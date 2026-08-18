@@ -6,16 +6,15 @@
 #
 # Produces for each platform (linux-x86_64, linux-arm64, macos-arm64):
 #   - morloc-manager  (Rust binary; the static-musl bootstrap on Linux)
-#   - libmorloc.so    (Rust runtime library; .dylib on macOS)
-#   - morloc-nexus    (Rust binary)
 # and, on Linux only (dynamic glibc 2.31, built in container/static-build):
 #   - morloc          (the Haskell compiler, for native install)
-# plus a `morloc-release-manifest.json` describing the native-install trio per
-# triple + the release version.
+# plus the platform-independent Rust workspace source and a
+# `morloc-release-manifest.json` describing the provisionable assets per triple.
 #
-# All are attached to the GitHub Release, EXCEPT the macOS libmorloc.dylib /
-# morloc-nexus, which are withheld until the macOS build-layer port + a macOS
-# init/make smoke test land (they remain as workflow artifacts).
+# libmorloc.so and morloc-nexus are NOT prebuilt: `morloc init` builds them from
+# the bundled Rust source with the target env's own toolchain, so the runtime is
+# ABI-coherent with the pools it links. Only the compiler (GHC-built) and the
+# static bootstrap manager ship prebuilt.
 
 name: Release
 
@@ -28,7 +27,7 @@ env:
   IMAGE_BASE: ghcr.io/morloc-project/morloc
 
 jobs:
-  # ---- Build Rust binaries (libmorloc + morloc-nexus + morloc-manager) per platform ----
+  # ---- Build the prebuilt release assets (compiler + static manager + rust source) per platform ----
   rust-binary:
     strategy:
       fail-fast: false
@@ -51,13 +50,31 @@ jobs:
       - uses: actions/checkout@v4
 
       # ---- Linux: Docker container build ----
-      # libmorloc.so + morloc-nexus: glibc (Ubuntu 20.04)
       # morloc-manager: static (Alpine/musl)
-      - name: Build Rust binaries (Linux)
+      # morloc compiler: Haskell/stack (Ubuntu 20.04)
+      # rust source: bundled for from-source `morloc init`
+      - name: Set up Docker Buildx (Linux)
+        if: matrix.method == 'docker'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build compiler + manager + rust source (Linux)
+        if: matrix.method == 'docker'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: container/static-build/Dockerfile
+          tags: morloc-rust-build
+          load: true
+          # GHA layer cache (unlike --mount=type=cache) persists across runs, when
+          # not evicted from the repo's ~10 GB LRU pool between infrequent tag builds.
+          # mode=max is needed to cache the intermediate GHC dependency stage; scope
+          # is per-platform so x86_64 and arm64 do not clobber each other.
+          cache-from: type=gha,scope=static-build-${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=static-build-${{ matrix.platform }}
+
+      - name: Extract assets (Linux)
         if: matrix.method == 'docker'
         run: |
-          docker build -t morloc-rust-build \
-            -f container/static-build/Dockerfile .
           mkdir -p out
           docker run --rm -v "$(pwd)/out:/out" morloc-rust-build
           # Verify morloc-manager is static
@@ -67,9 +84,8 @@ jobs:
         if: matrix.method == 'docker'
         run: |
           mv out/morloc out/morloc-${{ matrix.platform }}
-          mv out/libmorloc.so out/libmorloc-${{ matrix.platform }}.so
-          mv out/morloc-nexus out/morloc-nexus-${{ matrix.platform }}
           mv out/morloc-manager out/morloc-manager-${{ matrix.platform }}
+          # out/rust/ (the workspace source) is uploaded as-is via out/*
 
       # ---- macOS: native cargo build ----
       - name: Setup Rust (macOS)
@@ -87,25 +103,16 @@ jobs:
           key: cargo-macos-${{ hashFiles('data/rust/Cargo.lock') }}
           restore-keys: cargo-macos-
 
-      - name: Build Rust binaries (macOS)
+      # macOS ships only the bootstrap manager. libmorloc.dylib + morloc-nexus
+      # are built from source by `morloc init` on the target host (which owns the
+      # Mach-O install_name / @loader_path rpath handling), not prebuilt here.
+      - name: Build morloc-manager (macOS)
         if: matrix.method == 'native'
         run: |
           cd data/rust
-          # Build libmorloc (cdylib produces .dylib on macOS)
-          cargo build --release -p morloc-runtime
-          # Install .dylib so nexus can link against it
-          mkdir -p $HOME/.local/share/morloc/lib
-          cp target/release/libmorloc_runtime.dylib $HOME/.local/share/morloc/lib/libmorloc.dylib
-          # Build nexus
-          cargo build --release -p morloc-nexus
-          # Build manager
           cargo build --release -p morloc-manager
-          # Collect artifacts
           mkdir -p ../../out
-          cp target/release/libmorloc_runtime.dylib ../../out/libmorloc-${{ matrix.platform }}.dylib
-          cp target/release/morloc-nexus ../../out/morloc-nexus-${{ matrix.platform }}
           cp target/release/morloc-manager ../../out/morloc-manager-${{ matrix.platform }}
-          strip ../../out/morloc-nexus-${{ matrix.platform }} || true
           strip ../../out/morloc-manager-${{ matrix.platform }} || true
 
       - name: Upload Rust artifacts
@@ -123,8 +130,9 @@ jobs:
       DEBIAN_FRONTEND: noninteractive
     steps:
       - uses: actions/checkout@v4
-      # rustc/cargo: morloc make compiles Rust pools, and morloc init builds the
-      # rustmorloc rlib from the bundled sources (prebuilt/rust) with this toolchain.
+      # rustc/cargo: morloc make compiles Rust pools, and morloc init builds
+      # libmorloc.so + morloc-nexus + the rustmorloc rlib from the bundled
+      # sources (prebuilt/rust) with this toolchain.
       - uses: dtolnay/rust-toolchain@stable
       - uses: haskell-actions/setup@v2
         with:
@@ -169,21 +177,17 @@ jobs:
           LIBARROW_MINIMAL=true ARROW_S3=OFF ARROW_GCS=OFF \
             Rscript -e 'install.packages("arrow", lib="~/R/library", repos = "https://cloud.r-project.org")'
 
-      - name: Download Rust binaries
+      - name: Download release assets
         uses: actions/download-artifact@v4
         with:
           name: rust-binaries-linux-x86_64
           path: rust-bin
 
-      - name: Prepare Rust binaries
+      - name: Prepare Rust source
         run: |
           mkdir -p prebuilt
-          mv rust-bin/libmorloc-linux-x86_64.so prebuilt/libmorloc.so
-          mv rust-bin/morloc-nexus-linux-x86_64 prebuilt/morloc-nexus
-          mv rust-bin/morloc-manager-linux-x86_64 prebuilt/morloc-manager
-          # bundled crate sources: morloc init compiles rustmorloc from these
+          # morloc init builds libmorloc.so + morloc-nexus + rustmorloc from these
           mv rust-bin/rust prebuilt/rust
-          chmod +x prebuilt/libmorloc.so prebuilt/morloc-nexus prebuilt/morloc-manager
 
       - name: Add morloc to PATH
         run: |
@@ -192,13 +196,38 @@ jobs:
           echo "R_LIBS_USER=$HOME/R/library" >> $GITHUB_ENV
       - name: Build morloc
         run: stack install --system-ghc --no-install-ghc --no-run-tests
-      - name: Initialize morloc (using pre-built Rust binaries)
+      - name: Initialize morloc (build runtime from source)
         run: |
-          MORLOC_RUST_BIN=$(pwd)/prebuilt morloc init -f
+          MORLOC_RUST_DIR=$(pwd)/prebuilt/rust morloc init -f
           morloc install stdlib
       - name: Run tests
         run: stack test --system-ghc --no-install-ghc morloc:morloc-test
         timeout-minutes: 10
+
+      # Stage the stack-built compiler as a release asset so morloc-manager can
+      # provision it (the native + container backends download the trio; the
+      # manifest below references morloc-linux-x86_64).
+      - name: Stage morloc compiler for release
+        run: |
+          cp "$HOME/.local/bin/morloc" morloc-linux-x86_64
+          strip morloc-linux-x86_64 || true
+      - name: Upload morloc compiler
+        uses: actions/upload-artifact@v4
+        with:
+          name: morloc-compiler-linux-x86_64
+          path: morloc-linux-x86_64
+
+      # Publish the language-support table (compiler-owned static data) as a
+      # release asset so morloc-manager can render pixi manifests WITHOUT running
+      # the compiler on the host -- essential for container builds on hosts where
+      # the glibc compiler cannot execute natively (NixOS, musl, etc.).
+      - name: Stage lang-support table for release
+        run: morloc lang-support > morloc-lang-support.json
+      - name: Upload lang-support table
+        uses: actions/upload-artifact@v4
+        with:
+          name: morloc-lang-support
+          path: morloc-lang-support.json
 
   # ---- Build and push container images ----
   containers:
@@ -221,12 +250,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Build tiny (from local source)
-        run: |
-          docker build \
-            -t ${{ env.IMAGE_BASE }}/morloc-tiny:${{ steps.ver.outputs.version }} \
-            -t ${{ env.IMAGE_BASE }}/morloc-tiny:edge \
-            -f container/tiny/Dockerfile .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: container/tiny/Dockerfile
+          tags: |
+            ${{ env.IMAGE_BASE }}/morloc-tiny:${{ steps.ver.outputs.version }}
+            ${{ env.IMAGE_BASE }}/morloc-tiny:edge
+          # load into the local store so the `full` build can FROM it and the
+          # push step can push it. GHA layer cache persists the GHC deps layer.
+          load: true
+          cache-from: type=gha,scope=tiny
+          cache-to: type=gha,mode=max,scope=tiny
 
       - name: Build full (uses local tiny)
         run: |
@@ -257,59 +296,91 @@ jobs:
           pattern: 'rust-binaries-*'
           merge-multiple: true
 
+      # The stack-built compiler ships under its own truthful artifact name.
+      - name: Download the morloc compiler
+        uses: actions/download-artifact@v4
+        with:
+          name: morloc-compiler-linux-x86_64
+
+      - name: Download the lang-support table
+        uses: actions/download-artifact@v4
+        with:
+          name: morloc-lang-support
+
       - name: List artifacts
         run: ls -lh
 
-      # rustmorloc is an rlib locked to the consumer's rustc, so it ships as
-      # source (platform-independent) rather than a prebuilt binary; `morloc
-      # init` compiles it locally. Consumers unpack this into their
-      # MORLOC_RUST_BIN directory as `rust/`.
+      # The entire ABI-bearing runtime (libmorloc.so, morloc-nexus, and the
+      # rustmorloc rlib) is built from this source by `morloc init` with the
+      # target env's own toolchain, so it ships as platform-independent source
+      # rather than prebuilt binaries. Consumers unpack it as MORLOC_RUST_DIR.
       - name: Package Rust sources
         run: tar czf morloc-rust-src.tar.gz rust
 
-      # The macOS libmorloc.dylib and morloc-nexus are built for CI validation
-      # but are not yet loadable end-to-end: the macOS build-layer port (dylib
-      # install_name / @loader_path rpaths) and a macOS init+make smoke test are
-      # still pending. Withhold them from the published Release so the native
-      # download flow can never auto-select a broken binary; they remain
-      # available as this run's workflow artifacts for the macOS build-out. The
-      # macOS manager (the bootstrap CLI) stays a first-class asset.
-      - name: Withhold untested macOS runtime binaries from the Release
-        run: rm -f libmorloc-macos-arm64.dylib morloc-nexus-macos-arm64
-
       # A version manifest for the native-install download flow: which loose
-      # artifacts make up the provisionable trio per platform triple, plus the
+      # artifacts make up the provisionable set per platform triple, plus the
       # release version so `morloc init` can enforce exact-version equality
-      # across the downloaded compiler/libmorloc/nexus (the interim coherence
-      # check while the ABI-version gate stays deferred). Only triples with a
-      # complete, tested native trio are listed; macOS is omitted until its
-      # build-layer port + smoke test land, so the flow falls through to a
-      # container there.
+      # across the downloaded compiler + manager (the interim coherence check
+      # while the ABI-version gate stays deferred). libmorloc.so and morloc-nexus
+      # are NOT listed: they are built from the shared rust_src at init time.
+      # Only triples with a complete, tested asset set are listed; macOS is
+      # omitted until its build-layer port + smoke test land, so the flow falls
+      # through to a container there.
+      # Built with Python so the manifest carries a SHA-256 for every published
+      # asset (the download flow verifies each fetch against these) and lists a
+      # triple ONLY when all of its artifacts exist on disk -- a partial triple
+      # would otherwise 404 at download time. Digests + presence are computed
+      # from the actual files staged for the Release.
       - name: Generate native-install manifest
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          cat > morloc-release-manifest.json <<EOF
-          {
-            "schema": 1,
-            "version": "${version}",
-            "rust_src": "morloc-rust-src.tar.gz",
-            "triples": {
+          python3 - <<'PY'
+          import json, hashlib, os
+          version = os.environ["GITHUB_REF_NAME"].lstrip("v")
+
+          def sha256(path):
+              h = hashlib.sha256()
+              with open(path, "rb") as f:
+                  for chunk in iter(lambda: f.read(1 << 16), b""):
+                      h.update(chunk)
+              return h.hexdigest()
+
+          candidates = {
               "linux-x86_64": {
-                "morloc": "morloc-linux-x86_64",
-                "libmorloc": "libmorloc-linux-x86_64.so",
-                "nexus": "morloc-nexus-linux-x86_64",
-                "manager": "morloc-manager-linux-x86_64"
+                  "morloc": "morloc-linux-x86_64",
+                  "manager": "morloc-manager-linux-x86_64",
               },
               "linux-arm64": {
-                "morloc": "morloc-linux-arm64",
-                "libmorloc": "libmorloc-linux-arm64.so",
-                "nexus": "morloc-nexus-linux-arm64",
-                "manager": "morloc-manager-linux-arm64"
-              }
-            }
+                  "morloc": "morloc-linux-arm64",
+                  "manager": "morloc-manager-linux-arm64",
+              },
           }
-          EOF
-          cat morloc-release-manifest.json
+          rust_src = "morloc-rust-src.tar.gz"
+          extra = ["morloc-lang-support.json"]
+
+          triples, digests = {}, {}
+          for triple, assets in candidates.items():
+              missing = [a for a in assets.values() if not os.path.exists(a)]
+              if missing:
+                  print(f"omitting triple {triple}; missing {missing}")
+                  continue
+              triples[triple] = assets
+              for a in assets.values():
+                  digests[a] = sha256(a)
+          for a in [rust_src, *extra]:
+              if os.path.exists(a):
+                  digests[a] = sha256(a)
+
+          manifest = {
+              "schema": 2,
+              "version": version,
+              "rust_src": rust_src,
+              "triples": triples,
+              "sha256": digests,
+          }
+          with open("morloc-release-manifest.json", "w") as f:
+              json.dump(manifest, f, indent=2)
+          print(json.dumps(manifest, indent=2))
+          PY
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -317,8 +388,7 @@ jobs:
           files: |
             morloc-linux-*
             morloc-manager-*
-            libmorloc-*
-            morloc-nexus-*
             morloc-rust-src.tar.gz
             morloc-release-manifest.json
+            morloc-lang-support.json
           generate_release_notes: true

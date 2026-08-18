@@ -2558,7 +2558,7 @@ generate cs rASTs helperRASTs = do
   -- directory), the working directory (or --build-dir) for make.
   buildRoot <-
     if stateInstall st
-      then return (configHome config </> "exe" </> dirKey)
+      then return (MC.exeDir config </> dirKey)
       else do
         cwd <- liftIO Dir.getCurrentDirectory
         liftIO $ Dir.makeAbsolute (fromMaybe cwd buildParent)

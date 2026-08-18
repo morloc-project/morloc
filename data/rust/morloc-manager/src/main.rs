@@ -2,21 +2,22 @@ mod bridge;
 mod config;
 mod container;
 mod doctor;
+mod dockerfile;
 mod environment;
-// Foundations for the native/pixi backend; wired into the command flow in a
-// following P2b step, at which point these allow attributes come off.
+// envspec/langsupport deserialize the compiler's JSON contracts in full; not
+// every schema field is consumed by the manager yet (e.g. module pins, cpp std,
+// default versions), so unused-field warnings on those mirror types are expected.
 #[allow(dead_code)]
 mod envspec;
 mod error;
 mod freeze;
-#[allow(dead_code)]
+mod constraint;
 mod hostprobe;
 #[allow(dead_code)]
 mod langsupport;
-#[allow(dead_code)]
 mod pixi;
-#[allow(dead_code)]
 mod provision;
+mod runner;
 mod selinux;
 mod serve;
 mod types;
@@ -24,6 +25,7 @@ mod types;
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
+use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitCode, Stdio};
 
 use clap::builder::styling::Style;
@@ -134,66 +136,26 @@ enum Cmd {
     },
     /// Build a new morloc environment
     #[command(display_order = 1)]
-    #[command(after_help = "Examples:\n  morloc-manager new\n  morloc-manager new myenv --version 0.73.0\n  morloc-manager new myenv --tag edge\n  morloc-manager new myenv --image ubuntu:22.04 --dockerfile ./Dockerfile\n\nDefault (when --version, --tag, and --image are all omitted): pulls the\n:edge tag from the morloc registry and records the resolved version.\n\nIn non-interactive mode (no TTY), if no name is given, the latest edge\nimage is pulled and the environment is named after the detected morloc\nversion.")]
+    #[command(after_help = "Examples:\n  morloc-manager new\n  morloc-manager new myenv --lang py@3.12\n  morloc-manager new myenv --engine podman\n\nThe environment's toolchain is provisioned from its requirements via pixi:\nnative by default on a capable host, or a requirement-derived container image\nwith --engine (podman/docker/apptainer). No hand-authored recipes.")]
     New {
-        /// Environment name (default: derived from base image version)
+        /// Environment name (default: derived from the morloc version)
         name: Option<String>,
-        /// Base image from Docker Hub or a registry
+        /// Language toolchain(s) to provision: `lang` or `lang@version`
+        /// (e.g. --lang py@3.12 --lang r). Repeatable or comma-separated.
         #[arg(long)]
-        image: Option<String>,
-        /// Morloc version (MAJOR.MINOR.PATCH, leading 'v' stripped automatically)
-        #[arg(long)]
-        version: Option<String>,
-        /// Container image tag (e.g., 'edge', 'nightly')
-        #[arg(long, conflicts_with_all = ["version", "image"])]
-        tag: Option<String>,
-        /// Dockerfile to layer on top of the base image
-        #[arg(long)]
-        dockerfile: Option<String>,
-        /// Generate a stub Dockerfile for customization
-        #[arg(long)]
-        dockerfile_stub: bool,
-        /// Singularity .def recipe to layer on top of the base image (apptainer engine)
-        #[arg(long)]
-        deffile: Option<String>,
-        /// Generate a stub Singularity .def recipe for customization (apptainer engine)
-        #[arg(long)]
-        deffile_stub: bool,
-        /// Force overwrite of existing Dockerfile stub
-        #[arg(long)]
-        force: bool,
-        /// Include file/dir in build context; use src:dest for explicit placement (repeatable)
-        #[arg(short = 'i', long = "include")]
-        include: Vec<String>,
-        /// Path to a file with one engine argument per line
-        #[arg(long)]
-        flagfile: Option<String>,
-        /// A single engine flag (may be repeated)
-        #[arg(short = 'x', long = "engine-arg", allow_hyphen_values = true)]
-        engine_arg: Vec<String>,
-        /// Container engine: podman, docker, apptainer, or singularity
+        lang: Vec<String>,
+        /// Backend/engine: podman, docker, apptainer, singularity, or none (native).
         #[arg(long, value_enum)]
         engine: Option<EngineArg>,
-        /// Shared memory size (default: 512m; ignored under apptainer/singularity)
-        #[arg(long)]
-        shm_size: Option<String>,
         /// Create in system scope (requires root)
         #[arg(long)]
         system: bool,
-        /// Skip morloc init after creation
+        /// Skip provisioning + morloc init after creation
         #[arg(long)]
         no_init: bool,
-        /// Skip interactive wizard, use defaults for unspecified options
+        /// Skip interactive prompts, use defaults
         #[arg(long)]
         non_interactive: bool,
-        /// Extra argument to pass through to the in-container
-        /// `morloc init -f` invocation (repeatable). Typical uses:
-        /// `--init-arg --slurm` to enable SLURM-dispatch codegen,
-        /// `--init-arg --sanitize` for libmorloc.so built with ASan.
-        /// Generic mechanism: any compiler init flag works without a
-        /// new morloc-manager flag.
-        #[arg(long = "init-arg", allow_hyphen_values = true)]
-        init_args: Vec<String>,
     },
     /// Run a command in the active environment
     #[command(display_order = 2)]
@@ -296,63 +258,14 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
 
     /// Rebuild an environment
     #[command(display_order = 7)]
-    #[command(after_help = "Examples:\n  morloc-manager update              # rebuild active environment\n  morloc-manager update myenv        # rebuild a specific environment\n  morloc-manager update --shm-size 1g\n  morloc-manager update --dockerfile ./new.Dockerfile -i ./data\n  morloc-manager update myenv --reinit  # re-run morloc init in myenv")]
+    #[command(after_help = "Examples:\n  morloc-manager update              # re-solve/rebuild the active environment\n  morloc-manager update myenv\n  morloc-manager update myenv --lang py@3.13   # re-pin, then rebuild")]
     Update {
         /// Environment name (default: active environment)
         name: Option<String>,
-        /// Change the base image
+        /// Re-pin language toolchain(s): `lang` or `lang@version` (repeatable /
+        /// comma-separated). Omit to keep the stored pins.
         #[arg(long)]
-        image: Option<String>,
-        /// Change to a specific morloc version (MAJOR.MINOR.PATCH, leading 'v' stripped)
-        #[arg(long)]
-        version: Option<String>,
-        /// Container image tag (e.g., 'edge', 'nightly')
-        #[arg(long, conflicts_with_all = ["version", "image"])]
-        tag: Option<String>,
-        /// Replace the Dockerfile
-        #[arg(long)]
-        dockerfile: Option<String>,
-        /// Replace the Singularity .def recipe (apptainer engine)
-        #[arg(long)]
-        deffile: Option<String>,
-        /// Include file/dir in build context; use src:dest for explicit placement (repeatable)
-        #[arg(short = 'i', long = "include")]
-        include: Vec<String>,
-        /// Replace the flags file (YAML, schema documented in env.flags.yaml stub)
-        #[arg(long)]
-        flagfile: Option<String>,
-        /// One-shot build-engine flag for this rebuild only (repeatable;
-        /// requires --reinit; not persisted). Use env.flags.yaml `build`
-        /// section for persistent build flags.
-        #[arg(long = "reinit-arg", allow_hyphen_values = true, requires = "reinit")]
-        reinit_arg: Vec<String>,
-        /// Change the container engine
-        #[arg(long, value_enum)]
-        engine: Option<EngineArg>,
-        /// Change shared memory size
-        #[arg(long)]
-        shm_size: Option<String>,
-        /// Generate a stub Dockerfile (fails if one already exists)
-        #[arg(long)]
-        dockerfile_stub: bool,
-        /// Generate a stub Singularity .def recipe (fails if one already exists)
-        #[arg(long)]
-        deffile_stub: bool,
-        /// Force overwrite of existing Dockerfile/.def stub
-        #[arg(long)]
-        force: bool,
-        /// Skip Dockerfile/.def build
-        #[arg(long)]
-        no_build: bool,
-        /// Re-run morloc init
-        #[arg(long)]
-        reinit: bool,
-        /// Extra argument to pass through to the in-container
-        /// `morloc init -f` invocation when `--reinit` is set
-        /// (repeatable). Same shape as `new --init-arg`. Typical:
-        /// `--init-arg --slurm` to enable SLURM-dispatch codegen.
-        #[arg(long = "init-arg", allow_hyphen_values = true, requires = "reinit")]
-        init_args: Vec<String>,
+        lang: Vec<String>,
         /// Accepted for scripting uniformity with `new` (no effect)
         #[arg(long, hide = true)]
         non_interactive: bool,
@@ -573,7 +486,7 @@ enum ExposeAction {
     },
 }
 
-#[derive(Clone, ValueEnum)]
+#[derive(Clone, PartialEq, Eq, ValueEnum)]
 enum EngineArg {
     Docker,
     Podman,
@@ -581,6 +494,8 @@ enum EngineArg {
     /// Alias for Apptainer (the older binary name). Both resolve to
     /// ContainerEngine::Apptainer; the runtime executable is detected later.
     Singularity,
+    /// The native (no-container) backend: provision a host toolchain via pixi.
+    None,
 }
 
 impl From<EngineArg> for ContainerEngine {
@@ -589,6 +504,11 @@ impl From<EngineArg> for ContainerEngine {
             EngineArg::Docker => ContainerEngine::Docker,
             EngineArg::Podman => ContainerEngine::Podman,
             EngineArg::Apptainer | EngineArg::Singularity => ContainerEngine::Apptainer,
+            // Native is always dispatched to its own flow before any command
+            // converts an engine selection to a container engine.
+            EngineArg::None => {
+                unreachable!("EngineArg::None (native) must be handled before this conversion")
+            }
         }
     }
 }
@@ -767,35 +687,6 @@ fn which(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Content of the Singularity .def stub written by `--deffile-stub`. Uses
-/// Apptainer's native build-arg substitution: `{{ BASE_SIF }}` is replaced
-/// at build time with the path to the env's base .sif. No textual
-/// preprocessing in morloc-manager.
-fn singularity_def_stub(env_name: &str) -> String {
-    format!(
-"# morloc environment: {env_name}
-# Edit this file, then rebuild with: morloc-manager update
-#
-# {{{{ BASE_SIF }}}} is substituted at build time with the path to
-# this environment's base .sif.
-
-Bootstrap: localimage
-From: {{{{ BASE_SIF }}}}
-
-%post
-    set -euo pipefail
-
-    # apt-get on hosts without a full subuid range needs APT::Sandbox::User=root:
-    #   apt-get -o APT::Sandbox::User=root update \\
-    #     && apt-get -o APT::Sandbox::User=root install -y jq \\
-    #     && rm -rf /var/lib/apt/lists/*
-    #
-    # pip install scikit-learn pandas
-    # R -e \"install.packages('ggplot2', repos='https://cloud.r-project.org')\"
-    :
-"
-    )
-}
 
 /// Render a phase of env.flags.yaml for `info` text output. Only sections
 /// with at least one flag are printed; an entirely empty section
@@ -892,16 +783,6 @@ fn check_podman_additional_stores(engine: ContainerEngine) -> bool {
     false
 }
 
-fn warn_podman_additional_stores() {
-    eprintln!("Warning: Podman is not configured to see system (rootful) images.");
-    eprintln!("  Non-root users will not be able to run system environments.");
-    eprintln!("  Option 1 (recommended): Use Docker for system environments.");
-    eprintln!("  Option 2: Add to [storage.options] in /etc/containers/storage.conf:");
-    eprintln!();
-    eprintln!("    additionalimagestores = [\"/var/lib/containers/storage\"]");
-    eprintln!();
-    eprintln!("  Note: Option 2 may cause storage locking conflicts on Fedora and Debian.");
-}
 
 // ======================================================================
 // Dispatch
@@ -925,6 +806,13 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             }
             if system { check_system_write_access()?; }
             let scope = resolve_scope(system);
+            if matches!(engine, Some(EngineArg::None)) {
+                let cfg_path = cfg::config_path(scope);
+                let base_cfg = cfg::read_config::<Config>(&cfg_path).unwrap_or_default();
+                cfg::write_config(&cfg_path, &Config { backend: Backend::Native, ..base_cfg })?;
+                eprintln!("Engine set to: native");
+                return Ok(());
+            }
             let eng: ContainerEngine = engine.unwrap().into();
             check_docker_socket(eng);
             let cfg_path = cfg::config_path(scope);
@@ -941,26 +829,41 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         // ---- new ----
         Cmd::New {
             name,
-            image,
-            version,
-            tag,
-            dockerfile,
-            dockerfile_stub,
-            deffile,
-            deffile_stub,
-            force,
-            include,
-            flagfile,
-            engine_arg,
+            lang,
             engine,
-            shm_size,
             system,
             no_init,
             non_interactive,
-            init_args,
         } => {
             if system { check_system_write_access()?; }
             let scope = resolve_scope(system);
+
+            // Backend fork: the native (no-container) backend has its own flow.
+            // Choose it when explicitly requested (--engine none), when it is the
+            // configured default, or -- with no explicit or configured choice --
+            // when the host is native-capable (host-probed default).
+            let go_native = match &engine {
+                Some(EngineArg::None) => {
+                    let profile = hostprobe::probe_host();
+                    if !profile.native_capable {
+                        return Err(ManagerError::EnvError(format!(
+                            "the native backend is not available on this host: {}",
+                            profile.reason
+                        )));
+                    }
+                    true
+                }
+                Some(_) => false,
+                None => match cfg::read_active_config().map(|c| c.backend) {
+                    Some(Backend::Native) => true,
+                    Some(Backend::Container(_)) => false,
+                    None => hostprobe::probe_host().native_capable,
+                },
+            };
+            if go_native {
+                let interactive = !non_interactive && io::stdin().is_terminal();
+                return native_new(scope, name, lang, no_init, interactive, verbose);
+            }
 
             // Resolve engine: explicit flag > config default > auto-detect single > error
             // For --system, prefer system config so the env uses the system engine.
@@ -1035,269 +938,14 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 cfg::write_config(&cfg_path, &new_cfg)?;
             }
 
+            // The container backend is requirement-derived: the env's image is
+            // built from a generated Dockerfile that runs pixi inside, sharing the
+            // native backend's lowering. There is no pull/recipe/base-image path.
             let interactive = !non_interactive && io::stdin().is_terminal();
             if !non_interactive && !interactive {
                 eprintln!("Note: No TTY detected, running in non-interactive mode.");
             }
-
-            // Step 1: Resolve name (ask first so user isn't surprised after a long pull)
-            let env_name = if let Some(n) = name {
-                if cfg::env_config_path(scope, &n).is_file() {
-                    return Err(ManagerError::EnvError(format!(
-                        "Environment '{n}' already exists"
-                    )));
-                }
-                n
-            } else if interactive {
-                loop {
-                    eprint!("Environment name: ");
-                    io::stderr().flush().ok();
-                    let mut name_input = String::new();
-                    io::stdin().read_line(&mut name_input).ok();
-                    let n = name_input.trim().to_string();
-                    if n.is_empty() {
-                        eprintln!("Name cannot be empty.");
-                        continue;
-                    }
-                    if cfg::env_config_path(scope, &n).is_file() {
-                        eprintln!("Environment '{n}' already exists. Choose a different name.");
-                        continue;
-                    }
-                    break n;
-                }
-            } else {
-                // Non-interactive without a name: will be filled in after
-                // version resolution below (default to version string)
-                String::new()
-            };
-
-            // Validate name early (before potentially slow image pull)
-            if !env_name.is_empty() {
-                environment::validate_env_name(&env_name)?;
-            }
-
-            if version.is_some() && image.is_some() {
-                return Err(ManagerError::EnvError(
-                    "--version and --image are mutually exclusive".to_string()
-                ));
-            }
-
-            // Validate cheap-to-check parameters before any I/O
-            if let Some(ref shm) = shm_size {
-                if !environment::is_valid_shm_size(shm) {
-                    return Err(ManagerError::EnvError(format!(
-                        "Invalid --shm-size '{shm}'. Use format like: 512m, 1g, 2048k"
-                    )));
-                }
-            }
-
-            // Step 2: Resolve base image and version
-            let (base_image, original_image, morloc_ver) = if let Some(ref ver_str) = version {
-                // Strip leading 'v' for convenience (e.g., "v0.77.0" -> "0.77.0")
-                let clean = ver_str.strip_prefix('v').unwrap_or(ver_str);
-                let ver: Version = clean.parse().map_err(|_| {
-                    ManagerError::InvalidVersion(ver_str.clone())
-                })?;
-                let img = environment::pull_version_image(resolved_engine, &ver)?;
-                (img, None, Some(ver))
-            } else if let Some(ref t) = tag {
-                let (img, ver) = environment::pull_tagged_image(resolved_engine, t)?;
-                (img, None, Some(ver))
-            } else if let Some(ref img) = image {
-                environment::pull_custom_image(resolved_engine, img)?;
-                (img.clone(), None, None)
-            } else if interactive {
-                eprintln!("Choose a base image:");
-                eprintln!("  [1] Latest morloc release (recommended)");
-                eprintln!("  [2] Specific morloc version");
-                eprintln!("  [3] Custom image");
-                eprint!("Choose [1]: ");
-                io::stderr().flush().ok();
-                let mut input = String::new();
-                io::stdin().read_line(&mut input).ok();
-                match input.trim() {
-                    "2" => {
-                        eprint!("Morloc version: ");
-                        io::stderr().flush().ok();
-                        let mut ver_input = String::new();
-                        io::stdin().read_line(&mut ver_input).ok();
-                        let ver: Version = ver_input.trim().parse().map_err(|_| {
-                            ManagerError::InvalidVersion(ver_input.trim().to_string())
-                        })?;
-                        let img = environment::pull_version_image(resolved_engine, &ver)?;
-                        (img, None, Some(ver))
-                    }
-                    "3" => {
-                        eprint!("Image reference: ");
-                        io::stderr().flush().ok();
-                        let mut img_input = String::new();
-                        io::stdin().read_line(&mut img_input).ok();
-                        let img = img_input.trim().to_string();
-                        if img.is_empty() {
-                            return Err(ManagerError::EnvError("No image specified".to_string()));
-                        }
-                        environment::pull_custom_image(resolved_engine, &img)?;
-                        (img, None, None)
-                    }
-                    _ => {
-                        let (img, ver) = environment::resolve_latest(resolved_engine)?;
-                        (img.clone(), Some(img), Some(ver))
-                    }
-                }
-            } else {
-                let (img, ver) = environment::resolve_latest(resolved_engine)?;
-                (img.clone(), Some(img), Some(ver))
-            };
-
-            // Fill in name for non-interactive mode if it wasn't provided
-            let env_name = if env_name.is_empty() {
-                if let Some(ref ver) = morloc_ver {
-                    let default_name = ver.show();
-                    if cfg::env_config_path(scope, &default_name).is_file() {
-                        return Err(ManagerError::EnvError(format!(
-                            "Environment '{}' already exists. Specify a different name: morloc-manager new <NAME> ...",
-                            default_name
-                        )));
-                    }
-                    default_name
-                } else {
-                    return Err(ManagerError::EnvError(
-                        "Environment name required in non-interactive mode".to_string(),
-                    ));
-                }
-            } else {
-                env_name
-            };
-
-            // Resolve dockerfile: explicit path takes precedence, then stub generation
-            let resolved_dockerfile = if dockerfile.is_some() {
-                if dockerfile_stub {
-                    return Err(ManagerError::EnvError(
-                        "Cannot use both --dockerfile and --dockerfile-stub".to_string(),
-                    ));
-                }
-                dockerfile
-            } else if dockerfile_stub {
-                let df_path = cfg::env_dockerfile_path(scope, &env_name);
-                if df_path.exists() && !force {
-                    return Err(ManagerError::EnvError(format!(
-                        "Dockerfile already exists: {}\nUse --force to overwrite.",
-                        df_path.display()
-                    )));
-                }
-                let stub_dir = cfg::data_dir(scope).join("tmp");
-                fs::create_dir_all(&stub_dir).map_err(|e| {
-                    ManagerError::EnvError(format!("Failed to create tmp dir: {e}"))
-                })?;
-                let stub_path = stub_dir.join(format!("{env_name}.Dockerfile"));
-                let stub_content = format!(
-                    "# morloc environment: {env_name}\n\
-                     # Edit this file, then rebuild with: morloc-manager update\n\
-                     \n\
-                     # CONTAINER_BASE is replaced at build time with the environment's base image\n\
-                     ARG CONTAINER_BASE=scratch\n\
-                     FROM ${{CONTAINER_BASE}}\n\
-                     \n\
-                     # Example: install system packages\n\
-                     # RUN apt-get update && apt-get install -y jq && rm -rf /var/lib/apt/lists/*\n\
-                     \n\
-                     # Example: install Python packages\n\
-                     # RUN pip install scikit-learn pandas\n\
-                     \n\
-                     # Example: install R packages\n\
-                     # RUN R -e \"install.packages('ggplot2', repos='https://cloud.r-project.org')\"\n"
-                );
-                fs::write(&stub_path, &stub_content).map_err(|e| {
-                    ManagerError::EnvError(format!("Failed to write stub Dockerfile: {e}"))
-                })?;
-                Some(stub_path.to_string_lossy().to_string())
-            } else {
-                None
-            };
-
-            // Resolve .def file: explicit path takes precedence, then stub generation
-            let resolved_deffile = if deffile.is_some() {
-                if deffile_stub {
-                    return Err(ManagerError::EnvError(
-                        "Cannot use both --deffile and --deffile-stub".to_string(),
-                    ));
-                }
-                deffile
-            } else if deffile_stub {
-                let def_path = cfg::env_deffile_path(scope, &env_name);
-                if def_path.exists() && !force {
-                    return Err(ManagerError::EnvError(format!(
-                        ".def already exists: {}\nUse --force to overwrite.",
-                        def_path.display()
-                    )));
-                }
-                let stub_dir = cfg::data_dir(scope).join("tmp");
-                fs::create_dir_all(&stub_dir).map_err(|e| {
-                    ManagerError::EnvError(format!("Failed to create tmp dir: {e}"))
-                })?;
-                let stub_path = stub_dir.join(format!("{env_name}.def"));
-                let stub_content = singularity_def_stub(&env_name);
-                fs::write(&stub_path, &stub_content).map_err(|e| {
-                    ManagerError::EnvError(format!("Failed to write stub .def: {e}"))
-                })?;
-                Some(stub_path.to_string_lossy().to_string())
-            } else {
-                None
-            };
-
-            let opts = environment::ApplyOptions {
-                name: env_name.clone(),
-                scope,
-                is_new: true,
-                base_image: Some(base_image),
-                original_image,
-                morloc_version: morloc_ver,
-                dockerfile: resolved_dockerfile,
-                deffile: resolved_deffile,
-                includes: include,
-                flagfile,
-                engine_args: engine_arg,
-                reinit_args: Vec::new(),
-                engine: Some(resolved_engine),
-                shm_size: Some(shm_size.unwrap_or_else(|| "512m".to_string())),
-                skip_dockerfile_build: dockerfile_stub || deffile_stub,
-                verbose,
-            };
-
-            environment::apply_environment(&opts)?;
-
-            if dockerfile_stub {
-                let df_path = cfg::env_dockerfile_path(scope, &env_name);
-                eprintln!("Stub Dockerfile: {}", df_path.display());
-                eprintln!("Edit it, then run: morloc-manager update {env_name}");
-            }
-            if deffile_stub {
-                let def_path = cfg::env_deffile_path(scope, &env_name);
-                eprintln!("Stub .def: {}", def_path.display());
-                eprintln!("Edit it, then run: morloc-manager update {env_name}");
-            }
-
-            eprintln!("Created environment: {env_name}");
-
-            // Run morloc init, passing the env explicitly (no active env needed)
-            if !no_init {
-                let ec = cfg::read_env_config(scope, &env_name)?;
-                run_morloc_init_for(Some((env_name.clone(), scope, ec)), verbose, &init_args)?;
-            } else {
-                eprintln!("Warning: --no-init was used. Run 'morloc-manager run -- morloc init -f' before building morloc programs.");
-            }
-
-            anstream::eprintln!(
-                "\x1b[1;32mEnvironment '{env_name}' is ready.\x1b[0m"
-            );
-            eprintln!("Activate it with: morloc-manager select {env_name}");
-
-            if system && !check_podman_additional_stores(resolved_engine) {
-                eprintln!();
-                warn_podman_additional_stores();
-            }
-
-            Ok(())
+            container_new_derived(scope, resolved_engine, name, lang, no_init, interactive)
         }
 
         // ---- run ----
@@ -1306,7 +954,19 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 return Err(ManagerError::NoCommand);
             }
             let user_env = collect_env_vars(&env_vars, env_file.as_deref())?;
-            run_in_container(verbose, shell, &command, &user_env, &engine_arg, slurm_bridge).map_err(|e| match e {
+            runner::run_in_env(
+                None,
+                runner::RunRequest {
+                    verbose,
+                    shell,
+                    args: command,
+                    user_env,
+                    engine_args: engine_arg,
+                    phase: Phase::Run,
+                    slurm_bridge,
+                },
+            )
+            .map_err(|e| match e {
                 ManagerError::EnvironmentNotFound(msg) => ManagerError::EnvironmentNotFound(
                     format!("{msg}. Run 'morloc-manager new' to create an environment")
                 ),
@@ -1894,9 +1554,9 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
 
         // ---- update ----
         Cmd::Update {
-            name, image, version, tag, dockerfile, deffile, dockerfile_stub, deffile_stub,
-            force, include, flagfile,
-            reinit_arg, engine, shm_size, no_build, reinit, init_args, non_interactive: _,
+            name,
+            lang,
+            non_interactive: _,
         } => {
             let (env_name, env_scope) = match name {
                 Some(n) => {
@@ -1912,173 +1572,38 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 check_system_write_access()?;
             }
 
-            // Handle --dockerfile-stub: generate stub if no Dockerfile exists
-            let resolved_dockerfile = if dockerfile.is_some() && dockerfile_stub {
-                return Err(ManagerError::EnvError(
-                    "Cannot use both --dockerfile and --dockerfile-stub".to_string(),
-                ));
-            } else if dockerfile_stub {
-                let df_path = cfg::env_dockerfile_path(env_scope, &env_name);
-                if df_path.exists() && !force {
-                    return Err(ManagerError::EnvError(format!(
-                        "Dockerfile already exists: {}\nUse --force to overwrite.",
-                        df_path.display()
-                    )));
-                }
-                let stub_dir = cfg::data_dir(env_scope).join("tmp");
-                fs::create_dir_all(&stub_dir).map_err(|e| {
-                    ManagerError::EnvError(format!("Failed to create tmp dir: {e}"))
-                })?;
-                let stub_path = stub_dir.join(format!("{env_name}.Dockerfile"));
-                let stub_content = format!(
-                    "# morloc environment: {env_name}\n\
-                     # Edit this file, then rebuild with: morloc-manager update\n\
-                     \n\
-                     # CONTAINER_BASE is replaced at build time with the environment's base image\n\
-                     ARG CONTAINER_BASE=scratch\n\
-                     FROM ${{CONTAINER_BASE}}\n\
-                     \n\
-                     # Example: install system packages\n\
-                     # RUN apt-get update && apt-get install -y jq && rm -rf /var/lib/apt/lists/*\n\
-                     \n\
-                     # Example: install Python packages\n\
-                     # RUN pip install scikit-learn pandas\n\
-                     \n\
-                     # Example: install R packages\n\
-                     # RUN R -e \"install.packages('ggplot2', repos='https://cloud.r-project.org')\"\n"
-                );
-                fs::write(&stub_path, &stub_content).map_err(|e| {
-                    ManagerError::EnvError(format!("Failed to write stub Dockerfile: {e}"))
-                })?;
-                Some(stub_path.to_string_lossy().to_string())
+            let ec = cfg::read_env_config(env_scope, &env_name)?;
+
+            // Re-pin: an explicit --lang overwrites the stored pins; otherwise
+            // reuse them. Program requirements are re-gathered from installed
+            // envspec.json files.
+            let lang_pins = if lang.is_empty() {
+                cfg::read_env_inputs(env_scope, &env_name).lang_pins
             } else {
-                dockerfile
+                let pins = parse_lang_pins(&lang);
+                cfg::write_env_inputs(env_scope, &env_name, &EnvInputs { lang_pins: pins.clone() })?;
+                pins
             };
+            let specs = gather_env_specs(env_scope, &env_name);
 
-            // Handle --deffile-stub: generate stub if no .def exists
-            let resolved_deffile = if deffile.is_some() && deffile_stub {
-                return Err(ManagerError::EnvError(
-                    "Cannot use both --deffile and --deffile-stub".to_string(),
-                ));
-            } else if deffile_stub {
-                let def_path = cfg::env_deffile_path(env_scope, &env_name);
-                if def_path.exists() && !force {
-                    return Err(ManagerError::EnvError(format!(
-                        ".def already exists: {}\nUse --force to overwrite.",
-                        def_path.display()
-                    )));
-                }
-                let stub_dir = cfg::data_dir(env_scope).join("tmp");
-                fs::create_dir_all(&stub_dir).map_err(|e| {
-                    ManagerError::EnvError(format!("Failed to create tmp dir: {e}"))
-                })?;
-                let stub_path = stub_dir.join(format!("{env_name}.def"));
-                let stub_content = singularity_def_stub(&env_name);
-                fs::write(&stub_path, &stub_content).map_err(|e| {
-                    ManagerError::EnvError(format!("Failed to write stub .def: {e}"))
-                })?;
-                Some(stub_path.to_string_lossy().to_string())
-            } else {
-                deffile
-            };
-
-            if version.is_some() && image.is_some() {
-                return Err(ManagerError::EnvError(
-                    "--version and --image are mutually exclusive".to_string()
-                ));
+            if ec.backend.is_native() {
+                materialize_native_env(env_scope, &env_name, &specs, &lang_pins, verbose)?;
+                eprintln!("Native environment '{env_name}' re-materialized.");
+                return Ok(());
             }
 
-            // Resolve base image if --version, --tag, or --image provided
-            let (base_image, original_image, morloc_ver) = if let Some(ref ver_str) = version {
-                let ec = cfg::read_env_config(env_scope, &env_name)?;
-                let clean = ver_str.strip_prefix('v').unwrap_or(ver_str);
-                let ver: Version = clean.parse().map_err(|_| {
-                    ManagerError::InvalidVersion(ver_str.clone())
-                })?;
-                let img = environment::pull_version_image(ec.engine()?, &ver)?;
-                (Some(img), None, Some(ver))
-            } else if let Some(ref t) = tag {
-                let ec = cfg::read_env_config(env_scope, &env_name)?;
-                let (img, ver) = environment::pull_tagged_image(ec.engine()?, t)?;
-                (Some(img), None, Some(ver))
-            } else if let Some(ref img) = image {
-                let ec = cfg::read_env_config(env_scope, &env_name)?;
-                environment::pull_custom_image(ec.engine()?, img)?;
-                // Detect version from the new image so it doesn't stay stale
-                let detected_ver = environment::detect_morloc_version(ec.engine()?, img).ok();
-                (Some(img.clone()), None, detected_ver)
-            } else {
-                (None, None, None)
-            };
-
-            eprintln!("Updating environment: {env_name}");
-            let opts = environment::ApplyOptions {
-                name: env_name.clone(),
-                scope: env_scope,
-                is_new: false,
-                base_image,
-                original_image,
-                morloc_version: morloc_ver,
-                dockerfile: resolved_dockerfile,
-                deffile: resolved_deffile,
-                includes: include,
-                flagfile,
-                engine_args: Vec::new(),
-                reinit_args: reinit_arg,
-                engine: engine.map(|e| e.into()),
-                shm_size,
-                skip_dockerfile_build: no_build || dockerfile_stub || deffile_stub,
-                verbose,
-            };
-            environment::apply_environment(&opts)?;
-
-            if dockerfile_stub {
-                let df_path = cfg::env_dockerfile_path(env_scope, &env_name);
-                eprintln!("Stub Dockerfile: {}", df_path.display());
-                eprintln!("Edit it, then run: morloc-manager update {env_name}");
-            }
-            if deffile_stub {
-                let def_path = cfg::env_deffile_path(env_scope, &env_name);
-                eprintln!("Stub .def: {}", def_path.display());
-                eprintln!("Edit it, then run: morloc-manager update {env_name}");
-            }
-
-            // --version, --tag, and --image imply --reinit (ABI may have changed)
-            if reinit || version.is_some() || tag.is_some() || image.is_some() {
-                // Re-read the config (apply_environment may have updated it)
-                let ec = cfg::read_env_config(env_scope, &env_name)?;
-
-                // Check for running serve container -- reinit replaces morloc-nexus
-                // which will fail with "Text file busy" if the container has it open.
-                let serve_name = serve::serve_container_name(&env_name);
-                let running = serve::find_running_serve_containers(ec.engine()?);
-                if running.iter().any(|n| n == &serve_name) {
-                    return Err(ManagerError::EnvError(format!(
-                        "Cannot reinit environment '{env_name}' while its serve container is running.\n  \
-                         Run 'morloc-manager stop {env_name}' first."
-                    )));
-                }
-
-                run_morloc_init_for(Some((env_name.clone(), env_scope, ec)), verbose, &init_args)?;
-            }
-
-            anstream::eprintln!(
-                "\x1b[1;32mEnvironment '{env_name}' updated.\x1b[0m"
-            );
-
-            if env_scope == Scope::System && !check_podman_additional_stores(
-                cfg::read_env_config(env_scope, &env_name)
-                    .ok()
-                    .and_then(|ec| ec.backend.container_engine())
-                    .unwrap_or(ContainerEngine::Podman),
-            ) {
-                eprintln!();
-                warn_podman_additional_stores();
-            }
-
+            // Container: rebuild the requirement-derived image from current
+            // requirements (lang pins + installed programs' envspecs).
+            let ce = ec.engine()?;
+            let (image_tag, mver) =
+                build_requirement_derived_image(env_scope, &env_name, ce, &specs, &lang_pins)?;
+            let mut ec = ec;
+            ec.built_image = Some(image_tag);
+            ec.morloc_version = mver.parse::<Version>().ok();
+            cfg::write_env_config(env_scope, &env_name, &ec)?;
+            anstream::eprintln!("\x1b[1;32mContainer environment '{env_name}' rebuilt.\x1b[0m");
             Ok(())
         }
-
         // ---- freeze ----
         Cmd::Freeze { name, output, force } => {
             let output_dir = output.as_deref().unwrap_or("./morloc-freeze");
@@ -2161,6 +1686,12 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     "Cannot read freeze manifest at {}. Ensure state.tar.gz and freeze-manifest.json are in the same directory.",
                     manifest_path.display()
                 )))?;
+            if matches!(engine_override, Some(EngineArg::None)) {
+                return Err(ManagerError::UnfreezeError(
+                    "unfreezing to the native backend is not yet supported; unfreeze to a \
+                     container engine (--engine podman) or omit --engine".to_string(),
+                ));
+            }
             let engine = match engine_override {
                 Some(arg) => arg.into(),
                 None => {
@@ -2178,55 +1709,29 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         // ---- start ----
         Cmd::Start { name, mcp, auth_token, expose, allow_plaintext, allow_no_auth, unsafe_serve, port, env_vars, env_file, engine_arg, force } => {
             let (env_name, env_scope, ec) = resolve_env_or_active(name)?;
-            let image = ec.active_image().to_string();
-            let data_dir = cfg::env_data_dir(env_scope, &env_name);
-            let container_name = serve::serve_container_name(&env_name);
-            // Warn if a Dockerfile is configured but the layered image hasn't been built
-            if ec.dockerfile.is_some() && ec.built_image.is_none() {
-                eprintln!("Warning: Dockerfile is configured but image has not been built. Using base image.");
-                eprintln!("  Run 'morloc-manager update {env_name}' to build the Dockerfile layer.");
+            // Refuse to replace a live serve -- dispatch on the STORED handle so a
+            // serve of this env by either backend is detected; --force tears the
+            // old one down first so nothing is stranded.
+            if let Some(rt) = cfg::read_serve_runtime(env_scope, &env_name) {
+                if let Some(handle) = &rt.handle {
+                    if serve_handle_alive(handle) {
+                        if !force {
+                            return Err(ManagerError::EnvError(format!(
+                                "'{env_name}' is already serving on {}:{}. Use --force to replace.",
+                                rt.host, rt.port
+                            )));
+                        }
+                        stop_by_handle(handle, verbose)?;
+                    }
+                }
             }
-            // Refuse to replace a running container unless --force is passed
-            if container::container_exists(ec.engine()?, &container_name) {
-                if !force {
-                    return Err(ManagerError::EnvError(format!(
-                        "Serve container already running for '{env_name}'. Use --force to replace."
-                    )));
-                }
-                eprintln!("Warning: replacing existing serve container '{container_name}'");
-            }
-            // Resolve WHAT to serve: a --mcp <program> one-off, or the
-            // environment's exposed set (expose.yaml). There is no
-            // serve-everything mode -- exposure is always an explicit decision.
-            let spec = if let Some(ref program) = mcp {
-                ensure_program_installed(env_scope, &env_name, program)?;
-                ServeSpec { mcp: vec![program.clone()], api: Vec::new(), eval_allow: None }
-            } else {
-                let ex = cfg::read_exposure(env_scope, &env_name)?;
-                if ex.is_empty() {
-                    return Err(ManagerError::EnvError(format!(
-                        "Nothing is exposed in '{env_name}'. Expose a module first:\n    \
-                         morloc-manager expose add <module> --as mcp\n  \
-                         (or 'start --mcp <module>' for a one-off)."
-                    )));
-                }
-                for m in ex.exposed_modules() {
-                    ensure_program_installed(env_scope, &env_name, &m)?;
-                }
-                let eval_allow = ex.eval.as_ref().map(|e| e.allow.join(","));
-                ServeSpec { mcp: ex.mcp.clone(), api: ex.api.clone(), eval_allow }
-            };
-            // The eval capability is reachable over both adapters (the `eval`
-            // MCP tool and the `/eval` route), so it keeps both live even with
-            // no module in either set.
+            // Backend-neutral orchestration: WHAT to serve (a --mcp one-off or the
+            // exposed set) + the port. One listener serves both adapters; MCP
+            // defaults to 9000, API-only to 8080, auto-picking a free port.
+            let spec = resolve_serve_spec(env_scope, &env_name, &mcp)?;
             let eval_on = spec.eval_allow.is_some();
             let serves_mcp = !spec.mcp.is_empty() || eval_on;
             let serves_api = !spec.api.is_empty() || eval_on;
-
-            // MCP defaults to 9000, an API-only serve to 8080. One listener
-            // serves both adapters (/mcp and /call) on the same port. With no
-            // explicit -p, auto-pick a free host port so concurrent serves in
-            // different environments just work; an explicit -p is respected.
             let default_port: u16 = if serves_mcp { 9000 } else { 8080 };
             let (host_port, container_port) = if port.is_empty() {
                 let p = find_free_host_port(default_port, 100);
@@ -2237,72 +1742,41 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             } else {
                 port.first().copied().unwrap_or((default_port, default_port))
             };
-            let port_mappings = vec![(host_port, container_port)];
-            let mut extra_flags = cfg::read_flag_config(env_scope, &env_name)?
-                .materialize(Phase::Start, ec.engine()?);
-            extra_flags.extend(engine_arg.iter().cloned());
-            let mut user_env = collect_env_vars(&env_vars, env_file.as_deref())?;
-
-            let mh = serve::CONTAINER_MORLOC_HOME;
+            let user_env = collect_env_vars(&env_vars, env_file.as_deref())?;
             let token = resolve_mcp_token(auth_token);
-            let plan = serve_plan(
-                ec.engine()?, &spec, mh, container_port, host_port,
+
+            // Backend-dispatched launch (container image vs detached host nexus);
+            // the record + client config below are shared.
+            let req = ServeRequest {
+                spec, host_port, container_port, user_env,
                 expose, allow_plaintext, allow_no_auth, unsafe_serve,
-                cfg!(target_os = "linux"), token,
-            )?;
-            let publish_host = plan.publish_host;
-            let network = plan.network;
-            let unsafe_unconfined = plan.unsafe_unconfined;
-            let mut mcp_token: Option<String> = None;
-            if let Some(t) = plan.token {
-                mcp_token = Some(t.clone());
-                user_env.push(("MORLOC_MCP_TOKEN".to_string(), t));
-            }
-
-            serve::serve_environment(
-                ec.engine()?, verbose, &image,
-                &data_dir.to_string_lossy(), &container_name,
-                &port_mappings, publish_host.as_deref(), network.as_deref(), &extra_flags,
-                &Some(ec.shm_size.clone()), &user_env, &plan.command,
-            )?;
-
-            // Human-facing status on stderr; the client MCP config as pure JSON
-            // on stdout (so `> file` / `| jq` capture clean config).
-            let url_host = if expose {
-                eprintln!("Serving '{env_name}' on 0.0.0.0:{host_port} (EXPOSED, plaintext).");
-                eprintln!("  A bearer token over plaintext stops scanners, not eavesdroppers.");
-                eprintln!("  Do not commit the printed token into a project-scoped .mcp.json.");
-                serve::system_hostname()
-            } else if unsafe_unconfined {
-                eprintln!("DANGER: serving '{env_name}' on 127.0.0.1:{host_port} UNAUTHENTICATED (--unsafe).");
-                eprintln!("  Reachable by any container co-resident on the engine's network. Trusted hosts only.");
-                "127.0.0.1".to_string()
-            } else if mcp_token.is_some() {
-                eprintln!("Serving '{env_name}' on 127.0.0.1:{host_port} (loopback; token required on this engine).");
-                "127.0.0.1".to_string()
-            } else {
-                eprintln!("Serving '{env_name}' on 127.0.0.1:{host_port} (host-local; no token needed).");
-                "127.0.0.1".to_string()
+                engine_args: engine_arg, token, verbose,
             };
+            let env = runner::ResolvedEnv { name: env_name.clone(), scope: env_scope, ec };
+            let ServeOutcome { handle, url_host, token: eff_token } =
+                runner::runner_for(&env.ec).serve(&env, &req)?;
+
             if serves_mcp {
                 eprintln!("  MCP:  http://{url_host}:{host_port}/mcp");
             }
             if serves_api {
                 eprintln!("  API:  http://{url_host}:{host_port}/call/<module>/<command>");
             }
-            // Record what we actually launched so `status` can report it.
+            // Record what we launched + how (the handle) so stop/logs/status act
+            // on the real target regardless of the env's current backend.
             let _ = cfg::write_serve_runtime(env_scope, &env_name, &ServeRuntime {
-                mcp: spec.mcp.clone(),
-                api: spec.api.clone(),
-                eval: spec.eval_allow.is_some(),
+                mcp: req.spec.mcp.clone(),
+                api: req.spec.api.clone(),
+                eval: eval_on,
                 host: url_host.clone(),
                 port: host_port,
-                token_required: mcp_token.is_some(),
+                token_required: eff_token.is_some(),
+                handle: Some(handle),
             });
             if serves_mcp {
                 // The mcpServers entry name: the one-off program, else the env.
-                let cfg_name = mcp.clone().unwrap_or_else(|| env_name.clone());
-                print_http_mcp_config(&cfg_name, &url_host, host_port, mcp_token.as_deref());
+                let cfg_name = mcp.unwrap_or_else(|| env_name.clone());
+                print_http_mcp_config(&cfg_name, &url_host, host_port, eff_token.as_deref());
             }
             Ok(())
         }
@@ -2310,6 +1784,18 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         // ---- stop ----
         Cmd::Stop { name } => {
             let (env_name, env_scope, ec) = resolve_env_or_active(name)?;
+            // Prefer the stored launch handle: it tears down the right target
+            // (native process group or container) regardless of the env's current
+            // backend, so migration / dual-backend serve never strands a server.
+            if let Some(rt) = cfg::read_serve_runtime(env_scope, &env_name) {
+                if let Some(handle) = &rt.handle {
+                    stop_by_handle(handle, verbose)?;
+                    cfg::remove_serve_runtime(env_scope, &env_name);
+                    eprintln!("Stopped serving environment: {env_name}");
+                    return Ok(());
+                }
+            }
+            // Legacy record (no handle): fall back to the container-name probe.
             let container_name = serve::serve_container_name(&env_name);
             if crate::container::container_exists(ec.engine()?, &container_name) {
                 serve::stop_serve_container(ec.engine()?, verbose, &container_name)?;
@@ -2317,7 +1803,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 eprintln!("Stopped serving environment: {env_name}");
             } else {
                 return Err(ManagerError::EnvError(
-                    format!("No serve container running for environment '{env_name}'")
+                    format!("No serve running for environment '{env_name}'")
                 ));
             }
             Ok(())
@@ -2325,6 +1811,16 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
 
         // ---- logs ----
         Cmd::Logs { name, follow } => {
+            // Native serve: if the resolved/active env is serving natively, tail
+            // its host logfile. Falls through to the container path otherwise.
+            if let Ok((en, sc, _)) = resolve_env_or_active(name.clone()) {
+                if let Some(rt) = cfg::read_serve_runtime(sc, &en) {
+                    if matches!(rt.handle, Some(ServeHandle::Native { .. })) {
+                        let log_path = cfg::env_data_dir(sc, &en).join("logs").join("serve.log");
+                        return tail_file(&log_path, follow);
+                    }
+                }
+            }
             let (container_name, engine, logs_dir) = if let Some(ref n) = name {
                 let (env_name, scope, ec) = resolve_env_or_active(Some(n.clone()))?;
                 let cname = serve::serve_container_name(n);
@@ -2452,7 +1948,18 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     "--install".to_string(), src,
                 ]
             };
-            run_in_container(verbose, false, &args, &[], &engine_arg, false)
+            runner::run_in_env(
+                None,
+                runner::RunRequest {
+                    verbose,
+                    shell: false,
+                    args,
+                    user_env: Vec::new(),
+                    engine_args: engine_arg,
+                    phase: Phase::Run,
+                    slurm_bridge: false,
+                },
+            )
         }
 
         // ---- expose ----
@@ -2518,7 +2025,6 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         // ---- status ----
         Cmd::Status => {
             let mut all_containers: Vec<serve::ServeContainerInfo> = Vec::new();
-            let mut any_engine = false;
             for engine in [
                 ContainerEngine::Podman,
                 ContainerEngine::Docker,
@@ -2540,14 +2046,10 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     }
                 };
                 if !exe.is_empty() && which(exe) {
-                    any_engine = true;
                     if let Ok(containers) = serve::query_serve_containers(engine, verbose) {
                         all_containers.extend(containers);
                     }
                 }
-            }
-            if !any_engine {
-                return Err(ManagerError::EngineNotFound);
             }
             // Enrich each running container with its runtime serve-record
             // (mode / modules / url) -- authoritative even under host-networking
@@ -2562,13 +2064,15 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     c.url = if rt.token_required { format!("{} (token)", rt.url()) } else { rt.url() };
                 }
             }
+            // Native serves (host processes) tracked via per-env serve records.
+            all_containers.extend(native_running_serves());
             if json {
                 #[derive(serde::Serialize)]
                 struct StatusOutput { containers: Vec<serve::ServeContainerInfo> }
                 let output = StatusOutput { containers: all_containers };
                 println!("{}", serde_json::to_string_pretty(&output).unwrap());
             } else if all_containers.is_empty() {
-                println!("No morloc serve containers running.");
+                println!("No servers running.");
             } else {
                 println!("Running servers:");
                 println!("  {:<16} {:<12} {:<20} {:<32} STATUS", "ENV", "MODE", "MODULES", "URL");
@@ -2591,6 +2095,12 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             } else {
                 resolve_env_or_active(None)?
             };
+            if ec.backend.is_native() {
+                if slurm {
+                    eprintln!("Note: --slurm applies to the container backend; ignoring for a native env.");
+                }
+                return doctor::native_doctor(verbose, &env_name, env_scope, &ec, deep, strict, json);
+            }
             doctor::doctor(ec.engine()?, verbose, &env_name, env_scope, &ec, deep, strict, slurm, json)
         }
 
@@ -2648,15 +2158,907 @@ fn find_running_serve_container() -> Result<(String, ContainerEngine)> {
 // Container run
 // ======================================================================
 
-fn run_in_container(
-    verbose: bool,
-    shell: bool,
-    args: &[String],
-    user_env: &[(String, String)],
-    cli_engine_args: &[String],
-    slurm_bridge: bool,
+/// Native-backend `run`: execute a command directly on the host against the
+/// environment's own MORLOC_HOME, reconstructing the provisioned toolchain
+/// environment from the materialization record. Invoked through the `Runner`
+/// seam (`NativeRunner`).
+pub(crate) fn native_run_env(
+    env: &runner::ResolvedEnv,
+    req: &runner::RunRequest,
 ) -> Result<()> {
-    run_in_container_for(None, verbose, shell, args, user_env, cli_engine_args, Phase::Run, slurm_bridge)
+    // Container-only inputs have no meaning on the host; reject rather than
+    // silently drop them.
+    if !req.engine_args.is_empty() {
+        return Err(ManagerError::EnvError(
+            "--engine-arg / -x is a container-only option; the native backend has no \
+             container engine to pass flags to".to_string(),
+        ));
+    }
+    if req.slurm_bridge {
+        return Err(ManagerError::EnvError(
+            "--slurm-bridge is only supported on the container backend".to_string(),
+        ));
+    }
+
+    // The toolchain env-map is captured when the environment is materialized.
+    // Its absence means the environment was never provisioned.
+    let runtime = cfg::read_native_runtime(env.scope, &env.name).map_err(|_| {
+        ManagerError::EnvError(format!(
+            "native environment '{}' has not been materialized. \
+             Run 'morloc-manager update {}' to provision its toolchain.",
+            env.name, env.name
+        ))
+    })?;
+
+    let data_dir = cfg::env_data_dir(env.scope, &env.name);
+    let mh = data_dir.to_string_lossy().to_string();
+
+    let mut cmd = if req.shell {
+        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            eprintln!("Error: --shell requires an interactive terminal (TTY).");
+            std::process::exit(1);
+        }
+        let shell_exe = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        Command::new(shell_exe)
+    } else {
+        let (program, rest) = req
+            .args
+            .split_first()
+            .ok_or(ManagerError::NoCommand)?;
+        let mut c = Command::new(program);
+        c.args(rest);
+        c
+    };
+
+    // Inherited environ + captured toolchain activation + MORLOC_HOME, then the
+    // caller's `--env` overrides last so `-e KEY=VAL` always wins.
+    for (k, v) in &runtime.activation_env {
+        cmd.env(k, v);
+    }
+    cmd.env("MORLOC_HOME", &mh);
+    for (k, v) in &req.user_env {
+        cmd.env(k, v);
+    }
+
+    let status = cmd.status().map_err(|e| {
+        ManagerError::EnvError(format!("failed to launch command on host: {e}"))
+    })?;
+    let code = status.code().unwrap_or(1);
+    if status.success() {
+        Ok(())
+    } else {
+        std::process::exit(code);
+    }
+}
+
+// ======================================================================
+// Native backend: materialize + new
+// ======================================================================
+
+/// The release tag to provision the morloc runtime from: `$MORLOC_RELEASE_TAG`
+/// if set (e.g. "dev" or "v0.98.3"), else "latest" (resolved via the releases
+/// API). morloc-manager is self-bootstrapping -- it downloads the compiler +
+/// Rust source (init builds the runtime) rather than requiring a host morloc install.
+fn resolve_release_tag() -> String {
+    std::env::var("MORLOC_RELEASE_TAG")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "latest".to_string())
+}
+
+/// morloc's language-support table, in preference order: `$MORLOC_LANG_SUPPORT`
+/// (a JSON file, for pinning/dev); the table downloaded into the provisioned
+/// runtime (works on every host -- no compiler execution); else, as a fallback,
+/// running the provisioned compiler (only viable where it can execute natively).
+///
+/// The downloaded-table path is what lets container builds succeed on hosts where
+/// the glibc compiler cannot run (NixOS, musl, ...).
+fn load_lang_support(runtime_dir: &std::path::Path) -> Result<langsupport::LangSupport> {
+    if let Ok(path) = std::env::var("MORLOC_LANG_SUPPORT") {
+        if !path.is_empty() {
+            let text = std::fs::read_to_string(&path).map_err(|e| {
+                ManagerError::EnvError(format!("cannot read MORLOC_LANG_SUPPORT {path}: {e}"))
+            })?;
+            return langsupport::LangSupport::from_json(&text);
+        }
+    }
+    let table = runtime_dir.join(provision::LANG_SUPPORT_FILE);
+    if table.is_file() {
+        let text = std::fs::read_to_string(&table).map_err(|e| {
+            ManagerError::EnvError(format!("cannot read {}: {e}", table.display()))
+        })?;
+        return langsupport::LangSupport::from_json(&text);
+    }
+    let out = Command::new(runtime_dir.join("morloc"))
+        .arg("lang-support")
+        .output()
+        .map_err(|e| ManagerError::EnvError(format!("could not run morloc: {e}")))?;
+    if !out.status.success() {
+        return Err(ManagerError::EnvError(
+            "could not obtain the language-support table: this release does not publish it \
+             (morloc-lang-support.json) and the provisioned compiler could not run on this host \
+             (e.g. NixOS/musl). Use a release that includes the table, or set MORLOC_LANG_SUPPORT \
+             to a lang-support JSON file."
+                .to_string(),
+        ));
+    }
+    langsupport::LangSupport::from_json(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Run `morloc init` on the host to build the environment's language shims into
+/// its own MORLOC_HOME, against the pixi toolchain (on PATH via the activation
+/// env-map) and the provisioned compiler + Rust source.
+fn run_native_morloc_init(
+    morloc_bin: &std::path::Path,
+    env_dir: &std::path::Path,
+    runtime_dir: &std::path::Path,
+    activation: &[(String, String)],
+    verbose: bool,
+) -> Result<()> {
+    let mut cmd = Command::new(morloc_bin);
+    cmd.arg("init").arg("-f");
+    if !verbose {
+        cmd.arg("-q");
+    }
+    for (k, v) in activation {
+        cmd.env(k, v);
+    }
+    cmd.env("MORLOC_HOME", env_dir);
+    // init builds libmorloc.so + morloc-nexus from source with the env toolchain;
+    // point it at the Rust workspace bundled in the provisioned runtime.
+    cmd.env("MORLOC_RUST_DIR", runtime_dir.join("rust"));
+    let status = cmd
+        .status()
+        .map_err(|e| ManagerError::EnvError(format!("could not run morloc init: {e}")))?;
+    if !status.success() {
+        return Err(ManagerError::EnvError(
+            "morloc init failed while provisioning the native environment".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Materialize a native environment: solve its pixi toolchain, capture the
+/// activation env-map, provision the morloc compiler + Rust source, run `morloc init` on
+/// the host, and persist the native runtime record. `specs` is the union of the
+/// installed programs' requirements (empty for a bare env).
+/// Parse `--lang` values into (language, optional version pin) pairs. Accepts
+/// repeated flags and comma-separated lists; each atom is `lang` or `lang@pin`
+/// (e.g. `py`, `py@3.12`, `r@4.3`).
+fn parse_lang_pins(lang: &[String]) -> Vec<(String, Option<String>)> {
+    let mut out = Vec::new();
+    for entry in lang {
+        for atom in entry.split(',') {
+            let atom = atom.trim();
+            if atom.is_empty() {
+                continue;
+            }
+            match atom.split_once('@') {
+                Some((l, p)) => out.push((l.trim().to_string(), Some(p.trim().to_string()))),
+                None => out.push((atom.to_string(), None)),
+            }
+        }
+    }
+    out
+}
+
+/// Resolve one `--lang` pin into a language requirement, intersecting the pin
+/// with morloc's supported range for that language and erroring legibly (in
+/// morloc's vocabulary) when they conflict -- before pixi is ever invoked.
+fn resolve_lang_pin(
+    lang: &str,
+    pin: Option<&str>,
+    morloc_version: &str,
+    support: &langsupport::LangSupport,
+) -> Result<envspec::LangReq> {
+    let supported = support
+        .languages
+        .get(lang)
+        .and_then(|e| e.runtime.as_ref())
+        .map(|r| r.version.as_str())
+        .unwrap_or("*");
+    let spec = constraint::resolve_lang_version(lang, morloc_version, None, pin, supported)?;
+    let constraint = (spec != "*").then_some(spec);
+    Ok(envspec::LangReq { lang: lang.to_string(), constraint, std: None })
+}
+
+/// A provisioned runtime plus the structured requirement set for an
+/// environment. Both backends share this "gather -> RequirementSet" step; they
+/// differ only in what they do with it (native: render + solve on host;
+/// container: render + lock + build an image). The requirement set is the
+/// backend-neutral IR; the pixi manifest is rendered from it at the point of use.
+struct ResolvedRequirements {
+    /// The downloaded runtime store (`runtimes/<version>/`); its `rust/` subdir
+    /// is `morloc init`'s MORLOC_RUST_DIR.
+    runtime_dir: std::path::PathBuf,
+    /// The concrete morloc version provisioned.
+    version: String,
+    /// The provisioned morloc compiler (`runtime_dir/morloc`).
+    morloc_bin: std::path::PathBuf,
+    /// The union of `program_specs` and the `--lang` pins.
+    specs: Vec<envspec::EnvSpec>,
+    /// The structured requirement set (backend-neutral IR).
+    requirements: pixi::RequirementSet,
+}
+
+/// Provision the morloc runtime (download the compiler + Rust source; no host install),
+/// then lower the environment's requirements to a pixi manifest. `--lang` pins
+/// are validated against morloc's supported range here (a legible pin-time error
+/// before pixi runs).
+fn resolve_env_requirements(
+    scope: Scope,
+    name: &str,
+    program_specs: &[envspec::EnvSpec],
+    lang_pins: &[(String, Option<String>)],
+) -> Result<ResolvedRequirements> {
+    let tag = resolve_release_tag();
+    eprintln!("Provisioning morloc runtime ({tag})...");
+    let (runtime_dir, version) = provision::provision_runtime(scope, &tag)?;
+    let morloc_bin = runtime_dir.join("morloc");
+    let support = load_lang_support(&runtime_dir)?;
+
+    let mut specs: Vec<envspec::EnvSpec> = program_specs.to_vec();
+    if !lang_pins.is_empty() {
+        let mut langreqs = Vec::new();
+        for (lang, pin) in lang_pins {
+            langreqs.push(resolve_lang_pin(lang, pin.as_deref(), &version, &support)?);
+        }
+        specs.push(envspec::EnvSpec::from_languages(&version, langreqs));
+    }
+
+    let profile = hostprobe::probe_host();
+    let channels = vec!["conda-forge".to_string()];
+    let requirements = pixi::resolve_requirements(&pixi::PixiManifestInput {
+        env_name: name,
+        platform: &profile.platform,
+        channels: &channels,
+        specs: &specs,
+        lang_support: &support,
+    });
+
+    Ok(ResolvedRequirements { runtime_dir, version, morloc_bin, specs, requirements })
+}
+
+/// Materialize a native environment: solve its pixi toolchain, capture the
+/// activation env-map, provision the morloc compiler + Rust source, run `morloc init` on
+/// the host, and persist the native runtime record. The toolchain is the union
+/// of the installed programs' requirements (`program_specs`) and the user's
+/// `--lang` pins. Re-solving is skipped when the rendered manifest is unchanged
+/// from a prior materialization (avoids a redundant solve on every `update`).
+fn materialize_native_env(
+    scope: Scope,
+    name: &str,
+    program_specs: &[envspec::EnvSpec],
+    lang_pins: &[(String, Option<String>)],
+    verbose: bool,
+) -> Result<String> {
+    let req = resolve_env_requirements(scope, name, program_specs, lang_pins)?;
+
+    // Phase 1 of the impurity gate: a fast reject on host/vcpkg system deps that
+    // conda cannot provide (the pixi solve below is the accurate phase 2).
+    let blockers: Vec<String> = req.specs.iter().flat_map(|s| s.native_blockers()).collect();
+    if !blockers.is_empty() {
+        return Err(ManagerError::EnvError(format!(
+            "this environment cannot be built on the native backend:\n  {}",
+            blockers.join("\n  ")
+        )));
+    }
+
+    let env_dir = cfg::env_data_dir(scope, name);
+    let pixi_dir = env_dir.join("pixi");
+    let manifest = pixi::render_manifest(&req.requirements);
+
+    // Solve cache: an unchanged manifest with an existing runtime record means the
+    // toolchain is already materialized; skip the solve + re-init.
+    let manifest_unchanged = std::fs::read_to_string(pixi_dir.join("pixi.toml"))
+        .map(|prev| prev == manifest)
+        .unwrap_or(false);
+    if manifest_unchanged && cfg::read_native_runtime(scope, name).is_ok() {
+        eprintln!("Native toolchain is up to date (requirements unchanged).");
+        return Ok(req.version);
+    }
+
+    pixi::write_manifest(&pixi_dir, &manifest)?;
+    let pixi_bin = provision::provision_pixi(scope)?;
+    eprintln!("Solving native toolchain with pixi (this may take a few minutes)...");
+    pixi::solve(&pixi_dir, &pixi_bin)?;
+    let mut activation = pixi::capture_activation(&pixi_dir, &pixi_bin)?;
+    // Expose the env's own bin (nexus + installed program launchers) and the
+    // provisioned runtime (the morloc compiler) on PATH, so `run -- <program>`
+    // and `run -- morloc ...` resolve inside the env alongside the conda toolchain.
+    prepend_to_path(&mut activation, &[env_dir.join("bin"), req.runtime_dir.clone()]);
+
+    run_native_morloc_init(&req.morloc_bin, &env_dir, &req.runtime_dir, &activation, verbose)?;
+
+    cfg::write_native_runtime(scope, name, &NativeRuntime { activation_env: activation })?;
+    Ok(req.version)
+}
+
+/// Prepend `dirs` (in order) to the `PATH` entry of an activation env-map,
+/// inserting a `PATH` entry if none exists.
+fn prepend_to_path(activation: &mut Vec<(String, String)>, dirs: &[std::path::PathBuf]) {
+    let prefix = dirs
+        .iter()
+        .map(|d| d.to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join(":");
+    if prefix.is_empty() {
+        return;
+    }
+    for (k, v) in activation.iter_mut() {
+        if k == "PATH" {
+            *v = format!("{prefix}:{v}");
+            return;
+        }
+    }
+    activation.push(("PATH".to_string(), prefix));
+}
+
+/// Collect the requirements of every program installed into a native env by
+/// reading the `envspec.json` files morloc writes into each program's build dir
+/// under the env's MORLOC_HOME. A malformed or unreadable spec is skipped (with
+/// a warning) rather than aborting the whole re-solve.
+fn gather_env_specs(scope: Scope, name: &str) -> Vec<envspec::EnvSpec> {
+    let env_dir = cfg::env_data_dir(scope, name);
+    let mut specs = Vec::new();
+    for path in find_envspec_files(&env_dir) {
+        let build_dir = path.parent().unwrap_or(&env_dir);
+        match envspec::EnvSpec::read_from_build_dir(build_dir) {
+            Ok(spec) => specs.push(spec),
+            Err(e) => eprintln!("warning: skipping {}: {e}", path.display()),
+        }
+    }
+    specs
+}
+
+/// Find `envspec.json` files under `root`, skipping large non-source subtrees
+/// (the pixi env, cargo/target dirs) so the scan stays cheap.
+fn find_envspec_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let skip = matches!(
+                    path.file_name().and_then(|n| n.to_str()),
+                    Some("pixi") | Some(".pixi") | Some("target") | Some("rust") | Some(".cargo")
+                );
+                if !skip {
+                    stack.push(path);
+                }
+            } else if path.file_name().and_then(|n| n.to_str()) == Some("envspec.json") {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// Create a native (no-container) environment: record it, then materialize its
+/// pixi toolchain + morloc runtime on the host (unless `no_init`).
+/// Resolve, validate, and dedup-check a new environment's name (shared by the
+/// native and container `new` paths). Prompts interactively when no name given.
+fn resolve_new_env_name(scope: Scope, name: Option<String>, interactive: bool) -> Result<String> {
+    let env_name = match name {
+        Some(n) => n,
+        None if interactive => {
+            eprint!("Environment name: ");
+            io::stderr().flush().ok();
+            let mut buf = String::new();
+            io::stdin().read_line(&mut buf).ok();
+            buf.trim().to_string()
+        }
+        None => "morloc-env".to_string(),
+    };
+    if env_name.is_empty() {
+        return Err(ManagerError::EnvError("Environment name cannot be empty".to_string()));
+    }
+    environment::validate_env_name(&env_name)?;
+    if cfg::env_config_path(scope, &env_name).is_file() {
+        return Err(ManagerError::EnvError(format!(
+            "Environment '{env_name}' already exists"
+        )));
+    }
+    Ok(env_name)
+}
+
+/// Persist a freshly created environment: its `--lang` inputs, its config, a
+/// default active-config when none exists, and the "ready" banner. Shared by the
+/// native and container `new` paths.
+fn finalize_new_env(
+    scope: Scope,
+    ec: &EnvironmentConfig,
+    lang_pins: Vec<(String, Option<String>)>,
+) -> Result<()> {
+    cfg::write_env_inputs(scope, &ec.name, &EnvInputs { lang_pins })?;
+    cfg::write_env_config(scope, &ec.name, ec)?;
+    if cfg::read_active_config().is_none() {
+        cfg::write_config(
+            &cfg::config_path(scope),
+            &Config { active_env: None, backend: ec.backend },
+        )?;
+    }
+    let kind = if ec.backend.is_native() { "Native" } else { "Container" };
+    anstream::eprintln!("\x1b[1;32m{kind} environment '{}' is ready.\x1b[0m", ec.name);
+    eprintln!("Activate it with: morloc-manager select {}", ec.name);
+    Ok(())
+}
+
+fn native_new(
+    scope: Scope,
+    name: Option<String>,
+    lang: Vec<String>,
+    no_init: bool,
+    interactive: bool,
+    verbose: bool,
+) -> Result<()> {
+    let env_name = resolve_new_env_name(scope, name, interactive)?;
+
+    // A new env has no installed programs yet; its toolchain is morloc's core
+    // language-support table plus any `--lang` pins. Provisioning (inside
+    // materialize) yields the concrete morloc version.
+    let lang_pins = parse_lang_pins(&lang);
+    let morloc_version = if no_init {
+        None
+    } else {
+        materialize_native_env(scope, &env_name, &[], &lang_pins, verbose)?
+            .parse::<Version>()
+            .ok()
+    };
+
+    let ec = EnvironmentConfig::new_backend(
+        env_name,
+        Backend::Native,
+        String::new(),
+        None,
+        morloc_version,
+    );
+    finalize_new_env(scope, &ec, lang_pins)
+}
+
+
+/// Slim base image for requirement-derived container builds. Fully qualified
+/// (registry + `library/` namespace) so podman resolves it without a
+/// containers-registries.conf: podman refuses to expand a bare short name like
+/// `debian:bookworm-slim` when no unqualified-search-registries config is present
+/// (common on NixOS), whereas docker silently assumes Docker Hub. The explicit
+/// form works identically on both.
+const CONTAINER_BASE_IMAGE: &str = "docker.io/library/debian:bookworm-slim";
+
+/// Build a requirement-derived container image: render the env's pixi.toml
+/// (shared with the native backend), lock it, stage the morloc runtime + a
+/// generated Dockerfile into a build context, and build the image. Returns the
+/// built image tag.
+fn build_requirement_derived_image(
+    scope: Scope,
+    name: &str,
+    engine: ContainerEngine,
+    program_specs: &[envspec::EnvSpec],
+    lang_pins: &[(String, Option<String>)],
+) -> Result<(String, String)> {
+    // Unlike native, a container HAS a build layer, so host/vcpkg system deps are
+    // not a hard blocker here -- they become build-extras (a later --system-package
+    // flag). native_blockers therefore does not apply to the container path.
+    let req = resolve_env_requirements(scope, name, program_specs, lang_pins)?;
+
+    let context = cfg::env_data_dir(scope, name).join("container-build");
+    pixi::write_manifest(&context, &pixi::render_manifest(&req.requirements))?;
+
+    let pixi_bin = provision::provision_pixi(scope)?;
+    eprintln!("Solving + locking the environment with pixi...");
+    pixi::lock(&context, &pixi_bin)?;
+
+    eprintln!("Staging the morloc runtime into the build context...");
+    provision::stage_runtime(&req.runtime_dir, &context.join("runtime"))?;
+
+    let extras = dockerfile::BuildExtras::default();
+    let df_text = dockerfile::generate_dockerfile(&dockerfile::DockerfileInput {
+        base_image: CONTAINER_BASE_IMAGE,
+        pixi_version: provision::PIXI_VERSION,
+        morloc_home: serve::CONTAINER_MORLOC_HOME,
+        extras: &extras,
+    });
+    let df_path = context.join("Dockerfile");
+    std::fs::write(&df_path, df_text)
+        .map_err(|e| ManagerError::EnvError(format!("cannot write {}: {e}", df_path.display())))?;
+
+    let image_tag = format!("localhost/morloc-env:{name}");
+    eprintln!("Building the environment image ({image_tag}) with {}...", engine.name());
+    let cfg = crate::container::BuildConfig {
+        dockerfile: df_path.to_string_lossy().to_string(),
+        context: context.to_string_lossy().to_string(),
+        tag: image_tag.clone(),
+        build_args: Vec::new(),
+        extra_flags: Vec::new(),
+    };
+    let status = crate::container::container_build_visible(engine, &cfg);
+    if !status.success() {
+        return Err(ManagerError::EngineError {
+            engine,
+            code: crate::container::exit_code_to_int(status),
+            stderr: "requirement-derived image build failed".to_string(),
+        });
+    }
+    Ok((image_tag, req.version))
+}
+
+/// Create a container environment whose image is derived from its requirements
+/// (a generated Dockerfile running pixi inside), rather than a pulled/recipe
+/// image. Mirrors `native_new`; the run substrate is unchanged.
+fn container_new_derived(
+    scope: Scope,
+    engine: ContainerEngine,
+    name: Option<String>,
+    lang: Vec<String>,
+    no_init: bool,
+    interactive: bool,
+) -> Result<()> {
+    let env_name = resolve_new_env_name(scope, name, interactive)?;
+
+    let lang_pins = parse_lang_pins(&lang);
+    let (built_image, morloc_version) = if no_init {
+        (None, None)
+    } else {
+        let (image, version) =
+            build_requirement_derived_image(scope, &env_name, engine, &[], &lang_pins)?;
+        (Some(image), version.parse::<Version>().ok())
+    };
+
+    let ec = EnvironmentConfig::new_backend(
+        env_name,
+        Backend::Container(engine),
+        CONTAINER_BASE_IMAGE.to_string(),
+        built_image,
+        morloc_version,
+    );
+    finalize_new_env(scope, &ec, lang_pins)
+}
+
+// ======================================================================
+// Native serve (detached host nexus)
+// ======================================================================
+
+/// Whether a native serve pid is still our nexus: alive, and (on Linux) its
+/// cmdline still looks like morloc-nexus -- a guard against PID reuse.
+fn native_serve_alive(pid: u32) -> bool {
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+    if kill(Pid::from_raw(pid as i32), None).is_err() {
+        return false;
+    }
+    match std::fs::read(format!("/proc/{pid}/cmdline")) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).contains("morloc-nexus"),
+        Err(_) => true, // no /proc (e.g. macOS): trust the liveness signal
+    }
+}
+
+/// SIGTERM then, after a grace period, SIGKILL a native serve process group (the
+/// nexus + its pool daemons). Best-effort. Killing the GROUP (negative pid) is
+/// what reaps the child pool daemons; SIGTERM first lets the nexus clean its SHM.
+fn kill_native_group(pgid: u32) {
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
+    let group = Pid::from_raw(-(pgid as i32));
+    let _ = kill(group, Signal::SIGTERM);
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if kill(Pid::from_raw(pgid as i32), None).is_err() {
+            return; // group leader gone
+        }
+    }
+    let _ = kill(group, Signal::SIGKILL);
+}
+
+/// Is the serve behind this handle still live? (dispatches on the stored handle,
+/// not the env's current backend).
+fn serve_handle_alive(handle: &ServeHandle) -> bool {
+    match handle {
+        ServeHandle::Native { pid, .. } => native_serve_alive(*pid),
+        ServeHandle::Container { engine, name } => container::container_exists(*engine, name),
+    }
+}
+
+/// Tear down a running serve by its stored launch handle (backend-independent).
+fn stop_by_handle(handle: &ServeHandle, verbose: bool) -> Result<()> {
+    match handle {
+        ServeHandle::Native { pgid, .. } => {
+            kill_native_group(*pgid);
+            Ok(())
+        }
+        ServeHandle::Container { engine, name } => {
+            serve::stop_serve_container(*engine, verbose, name)
+        }
+    }
+}
+
+/// Native serves currently running: scanned from each env's serve record with a
+/// live `Native` handle. The native half of `status`/`ls-running` (the container
+/// half comes from `docker ps`); kept a free function so one query covers all envs.
+fn native_running_serves() -> Vec<serve::ServeContainerInfo> {
+    let mut out = Vec::new();
+    for scope in [Scope::Local, Scope::System] {
+        for env in cfg::list_env_names(scope) {
+            let Some(rt) = cfg::read_serve_runtime(scope, &env) else { continue };
+            let Some(ServeHandle::Native { pid, .. }) = &rt.handle else { continue };
+            if !native_serve_alive(*pid) {
+                continue;
+            }
+            out.push(serve::ServeContainerInfo {
+                name: format!("native:{env}"),
+                env: env.clone(),
+                ports: rt.port.to_string(),
+                status: format!("running (native, pid {pid})"),
+                mode: rt.mode(),
+                modules: rt.modules_summary(),
+                url: if rt.token_required {
+                    format!("{} (token)", rt.url())
+                } else {
+                    rt.url()
+                },
+            });
+        }
+    }
+    out
+}
+
+/// Resolve WHAT to serve: a `--mcp <program>` one-off, or the environment's
+/// exposed set (expose.yaml). Ensures each program is installed. Shared by the
+/// container and native start paths.
+fn resolve_serve_spec(scope: Scope, name: &str, mcp: &Option<String>) -> Result<ServeSpec> {
+    if let Some(program) = mcp {
+        ensure_program_installed(scope, name, program)?;
+        Ok(ServeSpec { mcp: vec![program.clone()], api: Vec::new(), eval_allow: None })
+    } else {
+        let ex = cfg::read_exposure(scope, name)?;
+        if ex.is_empty() {
+            return Err(ManagerError::EnvError(format!(
+                "Nothing is exposed in '{name}'. Expose a module first:\n    \
+                 morloc-manager expose add <module> --as mcp\n  \
+                 (or 'start --mcp <module>' for a one-off)."
+            )));
+        }
+        for m in ex.exposed_modules() {
+            ensure_program_installed(scope, name, &m)?;
+        }
+        let eval_allow = ex.eval.as_ref().map(|e| e.allow.join(","));
+        Ok(ServeSpec { mcp: ex.mcp.clone(), api: ex.api.clone(), eval_allow })
+    }
+}
+
+/// Spawn `morloc-nexus router ...` as a detached host process group serving the
+/// native environment, logging to `<env>/logs/serve.log`. Returns the launch
+/// handle and the host used in URLs.
+fn native_serve(
+    scope: Scope,
+    env_name: &str,
+    spec: &ServeSpec,
+    host_port: u16,
+    user_env: &[(String, String)],
+    expose: bool,
+    allow_plaintext: bool,
+    allow_no_auth: bool,
+    token: Option<String>,
+) -> Result<(ServeHandle, String)> {
+    // Exposing an UNSANDBOXED host process off-loopback reuses the container
+    // path's gates (plaintext ack + a token) so it can't happen by accident.
+    if expose {
+        if !allow_plaintext {
+            return Err(ManagerError::EnvError(format!(
+                "Refusing to expose off-loopback over plaintext HTTP without --allow-plaintext.\n  \
+                 Prefer the default (loopback) and reach it over an SSH tunnel:\n    \
+                 ssh -N -L {host_port}:127.0.0.1:{host_port} <host>"
+            )));
+        }
+        if token.is_none() && !allow_no_auth {
+            return Err(ManagerError::EnvError(
+                "An exposed endpoint requires a token: set MORLOC_MCP_TOKEN or --auth-token \
+                 (or --allow-no-auth to serve it unauthenticated)."
+                    .to_string(),
+            ));
+        }
+    }
+    let http_host = if expose { "0.0.0.0" } else { "127.0.0.1" };
+    let need_allow_no_auth = http_host == "0.0.0.0" && token.is_none();
+
+    let data_dir = cfg::env_data_dir(scope, env_name);
+    let mh = data_dir.to_string_lossy().to_string();
+    let command = build_router_command(&mh, host_port, http_host, spec, need_allow_no_auth);
+
+    // The stored activation env-map puts the env's bin (morloc-nexus) + conda
+    // toolchain on PATH; its absence means the env was never materialized.
+    let runtime = cfg::read_native_runtime(scope, env_name).map_err(|_| {
+        ManagerError::EnvError(format!(
+            "native environment '{env_name}' is not materialized; \
+             run 'morloc-manager update {env_name}' first"
+        ))
+    })?;
+
+    // Persistent logfile so `logs` can read it after the manager exits.
+    let logs_dir = data_dir.join("logs");
+    std::fs::create_dir_all(&logs_dir)
+        .map_err(|e| ManagerError::EnvError(format!("cannot create {}: {e}", logs_dir.display())))?;
+    let log_path = logs_dir.join("serve.log");
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| ManagerError::EnvError(format!("cannot open {}: {e}", log_path.display())))?;
+    let log_err = log
+        .try_clone()
+        .map_err(|e| ManagerError::EnvError(format!("duplicate log fd: {e}")))?;
+
+    // Resolve the nexus binary explicitly (env bin), else rely on the activation PATH.
+    let nexus = data_dir.join("bin").join("morloc-nexus");
+    let program: std::path::PathBuf = if nexus.is_file() {
+        nexus
+    } else {
+        command[0].clone().into()
+    };
+
+    let mut cmd = Command::new(&program);
+    cmd.args(&command[1..]);
+    for (k, v) in &runtime.activation_env {
+        cmd.env(k, v);
+    }
+    cmd.env("MORLOC_HOME", &mh);
+    if let Some(t) = &token {
+        cmd.env("MORLOC_MCP_TOKEN", t);
+    }
+    for (k, v) in user_env {
+        cmd.env(k, v);
+    }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err));
+    // Detach into a new session + process group: survives the terminal, and lets
+    // stop kill the whole group (nexus + pool daemons). setsid is async-signal-safe.
+    unsafe {
+        cmd.pre_exec(|| {
+            nix::unistd::setsid()
+                .map(|_| ())
+                .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
+        });
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| ManagerError::EnvError(format!("failed to launch morloc-nexus: {e}")))?;
+    let pid = child.id();
+
+    // A moment to catch an immediate failure (e.g. port already in use).
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    if let Ok(Some(status)) = child.try_wait() {
+        let logs = std::fs::read_to_string(&log_path).unwrap_or_default();
+        let tail: Vec<&str> = logs.lines().rev().take(20).collect();
+        let tail: String = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+        return Err(ManagerError::EnvError(format!(
+            "native serve exited immediately ({status}). Last log lines:\n{tail}"
+        )));
+    }
+    // setsid made the child its own session + group leader, so pgid == pid.
+    let url_host = if expose {
+        serve::system_hostname()
+    } else {
+        "127.0.0.1".to_string()
+    };
+    Ok((ServeHandle::Native { pid, pgid: pid }, url_host))
+}
+
+/// Native `start`: serve the environment as a detached host nexus process.
+#[allow(clippy::too_many_arguments)]
+/// Native-backend serve launch (behind `NativeRunner::serve`). Spawns the
+/// detached host nexus + prints native-specific status; the shared orchestration
+/// (spec/port/token/record/MCP-config) runs in the `start` handler.
+pub(crate) fn native_serve_launch(
+    env: &runner::ResolvedEnv,
+    req: &ServeRequest,
+) -> Result<ServeOutcome> {
+    let (handle, url_host) = native_serve(
+        env.scope, &env.name, &req.spec, req.host_port, &req.user_env,
+        req.expose, req.allow_plaintext, req.allow_no_auth, req.token.clone(),
+    )?;
+    if req.expose {
+        eprintln!(
+            "Serving '{}' on {url_host}:{} (EXPOSED, plaintext; native host process).",
+            env.name, req.host_port
+        );
+    } else {
+        eprintln!("Serving '{}' on 127.0.0.1:{} (native, host-local).", env.name, req.host_port);
+    }
+    eprintln!("  Logs:   morloc-manager logs");
+    eprintln!("  Stop:   morloc-manager stop");
+    eprintln!("  Note:   native serve is unsupervised (no restart; does not survive reboot).");
+    Ok(ServeOutcome { handle, url_host, token: req.token.clone() })
+}
+
+/// Container-backend serve launch (behind `ContainerRunner::serve`). Builds the
+/// serve plan (security tiers + netns), launches the container, and prints
+/// container-specific status; shared orchestration runs in the `start` handler.
+pub(crate) fn container_serve(
+    env: &runner::ResolvedEnv,
+    req: &ServeRequest,
+) -> Result<ServeOutcome> {
+    let ec = &env.ec;
+    let env_name = &env.name;
+    let engine = ec.engine()?;
+    let image = ec.active_image().to_string();
+    let data_dir = cfg::env_data_dir(env.scope, env_name);
+    let container_name = serve::serve_container_name(env_name);
+    if ec.dockerfile.is_some() && ec.built_image.is_none() {
+        eprintln!("Warning: Dockerfile is configured but image has not been built. Using base image.");
+        eprintln!("  Run 'morloc-manager update {env_name}' to build the Dockerfile layer.");
+    }
+
+    let mh = serve::CONTAINER_MORLOC_HOME;
+    let plan = serve_plan(
+        engine, &req.spec, mh, req.container_port, req.host_port,
+        req.expose, req.allow_plaintext, req.allow_no_auth, req.unsafe_serve,
+        cfg!(target_os = "linux"), req.token.clone(),
+    )?;
+    let mut user_env = req.user_env.clone();
+    let mut mcp_token: Option<String> = None;
+    if let Some(t) = plan.token {
+        mcp_token = Some(t.clone());
+        user_env.push(("MORLOC_MCP_TOKEN".to_string(), t));
+    }
+    let mut extra_flags = cfg::read_flag_config(env.scope, env_name)?.materialize(Phase::Start, engine);
+    extra_flags.extend(req.engine_args.iter().cloned());
+
+    serve::serve_environment(
+        engine, req.verbose, &image, &data_dir.to_string_lossy(), &container_name,
+        &[(req.host_port, req.container_port)], plan.publish_host.as_deref(), plan.network.as_deref(),
+        &extra_flags, &Some(ec.shm_size.clone()), &user_env, &plan.command,
+    )?;
+
+    let url_host = if req.expose {
+        eprintln!("Serving '{env_name}' on 0.0.0.0:{} (EXPOSED, plaintext).", req.host_port);
+        eprintln!("  A bearer token over plaintext stops scanners, not eavesdroppers.");
+        eprintln!("  Do not commit the printed token into a project-scoped .mcp.json.");
+        serve::system_hostname()
+    } else if plan.unsafe_unconfined {
+        eprintln!("DANGER: serving '{env_name}' on 127.0.0.1:{} UNAUTHENTICATED (--unsafe).", req.host_port);
+        eprintln!("  Reachable by any container co-resident on the engine's network. Trusted hosts only.");
+        "127.0.0.1".to_string()
+    } else if mcp_token.is_some() {
+        eprintln!("Serving '{env_name}' on 127.0.0.1:{} (loopback; token required on this engine).", req.host_port);
+        "127.0.0.1".to_string()
+    } else {
+        eprintln!("Serving '{env_name}' on 127.0.0.1:{} (host-local; no token needed).", req.host_port);
+        "127.0.0.1".to_string()
+    };
+
+    Ok(ServeOutcome {
+        handle: ServeHandle::Container { engine, name: container_name },
+        url_host,
+        token: mcp_token,
+    })
+}
+
+/// Print (and optionally follow) a native serve's logfile via `tail`.
+fn tail_file(path: &std::path::Path, follow: bool) -> Result<()> {
+    if !path.exists() {
+        return Err(ManagerError::EnvError(format!(
+            "no serve log at {} (is it serving?)",
+            path.display()
+        )));
+    }
+    let mut args = vec!["-n".to_string(), "200".to_string()];
+    if follow {
+        args.push("-f".to_string());
+    }
+    args.push(path.to_string_lossy().to_string());
+    let status = Command::new("tail")
+        .args(&args)
+        .status()
+        .map_err(|e| ManagerError::EnvError(format!("could not run tail: {e}")))?;
+    if !status.success() {
+        return Err(ManagerError::EnvError("tail failed".to_string()));
+    }
+    Ok(())
 }
 
 /// Validate the active env can host a SLURM bridge and spawn one. The
@@ -2727,20 +3129,23 @@ fn bridge_socket_path() -> std::path::PathBuf {
     std::path::PathBuf::from(dir).join(format!("morloc-bridge-{}.sock", std::process::id()))
 }
 
-fn run_in_container_for(
-    target: Option<(String, Scope, EnvironmentConfig)>,
-    verbose: bool,
-    shell: bool,
-    args: &[String],
-    user_env: &[(String, String)],
-    cli_engine_args: &[String],
-    phase: Phase,
-    slurm_bridge: bool,
+/// Container-backend `run`: execute a command inside the environment's image.
+/// Invoked through the `Runner` seam (`ContainerRunner`); the target is already
+/// resolved by `runner::run_in_env`.
+pub(crate) fn container_run_env(
+    env: &runner::ResolvedEnv,
+    req: &runner::RunRequest,
 ) -> Result<()> {
-    let (env_name, env_scope, ec) = match target {
-        Some(t) => t,
-        None => environment::resolve_active_environment()?,
-    };
+    let env_name = env.name.clone();
+    let env_scope = env.scope;
+    let ec = &env.ec;
+    let verbose = req.verbose;
+    let shell = req.shell;
+    let args: &[String] = &req.args;
+    let user_env: &[(String, String)] = &req.user_env;
+    let cli_engine_args: &[String] = &req.engine_args;
+    let phase = req.phase;
+    let slurm_bridge = req.slurm_bridge;
     let engine = ec.engine()?;
     let image = ec.active_image().to_string();
     let data_dir = cfg::env_data_dir(env_scope, &env_name);
@@ -2752,7 +3157,7 @@ fn run_in_container_for(
     // bridge stays alive for the lifetime of every nested remote
     // call).
     let _bridge_guard = if slurm_bridge {
-        Some(setup_slurm_bridge(&ec)?)
+        Some(setup_slurm_bridge(ec)?)
     } else {
         None
     };
@@ -2874,11 +3279,13 @@ fn run_with_config(
         }
     }
 
-    // Mount data at /opt/morloc — matching the serve container (start).
-    // The compiler reads MORLOC_HOME to resolve all generated paths.
-    let mh = "/opt/morloc";
+    // Mount the host env dir at the in-container MORLOC_STATE (mutable state) --
+    // NOT over MORLOC_HOME (the image-baked runtime), so the runtime is never
+    // shadowed. The compiler resolves runtime paths from MORLOC_HOME and state
+    // paths (exe/fdb/modules/logs) from MORLOC_STATE (set via oci_base_env).
+    let mh = serve::CONTAINER_MORLOC_HOME;
     let base_mounts = vec![
-        (v_data_dir.to_string(), mh.to_string()),
+        (v_data_dir.to_string(), serve::CONTAINER_MORLOC_STATE.to_string()),
     ];
     let work_mount = if is_init {
         Vec::new()
@@ -2939,10 +3346,14 @@ fn run_with_config(
             vec![
                 ("HOME".to_string(), home.to_string()),
                 ("MORLOC_HOME".to_string(), mh.to_string()),
+                (
+                    "MORLOC_STATE".to_string(),
+                    serve::CONTAINER_MORLOC_STATE.to_string(),
+                ),
                 ("MORLOC_BIN_LINK_DIR".to_string(), link_dir.clone()),
                 (
                     "PATH".to_string(),
-                    format!("{link_dir}:{mh}/bin:{}", serve::CONTAINER_PATH_TAIL),
+                    format!("{link_dir}:{}", serve::container_path(mh)),
                 ),
             ]
         }
@@ -2952,8 +3363,12 @@ fn run_with_config(
             let mut v = serve::oci_base_env(mh);
             // Explicit skip: SystemConfig.hs treats "" as "do not link".
             v.push(("MORLOC_BIN_LINK_DIR".to_string(), String::new()));
-            // Writable, mounted, persisted cargo cache for Rust pool builds.
-            v.push(("CARGO_HOME".to_string(), format!("{mh}/.cargo")));
+            // Writable, mounted, persisted cargo cache for Rust pool builds
+            // (under the mounted state root, not the baked runtime).
+            v.push((
+                "CARGO_HOME".to_string(),
+                format!("{}/.cargo", serve::CONTAINER_MORLOC_STATE),
+            ));
             v
         }
     };
@@ -3058,11 +3473,36 @@ struct ServePlan {
 }
 
 /// What to serve: per-adapter module membership + the eval capability.
-struct ServeSpec {
+pub(crate) struct ServeSpec {
     mcp: Vec<String>,
     api: Vec<String>,
     /// `Some(csv)` enables the sandboxed eval capability with this allow-list.
     eval_allow: Option<String>,
+}
+
+/// Everything a backend needs to launch a serve, after the neutral orchestration
+/// (spec resolution, port pick, env, token) has run in the `start` handler. The
+/// backend impl differs only in how it launches + tracks the process.
+pub(crate) struct ServeRequest {
+    pub spec: ServeSpec,
+    pub host_port: u16,
+    pub container_port: u16,
+    pub user_env: Vec<(String, String)>,
+    pub expose: bool,
+    pub allow_plaintext: bool,
+    pub allow_no_auth: bool,
+    pub unsafe_serve: bool,
+    pub engine_args: Vec<String>,
+    pub token: Option<String>,
+    pub verbose: bool,
+}
+
+/// What a backend's launch produced: the tracking handle, the host used in URLs,
+/// and the effective token (a backend may add one, e.g. the container VM-fallback).
+pub(crate) struct ServeOutcome {
+    pub handle: ServeHandle,
+    pub url_host: String,
+    pub token: Option<String>,
 }
 
 /// Decide how to serve the exposure `spec` (MCP + API adapters) over HTTP via the
@@ -3159,13 +3599,27 @@ fn serve_plan(
 
     // The nexus refuses a non-loopback bind with no token unless --allow-no-auth.
     let need_allow_no_auth = http_host == "0.0.0.0" && token.is_none();
+    let command = build_router_command(mh, bind_port, &http_host, spec, need_allow_no_auth);
+    Ok(ServePlan { command, network, publish_host, token, unsafe_unconfined })
+}
 
+/// Build the `morloc-nexus router ...` argv shared by the container and native
+/// serve paths. `mh` is the in-context MORLOC_HOME; the nexus listens on
+/// `http_host:bind_port`. `need_allow_no_auth` is set when a non-loopback bind
+/// has no token (the nexus otherwise refuses it).
+fn build_router_command(
+    mh: &str,
+    bind_port: u16,
+    http_host: &str,
+    spec: &ServeSpec,
+    need_allow_no_auth: bool,
+) -> Vec<String> {
     let mut command = vec![
         "morloc-nexus".to_string(),
         "router".to_string(),
         "--fdb".to_string(), format!("{mh}/exe"),
         "--http-port".to_string(), bind_port.to_string(),
-        "--http-host".to_string(), http_host,
+        "--http-host".to_string(), http_host.to_string(),
     ];
     for m in &spec.mcp {
         command.push("--mcp".to_string());
@@ -3183,8 +3637,7 @@ fn serve_plan(
     if need_allow_no_auth {
         command.push("--allow-no-auth".to_string());
     }
-
-    Ok(ServePlan { command, network, publish_host, token, unsafe_unconfined })
+    command
 }
 
 /// Print an environment's exposure set (modules with their protocols, and the
@@ -3241,23 +3694,6 @@ fn build_http_mcp_config(
     serde_json::json!({ "mcpServers": serde_json::Value::Object(servers) })
 }
 
-fn run_morloc_init_for(
-    target: Option<(String, Scope, EnvironmentConfig)>,
-    verbose: bool,
-    extra_init_args: &[String],
-) -> Result<()> {
-    let mut argv: Vec<String> = if verbose {
-        ["morloc", "init", "-f"].iter().map(|s| s.to_string()).collect()
-    } else {
-        ["morloc", "init", "-f", "-q"].iter().map(|s| s.to_string()).collect()
-    };
-    argv.extend(extra_init_args.iter().cloned());
-    eprintln!("Initializing morloc (this may take several minutes)...");
-    // `morloc init` is a run-style invocation (it execs inside the
-    // container); it picks up `run.<engine>` flags from env.flags.yaml.
-    // No CLI engine-args here (the inner command is set by morloc-manager).
-    run_in_container_for(target, verbose, false, &argv, &[], &[], Phase::Run, false)
-}
 
 fn normalize_trailing(p: &str) -> String {
     let mut s = p.to_string();
@@ -3473,11 +3909,6 @@ mod tests {
 
     // ---- Error message tests ----
 
-    #[test]
-    fn invalid_version_renders() {
-        let err = ManagerError::InvalidVersion("abc".to_string());
-        assert!(err.to_string().contains("Invalid version"));
-    }
 
     #[test]
     fn no_command_renders() {
@@ -3593,6 +4024,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("env.json");
         let ec = EnvironmentConfig {
+            schema_version: crate::types::CURRENT_ENV_SCHEMA,
             name: "test".to_string(),
             base_image: "ghcr.io/morloc-project/morloc/morloc-full:0.67.0".to_string(),
             original_image: None,
@@ -3675,7 +4107,7 @@ mod tests {
     #[test]
     fn flag_config_default_is_all_empty() {
         let fc = FlagConfig::default();
-        for phase in [Phase::Build, Phase::Run, Phase::Start] {
+        for phase in [Phase::Run, Phase::Start] {
             for eng in [
                 ContainerEngine::Docker,
                 ContainerEngine::Podman,
@@ -3689,7 +4121,7 @@ mod tests {
     #[test]
     fn flag_config_materialize_concatenates_all_then_engine() {
         let yaml = r#"
-build:
+run:
   all:
     - --shared
   apptainer:
@@ -3697,14 +4129,14 @@ build:
 "#;
         let fc: FlagConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(
-            fc.materialize(Phase::Build, ContainerEngine::Apptainer),
+            fc.materialize(Phase::Run, ContainerEngine::Apptainer),
             vec!["--shared", "--ignore-subuid"]
         );
         assert_eq!(
-            fc.materialize(Phase::Build, ContainerEngine::Docker),
+            fc.materialize(Phase::Run, ContainerEngine::Docker),
             vec!["--shared"]
         );
-        assert!(fc.materialize(Phase::Run, ContainerEngine::Apptainer).is_empty());
+        assert!(fc.materialize(Phase::Start, ContainerEngine::Apptainer).is_empty());
     }
 
     #[test]
@@ -4011,83 +4443,9 @@ build:
         assert!(!args.iter().any(|a| a == "1g"));
     }
 
-    #[test]
-    fn build_apptainer_native_argv_emits_build_args_and_paths() {
-        let cfg = container::ApptainerNativeBuildConfig {
-            deffile: "/cfg/recipe.def".to_string(),
-            output_sif: "/data/sif/layered.sif".to_string(),
-            build_args: vec![("BASE_SIF".to_string(), "/data/sif/base.sif".to_string())],
-            extra_flags: Vec::new(),
-        };
-        let argv = container::build_apptainer_native_argv(&cfg);
-        assert_eq!(argv[0], "build");
-        assert!(argv.contains(&"--force".to_string()));
-        // No mode-selecting flags are passed by default; user supplies them
-        // via env.flags.yaml `build.apptainer` or `update --reinit-arg`.
-        assert!(!argv.contains(&"--ignore-subuid".to_string()));
-        assert!(!argv.contains(&"--ignore-fakeroot-command".to_string()));
-        assert!(argv.windows(2).any(|w| w == ["--build-arg", "BASE_SIF=/data/sif/base.sif"]));
-        // Output sif is the temp path with .tmp.sif suffix; final rename
-        // happens after success in apptainer_build_native.
-        assert!(argv.iter().any(|a| a == "/data/sif/layered.sif.tmp.sif"));
-        // Recipe path is the last argv slot.
-        assert_eq!(argv.last().unwrap(), "/cfg/recipe.def");
-    }
 
-    #[test]
-    fn build_apptainer_native_argv_threads_extra_flags() {
-        let cfg = container::ApptainerNativeBuildConfig {
-            deffile: "/cfg/recipe.def".to_string(),
-            output_sif: "/data/sif/layered.sif".to_string(),
-            build_args: vec![("BASE_SIF".to_string(), "/data/sif/base.sif".to_string())],
-            extra_flags: vec![
-                "--ignore-subuid".to_string(),
-                "--ignore-fakeroot-command".to_string(),
-            ],
-        };
-        let argv = container::build_apptainer_native_argv(&cfg);
-        let force_idx = argv.iter().position(|a| a == "--force").unwrap();
-        let isubuid_idx = argv.iter().position(|a| a == "--ignore-subuid").unwrap();
-        let buildarg_idx = argv.iter().position(|a| a == "--build-arg").unwrap();
-        // extra_flags land between --force and the first --build-arg.
-        assert!(force_idx < isubuid_idx);
-        assert!(isubuid_idx < buildarg_idx);
-    }
 
-    #[test]
-    fn build_apptainer_oci_convert_argv_picks_docker_daemon_scheme() {
-        let cfg = container::ApptainerOciConvertConfig {
-            source_engine: ContainerEngine::Docker,
-            source_tag: "localhost/morloc-env:dnd".to_string(),
-            output_sif: "/data/sif/layered.sif".to_string(),
-            extra_flags: Vec::new(),
-        };
-        let argv = container::build_apptainer_oci_convert_argv(&cfg);
-        assert_eq!(argv[0], "build");
-        // No mode-selecting flags by default; user supplies via flag file.
-        assert!(!argv.contains(&"--ignore-subuid".to_string()));
-        assert!(!argv.contains(&"--ignore-fakeroot-command".to_string()));
-        assert!(argv.iter().any(|a| a == "/data/sif/layered.sif.tmp.sif"));
-        assert_eq!(
-            argv.last().unwrap(),
-            "docker-daemon://localhost/morloc-env:dnd"
-        );
-    }
 
-    #[test]
-    fn build_apptainer_oci_convert_argv_uses_podman_daemon() {
-        let cfg = container::ApptainerOciConvertConfig {
-            source_engine: ContainerEngine::Podman,
-            source_tag: "localhost/morloc-env:dnd".to_string(),
-            output_sif: "/data/sif/layered.sif".to_string(),
-            extra_flags: Vec::new(),
-        };
-        let argv = container::build_apptainer_oci_convert_argv(&cfg);
-        assert_eq!(
-            argv.last().unwrap(),
-            "podman-daemon://localhost/morloc-env:dnd"
-        );
-    }
 
     #[test]
     fn env_config_yaml_round_trip_with_apptainer_fields() {
@@ -4097,6 +4455,7 @@ build:
         // to keep the test hermetic.
         let path = dir.path().join("env.yaml");
         let ec = EnvironmentConfig {
+            schema_version: crate::types::CURRENT_ENV_SCHEMA,
             name: "dnd".to_string(),
             base_image: "ghcr.io/morloc-project/morloc/morloc-full:0.85.0".to_string(),
             original_image: None,
@@ -4145,6 +4504,7 @@ build:
     #[test]
     fn active_image_apptainer_prefers_layered_sif() {
         let ec = EnvironmentConfig {
+            schema_version: crate::types::CURRENT_ENV_SCHEMA,
             name: "test".to_string(),
             base_image: "ghcr.io/morloc-project/morloc/morloc-full:0.85.0".to_string(),
             original_image: None,
@@ -4165,6 +4525,7 @@ build:
     #[test]
     fn active_image_apptainer_falls_back_to_base_sif() {
         let ec = EnvironmentConfig {
+            schema_version: crate::types::CURRENT_ENV_SCHEMA,
             name: "test".to_string(),
             base_image: "ghcr.io/morloc-project/morloc/morloc-full:0.85.0".to_string(),
             original_image: None,
@@ -4180,5 +4541,202 @@ build:
             morloc_version: None,
         };
         assert_eq!(ec.active_image(), "/base.sif");
+    }
+
+    // ---- native Runner seam ----
+
+    fn native_test_env(name: &str) -> runner::ResolvedEnv {
+        runner::ResolvedEnv {
+            name: name.to_string(),
+            scope: Scope::Local,
+            ec: EnvironmentConfig {
+                schema_version: crate::types::CURRENT_ENV_SCHEMA,
+                name: name.to_string(),
+                base_image: String::new(),
+                original_image: None,
+                dockerfile: None,
+                content_hash: None,
+                built_image: None,
+                singularity_def: None,
+                def_content_hash: None,
+                base_sif: None,
+                layered_sif: None,
+                backend: Backend::Native,
+                shm_size: "512m".to_string(),
+                morloc_version: None,
+            },
+        }
+    }
+
+    fn native_req(engine_args: Vec<String>, slurm_bridge: bool) -> runner::RunRequest {
+        runner::RunRequest {
+            verbose: false,
+            shell: false,
+            args: vec!["morloc".to_string(), "--version".to_string()],
+            user_env: Vec::new(),
+            engine_args,
+            phase: Phase::Run,
+            slurm_bridge,
+        }
+    }
+
+    #[test]
+    fn native_run_rejects_engine_args() {
+        let env = native_test_env("nat-engine-args");
+        let err = native_run_env(&env, &native_req(vec!["--privileged".to_string()], false))
+            .unwrap_err();
+        assert!(err.to_string().contains("container-only"), "{err}");
+    }
+
+    #[test]
+    fn native_run_rejects_slurm_bridge() {
+        let env = native_test_env("nat-slurm");
+        let err = native_run_env(&env, &native_req(Vec::new(), true)).unwrap_err();
+        assert!(err.to_string().contains("container backend"), "{err}");
+    }
+
+    #[test]
+    fn native_run_requires_materialization() {
+        // A native env with no materialization record must fail loudly rather
+        // than spawn against an unprovisioned toolchain.
+        let env = native_test_env("nat-unmaterialized-zzqx");
+        let err = native_run_env(&env, &native_req(Vec::new(), false)).unwrap_err();
+        assert!(err.to_string().contains("not been materialized"), "{err}");
+    }
+
+    // ---- --lang pins ----
+
+    #[test]
+    fn parse_lang_pins_splits_atoms_and_versions() {
+        let pins = parse_lang_pins(&["py@3.12".to_string(), "cpp, r@4.3".to_string()]);
+        assert_eq!(
+            pins,
+            vec![
+                ("py".to_string(), Some("3.12".to_string())),
+                ("cpp".to_string(), None),
+                ("r".to_string(), Some("4.3".to_string())),
+            ]
+        );
+        // Blank atoms are dropped.
+        assert!(parse_lang_pins(&[" , ".to_string()]).is_empty());
+    }
+
+    fn lang_support_fixture() -> langsupport::LangSupport {
+        const S: &str = r#"{"morloc_version":"0.0.0","toolchain":[],
+          "languages":{
+            "py":{"runtime":{"package":"python","version":">=3.10,<3.14","default":"3.12"},"requires":[]},
+            "cpp":{"runtime":null,"requires":[]}
+          }}"#;
+        langsupport::LangSupport::from_json(S).unwrap()
+    }
+
+    #[test]
+    fn resolve_lang_pin_clamps_to_supported_range() {
+        let s = lang_support_fixture();
+        // A minor pin intersects with morloc's supported range.
+        let req = resolve_lang_pin("py", Some("3.12"), "0.0.0", &s).unwrap();
+        assert_eq!(req.constraint.as_deref(), Some(">=3.12,<3.13"));
+        // No pin yields the full supported range (so conda python is used).
+        let req = resolve_lang_pin("py", None, "0.0.0", &s).unwrap();
+        assert_eq!(req.constraint.as_deref(), Some(">=3.10,<3.14"));
+        // A language with no runtime (cpp) carries no version constraint.
+        let req = resolve_lang_pin("cpp", None, "0.0.0", &s).unwrap();
+        assert!(req.constraint.is_none());
+    }
+
+    #[test]
+    fn resolve_lang_pin_rejects_out_of_range() {
+        let s = lang_support_fixture();
+        // 3.20 is outside morloc's >=3.10,<3.14 support window.
+        let err = resolve_lang_pin("py", Some("3.20"), "0.0.0", &s).unwrap_err();
+        assert!(err.to_string().contains("no py version"), "{err}");
+    }
+
+    #[test]
+    fn find_envspec_files_scans_and_skips_heavy_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // A program build dir carries an envspec.json to be collected.
+        std::fs::create_dir_all(root.join("prog-build")).unwrap();
+        std::fs::write(root.join("prog-build/envspec.json"), "{}").unwrap();
+        // A decoy inside the skipped pixi subtree must NOT be collected.
+        std::fs::create_dir_all(root.join("pixi/.pixi/envs")).unwrap();
+        std::fs::write(root.join("pixi/.pixi/envs/envspec.json"), "{}").unwrap();
+        let found = find_envspec_files(root);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].ends_with("prog-build/envspec.json"));
+    }
+
+    #[test]
+    fn kill_native_group_reaps_children() {
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+        use std::time::Duration;
+        // A leader (setsid session/group leader) that spawns a background child
+        // sharing the group -- the shape of the nexus + its pool daemons.
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("child.pid");
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg(format!("sleep 60 & echo $! > {}; wait", pidfile.display()));
+        unsafe {
+            cmd.pre_exec(|| {
+                nix::unistd::setsid()
+                    .map(|_| ())
+                    .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
+            });
+        }
+        let mut child = cmd.spawn().unwrap();
+        let leader = child.id();
+
+        // Wait for the child (grandchild of us) to report its pid.
+        let mut grandchild = 0u32;
+        for _ in 0..100 {
+            std::thread::sleep(Duration::from_millis(20));
+            if let Ok(s) = std::fs::read_to_string(&pidfile) {
+                if let Ok(p) = s.trim().parse::<u32>() {
+                    grandchild = p;
+                    break;
+                }
+            }
+        }
+        assert!(grandchild != 0, "child pid was not captured");
+        assert!(
+            kill(Pid::from_raw(grandchild as i32), None).is_ok(),
+            "child should be alive before the group kill"
+        );
+
+        kill_native_group(leader);
+        // In production the nexus is reparented to init and reaped there; in the
+        // test WE are the leader's parent, so reap its zombie before asserting.
+        let _ = child.wait();
+
+        // The child pool daemon received the group SIGTERM. It is either fully
+        // reaped, or (under a subreaper that hasn't reaped it yet) a zombie --
+        // both prove the kill reached the WHOLE group, not just the leader. The
+        // failure mode we're guarding against is an orphan still sleeping.
+        let dead_or_zombie = |pid: u32| -> bool {
+            if kill(Pid::from_raw(pid as i32), None).is_err() {
+                return true; // gone
+            }
+            match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                // State char follows the "(comm)"; 'Z' = zombie (terminated).
+                Ok(stat) => stat
+                    .rsplit(')')
+                    .next()
+                    .map(|rest| rest.trim_start().starts_with('Z'))
+                    .unwrap_or(false),
+                Err(_) => true, // no /proc: the kill(0)==err path above governs
+            }
+        };
+        let mut ok = false;
+        for _ in 0..100 {
+            if dead_or_zombie(grandchild) {
+                ok = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(ok, "child pool daemon must be terminated by the group kill (not left an orphan)");
     }
 }

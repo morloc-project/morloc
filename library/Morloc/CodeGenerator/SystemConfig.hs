@@ -30,11 +30,11 @@ import qualified Data.Text.IO as TIO
 import Control.Exception (SomeException, catch, displayException, fromException, try)
 import System.IO.Error (ioeGetErrorString)
 import System.Directory (canonicalizePath, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, findExecutable, getHomeDirectory, pathIsSymbolicLink, removeDirectoryRecursive, removeFile)
-import System.Environment (lookupEnv)
+import System.Environment (lookupEnv, setEnv)
 import System.FilePath (takeDirectory)
 import System.IO (hIsTerminalDevice, hPutStrLn, stderr)
 import System.Exit (ExitCode(..))
-import System.Process (CreateProcess(..), StdStream(..), createProcess, proc, waitForProcess)
+import System.Process (CreateProcess(..), StdStream(..), createProcess, proc, readProcessWithExitCode, waitForProcess)
 
 configure :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad ()
 configure _ = return ()
@@ -85,8 +85,11 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   ensureDirectory verbose "morloc home directory" homeDir
   ensureDirectory verbose "morloc lib directory" libDir
   ensureDirectory verbose "morloc include directory" includeDir
-  ensureDirectory verbose "morloc python lib directory" (libDir </> "python")
-  ensureDirectory verbose "morloc R lib directory" (libDir </> "R")
+  -- Installed-module resources are STATE, under the state root (not the runtime
+  -- lib/); pre-create the per-language dirs there.
+  ensureDirectory verbose "morloc python module directory" (Config.moduleDir config "python")
+  ensureDirectory verbose "morloc R module directory" (Config.moduleDir config "R")
+  ensureDirectory verbose "morloc cpp module directory" (Config.moduleDir config "include")
   ensureDirectory verbose "morloc tmp directory" tmpDir
   ensureDirectory verbose "morloc opt directory" optDir
   ensureDirectory verbose "morloc module directory" srcLibrary
@@ -113,18 +116,24 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   createDirectoryIfMissing True buildDir
 
   requireTool "gcc" "gcc (or the compiler named by $CC) is required to compile language extensions (C++ pools, Python/R bindings)"
+  -- Export $AR/$STRIP for the cargo/cc-rs builds and the shim init scripts. A
+  -- conda toolchain ships these only under a target-prefixed name and sets them
+  -- on activation, but not every launch path activates; derive them from the C
+  -- compiler so the builds do not fall back to a bare `ar`/`strip` that conda
+  -- does not provide.
+  exportArchiveTools
   -- Install morloc.h (the C ABI contract for language extensions and pool templates)
   sayInfo verbose "Installing morloc.h"
   TIO.writeFile (includeDir </> "morloc.h") DF.libmorlocHeader
 
-  -- Install libmorloc.so and morloc-nexus.
-  --
-  -- Strategy (in priority order):
-  --   1. MORLOC_RUST_BIN: directory with pre-built libmorloc.so + morloc-nexus
-  --      (used for release installs with portable musl-linked binaries)
-  --   2. MORLOC_RUST_DIR: Cargo workspace source - build from source via cargo
-  --      (used for development and container builds)
-  --   3. Auto-detect Cargo workspace relative to morloc binary
+  -- Build libmorloc.so + morloc-nexus (and rustmorloc + the language shims)
+  -- FROM SOURCE with the active toolchain. This is the single provisioning path:
+  -- the runtime that pools link and load MUST be ABI-coherent with the toolchain
+  -- that compiles those pools, so a prebuilt binary from a foreign libc/toolchain
+  -- world is not an option. Only the morloc compiler and morloc-manager are
+  -- shipped prebuilt (they never link into a pool). The Rust workspace source is
+  -- resolved from MORLOC_RUST_DIR (set by morloc-manager / dev), else
+  -- $MORLOC_HOME/rust, else next to the morloc binary.
   let soPath = libDir </> "libmorloc.so"
   -- Primary install goes to $MORLOC_HOME/bin/
   let nexusBinDir = homeDir </> "bin"
@@ -134,71 +143,43 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   -- (see the MORLOC_BIN_LINK_DIR handling below).
   userHome <- getHomeDirectory
 
-  -- Resolve the Rust workspace source + cargo up front. Needed by the
-  -- from-source libmorloc build AND -- unconditionally -- by the rustmorloc
-  -- build below: rustmorloc is an rlib locked to the LOCAL rustc that
-  -- `morloc make` uses, so it can never come from a prebuilt bundle (unlike
-  -- the C-ABI libmorloc.so) and must be compiled locally in every init path.
-  -- Search order: MORLOC_RUST_DIR; the prebuilt bundle's `rust/` subdir; the
-  -- persisted copy at $MORLOC_HOME/rust; then next to the morloc binary.
-  rustBinEnv <- lookupEnv "MORLOC_RUST_BIN"
+  -- Resolve the Rust workspace source + cargo up front. The whole ABI-bearing
+  -- runtime (libmorloc.so, morloc-nexus, and the rustmorloc rlib) is compiled
+  -- from this source with the LOCAL toolchain that `morloc make` also uses, so
+  -- it can never come from a prebuilt bundle and must be present in every init
+  -- path. Search order: MORLOC_RUST_DIR; the persisted copy at $MORLOC_HOME/rust;
+  -- then next to the morloc binary.
   rustDirEnv <- lookupEnv "MORLOC_RUST_DIR"
   rustDir <- case rustDirEnv of
     Just d -> return d
     Nothing -> do
       morlocBin <- findExecutable "morloc"
-      let bundleCandidate = case rustBinEnv of Just b -> [b </> "rust"]; Nothing -> []
-          -- Order: an explicit MORLOC_RUST_DIR (handled above) wins; then a
-          -- prebuilt bundle; then the persisted copy at $MORLOC_HOME/rust; then
-          -- locations relative to the morloc binary. The persisted copy is kept
-          -- AHEAD of the binary-relative candidates so a custom $MORLOC_HOME is
-          -- not shadowed by a stale default-home ($HOME/.local/share/morloc/rust)
-          -- workspace. Staleness of the persisted copy is surfaced by a warning
-          -- below (set MORLOC_RUST_DIR to rebuild from fresh source).
-          homeCandidate = [homeDir </> "rust"]
+          -- The persisted copy is kept AHEAD of the binary-relative candidates
+          -- so a custom $MORLOC_HOME is not shadowed by a stale default-home
+          -- ($HOME/.local/share/morloc/rust) workspace. Staleness is surfaced by
+          -- a warning below (set MORLOC_RUST_DIR to rebuild from fresh source).
+      let homeCandidate = [homeDir </> "rust"]
           binCandidates = case morlocBin of
             Just binPath ->
               [ takeDirectory (takeDirectory binPath) </> "share" </> "morloc" </> "rust"
               , takeDirectory (takeDirectory binPath) </> "data" </> "rust"
               ]
             Nothing -> []
-      findRustDir (bundleCandidate ++ homeCandidate ++ binCandidates)
+      findRustDir (homeCandidate ++ binCandidates)
   hasCargo <- findExecutable "cargo"
-  case rustBinEnv of
-    Just binDir -> do
-      -- Pre-built binaries (release path)
-      let prebuiltSo = binDir </> "libmorloc.so"
-          prebuiltNexus = binDir </> "morloc-nexus"
-          prebuiltManager = binDir </> "morloc-manager"
-          managerBinPath = nexusBinDir </> "morloc-manager"
-      sayInfo verbose $ "Installing pre-built libmorloc.so from " <> binDir
-      run verbose "cp" [prebuiltSo, soPath]
-      run verbose "cp" [prebuiltNexus, nexusBinPath]
-      run verbose "chmod" ["+x", soPath]
-      run verbose "chmod" ["+x", nexusBinPath]
-      -- Install morloc-manager if present in pre-built binaries
-      managerExists <- doesFileExist prebuiltManager
-      when managerExists $ do
-        sayInfo verbose "Installing pre-built morloc-manager"
-        run verbose "cp" [prebuiltManager, managerBinPath]
-        run verbose "chmod" ["+x", managerBinPath]
-    Nothing -> do
-      -- Build libmorloc.so + morloc-nexus/manager from source (needs cargo +
-      -- the Rust workspace, resolved above).
+  do
+      -- Build libmorloc.so + morloc-nexus from source (needs cargo + the Rust
+      -- workspace). morloc-manager is NOT built here: it is the downloaded
+      -- static bootstrap binary, ABI-isolated from the runtime.
       when (null rustDir || hasCargo == Nothing) $
         ioError . userError $ unlines
-          [ "morloc init requires pre-built libmorloc.so and morloc-nexus binaries."
+          [ "morloc init builds the runtime (libmorloc.so + morloc-nexus) from"
+          , "source and requires cargo plus the Rust workspace."
           , ""
-          , "Download them from: https://github.com/morloc-project/morloc/releases"
-          , ""
-          , "Then set MORLOC_RUST_BIN to the directory containing them:"
-          , "  export MORLOC_RUST_BIN=/path/to/binaries"
+          , "Provision via morloc-manager, or for development set MORLOC_RUST_DIR"
+          , "to the data/rust/ directory and put cargo on PATH:"
+          , "  export MORLOC_RUST_DIR=/path/to/morloc/data/rust"
           , "  morloc init -f"
-          , ""
-          , "For development, you can build from source instead:"
-          , "  1. Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
-          , "  2. Set MORLOC_RUST_DIR to the data/rust/ directory in the compiler repo"
-          , "  3. Run: morloc init -f"
           ]
 
       sayInfo verbose "Compiling libmorloc.so (Rust)"
@@ -223,7 +204,7 @@ configureAllSteps verbose force slurmSupport sanitize config = do
         , "-Wl,--whole-archive", rustStaticLib, "-Wl,--no-whole-archive"
         , "-lpthread", "-lrt", "-ldl", "-lm"
         ]
-      hasStrip <- findExecutable "strip"
+      hasStrip <- resolveTool "strip"
       case hasStrip of
         Just stripPath -> run verbose stripPath [soPath]
         Nothing -> return ()
@@ -238,19 +219,6 @@ configureAllSteps verbose force slurmSupport sanitize config = do
       run verbose "cp" [rustNexus, nexusBinPath]
       case hasStrip of
         Just stripPath -> run verbose stripPath [nexusBinPath]
-        Nothing -> return ()
-
-      sayInfo verbose "Compiling morloc-manager (Rust)"
-      run verbose "cargo"
-        [ "build", "--release"
-        , "--manifest-path", rustDir </> "Cargo.toml"
-        , "-p", "morloc-manager"
-        ]
-      let rustManager = rustDir </> "target" </> "release" </> "morloc-manager"
-          managerBinPath = nexusBinDir </> "morloc-manager"
-      run verbose "cp" [rustManager, managerBinPath]
-      case hasStrip of
-        Just stripPath -> run verbose stripPath [managerBinPath]
         Nothing -> return ()
 
       return ()
@@ -272,7 +240,7 @@ configureAllSteps verbose force slurmSupport sanitize config = do
       -- makeTheMaker, so a broken warm-up cannot silently ship a bad pool.
       optionalStep "Rust configuration failed (Rust pools will not be available): " $ do
         let persistedRustDir = homeDir </> "rust"
-            poolTargetDir = libDir </> "rust-build"
+            poolTargetDir = Config.rustBuildDir config
         -- If the resolved source IS the persisted copy (no fresher workspace
         -- found), warn instead of silently reusing possibly-stale source; a dev
         -- who edited data/rust must point MORLOC_RUST_DIR at it. Otherwise
@@ -347,9 +315,9 @@ configureAllSteps verbose force slurmSupport sanitize config = do
         when managerExists $
           symlinkBinary managerSrc (linkDir </> "morloc-manager")
 
-  -- Create exe/ and fdb/ directories
-  let exeDir = homeDir </> "exe"
-      fdbDir = homeDir </> "fdb"
+  -- Create exe/ and fdb/ directories (STATE, under the state root)
+  let exeDir = Config.exeDir config
+      fdbDir = Config.fdbDir config
   ensureDirectory verbose "morloc exe directory" exeDir
   ensureDirectory verbose "morloc fdb directory" fdbDir
 
@@ -397,7 +365,7 @@ configureAllSteps verbose force slurmSupport sanitize config = do
 
   -- Generate shell completions
   sayInfo verbose "Generating shell completions"
-  Completion.regenerateCompletions verbose homeDir
+  Completion.regenerateCompletions verbose (Config.exeDir config) (homeDir </> "completions")
 
 -- | Search for a Rust workspace directory containing Cargo.toml
 findRustDir :: [FilePath] -> IO FilePath
@@ -528,17 +496,63 @@ initOwnedIncludePaths =
   , "nanoarrow"
   ]
 
--- | Resolve a compiler tool name against the environment. A conda toolchain
--- (e.g. a pixi env) exports $CC/$CXX pointing at prefixed compilers such as
--- @x86_64-conda-linux-gnu-g++@ rather than a plain @gcc@/@g++@, so honor those
--- for the C/C++ compiler names. All other tools are used as given.
+-- | The conventional environment variable that overrides a build tool's name.
+-- A conda toolchain (e.g. a pixi env) exports these pointing at target-prefixed
+-- tools such as @x86_64-conda-linux-gnu-g++@ / @-ar@ rather than plain
+-- @gcc@/@g++@/@ar@. Tools not listed are used as given.
+toolEnvVar :: String -> Maybe String
+toolEnvVar "gcc"   = Just "CC"
+toolEnvVar "g++"   = Just "CXX"
+toolEnvVar "ar"    = Just "AR"
+toolEnvVar "strip" = Just "STRIP"
+toolEnvVar _       = Nothing
+
+-- | Resolve a build tool name: the environment override if set, else the tool
+-- name as given (whether or not it is on PATH).
 resolveToolName :: String -> IO String
 resolveToolName tool = do
-  mEnv <- case tool of
-    "gcc" -> lookupEnv "CC"
-    "g++" -> lookupEnv "CXX"
-    _     -> return Nothing
+  mEnv <- maybe (return Nothing) lookupEnv (toolEnvVar tool)
   return (fromMaybe tool mEnv)
+
+-- | Resolve a build tool to an available executable: the environment override
+-- if set, else the tool found on PATH; Nothing when neither exists.
+resolveTool :: String -> IO (Maybe FilePath)
+resolveTool tool = do
+  mEnv <- maybe (return Nothing) lookupEnv (toolEnvVar tool)
+  case mEnv of
+    Just v | not (null v) -> return (Just v)
+    _                     -> findExecutable tool
+
+-- | Ask the C compiler for the absolute path of a companion tool
+-- (e.g. @cc -print-prog-name=ar@). Returns Nothing when the compiler cannot
+-- resolve it (it echoes the bare name back, which has no path separator).
+compilerToolPath :: String -> String -> IO (Maybe FilePath)
+compilerToolPath cc tool = do
+  result <- try (readProcessWithExitCode cc ["-print-prog-name=" <> tool] "")
+              :: IO (Either SomeException (ExitCode, String, String))
+  return $ case result of
+    Right (ExitSuccess, out, _) ->
+      let path = reverse (dropWhile (`elem` (" \t\r\n" :: String)) (reverse out))
+      in if '/' `elem` path then Just path else Nothing
+    _ -> Nothing
+
+-- | Export $AR and $STRIP for the cargo/cc-rs builds and the shim init scripts
+-- when unset, derived from the resolved C compiler. Idempotent: an already-set
+-- value (e.g. from a conda activation) is left untouched. conda ships these
+-- tools only under a target-prefixed name, so a bare @ar@/@strip@ fallback
+-- fails inside a conda env; asking the compiler resolves the prefixed tool.
+exportArchiveTools :: IO ()
+exportArchiveTools = do
+  cc <- resolveToolName "gcc"
+  mapM_ (ensure cc) [("AR", "ar"), ("STRIP", "strip")]
+  where
+    ensure cc (var, tool) = do
+      existing <- lookupEnv var
+      case existing of
+        Just v | not (null v) -> return ()
+        _ -> do
+          mp <- compilerToolPath cc tool
+          maybe (return ()) (setEnv var) mp
 
 -- | Native-backend admission control. When strict mode is requested
 -- (@MORLOC_STRICT_CONDA@, set by the native backend and by the native CI),

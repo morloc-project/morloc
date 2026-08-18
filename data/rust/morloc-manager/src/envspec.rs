@@ -104,6 +104,44 @@ impl EnvSpec {
         })?;
         Self::from_json(&text)
     }
+
+    /// Build a synthetic spec carrying only language requirements. `--lang` pins
+    /// enter the solve exactly like a program's declared language deps, so they
+    /// are modeled as a spec with no packages/system/modules.
+    pub fn from_languages(morloc_version: &str, languages: Vec<LangReq>) -> EnvSpec {
+        EnvSpec {
+            envspec_version: SUPPORTED_ENVSPEC_VERSION,
+            morloc_version: morloc_version.to_string(),
+            languages,
+            packages: std::collections::BTreeMap::new(),
+            system: Vec::new(),
+            modules: Vec::new(),
+        }
+    }
+
+    /// Fast, pre-solve reasons this program cannot build on the native backend.
+    /// The native backend provides only conda-forge packages and has no build
+    /// layer, so a system dependency that must come from the host or another
+    /// non-conda provider is a hard blocker. A `conda-forge` provider is fine;
+    /// an `unspecified` provider is left to the solve (not a fast blocker). An
+    /// empty result means "no fast blocker" -- the pixi solve remains the final
+    /// authority on whether the requirements resolve natively.
+    pub fn native_blockers(&self) -> Vec<String> {
+        self.system
+            .iter()
+            .filter(|s| {
+                let p = s.provider.to_ascii_lowercase();
+                p != "conda-forge" && p != "unspecified"
+            })
+            .map(|s| {
+                format!(
+                    "system dependency '{}' (provider: {}) cannot be provided by the \
+                     native backend; use a container backend (--engine podman)",
+                    s.name, s.provider
+                )
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -154,5 +192,39 @@ mod tests {
     fn rejects_future_version() {
         let r = EnvSpec::from_json(r#"{"envspec_version":999,"morloc_version":"9.9.9"}"#);
         assert!(r.is_err());
+    }
+
+    fn spec_with_system(system_json: &str) -> EnvSpec {
+        EnvSpec::from_json(&format!(
+            r#"{{"envspec_version":1,"morloc_version":"0.0.0","system":{system_json}}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn native_blockers_ignores_conda_and_unspecified() {
+        // conda-forge is provided natively; unspecified is left to the solve.
+        let s = spec_with_system(
+            r#"[{"name":"blas","provider":"conda-forge"},{"name":"lapack","provider":"unspecified"}]"#,
+        );
+        assert!(s.native_blockers().is_empty());
+    }
+
+    #[test]
+    fn native_blockers_flags_host_and_vcpkg_providers() {
+        let s = spec_with_system(
+            r#"[{"name":"cuda","provider":"host"},{"name":"zlib","provider":"conda-forge"},{"name":"boost","provider":"vcpkg"}]"#,
+        );
+        let blockers = s.native_blockers();
+        assert_eq!(blockers.len(), 2);
+        assert!(blockers.iter().any(|b| b.contains("cuda")));
+        assert!(blockers.iter().any(|b| b.contains("boost")));
+        assert!(blockers.iter().all(|b| !b.contains("zlib")));
+    }
+
+    #[test]
+    fn native_blockers_empty_when_no_system_deps() {
+        let s = EnvSpec::from_json(r#"{"envspec_version":1,"morloc_version":"0.0.0"}"#).unwrap();
+        assert!(s.native_blockers().is_empty());
     }
 }

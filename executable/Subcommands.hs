@@ -498,7 +498,7 @@ cmdEval args verbosity config buildConfig = do
                 Just installDir -> do
                   evalInstallResult <- try (do
                     Install.installProgram (Config.configHome config) installDir saveName mergedIncludes True
-                    writeEvalMeta (Config.configHome config) saveName rawExpr
+                    writeEvalMeta (Config.fdbDir config) saveName rawExpr
                     ) :: IO (Either SomeException ())
                   case evalInstallResult of
                     Right () -> return True
@@ -543,12 +543,12 @@ getFirstSubcommand manifestPath = do
         [] -> return "__expr__"
       Left _ -> return "__expr__"
 
--- | Write metadata about the saved eval expression
+-- | Write metadata about the saved eval expression. `fdbDir` is the module
+-- database directory (state root), e.g. `Config.fdbDir config`.
 writeEvalMeta :: FilePath -> String -> String -> IO ()
-writeEvalMeta cfgHome name expr = do
+writeEvalMeta fdbDir name expr = do
   now <- getCurrentTime
-  let fdbDir = cfgHome </> "fdb"
-      metaPath = fdbDir </> name ++ ".eval-meta"
+  let metaPath = fdbDir </> name ++ ".eval-meta"
       timestamp = formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" now
       json = "{\"expression\":" ++ jsonEscape expr ++ ",\"timestamp\":\"" ++ timestamp ++ "\"}"
   createDirectoryIfMissing True fdbDir
@@ -784,8 +784,8 @@ subsequenceMatch (p : ps) (t : ts)
 
 cmdList :: ListCommand -> Config.Config -> IO Bool
 cmdList args config = do
-  let fdbDir = Config.configHome config </> "fdb"
-      exeDir = Config.configHome config </> "exe"
+  let fdbDir = Config.fdbDir config
+      exeDir = Config.exeDir config
       libDir = Config.configLibrary config </> Config.configPlane config
       verbose = listVerbose args
       kind = listKind args
@@ -1007,10 +1007,10 @@ printProgram verbose p = do
 
 cmdUninstall :: UninstallCommand -> Config.Config -> IO Bool
 cmdUninstall args config = do
-  let fdbDir = Config.configHome config </> "fdb"
+  let fdbDir = Config.fdbDir config
       libDir = Config.configLibrary config </> Config.configPlane config
       binDir = Config.configHome config </> "bin"
-      exeDir = Config.configHome config </> "exe"
+      exeDir = Config.exeDir config
       dryRun = uninstallDryRun args
       kind = uninstallKind args
 
@@ -1038,7 +1038,7 @@ cmdUninstall args config = do
 
       -- Regenerate completions if anything was actually removed
       if anyRemoved && not dryRun
-        then Completion.regenerateCompletions False (Config.configHome config)
+        then Completion.regenerateCompletions False (Config.exeDir config) (Config.configHome config </> "completions")
         else return ()
 
       return True

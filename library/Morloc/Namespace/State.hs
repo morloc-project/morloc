@@ -293,6 +293,13 @@ data MorlocError
 data Config
   = Config
   { configHome :: !Path
+  -- | Root for MUTABLE per-environment STATE (built programs, module db,
+  -- installed module code, plane source) -- distinct from the immutable
+  -- runtime under 'configHome' (bin/lib/include). Set from $MORLOC_STATE;
+  -- defaults to 'configHome' so a plain host install stays single-directory.
+  -- The split lets a container mount only the state root without shadowing the
+  -- image-baked runtime.
+  , configState :: !Path
   , configLibrary :: !Path
   , configPlane :: !Path
   , configPlaneCore :: !Path
@@ -621,7 +628,9 @@ instance FromJSON Config where
                 , ("r", if rCmd == "" then [] else [rCmd])
                 ]
           allOverrides = Map.union overrides legacyOverrides
-      return $ Config home' source' plane' planeCore' tmpdir' buildConfig' allOverrides registry'
+      -- configState defaults to home' here; the post-load resolver in
+      -- Morloc.Config applies $MORLOC_STATE and re-derives configLibrary from it.
+      return $ Config home' home' source' plane' planeCore' tmpdir' buildConfig' allOverrides registry'
 
 instance FromJSON PackageMeta where
   parseJSON = Aeson.withObject "object" $ \o ->

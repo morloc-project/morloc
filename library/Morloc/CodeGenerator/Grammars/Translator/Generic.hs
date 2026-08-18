@@ -82,6 +82,7 @@ translateBuiltin :: Lang -> LangDescriptor -> [Source] -> [SerialManifold] -> Mo
 translateBuiltin lang desc srcs es = do
   home <- pretty <$> asks MC.configHome
   lib <- MT.pack <$> asks MC.configLibrary
+  state <- MT.pack <$> asks MC.configState
   let opt = home <> "/opt"
 
   -- translate source imports
@@ -104,7 +105,7 @@ translateBuiltin lang desc srcs es = do
         Just entry -> LR.lrePreamble entry
         Nothing -> []
   homeDir <- asks MC.configHome
-  let preambleDocs = map (substitutePreamble home lib opt homeDir) preambleTemplates
+  let preambleDocs = map (substitutePreamble home lib state opt homeDir) preambleTemplates
 
   debugInfo <- makeManifoldDebugInfoLookup
   debugMode <- gets stateDebugTrace
@@ -132,11 +133,12 @@ translateBuiltin lang desc srcs es = do
       , scriptMake = []
       }
   where
-    substitutePreamble :: MDoc -> Text -> MDoc -> Path -> Text -> MDoc
-    substitutePreamble homeDoc libText optDoc _homeDir t =
+    substitutePreamble :: MDoc -> Text -> Text -> MDoc -> Path -> Text -> MDoc
+    substitutePreamble homeDoc libText stateText optDoc _homeDir t =
       pretty
         . T.replace "{{home}}" (render homeDoc)
         . T.replace "{{lib}}" libText
+        . T.replace "{{state}}" stateText
         . T.replace "{{opt}}" (render optDoc)
         $ t
 

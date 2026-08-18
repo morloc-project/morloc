@@ -22,7 +22,7 @@ preamble:
   - 'suppressPackageStartupMessages(library(bit64))'
   - 'dyn.load("{{home}}/lib/librmorloc.so")'
   - '.morloc.pooldir <- dirname(sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value=TRUE)[1]))'
-  - '.morloc.libdir <- "{{home}}/lib/R"'
+  - '.morloc.libdir <- "{{state}}/modules/R"'
   - '.morloc.source <- function(p) source(if (startsWith(p, "/")) p else { src <- normalizePath(file.path(.morloc.pooldir, "..", "..", "..", p), mustWork=FALSE); cwd <- file.path(".", p); if (file.exists(src)) src else if (file.exists(cwd)) cwd else file.path(.morloc.libdir, p) }, chdir=TRUE)'
 
 # Literals
