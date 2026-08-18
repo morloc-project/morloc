@@ -196,6 +196,7 @@ emptyConfig = do
   return $
     Config
       { configHome = home <> "/.local/share/morloc"
+      , configState = home <> "/.local/share/morloc"
       , configLibrary = home <> "/.local/share/src/morloc"
       , configPlane = "default"
       , configPlaneCore = "morloclib"

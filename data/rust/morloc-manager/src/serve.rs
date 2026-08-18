@@ -360,10 +360,12 @@ pub fn serve_environment(
     cfg.publish_host = publish_host.map(str::to_string);
     cfg.network = network.map(str::to_string);
     let mh = CONTAINER_MORLOC_HOME;
-    cfg.bind_mounts = vec![(data_dir.to_string(), mh.to_string())];
+    // Mount the host env dir at MORLOC_STATE (mutable), NOT over MORLOC_HOME (the
+    // baked runtime), so the runtime is never shadowed.
+    cfg.bind_mounts = vec![(data_dir.to_string(), CONTAINER_MORLOC_STATE.to_string())];
     // Docker/podman run as the host UID without mounting the host $HOME; pool
     // daemons may touch $HOME (matplotlib config, R tempdir), so oci_base_env
-    // points it at a writable, mounted target ($MORLOC_HOME/home). Create it on
+    // points it at a writable, mounted target ($MORLOC_STATE/home). Create it on
     // the host bind-mount side so those writes do not hit ENOENT (the env-create
     // loop does not make it, and existing environments predate it).
     let _ = fs::create_dir_all(format!("{data_dir}/home"));
@@ -679,6 +681,7 @@ pub fn validate_programs(
             command: Some(vec![exe_path, "--help".to_string()]),
             env: vec![
                 ("MORLOC_HOME".to_string(), CONTAINER_MORLOC_HOME.to_string()),
+                ("MORLOC_STATE".to_string(), CONTAINER_MORLOC_STATE.to_string()),
             ],
             // Override the image ENTRYPOINT so the command runs directly
             // instead of being appended to the router entrypoint.
@@ -707,23 +710,52 @@ pub fn validate_programs(
 // Container constants
 // ======================================================================
 
+/// In-container MORLOC_HOME: the IMMUTABLE runtime prefix (bin/lib/include),
+/// image-baked by `morloc init` and NEVER bind-mounted, so a state mount cannot
+/// shadow it (the mount-shadow bug the three-way split fixes).
 pub const CONTAINER_MORLOC_HOME: &str = "/opt/morloc";
 
-/// System PATH tail appended after `$MORLOC_HOME/bin` for every in-container
-/// invocation (run, serve, apptainer).
+/// In-container MORLOC_STATE: the MUTABLE state root (exe/, fdb/, installed
+/// modules, logs). This is the ONLY thing bind-mounted from the host env dir, so
+/// installs/builds persist without covering the runtime.
+pub const CONTAINER_MORLOC_STATE: &str = "/opt/morloc-state";
+
+/// System PATH tail appended after the morloc + toolchain dirs for every
+/// in-container invocation (run, serve, apptainer).
 pub const CONTAINER_PATH_TAIL: &str =
     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
-/// Base env for a docker/podman in-container process. The container runs as the
-/// host UID without mounting the host $HOME, so HOME must point at a writable,
-/// mounted location under $MORLOC_HOME; callers extend this with any
-/// phase-specific vars (e.g. CARGO_HOME/MORLOC_BIN_LINK_DIR for build, user_env).
+/// Where the pinned morloc trio (compiler + nexus) is COPYed in the
+/// requirement-derived image (see dockerfile.rs). Must be on PATH so `morloc`
+/// and `morloc-nexus` resolve at run/serve time -- they are NOT under
+/// `$MORLOC_HOME/bin` the way the retired fat image installed them.
+pub const CONTAINER_RUNTIME_BIN: &str = "/opt/morloc-runtime";
+
+/// The pixi-solved conda environment's bin inside the image (WORKDIR `/env`,
+/// pixi's default environment). Provides the language toolchain (python, R,
+/// ...); PATH is the load-bearing part of pixi activation.
+pub const CONTAINER_PIXI_ENV_BIN: &str = "/env/.pixi/envs/default/bin";
+
+/// The in-container PATH for a requirement-derived image: installed program
+/// launchers + shims (`$MORLOC_HOME/bin`), the morloc trio, the pixi toolchain,
+/// then the system tail. Single source of truth for every in-container PATH.
+pub fn container_path(mh: &str) -> String {
+    format!("{mh}/bin:{CONTAINER_RUNTIME_BIN}:{CONTAINER_PIXI_ENV_BIN}:{CONTAINER_PATH_TAIL}")
+}
+
+/// Base env for a docker/podman in-container process. MORLOC_HOME is the baked
+/// runtime prefix; MORLOC_STATE is the mounted, writable state root; HOME lives
+/// under state so pool daemons/tools have a writable home. `morloc-nexus` finds
+/// `libmorloc.so` via its own baked `bin/../lib` RUNPATH (the runtime is no
+/// longer shadowed), so no `LD_LIBRARY_PATH` override is needed. Callers extend
+/// this with phase-specific vars (CARGO_HOME/MORLOC_BIN_LINK_DIR, user_env).
 /// Apptainer mounts the host $HOME and uses its own env, so it does not use this.
 pub fn oci_base_env(mh: &str) -> Vec<(String, String)> {
     vec![
         ("MORLOC_HOME".to_string(), mh.to_string()),
-        ("HOME".to_string(), format!("{mh}/home")),
-        ("PATH".to_string(), format!("{mh}/bin:{CONTAINER_PATH_TAIL}")),
+        ("MORLOC_STATE".to_string(), CONTAINER_MORLOC_STATE.to_string()),
+        ("HOME".to_string(), format!("{CONTAINER_MORLOC_STATE}/home")),
+        ("PATH".to_string(), container_path(mh)),
     ]
 }
 
@@ -877,11 +909,13 @@ fn serve_apptainer_instance(
     let exe = engine_executable(ContainerEngine::Apptainer);
     let mut argv: Vec<String> = vec!["instance".to_string(), "start".to_string()];
     argv.push("--bind".to_string());
-    argv.push(format!("{data_dir}:{mh}"));
+    argv.push(format!("{data_dir}:{CONTAINER_MORLOC_STATE}"));
     argv.push("--env".to_string());
-    argv.push(format!("PATH={mh}/bin:{CONTAINER_PATH_TAIL}"));
+    argv.push(format!("PATH={}", container_path(mh)));
     argv.push("--env".to_string());
     argv.push(format!("MORLOC_HOME={mh}"));
+    argv.push("--env".to_string());
+    argv.push(format!("MORLOC_STATE={CONTAINER_MORLOC_STATE}"));
     for (k, v) in user_env {
         argv.push("--env".to_string());
         argv.push(format!("{k}={v}"));

@@ -192,6 +192,153 @@ pub fn doctor(
     Ok(())
 }
 
+/// Native-backend doctor: host-side health checks (no container engine). Reuses
+/// the backend-neutral data-dir / readability / manifest checks and adds native
+/// toolchain + runtime probes.
+pub fn native_doctor(
+    _verbose: bool,
+    env_name: &str,
+    scope: Scope,
+    ec: &EnvironmentConfig,
+    deep: bool,
+    strict: bool,
+    json_mode: bool,
+) -> Result<()> {
+    let scope_str = match scope {
+        Scope::Local => "local",
+        Scope::System => "system",
+    };
+    if !json_mode {
+        println!("Environment: {env_name} ({scope_str})");
+        println!("Backend:     native");
+        println!();
+        println!("Prerequisites");
+    }
+
+    let mut c = Counts::new(json_mode);
+    let data_dir = cfg::env_data_dir(scope, env_name);
+
+    c.set_category("prerequisites");
+    check_data_dirs(&mut c, &data_dir);
+    check_file_readability(&mut c, &data_dir);
+    check_native_runtime(&mut c, scope, env_name, &data_dir);
+
+    if !json_mode { println!("\nManifests"); }
+    c.set_category("manifests");
+    check_manifests(&mut c, &data_dir, ec.morloc_version.as_ref());
+
+    if !json_mode { println!("\nDeep checks"); }
+    c.set_category("deep");
+    if deep {
+        check_native_programs(&mut c, &data_dir);
+    } else {
+        c.skip("Use --deep to check installed program launchers");
+    }
+
+    let fail_count = c.fail;
+    let warn_count = c.warn;
+    if json_mode {
+        #[derive(serde::Serialize)]
+        struct DoctorOutput {
+            environment: String,
+            scope: String,
+            backend: String,
+            checks: Vec<CheckResult>,
+            summary: DoctorSummary,
+        }
+        let output = DoctorOutput {
+            environment: env_name.to_string(),
+            scope: scope_str.to_string(),
+            backend: "native".to_string(),
+            checks: c.checks,
+            summary: DoctorSummary { ok: c.ok, warnings: warn_count, errors: fail_count },
+        };
+        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+    } else {
+        println!();
+        println!("{} passed, {} warnings, {} errors", c.ok, warn_count, fail_count);
+    }
+
+    if fail_count > 0 {
+        return Err(crate::error::ManagerError::DoctorFailed(fail_count));
+    }
+    if strict && warn_count > 0 {
+        return Err(crate::error::ManagerError::DoctorFailed(warn_count));
+    }
+    Ok(())
+}
+
+/// Native materialization health: the runtime record + captured toolchain
+/// activation, the conda prefix it points at, and the morloc trio `morloc init`
+/// installs into the env.
+fn check_native_runtime(c: &mut Counts, scope: Scope, env_name: &str, data_dir: &Path) {
+    match cfg::read_native_runtime(scope, env_name) {
+        Ok(rt) => {
+            match rt.activation_env.iter().find(|(k, _)| k == "CONDA_PREFIX") {
+                Some((_, prefix)) => {
+                    c.pass("native runtime materialized (toolchain activation captured)");
+                    if Path::new(prefix).is_dir() {
+                        c.pass(&format!("conda toolchain present ({prefix})"));
+                    } else {
+                        c.fail(&format!(
+                            "conda prefix missing at {prefix} -- re-run: morloc-manager update {env_name}"
+                        ));
+                    }
+                }
+                None => c.warn("runtime record present but no CONDA_PREFIX in the activation env-map"),
+            }
+        }
+        Err(_) => c.fail(&format!(
+            "native environment not materialized -- run: morloc-manager update {env_name}"
+        )),
+    }
+
+    let nexus = data_dir.join("bin").join("morloc-nexus");
+    if nexus.is_file() {
+        c.pass("morloc-nexus installed in the environment");
+    } else {
+        c.fail("morloc-nexus missing from the env bin/ (re-run: morloc-manager update)");
+    }
+    let so = data_dir.join("lib").join("libmorloc.so");
+    let dylib = data_dir.join("lib").join("libmorloc.dylib");
+    if so.is_file() || dylib.is_file() {
+        c.pass("libmorloc present");
+    } else {
+        c.fail("libmorloc missing from the env lib/ (re-run: morloc-manager update)");
+    }
+}
+
+/// Deep native check: each installed program launcher exists and is executable.
+fn check_native_programs(c: &mut Counts, data_dir: &Path) {
+    let bin = data_dir.join("bin");
+    let reserved = ["morloc-nexus", "morloc", "morloc-manager"];
+    let mut found = 0;
+    if let Ok(entries) = fs::read_dir(&bin) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if reserved.contains(&name.as_str()) {
+                continue;
+            }
+            found += 1;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let exec = fs::metadata(entry.path())
+                    .map(|m| m.permissions().mode() & 0o111 != 0)
+                    .unwrap_or(false);
+                if exec {
+                    c.pass(&format!("program '{name}' launcher is executable"));
+                } else {
+                    c.warn(&format!("program '{name}' launcher is not executable"));
+                }
+            }
+        }
+    }
+    if found == 0 {
+        c.skip("no programs installed yet (morloc-manager install <file>.loc)");
+    }
+}
+
 // ======================================================================
 // Individual checks
 // ======================================================================
@@ -523,14 +670,17 @@ fn check_programs_deep(
     data_dir: &Path,
 ) {
     let image = ec.active_image();
-    let mh = "/opt/morloc";
-    let bind_mounts = vec![(data_dir.to_string_lossy().to_string(), mh.to_string())];
+    let mh = crate::serve::CONTAINER_MORLOC_HOME;
+    let state = crate::serve::CONTAINER_MORLOC_STATE;
+    // Mount the host env dir at MORLOC_STATE (mutable), not over the baked runtime.
+    let bind_mounts = vec![(data_dir.to_string_lossy().to_string(), state.to_string())];
     let env = vec![
         ("MORLOC_HOME".to_string(), mh.to_string()),
+        ("MORLOC_STATE".to_string(), state.to_string()),
     ];
 
-    // Scan programs from exe/ (one exe/<name>/ subdir per program).
-    let exe_dir = format!("{mh}/exe");
+    // Scan programs from exe/ (one exe/<name>/ subdir per program) under state.
+    let exe_dir = format!("{state}/exe");
     let cfg = RunConfig {
         command: Some(vec!["ls".to_string(), exe_dir.clone()]),
         bind_mounts: bind_mounts.clone(),

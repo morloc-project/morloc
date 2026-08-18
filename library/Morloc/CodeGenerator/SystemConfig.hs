@@ -30,11 +30,11 @@ import qualified Data.Text.IO as TIO
 import Control.Exception (SomeException, catch, displayException, fromException, try)
 import System.IO.Error (ioeGetErrorString)
 import System.Directory (canonicalizePath, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, findExecutable, getHomeDirectory, pathIsSymbolicLink, removeDirectoryRecursive, removeFile)
-import System.Environment (lookupEnv)
+import System.Environment (lookupEnv, setEnv)
 import System.FilePath (takeDirectory)
 import System.IO (hIsTerminalDevice, hPutStrLn, stderr)
 import System.Exit (ExitCode(..))
-import System.Process (CreateProcess(..), StdStream(..), createProcess, proc, waitForProcess)
+import System.Process (CreateProcess(..), StdStream(..), createProcess, proc, readProcessWithExitCode, waitForProcess)
 
 configure :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad ()
 configure _ = return ()
@@ -85,8 +85,11 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   ensureDirectory verbose "morloc home directory" homeDir
   ensureDirectory verbose "morloc lib directory" libDir
   ensureDirectory verbose "morloc include directory" includeDir
-  ensureDirectory verbose "morloc python lib directory" (libDir </> "python")
-  ensureDirectory verbose "morloc R lib directory" (libDir </> "R")
+  -- Installed-module resources are STATE, under the state root (not the runtime
+  -- lib/); pre-create the per-language dirs there.
+  ensureDirectory verbose "morloc python module directory" (Config.moduleDir config "python")
+  ensureDirectory verbose "morloc R module directory" (Config.moduleDir config "R")
+  ensureDirectory verbose "morloc cpp module directory" (Config.moduleDir config "include")
   ensureDirectory verbose "morloc tmp directory" tmpDir
   ensureDirectory verbose "morloc opt directory" optDir
   ensureDirectory verbose "morloc module directory" srcLibrary
@@ -113,6 +116,12 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   createDirectoryIfMissing True buildDir
 
   requireTool "gcc" "gcc (or the compiler named by $CC) is required to compile language extensions (C++ pools, Python/R bindings)"
+  -- Export $AR/$STRIP for the cargo/cc-rs builds and the shim init scripts. A
+  -- conda toolchain ships these only under a target-prefixed name and sets them
+  -- on activation, but not every launch path activates; derive them from the C
+  -- compiler so the builds do not fall back to a bare `ar`/`strip` that conda
+  -- does not provide.
+  exportArchiveTools
   -- Install morloc.h (the C ABI contract for language extensions and pool templates)
   sayInfo verbose "Installing morloc.h"
   TIO.writeFile (includeDir </> "morloc.h") DF.libmorlocHeader
@@ -223,7 +232,7 @@ configureAllSteps verbose force slurmSupport sanitize config = do
         , "-Wl,--whole-archive", rustStaticLib, "-Wl,--no-whole-archive"
         , "-lpthread", "-lrt", "-ldl", "-lm"
         ]
-      hasStrip <- findExecutable "strip"
+      hasStrip <- resolveTool "strip"
       case hasStrip of
         Just stripPath -> run verbose stripPath [soPath]
         Nothing -> return ()
@@ -272,7 +281,7 @@ configureAllSteps verbose force slurmSupport sanitize config = do
       -- makeTheMaker, so a broken warm-up cannot silently ship a bad pool.
       optionalStep "Rust configuration failed (Rust pools will not be available): " $ do
         let persistedRustDir = homeDir </> "rust"
-            poolTargetDir = libDir </> "rust-build"
+            poolTargetDir = Config.rustBuildDir config
         -- If the resolved source IS the persisted copy (no fresher workspace
         -- found), warn instead of silently reusing possibly-stale source; a dev
         -- who edited data/rust must point MORLOC_RUST_DIR at it. Otherwise
@@ -347,9 +356,9 @@ configureAllSteps verbose force slurmSupport sanitize config = do
         when managerExists $
           symlinkBinary managerSrc (linkDir </> "morloc-manager")
 
-  -- Create exe/ and fdb/ directories
-  let exeDir = homeDir </> "exe"
-      fdbDir = homeDir </> "fdb"
+  -- Create exe/ and fdb/ directories (STATE, under the state root)
+  let exeDir = Config.exeDir config
+      fdbDir = Config.fdbDir config
   ensureDirectory verbose "morloc exe directory" exeDir
   ensureDirectory verbose "morloc fdb directory" fdbDir
 
@@ -397,7 +406,7 @@ configureAllSteps verbose force slurmSupport sanitize config = do
 
   -- Generate shell completions
   sayInfo verbose "Generating shell completions"
-  Completion.regenerateCompletions verbose homeDir
+  Completion.regenerateCompletions verbose (Config.exeDir config) (homeDir </> "completions")
 
 -- | Search for a Rust workspace directory containing Cargo.toml
 findRustDir :: [FilePath] -> IO FilePath
@@ -528,17 +537,63 @@ initOwnedIncludePaths =
   , "nanoarrow"
   ]
 
--- | Resolve a compiler tool name against the environment. A conda toolchain
--- (e.g. a pixi env) exports $CC/$CXX pointing at prefixed compilers such as
--- @x86_64-conda-linux-gnu-g++@ rather than a plain @gcc@/@g++@, so honor those
--- for the C/C++ compiler names. All other tools are used as given.
+-- | The conventional environment variable that overrides a build tool's name.
+-- A conda toolchain (e.g. a pixi env) exports these pointing at target-prefixed
+-- tools such as @x86_64-conda-linux-gnu-g++@ / @-ar@ rather than plain
+-- @gcc@/@g++@/@ar@. Tools not listed are used as given.
+toolEnvVar :: String -> Maybe String
+toolEnvVar "gcc"   = Just "CC"
+toolEnvVar "g++"   = Just "CXX"
+toolEnvVar "ar"    = Just "AR"
+toolEnvVar "strip" = Just "STRIP"
+toolEnvVar _       = Nothing
+
+-- | Resolve a build tool name: the environment override if set, else the tool
+-- name as given (whether or not it is on PATH).
 resolveToolName :: String -> IO String
 resolveToolName tool = do
-  mEnv <- case tool of
-    "gcc" -> lookupEnv "CC"
-    "g++" -> lookupEnv "CXX"
-    _     -> return Nothing
+  mEnv <- maybe (return Nothing) lookupEnv (toolEnvVar tool)
   return (fromMaybe tool mEnv)
+
+-- | Resolve a build tool to an available executable: the environment override
+-- if set, else the tool found on PATH; Nothing when neither exists.
+resolveTool :: String -> IO (Maybe FilePath)
+resolveTool tool = do
+  mEnv <- maybe (return Nothing) lookupEnv (toolEnvVar tool)
+  case mEnv of
+    Just v | not (null v) -> return (Just v)
+    _                     -> findExecutable tool
+
+-- | Ask the C compiler for the absolute path of a companion tool
+-- (e.g. @cc -print-prog-name=ar@). Returns Nothing when the compiler cannot
+-- resolve it (it echoes the bare name back, which has no path separator).
+compilerToolPath :: String -> String -> IO (Maybe FilePath)
+compilerToolPath cc tool = do
+  result <- try (readProcessWithExitCode cc ["-print-prog-name=" <> tool] "")
+              :: IO (Either SomeException (ExitCode, String, String))
+  return $ case result of
+    Right (ExitSuccess, out, _) ->
+      let path = reverse (dropWhile (`elem` (" \t\r\n" :: String)) (reverse out))
+      in if '/' `elem` path then Just path else Nothing
+    _ -> Nothing
+
+-- | Export $AR and $STRIP for the cargo/cc-rs builds and the shim init scripts
+-- when unset, derived from the resolved C compiler. Idempotent: an already-set
+-- value (e.g. from a conda activation) is left untouched. conda ships these
+-- tools only under a target-prefixed name, so a bare @ar@/@strip@ fallback
+-- fails inside a conda env; asking the compiler resolves the prefixed tool.
+exportArchiveTools :: IO ()
+exportArchiveTools = do
+  cc <- resolveToolName "gcc"
+  mapM_ (ensure cc) [("AR", "ar"), ("STRIP", "strip")]
+  where
+    ensure cc (var, tool) = do
+      existing <- lookupEnv var
+      case existing of
+        Just v | not (null v) -> return ()
+        _ -> do
+          mp <- compilerToolPath cc tool
+          maybe (return ()) (setEnv var) mp
 
 -- | Native-backend admission control. When strict mode is requested
 -- (@MORLOC_STRICT_CONDA@, set by the native backend and by the native CI),

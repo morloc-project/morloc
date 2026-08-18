@@ -1367,10 +1367,13 @@ makeTheMaker crateName = do
       MM.throwSystemError
         "building a Rust pool requires `cargo` on PATH (install Rust: https://rustup.rs)"
   home <- MM.asks configHome
+  state <- MM.asks configState
   let poolSubdir = ML.poolDirKey rustLang
       outRel = pretty $ "pools" </> poolSubdir </> ML.makeExecutablePoolName rustLang
       manifestPath = pretty $ "pools" </> poolSubdir </> "Cargo.toml"
-      targetDir = home </> "lib" </> "rust-build"
+      -- The shared cargo build cache is regenerable STATE, not runtime: it lives
+      -- under the state root, never inside the immutable runtime lib/.
+      targetDir = state </> "cache" </> "rust-build"
       targetD = pretty targetDir
       binPath = pretty $ targetDir </> "release" </> T.unpack crateName
       homeD = pretty home

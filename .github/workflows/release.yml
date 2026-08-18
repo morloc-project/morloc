@@ -53,11 +53,29 @@ jobs:
       # ---- Linux: Docker container build ----
       # libmorloc.so + morloc-nexus: glibc (Ubuntu 20.04)
       # morloc-manager: static (Alpine/musl)
-      - name: Build Rust binaries (Linux)
+      # morloc compiler: Haskell/stack (Ubuntu 20.04)
+      - name: Set up Docker Buildx (Linux)
+        if: matrix.method == 'docker'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Rust binaries + compiler (Linux)
+        if: matrix.method == 'docker'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: container/static-build/Dockerfile
+          tags: morloc-rust-build
+          load: true
+          # GHA layer cache (unlike --mount=type=cache) persists across runs, when
+          # not evicted from the repo's ~10 GB LRU pool between infrequent tag builds.
+          # mode=max is needed to cache the intermediate GHC dependency stage; scope
+          # is per-platform so x86_64 and arm64 do not clobber each other.
+          cache-from: type=gha,scope=static-build-${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=static-build-${{ matrix.platform }}
+
+      - name: Extract Rust binaries (Linux)
         if: matrix.method == 'docker'
         run: |
-          docker build -t morloc-rust-build \
-            -f container/static-build/Dockerfile .
           mkdir -p out
           docker run --rm -v "$(pwd)/out:/out" morloc-rust-build
           # Verify morloc-manager is static
@@ -200,6 +218,31 @@ jobs:
         run: stack test --system-ghc --no-install-ghc morloc:morloc-test
         timeout-minutes: 10
 
+      # Stage the stack-built compiler as a release asset so morloc-manager can
+      # provision it (the native + container backends download the trio; the
+      # manifest below references morloc-linux-x86_64).
+      - name: Stage morloc compiler for release
+        run: |
+          cp "$HOME/.local/bin/morloc" morloc-linux-x86_64
+          strip morloc-linux-x86_64 || true
+      - name: Upload morloc compiler
+        uses: actions/upload-artifact@v4
+        with:
+          name: morloc-compiler-linux-x86_64
+          path: morloc-linux-x86_64
+
+      # Publish the language-support table (compiler-owned static data) as a
+      # release asset so morloc-manager can render pixi manifests WITHOUT running
+      # the compiler on the host -- essential for container builds on hosts where
+      # the glibc compiler cannot execute natively (NixOS, musl, etc.).
+      - name: Stage lang-support table for release
+        run: morloc lang-support > morloc-lang-support.json
+      - name: Upload lang-support table
+        uses: actions/upload-artifact@v4
+        with:
+          name: morloc-lang-support
+          path: morloc-lang-support.json
+
   # ---- Build and push container images ----
   containers:
     needs: test
@@ -221,12 +264,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Build tiny (from local source)
-        run: |
-          docker build \
-            -t ${{ env.IMAGE_BASE }}/morloc-tiny:${{ steps.ver.outputs.version }} \
-            -t ${{ env.IMAGE_BASE }}/morloc-tiny:edge \
-            -f container/tiny/Dockerfile .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: container/tiny/Dockerfile
+          tags: |
+            ${{ env.IMAGE_BASE }}/morloc-tiny:${{ steps.ver.outputs.version }}
+            ${{ env.IMAGE_BASE }}/morloc-tiny:edge
+          # load into the local store so the `full` build can FROM it and the
+          # push step can push it. GHA layer cache persists the GHC deps layer.
+          load: true
+          cache-from: type=gha,scope=tiny
+          cache-to: type=gha,mode=max,scope=tiny
 
       - name: Build full (uses local tiny)
         run: |
@@ -257,6 +310,17 @@ jobs:
           pattern: 'rust-binaries-*'
           merge-multiple: true
 
+      # The stack-built compiler ships under its own truthful artifact name.
+      - name: Download the morloc compiler
+        uses: actions/download-artifact@v4
+        with:
+          name: morloc-compiler-linux-x86_64
+
+      - name: Download the lang-support table
+        uses: actions/download-artifact@v4
+        with:
+          name: morloc-lang-support
+
       - name: List artifacts
         run: ls -lh
 
@@ -285,31 +349,65 @@ jobs:
       # complete, tested native trio are listed; macOS is omitted until its
       # build-layer port + smoke test land, so the flow falls through to a
       # container there.
+      # Built with Python so the manifest carries a SHA-256 for every published
+      # asset (the download flow verifies each fetch against these) and lists a
+      # triple ONLY when all four of its artifacts exist on disk -- a partial
+      # triple would otherwise 404 at download time. Digests + presence are
+      # computed from the actual files staged for the Release.
       - name: Generate native-install manifest
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          cat > morloc-release-manifest.json <<EOF
-          {
-            "schema": 1,
-            "version": "${version}",
-            "rust_src": "morloc-rust-src.tar.gz",
-            "triples": {
+          python3 - <<'PY'
+          import json, hashlib, os
+          version = os.environ["GITHUB_REF_NAME"].lstrip("v")
+
+          def sha256(path):
+              h = hashlib.sha256()
+              with open(path, "rb") as f:
+                  for chunk in iter(lambda: f.read(1 << 16), b""):
+                      h.update(chunk)
+              return h.hexdigest()
+
+          candidates = {
               "linux-x86_64": {
-                "morloc": "morloc-linux-x86_64",
-                "libmorloc": "libmorloc-linux-x86_64.so",
-                "nexus": "morloc-nexus-linux-x86_64",
-                "manager": "morloc-manager-linux-x86_64"
+                  "morloc": "morloc-linux-x86_64",
+                  "libmorloc": "libmorloc-linux-x86_64.so",
+                  "nexus": "morloc-nexus-linux-x86_64",
+                  "manager": "morloc-manager-linux-x86_64",
               },
               "linux-arm64": {
-                "morloc": "morloc-linux-arm64",
-                "libmorloc": "libmorloc-linux-arm64.so",
-                "nexus": "morloc-nexus-linux-arm64",
-                "manager": "morloc-manager-linux-arm64"
-              }
-            }
+                  "morloc": "morloc-linux-arm64",
+                  "libmorloc": "libmorloc-linux-arm64.so",
+                  "nexus": "morloc-nexus-linux-arm64",
+                  "manager": "morloc-manager-linux-arm64",
+              },
           }
-          EOF
-          cat morloc-release-manifest.json
+          rust_src = "morloc-rust-src.tar.gz"
+          extra = ["morloc-lang-support.json"]
+
+          triples, digests = {}, {}
+          for triple, assets in candidates.items():
+              missing = [a for a in assets.values() if not os.path.exists(a)]
+              if missing:
+                  print(f"omitting triple {triple}; missing {missing}")
+                  continue
+              triples[triple] = assets
+              for a in assets.values():
+                  digests[a] = sha256(a)
+          for a in [rust_src, *extra]:
+              if os.path.exists(a):
+                  digests[a] = sha256(a)
+
+          manifest = {
+              "schema": 1,
+              "version": version,
+              "rust_src": rust_src,
+              "triples": triples,
+              "sha256": digests,
+          }
+          with open("morloc-release-manifest.json", "w") as f:
+              json.dump(manifest, f, indent=2)
+          print(json.dumps(manifest, indent=2))
+          PY
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -321,4 +419,5 @@ jobs:
             morloc-nexus-*
             morloc-rust-src.tar.gz
             morloc-release-manifest.json
+            morloc-lang-support.json
           generate_release_notes: true

@@ -116,18 +116,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # -L is required: get.haskellstack.org redirects to the actual install script.
 RUN curl --proto '=https' --tlsv1.2 -sSfL https://get.haskellstack.org/ | sh
 
-# Whole repo (the compiler needs its full source, not just data/rust).
-COPY . /morloc
-# Cache-mount stack's GHC bindist + compiled snapshot (~/.stack) and the project
-# build (.stack-work), like the cargo stages above. `COPY . /morloc` invalidates
-# this layer on ANY source change, so without these mounts every build re-ran
-# `stack install` from scratch -- re-downloading GHC and recompiling all deps.
-# With them, only the changed project modules recompile. The morloc binary is
-# copied OUT to /artifacts in the SAME RUN (cache mounts are not visible to later
-# layers), so the artifact still persists into the image.
-RUN --mount=type=cache,id=morloc-stack-root,target=/root/.stack,sharing=locked \
-    --mount=type=cache,id=morloc-stack-work,target=/morloc/.stack-work,sharing=locked \
-    cd /morloc && stack install --no-run-tests \
+WORKDIR /morloc
+
+# --- Dependency layer: GHC + snapshot land in an image LAYER keyed on the
+# dependency-determining files, so the GHA layer cache can persist it (a
+# --mount=type=cache would not survive an ephemeral runner). ---
+COPY stack.yaml stack.yaml.lock package.yaml ./
+RUN stack build --no-run-tests --only-dependencies
+
+# --- Source layer: only the project's own modules recompile per commit ---
+COPY . .
+RUN stack install --no-run-tests \
     && mkdir -p /artifacts \
     && cp /root/.local/bin/morloc /artifacts/morloc \
     && strip /artifacts/morloc

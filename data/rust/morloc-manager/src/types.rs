@@ -275,8 +275,22 @@ impl Default for Config {
 // Environment configuration
 // ======================================================================
 
+/// Current on-disk schema version for `env.yaml`. Bump when the field set
+/// changes incompatibly and add a matching arm to `migrate_env_config`.
+pub const CURRENT_ENV_SCHEMA: u32 = 1;
+
+/// Records written before schema versioning existed carry no `schema_version`
+/// field; they are the v1 baseline.
+fn default_env_schema() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvironmentConfig {
+    /// On-disk schema version. Read-time validation rejects a version newer
+    /// than `CURRENT_ENV_SCHEMA` and migrates anything older forward.
+    #[serde(default = "default_env_schema")]
+    pub schema_version: u32,
     /// Human-readable name (also the directory name).
     pub name: String,
     /// Base container image reference (OCI URI; same field for all engines).
@@ -326,6 +340,34 @@ fn default_shm_size() -> String {
 }
 
 impl EnvironmentConfig {
+    /// Construct a fresh env record for a requirement-derived backend (native or
+    /// container), leaving the legacy container-recipe fields (dockerfile, .sif,
+    /// content hashes) at their inert defaults.
+    pub fn new_backend(
+        name: String,
+        backend: Backend,
+        base_image: String,
+        built_image: Option<String>,
+        morloc_version: Option<Version>,
+    ) -> Self {
+        EnvironmentConfig {
+            schema_version: CURRENT_ENV_SCHEMA,
+            name,
+            base_image,
+            original_image: None,
+            dockerfile: None,
+            content_hash: None,
+            built_image,
+            singularity_def: None,
+            def_content_hash: None,
+            base_sif: None,
+            layered_sif: None,
+            backend,
+            shm_size: default_shm_size(),
+            morloc_version,
+        }
+    }
+
     /// The container engine of this environment's backend, or an error if the
     /// environment is native (a caller reaching here is on a container-only
     /// code path that does not apply to native environments).
@@ -370,7 +412,6 @@ impl EnvironmentConfig {
 /// the subcommand that consumes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
-    Build,
     Run,
     Start,
 }
@@ -433,7 +474,6 @@ impl FlagConfig {
     /// overrides are appended by the caller, not here.
     pub fn materialize(&self, phase: Phase, engine: ContainerEngine) -> Vec<String> {
         let section = match phase {
-            Phase::Build => &self.build,
             Phase::Run => &self.run,
             Phase::Start => &self.start,
         };
@@ -599,6 +639,41 @@ fn sorted_union(a: &[String], b: &[String]) -> Vec<String> {
 /// `start` and read by `status`. Distinct from `ExposureConfig` (declared
 /// intent): this reflects the live invocation, including the resolved host/port
 /// and whether a token is required.
+/// Host-side materialization record for a native (no-container) environment.
+/// Written when the environment's toolchain is provisioned; read by the native
+/// Runner to reconstruct the toolchain environment before spawning a command.
+/// `activation_env` is the captured env-map (PATH, compiler vars, etc.) that
+/// the provisioned toolchain requires. Additional fields may accrue as the
+/// native backend gains features; readers must tolerate their absence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeRuntime {
+    #[serde(default)]
+    pub activation_env: Vec<(String, String)>,
+}
+
+/// Persisted requirement inputs for an environment (native or container), kept
+/// so that a later `update` re-materializes the same toolchain request. Program
+/// requirements are re-gathered from installed `envspec.json` files; only the
+/// user's `--lang` pins (which have no other on-disk home) are stored here.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvInputs {
+    /// `--lang` pins as (language, optional version pin), e.g. ("py", Some("3.12")).
+    #[serde(default)]
+    pub lang_pins: Vec<(String, Option<String>)>,
+}
+
+/// How a running serve was launched -- the authority for stop/status/logs, which
+/// dispatch on this stored handle rather than the environment's current backend
+/// (so migrating an env or serving it two ways never strands a server).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "backend", rename_all = "lowercase")]
+pub enum ServeHandle {
+    /// A container/apptainer instance, torn down by engine + name.
+    Container { engine: ContainerEngine, name: String },
+    /// A detached host process group (native backend), torn down by killing pgid.
+    Native { pid: u32, pgid: u32 },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServeRuntime {
     #[serde(default)]
@@ -611,6 +686,12 @@ pub struct ServeRuntime {
     pub port: u16,
     #[serde(default)]
     pub token_required: bool,
+    /// The launch handle. `Option` for backward compatibility with serve records
+    /// written before this field existed (an in-flight serve during upgrade);
+    /// when absent, stop/status/logs fall back to deriving the target from the
+    /// environment's backend.
+    #[serde(default)]
+    pub handle: Option<ServeHandle>,
 }
 
 impl ServeRuntime {
@@ -689,6 +770,7 @@ mod exposure_tests {
             host: "127.0.0.1".into(),
             port: 9000,
             token_required: false,
+            handle: None,
         };
         assert_eq!(r.mode(), "mcp+api+eval");
         assert_eq!(r.modules_summary(), "align,dna");
@@ -696,6 +778,7 @@ mod exposure_tests {
         let empty = ServeRuntime {
             mcp: vec![], api: vec![], eval: false,
             host: "h".into(), port: 8080, token_required: true,
+            handle: None,
         };
         assert_eq!(empty.mode(), "-");
         assert_eq!(empty.modules_summary(), "-");

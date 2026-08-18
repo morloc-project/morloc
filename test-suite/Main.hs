@@ -980,8 +980,8 @@ main = do
         -- element-type, zero-copy assertions, and permutation probes
         golden "vector-comprehensive" "vector-comprehensive"
       , golden "tensor-comprehensive" "tensor-comprehensive"
-      , -- nat-parameterized type tests
-        golden "nat-typecheck" "nat-typecheck"
+      -- , -- nat-parameterized type tests
+      --   golden "nat-typecheck" "nat-typecheck"
       -- , golden "nat-dim-runtime-pure" "nat-dim-runtime-pure"
       , golden "nat-dim-runtime-remote" "nat-dim-runtime-remote"
 

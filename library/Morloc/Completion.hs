@@ -110,13 +110,12 @@ instance JSON.FromJSON GroupInfo where
   parseJSON = JSON.withObject "GroupInfo" $ \o ->
     GroupInfo <$> o .: "name"
 
-{- | Read all manifests and regenerate completion files.
-The Bool parameter controls whether to print activation instructions.
+{- | Read all manifests and regenerate completion files. `exeDir` is the
+built-program dir (state root); `compDir` is the completions dir (under the
+runtime home). The Bool controls whether to print activation instructions.
 -}
-regenerateCompletions :: Bool -> String -> IO ()
-regenerateCompletions printInstructions configHome = do
-  let exeDir = configHome </> "exe"
-      compDir = configHome </> "completions"
+regenerateCompletions :: Bool -> String -> String -> IO ()
+regenerateCompletions printInstructions exeDir compDir = do
   createDirectoryIfMissing True compDir
 
   manifests <- loadManifests exeDir

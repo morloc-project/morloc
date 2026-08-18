@@ -9,11 +9,18 @@ RUN apt-get update && apt-get install -y git curl pkg-config libglib2.0-dev
 # Install stack
 RUN curl -SL https://get.haskellstack.org/ | sh
 
-# Copy the local source tree (no git clone -- builds exactly this checkout)
-COPY . /morloc
+WORKDIR /morloc
 
-# Build morloc
-RUN cd /morloc && stack install --no-run-tests
+# Dependency layer: copy only the dependency-determining files and build deps,
+# so GHC + the compiled snapshot land in this layer. Keyed on the resolver +
+# package deps, it is restored from the GHA layer cache unless those change --
+# no re-download/recompile of GHC on every commit.
+COPY stack.yaml stack.yaml.lock package.yaml ./
+RUN stack build --no-run-tests --only-dependencies
+
+# Source layer: the local checkout; only the project's own modules recompile.
+COPY . .
+RUN stack install --no-run-tests
 
 ###############################################################################
 # Stage 2: Build Rust binaries (libmorloc.so + morloc-nexus + morloc-manager)

@@ -226,12 +226,15 @@ data ExposeDirs = ExposeDirs
 
 exposeDirsFor :: Config.Config -> Text -> ExposeDirs
 exposeDirsFor config name =
-  let home = Config.configHome config
-      modName = MT.unpack name
+  let modName = MT.unpack name
   in ExposeDirs
-       { exposeCppDir = home </> "include" </> modName
-       , exposePyDir  = home </> "lib" </> "python" </> pythonizeName modName
-       , exposeRDir   = home </> "lib" </> "R" </> modName
+       -- Installed module resources are STATE: they live under the state root
+       -- (MORLOC_STATE/modules), NOT interleaved into the immutable runtime
+       -- lib/include trees. This is the un-nesting that lets a container mount
+       -- state without shadowing the baked runtime.
+       { exposeCppDir = Config.moduleDir config "include" </> modName
+       , exposePyDir  = Config.moduleDir config "python" </> pythonizeName modName
+       , exposeRDir   = Config.moduleDir config "R" </> modName
        }
 
 -- | Convert a module name to a Python-legal identifier: hyphens become
@@ -584,7 +587,7 @@ installModule ::
 installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgress pinMap depth reason modstr = do
   config <- MM.ask
   let registry = Config.configRegistry config
-      fdbDir = Config.configHome config </> "fdb"
+      fdbDir = Config.fdbDir config
   -- Try registry first for bare names when a registry is configured
   case (registry, tryParseRegistryModule (MT.pack coreorg) modstr) of
     (Just _, Just (owner, name)) -> do
