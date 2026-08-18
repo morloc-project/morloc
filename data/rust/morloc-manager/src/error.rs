@@ -26,8 +26,6 @@ pub enum ManagerError {
     #[error("{0}")]
     BackendUnsupported(String),
 
-    #[error("Invalid version: {0}. Expected format: MAJOR.MINOR.PATCH. For named tags like 'edge', use --tag instead.")]
-    InvalidVersion(String),
 
     #[error("No command specified. Use --shell or provide a command after --.")]
     NoCommand,

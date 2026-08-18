@@ -10,8 +10,6 @@
 
 use std::path::Path;
 
-use crate::types::{Backend, ContainerEngine};
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostProfile {
     /// Whether the native backend can run on this host.
@@ -109,16 +107,6 @@ pub fn probe_host() -> HostProfile {
     classify(os, arch, glibc_loader_present, is_nixos)
 }
 
-/// The default backend for a host when the user gives no explicit `--backend`:
-/// native where viable, otherwise a container under the given fallback engine.
-pub fn default_backend(profile: &HostProfile, fallback_engine: ContainerEngine) -> Backend {
-    if profile.native_capable {
-        Backend::Native
-    } else {
-        Backend::Container(fallback_engine)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,25 +152,5 @@ mod tests {
         let p = classify("windows", "x86_64", false, false);
         assert!(!p.native_capable);
         assert_eq!(p.platform, "unknown");
-    }
-
-    #[test]
-    fn default_backend_picks_native_or_container() {
-        let native = HostProfile {
-            native_capable: true,
-            reason: String::new(),
-            platform: "linux-64".to_string(),
-        };
-        assert_eq!(default_backend(&native, ContainerEngine::Podman), Backend::Native);
-
-        let contained = HostProfile {
-            native_capable: false,
-            reason: String::new(),
-            platform: "linux-64".to_string(),
-        };
-        assert_eq!(
-            default_backend(&contained, ContainerEngine::Docker),
-            Backend::Container(ContainerEngine::Docker)
-        );
     }
 }

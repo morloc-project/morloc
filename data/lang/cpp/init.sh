@@ -7,9 +7,12 @@ SANITIZE_FLAGS="$3"
 INCLUDE_DIR="$MORLOC_HOME/include"
 LIB_DIR="$MORLOC_HOME/lib"
 
-# Allow overriding the C/C++ compilers via env vars.
+# Allow overriding the C/C++ compilers and archiver via env vars. A conda
+# toolchain ships a target-prefixed `ar` (morloc init exports $AR to it), so
+# fall back to a bare `ar` only outside such an environment.
 : "${CC:=gcc}"
 : "${CXX:=g++}"
+: "${AR:=ar}"
 
 # Install mlccpptypes if not present
 if [ ! -d "$INCLUDE_DIR/mlccpptypes" ]; then
@@ -31,7 +34,7 @@ cp "$BUILD_DIR/nanoarrow.h" "$INCLUDE_DIR/nanoarrow/"
 "$CXX" -c --std=c++20 -O2 $SANITIZE_FLAGS -I"$INCLUDE_DIR" -o "$BUILD_DIR/cppmorloc.o" "$BUILD_DIR/cppmorloc.cpp"
 
 # Archive into libcppmorloc.a
-ar rcs "$LIB_DIR/libcppmorloc.a" "$BUILD_DIR/cppmorloc.o" "$BUILD_DIR/nanoarrow.o"
+"$AR" rcs "$LIB_DIR/libcppmorloc.a" "$BUILD_DIR/cppmorloc.o" "$BUILD_DIR/nanoarrow.o"
 
 # Compile precompiled header
 cp "$BUILD_DIR/morloc_pch.hpp" "$INCLUDE_DIR/"

@@ -332,14 +332,16 @@ pub unsafe extern "C" fn router_start_program(
     // Capture the daemon's startup stderr to a host-visible file so a crash
     // surfaces the real cause (missing shared library, unreadable config, bad
     // manifest, ...) instead of only an exit status. The file lives under
-    // MORLOC_HOME, which is a bind mount in the serve container (so it is also
+    // MORLOC_STATE, which is the bind mount in the serve container (so it is also
     // readable from the host); the /tmp socket dir is a per-container tmpfs and
     // would not be. All allocation happens here in the parent -- the child does
     // only async-signal-safe calls before exec.
     let prog_name_str = CStr::from_ptr((*prog).name).to_string_lossy().into_owned();
     let log_dir = format!(
         "{}/logs",
-        env_str("MORLOC_HOME").unwrap_or_else(|| "/tmp".to_string())
+        env_str("MORLOC_STATE")
+            .or_else(|| env_str("MORLOC_HOME"))
+            .unwrap_or_else(|| "/tmp".to_string())
     );
     let _ = std::fs::create_dir_all(&log_dir);
     let stderr_log = format!("{log_dir}/{prog_name_str}.err");

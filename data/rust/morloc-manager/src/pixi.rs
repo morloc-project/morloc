@@ -19,8 +19,11 @@
 //!     unresolvable name surfaces at solve time as an impurity/escalation.
 
 use std::collections::BTreeMap;
+use std::path::Path;
+use std::process::{Command, Stdio};
 
 use crate::envspec::{DepClass, EnvSpec};
+use crate::error::{ManagerError, Result};
 use crate::langsupport::LangSupport;
 
 /// Inputs for rendering an environment's pixi manifest.
@@ -179,11 +182,43 @@ fn key(name: &str) -> String {
     format!("\"{name}\"")
 }
 
-/// Render the pixi manifest text. Deterministic (sorted dependency maps).
-pub fn render_pixi_manifest(input: &PixiManifestInput) -> String {
-    let (conda, pypi) = aggregate(input.specs, input.lang_support);
+/// The backend-neutral, structured requirement set for an environment: the union
+/// of every gathered `EnvSpec` intersected with the language-support table and
+/// user pins, resolved to concrete package requirements. This is the IR between
+/// requirement gathering (main.rs) and backend materialization (today: pixi). It
+/// replaces passing rendered `pixi.toml` *text* around, so the coherence key and
+/// any future backend consume structured data rather than re-parsing a manifest.
+#[derive(Debug, Clone)]
+pub struct RequirementSet {
+    pub env_name: String,
+    /// conda platform string ("linux-64" | "osx-arm64" | ...).
+    pub platform: String,
+    pub channels: Vec<String>,
+    /// conda `[dependencies]`: package -> version match-spec (sorted).
+    pub conda: BTreeMap<String, String>,
+    /// pypi `[pypi-dependencies]`: package -> version (sorted).
+    pub pypi: BTreeMap<String, String>,
+}
 
-    let channels = input
+/// Resolve gathered specs + morloc's language-support table into a structured
+/// `RequirementSet` (aggregate/clamp/inject, bucketed into conda and pypi). The
+/// morloc version is not carried here -- it lives on `ResolvedRequirements`
+/// alongside this IR, where the coherence key reads it.
+pub fn resolve_requirements(input: &PixiManifestInput) -> RequirementSet {
+    let (conda, pypi) = aggregate(input.specs, input.lang_support);
+    RequirementSet {
+        env_name: input.env_name.to_string(),
+        platform: input.platform.to_string(),
+        channels: input.channels.to_vec(),
+        conda,
+        pypi,
+    }
+}
+
+/// Render the pixi manifest text from a resolved `RequirementSet`. Deterministic
+/// (the dependency maps are sorted). This is the pixi *lowering* of the IR.
+pub fn render_manifest(req: &RequirementSet) -> String {
+    let channels = req
         .channels
         .iter()
         .map(|c| format!("\"{c}\""))
@@ -191,24 +226,153 @@ pub fn render_pixi_manifest(input: &PixiManifestInput) -> String {
         .join(", ");
 
     let mut out = String::new();
-    out.push_str("[project]\n");
-    out.push_str(&format!("name = \"{}\"\n", input.env_name));
+    out.push_str("[workspace]\n");
+    out.push_str(&format!("name = \"{}\"\n", req.env_name));
     out.push_str(&format!("channels = [{channels}]\n"));
-    out.push_str(&format!("platforms = [\"{}\"]\n", input.platform));
+    out.push_str(&format!("platforms = [\"{}\"]\n", req.platform));
 
     out.push_str("\n[dependencies]\n");
-    for (name, constraint) in &conda {
+    for (name, constraint) in &req.conda {
         out.push_str(&format!("{} = \"{}\"\n", key(name), constraint));
     }
 
-    if !pypi.is_empty() {
+    if !req.pypi.is_empty() {
         out.push_str("\n[pypi-dependencies]\n");
-        for (name, constraint) in &pypi {
+        for (name, constraint) in &req.pypi {
             out.push_str(&format!("{} = \"{}\"\n", key(name), constraint));
         }
     }
 
     out
+}
+
+// ======================================================================
+// Solve driver (shells out to a pinned pixi binary)
+// ======================================================================
+
+/// Write the rendered manifest to `<env_dir>/pixi.toml`.
+pub fn write_manifest(env_dir: &Path, manifest: &str) -> Result<()> {
+    std::fs::create_dir_all(env_dir)
+        .map_err(|e| ManagerError::EnvError(format!("cannot create {}: {e}", env_dir.display())))?;
+    let path = env_dir.join("pixi.toml");
+    std::fs::write(&path, manifest)
+        .map_err(|e| ManagerError::EnvError(format!("cannot write {}: {e}", path.display())))
+}
+
+/// Solve + install the manifest in `env_dir` using `pixi_bin`. This is phase 2
+/// of the impurity gate: an unresolvable package (one conda-forge cannot
+/// provide for this platform) fails here, which is the accurate verdict that a
+/// native build is impossible -- the caller escalates to a container.
+pub fn solve(env_dir: &Path, pixi_bin: &Path) -> Result<()> {
+    let manifest = env_dir.join("pixi.toml");
+    let status = Command::new(pixi_bin)
+        .arg("install")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .stdin(Stdio::null())
+        .status()
+        .map_err(|e| ManagerError::EnvError(format!("could not run pixi ({}): {e}", pixi_bin.display())))?;
+    if !status.success() {
+        return Err(ManagerError::EnvError(
+            "pixi could not solve this environment: a required package is unavailable on \
+             conda-forge for this platform. The native backend can only provide what conda \
+             offers; rebuild with a container backend (--engine podman) for host or system \
+             dependencies."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Produce the `pixi.lock` for the manifest in `env_dir` without installing on
+/// the host. The lock is what a container image reproduces with `pixi install
+/// --locked`, so the container's conda world is pinned to the same solve. A
+/// failure here is phase 2 of the impurity gate (a package conda cannot provide).
+pub fn lock(env_dir: &Path, pixi_bin: &Path) -> Result<()> {
+    let manifest = env_dir.join("pixi.toml");
+    let status = Command::new(pixi_bin)
+        .arg("lock")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .stdin(Stdio::null())
+        .status()
+        .map_err(|e| ManagerError::EnvError(format!("could not run pixi ({}): {e}", pixi_bin.display())))?;
+    if !status.success() {
+        return Err(ManagerError::EnvError(
+            "pixi could not lock this environment: a required package is unavailable on \
+             conda-forge for this platform (see the solver output above)."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Capture the toolchain activation env-map from a solved pixi env by parsing
+/// `pixi shell-hook`. The map (PATH with the conda bin prepended, CONDA_PREFIX,
+/// etc.) is what the native Runner injects before spawning a command. conda
+/// toolchains expose `cc`/`gcc` on PATH rather than via `$CC`, so PATH is the
+/// load-bearing entry.
+pub fn capture_activation(env_dir: &Path, pixi_bin: &Path) -> Result<Vec<(String, String)>> {
+    let manifest = env_dir.join("pixi.toml");
+    let out = Command::new(pixi_bin)
+        .arg("shell-hook")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| ManagerError::EnvError(format!("could not run pixi shell-hook: {e}")))?;
+    if !out.status.success() {
+        return Err(ManagerError::EnvError(format!(
+            "pixi shell-hook failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    let map = parse_shell_hook(&String::from_utf8_lossy(&out.stdout));
+    if !map.iter().any(|(k, _)| k == "CONDA_PREFIX") {
+        return Err(ManagerError::EnvError(
+            "pixi shell-hook produced no CONDA_PREFIX; cannot activate the native toolchain"
+                .to_string(),
+        ));
+    }
+    Ok(map)
+}
+
+/// Parse `pixi shell-hook` output into an activation env-map. Recognizes
+/// `export KEY=VALUE` lines with an identifier key; ignores comments, blank
+/// lines, and any trailing shell-function body. Values are shell-unquoted.
+pub fn parse_shell_hook(output: &str) -> Vec<(String, String)> {
+    let mut map = Vec::new();
+    for line in output.lines() {
+        let rest = match line.trim().strip_prefix("export ") {
+            Some(r) => r,
+            None => continue,
+        };
+        let (key, val) = match rest.split_once('=') {
+            Some(kv) => kv,
+            None => continue,
+        };
+        if key.is_empty()
+            || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            continue;
+        }
+        map.push((key.to_string(), shell_unquote(val)));
+    }
+    map
+}
+
+/// Strip a single layer of matching single or double quotes.
+fn shell_unquote(s: &str) -> String {
+    let s = s.trim();
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2
+        && (bytes[0] == b'"' || bytes[0] == b'\'')
+        && bytes[bytes.len() - 1] == bytes[0]
+    {
+        s[1..s.len() - 1].to_string()
+    } else {
+        s.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -249,14 +413,15 @@ mod tests {
             specs: std::slice::from_ref(&spec),
             lang_support: &support,
         };
-        let got = render_pixi_manifest(&input);
+        let req = resolve_requirements(&input);
+        let got = render_manifest(&req);
         // The table injects the core toolchain (c-compiler, rust); clamps python
         // to morloc's supported range intersected with the author's >=3.10; and
         // injects the non-optional py binder deps numpy + setuptools (pyarrow is
         // optional -> omitted). The program's own numpy>=2,<3 merges with the
         // injected numpy>=1.22,<3. cxx-compiler comes from the cpp entry.
         let expected = "\
-[project]
+[workspace]
 name = \"morloc-env-demo\"
 channels = [\"conda-forge\"]
 platforms = [\"linux-64\"]
@@ -325,5 +490,58 @@ platforms = [\"linux-64\"]
         assert_eq!(merge_constraint("*", ">=1"), ">=1");
         assert_eq!(merge_constraint(">=1", "*"), ">=1");
         assert_eq!(merge_constraint(">=2,<3", ">=2"), ">=2,<3");
+    }
+
+    // The exact shape `pixi shell-hook` emits: export lines, a blank line, and a
+    // trailing shellcheck comment (which must be ignored).
+    const SHELL_HOOK: &str = "\
+export PATH=\"/env/.pixi/envs/default/bin:/usr/bin:/bin\"
+export CONDA_SHLVL=1
+export CONDA_PREFIX=/env/.pixi/envs/default
+export PIXI_PROMPT='(default) '
+
+# shellcheck shell=bash
+";
+
+    #[test]
+    fn parse_shell_hook_extracts_exports() {
+        let map = parse_shell_hook(SHELL_HOOK);
+        let get = |k: &str| map.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("CONDA_PREFIX"), Some("/env/.pixi/envs/default"));
+        assert_eq!(get("PATH"), Some("/env/.pixi/envs/default/bin:/usr/bin:/bin"));
+        assert_eq!(get("CONDA_SHLVL"), Some("1"));
+        // single-quoted value is unquoted
+        assert_eq!(get("PIXI_PROMPT"), Some("(default) "));
+        // comment / blank lines contribute nothing
+        assert!(!map.iter().any(|(k, _)| k.starts_with('#')));
+    }
+
+    fn find_pixi() -> std::path::PathBuf {
+        let home = std::path::PathBuf::from(std::env::var("HOME").unwrap());
+        let local = home.join(".pixi/bin/pixi");
+        if local.exists() {
+            local
+        } else {
+            std::path::PathBuf::from("pixi")
+        }
+    }
+
+    #[test]
+    #[ignore = "requires pixi + network; run with `cargo test -- --ignored`"]
+    fn live_solve_and_capture_activation() {
+        let pixi = find_pixi();
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(
+            dir.path(),
+            "[workspace]\nname = \"morloc-live-test\"\nchannels = [\"conda-forge\"]\n\
+             platforms = [\"linux-64\"]\n\n[dependencies]\n\"c-compiler\" = \"*\"\n",
+        )
+        .unwrap();
+        solve(dir.path(), &pixi).expect("pixi solve");
+        let act = capture_activation(dir.path(), &pixi).expect("capture activation");
+        let get = |k: &str| act.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.clone());
+        assert!(get("CONDA_PREFIX").is_some(), "no CONDA_PREFIX captured");
+        let path = get("PATH").expect("PATH captured");
+        assert!(path.contains(".pixi/envs"), "conda bin not first on PATH: {path}");
     }
 }

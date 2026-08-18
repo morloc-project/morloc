@@ -1,13 +1,15 @@
 #!/bin/sh
-# Build portable libmorloc.so, morloc-nexus, and morloc-manager.
+# Build the portable morloc release assets: the compiler, the static
+# morloc-manager, and the Rust workspace source (libmorloc.so + morloc-nexus are
+# built from that source by `morloc init`, not prebuilt here).
 #
 # Usage:
 #   ./container/static-build/build.sh
 #
 # Output:
-#   ./out/libmorloc.so      (shared library, glibc >= 2.31)
-#   ./out/morloc-nexus      (binary, glibc >= 2.31, links libmorloc.so)
+#   ./out/morloc            (compiler, glibc >= 2.31)
 #   ./out/morloc-manager    (static binary, runs on any Linux)
+#   ./out/rust/             (Rust workspace source)
 
 set -e
 
@@ -24,7 +26,7 @@ else
     exit 1
 fi
 
-echo "Building libmorloc.so, morloc-nexus, and morloc-manager with $ENGINE..."
+echo "Building the morloc compiler, morloc-manager, and rust source with $ENGINE..."
 
 mkdir -p "$PROJECT_DIR/out"
 
@@ -41,6 +43,6 @@ $ENGINE run --rm \
     morloc-rust-build
 
 echo ""
-echo "Binaries:"
-ls -lh "$PROJECT_DIR/out/libmorloc.so" "$PROJECT_DIR/out/morloc-nexus" "$PROJECT_DIR/out/morloc-manager"
-file "$PROJECT_DIR/out/libmorloc.so" "$PROJECT_DIR/out/morloc-nexus" "$PROJECT_DIR/out/morloc-manager"
+echo "Assets:"
+ls -lh "$PROJECT_DIR/out/morloc" "$PROJECT_DIR/out/morloc-manager"
+file "$PROJECT_DIR/out/morloc" "$PROJECT_DIR/out/morloc-manager"

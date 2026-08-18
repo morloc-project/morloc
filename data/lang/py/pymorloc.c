@@ -1052,12 +1052,21 @@ static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schem
                     if (rel_err) { free(rel_err); goto error; }
                 }
                 memset(*cursor, 0, nlimbs * sizeof(uint64_t));
+                // Python 3.13 added a trailing `with_exceptions` argument to
+                // _PyLong_AsByteArray; pass 1 to keep the exception-raising
+                // behavior that older Pythons had implicitly.
+#if PY_VERSION_HEX >= 0x030D0000
+#  define MORLOC_ASBYTEARRAY_TAIL , 1
+#else
+#  define MORLOC_ASBYTEARRAY_TAIL
+#endif
                 if (_PyLong_AsByteArray((PyLongObject*)obj,
                                         (unsigned char*)*cursor,
                                         nlimbs * sizeof(uint64_t),
-                                        1, 1) < 0) {
+                                        1, 1 MORLOC_ASBYTEARRAY_TAIL) < 0) {
                     goto error;
                 }
+#undef MORLOC_ASBYTEARRAY_TAIL
                 *cursor = (char*)*cursor + nlimbs * sizeof(uint64_t);
             }
             break;

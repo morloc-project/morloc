@@ -35,9 +35,12 @@ pub fn freeze_from_dir(
         ));
     }
 
-    // Validate programs work before freezing
-    let mh = "/opt/morloc";
-    let bind_mounts = vec![(v_data_dir.to_string(), mh.to_string())];
+    // Validate programs work before freezing. Mount the host env dir at
+    // MORLOC_STATE (mutable), not over the baked runtime.
+    let bind_mounts = vec![(
+        v_data_dir.to_string(),
+        crate::serve::CONTAINER_MORLOC_STATE.to_string(),
+    )];
     crate::serve::validate_programs(engine, image, &programs, bind_mounts, verbose)?;
 
     eprintln!("Freezing installed state from {v_data_dir}...");

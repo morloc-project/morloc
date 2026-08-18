@@ -70,41 +70,7 @@ pub struct BuildConfig {
     pub extra_flags: Vec<String>,
 }
 
-/// Configuration for an Apptainer native build from a Singularity .def file.
-/// Does not require Docker or Podman on the host -- the native `apptainer
-/// build` is used.
-#[derive(Debug, Clone)]
-pub struct ApptainerNativeBuildConfig {
-    /// Path to the .def file.
-    pub deffile: String,
-    /// Output .sif path. Built to `<output>.tmp.sif` first and renamed on
-    /// success.
-    pub output_sif: String,
-    /// `--build-arg` pairs forwarded to `apptainer build`.
-    pub build_args: Vec<(String, String)>,
-    /// User-supplied build flags (from env.flags.yaml `build.apptainer` plus
-    /// any one-shot CLI overrides). Inserted into the argv between
-    /// `--force` and the build-args, so they apply to mode-selection
-    /// flags like `--ignore-subuid` / `--fakeroot`.
-    pub extra_flags: Vec<String>,
-}
 
-/// Configuration for converting an existing OCI image (in the local
-/// docker/podman daemon) to a .sif. Used as the Apptainer-engine fallback
-/// when only a Dockerfile is present and an OCI builder is available.
-#[derive(Debug, Clone)]
-pub struct ApptainerOciConvertConfig {
-    /// OCI engine that holds the source image (docker or podman).
-    pub source_engine: ContainerEngine,
-    /// Local OCI image tag the source engine has built (e.g.
-    /// `localhost/morloc-env:dnd`).
-    pub source_tag: String,
-    /// Output .sif path.
-    pub output_sif: String,
-    /// User-supplied build flags forwarded to `apptainer build` during the
-    /// OCI-to-SIF conversion step.
-    pub extra_flags: Vec<String>,
-}
 
 // ======================================================================
 // Engine detection
@@ -138,19 +104,6 @@ fn apptainer_executable() -> &'static str {
     })
 }
 
-/// Returns true if either Docker or Podman is reachable on $PATH. Used by
-/// the Apptainer-engine fallback build path that converts an OCI image to a
-/// .sif. Prefers docker when both are present (matches the existing morloc
-/// preference order in setup).
-pub fn detect_oci_builder() -> Option<ContainerEngine> {
-    if has_on_path("docker") {
-        Some(ContainerEngine::Docker)
-    } else if has_on_path("podman") {
-        Some(ContainerEngine::Podman)
-    } else {
-        None
-    }
-}
 
 /// Internal: argv-shape used by the dispatch in build_run_args.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,27 +209,7 @@ pub fn container_build_visible(engine: ContainerEngine, cfg: &BuildConfig) -> Ex
     run_process_to_stderr(exe, &args)
 }
 
-/// Pull a container image with all output (stdout+stderr) redirected to stderr.
-/// Use for IO () commands where stdout must stay clean.
-pub fn container_pull_visible(engine: ContainerEngine, image: &str) -> ExitStatus {
-    let exe = engine_executable(engine);
-    let args = pull_argv(engine, image, None);
-    run_process_to_stderr(exe, &args)
-}
 
-/// Pull an image to a specific local file path. For docker/podman this is
-/// not meaningful (the daemon owns image storage) and `target_path` is
-/// ignored. For apptainer, `target_path` is required and is the local .sif
-/// destination.
-pub fn container_pull_to_path(
-    engine: ContainerEngine,
-    image: &str,
-    target_path: &str,
-) -> ExitStatus {
-    let exe = engine_executable(engine);
-    let args = pull_argv(engine, image, Some(target_path));
-    run_process_to_stderr(exe, &args)
-}
 
 /// Build the argv for `pull`. For OCI engines this is `pull <image>`. For
 /// Apptainer it is `pull <output.sif> docker://<image>` (the `docker://`
@@ -337,50 +270,7 @@ pub fn image_inspect_stderr(engine: ContainerEngine, image: &str) -> Option<Stri
     }
 }
 
-/// Result of checking whether a remote image exists.
-pub enum RemoteImageStatus {
-    /// The image exists on the registry.
-    Exists,
-    /// The registry was reached but the image/tag was not found.
-    NotFound,
-    /// The check failed for an unknown reason (network, auth, etc).
-    /// Contains the stderr output from the container engine.
-    Unknown(String),
-}
 
-pub fn check_remote_image(engine: ContainerEngine, image: &str) -> RemoteImageStatus {
-    match argstyle(engine) {
-        ArgStyle::Oci => {
-            let exe = engine_executable(engine);
-            let output = Command::new(exe)
-                .args(["manifest", "inspect", image])
-                .stdout(Stdio::null())
-                .output();
-
-            match output {
-                Ok(o) if o.status.success() => RemoteImageStatus::Exists,
-                Ok(o) => {
-                    let stderr = String::from_utf8_lossy(&o.stderr).to_string();
-                    let lower = stderr.to_lowercase();
-                    if lower.contains("manifest unknown")
-                        || lower.contains("not found")
-                        || lower.contains("name unknown")
-                    {
-                        RemoteImageStatus::NotFound
-                    } else {
-                        RemoteImageStatus::Unknown(stderr)
-                    }
-                }
-                Err(e) => RemoteImageStatus::Unknown(format!("Failed to execute {exe}: {e}")),
-            }
-        }
-        // Apptainer has no `manifest inspect` analog. Best-effort: assume the
-        // remote exists and let the subsequent `apptainer pull` fail loudly
-        // with the registry's own error if it does not. This trades
-        // pre-flight precision for not needing skopeo on the build host.
-        ArgStyle::Apptainer => RemoteImageStatus::Exists,
-    }
-}
 
 pub fn container_stop(engine: ContainerEngine, name_or_id: &str) -> (ExitStatus, String) {
     match argstyle(engine) {
@@ -715,91 +605,11 @@ pub fn build_build_args(cfg: &BuildConfig) -> Vec<String> {
 // Apptainer build operations
 // ======================================================================
 
-/// Build a .sif natively from a Singularity .def file. Requires only the
-/// Apptainer binary on $PATH -- no Docker daemon, no Podman. Atomic write:
-/// builds to `<output>.tmp.sif` and renames on success so a failed build
-/// never leaves a corrupt .sif behind.
-pub fn apptainer_build_native(cfg: &ApptainerNativeBuildConfig) -> ExitStatus {
-    let exe = engine_executable(ContainerEngine::Apptainer);
-    let argv = build_apptainer_native_argv(cfg);
 
-    let status = run_process_to_stderr(exe, &argv);
-    if status.success() {
-        finalize_sif_atomic(&cfg.output_sif);
-    }
-    status
-}
 
-/// Build a .sif by converting an OCI image that already exists in a
-/// docker/podman daemon. This is the Apptainer-engine *fallback* path used
-/// when the user has only a Dockerfile recipe. Atomic write as above.
-pub fn apptainer_build_from_oci_daemon(cfg: &ApptainerOciConvertConfig) -> ExitStatus {
-    let exe = engine_executable(ContainerEngine::Apptainer);
-    let argv = build_apptainer_oci_convert_argv(cfg);
 
-    let status = run_process_to_stderr(exe, &argv);
-    if status.success() {
-        finalize_sif_atomic(&cfg.output_sif);
-    }
-    status
-}
 
-/// Pure-function argv builder for the native .def path. Kept separate so
-/// tests can assert on the exact argv without spawning Apptainer.
-///
-/// No mode-selecting flags (`--fakeroot`, `--ignore-subuid`,
-/// `--ignore-fakeroot-command`) are passed by default. Apptainer's own
-/// defaults apply; on hosts where those defaults fail, the user supplies
-/// the needed flags via `env.flags.yaml` (`build.apptainer: [...]`) or
-/// the one-shot `update --reinit --reinit-arg ...`. This keeps
-/// build-policy choices in the user's hands and out of the tool.
-pub fn build_apptainer_native_argv(cfg: &ApptainerNativeBuildConfig) -> Vec<String> {
-    let mut argv = vec![
-        "build".to_string(),
-        "--force".to_string(),
-    ];
-    argv.extend(cfg.extra_flags.iter().cloned());
-    for (key, val) in &cfg.build_args {
-        argv.push("--build-arg".to_string());
-        argv.push(format!("{key}={val}"));
-    }
-    argv.push(tmp_sif_path(&cfg.output_sif));
-    argv.push(cfg.deffile.clone());
-    argv
-}
 
-/// Pure-function argv builder for the OCI-conversion path.
-pub fn build_apptainer_oci_convert_argv(cfg: &ApptainerOciConvertConfig) -> Vec<String> {
-    let scheme = match cfg.source_engine {
-        ContainerEngine::Docker => "docker-daemon",
-        ContainerEngine::Podman => "podman-daemon",
-        // Apptainer cannot be the source of an OCI image; reject by code.
-        ContainerEngine::Apptainer => "docker-daemon",
-    };
-    let mut argv = vec![
-        "build".to_string(),
-        "--force".to_string(),
-    ];
-    argv.extend(cfg.extra_flags.iter().cloned());
-    argv.push(tmp_sif_path(&cfg.output_sif));
-    argv.push(format!("{scheme}://{}", cfg.source_tag));
-    argv
-}
-
-fn tmp_sif_path(final_path: &str) -> String {
-    format!("{final_path}.tmp.sif")
-}
-
-/// Rename `<output>.tmp.sif` -> `<output>`, replacing any existing file.
-/// Best-effort: if the rename fails, the .tmp.sif is left in place so the
-/// user can inspect what was produced.
-fn finalize_sif_atomic(output_sif: &str) {
-    let tmp = tmp_sif_path(output_sif);
-    if let Some(parent) = Path::new(output_sif).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::rename(&tmp, output_sif);
-}
 
 // ======================================================================
 // Process execution
