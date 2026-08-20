@@ -1,0 +1,13 @@
+[package]
+name = "morloc-env"
+version = "0.25.0"
+edition = "2021"
+description = "In-environment dependency agent for Morloc (sync/clean/spec over the shared dependency kernel)"
+
+[[bin]]
+name = "morloc-env"
+path = "src/main.rs"
+
+[dependencies]
+morloc-deps = { path = "../morloc-deps" }
+clap = { workspace = true }

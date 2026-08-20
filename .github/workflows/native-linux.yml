@@ -13,14 +13,10 @@
 # morloc's SystemConfig to honor $CC/$CXX -- worked around here with symlinks).
 name: Native Linux (pixi)
 
+# Manual only: this heavy pixi/native build no longer runs on every push. Run it
+# from the Actions tab when validating the native backend end-to-end.
 on:
   workflow_dispatch: {}
-  push:
-    paths:
-      - '.github/workflows/native-linux.yml'
-      - 'library/**'
-      - 'data/**'
-      - 'executable/**'
 
 env:
   # A pixi project holding the native toolchain env; referenced from every step.

@@ -17,7 +17,9 @@ module Morloc.ProgramBuilder.Build
   ( buildProgram
   ) where
 
+import Control.Exception (IOException, try)
 import Control.Monad.Except (catchError, throwError)
+import qualified Data.Map as Map
 import Morloc.Data.Doc ((<+>), line, vsep, pretty)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
@@ -26,9 +28,11 @@ import Morloc.Namespace.State
 import Morloc.ProgramBuilder.Paths (buildMarker)
 import qualified Morloc.System as MS
 import qualified System.Directory as SD
+import System.Environment (getExecutablePath, lookupEnv)
+import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.IO.Error (ioeGetFileName)
-import System.Process (callProcess, getCurrentPid)
+import System.Process (callProcess, createProcess, getCurrentPid, proc, waitForProcess)
 
 buildProgram :: (Script, [WrapperFile], [Script]) -> MorlocMonad ()
 buildProgram (manifest, wrappers, pools) = do
@@ -92,8 +96,100 @@ buildProgram (manifest, wrappers, pools) = do
     -- commands. If one pool's compile fails, the other pools' sources
     -- still exist on disk for inspection. Without this split, a make
     -- failure in an earlier pool aborts the mapM_ before later pools'
-    -- files ever get written.
-    buildAll ss = mapM_ writeScript ss >> mapM_ runMakes ss
+    -- files ever get written. Between the two, provision the program's
+    -- declared dependencies (a no-op outside a managed environment), so the
+    -- pool compiles find the required headers/libraries/interpreters.
+    buildAll ss = do
+      mapM_ writeScript ss
+      syncEnvDeps
+      mapM_ runMakes ss
+
+-- | Provision a program's declared package dependencies before its pools are
+-- compiled, by invoking the in-environment @morloc-env@ agent. Runs only when
+-- BUILDING (not eval, not install -- the manager provisions those) INSIDE a
+-- managed environment (@MORLOC_ENV@ set) a program that actually DECLARES
+-- dependencies; every other case is a silent no-op. CWD is the staging build
+-- dir, so the freshly written @envspec.json@ is at a relative path.
+--
+-- A solve failure (e.g. an unsatisfiable conflict) aborts the build with the
+-- agent's message. A missing agent in a managed environment is a warning, not a
+-- failure: the build proceeds and any missing dependency surfaces at compile.
+syncEnvDeps :: MorlocMonad ()
+syncEnvDeps = do
+  metas <- MM.gets statePackageMeta
+  mKey <- MM.gets stateProgramKey
+  isEval <- MM.gets stateEvalMode
+  isInstall <- MM.gets stateInstall
+  mEnv <- liftIO $ lookupEnv "MORLOC_ENV"
+  let declaresDeps = any packageHasDeps metas
+  case (mEnv, mKey) of
+    (Just env, Just key)
+      | not (null env) && declaresDeps && not isEval && not isInstall ->
+          runSync key
+    _ -> return ()
+  where
+    packageHasDeps pm =
+      not (Map.null (packagePyDeps pm))
+        || not (Map.null (packageRDeps pm))
+        || not (Map.null (packageCppDeps pm))
+        || not (Map.null (packageRustDeps pm))
+        || not (Map.null (packageJuliaDeps pm))
+
+    runSync key = do
+      magent <- liftIO findMorlocEnv
+      case magent of
+        Nothing ->
+          MM.say . vsep $
+            [ "===================================================================="
+            , "WARNING: 'morloc-env' was not found in this environment."
+            , "  This program declares package dependencies, but the in-environment"
+            , "  dependency agent is missing, so they were NOT provisioned -- the"
+            , "  build (or the program at runtime) may fail on missing dependencies."
+            , "  'morloc-env' ships alongside morloc-manager; build and re-stage it,"
+            , "  e.g. re-provision the environment (morloc-manager update <env>)."
+            , "===================================================================="
+            ]
+        Just agent -> do
+          MM.say "Provisioning environment dependencies (morloc-env sync)..."
+          result <- liftIO (runAgent agent key)
+          case result of
+            Left e ->
+              MM.throwSystemError $ "could not run 'morloc-env':" <+> pretty (show e)
+            Right ExitSuccess -> return ()
+            Right (ExitFailure _) ->
+              MM.throwSystemError
+                "environment dependency provisioning failed (see the output above)."
+
+    -- Inherit the terminal so morloc-env and the pixi it spawns stream their
+    -- progress live; capturing would silence a successful install. `try` keeps a
+    -- spawn failure (e.g. a non-executable agent) inside the error monad rather
+    -- than letting the IOException escape as an unhandled crash.
+    runAgent :: FilePath -> String -> IO (Either IOException ExitCode)
+    runAgent agent key = try $ do
+      (_, _, _, ph) <-
+        createProcess (proc agent ["sync", "--program", key, "--spec", "envspec.json"])
+      waitForProcess ph
+
+-- | Locate the @morloc-env@ agent: first as a sibling of this compiler
+-- executable (they are co-located in the runtime dir), then on PATH.
+findMorlocEnv :: IO (Maybe FilePath)
+findMorlocEnv = do
+  self <- getExecutablePath
+  let sibling = takeDirectory self </> "morloc-env"
+  -- Require the sibling to be EXECUTABLE, not merely present: a present but
+  -- non-executable file would pass a bare existence check and then make the
+  -- spawn fail at exec. Fall through to PATH (findExecutable already checks the
+  -- executable bit) otherwise.
+  siblingOk <- executableFileExists sibling
+  if siblingOk
+    then return (Just sibling)
+    else SD.findExecutable "morloc-env"
+  where
+    executableFileExists path = do
+      isFile <- SD.doesFileExist path
+      if isFile
+        then SD.executable <$> SD.getPermissions path
+        else return False
 
 -- | Atomically replace @dest@ with @staging@ (same parent, so the rename is
 -- atomic). An existing @dest@ is removed only when it is a real directory

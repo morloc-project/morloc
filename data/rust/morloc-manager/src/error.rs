@@ -26,8 +26,6 @@ pub enum ManagerError {
     #[error("{0}")]
     BackendUnsupported(String),
 
-    #[error("Invalid version: {0}. Expected format: MAJOR.MINOR.PATCH. For named tags like 'edge', use --tag instead.")]
-    InvalidVersion(String),
 
     #[error("No command specified. Use --shell or provide a command after --.")]
     NoCommand,
@@ -78,3 +76,12 @@ impl fmt::Display for ContainerEngine {
 }
 
 pub type Result<T> = std::result::Result<T, ManagerError>;
+
+// The dependency kernel (`morloc-deps`) reports failures as `DepsError`; collapse
+// them into the existing `EnvError` variant so `?` at kernel call sites converts
+// transparently and existing `EnvError` match arms still catch them.
+impl From<morloc_deps::error::DepsError> for ManagerError {
+    fn from(e: morloc_deps::error::DepsError) -> Self {
+        ManagerError::EnvError(e.to_string())
+    }
+}

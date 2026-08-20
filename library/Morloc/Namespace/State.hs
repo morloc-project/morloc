@@ -37,6 +37,11 @@ module Morloc.Namespace.State
 
     -- * Package metadata
   , PackageMeta (..)
+  , DepSpec (..)
+  , DepSource (..)
+  , depSourceText
+  , defaultDepSource
+  , checkPackageDeps
   , ExposeSet (..)
 
     -- * Typechecking
@@ -72,6 +77,7 @@ import qualified Data.Map as Map
 import Data.Map.Strict (Map)
 import qualified Data.Set as Set
 import Data.Text (Text)
+import qualified Data.Text as T
 import Morloc.Data.Doc
 import Morloc.LangRegistry (LangRegistry (..), LangRegistryEntry (..))
 import qualified Morloc.LangRegistry as LR
@@ -293,6 +299,13 @@ data MorlocError
 data Config
   = Config
   { configHome :: !Path
+  -- | Root for MUTABLE per-environment STATE (built programs, module db,
+  -- installed module code, plane source) -- distinct from the immutable
+  -- runtime under 'configHome' (bin/lib/include). Set from $MORLOC_STATE;
+  -- defaults to 'configHome' so a plain host install stays single-directory.
+  -- The split lets a container mount only the state root without shadowing the
+  -- image-baked runtime.
+  , configState :: !Path
   , configLibrary :: !Path
   , configPlane :: !Path
   , configPlaneCore :: !Path
@@ -304,6 +317,138 @@ data Config
   deriving (Show, Ord, Eq)
 
 ---- Package metadata
+
+-- | The ecosystem (package database / index) a dependency is drawn from. This
+-- names WHERE a package comes from, never the tool that fetches it: 'SrcConda'
+-- (the conda package database), 'SrcPypi' (PyPI), 'SrcCran'/'SrcBioconductor'
+-- (R registries), 'SrcCrates' (crates.io), 'SrcPkg' (Julia's General registry).
+-- A module declaring its sources is self-describing: the meaning of a name does
+-- not depend on which channels the builder happens to provide.
+data DepSource
+  = SrcConda
+  | SrcPypi
+  | SrcCran
+  | SrcBioconductor
+  | SrcCrates
+  | SrcPkg
+  deriving (Show, Eq, Ord)
+
+-- | One declared dependency: a version constraint and an optional source. An
+-- omitted source takes the per-language default ('defaultDepSource'); Python
+-- has no default (its conda-vs-PyPI split must be stated explicitly).
+data DepSpec = DepSpec
+  { dsVersion :: !Text
+  , dsSource :: !(Maybe DepSource)
+  }
+  deriving (Show, Eq, Ord)
+
+-- | Parse a source name. The vocabulary is the set of package databases morloc
+-- understands; anything else is a hard parse error.
+parseDepSource :: Text -> Maybe DepSource
+parseDepSource "conda" = Just SrcConda
+parseDepSource "pypi" = Just SrcPypi
+parseDepSource "cran" = Just SrcCran
+parseDepSource "bioconductor" = Just SrcBioconductor
+parseDepSource "crates" = Just SrcCrates
+parseDepSource "pkg" = Just SrcPkg
+parseDepSource _ = Nothing
+
+-- | Canonical name for a source (the inverse of 'parseDepSource'): the string
+-- written in @package.yaml@ and emitted on the envspec wire.
+depSourceText :: DepSource -> Text
+depSourceText SrcConda = "conda"
+depSourceText SrcPypi = "pypi"
+depSourceText SrcCran = "cran"
+depSourceText SrcBioconductor = "bioconductor"
+depSourceText SrcCrates = "crates"
+depSourceText SrcPkg = "pkg"
+
+-- | A language's dependency-source policy: the sources honored today, sources
+-- recognized but not yet wired up, and the source assumed when the author omits
+-- one ('Nothing' means a source is mandatory). One table drives validation and
+-- defaulting so the two cannot drift; by construction 'ldpDefault' is either
+-- 'Nothing' or one of 'ldpHonored'.
+data LangDepPolicy = LangDepPolicy
+  { ldpHonored :: ![DepSource]
+  , ldpUnsupported :: ![DepSource]
+  , ldpDefault :: !(Maybe DepSource)
+  }
+
+depPolicy :: Text -> LangDepPolicy
+depPolicy "py" = LangDepPolicy [SrcConda, SrcPypi] [] Nothing
+depPolicy "r" = LangDepPolicy [SrcConda] [SrcCran, SrcBioconductor] (Just SrcConda)
+depPolicy "cpp" = LangDepPolicy [SrcConda] [] (Just SrcConda)
+depPolicy "rust" = LangDepPolicy [SrcCrates] [] (Just SrcCrates)
+depPolicy "julia" = LangDepPolicy [SrcPkg] [] (Just SrcPkg)
+depPolicy _ = LangDepPolicy [SrcConda] [] (Just SrcConda)
+
+-- | The source assumed for a language's dependency when none is declared.
+defaultDepSource :: Text -> Maybe DepSource
+defaultDepSource = ldpDefault . depPolicy
+
+instance FromJSON DepSource where
+  parseJSON = Aeson.withText "source" $ \t ->
+    case parseDepSource t of
+      Just s -> return s
+      Nothing ->
+        fail $
+          "unknown dependency source (expected one of: conda, pypi, cran, \
+          \bioconductor, crates, pkg)"
+
+-- A dependency value is either a bare version string (source defaulted) or an
+-- object {version, source}. The bare form keeps the common case terse.
+instance FromJSON DepSpec where
+  parseJSON (Aeson.String s) = return (DepSpec s Nothing)
+  parseJSON (Aeson.Object o) = DepSpec <$> o .:? "version" .!= "*" <*> o .:? "source"
+  parseJSON _ =
+    fail "dependency must be a version string or an object {version, source}"
+
+-- | Validate a module's declared dependencies against the per-language source
+-- policy. Returns a human-readable error on the first violation. This is the
+-- authoritative gate; it is language-aware (each @*-deps@ block knows its
+-- language) in a way the source-agnostic 'FromJSON DepSpec' cannot be.
+--
+--   * Python: @source@ is mandatory and must be @conda@ or @pypi@.
+--   * R: defaults to conda (the @r-@ feedstock); @cran@/@bioconductor@ are not
+--     yet supported (the R pool installs only through conda).
+--   * C++: conda only.
+--   * Rust: crates.io only.  * Julia: the General registry only.
+checkPackageDeps :: PackageMeta -> Either Text ()
+checkPackageDeps pm = mapM_ checkGroup groups
+  where
+    groups =
+      [ ("py", packagePyDeps pm)
+      , ("r", packageRDeps pm)
+      , ("cpp", packageCppDeps pm)
+      , ("rust", packageRustDeps pm)
+      , ("julia", packageJuliaDeps pm)
+      ]
+
+    checkGroup (lang, m) = mapM_ (checkDep lang) (Map.toList m)
+
+    checkDep lang (name, ds) =
+      let pol = depPolicy lang
+       in case dsSource ds of
+            Just s
+              | s `elem` ldpHonored pol -> Right ()
+              | s `elem` ldpUnsupported pol ->
+                  Left $
+                    depSourceText s <> " dependencies are not yet supported for " <> lang
+                      <> " (package '" <> name <> "'); use conda"
+              | otherwise ->
+                  Left $
+                    "dependency '" <> name <> "' declares source " <> depSourceText s
+                      <> ", which is not valid for " <> lang
+                      <> " (expected: " <> validList pol <> ")"
+            Nothing ->
+              case ldpDefault pol of
+                Just _ -> Right ()
+                Nothing ->
+                  Left $
+                    "dependency '" <> name <> "' must declare a source for " <> lang
+                      <> " (one of: " <> validList pol <> ")"
+
+    validList pol = T.intercalate ", " (map depSourceText (ldpHonored pol))
 
 data PackageMeta
   = PackageMeta
@@ -323,22 +468,22 @@ data PackageMeta
   -- | Extra flags appended to the C++ pool compile line (e.g. -O3,
   -- -march=native, -DXYZ). Propagates transitively through dependencies.
   , packageCxxFlags :: [Text]
-  -- | External Rust crates (crate name -> semver requirement) a module needs
-  -- available to the Rust pool. The DAG-wide union is written into the
-  -- generated pool @Cargo.toml@ dependencies. Propagates transitively.
-  , packageRustDeps :: Map Text Text
-  -- | External Python packages (name -> version constraint) needed by the
-  -- Python pool. The DAG-wide union flows into the generated EnvSpec.
-  -- Propagates transitively.
-  , packagePyDeps :: Map Text Text
-  -- | External R packages (name -> version constraint) needed by the R pool.
-  , packageRDeps :: Map Text Text
-  -- | External C++ libraries (name -> version constraint) needed by the C++
-  -- pool; the structured, version-managed successor to 'packageDependencies'.
-  , packageCppDeps :: Map Text Text
-  -- | External Julia packages (name -> version constraint) needed by the Julia
-  -- pool (resolved by Pkg.jl).
-  , packageJuliaDeps :: Map Text Text
+  -- | External Rust crates (crate name -> 'DepSpec') a module needs available
+  -- to the Rust pool. The DAG-wide union is written into the generated pool
+  -- @Cargo.toml@ dependencies. Propagates transitively.
+  , packageRustDeps :: Map Text DepSpec
+  -- | External Python packages (name -> 'DepSpec') needed by the Python pool.
+  -- The DAG-wide union flows into the generated EnvSpec. Propagates
+  -- transitively.
+  , packagePyDeps :: Map Text DepSpec
+  -- | External R packages (name -> 'DepSpec') needed by the R pool.
+  , packageRDeps :: Map Text DepSpec
+  -- | External C++ libraries (name -> 'DepSpec') needed by the C++ pool; the
+  -- structured, version-managed successor to 'packageDependencies'.
+  , packageCppDeps :: Map Text DepSpec
+  -- | External Julia packages (name -> 'DepSpec') needed by the Julia pool
+  -- (resolved by Pkg.jl).
+  , packageJuliaDeps :: Map Text DepSpec
   -- | Optional per-language toolchain version constraints
   -- (lang name -> constraint, e.g. "python" -> ">=3.10"), merged into the
   -- EnvSpec language list.
@@ -621,7 +766,9 @@ instance FromJSON Config where
                 , ("r", if rCmd == "" then [] else [rCmd])
                 ]
           allOverrides = Map.union overrides legacyOverrides
-      return $ Config home' source' plane' planeCore' tmpdir' buildConfig' allOverrides registry'
+      -- configState defaults to home' here; the post-load resolver in
+      -- Morloc.Config applies $MORLOC_STATE and re-derives configLibrary from it.
+      return $ Config home' home' source' plane' planeCore' tmpdir' buildConfig' allOverrides registry'
 
 instance FromJSON PackageMeta where
   parseJSON = Aeson.withObject "object" $ \o ->

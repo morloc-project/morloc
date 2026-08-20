@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use crate::error::{ManagerError, Result};
+use crate::error::{DepsError, Result};
 
 fn any_constraint() -> String {
     "*".to_string()
@@ -70,7 +70,7 @@ impl LangSupport {
     /// Parse the table from `morloc lang-support` JSON output.
     pub fn from_json(text: &str) -> Result<Self> {
         serde_json::from_str(text).map_err(|e| {
-            ManagerError::EnvError(format!("Failed to parse the language-support table: {e}"))
+            DepsError::Env(format!("Failed to parse the language-support table: {e}"))
         })
     }
 }

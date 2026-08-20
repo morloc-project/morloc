@@ -25,6 +25,7 @@ module UI
   , ConfigCommand (..)
   , ConfigAction (..)
   , LangSupportCommand (..)
+  , EnvspecCommand (..)
   ) where
 
 import Data.Int (Int64)
@@ -56,6 +57,7 @@ data CliCommand
   | CmdEval EvalCommand
   | CmdConfig ConfigCommand
   | CmdLangSupport LangSupportCommand
+  | CmdEnvspec EnvspecCommand
 
 cliParser :: Parser CliCommand
 cliParser =
@@ -71,6 +73,7 @@ cliParser =
         <> evalSubcommand
         <> configSubcommand
         <> langSupportSubcommand
+        <> envspecSubcommand
     )
 
 data MakeCommand = MakeCommand
@@ -133,6 +136,29 @@ langSupportSubcommand =
   command
     "lang-support"
     (info (CmdLangSupport <$> langSupportCommandParser) (progDesc "Print the language-support table (JSON)"))
+
+-- | @envspec@ runs only the frontend (parse + typecheck, no codegen) and prints
+-- the program's environment requirement spec (the same @envspec.json@ that
+-- @make@ emits). This lets a build system resolve a program's declared
+-- dependencies BEFORE building it.
+data EnvspecCommand = EnvspecCommand
+  { envspecConfig :: String
+  , envspecVanilla :: Bool
+  , envspecScript :: String
+  }
+
+makeEnvspecParser :: Parser EnvspecCommand
+makeEnvspecParser =
+  EnvspecCommand
+    <$> optConfig
+    <*> optVanilla
+    <*> optScript
+
+envspecSubcommand :: Mod CommandFields CliCommand
+envspecSubcommand =
+  command
+    "envspec"
+    (info (CmdEnvspec <$> makeEnvspecParser) (progDesc "Emit the environment requirement spec (envspec.json) without building"))
 
 data InitCommand = InitCommand
   { initConfig :: String

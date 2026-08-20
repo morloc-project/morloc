@@ -34,6 +34,13 @@ fn morloc_home() -> String {
     })
 }
 
+/// Resolve the mutable-state root: MORLOC_STATE if set, else MORLOC_HOME. Built
+/// programs (exe/) and the module db (fdb/) live here, separate from the
+/// immutable runtime under MORLOC_HOME.
+fn morloc_state() -> String {
+    std::env::var("MORLOC_STATE").unwrap_or_else(|_| morloc_home())
+}
+
 fn main() {
     // `morloc-nexus --abi-version`: print the ABI/wire-format contract version
     // and exit. Checked as the first argument (a real program runs through the
@@ -671,7 +678,7 @@ fn run_router(config: &dispatch::NexusConfig) {
     }
 
     let exe_path = config.fdb_path.clone().unwrap_or_else(|| {
-        format!("{}/exe", morloc_home())
+        format!("{}/exe", morloc_state())
     });
     let fdb_c = CString::new(exe_path.as_str()).unwrap();
 

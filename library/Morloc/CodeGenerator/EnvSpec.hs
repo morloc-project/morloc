@@ -9,29 +9,28 @@ Maintainer  : z@morloc.io
 
 The 'EnvSpec' is a pure, offline function of a program's typed dependency
 closure. It records the languages a program's pools use, the external native
-packages each pool needs (with a CLASSIFICATION HINT), the system libraries,
-and the pinned morloc module dependencies. It is written to @envspec.json@
-beside @manifest.json@ and consumed by environment backends (pixi, container,
-nix) that lower it to a concrete environment.
+packages each pool needs (each carrying the package DATABASE it is drawn from),
+the system libraries, and the pinned morloc module dependencies. It is written
+to @envspec.json@ beside @manifest.json@ and consumed by environment backends
+(pixi, container, nix) that lower it to a concrete environment.
 
-Deliberately absent: any "purity" verdict. The compiler cannot see transitive
-dependency closures or query package channels offline, so it emits a
-classification HYPOTHESIS ('abi'/'source'/'unknown'), never a decision. The
-backend solve -- which does see the full closure and channel availability --
-is the authority on whether an environment can be materialized natively.
+Every package carries an explicit source ('DepSource') -- conda, PyPI, crates,
+etc. The source is declared in the module's @package.yaml@ (or defaulted per
+language) and validated at module load, so the spec is self-describing: a
+backend routes each package by its stated database, not by guessing from the
+name.
 -}
 module Morloc.CodeGenerator.EnvSpec
   ( EnvSpec(..)
   , LangReq(..)
   , PackageReq(..)
-  , DepClass(..)
   , SystemReq(..)
   , ModuleReq(..)
   , buildEnvSpec
   , renderEnvSpec
-  , classifyDep
   ) where
 
+import Control.Applicative ((<|>))
 import Data.Map (Map)
 import Data.Text (Text)
 import qualified Data.Map as Map
@@ -40,19 +39,15 @@ import qualified Morloc.Data.Text as MT
 import Morloc.Data.Json
 import Morloc.Internal (unique)
 import Morloc.Language (Lang, showLangName)
-import Morloc.Namespace.State (PackageMeta(..))
+import Morloc.Namespace.State
+  (PackageMeta(..), DepSpec(..), DepSource, defaultDepSource, depSourceText)
 
--- | Whether a declared dependency is expected to drop externally-built machine
--- code into a pool process. A HINT computed from the top-level package name;
--- the backend solve refines it against the transitive closure.
-data DepClass = Abi | Source | Unknown
-  deriving (Show, Eq, Ord)
-
--- | One external native package required by a pool.
+-- | One external native package required by a pool, with the package database
+-- ('DepSource') it is drawn from.
 data PackageReq = PackageReq
   { prName       :: !Text
   , prConstraint :: !Text
-  , prClass      :: !DepClass
+  , prSource     :: !DepSource
   }
   deriving (Show, Eq, Ord)
 
@@ -92,7 +87,7 @@ data EnvSpec = EnvSpec
 
 -- | Current on-disk schema version.
 envSpecVersion :: Int
-envSpecVersion = 1
+envSpecVersion = 2
 
 -- | Assemble the EnvSpec from the program's pool languages and the DAG-wide
 -- package metadata. Pure and offline.
@@ -115,7 +110,7 @@ buildEnvSpec morlocVersion langs metas =
     langNames = unique (map showLangName langs)
 
     -- Union of per-language toolchain version constraints across the DAG.
-    langVersions = unionConstraints (map packageLangVersions metas)
+    langVersions = Map.unionsWith mergeConstraint (map packageLangVersions metas)
     -- Highest requested C++ standard across the DAG.
     cppVer = maximum (0 : map packageCppVersion metas)
 
@@ -128,12 +123,17 @@ buildEnvSpec morlocVersion langs metas =
                            else Nothing
         }
 
-    -- Per-language dependency maps, unioned across the DAG, then classified.
+    -- Per-language dependency maps, unioned across the DAG. Each package's
+    -- source is its declared source, or the language default when omitted.
     -- Only emit a group when it has at least one package.
     packageGroups =
       [ (lang, reqs)
       | (lang, pick) <- langDepFields
-      , let reqs = classifyGroup lang (unionConstraints (map pick metas))
+      , let reqs =
+              [ PackageReq name (dsVersion ds) src
+              | (name, ds) <- Map.toList (unionDepSpecs (map pick metas))
+              , Just src <- [effectiveSource lang (dsSource ds)]
+              ]
       , not (null reqs)
       ]
 
@@ -143,11 +143,6 @@ buildEnvSpec morlocVersion langs metas =
       , ("cpp",   packageCppDeps)
       , ("julia", packageJuliaDeps)
       , ("rust",  packageRustDeps)
-      ]
-
-    classifyGroup lang m =
-      [ PackageReq name constraint (classifyDep lang name)
-      | (name, constraint) <- Map.toList m
       ]
 
     -- The bare C++ `-l` link libraries; provider is unknowable at compile time.
@@ -163,53 +158,28 @@ buildEnvSpec morlocVersion langs metas =
       | (name, h) <- dedupFst (concatMap packageMorlocDependencies metas)
       ]
 
--- | Classification HINT for a top-level package name. This is a hypothesis
--- refined by the backend solve, never a gate.
---
---   * C/C++ libs are compiled native code -> abi.
---   * Rust crates are source, EXCEPT @-sys@ crates that link a native library
---     -> unknown (the solve confirms whether that library is in-world).
---   * Python/R packages are abi when a known compiled package, source when a
---     known pure package, else unknown.
---   * Julia packages are source (Pkg.jl artifacts are handled separately).
-classifyDep :: Text -> Text -> DepClass
-classifyDep lang name
-  | lang == "cpp"   = Abi
-  | lang == "rust"  = if "-sys" `MT.isSuffixOf` name then Unknown else Source
-  | lang == "py"    = if name `Set.member` pyAbi then Abi
-                      else if name `Set.member` pyPure then Source
-                      else Unknown
-  | lang == "r"     = if name `Set.member` rPure then Source else Unknown
-  | lang == "julia" = Source
-  | otherwise       = Unknown
+-- | Resolve a dependency's effective source: its declared source, or the
+-- language default when omitted. 'Nothing' means unresolvable (a Python dep
+-- with no source) -- module-load validation ('checkPackageDeps') rejects that
+-- case, so post-validation this is always 'Just'.
+effectiveSource :: Text -> Maybe DepSource -> Maybe DepSource
+effectiveSource lang mSource = mSource <|> defaultDepSource lang
 
--- Small, extensible hint tables. Refined by the backend solve; not exhaustive.
-pyAbi :: Set.Set Text
-pyAbi = Set.fromList
-  [ "numpy", "scipy", "pandas", "pyarrow", "torch", "tensorflow"
-  , "scikit-learn", "matplotlib", "pillow", "lxml", "cryptography"
-  , "numba", "h5py", "opencv-python", "polars", "grpcio"
-  ]
-
-pyPure :: Set.Set Text
-pyPure = Set.fromList
-  [ "requests", "click", "pyyaml", "six", "urllib3", "typing-extensions"
-  , "attrs", "jinja2", "toml", "packaging"
-  ]
-
-rPure :: Set.Set Text
-rPure = Set.fromList
-  [ "ggplot2", "dplyr", "tidyr", "purrr", "stringr", "jsonlite" ]
-
--- | Union a list of constraint maps. When two modules constrain the same
--- package differently, keep both constraints (comma-joined, deduplicated) --
--- the resolver intersects them. Union, do NOT error on difference.
-unionConstraints :: [Map Text Text] -> Map Text Text
-unionConstraints = foldr (Map.unionWith combine) Map.empty
+-- | Union dependency maps across the DAG. Constraints on the same package are
+-- merged (the resolver intersects them); the first-seen source wins.
+unionDepSpecs :: [Map Text DepSpec] -> Map Text DepSpec
+unionDepSpecs = Map.unionsWith combine
   where
-    combine a b
-      | a == b = a
-      | otherwise = MT.intercalate "," (unique (MT.splitOn "," a <> MT.splitOn "," b))
+    combine a b =
+      DepSpec (mergeConstraint (dsVersion a) (dsVersion b))
+              (dsSource a <|> dsSource b)
+
+-- | Merge two version constraints. When they differ, comma-join and dedup --
+-- the resolver intersects them. Union, do NOT error on difference.
+mergeConstraint :: Text -> Text -> Text
+mergeConstraint a b
+  | a == b = a
+  | otherwise = MT.intercalate "," (unique (MT.splitOn "," a <> MT.splitOn "," b))
 
 -- | Deduplicate association-list entries by their first component (keep first).
 dedupFst :: Ord a => [(a, b)] -> [(a, b)]
@@ -241,11 +211,11 @@ renderEnvSpec es =
         ++ maybe [] (\c -> [("constraint", jsonStr c)]) mc
         ++ maybe [] (\s -> [("std", jsonStr s)]) mstd
 
-    pkgJson (PackageReq n c cls) =
+    pkgJson (PackageReq n c src) =
       jsonObj
         [ ("name", jsonStr n)
         , ("constraint", jsonStr c)
-        , ("class", jsonStr (classStr cls))
+        , ("source", jsonStr (depSourceText src))
         ]
 
     sysJson (SystemReq n p) =
@@ -254,7 +224,3 @@ renderEnvSpec es =
     modJson (ModuleReq n mh) =
       jsonObj $ [("name", jsonStr n)]
         ++ maybe [] (\h -> [("git_hash", jsonStr h)]) mh
-
-    classStr Abi = "abi"
-    classStr Source = "source"
-    classStr Unknown = "unknown"

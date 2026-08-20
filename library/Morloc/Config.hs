@@ -21,6 +21,11 @@ module Morloc.Config
   , setupServerAndSocket
   , getDefaultConfigFilepath
   , getDefaultMorlocLibrary
+  -- State-rooted (mutable) path helpers -- see 'configState'.
+  , exeDir
+  , fdbDir
+  , moduleDir
+  , rustBuildDir
   ) where
 
 import qualified Data.Aeson.KeyMap as K
@@ -49,6 +54,7 @@ loadDefaultMorlocConfig = do
   return $
     Config
       (MT.unpack . fromJust $ defaults K.!? "home")
+      (MT.unpack . fromJust $ defaults K.!? "state")
       (MT.unpack . fromJust $ defaults K.!? "source")
       (MT.unpack . fromJust $ defaults K.!? "plane")
       (MT.unpack . fromJust $ defaults K.!? "plane-core")
@@ -61,7 +67,45 @@ loadDefaultMorlocConfig = do
 default configuration will be used.
 -}
 loadMorlocConfig :: Maybe Path -> IO Config
-loadMorlocConfig mfile = loadMorlocConfig' mfile >>= applyMorlocHomeOverride
+loadMorlocConfig mfile =
+  loadMorlocConfig' mfile >>= applyMorlocHomeOverride >>= resolveStateRoots
+
+{- | Resolve the mutable-STATE root. @$MORLOC_STATE@ overrides; it defaults to
+'configHome' (a plain host install stays single-directory). @configLibrary@ (the
+installed-module plane source) is re-derived under the state root because
+installed modules are state, not runtime. Runs AFTER 'applyMorlocHomeOverride'
+so it sees the final home. In a container, the manager sets MORLOC_HOME to the
+image-baked runtime and MORLOC_STATE to the mounted state dir, so init's runtime
+under home is never shadowed by the state mount.
+-}
+resolveStateRoots :: Config -> IO Config
+resolveStateRoots config = do
+  envState <- lookupEnv "MORLOC_STATE"
+  let state = case envState of
+        Just s | not (null s) -> s
+        _ -> configHome config
+  return
+    config
+      { configState = state
+      , configLibrary = MS.combine state "src/morloc/plane"
+      }
+
+-- | State root (mutable): built programs, module db, installed module code.
+exeDir :: Config -> Path
+exeDir c = MS.combine (configState c) "exe"
+
+-- | Module database directory (state).
+fdbDir :: Config -> Path
+fdbDir c = MS.combine (configState c) "fdb"
+
+-- | Per-language installed-module directory under the state root
+-- (@sub@ = "include" | "python" | "R").
+moduleDir :: Config -> String -> Path
+moduleDir c sub = MS.combine (MS.combine (configState c) "modules") sub
+
+-- | Regenerable rustmorloc/pool cargo build cache, under the state root.
+rustBuildDir :: Config -> Path
+rustBuildDir c = MS.combine (configState c) "cache/rust-build"
 
 loadMorlocConfig' :: Maybe Path -> IO Config
 loadMorlocConfig' Nothing = do
@@ -181,12 +225,14 @@ setupServerAndSocket reg lang0 = Socket lang socket
 defaultFields :: IO (K.KeyMap Text)
 defaultFields = do
   home <- MT.pack <$> getDefaultMorlocHome
+  state <- MT.pack <$> getDefaultMorlocState
   lib <- MT.pack <$> getDefaultMorlocSource
   tmp <- MT.pack <$> getDefaultMorlocTmpDir
   buildConfig <- MT.pack <$> getDefaultMorlocBuildConfig
   return $
     K.fromList
       [ ("home", home)
+      , ("state", state)
       , ("source", lib)
       , ("plane", "default")
       , ("plane-core", "morloclib")
@@ -202,6 +248,14 @@ getDefaultMorlocHome = do
   case envHome of
     Just p | not (null p) -> return p
     _ -> MS.combine <$> MS.getHomeDirectory <*> pure ".local/share/morloc"
+
+-- | The mutable-state root: @$MORLOC_STATE@, else 'getDefaultMorlocHome'.
+getDefaultMorlocState :: IO Path
+getDefaultMorlocState = do
+  envState <- lookupEnv "MORLOC_STATE"
+  case envState of
+    Just p | not (null p) -> return p
+    _ -> getDefaultMorlocHome
 
 {- | Get the Morloc source directory (absolute path). Usually this will be a
 folder inside the home directory. This is the path to the source data (often

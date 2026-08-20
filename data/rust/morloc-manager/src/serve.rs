@@ -212,94 +212,6 @@ pub fn build_serve_image(
     Ok(())
 }
 
-#[allow(dead_code)]
-pub fn run_serve_container(
-    engine: ContainerEngine,
-    verbose: bool,
-    image: &str,
-    name: &str,
-    ports: &[(u16, u16)],
-) -> Result<()> {
-    // Clean up any existing dead container with this name (silently)
-    let _ = crate::container::container_remove_quiet(engine, name);
-
-    let port_str: Vec<String> = ports
-        .iter()
-        .map(|(h, c)| format!("{h}:{c}"))
-        .collect();
-    eprintln!(
-        "Starting serve container {name} on ports {}...",
-        port_str.join(", ")
-    );
-
-    let mut cfg = RunConfig::new(image);
-    cfg.read_only = true;
-    cfg.remove_after = false;
-    cfg.name = Some(name.to_string());
-    cfg.ports = ports.to_vec();
-    cfg.extra_flags = vec!["-d".to_string()];
-
-    if verbose {
-        let exe = engine_executable(engine);
-        let extra = crate::container::engine_specific_run_flags_io(engine);
-        let args = crate::container::build_run_args(engine, &extra, &cfg);
-        let quoted: Vec<String> = args.iter().map(|a| {
-            if a.contains(' ') { format!("'{a}'") } else { a.clone() }
-        }).collect();
-        eprintln!("[morloc-manager] {exe} {}", quoted.join(" "));
-    }
-
-    let (status, _stdout, run_err) = container_run(engine, &cfg);
-    if !status.success() {
-        let _ = crate::container::container_remove_quiet(engine, name);
-        return Err(ManagerError::EngineError {
-            engine,
-            code: exit_code_to_int(status),
-            stderr: run_err,
-        });
-    }
-
-    // Verify container reached running state
-    thread::sleep(Duration::from_secs(1));
-    let exe = engine_executable(engine);
-    let insp_output = Command::new(exe)
-        .args(["inspect", "--format", "{{.State.Status}}", name])
-        .output();
-    match insp_output {
-        Ok(o) if o.status.success() => {
-            let state = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if state == "running" {
-                eprintln!("Container {name} started");
-                eprintln!("  Logs:   morloc-manager logs");
-                eprintln!("  Stop:   morloc-manager stop {name}");
-                eprintln!("  Status: morloc-manager status");
-                Ok(())
-            } else {
-                let log_output = Command::new(exe).args(["logs", name]).output();
-                let logs = log_output
-                    .map(|o| {
-                        let stdout = String::from_utf8_lossy(&o.stdout);
-                        let stderr = String::from_utf8_lossy(&o.stderr);
-                        format!("{stdout}{stderr}")
-                    })
-                    .unwrap_or_default();
-                // Clean up the dead container to prevent name conflicts on retry
-                let _ = container_remove(engine, name);
-                Err(ManagerError::EngineError {
-                    engine,
-                    code: 1,
-                    stderr: format!("Container failed to start (state: {state}):\n{logs}"),
-                })
-            }
-        }
-        _ => Err(ManagerError::EngineError {
-            engine,
-            code: 1,
-            stderr: "Failed to inspect container state".to_string(),
-        }),
-    }
-}
-
 /// Serve an environment by bind-mounting its data directory into the container.
 pub fn serve_environment(
     engine: ContainerEngine,
@@ -360,10 +272,12 @@ pub fn serve_environment(
     cfg.publish_host = publish_host.map(str::to_string);
     cfg.network = network.map(str::to_string);
     let mh = CONTAINER_MORLOC_HOME;
-    cfg.bind_mounts = vec![(data_dir.to_string(), mh.to_string())];
+    // Mount the host env dir at MORLOC_STATE (mutable), NOT over MORLOC_HOME (the
+    // baked runtime), so the runtime is never shadowed.
+    cfg.bind_mounts = vec![(data_dir.to_string(), CONTAINER_MORLOC_STATE.to_string())];
     // Docker/podman run as the host UID without mounting the host $HOME; pool
     // daemons may touch $HOME (matplotlib config, R tempdir), so oci_base_env
-    // points it at a writable, mounted target ($MORLOC_HOME/home). Create it on
+    // points it at a writable, mounted target ($MORLOC_STATE/home). Create it on
     // the host bind-mount side so those writes do not hit ENOENT (the env-create
     // loop does not make it, and existing environments predate it).
     let _ = fs::create_dir_all(format!("{data_dir}/home"));
@@ -505,19 +419,20 @@ pub fn system_hostname() -> String {
         .unwrap_or_else(|| "localhost".to_string())
 }
 
-pub fn serve_container_name(env_name: &str) -> String {
-    let user = std::env::var("USER")
+/// The current user's login name, for namespacing serve containers.
+fn current_user() -> String {
+    std::env::var("USER")
         .or_else(|_| std::env::var("LOGNAME"))
-        .unwrap_or_else(|_| "unknown".to_string());
-    format!("morloc-serve-{user}-{env_name}")
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+pub fn serve_container_name(env_name: &str) -> String {
+    format!("{}{env_name}", serve_container_prefix())
 }
 
 /// The prefix used to filter all serve containers for the current user.
 pub fn serve_container_prefix() -> String {
-    let user = std::env::var("USER")
-        .or_else(|_| std::env::var("LOGNAME"))
-        .unwrap_or_else(|_| "unknown".to_string());
-    format!("morloc-serve-{user}-")
+    format!("morloc-serve-{}-", current_user())
 }
 
 /// Extract the environment name from a serve container name.
@@ -679,6 +594,7 @@ pub fn validate_programs(
             command: Some(vec![exe_path, "--help".to_string()]),
             env: vec![
                 ("MORLOC_HOME".to_string(), CONTAINER_MORLOC_HOME.to_string()),
+                ("MORLOC_STATE".to_string(), CONTAINER_MORLOC_STATE.to_string()),
             ],
             // Override the image ENTRYPOINT so the command runs directly
             // instead of being appended to the router entrypoint.
@@ -707,23 +623,77 @@ pub fn validate_programs(
 // Container constants
 // ======================================================================
 
+/// In-container MORLOC_HOME: the IMMUTABLE runtime prefix (bin/lib/include),
+/// image-baked by `morloc init` and NEVER bind-mounted, so a state mount cannot
+/// shadow it (the mount-shadow bug the three-way split fixes).
 pub const CONTAINER_MORLOC_HOME: &str = "/opt/morloc";
 
-/// System PATH tail appended after `$MORLOC_HOME/bin` for every in-container
-/// invocation (run, serve, apptainer).
+/// In-container MORLOC_STATE: the MUTABLE state root (exe/, fdb/, installed
+/// modules, logs). This is the ONLY thing bind-mounted from the host env dir, so
+/// installs/builds persist without covering the runtime.
+pub const CONTAINER_MORLOC_STATE: &str = "/opt/morloc-state";
+
+/// System PATH tail appended after the morloc + toolchain dirs for every
+/// in-container invocation (run, serve, apptainer).
 pub const CONTAINER_PATH_TAIL: &str =
     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
-/// Base env for a docker/podman in-container process. The container runs as the
-/// host UID without mounting the host $HOME, so HOME must point at a writable,
-/// mounted location under $MORLOC_HOME; callers extend this with any
-/// phase-specific vars (e.g. CARGO_HOME/MORLOC_BIN_LINK_DIR for build, user_env).
+/// Where the morloc compiler + the Rust source are COPYed in the
+/// requirement-derived image (see dockerfile.rs). Must be on PATH so the
+/// `morloc` compiler resolves at build/run time. (morloc-nexus is NOT here: it
+/// is built from source by `morloc init` into `$MORLOC_HOME/bin`.)
+pub const CONTAINER_RUNTIME_BIN: &str = "/opt/morloc-runtime";
+
+/// The pixi-solved conda environment's bin inside the image (WORKDIR `/env`,
+/// pixi's default environment). Provides the language toolchain (python, R,
+/// ...); PATH is the load-bearing part of pixi activation.
+pub const CONTAINER_PIXI_ENV_BIN: &str = "/env/.pixi/envs/default/bin";
+
+/// The pixi PROJECT dir inside the image (holds `pixi.toml`/`pixi.lock` and the
+/// solved prefix). Distinct from the state root, so the in-env agent is told
+/// this location explicitly (MORLOC_PIXI_DIR) rather than deriving it.
+pub const CONTAINER_PIXI_DIR: &str = "/env";
+
+/// The pixi binary inside the image (PIXI_HOME=/opt/pixi; not on the run PATH).
+pub const CONTAINER_PIXI_BIN: &str = "/opt/pixi/bin/pixi";
+
+/// The shell lines that activate the mounted conda toolchain for a container
+/// process: set CONDA_PREFIX, run pixi's shell-hook (for PATH), then source the
+/// conda activate.d scripts. shell-hook alone does NOT export $CC/$AR, which the
+/// pool builds require, so the activate.d sourcing is mandatory. Shared by the
+/// image ENTRYPOINT and the env-materialize step so the two cannot drift.
+pub fn conda_activate_lines() -> [String; 3] {
+    let prefix = format!("{CONTAINER_PIXI_DIR}/.pixi/envs/default");
+    [
+        format!("export CONDA_PREFIX={prefix}"),
+        format!(
+            "eval \"$({CONTAINER_PIXI_BIN} shell-hook --manifest-path {CONTAINER_PIXI_DIR}/pixi.toml --shell bash 2>/dev/null)\" || true"
+        ),
+        "for f in \"$CONDA_PREFIX/etc/conda/activate.d/\"*.sh; do [ -r \"$f\" ] && . \"$f\"; done".to_string(),
+    ]
+}
+
+/// The in-container PATH for a requirement-derived image: installed program
+/// launchers + shims + the init-built morloc-nexus (`$MORLOC_HOME/bin`), the
+/// morloc compiler, the pixi toolchain, then the system tail. Single source of
+/// truth for every in-container PATH.
+pub fn container_path(mh: &str) -> String {
+    format!("{mh}/bin:{CONTAINER_RUNTIME_BIN}:{CONTAINER_PIXI_ENV_BIN}:{CONTAINER_PATH_TAIL}")
+}
+
+/// Base env for a docker/podman in-container process. MORLOC_HOME is the baked
+/// runtime prefix; MORLOC_STATE is the mounted, writable state root; HOME lives
+/// under state so pool daemons/tools have a writable home. `morloc-nexus` finds
+/// `libmorloc.so` via its own baked `bin/../lib` RUNPATH (the runtime is no
+/// longer shadowed), so no `LD_LIBRARY_PATH` override is needed. Callers extend
+/// this with phase-specific vars (CARGO_HOME/MORLOC_BIN_LINK_DIR, user_env).
 /// Apptainer mounts the host $HOME and uses its own env, so it does not use this.
 pub fn oci_base_env(mh: &str) -> Vec<(String, String)> {
     vec![
         ("MORLOC_HOME".to_string(), mh.to_string()),
-        ("HOME".to_string(), format!("{mh}/home")),
-        ("PATH".to_string(), format!("{mh}/bin:{CONTAINER_PATH_TAIL}")),
+        ("MORLOC_STATE".to_string(), CONTAINER_MORLOC_STATE.to_string()),
+        ("HOME".to_string(), format!("{CONTAINER_MORLOC_STATE}/home")),
+        ("PATH".to_string(), container_path(mh)),
     ]
 }
 
@@ -877,11 +847,13 @@ fn serve_apptainer_instance(
     let exe = engine_executable(ContainerEngine::Apptainer);
     let mut argv: Vec<String> = vec!["instance".to_string(), "start".to_string()];
     argv.push("--bind".to_string());
-    argv.push(format!("{data_dir}:{mh}"));
+    argv.push(format!("{data_dir}:{CONTAINER_MORLOC_STATE}"));
     argv.push("--env".to_string());
-    argv.push(format!("PATH={mh}/bin:{CONTAINER_PATH_TAIL}"));
+    argv.push(format!("PATH={}", container_path(mh)));
     argv.push("--env".to_string());
     argv.push(format!("MORLOC_HOME={mh}"));
+    argv.push("--env".to_string());
+    argv.push(format!("MORLOC_STATE={CONTAINER_MORLOC_STATE}"));
     for (k, v) in user_env {
         argv.push("--env".to_string());
         argv.push(format!("{k}={v}"));
@@ -995,9 +967,7 @@ pub fn apptainer_list_serve_instances() -> Vec<ServeContainerInfo> {
 /// file (mirroring the OCI path which interleaves stdout/stderr to stdout).
 pub fn apptainer_logs(instance_name: &str, follow: bool) -> Result<()> {
     let host = system_hostname();
-    let user = std::env::var("USER")
-        .or_else(|_| std::env::var("LOGNAME"))
-        .unwrap_or_else(|_| "unknown".to_string());
+    let user = current_user();
     let home = dirs::home_dir().ok_or_else(|| {
         ManagerError::EnvError("Cannot determine home directory".to_string())
     })?;

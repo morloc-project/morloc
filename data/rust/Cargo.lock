@@ -798,6 +798,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "morloc-deps"
+version = "0.25.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "morloc-env"
+version = "0.25.0"
+dependencies = [
+ "clap",
+ "morloc-deps",
+]
+
+[[package]]
 name = "morloc-manager"
 version = "0.25.0"
 dependencies = [
@@ -805,6 +822,7 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "morloc-deps",
  "nix",
  "serde",
  "serde_json",

@@ -1,5 +1,10 @@
 name: Test Morloc
-on: [push]
+# Manual only: the dev loop tests locally (build morloc + morloc-manager, then
+# `MORLOC_COMPILER_BIN`/`MORLOC_RUST_DIR` point the manager at those binaries).
+# release.yml still runs the full suite on version tags. Run this from the
+# Actions tab when a full CI pass is wanted.
+on:
+  workflow_dispatch: {}
 
 jobs:
   linux-test:

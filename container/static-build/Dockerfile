@@ -1,19 +1,26 @@
 # syntax=docker/dockerfile:1.7
-# Portable build of libmorloc.so, morloc-nexus, and morloc-manager.
+# Portable build of the prebuilt morloc release assets: the morloc compiler, the
+# static morloc-manager, and the Rust workspace SOURCE.
+#
+# libmorloc.so and morloc-nexus are NOT prebuilt here. `morloc init` builds them
+# from the bundled Rust source with the env's own toolchain, so the runtime is
+# ABI-coherent with the pools it links (the prebuilt-vs-conda glibc mismatch is
+# gone). Only the two things that cannot be built from source at init time ship
+# prebuilt: the GHC-compiled compiler and the static bootstrap manager.
 #
 # Strategy:
-#   - libmorloc.so: shared library built on Ubuntu 20.04 (glibc >= 2.31)
-#   - morloc-nexus: dynamically linked to libmorloc.so (glibc >= 2.31)
-#   - morloc-manager: fully static binary (Alpine/musl, runs on any Linux)
+#   - morloc          : Haskell compiler, Ubuntu 20.04 (glibc >= 2.31)
+#   - morloc-manager  : fully static binary (Alpine/musl, runs on any Linux)
+#   - rust/           : the Rust workspace source (platform-independent)
 #
 # Build:
 #   DOCKER_BUILDKIT=1 docker build -t morloc-rust-build -f container/static-build/Dockerfile .
 #   docker run --rm -v $(pwd)/out:/out morloc-rust-build
 #
 # Output:
-#   ./out/libmorloc.so      (shared library, glibc >= 2.31)
-#   ./out/morloc-nexus      (binary, glibc >= 2.31, links libmorloc.so)
+#   ./out/morloc            (compiler, glibc >= 2.31)
 #   ./out/morloc-manager    (static binary, runs on any Linux including NixOS)
+#   ./out/rust/             (Rust workspace source)
 #
 # Caching:
 #   BuildKit cache mounts persist cargo's registry/git/target dirs across
@@ -21,47 +28,7 @@
 #   To wipe the cache: `docker buildx prune` or `podman system prune`.
 
 # ===========================================================================
-# Stage 1: Build libmorloc.so + morloc-nexus on Ubuntu (glibc)
-#
-# morloc-nexus dynamically links libmorloc.so at runtime, so both must be
-# built against the same libc. Ubuntu 20.04 gives glibc 2.31 forward compat.
-# ===========================================================================
-FROM docker.io/library/ubuntu:20.04 AS glibc-builder
-
-ENV DEBIAN_FRONTEND=noninteractive
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl ca-certificates gcc g++ make pkg-config \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable \
-    && /root/.cargo/bin/cargo --version
-ENV PATH="/root/.cargo/bin:${PATH}"
-
-WORKDIR /build
-
-COPY data/rust/ ./
-
-# Single RUN: cache-mounted target/ is not visible to later layers, so we
-# build morloc-runtime, link libmorloc.so via --whole-archive (exports ALL
-# symbols so language extensions can see internal Rust runtime state),
-# build morloc-nexus, then stash the artifacts in /artifacts/ for the
-# final stage to pick up.
-RUN --mount=type=cache,id=morloc-cargo-registry,target=/root/.cargo/registry,sharing=locked \
-    --mount=type=cache,id=morloc-cargo-git,target=/root/.cargo/git,sharing=locked \
-    --mount=type=cache,id=morloc-target-glibc,target=/build/target,sharing=locked \
-    cargo build --release -p morloc-runtime && \
-    mkdir -p /root/.local/share/morloc/lib /artifacts && \
-    gcc -shared -o /root/.local/share/morloc/lib/libmorloc.so \
-       -Wl,--whole-archive target/release/libmorloc_runtime.a -Wl,--no-whole-archive \
-       -lpthread -lrt -ldl -lm && \
-    cargo build --release -p morloc-nexus && \
-    cp /root/.local/share/morloc/lib/libmorloc.so /artifacts/libmorloc.so && \
-    cp target/release/morloc-nexus /artifacts/morloc-nexus && \
-    strip /artifacts/libmorloc.so /artifacts/morloc-nexus
-
-# ===========================================================================
-# Stage 2: Build morloc-manager on Alpine (musl, fully static)
+# Stage 1: Build morloc-manager on Alpine (musl, fully static)
 #
 # morloc-manager has no native dependencies - pure Rust crates only.
 # Building on Alpine produces a fully static musl binary that runs on any
@@ -77,25 +44,34 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /build
 
+# Cache-bust: MANAGER_SRC_ID is a content fingerprint of data/rust passed by
+# scripts/build-rust.sh. Referencing it in a layer BEFORE the COPY makes the
+# COPY + cargo build below re-run whenever the source changes, so a cached image
+# layer never serves a stale binary; unchanged source keeps the same id and the
+# cache is reused. Builds that do not pass it (release CI, which uses a clean
+# checkout) get the default and rely on the content-addressed COPY cache.
+ARG MANAGER_SRC_ID=release
+RUN echo "morloc-manager source id: ${MANAGER_SRC_ID}" > /manager-src-id
+
 COPY data/rust/ ./
 
 RUN --mount=type=cache,id=morloc-cargo-registry,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,id=morloc-cargo-git,target=/root/.cargo/git,sharing=locked \
     --mount=type=cache,id=morloc-target-musl,target=/build/target,sharing=locked \
-    cargo build --release -p morloc-manager && \
+    cargo build --release -p morloc-manager -p morloc-env && \
     mkdir -p /artifacts && \
     cp target/release/morloc-manager /artifacts/morloc-manager && \
-    strip /artifacts/morloc-manager
+    cp target/release/morloc-env /artifacts/morloc-env && \
+    strip /artifacts/morloc-manager /artifacts/morloc-env
 
 # ===========================================================================
-# Stage: Build the morloc compiler (Haskell/stack) on the SAME glibc floor
-# (Ubuntu 20.04, glibc >= 2.31) as libmorloc.so / morloc-nexus.
+# Stage 2: Build the morloc compiler (Haskell/stack) on Ubuntu 20.04
+# (glibc >= 2.31).
 #
-# The compiler, libmorloc.so, and nexus form one dynamic trio provisioned
-# together into a native environment; building them all at glibc 2.31 keeps
-# them mutually loadable and forward-compatible on any newer host. (morloc
-# is a conventional dynamic-glibc Haskell binary -- its only extra runtime
-# .so deps are libgmp + libz, satisfied by the host or the pixi env.)
+# The compiler ships prebuilt (GHC cannot be rebuilt from source at init).
+# Building at glibc 2.31 keeps it forward-compatible on any newer host. (morloc
+# is a conventional dynamic-glibc Haskell binary -- its only extra runtime .so
+# deps are libgmp + libz, satisfied by the host or the pixi env.)
 #
 # NOTE: the container image (container/tiny) also stack-builds the compiler;
 # consolidating the two builds is a future CI optimization.
@@ -116,38 +92,35 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # -L is required: get.haskellstack.org redirects to the actual install script.
 RUN curl --proto '=https' --tlsv1.2 -sSfL https://get.haskellstack.org/ | sh
 
-# Whole repo (the compiler needs its full source, not just data/rust).
-COPY . /morloc
-# Cache-mount stack's GHC bindist + compiled snapshot (~/.stack) and the project
-# build (.stack-work), like the cargo stages above. `COPY . /morloc` invalidates
-# this layer on ANY source change, so without these mounts every build re-ran
-# `stack install` from scratch -- re-downloading GHC and recompiling all deps.
-# With them, only the changed project modules recompile. The morloc binary is
-# copied OUT to /artifacts in the SAME RUN (cache mounts are not visible to later
-# layers), so the artifact still persists into the image.
-RUN --mount=type=cache,id=morloc-stack-root,target=/root/.stack,sharing=locked \
-    --mount=type=cache,id=morloc-stack-work,target=/morloc/.stack-work,sharing=locked \
-    cd /morloc && stack install --no-run-tests \
+WORKDIR /morloc
+
+# --- Dependency layer: GHC + snapshot land in an image LAYER keyed on the
+# dependency-determining files, so the GHA layer cache can persist it (a
+# --mount=type=cache would not survive an ephemeral runner). ---
+COPY stack.yaml stack.yaml.lock package.yaml ./
+RUN stack build --no-run-tests --only-dependencies
+
+# --- Source layer: only the project's own modules recompile per commit ---
+COPY . .
+RUN stack install --no-run-tests \
     && mkdir -p /artifacts \
     && cp /root/.local/bin/morloc /artifacts/morloc \
     && strip /artifacts/morloc
 
 # ===========================================================================
-# Stage 3: Verify and output
+# Stage 3: Collect and output
 # ===========================================================================
 FROM docker.io/library/alpine:3.20
 
 RUN apk add --no-cache file
 
-COPY --from=glibc-builder /artifacts/libmorloc.so /out-staging/libmorloc.so
-COPY --from=glibc-builder /artifacts/morloc-nexus /out-staging/morloc-nexus
 COPY --from=musl-builder /artifacts/morloc-manager /out-staging/morloc-manager
+COPY --from=musl-builder /artifacts/morloc-env /out-staging/morloc-env
 COPY --from=compiler-builder /artifacts/morloc /out-staging/morloc
 
-# Bundle the Rust crate sources (minus build artifacts). rustmorloc is an rlib
-# locked to the consumer's rustc, so it can't be prebuilt like the binaries
-# above; `morloc init` compiles it locally from these sources (resolved as
-# $MORLOC_RUST_BIN/rust).
+# The Rust workspace source (minus build artifacts). `morloc init` compiles
+# libmorloc.so, morloc-nexus, and the rustmorloc rlib locally from these
+# sources (resolved as $MORLOC_RUST_DIR).
 COPY data/rust /out-staging/rust
 RUN rm -rf /out-staging/rust/target
 
@@ -156,4 +129,4 @@ RUN file /out-staging/morloc-manager \
     && ! ldd /out-staging/morloc-manager 2>&1 | grep -q "=>" \
     && echo "OK: morloc-manager has no dynamic dependencies"
 
-CMD ["sh", "-c", "cp /out-staging/libmorloc.so /out-staging/morloc-nexus /out-staging/morloc-manager /out-staging/morloc /out/ && cp -r /out-staging/rust /out/rust && echo 'Wrote morloc, libmorloc.so, morloc-nexus, morloc-manager, rust/' && ls -lh /out/morloc /out/libmorloc.so /out/morloc-nexus /out/morloc-manager && echo && file /out/morloc-manager"]
+CMD ["sh", "-c", "cp /out-staging/morloc-manager /out-staging/morloc-env /out-staging/morloc /out/ && cp -r /out-staging/rust /out/rust && echo 'Wrote morloc, morloc-manager, morloc-env, rust/' && ls -lh /out/morloc /out/morloc-manager /out/morloc-env && echo && file /out/morloc-manager /out/morloc-env"]

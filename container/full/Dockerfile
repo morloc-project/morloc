@@ -15,9 +15,9 @@ WORKDIR $HOME
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PATH="/root/.local/bin:/root/.local/share/morloc/bin:${PATH}"
-# Prebuilt Rust binaries (libmorloc.so/nexus/manager) + bundled crate sources
-# (rust/) that `morloc init` compiles rustmorloc from with the local toolchain.
-ENV MORLOC_RUST_BIN=/opt/morloc-rust-bin
+# Bundled Rust workspace source that `morloc init` compiles the whole runtime
+# (libmorloc.so, morloc-nexus, rustmorloc) from with the local toolchain.
+ENV MORLOC_RUST_DIR=/opt/morloc-rust-bin/rust
 
 RUN apt-get update
 
@@ -36,10 +36,10 @@ RUN python3 -m pip install --break-system-packages --upgrade setuptools
 RUN Rscript -e 'install.packages("bit64", repos = "https://cloud.r-project.org")'
 
 # Rust toolchain. Required because (1) `morloc make` compiles Rust pools by
-# shelling out to cargo/rustc at RUNTIME, and (2) `morloc init` builds the
-# rustmorloc marshaller -- an rlib locked to this exact rustc, so unlike the
-# prebuilt C-ABI libmorloc.so it cannot be a bundle artifact -- from the crate
-# sources bundled at $MORLOC_RUST_BIN/rust.
+# shelling out to cargo/rustc at RUNTIME, and (2) `morloc init` builds the whole
+# runtime -- libmorloc.so, morloc-nexus, and the rustmorloc rlib -- from the
+# crate sources bundled at $MORLOC_RUST_DIR with this exact rustc, so the runtime
+# is ABI-coherent with the pools it links.
 #
 # Installed to a world-readable system location (/opt/rust) rather than
 # /root/.cargo: morloc-manager runs `morloc init` and `morloc make` inside this
@@ -56,8 +56,8 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
   && ln -s /opt/rust/cargo/bin/* /usr/local/bin/
 ENV PATH="/opt/rust/cargo/bin:${PATH}"
 
-# Setup the morloc home: installs the prebuilt libmorloc.so/nexus/manager and
-# compiles rustmorloc locally from the bundled sources.
+# Setup the morloc home: builds libmorloc.so, morloc-nexus, and rustmorloc
+# locally from the bundled sources.
 RUN morloc init
 # Copy morloc-nexus to a system path so it remains on PATH even when
 # morloc-manager bind-mounts over ~/.local/bin with a host directory

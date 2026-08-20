@@ -5,7 +5,20 @@
 #
 # Per-language requirements live in data/lang/<lang>/requirements.yaml.
 toolchain:
-  - { package: rust,        version: "*", phase: build }
-  - { package: c-compiler,  version: "*", phase: build }
-  - { package: make,        version: "*", phase: build }
-  - { package: pkg-config,  version: "*", phase: build }
+  - { package: rust,         version: "*", phase: build }
+  # c-compiler and cxx-compiler are both core: the runtime and every pool build
+  # (cargo/cc-rs and the C++ pools) need the conda toolchain ACTIVATION -- the
+  # activate.d scripts that export $CC/$CXX/$AR/$RANLIB/... In a language-free
+  # solve (e.g. `morloc-env clean`, which resets to a baseline that declares no
+  # pool language), c-compiler alone lands the compiler binaries but NOT the
+  # activation packages (gcc_linux-64/binutils_linux-64), so $AR is unset and
+  # cc-rs fails with "failed to find tool ar". cxx-compiler hard-depends on that
+  # activation chain, so keeping it in core guarantees $AR is always exported,
+  # not only when a program happens to declare a cpp pool.
+  - { package: c-compiler,   version: "*", phase: build }
+  - { package: cxx-compiler, version: "*", phase: build }
+  - { package: make,         version: "*", phase: build }
+  - { package: pkg-config,   version: "*", phase: build }
+  # git is universal to the installation system: `morloc install` clones modules
+  # and resolves git-pinned morloc-dependencies (build AND interactive runtime).
+  - { package: git,         version: "*", phase: both }

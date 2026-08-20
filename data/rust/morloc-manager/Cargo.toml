@@ -9,6 +9,7 @@ name = "morloc-manager"
 path = "src/main.rs"
 
 [dependencies]
+morloc-deps = { path = "../morloc-deps" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = "0.9"
