@@ -617,8 +617,12 @@ fn copy_file(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// Recursively copy `src` into `dst`, skipping any directory whose name is in
-/// `skip` (e.g. `target` build artifacts). Symlinks are followed as files.
-fn copy_dir_excluding(src: &Path, dst: &Path, skip: &[&str]) -> Result<()> {
+/// `skip` (e.g. `target` build artifacts). Real directories are recursed; a
+/// symlink to a file is followed and copied as content, but a symlink to a
+/// directory is NOT recursed into -- following it could form a cycle (infinite
+/// recursion) or escape the source tree (e.g. a dotfiles dir that symlinks to
+/// `$HOME`). Existing files are overwritten (`fs::copy` semantics).
+pub fn copy_dir_excluding(src: &Path, dst: &Path, skip: &[&str]) -> Result<()> {
     std::fs::create_dir_all(dst)
         .map_err(|e| ManagerError::EnvError(format!("cannot create {}: {e}", dst.display())))?;
     let entries = std::fs::read_dir(src)
@@ -627,7 +631,20 @@ fn copy_dir_excluding(src: &Path, dst: &Path, skip: &[&str]) -> Result<()> {
         let from = entry.path();
         let name = entry.file_name();
         let to = dst.join(&name);
-        if from.is_dir() {
+        // file_type() does NOT follow the link, so we can tell a symlink apart
+        // from a real directory before deciding whether to recurse.
+        let is_symlink = entry
+            .file_type()
+            .map(|t| t.is_symlink())
+            .unwrap_or(false);
+        if is_symlink {
+            // Skip a symlinked directory (cycle/escape hazard); copy a symlinked
+            // file as its target content (fs::copy follows the link).
+            if from.is_dir() {
+                continue;
+            }
+            copy_file(&from, &to)?;
+        } else if from.is_dir() {
             if skip.iter().any(|s| name.to_str() == Some(s)) {
                 continue;
             }

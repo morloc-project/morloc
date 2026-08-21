@@ -60,6 +60,14 @@ impl ContainerEngine {
             _ => None,
         }
     }
+
+    /// An OCI engine (docker/podman): runs as the host UID without mounting the
+    /// host `$HOME`, so the env owns a per-env home under the mounted state.
+    /// Apptainer differs (it mounts the host `$HOME`), so features keyed on the
+    /// env-owned home apply only to OCI engines.
+    pub fn is_oci(&self) -> bool {
+        matches!(self, ContainerEngine::Docker | ContainerEngine::Podman)
+    }
 }
 
 impl Serialize for ContainerEngine {

@@ -10,6 +10,22 @@ use crate::types::*;
 // Path utilities
 // ======================================================================
 
+/// The per-environment home directory on the host: `<data_dir>/home`. Bind-
+/// mounted as the container `$HOME` under docker/podman, so dotfiles dropped
+/// here (.bashrc, .vimrc, nested .config/...) apply inside the env's shells.
+pub fn env_home_dir(data_dir: impl AsRef<Path>) -> PathBuf {
+    data_dir.as_ref().join("home")
+}
+
+/// Create `<data_dir>/home` if absent and return it. Best-effort: a failure to
+/// create (an unwritable data dir) surfaces loudly downstream. Idempotent, so
+/// it doubles as the seed point that the run-time paths share.
+pub fn ensure_env_home(data_dir: impl AsRef<Path>) -> PathBuf {
+    let home = env_home_dir(data_dir);
+    let _ = fs::create_dir_all(&home);
+    home
+}
+
 pub fn config_dir(scope: Scope) -> PathBuf {
     match scope {
         Scope::Local => dirs::config_dir()

@@ -278,9 +278,8 @@ pub fn serve_environment(
     // Docker/podman run as the host UID without mounting the host $HOME; pool
     // daemons may touch $HOME (matplotlib config, R tempdir), so oci_base_env
     // points it at a writable, mounted target ($MORLOC_STATE/home). Create it on
-    // the host bind-mount side so those writes do not hit ENOENT (the env-create
-    // loop does not make it, and existing environments predate it).
-    let _ = fs::create_dir_all(format!("{data_dir}/home"));
+    // the host bind-mount side so those writes do not hit ENOENT.
+    let _ = crate::config::ensure_env_home(data_dir);
     cfg.env = oci_base_env(mh);
     cfg.env.extend(user_env.iter().cloned());
     cfg.command = Some(command.to_vec());

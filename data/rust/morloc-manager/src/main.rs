@@ -147,6 +147,10 @@ enum Cmd {
         /// --system-package jq. Container backend only.
         #[arg(long = "system-package")]
         system_package: Vec<String>,
+        /// Directory of dotfiles to copy into the environment's home
+        /// (.bashrc, .vimrc, .config/...). Docker/podman only.
+        #[arg(long)]
+        dotfiles: Option<String>,
         /// Create in system scope (requires root)
         #[arg(long)]
         system: bool,
@@ -258,7 +262,7 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
 
     /// Rebuild an environment
     #[command(display_order = 7)]
-    #[command(after_help = "Examples:\n  morloc-manager update              # re-solve/rebuild the active environment\n  morloc-manager update myenv\n  morloc-manager update myenv --lang py@3.13   # re-pin, then rebuild\n  morloc-manager update myenv --system-package jq   # add an OS package, then rebuild")]
+    #[command(after_help = "Examples:\n  morloc-manager update              # re-solve/rebuild the active environment\n  morloc-manager update myenv\n  morloc-manager update myenv --lang py@3.13   # re-pin, then rebuild\n  morloc-manager update myenv --system-package jq   # add an OS package, then rebuild\n  morloc-manager update myenv --dotfiles ~/mydots   # copy dotfiles into the env home")]
     Update {
         /// Environment name (default: active environment)
         name: Option<String>,
@@ -271,6 +275,11 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// (additive; not a replace); container backend only.
         #[arg(long = "system-package")]
         system_package: Vec<String>,
+        /// Directory of dotfiles to copy into the environment's home
+        /// (.bashrc, .vimrc, .config/...). Overwrites like `cp -rf`;
+        /// docker/podman only.
+        #[arg(long)]
+        dotfiles: Option<String>,
         /// Accepted for scripting uniformity with `new` (no effect)
         #[arg(long, hide = true)]
         non_interactive: bool,
@@ -837,6 +846,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             lang,
             engine,
             system_package,
+            dotfiles,
             system,
             no_init,
             non_interactive,
@@ -873,6 +883,9 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                          native backend has no image to bake packages into"
                             .to_string(),
                     ));
+                }
+                if dotfiles.is_some() {
+                    return Err(dotfiles_not_supported());
                 }
                 let interactive = !non_interactive && io::stdin().is_terminal();
                 return native_new(scope, name, lang, no_init, interactive, verbose);
@@ -959,7 +972,8 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 eprintln!("Note: No TTY detected, running in non-interactive mode.");
             }
             container_new_derived(
-                scope, resolved_engine, name, lang, system_package, no_init, interactive,
+                scope, resolved_engine, name, lang, system_package, dotfiles, no_init,
+                interactive,
             )
         }
 
@@ -1440,6 +1454,15 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     print_flag_section("build", &flag_config.build);
                     print_flag_section("run", &flag_config.run);
                     print_flag_section("start", &flag_config.start);
+                    // Docker/podman use <data_dir>/home as the shell $HOME, so a
+                    // user can drop dotfiles there. Apptainer/native use the host
+                    // home, so the field would mislead there.
+                    if matches!(ec.backend.container_engine(), Some(e) if e.is_oci()) {
+                        println!(
+                            "Home:           {}  (shell $HOME; drop dotfiles here)",
+                            cfg::env_home_dir(&data_dir).display()
+                        );
+                    }
                     println!("Data dir:       {}", data_dir.display());
                 }
             } else {
@@ -1575,6 +1598,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             name,
             lang,
             system_package,
+            dotfiles,
             non_interactive: _,
         } => {
             let (env_name, env_scope) = match name {
@@ -1592,6 +1616,14 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             }
 
             let mut ec = cfg::read_env_config(env_scope, &env_name)?;
+
+            // Dotfiles land in the mounted home, not the image, so this is a
+            // plain copy independent of the rebuild below. Done first so a bad
+            // --dotfiles path fails before any config is persisted.
+            if let Some(src) = &dotfiles {
+                let data_dir = cfg::env_data_dir(env_scope, &env_name);
+                apply_dotfiles(ec.backend.container_engine(), &data_dir, src)?;
+            }
 
             // Merge any newly requested OS packages into the persisted set
             // (additive + idempotent); rematerialize_env reads them back from
@@ -3002,7 +3034,7 @@ fn container_capture_env(
         .to_string();
     // HOME lives under the mounted state (oci_base_env); make it on the host side
     // so writes do not hit ENOENT.
-    let _ = std::fs::create_dir_all(format!("{v_data_dir}/home"));
+    let _ = cfg::ensure_env_home(&v_data_dir);
 
     let mut cfg = container::RunConfig::new(&image);
     cfg.remove_after = true;
@@ -3266,6 +3298,42 @@ fn materialize_container_env(
     Ok(())
 }
 
+/// The single rejection for `--dotfiles` on a non-OCI backend: apptainer mounts
+/// the host `$HOME` and native uses the real host home, so neither consults the
+/// env-owned home this flag populates. Both the `new` native guard and
+/// `apply_dotfiles` return this so the message has one source of truth.
+fn dotfiles_not_supported() -> ManagerError {
+    ManagerError::EnvError(
+        "--dotfiles applies only to docker/podman environments; apptainer \
+         inherits the host $HOME and the native backend uses your real home"
+            .to_string(),
+    )
+}
+
+/// Copy a user dotfiles directory into the environment's home (`<data_dir>/home`,
+/// the docker/podman shell `$HOME`), overwriting like `cp -rf`. Rejected on
+/// apptainer and native (see `dotfiles_not_supported`).
+fn apply_dotfiles(
+    engine: Option<ContainerEngine>,
+    data_dir: &std::path::Path,
+    dotfiles: &str,
+) -> Result<()> {
+    if !matches!(engine, Some(e) if e.is_oci()) {
+        return Err(dotfiles_not_supported());
+    }
+    let src = std::path::Path::new(dotfiles);
+    if !src.is_dir() {
+        return Err(ManagerError::EnvError(format!(
+            "--dotfiles path is not a directory: {}",
+            src.display()
+        )));
+    }
+    let home = cfg::ensure_env_home(data_dir);
+    provision::copy_dir_excluding(src, &home, &[])?;
+    eprintln!("Copied dotfiles from {} into {}", src.display(), home.display());
+    Ok(())
+}
+
 /// Create a container environment whose image is derived from its requirements
 /// (a generated Dockerfile running pixi inside), rather than a pulled/recipe
 /// image. Mirrors `native_new`; the run substrate is unchanged.
@@ -3275,10 +3343,24 @@ fn container_new_derived(
     name: Option<String>,
     lang: Vec<String>,
     system_packages: Vec<String>,
+    dotfiles: Option<String>,
     no_init: bool,
     interactive: bool,
 ) -> Result<()> {
     let env_name = resolve_new_env_name(scope, name, interactive)?;
+
+    // Seed the per-env home before the (multi-minute) image build so it exists
+    // for hand-editing straight after `new`, and any --dotfiles error fails fast.
+    // OCI only: apptainer inherits the host $HOME, so it has no env-owned home.
+    if engine.is_oci() || dotfiles.is_some() {
+        let data_dir = cfg::env_data_dir(scope, &env_name);
+        if engine.is_oci() {
+            cfg::ensure_env_home(&data_dir);
+        }
+        if let Some(src) = &dotfiles {
+            apply_dotfiles(Some(engine), &data_dir, src)?;
+        }
+    }
 
     let lang_pins = parse_lang_pins(&lang);
     let (built_image, morloc_version) = if no_init {
@@ -3953,8 +4035,8 @@ fn run_with_config(
     // touch $HOME do not hit ENOENT -- the env-create loop does not make it, and
     // existing environments predate it. Best-effort: a failure here means the
     // data dir is unwritable, which fails loudly downstream.
-    if matches!(engine, ContainerEngine::Docker | ContainerEngine::Podman) {
-        let _ = std::fs::create_dir_all(format!("{v_data_dir}/home"));
+    if engine.is_oci() {
+        let _ = cfg::ensure_env_home(&v_data_dir);
     }
     let mut env_vars = match engine {
         ContainerEngine::Apptainer => {
@@ -5198,6 +5280,15 @@ run:
         let with_pkg = cache_key("manifest", bin, &["jq".to_string()]);
         assert_ne!(base, with_pkg);
         assert!(with_pkg.contains("# system-packages: jq"));
+    }
+
+    #[test]
+    fn apply_dotfiles_rejects_non_oci() {
+        // The engine gate fires before any filesystem check, so bogus paths are
+        // fine here: native (None) and apptainer both reject.
+        let d = std::path::Path::new("/nonexistent");
+        assert!(apply_dotfiles(None, d, "/whatever").is_err());
+        assert!(apply_dotfiles(Some(ContainerEngine::Apptainer), d, "/whatever").is_err());
     }
 
     // ---- native Runner seam ----
