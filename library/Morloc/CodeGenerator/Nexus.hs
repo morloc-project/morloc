@@ -2668,8 +2668,11 @@ generate cs rASTs helperRASTs = do
   -- Backend-agnostic environment requirements: a pure, offline function of the
   -- program's dependency closure (pool languages + DAG-wide package metadata).
   -- It lands beside manifest.json and is consumed by environment backends.
-  let envspec = ES.buildEnvSpec Morloc.Version.versionStr (map fst daemonSets) (statePackageMeta st)
-      envspecScript =
+  envspec <-
+    either (MM.throwSystemError . pretty)
+           return
+           (ES.buildEnvSpec Morloc.Version.versionStr (map fst daemonSets) (statePackageMeta st))
+  let envspecScript =
         Script
           { scriptBase = "envspec"
           , scriptLang = cLang

@@ -26,6 +26,10 @@ use crate::envspec::{DepSource, EnvSpec};
 use crate::error::{DepsError, Result};
 use crate::langsupport::LangSupport;
 
+/// The universal default conda channel and highest strict-priority base. An
+/// omitted per-dep channel means this; it is the sole entry in `default_channels`.
+const CONDA_FORGE: &str = "conda-forge";
+
 /// Inputs for rendering an environment's pixi manifest.
 pub struct PixiManifestInput<'a> {
     pub env_name: &'a str,
@@ -53,9 +57,33 @@ fn lang_toolchain(lang: &str) -> Option<&'static str> {
     }
 }
 
-/// The conda package name for an R package (conda-forge `r-` feedstock, lowercased).
-fn conda_r_name(pkg: &str) -> String {
-    format!("r-{}", pkg.to_lowercase())
+/// The conda package name for a dependency. On conda-forge (the default channel)
+/// an R package is a `r-<lowercase>` feedstock; on any other channel the author
+/// writes the exact conda name (e.g. `bioconductor-deseq2`), so it passes through
+/// literally. Non-R packages always use the name as written.
+fn conda_name(channel: Option<&str>, lang: &str, pkg: &str) -> String {
+    let is_conda_forge = matches!(channel, None | Some(CONDA_FORGE));
+    if lang == "r" && is_conda_forge {
+        format!("r-{}", pkg.to_lowercase())
+    } else {
+        pkg.to_string()
+    }
+}
+
+/// Merge two channels for the same conda package. A channel is a provenance
+/// choice and is NOT intersectable: an explicit channel beats `None` (an unstated
+/// conda-forge default), equal channels coalesce, but two DIFFERENT explicit
+/// channels are a hard conflict (naming the package).
+fn merge_channel(name: &str, a: Option<&str>, b: Option<&str>) -> Result<Option<String>> {
+    match (a, b) {
+        (None, x) | (x, None) => Ok(x.map(str::to_string)),
+        (Some(x), Some(y)) if x == y => Ok(Some(x.to_string())),
+        (Some(x), Some(y)) => Err(DepsError::Env(format!(
+            "conflicting conda channels for dependency '{name}': '{x}' vs '{y}'. \
+             A package can be drawn from only one channel across all programs in an \
+             environment."
+        ))),
+    }
 }
 
 /// Combine two version constraints for the same package. conda match-specs use
@@ -84,19 +112,45 @@ fn insert_merged(map: &mut BTreeMap<String, String>, name: &str, constraint: &st
         .or_insert_with(|| constraint.to_string());
 }
 
+/// Insert or merge a conda dependency (constraint + channel). Constraints
+/// intersect (`merge_constraint`); channels merge under `merge_channel`, which
+/// errors on two different explicit channels for one package.
+fn insert_merged_conda(
+    map: &mut BTreeMap<String, (String, Option<String>)>,
+    name: &str,
+    constraint: &str,
+    channel: Option<&str>,
+) -> Result<()> {
+    use std::collections::btree_map::Entry;
+    match map.entry(name.to_string()) {
+        Entry::Vacant(v) => {
+            v.insert((constraint.to_string(), channel.map(str::to_string)));
+        }
+        Entry::Occupied(mut o) => {
+            let (c, existing) = o.get_mut();
+            *c = merge_constraint(c, constraint);
+            *existing = merge_channel(name, existing.as_deref(), channel)?;
+        }
+    }
+    Ok(())
+}
+
 /// Aggregate all specs into (conda dependencies, pypi dependencies) maps,
-/// clamped and injected against morloc's language-support table.
+/// clamped and injected against morloc's language-support table. Every injected
+/// dependency (toolchain, runtime, binder, system lib) rides on conda-forge
+/// (channel `None`); only a program's own conda package may carry an explicit
+/// channel. Fails on a cross-program channel conflict for one package.
 fn aggregate(
     specs: &[EnvSpec],
     support: &LangSupport,
-) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
-    let mut conda: BTreeMap<String, String> = BTreeMap::new();
+) -> Result<(BTreeMap<String, (String, Option<String>)>, BTreeMap<String, String>)> {
+    let mut conda: BTreeMap<String, (String, Option<String>)> = BTreeMap::new();
     let mut pypi: BTreeMap<String, String> = BTreeMap::new();
 
     // Core toolchain: always required (libmorloc + any shim). Non-optional only.
     for p in &support.toolchain {
         if !p.optional {
-            insert_merged(&mut conda, &p.package, &p.constraint);
+            insert_merged_conda(&mut conda, &p.package, &p.constraint, None)?;
         }
     }
 
@@ -121,17 +175,17 @@ fn aggregate(
             Some(entry) => {
                 if let Some(rt) = &entry.runtime {
                     // clamp: morloc's supported range intersected with the author's
-                    insert_merged(&mut conda, &rt.package, &merge_constraint(&rt.version, author_c));
+                    insert_merged_conda(&mut conda, &rt.package, &merge_constraint(&rt.version, author_c), None)?;
                 }
                 for p in &entry.requires {
                     if !p.optional {
-                        insert_merged(&mut conda, &p.package, &p.constraint);
+                        insert_merged_conda(&mut conda, &p.package, &p.constraint, None)?;
                     }
                 }
             }
             None => {
                 if let Some(tc) = lang_toolchain(lang) {
-                    insert_merged(&mut conda, tc, author_c);
+                    insert_merged_conda(&mut conda, tc, author_c, None)?;
                 }
             }
         }
@@ -141,15 +195,13 @@ fn aggregate(
         for (lang, reqs) in &spec.packages {
             for r in reqs {
                 match r.source {
-                    // R conda feedstocks are named r-<lowercase>; other conda
-                    // packages use the name as written.
+                    // R conda feedstocks are named r-<lowercase> ONLY on
+                    // conda-forge; on another channel the author's exact name is
+                    // used. Other conda packages use the name as written.
                     DepSource::Conda => {
-                        let name = if lang.as_str() == "r" {
-                            conda_r_name(&r.name)
-                        } else {
-                            r.name.clone()
-                        };
-                        insert_merged(&mut conda, &name, &r.constraint);
+                        let channel = r.channel.as_deref();
+                        let name = conda_name(channel, lang.as_str(), &r.name);
+                        insert_merged_conda(&mut conda, &name, &r.constraint, channel)?;
                     }
                     DepSource::Pypi => insert_merged(&mut pypi, &r.name, &r.constraint),
                     // cargo and Pkg.jl own these; resolved in-world at pool build.
@@ -172,12 +224,12 @@ fn aggregate(
         // conda dependency.
         for s in &spec.system {
             if s.provider != "host" {
-                insert_merged(&mut conda, &s.name, "*");
+                insert_merged_conda(&mut conda, &s.name, "*", None)?;
             }
         }
     }
 
-    (conda, pypi)
+    Ok((conda, pypi))
 }
 
 /// A TOML key, quoted (package names may contain `.`, which is illegal bare).
@@ -197,8 +249,10 @@ pub struct RequirementSet {
     /// conda platform string ("linux-64" | "osx-arm64" | ...).
     pub platform: String,
     pub channels: Vec<String>,
-    /// conda `[dependencies]`: package -> version match-spec (sorted).
-    pub conda: BTreeMap<String, String>,
+    /// conda `[dependencies]`: package -> (version match-spec, optional channel),
+    /// sorted. A `Some` channel is a non-conda-forge subordinate channel and
+    /// lowers to a pixi inline table; `None` is conda-forge (flat form).
+    pub conda: BTreeMap<String, (String, Option<String>)>,
     /// pypi `[pypi-dependencies]`: package -> version (sorted).
     pub pypi: BTreeMap<String, String>,
 }
@@ -206,29 +260,39 @@ pub struct RequirementSet {
 /// The default conda channel list for morloc environments (one policy home for
 /// both the manager and the in-env agent).
 pub fn default_channels() -> Vec<String> {
-    vec!["conda-forge".to_string()]
+    vec![CONDA_FORGE.to_string()]
 }
 
 /// Resolve gathered specs + morloc's language-support table into a structured
 /// `RequirementSet` (aggregate/clamp/inject, bucketed into conda and pypi). The
 /// morloc version is not carried here -- it lives on `ResolvedRequirements`
 /// alongside this IR, where the coherence key reads it.
-pub fn resolve_requirements(input: &PixiManifestInput) -> RequirementSet {
-    let (conda, pypi) = aggregate(input.specs, input.lang_support);
-    RequirementSet {
+pub fn resolve_requirements(input: &PixiManifestInput) -> Result<RequirementSet> {
+    let (conda, pypi) = aggregate(input.specs, input.lang_support)?;
+    Ok(RequirementSet {
         env_name: input.env_name.to_string(),
         platform: input.platform.to_string(),
         channels: input.channels.to_vec(),
         conda,
         pypi,
-    }
+    })
 }
 
 /// Render the pixi manifest text from a resolved `RequirementSet`. Deterministic
 /// (the dependency maps are sorted). This is the pixi *lowering* of the IR.
 pub fn render_manifest(req: &RequirementSet) -> String {
-    let channels = req
-        .channels
+    // Workspace channels: the base channels (conda-forge, always first) followed
+    // by every new per-dep channel. pixi/rattler honor a per-dep channel ONLY if
+    // it is also a declared workspace channel, so this union is required, not
+    // cosmetic. Per-dep channels are never conda-forge (`resolveChannel` strips
+    // it), so conda-forge stays at the front from `req.channels`.
+    let mut channel_list: Vec<&str> = req.channels.iter().map(String::as_str).collect();
+    for ch in req.conda.values().filter_map(|(_, c)| c.as_deref()) {
+        if !channel_list.contains(&ch) {
+            channel_list.push(ch);
+        }
+    }
+    let channels = channel_list
         .iter()
         .map(|c| format!("\"{c}\""))
         .collect::<Vec<_>>()
@@ -241,8 +305,18 @@ pub fn render_manifest(req: &RequirementSet) -> String {
     out.push_str(&format!("platforms = [\"{}\"]\n", req.platform));
 
     out.push_str("\n[dependencies]\n");
-    for (name, constraint) in &req.conda {
-        out.push_str(&format!("{} = \"{}\"\n", key(name), constraint));
+    for (name, (constraint, channel)) in &req.conda {
+        match channel {
+            // A non-conda-forge channel lowers to a pixi inline table so the dep
+            // is pinned to that channel; conda-forge (None) keeps the flat form.
+            Some(ch) => out.push_str(&format!(
+                "{} = {{ version = \"{}\", channel = \"{}\" }}\n",
+                key(name),
+                constraint,
+                ch
+            )),
+            None => out.push_str(&format!("{} = \"{}\"\n", key(name), constraint)),
+        }
     }
 
     if !req.pypi.is_empty() {
@@ -425,7 +499,7 @@ mod tests {
             specs: std::slice::from_ref(&spec),
             lang_support: &support,
         };
-        let req = resolve_requirements(&input);
+        let req = resolve_requirements(&input).unwrap();
         let got = render_manifest(&req);
         // The table injects the core toolchain (c-compiler, rust); clamps python
         // to morloc's supported range intersected with the author's >=3.10; and
@@ -458,7 +532,7 @@ platforms = [\"linux-64\"]
     fn rust_and_julia_packages_are_excluded_but_toolchains_kept() {
         let spec = sample_spec();
         let support = sample_support();
-        let (conda, pypi) = aggregate(std::slice::from_ref(&spec), &support);
+        let (conda, pypi) = aggregate(std::slice::from_ref(&spec), &support).unwrap();
         // ndarray (a rust crate) must not leak into the conda/pypi manifest...
         assert!(!conda.contains_key("ndarray"));
         assert!(!pypi.contains_key("ndarray"));
@@ -471,9 +545,84 @@ platforms = [\"linux-64\"]
         const R: &str = r#"{"envspec_version":2,"morloc_version":"0","languages":[{"lang":"r"}],"packages":{"r":[{"name":"data.table","constraint":"*","source":"conda"}]}}"#;
         let spec = EnvSpec::from_json(R).unwrap();
         let support = sample_support();
-        let (conda, _) = aggregate(std::slice::from_ref(&spec), &support);
+        let (conda, _) = aggregate(std::slice::from_ref(&spec), &support).unwrap();
         assert!(conda.contains_key("r-data.table"));
         assert!(conda.contains_key("r-base"));
+    }
+
+    fn render_with(spec: EnvSpec) -> String {
+        let support = sample_support();
+        let channels = default_channels();
+        let input = PixiManifestInput {
+            env_name: "e",
+            platform: "linux-64",
+            channels: &channels,
+            specs: std::slice::from_ref(&spec),
+            lang_support: &support,
+        };
+        render_manifest(&resolve_requirements(&input).unwrap())
+    }
+
+    #[test]
+    fn bioconda_channel_renders_inline_table_and_workspace_union() {
+        // A conda dep on bioconda lowers to a pixi inline table AND adds bioconda
+        // to the workspace channels (conda-forge stays first).
+        const S: &str = r#"{"envspec_version":3,"morloc_version":"0","languages":[{"lang":"py"}],"packages":{"py":[{"name":"samtools","constraint":"*","source":"conda","channel":"bioconda"}]}}"#;
+        let manifest = render_with(EnvSpec::from_json(S).unwrap());
+        assert!(manifest.contains("channels = [\"conda-forge\", \"bioconda\"]"), "{manifest}");
+        assert!(
+            manifest.contains("\"samtools\" = { version = \"*\", channel = \"bioconda\" }"),
+            "{manifest}"
+        );
+    }
+
+    #[test]
+    fn conda_forge_dep_stays_flat_and_channel_list_unchanged() {
+        // A conda-forge dep (no channel on the wire) keeps the flat form and does
+        // not perturb the workspace channel list -- byte-identical to pre-channel.
+        const S: &str = r#"{"envspec_version":3,"morloc_version":"0","languages":[{"lang":"py"}],"packages":{"py":[{"name":"numpy","constraint":">=2","source":"conda"}]}}"#;
+        let manifest = render_with(EnvSpec::from_json(S).unwrap());
+        assert!(manifest.contains("channels = [\"conda-forge\"]"), "{manifest}");
+        // flat form (`= "`), not an inline table (`= {`), and no channel key.
+        assert!(manifest.contains("\"numpy\" = \""), "{manifest}");
+        assert!(!manifest.contains("channel ="), "{manifest}");
+    }
+
+    #[test]
+    fn r_bioconda_name_passes_literally() {
+        // An R dep on a non-conda-forge channel is NOT r-prefixed; the author's
+        // exact conda name is used and the channel rides through.
+        const S: &str = r#"{"envspec_version":3,"morloc_version":"0","languages":[{"lang":"r"}],"packages":{"r":[{"name":"bioconductor-deseq2","constraint":"*","source":"conda","channel":"bioconda"}]}}"#;
+        let manifest = render_with(EnvSpec::from_json(S).unwrap());
+        assert!(
+            manifest.contains("\"bioconductor-deseq2\" = { version = \"*\", channel = \"bioconda\" }"),
+            "{manifest}"
+        );
+        assert!(!manifest.contains("r-bioconductor"), "{manifest}");
+    }
+
+    #[test]
+    fn conflicting_channels_across_specs_error() {
+        // Two programs drawing the same conda package from different channels is a
+        // hard conflict (a channel is a provenance choice, not intersectable).
+        const A: &str = r#"{"envspec_version":3,"morloc_version":"0","languages":[{"lang":"py"}],"packages":{"py":[{"name":"pkg","constraint":"*","source":"conda","channel":"bioconda"}]}}"#;
+        const B: &str = r#"{"envspec_version":3,"morloc_version":"0","languages":[{"lang":"py"}],"packages":{"py":[{"name":"pkg","constraint":"*","source":"conda","channel":"custom"}]}}"#;
+        let specs = vec![EnvSpec::from_json(A).unwrap(), EnvSpec::from_json(B).unwrap()];
+        let r = aggregate(&specs, &sample_support());
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn explicit_channel_beats_omitted_default() {
+        // The same package with an explicit channel in one spec and no channel in
+        // another coalesces to the explicit channel (no conflict).
+        const A: &str = r#"{"envspec_version":3,"morloc_version":"0","languages":[{"lang":"py"}],"packages":{"py":[{"name":"pkg","constraint":"*","source":"conda","channel":"bioconda"}]}}"#;
+        const B: &str = r#"{"envspec_version":3,"morloc_version":"0","languages":[{"lang":"py"}],"packages":{"py":[{"name":"pkg","constraint":">=1","source":"conda"}]}}"#;
+        let specs = vec![EnvSpec::from_json(A).unwrap(), EnvSpec::from_json(B).unwrap()];
+        let (conda, _) = aggregate(&specs, &sample_support()).unwrap();
+        // constraint `*` yields to the real `>=1`; the explicit bioconda channel
+        // survives the omitted (conda-forge) default.
+        assert_eq!(conda.get("pkg"), Some(&(">=1".to_string(), Some("bioconda".to_string()))));
     }
 
     #[test]
@@ -483,11 +632,11 @@ platforms = [\"linux-64\"]
         // (pyarrow) are omitted; the core toolchain is always present.
         const PY: &str = r#"{"envspec_version":2,"morloc_version":"0","languages":[{"lang":"py","constraint":">=3.11"}]}"#;
         let spec = EnvSpec::from_json(PY).unwrap();
-        let (conda, _) = aggregate(std::slice::from_ref(&spec), &sample_support());
+        let (conda, _) = aggregate(std::slice::from_ref(&spec), &sample_support()).unwrap();
         // clamp: author >=3.11 intersected with morloc's >=3.10,<3.14
-        assert_eq!(conda.get("python").map(String::as_str), Some(">=3.10,<3.14,>=3.11"));
+        assert_eq!(conda.get("python").map(|(c, _)| c.as_str()), Some(">=3.10,<3.14,>=3.11"));
         // injected non-optional binder deps
-        assert_eq!(conda.get("numpy").map(String::as_str), Some(">=1.22,<3"));
+        assert_eq!(conda.get("numpy").map(|(c, _)| c.as_str()), Some(">=1.22,<3"));
         assert!(conda.contains_key("setuptools"));
         // optional pyarrow is NOT injected
         assert!(!conda.contains_key("pyarrow"));

@@ -92,7 +92,7 @@ fn run(cli: Cli) -> Result<(), DepsError> {
         }
         Cmd::Spec => {
             let specs = ctx.gather()?;
-            print!("{}", ctx.rendered_manifest(&specs, &inputs));
+            print!("{}", ctx.rendered_manifest(&specs, &inputs)?);
         }
     }
     Ok(())

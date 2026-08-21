@@ -2593,7 +2593,7 @@ fn resolve_env_requirements(
         channels: &channels,
         specs: &specs,
         lang_support: &support,
-    });
+    })?;
 
     Ok(ResolvedRequirements { runtime_dir, version, morloc_bin, specs, lang_spec, requirements })
 }

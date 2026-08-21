@@ -18,7 +18,7 @@ use crate::error::{DepsError, Result};
 /// be rebuilt), a newer one carries fields this build cannot honor (upgrade the
 /// manager).
 pub const MIN_ENVSPEC_VERSION: u32 = 2;
-pub const SUPPORTED_ENVSPEC_VERSION: u32 = 2;
+pub const SUPPORTED_ENVSPEC_VERSION: u32 = 3;
 
 /// The package database a dependency is drawn from. Names WHERE a package comes
 /// from, never the tool that fetches it.
@@ -54,6 +54,11 @@ pub struct PackageReq {
     pub name: String,
     pub constraint: String,
     pub source: DepSource,
+    /// conda channel (sub-database) the package is drawn from, present only for a
+    /// conda package on a NON-conda-forge channel. Absent means conda-forge (the
+    /// universal default), so a channel-less spec matches the pre-channel schema.
+    #[serde(default)]
+    pub channel: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,6 +206,28 @@ mod tests {
         assert_eq!(s.system[0].provider, "unspecified");
         assert_eq!(s.modules[0].name, "tensor-cpp");
         assert_eq!(s.modules[0].git_hash.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn parses_channel_field() {
+        // A v3 spec: a conda package on a non-conda-forge channel carries the
+        // channel; a channel-less conda package defaults to None (conda-forge).
+        const V3: &str = r#"{"envspec_version":3,"morloc_version":"0","packages":{"py":[{"name":"samtools","constraint":"*","source":"conda","channel":"bioconda"},{"name":"numpy","constraint":">=2","source":"conda"}]}}"#;
+        let s = EnvSpec::from_json(V3).unwrap();
+        let py = &s.packages["py"];
+        assert_eq!(py[0].name, "samtools");
+        assert_eq!(py[0].channel.as_deref(), Some("bioconda"));
+        assert_eq!(py[1].name, "numpy");
+        assert!(py[1].channel.is_none());
+    }
+
+    #[test]
+    fn v2_spec_still_parses_without_channel() {
+        // A pre-channel (v2) spec has no channel field; MIN_ENVSPEC_VERSION stays
+        // 2 so it parses, with every channel defaulting to None (conda-forge).
+        let s = EnvSpec::from_json(SAMPLE).unwrap();
+        assert_eq!(s.envspec_version, 2);
+        assert!(s.packages["py"].iter().all(|p| p.channel.is_none()));
     }
 
     #[test]

@@ -703,9 +703,15 @@ cmdEnvspec args _ config buildConfig = do
       let registry = stateLangRegistry st
           srcs = concat (GMap.elems (stateSources st))
           langs = unique (map (LR.poolOf registry . srcLang) srcs)
-          spec = ES.buildEnvSpec versionStr langs (statePackageMeta st)
-      TIO.putStr (ES.renderEnvSpec spec)
-      return True
+      case ES.buildEnvSpec versionStr langs (statePackageMeta st) of
+        Left e -> do
+          -- A cross-module conda channel conflict; diagnostics go to stderr so a
+          -- caller capturing stdout for the JSON is not fed an error.
+          hPutStrLn stderr (MT.unpack e)
+          return False
+        Right spec -> do
+          TIO.putStr (ES.renderEnvSpec spec)
+          return True
 
 cmdNew :: NewCommand -> IO Bool
 cmdNew args = do

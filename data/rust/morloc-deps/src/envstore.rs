@@ -229,8 +229,9 @@ impl EnvContext {
     }
 
     /// Render the given specs to a pixi manifest (the merged, backend-neutral
-    /// requirement set lowered to `pixi.toml` text). Pure: no solve, no I/O.
-    pub fn rendered_manifest(&self, specs: &[EnvSpec], inputs: &SolveInputs) -> String {
+    /// requirement set lowered to `pixi.toml` text). No solve, no I/O. Fails on a
+    /// cross-program conda channel conflict for one package.
+    pub fn rendered_manifest(&self, specs: &[EnvSpec], inputs: &SolveInputs) -> Result<String> {
         let name = self.env_name();
         let requirements = crate::pixi::resolve_requirements(&crate::pixi::PixiManifestInput {
             env_name: name.as_str(),
@@ -238,8 +239,8 @@ impl EnvContext {
             channels: inputs.channels,
             specs,
             lang_support: inputs.lang_support,
-        });
-        crate::pixi::render_manifest(&requirements)
+        })?;
+        Ok(crate::pixi::render_manifest(&requirements))
     }
 
     /// Render the given specs to a pixi manifest and solve it into this env's
@@ -250,7 +251,7 @@ impl EnvContext {
         specs: &[EnvSpec],
         inputs: &SolveInputs,
     ) -> Result<Vec<(String, String)>> {
-        let manifest = self.rendered_manifest(specs, inputs);
+        let manifest = self.rendered_manifest(specs, inputs)?;
         let pixi_dir = self.pixi_dir();
         crate::pixi::write_manifest(&pixi_dir, &manifest)?;
         crate::pixi::solve(&pixi_dir, inputs.pixi_bin)?;

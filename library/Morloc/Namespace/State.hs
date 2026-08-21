@@ -41,6 +41,8 @@ module Morloc.Namespace.State
   , DepSource (..)
   , depSourceText
   , defaultDepSource
+  , effectiveDepSource
+  , condaForgeChannel
   , checkPackageDeps
   , ExposeSet (..)
 
@@ -65,6 +67,7 @@ module Morloc.Namespace.State
   , LangRegistryEntry (..)
   ) where
 
+import Control.Applicative ((<|>))
 import Control.Monad.Except (ExceptT)
 import Control.Monad.Reader (ReaderT)
 import Control.Monad.State (StateT)
@@ -333,12 +336,15 @@ data DepSource
   | SrcPkg
   deriving (Show, Eq, Ord)
 
--- | One declared dependency: a version constraint and an optional source. An
--- omitted source takes the per-language default ('defaultDepSource'); Python
--- has no default (its conda-vs-PyPI split must be stated explicitly).
+-- | One declared dependency: a version constraint, an optional source, and an
+-- optional conda channel. An omitted source takes the per-language default
+-- ('defaultDepSource'); Python has no default (its conda-vs-PyPI split must be
+-- stated explicitly). 'dsChannel' is conda-only (the package DATABASE within
+-- conda, e.g. bioconda); an omitted channel means conda-forge, the universal base.
 data DepSpec = DepSpec
   { dsVersion :: !Text
   , dsSource :: !(Maybe DepSource)
+  , dsChannel :: !(Maybe Text)
   }
   deriving (Show, Eq, Ord)
 
@@ -386,6 +392,22 @@ depPolicy _ = LangDepPolicy [SrcConda] [] (Just SrcConda)
 defaultDepSource :: Text -> Maybe DepSource
 defaultDepSource = ldpDefault . depPolicy
 
+-- | The source a dependency resolves to: its declared source, else the language
+-- default, else conda when a channel is present (channels are conda-exclusive, so
+-- they imply conda for a language with no default, i.e. Python). 'Nothing' means
+-- unresolvable (a Python dep with neither source nor channel), which
+-- 'checkPackageDeps' rejects. This is the single source of truth shared by
+-- validation and envspec emission so the two cannot drift.
+effectiveDepSource :: Text -> DepSpec -> Maybe DepSource
+effectiveDepSource lang ds =
+  dsSource ds <|> defaultDepSource lang <|> (SrcConda <$ dsChannel ds)
+
+-- | The universal default conda channel and highest strict-priority base. An
+-- omitted channel means this; it is stripped from the envspec wire so a
+-- channel-less program stays byte-identical to the pre-channel schema.
+condaForgeChannel :: Text
+condaForgeChannel = "conda-forge"
+
 instance FromJSON DepSource where
   parseJSON = Aeson.withText "source" $ \t ->
     case parseDepSource t of
@@ -398,10 +420,11 @@ instance FromJSON DepSource where
 -- A dependency value is either a bare version string (source defaulted) or an
 -- object {version, source}. The bare form keeps the common case terse.
 instance FromJSON DepSpec where
-  parseJSON (Aeson.String s) = return (DepSpec s Nothing)
-  parseJSON (Aeson.Object o) = DepSpec <$> o .:? "version" .!= "*" <*> o .:? "source"
+  parseJSON (Aeson.String s) = return (DepSpec s Nothing Nothing)
+  parseJSON (Aeson.Object o) =
+    DepSpec <$> o .:? "version" .!= "*" <*> o .:? "source" <*> o .:? "channel"
   parseJSON _ =
-    fail "dependency must be a version string or an object {version, source}"
+    fail "dependency must be a version string or an object {version, source, channel}"
 
 -- | Validate a module's declared dependencies against the per-language source
 -- policy. Returns a human-readable error on the first violation. This is the
@@ -413,6 +436,8 @@ instance FromJSON DepSpec where
 --     yet supported (the R pool installs only through conda).
 --   * C++: conda only.
 --   * Rust: crates.io only.  * Julia: the General registry only.
+--   * @channel@ is conda-only: it may not accompany a non-conda source, and a
+--     conda-forge R name must be a bare CRAN name (no @r-@ prefix).
 checkPackageDeps :: PackageMeta -> Either Text ()
 checkPackageDeps pm = mapM_ checkGroup groups
   where
@@ -426,11 +451,21 @@ checkPackageDeps pm = mapM_ checkGroup groups
 
     checkGroup (lang, m) = mapM_ (checkDep lang) (Map.toList m)
 
-    checkDep lang (name, ds) =
+    checkDep lang (name, ds) = do
+      src <- resolveSource lang name ds
+      checkChannel lang name ds src
+
+    -- Validate the dependency's resolved source (see 'effectiveDepSource', the
+    -- shared resolution rule). Returns the validated source or an error.
+    resolveSource lang name ds =
       let pol = depPolicy lang
-       in case dsSource ds of
+       in case effectiveDepSource lang ds of
+            Nothing ->
+              Left $
+                "dependency '" <> name <> "' must declare a source for " <> lang
+                  <> " (one of: " <> validList pol <> ")"
             Just s
-              | s `elem` ldpHonored pol -> Right ()
+              | s `elem` ldpHonored pol -> Right s
               | s `elem` ldpUnsupported pol ->
                   Left $
                     depSourceText s <> " dependencies are not yet supported for " <> lang
@@ -440,13 +475,31 @@ checkPackageDeps pm = mapM_ checkGroup groups
                     "dependency '" <> name <> "' declares source " <> depSourceText s
                       <> ", which is not valid for " <> lang
                       <> " (expected: " <> validList pol <> ")"
-            Nothing ->
-              case ldpDefault pol of
-                Just _ -> Right ()
-                Nothing ->
-                  Left $
-                    "dependency '" <> name <> "' must declare a source for " <> lang
-                      <> " (one of: " <> validList pol <> ")"
+
+    -- A channel is a conda-only refinement (which package DATABASE within conda).
+    -- Rule 2: a channel on a resolved non-conda source is a contradiction. Under
+    -- conda-forge the R name must be a bare CRAN name (the pixi lowering adds the
+    -- r- prefix); any other channel passes through literally.
+    checkChannel lang name ds src =
+      case dsChannel ds of
+        Nothing -> checkRName lang name ds -- absent channel means conda-forge
+        Just ch
+          | src == SrcConda -> checkRName lang name ds
+          | otherwise ->
+              Left $
+                "dependency '" <> name <> "' declares channel '" <> ch
+                  <> "', but channels apply only to conda dependencies (" <> lang <> ")"
+
+    checkRName lang name ds
+      | lang == "r"
+      , channelIsCondaForge (dsChannel ds)
+      , T.isPrefixOf "r-" (T.toLower name) =
+          Left $
+            "dependency '" <> name <> "' names a conda-forge R feedstock; r-deps "
+              <> "names are bare CRAN names (drop the 'r-' prefix)"
+      | otherwise = Right ()
+
+    channelIsCondaForge = maybe True (== condaForgeChannel)
 
     validList pol = T.intercalate ", " (map depSourceText (ldpHonored pol))
 
