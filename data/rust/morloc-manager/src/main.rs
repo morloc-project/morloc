@@ -143,6 +143,10 @@ enum Cmd {
         /// Backend/engine: podman, docker, apptainer, singularity, or none (native).
         #[arg(long, value_enum)]
         engine: Option<EngineArg>,
+        /// Extra OS package to bake into the image (repeatable), e.g.
+        /// --system-package jq. Container backend only.
+        #[arg(long = "system-package")]
+        system_package: Vec<String>,
         /// Create in system scope (requires root)
         #[arg(long)]
         system: bool,
@@ -254,7 +258,7 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
 
     /// Rebuild an environment
     #[command(display_order = 7)]
-    #[command(after_help = "Examples:\n  morloc-manager update              # re-solve/rebuild the active environment\n  morloc-manager update myenv\n  morloc-manager update myenv --lang py@3.13   # re-pin, then rebuild")]
+    #[command(after_help = "Examples:\n  morloc-manager update              # re-solve/rebuild the active environment\n  morloc-manager update myenv\n  morloc-manager update myenv --lang py@3.13   # re-pin, then rebuild\n  morloc-manager update myenv --system-package jq   # add an OS package, then rebuild")]
     Update {
         /// Environment name (default: active environment)
         name: Option<String>,
@@ -262,6 +266,11 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// comma-separated). Omit to keep the stored pins.
         #[arg(long)]
         lang: Vec<String>,
+        /// Extra OS package to bake into the image (repeatable), e.g.
+        /// --system-package jq. Added to the environment's persisted set
+        /// (additive; not a replace); container backend only.
+        #[arg(long = "system-package")]
+        system_package: Vec<String>,
         /// Accepted for scripting uniformity with `new` (no effect)
         #[arg(long, hide = true)]
         non_interactive: bool,
@@ -827,6 +836,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             name,
             lang,
             engine,
+            system_package,
             system,
             no_init,
             non_interactive,
@@ -857,6 +867,13 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 },
             };
             if go_native {
+                if !system_package.is_empty() {
+                    return Err(ManagerError::EnvError(
+                        "--system-package applies only to container backends; the \
+                         native backend has no image to bake packages into"
+                            .to_string(),
+                    ));
+                }
                 let interactive = !non_interactive && io::stdin().is_terminal();
                 return native_new(scope, name, lang, no_init, interactive, verbose);
             }
@@ -941,7 +958,9 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             if !non_interactive && !interactive {
                 eprintln!("Note: No TTY detected, running in non-interactive mode.");
             }
-            container_new_derived(scope, resolved_engine, name, lang, no_init, interactive)
+            container_new_derived(
+                scope, resolved_engine, name, lang, system_package, no_init, interactive,
+            )
         }
 
         // ---- run ----
@@ -1411,6 +1430,9 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                         // Native environments have no engine-specific fields.
                         None => {}
                     }
+                    if !ec.system_packages.is_empty() {
+                        println!("System pkgs:    {}", ec.system_packages.join(" "));
+                    }
                     let flags_path = cfg::env_flags_yaml_path(scope, &env_name);
                     println!("Flags:          {}", flags_path.display());
                     let flag_config = cfg::read_flag_config(scope, &env_name)
@@ -1552,6 +1574,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         Cmd::Update {
             name,
             lang,
+            system_package,
             non_interactive: _,
         } => {
             let (env_name, env_scope) = match name {
@@ -1568,7 +1591,26 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 check_system_write_access()?;
             }
 
-            let ec = cfg::read_env_config(env_scope, &env_name)?;
+            let mut ec = cfg::read_env_config(env_scope, &env_name)?;
+
+            // Merge any newly requested OS packages into the persisted set
+            // (additive + idempotent); rematerialize_env reads them back from
+            // env.yaml. Container-only: native has no image layer to bake into.
+            if !system_package.is_empty() {
+                if ec.backend.is_native() {
+                    return Err(ManagerError::EnvError(
+                        "--system-package applies only to container backends; the \
+                         native backend has no image to bake packages into"
+                            .to_string(),
+                    ));
+                }
+                for p in system_package {
+                    if !ec.system_packages.contains(&p) {
+                        ec.system_packages.push(p);
+                    }
+                }
+                cfg::write_env_config(env_scope, &env_name, &ec)?;
+            }
 
             // Re-pin: an explicit --lang overwrites the stored pins that
             // rematerialize_env reads back; otherwise the stored pins are reused.
@@ -2592,7 +2634,7 @@ fn materialize_native_env(
     // a success marker avoids a poisoned skip -- a failed solve leaves a new
     // pixi.toml on disk, but the marker still reflects the last good build, so the
     // rebuild is not falsely skipped on retry.
-    let key = cache_key(&manifest, &req.morloc_bin);
+    let key = cache_key(&manifest, &req.morloc_bin, &[]);
     let marker = pixi_dir.join("materialized.toml");
     let unchanged = std::fs::read_to_string(&marker)
         .map(|prev| prev == key)
@@ -2846,6 +2888,7 @@ fn native_new(
         String::new(),
         None,
         morloc_version,
+        Vec::new(),
     );
     finalize_new_env(scope, &ec, lang_pins)
 }
@@ -3012,9 +3055,17 @@ fn compiler_fingerprint(morloc_bin: &std::path::Path) -> String {
 /// materialize, and compared on the next run; a change in either the conda
 /// requirements OR the compiler forces a rebuild (so a dev compiler rebuild
 /// refreshes the env without a manual image removal).
-fn cache_key(manifest: &str, morloc_bin: &std::path::Path) -> String {
+fn cache_key(manifest: &str, morloc_bin: &std::path::Path, system_packages: &[String]) -> String {
+    // System packages live outside the pixi manifest, so fold them in or an
+    // edit would not invalidate the marker. Omitted when empty to keep the key
+    // byte-identical for envs that declare none (no spurious rebuild).
+    let extras = if system_packages.is_empty() {
+        String::new()
+    } else {
+        format!("# system-packages: {}\n", system_packages.join(" "))
+    };
     format!(
-        "{manifest}\n# morloc-compiler: {}\n",
+        "{manifest}\n# morloc-compiler: {}\n{extras}",
         compiler_fingerprint(morloc_bin)
     )
 }
@@ -3044,8 +3095,9 @@ fn rematerialize_env(
     }
 
     let ce = ec.engine()?;
-    let (image_tag, mver) =
-        build_requirement_derived_image(scope, name, ce, &specs, &lang_pins)?;
+    let (image_tag, mver) = build_requirement_derived_image(
+        scope, name, ce, &specs, &lang_pins, &ec.system_packages,
+    )?;
     let mut ec = ec;
     ec.built_image = Some(image_tag);
     ec.morloc_version = mver.parse::<Version>().ok();
@@ -3063,6 +3115,7 @@ fn build_requirement_derived_image(
     engine: ContainerEngine,
     program_specs: &[envspec::EnvSpec],
     lang_pins: &[(String, Option<String>)],
+    system_packages: &[String],
 ) -> Result<(String, String)> {
     // Unlike native, a container HAS a build layer, so host/vcpkg system deps are
     // not a hard blocker here -- they become build-extras (a later --system-package
@@ -3081,7 +3134,7 @@ fn build_requirement_derived_image(
     // compiler identity) written only after a good build (NOT the working
     // pixi.toml), so a failed build cannot poison the cache, and a rebuilt dev
     // compiler forces a fresh image without a manual `podman rmi`.
-    let key = cache_key(&manifest, &req.morloc_bin);
+    let key = cache_key(&manifest, &req.morloc_bin, system_packages);
     let marker = context.join("materialized.toml");
     let unchanged = std::fs::read_to_string(&marker)
         .map(|prev| prev == key)
@@ -3116,7 +3169,9 @@ fn build_requirement_derived_image(
     // container step below, writing into the host mounts.
     eprintln!("Staging the morloc runtime into the build context...");
     provision::stage_runtime(&req.runtime_dir, &context.join("runtime"))?;
-    let extras = dockerfile::BuildExtras::default();
+    let extras = dockerfile::BuildExtras {
+        system_packages: system_packages.to_vec(),
+    };
     let df_text = dockerfile::generate_dockerfile(&dockerfile::DockerfileInput {
         base_image: CONTAINER_BASE_IMAGE,
         pixi_version: provision::PIXI_VERSION,
@@ -3219,6 +3274,7 @@ fn container_new_derived(
     engine: ContainerEngine,
     name: Option<String>,
     lang: Vec<String>,
+    system_packages: Vec<String>,
     no_init: bool,
     interactive: bool,
 ) -> Result<()> {
@@ -3228,8 +3284,9 @@ fn container_new_derived(
     let (built_image, morloc_version) = if no_init {
         (None, None)
     } else {
-        let (image, version) =
-            build_requirement_derived_image(scope, &env_name, engine, &[], &lang_pins)?;
+        let (image, version) = build_requirement_derived_image(
+            scope, &env_name, engine, &[], &lang_pins, &system_packages,
+        )?;
         (Some(image), version.parse::<Version>().ok())
     };
 
@@ -3239,6 +3296,7 @@ fn container_new_derived(
         CONTAINER_BASE_IMAGE.to_string(),
         built_image,
         morloc_version,
+        system_packages,
     );
     finalize_new_env(scope, &ec, lang_pins)
 }
@@ -4621,6 +4679,7 @@ mod tests {
             backend: Backend::Container(ContainerEngine::Podman),
             shm_size: "1g".to_string(),
             morloc_version: Some(Version::new(0, 67, 0)),
+            system_packages: Vec::new(),
         };
         cfg::write_config(&path, &ec).unwrap();
         let ec2: EnvironmentConfig = cfg::read_config(&path).unwrap();
@@ -5052,6 +5111,7 @@ run:
             backend: Backend::Container(ContainerEngine::Apptainer),
             shm_size: "512m".to_string(),
             morloc_version: Some(Version::new(0, 85, 0)),
+            system_packages: Vec::new(),
         };
         let yaml = serde_yaml::to_string(&ec).unwrap();
         std::fs::write(&path, yaml).unwrap();
@@ -5101,6 +5161,7 @@ run:
             backend: Backend::Container(ContainerEngine::Apptainer),
             shm_size: "512m".to_string(),
             morloc_version: None,
+            system_packages: Vec::new(),
         };
         assert_eq!(ec.active_image(), "/layered.sif");
     }
@@ -5122,8 +5183,21 @@ run:
             backend: Backend::Container(ContainerEngine::Apptainer),
             shm_size: "512m".to_string(),
             morloc_version: None,
+            system_packages: Vec::new(),
         };
         assert_eq!(ec.active_image(), "/base.sif");
+    }
+
+    #[test]
+    fn cache_key_folds_system_packages() {
+        let bin = std::path::Path::new("/nonexistent/morloc");
+        let base = cache_key("manifest", bin, &[]);
+        // No packages: no extra line, so envs declaring none keep a stable key.
+        assert!(!base.contains("system-packages"));
+        // Declaring one changes the key so the image is rebuilt.
+        let with_pkg = cache_key("manifest", bin, &["jq".to_string()]);
+        assert_ne!(base, with_pkg);
+        assert!(with_pkg.contains("# system-packages: jq"));
     }
 
     // ---- native Runner seam ----
@@ -5147,6 +5221,7 @@ run:
                 backend: Backend::Native,
                 shm_size: "512m".to_string(),
                 morloc_version: None,
+                system_packages: Vec::new(),
             },
         }
     }

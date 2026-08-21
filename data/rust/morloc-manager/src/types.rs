@@ -333,6 +333,11 @@ pub struct EnvironmentConfig {
     /// Morloc version this environment was created from.
     #[serde(default)]
     pub morloc_version: Option<Version>,
+    /// Extra OS packages baked into the image via the base package manager
+    /// (apt), for tools conda cannot provide (e.g. jq). Container-only; the
+    /// native backend rejects them at creation.
+    #[serde(default)]
+    pub system_packages: Vec<String>,
 }
 
 fn default_shm_size() -> String {
@@ -349,6 +354,7 @@ impl EnvironmentConfig {
         base_image: String,
         built_image: Option<String>,
         morloc_version: Option<Version>,
+        system_packages: Vec<String>,
     ) -> Self {
         EnvironmentConfig {
             schema_version: CURRENT_ENV_SCHEMA,
@@ -365,6 +371,7 @@ impl EnvironmentConfig {
             backend,
             shm_size: default_shm_size(),
             morloc_version,
+            system_packages,
         }
     }
 
