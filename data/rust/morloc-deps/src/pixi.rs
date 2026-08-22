@@ -390,75 +390,307 @@ pub fn lock(env_dir: &Path, pixi_bin: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Capture the toolchain activation env-map from a solved pixi env by parsing
-/// `pixi shell-hook`. The map is what the native Runner injects before spawning a
-/// command, and it carries EVERY variable the conda activation scripts export --
-/// PATH + CONDA_PREFIX, and (crucially) `$CC`/`$CXX`/`$AR`/`$RANLIB`/`$STRIP`/...
-/// set by conda-forge's `c-compiler`/`cxx-compiler` packages. conda ships the
-/// binutils/compilers under target-prefixed names (e.g. `x86_64-conda-linux-gnu-
-/// ar`), NOT as a bare `ar`/`gcc` on PATH, so those `$AR`/`$CC` entries are what
-/// let cargo/cc-rs find the archiver; dropping them breaks C-dependency builds.
+/// A package installed in the environment's solved world, read from `pixi.lock`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LockedPackage {
+    pub name: String,
+    pub version: String,
+    /// Provider: "conda" or "pypi".
+    pub kind: String,
+}
+
+/// The packages recorded in `<pixi_dir>/pixi.lock` for `platform` -- the env's
+/// actual solved world, sorted by name. Returns an empty vec if the lock is
+/// absent (the environment has not been solved yet).
+///
+/// The lock references each package only by artifact URL under
+/// `environments.<env>.packages.<platform>`, with no separate name/version
+/// fields, so both are parsed from the artifact filename.
+pub fn locked_packages(pixi_dir: &Path, platform: &str) -> Result<Vec<LockedPackage>> {
+    let lock_path = pixi_dir.join("pixi.lock");
+    let text = match std::fs::read_to_string(&lock_path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(DepsError::Env(format!(
+                "cannot read {}: {e}",
+                lock_path.display()
+            )))
+        }
+    };
+    parse_locked_packages(&text, platform)
+}
+
+#[derive(serde::Deserialize)]
+struct Lock {
+    #[serde(default)]
+    environments: std::collections::BTreeMap<String, LockEnv>,
+}
+
+#[derive(serde::Deserialize)]
+struct LockEnv {
+    #[serde(default)]
+    packages: std::collections::BTreeMap<String, Vec<PackageRef>>,
+}
+
+#[derive(serde::Deserialize)]
+struct PackageRef {
+    #[serde(default)]
+    conda: Option<String>,
+    #[serde(default)]
+    pypi: Option<String>,
+}
+
+/// Parse pixi.lock text into the sorted package list for `platform`. Prefers the
+/// `default` environment and the requested platform, falling back to the sole
+/// entry when there is exactly one (so a single-env/single-platform lock always
+/// resolves even if names drift).
+fn parse_locked_packages(text: &str, platform: &str) -> Result<Vec<LockedPackage>> {
+    let lock: Lock = serde_yaml::from_str(text)
+        .map_err(|e| DepsError::Env(format!("cannot parse pixi.lock: {e}")))?;
+    let env = lock.environments.get("default").or_else(|| {
+        (lock.environments.len() == 1).then(|| lock.environments.values().next().unwrap())
+    });
+    let Some(env) = env else {
+        return Ok(Vec::new());
+    };
+    let refs = env.packages.get(platform).or_else(|| {
+        (env.packages.len() == 1).then(|| env.packages.values().next().unwrap())
+    });
+    let Some(refs) = refs else {
+        return Ok(Vec::new());
+    };
+    let mut pkgs: Vec<LockedPackage> = refs
+        .iter()
+        .filter_map(|r| {
+            if let Some(url) = &r.conda {
+                parse_conda_artifact(url)
+                    .map(|(name, version)| LockedPackage { name, version, kind: "conda".to_string() })
+            } else if let Some(url) = &r.pypi {
+                parse_pypi_artifact(url)
+                    .map(|(name, version)| LockedPackage { name, version, kind: "pypi".to_string() })
+            } else {
+                None
+            }
+        })
+        .collect();
+    pkgs.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.version.cmp(&b.version)));
+    pkgs.dedup();
+    Ok(pkgs)
+}
+
+/// Parse `name` and `version` from a conda artifact URL. The filename is
+/// `<name>-<version>-<build>.conda` (or `.tar.bz2`); split from the RIGHT so a
+/// name containing hyphens (e.g. `binutils_impl_linux-64`) stays intact.
+fn parse_conda_artifact(url: &str) -> Option<(String, String)> {
+    let file = url.rsplit('/').next()?;
+    let stem = file
+        .strip_suffix(".conda")
+        .or_else(|| file.strip_suffix(".tar.bz2"))?;
+    let mut it = stem.rsplitn(3, '-');
+    let _build = it.next()?;
+    let version = it.next()?;
+    let name = it.next()?;
+    if name.is_empty() || version.is_empty() {
+        None
+    } else {
+        Some((name.to_string(), version.to_string()))
+    }
+}
+
+/// Parse `name` and `version` from a pypi artifact URL. A wheel filename is
+/// `<name>-<version>-...whl` (the distribution name is normalized to contain no
+/// hyphen), so split from the LEFT.
+fn parse_pypi_artifact(url: &str) -> Option<(String, String)> {
+    let file = url.rsplit('/').next()?;
+    let stem = file
+        .strip_suffix(".whl")
+        .or_else(|| file.strip_suffix(".tar.gz"))
+        .or_else(|| file.strip_suffix(".zip"))
+        .unwrap_or(file);
+    let mut it = stem.split('-');
+    let name = it.next()?;
+    let version = it.next()?;
+    if name.is_empty() || version.is_empty() {
+        None
+    } else {
+        Some((name.to_string(), version.to_string()))
+    }
+}
+
+/// The morloc language whose runtime each recognized conda package provides,
+/// paired with that package's resolved version, for the packages present in
+/// `locked`. The single source of truth for the runtime-package -> language
+/// mapping, so `info` (which formats "<lang> <version>") and `doctor` (which
+/// wants just the language set) cannot drift apart.
+pub fn runtime_languages(locked: &[LockedPackage]) -> Vec<(&'static str, String)> {
+    // (conda package name, morloc language)
+    const RUNTIMES: &[(&str, &str)] = &[
+        ("python", "python"),
+        ("rust", "rust"),
+        ("r-base", "r"),
+        ("julia", "julia"),
+    ];
+    RUNTIMES
+        .iter()
+        .filter_map(|(pkg, lang)| {
+            locked
+                .iter()
+                .find(|p| p.name == *pkg)
+                .map(|p| (*lang, p.version.clone()))
+        })
+        .collect()
+}
+
+/// Single-quote a string for safe interpolation into a shell command: wrap in
+/// single quotes and replace each embedded `'` with `'\''`. Prevents a path
+/// containing a quote/space/metachar from breaking or injecting into the script.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Capture the toolchain activation env-map from a solved pixi env. The map is
+/// what the native Runner injects before spawning a command, and it must carry
+/// EVERY variable the conda activation exports -- PATH + CONDA_PREFIX, and
+/// (crucially) `$CC`/`$CXX`/`$AR`/`$RANLIB`/`$STRIP`/... set by conda-forge's
+/// `c-compiler`/`cxx-compiler` packages. conda ships the binutils/compilers under
+/// target-prefixed names (e.g. `x86_64-conda-linux-gnu-ar`), NOT as a bare
+/// `ar`/`gcc` on PATH, so those `$AR`/`$CC` entries are what let cargo/cc-rs find
+/// the archiver; dropping them breaks C-dependency builds.
+///
+/// `pixi shell-hook` alone does NOT set those compiler vars -- they are exported
+/// by the `$CONDA_PREFIX/etc/conda/activate.d/*.sh` scripts, which the hook does
+/// not inline. So the capture activates exactly as the container's
+/// `morloc-activate` does (shell-hook THEN source activate.d) and diffs the
+/// resulting environment against the base, keeping only what activation added or
+/// changed. Statically parsing the hook text would silently drop `$AR` and leave
+/// native Rust builds failing with `cc-rs: failed to find tool "ar"` on any host
+/// without a bare `ar` on PATH.
 pub fn capture_activation(env_dir: &Path, pixi_bin: &Path) -> Result<Vec<(String, String)>> {
     let manifest = env_dir.join("pixi.toml");
-    let out = Command::new(pixi_bin)
-        .arg("shell-hook")
-        .arg("--manifest-path")
-        .arg(&manifest)
+    const SPLIT: &str = "__MORLOC_ACTIVATION_SPLIT__";
+    // NUL-delimited dump of the exported environment via POSIX awk. `env -0` is a
+    // GNU extension (absent on macOS/BSD/busybox); awk's ENVIRON is portable and
+    // preserves values that span newlines. Running it before and after activation
+    // captures the delta.
+    const ENV_DUMP: &str = "awk 'BEGIN{for(k in ENVIRON) printf \"%s=%s%c\", k, ENVIRON[k], 0}'";
+    // Interpolated paths are shell-quoted: a single quote or space in the env
+    // path must not break the script or inject commands. shell-hook's stdout is
+    // captured into `hook` (not eval'd inline) so it cannot pollute the env dump;
+    // its failure aborts with the real error surfaced (no `2>/dev/null`/`|| true`),
+    // and CONDA_PREFIX is asserted in-shell rather than assumed. Sourced activate.d
+    // stdout is sent to stderr so a chatty script cannot corrupt the dump.
+    let script = format!(
+        "{dump}\n\
+         printf '%s\\0' {split}\n\
+         hook=$({pixi} shell-hook --manifest-path {manifest} --shell bash) || exit 3\n\
+         eval \"$hook\"\n\
+         [ -n \"$CONDA_PREFIX\" ] || exit 4\n\
+         for f in \"$CONDA_PREFIX/etc/conda/activate.d/\"*.sh; do [ -r \"$f\" ] && . \"$f\" >&2; done\n\
+         {dump}",
+        dump = ENV_DUMP,
+        split = sh_quote(SPLIT),
+        pixi = sh_quote(&pixi_bin.display().to_string()),
+        manifest = sh_quote(&manifest.display().to_string()),
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
         .stdin(Stdio::null())
         .output()
-        .map_err(|e| DepsError::Env(format!("could not run pixi shell-hook: {e}")))?;
+        .map_err(|e| DepsError::Env(format!("could not run activation capture: {e}")))?;
     if !out.status.success() {
         return Err(DepsError::Env(format!(
-            "pixi shell-hook failed: {}",
+            "activation capture failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
-    let map = parse_shell_hook(&String::from_utf8_lossy(&out.stdout));
-    if !map.iter().any(|(k, _)| k == "CONDA_PREFIX") {
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let (base_text, activated_text) = stdout
+        .split_once(&format!("{SPLIT}\0"))
+        .ok_or_else(|| {
+            DepsError::Env("activation capture produced no split marker".to_string())
+        })?;
+    let activated = parse_env0(activated_text);
+    if !activated.iter().any(|(k, _)| k == "CONDA_PREFIX") {
         return Err(DepsError::Env(
-            "pixi shell-hook produced no CONDA_PREFIX; cannot activate the native toolchain"
+            "activation produced no CONDA_PREFIX; cannot activate the native toolchain"
                 .to_string(),
         ));
     }
-    Ok(map)
+    Ok(activation_delta(&parse_env0(base_text), activated))
 }
 
-/// Parse `pixi shell-hook` output into an activation env-map. Recognizes
-/// `export KEY=VALUE` lines with an identifier key; ignores comments, blank
-/// lines, and any trailing shell-function body. Values are shell-unquoted.
-pub fn parse_shell_hook(output: &str) -> Vec<(String, String)> {
-    let mut map = Vec::new();
-    for line in output.lines() {
-        let rest = match line.trim().strip_prefix("export ") {
-            Some(r) => r,
-            None => continue,
-        };
-        let (key, val) = match rest.split_once('=') {
-            Some(kv) => kv,
-            None => continue,
-        };
-        if key.is_empty()
-            || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        {
-            continue;
-        }
-        map.push((key.to_string(), shell_unquote(val)));
-    }
-    map
+/// The activation delta: entries the activated environment ADDED or CHANGED
+/// relative to the base, so it never pins the caller's unrelated host vars when
+/// applied on top of the inherited environ at run time. Pure shell bookkeeping
+/// (`_`, `SHLVL`, `PWD`, `OLDPWD`) is dropped. Kept even when identical to the
+/// base: the loader/toolchain essentials (`is_forced_keep`) and any var whose
+/// value references the conda prefix -- these are conda-set and must survive so a
+/// later `run` from a clean shell still has the compiler toolchain.
+fn activation_delta(
+    base: &[(String, String)],
+    activated: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    let base_map: BTreeMap<&str, &str> =
+        base.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    // The activated conda prefix. Vars whose value references it are conda-set
+    // (e.g. CFLAGS=-I$PREFIX/include, CC=$PREFIX/bin/...) and must survive even
+    // when identical to the base, otherwise running `update` from an already-
+    // activated shell would drop them from the record; `native_run_env` replays
+    // that record, so a later `run` from a clean shell would build with no
+    // $CC/$AR/$CFLAGS and fail with "failed to find tool ar".
+    let prefix = activated
+        .iter()
+        .find(|(k, _)| k == "CONDA_PREFIX")
+        .map(|(_, v)| v.clone())
+        .filter(|p| !p.is_empty());
+    activated
+        .into_iter()
+        .filter(|(k, _)| !matches!(k.as_str(), "_" | "SHLVL" | "PWD" | "OLDPWD"))
+        .filter(|(k, v)| {
+            is_forced_keep(k)
+                || prefix.as_deref().map(|p| v.contains(p)).unwrap_or(false)
+                || base_map.get(k.as_str()) != Some(&v.as_str())
+        })
+        .collect()
 }
 
-/// Strip a single layer of matching single or double quotes.
-fn shell_unquote(s: &str) -> String {
-    let s = s.trim();
-    let bytes = s.as_bytes();
-    if bytes.len() >= 2
-        && (bytes[0] == b'"' || bytes[0] == b'\'')
-        && bytes[bytes.len() - 1] == bytes[0]
-    {
-        s[1..s.len() - 1].to_string()
-    } else {
-        s.to_string()
-    }
+/// Env vars that must survive the activation delta even when identical to the
+/// base: the loader essentials (`PATH`/`CONDA_PREFIX`, which downstream steps
+/// like `prepend_to_path` require) and the conda compiler/binutils vars that
+/// cargo/cc-rs and the C++ pools need (dropping any of these reintroduces the
+/// "failed to find tool ar" class of build failure). Conda vars whose VALUE
+/// points into the prefix are kept separately (see `activation_delta`), so this
+/// list only needs the ones that can be bare names (e.g. `AR`).
+fn is_forced_keep(key: &str) -> bool {
+    matches!(
+        key,
+        "PATH" | "CONDA_PREFIX"
+            | "CC" | "CXX" | "CPP" | "AR" | "AS" | "LD" | "NM" | "RANLIB"
+            | "STRIP" | "OBJCOPY" | "OBJDUMP" | "READELF" | "ADDR2LINE"
+            | "CFLAGS" | "CXXFLAGS" | "CPPFLAGS" | "LDFLAGS"
+            | "DEBUG_CFLAGS" | "DEBUG_CXXFLAGS" | "CMAKE_ARGS"
+            | "CMAKE_PREFIX_PATH" | "PKG_CONFIG_PATH" | "CONDA_BUILD_SYSROOT"
+            | "HOST" | "BUILD"
+    )
+}
+
+/// Parse a NUL-terminated environment dump into a `KEY=VALUE` map. Entries
+/// without a `=` or with an empty key are ignored; values may contain `=` and
+/// newlines (they are preserved by the NUL delimiter).
+pub fn parse_env0(dump: &str) -> Vec<(String, String)> {
+    dump.split('\0')
+        .filter(|e| !e.is_empty())
+        .filter_map(|entry| {
+            let (k, v) = entry.split_once('=')?;
+            if k.is_empty() {
+                None
+            } else {
+                Some((k.to_string(), v.to_string()))
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -653,28 +885,102 @@ platforms = [\"linux-64\"]
         assert_eq!(merge_constraint(">=2,<3", ">=2"), ">=2,<3");
     }
 
-    // The exact shape `pixi shell-hook` emits: export lines, a blank line, and a
-    // trailing shellcheck comment (which must be ignored).
-    const SHELL_HOOK: &str = "\
-export PATH=\"/env/.pixi/envs/default/bin:/usr/bin:/bin\"
-export CONDA_SHLVL=1
-export CONDA_PREFIX=/env/.pixi/envs/default
-export PIXI_PROMPT='(default) '
-
-# shellcheck shell=bash
-";
+    #[test]
+    fn conda_artifact_name_version_split_from_right() {
+        // A name with an internal hyphen must survive the split.
+        assert_eq!(
+            parse_conda_artifact("https://conda.anaconda.org/conda-forge/linux-64/binutils_impl_linux-64-2.46.1-default_hfdba357_102.conda"),
+            Some(("binutils_impl_linux-64".to_string(), "2.46.1".to_string()))
+        );
+        assert_eq!(
+            parse_conda_artifact("https://conda.anaconda.org/conda-forge/linux-64/python-3.12.4-hab00c5b_0_cpython.conda"),
+            Some(("python".to_string(), "3.12.4".to_string()))
+        );
+        // Legacy .tar.bz2 artifacts parse the same way.
+        assert_eq!(
+            parse_conda_artifact("https://conda.anaconda.org/conda-forge/noarch/wheel-0.48.0-pyhd8ed1ab_0.tar.bz2"),
+            Some(("wheel".to_string(), "0.48.0".to_string()))
+        );
+    }
 
     #[test]
-    fn parse_shell_hook_extracts_exports() {
-        let map = parse_shell_hook(SHELL_HOOK);
-        let get = |k: &str| map.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.as_str());
-        assert_eq!(get("CONDA_PREFIX"), Some("/env/.pixi/envs/default"));
-        assert_eq!(get("PATH"), Some("/env/.pixi/envs/default/bin:/usr/bin:/bin"));
-        assert_eq!(get("CONDA_SHLVL"), Some("1"));
-        // single-quoted value is unquoted
-        assert_eq!(get("PIXI_PROMPT"), Some("(default) "));
-        // comment / blank lines contribute nothing
-        assert!(!map.iter().any(|(k, _)| k.starts_with('#')));
+    fn pypi_artifact_name_version_split_from_left() {
+        assert_eq!(
+            parse_pypi_artifact("https://files.pythonhosted.org/packages/aa/numpy-2.1.3-cp312-cp312-manylinux_2_17_x86_64.whl"),
+            Some(("numpy".to_string(), "2.1.3".to_string()))
+        );
+        assert_eq!(
+            parse_pypi_artifact("https://files.pythonhosted.org/packages/bb/some_pkg-1.4.2.tar.gz"),
+            Some(("some_pkg".to_string(), "1.4.2".to_string()))
+        );
+    }
+
+    #[test]
+    fn locked_packages_reads_env_platform_section() {
+        let lock = "\
+version: 7
+environments:
+  default:
+    channels:
+    - url: https://conda.anaconda.org/conda-forge/
+    packages:
+      linux-64:
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/python-3.12.4-hab00c5b_0_cpython.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/binutils_impl_linux-64-2.46.1-default_hfdba357_102.conda
+      - pypi: https://files.pythonhosted.org/packages/aa/numpy-2.1.3-cp312-cp312-manylinux_2_17_x86_64.whl
+packages:
+- conda: https://conda.anaconda.org/conda-forge/linux-64/python-3.12.4-hab00c5b_0_cpython.conda
+  size: 1
+";
+        let pkgs = parse_locked_packages(lock, "linux-64").unwrap();
+        // sorted by name: binutils_impl_linux-64, numpy, python
+        assert_eq!(pkgs.len(), 3);
+        assert_eq!(pkgs[0].name, "binutils_impl_linux-64");
+        assert_eq!(pkgs[0].version, "2.46.1");
+        assert_eq!(pkgs[0].kind, "conda");
+        assert_eq!(pkgs[1].name, "numpy");
+        assert_eq!(pkgs[1].kind, "pypi");
+        assert_eq!(pkgs[2].name, "python");
+        assert_eq!(pkgs[2].version, "3.12.4");
+    }
+
+    #[test]
+    fn locked_packages_falls_back_to_sole_platform() {
+        // Requested platform absent, but exactly one platform present -> use it.
+        let lock = "\
+environments:
+  default:
+    packages:
+      osx-arm64:
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/python-3.11.9-h0_0.conda
+";
+        let pkgs = parse_locked_packages(lock, "linux-64").unwrap();
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].name, "python");
+        assert_eq!(pkgs[0].version, "3.11.9");
+    }
+
+    #[test]
+    fn sh_quote_escapes_single_quotes() {
+        assert_eq!(sh_quote("plain"), "'plain'");
+        assert_eq!(sh_quote("a b"), "'a b'");
+        // The o'brien case: the embedded quote must be escaped, not close the quote.
+        assert_eq!(sh_quote("/home/o'brien/x"), "'/home/o'\\''brien/x'");
+    }
+
+    #[test]
+    fn runtime_languages_maps_present_packages() {
+        let pkgs = vec![
+            LockedPackage { name: "python".into(), version: "3.12.4".into(), kind: "conda".into() },
+            LockedPackage { name: "rust".into(), version: "1.83.0".into(), kind: "conda".into() },
+        ];
+        assert_eq!(
+            runtime_languages(&pkgs),
+            vec![("python", "3.12.4".to_string()), ("rust", "1.83.0".to_string())]
+        );
+        // r-base -> the "r" language label; absent runtimes are omitted.
+        let r = vec![LockedPackage { name: "r-base".into(), version: "4.3.1".into(), kind: "conda".into() }];
+        assert_eq!(runtime_languages(&r), vec![("r", "4.3.1".to_string())]);
     }
 
     fn find_pixi() -> std::path::PathBuf {
@@ -688,14 +994,81 @@ export PIXI_PROMPT='(default) '
     }
 
     #[test]
+    fn parse_env0_handles_multiline_and_equals() {
+        let dump = "PATH=/a:/b\0AR=x86_64-conda-linux-gnu-ar\0MULTI=line1\nline2\0KV=a=b\0\0";
+        let map = parse_env0(dump);
+        let get = |k: &str| map.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("PATH"), Some("/a:/b"));
+        assert_eq!(get("AR"), Some("x86_64-conda-linux-gnu-ar"));
+        // a value may span newlines and may itself contain '='
+        assert_eq!(get("MULTI"), Some("line1\nline2"));
+        assert_eq!(get("KV"), Some("a=b"));
+        // empty entries (trailing NUL) contribute nothing
+        assert_eq!(map.len(), 4);
+    }
+
+    #[test]
+    fn activation_delta_keeps_added_and_changed_drops_noise() {
+        let base = vec![
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("HOME".to_string(), "/home/u".to_string()),
+            ("SHLVL".to_string(), "1".to_string()),
+        ];
+        let activated = vec![
+            // changed: conda prepends its bin
+            ("PATH".to_string(), "/env/bin:/usr/bin".to_string()),
+            // unchanged: dropped
+            ("HOME".to_string(), "/home/u".to_string()),
+            // added by activate.d: the whole point
+            ("AR".to_string(), "x86_64-conda-linux-gnu-ar".to_string()),
+            ("CONDA_PREFIX".to_string(), "/env".to_string()),
+            // shell bookkeeping that changed: dropped
+            ("SHLVL".to_string(), "2".to_string()),
+        ];
+        let delta = activation_delta(&base, activated);
+        let has = |k: &str| delta.iter().any(|(kk, _)| kk == k);
+        assert!(has("PATH"), "changed PATH kept");
+        assert!(has("AR"), "added AR kept");
+        assert!(has("CONDA_PREFIX"), "added CONDA_PREFIX kept");
+        assert!(!has("HOME"), "unchanged var dropped");
+        assert!(!has("SHLVL"), "shell bookkeeping dropped");
+    }
+
+    #[test]
+    fn activation_delta_keeps_toolchain_vars_equal_to_base() {
+        // `update` run from an already-activated shell: the toolchain vars are
+        // IDENTICAL in base and activated. They must not be dropped, else a later
+        // `run` from a clean shell builds with no compiler and fails.
+        let prefix = "/home/u/.local/share/morloc/env/pixi/.pixi/envs/default";
+        let base = vec![
+            ("CC".to_string(), "x86_64-conda-linux-gnu-cc".to_string()),
+            ("AR".to_string(), "x86_64-conda-linux-gnu-ar".to_string()),
+            ("CFLAGS".to_string(), format!("-I{prefix}/include")),
+            ("PYTHONHASHSEED".to_string(), "0".to_string()),
+            ("CONDA_PREFIX".to_string(), prefix.to_string()),
+        ];
+        let activated = base.clone(); // fully-activated shell: nothing changed
+        let delta = activation_delta(&base, activated);
+        let has = |k: &str| delta.iter().any(|(kk, _)| kk == k);
+        assert!(has("CC"), "CC kept via forced-keep");
+        assert!(has("AR"), "AR kept via forced-keep");
+        assert!(has("CFLAGS"), "CFLAGS kept (value references the prefix)");
+        assert!(has("CONDA_PREFIX"), "CONDA_PREFIX always kept");
+        // an unrelated var equal to base and unrelated to the prefix is dropped
+        assert!(!has("PYTHONHASHSEED"), "unrelated unchanged var dropped");
+    }
+
+    #[test]
     #[ignore = "requires pixi + network; run with `cargo test -- --ignored`"]
     fn live_solve_and_capture_activation() {
         let pixi = find_pixi();
         let dir = tempfile::tempdir().unwrap();
+        // cxx-compiler (not c-compiler alone) pulls the binutils activation that
+        // exports $AR, which the capture must preserve.
         write_manifest(
             dir.path(),
             "[workspace]\nname = \"morloc-live-test\"\nchannels = [\"conda-forge\"]\n\
-             platforms = [\"linux-64\"]\n\n[dependencies]\n\"c-compiler\" = \"*\"\n",
+             platforms = [\"linux-64\"]\n\n[dependencies]\n\"cxx-compiler\" = \"*\"\n",
         )
         .unwrap();
         solve(dir.path(), &pixi).expect("pixi solve");
@@ -704,5 +1077,9 @@ export PIXI_PROMPT='(default) '
         assert!(get("CONDA_PREFIX").is_some(), "no CONDA_PREFIX captured");
         let path = get("PATH").expect("PATH captured");
         assert!(path.contains(".pixi/envs"), "conda bin not first on PATH: {path}");
+        // activate.d exports (not just shell-hook lines) must be captured;
+        // without them cc-rs cannot find the archiver.
+        assert!(get("AR").is_some(), "no $AR captured (activate.d not sourced)");
+        assert!(get("CC").is_some(), "no $CC captured (activate.d not sourced)");
     }
 }

@@ -696,6 +696,18 @@ pub fn oci_base_env(mh: &str) -> Vec<(String, String)> {
     ]
 }
 
+/// The OCI managed-environment markers appended for an in-container `morloc make`:
+/// the `MORLOC_ENV` marker the compiler's dependency callback gates on, plus the
+/// baked pixi location (`/env`, distinct from the state root). Shared so
+/// `morloc-manager info` reports exactly the markers a run exports.
+pub fn oci_managed_markers() -> Vec<(String, String)> {
+    vec![
+        ("MORLOC_ENV".to_string(), "container".to_string()),
+        ("MORLOC_PIXI".to_string(), CONTAINER_PIXI_BIN.to_string()),
+        ("MORLOC_PIXI_DIR".to_string(), CONTAINER_PIXI_DIR.to_string()),
+    ]
+}
+
 // ======================================================================
 // Manifest and image resolution
 // ======================================================================

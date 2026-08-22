@@ -167,7 +167,7 @@ syncEnvDeps = do
     runAgent :: FilePath -> String -> IO (Either IOException ExitCode)
     runAgent agent key = try $ do
       (_, _, _, ph) <-
-        createProcess (proc agent ["sync", "--program", key, "--spec", "envspec.json"])
+        createProcess (proc agent ["sync", "--name", key, "--spec", "envspec.json"])
       waitForProcess ph
 
 -- | Locate the @morloc-env@ agent: first as a sibling of this compiler

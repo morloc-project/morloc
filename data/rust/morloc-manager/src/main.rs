@@ -248,6 +248,10 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Look up the system-scope environment (when name is shadowed locally)
         #[arg(long)]
         system: bool,
+        /// List every package in the solved world (from pixi.lock) at its
+        /// locked version, instead of the summary
+        #[arg(long)]
+        packages: bool,
     },
     /// Select an environment
     #[command(display_order = 6)]
@@ -702,28 +706,107 @@ fn which(name: &str) -> bool {
 }
 
 
-/// Render a phase of env.flags.yaml for `info` text output. Only sections
-/// with at least one flag are printed; an entirely empty section
-/// (the default for a fresh env) is suppressed.
-fn print_flag_section(label: &str, section: &EngineFlags) {
-    let mut emitted_header = false;
-    let mut emit = |engine: &str, list: &[String]| {
-        if list.is_empty() {
-            return;
+/// A path rendered for `info`, flagged `(MISSING)` when it is absent on disk so
+/// a half-built environment is obvious.
+fn annotate_missing(p: &std::path::Path) -> String {
+    if p.exists() {
+        p.display().to_string()
+    } else {
+        format!("{} (MISSING)", p.display())
+    }
+}
+
+/// Locate pixi WITHOUT provisioning it (never downloads): the `MORLOC_PIXI`
+/// override if it names a file, else the provisioned `<data_dir>/bin/pixi`.
+/// `None` if it isn't provisioned yet. Used by `info` and by doctor so neither
+/// triggers a download (unlike `provision::provision_pixi`).
+pub(crate) fn locate_pixi(scope: Scope) -> Option<std::path::PathBuf> {
+    std::env::var("MORLOC_PIXI")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_file())
+        .or_else(|| {
+            let p = cfg::data_dir(scope).join("bin").join("pixi");
+            p.is_file().then_some(p)
+        })
+}
+
+/// The env-related variables a `run`/`serve` process sees, with the values it
+/// sees them as: host paths natively, in-container paths under a container.
+/// Mirrors the exports set by `native_run_env` and `run_with_config`; kept here
+/// so `info` reflects what actually reaches the process.
+fn info_env_exports(
+    scope: Scope,
+    data_dir: &std::path::Path,
+    name: &str,
+    engine: Option<ContainerEngine>,
+) -> Vec<(String, String)> {
+    match engine {
+        // Native: native_run_env exports MORLOC_HOME, MORLOC_ENV, and (best-effort)
+        // MORLOC_PIXI. It does NOT export MORLOC_STATE (the nexus defaults that to
+        // MORLOC_HOME internally), so it is not listed here.
+        None => {
+            let mut v = vec![
+                ("MORLOC_HOME".to_string(), data_dir.display().to_string()),
+                ("MORLOC_ENV".to_string(), name.to_string()),
+            ];
+            if let Some(pixi) = locate_pixi(scope) {
+                v.push(("MORLOC_PIXI".to_string(), pixi.display().to_string()));
+            }
+            v
         }
-        if !emitted_header {
-            println!("  {label}:");
-            emitted_header = true;
+        Some(e) => {
+            let mut v = vec![
+                ("MORLOC_HOME".to_string(), serve::CONTAINER_MORLOC_HOME.to_string()),
+                ("MORLOC_STATE".to_string(), serve::CONTAINER_MORLOC_STATE.to_string()),
+            ];
+            if e.is_oci() {
+                v.push(("HOME".to_string(), format!("{}/home", serve::CONTAINER_MORLOC_STATE)));
+                v.extend(serve::oci_managed_markers());
+            } else {
+                // Apptainer mounts the host $HOME and sets none of the OCI-only vars.
+                v.push(("HOME".to_string(), "<host $HOME>".to_string()));
+            }
+            v
         }
-        println!("    {engine}:");
-        for flag in list {
-            println!("      - {flag}");
+    }
+}
+
+/// The languages the environment provisions -- the union across the installed
+/// baseline (per-program specs plus the `--lang` toolchain pins), one entry per
+/// language with its version constraint when one is pinned.
+fn info_languages(ctx: &envstore::EnvContext) -> Vec<String> {
+    let specs = ctx.gather_installed().unwrap_or_default();
+    let mut by_lang: std::collections::BTreeMap<String, Option<String>> =
+        std::collections::BTreeMap::new();
+    for spec in &specs {
+        for l in &spec.languages {
+            let entry = by_lang.entry(l.lang.clone()).or_insert(None);
+            if entry.is_none() {
+                if let Some(c) = l.constraint.as_deref().filter(|c| *c != "*") {
+                    *entry = Some(c.to_string());
+                }
+            }
         }
-    };
-    emit("all", &section.all);
-    emit("docker", &section.docker);
-    emit("podman", &section.podman);
-    emit("apptainer", &section.apptainer);
+    }
+    by_lang
+        .into_iter()
+        .map(|(lang, c)| match c {
+            Some(c) => format!("{lang}@{c}"),
+            None => lang,
+        })
+        .collect()
+}
+
+/// Language-runtime versions found in the solved world, for the `info` summary --
+/// e.g. `["python 3.12.4", "rust 1.83.0"]`. The runtime-package -> language map is
+/// shared with `doctor` via `pixi::runtime_languages` so the two cannot drift.
+fn info_runtimes(locked: &[pixi::LockedPackage]) -> Vec<String> {
+    pixi::runtime_languages(locked)
+        .into_iter()
+        .map(|(lang, ver)| format!("{lang} {ver}"))
+        .collect()
 }
 
 
@@ -1279,7 +1362,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- info ----
-        Cmd::Info { name, system } => {
+        Cmd::Info { name, system, packages } => {
             if let Some(env_name) = name {
                 // Detailed info for a specific environment
                 let scope = if system {
@@ -1298,172 +1381,259 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     .and_then(|c| c.active_env)
                     .as_deref() == Some(env_name.as_str());
 
-                if json {
+                let engine = ec.backend.container_engine();
+                let is_oci = matches!(engine, Some(e) if e.is_oci());
+                let scope_str = match scope { Scope::Local => "local", Scope::System => "system" };
+                // Folders (host paths). Natively the runtime shares the data dir;
+                // a container stages the runtime under `runtime/`. The requirements
+                // store, pixi project, cache, and (OCI) shell home all sit under it.
+                let dep_ctx = envstore::EnvContext::new(&data_dir);
+                let requirements_dir = dep_ctx.requirements_dir();
+                let pixi_dir = dep_ctx.pixi_dir();
+                let cache_dir = data_dir.join("cache");
+                let config_path = cfg::env_config_path(scope, &env_name);
+                let runtime_host = match engine {
+                    Some(_) => data_dir.join("runtime"),
+                    None => data_dir.clone(),
+                };
+                let home_dir = if is_oci { Some(cfg::env_home_dir(&data_dir)) } else { None };
+                // Provisioned yet? Native writes a runtime record on success; a
+                // container env has a built image.
+                let materialized = match engine {
+                    None => cfg::read_native_runtime(scope, &env_name).is_ok(),
+                    Some(_) => ec.built_image.is_some(),
+                };
+                let exports = info_env_exports(scope, &data_dir, &env_name, engine);
+                let languages = info_languages(&dep_ctx);
+                let installed = dep_ctx.installed_program_names().unwrap_or_default();
+                // The actual solved world from pixi.lock (host-side for every
+                // backend). Empty if the env has not been solved yet.
+                let platform = morloc_deps::platform::conda_platform();
+                let locked = pixi::locked_packages(&pixi_dir, &platform).unwrap_or_default();
+
+                if packages && json {
+                    // `--packages --json`: just the package list, nothing else.
+                    println!("{}", serde_json::to_string_pretty(&locked).unwrap());
+                } else if packages {
+                    // `--packages`: the full locked world, one per line.
+                    if locked.is_empty() {
+                        println!("No packages: environment not solved yet (run `update`).");
+                    } else {
+                        println!("Packages (locked, {}):", locked.len());
+                        for p in &locked {
+                            println!("  {:<28} {:<14} [{}]", p.name, p.version, p.kind);
+                        }
+                    }
+                } else if json {
                     #[derive(serde::Serialize)]
-                    struct InfoDetail {
-                        name: String,
-                        scope: String,
-                        active: bool,
-                        base_image: String,
+                    struct Folders {
+                        data_dir: String,
+                        runtime: String,
+                        pixi: String,
+                        requirements: String,
+                        cache: String,
                         #[serde(skip_serializing_if = "Option::is_none")]
-                        built_image: Option<String>,
-                        morloc_version: Option<Version>,
-                        engine: String,
+                        home: Option<String>,
+                        config: String,
+                    }
+                    // `languages`/`installed`/`pinned` are the morloc-DECLARED
+                    // intent; `packages` is the ACTUAL solved world from pixi.lock.
+                    #[derive(serde::Serialize)]
+                    struct Deps {
+                        languages: Vec<String>,
+                        installed: Vec<String>,
+                        #[serde(skip_serializing_if = "Vec::is_empty")]
+                        system_packages: Vec<String>,
+                        packages: Vec<pixi::LockedPackage>,
+                    }
+                    // Container-only image/recipe detail (includes the engine flags,
+                    // which are meaningless natively and so omitted there).
+                    #[derive(serde::Serialize)]
+                    struct Container {
+                        #[serde(skip_serializing_if = "Option::is_none")]
+                        image: Option<String>,
                         #[serde(skip_serializing_if = "Option::is_none")]
                         shm_size: Option<String>,
                         #[serde(skip_serializing_if = "Option::is_none")]
                         dockerfile: Option<String>,
                         #[serde(skip_serializing_if = "Option::is_none")]
-                        deffile: Option<String>,
-                        #[serde(skip_serializing_if = "Option::is_none")]
                         base_sif: Option<String>,
                         #[serde(skip_serializing_if = "Option::is_none")]
                         layered_sif: Option<String>,
-                        flag_config: FlagConfig,
-                        flags_file: String,
-                        data_dir: String,
+                        #[serde(skip_serializing_if = "Option::is_none")]
+                        deffile: Option<String>,
+                        flags: FlagConfig,
                     }
-                    let df_str = ec.dockerfile.as_ref().map(|_| {
-                        let df_path = cfg::env_dockerfile_path(scope, &env_name);
-                        df_path.display().to_string()
-                    });
-                    let def_str = ec.singularity_def.as_ref().map(|_| {
-                        let def_path = cfg::env_deffile_path(scope, &env_name);
-                        def_path.display().to_string()
-                    });
-                    let flags_path = cfg::env_flags_yaml_path(scope, &env_name);
-                    let flag_config = cfg::read_flag_config(scope, &env_name)
-                        .unwrap_or_default();
-                    // SHM size is honored only under docker/podman; Apptainer
-                    // shares host /dev/shm so the field is meaningless there
-                    // and is omitted from `info` output for that engine.
-                    let shm = match ec.backend.container_engine() {
-                        Some(ContainerEngine::Docker) | Some(ContainerEngine::Podman) => {
-                            Some(ec.shm_size.clone())
+                    #[derive(serde::Serialize)]
+                    struct InfoDetail {
+                        name: String,
+                        scope: String,
+                        active: bool,
+                        backend: String,
+                        #[serde(skip_serializing_if = "Option::is_none")]
+                        morloc_version: Option<Version>,
+                        materialized: bool,
+                        folders: Folders,
+                        environment: std::collections::BTreeMap<String, String>,
+                        dependencies: Deps,
+                        #[serde(skip_serializing_if = "Option::is_none")]
+                        container: Option<Container>,
+                    }
+                    let container = engine.map(|e| {
+                        let dockerfile = ec.dockerfile.as_ref().map(|_| {
+                            cfg::env_dockerfile_path(scope, &env_name).display().to_string()
+                        });
+                        let deffile = ec.singularity_def.as_ref().map(|_| {
+                            cfg::env_deffile_path(scope, &env_name).display().to_string()
+                        });
+                        // .sif paths only apply under Apptainer.
+                        let (base_sif, layered_sif) = match e {
+                            ContainerEngine::Apptainer => (ec.base_sif.clone(), ec.layered_sif.clone()),
+                            _ => (None, None),
+                        };
+                        Container {
+                            image: ec.built_image.clone(),
+                            // SHM size is honored only under docker/podman.
+                            shm_size: if e.is_oci() { Some(ec.shm_size.clone()) } else { None },
+                            dockerfile,
+                            base_sif,
+                            layered_sif,
+                            deffile,
+                            flags: cfg::read_flag_config(scope, &env_name).unwrap_or_default(),
                         }
-                        // Apptainer shares host /dev/shm; native has no container.
-                        _ => None,
-                    };
-                    // .sif paths only apply under Apptainer. Built_image
-                    // mirrors that asymmetry: it is the OCI fallback tag for
-                    // Apptainer and the primary built layer for docker/podman.
-                    let (base_sif, layered_sif) = match ec.backend.container_engine() {
-                        Some(ContainerEngine::Apptainer) => (ec.base_sif.clone(), ec.layered_sif.clone()),
-                        _ => (None, None),
-                    };
+                    });
                     let output = InfoDetail {
                         name: ec.name.clone(),
-                        scope: match scope { Scope::Local => "local", Scope::System => "system" }.to_string(),
+                        scope: scope_str.to_string(),
                         active,
-                        base_image: ec.base_image.clone(),
-                        built_image: ec.built_image.clone(),
+                        backend: ec.backend.label().to_string(),
                         morloc_version: ec.morloc_version.clone(),
-                        engine: ec.backend.label().to_string(),
-                        shm_size: shm,
-                        dockerfile: df_str,
-                        deffile: def_str,
-                        base_sif,
-                        layered_sif,
-                        flag_config,
-                        flags_file: flags_path.display().to_string(),
-                        data_dir: data_dir.display().to_string(),
+                        materialized,
+                        folders: Folders {
+                            data_dir: data_dir.display().to_string(),
+                            runtime: runtime_host.display().to_string(),
+                            pixi: pixi_dir.display().to_string(),
+                            requirements: requirements_dir.display().to_string(),
+                            cache: cache_dir.display().to_string(),
+                            home: home_dir.as_ref().map(|h| h.display().to_string()),
+                            config: config_path.display().to_string(),
+                        },
+                        environment: exports.into_iter().collect(),
+                        dependencies: Deps {
+                            languages,
+                            installed,
+                            system_packages: ec.system_packages.clone(),
+                            packages: locked,
+                        },
+                        container,
                     };
                     println!("{}", serde_json::to_string_pretty(&output).unwrap());
                 } else {
-                    println!("Name:           {}", ec.name);
-                    println!("Scope:          {}", match scope { Scope::Local => "local", Scope::System => "system" });
-                    println!("Active:         {}", if active { "yes" } else { "no" });
-                    println!("Base image:     {}", ec.base_image);
-                    if let Some(ref img) = ec.built_image {
-                        println!("Built image:    {img}");
-                    }
+                    println!("Name:      {}", ec.name);
+                    println!("Scope:     {scope_str}");
+                    println!("Active:    {}", if active { "yes" } else { "no" });
+                    println!("Backend:   {}", ec.backend.label());
                     if let Some(ref ver) = ec.morloc_version {
-                        println!("Morloc version: {}", ver.show());
+                        println!("Morloc:    {}", ver.show());
                     }
-                    println!("Engine:         {}", ec.backend.label());
-                    // Engine-specific fields:
-                    // * Docker/Podman: show SHM size and the Dockerfile path.
-                    // * Apptainer:    show base .sif path and the .def path
-                    //                 (Dockerfile, if present, is the OCI
-                    //                 fallback recipe and is also surfaced).
-                    match ec.backend.container_engine() {
+                    println!(
+                        "Status:    {}",
+                        if materialized { "materialized" } else { "not materialized (run `update`)" }
+                    );
+
+                    println!();
+                    println!("Folders (host):");
+                    println!("  Data dir:     {}", data_dir.display());
+                    match engine {
+                        // Native shares one dir for runtime and state.
+                        None => println!("  Runtime:      {}  (shared with state)", runtime_host.display()),
+                        Some(_) => println!("  Runtime:      {}", runtime_host.display()),
+                    }
+                    println!("  Pixi:         {}", pixi_dir.display());
+                    println!("  Requirements: {}", requirements_dir.display());
+                    println!("  Cache:        {}", cache_dir.display());
+                    if let Some(ref h) = home_dir {
+                        println!("  Home:         {}  (shell $HOME; drop dotfiles here)", h.display());
+                    }
+                    println!("  Config:       {}", config_path.display());
+
+                    println!();
+                    println!("Environment (exported into run/serve):");
+                    for (k, v) in &exports {
+                        println!("  {k}={v}");
+                    }
+
+                    println!();
+                    println!("Dependencies (locked):");
+                    if locked.is_empty() {
+                        println!("  not solved yet (run `update`)");
+                    } else {
+                        let runtimes = info_runtimes(&locked);
+                        if !runtimes.is_empty() {
+                            println!("  Languages:  {}", runtimes.join(", "));
+                        }
+                        println!(
+                            "  {} packages in the solved world (`info {} --packages` for the full list)",
+                            locked.len(),
+                            env_name
+                        );
+                    }
+                    // morloc-declared intent, shown only when present (distinct from
+                    // the actual solved world above).
+                    if !installed.is_empty() {
+                        println!("  Programs:   {}", installed.join(", "));
+                    }
+                    if !languages.is_empty() {
+                        println!("  Pinned:     {}", languages.join(", "));
+                    }
+                    if !ec.system_packages.is_empty() {
+                        println!("  System:     {}", ec.system_packages.join(" "));
+                    }
+
+                    // Container image + recipe detail (docker/podman/apptainer only).
+                    // Missing on-disk artifacts are flagged so a half-built env is
+                    // obvious.
+                    match engine {
                         Some(ContainerEngine::Docker) | Some(ContainerEngine::Podman) => {
-                            println!("SHM size:       {}", ec.shm_size);
-                            println!("Dockerfile:     {}", match ec.dockerfile {
-                                Some(_) => {
-                                    let df_path = cfg::env_dockerfile_path(scope, &env_name);
-                                    if df_path.exists() {
-                                        df_path.display().to_string()
-                                    } else {
-                                        format!("{} (MISSING)", df_path.display())
-                                    }
-                                }
+                            println!();
+                            println!("Container:");
+                            if let Some(ref img) = ec.built_image {
+                                println!("  Image:        {img}");
+                            }
+                            println!("  SHM size:     {}", ec.shm_size);
+                            println!("  Dockerfile:   {}", match ec.dockerfile {
+                                Some(_) => annotate_missing(&cfg::env_dockerfile_path(scope, &env_name)),
                                 None => "none".to_string(),
                             });
                         }
                         Some(ContainerEngine::Apptainer) => {
-                            println!("Base SIF:       {}", match ec.base_sif {
-                                Some(ref p) => {
-                                    if std::path::Path::new(p).is_file() {
-                                        p.clone()
-                                    } else {
-                                        format!("{p} (MISSING)")
-                                    }
-                                }
+                            println!();
+                            println!("Container:");
+                            if let Some(ref img) = ec.built_image {
+                                println!("  Image:        {img}  (OCI fallback)");
+                            }
+                            println!("  Base SIF:     {}", match ec.base_sif {
+                                Some(ref p) => annotate_missing(std::path::Path::new(p)),
                                 None => "none".to_string(),
                             });
                             if let Some(ref p) = ec.layered_sif {
-                                println!("Layered SIF:    {}", if std::path::Path::new(p).is_file() {
-                                    p.clone()
-                                } else {
-                                    format!("{p} (MISSING)")
-                                });
+                                println!("  Layered SIF:  {}", annotate_missing(std::path::Path::new(p)));
                             }
-                            println!("Def file:       {}", match ec.singularity_def {
-                                Some(_) => {
-                                    let def_path = cfg::env_deffile_path(scope, &env_name);
-                                    if def_path.exists() {
-                                        def_path.display().to_string()
-                                    } else {
-                                        format!("{} (MISSING)", def_path.display())
-                                    }
-                                }
+                            println!("  Def file:     {}", match ec.singularity_def {
+                                Some(_) => annotate_missing(&cfg::env_deffile_path(scope, &env_name)),
                                 None => "none".to_string(),
                             });
-                            // Surface a Dockerfile too if one exists -- under
-                            // Apptainer it is the OCI-fallback recipe.
+                            // A Dockerfile, if present, is the OCI-fallback recipe.
                             if ec.dockerfile.is_some() {
-                                let df_path = cfg::env_dockerfile_path(scope, &env_name);
-                                println!("Dockerfile:     {} (OCI fallback)", if df_path.exists() {
-                                    df_path.display().to_string()
-                                } else {
-                                    format!("{} (MISSING)", df_path.display())
-                                });
+                                println!(
+                                    "  Dockerfile:   {} (OCI fallback)",
+                                    annotate_missing(&cfg::env_dockerfile_path(scope, &env_name))
+                                );
                             }
                         }
-                        // Native environments have no engine-specific fields.
+                        // Native environments have no container section.
                         None => {}
                     }
-                    if !ec.system_packages.is_empty() {
-                        println!("System pkgs:    {}", ec.system_packages.join(" "));
-                    }
-                    let flags_path = cfg::env_flags_yaml_path(scope, &env_name);
-                    println!("Flags:          {}", flags_path.display());
-                    let flag_config = cfg::read_flag_config(scope, &env_name)
-                        .unwrap_or_default();
-                    print_flag_section("build", &flag_config.build);
-                    print_flag_section("run", &flag_config.run);
-                    print_flag_section("start", &flag_config.start);
-                    // Docker/podman use <data_dir>/home as the shell $HOME, so a
-                    // user can drop dotfiles there. Apptainer/native use the host
-                    // home, so the field would mislead there.
-                    if matches!(ec.backend.container_engine(), Some(e) if e.is_oci()) {
-                        println!(
-                            "Home:           {}  (shell $HOME; drop dotfiles here)",
-                            cfg::env_home_dir(&data_dir).display()
-                        );
-                    }
-                    println!("Data dir:       {}", data_dir.display());
                 }
             } else {
                 // Overview
@@ -2265,6 +2435,14 @@ fn find_running_serve_container() -> Result<(String, ContainerEngine)> {
 // Container run
 // ======================================================================
 
+/// Apply a captured activation env-map to a `Command` (the inherited environ
+/// stays in place; callers add their own overrides afterwards).
+pub(crate) fn apply_activation(cmd: &mut Command, env: &[(String, String)]) {
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+}
+
 /// Native-backend `run`: execute a command directly on the host against the
 /// environment's own MORLOC_HOME, reconstructing the provisioned toolchain
 /// environment from the materialization record. Invoked through the `Runner`
@@ -2306,7 +2484,17 @@ pub(crate) fn native_run_env(
             std::process::exit(1);
         }
         let shell_exe = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-        Command::new(shell_exe)
+        // Tag the prompt with the env name so it is clear the shell runs inside
+        // the environment. The wiring is per-shell (bash `--rcfile`, zsh
+        // `ZDOTDIR`); each wrapper sources the user's real init, so nothing on
+        // disk is touched. Other shells launch untagged.
+        let (shell_args, shell_env) = shell_prompt_setup(&shell_exe, &data_dir, &env.name);
+        let mut c = Command::new(&shell_exe);
+        c.args(&shell_args);
+        for (k, v) in &shell_env {
+            c.env(k, v);
+        }
+        c
     } else {
         let (program, rest) = req
             .args
@@ -2319,9 +2507,7 @@ pub(crate) fn native_run_env(
 
     // Inherited environ + captured toolchain activation + MORLOC_HOME, then the
     // caller's `--env` overrides last so `-e KEY=VAL` always wins.
-    for (k, v) in &runtime.activation_env {
-        cmd.env(k, v);
-    }
+    apply_activation(&mut cmd, &runtime.activation_env);
     cmd.env("MORLOC_HOME", &mh);
     // Managed-env marker: the boolean signal the compiler's dependency callback
     // gates on. Distinct from MORLOC_HOME (a general config-home override a user
@@ -2499,9 +2685,7 @@ fn run_native_morloc_init(
     if !verbose {
         cmd.arg("-q");
     }
-    for (k, v) in activation {
-        cmd.env(k, v);
-    }
+    apply_activation(&mut cmd, activation);
     cmd.env("MORLOC_HOME", env_dir);
     // init builds libmorloc.so + morloc-nexus from source with the env toolchain;
     // point it at the Rust workspace bundled in the provisioned runtime.
@@ -2707,7 +2891,14 @@ fn materialize_native_env(
     // record_abi_lock_or_warn). The env's pixi dir is the EnvContext default.
     record_abi_lock_or_warn(&env_dir, name, &req.version);
 
-    cfg::write_native_runtime(scope, name, &NativeRuntime { activation_env: activation })?;
+    cfg::write_native_runtime(
+        scope,
+        name,
+        &NativeRuntime {
+            activation_env: activation,
+            manager_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        },
+    )?;
     // Record the cache key (manifest + compiler identity) as successfully
     // materialized, written only now that the solve + init have succeeded.
     let _ = std::fs::write(&marker, &key);
@@ -2992,9 +3183,7 @@ fn native_capture_env(scope: Scope, name: &str, args: &[String]) -> Result<Strin
     let (program, rest) = args.split_first().ok_or(ManagerError::NoCommand)?;
     let mut cmd = Command::new(program);
     cmd.args(rest);
-    for (k, v) in &runtime.activation_env {
-        cmd.env(k, v);
-    }
+    apply_activation(&mut cmd, &runtime.activation_env);
     cmd.env("MORLOC_HOME", data_dir.to_string_lossy().to_string());
     let out = cmd
         .output()
@@ -3122,7 +3311,14 @@ fn rematerialize_env(
     specs.extend_from_slice(extra_specs);
 
     if ec.backend.is_native() {
-        materialize_native_env(scope, name, &specs, &lang_pins, verbose)?;
+        // Persist the provisioned version so `ec.morloc_version` tracks what is
+        // actually installed (symmetric with the container path below); without
+        // this a native `update` leaves a stale version that misleads `doctor`
+        // and the manifest-version check.
+        let mver = materialize_native_env(scope, name, &specs, &lang_pins, verbose)?;
+        let mut ec = ec;
+        ec.morloc_version = mver.parse::<Version>().ok();
+        cfg::write_env_config(scope, name, &ec)?;
         return Ok(());
     }
 
@@ -3332,6 +3528,115 @@ fn apply_dotfiles(
     provision::copy_dir_excluding(src, &home, &[])?;
     eprintln!("Copied dotfiles from {} into {}", src.display(), home.display());
     Ok(())
+}
+
+/// Filename of the morloc-owned rcfile that tags an interactive `run --shell`
+/// prompt with the environment name. It lives in the env data dir (native) or
+/// the mounted state root (container), never in the user's home, so it is not
+/// the user's `~/.bashrc` and never collides with it.
+const SHELLRC_NAME: &str = ".morloc-shellrc";
+
+/// Body of the per-launch bash rcfile for `env_name`. It first sources the
+/// standard bash init (so the user's dotfiles fully apply), then prepends a
+/// bold-orange `(<env>)` tag to whatever `PS1` those produced -- the same
+/// prepend convention conda/venv use, applied to a spawned shell. Nothing the
+/// user owns is written; this file is generated fresh each launch. Bash-only;
+/// other shells launch without it.
+fn shell_rcfile_body(env_name: &str) -> String {
+    // \033[1;38;5;208m = bold orange (256-colour); \[ \] wrap the non-printing
+    // bytes so bash computes the prompt width correctly. A raw string keeps the
+    // backslashes verbatim on their way into the file (and thus into PS1).
+    let template = r#"# morloc-manager: interactive shell for environment '__ENV__'.
+# Generated per launch -- NOT your ~/.bashrc. Sources the standard bash init so
+# your dotfiles apply, then prepends the environment tag to PS1.
+if [ -r /etc/bash.bashrc ]; then . /etc/bash.bashrc; fi
+if [ -r "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi
+PS1='\[\033[1;38;5;208m\](__ENV__)\[\033[0m\] '"$PS1"
+"#;
+    template.replace("__ENV__", env_name)
+}
+
+/// Write the prompt-tagging rcfile into `dir`, returning its path. Best-effort:
+/// on failure the shell just launches without the env tag.
+fn write_shell_rcfile(dir: &std::path::Path, env_name: &str) -> Option<std::path::PathBuf> {
+    let path = dir.join(SHELLRC_NAME);
+    std::fs::write(&path, shell_rcfile_body(env_name)).ok()?;
+    Some(path)
+}
+
+/// Directory name of the morloc-owned `ZDOTDIR` used to tag a zsh prompt. zsh has
+/// no `--rcfile`; it reads its startup files from `$ZDOTDIR`, so we point it at a
+/// wrapper dir whose `.zshrc` sources the user's real init and then prepends the
+/// tag, restoring `ZDOTDIR` afterwards. As with bash, no user file is written.
+const ZDOTDIR_NAME: &str = ".morloc-zdotdir";
+
+/// Write the zsh wrapper `ZDOTDIR` into `dir`, returning its path. The `.zshenv`
+/// chains the user's real `.zshenv`; the `.zshrc` chains the user's real `.zshrc`
+/// then prepends the env tag to `PROMPT` and restores the real `ZDOTDIR`.
+fn write_zdotdir(dir: &std::path::Path, env_name: &str) -> Option<std::path::PathBuf> {
+    let zdot = dir.join(ZDOTDIR_NAME);
+    std::fs::create_dir_all(&zdot).ok()?;
+    let zshenv = "\
+# morloc-manager: keep ZDOTDIR pointed here through .zshrc, but source the
+# user's real zshenv so their environment still applies.
+_morloc_real=\"${MORLOC_REAL_ZDOTDIR:-$HOME}\"
+[ -r \"$_morloc_real/.zshenv\" ] && source \"$_morloc_real/.zshenv\"
+";
+    // %F{208}/%f = orange foreground on/off; %B/%b = bold. zsh accounts for the
+    // width of %-escapes itself, so no non-printing wrappers are needed.
+    let zshrc = format!(
+        "\
+# morloc-manager: interactive zsh for environment '{env_name}'. Generated per
+# launch -- NOT your ~/.zshrc. Sources your real zsh init, then prepends the tag.
+_morloc_real=\"${{MORLOC_REAL_ZDOTDIR:-$HOME}}\"
+[ -r \"$_morloc_real/.zshrc\" ] && source \"$_morloc_real/.zshrc\"
+PROMPT=\"%B%F{{208}}({env_name})%f%b ${{PROMPT}}\"
+export ZDOTDIR=\"$_morloc_real\"
+unset MORLOC_REAL_ZDOTDIR _morloc_real
+"
+    );
+    std::fs::write(zdot.join(".zshenv"), zshenv).ok()?;
+    std::fs::write(zdot.join(".zshrc"), zshrc).ok()?;
+    Some(zdot)
+}
+
+/// Per-shell wiring to tag an interactive prompt with the env name without
+/// touching the user's dotfiles. Returns extra CLI args and env vars for the
+/// spawned shell (writing any wrapper files under `dir`). Supports bash and zsh
+/// -- the dominant interactive shells; any other shell launches untagged.
+fn shell_prompt_setup(
+    shell_exe: &str,
+    dir: &std::path::Path,
+    env_name: &str,
+) -> (Vec<String>, Vec<(String, String)>) {
+    let shell = std::path::Path::new(shell_exe)
+        .file_name()
+        .and_then(|s| s.to_str());
+    let wired = match shell {
+        Some("bash") => write_shell_rcfile(dir, env_name).map(|rc| {
+            (
+                vec!["--rcfile".to_string(), rc.to_string_lossy().into_owned()],
+                Vec::new(),
+            )
+        }),
+        Some("zsh") => write_zdotdir(dir, env_name).map(|zdot| {
+            // The user's current ZDOTDIR (or $HOME) is where their real zsh init
+            // lives; pass it through so the wrapper can chain it.
+            let real = std::env::var("ZDOTDIR")
+                .or_else(|_| std::env::var("HOME"))
+                .unwrap_or_default();
+            (
+                Vec::new(),
+                vec![
+                    ("ZDOTDIR".to_string(), zdot.to_string_lossy().into_owned()),
+                    ("MORLOC_REAL_ZDOTDIR".to_string(), real),
+                ],
+            )
+        }),
+        _ => None,
+    };
+    // Any shell we do not tag (or a failed wrapper write) launches untagged.
+    wired.unwrap_or_else(|| (Vec::new(), Vec::new()))
 }
 
 /// Create a container environment whose image is derived from its requirements
@@ -3569,9 +3874,7 @@ fn native_serve(
 
     let mut cmd = Command::new(&program);
     cmd.args(&command[1..]);
-    for (k, v) in &runtime.activation_env {
-        cmd.env(k, v);
-    }
+    apply_activation(&mut cmd, &runtime.activation_env);
     cmd.env("MORLOC_HOME", &mh);
     if let Some(t) = &token {
         cmd.env("MORLOC_MCP_TOKEN", t);
@@ -3900,7 +4203,7 @@ pub(crate) fn container_run_env(
     if !is_init && !suffix.is_empty() && !is_home_dir {
         selinux::validate_mount_path(&cwd)?;
         run_with_config(
-            engine, verbose, &image, &v_data_dir, &home, &cwd, suffix,
+            engine, verbose, &env_name, &image, &v_data_dir, &home, &cwd, suffix,
             shell, args, false, &ec.shm_size, &extra_flags, user_env,
             bridge_mount.as_deref(),
         )
@@ -3914,7 +4217,7 @@ pub(crate) fn container_run_env(
             (cwd, false)
         };
         run_with_config(
-            engine, verbose, &image, &v_data_dir, &home, &cwd_final, suffix,
+            engine, verbose, &env_name, &image, &v_data_dir, &home, &cwd_final, suffix,
             shell, args, is_init || skip_work_mount, &ec.shm_size, &extra_flags, user_env,
             bridge_mount.as_deref(),
         )
@@ -3924,6 +4227,7 @@ pub(crate) fn container_run_env(
 fn run_with_config(
     engine: ContainerEngine,
     verbose: bool,
+    env_name: &str,
     image: &str,
     v_data_dir: &str,
     home: &str,
@@ -4069,15 +4373,8 @@ fn run_with_config(
             ));
             // Managed-env marker + pixi location, so an in-container `morloc make`
             // provisions its package.yaml deps via `morloc-env` (the compiler's
-            // callback gates on MORLOC_ENV). The container's pixi env is baked at
-            // /env, distinct from the state root, so it is passed explicitly; the
-            // store itself lives under the mounted MORLOC_STATE.
-            v.push(("MORLOC_ENV".to_string(), "container".to_string()));
-            v.push(("MORLOC_PIXI".to_string(), serve::CONTAINER_PIXI_BIN.to_string()));
-            v.push((
-                "MORLOC_PIXI_DIR".to_string(),
-                serve::CONTAINER_PIXI_DIR.to_string(),
-            ));
+            // callback gates on MORLOC_ENV). Shared with `info` via oci_managed_markers.
+            v.extend(serve::oci_managed_markers());
             v
         }
     };
@@ -4089,7 +4386,16 @@ fn run_with_config(
     }
     env_vars.extend(user_env.iter().cloned());
     let cmd = if shell {
-        Some(vec!["/bin/bash".to_string()])
+        // The image ships bash; tag its prompt with the env name. The rcfile is
+        // written into the state dir (v_data_dir), which is bind-mounted at
+        // CONTAINER_MORLOC_STATE, so bash reads it from that in-container path.
+        // It sources the container's real bash init, so no image file is edited.
+        let mut c = vec!["/bin/bash".to_string()];
+        if write_shell_rcfile(std::path::Path::new(v_data_dir), env_name).is_some() {
+            c.push("--rcfile".to_string());
+            c.push(format!("{}/{}", serve::CONTAINER_MORLOC_STATE, SHELLRC_NAME));
+        }
+        Some(c)
     } else if args.is_empty() {
         None
     } else {

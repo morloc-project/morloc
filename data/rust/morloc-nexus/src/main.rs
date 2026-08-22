@@ -50,6 +50,14 @@ fn main() {
         println!("{}", morloc_runtime_types::MORLOC_ABI_VERSION);
         std::process::exit(0);
     }
+    // `morloc-nexus --version`: the semver of the nexus/runtime lane (tracks the
+    // morloc compiler version), so `doctor` can detect a nexus that is stale
+    // relative to the env's recorded version. Distinct from `--abi-version` (the
+    // coarse wire-format integer). Same early-arg rationale as above.
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("morloc-nexus {}", env!("CARGO_PKG_VERSION"));
+        std::process::exit(0);
+    }
 
     // Install a panic hook so a Rust panic still runs the run-scope
     // epilogue + summary.json + tee cleanup before the process dies.

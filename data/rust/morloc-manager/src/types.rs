@@ -664,6 +664,12 @@ fn sorted_union(a: &[String], b: &[String]) -> Vec<String> {
 pub struct NativeRuntime {
     #[serde(default)]
     pub activation_env: Vec<(String, String)>,
+    /// The morloc-manager version that materialized this env (its
+    /// `CARGO_PKG_VERSION`). `None` for records written before this field
+    /// existed. `doctor` compares it to the running manager to flag tooling
+    /// drift.
+    #[serde(default)]
+    pub manager_version: Option<String>,
 }
 
 /// Persisted requirement inputs for an environment (native or container), kept

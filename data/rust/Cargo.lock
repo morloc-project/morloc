@@ -803,6 +803,7 @@ version = "0.25.0"
 dependencies = [
  "serde",
  "serde_json",
+ "serde_yaml",
  "tempfile",
 ]
 

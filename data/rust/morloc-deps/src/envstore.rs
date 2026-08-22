@@ -290,6 +290,15 @@ impl EnvContext {
         }
     }
 
+    /// The names (file stems) of the installed programs only (the canonical
+    /// baseline), sorted. Excludes transient scratch builds -- unlike
+    /// `program_names`, which unions both tiers.
+    pub fn installed_program_names(&self) -> Result<Vec<String>> {
+        let mut names = program_stems(&self.provenance_dir(Provenance::Installed))?;
+        names.sort();
+        Ok(names)
+    }
+
     /// The names (file stems) of every program with a stored spec, sorted and
     /// deduplicated. Used to attribute a conflict.
     pub fn program_names(&self) -> Result<Vec<String>> {
