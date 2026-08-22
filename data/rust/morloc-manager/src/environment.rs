@@ -229,7 +229,7 @@ fn resolve_default_env_name() -> Result<String> {
         available.extend(system_envs.iter().map(|n| format!("{n} (system)")));
         Err(ManagerError::EnvError(format!(
             "No default environment set. Pass --env <name>, or set a default with: \
-             morloc-manager update --env <name> --set-default\n\
+             morloc-manager modify --env <name> --set-default\n\
              Available: {}",
             available.join(", ")
         )))

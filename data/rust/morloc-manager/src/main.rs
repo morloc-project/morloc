@@ -62,14 +62,15 @@ fn build_help_template() -> String {
 {{usage-heading}} {{usage}}
 
 {bu}Development{r}
-  {b}setup{r}      Configure the default container engine
   {b}new{r}        Build a new morloc environment
   {b}run{r}        Run a command in an environment
   {b}shell{r}      Open an interactive shell in an environment
-  {b}rm{r}         Remove a morloc environment
   {b}ls{r}         List morloc environments
   {b}info{r}       Show configuration and installed environments
-  {b}update{r}     Rebuild or reconfigure an environment
+  {b}doctor{r}     Check environment health and diagnose issues
+  {b}update{r}     Rebuild an environment (optionally move its morloc version)
+  {b}modify{r}     Change an environment's settings (packages, dotfiles, default)
+  {b}rm{r}         Remove a morloc environment
   {b}nuke{r}       Remove all morloc environments
 
 {bu}Serving{r}
@@ -84,7 +85,6 @@ fn build_help_template() -> String {
 {bu}Deployment{r}
   {b}freeze{r}     Export installed state as a frozen artifact
   {b}unfreeze{r}   Build a portable serve image from frozen state
-  {b}doctor{r}     Check environment health and diagnose issues
 
 {bu}Options{r}
 {{options}}"
@@ -119,20 +119,14 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     // -- Development --
-    /// Configure the default container engine
-    #[command(display_order = 0)]
-    #[command(after_help = "Examples:\n  morloc-manager setup --engine podman\n  morloc-manager setup --engine docker\n  morloc-manager setup --engine apptainer\n  sudo morloc-manager setup --engine podman --system")]
-    Setup {
-        /// Container engine: podman, docker, apptainer, or singularity
-        #[arg(long, value_enum)]
-        engine: Option<EngineArg>,
-        /// Apply to system scope (requires root)
-        #[arg(long)]
-        system: bool,
-    },
     /// Build a new morloc environment
     #[command(display_order = 1)]
-    #[command(after_help = "Examples:\n  morloc-manager new                        # creates 'default'\n  morloc-manager new myenv --lang py@3.12\n  morloc-manager new myenv --engine podman\n  morloc-manager new myenv --morloc-version 0.98.0\n\nThe first environment you create becomes the default. The environment's toolchain\nis provisioned from its requirements via pixi: native by default on a capable\nhost, or a requirement-derived container image with --engine\n(podman/docker/apptainer). No hand-authored recipes.")]
+    #[command(after_help = "\
+Examples:
+  morloc-manager new
+  morloc-manager new foo --lang py@3.12
+  morloc-manager new bar --engine podman
+  morloc-manager new baz --morloc-version 0.98.0")]
     New {
         /// Environment name (default: `default`)
         name: Option<String>,
@@ -168,13 +162,10 @@ enum Cmd {
     #[command(display_order = 2)]
     #[command(after_help = "\
 Examples:
+  # runs in default env (see `morloc-manager ls`)
   morloc-manager run -- morloc --version
-  morloc-manager run --env dev -- morloc make -o svc svc.loc
-  morloc-manager run -- morloc install math
-
-Without --env, the default environment is used (see `morloc-manager ls`).
-Use -- to separate morloc-manager flags from the container command.
-Without --, flags like --version are interpreted by morloc-manager itself.")]
+  # run in specific env
+  morloc-manager run --env dev -- morloc make svc.loc")]
     Run {
         /// Command to run inside the container
         command: Vec<String>,
@@ -206,7 +197,12 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     },
     /// Open an interactive shell in an environment
     #[command(display_order = 2)]
-    #[command(after_help = "Examples:\n  morloc-manager shell\n  morloc-manager shell --env dev\n\nWithout --env, the default environment is used.")]
+    #[command(after_help = "\
+Examples:
+  morloc-manager shell
+  morloc-manager shell --env dev
+
+Without --env, the default environment is used.")]
     Shell {
         /// Environment to open a shell in (default: the default environment)
         #[arg(long)]
@@ -224,7 +220,10 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     },
     /// Remove a morloc environment
     #[command(display_order = 3)]
-    #[command(after_help = "Examples:\n  morloc-manager rm myenv\n  sudo morloc-manager rm myenv --system")]
+    #[command(after_help = "\
+Examples:
+  morloc-manager rm myenv
+  sudo morloc-manager rm myenv --system")]
     Rm {
         /// Environment name(s) to remove
         names: Vec<String>,
@@ -234,7 +233,13 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     },
     /// Remove all morloc environments
     #[command(display_order = 8)]
-    #[command(after_help = "Examples:\n  morloc-manager nuke\n  morloc-manager nuke --yes\n  morloc-manager nuke --images\n  sudo morloc-manager nuke --system\n  sudo morloc-manager nuke --system --images --yes")]
+    #[command(after_help = "\
+Examples:
+  morloc-manager nuke
+  morloc-manager nuke --yes
+  morloc-manager nuke --images
+  sudo morloc-manager nuke --system
+  sudo morloc-manager nuke --system --images --yes")]
     Nuke {
         /// Remove system-scope environments instead of local (requires root)
         #[arg(long)]
@@ -248,7 +253,10 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     },
     /// List morloc environments
     #[command(display_order = 4)]
-    #[command(after_help = "Examples:\n  morloc-manager ls\n  morloc-manager ls --system")]
+    #[command(after_help = "\
+Examples:
+  morloc-manager ls
+  morloc-manager ls --system")]
     Ls {
         /// Show only system environments
         #[arg(long)]
@@ -259,7 +267,10 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     },
     /// Show configuration and installed environments
     #[command(display_order = 5)]
-    #[command(after_help = "Examples:\n  morloc-manager info\n  morloc-manager info myenv")]
+    #[command(after_help = "\
+Examples:
+  morloc-manager info
+  morloc-manager info myenv")]
     Info {
         /// Environment name (show details for this environment)
         name: Option<String>,
@@ -271,49 +282,113 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         #[arg(long)]
         packages: bool,
     },
-    /// Rebuild an environment
+    /// Check environment health and diagnose issues
+    #[command(display_order = 6)]
+    #[command(after_help = "\
+Examples:
+  morloc-manager doctor
+  morloc-manager doctor --env myenv
+  morloc-manager doctor --deep")]
+    Doctor {
+        /// Environment to check (default: the default environment)
+        #[arg(long)]
+        env: Option<String>,
+        /// Check system-scope environment
+        #[arg(long)]
+        system: bool,
+        /// Run checks inside the container (slower, more thorough)
+        #[arg(long)]
+        deep: bool,
+        /// Treat warnings as errors (non-zero exit on warnings)
+        #[arg(long)]
+        strict: bool,
+        /// Additionally check SLURM-bridge prerequisites (sbatch on
+        /// PATH, build.yaml has slurm-support, env image resolvable,
+        /// morloc-manager binary path mirrorable, runtime dir
+        /// writable). Run this before relying on `--slurm-bridge` on
+        /// a new cluster.
+        #[arg(long)]
+        slurm: bool,
+    },
+    /// Rebuild an environment (optionally moving its morloc version)
     #[command(display_order = 7)]
-    #[command(after_help = "Examples:\n  morloc-manager update                        # re-solve/rebuild the default environment\n  morloc-manager update --env myenv\n  morloc-manager update --env myenv --morloc-version 0.98.0   # bump morloc, then rebuild\n  morloc-manager update --env myenv --lang py@3.13   # re-pin, then rebuild\n  morloc-manager update --env myenv --system-package jq   # add an OS package, then rebuild\n  morloc-manager update --env myenv --dotfiles ~/mydots   # copy dotfiles into the env home\n  morloc-manager update --env myenv --set-default   # make myenv your default environment\n  sudo morloc-manager update --env shared --set-default --system   # set the machine-wide default")]
+    #[command(after_help = "\
+Examples:
+  morloc-manager update                        # re-solve/rebuild at the current version
+  morloc-manager update --env myenv
+  morloc-manager update --env myenv --force            # force a fresh re-solve
+  morloc-manager update --env myenv --latest           # move to the newest release
+  morloc-manager update --env myenv --morloc-version 0.98.0   # move to a specific version
+
+Without --latest/--morloc-version, the environment keeps its current morloc
+version; changing settings (packages, dotfiles, default) is `morloc-manager modify`.")]
     Update {
         /// Environment to update (default: the default environment)
         #[arg(long)]
         env: Option<String>,
         /// Move this environment to a specific morloc version, then re-solve and
         /// rebuild. Omit to keep the environment's current morloc version.
-        #[arg(long = "morloc-version")]
+        #[arg(long = "morloc-version", conflicts_with = "latest")]
         morloc_version: Option<String>,
+        /// Move this environment to the newest morloc release, then re-solve and
+        /// rebuild.
+        #[arg(long)]
+        latest: bool,
+        /// Force a full re-solve and rebuild even when nothing changed (repair a
+        /// stale or half-built environment).
+        #[arg(long)]
+        force: bool,
+    },
+    /// Change an environment's settings (without moving its morloc version)
+    #[command(display_order = 8)]
+    #[command(after_help = "\
+Examples:
+  morloc-manager modify --env myenv --set-default   # make myenv your default
+  sudo morloc-manager modify --env shared --set-default --system   # machine-wide default
+  morloc-manager modify --env myenv --dotfiles ~/mydots   # copy dotfiles (no rebuild)
+  morloc-manager modify --env myenv --system-package jq   # add an OS package, then rebuild
+  morloc-manager modify --env myenv --rm-system-package jq   # remove one, then rebuild
+  morloc-manager modify --env myenv --lang py@3.13   # re-pin a language, then rebuild")]
+    Modify {
+        /// Environment to modify (default: the default environment)
+        #[arg(long)]
+        env: Option<String>,
+        /// Re-pin language toolchain(s): `lang` or `lang@version` (repeatable /
+        /// comma-separated). Triggers a rebuild at the current morloc version.
+        #[arg(long)]
+        lang: Vec<String>,
+        /// Add an OS package to the image (repeatable), e.g. --system-package jq.
+        /// Additive; container backend only. Triggers a rebuild.
+        #[arg(long = "system-package")]
+        system_package: Vec<String>,
+        /// Remove an OS package previously added with --system-package
+        /// (repeatable). Triggers a rebuild.
+        #[arg(long = "rm-system-package")]
+        rm_system_package: Vec<String>,
+        /// Directory of dotfiles to copy into the environment's home
+        /// (.bashrc, .vimrc, .config/...). Overwrites like `cp -rf`;
+        /// docker/podman only. No rebuild.
+        #[arg(long)]
+        dotfiles: Option<String>,
         /// Tag this environment as the default (used when a command is given no
         /// explicit --env). Writes your personal (local) default, even for a
-        /// system-scope env; add --system to set the machine-wide default.
+        /// system-scope env; add --system to set the machine-wide default. No rebuild.
         #[arg(long = "set-default")]
         set_default: bool,
         /// With --set-default, write the machine-wide (system) default instead of
         /// your personal one (requires root).
         #[arg(long)]
         system: bool,
-        /// Re-pin language toolchain(s): `lang` or `lang@version` (repeatable /
-        /// comma-separated). Omit to keep the stored pins.
-        #[arg(long)]
-        lang: Vec<String>,
-        /// Extra OS package to bake into the image (repeatable), e.g.
-        /// --system-package jq. Added to the environment's persisted set
-        /// (additive; not a replace); container backend only.
-        #[arg(long = "system-package")]
-        system_package: Vec<String>,
-        /// Directory of dotfiles to copy into the environment's home
-        /// (.bashrc, .vimrc, .config/...). Overwrites like `cp -rf`;
-        /// docker/podman only.
-        #[arg(long)]
-        dotfiles: Option<String>,
-        /// Accepted for scripting uniformity with `new` (no effect)
-        #[arg(long, hide = true)]
-        non_interactive: bool,
     },
 
     // -- Deployment --
     /// Serve an environment over the network
     #[command(display_order = 20)]
-    #[command(after_help = "Examples:\n  morloc-manager start                       # serve the default environment's exposed set\n  morloc-manager start --env myenv -p 9090:8080\n  morloc-manager start --mcp mymodule -p 9000:9000   # serve one module as MCP/HTTP")]
+    #[command(after_help = "\
+Examples:
+  morloc-manager start                       # serve the default environment's exposed set
+  morloc-manager start --env myenv -p 9090:8080
+  morloc-manager start --mcp mymodule -p 9000:9000   # serve one module as MCP/HTTP")]
     Start {
         /// Environment to serve (default: the default environment)
         #[arg(long)]
@@ -364,7 +439,10 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     },
     /// Stop a running serve container
     #[command(display_order = 21)]
-    #[command(after_help = "Examples:\n  morloc-manager stop              # stop the default environment\n  morloc-manager stop --env myenv")]
+    #[command(after_help = "\
+Examples:
+  morloc-manager stop              # stop the default environment
+  morloc-manager stop --env myenv")]
     Stop {
         /// Environment to stop (default: the default environment)
         #[arg(long)]
@@ -372,7 +450,11 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     },
     /// Stream logs from a running serve container
     #[command(display_order = 22)]
-    #[command(after_help = "Examples:\n  morloc-manager logs              # logs from only running serve container\n  morloc-manager logs --env myenv\n  morloc-manager logs -f --env myenv     # follow mode")]
+    #[command(after_help = "\
+Examples:
+  morloc-manager logs              # logs from only running serve container
+  morloc-manager logs --env myenv
+  morloc-manager logs -f --env myenv     # follow mode")]
     Logs {
         /// Environment whose logs to stream (default: the default environment)
         #[arg(long)]
@@ -383,7 +465,13 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     },
     /// Export installed state as a frozen artifact
     #[command(display_order = 23)]
-    #[command(after_help = "Examples:\n  morloc-manager freeze\n  morloc-manager freeze --env myenv\n  morloc-manager freeze -o ./my-freeze\n\nRequires at least one program compiled with 'morloc make --install'.")]
+    #[command(after_help = "\
+Examples:
+  morloc-manager freeze
+  morloc-manager freeze --env myenv
+  morloc-manager freeze -o ./my-freeze
+
+Requires at least one program compiled with 'morloc make --install'.")]
     Freeze {
         /// Environment to freeze (default: the default environment)
         #[arg(long)]
@@ -397,7 +485,10 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     },
     /// Build a serve image from frozen state
     #[command(display_order = 24)]
-    #[command(after_help = "Examples:\n  morloc-manager unfreeze --from ./morloc-freeze/state.tar.gz -t myservice:v1\n  morloc-manager unfreeze --from ./state.tar.gz -t svc:v1 --engine docker")]
+    #[command(after_help = "\
+Examples:
+  morloc-manager unfreeze --from ./morloc-freeze/state.tar.gz -t myservice:v1
+  morloc-manager unfreeze --from ./state.tar.gz -t svc:v1 --engine docker")]
     Unfreeze {
         /// Path to state.tar.gz from freeze
         #[arg(long)]
@@ -418,7 +509,11 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     },
     /// Evaluate a morloc expression against a running serve container
     #[command(display_order = 25)]
-    #[command(after_help = "Examples:\n  morloc-manager eval 'add 1 2'\n  morloc-manager eval --env myenv 'map (add 1) [1,2,3]'\n  morloc-manager eval -p 9090 'greet \"world\"'")]
+    #[command(after_help = "\
+Examples:
+  morloc-manager eval 'add 1 2'
+  morloc-manager eval --env myenv 'map (add 1) [1,2,3]'
+  morloc-manager eval -p 9090 'greet \"world\"'")]
     Eval {
         /// Expression to evaluate
         #[arg(allow_hyphen_values = true)]
@@ -459,39 +554,23 @@ Sugar for: morloc-manager run -- morloc make --install <file>
     /// run `start` to realize it). Covers the network views (MCP, API) and the
     /// eval capability; the CLI view is local (`morloc-manager run`).
     #[command(display_order = 23)]
-    #[command(after_help = "Examples:\n  morloc-manager expose add dna --as mcp\n  morloc-manager expose add util --as mcp,api\n  morloc-manager expose eval --allow dna,stats\n  morloc-manager expose list\n  morloc-manager expose rm dna")]
+    #[command(after_help = "\
+Examples:
+  morloc-manager expose add dna --as mcp
+  morloc-manager expose add util --as mcp,api
+  morloc-manager expose eval --allow dna,stats
+  morloc-manager expose list
+  morloc-manager expose rm dna")]
     Expose {
         #[command(subcommand)]
         action: ExposeAction,
     },
     /// List running serve containers
     #[command(display_order = 27)]
-    #[command(after_help = "Examples:\n  morloc-manager status")]
+    #[command(after_help = "\
+Examples:
+  morloc-manager status")]
     Status,
-    /// Check environment health and diagnose issues
-    #[command(display_order = 26)]
-    #[command(after_help = "Examples:\n  morloc-manager doctor\n  morloc-manager doctor --env myenv\n  morloc-manager doctor --deep")]
-    Doctor {
-        /// Environment to check (default: the default environment)
-        #[arg(long)]
-        env: Option<String>,
-        /// Check system-scope environment
-        #[arg(long)]
-        system: bool,
-        /// Run checks inside the container (slower, more thorough)
-        #[arg(long)]
-        deep: bool,
-        /// Treat warnings as errors (non-zero exit on warnings)
-        #[arg(long)]
-        strict: bool,
-        /// Additionally check SLURM-bridge prerequisites (sbatch on
-        /// PATH, build.yaml has slurm-support, env image resolvable,
-        /// morloc-manager binary path mirrorable, runtime dir
-        /// writable). Run this before relying on `--slurm-bridge` on
-        /// a new cluster.
-        #[arg(long)]
-        slurm: bool,
-    },
 }
 
 #[derive(Subcommand)]
@@ -957,42 +1036,6 @@ fn check_podman_additional_stores(engine: ContainerEngine) -> bool {
 
 fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
     match cmd {
-        // ---- setup ----
-        Cmd::Setup { engine, system } => {
-            // With no --engine, show the current engine settings
-            if engine.is_none() {
-                let local = cfg::read_config::<Config>(&cfg::config_path(Scope::Local)).ok();
-                let sys = cfg::read_config::<Config>(&cfg::config_path(Scope::System)).ok();
-                println!("Local engine:   {}",
-                    local.as_ref().map(|c| c.backend.label()).unwrap_or("unset"));
-                println!("System engine:  {}",
-                    sys.as_ref().map(|c| c.backend.label()).unwrap_or("unset"));
-                println!();
-                println!("Set with: morloc-manager setup --engine <podman|docker|apptainer|singularity>");
-                return Ok(());
-            }
-            if system { check_system_write_access()?; }
-            let scope = resolve_scope(system);
-            if matches!(engine, Some(EngineArg::None)) {
-                let cfg_path = cfg::config_path(scope);
-                let base_cfg = cfg::read_config::<Config>(&cfg_path).unwrap_or_default();
-                cfg::write_config(&cfg_path, &Config { backend: Backend::Native, ..base_cfg })?;
-                eprintln!("Engine set to: native");
-                return Ok(());
-            }
-            let eng: ContainerEngine = engine.unwrap().into();
-            check_docker_socket(eng);
-            let cfg_path = cfg::config_path(scope);
-            let base_cfg = cfg::read_config::<Config>(&cfg_path).unwrap_or_default();
-            let new_cfg = Config {
-                backend: Backend::Container(eng),
-                ..base_cfg
-            };
-            cfg::write_config(&cfg_path, &new_cfg)?;
-            eprintln!("Engine set to: {}", eng.name());
-            Ok(())
-        }
-
         // ---- new ----
         Cmd::New {
             name,
@@ -1086,23 +1129,17 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                         *only
                     }
                     multi => {
-                        let scope_flag = if system { " --system" } else { "" };
                         let names: Vec<String> = multi
                             .iter()
                             .map(|(_, n)| (*n).to_string())
                             .collect();
-                        let setup_lines: String = multi
-                            .iter()
-                            .map(|(_, n)| {
-                                format!("  morloc-manager setup --engine {n}{scope_flag}\n")
-                            })
-                            .collect();
                         return Err(ManagerError::EnvError(format!(
                             "Multiple container engines are installed ({}) and no \
-                             default is set.\nPick one with:\n{}\
-                             Or pass --engine to this command directly.",
+                             default is set.\nPass one with --engine, e.g.:\n  \
+                             morloc-manager new <name> --engine {}\n\
+                             The choice is remembered for later environments.",
                             names.join(", "),
-                            setup_lines
+                            multi[0].1,
                         )));
                     }
                 }
@@ -1184,7 +1221,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     Ok(()) => {
                         if was_default.as_deref() == Some(name.as_str()) {
                             eprintln!("Removed environment: {name}. It was the default; \
-                                       set a new one with: morloc-manager update --env <name> --set-default");
+                                       set a new one with: morloc-manager modify --env <name> --set-default");
                         } else {
                             eprintln!("Removed environment: {name}");
                         }
@@ -1802,22 +1839,95 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- update ----
-        Cmd::Update {
+        // Rebuild an environment, optionally moving its morloc version. Settings
+        // changes (packages/dotfiles/default) are `modify`, not `update`.
+        Cmd::Update { env, morloc_version, latest, force } => {
+            let (env_name, env_scope, ec) = resolve_env_or_default(env)?;
+            if env_scope == Scope::System {
+                check_system_write_access()?;
+            }
+
+            // Version policy: --latest -> newest release; --morloc-version V -> V;
+            // otherwise keep the env's current recorded version (error if none).
+            let requested: Option<String> = if latest {
+                None // None => resolve_release_tag() => newest release
+            } else {
+                match morloc_version {
+                    Some(v) => Some(v),
+                    None => Some(require_current_version(&ec, &env_name)?),
+                }
+            };
+
+            // --force repairs a stale/half-built env: drop the success marker so
+            // materialization always re-solves and rebuilds rather than skipping.
+            if force {
+                clear_materialized_marker(env_scope, &env_name, &ec);
+            }
+
+            rematerialize_env(env_scope, &env_name, &[], requested, verbose)?;
+            report_rematerialized(ec.backend.is_native(), &env_name);
+            Ok(())
+        }
+
+        // ---- modify ----
+        // Change an environment's settings without moving its morloc version.
+        Cmd::Modify {
             env,
-            morloc_version,
-            set_default,
-            system,
             lang,
             system_package,
+            rm_system_package,
             dotfiles,
-            non_interactive: _,
+            set_default,
+            system,
         } => {
+            // ---- Argument validation (no filesystem) ----
+            if system && !set_default {
+                return Err(ManagerError::EnvError(
+                    "--system applies only to --set-default (the machine-wide default); \
+                     an environment's scope is fixed when it is created".to_string(),
+                ));
+            }
+            let touches_packages = !system_package.is_empty() || !rm_system_package.is_empty();
+            let will_rebuild = !lang.is_empty() || touches_packages;
+            if !set_default && !will_rebuild && dotfiles.is_none() {
+                return Err(ManagerError::EnvError(
+                    "nothing to modify: pass --set-default, --dotfiles, --lang, \
+                     --system-package, or --rm-system-package".to_string(),
+                ));
+            }
+
             let (env_name, env_scope, mut ec) = resolve_env_or_default(env)?;
 
-            // The default tag is a personal (local) choice by default: any user
-            // may point their own default at any environment -- including a
-            // read-only system env they cannot modify -- without root. `--system`
-            // writes the machine-wide default instead, which does require root.
+            // ---- Validation that needs the resolved env, done BEFORE any side
+            //      effect so an invalid request never leaves partial changes. ----
+            if touches_packages && ec.backend.is_native() {
+                return Err(ManagerError::EnvError(
+                    "--system-package/--rm-system-package apply only to container \
+                     backends; the native backend has no image to bake packages into"
+                        .to_string(),
+                ));
+            }
+            if dotfiles.is_some() && !ec.backend.container_engine().is_some_and(|e| e.is_oci()) {
+                // Same rule as `new`: dotfiles land in a docker/podman env home;
+                // native runs against your real home and apptainer mounts host $HOME.
+                return Err(dotfiles_not_supported());
+            }
+            if set_default && system && env_scope != Scope::System {
+                return Err(ManagerError::EnvError(format!(
+                    "environment '{env_name}' is local; only a system-scope environment \
+                     can be the machine-wide default. Omit --system to set your personal default."
+                )));
+            }
+            // Any write into a system-scope env's own data/config (dotfiles copy,
+            // package/lang edits + rebuild) needs root. A personal (local)
+            // set-default does not, and is handled in its own block below.
+            if env_scope == Scope::System && (will_rebuild || dotfiles.is_some()) {
+                check_system_write_access()?;
+            }
+
+            // ---- Side effects (all inputs validated) ----
+            // 1. set-default (pure metadata, no rebuild): personal (local) by
+            //    default, machine-wide with --system (root).
             if set_default {
                 let write_scope = if system { Scope::System } else { Scope::Local };
                 if system {
@@ -1831,66 +1941,39 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 }
             }
 
-            // Setting the default is pure metadata: with no build-affecting flag,
-            // do NOT re-solve/rebuild the environment (that would be a costly and
-            // surprising side effect of a one-line tag change).
-            if set_default
-                && morloc_version.is_none()
-                && lang.is_empty()
-                && system_package.is_empty()
-                && dotfiles.is_none()
-            {
-                return Ok(());
-            }
-
-            // A rebuild of a system-scope env writes to system data dirs, so it
-            // needs root; a personal set-default (handled above) does not.
-            if env_scope == Scope::System {
-                check_system_write_access()?;
-            }
-
-            // Dotfiles land in the mounted home, not the image, so this is a
-            // plain copy independent of the rebuild below. Done first so a bad
-            // --dotfiles path fails before any config is persisted.
+            // 2. dotfiles: copy into the mounted home; no rebuild.
             if let Some(src) = &dotfiles {
                 let data_dir = cfg::env_data_dir(env_scope, &env_name);
                 apply_dotfiles(ec.backend.container_engine(), &data_dir, src)?;
+                eprintln!("Copied dotfiles into '{env_name}'.");
             }
 
-            // Merge any newly requested OS packages into the persisted set
-            // (additive + idempotent); rematerialize_env reads them back from
-            // env.yaml. Container-only: native has no image layer to bake into.
-            if !system_package.is_empty() {
-                if ec.backend.is_native() {
-                    return Err(ManagerError::EnvError(
-                        "--system-package applies only to container backends; the \
-                         native backend has no image to bake packages into"
-                            .to_string(),
-                    ));
-                }
+            // 3. system packages: add and/or remove, then persist so
+            //    rematerialize_env reads the new set back.
+            if touches_packages {
                 for p in system_package {
                     if !ec.system_packages.contains(&p) {
                         ec.system_packages.push(p);
                     }
                 }
+                if !rm_system_package.is_empty() {
+                    ec.system_packages.retain(|p| !rm_system_package.contains(p));
+                }
                 cfg::write_env_config(env_scope, &env_name, &ec)?;
             }
 
-            // Re-pin: an explicit --lang overwrites the stored pins that
-            // rematerialize_env reads back; otherwise the stored pins are reused.
+            // 4. language re-pin.
             if !lang.is_empty() {
                 let pins = parse_lang_pins(&lang);
                 cfg::write_env_inputs(env_scope, &env_name, &EnvInputs { lang_pins: pins })?;
             }
-            // No extra specs: re-solve from the installed programs' envspecs.
-            // `morloc_version` (from --morloc-version) moves the env to a new
-            // morloc version; None keeps the env's currently recorded version.
-            rematerialize_env(env_scope, &env_name, &[], morloc_version, verbose)?;
 
-            if ec.backend.is_native() {
-                eprintln!("Native environment '{env_name}' re-materialized.");
-            } else {
-                anstream::eprintln!("\x1b[1;32mContainer environment '{env_name}' rebuilt.\x1b[0m");
+            // 5. rebuild at the CURRENT morloc version if a build-affecting input
+            //    changed. `modify` never moves the version.
+            if will_rebuild {
+                let keep = require_current_version(&ec, &env_name)?;
+                rematerialize_env(env_scope, &env_name, &[], Some(keep), verbose)?;
+                report_rematerialized(ec.backend.is_native(), &env_name);
             }
             Ok(())
         }
@@ -2266,7 +2349,9 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             //    pixi before the build. The dry spec is ephemeral -- once the
             //    program builds, `morloc make --install` writes its real
             //    envspec.json, which gather_env_specs picks up from then on.
-            rematerialize_env(scope, &env_name, &[dry], None, verbose)?;
+            //    Keep the env's current morloc version -- installing a module must
+            //    never bump the toolchain out from under it.
+            rematerialize_env(scope, &env_name, &[dry], current_version_tag(&ec), verbose)?;
 
             // 3. Build + install into the now-complete environment. Step 2 may
             //    have rebuilt the image, so re-read the config.
@@ -2919,7 +3004,7 @@ fn materialize_native_env(
     // pixi.toml on disk, but the marker still reflects the last good build, so the
     // rebuild is not falsely skipped on retry.
     let key = cache_key(&manifest, &req.morloc_bin, &[]);
-    let marker = pixi_dir.join("materialized.toml");
+    let marker = materialized_marker(scope, name, true);
     let unchanged = std::fs::read_to_string(&marker)
         .map(|prev| prev == key)
         .unwrap_or(false);
@@ -3161,10 +3246,10 @@ fn finalize_new_env(
         if environment::set_default_environment(&ec.name, scope).is_ok() {
             eprintln!("Set '{}' as the default environment.", ec.name);
         } else {
-            eprintln!("Note: could not record '{}' as the default; set it with: morloc-manager update --env {} --set-default", ec.name, ec.name);
+            eprintln!("Note: could not record '{}' as the default; set it with: morloc-manager modify --env {} --set-default", ec.name, ec.name);
         }
     } else {
-        eprintln!("Make it the default with: morloc-manager update --env {} --set-default", ec.name);
+        eprintln!("Make it the default with: morloc-manager modify --env {} --set-default", ec.name);
     }
     Ok(())
 }
@@ -3379,6 +3464,57 @@ fn cache_key(manifest: &str, morloc_bin: &std::path::Path, system_packages: &[St
     )
 }
 
+/// The provision tag that keeps an environment at its currently recorded morloc
+/// version: `Some("<version>")`, or `None` if the env has no recorded version
+/// (a legacy or `--no-init` env). `install` uses this directly (a missing
+/// version resolves to latest); callers that must NOT move the version use
+/// `require_current_version`.
+fn current_version_tag(ec: &EnvironmentConfig) -> Option<String> {
+    ec.morloc_version.as_ref().map(|v| v.show())
+}
+
+/// The recorded morloc version an operation must keep, or an error when the env
+/// has none. Used by the keep-current verbs (`update` with no version flag,
+/// `modify`) so a version-less env is rejected rather than silently bumped to
+/// latest.
+fn require_current_version(ec: &EnvironmentConfig, env_name: &str) -> Result<String> {
+    current_version_tag(ec).ok_or_else(|| ManagerError::EnvError(format!(
+        "environment '{env_name}' has no recorded morloc version; set one with \
+         `morloc-manager update --env {env_name} --latest`"
+    )))
+}
+
+/// Post-rebuild banner, shared by `update` and `modify` so the two never drift.
+/// Takes only the backend flag (not the whole config) so it cannot grow a read
+/// of a possibly-stale post-rebuild field.
+fn report_rematerialized(is_native: bool, env_name: &str) {
+    if is_native {
+        eprintln!("Native environment '{env_name}' re-materialized.");
+    } else {
+        anstream::eprintln!("\x1b[1;32mContainer environment '{env_name}' rebuilt.\x1b[0m");
+    }
+}
+
+/// The single source of truth for an environment's `materialized.toml` success
+/// marker path, per backend: `<data-dir>/pixi/materialized.toml` for native,
+/// `<data-dir>/container-build/materialized.toml` for a container. The writers
+/// and the `--force` cleaner both derive it here so they cannot drift.
+fn materialized_marker(scope: Scope, name: &str, is_native: bool) -> std::path::PathBuf {
+    let data_dir = cfg::env_data_dir(scope, name);
+    if is_native {
+        data_dir.join("pixi").join("materialized.toml")
+    } else {
+        data_dir.join("container-build").join("materialized.toml")
+    }
+}
+
+/// Delete the `materialized.toml` success marker so the next materialize is
+/// forced to re-solve + rebuild instead of taking the unchanged-manifest skip.
+/// Best-effort.
+fn clear_materialized_marker(scope: Scope, name: &str, ec: &EnvironmentConfig) {
+    let _ = std::fs::remove_file(materialized_marker(scope, name, ec.backend.is_native()));
+}
+
 /// Re-solve and re-materialize an environment from the union of every installed
 /// program's envspec (`gather_env_specs`) plus any `extra_specs` not yet on disk
 /// -- e.g. the dry envspec of a program about to be installed. Shared by
@@ -3399,24 +3535,11 @@ fn rematerialize_env(
     let mut specs = gather_env_specs(scope, name);
     specs.extend_from_slice(extra_specs);
 
-    // R2 version policy: an explicit --morloc-version moves the env; otherwise
-    // keep the env's currently recorded version so a plain `update` (or one that
-    // only touches dotfiles/packages/lang) never silently bumps morloc. A legacy
-    // env with no recorded version falls back to $MORLOC_RELEASE_TAG/latest.
-    let effective_version: Option<String> = match requested_version {
-        Some(v) => Some(v),
-        None => match ec.morloc_version.as_ref() {
-            Some(v) => Some(v.show()),
-            None => {
-                eprintln!(
-                    "warning: environment '{name}' has no recorded morloc version; \
-                     re-solving at the latest release. Pin one with --morloc-version."
-                );
-                None
-            }
-        },
-    };
-    let effective_version = effective_version.as_deref();
+    // The caller decides the version policy and passes the concrete tag to
+    // provision (None => latest via resolve_release_tag). `update` passes the
+    // recorded version to keep it, or an explicit target to move it; `install`
+    // passes the recorded version.
+    let effective_version = requested_version.as_deref();
 
     if ec.backend.is_native() {
         // Persist the provisioned version so `ec.morloc_version` tracks what is
@@ -3472,7 +3595,7 @@ fn build_requirement_derived_image(
     // pixi.toml), so a failed build cannot poison the cache, and a rebuilt dev
     // compiler forces a fresh image without a manual `podman rmi`.
     let key = cache_key(&manifest, &req.morloc_bin, system_packages);
-    let marker = context.join("materialized.toml");
+    let marker = materialized_marker(scope, name, false);
     let unchanged = std::fs::read_to_string(&marker)
         .map(|prev| prev == key)
         .unwrap_or(false);
@@ -4893,31 +5016,98 @@ mod tests {
     }
 
     #[test]
-    fn update_takes_set_default_and_morloc_version() {
+    fn update_takes_version_and_force() {
         let cli = Cli::try_parse_from([
-            "morloc-manager", "update", "--env", "e", "--set-default", "--morloc-version", "0.98.0",
+            "morloc-manager", "update", "--env", "e", "--morloc-version", "0.98.0",
         ])
-        .expect("update should parse --set-default and --morloc-version");
+        .expect("update should parse --morloc-version");
         match cli.command {
-            Some(Cmd::Update { env, morloc_version, set_default, .. }) => {
+            Some(Cmd::Update { env, morloc_version, latest, force }) => {
                 assert_eq!(env.as_deref(), Some("e"));
                 assert_eq!(morloc_version.as_deref(), Some("0.98.0"));
-                assert!(set_default);
+                assert!(!latest);
+                assert!(!force);
             }
             _ => panic!("expected Cmd::Update"),
+        }
+        // --force and --latest parse.
+        let cli = Cli::try_parse_from(["morloc-manager", "update", "--env", "e", "--force", "--latest"])
+            .expect("update --force --latest should parse");
+        assert!(matches!(cli.command, Some(Cmd::Update { latest: true, force: true, .. })));
+    }
+
+    #[test]
+    fn update_latest_conflicts_with_morloc_version() {
+        // --latest and --morloc-version are mutually exclusive.
+        assert!(Cli::try_parse_from([
+            "morloc-manager", "update", "--env", "e", "--latest", "--morloc-version", "0.98.0",
+        ]).is_err());
+    }
+
+    #[test]
+    fn update_no_longer_takes_set_default() {
+        // set-default moved to `modify`.
+        assert!(Cli::try_parse_from(["morloc-manager", "update", "--env", "e", "--set-default"]).is_err());
+    }
+
+    #[test]
+    fn modify_set_default_is_local_unless_system_flag() {
+        // A personal (local) default: no --system.
+        let cli = Cli::try_parse_from(["morloc-manager", "modify", "--env", "shared", "--set-default"])
+            .expect("modify --set-default should parse");
+        assert!(matches!(cli.command, Some(Cmd::Modify { set_default: true, system: false, .. })));
+        // The machine-wide default: --system.
+        let cli = Cli::try_parse_from(["morloc-manager", "modify", "--env", "shared", "--set-default", "--system"])
+            .expect("modify --set-default --system should parse");
+        assert!(matches!(cli.command, Some(Cmd::Modify { set_default: true, system: true, .. })));
+    }
+
+    #[test]
+    fn modify_takes_package_add_remove_and_dotfiles() {
+        let cli = Cli::try_parse_from([
+            "morloc-manager", "modify", "--env", "e",
+            "--system-package", "jq", "--rm-system-package", "vim", "--dotfiles", "/tmp/d",
+        ])
+        .expect("modify should parse package add/remove and dotfiles");
+        match cli.command {
+            Some(Cmd::Modify { system_package, rm_system_package, dotfiles, .. }) => {
+                assert_eq!(system_package, vec!["jq".to_string()]);
+                assert_eq!(rm_system_package, vec!["vim".to_string()]);
+                assert_eq!(dotfiles.as_deref(), Some("/tmp/d"));
+            }
+            _ => panic!("expected Cmd::Modify"),
         }
     }
 
     #[test]
-    fn update_set_default_is_local_unless_system_flag() {
-        // A personal (local) default: no --system.
-        let cli = Cli::try_parse_from(["morloc-manager", "update", "--env", "shared", "--set-default"])
-            .expect("update --set-default should parse");
-        assert!(matches!(cli.command, Some(Cmd::Update { set_default: true, system: false, .. })));
-        // The machine-wide default: --system.
-        let cli = Cli::try_parse_from(["morloc-manager", "update", "--env", "shared", "--set-default", "--system"])
-            .expect("update --set-default --system should parse");
-        assert!(matches!(cli.command, Some(Cmd::Update { set_default: true, system: true, .. })));
+    fn setup_subcommand_removed() {
+        assert!(Cli::try_parse_from(["morloc-manager", "setup", "--engine", "podman"]).is_err());
+    }
+
+    // The two `modify` guards below fire before any environment/filesystem
+    // access, so they can be exercised straight through `dispatch`.
+    fn modify_cmd(set_default: bool, system: bool, dotfiles: Option<String>) -> Cmd {
+        Cmd::Modify {
+            env: Some("e".to_string()),
+            lang: Vec::new(),
+            system_package: Vec::new(),
+            rm_system_package: Vec::new(),
+            dotfiles,
+            set_default,
+            system,
+        }
+    }
+
+    #[test]
+    fn modify_system_requires_set_default() {
+        let err = dispatch(false, false, modify_cmd(false, true, None)).unwrap_err();
+        assert!(err.to_string().contains("--system applies only to --set-default"), "got: {err}");
+    }
+
+    #[test]
+    fn modify_requires_at_least_one_change() {
+        let err = dispatch(false, false, modify_cmd(false, false, None)).unwrap_err();
+        assert!(err.to_string().contains("nothing to modify"), "got: {err}");
     }
 
     #[test]
