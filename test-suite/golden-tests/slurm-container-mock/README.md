@@ -21,13 +21,12 @@ morloc init -f --slurm
 
 # 2. Create an Apptainer env, install the root libs.
 morloc-manager new e2e-slurm --engine apptainer
-morloc-manager run -- morloc init -f --slurm
-morloc-manager run -- morloc install root root-py
-morloc-manager select e2e-slurm
+morloc-manager run --env e2e-slurm -- morloc init -f --slurm
+morloc-manager run --env e2e-slurm -- morloc install root root-py
 ```
 
 The env's `.sif` lives under `~/.local/share/morloc/environments/e2e-slurm/sif/`.
-`morloc-manager run --slurm-bridge` reads `layered_sif.unwrap_or(base_sif)`
+`morloc-manager run --env e2e-slurm --slurm-bridge` reads `layered_sif.unwrap_or(base_sif)`
 from the env config and bind-mounts the bridge socket into the container.
 
 ## Running

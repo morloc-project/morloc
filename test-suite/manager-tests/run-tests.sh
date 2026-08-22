@@ -16,8 +16,8 @@
 #             run against a SANDBOXED config/data root (XDG_*), so no container
 #             engine or real environment is touched. Needs only the binary.
 #   serve   - full end to end: install -> expose -> start -> call/mcp/discover
-#             -> eval -> stop, against the ACTIVE environment. Needs a container
-#             engine AND a working active morloc environment; SKIPs otherwise.
+#             -> eval -> stop, against the DEFAULT environment. Needs a container
+#             engine AND a working default morloc environment; SKIPs otherwise.
 #   auth    - a token-protected serve returns 401 without the bearer, 200 with.
 #             Same prerequisites as `serve`.
 #
@@ -212,8 +212,10 @@ serve_prereqs_ok() {
     command -v curl >/dev/null 2>&1 || { echo "curl not found"; return 1; }
     command -v python3 >/dev/null 2>&1 || { echo "python3 not found"; return 1; }
     have_engine || { echo "no container engine"; return 1; }
-    # An active environment must exist (install/start run inside it).
-    "$MANAGER" info >/dev/null 2>&1 || { echo "no active morloc environment"; return 1; }
+    # A default environment must be tagged (bare install/start run against it).
+    # Check the tag via `ls --json` rather than spinning up a container.
+    "$MANAGER" ls --json 2>/dev/null | grep -q '"is_default": *true' \
+        || { echo "no default morloc environment"; return 1; }
     return 0
 }
 
@@ -227,7 +229,7 @@ wait_for_health() { # url
 }
 
 # ---------------------------------------------------------------------------
-# serve - full end to end against the active environment
+# serve - full end to end against the default environment
 # ---------------------------------------------------------------------------
 group_serve() {
     section "serve (install -> expose -> start -> call/mcp/discover -> eval)"

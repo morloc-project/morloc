@@ -19,7 +19,7 @@ use crate::types::*;
 pub struct EnvInfo {
     pub name: String,
     pub morloc_version: Option<Version>,
-    pub active: bool,
+    pub is_default: bool,
 }
 
 // ======================================================================
@@ -128,16 +128,23 @@ pub fn remove_environment(engine: ContainerEngine, scope: Scope, name: &str) -> 
         let _ = fs::remove_dir_all(&data_dir);
     }
 
-    // If the active env was this one, clear it in both local and system configs
-    for cfg_scope in [Scope::Local, Scope::System] {
-        let cfg_path = config::config_path(cfg_scope);
-        if let Ok(cfg) = config::read_config::<Config>(&cfg_path) {
-            if cfg.active_env.as_deref() == Some(name) {
-                let new_cfg = Config {
-                    active_env: None,
-                    ..cfg
-                };
-                let _ = config::write_config(&cfg_path, &new_cfg);
+    // If a config's default tag pointed at this name AND no env of that name
+    // survives in any scope, clear the tag. The name-still-resolves guard avoids
+    // over-clearing when a same-named env remains in the other scope (e.g. a
+    // local `default` is removed while a system `default` — the common case now
+    // that no-name `new` uses the constant name `default` — still exists).
+    let name_orphaned = config::find_env_scope(name).is_err();
+    if name_orphaned {
+        for cfg_scope in [Scope::Local, Scope::System] {
+            let cfg_path = config::config_path(cfg_scope);
+            if let Ok(cfg) = config::read_config::<Config>(&cfg_path) {
+                if cfg.default_env.as_deref() == Some(name) {
+                    let new_cfg = Config {
+                        default_env: None,
+                        ..cfg
+                    };
+                    let _ = config::write_config(&cfg_path, &new_cfg);
+                }
             }
         }
     }
@@ -146,7 +153,7 @@ pub fn remove_environment(engine: ContainerEngine, scope: Scope, name: &str) -> 
 }
 
 /// List environments in the given scope.
-pub fn list_environments(scope: Scope, active_env: Option<&str>) -> Vec<EnvInfo> {
+pub fn list_environments(scope: Scope, default_env: Option<&str>) -> Vec<EnvInfo> {
     let names = config::list_env_names(scope);
     let mut result = Vec::new();
     for name in names {
@@ -154,15 +161,16 @@ pub fn list_environments(scope: Scope, active_env: Option<&str>) -> Vec<EnvInfo>
             result.push(EnvInfo {
                 name: name.clone(),
                 morloc_version: ec.morloc_version,
-                active: active_env == Some(name.as_str()),
+                is_default: default_env == Some(name.as_str()),
             });
         }
     }
     result
 }
 
-/// Select an environment by writing active_env to the given write_scope config.
-pub fn select_environment(name: &str, write_scope: Scope) -> Result<()> {
+/// Tag an environment as the default by writing default_env to the given
+/// write_scope config.
+pub fn set_default_environment(name: &str, write_scope: Scope) -> Result<()> {
     // Verify the environment exists somewhere
     config::find_env_scope(name)?;
 
@@ -171,17 +179,17 @@ pub fn select_environment(name: &str, write_scope: Scope) -> Result<()> {
         .or_else(|_| config::read_config::<Config>(&config::config_path(Scope::System)))
         .unwrap_or_default();
     let new_cfg = Config {
-        active_env: Some(name.to_string()),
+        default_env: Some(name.to_string()),
         ..base_cfg
     };
     config::write_config(&cfg_path, &new_cfg)
 }
 
-/// Resolve the active environment. Checks local config first, then system.
+/// Resolve the default environment. Checks local config first, then system.
 /// Returns (name, scope where env config lives, EnvironmentConfig).
-pub fn resolve_active_environment() -> Result<(String, Scope, EnvironmentConfig)> {
-    // Find active_env name from config (local first, then system)
-    let name = resolve_active_env_name()?;
+pub fn resolve_default_environment() -> Result<(String, Scope, EnvironmentConfig)> {
+    // Find default_env name from config (local first, then system)
+    let name = resolve_default_env_name()?;
 
     // Find which scope has the environment config
     let scope = config::find_env_scope(&name)?;
@@ -189,19 +197,19 @@ pub fn resolve_active_environment() -> Result<(String, Scope, EnvironmentConfig)
     Ok((name, scope, ec))
 }
 
-/// Resolve just the active environment name from config.
+/// Resolve just the default environment name from config.
 /// Skips names that don't resolve to an actual environment (e.g., stale
 /// entries from old config formats).
-fn resolve_active_env_name() -> Result<String> {
+fn resolve_default_env_name() -> Result<String> {
     if let Ok(cfg) = config::read_config::<Config>(&config::config_path(Scope::Local)) {
-        if let Some(ref name) = cfg.active_env {
+        if let Some(ref name) = cfg.default_env {
             if config::find_env_scope(name).is_ok() {
                 return Ok(name.clone());
             }
         }
     }
     if let Ok(cfg) = config::read_config::<Config>(&config::config_path(Scope::System)) {
-        if let Some(ref name) = cfg.active_env {
+        if let Some(ref name) = cfg.default_env {
             if config::find_env_scope(name).is_ok() {
                 return Ok(name.clone());
             }
@@ -211,17 +219,17 @@ fn resolve_active_env_name() -> Result<String> {
     let local_envs = config::list_env_names(Scope::Local);
     let system_envs = config::list_env_names(Scope::System);
     if local_envs.is_empty() && system_envs.is_empty() {
-        Err(ManagerError::NoActiveEnvironment)
+        Err(ManagerError::NoDefaultEnvironment)
     } else {
         // Label each entry with its scope so same-named envs are distinguishable.
-        // System envs are flagged with --system to disambiguate in select.
         let mut available: Vec<String> = local_envs
             .iter()
             .map(|n| format!("{n} (local)"))
             .collect();
         available.extend(system_envs.iter().map(|n| format!("{n} (system)")));
         Err(ManagerError::EnvError(format!(
-            "No active environment. Select one with: morloc-manager select <name>\n\
+            "No default environment set. Pass --env <name>, or set a default with: \
+             morloc-manager update --env <name> --set-default\n\
              Available: {}",
             available.join(", ")
         )))

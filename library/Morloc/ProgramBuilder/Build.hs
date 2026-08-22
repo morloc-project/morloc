@@ -146,7 +146,7 @@ syncEnvDeps = do
             , "  dependency agent is missing, so they were NOT provisioned -- the"
             , "  build (or the program at runtime) may fail on missing dependencies."
             , "  'morloc-env' ships alongside morloc-manager; build and re-stage it,"
-            , "  e.g. re-provision the environment (morloc-manager update <env>)."
+            , "  e.g. re-provision the environment (morloc-manager update --env <env>)."
             , "===================================================================="
             ]
         Just agent -> do

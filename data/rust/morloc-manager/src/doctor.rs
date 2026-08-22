@@ -175,7 +175,7 @@ pub fn doctor(
     if slurm {
         if !json_mode { println!("\nSLURM bridge"); }
         c.set_category("slurm");
-        check_slurm_prereqs(&mut c, engine, ec);
+        check_slurm_prereqs(&mut c, engine, ec, scope, env_name);
     }
 
     let fail_count = c.fail;
@@ -334,14 +334,14 @@ fn check_native_runtime(c: &mut Counts, env_name: &str, rt: Option<&NativeRuntim
                     c.pass(&format!("conda toolchain present ({prefix})"));
                 } else {
                     c.fail(&format!(
-                        "conda prefix missing at {prefix} -- re-run: morloc-manager update {env_name}"
+                        "conda prefix missing at {prefix} -- re-run: morloc-manager update --env {env_name}"
                     ));
                 }
             }
             None => c.warn("runtime record present but no CONDA_PREFIX in the activation env-map"),
         },
         None => c.fail(&format!(
-            "native environment not materialized -- run: morloc-manager update {env_name}"
+            "native environment not materialized -- run: morloc-manager update --env {env_name}"
         )),
     }
 }
@@ -1210,7 +1210,7 @@ fn check_programs_deep(
 /// will rely on: cluster client tools, codegen toggle in the build
 /// config, env image resolvability, NFS-shared morloc-manager binary
 /// path, and a writable runtime dir for the bridge UDS.
-fn check_slurm_prereqs(c: &mut Counts, engine: ContainerEngine, ec: &EnvironmentConfig) {
+fn check_slurm_prereqs(c: &mut Counts, engine: ContainerEngine, ec: &EnvironmentConfig, scope: Scope, env_name: &str) {
     fn which(name: &str) -> bool {
         Command::new(name).arg("--version").output().is_ok()
     }
@@ -1255,12 +1255,12 @@ fn check_slurm_prereqs(c: &mut Counts, engine: ContainerEngine, ec: &Environment
         }
     }
 
-    // 4. Active env image is resolvable.
+    // 4. Env image is resolvable.
     let image = ec.active_image();
     if image.is_empty() {
-        c.fail("active env has no resolvable image (run `morloc-manager update`)");
+        c.fail("env has no resolvable image (run `morloc-manager update`)");
     } else {
-        c.pass(&format!("active env image: {}", image));
+        c.pass(&format!("env image: {}", image));
     }
 
     // 5. Engine softly recommended to be Apptainer.
@@ -1291,6 +1291,26 @@ fn check_slurm_prereqs(c: &mut Counts, engine: ContainerEngine, ec: &Environment
         }
         _ => {
             c.warn("could not resolve morloc-manager's own absolute path; --slurm-bridge may fail to compose a working sbatch wrap");
+        }
+    }
+
+    // 6b. The env config must be resolvable at the SAME path on every compute
+    //     node. The wrap pins `run --env <name>`, so each worker re-reads this
+    //     env's config; if it lives outside the NFS-shared $HOME (e.g. a
+    //     system-scope env under /etc/morloc), workers may not find it.
+    let env_cfg = cfg::env_config_path(scope, env_name);
+    match dirs::home_dir() {
+        Some(home) if env_cfg.starts_with(&home) => {
+            c.pass(&format!("env config is under $HOME ({})", env_cfg.display()));
+        }
+        Some(_) => {
+            c.warn(&format!(
+                "env '{env_name}' config at {} is not under $HOME; compute nodes may not resolve `--env {env_name}`. Use a local (per-user) env on NFS-shared $HOME for the SLURM bridge.",
+                env_cfg.display()
+            ));
+        }
+        None => {
+            c.warn("could not resolve $HOME to check the env config is NFS-mirrorable for compute nodes");
         }
     }
 

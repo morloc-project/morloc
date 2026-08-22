@@ -45,8 +45,9 @@ safe to run anywhere.
 - `help`/`expose`: just the `morloc-manager` binary. It is resolved from
   `$MORLOC_MANAGER`, then `PATH`, then the local cargo build under
   `data/rust/target/{debug,release}/morloc-manager`.
-- `serve`/`auth`: additionally a container engine (docker/podman/apptainer), an
-  **active** morloc environment (`morloc-manager select <env>`), `curl`, and
+- `serve`/`auth`: additionally a container engine (docker/podman/apptainer), a
+  **default** morloc environment (the first `morloc-manager new` sets it, or
+  `morloc-manager update --env <env> --set-default`), `curl`, and
   `python3`. The serving code must be current -- run `morloc init -f` after
   changing the nexus/runtime.
 

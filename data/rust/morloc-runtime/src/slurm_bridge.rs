@@ -71,8 +71,9 @@ struct SubmitReq<'a> {
     op: &'a str,
     /// Inner argv: the morloc-manager-/nexus-style command to run on
     /// the compute node, one element per shell token. The bridge
-    /// prepends `["<morloc-manager>", "run", "--slurm-bridge", "--"]`
-    /// before composing the sbatch wrap. Sending an argv list rather
+    /// prepends `["<morloc-manager>", "run", "--env", "<name>",
+    /// "--slurm-bridge", "--"]` before composing the sbatch wrap.
+    /// Sending an argv list rather
     /// than a pre-escaped string keeps quoting out of the wire format
     /// and lets the bridge echo the exact attempted argv in error
     /// replies.

@@ -10,6 +10,7 @@ use crate::types::*;
 
 pub fn freeze_from_dir(
     scope: Scope,
+    env_name: &str,
     ver: Version,
     engine: ContainerEngine,
     image: &str,
@@ -75,19 +76,8 @@ pub fn freeze_from_dir(
     eprintln!("Created {tar_path}");
     let now = Utc::now();
 
-    // Get base image from the active environment config.
-    // Check local config first, then system config for the active env name
-    // (mirrors resolve_active_env_name in environment.rs).
-    let active_env_name: Option<String> = config::read_active_config()
-        .and_then(|c| c.active_env)
-        .or_else(|| {
-            let sys_path = config::config_path(Scope::System);
-            config::read_config::<Config>(&sys_path)
-                .ok()
-                .and_then(|c| c.active_env)
-        });
-
-    let (base_img, env_layer) = if let Some(ref env_name) = active_env_name {
+    // Get base image from the environment being frozen (resolved by the caller).
+    let (base_img, env_layer) = {
         let env_scope = config::find_env_scope(env_name).unwrap_or(scope);
         match config::read_env_config(env_scope, env_name) {
             Ok(ec) => {
@@ -119,8 +109,6 @@ pub fn freeze_from_dir(
             }
             Err(_) => ("unknown".to_string(), None),
         }
-    } else {
-        ("unknown".to_string(), None)
     };
 
     let manifest = FreezeManifest {

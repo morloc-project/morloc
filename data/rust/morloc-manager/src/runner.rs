@@ -86,7 +86,7 @@ pub fn run_in_env(
 ) -> Result<()> {
     let (name, scope, ec) = match target {
         Some(t) => t,
-        None => environment::resolve_active_environment()?,
+        None => environment::resolve_default_environment()?,
     };
     let env = ResolvedEnv { name, scope, ec };
     runner_for(&env.ec).run(&env, &req)

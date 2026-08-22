@@ -457,7 +457,7 @@ fn build_oci_run_args(
 ///
 /// Subcommand selection:
 /// * `interactive=true` + cmd=Some(["/bin/bash"]) => `shell` (matches the
-///   `--shell` UX in run_with_config).
+///   interactive `shell` UX in run_with_config).
 /// * cmd=Some(other) => `exec` (run the command directly, bypassing any
 ///   runscript).
 /// * cmd=None => `run` (invoke the image's runscript).

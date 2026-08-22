@@ -14,8 +14,8 @@ pub enum ManagerError {
     #[error("Invalid configuration in {path}: {msg}")]
     ConfigParseError { path: String, msg: String },
 
-    #[error("No active environment. Run: morloc-manager new")]
-    NoActiveEnvironment,
+    #[error("No default environment set. Run: morloc-manager new")]
+    NoDefaultEnvironment,
 
     #[error("Environment not found: {0}")]
     EnvironmentNotFound(String),
@@ -27,7 +27,7 @@ pub enum ManagerError {
     BackendUnsupported(String),
 
 
-    #[error("No command specified. Use --shell or provide a command after --.")]
+    #[error("No command specified. Provide a command after --, or use 'morloc-manager shell' for an interactive shell.")]
     NoCommand,
 
     #[error("No container engine found. Install podman or docker.")]

@@ -204,6 +204,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
     pub morloc_manager_exe: PathBuf,
+    /// Environment the compute-node `morloc-manager run` must target. The bridge
+    /// pins this explicitly (`run --env <name>`) so every worker uses the same
+    /// env as the driver, independent of the host's default-environment tag.
+    pub env_name: String,
 }
 
 /// Owns the listener thread + socket path. Drop tears the bridge down
@@ -388,23 +392,28 @@ fn handle_submit(
     stderr: &str,
     res: &ResourceSpec,
 ) -> String {
-    // Wrap the logical nexus invocation in `morloc-manager run
-    // --slurm-bridge -- ...`. Each compute node thereby brings up the
-    // active env's container (same .sif, same $HOME mount, same
-    // MORLOC_HOME) AND spawns its own bridge UDS so the in-container
-    // nexus can dispatch nested remote calls back to slurm on the
-    // worker host. Without --slurm-bridge the leaf case still works
-    // but the in-container nexus has no bridge to talk to and any
-    // nested labeled call fails with "MORLOC_BRIDGE_SOCKET unset".
+    // Wrap the logical nexus invocation in `morloc-manager run --env
+    // <name> --slurm-bridge -- ...`. Each compute node thereby brings
+    // up the same env's container (same .sif, same $HOME mount, same
+    // MORLOC_HOME) AS THE DRIVER -- the env is pinned explicitly rather
+    // than resolved from the host's default tag, so a login-node
+    // default change mid-run cannot repoint in-flight workers. It also
+    // spawns its own bridge UDS so the in-container nexus can dispatch
+    // nested remote calls back to slurm on the worker host. Without
+    // --slurm-bridge the leaf case still works but the in-container
+    // nexus has no bridge to talk to and any nested labeled call fails
+    // with "MORLOC_BRIDGE_SOCKET unset".
     //
-    // The full argv `[morloc-manager, run, --slurm-bridge, --,
-    // <inner_argv>...]` is shell-escaped once into a single string for
-    // sbatch --wrap. /bin/sh on the compute node parses it back into
-    // argv, morloc-manager hands everything after `--` to the
-    // in-container nexus. One quoting boundary, end to end.
-    let mut argv: Vec<String> = Vec::with_capacity(inner_argv.len() + 4);
+    // The full argv `[morloc-manager, run, --env, <name>,
+    // --slurm-bridge, --, <inner_argv>...]` is shell-escaped once into
+    // a single string for sbatch --wrap. /bin/sh on the compute node
+    // parses it back into argv, morloc-manager hands everything after
+    // `--` to the in-container nexus. One quoting boundary, end to end.
+    let mut argv: Vec<String> = Vec::with_capacity(inner_argv.len() + 6);
     argv.push(cfg.morloc_manager_exe.to_string_lossy().into_owned());
     argv.push("run".to_string());
+    argv.push("--env".to_string());
+    argv.push(cfg.env_name.clone());
     argv.push("--slurm-bridge".to_string());
     argv.push("--".to_string());
     argv.extend(inner_argv.iter().cloned());

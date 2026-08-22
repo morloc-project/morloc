@@ -247,8 +247,8 @@ impl<'de> Deserialize<'de> for Version {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// Name of the active environment.
-    pub active_env: Option<String>,
+    /// Name of the environment used when a command is given no explicit `--env`.
+    pub default_env: Option<String>,
     /// Default execution backend (serialized under the historical `engine` key).
     #[serde(rename = "engine", default = "default_backend")]
     pub backend: Backend,
@@ -273,7 +273,7 @@ impl Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            active_env: None,
+            default_env: None,
             backend: Backend::Container(ContainerEngine::Podman),
         }
     }

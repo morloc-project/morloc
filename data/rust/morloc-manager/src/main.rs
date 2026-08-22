@@ -64,16 +64,16 @@ fn build_help_template() -> String {
 {bu}Development{r}
   {b}setup{r}      Configure the default container engine
   {b}new{r}        Build a new morloc environment
-  {b}run{r}        Run a command in the active environment
+  {b}run{r}        Run a command in an environment
+  {b}shell{r}      Open an interactive shell in an environment
   {b}rm{r}         Remove a morloc environment
   {b}ls{r}         List morloc environments
   {b}info{r}       Show configuration and installed environments
-  {b}select{r}     Select an environment
-  {b}update{r}     Rebuild an environment
+  {b}update{r}     Rebuild or reconfigure an environment
   {b}nuke{r}       Remove all morloc environments
 
 {bu}Serving{r}
-  {b}install{r}    Build and install a module into the active environment
+  {b}install{r}    Build and install a module into an environment
   {b}expose{r}     Choose which installed modules are served (MCP/API/eval)
   {b}start{r}      Serve an environment over the network
   {b}eval{r}       Evaluate a morloc expression against a serve container
@@ -132,14 +132,17 @@ enum Cmd {
     },
     /// Build a new morloc environment
     #[command(display_order = 1)]
-    #[command(after_help = "Examples:\n  morloc-manager new\n  morloc-manager new myenv --lang py@3.12\n  morloc-manager new myenv --engine podman\n\nThe environment's toolchain is provisioned from its requirements via pixi:\nnative by default on a capable host, or a requirement-derived container image\nwith --engine (podman/docker/apptainer). No hand-authored recipes.")]
+    #[command(after_help = "Examples:\n  morloc-manager new                        # creates 'default'\n  morloc-manager new myenv --lang py@3.12\n  morloc-manager new myenv --engine podman\n  morloc-manager new myenv --morloc-version 0.98.0\n\nThe first environment you create becomes the default. The environment's toolchain\nis provisioned from its requirements via pixi: native by default on a capable\nhost, or a requirement-derived container image with --engine\n(podman/docker/apptainer). No hand-authored recipes.")]
     New {
-        /// Environment name (default: derived from the morloc version)
+        /// Environment name (default: `default`)
         name: Option<String>,
         /// Language toolchain(s) to provision: `lang` or `lang@version`
         /// (e.g. --lang py@3.12 --lang r). Repeatable or comma-separated.
         #[arg(long)]
         lang: Vec<String>,
+        /// morloc version to provision (e.g. 0.98.0). Omit for the latest release.
+        #[arg(long = "morloc-version")]
+        morloc_version: Option<String>,
         /// Backend/engine: podman, docker, apptainer, singularity, or none (native).
         #[arg(long, value_enum)]
         engine: Option<EngineArg>,
@@ -161,25 +164,25 @@ enum Cmd {
         #[arg(long)]
         non_interactive: bool,
     },
-    /// Run a command in the active environment
+    /// Run a command in an environment
     #[command(display_order = 2)]
     #[command(after_help = "\
 Examples:
   morloc-manager run -- morloc --version
-  morloc-manager run -- morloc make -o svc svc.loc
+  morloc-manager run --env dev -- morloc make -o svc svc.loc
   morloc-manager run -- morloc install math
-  morloc-manager run --shell
 
+Without --env, the default environment is used (see `morloc-manager ls`).
 Use -- to separate morloc-manager flags from the container command.
 Without --, flags like --version are interpreted by morloc-manager itself.")]
     Run {
         /// Command to run inside the container
         command: Vec<String>,
-        /// Start an interactive shell
+        /// Environment to run in (default: the default environment)
         #[arg(long)]
-        shell: bool,
+        env: Option<String>,
         /// Pass environment variable to the container (KEY=VALUE)
-        #[arg(short, long = "env")]
+        #[arg(long = "env-var")]
         env_vars: Vec<String>,
         /// Read environment variables from a file (one KEY=VALUE per line)
         #[arg(long)]
@@ -190,16 +193,34 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         engine_arg: Vec<String>,
         /// Expose a SLURM submission bridge inside the container so
         /// labeled remote calls (`big:fn x`) can submit jobs to the
-        /// host's sbatch. Requires the active environment to use the
+        /// host's sbatch. Requires the environment to use the
         /// Apptainer engine. Each remote job is launched on its
-        /// compute node via `morloc-manager run -- <nexus>
-        /// --call-packet ...`, so the same env (same .sif, same
-        /// MORLOC_HOME) is used on driver and worker; the
+        /// compute node via `morloc-manager run --env <name> --
+        /// <nexus> --call-packet ...`, so the same env (same .sif,
+        /// same MORLOC_HOME) is used on driver and worker; the
         /// morloc-manager binary must be reachable at the same path
         /// on every compute node (typical: `~/.local/bin` on
         /// NFS-shared $HOME).
         #[arg(long)]
         slurm_bridge: bool,
+    },
+    /// Open an interactive shell in an environment
+    #[command(display_order = 2)]
+    #[command(after_help = "Examples:\n  morloc-manager shell\n  morloc-manager shell --env dev\n\nWithout --env, the default environment is used.")]
+    Shell {
+        /// Environment to open a shell in (default: the default environment)
+        #[arg(long)]
+        env: Option<String>,
+        /// Pass environment variable to the container (KEY=VALUE)
+        #[arg(long = "env-var")]
+        env_vars: Vec<String>,
+        /// Read environment variables from a file (one KEY=VALUE per line)
+        #[arg(long)]
+        env_file: Option<String>,
+        /// One-shot engine flag, appended to env.flags.yaml `run.<engine>`
+        /// for this invocation only (repeatable; not persisted)
+        #[arg(short = 'x', long = "engine-arg", allow_hyphen_values = true)]
+        engine_arg: Vec<String>,
     },
     /// Remove a morloc environment
     #[command(display_order = 3)]
@@ -210,9 +231,6 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         /// Remove from system scope (requires root)
         #[arg(long)]
         system: bool,
-        /// Remove even if active (deactivates first)
-        #[arg(long)]
-        force: bool,
     },
     /// Remove all morloc environments
     #[command(display_order = 8)]
@@ -253,23 +271,26 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         #[arg(long)]
         packages: bool,
     },
-    /// Select an environment
-    #[command(display_order = 6)]
-    #[command(after_help = "Examples:\n  morloc-manager select myenv\n  sudo morloc-manager select myenv --system")]
-    Select {
-        /// Environment name
-        name: String,
-        /// Write to system config instead of local (requires root)
-        #[arg(long)]
-        system: bool,
-    },
-
     /// Rebuild an environment
     #[command(display_order = 7)]
-    #[command(after_help = "Examples:\n  morloc-manager update              # re-solve/rebuild the active environment\n  morloc-manager update myenv\n  morloc-manager update myenv --lang py@3.13   # re-pin, then rebuild\n  morloc-manager update myenv --system-package jq   # add an OS package, then rebuild\n  morloc-manager update myenv --dotfiles ~/mydots   # copy dotfiles into the env home")]
+    #[command(after_help = "Examples:\n  morloc-manager update                        # re-solve/rebuild the default environment\n  morloc-manager update --env myenv\n  morloc-manager update --env myenv --morloc-version 0.98.0   # bump morloc, then rebuild\n  morloc-manager update --env myenv --lang py@3.13   # re-pin, then rebuild\n  morloc-manager update --env myenv --system-package jq   # add an OS package, then rebuild\n  morloc-manager update --env myenv --dotfiles ~/mydots   # copy dotfiles into the env home\n  morloc-manager update --env myenv --set-default   # make myenv your default environment\n  sudo morloc-manager update --env shared --set-default --system   # set the machine-wide default")]
     Update {
-        /// Environment name (default: active environment)
-        name: Option<String>,
+        /// Environment to update (default: the default environment)
+        #[arg(long)]
+        env: Option<String>,
+        /// Move this environment to a specific morloc version, then re-solve and
+        /// rebuild. Omit to keep the environment's current morloc version.
+        #[arg(long = "morloc-version")]
+        morloc_version: Option<String>,
+        /// Tag this environment as the default (used when a command is given no
+        /// explicit --env). Writes your personal (local) default, even for a
+        /// system-scope env; add --system to set the machine-wide default.
+        #[arg(long = "set-default")]
+        set_default: bool,
+        /// With --set-default, write the machine-wide (system) default instead of
+        /// your personal one (requires root).
+        #[arg(long)]
+        system: bool,
         /// Re-pin language toolchain(s): `lang` or `lang@version` (repeatable /
         /// comma-separated). Omit to keep the stored pins.
         #[arg(long)]
@@ -292,10 +313,11 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     // -- Deployment --
     /// Serve an environment over the network
     #[command(display_order = 20)]
-    #[command(after_help = "Examples:\n  morloc-manager start                       # serve the environment's exposed set\n  morloc-manager start myenv -p 9090:8080\n  morloc-manager start --mcp mymodule -p 9000:9000   # serve one module as MCP/HTTP")]
+    #[command(after_help = "Examples:\n  morloc-manager start                       # serve the default environment's exposed set\n  morloc-manager start --env myenv -p 9090:8080\n  morloc-manager start --mcp mymodule -p 9000:9000   # serve one module as MCP/HTTP")]
     Start {
-        /// Environment name (default: active environment)
-        name: Option<String>,
+        /// Environment to serve (default: the default environment)
+        #[arg(long)]
+        env: Option<String>,
         /// Ad-hoc: serve just this one installed module over MCP, ignoring the
         /// exposed set. Default (no --mcp) serves the environment's exposed
         /// set (managed with `morloc-manager expose`).
@@ -327,7 +349,7 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
         #[arg(short, long, value_parser = parse_port)]
         port: Vec<(u16, u16)>,
         /// Pass environment variable to the container (KEY=VALUE)
-        #[arg(short, long = "env")]
+        #[arg(long = "env-var")]
         env_vars: Vec<String>,
         /// Read environment variables from a file (one KEY=VALUE per line)
         #[arg(long)]
@@ -342,27 +364,30 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     },
     /// Stop a running serve container
     #[command(display_order = 21)]
-    #[command(after_help = "Examples:\n  morloc-manager stop              # stop active environment\n  morloc-manager stop myenv")]
+    #[command(after_help = "Examples:\n  morloc-manager stop              # stop the default environment\n  morloc-manager stop --env myenv")]
     Stop {
-        /// Environment name (default: active environment)
-        name: Option<String>,
+        /// Environment to stop (default: the default environment)
+        #[arg(long)]
+        env: Option<String>,
     },
     /// Stream logs from a running serve container
     #[command(display_order = 22)]
-    #[command(after_help = "Examples:\n  morloc-manager logs              # logs from only running serve container\n  morloc-manager logs myenv\n  morloc-manager logs -f myenv     # follow mode")]
+    #[command(after_help = "Examples:\n  morloc-manager logs              # logs from only running serve container\n  morloc-manager logs --env myenv\n  morloc-manager logs -f --env myenv     # follow mode")]
     Logs {
-        /// Environment name (default: auto-detect running container)
-        name: Option<String>,
+        /// Environment whose logs to stream (default: the default environment)
+        #[arg(long)]
+        env: Option<String>,
         /// Follow log output
         #[arg(short, long)]
         follow: bool,
     },
     /// Export installed state as a frozen artifact
     #[command(display_order = 23)]
-    #[command(after_help = "Examples:\n  morloc-manager freeze\n  morloc-manager freeze myenv\n  morloc-manager freeze -o ./my-freeze\n\nRequires at least one program compiled with 'morloc make --install'.")]
+    #[command(after_help = "Examples:\n  morloc-manager freeze\n  morloc-manager freeze --env myenv\n  morloc-manager freeze -o ./my-freeze\n\nRequires at least one program compiled with 'morloc make --install'.")]
     Freeze {
-        /// Environment name (default: active environment)
-        name: Option<String>,
+        /// Environment to freeze (default: the default environment)
+        #[arg(long)]
+        env: Option<String>,
         /// Output directory (default: ./morloc-freeze)
         #[arg(short, long)]
         output: Option<String>,
@@ -393,22 +418,25 @@ Without --, flags like --version are interpreted by morloc-manager itself.")]
     },
     /// Evaluate a morloc expression against a running serve container
     #[command(display_order = 25)]
-    #[command(after_help = "Examples:\n  morloc-manager eval 'add 1 2'\n  morloc-manager eval myenv 'map (add 1) [1,2,3]'\n  morloc-manager eval -p 9090 'greet \"world\"'")]
+    #[command(after_help = "Examples:\n  morloc-manager eval 'add 1 2'\n  morloc-manager eval --env myenv 'map (add 1) [1,2,3]'\n  morloc-manager eval -p 9090 'greet \"world\"'")]
     Eval {
-        /// Expression to evaluate (or environment name if two positional args)
-        first: String,
-        /// Expression to evaluate (when first arg is environment name)
-        second: Option<String>,
+        /// Expression to evaluate
+        #[arg(allow_hyphen_values = true)]
+        expr: String,
+        /// Environment whose serve container to evaluate against
+        /// (default: the default environment)
+        #[arg(long)]
+        env: Option<String>,
         /// Port of the serve container (default: 8080)
         #[arg(short, long, default_value = "8080")]
         port: u16,
     },
-    /// Build and install a module into the active environment
+    /// Build and install a module into an environment
     #[command(display_order = 4)]
     #[command(after_help = "\
 Examples:
   morloc-manager install main.loc              # installs under the module name
-  morloc-manager install ./mypkg               # installs a package directory
+  morloc-manager install --env dev ./mypkg     # installs a package directory into 'dev'
 
 Sugar for: morloc-manager run -- morloc make --install <file>
        (or: morloc-manager run -- morloc install --build <dir> for a directory)")]
@@ -419,6 +447,9 @@ Sugar for: morloc-manager run -- morloc make --install <file>
         /// declaration), not the source file, so it is exposed/served by that
         /// module name.
         src: String,
+        /// Environment to install into (default: the default environment)
+        #[arg(long)]
+        env: Option<String>,
         /// One-shot engine flag, appended to env.flags.yaml `run.<engine>`
         /// for this invocation only (repeatable; not persisted)
         #[arg(short = 'x', long = "engine-arg", allow_hyphen_values = true)]
@@ -439,10 +470,11 @@ Sugar for: morloc-manager run -- morloc make --install <file>
     Status,
     /// Check environment health and diagnose issues
     #[command(display_order = 26)]
-    #[command(after_help = "Examples:\n  morloc-manager doctor\n  morloc-manager doctor myenv\n  morloc-manager doctor --deep")]
+    #[command(after_help = "Examples:\n  morloc-manager doctor\n  morloc-manager doctor --env myenv\n  morloc-manager doctor --deep")]
     Doctor {
-        /// Environment name (default: active)
-        name: Option<String>,
+        /// Environment to check (default: the default environment)
+        #[arg(long)]
+        env: Option<String>,
         /// Check system-scope environment
         #[arg(long)]
         system: bool,
@@ -471,7 +503,7 @@ enum ExposeAction {
         /// Protocols to expose over (comma-separated: mcp, api)
         #[arg(long = "as", value_enum, value_delimiter = ',', required = true)]
         protocols: Vec<Protocol>,
-        /// Environment (default: active)
+        /// Environment (default: the default environment)
         #[arg(long)]
         env: Option<String>,
     },
@@ -479,13 +511,13 @@ enum ExposeAction {
     Rm {
         /// Module name
         module: String,
-        /// Environment (default: active)
+        /// Environment (default: the default environment)
         #[arg(long)]
         env: Option<String>,
     },
     /// Show what is exposed
     List {
-        /// Environment (default: active)
+        /// Environment (default: the default environment)
         #[arg(long)]
         env: Option<String>,
     },
@@ -498,7 +530,7 @@ enum ExposeAction {
         /// Disable the eval capability
         #[arg(long)]
         off: bool,
-        /// Environment (default: active)
+        /// Environment (default: the default environment)
         #[arg(long)]
         env: Option<String>,
     },
@@ -606,7 +638,6 @@ fn main() -> ExitCode {
                 let args: Vec<String> = std::env::args().collect();
                 if args.len() > 1 && args[1] == "run" {
                     let inner: Vec<&str> = args[2..].iter()
-                        .filter(|a| *a != "--shell")
                         .map(|a| a.as_str())
                         .collect();
                     if !inner.is_empty() {
@@ -676,16 +707,55 @@ fn check_system_write_access() -> Result<()> {
     }
 }
 
-/// Resolve an environment by explicit name or fall back to the active environment.
-fn resolve_env_or_active(name: Option<String>) -> Result<(String, Scope, EnvironmentConfig)> {
+/// Resolve an environment by explicit `--env` name or fall back to the default
+/// environment.
+fn resolve_env_or_default(name: Option<String>) -> Result<(String, Scope, EnvironmentConfig)> {
     match name {
         Some(n) => {
             let scope = cfg::find_env_scope(&n)?;
             let ec = cfg::read_env_config(scope, &n)?;
             Ok((n, scope, ec))
         }
-        None => environment::resolve_active_environment(),
+        None => environment::resolve_default_environment(),
     }
+}
+
+/// Shared body of the `run` and `shell` subcommands: resolve the target
+/// environment (honoring `--env` / the default), collect any pass-through env
+/// vars, and dispatch through the backend's Runner. `shell`=true opens an
+/// interactive shell (with `args` empty); `run` passes the command as `args`.
+#[allow(clippy::too_many_arguments)]
+fn exec_in_env(
+    verbose: bool,
+    env: Option<String>,
+    env_vars: Vec<String>,
+    env_file: Option<String>,
+    engine_arg: Vec<String>,
+    shell: bool,
+    args: Vec<String>,
+    slurm_bridge: bool,
+) -> Result<()> {
+    // Apply the "create one" hint at the resolve step, where the
+    // EnvironmentNotFound / NoDefaultEnvironment error actually originates.
+    let target = resolve_env_or_default(env).map_err(|e| match e {
+        ManagerError::EnvironmentNotFound(msg) => ManagerError::EnvironmentNotFound(
+            format!("{msg}. Run 'morloc-manager new' to create an environment")
+        ),
+        other => other,
+    })?;
+    let user_env = collect_env_vars(&env_vars, env_file.as_deref())?;
+    runner::run_in_env(
+        Some(target),
+        runner::RunRequest {
+            verbose,
+            shell,
+            args,
+            user_env,
+            engine_args: engine_arg,
+            phase: Phase::Run,
+            slurm_bridge,
+        },
+    )
 }
 
 fn ensure_engine() -> Result<ContainerEngine> {
@@ -927,6 +997,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         Cmd::New {
             name,
             lang,
+            morloc_version,
             engine,
             system_package,
             dotfiles,
@@ -971,7 +1042,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     return Err(dotfiles_not_supported());
                 }
                 let interactive = !non_interactive && io::stdin().is_terminal();
-                return native_new(scope, name, lang, no_init, interactive, verbose);
+                return native_new(scope, name, lang, morloc_version, no_init, interactive, verbose);
             }
 
             // Resolve engine: explicit flag > config default > auto-detect single > error
@@ -1041,7 +1112,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             if cfg::read_active_config().is_none() {
                 let cfg_path = cfg::config_path(scope);
                 let new_cfg = Config {
-                    active_env: None,
+                    default_env: None,
                     backend: Backend::Container(resolved_engine),
                 };
                 cfg::write_config(&cfg_path, &new_cfg)?;
@@ -1055,45 +1126,42 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 eprintln!("Note: No TTY detected, running in non-interactive mode.");
             }
             container_new_derived(
-                scope, resolved_engine, name, lang, system_package, dotfiles, no_init,
-                interactive,
+                scope, resolved_engine, name, lang, system_package, dotfiles, morloc_version,
+                no_init, interactive,
             )
         }
 
         // ---- run ----
-        Cmd::Run { command, shell, env_vars, env_file, engine_arg, slurm_bridge } => {
-            if !shell && command.is_empty() {
+        Cmd::Run { command, env, env_vars, env_file, engine_arg, slurm_bridge } => {
+            if command.is_empty() {
                 return Err(ManagerError::NoCommand);
             }
-            let user_env = collect_env_vars(&env_vars, env_file.as_deref())?;
-            runner::run_in_env(
-                None,
-                runner::RunRequest {
-                    verbose,
-                    shell,
-                    args: command,
-                    user_env,
-                    engine_args: engine_arg,
-                    phase: Phase::Run,
-                    slurm_bridge,
-                },
-            )
-            .map_err(|e| match e {
-                ManagerError::EnvironmentNotFound(msg) => ManagerError::EnvironmentNotFound(
-                    format!("{msg}. Run 'morloc-manager new' to create an environment")
-                ),
-                other => other,
-            })
+            exec_in_env(verbose, env, env_vars, env_file, engine_arg, false, command, slurm_bridge)
+        }
+
+        // ---- shell ----
+        Cmd::Shell { env, env_vars, env_file, engine_arg } => {
+            exec_in_env(verbose, env, env_vars, env_file, engine_arg, true, Vec::new(), false)
         }
 
         // ---- rm ----
-        Cmd::Rm { names, system, force } => {
+        // rm always requires explicit names; it never operates on the default.
+        Cmd::Rm { names, system } => {
             if system { check_system_write_access()?; }
             if names.is_empty() {
                 return Err(ManagerError::EnvError("No environment names specified".to_string()));
             }
-            // Capture current active env for post-removal feedback
-            let was_active = cfg::read_active_config().and_then(|c| c.active_env);
+            // Capture current default env for post-removal feedback
+            // Capture the default tag from BOTH scopes: a system-scope default is
+            // otherwise invisible when a local config file exists (read_active_config
+            // returns the local config and never falls through to system).
+            let was_default = cfg::read_active_config()
+                .and_then(|c| c.default_env)
+                .or_else(|| {
+                    cfg::read_config::<Config>(&cfg::config_path(Scope::System))
+                        .ok()
+                        .and_then(|c| c.default_env)
+                });
             // Attempt each removal; collect failures, continue past errors
             let mut failures: Vec<String> = Vec::new();
             for name in &names {
@@ -1106,34 +1174,17 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     if scope == Scope::System && !system {
                         check_system_write_access()?;
                     }
-                    if !force {
-                        if let Some(cfg) = cfg::read_active_config() {
-                            if cfg.active_env.as_deref() == Some(name.as_str()) {
-                                return Err(ManagerError::EnvError(format!(
-                                    "active environment (use --force)"
-                                )));
-                            }
-                        }
-                    }
                     let ec = cfg::read_env_config(scope, name)
                         .map_err(|_| ManagerError::EnvironmentNotFound(name.to_string()))?;
+                    // remove_environment clears the default tag if it matched.
                     environment::remove_environment(ec.engine()?, scope, name)?;
                     Ok(())
                 })();
                 match result {
                     Ok(()) => {
-                        // Check if removed env was active and report new state
-                        if was_active.as_deref() == Some(name.as_str()) {
-                            match environment::resolve_active_environment() {
-                                Ok((new_active, _, _)) => {
-                                    // Persist the fallback as the new active environment
-                                    let _ = environment::select_environment(&new_active, Scope::Local);
-                                    eprintln!("Removed environment: {name}. Active environment is now: {new_active}");
-                                }
-                                Err(_) => {
-                                    eprintln!("Removed environment: {name}. No active environment. Use: morloc-manager select <name>");
-                                }
-                            }
+                        if was_default.as_deref() == Some(name.as_str()) {
+                            eprintln!("Removed environment: {name}. It was the default; \
+                                       set a new one with: morloc-manager update --env <name> --set-default");
                         } else {
                             eprintln!("Removed environment: {name}");
                         }
@@ -1231,13 +1282,13 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     }
                 }
 
-                // Clear active_env in the targeted scope's config
+                // Clear the default env tag in the targeted scope's config
                 let cfg_path = cfg::config_path(scope);
                 if let Ok(cfg_data) = cfg::read_config::<Config>(&cfg_path) {
-                    if cfg_data.active_env.is_some() {
-                        let new_cfg = Config { active_env: None, ..cfg_data };
+                    if cfg_data.default_env.is_some() {
+                        let new_cfg = Config { default_env: None, ..cfg_data };
                         let _ = cfg::write_config(&cfg_path, &new_cfg);
-                        eprintln!("Cleared active environment.");
+                        eprintln!("Cleared the default environment.");
                     }
                 }
 
@@ -1295,13 +1346,13 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
 
         // ---- ls ----
         Cmd::Ls { system, local } => {
-            let active_env = cfg::read_active_config()
-                .and_then(|c| c.active_env);
-            let active_str = active_env.as_deref();
+            let default_env = cfg::read_active_config()
+                .and_then(|c| c.default_env);
+            let default_str = default_env.as_deref();
 
-            // Determine which scope effectively owns the active environment.
-            // Local takes priority (same resolution as run/select).
-            let active_in_local = active_str
+            // Determine which scope effectively owns the default environment.
+            // Local takes priority (same resolution as run).
+            let default_in_local = default_str
                 .map(|name| cfg::env_config_path(Scope::Local, name).is_file())
                 .unwrap_or(false);
 
@@ -1309,14 +1360,14 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             let show_system = !local || system;
 
             let local_envs = if show_local {
-                let local_active = if active_in_local { active_str } else { None };
-                environment::list_environments(Scope::Local, local_active)
+                let local_default = if default_in_local { default_str } else { None };
+                environment::list_environments(Scope::Local, local_default)
             } else {
                 Vec::new()
             };
             let system_envs = if show_system {
-                let system_active = if active_in_local { None } else { active_str };
-                environment::list_environments(Scope::System, system_active)
+                let system_default = if default_in_local { None } else { default_str };
+                environment::list_environments(Scope::System, system_default)
             } else {
                 Vec::new()
             };
@@ -1334,11 +1385,11 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 if !local_envs.is_empty() {
                     println!("Local environments:");
                     for e in &local_envs {
-                        let active_mark = if e.active { " (active)" } else { "" };
+                        let default_mark = if e.is_default { " (default)" } else { "" };
                         let ver_mark = e.morloc_version.as_ref()
                             .map(|v| format!(" [{}]", v.show()))
                             .unwrap_or_default();
-                        println!("  {}{}{}", e.name, ver_mark, active_mark);
+                        println!("  {}{}{}", e.name, ver_mark, default_mark);
                     }
                 }
                 if !system_envs.is_empty() {
@@ -1347,11 +1398,11 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     }
                     println!("System environments:");
                     for e in &system_envs {
-                        let active_mark = if e.active { " (active)" } else { "" };
+                        let default_mark = if e.is_default { " (default)" } else { "" };
                         let ver_mark = e.morloc_version.as_ref()
                             .map(|v| format!(" [{}]", v.show()))
                             .unwrap_or_default();
-                        println!("  {}{}{}", e.name, ver_mark, active_mark);
+                        println!("  {}{}{}", e.name, ver_mark, default_mark);
                     }
                 }
                 if total == 0 {
@@ -1377,8 +1428,8 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 };
                 let ec = cfg::read_env_config(scope, &env_name)?;
                 let data_dir = cfg::env_data_dir(scope, &env_name);
-                let active = cfg::read_active_config()
-                    .and_then(|c| c.active_env)
+                let is_default = cfg::read_active_config()
+                    .and_then(|c| c.default_env)
                     .as_deref() == Some(env_name.as_str());
 
                 let engine = ec.backend.container_engine();
@@ -1468,7 +1519,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     struct InfoDetail {
                         name: String,
                         scope: String,
-                        active: bool,
+                        is_default: bool,
                         backend: String,
                         #[serde(skip_serializing_if = "Option::is_none")]
                         morloc_version: Option<Version>,
@@ -1505,7 +1556,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     let output = InfoDetail {
                         name: ec.name.clone(),
                         scope: scope_str.to_string(),
-                        active,
+                        is_default,
                         backend: ec.backend.label().to_string(),
                         morloc_version: ec.morloc_version.clone(),
                         materialized,
@@ -1531,7 +1582,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 } else {
                     println!("Name:      {}", ec.name);
                     println!("Scope:     {scope_str}");
-                    println!("Active:    {}", if active { "yes" } else { "no" });
+                    println!("Default:   {}", if is_default { "yes" } else { "no" });
                     println!("Backend:   {}", ec.backend.label());
                     if let Some(ref ver) = ec.morloc_version {
                         println!("Morloc:    {}", ver.show());
@@ -1641,7 +1692,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 let system_cfg = cfg::read_config::<Config>(&cfg::config_path(Scope::System)).ok();
                 let se_mode = detect_selinux();
 
-                let active_env = environment::resolve_active_environment()
+                let default_env = environment::resolve_default_environment()
                     .map(|(name, _, _)| name)
                     .unwrap_or_else(|_| "none".to_string());
 
@@ -1656,7 +1707,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     struct DirInfo { path: String, exists: bool }
                     #[derive(serde::Serialize)]
                     struct InfoOverview {
-                        active: String,
+                        default: String,
                         local_engine: String,
                         system_engine: String,
                         selinux: String,
@@ -1664,7 +1715,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                         local: Vec<environment::EnvInfo>,
                         system: Vec<environment::EnvInfo>,
                     }
-                    let active_str = if active_env == "none" { None } else { Some(active_env.as_str()) };
+                    let default_str = if default_env == "none" { None } else { Some(default_env.as_str()) };
                     let mut directories = std::collections::BTreeMap::new();
                     for (label, path) in [
                         ("config_local", cfg::config_dir(Scope::Local)),
@@ -1678,17 +1729,17 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                         });
                     }
                     let output = InfoOverview {
-                        active: active_env.clone(),
+                        default: default_env.clone(),
                         local_engine: local_cfg.as_ref().map(|c| c.backend.label()).unwrap_or("unset").to_string(),
                         system_engine: system_cfg.as_ref().map(|c| c.backend.label()).unwrap_or("unset").to_string(),
                         selinux: se_str.to_string(),
                         directories,
-                        local: environment::list_environments(Scope::Local, active_str),
-                        system: environment::list_environments(Scope::System, active_str),
+                        local: environment::list_environments(Scope::Local, default_str),
+                        system: environment::list_environments(Scope::System, default_str),
                     };
                     println!("{}", serde_json::to_string_pretty(&output).unwrap());
                 } else {
-                    println!("Active:         {active_env}");
+                    println!("Default:        {default_env}");
                     println!("Local engine:   {}",
                         local_cfg.as_ref().map(|c| c.backend.label()).unwrap_or("unset"));
                     println!("System engine:  {}",
@@ -1707,42 +1758,42 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                         println!("  {:<20} {} ({})", label, path.display(), status);
                     }
 
-                    let active_str = if active_env == "none" { None } else { Some(active_env.as_str()) };
+                    let default_str = if default_env == "none" { None } else { Some(default_env.as_str()) };
 
-                    // Check if active env lives in local scope (local takes priority)
-                    let active_in_local = active_str
+                    // Check if the default env lives in local scope (local takes priority)
+                    let default_in_local = default_str
                         .map(|name| cfg::env_config_path(Scope::Local, name).is_file())
                         .unwrap_or(false);
 
-                    let local_envs = environment::list_environments(Scope::Local, active_str);
+                    let local_envs = environment::list_environments(Scope::Local, default_str);
                     println!("\nLocal environments:");
                     if local_envs.is_empty() {
                         println!("  (none)");
                     } else {
                         for e in &local_envs {
-                            let active_mark = if e.active { " (active)" } else { "" };
+                            let default_mark = if e.is_default { " (default)" } else { "" };
                             let ver_mark = e.morloc_version.as_ref()
                                 .map(|v| format!(" [{}]", v.show()))
                                 .unwrap_or_default();
-                            println!("  {}{}{}", e.name, ver_mark, active_mark);
+                            println!("  {}{}{}", e.name, ver_mark, default_mark);
                         }
                     }
 
-                    let system_envs = environment::list_environments(Scope::System, active_str);
+                    let system_envs = environment::list_environments(Scope::System, default_str);
                     if !system_envs.is_empty() {
                         println!("\nSystem environments:");
                         for e in &system_envs {
-                            let active_mark = if e.active && active_in_local {
-                                " (active - shadowed)"
-                            } else if e.active {
-                                " (active)"
+                            let default_mark = if e.is_default && default_in_local {
+                                " (default - shadowed)"
+                            } else if e.is_default {
+                                " (default)"
                             } else {
                                 ""
                             };
                             let ver_mark = e.morloc_version.as_ref()
                                 .map(|v| format!(" [{}]", v.show()))
                                 .unwrap_or_default();
-                            println!("  {}{}{}", e.name, ver_mark, active_mark);
+                            println!("  {}{}{}", e.name, ver_mark, default_mark);
                         }
                     }
                 }
@@ -1750,42 +1801,53 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             Ok(())
         }
 
-        // ---- select ----
-        Cmd::Select { name, system } => {
-            if system { check_system_write_access()?; }
-            let write_scope = resolve_scope(system);
-            environment::select_environment(&name, write_scope)?;
-            if system {
-                eprintln!("Set system default environment: {name}");
-            } else {
-                eprintln!("Selected environment: {name}");
-            }
-            Ok(())
-        }
-
         // ---- update ----
         Cmd::Update {
-            name,
+            env,
+            morloc_version,
+            set_default,
+            system,
             lang,
             system_package,
             dotfiles,
             non_interactive: _,
         } => {
-            let (env_name, env_scope) = match name {
-                Some(n) => {
-                    let scope = cfg::find_env_scope(&n)?;
-                    (n, scope)
+            let (env_name, env_scope, mut ec) = resolve_env_or_default(env)?;
+
+            // The default tag is a personal (local) choice by default: any user
+            // may point their own default at any environment -- including a
+            // read-only system env they cannot modify -- without root. `--system`
+            // writes the machine-wide default instead, which does require root.
+            if set_default {
+                let write_scope = if system { Scope::System } else { Scope::Local };
+                if system {
+                    check_system_write_access()?;
                 }
-                None => {
-                    let (n, s, _) = environment::resolve_active_environment()?;
-                    (n, s)
+                environment::set_default_environment(&env_name, write_scope)?;
+                if system {
+                    eprintln!("Set '{env_name}' as the system default environment.");
+                } else {
+                    eprintln!("Set '{env_name}' as your default environment.");
                 }
-            };
+            }
+
+            // Setting the default is pure metadata: with no build-affecting flag,
+            // do NOT re-solve/rebuild the environment (that would be a costly and
+            // surprising side effect of a one-line tag change).
+            if set_default
+                && morloc_version.is_none()
+                && lang.is_empty()
+                && system_package.is_empty()
+                && dotfiles.is_none()
+            {
+                return Ok(());
+            }
+
+            // A rebuild of a system-scope env writes to system data dirs, so it
+            // needs root; a personal set-default (handled above) does not.
             if env_scope == Scope::System {
                 check_system_write_access()?;
             }
-
-            let mut ec = cfg::read_env_config(env_scope, &env_name)?;
 
             // Dotfiles land in the mounted home, not the image, so this is a
             // plain copy independent of the rebuild below. Done first so a bad
@@ -1821,7 +1883,9 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 cfg::write_env_inputs(env_scope, &env_name, &EnvInputs { lang_pins: pins })?;
             }
             // No extra specs: re-solve from the installed programs' envspecs.
-            rematerialize_env(env_scope, &env_name, &[], verbose)?;
+            // `morloc_version` (from --morloc-version) moves the env to a new
+            // morloc version; None keeps the env's currently recorded version.
+            rematerialize_env(env_scope, &env_name, &[], morloc_version, verbose)?;
 
             if ec.backend.is_native() {
                 eprintln!("Native environment '{env_name}' re-materialized.");
@@ -1831,7 +1895,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             Ok(())
         }
         // ---- freeze ----
-        Cmd::Freeze { name, output, force } => {
+        Cmd::Freeze { env, output, force } => {
             let output_dir = output.as_deref().unwrap_or("./morloc-freeze");
             // Protect against silently overwriting a previous freeze
             let existing_tar = std::path::Path::new(output_dir).join("state.tar.gz");
@@ -1842,7 +1906,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     existing_tar.display()
                 )));
             }
-            let (env_name, env_scope, ec) = resolve_env_or_active(name)?;
+            let (env_name, env_scope, ec) = resolve_env_or_default(env)?;
             let engine = ec.engine()?;
             // Detect the version from the container binary for sanity check.
             // The morloc binary can't report prerelease tags (stack limitation),
@@ -1868,7 +1932,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             };
             let data_dir = cfg::env_data_dir(env_scope, &env_name);
             let image = ec.active_image().to_string();
-            let result = freeze::freeze_from_dir(env_scope, ver.clone(), engine, &image, &data_dir.to_string_lossy(), output_dir, verbose);
+            let result = freeze::freeze_from_dir(env_scope, &env_name, ver.clone(), engine, &image, &data_dir.to_string_lossy(), output_dir, verbose);
             if result.is_ok() && ec.morloc_version.as_ref() != Some(&ver) {
                 let mut updated = ec.clone();
                 updated.morloc_version = Some(ver);
@@ -1933,8 +1997,8 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- start ----
-        Cmd::Start { name, mcp, auth_token, expose, allow_plaintext, allow_no_auth, unsafe_serve, port, env_vars, env_file, engine_arg, force } => {
-            let (env_name, env_scope, ec) = resolve_env_or_active(name)?;
+        Cmd::Start { env, mcp, auth_token, expose, allow_plaintext, allow_no_auth, unsafe_serve, port, env_vars, env_file, engine_arg, force } => {
+            let (env_name, env_scope, ec) = resolve_env_or_default(env)?;
             // Refuse to replace a live serve -- dispatch on the STORED handle so a
             // serve of this env by either backend is detected; --force tears the
             // old one down first so nothing is stranded. A record with no handle is
@@ -2029,8 +2093,8 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- stop ----
-        Cmd::Stop { name } => {
-            let (env_name, env_scope, ec) = resolve_env_or_active(name)?;
+        Cmd::Stop { env } => {
+            let (env_name, env_scope, ec) = resolve_env_or_default(env)?;
             // Prefer the stored launch handle: it tears down the right target
             // (native process group or container) regardless of the env's current
             // backend, so migration / dual-backend serve never strands a server.
@@ -2057,10 +2121,10 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- logs ----
-        Cmd::Logs { name, follow } => {
-            // Native serve: if the resolved/active env is serving natively, tail
+        Cmd::Logs { env, follow } => {
+            // Native serve: if the resolved/default env is serving natively, tail
             // its host logfile. Falls through to the container path otherwise.
-            if let Ok((en, sc, _)) = resolve_env_or_active(name.clone()) {
+            if let Ok((en, sc, _)) = resolve_env_or_default(env.clone()) {
                 if let Some(rt) = cfg::read_serve_runtime(sc, &en) {
                     if matches!(rt.handle, Some(ServeHandle::Native { .. })) {
                         let log_path = cfg::env_data_dir(sc, &en).join("logs").join("serve.log");
@@ -2068,8 +2132,8 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     }
                 }
             }
-            let (container_name, engine, logs_dir) = if let Some(ref n) = name {
-                let (env_name, scope, ec) = resolve_env_or_active(Some(n.clone()))?;
+            let (container_name, engine, logs_dir) = if let Some(ref n) = env {
+                let (env_name, scope, ec) = resolve_env_or_default(Some(n.clone()))?;
                 let cname = serve::serve_container_name(n);
                 if !container::container_exists(ec.engine()?, &cname) {
                     return Err(ManagerError::EnvError(
@@ -2083,7 +2147,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 // back to the Local scope if the env can't be resolved (display
                 // only -- worst case the per-daemon logs are simply omitted).
                 let env_name = serve::env_name_from_container(&cname).to_string();
-                let logs_dir = match resolve_env_or_active(Some(env_name.clone())) {
+                let logs_dir = match resolve_env_or_default(Some(env_name.clone())) {
                     Ok((en, sc, _)) => cfg::env_data_dir(sc, &en).join("logs"),
                     Err(_) => cfg::env_data_dir(Scope::Local, &env_name).join("logs"),
                 };
@@ -2133,20 +2197,17 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- eval ----
-        Cmd::Eval { first, second, port } => {
-            let expr = if let Some(ref expr_arg) = second {
-                // first is env name — validate it exists and its serve container is running
-                let (env_name, _, ec) = resolve_env_or_active(Some(first))?;
+        Cmd::Eval { expr, env, port } => {
+            // When --env is given, validate that env's serve container is running.
+            if let Some(env_arg) = env {
+                let (env_name, _, ec) = resolve_env_or_default(Some(env_arg))?;
                 let container_name = serve::serve_container_name(&env_name);
                 if !container::container_exists(ec.engine()?, &container_name) {
                     return Err(ManagerError::EnvError(format!(
-                        "No serve container running for '{env_name}'. Start with: morloc-manager start {env_name}"
+                        "No serve container running for '{env_name}'. Start with: morloc-manager start --env {env_name}"
                     )));
                 }
-                expr_arg.clone()
-            } else {
-                first
-            };
+            }
             use std::io::{Read as IoRead, Write as IoWrite};
             let body = format!("{{\"expr\":{}}}", serde_json::to_string(&expr).unwrap_or_default());
             let request = format!(
@@ -2177,10 +2238,10 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- install ----
-        Cmd::Install { src, engine_arg } => {
+        Cmd::Install { src, env, engine_arg } => {
             // Resolve the target environment up front so the program's declared
             // dependencies can be provisioned into it BEFORE it is built.
-            let (env_name, scope, ec) = resolve_env_or_active(None)?;
+            let (env_name, scope, ec) = resolve_env_or_default(env)?;
 
             // 1. Resolve the program's env requirements without building it
             //    (frontend only). A directory is a package whose entry is its
@@ -2205,7 +2266,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             //    pixi before the build. The dry spec is ephemeral -- once the
             //    program builds, `morloc make --install` writes its real
             //    envspec.json, which gather_env_specs picks up from then on.
-            rematerialize_env(scope, &env_name, &[dry], verbose)?;
+            rematerialize_env(scope, &env_name, &[dry], None, verbose)?;
 
             // 3. Build + install into the now-complete environment. Step 2 may
             //    have rebuilt the image, so re-read the config.
@@ -2242,7 +2303,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         // ---- expose ----
         Cmd::Expose { action } => match action {
             ExposeAction::Add { module, protocols, env } => {
-                let (env_name, scope, _ec) = resolve_env_or_active(env)?;
+                let (env_name, scope, _ec) = resolve_env_or_default(env)?;
                 // Exposure is a view of an INSTALLED program; catch typos early.
                 let launcher = cfg::env_data_dir(scope, &env_name).join("bin").join(&module);
                 if !launcher.exists() {
@@ -2262,7 +2323,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 Ok(())
             }
             ExposeAction::Rm { module, env } => {
-                let (env_name, scope, _ec) = resolve_env_or_active(env)?;
+                let (env_name, scope, _ec) = resolve_env_or_default(env)?;
                 let mut ex = cfg::read_exposure(scope, &env_name)?;
                 if ex.remove(&module) {
                     cfg::write_exposure(scope, &env_name, &ex)?;
@@ -2273,13 +2334,13 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 Ok(())
             }
             ExposeAction::List { env } => {
-                let (env_name, scope, _ec) = resolve_env_or_active(env)?;
+                let (env_name, scope, _ec) = resolve_env_or_default(env)?;
                 let ex = cfg::read_exposure(scope, &env_name)?;
                 print_exposure(&env_name, &ex, json);
                 Ok(())
             }
             ExposeAction::Eval { allow, off, env } => {
-                let (env_name, scope, _ec) = resolve_env_or_active(env)?;
+                let (env_name, scope, _ec) = resolve_env_or_default(env)?;
                 let mut ex = cfg::read_exposure(scope, &env_name)?;
                 if off {
                     ex.eval = None;
@@ -2364,13 +2425,13 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         }
 
         // ---- doctor ----
-        Cmd::Doctor { name, system, deep, strict, slurm } => {
-            let (env_name, env_scope, ec) = if let Some(ref n) = name {
+        Cmd::Doctor { env, system, deep, strict, slurm } => {
+            let (env_name, env_scope, ec) = if let Some(ref n) = env {
                 let s = if system { Scope::System } else { cfg::find_env_scope(n)? };
                 let c = cfg::read_env_config(s, n)?;
                 (n.clone(), s, c)
             } else {
-                resolve_env_or_active(None)?
+                resolve_env_or_default(None)?
             };
             if ec.backend.is_native() {
                 if slurm {
@@ -2470,7 +2531,7 @@ pub(crate) fn native_run_env(
     let runtime = cfg::read_native_runtime(env.scope, &env.name).map_err(|_| {
         ManagerError::EnvError(format!(
             "native environment '{}' has not been materialized. \
-             Run 'morloc-manager update {}' to provision its toolchain.",
+             Run 'morloc-manager update --env {}' to provision its toolchain.",
             env.name, env.name
         ))
     })?;
@@ -2480,7 +2541,8 @@ pub(crate) fn native_run_env(
 
     let mut cmd = if req.shell {
         if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-            eprintln!("Error: --shell requires an interactive terminal (TTY).");
+            eprintln!("Error: an interactive shell requires a terminal (TTY).");
+            eprintln!("If connecting over SSH, use: ssh -t <host> morloc-manager shell");
             std::process::exit(1);
         }
         let shell_exe = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
@@ -2779,10 +2841,15 @@ fn resolve_env_requirements(
     program_specs: &[envspec::EnvSpec],
     lang_pins: &[(String, Option<String>)],
     engine: Option<ContainerEngine>,
+    requested_version: Option<&str>,
 ) -> Result<ResolvedRequirements> {
+    // An explicit per-env version (from --morloc-version, or an env's recorded
+    // version on update) wins; otherwise fall back to $MORLOC_RELEASE_TAG/latest.
     // provision_runtime announces which path it took (local dev override vs
     // release download), so the message is accurate rather than always "latest".
-    let tag = resolve_release_tag();
+    let tag = requested_version
+        .map(|v| v.to_string())
+        .unwrap_or_else(resolve_release_tag);
     let (runtime_dir, version) = provision::provision_runtime(scope, &tag)?;
     let morloc_bin = provision::runtime_morloc_bin(&runtime_dir);
     // `engine` lets the table be generated in a container when the host cannot
@@ -2825,10 +2892,11 @@ fn materialize_native_env(
     name: &str,
     program_specs: &[envspec::EnvSpec],
     lang_pins: &[(String, Option<String>)],
+    requested_version: Option<&str>,
     verbose: bool,
 ) -> Result<String> {
     // Native runs on the host, so the compiler executes there -- no engine needed.
-    let req = resolve_env_requirements(scope, name, program_specs, lang_pins, None)?;
+    let req = resolve_env_requirements(scope, name, program_specs, lang_pins, None, requested_version)?;
 
     // Phase 1 of the impurity gate: a fast reject on host/vcpkg system deps that
     // conda cannot provide (the pixi solve below is the accurate phase 2).
@@ -2869,7 +2937,7 @@ fn materialize_native_env(
                 return Err(ManagerError::EnvError(format!(
                     "Cannot re-materialize native environment '{name}' while it is being \
                      served: `morloc init` would overwrite the running runtime. \
-                     Run 'morloc-manager stop {name}' first."
+                     Run 'morloc-manager stop --env {name}' first."
                 )));
             }
         }
@@ -3041,13 +3109,14 @@ fn resolve_new_env_name(scope: Scope, name: Option<String>, interactive: bool) -
     let env_name = match name {
         Some(n) => n,
         None if interactive => {
-            eprint!("Environment name: ");
+            eprint!("Environment name [default]: ");
             io::stderr().flush().ok();
             let mut buf = String::new();
             io::stdin().read_line(&mut buf).ok();
-            buf.trim().to_string()
+            let trimmed = buf.trim();
+            if trimmed.is_empty() { "default".to_string() } else { trimmed.to_string() }
         }
-        None => "morloc-env".to_string(),
+        None => "default".to_string(),
     };
     if env_name.is_empty() {
         return Err(ManagerError::EnvError("Environment name cannot be empty".to_string()));
@@ -3062,8 +3131,10 @@ fn resolve_new_env_name(scope: Scope, name: Option<String>, interactive: bool) -
 }
 
 /// Persist a freshly created environment: its `--lang` inputs, its config, a
-/// default active-config when none exists, and the "ready" banner. Shared by the
-/// native and container `new` paths.
+/// top-level config when none exists, and the "ready" banner. Shared by the
+/// native and container `new` paths. When no default environment is set yet,
+/// tag this new one as the default so the first env you create is usable with
+/// bare (no `--env`) commands.
 fn finalize_new_env(
     scope: Scope,
     ec: &EnvironmentConfig,
@@ -3074,12 +3145,27 @@ fn finalize_new_env(
     if cfg::read_active_config().is_none() {
         cfg::write_config(
             &cfg::config_path(scope),
-            &Config { active_env: None, backend: ec.backend },
+            &Config { default_env: None, backend: ec.backend },
         )?;
     }
+    // If no default env currently resolves, make this env the default. Use the
+    // canonical resolver (not the raw tag) so a stale default_env pointing at a
+    // deleted env is treated as "no default" -- matching how every command
+    // resolves the default, and so the first working env you create is adopted.
+    let has_default = environment::resolve_default_environment().is_ok();
     let kind = if ec.backend.is_native() { "Native" } else { "Container" };
     anstream::eprintln!("\x1b[1;32m{kind} environment '{}' is ready.\x1b[0m", ec.name);
-    eprintln!("Activate it with: morloc-manager select {}", ec.name);
+    if !has_default {
+        // Best-effort: the env is already created and usable; a failure to write
+        // the default tag must not turn a successful `new` into an error.
+        if environment::set_default_environment(&ec.name, scope).is_ok() {
+            eprintln!("Set '{}' as the default environment.", ec.name);
+        } else {
+            eprintln!("Note: could not record '{}' as the default; set it with: morloc-manager update --env {} --set-default", ec.name, ec.name);
+        }
+    } else {
+        eprintln!("Make it the default with: morloc-manager update --env {} --set-default", ec.name);
+    }
     Ok(())
 }
 
@@ -3087,6 +3173,7 @@ fn native_new(
     scope: Scope,
     name: Option<String>,
     lang: Vec<String>,
+    requested_version: Option<String>,
     no_init: bool,
     interactive: bool,
     verbose: bool,
@@ -3095,12 +3182,13 @@ fn native_new(
 
     // A new env has no installed programs yet; its toolchain is morloc's core
     // language-support table plus any `--lang` pins. Provisioning (inside
-    // materialize) yields the concrete morloc version.
+    // materialize) yields the concrete morloc version. `--morloc-version` pins
+    // the release; omitted, it defaults to $MORLOC_RELEASE_TAG/latest.
     let lang_pins = parse_lang_pins(&lang);
     let morloc_version = if no_init {
         None
     } else {
-        materialize_native_env(scope, &env_name, &[], &lang_pins, verbose)?
+        materialize_native_env(scope, &env_name, &[], &lang_pins, requested_version.as_deref(), verbose)?
             .parse::<Version>()
             .ok()
     };
@@ -3176,7 +3264,7 @@ fn native_capture_env(scope: Scope, name: &str, args: &[String]) -> Result<Strin
     let runtime = cfg::read_native_runtime(scope, name).map_err(|_| {
         ManagerError::EnvError(format!(
             "native environment '{name}' has not been materialized. \
-             Run 'morloc-manager update {name}' to provision its toolchain."
+             Run 'morloc-manager update --env {name}' to provision its toolchain."
         ))
     })?;
     let data_dir = cfg::env_data_dir(scope, name);
@@ -3212,7 +3300,7 @@ fn container_capture_env(
     require_docker_socket(engine)?;
     if !container::image_exists_locally(engine, &image) {
         return Err(ManagerError::EnvError(format!(
-            "Image '{image}' not found. Run 'morloc-manager update {name}' to build it."
+            "Image '{image}' not found. Run 'morloc-manager update --env {name}' to build it."
         )));
     }
     let data_dir = cfg::env_data_dir(scope, name);
@@ -3303,6 +3391,7 @@ fn rematerialize_env(
     scope: Scope,
     name: &str,
     extra_specs: &[envspec::EnvSpec],
+    requested_version: Option<String>,
     verbose: bool,
 ) -> Result<()> {
     let ec = cfg::read_env_config(scope, name)?;
@@ -3310,12 +3399,31 @@ fn rematerialize_env(
     let mut specs = gather_env_specs(scope, name);
     specs.extend_from_slice(extra_specs);
 
+    // R2 version policy: an explicit --morloc-version moves the env; otherwise
+    // keep the env's currently recorded version so a plain `update` (or one that
+    // only touches dotfiles/packages/lang) never silently bumps morloc. A legacy
+    // env with no recorded version falls back to $MORLOC_RELEASE_TAG/latest.
+    let effective_version: Option<String> = match requested_version {
+        Some(v) => Some(v),
+        None => match ec.morloc_version.as_ref() {
+            Some(v) => Some(v.show()),
+            None => {
+                eprintln!(
+                    "warning: environment '{name}' has no recorded morloc version; \
+                     re-solving at the latest release. Pin one with --morloc-version."
+                );
+                None
+            }
+        },
+    };
+    let effective_version = effective_version.as_deref();
+
     if ec.backend.is_native() {
         // Persist the provisioned version so `ec.morloc_version` tracks what is
         // actually installed (symmetric with the container path below); without
         // this a native `update` leaves a stale version that misleads `doctor`
         // and the manifest-version check.
-        let mver = materialize_native_env(scope, name, &specs, &lang_pins, verbose)?;
+        let mver = materialize_native_env(scope, name, &specs, &lang_pins, effective_version, verbose)?;
         let mut ec = ec;
         ec.morloc_version = mver.parse::<Version>().ok();
         cfg::write_env_config(scope, name, &ec)?;
@@ -3324,7 +3432,7 @@ fn rematerialize_env(
 
     let ce = ec.engine()?;
     let (image_tag, mver) = build_requirement_derived_image(
-        scope, name, ce, &specs, &lang_pins, &ec.system_packages,
+        scope, name, ce, &specs, &lang_pins, &ec.system_packages, effective_version,
     )?;
     let mut ec = ec;
     ec.built_image = Some(image_tag);
@@ -3344,13 +3452,14 @@ fn build_requirement_derived_image(
     program_specs: &[envspec::EnvSpec],
     lang_pins: &[(String, Option<String>)],
     system_packages: &[String],
+    requested_version: Option<&str>,
 ) -> Result<(String, String)> {
     // Unlike native, a container HAS a build layer, so host/vcpkg system deps are
     // not a hard blocker here -- they become build-extras (a later --system-package
     // flag). native_blockers therefore does not apply to the container path.
     // Pass the engine so the language-support table can be generated in a
     // container when the host cannot run the compiler (NixOS/musl).
-    let req = resolve_env_requirements(scope, name, program_specs, lang_pins, Some(engine))?;
+    let req = resolve_env_requirements(scope, name, program_specs, lang_pins, Some(engine), requested_version)?;
 
     let context = cfg::env_data_dir(scope, name).join("container-build");
     let manifest = pixi::render_manifest(&req.requirements);
@@ -3530,7 +3639,7 @@ fn apply_dotfiles(
     Ok(())
 }
 
-/// Filename of the morloc-owned rcfile that tags an interactive `run --shell`
+/// Filename of the morloc-owned rcfile that tags an interactive `shell`
 /// prompt with the environment name. It lives in the env data dir (native) or
 /// the mounted state root (container), never in the user's home, so it is not
 /// the user's `~/.bashrc` and never collides with it.
@@ -3649,6 +3758,7 @@ fn container_new_derived(
     lang: Vec<String>,
     system_packages: Vec<String>,
     dotfiles: Option<String>,
+    requested_version: Option<String>,
     no_init: bool,
     interactive: bool,
 ) -> Result<()> {
@@ -3672,7 +3782,7 @@ fn container_new_derived(
         (None, None)
     } else {
         let (image, version) = build_requirement_derived_image(
-            scope, &env_name, engine, &[], &lang_pins, &system_packages,
+            scope, &env_name, engine, &[], &lang_pins, &system_packages, requested_version.as_deref(),
         )?;
         (Some(image), version.parse::<Version>().ok())
     };
@@ -3846,7 +3956,7 @@ fn native_serve(
     let runtime = cfg::read_native_runtime(scope, env_name).map_err(|_| {
         ManagerError::EnvError(format!(
             "native environment '{env_name}' is not materialized; \
-             run 'morloc-manager update {env_name}' first"
+             run 'morloc-manager update --env {env_name}' first"
         ))
     })?;
 
@@ -3960,7 +4070,7 @@ pub(crate) fn container_serve(
     let container_name = serve::serve_container_name(env_name);
     if ec.dockerfile.is_some() && ec.built_image.is_none() {
         eprintln!("Warning: Dockerfile is configured but image has not been built. Using base image.");
-        eprintln!("  Run 'morloc-manager update {env_name}' to build the Dockerfile layer.");
+        eprintln!("  Run 'morloc-manager update --env {env_name}' to build the Dockerfile layer.");
     }
 
     let plan = serve_plan(
@@ -4030,18 +4140,17 @@ fn tail_file(path: &std::path::Path, follow: bool) -> Result<()> {
     Ok(())
 }
 
-/// Validate the active env can host a SLURM bridge and spawn one. The
+/// Validate the given env can host a SLURM bridge and spawn one. The
 /// returned handle owns the listener thread + socket; dropping it
 /// shuts the bridge down and unlinks the socket.
 ///
 /// The bridge does NOT directly invoke `apptainer exec` on the compute
-/// node; the wrap command is `morloc-manager run --slurm-bridge --
-/// <nexus> --call-packet ...` so each compute-node nexus comes up
-/// under the same env machinery the driver uses (and can recursively
-/// dispatch further remote calls). The only thing the bridge needs to
-/// carry is the absolute path to the morloc-manager binary itself,
-/// which is the path of the currently-running process (we are
-/// morloc-manager).
+/// node; the wrap command is `morloc-manager run --env <name>
+/// --slurm-bridge -- <nexus> --call-packet ...` so each compute-node
+/// nexus comes up under the same env the driver uses (and can
+/// recursively dispatch further remote calls). The bridge carries the
+/// absolute path to the morloc-manager binary (the currently-running
+/// process) and the env name to pin on every worker.
 fn setup_slurm_bridge(ec: &EnvironmentConfig) -> Result<bridge::BridgeHandle> {
     // Apptainer is the recommended engine for HPC -- its `.sif` is a
     // single shared-FS file and `$HOME` auto-mount makes path mirroring
@@ -4082,7 +4191,7 @@ fn setup_slurm_bridge(ec: &EnvironmentConfig) -> Result<bridge::BridgeHandle> {
     let sock_path = bridge_socket_path();
     bridge::spawn_bridge(
         &sock_path,
-        bridge::BridgeConfig { morloc_manager_exe },
+        bridge::BridgeConfig { morloc_manager_exe, env_name: ec.name.clone() },
     )
     .map_err(|e| ManagerError::EnvError(format!("spawn slurm bridge: {e}")))
 }
@@ -4135,7 +4244,7 @@ pub(crate) fn container_run_env(
     // Warn if a Dockerfile is configured but the layered image hasn't been built
     if ec.dockerfile.is_some() && ec.built_image.is_none() {
         eprintln!("Warning: Dockerfile is configured but image has not been built. Using base image.");
-        eprintln!("  Run 'morloc-manager update {env_name}' to build the Dockerfile layer.");
+        eprintln!("  Run 'morloc-manager update --env {env_name}' to build the Dockerfile layer.");
     }
 
     // Fail fast with a clear message if docker socket is unreachable
@@ -4161,9 +4270,9 @@ pub(crate) fn container_run_env(
             )));
         }
         let hint = if env_scope == Scope::System {
-            format!("Ask your administrator to run: sudo morloc-manager update {env_name}")
+            format!("Ask your administrator to run: sudo morloc-manager update --env {env_name}")
         } else {
-            format!("Run 'morloc-manager update {env_name}' to build it.")
+            format!("Run 'morloc-manager update --env {env_name}' to build it.")
         };
         return Err(ManagerError::EnvError(format!(
             "Image '{image}' not found locally. {hint}"
@@ -4243,8 +4352,8 @@ fn run_with_config(
 ) -> Result<()> {
     if shell {
         if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-            eprintln!("Error: --shell requires an interactive terminal (TTY).");
-            eprintln!("If connecting over SSH, use: ssh -t <host> morloc-manager run --shell");
+            eprintln!("Error: an interactive shell requires a terminal (TTY).");
+            eprintln!("If connecting over SSH, use: ssh -t <host> morloc-manager shell");
             std::process::exit(1);
         }
     }
@@ -4276,7 +4385,7 @@ fn run_with_config(
         if !populated {
             return Err(ManagerError::EnvError(format!(
                 "environment at '{v_data_dir}' is not materialized: its {what} is missing \
-                 at '{}'. Provision it first with 'morloc-manager update <env>', or recreate \
+                 at '{}'. Provision it first with 'morloc-manager update --env <env>', or recreate \
                  the environment without --no-init.",
                 src.display()
             )));
@@ -4738,6 +4847,107 @@ fn normalize_trailing(p: &str) -> String {
 mod tests {
     use super::*;
     use crate::container::{build_build_args, build_run_args, engine_executable, engine_specific_run_flags, BuildConfig};
+    use clap::Parser;
+
+    // ---- CLI shape: --env selector, --env-var rename, shell, no select ----
+
+    #[test]
+    fn run_takes_env_and_env_var_flags() {
+        let cli = Cli::try_parse_from([
+            "morloc-manager", "run", "--env", "dev", "--env-var", "FOO=bar", "--", "echo", "hi",
+        ])
+        .expect("run should parse --env and --env-var");
+        match cli.command {
+            Some(Cmd::Run { env, env_vars, command, .. }) => {
+                assert_eq!(env.as_deref(), Some("dev"));
+                assert_eq!(env_vars, vec!["FOO=bar".to_string()]);
+                assert_eq!(command, vec!["echo".to_string(), "hi".to_string()]);
+            }
+            _ => panic!("expected Cmd::Run"),
+        }
+    }
+
+    #[test]
+    fn run_rejects_removed_shell_flag() {
+        // --shell moved to the `shell` subcommand; run must no longer accept it.
+        assert!(Cli::try_parse_from(["morloc-manager", "run", "--shell"]).is_err());
+    }
+
+    #[test]
+    fn run_rejects_short_e_env_var() {
+        // The old `-e/--env` passthrough is renamed to --env-var (no short form),
+        // freeing --env for the environment selector.
+        assert!(Cli::try_parse_from(["morloc-manager", "run", "-e", "FOO=bar", "--", "x"]).is_err());
+    }
+
+    #[test]
+    fn shell_subcommand_parses() {
+        let cli = Cli::try_parse_from(["morloc-manager", "shell", "--env", "dev"])
+            .expect("shell should parse");
+        assert!(matches!(cli.command, Some(Cmd::Shell { env: Some(ref e), .. }) if e == "dev"));
+    }
+
+    #[test]
+    fn select_subcommand_removed() {
+        assert!(Cli::try_parse_from(["morloc-manager", "select", "foo"]).is_err());
+    }
+
+    #[test]
+    fn update_takes_set_default_and_morloc_version() {
+        let cli = Cli::try_parse_from([
+            "morloc-manager", "update", "--env", "e", "--set-default", "--morloc-version", "0.98.0",
+        ])
+        .expect("update should parse --set-default and --morloc-version");
+        match cli.command {
+            Some(Cmd::Update { env, morloc_version, set_default, .. }) => {
+                assert_eq!(env.as_deref(), Some("e"));
+                assert_eq!(morloc_version.as_deref(), Some("0.98.0"));
+                assert!(set_default);
+            }
+            _ => panic!("expected Cmd::Update"),
+        }
+    }
+
+    #[test]
+    fn update_set_default_is_local_unless_system_flag() {
+        // A personal (local) default: no --system.
+        let cli = Cli::try_parse_from(["morloc-manager", "update", "--env", "shared", "--set-default"])
+            .expect("update --set-default should parse");
+        assert!(matches!(cli.command, Some(Cmd::Update { set_default: true, system: false, .. })));
+        // The machine-wide default: --system.
+        let cli = Cli::try_parse_from(["morloc-manager", "update", "--env", "shared", "--set-default", "--system"])
+            .expect("update --set-default --system should parse");
+        assert!(matches!(cli.command, Some(Cmd::Update { set_default: true, system: true, .. })));
+    }
+
+    #[test]
+    fn eval_takes_expr_and_optional_env() {
+        let cli = Cli::try_parse_from(["morloc-manager", "eval", "--env", "e", "add 1 2"])
+            .expect("eval should parse expr with --env");
+        match cli.command {
+            Some(Cmd::Eval { expr, env, .. }) => {
+                assert_eq!(expr, "add 1 2");
+                assert_eq!(env.as_deref(), Some("e"));
+            }
+            _ => panic!("expected Cmd::Eval"),
+        }
+    }
+
+    #[test]
+    fn eval_expr_allows_leading_hyphen() {
+        let cli = Cli::try_parse_from(["morloc-manager", "eval", "-1"])
+            .expect("eval should accept an expression starting with '-'");
+        assert!(matches!(cli.command, Some(Cmd::Eval { ref expr, .. }) if expr == "-1"));
+    }
+
+    #[test]
+    fn collect_env_vars_parses_key_value() {
+        let vars = collect_env_vars(&["FOO=bar".to_string(), "BAZ=qux=1".to_string()], None).unwrap();
+        assert_eq!(vars, vec![
+            ("FOO".to_string(), "bar".to_string()),
+            ("BAZ".to_string(), "qux=1".to_string()),
+        ]);
+    }
 
     // ---- MCP config emission ----
 
@@ -4946,8 +5156,8 @@ mod tests {
     }
 
     #[test]
-    fn no_active_environment_suggests_new() {
-        let err = ManagerError::NoActiveEnvironment;
+    fn no_default_environment_suggests_new() {
+        let err = ManagerError::NoDefaultEnvironment;
         assert!(err.to_string().contains("new"));
     }
 
@@ -4966,8 +5176,8 @@ mod tests {
     // ---- Config default tests ----
 
     #[test]
-    fn default_config_has_no_active_env() {
-        assert_eq!(Config::default().active_env, None);
+    fn default_config_has_no_default_env() {
+        assert_eq!(Config::default().default_env, None);
     }
 
     #[test]
@@ -4982,12 +5192,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         let cfg = Config {
-            active_env: Some("ml".to_string()),
+            default_env: Some("ml".to_string()),
             backend: Backend::Container(ContainerEngine::Docker),
         };
         cfg::write_config(&path, &cfg).unwrap();
         let cfg2: Config = cfg::read_config(&path).unwrap();
-        assert_eq!(cfg2.active_env.as_deref(), Some("ml"));
+        assert_eq!(cfg2.default_env.as_deref(), Some("ml"));
         assert_eq!(cfg2.engine().unwrap(), ContainerEngine::Docker);
     }
 
@@ -4997,7 +5207,7 @@ mod tests {
     // the same `engine` key so a downgrade or an older reader is unaffected.
     #[test]
     fn backend_reads_legacy_engine_field() {
-        let legacy = r#"{"active_env":"ml","engine":"podman"}"#;
+        let legacy = r#"{"default_env":"ml","engine":"podman"}"#;
         let cfg: Config = serde_json::from_str(legacy).unwrap();
         assert_eq!(cfg.engine().unwrap(), ContainerEngine::Podman);
         assert!(matches!(
@@ -5009,7 +5219,7 @@ mod tests {
     #[test]
     fn backend_serializes_under_engine_key() {
         let cfg = Config {
-            active_env: None,
+            default_env: None,
             backend: Backend::Container(ContainerEngine::Apptainer),
         };
         let json = serde_json::to_string(&cfg).unwrap();
@@ -5020,7 +5230,7 @@ mod tests {
     #[test]
     fn native_backend_round_trips_under_engine_key() {
         let cfg = Config {
-            active_env: None,
+            default_env: None,
             backend: Backend::Native,
         };
         let json = serde_json::to_string(&cfg).unwrap();

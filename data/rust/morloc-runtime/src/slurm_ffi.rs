@@ -249,8 +249,8 @@ pub unsafe extern "C" fn submit_morloc_slurm_job(
     ];
 
     // Containerized path: send the structured argv to morloc-manager
-    // via the UDS bridge. The bridge prepends `morloc-manager run
-    // --slurm-bridge --` and shell-escapes once for sbatch.
+    // via the UDS bridge. The bridge prepends `morloc-manager run --env
+    // <name> --slurm-bridge --` and shell-escapes once for sbatch.
     if let Some(sock) = crate::slurm_bridge::socket_from_env() {
         let res_spec = crate::slurm_bridge::ResourceSpec {
             mem_gb: res.memory,
