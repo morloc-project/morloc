@@ -656,6 +656,17 @@ pub const CONTAINER_PIXI_DIR: &str = "/env";
 /// The pixi binary inside the image (PIXI_HOME=/opt/pixi; not on the run PATH).
 pub const CONTAINER_PIXI_BIN: &str = "/opt/pixi/bin/pixi";
 
+/// Dev environments only: where the mounted morloc SOURCE tree appears
+/// in-container (the compiler + runtime are built from it). `MORLOC_RUST_DIR`
+/// points at `<this>/data/rust`.
+pub const CONTAINER_DEV_SRC: &str = "/opt/morloc-src";
+
+/// Dev environments only: the ghcup bin dir baked into the dev image
+/// (`GHCUP_INSTALL_BASE_PREFIX=/opt`), holding `ghcup`/`stack`. Placed on the run
+/// PATH so an interactive dev shell can build the compiler, not just run it. On a
+/// release image the dir is absent, so the PATH entry is a harmless no-op.
+pub const CONTAINER_GHCUP_BIN: &str = "/opt/.ghcup/bin";
+
 /// The shell lines that activate the mounted conda toolchain for a container
 /// process: set CONDA_PREFIX, run pixi's shell-hook (for PATH), then source the
 /// conda activate.d scripts. shell-hook alone does NOT export $CC/$AR, which the
@@ -677,7 +688,9 @@ pub fn conda_activate_lines() -> [String; 3] {
 /// morloc compiler, the pixi toolchain, then the system tail. Single source of
 /// truth for every in-container PATH.
 pub fn container_path(mh: &str) -> String {
-    format!("{mh}/bin:{CONTAINER_RUNTIME_BIN}:{CONTAINER_PIXI_ENV_BIN}:{CONTAINER_PATH_TAIL}")
+    // CONTAINER_GHCUP_BIN exists only in a dev image (a harmless no-op otherwise),
+    // so an interactive dev shell has `stack`/`ghc` on PATH.
+    format!("{mh}/bin:{CONTAINER_RUNTIME_BIN}:{CONTAINER_PIXI_ENV_BIN}:{CONTAINER_GHCUP_BIN}:{CONTAINER_PATH_TAIL}")
 }
 
 /// Base env for a docker/podman in-container process. MORLOC_HOME is the baked
@@ -693,6 +706,11 @@ pub fn oci_base_env(mh: &str) -> Vec<(String, String)> {
         ("MORLOC_STATE".to_string(), CONTAINER_MORLOC_STATE.to_string()),
         ("HOME".to_string(), format!("{CONTAINER_MORLOC_STATE}/home")),
         ("PATH".to_string(), container_path(mh)),
+        // A UTF-8 locale (C.UTF-8 is built into the base image's glibc) so the
+        // compiler and programs can emit non-ASCII to stdout; under the default C
+        // locale that fails with "commitBuffer: invalid argument".
+        ("LANG".to_string(), "C.UTF-8".to_string()),
+        ("LC_ALL".to_string(), "C.UTF-8".to_string()),
     ]
 }
 

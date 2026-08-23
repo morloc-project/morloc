@@ -36,18 +36,13 @@ fn glibc_loader_path(arch: &str) -> Option<&'static str> {
 fn classify(os: &str, arch: &str, glibc_loader_present: bool, is_nixos: bool) -> HostProfile {
     let platform = morloc_deps::platform::conda_platform_for(os, arch);
     match os {
-        // Apple Silicon only: there is no prebuilt native toolchain for Intel
-        // macOS (GitHub dropped free Intel runners, and the Haskell compiler
-        // cannot be cross-produced for it), so Intel Macs route to a container.
-        "macos" if arch == "aarch64" => HostProfile {
-            native_capable: true,
-            reason: "macOS on Apple Silicon (native backend supported)".to_string(),
-            platform,
-        },
+        // The native backend does not yet run on macOS (unresolved gaps in the
+        // IPC and process-supervision layers), so all Macs route to a container
+        // backend for now. Support is planned.
         "macos" => HostProfile {
             native_capable: false,
-            reason: "Intel macOS has no prebuilt native toolchain (Apple Silicon \
-                     only); use a container backend"
+            reason: "native backend not yet supported on macOS (coming soon); \
+                     use a container backend"
                 .to_string(),
             platform,
         },
@@ -55,8 +50,7 @@ fn classify(os: &str, arch: &str, glibc_loader_present: bool, is_nixos: bool) ->
             if is_nixos {
                 HostProfile {
                     native_capable: false,
-                    reason: "NixOS has no standard FHS; use a container backend \
-                             (or the Nix backend when available)"
+                    reason: "NixOS has no standard FHS, native not yet available"
                         .to_string(),
                     platform,
                 }
@@ -100,18 +94,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn apple_silicon_macos_is_native_capable() {
-        let p = classify("macos", "aarch64", false, false);
-        assert!(p.native_capable);
-        assert_eq!(p.platform, "osx-arm64");
-    }
+    fn macos_is_not_native_capable_yet() {
+        // The native backend is not yet supported on macOS; the platform string
+        // is still reported so container builds target the right conda platform.
+        let arm = classify("macos", "aarch64", false, false);
+        assert!(!arm.native_capable);
+        assert_eq!(arm.platform, "osx-arm64");
 
-    #[test]
-    fn intel_macos_is_not_native_capable() {
-        // No prebuilt native toolchain exists for Intel macOS.
-        let p = classify("macos", "x86_64", false, false);
-        assert!(!p.native_capable);
-        assert_eq!(p.platform, "osx-64");
+        let intel = classify("macos", "x86_64", false, false);
+        assert!(!intel.native_capable);
+        assert_eq!(intel.platform, "osx-64");
     }
 
     #[test]

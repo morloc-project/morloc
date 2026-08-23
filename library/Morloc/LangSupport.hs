@@ -108,6 +108,7 @@ instance Aeson.FromJSON RuntimeSpec where
 data LangEntry = LangEntry
   { leRuntime :: !(Maybe RuntimeSpec)
   , leRequires :: ![PkgReq]
+  , leInstallScript :: !(Maybe Text)  -- ^ container install.sh (non-conda langs, e.g. futhark)
   }
   deriving (Show, Eq, Ord)
 
@@ -117,6 +118,7 @@ instance Aeson.FromJSON LangEntry where
       LangEntry
         <$> o .:? "runtime"
         <*> o .:? "requires" .!= []
+        <*> o .:? "install_script"
 
 -- | The whole table for this release.
 data LangSupport = LangSupport
@@ -126,7 +128,8 @@ data LangSupport = LangSupport
   }
   deriving (Show, Eq)
 
--- | Internal shape of the core @data\/lang\/requirements.yaml@.
+-- | Internal shape of the core @data\/lang\/requirements.yaml@. The dev-only
+-- @dev-apt@ key is consumed by morloc-manager (Rust), not here, so it is ignored.
 newtype CoreReq = CoreReq {crToolchain :: [PkgReq]}
 
 instance Aeson.FromJSON CoreReq where
@@ -135,18 +138,28 @@ instance Aeson.FromJSON CoreReq where
       CoreReq <$> o .:? "toolchain" .!= []
 
 -- | Parse the embedded requirements files into the support table. Arguments: the
--- per-language @(name, yaml-text)@ pairs and the core toolchain yaml-text.
-parseRequirements :: [(Text, Text)] -> Text -> Either String LangSupport
-parseRequirements langFiles coreText = do
+-- per-language conda @(name, requirements.yaml-text)@ pairs, the per-language
+-- container @(name, install.sh-text)@ pairs (non-conda languages, e.g. futhark),
+-- and the core toolchain yaml-text.
+parseRequirements :: [(Text, Text)] -> [(Text, Text)] -> Text -> Either String LangSupport
+parseRequirements langFiles installScripts coreText = do
   core <- decodeYaml "requirements.yaml (core toolchain)" coreText
-  langs <- forM langFiles $ \(name, content) -> do
+  condaLangs <- forM langFiles $ \(name, content) -> do
     entry <- decodeYaml ("requirements.yaml for " <> T.unpack name) content
-    return (name, entry)
+    -- A conda language MAY also ship an install.sh (none currently do).
+    return (name, entry {leInstallScript = lookup name installScripts})
+  -- Script-provisioned languages have no requirements.yaml; the install.sh IS the
+  -- provisioning and they contribute nothing to the conda solve.
+  let condaNames = map fst langFiles
+      scriptLangs =
+        [ (name, LangEntry Nothing [] (Just content))
+        | (name, content) <- installScripts, name `notElem` condaNames
+        ]
   return
     LangSupport
       { lsMorlocVersion = MT.pack Morloc.Version.versionStr
       , lsToolchain = crToolchain core
-      , lsLanguages = Map.fromList langs
+      , lsLanguages = Map.fromList (condaLangs ++ scriptLangs)
       }
 
 decodeYaml :: Aeson.FromJSON a => String -> Text -> Either String a
@@ -165,10 +178,11 @@ renderLangSupport ls =
     ]
   where
     langJson e =
-      jsonObj
+      jsonObj $
         [ ("runtime", maybe jsonNull runtimeJson (leRuntime e))
         , ("requires", jsonArr (map pkgJson (leRequires e)))
         ]
+        ++ maybe [] (\s -> [("install_script", jsonStr s)]) (leInstallScript e)
     runtimeJson (RuntimeSpec p v d) =
       jsonObj
         [ ("package", jsonStr p)

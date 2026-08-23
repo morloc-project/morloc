@@ -22,6 +22,9 @@ use crate::types::Scope;
 
 /// GitHub release download base for the morloc project.
 const RELEASE_BASE: &str = "https://github.com/morloc-project/morloc/releases/download";
+/// GitHub release *page* base (used to check that a tag exists, independent of
+/// which assets it publishes).
+const RELEASE_TAG_BASE: &str = "https://github.com/morloc-project/morloc/releases/tag";
 /// The manifest asset attached to every release (see .github/workflows/release.yml).
 const MANIFEST_ASSET: &str = "morloc-release-manifest.json";
 /// Pinned pixi version morloc-manager provisions + generates container images
@@ -108,6 +111,36 @@ pub fn asset_url(tag: &str, asset: &str) -> String {
     format!("{RELEASE_BASE}/{tag}/{asset}")
 }
 
+/// The public release page for `tag` (HTTP 200 if the release exists, 404
+/// otherwise). Used as an asset-independent existence check and in diagnostics.
+pub fn release_page_url(tag: &str) -> String {
+    format!("{RELEASE_TAG_BASE}/{tag}")
+}
+
+/// Verify a requested version resolves to a published release, returning the
+/// resolved tag. Checks the release PAGE (which 404s for a nonexistent tag)
+/// rather than a specific asset, so it does not depend on which assets a given
+/// release publishes.
+pub fn verify_release(requested: &str) -> Result<String> {
+    let tag = resolve_tag(requested)?;
+    let url = release_page_url(&tag);
+    // -I/-o /dev/null: a HEAD that discards the body; -f (from curl_base) makes a
+    // 404 a non-success exit. Silence curl's own stderr so the caller controls
+    // the message.
+    let ok = curl_base()
+        .args(["-I", "-o", "/dev/null"])
+        .arg(&url)
+        .stderr(Stdio::null())
+        .status()
+        .map_err(curl_spawn_err)?
+        .success();
+    if ok {
+        Ok(tag)
+    } else {
+        Err(ManagerError::EnvError(format!("no published release at {url}")))
+    }
+}
+
 /// A curl command hardened with the same TLS/proto flags and stdio for every
 /// fetch. Callers add `-o <dest>` (download) or just the URL (capture).
 fn curl_base() -> Command {
@@ -178,7 +211,8 @@ pub fn fetch_latest_tag() -> Result<String> {
 /// queries the API; a bare version like "0.98.3" becomes "v0.98.3"; anything
 /// else (an explicit tag such as "dev" or "v0.98.3") is used verbatim.
 pub fn resolve_tag(requested: &str) -> Result<String> {
-    if requested == "latest" {
+    let requested = requested.trim();
+    if requested.eq_ignore_ascii_case("latest") {
         fetch_latest_tag()
     } else if requested.chars().next().is_some_and(|c| c.is_ascii_digit()) {
         Ok(format!("v{requested}"))
@@ -207,7 +241,7 @@ fn curl_download(url: &str, dest: &Path) -> Result<()> {
 }
 
 /// Lowercase hex of a byte slice.
-fn hex_lower(bytes: &[u8]) -> String {
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
     use std::fmt::Write;
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -311,112 +345,6 @@ pub fn runtime_rust_src(dir: &Path) -> PathBuf {
     dir.join("rust")
 }
 
-/// Replace `link` with a symlink to `target`, clobbering whatever is there
-/// (a stale symlink from a prior dev run, or a real dir from a prior download).
-fn force_symlink(target: &Path, link: &Path) -> Result<()> {
-    // A symlink (even one pointing at a directory) is removed by remove_file on
-    // Unix; a real directory left by a prior download needs remove_dir_all.
-    let _ = std::fs::remove_file(link);
-    let _ = std::fs::remove_dir_all(link);
-    std::os::unix::fs::symlink(target, link).map_err(|e| {
-        ManagerError::EnvError(format!(
-            "cannot symlink {} -> {}: {e}",
-            link.display(),
-            target.display()
-        ))
-    })
-}
-
-/// Dev shortcut: when `MORLOC_COMPILER_BIN` is set, skip the GitHub release
-/// fetch entirely and stage `runtimes/dev/` from LOCAL binaries -- the morloc
-/// compiler at `$MORLOC_COMPILER_BIN` and the Rust workspace source at
-/// `$MORLOC_RUST_DIR`. Both are symlinked, so rebuilding the compiler
-/// (`stack install`) or editing `data/rust` is reflected on the next command
-/// with no re-copy and no network round-trip. Returns `None` when the override
-/// is not in effect (the normal download path runs); production installs leave
-/// `MORLOC_COMPILER_BIN` unset.
-fn dev_runtime_override(scope: Scope) -> Option<Result<(PathBuf, String)>> {
-    let compiler = std::env::var("MORLOC_COMPILER_BIN")
-        .ok()
-        .filter(|s| !s.is_empty())?;
-    Some((|| {
-        let compiler = PathBuf::from(compiler);
-        if !compiler.is_file() {
-            return Err(ManagerError::EnvError(format!(
-                "MORLOC_COMPILER_BIN={} is not a file",
-                compiler.display()
-            )));
-        }
-        // The runtime is built from source at init, so the dev override needs the
-        // Rust workspace too -- reuse the same MORLOC_RUST_DIR the init step reads.
-        let rust = std::env::var("MORLOC_RUST_DIR")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                ManagerError::EnvError(
-                    "MORLOC_COMPILER_BIN is set but MORLOC_RUST_DIR is not; point \
-                     MORLOC_RUST_DIR at the compiler's data/rust/ so `morloc init` can \
-                     build the runtime from source"
-                        .to_string(),
-                )
-            })?;
-        let rust = PathBuf::from(rust);
-        if !rust.join("Cargo.toml").is_file() {
-            return Err(ManagerError::EnvError(format!(
-                "MORLOC_RUST_DIR={} has no Cargo.toml (expected the data/rust workspace)",
-                rust.display()
-            )));
-        }
-        let dir = runtimes_dir(scope, "dev");
-        std::fs::create_dir_all(&dir).map_err(|e| {
-            ManagerError::EnvError(format!("cannot create {}: {e}", dir.display()))
-        })?;
-        force_symlink(&compiler, &runtime_morloc_bin(&dir))?;
-        force_symlink(&rust, &runtime_rust_src(&dir))?;
-        // Stage the sibling `morloc-env` agent (built alongside this
-        // morloc-manager) into the runtime dir, so the co-located compiler finds
-        // it next to itself (and on PATH) for the dependency callback. A missing
-        // agent (not yet `cargo build -p morloc-env`) is reported loudly here,
-        // since it silently disables in-environment dependency provisioning.
-        let staged_agent = std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(|d| d.join("morloc-env")))
-            .filter(|agent| agent.is_file());
-        match &staged_agent {
-            Some(agent) => force_symlink(agent, &runtime_morloc_env_bin(&dir))?,
-            None => eprintln!(
-                "WARNING: morloc-env not found next to morloc-manager; in-environment \
-                 dependency provisioning will be UNAVAILABLE. Build it with \
-                 `cargo build -p morloc-env` and re-run this command."
-            ),
-        }
-        // Drop a cached lang-support table if the local compiler is newer than it,
-        // so a rebuilt compiler regenerates the table instead of reusing a stale
-        // one. (Production never runs this; its table is a downloaded asset.)
-        let cached_table = dir.join(LANG_SUPPORT_FILE);
-        if let (Ok(tmeta), Ok(cmeta)) = (
-            std::fs::metadata(&cached_table),
-            std::fs::metadata(&compiler),
-        ) {
-            if let (Ok(tt), Ok(ct)) = (tmeta.modified(), cmeta.modified()) {
-                if ct > tt {
-                    let _ = std::fs::remove_file(&cached_table);
-                }
-            }
-        }
-        eprintln!(
-            "Using LOCAL morloc runtime (MORLOC_COMPILER_BIN): {} + {}{}",
-            compiler.display(),
-            rust.display(),
-            staged_agent
-                .as_ref()
-                .map(|a| format!(" + morloc-env {}", a.display()))
-                .unwrap_or_default()
-        );
-        Ok((dir, "dev".to_string()))
-    })())
-}
-
 /// Extract a .tar.gz into `dest` (the rust-src tarball unpacks to `rust/`).
 /// `--no-same-owner`: extracted files belong to the current user, not the uids
 /// recorded in the archive (restoring those fails for a non-root user, and for
@@ -453,14 +381,7 @@ pub fn fetch_manifest(tag: &str) -> Result<ReleaseManifest> {
 /// the version-matched morloc compiler plus the rust sources; `morloc init`
 /// builds libmorloc.so, morloc-nexus, and rustmorloc locally from that source.
 /// The already-installed `morloc-manager` bootstrap is not re-fetched.
-///
-/// Dev shortcut: if `MORLOC_COMPILER_BIN` is set, local binaries are staged
-/// instead (see `dev_runtime_override`) and nothing is downloaded.
 pub fn provision_runtime(scope: Scope, requested: &str) -> Result<(PathBuf, String)> {
-    if let Some(result) = dev_runtime_override(scope) {
-        return result;
-    }
-
     let triple = host_release_triple().ok_or_else(|| {
         ManagerError::BackendUnsupported(format!(
             "no prebuilt native runtime is published for this platform ({}/{}); \

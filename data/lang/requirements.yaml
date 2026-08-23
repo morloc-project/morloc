@@ -22,3 +22,26 @@ toolchain:
   # git is universal to the installation system: `morloc install` clones modules
   # and resolves git-pinned morloc-dependencies (build AND interactive runtime).
   - { package: git,         version: "*", phase: both }
+
+# APT packages the dev environment installs to build the morloc COMPILER from
+# source. Used ONLY by dev environments (`morloc-manager new --dev`, always a
+# debian/ubuntu container); released environments download a prebuilt compiler and
+# never use this list. These are NOT conda packages: they let the developer build
+# the Haskell compiler in the dev shell with conda DEACTIVATED, so GHC links the
+# system (apt) libraries rather than the mounted /env conda libraries. The Haskell
+# toolchain itself (GHC + stack) is provisioned by ghcup baked into the container
+# image (conda's ghc/stack are too old, and conda-forge has no GHC 9.6); these apt
+# packages are the C toolchain + the libraries that GHC bindist and the compiler's
+# Haskell deps link:
+# build-essential (gcc/g++/make), libgmp-dev (integer-gmp), libncurses-dev
+# (libtinfo, GHC + ghci), zlib1g-dev, libffi-dev (the RTS), xz-utils (to unpack the
+# GHC bindist), pkg-config, and git.
+dev-apt:
+  - build-essential
+  - libgmp-dev
+  - libncurses-dev
+  - zlib1g-dev
+  - libffi-dev
+  - xz-utils
+  - pkg-config
+  - git

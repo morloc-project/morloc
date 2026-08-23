@@ -33,6 +33,15 @@ pub struct DockerfileInput<'a> {
     pub morloc_home: &'a str,
     /// Build-extras (container-only OS packages).
     pub extras: &'a BuildExtras,
+    /// Script-provisioned languages (e.g. futhark) whose `install.sh` the builder
+    /// has written into the build context as `install-<lang>.sh`. Each is COPY-ed
+    /// in and run at image build. OCI-only (only the Dockerfile path supports it).
+    pub lang_installs: &'a [String],
+    /// Dev environment: the compiler + Rust source are NOT baked in (they are
+    /// built from a mounted source tree at materialize time), so the
+    /// `COPY runtime/` step and the baked `MORLOC_RUST_DIR` are omitted;
+    /// `CONTAINER_RUNTIME_BIN` becomes a mount target instead.
+    pub dev: bool,
 }
 
 /// Render the Dockerfile text. Deterministic for a given input.
@@ -56,6 +65,17 @@ pub fn generate_dockerfile(input: &DockerfileInput) -> String {
     out.push_str(" && rm -rf /var/lib/apt/lists/*\n");
     out.push('\n');
 
+    // Script-provisioned languages (e.g. futhark): their upstream binary is not on
+    // conda-forge, so run the committed install.sh (staged into the build context)
+    // against the base OS. Runs as root at build; the script does its own apt.
+    for lang in input.lang_installs {
+        out.push_str(&format!("# {lang}: provisioned by data/lang/{lang}/install.sh\n"));
+        out.push_str(&format!("COPY install-{lang}.sh /tmp/morloc-install-{lang}.sh\n"));
+        out.push_str(&format!(
+            "RUN bash /tmp/morloc-install-{lang}.sh && rm /tmp/morloc-install-{lang}.sh\n\n"
+        ));
+    }
+
     // Pinned pixi (the conda package manager).
     out.push_str("# Pinned pixi (conda package manager)\n");
     out.push_str("ENV PIXI_HOME=/opt/pixi\n");
@@ -71,12 +91,39 @@ pub fn generate_dockerfile(input: &DockerfileInput) -> String {
     // source with the pixi toolchain, so the runtime is ABI-coherent with the
     // pools. The COPY destination is shared with the run-side PATH
     // (serve::container_path), so it comes from one constant, not a literal.
+    //
+    // Dev envs skip the COPY + baked MORLOC_RUST_DIR: the compiler is BUILT from a
+    // mounted source tree at materialize time and installed into CONTAINER_RUNTIME_BIN
+    // (a mount, not a baked layer), and MORLOC_RUST_DIR points at the mounted
+    // source. Only the PATH entry is kept, so the built compiler is found.
     let runtime_bin = crate::serve::CONTAINER_RUNTIME_BIN;
-    out.push_str("# morloc compiler + rust source (from the build context)\n");
-    out.push_str(&format!("COPY runtime/ {runtime_bin}/\n"));
-    out.push_str(&format!("ENV MORLOC_RUST_DIR={runtime_bin}/rust\n"));
+    if input.dev {
+        out.push_str("# morloc compiler + rust source are built from a mounted source tree\n");
+    } else {
+        out.push_str("# morloc compiler + rust source (from the build context)\n");
+        out.push_str(&format!("COPY runtime/ {runtime_bin}/\n"));
+        out.push_str(&format!("ENV MORLOC_RUST_DIR={runtime_bin}/rust\n"));
+    }
+    // Both variants put the compiler dir on PATH (baked COPY dest, or a mount).
     out.push_str(&format!("ENV PATH=\"{runtime_bin}:${{PATH}}\"\n"));
     out.push('\n');
+
+    if input.dev {
+        // Bake the Haskell toolchain (ghcup + stack) into the dev image, so
+        // `stack`/`ghc` are on PATH in an interactive dev shell -- a dev env is a
+        // place to build/edit/rebuild the compiler, not just run a prebuilt one
+        // (mirrors the project's reference dev container). GHC itself is NOT baked:
+        // `stack setup` fetches the exact version stack.yaml pins into
+        // `$HOME/.stack` (host-mounted), so it persists and stays authoritative.
+        // MINIMAL installs ghcup only; the second step adds a current stack.
+        let ghcup_bin = crate::serve::CONTAINER_GHCUP_BIN;
+        out.push_str("# Haskell toolchain (ghcup + stack) to build the compiler from source\n");
+        out.push_str("ENV GHCUP_INSTALL_BASE_PREFIX=/opt BOOTSTRAP_HASKELL_NONINTERACTIVE=1 BOOTSTRAP_HASKELL_MINIMAL=1\n");
+        out.push_str("RUN curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh \\\n");
+        out.push_str(&format!("  && {ghcup_bin}/ghcup install stack --set\n"));
+        out.push_str(&format!("ENV PATH=\"{ghcup_bin}:${{PATH}}\"\n"));
+        out.push('\n');
+    }
 
     // The conda env is NOT baked into the image: it is materialized into a
     // host-mounted /env at env setup and bind-mounted at run, so an in-container
@@ -132,6 +179,8 @@ mod tests {
             pixi_version: "0.76.2",
             morloc_home: "/opt/morloc",
             extras: &extras,
+            lang_installs: &[],
+            dev: false,
         };
         let got = generate_dockerfile(&input);
         let expected = "\
@@ -176,9 +225,51 @@ ENTRYPOINT [\"/usr/local/bin/morloc-activate\"]
             pixi_version: "0.76.2",
             morloc_home: "/opt/morloc",
             extras: &extras,
+            lang_installs: &[],
+            dev: false,
         };
         let got = generate_dockerfile(&input);
         assert!(got.contains("ca-certificates curl \\"));
         assert!(!got.contains("  \\")); // no dangling double space before continuation
+    }
+
+    #[test]
+    fn lang_install_scripts_are_copied_and_run() {
+        let extras = BuildExtras::default();
+        let installs = vec!["futhark".to_string()];
+        let input = DockerfileInput {
+            base_image: "debian:bookworm-slim",
+            pixi_version: "0.76.2",
+            morloc_home: "/opt/morloc",
+            extras: &extras,
+            lang_installs: &installs,
+            dev: false,
+        };
+        let got = generate_dockerfile(&input);
+        assert!(got.contains("COPY install-futhark.sh /tmp/morloc-install-futhark.sh"));
+        assert!(got.contains("RUN bash /tmp/morloc-install-futhark.sh"));
+        // Installed against the base OS, before the pixi install.
+        let install_at = got.find("morloc-install-futhark.sh").unwrap();
+        let pixi_at = got.find("pixi.sh/install.sh").unwrap();
+        assert!(install_at < pixi_at);
+    }
+
+    #[test]
+    fn dev_dockerfile_omits_copy_runtime() {
+        let extras = BuildExtras::default();
+        let input = DockerfileInput {
+            base_image: "debian:bookworm-slim",
+            pixi_version: "0.76.2",
+            morloc_home: "/opt/morloc",
+            extras: &extras,
+            lang_installs: &[],
+            dev: true,
+        };
+        let got = generate_dockerfile(&input);
+        // Nothing is baked in: the compiler is built from a mounted source tree.
+        assert!(!got.contains("COPY runtime/"));
+        assert!(!got.contains("ENV MORLOC_RUST_DIR="));
+        // But CONTAINER_RUNTIME_BIN (a mount target) is still on PATH.
+        assert!(got.contains(&format!("ENV PATH=\"{}:", crate::serve::CONTAINER_RUNTIME_BIN)));
     }
 }

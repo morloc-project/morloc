@@ -26,6 +26,7 @@ module Morloc.DataFiles
   , languagesYaml
   , requirementsCore
   , requirementsFiles
+  , installScriptFiles
   ) where
 
 import Data.FileEmbed (embedFileRelative)
@@ -152,4 +153,12 @@ requirementsFiles =
   , ("r", EmbededFile "requirements.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/r/requirements.yaml")))
   , ("cpp", EmbededFile "requirements.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/cpp/requirements.yaml")))
   , ("rust", EmbededFile "requirements.yaml" (decodeUtf8 $ $(embedFileRelative "data/lang/rust/requirements.yaml")))
+  ]
+
+-- | Per-language container install scripts, for languages NOT on conda-forge
+-- (their upstream binary is fetched by a script at OCI image build). Keyed by
+-- canonical name. Keep in lockstep with morloc-deps `layout::SCRIPT_LANGUAGES`.
+installScriptFiles :: [(Text, EmbededFile)]
+installScriptFiles =
+  [ ("futhark", EmbededFile "install.sh" (decodeUtf8 $ $(embedFileRelative "data/lang/futhark/install.sh")))
   ]

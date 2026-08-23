@@ -161,7 +161,7 @@ pub fn read_env_config(scope: Scope, name: &str) -> Result<EnvironmentConfig> {
 /// A record from a newer morloc-manager (unknown fields already dropped by
 /// serde) is refused rather than half-read; an older record is migrated forward
 /// one version at a time.
-fn migrate_env_config(ec: EnvironmentConfig) -> Result<EnvironmentConfig> {
+fn migrate_env_config(mut ec: EnvironmentConfig) -> Result<EnvironmentConfig> {
     if ec.schema_version > CURRENT_ENV_SCHEMA {
         return Err(ManagerError::EnvError(format!(
             "environment '{}' was created by a newer morloc-manager (env schema v{}, this build \
@@ -171,8 +171,9 @@ fn migrate_env_config(ec: EnvironmentConfig) -> Result<EnvironmentConfig> {
     }
     while ec.schema_version < CURRENT_ENV_SCHEMA {
         match ec.schema_version {
-            // Add an arm here per version bump: transform in place, then set
-            // `ec.schema_version` to the next version.
+            // v1 -> v2: added the optional `dev` block (defaults to None). Purely
+            // additive, so bumping the version is the whole migration.
+            1 => ec.schema_version = 2,
             v => {
                 return Err(ManagerError::EnvError(format!(
                     "environment '{}' uses env schema v{v} with no migration path to v{}; \

@@ -670,7 +670,7 @@ cmdInit ic config = MSC.configureAll (not (initQuiet ic)) (initForce ic) (initSl
 -- package injection, bare-@new@ defaults) and the CI matrix.
 cmdLangSupport :: LangSupportCommand -> IO Bool
 cmdLangSupport _ =
-  case parseRequirements langReqs coreReq of
+  case parseRequirements langReqs installScripts coreReq of
     Left err -> do
       hPutStrLn stderr ("Failed to build the language-support table: " <> err)
       return False
@@ -680,6 +680,7 @@ cmdLangSupport _ =
   where
     coreReq = DF.embededFileText DF.requirementsCore
     langReqs = [(name, DF.embededFileText ef) | (name, ef) <- DF.requirementsFiles]
+    installScripts = [(name, DF.embededFileText ef) | (name, ef) <- DF.installScriptFiles]
 
 -- | Emit the program's environment requirement spec (envspec.json) using only
 -- the frontend -- parse + typecheck, no realization or codegen -- so a build

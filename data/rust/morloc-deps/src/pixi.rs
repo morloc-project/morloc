@@ -46,13 +46,14 @@ pub struct PixiManifestInput<'a> {
 }
 
 /// Toolchain package for a language morloc has NO requirements.yaml entry for
-/// (julia, futhark) -- the escape hatch until they gain table entries. Languages
-/// in the support table get their toolchain from `runtime.package` and `requires`
+/// (julia) -- the escape hatch until it gains a table entry. Languages in the
+/// support table get their toolchain from `runtime.package` and `requires`
 /// instead; those are NOT duplicated here (a second copy would silently diverge).
+/// Script-provisioned languages (futhark) are NOT here: they carry an empty
+/// support entry (with an `install_script`) and are installed outside conda.
 fn lang_toolchain(lang: &str) -> Option<&'static str> {
     match lang {
         "julia" => Some("julia"),
-        "futhark" => Some("futhark"),
         _ => None,
     }
 }

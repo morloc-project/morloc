@@ -20,6 +20,9 @@ pub struct EnvInfo {
     pub name: String,
     pub morloc_version: Option<Version>,
     pub is_default: bool,
+    /// A dev environment (built from a mounted source tree). For these the
+    /// version above is the stdlib base, not the compiler.
+    pub is_dev: bool,
 }
 
 // ======================================================================
@@ -160,6 +163,7 @@ pub fn list_environments(scope: Scope, default_env: Option<&str>) -> Vec<EnvInfo
         if let Ok(ec) = config::read_env_config(scope, &name) {
             result.push(EnvInfo {
                 name: name.clone(),
+                is_dev: ec.is_dev(),
                 morloc_version: ec.morloc_version,
                 is_default: default_env == Some(name.as_str()),
             });

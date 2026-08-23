@@ -17,5 +17,6 @@ pub mod envstore;
 pub mod error;
 #[allow(dead_code)]
 pub mod langsupport;
+pub mod layout;
 pub mod pixi;
 pub mod platform;

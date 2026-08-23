@@ -73,6 +73,7 @@ langSupportTests =
       either assertFailure k $
         parseRequirements
           [(n, DF.embededFileText ef) | (n, ef) <- DF.requirementsFiles]
+          [(n, DF.embededFileText ef) | (n, ef) <- DF.installScriptFiles]
           (DF.embededFileText DF.requirementsCore)
 
     reqNames t k = maybe [] (map pkgName . leRequires) (Map.lookup k (lsLanguages t))
@@ -100,11 +101,12 @@ langSupportTests =
         , lsToolchain = [PkgReq "c-compiler" "*" Build False]
         , lsLanguages =
             Map.fromList
-              [ ("cpp", LangEntry Nothing [PkgReq "cxx-compiler" "*" Build False])
+              [ ("cpp", LangEntry Nothing [PkgReq "cxx-compiler" "*" Build False] Nothing)
               , ( "py"
                 , LangEntry
                     (Just (RuntimeSpec "python" ">=3.10,<3.14" (Just "3.12")))
                     [PkgReq "numpy" ">=1.22,<3" Both False, PkgReq "pyarrow" "*" Runtime True]
+                    Nothing
                 )
               ]
         }

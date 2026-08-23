@@ -42,6 +42,14 @@ pub enum ContainerEngine {
 }
 
 impl ContainerEngine {
+    /// All container engines, in preference order. Defined once here so menus
+    /// and auto-detection share a single ordered source of truth.
+    pub const ALL: [ContainerEngine; 3] = [
+        ContainerEngine::Podman,
+        ContainerEngine::Docker,
+        ContainerEngine::Apptainer,
+    ];
+
     /// Canonical lowercase name; also the serialized form and the display name.
     pub fn name(&self) -> &'static str {
         match self {
@@ -285,12 +293,26 @@ impl Default for Config {
 
 /// Current on-disk schema version for `env.yaml`. Bump when the field set
 /// changes incompatibly and add a matching arm to `migrate_env_config`.
-pub const CURRENT_ENV_SCHEMA: u32 = 1;
+pub const CURRENT_ENV_SCHEMA: u32 = 2;
 
 /// Records written before schema versioning existed carry no `schema_version`
 /// field; they are the v1 baseline.
 fn default_env_schema() -> u32 {
     1
+}
+
+/// Dev-environment configuration. Its PRESENCE on an `EnvironmentConfig` marks
+/// the environment as a dev env (`EnvironmentConfig::is_dev`): one that mounts a
+/// morloc source tree so the developer builds the compiler + runtime from it,
+/// rather than downloading a release. morloc-manager only provisions the tooling
+/// (the pixi env + the baked ghcup/stack/cargo toolchain); the build itself is
+/// the developer's. There is no separate `is_dev` flag, so an env is either a
+/// normal release env (`dev: None`) or a dev env (`dev: Some(..)`) -- illegal
+/// mixed states are unrepresentable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevConfig {
+    /// Absolute host path to the morloc source repo, bind-mounted into the env.
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -346,6 +368,10 @@ pub struct EnvironmentConfig {
     /// native backend rejects them at creation.
     #[serde(default)]
     pub system_packages: Vec<String>,
+    /// Dev-environment config. Present iff this env builds morloc from a mounted
+    /// source tree (`is_dev`); `None` for a normal release env.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev: Option<DevConfig>,
 }
 
 fn default_shm_size() -> String {
@@ -380,7 +406,20 @@ impl EnvironmentConfig {
             shm_size: default_shm_size(),
             morloc_version,
             system_packages,
+            dev: None,
         }
+    }
+
+    /// True iff this is a dev environment (builds morloc from a mounted source
+    /// tree). Equivalent to `self.dev.is_some()`.
+    pub fn is_dev(&self) -> bool {
+        self.dev.is_some()
+    }
+
+    /// Attach a dev-environment config, marking this as a dev env.
+    pub fn with_dev(mut self, dev: DevConfig) -> Self {
+        self.dev = Some(dev);
+        self
     }
 
     /// The container engine of this environment's backend, or an error if the

@@ -158,7 +158,7 @@ pub fn doctor(
     // ==== Manifests ====
     if !json_mode { println!("\nManifests"); }
     c.set_category("manifests");
-    check_manifests(&mut c, &data_dir, ec.morloc_version.as_ref());
+    check_manifests(&mut c, &data_dir, expected_manifest_version(ec));
 
     // ==== Deep checks ====
     c.set_category("deep");
@@ -279,7 +279,7 @@ pub fn native_doctor(
 
     if !json_mode { println!("\nManifests"); }
     c.set_category("manifests");
-    check_manifests(&mut c, &data_dir, ec.morloc_version.as_ref());
+    check_manifests(&mut c, &data_dir, expected_manifest_version(ec));
 
     if !json_mode { println!("\nDeep checks"); }
     c.set_category("deep");
@@ -621,48 +621,39 @@ fn check_staleness(c: &mut Counts, ec: &EnvironmentConfig, rt: &NativeRuntime) {
     let runtime_dir = runtime_dir_from_activation(&rt.activation_env);
     let stamp_raw = runtime_dir.as_deref().and_then(runtime_store_version);
     let stamp_ver = stamp_raw.as_deref().and_then(|s| s.parse::<Version>().ok());
-    // A stamp that isn't a semver ("dev") is a local runtime bound via
-    // MORLOC_COMPILER_BIN: there is no released version to track, so the
-    // compiler-version checks do not apply. The tooling checks still do -- the
-    // manager/agent are real builds even in dev mode.
-    let dev_runtime = stamp_raw.is_some() && stamp_ver.is_none();
 
-    if dev_runtime {
-        c.skip("local dev runtime (MORLOC_COMPILER_BIN) -- compiler-version checks skipped");
-    } else {
-        // The morloc resolved under activation vs the store stamp.
-        if let Some(want) = &stamp_ver {
-            match run_with_activation(&rt.activation_env, "morloc", &["--version"]) {
-                Some(out) if out.status.success() => match parse_version_output(&out.stdout) {
-                    Some(got) if &got == want => {
-                        c.pass(&format!("morloc compiler matches the env runtime ({})", got.show()))
-                    }
-                    Some(got) => c.fail(&format!(
-                        "on-PATH morloc is {} but this env's runtime is {} -- a different morloc is shadowing it; re-run: morloc-manager update",
-                        got.show(),
-                        want.show()
-                    )),
-                    None => c.warn("could not parse `morloc --version` output"),
-                },
-                _ => c.warn("could not run `morloc --version` under the env activation"),
-            }
+    // The morloc resolved under activation vs the store stamp.
+    if let Some(want) = &stamp_ver {
+        match run_with_activation(&rt.activation_env, "morloc", &["--version"]) {
+            Some(out) if out.status.success() => match parse_version_output(&out.stdout) {
+                Some(got) if &got == want => {
+                    c.pass(&format!("morloc compiler matches the env runtime ({})", got.show()))
+                }
+                Some(got) => c.fail(&format!(
+                    "on-PATH morloc is {} but this env's runtime is {} -- a different morloc is shadowing it; re-run: morloc-manager update",
+                    got.show(),
+                    want.show()
+                )),
+                None => c.warn("could not parse `morloc --version` output"),
+            },
+            _ => c.warn("could not run `morloc --version` under the env activation"),
         }
+    }
 
-        // Recorded env version vs the store stamp.
-        match (&ec.morloc_version, &stamp_ver) {
-            (Some(rec), Some(store)) if rec == store => {
-                c.pass(&format!("recorded env version matches the runtime store ({})", rec.show()))
-            }
-            (Some(rec), Some(store)) => c.fail(&format!(
-                "env records morloc {} but the runtime store is {} -- re-run: morloc-manager update",
-                rec.show(),
-                store.show()
-            )),
-            (None, _) => c.warn(
-                "materialized env has no recorded morloc version -- re-run: morloc-manager update",
-            ),
-            (Some(_), None) => {}
+    // Recorded env version vs the store stamp.
+    match (&ec.morloc_version, &stamp_ver) {
+        (Some(rec), Some(store)) if rec == store => {
+            c.pass(&format!("recorded env version matches the runtime store ({})", rec.show()))
         }
+        (Some(rec), Some(store)) => c.fail(&format!(
+            "env records morloc {} but the runtime store is {} -- re-run: morloc-manager update",
+            rec.show(),
+            store.show()
+        )),
+        (None, _) => c.warn(
+            "materialized env has no recorded morloc version -- re-run: morloc-manager update",
+        ),
+        (Some(_), None) => {}
     }
 
     // The manager that materialized the env vs the running manager.
@@ -994,6 +985,18 @@ fn collect_unreadable(dir: &Path, out: &mut Vec<String>) {
     }
 }
 
+/// The morloc version a program manifest is expected to have been built with. A
+/// dev env's programs are built by the developer's source-built compiler, not by
+/// `morloc_version` (its stdlib base), so comparing against the stdlib base would
+/// false-warn on every program -- skip the version match for dev (return None).
+fn expected_manifest_version(ec: &EnvironmentConfig) -> Option<&Version> {
+    if ec.is_dev() {
+        None
+    } else {
+        ec.morloc_version.as_ref()
+    }
+}
+
 fn check_manifests(
     c: &mut Counts,
     data_dir: &Path,
@@ -1107,6 +1110,17 @@ fn check_one_manifest(
 }
 
 fn check_morloc_version(c: &mut Counts, engine: ContainerEngine, ec: &EnvironmentConfig) {
+    // A dev env's compiler is built by the developer from the mounted source, so
+    // morloc-manager does not track its version (the stdlib base is separate).
+    // Report the mode + source; the compiler is the developer's to build/verify.
+    if let Some(dev) = &ec.dev {
+        let stdlib = ec.morloc_version.as_ref().map(|v| v.show()).unwrap_or_else(|| "?".to_string());
+        c.pass(&format!(
+            "dev: compiler built from source ({}), stdlib base {stdlib}",
+            dev.source
+        ));
+        return;
+    }
     let image = ec.active_image();
     match environment::detect_morloc_version(engine, image) {
         Ok(detected) => {
