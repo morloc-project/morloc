@@ -153,9 +153,9 @@ or `latest`). With no flags on a TTY, all settings are prompted interactively.")
         /// scope only.
         #[arg(long)]
         dev: Option<String>,
-        /// Extra OS package to bake into the image (repeatable), e.g.
-        /// --system-package jq. Container backend only.
-        #[arg(long = "system-package")]
+        /// Extra OS package(s) to bake into the image, e.g. --system-packages
+        /// jq,vim. Repeatable or comma-separated. Container backend only.
+        #[arg(long = "system-packages", alias = "system-package")]
         system_package: Vec<String>,
         /// Directory of dotfiles to copy into the environment's home
         /// (.bashrc, .vimrc, .config/...). Docker/podman only.
@@ -368,8 +368,8 @@ Examples:
   morloc-manager modify --env myenv --set-default   # make myenv your default
   sudo morloc-manager modify --env shared --set-default --system
   morloc-manager modify --env myenv --dotfiles ~/mydots
-  morloc-manager modify --env myenv --system-package jq
-  morloc-manager modify --env myenv --rm-system-package jq
+  morloc-manager modify --env myenv --system-packages jq,vim
+  morloc-manager modify --env myenv --rm-system-packages jq
   morloc-manager modify --env myenv --lang py@3.13")]
     Modify {
         /// Environment to modify (default: the default environment)
@@ -379,13 +379,14 @@ Examples:
         /// comma-separated). Triggers a rebuild at the current morloc version.
         #[arg(long)]
         lang: Vec<String>,
-        /// Add an OS package to the image (repeatable), e.g. --system-package jq.
-        /// Additive; container backend only. Triggers a rebuild.
-        #[arg(long = "system-package")]
+        /// Add OS package(s) to the image, e.g. --system-packages jq,vim.
+        /// Repeatable or comma-separated. Additive; container backend only.
+        /// Triggers a rebuild.
+        #[arg(long = "system-packages", alias = "system-package")]
         system_package: Vec<String>,
-        /// Remove an OS package previously added with --system-package
-        /// (repeatable). Triggers a rebuild.
-        #[arg(long = "rm-system-package")]
+        /// Remove OS package(s) previously added, e.g. --rm-system-packages jq.
+        /// Repeatable or comma-separated. Triggers a rebuild.
+        #[arg(long = "rm-system-packages", alias = "rm-system-package")]
         rm_system_package: Vec<String>,
         /// Directory of dotfiles to copy into the environment's home
         /// (.bashrc, .vimrc, .config/...). Overwrites like `cp -rf`;
@@ -885,11 +886,11 @@ fn engine_installed(engine: ContainerEngine) -> bool {
     }
 }
 
-/// The error for `--system-package` on a backend that has no image to bake OS
+/// The error for `--system-packages` on a backend that has no image to bake OS
 /// packages into (i.e. native). Mirrors `dotfiles_not_supported`.
 fn system_package_not_supported() -> ManagerError {
     ManagerError::EnvError(
-        "--system-package applies only to container backends; the native backend \
+        "--system-packages applies only to container backends; the native backend \
          has no image to bake packages into"
             .to_string(),
     )
@@ -1103,6 +1104,9 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             non_interactive,
         } => {
             if system { check_system_write_access()?; }
+            // Flatten `--system-packages a,b --system-packages c` into `[a,b,c]`
+            // once, so every downstream path sees a clean list.
+            let system_package = flatten_csv(&system_package);
             let interactive = !non_interactive && io::stdin().is_terminal();
             if !non_interactive && !interactive {
                 eprintln!("Note: No TTY detected, running in non-interactive mode.");
@@ -2006,12 +2010,15 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                      an environment's scope is fixed when it is created".to_string(),
                 ));
             }
+            // Flatten repeatable + comma-separated package lists into clean tokens.
+            let system_package = flatten_csv(&system_package);
+            let rm_system_package = flatten_csv(&rm_system_package);
             let touches_packages = !system_package.is_empty() || !rm_system_package.is_empty();
             let will_rebuild = !lang.is_empty() || touches_packages;
             if !set_default && !will_rebuild && dotfiles.is_none() {
                 return Err(ManagerError::EnvError(
                     "nothing to modify: pass --set-default, --dotfiles, --lang, \
-                     --system-package, or --rm-system-package".to_string(),
+                     --system-packages, or --rm-system-packages".to_string(),
                 ));
             }
 
@@ -2021,7 +2028,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
             //      effect so an invalid request never leaves partial changes. ----
             if touches_packages && ec.backend.is_native() {
                 return Err(ManagerError::EnvError(
-                    "--system-package/--rm-system-package apply only to container \
+                    "--system-packages/--rm-system-packages apply only to container \
                      backends; the native backend has no image to bake packages into"
                         .to_string(),
                 ));
@@ -2067,32 +2074,41 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                 eprintln!("Copied dotfiles into '{env_name}'.");
             }
 
-            // 3. system packages: add and/or remove, then persist so
-            //    rematerialize_env reads the new set back.
-            if touches_packages {
-                for p in system_package {
-                    if !ec.system_packages.contains(&p) {
-                        ec.system_packages.push(p);
+            // 3. Build-affecting changes (system packages, language pins) + rebuild.
+            //    rematerialize_env reads the stored config/inputs from disk, so the
+            //    new values must be persisted BEFORE it runs -- but a failed rebuild
+            //    ROLLS BACK to the prior config/inputs, so a package or pin that
+            //    breaks the build (e.g. a typo) is never left stored to re-break
+            //    every later operation. (`new` needs no rollback: it persists only
+            //    after a successful build.)
+            if will_rebuild {
+                let prev_ec = ec.clone();
+                let prev_inputs = cfg::read_env_inputs(env_scope, &env_name);
+
+                if touches_packages {
+                    for p in system_package {
+                        if !ec.system_packages.contains(&p) {
+                            ec.system_packages.push(p);
+                        }
+                    }
+                    ec.system_packages.retain(|p| !rm_system_package.contains(p));
+                    cfg::write_env_config(env_scope, &env_name, &ec)?;
+                }
+                if !lang.is_empty() {
+                    let pins = parse_lang_pins(&lang);
+                    cfg::write_env_inputs(env_scope, &env_name, &EnvInputs { lang_pins: pins })?;
+                }
+
+                // Rebuild at the CURRENT morloc version; `modify` never moves it.
+                let keep = require_current_version(&ec, &env_name)?;
+                match rematerialize_env(env_scope, &env_name, &[], Some(keep), verbose) {
+                    Ok(()) => report_rematerialized(ec.backend.is_native(), &env_name),
+                    Err(e) => {
+                        let _ = cfg::write_env_config(env_scope, &env_name, &prev_ec);
+                        let _ = cfg::write_env_inputs(env_scope, &env_name, &prev_inputs);
+                        return Err(e);
                     }
                 }
-                if !rm_system_package.is_empty() {
-                    ec.system_packages.retain(|p| !rm_system_package.contains(p));
-                }
-                cfg::write_env_config(env_scope, &env_name, &ec)?;
-            }
-
-            // 4. language re-pin.
-            if !lang.is_empty() {
-                let pins = parse_lang_pins(&lang);
-                cfg::write_env_inputs(env_scope, &env_name, &EnvInputs { lang_pins: pins })?;
-            }
-
-            // 5. rebuild at the CURRENT morloc version if a build-affecting input
-            //    changed. `modify` never moves the version.
-            if will_rebuild {
-                let keep = require_current_version(&ec, &env_name)?;
-                rematerialize_env(env_scope, &env_name, &[], Some(keep), verbose)?;
-                report_rematerialized(ec.backend.is_native(), &env_name);
             }
             Ok(())
         }
@@ -3517,6 +3533,18 @@ fn parse_token_list(answer: &str) -> Vec<String> {
         .collect()
 }
 
+/// Flatten repeatable + comma-separated CLI list values into trimmed, non-empty
+/// tokens, so `--system-packages a,b --system-packages c` yields `[a, b, c]`.
+fn flatten_csv(items: &[String]) -> Vec<String> {
+    items
+        .iter()
+        .flat_map(|s| s.split(','))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Prompt for the morloc version to provision. Returns the requested spec:
 /// `None` tracks the latest release (honoring $MORLOC_RELEASE_TAG); `Some(v)` is
 /// a concrete version. A specific version is checked for a published release (the
@@ -4013,7 +4041,7 @@ fn interactive_new_session(input: NewSessionInput) -> Result<Option<NewPlan>> {
     };
 
     // 4. System packages (container backends only). Native has no image to bake
-    //    packages into, so the prompt is skipped there. A --system-package passed
+    //    packages into, so the prompt is skipped there. A --system-packages passed
     //    on the CLI for a native backend is an error (mirrors the non-interactive
     //    path), not a silently-dropped flag.
     let system_packages = if !cli_system_package.is_empty() {
@@ -4602,7 +4630,7 @@ fn build_requirement_derived_image(
     requested_version: Option<&str>,
 ) -> Result<(String, String)> {
     // Unlike native, a container HAS a build layer, so host/vcpkg system deps are
-    // not a hard blocker here -- they become build-extras (a later --system-package
+    // not a hard blocker here -- they become build-extras (a later --system-packages
     // flag). native_blockers therefore does not apply to the container path.
     // Pass the engine so the language-support table can be generated in a
     // container when the host cannot run the compiler (NixOS/musl).
@@ -6450,19 +6478,38 @@ mod tests {
 
     #[test]
     fn modify_takes_package_add_remove_and_dotfiles() {
+        // Plural flags + comma-separated values (comma-splitting is flatten_csv's
+        // job at dispatch, so the parsed token is still the raw "jq,git" here).
         let cli = Cli::try_parse_from([
             "morloc-manager", "modify", "--env", "e",
-            "--system-package", "jq", "--rm-system-package", "vim", "--dotfiles", "/tmp/d",
+            "--system-packages", "jq,git", "--rm-system-packages", "vim", "--dotfiles", "/tmp/d",
         ])
-        .expect("modify should parse package add/remove and dotfiles");
+        .expect("modify should parse plural package add/remove and dotfiles");
         match cli.command {
             Some(Cmd::Modify { system_package, rm_system_package, dotfiles, .. }) => {
-                assert_eq!(system_package, vec!["jq".to_string()]);
+                assert_eq!(system_package, vec!["jq,git".to_string()]);
                 assert_eq!(rm_system_package, vec!["vim".to_string()]);
                 assert_eq!(dotfiles.as_deref(), Some("/tmp/d"));
             }
             _ => panic!("expected Cmd::Modify"),
         }
+        // The singular forms remain accepted as hidden aliases.
+        let cli = Cli::try_parse_from([
+            "morloc-manager", "modify", "--env", "e",
+            "--system-package", "jq", "--rm-system-package", "vim",
+        ])
+        .expect("singular aliases should still parse");
+        assert!(matches!(cli.command, Some(Cmd::Modify { .. })));
+    }
+
+    #[test]
+    fn flatten_csv_splits_commas_and_trims() {
+        // Repeatable + comma-separated, with surrounding whitespace and blanks.
+        assert_eq!(
+            flatten_csv(&["jq, git".to_string(), "vim".to_string(), " , ".to_string()]),
+            vec!["jq".to_string(), "git".to_string(), "vim".to_string()]
+        );
+        assert!(flatten_csv(&[]).is_empty());
     }
 
     #[test]
