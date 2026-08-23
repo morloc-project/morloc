@@ -355,6 +355,11 @@ version; changing settings (packages, dotfiles, default) is `morloc-manager modi
         /// stale or half-built environment).
         #[arg(long)]
         force: bool,
+        /// Proceed even if an installed module declares a morloc-version range
+        /// that excludes the target compiler. Without this, such a conflict
+        /// aborts the update (leaving the environment untouched).
+        #[arg(long)]
+        ignore_module_compat: bool,
     },
     /// Change an environment's settings (without moving its morloc version)
     #[command(display_order = 8)]
@@ -1948,7 +1953,7 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
         // ---- update ----
         // Rebuild an environment, optionally moving its morloc version. Settings
         // changes (packages/dotfiles/default) are `modify`, not `update`.
-        Cmd::Update { env, morloc_version, latest, force } => {
+        Cmd::Update { env, morloc_version, latest, force, ignore_module_compat } => {
             let (env_name, env_scope, ec) = resolve_env_or_default(env)?;
             if env_scope == Scope::System {
                 check_system_write_access()?;
@@ -1964,6 +1969,13 @@ fn dispatch(verbose: bool, json: bool, cmd: Cmd) -> Result<()> {
                     None => Some(require_current_version(&ec, &env_name)?),
                 }
             };
+
+            // Refuse (env untouched) if the target compiler breaks an installed
+            // module's morloc-version. Reuse any concrete version it resolved so
+            // the gate and the rebuild cannot disagree on a "latest" target.
+            let requested =
+                gate_module_compat(env_scope, &env_name, &requested, ignore_module_compat)?
+                    .or(requested);
 
             // --force repairs a stale/half-built env: drop the success marker so
             // materialization always re-solves and rebuilds rather than skipping.
@@ -4371,6 +4383,105 @@ fn require_current_version(ec: &EnvironmentConfig, env_name: &str) -> Result<Str
     )))
 }
 
+/// Resolve the target compiler version of an update to a concrete numeric
+/// string. `requested` follows `Cmd::Update`'s policy: `None` = --latest;
+/// `Some(v)` = an explicit target or the env's recorded version. A literal
+/// "latest" is resolved via the release manifest (a read-only network fetch);
+/// an explicit/recorded version needs no network.
+fn resolve_target_version(requested: &Option<String>) -> Result<String> {
+    match requested {
+        Some(v) if !is_latest_spec(v) => Ok(strip_v_prefix(v).to_string()),
+        _ => {
+            let tag = provision::resolve_tag(requested.as_deref().unwrap_or("latest"))?;
+            Ok(provision::fetch_manifest(&tag)?.version)
+        }
+    }
+}
+
+/// Partition installed `(module, constraint)` pairs against a concrete target
+/// compiler version into (violations, unparseable). A module violates when its
+/// range excludes the target; an unparseable stored constraint is neither (the
+/// caller warns and ignores it). Pure -- no IO -- so it is unit-testable.
+fn classify_module_compat(
+    constrained: &[(String, String)],
+    target: &str,
+) -> (Vec<(String, String)>, Vec<(String, String)>) {
+    let mut violations = Vec::new();
+    let mut unparseable = Vec::new();
+    for (module, spec) in constrained {
+        match constraint::VersionRange::parse(spec) {
+            Ok(range) if !range.satisfies(target) => {
+                violations.push((module.clone(), spec.clone()))
+            }
+            Ok(_) => {}
+            Err(_) => unparseable.push((module.clone(), spec.clone())),
+        }
+    }
+    (violations, unparseable)
+}
+
+/// Refuse an update when an installed module's declared `morloc-version`
+/// excludes the target compiler. Reads constraints from the env's `.module`
+/// manifests; makes no network call unless a constrained module exists. A
+/// non-numeric target (dev build) or an unparseable stored constraint warns and
+/// passes, mirroring the compiler-side gate. Returns the concrete target it
+/// resolved (`Some`) so the caller reuses one version for the rebuild, or `None`
+/// when there was nothing to check.
+fn gate_module_compat(
+    scope: Scope,
+    name: &str,
+    requested: &Option<String>,
+    ignore: bool,
+) -> Result<Option<String>> {
+    let fdb = cfg::env_data_dir(scope, name).join("fdb");
+    let constrained: Vec<(String, String)> = freeze::scan_modules(&fdb.to_string_lossy())
+        .into_iter()
+        .filter_map(|m| m.morloc_version.map(|c| (m.name, c)))
+        .collect();
+    if constrained.is_empty() {
+        return Ok(None);
+    }
+
+    let target = resolve_target_version(requested)?;
+    if !constraint::is_numeric_version(&target) {
+        eprintln!(
+            "Warning: target morloc version '{target}' is not a plain numeric \
+             version; skipping the module-compatibility check."
+        );
+        return Ok(Some(target));
+    }
+
+    let (violations, unparseable) = classify_module_compat(&constrained, &target);
+    for (module, spec) in &unparseable {
+        eprintln!(
+            "Warning: module '{module}' has an unparseable morloc-version \
+             '{spec}'; skipping it in the compatibility check."
+        );
+    }
+    if violations.is_empty() {
+        return Ok(Some(target));
+    }
+
+    let mut msg = format!(
+        "Cannot move environment '{name}' to morloc {target}: {} installed \
+         module(s) require a different compiler:\n",
+        violations.len()
+    );
+    for (module, spec) in &violations {
+        msg.push_str(&format!("  - {module} requires morloc {spec}\n"));
+    }
+    if ignore {
+        eprintln!("{msg}Proceeding anyway (--ignore-module-compat).");
+        Ok(Some(target))
+    } else {
+        msg.push_str(
+            "Install compatible versions of these modules, or re-run with \
+             --ignore-module-compat to override.",
+        );
+        Err(ManagerError::EnvError(msg))
+    }
+}
+
 /// Post-rebuild banner, shared by `update` and `modify` so the two never drift.
 /// Takes only the backend flag (not the whole config) so it cannot grow a read
 /// of a possibly-stale post-rebuild field.
@@ -6205,6 +6316,28 @@ mod tests {
     }
 
     #[test]
+    fn module_compat_classification() {
+        let mods = vec![
+            ("stdlib".to_string(), ">=0.98, <0.99".to_string()),
+            ("loose-a".to_string(), ">=0.99".to_string()),
+            ("loose-b".to_string(), "*".to_string()),
+            ("weird".to_string(), "not-a-version".to_string()),
+        ];
+        // Target 0.98.2: stdlib ok, loose-a violates (needs >=0.99), * ok,
+        // weird is unparseable (warned+ignored, never a violation).
+        let (viol, unparseable) = classify_module_compat(&mods, "0.98.2");
+        let vnames: Vec<&str> = viol.iter().map(|(m, _)| m.as_str()).collect();
+        let unames: Vec<&str> = unparseable.iter().map(|(m, _)| m.as_str()).collect();
+        assert_eq!(vnames, vec!["loose-a"]);
+        assert_eq!(unames, vec!["weird"]);
+
+        // Target 0.99.0: stdlib now violates (excluded by <0.99), loose-a ok.
+        let (viol, _) = classify_module_compat(&mods, "0.99.0");
+        let vnames: Vec<&str> = viol.iter().map(|(m, _)| m.as_str()).collect();
+        assert_eq!(vnames, vec!["stdlib"]);
+    }
+
+    #[test]
     fn lang_accepts_comma_delimited_and_repeated() {
         // `--lang py,r,cpp` (one flag, comma-separated) must resolve to the same
         // pins as `--lang py --lang r --lang cpp`, and both forms may be mixed.
@@ -6265,11 +6398,12 @@ mod tests {
         ])
         .expect("update should parse --morloc-version");
         match cli.command {
-            Some(Cmd::Update { env, morloc_version, latest, force }) => {
+            Some(Cmd::Update { env, morloc_version, latest, force, ignore_module_compat }) => {
                 assert_eq!(env.as_deref(), Some("e"));
                 assert_eq!(morloc_version.as_deref(), Some("0.98.0"));
                 assert!(!latest);
                 assert!(!force);
+                assert!(!ignore_module_compat);
             }
             _ => panic!("expected Cmd::Update"),
         }
@@ -6277,6 +6411,15 @@ mod tests {
         let cli = Cli::try_parse_from(["morloc-manager", "update", "--env", "e", "--force", "--latest"])
             .expect("update --force --latest should parse");
         assert!(matches!(cli.command, Some(Cmd::Update { latest: true, force: true, .. })));
+        // --ignore-module-compat parses.
+        let cli = Cli::try_parse_from(
+            ["morloc-manager", "update", "--env", "e", "--ignore-module-compat"],
+        )
+        .expect("update --ignore-module-compat should parse");
+        assert!(matches!(
+            cli.command,
+            Some(Cmd::Update { ignore_module_compat: true, .. })
+        ));
     }
 
     #[test]
@@ -6731,6 +6874,8 @@ mod tests {
                 name: "math".to_string(),
                 version: Some("0.3.0".to_string()),
                 sha256: "abc123".to_string(),
+                morloc_version: None,
+                built_with_morloc: None,
             }],
             programs: vec![ProgramEntry {
                 name: "svc".to_string(),

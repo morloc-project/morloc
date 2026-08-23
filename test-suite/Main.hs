@@ -20,6 +20,7 @@ import SchemaHintTests (schemaHintTests)
 import SizeParseTests (sizeParseTests)
 import SystemConfigTests (systemConfigTests)
 import UnitTypeTests
+import VersionConstraintTests (versionConstraintTests)
 
 main :: IO ()
 main = do
@@ -77,6 +78,7 @@ main = do
       , withDocstringTests
       , evalSandboxTests
       , morlocDepsTests
+      , versionConstraintTests
       , sizeParseTests
       , patternChainTests
       , irrefutablePatternLexerTests

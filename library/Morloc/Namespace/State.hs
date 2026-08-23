@@ -542,6 +542,11 @@ data PackageMeta
   -- EnvSpec language list.
   , packageLangVersions :: Map Text Text
   , packageInclude :: Maybe [Text]
+  -- | Optional constraint on the morloc COMPILER version this module supports,
+  -- in the same conda match-spec grammar as language/package versions: e.g.
+  -- ">=0.98, <0.99" (an interval), "0.98" (the 0.98.x series), or "*". 'Nothing'
+  -- means unconstrained. Checked at install and make.
+  , packageMorlocVersion :: !(Maybe Text)
   -- | Pinned morloc module dependencies (name, git commit hash). Optional;
   -- empty = unpinned, install latest. See plan: closer-to-install-root wins.
   , packageMorlocDependencies :: [(Text, Text)]
@@ -789,6 +794,7 @@ instance Defaultable PackageMeta where
       , packageJuliaDeps = Map.empty
       , packageLangVersions = Map.empty
       , packageInclude = Nothing
+      , packageMorlocVersion = Nothing
       , packageMorlocDependencies = []
       , packageSetup = Nothing
       , packageExpose = defaultValue
@@ -847,6 +853,7 @@ instance FromJSON PackageMeta where
       <*> o .:? "julia-deps" .!= Map.empty
       <*> o .:? "lang-versions" .!= Map.empty
       <*> o .:? "include"
+      <*> o .:? "morloc-version"
       <*> (o .:? "morloc-dependencies" .!= [] >>= mapM parseMorlocDep)
       <*> o .:? "setup"
       <*> o .:? "expose" .!= defaultValue

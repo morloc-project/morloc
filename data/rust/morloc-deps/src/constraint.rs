@@ -11,6 +11,11 @@
 //! It handles the conda match-spec SUBSET morloc uses: comma-separated
 //! comparator atoms (`>=`, `>`, `<`, `<=`, `==`/bare), `X.Y.*` globs, and `*`
 //! (any). Versions are dotted numeric segments compared segment-wise.
+//!
+//! MIRROR: `library/Morloc/Version/Constraint.hs` implements the same grammar
+//! and ordering for the module `morloc-version` gate. Keep the two, and their
+//! shared test vectors, in sync -- one grammar for morloc, language, and conda
+//! versions.
 
 use crate::error::{DepsError, Result};
 use std::cmp::Ordering;
@@ -222,6 +227,28 @@ impl VersionRange {
         }
     }
 
+    /// Whether a concrete version satisfies this range. A non-numeric version
+    /// string (e.g. a dev suffix) yields `false`; callers that must distinguish
+    /// "cannot check" from "out of range" should pre-check with
+    /// `is_numeric_version` (the module gate warns-and-skips on a dev build).
+    pub fn satisfies(&self, version: &str) -> bool {
+        let v = match Version::parse(version) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        let lower_ok = match &self.lower {
+            Lower::Inf => true,
+            Lower::Ge(b) => v.cmp(b) != Ordering::Less,
+            Lower::Gt(b) => v.cmp(b) == Ordering::Greater,
+        };
+        let upper_ok = match &self.upper {
+            Upper::Inf => true,
+            Upper::Le(b) => v.cmp(b) != Ordering::Greater,
+            Upper::Lt(b) => v.cmp(b) == Ordering::Less,
+        };
+        lower_ok && upper_ok
+    }
+
     /// Render back to a conda match-spec (`*`, `>=3.10,<3.14`, `>=3.12,<3.13`).
     pub fn to_spec(&self) -> String {
         let mut atoms = Vec::new();
@@ -241,6 +268,13 @@ impl VersionRange {
             atoms.join(",")
         }
     }
+}
+
+/// Whether a string is a plain dotted-numeric version (no dev/pre suffix), i.e.
+/// one this module can order. Callers gate a dev-build compiler version by
+/// warning-and-skipping when this is false, mirroring the Haskell checker.
+pub fn is_numeric_version(s: &str) -> bool {
+    Version::parse(s).is_ok()
 }
 
 fn tighter_lower(a: &Lower, b: &Lower) -> Lower {
@@ -381,6 +415,23 @@ mod tests {
     fn version_ordering() {
         assert!(Version::parse("3.9").unwrap() < Version::parse("3.10").unwrap());
         assert_eq!(Version::parse("3.12").unwrap(), Version::parse("3.12.0").unwrap());
+    }
+
+    #[test]
+    fn satisfies_admission() {
+        let r = VersionRange::parse(">=0.98,<0.99").unwrap();
+        assert!(r.satisfies("0.98.2"));
+        assert!(r.satisfies("0.98"));
+        assert!(!r.satisfies("0.99.0"));
+        assert!(!r.satisfies("0.97.9"));
+        // strict lower bound excludes the endpoint
+        assert!(!VersionRange::parse(">0.98").unwrap().satisfies("0.98"));
+        // any range admits anything numeric
+        assert!(VersionRange::any().satisfies("123.4"));
+        // a non-numeric (dev) version cannot be shown to satisfy
+        assert!(!r.satisfies("0.98.2-dev"));
+        assert!(is_numeric_version("0.98.2"));
+        assert!(!is_numeric_version("0.98.2-dev"));
     }
 
     #[test]

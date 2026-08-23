@@ -74,7 +74,7 @@ data SystemReq = SystemReq
   }
   deriving (Show, Eq, Ord)
 
--- | A pinned morloc module dependency (existing exact-git-hash model).
+-- | A pinned morloc module dependency (exact-git-hash model).
 data ModuleReq = ModuleReq
   { mrName    :: !Text
   , mrGitHash :: !(Maybe Text)
@@ -161,8 +161,8 @@ buildEnvSpec morlocVersion langs metas = do
       | name <- unique (concatMap packageDependencies metas)
       ]
 
-    -- Existing exact-git-hash module pins, deduplicated by module name
-    -- (closer-to-root resolution already happened during load/install).
+    -- Exact-git-hash module pins, deduplicated by module name (closer-to-root
+    -- resolution already happened during load/install).
     moduleReqs =
       [ ModuleReq name (Just h)
       | (name, h) <- dedupFst (concatMap packageMorlocDependencies metas)

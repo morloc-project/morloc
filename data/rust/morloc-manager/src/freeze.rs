@@ -147,7 +147,7 @@ pub fn read_freeze_manifest(path: &str) -> Result<FreezeManifest> {
 // Internal: scanning installed state
 // ======================================================================
 
-fn scan_modules(fdb_dir: &str) -> Vec<ModuleEntry> {
+pub(crate) fn scan_modules(fdb_dir: &str) -> Vec<ModuleEntry> {
     let fdb_path = Path::new(fdb_dir);
     if !fdb_path.is_dir() {
         return Vec::new();
@@ -161,6 +161,10 @@ fn scan_modules(fdb_dir: &str) -> Vec<ModuleEntry> {
         name: String,
         #[serde(default)]
         version: Option<String>,
+        #[serde(default)]
+        morloc_version: Option<String>,
+        #[serde(default)]
+        built_with_morloc: Option<String>,
     }
 
     entries
@@ -179,6 +183,8 @@ fn scan_modules(fdb_dir: &str) -> Vec<ModuleEntry> {
                 name: stub.name,
                 version: stub.version,
                 sha256,
+                morloc_version: stub.morloc_version,
+                built_with_morloc: stub.built_with_morloc,
             })
         })
         .collect()

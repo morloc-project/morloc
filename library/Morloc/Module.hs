@@ -68,6 +68,8 @@ import Morloc.Namespace.Prim
 import Morloc.Namespace.State
 import qualified Morloc.ProgramBuilder.Install as Install
 import qualified Morloc.System as MS
+import qualified Morloc.Version as Version
+import qualified Morloc.Version.Constraint as VC
 import qualified Network.HTTP.Simple as HTTP
 import System.Directory
 import System.Environment (getEnvironment)
@@ -466,6 +468,13 @@ loadModuleMetadata main = do
   -- Reject dependencies whose declared source is illegal for their language
   -- (e.g. a Python dep with no source, or an R cran/bioconductor source).
   either (liftIO . ioError . userError . MT.unpack) return (checkPackageDeps meta)
+  -- Reject a module whose declared morloc-version excludes the running
+  -- compiler: a fast, actionable failure instead of a cryptic downstream
+  -- codegen error. A non-numeric compiler version (dev build) warns and passes.
+  case VC.gateModuleVersion (packageName meta) (MT.pack Version.versionStr) (packageMorlocVersion meta) of
+    Left err -> liftIO . ioError . userError $ MT.unpack err
+    Right Nothing -> return ()
+    Right (Just warning) -> MM.say (pretty warning)
   state <- MM.get
   MM.put (appendMeta meta state)
   where
@@ -686,6 +695,18 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
           then YC.loadYamlSettings [pkgYaml] [] YC.ignoreEnv
           else return defaultValue
 
+      -- Reject a module whose declared morloc-version excludes the running
+      -- compiler (rolling back the freshly-fetched source). An explicit
+      -- --force downgrades the rejection to a warning.
+      case VC.gateModuleVersion name (MT.pack Version.versionStr) (packageMorlocVersion meta) of
+        Right Nothing -> return ()
+        Right (Just warning) -> MM.say (pretty warning)
+        Left err
+          | overwrite == ForceOverwrite -> MM.say ("warning:" <+> pretty err)
+          | otherwise -> do
+              liftIO $ runCleanup targetDir
+              moduleInstallError (pretty err)
+
       -- Fold this package's morloc-dependencies into the resolver state.
       -- Closer-wins: pins declared by this package (at depth `depth`) are
       -- shadowed by any already-present pin at a smaller depth, supersede
@@ -856,6 +877,11 @@ buildModuleManifest meta name morlocDeps installedSelfHash exports installPath i
     [ ("kind", jsonStr "module")
     , ("name", jsonStr name)
     , ("version", jsonStr (packageVersion meta))
+    -- The module's declared compiler-version constraint (null = unconstrained)
+    -- and the compiler that performed this install. Let the manager gate a
+    -- morloc-version bump without invoking the compiler.
+    , ("morloc_version", maybe jsonNull jsonStr (packageMorlocVersion meta))
+    , ("built_with_morloc", jsonStr (MT.pack Version.versionStr))
     , ("synopsis", jsonStr (packageSynopsis meta))
     , ("author", jsonStr (packageAuthor meta))
     , ("license", jsonStr (packageLicense meta))

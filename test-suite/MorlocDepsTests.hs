@@ -8,11 +8,13 @@ module MorlocDepsTests
   ( morlocDepsTests
   ) where
 
+import Control.Exception (SomeException, try)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import qualified Data.Yaml as Yaml
 import qualified Morloc.Monad as MM
 import qualified System.Directory as SD
+import System.FilePath ((</>))
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit
 
@@ -21,6 +23,7 @@ import Morloc.Module
   , PinEntry (..)
   , addPin
   , hashEq
+  , loadModuleMetadata
   , reconcileOverwrite
   )
 import Morloc.Namespace.Prim (Defaultable (..))
@@ -61,6 +64,52 @@ morlocDepsTests =
     [ packageYamlParserTests
     , resolverTests
     , packageSetupParserTests
+    , moduleVersionGateTests
+    ]
+
+-- ---------------------------------------------------------------------------
+-- morloc-version gate integration (loadModuleMetadata, the make-time path)
+-- ---------------------------------------------------------------------------
+
+-- | Write a minimal module fixture (package.yaml + a placeholder main.loc) into
+-- a fresh temp dir and return the main.loc path. `extra` is appended to the
+-- package.yaml (e.g. a morloc-version line).
+writeModuleFixture :: String -> String -> IO FilePath
+writeModuleFixture sub extra = do
+  tmp <- SD.getTemporaryDirectory
+  let dir = tmp </> ("morloc-gate-" ++ sub)
+  SD.createDirectoryIfMissing True dir
+  writeFile (dir </> "package.yaml") ("name: gatemod\nversion: 0.0.0\n" ++ extra)
+  writeFile (dir </> "main.loc") "module gatemod ()\n"
+  return (dir </> "main.loc")
+
+-- | loadModuleMetadata reports the gate failure via `ioError`, which escapes the
+-- MorlocMonad runner as an IO exception (not a Left); accept either an exception
+-- or a MorlocError Left as "rejected".
+loadRejects :: FilePath -> IO Bool
+loadRejects mainLoc = do
+  outcome <- try (runMM (loadModuleMetadata mainLoc))
+  return $ case (outcome :: Either SomeException (Either MorlocError ())) of
+    Left _ -> True             -- ioError path
+    Right (Left _) -> True     -- throwError path
+    Right (Right ()) -> False
+
+moduleVersionGateTests :: TestTree
+moduleVersionGateTests =
+  testGroup
+    "morloc-version gate (loadModuleMetadata integration)"
+    [ testCase "rejects a module whose morloc-version excludes the compiler" $ do
+        mainLoc <- writeModuleFixture "reject" "morloc-version: \">=99.0\"\n"
+        rejected <- loadRejects mainLoc
+        assertBool "expected the out-of-range module to be rejected at load" rejected
+    , testCase "accepts a satisfiable morloc-version" $ do
+        mainLoc <- writeModuleFixture "accept" "morloc-version: \">=0.1\"\n"
+        rejected <- loadRejects mainLoc
+        assertBool "expected the in-range module to load" (not rejected)
+    , testCase "accepts a module with no morloc-version" $ do
+        mainLoc <- writeModuleFixture "absent" ""
+        rejected <- loadRejects mainLoc
+        assertBool "expected an unconstrained module to load" (not rejected)
     ]
 
 -- ---------------------------------------------------------------------------

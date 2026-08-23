@@ -570,6 +570,13 @@ pub struct ModuleEntry {
     pub name: String,
     pub version: Option<String>,
     pub sha256: String,
+    /// The module's declared compiler-version constraint, used to gate a
+    /// morloc-version bump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub morloc_version: Option<String>,
+    /// The compiler version that installed this module.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub built_with_morloc: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
