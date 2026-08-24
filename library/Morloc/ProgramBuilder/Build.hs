@@ -17,7 +17,9 @@ module Morloc.ProgramBuilder.Build
   ( buildProgram
   ) where
 
+import Control.Exception (IOException, try)
 import Control.Monad.Except (catchError, throwError)
+import qualified Data.Map as Map
 import Morloc.Data.Doc ((<+>), line, vsep, pretty)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
@@ -26,9 +28,11 @@ import Morloc.Namespace.State
 import Morloc.ProgramBuilder.Paths (buildMarker)
 import qualified Morloc.System as MS
 import qualified System.Directory as SD
+import System.Environment (getEnvironment, getExecutablePath, lookupEnv)
+import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.IO.Error (ioeGetFileName)
-import System.Process (callProcess, getCurrentPid)
+import System.Process (CreateProcess (env), callProcess, createProcess, getCurrentPid, proc, waitForProcess)
 
 buildProgram :: (Script, [WrapperFile], [Script]) -> MorlocMonad ()
 buildProgram (manifest, wrappers, pools) = do
@@ -92,8 +96,92 @@ buildProgram (manifest, wrappers, pools) = do
     -- commands. If one pool's compile fails, the other pools' sources
     -- still exist on disk for inspection. Without this split, a make
     -- failure in an earlier pool aborts the mapM_ before later pools'
-    -- files ever get written.
-    buildAll ss = mapM_ writeScript ss >> mapM_ runMakes ss
+    -- files ever get written. Between the two, provision the program's
+    -- declared dependencies (a no-op outside a managed environment), so the
+    -- pool compiles find the required headers/libraries/interpreters.
+    buildAll ss = do
+      mapM_ writeScript ss
+      syncEnvDeps
+      mapM_ runMakes ss
+
+-- | Provision a program's declared package dependencies before its pools are
+-- compiled, by invoking the environment's build hook: an external program named
+-- by @MORLOC_BUILD_HOOK@ (the in-environment dependency agent, e.g. @mim-env@),
+-- run as @<hook> sync --name <key> --spec envspec.json@. Runs only when BUILDING
+-- (not eval, not install -- the manager provisions those) INSIDE a managed
+-- environment (@MORLOC_ENV@ set) a program that actually DECLARES dependencies;
+-- every other case is a silent no-op. CWD is the staging build dir, so the
+-- freshly written @envspec.json@ is at a relative path.
+--
+-- The compiler's own path is passed to the hook as @MORLOC_BIN@ so the hook's
+-- reverse @morloc lang-support@ call resolves the exact driving compiler without
+-- relying on PATH.
+--
+-- A solve failure (e.g. an unsatisfiable conflict) aborts the build with the
+-- hook's message. A managed environment with no hook set is an ERROR: it
+-- provably expects provisioning but has no provisioner, so the build fails now
+-- with an actionable message rather than at pool compile on missing deps.
+syncEnvDeps :: MorlocMonad ()
+syncEnvDeps = do
+  metas <- MM.gets statePackageMeta
+  mKey <- MM.gets stateProgramKey
+  isEval <- MM.gets stateEvalMode
+  isInstall <- MM.gets stateInstall
+  mEnv <- liftIO $ lookupEnv "MORLOC_ENV"
+  let declaresDeps = any packageHasDeps metas
+  case (mEnv, mKey) of
+    (Just env, Just key)
+      | not (null env) && declaresDeps && not isEval && not isInstall ->
+          runSync key
+    _ -> return ()
+  where
+    packageHasDeps pm =
+      not (Map.null (packagePyDeps pm))
+        || not (Map.null (packageRDeps pm))
+        || not (Map.null (packageCppDeps pm))
+        || not (Map.null (packageRustDeps pm))
+        || not (Map.null (packageJuliaDeps pm))
+
+    runSync key = do
+      mhook <- liftIO $ lookupEnv "MORLOC_BUILD_HOOK"
+      case mhook of
+        Just hook | not (null hook) -> do
+          MM.say $ "Provisioning environment dependencies (" <> pretty hook <> " sync)..."
+          self <- liftIO getExecutablePath
+          result <- liftIO (runHook hook self key)
+          case result of
+            Left e ->
+              MM.throwSystemError $ "could not run " <> pretty hook <> ": " <> pretty (show e)
+            Right ExitSuccess -> return ()
+            Right (ExitFailure _) ->
+              MM.throwSystemError
+                "environment dependency provisioning failed (see the output above)."
+        -- MORLOC_ENV is set (a managed env that expects provisioning) but no build
+        -- hook is named. Fail now with an actionable message rather than at pool
+        -- compile on the missing dependencies.
+        _ ->
+          MM.throwSystemError . vsep $
+            [ "This program declares package dependencies and MORLOC_ENV is set, but"
+            , "MORLOC_BUILD_HOOK names no provisioning program. A managed environment"
+            , "must export MORLOC_BUILD_HOOK (the dependency agent, e.g. mim-env) so"
+            , "'morloc make' can provision declared dependencies before the pools are"
+            , "compiled. Re-provision the environment (e.g. 'mim update --env <env>')."
+            ]
+
+    -- Inherit the terminal so the hook and the pixi it spawns stream progress
+    -- live; capturing would silence a successful install. MORLOC_BIN carries THIS
+    -- compiler's path so the hook's reverse `morloc lang-support` call resolves
+    -- the driving compiler without relying on PATH. `try` keeps a spawn failure
+    -- (e.g. a non-executable hook) inside the error monad.
+    runHook :: FilePath -> FilePath -> String -> IO (Either IOException ExitCode)
+    runHook hook self key = try $ do
+      baseEnv <- getEnvironment
+      let childEnv = ("MORLOC_BIN", self) : filter ((/= "MORLOC_BIN") . fst) baseEnv
+          spec =
+            (proc hook ["sync", "--name", key, "--spec", "envspec.json"])
+              { env = Just childEnv }
+      (_, _, _, ph) <- createProcess spec
+      waitForProcess ph
 
 -- | Atomically replace @dest@ with @staging@ (same parent, so the rename is
 -- atomic). An existing @dest@ is removed only when it is a real directory

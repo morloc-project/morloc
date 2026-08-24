@@ -24,6 +24,8 @@ import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import Morloc (generatePools)
+import qualified Morloc.DataFiles as DF
+import Morloc.LangSupport (parseRequirements, renderLangSupport)
 import qualified Morloc as M
 import Morloc.Build.Params (LangParams)
 import qualified Morloc.Build.Params as BP
@@ -32,7 +34,13 @@ import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialMani
 import Morloc.CodeGenerator.Pools.Pool (Member (..))
 import Morloc.CodeGenerator.Pools.CAbi.Pool (memberFor)
 import Morloc.CodeGenerator.Namespace (SerialManifold (..))
+import qualified Morloc.CodeGenerator.EnvSpec as ES
 import qualified Morloc.CodeGenerator.SystemConfig as MSC
+import Morloc.Internal (unique)
+import qualified Morloc.LangRegistry as LR
+import Morloc.Version (versionStr, envspecVersion, langSupportSchemaVersion)
+import Morloc.Abi (abiVersion)
+import Morloc.Data.Json (jsonObj, jsonStr, jsonInt)
 import qualified Morloc.Completion as Completion
 import qualified Morloc.Config as Config
 import Morloc.Data.Doc
@@ -90,6 +98,9 @@ runMorloc args = do
     (CmdNew g) -> cmdNew g
     (CmdEval g) -> cmdEval g verbose config buildConfig
     (CmdConfig g) -> cmdConfig g config buildConfig
+    (CmdLangSupport g) -> cmdLangSupport g
+    (CmdEnvspec g) -> cmdEnvspec g verbose config buildConfig
+    (CmdVersions g) -> cmdVersions g
   case runPassed of
     True -> exitSuccess
     False -> exitFailure
@@ -106,6 +117,9 @@ getConfig (CmdUninstall g) = getConfig' (uninstallConfig g) (uninstallVanilla g)
 getConfig (CmdEval g) = getConfig' (evalConfig g) (evalVanilla g)
 getConfig (CmdConfig g) = getConfig' (configCmdConfig g) (configCmdVanilla g)
 getConfig (CmdNew _) = getConfig' "" False
+getConfig (CmdLangSupport _) = getConfig' "" False
+getConfig (CmdEnvspec g) = getConfig' (envspecConfig g) (envspecVanilla g)
+getConfig (CmdVersions _) = getConfig' "" False
 
 getConfig' :: String -> Bool -> IO Config.Config
 getConfig' _ True = Config.loadMorlocConfig Nothing
@@ -123,6 +137,9 @@ getVerbosity (CmdEval g) = evalVerbose g
 getVerbosity (CmdUninstall _) = 0
 getVerbosity (CmdNew _) = 0
 getVerbosity (CmdConfig _) = 0
+getVerbosity (CmdLangSupport _) = 0
+getVerbosity (CmdEnvspec _) = 0
+getVerbosity (CmdVersions _) = 0
 
 readScript :: Bool -> String -> IO (Maybe Path, Code)
 readScript True code = return (Nothing, Code (MT.pack code))
@@ -493,7 +510,7 @@ cmdEval args verbosity config buildConfig = do
                 Just installDir -> do
                   evalInstallResult <- try (do
                     Install.installProgram (Config.configHome config) installDir saveName mergedIncludes True
-                    writeEvalMeta (Config.configHome config) saveName rawExpr
+                    writeEvalMeta (Config.fdbDir config) saveName rawExpr
                     ) :: IO (Either SomeException ())
                   case evalInstallResult of
                     Right () -> return True
@@ -538,12 +555,12 @@ getFirstSubcommand manifestPath = do
         [] -> return "__expr__"
       Left _ -> return "__expr__"
 
--- | Write metadata about the saved eval expression
+-- | Write metadata about the saved eval expression. `fdbDir` is the module
+-- database directory (state root), e.g. `Config.fdbDir config`.
 writeEvalMeta :: FilePath -> String -> String -> IO ()
-writeEvalMeta cfgHome name expr = do
+writeEvalMeta fdbDir name expr = do
   now <- getCurrentTime
-  let fdbDir = cfgHome </> "fdb"
-      metaPath = fdbDir </> name ++ ".eval-meta"
+  let metaPath = fdbDir </> name ++ ".eval-meta"
       timestamp = formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ" now
       json = "{\"expression\":" ++ jsonEscape expr ++ ",\"timestamp\":\"" ++ timestamp ++ "\"}"
   createDirectoryIfMissing True fdbDir
@@ -652,6 +669,73 @@ cmdDump args _ config buildConfig = do
 
 cmdInit :: InitCommand -> Config.Config -> IO Bool
 cmdInit ic config = MSC.configureAll (not (initQuiet ic)) (initForce ic) (initSlurmSupport ic) (initSanitize ic) config
+
+-- | Print the language-support table as JSON, parsed from the embedded
+-- requirements.yaml files. Consumed by the native backend (pixi solve-clamp +
+-- package injection, bare-@new@ defaults) and the CI matrix.
+cmdLangSupport :: LangSupportCommand -> IO Bool
+cmdLangSupport _ =
+  case parseRequirements langReqs installScripts coreReq of
+    Left err -> do
+      hPutStrLn stderr ("Failed to build the language-support table: " <> err)
+      return False
+    Right table -> do
+      TIO.putStrLn (renderLangSupport table)
+      return True
+  where
+    coreReq = DF.embededFileText DF.requirementsCore
+    langReqs = [(name, DF.embededFileText ef) | (name, ef) <- DF.requirementsFiles]
+    installScripts = [(name, DF.embededFileText ef) | (name, ef) <- DF.installScriptFiles]
+
+-- | Print, as JSON, the contract versions this compiler emits: the ABI version,
+-- the envspec_version, and the lang-support schema_version. The environment
+-- manager reads this (CI inlines it into the release manifest) to gate on
+-- compatibility before installing a release, and runs it on an installed compiler
+-- for doctor checks. Every value comes from the central definitions
+-- (Morloc.Version / Morloc.Abi), so it can never drift from what the compiler
+-- actually writes.
+cmdVersions :: VersionsCommand -> IO Bool
+cmdVersions _ = do
+  TIO.putStrLn $
+    jsonObj
+      [ ("morloc_version", jsonStr (MT.pack versionStr))
+      , ("abi_version", jsonInt abiVersion)
+      , ("envspec_version", jsonInt envspecVersion)
+      , ("lang_support_schema", jsonStr langSupportSchemaVersion)
+      ]
+  return True
+
+-- | Emit the program's environment requirement spec (envspec.json) using only
+-- the frontend -- parse + typecheck, no realization or codegen -- so a build
+-- system can resolve declared dependencies BEFORE building. The package
+-- dependencies come from statePackageMeta (populated by the frontend over the
+-- whole module DAG); the language set is derived from the sourced languages
+-- mapped through 'LR.poolOf' so guest languages fold into their host pool
+-- exactly as realization would (e.g. Futhark -> C++), without realizing.
+cmdEnvspec :: EnvspecCommand -> Int -> Config.Config -> BuildConfig -> IO Bool
+cmdEnvspec args _ config buildConfig = do
+  (path, code) <- readScript False (envspecScript args)
+  ((eresult, _), st) <-
+    MM.runMorlocMonad Nothing 0 config buildConfig (M.typecheckFrontend path code)
+  case eresult of
+    Left e -> do
+      -- Errors go to stderr: a caller (mim) captures stdout for the
+      -- envspec JSON, so a diagnostic on stdout would be swallowed, not shown.
+      hPutDoc stderr (MM.makeMorlocError st e <> "\n")
+      return False
+    Right _ -> do
+      let registry = stateLangRegistry st
+          srcs = concat (GMap.elems (stateSources st))
+          langs = unique (map (LR.poolOf registry . srcLang) srcs)
+      case ES.buildEnvSpec versionStr langs (statePackageMeta st) of
+        Left e -> do
+          -- A cross-module conda channel conflict; diagnostics go to stderr so a
+          -- caller capturing stdout for the JSON is not fed an error.
+          hPutStrLn stderr (MT.unpack e)
+          return False
+        Right spec -> do
+          TIO.putStr (ES.renderEnvSpec spec)
+          return True
 
 cmdNew :: NewCommand -> IO Bool
 cmdNew args = do
@@ -763,8 +847,8 @@ subsequenceMatch (p : ps) (t : ts)
 
 cmdList :: ListCommand -> Config.Config -> IO Bool
 cmdList args config = do
-  let fdbDir = Config.configHome config </> "fdb"
-      exeDir = Config.configHome config </> "exe"
+  let fdbDir = Config.fdbDir config
+      exeDir = Config.exeDir config
       libDir = Config.configLibrary config </> Config.configPlane config
       verbose = listVerbose args
       kind = listKind args
@@ -986,10 +1070,10 @@ printProgram verbose p = do
 
 cmdUninstall :: UninstallCommand -> Config.Config -> IO Bool
 cmdUninstall args config = do
-  let fdbDir = Config.configHome config </> "fdb"
+  let fdbDir = Config.fdbDir config
       libDir = Config.configLibrary config </> Config.configPlane config
       binDir = Config.configHome config </> "bin"
-      exeDir = Config.configHome config </> "exe"
+      exeDir = Config.exeDir config
       dryRun = uninstallDryRun args
       kind = uninstallKind args
 
@@ -1017,7 +1101,7 @@ cmdUninstall args config = do
 
       -- Regenerate completions if anything was actually removed
       if anyRemoved && not dryRun
-        then Completion.regenerateCompletions False (Config.configHome config)
+        then Completion.regenerateCompletions False (Config.exeDir config) (Config.configHome config </> "completions")
         else return ()
 
       return True

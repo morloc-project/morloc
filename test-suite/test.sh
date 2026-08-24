@@ -13,7 +13,7 @@
 # Prerequisites vary by suite; most need a built morloc/nexus (`morloc init -f`).
 #
 # Note: `manager-tests/` is deliberately NOT aggregated here -- it tests
-# morloc-manager and needs a container engine, so it is run on its own
+# mim and needs a container engine, so it is run on its own
 # (`./manager-tests/run-tests.sh`), not as part of `./test.sh`.
 
 set -uo pipefail

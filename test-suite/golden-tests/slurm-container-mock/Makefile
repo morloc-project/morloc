@@ -2,11 +2,10 @@
 #
 # Prerequisites (run once):
 #   1. `morloc init -f --slurm` — enables RemoteCall codegen
-#   2. An Apptainer env exists and is active:
-#        morloc-manager new e2e-slurm --engine apptainer
-#        morloc-manager run -- morloc init -f --slurm
-#        morloc-manager run -- morloc install root root-py
-#        morloc-manager select e2e-slurm
+#   2. An Apptainer env named e2e-slurm exists:
+#        mim new e2e-slurm --engine apptainer
+#        mim run --env e2e-slurm -- morloc init -f --slurm
+#        mim run --env e2e-slurm -- morloc install root root-py
 #
 # The mock sbatch on the host PATH strips the `apptainer exec` wrap the
 # bridge produces and runs the inner nexus command on the test host.
@@ -16,7 +15,7 @@
 all:
 	rm -f *.err obs.txt
 	PATH="$(CURDIR)/mock-bin:$$PATH" \
-	morloc-manager run --slurm-bridge -- bash -c \
+	mim run --env e2e-slurm --slurm-bridge -- bash -c \
 	  "morloc make -o nexus main.loc && ./nexus foo 5" \
 	  > obs.txt 2> obs.err
 

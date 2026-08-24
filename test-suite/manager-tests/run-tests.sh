@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
-# run-tests.sh - integration tests for the morloc-manager serving path.
+# run-tests.sh - integration tests for the mim serving path.
 #
 # Covers the whole path a user follows to expose a compiled program to an AI
 # client or HTTP API:
 #
-#   morloc-manager install  ->  expose add  ->  expose eval  ->  start
+#   mim install  ->  expose add  ->  expose eval  ->  start
 #     ->  /call, /discover, /health, /mcp (tools/list + tools/call), /eval
-#     ->  morloc-manager eval / status / stop
+#     ->  mim eval / status / stop
 #
 # The suite is grouped so it degrades gracefully:
 #
-#   help    - CLI surface: `morloc-manager -h` lists install/expose/eval and the
+#   help    - CLI surface: `mim -h` lists install/expose/eval and the
 #             subcommand help pages parse. Needs only the manager binary.
 #   expose  - the declarative exposure state machine (expose add/rm/list/eval),
 #             run against a SANDBOXED config/data root (XDG_*), so no container
 #             engine or real environment is touched. Needs only the binary.
 #   serve   - full end to end: install -> expose -> start -> call/mcp/discover
-#             -> eval -> stop, against the ACTIVE environment. Needs a container
-#             engine AND a working active morloc environment; SKIPs otherwise.
+#             -> eval -> stop, against the DEFAULT environment. Needs a container
+#             engine AND a working default morloc environment; SKIPs otherwise.
 #   auth    - a token-protected serve returns 401 without the bearer, 200 with.
 #             Same prerequisites as `serve`.
 #
@@ -25,7 +25,7 @@
 #   No args runs every group whose prerequisites are met.
 #   Filter by name:  ./run-tests.sh help expose
 #
-# The manager binary is found via $MORLOC_MANAGER, then PATH (`morloc-manager`),
+# The manager binary is found via $MORLOC_MANAGER, then PATH (`mim`),
 # then the local cargo debug/release build. A rebuilt nexus is required for the
 # serve/auth groups: run `morloc init -f` after changing the serving code.
 
@@ -63,11 +63,11 @@ resolve_manager() {
     if [[ -n "${MORLOC_MANAGER:-}" && -x "${MORLOC_MANAGER}" ]]; then
         echo "$MORLOC_MANAGER"; return 0
     fi
-    if command -v morloc-manager >/dev/null 2>&1; then
-        command -v morloc-manager; return 0
+    if command -v mim >/dev/null 2>&1; then
+        command -v mim; return 0
     fi
     local root="$SCRIPT_DIR/../../data/rust/target"
-    for cand in "$root/debug/morloc-manager" "$root/release/morloc-manager"; do
+    for cand in "$root/debug/mim" "$root/release/mim"; do
         [[ -x "$cand" ]] && { echo "$cand"; return 0; }
     done
     return 1
@@ -212,8 +212,10 @@ serve_prereqs_ok() {
     command -v curl >/dev/null 2>&1 || { echo "curl not found"; return 1; }
     command -v python3 >/dev/null 2>&1 || { echo "python3 not found"; return 1; }
     have_engine || { echo "no container engine"; return 1; }
-    # An active environment must exist (install/start run inside it).
-    "$MANAGER" info >/dev/null 2>&1 || { echo "no active morloc environment"; return 1; }
+    # A default environment must be tagged (bare install/start run against it).
+    # Check the tag via `ls --json` rather than spinning up a container.
+    "$MANAGER" ls --json 2>/dev/null | grep -q '"is_default": *true' \
+        || { echo "no default morloc environment"; return 1; }
     return 0
 }
 
@@ -227,7 +229,7 @@ wait_for_health() { # url
 }
 
 # ---------------------------------------------------------------------------
-# serve - full end to end against the active environment
+# serve - full end to end against the default environment
 # ---------------------------------------------------------------------------
 group_serve() {
     section "serve (install -> expose -> start -> call/mcp/discover -> eval)"
@@ -239,10 +241,10 @@ group_serve() {
     # install (module identity = `demo`, independent of the file name)
     "$MANAGER" install demo.loc >/tmp/mgr-install.log 2>&1
     if [[ $? -ne 0 ]]; then
-        fail "morloc-manager install demo.loc" "exit 0" "$(tail -c 400 /tmp/mgr-install.log)"
+        fail "mim install demo.loc" "exit 0" "$(tail -c 400 /tmp/mgr-install.log)"
         skip "remaining serve asserts (install failed)"; return
     fi
-    pass "morloc-manager install demo.loc"
+    pass "mim install demo.loc"
 
     "$MANAGER" expose add "$MODULE" --as mcp,api >/dev/null 2>&1
     assert_ok "expose add demo --as mcp,api" $?
@@ -251,11 +253,11 @@ group_serve() {
 
     "$MANAGER" start -p "$SERVE_PORT:$SERVE_PORT" >/tmp/mgr-start.log 2>&1
     if [[ $? -ne 0 ]]; then
-        fail "morloc-manager start" "exit 0" "$(tail -c 400 /tmp/mgr-start.log)"
+        fail "mim start" "exit 0" "$(tail -c 400 /tmp/mgr-start.log)"
         skip "remaining serve asserts (start failed)"; return
     fi
     STARTED_SERVE=1
-    pass "morloc-manager start"
+    pass "mim start"
 
     local url="http://127.0.0.1:$SERVE_PORT"
     if ! wait_for_health "$url"; then
@@ -314,11 +316,11 @@ add 1.0 2.0'
         --args "$(python3 -c 'import json,sys; print(json.dumps({"expression": sys.stdin.read()}))' <<<"$evalexpr")")"
     assert_contains "MCP eval tool evaluates an allowed expression" "3" "$evtool"
     local evcli; evcli="$("$MANAGER" eval -p "$SERVE_PORT" "$evalexpr" 2>&1)"
-    assert_contains "morloc-manager eval reaches the serve" "3" "$evcli"
+    assert_contains "mim eval reaches the serve" "3" "$evcli"
 
     # --- teardown ---
     "$MANAGER" stop >/dev/null 2>&1
-    assert_ok "morloc-manager stop" $?
+    assert_ok "mim stop" $?
     STARTED_SERVE=0
     sleep 1
     curl -sf "$url/health" >/dev/null 2>&1

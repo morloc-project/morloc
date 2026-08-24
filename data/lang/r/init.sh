@@ -23,9 +23,9 @@ cp "$BUILD_DIR/rmorloc.c" "$INCLUDE_DIR/"
 # at link time.
 R_CPPFLAGS=$(R CMD config --cppflags)
 R_HOME=$(R RHOME)
-gcc $R_CPPFLAGS -I"$INCLUDE_DIR" $SANITIZE_FLAGS -fpic -O2 \
+${CC:-gcc} $R_CPPFLAGS -I"$INCLUDE_DIR" $SANITIZE_FLAGS -fpic -O2 \
     -c "$INCLUDE_DIR/rmorloc.c" -o "$INCLUDE_DIR/rmorloc.o"
-gcc -shared $SANITIZE_FLAGS \
+${CC:-gcc} -shared $SANITIZE_FLAGS \
     -Wl,-Bsymbolic-functions -Wl,-z,relro \
     -o "$LIB_DIR/librmorloc.so" "$INCLUDE_DIR/rmorloc.o" \
     -L"$LIB_DIR" -Wl,-rpath,"$LIB_DIR" -Wl,-rpath,'$ORIGIN' -lmorloc -lpthread \

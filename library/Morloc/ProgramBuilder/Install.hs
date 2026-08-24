@@ -100,8 +100,9 @@ installProgram configHome installDir installName includes force = do
       hPutStrLn stderr $
         "Installed '" <> installName <> "' (no CLI executable on PATH; build directory at " <> installDir <> ")"
 
-  -- Regenerate shell completions
-  Completion.regenerateCompletions False configHome
+  -- Regenerate shell completions. The exe dir is the parent of installDir
+  -- (`<exeDir>/<name>`); completions live under the runtime home.
+  Completion.regenerateCompletions False (takeDirectory installDir) (configHome </> "completions")
 
 -- ======================================================================
 -- Copy-everything mode (default)

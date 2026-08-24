@@ -34,7 +34,31 @@ fn morloc_home() -> String {
     })
 }
 
+/// Resolve the mutable-state root: MORLOC_STATE if set, else MORLOC_HOME. Built
+/// programs (exe/) and the module db (fdb/) live here, separate from the
+/// immutable runtime under MORLOC_HOME.
+fn morloc_state() -> String {
+    std::env::var("MORLOC_STATE").unwrap_or_else(|_| morloc_home())
+}
+
 fn main() {
+    // `morloc-nexus --abi-version`: print the ABI/wire-format contract version
+    // and exit. Checked as the first argument (a real program runs through the
+    // `run <target>` wrapper, so arg[1] is never a bare flag) so provisioning
+    // can query a prebuilt nexus cheaply, before any setup.
+    if std::env::args().nth(1).as_deref() == Some("--abi-version") {
+        println!("{}", morloc_runtime_types::MORLOC_ABI_VERSION);
+        std::process::exit(0);
+    }
+    // `morloc-nexus --version`: the semver of the nexus/runtime lane (tracks the
+    // morloc compiler version), so `doctor` can detect a nexus that is stale
+    // relative to the env's recorded version. Distinct from `--abi-version` (the
+    // coarse wire-format integer). Same early-arg rationale as above.
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("morloc-nexus {}", env!("CARGO_PKG_VERSION"));
+        std::process::exit(0);
+    }
+
     // Install a panic hook so a Rust panic still runs the run-scope
     // epilogue + summary.json + tee cleanup before the process dies.
     // Without this, panic-unwound exits skip clean_exit entirely and
@@ -662,7 +686,7 @@ fn run_router(config: &dispatch::NexusConfig) {
     }
 
     let exe_path = config.fdb_path.clone().unwrap_or_else(|| {
-        format!("{}/exe", morloc_home())
+        format!("{}/exe", morloc_state())
     });
     let fdb_c = CString::new(exe_path.as_str()).unwrap();
 

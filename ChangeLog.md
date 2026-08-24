@@ -1,3 +1,34 @@
+0.99.0 [2026-08-24]
+-------------------
+
+Dependency management
+ * Manage all dependencies for an environment through conda via pixi 
+ * New native backend: build, run, and serve without a container (just Linux)
+ * Define all language-specific build requirements explicitly
+ * Each package declares its source (conda, pypi, cran, crates, pkg, ...)
+ * Per-dependency conda channel support (e.g. bioconda)
+ * Remove the bundled containerized solutions
+
+New morloc compiler subcommands
+ * `morloc versions` - print contracts between the compiler, runtime, and manager
+ * `morloc envspec <morloc-file>` - prints the dependencies for a morloc program 
+ * `morloc lang-support` - prints supported languages and their dependencies 
+
+Morloc manager (mim) updates
+ * Rename `morloc-manager` to `mim` and move it to dedicated repo
+ * Expand `mim new` interactive mode to cover all options and add checks
+ * Allow creation of dev environments with all morloc build tools
+ * `mim doctor` - read-only health checks for an environment
+ * Create dev environments with all morloc build tools (`mim new --dev`)
+ * Per-environment `$HOME` and `--dotfiles`
+ * `mim ... --system-packages foo,bar` - add OS packages to an environment
+ * Add `--env` to all 
+ * `mim shell` to directly enter an environment shell
+ * `mim modify` alter an existing environment without changing morloc version
+ * `mim update` alter an environment's morloc version
+ * Removed `mim select`, now there is a default
+
+
 0.98.2 [2026-08-17]
 -------------------
 

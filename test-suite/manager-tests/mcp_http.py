@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal MCP-over-HTTP client for the morloc-manager serving test suite.
+"""Minimal MCP-over-HTTP client for the mim serving test suite.
 
 The serving front-end exposes MCP as JSON-RPC over `POST /mcp` with a session
 handshake (unlike `morloc-nexus mcp`, which is stdio -- see mcp-tests/mcp_client.py).

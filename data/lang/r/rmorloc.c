@@ -2,6 +2,7 @@
 #include <Rinternals.h>
 #include <Rdefines.h>
 #include <R_ext/Arith.h>
+#include <Rversion.h>
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -22,6 +23,18 @@
 #include "morloc.h"
 
 // {{{ macros
+
+// R 4.5.0 removed Rf_findVar / Rf_findVarInFrame from the C API in favor of
+// R_getVar / R_getVarEx (both added in 4.5.0). findVarInFrame(rho, sym) looked
+// up a symbol in a SINGLE frame (no inheritance) and returned R_UnboundValue
+// when absent; R_getVarEx(sym, rho, inherits=FALSE, ifnotfound=R_UnboundValue)
+// is the portable equivalent (note the swapped argument order). The version
+// guard keeps older R -- which lacks R_getVarEx -- compiling.
+#if defined(R_VERSION) && R_VERSION >= R_Version(4, 5, 0)
+#  define MORLOC_FIND_IN_FRAME(rho, sym) R_getVarEx((sym), (rho), FALSE, R_UnboundValue)
+#else
+#  define MORLOC_FIND_IN_FRAME(rho, sym) findVarInFrame((rho), (sym))
+#endif
 
 #define MAYFAIL char* child_errmsg_ = NULL;
 
@@ -1752,7 +1765,7 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
         memset(&arrow_array, 0, sizeof(arrow_array));
 
         SEXP arrow_ns = PROTECT(R_FindNamespace(mkString("arrow")));
-        SEXP export_fn = PROTECT(findVarInFrame(arrow_ns, install("ExportRecordBatch")));
+        SEXP export_fn = PROTECT(MORLOC_FIND_IN_FRAME(arrow_ns, install("ExportRecordBatch")));
         if (export_fn == R_UnboundValue) {
             UNPROTECT(2);
             free_schema(schema);
@@ -2465,7 +2478,7 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r) { MAYFAIL
 
         // Import via R arrow package: arrow::ImportRecordBatch(array_ptr, schema_ptr)
         SEXP arrow_ns = PROTECT(R_FindNamespace(mkString("arrow")));
-        SEXP import_fn = PROTECT(findVarInFrame(arrow_ns, install("ImportRecordBatch")));
+        SEXP import_fn = PROTECT(MORLOC_FIND_IN_FRAME(arrow_ns, install("ImportRecordBatch")));
         if (import_fn == R_UnboundValue) {
             if (arrow_schema.release) arrow_schema.release(&arrow_schema);
             if (arrow_array.release) arrow_array.release(&arrow_array);

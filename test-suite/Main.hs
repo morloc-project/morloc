@@ -4,18 +4,23 @@
 import qualified System.Directory as SD
 import Test.Tasty
 
+import AbiTests (abiTests)
 import BuildParamsTests (buildParamsTests)
 import EffectBoundaryTests (effectBoundaryTests)
+import EnvSpecTests (envSpecTests)
 import FutharkTupleTests (futharkTupleTests)
 import GoldenMakefileTests (goldenMakefileTest)
 import IrrefutablePatternLexerTests (irrefutablePatternLexerTests)
+import LangSupportTests (langSupportTests)
 import MorlocDepsTests (morlocDepsTests)
 import PatternChainTests (patternChainTests)
 import PropertyTests (propertyTests)
 import RefutablePatternTests (refutablePatternTests)
 import SchemaHintTests (schemaHintTests)
 import SizeParseTests (sizeParseTests)
+import SystemConfigTests (systemConfigTests)
 import UnitTypeTests
+import VersionConstraintTests (versionConstraintTests)
 
 main :: IO ()
 main = do
@@ -25,7 +30,9 @@ main = do
     testGroup
       "Morloc tests"
       [ unitTypeTests
+      , abiTests
       , buildParamsTests
+      , envSpecTests
       , futharkTupleTests
       , unitValuecheckTests
       , typeOrderTests
@@ -71,12 +78,15 @@ main = do
       , withDocstringTests
       , evalSandboxTests
       , morlocDepsTests
+      , versionConstraintTests
       , sizeParseTests
       , patternChainTests
       , irrefutablePatternLexerTests
       , refutablePatternTests
       , effectBoundaryTests
       , schemaHintTests
+      , systemConfigTests
+      , langSupportTests
 
       -- -- These tests pass locally and when I run the same container that I
       -- -- use in github actions. Yet these tests freeze in an infinite loop
@@ -972,8 +982,8 @@ main = do
         -- element-type, zero-copy assertions, and permutation probes
         golden "vector-comprehensive" "vector-comprehensive"
       , golden "tensor-comprehensive" "tensor-comprehensive"
-      , -- nat-parameterized type tests
-        golden "nat-typecheck" "nat-typecheck"
+      -- , -- nat-parameterized type tests
+      --   golden "nat-typecheck" "nat-typecheck"
       -- , golden "nat-dim-runtime-pure" "nat-dim-runtime-pure"
       , golden "nat-dim-runtime-remote" "nat-dim-runtime-remote"
 

@@ -158,7 +158,7 @@ writeProgram translateFn path code = do
             isExported (AnnoS (Idx midx _) _ _, _) = Set.member midx exportSet
             exportedRASTs = filter isExported concreteRASTs
             helperRASTs = map fst (filter (not . isExported) concreteRASTs)
-        (nexus, wrappers) <- Nexus.generate concreteGASTs exportedRASTs helperRASTs
+        (nexus, envspec, wrappers) <- Nexus.generate concreteGASTs exportedRASTs helperRASTs
         MM.startCounter
         paramRASTs <- mapM parameterize (map fst concreteRASTs)
         let langMap = Map.fromList
@@ -210,7 +210,9 @@ writeProgram translateFn path code = do
               | otherwise = BP.renderSalt params <> "|obj:" <> PoolHash.poolHashHex objHash
         poolHashes <- MM.liftIO $ PoolHash.computePoolHashes buildSalt hashIncludes pools
         let nexusPatched = PoolHash.patchManifestPoolHashes poolHashes nexus
-        buildProgram (nexusPatched, wrappers, pools)
+        -- The envspec Script carries no make commands; it is written to the
+        -- build dir alongside manifest.json and the pool sources.
+        buildProgram (nexusPatched, wrappers, envspec : pools)
 
 -- | An eval input is a single expression, not a module: it may import
 -- installed modules and use let/where/do, but may not define types,

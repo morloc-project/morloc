@@ -951,10 +951,18 @@ fn start_language_server(socket: &PoolSocket) -> Result<i32, String> {
         unsafe {
             libc::execvp(argv[0], argv.as_ptr());
         }
-        // Only reached if exec fails.
+        // Only reached if exec fails. Report the actual command (argv[0]), not
+        // just the pool language, so a missing interpreter (e.g. Rscript not on
+        // PATH) is not mislabeled as the language name (e.g. "r").
+        let cmd = socket
+            .syscmd
+            .first()
+            .and_then(|c| c.to_str().ok())
+            .unwrap_or("<none>");
         eprintln!(
-            "execvp failed for {}: {}",
+            "execvp failed for pool '{}' running '{}': {}",
             socket.lang,
+            cmd,
             std::io::Error::last_os_error()
         );
         unsafe { libc::_exit(127) };
@@ -1139,7 +1147,24 @@ pub fn pool_death_info(pool_index: usize) -> Option<String> {
     }
 }
 
-/// Validate that all pool executables exist.
+/// Resolve a command the way `execvp` will: a path containing '/' is checked
+/// directly, a bare name is searched across `$PATH`.
+fn command_on_path(cmd: &str) -> bool {
+    if cmd.contains('/') {
+        return Path::new(cmd).exists();
+    }
+    // Mirror execvp: an unset PATH falls back to a default search path, so do the
+    // same here rather than reporting the interpreter missing.
+    let path = std::env::var("PATH").unwrap_or_else(|_| "/bin:/usr/bin".to_string());
+    path.split(':')
+        .any(|dir| !dir.is_empty() && Path::new(dir).join(cmd).exists())
+}
+
+/// Validate that all pool executables exist. Two distinct checks: the pool FILE
+/// (the last argv element -- a build-dir-relative path) must exist on disk, and
+/// for an interpreted pool the INTERPRETER (argv[0], e.g. Rscript/python3) must
+/// resolve on PATH. Without the second check a missing interpreter surfaces only
+/// as an opaque fork/exec failure after startup.
 pub fn validate_pools(pools: &[Pool]) -> Result<(), String> {
     for pool in pools {
         if let Some(exec) = pool.exec.last() {
@@ -1147,6 +1172,19 @@ pub fn validate_pools(pools: &[Pool]) -> Result<(), String> {
                 return Err(format!(
                     "Build artifacts missing or stale. Pool file '{}' not found. Re-run `morloc make`.",
                     exec
+                ));
+            }
+        }
+        // Interpreted pools carry [interpreter, script, ...]; compiled pools
+        // carry just [executable] (already checked above).
+        if pool.exec.len() > 1 {
+            let interpreter = &pool.exec[0];
+            if !command_on_path(interpreter) {
+                return Err(format!(
+                    "The '{}' pool needs the interpreter '{}', which was not found on PATH. \
+                     Install it, or run inside an environment that provides it \
+                     (e.g. `mim run [--env <name>] -- ...`).",
+                    pool.lang, interpreter
                 ));
             }
         }

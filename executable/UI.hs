@@ -24,6 +24,9 @@ module UI
   , EvalCommand (..)
   , ConfigCommand (..)
   , ConfigAction (..)
+  , LangSupportCommand (..)
+  , EnvspecCommand (..)
+  , VersionsCommand (..)
   ) where
 
 import Data.Int (Int64)
@@ -54,6 +57,9 @@ data CliCommand
   | CmdNew NewCommand
   | CmdEval EvalCommand
   | CmdConfig ConfigCommand
+  | CmdLangSupport LangSupportCommand
+  | CmdEnvspec EnvspecCommand
+  | CmdVersions VersionsCommand
 
 cliParser :: Parser CliCommand
 cliParser =
@@ -68,6 +74,9 @@ cliParser =
         <> newSubcommand
         <> evalSubcommand
         <> configSubcommand
+        <> langSupportSubcommand
+        <> envspecSubcommand
+        <> versionsSubcommand
     )
 
 data MakeCommand = MakeCommand
@@ -117,6 +126,56 @@ makeCommandParser =
 
 makeSubcommand :: Mod CommandFields CliCommand
 makeSubcommand = command "make" (info (CmdMake <$> makeCommandParser) (progDesc "Build a morloc script"))
+
+-- | @lang-support@ takes no options; it prints the language-support table as
+-- JSON (the versions and packages morloc's shims build/run against).
+data LangSupportCommand = LangSupportCommand
+
+langSupportCommandParser :: Parser LangSupportCommand
+langSupportCommandParser = pure LangSupportCommand
+
+langSupportSubcommand :: Mod CommandFields CliCommand
+langSupportSubcommand =
+  command
+    "lang-support"
+    (info (CmdLangSupport <$> langSupportCommandParser) (progDesc "Print the language-support table (JSON)"))
+
+-- | @versions@ takes no options; it prints, as JSON, the contract versions this
+-- compiler emits (ABI, envspec, lang-support), so the environment manager can gate
+-- on compatibility before installing a release.
+data VersionsCommand = VersionsCommand
+
+versionsCommandParser :: Parser VersionsCommand
+versionsCommandParser = pure VersionsCommand
+
+versionsSubcommand :: Mod CommandFields CliCommand
+versionsSubcommand =
+  command
+    "versions"
+    (info (CmdVersions <$> versionsCommandParser) (progDesc "Print the contract/ABI versions (JSON)"))
+
+-- | @envspec@ runs only the frontend (parse + typecheck, no codegen) and prints
+-- the program's environment requirement spec (the same @envspec.json@ that
+-- @make@ emits). This lets a build system resolve a program's declared
+-- dependencies BEFORE building it.
+data EnvspecCommand = EnvspecCommand
+  { envspecConfig :: String
+  , envspecVanilla :: Bool
+  , envspecScript :: String
+  }
+
+makeEnvspecParser :: Parser EnvspecCommand
+makeEnvspecParser =
+  EnvspecCommand
+    <$> optConfig
+    <*> optVanilla
+    <*> optScript
+
+envspecSubcommand :: Mod CommandFields CliCommand
+envspecSubcommand =
+  command
+    "envspec"
+    (info (CmdEnvspec <$> makeEnvspecParser) (progDesc "Emit the environment requirement spec (envspec.json) without building"))
 
 data InitCommand = InitCommand
   { initConfig :: String

@@ -1,23 +1,20 @@
 #!/usr/bin/env bash
-# Build static Rust binaries and/or container images locally.
+# Build the portable morloc release assets locally.
+#
+# Produces the same assets the release pipeline ships: the morloc compiler
+# (glibc >= 2.31 floor) and the Rust workspace source. libmorloc.so +
+# morloc-nexus are NOT built here -- `morloc init` builds them from the bundled
+# source with the target toolchain. The mim environment manager is built and
+# released from its own repository (morloc-project/morloc-manager).
 #
 # Usage:
-#   ./scripts/build-rust.sh rust       Build static binaries to out/
-#   ./scripts/build-rust.sh tiny       Build morloc-tiny container
-#   ./scripts/build-rust.sh full       Build morloc-full container (requires tiny)
-#   ./scripts/build-rust.sh all        Build binaries + both containers
-#   ./scripts/build-rust.sh export     Export morloc-full image to tarball
-#
-# Environment:
-#   MORLOC_VERSION   Container image tag (default: edge)
+#   ./scripts/build-rust.sh rust    Build the release assets to out/
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-MORLOC_VERSION="${MORLOC_VERSION:-edge}"
-
 cmd_rust() {
-    echo "=== Building static Rust binaries ==="
+    echo "=== Building portable release assets (compiler + rust source) ==="
     podman build -t morloc-rust-build -f container/static-build/Dockerfile .
     mkdir -p out
     podman run --rm -v "$(pwd)/out:/out" morloc-rust-build
@@ -25,49 +22,15 @@ cmd_rust() {
     ls -lh out/
 }
 
-cmd_tiny() {
-    echo "=== Building morloc-tiny:${MORLOC_VERSION} ==="
-    make -C container MORLOC_VERSION="$MORLOC_VERSION" build-tiny
-}
-
-cmd_full() {
-    echo "=== Building morloc-full:${MORLOC_VERSION} ==="
-    make -C container MORLOC_VERSION="$MORLOC_VERSION" build-full
-}
-
-cmd_all() {
-    cmd_rust
-    cmd_tiny
-    cmd_full
-}
-
-cmd_export() {
-    local tarball="/tmp/morloc-full-${MORLOC_VERSION}.tar"
-    echo "=== Exporting morloc-full:${MORLOC_VERSION} to ${tarball} ==="
-    podman save "ghcr.io/morloc-project/morloc/morloc-full:${MORLOC_VERSION}" -o "$tarball"
-    ls -lh "$tarball"
-}
-
 usage() {
-    echo "Usage: $(basename "$0") <command>"
+    echo "Usage: $(basename "$0") rust"
     echo ""
     echo "Commands:"
-    echo "  rust     Build static Rust binaries (morloc-manager, morloc-nexus, libmorloc.so)"
-    echo "  tiny     Build morloc-tiny container"
-    echo "  full     Build morloc-full container (requires tiny)"
-    echo "  all      Build everything (binaries + containers)"
-    echo "  export   Export morloc-full image to /tmp/ tarball"
-    echo ""
-    echo "Environment:"
-    echo "  MORLOC_VERSION=edge  (default)"
+    echo "  rust   Build release assets (morloc compiler, rust source) to out/"
 }
 
 case "${1:-}" in
-    rust)   cmd_rust ;;
-    tiny)   cmd_tiny ;;
-    full)   cmd_full ;;
-    all)    cmd_all ;;
-    export) cmd_export ;;
+    rust)    cmd_rust ;;
     -h|--help|"")
         usage
         exit 0

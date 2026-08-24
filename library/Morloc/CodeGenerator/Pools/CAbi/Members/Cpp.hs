@@ -1791,7 +1791,8 @@ flagAndPath reg src@(Source _ srcL (Just p) _ _ _ _ _ _ _) | LR.poolOf reg srcL 
     lookupHeader :: String -> MorlocMonad Path
     lookupHeader base = do
       home <- MM.asks configHome
-      let allPaths = getHeaderPaths home base [".h", ".hpp", ".hxx"]
+      state <- MM.asks configState
+      let allPaths = getHeaderPaths home state base [".h", ".hpp", ".hxx"]
       existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
       case existingPaths of
         (x : _) -> liftIO $ MS.canonicalizePath x
@@ -1800,9 +1801,10 @@ flagAndPath reg src@(Source _ srcL (Just p) _ _ _ _ _ _ _) | LR.poolOf reg srcL 
     lookupLib :: String -> MorlocMonad [String]
     lookupLib base = do
       home <- MM.asks configHome
+      state <- MM.asks configState
       let libnamebase = filter DC.isAlphaNum (map DC.toLower base)
       let libname = "lib" <> libnamebase <> ".so"
-      let allPaths = getLibraryPaths home base libname
+      let allPaths = getLibraryPaths home state base libname
       existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
       case existingPaths of
         (libpath : _) -> do
@@ -1824,8 +1826,11 @@ getFile x = do
       then Just x
       else Nothing
 
-getHeaderPaths :: Path -> String -> [String] -> [Path]
-getHeaderPaths lib base exts = [path <> ext | path <- paths, ext <- exts]
+-- `home` is the immutable runtime root (runtime headers/libs); `state` is the
+-- mutable state root where installed module resources live
+-- (state/modules/include/<mod>) and the plane source (state/src/<mod>).
+getHeaderPaths :: Path -> Path -> String -> [String] -> [Path]
+getHeaderPaths home state base exts = [path <> ext | path <- paths, ext <- exts]
   where
     paths =
       map
@@ -1833,20 +1838,21 @@ getHeaderPaths lib base exts = [path <> ext | path <- paths, ext <- exts]
         [ [base]
         , ["include", base]
         , [base, base]
-        , [lib, "include", base]
-        , [lib, "src", base, base]
+        , [home, "include", base]
+        , [state, "modules", "include", base]
+        , [state, "src", base, base]
         , ["/usr/include", base]
         , ["/usr/local/include", base]
         ]
 
-getLibraryPaths :: Path -> String -> String -> [Path]
-getLibraryPaths lib base sofile =
+getLibraryPaths :: Path -> Path -> String -> String -> [Path]
+getLibraryPaths home state base sofile =
   map
     MS.joinPath
     [ [sofile]
     , ["lib", sofile]
     , [base, sofile]
-    , [lib, "lib", sofile]
-    , [lib, "src", base, sofile]
-    , [lib, "src", base, "lib", sofile]
+    , [home, "lib", sofile]
+    , [state, "src", base, sofile]
+    , [state, "src", base, "lib", sofile]
     ]

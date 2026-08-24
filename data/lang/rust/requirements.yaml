@@ -1,0 +1,7 @@
+# Conda requirements for rust pools. The rust toolchain is already in the core
+# toolchain (it builds libmorloc/nexus/rustmorloc), so nothing extra is needed;
+# this entry exists to record the supported rust version for `--lang rust@X`.
+# rust pools are C-ABI to libmorloc and have low version sensitivity.
+runtime:
+  package: rust
+  version: "*"

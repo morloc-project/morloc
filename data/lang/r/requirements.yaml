@@ -1,0 +1,9 @@
+# Conda requirements for the rmorloc binder + the R versions morloc supports.
+# Keep in lockstep with rmorloc.c.
+runtime:
+  package: r-base
+  version: ">=4.2,<4.6"   # R-4.5 removed Rf_findVarInFrame; rmorloc.c version-guards, so 4.5 is in range
+  default: "4.4"
+requires:
+  # bit64: the integer64 class the R pool loads at runtime.
+  - { package: r-bit64, version: "*", phase: runtime }

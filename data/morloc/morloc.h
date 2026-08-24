@@ -6,6 +6,16 @@
 #ifndef __MORLOC_H__
 #define __MORLOC_H__
 
+// MORLOC_ABI_VERSION: the ABI / wire-format contract version, distinct from the
+// marketing/release version. Bump whenever the C ABI declared in this header or
+// the wire packet format changes. This is the single source of truth: the Rust
+// runtime mirrors it (morloc_runtime_types::MORLOC_ABI_VERSION, checked against
+// this header by a test) and the Haskell compiler parses it from this header
+// (Morloc.Abi). Provisioning refuses to run a prebuilt libmorloc/nexus whose
+// version differs from the compiler's expected value (fail-closed), preventing
+// silent cross-pool struct/offset corruption.
+#define MORLOC_ABI_VERSION 1
+
 // Atomic includes must sit outside any `extern "C"` block because the
 // C++ <atomic> header pulls in <type_traits> et al., which use C++
 // templates. We define the platform-neutral macros here, then open
@@ -344,6 +354,12 @@ void morloc_set_inline_threshold(int64_t bytes);
 
 // Read the live inline threshold (in bytes).
 uint64_t morloc_get_inline_threshold(void);
+
+// The ABI/wire-format contract version compiled into this libmorloc.so (the
+// value of MORLOC_ABI_VERSION at build time). Compared fail-closed against the
+// compiler's expected version at provisioning time so a mismatched prebuilt
+// binary is refused rather than run.
+uint32_t morloc_abi_version(void);
 
 // Toggle shared memory at runtime. When disabled, payloads above the
 // inline threshold are written to a temp file (PACKET_SOURCE_FILE)
