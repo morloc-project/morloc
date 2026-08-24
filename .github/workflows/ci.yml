@@ -1,13 +1,12 @@
-name: Test Morloc
-# Manual only: the dev loop tests locally (build morloc + mim, then
-# `MORLOC_COMPILER_BIN`/`MORLOC_RUST_DIR` point the manager at those binaries).
-# release.yml still runs the full suite on version tags. Run this from the
-# Actions tab when a full CI pass is wanted.
+name: CI
+
+# Build morloc and run the standard test target on every push to master or dev.
 on:
-  workflow_dispatch: {}
+  push:
+    branches: [master, dev]
 
 jobs:
-  linux-test:
+  build-and-test:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
