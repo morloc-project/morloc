@@ -9,52 +9,25 @@ Dependency management
  * Per-dependency conda channel support (e.g. bioconda)
  * Remove the bundled containerized solutions
 
-
 New morloc compiler subcommands
  * `morloc versions` - print contracts between the compiler, runtime, and manager
  * `morloc envspec <morloc-file>` - prints the dependencies for a morloc program 
  * `morloc lang-support` - prints supported languages and their dependencies 
 
-
 Morloc manager (mim) updates
  * Rename `morloc-manager` to `mim` and move it to dedicated repo
  * Expand `mim new` interactive mode to cover all options and add checks
  * Allow creation of dev environments with all morloc build tools
- 
+ * `mim doctor` - read-only health checks for an environment
+ * Create dev environments with all morloc build tools (`mim new --dev`)
+ * Per-environment `$HOME` and `--dotfiles`
+ * `mim ... --system-packages foo,bar` - add OS packages to an environment
+ * Add `--env` to all 
+ * `mim shell` to directly enter an environment shell
+ * `mim modify` alter an existing environment without changing morloc version
+ * `mim update` alter an environment's morloc version
+ * Removed `mim select`, now there is a default
 
-Native backend
- * Allow native environments without containers (just for Linux for now)
-
-
-
-
-  Environment manager (mim)
-   * Rename `morloc-manager` to `mim` and move it to a dedicated repo
-     (morloc-project/morloc-manager); released on its own cadence
-   * Environment lifecycle: `mim new/ls/info/modify/rm/run/shell`
-   * Native and container backends behind the same commands
-   * `mim doctor` - read-only health checks for an environment
-   * Create dev environments with all morloc build tools (`mim new --dev`)
-   * Per-environment `$HOME` and `--dotfiles` for dev shells
-   * `mim ... --system-packages foo,bar` - add OS packages to an environment
-   * Expand `mim new` interactive mode to cover all options and add checks
-
-  New morloc compiler subcommands
-   * `morloc versions` - print the contract/ABI versions the compiler emits
-   * `morloc envspec <morloc-file>` - print a program's declared dependencies
-   * `morloc lang-support` - print supported languages and their dependencies
-
-  Compiler / manager contract
-   * `morloc make` provisions declared dependencies via a pluggable build
-     hook (`MORLOC_BUILD_HOOK`); any manager can implement it, not just mim
-   * Versioned, checked schemas between compiler and manager (envspec,
-     lang-support, release manifest); a mismatch prompts an upgrade
-   * Check module morloc-version compatibility at install and make
-
-  Packaging
-   * Releases ship the compiler + Rust source + a versioned install manifest;
-     libmorloc and morloc-nexus are still built from source at `morloc init`
-   * Drop the `morloc-tiny` / `morloc-full` distribution images
 
 0.98.2 [2026-08-17]
 -------------------
