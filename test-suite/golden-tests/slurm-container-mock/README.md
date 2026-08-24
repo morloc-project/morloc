@@ -1,7 +1,7 @@
 # slurm-container-mock
 
 End-to-end exercise of the containerized SLURM dispatch path:
-`morloc-manager run --slurm-bridge` -> driver container ->
+`mim run --slurm-bridge` -> driver container ->
 `libmorloc::remote_call` -> `MORLOC_BRIDGE_SOCKET` -> host bridge
 thread -> `apptainer exec <env-sif> sh -c '<nexus> --call-packet ...'`
 -> sbatch -> compute-node nexus -> result packet to shared cache ->
@@ -20,13 +20,13 @@ Run once on the host:
 morloc init -f --slurm
 
 # 2. Create an Apptainer env, install the root libs.
-morloc-manager new e2e-slurm --engine apptainer
-morloc-manager run --env e2e-slurm -- morloc init -f --slurm
-morloc-manager run --env e2e-slurm -- morloc install root root-py
+mim new e2e-slurm --engine apptainer
+mim run --env e2e-slurm -- morloc init -f --slurm
+mim run --env e2e-slurm -- morloc install root root-py
 ```
 
 The env's `.sif` lives under `~/.local/share/morloc/environments/e2e-slurm/sif/`.
-`morloc-manager run --env e2e-slurm --slurm-bridge` reads `layered_sif.unwrap_or(base_sif)`
+`mim run --env e2e-slurm --slurm-bridge` reads `layered_sif.unwrap_or(base_sif)`
 from the env config and bind-mounts the bridge socket into the container.
 
 ## Running
@@ -43,4 +43,4 @@ auto-mount), so the recursive `nexus --call-packet` invocation finds
 the pool the driver started and the call round-trips.
 
 Not registered in `test-suite/Main.hs`: requires Apptainer plus
-host-side morloc-manager + state mutation. Run manually.
+host-side mim + state mutation. Run manually.

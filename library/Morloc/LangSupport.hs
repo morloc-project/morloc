@@ -129,7 +129,7 @@ data LangSupport = LangSupport
   deriving (Show, Eq)
 
 -- | Internal shape of the core @data\/lang\/requirements.yaml@. The dev-only
--- @dev-apt@ key is consumed by morloc-manager (Rust), not here, so it is ignored.
+-- @dev-apt@ key is consumed by mim (Rust), not here, so it is ignored.
 newtype CoreReq = CoreReq {crToolchain :: [PkgReq]}
 
 instance Aeson.FromJSON CoreReq where
@@ -172,7 +172,8 @@ decodeYaml label content =
 renderLangSupport :: LangSupport -> Text
 renderLangSupport ls =
   jsonObj
-    [ ("morloc_version", jsonStr (lsMorlocVersion ls))
+    [ ("schema_version", jsonStr Morloc.Version.langSupportSchemaVersion)
+    , ("morloc_version", jsonStr (lsMorlocVersion ls))
     , ("toolchain", jsonArr (map pkgJson (lsToolchain ls)))
     , ("languages", jsonObj [(name, langJson e) | (name, e) <- Map.toAscList (lsLanguages ls)])
     ]

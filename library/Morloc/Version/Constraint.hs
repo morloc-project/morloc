@@ -10,8 +10,9 @@ Maintainer  : z@morloc.io
 Checks a module's declared @morloc-version@ constraint (from its
 @package.yaml@) against the running compiler version, at install and make.
 
-Mirror of @data/rust/morloc-deps/src/constraint.rs@: the two implement the same
-grammar and ordering, so keep them and their shared test vectors in sync.
+Mirror of @morloc-deps/src/constraint.rs@ in the morloc-project/morloc-manager
+repo: the two implement the same grammar and ordering, so keep them and their
+shared test vectors in sync.
 
 The grammar is the conda match-spec subset morloc already uses for language and
 package versions -- ONE grammar for all versions. A constraint is @*@ (or empty)
@@ -155,6 +156,6 @@ gateModuleVersion modName compilerVer (Just spec) =
               Left $
                 "module '" <> modName <> "' requires morloc " <> spec
                   <> ", but the running compiler is " <> compilerVer
-                  <> ". Update the compiler (e.g. 'morloc-manager update "
+                  <> ". Update the compiler (e.g. 'mim update "
                   <> "--morloc-version <version>') or install a compatible "
                   <> "version of the module."

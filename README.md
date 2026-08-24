@@ -49,11 +49,11 @@ Below is a simple example, for installation details and more examples, see the
 [Manual](https://morloc-project.github.io/docs).
 
 
-morloc-manager run -- morloc install stdlib
-morloc-manager install main.loc
-morloc-manager expose add foo --as mcp,api
-morloc-manager start
-morloc-manager status
+mim run -- morloc install stdlib
+mim install main.loc
+mim expose add foo --as mcp,api
+mim start
+mim status
 
 claude mcp add --transport http foo http://127.0.0.1:9000/mcp
 

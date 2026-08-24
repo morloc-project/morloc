@@ -1,20 +1,19 @@
-# Release workflow: build all binaries + containers, run tests, publish release.
+# Release workflow: build all binaries, run tests, publish release.
 #
 # Triggered by pushing a version tag:
 #   git tag v0.68.0
 #   git push origin v0.68.0
 #
-# Produces for each platform (linux-x86_64, linux-arm64, macos-arm64):
-#   - morloc-manager  (Rust binary; the static-musl bootstrap on Linux)
-# and, on Linux only (dynamic glibc 2.31, built in container/static-build):
-#   - morloc          (the Haskell compiler, for native install)
+# Produces (linux-x86_64, linux-arm64):
+#   - morloc  (the Haskell compiler, glibc 2.31, built in container/static-build)
 # plus the platform-independent Rust workspace source and a
 # `morloc-release-manifest.json` describing the provisionable assets per triple.
 #
 # libmorloc.so and morloc-nexus are NOT prebuilt: `morloc init` builds them from
 # the bundled Rust source with the target env's own toolchain, so the runtime is
-# ABI-coherent with the pools it links. Only the compiler (GHC-built) and the
-# static bootstrap manager ship prebuilt.
+# ABI-coherent with the pools it links. Only the compiler (GHC-built) ships
+# prebuilt. The mim environment manager is built and released from its own
+# repository (morloc-project/morloc-manager).
 
 name: Release
 
@@ -22,12 +21,8 @@ on:
   push:
     tags: ['v*']
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_BASE: ghcr.io/morloc-project/morloc
-
 jobs:
-  # ---- Build the prebuilt release assets (compiler + static manager + rust source) per platform ----
+  # ---- Build the prebuilt release assets (compiler + rust source) per platform ----
   rust-binary:
     strategy:
       fail-fast: false
@@ -35,30 +30,22 @@ jobs:
         include:
           - os: ubuntu-latest
             platform: linux-x86_64
-            method: docker
           - os: ubuntu-24.04-arm
             platform: linux-arm64
-            method: docker
-          - os: macos-latest
-            platform: macos-arm64
-            method: native
     runs-on: ${{ matrix.os }}
-    # The Linux build now also stack-builds the morloc compiler (cold, no cross-run
-    # cache on ephemeral runners), which dominates the wall time.
+    # The Linux build stack-builds the morloc compiler (cold, no cross-run cache
+    # on ephemeral runners), which dominates the wall time.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
       # ---- Linux: Docker container build ----
-      # morloc-manager: static (Alpine/musl)
       # morloc compiler: Haskell/stack (Ubuntu 20.04)
       # rust source: bundled for from-source `morloc init`
       - name: Set up Docker Buildx (Linux)
-        if: matrix.method == 'docker'
         uses: docker/setup-buildx-action@v3
 
-      - name: Build compiler + manager + rust source (Linux)
-        if: matrix.method == 'docker'
+      - name: Build compiler + rust source (Linux)
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -73,47 +60,14 @@ jobs:
           cache-to: type=gha,mode=max,scope=static-build-${{ matrix.platform }}
 
       - name: Extract assets (Linux)
-        if: matrix.method == 'docker'
         run: |
           mkdir -p out
           docker run --rm -v "$(pwd)/out:/out" morloc-rust-build
-          # Verify morloc-manager is static
-          file out/morloc-manager | grep -qE "static(ally|-pie) linked"
 
       - name: Rename artifacts (Linux)
-        if: matrix.method == 'docker'
         run: |
           mv out/morloc out/morloc-${{ matrix.platform }}
-          mv out/morloc-manager out/morloc-manager-${{ matrix.platform }}
           # out/rust/ (the workspace source) is uploaded as-is via out/*
-
-      # ---- macOS: native cargo build ----
-      - name: Setup Rust (macOS)
-        if: matrix.method == 'native'
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo (macOS)
-        if: matrix.method == 'native'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            data/rust/target
-          key: cargo-macos-${{ hashFiles('data/rust/Cargo.lock') }}
-          restore-keys: cargo-macos-
-
-      # macOS ships only the bootstrap manager. libmorloc.dylib + morloc-nexus
-      # are built from source by `morloc init` on the target host (which owns the
-      # Mach-O install_name / @loader_path rpath handling), not prebuilt here.
-      - name: Build morloc-manager (macOS)
-        if: matrix.method == 'native'
-        run: |
-          cd data/rust
-          cargo build --release -p morloc-manager
-          mkdir -p ../../out
-          cp target/release/morloc-manager ../../out/morloc-manager-${{ matrix.platform }}
-          strip ../../out/morloc-manager-${{ matrix.platform }} || true
 
       - name: Upload Rust artifacts
         uses: actions/upload-artifact@v4
@@ -211,7 +165,7 @@ jobs:
       # staged, so there is no glibc-floor collision on `morloc-linux-x86_64`.
 
       # Publish the language-support table (compiler-owned static data) as a
-      # release asset so morloc-manager can render pixi manifests WITHOUT running
+      # release asset so mim can render pixi manifests WITHOUT running
       # the compiler on the host -- essential for container builds on hosts where
       # the glibc compiler cannot execute natively (NixOS, musl, etc.).
       - name: Stage lang-support table for release
@@ -222,69 +176,29 @@ jobs:
           name: morloc-lang-support
           path: morloc-lang-support.json
 
-  # ---- Build and push container images ----
-  containers:
-    needs: test
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    permissions:
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Extract version from tag
-        id: ver
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Login to GHCR
-        uses: docker/login-action@v3
+      # The contract/ABI versions this compiler emits, sourced from its central
+      # constants. Inlined into the release manifest (not published as a separate
+      # asset) so the manager gets a pre-install compatibility gate from the fetch
+      # it already makes.
+      - name: Stage versions doc
+        run: morloc versions > morloc-versions.json
+      - name: Upload versions doc
+        uses: actions/upload-artifact@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build tiny (from local source)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: container/tiny/Dockerfile
-          tags: |
-            ${{ env.IMAGE_BASE }}/morloc-tiny:${{ steps.ver.outputs.version }}
-            ${{ env.IMAGE_BASE }}/morloc-tiny:edge
-          # load into the local store so the `full` build can FROM it and the
-          # push step can push it. GHA layer cache persists the GHC deps layer.
-          load: true
-          cache-from: type=gha,scope=tiny
-          cache-to: type=gha,mode=max,scope=tiny
-
-      - name: Build full (uses local tiny)
-        run: |
-          docker build \
-            --build-arg MORLOC_VERSION=${{ steps.ver.outputs.version }} \
-            -t ${{ env.IMAGE_BASE }}/morloc-full:${{ steps.ver.outputs.version }} \
-            -t ${{ env.IMAGE_BASE }}/morloc-full:edge \
-            container/full/
-
-      - name: Push all images
-        run: |
-          for img in morloc-tiny morloc-full; do
-            docker push ${{ env.IMAGE_BASE }}/${img}:${{ steps.ver.outputs.version }}
-            docker push ${{ env.IMAGE_BASE }}/${img}:edge
-          done
+          name: morloc-versions
+          path: morloc-versions.json
 
   # ---- Create GitHub Release ----
   release:
-    if: always() && needs.containers.result == 'success'
-    needs: [containers, rust-binary]
+    if: always() && needs.test.result == 'success'
+    needs: [test, rust-binary]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       # rust-binaries-* carries, per triple, the morloc compiler (glibc >= 2.31
-      # from static-build), the static morloc-manager, and the rust/ source.
+      # from static-build) and the rust/ source. The mim manager is released
+      # from its own repo (morloc-project/morloc-manager), not bundled here yet.
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -295,6 +209,11 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: morloc-lang-support
+
+      - name: Download the versions doc
+        uses: actions/download-artifact@v4
+        with:
+          name: morloc-versions
 
       - name: List artifacts
         run: ls -lh
@@ -308,13 +227,12 @@ jobs:
 
       # A version manifest for the native-install download flow: which loose
       # artifacts make up the provisionable set per platform triple, plus the
-      # release version so `morloc init` can enforce exact-version equality
-      # across the downloaded compiler + manager (the interim coherence check
-      # while the ABI-version gate stays deferred). libmorloc.so and morloc-nexus
-      # are NOT listed: they are built from the shared rust_src at init time.
-      # Only triples with a complete, tested asset set are listed; macOS is
-      # omitted until its build-layer port + smoke test land, so the flow falls
-      # through to a container there.
+      # release version. libmorloc.so and morloc-nexus are NOT listed: they are
+      # built from the shared rust_src at init time. The mim manager is NOT
+      # listed either -- it is released from its own repo and (Phase 3) will be
+      # fetched-then-bundled here. Only triples with a complete asset set are
+      # listed; macOS is omitted (no prebuilt compiler), so the flow falls
+      # through to a container.
       # Built with Python so the manifest carries a SHA-256 for every published
       # asset (the download flow verifies each fetch against these) and lists a
       # triple ONLY when all of its artifacts exist on disk -- a partial triple
@@ -336,11 +254,9 @@ jobs:
           candidates = {
               "linux-x86_64": {
                   "morloc": "morloc-linux-x86_64",
-                  "manager": "morloc-manager-linux-x86_64",
               },
               "linux-arm64": {
                   "morloc": "morloc-linux-arm64",
-                  "manager": "morloc-manager-linux-arm64",
               },
           }
           rust_src = "morloc-rust-src.tar.gz"
@@ -359,13 +275,30 @@ jobs:
               if os.path.exists(a):
                   digests[a] = sha256(a)
 
+          # The contract/ABI versions the compiler emits, inlined so the manager
+          # gets its pre-install compatibility gate from the manifest it already
+          # fetches (no separate asset to publish or fetch).
+          with open("morloc-versions.json") as f:
+              versions = json.load(f)
+
           manifest = {
-              "schema": 2,
+              "schema": 1,
               "version": version,
               "rust_src": rust_src,
+              "versions": versions,
               "triples": triples,
               "sha256": digests,
           }
+
+          # Fail closed: every asset the manifest REQUIRES the manager to download
+          # (the rust source + each triple's binaries) must carry a digest, since a
+          # missing digest is a hard error on the manager side. Catch it here rather
+          # than shipping a manifest that bricks native install.
+          required = {rust_src} | {a for t in triples.values() for a in t.values()}
+          no_digest = sorted(a for a in required if a not in digests)
+          if no_digest:
+              raise SystemExit(f"manifest references assets with no SHA-256 digest: {no_digest}")
+
           with open("morloc-release-manifest.json", "w") as f:
               json.dump(manifest, f, indent=2)
           print(json.dumps(manifest, indent=2))
@@ -376,7 +309,6 @@ jobs:
         with:
           files: |
             morloc-linux-*
-            morloc-manager-*
             morloc-rust-src.tar.gz
             morloc-release-manifest.json
             morloc-lang-support.json

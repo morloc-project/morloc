@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# run-tests.sh - integration tests for the morloc-manager serving path.
+# run-tests.sh - integration tests for the mim serving path.
 #
 # Covers the whole path a user follows to expose a compiled program to an AI
 # client or HTTP API:
 #
-#   morloc-manager install  ->  expose add  ->  expose eval  ->  start
+#   mim install  ->  expose add  ->  expose eval  ->  start
 #     ->  /call, /discover, /health, /mcp (tools/list + tools/call), /eval
-#     ->  morloc-manager eval / status / stop
+#     ->  mim eval / status / stop
 #
 # The suite is grouped so it degrades gracefully:
 #
-#   help    - CLI surface: `morloc-manager -h` lists install/expose/eval and the
+#   help    - CLI surface: `mim -h` lists install/expose/eval and the
 #             subcommand help pages parse. Needs only the manager binary.
 #   expose  - the declarative exposure state machine (expose add/rm/list/eval),
 #             run against a SANDBOXED config/data root (XDG_*), so no container
@@ -25,7 +25,7 @@
 #   No args runs every group whose prerequisites are met.
 #   Filter by name:  ./run-tests.sh help expose
 #
-# The manager binary is found via $MORLOC_MANAGER, then PATH (`morloc-manager`),
+# The manager binary is found via $MORLOC_MANAGER, then PATH (`mim`),
 # then the local cargo debug/release build. A rebuilt nexus is required for the
 # serve/auth groups: run `morloc init -f` after changing the serving code.
 
@@ -63,11 +63,11 @@ resolve_manager() {
     if [[ -n "${MORLOC_MANAGER:-}" && -x "${MORLOC_MANAGER}" ]]; then
         echo "$MORLOC_MANAGER"; return 0
     fi
-    if command -v morloc-manager >/dev/null 2>&1; then
-        command -v morloc-manager; return 0
+    if command -v mim >/dev/null 2>&1; then
+        command -v mim; return 0
     fi
     local root="$SCRIPT_DIR/../../data/rust/target"
-    for cand in "$root/debug/morloc-manager" "$root/release/morloc-manager"; do
+    for cand in "$root/debug/mim" "$root/release/mim"; do
         [[ -x "$cand" ]] && { echo "$cand"; return 0; }
     done
     return 1
@@ -241,10 +241,10 @@ group_serve() {
     # install (module identity = `demo`, independent of the file name)
     "$MANAGER" install demo.loc >/tmp/mgr-install.log 2>&1
     if [[ $? -ne 0 ]]; then
-        fail "morloc-manager install demo.loc" "exit 0" "$(tail -c 400 /tmp/mgr-install.log)"
+        fail "mim install demo.loc" "exit 0" "$(tail -c 400 /tmp/mgr-install.log)"
         skip "remaining serve asserts (install failed)"; return
     fi
-    pass "morloc-manager install demo.loc"
+    pass "mim install demo.loc"
 
     "$MANAGER" expose add "$MODULE" --as mcp,api >/dev/null 2>&1
     assert_ok "expose add demo --as mcp,api" $?
@@ -253,11 +253,11 @@ group_serve() {
 
     "$MANAGER" start -p "$SERVE_PORT:$SERVE_PORT" >/tmp/mgr-start.log 2>&1
     if [[ $? -ne 0 ]]; then
-        fail "morloc-manager start" "exit 0" "$(tail -c 400 /tmp/mgr-start.log)"
+        fail "mim start" "exit 0" "$(tail -c 400 /tmp/mgr-start.log)"
         skip "remaining serve asserts (start failed)"; return
     fi
     STARTED_SERVE=1
-    pass "morloc-manager start"
+    pass "mim start"
 
     local url="http://127.0.0.1:$SERVE_PORT"
     if ! wait_for_health "$url"; then
@@ -316,11 +316,11 @@ add 1.0 2.0'
         --args "$(python3 -c 'import json,sys; print(json.dumps({"expression": sys.stdin.read()}))' <<<"$evalexpr")")"
     assert_contains "MCP eval tool evaluates an allowed expression" "3" "$evtool"
     local evcli; evcli="$("$MANAGER" eval -p "$SERVE_PORT" "$evalexpr" 2>&1)"
-    assert_contains "morloc-manager eval reaches the serve" "3" "$evcli"
+    assert_contains "mim eval reaches the serve" "3" "$evcli"
 
     # --- teardown ---
     "$MANAGER" stop >/dev/null 2>&1
-    assert_ok "morloc-manager stop" $?
+    assert_ok "mim stop" $?
     STARTED_SERVE=0
     sleep 1
     curl -sf "$url/health" >/dev/null 2>&1

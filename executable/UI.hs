@@ -26,6 +26,7 @@ module UI
   , ConfigAction (..)
   , LangSupportCommand (..)
   , EnvspecCommand (..)
+  , VersionsCommand (..)
   ) where
 
 import Data.Int (Int64)
@@ -58,6 +59,7 @@ data CliCommand
   | CmdConfig ConfigCommand
   | CmdLangSupport LangSupportCommand
   | CmdEnvspec EnvspecCommand
+  | CmdVersions VersionsCommand
 
 cliParser :: Parser CliCommand
 cliParser =
@@ -74,6 +76,7 @@ cliParser =
         <> configSubcommand
         <> langSupportSubcommand
         <> envspecSubcommand
+        <> versionsSubcommand
     )
 
 data MakeCommand = MakeCommand
@@ -136,6 +139,20 @@ langSupportSubcommand =
   command
     "lang-support"
     (info (CmdLangSupport <$> langSupportCommandParser) (progDesc "Print the language-support table (JSON)"))
+
+-- | @versions@ takes no options; it prints, as JSON, the contract versions this
+-- compiler emits (ABI, envspec, lang-support), so the environment manager can gate
+-- on compatibility before installing a release.
+data VersionsCommand = VersionsCommand
+
+versionsCommandParser :: Parser VersionsCommand
+versionsCommandParser = pure VersionsCommand
+
+versionsSubcommand :: Mod CommandFields CliCommand
+versionsSubcommand =
+  command
+    "versions"
+    (info (CmdVersions <$> versionsCommandParser) (progDesc "Print the contract/ABI versions (JSON)"))
 
 -- | @envspec@ runs only the frontend (parse + typecheck, no codegen) and prints
 -- the program's environment requirement spec (the same @envspec.json@ that

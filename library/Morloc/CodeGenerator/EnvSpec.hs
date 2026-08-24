@@ -40,6 +40,7 @@ import qualified Morloc.Data.Text as MT
 import Morloc.Data.Json
 import Morloc.Internal (unique)
 import Morloc.Language (Lang, showLangName)
+import qualified Morloc.Version
 import Morloc.Namespace.State
   ( PackageMeta(..), DepSpec(..), DepSource(..)
   , effectiveDepSource, depSourceText, condaForgeChannel
@@ -91,10 +92,6 @@ data EnvSpec = EnvSpec
   }
   deriving (Show, Eq, Ord)
 
--- | Current on-disk schema version.
-envSpecVersion :: Int
-envSpecVersion = 3
-
 -- | Assemble the EnvSpec from the program's pool languages and the DAG-wide
 -- package metadata. Pure and offline. Returns 'Left' with a human-readable
 -- message when two modules declare conflicting conda channels for one package
@@ -108,7 +105,7 @@ buildEnvSpec morlocVersion langs metas = do
   packageGroups <- fmap (filter (not . null . snd)) (mapM mkGroup langDepFields)
   return
     EnvSpec
-      { esVersion       = envSpecVersion
+      { esVersion       = Morloc.Version.envspecVersion
       , esMorlocVersion = MT.pack morlocVersion
       , esLanguages     = map langReq langNames
       , esPackages      = packageGroups

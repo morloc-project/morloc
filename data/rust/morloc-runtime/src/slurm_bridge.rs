@@ -1,13 +1,13 @@
-//! Client side of the morloc-manager SLURM bridge.
+//! Client side of the mim SLURM bridge.
 //!
 //! When a labeled `remote_call` happens inside a containerized morloc
 //! program, the container has no `sbatch`/`sacct` on its PATH. The
 //! container instead talks to a Unix domain socket bind-mounted into
-//! it by morloc-manager (path in env `MORLOC_BRIDGE_SOCKET`), and
-//! morloc-manager on the host translates each RPC into a real
+//! it by mim (path in env `MORLOC_BRIDGE_SOCKET`), and
+//! mim on the host translates each RPC into a real
 //! `sbatch --parsable ...` / `sacct -j ID ...` invocation.
 //!
-//! See `morloc-manager/src/bridge.rs` for the canonical schema spec
+//! See `mim/src/bridge.rs` for the canonical schema spec
 //! (request / reply shapes, state enum, error format, examples). The
 //! types in this module mirror that spec; if the two diverge, the
 //! server is authoritative.
@@ -69,9 +69,9 @@ pub struct ResourceSpec {
 #[derive(Serialize)]
 struct SubmitReq<'a> {
     op: &'a str,
-    /// Inner argv: the morloc-manager-/nexus-style command to run on
+    /// Inner argv: the mim-/nexus-style command to run on
     /// the compute node, one element per shell token. The bridge
-    /// prepends `["<morloc-manager>", "run", "--env", "<name>",
+    /// prepends `["<mim>", "run", "--env", "<name>",
     /// "--slurm-bridge", "--"]` before composing the sbatch wrap.
     /// Sending an argv list rather
     /// than a pre-escaped string keeps quoting out of the wire format

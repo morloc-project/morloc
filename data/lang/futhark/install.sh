@@ -4,7 +4,7 @@
 #
 # Futhark is a hosted guest language (its sourced functions are compiled to C and
 # called from the C++ pool); it is NOT on conda-forge, so it cannot be provisioned
-# through pixi like the other languages. morloc-manager runs this script at image
+# through pixi like the other languages. mim runs this script at image
 # build time inside an OCI container -- the one OS we fully control (debian/ubuntu,
 # linux-x86_64). It is deliberately NOT portable to native or other backends;
 # those raise an "install script not yet supported" error rather than guessing.

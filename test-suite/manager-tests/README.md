@@ -1,18 +1,18 @@
 # manager-tests
 
-Integration tests for the **morloc-manager serving path** -- the whole flow a
+Integration tests for the **mim serving path** -- the whole flow a
 user follows to expose a compiled morloc program to an AI client (MCP) or an
 HTTP/JSON API:
 
 ```
-morloc-manager install  ->  expose add  ->  expose eval  ->  start
+mim install  ->  expose add  ->  expose eval  ->  start
    ->  /call, /discover, /health, /mcp (tools/list + tools/call), /eval
-   ->  morloc-manager eval / status / stop
+   ->  mim eval / status / stop
 ```
 
 These are shell integration tests in the style of `daemon-tests`, `mcp-tests`,
 and `stress`. They intentionally live **outside** the Haskell golden/unit suite
-so the main test suite carries no dependency on `morloc-manager` or a container
+so the main test suite carries no dependency on `mim` or a container
 engine.
 
 ## Layout
@@ -31,9 +31,9 @@ met; name groups to filter (`./run-tests.sh help expose`).
 
 | Group    | What it checks                                                    | Needs |
 |----------|------------------------------------------------------------------|-------|
-| `help`   | `morloc-manager -h` lists `install`/`expose`/`eval`/`start`/`status`/`stop`; every subcommand `-h` parses; `expose -h` lists `add`/`rm`/`list`/`eval`. | binary only |
+| `help`   | `mim -h` lists `install`/`expose`/`eval`/`start`/`status`/`stop`; every subcommand `-h` parses; `expose -h` lists `add`/`rm`/`list`/`eval`. | binary only |
 | `expose` | The declarative exposure state machine: `expose add/rm/list/eval`, the not-installed rejection, idempotent add, per-protocol (mcp[] vs api[]) sets, eval as an independent capability. Run against a **sandboxed** `XDG_CONFIG_HOME`/`XDG_DATA_HOME`, so no engine or real environment is touched. | binary only |
-| `serve`  | Full end to end against the **active** environment: `install` -> `expose add --as mcp,api` -> `expose eval` -> `start`, then `/call` (positional), `/discover` + `/discover/<module>` (positional-arg help), `/health`, CORS preflight, MCP `tools/list` + `tools/call` (named args, `demo__greet`), `/eval` + `morloc-manager eval` + the MCP `eval` tool, `status`, and `stop`. | engine + active env |
+| `serve`  | Full end to end against the **active** environment: `install` -> `expose add --as mcp,api` -> `expose eval` -> `start`, then `/call` (positional), `/discover` + `/discover/<module>` (positional-arg help), `/health`, CORS preflight, MCP `tools/list` + `tools/call` (named args, `demo__greet`), `/eval` + `mim eval` + the MCP `eval` tool, `status`, and `stop`. | engine + active env |
 | `auth`   | A `start --auth-token` serve returns 401 without the bearer and 200 with it, on both adapters; `/health` stays open (liveness needs no token). | engine + active env |
 
 The `serve` and `auth` groups **skip** (not fail) when a container engine, an
@@ -42,12 +42,12 @@ safe to run anywhere.
 
 ## Prerequisites
 
-- `help`/`expose`: just the `morloc-manager` binary. It is resolved from
+- `help`/`expose`: just the `mim` binary. It is resolved from
   `$MORLOC_MANAGER`, then `PATH`, then the local cargo build under
-  `data/rust/target/{debug,release}/morloc-manager`.
+  `data/rust/target/{debug,release}/mim`.
 - `serve`/`auth`: additionally a container engine (docker/podman/apptainer), a
-  **default** morloc environment (the first `morloc-manager new` sets it, or
-  `morloc-manager update --env <env> --set-default`), `curl`, and
+  **default** morloc environment (the first `mim new` sets it, or
+  `mim update --env <env> --set-default`), `curl`, and
   `python3`. The serving code must be current -- run `morloc init -f` after
   changing the nexus/runtime.
 

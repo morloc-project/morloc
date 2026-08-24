@@ -38,7 +38,9 @@ import qualified Morloc.CodeGenerator.EnvSpec as ES
 import qualified Morloc.CodeGenerator.SystemConfig as MSC
 import Morloc.Internal (unique)
 import qualified Morloc.LangRegistry as LR
-import Morloc.Version (versionStr)
+import Morloc.Version (versionStr, envspecVersion, langSupportSchemaVersion)
+import Morloc.Abi (abiVersion)
+import Morloc.Data.Json (jsonObj, jsonStr, jsonInt)
 import qualified Morloc.Completion as Completion
 import qualified Morloc.Config as Config
 import Morloc.Data.Doc
@@ -98,6 +100,7 @@ runMorloc args = do
     (CmdConfig g) -> cmdConfig g config buildConfig
     (CmdLangSupport g) -> cmdLangSupport g
     (CmdEnvspec g) -> cmdEnvspec g verbose config buildConfig
+    (CmdVersions g) -> cmdVersions g
   case runPassed of
     True -> exitSuccess
     False -> exitFailure
@@ -116,6 +119,7 @@ getConfig (CmdConfig g) = getConfig' (configCmdConfig g) (configCmdVanilla g)
 getConfig (CmdNew _) = getConfig' "" False
 getConfig (CmdLangSupport _) = getConfig' "" False
 getConfig (CmdEnvspec g) = getConfig' (envspecConfig g) (envspecVanilla g)
+getConfig (CmdVersions _) = getConfig' "" False
 
 getConfig' :: String -> Bool -> IO Config.Config
 getConfig' _ True = Config.loadMorlocConfig Nothing
@@ -135,6 +139,7 @@ getVerbosity (CmdNew _) = 0
 getVerbosity (CmdConfig _) = 0
 getVerbosity (CmdLangSupport _) = 0
 getVerbosity (CmdEnvspec _) = 0
+getVerbosity (CmdVersions _) = 0
 
 readScript :: Bool -> String -> IO (Maybe Path, Code)
 readScript True code = return (Nothing, Code (MT.pack code))
@@ -682,6 +687,24 @@ cmdLangSupport _ =
     langReqs = [(name, DF.embededFileText ef) | (name, ef) <- DF.requirementsFiles]
     installScripts = [(name, DF.embededFileText ef) | (name, ef) <- DF.installScriptFiles]
 
+-- | Print, as JSON, the contract versions this compiler emits: the ABI version,
+-- the envspec_version, and the lang-support schema_version. The environment
+-- manager reads this (CI inlines it into the release manifest) to gate on
+-- compatibility before installing a release, and runs it on an installed compiler
+-- for doctor checks. Every value comes from the central definitions
+-- (Morloc.Version / Morloc.Abi), so it can never drift from what the compiler
+-- actually writes.
+cmdVersions :: VersionsCommand -> IO Bool
+cmdVersions _ = do
+  TIO.putStrLn $
+    jsonObj
+      [ ("morloc_version", jsonStr (MT.pack versionStr))
+      , ("abi_version", jsonInt abiVersion)
+      , ("envspec_version", jsonInt envspecVersion)
+      , ("lang_support_schema", jsonStr langSupportSchemaVersion)
+      ]
+  return True
+
 -- | Emit the program's environment requirement spec (envspec.json) using only
 -- the frontend -- parse + typecheck, no realization or codegen -- so a build
 -- system can resolve declared dependencies BEFORE building. The package
@@ -696,7 +719,7 @@ cmdEnvspec args _ config buildConfig = do
     MM.runMorlocMonad Nothing 0 config buildConfig (M.typecheckFrontend path code)
   case eresult of
     Left e -> do
-      -- Errors go to stderr: a caller (morloc-manager) captures stdout for the
+      -- Errors go to stderr: a caller (mim) captures stdout for the
       -- envspec JSON, so a diagnostic on stdout would be swallowed, not shown.
       hPutDoc stderr (MM.makeMorlocError st e <> "\n")
       return False

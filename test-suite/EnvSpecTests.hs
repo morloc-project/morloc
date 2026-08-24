@@ -110,7 +110,7 @@ envSpecTests =
     , testGroup
         "buildEnvSpec aggregation"
         [ testCase "schema + morloc version" $ do
-            esVersion spec @?= 3
+            esVersion spec @?= 1
             esMorlocVersion spec @?= "0.98.2"
         , testCase "languages carry version + cpp std" $
             esLanguages spec
@@ -175,7 +175,7 @@ envSpecTests =
   where
     minimal =
       EnvSpec
-        { esVersion = 3
+        { esVersion = 1
         , esMorlocVersion = "0.98.2"
         , esLanguages = [LangReq "py" Nothing Nothing]
         , esPackages = [("py", [PackageReq "numpy" ">=2" SrcConda Nothing])]
@@ -184,7 +184,7 @@ envSpecTests =
         }
     minimalJson :: Text
     minimalJson =
-      "{\"envspec_version\":3,\"morloc_version\":\"0.98.2\","
+      "{\"envspec_version\":1,\"morloc_version\":\"0.98.2\","
         <> "\"languages\":[{\"lang\":\"py\"}],"
         <> "\"packages\":{\"py\":[{\"name\":\"numpy\",\"constraint\":\">=2\",\"source\":\"conda\"}]},"
         <> "\"system\":[],\"modules\":[]}"

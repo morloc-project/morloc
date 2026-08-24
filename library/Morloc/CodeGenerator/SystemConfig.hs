@@ -130,7 +130,7 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   -- FROM SOURCE with the active toolchain. This is the single provisioning path:
   -- the runtime that pools link and load MUST be ABI-coherent with the toolchain
   -- that compiles those pools, so a prebuilt binary from a foreign libc/toolchain
-  -- world is not an option. Only the morloc compiler and morloc-manager are
+  -- world is not an option. Only the morloc compiler and mim are
   -- shipped prebuilt (they never link into a pool).
   let soPath = libDir </> "libmorloc.so"
   -- Primary install goes to $MORLOC_HOME/bin/
@@ -142,7 +142,7 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   userHome <- getHomeDirectory
 
   -- Resolve the Rust workspace source + cargo up front. Search order:
-  -- MORLOC_RUST_DIR (set by morloc-manager / dev); the persisted copy at
+  -- MORLOC_RUST_DIR (set by mim / dev); the persisted copy at
   -- $MORLOC_HOME/rust; then next to the morloc binary.
   rustDirEnv <- lookupEnv "MORLOC_RUST_DIR"
   rustDir <- case rustDirEnv of
@@ -163,7 +163,7 @@ configureAllSteps verbose force slurmSupport sanitize config = do
       findRustDir (homeCandidate ++ binCandidates)
   hasCargo <- findExecutable "cargo"
   -- Build libmorloc.so + morloc-nexus from source (needs cargo + the Rust
-  -- workspace). morloc-manager is NOT built here: it is the downloaded static
+  -- workspace). mim is NOT built here: it is the downloaded static
   -- bootstrap binary, ABI-isolated from the runtime. This guard aborts init
   -- unless the source + cargo are present, so the Rust steps below all run.
   when (null rustDir || hasCargo == Nothing) $
@@ -171,7 +171,7 @@ configureAllSteps verbose force slurmSupport sanitize config = do
       [ "morloc init builds the runtime (libmorloc.so + morloc-nexus) from"
       , "source and requires cargo plus the Rust workspace."
       , ""
-      , "Provision via morloc-manager, or for development set MORLOC_RUST_DIR"
+      , "Provision via mim, or for development set MORLOC_RUST_DIR"
       , "to the data/rust/ directory and put cargo on PATH:"
       , "  export MORLOC_RUST_DIR=/path/to/morloc/data/rust"
       , "  morloc init -f"
@@ -271,7 +271,7 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   --   Nothing                - legacy default: symlink into ~/.local/bin/
   --                            iff that directory already exists
   --
-  -- The skip-on-empty case lets a caller (e.g. morloc-manager when running
+  -- The skip-on-empty case lets a caller (e.g. mim when running
   -- this init inside a container) suppress symlinking without baking
   -- container-awareness into this module. The container harness sets
   -- MORLOC_BIN_LINK_DIR to a morloc-owned subtree such as
@@ -297,10 +297,10 @@ configureAllSteps verbose force slurmSupport sanitize config = do
       Nothing -> return ()
       Just linkDir -> do
         symlinkBinary nexusBinPath (linkDir </> "morloc-nexus")
-        let managerSrc = nexusBinDir </> "morloc-manager"
+        let managerSrc = nexusBinDir </> "mim"
         managerExists <- doesFileExist managerSrc
         when managerExists $
-          symlinkBinary managerSrc (linkDir </> "morloc-manager")
+          symlinkBinary managerSrc (linkDir </> "mim")
 
   -- Create exe/ and fdb/ directories (STATE, under the state root)
   let exeDir = Config.exeDir config

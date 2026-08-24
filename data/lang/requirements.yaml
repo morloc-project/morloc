@@ -9,7 +9,7 @@ toolchain:
   # c-compiler and cxx-compiler are both core: the runtime and every pool build
   # (cargo/cc-rs and the C++ pools) need the conda toolchain ACTIVATION -- the
   # activate.d scripts that export $CC/$CXX/$AR/$RANLIB/... In a language-free
-  # solve (e.g. `morloc-env clean`, which resets to a baseline that declares no
+  # solve (e.g. `mim-env clean`, which resets to a baseline that declares no
   # pool language), c-compiler alone lands the compiler binaries but NOT the
   # activation packages (gcc_linux-64/binutils_linux-64), so $AR is unset and
   # cc-rs fails with "failed to find tool ar". cxx-compiler hard-depends on that
@@ -24,7 +24,7 @@ toolchain:
   - { package: git,         version: "*", phase: both }
 
 # APT packages the dev environment installs to build the morloc COMPILER from
-# source. Used ONLY by dev environments (`morloc-manager new --dev`, always a
+# source. Used ONLY by dev environments (`mim new --dev`, always a
 # debian/ubuntu container); released environments download a prebuilt compiler and
 # never use this list. These are NOT conda packages: they let the developer build
 # the Haskell compiler in the dev shell with conda DEACTIVATED, so GHC links the

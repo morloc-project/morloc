@@ -1183,7 +1183,7 @@ pub fn validate_pools(pools: &[Pool]) -> Result<(), String> {
                 return Err(format!(
                     "The '{}' pool needs the interpreter '{}', which was not found on PATH. \
                      Install it, or run inside an environment that provides it \
-                     (e.g. `morloc-manager run [--env <name>] -- ...`).",
+                     (e.g. `mim run [--env <name>] -- ...`).",
                     pool.lang, interpreter
                 ));
             }

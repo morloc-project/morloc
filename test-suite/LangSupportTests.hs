@@ -112,7 +112,7 @@ langSupportTests =
         }
     minimalJson :: Text
     minimalJson =
-      "{\"morloc_version\":\"0.0.0\","
+      "{\"schema_version\":\"1.0\",\"morloc_version\":\"0.0.0\","
         <> "\"toolchain\":[{\"package\":\"c-compiler\",\"constraint\":\"*\",\"phase\":\"build\",\"optional\":false}],"
         <> "\"languages\":{"
         <> "\"cpp\":{\"runtime\":null,\"requires\":[{\"package\":\"cxx-compiler\",\"constraint\":\"*\",\"phase\":\"build\",\"optional\":false}]},"

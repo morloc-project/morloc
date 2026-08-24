@@ -157,7 +157,8 @@ requirementsFiles =
 
 -- | Per-language container install scripts, for languages NOT on conda-forge
 -- (their upstream binary is fetched by a script at OCI image build). Keyed by
--- canonical name. Keep in lockstep with morloc-deps `layout::SCRIPT_LANGUAGES`.
+-- canonical name. Keep in lockstep with `layout::SCRIPT_LANGUAGES` in morloc-deps
+-- (morloc-project/morloc-manager).
 installScriptFiles :: [(Text, EmbededFile)]
 installScriptFiles =
   [ ("futhark", EmbededFile "install.sh" (decodeUtf8 $ $(embedFileRelative "data/lang/futhark/install.sh")))

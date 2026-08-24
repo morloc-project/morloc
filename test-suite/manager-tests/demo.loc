@@ -1,4 +1,4 @@
---' morloc-manager serving integration test module.
+--' mim serving integration test module.
 --'
 --' Two small exports exercise the whole serve path end to end:
 --'   greet :: Str -> Str            -- single-argument string round trip
@@ -8,7 +8,7 @@
 --' name or any `-o`, so the serve adapters address it as `demo` and MCP tools
 --' are named `demo__greet` / `demo__add`. Metavars pin the MCP property names
 --' (`name`, `x`, `y`) so tools/call assertions are deterministic. Kept tiny so
---' `morloc-manager install` + `start` stay fast in an integration run.
+--' `mim install` + `start` stay fast in an integration run.
 module demo (greet, add)
 
 import root-py
