@@ -934,7 +934,7 @@ translate srcs es = do
 
   -- The Rust pool is a real Cargo project: `src/main.rs` is the rendered pool
   -- code, `Cargo.toml` pulls in rustmorloc (path dep) + any declared rust-deps,
-  -- and `build.rs` supplies the libmorloc.so link + rpath. `cargo build`
+  -- and `build.rs` supplies the libmorloc.so link. `cargo build`
   -- (makeTheMaker) does dependency resolution and linking.
   return $
     Script
@@ -1305,8 +1305,9 @@ rustDepsUnion = do
 -- | Render the generated pool crate's @Cargo.toml@ and @build.rs@. rustmorloc
 -- is a path dependency on the source persisted at @$MORLOC_HOME/rust@ (by
 -- @morloc init@); external crates come from the DAG-wide rust-deps union.
--- @build.rs@ carries the libmorloc.so link + rpath (parameterised by
--- @$MORLOC_HOME/lib@). The release profile must set @panic = "unwind"@ to match
+-- @build.rs@ carries the libmorloc.so link (link-search under
+-- @$MORLOC_HOME/lib@; libmorloc is found at run time via the nexus-exported
+-- LD_LIBRARY_PATH). The release profile must set @panic = "unwind"@ to match
 -- rustmorloc/morloc-runtime (the SHM arena relies on Drop-on-unwind cleanup).
 -- @crateName@ is unique per program (a source hash) so a shared target-dir
 -- never collides one program's pool binary with another's.
@@ -1339,12 +1340,14 @@ makeCargoDocs crateName deps home =
           , [idoc|lto = "thin"|]
           , [idoc|panic = "unwind"|]
           ]
+      -- No runtime rpath: the pool is relocatable and finds libmorloc via
+      -- LD_LIBRARY_PATH exported by the nexus at launch. link-search is kept
+      -- for the build-time link only.
       buildRs =
         vsep
           [ "fn main() {"
           , [idoc|    println!("cargo:rustc-link-search=native=#{pretty libDir}");|]
           , [idoc|    println!("cargo:rustc-link-lib=dylib=morloc");|]
-          , [idoc|    println!("cargo:rustc-link-arg=-Wl,-rpath,#{pretty libDir}");|]
           , "}"
           ]
   in (cargoToml, buildRs)

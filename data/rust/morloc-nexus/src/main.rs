@@ -279,6 +279,30 @@ fn main() {
     // that needs to re-enter the same nexus from a worker.
     if let Ok(exe) = std::env::current_exe() {
         std::env::set_var("MORLOC_NEXUS_PATH", &exe);
+        // Point pools at this nexus's sibling lib dir so they load the SAME
+        // libmorloc.so the nexus resolved, wherever the build tree lives (pools
+        // carry no absolute rpath). Append, never prepend, so a conda-provided
+        // library of the same soname is never shadowed. macOS uses
+        // DYLD_LIBRARY_PATH; every other platform uses LD_LIBRARY_PATH.
+        if let Some(prefix) = exe.parent().and_then(|d| d.parent()) {
+            let var = if cfg!(target_os = "macos") {
+                "DYLD_LIBRARY_PATH"
+            } else {
+                "LD_LIBRARY_PATH"
+            };
+            let mut entries: Vec<std::path::PathBuf> = std::env::var_os(var)
+                .map(|v| std::env::split_paths(&v).collect())
+                .unwrap_or_default();
+            for sub in ["lib", "share/morloc/lib"] {
+                let dir = prefix.join(sub);
+                if !entries.contains(&dir) {
+                    entries.push(dir);
+                }
+            }
+            if let Ok(joined) = std::env::join_paths(&entries) {
+                std::env::set_var(var, joined);
+            }
+        }
     }
     // Canonicalize once; reused below to resolve relative pool exec paths.
     let abs_manifest = std::fs::canonicalize(&manifest_path).ok();

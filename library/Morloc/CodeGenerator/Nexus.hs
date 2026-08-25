@@ -2654,6 +2654,11 @@ generate cs rASTs helperRASTs = do
         | stateInstall st = map renameCliForInstall rawSpecs
         | otherwise = rawSpecs
       absManifest = buildDir </> "manifest.json"
+      -- The make launcher is self-relative (it travels with the build tree, so
+      -- the whole tree can be moved or bind-mounted at a different path); the
+      -- install launcher keeps the absolute path (it lives at a fixed exe/<key>
+      -- anchor and is copied to bin/, where a relative form would not resolve).
+      relManifest = buildDirName dirKey </> "manifest.json"
       -- Launcher(s) land at the root (<root>/<key>), beside the nested
       -- <key>-build; for install this is exe/<key>, whence installProgram
       -- copies the CLI wrapper to bin/.
@@ -2661,7 +2666,8 @@ generate cs rASTs helperRASTs = do
       wrappers =
         [ WrapperFile
             (wrapperDir </> wsName s)
-            (makeWrapperScript (wsMode s) absManifest)
+            (makeWrapperScript (wsMode s) (not (stateInstall st))
+               (if stateInstall st then absManifest else relManifest))
         | s <- specs
         ]
 
@@ -2696,18 +2702,44 @@ generate cs rASTs helperRASTs = do
 -- @manifest.json@. The manifest is a standalone file (no embedded
 -- payload), so the wrapper carries no JSON and can be freely moved; only
 -- the build directory it points at is fixed.
-makeWrapperScript :: WrapperMode -> FilePath -> Text
-makeWrapperScript mode absManifestPath =
-  -- Export the launcher's own invocation name ($0, e.g. ./main) so the
-  -- nexus can print it in Usage/help lines instead of the module name.
-  "#!/bin/sh\nexport MORLOC_PROG_NAME=\"$0\"\nexec morloc-nexus "
-    <> modeToken mode
-    <> " "
-    <> MT.pack (shellQuote absManifestPath)
-    <> " \"$@\"\n"
+makeWrapperScript :: WrapperMode -> Bool -> FilePath -> Text
+makeWrapperScript mode selfRel manifestPath
+  -- MORLOC_PROG_NAME carries the launcher's own invocation name ($0, e.g.
+  -- ./main) so the nexus prints it in Usage/help instead of the module name.
+  | selfRel =
+      -- Resolve the launcher's own directory and find the manifest relative to
+      -- it, so the build tree works wherever it is placed. $0 has a slash when
+      -- invoked by a path (the normal case); a bare name is located via PATH.
+      MT.unlines
+        [ "#!/bin/sh"
+        , "export MORLOC_PROG_NAME=\"$0\""
+        , "self=\"$0\""
+        , "case \"$self\" in */*) : ;; *) self=$(command -v -- \"$self\") ;; esac"
+        , "d=$(CDPATH= cd -- \"$(dirname -- \"$self\")\" && pwd)"
+        , "exec morloc-nexus " <> modeToken mode
+            <> " \"$d/" <> MT.pack (dquoteEsc manifestPath) <> "\" \"$@\""
+        ]
+  | otherwise =
+      "#!/bin/sh\nexport MORLOC_PROG_NAME=\"$0\"\nexec morloc-nexus "
+        <> modeToken mode
+        <> " "
+        <> MT.pack (shellQuote manifestPath)
+        <> " \"$@\"\n"
   where
     modeToken WCli = "run"
     modeToken WDaemon = "daemon"
+
+-- | Escape a path for a double-quoted POSIX shell context (backslash, double
+-- quote, dollar, backtick), so a self-relative manifest path with shell
+-- metacharacters survives inside @"$d/...".
+dquoteEsc :: FilePath -> String
+dquoteEsc = concatMap esc
+  where
+    esc '\\' = "\\\\"
+    esc '"' = "\\\""
+    esc '$' = "\\$"
+    esc '`' = "\\`"
+    esc c = [c]
 
 -- | POSIX single-quote a path so spaces and shell metacharacters in the
 -- absolute manifest path survive. Embedded single quotes are escaped with

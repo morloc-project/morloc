@@ -1759,7 +1759,10 @@ handleFlagsAndPaths srcs = do
   home <- MM.asks configHome
   let mlcInclude = ["-I" <> home <> "/include"]
       mlcPch = ["-include", "morloc_pch.hpp"]
-      mlcLib = ["-L" <> home <> "/lib", "-Wl,-rpath," <> home <> "/lib", "-lmorloc", "-lcppmorloc", "-lpthread"]
+      -- No runtime rpath to home/lib: the pool is relocatable and finds
+      -- libmorloc via LD_LIBRARY_PATH exported by the nexus at launch, which
+      -- guarantees it loads the same libmorloc the nexus resolved.
+      mlcLib = ["-L" <> home <> "/lib", "-lmorloc", "-lcppmorloc", "-lpthread"]
 
   return
     ( filter (isJust . srcPath) srcs'
