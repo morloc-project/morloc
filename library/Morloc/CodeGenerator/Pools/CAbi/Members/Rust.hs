@@ -919,6 +919,7 @@ translate srcs es = do
 
   home <- MM.asks configHome
   deps <- rustDepsUnion
+  localCrates <- rustLocalDeps
   installDir <- MM.gets stateInstallDir
   -- The pool crate/bin name is derived from the build LOCATION (unique per
   -- program/build-dir, stable across edits of one program). With a shared cargo
@@ -928,7 +929,7 @@ translate srcs es = do
   -- crate per edit. Falls back to a source hash if the build dir is unset.
   let poolSrc = subVersion (render code)
       crateName = "pool_" <> PH.hashText (maybe poolSrc T.pack installDir)
-      (cargoToml, buildRs) = makeCargoDocs crateName deps home
+      (cargoToml, buildRs) = makeCargoDocs crateName deps localCrates home
   maker <- makeTheMaker crateName
   let poolSubdir = ML.poolDirKey rustLang
 
@@ -1279,6 +1280,23 @@ translateSegment m0 = do
   e <- surroundFoldSerialManifoldM rustSurround (defaultFoldRules (rustLowerConfig mask)) m0
   return $ renderPoolDocs e
 
+-- | Local (filesystem-path) Rust crates declared in @local-deps: {rust: ...}@,
+-- resolved to absolute paths for the generated pool @Cargo.toml@ (@crate = { path
+-- = ... }@). Only the root module may declare these ('loadModuleMetadata' rejects
+-- them elsewhere), so a DAG-wide union yields exactly the root's set. The path is
+-- resolved against the project root (the entry module's directory) -- the native
+-- real path; the container anchor rewrite is layered on separately.
+rustLocalDeps :: MorlocMonad (Map.Map Text FilePath)
+rustLocalDeps = do
+  metas <- MM.gets statePackageMeta
+  root <- fromMaybe "." <$> MM.gets stateProjectRoot
+  let locals =
+        [ (crate, T.unpack (ldPath ld))
+        | m <- metas
+        , (crate, ld) <- Map.toList (Map.findWithDefault Map.empty "rust" (packageLocalDeps m))
+        ]
+  Map.fromList <$> mapM (\(c, p) -> (,) c <$> liftIO (MS.canonicalizePath (root </> p))) locals
+
 -- | DAG-wide union of every imported module's @rust-deps@ (crate -> semver),
 -- written into the generated pool @Cargo.toml@. Two modules declaring the same
 -- crate at different versions is a hard error (cargo cannot list a crate twice
@@ -1311,12 +1329,19 @@ rustDepsUnion = do
 -- rustmorloc/morloc-runtime (the SHM arena relies on Drop-on-unwind cleanup).
 -- @crateName@ is unique per program (a source hash) so a shared target-dir
 -- never collides one program's pool binary with another's.
-makeCargoDocs :: Text -> Map.Map Text Text -> FilePath -> (MDoc, MDoc)
-makeCargoDocs crateName deps home =
+makeCargoDocs :: Text -> Map.Map Text Text -> Map.Map Text FilePath -> FilePath -> (MDoc, MDoc)
+makeCargoDocs crateName deps localCrates home =
   let rustmorlocPath = home </> "rust" </> "rustmorloc"
       libDir = home </> "lib"
       nameLit = dquotes (pretty crateName)
-      depLines = [pretty crate <> " = " <> dquotes (pretty ver) | (crate, ver) <- Map.toList deps]
+      -- A local crate (path dep) overrides any registry version line of the same
+      -- name; cargo cannot list a crate twice.
+      versionDeps = Map.filterWithKey (\c _ -> not (Map.member c localCrates)) deps
+      depLines = [pretty crate <> " = " <> dquotes (pretty ver) | (crate, ver) <- Map.toList versionDeps]
+      localLines =
+        [ pretty crate <> " = { path = " <> dquotes (pretty path) <> " }"
+        | (crate, path) <- Map.toList localCrates
+        ]
       cargoToml =
         vsep
           [ "[package]"
@@ -1331,6 +1356,7 @@ makeCargoDocs crateName deps home =
           , "[dependencies]"
           , "rustmorloc = { path = " <> dquotes (pretty rustmorlocPath) <> " }"
           , vsep depLines
+          , vsep localLines
           , ""
           , "[profile.release]"
           , "opt-level = 2"

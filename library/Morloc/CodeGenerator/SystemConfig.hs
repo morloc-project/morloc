@@ -89,7 +89,8 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   -- lib/); pre-create the per-language dirs there.
   ensureDirectory verbose "morloc python module directory" (Config.moduleDir config "python")
   ensureDirectory verbose "morloc R module directory" (Config.moduleDir config "R")
-  ensureDirectory verbose "morloc cpp module directory" (Config.moduleDir config "include")
+  ensureDirectory verbose "morloc cpp module include directory" (Config.moduleDir config "include")
+  ensureDirectory verbose "morloc cpp module lib directory" (Config.moduleDir config "lib")
   ensureDirectory verbose "morloc tmp directory" tmpDir
   ensureDirectory verbose "morloc opt directory" optDir
   ensureDirectory verbose "morloc module directory" srcLibrary

@@ -1757,12 +1757,19 @@ handleFlagsAndPaths srcs = do
       $ [s | s <- srcs, LR.poolOf (stateLangRegistry state) (srcLang s) == cppLang]
 
   home <- MM.asks configHome
-  let mlcInclude = ["-I" <> home <> "/include"]
+  state <- MM.asks configState
+  let -- Search the runtime include dir (home) and the environment's shared C++
+      -- module prefix (state/modules/include), where a user-installed library's
+      -- headers live.
+      mlcInclude = ["-I" <> home <> "/include", "-I" <> state <> "/modules/include"]
       mlcPch = ["-include", "morloc_pch.hpp"]
       -- No runtime rpath to home/lib: the pool is relocatable and finds
       -- libmorloc via LD_LIBRARY_PATH exported by the nexus at launch, which
-      -- guarantees it loads the same libmorloc the nexus resolved.
-      mlcLib = ["-L" <> home <> "/lib", "-lmorloc", "-lcppmorloc", "-lpthread"]
+      -- guarantees it loads the same libmorloc the nexus resolved. The
+      -- state/modules/lib search dir covers a user library referenced by a
+      -- `-l` from dependencies/cxx-flags; its runtime load is likewise handled
+      -- by the nexus LD_LIBRARY_PATH export, not a baked rpath.
+      mlcLib = ["-L" <> home <> "/lib", "-L" <> state <> "/modules/lib", "-lmorloc", "-lcppmorloc", "-lpthread"]
 
   return
     ( filter (isJust . srcPath) srcs'
@@ -1809,14 +1816,17 @@ flagAndPath reg src@(Source _ srcL (Just p) _ _ _ _ _ _ _) | LR.poolOf reg srcL 
       let libname = "lib" <> libnamebase <> ".so"
       let allPaths = getLibraryPaths home state base libname
       existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
+      moduleLibDir <- liftIO . MS.canonicalizePath $ MS.joinPath [state, "modules", "lib"]
       case existingPaths of
         (libpath : _) -> do
           libdir <- liftIO . MS.canonicalizePath . MS.takeDirectory $ libpath
-          return
-            [ "-Wl,-rpath=" <> libdir
-            , "-L" <> libdir
-            , "-l" <> libnamebase
-            ]
+          -- A lib in the shared module prefix is found at run time via the
+          -- nexus-exported LD_LIBRARY_PATH, so it needs no baked rpath -- and an
+          -- absolute rpath there would pin the pool to the build-time state
+          -- path, breaking relocation. A lib elsewhere (a module's own
+          -- state/src tree) is not on that export, so it keeps the rpath.
+          let rpathFlags = ["-Wl,-rpath=" <> libdir | libdir /= moduleLibDir]
+          return $ rpathFlags <> ["-L" <> libdir, "-l" <> libnamebase]
         [] -> return []
 flagAndPath reg src@(Source _ srcL Nothing _ _ _ _ _ _ _) | LR.poolOf reg srcL == cppLang = return (src, [], Nothing)
 flagAndPath _ _ = MM.throwSystemError $ "flagAndPath should only be called for C++ functions"
@@ -1856,6 +1866,7 @@ getLibraryPaths home state base sofile =
     , ["lib", sofile]
     , [base, sofile]
     , [home, "lib", sofile]
+    , [state, "modules", "lib", sofile]
     , [state, "src", base, sofile]
     , [state, "src", base, "lib", sofile]
     ]

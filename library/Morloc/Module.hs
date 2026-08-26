@@ -452,8 +452,8 @@ findModuleMetadata :: Path -> IO (Maybe Path)
 findModuleMetadata mainFile =
   getFile $ MS.combine (MS.takeDirectory mainFile) "package.yaml"
 
-loadModuleMetadata :: Path -> MorlocMonad ()
-loadModuleMetadata main = do
+loadModuleMetadata :: Bool -> Path -> MorlocMonad ()
+loadModuleMetadata isRoot main = do
   maybef <- liftIO $ findModuleMetadata main
   meta <-
     case maybef of
@@ -468,6 +468,14 @@ loadModuleMetadata main = do
   -- Reject dependencies whose declared source is illegal for their language
   -- (e.g. a Python dep with no source, or an R cran/bioconductor source).
   either (liftIO . ioError . userError . MT.unpack) return (checkPackageDeps meta)
+  -- Local (filesystem-path) dependencies are honored ONLY from the top-level
+  -- project: an imported/installed module's relative path has no meaning from the
+  -- build root (and would break portability). Reject them with a precise error.
+  when (not isRoot && not (Map.null (packageLocalDeps meta))) $
+    liftIO . ioError . userError . MT.unpack $
+      "module '" <> packageName meta <> "' declares local-deps, but local "
+        <> "(filesystem-path) dependencies may only be declared by the top-level "
+        <> "project being built, not by an imported module"
   -- Reject a module whose declared morloc-version excludes the running
   -- compiler: a fast, actionable failure instead of a cryptic downstream
   -- codegen error. A non-numeric compiler version (dev build) warns and passes.

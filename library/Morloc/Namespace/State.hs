@@ -38,8 +38,17 @@ module Morloc.Namespace.State
     -- * Package metadata
   , PackageMeta (..)
   , DepSpec (..)
+  , RegDep (..)
+  , LocalDep (..)
   , DepSource (..)
+  , LangDepPolicy (..)
+  , depPolicy
+  , knownDepLangs
+  , renderDepCapabilities
   , depSourceText
+  , dsChannel
+  , dsSource
+  , regOfSource
   , defaultDepSource
   , effectiveDepSource
   , condaForgeChannel
@@ -72,7 +81,7 @@ import Control.Monad.Except (ExceptT)
 import Control.Monad.Reader (ReaderT)
 import Control.Monad.State (StateT)
 import Control.Monad.Writer (WriterT)
-import Data.Aeson (FromJSON (..), (.!=), (.:?))
+import Data.Aeson (FromJSON (..), (.!=), (.:), (.:?))
 import qualified Data.Aeson as Aeson
 import Data.Int (Int64)
 import qualified Data.IntMap.Strict as IntMap
@@ -336,15 +345,58 @@ data DepSource
   | SrcPkg
   deriving (Show, Eq, Ord)
 
--- | One declared dependency: a version constraint, an optional source, and an
--- optional conda channel. An omitted source takes the per-language default
--- ('defaultDepSource'); Python has no default (its conda-vs-PyPI split must be
--- stated explicitly). 'dsChannel' is conda-only (the package DATABASE within
--- conda, e.g. bioconda); an omitted channel means conda-forge, the universal base.
+-- | Which registry a dependency is drawn from, carrying only the fields that are
+-- valid for that registry so illegal combinations are unrepresentable. A channel
+-- (the package DATABASE within conda, e.g. bioconda) lives ONLY in 'RegConda', so
+-- a channel can never accompany a non-conda source. 'RegDefault' is the
+-- source-omitted form (a bare version string): it resolves to the per-language
+-- default ('defaultDepSource') later, when the language is known.
+data RegDep
+  = RegConda !(Maybe Text)   -- optional channel; Nothing means conda-forge
+  | RegPypi
+  | RegCrates
+  | RegPkg
+  | RegCran
+  | RegBioconductor
+  | RegDefault
+  deriving (Show, Eq, Ord)
+
+-- | One declared registry dependency: which registry (with its conda channel, if
+-- any) and a version constraint. Local (filesystem-path) dependencies are NOT
+-- registry deps; they are declared separately (see 'LocalDep',
+-- 'packageLocalDeps') so this type stays a tight registry-only sum.
 data DepSpec = DepSpec
-  { dsVersion :: !Text
-  , dsSource :: !(Maybe DepSource)
-  , dsChannel :: !(Maybe Text)
+  { dsReg :: !RegDep
+  , dsVersion :: !Text
+  }
+  deriving (Show, Eq, Ord)
+
+-- | The conda channel of a dependency (conda-only; 'Nothing' for any other
+-- registry). Derived from 'dsReg' so channel-without-conda is unrepresentable.
+dsChannel :: DepSpec -> Maybe Text
+dsChannel ds = case dsReg ds of
+  RegConda mch -> mch
+  _ -> Nothing
+
+-- | The declared source of a dependency, or 'Nothing' when omitted ('RegDefault',
+-- resolved to the language default by 'effectiveDepSource').
+dsSource :: DepSpec -> Maybe DepSource
+dsSource ds = case dsReg ds of
+  RegConda _ -> Just SrcConda
+  RegPypi -> Just SrcPypi
+  RegCrates -> Just SrcCrates
+  RegPkg -> Just SrcPkg
+  RegCran -> Just SrcCran
+  RegBioconductor -> Just SrcBioconductor
+  RegDefault -> Nothing
+
+-- | One declared local (filesystem-path) dependency. 'ldPath' is relative to the
+-- module root (no @..@, no absolute; an in-project symlink is the escape hatch to
+-- an external source). 'ldEditable' is an INTENT: editable in interactive
+-- contexts (native, dev run), a plain snapshot when serving or frozen.
+data LocalDep = LocalDep
+  { ldPath :: !Text
+  , ldEditable :: !Bool
   }
   deriving (Show, Eq, Ord)
 
@@ -378,29 +430,52 @@ data LangDepPolicy = LangDepPolicy
   { ldpHonored :: ![DepSource]
   , ldpUnsupported :: ![DepSource]
   , ldpDefault :: !(Maybe DepSource)
+  -- | Whether this language supports tracked local (filesystem-path)
+  -- dependencies. The single source of truth: both 'checkPackageDeps' (the gate)
+  -- and any advertised capability table read this, so they cannot drift.
+  , ldpLocalInstall :: !Bool
   }
 
 depPolicy :: Text -> LangDepPolicy
-depPolicy "py" = LangDepPolicy [SrcConda, SrcPypi] [] Nothing
-depPolicy "r" = LangDepPolicy [SrcConda] [SrcCran, SrcBioconductor] (Just SrcConda)
-depPolicy "cpp" = LangDepPolicy [SrcConda] [] (Just SrcConda)
-depPolicy "rust" = LangDepPolicy [SrcCrates] [] (Just SrcCrates)
-depPolicy "julia" = LangDepPolicy [SrcPkg] [] (Just SrcPkg)
-depPolicy _ = LangDepPolicy [SrcConda] [] (Just SrcConda)
+depPolicy "py" = LangDepPolicy [SrcConda, SrcPypi] [] Nothing True
+depPolicy "r" = LangDepPolicy [SrcConda] [SrcCran, SrcBioconductor] (Just SrcConda) False
+depPolicy "cpp" = LangDepPolicy [SrcConda] [] (Just SrcConda) False
+depPolicy "rust" = LangDepPolicy [SrcCrates] [] (Just SrcCrates) True
+depPolicy "julia" = LangDepPolicy [SrcPkg] [] (Just SrcPkg) False
+depPolicy _ = LangDepPolicy [SrcConda] [] (Just SrcConda) False
 
 -- | The source assumed for a language's dependency when none is declared.
 defaultDepSource :: Text -> Maybe DepSource
 defaultDepSource = ldpDefault . depPolicy
 
+-- | The languages with an explicit dependency policy, in display order. The
+-- capability table ('renderDepCapabilities') iterates these.
+knownDepLangs :: [Text]
+knownDepLangs = ["py", "r", "cpp", "rust", "julia"]
+
+-- | Render the per-language dependency-capability table as plain lines, DERIVED
+-- entirely from 'depPolicy' (the single source of truth) so an advertised table
+-- can never disagree with the actual validation gate. Each row lists the honored
+-- registry sources and whether local (filesystem-path) deps are supported.
+renderDepCapabilities :: Text
+renderDepCapabilities = T.unlines (header : map row knownDepLangs)
+  where
+    header = "language | registries | local-path"
+    row lang =
+      let pol = depPolicy lang
+          regs = case map depSourceText (ldpHonored pol) of
+                   [] -> "-"
+                   ss -> T.intercalate ", " ss
+          local = if ldpLocalInstall pol then "yes" else "no"
+       in lang <> " | " <> regs <> " | " <> local
+
 -- | The source a dependency resolves to: its declared source, else the language
--- default, else conda when a channel is present (channels are conda-exclusive, so
--- they imply conda for a language with no default, i.e. Python). 'Nothing' means
--- unresolvable (a Python dep with neither source nor channel), which
--- 'checkPackageDeps' rejects. This is the single source of truth shared by
--- validation and envspec emission so the two cannot drift.
+-- default. (A bare @{channel: ...}@ already parses to 'RegConda', so channels no
+-- longer need to imply conda here.) 'Nothing' means unresolvable (a Python dep
+-- with no source), which 'checkPackageDeps' rejects. This is the single source of
+-- truth shared by validation and envspec emission so the two cannot drift.
 effectiveDepSource :: Text -> DepSpec -> Maybe DepSource
-effectiveDepSource lang ds =
-  dsSource ds <|> defaultDepSource lang <|> (SrcConda <$ dsChannel ds)
+effectiveDepSource lang ds = dsSource ds <|> defaultDepSource lang
 
 -- | The universal default conda channel and highest strict-priority base. An
 -- omitted channel means this; it is stripped from the envspec wire so a
@@ -417,14 +492,45 @@ instance FromJSON DepSource where
           "unknown dependency source (expected one of: conda, pypi, cran, \
           \bioconductor, crates, pkg)"
 
--- A dependency value is either a bare version string (source defaulted) or an
--- object {version, source}. The bare form keeps the common case terse.
+-- A registry dependency value is either a bare version string (source defaulted)
+-- or an object {version, source, channel}. The bare form keeps the common case
+-- terse. Illegal combinations are rejected here so they are unrepresentable
+-- downstream: a channel may accompany only conda (or an omitted source, which a
+-- channel pins to conda).
 instance FromJSON DepSpec where
-  parseJSON (Aeson.String s) = return (DepSpec s Nothing Nothing)
-  parseJSON (Aeson.Object o) =
-    DepSpec <$> o .:? "version" .!= "*" <*> o .:? "source" <*> o .:? "channel"
+  parseJSON (Aeson.String s) = return (DepSpec RegDefault s)
+  parseJSON (Aeson.Object o) = do
+    version <- o .:? "version" .!= "*"
+    msrc <- o .:? "source"
+    mchan <- o .:? "channel"
+    reg <- case (msrc, mchan) of
+      (Nothing, Nothing) -> return RegDefault
+      (Nothing, Just ch) -> return (RegConda (Just ch)) -- a channel pins conda
+      (Just SrcConda, mch) -> return (RegConda mch)
+      (Just s, Nothing) -> return (regOfSource s)
+      (Just s, Just _) ->
+        fail $
+          "dependency declares channel with source '" <> T.unpack (depSourceText s)
+            <> "', but channels apply only to conda dependencies"
+    return (DepSpec reg version)
   parseJSON _ =
     fail "dependency must be a version string or an object {version, source, channel}"
+
+-- | The 'RegDep' for a non-conda source (conda is handled separately so its
+-- channel is captured). Total over the non-conda 'DepSource' constructors.
+regOfSource :: DepSource -> RegDep
+regOfSource SrcConda = RegConda Nothing
+regOfSource SrcPypi = RegPypi
+regOfSource SrcCrates = RegCrates
+regOfSource SrcPkg = RegPkg
+regOfSource SrcCran = RegCran
+regOfSource SrcBioconductor = RegBioconductor
+
+-- A local dependency value is an object {path, editable?}. 'path' is required;
+-- 'editable' defaults to False.
+instance FromJSON LocalDep where
+  parseJSON = Aeson.withObject "local dependency" $ \o ->
+    LocalDep <$> o .: "path" <*> o .:? "editable" .!= False
 
 -- | Validate a module's declared dependencies against the per-language source
 -- policy. Returns a human-readable error on the first violation. This is the
@@ -439,7 +545,8 @@ instance FromJSON DepSpec where
 --   * @channel@ is conda-only: it may not accompany a non-conda source, and a
 --     conda-forge R name must be a bare CRAN name (no @r-@ prefix).
 checkPackageDeps :: PackageMeta -> Either Text ()
-checkPackageDeps pm = mapM_ checkGroup groups
+checkPackageDeps pm =
+  mapM_ checkGroup groups >> mapM_ checkLocalGroup (Map.toList (packageLocalDeps pm))
   where
     groups =
       [ ("py", packagePyDeps pm)
@@ -452,8 +559,11 @@ checkPackageDeps pm = mapM_ checkGroup groups
     checkGroup (lang, m) = mapM_ (checkDep lang) (Map.toList m)
 
     checkDep lang (name, ds) = do
-      src <- resolveSource lang name ds
-      checkChannel lang name ds src
+      _ <- resolveSource lang name ds
+      -- A channel-on-non-conda contradiction is now unrepresentable (parsed into
+      -- 'RegConda' or rejected in 'FromJSON DepSpec'); only the R feedstock naming
+      -- rule remains a semantic check.
+      checkRName lang name ds
 
     -- Validate the dependency's resolved source (see 'effectiveDepSource', the
     -- shared resolution rule). Returns the validated source or an error.
@@ -476,20 +586,6 @@ checkPackageDeps pm = mapM_ checkGroup groups
                       <> ", which is not valid for " <> lang
                       <> " (expected: " <> validList pol <> ")"
 
-    -- A channel is a conda-only refinement (which package DATABASE within conda).
-    -- Rule 2: a channel on a resolved non-conda source is a contradiction. Under
-    -- conda-forge the R name must be a bare CRAN name (the pixi lowering adds the
-    -- r- prefix); any other channel passes through literally.
-    checkChannel lang name ds src =
-      case dsChannel ds of
-        Nothing -> checkRName lang name ds -- absent channel means conda-forge
-        Just ch
-          | src == SrcConda -> checkRName lang name ds
-          | otherwise ->
-              Left $
-                "dependency '" <> name <> "' declares channel '" <> ch
-                  <> "', but channels apply only to conda dependencies (" <> lang <> ")"
-
     checkRName lang name ds
       | lang == "r"
       , channelIsCondaForge (dsChannel ds)
@@ -502,6 +598,37 @@ checkPackageDeps pm = mapM_ checkGroup groups
     channelIsCondaForge = maybe True (== condaForgeChannel)
 
     validList pol = T.intercalate ", " (map depSourceText (ldpHonored pol))
+
+    -- Local (filesystem-path) deps: the language must support tracked local
+    -- installs, and each path must be module-relative (no absolute, no '..'; an
+    -- in-project symlink is the escape hatch to an external source).
+    checkLocalGroup (lang, m)
+      | ldpLocalInstall (depPolicy lang) = mapM_ (checkLocalDep lang) (Map.toList m)
+      | otherwise = Left (localUnsupportedMsg lang (Map.keys m))
+
+    checkLocalDep lang (name, ld) = checkLocalPath lang name (ldPath ld)
+
+    checkLocalPath lang name p
+      | "/" `T.isPrefixOf` p =
+          Left $ localPathErr lang name p "must be relative to the module root (not absolute)"
+      | any (== "..") (T.splitOn "/" p) =
+          Left $ localPathErr lang name p "must not contain '..' (use an in-project symlink for an external source)"
+      | T.null p = Left $ localPathErr lang name p "must not be empty"
+      | otherwise = Right ()
+
+    localPathErr lang name p why =
+      "local dependency '" <> name <> "' for " <> lang <> " has path '" <> p <> "' that " <> why
+
+    localUnsupportedMsg lang names =
+      let pkgs = T.intercalate ", " names
+       in case lang of
+            "cpp" ->
+              "local dependencies are not supported for cpp (packages: " <> pkgs
+                <> "); C++ has no package-manager-tracked local deps. Use cxx-flags "
+                <> "for ad-hoc (untracked) linkage of a locally built library."
+            _ ->
+              "local dependencies are not supported for " <> lang
+                <> " (packages: " <> pkgs <> "); supported for: py, rust."
 
 data PackageMeta
   = PackageMeta
@@ -537,6 +664,10 @@ data PackageMeta
   -- | External Julia packages (name -> 'DepSpec') needed by the Julia pool
   -- (resolved by Pkg.jl).
   , packageJuliaDeps :: Map Text DepSpec
+  -- | Local (filesystem-path) dependencies, grouped by language
+  -- (lang -> name -> 'LocalDep'). Non-portable until frozen; honored only from
+  -- the root/entry module. Supported languages: py, rust (see 'ldpLocalInstall').
+  , packageLocalDeps :: Map Text (Map Text LocalDep)
   -- | Optional per-language toolchain version constraints
   -- (lang name -> constraint, e.g. "python" -> ">=3.10"), merged into the
   -- EnvSpec language list.
@@ -792,6 +923,7 @@ instance Defaultable PackageMeta where
       , packageRDeps = Map.empty
       , packageCppDeps = Map.empty
       , packageJuliaDeps = Map.empty
+      , packageLocalDeps = Map.empty
       , packageLangVersions = Map.empty
       , packageInclude = Nothing
       , packageMorlocVersion = Nothing
@@ -851,6 +983,7 @@ instance FromJSON PackageMeta where
       <*> o .:? "r-deps" .!= Map.empty
       <*> o .:? "cpp-deps" .!= Map.empty
       <*> o .:? "julia-deps" .!= Map.empty
+      <*> o .:? "local-deps" .!= Map.empty
       <*> o .:? "lang-versions" .!= Map.empty
       <*> o .:? "include"
       <*> o .:? "morloc-version"

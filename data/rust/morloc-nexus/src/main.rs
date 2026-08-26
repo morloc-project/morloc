@@ -293,8 +293,23 @@ fn main() {
             let mut entries: Vec<std::path::PathBuf> = std::env::var_os(var)
                 .map(|v| std::env::split_paths(&v).collect())
                 .unwrap_or_default();
-            for sub in ["lib", "share/morloc/lib"] {
-                let dir = prefix.join(sub);
+            // libmorloc + morloc-shipped libs live under the nexus's own prefix.
+            // A user-installed C++ library lives under the environment's shared
+            // module prefix, <state>/modules/lib. Natively state == the nexus
+            // prefix (so prefix/modules/lib is correct); in a container the state
+            // dir is mounted separately and MORLOC_STATE names it, so add that
+            // too. This runtime search path is what makes a user .so LOAD;
+            // resolving it from the running environment (rather than a baked
+            // rpath) keeps the pool relocatable.
+            let mut dirs: Vec<std::path::PathBuf> = vec![
+                prefix.join("lib"),
+                prefix.join("share/morloc/lib"),
+                prefix.join("modules/lib"),
+            ];
+            if let Some(state) = std::env::var_os("MORLOC_STATE").filter(|s| !s.is_empty()) {
+                dirs.push(std::path::PathBuf::from(state).join("modules/lib"));
+            }
+            for dir in dirs {
                 if !entries.contains(&dir) {
                     entries.push(dir);
                 }
