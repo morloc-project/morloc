@@ -23,19 +23,34 @@ toolchain:
   # and resolves git-pinned morloc-dependencies (build AND interactive runtime).
   - { package: git,         version: "*", phase: both }
 
-# APT packages the dev environment installs to build the morloc COMPILER from
-# source. Used ONLY by dev environments (`mim new --dev`, always a
-# debian/ubuntu container); released environments download a prebuilt compiler and
-# never use this list. These are NOT conda packages: they let the developer build
-# the Haskell compiler in the dev shell with conda DEACTIVATED, so GHC links the
-# system (apt) libraries rather than the mounted /env conda libraries. The Haskell
-# toolchain itself (GHC + stack) is provisioned by ghcup baked into the container
-# image (conda's ghc/stack are too old, and conda-forge has no GHC 9.6); these apt
-# packages are the C toolchain + the libraries that GHC bindist and the compiler's
-# Haskell deps link:
-# build-essential (gcc/g++/make), libgmp-dev (integer-gmp), libncurses-dev
-# (libtinfo, GHC + ghci), zlib1g-dev, libffi-dev (the RTS), xz-utils (to unpack the
-# GHC bindist), pkg-config, and git.
+# Dev environments build the morloc COMPILER from source. Both lists below are
+# dev-only (`mim new --dev`, always a debian/ubuntu container); released
+# environments download a prebuilt compiler and use neither. They exist because
+# the compiler is built in TWO phases that see different toolchains:
+#
+#   Phase 1 (image build, as root): the conda env does not exist yet -- it is
+#   mounted only at run time. The Dockerfile installs ghcup + stack here, and
+#   `stack setup` later fetches the GHC bindist. The only package manager is apt,
+#   so the libs those bootstrap binaries dynamically link, plus xz to unpack the
+#   bindist, must come from apt. That is `dev-apt`.
+#
+#   Phase 2 (run time, dev shell): the conda env is mounted and ACTIVE. GHC
+#   compiles the compiler's Haskell dependencies through the conda toolchain
+#   (conda's cc/ld), so the C libraries those deps link resolve in the conda env,
+#   NOT in /usr/lib. That is `dev-conda`.
+#
+# The Haskell toolchain (GHC + stack) itself comes from ghcup, not conda
+# (conda's ghc/stack are too old and conda-forge has no GHC 9.6). A lib in both
+# lists is consumed by a different tool in each phase.
+
+# System build tools + libs the dev build needs from apt rather than conda:
+#   - build-essential: binutils (`/usr/bin/strip`, `ar`, ...) that the Haskell
+#     build shells out to -- Cabal's copy/register step strips the built exes and
+#     libs with the system strip, independent of the conda cc/ld GHC links with.
+#   - libgmp/libtinfo(libncurses)/libz/libffi: linked by the ghcup + stack
+#     bootstrap binaries at image-build time, when the conda env is not mounted
+#     yet, so they cannot come from conda.
+#   - xz-utils: unpacks the GHC bindist.
 dev-apt:
   - build-essential
   - libgmp-dev
@@ -43,5 +58,13 @@ dev-apt:
   - zlib1g-dev
   - libffi-dev
   - xz-utils
-  - pkg-config
-  - git
+
+# Phase-2 conda deps: C libraries the compiler's Haskell dependencies link when
+# built through the active conda toolchain -- gmp (integer-gmp), zlib (zlib and
+# digest packages), ncurses/libtinfo, libffi (the RTS), xz.
+dev-conda:
+  - gmp
+  - zlib
+  - ncurses
+  - libffi
+  - xz
