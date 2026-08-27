@@ -198,7 +198,7 @@ jobs:
     steps:
       # rust-binaries-* carries, per triple, the morloc compiler (glibc >= 2.31
       # from static-build) and the rust/ source. The mim manager is released
-      # from its own repo (morloc-project/morloc-manager), not bundled here yet.
+      # from its own repo (morloc-project/morloc-manager), not bundled here.
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -229,8 +229,8 @@ jobs:
       # artifacts make up the provisionable set per platform triple, plus the
       # release version. libmorloc.so and morloc-nexus are NOT listed: they are
       # built from the shared rust_src at init time. The mim manager is NOT
-      # listed either -- it is released from its own repo and (Phase 3) will be
-      # fetched-then-bundled here. Only triples with a complete asset set are
+      # listed either -- it is released from its own repo
+      # (morloc-project/morloc-manager). Only triples with a complete asset set are
       # listed; macOS is omitted (no prebuilt compiler), so the flow falls
       # through to a container.
       # Built with Python so the manifest carries a SHA-256 for every published
