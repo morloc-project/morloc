@@ -114,8 +114,8 @@ const DEFAULT_IFILE_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 // ── Shared SHM stream registry: bootstrap ────────────────────────────────
 //
 // The registry is a `CompanionSegment` -- a dedicated shared mapping
-// named `<basename>.registry` that lives outside the general allocator's
-// `_<idx>` namespace. Layout:
+// named `<basename>.reg` that lives outside the general allocator's
+// `-<idx>` namespace. Layout:
 //
 //   offset 0:                 RegistryHeader (64 bytes)
 //   offset 64:                slot[0]
@@ -251,7 +251,7 @@ pub fn registry_bootstrap() -> Result<usize, MorlocError> {
     let volume_bytes = registry_volume_size(slot_count);
 
     let seg = crate::shm_companion::CompanionSegment::open(
-        "registry",
+        "reg",
         volume_bytes,
         crate::shm_companion::SweepPolicy::SweepOnCrash,
     )?;

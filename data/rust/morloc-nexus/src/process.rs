@@ -16,23 +16,23 @@ pub const MAX_DAEMONS: usize = 32;
 /// Pool-crash recovery generation counter. Starts at 0 (initial daemon
 /// startup). Each successful coordinated recovery (kill all pools, drop
 /// SHM, respawn) increments this. The current generation is encoded into
-/// the SHM basename so volumes from a prior generation can never be
-/// confused for current-generation volumes -- if a generation 0 file
-/// somehow survives the recovery teardown, generation 1's `morloc-<pid>-
-/// <hash>-gen1_X` will not collide. The next nexus startup sweep
-/// (`cleanup_stale_shm`) catches any stragglers because everything still
-/// starts with `morloc-<pid>-`.
+/// the SHM basename's 4-hex generation field so volumes from a prior
+/// generation can never be confused for current-generation volumes -- if
+/// a generation 0 file somehow survives the recovery teardown,
+/// generation 1's `/mlc-<pid>-<hash>-0001-<vol>` will not collide. The
+/// next nexus startup sweep (`cleanup_stale_shm`) catches any stragglers
+/// because everything still starts with `mlc-<pid>`.
 pub static RECOVERY_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// Compute the SHM basename for a given recovery generation. Generation
-/// 0 returns the base unchanged (preserves the current naming for the
-/// happy path); generations 1+ append `-gen<N>`.
+/// Compute the SHM basename for a given recovery generation. `base` is
+/// the generation-0 basename `/mlc-<pid>-<hash>-0000`; this replaces its
+/// trailing 4-hex generation field. Generation 0 reproduces `base`,
+/// keeping the fixed four-field shape (pid, hash, gen, vol) so parsing is
+/// positional. (The name is ASCII, so byte-slicing off the last field is
+/// safe.)
 pub fn basename_for_generation(base: &str, generation: u64) -> String {
-    if generation == 0 {
-        base.to_string()
-    } else {
-        format!("{}-gen{}", base, generation)
-    }
+    let core = &base[..base.len() - 4];
+    format!("{}{:04x}", core, generation)
 }
 
 // ── Recovery context ────────────────────────────────────────────────────────
@@ -385,8 +385,8 @@ static BROKEN_PIPE: AtomicBool = AtomicBool::new(false);
 /// Global tmpdir path (set once in main, read during cleanup).
 static TMPDIR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-/// Async-signal-safe view of the SHM basename prefix (`"<basename>_\0"`)
-/// so `signal_exit_handler` can build `<basename>_<idx>` names without
+/// Async-signal-safe view of the SHM basename prefix (`"<basename>-\0"`)
+/// so `signal_exit_handler` can build `<basename>-<idx>` names without
 /// allocating or locking. `Mutex`-guarded `COMMON_BASENAME` in shm.rs
 /// is unusable from a signal handler. Overwrites leak the previous
 /// `CString` -- recovery is rare and each string is ~64 B.
@@ -496,7 +496,7 @@ extern "C" fn crash_cleanup_handler(sig: libc::c_int) {
     }
 }
 
-/// Sweep every `<basename>_<idx>` segment via `shm_unlink`. Called
+/// Sweep every `<basename>-<idx>` segment via `shm_unlink`. Called
 /// from `signal_exit_handler`; must stay async-signal-safe (no
 /// allocation, no locks). The full 0..MAX_VOLUME_NUMBER walk is
 /// required because `pick_free_slot` (shm.rs) places new volumes at
@@ -514,11 +514,11 @@ unsafe fn sweep_shm_segments() {
     // strlen is async-signal-safe.
     let prefix_len = libc::strlen(prefix_ptr);
 
-    // 96 B holds any realistic basename (~50 B) + a full u32's 10
-    // decimal digits + NUL, with headroom.
+    // 96 B holds any realistic basename (~50 B) + the 4-hex volume index
+    // + NUL, with headroom.
     const BUF_LEN: usize = 96;
     let mut buf: [u8; BUF_LEN] = [0; BUF_LEN];
-    if prefix_len + 11 > BUF_LEN {
+    if prefix_len + 5 > BUF_LEN {
         return;
     }
     std::ptr::copy_nonoverlapping(
@@ -528,7 +528,7 @@ unsafe fn sweep_shm_segments() {
     );
 
     for idx in 0..MAX_VOLUME_NUMBER {
-        let digits_end = write_decimal(&mut buf, prefix_len, idx as u32);
+        let digits_end = write_hex4(&mut buf, prefix_len, idx as u16);
         buf[digits_end] = 0;
         libc::shm_unlink(buf.as_ptr() as *const std::os::raw::c_char);
     }
@@ -544,27 +544,16 @@ unsafe fn sweep_shm_segments() {
     }
 }
 
-/// Signal-safe unsigned-decimal writer. Divmod-and-reverse.
-fn write_decimal(buf: &mut [u8], start: usize, mut val: u32) -> usize {
-    if val == 0 {
-        buf[start] = b'0';
-        return start + 1;
-    }
-    let digits_start = start;
-    let mut pos = start;
-    while val > 0 {
-        buf[pos] = b'0' + (val % 10) as u8;
-        val /= 10;
-        pos += 1;
-    }
-    let mut lo = digits_start;
-    let mut hi = pos - 1;
-    while lo < hi {
-        buf.swap(lo, hi);
-        lo += 1;
-        hi -= 1;
-    }
-    pos
+/// Signal-safe fixed-width (4-digit, zero-padded) lowercase-hex writer.
+/// Volume indices are < MAX_VOLUME_NUMBER (32768 = 0x8000), so 4 hex
+/// digits are exact. Returns the end offset (`start + 4`).
+fn write_hex4(buf: &mut [u8], start: usize, val: u16) -> usize {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    buf[start] = HEX[((val >> 12) & 0xf) as usize];
+    buf[start + 1] = HEX[((val >> 8) & 0xf) as usize];
+    buf[start + 2] = HEX[((val >> 4) & 0xf) as usize];
+    buf[start + 3] = HEX[(val & 0xf) as usize];
+    start + 4
 }
 
 /// Install signal handlers.
@@ -606,10 +595,10 @@ pub fn set_tmpdir(path: String) {
     let _ = TMPDIR.set(path);
 }
 
-/// Publish the current basename with its trailing `_` so the signal
-/// handler only has to append decimal digits and a NUL.
+/// Publish the current basename with its trailing `-` so the signal
+/// handler only has to append the 4-hex volume index and a NUL.
 fn record_shm_basename(basename: &str) {
-    let prefix = CString::new(format!("{}_", basename))
+    let prefix = CString::new(format!("{}-", basename))
         .expect("shm basename must not contain NUL");
     SHM_BASENAME_PREFIX.store(prefix.into_raw(), Ordering::Release);
 }
@@ -630,9 +619,25 @@ pub fn init_shm() -> (String, String) {
     cleanup_stale_shm();
 
     let job_hash = make_job_hash(42);
-    // PID is embedded so cleanup_stale_shm() can identify orphans
-    // without reading SHM headers.
-    let shm_basename = format!("morloc-{}-{:016x}", std::process::id(), job_hash);
+    // SHM name convention, uniform across platforms. macOS `shm_open`
+    // requires a leading '/' and caps the whole name (slash included) at
+    // PSHMNAMLEN = 31; Linux/glibc accepts the identical form, so one
+    // shape works everywhere and the Linux test suite exercises exactly
+    // the names macOS uses. Four dash-separated fixed-width hex fields
+    // (always present) keep names short, give a distinctive `mlc-` match
+    // prefix, and make parsing positional:
+    //   basename  /mlc-<pid:6hex>-<hash:8hex>-<gen:4hex>
+    //   volume    <basename>-<vol:4hex>       registry  <basename>.reg
+    // The PID (embedded so orphan sweeps need no SHM-header read) uses 6
+    // hex = 24 bits, covering every real PID (Linux pid_max <= 2^22,
+    // macOS PID_MAX = 99999). The 32-bit hash disambiguates same-PID
+    // jobs. The generation field starts at 0000 and is bumped by
+    // `basename_for_generation` on pool-crash recovery.
+    let shm_basename = format!(
+        "/mlc-{:06x}-{:08x}-0000",
+        std::process::id(),
+        job_hash & 0xffff_ffff
+    );
 
     extern "C" {
         fn shm_set_fallback_dir(dir: *const std::ffi::c_char);
@@ -664,8 +669,8 @@ pub fn init_shm() -> (String, String) {
         }
         // After the main SHM allocation pool is up, bootstrap the
         // shared stream registry. Since the registry lives in a
-        // CompanionSegment (`<basename>.registry`) it never collides
-        // with the allocator's `_<idx>` volumes. Subsequent pool
+        // CompanionSegment (`<basename>.reg`) it never collides
+        // with the allocator's `-<idx>` volumes. Subsequent pool
         // processes attach to the same segment; `stream_registry_init`
         // is idempotent.
         let slot_count = stream_registry_init(&mut errmsg);
@@ -1249,7 +1254,7 @@ pub fn cleanup_stale_shm() {
             Ok(s) => s,
             Err(_) => continue,
         };
-        if name.starts_with("morloc-") {
+        if name.starts_with("mlc-") || name.starts_with("morloc-") {
             candidates.push(name);
         }
     }
@@ -1261,9 +1266,7 @@ pub fn cleanup_stale_shm() {
     // bucket for the /proc/maps strategy.
     let mut needs_map_scan: Vec<String> = Vec::new();
     for name in candidates {
-        let body = name.strip_prefix("morloc-").unwrap();
-        let pid_str = body.split(['-', '_']).next().unwrap_or("");
-        let pid_parsed: Option<u32> = pid_str.parse().ok();
+        let pid_parsed = parse_pid_from_shm_entry(&name);
         match pid_parsed {
             Some(pid) if std::path::Path::new(&format!("/proc/{}", pid)).exists() => {
                 continue; // creator alive; leave alone
@@ -1324,6 +1327,22 @@ fn collect_mapped_shm_paths() -> std::collections::HashSet<String> {
     out
 }
 
+/// Recover the creator PID from an on-disk SHM segment name (a `/dev/shm`
+/// directory entry, which lacks the `shm_open` leading `/`). Handles the
+/// current `mlc-<pid:6hex>-<hash...>` format and the legacy
+/// `morloc-<pid>-<hash>` format (pre-upgrade stragglers). Returns `None`
+/// when no PID can be parsed, in which case the caller falls back to the
+/// `/proc/*/maps` liveness scan.
+fn parse_pid_from_shm_entry(name: &str) -> Option<u32> {
+    if let Some(body) = name.strip_prefix("mlc-") {
+        body.get(0..6).and_then(|h| u32::from_str_radix(h, 16).ok())
+    } else if let Some(body) = name.strip_prefix("morloc-") {
+        body.split(['-', '_']).next().and_then(|s| s.parse().ok())
+    } else {
+        None
+    }
+}
+
 fn unlink_shm(name: &str) {
     // Best-effort: failures (EACCES from foreign user, ENOENT from race,
     // etc.) are silent.
@@ -1349,37 +1368,63 @@ pub fn set_child_subreaper() {
 mod tests {
     use super::*;
 
-    fn digits(val: u32) -> String {
-        let mut buf = [0u8; 32];
-        let end = write_decimal(&mut buf, 0, val);
+    fn hex4(val: u16) -> String {
+        let mut buf = [0u8; 8];
+        let end = write_hex4(&mut buf, 0, val);
         std::str::from_utf8(&buf[..end]).unwrap().to_string()
     }
 
     #[test]
-    fn write_decimal_zero() {
-        assert_eq!(digits(0), "0");
+    fn write_hex4_zero_is_padded() {
+        assert_eq!(hex4(0), "0000");
     }
 
     #[test]
-    fn write_decimal_single_digit() {
-        assert_eq!(digits(7), "7");
-    }
-
-    #[test]
-    fn write_decimal_multi_digit() {
-        assert_eq!(digits(42), "42");
-        assert_eq!(digits(1234), "1234");
-        // Locks the sweep's per-index name to fit in the 96-byte buffer.
+    fn write_hex4_pads_to_four() {
+        assert_eq!(hex4(7), "0007");
+        assert_eq!(hex4(0x1234), "1234");
+        // The max volume index fits in exactly 4 hex digits.
         assert_eq!(MAX_VOLUME_NUMBER, 32768);
-        assert_eq!(digits((MAX_VOLUME_NUMBER - 1) as u32), "32767");
+        assert_eq!(hex4((MAX_VOLUME_NUMBER - 1) as u16), "7fff");
     }
 
     #[test]
-    fn write_decimal_appends_after_prefix() {
+    fn shm_pid_round_trips_through_name() {
+        // The /dev/shm entry lacks the shm_open leading '/'.
+        for pid in [1u32, 99999, 0x3f_ffff, 0xff_ffff] {
+            let base = format!("/mlc-{:06x}-{:08x}-0000", pid, 0xdead_beefu64 & 0xffff_ffff);
+            let entry = base.trim_start_matches('/');
+            assert_eq!(parse_pid_from_shm_entry(entry), Some(pid), "entry {}", entry);
+        }
+        // Legacy format is still recognised for pre-upgrade stragglers.
+        assert_eq!(parse_pid_from_shm_entry("morloc-4242-deadbeefcafef00d_3"), Some(4242));
+    }
+
+    #[test]
+    fn shm_names_fit_macos_pshmnamlen() {
+        // macOS PSHMNAMLEN is 31, counting the leading '/'. Assemble the
+        // worst case: a full-width PID (>= any real pid_max), the full
+        // 32-bit hash field, a high recovery generation, and the maximum
+        // volume index / the registry companion suffix.
+        const PSHMNAMLEN: usize = 31;
+        let base = basename_for_generation(
+            &format!("/mlc-{:06x}-{:08x}-0000", 0xff_ffffu32, 0xffff_ffffu32),
+            0xffff,
+        );
+        let volume = format!("{}-{:04x}", base, MAX_VOLUME_NUMBER - 1);
+        let registry = format!("{}.reg", base);
+        assert!(volume.len() <= PSHMNAMLEN, "volume '{}' is {} chars", volume, volume.len());
+        assert!(registry.len() <= PSHMNAMLEN, "registry '{}' is {} chars", registry, registry.len());
+    }
+
+    #[test]
+    fn write_hex4_appends_after_prefix() {
+        // Mirrors the signal-handler sweep: prefix ends with '-', then a
+        // 4-hex volume index.
         let mut buf = [0u8; 64];
-        let prefix = b"morloc-1234_";
+        let prefix = b"mlc-0004d2-deadbeef-";
         buf[..prefix.len()].copy_from_slice(prefix);
-        let end = write_decimal(&mut buf, prefix.len(), 42);
-        assert_eq!(&buf[..end], b"morloc-1234_42");
+        let end = write_hex4(&mut buf, prefix.len(), 42);
+        assert_eq!(&buf[..end], b"mlc-0004d2-deadbeef-002a");
     }
 }

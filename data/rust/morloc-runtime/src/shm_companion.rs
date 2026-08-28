@@ -1,8 +1,8 @@
 //! SHM companion segments: fixed-size shared mappings kept outside
-//! the general allocator's `_<idx>` namespace.
+//! the general allocator's `-<idx>` namespace.
 //!
 //! The general SHM allocator (`shm::shinit` + `find_free_block`) owns
-//! volumes named `<basename>_<idx>`. Subsystems that want a fixed
+//! volumes named `<basename>-<idx>`. Subsystems that want a fixed
 //! shared region (the stream registry, a future trace buffer, a
 //! cross-pool `@save` index, ...) name their files
 //! `<basename>.<suffix>` and open them through this module. The
@@ -50,7 +50,7 @@ enum Backing {
 }
 
 /// A shared memory segment held outside the general allocator's
-/// `_<idx>` namespace. RAII: `Drop` runs `teardown`.
+/// `-<idx>` namespace. RAII: `Drop` runs `teardown`.
 ///
 /// Callers that hand the segment off to a static must
 /// `mem::forget(seg)` and later call a manual teardown; see
