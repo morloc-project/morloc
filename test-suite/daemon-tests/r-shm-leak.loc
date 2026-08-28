@@ -5,7 +5,7 @@
 --   * The daemon allocates SHM for the argument list (~ 250 bytes).
 --   * The R pool serializes the result via morloc_put_value, which
 --     allocates a fresh voidstar and ships it as PACKET_SOURCE_RPTR.
---   * Pre-fix: the R pool never freed that voidstar; /dev/shm/morloc-*
+--   * Pre-fix: the R pool never freed that voidstar; /dev/shm/mlc-*
 --     grew per request.
 --   * Post-fix: the R pool's shm_tracker holds the voidstar until the
 --     next request, then flushes it at run_job_c entry.

@@ -317,12 +317,14 @@ s.close()
 "
 }
 
-# Sum sizes of all /dev/shm/morloc-<pid>-* segments belonging to a daemon.
+# Sum sizes of all /dev/shm/mlc-<pid:6hex>-* segments belonging to a daemon.
+# The SHM name embeds the creator PID as 6 zero-padded hex digits.
 shm_size_for_pid() {
-    local pid="$1"
+    local pidhex
+    pidhex=$(printf '%06x' "$1")
     local total=0
     local sz
-    for f in /dev/shm/morloc-${pid}-*; do
+    for f in /dev/shm/mlc-${pidhex}-*; do
         [ -e "$f" ] || continue
         sz=$(stat -c %s "$f" 2>/dev/null || echo 0)
         total=$((total + sz))
@@ -330,9 +332,11 @@ shm_size_for_pid() {
     echo "$total"
 }
 
-# Count /dev/shm/morloc-<pid>-* segments for a daemon.
+# Count /dev/shm/mlc-<pid:6hex>-* segments for a daemon.
 shm_count_for_pid() {
-    ls -1 /dev/shm/morloc-${1}-* 2>/dev/null | wc -l
+    local pidhex
+    pidhex=$(printf '%06x' "$1")
+    ls -1 /dev/shm/mlc-${pidhex}-* 2>/dev/null | wc -l
 }
 
 # ======================================================================
@@ -1603,7 +1607,7 @@ fi
 # Asserts that the daemon's per-call SHM allocations are released when
 # each request finishes (via the per-eval arena in eval_arena.rs). With
 # the leak in place, every call would accumulate ~500 bytes in the
-# daemon's /dev/shm/morloc-<pid>-* volumes; over 1000 calls the volume
+# daemon's /dev/shm/mlc-<pid>-* volumes; over 1000 calls the volume
 # would fill and additional 64 KB volumes would be created. With the
 # fix, blocks are reused and total /dev/shm bytes for the daemon stay
 # essentially flat.
@@ -1915,7 +1919,7 @@ fi
 # single ill-timed crash without proper SHM reclamation could OOM the
 # host. This test fires repeated requests that ship a ~250 KB payload
 # per call, kills the pool mid-stream each iteration, and asserts that
-# /dev/shm/morloc-<daemon-pid>-* total bytes stay bounded across many
+# /dev/shm/mlc-<daemon-pid>-* total bytes stay bounded across many
 # crash/recover cycles. Without recovery's coordinated SHM teardown the
 # delta would grow by roughly the payload size per crash.
 

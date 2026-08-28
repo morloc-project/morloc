@@ -35,8 +35,8 @@ trap cleanup EXIT
 
 count_shm() {
     local n=0
-    if ls /dev/shm/morloc-* &>/dev/null; then
-        n=$(ls -1 /dev/shm/morloc-* 2>/dev/null | wc -l)
+    if ls /dev/shm/mlc-* &>/dev/null; then
+        n=$(ls -1 /dev/shm/mlc-* 2>/dev/null | wc -l)
     fi
     echo "$n"
 }
