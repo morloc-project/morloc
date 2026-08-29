@@ -2064,13 +2064,9 @@ unsafe fn write_lp_message(
         (len & 0xFF) as u8,
     ];
 
-    let n = libc::send(
-        fd,
-        len_buf.as_ptr() as *const c_void,
-        4,
-        crate::utility::SEND_NOSIGNAL,
-    );
-    if n != 4 {
+    // send_all retries on EAGAIN (non-blocking client fd on macOS) rather than
+    // treating a full send buffer as a fatal error mid-message.
+    if !crate::ipc_ffi::send_all(fd, len_buf.as_ptr(), 4) {
         set_errmsg(
             errmsg,
             &MorlocError::Other("Failed to write message length prefix".into()),
@@ -2078,22 +2074,12 @@ unsafe fn write_lp_message(
         return false;
     }
 
-    let mut total: usize = 0;
-    while total < len {
-        let n = libc::send(
-            fd,
-            (data as *const u8).add(total) as *const c_void,
-            len - total,
-            crate::utility::SEND_NOSIGNAL,
+    if !crate::ipc_ffi::send_all(fd, data as *const u8, len) {
+        set_errmsg(
+            errmsg,
+            &MorlocError::Other("Failed to write message body".into()),
         );
-        if n <= 0 {
-            set_errmsg(
-                errmsg,
-                &MorlocError::Other("Failed to write message body".into()),
-            );
-            return false;
-        }
-        total += n as usize;
+        return false;
     }
 
     true

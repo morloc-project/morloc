@@ -31,7 +31,19 @@ pub static RECOVERY_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// positional. (The name is ASCII, so byte-slicing off the last field is
 /// safe.)
 pub fn basename_for_generation(base: &str, generation: u64) -> String {
-    let core = &base[..base.len() - 4];
+    // `base` is always a gen-0 basename ending in the 4-hex generation field,
+    // so it is at least 4 bytes; saturating_sub keeps a malformed short input
+    // from underflow-panicking (it would just drop the whole string).
+    debug_assert!(base.len() >= 4, "shm basename too short: {:?}", base);
+    // The generation field is 4 hex digits; beyond 0xffff the name would grow
+    // past macOS PSHMNAMLEN(31) and shm_open falls back to file-backed. The
+    // daemon's recovery loop-guard bounds generations far below this.
+    debug_assert!(
+        generation <= 0xffff,
+        "recovery generation overflows the 4-hex field: {}",
+        generation
+    );
+    let core = &base[..base.len().saturating_sub(4)];
     format!("{}{:04x}", core, generation)
 }
 
@@ -373,6 +385,11 @@ static POOL_SWEPT: [AtomicBool; MAX_DAEMONS] = {
     const INIT: AtomicBool = AtomicBool::new(false);
     [INIT; MAX_DAEMONS]
 };
+
+/// Per-index pool language label, captured at spawn. Used only for the
+/// post-mortem `report_dead_pools` line so a failed run names WHICH pool
+/// died (e.g. "pool 2 [cpp]"). Indexed by the global pool index.
+static POOL_LANGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 /// Re-entrancy guard for clean_exit.
 static CLEANING_UP: AtomicBool = AtomicBool::new(false);
@@ -930,21 +947,23 @@ pub fn setup_sockets(pools: &[Pool], tmpdir: &str, shm_basename: &str) -> Vec<Po
 /// corrupted -- the runtime cannot police fd sharing across pools
 /// and the nexus. Documented, not enforced.
 fn start_language_server(socket: &PoolSocket) -> Result<i32, String> {
+    // Export this pool's source-fingerprint hash so the runtime cache wrap can
+    // mix it into every cache key. Set it in the PARENT before the fork so the
+    // child inherits it: `setenv` is NOT async-signal-safe (it mallocs the
+    // environ array) and calling it between fork and exec can deadlock on the
+    // allocator lock if the nexus is multithreaded (serve/daemon topologies).
+    // The value is per-pool; pools are spawned serially on the main thread, so
+    // each child inherits the hash set immediately before its own fork.
+    unsafe {
+        let key = b"MORLOC_POOL_HASH\0".as_ptr() as *const libc::c_char;
+        libc::setenv(key, socket.pool_hash.as_ptr(), 1);
+    }
+
     let pid = unsafe { libc::fork() };
 
     if pid == 0 {
         // Child process
         unsafe { libc::setpgid(0, 0) };
-
-        // Export this pool's source-fingerprint hash so the runtime
-        // cache wrap can mix it into every cache key. The env var is
-        // per-pool because each language emits its own pool source and
-        // therefore has its own hash; setting it in the child between
-        // fork and exec keeps the values isolated.
-        unsafe {
-            let key = b"MORLOC_POOL_HASH\0".as_ptr() as *const libc::c_char;
-            libc::setenv(key, socket.pool_hash.as_ptr(), 1);
-        }
 
         let argv: Vec<*const libc::c_char> = socket
             .syscmd
@@ -1000,6 +1019,14 @@ pub fn start_daemons(sockets: &mut [PoolSocket], indices: &[usize]) -> Result<()
         POOL_SWEPT[idx].store(false, Ordering::Relaxed);
         PIDS[idx].store(pid, Ordering::Relaxed);
         PGIDS[idx].store(pid, Ordering::Relaxed);
+        // Record the lang label for the post-mortem in report_dead_pools.
+        {
+            let mut langs = POOL_LANGS.lock().unwrap();
+            if langs.len() <= idx {
+                langs.resize(idx + 1, String::new());
+            }
+            langs[idx] = sockets[idx].lang.clone();
+        }
     }
 
     // Wait for each daemon to respond to pings
@@ -1149,6 +1176,48 @@ pub fn pool_death_info(pool_index: usize) -> Option<String> {
         Some(format!("Pool process exited with status {code}"))
     } else {
         Some("Pool process died unexpectedly".into())
+    }
+}
+
+/// Post-mortem for a failed single-shot run: reap any exited pool children
+/// and print one line per dead pool naming WHICH pool died and HOW.
+///
+/// A cross-language "Connection closed by peer" only names the caller pool;
+/// the callee that actually died is invisible to the caller (they are
+/// siblings, both children of this nexus). This nexus is the parent, so
+/// `waitpid` gives it the exact disposition. Crucially, a pool killed by an
+/// uncatchable SIGKILL -- e.g. the macOS memory-pressure/jetsam OOM killer --
+/// leaves NO in-pool backtrace (no crash handler, no faulthandler, no log);
+/// only the parent's wait-status reveals it ("signal 9"). Called from the
+/// run-failed paths so that signal is surfaced instead of swallowed.
+pub fn report_dead_pools() {
+    // Drain any child exits the SIGCHLD handler has not yet processed, so a
+    // pool that died microseconds before the caller observed EOF is still
+    // reported (avoids a report/reap race).
+    loop {
+        let mut status: libc::c_int = 0;
+        let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+        if pid <= 0 {
+            break;
+        }
+        for i in 0..MAX_DAEMONS {
+            if PIDS[i].load(Ordering::Relaxed) == pid {
+                EXIT_STATUSES[i].store(status, Ordering::Relaxed);
+                PIDS[i].store(-1, Ordering::Relaxed);
+                break;
+            }
+        }
+    }
+    let langs = POOL_LANGS.lock().unwrap();
+    for i in 0..langs.len().min(MAX_DAEMONS) {
+        if let Some(info) = pool_death_info(i) {
+            let lang = &langs[i];
+            if lang.is_empty() {
+                eprintln!("  pool {}: {}", i, info);
+            } else {
+                eprintln!("  pool {} [{}]: {}", i, lang, info);
+            }
+        }
     }
 }
 

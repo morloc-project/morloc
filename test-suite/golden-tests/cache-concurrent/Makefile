@@ -8,14 +8,18 @@
 # per language (3 total) must remain.
 
 INPUT := '[1,2,3.5]'
-N := 20
+# Fan-out width. Reduced on macOS: each R invocation spawns a memory-heavy
+# Rscript dispatcher + forked worker, and 20-way parallelism exhausts the
+# 7 GB GitHub macOS runner (jetsam SIGKILLs R pools) -- a runner-capacity
+# limit, not a morloc defect. Linux keeps the full-width stress.
+N := $(shell [ "$$(uname)" = Darwin ] && echo 6 || echo 20)
 
 define RUN
 	@for i in $$(seq 1 $(N)); do \
 	  MORLOC_CACHE_BASE=$$PWD/cache ./nexus foo$(1) $(INPUT) > obs.run.$(1).$$i.out 2> obs.run.$(1).$$i.err & \
 	done; wait
-	@echo "outputs_correct_$(1): $$(grep -lx '6.5' obs.run.$(1).*.out 2>/dev/null | wc -l)" >> obs.txt
-	@echo "stderr_empty_$(1):    $$(find obs.run.$(1).*.err -size 0 2>/dev/null | wc -l)" >> obs.txt
+	@echo "outputs_correct_$(1): $$([ "$$(grep -lx '6.5' obs.run.$(1).*.out 2>/dev/null | wc -l | tr -d ' ')" = "$(N)" ] && echo yes || echo no)" >> obs.txt
+	@echo "stderr_empty_$(1):    $$([ "$$(find obs.run.$(1).*.err -size 0 2>/dev/null | wc -l | tr -d ' ')" = "$(N)" ] && echo yes || echo no)" >> obs.txt
 	@cat obs.run.$(1).*.err > obs.err.$(1)
 	@rm -f obs.run.$(1).*
 
@@ -29,9 +33,9 @@ all:
 	$(call RUN,P)
 	$(call RUN,R)
 	$(call RUN,C)
-	@echo "a_packets:    $$(ls cache/a/*.dat 2>/dev/null | wc -l)" >> obs.txt
-	@echo "dats:         $$(ls cache/data/*.dat 2>/dev/null | wc -l)" >> obs.txt
-	@echo "leftover_tmps: $$(find cache -name '*.tmp.*' 2>/dev/null | wc -l)" >> obs.txt
+	@echo "a_packets:    $$(ls cache/a/*.dat 2>/dev/null | wc -l | tr -d ' ')" >> obs.txt
+	@echo "dats:         $$(ls cache/data/*.dat 2>/dev/null | wc -l | tr -d ' ')" >> obs.txt
+	@echo "leftover_tmps: $$(find cache -name '*.tmp.*' 2>/dev/null | wc -l | tr -d ' ')" >> obs.txt
 	cat obs.err.* > obs.err
 	rm -f obs.err.*
 

@@ -14,7 +14,7 @@ all:
 	# === -f jsonl: one element per line, streamed sub-packet by
 	#     sub-packet. Expected count = 3+4+2+1 = 10 lines.
 	printf 'jsonl line count: ' >> obs.txt
-	./prog -f packet @ emit | $(NEXUS) view - -f jsonl | wc -l >> obs.txt 2>> obs.err
+	./prog -f packet @ emit | $(NEXUS) view - -f jsonl | wc -l | tr -d ' ' >> obs.txt 2>> obs.err
 	printf 'jsonl first line: ' >> obs.txt
 	./prog -f packet @ emit | $(NEXUS) view - -f jsonl | head -n 1 >> obs.txt 2>> obs.err
 	printf 'jsonl last line: '  >> obs.txt

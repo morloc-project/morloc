@@ -8,7 +8,7 @@ all:
 	# (`mmh` magic + type byte + u32 size); the schema string starts at
 	# offset 40. Scan the metadata region for a `<` byte -- its presence
 	# means a hint prefix leaked back onto the wire.
-	echo -n "wire-has-hint: " >> obs.txt
+	printf 'wire-has-hint: ' >> obs.txt
 	if od -An -c -j 40 -N 128 /tmp/wire-schema-no-hints.dat | grep -q '<' ; then \
 	  echo "YES" >> obs.txt ; \
 	else \

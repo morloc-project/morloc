@@ -42,6 +42,14 @@ fn morloc_state() -> String {
 }
 
 fn main() {
+    // Ignore SIGPIPE process-wide so a reader that closes early (e.g.
+    // `morloc view | head`, `... | less` quit before EOF) surfaces as an EPIPE
+    // the I/O code already handles, instead of killing the nexus with signal 13.
+    // The pool-dispatch path installs this again later (stdio_server::start), but
+    // `file`/`view` and the early-exit flags short-circuit before that, so it
+    // must be set up front to cover them too.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN); }
+
     // `morloc-nexus --abi-version`: print the ABI/wire-format contract version
     // and exit. Checked as the first argument (a real program runs through the
     // `run <target>` wrapper, so arg[1] is never a bare flag) so provisioning
@@ -318,6 +326,14 @@ fn main() {
                 std::env::set_var(var, joined);
             }
         }
+        // On macOS, the Python pool forks workers after numpy (via pymorloc)
+        // may have initialized an Apple framework in the parent; disable the
+        // Objective-C fork-safety abort in the pools we spawn. libobjc reads
+        // this variable once at process startup, so it must be present in the
+        // child's environment BEFORE exec -- setting it from inside the
+        // already-running interpreter is too late to take effect.
+        #[cfg(target_os = "macos")]
+        std::env::set_var("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES");
     }
     // Canonicalize once; reused below to resolve relative pool exec paths.
     let abs_manifest = std::fs::canonicalize(&manifest_path).ok();
@@ -930,6 +946,7 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
             "unknown error".into()
         };
         eprintln!("Error: run failed: {}", msg);
+        process::report_dead_pools();
         process::clean_exit(1);
     }
 
@@ -939,6 +956,7 @@ fn run_call_packet(config: &dispatch::NexusConfig, tmpdir: &str) {
         let s = unsafe { std::ffi::CStr::from_ptr(run_err) }.to_string_lossy().into_owned();
         unsafe { libc::free(run_err as *mut c_void) };
         eprintln!("Error: run failed: {}", s);
+        process::report_dead_pools();
         process::clean_exit(1);
     }
 

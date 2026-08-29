@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# Byte-match, not text-match: the packets are binary (msgpack markers like 0xAC
+# precede ASCII markers). BSD grep in a UTF-8 locale refuses to match a pattern
+# in a file with invalid-UTF-8 bytes, so force the C locale for byte semantics.
+# (The payloads here are ASCII, so C locale is safe for the morloc runs too.)
+export LC_ALL=C
 # Two binaries, three data shapes, two threshold regimes.
 #
 # nexus-zero (--inline-size 0): every value -- regardless of size or
@@ -60,7 +65,7 @@ fi
 # msgpack encodes [1,2,3,4,5] as an array of small positive ints --
 # the bytes 0x01 0x02 0x03 0x04 0x05 appear contiguously somewhere.
 if find tmp_zero -name 'morloc-pkt-*.mpk' \
-   -exec grep -lP '\x01\x02\x03\x04\x05' {} \; 2>/dev/null | grep -q .; then
+   -exec grep -lF "$(printf '\001\002\003\004\005')" {} \; 2>/dev/null | grep -q .; then
   echo "List_serialized=yes"
 else
   echo "List_serialized=no"
@@ -69,7 +74,7 @@ fi
 # Nested list [[1,2],[3,4]] msgpack: outer array of 2 inner arrays of
 # 2 small ints. The byte sequence "\x01\x02" appears (inner [1,2]).
 if find tmp_zero -name 'morloc-pkt-*.mpk' \
-   -exec grep -lP '\x01\x02' {} \; 2>/dev/null | grep -q .; then
+   -exec grep -lF "$(printf '\001\002')" {} \; 2>/dev/null | grep -q .; then
   echo "Nested_serialized=yes"
 else
   echo "Nested_serialized=no"

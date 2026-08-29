@@ -26,7 +26,7 @@ all:
 	printf 'd2s state: '         >> obs.txt
 	$(NEXUS) file d2s.stream | grep -oE 'state=[a-z]+' >> obs.txt 2>> obs.err
 	printf 'd2s jsonl lines: '   >> obs.txt
-	$(NEXUS) view d2s.stream -f jsonl | wc -l >> obs.txt 2>> obs.err
+	$(NEXUS) view d2s.stream -f jsonl | wc -l | tr -d ' ' >> obs.txt 2>> obs.err
 	printf 'd2s jsonl sum via awk: ' >> obs.txt
 	$(NEXUS) view d2s.stream -f jsonl | awk '{s+=$$1} END {print s}' >> obs.txt 2>> obs.err
 
@@ -37,7 +37,7 @@ all:
 	printf 's2s state: '         >> obs.txt
 	$(NEXUS) file s2s.stream | grep -oE 'state=[a-z]+' >> obs.txt 2>> obs.err
 	printf 's2s jsonl lines: '   >> obs.txt
-	$(NEXUS) view s2s.stream -f jsonl | wc -l >> obs.txt 2>> obs.err
+	$(NEXUS) view s2s.stream -f jsonl | wc -l | tr -d ' ' >> obs.txt 2>> obs.err
 	printf 's2s jsonl sum: '     >> obs.txt
 	$(NEXUS) view s2s.stream -f jsonl | awk '{s+=$$1} END {print s}' >> obs.txt 2>> obs.err
 
@@ -46,7 +46,7 @@ all:
 	printf 's2d file kind: '     >> obs.txt
 	$(NEXUS) file -FD s2d.packet >> obs.txt 2>> obs.err
 	printf 's2d jsonl lines: '   >> obs.txt
-	$(NEXUS) view s2d.packet -f jsonl | wc -l >> obs.txt 2>> obs.err
+	$(NEXUS) view s2d.packet -f jsonl | wc -l | tr -d ' ' >> obs.txt 2>> obs.err
 	printf 's2d jsonl sum: '     >> obs.txt
 	$(NEXUS) view s2d.packet -f jsonl | awk '{s+=$$1} END {print s}' >> obs.txt 2>> obs.err
 

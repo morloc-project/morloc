@@ -261,9 +261,17 @@ unsafe fn worker_loop(queue: &JobQueue, config: &PoolConfig) {
         let mut errmsg: *mut c_char = ptr::null_mut();
         let data = stream_from_client(client_fd, &mut errmsg);
         if data.is_null() || !errmsg.is_null() {
+            // Log why the request read failed before closing: otherwise the
+            // caller only sees a bare "Connection closed by peer" with no cause.
+            // eprintln! writes to Rust's unbuffered stderr (a raw fdopen(2)
+            // FILE* would be block-buffered and lost if the pool never flushes).
             if !errmsg.is_null() {
+                let m = std::ffi::CStr::from_ptr(errmsg).to_string_lossy();
+                eprintln!("morloc pool: request read failed: {}", m);
                 try_send_fail(client_fd, errmsg);
                 libc::free(errmsg as *mut c_void);
+            } else {
+                eprintln!("morloc pool: request read returned no data");
             }
             libc::free(data as *mut c_void);
             close_socket(client_fd);
@@ -279,7 +287,19 @@ unsafe fn worker_loop(queue: &JobQueue, config: &PoolConfig) {
         if !result.is_null() {
             send_packet_to_foreign_server(client_fd, result, &mut errmsg);
             libc::free(result as *mut c_void);
-            if !errmsg.is_null() { libc::free(errmsg as *mut c_void); }
+            // A failed response send was previously freed silently, leaving the
+            // caller with an unexplained "Connection closed" -- log the cause.
+            if !errmsg.is_null() {
+                let m = std::ffi::CStr::from_ptr(errmsg).to_string_lossy();
+                eprintln!("morloc pool: response send failed: {}", m);
+                libc::free(errmsg as *mut c_void);
+            }
+        } else {
+            // pool_dispatch_packet returned null: no response is sent and the
+            // socket is closed below, so the caller sees a bare "Connection
+            // closed by peer". This should not happen (dispatch always returns
+            // at least a fail packet); log it to catch the case if it does.
+            eprintln!("morloc pool: dispatch returned null result (no response sent)");
         }
 
         libc::fflush(ptr::null_mut()); // flush stdout
@@ -321,7 +341,14 @@ unsafe fn pool_main_threads(config: &PoolConfig, socket_path: *const c_char, tmp
 
     while !SHUTTING_DOWN.load(Ordering::Relaxed) {
         let client_fd = wait_for_client_with_timeout(daemon, 10000, &mut errmsg);
-        if !errmsg.is_null() { libc::free(errmsg as *mut c_void); errmsg = ptr::null_mut(); }
+        if !errmsg.is_null() {
+            // A dropped accept-loop error can leave an accepted client
+            // unserved (the caller then sees a bare "Connection closed"); log it.
+            let m = std::ffi::CStr::from_ptr(errmsg).to_string_lossy();
+            eprintln!("morloc pool: accept loop error: {}", m);
+            libc::free(errmsg as *mut c_void);
+            errmsg = ptr::null_mut();
+        }
         if client_fd > 0 {
             queue.push(client_fd);
         }
@@ -433,6 +460,10 @@ unsafe fn pool_main_fork(config: &PoolConfig, socket_path: *const c_char, tmpdir
         close_daemon(&mut daemon);
         return 1;
     }
+    // The fd-passing sendmsg on this pair uses flags=0 (no MSG_NOSIGNAL), so
+    // set SO_NOSIGPIPE on macOS in addition to the process-wide SIG_IGN.
+    crate::utility::set_nosigpipe(sv[0]);
+    crate::utility::set_nosigpipe(sv[1]);
 
     // Shared busy counter via mmap
     let shared_counter = libc::mmap(
@@ -639,6 +670,13 @@ pub unsafe extern "C" fn pool_main(
     sa.sa_sigaction = pool_sigterm_handler as *const () as usize;
     libc::sigemptyset(&mut sa.sa_mask);
     libc::sigaction(libc::SIGTERM, &sa, ptr::null_mut());
+
+    // Ignore SIGPIPE process-wide. A peer closing the socket mid-write must
+    // surface as the EPIPE return the IPC code already handles, not kill the
+    // pool. Linux masks this via MSG_NOSIGNAL on every send; macOS has no
+    // per-call flag (SEND_NOSIGNAL == 0), so without this a broken pipe
+    // terminates the pool and the caller sees "Connection closed by peer".
+    libc::signal(libc::SIGPIPE, libc::SIG_IGN);
 
     let socket_path = *argv.add(1);
     let tmpdir = *argv.add(2);

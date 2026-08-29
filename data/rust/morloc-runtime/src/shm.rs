@@ -37,7 +37,10 @@ unsafe fn preallocate_fd(fd: i32, size: i64) -> i32 {
 
 /// System page size, cached on first use. Used to align the per-worker
 /// sub-ranges in `parallel_madvise_populate_write` -- `madvise`
-/// requires page-aligned offsets and lengths.
+/// requires page-aligned offsets and lengths. Only the Linux
+/// page-reservation path (and a test) use it; on a macOS release build it
+/// would otherwise be dead code.
+#[cfg(any(target_os = "linux", test))]
 fn page_size() -> usize {
     static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
@@ -48,7 +51,9 @@ fn page_size() -> usize {
 
 /// Worker count for parallel page reservation. Reuses the encoder's
 /// `frame_workers()` cap so all parallel-CPU work in the runtime sees
-/// the same `MORLOC_FRAME_WORKERS` override.
+/// the same `MORLOC_FRAME_WORKERS` override. Only the Linux
+/// page-reservation path uses it (macOS reserves lazily).
+#[cfg(target_os = "linux")]
 fn fallocate_workers(size: usize) -> usize {
     // Below ~64 MiB there's no headroom for parallel reservation to
     // pay back the thread-spawn cost; stay serial.

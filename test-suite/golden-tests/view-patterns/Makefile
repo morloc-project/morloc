@@ -54,9 +54,9 @@ all:
 	# List slice of records emitted via -f jsonl for a shape-agnostic
 	# check (records are still records; slice preserves shape).
 	printf 'records DATA .[0:2] jsonl lines: ' >> obs.txt
-	$(NEXUS) view records.packet --pattern '.[0:2]' -f jsonl | wc -l >> obs.txt 2>> obs.err
+	$(NEXUS) view records.packet --pattern '.[0:2]' -f jsonl | wc -l | tr -d ' ' >> obs.txt 2>> obs.err
 	printf 'records STREAM .[0:2] jsonl lines: ' >> obs.txt
-	$(NEXUS) view records.stream --pattern '.[0:2]' -f jsonl | wc -l >> obs.txt 2>> obs.err
+	$(NEXUS) view records.stream --pattern '.[0:2]' -f jsonl | wc -l | tr -d ' ' >> obs.txt 2>> obs.err
 
 	# === Nested record (DATA only; top level is not list-shaped) ===
 	printf 'nested .label: '                >> obs.txt
@@ -96,7 +96,7 @@ all:
 	printf 'flat DATA .[3:7] -d file kind: ' >> obs.txt
 	$(NEXUS) file -FD flat_slice.packet >> obs.txt 2>> obs.err
 	printf 'flat DATA .[3:7] -d roundtrip jsonl lines: ' >> obs.txt
-	$(NEXUS) view flat_slice.packet -f jsonl | wc -l >> obs.txt 2>> obs.err
+	$(NEXUS) view flat_slice.packet -f jsonl | wc -l | tr -d ' ' >> obs.txt 2>> obs.err
 	printf 'flat DATA .[3:7] -d roundtrip jsonl sum: ' >> obs.txt
 	$(NEXUS) view flat_slice.packet -f jsonl | awk '{s+=$$1} END {print s}' >> obs.txt 2>> obs.err
 
@@ -146,7 +146,7 @@ all:
 	printf 'records DATA .[0:2] -d file kind: ' >> obs.txt
 	$(NEXUS) file -FD records_slice.packet >> obs.txt 2>> obs.err
 	printf 'records DATA .[0:2] -d roundtrip jsonl lines: ' >> obs.txt
-	$(NEXUS) view records_slice.packet -f jsonl | wc -l >> obs.txt 2>> obs.err
+	$(NEXUS) view records_slice.packet -f jsonl | wc -l | tr -d ' ' >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf prog pools __pycache__ *.err

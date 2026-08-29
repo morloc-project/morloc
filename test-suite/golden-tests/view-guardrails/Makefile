@@ -43,18 +43,17 @@ all:
 	rm -f /tmp/g-s2d.packet
 
 	# === Binary-to-tty refusal ===
-	# `script -e -qc CMD /dev/null` allocates a pty for CMD's stdout
-	# so our isatty() check fires; `-e` propagates the CMD's exit
-	# status. `script` forwards CMD's stdout+stderr through the pty
-	# to its own stdout, so we grep on stdout, not stderr.
+	# Run the command with its stdio on a pty so the nexus's isatty() guardrail
+	# fires, forward the pty output to our stdout, and exit with the command's
+	# status. Uses a portable python pty (GNU `script -e -qc` is not on macOS).
 	printf 'tty -f voidstar exit: ' >> obs.txt
-	script -e -qc '$(NEXUS) view data.packet -f voidstar' /dev/null > tmp.out; \
+	python3 -c 'import pty,sys,os; sys.exit(os.waitstatus_to_exitcode(pty.spawn(["sh","-c",sys.argv[1]])))' '$(NEXUS) view data.packet -f voidstar' > tmp.out; \
 	  printf '%s\n' "$$?" >> obs.txt
 	printf 'tty -f voidstar msg: '  >> obs.txt
 	grep -oE 'refusing to write binary' tmp.out | head -n 1 >> obs.txt 2>> obs.err
 	rm -f tmp.out
 	printf 'tty -f voidstar --force exit: ' >> obs.txt
-	script -e -qc '$(NEXUS) view data.packet -f voidstar --force' /dev/null > /dev/null 2>>obs.err; \
+	python3 -c 'import pty,sys,os; sys.exit(os.waitstatus_to_exitcode(pty.spawn(["sh","-c",sys.argv[1]])))' '$(NEXUS) view data.packet -f voidstar --force' > /dev/null 2>>obs.err; \
 	  printf '%s\n' "$$?" >> obs.txt
 
 	# === CLI mutex / -f-vs-packet-flag / -p-on-non-packet ===

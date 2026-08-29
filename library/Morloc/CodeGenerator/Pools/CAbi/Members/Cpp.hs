@@ -50,6 +50,7 @@ import qualified Morloc.Build.Params as BP
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.LangRegistry as LR
 import Morloc.CodeGenerator.Namespace
+import qualified Morloc.CodeGenerator.Platform as P
 import Morloc.CodeGenerator.Serial
   ( serialAstToType
   , wireSerialAstToType
@@ -470,7 +471,7 @@ makeCppCode labels srcs es univeralScopeMap scopeMap closureTable0 = do
   (closureWrappers, reifyThunks) <- makeClosureDispatch closureTable es
 
   -- build the program (translates each manifold tree)
-  program <- buildProgramM labels templates includeDocs es (translateSegment reifyThunks) getCppSchemaTable closureTable
+  program <- buildProgramM labels templates includeDocs [] es (translateSegment reifyThunks) getCppSchemaTable closureTable
 
   -- create and return complete pool script
   return $ CP.printProgram serializationCode signatures closureWrappers program
@@ -1813,7 +1814,7 @@ flagAndPath reg src@(Source _ srcL (Just p) _ _ _ _ _ _ _) | LR.poolOf reg srcL 
       home <- MM.asks configHome
       state <- MM.asks configState
       let libnamebase = filter DC.isAlphaNum (map DC.toLower base)
-      let libname = "lib" <> libnamebase <> ".so"
+      let libname = P.sharedLibName P.hostPlatform libnamebase  -- lib<name>.so | .dylib
       let allPaths = getLibraryPaths home state base libname
       existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
       moduleLibDir <- liftIO . MS.canonicalizePath $ MS.joinPath [state, "modules", "lib"]
@@ -1825,7 +1826,9 @@ flagAndPath reg src@(Source _ srcL (Just p) _ _ _ _ _ _ _) | LR.poolOf reg srcL 
           -- absolute rpath there would pin the pool to the build-time state
           -- path, breaking relocation. A lib elsewhere (a module's own
           -- state/src tree) is not on that export, so it keeps the rpath.
-          let rpathFlags = ["-Wl,-rpath=" <> libdir | libdir /= moduleLibDir]
+          -- Comma form (`-Wl,-rpath,DIR`), accepted by both GNU ld and macOS ld64
+          -- (which rejects the GNU `-Wl,-rpath=DIR` form).
+          let rpathFlags = ["-Wl,-rpath," <> libdir | libdir /= moduleLibDir]
           return $ rpathFlags <> ["-L" <> libdir, "-l" <> libnamebase]
         [] -> return []
 flagAndPath reg src@(Source _ srcL Nothing _ _ _ _ _ _ _) | LR.poolOf reg srcL == cppLang = return (src, [], Nothing)

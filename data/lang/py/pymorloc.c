@@ -18,9 +18,13 @@ typedef struct {
     absptr_t ptr;
     Schema* schema;
 } shm_entry_t;
-static shm_entry_t* shm_tracker = NULL;
-static size_t shm_tracker_count = 0;
-static size_t shm_tracker_cap = 0;
+// Thread-local: each worker gets its own SHM tracking list so a per-dispatch
+// flush frees only that thread's in-flight SHM, never a sibling's. Required for
+// the thread-based pool (macOS); a no-op distinction under the single-threaded
+// fork worker (Linux). Mirrors the __thread recur_env_stack below.
+static __thread shm_entry_t* shm_tracker = NULL;
+static __thread size_t shm_tracker_count = 0;
+static __thread size_t shm_tracker_cap = 0;
 
 static void shm_tracker_push(absptr_t ptr, Schema* schema) {
     if (shm_tracker_count >= shm_tracker_cap) {
@@ -1577,12 +1581,32 @@ static PyObject* pybinding__cache_record_store(PyObject* self, PyObject* args) {
 
 static PyObject* pybinding__wait_for_client(PyObject* self, PyObject* args) { MAYFAIL
     PyObject* daemon_capsule;
+    int timeout_us = 0;  // optional; 0 = block indefinitely
 
-    PARSE_ARGS_OR_ABORT(args, "O", &daemon_capsule);
+    PARSE_ARGS_OR_ABORT(args, "O|i", &daemon_capsule, &timeout_us);
 
     language_daemon_t* daemon = (language_daemon_t*)PyCapsule_GetPointer(daemon_capsule, "language_daemon_t");
 
-    int client_fd = PyTRY(wait_for_client, daemon);
+    // Release the GIL for the blocking accept: in the thread-based pool the
+    // listener thread sits here, and holding the GIL while blocked would starve
+    // every worker thread (deadlock). Harmless in the fork pool's listener
+    // process. Only the blocking wait is GIL-free. A positive timeout_us lets
+    // the listener wake periodically to observe shutdown (so it can be joined
+    // before the daemon struct is freed).
+    int client_fd;
+    Py_BEGIN_ALLOW_THREADS
+    client_fd = wait_for_client_with_timeout(daemon, timeout_us, &child_errmsg_);
+    Py_END_ALLOW_THREADS
+    if (child_errmsg_ != NULL) {
+        char* prior_err = get_prior_err();
+        if (prior_err == NULL) {
+            PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_);
+        } else {
+            PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_);
+            free(prior_err);
+        }
+        goto error;
+    }
 
     return PyLong_FromLong((long)client_fd);
 
@@ -1685,7 +1709,26 @@ static PyObject*  pybinding__send_packet_to_foreign_server(PyObject* self, PyObj
 
     PARSE_ARGS_OR_ABORT(args, "iy#", &client_fd, &packet, &packet_size);
 
-    size_t bytes_sent = PyTRY(send_packet_to_foreign_server, client_fd, packet);
+    // Release the GIL around the blocking send: send_all can now wait (bounded)
+    // for socket writability when the send buffer is full, and holding the GIL
+    // across that wait would starve every sibling worker thread and the listener
+    // in the thread-based pool. Only the syscall is GIL-free; the Python C-API
+    // error handling below re-holds it. (Expanded PyTRY so Py_BEGIN/END wraps
+    // just the syscall, mirroring the stream_from_client binding.)
+    size_t bytes_sent = 0;
+    Py_BEGIN_ALLOW_THREADS
+    bytes_sent = send_packet_to_foreign_server(client_fd, packet, &child_errmsg_);
+    Py_END_ALLOW_THREADS
+    if (child_errmsg_ != NULL) {
+        char* prior_err = get_prior_err();
+        if (prior_err == NULL) {
+            PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_);
+        } else {
+            PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_);
+            free(prior_err);
+        }
+        goto error;
+    }
 
     return PyLong_FromSize_t(bytes_sent);
 
@@ -1700,7 +1743,21 @@ static PyObject*  pybinding__stream_from_client(PyObject* self, PyObject* args){
 
     PARSE_ARGS_OR_ABORT(args, "i", &client_fd);
 
-    packet = PyTRY(stream_from_client, client_fd);
+    // Release the GIL for the blocking request read so sibling worker threads run
+    // in the thread-based pool; harmless in the single-threaded fork worker.
+    Py_BEGIN_ALLOW_THREADS
+    packet = stream_from_client(client_fd, &child_errmsg_);
+    Py_END_ALLOW_THREADS
+    if (child_errmsg_ != NULL) {
+        char* prior_err = get_prior_err();
+        if (prior_err == NULL) {
+            PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_);
+        } else {
+            PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_);
+            free(prior_err);
+        }
+        goto error;
+    }
 
     size_t packet_size = PyTRY(morloc_packet_size, packet);
 
@@ -2231,7 +2288,24 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
     free(arg_packets);
     arg_packets = NULL;
 
-    result = PyTRY(send_and_receive_over_socket, socket_path, packet);
+    // Release the GIL for the blocking round-trip to the foreign pool: this is
+    // what lets a sibling worker thread run and service a re-entrant callback in
+    // the thread-based pool (macOS). Harmless in the single-threaded fork worker
+    // (Linux). Only the blocking call is GIL-free; the error handling re-holds
+    // it. (Expanded PyTRY so the Py_BEGIN/END wraps just the syscall.)
+    Py_BEGIN_ALLOW_THREADS
+    result = send_and_receive_over_socket(socket_path, packet, &child_errmsg_);
+    Py_END_ALLOW_THREADS
+    if (child_errmsg_ != NULL) {
+        char* prior_err = get_prior_err();
+        if (prior_err == NULL) {
+            PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_);
+        } else {
+            PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_);
+            free(prior_err);
+        }
+        goto error;
+    }
     free(packet);
     packet = NULL;
 

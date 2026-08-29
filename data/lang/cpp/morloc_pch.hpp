@@ -12,6 +12,7 @@
 #include <queue>
 #include <deque>
 #include <unordered_map>
+#include <map>
 
 // STL algorithms and utilities
 #include <algorithm>

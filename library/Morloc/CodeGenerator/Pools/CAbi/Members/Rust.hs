@@ -974,7 +974,7 @@ makeRustCode includeDocs closureTable0 es = do
   -- origin instead of a bare closure.
   (closureWrappers, reifyInfo) <- makeClosureDispatch closureTable es
   CMS.modify $ \s -> s {rsReifyInfo = reifyInfo}
-  program <- buildProgramM Map.empty Map.empty includeDocs es translateSegment getRustSchemaTable closureTable
+  program <- buildProgramM Map.empty Map.empty includeDocs [] es translateSegment getRustSchemaTable closureTable
   -- structDocs go in the schema-table section; the closure dispatch wrappers are
   -- free functions spliced into the signatures section.
   return $ RP.printProgram structDocs closureWrappers [] program

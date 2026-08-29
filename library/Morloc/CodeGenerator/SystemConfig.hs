@@ -19,6 +19,7 @@ module Morloc.CodeGenerator.SystemConfig
   ) where
 
 import Morloc.CodeGenerator.Namespace
+import qualified Morloc.CodeGenerator.Platform as P
 import qualified Morloc.Completion as Completion
 import qualified Morloc.Config as Config
 import qualified Morloc.DataFiles as DF
@@ -133,7 +134,7 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   -- that compiles those pools, so a prebuilt binary from a foreign libc/toolchain
   -- world is not an option. Only the morloc compiler and mim are
   -- shipped prebuilt (they never link into a pool).
-  let soPath = libDir </> "libmorloc.so"
+  let soPath = libDir </> P.sharedLibName P.hostPlatform "morloc"
   -- Primary install goes to $MORLOC_HOME/bin/
   let nexusBinDir = homeDir </> "bin"
       nexusBinPath = nexusBinDir </> "morloc-nexus"
@@ -182,33 +183,46 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   -- MORLOC_STATE), NOT the default `<source>/target`: in a container the Rust
   -- source is a read-only image layer, so cargo cannot write a target beside it.
   let rustBuildDir = Config.rustBuildDir config
-  sayInfo verbose "Compiling libmorloc.so (Rust)"
+  sayInfo verbose "Building libmorloc (Rust runtime)"
   run verbose "cargo"
     [ "build", "--release"
     , "--manifest-path", rustDir </> "Cargo.toml"
     , "-p", "morloc-runtime"
     , "--target-dir", rustBuildDir
     ]
-  -- Build the .so from the staticlib using gcc --whole-archive.
-  -- This exports ALL symbols, which is required because the Rust runtime's
-  -- internal state (SHM globals, allocator) must be visible to language
-  -- extensions (pymorloc, rmorloc, cppmorloc).
-  -- We cannot use the cdylib directly because Rust's cdylib only exports
-  -- #[no_mangle] pub extern "C" symbols, and adding a version script to
-  -- override this conflicts with Rust's own version script on ARM/aarch64.
-  let rustStaticLib = rustBuildDir </> "release" </> "libmorloc_runtime.a"
-  -- Link libmorloc.so with $CC when set (conda toolchain) so the runtime and
-  -- the shims that link it share one compiler/libc world; fall back to gcc.
-  cc <- resolveToolName "gcc"
-  run verbose cc
-    [ "-shared", "-o", soPath
-    , "-Wl,--whole-archive", rustStaticLib, "-Wl,--no-whole-archive"
-    , "-lpthread", "-lrt", "-ldl", "-lm"
-    ]
+  -- Produce libmorloc from the Rust build. The recipe differs by platform:
+  --
+  --   * ELF/Linux: link the *staticlib* with `--whole-archive` so ALL symbols
+  --     (including the runtime's internal SHM/allocator state) are exported to
+  --     the language extensions (pymorloc, rmorloc, cppmorloc). The cdylib
+  --     can't be used directly here because forcing full-symbol export needs a
+  --     version script, which conflicts with Rust's own version script on
+  --     ARM/aarch64 -- an ELF/GNU-ld concern.
+  --
+  --   * Mach-O/macOS: version scripts don't exist, and the plain cdylib
+  --     already exports the full C ABI, so use it directly (its install_name
+  --     is set to @rpath/libmorloc.dylib by morloc-runtime/build.rs). Do NOT
+  --     `strip` it: a bare strip on a Mach-O dylib can drop exported symbols
+  --     the shims resolve at load time.
+  -- Resolved once and reused for the nexus binary below.
   hasStrip <- resolveTool "strip"
-  case hasStrip of
-    Just stripPath -> run verbose stripPath [soPath]
-    Nothing -> return ()
+  case P.hostPlatform of
+    P.Linux -> do
+      let rustStaticLib = rustBuildDir </> "release" </> "libmorloc_runtime.a"
+      -- Link with $CC when set (conda toolchain) so the runtime and the shims
+      -- that link it share one compiler/libc world; fall back to gcc.
+      cc <- resolveToolName "gcc"
+      run verbose cc
+        [ "-shared", "-o", soPath
+        , "-Wl,--whole-archive", rustStaticLib, "-Wl,--no-whole-archive"
+        , "-lpthread", "-lrt", "-ldl", "-lm"
+        ]
+      case hasStrip of
+        Just stripPath -> run verbose stripPath [soPath]
+        Nothing -> return ()
+    P.Darwin -> do
+      let rustCdylib = rustBuildDir </> "release" </> "libmorloc_runtime.dylib"
+      run verbose "cp" [rustCdylib, soPath]
 
   sayInfo verbose "Compiling morloc-nexus (Rust)"
   run verbose "cargo"
@@ -464,9 +478,9 @@ removePathIfExists path = do
 -- `morloc init -f`.
 initOwnedLibPaths :: [FilePath]
 initOwnedLibPaths =
-  [ "libmorloc.so"
+  [ P.sharedLibName P.hostPlatform "morloc"  -- libmorloc.so | libmorloc.dylib
   , "libcppmorloc.a"
-  , "librmorloc.so"
+  , "librmorloc.so"  -- R loadable modules keep the .so name even on macOS
   ]
 
 -- | Names (relative to $MORLOC_HOME/include/) written by morloc init itself.

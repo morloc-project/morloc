@@ -17,8 +17,8 @@ all:
 	  MORLOC_CACHE_BASE=$$PWD/cache ./nexus foo$$lang $(INPUT) > obs.run.$$lang.2.out 2>&1 || true; \
 	  echo "run2_$${lang}_raised: $$(grep -c 'INTENTIONAL_TEST_FAILURE' obs.run.$$lang.2.out)" >> obs.txt; \
 	done
-	echo "a_packets: $$(ls cache/a/*.dat 2>/dev/null | wc -l)" >> obs.txt
-	echo "dats:      $$(ls cache/data/*.dat 2>/dev/null | wc -l)" >> obs.txt
+	echo "a_packets: $$(ls cache/a/*.dat 2>/dev/null | wc -l | tr -d ' ')" >> obs.txt
+	echo "dats:      $$(ls cache/data/*.dat 2>/dev/null | wc -l | tr -d ' ')" >> obs.txt
 	cat obs.run.*.out > obs.err
 	rm -f obs.run.*.out
 

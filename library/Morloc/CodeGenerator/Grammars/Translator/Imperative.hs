@@ -284,6 +284,13 @@ data IFunMeta = IFunMeta
 
 data IProgram = IProgram
   { ipSources :: [Text]
+    -- ^ Module-top / parent-load source lines: the language preamble (runtime
+    -- bootstrap) for the interpreted pools, or the includes for C++/Rust.
+  , ipIncludes :: [Text]
+    -- ^ User `source` imports, kept separate so interpreted pools can defer them
+    -- past the worker fork (importing thread-spinning libraries in the
+    -- coordinator parent and then forking is unsafe on macOS). Empty for the
+    -- C++/Rust members, whose includes live in 'ipSources'.
   , ipManifolds :: [Text]
   , ipLocalDispatch :: [DispatchEntry]
   , ipRemoteDispatch :: [DispatchEntry]
@@ -309,13 +316,14 @@ instance Binary IProgram
 buildProgram ::
   Map.Map Int Text ->
   Map.Map Int RenderedTemplate ->
-  [MDoc] ->
+  [MDoc] ->  -- module-top sources (preamble for py/r, includes for cpp/rust)
+  [MDoc] ->  -- deferred user includes (py/r); empty for cpp/rust
   [MDoc] ->
   [SerialManifold] ->
   [Text] ->
   Map.Map Int ([Text], [Text], Text) ->
   IProgram
-buildProgram labels templates sources manifolds es schemas closureTable =
+buildProgram labels templates sources includes manifolds es schemas closureTable =
   let definedIds = collectManifoldIds es
       foreignCalleeIds =
         Set.fromList [i | SerialManifold i _ _ f _ <- es, isForeignCalleeForm (Just f)]
@@ -325,6 +333,7 @@ buildProgram labels templates sources manifolds es schemas closureTable =
                      `Map.withoutKeys` foreignCalleeIds
    in IProgram
         { ipSources = map render sources
+        , ipIncludes = map render includes
         , ipManifolds = map render manifolds
         , ipLocalDispatch = extractLocalDispatch labels' es
         , ipRemoteDispatch = extractRemoteDispatch labels' es
@@ -338,16 +347,17 @@ buildProgramM ::
   (Monad m) =>
   Map.Map Int Text ->
   Map.Map Int RenderedTemplate ->
-  [MDoc] ->
+  [MDoc] ->  -- module-top sources
+  [MDoc] ->  -- deferred user includes (empty for cpp/rust)
   [SerialManifold] ->
   (SerialManifold -> m MDoc) ->
   m [Text] ->
   Map.Map Int ([Text], [Text], Text) ->
   m IProgram
-buildProgramM labels templates sources es translateSeg getSchemas closureTable = do
+buildProgramM labels templates sources includes es translateSeg getSchemas closureTable = do
   manifolds <- mapM translateSeg es
   schemas <- getSchemas
-  return $ buildProgram labels templates sources manifolds es schemas closureTable
+  return $ buildProgram labels templates sources includes manifolds es schemas closureTable
 
 -- | Which kind of call an argument is being passed into. Members that vary
 -- argument passing by call kind (currently only Rust) branch on this; the

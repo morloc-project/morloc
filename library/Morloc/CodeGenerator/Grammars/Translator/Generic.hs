@@ -109,15 +109,17 @@ translateBuiltin lang desc srcs es = do
 
   debugInfo <- makeManifoldDebugInfoLookup
   debugMode <- gets stateDebugTrace
-  let allSources = preambleDocs ++ includeDocs
-      (mDocs, schemas) = runIndex 0 $ do
+  let (mDocs, schemas) = runIndex 0 $ do
         docs <- mapM (translateSegment desc srcNamer debugInfo debugMode) es
         tbl <- getSchemaTable
         return (docs, tbl)
   labels <- collectLogLabels <$> gets stateManifoldConfig
   templates <- collectRenderedTemplates lang
   closureTable <- computeClosureSchemas lang es
-  let program = buildProgram labels templates allSources mDocs es schemas closureTable
+  -- Keep the preamble (runtime bootstrap) at module top / parent load, and pass
+  -- the user includes separately so interpreted pools can defer them past the
+  -- worker fork (macOS fork-safety); see 'ipIncludes'.
+  let program = buildProgram labels templates preambleDocs includeDocs mDocs es schemas closureTable
 
   let code = printProgram desc program
   let exefile = ML.makeExecutablePoolName lang
@@ -170,7 +172,9 @@ translateExternal cmd lang desc srcs es = do
   labels <- collectLogLabels <$> gets stateManifoldConfig
   templates <- collectRenderedTemplates lang
   closureTable <- computeClosureSchemas lang es
-  let program = buildProgram labels templates includeDocs mDocs es schemas closureTable
+  -- Out-of-process codegen path: includes stay at module top (no fork-defer),
+  -- so pass them as sources and leave the deferred-includes slot empty.
+  let program = buildProgram labels templates includeDocs [] mDocs es schemas closureTable
 
   -- find the lang.yaml path for the codegen tool
   let langYamlPath = home </> "lang" </> T.unpack (ML.langName lang) </> "lang.yaml"
@@ -1315,8 +1319,13 @@ printProgram desc prog =
     (ldBreakMarker desc)
     sections
   where
+    -- Four sections fill the template's four `<<<BREAK>>>` markers in order:
+    -- (1) module-top preamble + data tables, (2) the user includes -- which
+    -- interpreted templates place inside a deferred post-fork loader, (3)
+    -- manifolds, (4) dispatch.
     sections =
       [ vsep (map pretty (ipSources prog) ++ [schemaTableInit, closureTableInit])
+      , vsep (map pretty (ipIncludes prog))
       , vsep (map pretty (ipManifolds prog) ++ logRebindings)
       , templateDispatch
       ]
