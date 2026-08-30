@@ -4,8 +4,9 @@
 #   git tag v0.68.0
 #   git push origin v0.68.0
 #
-# Produces (linux-x86_64, linux-arm64):
-#   - morloc  (the Haskell compiler, glibc 2.31, built in container/static-build)
+# Produces (linux-x86_64, linux-arm64, macos-arm64):
+#   - morloc  (the Haskell compiler; Linux triples build in container/static-build
+#     at glibc 2.31, macos-arm64 builds natively on an Apple Silicon runner)
 # plus the platform-independent Rust workspace source and a
 # `morloc-release-manifest.json` describing the provisionable assets per triple.
 #
@@ -74,6 +75,44 @@ jobs:
         with:
           name: rust-binaries-${{ matrix.platform }}
           path: out/*
+
+  # ---- Build the macOS compiler natively (no container path on macOS) ----
+  # Apple Silicon runners are arm64; there is no glibc floor to manage (macOS
+  # binaries link the system dyld), so the compiler is stack-built directly.
+  # Only the compiler binary is uploaded -- the platform-independent rust/
+  # source is carried by the Linux jobs and merged at release time.
+  compiler-macos:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: haskell-actions/setup@v2
+        with:
+          ghc-version: '9.6.7'
+          enable-stack: true
+          stack-version: 'latest'
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.stack/snapshots
+            ~/.stack/setup-exe-cache
+            .stack-work
+          key: stack-deps-release-macos-${{ hashFiles('stack.yaml.lock', 'package.yaml') }}
+          restore-keys: stack-deps-release-macos-
+      - name: Build morloc compiler
+        run: stack install --system-ghc --no-install-ghc --no-run-tests
+      - name: Stage compiler binary
+        run: |
+          mkdir -p out
+          cp "$HOME/.local/bin/morloc" out/morloc-macos-arm64
+          # -x (strip local symbols only) is the safe Mach-O variant; a bare
+          # `strip` can fail on indirect symbol-table entries in GHC binaries.
+          strip -x out/morloc-macos-arm64
+      - name: Upload compiler artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-binaries-macos-arm64
+          path: out/morloc-macos-arm64
 
   # ---- Run tests using the Rust binaries ----
   test:
@@ -190,8 +229,11 @@ jobs:
 
   # ---- Create GitHub Release ----
   release:
+    # Gate only on tests: a macOS build failure must not block the Linux release.
+    # The manifest generator omits any triple whose asset is missing, so a failed
+    # compiler-macos simply drops macos-arm64 from the release.
     if: always() && needs.test.result == 'success'
-    needs: [test, rust-binary]
+    needs: [test, rust-binary, compiler-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -231,8 +273,8 @@ jobs:
       # built from the shared rust_src at init time. The mim manager is NOT
       # listed either -- it is released from its own repo
       # (morloc-project/morloc-manager). Only triples with a complete asset set are
-      # listed; macOS is omitted (no prebuilt compiler), so the flow falls
-      # through to a container.
+      # listed; Intel macOS is omitted (no prebuilt compiler), so the flow falls
+      # through to a container there.
       # Built with Python so the manifest carries a SHA-256 for every published
       # asset (the download flow verifies each fetch against these) and lists a
       # triple ONLY when all of its artifacts exist on disk -- a partial triple
@@ -257,6 +299,9 @@ jobs:
               },
               "linux-arm64": {
                   "morloc": "morloc-linux-arm64",
+              },
+              "macos-arm64": {
+                  "morloc": "morloc-macos-arm64",
               },
           }
           rust_src = "morloc-rust-src.tar.gz"
@@ -309,6 +354,7 @@ jobs:
         with:
           files: |
             morloc-linux-*
+            morloc-macos-*
             morloc-rust-src.tar.gz
             morloc-release-manifest.json
             morloc-lang-support.json
