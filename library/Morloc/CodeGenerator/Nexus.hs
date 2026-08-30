@@ -2678,6 +2678,9 @@ generate cs rASTs helperRASTs = do
     either (MM.throwSystemError . pretty)
            return
            (ES.buildEnvSpec Morloc.Version.versionStr (map fst daemonSets) (statePackageMeta st))
+  -- Record the pool languages so the build's provisioning hook fires for a
+  -- program that merely USES a language (with no declared package deps).
+  MM.modify (\s -> s { stateEnvSpecLangs = map ES.lrLang (ES.esLanguages envspec) })
   let envspecScript =
         Script
           { scriptBase = "envspec"

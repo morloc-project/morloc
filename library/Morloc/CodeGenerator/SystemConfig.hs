@@ -66,6 +66,13 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   -- coherence guard and the env-aware language-setup loop below.
   mStrictPrefix <- strictCondaPrefix
 
+  -- Incremental mode (@MORLOC_INIT_INCREMENTAL@, set by the in-env agent on the
+  -- on-demand shim-build path): skip the already-built runtime and language shims
+  -- (marker-driven) and build only what is missing. A bare @morloc init@ (flag
+  -- unset) rebuilds everything, so it can never silently keep an ABI-stale runtime
+  -- after a compiler upgrade.
+  incremental <- maybe False (`notElem` ["", "0", "false", "no"]) <$> lookupEnv "MORLOC_INIT_INCREMENTAL"
+
   -- Admission control FIRST, before any destructive step: a failed coherence
   -- check must abort before the force-clean below wipes opt/ + init-owned libs,
   -- otherwise a rejected env leaves MORLOC_HOME gutted (no libmorloc, no nexus).
@@ -143,6 +150,137 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   -- (see the MORLOC_BIN_LINK_DIR handling below).
   userHome <- getHomeDirectory
 
+  -- Build the Rust runtime (libmorloc.so + morloc-nexus + the rustmorloc pool
+  -- cache) only when it is missing, or when a full rebuild is forced. An
+  -- in-environment on-demand language add (see the language loop below) re-runs
+  -- `morloc init` WITHOUT force purely to build a newly provisioned language's
+  -- shim; the already-built runtime must not be relinked (and cargo must not be
+  -- required) on that path. The manager's provision always uses force, so a
+  -- compiler/version change still rebuilds the runtime.
+  runtimeBuilt <- (&&) <$> doesFileExist soPath <*> doesFileExist nexusBinPath
+  if force == ForceOverwrite || not runtimeBuilt || not incremental
+    then provisionRustRuntime verbose config homeDir soPath nexusBinPath
+    else sayInfo verbose "Runtime (libmorloc + morloc-nexus) already built; skipping"
+
+  -- Symlink the newly installed binaries into a "user bin" directory so
+  -- they end up on PATH. The directory is selected by the
+  -- MORLOC_BIN_LINK_DIR environment variable:
+  --
+  --   Just <non-empty path>  - create that directory if missing and
+  --                            symlink into it (caller-controlled target)
+  --   Just ""                - explicit skip, no symlinks created
+  --   Nothing                - default: symlink into ~/.local/bin/
+  --                            iff that directory already exists
+  --
+  -- The skip-on-empty case lets a caller (e.g. mim when running
+  -- this init inside a container) suppress symlinking without baking
+  -- container-awareness into this module. The container harness sets
+  -- MORLOC_BIN_LINK_DIR to a morloc-owned subtree such as
+  -- $HOME/.local/share/morloc/bin so the resulting symlinks land in a
+  -- non-shared location instead of clobbering files in the user's
+  -- general-purpose ~/.local/bin/.
+  -- Linking binaries onto PATH is a convenience: the binaries are always
+  -- reachable under $MORLOC_HOME/bin regardless. A failure here (e.g. the link
+  -- dir is an unwritable host path under a non-root container UID) must warn,
+  -- not abort init.
+  optionalStep "Could not link morloc binaries onto PATH (they remain available under $MORLOC_HOME/bin): " $ do
+    linkDirEnv <- lookupEnv "MORLOC_BIN_LINK_DIR"
+    mLinkDir <- case linkDirEnv of
+      Just "" -> return Nothing
+      Just dir -> do
+        createDirectoryIfMissing True dir
+        return (Just dir)
+      Nothing -> do
+        let defaultBin = userHome </> ".local" </> "bin"
+        exists <- doesDirectoryExist defaultBin
+        return $ if exists then Just defaultBin else Nothing
+    case mLinkDir of
+      Nothing -> return ()
+      Just linkDir -> do
+        symlinkBinary nexusBinPath (linkDir </> "morloc-nexus")
+        let managerSrc = nexusBinDir </> "mim"
+        managerExists <- doesFileExist managerSrc
+        when managerExists $
+          symlinkBinary managerSrc (linkDir </> "mim")
+
+  -- Create exe/ and fdb/ directories (STATE, under the state root)
+  let exeDir = Config.exeDir config
+      fdbDir = Config.fdbDir config
+  ensureDirectory verbose "morloc exe directory" exeDir
+  ensureDirectory verbose "morloc fdb directory" fdbDir
+
+  -- Configure each language via its init.sh script.
+  --
+  -- Language SELECTION is environment-aware in strict mode: a language is set up
+  -- only when its toolchain resolves INSIDE the conda prefix -- the conda env IS
+  -- the intended language set. A host tool for a language the env does not
+  -- include (e.g. a stray /usr/bin/julia on a CI runner) is NOT built, so we
+  -- never compile a shim that mixes a host toolchain with conda's libmorloc.
+  -- In non-strict mode, selection stays PATH-based (any tool on PATH), preserving
+  -- lenient system-toolchain dev installs.
+  --
+  -- Shim BUILD is fail-closed in strict mode: a compile failure ABORTS init with
+  -- the error, rather than the best-effort warn that silently leaves a half-
+  -- configured env whose failure only surfaces later as a runtime import error.
+  --
+  -- A per-language marker records that a shim was built successfully. In
+  -- incremental mode (the on-demand agent path), an already-built language is
+  -- skipped: this makes an on-demand init (run to add one newly provisioned
+  -- language) build ONLY that language's shim and leave every other language's
+  -- working shim untouched -- crucial because rebuilding a shim against a moved
+  -- interpreter would break its ABI. A bare init (non-incremental) rebuilds every
+  -- available language. The markers live under opt/, which the force-clean above
+  -- wipes, so `-f` also rebuilds every available language.
+  let langMarkerDir = optDir </> "lang-configured"
+  createDirectoryIfMissing True langMarkerDir
+  forM_ DF.langSetups $ \ls -> do
+    let tools = DF.lsRequiredTools ls
+        marker = langMarkerDir </> DF.lsName ls
+    avail <- mapM (toolAvailableInEnv mStrictPrefix) tools
+    alreadyBuilt <- doesFileExist marker
+    let unavailable = [t | (t, False) <- zip tools avail]
+    if not (null unavailable)
+      then
+        let reason = case mStrictPrefix of
+              Just _ -> "not provided by the conda environment"
+              Nothing -> "missing"
+        in sayWarning $ "Skipping " <> DF.lsName ls <> " setup (" <> reason <> ": " <> unwords unavailable <> ")"
+      else if alreadyBuilt && force /= ForceOverwrite && incremental
+        then sayInfo verbose $ DF.lsName ls <> " extension already built; skipping"
+        else do
+          hPutStrLn stderr $ "Building " <> DF.lsName ls <> " extension ..."
+          sayInfo verbose $ "Configuring " <> DF.lsName ls <> " language support"
+          -- Write data files to build dir
+          forM_ (DF.lsFiles ls) $ \ef ->
+            TIO.writeFile (buildDir </> DF.embededFileName ef) (DF.embededFileText ef)
+          -- Write and run init script
+          let initPath = buildDir </> "init.sh"
+          TIO.writeFile initPath (DF.embededFileText (DF.lsInitScript ls))
+          let sanitizeFlagsStr = if sanitize then "-fsanitize=alignment -fno-sanitize-recover=alignment" else ""
+          -- Run the setup, and only on success record the marker + clean up.
+          -- Grouping the marker write with the build inside `optionalStep` keeps
+          -- a non-strict failure from marking the language as built.
+          let buildShim = do
+                run verbose "bash" [initPath, homeDir, buildDir, sanitizeFlagsStr]
+                removeFileSafe initPath
+                forM_ (DF.lsFiles ls) $ \ef ->
+                  removeFileSafe (buildDir </> DF.embededFileName ef)
+                TIO.writeFile marker ""
+          case mStrictPrefix of
+            Just _ -> buildShim
+            Nothing -> optionalStep (DF.lsName ls <> " setup failed: ") buildShim
+
+  -- Generate shell completions
+  sayInfo verbose "Generating shell completions"
+  Completion.regenerateCompletions verbose (Config.exeDir config) (homeDir </> "completions")
+
+-- | Build libmorloc.so + morloc-nexus from source with the active toolchain,
+-- then persist the Rust workspace source and warm the rustmorloc pool cache.
+-- 'configureAllSteps' calls this only when the runtime is missing or a rebuild is
+-- forced, so an in-env, no-force, on-demand language add skips it. @soPath@ is the
+-- installed libmorloc path; @nexusBinPath@ is the installed nexus path.
+provisionRustRuntime :: Bool -> Config -> FilePath -> FilePath -> FilePath -> IO ()
+provisionRustRuntime verbose config homeDir soPath nexusBinPath = do
   -- Resolve the Rust workspace source + cargo up front. Search order:
   -- MORLOC_RUST_DIR (set by mim / dev); the persisted copy at
   -- $MORLOC_HOME/rust; then next to the morloc binary.
@@ -275,99 +413,6 @@ configureAllSteps verbose force slurmSupport sanitize config = do
       , "-p", "rustmorloc"
       , "--target-dir", poolTargetDir
       ]
-
-  -- Symlink the newly installed binaries into a "user bin" directory so
-  -- they end up on PATH. The directory is selected by the
-  -- MORLOC_BIN_LINK_DIR environment variable:
-  --
-  --   Just <non-empty path>  - create that directory if missing and
-  --                            symlink into it (caller-controlled target)
-  --   Just ""                - explicit skip, no symlinks created
-  --   Nothing                - legacy default: symlink into ~/.local/bin/
-  --                            iff that directory already exists
-  --
-  -- The skip-on-empty case lets a caller (e.g. mim when running
-  -- this init inside a container) suppress symlinking without baking
-  -- container-awareness into this module. The container harness sets
-  -- MORLOC_BIN_LINK_DIR to a morloc-owned subtree such as
-  -- $HOME/.local/share/morloc/bin so the resulting symlinks land in a
-  -- non-shared location instead of clobbering files in the user's
-  -- general-purpose ~/.local/bin/.
-  -- Linking binaries onto PATH is a convenience: the binaries are always
-  -- reachable under $MORLOC_HOME/bin regardless. A failure here (e.g. the link
-  -- dir is an unwritable host path under a non-root container UID) must warn,
-  -- not abort init.
-  optionalStep "Could not link morloc binaries onto PATH (they remain available under $MORLOC_HOME/bin): " $ do
-    linkDirEnv <- lookupEnv "MORLOC_BIN_LINK_DIR"
-    mLinkDir <- case linkDirEnv of
-      Just "" -> return Nothing
-      Just dir -> do
-        createDirectoryIfMissing True dir
-        return (Just dir)
-      Nothing -> do
-        let defaultBin = userHome </> ".local" </> "bin"
-        exists <- doesDirectoryExist defaultBin
-        return $ if exists then Just defaultBin else Nothing
-    case mLinkDir of
-      Nothing -> return ()
-      Just linkDir -> do
-        symlinkBinary nexusBinPath (linkDir </> "morloc-nexus")
-        let managerSrc = nexusBinDir </> "mim"
-        managerExists <- doesFileExist managerSrc
-        when managerExists $
-          symlinkBinary managerSrc (linkDir </> "mim")
-
-  -- Create exe/ and fdb/ directories (STATE, under the state root)
-  let exeDir = Config.exeDir config
-      fdbDir = Config.fdbDir config
-  ensureDirectory verbose "morloc exe directory" exeDir
-  ensureDirectory verbose "morloc fdb directory" fdbDir
-
-  -- Configure each language via its init.sh script.
-  --
-  -- Language SELECTION is environment-aware in strict mode: a language is set up
-  -- only when its toolchain resolves INSIDE the conda prefix -- the conda env IS
-  -- the intended language set. A host tool for a language the env does not
-  -- include (e.g. a stray /usr/bin/julia on a CI runner) is NOT built, so we
-  -- never compile a shim that mixes a host toolchain with conda's libmorloc.
-  -- In non-strict mode, selection stays PATH-based (any tool on PATH), preserving
-  -- lenient system-toolchain dev installs.
-  --
-  -- Shim BUILD is fail-closed in strict mode: a compile failure ABORTS init with
-  -- the error, rather than the best-effort warn that silently leaves a half-
-  -- configured env whose failure only surfaces later as a runtime import error.
-  forM_ DF.langSetups $ \ls -> do
-    let tools = DF.lsRequiredTools ls
-    avail <- mapM (toolAvailableInEnv mStrictPrefix) tools
-    let unavailable = [t | (t, False) <- zip tools avail]
-    if null unavailable
-      then do
-        hPutStrLn stderr $ "Building " <> DF.lsName ls <> " extension ..."
-        sayInfo verbose $ "Configuring " <> DF.lsName ls <> " language support"
-        -- Write data files to build dir
-        forM_ (DF.lsFiles ls) $ \ef ->
-          TIO.writeFile (buildDir </> DF.embededFileName ef) (DF.embededFileText ef)
-        -- Write and run init script
-        let initPath = buildDir </> "init.sh"
-        TIO.writeFile initPath (DF.embededFileText (DF.lsInitScript ls))
-        let sanitizeFlagsStr = if sanitize then "-fsanitize=alignment -fno-sanitize-recover=alignment" else ""
-        let runSetup = run verbose "bash" [initPath, homeDir, buildDir, sanitizeFlagsStr]
-        case mStrictPrefix of
-          Just _ -> runSetup
-          Nothing -> optionalStep (DF.lsName ls <> " setup failed: ") runSetup
-        -- Clean up
-        removeFileSafe initPath
-        forM_ (DF.lsFiles ls) $ \ef ->
-          removeFileSafe (buildDir </> DF.embededFileName ef)
-      else
-        let reason = case mStrictPrefix of
-              Just _ -> "not provided by the conda environment"
-              Nothing -> "missing"
-        in sayWarning $ "Skipping " <> DF.lsName ls <> " setup (" <> reason <> ": " <> unwords unavailable <> ")"
-
-  -- Generate shell completions
-  sayInfo verbose "Generating shell completions"
-  Completion.regenerateCompletions verbose (Config.exeDir config) (homeDir </> "completions")
 
 -- | Search for a Rust workspace directory containing Cargo.toml
 findRustDir :: [FilePath] -> IO FilePath

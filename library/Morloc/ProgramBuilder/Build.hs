@@ -128,13 +128,20 @@ syncEnvDeps = do
   isEval <- MM.gets stateEvalMode
   isInstall <- MM.gets stateInstall
   mRoot <- MM.gets stateProjectRoot
+  usesLangs <- MM.gets stateEnvSpecLangs
   mEnv <- liftIO $ lookupEnv "MORLOC_ENV"
   let declaresDeps = any packageHasDeps metas
+      -- A program that merely USES a language (has a pool) needs that language's
+      -- toolchain/runtime provisioned on demand, even with no declared package
+      -- deps; a program that declares deps needs them regardless. Either makes
+      -- the build's provisioning hook fire. The hook is a near-no-op (its solve
+      -- is cached) when the world is already up to date.
+      needsSync = declaresDeps || not (null usesLangs)
   case (mEnv, mKey) of
     (Just env, Just key)
-      | not (null env) && declaresDeps && not isEval && not isInstall -> do
+      | not (null env) && needsSync && not isEval && not isInstall -> do
           root <- liftIO $ maybe (return ".") SD.makeAbsolute mRoot
-          runSync key root
+          runSync declaresDeps key root
     _ -> return ()
   where
     packageHasDeps pm =
@@ -145,7 +152,12 @@ syncEnvDeps = do
         || not (Map.null (packageJuliaDeps pm))
         || not (Map.null (packageLocalDeps pm))
 
-    runSync key root = do
+    -- @requireHook@ is @declaresDeps@: a program that DECLARES package
+    -- dependencies cannot build without them, so a managed env with no
+    -- provisioner is a hard error. A language-only trigger degrades to a warning
+    -- instead -- the languages may already be provisioned (by `mim new`/init), so
+    -- a missing hook must not brick a build that would otherwise succeed.
+    runSync requireHook key root = do
       mhook <- liftIO $ lookupEnv "MORLOC_BUILD_HOOK"
       case mhook of
         Just hook | not (null hook) -> do
@@ -160,16 +172,22 @@ syncEnvDeps = do
               MM.throwSystemError
                 "environment dependency provisioning failed (see the output above)."
         -- MORLOC_ENV is set (a managed env that expects provisioning) but no build
-        -- hook is named. Fail now with an actionable message rather than at pool
-        -- compile on the missing dependencies.
-        _ ->
-          MM.throwSystemError . vsep $
-            [ "This program declares package dependencies and MORLOC_ENV is set, but"
-            , "MORLOC_BUILD_HOOK names no provisioning program. A managed environment"
-            , "must export MORLOC_BUILD_HOOK (the dependency agent, e.g. mim-env) so"
-            , "'morloc make' can provision declared dependencies before the pools are"
-            , "compiled. Re-provision the environment (e.g. 'mim update --env <env>')."
-            ]
+        -- hook is named.
+        _ | requireHook ->
+              MM.throwSystemError . vsep $
+                [ "This program declares package dependencies and MORLOC_ENV is set, but"
+                , "MORLOC_BUILD_HOOK names no provisioning program. A managed environment"
+                , "must export MORLOC_BUILD_HOOK (the dependency agent, e.g. mim) so"
+                , "'morloc make' can provision declared dependencies before the pools are"
+                , "compiled. Re-provision the environment (e.g. 'mim update --env <env>')."
+                ]
+          | otherwise ->
+              MM.say . vsep $
+                [ "Warning: MORLOC_ENV is set but MORLOC_BUILD_HOOK names no provisioning"
+                , "program, so on-demand language provisioning is skipped. If a pool fails"
+                , "to compile on a missing toolchain, re-provision the environment"
+                , "(e.g. 'mim update --env <env>')."
+                ]
 
     -- Inherit the terminal so the hook and the pixi it spawns stream progress
     -- live; capturing would silence a successful install. MORLOC_BIN carries THIS

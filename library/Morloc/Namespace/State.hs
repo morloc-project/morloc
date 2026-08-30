@@ -217,6 +217,11 @@ data MorlocState = MorlocState
   -- ^ Map from export manifold ID to its original return effect labels
   , stateProjectRoot :: Maybe Path
   -- ^ Project root directory (directory of the entry-point file)
+  , stateEnvSpecLangs :: [Text]
+  -- ^ The languages the built program's pools use (from the emitted
+  -- envspec.json). Set during nexus generation; read by the build's
+  -- environment-provisioning hook so a program that USES a language triggers
+  -- on-demand provisioning even when it declares no package dependencies.
   , stateEvalMode :: Bool
   -- ^ True when running in eval mode (restricts source/class/instance)
   , stateAllowLocalModules :: Bool
@@ -888,6 +893,7 @@ instance Defaultable MorlocState where
       , stateManifoldLang = Map.empty
       , stateManifoldEffects = Map.empty
       , stateProjectRoot = Nothing
+      , stateEnvSpecLangs = []
       , stateEvalMode = False
       , stateAllowLocalModules = True
       , stateEvalSandbox = Nothing

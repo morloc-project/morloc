@@ -120,6 +120,7 @@ copyState oldIdx newIdx = do
       , stateManifoldLang = stateManifoldLang s
       , stateManifoldEffects = stateManifoldEffects s
       , stateProjectRoot = stateProjectRoot s
+      , stateEnvSpecLangs = stateEnvSpecLangs s
       , stateEvalMode = stateEvalMode s
       , stateAllowLocalModules = stateAllowLocalModules s
       , stateEvalSandbox = stateEvalSandbox s

@@ -44,28 +44,39 @@
    faster, more maintainable pipelines made from functions acting on structured
    data.
 
+## Installation
+
+First retrieve the Morloc installation manager (mim), this should work on any
+Linux or arm MacOS machine:
+
+```
+curl -fsSL https://raw.githubusercontent.com/morloc-project/morloc-manager/main/scripts/install.sh | sh
+```
+
+Next setup run `mim new` to setup the default Morloc environment for your system:
+
+```
+mim new --non-interactive
+```
+
+There are many ways to customize these environments. If you want to customize
+the environment, drop the `--non-interactive` flag or run `mim new -h` to
+explore the options.
+
+Next you can enter the environment with:
+
+```
+mim shell
+```
+
+## Example
 
 Below is a simple example, for installation details and more examples, see the
 [Manual](https://morloc-project.github.io/docs).
 
 
-mim run -- morloc install stdlib
-mim install main.loc
-mim expose add foo --as mcp,api
-mim start
-mim status
-
-claude mcp add --transport http foo http://127.0.0.1:9000/mcp
-
-curl -s http://127.0.0.1:9000/health
-curl -s http://127.0.0.1:9000/discover/foo | jq .
-curl -s -X POST -d '[[[1,2,3],[4,5]]]' http://127.0.0.1:9001/call/foo/vsum
-
-
 A Morloc module can import functions from foreign languages, assign them general
 types, and compose new functions:
-
-
 
 
 ```morloc

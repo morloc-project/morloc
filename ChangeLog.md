@@ -1,3 +1,13 @@
+0.100.2 [2026-08-30]
+--------------------
+
+ - support on-demand language provisioning
+
+0.100.1 [2026-08-30]
+--------------------
+
+ - add macos silicon compiler binary
+
 0.100.0 [2026-08-29]
 --------------------
 
