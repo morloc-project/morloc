@@ -20,10 +20,26 @@ struct PriceDistribution {
     double ciUpper;
 };
 
+// std::normal_distribution (and std::uniform_real_distribution) are NOT
+// specified to produce the same sequence across standard-library
+// implementations, so libstdc++ (Linux) and libc++ (macOS) would diverge for
+// the same seed. Generate the standard-normal variate by hand (Box-Muller) from
+// mt19937's raw output, which IS portable, so the golden matches on both
+// platforms. Depends only on the portable PRNG plus IEEE sqrt/log/cos.
+static inline double portable_uniform(std::mt19937& gen) {
+    // mt19937::operator() yields a uint32 in [0, 2^32); map to (0,1).
+    return (static_cast<double>(gen()) + 0.5) / 4294967296.0;
+}
+static inline double portable_normal(std::mt19937& gen) {
+    const double two_pi = 6.283185307179586476925286766559;
+    double u1 = portable_uniform(gen);
+    double u2 = portable_uniform(gen);
+    return std::sqrt(-2.0 * std::log(u1)) * std::cos(two_pi * u2);
+}
+
 // Simulate stock price paths using Geometric Brownian Motion
 std::vector<std::vector<double>> simulatePaths(MarketParams params, int nPaths, int nSteps) {
     std::mt19937 gen(42);  // Deterministic seed
-    std::normal_distribution<> dist(0.0, 1.0);
 
     double dt = params.timeToMaturity / nSteps;
     double drift = (params.riskFreeRate - 0.5 * params.volatility * params.volatility) * dt;
@@ -35,7 +51,7 @@ std::vector<std::vector<double>> simulatePaths(MarketParams params, int nPaths, 
         paths[i][0] = params.spot;
 
         for (int j = 1; j <= nSteps; j++) {
-            double z = dist(gen);
+            double z = portable_normal(gen);
             double S_prev = paths[i][j-1];
             paths[i][j] = S_prev * std::exp(drift + diffusion * z);
         }

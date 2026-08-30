@@ -28,7 +28,7 @@ define run_lang
 	./$(1) -f jsonl   streamInts --sorted >> obs.txt 2>> obs.err
 	MORLOC_TMPDIR=$(TMP) ./$(1) -f voidstar streamInts --sorted 2>> obs.err | morloc-nexus view -f json - >> obs.txt 2>> obs.err
 	MORLOC_TMPDIR=$(TMP) ./$(1) -f packet -z 9 streamInts --sorted 2>> obs.err | morloc-nexus view -f json - >> obs.txt 2>> obs.err
-	printf -- 'mpk bytes: ' >> obs.txt ; MORLOC_TMPDIR=$(TMP) ./$(1) -f mpk streamInts --sorted 2>> obs.err | wc -c >> obs.txt
+	printf -- 'mpk bytes: ' >> obs.txt ; MORLOC_TMPDIR=$(TMP) ./$(1) -f mpk streamInts --sorted 2>> obs.err | wc -c | tr -d ' ' >> obs.txt
 	printf -- '=== $(2): whole-form with (IFile, @flen) ===\n' >> obs.txt
 	./$(1) -f json streamInts --summary >> obs.txt 2>> obs.err
 	printf -- '=== $(2): with.buffer (per-batch) json/jsonl ===\n' >> obs.txt
@@ -73,7 +73,7 @@ assertions:
 	printf -- '=== cleanup: gather temps after 5 whole-form calls ===\n' >> obs.txt
 	for n in 1 2 3 4 5 ; do MORLOC_TMPDIR=$(TMP) ./nexus-cpp -f json streamInts --sorted >/dev/null 2>> obs.err ; done
 	printf 'leftover morloc-gather files: ' >> obs.txt
-	find $(TMP) -name 'morloc-gather-*' 2>/dev/null | wc -l >> obs.txt
+	find $(TMP) -name 'morloc-gather-*' 2>/dev/null | wc -l | tr -d ' ' >> obs.txt
 	# Return block lists each formatter's wire return type: whole-gather
 	# `with:` handlers return their reshaped value, buffered/streaming
 	# formatters return Unit (their data leaves via the stream).

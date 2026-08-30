@@ -8,7 +8,7 @@
 -- are released at end-of-request scope.
 --
 -- Used by the [shm-leak] test group in run-tests.sh to assert that
--- /dev/shm/morloc-<daemon-pid>-* total bytes do not grow unboundedly
+-- /dev/shm/mlc-<daemon-pid>-* total bytes do not grow unboundedly
 -- across many requests.
 
 module shm_leak (echoList)

@@ -62,6 +62,43 @@ pub struct DaemonRequest {
     pub media: bool,
 }
 
+// recv that tolerates EAGAIN/EWOULDBLOCK on a non-blocking fd -- macOS's BSD
+// accept() inherits O_NONBLOCK onto the accepted client fd, so a bare recv can
+// return -1/EAGAIN mid-request and a plain `n <= 0` check would misread that as
+// a closed connection and truncate the parse. Polls for readability (bounded)
+// and retries EINTR. Returns the byte count (>0), 0 on clean EOF, or -1 on a
+// hard error / stall timeout.
+unsafe fn http_recv(fd: i32, buf: *mut u8, len: usize) -> isize {
+    const STALL_MS: u128 = 120_000;
+    let start = std::time::Instant::now();
+    loop {
+        let n = libc::recv(fd, buf as *mut c_void, len, 0);
+        if n >= 0 {
+            return n;
+        }
+        let e = crate::utility::errno_val();
+        if e == libc::EINTR {
+            continue;
+        }
+        if e == libc::EAGAIN || e == libc::EWOULDBLOCK {
+            // Wait (bounded) for readability. A signal-interrupted poll returns
+            // -1/EINTR -- re-loop rather than treating it as a hard error (which
+            // would truncate an in-flight request on any SIGTERM/SIGCHLD). The
+            // wall-clock deadline bounds a genuinely stalled peer.
+            if start.elapsed().as_millis() >= STALL_MS {
+                return -1;
+            }
+            let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+            let r = libc::poll(&mut pfd, 1, 1000);
+            if r < 0 && crate::utility::errno_val() != libc::EINTR {
+                return -1; // hard poll error
+            }
+            continue;
+        }
+        return -1;
+    }
+}
+
 // ── http_parse_request ───────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -77,7 +114,7 @@ pub unsafe extern "C" fn http_parse_request(
     let mut header_end_pos: Option<usize> = None;
 
     while header_len < HTTP_MAX_HEADERS - 1 {
-        let n = libc::recv(fd, header_buf.as_mut_ptr().add(header_len) as *mut c_void, 1, 0);
+        let n = http_recv(fd, header_buf.as_mut_ptr().add(header_len), 1);
         if n <= 0 {
             set_errmsg(errmsg, &MorlocError::Other("Connection closed while reading HTTP headers".into()));
             return ptr::null_mut();
@@ -178,7 +215,7 @@ pub unsafe extern "C" fn http_parse_request(
 
         let mut total = already_read;
         while total < content_length {
-            let n = libc::recv(fd, body.add(total) as *mut c_void, content_length - total, 0);
+            let n = http_recv(fd, body.add(total), content_length - total);
             if n <= 0 {
                 libc::free(body as *mut c_void);
                 libc::free(req as *mut c_void);
@@ -266,15 +303,15 @@ pub unsafe extern "C" fn http_write_response_ex(
         status, http_status_text(status), ct, body_len, extra
     );
 
-    let n = libc::send(fd, header.as_ptr() as *const c_void, header.len(), crate::utility::SEND_NOSIGNAL);
-    if n < 0 { return false; }
+    // send_all retries on EAGAIN (non-blocking client fd on macOS) and on a
+    // short header/body send, rather than truncating the response mid-message.
+    if !crate::ipc_ffi::send_all(fd, header.as_ptr(), header.len()) {
+        return false;
+    }
 
     if !body.is_null() && body_len > 0 {
-        let mut total: usize = 0;
-        while total < body_len {
-            let n = libc::send(fd, (body as *const u8).add(total) as *const c_void, body_len - total, crate::utility::SEND_NOSIGNAL);
-            if n <= 0 { return false; }
-            total += n as usize;
+        if !crate::ipc_ffi::send_all(fd, body as *const u8, body_len) {
+            return false;
         }
     }
 

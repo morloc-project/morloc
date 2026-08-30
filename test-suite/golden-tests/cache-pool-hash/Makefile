@@ -20,14 +20,16 @@ all:
 	MORLOC_CACHE_BASE=$$PWD/cache ./nexus fooP $(INPUT) >> obs.txt 2> obs.run.P1.err
 	MORLOC_CACHE_BASE=$$PWD/cache ./nexus fooR $(INPUT) >> obs.txt 2> obs.run.R1.err
 	MORLOC_CACHE_BASE=$$PWD/cache ./nexus fooC $(INPUT) >> obs.txt 2> obs.run.C1.err
-	sed -i 's/fold (+) 0\.0/fold (+) 100.0/' main.loc
+	@# Portable in-place edit: GNU `sed -i` and BSD `sed -i` take different
+	@# arguments (BSD requires a backup-suffix arg), so edit via a temp file.
+	sed 's/fold (+) 0\.0/fold (+) 100.0/' main.loc > main.loc.edit && mv main.loc.edit main.loc
 	morloc make -o nexus main.loc 2> build2.err
 	MORLOC_CACHE_BASE=$$PWD/cache ./nexus fooP $(INPUT) >> obs.txt 2> obs.run.P2.err
 	MORLOC_CACHE_BASE=$$PWD/cache ./nexus fooR $(INPUT) >> obs.txt 2> obs.run.R2.err
 	MORLOC_CACHE_BASE=$$PWD/cache ./nexus fooC $(INPUT) >> obs.txt 2> obs.run.C2.err
 	mv main.orig.loc main.loc
-	@echo "a_packets: $$(ls cache/a/*.dat 2>/dev/null | wc -l)" >> obs.txt
-	@echo "dats:      $$(ls cache/data/*.dat 2>/dev/null | wc -l)" >> obs.txt
+	@echo "a_packets: $$(ls cache/a/*.dat 2>/dev/null | wc -l | tr -d ' ')" >> obs.txt
+	@echo "dats:      $$(ls cache/data/*.dat 2>/dev/null | wc -l | tr -d ' ')" >> obs.txt
 	cat obs.run.*.err > obs.err
 
 clean:

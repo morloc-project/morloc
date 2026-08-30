@@ -88,7 +88,7 @@ writeModuleFixture sub extra = do
 -- or a MorlocError Left as "rejected".
 loadRejects :: FilePath -> IO Bool
 loadRejects mainLoc = do
-  outcome <- try (runMM (loadModuleMetadata mainLoc))
+  outcome <- try (runMM (loadModuleMetadata True mainLoc))
   return $ case (outcome :: Either SomeException (Either MorlocError ())) of
     Left _ -> True             -- ioError path
     Right (Left _) -> True     -- throwError path

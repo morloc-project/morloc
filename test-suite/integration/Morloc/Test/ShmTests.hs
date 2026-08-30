@@ -230,8 +230,8 @@ sigtermBehavior getWorkDir = testCase "sigtermBehavior" $ do
 -- Test 3b: SIGTERM cleans up dynamic-growth volumes, not just the two
 --          startup ones. Runs `bigstress 20000 5.0` which allocates a
 --          160 KB payload before sleeping -- forces the allocator past
---          the initial 64 KB `_0` volume into `_1` (128 KB) and often
---          `_2` (256 KB). The test snapshots the SHM count DURING the
+--          the initial 64 KB `-0000` volume into `-0001` (128 KB) and
+--          often `-0002` (256 KB). The test snapshots the SHM count DURING the
 --          sleep to verify growth actually happened (otherwise this
 --          test would silently degrade to the same coverage as the
 --          plain `sigtermBehavior`).
@@ -245,8 +245,8 @@ sigtermBehaviorWithGrowth getWorkDir = testCase "sigtermBehaviorWithGrowth" $ do
   before <- countShm
 
   devNull <- openFile "/dev/null" WriteMode
-  -- 4 MB > both the initial 64 KB `_0` volume AND the ~2.1 MB stream
-  -- registry `_32767` (which shmalloc's fallback scan can allocate
+  -- 4 MB > both the initial 64 KB `-0000` volume AND the ~2.1 MB stream
+  -- registry companion `.reg` (which shmalloc's fallback scan can allocate
   -- from). Forces the allocator to `shinit` a fresh growth volume.
   let cp =
         (proc (workDir </> "nexus") ["bigstress", "4096", "5.0"])
@@ -271,7 +271,7 @@ sigtermBehaviorWithGrowth getWorkDir = testCase "sigtermBehaviorWithGrowth" $ do
         , "  during: " ++ show duringSleep ++ " segments"
         , "  expected: > " ++ show (before + 2)
           ++ " (any dynamic-growth segment beyond the two startup ones)"
-        , "  bump the KB argument on `bigstress` or shrink `_0`'s initial size."
+        , "  bump the KB argument on `bigstress` or shrink `-0000`'s initial size."
         ]
 
   terminateProcess ph

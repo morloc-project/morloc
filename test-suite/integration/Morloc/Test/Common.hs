@@ -315,7 +315,7 @@ countShm = do
   (_, out, _) <-
     readProcessWithExitCode
       "sh"
-      ["-c", "ls -1 /dev/shm/morloc-* 2>/dev/null | wc -l || echo 0"]
+      ["-c", "ls -1 /dev/shm/mlc-* 2>/dev/null | wc -l || echo 0"]
       ""
   return (readDef 0 (strip out))
 
@@ -334,7 +334,7 @@ listShm = do
   (_, out, _) <-
     readProcessWithExitCode
       "sh"
-      ["-c", "ls -1 /dev/shm/morloc-* 2>/dev/null || true"]
+      ["-c", "ls -1 /dev/shm/mlc-* 2>/dev/null || true"]
       ""
   return (filter (not . null) (lines out))
 
@@ -415,6 +415,6 @@ readDef def s = case reads s of
 -- | Remove stale morloc SHM segments and tmp dirs to get a clean baseline
 cleanupMorlocResources :: IO ()
 cleanupMorlocResources = do
-  _ <- readProcessWithExitCode "sh" ["-c", "rm -f /dev/shm/morloc-* 2>/dev/null"] ""
+  _ <- readProcessWithExitCode "sh" ["-c", "rm -f /dev/shm/mlc-* 2>/dev/null"] ""
   _ <- readProcessWithExitCode "sh" ["-c", "rm -rf /tmp/morloc.* 2>/dev/null"] ""
   return ()

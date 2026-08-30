@@ -745,7 +745,29 @@ template<typename Wire, typename Src>
 Wire check_range_narrow(const Src& data, const char* name) {
     if constexpr (std::is_arithmetic_v<Src>) {
         using SLim = std::numeric_limits<Wire>;
-        if constexpr (std::is_signed_v<Src>) {
+        if constexpr (std::is_floating_point_v<Src>) {
+            // Narrowing a non-finite float (Inf/NaN) to an integer via
+            // static_cast is UB -- Apple-clang on ARM64 may trap or yield
+            // garbage. Reject it cleanly.
+            if (!std::isfinite(data)) {
+                std::ostringstream oss;
+                oss << "Cannot convert non-finite value to integer type " << name;
+                throw std::overflow_error(oss.str());
+            }
+            // A FINITE but out-of-range float is ALSO UB to static_cast into an
+            // integer, so range-check in floating point BEFORE the narrowing
+            // cast, against exact power-of-two bounds (representable in long
+            // double even where it is 64-bit): the valid signed range is
+            // [-2^(w-1), 2^(w-1)) and unsigned is [0, 2^w).
+            long double d = static_cast<long double>(data);
+            long double hi_excl = std::ldexp(1.0L, std::numeric_limits<Wire>::digits);
+            long double lo = std::is_signed_v<Wire> ? -hi_excl : 0.0L;
+            if (!(d >= lo && d < hi_excl)) {
+                std::ostringstream oss;
+                oss << "Integer overflow: value " << data << " out of range for " << name;
+                throw std::overflow_error(oss.str());
+            }
+        } else if constexpr (std::is_signed_v<Src>) {
             int64_t v = static_cast<int64_t>(data);
             int64_t lo = static_cast<int64_t>(SLim::min());
             int64_t hi = static_cast<int64_t>(SLim::max());
@@ -792,18 +814,18 @@ void* to_voidstar(void* dest, void** cursor, const Schema* schema, const Primiti
             case MORLOC_SINT8:   *(int8_t*)dest   = check_range_narrow<int8_t>(data, "I8");    break;
             case MORLOC_SINT16:  *(int16_t*)dest  = check_range_narrow<int16_t>(data, "I16");  break;
             case MORLOC_SINT32:  *(int32_t*)dest  = check_range_narrow<int32_t>(data, "I32");  break;
-            case MORLOC_SINT64:  *(int64_t*)dest  = static_cast<int64_t>(data);   break;
+            case MORLOC_SINT64:  *(int64_t*)dest  = check_range_narrow<int64_t>(data, "I64");  break;
             case MORLOC_UINT8:   *(uint8_t*)dest  = check_range_narrow<uint8_t>(data, "U8");   break;
             case MORLOC_UINT16:  *(uint16_t*)dest = check_range_narrow<uint16_t>(data, "U16"); break;
             case MORLOC_UINT32:  *(uint32_t*)dest = check_range_narrow<uint32_t>(data, "U32"); break;
-            case MORLOC_UINT64:  *(uint64_t*)dest = static_cast<uint64_t>(data);  break;
+            case MORLOC_UINT64:  *(uint64_t*)dest = check_range_narrow<uint64_t>(data, "U64"); break;
             case MORLOC_FLOAT32: *(float*)dest    = static_cast<float>(data);    break;
             case MORLOC_FLOAT64: *(double*)dest   = static_cast<double>(data);   break;
             case MORLOC_INT: {
                 // Inline BigInt: [size=1, value] — no allocation, no relptr
                 int64_t* fields = static_cast<int64_t*>(dest);
                 fields[0] = 1;
-                fields[1] = static_cast<int64_t>(data);
+                fields[1] = check_range_narrow<int64_t>(data, "Int");
                 break;
             }
             default: *(Primitive*)dest = data; break;
@@ -863,7 +885,15 @@ void* to_voidstar(void* dest, void** cursor, const Schema* schema, const std::ve
         }
     }
     for (size_t i = 0; i < data.size(); ++i) {
-         to_voidstar(start + width * i, cursor, elem_schema, data[i]);
+         if constexpr (std::is_same_v<T, bool>) {
+             // std::vector<bool>::operator[] returns a bit-proxy, not bool&.
+             // On libc++ (macOS) that proxy is a real reference type whose
+             // operator= is deleted, so passing it through would instantiate
+             // to_voidstar on the proxy and fail. Materialize a plain bool.
+             to_voidstar(start + width * i, cursor, elem_schema, static_cast<bool>(data[i]));
+         } else {
+             to_voidstar(start + width * i, cursor, elem_schema, data[i]);
+         }
     }
     return dest;
 }
@@ -1074,10 +1104,16 @@ T from_voidstar(const Schema* schema, const void* data, T*, const void* base_ptr
             case MORLOC_UINT64:
             case MORLOC_FLOAT32:
             case MORLOC_FLOAT64:
-                if (sizeof(ElemT) == elem_schema->width) {
-                    ElemT* arr_start = (ElemT*)resolve_relptr_cpp(array->data, base_ptr);
-                    std::vector<ElemT> pv(arr_start, arr_start + array->size);
-                    return pv;
+                // Exclude bool: loading a wire byte directly as `bool` is UB if
+                // it is not exactly 0/1, and clang -O2 assumes bool in {0,1}
+                // (can miscompile a later branch/jump table). Fall through to the
+                // per-element slow path, which normalizes via `*(uint8_t*)==1`.
+                if constexpr (!std::is_same_v<ElemT, bool>) {
+                    if (sizeof(ElemT) == elem_schema->width) {
+                        ElemT* arr_start = (ElemT*)resolve_relptr_cpp(array->data, base_ptr);
+                        std::vector<ElemT> pv(arr_start, arr_start + array->size);
+                        return pv;
+                    }
                 }
                 break;
         }

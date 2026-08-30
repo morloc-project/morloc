@@ -37,7 +37,10 @@ unsafe fn preallocate_fd(fd: i32, size: i64) -> i32 {
 
 /// System page size, cached on first use. Used to align the per-worker
 /// sub-ranges in `parallel_madvise_populate_write` -- `madvise`
-/// requires page-aligned offsets and lengths.
+/// requires page-aligned offsets and lengths. Only the Linux
+/// page-reservation path (and a test) use it; on a macOS release build it
+/// would otherwise be dead code.
+#[cfg(any(target_os = "linux", test))]
 fn page_size() -> usize {
     static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
@@ -48,7 +51,9 @@ fn page_size() -> usize {
 
 /// Worker count for parallel page reservation. Reuses the encoder's
 /// `frame_workers()` cap so all parallel-CPU work in the runtime sees
-/// the same `MORLOC_FRAME_WORKERS` override.
+/// the same `MORLOC_FRAME_WORKERS` override. Only the Linux
+/// page-reservation path uses it (macOS reserves lazily).
+#[cfg(target_os = "linux")]
 fn fallocate_workers(size: usize) -> usize {
     // Below ~64 MiB there's no headroom for parallel reservation to
     // pay back the thread-spawn cost; stay serial.
@@ -531,11 +536,14 @@ extern "C" fn shclose_atexit() {
             let name = get_cstr(&(*shm).volume_name).to_string();
             let full_size = (*shm).volume_size + std::mem::size_of::<ShmHeader>();
             libc::munmap(shm as *mut libc::c_void, full_size);
-            if name.starts_with('/') {
-                let cstr = std::ffi::CString::new(name.as_str()).unwrap_or_default();
+            // POSIX shm names are "/<segment>" (single leading slash, no
+            // interior slash); file-backed labels are absolute paths with
+            // interior slashes. Distinguish by an interior slash.
+            let file_backed = name.get(1..).map_or(false, |r| r.contains('/'));
+            let cstr = std::ffi::CString::new(name.as_str()).unwrap_or_default();
+            if file_backed {
                 libc::unlink(cstr.as_ptr());
             } else {
-                let cstr = std::ffi::CString::new(name.as_str()).unwrap_or_default();
                 libc::shm_unlink(cstr.as_ptr());
             }
         }
@@ -586,7 +594,9 @@ pub fn shinit(
     }
 
     let full_size = shm_size + std::mem::size_of::<ShmHeader>();
-    let shm_name = format!("{}_{}", shm_basename, volume_index);
+    // Volume name: <basename>-<vol:4hex>. The volume index is
+    // < MAX_VOLUME_NUMBER (32768), so 4 hex digits are exact.
+    let shm_name = format!("{}-{:04x}", shm_basename, volume_index);
 
     // Store common basename
     {
@@ -666,8 +676,8 @@ pub enum ShopenMiss {
     /// the nexus/pool wire shinit before any allocation. Surfacing it
     /// explicitly catches "someone touched a relptr before init" bugs.
     NotInitialized,
-    /// Basename is set but neither `/dev/shm/<basename>_<i>` nor the
-    /// file-backed fallback at `<fallback_dir>/<basename>_<i>` could be
+    /// Basename is set but neither `/dev/shm/<basename>-<i>` nor the
+    /// file-backed fallback at `<fallback_dir>/<basename>-<i>` could be
     /// opened. Common causes: the writer never created this volume,
     /// the writer crashed before sending, basename mismatch between
     /// writer and reader, or another process (or stale-SHM cleanup)
@@ -712,7 +722,7 @@ pub fn shopen_diag(
         return Ok(Err(ShopenMiss::NotInitialized));
     }
 
-    let shm_name = format!("{}_{}", basename, volume_index);
+    let shm_name = format!("{}-{:04x}", basename, volume_index);
 
     // Try POSIX SHM
     let name_cstr = std::ffi::CString::new(shm_name.as_str()).unwrap();
@@ -733,7 +743,8 @@ pub fn shopen_diag(
                 shm_errno: shm_open_errno,
             }));
         }
-        let file_path = format!("{}/{}", fallback, shm_name);
+        // `shm_name` already carries a leading '/', so append directly.
+        let file_path = format!("{}{}", fallback, shm_name);
         let path_cstr = std::ffi::CString::new(file_path.as_str()).unwrap();
         let fd2 = unsafe { libc::open(path_cstr.as_ptr(), libc::O_RDWR) };
         if fd2 == -1 {
@@ -878,12 +889,14 @@ fn shclose_locked(vols: &mut VolumeTable) {
             let full_size = (*shm).volume_size + std::mem::size_of::<ShmHeader>();
             libc::munmap(shm as *mut libc::c_void, full_size);
 
-            // Unlink: file-backed volumes start with '/', POSIX SHM does not
-            if name.starts_with('/') {
-                let cstr = std::ffi::CString::new(name.as_str()).unwrap();
+            // POSIX shm names are "/<segment>" (single leading slash, no
+            // interior slash); file-backed labels are absolute paths with
+            // interior slashes. Distinguish by an interior slash.
+            let file_backed = name.get(1..).map_or(false, |r| r.contains('/'));
+            let cstr = std::ffi::CString::new(name.as_str()).unwrap();
+            if file_backed {
                 libc::unlink(cstr.as_ptr());
             } else {
-                let cstr = std::ffi::CString::new(name.as_str()).unwrap();
                 libc::shm_unlink(cstr.as_ptr());
             }
         }
@@ -1010,7 +1023,7 @@ pub unsafe fn shm_block_size(ptr: AbsPtr) -> Option<usize> {
 /// and add the offset.
 ///
 /// If the volume is not yet mapped in this process (cross-process
-/// reader), `shopen_diag(idx)` lazily mmaps `<basename>_<idx>` and
+/// reader), `shopen_diag(idx)` lazily mmaps `<basename>-<idx>` and
 /// records it.
 pub fn rel2abs(ptr: RelPtr) -> Result<AbsPtr, MorlocError> {
     if relptr_is_sentinel(ptr) {
@@ -1132,11 +1145,11 @@ fn rel2abs_miss_error(
             let fallback_note = if fallback_dir.is_empty() {
                 "no file-backed fallback directory was configured".to_string()
             } else {
-                format!("file-backed fallback '{}/{}_{}' also missing", fallback_dir, basename, vi)
+                format!("file-backed fallback '{}{}-{:04x}' also missing", fallback_dir, basename, vi)
             };
             MorlocError::Shm(format!(
                 "cannot resolve relptr {} (decoded as vol_idx={}, offset={}) -- \
-                 SHM volume '/dev/shm/{}_{}' does not exist (shm_open: {}).{} {}. \
+                 SHM volume '/dev/shm{}-{:04x}' does not exist (shm_open: {}).{} {}. \
                  Likely causes: writer never created this volume, writer crashed \
                  before sending, basename mismatch between writer and reader, or \
                  another process (or /dev/shm cleanup) unlinked it.",
@@ -1379,7 +1392,8 @@ pub fn try_open_file_backed(
             shm_name
         )));
     }
-    let file_path = format!("{}/{}", fallback, shm_name);
+    // `shm_name` already carries a leading '/', so append directly.
+    let file_path = format!("{}{}", fallback, shm_name);
     drop(fb);
 
     let path_cstr = std::ffi::CString::new(file_path.as_str()).unwrap();

@@ -57,7 +57,7 @@ all:
 	$(NEXUS) file -FD people.csv          >> obs.txt 2>> obs.err
 	# === `file -v` (verbose: CSV column lines) ===
 	printf 'verbose people.csv lines: '   >> obs.txt
-	$(NEXUS) file -v people.csv | wc -l   >> obs.txt 2>> obs.err
+	$(NEXUS) file -v people.csv | wc -l | tr -d ' '   >> obs.txt 2>> obs.err
 	$(NEXUS) file -v people.csv | tail -n +2 | sort >> obs.txt 2>> obs.err
 	# === `file --json` (extract just stable fields) ===
 	printf 'json data.packet subkind: '   >> obs.txt
@@ -101,7 +101,7 @@ all:
 	rm -f tmp.err
 	# `-FD` produces a clean type stream (one type token per file).
 	printf '%s' '-FD line count over corpus: '  >> obs.txt
-	$(NEXUS) file -FD data.json data.mpk data.packet readme.txt people.csv | wc -l >> obs.txt 2>> obs.err
+	$(NEXUS) file -FD data.json data.mpk data.packet readme.txt people.csv | wc -l | tr -d ' ' >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf prog pools __pycache__ *.err *.packet *.packet.zst data.json data.mpk readme.txt people.csv truncated.packet tmp.out tmp.err

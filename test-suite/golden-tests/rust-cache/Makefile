@@ -10,7 +10,7 @@ all:
 	MORLOC_CACHE_BASE=$$PWD/cache ./nexus fooR '[1,2,3.5]' >> obs.txt 2> obs.run.err
 	MORLOC_CACHE_BASE=$$PWD/cache ./nexus fooR '[1,2,3.5]' >> obs.txt 2>> obs.run.err
 	MORLOC_CACHE_BASE=$$PWD/cache ./nexus fooR '[10,20]'   >> obs.txt 2>> obs.run.err
-	@echo "a_packets: $$(ls cache/a/*.dat 2>/dev/null | wc -l)" >> obs.txt
+	@echo "a_packets: $$(ls cache/a/*.dat 2>/dev/null | wc -l | tr -d ' ')" >> obs.txt
 	cat obs.run.err > obs.err
 
 clean:

@@ -25,9 +25,10 @@ versionStr :: String
 versionStr = showVersion Paths_morloc.version
 
 -- | @envspec.json@ @envspec_version@ (integer): the single schema version the
--- compiler emits and the manager accepts.
+-- compiler emits and the manager accepts. v2 adds the @local@ package source
+-- (local filesystem-path dependencies) and makes @source@ a discriminated tag.
 envspecVersion :: Int
-envspecVersion = 1
+envspecVersion = 2
 
 -- | @morloc lang-support@ @schema_version@ (semver "MAJOR.MINOR"). A new language
 -- or field is a MINOR bump; a breaking change is a MAJOR bump.

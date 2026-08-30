@@ -115,7 +115,7 @@ parse f (Code code) = do
         { stateSourceText = Map.insert path code (stateSourceText st)
         , stateProjectRoot = projectRoot
         })
-      Mod.loadModuleMetadata path
+      Mod.loadModuleMetadata True path
     Nothing -> return ()
 
   case Parser.readProgram Nothing f code parserState mempty of
@@ -160,7 +160,7 @@ parse f (Code code) = do
         moduleConfig <- Config.loadModuleConfig (Just importPath)
         let newState = s {psModuleConfig = moduleConfig}
 
-        Mod.loadModuleMetadata importPath
+        Mod.loadModuleMetadata False importPath
         (childPath, code') <- openLocalModule importPath
         case Parser.readProgram (Just importedModule) childPath code' newState d of
           (Left e) -> MM.throwSystemError $ pretty e

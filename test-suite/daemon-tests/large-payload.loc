@@ -8,7 +8,7 @@
 -- The function takes an integer N and returns a list of N strings,
 -- each ~256 chars wide. With N=1000 the result is ~250 KB per call,
 -- enough to make any per-crash leak immediately visible in
--- /dev/shm/morloc-* file growth.
+-- /dev/shm/mlc-* file growth.
 
 module large_payload (bigList)
 

@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdarg.h>
 #include <limits.h>
 #include <string.h>
 #include <errno.h>
@@ -708,7 +709,10 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
                         }
                         break;
                     case RAWSXP:
-                        str = RAW(obj);
+                        // RAW() yields Rbyte* (unsigned char*); we treat the
+                        // LENGTH(obj) bytes as an opaque char buffer. Cast to
+                        // avoid a -Wpointer-sign mismatch (clang warns).
+                        str = (const char*)RAW(obj);
                         length = LENGTH(obj);
                         break;
                     default:
@@ -731,7 +735,11 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
                 *cursor = (void*)(*(char**)cursor + array->size);
             }
             break;
-        case MORLOC_ARRAY:
+        case MORLOC_ARRAY: {
+            // Braced so the declarations below are legal directly under the
+            // label: C forbids a declaration immediately after a case label
+            // (a label must precede a statement). gcc allowed it; clang/ld64
+            // (macOS) rejects it. Matches the braced MORLOC_RECUR/ISTREAM cases.
             Array* array = (Array*)dest;
             array->size = (size_t)length(obj);
             if(array->size == 0){
@@ -845,8 +853,7 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
                     MORLOC_ERROR("Unsupported type in to_voidstar array: %s", type2char(TYPEOF(obj)));
             }
             break;
-
-
+        }
 
         case MORLOC_TUPLE:
             if (!isVectorList(obj)) {
@@ -1537,6 +1544,12 @@ SEXP morloc_install_sigterm_handler(void) {
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
     sigaction(SIGTERM, &sa, NULL);
+
+    /* Ignore SIGPIPE: a peer closing the socket mid-write must surface as an
+       EPIPE return, not kill the pool. Linux masks this via MSG_NOSIGNAL on
+       each send; macOS has no per-call flag, so without this a broken pipe
+       terminates the R pool and the caller sees "Connection closed by peer". */
+    signal(SIGPIPE, SIG_IGN);
 
     /* Request SIGTERM when the parent (nexus) dies. Without this,
        SIGKILL on the nexus leaves pool processes orphaned with
@@ -2981,17 +2994,48 @@ SEXP morloc_exit(SEXP status_r) {
     return R_NilValue; // unreachable
 }
 
-SEXP morloc_send_fd(SEXP pipe_fd_r, SEXP client_fd_r) {
-    int pipe_fd = INTEGER(pipe_fd_r)[0];
-    int client_fd = INTEGER(client_fd_r)[0];
+// Diagnostic IPC trace, gated by MORLOC_TRACE_CLOSE=1 (same switch the Rust
+// close tracer uses). Localizes the macOS cross-language "Connection closed by
+// peer" flake by pairing each dispatcher send_fd with the worker recv_fd that
+// (should) receive it and the run_job that serves it. Cached once.
+static int mlc_trace_ipc(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* e = getenv("MORLOC_TRACE_CLOSE");
+        cached = (e && e[0] == '1') ? 1 : 0;
+    }
+    return cached;
+}
 
+// Emit one "[MLC_IPC] pid=<pid> <fmt>" line to stderr when tracing is on.
+// Built into a single buffer and written once so concurrent pool processes'
+// lines do not interleave mid-message.
+static void mlc_trace(const char* fmt, ...) {
+    if (!mlc_trace_ipc()) return;
+    char buf[256];
+    int m = snprintf(buf, sizeof(buf), "[MLC_IPC] pid=%d ", (int)getpid());
+    if (m < 0) return;
+    if (m > (int)sizeof(buf)) m = (int)sizeof(buf);
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf + m, sizeof(buf) - (size_t)m, fmt, ap);
+    va_end(ap);
+    fputs(buf, stderr);
+    fflush(stderr);
+}
+
+// Pass an accepted client fd to a worker over the job-queue socketpair. The
+// fd travels as SCM_RIGHTS ancillary data; the iov carries `client_fd` itself
+// as a token the worker echoes back once it has DRAINED the request off the
+// socket (see the deferred-close registry below).
+static ssize_t mlc_send_fd_with_token(int pipe_fd, int client_fd) {
     struct msghdr msg = {0};
     struct iovec iov;
-    char buf[1] = {0};
+    int token = client_fd;
     char cmsgbuf[CMSG_SPACE(sizeof(int))];
 
-    iov.iov_base = buf;
-    iov.iov_len = 1;
+    iov.iov_base = &token;
+    iov.iov_len = sizeof(int);
     msg.msg_iov = &iov;
     msg.msg_iovlen = 1;
     msg.msg_control = cmsgbuf;
@@ -3003,10 +3047,104 @@ SEXP morloc_send_fd(SEXP pipe_fd_r, SEXP client_fd_r) {
     cmsg->cmsg_len = CMSG_LEN(sizeof(int));
     memcpy(CMSG_DATA(cmsg), &client_fd, sizeof(int));
 
-    ssize_t n = sendmsg(pipe_fd, &msg, 0);
+    ssize_t n;
+    do { n = sendmsg(pipe_fd, &msg, 0); } while (n < 0 && errno == EINTR);
+    return n;
+}
+
+SEXP morloc_send_fd(SEXP pipe_fd_r, SEXP client_fd_r) {
+    int pipe_fd = INTEGER(pipe_fd_r)[0];
+    int client_fd = INTEGER(client_fd_r)[0];
+    ssize_t n = mlc_send_fd_with_token(pipe_fd, client_fd);
     if (n < 0) {
         error("sendmsg SCM_RIGHTS failed: %s", strerror(errno));
     }
+    return R_NilValue;
+}
+
+// Deferred close of the dispatcher's accepted client fds.
+//
+// On macOS (XNU), close()ing the dispatcher's accepted copy of a client socket
+// while the client's request bytes still sit UNREAD in that socket's receive
+// buffer flushes the receive side (marks SS_CANTRCVMORE) -- even though the
+// worker's SCM_RIGHTS dup still references the same socket. The worker's dup
+// then reads 0 (EOF) and the request is lost ("Connection closed by peer").
+// Linux treats a non-last-reference close as a pure refcount decrement and
+// never flushes, which is why this is macOS-only and, being a close-vs-drain
+// race, flaky. Fix: the dispatcher does NOT close its copy at dispatch time;
+// it records the fd here and closes it only after the worker signals (over a
+// dedicated ack pipe) that it has drained the request, so the receive buffer
+// is provably empty at close time and there is nothing to flush.
+#define MLC_MAX_PENDING_CLOSE 1024
+static int mlc_pending_close[MLC_MAX_PENDING_CLOSE];
+static int mlc_pending_count = 0;
+static int mlc_ack_nonblock_set = 0;
+
+// Dispatch an accepted client fd to a worker and register it for deferred
+// close. Errors (without registering) if the fd could not be passed, so the
+// caller closes it immediately -- nothing was handed off.
+SEXP morloc_dispatch_fd(SEXP pipe_fd_r, SEXP client_fd_r) {
+    int pipe_fd = INTEGER(pipe_fd_r)[0];
+    int client_fd = INTEGER(client_fd_r)[0];
+
+    ssize_t n = mlc_send_fd_with_token(pipe_fd, client_fd);
+    if (n < 0) {
+        error("sendmsg SCM_RIGHTS failed: %s", strerror(errno));
+    }
+
+    // Bound the registry so a worker that dies between fd-receipt and drain
+    // (its token never comes back) cannot leak fds without limit: force-close
+    // the oldest pending fd. That job is already lost with its worker; this
+    // only reclaims the descriptor.
+    if (mlc_pending_count >= MLC_MAX_PENDING_CLOSE) {
+        close_socket(mlc_pending_close[0]);
+        memmove(&mlc_pending_close[0], &mlc_pending_close[1],
+                (MLC_MAX_PENDING_CLOSE - 1) * sizeof(int));
+        mlc_pending_count--;
+    }
+    mlc_pending_close[mlc_pending_count++] = client_fd;
+
+    mlc_trace("send_fd client=%d via pipe=%d n=%zd\n", client_fd, pipe_fd, n);
+    return R_NilValue;
+}
+
+// Non-blocking: read all drain-ack tokens available on the ack pipe and close
+// each corresponding pending fd. Tokens are 4-byte atomic pipe writes (<=
+// PIPE_BUF), so they never interleave across concurrent workers. Closing the
+// EXACT fd named by the token (not the oldest) keeps the deferred close correct
+// even when workers drain out of dispatch order.
+SEXP morloc_reap_closes(SEXP ack_fd_r) {
+    int ack_fd = INTEGER(ack_fd_r)[0];
+    if (!mlc_ack_nonblock_set) {
+        int fl = fcntl(ack_fd, F_GETFL, 0);
+        if (fl != -1) fcntl(ack_fd, F_SETFL, fl | O_NONBLOCK);
+        mlc_ack_nonblock_set = 1;
+    }
+    for (;;) {
+        int token;
+        ssize_t n;
+        do { n = read(ack_fd, &token, sizeof(int)); } while (n < 0 && errno == EINTR);
+        if (n != (ssize_t)sizeof(int)) break;  // EAGAIN / EOF / (impossible) partial
+        close_socket(token);
+        for (int i = 0; i < mlc_pending_count; i++) {
+            if (mlc_pending_close[i] == token) {
+                memmove(&mlc_pending_close[i], &mlc_pending_close[i + 1],
+                        (mlc_pending_count - i - 1) * sizeof(int));
+                mlc_pending_count--;
+                break;
+            }
+        }
+        mlc_trace("reap-close client=%d pending=%d\n", token, mlc_pending_count);
+    }
+    return R_NilValue;
+}
+
+// Close any fds still pending at shutdown (their workers are being killed).
+SEXP morloc_close_pending(void) {
+    for (int i = 0; i < mlc_pending_count; i++) {
+        close_socket(mlc_pending_close[i]);
+    }
+    mlc_pending_count = 0;
     return R_NilValue;
 }
 
@@ -3022,10 +3160,17 @@ SEXP morloc_recv_fd(SEXP pipe_fd_r) {
     iov.iov_len = 1;
     msg.msg_iov = &iov;
     msg.msg_iovlen = 1;
-    msg.msg_control = cmsgbuf;
-    msg.msg_controllen = sizeof(cmsgbuf);
 
-    ssize_t n = recvmsg(pipe_fd, &msg, 0);
+    // Retry EINTR (a signal must not spuriously report the pipe as closed);
+    // only a genuine pipe close returns 0.
+    ssize_t n;
+    for (;;) {
+        msg.msg_control = cmsgbuf;
+        msg.msg_controllen = sizeof(cmsgbuf);
+        msg.msg_flags = 0;
+        n = recvmsg(pipe_fd, &msg, 0);
+        if (n >= 0 || errno != EINTR) break;
+    }
     if (n <= 0) {
         return ScalarInteger(-1);
     }
@@ -3052,6 +3197,38 @@ SEXP morloc_waitpid(SEXP pid_r) {
     int status;
     pid_t result = waitpid(pid, &status, WNOHANG);
     return ScalarInteger((int)result);
+}
+
+// Non-blocking reap of ONE worker pid, reporting HOW it died. A crashed R
+// worker (forked process) closes its client fd -> the caller sees a bare
+// "Connection closed by peer", and the nexus cannot see it (it tracks the R
+// dispatcher pid, not worker grandchildren), so log the disposition here.
+// Reaping by specific pid (not waitpid(-1)) lets the dispatcher prune its own
+// pid list precisely, so shutdown never SIGKILLs a reaped-and-reused pid.
+// Returns: 0 = still alive; WTERMSIG (>0) = died by signal; -1 = reaped
+// (clean/nonzero exit) or already gone.
+SEXP morloc_reap_worker(SEXP pid_r) {
+    pid_t pid = (pid_t)INTEGER(pid_r)[0];
+    int status;
+    pid_t r = waitpid(pid, &status, WNOHANG);
+    if (r == 0) {
+        return ScalarInteger(0);   // still running
+    }
+    if (r < 0) {
+        return ScalarInteger(-1);  // ECHILD / already reaped
+    }
+    if (WIFSIGNALED(status)) {
+        fprintf(stderr, "morloc R pool: worker %d crashed with signal %d\n",
+                (int)pid, WTERMSIG(status));
+        fflush(stderr);
+        return ScalarInteger(WTERMSIG(status));
+    }
+    if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+        fprintf(stderr, "morloc R pool: worker %d exited with status %d\n",
+                (int)pid, WEXITSTATUS(status));
+        fflush(stderr);
+    }
+    return ScalarInteger(-1);      // reaped
 }
 
 SEXP morloc_waitpid_blocking(SEXP pid_r) {
@@ -3138,28 +3315,49 @@ SEXP morloc_close_fd(SEXP fd_r) {
 // {{{ C-level worker loop
 
 // Receive a file descriptor over a Unix domain socket (C-level helper).
-static int recv_fd_c(int pipe_fd) {
+static int recv_fd_c(int pipe_fd, int* out_token) {
     struct msghdr msg = {0};
     struct iovec iov;
-    char buf[1];
+    int token = -1;
     char cmsgbuf[CMSG_SPACE(sizeof(int))];
 
-    iov.iov_base = buf;
-    iov.iov_len = 1;
+    iov.iov_base = &token;
+    iov.iov_len = sizeof(int);
     msg.msg_iov = &iov;
     msg.msg_iovlen = 1;
-    msg.msg_control = cmsgbuf;
-    msg.msg_controllen = sizeof(cmsgbuf);
 
-    ssize_t n = recvmsg(pipe_fd, &msg, 0);
-    if (n <= 0) return -1;
+    // Retry a signal-interrupted wait rather than returning -1: the caller
+    // (morloc_worker_loop_c) treats -1 as "pipe closed" and breaks -> the
+    // worker _exit()s. A bare EINTR (any signal delivered while parked in
+    // recvmsg) must NOT kill a live worker; only a genuine pipe close (all
+    // write-ends gone) returns 0. Reset the control buffer each attempt since
+    // an interrupted recvmsg may have modified msg_controllen/msg_flags.
+    ssize_t n;
+    for (;;) {
+        msg.msg_control = cmsgbuf;
+        msg.msg_controllen = sizeof(cmsgbuf);
+        msg.msg_flags = 0;
+        n = recvmsg(pipe_fd, &msg, 0);
+        if (n >= 0 || errno != EINTR) break;
+        mlc_trace("recv_fd EINTR retry\n");
+    }
+    if (n <= 0) {
+        mlc_trace("recv_fd FAIL n=%zd errno=%d(%s) flags=0x%x\n",
+                  n, (int)errno, strerror(errno), msg.msg_flags);
+        return -1;
+    }
 
     struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
-    if (!cmsg || cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS)
+    if (!cmsg || cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) {
+        mlc_trace("recv_fd NOCMSG n=%zd flags=0x%x cmsg=%p\n",
+                  n, msg.msg_flags, (void*)cmsg);
         return -1;
+    }
 
     int fd;
     memcpy(&fd, CMSG_DATA(cmsg), sizeof(int));
+    if (out_token) *out_token = token;
+    mlc_trace("recv_fd OK client=%d token=%d flags=0x%x\n", fd, token, msg.msg_flags);
     return fd;
 }
 
@@ -3277,12 +3475,19 @@ static void dispatch_manifold_c(int client_fd, const uint8_t* packet,
     nprotect++;
 
     send_packet_to_foreign_server(client_fd, RAW(result), &errmsg);
+    if (errmsg) {
+        // A failed response send was previously dropped silently, leaving the
+        // caller with an unexplained "Connection closed" -- log the cause.
+        fprintf(stderr, "morloc R pool: response send failed: %s\n", errmsg);
+        fflush(stderr);
+        free(errmsg);
+    }
     UNPROTECT(nprotect);
 }
 
 // Process one client job entirely in C. Only crosses into R for
 // the actual manifold evaluation.
-static void run_job_c(int client_fd, SEXP dispatch, SEXP remote_dispatch) {
+static void run_job_c(int client_fd, int token, int ack_fd, SEXP dispatch, SEXP remote_dispatch) {
     char* errmsg = NULL;
 
     // Release any SHM that the previous request's morloc_put_value handed
@@ -3293,8 +3498,24 @@ static void run_job_c(int client_fd, SEXP dispatch, SEXP remote_dispatch) {
     shm_tracker_flush();
     morloc_debug_flush_dispatch();
 
+    mlc_trace("run_job ENTER client=%d\n", client_fd);
+
     uint8_t* packet = stream_from_client(client_fd, &errmsg);
+
+    // The request has now been drained from the socket receive buffer (or the
+    // read failed). Either way, signal the dispatcher that it may close its
+    // accepted copy of this fd: the buffer is empty, so the macOS
+    // close-flushes-unread-data race cannot lose the request. The token is the
+    // dispatcher's own fd number, echoed back so it closes exactly this fd.
+    // A 4-byte pipe write is atomic (<= PIPE_BUF), so concurrent workers'
+    // acks never interleave.
+    {
+        ssize_t w;
+        do { w = write(ack_fd, &token, sizeof(int)); } while (w < 0 && errno == EINTR);
+    }
+
     if (errmsg) {
+        mlc_trace("run_job READ-FAIL client=%d err=%s\n", client_fd, errmsg);
         send_fail_to_client(client_fd, errmsg);
         free(errmsg);
         close_socket(client_fd);
@@ -3333,21 +3554,25 @@ static void run_job_c(int client_fd, SEXP dispatch, SEXP remote_dispatch) {
     // "@stdout already open in this nexus".
     mlc_reclaim_stdio_after_dispatch();
 
+    mlc_trace("run_job EXIT client=%d\n", client_fd);
+
     free(packet);
     close_socket(client_fd);
 }
 
 // Tight C worker loop. Receives fds from the job queue and processes them,
 // crossing into R only for manifold evaluation.
-SEXP morloc_worker_loop_c(SEXP pipe_fd_r, SEXP dispatch_r, SEXP remote_dispatch_r) {
+SEXP morloc_worker_loop_c(SEXP pipe_fd_r, SEXP ack_fd_r, SEXP dispatch_r, SEXP remote_dispatch_r) {
     int pipe_fd = INTEGER(pipe_fd_r)[0];
+    int ack_fd = INTEGER(ack_fd_r)[0];
     PROTECT(dispatch_r);
     PROTECT(remote_dispatch_r);
 
     while (!r_shutting_down) {
-        int client_fd = recv_fd_c(pipe_fd);
+        int token = -1;
+        int client_fd = recv_fd_c(pipe_fd, &token);
         if (client_fd < 0) break;
-        run_job_c(client_fd, dispatch_r, remote_dispatch_r);
+        run_job_c(client_fd, token, ack_fd, dispatch_r, remote_dispatch_r);
         fflush(stdout);
     }
 
@@ -3590,10 +3815,14 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_fork", (DL_FUNC) &morloc_fork, 0},
         {"morloc_exit", (DL_FUNC) &morloc_exit, 1},
         {"morloc_send_fd", (DL_FUNC) &morloc_send_fd, 2},
+        {"morloc_dispatch_fd", (DL_FUNC) &morloc_dispatch_fd, 2},
+        {"morloc_reap_closes", (DL_FUNC) &morloc_reap_closes, 1},
+        {"morloc_close_pending", (DL_FUNC) &morloc_close_pending, 0},
         {"morloc_recv_fd", (DL_FUNC) &morloc_recv_fd, 1},
         {"morloc_kill", (DL_FUNC) &morloc_kill, 2},
         {"morloc_waitpid", (DL_FUNC) &morloc_waitpid, 1},
         {"morloc_waitpid_blocking", (DL_FUNC) &morloc_waitpid_blocking, 1},
+        {"morloc_reap_worker", (DL_FUNC) &morloc_reap_worker, 1},
         {"morloc_install_sigterm_handler", (DL_FUNC) &morloc_install_sigterm_handler, 0},
         {"morloc_set_line_buffered", (DL_FUNC) &morloc_set_line_buffered, 0},
         {"morloc_is_shutting_down", (DL_FUNC) &morloc_is_shutting_down, 0},
@@ -3605,7 +3834,7 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_pipe", (DL_FUNC) &morloc_pipe, 0},
         {"morloc_write_byte", (DL_FUNC) &morloc_write_byte, 2},
         {"morloc_close_fd", (DL_FUNC) &morloc_close_fd, 1},
-        {"morloc_worker_loop_c", (DL_FUNC) &morloc_worker_loop_c, 3},
+        {"morloc_worker_loop_c", (DL_FUNC) &morloc_worker_loop_c, 4},
         {"r_morloc_cache_key_compute", (DL_FUNC) &morloc_cache_key_compute_r, 3},
         {"r_morloc_debug_record_frame", (DL_FUNC) &morloc_debug_record_frame_r, 6},
         {"r_morloc_debug_flush_dispatch", (DL_FUNC) &morloc_debug_flush_dispatch_r, 0},

@@ -12,12 +12,18 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", morloc_lib);
     println!("cargo:rustc-link-lib=dylib=morloc");
 
-    // Embed $ORIGIN-relative rpaths so the nexus finds libmorloc.so
+    // Embed loader-relative rpaths so the nexus finds libmorloc (.so/.dylib)
     // regardless of install location:
-    //   $ORIGIN/../lib           covers /opt/morloc/bin -> /opt/morloc/lib
-    //   $ORIGIN/../share/morloc/lib  covers ~/.local/bin -> ~/.local/share/morloc/lib
-    println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib");
-    println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../share/morloc/lib");
+    //   <origin>/../lib               covers /opt/morloc/bin -> /opt/morloc/lib
+    //   <origin>/../share/morloc/lib  covers ~/.local/bin -> ~/.local/share/morloc/lib
+    // The loader's origin token is platform-specific: ELF expands $ORIGIN,
+    // Mach-O (macOS) expands @loader_path.
+    let origin = match std::env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("macos") => "@loader_path",
+        _ => "$ORIGIN",
+    };
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{}/../lib", origin);
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{}/../share/morloc/lib", origin);
 
     // The morloc compiler version is sourced from CARGO_PKG_VERSION
     // (this crate's Cargo.toml), which is intentionally kept in

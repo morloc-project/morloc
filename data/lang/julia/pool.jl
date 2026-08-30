@@ -12,6 +12,10 @@ global_state = Dict{String,String}()
 
 using MorlocRuntime
 
+# User source includes run here at module top -- Julia does not fork-defer them
+# (the fork-safety split matters only for the Python/R pools).
+# <<<BREAK>>>
+
 # <<<BREAK>>>
 
 # <<<BREAK>>>

@@ -28,6 +28,12 @@ pub struct LanguageDaemon {
 
 const BUFFER_SIZE: usize = 65536;
 
+// Whether the accept loop still peeks each new connection for a readiness ping.
+// True until the first non-ping request is seen (readiness pings precede all
+// real calls), after which steady-state accepts skip the extra peek syscall.
+static PING_PEEK_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
 // A polled fd is ready to read when data is available or the peer has
 // hung up / errored (so the following recv observes EOF or the error).
 #[inline]
@@ -66,11 +72,172 @@ unsafe fn poll_wait(
     libc::poll(fds, nfds, timeout_ms)
 }
 
+// Ceiling on a single zero-progress wait for socket writability in send_all.
+// A reader that drains at all wakes the POLLOUT poll immediately and resets
+// this window (it bounds only a fully-stalled peer), so a large legitimate send
+// to a slow-but-progressing reader is never cut off; a peer that accepts zero
+// bytes for this long is treated as hung and the send fails instead of blocking
+// the caller (and, for a pool worker, its thread) forever.
+const SEND_STALL_TIMEOUT_MS: i64 = 120_000;
+
+// Send an entire buffer over a (possibly non-blocking) socket, polling for
+// writability on EAGAIN/EWOULDBLOCK rather than treating it as failure.
+//
+// macOS's BSD accept() inherits O_NONBLOCK onto the accepted client fd (Linux
+// does not), so a packet whose size exceeds the socket send buffer makes
+// send() return -1/EAGAIN part-way through. A bare `bytes_sent <= 0` check
+// misreads that as a fatal error, closes the socket mid-packet, and the peer's
+// read then fails with "Connection closed early". The recv path already
+// retries on EAGAIN; this mirrors it for the send side. Returns true only when
+// every byte was sent, false on a closed/hung peer.
+pub(crate) unsafe fn send_all(fd: i32, buf: *const u8, len: usize) -> bool {
+    let stall = libc::timespec {
+        tv_sec: SEND_STALL_TIMEOUT_MS / 1000,
+        tv_nsec: (SEND_STALL_TIMEOUT_MS % 1000) * 1_000_000,
+    };
+    let stall_dur = std::time::Duration::from_millis(SEND_STALL_TIMEOUT_MS as u64);
+    // Wall-clock deadline for a zero-progress stall, reset on every byte sent.
+    // Bounding on elapsed time (not just per-poll timeout) prevents a signal
+    // storm -- e.g. SIGCHLD from exiting pool workers -- from turning
+    // send->EAGAIN->poll->EINTR->send into an unbounded busy-loop that never
+    // trips the per-poll ceiling.
+    let mut last_progress = std::time::Instant::now();
+    let mut total: usize = 0;
+    while total < len {
+        let n = libc::send(
+            fd,
+            buf.add(total) as *const c_void,
+            len - total,
+            crate::utility::SEND_NOSIGNAL,
+        );
+        if n > 0 {
+            total += n as usize;
+            last_progress = std::time::Instant::now();
+            continue;
+        }
+        if n == 0 {
+            return false; // peer closed; nothing more can be sent
+        }
+        let e = crate::utility::errno_val();
+        if e == libc::EINTR {
+            continue;
+        }
+        if e == libc::EAGAIN || e == libc::EWOULDBLOCK {
+            // Send buffer full on a non-blocking socket. Bail if the peer has
+            // accepted zero bytes for the whole stall window (checked on
+            // wall-clock so an EINTR-interrupted poll can't reset it), else wait
+            // (bounded) for writability and retry the same offset. A dead peer
+            // surfaces as POLLHUP/POLLERR -> the next send returns EPIPE and we
+            // bail on the hard-error path below.
+            if last_progress.elapsed() >= stall_dur {
+                return false;
+            }
+            let mut pfd = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
+            let _ = poll_wait(&mut pfd, 1, &stall); // EINTR just re-loops (deadline still bounds it)
+            continue;
+        }
+        return false; // EPIPE / ECONNRESET / other hard error
+    }
+    true
+}
+
+// Outcome of peeking a freshly accepted connection for a readiness ping.
+enum PingPeek {
+    Answered, // it was a ping; pong sent and fd closed -- do not enqueue
+    NotPing,  // a full, non-ping header was seen -- hand the fd to a worker
+    Unknown,  // header not yet fully arrived (EAGAIN/partial) -- hand off
+}
+
+// Answer a readiness ping directly from the accept loop, which is always
+// available, instead of handing it to a language worker that may still be
+// initializing (e.g. a Python pool importing numpy in a post-fork worker).
+//
+// The nexus's readiness probe uses a short (10 ms) timeout: if the ping is
+// queued behind a not-yet-ready worker it times out, the nexus abandons the
+// connection and retries on a fresh one, and the worker later answers into a
+// closed socket ("job failed: broken pipe"). Handling the ping here makes the
+// readiness signal honest -- a pool that can accept can answer.
+//
+// Peeks the fixed 32-byte header with MSG_PEEK (which does NOT consume), so a
+// non-ping request is left fully intact for the worker to read.
+unsafe fn try_answer_ping(fd: i32) -> PingPeek {
+    let mut hdr = [0u8; 32];
+    let peeked = libc::recv(fd, hdr.as_mut_ptr() as *mut c_void, 32, libc::MSG_PEEK);
+    if peeked != 32 {
+        return PingPeek::Unknown; // partial/absent header: let a worker handle it
+    }
+    let mut e: *mut c_char = ptr::null_mut();
+    let is_ping = crate::packet_ffi::packet_is_ping(hdr.as_ptr(), &mut e);
+    if !e.is_null() {
+        libc::free(e as *mut c_void);
+        e = ptr::null_mut();
+    }
+    if !is_ping {
+        return PingPeek::NotPing;
+    }
+    // A genuine ping is EXACTLY the 32-byte header (offset==0, length==0).
+    // packet_is_ping only checks magic+command-type, so a malformed 32-byte
+    // "ping" with a nonzero length would make return_ping copy 32+offset+length
+    // bytes -- reading past our 32-byte stack buffer. Refuse to answer such a
+    // packet here; hand it to a worker, which reads the full packet off the
+    // socket into a correctly sized heap buffer.
+    let size = crate::packet_ffi::morloc_packet_size(hdr.as_ptr(), &mut e);
+    if !e.is_null() {
+        libc::free(e as *mut c_void);
+        e = ptr::null_mut();
+    }
+    if size != 32 {
+        return PingPeek::NotPing;
+    }
+    // Drain the ping (exactly the 32-byte header) now that it is classified,
+    // then echo it back as the pong from this always-ready accept loop. The
+    // pong send is best-effort and non-blocking (the fd is O_NONBLOCK): a
+    // 32-byte pong on a fresh socket effectively never blocks, but if the send
+    // buffer were somehow full we drop it rather than let a not-reading peer
+    // head-of-line-block the single accept loop (the nexus retries the probe).
+    let mut sink = [0u8; 32];
+    let _ = libc::recv(fd, sink.as_mut_ptr() as *mut c_void, 32, 0);
+    let pong = crate::packet_ffi::return_ping(hdr.as_ptr(), &mut e);
+    if !pong.is_null() {
+        let _ = libc::send(fd, pong as *const c_void, 32, crate::utility::SEND_NOSIGNAL);
+        libc::free(pong as *mut c_void);
+    }
+    if !e.is_null() {
+        libc::free(e as *mut c_void);
+    }
+    if trace_close_enabled() {
+        eprintln!("[MLC_IPC] pid={} ping-answered fd={}", libc::getpid(), fd);
+    }
+    close_socket(fd);
+    PingPeek::Answered
+}
+
 // ── close_socket / close_daemon ──────────────────────────────────────────────
+
+// Diagnostic: when MORLOC_TRACE_CLOSE=1, log every socket close with the pid and
+// a backtrace. This localizes the "callee closed cleanly with no trace" macOS
+// flake -- the failing job's callee close shows the exact stack that closed it.
+// The env var is read once and cached, so a normal (untraced) close is one
+// atomic load. Off by default; enabled only by the close-trace diagnostic test.
+fn trace_close_enabled() -> bool {
+    use std::sync::OnceLock;
+    static T: OnceLock<bool> = OnceLock::new();
+    *T.get_or_init(|| {
+        std::env::var("MORLOC_TRACE_CLOSE").map(|v| v == "1").unwrap_or(false)
+    })
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn close_socket(socket_id: i32) {
     if socket_id >= 0 {
+        if trace_close_enabled() {
+            eprintln!(
+                "[MLC_CLOSE] pid={} fd={}\n{}",
+                libc::getpid(),
+                socket_id,
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
         libc::close(socket_id);
     }
 }
@@ -282,42 +449,70 @@ pub unsafe extern "C" fn stream_from_client_wait(
         ptr::null()
     };
 
-    // Initial receive with timeout, retrying only on a signal interruption.
-    let mut ready;
-    loop {
-        ready = poll_wait(&mut pfd, 1, timeout_ptr);
-        if !(ready < 0 && crate::utility::errno_val() == libc::EINTR) {
-            break;
+    // Initial receive: poll, then recv, retrying on EINTR (poll) and on a
+    // spurious EAGAIN/EWOULDBLOCK. A non-blocking socket can report readable via
+    // poll yet return EAGAIN on recv; on macOS an accepted fd inherits the listen
+    // socket's non-blocking flag, so this is reachable. Looping (rather than
+    // falling through with a negative length, which then copied uninitialized
+    // buffer bytes) keeps a garbage packet from being returned as success.
+    // Bound consecutive poll-readable-but-recv-EAGAIN spins so a peer that keeps
+    // the fd poll-readable without ever delivering data cannot defeat the
+    // per-iteration timeout and hang the reader indefinitely. The normal path
+    // sees zero or one spurious wakeup; this ceiling is orders of magnitude
+    // above that.
+    const MAX_SPURIOUS_WAKEUPS: u32 = 1024;
+    let mut spurious: u32 = 0;
+    let recv_length = loop {
+        let mut ready;
+        loop {
+            ready = poll_wait(&mut pfd, 1, timeout_ptr);
+            if !(ready < 0 && crate::utility::errno_val() == libc::EINTR) {
+                break;
+            }
         }
-    }
 
-    if ready == 0 {
-        libc::free(buffer as *mut c_void);
-        set_errmsg(errmsg, &MorlocError::Ipc("Timeout waiting for initial data".into()));
-        return ptr::null_mut();
-    }
-    if ready < 0 {
-        libc::free(buffer as *mut c_void);
-        set_errmsg(errmsg, &MorlocError::Ipc("poll error".into()));
-        return ptr::null_mut();
-    }
-    if !pfd_ready(&pfd) {
-        libc::free(buffer as *mut c_void);
-        set_errmsg(errmsg, &MorlocError::Ipc("Bad client file descriptor".into()));
-        return ptr::null_mut();
-    }
+        if ready == 0 {
+            libc::free(buffer as *mut c_void);
+            set_errmsg(errmsg, &MorlocError::Ipc("Timeout waiting for initial data".into()));
+            return ptr::null_mut();
+        }
+        if ready < 0 {
+            libc::free(buffer as *mut c_void);
+            set_errmsg(errmsg, &MorlocError::Ipc("poll error".into()));
+            return ptr::null_mut();
+        }
+        if !pfd_ready(&pfd) {
+            libc::free(buffer as *mut c_void);
+            set_errmsg(errmsg, &MorlocError::Ipc("Bad client file descriptor".into()));
+            return ptr::null_mut();
+        }
 
-    let recv_length = libc::recv(client_fd, buffer as *mut c_void, BUFFER_SIZE, 0);
-    if recv_length == 0 {
-        libc::free(buffer as *mut c_void);
-        set_errmsg(errmsg, &MorlocError::Ipc("Connection closed by peer".into()));
-        return ptr::null_mut();
-    }
-    if recv_length < 0 && crate::utility::errno_val() != libc::EWOULDBLOCK && crate::utility::errno_val() != libc::EAGAIN {
+        let n = libc::recv(client_fd, buffer as *mut c_void, BUFFER_SIZE, 0);
+        if n == 0 {
+            if trace_close_enabled() {
+                eprintln!("[MLC_IPC] pid={} recv EOF (0 bytes) fd={}", libc::getpid(), client_fd);
+            }
+            libc::free(buffer as *mut c_void);
+            set_errmsg(errmsg, &MorlocError::Ipc("Connection closed by peer".into()));
+            return ptr::null_mut();
+        }
+        if n > 0 {
+            break n;
+        }
+        let e = crate::utility::errno_val();
+        if e == libc::EWOULDBLOCK || e == libc::EAGAIN {
+            spurious += 1;
+            if spurious > MAX_SPURIOUS_WAKEUPS {
+                libc::free(buffer as *mut c_void);
+                set_errmsg(errmsg, &MorlocError::Ipc("Timeout waiting for initial data".into()));
+                return ptr::null_mut();
+            }
+            continue; // no data yet despite poll; re-poll and retry
+        }
         libc::free(buffer as *mut c_void);
         set_errmsg(errmsg, &MorlocError::Ipc("Recv error".into()));
         return ptr::null_mut();
-    }
+    };
 
     // Get packet size from header
     let mut packet_err: *mut c_char = ptr::null_mut();
@@ -353,7 +548,7 @@ pub unsafe extern "C" fn stream_from_client_wait(
                 ptr::null()
             };
 
-            ready = poll_wait(&mut pfd, 1, recv_timeout_ptr);
+            let ready = poll_wait(&mut pfd, 1, recv_timeout_ptr);
 
             if ready == 0 {
                 libc::free(result as *mut c_void);
@@ -453,24 +648,20 @@ pub unsafe extern "C" fn send_and_receive_over_socket_wait(
         return ptr::null_mut();
     }
 
-    // Send packet in loop
-    let mut total_sent: usize = 0;
-    while total_sent < packet_size {
-        let bytes_sent = libc::send(
-            client_fd,
-            packet.add(total_sent) as *const c_void,
-            packet_size - total_sent,
-            crate::utility::SEND_NOSIGNAL,
-        );
-        if bytes_sent <= 0 {
-            close_socket(client_fd);
-            set_errmsg(errmsg, &MorlocError::Ipc(format!(
-                "Failed to send data to '{}'",
-                CStr::from_ptr(socket_path).to_string_lossy()
-            )));
-            return ptr::null_mut();
-        }
-        total_sent += bytes_sent as usize;
+    // Send packet, retrying on a full send buffer (non-blocking client fd).
+    if !send_all(client_fd, packet, packet_size) {
+        close_socket(client_fd);
+        set_errmsg(errmsg, &MorlocError::Ipc(format!(
+            "Failed to send data to '{}'",
+            CStr::from_ptr(socket_path).to_string_lossy()
+        )));
+        return ptr::null_mut();
+    }
+
+    if trace_close_enabled() {
+        eprintln!("[MLC_IPC] pid={} sent request fd={} bytes={} to '{}'",
+            libc::getpid(), client_fd, packet_size,
+            CStr::from_ptr(socket_path).to_string_lossy());
     }
 
     let result = stream_from_client_wait(client_fd, poll_timeout_us, recv_timeout_us, &mut err);
@@ -510,24 +701,14 @@ pub unsafe extern "C" fn send_packet_to_foreign_server(
         return 0;
     }
 
-    let mut total_sent: usize = 0;
-    while total_sent < size {
-        let bytes_sent = libc::send(
-            client_fd,
-            packet.add(total_sent) as *const c_void,
-            size - total_sent,
-            crate::utility::SEND_NOSIGNAL,
-        );
-        if bytes_sent <= 0 {
-            set_errmsg(errmsg, &MorlocError::Ipc(format!(
-                "Failed to send over client {}", client_fd
-            )));
-            return 0;
-        }
-        total_sent += bytes_sent as usize;
+    if !send_all(client_fd, packet, size) {
+        set_errmsg(errmsg, &MorlocError::Ipc(format!(
+            "Failed to send over client {}", client_fd
+        )));
+        return 0;
     }
 
-    total_sent
+    size
 }
 
 // ── wait_for_client ──────────────────────────────────────────────────────────
@@ -578,21 +759,43 @@ pub unsafe extern "C" fn wait_for_client_with_timeout(
     if pfds[0].revents & libc::POLLIN != 0 {
         let selected_fd = libc::accept((*daemon).server_fd, ptr::null_mut(), ptr::null_mut());
         if selected_fd >= 0 {
+            if trace_close_enabled() {
+                eprintln!("[MLC_IPC] pid={} accept fd={}", libc::getpid(), selected_fd);
+            }
             crate::utility::set_nosigpipe(selected_fd);
             libc::fcntl(selected_fd, libc::F_SETFL, libc::O_NONBLOCK);
 
-            let new_client = libc::calloc(1, std::mem::size_of::<ClientList>()) as *mut ClientList;
-            (*new_client).fd = selected_fd;
-            (*new_client).next = ptr::null_mut();
-
-            if (*daemon).client_fds.is_null() {
-                (*daemon).client_fds = new_client;
-            } else {
-                let mut last = (*daemon).client_fds;
-                while !(*last).next.is_null() {
-                    last = (*last).next;
+            // Short-circuit readiness pings here (see try_answer_ping) so they
+            // never wait on a possibly-initializing worker. Peeking costs one
+            // extra recv per accept, so only do it during startup: readiness
+            // pings always precede the first real call, so once a non-ping
+            // request is seen the peek is disabled and steady-state calls pay
+            // nothing (a later recovery ping falls through to a now-warm worker,
+            // with the pool-side silent-pong-drop as backstop).
+            let mut handled = false;
+            if PING_PEEK_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+                match try_answer_ping(selected_fd) {
+                    PingPeek::Answered => handled = true,
+                    PingPeek::NotPing => {
+                        PING_PEEK_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    PingPeek::Unknown => {}
                 }
-                (*last).next = new_client;
+            }
+            if !handled {
+                let new_client = libc::calloc(1, std::mem::size_of::<ClientList>()) as *mut ClientList;
+                (*new_client).fd = selected_fd;
+                (*new_client).next = ptr::null_mut();
+
+                if (*daemon).client_fds.is_null() {
+                    (*daemon).client_fds = new_client;
+                } else {
+                    let mut last = (*daemon).client_fds;
+                    while !(*last).next.is_null() {
+                        last = (*last).next;
+                    }
+                    (*last).next = new_client;
+                }
             }
         }
         // Ignore EAGAIN/EWOULDBLOCK on accept
@@ -608,6 +811,9 @@ pub unsafe extern "C" fn wait_for_client_with_timeout(
     (*daemon).client_fds = (*client_node).next;
     libc::free(client_node as *mut c_void);
 
+    if trace_close_enabled() {
+        eprintln!("[MLC_IPC] pid={} wait_for_client return fd={}", libc::getpid(), return_fd);
+    }
     return_fd
 }
 
@@ -617,4 +823,182 @@ pub unsafe extern "C" fn wait_for_client(
     errmsg: *mut *mut c_char,
 ) -> i32 {
     wait_for_client_with_timeout(daemon, 0, errmsg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // send_all must deliver every byte of a payload larger than the socket
+    // send buffer even when the sending fd is non-blocking -- the exact macOS
+    // condition (BSD accept inherits O_NONBLOCK) that made the old bare
+    // `bytes_sent <= 0` send loop truncate a packet and close the socket
+    // mid-message ("Connection closed early"). A slow reader forces the send
+    // buffer to fill, so send() returns EAGAIN part-way and send_all must poll
+    // for writability and resume rather than bail.
+    #[test]
+    fn send_all_completes_across_eagain_on_nonblocking_socket() {
+        unsafe {
+            let mut fds = [0i32; 2];
+            assert_eq!(
+                libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()),
+                0
+            );
+            let (send_fd, recv_fd) = (fds[0], fds[1]);
+
+            // Shrink both buffers so a modest payload overflows the pipe and
+            // forces EAGAIN, then make the sender non-blocking.
+            let small: libc::c_int = 4096;
+            libc::setsockopt(
+                send_fd,
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                &small as *const _ as *const c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+            libc::setsockopt(
+                recv_fd,
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                &small as *const _ as *const c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+            let flags = libc::fcntl(send_fd, libc::F_GETFL, 0);
+            libc::fcntl(send_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+
+            const N: usize = 1 << 20; // 1 MiB, far exceeds the 4 KiB buffer
+            let payload: Vec<u8> = (0..N).map(|i| (i & 0xff) as u8).collect();
+
+            // Slow reader on another thread: drains in small chunks with brief
+            // pauses so the sender's buffer genuinely fills (yields EAGAIN).
+            let reader = std::thread::spawn(move || {
+                let mut got = vec![0u8; N];
+                let mut total = 0usize;
+                while total < N {
+                    let n = libc::recv(
+                        recv_fd,
+                        got.as_mut_ptr().add(total) as *mut c_void,
+                        (N - total).min(1024),
+                        0,
+                    );
+                    if n > 0 {
+                        total += n as usize;
+                    } else if n == 0 {
+                        break;
+                    }
+                    std::thread::yield_now();
+                }
+                libc::close(recv_fd);
+                (got, total)
+            });
+
+            let ok = send_all(send_fd, payload.as_ptr(), N);
+            libc::close(send_fd);
+            let (got, total) = reader.join().unwrap();
+
+            assert!(ok, "send_all reported failure on a non-blocking socket");
+            assert_eq!(total, N, "reader did not receive the whole payload");
+            assert_eq!(got, payload, "payload corrupted in transit");
+        }
+    }
+
+    // The accept loop must answer a readiness ping itself (echo the pong) so a
+    // still-initializing worker never sees it, and must leave a non-ping request
+    // fully intact (MSG_PEEK does not consume) for the worker to read.
+    #[test]
+    fn try_answer_ping_handles_ping_and_leaves_calls_intact() {
+        unsafe {
+            // -- ping: answered in-loop, pong echoed back --
+            let mut fds = [0i32; 2];
+            assert_eq!(
+                libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()),
+                0
+            );
+            let (peer, server) = (fds[0], fds[1]);
+            let ping = crate::packet_ffi::make_ping_packet();
+            assert!(!ping.is_null());
+            assert_eq!(send_all(peer, ping, 32), true);
+
+            assert!(
+                matches!(try_answer_ping(server), PingPeek::Answered),
+                "ping was not answered by the accept loop"
+            );
+
+            let mut pong = [0u8; 32];
+            let n = libc::recv(peer, pong.as_mut_ptr() as *mut c_void, 32, 0);
+            assert_eq!(n, 32, "no pong echoed back");
+            let mut e: *mut c_char = ptr::null_mut();
+            assert!(crate::packet_ffi::packet_is_ping(pong.as_ptr(), &mut e));
+            if !e.is_null() { libc::free(e as *mut c_void); }
+            libc::free(ping as *mut c_void);
+            libc::close(peer);
+            libc::close(server);
+
+            // -- non-ping: not consumed, left for the worker --
+            let mut fds2 = [0i32; 2];
+            assert_eq!(
+                libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds2.as_mut_ptr()),
+                0
+            );
+            let (peer2, server2) = (fds2[0], fds2[1]);
+            // 32 bytes that are not a valid morloc ping header.
+            let junk = [0x7fu8; 32];
+            assert_eq!(send_all(peer2, junk.as_ptr(), 32), true);
+
+            assert!(
+                matches!(try_answer_ping(server2), PingPeek::NotPing),
+                "non-ping request was wrongly treated as a ping"
+            );
+            // The bytes must still be readable (MSG_PEEK did not consume them).
+            let mut got = [0u8; 32];
+            let n2 = libc::recv(server2, got.as_mut_ptr() as *mut c_void, 32, 0);
+            assert_eq!(n2, 32, "non-ping payload was consumed by try_answer_ping");
+            assert_eq!(got, junk, "non-ping payload was altered");
+            libc::close(peer2);
+            libc::close(server2);
+        }
+    }
+
+    // A malformed 32-byte "ping" (valid magic + PING command type but a nonzero
+    // length) must NOT be answered from the accept loop: return_ping would read
+    // 32+length bytes past the 32-byte peek buffer. It must be classified NotPing
+    // and left intact for a worker to read the full packet off the socket.
+    #[test]
+    fn try_answer_ping_rejects_oversized_ping_header() {
+        unsafe {
+            let mut fds = [0i32; 2];
+            assert_eq!(
+                libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()),
+                0
+            );
+            let (peer, server) = (fds[0], fds[1]);
+            // Start from a genuine ping header, then forge a nonzero length so
+            // morloc_packet_size(hdr) != 32.
+            let ping = crate::packet_ffi::make_ping_packet();
+            assert!(!ping.is_null());
+            let mut hdr = [0u8; 32];
+            std::ptr::copy_nonoverlapping(ping, hdr.as_mut_ptr(), 32);
+            libc::free(ping as *mut c_void);
+            // PacketHeader length is the last 4 bytes (see morloc_packet_size =
+            // 32 + offset + length); set a large length to force the over-read.
+            hdr[28] = 0x00; hdr[29] = 0x10; hdr[30] = 0x00; hdr[31] = 0x00;
+            let mut e: *mut c_char = ptr::null_mut();
+            // Only run the assertion if this still parses as a ping by type;
+            // otherwise the guard is trivially satisfied via the is_ping path.
+            let looks_ping = crate::packet_ffi::packet_is_ping(hdr.as_ptr(), &mut e);
+            if !e.is_null() { libc::free(e as *mut c_void); e = ptr::null_mut(); }
+            let sz = crate::packet_ffi::morloc_packet_size(hdr.as_ptr(), &mut e);
+            if !e.is_null() { libc::free(e as *mut c_void); }
+            assert_eq!(send_all(peer, hdr.as_ptr(), 32), true);
+            let outcome = try_answer_ping(server);
+            if looks_ping && sz != 32 {
+                assert!(
+                    matches!(outcome, PingPeek::NotPing),
+                    "oversized ping header must be handed to a worker, not answered"
+                );
+            }
+            libc::close(peer);
+            libc::close(server);
+        }
+    }
 }

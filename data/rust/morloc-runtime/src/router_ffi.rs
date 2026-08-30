@@ -592,13 +592,10 @@ pub unsafe extern "C" fn router_forward(
         (req_len & 0xFF) as u8,
     ];
 
-    let n = libc::send(
-        sock,
-        len_buf.as_ptr() as *const c_void,
-        4,
-        crate::utility::SEND_NOSIGNAL,
-    );
-    if n != 4 {
+    // send_all retries on EAGAIN (a full send buffer surfaces as EWOULDBLOCK on
+    // this SO_SNDTIMEO socket) instead of misreading it as a fatal error and
+    // truncating the request mid-message.
+    if !crate::ipc_ffi::send_all(sock, len_buf.as_ptr(), 4) {
         libc::close(sock);
         set_errmsg(
             errmsg,
@@ -607,23 +604,13 @@ pub unsafe extern "C" fn router_forward(
         return ptr::null_mut();
     }
 
-    let mut total_sent: usize = 0;
-    while total_sent < req_len {
-        let n = libc::send(
-            sock,
-            c_req.as_ptr().add(total_sent) as *const c_void,
-            req_len - total_sent,
-            crate::utility::SEND_NOSIGNAL,
+    if !crate::ipc_ffi::send_all(sock, c_req.as_ptr() as *const u8, req_len) {
+        libc::close(sock);
+        set_errmsg(
+            errmsg,
+            &MorlocError::Other("Failed to send request body to daemon".into()),
         );
-        if n <= 0 {
-            libc::close(sock);
-            set_errmsg(
-                errmsg,
-                &MorlocError::Other("Failed to send request body to daemon".into()),
-            );
-            return ptr::null_mut();
-        }
-        total_sent += n as usize;
+        return ptr::null_mut();
     }
 
     // Read response length

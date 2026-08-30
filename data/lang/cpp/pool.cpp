@@ -47,11 +47,17 @@ uint8_t* foreign_call_v(const char* socket_filename, size_t mid, const uint8_t**
 // the user-source includes so foreign code can use mlc::Unit too.
 #include "mlccpptypes/prelude.hpp"
 
-// Forward-declared here so PROPAGATE_ERROR can reference it before the
-// class body is fully defined further down. MorlocException is the
-// user-catchable class (@catch intercepts). Compiler / invariant bugs
-// go through _mlc_internal_abort (below), which bypasses @catch.
-class MorlocException;
+// Defined here (before PROPAGATE_ERROR and every throw site) so it is a
+// COMPLETE type wherever it is thrown -- throwing an incomplete type is
+// ill-formed C++ ([except.throw]/2); clang rejects it (g++ was lenient).
+// MorlocException is the user-catchable class (@catch intercepts). Compiler
+// / invariant bugs go through _mlc_internal_abort (below), which bypasses
+// @catch. It carries a @throw / catchable-intrinsic-failure message across
+// the pool call stack; also used by _mlc_read/_mlc_load/_mlc_throw below.
+class MorlocException : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 
 #define PROPAGATE_ERROR(errmsg) \
     if(errmsg != NULL) { \
@@ -452,14 +458,8 @@ std::string _mlc_show(const T& value, Schema* schema) {
     return result;
 }
 
-// MorlocException carries a @throw / catchable-intrinsic-failure
-// message across the pool call stack. Defined here (before _mlc_read /
-// _mlc_load) so those shims can throw it directly on failure. Also
-// used by _mlc_throw (below) and caught by _mlc_catch.
-class MorlocException : public std::runtime_error {
-public:
-    using std::runtime_error::runtime_error;
-};
+// (MorlocException is defined near the top of this file, before its first
+// throw site -- see the note there.)
 
 // MorlocPipeClosed signals that the downstream consumer closed @stdout /
 // @stderr (a broken pipe). It is an <IO> condition, NOT a user-recoverable

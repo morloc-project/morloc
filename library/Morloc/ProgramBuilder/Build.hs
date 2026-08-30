@@ -127,12 +127,14 @@ syncEnvDeps = do
   mKey <- MM.gets stateProgramKey
   isEval <- MM.gets stateEvalMode
   isInstall <- MM.gets stateInstall
+  mRoot <- MM.gets stateProjectRoot
   mEnv <- liftIO $ lookupEnv "MORLOC_ENV"
   let declaresDeps = any packageHasDeps metas
   case (mEnv, mKey) of
     (Just env, Just key)
-      | not (null env) && declaresDeps && not isEval && not isInstall ->
-          runSync key
+      | not (null env) && declaresDeps && not isEval && not isInstall -> do
+          root <- liftIO $ maybe (return ".") SD.makeAbsolute mRoot
+          runSync key root
     _ -> return ()
   where
     packageHasDeps pm =
@@ -141,14 +143,15 @@ syncEnvDeps = do
         || not (Map.null (packageCppDeps pm))
         || not (Map.null (packageRustDeps pm))
         || not (Map.null (packageJuliaDeps pm))
+        || not (Map.null (packageLocalDeps pm))
 
-    runSync key = do
+    runSync key root = do
       mhook <- liftIO $ lookupEnv "MORLOC_BUILD_HOOK"
       case mhook of
         Just hook | not (null hook) -> do
           MM.say $ "Provisioning environment dependencies (" <> pretty hook <> " sync)..."
           self <- liftIO getExecutablePath
-          result <- liftIO (runHook hook self key)
+          result <- liftIO (runHook hook self key root)
           case result of
             Left e ->
               MM.throwSystemError $ "could not run " <> pretty hook <> ": " <> pretty (show e)
@@ -173,12 +176,14 @@ syncEnvDeps = do
     -- compiler's path so the hook's reverse `morloc lang-support` call resolves
     -- the driving compiler without relying on PATH. `try` keeps a spawn failure
     -- (e.g. a non-executable hook) inside the error monad.
-    runHook :: FilePath -> FilePath -> String -> IO (Either IOException ExitCode)
-    runHook hook self key = try $ do
+    runHook :: FilePath -> FilePath -> String -> FilePath -> IO (Either IOException ExitCode)
+    runHook hook self key root = try $ do
       baseEnv <- getEnvironment
       let childEnv = ("MORLOC_BIN", self) : filter ((/= "MORLOC_BIN") . fst) baseEnv
+          -- --root is the project root (the entry module's directory), against
+          -- which local (filesystem-path) dependency paths are resolved.
           spec =
-            (proc hook ["sync", "--name", key, "--spec", "envspec.json"])
+            (proc hook ["sync", "--name", key, "--spec", "envspec.json", "--root", root])
               { env = Just childEnv }
       (_, _, _, ph) <- createProcess spec
       waitForProcess ph

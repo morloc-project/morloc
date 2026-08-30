@@ -25,10 +25,23 @@ R_CPPFLAGS=$(R CMD config --cppflags)
 R_HOME=$(R RHOME)
 ${CC:-gcc} $R_CPPFLAGS -I"$INCLUDE_DIR" $SANITIZE_FLAGS -fpic -O2 \
     -c "$INCLUDE_DIR/rmorloc.c" -o "$INCLUDE_DIR/rmorloc.o"
-${CC:-gcc} -shared $SANITIZE_FLAGS \
-    -Wl,-Bsymbolic-functions -Wl,-z,relro \
+
+# Platform-specific link flags. The R-loadable object keeps the `.so` NAME on
+# macOS by convention (R strips lib.../.so to find R_init_rmorloc), but is
+# LINKED as a Mach-O dynamic library that defers undefined symbols (R API +
+# transitive R libs it doesn't link directly) to dlopen time -- mirroring what
+# `R CMD SHLIB` emits on macOS. GNU-ld hardening flags don't exist on ld64,
+# and the loader-origin token differs ($ORIGIN vs @loader_path).
+if [ "$(uname -s)" = "Darwin" ]; then
+    SHLIB_FLAGS="-dynamiclib -undefined dynamic_lookup"
+    RPATH_ORIGIN="@loader_path"
+else
+    SHLIB_FLAGS="-shared -Wl,-Bsymbolic-functions -Wl,-z,relro"
+    RPATH_ORIGIN='$ORIGIN'
+fi
+${CC:-gcc} $SHLIB_FLAGS $SANITIZE_FLAGS \
     -o "$LIB_DIR/librmorloc.so" "$INCLUDE_DIR/rmorloc.o" \
-    -L"$LIB_DIR" -Wl,-rpath,"$LIB_DIR" -Wl,-rpath,'$ORIGIN' -lmorloc -lpthread \
+    -L"$LIB_DIR" -Wl,-rpath,"$LIB_DIR" -Wl,-rpath,"$RPATH_ORIGIN" -lmorloc -lpthread \
     -L"$R_HOME/lib" -lR
 
 # Clean up

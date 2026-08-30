@@ -30,7 +30,6 @@ module Morloc.CodeGenerator.EnvSpec
   , renderEnvSpec
   ) where
 
-import Control.Applicative ((<|>))
 import Control.Monad (foldM)
 import Data.Map (Map)
 import Data.Text (Text)
@@ -42,20 +41,27 @@ import Morloc.Internal (unique)
 import Morloc.Language (Lang, showLangName)
 import qualified Morloc.Version
 import Morloc.Namespace.State
-  ( PackageMeta(..), DepSpec(..), DepSource(..)
-  , effectiveDepSource, depSourceText, condaForgeChannel
+  ( PackageMeta(..), DepSpec(..), RegDep(..), LocalDep(..), DepSource(..)
+  , effectiveDepSource, depSourceText, condaForgeChannel, dsChannel
   )
 
--- | One external native package required by a pool, with the package database
--- ('DepSource') it is drawn from. 'prChannel' is the conda channel (sub-database)
--- the package is drawn from, present only when it is NOT conda-forge: conda-forge
--- is the universal default and is omitted so existing envspecs stay byte-identical.
-data PackageReq = PackageReq
-  { prName       :: !Text
-  , prConstraint :: !Text
-  , prSource     :: !DepSource
-  , prChannel    :: !(Maybe Text)
-  }
+-- | One external package required by a pool. Either a registry package (drawn
+-- from a 'DepSource'; 'prChannel' is the conda sub-database, present only for a
+-- non-conda-forge conda channel so channel-less envspecs stay byte-identical) or
+-- a local (filesystem-path) package. A sum so a registry package can never carry
+-- a path and a local package can never carry a version/channel.
+data PackageReq
+  = ReqRegistry
+      { prName       :: !Text
+      , prConstraint :: !Text
+      , prSource     :: !DepSource
+      , prChannel    :: !(Maybe Text)
+      }
+  | ReqLocal
+      { prName     :: !Text
+      , prPath     :: !Text     -- module-relative path (resolved late, by mim)
+      , prEditable :: !Bool     -- intent: editable interactively, snapshot when served/frozen
+      }
   deriving (Show, Eq, Ord)
 
 -- | One language toolchain used by the program's pools.
@@ -135,14 +141,22 @@ buildEnvSpec morlocVersion langs metas = do
     -- channel rides the wire only when it is a non-conda-forge conda channel.
     -- May fail on a cross-module channel conflict. Empty groups are dropped by
     -- the caller.
+    -- Local deps come only from the root module ('loadModuleMetadata' rejects them
+    -- in imported modules), so a DAG-wide union is safe and yields the root's set.
+    localByLang = Map.unionsWith Map.union (map packageLocalDeps metas)
+
     mkGroup (lang, pick) = do
       merged <- unionDepSpecs [(packageName m, pick m) | m <- metas]
-      let reqs =
-            [ PackageReq name (dsVersion ds) src (resolveChannel src (dsChannel ds))
+      let regReqs =
+            [ ReqRegistry name (dsVersion ds) src (resolveChannel src (dsChannel ds))
             | (name, ds) <- Map.toList merged
             , Just src <- [effectiveDepSource lang ds]
             ]
-      return (lang, reqs)
+          localReqs =
+            [ ReqLocal name (ldPath ld) (ldEditable ld)
+            | (name, ld) <- Map.toList (Map.findWithDefault Map.empty lang localByLang)
+            ]
+      return (lang, regReqs ++ localReqs)
 
     langDepFields =
       [ ("py",    packagePyDeps)
@@ -187,16 +201,23 @@ unionDepSpecs modMaps = fmap (Map.map fst) (foldM addModule Map.empty modMaps)
       case Map.lookup name acc of
         Nothing -> Right (Map.insert name (ds, chanOwner modName ds) acc)
         Just (prev, prevOwner) -> do
-          (ch, owner) <-
-            mergeChannel name (dsChannel prev, prevOwner) (dsChannel ds, chanOwner modName ds)
-          let merged =
-                DepSpec (mergeConstraint (dsVersion prev) (dsVersion ds))
-                        (dsSource prev <|> dsSource ds)
-                        ch
+          (reg, owner) <-
+            mergeReg name (dsReg prev, prevOwner) (dsReg ds, chanOwner modName ds)
+          let merged = DepSpec reg (mergeConstraint (dsVersion prev) (dsVersion ds))
           Right (Map.insert name (merged, owner) acc)
 
-    -- the module that established this dep's explicit channel, if any
+    -- the module that established this dep's explicit conda channel, if any
     chanOwner modName ds = modName <$ dsChannel ds
+
+    -- Merge two registry sources. An omitted source ('RegDefault') yields to a
+    -- concrete one; two conda sources merge their channels (a channel conflict is
+    -- a hard error, naming both owners); otherwise the first-seen source wins.
+    mergeReg _ (RegDefault, _) (b, bOwner) = Right (b, bOwner)
+    mergeReg _ (a, aOwner) (RegDefault, _) = Right (a, aOwner)
+    mergeReg name (RegConda ca, aOwner) (RegConda cb, bOwner) = do
+      (ch, owner) <- mergeChannel name (ca, aOwner) (cb, bOwner)
+      Right (RegConda ch, owner)
+    mergeReg _ (a, aOwner) _ = Right (a, aOwner)
 
     -- 'prev' already carries the winning channel and its owner.
     mergeChannel _ (Nothing, _) (b, bOwner) = Right (b, bOwner)
@@ -249,13 +270,20 @@ renderEnvSpec es =
         ++ maybe [] (\c -> [("constraint", jsonStr c)]) mc
         ++ maybe [] (\s -> [("std", jsonStr s)]) mstd
 
-    pkgJson (PackageReq n c src mch) =
+    pkgJson (ReqRegistry n c src mch) =
       jsonObj $
         [ ("name", jsonStr n)
         , ("constraint", jsonStr c)
         , ("source", jsonStr (depSourceText src))
         ]
         ++ maybe [] (\ch -> [("channel", jsonStr ch)]) mch
+    pkgJson (ReqLocal n p editable) =
+      jsonObj
+        [ ("name", jsonStr n)
+        , ("source", jsonStr "local")
+        , ("path", jsonStr p)
+        , ("editable", jsonBool editable)
+        ]
 
     sysJson (SystemReq n p) =
       jsonObj [("name", jsonStr n), ("provider", jsonStr p)]
