@@ -1,3 +1,9 @@
+0.100.0 [2026-08-29]
+--------------------
+
+ - Add macOS native support
+ - Split dev-apt and dev-conda env dependencies
+
 0.99.1 [2026-08-25]
 -------------------
 
