@@ -123,6 +123,7 @@ copyState oldIdx newIdx = do
       , stateEnvSpecLangs = stateEnvSpecLangs s
       , stateEvalMode = stateEvalMode s
       , stateAllowLocalModules = stateAllowLocalModules s
+      , stateAutoInstall = stateAutoInstall s
       , stateEvalSandbox = stateEvalSandbox s
       , stateUnsafeSkipNullCheck = stateUnsafeSkipNullCheck s
       , stateInlineSize = stateInlineSize s

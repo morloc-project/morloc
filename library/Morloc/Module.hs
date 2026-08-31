@@ -17,6 +17,9 @@ Handles all aspects of the morloc module system:
 -}
 module Morloc.Module
   ( findModule
+  , findBareModuleMaybe
+  , isLocalImport
+  , autoInstallDep
   , loadModuleMetadata
   , findMainLocFile
 
@@ -344,54 +347,90 @@ findLocalModule currentModule importModule = do
             <> "\nThe following paths were searched:\n"
             <+> indent 4 (vsep (map pretty candidates))
 
--- | Resolve a bare (non-dot-prefixed) import: search system/plane paths,
--- with deprecated fallback to local paths (project root).
--- Supports namespaced imports: "owner/name" searches lib/plane/owner/name/
--- Bare imports: "foo" searches lib/plane/morloclib/foo/ first, then lib/plane/foo/
+-- | Compute the candidate filesystem paths for a bare/namespaced import,
+-- split into system (installed plane) and local (project-relative) search
+-- lists. Shared by the throwing resolver and the non-throwing probe so the
+-- two can never drift.
+bareModulePaths :: Config.Config -> Maybe Path -> Bool -> MVar -> ([Path], [Path])
+bareModulePaths config projectRoot allowLocal importModule =
+  (systemPaths, localPaths)
+  where
+    lib = Config.configLibrary config
+    plane = Config.configPlane config
+    planeCore = Config.configPlaneCore config
+    namePath = splitModuleName importModule
+    -- Check if this is a namespaced import (contains "/")
+    MV importText = importModule
+    isNamespaced = "/" `MT.isInfixOf` importText
+    -- For namespaced: "owner/name" -> [owner, name] as filesystem path
+    -- For bare: "foo" -> search morloclib/foo first, then foo
+    namespacedPath = case MT.splitOn "/" importText of
+      [owner, name] -> [MT.unpack owner, MT.unpack name]
+      _ -> namePath  -- fallback
+    systemPaths
+      | isNamespaced =
+          -- Namespaced import: the explicit namespace path (where the registry
+          -- installs "owner/name"), then the flat repo-name path where a
+          -- classic git install of "owner/name" actually lands (libpath/<repo>).
+          [ MS.joinPath ([lib, plane] <> namespacedPath <> ["main.loc"])
+          , MS.joinPath ([lib, plane] <> init namespacedPath <> [last namespacedPath <> ".loc"])
+          , MS.joinPath ([lib, plane, last namespacedPath] <> ["main.loc"])
+          , MS.joinPath ([lib, plane] <> [last namespacedPath <> ".loc"])
+          ]
+      | otherwise =
+          -- Bare import: search core org namespace first, then flat paths
+          [ MS.joinPath ([lib, plane, planeCore] <> namePath <> ["main.loc"])
+          , MS.joinPath ([lib, plane, planeCore] <> init namePath <> [last namePath <> ".loc"])
+          , MS.joinPath ([lib, plane] <> init namePath <> [last namePath <> ".loc"])
+          , MS.joinPath ([lib, plane] <> namePath <> ["main.loc"])
+          , MS.joinPath (lib : init namePath <> [last namePath <> ".loc"])
+          , MS.joinPath (lib : namePath <> ["main.loc"])
+          ]
+    localPaths
+      | not allowLocal = []  -- eval mode: installed modules only
+      | isNamespaced = []  -- namespaced imports are never local
+      | otherwise = case projectRoot of
+          Just root ->
+            [ MS.joinPath (root : init namePath <> [last namePath <> ".loc"])
+            , MS.joinPath (root : namePath <> ["main.loc"])
+            ]
+          Nothing ->
+            [ MS.joinPath (init namePath <> [last namePath <> ".loc"])
+            , MS.joinPath (namePath <> ["main.loc"])
+            ]
+
+-- | Presence probe for a bare/namespaced import: returns a candidate path if
+-- one exists, or Nothing if none does. This is only used to decide whether a
+-- missing dependency should be auto-downloaded; it does NOT enforce the
+-- system-vs-local ambiguity error or emit the local-resolution warning.
+-- Authoritative resolution (with those diagnostics) always goes through
+-- 'findBareModule'/'findModule'.
+findBareModuleMaybe :: MVar -> MorlocMonad (Maybe Path)
+findBareModuleMaybe importModule = do
+  config <- MM.ask
+  projectRoot <- MM.gets stateProjectRoot
+  allowLocal <- MM.gets stateAllowLocalModules
+  let (systemPaths, localPaths) = bareModulePaths config projectRoot allowLocal importModule
+  existingSystem <- liftIO . fmap catMaybes . mapM getFile $ systemPaths
+  existingLocal <- liftIO . fmap catMaybes . mapM getFile $ localPaths
+  return $ case (existingSystem, existingLocal) of
+    (x : _, _) -> Just x
+    ([], x : _) -> Just x
+    ([], []) -> Nothing
+
+-- | Resolve a bare (non-dot-prefixed) import: search system/plane paths, with
+-- deprecated fallback to local paths (project root). Supports namespaced
+-- imports ("owner/name"). Throws on an ambiguous (system + local) match and
+-- warns when a bare import resolves only locally.
 findBareModule :: MVar -> MVar -> MorlocMonad Path
 findBareModule currentModule importModule = do
   config <- MM.ask
   projectRoot <- MM.gets stateProjectRoot
   allowLocal <- MM.gets stateAllowLocalModules
-  let lib = Config.configLibrary config
+  let (systemPaths, localPaths) = bareModulePaths config projectRoot allowLocal importModule
+      lib = Config.configLibrary config
       plane = Config.configPlane config
-      planeCore = Config.configPlaneCore config
       namePath = splitModuleName importModule
-      -- Check if this is a namespaced import (contains "/")
-      MV importText = importModule
-      isNamespaced = "/" `MT.isInfixOf` importText
-      -- For namespaced: "owner/name" -> [owner, name] as filesystem path
-      -- For bare: "foo" -> search morloclib/foo first, then foo
-      namespacedPath = case MT.splitOn "/" importText of
-        [owner, name] -> [MT.unpack owner, MT.unpack name]
-        _ -> namePath  -- fallback
-      systemPaths
-        | isNamespaced =
-            -- Namespaced import: only search the explicit namespace path
-            [ MS.joinPath ([lib, plane] <> namespacedPath <> ["main.loc"])
-            , MS.joinPath ([lib, plane] <> init namespacedPath <> [last namespacedPath <> ".loc"])
-            ]
-        | otherwise =
-            -- Bare import: search core org namespace first, then flat paths
-            [ MS.joinPath ([lib, plane, planeCore] <> namePath <> ["main.loc"])
-            , MS.joinPath ([lib, plane, planeCore] <> init namePath <> [last namePath <> ".loc"])
-            , MS.joinPath ([lib, plane] <> init namePath <> [last namePath <> ".loc"])
-            , MS.joinPath ([lib, plane] <> namePath <> ["main.loc"])
-            , MS.joinPath (lib : init namePath <> [last namePath <> ".loc"])
-            , MS.joinPath (lib : namePath <> ["main.loc"])
-            ]
-      localPaths
-        | not allowLocal = []  -- eval mode: installed modules only
-        | isNamespaced = []  -- namespaced imports are never local
-        | otherwise = case projectRoot of
-            Just root ->
-              [ MS.joinPath (root : init namePath <> [last namePath <> ".loc"])
-              , MS.joinPath (root : namePath <> ["main.loc"])
-              ]
-            Nothing ->
-              [ MS.joinPath (init namePath <> [last namePath <> ".loc"])
-              , MS.joinPath (namePath <> ["main.loc"])
-              ]
   existingSystem <- liftIO . fmap catMaybes . mapM getFile $ systemPaths
   existingLocal <- liftIO . fmap catMaybes . mapM getFile $ localPaths
   case (existingSystem, existingLocal) of
@@ -444,6 +483,40 @@ findBareModule currentModule importModule = do
           <> "\nMaybe try running: morloc install" <+> pretty importModule
           <> hintMsg
 
+{- | Auto-download a missing bare/namespaced module dependency during
+`morloc make`. If the root project's package.yaml pins the dependency in its
+`morloc-deps`, that git-hash is used; otherwise the latest is installed.
+Transitive dependencies (and their own pins) are resolved by installModule's
+recursion, which reads each fetched package's package.yaml. Downloaded
+modules are never overwritten (DoNotOverwrite) and are typechecked as part of
+the main build, so no typecheck callback is passed here.
+-}
+autoInstallDep :: MVar -> MorlocMonad ()
+autoInstallDep importModule = do
+  config <- MM.ask
+  metas <- MM.gets statePackageMeta
+  let libpath = Config.configLibrary config </> Config.configPlane config
+      coreorg = Config.configPlaneCore config
+      name = unMVar importModule
+      -- honor a git-hash pin declared in the (already-loaded) root project
+      pins = concatMap packageMorlocDependencies metas
+      modstr = case lookup name pins of
+        Just h -> name <> "@hash:" <> h
+        Nothing -> name
+  MM.say $ "Auto-installing missing dependency:" <+> pretty modstr
+  installModule
+    DoNotOverwrite
+    HttpsProtocol
+    libpath
+    coreorg
+    Nothing
+    Map.empty
+    Set.empty
+    Map.empty
+    0
+    AutoDependency
+    modstr
+
 {- | Give a module path (e.g. "/your/path/foo.loc") find the package metadata.
 It currently only looks for a file named "package.yaml" in the same folder
 as the main "*.loc" file.
@@ -459,6 +532,21 @@ loadModuleMetadata isRoot main = do
     case maybef of
       (Just f) -> liftIO $ YC.loadYamlSettings [f] [] YC.ignoreEnv
       Nothing -> return defaultValue
+  -- Nudge the top-level project off the deprecated `morloc-dependencies` key,
+  -- which has been renamed to `morloc-deps`. Both are still accepted (see the
+  -- FromJSON PackageMeta instance); the warning is scoped to the root so that
+  -- imported modules still using the old alias do not spam the build.
+  when isRoot $ case maybef of
+    Just f -> do
+      raw <- liftIO (YC.loadYamlSettings [f] [] YC.ignoreEnv :: IO Aeson.Value)
+      case raw of
+        Aeson.Object o
+          | KM.member "morloc-dependencies" o && not (KM.member "morloc-deps" o) ->
+              MM.say $
+                "warning: package.yaml key 'morloc-dependencies' is deprecated;"
+                  <+> "rename it to 'morloc-deps'"
+        _ -> return ()
+    Nothing -> return ()
   -- Reject include entries that escape the package directory. Absolute
   -- paths and `..` traversals are not allowed because they would break
   -- reproducibility and tie installs to ambient filesystem layout.

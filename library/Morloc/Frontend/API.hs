@@ -128,6 +128,28 @@ parse f (Code code) = do
         })
       parseImports mainDag mainState Map.empty
   where
+    -- Resolve an import to a file path. Local (.dot) imports are project
+    -- files and are never downloaded. A missing bare/namespaced import is
+    -- auto-downloaded only when stateAutoInstall is set (make, unless
+    -- --offline) and we are not in eval mode. Resolution itself always goes
+    -- through findModule, which reports ambiguity errors and the
+    -- local-resolution warning; findBareModuleMaybe is only a presence probe
+    -- that decides whether an install is needed.
+    resolveImport :: Maybe Path -> MVar -> MVar -> MorlocMonad Path
+    resolveImport mainPath mainModule importedModule
+      | Mod.isLocalImport importedModule =
+          Mod.findModule (mainPath, mainModule) importedModule
+      | otherwise = do
+          present <- Mod.findBareModuleMaybe importedModule
+          case present of
+            Just _ -> Mod.findModule (mainPath, mainModule) importedModule
+            Nothing -> do
+              autoInstall <- MM.gets stateAutoInstall
+              evalMode <- MM.gets stateEvalMode
+              when (autoInstall && not evalMode) $
+                Mod.autoInstallDep importedModule
+              Mod.findModule (mainPath, mainModule) importedModule
+
     -- descend recursively into imports
     parseImports ::
       DAG MVar Import ExprI ->
@@ -152,9 +174,7 @@ parse f (Code code) = do
       ((mainModule, importedModule) : _) -> do
         when (mainModule == importedModule) . MM.throwSystemError $
           "Module" <+> pretty importedModule <+> "imports itself"
-        importPath <- case Map.lookup mainModule m of
-          (Just mainPath) -> Mod.findModule (Just mainPath, mainModule) importedModule
-          Nothing -> Mod.findModule (Nothing, mainModule) importedModule
+        importPath <- resolveImport (Map.lookup mainModule m) mainModule importedModule
 
         -- Load the <main>.yaml file associated with the main morloc package file
         moduleConfig <- Config.loadModuleConfig (Just importPath)

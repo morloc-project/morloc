@@ -145,6 +145,42 @@ packageYamlParserTests =
               @?= [ ("root", "1a2b3c4d5e6f7890abcdef1234567890abcdef12")
                   , ("table", "9f8e7d6c5b4a39281706050403020100f0e1d2c3")
                   ]
+    , testCase "canonical morloc-deps key is parsed" $ do
+        let yamlText =
+              "name: foo\n\
+              \morloc-deps:\n\
+              \  - name: root\n\
+              \    git-hash: 1a2b3c4d5e6f7890abcdef1234567890abcdef12\n"
+        case parsePackageYaml yamlText of
+          Left e -> assertFailure (show e)
+          Right pm ->
+            packageMorlocDependencies pm
+              @?= [("root", "1a2b3c4d5e6f7890abcdef1234567890abcdef12")]
+    , testCase "morloc-deps wins when both keys are present" $ do
+        let yamlText =
+              "name: foo\n\
+              \morloc-deps:\n\
+              \  - name: root\n\
+              \    git-hash: 1111111111111111111111111111111111111111\n\
+              \morloc-dependencies:\n\
+              \  - name: table\n\
+              \    git-hash: 2222222222222222222222222222222222222222\n"
+        case parsePackageYaml yamlText of
+          Left e -> assertFailure (show e)
+          Right pm ->
+            packageMorlocDependencies pm
+              @?= [("root", "1111111111111111111111111111111111111111")]
+    , testCase "deprecated morloc-dependencies alias still parses" $ do
+        let yamlText =
+              "name: foo\n\
+              \morloc-dependencies:\n\
+              \  - name: root\n\
+              \    git-hash: 1a2b3c4d5e6f7890abcdef1234567890abcdef12\n"
+        case parsePackageYaml yamlText of
+          Left e -> assertFailure (show e)
+          Right pm ->
+            packageMorlocDependencies pm
+              @?= [("root", "1a2b3c4d5e6f7890abcdef1234567890abcdef12")]
     , testCase "missing git-hash field is rejected" $ do
         let yamlText =
               "name: foo\n\

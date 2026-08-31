@@ -259,6 +259,7 @@ data MakeOptions = MakeOptions
   , moProgramKey :: Maybe String
   , moWrapperSpecs :: Maybe [WrapperSpec]
   , moBuildParentDir :: Maybe Path
+  , moOffline :: Bool
   }
 
 -- | Safe defaults for paths that re-enter the make pipeline without the full
@@ -275,6 +276,7 @@ defaultMakeOptions =
     , moProgramKey = Nothing
     , moWrapperSpecs = Nothing
     , moBuildParentDir = Nothing
+    , moOffline = False
     }
 
 -- | Resolve build parameters: parse each @-X LANG:KEY=VALUE@ and overlay them on
@@ -299,6 +301,9 @@ applyMakeOptions mopts s =
     , stateProgramKey = moProgramKey mopts
     , stateWrapperSpecs = moWrapperSpecs mopts
     , stateBuildParentDir = moBuildParentDir mopts
+    -- applyMakeOptions runs only on build paths (make / make --install /
+    -- install --build); auto-install defaults on there unless --offline.
+    , stateAutoInstall = not (moOffline mopts)
     }
 
 -- | Compile a morloc program and optionally install it.
@@ -408,6 +413,7 @@ cmdMakeWith args verbosity config buildConfig path code progKey = do
               , moProgramKey = Just progKey
               , moWrapperSpecs = Just wrapperSpecs
               , moBuildParentDir = makeBuildDir args
+              , moOffline = makeOffline args
               }
       if makeInstall args
         then

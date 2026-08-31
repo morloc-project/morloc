@@ -228,6 +228,11 @@ data MorlocState = MorlocState
   -- ^ When False, import resolution ignores local/project-relative
   -- modules and resolves only installed (system) modules. False in
   -- eval mode (the API sandbox boundary) unless --allow-local-modules.
+  , stateAutoInstall :: Bool
+  -- ^ When True, a missing bare/namespaced module dependency is auto-downloaded
+  -- during import resolution. Enabled only by `morloc make` (and disabled there
+  -- by `--offline`); left False for read-only commands (typecheck, dump) and for
+  -- eval/served mode, so those never trigger network installs.
   , stateEvalSandbox :: Maybe (Set.Set MVar)
   -- ^ Nothing = trusted eval (dev CLI): no extra gates. Just mods =
   -- sandboxed eval (served): only these modules may be imported at the
@@ -896,6 +901,7 @@ instance Defaultable MorlocState where
       , stateEnvSpecLangs = []
       , stateEvalMode = False
       , stateAllowLocalModules = True
+      , stateAutoInstall = False
       , stateEvalSandbox = Nothing
       , stateUnsafeSkipNullCheck = False
       , stateInlineSize = Nothing
@@ -993,12 +999,19 @@ instance FromJSON PackageMeta where
       <*> o .:? "lang-versions" .!= Map.empty
       <*> o .:? "include"
       <*> o .:? "morloc-version"
-      <*> (o .:? "morloc-dependencies" .!= [] >>= mapM parseMorlocDep)
+      <*> parseMorlocDeps o
       <*> o .:? "setup"
       <*> o .:? "expose" .!= defaultValue
     where
       parseMorlocDep = Aeson.withObject "morloc-dependency" $ \od ->
         (,) <$> od Aeson..: "name" <*> od Aeson..: "git-hash"
+      -- Accept the canonical `morloc-deps` key, falling back to the deprecated
+      -- `morloc-dependencies` alias. `morloc-deps` wins when both are present.
+      -- The deprecation warning is emitted at load time (see loadModuleMetadata).
+      parseMorlocDeps obj = do
+        primary <- obj .:? "morloc-deps"
+        legacy  <- obj .:? "morloc-dependencies"
+        mapM parseMorlocDep (maybe [] id (primary <|> legacy))
 
 instance FromJSON ExposeSet where
   parseJSON = Aeson.withObject "expose" $ \o ->
