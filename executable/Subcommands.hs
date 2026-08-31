@@ -175,7 +175,11 @@ cmdInstall args verbosity conf buildConfig = do
   userSources <- Map.fromList <$> mapM (\modstr -> do
     name <- Mod.extractModuleName modstr
     return (name, modstr)) moduleTexts
-  let cmdInstall' =
+  let cmdInstall' = do
+        -- Load the env's module-pin snapshot so explicit installs honor it
+        -- (and enforce env coherence) exactly as build-time auto-install does.
+        snapshot <- Mod.loadSnapshot
+        MM.modify (\s -> s {stateSnapshot = snapshot})
         mapM
           ( \modstr ->
               Mod.installModule

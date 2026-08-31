@@ -233,6 +233,11 @@ data MorlocState = MorlocState
   -- during import resolution. Enabled only by `morloc make` (and disabled there
   -- by `--offline`); left False for read-only commands (typecheck, dump) and for
   -- eval/served mode, so those never trigger network installs.
+  , stateSnapshot :: Map.Map Text Text
+  -- ^ Module-pin snapshot: module name -> exact git hash, merged from the env's
+  -- snapshot directory. Consulted AUTHORITATIVELY during on-demand module
+  -- resolution (a snapshot pin overrides package pins). Loaded lazily on the
+  -- make/install path; empty otherwise (read-only commands, no env).
   , stateEvalSandbox :: Maybe (Set.Set MVar)
   -- ^ Nothing = trusted eval (dev CLI): no extra gates. Just mods =
   -- sandboxed eval (served): only these modules may be imported at the
@@ -902,6 +907,7 @@ instance Defaultable MorlocState where
       , stateEvalMode = False
       , stateAllowLocalModules = True
       , stateAutoInstall = False
+      , stateSnapshot = Map.empty
       , stateEvalSandbox = Nothing
       , stateUnsafeSkipNullCheck = False
       , stateInlineSize = Nothing

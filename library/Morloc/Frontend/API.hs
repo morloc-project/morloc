@@ -58,6 +58,16 @@ parse f (Code code) = do
   moduleConfig <- Config.loadModuleConfig f
   langMap <- buildLangMap'
 
+  -- Load the env's module-pin snapshot only when auto-install can actually run
+  -- (`morloc make`, not --offline). Read-only commands (typecheck, dump) and
+  -- eval never install, so they must neither pay the directory scan nor be
+  -- aborted by a conflicting snapshot they will not consult. `morloc install`
+  -- loads it separately (Subcommands.cmdInstall).
+  autoInstall <- MM.gets stateAutoInstall
+  when autoInstall $ do
+    snapshot <- Mod.loadSnapshot
+    MM.modify (\st -> st {stateSnapshot = snapshot})
+
   -- The main module's @log-template@ becomes the program-wide default
   -- log message template. Per-label overrides win over this; the
   -- built-in defaults in 'Morloc.CodeGenerator.LogTemplate' fill any

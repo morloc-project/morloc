@@ -124,6 +124,7 @@ copyState oldIdx newIdx = do
       , stateEvalMode = stateEvalMode s
       , stateAllowLocalModules = stateAllowLocalModules s
       , stateAutoInstall = stateAutoInstall s
+      , stateSnapshot = stateSnapshot s
       , stateEvalSandbox = stateEvalSandbox s
       , stateUnsafeSkipNullCheck = stateUnsafeSkipNullCheck s
       , stateInlineSize = stateInlineSize s

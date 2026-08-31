@@ -20,6 +20,8 @@ module Morloc.Module
   , findBareModuleMaybe
   , isLocalImport
   , autoInstallDep
+  , loadSnapshot
+  , parseSnapshotLine
   , loadModuleMetadata
   , findMainLocFile
 
@@ -46,6 +48,8 @@ module Morloc.Module
 
 import Control.Applicative (optional)
 import Control.Exception (onException)
+import Control.Monad.Except (catchError, throwError)
+import GHC.IO.Handle.Lock (LockMode(ExclusiveLock), hLock, hTryLock)
 import Text.Parsec (Parsec, try, parse, many, many1)
 import Text.Parsec.Char (char, string, alphaNum, digit, satisfy)
 import Text.Parsec.Text ()
@@ -77,7 +81,7 @@ import qualified Network.HTTP.Simple as HTTP
 import System.Directory
 import System.Environment (getEnvironment)
 import System.Exit (ExitCode(..))
-import System.IO (stderr)
+import System.IO (IOMode(ReadWriteMode), hClose, openFile, stderr)
 import System.Process
   ( callProcess
   , createProcess
@@ -163,6 +167,18 @@ reconcileOverwrite DoNotOverwrite (Just expected) (Just actual)
 reconcileOverwrite DoNotOverwrite (Just _) Nothing = ForceOverwrite
 reconcileOverwrite ow _ _ = ow
 
+-- | Apply an authoritative pin to a module source: when a hash is resolved (env
+-- snapshot, else a closer-wins package pin) and the install string gave no
+-- explicit git ref, fetch that exact commit -- so the fetched hash matches what
+-- gets recorded and coherence-checked. An explicit ref in the install string
+-- (@\@branch:@/@\@version:@/@\@hash:@) is left untouched; a genuine disagreement
+-- is then surfaced by the coherence check rather than silently overridden.
+pinSource :: Maybe Text -> ModuleSource -> ModuleSource
+pinSource (Just h) (ModuleSourceRemoteGit r)
+  | gitReference r == LatestDefaultBranch =
+      ModuleSourceRemoteGit r {gitReference = CommitHash h}
+pinSource _ src = src
+
 moduleInstallError :: MDoc -> MorlocMonad a
 moduleInstallError msg = MM.throwSystemError $ "Failed to install module:" <+> msg
 
@@ -173,6 +189,32 @@ runCleanup :: FilePath -> IO ()
 runCleanup targetDir = do
   exists <- doesDirectoryExist targetDir
   when exists $ removeDirectoryRecursive targetDir
+
+-- | Run an action while holding an exclusive, blocking, per-module install lock
+-- so concurrent @morloc make@/@morloc install@ processes installing the SAME
+-- module serialize (a waiter proceeds -- and hits the already-installed no-op --
+-- once the holder finishes), while different modules install in parallel. The
+-- lock is an advisory @flock@ ('GHC.IO.Handle.Lock') on a lockfile under fdb, so
+-- it is released on scope exit, on a MorlocError, and automatically on process
+-- death. A "waiting" message is emitted only when the lock is actually
+-- contended, so the common (uncontended) path stays quiet.
+withModuleLock :: FilePath -> Text -> MorlocMonad a -> MorlocMonad a
+withModuleLock fdbDir name action = do
+  let lockPath = fdbDir </> (map slashToUnderscore (MT.unpack name) ++ ".lock")
+  liftIO $ createDirectoryIfMissing True fdbDir
+  h <- liftIO $ openFile lockPath ReadWriteMode
+  gotImmediately <- liftIO $ hTryLock h ExclusiveLock
+  unless gotImmediately $ do
+    MM.say $ "Waiting for another process to finish installing"
+      <+> squotes (pretty name) <> "..."
+    liftIO $ hLock h ExclusiveLock
+  -- Release on both normal completion and a MorlocError (throwError). An
+  -- uncaught IO exception unwinds past this, but flock releases on process death.
+  result <- action `catchError` \e -> liftIO (hClose h) >> throwError e
+  liftIO (hClose h)
+  return result
+  where
+    slashToUnderscore c = if c == '/' then '_' else c
 
 -- | Spawn the module's setup script. Working directory is the module's
 -- installed location, stdout and stderr stream to the morloc process's
@@ -495,14 +537,19 @@ autoInstallDep :: MVar -> MorlocMonad ()
 autoInstallDep importModule = do
   config <- MM.ask
   metas <- MM.gets statePackageMeta
+  snapshot <- MM.gets stateSnapshot
   let libpath = Config.configLibrary config </> Config.configPlane config
       coreorg = Config.configPlaneCore config
       name = unMVar importModule
-      -- honor a git-hash pin declared in the (already-loaded) root project
+      -- Resolve the pin. The env snapshot is authoritative (keeps the whole
+      -- environment on one hash per module); otherwise honor a git-hash pin
+      -- declared in the (already-loaded) root project.
       pins = concatMap packageMorlocDependencies metas
-      modstr = case lookup name pins of
+      modstr = case Map.lookup name snapshot of
         Just h -> name <> "@hash:" <> h
-        Nothing -> name
+        Nothing -> case lookup name pins of
+          Just h -> name <> "@hash:" <> h
+          Nothing -> name
   MM.say $ "Auto-installing missing dependency:" <+> pretty modstr
   installModule
     DoNotOverwrite
@@ -516,6 +563,55 @@ autoInstallDep importModule = do
     0
     AutoDependency
     modstr
+
+{- | Load and merge the env's module-pin snapshot from 'Config.snapshotDir'.
+Each file has one @name hash@ per line (blank lines and @#@ comments ignored).
+Two entries pinning one module to different hashes is a hard error. Returns an
+empty map when the directory is absent (no env / dev host / read-only command).
+-}
+loadSnapshot :: MorlocMonad (Map.Map Text Text)
+loadSnapshot = do
+  config <- MM.ask
+  let dir = Config.snapshotDir config
+  exists <- liftIO $ doesDirectoryExist dir
+  if not exists
+    then return Map.empty
+    else do
+      entries <- liftIO $ listDirectory dir
+      -- Skip dot-files: a snapshot writer's atomic temp (e.g. mim's
+      -- `.stdlib.txt.tmp`) or an editor/OS artifact (`.swp`, `.DS_Store`) in
+      -- this directory must not be parsed as pins -- an interrupted deposit
+      -- would otherwise leave a temp with a conflicting hash and hard-fail
+      -- every build.
+      let realEntries = filter (\e -> take 1 e /= ".") entries
+      foldM mergeSnapshotFile Map.empty (map (dir </>) realEntries)
+  where
+    mergeSnapshotFile :: Map.Map Text Text -> Path -> MorlocMonad (Map.Map Text Text)
+    mergeSnapshotFile acc path = do
+      isFile <- liftIO $ doesFileExist path
+      if not isFile
+        then return acc
+        else do
+          content <- liftIO $ TIO.readFile path
+          foldM (addSnapshotEntry path) acc
+            (mapMaybe parseSnapshotLine (MT.lines content))
+    addSnapshotEntry :: Path -> Map.Map Text Text -> (Text, Text) -> MorlocMonad (Map.Map Text Text)
+    addSnapshotEntry path acc (name, hash) =
+      case Map.lookup name acc of
+        Just h
+          | not (hashEq h hash) ->
+              MM.throwSystemError $
+                "Conflicting snapshot pins for module" <+> squotes (pretty name)
+                <> ":" <+> pretty h <+> "vs" <+> pretty hash
+                <+> "(in" <+> pretty path <> ")"
+        _ -> return (Map.insert name hash acc)
+
+-- | Parse one snapshot line @name hash@ (ignores @#@ comments and blank lines).
+parseSnapshotLine :: Text -> Maybe (Text, Text)
+parseSnapshotLine line =
+  case MT.words (MT.takeWhile (/= '#') line) of
+    (name : hash : _) -> Just (name, hash)
+    _ -> Nothing
 
 {- | Give a module path (e.g. "/your/path/foo.loc") find the package metadata.
 It currently only looks for a file named "package.yaml" in the same folder
@@ -694,11 +790,16 @@ installModule ::
   MorlocMonad ()
 installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgress pinMap depth reason modstr = do
   config <- MM.ask
+  snapshot <- MM.gets stateSnapshot
   let registry = Config.configRegistry config
       fdbDir = Config.fdbDir config
-  -- Try registry first for bare names when a registry is configured
+  -- Try registry first for bare names when a registry is configured -- EXCEPT
+  -- when the env snapshot pins this module: the snapshot pins an exact git hash,
+  -- which the registry (version-based) cannot honor, so route it through the git
+  -- path where the pin is applied. Otherwise the recorded hash (snapshot) would
+  -- disagree with the fetched (registry) version and trip the coherence check.
   case (registry, tryParseRegistryModule (MT.pack coreorg) modstr) of
-    (Just _, Just (owner, name)) -> do
+    (Just _, Just (owner, name)) | not (Map.member name snapshot) -> do
       let targetDir = libpath </> MT.unpack owner </> MT.unpack name
       reconcileAndDispatch fdbDir (ModuleSourceRegistry owner name) name targetDir
     _ -> installModuleClassic fdbDir
@@ -715,8 +816,16 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
         name <- case validateModuleName modstr rawName of
           Left err -> moduleInstallError $ pretty err
           Right n -> return n
+        -- Make the FETCH honor the authoritative pin (snapshot, else package
+        -- pin) for a bare install string, so an explicit `morloc install foo`
+        -- in a snapshot-pinned env fetches the pinned commit, not latest.
+        snapshot <- MM.gets stateSnapshot
+        let effHash = case Map.lookup name snapshot of
+              Just h -> Just h
+              Nothing -> pinHash <$> Map.lookup name pinMap
+            source' = pinSource effHash source
         let targetDir = libpath </> MT.unpack name
-        reconcileAndDispatch fdbDir source name targetDir
+        reconcileAndDispatch fdbDir source' name targetDir
 
     -- Shared reconciliation/dispatch logic. Reads any recorded
     -- installed_hash from fdb, compares to the expected hash from the
@@ -725,10 +834,31 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
     reconcileAndDispatch fdbDir source name targetDir =
       if Set.member name inProgress
         then return ()
-        else do
+        else withModuleLock fdbDir name $ do
+          -- Re-read under the lock: a concurrent installer may have finished
+          -- while we waited, in which case the checks below no-op.
           installedHash <- liftIO $ readInstalledHash fdbDir name
-          let expectedHash = pinHash <$> Map.lookup name pinMap
-              effectiveOverwrite = reconcileOverwrite overwrite expectedHash installedHash
+          snapshot <- MM.gets stateSnapshot
+          -- The env snapshot is authoritative for the modules it lists; else
+          -- the closer-wins package pin.
+          let expectedHash = case Map.lookup name snapshot of
+                (Just h) -> Just h
+                Nothing -> pinHash <$> Map.lookup name pinMap
+              coherenceMismatch = case (expectedHash, installedHash) of
+                (Just e, Just a) -> not (hashEq e a)
+                _ -> False
+          -- Env-wide coherence: never silently change an installed module's
+          -- hash. A snapshot/pin that disagrees with what is installed is a
+          -- hard error unless an explicit --force (ForceOverwrite) sanctions
+          -- the migration.
+          when (coherenceMismatch && overwrite /= ForceOverwrite) . MM.throwSystemError $
+            "Environment coherence violation for module" <+> squotes (pretty name) <> "."
+            <> "\n  installed:" <+> pretty (fromMaybe "?" installedHash)
+            <> "\n  required :" <+> pretty (fromMaybe "?" expectedHash)
+            <> "\nAll programs in an environment must share one hash per module."
+            <> "\nReconcile deliberately with 'morloc install --force"
+              <+> pretty name <> "' or 'mim update'."
+          let effectiveOverwrite = reconcileOverwrite overwrite expectedHash installedHash
           targetExists <- liftIO $ doesDirectoryExist targetDir
           case (targetExists, effectiveOverwrite) of
             (True, DoNotOverwrite) -> do
@@ -748,7 +878,9 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
                   MM.say $ "Reinstalling" <+> pretty name
                         <+> "to record pinned hash" <+> pretty e
                 _ -> return ()
-              liftIO $ removeDirectoryRecursive targetDir
+              -- doInstall fetches into a temp dir and swaps the old one out just
+              -- before the atomic move, so the existing install stays intact if
+              -- the fetch fails.
               doInstall fdbDir source name targetDir
             (False, _) ->
               doInstall fdbDir source name targetDir
@@ -760,48 +892,63 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
       -- create the library path if it is missing
       liftIO $ createDirectoryIfMissing True libpath
 
-      -- Copy/clone files, with cleanup on exception
+      MM.say $ "Fetching module" <+> squotes (pretty name) <> "..."
+
+      -- Fetch into a temporary sibling dir, then atomically move it into place.
+      -- An interrupted fetch thus never leaves a partial-but-present targetDir
+      -- (the manifest write, being last, would otherwise disagree with a
+      -- half-clone). The per-module lock serializes the remove+rename window, so
+      -- a concurrent installer never observes the intermediate state.
       liftIO $ createDirectoryIfMissing True (MS.takeDirectory targetDir)
       config' <- MM.ask
-      let ioAction = case source of
+      let tmpDir = targetDir ++ ".partial"
+          ioAction = case source of
             ModuleSourceLocal path selector ->
-              installLocalIO targetDir selector path
+              installLocalIO tmpDir selector path
             ModuleSourceRemoteGit remote ->
-              installRemoteIO gitprot targetDir remote
+              installRemoteIO gitprot tmpDir remote
             ModuleSourceRegistry owner' modName ->
               case Config.configRegistry config' of
-                Just regUrl -> installFromRegistry regUrl owner' modName targetDir
+                Just regUrl -> installFromRegistry regUrl owner' modName tmpDir
                 Nothing -> ioError $ userError "Registry URL not configured"
-      liftIO $ ioAction `onException` runCleanup targetDir
+      -- Fetch into the temp dir (never touching any existing install yet).
+      liftIO $ (removePathForcibly tmpDir >> ioAction) `onException` runCleanup tmpDir
 
-      -- Enforce: the install-target directory name must equal the
-      -- named `module <name>` declaration in the entry-point .loc file
-      -- (main.loc, or the unique .loc file). Otherwise downstream
-      -- `import <name>` will look in the wrong place. Runs before
-      -- package.yaml is parsed so a mismatched install is rejected as
-      -- early as possible, leaving runCleanup as the sole rollback.
-      liftIO $ validateModuleNameMatchesDir targetDir
-        `onException` runCleanup targetDir
+      -- Validate the FETCHED content in the temp dir BEFORE swapping it in, so a
+      -- rejected fetch (name mismatch, or a morloc-version that excludes this
+      -- compiler) never deletes the existing working install. `name` is passed
+      -- explicitly because the temp dir's basename is `<name>.partial`.
+      liftIO $ validateModuleNameMatches name tmpDir `onException` runCleanup tmpDir
 
-      -- Read package.yaml for metadata and dependencies
+      -- Read package.yaml (from the temp dir) for metadata and dependencies.
       meta <- liftIO $ do
-        let pkgYaml = targetDir </> "package.yaml"
+        let pkgYaml = tmpDir </> "package.yaml"
         exists <- doesFileExist pkgYaml
         if exists
           then YC.loadYamlSettings [pkgYaml] [] YC.ignoreEnv
           else return defaultValue
 
       -- Reject a module whose declared morloc-version excludes the running
-      -- compiler (rolling back the freshly-fetched source). An explicit
-      -- --force downgrades the rejection to a warning.
+      -- compiler, cleaning the temp fetch and leaving the old install intact.
+      -- An explicit --force downgrades the rejection to a warning.
       case VC.gateModuleVersion name (MT.pack Version.versionStr) (packageMorlocVersion meta) of
         Right Nothing -> return ()
         Right (Just warning) -> MM.say (pretty warning)
         Left err
           | overwrite == ForceOverwrite -> MM.say ("warning:" <+> pretty err)
           | otherwise -> do
-              liftIO $ runCleanup targetDir
+              liftIO $ runCleanup tmpDir
               moduleInstallError (pretty err)
+
+      -- Only now (validated) swap the temp tree into place atomically. The
+      -- per-module lock serializes the remove+rename for concurrent installers.
+      liftIO $
+        ( do
+            targetPresent <- doesDirectoryExist targetDir
+            when targetPresent $ removeDirectoryRecursive targetDir
+            renameDirectory tmpDir targetDir
+        )
+          `onException` runCleanup tmpDir
 
       -- Fold this package's morloc-dependencies into the resolver state.
       -- Closer-wins: pins declared by this package (at depth `depth`) are
@@ -832,22 +979,25 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
 
       -- Recursively install dependencies, threading the updated resolver
       -- state at depth+1.
+      snapshot <- MM.gets stateSnapshot
       forM_ morlocDeps $ \dep -> do
         unless (Set.member dep inProgress') $ do
           let resolved = Map.lookup dep pinMap'
               resolvedHash = pinHash <$> resolved
               userOverride = Map.lookup dep userSources
-              -- If the user supplied an explicit install string for this
-              -- dep (via the CLI), honor it as-is. Otherwise build the
-              -- modstr from the bare name plus an @hash:HASH suffix when
-              -- pinned. The existing parser interprets the suffix as a
-              -- CommitHash selector for both local and remote sources.
-              depModstr = case userOverride of
-                Just s -> s
-                Nothing -> case resolvedHash of
-                  Nothing -> dep
-                  Just h  -> dep <> "@hash:" <> h
-          when (resolved == Nothing) $
+              -- Resolve the dep's hash. The env snapshot is AUTHORITATIVE (keeps
+              -- the whole environment on one hash per module). Otherwise honor an
+              -- explicit CLI install string, then a closer-wins package pin, else
+              -- take the latest. The @hash:HASH suffix is parsed as a CommitHash
+              -- selector for both local and remote sources.
+              depModstr = case Map.lookup dep snapshot of
+                Just h  -> dep <> "@hash:" <> h
+                Nothing -> case userOverride of
+                  Just s -> s
+                  Nothing -> case resolvedHash of
+                    Nothing -> dep
+                    Just h  -> dep <> "@hash:" <> h
+          when (resolved == Nothing && Map.notMember dep snapshot) $
             -- Per-dep noise: only at verbose -v. Stale-entry warnings (a
             -- declared pin with no matching import) stay at default level
             -- because those are likely user errors, not the common case.
@@ -919,10 +1069,21 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
       liftIO $ createDirectoryIfMissing True fdbDir
       installTime <- liftIO $ floor <$> Time.getPOSIXTime
       let manifestPath = fdbDir </> MT.unpack name ++ ".module"
-          -- For each auto-discovered dep, record the resolved hash (if any)
+          manifestTmp = manifestPath ++ ".tmp"
+          -- For each auto-discovered dep, record the resolved hash (if any),
+          -- snapshot-first to match what was actually fetched.
           morlocDepsWithHash =
-            [ (dep, pinHash <$> Map.lookup dep pinMap') | dep <- morlocDeps ]
-          installedSelfHash = pinHash <$> Map.lookup name pinMap
+            [ (dep, resolveDepHash dep) | dep <- morlocDeps ]
+          resolveDepHash dep = case Map.lookup dep snapshot of
+            Just h -> Just h
+            Nothing -> pinHash <$> Map.lookup dep pinMap'
+          -- Record the hash that was actually fetched (env snapshot is
+          -- authoritative, else the package pin); recording only the pinMap
+          -- hash left snapshot-pinned modules with a null installed_hash,
+          -- forcing a re-clone on every install and defeating coherence.
+          installedSelfHash = case Map.lookup name snapshot of
+            Just h -> Just h
+            Nothing -> pinHash <$> Map.lookup name pinMap
           manifestJson =
             buildModuleManifest
               meta
@@ -934,7 +1095,11 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
               modstr
               reason
               installTime
-      liftIO $ TIO.writeFile manifestPath manifestJson
+      -- Write the manifest atomically (temp + rename) so a crash never leaves a
+      -- truncated manifest that readInstalledHash would misparse.
+      liftIO $ do
+        TIO.writeFile manifestTmp manifestJson
+        renameFile manifestTmp manifestPath
       MM.say $ "Installed module" <+> squotes (pretty name)
 
 -- | Find the main .loc file in a module directory
@@ -1112,14 +1277,23 @@ findEntryPointLocFile dir = do
 -- mismatch / missing entry / no-named-module / multiple-named-modules.
 -- Caller is responsible for cleanup-on-throw (use within onException).
 validateModuleNameMatchesDir :: FilePath -> IO ()
-validateModuleNameMatchesDir targetDir = do
-  entryResult <- findEntryPointLocFile targetDir
+validateModuleNameMatchesDir targetDir =
+  validateModuleNameMatches
+    (MT.pack (MS.takeFileName (MS.dropTrailingPathSeparator targetDir)))
+    targetDir
+
+-- | Like 'validateModuleNameMatchesDir' but checks the declared module name
+-- against an explicitly-supplied expected name rather than the directory's
+-- basename -- so the fetched content can be validated in a temp dir (whose
+-- basename is @<name>.partial@) before it is swapped into place.
+validateModuleNameMatches :: Text -> FilePath -> IO ()
+validateModuleNameMatches dirName dir = do
+  entryResult <- findEntryPointLocFile dir
   entryPath <- case entryResult of
     Right p   -> return p
     Left err  -> ioError . userError $ MT.unpack err
   declared <- extractNamedModuleDecls entryPath
-  let dirName   = MT.pack (MS.takeFileName (MS.dropTrailingPathSeparator targetDir))
-      entryFile = MT.pack (MS.takeFileName entryPath)
+  let entryFile = MT.pack (MS.takeFileName entryPath)
   case declared of
     [name]
       | name == dirName -> return ()
