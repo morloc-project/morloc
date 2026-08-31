@@ -256,15 +256,15 @@ packageYamlParserTests =
               "name: foo\n\
               \morloc-deps:\n\
               \  - name: root\n\
-              \    git-hash: 1111111111111111111111111111111111111111\n\
+              \    git-hash: aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111\n\
               \morloc-dependencies:\n\
               \  - name: table\n\
-              \    git-hash: 2222222222222222222222222222222222222222\n"
+              \    git-hash: bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222\n"
         case parsePackageYaml yamlText of
           Left e -> assertFailure (show e)
           Right pm ->
             packageMorlocDependencies pm
-              @?= [("root", "1111111111111111111111111111111111111111")]
+              @?= [("root", "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111")]
     , testCase "deprecated morloc-dependencies alias still parses" $ do
         let yamlText =
               "name: foo\n\
@@ -293,12 +293,15 @@ packageYamlParserTests =
               \morloc-dependencies:\n\
               \  - name: root\n\
               \    git-hash: 12345\n"
-        -- aeson coerces numeric scalars to strings in YAML, so this
-        -- particular case may parse. The real safety net is the unit tests
-        -- on the resolver. We assert that the parser does not crash.
+        -- An unquoted numeric git-hash is parsed by YAML as a number. Coercing
+        -- it back to text would silently drop leading zeros, so the parser
+        -- rejects it and asks for a quoted string.
         case parsePackageYaml yamlText of
-          Left _ -> return ()
-          Right _ -> return ()
+          Left _ -> return ()  -- expected: parse failure, must be quoted
+          Right pm ->
+            assertFailure $
+              "expected parse failure on numeric git-hash; got: "
+                <> show (packageMorlocDependencies pm)
     ]
 
 -- ---------------------------------------------------------------------------

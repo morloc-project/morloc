@@ -1010,7 +1010,16 @@ instance FromJSON PackageMeta where
       <*> o .:? "expose" .!= defaultValue
     where
       parseMorlocDep = Aeson.withObject "morloc-dependency" $ \od ->
-        (,) <$> od Aeson..: "name" <*> od Aeson..: "git-hash"
+        (,) <$> od Aeson..: "name" <*> (od Aeson..: "git-hash" >>= parseGitHash)
+      -- A git-hash must be a quoted string. An unquoted, all-numeric hash is
+      -- read by YAML as a number; coercing it back to text would silently drop
+      -- leading zeros, so we reject it with an actionable message instead.
+      parseGitHash (Aeson.String t) = pure t
+      parseGitHash _ =
+        fail
+          "git-hash must be a quoted string, e.g. git-hash: \"00a1b2...\" \
+          \(an unquoted all-numeric hash is read as a number and would lose \
+          \any leading zeros)"
       -- Accept the canonical `morloc-deps` key, falling back to the deprecated
       -- `morloc-dependencies` alias. `morloc-deps` wins when both are present.
       -- The deprecation warning is emitted at load time (see loadModuleMetadata).

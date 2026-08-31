@@ -120,7 +120,7 @@ test_pinned_dep() {
 name: outer-pkg
 morloc-dependencies:
   - name: inner-pkg
-    git-hash: $FIXTURE_HASH1
+    git-hash: "$FIXTURE_HASH1"
 EOF
     cat > main.loc <<EOF
 module outer-pkg
@@ -177,7 +177,7 @@ test_reconciles_stale_cache() {
 name: outer-pkg
 morloc-dependencies:
   - name: inner-pkg
-    git-hash: $FIXTURE_HASH2
+    git-hash: "$FIXTURE_HASH2"
 EOF
     cat > main.loc <<EOF
 module outer-pkg
@@ -191,7 +191,7 @@ EOF
 name: outer-pkg
 morloc-dependencies:
   - name: inner-pkg
-    git-hash: $FIXTURE_HASH1
+    git-hash: "$FIXTURE_HASH1"
 EOF
     morloc install "$outer_dir" "$FIXTURE_REPO" >/dev/null 2>&1 || {
         fail "$label: re-install" "morloc install failed"
@@ -231,7 +231,7 @@ test_conflicting_pins() {
 name: sib-a
 morloc-dependencies:
   - name: inner-pkg
-    git-hash: $FIXTURE_HASH1
+    git-hash: "$FIXTURE_HASH1"
 EOF
     cat > "$sib_a_dir/main.loc" <<EOF
 module sib-a
@@ -244,7 +244,7 @@ EOF
 name: sib-b
 morloc-dependencies:
   - name: inner-pkg
-    git-hash: $FIXTURE_HASH2
+    git-hash: "$FIXTURE_HASH2"
 EOF
     cat > "$sib_b_dir/main.loc" <<EOF
 module sib-b
@@ -287,7 +287,7 @@ test_local_git_hash() {
 name: outer-pkg
 morloc-dependencies:
   - name: inner-pkg
-    git-hash: $FIXTURE_HASH1
+    git-hash: "$FIXTURE_HASH1"
 EOF
     cat > main.loc <<EOF
 module outer-pkg
