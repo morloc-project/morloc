@@ -15,7 +15,7 @@ identity :: a -> a
 
 roundTripBin :: Int -> Str -> <IO, Err> Int
 roundTripBin x path = do
-  @save 0 (identity x) path
+  @save 0 path (identity x)
   @load path
 
 roundTripMsg :: Int -> Str -> <IO, Err> Int

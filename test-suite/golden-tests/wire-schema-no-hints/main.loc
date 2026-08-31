@@ -20,4 +20,4 @@ source Cpp from "src.hpp" ("mkVec4")
 mkVec4 :: Vector 4 Real
 
 saveVec :: Str -> <IO, Err> ()
-saveVec path = @save 0 mkVec4 path
+saveVec path = @save 0 path mkVec4

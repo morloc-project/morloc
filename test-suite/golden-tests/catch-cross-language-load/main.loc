@@ -39,7 +39,7 @@ escapable effect Err
 -- Save via C++ pool (native std::vector<double>).
 saveCpp :: Str -> <IO, Err> Real
 saveCpp path = do
-  @save 0 cppMkVec4 path
+  @save 0 path cppMkVec4
   cppSumVec4 cppMkVec4
 
 -- Load via Python pool (native numpy.ndarray). The wire schema

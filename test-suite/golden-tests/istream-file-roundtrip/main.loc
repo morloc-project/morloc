@@ -24,14 +24,14 @@ import root
 -- 1. Open as IStream and pull the first (only) sub-packet.
 testNextOnce :: Str -> <IO, Err> [Str]
 testNextOnce path = do
-  @save 0 ["one", "two", "three"] path
+  @save 0 path ["one", "two", "three"]
   s <- @open path :: <IO, Err> IStream Str
   @next s
 
 -- 2. After EOF, subsequent @next calls return empty.
 testNextEofTwice :: Str -> <IO, Err> [Str]
 testNextEofTwice path = do
-  @save 0 ["alpha", "beta"] path
+  @save 0 path ["alpha", "beta"]
   s <- @open path :: <IO, Err> IStream Str
   _ <- @next s
   @next s
@@ -39,7 +39,7 @@ testNextEofTwice path = do
 -- 3. Derive an IStream from an IFile and walk it.
 testStreamFromIFile :: Str -> <IO, Err> [Int]
 testStreamFromIFile path = do
-  @save 0 [11, 22, 33] path
+  @save 0 path [11, 22, 33]
   f <- @open path :: <IO, Err> IFile Int
   s <- @stream f
   @next s
@@ -47,6 +47,6 @@ testStreamFromIFile path = do
 -- 4. Int element type round-trip.
 testIntList :: Str -> <IO, Err> [Int]
 testIntList path = do
-  @save 0 [100, 200, 300, 400] path
+  @save 0 path [100, 200, 300, 400]
   s <- @open path :: <IO, Err> IStream Int
   @next s

@@ -27,14 +27,14 @@ import root-rust
 -- 1. Open as IStream and pull the first (only) sub-packet.
 testNextOnce :: Str -> <IO, Err> [Str]
 testNextOnce path = do
-  @save 0 ["one", "two", "three"] path
+  @save 0 path ["one", "two", "three"]
   s <- @open path :: <IO, Err> IStream Str
   @next s
 
 -- 2. After EOF, subsequent @next calls return empty.
 testNextEofTwice :: Str -> <IO, Err> [Str]
 testNextEofTwice path = do
-  @save 0 ["alpha", "beta"] path
+  @save 0 path ["alpha", "beta"]
   s <- @open path :: <IO, Err> IStream Str
   _ <- @next s
   @next s
@@ -42,7 +42,7 @@ testNextEofTwice path = do
 -- 3. Derive an IStream from an IFile and walk it.
 testStreamFromIFile :: Str -> <IO, Err> [Int]
 testStreamFromIFile path = do
-  @save 0 [11, 22, 33] path
+  @save 0 path [11, 22, 33]
   f <- @open path :: <IO, Err> IFile Int
   s <- @stream f
   @next s
@@ -50,19 +50,19 @@ testStreamFromIFile path = do
 -- 4. Int element type round-trip.
 testIntList :: Str -> <IO, Err> [Int]
 testIntList path = do
-  @save 0 [100, 200, 300, 400] path
+  @save 0 path [100, 200, 300, 400]
   s <- @open path :: <IO, Err> IStream Int
   @next s
 
 -- 5. Element count of a saved list via IFile.
 testLength :: Str -> <IO, Err> Int
 testLength path = do
-  @save 0 [1, 2, 3, 4, 5, 6, 7] path
+  @save 0 path [1, 2, 3, 4, 5, 6, 7]
   f <- @open path :: <IO, Err> IFile Int
   @flen f
 
 -- 6. Read a file's element schema string without opening it.
 testFschema :: Str -> <IO, Err> Str
 testFschema path = do
-  @save 0 [1, 2, 3] path
+  @save 0 path [1, 2, 3]
   @fschema path

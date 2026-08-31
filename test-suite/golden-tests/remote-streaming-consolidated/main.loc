@@ -152,9 +152,9 @@ consComp7 = do
 -- TAG_PATH -> local-handle reconstitution end-to-end.
 prodHandles :: Str -> Str -> Str -> Str -> <IO, Err> ()
 prodHandles dest pa pb pc = do
-  @save 0 [100, 101, 102] pa
-  @save 0 [200, 201, 202] pb
-  @save 0 [300, 301, 302] pc
+  @save 0 pa [100, 101, 102]
+  @save 0 pb [200, 201, 202]
+  @save 0 pc [300, 301, 302]
   fa <- @open pa :: <IO, Err> IFile [Int]
   fb <- @open pb :: <IO, Err> IFile [Int]
   fc <- @open pc :: <IO, Err> IFile [Int]

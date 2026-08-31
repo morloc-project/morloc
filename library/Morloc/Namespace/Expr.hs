@@ -360,7 +360,7 @@ data Pattern
 
 -- | Compiler intrinsics: functions the compiler generates specialized code for.
 data Intrinsic
-  = IntrSave      -- ^ @save  :: Int -> a -> Str -> <IO, Err> () -- voidstar packet, with zstd level 0-9
+  = IntrSave      -- ^ @save  :: Int -> Str -> a -> <IO, Err> () -- voidstar packet, with zstd level 0-9
   | IntrSaveM     -- ^ @savem :: Str -> a -> <IO, Err> ()         -- raw msgpack file
   | IntrSaveJ     -- ^ @savej :: Str -> a -> <IO, Err> ()         -- raw JSON file
   | IntrLoad      -- ^ @load  :: Str -> <IO, Err> a               -- auto-detect format, auto-decompress packets; failure raises Err (catch with @catch)

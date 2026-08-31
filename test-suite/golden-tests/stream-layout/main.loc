@@ -68,7 +68,7 @@ totalElems path = do
 -- IFile whose layout is exactly one triple (offset 0, count = #elements).
 openData :: Str -> <IO, Err> IFile [Int]
 openData path = do
-  @save 0 [10, 20, 30, 40] path
+  @save 0 path [10, 20, 30, 40]
   @open path :: <IO, Err> IFile [Int]
 
 dataOffsets :: Str -> <IO, Err> [U64]

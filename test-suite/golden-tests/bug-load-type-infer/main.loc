@@ -11,6 +11,6 @@ identity :: a -> a
 
 roundTrip :: Int -> Str -> <IO, Err> Int
 roundTrip x path = do
-  @save 0 (identity x) path
+  @save 0 path (identity x)
   x <- @load path
   x

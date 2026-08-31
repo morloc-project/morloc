@@ -744,7 +744,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       ReadX <$> type2schema t <*> toNexusExpr arg
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrHash [arg])) =
       HashX <$> type2schema t <*> toNexusExpr arg
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSave [levelExpr, valExpr, path])) =
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSave [levelExpr, path, valExpr])) =
       SaveX "voidstar"
         <$> type2schema t
         <*> toNexusExpr levelExpr

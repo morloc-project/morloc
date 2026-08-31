@@ -33,8 +33,8 @@ import root-r
 --   * .[i] f IFile pattern walk in target pool
 testInPool :: (Int -> Int) -> Str -> Str -> <IO, Err> Int
 testInPool langId pathA pathB = do
-  @save 0 [10, 20, 30, 40, 50] pathA
-  @save 0 [100, 200, 300, 400, 500] pathB
+  @save 0 pathA [10, 20, 30, 40, 50]
+  @save 0 pathB [100, 200, 300, 400, 500]
   fa <- @open pathA :: <IO, Err> IFile [Int]
   fb <- @open pathB :: <IO, Err> IFile [Int]
   -- [fa, fb] crosses to langId's pool. Inside that pool, .[1] indexes
@@ -57,6 +57,6 @@ testArrayR = testInPool idr
 -- where per-element path-bytes share storage / overwrite each other.
 testArrayMixedDispatch :: Str -> <IO, Err> Int
 testArrayMixedDispatch path = do
-  @save 0 [10, 20, 30, 40, 50] path
+  @save 0 path [10, 20, 30, 40, 50]
   f <- @open path :: <IO, Err> IFile [Int]
   idcpp (.[3] (.[2] [f, f, f]))

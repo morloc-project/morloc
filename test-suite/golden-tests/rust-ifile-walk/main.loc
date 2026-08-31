@@ -37,34 +37,34 @@ mkPoint a b = {x = a, y = b}
 -- .[i] on a fixed-width element list.
 testIntIndex :: Str -> <IO, Err> Int
 testIntIndex path = do
-  @save 0 [10, 20, 30, 40, 50] path
+  @save 0 path [10, 20, 30, 40, 50]
   f <- @open path :: <IO, Err> IFile [Int]
   .[2] f                                       -- expect 30
 
 -- .[i] on a variable-width element list.
 testStrIndex :: Str -> <IO, Err> Str
 testStrIndex path = do
-  @save 0 ["alpha", "beta", "gamma", "delta"] path
+  @save 0 path ["alpha", "beta", "gamma", "delta"]
   f <- @open path :: <IO, Err> IFile [Str]
   .[2] f                                       -- expect "gamma"
 
 -- .[i:j] bounded slice.
 testIntSlice :: Str -> <IO, Err> [Int]
 testIntSlice path = do
-  @save 0 [10, 20, 30, 40, 50] path
+  @save 0 path [10, 20, 30, 40, 50]
   f <- @open path :: <IO, Err> IFile [Int]
   .[1:4] f                                      -- expect [20, 30, 40]
 
 -- .[i:] open-ended slice (absent upper bound -> a None walk arg).
 testIntTail :: Str -> <IO, Err> [Int]
 testIntTail path = do
-  @save 0 [10, 20, 30, 40, 50] path
+  @save 0 path [10, 20, 30, 40, 50]
   f <- @open path :: <IO, Err> IFile [Int]
   .[3:] f                                       -- expect [40, 50]
 
 -- Field select on a record through the IFile.
 testRecordField :: Str -> <IO, Err> Int
 testRecordField path = do
-  @save 0 (mkPoint 7 9) path
+  @save 0 path (mkPoint 7 9)
   f <- @open path :: <IO, Err> IFile Point
   .y f                                          -- expect 9

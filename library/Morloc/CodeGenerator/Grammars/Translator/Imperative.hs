@@ -1082,7 +1082,10 @@ lowerNativeExpr cfg (IntrinsicN _ _ _ [dataE]) (IntrinsicN_ _ IntrHash (Just sch
   -- ('&(&Vec)'). No-op where 'lcOwnArg' is identity (C++/py/r).
   dataDocs' <- adaptOwnedElem cfg dataE dataDocs
   return $ dataDocs' {poolExpr = lcPrintExpr cfg (IIntrinsicHash sid (IRawExpr (render (poolExpr dataDocs'))))}
-lowerNativeExpr cfg (IntrinsicN _ _ _ [_, dataE, _]) (IntrinsicN_ _ IntrSave (Just schema) [levelDocs, dataDocs, pathDocs]) = do
+-- @save takes source args in (level, path, value) order; path-first
+-- (after the level) mirrors @savem/@savej. The runtime ABI is unchanged:
+-- IIntrinsicSave keeps (level, data, path).
+lowerNativeExpr cfg (IntrinsicN _ _ _ [_, _, dataE]) (IntrinsicN_ _ IntrSave (Just schema) [levelDocs, pathDocs, dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
   -- The saved value crosses into a 'ToVoidstar' (&T) sink; own-adapt it (see
   -- @hash above). level and path are scalar/Str, not value sinks.
@@ -1092,7 +1095,7 @@ lowerNativeExpr cfg (IntrinsicN _ _ _ [_, dataE, _]) (IntrinsicN_ _ IntrSave (Ju
                    (IRawExpr (render (poolExpr levelDocs)))
                    (IRawExpr (render (poolExpr dataDocs')))
                    (IRawExpr (render (poolExpr pathDocs)))
-   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [levelDocs, dataDocs', pathDocs]
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [levelDocs, pathDocs, dataDocs']
 -- @savem/@savej take source args in (path, value) order for
 -- partial-application ergonomics (`@savem path` is a reusable sink).
 -- The runtime ABI is unchanged: IIntrinsicSave keeps (level, data, path).
