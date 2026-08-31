@@ -544,13 +544,19 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     -- mirror that here so intrinsics flow through the same pack/unpack
     -- machinery as ordinary functions instead of feeding the runtime a
     -- user-side struct it cannot serialize.
-    -- Idempotently wrap a NativeExpr in a DoBlockN so it renders as a
-    -- no-arg thunk. Any effect-typed NativeExpr is already thunk-shaped
-    -- via the enclosing DoBlockN-wrap step; a structural pattern-match
-    -- would have to enumerate every pass-through constructor
-    -- (MapOptionalN, CoerceN, ReturnN, ...) and silently misbehave when
-    -- a new one is added, so we dispatch on the type wrapper instead.
+    -- Wrap a NativeExpr in a DoBlockN so it renders as a no-arg thunk;
+    -- both of @catch's arguments reach mlc_catch as thunks it forces at
+    -- most once. An expression is already thunk-shaped in two ways: an
+    -- effect-typed one (which lowered to a DoBlockN upstream and carries
+    -- an EffectF type) and a do-block whose effect row is empty (a
+    -- DoBlockN whose stored type is its plain inner type -- e.g. a pure
+    -- fallback like `do []`). typeFof reports the DoBlockN's inner type,
+    -- so the type check alone misses the second case and re-wraps it into
+    -- DoBlockN (DoBlockN _); mlc_catch's `return fallback()` then yields
+    -- the inner thunk instead of the value. Match DoBlockN structurally
+    -- so both shapes pass through untouched.
     thunkifyForCatch :: NativeExpr -> NativeExpr
+    thunkifyForCatch e@(DoBlockN _ _) = e
     thunkifyForCatch e = case typeFof e of
       EffectF _ _ -> e
       t           -> DoBlockN t e

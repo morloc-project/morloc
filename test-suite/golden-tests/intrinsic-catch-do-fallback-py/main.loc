@@ -1,0 +1,48 @@
+-- Regression: @catch whose FALLBACK is a do-block that carries no
+-- residual effect (an empty-row do-block).
+--
+-- @catch strips the Err row from its fallible; when nothing else
+-- remains the whole expression is plain-typed. A do-block fallback is
+-- already a thunk (a DoBlockN) whose stored type is that plain inner
+-- type, so a thunk-shaping test gated on "type == EffectF" misses it
+-- and wraps it a second time into a thunk-that-returns-a-thunk. The
+-- pool's catch helper does `return fallback()`, which then yields the
+-- inner lambda instead of the value. Unlike C++/Rust (which fail to
+-- compile), a Python pool returns that callable with no error, so the
+-- defect surfaces only at RUNTIME: the returned closure fails to
+-- serialize / prints as the wrong value. A build-only test would pass
+-- while the bug is live -- this variant must be run, not just built.
+--
+-- Cases (each run twice: fallible succeeds -> value passes through and
+-- the fallback is ignored; fallible raises -> the fallback do-block
+-- runs):
+--   catchListDoFb    -- variable-width [Int] return, empty-list do-block
+--   catchListDoFbOpt -- result optional-widened to ?[Int], so the
+--                       fallback do-block sits under a CoerceToOptional
+--   catchLetDoFb     -- multi-statement pure do-block fallback (let .. in ..)
+
+module main
+  ( catchListDoFb
+  , catchListDoFbOpt
+  , catchLetDoFb
+  )
+
+import root
+import root-py
+
+source Py from "helper.py" ("py_maybe_list")
+
+py_maybe_list :: Str -> <Err> [Int]
+
+catchListDoFb :: Str -> <IO> [Int]
+catchListDoFb s = @catch (py_maybe_list s) (do [])
+
+catchListDoFbOpt :: Str -> <IO> ?[Int]
+catchListDoFbOpt s = @catch (py_maybe_list s) (do [])
+
+catchLetDoFb :: Str -> <IO> [Int]
+catchLetDoFb s = @catch
+  (py_maybe_list s)
+  (do let x = 7
+      [x, x]
+  )
