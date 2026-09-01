@@ -608,8 +608,8 @@ loadSnapshot = do
 
 -- | Parse one snapshot line @name hash@ (ignores @#@ comments and blank lines).
 parseSnapshotLine :: Text -> Maybe (Text, Text)
-parseSnapshotLine line =
-  case MT.words (MT.takeWhile (/= '#') line) of
+parseSnapshotLine ln =
+  case MT.words (MT.takeWhile (/= '#') ln) of
     (name : hash : _) -> Just (name, hash)
     _ -> Nothing
 
@@ -1272,20 +1272,13 @@ findEntryPointLocFile dir = do
               " and no main.loc to disambiguate: " <>
               MT.intercalate ", " (map (MT.pack . MS.takeFileName) multiple)
 
--- | Verify the installed module's directory basename matches the
--- declared module name in its entry-point .loc file. Throws IOError on
--- mismatch / missing entry / no-named-module / multiple-named-modules.
--- Caller is responsible for cleanup-on-throw (use within onException).
-validateModuleNameMatchesDir :: FilePath -> IO ()
-validateModuleNameMatchesDir targetDir =
-  validateModuleNameMatches
-    (MT.pack (MS.takeFileName (MS.dropTrailingPathSeparator targetDir)))
-    targetDir
-
--- | Like 'validateModuleNameMatchesDir' but checks the declared module name
--- against an explicitly-supplied expected name rather than the directory's
--- basename -- so the fetched content can be validated in a temp dir (whose
--- basename is @<name>.partial@) before it is swapped into place.
+-- | Verify the installed module's declared module name (in its entry-point
+-- .loc file) matches an explicitly-supplied expected name rather than the
+-- directory's basename -- so the fetched content can be validated in a temp
+-- dir (whose basename is @<name>.partial@) before it is swapped into place.
+-- Throws IOError on mismatch / missing entry / no-named-module /
+-- multiple-named-modules. Caller is responsible for cleanup-on-throw (use
+-- within onException).
 validateModuleNameMatches :: Text -> FilePath -> IO ()
 validateModuleNameMatches dirName dir = do
   entryResult <- findEntryPointLocFile dir

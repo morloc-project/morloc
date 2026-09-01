@@ -235,7 +235,7 @@ walkSelectorBrackets ::
   (MDoc -> MDoc -> MDoc -> MDoc -> MDoc) ->  -- bracket slice: start stop step receiver -> expr
   ([MDoc] -> MDoc) ->                        -- multi-sibling group: results -> expr
   MDoc -> [MDoc] -> Selector -> (MDoc, [MDoc])
-walkSelectorBrackets keyStep idxStep bracketIndex bracketSlice group = go
+walkSelectorBrackets keyStep idxStep bracketIndex bracketSlice groupStep = go
   where
     go rcv brs SelectorEnd = (rcv, brs)
     go rcv brs (SelectorKey (k, sub) []) = go (keyStep rcv k) brs sub
@@ -258,7 +258,7 @@ walkSelectorBrackets keyStep idxStep bracketIndex bracketSlice group = go
     groupWalk steps brs =
       let (results, finalBrs) =
             foldl (\(acc, b) step -> let (out, b') = step b in (acc ++ [out], b')) ([], brs) steps
-       in (group results, finalBrs)
+       in (groupStep results, finalBrs)
 
 -- Represents the dependency of a on previously bound expressions
 data D a = D a [(Int, Either SerialExpr NativeExpr)]

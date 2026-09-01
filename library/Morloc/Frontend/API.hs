@@ -22,7 +22,6 @@ module Morloc.Frontend.API
 
 import qualified Control.Monad.State.Strict as State
 import Data.Functor.Identity (Identity, runIdentity)
-import Data.Maybe (isJust)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -308,7 +307,7 @@ moduleVisibleSigs dag =
     resolve _ node children =
       let visible = Map.union
             (localSigs node)
-            (Map.unions [ applyImport imp exported | (_, imp, (_, exported)) <- children ])
+            (Map.unions [ applyImport imp childExported | (_, imp, (_, childExported)) <- children ])
           exported = case AST.findExport node of
             ExportAll -> visible
             _ ->

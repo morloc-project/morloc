@@ -1758,11 +1758,11 @@ handleFlagsAndPaths srcs = do
       $ [s | s <- srcs, LR.poolOf (stateLangRegistry state) (srcLang s) == cppLang]
 
   home <- MM.asks configHome
-  state <- MM.asks configState
+  stateDir <- MM.asks configState
   let -- Search the runtime include dir (home) and the environment's shared C++
       -- module prefix (state/modules/include), where a user-installed library's
       -- headers live.
-      mlcInclude = ["-I" <> home <> "/include", "-I" <> state <> "/modules/include"]
+      mlcInclude = ["-I" <> home <> "/include", "-I" <> stateDir <> "/modules/include"]
       mlcPch = ["-include", "morloc_pch.hpp"]
       -- No runtime rpath to home/lib: the pool is relocatable and finds
       -- libmorloc via LD_LIBRARY_PATH exported by the nexus at launch, which
@@ -1770,7 +1770,7 @@ handleFlagsAndPaths srcs = do
       -- state/modules/lib search dir covers a user library referenced by a
       -- `-l` from dependencies/cxx-flags; its runtime load is likewise handled
       -- by the nexus LD_LIBRARY_PATH export, not a baked rpath.
-      mlcLib = ["-L" <> home <> "/lib", "-L" <> state <> "/modules/lib", "-lmorloc", "-lcppmorloc", "-lpthread"]
+      mlcLib = ["-L" <> home <> "/lib", "-L" <> stateDir <> "/modules/lib", "-lmorloc", "-lcppmorloc", "-lpthread"]
 
   return
     ( filter (isJust . srcPath) srcs'

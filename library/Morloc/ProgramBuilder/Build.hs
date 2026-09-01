@@ -30,7 +30,7 @@ import qualified Morloc.System as MS
 import qualified System.Directory as SD
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..))
-import System.FilePath (takeDirectory, takeFileName, (</>))
+import System.FilePath (takeDirectory, takeFileName)
 import System.IO.Error (ioeGetFileName)
 import System.Process (CreateProcess (env), callProcess, createProcess, getCurrentPid, proc, waitForProcess)
 
@@ -138,8 +138,8 @@ syncEnvDeps = do
       -- is cached) when the world is already up to date.
       needsSync = declaresDeps || not (null usesLangs)
   case (mEnv, mKey) of
-    (Just env, Just key)
-      | not (null env) && needsSync && not isEval && not isInstall -> do
+    (Just envVal, Just key)
+      | not (null envVal) && needsSync && not isEval && not isInstall -> do
           root <- liftIO $ maybe (return ".") SD.makeAbsolute mRoot
           runSync declaresDeps key root
     _ -> return ()

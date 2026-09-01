@@ -145,10 +145,10 @@ evalSandboxTests =
         runEvalTrusted "module main (x)\nx = @tell" >>= assertRight
     ]
   where
-    assertLeft r = case r of
+    assertLeft res = case res of
       Left _ -> return ()
       Right _ -> assertFailure "expected the sandbox to reject this eval expression"
-    assertRight r = case r of
+    assertRight res = case res of
       Right _ -> return ()
       Left e -> assertFailure ("expected acceptance, got error: " <> show e)
 

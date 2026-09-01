@@ -76,7 +76,6 @@ module Morloc.Namespace.State
   , LangRegistryEntry (..)
   ) where
 
-import Control.Applicative ((<|>))
 import Control.Monad.Except (ExceptT)
 import Control.Monad.Reader (ReaderT)
 import Control.Monad.State (StateT)

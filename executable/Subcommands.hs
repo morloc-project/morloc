@@ -36,7 +36,6 @@ import Morloc.CodeGenerator.Pools.CAbi.Pool (memberFor)
 import Morloc.CodeGenerator.Namespace (SerialManifold (..))
 import qualified Morloc.CodeGenerator.EnvSpec as ES
 import qualified Morloc.CodeGenerator.SystemConfig as MSC
-import Morloc.Internal (unique)
 import qualified Morloc.LangRegistry as LR
 import Morloc.Version (versionStr, envspecVersion, langSupportSchemaVersion)
 import Morloc.Abi (abiVersion)
@@ -449,7 +448,7 @@ cmdConfig args config buildConfig =
   where
     current = fromMaybe Map.empty (buildConfigLangParams buildConfig)
     nonEmpty m = if Map.null m then Nothing else Just m
-    renderEntry (lang, key, val) = T.unpack lang <> ":" <> T.unpack key <> "=" <> T.unpack val
+    renderEntry (lang, key, v) = T.unpack lang <> ":" <> T.unpack key <> "=" <> T.unpack v
     -- Parse each argument, then write the transformed lang-params back. Shared
     -- by set and unset; only the (parse, transform) pair differs.
     withParams parse transform rawArgs =

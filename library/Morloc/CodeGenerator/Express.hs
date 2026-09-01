@@ -334,7 +334,7 @@ addLoopWraps ph@(PolyHead lang midx args body) = do
     -- 'PolyManifold' wrapper so the continue is not stranded in a value
     -- position. Control/effect wrappers (If/Let/DoBlock) are preserved.
     rewriteLoopTail :: Int -> PolyExpr -> PolyExpr
-    rewriteLoopTail mid body = fst (goT body)
+    rewriteLoopTail mid loopBody = fst (goT loopBody)
       where
         -- 'goT' returns the rewritten expression paired with a flag: True when
         -- the rewrite produced a 'PolyLoopContinue' anywhere inside. The flag is

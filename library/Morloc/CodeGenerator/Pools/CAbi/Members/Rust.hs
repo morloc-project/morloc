@@ -30,12 +30,10 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.Rust
   , rustLang
   ) where
 
-import Control.Monad (foldM)
 import Control.Monad.Identity (Identity, runIdentity)
 import Control.Monad.Reader (ReaderT, asks, local, runReaderT)
 import qualified Control.Monad.State.Strict as CMS
 import Data.Function (on)
-import Data.List (nubBy)
 import Data.Ord (comparing)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -1596,7 +1594,7 @@ isFunctionTypeF t = case stripEffectF t of
 -- locals and adapts a borrowed/place RHS via 'adaptOwnedElem' upstream.
 rustMakeLet :: (Int -> MDoc) -> Int -> Maybe TypeF -> Bool -> PoolDocs -> PoolDocs -> RustM PoolDocs
 rustMakeLet namer letIndex mt _ p1 p2 = do
-  ann <- case mt of
+  annDoc <- case mt of
     Just t | isFunctionTypeF t -> return ""
     Just t -> do ts <- rustTypeOf t; return (":" <+> ts)
     Nothing -> return (":" <+> "*mut u8")
@@ -1604,7 +1602,7 @@ rustMakeLet namer letIndex mt _ p1 p2 = do
   -- the loop's continue, so it must bind mutably.
   carried <- asks oeLoopCarried
   let letKw = if Set.member letIndex carried then "let mut" else "let"
-      letLine = letKw <+> namer letIndex <> ann <+> "=" <+> poolExpr p1 <> ";"
+      letLine = letKw <+> namer letIndex <> annDoc <+> "=" <+> poolExpr p1 <> ";"
       rs = poolPriorLines p1 <> [letLine] <> poolPriorLines p2
   return $
     PoolDocs
