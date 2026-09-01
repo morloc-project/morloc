@@ -160,6 +160,7 @@ main = do
       , golden "intrinsic-catch-cpp" "intrinsic-catch-cpp"
       , golden "intrinsic-catch-do-fallback-cpp" "intrinsic-catch-do-fallback-cpp"
       , golden "intrinsic-catch-do-fallback-py" "intrinsic-catch-do-fallback-py"
+      , golden "intrinsic-catch-do-fallback-rust" "intrinsic-catch-do-fallback-rust"
       , golden "intrinsic-catch-py" "intrinsic-catch-py"
       , golden "intrinsic-catch-r" "intrinsic-catch-r"
       , golden "intrinsic-catch-rejects-non-err" "intrinsic-catch-rejects-non-err"

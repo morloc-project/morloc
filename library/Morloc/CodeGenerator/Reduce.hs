@@ -133,13 +133,25 @@ reduceNativeExpr ver ts lang (EvalN _ (IfN _ c (DoBlockN t1 th) (DoBlockN t2 el)
       th' <- reduceNativeExpr ver ts lang th
       el' <- reduceNativeExpr ver ts lang el
       return $ IfN (stripEffectF (typeFof th')) c' th' el'
--- EvalN . DoBlockN = id (cancels the outermost thunk when a value is
--- forced immediately after being wrapped). Skipped for Unit-typed
--- DoBlockN for the same reason as the ?/: peephole above.
-reduceNativeExpr ver ts lang (EvalN _ (DoBlockN t x))
-  | not (isDoBlockUnit t) =
-      reduceNativeExpr ver ts lang x
-reduceNativeExpr ver ts lang (EvalN t ne) = EvalN t <$> reduceNativeExpr ver ts lang ne
+-- Generalized `EvalN . DoBlockN = id`, robust to a CoerceToOptional wedged
+-- between the force and the thunk. This is the optional-widened `@catch` shape:
+-- `@catch` collapses to a plain-typed value and the `<E>`+`?` migrate onto a
+-- CoerceN, so a naive `EvalN (DoBlockN ..)` match misses it and a spurious
+-- `mlc_catch(..)()` is emitted on a value. Peel the transparent coerce stack to
+-- the head, then:
+--   * DoBlockN head      -> commute the force inside and cancel (rebuild coerces)
+--   * provably-plain head -> the force is spurious: drop it, keep the coerces so
+--                            `?T` widening (incl. Rust `Some(..)`) survives
+--   * anything else       -> KEEP the force (fail-closed: never silently drop a
+--                            force that might be load-bearing).
+-- Unit-typed DoBlockN is still skipped (C++ `void` return; see the ?/: peephole).
+reduceNativeExpr ver ts lang (EvalN et wrapped) =
+  case peelCoerce wrapped of
+    (rebuild, DoBlockN t x)
+      | not (isDoBlockUnit t) -> rebuild <$> reduceNativeExpr ver ts lang x
+    (rebuild, inner)
+      | isProvablyPlain inner -> rebuild <$> reduceNativeExpr ver ts lang inner
+    _ -> EvalN et <$> reduceNativeExpr ver ts lang wrapped
 reduceNativeExpr ver ts lang (CoerceN c t ne) = CoerceN c t <$> reduceNativeExpr ver ts lang ne
 reduceNativeExpr ver ts lang (IfN t c th el) =
   IfN t <$> reduceNativeExpr ver ts lang c <*> reduceNativeExpr ver ts lang th <*> reduceNativeExpr ver ts lang el
@@ -162,6 +174,35 @@ isDoBlockUnit :: TypeF -> Bool
 isDoBlockUnit t = case stripEffectF t of
   VarF (FV tv _) -> tv == TV "Unit"
   _ -> False
+
+-- | Peel a stack of CoerceN wrappers, returning a function that rebuilds them
+-- around a now-EAGER value plus the innermost (head) node. The rebuilt coerces
+-- are effect-stripped: the rebuild is applied only where the enclosing force is
+-- dropped, so the value is eager and a leftover `EffectF` outer type would make
+-- the pool declare a thunk (std::function) for a bare value -- the same hazard
+-- the sibling ?/: peephole avoids via `stripEffectF` (see above). Only CoerceN
+-- is peeled: its non-child fields are not reducible, so rebuilding is otherwise
+-- sound. Any other node is treated as an opaque head (fail-closed).
+peelCoerce :: NativeExpr -> (NativeExpr -> NativeExpr, NativeExpr)
+peelCoerce (CoerceN c t x) =
+  let (f, h) = peelCoerce x in (CoerceN c (stripEffectF t) . f, h)
+peelCoerce e = (id, e)
+
+-- | Nodes that are definitely values (never a suspended thunk), so a force
+-- landing on one is spurious and may be dropped. Deliberately conservative:
+-- anything not listed here stays opaque and KEEPS its force (fail-closed), so a
+-- real thunk is never mistaken for a value and dropped.
+isProvablyPlain :: NativeExpr -> Bool
+isProvablyPlain IntN{}    = True
+isProvablyPlain RealN{}   = True
+isProvablyPlain StrN{}    = True
+isProvablyPlain LogN{}    = True
+isProvablyPlain NullN{}   = True
+isProvablyPlain ListN{}   = True
+isProvablyPlain TupleN{}  = True
+isProvablyPlain RecordN{} = True
+isProvablyPlain (IntrinsicN t _ _ _) = not (isEffectF t)
+isProvablyPlain _ = False
 
 makeStr :: TypeF -> Text -> NativeExpr
 makeStr (VarF fv) x = StrN fv x
