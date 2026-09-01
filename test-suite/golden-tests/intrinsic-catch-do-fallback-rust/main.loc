@@ -3,12 +3,12 @@
 -- @catch strips the Err row from its fallible; when the residual row is empty
 -- the whole expression is plain-typed and (for catchListDoFbOpt) sits under a
 -- CoerceToOptional. The native Reduce peephole must cancel the spurious force
--- THROUGH that coerce; otherwise Rust's `lcCoerceOptional = Some(..)` emits
--- `Some(thunk)()`, which fails to build. The decisive case is
--- `catchListDoFbOpt ""` -> [] with exit:0.
+-- THROUGH that coerce; and Rust's `lcCoerceOptional = Some(..)` must wrap the
+-- eager value, not a thunk. The decisive case is `catchListDoFbOpt ""` -> []
+-- with exit:0.
 --
--- Mirrors intrinsic-catch-do-fallback-{cpp,py}. The fallible is a Rust-realized
--- <Err> manifold that @throws on empty input, else returns [len].
+-- Parallel to intrinsic-catch-do-fallback-{cpp,py}: the fallible is a Rust
+-- source function that natively raises (a MorlocThrow panic caught by @catch).
 
 module main
   ( catchListDoFb
@@ -20,26 +20,19 @@ import root
 
 type Rust => Int = "i64"
 type Rust => Str = "String"
-type Rust => Bool = "bool"
 type Rust => (List a) = "Vec<$1>" a
 
-source Rust from "helper.rs" ("rust_len" as rustLen, "rust_empty" as rustEmpty)
+source Rust from "helper.rs" ("rust_maybe_list")
 
-rustLen :: Str -> Int
-rustEmpty :: Str -> Bool
-
-maybeList :: Str -> <Err> [Int]
-maybeList s =
-  ? rustEmpty s = @throw "maybeList: empty input"
-  : [rustLen s]
+rust_maybe_list :: Str -> <Err> [Int]
 
 catchListDoFb :: Str -> <IO> [Int]
-catchListDoFb s = @catch (maybeList s) (do [])
+catchListDoFb s = @catch (rust_maybe_list s) (do [])
 
 catchListDoFbOpt :: Str -> <IO> ?[Int]
-catchListDoFbOpt s = @catch (maybeList s) (do [])
+catchListDoFbOpt s = @catch (rust_maybe_list s) (do [])
 
 catchLetDoFb :: Str -> <IO> [Int]
-catchLetDoFb s = @catch (maybeList s) (do
+catchLetDoFb s = @catch (rust_maybe_list s) (do
     let x = 7
     [x, x])

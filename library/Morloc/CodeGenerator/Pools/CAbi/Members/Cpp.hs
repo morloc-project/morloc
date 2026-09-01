@@ -717,7 +717,16 @@ cppLowerConfig reifyThunks =
     , lcArgManifoldOwnership = \_ -> return Owned
     , lcOwnArg = \_ _ x -> x
     , lcWithCallerScope = id
-    , lcCoerceOptional = id
+    -- `?T` is `std::optional<T>` at every value position where sizeof(T) is
+    -- known (cppmorloc.hpp), which is exactly where a value-level
+    -- CoerceToOptional lands (record fields use `wrap_field`, not this). The
+    -- coerced value must therefore BE a std::optional, not just implicitly
+    -- convertible to one: the msgpack-leaf serialize path passes the value
+    -- straight to `to_voidstar<T>`, whose T is template-deduced from the
+    -- expression, so a bare `T` would serialize against a `?`-schema without the
+    -- optional layer (a compound inner then hits "compound schema reached a
+    -- scalar-sized type" at runtime). `make_optional` deduces T from the value.
+    , lcCoerceOptional = \x -> "std::make_optional(" <> x <> ")"
     , lcTypeOf = \t -> Just . toIType <$> cppTypeOf t
     , lcSerialAstType = serializeTypeOf
     , lcDeserialAstType = \s -> Just . toIType <$> cppTypeOf (shallowType s)
