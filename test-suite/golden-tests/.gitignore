@@ -18,3 +18,4 @@ nexus
 pool.*
 make.log
 *_paths.txt
+runs/

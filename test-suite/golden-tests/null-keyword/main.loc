@@ -7,7 +7,7 @@ import root-r
 safeHead :: [a] -> ?a
 safeHead xs
   ? length xs == 0 = Null
-  : head xs
+  : .[0] xs
 
 source Py from "main.py" ("fromNull")
 source R from "main.R" ("fromNull")

@@ -1,0 +1,4 @@
+SLURM support is experimental. This test additionally requires an Apptainer
+environment named e2e-slurm that must be provisioned by hand (see the header
+comment in the Makefile); without it the run fails with "Environment not
+found: e2e-slurm".

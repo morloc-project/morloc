@@ -1,16 +1,16 @@
 module main (test_a, test_b)
 
-import ops-a ((&) as (&~))
+import ops-a ((&~))
 import ops-b ((&))
 
 type Py => Int = "int"
 
--- Test operator from ops-a with its fixity (infixl 5 &)
--- 2 &~ 3 &~ 4 should be (2 & 3) & 4 = 14 (left-associative)
+-- ops-a's (&~) is infixl 5 and adds 10: left-associative
+-- 2 &~ 3 &~ 4 = (2 &~ 3) &~ 4 = 15 &~ 4 = 29
 test_a :: Int
 test_a = 2 &~ 3 &~ 4
 
--- Test operator from ops-b with its fixity (infixr 7 &)
--- 2 & 3 & 4 should be 2 & (3 & 4) = 18 (right-associative)
+-- ops-b's (&) is infixr 7 and adds 100: right-associative
+-- 2 & 3 & 4 = 2 & (3 & 4) = 2 & 107 = 209
 test_b :: Int
 test_b = 2 & 3 & 4
