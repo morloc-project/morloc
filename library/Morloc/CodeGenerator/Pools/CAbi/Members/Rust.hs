@@ -304,6 +304,19 @@ rustReturnType (Native t) = case typeFof t of
     return $ "impl Fn() ->" <+> innerT
   tf -> rustTypeOf tf
 
+-- | Whether a manifold's return type renders as an opaque @impl Fn@ closure:
+-- a deferred effect (a nullary thunk) or a function value. Such a closure is
+-- built with @move@ over the manifold's parameters, so when any parameter is
+-- borrowed the opaque type must name that lifetime or rustc rejects it (E0700,
+-- "hidden type captures lifetime that does not appear in bounds").
+rustReturnIsClosure :: TypeM -> Bool
+rustReturnIsClosure (Function _ o) = rustReturnIsClosure o
+rustReturnIsClosure (Native t) = case typeFof t of
+  EffectF _ _ -> True
+  FunF _ _ -> True
+  _ -> False
+rustReturnIsClosure _ = False
+
 -- | The Rust type of a record field. A function-typed field is stored as a fat
 -- trait object @Rc<dyn MorlocFnN<A1,..,An,R>>@ -- a bare @impl Fn@ is illegal in
 -- a field, and the trait object carries the reify capability a crossing closure
@@ -342,21 +355,34 @@ rustDivertsClosure (SerialOptional _ s) = rustDivertsClosure s
 rustDivertsClosure (SerialPack _ (_, s)) = rustDivertsClosure s
 rustDivertsClosure _ = False
 
+-- | Whether a manifold parameter is passed as a shared reference. Mirrors the
+-- by-reference cases in 'rustArgOfWith'; a manifold that returns a closure and
+-- has any such parameter must carry an explicit lifetime.
+rustArgIsRef :: TypeM -> Bool
+rustArgIsRef (Native tf) = not (rustIsCopy tf)
+rustArgIsRef (Function _ _) = True
+rustArgIsRef _ = False
+
 rustArgOf :: Arg TypeM -> RustM MDoc
-rustArgOf a@(Arg _ t) = do
+rustArgOf = rustArgOfWith Nothing
+
+-- | As 'rustArgOf', but stamping the given lifetime onto every by-reference
+-- parameter. The lifetime is supplied when the manifold returns a closure that
+-- may capture those references.
+rustArgOfWith :: Maybe MDoc -> Arg TypeM -> RustM MDoc
+rustArgOfWith lifetime a@(Arg _ t) = do
   ts <- rustArgType t
   -- Idiomatic asymmetric passing: a Copy scalar parameter is by value (`i64`);
   -- a non-Copy parameter (Str/Vec/record) is a shared reference (`&T`). Both
   -- are `Copy` at the manifold-param level (`&T` is Copy), so a value fans out
   -- to several callees with no move. Serial/passthrough args are Copy pointers.
-  let ts' = case t of
-        Native tf | not (rustIsCopy tf) -> "&" <> ts
-        -- A captured function value is taken by reference (`&(impl Fn..)`): a
-        -- `&F` still implements `Fn`, so the manifold stays re-callable across a
-        -- HOF's per-element calls, whereas a by-value `impl Fn` would move out of
-        -- the enclosing `move` closure on the first call.
-        Function _ _ -> "&" <> ts
-        _ -> ts
+  --
+  -- A captured function value is likewise taken by reference (`&(impl Fn..)`):
+  -- a `&F` still implements `Fn`, so the manifold stays re-callable across a
+  -- HOF's per-element calls, whereas a by-value `impl Fn` would move out of the
+  -- enclosing `move` closure on the first call.
+  let ref = "&" <> maybe mempty (<> " ") lifetime
+      ts' = if rustArgIsRef t then ref <> ts else ts
   return $ argNamer a <> ":" <+> ts'
 
 -- | Adapt a higher-order-function closure's by-reference argument to a
@@ -1713,10 +1739,18 @@ rustMakeFunction callIndex mname args manifoldType priorLines body headForm = do
         if isRemote
           then s {rsRemoteSet = Set.insert callIndex (rsRemoteSet s)}
           else s {rsLocalSet = Set.insert callIndex (rsLocalSet s)}
-      retStr <- rustReturnType manifoldType
-      typedArgs <- mapM rustArgOf args
+      -- A returned closure captures the manifold's parameters by `move`. When
+      -- any parameter is borrowed, the opaque `impl Fn` return type has to name
+      -- that lifetime; one shared lifetime over every reference parameter is
+      -- both sufficient and the only form that works for more than one.
+      let borrows = rustReturnIsClosure manifoldType && any (\(Arg _ t) -> rustArgIsRef t) args
+          lifetime = if borrows then Just "'a" else Nothing
+      retStr0 <- rustReturnType manifoldType
+      typedArgs <- mapM (rustArgOfWith lifetime) args
       let fullName = mname <> if isRemote then "_remote" else ""
-          decl = "unsafe fn" <+> fullName <> tupled typedArgs <+> "->" <+> retStr
+          ltParams = if borrows then "<'a>" else mempty
+          retStr = if borrows then retStr0 <+> "+ 'a" else retStr0
+          decl = "unsafe fn" <+> fullName <> ltParams <> tupled typedArgs <+> "->" <+> retStr
           -- Per-manifold traceback frame: on a panic unwind the FrameGuard
           -- appends this line to the thread-local trace, which dispatch_guard
           -- folds onto the throw message (mirrors the C++ member's frame).

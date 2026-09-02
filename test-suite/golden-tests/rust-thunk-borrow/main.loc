@@ -1,0 +1,51 @@
+-- A Rust manifold that returns a deferred effect renders as a nullary thunk
+-- (`impl Fn() -> T`) built with `move` over the manifold's parameters. Non-Copy
+-- parameters are passed by shared reference, so such a thunk captures a borrow
+-- and the opaque return type has to name that lifetime.
+--
+-- The cases below span the parameter shapes that decide whether a lifetime is
+-- emitted and where it lands: one borrow, two borrows sharing a lifetime, a
+-- borrow beside a Copy scalar, no borrow at all, and a borrowed container.
+-- Each is exercised on both the success and the @catch-fallback path.
+
+module main (oneRef, twoRefs, mixed, copyOnly, listRef)
+
+import root
+
+type Rust => Int = "i64"
+type Rust => Str = "String"
+type Rust => (List a) = "Vec<$1>" a
+
+source Rust from "helper.rs"
+  ( "from_str"
+  , "from_two"
+  , "from_mixed"
+  , "from_copy"
+  , "from_list"
+  )
+
+from_str :: Str -> <Err> [Int]
+from_two :: Str -> [Int] -> <Err> [Int]
+from_mixed :: Int -> Str -> <Err> [Int]
+from_copy :: Int -> <Err> [Int]
+from_list :: [Int] -> <Err> [Int]
+
+-- one borrowed parameter
+oneRef :: Str -> <IO> [Int]
+oneRef s = @catch (from_str s) (do [])
+
+-- two borrowed parameters, which must share one lifetime
+twoRefs :: Str -> [Int] -> <IO> [Int]
+twoRefs s v = @catch (from_two s v) (do [])
+
+-- a Copy scalar beside a borrow: only the borrow carries the lifetime
+mixed :: Int -> Str -> <IO> [Int]
+mixed n s = @catch (from_mixed n s) (do [])
+
+-- no borrowed parameter, so no lifetime is introduced
+copyOnly :: Int -> <IO> [Int]
+copyOnly n = @catch (from_copy n) (do [])
+
+-- a borrowed container rather than a borrowed scalar wrapper
+listRef :: [Int] -> <IO> [Int]
+listRef v = @catch (from_list v) (do [])
