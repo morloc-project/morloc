@@ -1,0 +1,15 @@
+module main (out)
+
+import root-r
+
+source R from "helper.R" ("identity" as rId)
+rId :: P -> P
+
+record P = P { a :: Str }
+record R => P = "list"
+
+p :: P
+p = {a = "ab\0cd"}
+
+out :: P
+out = rId p

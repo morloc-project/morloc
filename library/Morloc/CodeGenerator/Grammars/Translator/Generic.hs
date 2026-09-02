@@ -1179,27 +1179,24 @@ genericPrintExpr desc = go
 
     schemaRef = genericSchemaRef desc
 
-    -- Languages that opt out of NUL-in-Str (allow_string_null = false)
-    -- cannot represent a `\0` inside a source-level string literal: R
-    -- refuses to parse `"\000"` at all, and the pool would die before
-    -- any runtime guard can fire. Catch the situation at codegen time
-    -- and emit a clear compile error. Runtime-borne NUL strings
-    -- (arriving via FFI from another pool or the nexus) are caught
-    -- separately by the runtime null_check.
+    -- Backstop for a NUL reaching a pool that cannot represent one.
+    --
+    -- User-written literals are rejected upstream, in Express, where the
+    -- literal still has a source position and the message can name the file
+    -- and line. Reaching here therefore means a NUL was introduced by the
+    -- compiler itself after that check -- an invariant violation, not a
+    -- mistake in the user's program -- so this aborts as a bug rather than
+    -- pretending to diagnose the source.
     checkNul :: Text -> ()
     checkNul s
       | ldAllowStringNull desc = ()
       | T.any (== '\0') s =
           error $
-            "Embedded NUL byte in a Str literal destined for the "
+            "morloc bug: a NUL byte reached the "
               ++ show (ldName desc)
-              ++ " pool. The "
-              ++ show (ldName desc)
-              ++ " language cannot represent NUL bytes in its native "
-              ++ "string type. Move the literal to a language that "
-              ++ "supports it (Python, C++, Julia, or the nexus itself), "
-              ++ "or remove the NUL byte. (See lang.yaml's "
-              ++ "allow_string_null field.)"
+              ++ " printer in a Str literal. User-written literals are"
+              ++ " rejected in Express.checkStringNul, so this one was"
+              ++ " synthesized after that check."
       | otherwise = ()
 
 -- | Generic statement printer driven by descriptor

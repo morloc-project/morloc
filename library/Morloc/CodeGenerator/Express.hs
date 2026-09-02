@@ -35,6 +35,9 @@ import Morloc.CodeGenerator.IFile
   , bracketSliceSteps
   )
 import Morloc.CodeGenerator.Infer
+import Morloc.CodeGenerator.LanguageDescriptor (ldAllowStringNull, loadLangDescriptorFromText)
+import qualified Morloc.DataFiles as DF
+import qualified Morloc.Language as ML
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
@@ -1328,6 +1331,47 @@ dispatchListLit midx cidx lang userT userTV userArgs xs' = do
 -- wire form's. @mkLit@ builds the natural literal given the TVar at
 -- which it should be tagged (user's TVar when emitting naturally,
 -- wire-form's TVar when emitting inside a wrap).
+-- | Reject a NUL byte in a string literal bound for a language that cannot
+-- represent one.
+--
+-- R refuses to parse a source-level @"\000"@ at all, so the generated pool
+-- would die before any runtime guard could fire; the failure has to be caught
+-- while the literal still has a source position. That position is why the
+-- check lives here rather than in the pool printer, which is pure and can only
+-- abort with a call stack naming the compiler instead of the program.
+--
+-- The scan runs before the descriptor is consulted so that a program with no
+-- NUL-bearing literal -- which is nearly all of them -- pays one 'T.any' per
+-- literal and never reads a descriptor.
+checkStringNul :: Int -> Lang -> Text -> MorlocMonad ()
+checkStringNul idx lang s
+  | not (T.any (== '\0') s) = return ()
+  | langAllowsStringNul lang = return ()
+  | otherwise =
+      MM.throwSourcedError idx $
+        "This string literal contains a NUL byte, which the"
+        <+> pretty (ML.langName lang)
+        <+> "pool cannot represent in its native string type."
+        <+> "Move the literal to a language that can (Python, C++, Julia, or the"
+        <+> "nexus itself), or remove the NUL byte."
+        <+> "See the allow_string_null field in the language's lang.yaml."
+
+-- | Whether a language's native string type admits an embedded NUL, read from
+-- the embedded lang.yaml registry. A language with no descriptor, or one whose
+-- descriptor does not parse, is treated as permissive -- the same default the
+-- descriptor itself carries, so an unreadable descriptor cannot turn into a
+-- spurious rejection of the user's program.
+langAllowsStringNul :: Lang -> Bool
+langAllowsStringNul lang =
+  case lookup (T.unpack (ML.langName lang)) embeddedRegistry of
+    Just yamlText -> case loadLangDescriptorFromText yamlText of
+      Right desc -> ldAllowStringNull desc
+      Left _ -> True
+    Nothing -> True
+  where
+    embeddedRegistry =
+      [(n, DF.embededFileText ef) | (n, ef) <- DF.langRegistryFiles]
+
 dispatchPrimLit ::
   Int ->                  -- midx
   Lang ->
@@ -1721,7 +1765,8 @@ expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (IntS _ x)
   dispatchPrimLit midx lang t v (\tv -> PolyInt (Idx cidx tv) x)
 expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (LogS x)) =
   dispatchPrimLit midx lang t v (\tv -> PolyLog (Idx cidx tv) x)
-expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (StrS x)) =
+expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (StrS x)) = do
+  checkStringNul midx lang x
   dispatchPrimLit midx lang t v (\tv -> PolyStr (Idx cidx tv) x)
 expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) UniS) =
   dispatchPrimLit midx lang t v (\tv -> PolyNull (Idx cidx (VarT tv)))
