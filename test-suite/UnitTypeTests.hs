@@ -16,7 +16,6 @@ module UnitTypeTests
   , typeAliasTests
   , numericLiteralAliasTests
   , pendingNumLitTests
-  , packerTests
   , whereTests
   , orderInvarianceTests
   , whitespaceTests
@@ -625,13 +624,6 @@ module main (z)
       |]
           int
       ]
-
-packerTests :: TestTree
-packerTests =
-  localOption (mkTimeout 1000000) $ -- 1 second timeout
-    testGroup
-      "Test building of packer maps"
-      [testEqual "packer test" (1 :: Int) 1]
 
 typeAliasTests :: TestTree
 typeAliasTests =

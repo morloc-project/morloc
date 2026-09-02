@@ -24,3 +24,4 @@ all:
 
 clean:
 	rm -rf nexus pools cache *.err obs.run.*.out
+	rm -rf *-build *build.tmp*

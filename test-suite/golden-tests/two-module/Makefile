@@ -7,3 +7,4 @@ all:
 
 clean:
 	rm -rf tavern combat pools __pycache__ *.manifest
+	rm -rf *-build *build.tmp*

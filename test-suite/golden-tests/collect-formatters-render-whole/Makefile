@@ -18,4 +18,5 @@ all:
 	fi
 
 clean:
-	rm -rf nexus-cpp pools __pycache__ *.err obs.txt
+	rm -rf nexus-cpp pools __pycache__ *.err
+	rm -rf *-build *build.tmp*

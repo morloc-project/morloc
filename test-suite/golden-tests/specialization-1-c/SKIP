@@ -1,0 +1,3 @@
+Passes locally and in the same container the GitHub Actions job uses, but
+freezes in an infinite loop with no stderr output on GitHub. Cause unknown.
+Run it locally during a dev cycle so it is tested somewhere.

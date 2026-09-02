@@ -7,3 +7,4 @@ all:
 
 clean:
 	rm -rf nexus pools __pycache__ *.err effRec.stderr
+	rm -rf *-build *build.tmp*

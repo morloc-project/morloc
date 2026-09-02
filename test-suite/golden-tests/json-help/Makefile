@@ -12,3 +12,4 @@ all:
 
 clean:
 	rm -rf main main.manifest pools __pycache__ obs.err build.err
+	rm -rf *-build *build.tmp*

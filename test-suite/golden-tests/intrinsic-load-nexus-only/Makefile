@@ -26,3 +26,4 @@ all:
 clean:
 	rm -rf nexus pools __pycache__ *.err
 	rm -f /tmp/load-nexus-only-*.dat
+	rm -rf *-build *build.tmp*

@@ -5,3 +5,4 @@ all:
 
 clean:
 	rm -rf nexus pools *pdf __pycache__ main
+	rm -rf *-build *build.tmp*

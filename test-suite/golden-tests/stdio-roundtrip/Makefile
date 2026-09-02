@@ -14,3 +14,4 @@ all:
 
 clean:
 	rm -rf nexus pools *.err *.stream
+	rm -rf *-build *build.tmp*

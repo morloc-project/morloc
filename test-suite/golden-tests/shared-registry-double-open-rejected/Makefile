@@ -11,3 +11,4 @@ all:
 clean:
 	rm -rf nexus pools __pycache__ *.err
 	rm -f /tmp/shared-registry-double-*.dat
+	rm -rf *-build *build.tmp*

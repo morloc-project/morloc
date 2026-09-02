@@ -13,3 +13,4 @@ all:
 
 clean:
 	rm -rf nexus pools *err __pycache__ input.csv input.parquet input.arrow
+	rm -rf *-build *build.tmp*

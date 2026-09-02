@@ -45,3 +45,4 @@ all:
 
 clean:
 	rm -rf nexus pools logs_int logs_real logs_list logs_tup obs.*.err build.err
+	rm -rf *-build *build.tmp*

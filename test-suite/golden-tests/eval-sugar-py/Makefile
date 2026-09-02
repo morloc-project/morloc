@@ -21,3 +21,4 @@ all:
 
 clean:
 	rm -rf nexus pools *.err __pycache__ /tmp/eval_sugar_log.txt
+	rm -rf *-build *build.tmp*

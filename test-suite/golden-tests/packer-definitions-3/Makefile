@@ -6,3 +6,4 @@ all:
 .PHONY: clean
 clean:
 	rm -rf nexus pools *pdf *rda __pycache__
+	rm -rf *-build *build.tmp*

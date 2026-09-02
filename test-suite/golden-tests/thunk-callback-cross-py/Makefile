@@ -17,3 +17,4 @@ all:
 
 clean:
 	rm -rf nexus pools log __pycache__ tap_log.txt
+	rm -rf *-build *build.tmp*

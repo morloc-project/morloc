@@ -34,3 +34,4 @@ all:
 
 clean:
 	rm -rf nexus pools z* __pycache__
+	rm -rf *-build *build.tmp*

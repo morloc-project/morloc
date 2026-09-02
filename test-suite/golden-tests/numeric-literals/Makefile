@@ -14,3 +14,4 @@ all:
 
 clean:
 	rm -rf nexus bad_hex bad_oct bad_bin pools
+	rm -rf *-build *build.tmp*

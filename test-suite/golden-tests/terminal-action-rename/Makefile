@@ -23,3 +23,4 @@ all:
 
 clean:
 	rm -rf nexus pools __pycache__ *.err entries.tsv
+	rm -rf *-build *build.tmp*

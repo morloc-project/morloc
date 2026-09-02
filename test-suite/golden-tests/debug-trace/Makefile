@@ -55,3 +55,4 @@ test_lang:
 clean:
 	rm -rf nexus_debug nexus_plain pools logs_dbg* logs_ok* logs_nodbg \
 	  obs.*.err build_debug.err build_plain.err build.err
+	rm -rf *-build *build.tmp*

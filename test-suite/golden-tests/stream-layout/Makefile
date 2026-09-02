@@ -32,3 +32,4 @@ all:
 clean:
 	rm -rf nexus bad_ostream bad_nonlist pools __pycache__ *.err
 	rm -f /tmp/stream-layout-*.dat
+	rm -rf *-build *build.tmp*

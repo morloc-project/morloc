@@ -5,4 +5,5 @@ all:
 	./nexus reverseChain 25 2>> obs.err  >> obs.txt
 
 clean:
-	rm -rf nexus poolsgc
+	rm -rf nexus pools
+	rm -rf *-build *build.tmp*

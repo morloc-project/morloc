@@ -6,3 +6,4 @@ all:
 
 clean:
 	rm -rf nexus pools *.err effRec.stderr
+	rm -rf *-build *build.tmp*

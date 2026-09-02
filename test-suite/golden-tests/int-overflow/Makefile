@@ -217,3 +217,4 @@ all:
 
 clean:
 	rm -rf nexus nexus_bad pools *err __pycache__
+	rm -rf *-build *build.tmp*

@@ -24,3 +24,4 @@ all:
 
 clean:
 	rm -f g1a.err g1b.err g1c.err g2a.err g2b.err
+	rm -rf *-build *build.tmp*

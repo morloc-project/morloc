@@ -153,3 +153,4 @@ clean:
 	rm -f flat.packet records.packet nested.packet flat.stream records.stream
 	rm -f flat_slice.packet flat_stream_slice.packet flat_stream_slice_redir.packet
 	rm -f flat_slice_fpkt.packet flat_scalar.packet flat_slice_z.packet records_slice.packet
+	rm -rf *-build *build.tmp*

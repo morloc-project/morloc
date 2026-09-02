@@ -43,4 +43,5 @@ all:
 	rm -f 42 null
 
 clean:
-	rm -rf main main.manifest pools __pycache__ obs.txt obs.err build.err 42 null
+	rm -rf main main.manifest pools __pycache__ obs.err build.err 42 null
+	rm -rf *-build *build.tmp*

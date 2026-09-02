@@ -16,3 +16,5 @@ nexus
 *-build/
 *build.tmp*/
 pool.*
+make.log
+*_paths.txt

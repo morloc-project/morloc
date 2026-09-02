@@ -21,3 +21,4 @@ all:
 clean:
 	rm -rf nexus pools __pycache__ *.err
 	rm -f /tmp/save-compressed-*.packet
+	rm -rf *-build *build.tmp*

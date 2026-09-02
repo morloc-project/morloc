@@ -9,9 +9,9 @@ across Python, C++, and R under a unified type system.
 
 ## General Rules
 
-- Errors are ALWAYS serious
-- Do not ignore an error because it is pre-existing
-- If an unexpected error is found, stop and describe it
+See @../../../CONVENTIONS.md for the workspace-wide rules (git, bug reporting,
+correctness, test-first, comments, ASCII-only). Repo-specific rules follow.
+
 - Performance is critical
   - Morloc programs may run for days or nanoseconds
   - All between process communication must be as fast as possible (no more than
@@ -33,9 +33,14 @@ If you make any change to the non-haskell code in data/, then you MUST run
 `morloc init -f`. This will rebuild shared libraries, the nexus executable, and
 language bindings.
 
+After changing anything under `data/rust/`, run:
+
+$ cargo test --workspace --manifest-path data/rust/Cargo.toml
+
 - Stack test runs unit tests and golden-tests
 - Golden-tests are full morloc programs
   - Each golden test is in the path @test-suite/golden-tests/<testname>
+  - Every directory there is discovered and run; nothing needs registering
   - These tests produce build errors in `build.err` and runtime errors in
     `obs.err`. These outputs are VITAL to debugging errors.
 
@@ -43,20 +48,17 @@ If the required morloc libraries may have changed, you may run:
 
 $ morloc install --force <remote-model-name>
 
-## Other rules
-
-Never ignore errors
-
-## Git Rules
-
-- DO NOT commit code
-- DO NOT use any destructive git commit
-- DO USE for `git log` and `git diff` variants
-
 ## Haskell Coding Style
-- comments should be sparse and succinct
 - comments should explain complex code and a rationale
 - avoid non-total functions when possible
+- an unused pattern binding becomes bare `_`, never `_oldname`; if it is truly
+  unused, drop the name rather than leaving it visible
+
+## ChangeLog
+
+Do not edit `ChangeLog.md`, here or in any other repo, unless asked. Release
+note wording and grouping are written by hand. When a change would normally
+merit an entry, skip it and say so in the summary.
 
 ## Testing Conventions
 - tests should be written for all new features
@@ -78,8 +80,7 @@ stack test --test-arguments="--pattern='native-morloc'"
 
 ## Code Style
 
-- Haskell (GHC 9.6.6, LTS 22.44)
+- Haskell (GHC 9.6.7, LTS 22.44)
 - Build tool: Stack
 - Module naming: `Morloc.CodeGenerator.Generate`
 - Morloc syntax: Functional, ML-style
-- **ASCII only** in all source files (C, C++, Haskell, Python, R, templates). No Unicode characters (em-dashes, smart quotes, etc). Non-ASCII in Template Haskell-embedded files causes silent truncation under POSIX locale.

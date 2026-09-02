@@ -1132,21 +1132,22 @@ fn write_float(w: &mut dyn Write, f: f64, fmt: &[u8]) -> Result<(), MorlocError>
 mod tests {
     use super::*;
     use crate::schema::parse_schema;
-    fn setup() { crate::init_test_shm(); }
+    #[must_use]
+    fn setup() -> std::sync::RwLockReadGuard<'static, ()> { crate::init_test_shm() }
 
-    #[test] fn test_int()     { setup(); let s = parse_schema("i4").unwrap(); let p = read_json_with_schema("42", &s).unwrap(); assert_eq!(voidstar_to_json_string(p, &s).unwrap(), "42"); }
-    #[test] fn test_string()  { setup(); let s = parse_schema("s").unwrap(); let p = read_json_with_schema("\"hello\"", &s).unwrap(); assert_eq!(voidstar_to_json_string(p, &s).unwrap(), "\"hello\""); }
-    #[test] fn test_bool()    { setup(); let s = parse_schema("b").unwrap(); let p = read_json_with_schema("true", &s).unwrap(); assert_eq!(voidstar_to_json_string(p, &s).unwrap(), "true"); }
-    #[test] fn test_array()   { setup(); let s = parse_schema("ai4").unwrap(); let p = read_json_with_schema("[1,2,3]", &s).unwrap(); assert_eq!(voidstar_to_json_string(p, &s).unwrap(), "[1,2,3]"); }
-    #[test] fn test_opt_some(){ setup(); let s = parse_schema("?i4").unwrap(); let p = read_json_with_schema("5", &s).unwrap(); assert_eq!(voidstar_to_json_string(p, &s).unwrap(), "5"); }
-    #[test] fn test_opt_null(){ setup(); let s = parse_schema("?i4").unwrap(); let p = read_json_with_schema("null", &s).unwrap(); assert_eq!(voidstar_to_json_string(p, &s).unwrap(), "null"); }
+    #[test] fn test_int()     { let _shm = setup(); let s = parse_schema("i4").unwrap(); let p = read_json_with_schema("42", &s).unwrap(); assert_eq!(voidstar_to_json_string(p, &s).unwrap(), "42"); }
+    #[test] fn test_string()  { let _shm = setup(); let s = parse_schema("s").unwrap(); let p = read_json_with_schema("\"hello\"", &s).unwrap(); assert_eq!(voidstar_to_json_string(p, &s).unwrap(), "\"hello\""); }
+    #[test] fn test_bool()    { let _shm = setup(); let s = parse_schema("b").unwrap(); let p = read_json_with_schema("true", &s).unwrap(); assert_eq!(voidstar_to_json_string(p, &s).unwrap(), "true"); }
+    #[test] fn test_array()   { let _shm = setup(); let s = parse_schema("ai4").unwrap(); let p = read_json_with_schema("[1,2,3]", &s).unwrap(); assert_eq!(voidstar_to_json_string(p, &s).unwrap(), "[1,2,3]"); }
+    #[test] fn test_opt_some(){ let _shm = setup(); let s = parse_schema("?i4").unwrap(); let p = read_json_with_schema("5", &s).unwrap(); assert_eq!(voidstar_to_json_string(p, &s).unwrap(), "5"); }
+    #[test] fn test_opt_null(){ let _shm = setup(); let s = parse_schema("?i4").unwrap(); let p = read_json_with_schema("null", &s).unwrap(); assert_eq!(voidstar_to_json_string(p, &s).unwrap(), "null"); }
 
     // Record `{m :: i4, n :: i4}` -- schema encoding `m21mi41ni4`.
     fn rec2_schema() -> Schema { parse_schema("m21mi41ni4").unwrap() }
 
     #[test]
     fn test_record_missing_field_errors() {
-        setup();
+        let _shm = setup();
         let s = rec2_schema();
         let r = read_json_with_schema("{\"m\":1}", &s);
         let msg = r.err().expect("missing field must error").to_string();
@@ -1155,7 +1156,7 @@ mod tests {
 
     #[test]
     fn test_record_array_wrong_length_errors() {
-        setup();
+        let _shm = setup();
         let s = rec2_schema();
         let r = read_json_with_schema("[1]", &s);
         let msg = r.err().expect("short array must error").to_string();
@@ -1164,7 +1165,7 @@ mod tests {
 
     #[test]
     fn test_partial_load_full_object() {
-        setup();
+        let _shm = setup();
         let s = rec2_schema();
         let v = load_record_fields_from_json("{\"m\":7,\"n\":11}", &s).unwrap();
         assert_eq!(v.len(), 2);
@@ -1174,7 +1175,7 @@ mod tests {
 
     #[test]
     fn test_partial_load_partial_object() {
-        setup();
+        let _shm = setup();
         let s = rec2_schema();
         let v = load_record_fields_from_json("{\"m\":7}", &s).unwrap();
         assert_eq!(v.len(), 2);
@@ -1184,7 +1185,7 @@ mod tests {
 
     #[test]
     fn test_partial_load_unknown_field_errors() {
-        setup();
+        let _shm = setup();
         let s = rec2_schema();
         let r = load_record_fields_from_json("{\"m\":7,\"oops\":1}", &s);
         let msg = r.err().expect("unknown key must error").to_string();
@@ -1193,7 +1194,7 @@ mod tests {
 
     #[test]
     fn test_partial_load_array_must_be_complete() {
-        setup();
+        let _shm = setup();
         let s = rec2_schema();
         let r = load_record_fields_from_json("[1]", &s);
         let msg = r.err().expect("short array must error").to_string();
@@ -1205,7 +1206,7 @@ mod tests {
 
     #[test]
     fn test_partial_load_non_map_schema_errors() {
-        setup();
+        let _shm = setup();
         let s = parse_schema("i4").unwrap();
         let r = load_record_fields_from_json("42", &s);
         assert!(r.is_err());
@@ -1243,7 +1244,7 @@ mod tests {
 
     #[test]
     fn test_write_json_streams_without_buffering() {
-        setup();
+        let _shm = setup();
         // A 100-element array: write_json should feed the sink one chunk
         // at a time. We just care that the produced bytes match the
         // buffered voidstar_to_json_string form -- if it does, the
@@ -1260,7 +1261,7 @@ mod tests {
 
     #[test]
     fn test_write_json_maps_broken_pipe_to_pipe_closed() {
-        setup();
+        let _shm = setup();
         // Fail on the very first write to prove the walker doesn't
         // silently swallow the error.
         let s = parse_schema("ai4").unwrap();
@@ -1275,7 +1276,7 @@ mod tests {
 
     #[test]
     fn test_write_json_pipe_closed_partway() {
-        setup();
+        let _shm = setup();
         // Accept a few bytes, then fail. The walker must still surface
         // PipeClosed (not Io / Serialization) -- upstream policy relies
         // on this distinction to pick exit code 141 vs 1.

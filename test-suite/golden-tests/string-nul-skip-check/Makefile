@@ -22,3 +22,4 @@ all:
 
 clean:
 	rm -rf nexus pools __pycache__ nul.txt
+	rm -rf *-build *build.tmp*

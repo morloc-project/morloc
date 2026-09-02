@@ -118,3 +118,4 @@ all:
 
 clean:
 	rm -rf badF64 badNeg badF32 nexus pools *err __pycache__
+	rm -rf *-build *build.tmp*

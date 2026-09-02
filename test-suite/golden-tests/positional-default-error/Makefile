@@ -11,3 +11,4 @@ all:
 clean:
 	rm -f *.err
 	rm -rf main pools __pycache__
+	rm -rf *-build *build.tmp*

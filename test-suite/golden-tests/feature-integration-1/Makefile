@@ -5,3 +5,4 @@ all:
 
 clean:
 	rm -rf __pycache__ nexus log pools
+	rm -rf *-build *build.tmp*

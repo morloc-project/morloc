@@ -154,9 +154,10 @@ mod tests {
     use crate::shm;
 
     // The schema walker requires SHM to be initialised so that rel2abs
-    // succeeds. Tests use the crate-wide one-shot helper.
-    fn setup() {
-        crate::init_test_shm();
+    // succeeds. Tests use the crate-wide helper and hold its guard.
+    #[must_use]
+    fn setup() -> std::sync::RwLockReadGuard<'static, ()> {
+        crate::init_test_shm()
     }
 
     unsafe fn write_str_to_shm(bytes: &[u8]) -> shm::RelPtr {
@@ -175,7 +176,7 @@ mod tests {
 
     #[test]
     fn plain_string_no_nul() {
-        setup();
+        let _shm = setup();
         let s = Schema::primitive(SerialType::String);
         unsafe {
             let arr = make_string_slot(b"hello");
@@ -186,7 +187,7 @@ mod tests {
 
     #[test]
     fn plain_string_with_nul() {
-        setup();
+        let _shm = setup();
         let s = Schema::primitive(SerialType::String);
         unsafe {
             let arr = make_string_slot(b"abc\0def");
@@ -199,7 +200,7 @@ mod tests {
 
     #[test]
     fn empty_string_no_nul() {
-        setup();
+        let _shm = setup();
         let s = Schema::primitive(SerialType::String);
         unsafe {
             let arr = make_string_slot(b"");

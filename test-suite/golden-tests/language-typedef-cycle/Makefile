@@ -23,4 +23,5 @@ all:
 	@if grep -q "Mutual recursion" param-cpp.err 2>/dev/null; then echo 1; else echo 0; fi >> obs.txt
 
 clean:
-	rm -rf nexus_* pools *err obs.txt
+	rm -rf nexus_* pools *err
+	rm -rf *-build *build.tmp*

@@ -42,3 +42,4 @@ all:
 clean:
 	rm -rf prog pools __pycache__ *.err
 	rm -f list-int.packet list-record.packet scalar.packet empty.packet
+	rm -rf *-build *build.tmp*

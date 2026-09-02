@@ -96,3 +96,4 @@ all:
 
 clean:
 	rm -rf nexus pools logs_ok logs_fail logs_quiet summary-only.json obs.*.err build.err
+	rm -rf *-build *build.tmp*

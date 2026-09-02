@@ -8504,7 +8504,7 @@ mod tests {
     /// tests.
     #[test]
     fn open_close_empty_stream_file() {
-        crate::init_test_shm();
+        let _shm = crate::own_test_registry();
         let dir = std::env::temp_dir().join(format!(
             "morloc_stream_test_{}", std::process::id()
         ));
@@ -8681,7 +8681,7 @@ mod tests {
 
     #[test]
     fn ifile_bracket_index_end_to_end() {
-        crate::init_test_shm();
+        let _shm = crate::own_test_registry();
         let dir = std::env::temp_dir().join(format!(
             "morloc_stream_test_{}", std::process::id()
         ));
@@ -8736,7 +8736,7 @@ mod tests {
     /// packets, negative indices, and step.
     #[test]
     fn ifile_bracket_slice_end_to_end() {
-        crate::init_test_shm();
+        let _shm = crate::own_test_registry();
         let dir = std::env::temp_dir().join(format!(
             "morloc_stream_test_{}_slice", std::process::id()
         ));
@@ -8802,7 +8802,7 @@ mod tests {
     /// Step zero is a clean runtime error, not a panic.
     #[test]
     fn ifile_bracket_slice_step_zero_is_error() {
-        crate::init_test_shm();
+        let _shm = crate::own_test_registry();
         let dir = std::env::temp_dir().join(format!(
             "morloc_stream_test_{}_step0", std::process::id()
         ));
@@ -8828,7 +8828,7 @@ mod tests {
         // each test in its own process, so this is safe-ish but
         // best-effort -- the lazy init may have already run.)
         std::env::set_var("MORLOC_IFILE_CACHE_BYTES", "256");
-        crate::init_test_shm();
+        let _shm = crate::own_test_registry();
         let dir = std::env::temp_dir().join(format!(
             "morloc_stream_test_{}_cache", std::process::id()
         ));
@@ -8870,7 +8870,7 @@ mod tests {
     /// the file's payload via the file resolver (zero-copy).
     #[test]
     fn ifile_data_packet_zero_copy() {
-        crate::init_test_shm();
+        let _shm = crate::own_test_registry();
         let dir = std::env::temp_dir().join(format!(
             "morloc_stream_test_{}_data", std::process::id()
         ));
@@ -8926,7 +8926,7 @@ mod tests {
     /// forward-drain remains available for such files.
     #[test]
     fn ifile_rejects_footerless_stream() {
-        crate::init_test_shm();
+        let _shm = crate::own_test_registry();
         let dir = std::env::temp_dir().join(format!(
             "morloc_stream_test_{}_norec", std::process::id()
         ));
@@ -8959,7 +8959,7 @@ mod tests {
     /// `PatternAccessible.__extract_pattern__` for group accessors.
     #[test]
     fn ifile_group_pattern_returns_tuple() {
-        crate::init_test_shm();
+        let _shm = crate::own_test_registry();
         let dir = std::env::temp_dir().join(format!(
             "morloc_stream_test_{}_group", std::process::id()
         ));
@@ -9014,7 +9014,7 @@ mod tests {
     #[test]
     fn stdio_stale_or_corrupt_claim_is_reclaimed() {
         use std::sync::atomic::Ordering;
-        crate::init_test_shm();
+        let _shm = crate::own_test_registry();
         registry_init().unwrap();
         let claim = stdio_claim_slot(STDIO_KIND_STDIN).expect("registry attached");
 

@@ -61,3 +61,4 @@ all:
 clean:
 	rm -rf prog pools __pycache__ *.err
 	rm -f data.packet stream.packet d2d.packet d2s.stream s2s.stream s2d.packet pd.packet ps.stream
+	rm -rf *-build *build.tmp*

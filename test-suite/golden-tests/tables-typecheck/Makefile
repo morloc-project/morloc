@@ -4,3 +4,4 @@ all:
 
 clean:
 	rm -f *.err
+	rm -rf *-build *build.tmp*

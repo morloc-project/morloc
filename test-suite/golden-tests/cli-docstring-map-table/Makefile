@@ -19,3 +19,4 @@ all:
 
 clean:
 	rm -rf nexus pools __pycache__ log map_tsv.txt map_json.txt
+	rm -rf *-build *build.tmp*

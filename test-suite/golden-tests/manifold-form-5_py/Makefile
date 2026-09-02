@@ -5,3 +5,4 @@ all:
 
 clean:
 	rm -rf nexus pools
+	rm -rf *-build *build.tmp*

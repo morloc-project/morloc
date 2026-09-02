@@ -26,3 +26,4 @@ all:
 
 clean:
 	rm -rf /tmp/nrtest_* *.err *.manifest pools __pycache__
+	rm -rf *-build *build.tmp*

@@ -28,3 +28,4 @@ all:
 
 clean:
 	rm -f *.err /tmp/mcre_nexus /tmp/mcre_nexus.manifest
+	rm -rf *-build *build.tmp*

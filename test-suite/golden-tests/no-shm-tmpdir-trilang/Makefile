@@ -29,3 +29,4 @@ all:
 
 clean:
 	rm -rf nexus-zero nexus-thresh pools tmp_zero tmp_thresh __pycache__
+	rm -rf *-build *build.tmp*

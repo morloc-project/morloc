@@ -1868,6 +1868,9 @@ mod tests {
 
     #[test]
     fn vol_table_publication_roundtrip() {
+        // Owns the process-global arena: shinit/shclose here would tear it
+        // down under any test allocating in the shared arena.
+        let _arena = crate::own_test_shm();
         // shinit / shopen_diag publish a (data_base, data_size) pair to
         // MORLOC_VOL_TABLE so the C-side resolve_relptr inline can do
         // its lookup without crossing FFI. Verify the publish helpers
@@ -1878,7 +1881,7 @@ mod tests {
         std::fs::create_dir_all(&test_dir).unwrap();
         shm_set_fallback_dir(test_dir.to_str().unwrap());
 
-        let basename = format!("test_shm_vt_{}", std::process::id());
+        let basename = format!("morloc-{}-test-vt", std::process::id());
         let shm = shinit(&basename, 0, 4096).unwrap();
 
         // shinit should have populated slot 0.
@@ -1927,6 +1930,9 @@ mod tests {
 
     #[test]
     fn test_indexed_relptr_roundtrip_across_volumes() {
+        // Owns the process-global arena: shinit/shclose here would tear it
+        // down under any test allocating in the shared arena.
+        let _arena = crate::own_test_shm();
         // Verify that rel2abs/abs2rel commute under the new indexed
         // encoding: every (slot_idx, offset) pair we allocate into can
         // be encoded to a relptr and decoded back to the same absolute
@@ -1937,7 +1943,7 @@ mod tests {
         std::fs::create_dir_all(&test_dir).unwrap();
         shm_set_fallback_dir(test_dir.to_str().unwrap());
 
-        let basename = format!("test_shm_idx_{}", std::process::id());
+        let basename = format!("morloc-{}-test-idx", std::process::id());
         shinit(&basename, 0, 4096).unwrap();
 
         // Force grow into several randomly-allocated volumes by
@@ -1984,13 +1990,16 @@ mod tests {
 
     #[test]
     fn test_shinit_and_shmalloc() {
+        // Owns the process-global arena: shinit/shclose here would tear it
+        // down under any test allocating in the shared arena.
+        let _arena = crate::own_test_shm();
         // Use file-backed SHM via tmpdir to avoid /dev/shm permission issues in test
         let tmpdir = std::env::temp_dir();
         let test_dir = tmpdir.join(format!("morloc_test_{}", std::process::id()));
         std::fs::create_dir_all(&test_dir).unwrap();
         shm_set_fallback_dir(test_dir.to_str().unwrap());
 
-        let basename = format!("test_shm_{}", std::process::id());
+        let basename = format!("morloc-{}-test-shm", std::process::id());
         let shm = shinit(&basename, 0, 4096).unwrap();
         assert!(!shm.is_null());
         assert_eq!(unsafe { (*shm).magic }, SHM_MAGIC);
@@ -2021,6 +2030,9 @@ mod tests {
 
     #[test]
     fn large_alloc_writes_every_page_without_crashing() {
+        // Owns the process-global arena: shinit/shclose here would tear it
+        // down under any test allocating in the shared arena.
+        let _arena = crate::own_test_shm();
         // Smoke test for the parallel page-reservation path: allocate
         // a region larger than the 64 MiB serial-fallback cutoff in
         // `fallocate_workers`, then write every page. If the new
@@ -2033,7 +2045,7 @@ mod tests {
         std::fs::create_dir_all(&test_dir).unwrap();
         shm_set_fallback_dir(test_dir.to_str().unwrap());
 
-        let basename = format!("test_shm_large_{}", std::process::id());
+        let basename = format!("morloc-{}-test-large", std::process::id());
         // 128 MiB requested; that's > 64 MiB so `fallocate_workers`
         // returns >= 1 worker, and on Linux 5.14+ this exercises
         // `parallel_madvise_populate_write`.

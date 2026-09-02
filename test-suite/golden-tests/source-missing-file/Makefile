@@ -10,3 +10,4 @@ all:
 clean:
 	rm -f *.err
 	rm -rf main pools
+	rm -rf *-build *build.tmp*

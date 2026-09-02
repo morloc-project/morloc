@@ -73,3 +73,4 @@ all:
 
 clean:
 	rm -rf prog pools __pycache__ *.err stream-final.packet stream-temp.packet stream-missing.packet
+	rm -rf *-build *build.tmp*

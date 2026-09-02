@@ -11,3 +11,4 @@ all:
 
 clean:
 	rm -f *.err raw.out
+	rm -rf *-build *build.tmp*

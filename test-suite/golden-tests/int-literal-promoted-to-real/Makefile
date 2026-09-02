@@ -15,3 +15,4 @@ all:
 
 clean:
 	rm -rf nexus bad_overflow pools
+	rm -rf *-build *build.tmp*

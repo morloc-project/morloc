@@ -60,3 +60,4 @@ all:
 
 clean:
 	rm -rf nexus pools __pycache__ lines.txt
+	rm -rf *-build *build.tmp*

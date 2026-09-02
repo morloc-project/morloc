@@ -41,3 +41,4 @@ all:
 clean:
 	rm -rf prog pools __pycache__ *.err
 	rm -f out.stream
+	rm -rf *-build *build.tmp*

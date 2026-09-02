@@ -5,3 +5,4 @@ all:
 
 clean:
 	rm -rf nexus pools *err z zj zp
+	rm -rf *-build *build.tmp*

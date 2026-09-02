@@ -25,6 +25,14 @@ fn main() {
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}/../lib", origin);
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}/../share/morloc/lib", origin);
 
+    // Test and other dev binaries run out of target/debug/deps, where neither
+    // loader-relative rpath resolves, so they cannot load libmorloc at all.
+    // Add the absolute library directory for those builds; release binaries
+    // keep only the relative rpaths and stay relocatable.
+    if std::env::var("PROFILE").as_deref() == Ok("debug") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", morloc_lib);
+    }
+
     // The morloc compiler version is sourced from CARGO_PKG_VERSION
     // (this crate's Cargo.toml), which is intentionally kept in
     // lockstep with the morloc Haskell package.yaml. No build-time

@@ -12,4 +12,5 @@ all:
 	./nexus rrerr 0 2>&1 | grep -c "zero" 2>> obs.err  >> obs.txt || true
 
 clean:
-	rm -rf nexus poolscpp.out __pycache__
+	rm -rf nexus pools __pycache__
+	rm -rf *-build *build.tmp*

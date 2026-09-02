@@ -74,3 +74,4 @@ all:
 clean:
 	rm -rf nexus pools *err __pycache__
 	rm -f /tmp/bai-*.pkt
+	rm -rf *-build *build.tmp*

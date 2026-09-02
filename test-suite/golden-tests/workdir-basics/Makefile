@@ -42,4 +42,5 @@ all:
 	cat obs.foo1.err obs.foo2.err obs.bar.err > obs.err
 
 clean:
-	rm -rf nexus pools runs *.err obs.txt
+	rm -rf nexus pools runs *.err
+	rm -rf *-build *build.tmp*
