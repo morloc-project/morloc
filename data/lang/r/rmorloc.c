@@ -39,29 +39,35 @@
 
 #define MAYFAIL char* child_errmsg_ = NULL;
 
+// User-attributable failures carry the message alone -- no source file, line,
+// or function. Those locate the runtime, not the user's program, and the user
+// cannot act on them; the nexus already prints the manifold call chain, which
+// is the location that means something. This matches the C++ binder, which
+// throws a bare std::runtime_error message. Genuine invariant violations keep
+// their location, in MORLOC_INTERNAL_ABORT below, where a bug report wants it.
 #define R_TRY(fun, ...) \
     fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
     if(child_errmsg_ != NULL){ \
-        error("Error in R pool (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_); \
+        error("%s", child_errmsg_); \
     }
 
 #define R_TRY_WITH(clean, fun, ...) \
     fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
     if(child_errmsg_ != NULL){ \
         clean; \
-        error("Error in R pool (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_); \
+        error("%s", child_errmsg_); \
     }
 
-#define MORLOC_ERROR(msg, ...) error("Error in R pool (%s:%d in %s):" msg, __FILE__, __LINE__, __func__, ##__VA_ARGS__);
+#define MORLOC_ERROR(msg, ...) error(msg, ##__VA_ARGS__);
 
 // Raise a MorlocInternalError-classed R error for genuine morloc-
 // invariant violations (compiler bugs, unreachable branches, libmorloc
 // contract violations). morloc_mlc_catch (in pool.R) inspects the
 // class and re-raises, so @catch cannot swallow it. The message goes
-// through the same "Error in R pool ..." prefix as MORLOC_ERROR so
-// diagnostic tooling picks it up uniformly. Use ONLY for genuine
-// bugs; user-attributable failures must go through MORLOC_ERROR so
-// @catch can intercept.
+// carries the runtime source location, unlike MORLOC_ERROR: a genuine
+// invariant violation is a bug report, and the location is the useful
+// part. Use ONLY for genuine bugs; user-attributable failures must go
+// through MORLOC_ERROR so @catch can intercept.
 #define MORLOC_INTERNAL_ABORT(msg, ...) do { \
     SEXP _cond = PROTECT(allocVector(VECSXP, 2)); \
     SEXP _names = PROTECT(allocVector(STRSXP, 2)); \
@@ -3381,6 +3387,44 @@ extern void morloc_debug_record_frame(
     const char** schemas,
     size_t n);
 
+// Normalize R's rendered error buffer into a bare message.
+//
+// R_curErrorBuf() returns the text as R would PRINT it: "Error: msg\n", or
+// "Error in f(x): msg\n" when the condition carries a call. The nexus supplies
+// its own framing around whatever a pool reports, so passing R's rendering
+// through reports the word "Error" twice and buries a newline mid-packet. The
+// C++ and Python binders report the bare message; this brings R in line.
+//
+// A buffer that does not match R's rendering is passed through untouched, so
+// an unexpected shape degrades to the old behaviour rather than being mangled.
+// Returns a heap string the caller frees, or NULL on allocation failure.
+static char* r_error_message(const char* buf) {
+    if (buf == NULL) {
+        return NULL;
+    }
+    const char* p = buf;
+    if (strncmp(p, "Error", 5) == 0) {
+        const char* colon = strchr(p + 5, ':');
+        if (colon != NULL) {
+            p = colon + 1;
+            while (*p == ' ') {
+                p++;
+            }
+        }
+    }
+    size_t len = strlen(p);
+    while (len > 0 && (p[len - 1] == '\n' || p[len - 1] == '\r' || p[len - 1] == ' ')) {
+        len--;
+    }
+    char* out = (char*)malloc(len + 1);
+    if (out == NULL) {
+        return NULL;
+    }
+    memcpy(out, p, len);
+    out[len] = '\0';
+    return out;
+}
+
 // Send a fail packet to the client (best-effort, ignores send errors).
 // Concatenates any recorded debug trace with the message so the nexus's
 // summary.json carries both the foreign error and the morloc frames.
@@ -3466,8 +3510,13 @@ static void dispatch_manifold_c(int client_fd, const uint8_t* packet,
 
     if (eval_err || result == R_NilValue || TYPEOF(result) != RAWSXP) {
         UNPROTECT(nprotect);
-        send_fail_to_client(client_fd,
-            eval_err ? R_curErrorBuf() : "manifold returned non-raw result");
+        if (eval_err) {
+            char* bare = r_error_message(R_curErrorBuf());
+            send_fail_to_client(client_fd, bare != NULL ? bare : R_curErrorBuf());
+            free(bare);
+        } else {
+            send_fail_to_client(client_fd, "manifold returned non-raw result");
+        }
         return;
     }
 
