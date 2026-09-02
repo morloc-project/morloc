@@ -1,0 +1,15 @@
+[3,6]
+[11,12]
+[2,4]
+true
+false
+10
+5
+2
+1
+1
+zero_rejected
+negative_rejected
+noninteger_rejected
+toolarge_rejected
+exact_rejected

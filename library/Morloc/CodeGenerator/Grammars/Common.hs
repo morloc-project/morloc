@@ -114,18 +114,22 @@ mergePoolDocs f ms =
     , poolReturnFlag = any poolReturnFlag ms
     }
 
+-- | Split a call's arguments into successive call groups according to the
+-- source's `rsize` directive. Each value is the size of one leading group; the
+-- final group is whatever remains, so it is never written.
+--
+-- Total by construction: a group size that cannot be honoured leaves the
+-- remaining arguments in one final group rather than failing. The real
+-- rejection is 'checkRsizeArity', which runs in the monad where a legible
+-- error can be raised; this function is the pure renderer and must not be the
+-- thing that decides a program is invalid.
 provideClosure :: Source -> [MDoc] -> [[MDoc]]
 provideClosure src args0 = f (srcRsize src) args0
   where
     f [] args = [args]
     f (n : ns) args
       | n < length args = take n args : f ns (drop n args)
-      | otherwise =
-          error $
-            "Invalid rsize value for imported "
-              <> show (srcLang src)
-              <> " function "
-              <> show (unEVar (srcAlias src))
+      | otherwise = [args]
 
 svarNamer :: Int -> MDoc
 svarNamer i = "s" <> viaShow i

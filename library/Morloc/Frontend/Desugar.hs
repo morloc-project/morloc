@@ -661,23 +661,55 @@ processModuleDocLines = finalize . foldl step ([], Nothing, [])
             Just epi -> epis <> [epi]
       in ([], desc, epis')
 
-applySourceDocs :: [Text] -> Source -> ([Text], Source)
-applySourceDocs lns src = foldl step ([], src) lns
+-- | Apply `source`-level docstring directives, returning (errors, warnings,
+-- source). Errors are fatal and reported by 'applySourceDocsD'.
+--
+-- `rsize` values are validated here rather than silently coerced. An
+-- unparseable word used to be dropped by 'mapMaybe', so a typo
+-- (@rsize: to@) left the directive empty and the function was called flat --
+-- silently producing the very calling convention the directive existed to
+-- override. A non-positive value parsed fine and then emitted an empty call
+-- group, which failed at run time inside the pool. Both are rejected at the
+-- declaration now, where the source position is available.
+applySourceDocs :: [Text] -> Source -> ([Text], [Text], Source)
+applySourceDocs lns src = foldl step ([], [], src) lns
   where
-    step (ws, s) line = case parseDocKV line of
+    step (errs, ws, s) line = case parseDocKV line of
       DocDesc v
-        | T.null v -> (ws, s)
-        | otherwise -> (ws, s {srcNote = srcNote s <> [v]})
+        | T.null v -> (errs, ws, s)
+        | otherwise -> (errs, ws, s {srcNote = srcNote s <> [v]})
       DocDirective k v -> case k of
-        "name" -> (ws, s {srcName = SrcName v})
-        "rsize" -> (ws, s {srcRsize = mapMaybe readMaybeInt (T.words v)})
+        "name" -> (errs, ws, s {srcName = SrcName v})
+        "rsize" -> case parseRsize v of
+          Left e -> (errs <> [e], ws, s)
+          Right ns -> (errs, ws, s {srcRsize = ns})
         _ ->
           let w = unknownDirectiveWarning sourceDocDirectiveKeys k
               desc = k <> ": " <> v
-           in (ws <> [w], s {srcNote = srcNote s <> [desc]})
-    readMaybeInt t = case reads (T.unpack t) of
-      [(n, "")] -> Just n
-      _ -> Nothing
+           in (errs, ws <> [w], s {srcNote = srcNote s <> [desc]})
+
+-- | Parse an `rsize` value: one or more positive integers separated by
+-- whitespace. Each is the size of a leading call group; the final group is
+-- implicit, which is why a group of zero arguments is meaningless.
+parseRsize :: Text -> Either Text [Int]
+parseRsize v =
+  case T.words v of
+    [] -> Left "rsize: expected one or more positive integers, got nothing"
+    ws -> mapM parseOne ws
+  where
+    parseOne w = case reads (T.unpack w) :: [(Int, String)] of
+      [(n, "")]
+        | n >= 1 -> Right n
+        | otherwise ->
+            Left $
+              "rsize: call-group sizes must be at least 1, got '" <> w
+                <> "'. Each value is the number of arguments in one call; a"
+                <> " group of zero arguments would emit an empty call."
+      _ ->
+        Left $
+          "rsize: expected a positive integer, got '" <> w
+            <> "'. The value is a whitespace-separated list of call-group"
+            <> " sizes, e.g. `rsize: 1` or `rsize: 1 1`."
 
 -- | D-monad wrapper: parse argument docstring lines, accumulate
 -- warnings into 'dsWarnings' for the caller to drain, and fail
@@ -782,11 +814,13 @@ renderWithSpec (WithSpec mShort l (EV t) _ _ _ _) =
       Nothing -> "--" <> l
 
 -- | D-monad wrapper: apply `source` docstring lines and accumulate warnings.
-applySourceDocsD :: [Text] -> Source -> D Source
-applySourceDocsD ls src = do
-  let (ws, s) = applySourceDocs ls src
+applySourceDocsD :: Pos -> [Text] -> Source -> D Source
+applySourceDocsD pos ls src = do
+  let (errs, ws, s) = applySourceDocs ls src
   dwarn ws
-  return s
+  case errs of
+    [] -> return s
+    (e : _) -> dfail pos (T.unpack e)
 
 --------------------------------------------------------------------
 -- Type helpers
@@ -2621,7 +2655,7 @@ mkNewSource sp lang path (isInline, isBacktick, name, nameTok) = do
           , srcOperator = isOp
           , srcBacktick = isBacktick
           }
-  src <- applySourceDocsD docLines' baseSrc
+  src <- applySourceDocsD (startPos sp) docLines' baseSrc
   freshExprSpan sp (SrcE src)
 
 isOperatorName :: Text -> Bool

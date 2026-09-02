@@ -507,11 +507,40 @@ cacheLabelOfMidx midx = do
 collectArgs :: ManifoldForm None (Maybe Type) -> [Arg None]
 collectArgs = abilist (\i _ -> Arg i None) (\i _ -> Arg i None)
 
+-- | Reject an `rsize` declaration that cannot describe a call of this arity.
+--
+-- `rsize` names the sizes of the leading call groups of a curried foreign
+-- function; the final group is implicit and is never written. Every declared
+-- group must therefore leave at least one argument for the group after it.
+-- Sizes that consume every argument would emit a trailing empty call, which
+-- fails inside the pool with an error naming neither the directive nor the
+-- function.
+--
+-- Individual values are already known to be positive integers: the parser
+-- rejects a non-integer or non-positive word at the declaration itself. Only
+-- the relationship to the function's arity is unknowable there, so it is
+-- checked here, where the source meets its type.
+checkRsizeArity :: Int -> Source -> Int -> MorlocMonad ()
+checkRsizeArity idx src arity = case srcRsize src of
+  [] -> return ()
+  ns
+    | sum ns < arity -> return ()
+    | otherwise ->
+        MM.throwSourcedError idx $
+          "The rsize declaration on" <+> squotes (pretty (unEVar (srcAlias src)))
+          <+> "cannot describe a call of" <+> pretty arity
+          <+> (if arity == 1 then "argument" else "arguments") <> ":"
+          <+> "the declared group sizes" <+> hsep (punctuate comma (map pretty ns))
+          <+> "total" <+> pretty (sum ns) <> "."
+          <+> "Each value is the number of arguments in one call, and the final"
+          <+> "group is implicit, so the sizes must total at most"
+          <+> pretty (arity - 1) <> "."
+
 expressCore :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyHead
 expressCore (AnnoS (Idx midx c@(FunT inputs _)) (Idx cidx lang, _) (ExeS exe)) = do
   ids <- MM.takeFromCounter (length inputs)
   exe' <- case exe of
-    (SrcCall src) -> return $ SrcCallP src
+    (SrcCall src) -> checkRsizeArity midx src (length inputs) >> return (SrcCallP src)
     (PatCall pat) -> return $ PatCallP pat
   let lambdaVals = fromJust $ safeZipWith PolyBndVar (map (C . Idx cidx) inputs) ids
   return
@@ -1456,6 +1485,7 @@ expressPolyExpr
     )
     | srcInline src && isLocal = do
         propagateScope gidxCall midx
+        checkRsizeArity midx src (length inputs)
         xsExpr <- zipWithM (expressPolyArg callLang) (map (Idx cidxCall) inputs) xs
         -- 'setManifoldConfig' (called from 'expressPolyExprWrap') already
         -- linked the head's label onto @midx@ if present; 'applyLambdas'
@@ -1976,6 +2006,9 @@ expressPolyApp ::
   AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) ->
   [PolyExpr] ->
   MorlocMonad PolyExpr
+expressPolyApp _ (AnnoS g@(Idx gi (FunT inputs _)) _ (ExeS (SrcCall src))) xs = do
+  checkRsizeArity gi src (length inputs)
+  return . PolyReturn $ PolyApp (PolyExe g (SrcCallP src)) xs
 expressPolyApp _ (AnnoS g _ (ExeS (SrcCall src))) xs =
   return . PolyReturn $ PolyApp (PolyExe g (SrcCallP src)) xs
 -- Eta-expanded pattern call: fires when a pattern-typed expression
