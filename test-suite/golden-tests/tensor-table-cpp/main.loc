@@ -1,14 +1,21 @@
-module main (result)
+-- A user header includes an imported module's header by bare name. The
+-- module's own code is never realized in this pool -- the Matrix stays
+-- inside C++ (`result` is a Real) and `cellCount` mentions the type in no
+-- morloc signature at all -- so the include path must come from the import
+-- graph rather than from whatever the program happens to call.
+
+module main (result, cellCount)
 
 import root
 import root-cpp
 import tensor
 import tensor-cpp
 
-source Cpp from "src.hpp" ("makeMatrix", "sumAll")
+source Cpp from "src.hpp" ("makeMatrix", "sumAll", "cellCount")
 
 makeMatrix :: Matrix 3 4 Real
 sumAll :: Matrix 3 4 Real -> Real
+cellCount :: Int
 
 result :: Real
 result = sumAll makeMatrix

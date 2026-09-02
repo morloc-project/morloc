@@ -11,6 +11,13 @@ mlc::Tensor2<double> makeMatrix() {
     return m;
 }
 
+// Uses the module type only inside this header: it appears in no morloc
+// signature, so nothing from tensor-cpp is realized in the pool at all.
+int cellCount() {
+    mlc::Tensor2<double> m({2, 3});
+    return (int)(m.view().extent(0) * m.view().extent(1));
+}
+
 double sumAll(const mlc::Tensor2<double>& m) {
     double s = 0;
     for (size_t k = 0; k < m.size(); k++) s += m.data()[k];

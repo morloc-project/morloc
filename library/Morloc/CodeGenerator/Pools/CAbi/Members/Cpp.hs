@@ -1766,6 +1766,17 @@ handleFlagsAndPaths srcs = do
       . unique
       $ [s | s <- srcs, LR.poolOf (stateLangRegistry state) (srcLang s) == cppLang]
 
+  -- Include directories for every C++ source any imported module declares,
+  -- whether or not this program realizes its code. The pool's own `#include`
+  -- lines are absolute, so these directories exist solely to resolve the bare
+  -- includes inside a user's header; which of a module's functions this
+  -- program happens to call must not decide whether such an include resolves.
+  moduleDirs <- cppModuleIncludeDirs (stateLangRegistry state)
+    . unique
+    . concat
+    . GMap.elems
+    $ stateSources state
+
   home <- MM.asks configHome
   stateDir <- MM.asks configState
   let -- Search the runtime include dir (home) and the environment's shared C++
@@ -1784,8 +1795,40 @@ handleFlagsAndPaths srcs = do
   return
     ( filter (isJust . srcPath) srcs'
     , [gccversion] <> explicitLibs <> userCxxFlags <> cliCxxFlags ++ (map MT.pack . concat) (mlcPch : mlcInclude : mlcLib : libflags)
-    , unique (catMaybes paths)
+    , unique (catMaybes paths <> moduleDirs)
     )
+
+-- | Directories holding the C++ sources declared by the program's modules.
+--
+-- Unlike 'flagAndPath' this only resolves a location and never fails: a module
+-- may declare a header this build has no use for, and merely enumerating
+-- candidate include directories must not turn a working build into an error.
+-- Contributes no linker flags, so a module whose code is never called is
+-- searched for headers but not linked against.
+cppModuleIncludeDirs :: LR.LangRegistry -> [Source] -> MorlocMonad [Path]
+cppModuleIncludeDirs reg = fmap catMaybes . mapM dirOf . filter isCpp
+  where
+    isCpp s = LR.poolOf reg (srcLang s) == cppLang
+
+    dirOf (Source _ _ (Just p) _ _ _ _ _ _ _) =
+      case (MS.takeDirectory p, MS.dropExtensions (MS.takeFileName p)) of
+        -- A bare header name resolves through the same search path the
+        -- compiled sources use.
+        (".", base) -> do
+          home <- MM.asks configHome
+          stateDir <- MM.asks configState
+          found <-
+            liftIO . fmap catMaybes . mapM getFile $
+              getHeaderPaths home stateDir base [".h", ".hpp", ".hxx"]
+          case found of
+            (x : _) -> Just . MS.takeDirectory <$> liftIO (MS.canonicalizePath x)
+            [] -> return Nothing
+        (dir, _) -> do
+          exists <- liftIO $ MS.doesDirectoryExist dir
+          if exists
+            then Just <$> liftIO (MS.canonicalizePath dir)
+            else return Nothing
+    dirOf _ = return Nothing
 
 gccVersionFlag :: Int -> Text
 gccVersionFlag i
