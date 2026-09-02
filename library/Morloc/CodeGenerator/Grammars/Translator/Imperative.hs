@@ -1030,6 +1030,19 @@ lowerNativeExpr cfg origExpr (RecordN_ o v ps rs) = do
       }
 lowerNativeExpr cfg _ (LogN_ _ v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IBoolLit v)}
 lowerNativeExpr cfg _ (RealN_ (FV _ cv) v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IRealLit (Just (unCVar cv)) v)}
+-- An integer literal whose slot resolved to a real type must be emitted in
+-- float form. The typechecker deliberately allows Int-literal-to-real
+-- promotion (it is what lets @4 + 2.3@ check), and the nexus side already
+-- converts through 'Morloc.CodeGenerator.NumericLiteral.resolveNumericLiteral'.
+-- The pool side emitted a bare integer, so a promoted literal reaching an F32
+-- slot was written as a Python @int@ against an @f4@ schema and rejected at
+-- run time by @pybinding__put_value@. Dispatch on the GENERAL type, which is
+-- the only place the promotion is visible; the concrete name is still passed
+-- through for the target language's own literal suffix.
+lowerNativeExpr cfg _ (IntN_ (FV gv cv) v)
+  | BT.isRealBaseType (VarU gv) =
+      return $ defaultValue
+        {poolExpr = lcPrintExpr cfg (IRealLit (Just (unCVar cv)) (RealFinite (fromInteger v)))}
 lowerNativeExpr cfg _ (IntN_ (FV _ cv) v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IIntLit (Just (unCVar cv)) v)}
 lowerNativeExpr cfg _ (StrN_ (FV _ cv) v) =
   let hint = if cv == CV "" then Nothing else Just (unCVar cv)

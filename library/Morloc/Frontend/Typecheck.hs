@@ -75,6 +75,19 @@ resolvePendingNumLits g0 entries = do
     -- this acceptance.
     acceptableForInt t = BT.isIntegerBaseType t || BT.isRealBaseType t
 
+    -- A literal may inhabit a type alias or a newtype whose wire parent is a
+    -- numeric base. The check-mode rules for @IntS@/@RealS@ already walk that
+    -- chain (evaluate the alias, then follow the wire parent); a DEFERRED
+    -- literal must be judged by the same standard, or the identical program
+    -- is accepted or rejected purely on whether the literal happened to meet
+    -- its type directly or through an existential.
+    baseOKThroughAliases :: (TypeU -> Bool) -> Int -> TypeU -> MorlocMonad Bool
+    baseOKThroughAliases baseOK i t = do
+      scope <- MM.getGeneralScope i
+      let tEval = either (const t) id (TE.evaluateType scope t)
+          tWire = TE.wireParentRoot scope tEval
+      return (baseOK t || baseOK tEval || baseOK tWire)
+
     resolveOne :: (TypeU -> Bool) -> TypeU -> Gamma -> (Int, TVar, NumLitKind) -> MorlocMonad Gamma
     resolveOne baseOK defaultT g (i, v, _) =
       -- Chain-walk via apply: when the deferred existential @v@ was
@@ -98,9 +111,11 @@ resolvePendingNumLits g0 entries = do
                Left err        -> MM.throwSystemError err
                Right Nothing   -> return g
                Right (Just g') -> return g'
-           t
-             | baseOK t  -> return g
-             | otherwise -> MM.throwSourcedError i $
+           t -> do
+             ok <- baseOKThroughAliases baseOK i t
+             if ok
+               then return g
+               else MM.throwSourcedError i $
                  "Numeric literal cannot have type " <> prettyTypeU t
 
     -- | Strip @EffectU@ and @OptionalU@ wrappers from a type. A
@@ -1299,7 +1314,30 @@ synthE i g (IntrinsicS IntrCatch [fallibleE, fallbackE]) = do
       unless (Set.member "Err" labels) $
         throwTypeError i $
           "@catch's first argument must have effect Err; got " <> prettyTypeU fallibleT'
-      (g2, fallbackT, fallbackE') <- synthG g1 fallbackE
+      -- A bare numeric-literal fallback is CHECKED against the fallible's
+      -- inner type; everything else is synthesized as before.
+      --
+      -- Synthesis commits a literal to its default (@Int@ for an integer,
+      -- @Real@ for a float) before it ever meets the fallible's type, so
+      -- @\@catch (tryInto x) 0@ reported "Cannot compare types Int and I64"
+      -- for every fixed-width target, and the same for an alias or newtype
+      -- over one. Checking hands the literal its expected type, which is what
+      -- the @IntS@/@RealS@ check rules need to walk the alias and wire-parent
+      -- chain.
+      --
+      -- The dispatch is on the literal itself rather than on purity in
+      -- general because the fallback may legitimately be effectful (a chained
+      -- @\@catch@ whose fallback declares @<Err>@), and an effectful value
+      -- cannot be checked against the plain inner type. A literal is pure by
+      -- construction, so this split needs no purity analysis. A literal buried
+      -- inside a compound fallback (@\@catch f [0]@) is still synthesized and
+      -- still defaults; that is the same "synthesis defaults literals"
+      -- behaviour found elsewhere and wants a bidirectional-checking decision
+      -- rather than a local patch here.
+      (g2, fallbackT, fallbackE') <- case fallbackE of
+        AnnoS _ _ (IntS _ _)  -> checkG g1 fallbackE (apply g1 innerT)
+        AnnoS _ _ (RealS _ _) -> checkG g1 fallbackE (apply g1 innerT)
+        _                     -> synthG g1 fallbackE
       let fallbackT' = apply g2 fallbackT
           (fbEffs, fbInnerT) = case peelForallU fallbackT' of
             EffectU e t -> (e, t)
