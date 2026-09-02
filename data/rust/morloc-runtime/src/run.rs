@@ -31,14 +31,16 @@
 //!   * `MORLOC_RUN_DIR` -- the absolute path of the run dir.
 //!   * `MORLOC_RUN_PARENT_PID` -- the PID that set the above.
 //!
-//! A child only inherits if `MORLOC_RUN_PARENT_PID == getppid()`. This
-//! defeats the case of a stale `MORLOC_RUN_DIR` left lingering in a
-//! shell environment from a previous run -- the PID won't match, the
-//! child generates its own run id.
+//! A process inherits only if `MORLOC_RUN_PARENT_PID` names one of its
+//! ancestors. This defeats the case of a stale `MORLOC_RUN_DIR` left
+//! lingering in a shell environment from a previous run -- that
+//! publisher is not in the ancestry, so the process generates its own
+//! run id.
 //!
-//! Pool processes are technically children of the nexus, so they hit
-//! the inherit branch and reuse the nexus's run dir -- one invocation,
-//! one dir.
+//! The relation is ancestry rather than parentage because a pool may
+//! dispatch by forking a worker: the process that emits a log line is
+//! then a grandchild of the nexus, and testing only the immediate
+//! parent would split one invocation across two run dirs.
 
 use std::collections::HashMap;
 use std::ffi::CStr;
@@ -82,17 +84,74 @@ fn get_run() -> Option<&'static Run> {
     RUN.get_or_init(init_run).as_ref()
 }
 
+/// The parent of `pid`, or `None` when this platform offers no way to ask.
+///
+/// Linux publishes it in `/proc/<pid>/stat`. The `comm` field there is
+/// unquoted and may itself contain spaces and parentheses, so the fields after
+/// it are only unambiguous when read from the LAST `)`: state, then ppid.
+fn parent_of(pid: i32) -> Option<i32> {
+    #[cfg(target_os = "linux")]
+    {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        parse_ppid_from_stat(&stat)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// Read the parent pid out of a `/proc/<pid>/stat` line.
+///
+/// Field two is the executable name, unquoted and parenthesized. It may itself
+/// contain spaces and parentheses -- a process is free to name itself
+/// `((weird) name)` -- so splitting the line on whitespace, or on the FIRST
+/// `)`, lands on the wrong field. Scanning from the last `)` is what makes the
+/// following fields (state, then ppid) unambiguous.
+fn parse_ppid_from_stat(stat: &str) -> Option<i32> {
+    let after_comm = stat.rsplit_once(')')?.1;
+    after_comm.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// Whether `ancestor` is this process's parent or a further ancestor.
+///
+/// A pool that dispatches by forking a worker puts the process that emits the
+/// log two levels below the nexus, so testing only the immediate parent misses
+/// a legitimate descendant. Where `parent_of` cannot answer, this degrades to
+/// exactly that immediate-parent test -- correct for pool models that dispatch
+/// on threads rather than forking below the pool process.
+fn descends_from(ancestor: i32) -> bool {
+    let mut pid = unsafe { libc::getppid() };
+    // Bounded so a `/proc` inconsistency cannot spin at startup. A morloc
+    // process tree is a handful of levels deep.
+    for _ in 0..32 {
+        if pid == ancestor {
+            return true;
+        }
+        if pid <= 1 {
+            return false;
+        }
+        match parent_of(pid) {
+            Some(p) => pid = p,
+            None => return false,
+        }
+    }
+    false
+}
+
 fn init_run() -> Option<Run> {
     use std::env;
 
-    // Inheritance: trust MORLOC_RUN_DIR only if MORLOC_RUN_PARENT_PID
-    // matches our actual ppid. Defeats stale shell-exported values.
+    // Inheritance: trust MORLOC_RUN_DIR only if MORLOC_RUN_PARENT_PID names a
+    // process we descend from. Defeats stale shell-exported values, whose
+    // publisher is not in our ancestry.
     let dir = env::var("MORLOC_RUN_DIR").ok();
     let ppid = env::var("MORLOC_RUN_PARENT_PID")
         .ok()
         .and_then(|s| s.parse::<i32>().ok());
     if let (Some(d), Some(p)) = (dir, ppid) {
-        if p == unsafe { libc::getppid() } {
+        if descends_from(p) {
             let path = PathBuf::from(&d);
             let id = path
                 .file_name()
@@ -431,4 +490,33 @@ mod tests {
         assert!(a.contains('T') && a.contains('Z'));
     }
 
+    #[test]
+    fn ppid_is_read_from_the_last_paren() {
+        // Ordinary case: comm is a plain name.
+        assert_eq!(parse_ppid_from_stat("42 (python3) S 17 42 42 0 -1").unwrap(), 17);
+        // A comm holding spaces and parentheses: splitting on whitespace or on
+        // the first ')' would read the wrong field.
+        assert_eq!(
+            parse_ppid_from_stat("42 ((weird) name) S 17 42 42 0 -1").unwrap(),
+            17
+        );
+        // Malformed input yields no answer rather than a wrong one.
+        assert!(parse_ppid_from_stat("not a stat line").is_none());
+        assert!(parse_ppid_from_stat("42 (comm) S").is_none());
+    }
+
+    #[test]
+    fn descends_from_accepts_the_immediate_parent() {
+        // The direct-parent case must keep working; it is the whole relation on
+        // platforms where `parent_of` cannot answer.
+        let ppid = unsafe { libc::getppid() };
+        assert!(descends_from(ppid));
+    }
+
+    #[test]
+    fn descends_from_rejects_a_stale_publisher() {
+        // A pid that is not in our ancestry stands for the stale value a shell
+        // exported from an earlier run.
+        assert!(!descends_from(-1));
+    }
 }
