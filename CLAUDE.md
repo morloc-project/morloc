@@ -30,8 +30,14 @@ To run the full heavy integrated test suite, run:
 $ stack test # ONLY do this at the very end of a session; IT IS EXPENSIVE
 
 If you make any change to the non-haskell code in data/, then you MUST run
-`morloc init -f`. This will rebuild shared libraries, the nexus executable, and
-language bindings.
+
+$ MORLOC_RUST_DIR=$PWD/data/rust morloc init -f
+
+from the repo root. This rebuilds shared libraries, the nexus executable, and
+language bindings. `MORLOC_RUST_DIR` is required: a bare `morloc init -f`
+rebuilds from the installed copy of the runtime sources, not your working tree,
+so your edit is silently absent from the library under test and the change
+appears to have no effect.
 
 After changing anything under `data/rust/`, run:
 
