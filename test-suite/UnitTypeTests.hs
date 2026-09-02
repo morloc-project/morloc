@@ -22,6 +22,7 @@ module UnitTypeTests
   , infixOperatorTests
   , recordLiteralOrderTests
   , complexityRegressionTests
+  , definitionArityTests
   , effectSubtypeTests
   , effectSynthesisTests
   , effectErrorTests
@@ -3208,6 +3209,115 @@ recordLiteralOrderTests =
 {- | Tests for typechecker complexity - these would timeout with O(2^n) behavior
 All tests have a 0.1-second timeout to catch exponential blowup
 -}
+-- | Arity agreement between a signature and its definition.
+--
+-- Two behaviours are covered, and both were broken by the same defect: the
+-- lambda-vs-'FunU' check compared the lambda's parameter count against the
+-- OUTERMOST argument list of the expected type, then handed the difference to
+-- 'expand'. A curried signature such as @Int -> (Int -> Int)@ presents one
+-- outer argument, so a legal two-parameter definition looked over-applied and
+-- 'expand' was called with a negative count, which appends a parameter and
+-- recurses without a base case. The compiler never returned.
+--
+-- The timeout on this group is the real assertion for the negative cases: a
+-- regression does not produce a wrong type, it diverges. Every case here
+-- completes in milliseconds once the check normalizes the expected type and
+-- rejects a genuine over-application.
+definitionArityTests :: TestTree
+definitionArityTests =
+  localOption (mkTimeout 2000000) $ -- 2 second timeout; the divergence guard
+    testGroup
+      "Definition arity"
+      [ -- Curried spellings must accept a definition of the flattened arity.
+        assertGeneralType
+          "curried signature, two parameters"
+          [r|
+          foo :: Int -> (Int -> Int)
+          foo x y = x
+          foo
+        |]
+          (fun [int, int, int])
+      , assertGeneralType
+          "curried signature, three parameters"
+          [r|
+          foo :: Int -> (Int -> (Int -> Int))
+          foo x y z = x
+          foo
+        |]
+          (fun [int, int, int, int])
+      , assertGeneralType
+          "curried in the middle"
+          [r|
+          foo :: Int -> (Int -> Int) -> Int
+          foo x f = f x
+          foo
+        |]
+          (fun [int, fun [int, int], int])
+      , assertGeneralType
+          "curried result whose argument is itself a function"
+          [r|
+          foo :: (Int -> Int) -> (Int -> Int)
+          foo f x = f x
+          foo
+        |]
+          (fun [fun [int, int], int, int])
+      , -- Flat spellings keep working, including under-application (which
+        -- eta-expands rather than erroring).
+        assertGeneralType
+          "flat signature, matching arity"
+          [r|
+          foo :: Int -> Int -> Int
+          foo x y = x
+          foo
+        |]
+          (fun [int, int, int])
+      , assertGeneralType
+          "fewer parameters than the type: eta-expansion"
+          [r|
+          add :: Int -> Int -> Int
+          foo :: Int -> Int -> Int
+          foo = add
+          foo
+        |]
+          (fun [int, int, int])
+      , -- Genuine over-application is an error, and must terminate.
+        expectError
+          "one parameter too many"
+          [r|
+          foo :: Int -> Int
+          foo x y = x
+          foo
+        |]
+      , expectError
+          "two parameters too many"
+          [r|
+          foo :: Int -> Int -> Int -> Int
+          foo x y z w = x
+          foo
+        |]
+      , expectError
+          "too many, where the first argument is a function"
+          [r|
+          foo :: (Int -> Int) -> Int
+          foo f x = f x
+          foo
+        |]
+      , expectError
+          "too many against a non-function result"
+          [r|
+          foo :: Int -> [Int]
+          foo x y = [x]
+          foo
+        |]
+      , expectError
+          "too many, polymorphic signature"
+          [r|
+          foo :: a -> a
+          foo x y = x
+          foo
+        |]
+      ]
+
 complexityRegressionTests :: TestTree
 complexityRegressionTests =
   localOption (mkTimeout 1000000) $ -- 1 second timeout

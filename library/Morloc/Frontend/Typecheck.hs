@@ -1646,7 +1646,11 @@ etaExpandSynthE i g1 funType0 funExpr0 _f xs0 = do
     _ -> error "impossible"
 
 expand :: Int -> Int -> Gamma -> ExprS Int f Int -> MorlocMonad (Gamma, ExprS Int f Int)
-expand _ 0 g x = return (g, x)
+-- Guard the whole non-positive range, not just zero. Every caller should have
+-- rejected an over-applied definition before reaching here, but a negative
+-- count would otherwise recurse forever, appending a fresh parameter on each
+-- step and never reaching the base case.
+expand _ n g x | n <= 0 = return (g, x)
 expand parentIdx n g e@(AppS _ _) = do
   newIdx <- MM.getCounterWithPos parentIdx
   let (g', v') = evarname g "v"
@@ -1787,6 +1791,11 @@ foldCheck g (x : xs) t = do
   (g'', t'', xs') <- foldCheck g' xs t'
   return (g'', t'', x' : xs')
 
+-- Singular/plural agreement for arity diagnostics.
+arguments :: Int -> MDoc
+arguments 1 = "argument"
+arguments _ = "arguments"
+
 checkE ::
   Int ->
   Gamma ->
@@ -1829,9 +1838,36 @@ checkE i g0 e0@(LamS vs body) t@(FunU as b)
           e3 = applyCon g2 (LamS vs e2)
 
       return (g2, t3, e3)
-  | otherwise = do
+  -- Fewer parameters than the type has arguments: eta-expand up to the
+  -- expected arity and re-check.
+  | length vs < length as = do
       (g', e') <- expand i (length as - length vs) g0 e0
       checkE' i g' e' t
+  -- More parameters than this arrow group has arguments. A signature written
+  -- @A -> (B -> C)@ parses as @FunU [A] (FunU [B] C)@, so a two-parameter
+  -- definition lands here with one argument to match against. Re-nest the
+  -- surplus parameters into the return type and recurse, which is exactly what
+  -- 'Morloc.Typecheck.Internal.subtype' already does to reconcile the two
+  -- spellings. A genuine arity error still surfaces: the re-nested return
+  -- fails to check because it is not a function.
+  --
+  -- Recursion terminates because each step consumes @length as@ parameters
+  -- (at least one, since @length vs > length as >= 0@ and the @null as@ case
+  -- cannot recur). Do NOT reach for 'expand' here -- it was previously called
+  -- with the negative difference, appending a parameter per step and never
+  -- reaching its base case, which hung the compiler.
+  | not (null as) = do
+      let (vsHere, vsRest) = splitAt (length as) vs
+          g1 = g0 ++> zipWith AnnG vsHere as
+      (g2, t2, e2) <- checkG g1 (AnnoS i i (LamS vsRest body)) b
+      let t3 = apply g2 (FunU as t2)
+          e3 = applyCon g2 (LamS vsHere e2)
+      return (g2, t3, e3)
+  -- A zero-argument arrow group cannot absorb any parameter, so there is
+  -- nothing left to reconcile.
+  | otherwise = throwTypeError i $
+      "This definition takes" <+> pretty (length vs) <+> arguments (length vs)
+      <> ", but its type accepts none. The declared type is:" <+> pretty t
 checkE i g1 e1 (ForallU v a) = do
   checkE' i (g1 +> v) e1 (substitute v a)
 checkE i g (IfS cond thenE elseE) t = do

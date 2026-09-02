@@ -46,6 +46,7 @@ unitTests =
   , substituteTVarTests
   , subtypeTests
   , complexityRegressionTests
+  , definitionArityTests
   , effectSubtypeTests
   , effectSynthesisTests
   , effectErrorTests
