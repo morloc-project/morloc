@@ -329,12 +329,27 @@ fn ret_display(ret: &Return) -> String {
     ret.mime.clone().unwrap_or_else(|| ret.type_desc.clone())
 }
 
+/// What a command puts on standard output, which is not always what it
+/// returns.
+///
+/// A streaming command returns `()` and writes its data through a sink,
+/// so reporting the return type would tell a caller the command produces
+/// nothing. When the compiler recorded a batch type, that is the answer;
+/// otherwise fall back to the return type, which is correct for every
+/// non-streaming command.
+fn stdout_display(cmd: &ManifestCommand) -> String {
+    match &cmd.stream {
+        Some(st) if !st.type_desc.is_empty() => st.type_desc.clone(),
+        _ => ret_display(&cmd.ret),
+    }
+}
+
 fn render_return_block(mcmd: &ManifestCommand, manifest: &Manifest) -> String {
     if mcmd.terminals.is_empty() {
         if mcmd.ret.type_desc.is_empty() {
             return String::new();
         }
-        let mut block = format!("Return: {}", ret_display(&mcmd.ret));
+        let mut block = format!("Return: {}", stdout_display(mcmd));
         for line in &mcmd.ret.desc {
             block.push_str(&format!("\n  {}", line));
         }
@@ -346,15 +361,24 @@ fn render_return_block(mcmd: &ManifestCommand, manifest: &Manifest) -> String {
     // malformed manifest) contributes an empty type rather than being
     // dropped, so the row still documents the flag.
     let mut rows: Vec<(String, String)> = Vec::with_capacity(mcmd.terminals.len() + 1);
-    rows.push(("default".to_string(), ret_display(&mcmd.ret)));
+    rows.push(("default".to_string(), stdout_display(mcmd)));
     for t in &mcmd.terminals {
         let label = match t.short {
             Some(c) => format!("-{}/--{}", c, t.long),
             None => format!("--{}", t.long),
         };
+        // A `render` action writes its bytes verbatim, so `-f` does not
+        // apply to it; say so rather than leave the reader to find out.
         let ret = t
             .resolve_entry(manifest)
-            .map(|c| ret_display(&c.ret))
+            .map(|c| {
+                let base = stdout_display(c);
+                if t.render && !base.is_empty() {
+                    format!("{}    (raw bytes)", base)
+                } else {
+                    base
+                }
+            })
             .unwrap_or_default();
         rows.push((label, ret));
     }

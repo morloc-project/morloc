@@ -3740,11 +3740,12 @@ data PState = PState
   , psWarnings    :: ![Text] -- docstring warnings accumulated during desugar
   , psModuleDoc   :: ![Text] -- module-level description
   , psModuleEpilogues :: ![[Text]] -- epilogue blocks
+  , psStreamElems :: !(Map.Map EVar TypeU) -- @collect batch type per command
   }
   deriving (Show)
 
 emptyPState :: PState
-emptyPState = PState 1 Map.empty Nothing defaultValue Map.empty [] Map.empty Nothing Map.empty [] [] []
+emptyPState = PState 1 Map.empty Nothing defaultValue Map.empty [] Map.empty Nothing Map.empty [] [] [] Map.empty
 
 type P a = State.StateT PState (Either ParseError) a
 
@@ -3970,6 +3971,7 @@ toDState ps = DState
   , dsWarnings = psWarnings ps
   , dsModuleDoc = psModuleDoc ps
   , dsModuleEpilogues = psModuleEpilogues ps
+  , dsStreamElems = psStreamElems ps
   }
 
 fromDState :: PState -> DState -> PState
@@ -3980,6 +3982,7 @@ fromDState ps ds = ps
   , psWarnings = dsWarnings ds
   , psModuleDoc = dsModuleDoc ds
   , psModuleEpilogues = dsModuleEpilogues ds
+  , psStreamElems = dsStreamElems ds
   }
 
 -- | Run parse + desugar

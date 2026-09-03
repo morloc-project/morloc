@@ -111,6 +111,11 @@ data DState = DState
   , dsWarnings :: ![Text] -- accumulated docstring warnings, drained by the caller
   , dsModuleDoc :: ![Text] -- module-level description lines
   , dsModuleEpilogues :: ![[Text]] -- epilogue blocks for top-level help
+  , dsStreamElems :: !(Map.Map EVar TypeU)
+    -- ^ For each command whose body reaches `@collect`, the batch type
+    -- it writes to standard output. Such a command returns `()` at the
+    -- morloc level, so nothing downstream can recover what a caller
+    -- actually receives from the signature alone.
   }
   deriving (Show)
 
@@ -2701,6 +2706,7 @@ desugarProgram isImplicitMain cstNodes = do
 injectTerminalActionsWithSigs :: Map.Map EVar TypeU -> ExprI -> D ExprI
 injectTerminalActionsWithSigs importedSigs (ExprI i (ModE mv body)) = do
   rejectReservedMlcpPrefix body
+  recordStreamElems importedSigs body
   body' <- expandWithBindings importedSigs body
   return (ExprI i (ModE mv body'))
 injectTerminalActionsWithSigs _ e = return e
@@ -2740,6 +2746,27 @@ rejectReservedMlcpPrefix body =
     pick e@(ExprI _ (AssE n _ _)) = [(e, n)]
     pick e@(ExprI _ (SrcE src)) = [(e, srcAlias src)]
     pick _ = []
+
+-- | Record the batch type of every streaming command in the module.
+--
+-- Runs over the whole module body rather than only over commands
+-- carrying a `--' with:` directive, because a bare `@collect` command
+-- with no output actions still writes a stream to standard output and
+-- still has to be able to say what it writes. Commands whose producer
+-- has no reachable signature are simply absent from the map.
+recordStreamElems :: Map.Map EVar TypeU -> [ExprI] -> D ()
+recordStreamElems importedSigs body = do
+  let localSigs = Map.fromList
+        [ (n, etype et) | ExprI _ (SigE (Signature n _ et)) <- body ]
+      sigs = Map.union localSigs importedSigs
+      found = Map.fromList
+        [ (n, t)
+        | e@(ExprI _ (AssE n _ _)) <- body
+        , containsCollect e
+        , Just t <- [collectStreamType sigs e]
+        ]
+  State.modify $ \st ->
+    st { dsStreamElems = Map.union found (dsStreamElems st) }
 
 expandWithBindings :: Map.Map EVar TypeU -> [ExprI] -> D [ExprI]
 expandWithBindings importedSigs body =
@@ -2909,6 +2936,71 @@ containsCollect (ExprI _ e) = case e of
   BopE l _ _ r -> containsCollect l || containsCollect r
   _ -> False
 
+-- | The batch type a `@collect` command writes to standard output.
+--
+-- A streaming command returns `()` at the morloc level: its data leaves
+-- through a sink rather than the return slot, so nothing downstream can
+-- recover what a caller receives from the signature alone. The
+-- producer's declared type can. `@collect` takes a function of exactly
+-- one parameter -- the sink -- so however many arguments were already
+-- applied to the producer, the sink is the last parameter of its full
+-- signature, and the sink's own parameter is the batch that reaches
+-- standard output.
+--
+-- Returns Nothing when the producer is not a named term with a
+-- signature (an inline lambda, say). The caller must then report that
+-- it does not know rather than claim the function's `()`.
+collectStreamType :: Map.Map EVar TypeU -> ExprI -> Maybe TypeU
+collectStreamType sigs body = do
+  arg <- findCollectArg body
+  producer <- headVarOf arg
+  sig <- Map.lookup producer sigs
+  sink <- lastParamOf (peelForall sig)
+  firstParamOf (peelForall sink)
+  where
+    -- The expression `@collect` was applied to, if the body reaches one.
+    findCollectArg :: ExprI -> Maybe ExprI
+    findCollectArg (ExprI _ e) = case e of
+      IntrinsicE IntrCollect (a : _) -> Just a
+      ModE _ xs -> firstJust (map findCollectArg xs)
+      AssE _ b ws -> firstJust (map findCollectArg (b : ws))
+      IstE _ _ b -> firstJust (map findCollectArg b)
+      LstE es -> firstJust (map findCollectArg es)
+      TupE es -> firstJust (map findCollectArg es)
+      NamE kes -> firstJust (map (findCollectArg . snd) kes)
+      AppE f xs -> firstJust (map findCollectArg (f : xs))
+      LamE _ b -> findCollectArg b
+      AnnE b _ -> findCollectArg b
+      LetE bs b -> firstJust (map (findCollectArg . snd) bs ++ [findCollectArg b])
+      IfE c t f -> firstJust [findCollectArg c, findCollectArg t, findCollectArg f]
+      DoBlockE b -> findCollectArg b
+      EvalE b -> findCollectArg b
+      IntrinsicE _ es -> firstJust (map findCollectArg es)
+      ParenE b -> findCollectArg b
+      BopE l _ _ r -> firstJust [findCollectArg l, findCollectArg r]
+      _ -> Nothing
+
+    -- The term at the head of a (possibly partial) application.
+    headVarOf :: ExprI -> Maybe EVar
+    headVarOf (ExprI _ e) = case e of
+      VarE _ v -> Just v
+      AppE f _ -> headVarOf f
+      ParenE b -> headVarOf b
+      AnnE b _ -> headVarOf b
+      _ -> Nothing
+
+    peelForall (ForallU _ t) = peelForall t
+    peelForall (EffectU _ t) = peelForall t
+    peelForall t = t
+
+    lastParamOf (FunU ts _) | not (null ts) = Just (last ts)
+    lastParamOf _ = Nothing
+
+    firstParamOf (FunU (t : _) _) = Just t
+    firstParamOf _ = Nothing
+
+    firstJust = foldr (\x acc -> maybe acc Just x) Nothing
+
 -- | Synthesize a `--' with:` flag command for a streaming (@collect) parent.
 -- Reuses the parent's body (re-indexed with fresh ids to avoid annotation
 -- collisions), rewriting every @collect node per flag:
@@ -2930,7 +3022,13 @@ synthStreamingBinding sp parentName assI sigMap (WithSpec _ long tTerm render st
       --             (nexus formats `[b]`); `render` handler `... [a] -> Str` ->
       --             sink [handler .. c] (one Str per batch, emitted verbatim).
       -- `@offset` in argSrcs binds `off <- @tell` and places it in the arg list.
-      withParentBody $ \bodyExpr wheres -> do
+      do
+        -- The synthesized entry returns `()` like its parent, but what it
+        -- writes per batch is the handler's own result. Record it here,
+        -- where the handler's signature is in scope, so the entry can
+        -- report what a caller receives rather than the `()` it returns.
+        recordHandlerStream (mangleTerminalName parentName long)
+        withParentBody $ \bodyExpr wheres -> do
           bodyExpr' <- composeHandlerIntoCollect render parentParams argSrcs tTerm bodyExpr
           wheres' <- mapM (composeHandlerIntoCollect render parentParams argSrcs tTerm) wheres
           return (bodyExpr', wheres')
@@ -2946,6 +3044,23 @@ synthStreamingBinding sp parentName assI sigMap (WithSpec _ long tTerm render st
           wheres' <- mapM (composeWholeIntoCollect useIFile parentParams argSrcs tTerm) wheres
           return (bodyExpr', wheres')
   where
+    -- The handler's declared return type is what reaches standard output
+    -- once per batch. Absent when the handler has no reachable
+    -- signature, in which case the entry says nothing rather than
+    -- claiming its `()`.
+    recordHandlerStream :: EVar -> D ()
+    recordHandlerStream name = case returnOf =<< Map.lookup tTerm sigMap of
+      Nothing -> return ()
+      Just rt -> State.modify $ \st ->
+        st { dsStreamElems = Map.insert name rt (dsStreamElems st) }
+      where
+        returnOf t = case peel t of
+          FunU _ r -> Just (peel r)
+          _ -> Nothing
+        peel (ForallU _ t) = peel t
+        peel (EffectU _ t) = peel t
+        peel t = t
+
     -- the parent's top-level positional parameters (in scope at every @collect
     -- site in the duplicated body); `$N` references index into these.
     parentParams = case assI of

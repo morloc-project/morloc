@@ -86,6 +86,11 @@ data FData = FData
     -- Consumed at emit time to derive per-entry wire schemas for
     -- group args (see 'groupEntryWireSchemas').
   , fdataReturnSchema :: Text
+  , fdataReturnGeneralSchema :: Text
+    -- ^ The return's wire schema with concrete-type hints stripped.
+    -- 'fdataReturnSchema' is what the pool speaks and is what dispatch
+    -- uses; this is what the interface publishes, so it does not move
+    -- when the implementation language does.
   , fdataCmdDocSet :: CmdDocSet
   }
 
@@ -99,6 +104,9 @@ data GastData = GastData
   , commandDocs :: CmdDocSet
   , commandExpr :: NexusExpr
   , commandReturnSchema :: Text
+  , commandReturnGeneralSchema :: Text
+    -- ^ Hint-stripped return schema. Same role as
+    -- 'fdataReturnGeneralSchema'.
   , commandArgSchemas :: [Text]
   , commandArgAsts :: [SerialAST]
     -- ^ Per-arg SerialAST, index-aligned with 'commandArgSchemas'.
@@ -306,6 +314,7 @@ getFData (t, i, lang, doc, sockets) = do
   (argAsts, returnAst) <- makeSerialASTs i lang t
   let argSchemas    = map (render . Serial.serialAstToMsgpackSchema) argAsts
       returnSchema  = render (Serial.serialAstToMsgpackSchema returnAst)
+      returnGeneral = render (Serial.serialAstToGeneralSchema returnAst)
   -- Validate wire-shape constraints and default values now that the
   -- SerialASTs are in hand. The rendered schema texts are reused
   -- here so the validator never re-renders.
@@ -324,6 +333,7 @@ getFData (t, i, lang, doc, sockets) = do
       , fdataArgSchemas = argSchemas
       , fdataArgAsts = argAsts
       , fdataReturnSchema = returnSchema
+      , fdataReturnGeneralSchema = returnGeneral
       , fdataCmdDocSet = doc
       }
 
@@ -576,8 +586,9 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
   checkExportedHigherOrder i gname gtype
 
   (retAst, argAsts) <- makeGastSerialASTs i gtype
-  let returnSchema = render (Serial.serialAstToMsgpackSchema retAst)
-      argSchemas   = map (render . Serial.serialAstToMsgpackSchema) argAsts
+  let returnSchema  = render (Serial.serialAstToMsgpackSchema retAst)
+      returnGeneral = render (Serial.serialAstToGeneralSchema retAst)
+      argSchemas    = map (render . Serial.serialAstToMsgpackSchema) argAsts
   validateArgSpecs i (cmdDocArgs docs) argAsts argSchemas
   validateReturnMime i (cmdDocRetMime docs) retAst
   expr <- toNexusExpr x0
@@ -591,6 +602,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       , commandDocs = docs
       , commandExpr = expr
       , commandReturnSchema = returnSchema
+      , commandReturnGeneralSchema = returnGeneral
       , commandArgSchemas = argSchemas
       , commandArgAsts = argAsts
       }
@@ -1168,13 +1180,15 @@ groupEntryWireSchemas ast0 = case peelPack ast0 of
 --                     (source, quoted, format hint). Distinct from
 --                     @mEmit@ so a group entry can resolve defaults
 --                     against its own wire schema without emitting one.
+--   * @mGeneral@      hint-stripped form of @mEmit@, emitted alongside
+--                     it as "general_schema".
 --   * @entrySchemas@  per-entry wire schemas for 'CmdArgGrp'; unused
 --                     for pos/opt/flag.
-argToJson :: Maybe Text -> Maybe Text -> [(Key, Text)] -> CmdArg -> Text
-argToJson mEmit mShape _ (CmdArgPos r) =
+argToJson :: Maybe Text -> Maybe Text -> Maybe Text -> [(Key, Text)] -> CmdArg -> Text
+argToJson mEmit mGeneral mShape _ (CmdArgPos r) =
   jsonObj $
     [ ("kind", jsonStr "pos") ]
-    ++ schemaField mEmit
+    ++ schemaField mEmit mGeneral
     ++ [ ("type", jsonStr (typeDescStr (argPosDocType r)))
        , ("name", jsonMaybeStr (argPosDocName r))
        , ("metavar", jsonMaybeStr (argPosDocMetavar r))
@@ -1189,10 +1203,10 @@ argToJson mEmit mShape _ (CmdArgPos r) =
          (argPosDocLiteral r)
          (argPosDocSource r) (argPosDocForm r) (argPosDocChecks r)
          (argPosDocListSource r) (argPosDocListForm r) (argPosDocListChecks r)
-argToJson mEmit mShape _ (CmdArgOpt r) =
+argToJson mEmit mGeneral mShape _ (CmdArgOpt r) =
   jsonObj $
     [ ("kind", jsonStr "opt") ]
-    ++ schemaField mEmit
+    ++ schemaField mEmit mGeneral
     ++ [ ("type", jsonStr (typeDescStr (argOptDocType r)))
        , ("metavar", jsonStr (argOptDocMetavar r))
        , ("quoted", jsonBool (isQuotedArg (argOptDocLiteral r) (argOptDocSource r) (argOptDocMany r) mShape))
@@ -1208,7 +1222,7 @@ argToJson mEmit mShape _ (CmdArgOpt r) =
          (argOptDocLiteral r)
          (argOptDocSource r) (argOptDocForm r) (argOptDocChecks r)
          (argOptDocListSource r) (argOptDocListForm r) (argOptDocListChecks r)
-argToJson _ _ _ (CmdArgFlag r) =
+argToJson _ _ _ _ (CmdArgFlag r) =
   jsonObj
     [ ("kind", jsonStr "flag")
     , ("short", cliOptShortJson (argFlagDocOpt r))
@@ -1218,10 +1232,10 @@ argToJson _ _ _ (CmdArgFlag r) =
     , ("desc", jsonStrArr (argFlagDocDesc r))
     , ("metadata", metadataEmpty)
     ]
-argToJson mEmit _ entrySchemas (CmdArgGrp r) =
+argToJson mEmit mGeneral _ entrySchemas (CmdArgGrp r) =
   jsonObj $
     [ ("kind", jsonStr "grp") ]
-    ++ schemaField mEmit
+    ++ schemaField mEmit mGeneral
     ++ [ ("type", jsonStr (render (pretty (recDocType r))))
        , ("metavar", jsonStr (recDocMetavar r))
        , ("desc", jsonStrArr (recDocDesc r))
@@ -1243,16 +1257,22 @@ argToJson mEmit _ entrySchemas (CmdArgGrp r) =
     grpEntryJson key entry =
       jsonObj
         [ ("key", jsonStr (unKey key))
-        , ("arg", argToJson Nothing (lookup key entrySchemas) []
+        , ("arg", argToJson Nothing Nothing (lookup key entrySchemas) []
                     (either CmdArgFlag CmdArgOpt entry))
         ]
 
--- | Prefixed @schema@ field when a schema is present, otherwise empty.
--- Used by 'argToJson' to splice the field into the per-variant field
--- list in a consistent position.
-schemaField :: Maybe Text -> [(Text, Text)]
-schemaField Nothing  = []
-schemaField (Just s) = [("schema", jsonStr s)]
+-- | The two schema slots for a typed arg. Spliced by 'argToJson' into
+-- the per-variant field list in a consistent position. @schema@ is the concrete
+-- (pool-resolved) form the runtime dispatches on; @general_schema@ is
+-- the same form with concrete-type hints stripped, which is what the
+-- machine-readable help publishes as the interface's data contract.
+-- Emitting both keeps dispatch exact without publishing a contract
+-- that moves when the implementation language does.
+schemaField :: Maybe Text -> Maybe Text -> [(Text, Text)]
+schemaField Nothing _ = []
+schemaField (Just s) mGen =
+  ("schema", jsonStr s)
+    : maybe [] (\g -> [("general_schema", jsonStr g)]) mGen
 
 -- | Compute the `quoted` flag emitted for a typed CLI arg. The flag
 -- tells the nexus to JSON-wrap the argv string before handing it to
@@ -2307,6 +2327,11 @@ data ManifestInputs = ManifestInputs
     -- description shown against a `--' with:` flag in `--help`
     -- (the referenced term's own docstring becomes the flag's help
     -- text).
+  , miStreamElems         :: !(Map.Map EVar (Text, Text))
+    -- ^ For each @collect command, keyed by term name: the batch type
+    -- it writes to standard output, rendered as a caller reads it, and
+    -- that type's general wire schema. A streaming command returns
+    -- @()@, so this is the only record of what a caller receives.
   }
 
 buildManifest :: ManifestInputs -> Text
@@ -2409,9 +2434,24 @@ buildManifest ManifestInputs{..} =
       Just gname -> ("group", jsonStr gname)
       Nothing -> ("group", jsonNull)
 
+    -- A `@collect` command's stdout carries a stream of batches, not its
+    -- `()` return value. Emit what it writes so a consumer is not left
+    -- reading `Unit` and concluding the command produces nothing. Absent
+    -- when the producer has no reachable signature -- saying nothing is
+    -- correct there, claiming `()` is not.
+    streamField :: Text -> [(Text, Text)]
+    streamField termName = case Map.lookup (EV termName) miStreamElems of
+      Nothing -> []
+      Just (tstr, schema) ->
+        [ ("stream", jsonObj
+            [ ("type", jsonStr tstr)
+            , ("schema", jsonStr schema)
+            ])
+        ]
+
     remoteCmdJson :: FData -> Text
     remoteCmdJson fd =
-      jsonObj
+      jsonObj $
         [ ("name", jsonStr (fdataSubcommand fd))
         , ("type", jsonStr "remote")
         , ("mid", jsonInt (fdataMid fd))
@@ -2419,7 +2459,7 @@ buildManifest ManifestInputs{..} =
         , ("needed_pools", jsonArr (map (jsonInt . miLangToPool . socketLang) (fdataSubSockets fd)))
         , ("desc", jsonStrArr (cmdDocDesc (fdataCmdDocSet fd)))
         , ("args", argsJson (cmdDocArgs (fdataCmdDocSet fd)) (fdataArgSchemas fd) (fdataArgAsts fd))
-        , ("return", returnJson (fdataReturnSchema fd) (fst (cmdDocRet (fdataCmdDocSet fd))) (snd (cmdDocRet (fdataCmdDocSet fd))) (cmdDocRetMime (fdataCmdDocSet fd)))
+        , ("return", returnJson (fdataReturnSchema fd) (fdataReturnGeneralSchema fd) (fst (cmdDocRet (fdataCmdDocSet fd))) (snd (cmdDocRet (fdataCmdDocSet fd))) (cmdDocRetMime (fdataCmdDocSet fd)))
         , ("constraints", jsonArr [])
         , ("internal", jsonBool (isInternalTerminalName (fdataTermName fd)))
         -- Terminals array must use the ORIGINAL term name so the
@@ -2431,15 +2471,16 @@ buildManifest ManifestInputs{..} =
         , ("metadata", metadataEmpty)
         , cmdGroupField (fdataMid fd)
         ]
+        <> streamField (fdataTermName fd)
 
     pureCmdJson :: GastData -> Text
     pureCmdJson g =
-      jsonObj
+      jsonObj $
         [ ("name", jsonStr (commandName g))
         , ("type", jsonStr "pure")
         , ("desc", jsonStrArr (cmdDocDesc (commandDocs g)))
         , ("args", argsJson (cmdDocArgs (commandDocs g)) (commandArgSchemas g) (commandArgAsts g))
-        , ("return", returnJson (commandReturnSchema g) (fst (cmdDocRet (commandDocs g))) (snd (cmdDocRet (commandDocs g))) (cmdDocRetMime (commandDocs g)))
+        , ("return", returnJson (commandReturnSchema g) (commandReturnGeneralSchema g) (fst (cmdDocRet (commandDocs g))) (snd (cmdDocRet (commandDocs g))) (cmdDocRetMime (commandDocs g)))
         , ("expr", exprToJson (commandExpr g))
         , ("constraints", jsonArr [])
         , ("internal", jsonBool (isInternalTerminalName (commandTermName g)))
@@ -2448,6 +2489,7 @@ buildManifest ManifestInputs{..} =
         , ("metadata", metadataEmpty)
         , cmdGroupField (commandMid g)
         ]
+        <> streamField (commandTermName g)
 
     -- Emit the `terminals` array for one command. The description
     -- comes from the referenced term's own top-level docstring; the
@@ -2494,20 +2536,22 @@ buildManifest ManifestInputs{..} =
         walk [] _ _ = []
         -- Flags consume a schema slot but emit no `schema` field.
         walk (a@(CmdArgFlag _) : rest) (_ : ss) (_ : as) =
-          argToJson Nothing Nothing [] a : walk rest ss as
+          argToJson Nothing Nothing Nothing [] a : walk rest ss as
         walk (a : rest) (s : ss) (ast : as) =
           let entries = case a of
                           CmdArgGrp _ -> groupEntryWireSchemas ast
                           _           -> []
-          in argToJson (Just s) (Just s) entries a : walk rest ss as
+              gen = render (Serial.serialAstToGeneralSchema ast)
+          in argToJson (Just s) (Just gen) (Just s) entries a : walk rest ss as
         walk (a : rest) [] _ =
           -- Defensive: more args than schemas. Emit with no schema so
           -- we fail cleanly downstream rather than silently misaligning.
-          argToJson Nothing Nothing [] a : walk rest [] []
+          argToJson Nothing Nothing Nothing [] a : walk rest [] []
         walk (a : rest) (s : ss) [] =
           -- Defensive: validateArgSpecs should have caught this. Emit
-          -- with no per-entry schemas rather than crash.
-          argToJson (Just s) (Just s) [] a : walk rest ss []
+          -- with no per-entry schemas rather than crash. Without the
+          -- AST there is no general form to derive.
+          argToJson (Just s) Nothing (Just s) [] a : walk rest ss []
 
     -- Nested @return@ object replacing v1's flat @return_schema@ /
     -- @return_type@ / @return_desc@. Also carries @constraints@ and
@@ -2518,11 +2562,12 @@ buildManifest ManifestInputs{..} =
     -- caller receives rather than the name the signature used. The
     -- 'returnTypeOnly' peel below is still needed for the doc-set
     -- branches that carry a whole function type.
-    returnJson :: Text -> Type -> [Text] -> Maybe Text -> Text
-    returnJson schema t desc mmime =
+    returnJson :: Text -> Text -> Type -> [Text] -> Maybe Text -> Text
+    returnJson schema generalSchema t desc mmime =
       let retT = stripThunks (returnTypeOnly t)
       in jsonObj $
         [ ("schema", jsonStr schema)
+        , ("general_schema", jsonStr generalSchema)
         , ("type", jsonStr (renderCliType retT))
         , ("desc", jsonStrArr desc)
         , ("constraints", constraintsJsonFor retT)
@@ -2650,6 +2695,19 @@ generate cs rASTs helperRASTs = do
   -- @profile@) accumulate the same way.
   let capabilities = "log" : ["debug_trace" | debugTrace]
   termDocs <- MM.gets stateTermDocs
+  streamElemTypes <- MM.gets stateStreamElems
+  -- Resolve each streaming command's batch type to the pair the manifest
+  -- publishes: the type as a caller reads it, and its general wire
+  -- schema. Indexed by the command's own manifold so a conversion
+  -- failure points at the command rather than at the manifest builder.
+  let streamMids =
+        Map.fromList $ [ (EV (fdataTermName fd), fdataMid fd) | fd <- fdata ]
+                    <> [ (EV (commandTermName g), commandMid g) | g <- gasts ]
+  streamElems <- fmap Map.fromList . CM.forM (Map.toList streamElemTypes) $ \(ev, tu) -> do
+    let i = Map.findWithDefault 0 ev streamMids
+        t = typeOf tu
+    ast <- generalTypeToSerialAST i t
+    return (ev, (renderCliType t, render (Serial.serialAstToGeneralSchema ast)))
 
   let manifestJson =
         buildManifest
@@ -2674,6 +2732,7 @@ generate cs rASTs helperRASTs = do
             , miRunLog              = runLog
             , miCapabilities        = capabilities
             , miTermDocs            = termDocs
+            , miStreamElems         = streamElems
             }
 
   -- Launcher wrappers. Each is a pure-shell script that execs

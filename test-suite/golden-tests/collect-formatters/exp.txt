@@ -207,12 +207,12 @@ OK: @close on non-temp path rejected
 leftover morloc-gather files: 0
 === streamInts --help Return block (per-formatter return types) ===
 Return:
-  default:       Unit
+  default:       [Int]
   -s/--sorted:   [Int]
   -m/--summary:  Int
-  -t/--tagged:   Unit
-  -T/--tag-off:  Unit
-  -r/--text:     Unit
-  -R/--text-off: Unit
+  -t/--tagged:   [Int]
+  -T/--tag-off:  [Int]
+  -r/--text:     Str    (raw bytes)
+  -R/--text-off: Str    (raw bytes)
 === mlcp_ hidden from top-level --help (expect 0) ===
 0

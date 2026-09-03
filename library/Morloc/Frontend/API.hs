@@ -171,6 +171,7 @@ parse f (Code code) = do
         MM.modify (\st -> st
           { stateSourceMap = psSourceMap s <> stateSourceMap st
           , stateTermDocs = psTermDocs s <> stateTermDocs st
+          , stateStreamElems = psStreamElems s <> stateStreamElems st
           })
         -- emit any docstring warnings accumulated during desugar
         case psWarnings s of
@@ -256,7 +257,14 @@ finalizeCollectActions dag = do
       MM.throwSystemError . pretty $
         Desugar.showParseError "<terminal-action synthesis>" err
     Right (entries, dsFinal) -> do
-      MM.modify (\st -> st {stateSourceMap = Desugar.dsSourceMap dsFinal})
+      -- The stream-batch types are discovered by this pass (it is the
+      -- first point where every module's signatures are visible), so
+      -- they are transferred from its final state rather than from the
+      -- parser's.
+      MM.modify (\st -> st
+        { stateSourceMap = Desugar.dsSourceMap dsFinal
+        , stateStreamElems = Desugar.dsStreamElems dsFinal <> stateStreamElems st
+        })
       case Desugar.dsWarnings dsFinal of
         [] -> return ()
         ws -> MM.tell ws
@@ -280,6 +288,7 @@ mkFinalizeDState idx srcMap = Desugar.DState
   , Desugar.dsWarnings = []
   , Desugar.dsModuleDoc = []
   , Desugar.dsModuleEpilogues = []
+  , Desugar.dsStreamElems = Map.empty
   }
 
 -- | For each module, the term signatures visible to it: its own top-level

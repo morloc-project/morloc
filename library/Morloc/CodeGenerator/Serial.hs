@@ -26,6 +26,7 @@ module Morloc.CodeGenerator.Serial
   , serialAstToType
   , shallowType
   , serialAstToMsgpackSchema
+  , serialAstToGeneralSchema
   , encode64
   , decode64
   ) where
@@ -184,7 +185,24 @@ encode64D i = pretty (encode64 i)
 -- 'collectRecursiveNames' computes that set so non-recursive records
 -- keep their previous, unprefixed wire form (no regression).
 serialAstToMsgpackSchema :: SerialAST -> MDoc
-serialAstToMsgpackSchema ast = emit ast
+serialAstToMsgpackSchema = serialAstToSchemaWith addHint
+
+-- | The same wire schema with every concrete-type hint omitted.
+--
+-- A hint (@\<dict\>@, @\<Point\>@) names the container the *pool's*
+-- language builds, so it is a property of the implementation rather
+-- than of the interface: recompiling the same signature against a
+-- different @root-*@ changes it while changing nothing a caller can
+-- observe. The dispatch path needs the concrete form -- that is what
+-- the pool speaks -- but anything published as the program's data
+-- contract needs this one.
+serialAstToGeneralSchema :: SerialAST -> MDoc
+serialAstToGeneralSchema = serialAstToSchemaWith (const "")
+
+-- | Shared schema emitter. 'addHint' is the only clause that differs
+-- between the concrete and general forms, so it is the only parameter.
+serialAstToSchemaWith :: (FVar -> MDoc) -> SerialAST -> MDoc
+serialAstToSchemaWith addHint ast = emit ast
   where
     recNames :: Set.Set TVar
     recNames = collectRecursiveNames ast

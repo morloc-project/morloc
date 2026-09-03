@@ -855,15 +855,24 @@ instance JSON.FromJSON ProgramCommand where
       <*> o JSON..:? "arg_schemas" JSON..!= []
       <*> o JSON..:? "internal" JSON..!= False
     where
-      -- The return type lives inside the command's nested `return`
-      -- object, beside the schema and description. A missing or
-      -- malformed slot yields "", which the caller renders as a bare
-      -- command name.
+      -- What the command puts on standard output. A streaming command
+      -- returns `()` and writes its data through a sink, so its `stream`
+      -- object is the answer where it has one; otherwise the type lives
+      -- inside the nested `return` object, beside the schema and
+      -- description. A missing or malformed slot yields "", which the
+      -- caller renders as a bare command name.
       parseReturnType o = do
-        mret <- o JSON..:? "return"
-        case mret of
+        mstream <- o JSON..:? "stream"
+        streamType <- case mstream of
           Nothing -> return ""
-          Just ret -> JSON.withObject "return" (\r -> r JSON..:? "type" JSON..!= "") ret
+          Just st -> JSON.withObject "stream" (\r -> r JSON..:? "type" JSON..!= "") st
+        if not (T.null streamType)
+          then return streamType
+          else do
+            mret <- o JSON..:? "return"
+            case mret of
+              Nothing -> return ""
+              Just ret -> JSON.withObject "return" (\r -> r JSON..:? "type" JSON..!= "") ret
 
 -- | Check if pattern is a subsequence of the target string (case-insensitive)
 subsequenceMatch :: String -> String -> Bool

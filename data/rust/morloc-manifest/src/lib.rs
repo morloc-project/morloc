@@ -287,6 +287,16 @@ pub struct Command {
     /// returns (use a Nil schema in that case).
     #[serde(default, rename = "return")]
     pub ret: Return,
+    /// What this command writes to standard output when it streams.
+    ///
+    /// A `@collect` command returns `()` -- its data leaves through a
+    /// sink rather than the return slot -- so `ret` describes the
+    /// function while this describes the command line. Present only on
+    /// streaming commands, and only when the compiler could determine
+    /// the batch type; `None` means "not a stream, or not known",
+    /// never "produces nothing".
+    #[serde(default)]
+    pub stream: Option<Stream>,
     /// **Reserved.** Command-level constraints -- invariants that span
     /// multiple arguments (e.g. `equal_length` of two list args).
     /// Empty in v2; populated when the constraint system rolls out.
@@ -391,6 +401,19 @@ impl Terminal {
     }
 }
 
+/// The batch a streaming command writes to standard output, once per
+/// call to its sink. See [`Command::stream`].
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct Stream {
+    /// The batch type as a caller reads it (e.g. `"[Hit]"`).
+    #[serde(default, rename = "type")]
+    pub type_desc: String,
+    /// The batch's general wire schema -- hints stripped, as with
+    /// [`Arg::general_schema_str`].
+    #[serde(default)]
+    pub schema: String,
+}
+
 /// Return-value descriptor. Structurally similar to a typed [`Arg`]
 /// minus the CLI-specific fields (kind, metavar, quoted, short/long,
 /// default). Always present on every command.
@@ -402,6 +425,11 @@ pub struct Return {
     /// pool process.
     #[serde(default)]
     pub schema: String,
+    /// Hint-stripped form of `schema`; see the per-arg field of the
+    /// same name. Empty on manifests written before the field existed,
+    /// in which case fall back to `schema`.
+    #[serde(default)]
+    pub general_schema: String,
     /// User-facing type name as written in the morloc source (e.g.
     /// `"Int"`, `"Config"`, `"[Int]"`). Used in help output and error
     /// messages. JSON key is `type`; the Rust field is `type_desc`
@@ -566,6 +594,15 @@ pub enum Arg {
         /// to parse the user's CLI input into a binary data packet.
         #[serde(default)]
         schema: Option<String>,
+        /// The same wire schema with concrete-type hints stripped. A
+        /// hint (`<dict>`, `<Point>`) names the container the *pool's*
+        /// language builds, so it moves when the implementation
+        /// language does while nothing a caller can observe changes.
+        /// Dispatch uses `schema`; anything published as the program's
+        /// data contract uses this. Absent on manifests written before
+        /// the field existed, in which case fall back to `schema`.
+        #[serde(default)]
+        general_schema: Option<String>,
         /// User-facing type name (e.g. `"Int"`, `"Config"`). The Rust
         /// field is `type_desc` because `type` is a reserved keyword.
         #[serde(default, rename = "type")]
@@ -643,6 +680,15 @@ pub enum Arg {
         /// Morloc serialization schema for the option's value type.
         #[serde(default)]
         schema: Option<String>,
+        /// The same wire schema with concrete-type hints stripped. A
+        /// hint (`<dict>`, `<Point>`) names the container the *pool's*
+        /// language builds, so it moves when the implementation
+        /// language does while nothing a caller can observe changes.
+        /// Dispatch uses `schema`; anything published as the program's
+        /// data contract uses this. Absent on manifests written before
+        /// the field existed, in which case fall back to `schema`.
+        #[serde(default)]
+        general_schema: Option<String>,
         /// User-facing type name. JSON key is `type`.
         #[serde(default, rename = "type")]
         type_desc: Option<String>,
@@ -737,6 +783,15 @@ pub enum Arg {
         /// Morloc schema for the whole record (a `Map` schema).
         #[serde(default)]
         schema: Option<String>,
+        /// The same wire schema with concrete-type hints stripped. A
+        /// hint (`<dict>`, `<Point>`) names the container the *pool's*
+        /// language builds, so it moves when the implementation
+        /// language does while nothing a caller can observe changes.
+        /// Dispatch uses `schema`; anything published as the program's
+        /// data contract uses this. Absent on manifests written before
+        /// the field existed, in which case fall back to `schema`.
+        #[serde(default)]
+        general_schema: Option<String>,
         /// User-facing record type name (e.g. `"SysConfig"`).
         #[serde(default, rename = "type")]
         type_desc: Option<String>,
@@ -965,6 +1020,20 @@ impl Arg {
             | Arg::Group { schema, .. } => schema.as_deref(),
             Arg::Flag { .. } => None,
         }
+    }
+
+    /// The hint-stripped wire schema, falling back to the concrete one
+    /// when a manifest predates the field. Use this wherever the schema
+    /// is published as the program's interface rather than used to
+    /// dispatch.
+    pub fn general_schema_str(&self) -> Option<&str> {
+        let general = match self {
+            Arg::Positional { general_schema, .. }
+            | Arg::Optional { general_schema, .. }
+            | Arg::Group { general_schema, .. } => general_schema.as_deref(),
+            Arg::Flag { .. } => None,
+        };
+        general.or_else(|| self.schema_str())
     }
 
     /// All constraints attached to this arg. Empty for flags. The

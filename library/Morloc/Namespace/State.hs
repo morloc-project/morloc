@@ -157,6 +157,11 @@ data MorlocState = MorlocState
   , stateTermDocs :: Map.Map EVar [Text]
   -- ^ Declaration-level docstrings keyed by term name. Takes precedence over
   -- signature docstrings for the command-level description.
+  , stateStreamElems :: Map.Map EVar TypeU
+  -- ^ For each command that streams its output through @collect, the batch
+  -- type it writes to standard output. Such a command returns @()@, so the
+  -- signature alone cannot say what a caller receives; see
+  -- 'Morloc.Frontend.Desugar.collectStreamType'.
   , stateManifoldConfig :: Map Int ManifoldConfig
   , stateLogTemplate :: Maybe LogTemplate
   -- ^ Program-wide log message template from the main module's YAML
@@ -891,6 +896,7 @@ instance Defaultable MorlocState where
       , stateExports = []
       , stateName = Map.empty
       , stateTermDocs = Map.empty
+      , stateStreamElems = Map.empty
       , stateManifoldConfig = Map.empty
       , stateLogTemplate = Nothing
       , stateRunLog = Nothing
