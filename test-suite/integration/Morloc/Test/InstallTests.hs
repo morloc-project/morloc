@@ -21,8 +21,10 @@ data InstallSpec = InstallSpec
 installTest :: TestEnv -> String -> InstallSpec -> TestTree
 installTest env name spec = testCase name $ do
   let srcDir = teSuiteDir env </> isSourceDir spec
+      -- The launcher goes on PATH, under the runtime prefix; the install root
+      -- it points at is state. See 'TestEnv'.
       binDir = teMorlocHome env </> "bin"
-      exeDir = teMorlocHome env </> "exe"
+      exeDir = teMorlocState env </> "exe"
       binPath = binDir </> name
       exePath = exeDir </> name
 

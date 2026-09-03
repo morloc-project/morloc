@@ -2753,6 +2753,7 @@ makeWrapperScript mode selfRel manifestPath
       -- invoked by a path (the normal case); a bare name is located via PATH.
       MT.unlines
         [ "#!/bin/sh"
+        , manifestMarker manifestPath
         , "export MORLOC_PROG_NAME=\"$0\""
         , "self=\"$0\""
         , "case \"$self\" in */*) : ;; *) self=$(command -v -- \"$self\") ;; esac"
@@ -2761,14 +2762,40 @@ makeWrapperScript mode selfRel manifestPath
             <> " \"$d/" <> MT.pack (dquoteEsc manifestPath) <> "\" \"$@\""
         ]
   | otherwise =
-      "#!/bin/sh\nexport MORLOC_PROG_NAME=\"$0\"\nexec morloc-nexus "
-        <> modeToken mode
-        <> " "
-        <> MT.pack (shellQuote manifestPath)
-        <> " \"$@\"\n"
+      MT.unlines
+        [ "#!/bin/sh"
+        , manifestMarker manifestPath
+        , "export MORLOC_PROG_NAME=\"$0\""
+        , "exec morloc-nexus " <> modeToken mode
+            <> " " <> MT.pack (shellQuote manifestPath) <> " \"$@\""
+        ]
   where
     modeToken WCli = "run"
     modeToken WDaemon = "daemon"
+
+{- | The prefix of the launcher line that declares which @manifest.json@ the
+launcher points at.
+
+A launcher is written by the compiler and read back by the nexus, which is
+handed one by @morloc-nexus daemon ./mycli@. Recovering the path by parsing the
+@exec@ line means reimplementing shell quoting and variable expansion in the
+reader, and the two halves drift: the reader is a second, informal
+implementation of a format only the writer defines. This line states the fact
+directly instead, so the reader never interprets shell.
+
+The path is relative to the launcher's own directory when the launcher travels
+with its build tree, and absolute otherwise; a reader resolves a relative path
+against the directory holding the launcher. Kept byte-identical to
+@MANIFEST_MARKER@ in the nexus (@data\/rust\/morloc-nexus\/src\/cli.rs@).
+
+A manifest path containing a newline cannot be represented here. Such a path
+also cannot survive the @exec@ line, so nothing is lost.
+-}
+manifestMarkerPrefix :: Text
+manifestMarkerPrefix = "# morloc-manifest: "
+
+manifestMarker :: FilePath -> Text
+manifestMarker p = manifestMarkerPrefix <> MT.pack p
 
 -- | Escape a path for a double-quoted POSIX shell context (backslash, double
 -- quote, dollar, backtick), so a self-relative manifest path with shell

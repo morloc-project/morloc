@@ -18,10 +18,14 @@ main = do
   suiteDir <- makeAbsolute "test-suite"
   home <- getHomeDirectory
   morlocHome <- maybe (home </> ".local/share/morloc") id <$> lookupEnv "MORLOC_HOME"
+  -- Mirrors Morloc.Config.resolveStateRoots: $MORLOC_STATE overrides, and
+  -- defaults to the home prefix so a plain host install stays one directory.
+  morlocState <- maybe morlocHome id <$> lookupEnv "MORLOC_STATE"
   let env =
         TestEnv
           { teSuiteDir = suiteDir
           , teMorlocHome = morlocHome
+          , teMorlocState = morlocState
           }
   -- Default to sequential execution: stress tests measure global resources
   -- (SHM segments in /dev/shm) and cannot run concurrently with other tests.
