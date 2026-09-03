@@ -950,9 +950,29 @@ fn render_positional_block(mcmd: &ManifestCommand) -> String {
         return String::new();
     }
     let idx_width = positionals.len().to_string().len();
+    // Label each slot with its index and, when the author supplied a
+    // `--' metavar:`, the name they chose: `1: PATTERN`. Labels are
+    // padded to a common width so the description column lines up
+    // whether or not a given positional has a metavar. With no
+    // metavars anywhere the labels are just `1:`, `2:`, unchanged.
+    let labels: Vec<String> = positionals
+        .iter()
+        .enumerate()
+        .map(|(i, marg)| {
+            let mv = match marg {
+                ManifestArg::Positional { metavar, .. } => metavar.as_deref(),
+                _ => unreachable!("filtered to Positional only"),
+            };
+            match mv.map(str::trim).filter(|m| !m.is_empty()) {
+                Some(m) => format!("{:>width$}: {}", i + 1, m, width = idx_width),
+                None => format!("{:>width$}:", i + 1, width = idx_width),
+            }
+        })
+        .collect();
+    let label_width = labels.iter().map(String::len).max().unwrap_or(0);
     let mut out = String::from("Positional arguments:");
     for (i, marg) in positionals.iter().enumerate() {
-        let prefix = format!("  {:>width$}:  ", i + 1, width = idx_width);
+        let prefix = format!("  {:<width$}  ", labels[i], width = label_width);
         let cont = " ".repeat(prefix.len());
         let (type_desc, desc, format_hint) = match marg {
             ManifestArg::Positional { type_desc, desc, format, .. } => (
@@ -1106,12 +1126,52 @@ mod tests {
         // fixture_single_add's two positionals have empty `desc`, so
         // the type line takes the first slot beside the index marker
         // rather than sitting on a continuation line under a
-        // placeholder. Indices are 1-based.
+        // placeholder. Indices are 1-based, and each carries the
+        // author's metavar.
         let m = fixture_single_add();
         let block = render_positional_block(&m.commands[0]);
         assert_eq!(
             block,
-            "Positional arguments:\n  1:  type: Int\n  2:  type: Int"
+            "Positional arguments:\n  1: X  type: Int\n  2: Y  type: Int"
+        );
+    }
+
+    #[test]
+    fn positional_block_omits_absent_metavar_and_keeps_columns_aligned() {
+        // One positional has a metavar and one does not. The labels pad
+        // to a common width so the description column lines up.
+        let json = wrap_manifest(
+            r#"[
+                {
+                    "name": "scan",
+                    "type": "remote",
+                    "mid": 1,
+                    "pool": 0,
+                    "needed_pools": [0],
+                    "desc": ["Search"],
+                    "args": [
+                        {"kind": "pos", "schema": "s", "type": "Str", "metavar": "PATTERN", "quoted": false, "desc": ["the text to find"], "constraints": [], "metadata": {}},
+                        {"kind": "pos", "schema": "s", "type": "Str", "quoted": false, "desc": ["where to look"], "constraints": [], "metadata": {}}
+                    ],
+                    "return": {"schema": "s", "type": "Str", "desc": [], "constraints": [], "metadata": {}},
+                    "constraints": [],
+                    "metadata": {},
+                    "group": null
+                }
+            ]"#,
+            "[]",
+        );
+        let m = parse_manifest(&json).unwrap();
+        let block = render_positional_block(&m.commands[0]);
+        assert_eq!(
+            block,
+            concat!(
+                "Positional arguments:\n",
+                "  1: PATTERN  the text to find\n",
+                "              type: Str\n",
+                "  2:          where to look\n",
+                "              type: Str"
+            )
         );
     }
 

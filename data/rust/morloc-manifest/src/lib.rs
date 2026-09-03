@@ -575,8 +575,10 @@ pub enum Arg {
         /// schema falls back to the positional index (`_1`, `_2`, ...).
         #[serde(default)]
         name: Option<String>,
-        /// Display placeholder shown in help (e.g. `"FILE"`). None
-        /// falls back to a generic `ARG` placeholder.
+        /// Display placeholder shown in help (e.g. `"FILE"`), from the
+        /// argument's `--' metavar:` directive. The help labels the slot
+        /// `<index>: <metavar>`; with no metavar the label is the bare
+        /// `<index>:`.
         #[serde(default)]
         metavar: Option<String>,
         /// If true, the user's CLI value is JSON-wrapped before being
