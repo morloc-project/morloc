@@ -1,8 +1,3 @@
-Unreleased
-----------
-
- - fix served eval failing to start on hosts with many cores
-
 0.100.2 [2026-08-30]
 --------------------
 
