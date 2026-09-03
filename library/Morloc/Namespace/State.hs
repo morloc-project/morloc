@@ -37,6 +37,7 @@ module Morloc.Namespace.State
 
     -- * Package metadata
   , PackageMeta (..)
+  , defaultCppVersion
   , DepSpec (..)
   , RegDep (..)
   , LocalDep (..)
@@ -644,6 +645,14 @@ checkPackageDeps pm =
               "local dependencies are not supported for " <> lang
                 <> " (packages: " <> pkgs <> "); supported for: py, rust."
 
+-- | The C++ standard assumed when a package does not name one. Both the
+-- 'Defaultable' instance (no @package.yaml@ at all) and the 'FromJSON' instance
+-- (a @package.yaml@ that omits @cpp-version@) read it, so the two cannot
+-- diverge: creating a @package.yaml@ must not change the standard a project
+-- builds against.
+defaultCppVersion :: Int
+defaultCppVersion = 20
+
 data PackageMeta
   = PackageMeta
   { packageName :: !Text
@@ -657,6 +666,9 @@ data PackageMeta
   , packageMaintainer :: !Text
   , packageGithub :: !Text
   , packageBugReports :: !Text
+  -- | The C++ standard the package's pool is built against, as a bare year
+  -- (20, 23, ...). Defaults to 'defaultCppVersion' whether or not the package
+  -- declares one.
   , packageCppVersion :: !Int
   , packageDependencies :: [Text]
   -- | Extra flags appended to the C++ pool compile line (e.g. -O3,
@@ -932,7 +944,7 @@ instance Defaultable PackageMeta where
       , packageMaintainer = ""
       , packageGithub = ""
       , packageBugReports = ""
-      , packageCppVersion = 20
+      , packageCppVersion = defaultCppVersion
       , packageDependencies = []
       , packageCxxFlags = []
       , packageRustDeps = Map.empty
@@ -992,7 +1004,7 @@ instance FromJSON PackageMeta where
       <*> o .:? "maintainer" .!= ""
       <*> o .:? "github" .!= ""
       <*> o .:? "bug-reports" .!= ""
-      <*> o .:? "cpp-version" .!= 0
+      <*> o .:? "cpp-version" .!= defaultCppVersion
       <*> o .:? "dependencies" .!= []
       <*> o .:? "cxx-flags" .!= []
       <*> o .:? "rust-deps" .!= Map.empty
