@@ -1,0 +1,101 @@
+-- A newtype travels the wire as its wire parent. No Packable instance is
+-- needed when the newtype inherits its native form from that parent, and
+-- that holds whatever shape the parent has: a bare primitive (Name, Count),
+-- another newtype (Alias), a phantom-parameterised primitive (Tagged), a
+-- list (Stack), a Nat-indexed list (Buf), or a tuple (Pair). This is the
+-- rule the standard library already depends on -- vector-cpp declares no
+-- Packable instance for Vector at all.
+--
+-- A Packable instance is needed only when the native form differs from the
+-- parent's. Path is that case: its Python form is pathlib.Path where its
+-- wire parent Str is a str, so the instance bridges the two.
+--
+-- Every newtype below is exercised across a language boundary as well as
+-- within one pool, because the wire form is what a crossing depends on.
+
+module main
+  ( nameRound
+  , nameCross
+  , countRound
+  , aliasRound
+  , taggedRound
+  , stackRev
+  , stackCross
+  , bufRev
+  , bufCross
+  , pairSwap
+  , pathSuffix
+  )
+
+import root-py
+import root-cpp
+
+newtype Name  = Str
+newtype Count = Int
+newtype Alias = Name
+newtype Tagged a = Str
+newtype Stack a = List a
+newtype Buf (n :: Nat) a = List a
+newtype Pair a b = (a, b)
+
+newtype Path = Str
+type Py => Path = "pathlib.Path"
+instance Packable Str Path where
+  source Py from "wire.py" ("to_path" as pack, "from_path" as unpack)
+
+source Py from "wire.py"
+  ( "shout" as shoutName
+  , "shout" as shoutAlias
+  , "shout" as shoutTagged
+  , "bump"
+  , "rev" as revStack
+  , "rev" as revBuf
+  , "swap"
+  , "suffix"
+  )
+source Cpp from "wire.hpp" ("str_len", "sum_ints" as sumStack, "sum_ints" as sumBuf)
+
+shoutName   :: Name -> Name
+shoutAlias  :: Alias -> Alias
+shoutTagged :: Tagged Int -> Tagged Int
+bump        :: Count -> Count
+revStack    :: Stack Int -> Stack Int
+revBuf      :: Buf 3 Int -> Buf 3 Int
+swap        :: Pair Str Int -> Pair Int Str
+suffix      :: Path -> Str
+str_len     :: Name -> Int
+sumStack    :: Stack Int -> Int
+sumBuf      :: Buf 3 Int -> Int
+
+nameRound   :: Name -> Name
+nameRound   = shoutName
+
+nameCross   :: Name -> Int
+nameCross   = str_len . shoutName
+
+countRound  :: Count -> Count
+countRound  = bump
+
+aliasRound  :: Alias -> Alias
+aliasRound  = shoutAlias
+
+taggedRound :: Tagged Int -> Tagged Int
+taggedRound = shoutTagged
+
+stackRev    :: Stack Int -> Stack Int
+stackRev    = revStack
+
+stackCross  :: Stack Int -> Int
+stackCross  = sumStack . revStack
+
+bufRev      :: Buf 3 Int -> Buf 3 Int
+bufRev      = revBuf
+
+bufCross    :: Buf 3 Int -> Int
+bufCross    = sumBuf . revBuf
+
+pairSwap    :: Pair Str Int -> Pair Int Str
+pairSwap    = swap
+
+pathSuffix  :: Path -> Str
+pathSuffix  = suffix
