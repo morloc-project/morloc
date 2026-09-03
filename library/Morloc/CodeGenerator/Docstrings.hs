@@ -159,15 +159,16 @@ processArgDoc i t (ArgDocAlias r) = do
   validateCommandLevelDirectives loc r
   rejectAuthoredMime loc r
   -- A nullary command's return type is still an alias chain that may carry a
-  -- `@mime` (e.g. `logo :: PNG`). Reduce it to inherit the media type; the
-  -- displayed return type/desc are left as-is.
-  (_, r') <- reduceArgDoc i t (ArgDocAlias r)
+  -- `@mime` (e.g. `logo :: PNG`). Reduce it so the media type is inherited
+  -- and the reported type is the one the caller actually receives; a
+  -- transparent alias names nothing a CLI user can act on.
+  (t', r') <- reduceArgDoc i t (ArgDocAlias r)
   return $
     CmdDocSet
       { cmdDocDesc = docLines r
       , cmdDocName = docName r
       , cmdDocArgs = []
-      , cmdDocRet = (t, [])
+      , cmdDocRet = (t', [])
       , cmdDocRetMime = getReturnMime r'
       , cmdDocTerminals = []
       }
@@ -187,7 +188,7 @@ processArgDoc i t r = do
           { cmdDocDesc = docLines args
           , cmdDocName = docName args
           , cmdDocArgs = cmdargs
-          , cmdDocRet = (t, [])
+          , cmdDocRet = (t', [])
           , cmdDocRetMime = Nothing
           , cmdDocTerminals = []
           }

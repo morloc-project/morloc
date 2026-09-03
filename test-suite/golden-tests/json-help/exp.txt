@@ -125,7 +125,7 @@
                   "Directory for scratch files"
                 ],
                 "type": {
-                  "morloc": "Str    (literal string)"
+                  "morloc": "Str"
                 },
                 "named_type_kind": null,
                 "input": {
@@ -135,7 +135,7 @@
                   "list_source": "inline",
                   "list_form": "auto",
                   "list_checks": [],
-                  "format": null
+                  "format": "literal string"
                 }
               }
             },
@@ -341,7 +341,7 @@
           "default": null,
           "description": [],
           "type": {
-            "morloc": "Str    (a filename)",
+            "morloc": "Str",
             "wire": "s",
             "structure": {
               "type": "string"

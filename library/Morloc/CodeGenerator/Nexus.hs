@@ -1039,14 +1039,17 @@ renderFormatHint mschema many mSrc mForm cks mLSrc mLForm lcks
         CatList elemS    -> listFormatHint elemS mSrc mForm cks mLSrc mLForm lcks
         CatOtherCompound -> Nothing
 
--- | Format hint for `Str` arguments.
+-- | Format hint for `Str` arguments. Always produces a hint: `Str` is
+-- the one type where argv is genuinely ambiguous (is this the value or
+-- a path to it?), so the default reading is stated rather than left to
+-- be inferred from the absence of a line.
 strFormatHint :: Maybe SourceAtom -> [Check] -> Maybe Text
 strFormatHint mSrc cks
   | mSrc == Just SourceFile =
       Just "read the value from the file at this path"
   | otherwise = case cks of
       (CheckPath (PathPerm p) : _) -> Just (pathCheckHint p)
-      _                            -> Nothing
+      _                            -> Just "literal string"
 
 -- | Map a path-permission mode to a user-facing phrase. The four
 -- accepted modes are r / w / x / rw; see 'parseCheck' for the
@@ -1172,7 +1175,7 @@ argToJson mEmit mShape _ (CmdArgPos r) =
   jsonObj $
     [ ("kind", jsonStr "pos") ]
     ++ schemaField mEmit
-    ++ [ ("type", jsonStr (typeDescStr (argPosDocType r) (argPosDocLiteral r) (argPosDocSource r) (argPosDocChecks r)))
+    ++ [ ("type", jsonStr (typeDescStr (argPosDocType r)))
        , ("name", jsonMaybeStr (argPosDocName r))
        , ("metavar", jsonMaybeStr (argPosDocMetavar r))
        , ("quoted", jsonBool (isQuotedArg (argPosDocLiteral r) (argPosDocSource r) (argPosDocMany r) mShape))
@@ -1190,7 +1193,7 @@ argToJson mEmit mShape _ (CmdArgOpt r) =
   jsonObj $
     [ ("kind", jsonStr "opt") ]
     ++ schemaField mEmit
-    ++ [ ("type", jsonStr (typeDescStr (argOptDocType r) (argOptDocLiteral r) (argOptDocSource r) (argOptDocChecks r)))
+    ++ [ ("type", jsonStr (typeDescStr (argOptDocType r)))
        , ("metavar", jsonStr (argOptDocMetavar r))
        , ("quoted", jsonBool (isQuotedArg (argOptDocLiteral r) (argOptDocSource r) (argOptDocMany r) mShape))
        , ("many", jsonBool (argOptDocMany r))
@@ -1267,16 +1270,6 @@ isQuotedArg _literal mSource many mschema =
       | many -> isListOfStrWireSchema s
       | otherwise -> isStrOrOptStrWireSchema s
 
--- Check if a type is Str or ?Str (for literal string handling).
--- NOTE: this is the surface-type check used for help-text rendering;
--- the manifest's `quoted` field uses the schema-text check below
--- ('isStrWireSchema') so that newtypes-over-Str (whose surface type
--- is not 'Str' but whose wire format is the Str primitive 's') also
--- get the JSON-quoting treatment.
-isStrType :: Type -> Bool
-isStrType (VarT v) = v == MBT.str
-isStrType (OptionalT t) = isStrType t
-isStrType _ = False
 
 -- | Strip a leading addHint decoration `<...>` if present. Hints
 -- carry the concrete-type tag for newtypes / aliases over a built-in
@@ -1813,20 +1806,59 @@ truncateForMsg t
 jsonSnippet :: Aeson.Value -> Text
 jsonSnippet = TE.decodeUtf8 . BSL.toStrict . Aeson.encode
 
--- | The user-facing "type:" line for a CLI arg. For a Str argument
--- that isn't declared literal, the parenthetical clarifies whether
--- argv is treated as a filesystem path only (when `source: file` or a
--- `check.path:*` forces path semantics) or as the default
--- literal string.
-typeDescStr :: Type -> Maybe Bool -> Maybe SourceAtom -> [Check] -> Text
-typeDescStr t isLiteral mSrc checks
-  | isStrType t && isLiteral /= Just True =
-      if pathOnly then "Str    (a filename)"
-                  else "Str    (literal string)"
-  | otherwise = render (pretty t)
+-- | The "type:" slot for a CLI arg. Holds a type and nothing else:
+-- the same string is read by `--help`, by `--json-help`, and by any
+-- consumer of the manifest, so a human-readable gloss here would have
+-- to be parsed back out. How argv is interpreted -- verbatim string,
+-- path to read, packed bytes -- is the `format:` slot's job; see
+-- 'renderFormatHint'.
+typeDescStr :: Type -> Text
+typeDescStr = renderCliType
+
+-- | Render a type for a CLI caller: rewrite the parts that 'pretty'
+-- shows as internal placeholders, then let 'pretty' do the rendering so
+-- the list and tuple sugar (@[a]@, @(a, b)@) is preserved.
+renderCliType :: Type -> Text
+renderCliType = render . pretty . cliDisplayType
+
+-- | The rewrite behind 'renderCliType'. Two cases differ from the
+-- source-level type:
+--
+--   * A @Table@'s column schema lowers to an anonymous record named
+--     @Rec@ (see 'typeOf' for @RecExtendU@), which 'pretty' prints as
+--     the bare constructor name. @Table _ (Rec)@ names nothing a caller
+--     can act on, so the row is spelled out:
+--     @Table {name = Str, count = Int}@. A user record actually named
+--     @Rec@ would be rewritten too; that name already collides with the
+--     compiler's anonymous row.
+--
+--   * Phantom Nat and Str slots ('NatVoidT' / 'StrVoidT') are erased
+--     measurements carrying no runtime content. They print as @_@ and
+--     are dropped from an application's arguments; a literal dimension
+--     (@Vector 4 Int@) is real information and is kept.
+--
+-- The spelled-out row is carried as a 'VarT' holding already-rendered
+-- text. That is a display device: the rewritten type is handed straight
+-- to 'pretty' and never escapes this function.
+cliDisplayType :: Type -> Type
+cliDisplayType t0 = case t0 of
+  NamT NamRecord (TV "Rec") [] fields ->
+    VarT (TV ("{" <> MT.intercalate ", "
+                     [unKey k <> " = " <> renderCliType ft | (k, ft) <- fields]
+                 <> "}"))
+  AppT f ts -> case filter (not . isPhantomSlot) (map cliDisplayType ts) of
+    []  -> cliDisplayType f
+    ts' -> AppT (cliDisplayType f) ts'
+  NamT o v ps fields ->
+    NamT o v (map cliDisplayType ps) [(k, cliDisplayType ft) | (k, ft) <- fields]
+  FunT ts t -> FunT (map cliDisplayType ts) (cliDisplayType t)
+  EffectT es t -> EffectT es (cliDisplayType t)
+  OptionalT t -> OptionalT (cliDisplayType t)
+  _ -> t0
   where
-    pathOnly = mSrc == Just SourceFile || any isPathCheck checks
-    isPathCheck (CheckPath _) = True
+    isPhantomSlot NatVoidT = True
+    isPhantomSlot StrVoidT = True
+    isPhantomSlot _ = False
 
 -- | Strip outer wrappers that don't change a type's "name kind" identity
 -- (Optional and Effect wrappers are transparent for record/object/table
@@ -2387,7 +2419,7 @@ buildManifest ManifestInputs{..} =
         , ("needed_pools", jsonArr (map (jsonInt . miLangToPool . socketLang) (fdataSubSockets fd)))
         , ("desc", jsonStrArr (cmdDocDesc (fdataCmdDocSet fd)))
         , ("args", argsJson (cmdDocArgs (fdataCmdDocSet fd)) (fdataArgSchemas fd) (fdataArgAsts fd))
-        , ("return", returnJson (fdataReturnSchema fd) (fdataType fd) (snd (cmdDocRet (fdataCmdDocSet fd))) (cmdDocRetMime (fdataCmdDocSet fd)))
+        , ("return", returnJson (fdataReturnSchema fd) (fst (cmdDocRet (fdataCmdDocSet fd))) (snd (cmdDocRet (fdataCmdDocSet fd))) (cmdDocRetMime (fdataCmdDocSet fd)))
         , ("constraints", jsonArr [])
         , ("internal", jsonBool (isInternalTerminalName (fdataTermName fd)))
         -- Terminals array must use the ORIGINAL term name so the
@@ -2407,7 +2439,7 @@ buildManifest ManifestInputs{..} =
         , ("type", jsonStr "pure")
         , ("desc", jsonStrArr (cmdDocDesc (commandDocs g)))
         , ("args", argsJson (cmdDocArgs (commandDocs g)) (commandArgSchemas g) (commandArgAsts g))
-        , ("return", returnJson (commandReturnSchema g) (commandType g) (snd (cmdDocRet (commandDocs g))) (cmdDocRetMime (commandDocs g)))
+        , ("return", returnJson (commandReturnSchema g) (fst (cmdDocRet (commandDocs g))) (snd (cmdDocRet (commandDocs g))) (cmdDocRetMime (commandDocs g)))
         , ("expr", exprToJson (commandExpr g))
         , ("constraints", jsonArr [])
         , ("internal", jsonBool (isInternalTerminalName (commandTermName g)))
@@ -2480,12 +2512,18 @@ buildManifest ManifestInputs{..} =
     -- Nested @return@ object replacing v1's flat @return_schema@ /
     -- @return_type@ / @return_desc@. Also carries @constraints@ and
     -- @metadata@ for symmetry with args.
+    --
+    -- @t@ comes from 'cmdDocRet', which has already walked any
+    -- transparent alias chain, so the reported type is the one the
+    -- caller receives rather than the name the signature used. The
+    -- 'returnTypeOnly' peel below is still needed for the doc-set
+    -- branches that carry a whole function type.
     returnJson :: Text -> Type -> [Text] -> Maybe Text -> Text
     returnJson schema t desc mmime =
       let retT = stripThunks (returnTypeOnly t)
       in jsonObj $
         [ ("schema", jsonStr schema)
-        , ("type", jsonStr (render (pretty retT)))
+        , ("type", jsonStr (renderCliType retT))
         , ("desc", jsonStrArr desc)
         , ("constraints", constraintsJsonFor retT)
         , ("metadata", metadataEmpty)
