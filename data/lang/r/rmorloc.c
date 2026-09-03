@@ -60,6 +60,25 @@
 
 #define MORLOC_ERROR(msg, ...) error(msg, ##__VA_ARGS__);
 
+// Reject a voidstar carrying an interior NUL in a Str slot. `guard` is
+// codegen's per-call decision; `cleanup` releases whatever the caller owns
+// before the longjmp out of error(). The path returned by the runtime names
+// the offending slot (e.g. ".field[3] (byte 2 of 7)") so a NUL buried in a
+// container is locatable without a debugger.
+#define MORLOC_REJECT_NUL(guard, ptr, schema, base, cleanup) \
+    if (guard) { \
+        char* nul_path_ = morloc_first_null_in_value((ptr), (schema), (base)); \
+        if (nul_path_ != NULL) { \
+            char nul_buf_[512]; \
+            snprintf(nul_buf_, sizeof(nul_buf_), \
+                "R cannot represent an embedded NUL byte in a string; one arrived%s%s", \
+                nul_path_[0] == ' ' ? "" : " at ", nul_path_); \
+            free(nul_path_); \
+            cleanup; \
+            MORLOC_ERROR("%s", nul_buf_); \
+        } \
+    }
+
 // Raise a MorlocInternalError-classed R error for genuine morloc-
 // invariant violations (compiler bugs, unreachable branches, libmorloc
 // contract violations). morloc_mlc_catch (in pool.R) inspects the
@@ -2456,13 +2475,21 @@ SEXP morloc_mlc_show(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
 }
 
 
-SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r) { MAYFAIL
+// The third argument is codegen's decision about whether this particular
+// deserialization can carry an interior NUL into R: true only when the value's
+// type contains a Str. R cannot hold one, so the byte has to be caught here,
+// at the boundary, rather than deeper inside base R where it surfaces as
+// "embedded nul in string" with no indication of where it came from.
+SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYFAIL
     if (TYPEOF(packet_r) != RAWSXP) {
         MORLOC_ERROR("packet must be a raw vector");
     }
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
         MORLOC_INTERNAL_ABORT("schema must be a single string");
     }
+    bool check_nul = (TYPEOF(check_nul_r) == LGLSXP && LENGTH(check_nul_r) == 1)
+                   ? (LOGICAL(check_nul_r)[0] == TRUE)
+                   : false;
 
     // Extract arguments
     uint8_t* packet = RAW(packet_r);
@@ -2524,6 +2551,8 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r) { MAYFAIL
     // Fast path: inline voidstar -- read directly from packet, no SHM needed
     if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR) {
         const uint8_t* payload = packet + sizeof(morloc_packet_header_t) + header->offset;
+        MORLOC_REJECT_NUL(check_nul, (const void*)payload, schema, (const void*)payload,
+                          free_schema(schema));
         SEXP obj_r = from_voidstar((const void*)payload, schema, (const void*)payload);
         free_schema(schema);
         if (obj_r == NULL) {
@@ -2636,6 +2665,8 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r) { MAYFAIL
         if (incref_err) { free(incref_err); }
         shm_tracker_push((absptr_t)voidstar, schema);
     }
+
+    MORLOC_REJECT_NUL(check_nul, voidstar, schema, NULL, free_schema(schema));
 
     SEXP obj_r = from_voidstar(voidstar, schema, NULL);
     if (obj_r == NULL) {
@@ -3847,7 +3878,7 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_stream_from_client", (DL_FUNC) &morloc_stream_from_client, 1},
         {"morloc_close_socket", (DL_FUNC) &morloc_close_socket, 1},
         {"morloc_foreign_call", (DL_FUNC) &morloc_foreign_call, 3},
-        {"morloc_get_value", (DL_FUNC) &morloc_get_value, 2},
+        {"morloc_get_value", (DL_FUNC) &morloc_get_value, 3},
         {"morloc_put_value", (DL_FUNC) &morloc_put_value, 2},
         {"morloc_mlc_show", (DL_FUNC) &morloc_mlc_show, 2},
         {"r_morloc_log_next_id", (DL_FUNC) &morloc_log_next_id_r, 0},

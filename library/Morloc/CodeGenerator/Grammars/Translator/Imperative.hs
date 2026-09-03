@@ -88,7 +88,7 @@ import Morloc.CodeGenerator.Grammars.Common
   )
 import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..))
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (isSerializable, serialAstToMsgpackSchema)
+import Morloc.CodeGenerator.Serial (isSerializable, serialAstHasString, serialAstToMsgpackSchema)
 import Morloc.Data.Doc
 import Morloc.Monad (IndexState)
 
@@ -130,7 +130,12 @@ data IExpr
   | IRecordLit NamType FVar [(Key, IExpr)]
   | IAccess IExpr IAccessor
   | ISerCall Int IExpr -- put_value(schemaId, expr)
-  | IDesCall Int (Maybe IType) IExpr -- get_value[<T>](schemaId, expr); type used by C++ template
+  -- get_value[<T>](schemaId, expr); type used by C++ template. The Bool says
+  -- whether the deserialized type carries a native string anywhere inside it,
+  -- which is what a receiving language that cannot hold an interior NUL needs
+  -- to know. It is carried here rather than decided in the printer because
+  -- only this layer still has the SerialAST.
+  | IDesCall Int (Maybe IType) Bool IExpr
   | IForeignCall Text Int [IExpr]
   | IRemoteCall Text Int RemoteResources [IExpr]
   | ILambda [Text] IExpr
@@ -695,14 +700,14 @@ expandDeserialize cfg v0 s0
   | isMsgpackLeaf cfg s0 = do
       schemaId <- lcRegisterSchema cfg (render $ serialAstToMsgpackSchema s0)
       desType <- lcDeserialAstType cfg s0
-      return (IDesCall schemaId desType (IRawExpr (render v0)), [])
+      return (IDesCall schemaId desType (serialAstHasString s0) (IRawExpr (render v0)), [])
   | otherwise = do
       idx <- lcNewIndex cfg
       rawType <- lcRawDeserialAstType cfg s0
       let rawvar = render $ helperNamer idx
       schemaId <- lcRegisterSchema cfg (render $ serialAstToMsgpackSchema s0)
       (x, befores) <- check (helperNamer idx) s0
-      return (x, IAssign rawvar rawType (IDesCall schemaId rawType (IRawExpr (render v0))) : befores)
+      return (x, IAssign rawvar rawType (IDesCall schemaId rawType (serialAstHasString s0) (IRawExpr (render v0))) : befores)
   where
     check v s
       | isMsgpackLeaf cfg s = return (IRawExpr (render v), [])

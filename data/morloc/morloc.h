@@ -1145,6 +1145,24 @@ char* read_schema_from_packet_meta(const uint8_t* packet, ERRMSG);
 uint8_t* make_fail_packet(const char* failure_message);
 char* get_morloc_data_packet_error_message(const uint8_t* data, ERRMSG);
 uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema, ERRMSG);
+
+// Cross-pool NUL-in-Str guard. Walks a schema-typed voidstar and returns a
+// heap description of the first String slot holding an interior NUL, or NULL
+// when there is none. The caller frees the result.
+//
+// `base_ptr` follows the same convention as resolve_relptr: non-NULL for a
+// payload inlined in a packet, NULL for a value in shared memory.
+//
+// Only called where the compiler emitted a check -- codegen knows the
+// receiving language and whether the type carries a Str, so a language that
+// tolerates NULs, or a type with no strings in it, costs nothing at all. The
+// MORLOC_SKIP_NULL_CHECK opt-out is handled inside, so every binder inherits
+// it without repeating the probe.
+char* morloc_first_null_in_value(
+    const void* voidstar,
+    const Schema* schema,
+    const void* base_ptr);
+
 uint8_t* make_morloc_local_call_packet(uint32_t midx, const uint8_t** arg_packets, size_t nargs, ERRMSG);
 uint8_t* make_morloc_remote_call_packet(uint32_t midx, const uint8_t** arg_packets, size_t nargs, ERRMSG);
 morloc_call_t* read_morloc_call_packet(const uint8_t* packet, ERRMSG);

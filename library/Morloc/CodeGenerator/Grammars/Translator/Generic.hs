@@ -1039,8 +1039,21 @@ genericPrintExpr desc = go
       DollarAccess -> go e <> "$" <> pretty f
     go (ISerCall sid e) =
       pretty (ldSerializeFn desc) <> "(" <> go e <> ", " <> schemaRef sid <> ")"
-    go (IDesCall sid _ e) =
-      pretty (ldDeserializeFn desc) <> "(" <> go e <> ", " <> schemaRef sid <> ")"
+    -- A language that cannot hold an interior NUL takes a third argument
+    -- saying whether this particular value's type carries a string at all.
+    -- The flag is what lets the receiving binder skip the walk entirely for a
+    -- type with no strings in it, which is most of them. Languages that
+    -- tolerate NULs keep the two-argument form and are untouched.
+    --
+    -- The argument is always present for such a language rather than emitted
+    -- only when true: the deserializer's arity has to be fixed, since the
+    -- binder registers it with a declared argument count.
+    go (IDesCall sid _ hasStr e) =
+      let nulGuard
+            | ldAllowStringNull desc = ""
+            | hasStr = ", " <> pretty (ldBoolTrue desc)
+            | otherwise = ", " <> pretty (ldBoolFalse desc)
+       in pretty (ldDeserializeFn desc) <> "(" <> go e <> ", " <> schemaRef sid <> nulGuard <> ")"
     go (IPack packer e) = pretty packer <> parens (go e)
     go (ICall f Nothing argGroups) =
       pretty f <> hsep (map (tupled . map go) argGroups)

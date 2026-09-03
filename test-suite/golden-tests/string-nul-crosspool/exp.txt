@@ -1,0 +1,12 @@
+"abab"
+2
+bare_rejected
+list_rejected
+record_rejected
+morloc_named_it
+list_path_located
+record_path_located
+still_rejected_by_r
+guard_skipped
+1
+4

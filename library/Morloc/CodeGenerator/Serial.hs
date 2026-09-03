@@ -18,6 +18,7 @@ module Morloc.CodeGenerator.Serial
   ( makeSerialAST
   , wireSerialAstToType
   , containsFunT
+  , serialAstHasString
   , chooseSerializationCycle
   , isSerializable
   , hasArrowHint
@@ -122,6 +123,25 @@ containsFunT (NamT _ _ ts rs) = any containsFunT ts || any (containsFunT . snd) 
 containsFunT (EffectT _ t) = containsFunT t
 containsFunT (OptionalT t) = containsFunT t
 containsFunT _ = False
+
+-- | Whether a serialized value can carry a native string anywhere inside it.
+--
+-- Used by codegen to decide, per deserialization, whether the receiving pool
+-- needs the cross-pool NUL guard. A type with no string in it cannot carry an
+-- interior NUL, so the check is not emitted at all and costs nothing -- which
+-- is why this is answered at compile time rather than by a runtime branch.
+--
+-- Stream handles are excluded deliberately. Their wire form is a tagged union
+-- carrying either a filesystem path, which cannot hold a NUL by POSIX rule, or
+-- a bare slot id, which holds no string bytes.
+serialAstHasString :: SerialAST -> Bool
+serialAstHasString (SerialString _) = True
+serialAstHasString (SerialList _ _ s) = serialAstHasString s
+serialAstHasString (SerialTuple _ ss) = any serialAstHasString ss
+serialAstHasString (SerialObject _ _ _ rs) = any (serialAstHasString . snd) rs
+serialAstHasString (SerialPack _ (_, s)) = serialAstHasString s
+serialAstHasString (SerialOptional _ s) = serialAstHasString s
+serialAstHasString _ = False
 
 encode64 :: Int -> String
 encode64 i

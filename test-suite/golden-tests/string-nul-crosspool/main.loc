@@ -1,0 +1,45 @@
+-- A NUL produced inside one pool and handed to another is caught at the
+-- receiving boundary, not left to the receiving language. R cannot hold an
+-- interior NUL, and without the guard base R raises "embedded nul in string",
+-- which names neither morloc nor the value that carried it.
+--
+-- Codegen decides per deserialization whether the guard is needed: it knows
+-- the receiving language and whether the value's type contains a Str at all.
+-- `noStrR` returns an Int and so is compiled with the check off; `cleanR`
+-- carries a string but no NUL and must pass through untouched. The reported
+-- path locates a NUL nested in a container, which is the part a user cannot
+-- work out for themselves.
+--
+-- The argument cannot carry the NUL in: argv cannot hold one. It is built in
+-- Python at run time, which is exactly the path the nexus argument scanner
+-- does not see.
+module main (bareR, listR, recordR, cleanR, noStrR)
+
+import root-py
+import root-r
+
+record P = P { a :: Int, b :: Str }
+record R => P = "list"
+record Py => P = "dict"
+
+source Py from "mk.py" ("bare", "in_list", "in_record", "clean", "no_str")
+bare :: Str -> Str
+in_list :: Str -> [Str]
+in_record :: Str -> P
+clean :: Str -> Str
+no_str :: Str -> Int
+
+bareR :: Str -> Str
+bareR s = idr (bare s)
+
+listR :: Str -> [Str]
+listR s = idr (in_list s)
+
+recordR :: Str -> P
+recordR s = idr (in_record s)
+
+cleanR :: Str -> Str
+cleanR s = idr (clean s)
+
+noStrR :: Str -> Int
+noStrR s = idr (no_str s)
