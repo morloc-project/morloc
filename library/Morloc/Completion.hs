@@ -40,7 +40,15 @@ data CmdInfo = CmdInfo
   { ciName :: Text
   , ciGroup :: Maybe Text
   , ciArgs :: [ArgInfo]
+  , ciInternal :: Bool
   }
+
+-- | The commands a user can actually invoke. Every @--' with:@ / @--' render:@
+-- directive makes the compiler synthesize a hidden entry point marked
+-- @internal@; offering those as completions would suggest names the program
+-- rejects.
+visibleCmds :: ManifestInfo -> [CmdInfo]
+visibleCmds = filter (not . ciInternal) . miCommands
 
 data ArgInfo
   = PosArg
@@ -67,6 +75,7 @@ instance JSON.FromJSON CmdInfo where
       <$> o .: "name"
       <*> o .:? "group"
       <*> (o .:? "args" .!= [])
+      <*> (o .:? "internal" .!= False)
 
 instance JSON.FromJSON ArgInfo where
   parseJSON = JSON.withObject "ArgInfo" $ \o -> do
@@ -286,7 +295,7 @@ programBashCompletion mi =
       funcName = "_morloc_prog_" ++ safeName
       groups = miGroups mi
       groupNames = map (T.unpack . giName) groups
-      cmds = miCommands mi
+      cmds = visibleCmds mi
       ungroupedCmds = [c | c <- cmds, ciGroup c == Nothing]
       ungroupedNames = map (T.unpack . ciName) ungroupedCmds
       firstLevelWords = nub (ungroupedNames ++ groupNames)
@@ -507,7 +516,7 @@ programZshCompletion mi =
       safeName = sanitizeName name
       funcName = "_morloc_prog_" ++ safeName
       groups = miGroups mi
-      cmds = miCommands mi
+      cmds = visibleCmds mi
       ungroupedCmds = [c | c <- cmds, ciGroup c == Nothing]
       groupedCmds grp = [c | c <- cmds, ciGroup c == Just grp]
       -- Build first-level descriptions

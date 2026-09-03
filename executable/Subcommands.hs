@@ -559,7 +559,7 @@ getFirstSubcommand manifestPath = do
   case result of
     Left _ -> return "__expr__"
     Right bs -> case JSON.eitherDecode bs of
-      Right pm -> case pmCommands pm of
+      Right pm -> case visibleCommands pm of
         (cmd : _) -> return (T.unpack (pcName cmd))
         [] -> return "__expr__"
       Left _ -> return "__expr__"
@@ -812,7 +812,15 @@ data ProgramCommand = ProgramCommand
   { pcName :: T.Text
   , pcReturnType :: T.Text
   , _pcArgSchemas :: [T.Text]
+  , pcInternal :: Bool
   }
+
+-- | The commands a user can actually invoke. The compiler synthesizes a
+-- hidden entry point for every @--' with:@ / @--' render:@ directive and
+-- marks it @internal@; the nexus hides those, and so must anything else
+-- that reports a program's command surface.
+visibleCommands :: ProgramManifest -> [ProgramCommand]
+visibleCommands = filter (not . pcInternal) . pmCommands
 
 instance JSON.FromJSON ModuleManifest where
   parseJSON = JSON.withObject "ModuleManifest" $ \o ->
@@ -843,8 +851,19 @@ instance JSON.FromJSON ProgramCommand where
   parseJSON = JSON.withObject "ProgramCommand" $ \o ->
     ProgramCommand
       <$> o JSON..: "name"
-      <*> o JSON..:? "return_type" JSON..!= ""
+      <*> parseReturnType o
       <*> o JSON..:? "arg_schemas" JSON..!= []
+      <*> o JSON..:? "internal" JSON..!= False
+    where
+      -- The return type lives inside the command's nested `return`
+      -- object, beside the schema and description. A missing or
+      -- malformed slot yields "", which the caller renders as a bare
+      -- command name.
+      parseReturnType o = do
+        mret <- o JSON..:? "return"
+        case mret of
+          Nothing -> return ""
+          Just ret -> JSON.withObject "return" (\r -> r JSON..:? "type" JSON..!= "") ret
 
 -- | Check if pattern is a subsequence of the target string (case-insensitive)
 subsequenceMatch :: String -> String -> Bool
@@ -1064,7 +1083,7 @@ printModule verbose m = do
 printProgram :: Int -> ProgramManifest -> IO ()
 printProgram verbose p = do
   let name = pmName p
-      cmds = pmCommands p
+      cmds = visibleCommands p
       cmdCount = length cmds
       summary = show cmdCount <> " command" <> (if cmdCount /= 1 then "s" else "")
   putStrLn $ "  " <> T.unpack name <> "  " <> summary
