@@ -151,7 +151,7 @@ resolveNestedTypes i = go []
               (Just [(_, _, _, _, TypedefPrimitive)]) -> return t
               (Just [(_, typeOf -> parent, _, _, TypedefAlias)]) -> go seen' parent
               _ -> return t
-      AppT f as -> AppT <$> go seen f <*> mapM (go seen) as
+      AppT f as -> bindNamed <$> go seen f <*> mapM (go seen) as
       FunT as b -> FunT <$> mapM (go seen) as <*> go seen b
       NamT o v ps fields -> do
         let seen' = render (pretty v) : seen
@@ -161,6 +161,20 @@ resolveNestedTypes i = go []
       EffectT es b -> EffectT es <$> go seen b
       OptionalT b -> OptionalT <$> go seen b
       _ -> return t
+
+    -- Resolving the head of an application yields a named type's
+    -- declaration, which is generic: its slots still hold the parameters
+    -- it was declared with. Binding the arguments there is what makes an
+    -- applied record print as it was written, `Box Int`, rather than as
+    -- an application of a generic head to an argument, `(Box a) Int`.
+    --
+    -- The field layout is deliberately left generic. It is the type's
+    -- definition, emitted once per name and showing where each parameter
+    -- goes, and an applied definition cannot be inverted -- the instance
+    -- is recorded per use site by the rendered type and the wire schema.
+    bindNamed (NamT o v ps fields) as
+      | length ps == length as = NamT o v as fields
+    bindNamed f as = AppT f as
 
 -- dispatch docstring info for each argument to `processArgDoc`
 processArgDoc :: Int -> Type -> ArgDoc -> MorlocMonad CmdDocSet

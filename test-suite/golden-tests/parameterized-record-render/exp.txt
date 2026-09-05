@@ -1,0 +1,39 @@
+--- takeInt help ---
+Take a box of Int
+
+Usage: ./box <nexus_options> takeInt <command_options>
+
+General Options:
+  -h, --help  Print help (see more with '--help')
+
+Positional arguments:
+  1:  type: Box Int
+
+Return: Int
+
+Record Schemas:
+  Box
+    it :: a
+--- takeStr help ---
+Take a box of Str
+
+Usage: ./box <nexus_options> takeStr <command_options>
+
+General Options:
+  -h, --help  Print help (see more with '--help')
+
+Positional arguments:
+  1:  type: Box Str
+
+Return: Int
+
+Record Schemas:
+  Box
+    it :: a
+--- json-help ---
+takeInt morloc=Box Int wire=m12itj
+takeStr morloc=Box Str wire=m12its
+type Box kind=record fields={it :: a}
+--- run ---
+7
+4
