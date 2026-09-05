@@ -1,0 +1,12 @@
+The test asserts a `start.json` in the materialized run directory, and no
+writer for that file exists: the name occurs once in the whole Rust tree, in a
+doc comment describing it. `summary.json`, which the same test checks, does
+have a writer.
+
+So this is not a red test waiting on a fix -- it asserts a contract that was
+described and never implemented, and whether the file or the assertion should
+move is an open design question. The run-directory path deserves a deliberate
+pass rather than a patch that makes the diff go away. See reports/0040.
+
+Delete this file when the run directory's contract is settled, and update
+`exp.txt` and the Makefile's header comment to match whichever way it goes.

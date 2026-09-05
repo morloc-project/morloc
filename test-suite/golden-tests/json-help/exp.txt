@@ -524,6 +524,25 @@
   ],
   "types": [
     {
+      "name": "SysConfig",
+      "kind": "record",
+      "parameters": [],
+      "fields": [
+        {
+          "key": "tmpDir",
+          "type": "Str"
+        },
+        {
+          "key": "numThreads",
+          "type": "Int"
+        },
+        {
+          "key": "removeCaches",
+          "type": "Bool"
+        }
+      ]
+    },
+    {
       "name": "Map",
       "kind": "packable",
       "parameters": [
