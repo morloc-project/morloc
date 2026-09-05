@@ -348,10 +348,10 @@ pub fn dispatch_command_parsed(
                 };
                 if let Some(s) = payload {
                     // The CLI ArgValue contains JSON-quoted form for
-                    // strings (e.g. `"abc def"`). Decode via
-                    // serde_json so any   escapes become real NUL
-                    // bytes; non-JSON values just fail to parse and
-                    // are skipped.
+                    // strings (e.g. `"abc\u0000def"`). Decode via
+                    // serde_json so any \u0000 escapes become real
+                    // NUL bytes; non-JSON values just fail to parse
+                    // and are skipped.
                     if let Ok(jv) = serde_json::from_str::<serde_json::Value>(s) {
                         if let Some(p) =
                             morloc_runtime_types::null_check::first_null_in_json(&jv)
