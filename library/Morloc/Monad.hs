@@ -194,16 +194,21 @@ setDepth i = do
   put $ s {stateDepth = i}
   return ()
 
+-- | Print a compilation's accumulated messages and, on failure, its error.
+--
+-- Messages are written on both branches. They are warnings -- an
+-- unrecognized docstring directive, a deprecated spelling -- and a warning
+-- that only appears when the build also fails is a warning no one ever
+-- reads: the build it describes is the one that succeeded and shipped a
+-- silently different interface.
 writeMorlocReturn :: MorlocReturn a -> IO Bool
-writeMorlocReturn ((Left err', msgs), st) = do
-  writeMessages
-  MT.hPutStrLn stderr (render $ makeMorlocError st err')
-  return False
-  where
-    writeMessages
-      | length msgs > 0 = MT.hPutStrLn stderr (MT.unlines msgs)
-      | otherwise = return ()
-writeMorlocReturn ((Right _, _), _) = return True
+writeMorlocReturn ((result, msgs), st) = do
+  unless (null msgs) $ MT.hPutStrLn stderr (MT.unlines msgs)
+  case result of
+    Left err' -> do
+      MT.hPutStrLn stderr (render $ makeMorlocError st err')
+      return False
+    Right _ -> return True
 
 makeMorlocError :: MorlocState -> MorlocError -> MDoc
 makeMorlocError st (SourcedError i msg) =

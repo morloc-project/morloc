@@ -522,8 +522,7 @@ unknownDirectiveWarning :: [Text] -> Text -> Text
 unknownDirectiveWarning knownKeys k =
   "warning: unknown docstring directive '" <> k <> "'"
   <> " (recognized: " <> T.intercalate ", " knownKeys <> "); "
-  <> "if this was intended as prose, prefix the line with '\\' to suppress this warning (e.g. '\\"
-  <> k <> ":')"
+  <> "if this line was meant as prose, prefix its content with '\\' to suppress this warning"
 
 -- | Parse a single CLI-option directive value into the
 -- [`ArgDocVars`] slot, recording an error when the value matched a
