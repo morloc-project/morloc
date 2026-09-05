@@ -1,0 +1,38 @@
+-- `@false` declares the spelling that turns a boolean flag off. It takes
+-- the same short/long forms as `@true`, so both names must reach the CLI
+-- and both must appear in help -- a flag reachable only by reading the
+-- source is not part of the interface.
+--
+-- The short-only form is the case that used to vanish entirely: the
+-- manifest had one slot for the reverse spelling, so a declaration with
+-- no long name had nowhere to go.
+module t (opts, shortOnly, longOnly)
+
+import root-py
+
+source Py from "t.py" ("show")
+show :: Bool -> Str
+
+--' Both reverse names
+opts ::
+  --' verbose on/off
+  --' @true -v/--verbose
+  --' @false -q/--quiet
+  Bool -> Str
+opts = show
+
+--' Reverse spelling with only a short name
+shortOnly ::
+  --' verbose on/off
+  --' @true -v/--verbose
+  --' @false -q
+  Bool -> Str
+shortOnly = show
+
+--' Reverse spelling with only a long name
+longOnly ::
+  --' verbose on/off
+  --' @true -v/--verbose
+  --' @false --quiet
+  Bool -> Str
+longOnly = show

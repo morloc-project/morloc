@@ -179,6 +179,7 @@
                 "short": null,
                 "long": "clean",
                 "long_reverse": "no-clean",
+                "short_reverse": null,
                 "default": "false",
                 "description": [
                   "Whether to purge caches on exit"

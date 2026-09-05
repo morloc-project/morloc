@@ -1229,6 +1229,7 @@ argToJson _ _ _ _ (CmdArgFlag r) =
     , ("short", cliOptShortJson (argFlagDocOpt r))
     , ("long", cliOptLongJson (argFlagDocOpt r))
     , ("long_rev", flagRevJson (argFlagDocOptRev r))
+    , ("short_rev", flagRevShortJson (argFlagDocOptRev r))
     , ("default", jsonStr (argFlagDocDefault r))
     , ("desc", jsonStrArr (argFlagDocDesc r))
     , ("metadata", metadataEmpty)
@@ -2139,11 +2140,20 @@ cliOptLongJson (CliOptLong l) = jsonStr l
 cliOptLongJson (CliOptBoth _ l) = jsonStr l
 cliOptLongJson _ = jsonNull
 
+-- | The reverse spelling of a boolean flag, split across two manifest
+-- slots the same way the forward spelling is. A single slot could only
+-- carry one of the two names, which silently dropped the short option
+-- from `@false -q/--quiet` and dropped `@false -q` altogether.
 flagRevJson :: Maybe CliOpt -> Text
 flagRevJson Nothing = jsonNull
 flagRevJson (Just (CliOptLong l)) = jsonStr l
 flagRevJson (Just (CliOptBoth _ l)) = jsonStr l
 flagRevJson _ = jsonNull
+
+flagRevShortJson :: Maybe CliOpt -> Text
+flagRevShortJson (Just (CliOptShort c)) = jsonStr (MT.singleton c)
+flagRevShortJson (Just (CliOptBoth c _)) = jsonStr (MT.singleton c)
+flagRevShortJson _ = jsonNull
 
 -- ======================================================================
 -- Expression tree serialization

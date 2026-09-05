@@ -809,6 +809,11 @@ pub enum Arg {
         /// direction (e.g. `"no-verbose"` for `--no-verbose`).
         #[serde(default)]
         long_rev: Option<String>,
+        /// Short option that flips the flag in the opposite direction
+        /// (e.g. `"q"` for `-q`). Independent of `long_rev`: a reverse
+        /// spelling may declare either name, or both.
+        #[serde(default)]
+        short_rev: Option<String>,
         /// Default value when the flag is not present on the CLI.
         /// String form: `"true"` or `"false"`.
         #[serde(default, rename = "default")]

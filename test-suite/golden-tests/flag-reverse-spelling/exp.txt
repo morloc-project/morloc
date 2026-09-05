@@ -1,0 +1,38 @@
+--- opts help ---
+Optional arguments:
+  -v, --verbose  verbose on/off
+                 type: Bool
+                 default: false
+  -q, --quiet    Turn --verbose off
+
+--- shortOnly help ---
+Optional arguments:
+  -v, --verbose  verbose on/off
+                 type: Bool
+                 default: false
+  -q             Turn --verbose off
+
+--- longOnly help ---
+Optional arguments:
+  -v, --verbose  verbose on/off
+                 type: Bool
+                 default: false
+      --quiet    Turn --verbose off
+
+--- opts dispatch ---
+"verbose=False"
+"verbose=True"
+"verbose=False"
+"verbose=False"
+"verbose=False"
+"verbose=True"
+--- shortOnly dispatch ---
+"verbose=True"
+"verbose=False"
+--- longOnly dispatch ---
+"verbose=True"
+"verbose=False"
+--- json-help ---
+opts short=v long=verbose short_reverse=q long_reverse=quiet default=false
+shortOnly short=v long=verbose short_reverse=q long_reverse=None default=false
+longOnly short=v long=verbose short_reverse=None long_reverse=quiet default=false

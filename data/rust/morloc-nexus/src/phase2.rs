@@ -533,6 +533,7 @@ fn build_command_args(
                 long_opt,
                 short_opt,
                 long_rev,
+                short_rev,
                 default_val,
                 desc,
                 ..
@@ -561,13 +562,27 @@ fn build_command_args(
                 )));
                 cmd = cmd.arg(fwd);
 
-                if let Some(rev) = long_rev {
+                // The reverse spelling is a flag the author declared, so
+                // it carries whichever names they wrote and appears in
+                // help like any other. Hiding it left `--quiet`
+                // reachable only by reading the source.
+                if long_rev.is_some() || short_rev.is_some() {
                     let neg_id: &'static str = leak(&format!("{}_neg", id));
-                    let neg = ClapArg::new(neg_id)
-                        .long(leak(rev))
+                    let mut neg = ClapArg::new(neg_id)
                         .action(ArgAction::SetTrue)
-                        .overrides_with(id)
-                        .hide(true);
+                        .overrides_with(id);
+                    if let Some(rev) = long_rev {
+                        neg = neg.long(leak(rev));
+                    }
+                    if let Some(s) = short_rev {
+                        if let Some(c) = s.chars().next() {
+                            neg = neg.short(c);
+                        }
+                    }
+                    neg = neg.help(leak(&reverse_flag_help(
+                        long_opt.as_deref(),
+                        short_opt.as_deref(),
+                    )));
                     cmd = cmd.arg(neg);
                 }
             }
@@ -684,6 +699,7 @@ fn add_group_entry_arg(mut cmd: ClapCommand, id: &'static str, marg: &ManifestAr
             long_opt,
             short_opt,
             long_rev,
+            short_rev,
             default_val,
             desc,
             ..
@@ -704,13 +720,23 @@ fn add_group_entry_arg(mut cmd: ClapCommand, id: &'static str, marg: &ManifestAr
                 None,
             )));
             cmd = cmd.arg(fwd);
-            if let Some(rev) = long_rev {
+            if long_rev.is_some() || short_rev.is_some() {
                 let neg_id: &'static str = leak(&format!("{}_neg", id));
-                let neg = ClapArg::new(neg_id)
-                    .long(leak(rev))
+                let mut neg = ClapArg::new(neg_id)
                     .action(ArgAction::SetTrue)
-                    .overrides_with(id)
-                    .hide(true);
+                    .overrides_with(id);
+                if let Some(rev) = long_rev {
+                    neg = neg.long(leak(rev));
+                }
+                if let Some(s) = short_rev {
+                    if let Some(c) = s.chars().next() {
+                        neg = neg.short(c);
+                    }
+                }
+                neg = neg.help(leak(&reverse_flag_help(
+                    long_opt.as_deref(),
+                    short_opt.as_deref(),
+                )));
                 cmd = cmd.arg(neg);
             }
         }
@@ -832,11 +858,13 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
             ManifestArg::Flag {
                 default_val,
                 long_rev,
+                short_rev,
                 ..
             } => {
                 let fwd_set = matches.get_flag(&id);
                 let neg_id = format!("{}_neg", id);
-                let neg_set = long_rev.is_some() && matches.get_flag(&neg_id);
+                let has_rev = long_rev.is_some() || short_rev.is_some();
+                let neg_set = has_rev && matches.get_flag(&neg_id);
                 // Clap's `overrides_with` ensures only one of the two
                 // ends up true if both spellings were given (last
                 // wins). Recover the original "true"/"false" string
@@ -881,11 +909,12 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                 for (j, entry) in entries.iter().enumerate() {
                     let eid = format!("{}_entry{}", id, j);
                     let entry_val: Option<String> = match &entry.arg {
-                        ManifestArg::Flag { long_rev, .. } => {
+                        ManifestArg::Flag { long_rev, short_rev, .. } => {
                             let fwd_set = matches.get_flag(&eid);
                             let neg_id = format!("{}_neg", eid);
-                            let neg_set =
-                                long_rev.is_some() && matches.get_flag(&neg_id);
+                            let neg_set = (long_rev.is_some()
+                                || short_rev.is_some())
+                                && matches.get_flag(&neg_id);
                             if fwd_set {
                                 Some("true".to_string())
                             } else if neg_set {
@@ -956,6 +985,16 @@ fn append_after_help(cmd: ClapCommand, block: &str) -> ClapCommand {
         format!("{existing}\n\n{block}")
     };
     cmd.after_help(leak(&merged))
+}
+
+/// Help text for a boolean flag's reverse spelling, naming the forward
+/// flag it turns off so the pair reads as one setting.
+fn reverse_flag_help(long_opt: Option<&str>, short_opt: Option<&str>) -> String {
+    match (long_opt, short_opt) {
+        (Some(l), _) => format!("Turn --{} off", l),
+        (None, Some(s)) => format!("Turn -{} off", s),
+        (None, None) => "Turn the flag off".to_string(),
+    }
 }
 
 pub(crate) fn first_desc(desc: &[String]) -> &str {

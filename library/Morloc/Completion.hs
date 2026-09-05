@@ -53,7 +53,7 @@ visibleCmds = filter (not . ciInternal) . miCommands
 data ArgInfo
   = PosArg
   | OptArg {oaShort :: Maybe Char, oaLong :: Maybe Text}
-  | FlagArg {faShort :: Maybe Char, faLong :: Maybe Text, faLongRev :: Maybe Text}
+  | FlagArg {faShort :: Maybe Char, faLong :: Maybe Text, faLongRev :: Maybe Text, faShortRev :: Maybe Char}
   | GrpArg {gaGroupOpt :: Maybe (Maybe Char, Maybe Text), gaEntries :: [ArgInfo]}
 
 data GroupInfo = GroupInfo
@@ -90,7 +90,8 @@ instance JSON.FromJSON ArgInfo where
         s <- o .:? "short"
         l <- o .:? "long"
         lr <- o .:? "long_rev"
-        return $ FlagArg (fmap charFromText s) l lr
+        sr <- o .:? "short_rev"
+        return $ FlagArg (fmap charFromText s) l lr (fmap charFromText sr)
       "grp" -> do
         gopt <- o .:? "group_opt"
         entries <- o .:? "entries" .!= []
@@ -173,7 +174,7 @@ argCompletionWords = concatMap argWords
   where
     argWords PosArg = []
     argWords (OptArg s l) = shortWord s ++ longWord l
-    argWords (FlagArg s l lr) = shortWord s ++ longWord l ++ longWord lr
+    argWords (FlagArg s l lr sr) = shortWord s ++ longWord l ++ longWord lr ++ shortWord sr
     argWords (GrpArg gopt entries) =
       maybe [] (\(s, l) -> shortWord s ++ longWord l) gopt
         ++ concatMap argWords entries
@@ -619,10 +620,11 @@ zshArgSpecs = concatMap go
     go (OptArg s l) =
       maybe [] (\c -> ["'-" ++ [c] ++ "[Option]:value:'"]) s
         ++ maybe [] (\t -> ["'--" ++ T.unpack t ++ "[Option]:value:'"]) l
-    go (FlagArg s l lr) =
+    go (FlagArg s l lr sr) =
       maybe [] (\c -> ["'-" ++ [c] ++ "[Flag]'"]) s
         ++ maybe [] (\t -> ["'--" ++ T.unpack t ++ "[Flag]'"]) l
         ++ maybe [] (\t -> ["'--" ++ T.unpack t ++ "[Flag]'"]) lr
+        ++ maybe [] (\c -> ["'-" ++ [c] ++ "[Flag]'"]) sr
     go (GrpArg gopt entries) =
       maybe
         []

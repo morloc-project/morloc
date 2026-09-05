@@ -363,6 +363,9 @@ pub struct ManifestArg {
     pub short_opt: c_char,
     pub long_opt: *mut c_char,
     pub long_rev: *mut c_char,
+    /// Short option flipping the flag the other way, or 0 when the
+    /// reverse spelling declares no short name. Mirrors `short_opt`.
+    pub short_rev: c_char,
     pub default_val: *mut c_char,
     /// NULL-terminated array of description lines.
     pub desc: *mut *mut c_char,
@@ -1520,6 +1523,7 @@ unsafe fn populate_arg(dst: *mut ManifestArg, src: &morloc_manifest::Arg) {
             short_opt,
             long_opt,
             long_rev,
+            short_rev,
             default_val,
             desc,
             ..
@@ -1532,6 +1536,11 @@ unsafe fn populate_arg(dst: *mut ManifestArg, src: &morloc_manifest::Arg) {
                 .unwrap_or(0);
             (*dst).long_opt = nullable_strdup(long_opt.as_deref());
             (*dst).long_rev = nullable_strdup(long_rev.as_deref());
+            (*dst).short_rev = short_rev
+                .as_ref()
+                .and_then(|s| s.as_bytes().first().copied())
+                .map(|b| b as c_char)
+                .unwrap_or(0);
             (*dst).default_val = nullable_strdup(default_val.as_deref());
             let (d, n) = populate_str_vec(desc);
             (*dst).desc = d;

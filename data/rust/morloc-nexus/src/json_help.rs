@@ -422,6 +422,7 @@ fn arg_to_json(arg: &Arg, pos_index: usize) -> Value {
             short_opt,
             long_opt,
             long_rev,
+            short_rev,
             default_val,
             desc,
             ..
@@ -434,6 +435,7 @@ fn arg_to_json(arg: &Arg, pos_index: usize) -> Value {
                 "short": short_opt,
                 "long": long_opt,
                 "long_reverse": long_rev,
+                "short_reverse": short_rev,
                 "default": default_val,
                 "description": desc,
                 "type": { "morloc": "Bool", "structure": { "type": "boolean" } },
