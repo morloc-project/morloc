@@ -20,3 +20,8 @@ def from_path(p):
 
 def suffix(p):
     return p.suffix
+
+
+def decode_utf8(b):
+    # only valid if the value really is `bytes`, as the module declares
+    return b.decode("utf-8")

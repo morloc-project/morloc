@@ -25,6 +25,7 @@ module main
   , bufCross
   , pairSwap
   , pathSuffix
+  , bytesDecode
   )
 
 import root-py
@@ -37,6 +38,12 @@ newtype Tagged a = Str
 newtype Stack a = List a
 newtype Buf (n :: Nat) a = List a
 newtype Pair a b = (a, b)
+
+-- Bytes declares a per-language form of its own without a Packable instance.
+-- It is still a Str on the wire, but natively it is Python's bytes, and the
+-- declaration is what tells the pool so.
+newtype Bytes = Str
+type Py => Bytes = "bytes"
 
 newtype Path = Str
 type Py => Path = "pathlib.Path"
@@ -52,6 +59,7 @@ source Py from "wire.py"
   , "rev" as revBuf
   , "swap"
   , "suffix"
+  , "decode_utf8" as decodeUtf8
   )
 source Cpp from "wire.hpp" ("str_len", "sum_ints" as sumStack, "sum_ints" as sumBuf)
 
@@ -63,6 +71,7 @@ revStack    :: Stack Int -> Stack Int
 revBuf      :: Buf 3 Int -> Buf 3 Int
 swap        :: Pair Str Int -> Pair Int Str
 suffix      :: Path -> Str
+decodeUtf8  :: Bytes -> Str
 str_len     :: Name -> Int
 sumStack    :: Stack Int -> Int
 sumBuf      :: Buf 3 Int -> Int
@@ -99,3 +108,6 @@ pairSwap    = swap
 
 pathSuffix  :: Path -> Str
 pathSuffix  = suffix
+
+bytesDecode :: Bytes -> Str
+bytesDecode = decodeUtf8

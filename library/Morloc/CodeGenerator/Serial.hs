@@ -489,6 +489,44 @@ findPackerInstances = do
 -- morloc general type system and many other languages. So the map contains a
 -- list of possible packers. Matching the concrete type name to the right packer
 -- will be done through subtyping.
+-- | Put a name on the head of a serializer.
+--
+-- The wire form is unchanged -- only which name the schema reports it under.
+-- A newtype that declares a per-language form of its own is not simply its
+-- wire parent natively, so the serializer built from the parent has to carry
+-- the newtype's name for the concrete-type hint to reach the pool.
+setSerialHead :: FVar -> SerialAST -> SerialAST
+setSerialHead v s = case s of
+  SerialPack _ x -> SerialPack v x
+  SerialList _ d x -> SerialList v d x
+  SerialTuple _ xs -> SerialTuple v xs
+  SerialObject o _ ps rs -> SerialObject o v ps rs
+  SerialRec _ -> SerialRec v
+  SerialReal _ -> SerialReal v
+  SerialFloat32 _ -> SerialFloat32 v
+  SerialFloat64 _ -> SerialFloat64 v
+  SerialInt _ -> SerialInt v
+  SerialInt8 _ -> SerialInt8 v
+  SerialInt16 _ -> SerialInt16 v
+  SerialInt32 _ -> SerialInt32 v
+  SerialInt64 _ -> SerialInt64 v
+  SerialUInt _ -> SerialUInt v
+  SerialUInt8 _ -> SerialUInt8 v
+  SerialUInt16 _ -> SerialUInt16 v
+  SerialUInt32 _ -> SerialUInt32 v
+  SerialUInt64 _ -> SerialUInt64 v
+  SerialBool _ -> SerialBool v
+  SerialString _ -> SerialString v
+  SerialIFile _ -> SerialIFile v
+  SerialOStream _ -> SerialOStream v
+  SerialIStream _ -> SerialIStream v
+  SerialNull _ -> SerialNull v
+  SerialOptional _ x -> SerialOptional v x
+  SerialUnknown _ -> SerialUnknown v
+  -- A closure carries no name of its own; its wire form is signature
+  -- independent, so there is no head to rename.
+  SerialClosure _ _ -> s
+
 makeSerialAST :: Int -> Lang -> TypeF -> MorlocMonad SerialAST
 makeSerialAST m lang t0 = do
   instances <- findPackerInstances
@@ -570,7 +608,7 @@ makeSerialAST m lang t0 = do
           | finalType == BT.u64U = return $ SerialUInt64 v
           | otherwise = do
               (cscope, _) <- getScope m lang
-              case aliasShape (Map.member gv cscope) of
+              case aliasShape of
                 -- @type X = [E]@: bare alias whose body is list-shaped.
                 -- The emitted SerialList carries an FVar whose GV is the
                 -- outer alias name (so the @&X@ declaration matches any
@@ -600,7 +638,8 @@ makeSerialAST m lang t0 = do
                 -- references back to @X@ are caught as @SerialRec@.
                 AliasIsOther expanded -> do
                   expandedTf <- inferConcreteType lang (Idx m (typeOf expanded))
-                  withAncestorVar anc (makeSerialAST' gscope typepackers expandedTf)
+                  ast <- withAncestorVar anc (makeSerialAST' gscope typepackers expandedTf)
+                  return $ if Map.member gv cscope then setSerialHead v ast else ast
                 -- No alias expansion available; fall back to Packable
                 -- lookup the same way this branch did before.
                 AliasIsNone -> case Map.lookup gv typepackers of
@@ -628,10 +667,7 @@ makeSerialAST m lang t0 = do
         -- When the outer type has a registered @Packable@ instance,
         -- defer to that instance regardless of body shape (see the
         -- AppF branch's @aliasShape@ for the rationale).
-        -- 'hasOwnForm' says the type declares a per-language form of its own.
-        -- Such a type is not simply its parent natively, so expanding through
-        -- the parent would discard the declaration.
-        aliasShape hasOwnForm
+        aliasShape
           | Map.member gv typepackers = AliasIsNone
           | otherwise = case TE.expandWireParent gscope (VarU gv) of
               Just expanded@(AppU (VarU h) bodyArgs)
@@ -647,7 +683,6 @@ makeSerialAST m lang t0 = do
               -- newtype over a primitive cannot cross a boundary at all.
               Just expanded@(VarU h)
                 | h == gv -> AliasIsNone
-                | hasOwnForm -> AliasIsNone
                 | otherwise -> AliasIsOther expanded
               _ -> AliasIsNone
 
@@ -790,7 +825,14 @@ makeSerialAST m lang t0 = do
               AliasIsOther expanded -> do
                 expandedTf <- inferConcreteType lang (Idx m (typeOf expanded))
                 ast <- withAncestor anc (makeSerialAST' gscope typepackers expandedTf)
-                return $ applyDimsToList dims ast
+                -- A type with a per-language form of its own keeps that form on
+                -- the head; one without it is its parent natively, and the
+                -- parent's own name is the right one to report.
+                (cscope, _) <- getScope m lang
+                let ast' = if Map.member generalTypeName cscope
+                             then setSerialHead fv ast
+                             else ast
+                return $ applyDimsToList dims ast'
 
               -- No outer aliasing: the type is its own head. Dispatch on it
               -- directly: list / tuple / Packable lookup.

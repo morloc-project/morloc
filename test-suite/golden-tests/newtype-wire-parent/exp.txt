@@ -20,3 +20,5 @@
 [7,"a"]
 --- pathSuffix ---
 ".txt"
+--- bytesDecode ---
+"hi"

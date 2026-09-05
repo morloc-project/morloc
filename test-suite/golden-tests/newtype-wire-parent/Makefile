@@ -23,6 +23,8 @@ all:
 	./nexus pairSwap '["a",7]' >> obs.txt 2>> obs.err
 	echo "--- pathSuffix ---" >> obs.txt
 	./nexus pathSuffix notes/report.txt >> obs.txt 2>> obs.err
+	echo "--- bytesDecode ---" >> obs.txt
+	./nexus bytesDecode hi >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus pools *.err __pycache__
