@@ -1,6 +1,12 @@
--- Single-command layout: the command's args live on the root, so the
--- module epilogue has to coexist with the command's own positional and
--- return blocks rather than replacing them.
+-- Single-command layout: the root is both the program and its only
+-- command, so two docstrings can describe it. Both must reach the help --
+-- the module's says what the program is, the command's says what the one
+-- thing it does does, and neither has anywhere else to appear.
+--
+-- The module epilogue also has to coexist with the command's own
+-- positional and return blocks rather than replacing them.
+--' A one-trick program
+--' The trick is addition.
 --' @epilogue
 --' Examples:
 --'   solo 1 2

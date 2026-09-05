@@ -19,7 +19,7 @@ It does several things.
 
 Usage: ./tool <nexus_options> <command> <command_options>
 --- single short ---
-Add two integers
+A one-trick program
 
 Usage: ./solo <nexus_options> @ <command_options>
 
@@ -34,3 +34,34 @@ Return: Int
 
 Examples:
   solo 1 2
+--- single long description ---
+A one-trick program
+The trick is addition.
+
+Add two integers
+
+Usage: ./solo <nexus_options> @ <command_options>
+--- module description only ---
+Convert a number to text
+
+Usage: ./modonly <nexus_options> @ <command_options>
+
+General Options:
+  -h, --help  Print help (see more with '--help')
+
+Positional arguments:
+  1:  type: Int
+
+Return: Str
+--- command description only ---
+Convert a number to text
+
+Usage: ./cmdonly <nexus_options> @ <command_options>
+
+General Options:
+  -h, --help  Print help (see more with '--help')
+
+Positional arguments:
+  1:  type: Int
+
+Return: Str

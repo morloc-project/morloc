@@ -1,0 +1,9 @@
+-- A single-command program described only at the command level. This is
+-- the shape that already worked; it is here so the fallback stays pinned.
+module cmdonly (render)
+
+import root-py
+
+--' Convert a number to text
+render :: Int -> Str
+render x = show x

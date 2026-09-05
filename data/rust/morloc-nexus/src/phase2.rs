@@ -240,9 +240,16 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
         // section sorts before the command's positional/optional args
         // (clap orders sections by first-arg-added).
         let root = crate::help::add_general_options(ClapCommand::new(leak(prog_name)));
+        // The root is the program and the command at once, so both
+        // docstrings describe it and `build_command_args` sees only one of
+        // them.
+        let desc = single_root_desc(&manifest.desc, &cmd.desc);
         let mut root = build_command_args(root, cmd, manifest)
-            .about(leak(first_desc(&cmd.desc)))
+            .about(leak(first_desc(&desc)))
             .arg_required_else_help(false);
+        if !desc.is_empty() {
+            root = root.long_about(leak(&desc.join("\n")));
+        }
         root = append_after_help(root, &epilogue);
         return crate::help::finalize(root, crate::help::usage_single_root(prog_name));
     }
@@ -985,6 +992,31 @@ fn append_after_help(cmd: ClapCommand, block: &str) -> ClapCommand {
         format!("{existing}\n\n{block}")
     };
     cmd.after_help(leak(&merged))
+}
+
+/// The description of a program whose args live on the root.
+///
+/// Two docstrings can describe it: the module's, which says what the program
+/// is, and the sole command's, which says what the one thing it does does. In
+/// the multi-command layout these have separate homes -- the module's heads
+/// the help, the command's sits in the command list and in its own subcommand
+/// help. Here there is one slot, and dropping either loses text its author had
+/// no other way to write.
+///
+/// The module's comes first, since it describes the program a reader is
+/// asking about. Where only one exists it is used alone, which is why a
+/// program described only at the command level reads exactly as before.
+fn single_root_desc(module_desc: &[String], cmd_desc: &[String]) -> Vec<String> {
+    if module_desc.is_empty() {
+        return cmd_desc.to_vec();
+    }
+    if cmd_desc.is_empty() || cmd_desc == module_desc {
+        return module_desc.to_vec();
+    }
+    let mut out = module_desc.to_vec();
+    out.push(String::new());
+    out.extend(cmd_desc.iter().cloned());
+    out
 }
 
 /// Help text for a boolean flag's reverse spelling, naming the forward
