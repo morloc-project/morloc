@@ -1,0 +1,19 @@
+-- A record's docstring is inherited by every argument of that type.
+-- The two record spellings must agree: `record X where` and the
+-- constructor form `record X = X { ... }` differ only in syntax, so a
+-- docstring above either one reaches the generated interface.
+module whereForm (f)
+
+import root-py
+
+--' Some settings
+--' @metavar SETTINGS
+record Config where
+  a :: Int
+  b :: Str
+
+record Py => Config = "dict"
+
+--' Take a config
+f :: Config -> Int
+f _ = 1

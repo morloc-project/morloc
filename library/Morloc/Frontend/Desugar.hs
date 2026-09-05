@@ -799,6 +799,26 @@ firstDuplicate = go Set.empty
 -- | Reject any `with:` atom that appears somewhere other than a
 -- signature preamble. Used for per-argument docstrings, record-field
 -- docstrings, type-alias docstrings, etc. `with:` is command-only.
+-- | Collect the docstrings attached to a named-type declaration: the block
+-- above the declaration keyword, and the block above each field. Both record
+-- spellings go through here, so `record X where` and `record X = X { .. }`
+-- generate the same documentation.
+namTypeDocs :: Pos -> [(Located, Key, TypeU)] -> D ArgDoc
+namTypeDocs declPos locEntries = do
+  recDocs <- lookupDocsAt declPos
+  recDocVars <- processArgDocLinesD declPos recDocs
+  rejectWithHere declPos "a record declaration" recDocVars
+  fieldDocs <-
+    mapM
+      (\(loc, _, _) -> do
+          let p = locPos loc
+          dl <- lookupDocsAt p
+          fieldDoc <- processArgDocLinesD p dl
+          rejectWithHere p "a record field" fieldDoc
+          return fieldDoc)
+      locEntries
+  return (ArgDocRec recDocVars (zip [k | (_, k, _) <- locEntries] fieldDocs))
+
 rejectWithHere :: Pos -> Text -> ArgDocVars -> D ()
 rejectWithHere pos ctx v =
   case docWith v of
@@ -2546,24 +2566,12 @@ desugarTypeDef sp (CstNamTypeWhere nt (v, vs) locEntries) = do
   -- @record Cpp => Foo = "..."@ form). An explicit @type SpecialPerson
   -- = Person@ wrapped around a record is still TypedefAlias and would
   -- still trip Invariant 1 if also given a per-language form.
-  recDocs <- lookupDocsAt (startPos sp)
-  recDocVars <- processArgDocLinesD (startPos sp) recDocs
-  rejectWithHere (startPos sp) "a record declaration" recDocVars
-  fieldDocs <-
-    mapM
-      (\(loc, _, _) -> do
-          let p = locPos loc
-          dl <- lookupDocsAt p
-          fieldDoc <- processArgDocLinesD p dl
-          rejectWithHere p "a record field" fieldDoc
-          return fieldDoc)
-      locEntries
+  doc <- namTypeDocs (startPos sp) locEntries
   let entries = [(k, ty) | (_, k, ty) <- locEntries]
-      doc = ArgDocRec recDocVars (zip (map fst entries) fieldDocs)
       t = NamU nt v (map (either (VarU . fst) id) vs) entries
   e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t doc TypedefNewtype))
   return [e]
-desugarTypeDef sp (CstNamTypeLegacy maybeLangTok nt (v, vs) (conName, isTerminal, conArgs) entries) = do
+desugarTypeDef sp (CstNamTypeLegacy maybeLangTok nt (v, vs) (conName, isTerminal, conArgs) locEntries) = do
   -- Legacy form covers both general @record Foo = Constructor ...@
   -- (lang=Nothing, behaves like CstNamTypeWhere -> TypedefNewtype) and
   -- per-language @record Cpp => Foo = "struct"@ (lang=Just, feeds
@@ -2574,7 +2582,9 @@ desugarTypeDef sp (CstNamTypeLegacy maybeLangTok nt (v, vs) (conName, isTerminal
     Just tok -> do
       l <- parseLang tok
       return (Just (l, isTerminal))
-  let con = if T.null conName then v else TV conName
+  doc <- namTypeDocs (startPos sp) locEntries
+  let entries = [(k, ty) | (_, k, ty) <- locEntries]
+      con = if T.null conName then v else TV conName
       -- If the user supplied explicit args after the constructor string
       -- (e.g. `"container_t<$1>" a`, parallel to the type-alias
       -- concrete_rhs syntax), use those as the body's positional args.
@@ -2585,7 +2595,6 @@ desugarTypeDef sp (CstNamTypeLegacy maybeLangTok nt (v, vs) (conName, isTerminal
                  then map (either (VarU . fst) id) vs
                  else conArgs
       t = NamU nt con bodyTs entries
-      doc = ArgDocRec defaultValue [(k, defaultValue) | (k, _) <- entries]
       kind = case maybeLangTok of
         Nothing -> TypedefNewtype  -- general record decl
         Just _  -> TypedefAlias     -- per-language native form (cscope)

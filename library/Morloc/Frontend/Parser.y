@@ -351,11 +351,11 @@ typedef_decl :: { Loc CstExpr }
   | nam_type typedef_term 'where' VLBRACE nam_entry_list_loc VRBRACE
       {% checkRecordTypeKeys (fst $1) $5 >> return (at (fst $1) (CTypE (CstNamTypeWhere (snd $1) $2 $5))) }
   | nam_type typedef_term '=' nam_constructor opt_nam_entries
-      {% checkRecordTypeKeysLegacy (fst $1) $5 >> return (at (fst $1) (CTypE (CstNamTypeLegacy Nothing (snd $1) $2 $4 $5))) }
+      {% checkRecordTypeKeys (fst $1) $5 >> return (at (fst $1) (CTypE (CstNamTypeLegacy Nothing (snd $1) $2 $4 $5))) }
   | nam_type UPPER '=>' typedef_term '=' nam_constructor opt_nam_entries
-      {% checkRecordTypeKeysLegacy (fst $1) $7 >> return (at (fst $1) (CTypE (CstNamTypeLegacy (Just $2) (snd $1) $4 $6 $7))) }
+      {% checkRecordTypeKeys (fst $1) $7 >> return (at (fst $1) (CTypE (CstNamTypeLegacy (Just $2) (snd $1) $4 $6 $7))) }
   | nam_type LOWER '=>' typedef_term '=' nam_constructor opt_nam_entries
-      {% checkRecordTypeKeysLegacy (fst $1) $7 >> return (at (fst $1) (CTypE (CstNamTypeLegacy (Just $2) (snd $1) $4 $6 $7))) }
+      {% checkRecordTypeKeys (fst $1) $7 >> return (at (fst $1) (CTypE (CstNamTypeLegacy (Just $2) (snd $1) $4 $6 $7))) }
 
 nam_type :: { (Located, NamType) }
   : 'record'   { ($1, NamRecord) }
@@ -389,7 +389,7 @@ nam_constructor_arg :: { TypeU }
   | STRING                        { StrLitU (getString $1) }
   | INTEGER                       { NatLitU (getInt $1) }
 
-opt_nam_entries :: { [(Key, TypeU)] }
+opt_nam_entries :: { [(Located, Key, TypeU)] }
   : {- empty -}              { [] }
   | '{' nam_entries '}'       { $2 }
 
@@ -408,9 +408,6 @@ typedef_params :: { [Either (TVar, Kind) TypeU] }
   | typedef_params '(' LOWER '::' UPPER ')'  {% parseKindE $5 >>= \k -> return ($1 ++ [Left (TV (getName $3), k)]) }
   | typedef_params '(' type ')'        { $1 ++ [Right $3] }
 
-nam_entry :: { (Key, TypeU) }
-  : LOWER '::' type          { (Key (getName $1), $3) }
-
 nam_entry_loc :: { (Located, Key, TypeU) }
   : LOWER '::' type          { ($1, Key (getName $1), $3) }
 
@@ -418,9 +415,9 @@ nam_entry_list_loc :: { [(Located, Key, TypeU)] }
   : nam_entry_loc                              { [$1] }
   | nam_entry_list_loc VSEMI nam_entry_loc     { $1 ++ [$3] }
 
-nam_entries :: { [(Key, TypeU)] }
-  : nam_entry                          { [$1] }
-  | nam_entries ',' nam_entry          { $1 ++ [$3] }
+nam_entries :: { [(Located, Key, TypeU)] }
+  : nam_entry_loc                          { [$1] }
+  | nam_entries ',' nam_entry_loc          { $1 ++ [$3] }
 
 concrete_rhs :: { (TypeU, Bool) }
   : STRING concrete_rhs_args    { (case $2 of { [] -> VarU (TV (getString $1)); ts -> AppU (VarU (TV (getString $1))) ts }, True) }
@@ -1216,8 +1213,8 @@ checkRecordKeys = go Set.empty
             ("duplicate field in record literal: " ++ T.unpack (unKey k)) [] srcLines))
       | otherwise = go (Set.insert k seen) rest
 
--- Reject duplicate field names in `record T where ...` and `object T where ...`
--- declarations. Caret on the second occurrence's identifier token.
+-- Reject duplicate field names in a record / object declaration, in either
+-- spelling. Caret on the second occurrence's identifier token.
 checkRecordTypeKeys :: Located -> [(Located, Key, TypeU)] -> P ()
 checkRecordTypeKeys _ = go Set.empty
   where
@@ -1257,21 +1254,6 @@ effectNameError nameTok = do
          ++ "  The first character must be uppercase\n"
          ++ "  try: `effect " ++ cap ++ "` (or `escapable effect " ++ cap ++ "`)"
   State.lift (Left (ParseError (locPos nameTok) msg [] srcLines))
-
--- Same check for the positionless legacy form (`record T = MkT { ... }`).
--- Falls back to the declaration-keyword position since per-entry positions
--- are not preserved by the legacy grammar rule.
-checkRecordTypeKeysLegacy :: Located -> [(Key, TypeU)] -> P ()
-checkRecordTypeKeysLegacy declTok = go Set.empty
-  where
-    go :: Set.Set Key -> [(Key, TypeU)] -> P ()
-    go _ [] = return ()
-    go seen ((k, _) : rest)
-      | Set.member k seen = do
-          srcLines <- State.gets psSourceLines
-          State.lift (Left (ParseError (locPos declTok)
-            ("duplicate field in record type declaration: " ++ T.unpack (unKey k)) [] srcLines))
-      | otherwise = go (Set.insert k seen) rest
 
 --------------------------------------------------------------------
 -- Desugar bridge

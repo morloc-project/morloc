@@ -155,7 +155,7 @@ data CstTypeDef
   | CstNewtype (TVar, [Either (TVar, Kind) TypeU]) TypeU
   | CstTypeAliasForward (TVar, [Either (TVar, Kind) TypeU])
   | CstNamTypeWhere NamType (TVar, [Either (TVar, Kind) TypeU]) [(Located, Key, TypeU)]
-  | CstNamTypeLegacy (Maybe Located) NamType (TVar, [Either (TVar, Kind) TypeU]) (Text, Bool, [TypeU]) [(Key, TypeU)]
+  | CstNamTypeLegacy (Maybe Located) NamType (TVar, [Either (TVar, Kind) TypeU]) (Text, Bool, [TypeU]) [(Located, Key, TypeU)]
   deriving (Show, Eq)
 
 data CstClassHead
