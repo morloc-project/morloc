@@ -1,0 +1,45 @@
+-- Regression: @catch whose FALLBACK is a do-block that carries no
+-- residual effect (an empty-row do-block).
+--
+-- @catch strips the Err row from its fallible; when nothing else
+-- remains the whole expression is plain-typed. A do-block fallback is
+-- already a thunk (a DoBlockN) whose stored type is that plain inner
+-- type, so a thunk-shaping test gated on "type == EffectF" misses it
+-- and wraps it a second time into a thunk-that-returns-a-thunk. The
+-- pool's catch helper does `return fallback()`, which then yields the
+-- inner lambda instead of the value: C++ fails to compile (a lambda
+-- will not convert to std::vector), and Python/R silently return a
+-- callable at runtime. Every prior @catch golden used a bare-value
+-- fallback, so this shape was untested.
+--
+-- Cases (each run twice: fallible succeeds -> value passes through and
+-- the fallback is ignored; fallible raises -> the fallback do-block
+-- runs):
+--   catchListDoFb    -- variable-width [Int] return, empty-list do-block
+--   catchListDoFbOpt -- result optional-widened to ?[Int], so the
+--                       fallback do-block sits under a CoerceToOptional
+--   catchLetDoFb     -- multi-statement pure do-block fallback (let .. in ..)
+
+module main
+  ( catchListDoFb
+  , catchListDoFbOpt
+  , catchLetDoFb
+  )
+
+import root
+import root-cpp
+
+source Cpp from "helper.hpp" ("cpp_maybe_list")
+
+cpp_maybe_list :: Str -> <Err> [Int]
+
+catchListDoFb :: Str -> <IO> [Int]
+catchListDoFb s = @catch (cpp_maybe_list s) (do [])
+
+catchListDoFbOpt :: Str -> <IO> ?[Int]
+catchListDoFbOpt s = @catch (cpp_maybe_list s) (do [])
+
+catchLetDoFb :: Str -> <IO> [Int]
+catchLetDoFb s = @catch (cpp_maybe_list s) (do
+    let x = 7
+    [x, x])

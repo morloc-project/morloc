@@ -88,14 +88,29 @@ inferConcreteTypeStructural lang i gscope g c = case (g, c) of
       <$> inferConcreteTypeStructural lang i gscope g' c'
   (OptionalU g', OptionalU c') ->
     OptionalF <$> inferConcreteTypeStructural lang i gscope g' c'
-  -- AppU general / VarU concrete: parameterised newtype/alias whose
-  -- per-language form is a non-templated VarU. Recurse on each general
-  -- arg via inferConcreteType (giving each its own pairEval pass) so
-  -- nested types -- including further newtype-vs-VarU pairs -- get
-  -- their own concrete forms.
+  -- AppU general / VarU concrete: the per-language form takes no arguments
+  -- while the general type has some.
+  --
+  -- A type that declares its own form must list every parameter, so this shape
+  -- means the declaration is missing one. A type with no declaration inherits
+  -- its concrete form through its wire parent -- @newtype PatternChain a b =
+  -- Str@ takes Str's mapping -- and an inherited form cannot carry the
+  -- newtype's parameters, so those arguments are carried here instead.
   (AppU (VarU vG) ts, VarU (TV vC)) -> do
-    argTfs <- mapM (inferConcreteType lang . Idx i . typeOf) ts
-    return $ AppF (VarF (FV vG (CV vC))) argTfs
+    (cscope, _) <- getScope i lang
+    if Map.member vG cscope
+      then
+        MM.throwSourcedError i $
+          "The" <+> pretty lang <+> "form of" <+> squotes (pretty vG)
+            <+> "takes no arguments, but" <+> squotes (pretty vG)
+            <+> "has" <+> pretty (length ts) <> "."
+            <> "\nA type that declares its own per-language form must list"
+            <> "\nevery parameter, so that the form's arity matches the"
+            <> "\ntype's. A parameter the native macro does not interpolate"
+            <> "\nis still listed."
+      else do
+        argTfs <- mapM (inferConcreteType lang . Idx i . typeOf) ts
+        return $ AppF (VarF (FV vG (CV vC))) argTfs
   -- AppU/AppU shortcut: weave the head pairwise, recurse on each
   -- (g, c) arg pair so a nested AppU/VarU on the arg side still
   -- picks up the intercept. The type-arity guard rejects phantom-Nat
@@ -173,9 +188,22 @@ inferConcreteTypeUniversalStructural lang gscopeUni t g c = case (g, c) of
       <$> inferConcreteTypeUniversalStructural lang gscopeUni t g' c'
   (OptionalU g', OptionalU c') ->
     OptionalF <$> inferConcreteTypeUniversalStructural lang gscopeUni t g' c'
+  -- Same rule as in the module-scoped walk above.
   (AppU (VarU vG) ts, VarU (TV vC)) -> do
-    argTfs <- mapM (inferConcreteTypeUniversal lang . typeOf) ts
-    return $ AppF (VarF (FV vG (CV vC))) argTfs
+    cscopeUni <- MM.getConcreteUniversalScope lang
+    if Map.member vG cscopeUni
+      then
+        MM.throwSystemError $
+          "The" <+> pretty lang <+> "form of" <+> squotes (pretty vG)
+            <+> "takes no arguments, but" <+> squotes (pretty vG)
+            <+> "has" <+> pretty (length ts) <> "."
+            <> "\nA type that declares its own per-language form must list"
+            <> "\nevery parameter, so that the form's arity matches the"
+            <> "\ntype's. A parameter the native macro does not interpolate"
+            <> "\nis still listed."
+      else do
+        argTfs <- mapM (inferConcreteTypeUniversal lang . typeOf) ts
+        return $ AppF (VarF (FV vG (CV vC))) argTfs
   (AppU (VarU vG) ts1, AppU (VarU (TV vC)) ts2)
     | length ts1 == length ts2
     , length (fst (partitionKindArgsU ts1))

@@ -56,3 +56,4 @@ all:
 
 clean:
 	rm -rf nexus pools logs_unlimited logs_capped obs.*.err build.err
+	rm -rf *-build *build.tmp*

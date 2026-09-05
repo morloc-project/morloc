@@ -1,0 +1,5 @@
+Passes a do-block directly as a function argument (`id (do ...)`). The
+typechecker rejects it: `<IO> Int <: Int`, "an effectful value cannot be used
+where a non-effectful type is expected". A plain type variable cannot carry an
+effect row, so this needs a decision on whether effect-polymorphic application
+should be supported before the test can be made green.

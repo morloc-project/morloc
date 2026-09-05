@@ -24,6 +24,8 @@ import Morloc.Module
   , addPin
   , hashEq
   , loadModuleMetadata
+  , loadSnapshot
+  , parseSnapshotLine
   , reconcileOverwrite
   )
 import Morloc.Namespace.Prim (Defaultable (..))
@@ -65,6 +67,99 @@ morlocDepsTests =
     , resolverTests
     , packageSetupParserTests
     , moduleVersionGateTests
+    , snapshotLineTests
+    , loadSnapshotTests
+    ]
+
+-- ---------------------------------------------------------------------------
+-- loadSnapshot: directory merge, dotfile skipping, conflict detection
+-- ---------------------------------------------------------------------------
+
+-- | Run a MorlocMonad action with configState pointed at a test dir, so
+-- 'loadSnapshot' reads @<stateDir>/snapshots@.
+runMMSnapshot :: FilePath -> MorlocMonad a -> IO (Either MorlocError a)
+runMMSnapshot stateDir action = do
+  home <- SD.getHomeDirectory
+  let cfg =
+        Config
+          { configHome = home <> "/.local/share/morloc"
+          , configState = stateDir
+          , configLibrary = stateDir <> "/src/morloc"
+          , configPlane = "default"
+          , configPlaneCore = "morloclib"
+          , configTmpDir = home <> "/.morloc/tmp"
+          , configBuildConfig = home <> "/.morloc/.build-config.yaml"
+          , configLangOverrides = mempty
+          , configRegistry = Nothing
+          }
+  ((r, _), _) <- MM.runMorlocMonad Nothing 0 cfg defaultValue action
+  return r
+
+loadSnapshotTests :: TestTree
+loadSnapshotTests =
+  testGroup
+    "loadSnapshot"
+    [ testCase "merges files and skips dot-files (temp/junk)" $ do
+        tmp <- SD.getTemporaryDirectory
+        let stateDir = tmp </> "morloc-snap-merge"
+            snapDir = stateDir </> "snapshots"
+        SD.createDirectoryIfMissing True snapDir
+        writeFile (snapDir </> "stdlib.txt") "# hdr\nroot abc\nmath def\n"
+        -- an interrupted mim deposit / editor artifact: MUST be ignored
+        writeFile (snapDir </> ".stdlib.txt.tmp") "root ZZZZ\n"
+        r <- runMMSnapshot stateDir loadSnapshot
+        SD.removeDirectoryRecursive stateDir
+        case r of
+          Left e -> assertFailure (show e)
+          Right m -> do
+            Map.lookup "root" m @?= Just "abc"
+            Map.lookup "math" m @?= Just "def"
+    , testCase "conflicting hashes across (non-dot) files is rejected" $ do
+        tmp <- SD.getTemporaryDirectory
+        let stateDir = tmp </> "morloc-snap-conflict"
+            snapDir = stateDir </> "snapshots"
+        SD.createDirectoryIfMissing True snapDir
+        writeFile (snapDir </> "a.txt") "root H1\n"
+        writeFile (snapDir </> "b.txt") "root H2\n"
+        r <- runMMSnapshot stateDir loadSnapshot
+        SD.removeDirectoryRecursive stateDir
+        case r of
+          Left _ -> return ()
+          Right _ -> assertFailure "expected a conflicting-pins error"
+    , testCase "absent snapshot dir yields empty map" $ do
+        tmp <- SD.getTemporaryDirectory
+        let stateDir = tmp </> "morloc-snap-absent"
+        SD.createDirectoryIfMissing True stateDir
+        r <- runMMSnapshot stateDir loadSnapshot
+        SD.removeDirectoryRecursive stateDir
+        case r of
+          Left e -> assertFailure (show e)
+          Right m -> Map.null m @?= True
+    ]
+
+-- ---------------------------------------------------------------------------
+-- Snapshot pin-file line parsing (the `name hash` on-demand pin table)
+-- ---------------------------------------------------------------------------
+
+snapshotLineTests :: TestTree
+snapshotLineTests =
+  testGroup
+    "snapshot pin-file line parser"
+    [ testCase "name and hash" $
+        parseSnapshotLine "root-py 64bc6da7391cbb1784af32ce621dddee56b121f8"
+          @?= Just ("root-py", "64bc6da7391cbb1784af32ce621dddee56b121f8")
+    , testCase "extra whitespace is tolerated" $
+        parseSnapshotLine "   math-py    303b8805d406690f3e1d584375001708d9451c42  "
+          @?= Just ("math-py", "303b8805d406690f3e1d584375001708d9451c42")
+    , testCase "trailing comment is stripped" $
+        parseSnapshotLine "bits 3ce5cc2ae8673b3799d0f8dc942a9931e344c162  # bits v0.2"
+          @?= Just ("bits", "3ce5cc2ae8673b3799d0f8dc942a9931e344c162")
+    , testCase "full-line comment is ignored" $
+        parseSnapshotLine "# stdlib snapshot for morloc 0.98" @?= Nothing
+    , testCase "blank line is ignored" $
+        parseSnapshotLine "   " @?= Nothing
+    , testCase "name without a hash is ignored" $
+        parseSnapshotLine "lonely-name" @?= Nothing
     ]
 
 -- ---------------------------------------------------------------------------
@@ -145,6 +240,42 @@ packageYamlParserTests =
               @?= [ ("root", "1a2b3c4d5e6f7890abcdef1234567890abcdef12")
                   , ("table", "9f8e7d6c5b4a39281706050403020100f0e1d2c3")
                   ]
+    , testCase "canonical morloc-deps key is parsed" $ do
+        let yamlText =
+              "name: foo\n\
+              \morloc-deps:\n\
+              \  - name: root\n\
+              \    git-hash: 1a2b3c4d5e6f7890abcdef1234567890abcdef12\n"
+        case parsePackageYaml yamlText of
+          Left e -> assertFailure (show e)
+          Right pm ->
+            packageMorlocDependencies pm
+              @?= [("root", "1a2b3c4d5e6f7890abcdef1234567890abcdef12")]
+    , testCase "morloc-deps wins when both keys are present" $ do
+        let yamlText =
+              "name: foo\n\
+              \morloc-deps:\n\
+              \  - name: root\n\
+              \    git-hash: aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111\n\
+              \morloc-dependencies:\n\
+              \  - name: table\n\
+              \    git-hash: bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222\n"
+        case parsePackageYaml yamlText of
+          Left e -> assertFailure (show e)
+          Right pm ->
+            packageMorlocDependencies pm
+              @?= [("root", "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111")]
+    , testCase "deprecated morloc-dependencies alias still parses" $ do
+        let yamlText =
+              "name: foo\n\
+              \morloc-dependencies:\n\
+              \  - name: root\n\
+              \    git-hash: 1a2b3c4d5e6f7890abcdef1234567890abcdef12\n"
+        case parsePackageYaml yamlText of
+          Left e -> assertFailure (show e)
+          Right pm ->
+            packageMorlocDependencies pm
+              @?= [("root", "1a2b3c4d5e6f7890abcdef1234567890abcdef12")]
     , testCase "missing git-hash field is rejected" $ do
         let yamlText =
               "name: foo\n\
@@ -162,12 +293,15 @@ packageYamlParserTests =
               \morloc-dependencies:\n\
               \  - name: root\n\
               \    git-hash: 12345\n"
-        -- aeson coerces numeric scalars to strings in YAML, so this
-        -- particular case may parse. The real safety net is the unit tests
-        -- on the resolver. We assert that the parser does not crash.
+        -- An unquoted numeric git-hash is parsed by YAML as a number. Coercing
+        -- it back to text would silently drop leading zeros, so the parser
+        -- rejects it and asks for a quoted string.
         case parsePackageYaml yamlText of
-          Left _ -> return ()
-          Right _ -> return ()
+          Left _ -> return ()  -- expected: parse failure, must be quoted
+          Right pm ->
+            assertFailure $
+              "expected parse failure on numeric git-hash; got: "
+                <> show (packageMorlocDependencies pm)
     ]
 
 -- ---------------------------------------------------------------------------

@@ -96,7 +96,7 @@ translateBuiltin lang desc srcs es = do
   -- build src name function
   let srcNamer =
         if ldQualifiedImports desc
-          then qualifiedSrcName lib
+          then qualifiedSrcName (sourceNamespacePrefix desc) lib
           else \src -> pretty (srcName src)
 
   -- add language-specific preamble from registry
@@ -160,7 +160,7 @@ translateExternal cmd lang desc srcs es = do
 
   let srcNamer =
         if ldQualifiedImports desc
-          then qualifiedSrcName lib
+          then qualifiedSrcName (sourceNamespacePrefix desc) lib
           else \src -> pretty (srcName src)
 
   debugInfo <- makeManifoldDebugInfoLookup
@@ -331,7 +331,7 @@ translateSource desc p = do
     then do
       lib <- MT.pack <$> asks MC.configLibrary
       let tmpl = ldImportTemplate desc
-          ns = render (makeNamespace lib p)
+          ns = render (makeNamespace (sourceNamespacePrefix desc) lib p)
           modPath = render (makeImportPath lib p)
       return . pretty $
         substituteT
@@ -343,15 +343,26 @@ translateSource desc p = do
       let tmpl = ldImportTemplate desc
       return . pretty $ substituteT tmpl [("path", p'')]
 
--- | Qualify a source function name with its module path.
-qualifiedSrcName :: Text -> Source -> MDoc
-qualifiedSrcName lib src = case srcPath src of
-  Nothing -> pretty $ srcName src
-  (Just path) -> makeNamespace lib path <> "." <> pretty (srcName src)
+-- | Prefix for the pool-side name a sourced file is bound to.
+--
+-- A source file's name is chosen by the user and must not have to dodge
+-- either the generated helper variables ('ldHelperVarPrefix') or anything
+-- the pool template itself binds. Reserving @<helper prefix>src_@ keeps the
+-- two apart: helper variables are @__morloc_cache_key@ and the like, never
+-- @__morloc_src_*@.
+sourceNamespacePrefix :: LangDescriptor -> Text
+sourceNamespacePrefix desc = ldHelperVarPrefix desc <> "src_"
 
-makeNamespace :: Text -> Path -> MDoc
-makeNamespace lib =
-  pretty
+-- | Qualify a source function name with its module path.
+qualifiedSrcName :: Text -> Text -> Source -> MDoc
+qualifiedSrcName prefix lib src = case srcPath src of
+  Nothing -> pretty $ srcName src
+  (Just path) -> makeNamespace prefix lib path <> "." <> pretty (srcName src)
+
+makeNamespace :: Text -> Text -> Path -> MDoc
+makeNamespace prefix lib =
+  (pretty prefix <>)
+    . pretty
     . MT.liftToText (map toLower')
     . MT.replace "/" "_"
     . MT.replace "-" "_"
@@ -1039,8 +1050,21 @@ genericPrintExpr desc = go
       DollarAccess -> go e <> "$" <> pretty f
     go (ISerCall sid e) =
       pretty (ldSerializeFn desc) <> "(" <> go e <> ", " <> schemaRef sid <> ")"
-    go (IDesCall sid _ e) =
-      pretty (ldDeserializeFn desc) <> "(" <> go e <> ", " <> schemaRef sid <> ")"
+    -- A language that cannot hold an interior NUL takes a third argument
+    -- saying whether this particular value's type carries a string at all.
+    -- The flag is what lets the receiving binder skip the walk entirely for a
+    -- type with no strings in it, which is most of them. Languages that
+    -- tolerate NULs keep the two-argument form and are untouched.
+    --
+    -- The argument is always present for such a language rather than emitted
+    -- only when true: the deserializer's arity has to be fixed, since the
+    -- binder registers it with a declared argument count.
+    go (IDesCall sid _ hasStr e) =
+      let nulGuard
+            | ldAllowStringNull desc = ""
+            | hasStr = ", " <> pretty (ldBoolTrue desc)
+            | otherwise = ", " <> pretty (ldBoolFalse desc)
+       in pretty (ldDeserializeFn desc) <> "(" <> go e <> ", " <> schemaRef sid <> nulGuard <> ")"
     go (IPack packer e) = pretty packer <> parens (go e)
     go (ICall f Nothing argGroups) =
       pretty f <> hsep (map (tupled . map go) argGroups)
@@ -1179,27 +1203,24 @@ genericPrintExpr desc = go
 
     schemaRef = genericSchemaRef desc
 
-    -- Languages that opt out of NUL-in-Str (allow_string_null = false)
-    -- cannot represent a `\0` inside a source-level string literal: R
-    -- refuses to parse `"\000"` at all, and the pool would die before
-    -- any runtime guard can fire. Catch the situation at codegen time
-    -- and emit a clear compile error. Runtime-borne NUL strings
-    -- (arriving via FFI from another pool or the nexus) are caught
-    -- separately by the runtime null_check.
+    -- Backstop for a NUL reaching a pool that cannot represent one.
+    --
+    -- User-written literals are rejected upstream, in Express, where the
+    -- literal still has a source position and the message can name the file
+    -- and line. Reaching here therefore means a NUL was introduced by the
+    -- compiler itself after that check -- an invariant violation, not a
+    -- mistake in the user's program -- so this aborts as a bug rather than
+    -- pretending to diagnose the source.
     checkNul :: Text -> ()
     checkNul s
       | ldAllowStringNull desc = ()
       | T.any (== '\0') s =
           error $
-            "Embedded NUL byte in a Str literal destined for the "
+            "morloc bug: a NUL byte reached the "
               ++ show (ldName desc)
-              ++ " pool. The "
-              ++ show (ldName desc)
-              ++ " language cannot represent NUL bytes in its native "
-              ++ "string type. Move the literal to a language that "
-              ++ "supports it (Python, C++, Julia, or the nexus itself), "
-              ++ "or remove the NUL byte. (See lang.yaml's "
-              ++ "allow_string_null field.)"
+              ++ " printer in a Str literal. User-written literals are"
+              ++ " rejected in Express.checkStringNul, so this one was"
+              ++ " synthesized after that check."
       | otherwise = ()
 
 -- | Generic statement printer driven by descriptor

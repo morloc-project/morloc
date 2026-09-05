@@ -53,6 +53,7 @@
       ],
       "return": {
         "description": [],
+        "streaming": false,
         "type": {
           "morloc": "Int",
           "wire": "j",
@@ -81,7 +82,7 @@
           ],
           "type": {
             "morloc": "SysConfig",
-            "wire": "<dict>m36tmpDirsanumThreadsjcremoveCachesb",
+            "wire": "m36tmpDirsanumThreadsjcremoveCachesb",
             "structure": {
               "type": "object",
               "properties": {
@@ -125,7 +126,7 @@
                   "Directory for scratch files"
                 ],
                 "type": {
-                  "morloc": "Str    (literal string)"
+                  "morloc": "Str"
                 },
                 "named_type_kind": null,
                 "input": {
@@ -135,7 +136,7 @@
                   "list_source": "inline",
                   "list_form": "auto",
                   "list_checks": [],
-                  "format": null
+                  "format": "literal string"
                 }
               }
             },
@@ -178,6 +179,7 @@
                 "short": null,
                 "long": "clean",
                 "long_reverse": "no-clean",
+                "short_reverse": null,
                 "default": "false",
                 "description": [
                   "Whether to purge caches on exit"
@@ -195,6 +197,7 @@
       ],
       "return": {
         "description": [],
+        "streaming": false,
         "type": {
           "morloc": "Str",
           "wire": "s",
@@ -248,6 +251,7 @@
       ],
       "return": {
         "description": [],
+        "streaming": false,
         "type": {
           "morloc": "Int",
           "wire": "j",
@@ -279,7 +283,7 @@
           "description": [],
           "type": {
             "morloc": "Map Str Int",
-            "wire": "<dict>at2sj",
+            "wire": "at2sj",
             "structure": {
               "type": "array",
               "items": {
@@ -311,6 +315,7 @@
       ],
       "return": {
         "description": [],
+        "streaming": false,
         "type": {
           "morloc": "Int",
           "wire": "j",
@@ -341,7 +346,7 @@
           "default": null,
           "description": [],
           "type": {
-            "morloc": "Str    (a filename)",
+            "morloc": "Str",
             "wire": "s",
             "structure": {
               "type": "string"
@@ -366,6 +371,7 @@
       ],
       "return": {
         "description": [],
+        "streaming": false,
         "type": {
           "morloc": "[Str]",
           "wire": "as",
@@ -383,14 +389,28 @@
           "long": "lines",
           "description": "Print each string on its own line",
           "render": false,
-          "default": false
+          "default": false,
+          "type": {
+            "morloc": "Unit",
+            "wire": "z",
+            "structure": {
+              "type": "null"
+            }
+          }
         },
         {
           "short": "s",
           "long": "sum",
           "description": "Join all strings into one semicolon-separated summary",
           "render": false,
-          "default": false
+          "default": false,
+          "type": {
+            "morloc": "Str",
+            "wire": "s",
+            "structure": {
+              "type": "string"
+            }
+          }
         }
       ]
     },
@@ -434,6 +454,7 @@
       ],
       "return": {
         "description": [],
+        "streaming": false,
         "type": {
           "morloc": "Int",
           "wire": "j",
@@ -487,6 +508,7 @@
       ],
       "return": {
         "description": [],
+        "streaming": false,
         "type": {
           "morloc": "?Int",
           "wire": "?j",
@@ -499,6 +521,36 @@
         }
       },
       "terminals": []
+    }
+  ],
+  "types": [
+    {
+      "name": "SysConfig",
+      "kind": "record",
+      "parameters": [],
+      "fields": [
+        {
+          "key": "tmpDir",
+          "type": "Str"
+        },
+        {
+          "key": "numThreads",
+          "type": "Int"
+        },
+        {
+          "key": "removeCaches",
+          "type": "Bool"
+        }
+      ]
+    },
+    {
+      "name": "Map",
+      "kind": "packable",
+      "parameters": [
+        "key",
+        "val"
+      ],
+      "equals": "[(key, val)]"
     }
   ]
 }

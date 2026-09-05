@@ -86,6 +86,11 @@ data FData = FData
     -- Consumed at emit time to derive per-entry wire schemas for
     -- group args (see 'groupEntryWireSchemas').
   , fdataReturnSchema :: Text
+  , fdataReturnGeneralSchema :: Text
+    -- ^ The return's wire schema with concrete-type hints stripped.
+    -- 'fdataReturnSchema' is what the pool speaks and is what dispatch
+    -- uses; this is what the interface publishes, so it does not move
+    -- when the implementation language does.
   , fdataCmdDocSet :: CmdDocSet
   }
 
@@ -99,6 +104,9 @@ data GastData = GastData
   , commandDocs :: CmdDocSet
   , commandExpr :: NexusExpr
   , commandReturnSchema :: Text
+  , commandReturnGeneralSchema :: Text
+    -- ^ Hint-stripped return schema. Same role as
+    -- 'fdataReturnGeneralSchema'.
   , commandArgSchemas :: [Text]
   , commandArgAsts :: [SerialAST]
     -- ^ Per-arg SerialAST, index-aligned with 'commandArgSchemas'.
@@ -306,6 +314,7 @@ getFData (t, i, lang, doc, sockets) = do
   (argAsts, returnAst) <- makeSerialASTs i lang t
   let argSchemas    = map (render . Serial.serialAstToMsgpackSchema) argAsts
       returnSchema  = render (Serial.serialAstToMsgpackSchema returnAst)
+      returnGeneral = render (Serial.serialAstToGeneralSchema returnAst)
   -- Validate wire-shape constraints and default values now that the
   -- SerialASTs are in hand. The rendered schema texts are reused
   -- here so the validator never re-renders.
@@ -324,6 +333,7 @@ getFData (t, i, lang, doc, sockets) = do
       , fdataArgSchemas = argSchemas
       , fdataArgAsts = argAsts
       , fdataReturnSchema = returnSchema
+      , fdataReturnGeneralSchema = returnGeneral
       , fdataCmdDocSet = doc
       }
 
@@ -576,8 +586,9 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
   checkExportedHigherOrder i gname gtype
 
   (retAst, argAsts) <- makeGastSerialASTs i gtype
-  let returnSchema = render (Serial.serialAstToMsgpackSchema retAst)
-      argSchemas   = map (render . Serial.serialAstToMsgpackSchema) argAsts
+  let returnSchema  = render (Serial.serialAstToMsgpackSchema retAst)
+      returnGeneral = render (Serial.serialAstToGeneralSchema retAst)
+      argSchemas    = map (render . Serial.serialAstToMsgpackSchema) argAsts
   validateArgSpecs i (cmdDocArgs docs) argAsts argSchemas
   validateReturnMime i (cmdDocRetMime docs) retAst
   expr <- toNexusExpr x0
@@ -591,6 +602,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       , commandDocs = docs
       , commandExpr = expr
       , commandReturnSchema = returnSchema
+      , commandReturnGeneralSchema = returnGeneral
       , commandArgSchemas = argSchemas
       , commandArgAsts = argAsts
       }
@@ -744,7 +756,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       ReadX <$> type2schema t <*> toNexusExpr arg
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrHash [arg])) =
       HashX <$> type2schema t <*> toNexusExpr arg
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSave [levelExpr, valExpr, path])) =
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSave [levelExpr, path, valExpr])) =
       SaveX "voidstar"
         <$> type2schema t
         <*> toNexusExpr levelExpr
@@ -874,10 +886,11 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- unaffected.
     toNexusExpr (AnnoS (Idx iTmp _) _ (IntrinsicS IntrTmpfile _)) =
       MM.throwSourcedError iTmp $
-        "the whole-list `with:`/`render:` handler currently requires a command"
+        "the whole-list `@with`/`@render` handler currently requires a command"
           <+> "that dispatches to a foreign pool; a pure (all-morloc) whole-form"
-          <+> "command is not yet supported. Use `.buffer` for streaming, or"
-          <+> "involve a foreign function in the command body."
+          <+> "command is not yet supported. Add the `@stream` modifier for"
+          <+> "per-batch streaming, or involve a foreign function in the"
+          <+> "command body."
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS intr _)) = do
       v <- resolveCompileTimeIntrinsic intr
       StrX <$> type2schema t <*> pure v
@@ -1039,14 +1052,17 @@ renderFormatHint mschema many mSrc mForm cks mLSrc mLForm lcks
         CatList elemS    -> listFormatHint elemS mSrc mForm cks mLSrc mLForm lcks
         CatOtherCompound -> Nothing
 
--- | Format hint for `Str` arguments.
+-- | Format hint for `Str` arguments. Always produces a hint: `Str` is
+-- the one type where argv is genuinely ambiguous (is this the value or
+-- a path to it?), so the default reading is stated rather than left to
+-- be inferred from the absence of a line.
 strFormatHint :: Maybe SourceAtom -> [Check] -> Maybe Text
 strFormatHint mSrc cks
   | mSrc == Just SourceFile =
       Just "read the value from the file at this path"
   | otherwise = case cks of
       (CheckPath (PathPerm p) : _) -> Just (pathCheckHint p)
-      _                            -> Nothing
+      _                            -> Just "literal string"
 
 -- | Map a path-permission mode to a user-facing phrase. The four
 -- accepted modes are r / w / x / rw; see 'parseCheck' for the
@@ -1165,14 +1181,16 @@ groupEntryWireSchemas ast0 = case peelPack ast0 of
 --                     (source, quoted, format hint). Distinct from
 --                     @mEmit@ so a group entry can resolve defaults
 --                     against its own wire schema without emitting one.
+--   * @mGeneral@      hint-stripped form of @mEmit@, emitted alongside
+--                     it as "general_schema".
 --   * @entrySchemas@  per-entry wire schemas for 'CmdArgGrp'; unused
 --                     for pos/opt/flag.
-argToJson :: Maybe Text -> Maybe Text -> [(Key, Text)] -> CmdArg -> Text
-argToJson mEmit mShape _ (CmdArgPos r) =
+argToJson :: Maybe Text -> Maybe Text -> Maybe Text -> [(Key, Text)] -> CmdArg -> Text
+argToJson mEmit mGeneral mShape _ (CmdArgPos r) =
   jsonObj $
     [ ("kind", jsonStr "pos") ]
-    ++ schemaField mEmit
-    ++ [ ("type", jsonStr (typeDescStr (argPosDocType r) (argPosDocLiteral r) (argPosDocSource r) (argPosDocChecks r)))
+    ++ schemaField mEmit mGeneral
+    ++ [ ("type", jsonStr (typeDescStr (argPosDocType r)))
        , ("name", jsonMaybeStr (argPosDocName r))
        , ("metavar", jsonMaybeStr (argPosDocMetavar r))
        , ("quoted", jsonBool (isQuotedArg (argPosDocLiteral r) (argPosDocSource r) (argPosDocMany r) mShape))
@@ -1186,11 +1204,11 @@ argToJson mEmit mShape _ (CmdArgPos r) =
          (argPosDocLiteral r)
          (argPosDocSource r) (argPosDocForm r) (argPosDocChecks r)
          (argPosDocListSource r) (argPosDocListForm r) (argPosDocListChecks r)
-argToJson mEmit mShape _ (CmdArgOpt r) =
+argToJson mEmit mGeneral mShape _ (CmdArgOpt r) =
   jsonObj $
     [ ("kind", jsonStr "opt") ]
-    ++ schemaField mEmit
-    ++ [ ("type", jsonStr (typeDescStr (argOptDocType r) (argOptDocLiteral r) (argOptDocSource r) (argOptDocChecks r)))
+    ++ schemaField mEmit mGeneral
+    ++ [ ("type", jsonStr (typeDescStr (argOptDocType r)))
        , ("metavar", jsonStr (argOptDocMetavar r))
        , ("quoted", jsonBool (isQuotedArg (argOptDocLiteral r) (argOptDocSource r) (argOptDocMany r) mShape))
        , ("many", jsonBool (argOptDocMany r))
@@ -1205,20 +1223,21 @@ argToJson mEmit mShape _ (CmdArgOpt r) =
          (argOptDocLiteral r)
          (argOptDocSource r) (argOptDocForm r) (argOptDocChecks r)
          (argOptDocListSource r) (argOptDocListForm r) (argOptDocListChecks r)
-argToJson _ _ _ (CmdArgFlag r) =
+argToJson _ _ _ _ (CmdArgFlag r) =
   jsonObj
     [ ("kind", jsonStr "flag")
     , ("short", cliOptShortJson (argFlagDocOpt r))
     , ("long", cliOptLongJson (argFlagDocOpt r))
     , ("long_rev", flagRevJson (argFlagDocOptRev r))
+    , ("short_rev", flagRevShortJson (argFlagDocOptRev r))
     , ("default", jsonStr (argFlagDocDefault r))
     , ("desc", jsonStrArr (argFlagDocDesc r))
     , ("metadata", metadataEmpty)
     ]
-argToJson mEmit _ entrySchemas (CmdArgGrp r) =
+argToJson mEmit mGeneral _ entrySchemas (CmdArgGrp r) =
   jsonObj $
     [ ("kind", jsonStr "grp") ]
-    ++ schemaField mEmit
+    ++ schemaField mEmit mGeneral
     ++ [ ("type", jsonStr (render (pretty (recDocType r))))
        , ("metavar", jsonStr (recDocMetavar r))
        , ("desc", jsonStrArr (recDocDesc r))
@@ -1240,16 +1259,22 @@ argToJson mEmit _ entrySchemas (CmdArgGrp r) =
     grpEntryJson key entry =
       jsonObj
         [ ("key", jsonStr (unKey key))
-        , ("arg", argToJson Nothing (lookup key entrySchemas) []
+        , ("arg", argToJson Nothing Nothing (lookup key entrySchemas) []
                     (either CmdArgFlag CmdArgOpt entry))
         ]
 
--- | Prefixed @schema@ field when a schema is present, otherwise empty.
--- Used by 'argToJson' to splice the field into the per-variant field
--- list in a consistent position.
-schemaField :: Maybe Text -> [(Text, Text)]
-schemaField Nothing  = []
-schemaField (Just s) = [("schema", jsonStr s)]
+-- | The two schema slots for a typed arg. Spliced by 'argToJson' into
+-- the per-variant field list in a consistent position. @schema@ is the concrete
+-- (pool-resolved) form the runtime dispatches on; @general_schema@ is
+-- the same form with concrete-type hints stripped, which is what the
+-- machine-readable help publishes as the interface's data contract.
+-- Emitting both keeps dispatch exact without publishing a contract
+-- that moves when the implementation language does.
+schemaField :: Maybe Text -> Maybe Text -> [(Text, Text)]
+schemaField Nothing _ = []
+schemaField (Just s) mGen =
+  ("schema", jsonStr s)
+    : maybe [] (\g -> [("general_schema", jsonStr g)]) mGen
 
 -- | Compute the `quoted` flag emitted for a typed CLI arg. The flag
 -- tells the nexus to JSON-wrap the argv string before handing it to
@@ -1267,16 +1292,6 @@ isQuotedArg _literal mSource many mschema =
       | many -> isListOfStrWireSchema s
       | otherwise -> isStrOrOptStrWireSchema s
 
--- Check if a type is Str or ?Str (for literal string handling).
--- NOTE: this is the surface-type check used for help-text rendering;
--- the manifest's `quoted` field uses the schema-text check below
--- ('isStrWireSchema') so that newtypes-over-Str (whose surface type
--- is not 'Str' but whose wire format is the Str primitive 's') also
--- get the JSON-quoting treatment.
-isStrType :: Type -> Bool
-isStrType (VarT v) = v == MBT.str
-isStrType (OptionalT t) = isStrType t
-isStrType _ = False
 
 -- | Strip a leading addHint decoration `<...>` if present. Hints
 -- carry the concrete-type tag for newtypes / aliases over a built-in
@@ -1447,9 +1462,9 @@ checkManyWire _   False _      = return ()
 checkManyWire loc True  schema
   | isArrayWireSchema schema = return ()
   | otherwise = MM.throwSystemError $
-      loc <> ": `many: true` requires a list-typed argument (wire schema"
+      loc <> ": `@many` requires a list-typed argument (wire schema"
         <> " starting with `a`); got `" <> pretty schema <> "`. Remove"
-        <> " `many: true` or change the type to a list."
+        <> " `@many` or change the type to a list."
 
 -- | Parse the default text as JSON and structurally validate it
 -- against the SerialAST. Parser failures are surfaced verbatim --
@@ -1813,20 +1828,59 @@ truncateForMsg t
 jsonSnippet :: Aeson.Value -> Text
 jsonSnippet = TE.decodeUtf8 . BSL.toStrict . Aeson.encode
 
--- | The user-facing "type:" line for a CLI arg. For a Str argument
--- that isn't declared literal, the parenthetical clarifies whether
--- argv is treated as a filesystem path only (when `source: file` or a
--- `check.path:*` forces path semantics) or as the default
--- literal string.
-typeDescStr :: Type -> Maybe Bool -> Maybe SourceAtom -> [Check] -> Text
-typeDescStr t isLiteral mSrc checks
-  | isStrType t && isLiteral /= Just True =
-      if pathOnly then "Str    (a filename)"
-                  else "Str    (literal string)"
-  | otherwise = render (pretty t)
+-- | The "type:" slot for a CLI arg. Holds a type and nothing else:
+-- the same string is read by `--help`, by `--json-help`, and by any
+-- consumer of the manifest, so a human-readable gloss here would have
+-- to be parsed back out. How argv is interpreted -- verbatim string,
+-- path to read, packed bytes -- is the `format:` slot's job; see
+-- 'renderFormatHint'.
+typeDescStr :: Type -> Text
+typeDescStr = renderCliType
+
+-- | Render a type for a CLI caller: rewrite the parts that 'pretty'
+-- shows as internal placeholders, then let 'pretty' do the rendering so
+-- the list and tuple sugar (@[a]@, @(a, b)@) is preserved.
+renderCliType :: Type -> Text
+renderCliType = render . pretty . cliDisplayType
+
+-- | The rewrite behind 'renderCliType'. Two cases differ from the
+-- source-level type:
+--
+--   * A @Table@'s column schema lowers to an anonymous record named
+--     @Rec@ (see 'typeOf' for @RecExtendU@), which 'pretty' prints as
+--     the bare constructor name. @Table _ (Rec)@ names nothing a caller
+--     can act on, so the row is spelled out:
+--     @Table {name = Str, count = Int}@. A user record actually named
+--     @Rec@ would be rewritten too; that name already collides with the
+--     compiler's anonymous row.
+--
+--   * Phantom Nat and Str slots ('NatVoidT' / 'StrVoidT') are erased
+--     measurements carrying no runtime content. They print as @_@ and
+--     are dropped from an application's arguments; a literal dimension
+--     (@Vector 4 Int@) is real information and is kept.
+--
+-- The spelled-out row is carried as a 'VarT' holding already-rendered
+-- text. That is a display device: the rewritten type is handed straight
+-- to 'pretty' and never escapes this function.
+cliDisplayType :: Type -> Type
+cliDisplayType t0 = case t0 of
+  NamT NamRecord (TV "Rec") [] fields ->
+    VarT (TV ("{" <> MT.intercalate ", "
+                     [unKey k <> " = " <> renderCliType ft | (k, ft) <- fields]
+                 <> "}"))
+  AppT f ts -> case filter (not . isPhantomSlot) (map cliDisplayType ts) of
+    []  -> cliDisplayType f
+    ts' -> AppT (cliDisplayType f) ts'
+  NamT o v ps fields ->
+    NamT o v (map cliDisplayType ps) [(k, cliDisplayType ft) | (k, ft) <- fields]
+  FunT ts t -> FunT (map cliDisplayType ts) (cliDisplayType t)
+  EffectT es t -> EffectT es (cliDisplayType t)
+  OptionalT t -> OptionalT (cliDisplayType t)
+  _ -> t0
   where
-    pathOnly = mSrc == Just SourceFile || any isPathCheck checks
-    isPathCheck (CheckPath _) = True
+    isPhantomSlot NatVoidT = True
+    isPhantomSlot StrVoidT = True
+    isPhantomSlot _ = False
 
 -- | Strip outer wrappers that don't change a type's "name kind" identity
 -- (Optional and Effect wrappers are transparent for record/object/table
@@ -1897,6 +1951,169 @@ namTagLabel NamRecord = "record"
 namTagLabel NamObject = "object"
 namTagLabel NamTable  = "table"
 
+-- | Every named type reachable from a command's signature, in discovery
+-- order and deduplicated by name.
+--
+-- The help prints a type by name and defines each name once beneath the
+-- argument list. A name is only useful there if it is actually defined,
+-- and a record reached through a list, tuple, or optional is exactly as
+-- opaque to a caller as one at the top level -- more so, since it is the
+-- shape they will be handed. Walking the whole type is what makes
+-- `[Hit]` mean something.
+-- | Every type a command's signature mentions: each argument (a group
+-- contributes the record itself, whose fields the walk then reaches)
+-- and the return.
+-- | The types a command's help actually shows.
+--
+-- The glossary defines the names a reader meets, so it is built from what is
+-- rendered rather than from the whole signature. An option group is the case
+-- where those differ: the record is destructured into individual options, so
+-- its own name appears nowhere and defining it only raises a question the help
+-- never asked. Its field types do appear, beside each option, so those are
+-- what it contributes.
+cmdSignatureTypes :: Maybe Type -> CmdDocSet -> [Type]
+cmdSignatureTypes mStream doc =
+  concatMap argTypes (cmdDocArgs doc)
+    -- A streaming command returns @()@ and its data leaves through a sink, so
+    -- the help shows the batch. Collect from what is shown.
+    <> [fromMaybe (fst (cmdDocRet doc)) mStream]
+  where
+    argTypes (CmdArgPos r) = [argPosDocType r]
+    argTypes (CmdArgOpt r) = [argOptDocType r]
+    argTypes (CmdArgFlag _) = [VarT MBT.bool]
+    -- A group is destructured into individual options, so the record's own
+    -- name is printed only when it also carries an aggregate option to accept
+    -- the whole thing. Its field types are printed either way, beside each
+    -- option.
+    argTypes (CmdArgGrp r) =
+      [recDocType r | isJust (recDocOpt r)]
+        <> case recDocType r of
+             NamT _ _ _ fields -> map snd fields
+             _ -> []
+
+-- | The glossary for one command: every named type its signature mentions,
+-- defined once and generically.
+--
+-- Records and tables are read off the signature itself. A type whose wire form
+-- comes from a @Packable@ instance has no structure in the signature at all --
+-- the name is opaque there -- so its definition is taken from the instance,
+-- which states the wire form generically in the constructor's own parameters.
+namedTypesJson :: [Serial.PackerInstance] -> [Type] -> Text
+namedTypesJson instances ts =
+  jsonArr
+    ( map oneNamed (filter (isShown . snd3) (dedup (concatMap collect ts)))
+        <> packableEntries ts
+    )
+  where
+    snd3 (_, x, _) = x
+
+    -- A definition earns its place by defining a name the reader actually
+    -- meets. A type can appear in a signature without appearing in the help:
+    -- an option group is destructured into flags, an anonymous record row is
+    -- printed inline as the table's columns, and a streaming command's @()@ is
+    -- replaced by its batch. Defining those raises a question the help never
+    -- asked.
+    isShown :: Text -> Bool
+    isShown nm = Set.member nm shownNames
+
+    shownNames :: Set.Set Text
+    shownNames =
+      Set.fromList
+        (concatMap (MT.split (\c -> not (isNameChar c)) . renderCliType) ts)
+
+    isNameChar c = c == '_' || c `elem` (['a' .. 'z'] <> ['A' .. 'Z'] <> ['0' .. '9'])
+
+    collect :: Type -> [(NamType, Text, [(Key, Type)])]
+    collect = go []
+      where
+        -- `seen` guards a record whose field type refers back to it;
+        -- the definition is emitted once and the back-reference renders
+        -- as the name.
+        go seen t = case t of
+          NamT o v ps fields
+            | render (pretty v) `elem` seen -> []
+            | otherwise ->
+                let nm = render (pretty v)
+                    seen' = nm : seen
+                in (o, nm, map (fmap (unwrapColumn o)) fields)
+                     : concatMap (go seen') ps
+                     <> concatMap (go seen' . snd) fields
+          AppT f as -> go seen f <> concatMap (go seen) as
+          FunT as b -> concatMap (go seen) as <> go seen b
+          EffectT _ b -> go seen b
+          OptionalT b -> go seen b
+          _ -> []
+
+    -- A table stores each column as an array; the author wrote the
+    -- element type, so that is what the definition shows.
+    unwrapColumn NamTable (AppT (VarT (TV "List")) [el]) = el
+    unwrapColumn _ t = t
+
+    dedup = go Set.empty
+      where
+        go _ [] = []
+        go seen (x@(_, nm, _) : rest)
+          | Set.member nm seen = go seen rest
+          | otherwise = x : go (Set.insert nm seen) rest
+
+    oneNamed (o, nm, fields) =
+      jsonObj
+        [ ("name", jsonStr nm)
+        , ("kind", jsonStr (namTagLabel o))
+        , ("parameters", jsonArr [])
+        , ("fields", jsonArr
+            [ jsonObj [("key", jsonStr (unKey k)), ("type", jsonStr (renderCliType ft))]
+            | (k, ft) <- fields
+            ])
+        ]
+
+    -- Every constructor named anywhere in the signature, head-first.
+    headNames :: Type -> [TVar]
+    headNames t = case t of
+      VarT v -> [v]
+      AppT f as -> headNames f <> concatMap headNames as
+      FunT as b -> concatMap headNames as <> headNames b
+      EffectT _ b -> headNames b
+      OptionalT b -> headNames b
+      NamT _ _ ps fs -> concatMap headNames ps <> concatMap (headNames . snd) fs
+      _ -> []
+
+    packableEntries :: [Type] -> [Text]
+    packableEntries sigTs =
+      let wanted = Set.fromList (concatMap headNames sigTs)
+       in map onePackable . dedupOn fst $
+            [ (extractKey (Serial.piHead pin), pin)
+            | pin <- instances
+            , Set.member (extractKey (Serial.piHead pin)) wanted
+            , isShown (render (pretty (extractKey (Serial.piHead pin))))
+            ]
+
+    dedupOn f = go Set.empty
+      where
+        go _ [] = []
+        go seen (x : rest)
+          | Set.member (f x) seen = go seen rest
+          | otherwise = x : go (Set.insert (f x) seen) rest
+
+    -- The instance states head and wire form over the same variables, so the
+    -- parameter list is read off the head and the wire form is left generic:
+    -- one entry serves every use of the constructor.
+    peelU (ForallU _ t) = peelU t
+    peelU t = t
+
+    onePackable (v, pin) =
+      let headBody = peelU (Serial.piHead pin)
+          wireBody = peelU (Serial.piWire pin)
+          params = case headBody of
+            AppU _ as -> [render (pretty a) | a <- as]
+            _ -> []
+       in jsonObj
+            [ ("name", jsonStr (render (pretty v)))
+            , ("kind", jsonStr "packable")
+            , ("parameters", jsonArr (map jsonStr params))
+            , ("equals", jsonStr (render (pretty wireBody)))
+            ]
+
 -- | Build the JSON @constraints@ array for a surface type. Only the
 -- @kind@ constraint is populated today; future constraints (min, max,
 -- regex, length, ...) will append to this list.
@@ -1923,11 +2140,20 @@ cliOptLongJson (CliOptLong l) = jsonStr l
 cliOptLongJson (CliOptBoth _ l) = jsonStr l
 cliOptLongJson _ = jsonNull
 
+-- | The reverse spelling of a boolean flag, split across two manifest
+-- slots the same way the forward spelling is. A single slot could only
+-- carry one of the two names, which silently dropped the short option
+-- from `@false -q/--quiet` and dropped `@false -q` altogether.
 flagRevJson :: Maybe CliOpt -> Text
 flagRevJson Nothing = jsonNull
 flagRevJson (Just (CliOptLong l)) = jsonStr l
 flagRevJson (Just (CliOptBoth _ l)) = jsonStr l
 flagRevJson _ = jsonNull
+
+flagRevShortJson :: Maybe CliOpt -> Text
+flagRevShortJson (Just (CliOptShort c)) = jsonStr (MT.singleton c)
+flagRevShortJson (Just (CliOptBoth c _)) = jsonStr (MT.singleton c)
+flagRevShortJson _ = jsonNull
 
 -- ======================================================================
 -- Expression tree serialization
@@ -2269,12 +2495,24 @@ data ManifestInputs = ManifestInputs
     -- recorded so a built program carries a record of how it was compiled.
     -- Empty when no build parameters were given.
   , miRunLog              :: !(Maybe RenderedRunLog)
+  , miPackerInstances     :: ![Serial.PackerInstance]
+    -- ^ Every @Packable@ instance in the program. A type whose wire form comes
+    -- from an instance is opaque in a signature, so its glossary entry is taken
+    -- from here rather than from the type itself.
   , miCapabilities        :: ![Text]
   , miTermDocs            :: !(Map.Map EVar [Text])
     -- ^ Term-level docstrings by term name. Used to look up the
     -- description shown against a `--' with:` flag in `--help`
     -- (the referenced term's own docstring becomes the flag's help
     -- text).
+  , miStreamElems         :: !(Map.Map EVar (Text, Text))
+  , miStreamTypes         :: !(Map.Map EVar Type)
+    -- ^ The batch a streaming command writes. Its help shows this in place of
+    -- the @()@ the function returns, so the glossary is built from it too.
+    -- ^ For each @collect command, keyed by term name: the batch type
+    -- it writes to standard output, rendered as a caller reads it, and
+    -- that type's general wire schema. A streaming command returns
+    -- @()@, so this is the only record of what a caller receives.
   }
 
 buildManifest :: ManifestInputs -> Text
@@ -2377,9 +2615,24 @@ buildManifest ManifestInputs{..} =
       Just gname -> ("group", jsonStr gname)
       Nothing -> ("group", jsonNull)
 
+    -- A `@collect` command's stdout carries a stream of batches, not its
+    -- `()` return value. Emit what it writes so a consumer is not left
+    -- reading `Unit` and concluding the command produces nothing. Absent
+    -- when the producer has no reachable signature -- saying nothing is
+    -- correct there, claiming `()` is not.
+    streamField :: Text -> [(Text, Text)]
+    streamField termName = case Map.lookup (EV termName) miStreamElems of
+      Nothing -> []
+      Just (tstr, schema) ->
+        [ ("stream", jsonObj
+            [ ("type", jsonStr tstr)
+            , ("schema", jsonStr schema)
+            ])
+        ]
+
     remoteCmdJson :: FData -> Text
     remoteCmdJson fd =
-      jsonObj
+      jsonObj $
         [ ("name", jsonStr (fdataSubcommand fd))
         , ("type", jsonStr "remote")
         , ("mid", jsonInt (fdataMid fd))
@@ -2387,7 +2640,7 @@ buildManifest ManifestInputs{..} =
         , ("needed_pools", jsonArr (map (jsonInt . miLangToPool . socketLang) (fdataSubSockets fd)))
         , ("desc", jsonStrArr (cmdDocDesc (fdataCmdDocSet fd)))
         , ("args", argsJson (cmdDocArgs (fdataCmdDocSet fd)) (fdataArgSchemas fd) (fdataArgAsts fd))
-        , ("return", returnJson (fdataReturnSchema fd) (fdataType fd) (snd (cmdDocRet (fdataCmdDocSet fd))) (cmdDocRetMime (fdataCmdDocSet fd)))
+        , ("return", returnJson (fdataReturnSchema fd) (fdataReturnGeneralSchema fd) (fst (cmdDocRet (fdataCmdDocSet fd))) (snd (cmdDocRet (fdataCmdDocSet fd))) (cmdDocRetMime (fdataCmdDocSet fd)))
         , ("constraints", jsonArr [])
         , ("internal", jsonBool (isInternalTerminalName (fdataTermName fd)))
         -- Terminals array must use the ORIGINAL term name so the
@@ -2396,26 +2649,32 @@ buildManifest ManifestInputs{..} =
         -- mangles pre-rename). Using the display name would emit
         -- dead pointers whenever the parent has a `--' name:`.
         , ("terminals", terminalsJson (fdataTermName fd) (cmdDocTerminals (fdataCmdDocSet fd)))
+        , ("named_types", namedTypesJson miPackerInstances
+            (cmdSignatureTypes (Map.lookup (EV (fdataTermName fd)) miStreamTypes) (fdataCmdDocSet fd)))
         , ("metadata", metadataEmpty)
         , cmdGroupField (fdataMid fd)
         ]
+        <> streamField (fdataTermName fd)
 
     pureCmdJson :: GastData -> Text
     pureCmdJson g =
-      jsonObj
+      jsonObj $
         [ ("name", jsonStr (commandName g))
         , ("type", jsonStr "pure")
         , ("desc", jsonStrArr (cmdDocDesc (commandDocs g)))
         , ("args", argsJson (cmdDocArgs (commandDocs g)) (commandArgSchemas g) (commandArgAsts g))
-        , ("return", returnJson (commandReturnSchema g) (commandType g) (snd (cmdDocRet (commandDocs g))) (cmdDocRetMime (commandDocs g)))
+        , ("return", returnJson (commandReturnSchema g) (commandReturnGeneralSchema g) (fst (cmdDocRet (commandDocs g))) (snd (cmdDocRet (commandDocs g))) (cmdDocRetMime (commandDocs g)))
         , ("expr", exprToJson (commandExpr g))
         , ("constraints", jsonArr [])
         , ("internal", jsonBool (isInternalTerminalName (commandTermName g)))
         -- Same term-name-for-mangling rationale as `remoteCmdJson`.
         , ("terminals", terminalsJson (commandTermName g) (cmdDocTerminals (commandDocs g)))
+        , ("named_types", namedTypesJson miPackerInstances
+            (cmdSignatureTypes (Map.lookup (EV (commandTermName g)) miStreamTypes) (commandDocs g)))
         , ("metadata", metadataEmpty)
         , cmdGroupField (commandMid g)
         ]
+        <> streamField (commandTermName g)
 
     -- Emit the `terminals` array for one command. The description
     -- comes from the referenced term's own top-level docstring; the
@@ -2462,30 +2721,39 @@ buildManifest ManifestInputs{..} =
         walk [] _ _ = []
         -- Flags consume a schema slot but emit no `schema` field.
         walk (a@(CmdArgFlag _) : rest) (_ : ss) (_ : as) =
-          argToJson Nothing Nothing [] a : walk rest ss as
+          argToJson Nothing Nothing Nothing [] a : walk rest ss as
         walk (a : rest) (s : ss) (ast : as) =
           let entries = case a of
                           CmdArgGrp _ -> groupEntryWireSchemas ast
                           _           -> []
-          in argToJson (Just s) (Just s) entries a : walk rest ss as
+              gen = render (Serial.serialAstToGeneralSchema ast)
+          in argToJson (Just s) (Just gen) (Just s) entries a : walk rest ss as
         walk (a : rest) [] _ =
           -- Defensive: more args than schemas. Emit with no schema so
           -- we fail cleanly downstream rather than silently misaligning.
-          argToJson Nothing Nothing [] a : walk rest [] []
+          argToJson Nothing Nothing Nothing [] a : walk rest [] []
         walk (a : rest) (s : ss) [] =
           -- Defensive: validateArgSpecs should have caught this. Emit
-          -- with no per-entry schemas rather than crash.
-          argToJson (Just s) (Just s) [] a : walk rest ss []
+          -- with no per-entry schemas rather than crash. Without the
+          -- AST there is no general form to derive.
+          argToJson (Just s) Nothing (Just s) [] a : walk rest ss []
 
     -- Nested @return@ object replacing v1's flat @return_schema@ /
     -- @return_type@ / @return_desc@. Also carries @constraints@ and
     -- @metadata@ for symmetry with args.
-    returnJson :: Text -> Type -> [Text] -> Maybe Text -> Text
-    returnJson schema t desc mmime =
+    --
+    -- @t@ comes from 'cmdDocRet', which has already walked any
+    -- transparent alias chain, so the reported type is the one the
+    -- caller receives rather than the name the signature used. The
+    -- 'returnTypeOnly' peel below is still needed for the doc-set
+    -- branches that carry a whole function type.
+    returnJson :: Text -> Text -> Type -> [Text] -> Maybe Text -> Text
+    returnJson schema generalSchema t desc mmime =
       let retT = stripThunks (returnTypeOnly t)
       in jsonObj $
         [ ("schema", jsonStr schema)
-        , ("type", jsonStr (render (pretty retT)))
+        , ("general_schema", jsonStr generalSchema)
+        , ("type", jsonStr (renderCliType retT))
         , ("desc", jsonStrArr desc)
         , ("constraints", constraintsJsonFor retT)
         , ("metadata", metadataEmpty)
@@ -2612,6 +2880,30 @@ generate cs rASTs helperRASTs = do
   -- @profile@) accumulate the same way.
   let capabilities = "log" : ["debug_trace" | debugTrace]
   termDocs <- MM.gets stateTermDocs
+  streamElemTypes <- MM.gets stateStreamElems
+  -- Resolve each streaming command's batch type to the pair the manifest
+  -- publishes: the type as a caller reads it, and its general wire
+  -- schema. Indexed by the command's own manifold so a conversion
+  -- failure points at the command rather than at the manifest builder.
+  let streamMids =
+        Map.fromList $ [ (EV (fdataTermName fd), fdataMid fd) | fd <- fdata ]
+                    <> [ (EV (commandTermName g), commandMid g) | g <- gasts ]
+  streamElems <- fmap Map.fromList . CM.forM (Map.toList streamElemTypes) $ \(ev, tu) -> do
+    let i = Map.findWithDefault 0 ev streamMids
+        t = typeOf tu
+    ast <- generalTypeToSerialAST i t
+    return (ev, (renderCliType t, render (Serial.serialAstToGeneralSchema ast)))
+
+  -- The batch type is recovered from the producer's sink signature, which does
+  -- not pass through the resolution that argument and return types get, so its
+  -- named types are still bare names. Resolve them here or the glossary has
+  -- nothing to define.
+  streamTypes <- fmap Map.fromList . CM.forM (Map.toList streamElemTypes) $ \(ev, tu) -> do
+    let i = Map.findWithDefault 0 ev streamMids
+    t <- Docstrings.resolveNestedTypes i (typeOf tu)
+    return (ev, t)
+
+  packerInstances <- Serial.findPackerInstances
 
   let manifestJson =
         buildManifest
@@ -2634,8 +2926,11 @@ generate cs rASTs helperRASTs = do
             , miTmpdir              = tmpdir
             , miBuildParams         = buildParams
             , miRunLog              = runLog
+            , miPackerInstances     = packerInstances
             , miCapabilities        = capabilities
             , miTermDocs            = termDocs
+            , miStreamElems         = streamElems
+            , miStreamTypes         = streamTypes
             }
 
   -- Launcher wrappers. Each is a pure-shell script that execs
@@ -2715,6 +3010,7 @@ makeWrapperScript mode selfRel manifestPath
       -- invoked by a path (the normal case); a bare name is located via PATH.
       MT.unlines
         [ "#!/bin/sh"
+        , manifestMarker manifestPath
         , "export MORLOC_PROG_NAME=\"$0\""
         , "self=\"$0\""
         , "case \"$self\" in */*) : ;; *) self=$(command -v -- \"$self\") ;; esac"
@@ -2723,14 +3019,40 @@ makeWrapperScript mode selfRel manifestPath
             <> " \"$d/" <> MT.pack (dquoteEsc manifestPath) <> "\" \"$@\""
         ]
   | otherwise =
-      "#!/bin/sh\nexport MORLOC_PROG_NAME=\"$0\"\nexec morloc-nexus "
-        <> modeToken mode
-        <> " "
-        <> MT.pack (shellQuote manifestPath)
-        <> " \"$@\"\n"
+      MT.unlines
+        [ "#!/bin/sh"
+        , manifestMarker manifestPath
+        , "export MORLOC_PROG_NAME=\"$0\""
+        , "exec morloc-nexus " <> modeToken mode
+            <> " " <> MT.pack (shellQuote manifestPath) <> " \"$@\""
+        ]
   where
     modeToken WCli = "run"
     modeToken WDaemon = "daemon"
+
+{- | The prefix of the launcher line that declares which @manifest.json@ the
+launcher points at.
+
+A launcher is written by the compiler and read back by the nexus, which is
+handed one by @morloc-nexus daemon ./mycli@. Recovering the path by parsing the
+@exec@ line means reimplementing shell quoting and variable expansion in the
+reader, and the two halves drift: the reader is a second, informal
+implementation of a format only the writer defines. This line states the fact
+directly instead, so the reader never interprets shell.
+
+The path is relative to the launcher's own directory when the launcher travels
+with its build tree, and absolute otherwise; a reader resolves a relative path
+against the directory holding the launcher. Kept byte-identical to
+@MANIFEST_MARKER@ in the nexus (@data\/rust\/morloc-nexus\/src\/cli.rs@).
+
+A manifest path containing a newline cannot be represented here. Such a path
+also cannot survive the @exec@ line, so nothing is lost.
+-}
+manifestMarkerPrefix :: Text
+manifestMarkerPrefix = "# morloc-manifest: "
+
+manifestMarker :: FilePath -> Text
+manifestMarker p = manifestMarkerPrefix <> MT.pack p
 
 -- | Escape a path for a double-quoted POSIX shell context (backslash, double
 -- quote, dollar, backtick), so a self-relative manifest path with shell

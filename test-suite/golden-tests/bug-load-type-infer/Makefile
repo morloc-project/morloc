@@ -7,3 +7,4 @@ all:
 clean:
 	rm -rf nexus pools __pycache__ *err
 	rm -f /tmp/bug-load-type-infer.bin
+	rm -rf *-build *build.tmp*

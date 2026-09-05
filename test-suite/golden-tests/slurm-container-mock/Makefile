@@ -21,3 +21,4 @@ all:
 
 clean:
 	rm -rf nexus pools __pycache__ .morloc-cache
+	rm -rf *-build *build.tmp*

@@ -98,6 +98,7 @@ data MakeCommand = MakeCommand
   , makeTmpdir :: Maybe String
   , makeDebugTrace :: Bool
   , makeLangParams :: [String]
+  , makeOffline :: Bool
   , makeScript :: String
   }
 
@@ -122,6 +123,7 @@ makeCommandParser =
     <*> optTmpdir
     <*> optDebugTrace
     <*> optLangParams
+    <*> optOffline
     <*> optScript
 
 makeSubcommand :: Mod CommandFields CliCommand
@@ -589,6 +591,13 @@ optMakeInstall =
   switch
     ( long "install"
         <> help "Install module to PATH"
+    )
+
+optOffline :: Parser Bool
+optOffline =
+  switch
+    ( long "offline"
+        <> help "Do not auto-download missing module dependencies"
     )
 
 optMakeForce :: Parser Bool

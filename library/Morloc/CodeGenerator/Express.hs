@@ -35,6 +35,9 @@ import Morloc.CodeGenerator.IFile
   , bracketSliceSteps
   )
 import Morloc.CodeGenerator.Infer
+import Morloc.CodeGenerator.LanguageDescriptor (ldAllowStringNull, loadLangDescriptorFromText)
+import qualified Morloc.DataFiles as DF
+import qualified Morloc.Language as ML
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
@@ -334,7 +337,7 @@ addLoopWraps ph@(PolyHead lang midx args body) = do
     -- 'PolyManifold' wrapper so the continue is not stranded in a value
     -- position. Control/effect wrappers (If/Let/DoBlock) are preserved.
     rewriteLoopTail :: Int -> PolyExpr -> PolyExpr
-    rewriteLoopTail mid body = fst (goT body)
+    rewriteLoopTail mid loopBody = fst (goT loopBody)
       where
         -- 'goT' returns the rewritten expression paired with a flag: True when
         -- the rewrite produced a 'PolyLoopContinue' anywhere inside. The flag is
@@ -507,11 +510,40 @@ cacheLabelOfMidx midx = do
 collectArgs :: ManifoldForm None (Maybe Type) -> [Arg None]
 collectArgs = abilist (\i _ -> Arg i None) (\i _ -> Arg i None)
 
+-- | Reject an `rsize` declaration that cannot describe a call of this arity.
+--
+-- `rsize` names the sizes of the leading call groups of a curried foreign
+-- function; the final group is implicit and is never written. Every declared
+-- group must therefore leave at least one argument for the group after it.
+-- Sizes that consume every argument would emit a trailing empty call, which
+-- fails inside the pool with an error naming neither the directive nor the
+-- function.
+--
+-- Individual values are already known to be positive integers: the parser
+-- rejects a non-integer or non-positive word at the declaration itself. Only
+-- the relationship to the function's arity is unknowable there, so it is
+-- checked here, where the source meets its type.
+checkRsizeArity :: Int -> Source -> Int -> MorlocMonad ()
+checkRsizeArity idx src arity = case srcRsize src of
+  [] -> return ()
+  ns
+    | sum ns < arity -> return ()
+    | otherwise ->
+        MM.throwSourcedError idx $
+          "The rsize declaration on" <+> squotes (pretty (unEVar (srcAlias src)))
+          <+> "cannot describe a call of" <+> pretty arity
+          <+> (if arity == 1 then "argument" else "arguments") <> ":"
+          <+> "the declared group sizes" <+> hsep (punctuate comma (map pretty ns))
+          <+> "total" <+> pretty (sum ns) <> "."
+          <+> "Each value is the number of arguments in one call, and the final"
+          <+> "group is implicit, so the sizes must total at most"
+          <+> pretty (arity - 1) <> "."
+
 expressCore :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyHead
 expressCore (AnnoS (Idx midx c@(FunT inputs _)) (Idx cidx lang, _) (ExeS exe)) = do
   ids <- MM.takeFromCounter (length inputs)
   exe' <- case exe of
-    (SrcCall src) -> return $ SrcCallP src
+    (SrcCall src) -> checkRsizeArity midx src (length inputs) >> return (SrcCallP src)
     (PatCall pat) -> return $ PatCallP pat
   let lambdaVals = fromJust $ safeZipWith PolyBndVar (map (C . Idx cidx) inputs) ids
   return
@@ -1299,6 +1331,47 @@ dispatchListLit midx cidx lang userT userTV userArgs xs' = do
 -- wire form's. @mkLit@ builds the natural literal given the TVar at
 -- which it should be tagged (user's TVar when emitting naturally,
 -- wire-form's TVar when emitting inside a wrap).
+-- | Reject a NUL byte in a string literal bound for a language that cannot
+-- represent one.
+--
+-- R refuses to parse a source-level @"\000"@ at all, so the generated pool
+-- would die before any runtime guard could fire; the failure has to be caught
+-- while the literal still has a source position. That position is why the
+-- check lives here rather than in the pool printer, which is pure and can only
+-- abort with a call stack naming the compiler instead of the program.
+--
+-- The scan runs before the descriptor is consulted so that a program with no
+-- NUL-bearing literal -- which is nearly all of them -- pays one 'T.any' per
+-- literal and never reads a descriptor.
+checkStringNul :: Int -> Lang -> Text -> MorlocMonad ()
+checkStringNul idx lang s
+  | not (T.any (== '\0') s) = return ()
+  | langAllowsStringNul lang = return ()
+  | otherwise =
+      MM.throwSourcedError idx $
+        "This string literal contains a NUL byte, which the"
+        <+> pretty (ML.langName lang)
+        <+> "pool cannot represent in its native string type."
+        <+> "Move the literal to a language that can (Python, C++, Julia, or the"
+        <+> "nexus itself), or remove the NUL byte."
+        <+> "See the allow_string_null field in the language's lang.yaml."
+
+-- | Whether a language's native string type admits an embedded NUL, read from
+-- the embedded lang.yaml registry. A language with no descriptor, or one whose
+-- descriptor does not parse, is treated as permissive -- the same default the
+-- descriptor itself carries, so an unreadable descriptor cannot turn into a
+-- spurious rejection of the user's program.
+langAllowsStringNul :: Lang -> Bool
+langAllowsStringNul lang =
+  case lookup (T.unpack (ML.langName lang)) embeddedRegistry of
+    Just yamlText -> case loadLangDescriptorFromText yamlText of
+      Right desc -> ldAllowStringNull desc
+      Left _ -> True
+    Nothing -> True
+  where
+    embeddedRegistry =
+      [(n, DF.embededFileText ef) | (n, ef) <- DF.langRegistryFiles]
+
 dispatchPrimLit ::
   Int ->                  -- midx
   Lang ->
@@ -1456,6 +1529,7 @@ expressPolyExpr
     )
     | srcInline src && isLocal = do
         propagateScope gidxCall midx
+        checkRsizeArity midx src (length inputs)
         xsExpr <- zipWithM (expressPolyArg callLang) (map (Idx cidxCall) inputs) xs
         -- 'setManifoldConfig' (called from 'expressPolyExprWrap') already
         -- linked the head's label onto @midx@ if present; 'applyLambdas'
@@ -1691,7 +1765,8 @@ expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (IntS _ x)
   dispatchPrimLit midx lang t v (\tv -> PolyInt (Idx cidx tv) x)
 expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (LogS x)) =
   dispatchPrimLit midx lang t v (\tv -> PolyLog (Idx cidx tv) x)
-expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (StrS x)) =
+expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (StrS x)) = do
+  checkStringNul midx lang x
   dispatchPrimLit midx lang t v (\tv -> PolyStr (Idx cidx tv) x)
 expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) UniS) =
   dispatchPrimLit midx lang t v (\tv -> PolyNull (Idx cidx (VarT tv)))
@@ -1976,6 +2051,9 @@ expressPolyApp ::
   AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) ->
   [PolyExpr] ->
   MorlocMonad PolyExpr
+expressPolyApp _ (AnnoS g@(Idx gi (FunT inputs _)) _ (ExeS (SrcCall src))) xs = do
+  checkRsizeArity gi src (length inputs)
+  return . PolyReturn $ PolyApp (PolyExe g (SrcCallP src)) xs
 expressPolyApp _ (AnnoS g _ (ExeS (SrcCall src))) xs =
   return . PolyReturn $ PolyApp (PolyExe g (SrcCallP src)) xs
 -- Eta-expanded pattern call: fires when a pattern-typed expression

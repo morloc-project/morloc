@@ -17,3 +17,4 @@ all:
 
 clean:
 	rm -f obs.err build.err build5.err
+	rm -rf *-build *build.tmp*

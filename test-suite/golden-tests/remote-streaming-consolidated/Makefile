@@ -45,3 +45,4 @@ all:
 clean:
 	rm -rf nexus pools __pycache__ *.err
 	find /tmp -maxdepth 1 -name 'remote-streaming-*' -type d -exec rm -rf {} + 2>/dev/null || true
+	rm -rf *-build *build.tmp*

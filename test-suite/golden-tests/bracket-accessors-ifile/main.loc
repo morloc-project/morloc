@@ -146,7 +146,7 @@ optStart = (Null :: ?I32)
 
 testIFileLangRange :: (Bool -> Bool) -> Str -> <IO, Err> Bool
 testIFileLangRange langId path = do
-  @save 0 ten path
+  @save 0 path ten
   f <- @open path :: <IO, Err> IFile [Int]
   langId $
     -- indexing
@@ -197,9 +197,9 @@ testIFileRangeR = testIFileLangRange idr
 
 testIFileLangRecord :: (Bool -> Bool) -> Str -> Str -> Str -> <IO, Err> Bool
 testIFileLangRecord langId pathPts pathPairs pathRows = do
-  @save 0 pts pathPts
-  @save 0 pairs pathPairs
-  @save 0 rows pathRows
+  @save 0 pathPts pts
+  @save 0 pathPairs pairs
+  @save 0 pathRows rows
   fPts <- @open pathPts :: <IO, Err> IFile [Pt]
   fPairs <- @open pathPairs :: <IO, Err> IFile [(Int, Str)]
   fRows <- @open pathRows :: <IO, Err> IFile [Row]
@@ -253,55 +253,55 @@ testIFileRecordR = testIFileLangRecord idr
 
 ifileIndexOne :: Str -> <IO, Err> Int
 ifileIndexOne path = do
-  @save 0 [10, 20, 30, 40, 50] path
+  @save 0 path [10, 20, 30, 40, 50]
   f <- @open path :: <IO, Err> IFile [Int]
   .[2] f
 
 ifileSliceClosed :: Str -> <IO, Err> [Int]
 ifileSliceClosed path = do
-  @save 0 [10, 20, 30, 40, 50] path
+  @save 0 path [10, 20, 30, 40, 50]
   f <- @open path :: <IO, Err> IFile [Int]
   .[1:4] f
 
 ifileSliceOpenLeft :: Str -> <IO, Err> [Int]
 ifileSliceOpenLeft path = do
-  @save 0 [10, 20, 30, 40, 50] path
+  @save 0 path [10, 20, 30, 40, 50]
   f <- @open path :: <IO, Err> IFile [Int]
   .[:3] f
 
 ifileSliceOpenRight :: Str -> <IO, Err> [Int]
 ifileSliceOpenRight path = do
-  @save 0 [10, 20, 30, 40, 50] path
+  @save 0 path [10, 20, 30, 40, 50]
   f <- @open path :: <IO, Err> IFile [Int]
   .[1:] f
 
 ifileSliceFull :: Str -> <IO, Err> [Int]
 ifileSliceFull path = do
-  @save 0 [10, 20, 30] path
+  @save 0 path [10, 20, 30]
   f <- @open path :: <IO, Err> IFile [Int]
   .[:] f
 
 ifileSliceReverse :: Str -> <IO, Err> [Int]
 ifileSliceReverse path = do
-  @save 0 [1, 2, 3, 4, 5] path
+  @save 0 path [1, 2, 3, 4, 5]
   f <- @open path :: <IO, Err> IFile [Int]
   .[::-1] f
 
 ifileSliceEvery :: Str -> <IO, Err> [Int]
 ifileSliceEvery path = do
-  @save 0 [1, 2, 3, 4, 5, 6, 7, 8] path
+  @save 0 path [1, 2, 3, 4, 5, 6, 7, 8]
   f <- @open path :: <IO, Err> IFile [Int]
   .[::2] f
 
 ifileSliceNegEnd :: Str -> <IO, Err> [Int]
 ifileSliceNegEnd path = do
-  @save 0 [10, 20, 30, 40, 50] path
+  @save 0 path [10, 20, 30, 40, 50]
   f <- @open path :: <IO, Err> IFile [Int]
   .[(0 - 3):] f
 
 ifileSliceWithStep :: Str -> <IO, Err> [Int]
 ifileSliceWithStep path = do
-  @save 0 [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] path
+  @save 0 path [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
   f <- @open path :: <IO, Err> IFile [Int]
   .[0:10:3] f
 
@@ -309,43 +309,43 @@ ifileSliceWithStep path = do
 -- its name, just a slice on a flat [Int] receiver).
 ifileChainedFieldThenSlice :: Str -> <IO, Err> [Int]
 ifileChainedFieldThenSlice path = do
-  @save 0 [10, 20, 30, 40] path
+  @save 0 path [10, 20, 30, 40]
   f <- @open path :: <IO, Err> IFile [Int]
   .[1:3] f
 
 ifileChainedIndexThenField :: Str -> <IO, Err> Int
 ifileChainedIndexThenField path = do
-  @save 0 chainedPts path
+  @save 0 path chainedPts
   f <- @open path :: <IO, Err> IFile [Pt]
   .[1].y f
 
 ifileSliceThenTupleField :: Str -> <IO, Err> [Int]
 ifileSliceThenTupleField path = do
-  @save 0 [(1, "a"), (2, "b"), (3, "c"), (4, "d"), (5, "e")] path
+  @save 0 path [(1, "a"), (2, "b"), (3, "c"), (4, "d"), (5, "e")]
   f <- @open path :: <IO, Err> IFile [(Int, Str)]
   .[1:4].0 f
 
 ifileSliceThenRecordField :: Str -> <IO, Err> [Int]
 ifileSliceThenRecordField path = do
-  @save 0 recordFieldPts path
+  @save 0 path recordFieldPts
   f <- @open path :: <IO, Err> IFile [Pt]
   .[0:3].x f
 
 ifileSliceThenNestedSlice :: Str -> <IO, Err> [[Int]]
 ifileSliceThenNestedSlice path = do
-  @save 0 [[1, 2, 3, 4, 5], [6, 7, 8, 9, 10], [99, 99]] path
+  @save 0 path [[1, 2, 3, 4, 5], [6, 7, 8, 9, 10], [99, 99]]
   f <- @open path :: <IO, Err> IFile [[Int]]
   .[0:2].[0:3] f
 
 ifileSliceThenGroup :: Str -> <IO, Err> [(Int, Int)]
 ifileSliceThenGroup path = do
-  @save 0 groupPts path
+  @save 0 path groupPts
   f <- @open path :: <IO, Err> IFile [Pt]
   .[0:2].(.x, .y) f
 
 ifileDeepChain :: Str -> <IO, Err> [(Int, Int)]
 ifileDeepChain path = do
-  @save 0 deepChainRows path
+  @save 0 path deepChainRows
   f <- @open path :: <IO, Err> IFile [Row]
   .[0:2].(.a.[0].0, .b.[0].y) f
 
@@ -354,7 +354,7 @@ ifileDeepChain path = do
 -- runs on an in-memory [Int] literal to produce the bracket index.
 ifileIndexFromForeignLength :: Str -> <IO, Err> Int
 ifileIndexFromForeignLength path = do
-  @save 0 [100, 200, 300, 400, 500] path
+  @save 0 path [100, 200, 300, 400, 500]
   f <- @open path :: <IO, Err> IFile [Int]
   .[length [10, 20, 30] - 1] f
 
@@ -363,7 +363,7 @@ ifileIndexFromForeignLength path = do
 -- "default start for positive step" (0).
 ifileSliceFromOptionalStart :: Str -> <IO, Err> [Int]
 ifileSliceFromOptionalStart path = do
-  @save 0 [10, 20, 30, 40, 50] path
+  @save 0 path [10, 20, 30, 40, 50]
   f <- @open path :: <IO, Err> IFile [Int]
   .[optStart:3] f
 
@@ -372,31 +372,31 @@ ifileSliceFromOptionalStart path = do
 -- regardless of source width.
 ifileIndexI8 :: Str -> <IO, Err> Int
 ifileIndexI8 path = do
-  @save 0 [10, 20, 30] path
+  @save 0 path [10, 20, 30]
   f <- @open path :: <IO, Err> IFile [Int]
   .[(0 :: I8)] f
 
 ifileIndexI16 :: Str -> <IO, Err> Int
 ifileIndexI16 path = do
-  @save 0 [10, 20, 30] path
+  @save 0 path [10, 20, 30]
   f <- @open path :: <IO, Err> IFile [Int]
   .[(1 :: I16)] f
 
 ifileIndexU32 :: Str -> <IO, Err> Int
 ifileIndexU32 path = do
-  @save 0 [10, 20, 30] path
+  @save 0 path [10, 20, 30]
   f <- @open path :: <IO, Err> IFile [Int]
   .[(2 :: U32)] f
 
 ifileSliceI8Bound :: Str -> <IO, Err> [Int]
 ifileSliceI8Bound path = do
-  @save 0 [10, 20, 30, 40, 50] path
+  @save 0 path [10, 20, 30, 40, 50]
   f <- @open path :: <IO, Err> IFile [Int]
   .[(1 :: I8):3] f
 
 ifileSliceMixedWidthBounds :: Str -> <IO, Err> [Int]
 ifileSliceMixedWidthBounds path = do
-  @save 0 [10, 20, 30, 40, 50] path
+  @save 0 path [10, 20, 30, 40, 50]
   f <- @open path :: <IO, Err> IFile [Int]
   .[(1 :: I8):(4 :: I16)] f
 
@@ -410,30 +410,30 @@ ifileSliceMixedWidthBounds path = do
 
 ifileCrossPoolReceiverPyToCpp :: Str -> <IO, Err> Int
 ifileCrossPoolReceiverPyToCpp path = do
-  @save 0 [100, 200, 300, 400, 500] path
+  @save 0 path [100, 200, 300, 400, 500]
   f <- @open path :: <IO, Err> IFile [Int]
   idcpp (.[2] (idpy f))
 
 ifileCrossPoolReceiverCppToR :: Str -> <IO, Err> Int
 ifileCrossPoolReceiverCppToR path = do
-  @save 0 [10, 20, 30] path
+  @save 0 path [10, 20, 30]
   f <- @open path :: <IO, Err> IFile [Int]
   idr (.[1] (idcpp f))
 
 ifileCrossPoolReceiverRToPy :: Str -> <IO, Err> Int
 ifileCrossPoolReceiverRToPy path = do
-  @save 0 [7, 8, 9] path
+  @save 0 path [7, 8, 9]
   f <- @open path :: <IO, Err> IFile [Int]
   idpy (.[-1] (idr f))
 
 ifileCrossPoolIdxForeign :: Str -> <IO, Err> Int
 ifileCrossPoolIdxForeign path = do
-  @save 0 [10, 20, 30, 40, 50] path
+  @save 0 path [10, 20, 30, 40, 50]
   f <- @open path :: <IO, Err> IFile [Int]
   idr (.[idpy 1] (idcpp f))
 
 ifileCrossPoolSliceNested :: Str -> <IO, Err> [Int]
 ifileCrossPoolSliceNested path = do
-  @save 0 crossPoolSlicePts path
+  @save 0 path crossPoolSlicePts
   f <- @open path :: <IO, Err> IFile [Pt]
   idr (.[0:3].x f)

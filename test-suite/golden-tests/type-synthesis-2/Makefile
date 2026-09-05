@@ -5,3 +5,4 @@ all:
 
 clean:
 	rm -rf nexus pools nexus.cpy lib/foo/__pycache__
+	rm -rf *-build *build.tmp*

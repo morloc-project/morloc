@@ -52,7 +52,13 @@ morloc_close_socket                  <- function(...){ .Call("morloc_close_socke
 morloc_start_daemon                  <- function(...){ .Call("morloc_start_daemon",                  ...) }
 morloc_shinit                        <- function(...){ .Call("morloc_shinit",                        ...) }
 morloc_foreign_call                  <- function(...){ .Call("morloc_foreign_call",                  ...) }
-morloc_get_value                     <- function(...){ .Call("morloc_get_value",                     ...) }
+# The third argument is codegen's per-call answer to "can this value carry an
+# interior NUL", which R cannot represent. It defaults to TRUE for the call
+# sites in this template, whose schemas are only known at run time (closure
+# reflection, remote dispatch) -- checking is the safe answer there, and none
+# of those paths is hot enough for the walk to matter. Generated manifolds
+# always pass the flag explicitly.
+morloc_get_value                     <- function(packet, schema, check_nul = TRUE){ .Call("morloc_get_value", packet, schema, check_nul) }
 morloc_put_value                     <- function(...){ .Call("morloc_put_value",                     ...) }
 morloc_release_packet_shm            <- function(...){ .Call("morloc_release_packet_shm",            ...) }
 morloc_mlc_show                      <- function(...){ .Call("morloc_mlc_show",                      ...) }

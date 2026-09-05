@@ -1,0 +1,50 @@
+-- `rsize` on a source declaration says how many arguments go in each call, for
+-- a foreign function that returns a closure instead of taking everything at
+-- once. The values are the sizes of the leading call groups; the final group is
+-- implicit. Without it Morloc emits a single flat call, which a curried Python
+-- function rejects with "takes 1 positional argument but 2 were given".
+--
+-- Covered here: a one-argument group (`rsize: 1`), a two-argument group
+-- (`rsize: 2`), successive single groups (`rsize: 1 1`), a flat function
+-- declared in the same block to show the directive binds only to the term
+-- below it, partial application through a curried source, and the source-level
+-- `name:` directive. The rejection paths are exercised by the sibling
+-- bad-*.loc files, which the Makefile expects to fail.
+module main (scaled, shifted, doubler, ranged, clamped, added)
+
+import root-py
+
+source Py from "lib.py" where
+  --' rsize: 1
+  scale
+  shift
+  --' rsize: 1 1
+  between
+  --' rsize: 2
+  clamp_lo_hi
+  --' name: native_name_add
+  add
+
+scale :: Real -> [Real] -> [Real]
+shift :: Real -> [Real] -> [Real]
+between :: Int -> Int -> Int -> Bool
+clamp_lo_hi :: Int -> Int -> Int -> Int
+add :: Int -> Int -> Int
+
+scaled :: Real -> [Real] -> [Real]
+scaled f xs = scale f xs
+
+shifted :: Real -> [Real] -> [Real]
+shifted o xs = shift o xs
+
+doubler :: [Real] -> [Real]
+doubler = scale 2.0
+
+ranged :: Int -> Int -> Int -> Bool
+ranged lo hi x = between lo hi x
+
+clamped :: Int -> Int -> Int -> Int
+clamped lo hi x = clamp_lo_hi lo hi x
+
+added :: Int -> Int -> Int
+added a b = add a b

@@ -12,5 +12,5 @@ escapable effect Err
 
 saveThenLoadWrongType :: Str -> <IO, Err> Int
 saveThenLoadWrongType path = do
-  @save 0 "not-an-int-payload" path
+  @save 0 path "not-an-int-payload"
   @catch (@load path :: <IO, Err> Int) 999

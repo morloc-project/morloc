@@ -25,3 +25,4 @@ all:
 
 clean:
 	rm -rf nexus pools *.err
+	rm -rf *-build *build.tmp*

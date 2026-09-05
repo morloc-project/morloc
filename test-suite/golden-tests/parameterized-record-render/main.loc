@@ -1,0 +1,30 @@
+-- An applied parameterized record must print as `Box Int`, the way it
+-- was written. Resolving the head of the application yields the record's
+-- generic declaration, so the arguments have to be bound into it or the
+-- type prints with a parenthesised head and a leaked parameter.
+--
+-- The definition block stays generic on purpose: it is emitted once per
+-- name and shows where each parameter goes. An applied definition cannot
+-- be inverted, so the instance is recorded per use site by the type
+-- string and the wire schema, which must stay distinct per instance.
+module box (takeInt, takeStr)
+
+import root-py
+
+--' A box around anything
+record Box a where
+  it :: a
+
+record Py => Box = "dict"
+
+source Py from "box.py" ("f", "g")
+f :: Box Int -> Int
+g :: Box Str -> Int
+
+--' Take a box of Int
+takeInt :: Box Int -> Int
+takeInt = f
+
+--' Take a box of Str
+takeStr :: Box Str -> Int
+takeStr = g

@@ -48,7 +48,7 @@ effect Err
 
 binInt :: Int -> Str -> <IO, Err> Int
 binInt x path = do
-  @save 0 x path
+  @save 0 path x
   @load path
 
 msgInt :: Int -> Str -> <IO, Err> Int
@@ -63,7 +63,7 @@ jsonInt x path = do
 
 binReal :: Real -> Str -> <IO, Err> Real
 binReal x path = do
-  @save 0 x path
+  @save 0 path x
   @load path
 
 msgReal :: Real -> Str -> <IO, Err> Real
@@ -78,7 +78,7 @@ jsonReal x path = do
 
 binStr :: Str -> Str -> <IO, Err> Str
 binStr s path = do
-  @save 0 s path
+  @save 0 path s
   @load path
 
 msgStr :: Str -> Str -> <IO, Err> Str
@@ -93,7 +93,7 @@ jsonStr s path = do
 
 binList :: [Str] -> Str -> <IO, Err> [Str]
 binList xs path = do
-  @save 0 xs path
+  @save 0 path xs
   @load path
 
 msgList :: [Str] -> Str -> <IO, Err> [Str]
@@ -108,7 +108,7 @@ jsonList xs path = do
 
 binTup :: (Int, Str) -> Str -> <IO, Err> (Int, Str)
 binTup t path = do
-  @save 0 t path
+  @save 0 path t
   @load path
 
 msgTup :: (Int, Str) -> Str -> <IO, Err> (Int, Str)
@@ -123,7 +123,7 @@ jsonTup t path = do
 
 binFixedTupList :: [(Int, Real)] -> Str -> <IO, Err> [(Int, Real)]
 binFixedTupList xs path = do
-  @save 0 xs path
+  @save 0 path xs
   @load path
 
 msgFixedTupList :: [(Int, Real)] -> Str -> <IO, Err> [(Int, Real)]

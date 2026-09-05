@@ -31,4 +31,5 @@ all:
 	./nexus testSliceAdd >> obs.txt 2>> obs.err
 
 clean:
-	rm -rf nexus *-build *err __pycache__
+	rm -rf nexus pools __pycache__ *.err
+	rm -rf *-build *build.tmp*

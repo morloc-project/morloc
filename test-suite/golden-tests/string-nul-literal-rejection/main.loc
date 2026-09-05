@@ -1,0 +1,25 @@
+-- A Str literal carrying a NUL byte cannot reach a pool whose language has
+-- allow_string_null = false. R refuses to parse a source-level "\000" at all,
+-- so the pool would die before any runtime guard could fire; the literal has
+-- to be rejected while it still has a source position.
+--
+-- This is the POSITIVE half: the same literal is legal in a Python pool, and
+-- the NUL survives the round trip and is emitted as the standard JSON escape.
+-- The rejections live in the sibling bad-*.loc files, which the Makefile
+-- expects to fail; they cover the container shapes a literal can hide in,
+-- since each reaches the pool by a different route.
+module main (pyNul, len)
+
+import root-py
+
+source Py from "helper.py" ("identity" as pyId)
+pyId :: Str -> Str
+
+nulStr :: Str
+nulStr = "ab\0cd"
+
+pyNul :: Str
+pyNul = pyId nulStr
+
+len :: U64
+len = size nulStr

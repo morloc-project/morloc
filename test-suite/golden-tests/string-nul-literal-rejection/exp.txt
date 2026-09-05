@@ -1,0 +1,8 @@
+5
+"ab\u0000cd"
+direct_rejected
+list_rejected
+tuple_rejected
+record_rejected
+no_callstack
+named_the_language

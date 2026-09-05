@@ -23,4 +23,4 @@ mkStream path = do
   @close s
 
 mkData :: Str -> <IO, Err> ()
-mkData path = @save 0 [1, 2, 3, 4, 5] path
+mkData path = @save 0 path [1, 2, 3, 4, 5]

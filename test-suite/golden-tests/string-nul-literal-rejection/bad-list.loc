@@ -1,0 +1,12 @@
+module main (out)
+
+import root-r
+
+source R from "helper.R" ("identity" as rId)
+rId :: [Str] -> [Str]
+
+xs :: [Str]
+xs = ["ab\0cd", "ok"]
+
+out :: [Str]
+out = rId xs

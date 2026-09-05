@@ -41,6 +41,7 @@ import Morloc.CodeGenerator.Parameterize (parameterize)
 import Morloc.CodeGenerator.Guest.Pass (lowerGuests)
 import Morloc.CodeGenerator.Realize (realityCheck)
 import Morloc.CodeGenerator.Segment (segment)
+import Morloc.CodeGenerator.Serial (checkPackerCoherence)
 import Morloc.CodeGenerator.Reduce (reduce)
 import Morloc.CodeGenerator.Serialize (serialize)
 import qualified Morloc.Data.DAG as DAG
@@ -128,6 +129,11 @@ writeProgram ::
   MorlocMonad ()
 writeProgram translateFn path code = do
   typecheck path code
+    -- A constructor whose Packable instances disagree about its wire form
+    -- cannot be serialized consistently by every language that shares it, and
+    -- the disagreement is invisible until a value crosses between two pools.
+    -- Settle it before anything is lowered.
+    >>= (\asts -> checkPackerCoherence >> return asts)
     -- Evaluate applied lambdas. gASTs run in the pure nexus evaluator, which
     -- cannot hold a native closure, so let-bound lambdas are always inlined
     -- there (True); rASTs become pools, where a multiply-used lambda is kept

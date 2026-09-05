@@ -105,3 +105,4 @@ all:
 
 clean:
 	rm -rf prog pools __pycache__ *.err *.packet *.packet.zst data.json data.mpk readme.txt people.csv truncated.packet tmp.out tmp.err
+	rm -rf *-build *build.tmp*

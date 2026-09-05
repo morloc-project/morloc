@@ -1,0 +1,12 @@
+module main (r)
+
+import root-py
+
+source Py from "lib.py" where
+  --' rsize: 0
+  shift
+
+shift :: Real -> [Real] -> [Real]
+
+r :: [Real]
+r = shift 1.0 [1.0]

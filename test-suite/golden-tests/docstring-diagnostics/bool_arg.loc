@@ -1,0 +1,12 @@
+-- A Bool argument cannot take `@arg`; the message must name the
+-- directives that do apply, in the syntax the manual teaches.
+module boolArg (f)
+
+import root-py
+
+--' Do a thing
+f ::
+  --' verbose
+  --' @arg -v/--verbose
+  Bool -> Int
+f _ = 1

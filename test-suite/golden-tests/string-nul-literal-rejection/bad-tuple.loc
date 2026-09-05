@@ -1,0 +1,12 @@
+module main (out)
+
+import root-r
+
+source R from "helper.R" ("identity" as rId)
+rId :: (Str, Int) -> (Str, Int)
+
+t :: (Str, Int)
+t = ("ab\0cd", 1)
+
+out :: (Str, Int)
+out = rId t

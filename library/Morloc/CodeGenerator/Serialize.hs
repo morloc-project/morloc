@@ -544,13 +544,19 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     -- mirror that here so intrinsics flow through the same pack/unpack
     -- machinery as ordinary functions instead of feeding the runtime a
     -- user-side struct it cannot serialize.
-    -- Idempotently wrap a NativeExpr in a DoBlockN so it renders as a
-    -- no-arg thunk. Any effect-typed NativeExpr is already thunk-shaped
-    -- via the enclosing DoBlockN-wrap step; a structural pattern-match
-    -- would have to enumerate every pass-through constructor
-    -- (MapOptionalN, CoerceN, ReturnN, ...) and silently misbehave when
-    -- a new one is added, so we dispatch on the type wrapper instead.
+    -- Wrap a NativeExpr in a DoBlockN so it renders as a no-arg thunk;
+    -- both of @catch's arguments reach mlc_catch as thunks it forces at
+    -- most once. An expression is already thunk-shaped in two ways: an
+    -- effect-typed one (which lowered to a DoBlockN upstream and carries
+    -- an EffectF type) and a do-block whose effect row is empty (a
+    -- DoBlockN whose stored type is its plain inner type -- e.g. a pure
+    -- fallback like `do []`). typeFof reports the DoBlockN's inner type,
+    -- so the type check alone misses the second case and re-wraps it into
+    -- DoBlockN (DoBlockN _); mlc_catch's `return fallback()` then yields
+    -- the inner thunk instead of the value. Match DoBlockN structurally
+    -- so both shapes pass through untouched.
     thunkifyForCatch :: NativeExpr -> NativeExpr
+    thunkifyForCatch e@(DoBlockN _ _) = e
     thunkifyForCatch e = case typeFof e of
       EffectF _ _ -> e
       t           -> DoBlockN t e
@@ -558,11 +564,11 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
 
     unpackDataArgIfNeeded ::
       Int -> Intrinsic -> [NativeExpr] -> MorlocMonad [NativeExpr]
-    -- @save's first argument is the compression level, not the data;
-    -- the data is the second positional arg. Apply the unpacker there.
-    unpackDataArgIfNeeded m IntrSave (levelArg : dataArg : rest) = do
+    -- @save's args are [level, path, value]; the value is at index 2.
+    -- Apply the unpacker there.
+    unpackDataArgIfNeeded m IntrSave (levelArg : pathArg : dataArg : rest) = do
       rest' <- packDataArg m dataArg
-      return (levelArg : rest' ++ rest)
+      return (levelArg : pathArg : rest' ++ rest)
     -- @write's args are [level, handle, value]; the value is at index 2.
     unpackDataArgIfNeeded m IntrWrite (levelArg : handleArg : dataArg : rest) = do
       rest' <- packDataArg m dataArg
@@ -611,8 +617,8 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
 
     -- Compute the msgpack schema string for runtime intrinsics
     intrinsicSchema :: Int -> Intrinsic -> TypeF -> [NativeExpr] -> MorlocMonad (Maybe Text)
-    -- @save's data is the second positional arg (after the level).
-    intrinsicSchema m IntrSave _ (_levelArg : dataArg : _) = do
+    -- @save's data is the third positional arg (after the level and path).
+    intrinsicSchema m IntrSave _ (_levelArg : _pathArg : dataArg : _) = do
       ast <- Serial.makeSerialAST m lang (typeFof dataArg)
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     -- @savem/@savej's data is the second positional arg (after the path).

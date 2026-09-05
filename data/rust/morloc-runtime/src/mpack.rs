@@ -701,13 +701,14 @@ mod tests {
     use crate::schema::parse_schema;
     use crate::json;
 
-    fn setup_shm() {
-        crate::init_test_shm();
+    #[must_use]
+    fn setup_shm() -> std::sync::RwLockReadGuard<'static, ()> {
+        crate::init_test_shm()
     }
 
     #[test]
     fn test_roundtrip_int_via_msgpack() {
-        setup_shm();
+        let _shm = setup_shm();
         let schema = parse_schema("i4").unwrap();
         // JSON -> voidstar -> msgpack -> voidstar -> JSON
         let ptr1 = json::read_json_with_schema("42", &schema).unwrap();
@@ -719,7 +720,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip_string_via_msgpack() {
-        setup_shm();
+        let _shm = setup_shm();
         let schema = parse_schema("s").unwrap();
         let ptr1 = json::read_json_with_schema("\"hello world\"", &schema).unwrap();
         let mpk = pack_with_schema(ptr1, &schema).unwrap();
@@ -730,7 +731,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip_array_via_msgpack() {
-        setup_shm();
+        let _shm = setup_shm();
         let schema = parse_schema("ai4").unwrap();
         let ptr1 = json::read_json_with_schema("[10,20,30]", &schema).unwrap();
         let mpk = pack_with_schema(ptr1, &schema).unwrap();
@@ -741,7 +742,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip_bool_via_msgpack() {
-        setup_shm();
+        let _shm = setup_shm();
         let schema = parse_schema("b").unwrap();
         let ptr1 = json::read_json_with_schema("true", &schema).unwrap();
         let mpk = pack_with_schema(ptr1, &schema).unwrap();
@@ -752,7 +753,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip_optional_null_via_msgpack() {
-        setup_shm();
+        let _shm = setup_shm();
         let schema = parse_schema("?i4").unwrap();
         let ptr1 = json::read_json_with_schema("null", &schema).unwrap();
         let mpk = pack_with_schema(ptr1, &schema).unwrap();
@@ -763,7 +764,7 @@ mod tests {
 
     #[test]
     fn test_pack_only_string() {
-        setup_shm();
+        let _shm = setup_shm();
         let schema = parse_schema("s").unwrap();
         let ptr1 = json::read_json_with_schema("\"hi\"", &schema).unwrap();
         let mpk = pack_with_schema(ptr1, &schema).unwrap();
@@ -773,7 +774,7 @@ mod tests {
 
     #[test]
     fn test_unpack_only_int() {
-        setup_shm();
+        let _shm = setup_shm();
         let schema = parse_schema("i4").unwrap();
         // msgpack for 42 = [42] (fixint)
         let mpk = vec![42u8];
@@ -784,7 +785,7 @@ mod tests {
 
     #[test]
     fn test_unpack_only_string() {
-        setup_shm();
+        let _shm = setup_shm();
         let schema = parse_schema("s").unwrap();
         // msgpack for "hi" = [0xa2, 0x68, 0x69]
         let mpk = vec![0xa2, 0x68, 0x69];

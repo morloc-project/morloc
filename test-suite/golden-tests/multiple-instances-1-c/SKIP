@@ -1,0 +1,3 @@
+Imports two instances of one function in a single language. The stricter
+instance resolution rejects this. Reinstate when the compiler can distinguish
+the two functions reasonably.

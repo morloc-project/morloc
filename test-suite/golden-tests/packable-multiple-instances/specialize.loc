@@ -1,0 +1,28 @@
+--' A generic instance and a specialization of it, used from two sites. The Int
+--' site matches both and takes the more specific one; the Str site matches only
+--' the generic instance and takes that. An instance that does not cover a use
+--' site is not a candidate there, not an error. See reports/0049.
+
+module specialize (howInt, howStr)
+
+import root-py
+
+newtype Box a
+
+type Py => (Box a) = "dict" a
+
+instance Packable [a] (Box a) where
+  source Py from "helpers.py" ("pack_generic" as pack, "unpack_generic" as unpack)
+
+instance Packable [Int] (Box Int) where
+  source Py from "helpers.py" ("pack_special" as pack, "unpack_special" as unpack)
+
+source Py from "helpers.py" ("how" as how)
+
+how :: Box a -> Str
+
+howInt :: Box Int -> Str
+howInt = how
+
+howStr :: Box Str -> Str
+howStr = how

@@ -1,0 +1,18 @@
+-- The constructor spelling of the record in where_form.loc. Every
+-- generated description must match that file's.
+module ctorForm (f)
+
+import root-py
+
+--' Some settings
+--' @metavar SETTINGS
+record Config = Config
+  { a :: Int
+  , b :: Str
+  }
+
+record Py => Config = "dict"
+
+--' Take a config
+f :: Config -> Int
+f _ = 1

@@ -348,10 +348,10 @@ pub fn dispatch_command_parsed(
                 };
                 if let Some(s) = payload {
                     // The CLI ArgValue contains JSON-quoted form for
-                    // strings (e.g. `"abc def"`). Decode via
-                    // serde_json so any   escapes become real NUL
-                    // bytes; non-JSON values just fail to parse and
-                    // are skipped.
+                    // strings (e.g. `"abc\u0000def"`). Decode via
+                    // serde_json so any \u0000 escapes become real
+                    // NUL bytes; non-JSON values just fail to parse
+                    // and are skipped.
                     if let Ok(jv) = serde_json::from_str::<serde_json::Value>(s) {
                         if let Some(p) =
                             morloc_runtime_types::null_check::first_null_in_json(&jv)
@@ -534,19 +534,34 @@ pub fn process_inline_bytes_escapes(argv: &str) -> Result<Vec<u8>, String> {
 }
 
 /// If `argv` is the Unix stdin/stdout shorthand `-` and the arg
-/// carries a `check.path` directive, return the OS path that selects
-/// the corresponding standard stream (so the pool's `fopen` etc. can
-/// open it as a regular file). Returns `None` when no substitution
-/// applies; the caller should keep the original value.
+/// names a file, return the OS path that selects the corresponding
+/// standard stream (so the pool's `fopen` etc. can open it as a regular
+/// file). Returns `None` when no substitution applies; the caller should
+/// keep the original value.
 ///
-/// Mapping (based on the path mode):
+/// Two directives make an argument name a file, and `-` has to mean
+/// stdin under both. A `check.path` argument carries the path through to
+/// the callee, so the mode picks the stream:
 /// * `r`  -> `/dev/stdin`
 /// * `w`  -> `/dev/stdout`
 /// * `x`  -> `None` (exclusive-create against stdout is nonsensical --
 ///   `/dev/stdout` already exists, so the check would fail after
 ///   substitution. The user should use `w` for stdout output.)
 /// * `rw` -> `None` (ambiguous; stdin vs stdout can't both be it).
-pub fn substitute_stdio_dash(argv: &str, checks: &[Check]) -> Option<String> {
+///
+/// A `source: file` argument is read by the runtime rather than checked,
+/// and it is read, never written, so it maps to `/dev/stdin`. Without
+/// this the token reaches the loader verbatim and `fopen("-")` fails --
+/// the auto classifier, which resolves `-` itself, is bypassed whenever
+/// the source is declared.
+///
+/// The two directives are mutually exclusive (`check.path` cannot be
+/// combined with `source: file`), so their order here does not matter.
+pub fn substitute_stdio_dash(
+    argv: &str,
+    checks: &[Check],
+    source: SourceAtom,
+) -> Option<String> {
     if argv != "-" {
         return None;
     }
@@ -560,6 +575,9 @@ pub fn substitute_stdio_dash(argv: &str, checks: &[Check]) -> Option<String> {
                 };
             }
         }
+    }
+    if source == SourceAtom::File {
+        return Some("/dev/stdin".to_string());
     }
     None
 }
@@ -692,10 +710,11 @@ fn check_parent_writable(argv: &str, mode: &str) -> Result<(), String> {
 pub fn preprocess_cli_value(
     val: String,
     checks: &[Check],
+    source: SourceAtom,
     quoted_flag: bool,
     error_prefix: &str,
 ) -> String {
-    let v = substitute_stdio_dash(&val, checks).unwrap_or(val);
+    let v = substitute_stdio_dash(&val, checks, source).unwrap_or(val);
     // The stdio sentinels are opened by the runtime (stdin via the nexus
     // RPC channel, stdout as a device); "read from stdin" is not
     // "validate a user-named path", and `access("/dev/stdin", R_OK)` can
@@ -1923,12 +1942,12 @@ mod tests {
         // the callee `fopen` the standard stream as a regular file.
         let r = vec![Check::Path("r".into())];
         assert_eq!(
-            substitute_stdio_dash("-", &r).as_deref(),
+            substitute_stdio_dash("-", &r, SourceAtom::Auto).as_deref(),
             Some("/dev/stdin"),
         );
         let w = vec![Check::Path("w".into())];
         assert_eq!(
-            substitute_stdio_dash("-", &w).as_deref(),
+            substitute_stdio_dash("-", &w, SourceAtom::Auto).as_deref(),
             Some("/dev/stdout"),
         );
     }
@@ -1939,16 +1958,16 @@ mod tests {
         // so substitution would immediately fail the check. Better to
         // leave `-` alone and let the check report the real problem.
         let x = vec![Check::Path("x".into())];
-        assert!(substitute_stdio_dash("-", &x).is_none());
+        assert!(substitute_stdio_dash("-", &x, SourceAtom::Auto).is_none());
     }
 
     #[test]
     fn substitute_stdio_dash_leaves_non_dash_untouched() {
         // Anything other than the literal `-` is a real path; leave it.
         let r = vec![Check::Path("r".into())];
-        assert!(substitute_stdio_dash("foo.txt", &r).is_none());
-        assert!(substitute_stdio_dash("/dev/stdin", &r).is_none());
-        assert!(substitute_stdio_dash("", &r).is_none());
+        assert!(substitute_stdio_dash("foo.txt", &r, SourceAtom::Auto).is_none());
+        assert!(substitute_stdio_dash("/dev/stdin", &r, SourceAtom::Auto).is_none());
+        assert!(substitute_stdio_dash("", &r, SourceAtom::Auto).is_none());
     }
 
     #[test]
@@ -1956,9 +1975,25 @@ mod tests {
         // `rw` is ambiguous (stdin or stdout?); no substitution.
         // No check.path at all also means no substitution.
         let rw = vec![Check::Path("rw".into())];
-        assert!(substitute_stdio_dash("-", &rw).is_none());
+        assert!(substitute_stdio_dash("-", &rw, SourceAtom::Auto).is_none());
         let none: Vec<Check> = vec![];
-        assert!(substitute_stdio_dash("-", &none).is_none());
+        assert!(substitute_stdio_dash("-", &none, SourceAtom::Auto).is_none());
+    }
+
+    #[test]
+    fn substitute_stdio_dash_maps_declared_file_source() {
+        // `source: file` bypasses the auto classifier, so the dash has
+        // to be resolved here or `fopen("-")` fails downstream. The
+        // argument is read, never written, so it is always stdin.
+        let none: Vec<Check> = vec![];
+        assert_eq!(
+            substitute_stdio_dash("-", &none, SourceAtom::File).as_deref(),
+            Some("/dev/stdin"),
+        );
+        // A real path under the same declaration is left alone.
+        assert!(substitute_stdio_dash("in.txt", &none, SourceAtom::File).is_none());
+        // An inline-declared argument names no file; `-` is its value.
+        assert!(substitute_stdio_dash("-", &none, SourceAtom::Inline).is_none());
     }
 
     #[test]

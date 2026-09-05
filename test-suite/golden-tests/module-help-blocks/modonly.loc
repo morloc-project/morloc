@@ -1,0 +1,11 @@
+-- A single-command program described only at the module level. The
+-- module docstring is the program's whole description and must be what
+-- the help shows.
+--' Convert a number to text
+--' The conversion is decimal.
+module modonly (render)
+
+import root-py
+
+render :: Int -> Str
+render x = show x

@@ -1,0 +1,38 @@
+-- Regression: optional-widened @catch in a RUST pool.
+--
+-- @catch strips the Err row from its fallible; when the residual row is empty
+-- the whole expression is plain-typed and (for catchListDoFbOpt) sits under a
+-- CoerceToOptional. The native Reduce peephole must cancel the spurious force
+-- THROUGH that coerce; and Rust's `lcCoerceOptional = Some(..)` must wrap the
+-- eager value, not a thunk. The decisive case is `catchListDoFbOpt ""` -> []
+-- with exit:0.
+--
+-- Parallel to intrinsic-catch-do-fallback-{cpp,py}: the fallible is a Rust
+-- source function that natively raises (a MorlocThrow panic caught by @catch).
+
+module main
+  ( catchListDoFb
+  , catchListDoFbOpt
+  , catchLetDoFb
+  )
+
+import root
+
+type Rust => Int = "i64"
+type Rust => Str = "String"
+type Rust => (List a) = "Vec<$1>" a
+
+source Rust from "helper.rs" ("rust_maybe_list")
+
+rust_maybe_list :: Str -> <Err> [Int]
+
+catchListDoFb :: Str -> <IO> [Int]
+catchListDoFb s = @catch (rust_maybe_list s) (do [])
+
+catchListDoFbOpt :: Str -> <IO> ?[Int]
+catchListDoFbOpt s = @catch (rust_maybe_list s) (do [])
+
+catchLetDoFb :: Str -> <IO> [Int]
+catchLetDoFb s = @catch (rust_maybe_list s) (do
+    let x = 7
+    [x, x])

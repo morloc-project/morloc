@@ -111,6 +111,11 @@ data DState = DState
   , dsWarnings :: ![Text] -- accumulated docstring warnings, drained by the caller
   , dsModuleDoc :: ![Text] -- module-level description lines
   , dsModuleEpilogues :: ![[Text]] -- epilogue blocks for top-level help
+  , dsStreamElems :: !(Map.Map EVar TypeU)
+    -- ^ For each command whose body reaches `@collect`, the batch type
+    -- it writes to standard output. Such a command returns `()` at the
+    -- morloc level, so nothing downstream can recover what a caller
+    -- actually receives from the signature alone.
   }
   deriving (Show)
 
@@ -216,10 +221,10 @@ captureDeclDocs pos name = do
   vars <- processArgDocLinesD pos docs
   case docWith vars of
     (s : _) -> dfail pos . T.unpack $
-      "`with:` requires an explicit signature above the definition. "
+      "`@with` requires an explicit signature above the definition. "
       <> "Add a `" <> unEVar name <> " :: <type>` line and move the "
-      <> "`--' with:` atoms to that signature's docstring. "
-      <> "Offending atom: `with: " <> renderWithSpec s <> "`."
+      <> "`--' @with` atoms to that signature's docstring. "
+      <> "Offending atom: `@with " <> renderWithSpec s <> "`."
     [] -> return ()
   let descLines = docLines vars
   case descLines of
@@ -340,10 +345,10 @@ parseSourceAtom raw = case T.strip raw of
   "inline" -> Right SourceInline
   "file" -> Right SourceFile
   s | T.isInfixOf "|" s ->
-        Left $ "OR-chains in `source:` (e.g. `file|inline`) are no longer"
+        Left $ "OR-chains in `@source` (e.g. `file|inline`) are no longer"
             <> " supported; pick a single value (inline or file)."
     | s == "auto" ->
-        Left $ "`source: auto` is not a writable value; auto is the implicit"
+        Left $ "`@source auto` is not a writable value; auto is the implicit"
             <> " default. Either drop the field or pick `inline` / `file`."
     | otherwise ->
         Left $ "unknown source value '" <> s
@@ -358,10 +363,10 @@ parseFormAtom raw = case T.strip raw of
   "bytes-only" -> Right FormBytesOnly
   "list" -> Right FormList
   s | T.isInfixOf "|" s ->
-        Left $ "OR-chains in `form:` (e.g. `packet|bytes`) are no longer"
+        Left $ "OR-chains in `@form` (e.g. `packet|bytes`) are no longer"
             <> " supported; pick a single value."
     | s == "auto" ->
-        Left $ "`form: auto` is not a writable value; auto is the implicit"
+        Left $ "`@form auto` is not a writable value; auto is the implicit"
             <> " default. Either drop the field or pick `list`, `bytes`,"
             <> " `bytes-only`, or `packet`."
     | otherwise ->
@@ -454,7 +459,7 @@ parseWithFlagSpec txt = case parseCliOpt txt of
     | isLongFlagName (T.unpack l) -> Right (Just c, l)
     | otherwise -> Left (longFlagInvalidMsg (T.unpack l))
   CliOptOk (CliOptShort _) -> Left
-    $ "short-only flag spec is not allowed on `with:`; every terminal "
+    $ "short-only flag spec is not allowed on `@with`; every terminal "
     <> "action must declare a long form (e.g. `-l/--lines=fmt_lines` "
     <> "or `--lines=fmt_lines`). The long form is what `--help` shows "
     <> "as a stable descriptor."
@@ -477,14 +482,14 @@ isLongFlagName (h : rest) =
 shortCharInvalidMsg :: Char -> Text
 shortCharInvalidMsg c =
   "invalid short option character '" <> T.singleton c
-  <> "' in `with:` spec. Short options must be a single ASCII letter "
+  <> "' in `@with` spec. Short options must be a single ASCII letter "
   <> "(a-z, A-Z); digits are forbidden because they collide with "
   <> "negative-number argv values."
 
 longFlagInvalidMsg :: String -> Text
 longFlagInvalidMsg rest =
   "invalid long flag name `--" <> T.pack rest
-  <> "` in `with:` spec. Long names must be lowercase-kebab: start "
+  <> "` in `@with` spec. Long names must be lowercase-kebab: start "
   <> "with a lowercase letter, then any of [a-z0-9-]."
 
 -- | Parse a check kind + value. Only `path` is recognized in v1.
@@ -517,8 +522,7 @@ unknownDirectiveWarning :: [Text] -> Text -> Text
 unknownDirectiveWarning knownKeys k =
   "warning: unknown docstring directive '" <> k <> "'"
   <> " (recognized: " <> T.intercalate ", " knownKeys <> "); "
-  <> "if this was intended as prose, prefix the line with '\\' to suppress this warning (e.g. '\\"
-  <> k <> ":')"
+  <> "if this line was meant as prose, prefix its content with '\\' to suppress this warning"
 
 -- | Parse a single CLI-option directive value into the
 -- [`ArgDocVars`] slot, recording an error when the value matched a
@@ -564,9 +568,9 @@ processArgDocLines = foldl step ([], [], defaultValue)
               warn =
                 if parsed
                   then
-                    [ "warning: docstring directive `literal: true` is deprecated; "
-                        <> "use `source: inline` instead. Both work today, but "
-                        <> "`literal: true` will be removed in a future release."
+                    [ "warning: docstring directive `@literal` is deprecated; "
+                        <> "use `@source inline` instead. Both work today, but "
+                        <> "`@literal` will be removed in a future release."
                     ]
                   else []
            in (errs, ws <> warn, d {docLiteral = Just parsed})
@@ -587,19 +591,19 @@ processArgDocLines = foldl step ([], [], defaultValue)
         ["return"] -> (errs, ws, d {docReturn = Just v})
         ["source"] -> case parseSourceAtom v of
           Right a -> (errs, ws, d {docSource = Just a})
-          Left e  -> (errs <> ["in `source: " <> v <> "`: " <> e], ws, d)
+          Left e  -> (errs <> ["in `@source " <> v <> "`: " <> e], ws, d)
         ["form"] -> case parseFormAtom v of
           Right a -> (errs, ws, d {docForm = Just a})
-          Left e  -> (errs <> ["in `form: " <> v <> "`: " <> e], ws, d)
+          Left e  -> (errs <> ["in `@form " <> v <> "`: " <> e], ws, d)
         ["check", kind] -> case parseCheck kind v of
           Right c -> (errs, ws, d {docChecks = docChecks d <> [c]})
           Left e  -> (errs <> ["in `check." <> kind <> ": " <> v <> "`: " <> e], ws, d)
         ["list", "source"] -> case parseSourceAtom v of
           Right a -> (errs, ws, d {docListSource = Just a})
-          Left e  -> (errs <> ["in `list.source: " <> v <> "`: " <> e], ws, d)
+          Left e  -> (errs <> ["in `@list.source " <> v <> "`: " <> e], ws, d)
         ["list", "form"] -> case parseFormAtom v of
           Right a -> (errs, ws, d {docListForm = Just a})
-          Left e  -> (errs <> ["in `list.form: " <> v <> "`: " <> e], ws, d)
+          Left e  -> (errs <> ["in `@list.form " <> v <> "`: " <> e], ws, d)
         ["list", "check", kind] -> case parseCheck kind v of
           Right c -> (errs, ws, d {docListChecks = docListChecks d <> [c]})
           Left e  -> (errs <> ["in `list.check." <> kind <> ": " <> v <> "`: " <> e], ws, d)
@@ -609,7 +613,7 @@ processArgDocLines = foldl step ([], [], defaultValue)
         ["render", "buffer"] -> (errs <> [retiredBufferMsg "render"], ws, d)
         ["mime"] -> case parseMediaType v of
           Right mt -> (errs, ws, d {docMime = Just mt})
-          Left e   -> (errs <> ["in `mime: " <> v <> "`: " <> e], ws, d)
+          Left e   -> (errs <> ["in `@mime " <> v <> "`: " <> e], ws, d)
         _ ->
           let w = unknownDirectiveWarning argDocDirectiveKeys k
               desc = k <> ": " <> v
@@ -661,23 +665,55 @@ processModuleDocLines = finalize . foldl step ([], Nothing, [])
             Just epi -> epis <> [epi]
       in ([], desc, epis')
 
-applySourceDocs :: [Text] -> Source -> ([Text], Source)
-applySourceDocs lns src = foldl step ([], src) lns
+-- | Apply `source`-level docstring directives, returning (errors, warnings,
+-- source). Errors are fatal and reported by 'applySourceDocsD'.
+--
+-- `rsize` values are validated here rather than silently coerced. An
+-- unparseable word used to be dropped by 'mapMaybe', so a typo
+-- (@rsize: to@) left the directive empty and the function was called flat --
+-- silently producing the very calling convention the directive existed to
+-- override. A non-positive value parsed fine and then emitted an empty call
+-- group, which failed at run time inside the pool. Both are rejected at the
+-- declaration now, where the source position is available.
+applySourceDocs :: [Text] -> Source -> ([Text], [Text], Source)
+applySourceDocs lns src = foldl step ([], [], src) lns
   where
-    step (ws, s) line = case parseDocKV line of
+    step (errs, ws, s) line = case parseDocKV line of
       DocDesc v
-        | T.null v -> (ws, s)
-        | otherwise -> (ws, s {srcNote = srcNote s <> [v]})
+        | T.null v -> (errs, ws, s)
+        | otherwise -> (errs, ws, s {srcNote = srcNote s <> [v]})
       DocDirective k v -> case k of
-        "name" -> (ws, s {srcName = SrcName v})
-        "rsize" -> (ws, s {srcRsize = mapMaybe readMaybeInt (T.words v)})
+        "name" -> (errs, ws, s {srcName = SrcName v})
+        "rsize" -> case parseRsize v of
+          Left e -> (errs <> [e], ws, s)
+          Right ns -> (errs, ws, s {srcRsize = ns})
         _ ->
           let w = unknownDirectiveWarning sourceDocDirectiveKeys k
               desc = k <> ": " <> v
-           in (ws <> [w], s {srcNote = srcNote s <> [desc]})
-    readMaybeInt t = case reads (T.unpack t) of
-      [(n, "")] -> Just n
-      _ -> Nothing
+           in (errs, ws <> [w], s {srcNote = srcNote s <> [desc]})
+
+-- | Parse an `rsize` value: one or more positive integers separated by
+-- whitespace. Each is the size of a leading call group; the final group is
+-- implicit, which is why a group of zero arguments is meaningless.
+parseRsize :: Text -> Either Text [Int]
+parseRsize v =
+  case T.words v of
+    [] -> Left "rsize: expected one or more positive integers, got nothing"
+    ws -> mapM parseOne ws
+  where
+    parseOne w = case reads (T.unpack w) :: [(Int, String)] of
+      [(n, "")]
+        | n >= 1 -> Right n
+        | otherwise ->
+            Left $
+              "rsize: call-group sizes must be at least 1, got '" <> w
+                <> "'. Each value is the number of arguments in one call; a"
+                <> " group of zero arguments would emit an empty call."
+      _ ->
+        Left $
+          "rsize: expected a positive integer, got '" <> w
+            <> "'. The value is a whitespace-separated list of call-group"
+            <> " sizes, e.g. `@rsize 1` or `@rsize 1 1`."
 
 -- | D-monad wrapper: parse argument docstring lines, accumulate
 -- warnings into 'dsWarnings' for the caller to drain, and fail
@@ -705,28 +741,28 @@ validateSigWith pos specs argDocs = do
       argLongSet = Set.fromList argLongs
       argShortSet = Set.fromList argShorts
   reportIfJust pos (firstDuplicate longs) $ \l ->
-    "duplicate `with:` long name `--" <> l
+    "duplicate `@with` long name `--" <> l
     <> "` in this signature. Each terminal action needs a unique long form."
   reportIfJust pos (firstDuplicate shorts) $ \c ->
-    "duplicate `with:` short name `-" <> T.singleton c
+    "duplicate `@with` short name `-" <> T.singleton c
     <> "` in this signature. Each terminal action needs a unique short form."
   reportIfAny pos [l | l <- longs, l == "help"] $ \l ->
-    "`with:` long name `--" <> l
+    "`@with` long name `--" <> l
     <> "` collides with a reserved command-scope flag. `--help` is "
     <> "always available; pick a different long name."
   reportIfAny pos [c | c <- shorts, c == 'h'] $ \c ->
-    "`with:` short name `-" <> T.singleton c
+    "`@with` short name `-" <> T.singleton c
     <> "` collides with a reserved command-scope flag. `-h` is always "
     <> "available; pick a different short letter."
   reportIfAny pos [l | l <- longs, Set.member l argLongSet] $ \l ->
-    "`with:` long name `--" <> l
+    "`@with` long name `--" <> l
     <> "` already appears on one of this signature's own argument "
-    <> "declarations (via `arg:` / `true:` / `false:`). Pick a different "
+    <> "declarations (via `@arg` / `@true` / `@false`). Pick a different "
     <> "long name for the terminal action."
   reportIfAny pos [c | c <- shorts, Set.member c argShortSet] $ \c ->
-    "`with:` short name `-" <> T.singleton c
+    "`@with` short name `-" <> T.singleton c
     <> "` already appears on one of this signature's own argument "
-    <> "declarations (via `arg:` / `true:` / `false:`). Pick a different "
+    <> "declarations (via `@arg` / `@true` / `@false`). Pick a different "
     <> "short letter for the terminal action."
 
 reportIfAny :: Pos -> [a] -> (a -> Text) -> D ()
@@ -763,14 +799,34 @@ firstDuplicate = go Set.empty
 -- | Reject any `with:` atom that appears somewhere other than a
 -- signature preamble. Used for per-argument docstrings, record-field
 -- docstrings, type-alias docstrings, etc. `with:` is command-only.
+-- | Collect the docstrings attached to a named-type declaration: the block
+-- above the declaration keyword, and the block above each field. Both record
+-- spellings go through here, so `record X where` and `record X = X { .. }`
+-- generate the same documentation.
+namTypeDocs :: Pos -> [(Located, Key, TypeU)] -> D ArgDoc
+namTypeDocs declPos locEntries = do
+  recDocs <- lookupDocsAt declPos
+  recDocVars <- processArgDocLinesD declPos recDocs
+  rejectWithHere declPos "a record declaration" recDocVars
+  fieldDocs <-
+    mapM
+      (\(loc, _, _) -> do
+          let p = locPos loc
+          dl <- lookupDocsAt p
+          fieldDoc <- processArgDocLinesD p dl
+          rejectWithHere p "a record field" fieldDoc
+          return fieldDoc)
+      locEntries
+  return (ArgDocRec recDocVars (zip [k | (_, k, _) <- locEntries] fieldDocs))
+
 rejectWithHere :: Pos -> Text -> ArgDocVars -> D ()
 rejectWithHere pos ctx v =
   case docWith v of
     [] -> return ()
     (s : _) -> dfail pos . T.unpack $
-      "`with:` is not allowed on " <> ctx
+      "`@with` is not allowed on " <> ctx
       <> "; it may only appear in a signature preamble (the `--'` "
-      <> "lines directly above `name ::`). Offending atom: `with: "
+      <> "lines directly above `name ::`). Offending atom: `@with "
       <> renderWithSpec s <> "`."
 
 renderWithSpec :: WithSpec -> Text
@@ -782,11 +838,13 @@ renderWithSpec (WithSpec mShort l (EV t) _ _ _ _) =
       Nothing -> "--" <> l
 
 -- | D-monad wrapper: apply `source` docstring lines and accumulate warnings.
-applySourceDocsD :: [Text] -> Source -> D Source
-applySourceDocsD ls src = do
-  let (ws, s) = applySourceDocs ls src
+applySourceDocsD :: Pos -> [Text] -> Source -> D Source
+applySourceDocsD pos ls src = do
+  let (errs, ws, s) = applySourceDocs ls src
   dwarn ws
-  return s
+  case errs of
+    [] -> return s
+    (e : _) -> dfail pos (T.unpack e)
 
 --------------------------------------------------------------------
 -- Type helpers
@@ -2508,24 +2566,12 @@ desugarTypeDef sp (CstNamTypeWhere nt (v, vs) locEntries) = do
   -- @record Cpp => Foo = "..."@ form). An explicit @type SpecialPerson
   -- = Person@ wrapped around a record is still TypedefAlias and would
   -- still trip Invariant 1 if also given a per-language form.
-  recDocs <- lookupDocsAt (startPos sp)
-  recDocVars <- processArgDocLinesD (startPos sp) recDocs
-  rejectWithHere (startPos sp) "a record declaration" recDocVars
-  fieldDocs <-
-    mapM
-      (\(loc, _, _) -> do
-          let p = locPos loc
-          dl <- lookupDocsAt p
-          fieldDoc <- processArgDocLinesD p dl
-          rejectWithHere p "a record field" fieldDoc
-          return fieldDoc)
-      locEntries
+  doc <- namTypeDocs (startPos sp) locEntries
   let entries = [(k, ty) | (_, k, ty) <- locEntries]
-      doc = ArgDocRec recDocVars (zip (map fst entries) fieldDocs)
       t = NamU nt v (map (either (VarU . fst) id) vs) entries
   e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t doc TypedefNewtype))
   return [e]
-desugarTypeDef sp (CstNamTypeLegacy maybeLangTok nt (v, vs) (conName, isTerminal, conArgs) entries) = do
+desugarTypeDef sp (CstNamTypeLegacy maybeLangTok nt (v, vs) (conName, isTerminal, conArgs) locEntries) = do
   -- Legacy form covers both general @record Foo = Constructor ...@
   -- (lang=Nothing, behaves like CstNamTypeWhere -> TypedefNewtype) and
   -- per-language @record Cpp => Foo = "struct"@ (lang=Just, feeds
@@ -2536,7 +2582,9 @@ desugarTypeDef sp (CstNamTypeLegacy maybeLangTok nt (v, vs) (conName, isTerminal
     Just tok -> do
       l <- parseLang tok
       return (Just (l, isTerminal))
-  let con = if T.null conName then v else TV conName
+  doc <- namTypeDocs (startPos sp) locEntries
+  let entries = [(k, ty) | (_, k, ty) <- locEntries]
+      con = if T.null conName then v else TV conName
       -- If the user supplied explicit args after the constructor string
       -- (e.g. `"container_t<$1>" a`, parallel to the type-alias
       -- concrete_rhs syntax), use those as the body's positional args.
@@ -2547,7 +2595,6 @@ desugarTypeDef sp (CstNamTypeLegacy maybeLangTok nt (v, vs) (conName, isTerminal
                  then map (either (VarU . fst) id) vs
                  else conArgs
       t = NamU nt con bodyTs entries
-      doc = ArgDocRec defaultValue [(k, defaultValue) | (k, _) <- entries]
       kind = case maybeLangTok of
         Nothing -> TypedefNewtype  -- general record decl
         Just _  -> TypedefAlias     -- per-language native form (cscope)
@@ -2621,7 +2668,7 @@ mkNewSource sp lang path (isInline, isBacktick, name, nameTok) = do
           , srcOperator = isOp
           , srcBacktick = isBacktick
           }
-  src <- applySourceDocsD docLines' baseSrc
+  src <- applySourceDocsD (startPos sp) docLines' baseSrc
   freshExprSpan sp (SrcE src)
 
 isOperatorName :: Text -> Bool
@@ -2667,6 +2714,7 @@ desugarProgram isImplicitMain cstNodes = do
 injectTerminalActionsWithSigs :: Map.Map EVar TypeU -> ExprI -> D ExprI
 injectTerminalActionsWithSigs importedSigs (ExprI i (ModE mv body)) = do
   rejectReservedMlcpPrefix body
+  recordStreamElems importedSigs body
   body' <- expandWithBindings importedSigs body
   return (ExprI i (ModE mv body'))
 injectTerminalActionsWithSigs _ e = return e
@@ -2694,7 +2742,7 @@ rejectReservedMlcpPrefix body =
         "identifier `" <> unEVar ev
         <> "` uses the reserved `mlcp_` prefix. That prefix is "
         <> "compiler-owned -- it names the internal entry points "
-        <> "synthesized from `--' with:` docstring atoms. Rename "
+        <> "synthesized from `--' @with` docstring atoms. Rename "
         <> "the identifier so it does not start with `mlcp_`."
     Nothing -> return ()
   where
@@ -2706,6 +2754,27 @@ rejectReservedMlcpPrefix body =
     pick e@(ExprI _ (AssE n _ _)) = [(e, n)]
     pick e@(ExprI _ (SrcE src)) = [(e, srcAlias src)]
     pick _ = []
+
+-- | Record the batch type of every streaming command in the module.
+--
+-- Runs over the whole module body rather than only over commands
+-- carrying a `--' with:` directive, because a bare `@collect` command
+-- with no output actions still writes a stream to standard output and
+-- still has to be able to say what it writes. Commands whose producer
+-- has no reachable signature are simply absent from the map.
+recordStreamElems :: Map.Map EVar TypeU -> [ExprI] -> D ()
+recordStreamElems importedSigs body = do
+  let localSigs = Map.fromList
+        [ (n, etype et) | ExprI _ (SigE (Signature n _ et)) <- body ]
+      sigs = Map.union localSigs importedSigs
+      found = Map.fromList
+        [ (n, t)
+        | e@(ExprI _ (AssE n _ _)) <- body
+        , containsCollect e
+        , Just t <- [collectStreamType sigs e]
+        ]
+  State.modify $ \st ->
+    st { dsStreamElems = Map.union found (dsStreamElems st) }
 
 expandWithBindings :: Map.Map EVar TypeU -> [ExprI] -> D [ExprI]
 expandWithBindings importedSigs body =
@@ -2749,7 +2818,7 @@ checkMangledCollisions body plan = do
     Just ((parentA, specA, mangled, _), (parentB, specB, _, sigB)) -> do
       sp <- posOfExprI sigB
       dfail (startPos sp) . T.unpack $
-        "two `--' with:` declarations produce the same synthesized "
+        "two `--' @with` declarations produce the same synthesized "
         <> "internal name `" <> unEVar mangled <> "`: "
         <> unEVar parentA <> " " <> renderWithSpec specA
         <> " and " <> unEVar parentB <> " " <> renderWithSpec specB
@@ -2875,6 +2944,71 @@ containsCollect (ExprI _ e) = case e of
   BopE l _ _ r -> containsCollect l || containsCollect r
   _ -> False
 
+-- | The batch type a `@collect` command writes to standard output.
+--
+-- A streaming command returns `()` at the morloc level: its data leaves
+-- through a sink rather than the return slot, so nothing downstream can
+-- recover what a caller receives from the signature alone. The
+-- producer's declared type can. `@collect` takes a function of exactly
+-- one parameter -- the sink -- so however many arguments were already
+-- applied to the producer, the sink is the last parameter of its full
+-- signature, and the sink's own parameter is the batch that reaches
+-- standard output.
+--
+-- Returns Nothing when the producer is not a named term with a
+-- signature (an inline lambda, say). The caller must then report that
+-- it does not know rather than claim the function's `()`.
+collectStreamType :: Map.Map EVar TypeU -> ExprI -> Maybe TypeU
+collectStreamType sigs body = do
+  arg <- findCollectArg body
+  producer <- headVarOf arg
+  sig <- Map.lookup producer sigs
+  sink <- lastParamOf (peelForall sig)
+  firstParamOf (peelForall sink)
+  where
+    -- The expression `@collect` was applied to, if the body reaches one.
+    findCollectArg :: ExprI -> Maybe ExprI
+    findCollectArg (ExprI _ e) = case e of
+      IntrinsicE IntrCollect (a : _) -> Just a
+      ModE _ xs -> firstSome (map findCollectArg xs)
+      AssE _ b ws -> firstSome (map findCollectArg (b : ws))
+      IstE _ _ b -> firstSome (map findCollectArg b)
+      LstE es -> firstSome (map findCollectArg es)
+      TupE es -> firstSome (map findCollectArg es)
+      NamE kes -> firstSome (map (findCollectArg . snd) kes)
+      AppE f xs -> firstSome (map findCollectArg (f : xs))
+      LamE _ b -> findCollectArg b
+      AnnE b _ -> findCollectArg b
+      LetE bs b -> firstSome (map (findCollectArg . snd) bs ++ [findCollectArg b])
+      IfE c t f -> firstSome [findCollectArg c, findCollectArg t, findCollectArg f]
+      DoBlockE b -> findCollectArg b
+      EvalE b -> findCollectArg b
+      IntrinsicE _ es -> firstSome (map findCollectArg es)
+      ParenE b -> findCollectArg b
+      BopE l _ _ r -> firstSome [findCollectArg l, findCollectArg r]
+      _ -> Nothing
+
+    -- The term at the head of a (possibly partial) application.
+    headVarOf :: ExprI -> Maybe EVar
+    headVarOf (ExprI _ e) = case e of
+      VarE _ v -> Just v
+      AppE f _ -> headVarOf f
+      ParenE b -> headVarOf b
+      AnnE b _ -> headVarOf b
+      _ -> Nothing
+
+    peelForall (ForallU _ t) = peelForall t
+    peelForall (EffectU _ t) = peelForall t
+    peelForall t = t
+
+    lastParamOf (FunU ts _) | not (null ts) = Just (last ts)
+    lastParamOf _ = Nothing
+
+    firstParamOf (FunU (t : _) _) = Just t
+    firstParamOf _ = Nothing
+
+    firstSome = foldr (\x acc -> maybe acc Just x) Nothing
+
 -- | Synthesize a `--' with:` flag command for a streaming (@collect) parent.
 -- Reuses the parent's body (re-indexed with fresh ids to avoid annotation
 -- collisions), rewriting every @collect node per flag:
@@ -2896,7 +3030,13 @@ synthStreamingBinding sp parentName assI sigMap (WithSpec _ long tTerm render st
       --             (nexus formats `[b]`); `render` handler `... [a] -> Str` ->
       --             sink [handler .. c] (one Str per batch, emitted verbatim).
       -- `@offset` in argSrcs binds `off <- @tell` and places it in the arg list.
-      withParentBody $ \bodyExpr wheres -> do
+      do
+        -- The synthesized entry returns `()` like its parent, but what it
+        -- writes per batch is the handler's own result. Record it here,
+        -- where the handler's signature is in scope, so the entry can
+        -- report what a caller receives rather than the `()` it returns.
+        recordHandlerStream (mangleTerminalName parentName long)
+        withParentBody $ \bodyExpr wheres -> do
           bodyExpr' <- composeHandlerIntoCollect render parentParams argSrcs tTerm bodyExpr
           wheres' <- mapM (composeHandlerIntoCollect render parentParams argSrcs tTerm) wheres
           return (bodyExpr', wheres')
@@ -2912,6 +3052,23 @@ synthStreamingBinding sp parentName assI sigMap (WithSpec _ long tTerm render st
           wheres' <- mapM (composeWholeIntoCollect useIFile parentParams argSrcs tTerm) wheres
           return (bodyExpr', wheres')
   where
+    -- The handler's declared return type is what reaches standard output
+    -- once per batch. Absent when the handler has no reachable
+    -- signature, in which case the entry says nothing rather than
+    -- claiming its `()`.
+    recordHandlerStream :: EVar -> D ()
+    recordHandlerStream name = case returnOf =<< Map.lookup tTerm sigMap of
+      Nothing -> return ()
+      Just rt -> State.modify $ \st ->
+        st { dsStreamElems = Map.insert name rt (dsStreamElems st) }
+      where
+        returnOf t = case peel t of
+          FunU _ r -> Just (peel r)
+          _ -> Nothing
+        peel (ForallU _ t) = peel t
+        peel (EffectU _ t) = peel t
+        peel t = t
+
     -- the parent's top-level positional parameters (in scope at every @collect
     -- site in the duplicated body); `$N` references index into these.
     parentParams = case assI of
@@ -2922,7 +3079,7 @@ synthStreamingBinding sp parentName assI sigMap (WithSpec _ long tTerm render st
         (bodyExpr', wheres') <- k bodyExpr wheres
         bodyExpr'' <- pinParentArgTypes bodyExpr'
         freshExprSpan sp (AssE (mangleTerminalName parentName long) bodyExpr'' wheres')
-      _ -> dfail (startPos sp) "internal: streaming `with:` parent is not an AssE"
+      _ -> dfail (startPos sp) "internal: streaming `@with` parent is not an AssE"
 
     -- The synthesized command duplicates the parent body rather than calling the
     -- parent (the @collect sink must be rewritten in place), so it carries no

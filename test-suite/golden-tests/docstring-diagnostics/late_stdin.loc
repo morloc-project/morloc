@@ -1,0 +1,13 @@
+-- A positional after the `@stdin` positional. Same missing-subject
+-- defect as two_stdin.loc.
+module lateStdin (f)
+
+import root-py
+
+--' Stdin then another positional
+f ::
+  --' @stdin
+  Str ->
+  Str ->
+  <IO, Err> ()
+f _ _ = @throw "unused"

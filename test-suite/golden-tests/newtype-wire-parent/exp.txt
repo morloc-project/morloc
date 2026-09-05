@@ -1,0 +1,24 @@
+--- nameRound ---
+"HI"
+--- nameCross ---
+2
+--- countRound ---
+42
+--- aliasRound ---
+"HI"
+--- taggedRound ---
+"HI"
+--- stackRev ---
+[3,2,1]
+--- stackCross ---
+6
+--- bufRev ---
+[3,2,1]
+--- bufCross ---
+6
+--- pairSwap ---
+[7,"a"]
+--- pathSuffix ---
+".txt"
+--- bytesDecode ---
+"hi"

@@ -31,30 +31,30 @@ effect Err
 
 binIntLvl0 :: Int -> Str -> <IO, Err> Int
 binIntLvl0 x path = do
-  @save 0 x path
+  @save 0 path x
   @load path
 
 binIntLvl1 :: Int -> Str -> <IO, Err> Int
 binIntLvl1 x path = do
-  @save 1 x path
+  @save 1 path x
   @load path
 
 binIntLvl5 :: Int -> Str -> <IO, Err> Int
 binIntLvl5 x path = do
-  @save 5 x path
+  @save 5 path x
   @load path
 
 binIntLvl9 :: Int -> Str -> <IO, Err> Int
 binIntLvl9 x path = do
-  @save 9 x path
+  @save 9 path x
   @load path
 
 binListLvl0 :: [Int] -> Str -> <IO, Err> [Int]
 binListLvl0 xs path = do
-  @save 0 xs path
+  @save 0 path xs
   @load path
 
 binListLvl5 :: [Int] -> Str -> <IO, Err> [Int]
 binListLvl5 xs path = do
-  @save 5 xs path
+  @save 5 path xs
   @load path

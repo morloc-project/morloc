@@ -1,0 +1,6 @@
+OK: unknown argument directive warned
+OK: near-miss argument directive warned
+OK: unknown source directive warned
+OK: escaped prose silent
+[3,6]
+7

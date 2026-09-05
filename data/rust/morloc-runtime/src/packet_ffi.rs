@@ -2248,8 +2248,9 @@ mod auto_routing_tests {
     /// header (see `PacketHeader` in `packet.rs`).
     const SOURCE_OFFSET: usize = 13;
 
-    fn ensure_shm() {
-        crate::init_test_shm();
+    #[must_use]
+    fn ensure_shm() -> std::sync::RwLockReadGuard<'static, ()> {
+        crate::init_test_shm()
     }
 
     /// Build a flat blob laid out as `Array<u8>` with `n` data bytes,
@@ -2298,7 +2299,7 @@ mod auto_routing_tests {
     /// concurrent `config_ffi::tests` test.
     fn auto_route_source_for(n: usize) -> u8 {
         let _guard = TEST_CONFIG_LOCK.lock().unwrap();
-        ensure_shm();
+        let _shm = ensure_shm();
         let schema = byte_array_schema();
         let cs = crate::cschema::CSchema::from_rust(&schema);
         unsafe {
@@ -2393,7 +2394,7 @@ mod auto_routing_tests {
         // accumulator at the moment the walk short-circuited; we only
         // assert the predicate the routing decision uses.
         let _guard = TEST_CONFIG_LOCK.lock().unwrap();
-        ensure_shm();
+        let _shm = ensure_shm();
         let schema = byte_array_schema();
         let n = 128 * 1024;
         let (abs, _rel) = unsafe { build_byte_array_voidstar(n) };
@@ -2420,7 +2421,7 @@ mod auto_routing_tests {
         // When the bound exceeds the actual size, bounded must match
         // the unbounded inner -- no short-circuit fires.
         let _guard = TEST_CONFIG_LOCK.lock().unwrap();
-        ensure_shm();
+        let _shm = ensure_shm();
         let schema = byte_array_schema();
         let n = 256usize;
         let (abs, _rel) = unsafe { build_byte_array_voidstar(n) };

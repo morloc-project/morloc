@@ -1,0 +1,3 @@
+Same effect-boundary question as do-block-paren-arg: passes a do-block as an
+argument to a C++ function (`idcpp (do ...)`), rejected with
+`<Err,IO> [Int] <: [Int]`. Blocked on the same decision.

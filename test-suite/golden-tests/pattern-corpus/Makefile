@@ -52,3 +52,4 @@ all:
 clean:
 	rm -rf prog pools __pycache__ *.err
 	rm -f ref-*.mpk orig-*.packet obs-*.mpk
+	rm -rf *-build *build.tmp*

@@ -6,4 +6,5 @@ all:
 	./nexus matmul '[[2,2],[1.0,2.0,3.0,4.0]]' '[[2,2],[5.0,6.0,7.0,8.0]]' >> obs.txt 2>> obs.err
 
 clean:
-	rm -rf nexus pools *-build *.err
+	rm -rf nexus pools *.err
+	rm -rf *-build *build.tmp*

@@ -14,3 +14,4 @@ all:
 
 clean:
 	rm -rf nexus pools input_open.csv input_open.json input_sniff.csv input_poly.json *err __pycache__
+	rm -rf *-build *build.tmp*

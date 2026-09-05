@@ -1436,7 +1436,8 @@ mod flat_writer_tests {
     use crate::schema::parse_schema;
     use crate::json::read_json_with_schema;
 
-    fn setup() { crate::init_test_shm(); }
+    #[must_use]
+    fn setup() -> std::sync::RwLockReadGuard<'static, ()> { crate::init_test_shm() }
 
     // Build a voidstar from JSON, then verify both flatteners produce
     // equivalent output:
@@ -1486,7 +1487,7 @@ mod flat_writer_tests {
 
     #[test]
     fn primitives() {
-        setup();
+        let _shm = setup();
         assert_byte_equal("42", "i4");
         assert_byte_equal("-1", "i8");
         assert_byte_equal("3.14", "f8");
@@ -1497,7 +1498,7 @@ mod flat_writer_tests {
 
     #[test]
     fn strings() {
-        setup();
+        let _shm = setup();
         assert_byte_equal("\"\"", "s");
         assert_byte_equal("\"hello\"", "s");
         assert_byte_equal("\"a slightly longer string here\"", "s");
@@ -1505,7 +1506,7 @@ mod flat_writer_tests {
 
     #[test]
     fn array_of_primitive_fixed() {
-        setup();
+        let _shm = setup();
         // Empty array
         assert_byte_equal("[]", "ai4");
         // Small array
@@ -1518,7 +1519,7 @@ mod flat_writer_tests {
 
     #[test]
     fn array_of_string() {
-        setup();
+        let _shm = setup();
         assert_byte_equal("[\"a\",\"bb\",\"ccc\"]", "as");
         assert_byte_equal("[]", "as");
         assert_byte_equal("[\"\"]", "as");
@@ -1531,21 +1532,21 @@ mod flat_writer_tests {
 
     #[test]
     fn nested_array() {
-        setup();
+        let _shm = setup();
         assert_byte_equal("[[1,2,3],[4,5],[]]", "aai4");
         assert_byte_equal("[[\"a\",\"b\"],[\"cd\"],[]]", "aas");
     }
 
     #[test]
     fn tuple_fixed_width() {
-        setup();
+        let _shm = setup();
         assert_byte_equal("[1, 2.5]", "t2i4f8");
         assert_byte_equal("[1, 2, 3]", "t3i4i4i4");
     }
 
     #[test]
     fn tuple_with_variable_fields() {
-        setup();
+        let _shm = setup();
         assert_byte_equal("[1, \"hello\"]", "t2i4s");
         assert_byte_equal("[\"a\", \"bb\", \"ccc\"]", "t3sss");
         assert_byte_equal("[\"a\", 42, \"bb\"]", "t3si4s");
@@ -1556,7 +1557,7 @@ mod flat_writer_tests {
 
     #[test]
     fn array_of_tuple_of_strings() {
-        setup();
+        let _shm = setup();
         // Array of small fixed-arity string tuples.
         assert_byte_equal(
             "[[\"a\",\"b\",\"c\"], [\"dd\",\"ee\",\"ff\"], [\"\",\"\",\"\"]]",
@@ -1566,7 +1567,7 @@ mod flat_writer_tests {
 
     #[test]
     fn optional_some_and_none() {
-        setup();
+        let _shm = setup();
         assert_byte_equal("42", "?i4");
         assert_byte_equal("null", "?i4");
         assert_byte_equal("\"hello\"", "?s");
@@ -1578,7 +1579,7 @@ mod flat_writer_tests {
 
     #[test]
     fn tuple_with_optional_field() {
-        setup();
+        let _shm = setup();
         assert_byte_equal("[42, \"hi\"]", "t2?i4s");
         assert_byte_equal("[null, \"hi\"]", "t2?i4s");
         assert_byte_equal("[42, null]", "t2?i4?s");
@@ -1586,7 +1587,7 @@ mod flat_writer_tests {
 
     #[test]
     fn empty_collections() {
-        setup();
+        let _shm = setup();
         assert_byte_equal("[]", "as");
         assert_byte_equal("[]", "aas");
         assert_byte_equal("[[],[],[]]", "aas");
@@ -1618,7 +1619,7 @@ mod flat_writer_tests {
 
     #[test]
     fn roundtrip_through_read_binary() {
-        setup();
+        let _shm = setup();
         assert_roundtrip("42", "i4");
         assert_roundtrip("3.14", "f8");
         assert_roundtrip("\"hello\"", "s");
@@ -1653,7 +1654,7 @@ mod flat_writer_tests {
         // The fast-path short-circuit: an empty xor_mask returns
         // immediately without walking. Compose two writes (producer and
         // consumer both 0) so the bytes are identical before and after.
-        setup();
+        let _shm = setup();
         let schema = parse_schema("at3sss").unwrap();
         let original = read_json_with_schema(
             "[[\"a\",\"b\",\"c\"], [\"dd\",\"ee\",\"ff\"]]", &schema,
@@ -1703,7 +1704,7 @@ mod flat_writer_tests {
 
     #[test]
     fn read_binary_with_hint_handles_layer3_emitter() {
-        setup();
+        let _shm = setup();
         for &hint in &[0u16, 1, 17, 4242, 32767] {
             assert_hint_aware_read_binary("\"hello\"", "s", hint);
             assert_hint_aware_read_binary("[1,2,3]", "ai4", hint);
@@ -1719,7 +1720,7 @@ mod flat_writer_tests {
     /// reader's wrapper.
     #[test]
     fn read_binary_no_hint_is_unchanged() {
-        setup();
+        let _shm = setup();
         let schema = parse_schema("at3sss").unwrap();
         let original = read_json_with_schema(
             "[[\"a\",\"b\",\"c\"], [\"dd\",\"ee\",\"ff\"]]", &schema,

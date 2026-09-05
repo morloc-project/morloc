@@ -1,1 +1,0 @@
-rid <- function(x) x

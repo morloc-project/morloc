@@ -54,6 +54,24 @@ const MAX_LINE_BYTES: usize = 64 * 1024 * 1024;
 /// may mean a pool process died, so we probe + recover afterward.
 const DAEMON_ERROR_INTERNAL: i32 = 5;
 
+/// Heap ceiling for a forked `morloc eval`, written as a GHC RTS argument.
+///
+/// The child is a GHC-compiled binary, and `RLIMIT_AS` is the wrong instrument
+/// for one. Its runtime reserves roughly a terabyte of address space at
+/// startup -- untouched, so it costs no memory -- and under an `RLIMIT_AS` it
+/// shrinks that reservation until it fits, which lands it just under the cap.
+/// There is then no address space left for the per-capability OS thread stacks
+/// it creates next, so the process dies before running any code with "failed to
+/// create OS thread" on any host with enough cores. `-M` bounds the live heap
+/// instead, which is the quantity actually worth bounding, and overflows
+/// cleanly and diagnosably. Mirrored in morloc-runtime's `daemon_ffi.rs`; this
+/// crate deliberately does not depend on that one.
+const EVAL_HEAP_LIMIT: &str = "-M2G";
+
+/// GHC's `EXIT_HEAPOVERFLOW`: the exit status of a child stopped by
+/// `EVAL_HEAP_LIMIT`.
+const EXIT_HEAPOVERFLOW: i32 = 251;
+
 // JSON-RPC 2.0 error codes.
 const JSONRPC_PARSE_ERROR: i32 = -32700;
 const JSONRPC_INVALID_REQUEST: i32 = -32600;
@@ -1854,16 +1872,19 @@ fn morloc_on_path() -> bool {
 fn frontend_eval(expr: &str, fe: &Frontend) -> Result<String, String> {
     let allow = fe.eval_allow.clone().unwrap_or_default();
     let mut cmd = std::process::Command::new("morloc");
-    cmd.arg("eval")
+    // Bound the child on both axes a runaway expression can exhaust
+    // (eval-sandbox bans IO, so a hang can only be compute or memory). Memory
+    // is capped by the child's own runtime, via an RTS block it strips from
+    // argv before the program sees it; CPU is capped by RLIMIT_CPU below.
+    cmd.arg("+RTS")
+        .arg(EVAL_HEAP_LIMIT)
+        .arg("-RTS")
+        .arg("eval")
         .arg("--eval-sandbox")
         .arg("--eval-allowed-modules")
         .arg(&allow)
         .arg("-e")
         .arg(expr);
-    // Bound the child's CPU time and address space so a runaway expression
-    // (eval-sandbox bans IO, so a hang can only be a compute or memory loop) is
-    // killed rather than pinning/exhausting the host. Mirrors the daemon's eval
-    // fork (RLIMIT_CPU + a 2 GiB RLIMIT_AS).
     let cpu_secs = fe.eval_timeout;
     if cpu_secs > 0 {
         use std::os::unix::process::CommandExt;
@@ -1874,13 +1895,6 @@ fn frontend_eval(expr: &str, fe: &Frontend) -> Result<String, String> {
                     rlim_max: (cpu_secs + 5) as libc::rlim_t,
                 };
                 if libc::setrlimit(libc::RLIMIT_CPU, &cpu) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                let as_lim = libc::rlimit {
-                    rlim_cur: 2 * 1024 * 1024 * 1024,
-                    rlim_max: 2 * 1024 * 1024 * 1024,
-                };
-                if libc::setrlimit(libc::RLIMIT_AS, &as_lim) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
                 Ok(())
@@ -1898,6 +1912,13 @@ fn frontend_eval(expr: &str, fe: &Frontend) -> Result<String, String> {
         })?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+    } else if out.status.code() == Some(EXIT_HEAPOVERFLOW) {
+        // The child's own advice ("use +RTS -M<size>") is useless to an HTTP
+        // caller, who cannot set it; say who imposed the ceiling instead.
+        Err(format!(
+            "eval exceeded the server's heap ceiling ({})",
+            EVAL_HEAP_LIMIT.trim_start_matches("-M")
+        ))
     } else {
         let err = String::from_utf8_lossy(&out.stderr);
         let err = err.trim();

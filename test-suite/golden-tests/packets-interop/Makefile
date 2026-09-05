@@ -29,3 +29,4 @@ all:
 
 clean:
 	rm -rf nexus pools __pycache__ data* test-data*
+	rm -rf *-build *build.tmp*

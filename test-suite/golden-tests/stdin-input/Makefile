@@ -49,3 +49,4 @@ all:
 
 clean:
 	rm -rf nexus bad_two pools __pycache__ *.err f.dat
+	rm -rf *-build *build.tmp*

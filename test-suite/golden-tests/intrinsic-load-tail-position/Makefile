@@ -10,3 +10,4 @@ all:
 clean:
 	rm -rf nexus pools __pycache__ *.err
 	rm -f /tmp/load-tail-bin.dat /tmp/load-tail-msg.dat /tmp/load-tail-json.dat
+	rm -rf *-build *build.tmp*

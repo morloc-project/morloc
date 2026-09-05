@@ -191,7 +191,7 @@ pub fn build_json_help(m: &Manifest) -> Value {
         .commands
         .iter()
         .filter(|c| !c.internal)
-        .map(command_to_json)
+        .map(|c| command_to_json(c, m))
         .collect();
     let groups: Vec<Value> = m
         .groups
@@ -206,10 +206,67 @@ pub fn build_json_help(m: &Manifest) -> Value {
         },
         "groups": groups,
         "commands": commands,
+        "types": named_type_glossary(m),
     })
 }
 
-fn command_to_json(cmd: &Command) -> Value {
+/// Every named type the visible commands mention, defined once.
+///
+/// A rendered type says `[Hit]` or `RootedTree Str Real Str`; without the
+/// definition a reader has the name and nothing else. Names are unique within a
+/// program -- the compiler rejects two definitions of one name -- so the
+/// glossary is flat and a name in any command's types resolves here.
+///
+/// Definitions are generic. A record lists its fields; a type whose wire form
+/// comes from a Packable instance gives that form in its own parameters, so one
+/// entry covers every instantiation rather than one entry per use.
+fn named_type_glossary(m: &Manifest) -> Vec<Value> {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut out: Vec<Value> = Vec::new();
+    for cmd in m.commands.iter().filter(|c| !c.internal) {
+        for t in &cmd.named_types {
+            if seen.contains(&t.name.as_str()) {
+                continue;
+            }
+            seen.push(&t.name);
+            let mut entry = serde_json::Map::new();
+            entry.insert("name".into(), json!(t.name));
+            entry.insert("kind".into(), json!(t.kind));
+            entry.insert("parameters".into(), json!(t.parameters));
+            if t.kind == "packable" {
+                entry.insert("equals".into(), json!(t.equals));
+            } else {
+                let fields: Vec<Value> = t
+                    .fields
+                    .iter()
+                    .map(|f| json!({ "key": f.key, "type": f.type_desc }))
+                    .collect();
+                entry.insert("fields".into(), json!(fields));
+            }
+            out.push(Value::Object(entry));
+        }
+    }
+    out
+}
+
+/// The `type` object for what a command puts on standard output: its
+/// stream batch when it streams, its return value otherwise.
+fn stream_or_return_type_object(cmd: &Command) -> Value {
+    match &cmd.stream {
+        Some(st) => type_object(
+            non_empty(&st.schema),
+            non_empty(&st.schema),
+            non_empty(&st.type_desc),
+        ),
+        None => type_object(
+            non_empty(&cmd.ret.schema),
+            non_empty(&cmd.ret.general_schema),
+            non_empty(&cmd.ret.type_desc),
+        ),
+    }
+}
+
+fn command_to_json(cmd: &Command, manifest: &Manifest) -> Value {
     let mut arguments: Vec<Value> = Vec::with_capacity(cmd.args.len());
     let mut pos_index = 0usize;
     for arg in &cmd.args {
@@ -219,21 +276,30 @@ fn command_to_json(cmd: &Command) -> Value {
         }
     }
 
+    // Each action flag selects a different output type, so the type
+    // belongs on the terminal rather than only on the command's own
+    // return. Resolved through the synthesized entry the flag dispatches
+    // to; a `render` terminal writes those bytes verbatim, which the
+    // sibling `render` flag already marks.
     let terminals: Vec<Value> = cmd
         .terminals
         .iter()
         .map(|t| {
+            let entry = t.resolve_entry(manifest);
+            let ty = entry.map(|c| stream_or_return_type_object(c));
             json!({
                 "short": t.short.map(|c| c.to_string()),
                 "long": t.long,
                 "description": t.description,
                 "render": t.render,
                 "default": t.default,
+                "type": ty,
             })
         })
         .collect();
 
     let ret_schema = non_empty(&cmd.ret.schema);
+    let ret_general = non_empty(&cmd.ret.general_schema);
     let ret_type = non_empty(&cmd.ret.type_desc);
 
     json!({
@@ -244,7 +310,18 @@ fn command_to_json(cmd: &Command) -> Value {
         "arguments": arguments,
         "return": {
             "description": cmd.ret.desc,
-            "type": type_object(ret_schema, ret_type),
+            // True when the command writes a stream to standard output
+            // instead of returning a value. Its morloc return type is
+            // `()`; `type` below describes what actually reaches stdout.
+            "streaming": cmd.stream.is_some(),
+            "type": match &cmd.stream {
+                Some(st) => type_object(
+                    non_empty(&st.schema),
+                    non_empty(&st.schema),
+                    non_empty(&st.type_desc),
+                ),
+                None => type_object(ret_schema, ret_general, ret_type),
+            },
         },
         "terminals": terminals,
     })
@@ -286,7 +363,11 @@ fn arg_to_json(arg: &Arg, pos_index: usize) -> Value {
                 "quoted": quoted,
                 "default": Value::Null,
                 "description": desc,
-                "type": type_object(schema.as_deref(), type_desc.as_deref()),
+                "type": type_object(
+                    schema.as_deref(),
+                    arg.general_schema_str(),
+                    type_desc.as_deref(),
+                ),
                 "named_type_kind": arg.kind_constraint(),
                 "input": input_object(
                     source, form, checks, list_source, list_form, list_checks,
@@ -325,7 +406,11 @@ fn arg_to_json(arg: &Arg, pos_index: usize) -> Value {
                 "long": long_opt,
                 "default": default_val,
                 "description": desc,
-                "type": type_object(schema.as_deref(), type_desc.as_deref()),
+                "type": type_object(
+                    schema.as_deref(),
+                    arg.general_schema_str(),
+                    type_desc.as_deref(),
+                ),
                 "named_type_kind": arg.kind_constraint(),
                 "input": input_object(
                     source, form, checks, list_source, list_form, list_checks,
@@ -337,6 +422,7 @@ fn arg_to_json(arg: &Arg, pos_index: usize) -> Value {
             short_opt,
             long_opt,
             long_rev,
+            short_rev,
             default_val,
             desc,
             ..
@@ -349,6 +435,7 @@ fn arg_to_json(arg: &Arg, pos_index: usize) -> Value {
                 "short": short_opt,
                 "long": long_opt,
                 "long_reverse": long_rev,
+                "short_reverse": short_rev,
                 "default": default_val,
                 "description": desc,
                 "type": { "morloc": "Bool", "structure": { "type": "boolean" } },
@@ -380,7 +467,11 @@ fn arg_to_json(arg: &Arg, pos_index: usize) -> Value {
                 "metavar": metavar,
                 "required": true,
                 "description": desc,
-                "type": type_object(schema.as_deref(), type_desc.as_deref()),
+                "type": type_object(
+                    schema.as_deref(),
+                    arg.general_schema_str(),
+                    type_desc.as_deref(),
+                ),
                 "named_type_kind": arg.kind_constraint(),
                 "group_option": group_option,
                 "entries": entries_json,
@@ -391,7 +482,17 @@ fn arg_to_json(arg: &Arg, pos_index: usize) -> Value {
 
 /// Build the `type` object: morloc type string, compact wire schema, and the
 /// structured JSON Schema. Any component with no data is omitted.
-fn type_object(schema: Option<&str>, type_desc: Option<&str>) -> Value {
+///
+/// `wire` publishes the *general* schema, not the one dispatch uses. The
+/// concrete schema carries a hint naming the container the pool's language
+/// builds (`<dict>` for Python, `<Point>` with no binding declared), so
+/// publishing it would make the advertised data contract change when the
+/// implementation language changed and nothing observable did.
+fn type_object(
+    schema: Option<&str>,
+    general_schema: Option<&str>,
+    type_desc: Option<&str>,
+) -> Value {
     let mut obj = Map::new();
     let parsed = schema.and_then(|s| parse_schema(s).ok());
     // Prefer the manifest's user-facing type name (carries named types like
@@ -402,7 +503,7 @@ fn type_object(schema: Option<&str>, type_desc: Option<&str>) -> Value {
     if let Some(t) = morloc {
         obj.insert("morloc".into(), Value::String(t));
     }
-    if let Some(sc) = schema {
+    if let Some(sc) = general_schema.or(schema) {
         obj.insert("wire".into(), Value::String(sc.to_string()));
     }
     if let Some(p) = parsed.as_ref() {

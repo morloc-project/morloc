@@ -60,3 +60,4 @@ all:
 
 clean:
 	rm -rf nexus nx_vf nx_nest nx_opt nx_nva pools __pycache__ *.err
+	rm -rf *-build *build.tmp*

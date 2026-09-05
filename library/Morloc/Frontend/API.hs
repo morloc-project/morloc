@@ -22,7 +22,6 @@ module Morloc.Frontend.API
 
 import qualified Control.Monad.State.Strict as State
 import Data.Functor.Identity (Identity, runIdentity)
-import Data.Maybe (isJust)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -57,6 +56,16 @@ parse ::
 parse f (Code code) = do
   moduleConfig <- Config.loadModuleConfig f
   langMap <- buildLangMap'
+
+  -- Load the env's module-pin snapshot only when auto-install can actually run
+  -- (`morloc make`, not --offline). Read-only commands (typecheck, dump) and
+  -- eval never install, so they must neither pay the directory scan nor be
+  -- aborted by a conflicting snapshot they will not consult. `morloc install`
+  -- loads it separately (Subcommands.cmdInstall).
+  autoInstall <- MM.gets stateAutoInstall
+  when autoInstall $ do
+    snapshot <- Mod.loadSnapshot
+    MM.modify (\st -> st {stateSnapshot = snapshot})
 
   -- The main module's @log-template@ becomes the program-wide default
   -- log message template. Per-label overrides win over this; the
@@ -128,6 +137,28 @@ parse f (Code code) = do
         })
       parseImports mainDag mainState Map.empty
   where
+    -- Resolve an import to a file path. Local (.dot) imports are project
+    -- files and are never downloaded. A missing bare/namespaced import is
+    -- auto-downloaded only when stateAutoInstall is set (make, unless
+    -- --offline) and we are not in eval mode. Resolution itself always goes
+    -- through findModule, which reports ambiguity errors and the
+    -- local-resolution warning; findBareModuleMaybe is only a presence probe
+    -- that decides whether an install is needed.
+    resolveImport :: Maybe Path -> MVar -> MVar -> MorlocMonad Path
+    resolveImport mainPath mainModule importedModule
+      | Mod.isLocalImport importedModule =
+          Mod.findModule (mainPath, mainModule) importedModule
+      | otherwise = do
+          present <- Mod.findBareModuleMaybe importedModule
+          case present of
+            Just _ -> Mod.findModule (mainPath, mainModule) importedModule
+            Nothing -> do
+              autoInstall <- MM.gets stateAutoInstall
+              evalMode <- MM.gets stateEvalMode
+              when (autoInstall && not evalMode) $
+                Mod.autoInstallDep importedModule
+              Mod.findModule (mainPath, mainModule) importedModule
+
     -- descend recursively into imports
     parseImports ::
       DAG MVar Import ExprI ->
@@ -140,6 +171,7 @@ parse f (Code code) = do
         MM.modify (\st -> st
           { stateSourceMap = psSourceMap s <> stateSourceMap st
           , stateTermDocs = psTermDocs s <> stateTermDocs st
+          , stateStreamElems = psStreamElems s <> stateStreamElems st
           })
         -- emit any docstring warnings accumulated during desugar
         case psWarnings s of
@@ -152,9 +184,7 @@ parse f (Code code) = do
       ((mainModule, importedModule) : _) -> do
         when (mainModule == importedModule) . MM.throwSystemError $
           "Module" <+> pretty importedModule <+> "imports itself"
-        importPath <- case Map.lookup mainModule m of
-          (Just mainPath) -> Mod.findModule (Just mainPath, mainModule) importedModule
-          Nothing -> Mod.findModule (Nothing, mainModule) importedModule
+        importPath <- resolveImport (Map.lookup mainModule m) mainModule importedModule
 
         -- Load the <main>.yaml file associated with the main morloc package file
         moduleConfig <- Config.loadModuleConfig (Just importPath)
@@ -227,7 +257,14 @@ finalizeCollectActions dag = do
       MM.throwSystemError . pretty $
         Desugar.showParseError "<terminal-action synthesis>" err
     Right (entries, dsFinal) -> do
-      MM.modify (\st -> st {stateSourceMap = Desugar.dsSourceMap dsFinal})
+      -- The stream-batch types are discovered by this pass (it is the
+      -- first point where every module's signatures are visible), so
+      -- they are transferred from its final state rather than from the
+      -- parser's.
+      MM.modify (\st -> st
+        { stateSourceMap = Desugar.dsSourceMap dsFinal
+        , stateStreamElems = Desugar.dsStreamElems dsFinal <> stateStreamElems st
+        })
       case Desugar.dsWarnings dsFinal of
         [] -> return ()
         ws -> MM.tell ws
@@ -251,6 +288,7 @@ mkFinalizeDState idx srcMap = Desugar.DState
   , Desugar.dsWarnings = []
   , Desugar.dsModuleDoc = []
   , Desugar.dsModuleEpilogues = []
+  , Desugar.dsStreamElems = Map.empty
   }
 
 -- | For each module, the term signatures visible to it: its own top-level
@@ -278,7 +316,7 @@ moduleVisibleSigs dag =
     resolve _ node children =
       let visible = Map.union
             (localSigs node)
-            (Map.unions [ applyImport imp exported | (_, imp, (_, exported)) <- children ])
+            (Map.unions [ applyImport imp childExported | (_, imp, (_, childExported)) <- children ])
           exported = case AST.findExport node of
             ExportAll -> visible
             _ ->

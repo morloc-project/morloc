@@ -1,0 +1,3 @@
+In boolArg:f, argument #1: a Bool argument cannot use `@arg`. Use `@true <opt>` (default false, the flag turns it on) or `@false <opt>` (default true, the flag turns it off) instead.
+In twoStdin:f, more than one positional declares `@stdin`; at most one argument may read from stdin.
+In lateStdin:f, a positional follows the `@stdin` positional; the stdin argument must be the last positional.

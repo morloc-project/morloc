@@ -64,3 +64,4 @@ all:
 
 clean:
 	rm -rf nexus pools __pycache__ packets *paths.txt *.err
+	rm -rf *-build *build.tmp*

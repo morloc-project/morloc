@@ -1,0 +1,24 @@
+--' A constructor with no parameters carrying two instances. The heads are
+--' identical -- there is nothing to be more specific about -- so no use site
+--' can choose between them and the program must be rejected.
+
+module atomicAmbiguous (howBlob)
+
+import root-py
+
+newtype Blob
+
+type Py => Blob = "dict"
+
+instance Packable [Int] Blob where
+  source Py from "tree.py" ("pack_blob" as pack, "unpack_blob" as unpack)
+
+instance Packable [Str] Blob where
+  source Py from "tree.py" ("pack_generic" as pack, "unpack_generic" as unpack)
+
+source Py from "tree.py" ("root_node" as rootNode)
+
+rootNode :: Blob -> Str
+
+howBlob :: Blob -> Str
+howBlob = rootNode

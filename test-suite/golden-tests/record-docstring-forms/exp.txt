@@ -1,0 +1,10 @@
+--- where form ---
+name=settings
+metavar=SETTINGS
+description=Some settings
+morloc=Config
+--- constructor form ---
+name=settings
+metavar=SETTINGS
+description=Some settings
+morloc=Config

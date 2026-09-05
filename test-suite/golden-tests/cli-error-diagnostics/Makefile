@@ -7,3 +7,4 @@ all:
 
 clean:
 	rm -rf progA rnexus pools __pycache__ *.err
+	rm -rf *-build *build.tmp*

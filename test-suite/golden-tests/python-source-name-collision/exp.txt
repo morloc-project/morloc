@@ -1,0 +1,18 @@
+--- fromCopy ---
+"copy:aGk="
+--- fromTime ---
+"time:hi"
+--- fromStruct ---
+"struct:hi"
+--- fromHeapq ---
+"heapq:hi"
+--- fromE ---
+"e:hi"
+--- fromJson ---
+"json:hi"
+--- fromSubCopy ---
+"sub.copy:hi"
+--- fromSibling ---
+"sibling:hi"
+--- fromPymorloc ---
+"pymorloc:hi"

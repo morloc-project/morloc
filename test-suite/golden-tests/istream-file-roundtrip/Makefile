@@ -12,3 +12,4 @@ all:
 clean:
 	rm -rf nexus pools __pycache__ *.err
 	rm -f /tmp/istream-rt-*.dat
+	rm -rf *-build *build.tmp*

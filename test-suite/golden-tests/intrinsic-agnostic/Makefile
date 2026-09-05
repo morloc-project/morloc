@@ -7,3 +7,4 @@ all:
 
 clean:
 	rm -rf nexus pools *err obs-saved.txt
+	rm -rf *-build *build.tmp*

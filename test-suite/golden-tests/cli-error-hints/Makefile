@@ -11,3 +11,4 @@ all:
 
 clean:
 	rm -rf nexus pools __pycache__ *.err entries.tsv headed.tsv
+	rm -rf *-build *build.tmp*

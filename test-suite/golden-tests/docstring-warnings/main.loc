@@ -1,0 +1,36 @@
+-- A docstring directive that is not recognized is a no-op: the line is
+-- demoted to prose and the interface silently differs from the one the
+-- author wrote. The compiler builds a warning for every such line; this
+-- test pins that the warning reaches stderr on a build that SUCCEEDS.
+--
+-- Covers both allowlists: argument directives and `source` directives.
+-- The escaped form is prose by request and must stay silent.
+module m (f, g)
+
+import root-py
+
+source Py from "lib.py" where
+  --' @rsize 1
+  scale
+  --' @rsizee 1
+  ident
+
+scale :: Int -> [Int] -> [Int]
+ident :: Int -> Int
+
+--' Apply a scale factor
+f ::
+  --' the factor
+  --' @nosuchdirective hello
+  Int ->
+  --' the values
+  --' @metvar VALUES
+  [Int] -> [Int]
+f = scale
+
+--' Pass a number through
+g ::
+  --' the number
+  --' \notadirective: this line is prose by request
+  Int -> Int
+g = ident

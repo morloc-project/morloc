@@ -14,7 +14,7 @@ payload :: [Int]
 payload = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
 mkData :: Str -> <IO, Err> ()
-mkData path = @save 0 payload path
+mkData path = @save 0 path payload
 
 mkStream :: Str -> <IO, Err> ()
 mkStream path = do

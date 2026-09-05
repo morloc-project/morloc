@@ -75,3 +75,4 @@ all:
 clean:
 	rm -rf prog pools __pycache__ *.err
 	rm -f stream.packet data.packet raw.json
+	rm -rf *-build *build.tmp*

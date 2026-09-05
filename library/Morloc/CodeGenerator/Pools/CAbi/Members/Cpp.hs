@@ -717,7 +717,16 @@ cppLowerConfig reifyThunks =
     , lcArgManifoldOwnership = \_ -> return Owned
     , lcOwnArg = \_ _ x -> x
     , lcWithCallerScope = id
-    , lcCoerceOptional = id
+    -- `?T` is `std::optional<T>` at every value position where sizeof(T) is
+    -- known (cppmorloc.hpp), which is exactly where a value-level
+    -- CoerceToOptional lands (record fields use `wrap_field`, not this). The
+    -- coerced value must therefore BE a std::optional, not just implicitly
+    -- convertible to one: the msgpack-leaf serialize path passes the value
+    -- straight to `to_voidstar<T>`, whose T is template-deduced from the
+    -- expression, so a bare `T` would serialize against a `?`-schema without the
+    -- optional layer (a compound inner then hits "compound schema reached a
+    -- scalar-sized type" at runtime). `make_optional` deduces T from the value.
+    , lcCoerceOptional = \x -> "std::make_optional(" <> x <> ")"
     , lcTypeOf = \t -> Just . toIType <$> cppTypeOf t
     , lcSerialAstType = serializeTypeOf
     , lcDeserialAstType = \s -> Just . toIType <$> cppTypeOf (shallowType s)
@@ -1757,12 +1766,23 @@ handleFlagsAndPaths srcs = do
       . unique
       $ [s | s <- srcs, LR.poolOf (stateLangRegistry state) (srcLang s) == cppLang]
 
+  -- Include directories for every C++ source any imported module declares,
+  -- whether or not this program realizes its code. The pool's own `#include`
+  -- lines are absolute, so these directories exist solely to resolve the bare
+  -- includes inside a user's header; which of a module's functions this
+  -- program happens to call must not decide whether such an include resolves.
+  moduleDirs <- cppModuleIncludeDirs (stateLangRegistry state)
+    . unique
+    . concat
+    . GMap.elems
+    $ stateSources state
+
   home <- MM.asks configHome
-  state <- MM.asks configState
+  stateDir <- MM.asks configState
   let -- Search the runtime include dir (home) and the environment's shared C++
       -- module prefix (state/modules/include), where a user-installed library's
       -- headers live.
-      mlcInclude = ["-I" <> home <> "/include", "-I" <> state <> "/modules/include"]
+      mlcInclude = ["-I" <> home <> "/include", "-I" <> stateDir <> "/modules/include"]
       mlcPch = ["-include", "morloc_pch.hpp"]
       -- No runtime rpath to home/lib: the pool is relocatable and finds
       -- libmorloc via LD_LIBRARY_PATH exported by the nexus at launch, which
@@ -1770,13 +1790,45 @@ handleFlagsAndPaths srcs = do
       -- state/modules/lib search dir covers a user library referenced by a
       -- `-l` from dependencies/cxx-flags; its runtime load is likewise handled
       -- by the nexus LD_LIBRARY_PATH export, not a baked rpath.
-      mlcLib = ["-L" <> home <> "/lib", "-L" <> state <> "/modules/lib", "-lmorloc", "-lcppmorloc", "-lpthread"]
+      mlcLib = ["-L" <> home <> "/lib", "-L" <> stateDir <> "/modules/lib", "-lmorloc", "-lcppmorloc", "-lpthread"]
 
   return
     ( filter (isJust . srcPath) srcs'
     , [gccversion] <> explicitLibs <> userCxxFlags <> cliCxxFlags ++ (map MT.pack . concat) (mlcPch : mlcInclude : mlcLib : libflags)
-    , unique (catMaybes paths)
+    , unique (catMaybes paths <> moduleDirs)
     )
+
+-- | Directories holding the C++ sources declared by the program's modules.
+--
+-- Unlike 'flagAndPath' this only resolves a location and never fails: a module
+-- may declare a header this build has no use for, and merely enumerating
+-- candidate include directories must not turn a working build into an error.
+-- Contributes no linker flags, so a module whose code is never called is
+-- searched for headers but not linked against.
+cppModuleIncludeDirs :: LR.LangRegistry -> [Source] -> MorlocMonad [Path]
+cppModuleIncludeDirs reg = fmap catMaybes . mapM dirOf . filter isCpp
+  where
+    isCpp s = LR.poolOf reg (srcLang s) == cppLang
+
+    dirOf (Source _ _ (Just p) _ _ _ _ _ _ _) =
+      case (MS.takeDirectory p, MS.dropExtensions (MS.takeFileName p)) of
+        -- A bare header name resolves through the same search path the
+        -- compiled sources use.
+        (".", base) -> do
+          home <- MM.asks configHome
+          stateDir <- MM.asks configState
+          found <-
+            liftIO . fmap catMaybes . mapM getFile $
+              getHeaderPaths home stateDir base [".h", ".hpp", ".hxx"]
+          case found of
+            (x : _) -> Just . MS.takeDirectory <$> liftIO (MS.canonicalizePath x)
+            [] -> return Nothing
+        (dir, _) -> do
+          exists <- liftIO $ MS.doesDirectoryExist dir
+          if exists
+            then Just <$> liftIO (MS.canonicalizePath dir)
+            else return Nothing
+    dirOf _ = return Nothing
 
 gccVersionFlag :: Int -> Text
 gccVersionFlag i

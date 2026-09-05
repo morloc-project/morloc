@@ -30,3 +30,4 @@ all:
 
 clean:
 	rm -rf single multi pools __pycache__ *.err entries.tsv
+	rm -rf *-build *build.tmp*

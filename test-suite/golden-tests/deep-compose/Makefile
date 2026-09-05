@@ -3,3 +3,4 @@ all:
 
 clean:
 	rm -rf nexus pools *.err __pycache__ obs.txt.tmp
+	rm -rf *-build *build.tmp*

@@ -75,6 +75,19 @@ resolvePendingNumLits g0 entries = do
     -- this acceptance.
     acceptableForInt t = BT.isIntegerBaseType t || BT.isRealBaseType t
 
+    -- A literal may inhabit a type alias or a newtype whose wire parent is a
+    -- numeric base. The check-mode rules for @IntS@/@RealS@ already walk that
+    -- chain (evaluate the alias, then follow the wire parent); a DEFERRED
+    -- literal must be judged by the same standard, or the identical program
+    -- is accepted or rejected purely on whether the literal happened to meet
+    -- its type directly or through an existential.
+    baseOKThroughAliases :: (TypeU -> Bool) -> Int -> TypeU -> MorlocMonad Bool
+    baseOKThroughAliases baseOK i t = do
+      scope <- MM.getGeneralScope i
+      let tEval = either (const t) id (TE.evaluateType scope t)
+          tWire = TE.wireParentRoot scope tEval
+      return (baseOK t || baseOK tEval || baseOK tWire)
+
     resolveOne :: (TypeU -> Bool) -> TypeU -> Gamma -> (Int, TVar, NumLitKind) -> MorlocMonad Gamma
     resolveOne baseOK defaultT g (i, v, _) =
       -- Chain-walk via apply: when the deferred existential @v@ was
@@ -98,9 +111,11 @@ resolvePendingNumLits g0 entries = do
                Left err        -> MM.throwSystemError err
                Right Nothing   -> return g
                Right (Just g') -> return g'
-           t
-             | baseOK t  -> return g
-             | otherwise -> MM.throwSourcedError i $
+           t -> do
+             ok <- baseOKThroughAliases baseOK i t
+             if ok
+               then return g
+               else MM.throwSourcedError i $
                  "Numeric literal cannot have type " <> prettyTypeU t
 
     -- | Strip @EffectU@ and @OptionalU@ wrappers from a type. A
@@ -1299,7 +1314,30 @@ synthE i g (IntrinsicS IntrCatch [fallibleE, fallbackE]) = do
       unless (Set.member "Err" labels) $
         throwTypeError i $
           "@catch's first argument must have effect Err; got " <> prettyTypeU fallibleT'
-      (g2, fallbackT, fallbackE') <- synthG g1 fallbackE
+      -- A bare numeric-literal fallback is CHECKED against the fallible's
+      -- inner type; everything else is synthesized as before.
+      --
+      -- Synthesis commits a literal to its default (@Int@ for an integer,
+      -- @Real@ for a float) before it ever meets the fallible's type, so
+      -- @\@catch (tryInto x) 0@ reported "Cannot compare types Int and I64"
+      -- for every fixed-width target, and the same for an alias or newtype
+      -- over one. Checking hands the literal its expected type, which is what
+      -- the @IntS@/@RealS@ check rules need to walk the alias and wire-parent
+      -- chain.
+      --
+      -- The dispatch is on the literal itself rather than on purity in
+      -- general because the fallback may legitimately be effectful (a chained
+      -- @\@catch@ whose fallback declares @<Err>@), and an effectful value
+      -- cannot be checked against the plain inner type. A literal is pure by
+      -- construction, so this split needs no purity analysis. A literal buried
+      -- inside a compound fallback (@\@catch f [0]@) is still synthesized and
+      -- still defaults; that is the same "synthesis defaults literals"
+      -- behaviour found elsewhere and wants a bidirectional-checking decision
+      -- rather than a local patch here.
+      (g2, fallbackT, fallbackE') <- case fallbackE of
+        AnnoS _ _ (IntS _ _)  -> checkG g1 fallbackE (apply g1 innerT)
+        AnnoS _ _ (RealS _ _) -> checkG g1 fallbackE (apply g1 innerT)
+        _                     -> synthG g1 fallbackE
       let fallbackT' = apply g2 fallbackT
           (fbEffs, fbInnerT) = case peelForallU fallbackT' of
             EffectU e t -> (e, t)
@@ -1491,9 +1529,10 @@ checkIntrinsicArgs i g intr argTypes = do
     else do
       -- Check specific argument types
       case (intr, argTypes) of
-        -- @save: Int -> a -> Str -> <IO>(). Level constrained to integer
-        -- domain; the value is unconstrained; path must be Str.
-        (IntrSave, [levelT, _, pathT]) -> do
+        -- @save: Int -> Str -> a -> <IO>(). Level constrained to integer
+        -- domain; path must be Str; the value is unconstrained. Path-first
+        -- (after the level) mirrors @savem/@savej.
+        (IntrSave, [levelT, pathT, _]) -> do
           g' <- subtype' i levelT BT.intU g
           subtype' i pathT BT.strU g'
         -- @savem/@savej: Str -> a -> <IO>(). Path-first makes
@@ -1645,7 +1684,11 @@ etaExpandSynthE i g1 funType0 funExpr0 _f xs0 = do
     _ -> error "impossible"
 
 expand :: Int -> Int -> Gamma -> ExprS Int f Int -> MorlocMonad (Gamma, ExprS Int f Int)
-expand _ 0 g x = return (g, x)
+-- Guard the whole non-positive range, not just zero. Every caller should have
+-- rejected an over-applied definition before reaching here, but a negative
+-- count would otherwise recurse forever, appending a fresh parameter on each
+-- step and never reaching the base case.
+expand _ n g x | n <= 0 = return (g, x)
 expand parentIdx n g e@(AppS _ _) = do
   newIdx <- MM.getCounterWithPos parentIdx
   let (g', v') = evarname g "v"
@@ -1786,6 +1829,11 @@ foldCheck g (x : xs) t = do
   (g'', t'', xs') <- foldCheck g' xs t'
   return (g'', t'', x' : xs')
 
+-- Singular/plural agreement for arity diagnostics.
+arguments :: Int -> MDoc
+arguments 1 = "argument"
+arguments _ = "arguments"
+
 checkE ::
   Int ->
   Gamma ->
@@ -1828,9 +1876,36 @@ checkE i g0 e0@(LamS vs body) t@(FunU as b)
           e3 = applyCon g2 (LamS vs e2)
 
       return (g2, t3, e3)
-  | otherwise = do
+  -- Fewer parameters than the type has arguments: eta-expand up to the
+  -- expected arity and re-check.
+  | length vs < length as = do
       (g', e') <- expand i (length as - length vs) g0 e0
       checkE' i g' e' t
+  -- More parameters than this arrow group has arguments. A signature written
+  -- @A -> (B -> C)@ parses as @FunU [A] (FunU [B] C)@, so a two-parameter
+  -- definition lands here with one argument to match against. Re-nest the
+  -- surplus parameters into the return type and recurse, which is exactly what
+  -- 'Morloc.Typecheck.Internal.subtype' already does to reconcile the two
+  -- spellings. A genuine arity error still surfaces: the re-nested return
+  -- fails to check because it is not a function.
+  --
+  -- Recursion terminates because each step consumes @length as@ parameters
+  -- (at least one, since @length vs > length as >= 0@ and the @null as@ case
+  -- cannot recur). Do NOT reach for 'expand' here -- it was previously called
+  -- with the negative difference, appending a parameter per step and never
+  -- reaching its base case, which hung the compiler.
+  | not (null as) = do
+      let (vsHere, vsRest) = splitAt (length as) vs
+          g1 = g0 ++> zipWith AnnG vsHere as
+      (g2, t2, e2) <- checkG g1 (AnnoS i i (LamS vsRest body)) b
+      let t3 = apply g2 (FunU as t2)
+          e3 = applyCon g2 (LamS vsHere e2)
+      return (g2, t3, e3)
+  -- A zero-argument arrow group cannot absorb any parameter, so there is
+  -- nothing left to reconcile.
+  | otherwise = throwTypeError i $
+      "This definition takes" <+> pretty (length vs) <+> arguments (length vs)
+      <> ", but its type accepts none. The declared type is:" <+> pretty t
 checkE i g1 e1 (ForallU v a) = do
   checkE' i (g1 +> v) e1 (substitute v a)
 checkE i g (IfS cond thenE elseE) t = do

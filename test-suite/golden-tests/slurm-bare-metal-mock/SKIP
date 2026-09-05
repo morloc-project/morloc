@@ -1,0 +1,4 @@
+SLURM support is experimental. This test also needs its config updated: the
+`time: 60` field in main.yaml is a YAML integer, but FromJSON TimeInSeconds
+(Morloc.Namespace.Prim) accepts only a string ("Expected a string for SLURM
+time"), so the module config fails to parse.

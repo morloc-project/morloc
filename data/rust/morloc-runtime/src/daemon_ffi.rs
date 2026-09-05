@@ -441,9 +441,14 @@ impl BindingStore {
                 }
             };
             let policy = eval_policy_args();
-            // argv: morloc eval --save <hex> -e <policy...> <expr> NULL.
-            let mut argv: Vec<*const c_char> = Vec::with_capacity(7 + policy.len());
+            let rts = eval_rts_args();
+            // argv: morloc +RTS <heap> -RTS eval --save <hex> -e <policy...> <expr> NULL.
+            let mut argv: Vec<*const c_char> =
+                Vec::with_capacity(7 + rts.len() + policy.len());
             argv.push(cmd.as_ptr());
+            for p in &rts {
+                argv.push(p.as_ptr());
+            }
             argv.push(arg_eval.as_ptr());
             argv.push(arg_save.as_ptr());
             argv.push(arg_hex.as_ptr());
@@ -472,17 +477,13 @@ impl BindingStore {
                 libc::close(stdout_pipe[1]);
                 libc::close(stderr_pipe[1]);
 
+                // Memory is bounded by EVAL_HEAP_LIMIT in argv, not here.
                 if eval_timeout > 0 {
                     let cpu_limit = libc::rlimit {
                         rlim_cur: eval_timeout as libc::rlim_t,
                         rlim_max: (eval_timeout + 5) as libc::rlim_t,
                     };
                     libc::setrlimit(libc::RLIMIT_CPU, &cpu_limit);
-                    let as_limit = libc::rlimit {
-                        rlim_cur: 2 * 1024 * 1024 * 1024,
-                        rlim_max: 2 * 1024 * 1024 * 1024,
-                    };
-                    libc::setrlimit(libc::RLIMIT_AS, &as_limit);
                 }
 
                 libc::execvp(cmd.as_ptr(), argv.as_ptr());
@@ -958,6 +959,35 @@ pub extern "C" fn daemon_set_eval_policy(sandbox: bool, allowed: *const c_char) 
     *G_EVAL_ALLOWED.lock().unwrap() = list;
 }
 
+/// Heap ceiling for a forked `morloc`, written as a GHC RTS argument.
+///
+/// The child is a GHC-compiled binary, and `RLIMIT_AS` is the wrong instrument
+/// for one. Its runtime reserves roughly a terabyte of address space at startup
+/// -- untouched, so it costs no memory -- and under an `RLIMIT_AS` it shrinks
+/// that reservation until it fits, which lands it just under the cap. There is
+/// then no address space left for the per-capability OS thread stacks it
+/// creates next, so the process dies before running any code with "failed to
+/// create OS thread" on any host with enough cores. `-M` bounds the live heap
+/// instead, which is the quantity actually worth bounding, and overflows
+/// cleanly and diagnosably. Mirrored in morloc-nexus's `mcp.rs`.
+const EVAL_HEAP_LIMIT: &str = "-M2G";
+
+/// GHC's `EXIT_HEAPOVERFLOW`: the exit status of a child stopped by
+/// `EVAL_HEAP_LIMIT`.
+const EXIT_HEAPOVERFLOW: i32 = 251;
+
+/// The RTS block bounding a forked `morloc`'s heap, as argv entries. The child
+/// runtime consumes and strips `+RTS ... -RTS` before the program sees argv, so
+/// it can sit anywhere; it goes first, keeping it clear of the expression.
+/// Built in the PARENT (it allocates) like the policy args below.
+fn eval_rts_args() -> [CString; 3] {
+    [
+        CString::new("+RTS").unwrap(),
+        CString::new(EVAL_HEAP_LIMIT).unwrap(),
+        CString::new("-RTS").unwrap(),
+    ]
+}
+
 /// Build the sandbox policy argv tail (`--eval-sandbox [--eval-allowed-modules
 /// <list>]`) for a forked `morloc eval`. MUST be called in the PARENT before
 /// fork: it locks G_EVAL_ALLOWED, which is not async-signal-safe to touch in
@@ -1000,10 +1030,15 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
     // always supplies an inline expression, so pass `-e`.
     let dash_e = CString::new("-e").unwrap();
     let policy = eval_policy_args();
-    // argv: morloc <subcmd> -e <policy...> <expr> NULL. Policy flags precede
-    // the expr positional so the positional is never read as a flag value.
-    let mut argv: Vec<*const c_char> = Vec::with_capacity(5 + policy.len());
+    let rts = eval_rts_args();
+    // argv: morloc +RTS <heap> -RTS <subcmd> -e <policy...> <expr> NULL. Policy
+    // flags precede the expr positional so the positional is never read as a
+    // flag value.
+    let mut argv: Vec<*const c_char> = Vec::with_capacity(5 + rts.len() + policy.len());
     argv.push(cmd.as_ptr());
+    for p in &rts {
+        argv.push(p.as_ptr());
+    }
     argv.push(arg_subcmd.as_ptr());
     argv.push(dash_e.as_ptr());
     for p in &policy {
@@ -1034,6 +1069,7 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
         libc::close(stdout_pipe[1]);
         libc::close(stderr_pipe[1]);
 
+        // Memory is bounded by EVAL_HEAP_LIMIT in argv, not here.
         let timeout = G_EVAL_TIMEOUT.load(Ordering::Relaxed);
         if timeout > 0 {
             let cpu_limit = libc::rlimit {
@@ -1041,11 +1077,6 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
                 rlim_max: (timeout + 5) as libc::rlim_t,
             };
             libc::setrlimit(libc::RLIMIT_CPU, &cpu_limit);
-            let as_limit = libc::rlimit {
-                rlim_cur: 2 * 1024 * 1024 * 1024,
-                rlim_max: 2 * 1024 * 1024 * 1024,
-            };
-            libc::setrlimit(libc::RLIMIT_AS, &as_limit);
         }
 
         libc::execvp(cmd.as_ptr(), argv.as_ptr());
@@ -1078,12 +1109,17 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
         // Classify by exit cause. SIGXCPU means the child blew the
         // RLIMIT_CPU budget (the --eval-timeout guard) -> TIMEOUT (408).
         // Other fatal signals (SIGKILL, SIGSEGV, ...) are server-side
-        // failures -> INTERNAL (500). Anything else (non-zero exit, no
-        // signal) is "your expression didn't compile / had a runtime
-        // error" -> BAD_REQUEST (400). Note: --eval-timeout only
-        // bounds /eval and /typecheck (this fork_morloc_command path);
+        // failures -> INTERNAL (500). EXIT_HEAPOVERFLOW means the child hit
+        // the heap ceiling this server imposed, which is a server-side
+        // resource decision and NOT a malformed expression -> INTERNAL (500);
+        // reporting it as BAD_REQUEST would tell the caller their expression
+        // did not compile when it merely needed more memory than we allow.
+        // Anything else (non-zero exit, no signal) is "your expression didn't
+        // compile / had a runtime error" -> BAD_REQUEST (400). Note: these
+        // guards bound /eval and /typecheck (this fork_morloc_command path);
         // /call/<command> dispatches into a pre-compiled pool worker
-        // and is not subject to this rlimit.
+        // and is subject to neither.
+        let exited_with = |code: i32| libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == code;
         let (errmsg, kind) = if libc::WIFSIGNALED(status) {
             let sig = libc::WTERMSIG(status);
             if sig == libc::SIGXCPU {
@@ -1106,6 +1142,17 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
                     DAEMON_ERROR_INTERNAL,
                 )
             }
+        } else if exited_with(EXIT_HEAPOVERFLOW) {
+            // The child's own advice ("use +RTS -M<size>") is useless to an
+            // HTTP caller, who cannot set it; say who imposed the ceiling.
+            (
+                format!(
+                    "morloc {} exceeded the server's heap ceiling ({})",
+                    subcmd,
+                    EVAL_HEAP_LIMIT.trim_start_matches("-M"),
+                ),
+                DAEMON_ERROR_INTERNAL,
+            )
         } else if !stderr_buf.is_empty() {
             (
                 String::from_utf8_lossy(&stderr_buf).into_owned(),

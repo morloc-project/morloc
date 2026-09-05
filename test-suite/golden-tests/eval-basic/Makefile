@@ -48,3 +48,4 @@ clean:
 	rm -f obs.err case5.err
 	morloc uninstall eval-basic-foo
 	morloc uninstall eval-basic-bar
+	rm -rf *-build *build.tmp*

@@ -1,3 +1,111 @@
+0.101.0 [2026-09-05]
+--------------------
+
+Module dependency management
+ * `morloc make` now installs missing imported modules on demand
+   (`--offline` opts out); `typecheck`, `dump` and `eval` never install
+ * Rename the `morloc-dependencies` package.yaml key to `morloc-deps`; the old
+   key still works and warns
+ * An environment's `$MORLOC_STATE/snapshots/` is an authoritative module-pin
+   table (`name hash` per line): resolution fetches the pinned commit and
+   errors on a hash conflicting with what the environment already holds
+   (`--force` migrates). Unpinned imports fall back to package pins, then latest
+ * Installs are concurrency-safe: a per-module lock serializes same-module
+   installs, and clones are validated (module name, morloc version) before an
+   atomic rename
+ * Progress output while modules are being fetched
+ * Publish the stdlib `stdlib-snapshot.txt` release asset
+
+Breaking changes
+ * `@save` takes the file before the value: `@save 0 path value`
+ * A language-specific declaration must bind the type's parameters, e.g.
+   `type Py => (IFile a) = "int" a`. An unbound parameter is now an arity error
+   naming the type rather than a silently wrong wire form
+
+Generated command line interfaces
+ * Render the module description and `@epilogue` block in help, in both the
+   short and long registers, including for single-command programs
+ * Label positional arguments with their `@metavar` name, not the index alone
+ * `@false` delivers both its short and long spelling, and the negation is
+   shown in help rather than hidden
+ * Accept `-` for standard input on an argument declared `@source file`
+ * Define every type the help names: a record by its fields, a table by its
+   columns, a Packable-backed type by the wire form it serializes to
+ * Report a streaming command's output as the batch that reaches standard
+   output rather than the unit it returns
+ * The type field holds a type and nothing else; how a token is read moved to
+   its own line, transparent aliases resolve in return position as they always
+   did in argument position, and a table's columns are spelled out
+ * Bind a parameterized type's arguments where it is applied: `Box Int`, not
+   `(Box a) Int`
+ * A record declared with an explicit constructor now collects its docstrings,
+   so its arguments inherit descriptions and metavars like the field-block form
+ * `morloc list` and the generated shell completions report only the commands a
+   user can invoke, and `-v` prints the return type again
+ * `--json-help` gains `short_reverse`, and publishes a wire schema free of the
+   hints naming the pool language's own container type
+
+Diagnostics
+ * Compiler warnings now print on a successful build; an unrecognized docstring
+   directive was silently discarded before
+ * Rewrite the docstring diagnostics in the `@keyword value` syntax the manual
+   teaches
+ * Validate the `rsize` source directive: an unparseable, zero, negative, or
+   over-arity value is a sourced error instead of a silent flat call or a
+   compiler call stack
+ * Diagnose a NUL-bearing string literal at its source position, with a caret,
+   for languages that cannot hold one
+ * Report an arity mismatch instead of hanging the typechecker forever; a
+   signature written `A -> (B -> C)` now checks against a two-parameter
+   definition
+ * Errors out of an R pool carry their own message alone, matching the C++
+   pools, rather than a doubled "Error" and a path into the morloc install
+
+Bug fixes
+ * `@catch` with a bare literal fallback typechecks against the expression it
+   replaces, so a fixed-width numeric target is usable; an integer literal
+   promoted into a real slot is emitted as a real by the pools
+ * Cancel a spurious force on an optional-widened `@catch`, and stop
+   double-wrapping a pure do-block fallback
+ * C++ value-level `?T` coercions are wrapped in `std::make_optional`, fixing a
+   run-time abort in any `?[T]`-returning C++ function
+ * A newtype keeps its own declared per-language form when its wire parent is a
+   leaf, so a foreign function sees the representation its module stated
+ * Rework Packable resolution: instances are matched by the type system's
+   subsumption order rather than by source order and constructor-name guessing,
+   a non-covering instance no longer aborts the build, and two instances that
+   disagree about a wire form are rejected at build time
+ * Guard the cross-pool boundary against NUL-bearing strings computed inside a
+   pool, reporting the access path to the offending slot
+ * Sourced Python files load into a reserved namespace from their location, so
+   a file may share a name with the pool's generated bindings or with any
+   already-imported module
+ * C++ pools take their include search path from the import graph, so a header
+   included by bare name resolves regardless of which values happen to cross a
+   pool boundary
+ * A Rust manifold returning a deferred effect names the lifetime its closure
+   borrows; such a pool previously failed to compile with E0700
+ * A Python pool frees its daemon exactly once at shutdown, without flipping
+   signal dispositions mid-teardown
+ * Read the C++ standard from one constant, so adding an empty package.yaml no
+   longer changes which standard a project declares
+ * A local relative-path dependency resolves against the project rather than
+   the build's staging directory
+ * A launcher states the manifest it points at, so a relocatable build tree can
+   be served and not only run
+ * Run logging materializes one directory per invocation: a forked pool worker
+   inherits the run directory from any ancestor, not just its parent
+ * The forked `eval` child is bounded by heap size rather than address space,
+   which killed it at startup on hosts with more than about four cores
+
+Other
+ * `morloc.h` describes the structs the runtime actually builds again, with a
+   layout guard comparing field names, offsets, sizes and alignment against the
+   Rust definitions; the expression and pattern kinds a C consumer can name are
+   complete
+ * Golden tests are discovered from the filesystem; a missing Makefile or
+   exp.txt fails instead of vanishing, and a disabled test must record why
+
 0.100.2 [2026-08-30]
 --------------------
 

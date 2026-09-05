@@ -26,6 +26,7 @@ module Morloc.Config
   , fdbDir
   , moduleDir
   , rustBuildDir
+  , snapshotDir
   ) where
 
 import qualified Data.Aeson.KeyMap as K
@@ -106,6 +107,12 @@ moduleDir c sub = MS.combine (MS.combine (configState c) "modules") sub
 -- | Regenerable rustmorloc/pool cargo build cache, under the state root.
 rustBuildDir :: Config -> Path
 rustBuildDir c = MS.combine (configState c) "cache/rust-build"
+
+-- | Module-pin snapshot directory (state). Holds zero or more snapshot files
+-- (one @name hash@ per line) that pin module git hashes for on-demand install.
+-- Read lazily on the make/install path, never at config load.
+snapshotDir :: Config -> Path
+snapshotDir c = MS.combine (configState c) "snapshots"
 
 loadMorlocConfig' :: Maybe Path -> IO Config
 loadMorlocConfig' Nothing = do

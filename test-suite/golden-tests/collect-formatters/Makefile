@@ -85,3 +85,4 @@ assertions:
 
 clean:
 	rm -rf nexus-cpp nexus-py nexus-r pools __pycache__ $(TMP) *.err
+	rm -rf *-build *build.tmp*

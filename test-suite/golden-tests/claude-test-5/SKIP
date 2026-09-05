@@ -1,0 +1,6 @@
+Not a test: a Conway's Game of Life demo that seeds a random board, so its
+output differs every run and no golden can match it. The committed exp.txt
+("1", "43") does not correspond to any output the program produces.
+
+It builds and runs correctly, so it is covering nothing that other tests do
+not. Delete it, or reseed it deterministically and record a real exp.txt.

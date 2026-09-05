@@ -76,9 +76,9 @@ printExpr (IAccess e (IIdx i)) = printExpr e <> "." <> pretty i
 printExpr (IAccess e (IField f)) = printExpr e <> "." <> pretty f
 printExpr (IAccess e (IKey _)) = printExpr e
 printExpr (ISerCall sid e) = "rustmorloc::put_value(&(" <> printExpr e <> "), schema(" <> pretty sid <> "))"
-printExpr (IDesCall sid (Just t) e) =
+printExpr (IDesCall sid (Just t) _ e) =
   "rustmorloc::get_value::<" <> rustType t <> ">(" <> printExpr e <> ", schema(" <> pretty sid <> "))"
-printExpr (IDesCall sid Nothing e) =
+printExpr (IDesCall sid Nothing _ e) =
   "rustmorloc::get_value(" <> printExpr e <> ", schema(" <> pretty sid <> "))"
 printExpr (IPack packer e) = pretty packer <> parens (printExpr e)
 printExpr (ICall f Nothing argGroups) =

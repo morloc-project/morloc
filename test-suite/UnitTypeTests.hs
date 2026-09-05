@@ -16,13 +16,13 @@ module UnitTypeTests
   , typeAliasTests
   , numericLiteralAliasTests
   , pendingNumLitTests
-  , packerTests
   , whereTests
   , orderInvarianceTests
   , whitespaceTests
   , infixOperatorTests
   , recordLiteralOrderTests
   , complexityRegressionTests
+  , definitionArityTests
   , effectSubtypeTests
   , effectSynthesisTests
   , effectErrorTests
@@ -145,10 +145,10 @@ evalSandboxTests =
         runEvalTrusted "module main (x)\nx = @tell" >>= assertRight
     ]
   where
-    assertLeft r = case r of
+    assertLeft res = case res of
       Left _ -> return ()
       Right _ -> assertFailure "expected the sandbox to reject this eval expression"
-    assertRight r = case r of
+    assertRight res = case res of
       Right _ -> return ()
       Left e -> assertFailure ("expected acceptance, got error: " <> show e)
 
@@ -453,6 +453,13 @@ testFalse msg x =
 bool :: TypeU
 bool = VarU (TV "Bool")
 
+unifies :: [MT.Text] -> TypeU -> TypeU -> Bool
+unifies vs a b = maybe False (const True) (unifyU (map TV vs) a b)
+
+wireAgrees :: ([MT.Text], TypeU, TypeU) -> ([MT.Text], TypeU, TypeU) -> Bool
+wireAgrees (vs1, h1, w1) (vs2, h2, w2) =
+  wireFormsAgree (map TV vs1, h1, w1) (map TV vs2, h2, w2)
+
 real :: TypeU
 real = VarU (TV "Real")
 
@@ -625,13 +632,6 @@ module main (z)
       |]
           int
       ]
-
-packerTests :: TestTree
-packerTests =
-  localOption (mkTimeout 1000000) $ -- 1 second timeout
-    testGroup
-      "Test building of packer maps"
-      [testEqual "packer test" (1 :: Int) 1]
 
 typeAliasTests :: TestTree
 typeAliasTests =
@@ -1546,6 +1546,122 @@ typeOrderTests =
               ]
           )
           [forallu ["a"] (tuple [int, var "a"])]
+      , -- A specialization chain has a unique most specific member for
+        -- every query, so instance selection is well defined.
+        testEqual
+          "mostSpecificSubtypes: specialization chain resolves uniquely"
+          ( mostSpecificSubtypes
+              (tuple [int, str, real])
+              [ forallu ["a", "b", "c"] (tuple [var "a", var "b", var "c"])
+              , forallu ["b", "c"] (tuple [int, var "b", var "c"])
+              , forallu ["c"] (tuple [int, str, var "c"])
+              ]
+          )
+          [forallu ["c"] (tuple [int, str, var "c"])]
+      , -- Two heads that overlap without either subsuming the other leave
+        -- the query with two maximal matches and no maximum. Selection is
+        -- ambiguous and must be reported rather than resolved.
+        testEqual
+          "mostSpecificSubtypes: incomparable overlap is ambiguous"
+          ( mostSpecificSubtypes
+              (tuple [int, int, str])
+              [ forallu ["a", "b", "c"] (tuple [var "a", var "b", var "c"])
+              , forallu ["b", "c"] (tuple [int, var "b", var "c"])
+              , forallu ["a", "c"] (tuple [var "a", int, var "c"])
+              ]
+          )
+          [ forallu ["b", "c"] (tuple [int, var "b", var "c"])
+          , forallu ["a", "c"] (tuple [var "a", int, var "c"])
+          ]
+      , -- Adding the unifier of the two overlapping heads restores a unique
+        -- maximum: the instance set is closed under unification.
+        testEqual
+          "mostSpecificSubtypes: unification closure restores a maximum"
+          ( mostSpecificSubtypes
+              (tuple [int, int, str])
+              [ forallu ["a", "b", "c"] (tuple [var "a", var "b", var "c"])
+              , forallu ["b", "c"] (tuple [int, var "b", var "c"])
+              , forallu ["a", "c"] (tuple [var "a", int, var "c"])
+              , forallu ["c"] (tuple [int, int, var "c"])
+              ]
+          )
+          [forallu ["c"] (tuple [int, int, var "c"])]
+      , -- Alpha-equivalence must not depend on the order in which two types
+        -- happen to quantify the same variables: adjacent universals commute.
+        -- Two of these fail; see reports/0054.
+        testTrue
+          "equivalent: renaming"
+          ( equivalent
+              (forallu ["a", "b"] (tuple [var "a", var "b"]))
+              (forallu ["x", "y"] (tuple [var "x", var "y"]))
+          )
+      , testTrue
+          "equivalent: quantifier order swapped"
+          ( equivalent
+              (forallu ["a", "b"] (tuple [var "a", var "b"]))
+              (forallu ["b", "a"] (tuple [var "a", var "b"]))
+          )
+      , testTrue
+          "equivalent: mirrored function types"
+          ( equivalent
+              (forallu ["a", "b"] (fun [tuple [var "b"], var "a"]))
+              (forallu ["b", "a"] (fun [tuple [var "b"], var "a"]))
+          )
+      , testFalse
+          "equivalent: repeated variable is not the same as two"
+          ( equivalent
+              (forallu ["a"] (tuple [var "a", var "a"]))
+              (forallu ["a", "b"] (tuple [var "a", var "b"]))
+          )
+      , -- Unification: the substitution that makes two types one, used to ask
+        -- whether two instance heads can ever describe the same use site.
+        testTrue
+          "unify: a variable takes the other side"
+          (unifies ["a"] (lst (var "a")) (lst int))
+      , testTrue
+          "unify: variables on both sides"
+          (unifies ["a", "b"] (tuple [var "a", str]) (tuple [int, var "b"]))
+      , testFalse
+          "unify: rigid heads must agree"
+          (unifies ["a"] (lst (var "a")) (tuple [int, int]))
+      , testFalse
+          "unify: a variable used twice must take one value"
+          (unifies ["a"] (tuple [var "a", var "a"]) (tuple [int, str]))
+      , testTrue
+          "unify: a variable used twice may take one value"
+          (unifies ["a"] (tuple [var "a", var "a"]) (tuple [int, int]))
+      , testFalse
+          "unify: occurs check"
+          (unifies ["a"] (var "a") (lst (var "a")))
+      , -- 'unifyU' shares one namespace between its arguments, so a name used
+        -- on both sides is one variable. Separating two types that were
+        -- quantified independently is the caller's job.
+        testFalse
+          "unify: one namespace, so a shared name is one variable"
+          (unifies ["a"] (tuple [var "a", int]) (tuple [str, var "a"]))
+      , -- The wire forms of two instances agree exactly when the substitution
+        -- unifying their heads makes the two forms one. See reports/0051.
+        testTrue
+          "wireAgrees: a specialization of a generic instance"
+          (wireAgrees (["a"], lst (var "a"), lst (var "a")) ([], lst int, lst int))
+      , testFalse
+          "wireAgrees: a list against a pair"
+          (wireAgrees (["a"], lst (var "a"), lst (var "a")) (["b"], lst (var "b"), tuple [var "b", var "b"]))
+      , testFalse
+          "wireAgrees: a list against a list of lists"
+          (wireAgrees (["a"], lst (var "a"), lst (var "a")) (["b"], lst (var "b"), lst (lst (var "b"))))
+      , testTrue
+          "wireAgrees: heads that never meet are unconstrained"
+          (wireAgrees ([], lst int, lst int) ([], lst str, tuple [str, str]))
+      , -- Both pairs quantify 'a', and they are not the same 'a'. Without
+        -- renaming them apart the heads would fail to unify and the
+        -- disagreement below would be missed.
+        testFalse
+          "wireAgrees: independently quantified names are separated"
+          ( wireAgrees
+              (["a"], tuple [var "a", int], lst (var "a"))
+              (["a"], tuple [str, var "a"], lst int)
+          )
       ]
 
 unitTypeTests :: TestTree
@@ -3216,6 +3332,115 @@ recordLiteralOrderTests =
 {- | Tests for typechecker complexity - these would timeout with O(2^n) behavior
 All tests have a 0.1-second timeout to catch exponential blowup
 -}
+-- | Arity agreement between a signature and its definition.
+--
+-- Two behaviours are covered, and both were broken by the same defect: the
+-- lambda-vs-'FunU' check compared the lambda's parameter count against the
+-- OUTERMOST argument list of the expected type, then handed the difference to
+-- 'expand'. A curried signature such as @Int -> (Int -> Int)@ presents one
+-- outer argument, so a legal two-parameter definition looked over-applied and
+-- 'expand' was called with a negative count, which appends a parameter and
+-- recurses without a base case. The compiler never returned.
+--
+-- The timeout on this group is the real assertion for the negative cases: a
+-- regression does not produce a wrong type, it diverges. Every case here
+-- completes in milliseconds once the check normalizes the expected type and
+-- rejects a genuine over-application.
+definitionArityTests :: TestTree
+definitionArityTests =
+  localOption (mkTimeout 2000000) $ -- 2 second timeout; the divergence guard
+    testGroup
+      "Definition arity"
+      [ -- Curried spellings must accept a definition of the flattened arity.
+        assertGeneralType
+          "curried signature, two parameters"
+          [r|
+          foo :: Int -> (Int -> Int)
+          foo x y = x
+          foo
+        |]
+          (fun [int, int, int])
+      , assertGeneralType
+          "curried signature, three parameters"
+          [r|
+          foo :: Int -> (Int -> (Int -> Int))
+          foo x y z = x
+          foo
+        |]
+          (fun [int, int, int, int])
+      , assertGeneralType
+          "curried in the middle"
+          [r|
+          foo :: Int -> (Int -> Int) -> Int
+          foo x f = f x
+          foo
+        |]
+          (fun [int, fun [int, int], int])
+      , assertGeneralType
+          "curried result whose argument is itself a function"
+          [r|
+          foo :: (Int -> Int) -> (Int -> Int)
+          foo f x = f x
+          foo
+        |]
+          (fun [fun [int, int], int, int])
+      , -- Flat spellings keep working, including under-application (which
+        -- eta-expands rather than erroring).
+        assertGeneralType
+          "flat signature, matching arity"
+          [r|
+          foo :: Int -> Int -> Int
+          foo x y = x
+          foo
+        |]
+          (fun [int, int, int])
+      , assertGeneralType
+          "fewer parameters than the type: eta-expansion"
+          [r|
+          add :: Int -> Int -> Int
+          foo :: Int -> Int -> Int
+          foo = add
+          foo
+        |]
+          (fun [int, int, int])
+      , -- Genuine over-application is an error, and must terminate.
+        expectError
+          "one parameter too many"
+          [r|
+          foo :: Int -> Int
+          foo x y = x
+          foo
+        |]
+      , expectError
+          "two parameters too many"
+          [r|
+          foo :: Int -> Int -> Int -> Int
+          foo x y z w = x
+          foo
+        |]
+      , expectError
+          "too many, where the first argument is a function"
+          [r|
+          foo :: (Int -> Int) -> Int
+          foo f x = f x
+          foo
+        |]
+      , expectError
+          "too many against a non-function result"
+          [r|
+          foo :: Int -> [Int]
+          foo x y = [x]
+          foo
+        |]
+      , expectError
+          "too many, polymorphic signature"
+          [r|
+          foo :: a -> a
+          foo x y = x
+          foo
+        |]
+      ]
+
 complexityRegressionTests :: TestTree
 complexityRegressionTests =
   localOption (mkTimeout 1000000) $ -- 1 second timeout

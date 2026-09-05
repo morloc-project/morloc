@@ -1,0 +1,4 @@
+Red by design: whole-list `render:` is not wired, so `morloc make` fails with a
+dfail and nothing is produced. No exp.txt has been written yet -- write the
+intended size-headered raw block and delete this file when the raw return path
+lands.

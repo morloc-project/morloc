@@ -1,0 +1,27 @@
+--' The same program with both instances giving the constructor a list wire
+--' form. The transfer is meaningful and the sum comes back.
+
+module agree (roundTrip)
+
+import root-py
+import root-cpp
+
+newtype Box a
+
+type Py  => (Box a) = "dict" a
+type Cpp => (Box a) = "BoxV<$1>" a
+
+instance Packable [a] (Box a) where
+  source Py from "helpers.py" ("pack_list" as pack, "unpack_list" as unpack)
+
+instance Packable [a] (Box a) where
+  source Cpp from "box.hpp" ("pack_vec" as pack, "unpack_vec" as unpack)
+
+source Py  from "helpers.py" ("pack_list" as mkBox)
+source Cpp from "box.hpp"    ("sum_vec" as boxSum)
+
+mkBox :: [Int] -> Box Int
+boxSum :: Box Int -> Int
+
+roundTrip :: [Int] -> Int
+roundTrip xs = boxSum (mkBox xs)

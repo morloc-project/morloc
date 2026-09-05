@@ -34,3 +34,4 @@ all:
 
 clean:
 	rm -rf nexus pools cache *.err build2.err
+	rm -rf *-build *build.tmp*

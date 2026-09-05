@@ -59,3 +59,4 @@ all:
 
 clean:
 	rm -rf nexus pools __pycache__ *.bin text.txt strs.txt ints.txt tuples_json.txt tuples_tsv.txt paths.txt
+	rm -rf *-build *build.tmp*

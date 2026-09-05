@@ -30,7 +30,7 @@ import qualified Morloc.System as MS
 import qualified System.Directory as SD
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..))
-import System.FilePath (takeDirectory, takeFileName, (</>))
+import System.FilePath (takeDirectory, takeFileName)
 import System.IO.Error (ioeGetFileName)
 import System.Process (CreateProcess (env), callProcess, createProcess, getCurrentPid, proc, waitForProcess)
 
@@ -76,11 +76,18 @@ buildProgram (manifest, wrappers, pools) = do
   liftIO $ SD.createDirectoryIfMissing True staging
   origDir <- liftIO SD.getCurrentDirectory
 
+  -- Resolve the project root while the working directory is still the one it was
+  -- parsed relative to. 'stateProjectRoot' is the entry file's directory as typed,
+  -- so `morloc make main.loc` makes it "."; resolved after the chdir below it would
+  -- name the staging directory instead of the project.
+  mProjectRoot <- MM.gets stateProjectRoot
+  projectRoot <- liftIO $ SD.makeAbsolute (fromMaybe "." mProjectRoot)
+
   ( do
       liftIO $ MT.writeFile (staging </> buildMarker) ""
       liftIO $ SD.createDirectoryIfMissing True dst
       liftIO $ SD.setCurrentDirectory dst
-      buildAll (manifest : pools)
+      buildAll projectRoot (manifest : pools)
       liftIO $ SD.setCurrentDirectory origDir
       liftIO $ swapIn staging swapTarget
     ) `catchError` \e -> do
@@ -99,15 +106,18 @@ buildProgram (manifest, wrappers, pools) = do
     -- files ever get written. Between the two, provision the program's
     -- declared dependencies (a no-op outside a managed environment), so the
     -- pool compiles find the required headers/libraries/interpreters.
-    buildAll ss = do
+    buildAll projectRoot ss = do
       mapM_ writeScript ss
-      syncEnvDeps
+      syncEnvDeps projectRoot
       mapM_ runMakes ss
 
 -- | Provision a program's declared package dependencies before its pools are
 -- compiled, by invoking the environment's build hook: an external program named
 -- by @MORLOC_BUILD_HOOK@ (the in-environment dependency agent, e.g. @mim-env@),
--- run as @<hook> sync --name <key> --spec envspec.json@. Runs only when BUILDING
+-- run as @<hook> sync --name <key> --spec envspec.json --root <projectRoot>@.
+-- @projectRoot@ is the absolute directory the hook resolves local (filesystem
+-- path) dependencies against; the caller resolves it before the build changes
+-- directory, since this runs from inside the staging tree. Runs only when BUILDING
 -- (not eval, not install -- the manager provisions those) INSIDE a managed
 -- environment (@MORLOC_ENV@ set) a program that actually DECLARES dependencies;
 -- every other case is a silent no-op. CWD is the staging build dir, so the
@@ -121,13 +131,12 @@ buildProgram (manifest, wrappers, pools) = do
 -- hook's message. A managed environment with no hook set is an ERROR: it
 -- provably expects provisioning but has no provisioner, so the build fails now
 -- with an actionable message rather than at pool compile on missing deps.
-syncEnvDeps :: MorlocMonad ()
-syncEnvDeps = do
+syncEnvDeps :: FilePath -> MorlocMonad ()
+syncEnvDeps projectRoot = do
   metas <- MM.gets statePackageMeta
   mKey <- MM.gets stateProgramKey
   isEval <- MM.gets stateEvalMode
   isInstall <- MM.gets stateInstall
-  mRoot <- MM.gets stateProjectRoot
   usesLangs <- MM.gets stateEnvSpecLangs
   mEnv <- liftIO $ lookupEnv "MORLOC_ENV"
   let declaresDeps = any packageHasDeps metas
@@ -138,10 +147,9 @@ syncEnvDeps = do
       -- is cached) when the world is already up to date.
       needsSync = declaresDeps || not (null usesLangs)
   case (mEnv, mKey) of
-    (Just env, Just key)
-      | not (null env) && needsSync && not isEval && not isInstall -> do
-          root <- liftIO $ maybe (return ".") SD.makeAbsolute mRoot
-          runSync declaresDeps key root
+    (Just envVal, Just key)
+      | not (null envVal) && needsSync && not isEval && not isInstall ->
+          runSync declaresDeps key projectRoot
     _ -> return ()
   where
     packageHasDeps pm =

@@ -1,3 +1,7 @@
+-- A C++ Matrix crossing to the nexus. Matrix is
+-- ((Int, Int), Vector (m * n) a), so the JSON is the shape pair
+-- followed by the flat row-major data, not nested rows.
+
 module main (makeMatrix)
 
 import root

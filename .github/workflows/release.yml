@@ -349,6 +349,26 @@ jobs:
           print(json.dumps(manifest, indent=2))
           PY
 
+      - name: Fetch stdlib module-pin snapshot
+        run: |
+          # stdlib is built/tested on the dev compiler and pushed BEFORE this
+          # release, so its committed snapshot.txt is this morloc version's pin
+          # set. Publish it as `stdlib-snapshot.txt`; `mim new` fetches it as the
+          # default stdlib and deposits it into new environments.
+          fetched=""
+          for branch in master main; do
+            if curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused \
+                 "https://raw.githubusercontent.com/morloclib/stdlib/$branch/snapshot.txt" \
+                 -o stdlib-snapshot.txt; then
+              fetched="$branch"; break
+            fi
+          done
+          if [ -z "$fetched" ]; then
+            echo "::error::could not fetch snapshot.txt from morloclib/stdlib (is it committed?)"
+            exit 1
+          fi
+          echo "fetched stdlib snapshot from '$fetched' ($(grep -cv '^#' stdlib-snapshot.txt) pins)"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -358,4 +378,5 @@ jobs:
             morloc-rust-src.tar.gz
             morloc-release-manifest.json
             morloc-lang-support.json
+            stdlib-snapshot.txt
           generate_release_notes: true

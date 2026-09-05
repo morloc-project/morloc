@@ -69,6 +69,6 @@ catchLoadNested =
 -- level (Err escapes to the export signature, which declares it).
 directOpenSucceeds :: Str -> <IO, Err> Str
 directOpenSucceeds path = do
-  @save 0 "morloc-payload" path
+  @save 0 path "morloc-payload"
   s <- @load path :: <IO, Err> Str
   s

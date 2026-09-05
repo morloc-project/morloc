@@ -37,6 +37,7 @@ module Morloc.Namespace.State
 
     -- * Package metadata
   , PackageMeta (..)
+  , defaultCppVersion
   , DepSpec (..)
   , RegDep (..)
   , LocalDep (..)
@@ -76,7 +77,6 @@ module Morloc.Namespace.State
   , LangRegistryEntry (..)
   ) where
 
-import Control.Applicative ((<|>))
 import Control.Monad.Except (ExceptT)
 import Control.Monad.Reader (ReaderT)
 import Control.Monad.State (StateT)
@@ -157,6 +157,11 @@ data MorlocState = MorlocState
   , stateTermDocs :: Map.Map EVar [Text]
   -- ^ Declaration-level docstrings keyed by term name. Takes precedence over
   -- signature docstrings for the command-level description.
+  , stateStreamElems :: Map.Map EVar TypeU
+  -- ^ For each command that streams its output through @collect, the batch
+  -- type it writes to standard output. Such a command returns @()@, so the
+  -- signature alone cannot say what a caller receives; see
+  -- 'Morloc.Frontend.Desugar.collectStreamType'.
   , stateManifoldConfig :: Map Int ManifoldConfig
   , stateLogTemplate :: Maybe LogTemplate
   -- ^ Program-wide log message template from the main module's YAML
@@ -228,6 +233,16 @@ data MorlocState = MorlocState
   -- ^ When False, import resolution ignores local/project-relative
   -- modules and resolves only installed (system) modules. False in
   -- eval mode (the API sandbox boundary) unless --allow-local-modules.
+  , stateAutoInstall :: Bool
+  -- ^ When True, a missing bare/namespaced module dependency is auto-downloaded
+  -- during import resolution. Enabled only by `morloc make` (and disabled there
+  -- by `--offline`); left False for read-only commands (typecheck, dump) and for
+  -- eval/served mode, so those never trigger network installs.
+  , stateSnapshot :: Map.Map Text Text
+  -- ^ Module-pin snapshot: module name -> exact git hash, merged from the env's
+  -- snapshot directory. Consulted AUTHORITATIVELY during on-demand module
+  -- resolution (a snapshot pin overrides package pins). Loaded lazily on the
+  -- make/install path; empty otherwise (read-only commands, no env).
   , stateEvalSandbox :: Maybe (Set.Set MVar)
   -- ^ Nothing = trusted eval (dev CLI): no extra gates. Just mods =
   -- sandboxed eval (served): only these modules may be imported at the
@@ -635,6 +650,14 @@ checkPackageDeps pm =
               "local dependencies are not supported for " <> lang
                 <> " (packages: " <> pkgs <> "); supported for: py, rust."
 
+-- | The C++ standard assumed when a package does not name one. Both the
+-- 'Defaultable' instance (no @package.yaml@ at all) and the 'FromJSON' instance
+-- (a @package.yaml@ that omits @cpp-version@) read it, so the two cannot
+-- diverge: creating a @package.yaml@ must not change the standard a project
+-- builds against.
+defaultCppVersion :: Int
+defaultCppVersion = 20
+
 data PackageMeta
   = PackageMeta
   { packageName :: !Text
@@ -648,6 +671,9 @@ data PackageMeta
   , packageMaintainer :: !Text
   , packageGithub :: !Text
   , packageBugReports :: !Text
+  -- | The C++ standard the package's pool is built against, as a bare year
+  -- (20, 23, ...). Defaults to 'defaultCppVersion' whether or not the package
+  -- declares one.
   , packageCppVersion :: !Int
   , packageDependencies :: [Text]
   -- | Extra flags appended to the C++ pool compile line (e.g. -O3,
@@ -870,6 +896,7 @@ instance Defaultable MorlocState where
       , stateExports = []
       , stateName = Map.empty
       , stateTermDocs = Map.empty
+      , stateStreamElems = Map.empty
       , stateManifoldConfig = Map.empty
       , stateLogTemplate = Nothing
       , stateRunLog = Nothing
@@ -896,6 +923,8 @@ instance Defaultable MorlocState where
       , stateEnvSpecLangs = []
       , stateEvalMode = False
       , stateAllowLocalModules = True
+      , stateAutoInstall = False
+      , stateSnapshot = Map.empty
       , stateEvalSandbox = Nothing
       , stateUnsafeSkipNullCheck = False
       , stateInlineSize = Nothing
@@ -921,7 +950,7 @@ instance Defaultable PackageMeta where
       , packageMaintainer = ""
       , packageGithub = ""
       , packageBugReports = ""
-      , packageCppVersion = 20
+      , packageCppVersion = defaultCppVersion
       , packageDependencies = []
       , packageCxxFlags = []
       , packageRustDeps = Map.empty
@@ -981,7 +1010,7 @@ instance FromJSON PackageMeta where
       <*> o .:? "maintainer" .!= ""
       <*> o .:? "github" .!= ""
       <*> o .:? "bug-reports" .!= ""
-      <*> o .:? "cpp-version" .!= 0
+      <*> o .:? "cpp-version" .!= defaultCppVersion
       <*> o .:? "dependencies" .!= []
       <*> o .:? "cxx-flags" .!= []
       <*> o .:? "rust-deps" .!= Map.empty
@@ -993,12 +1022,28 @@ instance FromJSON PackageMeta where
       <*> o .:? "lang-versions" .!= Map.empty
       <*> o .:? "include"
       <*> o .:? "morloc-version"
-      <*> (o .:? "morloc-dependencies" .!= [] >>= mapM parseMorlocDep)
+      <*> parseMorlocDeps o
       <*> o .:? "setup"
       <*> o .:? "expose" .!= defaultValue
     where
       parseMorlocDep = Aeson.withObject "morloc-dependency" $ \od ->
-        (,) <$> od Aeson..: "name" <*> od Aeson..: "git-hash"
+        (,) <$> od Aeson..: "name" <*> (od Aeson..: "git-hash" >>= parseGitHash)
+      -- A git-hash must be a quoted string. An unquoted, all-numeric hash is
+      -- read by YAML as a number; coercing it back to text would silently drop
+      -- leading zeros, so we reject it with an actionable message instead.
+      parseGitHash (Aeson.String t) = pure t
+      parseGitHash _ =
+        fail
+          "git-hash must be a quoted string, e.g. git-hash: \"00a1b2...\" \
+          \(an unquoted all-numeric hash is read as a number and would lose \
+          \any leading zeros)"
+      -- Accept the canonical `morloc-deps` key, falling back to the deprecated
+      -- `morloc-dependencies` alias. `morloc-deps` wins when both are present.
+      -- The deprecation warning is emitted at load time (see loadModuleMetadata).
+      parseMorlocDeps obj = do
+        primary <- obj .:? "morloc-deps"
+        legacy  <- obj .:? "morloc-dependencies"
+        mapM parseMorlocDep (maybe [] id (primary <|> legacy))
 
 instance FromJSON ExposeSet where
   parseJSON = Aeson.withObject "expose" $ \o ->

@@ -62,6 +62,11 @@ forceSpec = either (error . T.unpack) id
 decodeDep :: BL.ByteString -> Either String DepSpec
 decodeDep = eitherDecode
 
+-- Parse a whole package.yaml body (as JSON, which YAML decodes to) via the
+-- PackageMeta FromJSON instance.
+decodeMeta :: BL.ByteString -> Either String PackageMeta
+decodeMeta = eitherDecode
+
 -- A module declaring Python + Rust deps, a bare C++ link lib, and a module pin.
 -- Python sources are explicit; the Rust crate lets its source default to crates.
 pmA :: PackageMeta
@@ -116,6 +121,23 @@ envSpecTests =
             assertBool "crates+channel must be rejected" (isLeft (decodeDep "{\"source\":\"crates\",\"channel\":\"x\"}"))
         , testCase "an unknown source is a parse error" $
             assertBool "unknown source must be rejected" (isLeft (decodeDep "{\"source\":\"npm\"}"))
+        ]
+    , testGroup
+        "FromJSON PackageMeta agrees with the no-package.yaml defaults"
+        [ testCase "an omitted cpp-version defaults to the same standard as no package.yaml" $
+            case decodeMeta "{\"name\":\"dnd\"}" of
+              Right m -> packageCppVersion m @?= packageCppVersion (defaultValue :: PackageMeta)
+              Left e -> assertFailure ("package.yaml should parse: " <> e)
+        , testCase "an explicit cpp-version wins" $
+            case decodeMeta "{\"name\":\"dnd\",\"cpp-version\":23}" of
+              Right m -> packageCppVersion m @?= 23
+              Left e -> assertFailure ("package.yaml should parse: " <> e)
+        , testCase "a decoded meta still emits the cpp std on the wire" $
+            case decodeMeta "{\"name\":\"dnd\"}" of
+              Right m ->
+                esLanguages (forceSpec (buildEnvSpec "0.98.2" [makeLang "cpp" "cpp"] [m]))
+                  @?= [LangReq "cpp" Nothing (Just "c++20")]
+              Left e -> assertFailure ("package.yaml should parse: " <> e)
         ]
     , testGroup
         "FromJSON LocalDep"

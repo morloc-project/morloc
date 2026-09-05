@@ -7,4 +7,5 @@ all:
 	done
 
 clean:
-	rm -rf nexus pools .morloc-build build.err
+	rm -rf nexus pools build.err
+	rm -rf *-build *build.tmp*

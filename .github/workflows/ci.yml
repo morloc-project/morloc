@@ -148,6 +148,10 @@ jobs:
           MORLOC_RUST_DIR=$(pwd)/data/rust morloc init -f
           morloc install stdlib
 
+      - name: Test rust runtime and nexus
+        run: cargo test --workspace --manifest-path data/rust/Cargo.toml
+        timeout-minutes: 20
+
       - name: Test morloc
         run: |
           stack test --system-ghc --no-install-ghc morloc:morloc-test

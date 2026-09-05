@@ -15,6 +15,7 @@ module Morloc.Test.Common
   , assertJsonEq
   -- Daemon helpers
   , DaemonHandle (..)
+  , daemonStderr
   , withDaemon
   , pickFreePort
   , waitForHttp
@@ -59,6 +60,7 @@ import System.Process
   , ProcessHandle
   , StdStream (..)
   , createProcess
+  , getProcessExitCode
   , proc
   , readCreateProcessWithExitCode
   , readProcessWithExitCode
@@ -67,9 +69,19 @@ import System.Process
   )
 import Test.Tasty.HUnit (Assertion, assertBool, assertFailure)
 
+-- | Where the tests look for what morloc writes.
+--
+-- Morloc splits its installation in two: @teMorlocHome@ is the runtime prefix
+-- (the compiler, the nexus, the shared library, and the @bin\/@ launchers put
+-- on PATH), while @teMorlocState@ is the mutable state root that holds
+-- everything an install creates -- @exe\/@, @fdb\/@, installed module sources.
+-- The two coincide on a plain host install and diverge whenever
+-- @$MORLOC_STATE@ is set, which is how every containerized environment runs.
+-- A test that derives both from one root passes only on the former.
 data TestEnv = TestEnv
   { teSuiteDir :: FilePath
   , teMorlocHome :: FilePath
+  , teMorlocState :: FilePath
   }
 
 -- | Create a temp directory, run action, clean up
@@ -174,7 +186,14 @@ runNexusQuiet workDir subcmd args = do
 data DaemonHandle = DaemonHandle
   { dhProcess :: ProcessHandle
   , dhWorkDir :: FilePath
+  , dhErrLog :: FilePath
   }
+
+-- | Whatever the daemon wrote to stderr so far.
+daemonStderr :: DaemonHandle -> IO String
+daemonStderr dh = do
+  ok <- doesFileExist (dhErrLog dh)
+  if ok then readFile (dhErrLog dh) else return ""
 
 -- | Start a daemon, run action, stop daemon
 withDaemon ::
@@ -187,19 +206,40 @@ withDaemon ::
 withDaemon workDir extraArgs action = bracket startD stopD action
   where
     -- Daemon-mode argv shape: `morloc-nexus daemon <target> [opts...]`.
-    -- The wrapper script `morloc make` produced sits at
-    -- `<workDir>/nexus`; the resolver extracts the manifest.json path
-    -- from the wrapper's exec line (`cli::resolve_manifest_target`).
+    -- The launcher `morloc make` produced sits at `<workDir>/nexus` and
+    -- declares the manifest it points at; the resolver reads that
+    -- declaration (`cli::resolve_manifest_target`).
     startD = do
       devNull <- openFile "/dev/null" WriteMode
+      -- Keep stderr. A daemon that refuses to start says why on stderr, and
+      -- discarding it turns every such failure into "did not become ready"
+      -- from whichever listener the test happens to probe.
+      let errLog = workDir </> "daemon.err"
+      errH <- openFile errLog WriteMode
       let cp =
             (proc "morloc-nexus" ("daemon" : (workDir </> "nexus") : extraArgs))
               { cwd = Just workDir
               , std_out = UseHandle devNull
-              , std_err = UseHandle devNull
+              , std_err = UseHandle errH
               }
       (_, _, _, ph) <- createProcess cp
-      return (DaemonHandle ph workDir)
+      hClose errH
+      let dh = DaemonHandle ph workDir errLog
+      -- A daemon that dies during startup is always the failure, whatever the
+      -- test was about to probe, so report its own diagnosis here rather than
+      -- letting the test time out against a listener that was never opened.
+      threadDelay 300000
+      mExit <- getProcessExitCode ph
+      case mExit of
+        Nothing -> return dh
+        Just ec -> do
+          err <- daemonStderr dh
+          assertFailure $
+            "daemon exited during startup ("
+              ++ show ec
+              ++ ") in "
+              ++ workDir
+              ++ (if null (strip err) then "" else ":\n" ++ err)
     stopD dh = do
       terminateProcess (dhProcess dh)
       _ <- waitForProcess (dhProcess dh)

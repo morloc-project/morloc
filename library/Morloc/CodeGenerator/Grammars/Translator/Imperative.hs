@@ -88,7 +88,7 @@ import Morloc.CodeGenerator.Grammars.Common
   )
 import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..))
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (isSerializable, serialAstToMsgpackSchema)
+import Morloc.CodeGenerator.Serial (isSerializable, serialAstHasString, serialAstToMsgpackSchema)
 import Morloc.Data.Doc
 import Morloc.Monad (IndexState)
 
@@ -130,7 +130,12 @@ data IExpr
   | IRecordLit NamType FVar [(Key, IExpr)]
   | IAccess IExpr IAccessor
   | ISerCall Int IExpr -- put_value(schemaId, expr)
-  | IDesCall Int (Maybe IType) IExpr -- get_value[<T>](schemaId, expr); type used by C++ template
+  -- get_value[<T>](schemaId, expr); type used by C++ template. The Bool says
+  -- whether the deserialized type carries a native string anywhere inside it,
+  -- which is what a receiving language that cannot hold an interior NUL needs
+  -- to know. It is carried here rather than decided in the printer because
+  -- only this layer still has the SerialAST.
+  | IDesCall Int (Maybe IType) Bool IExpr
   | IForeignCall Text Int [IExpr]
   | IRemoteCall Text Int RemoteResources [IExpr]
   | ILambda [Text] IExpr
@@ -695,14 +700,14 @@ expandDeserialize cfg v0 s0
   | isMsgpackLeaf cfg s0 = do
       schemaId <- lcRegisterSchema cfg (render $ serialAstToMsgpackSchema s0)
       desType <- lcDeserialAstType cfg s0
-      return (IDesCall schemaId desType (IRawExpr (render v0)), [])
+      return (IDesCall schemaId desType (serialAstHasString s0) (IRawExpr (render v0)), [])
   | otherwise = do
       idx <- lcNewIndex cfg
       rawType <- lcRawDeserialAstType cfg s0
       let rawvar = render $ helperNamer idx
       schemaId <- lcRegisterSchema cfg (render $ serialAstToMsgpackSchema s0)
       (x, befores) <- check (helperNamer idx) s0
-      return (x, IAssign rawvar rawType (IDesCall schemaId rawType (IRawExpr (render v0))) : befores)
+      return (x, IAssign rawvar rawType (IDesCall schemaId rawType (serialAstHasString s0) (IRawExpr (render v0))) : befores)
   where
     check v s
       | isMsgpackLeaf cfg s = return (IRawExpr (render v), [])
@@ -1030,6 +1035,19 @@ lowerNativeExpr cfg origExpr (RecordN_ o v ps rs) = do
       }
 lowerNativeExpr cfg _ (LogN_ _ v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IBoolLit v)}
 lowerNativeExpr cfg _ (RealN_ (FV _ cv) v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IRealLit (Just (unCVar cv)) v)}
+-- An integer literal whose slot resolved to a real type must be emitted in
+-- float form. The typechecker deliberately allows Int-literal-to-real
+-- promotion (it is what lets @4 + 2.3@ check), and the nexus side already
+-- converts through 'Morloc.CodeGenerator.NumericLiteral.resolveNumericLiteral'.
+-- The pool side emitted a bare integer, so a promoted literal reaching an F32
+-- slot was written as a Python @int@ against an @f4@ schema and rejected at
+-- run time by @pybinding__put_value@. Dispatch on the GENERAL type, which is
+-- the only place the promotion is visible; the concrete name is still passed
+-- through for the target language's own literal suffix.
+lowerNativeExpr cfg _ (IntN_ (FV gv cv) v)
+  | BT.isRealBaseType (VarU gv) =
+      return $ defaultValue
+        {poolExpr = lcPrintExpr cfg (IRealLit (Just (unCVar cv)) (RealFinite (fromInteger v)))}
 lowerNativeExpr cfg _ (IntN_ (FV _ cv) v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IIntLit (Just (unCVar cv)) v)}
 lowerNativeExpr cfg _ (StrN_ (FV _ cv) v) =
   let hint = if cv == CV "" then Nothing else Just (unCVar cv)
@@ -1082,7 +1100,10 @@ lowerNativeExpr cfg (IntrinsicN _ _ _ [dataE]) (IntrinsicN_ _ IntrHash (Just sch
   -- ('&(&Vec)'). No-op where 'lcOwnArg' is identity (C++/py/r).
   dataDocs' <- adaptOwnedElem cfg dataE dataDocs
   return $ dataDocs' {poolExpr = lcPrintExpr cfg (IIntrinsicHash sid (IRawExpr (render (poolExpr dataDocs'))))}
-lowerNativeExpr cfg (IntrinsicN _ _ _ [_, dataE, _]) (IntrinsicN_ _ IntrSave (Just schema) [levelDocs, dataDocs, pathDocs]) = do
+-- @save takes source args in (level, path, value) order; path-first
+-- (after the level) mirrors @savem/@savej. The runtime ABI is unchanged:
+-- IIntrinsicSave keeps (level, data, path).
+lowerNativeExpr cfg (IntrinsicN _ _ _ [_, _, dataE]) (IntrinsicN_ _ IntrSave (Just schema) [levelDocs, pathDocs, dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
   -- The saved value crosses into a 'ToVoidstar' (&T) sink; own-adapt it (see
   -- @hash above). level and path are scalar/Str, not value sinks.
@@ -1092,7 +1113,7 @@ lowerNativeExpr cfg (IntrinsicN _ _ _ [_, dataE, _]) (IntrinsicN_ _ IntrSave (Ju
                    (IRawExpr (render (poolExpr levelDocs)))
                    (IRawExpr (render (poolExpr dataDocs')))
                    (IRawExpr (render (poolExpr pathDocs)))
-   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [levelDocs, dataDocs', pathDocs]
+   in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [levelDocs, pathDocs, dataDocs']
 -- @savem/@savej take source args in (path, value) order for
 -- partial-application ergonomics (`@savem path` is a reusable sink).
 -- The runtime ABI is unchanged: IIntrinsicSave keeps (level, data, path).

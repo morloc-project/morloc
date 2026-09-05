@@ -1,0 +1,28 @@
+--' One instance supplying pack/unpack in two languages. Each pool builds its
+--' own serializer from the source declared for it; the instance is shared.
+
+module twoSources (howPy, howCpp)
+
+import root-py
+import root-cpp
+
+newtype Box a
+
+type Py  => (Box a) = "dict" a
+type Cpp => (Box a) = "Box<$1>" a
+
+instance Packable [a] (Box a) where
+  source Py  from "helpers.py" ("pack_generic" as pack, "unpack_generic" as unpack)
+  source Cpp from "box.hpp"    ("pack_box" as pack, "unpack_box" as unpack)
+
+source Py  from "helpers.py" ("how" as howP)
+source Cpp from "box.hpp"    ("how_box" as howC)
+
+howP :: Box a -> Str
+howC :: Box a -> Str
+
+howPy :: Box Int -> Str
+howPy = howP
+
+howCpp :: Box Int -> Str
+howCpp = howC

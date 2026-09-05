@@ -75,8 +75,8 @@ printExpr (IAccess e (IIdx i)) = "std::get<" <> pretty i <> ">(" <> printExpr e 
 printExpr (IAccess e (IKey _)) = printExpr e -- should not be reached for C++
 printExpr (IAccess e (IField f)) = printExpr e <> "." <> pretty f
 printExpr (ISerCall sid e) = [idoc|_put_value(#{printExpr e}, mlc_schema_table[#{pretty sid}])|]
-printExpr (IDesCall sid (Just rawtype) e) = [idoc|_get_value<#{renderIType rawtype}>(#{printExpr e}, mlc_schema_table[#{pretty sid}])|]
-printExpr (IDesCall sid Nothing e) = [idoc|_get_value(#{printExpr e}, mlc_schema_table[#{pretty sid}])|]
+printExpr (IDesCall sid (Just rawtype) _ e) = [idoc|_get_value<#{renderIType rawtype}>(#{printExpr e}, mlc_schema_table[#{pretty sid}])|]
+printExpr (IDesCall sid Nothing _ e) = [idoc|_get_value(#{printExpr e}, mlc_schema_table[#{pretty sid}])|]
 printExpr (IPack packer e) = pretty packer <> parens (printExpr e)
 printExpr (ICall f Nothing argGroups) =
   pretty f <> hsep (map (tupled . map printExpr) argGroups)

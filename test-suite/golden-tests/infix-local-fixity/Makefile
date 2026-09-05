@@ -6,3 +6,4 @@ all:
 
 clean:
 	rm -rf nexus pools log
+	rm -rf *-build *build.tmp*

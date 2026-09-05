@@ -1,0 +1,13 @@
+Obsolete: written against a representation the standard library no longer
+uses. The test feeds `Matrix 2 3 Int` a nested list (`[[1,2,3],[4,5,6]]`) and
+expects "Array length mismatch" on a wrong shape, which was right when
+`Matrix m n a` was an alias for `[[a]]`. It is now a newtype whose wire form
+is `((Int, Int), Vector (m * n) a)`, so the CLI takes a dimension pair and a
+flat vector: `[[2,3],[1,2,3,4,5,6]]`.
+
+Rewriting it against the current form is not just a transcription, because
+the shape it would assert is not enforced. `Vector n a` does check a literal
+dimension, but the computed `Vector (m * n) a` inside Matrix's wire form does
+not: `Matrix 2 3 Int` accepts a 5-element or 2-element payload, and accepts a
+dimension pair that contradicts its own type. See reports/0064, which has the
+transcript. Settle what the boundary should check, then write this test to it.

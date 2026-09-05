@@ -72,7 +72,6 @@ printf "  %sfailed%s: %s\n" "$RED" "$RESET" "${FAILED[*]:-(none)}"
 [[ ${#MISSING[@]} -gt 0 ]] && printf "  missing: %s\n" "${MISSING[*]}"
 
 # Suites not yet wired (no runner defined):
-#   cmorloc-tests           - libmorloc C-API tests
 #   error-message-tests     - compiler diagnostic wording
 #   executable-benchmark    - distributed / parallel-interop / serial-interop
 #   shm-tests               - ad-hoc /dev/shm fixtures (no runner)

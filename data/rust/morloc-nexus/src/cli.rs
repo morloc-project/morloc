@@ -22,6 +22,8 @@
 //! `morloc-nexus`, and only the manifest knows the user's exported
 //! command surface.
 
+use std::path::Path;
+
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
 use crate::dispatch::{NexusConfig, OutputFormat};
@@ -920,10 +922,16 @@ pub fn resolve_manifest_target(target: &str) -> Result<String, String> {
     };
 
     if head.starts_with("#!") && head.contains("morloc-nexus") {
-        match extract_manifest_from_wrapper(head) {
+        // Preferred: the launcher declares its manifest outright. Fall back to
+        // reading the exec line when it carries no declaration.
+        if let Some(p) = manifest_from_marker(head, target) {
+            return Ok(p);
+        }
+        match extract_manifest_from_wrapper(head, target) {
             Some(p) => Ok(p),
             None => Err(format!(
-                "'{}' looks like a morloc wrapper but no manifest path was found on its exec line",
+                "'{}' looks like a morloc wrapper but declares no manifest path. \
+                 Rebuild it with `morloc make`.",
                 target
             )),
         }
@@ -932,19 +940,96 @@ pub fn resolve_manifest_target(target: &str) -> Result<String, String> {
     }
 }
 
-/// Extract the single-quoted manifest path from a wrapper's
-/// `exec morloc-nexus <mode> '<path>' "$@"` line, reversing the POSIX
-/// single-quote escaping the compiler applies (see
-/// `Morloc.CodeGenerator.Nexus.shellQuote`).
-fn extract_manifest_from_wrapper(content: &str) -> Option<String> {
+/// The launcher line that declares the manifest, byte-identical to
+/// `manifestMarkerPrefix` in the compiler
+/// (`library/Morloc/CodeGenerator/Nexus.hs`). Reading a declared fact is what
+/// keeps this side from being a second, informal implementation of the
+/// launcher format: nothing here interprets shell.
+const MANIFEST_MARKER: &str = "# morloc-manifest: ";
+
+/// Recover the manifest from a launcher's declaration line. A relative path is
+/// resolved against the directory holding the launcher, which is what lets a
+/// build tree be moved or bind-mounted at another path.
+fn manifest_from_marker(content: &str, target: &str) -> Option<String> {
+    let declared = content
+        .lines()
+        .find_map(|l| l.strip_prefix(MANIFEST_MARKER))?
+        .trim();
+    if declared.is_empty() {
+        return None;
+    }
+    Some(resolve_against_launcher(declared, target))
+}
+
+/// Join a launcher-relative path to the launcher's own directory, passing an
+/// absolute path through unchanged.
+fn resolve_against_launcher(path: &str, target: &str) -> String {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        return path.to_string();
+    }
+    Path::new(target)
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(p)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Recover the manifest from a launcher that carries no declaration, by
+/// reading its `exec` line. Two such shapes exist, and both must be read
+/// because a build tree outlives the compiler that wrote it:
+///
+/// - `exec morloc-nexus <mode> '<abs path>' "$@"` -- POSIX single-quoted,
+///   reversing `Morloc.CodeGenerator.Nexus.shellQuote`.
+/// - `exec morloc-nexus <mode> "$d/<rel path>" "$@"` -- double-quoted and
+///   relative to the launcher's directory, which the launcher computes into
+///   `$d` at run time; reversing `Nexus.dquoteEsc`.
+///
+/// Interpreting shell is exactly what the declaration line exists to avoid, so
+/// nothing new should be added here; new launchers carry the declaration.
+fn extract_manifest_from_wrapper(content: &str, target: &str) -> Option<String> {
     let line = content.lines().find(|l| {
         let t = l.trim_start();
         t.starts_with("exec morloc-nexus") || t.starts_with("morloc-nexus")
     })?;
-    let first = line.find('\'')?;
+    if let Some(first) = line.find('\'') {
+        let rest = &line[first + 1..];
+        let last = rest.rfind('\'')?;
+        return Some(rest[..last].replace("'\\''", "'"));
+    }
+    // Double-quoted, launcher-relative form. Take the argument between the
+    // quotes, drop the `$d/` the launcher expands to its own directory, and
+    // resolve what remains against that directory ourselves.
+    let first = line.find('"')?;
     let rest = &line[first + 1..];
-    let last = rest.rfind('\'')?;
-    Some(rest[..last].replace("'\\''", "'"))
+    let last = rest.find('"')?;
+    let arg = &rest[..last];
+    let rel = arg.strip_prefix("$d/")?;
+    Some(resolve_against_launcher(&undquote_esc(rel), target))
+}
+
+/// Reverse `Morloc.CodeGenerator.Nexus.dquoteEsc`: inside a double-quoted
+/// shell word, a backslash escapes the four characters the shell would
+/// otherwise interpret.
+fn undquote_esc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some(n @ ('\\' | '"' | '$' | '`')) => out.push(n),
+                Some(n) => {
+                    out.push('\\');
+                    out.push(n);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 // ============================================================
@@ -2424,27 +2509,147 @@ mod tests {
         p.to_string_lossy().into_owned()
     }
 
-    /// Build a synthetic thin wrapper of the shape the compiler emits:
-    /// a pure-shell launcher that execs `morloc-nexus <mode> '<path>'`.
-    fn wrapper_for(manifest_path: &str) -> Vec<u8> {
+    // The launcher shapes the compiler actually emits, reproduced verbatim
+    // from `Morloc.CodeGenerator.Nexus.makeWrapperScript`. These must stay
+    // byte-identical to it: a helper that invents its own shape validates the
+    // reader against a fiction, which is how the launcher format and this
+    // reader drifted apart once already.
+
+    /// `morloc make`: travels with its build tree, so the manifest is declared
+    /// relative to the launcher and the exec line resolves it through `$d`.
+    fn wrapper_self_relative(rel_manifest: &str) -> Vec<u8> {
         format!(
-            "#!/bin/sh\nexec morloc-nexus run '{}' \"$@\"\n",
+            "#!/bin/sh\n\
+             # morloc-manifest: {rel}\n\
+             export MORLOC_PROG_NAME=\"$0\"\n\
+             self=\"$0\"\n\
+             case \"$self\" in */*) : ;; *) self=$(command -v -- \"$self\") ;; esac\n\
+             d=$(CDPATH= cd -- \"$(dirname -- \"$self\")\" && pwd)\n\
+             exec morloc-nexus run \"$d/{rel}\" \"$@\"\n",
+            rel = rel_manifest
+        )
+        .into_bytes()
+    }
+
+    /// `morloc make --install`: anchored at a fixed `exe/<key>`, so the
+    /// manifest is declared and quoted absolutely.
+    fn wrapper_absolute(manifest_path: &str) -> Vec<u8> {
+        format!(
+            "#!/bin/sh\n\
+             # morloc-manifest: {p}\n\
+             export MORLOC_PROG_NAME=\"$0\"\n\
+             exec morloc-nexus run '{p}' \"$@\"\n",
+            p = manifest_path
+        )
+        .into_bytes()
+    }
+
+    /// A launcher carrying no declaration, in the self-relative shape. Build
+    /// trees outlive the compiler that wrote them, so this must still resolve.
+    fn undeclared_wrapper_self_relative(rel_manifest: &str) -> Vec<u8> {
+        format!(
+            "#!/bin/sh\n\
+             export MORLOC_PROG_NAME=\"$0\"\n\
+             self=\"$0\"\n\
+             case \"$self\" in */*) : ;; *) self=$(command -v -- \"$self\") ;; esac\n\
+             d=$(CDPATH= cd -- \"$(dirname -- \"$self\")\" && pwd)\n\
+             exec morloc-nexus run \"$d/{rel}\" \"$@\"\n",
+            rel = rel_manifest
+        )
+        .into_bytes()
+    }
+
+    /// A launcher carrying no declaration, in the absolute shape.
+    fn undeclared_wrapper_absolute(manifest_path: &str) -> Vec<u8> {
+        format!(
+            "#!/bin/sh\nexport MORLOC_PROG_NAME=\"$0\"\nexec morloc-nexus run '{}' \"$@\"\n",
             manifest_path
         )
         .into_bytes()
     }
 
-    #[test]
-    fn resolves_wrapper_to_manifest_path() {
+    /// Write `bytes` as a launcher in a fresh temp dir and resolve it.
+    fn resolve_launcher(tag: &str, name: &str, bytes: &[u8]) -> (String, std::path::PathBuf) {
         let tmp = std::env::temp_dir().join(format!(
-            "morloc-nexus-resolve-{}",
+            "morloc-nexus-{}-{}",
+            tag,
             std::process::id()
         ));
         std::fs::create_dir_all(&tmp).unwrap();
+        let path = write_tmp(&tmp, name, bytes);
+        let resolved = resolve_manifest_target(&path).unwrap();
+        (resolved, tmp)
+    }
+
+    #[test]
+    fn resolves_absolute_wrapper_to_manifest_path() {
         let manifest = "/abs/path/foo-build/manifest.json";
-        let path = write_tmp(&tmp, "morloc-prog", &wrapper_for(manifest));
-        let result = resolve_manifest_target(&path).unwrap();
-        assert_eq!(result, manifest);
+        let (resolved, tmp) =
+            resolve_launcher("abs", "morloc-prog", &wrapper_absolute(manifest));
+        assert_eq!(resolved, manifest);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn resolves_self_relative_wrapper_against_its_own_directory() {
+        // The shape `morloc make` emits. The declared path is relative, so it
+        // resolves beside the launcher wherever the tree has been moved to.
+        let (resolved, tmp) = resolve_launcher(
+            "selfrel",
+            "nexus",
+            &wrapper_self_relative("nexus-build/manifest.json"),
+        );
+        assert_eq!(resolved, tmp.join("nexus-build/manifest.json").to_string_lossy());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn resolves_a_second_launcher_beside_the_first() {
+        // `--daemon-out` writes another launcher into the same directory
+        // pointing at the same build tree, so resolution must key on the
+        // launcher's directory rather than its name.
+        let (resolved, tmp) = resolve_launcher(
+            "daemonout",
+            "mydaemon",
+            &wrapper_self_relative("nexus-build/manifest.json"),
+        );
+        assert_eq!(resolved, tmp.join("nexus-build/manifest.json").to_string_lossy());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn reads_launchers_that_declare_no_manifest() {
+        // Build trees outlive the compiler that wrote them, so both
+        // pre-declaration shapes must still resolve.
+        let manifest = "/abs/path/foo-build/manifest.json";
+        let (resolved, tmp) =
+            resolve_launcher("undeclabs", "prog", &undeclared_wrapper_absolute(manifest));
+        assert_eq!(resolved, manifest);
+        std::fs::remove_dir_all(&tmp).ok();
+
+        let (resolved, tmp) = resolve_launcher(
+            "undeclrel",
+            "nexus",
+            &undeclared_wrapper_self_relative("nexus-build/manifest.json"),
+        );
+        assert_eq!(resolved, tmp.join("nexus-build/manifest.json").to_string_lossy());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn a_wrapper_declaring_nothing_readable_is_an_error() {
+        let tmp = std::env::temp_dir().join(format!(
+            "morloc-nexus-nodecl-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = write_tmp(
+            &tmp,
+            "prog",
+            b"#!/bin/sh\nexec morloc-nexus run $SOMETHING_ELSE \"$@\"\n",
+        );
+        let err = resolve_manifest_target(&path).unwrap_err();
+        assert!(err.contains("declares no manifest path"), "got: {err}");
         std::fs::remove_dir_all(&tmp).ok();
     }
 
@@ -2476,7 +2681,31 @@ mod tests {
     fn unquotes_escaped_single_quote_in_path() {
         let extracted = extract_manifest_from_wrapper(
             "#!/bin/sh\nexec morloc-nexus daemon 'a'\\''b/manifest.json' \"$@\"\n",
+            "/tmp/prog",
         );
         assert_eq!(extracted.as_deref(), Some("a'b/manifest.json"));
+    }
+
+    #[test]
+    fn unescapes_a_double_quoted_launcher_relative_path() {
+        // `dquoteEsc` escapes the four characters a double-quoted shell word
+        // would otherwise interpret; an undeclared launcher must be unescaped.
+        let extracted = extract_manifest_from_wrapper(
+            "#!/bin/sh\nexec morloc-nexus daemon \"$d/a\\$b-build/manifest.json\" \"$@\"\n",
+            "/tmp/dir/prog",
+        );
+        assert_eq!(extracted.as_deref(), Some("/tmp/dir/a$b-build/manifest.json"));
+    }
+
+    #[test]
+    fn a_declared_absolute_path_ignores_the_launcher_directory() {
+        assert_eq!(
+            manifest_from_marker(
+                "#!/bin/sh\n# morloc-manifest: /elsewhere/m.json\n",
+                "/tmp/dir/prog"
+            )
+            .as_deref(),
+            Some("/elsewhere/m.json")
+        );
     }
 }

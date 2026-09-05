@@ -226,6 +226,10 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
     let visible_count = manifest.commands.iter().filter(|c| !c.internal).count();
     let single = visible_count == 1 && manifest.groups.is_empty();
 
+    // `--' @epilogue` blocks above `module` render at the foot of
+    // top-level help, in either layout.
+    let epilogue = render_epilogues(&manifest.epilogues);
+
     if single {
         let cmd = manifest
             .commands
@@ -236,9 +240,17 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
         // section sorts before the command's positional/optional args
         // (clap orders sections by first-arg-added).
         let root = crate::help::add_general_options(ClapCommand::new(leak(prog_name)));
-        let root = build_command_args(root, cmd, manifest)
-            .about(leak(first_desc(&cmd.desc)))
+        // The root is the program and the command at once, so both
+        // docstrings describe it and `build_command_args` sees only one of
+        // them.
+        let desc = single_root_desc(&manifest.desc, &cmd.desc);
+        let mut root = build_command_args(root, cmd, manifest)
+            .about(leak(first_desc(&desc)))
             .arg_required_else_help(false);
+        if !desc.is_empty() {
+            root = root.long_about(leak(&desc.join("\n")));
+        }
+        root = append_after_help(root, &epilogue);
         return crate::help::finalize(root, crate::help::usage_single_root(prog_name));
     }
 
@@ -249,6 +261,13 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
     if let Some(first) = manifest.desc.first() {
         root = root.about(leak(first));
     }
+    // `about` is the one-line synopsis `-h` shows; `long_about` carries
+    // every description line for `--help`, the same split
+    // `build_command_args` gives each subcommand.
+    if !manifest.desc.is_empty() {
+        root = root.long_about(leak(&manifest.desc.join("\n")));
+    }
+    root = append_after_help(root, &epilogue);
     root = crate::help::finalize(root, crate::help::usage_multi_root(prog_name));
 
     // Each CmdGroup becomes its own clap subcommand; its members
@@ -260,6 +279,9 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
         grp_cmd = crate::help::add_general_options(grp_cmd);
         if let Some(first) = grp.desc.first() {
             grp_cmd = grp_cmd.about(leak(first));
+        }
+        if !grp.desc.is_empty() {
+            grp_cmd = grp_cmd.long_about(leak(&grp.desc.join("\n")));
         }
         grp_cmd = crate::help::finalize(
             grp_cmd,
@@ -329,12 +351,27 @@ fn ret_display(ret: &Return) -> String {
     ret.mime.clone().unwrap_or_else(|| ret.type_desc.clone())
 }
 
+/// What a command puts on standard output, which is not always what it
+/// returns.
+///
+/// A streaming command returns `()` and writes its data through a sink,
+/// so reporting the return type would tell a caller the command produces
+/// nothing. When the compiler recorded a batch type, that is the answer;
+/// otherwise fall back to the return type, which is correct for every
+/// non-streaming command.
+fn stdout_display(cmd: &ManifestCommand) -> String {
+    match &cmd.stream {
+        Some(st) if !st.type_desc.is_empty() => st.type_desc.clone(),
+        _ => ret_display(&cmd.ret),
+    }
+}
+
 fn render_return_block(mcmd: &ManifestCommand, manifest: &Manifest) -> String {
     if mcmd.terminals.is_empty() {
         if mcmd.ret.type_desc.is_empty() {
             return String::new();
         }
-        let mut block = format!("Return: {}", ret_display(&mcmd.ret));
+        let mut block = format!("Return: {}", stdout_display(mcmd));
         for line in &mcmd.ret.desc {
             block.push_str(&format!("\n  {}", line));
         }
@@ -346,15 +383,24 @@ fn render_return_block(mcmd: &ManifestCommand, manifest: &Manifest) -> String {
     // malformed manifest) contributes an empty type rather than being
     // dropped, so the row still documents the flag.
     let mut rows: Vec<(String, String)> = Vec::with_capacity(mcmd.terminals.len() + 1);
-    rows.push(("default".to_string(), ret_display(&mcmd.ret)));
+    rows.push(("default".to_string(), stdout_display(mcmd)));
     for t in &mcmd.terminals {
         let label = match t.short {
             Some(c) => format!("-{}/--{}", c, t.long),
             None => format!("--{}", t.long),
         };
+        // A `render` action writes its bytes verbatim, so `-f` does not
+        // apply to it; say so rather than leave the reader to find out.
         let ret = t
             .resolve_entry(manifest)
-            .map(|c| ret_display(&c.ret))
+            .map(|c| {
+                let base = stdout_display(c);
+                if t.render && !base.is_empty() {
+                    format!("{}    (raw bytes)", base)
+                } else {
+                    base
+                }
+            })
             .unwrap_or_default();
         rows.push((label, ret));
     }
@@ -494,6 +540,7 @@ fn build_command_args(
                 long_opt,
                 short_opt,
                 long_rev,
+                short_rev,
                 default_val,
                 desc,
                 ..
@@ -522,13 +569,27 @@ fn build_command_args(
                 )));
                 cmd = cmd.arg(fwd);
 
-                if let Some(rev) = long_rev {
+                // The reverse spelling is a flag the author declared, so
+                // it carries whichever names they wrote and appears in
+                // help like any other. Hiding it left `--quiet`
+                // reachable only by reading the source.
+                if long_rev.is_some() || short_rev.is_some() {
                     let neg_id: &'static str = leak(&format!("{}_neg", id));
-                    let neg = ClapArg::new(neg_id)
-                        .long(leak(rev))
+                    let mut neg = ClapArg::new(neg_id)
                         .action(ArgAction::SetTrue)
-                        .overrides_with(id)
-                        .hide(true);
+                        .overrides_with(id);
+                    if let Some(rev) = long_rev {
+                        neg = neg.long(leak(rev));
+                    }
+                    if let Some(s) = short_rev {
+                        if let Some(c) = s.chars().next() {
+                            neg = neg.short(c);
+                        }
+                    }
+                    neg = neg.help(leak(&reverse_flag_help(
+                        long_opt.as_deref(),
+                        short_opt.as_deref(),
+                    )));
                     cmd = cmd.arg(neg);
                 }
             }
@@ -645,6 +706,7 @@ fn add_group_entry_arg(mut cmd: ClapCommand, id: &'static str, marg: &ManifestAr
             long_opt,
             short_opt,
             long_rev,
+            short_rev,
             default_val,
             desc,
             ..
@@ -665,13 +727,23 @@ fn add_group_entry_arg(mut cmd: ClapCommand, id: &'static str, marg: &ManifestAr
                 None,
             )));
             cmd = cmd.arg(fwd);
-            if let Some(rev) = long_rev {
+            if long_rev.is_some() || short_rev.is_some() {
                 let neg_id: &'static str = leak(&format!("{}_neg", id));
-                let neg = ClapArg::new(neg_id)
-                    .long(leak(rev))
+                let mut neg = ClapArg::new(neg_id)
                     .action(ArgAction::SetTrue)
-                    .overrides_with(id)
-                    .hide(true);
+                    .overrides_with(id);
+                if let Some(rev) = long_rev {
+                    neg = neg.long(leak(rev));
+                }
+                if let Some(s) = short_rev {
+                    if let Some(c) = s.chars().next() {
+                        neg = neg.short(c);
+                    }
+                }
+                neg = neg.help(leak(&reverse_flag_help(
+                    long_opt.as_deref(),
+                    short_opt.as_deref(),
+                )));
                 cmd = cmd.arg(neg);
             }
         }
@@ -696,7 +768,7 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
     for (i, marg) in cmd.args.iter().enumerate() {
         let id = format!("arg{}", i);
         match marg {
-            ManifestArg::Positional { quoted: q, many, checks, stdin, .. } => {
+            ManifestArg::Positional { quoted: q, many, checks, stdin, source, .. } => {
                 if *many {
                     // Variadic positional: clap collects 1..N tokens
                     // via Append action; pull them all and forward as
@@ -729,7 +801,7 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                             "/dev/stdin".to_string()
                         }
                     };
-                    let v = preprocess_cli_value(raw, checks, *q, &format!("argument #{}", i));
+                    let v = preprocess_cli_value(raw, checks, *source, *q, &format!("argument #{}", i));
                     out.push(ArgValue::Value(v));
                 } else {
                     // Required positional: clap guaranteed a value.
@@ -737,7 +809,7 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                         .get_one::<String>(&id)
                         .cloned()
                         .expect("clap-required positional must have a value");
-                    let v = preprocess_cli_value(val, checks, *q, &format!("argument #{}", i));
+                    let v = preprocess_cli_value(val, checks, *source, *q, &format!("argument #{}", i));
                     out.push(ArgValue::Value(v));
                 }
             }
@@ -746,6 +818,7 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                 default_val,
                 many,
                 checks,
+                source,
                 ..
             } => {
                 // Distinguish "user typed the flag" from "clap
@@ -781,7 +854,7 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                         .get_one::<String>(&id)
                         .cloned()
                         .expect("CLI source guarantees a value");
-                    let v = preprocess_cli_value(v, checks, *q, &format!("argument #{}", i));
+                    let v = preprocess_cli_value(v, checks, *source, *q, &format!("argument #{}", i));
                     out.push(ArgValue::Value(v));
                 } else if let Some(def) = default_val {
                     out.push(ArgValue::Value(def.clone()));
@@ -792,11 +865,13 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
             ManifestArg::Flag {
                 default_val,
                 long_rev,
+                short_rev,
                 ..
             } => {
                 let fwd_set = matches.get_flag(&id);
                 let neg_id = format!("{}_neg", id);
-                let neg_set = long_rev.is_some() && matches.get_flag(&neg_id);
+                let has_rev = long_rev.is_some() || short_rev.is_some();
+                let neg_set = has_rev && matches.get_flag(&neg_id);
                 // Clap's `overrides_with` ensures only one of the two
                 // ends up true if both spellings were given (last
                 // wins). Recover the original "true"/"false" string
@@ -841,11 +916,12 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                 for (j, entry) in entries.iter().enumerate() {
                     let eid = format!("{}_entry{}", id, j);
                     let entry_val: Option<String> = match &entry.arg {
-                        ManifestArg::Flag { long_rev, .. } => {
+                        ManifestArg::Flag { long_rev, short_rev, .. } => {
                             let fwd_set = matches.get_flag(&eid);
                             let neg_id = format!("{}_neg", eid);
-                            let neg_set =
-                                long_rev.is_some() && matches.get_flag(&neg_id);
+                            let neg_set = (long_rev.is_some()
+                                || short_rev.is_some())
+                                && matches.get_flag(&neg_id);
                             if fwd_set {
                                 Some("true".to_string())
                             } else if neg_set {
@@ -854,12 +930,12 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                                 None
                             }
                         }
-                        ManifestArg::Optional { quoted: q, checks, .. } => {
+                        ManifestArg::Optional { quoted: q, checks, source, .. } => {
                             let from_cli = matches.value_source(&eid)
                                 == Some(ValueSource::CommandLine);
                             if from_cli {
                                 matches.get_one::<String>(&eid).cloned().map(|v|
-                                    preprocess_cli_value(v, checks, *q,
+                                    preprocess_cli_value(v, checks, *source, *q,
                                         &format!("record entry '{}'", entry.key))
                                 )
                             } else {
@@ -883,6 +959,76 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
 }
 
 /// First non-empty description line (used as clap's `about` text).
+/// Join the manifest's epilogue blocks into one help footer: lines within a
+/// block as written, a blank line between blocks. Empty blocks drop out.
+fn render_epilogues(epilogues: &[Vec<String>]) -> String {
+    epilogues
+        .iter()
+        .map(|block| {
+            block
+                .iter()
+                .map(|line| line.trim_end())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .filter(|block| !block.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Append a block to a command's `after_help`, keeping whatever is already
+/// there. A blank `block` leaves the command untouched.
+fn append_after_help(cmd: ClapCommand, block: &str) -> ClapCommand {
+    if block.is_empty() {
+        return cmd;
+    }
+    let existing = cmd
+        .get_after_help()
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    let merged = if existing.is_empty() {
+        block.to_string()
+    } else {
+        format!("{existing}\n\n{block}")
+    };
+    cmd.after_help(leak(&merged))
+}
+
+/// The description of a program whose args live on the root.
+///
+/// Two docstrings can describe it: the module's, which says what the program
+/// is, and the sole command's, which says what the one thing it does does. In
+/// the multi-command layout these have separate homes -- the module's heads
+/// the help, the command's sits in the command list and in its own subcommand
+/// help. Here there is one slot, and dropping either loses text its author had
+/// no other way to write.
+///
+/// The module's comes first, since it describes the program a reader is
+/// asking about. Where only one exists it is used alone, which is why a
+/// program described only at the command level reads exactly as before.
+fn single_root_desc(module_desc: &[String], cmd_desc: &[String]) -> Vec<String> {
+    if module_desc.is_empty() {
+        return cmd_desc.to_vec();
+    }
+    if cmd_desc.is_empty() || cmd_desc == module_desc {
+        return module_desc.to_vec();
+    }
+    let mut out = module_desc.to_vec();
+    out.push(String::new());
+    out.extend(cmd_desc.iter().cloned());
+    out
+}
+
+/// Help text for a boolean flag's reverse spelling, naming the forward
+/// flag it turns off so the pair reads as one setting.
+fn reverse_flag_help(long_opt: Option<&str>, short_opt: Option<&str>) -> String {
+    match (long_opt, short_opt) {
+        (Some(l), _) => format!("Turn --{} off", l),
+        (None, Some(s)) => format!("Turn -{} off", s),
+        (None, None) => "Turn the flag off".to_string(),
+    }
+}
+
 pub(crate) fn first_desc(desc: &[String]) -> &str {
     desc.iter()
         .find(|d| !d.trim().is_empty())
@@ -950,9 +1096,29 @@ fn render_positional_block(mcmd: &ManifestCommand) -> String {
         return String::new();
     }
     let idx_width = positionals.len().to_string().len();
+    // Label each slot with its index and, when the author supplied a
+    // `--' metavar:`, the name they chose: `1: PATTERN`. Labels are
+    // padded to a common width so the description column lines up
+    // whether or not a given positional has a metavar. With no
+    // metavars anywhere the labels are just `1:`, `2:`, unchanged.
+    let labels: Vec<String> = positionals
+        .iter()
+        .enumerate()
+        .map(|(i, marg)| {
+            let mv = match marg {
+                ManifestArg::Positional { metavar, .. } => metavar.as_deref(),
+                _ => unreachable!("filtered to Positional only"),
+            };
+            match mv.map(str::trim).filter(|m| !m.is_empty()) {
+                Some(m) => format!("{:>width$}: {}", i + 1, m, width = idx_width),
+                None => format!("{:>width$}:", i + 1, width = idx_width),
+            }
+        })
+        .collect();
+    let label_width = labels.iter().map(String::len).max().unwrap_or(0);
     let mut out = String::from("Positional arguments:");
     for (i, marg) in positionals.iter().enumerate() {
-        let prefix = format!("  {:>width$}:  ", i + 1, width = idx_width);
+        let prefix = format!("  {:<width$}  ", labels[i], width = label_width);
         let cont = " ".repeat(prefix.len());
         let (type_desc, desc, format_hint) = match marg {
             ManifestArg::Positional { type_desc, desc, format, .. } => (
@@ -1106,12 +1272,52 @@ mod tests {
         // fixture_single_add's two positionals have empty `desc`, so
         // the type line takes the first slot beside the index marker
         // rather than sitting on a continuation line under a
-        // placeholder. Indices are 1-based.
+        // placeholder. Indices are 1-based, and each carries the
+        // author's metavar.
         let m = fixture_single_add();
         let block = render_positional_block(&m.commands[0]);
         assert_eq!(
             block,
-            "Positional arguments:\n  1:  type: Int\n  2:  type: Int"
+            "Positional arguments:\n  1: X  type: Int\n  2: Y  type: Int"
+        );
+    }
+
+    #[test]
+    fn positional_block_omits_absent_metavar_and_keeps_columns_aligned() {
+        // One positional has a metavar and one does not. The labels pad
+        // to a common width so the description column lines up.
+        let json = wrap_manifest(
+            r#"[
+                {
+                    "name": "scan",
+                    "type": "remote",
+                    "mid": 1,
+                    "pool": 0,
+                    "needed_pools": [0],
+                    "desc": ["Search"],
+                    "args": [
+                        {"kind": "pos", "schema": "s", "type": "Str", "metavar": "PATTERN", "quoted": false, "desc": ["the text to find"], "constraints": [], "metadata": {}},
+                        {"kind": "pos", "schema": "s", "type": "Str", "quoted": false, "desc": ["where to look"], "constraints": [], "metadata": {}}
+                    ],
+                    "return": {"schema": "s", "type": "Str", "desc": [], "constraints": [], "metadata": {}},
+                    "constraints": [],
+                    "metadata": {},
+                    "group": null
+                }
+            ]"#,
+            "[]",
+        );
+        let m = parse_manifest(&json).unwrap();
+        let block = render_positional_block(&m.commands[0]);
+        assert_eq!(
+            block,
+            concat!(
+                "Positional arguments:\n",
+                "  1: PATTERN  the text to find\n",
+                "              type: Str\n",
+                "  2:          where to look\n",
+                "              type: Str"
+            )
         );
     }
 

@@ -4,4 +4,5 @@ all:
 	grep -c "Mutual recursion between type definitions" build.err > obs.txt || echo 0 > obs.txt
 
 clean:
-	rm -rf nexus pools *err obs.txt
+	rm -rf nexus pools *err
+	rm -rf *-build *build.tmp*

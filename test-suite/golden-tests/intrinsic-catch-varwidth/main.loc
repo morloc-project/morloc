@@ -41,7 +41,7 @@ catchStrHappy :: Str -> <IO> Str
 catchStrHappy path =
   @catch
     (do
-       @save 0 "hello, morloc" path
+       @save 0 path "hello, morloc"
        @load path :: <IO, Err> Str)
     "fallback-not-used"
 
@@ -55,7 +55,7 @@ catchListHappy :: Str -> <IO> [Int]
 catchListHappy path =
   @catch
     (do
-       @save 0 [10, 20, 30, 40] path
+       @save 0 path [10, 20, 30, 40]
        @load path :: <IO, Err> [Int])
     [-1]
 
@@ -70,7 +70,7 @@ catchTupleHappy :: Str -> <IO> (Int, Str)
 catchTupleHappy path =
   @catch
     (do
-       @save 0 (42, "answer") path
+       @save 0 path (42, "answer")
        @load path :: <IO, Err> (Int, Str))
     (0, "fallback")
 
@@ -85,7 +85,7 @@ catchListStrHappy :: Str -> <IO> [Str]
 catchListStrHappy path =
   @catch
     (do
-       @save 0 ["alpha", "bravo", "charlie"] path
+       @save 0 path ["alpha", "bravo", "charlie"]
        @load path :: <IO, Err> [Str])
     ["fallback"]
 

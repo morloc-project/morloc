@@ -39,6 +39,7 @@ pub mod http_ffi;
 pub mod slurm_ffi;
 pub mod slurm_bridge;
 pub mod manifest_ffi;
+mod c_abi_layout;
 pub mod eval_arena;
 pub mod eval_ffi;
 pub mod stream;
@@ -55,19 +56,59 @@ pub mod log;
 pub mod run;
 pub mod debug;
 
-/// Shared test SHM initialization. Call from all test modules.
+/// Serializes tests against the process-global SHM arena. There is one arena
+/// per process, so a test that tears it down cannot run beside a test that is
+/// allocating in it: readers share the arena built by `init_test_shm`, while
+/// a test that drives `shinit`/`shclose` itself takes the write guard.
 #[cfg(test)]
-pub(crate) fn init_test_shm() {
-    use std::sync::Once;
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
+static SHM_TEST_ARENA: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+/// Shared test SHM initialization. Call from all test modules and hold the
+/// returned guard for the body of the test.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn init_test_shm() -> std::sync::RwLockReadGuard<'static, ()> {
+    let guard = SHM_TEST_ARENA
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    ensure_test_arena();
+    guard
+}
+
+/// Exclusive access for tests that build and tear down their own arena.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn own_test_shm() -> std::sync::RwLockWriteGuard<'static, ()> {
+    SHM_TEST_ARENA
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Exclusive access with the shared arena guaranteed live. For tests that
+/// drive process-global companion state -- the stream and stdio registries --
+/// which, like the arena, exist once per process and cannot be shared.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn own_test_registry() -> std::sync::RwLockWriteGuard<'static, ()> {
+    let guard = own_test_shm();
+    ensure_test_arena();
+    guard
+}
+
+#[cfg(test)]
+fn ensure_test_arena() {
+    static INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _init = INIT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Deliberately not one-shot: an arena-owning test may have called shclose
+    // since the last caller, resetting the allocator to its pre-shinit state.
+    if shm::get_common_basename().is_empty() {
         let tmpdir = std::env::temp_dir();
         let test_dir = tmpdir.join(format!("morloc_test_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&test_dir);
         shm::shm_set_fallback_dir(test_dir.to_str().unwrap());
-        let basename = format!("morloc_test_{}", std::process::id());
+        let basename = format!("morloc-{}-test-arena", std::process::id());
         shm::shinit(&basename, 0, 0x100000).unwrap(); // 1MB
-    });
+    }
 }
 
 // Re-export core types at crate root

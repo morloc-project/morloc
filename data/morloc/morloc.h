@@ -524,12 +524,45 @@ typedef enum {
     MORLOC_X_PAT,
     MORLOC_X_FMT,
     MORLOC_X_SHOW,
-    MORLOC_X_READ
+    MORLOC_X_READ,
+    MORLOC_X_HASH,
+    MORLOC_X_SAVE,
+    MORLOC_X_LOAD,
+    MORLOC_X_MAP,
+    // IFile / IStream / OStream handle intrinsics.
+    MORLOC_X_OPEN,          // path -> handle; the kind byte selects the family
+    MORLOC_X_CLOSE,         // handle -> ()
+    MORLOC_X_FSCHEMA,       // path -> schema string
+    MORLOC_X_FLENGTH,       // handle -> total element count
+    MORLOC_X_IFILE_WALK,    // handle + walk path + DFS-ordered args -> value
+    MORLOC_X_NEXT,          // IStream handle -> [a]; empty list at EOF
+    MORLOC_X_STREAM,        // IFile handle -> IStream handle
+    MORLOC_X_OPEN_OSTREAM,  // schema + path -> OStream handle
+    MORLOC_X_WRITE,         // (level, value, handle) -> ()
+    MORLOC_X_APPEND,        // schema + path -> OStream handle, append mode
+    MORLOC_X_CONCAT,        // [paths] + dest -> ()
+    MORLOC_X_FLUSH,         // handle -> ()
+    MORLOC_X_STDIN,         // schema -> IStream handle on fd 0
+    MORLOC_X_STDOUT,        // schema -> OStream handle on fd 1
+    MORLOC_X_STDERR,        // schema -> OStream handle on fd 2
+    MORLOC_X_THROW,         // msg -> raises; never returns
+    MORLOC_X_CATCH,         // (fallible, fallback) -> value
+    MORLOC_X_IF,            // (cond, then, else) -> value
+    MORLOC_X_STREAM_LAYOUT  // IFile handle -> [(U64,U64,U64)]
 } morloc_expression_type;
 
 typedef enum { APPLY_PATTERN, APPLY_LAMBDA, APPLY_FORMAT } morloc_app_expression_type;
 
-typedef enum { SELECT_BY_KEY, SELECT_BY_INDEX, SELECT_END } morloc_pattern_type;
+// Bracket patterns are leaf types: the node carries no selectors or
+// field indices, and arity is decided by the surrounding App node
+// (SELECT_BRACKET_INDEX takes 2 args, SELECT_BRACKET_SLICE takes 4).
+typedef enum {
+    SELECT_BY_KEY,
+    SELECT_BY_INDEX,
+    SELECT_END,
+    SELECT_BRACKET_INDEX,
+    SELECT_BRACKET_SLICE
+} morloc_pattern_type;
 
 // Forward declarations.
 typedef struct morloc_expression_s morloc_expression_t;
@@ -609,6 +642,50 @@ typedef struct morloc_pattern_s {
     morloc_pattern_t** selectors;
 } morloc_pattern_t;
 
+// zstd `level` is consulted only when `format` is "voidstar"; codegen
+// emits a literal 0 for the other formats so the layout stays uniform.
+typedef struct morloc_save_expression_s {
+    char* format;
+    morloc_expression_t* level;
+    morloc_expression_t* value;
+    morloc_expression_t* path;
+} morloc_save_expression_t;
+
+// Pure-morloc list map. `func` is a Lam expression of one parameter.
+typedef struct morloc_map_expression_s {
+    morloc_expression_t* func;
+    morloc_expression_t* list;
+} morloc_map_expression_t;
+
+// @catch: run `fallible` into scratch, memcpy on success, else
+// evaluate `fallback` into dest.
+typedef struct morloc_catch_expression_s {
+    morloc_expression_t* fallible;
+    morloc_expression_t* fallback;
+} morloc_catch_expression_t;
+
+// Pure-nexus conditional. Both branches share the If node's schema.
+typedef struct morloc_if_expression_s {
+    morloc_expression_t* cond;
+    morloc_expression_t* then_branch;
+    morloc_expression_t* else_branch;
+} morloc_if_expression_t;
+
+typedef struct morloc_open_expression_s {
+    uint8_t kind;            // selects IFile / IStream / OStream
+    morloc_expression_t* path;
+} morloc_open_expression_t;
+
+// Unified IFile pattern walker. `path` encodes the walk chain
+// (".[]", ".[:]", ".1.foo"); `args` carries the DFS-ordered runtime
+// bounds (bracket-index consumes 1, bracket-slice consumes 3).
+typedef struct morloc_ifile_walk_expression_s {
+    morloc_expression_t* handle;
+    char* path;
+    morloc_expression_t** args;
+    uint64_t n_args;
+} morloc_ifile_walk_expression_t;
+
 typedef struct morloc_expression_s {
     morloc_expression_type type;
     Schema* schema;
@@ -622,6 +699,12 @@ typedef struct morloc_expression_s {
         morloc_pattern_t* pattern_expr;
         morloc_data_t* data_expr;
         morloc_expression_t* unary_expr;
+        morloc_save_expression_t* save_expr;
+        morloc_map_expression_t* map_expr;
+        morloc_catch_expression_t* catch_expr;
+        morloc_if_expression_t* if_expr;
+        morloc_open_expression_t* open_expr;
+        morloc_ifile_walk_expression_t* ifile_walk_expr;
     } expr;
 } morloc_expression_t;
 
@@ -647,30 +730,79 @@ typedef enum {
 typedef struct manifest_arg_s manifest_arg_t;
 
 typedef struct {
+    char* path;
+    int64_t time;
+    char* morloc_version;
+} manifest_build_t;
+
+// One enforceable invariant on an argument, a return value, or a
+// command. `value_json` is NULL for constraint types that carry no
+// payload (e.g. "non_empty").
+typedef struct {
+    char* ctype;
+    char* value_json;
+} manifest_constraint_t;
+
+typedef struct {
     char* key;
     manifest_arg_t* arg;
 } manifest_grp_entry_t;
 
 struct manifest_arg_s {
     manifest_arg_kind_t kind;
-    char** desc;
+    // Per-arg serialization schema. NULL for flags, and for group
+    // entries (the group's own schema covers them).
+    char* schema;
+    char* type_desc;         // user-facing type name; NULL for flags
     char* metavar;
-    char* type_desc;
     bool quoted;
     char short_opt;
     char* long_opt;
     char* long_rev;
+    char short_rev;          // 0 when the reverse spelling has no short name
     char* default_val;
-    char grp_short;
+    char** desc;
+    size_t n_desc;
+    manifest_constraint_t* constraints;
+    size_t n_constraints;
+    char grp_short;          // group sub-fields; meaningful when kind == MARG_GRP
     char* grp_long;
     manifest_grp_entry_t* entries;
     size_t n_entries;
+    char* metadata_json;     // reserved
 };
+
+typedef struct {
+    char* schema;
+    char* type_desc;
+    char** desc;
+    size_t n_desc;
+    manifest_constraint_t* constraints;
+    size_t n_constraints;
+    char* metadata_json;     // reserved
+    // Media type (RFC 6838, e.g. "image/png") from a `@mime` return
+    // type; NULL when untyped.
+    char* mime;
+} manifest_return_t;
 
 typedef struct {
     char* name;
     char** desc;
+    size_t n_desc;
+    char* metadata_json;     // reserved
 } manifest_cmd_group_t;
+
+// One terminal-action flag (`@render` / `@with`) on a parent command.
+// `short_flag`, `long_flag` and `is_default` avoid the C keywords the
+// corresponding Rust fields use.
+typedef struct {
+    char short_flag;         // 0 when there is none
+    char* long_flag;
+    char* entry;             // synthesized internal command carrying the action
+    char* description;
+    bool render;
+    bool is_default;
+} manifest_terminal_t;
 
 typedef struct {
     char* name;
@@ -679,28 +811,34 @@ typedef struct {
     size_t pool_index;
     size_t* needed_pools;
     size_t n_needed_pools;
-    char** arg_schemas;
-    char* return_schema;
     char** desc;
-    char* return_type;
-    char** return_desc;
+    size_t n_desc;
     manifest_arg_t* args;
     size_t n_args;
+    manifest_return_t ret;
+    manifest_constraint_t* constraints;
+    size_t n_constraints;
     morloc_expression_t* expr;
     char* group;
+    char* metadata_json;     // reserved
+    manifest_terminal_t* terminals;
+    size_t n_terminals;
+    // True for synthesized internal commands (e.g. `@render` entries):
+    // hidden from /discover but still callable by name.
+    bool internal;
 } manifest_command_t;
 
 typedef struct {
-    char* type;
+    char* stype;             // `type` is a C keyword
     char* host;
-    int port;
+    int32_t port;
     char* socket;
+    char* metadata_json;     // reserved
 } manifest_service_t;
 
 typedef struct {
-    int version;
     char* name;
-    char* build_dir;
+    manifest_build_t build;
     manifest_pool_t* pools;
     size_t n_pools;
     manifest_command_t* commands;
@@ -1002,7 +1140,7 @@ size_t total_shm_size(void);
 volptr_t rel2vol(relptr_t ptr, ERRMSG);
 absptr_t rel2abs(relptr_t ptr, ERRMSG);
 
-// ── Lock-free per-process volume base table ─────────────────────────────────
+// -- Lock-free per-process volume base table ---------------------------------
 //
 // libmorloc.so publishes a base+size entry for every SHM volume it has
 // mapped into this process. `resolve_relptr` below reads from the
@@ -1145,6 +1283,24 @@ char* read_schema_from_packet_meta(const uint8_t* packet, ERRMSG);
 uint8_t* make_fail_packet(const char* failure_message);
 char* get_morloc_data_packet_error_message(const uint8_t* data, ERRMSG);
 uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema, ERRMSG);
+
+// Cross-pool NUL-in-Str guard. Walks a schema-typed voidstar and returns a
+// heap description of the first String slot holding an interior NUL, or NULL
+// when there is none. The caller frees the result.
+//
+// `base_ptr` follows the same convention as resolve_relptr: non-NULL for a
+// payload inlined in a packet, NULL for a value in shared memory.
+//
+// Only called where the compiler emitted a check -- codegen knows the
+// receiving language and whether the type carries a Str, so a language that
+// tolerates NULs, or a type with no strings in it, costs nothing at all. The
+// MORLOC_SKIP_NULL_CHECK opt-out is handled inside, so every binder inherits
+// it without repeating the probe.
+char* morloc_first_null_in_value(
+    const void* voidstar,
+    const Schema* schema,
+    const void* base_ptr);
+
 uint8_t* make_morloc_local_call_packet(uint32_t midx, const uint8_t** arg_packets, size_t nargs, ERRMSG);
 uint8_t* make_morloc_remote_call_packet(uint32_t midx, const uint8_t** arg_packets, size_t nargs, ERRMSG);
 morloc_call_t* read_morloc_call_packet(const uint8_t* packet, ERRMSG);
@@ -1405,7 +1561,7 @@ char* mlc_show(const absptr_t data, const Schema* schema, ERRMSG);
 void* mlc_read(const char* json_str, const Schema* schema, ERRMSG);
 relptr_t write_voidstar_binary(int fd, const void* data, const Schema* schema, ERRMSG);
 
-// ── Stream-handle intrinsics ─────────────────────────────────────────────
+// -- Stream-handle intrinsics ---------------------------------------------
 // Probe a file for a valid morloc packet without opening it as a typed
 // handle or allocating SHM. Opens the file, reads the packet-header
 // prefix, validates magic + structural sanity, and closes. Returns 0 if
@@ -1452,7 +1608,7 @@ void* mlc_ifile_walk(int64_t handle,
 // Errors cleanly when the IFile's value type is not a list.
 int64_t mlc_ifile_length(int64_t handle, ERRMSG);
 
-// ── Cross-pool handle wire codec ─────────────────────────────────────────
+// -- Cross-pool handle wire codec -----------------------------------------
 //
 // Stream handles are slot ids in a process-local registry. To cross a
 // pool boundary the sender's bridge writes the handle's path (and kind)

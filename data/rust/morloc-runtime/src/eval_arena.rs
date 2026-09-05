@@ -367,8 +367,9 @@ mod tests {
 
     use super::*;
 
-    fn ensure_shm() {
-        crate::init_test_shm();
+    #[must_use]
+    fn ensure_shm() -> std::sync::RwLockReadGuard<'static, ()> {
+        crate::init_test_shm()
     }
 
     fn arena_len() -> usize {
@@ -386,7 +387,7 @@ mod tests {
 
     #[test]
     fn enter_records_and_drop_frees() {
-        ensure_shm();
+        let _shm = ensure_shm();
         assert!(!is_active());
 
         let p1 = shm::shmalloc(64).unwrap();
@@ -415,7 +416,7 @@ mod tests {
 
     #[test]
     fn explicit_shfree_during_arena_does_not_double_free() {
-        ensure_shm();
+        let _shm = ensure_shm();
         let p = shm::shmalloc(32).unwrap();
         let _g = enter().unwrap();
 
@@ -434,7 +435,7 @@ mod tests {
 
     #[test]
     fn reentrant_enter_returns_err() {
-        ensure_shm();
+        let _shm = ensure_shm();
         let _g = enter().unwrap();
         let result = enter();
         assert!(result.is_err(), "second enter() must error");
@@ -442,7 +443,7 @@ mod tests {
 
     #[test]
     fn no_arena_means_no_recording() {
-        ensure_shm();
+        let _shm = ensure_shm();
         assert!(!is_active());
 
         let p = shm::shmalloc(16).unwrap();
@@ -455,7 +456,7 @@ mod tests {
 
     #[test]
     fn forget_unknown_pointer_is_noop() {
-        ensure_shm();
+        let _shm = ensure_shm();
         let p = shm::shmalloc(16).unwrap();
         let other = shm::shmalloc(16).unwrap();
 
@@ -474,7 +475,7 @@ mod tests {
 
     #[test]
     fn forget_when_arena_inactive_is_noop() {
-        ensure_shm();
+        let _shm = ensure_shm();
         let p = shm::shmalloc(16).unwrap();
         // No panic, no error.
         forget_if_active(p);
@@ -483,7 +484,7 @@ mod tests {
 
     #[test]
     fn record_null_is_ignored() {
-        ensure_shm();
+        let _shm = ensure_shm();
         let _g = enter().unwrap();
         record_if_active(std::ptr::null_mut());
         assert_eq!(arena_len(), 0);
@@ -494,7 +495,7 @@ mod tests {
         // Integration: now that shm::shmalloc/shfree are wired to the
         // arena, allocations under an active arena should round-trip
         // through the bookkeeping vector and be released at guard drop.
-        ensure_shm();
+        let _shm = ensure_shm();
         assert!(!is_active());
 
         {
@@ -520,7 +521,7 @@ mod tests {
         // remove the pointer before freeing, so guard drop doesn't try
         // to free the same block twice (double-free would corrupt the
         // free list / fail BLK_MAGIC check).
-        ensure_shm();
+        let _shm = ensure_shm();
         let _g = enter().unwrap();
 
         let p = shm::shmalloc(48).unwrap();
@@ -534,7 +535,7 @@ mod tests {
 
     #[test]
     fn threads_have_independent_arenas() {
-        ensure_shm();
+        let _shm = ensure_shm();
         let _g = enter().unwrap();
         assert!(is_active());
 

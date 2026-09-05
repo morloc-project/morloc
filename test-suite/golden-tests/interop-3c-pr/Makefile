@@ -35,3 +35,4 @@ all:
 
 clean:
 	rm -rf nexus pools *pdf run.out run.err
+	rm -rf *-build *build.tmp*

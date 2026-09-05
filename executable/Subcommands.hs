@@ -36,7 +36,6 @@ import Morloc.CodeGenerator.Pools.CAbi.Pool (memberFor)
 import Morloc.CodeGenerator.Namespace (SerialManifold (..))
 import qualified Morloc.CodeGenerator.EnvSpec as ES
 import qualified Morloc.CodeGenerator.SystemConfig as MSC
-import Morloc.Internal (unique)
 import qualified Morloc.LangRegistry as LR
 import Morloc.Version (versionStr, envspecVersion, langSupportSchemaVersion)
 import Morloc.Abi (abiVersion)
@@ -175,7 +174,11 @@ cmdInstall args verbosity conf buildConfig = do
   userSources <- Map.fromList <$> mapM (\modstr -> do
     name <- Mod.extractModuleName modstr
     return (name, modstr)) moduleTexts
-  let cmdInstall' =
+  let cmdInstall' = do
+        -- Load the env's module-pin snapshot so explicit installs honor it
+        -- (and enforce env coherence) exactly as build-time auto-install does.
+        snapshot <- Mod.loadSnapshot
+        MM.modify (\s -> s {stateSnapshot = snapshot})
         mapM
           ( \modstr ->
               Mod.installModule
@@ -259,6 +262,7 @@ data MakeOptions = MakeOptions
   , moProgramKey :: Maybe String
   , moWrapperSpecs :: Maybe [WrapperSpec]
   , moBuildParentDir :: Maybe Path
+  , moOffline :: Bool
   }
 
 -- | Safe defaults for paths that re-enter the make pipeline without the full
@@ -275,6 +279,7 @@ defaultMakeOptions =
     , moProgramKey = Nothing
     , moWrapperSpecs = Nothing
     , moBuildParentDir = Nothing
+    , moOffline = False
     }
 
 -- | Resolve build parameters: parse each @-X LANG:KEY=VALUE@ and overlay them on
@@ -299,6 +304,9 @@ applyMakeOptions mopts s =
     , stateProgramKey = moProgramKey mopts
     , stateWrapperSpecs = moWrapperSpecs mopts
     , stateBuildParentDir = moBuildParentDir mopts
+    -- applyMakeOptions runs only on build paths (make / make --install /
+    -- install --build); auto-install defaults on there unless --offline.
+    , stateAutoInstall = not (moOffline mopts)
     }
 
 -- | Compile a morloc program and optionally install it.
@@ -408,6 +416,7 @@ cmdMakeWith args verbosity config buildConfig path code progKey = do
               , moProgramKey = Just progKey
               , moWrapperSpecs = Just wrapperSpecs
               , moBuildParentDir = makeBuildDir args
+              , moOffline = makeOffline args
               }
       if makeInstall args
         then
@@ -439,7 +448,7 @@ cmdConfig args config buildConfig =
   where
     current = fromMaybe Map.empty (buildConfigLangParams buildConfig)
     nonEmpty m = if Map.null m then Nothing else Just m
-    renderEntry (lang, key, val) = T.unpack lang <> ":" <> T.unpack key <> "=" <> T.unpack val
+    renderEntry (lang, key, v) = T.unpack lang <> ":" <> T.unpack key <> "=" <> T.unpack v
     -- Parse each argument, then write the transformed lang-params back. Shared
     -- by set and unset; only the (parse, transform) pair differs.
     withParams parse transform rawArgs =
@@ -550,7 +559,7 @@ getFirstSubcommand manifestPath = do
   case result of
     Left _ -> return "__expr__"
     Right bs -> case JSON.eitherDecode bs of
-      Right pm -> case pmCommands pm of
+      Right pm -> case visibleCommands pm of
         (cmd : _) -> return (T.unpack (pcName cmd))
         [] -> return "__expr__"
       Left _ -> return "__expr__"
@@ -803,7 +812,15 @@ data ProgramCommand = ProgramCommand
   { pcName :: T.Text
   , pcReturnType :: T.Text
   , _pcArgSchemas :: [T.Text]
+  , pcInternal :: Bool
   }
+
+-- | The commands a user can actually invoke. The compiler synthesizes a
+-- hidden entry point for every @--' with:@ / @--' render:@ directive and
+-- marks it @internal@; the nexus hides those, and so must anything else
+-- that reports a program's command surface.
+visibleCommands :: ProgramManifest -> [ProgramCommand]
+visibleCommands = filter (not . pcInternal) . pmCommands
 
 instance JSON.FromJSON ModuleManifest where
   parseJSON = JSON.withObject "ModuleManifest" $ \o ->
@@ -834,8 +851,28 @@ instance JSON.FromJSON ProgramCommand where
   parseJSON = JSON.withObject "ProgramCommand" $ \o ->
     ProgramCommand
       <$> o JSON..: "name"
-      <*> o JSON..:? "return_type" JSON..!= ""
+      <*> parseReturnType o
       <*> o JSON..:? "arg_schemas" JSON..!= []
+      <*> o JSON..:? "internal" JSON..!= False
+    where
+      -- What the command puts on standard output. A streaming command
+      -- returns `()` and writes its data through a sink, so its `stream`
+      -- object is the answer where it has one; otherwise the type lives
+      -- inside the nested `return` object, beside the schema and
+      -- description. A missing or malformed slot yields "", which the
+      -- caller renders as a bare command name.
+      parseReturnType o = do
+        mstream <- o JSON..:? "stream"
+        streamType <- case mstream of
+          Nothing -> return ""
+          Just st -> JSON.withObject "stream" (\r -> r JSON..:? "type" JSON..!= "") st
+        if not (T.null streamType)
+          then return streamType
+          else do
+            mret <- o JSON..:? "return"
+            case mret of
+              Nothing -> return ""
+              Just ret -> JSON.withObject "return" (\r -> r JSON..:? "type" JSON..!= "") ret
 
 -- | Check if pattern is a subsequence of the target string (case-insensitive)
 subsequenceMatch :: String -> String -> Bool
@@ -1055,7 +1092,7 @@ printModule verbose m = do
 printProgram :: Int -> ProgramManifest -> IO ()
 printProgram verbose p = do
   let name = pmName p
-      cmds = pmCommands p
+      cmds = visibleCommands p
       cmdCount = length cmds
       summary = show cmdCount <> " command" <> (if cmdCount /= 1 then "s" else "")
   putStrLn $ "  " <> T.unpack name <> "  " <> summary
