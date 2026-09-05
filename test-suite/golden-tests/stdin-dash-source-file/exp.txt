@@ -1,0 +1,10 @@
+--- source file, dash ---
+"hello from stdin"
+--- source file, /dev/stdin ---
+"hello again"
+--- source file, real path ---
+"from a file"
+--- check.path, dash ---
+"\/dev\/stdin"
+--- check.path, real path ---
+"payload.txt"

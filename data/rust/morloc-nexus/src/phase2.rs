@@ -735,7 +735,7 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
     for (i, marg) in cmd.args.iter().enumerate() {
         let id = format!("arg{}", i);
         match marg {
-            ManifestArg::Positional { quoted: q, many, checks, stdin, .. } => {
+            ManifestArg::Positional { quoted: q, many, checks, stdin, source, .. } => {
                 if *many {
                     // Variadic positional: clap collects 1..N tokens
                     // via Append action; pull them all and forward as
@@ -768,7 +768,7 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                             "/dev/stdin".to_string()
                         }
                     };
-                    let v = preprocess_cli_value(raw, checks, *q, &format!("argument #{}", i));
+                    let v = preprocess_cli_value(raw, checks, *source, *q, &format!("argument #{}", i));
                     out.push(ArgValue::Value(v));
                 } else {
                     // Required positional: clap guaranteed a value.
@@ -776,7 +776,7 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                         .get_one::<String>(&id)
                         .cloned()
                         .expect("clap-required positional must have a value");
-                    let v = preprocess_cli_value(val, checks, *q, &format!("argument #{}", i));
+                    let v = preprocess_cli_value(val, checks, *source, *q, &format!("argument #{}", i));
                     out.push(ArgValue::Value(v));
                 }
             }
@@ -785,6 +785,7 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                 default_val,
                 many,
                 checks,
+                source,
                 ..
             } => {
                 // Distinguish "user typed the flag" from "clap
@@ -820,7 +821,7 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                         .get_one::<String>(&id)
                         .cloned()
                         .expect("CLI source guarantees a value");
-                    let v = preprocess_cli_value(v, checks, *q, &format!("argument #{}", i));
+                    let v = preprocess_cli_value(v, checks, *source, *q, &format!("argument #{}", i));
                     out.push(ArgValue::Value(v));
                 } else if let Some(def) = default_val {
                     out.push(ArgValue::Value(def.clone()));
@@ -893,12 +894,12 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                                 None
                             }
                         }
-                        ManifestArg::Optional { quoted: q, checks, .. } => {
+                        ManifestArg::Optional { quoted: q, checks, source, .. } => {
                             let from_cli = matches.value_source(&eid)
                                 == Some(ValueSource::CommandLine);
                             if from_cli {
                                 matches.get_one::<String>(&eid).cloned().map(|v|
-                                    preprocess_cli_value(v, checks, *q,
+                                    preprocess_cli_value(v, checks, *source, *q,
                                         &format!("record entry '{}'", entry.key))
                                 )
                             } else {

@@ -1,0 +1,27 @@
+-- `-` is the universal shell spelling of "read standard input", and it
+-- must mean the same thing on every argument shape that names a file.
+-- `@source file` declares the argument to be a path, so the classifier
+-- never sees the token and the substitution has to happen where the
+-- shape is known.
+--
+-- `@check.path r` already worked; it is here so the two shapes are
+-- pinned side by side, along with the explicit `/dev/stdin` spelling
+-- that `-` is supposed to be interchangeable with.
+module m (readIt, pathIt)
+
+import root-py
+
+source Py from "sh.py" ("ident")
+ident :: Str -> Str
+
+--' Read a file's contents as a string
+readIt ::
+  --' @source file
+  Str -> Str
+readIt = ident
+
+--' Take a path that must exist and be readable
+pathIt ::
+  --' @check.path r
+  Str -> Str
+pathIt = ident
