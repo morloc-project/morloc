@@ -1346,8 +1346,8 @@ alphaEq a b =
       | length xs /= length ys = Nothing
       | otherwise = go bij (zip xs ys)
       where
-        go b [] = Just b
-        go b ((u, v) : rest) = walk flex b u v >>= \b' -> go b' rest
+        go acc [] = Just acc
+        go acc ((u, v) : rest) = walk flex acc u v >>= \acc' -> go acc' rest
 
     -- Two bound variables match when neither is already matched to something
     -- else. A variable bound by neither side matches only itself.

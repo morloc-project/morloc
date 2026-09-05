@@ -2970,22 +2970,22 @@ collectStreamType sigs body = do
     findCollectArg :: ExprI -> Maybe ExprI
     findCollectArg (ExprI _ e) = case e of
       IntrinsicE IntrCollect (a : _) -> Just a
-      ModE _ xs -> firstJust (map findCollectArg xs)
-      AssE _ b ws -> firstJust (map findCollectArg (b : ws))
-      IstE _ _ b -> firstJust (map findCollectArg b)
-      LstE es -> firstJust (map findCollectArg es)
-      TupE es -> firstJust (map findCollectArg es)
-      NamE kes -> firstJust (map (findCollectArg . snd) kes)
-      AppE f xs -> firstJust (map findCollectArg (f : xs))
+      ModE _ xs -> firstSome (map findCollectArg xs)
+      AssE _ b ws -> firstSome (map findCollectArg (b : ws))
+      IstE _ _ b -> firstSome (map findCollectArg b)
+      LstE es -> firstSome (map findCollectArg es)
+      TupE es -> firstSome (map findCollectArg es)
+      NamE kes -> firstSome (map (findCollectArg . snd) kes)
+      AppE f xs -> firstSome (map findCollectArg (f : xs))
       LamE _ b -> findCollectArg b
       AnnE b _ -> findCollectArg b
-      LetE bs b -> firstJust (map (findCollectArg . snd) bs ++ [findCollectArg b])
-      IfE c t f -> firstJust [findCollectArg c, findCollectArg t, findCollectArg f]
+      LetE bs b -> firstSome (map (findCollectArg . snd) bs ++ [findCollectArg b])
+      IfE c t f -> firstSome [findCollectArg c, findCollectArg t, findCollectArg f]
       DoBlockE b -> findCollectArg b
       EvalE b -> findCollectArg b
-      IntrinsicE _ es -> firstJust (map findCollectArg es)
+      IntrinsicE _ es -> firstSome (map findCollectArg es)
       ParenE b -> findCollectArg b
-      BopE l _ _ r -> firstJust [findCollectArg l, findCollectArg r]
+      BopE l _ _ r -> firstSome [findCollectArg l, findCollectArg r]
       _ -> Nothing
 
     -- The term at the head of a (possibly partial) application.
@@ -3007,7 +3007,7 @@ collectStreamType sigs body = do
     firstParamOf (FunU (t : _) _) = Just t
     firstParamOf _ = Nothing
 
-    firstJust = foldr (\x acc -> maybe acc Just x) Nothing
+    firstSome = foldr (\x acc -> maybe acc Just x) Nothing
 
 -- | Synthesize a `--' with:` flag command for a streaming (@collect) parent.
 -- Reuses the parent's body (re-indexed with fresh ids to avoid annotation

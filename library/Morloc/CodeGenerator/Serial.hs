@@ -202,23 +202,24 @@ serialAstToMsgpackSchema = serialAstToSchemaWith addHint
 serialAstToGeneralSchema :: SerialAST -> MDoc
 serialAstToGeneralSchema = serialAstToSchemaWith (const "")
 
--- | Shared schema emitter. 'addHint' is the only clause that differs
--- between the concrete and general forms, so it is the only parameter.
+-- | Shared schema emitter. How a concrete-type hint is rendered is the only
+-- thing that differs between the concrete and general forms, so it is the
+-- only parameter.
 serialAstToSchemaWith :: (FVar -> MDoc) -> SerialAST -> MDoc
-serialAstToSchemaWith addHint ast = emit ast
+serialAstToSchemaWith renderHint ast = emit ast
   where
     recNames :: Set.Set TVar
     recNames = collectRecursiveNames ast
 
     emit :: SerialAST -> MDoc
-    emit (SerialPack v (_, s)) = addHint v <> emit s
+    emit (SerialPack v (_, s)) = renderHint v <> emit s
     emit (SerialList v@(FV (TV name) _) dim s) =
-      recDecl name <> addHint v <> "a" <> encodeDim dim <> emit s
+      recDecl name <> renderHint v <> "a" <> encodeDim dim <> emit s
       where
         encodeDim (Just (NatLitF n)) = ":" <> pretty n
         encodeDim _                  = ""  -- no slot or void-valued slot
     emit (SerialTuple v@(FV (TV name) _) ss) =
-      recDecl name <> addHint v <> "t" <> encode64D (length ss) <> foldl (<>) "" (map emit ss)
+      recDecl name <> renderHint v <> "t" <> encode64D (length ss) <> foldl (<>) "" (map emit ss)
     -- Table primitive (Arrow IPC buffer). Open semantics: declared columns
     -- are a *lower bound*; the runtime accepts any Arrow buffer whose schema
     -- contains at least these columns of at least these types.
@@ -226,24 +227,24 @@ serialAstToSchemaWith addHint ast = emit ast
     emit (SerialObject NamTable _ _ rs) =
       "T:" <> encode64D (length rs) <> foldl (<>) "" (map keypair rs)
     emit (SerialObject _ v@(FV (TV name) _) _ rs) =
-      recDecl name <> addHint v <> "m" <> encode64D (length rs)
+      recDecl name <> renderHint v <> "m" <> encode64D (length rs)
         <> foldl (<>) "" (map keypair rs)
     emit (SerialRec (FV (TV name) _)) = "^" <> encodeKey name
-    emit (SerialReal v) = addHint v <> "f8" -- 64 bit float
-    emit (SerialFloat32 v) = addHint v <> "f4"
-    emit (SerialFloat64 v) = addHint v <> "f8"
-    emit (SerialInt v) = addHint v <> "j"
-    emit (SerialInt8 v) = addHint v <> "i1"
-    emit (SerialInt16 v) = addHint v <> "i2"
-    emit (SerialInt32 v) = addHint v <> "i4"
-    emit (SerialInt64 v) = addHint v <> "i8"
-    emit (SerialUInt v) = addHint v <> "u8"
-    emit (SerialUInt8 v) = addHint v <> "u1"
-    emit (SerialUInt16 v) = addHint v <> "u2"
-    emit (SerialUInt32 v) = addHint v <> "u4"
-    emit (SerialUInt64 v) = addHint v <> "u8"
-    emit (SerialBool v) = addHint v <> "b"
-    emit (SerialString v) = addHint v <> "s"
+    emit (SerialReal v) = renderHint v <> "f8" -- 64 bit float
+    emit (SerialFloat32 v) = renderHint v <> "f4"
+    emit (SerialFloat64 v) = renderHint v <> "f8"
+    emit (SerialInt v) = renderHint v <> "j"
+    emit (SerialInt8 v) = renderHint v <> "i1"
+    emit (SerialInt16 v) = renderHint v <> "i2"
+    emit (SerialInt32 v) = renderHint v <> "i4"
+    emit (SerialInt64 v) = renderHint v <> "i8"
+    emit (SerialUInt v) = renderHint v <> "u8"
+    emit (SerialUInt8 v) = renderHint v <> "u1"
+    emit (SerialUInt16 v) = renderHint v <> "u2"
+    emit (SerialUInt32 v) = renderHint v <> "u4"
+    emit (SerialUInt64 v) = renderHint v <> "u8"
+    emit (SerialBool v) = renderHint v <> "b"
+    emit (SerialString v) = renderHint v <> "s"
     -- F/O/I share a 16-byte tagged-union wire form (see
     -- morloc-runtime-types::stream_handle). The schema code selects the
     -- morloc-level type (IFile / OStream / IStream); the per-instance
@@ -251,9 +252,9 @@ serialAstToSchemaWith addHint ast = emit ast
     -- handle). The hint preserves the user's per-language native
     -- (uint64_t, int, bit64) so generated foreign code keeps its typed
     -- surface.
-    emit (SerialIFile v) = addHint v <> "F"
-    emit (SerialOStream v) = addHint v <> "O"
-    emit (SerialIStream v) = addHint v <> "I"
+    emit (SerialIFile v) = renderHint v <> "F"
+    emit (SerialOStream v) = renderHint v <> "O"
+    emit (SerialIStream v) = renderHint v <> "I"
     -- A defunctionalized closure travels as a fixed-shape tuple, independent of
     -- the closure's signature: (home_language:str, manifold_id:int,
     -- captured_arg_packets:[bytes]). The language is a string (its lang name)
@@ -272,9 +273,9 @@ serialAstToSchemaWith addHint ast = emit ast
     -- any tuple/list/leaf code below changes.
     emit (SerialClosure _ _) =
       "t" <> encode64D (3 :: Int) <> "s" <> "j" <> "a" <> "a" <> "u1"
-    emit (SerialNull v) = addHint v <> "z"
-    emit (SerialOptional v s) = addHint v <> "?" <> emit s
-    emit (SerialUnknown v) = addHint v <> "*"
+    emit (SerialNull v) = renderHint v <> "z"
+    emit (SerialOptional v s) = renderHint v <> "?" <> emit s
+    emit (SerialUnknown v) = renderHint v <> "*"
 
     keypair :: (Key, SerialAST) -> MDoc
     keypair (k, s) = encodeKey (unKey k) <> emit s
@@ -887,8 +888,8 @@ makeSerialAST m lang t0 = do
             -- Carry each instance's general packed type alongside the
             -- resolved packer. Selection ranks instances by that head, and
             -- 'resolvePacker' has already rewritten it to the concrete form.
-            (failures, matches) <- partitionEithers <$> mapM resolveWithHead ps
-            selection <- selectPacker failures matches
+            (rejected, matches) <- partitionEithers <$> mapM resolveWithHead ps
+            selection <- selectPacker rejected matches
             return $ SerialPack fv selection
           Nothing ->
             let (gt, ct) = unweaveTypeF ft
@@ -1007,14 +1008,14 @@ makeSerialAST m lang t0 = do
           [(TypeU, MDoc)] ->
           [(TypeU, TypePacker)] ->
           MorlocMonad (TypePacker, SerialAST)
-        selectPacker failures [] =
+        selectPacker rejected [] =
           let (gt, ct) = unweaveTypeF ft
            in MM.throwSourcedError m $
                 "No Packable instance covers" <+> squotes (pretty gt)
                   <> " (concrete:" <+> pretty ct <> ")."
                   <> "\nInstances declared for" <+> pretty generalTypeName
                   <> ", and why each was rejected:"
-                  <> "\n" <> indent 2 (vsep [pretty h <> "\n  " <> reason | (h, reason) <- failures])
+                  <> "\n" <> indent 2 (vsep [pretty h <> "\n  " <> reason | (h, reason) <- rejected])
         selectPacker _ matches =
           let maxima = mostSpecific (map fst matches)
            in case [packer | (h, packer) <- matches, any (equivalent h) maxima] of

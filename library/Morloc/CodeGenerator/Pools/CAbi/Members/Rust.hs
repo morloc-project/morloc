@@ -363,12 +363,9 @@ rustArgIsRef (Native tf) = not (rustIsCopy tf)
 rustArgIsRef (Function _ _) = True
 rustArgIsRef _ = False
 
-rustArgOf :: Arg TypeM -> RustM MDoc
-rustArgOf = rustArgOfWith Nothing
-
--- | As 'rustArgOf', but stamping the given lifetime onto every by-reference
--- parameter. The lifetime is supplied when the manifold returns a closure that
--- may capture those references.
+-- | Render a manifold parameter. A 'Just' lifetime is stamped onto every
+-- by-reference parameter; it is supplied when the manifold returns a closure
+-- that may capture those references.
 rustArgOfWith :: Maybe MDoc -> Arg TypeM -> RustM MDoc
 rustArgOfWith lifetime a@(Arg _ t) = do
   ts <- rustArgType t
@@ -1242,7 +1239,7 @@ borrowedIndicesOfForm :: (HasTypeM t) => ManifoldForm (Or TypeS TypeF) t -> Set.
 borrowedIndicesOfForm form =
   Set.fromList [i | Arg i tm <- typeMofForm form, isBorrowed tm]
   where
-    -- A function-typed parameter is rendered `&impl MorlocFnN` (see 'rustArgOf'),
+    -- A function-typed parameter is rendered `&impl MorlocFnN` (see 'rustArgOfWith'),
     -- so it too is a borrowed reference; tracking it keeps a captured function
     -- from being double-referenced when it is forwarded into a nested closure.
     isBorrowed (Native tf) = not (rustIsCopy tf)
