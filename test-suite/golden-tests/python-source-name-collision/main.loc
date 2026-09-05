@@ -1,0 +1,84 @@
+-- A Python source file's name must not decide whether the program works.
+--
+-- The pool binds each sourced file to a name derived from its path and
+-- imports it by module name, so two things used to go wrong. A file whose
+-- name matches something already in `sys.modules` -- `copy`, `time`,
+-- `struct`, and anything they pull in transitively, such as `heapq` --
+-- resolved to that module instead of the user's file. A file named `e.py`
+-- collided with the `except ... as e` variable in the generated manifold,
+-- which Python's function scoping then made local, so every call failed.
+--
+-- Neither set is one a user can be expected to avoid: the second is invisible
+-- and the first is transitive. `json.py` and `sub/copy.py` are here to pin the
+-- cases that must keep working -- a stdlib name that happens not to be loaded,
+-- and a collision reached through a dotted path.
+--
+-- copy.py imports base64 to check that a real stdlib import from inside a
+-- file with a colliding name still reaches the standard library. sibling.py
+-- checks the harder direction: a source file importing the very module that
+-- another source file shadows must still get the standard library.
+--
+-- pymorloc.py covers a second mechanism with the same symptom: the pool's own
+-- runtime import used to be answered by a user file of that name, because the
+-- program's source root went on sys.path before the runtime was imported.
+
+module main
+  ( fromCopy
+  , fromTime
+  , fromStruct
+  , fromHeapq
+  , fromE
+  , fromJson
+  , fromSubCopy
+  , fromSibling
+  , fromPymorloc
+  )
+
+import root-py
+
+source Py from "copy.py" ("copy_kind")
+source Py from "time.py" ("time_kind")
+source Py from "struct.py" ("struct_kind")
+source Py from "heapq.py" ("heapq_kind")
+source Py from "e.py" ("e_kind")
+source Py from "json.py" ("json_kind")
+source Py from "sub/copy.py" ("sub_copy_kind")
+source Py from "sibling.py" ("sibling_kind")
+source Py from "pymorloc.py" ("pymorloc_kind")
+
+copy_kind     :: Str -> Str
+time_kind     :: Str -> Str
+struct_kind   :: Str -> Str
+heapq_kind    :: Str -> Str
+e_kind        :: Str -> Str
+json_kind     :: Str -> Str
+sub_copy_kind :: Str -> Str
+sibling_kind  :: Str -> Str
+pymorloc_kind :: Str -> Str
+
+fromCopy    :: Str -> Str
+fromCopy    = copy_kind
+
+fromTime    :: Str -> Str
+fromTime    = time_kind
+
+fromStruct  :: Str -> Str
+fromStruct  = struct_kind
+
+fromHeapq   :: Str -> Str
+fromHeapq   = heapq_kind
+
+fromE       :: Str -> Str
+fromE       = e_kind
+
+fromJson    :: Str -> Str
+fromJson    = json_kind
+
+fromSubCopy :: Str -> Str
+fromSubCopy = sub_copy_kind
+
+fromSibling :: Str -> Str
+fromSibling = sibling_kind
+
+fromPymorloc :: Str -> Str
+fromPymorloc = pymorloc_kind

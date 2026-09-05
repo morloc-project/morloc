@@ -13,6 +13,7 @@ from collections import OrderedDict
 from multiprocessing import Process, Value, RawValue
 import ctypes
 import functools
+import importlib.util
 
 
 # Global variables for clean signal handling
@@ -45,6 +46,33 @@ _mlc_user_sources = r'''
 
 _mlc_sources_loaded = False
 _mlc_source_error = None
+
+def _mlc_import_source(module_path):
+    # Load a `source`d file by location rather than by module name.
+    #
+    # A user file may be named after a module that is already in sys.modules --
+    # `copy` and `time` are imported above, and they pull in others such as
+    # `heapq` transitively -- and importing by name returns that module instead
+    # of the user's file, so none of their functions are found. The set is not
+    # one a user can be expected to know, so resolve the file on the search path
+    # and load it from there.
+    #
+    # The module is registered under a reserved key, so it neither reads nor
+    # replaces a real module of the same name: a plain `import copy` from inside
+    # a user file still reaches the standard library.
+    rel = module_path.replace(".", os.sep) + ".py"
+    for root in sys.path:
+        candidate = os.path.join(root, rel)
+        if os.path.isfile(candidate):
+            key = "_mlc_src_" + module_path.replace(".", "_")
+            spec = importlib.util.spec_from_file_location(key, candidate)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[key] = module
+            spec.loader.exec_module(module)
+            return module
+    # Nothing on the search path: an installed package, imported by name.
+    return importlib.import_module(module_path)
+
 
 def _mlc_load_user_sources():
     # Idempotent; called once per worker after shinit (and by --health). Any

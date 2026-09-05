@@ -96,7 +96,7 @@ translateBuiltin lang desc srcs es = do
   -- build src name function
   let srcNamer =
         if ldQualifiedImports desc
-          then qualifiedSrcName lib
+          then qualifiedSrcName (sourceNamespacePrefix desc) lib
           else \src -> pretty (srcName src)
 
   -- add language-specific preamble from registry
@@ -160,7 +160,7 @@ translateExternal cmd lang desc srcs es = do
 
   let srcNamer =
         if ldQualifiedImports desc
-          then qualifiedSrcName lib
+          then qualifiedSrcName (sourceNamespacePrefix desc) lib
           else \src -> pretty (srcName src)
 
   debugInfo <- makeManifoldDebugInfoLookup
@@ -331,7 +331,7 @@ translateSource desc p = do
     then do
       lib <- MT.pack <$> asks MC.configLibrary
       let tmpl = ldImportTemplate desc
-          ns = render (makeNamespace lib p)
+          ns = render (makeNamespace (sourceNamespacePrefix desc) lib p)
           modPath = render (makeImportPath lib p)
       return . pretty $
         substituteT
@@ -343,15 +343,26 @@ translateSource desc p = do
       let tmpl = ldImportTemplate desc
       return . pretty $ substituteT tmpl [("path", p'')]
 
--- | Qualify a source function name with its module path.
-qualifiedSrcName :: Text -> Source -> MDoc
-qualifiedSrcName lib src = case srcPath src of
-  Nothing -> pretty $ srcName src
-  (Just path) -> makeNamespace lib path <> "." <> pretty (srcName src)
+-- | Prefix for the pool-side name a sourced file is bound to.
+--
+-- A source file's name is chosen by the user and must not have to dodge
+-- either the generated helper variables ('ldHelperVarPrefix') or anything
+-- the pool template itself binds. Reserving @<helper prefix>src_@ keeps the
+-- two apart: helper variables are @__morloc_cache_key@ and the like, never
+-- @__morloc_src_*@.
+sourceNamespacePrefix :: LangDescriptor -> Text
+sourceNamespacePrefix desc = ldHelperVarPrefix desc <> "src_"
 
-makeNamespace :: Text -> Path -> MDoc
-makeNamespace lib =
-  pretty
+-- | Qualify a source function name with its module path.
+qualifiedSrcName :: Text -> Text -> Source -> MDoc
+qualifiedSrcName prefix lib src = case srcPath src of
+  Nothing -> pretty $ srcName src
+  (Just path) -> makeNamespace prefix lib path <> "." <> pretty (srcName src)
+
+makeNamespace :: Text -> Text -> Path -> MDoc
+makeNamespace prefix lib =
+  (pretty prefix <>)
+    . pretty
     . MT.liftToText (map toLower')
     . MT.replace "/" "_"
     . MT.replace "-" "_"
