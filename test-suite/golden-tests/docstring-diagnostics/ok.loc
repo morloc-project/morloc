@@ -1,0 +1,10 @@
+-- Builds cleanly. Its only job is to absorb environment provisioning
+-- output into build.err before the negative cases run, so their stderr
+-- is the diagnostic and nothing else.
+module ok (f)
+
+import root-py
+
+--' Do a thing
+f :: Int -> Int
+f x = x

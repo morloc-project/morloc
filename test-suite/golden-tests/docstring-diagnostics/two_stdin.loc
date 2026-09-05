@@ -1,0 +1,14 @@
+-- Two `@stdin` positionals. The message must name the command; it used
+-- to leave the subject empty and print a doubled space.
+module twoStdin (f)
+
+import root-py
+
+--' Two stdin arguments
+f ::
+  --' @stdin
+  Str ->
+  --' @stdin
+  Str ->
+  <IO, Err> ()
+f _ _ = @throw "unused"

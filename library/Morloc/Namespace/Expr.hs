@@ -1171,8 +1171,8 @@ instance Pretty Expr where
       <> indent
         2
         ( vsep
-            [ "--' srcname: " <> pretty srcname
-            , "--' rsize: " <> encloseSep "" "" " " (map pretty rsizes)
+            [ "--' @name " <> pretty srcname
+            , "--' @rsize " <> encloseSep "" "" " " (map pretty rsizes)
             , pretty alias
             ]
         )

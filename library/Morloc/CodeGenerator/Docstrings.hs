@@ -403,19 +403,19 @@ resolveArgDocVars loc rs t r
   | isStdin
       && (isJust (docArg r) || isJust (docTrue r) || isJust (docFalse r)) =
       MM.throwSystemError $
-        loc <> " has `stdin: true`, which marks a positional argument; it"
-          <> " cannot also carry `arg:`/`true:`/`false:` (those make it an"
+        loc <> " has `@stdin`, which marks a positional argument; it"
+          <> " cannot also carry `@arg`/`@true`/`@false` (those make it an"
           <> " option or flag)."
   | isStdin && docMany r == Just True =
       MM.throwSystemError $
-        loc <> " cannot combine `stdin: true` with `many: true`."
+        loc <> " cannot combine `@stdin` with `@many`."
   | isStdin && isJust (docDefault r) =
       MM.throwSystemError $
-        loc <> " cannot combine `stdin: true` with `default:`; a stdin"
+        loc <> " cannot combine `@stdin` with `@default`; a stdin"
           <> " positional already defaults to reading stdin when omitted."
   | isStdin && t == VarT MBT.bool =
       MM.throwSystemError $
-        loc <> " has `stdin: true` on a Bool argument; a stdin positional"
+        loc <> " has `@stdin` on a Bool argument; a stdin positional"
           <> " reads a path or the stdin sentinel and must be Str-shaped."
   -- `default:` only makes sense on a flag (true:/false:) or an
   -- option (arg:). On a bare positional it is rejected. An
@@ -436,7 +436,7 @@ resolveArgDocVars loc rs t r
   -- incompatible CLI shapes for the same slot.
   | docMany r == Just True && docUnroll r == Just True =
       MM.throwSystemError $
-        loc <> " cannot combine `many: true` with `unroll: true`."
+        loc <> " cannot combine `@many` with `@unroll`."
   | docUnroll r == Just False = resolvePos t r |>> CmdArgPos
   | length rs > 0 && docUnroll r == Just True = resolveGrp loc t r rs
   | t == VarT MBT.bool = resolveFlagCmdArg loc r
@@ -482,16 +482,16 @@ resolveFlag loc r = do
   -- carries none. Reject the latter before constructing the flag.
   when (isJust (docMetavar r) && hasAnyFlagDirective) $
     MM.throwSystemError $
-      loc <> ": `metavar:` is not allowed on a Bool flag because flags have no value."
-        <> " Remove the `metavar:` directive."
+      loc <> ": `@metavar` is not allowed on a Bool flag because flags have no value."
+        <> " Remove the `@metavar` directive."
   -- A Bool flag's CLI shape is encoded by `true:` / `false:`, not
   -- `arg:`. Reject before the (Nothing, Nothing, Nothing) case
   -- below silently produces a Bool positional and drops the
   -- directive.
   when (isJust (docArg r) && isNothing (docTrue r) && isNothing (docFalse r)) $
     MM.throwSystemError $
-      loc <> ": a Bool argument cannot use `arg:`. Use `true: <opt>`"
-        <> " (default false, the flag turns it on) or `false: <opt>`"
+      loc <> ": a Bool argument cannot use `@arg`. Use `@true <opt>`"
+        <> " (default false, the flag turns it on) or `@false <opt>`"
         <> " (default true, the flag turns it off) instead."
   case (docTrue r, docFalse r, (==) "true" <$> docDefault r) of
     -- if no default value is given, make default based on given args
@@ -511,15 +511,15 @@ resolveFlag loc r = do
     -- Noop: the only declared direction agrees with the default,
     -- so flipping the flag would never change the value.
     (Just rt, Nothing, Just True) -> MM.throwSystemError $
-      loc <> ": `true: " <> pretty (makeArg rt) <> "` combined with `default: true`"
+      loc <> ": `@true " <> pretty (makeArg rt) <> "` combined with `@default true`"
         <> " is a no-op -- supplying the flag never changes the value."
-        <> " Remove `default: true` (let the flag turn true on from a false default),"
-        <> " or replace `true:` with `false:` (the flag will turn the true default off)."
+        <> " Remove `@default true` (let the flag turn true on from a false default),"
+        <> " or replace `@true` with `@false` (the flag will turn the true default off)."
     (Nothing, Just rf, Just False) -> MM.throwSystemError $
-      loc <> ": `false: " <> pretty (makeArg rf) <> "` combined with `default: false`"
+      loc <> ": `@false " <> pretty (makeArg rf) <> "` combined with `@default false`"
         <> " is a no-op -- supplying the flag never changes the value."
-        <> " Remove `default: false` (let the flag turn false on from a true default),"
-        <> " or replace `false:` with `true:` (the flag will turn the false default off)."
+        <> " Remove `@default false` (let the flag turn false on from a true default),"
+        <> " or replace `@false` with `@true` (the flag will turn the false default off)."
     -- handle positional with a given default
     (Nothing, Nothing, Just _) -> MM.throwSystemError "Positional argument with default"
     -- handle positional
@@ -682,10 +682,10 @@ validateManyOrdering loc = go False
     go seenMany (CmdArgPos r : rest)
       | seenMany && argPosDocMany r =
           MM.throwSystemError $
-            loc <> " has more than one positional with `many: true`; at most one is allowed."
+            loc <> "more than one positional declares `@many`; at most one is allowed."
       | seenMany =
           MM.throwSystemError $
-            loc <> " has a positional with `many: true` that is not the last positional;"
+            loc <> "a positional declaring `@many` is not the last positional;"
               <> " variadic positionals must occupy the final positional slot."
       | otherwise = go (argPosDocMany r) rest
     go seenMany (_ : rest) = go seenMany rest
@@ -701,7 +701,7 @@ validateStdinArg loc cmdargs = do
   let stdinCount = length [() | CmdArgPos r <- cmdargs, argPosDocStdin r]
   when (stdinCount > 1) $
     MM.throwSystemError $
-      loc <> " has more than one positional with `stdin: true`; at most one"
+      loc <> "more than one positional declares `@stdin`; at most one"
         <> " argument may read from stdin."
   go False cmdargs
   where
@@ -710,7 +710,7 @@ validateStdinArg loc cmdargs = do
     go seenStdin (CmdArgPos r : rest)
       | seenStdin =
           MM.throwSystemError $
-            loc <> " has a positional after the `stdin: true` positional;"
+            loc <> "a positional follows the `@stdin` positional;"
               <> " the stdin argument must be the last positional."
       | otherwise = go (argPosDocStdin r) rest
     go seenStdin (_ : rest) = go seenStdin rest
@@ -979,15 +979,15 @@ validateArgShape schema many docs
 validateMany :: Text -> ArgDocVars -> Either Text ArgShape
 validateMany schema docs = do
   if not (isArrayWireSchema schema)
-    then Left $ "`many: true` requires a list-typed argument (wire schema"
+    then Left $ "`@many` requires a list-typed argument (wire schema"
               <> " starting with `a`); got `" <> schema <> "`."
     else do
-      let banIf b name = if b then Left (name <> " is not allowed with `many: true`.") else Right ()
-      banIf (docSource docs /= Nothing)      "`source:`"
-      banIf (docForm docs /= Nothing)        "`form:`"
-      banIf (not (null (docChecks docs)))    "`check.*`"
-      banIf (docListSource docs /= Nothing)  "`list.source:`"
-      banIf (docListForm docs /= Nothing)    "`list.form:`"
+      let banIf b name = if b then Left (name <> " is not allowed with `@many`.") else Right ()
+      banIf (docSource docs /= Nothing)      "`@source`"
+      banIf (docForm docs /= Nothing)        "`@form`"
+      banIf (not (null (docChecks docs)))    "`@check.*`"
+      banIf (docListSource docs /= Nothing)  "`@list.source`"
+      banIf (docListForm docs /= Nothing)    "`@list.form`"
       banIf (not (null (docListChecks docs))) "`list.check.*`"
       Right AsListMany
 
@@ -1010,13 +1010,13 @@ validateScalarPrim schema docs = do
 validateStr :: ArgDocVars -> Either Text ArgShape
 validateStr docs = do
   when' (docForm docs /= Nothing) $
-    "`form:` is not allowed on `Str`. With `source: file` the runtime"
+    "`@form` is not allowed on `Str`. With `@source file` the runtime"
     <> " sniffs packet magic and falls back to raw UTF-8 text; UTF-8's"
     <> " structural constraints make the sniff collision-free."
   when' (docListSource docs /= Nothing) $
-    "`list.source:` is not allowed on a `Str` argument."
+    "`@list.source` is not allowed on a `Str` argument."
   when' (docListForm docs /= Nothing) $
-    "`list.form:` is not allowed on a `Str` argument."
+    "`@list.form` is not allowed on a `Str` argument."
   when' (not (null (docListChecks docs))) $
     "`list.check.*` is not allowed on a `Str` argument."
   case (docSource docs, docChecks docs) of
@@ -1026,54 +1026,54 @@ validateStr docs = do
     (Nothing,           [CheckPath p])  -> Right (AsStr (StrCheckPath p))
     (Just SourceInline, [CheckPath p])  -> Right (AsStr (StrCheckPath p))
     (Just SourceFile,   [CheckPath _])  -> Left
-      "`check.path:` requires the argv to be the literal path; it cannot be combined with `source: file`."
+      "`@check.path` requires the argv to be the literal path; it cannot be combined with `@source file`."
     (_, (_:_:_))                        -> Left
-      "multiple `check.*` fields on one argument are not supported in v1."
+      "multiple `@check.*` fields on one argument are not supported in v1."
 
 -- | List arguments: a JSON / file default, a bytes-family form, the
 -- ASCII inline shortcut on `[UInt8]`, or `form: list`.
 validateList :: Text -> Text -> ArgDocVars -> Either Text ArgShape
 validateList schema elemS docs = do
   when' (not (null (docChecks docs))) $
-    "`check.path:` requires a `Str` argument; got wire schema `" <> schema <> "`."
+    "`@check.path` requires a `Str` argument; got wire schema `" <> schema <> "`."
   case (docSource docs, docForm docs) of
     (Nothing, Nothing) ->
       if hasAnyListField docs
-        then Left "`list.*` fields are only meaningful when `form: list` is set."
+        then Left "`@list.*` fields are only meaningful when `@form list` is set."
         else Right AsListDefault
     (Just SourceInline, Nothing) ->
       if hasAnyListField docs
-        then Left "`list.*` fields are only meaningful when `form: list` is set."
+        then Left "`@list.*` fields are only meaningful when `@form list` is set."
         else Right AsListDefault
     (Just SourceInline, Just FormList) -> Left
-      "`source: inline` is contradictory with `form: list`; splitting a single argv string on newlines is not meaningful. Use `source: file` (or omit `source:`)."
+      "`@source inline` is contradictory with `@form list`; splitting a single argv string on newlines is not meaningful. Use `@source file` (or omit `@source`)."
     (_, Just FormList) ->
       AsListLines <$> validateLinesPipeline elemS docs
     (mSrc, Just FormBytes)     -> bytesArm schema elemS mSrc Bytes docs
     (mSrc, Just FormBytesOnly) -> bytesArm schema elemS mSrc BytesOnly docs
     (mSrc, Just FormPacket)    -> bytesArm schema elemS mSrc Packet docs
     (Just SourceFile, Nothing) -> Left $
-      "`source: file` on a list argument requires an explicit `form:`"
-      <> " (`form: list`, `form: bytes`, `form: bytes-only`, or `form: packet`)."
+      "`@source file` on a list argument requires an explicit `@form`"
+      <> " (`@form list`, `@form bytes`, `@form bytes-only`, or `@form packet`)."
 
 bytesArm
   :: Text -> Text -> Maybe SourceAtom -> BytesVariant -> ArgDocVars
   -> Either Text ArgShape
 bytesArm schema elemS mSrc variant docs = do
   when' (hasAnyListField docs) $
-    "`list.*` fields are only meaningful when `form: list` is set."
+    "`@list.*` fields are only meaningful when `@form list` is set."
   case (mSrc, variant) of
     (Just SourceInline, Bytes)     ->
       requireUInt8 schema elemS *> Right (AsListInlineBytes IbBytes)
     (Just SourceInline, BytesOnly) ->
       requireUInt8 schema elemS *> Right (AsListInlineBytes IbBytesOnly)
     (Just SourceInline, Packet)    -> Left
-      "`source: inline` is not compatible with `form: packet`; packets are always file-borne."
+      "`@source inline` is not compatible with `@form packet`; packets are always file-borne."
     (_, _) ->
       if isFixedWidthScalar elemS
         then Right (AsListBytes variant)
         else Left $
-          "`form: " <> showVariant variant <> "` requires every list element"
+          "`@form " <> showVariant variant <> "` requires every list element"
           <> " to be a fixed-width scalar (Bool, sized Int/UInt, sized Float)."
           <> " Element wire schema `" <> elemS <> "` is not fixed-width."
   where
@@ -1081,7 +1081,7 @@ bytesArm schema elemS mSrc variant docs = do
       if es == "u1"
         then Right ()
         else Left $
-          "`source: inline + form: " <> showVariant variant <> "` is only"
+          "`@source inline + @form " <> showVariant variant <> "` is only"
           <> " allowed on `[UInt8]`; got element wire schema `" <> es <> "`."
 
 showVariant :: BytesVariant -> Text
@@ -1097,11 +1097,11 @@ validateLinesPipeline elemS docs =
     (Nothing,           Nothing,            [])             -> defaultPipeline elemS docs
     (Just SourceInline, Nothing,            [])             -> defaultPipeline elemS docs
     (Nothing,           Just FormList,      _)              -> Left
-      "`list.form: list` is not allowed -- nested list files are forbidden."
+      "`@list.form list` is not allowed -- nested list files are forbidden."
     (Just SourceInline, Just FormList,      _)              -> Left
-      "`list.form: list` is not allowed -- nested list files are forbidden."
+      "`@list.form list` is not allowed -- nested list files are forbidden."
     (Just SourceFile,   Just FormList,      _)              -> Left
-      "`list.form: list` is not allowed -- nested list files are forbidden."
+      "`@list.form list` is not allowed -- nested list files are forbidden."
     (Just SourceFile,   Nothing,            [])             -> Right (LpFile LfmAuto)
     (Just SourceFile,   Just FormPacket,    [])             -> Right (LpFile LfmPacket)
     (Just SourceFile,   Just FormBytes,     [])             -> bytesLineFile elemS IbBytes
@@ -1109,24 +1109,24 @@ validateLinesPipeline elemS docs =
     (Nothing,           Nothing,            [CheckPath p])  -> inlineCheck elemS p
     (Just SourceInline, Nothing,            [CheckPath p])  -> inlineCheck elemS p
     (_,                 Just FormPacket,    _)              -> Left
-      "`list.form: packet` requires `list.source: file`."
+      "`@list.form packet` requires `@list.source file`."
     (_,                 Just FormBytes,     _)              -> Left
-      "`list.form: bytes` requires `list.source: file` (or `list.source: inline` on inner `[UInt8]`)."
+      "`@list.form bytes` requires `@list.source file` (or `@list.source inline` on inner `[UInt8]`)."
     (_,                 Just FormBytesOnly, _)              -> Left
-      "`list.form: bytes-only` requires `list.source: file` (or `list.source: inline` on inner `[UInt8]`)."
-    _ -> Left "unsupported `list.*` combination."
+      "`@list.form bytes-only` requires `@list.source file` (or `@list.source inline` on inner `[UInt8]`)."
+    _ -> Left "unsupported `@list.*` combination."
   where
     defaultPipeline _ _ = Right LpInlineBare
     inlineCheck es p
       | es == "s"  = Right (LpInlineCheck p)
       | otherwise  = Left $
-          "`list.check.path:` requires a list-of-`Str` element type; got element wire schema `"
+          "`@list.check.path` requires a list-of-`Str` element type; got element wire schema `"
           <> es <> "`."
     bytesLineFile es variant
       | maybe (isFixedWidthScalar es) isFixedWidthScalar (listElementSchema es) = Right (LpFile (LfmBytes variant))
       | isFixedWidthScalar es = Right (LpFile (LfmBytes variant))
       | otherwise = Left $
-          "`list.form: bytes`/`bytes-only` requires every leaf to be a fixed-width scalar; got element wire schema `"
+          "`@list.form bytes`/`bytes-only` requires every leaf to be a fixed-width scalar; got element wire schema `"
           <> es <> "`."
 
 -- | Tuples, records, maps: no shape modifiers.

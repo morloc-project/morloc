@@ -886,10 +886,11 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- unaffected.
     toNexusExpr (AnnoS (Idx iTmp _) _ (IntrinsicS IntrTmpfile _)) =
       MM.throwSourcedError iTmp $
-        "the whole-list `with:`/`render:` handler currently requires a command"
+        "the whole-list `@with`/`@render` handler currently requires a command"
           <+> "that dispatches to a foreign pool; a pure (all-morloc) whole-form"
-          <+> "command is not yet supported. Use `.buffer` for streaming, or"
-          <+> "involve a foreign function in the command body."
+          <+> "command is not yet supported. Add the `@stream` modifier for"
+          <+> "per-batch streaming, or involve a foreign function in the"
+          <+> "command body."
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS intr _)) = do
       v <- resolveCompileTimeIntrinsic intr
       StrX <$> type2schema t <*> pure v
@@ -1460,9 +1461,9 @@ checkManyWire _   False _      = return ()
 checkManyWire loc True  schema
   | isArrayWireSchema schema = return ()
   | otherwise = MM.throwSystemError $
-      loc <> ": `many: true` requires a list-typed argument (wire schema"
+      loc <> ": `@many` requires a list-typed argument (wire schema"
         <> " starting with `a`); got `" <> pretty schema <> "`. Remove"
-        <> " `many: true` or change the type to a list."
+        <> " `@many` or change the type to a list."
 
 -- | Parse the default text as JSON and structurally validate it
 -- against the SerialAST. Parser failures are surfaced verbatim --
