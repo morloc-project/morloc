@@ -18,6 +18,14 @@ import importlib.util
 
 # Global variables for clean signal handling
 daemon = None
+# The daemon pointer is also held here, and is taken out exactly once by
+# whichever of the signal handler and the normal exit path reaches it first.
+# `list.pop` is a single C call, so the interpreter cannot process a pending
+# signal partway through it: a handler re-entering during cleanup finds the
+# slot empty rather than a pointer that is already being freed. Making the
+# hand-off atomic is what lets the handler leave signal dispositions alone --
+# see 'signal_handler'.
+_daemon_slot = []
 workers = []
 global_state = dict()
 _shutdown_wakeup_fd = -1
@@ -379,35 +387,44 @@ def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, tota
         sock.close()
 
 
+def _hold_daemon(d):
+    _daemon_slot.append(d)
+    return d
+
+
+def _take_daemon():
+    # None when someone else already took it.
+    try:
+        return _daemon_slot.pop()
+    except IndexError:
+        return None
+
+
 def signal_handler(sig, frame):
     global daemon
-    # Ignore further SIGTERM/SIGINT during cleanup. Python processes pending
-    # signals between bytecodes, including while another signal handler is
-    # running, so a second SIGTERM arriving mid-cleanup would otherwise
-    # re-enter this handler and double-free the daemon pointer.
-    try:
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
-    except Exception:
-        pass
+    # Re-entrancy is safe here and needs no change to signal dispositions.
+    # Python processes pending signals between bytecodes, including while a
+    # handler is running, so a second SIGTERM can re-enter this function at any
+    # point; every step below is idempotent, and the daemon pointer is taken
+    # from a slot that yields it to exactly one caller. Setting SIGTERM to
+    # SIG_IGN here instead would race with the delivery of that second signal,
+    # which the interpreter reports by printing
+    # "OSError: Signal 15 ignored due to race condition" to stderr.
     shutdown_flag.value = True
     if _shutdown_wakeup_fd >= 0:
         try:
             os.write(_shutdown_wakeup_fd, b'!')
         except OSError:
             pass
-    # Capture the daemon pointer into a local and clear the global BEFORE
-    # invoking close_daemon. If a pending signal still slips through and
-    # re-enters this handler, it will see daemon=None and skip the free.
-    d = daemon
     daemon = None
+    d = _take_daemon()
     if d is not None:
         morloc.close_daemon(d)
 
 
 def client_listener(job_fd, socket_path, tmpdir, shm_basename, shutdown_flag):
     global daemon
-    daemon = morloc.start_daemon(socket_path, tmpdir, shm_basename, 0xffff)
+    daemon = _hold_daemon(morloc.start_daemon(socket_path, tmpdir, shm_basename, 0xffff))
     sock = _socket.fromfd(job_fd, _socket.AF_UNIX, _socket.SOCK_STREAM)
     os.close(job_fd)  # sock owns a dup'd copy
 
@@ -470,7 +487,7 @@ def run_thread_pool(socket_path, tmpdir, shm_basename):
     morloc.shinit(shm_basename, 0, 0xffff)  # attach SHM once for the process
     _mlc_load_user_sources()  # no fork on this path -> safe to import in-thread
 
-    daemon = morloc.start_daemon(socket_path, tmpdir, shm_basename, 0xffff)
+    daemon = _hold_daemon(morloc.start_daemon(socket_path, tmpdir, shm_basename, 0xffff))
 
     stop = threading.Event()
     def _on_signal(_sig, _frame):
@@ -563,10 +580,12 @@ def run_thread_pool(socket_path, tmpdir, shm_basename):
         # returns promptly; the bound keeps a wedged listener from hanging exit.
         listener.join(timeout=2.0)
         sys.stdout.flush()
-        try:
-            morloc.close_daemon(daemon)
-        except Exception:
-            pass
+        d = _take_daemon()
+        if d is not None:
+            try:
+                morloc.close_daemon(d)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
