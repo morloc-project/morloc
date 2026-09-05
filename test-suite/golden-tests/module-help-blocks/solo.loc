@@ -1,0 +1,13 @@
+-- Single-command layout: the command's args live on the root, so the
+-- module epilogue has to coexist with the command's own positional and
+-- return blocks rather than replacing them.
+--' @epilogue
+--' Examples:
+--'   solo 1 2
+module solo (add)
+
+import root-py
+
+--' Add two integers
+add :: Int -> Int -> Int
+add x y = x + y

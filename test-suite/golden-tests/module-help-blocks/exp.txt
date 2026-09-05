@@ -1,0 +1,36 @@
+--- multi short ---
+A demo toolbox
+
+Usage: ./tool <nexus_options> <command> <command_options>
+
+Commands:
+  greet  Greet someone
+  add    Add two integers
+
+General Options:
+  -h, --help  Print help (see more with '--help')
+
+Examples:
+  tool greet Weena
+  tool add 1 2
+--- multi long description ---
+A demo toolbox
+It does several things.
+
+Usage: ./tool <nexus_options> <command> <command_options>
+--- single short ---
+Add two integers
+
+Usage: ./solo <nexus_options> @ <command_options>
+
+General Options:
+  -h, --help  Print help (see more with '--help')
+
+Positional arguments:
+  1:  type: Int
+  2:  type: Int
+
+Return: Int
+
+Examples:
+  solo 1 2

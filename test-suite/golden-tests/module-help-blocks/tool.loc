@@ -1,0 +1,23 @@
+-- A module docstring describes the whole program. Its first line is the
+-- synopsis `-h` shows; every line reaches `--help`. An `@epilogue` block
+-- is the trailing "Examples:" section, and renders under both.
+--
+-- The single-command layout in solo.loc puts the epilogue after the
+-- command's own positional/return blocks rather than instead of them.
+--' A demo toolbox
+--' It does several things.
+--' @epilogue
+--' Examples:
+--'   tool greet Weena
+--'   tool add 1 2
+module tool (greet, add)
+
+import root-py
+
+--' Greet someone
+greet :: Str -> Str
+greet name = "Hello, " <> name
+
+--' Add two integers
+add :: Int -> Int -> Int
+add x y = x + y

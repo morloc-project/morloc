@@ -226,6 +226,10 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
     let visible_count = manifest.commands.iter().filter(|c| !c.internal).count();
     let single = visible_count == 1 && manifest.groups.is_empty();
 
+    // `--' @epilogue` blocks above `module` render at the foot of
+    // top-level help, in either layout.
+    let epilogue = render_epilogues(&manifest.epilogues);
+
     if single {
         let cmd = manifest
             .commands
@@ -236,9 +240,10 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
         // section sorts before the command's positional/optional args
         // (clap orders sections by first-arg-added).
         let root = crate::help::add_general_options(ClapCommand::new(leak(prog_name)));
-        let root = build_command_args(root, cmd, manifest)
+        let mut root = build_command_args(root, cmd, manifest)
             .about(leak(first_desc(&cmd.desc)))
             .arg_required_else_help(false);
+        root = append_after_help(root, &epilogue);
         return crate::help::finalize(root, crate::help::usage_single_root(prog_name));
     }
 
@@ -249,6 +254,13 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
     if let Some(first) = manifest.desc.first() {
         root = root.about(leak(first));
     }
+    // `about` is the one-line synopsis `-h` shows; `long_about` carries
+    // every description line for `--help`, the same split
+    // `build_command_args` gives each subcommand.
+    if !manifest.desc.is_empty() {
+        root = root.long_about(leak(&manifest.desc.join("\n")));
+    }
+    root = append_after_help(root, &epilogue);
     root = crate::help::finalize(root, crate::help::usage_multi_root(prog_name));
 
     // Each CmdGroup becomes its own clap subcommand; its members
@@ -260,6 +272,9 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
         grp_cmd = crate::help::add_general_options(grp_cmd);
         if let Some(first) = grp.desc.first() {
             grp_cmd = grp_cmd.about(leak(first));
+        }
+        if !grp.desc.is_empty() {
+            grp_cmd = grp_cmd.long_about(leak(&grp.desc.join("\n")));
         }
         grp_cmd = crate::help::finalize(
             grp_cmd,
@@ -907,6 +922,41 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
 }
 
 /// First non-empty description line (used as clap's `about` text).
+/// Join the manifest's epilogue blocks into one help footer: lines within a
+/// block as written, a blank line between blocks. Empty blocks drop out.
+fn render_epilogues(epilogues: &[Vec<String>]) -> String {
+    epilogues
+        .iter()
+        .map(|block| {
+            block
+                .iter()
+                .map(|line| line.trim_end())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .filter(|block| !block.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Append a block to a command's `after_help`, keeping whatever is already
+/// there. A blank `block` leaves the command untouched.
+fn append_after_help(cmd: ClapCommand, block: &str) -> ClapCommand {
+    if block.is_empty() {
+        return cmd;
+    }
+    let existing = cmd
+        .get_after_help()
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    let merged = if existing.is_empty() {
+        block.to_string()
+    } else {
+        format!("{existing}\n\n{block}")
+    };
+    cmd.after_help(leak(&merged))
+}
+
 pub(crate) fn first_desc(desc: &[String]) -> &str {
     desc.iter()
         .find(|d| !d.trim().is_empty())
