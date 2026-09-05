@@ -206,7 +206,47 @@ pub fn build_json_help(m: &Manifest) -> Value {
         },
         "groups": groups,
         "commands": commands,
+        "types": named_type_glossary(m),
     })
+}
+
+/// Every named type the visible commands mention, defined once.
+///
+/// A rendered type says `[Hit]` or `RootedTree Str Real Str`; without the
+/// definition a reader has the name and nothing else. Names are unique within a
+/// program -- the compiler rejects two definitions of one name -- so the
+/// glossary is flat and a name in any command's types resolves here.
+///
+/// Definitions are generic. A record lists its fields; a type whose wire form
+/// comes from a Packable instance gives that form in its own parameters, so one
+/// entry covers every instantiation rather than one entry per use.
+fn named_type_glossary(m: &Manifest) -> Vec<Value> {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut out: Vec<Value> = Vec::new();
+    for cmd in m.commands.iter().filter(|c| !c.internal) {
+        for t in &cmd.named_types {
+            if seen.contains(&t.name.as_str()) {
+                continue;
+            }
+            seen.push(&t.name);
+            let mut entry = serde_json::Map::new();
+            entry.insert("name".into(), json!(t.name));
+            entry.insert("kind".into(), json!(t.kind));
+            entry.insert("parameters".into(), json!(t.parameters));
+            if t.kind == "packable" {
+                entry.insert("equals".into(), json!(t.equals));
+            } else {
+                let fields: Vec<Value> = t
+                    .fields
+                    .iter()
+                    .map(|f| json!({ "key": f.key, "type": f.type_desc }))
+                    .collect();
+                entry.insert("fields".into(), json!(fields));
+            }
+            out.push(Value::Object(entry));
+        }
+    }
+    out
 }
 
 /// The `type` object for what a command puts on standard output: its

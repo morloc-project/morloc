@@ -1949,6 +1949,169 @@ namTagLabel NamRecord = "record"
 namTagLabel NamObject = "object"
 namTagLabel NamTable  = "table"
 
+-- | Every named type reachable from a command's signature, in discovery
+-- order and deduplicated by name.
+--
+-- The help prints a type by name and defines each name once beneath the
+-- argument list. A name is only useful there if it is actually defined,
+-- and a record reached through a list, tuple, or optional is exactly as
+-- opaque to a caller as one at the top level -- more so, since it is the
+-- shape they will be handed. Walking the whole type is what makes
+-- `[Hit]` mean something.
+-- | Every type a command's signature mentions: each argument (a group
+-- contributes the record itself, whose fields the walk then reaches)
+-- and the return.
+-- | The types a command's help actually shows.
+--
+-- The glossary defines the names a reader meets, so it is built from what is
+-- rendered rather than from the whole signature. An option group is the case
+-- where those differ: the record is destructured into individual options, so
+-- its own name appears nowhere and defining it only raises a question the help
+-- never asked. Its field types do appear, beside each option, so those are
+-- what it contributes.
+cmdSignatureTypes :: Maybe Type -> CmdDocSet -> [Type]
+cmdSignatureTypes mStream doc =
+  concatMap argTypes (cmdDocArgs doc)
+    -- A streaming command returns @()@ and its data leaves through a sink, so
+    -- the help shows the batch. Collect from what is shown.
+    <> [fromMaybe (fst (cmdDocRet doc)) mStream]
+  where
+    argTypes (CmdArgPos r) = [argPosDocType r]
+    argTypes (CmdArgOpt r) = [argOptDocType r]
+    argTypes (CmdArgFlag _) = [VarT MBT.bool]
+    -- A group is destructured into individual options, so the record's own
+    -- name is printed only when it also carries an aggregate option to accept
+    -- the whole thing. Its field types are printed either way, beside each
+    -- option.
+    argTypes (CmdArgGrp r) =
+      [recDocType r | isJust (recDocOpt r)]
+        <> case recDocType r of
+             NamT _ _ _ fields -> map snd fields
+             _ -> []
+
+-- | The glossary for one command: every named type its signature mentions,
+-- defined once and generically.
+--
+-- Records and tables are read off the signature itself. A type whose wire form
+-- comes from a @Packable@ instance has no structure in the signature at all --
+-- the name is opaque there -- so its definition is taken from the instance,
+-- which states the wire form generically in the constructor's own parameters.
+namedTypesJson :: [Serial.PackerInstance] -> [Type] -> Text
+namedTypesJson instances ts =
+  jsonArr
+    ( map oneNamed (filter (isShown . snd3) (dedup (concatMap collect ts)))
+        <> packableEntries ts
+    )
+  where
+    snd3 (_, x, _) = x
+
+    -- A definition earns its place by defining a name the reader actually
+    -- meets. A type can appear in a signature without appearing in the help:
+    -- an option group is destructured into flags, an anonymous record row is
+    -- printed inline as the table's columns, and a streaming command's @()@ is
+    -- replaced by its batch. Defining those raises a question the help never
+    -- asked.
+    isShown :: Text -> Bool
+    isShown nm = Set.member nm shownNames
+
+    shownNames :: Set.Set Text
+    shownNames =
+      Set.fromList
+        (concatMap (MT.split (\c -> not (isNameChar c)) . renderCliType) ts)
+
+    isNameChar c = c == '_' || c `elem` (['a' .. 'z'] <> ['A' .. 'Z'] <> ['0' .. '9'])
+
+    collect :: Type -> [(NamType, Text, [(Key, Type)])]
+    collect = go []
+      where
+        -- `seen` guards a record whose field type refers back to it;
+        -- the definition is emitted once and the back-reference renders
+        -- as the name.
+        go seen t = case t of
+          NamT o v ps fields
+            | render (pretty v) `elem` seen -> []
+            | otherwise ->
+                let nm = render (pretty v)
+                    seen' = nm : seen
+                in (o, nm, map (fmap (unwrapColumn o)) fields)
+                     : concatMap (go seen') ps
+                     <> concatMap (go seen' . snd) fields
+          AppT f as -> go seen f <> concatMap (go seen) as
+          FunT as b -> concatMap (go seen) as <> go seen b
+          EffectT _ b -> go seen b
+          OptionalT b -> go seen b
+          _ -> []
+
+    -- A table stores each column as an array; the author wrote the
+    -- element type, so that is what the definition shows.
+    unwrapColumn NamTable (AppT (VarT (TV "List")) [el]) = el
+    unwrapColumn _ t = t
+
+    dedup = go Set.empty
+      where
+        go _ [] = []
+        go seen (x@(_, nm, _) : rest)
+          | Set.member nm seen = go seen rest
+          | otherwise = x : go (Set.insert nm seen) rest
+
+    oneNamed (o, nm, fields) =
+      jsonObj
+        [ ("name", jsonStr nm)
+        , ("kind", jsonStr (namTagLabel o))
+        , ("parameters", jsonArr [])
+        , ("fields", jsonArr
+            [ jsonObj [("key", jsonStr (unKey k)), ("type", jsonStr (renderCliType ft))]
+            | (k, ft) <- fields
+            ])
+        ]
+
+    -- Every constructor named anywhere in the signature, head-first.
+    headNames :: Type -> [TVar]
+    headNames t = case t of
+      VarT v -> [v]
+      AppT f as -> headNames f <> concatMap headNames as
+      FunT as b -> concatMap headNames as <> headNames b
+      EffectT _ b -> headNames b
+      OptionalT b -> headNames b
+      NamT _ _ ps fs -> concatMap headNames ps <> concatMap (headNames . snd) fs
+      _ -> []
+
+    packableEntries :: [Type] -> [Text]
+    packableEntries sigTs =
+      let wanted = Set.fromList (concatMap headNames sigTs)
+       in map onePackable . dedupOn fst $
+            [ (extractKey (Serial.piHead pin), pin)
+            | pin <- instances
+            , Set.member (extractKey (Serial.piHead pin)) wanted
+            , isShown (render (pretty (extractKey (Serial.piHead pin))))
+            ]
+
+    dedupOn f = go Set.empty
+      where
+        go _ [] = []
+        go seen (x : rest)
+          | Set.member (f x) seen = go seen rest
+          | otherwise = x : go (Set.insert (f x) seen) rest
+
+    -- The instance states head and wire form over the same variables, so the
+    -- parameter list is read off the head and the wire form is left generic:
+    -- one entry serves every use of the constructor.
+    peelU (ForallU _ t) = peelU t
+    peelU t = t
+
+    onePackable (v, pin) =
+      let headBody = peelU (Serial.piHead pin)
+          wireBody = peelU (Serial.piWire pin)
+          params = case headBody of
+            AppU _ as -> [render (pretty a) | a <- as]
+            _ -> []
+       in jsonObj
+            [ ("name", jsonStr (render (pretty v)))
+            , ("kind", jsonStr "packable")
+            , ("parameters", jsonArr (map jsonStr params))
+            , ("equals", jsonStr (render (pretty wireBody)))
+            ]
+
 -- | Build the JSON @constraints@ array for a surface type. Only the
 -- @kind@ constraint is populated today; future constraints (min, max,
 -- regex, length, ...) will append to this list.
@@ -2321,6 +2484,10 @@ data ManifestInputs = ManifestInputs
     -- recorded so a built program carries a record of how it was compiled.
     -- Empty when no build parameters were given.
   , miRunLog              :: !(Maybe RenderedRunLog)
+  , miPackerInstances     :: ![Serial.PackerInstance]
+    -- ^ Every @Packable@ instance in the program. A type whose wire form comes
+    -- from an instance is opaque in a signature, so its glossary entry is taken
+    -- from here rather than from the type itself.
   , miCapabilities        :: ![Text]
   , miTermDocs            :: !(Map.Map EVar [Text])
     -- ^ Term-level docstrings by term name. Used to look up the
@@ -2328,6 +2495,9 @@ data ManifestInputs = ManifestInputs
     -- (the referenced term's own docstring becomes the flag's help
     -- text).
   , miStreamElems         :: !(Map.Map EVar (Text, Text))
+  , miStreamTypes         :: !(Map.Map EVar Type)
+    -- ^ The batch a streaming command writes. Its help shows this in place of
+    -- the @()@ the function returns, so the glossary is built from it too.
     -- ^ For each @collect command, keyed by term name: the batch type
     -- it writes to standard output, rendered as a caller reads it, and
     -- that type's general wire schema. A streaming command returns
@@ -2468,6 +2638,8 @@ buildManifest ManifestInputs{..} =
         -- mangles pre-rename). Using the display name would emit
         -- dead pointers whenever the parent has a `--' name:`.
         , ("terminals", terminalsJson (fdataTermName fd) (cmdDocTerminals (fdataCmdDocSet fd)))
+        , ("named_types", namedTypesJson miPackerInstances
+            (cmdSignatureTypes (Map.lookup (EV (fdataTermName fd)) miStreamTypes) (fdataCmdDocSet fd)))
         , ("metadata", metadataEmpty)
         , cmdGroupField (fdataMid fd)
         ]
@@ -2486,6 +2658,8 @@ buildManifest ManifestInputs{..} =
         , ("internal", jsonBool (isInternalTerminalName (commandTermName g)))
         -- Same term-name-for-mangling rationale as `remoteCmdJson`.
         , ("terminals", terminalsJson (commandTermName g) (cmdDocTerminals (commandDocs g)))
+        , ("named_types", namedTypesJson miPackerInstances
+            (cmdSignatureTypes (Map.lookup (EV (commandTermName g)) miStreamTypes) (commandDocs g)))
         , ("metadata", metadataEmpty)
         , cmdGroupField (commandMid g)
         ]
@@ -2709,6 +2883,17 @@ generate cs rASTs helperRASTs = do
     ast <- generalTypeToSerialAST i t
     return (ev, (renderCliType t, render (Serial.serialAstToGeneralSchema ast)))
 
+  -- The batch type is recovered from the producer's sink signature, which does
+  -- not pass through the resolution that argument and return types get, so its
+  -- named types are still bare names. Resolve them here or the glossary has
+  -- nothing to define.
+  streamTypes <- fmap Map.fromList . CM.forM (Map.toList streamElemTypes) $ \(ev, tu) -> do
+    let i = Map.findWithDefault 0 ev streamMids
+    t <- Docstrings.resolveNestedTypes i (typeOf tu)
+    return (ev, t)
+
+  packerInstances <- Serial.findPackerInstances
+
   let manifestJson =
         buildManifest
           ManifestInputs
@@ -2730,9 +2915,11 @@ generate cs rASTs helperRASTs = do
             , miTmpdir              = tmpdir
             , miBuildParams         = buildParams
             , miRunLog              = runLog
+            , miPackerInstances     = packerInstances
             , miCapabilities        = capabilities
             , miTermDocs            = termDocs
             , miStreamElems         = streamElems
+            , miStreamTypes         = streamTypes
             }
 
   -- Launcher wrappers. Each is a pure-shell script that execs

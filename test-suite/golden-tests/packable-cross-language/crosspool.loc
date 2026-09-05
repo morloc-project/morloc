@@ -1,0 +1,29 @@
+--' A packed value crossing from one pool to another. Python builds the Box and
+--' C++ consumes it, so the value is serialized by one language's instance and
+--' read back by the other's. Both instances give it the same wire form, which
+--' is what makes the transfer meaningful.
+
+module crosspool (roundTrip)
+
+import root-py
+import root-cpp
+
+newtype Box a
+
+type Py  => (Box a) = "dict" a
+type Cpp => (Box a) = "Box<$1>" a
+
+instance Packable [a] (Box a) where
+  source Py from "helpers.py" ("pack_generic" as pack, "unpack_generic" as unpack)
+
+instance Packable [a] (Box a) where
+  source Cpp from "box.hpp" ("pack_box" as pack, "unpack_box" as unpack)
+
+source Py  from "helpers.py" ("pack_generic" as mkBox)
+source Cpp from "box.hpp"    ("box_sum" as boxSum)
+
+mkBox :: [Int] -> Box Int
+boxSum :: Box Int -> Int
+
+roundTrip :: [Int] -> Int
+roundTrip xs = boxSum (mkBox xs)

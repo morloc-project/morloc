@@ -142,6 +142,10 @@ module Morloc.Namespace.Type
 
     -- * Partial order logic
   , isSubtypeOf
+  , alphaEq
+  , unifyU
+  , applySubstU
+  , wireFormsAgree
   , equivalent
   , mostGeneral
   , mostSpecific
@@ -1066,13 +1070,10 @@ instance P.PartialOrd TypeU where
   (<=) t1 (LabeledU _ t2) = t1 P.<= t2
   (<=) _ _ = False
 
-  (==) (ForallU v1 t1) (ForallU v2 t2) =
-    if Set.member (VarU v1) (free t2)
-      then
-        let v = newVariable t1 t2
-         in (P.==) (substituteTVar v1 (VarU v) t1) (substituteTVar v2 (VarU v) t2)
-      else (P.==) t1 (substituteTVar v2 (VarU v1) t2)
-  (==) a b = a == b
+  -- Alpha-equivalence, so that two types binding the same variables in a
+  -- different order compare equal. The subtyping rules above consult this
+  -- before their own quantifier handling, so ordering is settled in one place.
+  (==) = alphaEq
 
 substituteFirst :: TVar -> TypeU -> TypeU -> TypeU
 substituteFirst v t1 t2 = case findFirst v t1 t2 of
@@ -1144,6 +1145,227 @@ findFirst v = f
     firstOf _ _ = Nothing
 
 -- | is t1 a generalization of t2?
+-- | The carrier a type variable occurs in. A variable must be replaced by a
+-- value of its own kind, so a renaming has to rebuild the carrier it found.
+data VarForm = VarPlain | VarKinded Kind | VarListed | VarSetted
+
+rebuildVar :: VarForm -> TVar -> TypeU
+rebuildVar VarPlain v = VarU v
+rebuildVar (VarKinded k) v = KVarU (v, k)
+rebuildVar VarListed v = ListVarU v
+rebuildVar VarSetted v = SetVarU v
+
+-- | Every type variable in a type, with the carrier it occurs in.
+varForms :: TypeU -> [(TVar, VarForm)]
+varForms = go
+  where
+    go (VarU v) = [(v, VarPlain)]
+    go (KVarU (v, k)) = [(v, VarKinded k)]
+    go (ListVarU v) = [(v, VarListed)]
+    go (SetVarU v) = [(v, VarSetted)]
+    go ListVoidU = []
+    go SetVoidU = []
+    go (VoidU _) = []
+    go (LitU _) = []
+    go (OpU _ ts) = concatMap go ts
+    go (FunU ts t) = concatMap go (t : ts)
+    go (AppU t ts) = concatMap go (t : ts)
+    go (EffectU _ t) = go t
+    go (OptionalU t) = go t
+    go (LabeledU _ t) = go t
+    go (NamU _ v ps rs) = (v, VarPlain) : concatMap go (ps <> map snd rs)
+    go (ExistU v (ts, _) (rs, _)) = (v, VarPlain) : concatMap go (ts <> map snd rs)
+    go (ForallU v t) = (v, VarPlain) : go t
+
+-- | Rename the given variables to names that occur in neither type, preserving
+-- each one's carrier. Two types that happen to use the same variable name do
+-- not thereby constrain each other, so they must be separated before unifying.
+renameApartU :: [TVar] -> [TVar] -> TypeU -> TypeU -> ([TVar], TypeU, TypeU)
+renameApartU avoid vs t1 t2 =
+  let forms = varForms t1 <> varForms t2
+      used = map fst forms <> avoid
+      (vs', renames) = foldl step ([], []) vs
+      step (accVs, accR) v =
+        let v' = fresh (used <> map snd accR) v
+         in (accVs <> [v'], accR <> [(v, v')])
+      apply t = foldl (\acc (v, v') -> substituteTVar v (rebuildVar (formOf forms v) v') acc) t renames
+   in (vs', apply t1, apply t2)
+  where
+    formOf forms v = maybe VarPlain id (lookup v forms)
+    fresh taken v =
+      let candidates = [TV (unTVar v <> DT.replicate k "'") | k <- [1 ..]]
+       in head [c | c <- candidates, c `notElem` taken]
+
+-- | Most general unifier of two types under a set of flexible variables.
+--
+-- A flexible variable may take any value; anything else matches only itself.
+-- The substitution is kept idempotent, so applying it is a fold of
+-- 'substituteTVar'.
+unifyU :: [TVar] -> TypeU -> TypeU -> Maybe [(TVar, TypeU)]
+unifyU flex = go []
+  where
+    go sub x y = case (resolve sub x, resolve sub y) of
+      (a, b) | Just v <- flexVar a -> bind sub v b
+             | Just v <- flexVar b -> bind sub v a
+      (VarU v1, VarU v2) | v1 == v2 -> Just sub
+      (KVarU (v1, k1), KVarU (v2, k2)) | v1 == v2, k1 == k2 -> Just sub
+      (ListVarU v1, ListVarU v2) | v1 == v2 -> Just sub
+      (SetVarU v1, SetVarU v2) | v1 == v2 -> Just sub
+      (ListVoidU, ListVoidU) -> Just sub
+      (SetVoidU, SetVoidU) -> Just sub
+      (VoidU k1, VoidU k2) | k1 == k2 -> Just sub
+      (LitU l1, LitU l2) | l1 == l2 -> Just sub
+      (OpU o1 as1, OpU o2 as2) | o1 == o2 -> goAll sub as1 as2
+      (FunU as1 r1, FunU as2 r2) -> goAll sub (r1 : as1) (r2 : as2)
+      (AppU f1 as1, AppU f2 as2) -> goAll sub (f1 : as1) (f2 : as2)
+      (EffectU e1 u1, EffectU e2 u2) | e1 == e2 -> go sub u1 u2
+      (OptionalU u1, OptionalU u2) -> go sub u1 u2
+      (LabeledU l1 u1, LabeledU l2 u2) | l1 == l2 -> go sub u1 u2
+      (NamU o1 n1 ps1 rs1, NamU o2 n2 ps2 rs2)
+        | o1 == o2, n1 == n2, map fst rs1 == map fst rs2 ->
+            goAll sub (ps1 <> map snd rs1) (ps2 <> map snd rs2)
+      (ExistU v1 (ts1, o1) (rs1, c1), ExistU v2 (ts2, o2) (rs2, c2))
+        | v1 == v2, o1 == o2, c1 == c2, map fst rs1 == map fst rs2 ->
+            goAll sub (ts1 <> map snd rs1) (ts2 <> map snd rs2)
+      (ForallU v1 u1, ForallU v2 u2) | v1 == v2 -> go sub u1 u2
+      _ -> Nothing
+
+    goAll sub xs ys
+      | length xs /= length ys = Nothing
+      | otherwise = foldl step (Just sub) (zip xs ys)
+      where
+        step acc (u, v) = acc >>= \s -> go s u v
+
+    flexVar t = case t of
+      (VarU v) | v `elem` flex -> Just v
+      (KVarU (v, _)) | v `elem` flex -> Just v
+      (ListVarU v) | v `elem` flex -> Just v
+      (SetVarU v) | v `elem` flex -> Just v
+      _ -> Nothing
+
+    resolve sub t = case flexVar t of
+      (Just v) -> maybe t (resolve sub) (lookup v sub)
+      Nothing -> t
+
+    -- Binding a variable to a term containing it would make an infinite type.
+    -- Composed eagerly so the substitution stays idempotent and applying it
+    -- is a plain fold. Binding a variable to a term containing it would make
+    -- an infinite type.
+    bind sub v t
+      | Just v' <- flexVar t, v' == v = Just sub
+      | v `elem` map fst (varForms t) = Nothing
+      | otherwise = Just ((v, t) : [(u, substituteTVar v t s) | (u, s) <- sub])
+
+applySubstU :: [(TVar, TypeU)] -> TypeU -> TypeU
+applySubstU sub t = foldl (\acc (v, r) -> substituteTVar v r acc) t sub
+
+-- | Do two @(head, wire)@ pairs agree wherever their heads meet?
+--
+-- Heads with no common instance describe disjoint sets of use sites and say
+-- nothing about each other. Where they do meet, the form a value of that type
+-- serializes to must be the same under both.
+wireFormsAgree :: ([TVar], TypeU, TypeU) -> ([TVar], TypeU, TypeU) -> Bool
+wireFormsAgree (vs1, h1, w1) (vs2, h2, w2) =
+  let avoid = vs1 <> map fst (varForms h1) <> map fst (varForms w1)
+      (vs2', h2', w2') = renameApartU avoid vs2 h2 w2
+   in case unifyU (vs1 <> vs2') h1 h2' of
+        Nothing -> True
+        (Just sub) -> alphaEq (applySubstU sub w1) (applySubstU sub w2')
+
+-- | Equality up to a consistent renaming of bound variables.
+--
+-- Adjacent universals commute, so two types that bind the same variables in a
+-- different order are the same type. Deciding that needs a bijection built from
+-- the structure of the two types, not from the order their quantifiers happen
+-- to be written in. On types with no bound variables this is exactly
+-- structural equality.
+alphaEq :: TypeU -> TypeU -> Bool
+alphaEq a b =
+  let (vs1, t1) = peelForalls a
+      (vs2, t2) = peelForalls b
+   in length vs1 == length vs2
+        && case walk (Set.fromList vs1, Set.fromList vs2) [] t1 t2 of
+             (Just _) -> True
+             Nothing -> False
+  where
+    peelForalls :: TypeU -> ([TVar], TypeU)
+    peelForalls (ForallU v t) = let (vs, t') = peelForalls t in (v : vs, t')
+    peelForalls t = ([], t)
+
+    -- The bijection so far, one entry per matched pair of bound variables.
+    walk ::
+      (Set.Set TVar, Set.Set TVar) ->
+      [(TVar, TVar)] ->
+      TypeU ->
+      TypeU ->
+      Maybe [(TVar, TVar)]
+    walk flex bij x y = case (x, y) of
+      (VarU v1, VarU v2) -> bind flex bij v1 v2
+      (KVarU (v1, k1), KVarU (v2, k2)) | k1 == k2 -> bind flex bij v1 v2
+      (ListVarU v1, ListVarU v2) -> bind flex bij v1 v2
+      (SetVarU v1, SetVarU v2) -> bind flex bij v1 v2
+      (ListVoidU, ListVoidU) -> Just bij
+      (SetVoidU, SetVoidU) -> Just bij
+      (VoidU k1, VoidU k2) | k1 == k2 -> Just bij
+      (LitU l1, LitU l2) | l1 == l2 -> Just bij
+      (OpU o1 as1, OpU o2 as2) | o1 == o2 -> walkAll flex bij as1 as2
+      (FunU as1 r1, FunU as2 r2) -> walkAll flex bij (r1 : as1) (r2 : as2)
+      (AppU f1 as1, AppU f2 as2) -> walkAll flex bij (f1 : as1) (f2 : as2)
+      (EffectU e1 u1, EffectU e2 u2) | e1 == e2 -> walk flex bij u1 u2
+      (OptionalU u1, OptionalU u2) -> walk flex bij u1 u2
+      (LabeledU l1 u1, LabeledU l2 u2) | l1 == l2 -> walk flex bij u1 u2
+      (NamU o1 n1 ps1 rs1, NamU o2 n2 ps2 rs2)
+        | o1 == o2
+        , n1 == n2
+        , map fst rs1 == map fst rs2 ->
+            walkAll flex bij (ps1 <> map snd rs1) (ps2 <> map snd rs2)
+      (ExistU v1 (ts1, o1) (rs1, c1), ExistU v2 (ts2, o2) (rs2, c2))
+        | v1 == v2
+        , o1 == o2
+        , c1 == c2
+        , map fst rs1 == map fst rs2 ->
+            walkAll flex bij (ts1 <> map snd rs1) (ts2 <> map snd rs2)
+      -- A nested quantifier opens a scope on both sides at once. Its variables
+      -- join the bijection like any other, so nested binders commute too.
+      (ForallU _ _, ForallU _ _) ->
+        let (ivs1, b1) = peelForalls x
+            (ivs2, b2) = peelForalls y
+            (f1, f2) = flex
+         in if length ivs1 == length ivs2
+              then walk (foldr Set.insert f1 ivs1, foldr Set.insert f2 ivs2) bij b1 b2
+              else Nothing
+      _ -> Nothing
+
+    walkAll ::
+      (Set.Set TVar, Set.Set TVar) ->
+      [(TVar, TVar)] ->
+      [TypeU] ->
+      [TypeU] ->
+      Maybe [(TVar, TVar)]
+    walkAll flex bij xs ys
+      | length xs /= length ys = Nothing
+      | otherwise = go bij (zip xs ys)
+      where
+        go b [] = Just b
+        go b ((u, v) : rest) = walk flex b u v >>= \b' -> go b' rest
+
+    -- Two bound variables match when neither is already matched to something
+    -- else. A variable bound by neither side matches only itself.
+    bind ::
+      (Set.Set TVar, Set.Set TVar) ->
+      [(TVar, TVar)] ->
+      TVar ->
+      TVar ->
+      Maybe [(TVar, TVar)]
+    bind (f1, f2) bij v1 v2
+      | Set.member v1 f1 && Set.member v2 f2 =
+          case (lookup v1 bij, lookup v2 [(r, l) | (l, r) <- bij]) of
+            (Nothing, Nothing) -> Just ((v1, v2) : bij)
+            (Just v2', Just v1') | v2' == v2 && v1' == v1 -> Just bij
+            _ -> Nothing
+      | not (Set.member v1 f1) && not (Set.member v2 f2) && v1 == v2 = Just bij
+      | otherwise = Nothing
+
 isSubtypeOf :: TypeU -> TypeU -> Bool
 isSubtypeOf t1 t2 = case P.compare t1 t2 of
   (Just x) -> x <= EQ

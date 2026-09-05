@@ -287,6 +287,16 @@ pub struct Command {
     /// returns (use a Nil schema in that case).
     #[serde(default, rename = "return")]
     pub ret: Return,
+    /// Every named type the command's signature mentions, at any depth,
+    /// in discovery order and deduplicated by name.
+    ///
+    /// The help prints a type by name and defines each name once
+    /// beneath the argument list. A record reached through a list or a
+    /// tuple is as opaque to a caller as one at the head, so the
+    /// compiler walks the whole type rather than the nexus trying to
+    /// recover the names from a wire schema, which cannot carry them.
+    #[serde(default)]
+    pub named_types: Vec<NamedType>,
     /// What this command writes to standard output when it streams.
     ///
     /// A `@collect` command returns `()` -- its data leaves through a
@@ -399,6 +409,43 @@ impl Terminal {
     pub fn resolve_entry<'a>(&self, m: &'a Manifest) -> Option<&'a Command> {
         m.command_by_name(&self.entry)
     }
+}
+
+/// A named type (record, object, or table) with its field layout, as
+/// the help defines it beneath a command's argument list.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct NamedType {
+    /// The name as it appears in a rendered type, e.g. `"Hit"`.
+    #[serde(default)]
+    pub name: String,
+    /// `"record"`, `"object"`, `"table"`, or `"packable"` -- which block
+    /// the definition is printed under.
+    #[serde(default)]
+    pub kind: String,
+    /// The constructor's parameters, in order. Empty for a type with
+    /// none. A definition is stated generically in these names, so one
+    /// entry serves every use of the constructor.
+    #[serde(default)]
+    pub parameters: Vec<String>,
+    /// Fields in declaration order. A table's columns carry their
+    /// element type, not the array that stores them. Empty for a
+    /// `"packable"`, whose definition is [`equals`](Self::equals).
+    #[serde(default)]
+    pub fields: Vec<NamedField>,
+    /// The wire form a `"packable"` serializes to, stated in
+    /// [`parameters`](Self::parameters). Empty for other kinds, whose
+    /// definition is their field list.
+    #[serde(default)]
+    pub equals: String,
+}
+
+/// One field of a [`NamedType`].
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct NamedField {
+    #[serde(default)]
+    pub key: String,
+    #[serde(default, rename = "type")]
+    pub type_desc: String,
 }
 
 /// The batch a streaming command writes to standard output, once per

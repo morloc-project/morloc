@@ -1,0 +1,24 @@
+--' A Nat-kinded parameter takes part in instance selection like any other. The
+--' dimension-fixed instance is the more specific of the two and is the one that
+--' applies to a use site carrying that dimension.
+
+module nat (howVec)
+
+import root-py
+
+newtype Vec n a
+
+type Py => (Vec n a) = "dict" n a
+
+instance Packable [a] (Vec n a) where
+  source Py from "helpers.py" ("pack_generic" as pack, "unpack_generic" as unpack)
+
+instance Packable [Int] (Vec 3 Int) where
+  source Py from "helpers.py" ("pack_special" as pack, "unpack_special" as unpack)
+
+source Py from "helpers.py" ("how" as how)
+
+how :: Vec n a -> Str
+
+howVec :: Vec 3 Int -> Str
+howVec = how

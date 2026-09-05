@@ -81,7 +81,7 @@ morloc typecheck script.loc
 morloc dump script.loc
 
 # Run specific tests
-stack test --test-arguments="--pattern='native-morloc'"
+stack test --test-arguments=--pattern=native-morloc
 ```
 
 ## Code Style

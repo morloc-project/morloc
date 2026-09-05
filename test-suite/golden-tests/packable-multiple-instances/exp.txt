@@ -1,0 +1,10 @@
+--- disjoint ---
+"int-instance"
+"str-instance"
+--- specialize ---
+"special"
+"generic"
+--- pairing ---
+[["a","b"],[[0,1,"e"]],["x"]]
+--- nat-generic ---
+"generic"

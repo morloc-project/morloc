@@ -1,12 +1,14 @@
-//! Schema-walking renderer for the Record / Table Schemas blocks
-//! shown under per-command `--help` output.
+//! Renderer for the Record / Table Schemas blocks shown under
+//! per-command `--help` output.
 //!
-//! The named-type layout for record / object / table args is
-//! reconstructed by walking the command's `args` + `return` value:
-//! for every typed entry whose schema parses to a `Map` at the top
-//! level, the entry's `type` name labels it and its schema's keys +
-//! parameter schemas give the field list. The record-vs-table
-//! distinction comes from the entry's `kind` constraint.
+//! The layouts come from the command's `named_types`, which the
+//! compiler fills by walking the whole signature. They used to be
+//! reconstructed here from each argument's wire schema, keyed on its
+//! rendered type name -- which only worked when the named type *was*
+//! the whole type. Wrap a record in a list and the name still appeared
+//! in the type while its definition silently vanished, because a wire
+//! schema cannot carry a morloc type name and `[Hit]` is not a name to
+//! key on. The compiler has the type; it says what the names are.
 //!
 //! The renderer is parser-agnostic -- it walks the manifest, not
 //! argv -- and the rendered block is plumbed into clap's
@@ -16,19 +18,9 @@
 //!
 //! The public surface is [`render_command_schemas`]: given a
 //! manifest [`Command`], it returns the rendered block as an owned
-//! `String` (or `None` when no named-type args appear in the
-//! signature).
+//! `String` (or `None` when the signature names no such type).
 
-use morloc_manifest::{Arg, Command};
-
-/// A rendered named-type layout, sourced from a parsed schema.
-struct TypeLayout<'a> {
-    name: &'a str,
-    /// "record" | "object" | "table" -- from the `kind` constraint.
-    kind: &'a str,
-    /// (field_name, rendered_type) pairs.
-    fields: Vec<(String, String)>,
-}
+use morloc_manifest::{Command, NamedType};
 
 /// Pretty-render a parsed `Schema` as a morloc-flavored type string,
 /// suitable for the field-type column in the schemas block.
@@ -139,139 +131,45 @@ pub(crate) fn render_schema_type(
     }
 }
 
-/// Try to extract a `TypeLayout` from a (name, schema_string, kind)
-/// triple. Returns None if any input is missing or the schema does
-/// not parse to a top-level Map. Tables (whose fields are arrays in
-/// the wire schema) render their fields by the array's element type,
-/// mirroring how the user wrote them in the source.
-fn extract_named_layout<'a>(
-    type_name: Option<&'a str>,
-    schema_str: Option<&str>,
-    kind: Option<&'a str>,
-) -> Option<TypeLayout<'a>> {
-    use morloc_runtime_types::schema::SerialType;
-    let name = type_name?;
-    let schema = schema_str?;
-    let kind = kind?;
-    let parsed = morloc_runtime_types::schema::parse_schema(schema).ok()?;
-    if parsed.serial_type != SerialType::Map {
-        return None;
-    }
-    // For a table, every field's wire schema is an Array -- peel one
-    // layer so the user sees `name :: Str` not `name :: [Str]`.
-    let strip_array = kind == "table";
-    // If the outer schema declares a name (the record's constructor,
-    // sans parameters), pair it with the layout's parameterized
-    // display name so `Recur` back-refs on self-referential fields
-    // can be re-parameterized on the way out.
-    let self_ref: Option<(&str, &str)> = parsed.name.as_deref().map(|short| (short, name));
-    let fields = parsed
-        .keys
-        .iter()
-        .zip(parsed.parameters.iter())
-        .map(|(k, p)| {
-            let inner = if strip_array && p.serial_type == SerialType::Array {
-                p.parameters.first().unwrap_or(p)
-            } else {
-                p
-            };
-            (k.clone(), render_schema_type(inner, self_ref))
-        })
-        .collect();
-    Some(TypeLayout { name, kind, fields })
-}
-
-/// Walk every arg + the return of a command. For each typed entry,
-/// build a layout. Deduplicate by type name, preserving discovery
-/// order so the rendering matches the order types appear in the
-/// signature.
-fn collect_command_layouts<'a>(cmd: &'a Command) -> Vec<TypeLayout<'a>> {
-    use std::collections::HashSet;
-    let mut seen: HashSet<&str> = HashSet::new();
-    let mut out: Vec<TypeLayout<'a>> = Vec::new();
-
-    for arg in &cmd.args {
-        // Skip unrolled groups without a group_opt: each field
-        // already appears as its own flag in the usage, so the schema
-        // is redundant. Keep the schema when group_opt is present
-        // (the user can pass the entire record as JSON and needs the
-        // full field spec).
-        if let Arg::Group { group_opt: None, .. } = arg {
-            continue;
-        }
-        if let Some(layout) =
-            extract_named_layout(arg.type_desc_str(), arg.schema_str(), arg.kind_constraint())
-        {
-            if seen.insert(layout.name) {
-                out.push(layout);
-            }
-        }
-    }
-
-    let ret_kind = cmd
-        .ret
-        .constraints
-        .iter()
-        .find(|c| c.ctype == "kind")
-        .and_then(|c| c.value.as_ref().and_then(|v| v.as_str()));
-    if let Some(layout) =
-        extract_named_layout(Some(&cmd.ret.type_desc), Some(&cmd.ret.schema), ret_kind)
-    {
-        if seen.insert(layout.name) {
-            out.push(layout);
-        }
-    }
-
-    out
-}
-
-/// Render a list of layouts to a String. Each layout shows its type
-/// name on its own line followed by the field list with `::`-aligned
-/// column widths. Definitions are separated by blank lines.
-fn render_layouts(defs: &[&TypeLayout]) -> String {
-    let mut out = String::new();
-    for (i, def) in defs.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        out.push_str(&format!("  {}\n", def.name));
-
-        let name_width = def
-            .fields
-            .iter()
-            .map(|(k, _)| k.len())
-            .max()
-            .unwrap_or(0);
-        for (k, v) in &def.fields {
-            out.push_str(&format!("    {:width$} :: {}\n", k, v, width = name_width));
-        }
-    }
-    out
-}
-
 /// Render the Record Schemas / Table Schemas sections for any named
 /// types referenced in this command's signature. Returns `None` when
 /// there are no named types (so callers can suppress the whole
 /// "after help" block).
 pub fn render_command_schemas(cmd: &Command) -> Option<String> {
-    let layouts = collect_command_layouts(cmd);
-    if layouts.is_empty() {
+    if cmd.named_types.is_empty() {
         return None;
     }
-    let records: Vec<&TypeLayout> = layouts.iter().filter(|l| l.kind != "table").collect();
-    let tables: Vec<&TypeLayout> = layouts.iter().filter(|l| l.kind == "table").collect();
+    let records: Vec<&NamedType> = cmd
+        .named_types
+        .iter()
+        .filter(|t| t.kind != "table" && t.kind != "packable")
+        .collect();
+    let tables: Vec<&NamedType> =
+        cmd.named_types.iter().filter(|t| t.kind == "table").collect();
+    let packables: Vec<&NamedType> = cmd
+        .named_types
+        .iter()
+        .filter(|t| t.kind == "packable")
+        .collect();
 
     let mut out = String::new();
     if !records.is_empty() {
         out.push_str("Record Schemas:\n");
-        out.push_str(&render_layouts(&records));
+        out.push_str(&render_named(&records));
     }
     if !tables.is_empty() {
         if !out.is_empty() {
             out.push('\n');
         }
         out.push_str("Table Schemas:\n");
-        out.push_str(&render_layouts(&tables));
+        out.push_str(&render_named(&tables));
+    }
+    if !packables.is_empty() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str("Wire Forms:\n");
+        out.push_str(&render_packables(&packables));
     }
     // Drop the trailing newline so clap can append its own block
     // separator cleanly.
@@ -279,4 +177,42 @@ pub fn render_command_schemas(cmd: &Command) -> Option<String> {
         out.pop();
     }
     Some(out)
+}
+
+/// Render types whose definition is a wire form rather than a field
+/// list: `Name p1 p2 = <form>`, stated in the constructor's own
+/// parameters so one line covers every use of it.
+fn render_packables(defs: &[&NamedType]) -> String {
+    let mut out = String::new();
+    for def in defs {
+        let head = if def.parameters.is_empty() {
+            def.name.clone()
+        } else {
+            format!("{} {}", def.name, def.parameters.join(" "))
+        };
+        out.push_str(&format!("  {} = {}\n", head, def.equals));
+    }
+    out
+}
+
+/// Render a list of named types, one block each: the name on its own
+/// line, then its fields with the `::` column aligned.
+fn render_named(defs: &[&NamedType]) -> String {
+    let mut out = String::new();
+    for (i, def) in defs.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&format!("  {}\n", def.name));
+        let width = def.fields.iter().map(|f| f.key.len()).max().unwrap_or(0);
+        for f in &def.fields {
+            out.push_str(&format!(
+                "    {:width$} :: {}\n",
+                f.key,
+                f.type_desc,
+                width = width
+            ));
+        }
+    }
+    out
 }

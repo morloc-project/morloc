@@ -1,0 +1,23 @@
+--' A Packable whose wire form is a record. Records are a wire form like lists
+--' and tuples, and Packable is how a type is given one, so this should compile
+--' and round trip. It crashes the compiler today: see reports/0053.
+
+module recordWire (howRec)
+
+import root-py
+
+record Pair = Pair {left :: Int, right :: Str}
+
+newtype Box a
+
+type Py => (Box a) = "dict" a
+
+instance Packable Pair (Box a) where
+  source Py from "helpers.py" ("pack_rec" as pack, "unpack_rec" as unpack)
+
+source Py from "helpers.py" ("how" as how)
+
+how :: Box a -> Str
+
+howRec :: Box Int -> Str
+howRec = how

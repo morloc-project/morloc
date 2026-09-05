@@ -16,6 +16,9 @@ pack\/unpack calls into the manifold tree.
 -}
 module Morloc.CodeGenerator.Serial
   ( makeSerialAST
+  , checkPackerCoherence
+  , findPackerInstances
+  , PackerInstance (..)
   , wireSerialAstToType
   , containsFunT
   , serialAstHasString
@@ -373,30 +376,110 @@ shallowType (SerialOptional _ s) = OptionalF (shallowType s)
 shallowType (SerialRec v) = RecF v
 shallowType (SerialUnknown v) = UnkF v
 
-findPackers ::
-  Lang ->
-  MorlocMonad
-    ( [(([TVar], TypeU), Source)]
-    , [(([TVar], TypeU), Source)]
-    )
-findPackers lang = do
-  sigmap <- MM.gets stateTypeclasses
+-- | One @Packable@ instance: the type it packs, the wire form it packs to,
+-- and the pack/unpack pair each language implements it with.
+--
+-- The wire form belongs to the instance rather than to a language: every
+-- language that implements the instance serializes through the same form. Only
+-- the sources differ.
+data PackerInstance = PackerInstance
+  { piHead :: TypeU
+  , piWire :: TypeU
+  , piSources :: Map.Map Lang (Source, Source)
+  }
 
-  packers <- case Map.lookup (EV "pack") sigmap of
-    (Just (Instance _ _ _ ts)) -> return $ concatMap f ts
-    Nothing -> return []
-
-  unpackers <- case Map.lookup (EV "unpack") sigmap of
-    (Just (Instance _ _ _ ts)) -> return $ concatMap f ts
-    Nothing -> return []
-
-  return (packers, unpackers)
+-- | Every @Packable@ instance in the program, with its two methods paired.
+--
+-- @Packable a b@ declares @pack :: a -> b@ and @unpack :: b -> a@. Which
+-- instance a method was declared in is not recorded, so the pairing is
+-- recovered from the signatures: a pack @a -> b@ belongs with the unpack whose
+-- argument and result are those same two types the other way round. Both
+-- signatures are built from one declaration and so name their variables alike,
+-- which is what lets them be compared directly.
+--
+-- A pack matched against the wrong unpack yields a serializer that is well
+-- typed and wrong, so this pairing is deliberately strict: an unmatched method
+-- contributes no instance, and the type it would have served then reports that
+-- no instance covers it.
+-- | Reject a constructor whose instances disagree about its wire form.
+--
+-- A type's wire form is what two pools agree on when they share a value. Two
+-- instances constrain each other only where their heads can be instantiated to
+-- one type: heads with no common instance describe disjoint sets of use sites
+-- and say nothing about each other. Where they do meet, the form that type
+-- serializes to must be the same under both, or a value written by one language
+-- is read by another under a form it was never written with.
+checkPackerCoherence :: MorlocMonad ()
+checkPackerCoherence = do
+  instances <- findPackerInstances
+  let byKey =
+        Map.fromListWith
+          (<>)
+          [(extractKey (piHead pin), [pin]) | pin <- instances]
+  mapM_ checkGroup (Map.elems byKey)
   where
-    f :: TermTypes -> [(([TVar], TypeU), Source)]
-    f (TermTypes (Just et) (map (val . snd) -> srcs) _) =
-      let (vs, t) = unqualify $ etype et
-       in [((vs, t), src) | src <- srcs, srcLang src == lang]
-    f (TermTypes Nothing _ _) = []
+    checkGroup :: [PackerInstance] -> MorlocMonad ()
+    checkGroup pins = mapM_ (uncurry checkPair) (pairs pins)
+
+    pairs :: [a] -> [(a, a)]
+    pairs [] = []
+    pairs (x : xs) = [(x, y) | y <- xs] <> pairs xs
+
+    -- Head and wire are qualified over the same variables, so peeling either
+    -- gives the list both were built with.
+    parts :: PackerInstance -> ([TVar], TypeU, TypeU)
+    parts pin =
+      let (vs, h) = unqualify (piHead pin)
+          (_, w) = unqualify (piWire pin)
+       in (vs, h, w)
+
+    checkPair :: PackerInstance -> PackerInstance -> MorlocMonad ()
+    checkPair a b
+      | wireFormsAgree (parts a) (parts b) = return ()
+      | otherwise =
+          MM.throwSystemError $
+            "Packable instances disagree on the wire form of"
+              <+> squotes (pretty (extractKey (piHead a))) <> ":"
+              <> "\n" <> indent 2 (pretty (piHead a) <+> "->" <+> pretty (piWire a))
+              <> "\n" <> indent 2 (pretty (piHead b) <+> "->" <+> pretty (piWire b))
+              <> "\nBoth cover a common type, so a value of it would be"
+              <> "\nwritten under one form and read under the other."
+              <> "\nGive the type one wire form."
+
+findPackerInstances :: MorlocMonad [PackerInstance]
+findPackerInstances = do
+  sigmap <- MM.gets stateTypeclasses
+  let packs = methodSignatures (EV "pack") sigmap
+      unpacks = methodSignatures (EV "unpack") sigmap
+  return
+    [ PackerInstance
+        { piHead = qualify vs1 b1
+        , piWire = qualify vs1 a1
+        , piSources = pairByLang packSrcs unpackSrcs
+        }
+    | ((vs1, FunU [a1] b1), packSrcs) <- packs
+    , ((vs2, FunU [a2] b2), unpackSrcs) <- unpacks
+    , length vs1 == length vs2
+    , a1 == b2
+    , b1 == a2
+    ]
+  where
+    methodSignatures :: EVar -> Map.Map EVar Instance -> [(([TVar], TypeU), [Source])]
+    methodSignatures name sigmap = case Map.lookup name sigmap of
+      (Just (Instance _ _ _ ts)) -> concatMap sigOf ts
+      Nothing -> []
+
+    sigOf :: TermTypes -> [(([TVar], TypeU), [Source])]
+    sigOf (TermTypes (Just et) (map (val . snd) -> srcs) _) =
+      [(unqualify (etype et), srcs)]
+    sigOf (TermTypes Nothing _ _) = []
+
+    -- A language declares at most one source per method; two are rejected
+    -- earlier as ambiguous source declarations.
+    pairByLang :: [Source] -> [Source] -> Map.Map Lang (Source, Source)
+    pairByLang ps us =
+      Map.fromList
+        [(srcLang p, (p, u)) | p <- ps, u <- us, srcLang p == srcLang u]
 
 -- Takes a map of packers with concrete type names as keys. A single concrete
 -- type name may map to many single types. For example, the python type "dict"
@@ -408,20 +491,18 @@ findPackers lang = do
 -- will be done through subtyping.
 makeSerialAST :: Int -> Lang -> TypeF -> MorlocMonad SerialAST
 makeSerialAST m lang t0 = do
-  -- ([(([TVar], TypeU), Source)], ...)
-  (packs, unpacks) <- findPackers lang
+  instances <- findPackerInstances
 
   (_, gscope) <- getScope m lang
 
-  -- Map TVar ((TypeU, Source), (TypeU, Source))
+  -- The instances this language can serialize with, grouped by the constructor
+  -- they pack.
   let typepackers =
         Map.fromListWith
           (<>)
-          [ (extractKey b1, [(length vs1, qualify vs1 a1, qualify vs1 b1, src1, src2)])
-          | ((vs1, FunU [a1] b1), src1) <- packs
-          , ((vs2, FunU [a2] _), src2) <- unpacks
-          , extractKey b1 == extractKey a2
-          , length vs1 == length vs2
+          [ (extractKey (piHead pin), [pin])
+          | pin <- instances
+          , Map.member lang (piSources pin)
           ]
 
   -- Reset the recursion-tracking state so this invocation starts with
@@ -433,7 +514,7 @@ makeSerialAST m lang t0 = do
   where
     makeSerialAST' ::
       Scope ->
-      Map.Map TVar [(Int, TypeU, TypeU, Source, Source)] ->
+      Map.Map TVar [PackerInstance] ->
       TypeF ->
       MorlocMonad SerialAST
     -- If the type is unknown in this language, then it must be a passthrough
@@ -487,48 +568,50 @@ makeSerialAST m lang t0 = do
           | finalType == BT.u16U = return $ SerialUInt16 v
           | finalType == BT.u32U = return $ SerialUInt32 v
           | finalType == BT.u64U = return $ SerialUInt64 v
-          | otherwise = case aliasShape of
-              -- @type X = [E]@: bare alias whose body is list-shaped.
-              -- The emitted SerialList carries an FVar whose GV is the
-              -- outer alias name (so the @&X@ declaration matches any
-              -- @^X@ back-reference inside) but whose CV is the
-              -- LANGUAGE-LEVEL list constructor name (so the runtime
-              -- schema hint -- e.g. @list@ in Python -- routes to the
-              -- right container path). Using the alias's own CV (which
-              -- defaults to the alias name itself when there is no
-              -- explicit @type Lang => Alias = "..."@ mapping) would
-              -- surface as an "Unexpected array hint" at deserialize
-              -- time. Same rationale applies to the tuple arm below.
-              AliasIsList elemU -> do
-                FV _ listCv <- inferConcreteVar lang (Idx m BT.list)
-                elemTf <- inferConcreteType lang (Idx m (typeOf elemU))
-                elemAST <- withAncestorVar anc (makeSerialAST' gscope typepackers elemTf)
-                return $ SerialList (FV gv listCv) Nothing elemAST
-              -- @type X = (A, B, ...)@: bare alias whose body is
-              -- tuple-shaped. Hint comes from the n-tuple constructor
-              -- (Tuple2/Tuple3/...), GV stays as the alias name.
-              AliasIsTuple bodyArgs -> do
-                FV _ tupleCv <- inferConcreteVar lang (Idx m (BT.tuple (length bodyArgs)))
-                elemTfs <- mapM (inferConcreteType lang . Idx m . typeOf) bodyArgs
-                elemASTs <- withAncestorVar anc (mapM (makeSerialAST' gscope typepackers) elemTfs)
-                return $ SerialTuple (FV gv tupleCv) elemASTs
-              -- @type X = SomePackedT a@: forward through the body's
-              -- expansion under the ancestor scope so any recursive
-              -- references back to @X@ are caught as @SerialRec@.
-              AliasIsOther expanded -> do
-                expandedTf <- inferConcreteType lang (Idx m (typeOf expanded))
-                withAncestorVar anc (makeSerialAST' gscope typepackers expandedTf)
-              -- No alias expansion available; fall back to Packable
-              -- lookup the same way this branch did before.
-              AliasIsNone -> case Map.lookup gv typepackers of
-                (Just ps) -> do
-                  packers <- mapM makeTypePacker ps
-                  unpacked <- mapM (makeSerialAST' gscope typepackers . typePackerUnpacked) packers
-                  selection <- selectPacker (zip packers unpacked)
-                  return $ SerialPack v selection
-                Nothing ->
-                  MM.throwSourcedError m $
-                    "Cannot find constructor in VarF" <+> dquotes (pretty v) <+> " finalType=" <> pretty finalType
+          | otherwise = do
+              (cscope, _) <- getScope m lang
+              case aliasShape (Map.member gv cscope) of
+                -- @type X = [E]@: bare alias whose body is list-shaped.
+                -- The emitted SerialList carries an FVar whose GV is the
+                -- outer alias name (so the @&X@ declaration matches any
+                -- @^X@ back-reference inside) but whose CV is the
+                -- LANGUAGE-LEVEL list constructor name (so the runtime
+                -- schema hint -- e.g. @list@ in Python -- routes to the
+                -- right container path). Using the alias's own CV (which
+                -- defaults to the alias name itself when there is no
+                -- explicit @type Lang => Alias = "..."@ mapping) would
+                -- surface as an "Unexpected array hint" at deserialize
+                -- time. Same rationale applies to the tuple arm below.
+                AliasIsList elemU -> do
+                  FV _ listCv <- inferConcreteVar lang (Idx m BT.list)
+                  elemTf <- inferConcreteType lang (Idx m (typeOf elemU))
+                  elemAST <- withAncestorVar anc (makeSerialAST' gscope typepackers elemTf)
+                  return $ SerialList (FV gv listCv) Nothing elemAST
+                -- @type X = (A, B, ...)@: bare alias whose body is
+                -- tuple-shaped. Hint comes from the n-tuple constructor
+                -- (Tuple2/Tuple3/...), GV stays as the alias name.
+                AliasIsTuple bodyArgs -> do
+                  FV _ tupleCv <- inferConcreteVar lang (Idx m (BT.tuple (length bodyArgs)))
+                  elemTfs <- mapM (inferConcreteType lang . Idx m . typeOf) bodyArgs
+                  elemASTs <- withAncestorVar anc (mapM (makeSerialAST' gscope typepackers) elemTfs)
+                  return $ SerialTuple (FV gv tupleCv) elemASTs
+                -- @type X = SomePackedT a@: forward through the body's
+                -- expansion under the ancestor scope so any recursive
+                -- references back to @X@ are caught as @SerialRec@.
+                AliasIsOther expanded -> do
+                  expandedTf <- inferConcreteType lang (Idx m (typeOf expanded))
+                  withAncestorVar anc (makeSerialAST' gscope typepackers expandedTf)
+                -- No alias expansion available; fall back to Packable
+                -- lookup the same way this branch did before.
+                AliasIsNone -> case Map.lookup gv typepackers of
+                  (Just ps) -> do
+                    packers <- mapM makeTypePacker ps
+                    unpacked <- mapM (makeSerialAST' gscope typepackers . typePackerUnpacked) packers
+                    selection <- selectPacker (zip packers unpacked)
+                    return $ SerialPack v selection
+                  Nothing ->
+                    MM.throwSourcedError m $
+                      "Cannot find constructor in VarF" <+> dquotes (pretty v) <+> " finalType=" <> pretty finalType
 
         -- Bare alias body shape classifier. Mirrors the AppF branch's
         -- @aliasShape@ but for a zero-arg @VarF@: we ask gscope for
@@ -545,7 +628,10 @@ makeSerialAST m lang t0 = do
         -- When the outer type has a registered @Packable@ instance,
         -- defer to that instance regardless of body shape (see the
         -- AppF branch's @aliasShape@ for the rationale).
-        aliasShape
+        -- 'hasOwnForm' says the type declares a per-language form of its own.
+        -- Such a type is not simply its parent natively, so expanding through
+        -- the parent would discard the declaration.
+        aliasShape hasOwnForm
           | Map.member gv typepackers = AliasIsNone
           | otherwise = case TE.expandWireParent gscope (VarU gv) of
               Just expanded@(AppU (VarU h) bodyArgs)
@@ -553,6 +639,15 @@ makeSerialAST m lang t0 = do
                 | h == BT.list, [elemU] <- bodyArgs -> AliasIsList elemU
                 | let bodyRT = bodyArgs
                 , h == BT.tuple (length bodyRT) -> AliasIsTuple bodyRT
+                | otherwise -> AliasIsOther expanded
+              -- A newtype over a leaf (@newtype Name = Str@) is its parent on
+              -- the wire, so route through the parent's serializer rather than
+              -- demanding a Packable instance. The parameterised branch above
+              -- already does this; without the arm here a zero-parameter
+              -- newtype over a primitive cannot cross a boundary at all.
+              Just expanded@(VarU h)
+                | h == gv -> AliasIsNone
+                | hasOwnForm -> AliasIsNone
                 | otherwise -> AliasIsOther expanded
               _ -> AliasIsNone
 
@@ -576,10 +671,11 @@ makeSerialAST m lang t0 = do
           , BT.uintU, BT.u8U, BT.u16U, BT.u32U, BT.u64U
           ]
 
-        makeTypePacker :: (Int, TypeU, TypeU, Source, Source) -> MorlocMonad TypePacker
-        makeTypePacker (0, generalUnpackedType, generalPackedType, forwardSource, reverseSource) = do
-          packedType <- inferConcreteType lang (Idx m (typeOf generalPackedType))
-          unpackedType <- inferConcreteType lang (Idx m (typeOf generalUnpackedType))
+        makeTypePacker :: PackerInstance -> MorlocMonad TypePacker
+        makeTypePacker pin = do
+          (forwardSource, reverseSource) <- packerSources lang m pin
+          packedType <- inferConcreteType lang (Idx m (typeOf (piHead pin)))
+          unpackedType <- inferConcreteType lang (Idx m (typeOf (piWire pin)))
           return $
             TypePacker
               { typePackerPacked = packedType
@@ -587,17 +683,20 @@ makeSerialAST m lang t0 = do
               , typePackerForward = forwardSource
               , typePackerReverse = reverseSource
               }
-        makeTypePacker (nparam, _, _, _, _) =
-          MM.throwSourcedError m $ "Unexpected parameters for atomic variable:" <+> pretty nparam
 
-        -- Select the first packer we happen across. This is a very key step and
-        -- eventually this function should be replaced with one more carefully
-        -- considered. But for now, I don't have any great criterion for
-        -- choosing.
+        -- A parameterless constructor gives selection nothing to discriminate
+        -- on: every instance for it has the same head, so more than one is
+        -- ambiguous by construction.
         selectPacker :: [(TypePacker, SerialAST)] -> MorlocMonad (TypePacker, SerialAST)
-        selectPacker [] = MM.throwSourcedError m $ "Cannot find constructor for" <+> pretty cv <+> "in selectPacker"
+        selectPacker [] =
+          MM.throwSourcedError m $ "No Packable instance for" <+> squotes (pretty cv) <> "."
         selectPacker [x] = return x
-        selectPacker _ = MM.throwSourcedError m "Two you say, oh, get out of here"
+        selectPacker xs =
+          MM.throwSourcedError m $
+            "Ambiguous Packable instances for" <+> squotes (pretty cv) <> ":"
+              <> "\n" <> indent 2 (vsep [pretty (typePackerUnpacked tp) | (tp, _) <- xs])
+              <> "\nA type with no parameters admits only one instance; these"
+              <+> "differ only in the form they serialize to."
     -- A function value crossing a pool boundary is defunctionalized: it travels
     -- as a closure datum (home language, manifold id, captured argument packets).
     -- The argument and result schemas shape only the native callable on each
@@ -743,9 +842,11 @@ makeSerialAST m lang t0 = do
         -- SerialPack, or raise a helpful error if no instance is registered.
         packableFallback = case Map.lookup generalTypeName typepackers of
           (Just ps) -> do
-            packers <- catMaybes <$> mapM (resolvePacker lang m ft) ps
-            unpacked <- mapM (makeSerialAST' gscope typepackers . typePackerUnpacked) packers
-            selection <- selectPacker (zip packers unpacked)
+            -- Carry each instance's general packed type alongside the
+            -- resolved packer. Selection ranks instances by that head, and
+            -- 'resolvePacker' has already rewritten it to the concrete form.
+            (failures, matches) <- partitionEithers <$> mapM resolveWithHead ps
+            selection <- selectPacker failures matches
             return $ SerialPack fv selection
           Nothing ->
             let (gt, ct) = unweaveTypeF ft
@@ -756,6 +857,17 @@ makeSerialAST m lang t0 = do
                    <> "\n  instance Packable <unpacked> (" <> pretty generalTypeName <+> "...) where ..."
                    <> "\nor map" <+> pretty generalTypeName
                    <+> "to a primitive list / tuple / sourced type."
+
+        -- Resolve one instance against the use site, keeping its general
+        -- packed type so the candidates can be ordered by specificity.
+        resolveWithHead ::
+          PackerInstance ->
+          MorlocMonad (Either (TypeU, MDoc) (TypeU, TypePacker))
+        resolveWithHead pin = do
+          resolved <- resolvePacker lang m ft pin
+          return $ case resolved of
+            (Right packer) -> Right (piHead pin, packer)
+            (Left reason) -> Left (piHead pin, reason)
 
         -- Extract dimension constraints from kind-kinded type args.
         -- Every Nat position is reified (including NatLitF 0, a valid empty
@@ -843,15 +955,38 @@ makeSerialAST m lang t0 = do
 
         finalVar = basevar $ maybe generalType id evaluatedType
 
-        selectPacker :: [(TypePacker, SerialAST)] -> MorlocMonad (TypePacker, SerialAST)
-        selectPacker [] =
-          MM.throwSourcedError m $
-            "Cannot find constructor in selectPacker for" <+> pretty ft
-              <> "\n  ft:" <+> pretty ft
-              <> "\n  generalTypeName (key):" <+> pretty generalTypeName
-              <> "\n  typepackers:" <+> viaShow typepackers
-              <> "\n  Map.lookup generalTypeName typepackers:" <+> viaShow (Map.lookup generalTypeName typepackers)
-        selectPacker (x : _) = return x
+        -- Choose among the instances that match this use site. Instance
+        -- heads are ordered by subsumption, so a well-formed instance set
+        -- gives the matches a unique greatest element: the most specific
+        -- instance, which is the one to apply. Several incomparable maxima
+        -- mean the heads overlap without either specializing the other, and
+        -- no choice between them is defensible.
+        selectPacker ::
+          [(TypeU, MDoc)] ->
+          [(TypeU, TypePacker)] ->
+          MorlocMonad (TypePacker, SerialAST)
+        selectPacker failures [] =
+          let (gt, ct) = unweaveTypeF ft
+           in MM.throwSourcedError m $
+                "No Packable instance covers" <+> squotes (pretty gt)
+                  <> " (concrete:" <+> pretty ct <> ")."
+                  <> "\nInstances declared for" <+> pretty generalTypeName
+                  <> ", and why each was rejected:"
+                  <> "\n" <> indent 2 (vsep [pretty h <> "\n  " <> reason | (h, reason) <- failures])
+        selectPacker _ matches =
+          let maxima = mostSpecific (map fst matches)
+           in case [packer | (h, packer) <- matches, any (equivalent h) maxima] of
+                [packer] -> do
+                  ast <- makeSerialAST' gscope typepackers (typePackerUnpacked packer)
+                  return (packer, ast)
+                _ ->
+                  MM.throwSourcedError m $
+                    "Ambiguous Packable instances for"
+                      <+> squotes (pretty (fst (unweaveTypeF ft))) <> ":"
+                      <> "\n" <> indent 2 (vsep (map pretty maxima))
+                      <> "\nEach matches, and none is more specific than the others."
+                      <> "\nDeclare an instance for their common specialization to"
+                      <+> "disambiguate, or remove one of them."
     makeSerialAST' gscope typepackers (NamF o n@(FV gv _) ps rs) = do
       anc <- MM.gets stateSerialAncestors
       -- Cycle detection at the NamF entry. If we are already lowering
@@ -877,13 +1012,37 @@ makeSerialAST m lang t0 = do
       return $ SerialOptional v inner
     makeSerialAST' _ _ t = MM.throwSourcedError m $ "makeSerialAST' error on type:" <+> pretty t
 
+-- | The pack/unpack pair a language implements an instance with.
+--
+-- The table is filtered to the language before use, so a miss here means the
+-- filter and this lookup have gone out of step.
+emptyGamma :: Gamma
+emptyGamma =
+  Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty [] Nothing Map.empty [] Set.empty
+
+packerSources :: Lang -> Int -> PackerInstance -> MorlocMonad (Source, Source)
+packerSources lang m0 pin = case Map.lookup lang (piSources pin) of
+  (Just srcs) -> return srcs
+  Nothing ->
+    MM.throwSourcedError m0 $
+      "No" <+> pretty lang <+> "implementation of the Packable instance for"
+        <+> squotes (pretty (piHead pin))
+
 resolvePacker ::
   Lang ->
   Int ->
   TypeF ->
-  (Int, TypeU, TypeU, Source, Source) ->
-  MorlocMonad (Maybe TypePacker)
-resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGeneralType, srcPacked, srcUnpacked) = do
+  PackerInstance ->
+  MorlocMonad (Either MDoc TypePacker)
+resolvePacker lang m0 resolvedType@(AppF _ _) pin = do
+  -- The wire form is written as whatever names the instance used, so a record
+  -- wire form arrives as the record's name. 'inferConcreteTypeU' resolves the
+  -- concrete side to the record body, so the general side has to be resolved
+  -- too; weaving a name against an expanded body has no meaning.
+  (_, gscope) <- getScope m0 lang
+  let unpackedGeneralType = either (const (piWire pin)) id (TE.evaluateType gscope (piWire pin))
+      packedGeneralType = piHead pin
+  (srcPacked, srcUnpacked) <- packerSources lang m0 pin
   packedConcreteType <- inferConcreteTypeU lang (Idx m0 packedGeneralType)
   unpackedConcreteType <- inferConcreteTypeU lang (Idx m0 unpackedGeneralType)
   maybeUnpackedType <-
@@ -894,15 +1053,15 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
       (packedGeneralType, unpackedGeneralType)
 
   case maybeUnpackedType of
-    (Just unpackedType) ->
-      return . Just $
+    (Right unpackedType) ->
+      return . Right $
         TypePacker
           { typePackerPacked = resolvedType
           , typePackerUnpacked = unpackedType
           , typePackerForward = srcPacked
           , typePackerReverse = srcUnpacked
           }
-    Nothing -> return Nothing
+    (Left reason) -> return (Left reason)
   where
     -- Both sides of the packer function are guaranteed to have the same
     -- generic values, this is guaranteed by the implementation of
@@ -932,43 +1091,29 @@ resolvePacker lang m0 resolvedType@(AppF _ _) (_, unpackedGeneralType, packedGen
       TypeU -> -- unresolved packed type (e.g., "dict" a b)
       TypeU -> -- unresolved unpacked type (e.g., "list" ("list" a b))
       (TypeU, TypeU) -> -- The general unresolved packed and unpacked types
-      MorlocMonad (Maybe TypeF) -- the resolved unpacked types
+      MorlocMonad (Either MDoc TypeF) -- the resolved unpacked type, or why this instance does not apply
     resolveP a b c generalTypes = do
       let (ga, ca) = unweaveTypeF a
-      unpackedConcreteType <- case subtype Map.empty b ca (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty [] Nothing Map.empty [] Set.empty) of
+      -- Both steps are match tests, not assertions. An instance whose head does
+      -- not cover this use site is simply not a candidate here; only the caller
+      -- knows whether some other instance matched, so neither step may abort.
+      case subtype Map.empty b ca emptyGamma of
         (Left typeErr) ->
-          MM.throwSourcedError m0 $
-            "There was an error raised in subtyping while resolving serialization"
-              <> "\nThe packer involved maps the type:"
-              <> "\n  "
-              <> (pretty . fst) generalTypes
-              <> "\n\nTo the serialized form:"
-              <> "\n  "
-              <> (pretty . snd) generalTypes
-              <> "\n\nHere the unresolved concrete packed type:"
-              <> "\n  b:" <+> pretty b
-              <> "\n\nShould be the subtype of the resolved packed type:"
-              <> "\n  a:" <+> pretty a
-              <> "\n\nThe generic terms in b should be resolved through subtyping and used to resolve the unpacked type:"
-              <> "\n  c:" <+> pretty c
-              <> "\n\nHowever, the b <: a step failed:\n"
-              <> typeErr
-              <> "\n\nThe packer function may not be generic enough to pack the type you specify, if this is the case, you may need to simplify the datatype"
+          return . Left $
+            "its concrete form" <+> pretty b <+> "does not cover" <+> pretty ca <> ":" <+> typeErr
         (Right g) -> do
-          return (apply g (existential c))
-
-      maybeUnpackedGeneralType <- case generalTypes of
-        (u, gc) -> do
-          -- where u  is the unresolved general packed type that was stored in Desugar.hs
-          --       gc is the unresolved general unpacked type
-          case subtype Map.empty u ga (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty [] Nothing Map.empty [] Set.empty) of
-            (Left _) -> return Nothing
-            (Right g) -> do
-              return . Just $ apply g (existential gc)
-
-      return $ case maybeUnpackedGeneralType of
-        (Just resolvedUnpackedGeneralType) -> Just $ weaveTypeF resolvedUnpackedGeneralType unpackedConcreteType
-        Nothing -> Nothing
+          let unpackedConcreteType = apply g (existential c)
+          -- u  is the unresolved general packed type stored in Desugar.hs
+          -- gc is the unresolved general unpacked type
+          case generalTypes of
+            (u, gc) ->
+              case subtype Map.empty u ga emptyGamma of
+                (Left typeErr) ->
+                  return . Left $
+                    "its general form" <+> pretty u <+> "does not cover" <+> pretty ga <> ":" <+> typeErr
+                (Right g2) ->
+                  return . Right $
+                    weaveTypeF (apply g2 (existential gc)) unpackedConcreteType
 
     -- Replaces each generic term with an existential term of the same name
     existential :: TypeU -> TypeU

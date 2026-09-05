@@ -1,0 +1,32 @@
+--' Two instances of one constructor, each declared for a different language and
+--' at a different generality: generic in Python, fixed to Int in C++. Instances
+--' are selected per language, so the two never compete and each pool uses the
+--' instance written for it.
+
+module perLanguage (howPy, howCpp)
+
+import root-py
+import root-cpp
+
+newtype Box a
+
+type Py  => (Box a) = "dict" a
+type Cpp => (Box a) = "Box<$1>" a
+
+instance Packable [a] (Box a) where
+  source Py from "helpers.py" ("pack_generic" as pack, "unpack_generic" as unpack)
+
+instance Packable [Int] (Box Int) where
+  source Cpp from "box.hpp" ("pack_box_int" as pack, "unpack_box_int" as unpack)
+
+source Py  from "helpers.py" ("how" as howP)
+source Cpp from "box.hpp"    ("how_box" as howC)
+
+howP :: Box a -> Str
+howC :: Box a -> Str
+
+howPy :: Box Int -> Str
+howPy = howP
+
+howCpp :: Box Int -> Str
+howCpp = howC

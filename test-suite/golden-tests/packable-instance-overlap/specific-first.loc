@@ -1,0 +1,36 @@
+--' Two Packable instances in one language claim the same type constructor: one
+--' generic over the parameters, one specialized to the ground types the export
+--' actually uses. The heads form a chain under subsumption, so the specialized
+--' instance is the unique most specific match and is the one selected. The
+--' paired 'generic-first.loc' declares the same two instances in the opposite
+--' order; declaration order carries no weight, so the two agree.
+--'
+--' The packers are observably different: the specialized one upcases node
+--' labels, so the selected instance is visible in the output of 'rootLabel'.
+
+module specificFirst (rootLabel)
+
+import root-py
+
+newtype RootedTree n e l
+
+type Py => (RootedTree n e l) = "dict" n e l
+
+instance Packable ([Str], [(Int, Int, Real)], [Str]) (RootedTree Str Real Str) where
+  source Py from "tree.py"
+    ( "pack_specific" as pack
+    , "unpack_specific" as unpack
+    )
+
+instance Packable ([n], [(Int, Int, e)], [l]) (RootedTree n e l) where
+  source Py from "tree.py"
+    ( "pack_generic" as pack
+    , "unpack_generic" as unpack
+    )
+
+source Py from "tree.py" ("root_node" as rootNode)
+
+rootNode :: RootedTree n e l -> n
+
+rootLabel :: RootedTree Str Real Str -> Str
+rootLabel = rootNode

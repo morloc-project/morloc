@@ -1,0 +1,34 @@
+--' The Python and C++ instances for one constructor give it different wire
+--' forms: a list in Python, a pair in C++. The value is built in Python and
+--' consumed in C++, so it is written under one form and read under the other.
+--'
+--' A type's wire form is what two pools agree on when they share a value. Two
+--' instances that disagree about it cannot both be right, and the program must
+--' be rejected rather than left to misread the packet at runtime.
+--'
+--' It is accepted today and misreads the packet: see reports/0051.
+
+module disagree (roundTrip)
+
+import root-py
+import root-cpp
+
+newtype Box a
+
+type Py  => (Box a) = "dict" a
+type Cpp => (Box a) = "BoxT<$1>" a
+
+instance Packable [a] (Box a) where
+  source Py from "helpers.py" ("pack_list" as pack, "unpack_list" as unpack)
+
+instance Packable (a, a) (Box a) where
+  source Cpp from "box.hpp" ("pack_tuple" as pack, "unpack_tuple" as unpack)
+
+source Py  from "helpers.py" ("pack_list" as mkBox)
+source Cpp from "box.hpp"    ("sum_tuple" as boxSum)
+
+mkBox :: [Int] -> Box Int
+boxSum :: Box Int -> Int
+
+roundTrip :: [Int] -> Int
+roundTrip xs = boxSum (mkBox xs)

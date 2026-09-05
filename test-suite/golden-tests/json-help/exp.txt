@@ -521,6 +521,17 @@
       },
       "terminals": []
     }
+  ],
+  "types": [
+    {
+      "name": "Map",
+      "kind": "packable",
+      "parameters": [
+        "key",
+        "val"
+      ],
+      "equals": "[(key, val)]"
+    }
   ]
 }
 === mcp-tools ===

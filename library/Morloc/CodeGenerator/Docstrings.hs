@@ -26,6 +26,7 @@ module Morloc.CodeGenerator.Docstrings
   , validateCmdArg
   -- * Schema-text predicates (used by emit helpers in Nexus.hs)
   , peelHint
+  , resolveNestedTypes
   , peelRecDecl
   , isStrWireSchema
   , isOptStrWireSchema
@@ -114,10 +115,58 @@ argLocPrefix i = do
     (Nothing, Just f) -> "In " <> pretty f <> ", "
     (Nothing, Nothing) -> ""
 
+-- | Expand every named type inside a type, not only the one at its head.
+--
+-- 'reduceArgDoc' walks the head so a docstring written on an alias
+-- reaches the use site, and stops there on purpose: docstring
+-- inheritance has no sensible meaning for a name buried inside a list,
+-- and two different records in one tuple would both claim the slot.
+--
+-- Type resolution has no such problem, and needs to go all the way
+-- down. A record reached through a list is exactly as opaque to a
+-- caller as one at the head -- more so, since it is the shape they will
+-- actually be handed -- and a transparent alias nested inside a tuple
+-- names a shape the help then never defines.
+--
+-- A record keeps its name: expanding it to a 'NamT' attaches the field
+-- layout while still printing as @Hit@, which is what a caller wants to
+-- read once the fields are defined beneath the argument list. A
+-- transparent alias has no name worth keeping and becomes its target.
+resolveNestedTypes :: Int -> Type -> MorlocMonad Type
+resolveNestedTypes i = go []
+  where
+    go seen t = case t of
+      VarT v
+        | render (pretty v) `elem` seen -> return t
+        | otherwise -> do
+            scope <- MM.getGeneralScope i
+            uni <- MM.gets stateUniversalGeneralTypedefs
+            let seen' = render (pretty v) : seen
+            case Map.lookup v scope <|> Map.lookup v uni of
+              -- Record-newtype: attach the layout, keep the name.
+              (Just [(_, typeOf -> parent@(NamT _ _ _ _), _, _, TypedefNewtype)]) ->
+                go seen' parent
+              -- Other newtypes and primitives are opaque by design.
+              (Just [(_, _, _, _, TypedefNewtype)]) -> return t
+              (Just [(_, _, _, _, TypedefPrimitive)]) -> return t
+              (Just [(_, typeOf -> parent, _, _, TypedefAlias)]) -> go seen' parent
+              _ -> return t
+      AppT f as -> AppT <$> go seen f <*> mapM (go seen) as
+      FunT as b -> FunT <$> mapM (go seen) as <*> go seen b
+      NamT o v ps fields -> do
+        let seen' = render (pretty v) : seen
+        ps' <- mapM (go seen') ps
+        fields' <- mapM (\(k, ft) -> (,) k <$> go seen' ft) fields
+        return (NamT o v ps' fields')
+      EffectT es b -> EffectT es <$> go seen b
+      OptionalT b -> OptionalT <$> go seen b
+      _ -> return t
+
 -- dispatch docstring info for each argument to `processArgDoc`
 processArgDoc :: Int -> Type -> ArgDoc -> MorlocMonad CmdDocSet
 processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs retdoc) = do
-  (ts', argdocs') <- zipWithM (reduceArgDoc i) ts (map ArgDocAlias argdocs) |>> unzip
+  (ts0, argdocs') <- zipWithM (reduceArgDoc i) ts (map ArgDocAlias argdocs) |>> unzip
+  ts' <- mapM (resolveNestedTypes i) ts0
   loc <- argLocPrefix i
   validateCommandLevelDirectives loc cmddoc
   mapM_ (rejectAuthoredMime loc) (cmddoc : retdoc : argdocs)
@@ -130,7 +179,8 @@ processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs retdoc) = do
   validateFlagRevCollisions loc cmdargs
   validatePositionalNames loc cmdargs
   validateStdinArg loc cmdargs
-  (t', retdoc') <- reduceArgDoc i t (ArgDocAlias retdoc)
+  (t0, retdoc') <- reduceArgDoc i t (ArgDocAlias retdoc)
+  t' <- resolveNestedTypes i t0
   return $
     CmdDocSet
       { cmdDocDesc = docLines cmddoc

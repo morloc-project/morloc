@@ -1,0 +1,29 @@
+--' Two instances of one constructor quantifying the same number of variables,
+--' neither covering the other: one fixes the node label, the other the edge
+--' label. Only the first covers this use site.
+--'
+--' The export returns the packed type, so the value is written out through the
+--' selected instance's unpack. The two unpacks are observably different -- the
+--' second upcases node labels -- so an instance's pack being paired with
+--' another instance's unpack shows up in the output.
+
+module pairing (mkTree)
+
+import root-py
+
+newtype RTree n e l
+
+type Py => (RTree n e l) = "dict" n e l
+
+instance Packable ([Str], [(Int, Int, e)], [l]) (RTree Str e l) where
+  source Py from "helpers.py" ("pack_a" as pack, "unpack_a" as unpack)
+
+instance Packable ([n], [(Int, Int, Real)], [l]) (RTree n Real l) where
+  source Py from "helpers.py" ("pack_b" as pack, "unpack_b" as unpack)
+
+source Py from "helpers.py" ("make_tree" as makeTree)
+
+makeTree :: Str -> RTree Str Str Str
+
+mkTree :: Str -> RTree Str Str Str
+mkTree = makeTree

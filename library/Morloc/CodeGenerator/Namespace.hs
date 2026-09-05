@@ -1662,7 +1662,21 @@ instance (Pretty a) => Pretty (Arg a) where
   pretty (Arg i x) = "x" <> pretty i <> braces (pretty x)
 
 instance Pretty TypeF where
-  pretty = viaShow
+  pretty (UnkF v) = "*" <> pretty v
+  pretty (VarF v) = pretty v
+  pretty (FunF ts t) = parens (hsep (punctuate " ->" (map pretty (ts <> [t]))))
+  pretty (AppF t ts) = parens (hsep (map pretty (t : ts)))
+  pretty (NamF _ v _ rs) =
+    pretty v
+      <+> encloseSep "{" "}" ", " [pretty k <+> "::" <+> pretty t | (k, t) <- rs]
+  pretty (RecF v) = "^" <> pretty v
+  pretty (EffectF es t) =
+    "<" <> hsep (punctuate "," (map pretty (Set.toList es))) <> ">" <+> pretty t
+  pretty (OptionalF t) = "?" <> pretty t
+  pretty (NatLitF n) = pretty n
+  pretty NatVoidF = "_"
+  pretty (StrLitF s) = dquotes (pretty s)
+  pretty StrVoidF = "_"
 
 instance Pretty TypeM where
   pretty Passthrough = "Passthrough"

@@ -1,0 +1,28 @@
+--' The same overlapping pair as 'ambiguous.loc', plus an instance for their
+--' unifier. Closing the instance set under unification restores a unique most
+--' specific match for every query, so the program builds and the added
+--' instance -- which brackets node labels -- is the one selected.
+
+module closure (rootLabel)
+
+import root-py
+
+newtype RootedTree n e l
+
+type Py => (RootedTree n e l) = "dict" n e l
+
+instance Packable ([Str], [(Int, Int, e)], [l]) (RootedTree Str e l) where
+  source Py from "tree.py" ("pack_generic" as pack, "unpack_generic" as unpack)
+
+instance Packable ([n], [(Int, Int, Real)], [l]) (RootedTree n Real l) where
+  source Py from "tree.py" ("pack_specific" as pack, "unpack_specific" as unpack)
+
+instance Packable ([Str], [(Int, Int, Real)], [l]) (RootedTree Str Real l) where
+  source Py from "tree.py" ("pack_closure" as pack, "unpack_closure" as unpack)
+
+source Py from "tree.py" ("root_node" as rootNode)
+
+rootNode :: RootedTree n e l -> n
+
+rootLabel :: RootedTree Str Real Str -> Str
+rootLabel = rootNode

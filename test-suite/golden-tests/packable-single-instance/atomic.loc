@@ -1,0 +1,20 @@
+--' A constructor with no parameters carries a Packable instance. Selection has
+--' nothing to discriminate on, so the single instance applies to every use.
+
+module atomic (howBlob)
+
+import root-py
+
+newtype Blob
+
+type Py => Blob = "dict"
+
+instance Packable [Int] Blob where
+  source Py from "helpers.py" ("pack_generic" as pack, "unpack_generic" as unpack)
+
+source Py from "helpers.py" ("how" as how)
+
+how :: Blob -> Str
+
+howBlob :: Blob -> Str
+howBlob = how

@@ -1,0 +1,30 @@
+--' Two instances of one constructor whose heads have no common instance: one
+--' covers boxes of Int, the other boxes of Str. Every use site matches exactly
+--' one of them, so there is nothing to choose between and both exports work.
+--'
+--' This is the smallest program with more than one instance for a constructor
+--' in a single language. It does not build today: see reports/0049.
+
+module disjoint (howInt, howStr)
+
+import root-py
+
+newtype Box a
+
+type Py => (Box a) = "dict" a
+
+instance Packable [Int] (Box Int) where
+  source Py from "helpers.py" ("pack_int" as pack, "unpack_int" as unpack)
+
+instance Packable [Str] (Box Str) where
+  source Py from "helpers.py" ("pack_str" as pack, "unpack_str" as unpack)
+
+source Py from "helpers.py" ("how" as how)
+
+how :: Box a -> Str
+
+howInt :: Box Int -> Str
+howInt = how
+
+howStr :: Box Str -> Str
+howStr = how

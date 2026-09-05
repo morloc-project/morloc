@@ -453,6 +453,13 @@ testFalse msg x =
 bool :: TypeU
 bool = VarU (TV "Bool")
 
+unifies :: [MT.Text] -> TypeU -> TypeU -> Bool
+unifies vs a b = maybe False (const True) (unifyU (map TV vs) a b)
+
+wireAgrees :: ([MT.Text], TypeU, TypeU) -> ([MT.Text], TypeU, TypeU) -> Bool
+wireAgrees (vs1, h1, w1) (vs2, h2, w2) =
+  wireFormsAgree (map TV vs1, h1, w1) (map TV vs2, h2, w2)
+
 real :: TypeU
 real = VarU (TV "Real")
 
@@ -1539,6 +1546,122 @@ typeOrderTests =
               ]
           )
           [forallu ["a"] (tuple [int, var "a"])]
+      , -- A specialization chain has a unique most specific member for
+        -- every query, so instance selection is well defined.
+        testEqual
+          "mostSpecificSubtypes: specialization chain resolves uniquely"
+          ( mostSpecificSubtypes
+              (tuple [int, str, real])
+              [ forallu ["a", "b", "c"] (tuple [var "a", var "b", var "c"])
+              , forallu ["b", "c"] (tuple [int, var "b", var "c"])
+              , forallu ["c"] (tuple [int, str, var "c"])
+              ]
+          )
+          [forallu ["c"] (tuple [int, str, var "c"])]
+      , -- Two heads that overlap without either subsuming the other leave
+        -- the query with two maximal matches and no maximum. Selection is
+        -- ambiguous and must be reported rather than resolved.
+        testEqual
+          "mostSpecificSubtypes: incomparable overlap is ambiguous"
+          ( mostSpecificSubtypes
+              (tuple [int, int, str])
+              [ forallu ["a", "b", "c"] (tuple [var "a", var "b", var "c"])
+              , forallu ["b", "c"] (tuple [int, var "b", var "c"])
+              , forallu ["a", "c"] (tuple [var "a", int, var "c"])
+              ]
+          )
+          [ forallu ["b", "c"] (tuple [int, var "b", var "c"])
+          , forallu ["a", "c"] (tuple [var "a", int, var "c"])
+          ]
+      , -- Adding the unifier of the two overlapping heads restores a unique
+        -- maximum: the instance set is closed under unification.
+        testEqual
+          "mostSpecificSubtypes: unification closure restores a maximum"
+          ( mostSpecificSubtypes
+              (tuple [int, int, str])
+              [ forallu ["a", "b", "c"] (tuple [var "a", var "b", var "c"])
+              , forallu ["b", "c"] (tuple [int, var "b", var "c"])
+              , forallu ["a", "c"] (tuple [var "a", int, var "c"])
+              , forallu ["c"] (tuple [int, int, var "c"])
+              ]
+          )
+          [forallu ["c"] (tuple [int, int, var "c"])]
+      , -- Alpha-equivalence must not depend on the order in which two types
+        -- happen to quantify the same variables: adjacent universals commute.
+        -- Two of these fail; see reports/0054.
+        testTrue
+          "equivalent: renaming"
+          ( equivalent
+              (forallu ["a", "b"] (tuple [var "a", var "b"]))
+              (forallu ["x", "y"] (tuple [var "x", var "y"]))
+          )
+      , testTrue
+          "equivalent: quantifier order swapped"
+          ( equivalent
+              (forallu ["a", "b"] (tuple [var "a", var "b"]))
+              (forallu ["b", "a"] (tuple [var "a", var "b"]))
+          )
+      , testTrue
+          "equivalent: mirrored function types"
+          ( equivalent
+              (forallu ["a", "b"] (fun [tuple [var "b"], var "a"]))
+              (forallu ["b", "a"] (fun [tuple [var "b"], var "a"]))
+          )
+      , testFalse
+          "equivalent: repeated variable is not the same as two"
+          ( equivalent
+              (forallu ["a"] (tuple [var "a", var "a"]))
+              (forallu ["a", "b"] (tuple [var "a", var "b"]))
+          )
+      , -- Unification: the substitution that makes two types one, used to ask
+        -- whether two instance heads can ever describe the same use site.
+        testTrue
+          "unify: a variable takes the other side"
+          (unifies ["a"] (lst (var "a")) (lst int))
+      , testTrue
+          "unify: variables on both sides"
+          (unifies ["a", "b"] (tuple [var "a", str]) (tuple [int, var "b"]))
+      , testFalse
+          "unify: rigid heads must agree"
+          (unifies ["a"] (lst (var "a")) (tuple [int, int]))
+      , testFalse
+          "unify: a variable used twice must take one value"
+          (unifies ["a"] (tuple [var "a", var "a"]) (tuple [int, str]))
+      , testTrue
+          "unify: a variable used twice may take one value"
+          (unifies ["a"] (tuple [var "a", var "a"]) (tuple [int, int]))
+      , testFalse
+          "unify: occurs check"
+          (unifies ["a"] (var "a") (lst (var "a")))
+      , -- 'unifyU' shares one namespace between its arguments, so a name used
+        -- on both sides is one variable. Separating two types that were
+        -- quantified independently is the caller's job.
+        testFalse
+          "unify: one namespace, so a shared name is one variable"
+          (unifies ["a"] (tuple [var "a", int]) (tuple [str, var "a"]))
+      , -- The wire forms of two instances agree exactly when the substitution
+        -- unifying their heads makes the two forms one. See reports/0051.
+        testTrue
+          "wireAgrees: a specialization of a generic instance"
+          (wireAgrees (["a"], lst (var "a"), lst (var "a")) ([], lst int, lst int))
+      , testFalse
+          "wireAgrees: a list against a pair"
+          (wireAgrees (["a"], lst (var "a"), lst (var "a")) (["b"], lst (var "b"), tuple [var "b", var "b"]))
+      , testFalse
+          "wireAgrees: a list against a list of lists"
+          (wireAgrees (["a"], lst (var "a"), lst (var "a")) (["b"], lst (var "b"), lst (lst (var "b"))))
+      , testTrue
+          "wireAgrees: heads that never meet are unconstrained"
+          (wireAgrees ([], lst int, lst int) ([], lst str, tuple [str, str]))
+      , -- Both pairs quantify 'a', and they are not the same 'a'. Without
+        -- renaming them apart the heads would fail to unify and the
+        -- disagreement below would be missed.
+        testFalse
+          "wireAgrees: independently quantified names are separated"
+          ( wireAgrees
+              (["a"], tuple [var "a", int], lst (var "a"))
+              (["a"], tuple [str, var "a"], lst int)
+          )
       ]
 
 unitTypeTests :: TestTree

@@ -1,0 +1,26 @@
+--' Two Packable instances whose heads overlap without either being a
+--' specialization of the other: one fixes the node label, the other the edge
+--' label. A tree with both fixed matches each instance and is more specific
+--' than neither, so the heads have no greatest lower bound in the instance
+--' set and no selection is defensible. The build must be rejected.
+
+module ambiguous (rootLabel)
+
+import root-py
+
+newtype RootedTree n e l
+
+type Py => (RootedTree n e l) = "dict" n e l
+
+instance Packable ([Str], [(Int, Int, e)], [l]) (RootedTree Str e l) where
+  source Py from "tree.py" ("pack_generic" as pack, "unpack_generic" as unpack)
+
+instance Packable ([n], [(Int, Int, Real)], [l]) (RootedTree n Real l) where
+  source Py from "tree.py" ("pack_specific" as pack, "unpack_specific" as unpack)
+
+source Py from "tree.py" ("root_node" as rootNode)
+
+rootNode :: RootedTree n e l -> n
+
+rootLabel :: RootedTree Str Real Str -> Str
+rootLabel = rootNode
