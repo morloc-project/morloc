@@ -229,6 +229,16 @@ fn die_with_pool_error(
     context: &str,
     comm_err: &std::io::Error,
 ) -> ! {
+    // A pool connection that drops while the nexus is already tearing down
+    // is the teardown itself -- clean_exit SIGTERMs every pool process
+    // group -- not a pool fault. Reporting it would race the exiting
+    // thread and, whenever it won, replace the real outcome (a downstream
+    // consumer closing the pipe exits 141) with a spurious "pool crashed"
+    // line on stderr and in summary.json.
+    if process::teardown_in_progress() {
+        process::park_until_exit();
+    }
+
     // Give the dying pool process time to flush its stderr/stdout before
     // we tear down the process group. Without this, a Python traceback or
     // error message that is still in a pipe buffer gets lost when
