@@ -136,6 +136,11 @@ extern "C" {
     fn morloc_daemon_is_shutting_down() -> bool;
     fn morloc_daemon_begin_recovery() -> bool;
     fn morloc_daemon_end_recovery();
+    // Hands a reaped child's exit status to whoever forked it. The daemon
+    // forks the compiler to serve an expression and then waits for it; the
+    // drains below would otherwise consume the status first and leave that
+    // wait with nothing to read.
+    fn morloc_note_child_exit(pid: libc::c_int, status: libc::c_int);
 }
 
 /// C-ABI callback wired into DaemonConfig.pool_check_fn.
@@ -472,6 +477,9 @@ extern "C" fn sigchld_handler(_sig: libc::c_int) {
         if pid <= 0 {
             break;
         }
+        // Publish before the pool bookkeeping: this reap may belong to a
+        // thread that forked its own child and is blocked waiting for it.
+        unsafe { morloc_note_child_exit(pid, status) };
         for i in 0..MAX_DAEMONS {
             if PIDS[i].load(Ordering::Relaxed) == pid {
                 EXIT_STATUSES[i].store(status, Ordering::Relaxed);
@@ -587,6 +595,12 @@ fn write_hex4(buf: &mut [u8], start: usize, val: u16) -> usize {
 /// Install signal handlers.
 pub fn install_signal_handlers() {
     unsafe {
+        // Bind the cross-library symbol the SIGCHLD handler calls before the
+        // handler can run. A first call from inside a signal handler would
+        // resolve it through the dynamic loader, whose lock the interrupted
+        // thread may already hold. A non-positive pid records nothing.
+        morloc_note_child_exit(-1, 0);
+
         // SIGCHLD
         let mut sa: libc::sigaction = std::mem::zeroed();
         sa.sa_sigaction = sigchld_handler as *const () as usize;
@@ -1238,6 +1252,7 @@ pub fn report_dead_pools() {
         if pid <= 0 {
             break;
         }
+        unsafe { morloc_note_child_exit(pid, status) };
         for i in 0..MAX_DAEMONS {
             if PIDS[i].load(Ordering::Relaxed) == pid {
                 EXIT_STATUSES[i].store(status, Ordering::Relaxed);

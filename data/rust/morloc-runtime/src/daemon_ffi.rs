@@ -972,6 +972,11 @@ pub extern "C" fn daemon_set_eval_policy(sandbox: bool, allowed: *const c_char) 
 /// cleanly and diagnosably. Mirrored in morloc-nexus's `mcp.rs`.
 const EVAL_HEAP_LIMIT: &str = "-M2G";
 
+/// 1 ms polls spent waiting for the SIGCHLD handler to publish a status it
+/// has already reaped. The gap is a handful of instructions; the bound only
+/// has to outlast a descheduled handler thread.
+const NOTED_EXIT_POLLS: usize = 100;
+
 /// GHC's `EXIT_HEAPOVERFLOW`: the exit status of a child stopped by
 /// `EVAL_HEAP_LIMIT`.
 const EXIT_HEAPOVERFLOW: i32 = 251;
@@ -1003,6 +1008,63 @@ fn eval_policy_args() -> Vec<CString> {
         }
     }
     out
+}
+
+// -- Reaped-child status exchange ---------------------------------------------
+//
+// The nexus reaps EVERY child from its SIGCHLD handler (`waitpid(-1)`), so a
+// thread that forks its own child and waits for it usually finds the child
+// already gone: `waitpid` fails with ECHILD and the exit status is lost.
+// Reading an untouched status word then says "exited 0", which turns a
+// compiler that refused the caller's expression into a successful run.
+//
+// The handler deposits every status it reaps here, and the waiter collects
+// the one it is owed. A ring rather than a registry because the waiter cannot
+// register before the fork (it has no pid yet) and cannot register after
+// (the child may already be reaped): depositing unconditionally has no such
+// window. Entries for children nobody is waiting on simply age out.
+
+const REAPED_SLOTS: usize = 32;
+
+static REAPED_PID: [AtomicI32; REAPED_SLOTS] = {
+    const INIT: AtomicI32 = AtomicI32::new(0);
+    [INIT; REAPED_SLOTS]
+};
+static REAPED_STATUS: [AtomicI32; REAPED_SLOTS] = {
+    const INIT: AtomicI32 = AtomicI32::new(0);
+    [INIT; REAPED_SLOTS]
+};
+static REAPED_NEXT: AtomicI32 = AtomicI32::new(0);
+
+/// Record a child the caller has already reaped, so whoever forked it can
+/// still learn how it ended.
+///
+/// Called from the nexus's SIGCHLD handler and so must stay
+/// async-signal-safe: atomics only, no allocation, no locks. The nexus warms
+/// the PLT entry for this symbol before installing the handler, so the
+/// in-handler call never triggers lazy symbol resolution.
+#[no_mangle]
+pub extern "C" fn morloc_note_child_exit(pid: i32, status: i32) {
+    if pid <= 0 {
+        return; // PLT warm-up call, or nothing to record
+    }
+    let n = REAPED_SLOTS as i32;
+    let slot = (REAPED_NEXT.fetch_add(1, Ordering::AcqRel).rem_euclid(n)) as usize;
+    REAPED_STATUS[slot].store(status, Ordering::Relaxed);
+    REAPED_PID[slot].store(pid, Ordering::Release);
+}
+
+/// Collect the exit status of `pid` if the SIGCHLD handler reaped it.
+/// Consumes the entry so a recycled pid cannot be answered twice.
+fn take_noted_child_exit(pid: i32) -> Option<i32> {
+    for i in 0..REAPED_SLOTS {
+        if REAPED_PID[i].load(Ordering::Acquire) == pid {
+            let status = REAPED_STATUS[i].load(Ordering::Relaxed);
+            REAPED_PID[i].store(0, Ordering::Release);
+            return Some(status);
+        }
+    }
+    None
 }
 
 // -- Fork-based eval/typecheck ------------------------------------------------
@@ -1097,8 +1159,37 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
     let stderr_buf = read_fd_to_vec(stderr_pipe[0]);
     libc::close(stderr_pipe[0]);
 
+    // The child's status may already have been consumed by the nexus's
+    // SIGCHLD handler: the pipes above only reach EOF when the child exits,
+    // so the handler has usually run by the time we get here. Fall back to
+    // what it recorded, and give it a moment to record it if the reap and
+    // the deposit straddle this point.
     let mut status: i32 = 0;
-    libc::waitpid(pid, &mut status, 0);
+    if libc::waitpid(pid, &mut status, 0) != pid {
+        let mut noted = None;
+        for _ in 0..NOTED_EXIT_POLLS {
+            noted = take_noted_child_exit(pid);
+            if noted.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        match noted {
+            Some(s) => status = s,
+            None => {
+                (*resp).success = false;
+                (*resp).error_kind = DAEMON_ERROR_INTERNAL;
+                let c = CString::new(format!(
+                    "lost the exit status of the forked `morloc {}`; \
+                     its result cannot be trusted",
+                    subcmd,
+                ))
+                .unwrap_or_default();
+                (*resp).error = libc::strdup(c.as_ptr());
+                return resp;
+            }
+        }
+    }
 
     if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 {
         let mut out = String::from_utf8_lossy(&stdout_buf).into_owned();
@@ -1161,6 +1252,15 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
         } else if !stderr_buf.is_empty() {
             (
                 String::from_utf8_lossy(&stderr_buf).into_owned(),
+                DAEMON_ERROR_BAD_REQUEST,
+            )
+        } else if !stdout_buf.is_empty() {
+            // A rejected expression is a diagnostic, and the compiler prints
+            // its diagnostics on stdout. Handing back the exit code alone
+            // would tell the caller their expression failed while withholding
+            // the sentence saying why.
+            (
+                String::from_utf8_lossy(&stdout_buf).into_owned(),
                 DAEMON_ERROR_BAD_REQUEST,
             )
         } else {

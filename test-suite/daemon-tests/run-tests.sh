@@ -591,10 +591,15 @@ if should_run "http-eval-timeout"; then
         --eval-allowed-modules root-py
     wait_for_http "$HTTP_PORT" 10
 
-    # Submit an expression heavy enough to blow the 1-second CPU
-    # budget. Any non-trivial /eval path will do — most of the time
-    # is the morloc compile cycle plus pool startup, both CPU-bound.
-    body='{"expr": "import root-py\nlength [1..50000000]"}'
+    # An expression whose COMPILE cost exceeds the budget. The budget is a
+    # CPU rlimit on the forked compiler, so the work has to land in the
+    # compiler and not in a pool: a long addition chain typechecks for
+    # several seconds while allocating almost nothing, where a huge list
+    # would spend a pool's memory instead and never touch the budget.
+    body=$(python3 -c "
+import json
+print(json.dumps({'expr': 'import root-py\n' + ' + '.join(['1'] * 800)}))
+")
     status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
         -X POST "http://127.0.0.1:${HTTP_PORT}/eval" \
         -H "Content-Type: application/json" -d "$body") \
