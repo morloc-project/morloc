@@ -82,6 +82,9 @@ pub struct NexusConfig {
     /// `/eval` route). Off by default; enabled only when the operator exposes it.
     /// Distinct from `eval_sandbox` (which is always on for served eval).
     pub eval_enabled: bool,
+    /// Serve eval without a bearer token (see `RouterArgs::eval_allow_no_auth`).
+    /// Only meaningful when `eval_enabled`.
+    pub eval_allow_no_auth: bool,
     /// Base directory under which a per-run subdir (named by run_id)
     /// is materialized. Activates rundir creation, log tee, and
     /// `summary.json`. Falls back to the `MORLOC_LOG_DIR` env var.
@@ -141,6 +144,7 @@ impl Default for NexusConfig {
             eval_sandbox: false,
             eval_allowed_modules: None,
             eval_enabled: false,
+            eval_allow_no_auth: false,
             log_dir: None,
             summary_path: None,
             quiet: false,

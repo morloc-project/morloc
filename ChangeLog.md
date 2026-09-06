@@ -3,6 +3,9 @@ Unreleased
 
  - a serve refuses to start when a module's pools cannot run, naming the module
    and what is missing, instead of reporting healthy and failing every call
+ - a served eval asks for a bearer token even where the rest of the endpoint
+   does not, and is not advertised until it can answer; waive it with
+   `--eval-allow-no-auth` or `MORLOC_EVAL_ALLOW_NO_AUTH`
 
 0.101.0 [2026-09-05]
 --------------------

@@ -302,6 +302,15 @@ pub struct RouterArgs {
     #[arg(long = "eval")]
     pub eval: bool,
 
+    /// Serve eval without a bearer token. Eval is the one exposed surface not
+    /// bounded by what the author declared: it compiles and runs expressions the
+    /// caller writes, which costs seconds to tens of seconds of the container's
+    /// CPU each time. It therefore asks for a token even when the rest of the
+    /// endpoint does not; this waives that. Falls back to
+    /// MORLOC_EVAL_ALLOW_NO_AUTH, which is the usable form inside a container.
+    #[arg(long = "eval-allow-no-auth")]
+    pub eval_allow_no_auth: bool,
+
     /// Serve exactly this program (repeatable) over BOTH adapters (MCP + API).
     /// Which modules are served is an explicit decision; a named program that is
     /// not installed is an error. For adapter-specific membership use
@@ -861,6 +870,13 @@ pub fn router_args_to_config(args: &RouterArgs) -> NexusConfig {
     cfg.mcp_allow_no_auth = args.allow_no_auth;
     apply_eval_policy(&mut cfg, &args.eval_allowed_modules);
     cfg.eval_enabled = args.eval;
+    // An image cannot take a command-line flag from `docker run` without the
+    // operator restating the whole command, so the waiver has an env form too,
+    // exactly as the token does.
+    cfg.eval_allow_no_auth = args.eval_allow_no_auth
+        || std::env::var("MORLOC_EVAL_ALLOW_NO_AUTH")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
     cfg
 }
 

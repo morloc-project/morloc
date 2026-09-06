@@ -1472,6 +1472,23 @@ struct Frontend {
     /// eval's sandbox allow-list (`None` => no imports). Passed to the forked
     /// `morloc eval`; independent of the served module sets.
     eval_allow: Option<String>,
+    /// Eval is exposed but must not be served: no bearer token is configured and
+    /// the operator did not waive the requirement.
+    ///
+    /// Eval is the one exposed surface not bounded by what the author declared.
+    /// `/call` runs the functions they chose, with arguments typed and checked
+    /// at the boundary; eval compiles and runs an expression the caller writes,
+    /// bounded only by the import allow-list and a sandbox that forbids
+    /// directly-written IO but not what an allowed module's own functions do.
+    /// It is also expensive in a way the rest is not -- an expression over a
+    /// compiled language rebuilds a pool, which is seconds to tens of seconds of
+    /// the container's CPU per call -- so an open eval is a denial-of-service
+    /// lever in the hands of a caller who meant no harm.
+    ///
+    /// Unlike the bind address, which says nothing about exposure once a process
+    /// is inside a container, whether eval is exposed is a fact the server knows
+    /// about itself. So this gate keys on something real.
+    eval_needs_token: bool,
     /// CPU-time budget (seconds) for a forked `morloc eval`; <=0 disables it.
     /// Mirrors the daemon's RLIMIT_CPU so a runaway expression can't burn a
     /// front-end thread's CPU indefinitely.
@@ -1545,6 +1562,12 @@ impl Frontend {
         out
     }
 }
+
+/// Why an exposed eval is refused, said the same way at both entry points.
+const EVAL_NEEDS_TOKEN: &str = "the eval capability is exposed but requires a bearer token: \
+     it compiles and runs expressions the caller writes, which costs seconds to tens of \
+     seconds of this container's CPU each time. Set MORLOC_MCP_TOKEN (or --auth-token), or \
+     waive the requirement with MORLOC_EVAL_ALLOW_NO_AUTH=1 (or --eval-allow-no-auth).";
 
 /// Check that a served module's pools can actually be spawned: every pool file
 /// present, every interpreter on PATH.
@@ -1645,11 +1668,27 @@ pub fn serve_frontend(router: *mut c_void, fdb: &str, config: &crate::dispatch::
         }
     }
 
+    // Eval asks for a bearer token even where the rest of the endpoint does not
+    // (see `Frontend::eval_needs_token`). An exposed-but-locked eval is not
+    // advertised: a tool that answers every call with a refusal is worse than an
+    // absent one, especially to an assistant reading the catalogue, and the
+    // operator's signal belongs in the startup log where they are looking.
+    let eval_needs_token = config.eval_enabled
+        && config.mcp_auth_token.is_none()
+        && !config.eval_allow_no_auth;
+    if eval_needs_token {
+        eprintln!(
+            "morloc serve: eval is exposed but LOCKED, and is not advertised. {}",
+            EVAL_NEEDS_TOKEN
+        );
+    }
+
     // The eval capability (sandboxed) is a single synthetic MCP tool, exposed
-    // only when enabled. It is NOT a module; it forks `morloc eval` per call, so
-    // the `morloc` compiler must be on PATH in the serving environment -- warn
-    // loudly at startup if it is not, since eval would otherwise fail per call.
-    if config.eval_enabled {
+    // only when enabled and callable. It is NOT a module; it forks `morloc eval`
+    // per call, so the `morloc` compiler must be on PATH in the serving
+    // environment -- warn loudly at startup if it is not, since eval would
+    // otherwise fail per call.
+    if config.eval_enabled && !eval_needs_token {
         if !morloc_on_path() {
             eprintln!(
                 "morloc serve: WARNING: eval is exposed but the `morloc` compiler is \
@@ -1753,6 +1792,7 @@ pub fn serve_frontend(router: *mut c_void, fdb: &str, config: &crate::dispatch::
         api_modules,
         api_help,
         eval_enabled: config.eval_enabled,
+        eval_needs_token,
         eval_allow: config.eval_allowed_modules.clone(),
         eval_timeout: config.eval_timeout,
         server_name: "morloc".to_string(),
@@ -1830,6 +1870,15 @@ fn frontend_build_response(
             _ => method_not_allowed("POST", keep_alive),
         }
     } else if path == "/eval" {
+        if fe.eval_needs_token {
+            return http_json(
+                403,
+                serde_json::json!({ "status": "error", "error": EVAL_NEEDS_TOKEN })
+                    .to_string()
+                    .as_bytes(),
+                keep_alive,
+            );
+        }
         match req.method.as_str() {
             "POST" => frontend_eval_api(req, fe, keep_alive),
             _ => method_not_allowed("POST", keep_alive),
@@ -1881,7 +1930,11 @@ fn frontend_discover(fe: &Arc<Frontend>, keep_alive: bool) -> Vec<u8> {
                      (tools are named <module>__<command> and take named arguments).",
         },
         "eval": {
-            "enabled": fe.eval_enabled,
+            // Callable, not merely exposed. An eval that is locked for want of a
+            // token cannot be used, and reporting it as enabled would send a
+            // caller to an endpoint that refuses them.
+            "enabled": fe.eval_enabled && !fe.eval_needs_token,
+            "locked": fe.eval_needs_token,
             "endpoints": ["/eval", "mcp tool 'eval'"],
         },
     });
@@ -2175,6 +2228,11 @@ fn frontend_tools_call(id: Value, msg: &Value, fe: &Frontend) -> Value {
     if name == "eval" {
         if !fe.eval_enabled {
             return error_response(id, JSONRPC_INVALID_PARAMS, "unknown tool 'eval'");
+        }
+        // The same gate as the HTTP route. Without it the tool is a way around
+        // it, since both reach the same forked compiler.
+        if fe.eval_needs_token {
+            return error_response(id, JSONRPC_INVALID_PARAMS, EVAL_NEEDS_TOKEN);
         }
         let expr = match arguments.get("expression").and_then(|v| v.as_str()) {
             Some(e) => e,
