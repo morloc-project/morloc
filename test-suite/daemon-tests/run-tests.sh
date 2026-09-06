@@ -587,13 +587,14 @@ if should_run "http-eval-timeout"; then
     echo "${BOLD}[http-eval-timeout] /eval CPU budget -> 408${RESET}"
 
     HTTP_PORT=$(pick_port)
-    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT" --eval-timeout 1
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT" --eval-timeout 1 \
+        --eval-allowed-modules root-py
     wait_for_http "$HTTP_PORT" 10
 
     # Submit an expression heavy enough to blow the 1-second CPU
     # budget. Any non-trivial /eval path will do — most of the time
     # is the morloc compile cycle plus pool startup, both CPU-bound.
-    body='{"expr": "import root-py; length [1..50000000]"}'
+    body='{"expr": "import root-py\nlength [1..50000000]"}'
     status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
         -X POST "http://127.0.0.1:${HTTP_PORT}/eval" \
         -H "Content-Type: application/json" -d "$body") \
@@ -621,14 +622,15 @@ if should_run "http-typecheck-eval"; then
     echo "${BOLD}[http-typecheck-eval] /typecheck and /eval expressions${RESET}"
 
     HTTP_PORT=$(pick_port)
-    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT"
+    start_daemon "$ARITH_DIR" --http-port "$HTTP_PORT" \
+        --eval-allowed-modules root-py
     wait_for_http "$HTTP_PORT" 10
 
     # /eval: a well-typed expression returns its value.
     eval_resp=$(curl -s --max-time 60 \
         -X POST "http://127.0.0.1:${HTTP_PORT}/eval" \
         -H "Content-Type: application/json" \
-        -d '{"expr": "import root-py; 2 + 2"}')
+        -d '{"expr": "import root-py\n2 + 2"}')
     eval_status=$(json_field "$eval_resp" "status")
     eval_result=$(json_field "$eval_resp" "result")
     assert_test "POST /eval '2 + 2' status=ok" "ok" "$eval_status"
@@ -639,7 +641,7 @@ if should_run "http-typecheck-eval"; then
     tc_resp=$(curl -s --max-time 60 \
         -X POST "http://127.0.0.1:${HTTP_PORT}/typecheck" \
         -H "Content-Type: application/json" \
-        -d '{"expr": "import root-py; 2 + 2"}')
+        -d '{"expr": "import root-py\n2 + 2"}')
     tc_status=$(json_field "$tc_resp" "status")
     tc_result=$(json_field "$tc_resp" "result")
     assert_test "POST /typecheck '2 + 2' status=ok" "ok" "$tc_status"
@@ -651,7 +653,7 @@ if should_run "http-typecheck-eval"; then
     bad_resp=$(curl -s --max-time 60 \
         -X POST "http://127.0.0.1:${HTTP_PORT}/typecheck" \
         -H "Content-Type: application/json" \
-        -d '{"expr": "import root-py; 2 + True"}')
+        -d '{"expr": "import root-py\n2 + True"}')
     bad_status=$(json_field "$bad_resp" "status")
     assert_test "POST /typecheck ill-typed status=error" "error" "$bad_status"
 
