@@ -1,6 +1,6 @@
 module pyfuncs (*)
 
-import types
+import .types
 
 pNotBool :: Bool -> Bool
 pAppendStr :: Str -> Str -> Str

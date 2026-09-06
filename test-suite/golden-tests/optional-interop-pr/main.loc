@@ -7,7 +7,7 @@ module main
   , testChainRPy
   )
 
-import types
+import .types
 import pyfuncs (pSafeDiv, pFromNull, pDouble)
 import rfuncs (rSafeDiv, rFromNull, rDouble)
 

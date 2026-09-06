@@ -1,6 +1,6 @@
 module cppfuncs (*)
 
-import types
+import .types
 
 cAddOne :: Int -> Int
 

@@ -1,6 +1,6 @@
 module cppfuncs (*)
 
-import types
+import .types
 
 cNotBool :: Bool -> Bool
 cAppendStr :: Str -> Str -> Str

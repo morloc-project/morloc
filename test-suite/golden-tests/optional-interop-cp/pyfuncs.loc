@@ -1,6 +1,6 @@
 module pyfuncs (*)
 
-import types
+import .types
 
 pSafeDiv :: Int -> Int -> ?Int
 pFromNull :: Int -> ?Int -> Int

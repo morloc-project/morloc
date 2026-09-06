@@ -1,6 +1,6 @@
 module pyfuncs (*)
 
-import types
+import .types
 
 pUnwrapOr :: a -> ?a -> a
 

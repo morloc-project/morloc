@@ -15,7 +15,7 @@ module main
   , testMultiHop
   )
 
-import types
+import .types
 import cppfuncs
 import pyfuncs
 
