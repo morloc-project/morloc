@@ -1,13 +1,11 @@
-Unreleased
-----------
+0.102.0 [2026-09-05]
+--------------------
 
- - a serve refuses to start when a module's pools cannot run, naming the module
-   and what is missing, instead of reporting healthy and failing every call
- - a served eval asks for a bearer token even where the rest of the endpoint
-   does not, and is not advertised until it can answer; waive it with
-   `--eval-allow-no-auth` or `MORLOC_EVAL_ALLOW_NO_AUTH`
- - a serve that was asked to run unauthenticated off loopback says so at
-   startup, naming what an operator can do about it
+ - a serve refuses to start when a module's pools cannot run
+ - a served eval asks for a bearer token even when the rest does not
+   - it is not advertised until it can answer
+   - waive it with `--eval-allow-no-auth` or `MORLOC_EVAL_ALLOW_NO_AUTH`
+ - a serve asked to run unauthenticated off loopback says so at startup
 
 0.101.0 [2026-09-05]
 --------------------
