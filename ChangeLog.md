@@ -6,6 +6,8 @@ Unreleased
  - a served eval asks for a bearer token even where the rest of the endpoint
    does not, and is not advertised until it can answer; waive it with
    `--eval-allow-no-auth` or `MORLOC_EVAL_ALLOW_NO_AUTH`
+ - a serve that was asked to run unauthenticated off loopback says so at
+   startup, naming what an operator can do about it
 
 0.101.0 [2026-09-05]
 --------------------

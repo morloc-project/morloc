@@ -1775,6 +1775,19 @@ pub fn serve_frontend(router: *mut c_void, fdb: &str, config: &crate::dispatch::
         );
         process::clean_exit(1);
     }
+    // Serving openly was asked for, which is ordinary inside a container: there
+    // the bind address says nothing about who can reach the process, and what
+    // can is decided outside it by a published port or a network. Say so once,
+    // because the caller who arrives is then whoever that decision let in.
+    if auth_token.is_none() && !is_loopback {
+        eprintln!(
+            "morloc serve: no auth token set. Every caller that can reach {} can call every \
+             exposed function. Access control is the operator's: publish to loopback \
+             (-p 127.0.0.1:PORT:PORT), keep this on an internal network, or put a gateway in \
+             front. Set MORLOC_MCP_TOKEN to require a bearer token here as well.",
+            bound
+        );
+    }
     eprintln!(
         "morloc serve: MCP at http://{}/mcp ({} tools) | API at http://{}/call/<module>/<command> \
          | discovery at http://{}/discover",
