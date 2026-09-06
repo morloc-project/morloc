@@ -1433,7 +1433,10 @@ pub unsafe extern "C" fn daemon_dispatch(
                 for i in 0..G_N_POOLS {
                     arr.push(serde_json::Value::Bool(alive_fn(i)));
                 }
-                let json = serde_json::to_string(&arr).unwrap_or_default();
+                // Named, not bare: a list of anonymous booleans tells a
+                // caller nothing about what is being reported, and leaves no
+                // room to report anything else about the daemon later.
+                let json = serde_json::json!({ "pools": arr }).to_string();
                 let c = CString::new(json).unwrap_or_default();
                 (*resp).result_json = libc::strdup(c.as_ptr());
             }
