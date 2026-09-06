@@ -1391,19 +1391,22 @@ fi
 if should_run "router"; then
     echo "${BOLD}[router] Multi-program router${RESET}"
 
-    # Set up a temporary exe/ directory: one <name>/manifest.json per
-    # program, exactly the shape the router scans ($MORLOC_HOME/exe). The
-    # build already produced a self-describing nexus-build/ dir (keyed on
-    # the -o name; manifest.json + pools/ with relative pool paths), so
-    # symlink it in under the program name -- no extraction or patching.
+    # Set up a temporary exe/ directory in the shape the router reads:
+    # exe/<name>/<name>-build/manifest.json, one per installed program.
+    # The build already produced a self-describing build dir (keyed on the
+    # -o name; manifest.json + pools/ with relative pool paths), so symlink
+    # it in under the name the router will look for -- no extraction or
+    # patching.
     FDB_DIR=$(mktemp -d)
     WORK_DIRS+=("$FDB_DIR")
+    ROUTER_MANIFEST="$FDB_DIR/arithmetic/arithmetic-build/manifest.json"
 
     if [ -f "$ARITH_DIR/nexus-build/manifest.json" ]; then
-        ln -s "$ARITH_DIR/nexus-build" "$FDB_DIR/arithmetic"
+        mkdir -p "$FDB_DIR/arithmetic"
+        ln -s "$ARITH_DIR/nexus-build" "$FDB_DIR/arithmetic/arithmetic-build"
     fi
 
-    if [ ! -f "$FDB_DIR/arithmetic/manifest.json" ]; then
+    if [ ! -f "$ROUTER_MANIFEST" ]; then
         echo "  ${RED}SKIP: could not locate arithmetic build directory${RESET}"
         echo ""
         TOTAL=$((TOTAL + 1))
@@ -1411,12 +1414,15 @@ if should_run "router"; then
         FAILURES+=("router: could not locate build directory")
     fi
 
-    if [ -f "$FDB_DIR/arithmetic/manifest.json" ]; then
+    if [ -f "$ROUTER_MANIFEST" ]; then
         ROUTER_PORT=$(pick_port)
 
-        # Start router (use the morloc-nexus binary)
+        # Start router (use the morloc-nexus binary). Which programs are
+        # served is always an explicit decision; with no --program/--mcp/--api
+        # the router has nothing to serve and refuses to start.
         NEXUS_PATH="$(which morloc-nexus 2>/dev/null || echo "$HOME/.local/bin/morloc-nexus")"
-        (exec "$NEXUS_PATH" router --http-port "$ROUTER_PORT" --fdb "$FDB_DIR" 2>"$FDB_DIR/router.log") &
+        (exec "$NEXUS_PATH" router --http-port "$ROUTER_PORT" --fdb "$FDB_DIR" \
+            --program arithmetic 2>"$FDB_DIR/router.log") &
         ROUTER_PID=$!
         DAEMON_PIDS+=("$ROUTER_PID")
 
@@ -1427,13 +1433,12 @@ if should_run "router"; then
         status=$(json_field "$result" "status" 2>/dev/null) || status=""
         assert_test "router GET /health" "ok" "$status"
 
-        # List programs
-        disco=$(curl -s "http://127.0.0.1:${ROUTER_PORT}/programs" 2>/dev/null) || disco=""
-        assert_contains "router GET /programs lists arithmetic" "arithmetic" "$disco"
-
-        # Full discovery
+        # Discovery index: names each served module and the URL shape a
+        # caller invokes it through.
         disco=$(curl -s "http://127.0.0.1:${ROUTER_PORT}/discover" 2>/dev/null) || disco=""
-        assert_contains "router GET /discover lists programs" "programs" "$disco"
+        assert_contains "router GET /discover lists arithmetic" "arithmetic" "$disco"
+        assert_contains "router GET /discover gives the call shape" \
+            "/call/arithmetic/<command>" "$disco"
 
         # Per-program discovery
         disco=$(curl -s "http://127.0.0.1:${ROUTER_PORT}/discover/arithmetic" 2>/dev/null) || disco=""
