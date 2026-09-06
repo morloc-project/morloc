@@ -1,3 +1,9 @@
+Unreleased
+----------
+
+ * `morloc init` reports a conda environment that activated no C/C++ compiler
+   as a failed activation instead of as PATH shadowing
+
 0.101.0 [2026-09-05]
 --------------------
 

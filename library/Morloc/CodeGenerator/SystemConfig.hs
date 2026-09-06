@@ -16,6 +16,8 @@ module Morloc.CodeGenerator.SystemConfig
   ( configure
   , configureAll
   , pathIsWithin
+  , Incoherence (..)
+  , compilerIncoherence
   ) where
 
 import Morloc.CodeGenerator.Namespace
@@ -627,6 +629,8 @@ checkCondaCoherence verbose mPrefix =
       -- not ABI-bearing and may legitimately come from the host.
       checks <- mapM (locateTool prefixAbs) abiBearingTools
       let incoherent = [x | Just x <- checks]
+          shadowed = [(t, p) | (t, p, Shadowed) <- incoherent]
+          unactivated = [(t, p) | (t, p, Unactivated) <- incoherent]
       if null incoherent
         then sayInfo verbose $ "Toolchain coherent with CONDA_PREFIX=" <> prefixAbs
         else
@@ -634,22 +638,46 @@ checkCondaCoherence verbose mPrefix =
             [ "Toolchain is incoherent with the active conda environment (CONDA_PREFIX="
                 <> prefixAbs
                 <> ")."
-            , "These build tools resolve to a HOST copy that shadows the conda"
-            , "environment's, which mixes ABIs and can crash at pool-load time:"
             ]
-              ++ ["  " <> t <> " -> " <> p | (t, p) <- incoherent]
-              ++ [ "Ensure the conda environment's tool comes first on PATH"
-                 , "(re-activate), or use a container backend."
-                 ]
+              ++ shadowedReport shadowed
+              ++ unactivatedReport unactivated
   where
-    -- Just (tool, hostPath) if the tool is INCOHERENT; Nothing if it is coherent
-    -- (resolves inside the env) or simply not part of this env. A tool resolving
-    -- OUTSIDE the prefix is only a problem when the env actually provides it and
-    -- a host copy is shadowing it -- NOT when the env never included that
-    -- language (e.g. a stray host /usr/bin/julia in an env with no julia). The
-    -- C/C++ compiler (gcc/g++, via $CC/$CXX) is the exception: it is always
-    -- required, so a host compiler is always a fatal mix.
-    locateTool :: FilePath -> String -> IO (Maybe (String, FilePath))
+    shadowedReport [] = []
+    shadowedReport ts =
+      [ "These build tools resolve to a HOST copy that shadows the conda"
+      , "environment's, which mixes ABIs and can crash at pool-load time:"
+      ]
+        ++ ["  " <> t <> " -> " <> p | (t, p) <- ts]
+        ++ [ "Ensure the conda environment's tool comes first on PATH"
+           , "(re-activate), or use a container backend."
+           ]
+
+    -- The env has no compiler of its own AND exported no $CC/$CXX, so the only
+    -- C compiler in sight is the host's. Nothing is shadowing anything and no
+    -- amount of PATH reordering helps: the environment's compiler activation
+    -- never ran (or failed), which is what the user has to be told.
+    unactivatedReport [] = []
+    unactivatedReport ts =
+      [ "The conda environment activated no C/C++ compiler: it provides no copy of"
+      , "these tools and exported no $CC/$CXX, so they resolve to a HOST compiler,"
+      , "which mixes ABIs and can crash at pool-load time:"
+      ]
+        ++ ["  " <> t <> " -> " <> p | (t, p) <- ts]
+        ++ [ "conda ships its compilers under target-prefixed names"
+           , "(x86_64-conda-linux-gnu-gcc, arm64-apple-darwin20.0.0-clang) and names"
+           , "them in $CC/$CXX from the environment's activate.d scripts. Unset means"
+           , "that activation did not run or failed; re-provision the environment and"
+           , "read the output of its activation scripts."
+           ]
+
+    -- Just (tool, hostPath, why) if the tool is INCOHERENT; Nothing if it is
+    -- coherent (resolves inside the env) or simply not part of this env. A tool
+    -- resolving OUTSIDE the prefix is only a problem when the env actually
+    -- provides it and a host copy is shadowing it -- NOT when the env never
+    -- included that language (e.g. a stray host /usr/bin/julia in an env with no
+    -- julia). The C/C++ compiler (gcc/g++, via $CC/$CXX) is the exception: it is
+    -- always required, so a host compiler is always a fatal mix.
+    locateTool :: FilePath -> String -> IO (Maybe (String, FilePath, Incoherence))
     locateTool prefixAbs tool = do
       loc <- resolveToolLocation tool
       case loc of
@@ -657,11 +685,31 @@ checkCondaCoherence verbose mPrefix =
         Just (path, dirAbs)
           | pathIsWithin prefixAbs dirAbs -> return Nothing
           | otherwise -> do
-              envProvides <-
-                if tool `elem` ["gcc", "g++"]
-                  then return True
-                  else doesFileExist (prefixAbs </> "bin" </> tool)
-              return (if envProvides then Just (tool, path) else Nothing)
+              inEnv <- doesFileExist (prefixAbs </> "bin" </> tool)
+              if tool `elem` ["gcc", "g++"]
+                then do
+                  named <- (/= tool) <$> resolveToolName tool
+                  return (Just (tool, path, compilerIncoherence inEnv named))
+                else return (if inEnv then Just (tool, path, Shadowed) else Nothing)
+
+-- | Why an ABI-bearing tool resolved outside the active conda prefix.
+data Incoherence
+  = Shadowed    -- ^ the env provides this tool, but a host copy comes first
+  | Unactivated -- ^ the env provides no such tool and exported no $CC/$CXX
+  deriving (Eq, Show)
+
+-- | Classify a C/C++ compiler that resolved OUTSIDE the conda prefix, given
+-- whether the prefix holds a @bin/gcc@ (@inEnv@) and whether @$CC@/@$CXX@ named
+-- a compiler at all (@named@). A named compiler resolving outside the env is a
+-- foreign compiler, and an env copy losing the PATH race is shadowed: both are
+-- fixable by pointing at the env's tool. Neither holding means the env simply
+-- has no C compiler to point at -- conda ships compilers under target-prefixed
+-- names and reaches them only through @$CC@/@$CXX@, so an unset pair with no
+-- @bin/gcc@ means the toolchain activation never ran.
+compilerIncoherence :: Bool -> Bool -> Incoherence
+compilerIncoherence inEnv named
+  | inEnv || named = Shadowed
+  | otherwise = Unactivated
 
 -- | Is @child@ the same as, or nested under, @parent@? Both are expected to be
 -- absolute, normalized paths. The trailing-separator comparison avoids matching
