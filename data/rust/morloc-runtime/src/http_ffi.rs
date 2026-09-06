@@ -408,8 +408,6 @@ pub unsafe extern "C" fn http_to_daemon_request(
     if method == HttpMethod::Post && path == "/eval" {
         (*dreq).method = DaemonMethod::Eval;
         if let Some(expr) = extract_json_string(body_str, "expr") {
-            (*dreq).expr = libc::strdup(expr.as_ptr() as *const c_char);
-            // strdup from Rust string - need null terminated
             let c = std::ffi::CString::new(expr).unwrap_or_default();
             (*dreq).expr = libc::strdup(c.as_ptr());
         }
