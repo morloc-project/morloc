@@ -1029,7 +1029,12 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
     // `morloc eval`/`typecheck` take a script file by default; the daemon
     // always supplies an inline expression, so pass `-e`.
     let dash_e = CString::new("-e").unwrap();
-    let policy = eval_policy_args();
+    // The sandbox policy belongs to `eval`, which compiles AND RUNS the
+    // caller's expression. `typecheck` infers a type and stops -- it
+    // executes nothing and reads no sourced files -- and its parser
+    // rejects these flags outright, so handing them over turned every
+    // typecheck into an argument error before it ever saw the expression.
+    let policy = if subcmd == "eval" { eval_policy_args() } else { Vec::new() };
     let rts = eval_rts_args();
     // argv: morloc +RTS <heap> -RTS <subcmd> -e <policy...> <expr> NULL. Policy
     // flags precede the expr positional so the positional is never read as a
