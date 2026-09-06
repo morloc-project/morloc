@@ -1,3 +1,9 @@
+Unreleased
+----------
+
+ - a serve refuses to start when a module's pools cannot run, naming the module
+   and what is missing, instead of reporting healthy and failing every call
+
 0.101.0 [2026-09-05]
 --------------------
 

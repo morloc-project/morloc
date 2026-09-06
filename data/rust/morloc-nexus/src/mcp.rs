@@ -1546,27 +1546,70 @@ impl Frontend {
     }
 }
 
+/// Check that a served module's pools can actually be spawned: every pool file
+/// present, every interpreter on PATH.
+///
+/// Pool `exec` paths are stored relative to the manifest's own directory, so
+/// they are resolved against it first -- the same resolution the child daemon
+/// performs when it spawns them, and what makes the file check meaningful for a
+/// module installed under the program database.
+fn validate_served_pools(manifest: &Manifest, manifest_path: &str) -> Result<(), String> {
+    let dir = std::path::Path::new(manifest_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let resolved: Vec<morloc_manifest::Pool> = manifest
+        .pools
+        .iter()
+        .map(|pool| {
+            let mut pool = pool.clone();
+            if let Some(last) = pool.exec.last_mut() {
+                if std::path::Path::new(last).is_relative() {
+                    *last = dir.join(&*last).to_string_lossy().into_owned();
+                }
+            }
+            pool
+        })
+        .collect();
+    process::validate_pools(&resolved)
+}
+
 /// Serve a set of modules over one HTTP listener with MCP + API adapters,
 /// forwarding to the supervisor's per-module children. Never returns.
 pub fn serve_frontend(router: *mut c_void, fdb: &str, config: &crate::dispatch::NexusConfig) -> ! {
     // Load and parse each served program's manifest once (union of adapters);
     // both the MCP tool surface and the API discovery view derive from it.
+    //
+    // The declared set is served completely or not at all. Every module here was
+    // named explicitly, so one that cannot answer is a broken contract, not a
+    // degraded service: skipping it would leave the listener reporting healthy
+    // and advertising a surface it cannot serve, and the caller would learn of it
+    // one failed request at a time.
     let mut manifests: HashMap<String, Manifest> = HashMap::new();
     for m in &config.programs {
         let manifest_path = format!("{}/{}/{}-build/manifest.json", fdb, m, m);
         let payload = match crate::manifest::read_manifest_payload(&manifest_path) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("morloc serve: skipping module '{}': {}", m, e);
-                continue;
+                eprintln!("morloc serve: cannot serve module '{}': {}", m, e);
+                process::clean_exit(1);
             }
         };
-        match crate::manifest::parse_manifest(&payload) {
-            Ok(mf) => {
-                manifests.insert(m.clone(), mf);
+        let mf = match crate::manifest::parse_manifest(&payload) {
+            Ok(mf) => mf,
+            Err(e) => {
+                eprintln!("morloc serve: cannot serve module '{}': {}", m, e);
+                process::clean_exit(1);
             }
-            Err(e) => eprintln!("morloc serve: skipping module '{}': {}", m, e),
+        };
+        // Pools are checked HERE, at startup, not when a request first arrives.
+        // A module's child daemon is spawned lazily, so its own pool check would
+        // otherwise run behind a listener that has already answered `/health` and
+        // published the module's tools.
+        if let Err(e) = validate_served_pools(&mf, &manifest_path) {
+            eprintln!("morloc serve: cannot serve module '{}': {}", m, e);
+            process::clean_exit(1);
         }
+        manifests.insert(m.clone(), mf);
     }
 
     // Build MCP tool shapes from each MCP module's manifest, namespaced.
@@ -2268,6 +2311,81 @@ mod tests {
             Value::Object(m) => m,
             _ => panic!("test args must be an object"),
         }
+    }
+
+    /// A one-pool manifest written into a fresh directory, returned with the
+    /// path to its `manifest.json`. The pool file is created so the check under
+    /// test is the interpreter, not the artifact.
+    fn manifest_with_pool(tag: &str, exec: &[&str], write_pool_file: bool) -> (String, String) {
+        let dir = std::env::temp_dir().join(format!(
+            "morloc-serve-pools-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(dir.join("pools/py")).unwrap();
+        if write_pool_file {
+            std::fs::write(dir.join("pools/py/pool.py"), "").unwrap();
+        }
+        let quoted: Vec<String> = exec.iter().map(|e| format!("\"{e}\"")).collect();
+        let manifest_path = dir.join("manifest.json");
+        std::fs::write(
+            &manifest_path,
+            format!(
+                r#"{{"name":"t","build":{{"path":".","time":0,"morloc_version":"{}"}},
+                    "pools":[{{"lang":"py","exec":[{}],"socket":"pipe-py"}}]}}"#,
+                env!("CARGO_PKG_VERSION"),
+                quoted.join(",")
+            ),
+        )
+        .unwrap();
+        (
+            dir.to_string_lossy().into_owned(),
+            manifest_path.to_string_lossy().into_owned(),
+        )
+    }
+
+    #[test]
+    fn a_served_module_with_no_interpreter_is_refused() {
+        // The failure this catches: the router answers /health and publishes the
+        // module's tools, then every call dies in the pool daemon it spawns.
+        let (dir, path) = manifest_with_pool(
+            "nointerp",
+            &["morloc-no-such-interpreter", "pools/py/pool.py"],
+            true,
+        );
+        let payload = morloc_manifest::read_manifest_payload(&path).unwrap();
+        let mf = morloc_manifest::parse_manifest(&payload).unwrap();
+        let err = validate_served_pools(&mf, &path).unwrap_err();
+        assert!(err.contains("morloc-no-such-interpreter"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_served_module_resolves_pool_files_against_its_manifest() {
+        // Pool paths are stored relative to the manifest, so a check run from any
+        // other working directory has to resolve them first or it reports every
+        // installed program as missing its artifacts.
+        let (dir, path) = manifest_with_pool("relative", &["/bin/sh", "pools/py/pool.py"], true);
+        let payload = morloc_manifest::read_manifest_payload(&path).unwrap();
+        let mf = morloc_manifest::parse_manifest(&payload).unwrap();
+        assert!(validate_served_pools(&mf, &path).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_served_module_missing_its_pool_file_is_refused() {
+        // The shape a truncated deployment artifact takes: the manifest travels,
+        // the pools do not.
+        let (dir, path) = manifest_with_pool("nopool", &["/bin/sh", "pools/py/pool.py"], false);
+        let payload = morloc_manifest::read_manifest_payload(&path).unwrap();
+        let mf = morloc_manifest::parse_manifest(&payload).unwrap();
+        let err = validate_served_pools(&mf, &path).unwrap_err();
+        assert!(err.contains("pool.py"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
