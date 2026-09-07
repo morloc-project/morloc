@@ -339,6 +339,25 @@ shm_count_for_pid() {
     ls -1 /dev/shm/mlc-${pidhex}-* 2>/dev/null | wc -l
 }
 
+# Resident set size of a process, in KB. `ps` rather than /proc so this also
+# answers on macOS. Reports 0 once the process is gone.
+rss_kb_for_pid() {
+    ps -o rss= -p "$1" 2>/dev/null | tr -d ' ' || echo 0
+}
+
+# Open file descriptors held by a process. /proc where it exists, lsof as a
+# fallback; prints "na" when neither can answer, which callers read as "do not
+# assert" rather than as zero.
+fd_count_for_pid() {
+    if [ -d "/proc/$1/fd" ]; then
+        ls -1 "/proc/$1/fd" 2>/dev/null | wc -l | tr -d ' '
+    elif command -v lsof >/dev/null 2>&1; then
+        lsof -p "$1" 2>/dev/null | wc -l | tr -d ' '
+    else
+        echo "na"
+    fi
+}
+
 # ======================================================================
 # Test selector
 # ======================================================================
@@ -1631,6 +1650,150 @@ print('true' if any(pools) else 'false')
     assert_test "health shows pools alive" "true" "$has_alive"
 
     stop_daemon "$LAST_DAEMON_PID"
+    echo ""
+fi
+
+# ======================================================================
+# Test Group 13b: Long-lived daemon under sustained load
+# ======================================================================
+#
+# Morloc daemons back long-running applications, so the interesting
+# question is not whether one request works but whether the ten-thousandth
+# does, while others are in flight, after a pool has died and been rebuilt
+# underneath them.
+#
+# Requests ride persistent connections driven by soak-client.py rather than
+# a process per call. That is how a real client behaves, it is the only
+# coverage the keep-alive path gets, and it is what makes a few thousand
+# requests affordable here.
+#
+# The correctness assertion is the point of the group: every response is
+# checked against a value derived from that request's own argument, so a
+# worker handing a result to the wrong caller fails rather than passing by
+# coincidence. A silent stderr is asserted for the same reason -- the
+# runtime reports shared-memory accounting faults there and nothing else in
+# the suite reads it, so a daemon can print a thousand refcount errors while
+# every other assertion passes.
+
+if should_run "soak"; then
+    echo "${BOLD}[soak] Long-lived daemon under sustained load${RESET}"
+
+    SOAK_DIR=$(mktemp -d)
+    WORK_DIRS+=("$SOAK_DIR")
+    cp "$SCRIPT_DIR/soak.loc" "$SOAK_DIR/"
+    if ! (cd "$SOAK_DIR" && morloc make -o nexus soak.loc \
+            > /dev/null 2>"$SOAK_DIR/build.err"); then
+        echo "  COMPILE FAIL: soak.loc"
+        cat "$SOAK_DIR/build.err"
+        TOTAL=$((TOTAL + 1))
+        FAILED=$((FAILED + 1))
+        FAILURES+=("soak: compilation failed")
+    else
+        SOAK_PORT=$(pick_port)
+        SOAK_LOG="$SOAK_DIR/daemon.log"
+        (cd "$SOAK_DIR" && exec morloc-nexus daemon ./nexus \
+            --http-port "$SOAK_PORT" 2>"$SOAK_LOG") &
+        SOAK_PID=$!
+        DAEMON_PIDS+=("$SOAK_PID")
+        wait_for_http "$SOAK_PORT" 15 || true
+
+        # Warm-up: spawn every pool and take whatever one-off shared memory
+        # and descriptors the daemon allocates lazily, so the baseline below
+        # measures steady state rather than start-up.
+        curl -s -o /dev/null --max-time 30 -X POST \
+            "http://127.0.0.1:${SOAK_PORT}/call/square" \
+            -H "Content-Type: application/json" -d '[3]'
+        curl -s -o /dev/null --max-time 30 -X POST \
+            "http://127.0.0.1:${SOAK_PORT}/call/echoList" \
+            -H "Content-Type: application/json" -d '[]'
+
+        base_shm=$(shm_size_for_pid "$SOAK_PID")
+        base_rss=$(rss_kb_for_pid "$SOAK_PID")
+        base_fds=$(fd_count_for_pid "$SOAK_PID")
+
+        # One connection, in series: the baseline every later phase is
+        # compared against. A failure here is not a concurrency bug.
+        seq_out=$(python3 "$SCRIPT_DIR/soak-client.py" "$SOAK_PORT" seq \
+            --requests 150 2>&1) && seq_rc=0 || seq_rc=$?
+        assert_test "sequential requests all correct" "0" "$seq_rc"
+
+        # Many connections at once. This is where a result handed to the
+        # wrong caller, or a block of shared memory recycled while still in
+        # use, shows up.
+        conc_out=$(python3 "$SCRIPT_DIR/soak-client.py" "$SOAK_PORT" conc \
+            --workers 8 --requests 60 2>&1) && conc_rc=0 || conc_rc=$?
+        assert_test "concurrent requests all correct" "0" "$conc_rc"
+        if [ "$conc_rc" != "0" ]; then
+            echo "      $conc_out"
+        fi
+
+        # Kill the pools mid-flight and keep the load on. Every request must
+        # still end up with the right answer; the client retries a rebuild in
+        # progress but never accepts a wrong or missing result.
+        soak_pools=$(pgrep -P "$SOAK_PID" 2>/dev/null) || soak_pools=""
+        for p in $soak_pools; do kill -9 "$p" 2>/dev/null || true; done
+        crash_out=$(python3 "$SCRIPT_DIR/soak-client.py" "$SOAK_PORT" conc \
+            --workers 4 --requests 40 2>&1) && crash_rc=0 || crash_rc=$?
+        assert_test "requests correct across a pool crash" "0" "$crash_rc"
+        if [ "$crash_rc" != "0" ]; then
+            echo "      $crash_out"
+        fi
+
+        after_shm=$(shm_size_for_pid "$SOAK_PID")
+        after_rss=$(rss_kb_for_pid "$SOAK_PID")
+        after_fds=$(fd_count_for_pid "$SOAK_PID")
+
+        # Shared memory is reused, not accumulated. The recovery above drops
+        # the whole namespace and builds a new one, so this compares steady
+        # state to steady state rather than tracking a single volume.
+        shm_delta=$((after_shm - base_shm))
+        assert_test "shared memory does not accumulate" "yes" \
+            "$([ "$shm_delta" -lt $((256 * 1024)) ] && echo yes || echo no)"
+        echo "      shm delta=${shm_delta} B  rss ${base_rss}->${after_rss} KB  fds ${base_fds}->${after_fds}"
+
+        # A daemon that grows a few hundred KB per thousand requests is a
+        # daemon that dies overnight. The bound is generous because an
+        # allocator is free to keep arenas warm; it is there to catch growth
+        # proportional to the request count.
+        rss_delta=$((after_rss - base_rss))
+        assert_test "daemon memory does not grow with traffic" "yes" \
+            "$([ "$rss_delta" -lt 65536 ] && echo yes || echo no)"
+
+        # Descriptors are the other resource a long-lived server runs out
+        # of. Recovery re-opens pool sockets, so a small delta is expected
+        # and only unbounded growth is a fault.
+        if [ "$base_fds" != "na" ] && [ "$after_fds" != "na" ]; then
+            fd_delta=$((after_fds - base_fds))
+            assert_test "descriptors do not accumulate" "yes" \
+                "$([ "$fd_delta" -lt 16 ] && echo yes || echo no)"
+        fi
+
+        # The runtime reports shared-memory accounting faults on stderr and
+        # keeps serving, so without this a corrupted daemon passes every
+        # other assertion in this suite.
+        # Everything this daemon is expected to say, enumerated rather than
+        # matched loosely: the crash narration is only there because the
+        # crash above was deliberate, and a pattern broad enough to cover it
+        # would also cover the faults this assertion exists to catch.
+        soak_noise=$(grep -vE \
+            -e '^morloc-daemon: listening ' \
+            -e '^morloc daemon: pool crash detected' \
+            -e '^ *pool [0-9]+: Pool process crashed with signal ' \
+            -e '^morloc daemon: recovery complete ' \
+            "$SOAK_LOG" 2>/dev/null | grep -c .) || soak_noise=0
+        assert_test "daemon logged nothing unexpected" "0" "$soak_noise"
+        if [ "$soak_noise" != "0" ]; then
+            echo "      $(head -c 400 "$SOAK_LOG")"
+        fi
+
+        # Still a working daemon at the end of all that.
+        final_status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 \
+            "http://127.0.0.1:${SOAK_PORT}/health")
+        assert_test "still serving after the soak" "200" "$final_status"
+
+        stop_daemon "$SOAK_PID"
+    fi
+
     echo ""
 fi
 
