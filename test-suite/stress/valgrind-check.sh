@@ -18,6 +18,15 @@ if ! command -v valgrind &>/dev/null; then
     exit 0
 fi
 
+# Present is not the same as usable. Valgrind needs the dynamic linker's
+# symbols, so a machine with a stripped ld.so and no glibc debuginfo has a
+# valgrind that refuses to start anything. Find that out on `true` rather
+# than by mistaking it for a leak in the nexus.
+if ! valgrind --error-exitcode=0 true >/dev/null 2>&1; then
+    echo "SKIP: valgrind cannot run here (usually missing glibc debuginfo)"
+    exit 0
+fi
+
 compile_workload
 
 VALGRIND_LOG="/tmp/morloc-valgrind-$$.log"
@@ -25,28 +34,40 @@ VALGRIND_LOG="/tmp/morloc-valgrind-$$.log"
 # Use first call only for valgrind (deterministic)
 CALL="${CALLS[0]}"
 
-# The nexus file may be a shell wrapper (#!/bin/sh + exec morloc-nexus "$0" "$@").
-# Valgrind can't instrument through exec, so unwrap to call morloc-nexus directly.
+# The nexus file is a shell wrapper that execs the shared morloc-nexus binary
+# against the program's manifest. Valgrind cannot instrument through the exec,
+# so run that binary directly. The wrapper names its manifest on a marker line
+# for exactly this purpose; the build directory is keyed on the program name,
+# so it must be read rather than assumed.
 if head -1 ./nexus | grep -q '^#!'; then
-    NEXUS_BIN=$(sed -n '2s/^exec \([^ ]*\) .*/\1/p' ./nexus)
-    if [ -z "$NEXUS_BIN" ] || ! command -v "$NEXUS_BIN" &>/dev/null; then
-        echo "FAIL: Cannot find morloc-nexus binary from nexus wrapper"
+    NEXUS_BIN=$(command -v morloc-nexus 2>/dev/null)
+    MANIFEST=$(sed -n 's/^# morloc-manifest: //p' ./nexus | head -1)
+    if [ -z "$NEXUS_BIN" ]; then
+        echo "FAIL: morloc-nexus is not on PATH"
         exit 1
     fi
-    VALGRIND_CMD="$NEXUS_BIN ./nexus $CALL"
+    if [ -z "$MANIFEST" ] || [ ! -f "$MANIFEST" ]; then
+        echo "FAIL: nexus wrapper names no readable manifest (got '$MANIFEST')"
+        exit 1
+    fi
+    VALGRIND_CMD="$NEXUS_BIN run $PWD/$MANIFEST $CALL"
 else
     VALGRIND_CMD="./nexus $CALL"
 fi
 
 echo "Running under valgrind: $VALGRIND_CMD"
 NEXUS_ERR="$WORK_DIR/valgrind-nexus.err"
+# `|| EXIT_CODE=$?` is load-bearing: common.sh sets -e, so without it a
+# non-zero valgrind exit kills this script before the status can be read,
+# and every check below -- including the timeout branch -- becomes
+# unreachable. The run would then fail with no verdict and no reason.
+EXIT_CODE=0
 eval timeout 60 valgrind \
     --leak-check=full \
     --show-leak-kinds=definite,indirect \
     --track-fds=yes \
     --log-file="$VALGRIND_LOG" \
-    $VALGRIND_CMD > /dev/null 2>"$NEXUS_ERR"
-EXIT_CODE=$?
+    $VALGRIND_CMD > /dev/null 2>"$NEXUS_ERR" || EXIT_CODE=$?
 
 # Log any nexus/valgrind stderr
 if [ -s "$NEXUS_ERR" ]; then
