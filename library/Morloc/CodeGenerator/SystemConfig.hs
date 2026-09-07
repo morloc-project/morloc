@@ -30,12 +30,13 @@ import Morloc.Module (OverwriteProtocol (..))
 import qualified Data.List as DL
 import qualified Data.Text.IO as TIO
 
-import Control.Exception (SomeException, catch, displayException, fromException, try)
+import Control.Exception (SomeException, catch, displayException, fromException, onException, try)
 import System.IO.Error (ioeGetErrorString)
-import System.Directory (canonicalizePath, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, findExecutable, getHomeDirectory, pathIsSymbolicLink, removeDirectoryRecursive, removeFile)
+import System.Directory (canonicalizePath, copyFile, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, findExecutable, getHomeDirectory, pathIsSymbolicLink, removeDirectoryRecursive, removeFile, renameFile)
 import System.Environment (lookupEnv, setEnv)
-import System.FilePath (takeDirectory)
-import System.IO (hIsTerminalDevice, hPutStrLn, stderr)
+import System.FilePath (takeDirectory, takeFileName)
+import System.IO (IOMode (ReadWriteMode), hClose, hIsTerminalDevice, hPutStrLn, openTempFile, stderr, withFile)
+import GHC.IO.Handle.Lock (LockMode (ExclusiveLock), hLock, hTryLock)
 import System.Exit (ExitCode(..))
 import System.Process (CreateProcess(..), StdStream(..), createProcess, proc, readProcessWithExitCode, waitForProcess)
 
@@ -44,7 +45,9 @@ configure _ = return ()
 
 configureAll :: Bool -> OverwriteProtocol -> Bool -> Bool -> Config -> IO Bool
 configureAll verbose force slurmSupport sanitize config = do
-  result <- try (configureAllSteps verbose force slurmSupport sanitize config) :: IO (Either SomeException ())
+  result <- try (withInitLock verbose (configHome config)
+                   (configureAllSteps verbose force slurmSupport sanitize config))
+              :: IO (Either SomeException ())
   case result of
     Left e -> do
       -- Strip the "user error (...)" wrapper from IOError messages
@@ -54,6 +57,24 @@ configureAll verbose force slurmSupport sanitize config = do
       sayError $ "Configuration failed: " ++ msg
       return False
     Right _ -> return True
+
+-- | Serialize this @morloc init@ against any other sharing the same
+-- @MORLOC_HOME@. Init is an install: it removes and rewrites artifacts at
+-- fixed shared paths, so two concurrent runs interleave destructive steps and
+-- one fails on a file the other has already deleted. An advisory lock on the
+-- home directory makes the second run wait and then take its own pass. The
+-- lock lives in an open descriptor rather than the filesystem, so it is
+-- released even if the process is killed, leaving nothing stale to clear by
+-- hand.
+withInitLock :: Bool -> FilePath -> IO a -> IO a
+withInitLock verbose homeDir act = do
+  createDirectoryIfMissing True homeDir
+  withFile (homeDir </> ".init.lock") ReadWriteMode $ \h -> do
+    held <- hTryLock h ExclusiveLock
+    unless held $ do
+      sayInfo verbose "Waiting for another morloc init to finish"
+      hLock h ExclusiveLock
+    act
 
 configureAllSteps :: Bool -> OverwriteProtocol -> Bool -> Bool -> Config -> IO ()
 configureAllSteps verbose force slurmSupport sanitize config = do
@@ -352,17 +373,15 @@ provisionRustRuntime verbose config homeDir soPath nexusBinPath = do
       -- Link with $CC when set (conda toolchain) so the runtime and the shims
       -- that link it share one compiler/libc world; fall back to gcc.
       cc <- resolveToolName "gcc"
-      run verbose cc
-        [ "-shared", "-o", soPath
-        , "-Wl,--whole-archive", rustStaticLib, "-Wl,--no-whole-archive"
-        , "-lpthread", "-lrt", "-ldl", "-lm"
-        ]
-      case hasStrip of
-        Just stripPath -> run verbose stripPath [soPath]
-        Nothing -> return ()
+      stageInstall verbose hasStrip soPath $ \tmp ->
+        run verbose cc
+          [ "-shared", "-o", tmp
+          , "-Wl,--whole-archive", rustStaticLib, "-Wl,--no-whole-archive"
+          , "-lpthread", "-lrt", "-ldl", "-lm"
+          ]
     P.Darwin -> do
       let rustCdylib = rustBuildDir </> "release" </> "libmorloc_runtime.dylib"
-      run verbose "cp" [rustCdylib, soPath]
+      stageInstall verbose Nothing soPath $ \tmp -> copyFile rustCdylib tmp
 
   sayInfo verbose "Compiling morloc-nexus (Rust)"
   run verbose "cargo"
@@ -372,10 +391,7 @@ provisionRustRuntime verbose config homeDir soPath nexusBinPath = do
     , "--target-dir", rustBuildDir
     ]
   let rustNexus = rustBuildDir </> "release" </> "morloc-nexus"
-  run verbose "cp" [rustNexus, nexusBinPath]
-  case hasStrip of
-    Just stripPath -> run verbose stripPath [nexusBinPath]
-    Nothing -> return ()
+  stageInstall verbose hasStrip nexusBinPath $ \tmp -> copyFile rustNexus tmp
 
   -- Persist the Rust workspace SOURCE at $MORLOC_HOME/rust and warm the shared
   -- pool build cache. A Rust pool is now a real Cargo project (Members/Rust.hs)
@@ -454,6 +470,29 @@ sayError message = do
 optionalStep :: String -> IO () -> IO ()
 optionalStep prefix act =
   act `catch` \(e :: IOError) -> sayWarning (prefix <> displayException e)
+
+-- | Build an artifact at a unique temporary path beside @dst@, optionally
+-- strip it there, then rename it onto @dst@. @rename(2)@ is atomic within a
+-- directory, so a concurrent @morloc init@ -- or any process loading the
+-- artifact -- sees either the previous file or the complete new one, never a
+-- half-written or half-stripped binary. Stripping in place is what makes the
+-- naive sequence unsafe: the window between copy and strip is long enough for
+-- a second builder to strip a file the first is still writing.
+stageInstall :: Bool -> Maybe FilePath -> FilePath -> (FilePath -> IO ()) -> IO ()
+stageInstall verbose mstrip dst produce = do
+  (tmp, h) <- openTempFile (takeDirectory dst) (takeFileName dst <> ".tmp")
+  hClose h
+  -- Reserve the name but let the producer create the file itself, so the
+  -- artifact lands with the mode the linker or copy would normally give it
+  -- rather than openTempFile's 0600.
+  removeFile tmp
+  let cleanup = removeFile tmp `catch` \(_ :: IOError) -> return ()
+  flip onException cleanup $ do
+    produce tmp
+    case mstrip of
+      Just stripPath -> run verbose stripPath [tmp]
+      Nothing -> return ()
+    renameFile tmp dst
 
 run :: Bool -> String -> [String] -> IO ()
 run verbose cmd args = do
