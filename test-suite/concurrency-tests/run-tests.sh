@@ -10,6 +10,18 @@
 
 set -euo pipefail
 
+# Milliseconds since the epoch. GNU date has %N; BSD date, which is what
+# macOS ships, does not -- it emits a literal N that then poisons the
+# arithmetic it feeds ("value too great for base") and, under errexit,
+# takes the suite down before it runs anything. Probe once and fall back to
+# python3, which these suites already require.
+if [ "$(date +%N 2>/dev/null)" = "N" ]; then
+    now_ms() { python3 -c 'import time; print(int(time.time() * 1000))'; }
+else
+    now_ms() { echo $(( $(date +%s%N) / 1000000 )); }
+fi
+
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TIMEOUT=10
 
@@ -44,9 +56,9 @@ run_single_test() {
     printf "  %-35s " "$test_label"
 
     local output start_time elapsed rc
-    start_time=$(date +%s%N)
+    start_time=$(now_ms)
     output=$(cd "$work_dir" && timeout "$TIMEOUT" ./nexus "$subcommand" 2>&1) && rc=0 || rc=$?
-    elapsed=$(( ($(date +%s%N) - start_time) / 1000000 ))
+    elapsed=$(( $(now_ms) - start_time ))
 
     if [[ $rc -eq 0 ]]; then
         if (( elapsed >= 1000 )); then

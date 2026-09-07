@@ -16,6 +16,18 @@
 # Each tier tracks failures explicitly via OVERALL_FAIL / rc checks.
 set -uo pipefail
 
+# Milliseconds since the epoch. GNU date has %N; BSD date, which is what
+# macOS ships, does not -- it emits a literal N that then poisons the
+# arithmetic it feeds ("value too great for base") and, under errexit,
+# takes the suite down before it runs anything. Probe once and fall back to
+# python3, which these suites already require.
+if [ "$(date +%N 2>/dev/null)" = "N" ]; then
+    now_ms() { python3 -c 'import time; print(int(time.time() * 1000))'; }
+else
+    now_ms() { echo $(( $(date +%s%N) / 1000000 )); }
+fi
+
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR=$(mktemp -d -t morloc-packet-io.XXXXXX)
 PKT_DIR="$WORK_DIR/pkts"
@@ -56,7 +68,7 @@ time_call() {
     local label="$1"; shift
     local outfile="$1"; shift
     local start_ns end_ns wall_ms rc=0 size
-    start_ns=$(date +%s%N)
+    start_ns=$(now_ms)
     # `|| rc=$?` captures the exit code without bouncing off `set -e`
     # if the caller has it on.
     if [ "$outfile" = "-" ]; then
@@ -64,8 +76,8 @@ time_call() {
     else
         timeout "$TIMEOUT_LONG" "$@" > "$outfile" 2>>"$WORK_DIR/stderr.log" || rc=$?
     fi
-    end_ns=$(date +%s%N)
-    wall_ms=$(( (end_ns - start_ns) / 1000000 ))
+    end_ns=$(now_ms)
+    wall_ms=$(( end_ns - start_ns ))
     if [ "$outfile" = "-" ]; then
         size=0
     else
@@ -85,14 +97,14 @@ compile_workload() {
     pushd "$WORK_DIR" > /dev/null
     echo "Compiling workload (morloc make main.loc)..."
     local t0 t1
-    t0=$(date +%s%N)
+    t0=$(now_ms)
     if ! morloc make -o nexus main.loc 2>"$WORK_DIR/build.err"; then
         echo "FAIL: morloc make failed; see $WORK_DIR/build.err" >&2
         sed -n '1,40p' "$WORK_DIR/build.err" >&2
         popd > /dev/null
         return 1
     fi
-    t1=$(date +%s%N)
-    printf "  %-40s  %6d ms\n" "morloc make" "$(( (t1 - t0) / 1000000 ))"
+    t1=$(now_ms)
+    printf "  %-40s  %6d ms\n" "morloc make" "$(( t1 - t0 ))"
     popd > /dev/null
 }

@@ -48,10 +48,16 @@ FAIL=$OVERALL_FAIL
 # So we don't `cmp` the files directly -- the canonical check is the
 # semantic fingerprint diff below. Sizes should be in the same ballpark
 # though; print them for sanity.
-PY_Z0=$(stat -c '%s' "$PKT_DIR/py.z0.dat"  2>/dev/null || echo 0)
-CPP_Z0=$(stat -c '%s' "$PKT_DIR/cpp.z0.dat" 2>/dev/null || echo 0)
-PY_Z1=$(stat -c '%s' "$PKT_DIR/py.z1.dat"  2>/dev/null || echo 0)
-CPP_Z1=$(stat -c '%s' "$PKT_DIR/cpp.z1.dat" 2>/dev/null || echo 0)
+# `wc -c` rather than `stat`, whose size flag differs between GNU (-c %s)
+# and BSD (-f %z). The BSD form failing here would not have been noticed:
+# every size falls back to 0, all four compare equal, and the check reports
+# MATCH having measured nothing.
+file_size() { wc -c < "$1" 2>/dev/null | tr -d ' ' || echo 0; }
+PY_Z0=$(file_size "$PKT_DIR/py.z0.dat")
+CPP_Z0=$(file_size "$PKT_DIR/cpp.z0.dat")
+PY_Z1=$(file_size "$PKT_DIR/py.z1.dat")
+CPP_Z1=$(file_size "$PKT_DIR/cpp.z1.dat")
+: "${PY_Z0:=0}" "${CPP_Z0:=0}" "${PY_Z1:=0}" "${CPP_Z1:=0}"
 printf "  py.z0=%d  cpp.z0=%d  py.z1=%d  cpp.z1=%d\n" \
     "$PY_Z0" "$CPP_Z0" "$PY_Z1" "$CPP_Z1"
 if (( PY_Z0 != CPP_Z0 || PY_Z1 != CPP_Z1 )); then

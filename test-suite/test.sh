@@ -35,14 +35,20 @@ fi
 
 # name -> runner path. Order is cheapest/most-fundamental first.
 SUITE_NAMES=(typecheck-benchmark concurrency daemon packet-io stress expose)
-declare -A SUITE_RUNNER=(
-    [typecheck-benchmark]="typecheck-benchmark/run-benchmarks.sh"
-    [concurrency]="concurrency-tests/run-tests.sh"
-    [daemon]="daemon-tests/run-tests.sh"
-    [packet-io]="packet-io/run-all.sh"
-    [stress]="stress/run-all.sh"
-    [expose]="expose-tests/run-tests.sh"
-)
+# A case rather than an associative array. macOS ships bash 3.2, which has
+# none, and this has to run there: macOS is the platform continuous
+# integration exists to cover, since development happens on Linux.
+suite_runner() {
+    case "$1" in
+        typecheck-benchmark) echo "typecheck-benchmark/run-benchmarks.sh" ;;
+        concurrency)         echo "concurrency-tests/run-tests.sh" ;;
+        daemon)              echo "daemon-tests/run-tests.sh" ;;
+        packet-io)           echo "packet-io/run-all.sh" ;;
+        stress)              echo "stress/run-all.sh" ;;
+        expose)              echo "expose-tests/run-tests.sh" ;;
+        *)                   echo "" ;;
+    esac
+}
 
 # Sizing: short unless asked otherwise. Exported because each sub-suite reads
 # it for itself -- there is no single knob that means the same thing to a
@@ -69,7 +75,7 @@ fi
 PASSED=() FAILED=() MISSING=()
 
 for name in "${selected[@]}"; do
-    runner="${SUITE_RUNNER[$name]:-}"
+    runner=$(suite_runner "$name")
     if [[ -z "$runner" ]]; then
         echo "${RED}unknown suite: $name${RESET} (known: ${SUITE_NAMES[*]})"
         MISSING+=("$name")

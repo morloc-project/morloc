@@ -7,6 +7,18 @@
 
 set -u
 
+# Milliseconds since the epoch. GNU date has %N; BSD date, which is what
+# macOS ships, does not -- it emits a literal N that then poisons the
+# arithmetic it feeds ("value too great for base") and, under errexit,
+# takes the suite down before it runs anything. Probe once and fall back to
+# python3, which these suites already require.
+if [ "$(date +%N 2>/dev/null)" = "N" ]; then
+    now_ms() { python3 -c 'import time; print(int(time.time() * 1000))'; }
+else
+    now_ms() { echo $(( $(date +%s%N) / 1000000 )); }
+fi
+
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 TIERS=(
@@ -24,15 +36,15 @@ for tier in "${TIERS[@]}"; do
     echo "############################################################"
     echo "## $tier"
     echo "############################################################"
-    t0=$(date +%s%N)
+    t0=$(now_ms)
     if bash "$SCRIPT_DIR/$tier"; then
         rc=0
     else
         rc=$?
         OVERALL_RC=1
     fi
-    t1=$(date +%s%N)
-    wall=$(( (t1 - t0) / 1000000 ))
+    t1=$(now_ms)
+    wall=$(( t1 - t0 ))
     RESULTS+=("$(printf '%-30s  %7d ms  rc=%d' "$tier" "$wall" "$rc")")
 done
 

@@ -9,6 +9,18 @@ TIMEOUT=${1:-10}
 WARN_MS=${2:-500}
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Milliseconds since the epoch. GNU date has %N; BSD date, which is what
+# macOS ships, does not -- it emits a literal N that then poisons the
+# arithmetic it feeds ("value too great for base") and, under errexit,
+# takes the suite down before it runs anything. Probe once and fall back to
+# python3, which these suites already require.
+if [ "$(date +%N 2>/dev/null)" = "N" ]; then
+    now_ms() { python3 -c 'import time; print(int(time.time() * 1000))'; }
+else
+    now_ms() { echo $(( $(date +%s%N) / 1000000 )); }
+fi
+
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -23,11 +35,11 @@ printf "%-25s %10s %8s\n" "-------------------------" "----------" "--------"
 
 for loc_file in "$SCRIPT_DIR"/*.loc; do
     name=$(basename "$loc_file" .loc)
-    start_ns=$(date +%s%N)
+    start_ns=$(now_ms)
     timeout "$TIMEOUT" morloc typecheck "$loc_file" > /dev/null 2>&1
     exit_code=$?
-    end_ns=$(date +%s%N)
-    diff_ms=$(( (end_ns - start_ns) / 1000000 ))
+    end_ns=$(now_ms)
+    diff_ms=$(( end_ns - start_ns ))
 
     if [ $exit_code -eq 124 ]; then
         color="$RED"

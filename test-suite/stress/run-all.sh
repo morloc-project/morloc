@@ -7,26 +7,41 @@
 
 set -euo pipefail
 
+# Milliseconds since the epoch. GNU date has %N; BSD date, which is what
+# macOS ships, does not -- it emits a literal N that then poisons the
+# arithmetic it feeds ("value too great for base") and, under errexit,
+# takes the suite down before it runs anything. Probe once and fall back to
+# python3, which these suites already require.
+if [ "$(date +%N 2>/dev/null)" = "N" ]; then
+    now_ms() { python3 -c 'import time; print(int(time.time() * 1000))'; }
+else
+    now_ms() { echo $(( $(date +%s%N) / 1000000 )); }
+fi
+
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GOLDEN="$SCRIPT_DIR/../golden-tests"
 
 # Workloads: golden-test-dir + nexus calls
-declare -A WORKLOAD_DIR=(
-    [cpp]="$GOLDEN/argument-form-1-c"
-    [py]="$GOLDEN/argument-form-1-py"
-    [r]="$GOLDEN/argument-form-1-r"
-    [cpp-py]="$GOLDEN/interop-3a-cp"
-    [cpp-r]="$GOLDEN/interop-3a-rc"
-    [py-r]="$GOLDEN/interop-3a-pr"
-)
-declare -A WORKLOAD_CALL=(
-    [cpp]="foo 2"
-    [py]="foo 2"
-    [r]="foo 2"
-    [cpp-py]="foo '[1,2,3]'"
-    [cpp-r]="foo '[1,2,3]'"
-    [py-r]="foo '[1,2,3]'"
-)
+# Cases rather than associative arrays: macOS ships bash 3.2, which has none.
+workload_dir() {
+    case "$1" in
+        cpp)    echo "$GOLDEN/argument-form-1-c" ;;
+        py)     echo "$GOLDEN/argument-form-1-py" ;;
+        r)      echo "$GOLDEN/argument-form-1-r" ;;
+        cpp-py) echo "$GOLDEN/interop-3a-cp" ;;
+        cpp-r)  echo "$GOLDEN/interop-3a-rc" ;;
+        py-r)   echo "$GOLDEN/interop-3a-pr" ;;
+        *)      echo "" ;;
+    esac
+}
+workload_call() {
+    case "$1" in
+        cpp|py|r)             echo "foo 2" ;;
+        cpp-py|cpp-r|py-r)    echo "foo '[1,2,3]'" ;;
+        *)                    echo "" ;;
+    esac
+}
 
 WORKLOAD_ORDER=(cpp py r cpp-py cpp-r py-r)
 
@@ -38,7 +53,7 @@ WORKLOAD_ORDER=(cpp py r cpp-py cpp-r py-r)
 if [[ -n "${MORLOC_STRESS_WORKLOADS:-}" ]]; then
     read -r -a WORKLOAD_ORDER <<< "$MORLOC_STRESS_WORKLOADS"
     for w in "${WORKLOAD_ORDER[@]}"; do
-        if [[ -z "${WORKLOAD_DIR[$w]:-}" ]]; then
+        if [[ -z "$(workload_dir "$w")" ]]; then
             echo "unknown workload: $w (known: cpp py r cpp-py cpp-r py-r)" >&2
             exit 2
         fi
@@ -61,15 +76,16 @@ run_test() {
     local test_script="$1"
     local test_name="$2"
     local workload="$3"
-    local dir="${WORKLOAD_DIR[$workload]}"
-    local call="${WORKLOAD_CALL[$workload]}"
+    local dir call
+    dir=$(workload_dir "$workload")
+    call=$(workload_call "$workload")
 
     printf "%-20s %-8s ... " "$test_name" "[$workload]"
 
     local output start_time elapsed
-    start_time=$(date +%s%N)
+    start_time=$(now_ms)
     if output=$("$SCRIPT_DIR/$test_script" "$dir" "$call" 2>&1); then
-        elapsed=$(( ($(date +%s%N) - start_time) / 1000000 ))
+        elapsed=$(( $(now_ms) - start_time ))
         if (( elapsed >= 1000 )); then
             printf "%sPASS%s (%d.%01ds)\n" "$GREEN" "$RESET" "$((elapsed/1000))" "$(( (elapsed%1000) / 100 ))"
         else
@@ -77,7 +93,7 @@ run_test() {
         fi
         PASSED=$((PASSED + 1))
     else
-        elapsed=$(( ($(date +%s%N) - start_time) / 1000000 ))
+        elapsed=$(( $(now_ms) - start_time ))
         local last_line
         last_line=$(echo "$output" | tail -1)
         if [[ "$last_line" == SKIP* ]]; then

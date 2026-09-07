@@ -66,7 +66,9 @@ compile_workload() {
 
     # Extract the morloc source file from the Makefile
     local loc_file
-    loc_file=$(grep 'morloc make' "$TEST_DIR/Makefile" | head -1 | grep -oP '[^ ]+\.loc')
+    # -E, not -P: perl expressions are a GNU extension and macOS grep has
+    # no such flag. The pattern needs nothing beyond POSIX.
+    loc_file=$(grep 'morloc make' "$TEST_DIR/Makefile" | head -1 | grep -oE '[^ ]+\.loc')
 
     cp "$TEST_DIR"/*.loc "$WORK_DIR"/ 2>/dev/null || true
     cp "$TEST_DIR"/*.py "$WORK_DIR"/ 2>/dev/null || true
