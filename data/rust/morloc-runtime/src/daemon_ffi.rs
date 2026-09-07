@@ -1392,6 +1392,39 @@ unsafe fn emit_raw_media(
     (*resp).mime = libc::strdup(mime);
 }
 
+/// Take a reference on a result packet's shared-memory block, if it has one,
+/// and record it in the active eval arena so it is released when the request
+/// ends.
+///
+/// A packet whose payload is inline carries no block and needs nothing. One
+/// that points into shared memory is owned by the pool that produced it, and
+/// that pool frees it at the head of its next dispatch -- soon enough to
+/// matter when requests overlap.
+///
+/// # Safety
+/// `packet` must be a well-formed morloc packet.
+unsafe fn adopt_rptr_result(packet: *const u8) {
+    use crate::packet::{PacketHeader, PACKET_SOURCE_RPTR};
+    use crate::shm::RelPtr;
+    if packet.is_null() {
+        return;
+    }
+    let header = packet as *const PacketHeader;
+    if (*header).command.data.source != PACKET_SOURCE_RPTR {
+        return;
+    }
+    let payload_start = 32 + (*header).offset as usize;
+    if ((*header).length as usize) < std::mem::size_of::<RelPtr>() {
+        return;
+    }
+    let relptr = *(packet.add(payload_start) as *const RelPtr);
+    if let Ok(abs) = crate::shm::rel2abs(relptr) {
+        if crate::shm::shincref(abs).is_ok() {
+            crate::eval_arena::record_if_active(abs);
+        }
+    }
+}
+
 // -- Dispatch -----------------------------------------------------------------
 
 #[no_mangle]
@@ -2050,6 +2083,21 @@ pub unsafe extern "C" fn daemon_dispatch(
                 (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                 (*resp).error = err;
             } else {
+                // Take a reference on a result that lives in shared memory,
+                // and hand it to the arena so it is released when this
+                // request ends.
+                //
+                // Without this the block is read while nothing holds it on
+                // this side: the pool that produced it keeps it only until
+                // its own next dispatch, and with several requests in flight
+                // that dispatch can arrive while this one is still reading.
+                // What comes back is then a prefix of the right answer
+                // followed by zeros, because releasing a block scrubs it.
+                // The pools already do exactly this to each other -- a pool
+                // receiving another pool's result increfs it and tracks it --
+                // and the daemon was the one consumer that did not.
+                adopt_rptr_result(result_packet);
+
                 let packet_error =
                     get_morloc_data_packet_error_message(result_packet, &mut err);
                 if !packet_error.is_null() {
