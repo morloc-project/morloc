@@ -226,14 +226,28 @@ concurrentStressTest wl getWorkDir = testCase "concurrent" $ do
           )
           [1 .. conc :: Int]
       threadDelay 50000 -- 50ms between rounds
-      cur <- takeSnapshot
-      let leaked = rsShm cur - rsShm before0 > 0 || rsTmp cur - rsTmp before0 > 0
+      leaked <- stillElevated before0
       goRounds
         wd
         (if leaked then leakR + 1 else leakR)
         (remaining - 1)
         conc
         before0
+
+    -- A round counts against us only if its resources are STILL elevated
+    -- after a settle. Tearing down ten one-shot runs is not instantaneous,
+    -- and the R pool takes far longer over it than the others; a segment
+    -- still held by a process on its way out is not a leak. A leak is one
+    -- that does not go away, so wait to see whether it does.
+    stillElevated before0 = go (10 :: Int)
+      where
+        go :: Int -> IO Bool
+        go 0 = return True
+        go n = do
+          cur <- takeSnapshot
+          if rsShm cur - rsShm before0 > 0 || rsTmp cur - rsTmp before0 > 0
+            then threadDelay 100000 >> go (n - 1)
+            else return False
 
 -- ======================================================================
 -- Crash recovery: 10 concurrent crash-and-recover cycles
