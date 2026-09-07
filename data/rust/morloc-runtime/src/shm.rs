@@ -985,6 +985,25 @@ pub fn shincref(ptr: AbsPtr) -> Result<(), MorlocError> {
     Ok(())
 }
 
+/// Current reference count of a shared memory block, or `None` when
+/// `ptr` is null or the header magic does not validate. A count of 0
+/// means the block is free and its bytes have been scrubbed.
+pub fn reference_count(ptr: AbsPtr) -> Option<u32> {
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: as in `shincref` -- shmalloc places a BlockHeader
+    // immediately before the returned pointer; the magic check
+    // validates that this pointer actually sits at a block start.
+    let blk = unsafe {
+        &*(ptr.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader)
+    };
+    if blk.magic != BLK_MAGIC {
+        return None;
+    }
+    Some(blk.reference_count.load(Ordering::Acquire))
+}
+
 /// Return the allocation size of an SHM block, in O(1), reading the
 /// `BlockHeader` placed immediately before `ptr` by `shmalloc`.
 ///

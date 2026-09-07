@@ -1224,6 +1224,19 @@ pub(crate) fn allocate_slot_cas() -> Result<(usize, &'static RegistrySlot), Morl
 /// subpacket_entries array that the slot referenced. The caller must
 /// already have done any kind-specific finalisation (e.g. write final
 /// footer for OStream).
+/// Transfer a freshly allocated block to the registry. The slot owns it
+/// from here: its lifetime is the slot's, which spans dispatches and can
+/// be shared across processes, so it must not be released when the
+/// allocating eval scope exits. Returns the relptr for assignment.
+fn slot_owns(rel: RelPtr) -> RelPtr {
+    if rel != shm_types_crate::RELNULL {
+        if let Ok(abs) = crate::shm::rel2abs(rel) {
+            crate::eval_arena::forget_if_active(abs);
+        }
+    }
+    rel
+}
+
 fn release_slot_locked(slot: &RegistrySlot) {
     use std::sync::atomic::Ordering;
 
@@ -1463,11 +1476,11 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
         unsafe {
             let mp = slot as *const RegistrySlot as *mut RegistrySlot;
             (*mp).kind = MLC_KIND_IFILE;
-            (*mp).file_path = path_rel;
+            (*mp).file_path = slot_owns(path_rel);
             (*mp).file_path_len = path.len() as u32;
-            (*mp).schema_str = schema_rel;
+            (*mp).schema_str = slot_owns(schema_rel);
             (*mp).schema_str_len = parsed.schema_str.len() as u32;
-            (*mp).subpacket_entries = idx_rel;
+            (*mp).subpacket_entries = slot_owns(idx_rel);
             (*mp).subpacket_entries_len = parsed.subpacket_entries.len() as u64;
             // IFile's sub-packet entry array is immutable -- set once
             // from the parsed final footer and never grown. cap = 0
@@ -1583,9 +1596,9 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
         unsafe {
             let mp = slot as *const RegistrySlot as *mut RegistrySlot;
             (*mp).kind = MLC_KIND_ISTREAM;
-            (*mp).file_path = path_rel;
+            (*mp).file_path = slot_owns(path_rel);
             (*mp).file_path_len = path.len() as u32;
-            (*mp).schema_str = schema_rel;
+            (*mp).schema_str = slot_owns(schema_rel);
             (*mp).schema_str_len = parsed.schema_str.len() as u32;
             (*mp).subpacket_entries = shm_types_crate::RELNULL;
             (*mp).subpacket_entries_len = 0;
@@ -1851,11 +1864,11 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
             (*mp).kind = kind;
             (*mp).is_stdio = 1;
             (*mp).stdio_kind = stdio_kind;
-            (*mp).file_path = path_rel;
+            (*mp).file_path = slot_owns(path_rel);
             (*mp).file_path_len = sentinel.len() as u32;
-            (*mp).schema_str = schema_rel;
+            (*mp).schema_str = slot_owns(schema_rel);
             (*mp).schema_str_len = schema_str.len() as u32;
-            (*mp).subpacket_entries = idx_rel;
+            (*mp).subpacket_entries = slot_owns(idx_rel);
             (*mp).subpacket_entries_len = 0;
             (*mp).subpacket_entries_cap = idx_cap;
             (*mp).body_start = stdio_body_start;
@@ -1866,7 +1879,7 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
             (*mp).opener_pid = std::process::id();
             (*mp).opener_pid_start_time = read_pid_start_time();
             (*mp).diag = StreamDiag::new();
-            (*mp).write_buffer = buf_rel;
+            (*mp).write_buffer = slot_owns(buf_rel);
             (*mp).write_buffer_index_cap = 0;
             (*mp).write_buffer_index_count = 0;
             (*mp).write_buffer_data_used = 0;
@@ -2292,11 +2305,11 @@ pub fn shared_open_ostream_with_schema(
         unsafe {
             let mp = slot as *const RegistrySlot as *mut RegistrySlot;
             (*mp).kind = MLC_KIND_OSTREAM;
-            (*mp).file_path = path_rel;
+            (*mp).file_path = slot_owns(path_rel);
             (*mp).file_path_len = path.len() as u32;
-            (*mp).schema_str = schema_rel;
+            (*mp).schema_str = slot_owns(schema_rel);
             (*mp).schema_str_len = schema_str.len() as u32;
-            (*mp).subpacket_entries = idx_buf_rel;
+            (*mp).subpacket_entries = slot_owns(idx_buf_rel);
             (*mp).subpacket_entries_len = 0;
             (*mp).subpacket_entries_cap = idx_cap_initial;
             (*mp).body_start = body_start;
@@ -2310,7 +2323,7 @@ pub fn shared_open_ostream_with_schema(
             // Write buffer fields. index_cap is set lazily on first
             // @write -- elem_width isn't known until then since the
             // schema-string parse happens below.
-            (*mp).write_buffer = buf_rel;
+            (*mp).write_buffer = slot_owns(buf_rel);
             (*mp).write_buffer_index_cap = 0;
             (*mp).write_buffer_index_count = 0;
             (*mp).write_buffer_data_used = 0;
@@ -2982,7 +2995,7 @@ fn append_shared_subpacket_index(
     let new_rel = crate::shm::abs2rel(new_abs as *mut u8)?;
     unsafe {
         let mp = slot as *const RegistrySlot as *mut RegistrySlot;
-        (*mp).subpacket_entries = new_rel;
+        (*mp).subpacket_entries = slot_owns(new_rel);
         (*mp).subpacket_entries_len = len + 1;
         (*mp).subpacket_entries_cap = new_cap;
     }
@@ -4211,11 +4224,11 @@ pub fn shared_append_to_path(
         unsafe {
             let mp = slot as *const RegistrySlot as *mut RegistrySlot;
             (*mp).kind = MLC_KIND_OSTREAM;
-            (*mp).file_path = path_rel;
+            (*mp).file_path = slot_owns(path_rel);
             (*mp).file_path_len = path.len() as u32;
-            (*mp).schema_str = schema_rel;
+            (*mp).schema_str = slot_owns(schema_rel);
             (*mp).schema_str_len = schema_str_clone.len() as u32;
-            (*mp).subpacket_entries = idx_buf_rel;
+            (*mp).subpacket_entries = slot_owns(idx_buf_rel);
             (*mp).subpacket_entries_len = preseed_len as u64;
             (*mp).subpacket_entries_cap = idx_cap_initial;
             (*mp).body_start = stream_hdr.body_start;
@@ -4226,7 +4239,7 @@ pub fn shared_append_to_path(
             (*mp).opener_pid = std::process::id();
             (*mp).opener_pid_start_time = read_pid_start_time();
             (*mp).diag = diag;
-            (*mp).write_buffer = buf_rel;
+            (*mp).write_buffer = slot_owns(buf_rel);
             (*mp).write_buffer_index_cap = 0;
             (*mp).write_buffer_index_count = 0;
             (*mp).write_buffer_data_used = 0;
@@ -8390,11 +8403,11 @@ pub fn shared_open_ifile_recovered(
         unsafe {
             let mp = slot as *const RegistrySlot as *mut RegistrySlot;
             (*mp).kind = MLC_KIND_IFILE;
-            (*mp).file_path = path_rel;
+            (*mp).file_path = slot_owns(path_rel);
             (*mp).file_path_len = path.len() as u32;
-            (*mp).schema_str = schema_rel;
+            (*mp).schema_str = slot_owns(schema_rel);
             (*mp).schema_str_len = parsed.schema_str.len() as u32;
-            (*mp).subpacket_entries = idx_rel;
+            (*mp).subpacket_entries = slot_owns(idx_rel);
             (*mp).subpacket_entries_len = subpacket_entries.len() as u64;
             (*mp).subpacket_entries_cap = 0;
             (*mp).body_start = parsed.body_start;
@@ -8540,6 +8553,57 @@ mod tests {
     /// confirm open_ifile + close_handle round-trip. Sub-packet walking
     /// + cache + pattern eval are exercised in task #13's integration
     /// tests.
+    // A slot's path/schema/index/buffer blocks belong to the registry.
+    // Their lifetime is the slot's, which spans dispatches and can be
+    // shared across processes, so allocating them while an eval arena
+    // is active must not enroll them in that arena. If it does, arena
+    // scope exit frees blocks the registry still owns and the eventual
+    // slot release frees them a second time.
+    #[test]
+    fn arena_scope_exit_leaves_slot_blocks_owned() {
+        let _shm = crate::own_test_registry();
+        let dir = std::env::temp_dir().join(format!(
+            "morloc_arena_slot_test_{}", std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("arena_slot.idx");
+
+        let schema = crate::schema::Schema::primitive(
+            crate::schema::SerialType::Uint32,
+        );
+        let schema_str =
+            morloc_runtime_types::schema::schema_to_string(&list_schema(&schema));
+
+        let handle = {
+            let _arena = crate::eval_arena::enter().unwrap();
+            shared_open_ostream_with_schema(path.to_str().unwrap(), &schema_str)
+                .unwrap()
+        };
+
+        let (_gen, slot_idx) = unpack_handle(handle);
+        let slot = slot_ref(slot_idx).expect("slot index in range");
+        for (field, rel) in [
+            ("file_path", slot.file_path),
+            ("schema_str", slot.schema_str),
+            ("subpacket_entries", slot.subpacket_entries),
+            ("write_buffer", slot.write_buffer),
+        ] {
+            if rel == shm_types_crate::RELNULL {
+                continue;
+            }
+            let abs = crate::shm::rel2abs(rel).expect("slot relptr resolves");
+            let rc = crate::shm::reference_count(abs);
+            assert!(
+                matches!(rc, Some(c) if c > 0),
+                "slot {} block was released while the slot still owns it (refcount {:?})",
+                field, rc,
+            );
+        }
+
+        shared_close_handle(handle).unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn open_close_empty_stream_file() {
         let _shm = crate::own_test_registry();
