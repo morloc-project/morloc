@@ -1702,6 +1702,7 @@ if should_run "soak"; then
         SOAK_CHURN="--workers 12 --requests 25 --rounds 60"
         SOAK_PIN_CHURN="--workers 12 --requests 20 --rounds 60"
         SOAK_PIN_CONC="--workers 16 --requests 100 --rounds 40"
+        SOAK_THREAD_CHURN="--workers 12 --requests 20 --rounds 30"
     else
         SOAK_CHURN="--workers 8 --requests 12 --rounds 2"
         SOAK_PIN_CHURN="--workers 8 --requests 10 --rounds 2"
@@ -1890,6 +1891,63 @@ if should_run "soak"; then
             fi
 
             stop_daemon "$PIN_PID"
+        fi
+
+        # The Python pool picks its concurrency model by platform: worker
+        # processes on Linux, worker threads on macOS, because forking a live
+        # interpreter aborts there. The two share almost no code path, so a
+        # run on Linux says nothing about the model macOS actually ships --
+        # and the threaded one, where workers share an address space, is
+        # where a concurrency fault has room to do damage. A long run on any
+        # other platform therefore takes a pass with it forced on, so whoever
+        # is hunting covers the model they are not otherwise testing. On
+        # macOS this is already what ran, three phases ago.
+        if [ "$MORLOC_TEST_LEVEL" = "long" ] && [ "$(uname -s)" != "Darwin" ]; then
+            THR_PORT=$(pick_port)
+            THR_LOG="$SOAK_DIR/threaded.log"
+            (cd "$SOAK_DIR" && export MORLOC_PY_POOL=thread && \
+                exec morloc-nexus daemon ./nexus \
+                --http-port "$THR_PORT" 2>"$THR_LOG") &
+            THR_PID=$!
+            DAEMON_PIDS+=("$THR_PID")
+            wait_for_http "$THR_PORT" 20 || true
+            curl -s -o /dev/null --max-time 30 -X POST \
+                "http://127.0.0.1:${THR_PORT}/call/pyEcho" \
+                -H "Content-Type: application/json" -d '[[1,2,3]]'
+
+            # Confirm the setting reached the pool rather than assuming it.
+            # A test that quietly exercises the default model while claiming
+            # otherwise is worse than not running: it reports coverage of the
+            # one platform nobody else is testing.
+            thr_pools=0
+            for cp in $(pgrep -P "$THR_PID" 2>/dev/null); do
+                if tr '\0' '\n' < "/proc/$cp/environ" 2>/dev/null \
+                        | grep -q '^MORLOC_PY_POOL=thread$'; then
+                    thr_pools=$((thr_pools + 1))
+                fi
+            done
+            assert_test "threaded pool model actually in force" "yes" \
+                "$([ "$thr_pools" -gt 0 ] && echo yes || echo no)"
+
+            thr_out=$(python3 "$SCRIPT_DIR/soak-client.py" "$THR_PORT" churn \
+                $SOAK_THREAD_CHURN 2>&1) && thr_rc=0 || thr_rc=$?
+            assert_test "correct under the threaded pool model" "0" "$thr_rc"
+            if [ "$thr_rc" != "0" ]; then
+                echo "      $thr_out"
+            fi
+
+            thr_noise=$(grep -vE \
+                -e '^morloc-daemon: listening ' \
+                -e '^morloc daemon: pool crash detected' \
+                -e '^ *pool [0-9]+: Pool process crashed with signal ' \
+                -e '^morloc daemon: recovery complete ' \
+                "$THR_LOG" 2>/dev/null | grep -c .) || thr_noise=0
+            assert_test "threaded pool logged nothing unexpected" "0" "$thr_noise"
+            if [ "$thr_noise" != "0" ]; then
+                echo "      $(head -c 400 "$THR_LOG")"
+            fi
+
+            stop_daemon "$THR_PID"
         fi
     fi
 
