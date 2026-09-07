@@ -95,8 +95,19 @@ reduceNativeExpr ver ts lang (AppExeN t exe args) =
 reduceNativeExpr ver ts lang (ReturnN ne) = ReturnN <$> reduceNativeExpr ver ts lang ne
 reduceNativeExpr ver ts lang (SerialLetN i se ne) =
   SerialLetN i <$> reduceSerialExpr ver ts lang se <*> reduceNativeExpr ver ts lang ne
-reduceNativeExpr ver ts lang (NativeLetN i ne1 ne2) =
-  NativeLetN i <$> reduceNativeExpr ver ts lang ne1 <*> reduceNativeExpr ver ts lang ne2
+reduceNativeExpr ver ts lang (NativeLetN i ne1 ne2) = do
+  ne1' <- reduceNativeExpr ver ts lang ne1
+  ne2' <- reduceNativeExpr ver ts lang ne2
+  -- Whether a let-bound variable holds a thunk is a property of what was bound
+  -- to it, and this is the only place both are visible. A binding that is
+  -- plainly a value can never need forcing at its use sites, so a force landing
+  -- on one of those references is spurious. Anything else keeps its force: an
+  -- effectful call binds a suspended computation, and @catch depends on that
+  -- suspension surviving to the point where it can be intercepted.
+  return $
+    if isProvablyPlain ne1'
+      then NativeLetN i ne1' (dropForceOn i ne2')
+      else NativeLetN i ne1' ne2'
 reduceNativeExpr ver ts lang (DeserializeN t ast se) =
   DeserializeN t ast <$> reduceSerialExpr ver ts lang se
 reduceNativeExpr ver ts lang (ListN fv t es) =
@@ -150,7 +161,7 @@ reduceNativeExpr ver ts lang (EvalN et wrapped) =
     (rebuild, DoBlockN t x)
       | not (isDoBlockUnit t) -> rebuild <$> reduceNativeExpr ver ts lang x
     (rebuild, inner)
-      | isProvablyPlain inner -> rebuild <$> reduceNativeExpr ver ts lang inner
+      | isProvablyPlain inner -> rebuild <$> reduceNativeExpr ver ts lang (retypeAsValue inner)
     _ -> EvalN et <$> reduceNativeExpr ver ts lang wrapped
 reduceNativeExpr ver ts lang (CoerceN c t ne) = CoerceN c t <$> reduceNativeExpr ver ts lang ne
 reduceNativeExpr ver ts lang (IfN t c th el) =
@@ -188,6 +199,32 @@ peelCoerce (CoerceN c t x) =
   let (f, h) = peelCoerce x in (CoerceN c (stripEffectF t) . f, h)
 peelCoerce e = (id, e)
 
+-- | Rewrite the spurious forces on one let-bound index. Used only where the
+-- bound expression has been shown to be a value.
+dropForceOn :: Int -> NativeExpr -> NativeExpr
+dropForceOn i = mmap defaultValue {mapNativeExpr = go}
+  where
+    go (EvalN _ (LetVarN t j)) | j == i = LetVarN (stripEffectF t) j
+    -- as in 'retypeAsValue': the annotation was never true of this node
+    go e = e
+
+-- | Correct the annotation on a node that was mis-typed as a computation.
+--
+-- This does not turn a computation into a value -- there is no such operation.
+-- A computation of type @\<E\> T@ yields a T only by being run, and running it
+-- is a choice with consequences: @\<IO\> Time@ yields a different answer every
+-- time. What this repairs is the inverse mistake. A plain value acquires an
+-- @EffectF@ annotation purely from the position it was returned at, and that
+-- annotation is what makes the pool declare a thunk (a Rust @MorlocFn0@, a C++
+-- @std::function@) and then assign a bare value to it. The node never held a
+-- computation, so the annotation was never true of it.
+--
+-- Applied only where the caller has already established, from the binding
+-- rather than from the type, that the node holds a value.
+retypeAsValue :: NativeExpr -> NativeExpr
+retypeAsValue (BndVarN t i) = BndVarN (stripEffectF t) i
+retypeAsValue e = e
+
 -- | Nodes that are definitely values (never a suspended thunk), so a force
 -- landing on one is spurious and may be dropped. Deliberately conservative:
 -- anything not listed here stays opaque and KEEPS its force (fail-closed), so a
@@ -202,6 +239,19 @@ isProvablyPlain ListN{}   = True
 isProvablyPlain TupleN{}  = True
 isProvablyPlain RecordN{} = True
 isProvablyPlain (IntrinsicN t _ _ _) = not (isEffectF t)
+-- An argument arrives evaluated, so a force landing on a bare parameter is
+-- spurious.
+--
+-- The type cannot decide this. A value of type @\<E\> T@ is a computation, and
+-- a plain value returned at an @\<E\> T@ position acquires the same annotation
+-- from its position alone -- so the two are indistinguishable by type while
+-- being different things at runtime: one is a value, the other a suspension
+-- that must be run to yield one. What separates them is shape. A computation
+-- reaches a force as the expression that built it, a 'DoBlockN' or a 'ManN'
+-- wrapping one, because an effectful value must be bound with '<-' before it
+-- can be used where a plain type is expected, and that binding runs it in
+-- place.
+isProvablyPlain BndVarN{} = True
 isProvablyPlain _ = False
 
 makeStr :: TypeF -> Text -> NativeExpr

@@ -1,3 +1,8 @@
+Unreleased
+----------
+
+ - a function with an effectful return type may return a plain value
+
 0.102.1 [2026-09-05]
 --------------------
 
