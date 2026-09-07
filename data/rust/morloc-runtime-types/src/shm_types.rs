@@ -15,6 +15,13 @@ use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize};
 
 pub const SHM_MAGIC: u32 = 0xFECA_0DF0;
 pub const BLK_MAGIC: u32 = 0x0CB1_0DF0;
+
+/// Written over a block header that has been merged into its predecessor.
+/// The header is then interior bytes of the surviving block, so it must
+/// stop reading as a block; a distinct value rather than zero lets the
+/// allocator tell "you are holding a pointer to a block that was coalesced
+/// away" apart from uninitialised or scrubbed memory, which are both zero.
+pub const BLK_ABSORBED: u32 = 0x0CB1_DEAD;
 pub const MAX_VOLUME_NUMBER: usize = 32768;
 pub const MAX_FILENAME_SIZE: usize = 128;
 pub const MAX_PATH_SIZE: usize = 512;

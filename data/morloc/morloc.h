@@ -94,6 +94,9 @@ typedef void*   absptr_t;
 // Magic numbers for integrity checks.
 #define SHM_MAGIC 0xFECA0DF0
 #define BLK_MAGIC 0x0CB10DF0
+// Written over a block header merged into its predecessor: the header is
+// now interior bytes of the survivor and must stop reading as a block.
+#define BLK_ABSORBED 0x0CB1DEAD
 
 #define MAX_VOLUME_NUMBER 32768
 

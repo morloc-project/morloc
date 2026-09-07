@@ -14,7 +14,7 @@ use std::sync::Mutex;
 pub use morloc_runtime_types::shm_types::{
     align_up, encode_relptr, relptr_is_sentinel, relptr_offset, relptr_volume_index,
     AbsPtr, Array, BlockHeader, MorlocVolEntry, RelPtr, ShmHeader, VolPtr,
-    BLK_MAGIC, BLOCK_ALIGN, MAX_FILENAME_SIZE, MAX_PATH_SIZE, MAX_VOLUME_NUMBER,
+    BLK_ABSORBED, BLK_MAGIC, BLOCK_ALIGN, MAX_FILENAME_SIZE, MAX_PATH_SIZE, MAX_VOLUME_NUMBER,
     OFFSET_MASK, RELNULL, SHM_MAGIC, VOLNULL,
 };
 
@@ -992,6 +992,12 @@ pub fn shincref(ptr: AbsPtr) -> Result<(), MorlocError> {
     // SAFETY: ptr was returned by shmalloc, which places a BlockHeader immediately before
     // the returned data pointer. Magic check below validates the header.
     let blk = unsafe { &*(ptr.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader) };
+    if blk.magic == BLK_ABSORBED {
+        return Err(MorlocError::Shm(
+            "Cannot incref a block that was merged into its predecessor \
+             (the caller is holding a stale pointer)".into(),
+        ));
+    }
     if blk.magic != BLK_MAGIC {
         return Err(MorlocError::Shm("Corrupted memory - invalid magic".into()));
     }
@@ -1554,6 +1560,12 @@ fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
     let blk = unsafe {
         &*(ptr.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader)
     };
+    if blk.magic == BLK_ABSORBED {
+        return Err(MorlocError::Shm(
+            "Cannot free a block that was merged into its predecessor \
+             (the caller is holding a stale pointer)".into(),
+        ));
+    }
     if blk.magic != BLK_MAGIC {
         return Err(MorlocError::Shm("Corrupted memory".into()));
     }
@@ -1782,13 +1794,23 @@ unsafe fn scan_volume(
         // Merge adjacent free blocks
         while (*blk).reference_count.load(Ordering::Relaxed) == 0 {
             let next = (blk as *mut u8).add(hdr_size + (*blk).size) as *mut BlockHeader;
+            // The whole header must lie inside the region: starting inside it
+            // is not enough, since the next thing done is a 16-byte read.
             if (next as *const u8) >= end
+                || (end as usize) - (next as usize) < hdr_size
                 || (*next).magic != BLK_MAGIC
                 || (*next).reference_count.load(Ordering::Relaxed) != 0
             {
                 break;
             }
-            (*blk).size += hdr_size + (*next).size;
+            // The absorbed header becomes interior bytes of the survivor.
+            // Stamp it so a pointer to the absorbed block stops reading as
+            // a block: leaving a valid header inside a live allocation is
+            // the allocator lying about its own structure, and every
+            // validating entry point believes it.
+            let next_size = (*next).size;
+            (*next).magic = BLK_ABSORBED;
+            (*blk).size += hdr_size + next_size;
         }
 
         if (*blk).reference_count.load(Ordering::Relaxed) == 0 && (*blk).size >= size {
@@ -1812,6 +1834,16 @@ fn split_block(
 
         shm_lock(&(*shm).lock)?;
 
+        // A block smaller than the request would underflow the remainder and
+        // send the split below to write a header outside the mapping. The
+        // search is supposed to return only blocks large enough; refuse
+        // rather than trust it.
+        if (*blk).size < size {
+            shm_unlock(&(*shm).lock);
+            return Err(MorlocError::Shm(
+                "Block smaller than the request reached the split".into(),
+            ));
+        }
         let remaining = (*blk).size - size;
         (*blk).size = size;
 
@@ -1827,6 +1859,12 @@ fn split_block(
             let data_start = (shm as *const u8).add(std::mem::size_of::<ShmHeader>());
             (*shm).cursor = (new_free as *const u8).offset_from(data_start) as VolPtr;
         } else {
+            // Too small to head, so it becomes interior bytes of the block.
+            // Stamp whatever header may be sitting there, for the same reason
+            // the merge does.
+            if remaining >= std::mem::size_of::<u32>() {
+                (*new_free).magic = BLK_ABSORBED;
+            }
             (*blk).size += remaining;
             (*shm).cursor = VOLNULL;
         }
@@ -1966,6 +2004,50 @@ pub unsafe fn vol2abs(ptr: VolPtr, shm: *const ShmHeader) -> AbsPtr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Merging a free block into its predecessor turns the absorbed block's
+    // header into interior bytes of the survivor. A pointer to the absorbed
+    // block must stop validating at that moment: if its header still reads
+    // as a block, a stale pointer passes every check and the allocator acts
+    // on payload bytes as though they were a header.
+    #[test]
+    fn coalescing_invalidates_the_absorbed_block_header() {
+        let hdr = std::mem::size_of::<BlockHeader>();
+        let body = 256usize;
+
+        // A synthetic volume holding two adjacent free blocks, so the merge
+        // is exercised without depending on where the live allocator's
+        // cursor happens to sit.
+        let mut backing = vec![0u64; (2 * (hdr + body)) / 8 + 8];
+        let base = backing.as_mut_ptr() as *mut u8;
+        let end = unsafe { base.add(2 * (hdr + body)) } as *const u8;
+
+        let first = base as *mut BlockHeader;
+        let second = unsafe { base.add(hdr + body) as *mut BlockHeader };
+        unsafe {
+            (*first).magic = BLK_MAGIC;
+            (*first).size = body;
+            (*first).reference_count = AtomicU32::new(0);
+            (*second).magic = BLK_MAGIC;
+            (*second).size = body;
+            (*second).reference_count = AtomicU32::new(0);
+        }
+
+        // Ask for more than either block alone can serve, forcing the merge.
+        let found = unsafe { scan_volume(first, body + 8, end) };
+        assert_eq!(found, Some(first), "expected the pair to merge");
+        assert!(
+            unsafe { (*first).size } >= 2 * body,
+            "merged block did not absorb its neighbour",
+        );
+
+        assert_eq!(
+            unsafe { (*second).magic }, BLK_ABSORBED,
+            "absorbed block still reads as a block, so a stale pointer to it \
+             passes the header check and is acted on as live payload",
+        );
+
+    }
 
     // A block whose last reference is being dropped is briefly marked with
     // a sentinel that reads as in-use, so nothing can claim it while its
