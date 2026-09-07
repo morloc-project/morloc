@@ -1,3 +1,7 @@
+0.102.1 [2026-09-05]
+
+Many bug fixes and better stress test coverage
+
 0.102.0 [2026-09-05]
 --------------------
 
