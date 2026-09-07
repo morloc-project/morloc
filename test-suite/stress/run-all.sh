@@ -30,6 +30,21 @@ declare -A WORKLOAD_CALL=(
 
 WORKLOAD_ORDER=(cpp py r cpp-py cpp-r py-r)
 
+# Restrict the language combinations swept, e.g.
+# `MORLOC_STRESS_WORKLOADS="cpp py-r" ./run-all.sh`. The full sweep runs six
+# combinations through every test and takes minutes, which is more than a
+# per-push gate can afford; a caller that only needs one single-language and
+# one cross-language combination can say so. Unset means all six.
+if [[ -n "${MORLOC_STRESS_WORKLOADS:-}" ]]; then
+    read -r -a WORKLOAD_ORDER <<< "$MORLOC_STRESS_WORKLOADS"
+    for w in "${WORKLOAD_ORDER[@]}"; do
+        if [[ -z "${WORKLOAD_DIR[$w]:-}" ]]; then
+            echo "unknown workload: $w (known: cpp py r cpp-py cpp-r py-r)" >&2
+            exit 2
+        fi
+    done
+fi
+
 PASSED=0
 FAILED=0
 SKIPPED=0

@@ -118,7 +118,10 @@ jobs:
   test:
     needs: rust-binary
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Raised with the test step: this job now builds the compiler, runs the
+    # live-daemon suites, and runs `stack test` with no target, and the sum
+    # of those step ceilings exceeds an hour. Matches the push workflow.
+    timeout-minutes: 120
     env:
       DEBIAN_FRONTEND: noninteractive
     steps:
@@ -193,9 +196,27 @@ jobs:
         run: |
           MORLOC_RUST_DIR=$(pwd)/prebuilt/rust morloc init -f
           morloc install stdlib
+      # A release is tested more thoroughly than a push. Two additions over
+      # what continuous integration runs.
+      #
+      # The suites that drive a live daemon: shared memory across thousands
+      # of requests, worker threads serving concurrently, pools crashing and
+      # being rebuilt under load. Their concurrency scales itself to the
+      # machine, so a two-core runner is asked for two cores' worth rather
+      # than a development box's worth.
+      - name: Run the runtime suites
+        env:
+          MORLOC_STRESS_WORKLOADS: "cpp py-r"
+        run: ./test-suite/test.sh
+        timeout-minutes: 30
+
+      # And `stack test` with no target, which adds morloc-integration-test
+      # to the unit and golden suites. That covers the daemon, MCP, shared
+      # memory, install and stress integration tests, none of which a push
+      # runs -- a release is the right place to pay for them.
       - name: Run tests
-        run: stack test --system-ghc --no-install-ghc morloc:morloc-test
-        timeout-minutes: 10
+        run: stack test --system-ghc --no-install-ghc
+        timeout-minutes: 45
 
       # The shipped compiler comes from the rust-binary job's static-build image
       # (Ubuntu 20.04, glibc >= 2.31 -- forward-compatible on any newer host),

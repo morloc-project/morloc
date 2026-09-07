@@ -1472,6 +1472,23 @@ struct Frontend {
     /// eval's sandbox allow-list (`None` => no imports). Passed to the forked
     /// `morloc eval`; independent of the served module sets.
     eval_allow: Option<String>,
+    /// Eval is exposed but must not be served: no bearer token is configured and
+    /// the operator did not waive the requirement.
+    ///
+    /// Eval is the one exposed surface not bounded by what the author declared.
+    /// `/call` runs the functions they chose, with arguments typed and checked
+    /// at the boundary; eval compiles and runs an expression the caller writes,
+    /// bounded only by the import allow-list and a sandbox that forbids
+    /// directly-written IO but not what an allowed module's own functions do.
+    /// It is also expensive in a way the rest is not -- an expression over a
+    /// compiled language rebuilds a pool, which is seconds to tens of seconds of
+    /// the container's CPU per call -- so an open eval is a denial-of-service
+    /// lever in the hands of a caller who meant no harm.
+    ///
+    /// Unlike the bind address, which says nothing about exposure once a process
+    /// is inside a container, whether eval is exposed is a fact the server knows
+    /// about itself. So this gate keys on something real.
+    eval_needs_token: bool,
     /// CPU-time budget (seconds) for a forked `morloc eval`; <=0 disables it.
     /// Mirrors the daemon's RLIMIT_CPU so a runaway expression can't burn a
     /// front-end thread's CPU indefinitely.
@@ -1546,27 +1563,76 @@ impl Frontend {
     }
 }
 
+/// Why an exposed eval is refused, said the same way at both entry points.
+const EVAL_NEEDS_TOKEN: &str = "the eval capability is exposed but requires a bearer token: \
+     it compiles and runs expressions the caller writes, which costs seconds to tens of \
+     seconds of this container's CPU each time. Set MORLOC_MCP_TOKEN (or --auth-token), or \
+     waive the requirement with MORLOC_EVAL_ALLOW_NO_AUTH=1 (or --eval-allow-no-auth).";
+
+/// Check that a served module's pools can actually be spawned: every pool file
+/// present, every interpreter on PATH.
+///
+/// Pool `exec` paths are stored relative to the manifest's own directory, so
+/// they are resolved against it first -- the same resolution the child daemon
+/// performs when it spawns them, and what makes the file check meaningful for a
+/// module installed under the program database.
+fn validate_served_pools(manifest: &Manifest, manifest_path: &str) -> Result<(), String> {
+    let dir = std::path::Path::new(manifest_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let resolved: Vec<morloc_manifest::Pool> = manifest
+        .pools
+        .iter()
+        .map(|pool| {
+            let mut pool = pool.clone();
+            if let Some(last) = pool.exec.last_mut() {
+                if std::path::Path::new(last).is_relative() {
+                    *last = dir.join(&*last).to_string_lossy().into_owned();
+                }
+            }
+            pool
+        })
+        .collect();
+    process::validate_pools(&resolved)
+}
+
 /// Serve a set of modules over one HTTP listener with MCP + API adapters,
 /// forwarding to the supervisor's per-module children. Never returns.
 pub fn serve_frontend(router: *mut c_void, fdb: &str, config: &crate::dispatch::NexusConfig) -> ! {
     // Load and parse each served program's manifest once (union of adapters);
     // both the MCP tool surface and the API discovery view derive from it.
+    //
+    // The declared set is served completely or not at all. Every module here was
+    // named explicitly, so one that cannot answer is a broken contract, not a
+    // degraded service: skipping it would leave the listener reporting healthy
+    // and advertising a surface it cannot serve, and the caller would learn of it
+    // one failed request at a time.
     let mut manifests: HashMap<String, Manifest> = HashMap::new();
     for m in &config.programs {
         let manifest_path = format!("{}/{}/{}-build/manifest.json", fdb, m, m);
         let payload = match crate::manifest::read_manifest_payload(&manifest_path) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("morloc serve: skipping module '{}': {}", m, e);
-                continue;
+                eprintln!("morloc serve: cannot serve module '{}': {}", m, e);
+                process::clean_exit(1);
             }
         };
-        match crate::manifest::parse_manifest(&payload) {
-            Ok(mf) => {
-                manifests.insert(m.clone(), mf);
+        let mf = match crate::manifest::parse_manifest(&payload) {
+            Ok(mf) => mf,
+            Err(e) => {
+                eprintln!("morloc serve: cannot serve module '{}': {}", m, e);
+                process::clean_exit(1);
             }
-            Err(e) => eprintln!("morloc serve: skipping module '{}': {}", m, e),
+        };
+        // Pools are checked HERE, at startup, not when a request first arrives.
+        // A module's child daemon is spawned lazily, so its own pool check would
+        // otherwise run behind a listener that has already answered `/health` and
+        // published the module's tools.
+        if let Err(e) = validate_served_pools(&mf, &manifest_path) {
+            eprintln!("morloc serve: cannot serve module '{}': {}", m, e);
+            process::clean_exit(1);
         }
+        manifests.insert(m.clone(), mf);
     }
 
     // Build MCP tool shapes from each MCP module's manifest, namespaced.
@@ -1602,11 +1668,27 @@ pub fn serve_frontend(router: *mut c_void, fdb: &str, config: &crate::dispatch::
         }
     }
 
+    // Eval asks for a bearer token even where the rest of the endpoint does not
+    // (see `Frontend::eval_needs_token`). An exposed-but-locked eval is not
+    // advertised: a tool that answers every call with a refusal is worse than an
+    // absent one, especially to an assistant reading the catalogue, and the
+    // operator's signal belongs in the startup log where they are looking.
+    let eval_needs_token = config.eval_enabled
+        && config.mcp_auth_token.is_none()
+        && !config.eval_allow_no_auth;
+    if eval_needs_token {
+        eprintln!(
+            "morloc serve: eval is exposed but LOCKED, and is not advertised. {}",
+            EVAL_NEEDS_TOKEN
+        );
+    }
+
     // The eval capability (sandboxed) is a single synthetic MCP tool, exposed
-    // only when enabled. It is NOT a module; it forks `morloc eval` per call, so
-    // the `morloc` compiler must be on PATH in the serving environment -- warn
-    // loudly at startup if it is not, since eval would otherwise fail per call.
-    if config.eval_enabled {
+    // only when enabled and callable. It is NOT a module; it forks `morloc eval`
+    // per call, so the `morloc` compiler must be on PATH in the serving
+    // environment -- warn loudly at startup if it is not, since eval would
+    // otherwise fail per call.
+    if config.eval_enabled && !eval_needs_token {
         if !morloc_on_path() {
             eprintln!(
                 "morloc serve: WARNING: eval is exposed but the `morloc` compiler is \
@@ -1693,6 +1775,19 @@ pub fn serve_frontend(router: *mut c_void, fdb: &str, config: &crate::dispatch::
         );
         process::clean_exit(1);
     }
+    // Serving openly was asked for, which is ordinary inside a container: there
+    // the bind address says nothing about who can reach the process, and what
+    // can is decided outside it by a published port or a network. Say so once,
+    // because the caller who arrives is then whoever that decision let in.
+    if auth_token.is_none() && !is_loopback {
+        eprintln!(
+            "morloc serve: no auth token set. Every caller that can reach {} can call every \
+             exposed function. Access control is the operator's: publish to loopback \
+             (-p 127.0.0.1:PORT:PORT), keep this on an internal network, or put a gateway in \
+             front. Set MORLOC_MCP_TOKEN to require a bearer token here as well.",
+            bound
+        );
+    }
     eprintln!(
         "morloc serve: MCP at http://{}/mcp ({} tools) | API at http://{}/call/<module>/<command> \
          | discovery at http://{}/discover",
@@ -1710,6 +1805,7 @@ pub fn serve_frontend(router: *mut c_void, fdb: &str, config: &crate::dispatch::
         api_modules,
         api_help,
         eval_enabled: config.eval_enabled,
+        eval_needs_token,
         eval_allow: config.eval_allowed_modules.clone(),
         eval_timeout: config.eval_timeout,
         server_name: "morloc".to_string(),
@@ -1787,6 +1883,15 @@ fn frontend_build_response(
             _ => method_not_allowed("POST", keep_alive),
         }
     } else if path == "/eval" {
+        if fe.eval_needs_token {
+            return http_json(
+                403,
+                serde_json::json!({ "status": "error", "error": EVAL_NEEDS_TOKEN })
+                    .to_string()
+                    .as_bytes(),
+                keep_alive,
+            );
+        }
         match req.method.as_str() {
             "POST" => frontend_eval_api(req, fe, keep_alive),
             _ => method_not_allowed("POST", keep_alive),
@@ -1838,7 +1943,11 @@ fn frontend_discover(fe: &Arc<Frontend>, keep_alive: bool) -> Vec<u8> {
                      (tools are named <module>__<command> and take named arguments).",
         },
         "eval": {
-            "enabled": fe.eval_enabled,
+            // Callable, not merely exposed. An eval that is locked for want of a
+            // token cannot be used, and reporting it as enabled would send a
+            // caller to an endpoint that refuses them.
+            "enabled": fe.eval_enabled && !fe.eval_needs_token,
+            "locked": fe.eval_needs_token,
             "endpoints": ["/eval", "mcp tool 'eval'"],
         },
     });
@@ -2133,6 +2242,11 @@ fn frontend_tools_call(id: Value, msg: &Value, fe: &Frontend) -> Value {
         if !fe.eval_enabled {
             return error_response(id, JSONRPC_INVALID_PARAMS, "unknown tool 'eval'");
         }
+        // The same gate as the HTTP route. Without it the tool is a way around
+        // it, since both reach the same forked compiler.
+        if fe.eval_needs_token {
+            return error_response(id, JSONRPC_INVALID_PARAMS, EVAL_NEEDS_TOKEN);
+        }
         let expr = match arguments.get("expression").and_then(|v| v.as_str()) {
             Some(e) => e,
             None => return error_response(id, JSONRPC_INVALID_PARAMS, "missing 'expression'"),
@@ -2268,6 +2382,81 @@ mod tests {
             Value::Object(m) => m,
             _ => panic!("test args must be an object"),
         }
+    }
+
+    /// A one-pool manifest written into a fresh directory, returned with the
+    /// path to its `manifest.json`. The pool file is created so the check under
+    /// test is the interpreter, not the artifact.
+    fn manifest_with_pool(tag: &str, exec: &[&str], write_pool_file: bool) -> (String, String) {
+        let dir = std::env::temp_dir().join(format!(
+            "morloc-serve-pools-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(dir.join("pools/py")).unwrap();
+        if write_pool_file {
+            std::fs::write(dir.join("pools/py/pool.py"), "").unwrap();
+        }
+        let quoted: Vec<String> = exec.iter().map(|e| format!("\"{e}\"")).collect();
+        let manifest_path = dir.join("manifest.json");
+        std::fs::write(
+            &manifest_path,
+            format!(
+                r#"{{"name":"t","build":{{"path":".","time":0,"morloc_version":"{}"}},
+                    "pools":[{{"lang":"py","exec":[{}],"socket":"pipe-py"}}]}}"#,
+                env!("CARGO_PKG_VERSION"),
+                quoted.join(",")
+            ),
+        )
+        .unwrap();
+        (
+            dir.to_string_lossy().into_owned(),
+            manifest_path.to_string_lossy().into_owned(),
+        )
+    }
+
+    #[test]
+    fn a_served_module_with_no_interpreter_is_refused() {
+        // The failure this catches: the router answers /health and publishes the
+        // module's tools, then every call dies in the pool daemon it spawns.
+        let (dir, path) = manifest_with_pool(
+            "nointerp",
+            &["morloc-no-such-interpreter", "pools/py/pool.py"],
+            true,
+        );
+        let payload = morloc_manifest::read_manifest_payload(&path).unwrap();
+        let mf = morloc_manifest::parse_manifest(&payload).unwrap();
+        let err = validate_served_pools(&mf, &path).unwrap_err();
+        assert!(err.contains("morloc-no-such-interpreter"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_served_module_resolves_pool_files_against_its_manifest() {
+        // Pool paths are stored relative to the manifest, so a check run from any
+        // other working directory has to resolve them first or it reports every
+        // installed program as missing its artifacts.
+        let (dir, path) = manifest_with_pool("relative", &["/bin/sh", "pools/py/pool.py"], true);
+        let payload = morloc_manifest::read_manifest_payload(&path).unwrap();
+        let mf = morloc_manifest::parse_manifest(&payload).unwrap();
+        assert!(validate_served_pools(&mf, &path).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_served_module_missing_its_pool_file_is_refused() {
+        // The shape a truncated deployment artifact takes: the manifest travels,
+        // the pools do not.
+        let (dir, path) = manifest_with_pool("nopool", &["/bin/sh", "pools/py/pool.py"], false);
+        let payload = morloc_manifest::read_manifest_payload(&path).unwrap();
+        let mf = morloc_manifest::parse_manifest(&payload).unwrap();
+        let err = validate_served_pools(&mf, &path).unwrap_err();
+        assert!(err.contains("pool.py"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1,7 +1,9 @@
 head count: 5
 head first: 0
 head last: 4
+head status: 141
 clean: PASS
 catch count: 5
 catch first: 0
+catch status: 141
 full count: 100000

@@ -2,7 +2,7 @@ module main
   ( testCppIntToPyOpt
   )
 
-import types
+import .types
 import cppfuncs (cAddOne)
 import pyfuncs (pUnwrapOr)
 

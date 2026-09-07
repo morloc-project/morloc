@@ -4,7 +4,7 @@
 # For each language a fixture module declares files in its package.yaml
 # `expose:` field. The runner installs the fixture, asserts that the
 # declared files land at the per-language well-known paths under
-# $MORLOC_HOME, builds a consumer that references the exposed paths in
+# the module state root, builds a consumer that references the exposed paths in
 # the canonical downstream form, runs the consumer, and finally
 # uninstalls the fixture (which should also wipe the exposed copies).
 #
@@ -19,10 +19,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 MORLOC_HOME="${MORLOC_HOME:-$HOME/.local/share/morloc}"
-INCLUDE_DIR="$MORLOC_HOME/include"
-PY_LIB_DIR="$MORLOC_HOME/lib/python"
-R_LIB_DIR="$MORLOC_HOME/lib/R"
-SRC_DIR="$MORLOC_HOME/src/morloc/plane/default"
+# Installed modules and the files they expose are mutable STATE, which morloc
+# roots separately from the runtime home so a read-only image can carry the
+# runtime while state lives on a mounted volume. It falls back to the home when
+# the state root is unset, and so does this.
+MORLOC_STATE="${MORLOC_STATE:-$MORLOC_HOME}"
+INCLUDE_DIR="$MORLOC_STATE/modules/include"
+PY_LIB_DIR="$MORLOC_STATE/modules/python"
+R_LIB_DIR="$MORLOC_STATE/modules/R"
+SRC_DIR="$MORLOC_STATE/src/morloc/plane/default"
+FDB_DIR="$MORLOC_STATE/fdb"
 
 CPP_MOD="morloc-test-expose-cpp"
 PY_MOD="morloc-test-expose-py"
@@ -53,7 +59,7 @@ cleanup_module() {
     rm -rf "$SRC_DIR/$name" \
            "$INCLUDE_DIR/$name" \
            "$R_LIB_DIR/$name" \
-           "$MORLOC_HOME/fdb/$name.module"
+           "$FDB_DIR/$name.module"
     # Python form replaces hyphens with underscores.
     local py_name="${name//-/_}"
     rm -rf "$PY_LIB_DIR/$py_name"
@@ -171,7 +177,7 @@ if should_run "cpp"; then
         printf "  %-60s %sFAIL%s\n" "cpp: install" "$RED" "$RESET"
         morloc install --force "$SCRIPT_DIR/morloc-test-expose-cpp" 2>&1 | tail -10 | sed 's/^/      /' || true
     else
-        # Exposed files land under $MORLOC_HOME/include/<module>/.
+        # Exposed files land under $MORLOC_STATE/modules/include/<module>/.
         assert_file "cpp: foo.hpp exposed"        "$INCLUDE_DIR/$CPP_MOD/foo.hpp"
         assert_file "cpp: foo_helpers/util.hpp exposed" \
                     "$INCLUDE_DIR/$CPP_MOD/foo_helpers/util.hpp"

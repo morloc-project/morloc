@@ -1,8 +1,17 @@
-Unreleased
-----------
+0.102.1 [2026-09-05]
+--------------------
 
- * `morloc init` reports a conda environment that activated no C/C++ compiler
-   as a failed activation instead of as PATH shadowing
+Many bug fixes and better stress test coverage
+
+0.102.0 [2026-09-05]
+--------------------
+
+ - a serve refuses to start when a module's pools cannot run
+ - a served eval asks for a bearer token even when the rest does not
+   - it is not advertised until it can answer
+   - waive it with `--eval-allow-no-auth` or `MORLOC_EVAL_ALLOW_NO_AUTH`
+ - a serve asked to run unauthenticated off loopback says so at startup
+>>>>>>> dev
 
 0.101.0 [2026-09-05]
 --------------------

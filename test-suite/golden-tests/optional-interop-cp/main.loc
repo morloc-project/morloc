@@ -7,7 +7,7 @@ module main
   , testChainPyCpp
   )
 
-import types
+import .types
 import cppfuncs (cSafeDiv, cFromNull, cDouble)
 import pyfuncs (pSafeDiv, pFromNull, pDouble)
 

@@ -136,6 +136,11 @@ extern "C" {
     fn morloc_daemon_is_shutting_down() -> bool;
     fn morloc_daemon_begin_recovery() -> bool;
     fn morloc_daemon_end_recovery();
+    // Hands a reaped child's exit status to whoever forked it. The daemon
+    // forks the compiler to serve an expression and then waits for it; the
+    // drains below would otherwise consume the status first and leave that
+    // wait with nothing to read.
+    fn morloc_note_child_exit(pid: libc::c_int, status: libc::c_int);
 }
 
 /// C-ABI callback wired into DaemonConfig.pool_check_fn.
@@ -394,6 +399,17 @@ static POOL_LANGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::ne
 /// Re-entrancy guard for clean_exit.
 static CLEANING_UP: AtomicBool = AtomicBool::new(false);
 
+/// Exit status chosen by the thread that owns the teardown. Read only by a
+/// thread parked in `park_until_exit` whose owner never reached `exit`.
+static EXIT_CODE: AtomicI32 = AtomicI32::new(0);
+
+/// Upper bound on how long a parked thread waits for the teardown owner to
+/// call `exit`. `clean_exit` is itself bounded (250 ms per pool group, at
+/// most MAX_DAEMONS groups), so reaching this means the owner is wedged;
+/// staying alive with no thread making progress is worse than exiting with
+/// the status the owner already chose.
+const PARK_LIMIT: Duration = Duration::from_secs(60);
+
 /// Set when we exit due to BrokenPipe on stdout. Read by `clean_exit` to
 /// skip the stdout flush -- fd 1 is known dead, and the flush would
 /// hit the same EPIPE again.
@@ -461,6 +477,9 @@ extern "C" fn sigchld_handler(_sig: libc::c_int) {
         if pid <= 0 {
             break;
         }
+        // Publish before the pool bookkeeping: this reap may belong to a
+        // thread that forked its own child and is blocked waiting for it.
+        unsafe { morloc_note_child_exit(pid, status) };
         for i in 0..MAX_DAEMONS {
             if PIDS[i].load(Ordering::Relaxed) == pid {
                 EXIT_STATUSES[i].store(status, Ordering::Relaxed);
@@ -576,6 +595,12 @@ fn write_hex4(buf: &mut [u8], start: usize, val: u16) -> usize {
 /// Install signal handlers.
 pub fn install_signal_handlers() {
     unsafe {
+        // Bind the cross-library symbol the SIGCHLD handler calls before the
+        // handler can run. A first call from inside a signal handler would
+        // resolve it through the dynamic loader, whose lock the interrupted
+        // thread may already hold. A non-positive pid records nothing.
+        morloc_note_child_exit(-1, 0);
+
         // SIGCHLD
         let mut sa: libc::sigaction = std::mem::zeroed();
         sa.sa_sigaction = sigchld_handler as *const () as usize;
@@ -780,7 +805,13 @@ pub fn get_tmpdir() -> Option<&'static str> {
 ///    (up from the previous 50ms, which was too short for Python's
 ///    atexit handlers and multiprocessing cleanup to flush buffers)
 pub fn clean_exit(exit_code: i32) -> ! {
-    CLEANING_UP.store(true, Ordering::SeqCst);
+    // Exactly one thread runs the teardown. A second concurrent caller
+    // would repeat the waitpid sweep, the SHM unlink and
+    // morloc_run_finalize, and race the owner on the exit status.
+    if CLEANING_UP.swap(true, Ordering::SeqCst) {
+        park_until_exit();
+    }
+    EXIT_CODE.store(exit_code, Ordering::SeqCst);
 
     // Flush stdout. Critical when -o redirected fd 1 to a file: Rust
     // and libc both buffer when stdout is not a TTY, and std::process::exit
@@ -900,6 +931,27 @@ pub fn clean_exit(exit_code: i32) -> ! {
 pub fn exit_broken_pipe() -> ! {
     BROKEN_PIPE.store(true, Ordering::SeqCst);
     clean_exit(141);
+}
+
+/// True once some thread has committed to tearing the nexus down.
+///
+/// Callers about to report a pool failure use this to tell a real fault
+/// from a consequence of the teardown: `clean_exit` SIGTERMs every pool
+/// process group, so a pool connection still open at that moment drops,
+/// and a thread blocked reading it sees a peer that vanished mid-call.
+pub fn teardown_in_progress() -> bool {
+    CLEANING_UP.load(Ordering::SeqCst)
+}
+
+/// Block a thread that reached an exit path while another thread already
+/// owns the teardown. The owner ends in `exit`, which takes the whole
+/// process down, so this normally never returns.
+pub fn park_until_exit() -> ! {
+    let deadline = std::time::Instant::now() + PARK_LIMIT;
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    unsafe { libc::_exit(EXIT_CODE.load(Ordering::SeqCst)) };
 }
 
 // ── Pool daemon spawning ───────────────────────────────────────────────────
@@ -1200,6 +1252,7 @@ pub fn report_dead_pools() {
         if pid <= 0 {
             break;
         }
+        unsafe { morloc_note_child_exit(pid, status) };
         for i in 0..MAX_DAEMONS {
             if PIDS[i].load(Ordering::Relaxed) == pid {
                 EXIT_STATUSES[i].store(status, Ordering::Relaxed);

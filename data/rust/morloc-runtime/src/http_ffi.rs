@@ -320,31 +320,14 @@ pub unsafe extern "C" fn http_write_response_ex(
 
 // ── http_to_daemon_request ───────────────────────────────────────────────────
 
-/// Extract a JSON string value after a key like "expr": "..."
+/// Read a top-level string field out of a JSON request body.
+///
+/// A real JSON parser, not a scan: the escape sequences matter here. An
+/// expression that imports a module spans lines, and a line break can only
+/// reach the daemon as `\n`.
 fn extract_json_string(body: &str, key: &str) -> Option<String> {
-    let search = format!("\"{}\"", key);
-    let pos = body.find(&search)?;
-    let after = &body[pos + search.len()..];
-    let after = after.trim_start();
-    let after = after.strip_prefix(':')?;
-    let after = after.trim_start();
-    if !after.starts_with('"') { return None; }
-    let after = &after[1..]; // skip opening quote
-    let mut result = String::new();
-    let mut chars = after.chars();
-    loop {
-        match chars.next() {
-            Some('\\') => {
-                if let Some(c) = chars.next() {
-                    result.push(c);
-                }
-            }
-            Some('"') => break,
-            Some(c) => result.push(c),
-            None => break,
-        }
-    }
-    Some(result)
+    let v: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+    Some(v.get(key)?.as_str()?.to_string())
 }
 
 /// Translate a parsed HTTP request into a daemon request. On failure,
@@ -408,8 +391,6 @@ pub unsafe extern "C" fn http_to_daemon_request(
     if method == HttpMethod::Post && path == "/eval" {
         (*dreq).method = DaemonMethod::Eval;
         if let Some(expr) = extract_json_string(body_str, "expr") {
-            (*dreq).expr = libc::strdup(expr.as_ptr() as *const c_char);
-            // strdup from Rust string - need null terminated
             let c = std::ffi::CString::new(expr).unwrap_or_default();
             (*dreq).expr = libc::strdup(c.as_ptr());
         }

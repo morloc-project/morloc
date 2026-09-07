@@ -1,6 +1,6 @@
 module types-cpp (*)
 
-import types
+import .types
 import root-cpp
 
 -- No explicit `type Cpp => MyStr = "std::string"` mapping.

@@ -7,7 +7,7 @@ module main
   , testChainCppR
   )
 
-import types
+import .types
 import cppfuncs (cSafeDiv, cFromNull, cDouble)
 import rfuncs (rSafeDiv, rFromNull, rDouble)
 

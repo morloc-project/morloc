@@ -1,6 +1,6 @@
 module rfuncs (*)
 
-import types
+import .types
 
 rSafeDiv :: Int -> Int -> ?Int
 rFromNull :: Int -> ?Int -> Int
