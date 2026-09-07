@@ -132,7 +132,7 @@ std::string interweave_strings(const std::vector<std::string>& first, const std:
 // Thread-local list of SHM pointers allocated by _put_value.
 // Freed after foreign_call returns (args consumed) or at next dispatch start
 // (result consumed by caller in the synchronous call that returned it).
-struct ShmEntry { absptr_t ptr; Schema* schema; };
+struct ShmEntry { absptr_t ptr; };
 thread_local std::vector<ShmEntry> _shm_tracker;
 
 static void _shm_tracker_flush() {
@@ -146,20 +146,18 @@ static void _shm_tracker_flush() {
     _shm_tracker.clear();
 }
 
-// Drop one tracker entry matching ptr (swap-with-last), shfree the
-// block, and free its schema. Used by _release_packet_shm to free
+// Drop one tracker entry matching ptr (swap-with-last) and shfree the
+// block. Used by _release_packet_shm to free
 // a _put_value-tracked packet's SHM as soon as its codegen-determined
 // scope ends, rather than waiting for the next dispatch flush.
 static bool _shm_tracker_release_one(absptr_t ptr) {
     for (size_t i = 0; i < _shm_tracker.size(); i++) {
         if (_shm_tracker[i].ptr == ptr) {
-            Schema* schema = _shm_tracker[i].schema;
             _shm_tracker[i] = _shm_tracker.back();
             _shm_tracker.pop_back();
             char* err = NULL;
             shfree(ptr, &err);
             if (err) { free(err); }
-            if (schema) { free_schema(schema); }
             return true;
         }
     }
@@ -205,7 +203,7 @@ uint8_t* _put_value(const T& value, Schema* schema) {
         char* err = nullptr;
         void* shm_ptr = rel2abs(relptr, &err);
         if (err) { free(err); }
-        if (shm_ptr) { _shm_tracker.push_back({(absptr_t)shm_ptr, nullptr}); }
+        if (shm_ptr) { _shm_tracker.push_back({(absptr_t)shm_ptr}); }
         return packet;
     } else {
         // Arrow dispatch: schema marker `T` (MORLOC_TABLE) routes through
@@ -229,7 +227,7 @@ uint8_t* _put_value(const T& value, Schema* schema) {
             const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
             if (hdr->command.data.source == PACKET_SOURCE_RPTR) {
                 // SHM referenced by packet -- track for deferred cleanup
-                _shm_tracker.push_back({(absptr_t)voidstar, schema});
+                _shm_tracker.push_back({(absptr_t)voidstar});
             } else {
                 // Data inlined in packet -- free SHM immediately. shfree
                 // zeros the block on final ref-drop.
@@ -273,7 +271,7 @@ T _get_value(const uint8_t* packet, Schema* schema){
         char* ierr = nullptr;
         shincref((absptr_t)raw, &ierr);
         if (ierr) { free(ierr); }
-        _shm_tracker.push_back({(absptr_t)raw, nullptr});
+        _shm_tracker.push_back({(absptr_t)raw});
 
         return mlc::ArrowTable(std::move(as), std::move(aa));
     } else {
@@ -379,7 +377,7 @@ T _get_value(const uint8_t* packet, Schema* schema){
             char* incref_err = NULL;
             shincref((absptr_t)voidstar, &incref_err);
             if (incref_err) { free(incref_err); }
-            _shm_tracker.push_back({(absptr_t)voidstar, schema});
+            _shm_tracker.push_back({(absptr_t)voidstar});
         }
 
         T* dummy = nullptr;
@@ -858,7 +856,7 @@ uint8_t* foreign_call_v(const char* socket_filename, size_t mid, const uint8_t**
                 char* incref_err = NULL;
                 shincref((absptr_t)res_voidstar, &incref_err);
                 if (incref_err) { free(incref_err); }
-                _shm_tracker.push_back({(absptr_t)res_voidstar, nullptr});
+                _shm_tracker.push_back({(absptr_t)res_voidstar});
             }
         }
     }
