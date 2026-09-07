@@ -401,7 +401,14 @@ fn check_incoming_schema(meta: &[u8], expected_schema: &str, what: &str) -> Resu
     // An empty declared schema adopts the incoming one without a check. Current
     // codegen always threads the `[a]` schema (@open :: IStream and @stdin
     // both), so this branch is a defensive fallback, not a reachable path.
-    if !expected_schema.is_empty() && incoming != expected_schema {
+    // Compare structurally, not by bytes. The opener's schema may carry
+    // `<hint>` prefixes (a pool passes the compiler's string) while the
+    // wire never does, and the two describe one type.
+    if !expected_schema.is_empty()
+        && !morloc_runtime_types::schema::schema_strings_compatible(
+            &incoming, expected_schema,
+        )
+    {
         return Err(format!(
             "{}-schema mismatch: opener declared `{}`, incoming carries `{}`",
             what, expected_schema, incoming,

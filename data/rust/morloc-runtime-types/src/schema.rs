@@ -812,6 +812,27 @@ pub fn schemas_compatible(a: &Schema, b: &Schema) -> bool {
         .all(|(pa, pb)| schemas_compatible(pa, pb))
 }
 
+/// Canonical form of a schema string: parsed, then re-rendered. This
+/// drops the `<hint>` prefixes that a compiler-generated pool schema
+/// carries, because `schema_to_string` does not emit them.
+///
+/// Every packet writer stores this form (`make_standard_data_packet`,
+/// `make_mesg_data_packet`, `make_stream_header_block`), so it is the
+/// only form that may be persisted or compared. An entry point that
+/// takes a schema string from a caller normalizes with this rather than
+/// trusting the caller to have done it: the nexus evaluator normalized
+/// and the pools did not, which is how the two came to disagree at
+/// `@append`.
+///
+/// An unparseable string is returned unchanged, so the caller's own
+/// parse produces the diagnostic rather than this function inventing one.
+pub fn canonicalize_schema_str(s: &str) -> String {
+    match parse_schema(s) {
+        Ok(parsed) => schema_to_string(&parsed),
+        Err(_) => s.to_string(),
+    }
+}
+
 /// String-form entry point for the wire-boundary comparator. Parses both
 /// operands via `parse_schema` and structurally compares. Returns true iff
 /// the two schemas describe compatible wire forms under the gradual-typing
@@ -993,6 +1014,65 @@ mod tests {
         let s = parse_schema("<std::vector<$1>>ai4").unwrap();
         assert_eq!(s.serial_type, SerialType::Array);
         assert_eq!(s.hint.as_deref(), Some("std::vector<$1>"));
+    }
+
+    // A pool's schema string carries the language's concrete form as a
+    // `<hint>` prefix; every packet writer stores the hint-free form
+    // (schema_to_string drops hints by design). The two describe one wire
+    // type, so any comparison at a wire boundary must ignore the hint.
+    #[test]
+    fn canonicalize_drops_hints_and_is_idempotent() {
+        assert_eq!(canonicalize_schema_str("a<dict>m24kinds2idj"), "am24kinds2idj");
+        assert_eq!(canonicalize_schema_str("a<str>s"), "as");
+        assert_eq!(canonicalize_schema_str("<std::vector<$1>>ai4"), "ai4");
+        // already canonical
+        assert_eq!(canonicalize_schema_str("am24kinds2idj"), "am24kinds2idj");
+        // idempotent
+        let once = canonicalize_schema_str("a<dict>m21x<int>j1yj");
+        assert_eq!(canonicalize_schema_str(&once), once);
+        // dims survive; they are part of the type, not a hint
+        assert_eq!(canonicalize_schema_str("a:5j"), "a:5j");
+        // unparseable input is handed back untouched for the caller to report
+        assert_eq!(canonicalize_schema_str("not a schema"), "not a schema");
+    }
+
+    #[test]
+    fn compatible_ignores_concrete_type_hints() {
+        assert!(schema_strings_compatible("am24kinds2idj", "a<dict>m24kinds2idj"));
+        assert!(schema_strings_compatible("a<dict>m24kinds2idj", "am24kinds2idj"));
+        // Hints are not a record-only concern: `type Tag = Str` gets one too.
+        assert!(schema_strings_compatible("as", "a<str>s"));
+        // Nested hints (the C++ container forms) parse and are ignored.
+        assert!(schema_strings_compatible("ai4", "<std::vector<$1>>ai4"));
+        // A hint on an inner node, not just the outer one.
+        assert!(schema_strings_compatible("am21xj1yj", "a<dict>m21x<int>j1yj"));
+    }
+
+    // Ignoring hints must not make the check vacuous.
+    #[test]
+    fn compatible_rejects_genuinely_different_types() {
+        // different record keys
+        assert!(!schema_strings_compatible("am24kinds2idj", "a<dict>m25alphas4betaj"));
+        // different leaf type
+        assert!(!schema_strings_compatible("aj", "as"));
+        // different shape
+        assert!(!schema_strings_compatible("aj", "j"));
+        // tuple field order
+        assert!(!schema_strings_compatible("t2js", "t2sj"));
+        // different arity
+        assert!(!schema_strings_compatible("t2js", "t3jss"));
+    }
+
+    // An unconstrained array length (0) is a wildcard against a
+    // constrained one. This is deliberate: `make_array_schema_with_dim`
+    // gives both the same width and `is_fixed_width` is false for every
+    // Array, so the dim is a validation constraint (enforced on the JSON
+    // ingestion path) rather than a layout difference.
+    #[test]
+    fn compatible_treats_array_length_zero_as_wildcard() {
+        assert!(schema_strings_compatible("a:5j", "aj"));
+        assert!(schema_strings_compatible("aj", "a:5j"));
+        assert!(!schema_strings_compatible("a:5j", "a:6j"));
     }
 
     #[test]

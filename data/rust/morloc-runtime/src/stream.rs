@@ -1732,6 +1732,14 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
 {
     use std::sync::atomic::Ordering;
 
+    // The declared schema is published to the nexus, which compares it
+    // against the schema on each incoming packet. A pool passes the
+    // compiler's hint-bearing string and the wire never carries hints,
+    // so store the canonical form.
+    let schema_owned =
+        morloc_runtime_types::schema::canonicalize_schema_str(schema_str);
+    let schema_str: &str = &schema_owned;
+
     // Pool processes attach lazily; without this, the first stdio open
     // from a pool sees a null REGISTRY_BASE and stdio_claim_slot
     // returns None. Idempotent + cheap on the fast path.
@@ -4091,11 +4099,19 @@ pub fn shared_append_to_path(
             return Err(e);
         }
     };
-    if parsed.schema_str != expected_schema_str {
+    // The caller's string may carry `<hint>` prefixes (a pool passes the
+    // schema the compiler baked into its dispatch table); the header
+    // never does. Canonicalize before comparing, and compare
+    // structurally so a caller that skips normalization is still served.
+    let requested_schema_str =
+        morloc_runtime_types::schema::canonicalize_schema_str(expected_schema_str);
+    if !morloc_runtime_types::schema::schema_strings_compatible(
+        &parsed.schema_str, &requested_schema_str,
+    ) {
         unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
         return Err(MorlocError::Other(format!(
             "@append: schema mismatch on '{}': file has '{}', open requested '{}'",
-            path, parsed.schema_str, expected_schema_str
+            path, parsed.schema_str, requested_schema_str
         )));
     }
     let stream_hdr = match parse_stream_header(mmap_ptr, mmap_size) {
@@ -7993,7 +8009,29 @@ pub fn open_dispatch_istream(path: &str, schema_str: &str) -> Result<i64, Morloc
     if is_stdin_device(path) {
         return open_stdio(MLC_KIND_ISTREAM, STDIO_KIND_STDIN, schema_str);
     }
-    shared_open_istream(path)
+    // A stream file is self-describing, so the reader decodes from the
+    // file's own schema and needs no argument. The ascribed type still
+    // matters: the pool walks the resulting voidstar with its
+    // compile-time schema, so a mismatch is a structural walk of a
+    // buffer that schema does not describe. Both strings are in hand
+    // here, so check once at open rather than producing garbage later.
+    let handle = shared_open_istream(path)?;
+    if !schema_str.is_empty() {
+        let stored = shared_handle_schema_str(handle)?;
+        let requested =
+            morloc_runtime_types::schema::canonicalize_schema_str(schema_str);
+        if !morloc_runtime_types::schema::schema_strings_compatible(
+            &stored, &requested,
+        ) {
+            let _ = shared_close_handle(handle);
+            return Err(MorlocError::Other(format!(
+                "@open IStream: schema mismatch on '{}': \
+                 file has '{}', open requested '{}'",
+                path, stored, requested
+            )));
+        }
+    }
+    Ok(handle)
 }
 
 // ── `morloc-nexus view` conversion helpers ────────────────────────────────
@@ -8534,6 +8572,62 @@ mod tests {
 
         // Re-close is an error.
         assert!(shared_close_handle(handle).is_err());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // A pool hands the runtime the schema string the compiler baked into
+    // its dispatch table, which carries the language's concrete-type hint
+    // (`a<dict>m...`). The stream header stores the hint-free form,
+    // because every writer renders through `schema_to_string`. An append
+    // must accept the pool's form: the two describe one wire type.
+    //
+    // The nexus's own evaluator normalizes before calling, so only the
+    // pool path exercises this.
+    #[test]
+    fn append_accepts_hint_bearing_schema() {
+        let _shm = crate::own_test_registry();
+        let dir = std::env::temp_dir().join(format!(
+            "morloc_append_hint_test_{}", std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("hinted.idx");
+        let p = path.to_str().unwrap();
+
+        // A two-field record of (Str, Int): the shape `record py => T =
+        // "dict"` produces. Stored hint-free, requested with `<dict>`.
+        let stored_form = "am24kinds2idj";
+        let pool_form = "a<dict>m24kinds2idj";
+
+        let out = shared_open_ostream_with_schema(p, pool_form).unwrap();
+        shared_close_handle(out).unwrap();
+
+        // The header keeps the canonical form regardless of what the
+        // opener passed.
+        let parsed_hdr = {
+            let (mp, sz) = mmap_file_readonly(p).unwrap();
+            let parsed = parse_stream_file(p, mp, sz).unwrap();
+            unsafe { libc::munmap(mp as *mut libc::c_void, sz as usize); }
+            parsed.schema_str
+        };
+        assert_eq!(parsed_hdr, stored_form);
+
+        // Appending with the pool's hint-bearing form must work.
+        let app = shared_append_to_path(p, pool_form)
+            .expect("append must accept a hint-bearing schema");
+        shared_close_handle(app).unwrap();
+
+        // The hint-free form must work too -- a library caller that read
+        // the schema back off the file passes this.
+        let app2 = shared_append_to_path(p, stored_form)
+            .expect("append must accept the canonical schema");
+        shared_close_handle(app2).unwrap();
+
+        // A genuinely different element type is still refused.
+        assert!(
+            shared_append_to_path(p, "a<dict>m25alphas4betaj").is_err(),
+            "append must still reject a different element type",
+        );
 
         let _ = std::fs::remove_file(&path);
     }
