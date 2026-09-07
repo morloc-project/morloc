@@ -268,10 +268,14 @@ T _get_value(const uint8_t* packet, Schema* schema){
         arrow_from_shm(hdr, &as, &aa, &aerr);
         if (aerr) { PROPAGATE_ERROR(aerr); }
 
+        // Track only a reference actually acquired. A refused incref means
+        // the block is free or being released, and tracking it anyway would
+        // make the next flush decrement a reference this pool never held.
         char* ierr = nullptr;
-        shincref((absptr_t)raw, &ierr);
+        if (shincref((absptr_t)raw, &ierr)) {
+            _shm_tracker.push_back({(absptr_t)raw});
+        }
         if (ierr) { free(ierr); }
-        _shm_tracker.push_back({(absptr_t)raw});
 
         return mlc::ArrowTable(std::move(as), std::move(aa));
     } else {
@@ -375,9 +379,10 @@ T _get_value(const uint8_t* packet, Schema* schema){
         // won't destroy data we may still need (e.g. forwarded packets).
         if (is_rptr) {
             char* incref_err = NULL;
-            shincref((absptr_t)voidstar, &incref_err);
+            if (shincref((absptr_t)voidstar, &incref_err)) {
+                _shm_tracker.push_back({(absptr_t)voidstar});
+            }
             if (incref_err) { free(incref_err); }
-            _shm_tracker.push_back({(absptr_t)voidstar});
         }
 
         T* dummy = nullptr;
@@ -854,9 +859,10 @@ uint8_t* foreign_call_v(const char* socket_filename, size_t mid, const uint8_t**
             if (resolve_err) { free(resolve_err); resolve_err = NULL; }
             if (res_voidstar) {
                 char* incref_err = NULL;
-                shincref((absptr_t)res_voidstar, &incref_err);
+                if (shincref((absptr_t)res_voidstar, &incref_err)) {
+                    _shm_tracker.push_back({(absptr_t)res_voidstar});
+                }
                 if (incref_err) { free(incref_err); }
-                _shm_tracker.push_back({(absptr_t)res_voidstar});
             }
         }
     }

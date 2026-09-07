@@ -902,13 +902,18 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
         morloc_throw(msg);
     }
     if source == PKT_SOURCE_RPTR {
-        shincref(voidstar as *mut c_void, &mut err);
+        // Track only a reference actually acquired: a refused incref means
+        // the block is free or being released, and tracking it anyway would
+        // make the next flush decrement a reference this pool never held.
+        let acquired = shincref(voidstar as *mut c_void, &mut err);
         if !err.is_null() {
             libc::free(err as *mut c_void);
             err = std::ptr::null_mut();
         }
         let _ = err;
-        track(voidstar as *mut c_void);
+        if acquired {
+            track(voidstar as *mut c_void);
+        }
     }
     <T as FromVoidstar>::read(schema, voidstar, std::ptr::null())
 }
@@ -1012,9 +1017,11 @@ unsafe fn finalize_call_result(result: *mut u8) -> *mut u8 {
         discard_err(rerr);
         if !voidstar.is_null() {
             let mut ierr: *mut c_char = std::ptr::null_mut();
-            shincref(voidstar, &mut ierr);
+            let acquired = shincref(voidstar, &mut ierr);
             discard_err(ierr);
-            track(voidstar);
+            if acquired {
+                track(voidstar);
+            }
         }
     }
 

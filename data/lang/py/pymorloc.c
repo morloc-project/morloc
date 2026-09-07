@@ -1964,11 +1964,15 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
             "nn", (Py_ssize_t)&arrow_array, (Py_ssize_t)&arrow_schema);
         Py_DECREF(rb_class);
 
-        // Incref shm so it stays alive while pyarrow references the buffers
+        // Incref shm so it stays alive while pyarrow references the buffers.
+        // Track only a reference actually acquired: a refused incref means
+        // the block is free or being released, and tracking it anyway would
+        // make the next flush decrement a reference this pool never held.
         char* incref_err = NULL;
-        shincref((absptr_t)voidstar, &incref_err);
+        if (shincref((absptr_t)voidstar, &incref_err)) {
+            shm_tracker_push((absptr_t)voidstar, NULL);
+        }
         if (incref_err) { free(incref_err); }
-        shm_tracker_push((absptr_t)voidstar, NULL);
 
         free_schema(schema);
         if (!obj) return NULL;
@@ -2061,11 +2065,12 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
     // won't destroy data we may still need (e.g. forwarded packets).
     if (is_rptr) {
         char* incref_err = NULL;
-        shincref((absptr_t)voidstar, &incref_err);
+        if (shincref((absptr_t)voidstar, &incref_err)) {
+            // Track for deferred decref (tracker takes schema ownership)
+            shm_tracker_push((absptr_t)voidstar, schema);
+            tracked = true;
+        }
         if (incref_err) { free(incref_err); }
-        // Track for deferred decref (tracker takes schema ownership)
-        shm_tracker_push((absptr_t)voidstar, schema);
-        tracked = true;
     }
 
     obj = from_voidstar(schema, voidstar, NULL);
@@ -2338,9 +2343,10 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
             if (resolve_err) { free(resolve_err); resolve_err = NULL; }
             if (res_voidstar) {
                 char* incref_err = NULL;
-                shincref((absptr_t)res_voidstar, &incref_err);
+                if (shincref((absptr_t)res_voidstar, &incref_err)) {
+                    shm_tracker_push((absptr_t)res_voidstar, NULL);
+                }
                 if (incref_err) { free(incref_err); }
-                shm_tracker_push((absptr_t)res_voidstar, NULL);
             }
         }
     }

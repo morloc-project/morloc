@@ -387,6 +387,12 @@ static VOLUMES: Mutex<VolumeTable> = Mutex::new(VolumeTable {
 
 static ALLOC_MUTEX: Mutex<()> = Mutex::new(());
 
+/// Reference-count value marking a block whose last reference has been
+/// dropped and whose bytes are being scrubbed. It reads as in-use, so no
+/// allocator can claim the block until the scrub completes and publishes
+/// zero.
+const TEARING_DOWN: u32 = u32::MAX;
+
 // ── Thread-local PRNG (for random slot allocation) ─────────────────────────
 
 thread_local! {
@@ -975,14 +981,45 @@ pub fn shincref(ptr: AbsPtr) -> Result<(), MorlocError> {
     if ptr.is_null() {
         return Err(MorlocError::Shm("Cannot incref NULL pointer".into()));
     }
+    // A pointer into a volume that has since been unmapped (pool-crash
+    // recovery calls `reset_all`) must not be dereferenced. `shfree` takes
+    // the same guard.
+    if !ptr_is_in_any_volume(ptr) {
+        return Err(MorlocError::Shm(
+            "Cannot incref a pointer outside every mapped volume".into(),
+        ));
+    }
     // SAFETY: ptr was returned by shmalloc, which places a BlockHeader immediately before
     // the returned data pointer. Magic check below validates the header.
     let blk = unsafe { &*(ptr.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader) };
     if blk.magic != BLK_MAGIC {
         return Err(MorlocError::Shm("Corrupted memory - invalid magic".into()));
     }
-    blk.reference_count.fetch_add(1, Ordering::AcqRel);
-    Ok(())
+    // Refuse the same two states `shfree` refuses. Zero means the block is
+    // free and its bytes are gone; the teardown sentinel means another
+    // party owns the transition to zero and is scrubbing right now. A
+    // reference taken in either state describes nothing, and taking one on
+    // the sentinel is destructive: incrementing it wraps to zero, which is
+    // the value the allocator reads as free, so the block is handed to a
+    // new owner while the previous one is still zeroing it.
+    loop {
+        let cur = blk.reference_count.load(Ordering::Acquire);
+        if cur == 0 {
+            return Err(MorlocError::Shm("Cannot incref a free block".into()));
+        }
+        if cur == TEARING_DOWN {
+            return Err(MorlocError::Shm(
+                "Cannot incref a block that is being released".into(),
+            ));
+        }
+        if blk
+            .reference_count
+            .compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return Ok(());
+        }
+    }
 }
 
 /// Current reference count of a shared memory block, or `None` when
@@ -1533,7 +1570,6 @@ fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
     // concurrent free of the same block can move it, and a decrement issued
     // on the strength of a stale read underflows a counter that everything
     // else treats as "in use".
-    const TEARING_DOWN: u32 = u32::MAX;
     loop {
         let cur = blk.reference_count.load(Ordering::Acquire);
         if cur == 0 {
@@ -1930,6 +1966,60 @@ pub unsafe fn vol2abs(ptr: VolPtr, shm: *const ShmHeader) -> AbsPtr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A block whose last reference is being dropped is briefly marked with
+    // a sentinel that reads as in-use, so nothing can claim it while its
+    // bytes are being scrubbed. Acquiring a reference in that window must
+    // be refused: incrementing the sentinel wraps it to zero, which is the
+    // value the allocator reads as "free", so the block would be handed to
+    // a new owner while the previous owner is still zeroing it.
+    #[test]
+    fn incref_refuses_a_block_whose_last_reference_is_dropping() {
+        let _shm = crate::own_test_registry();
+        let p = shmalloc(64).expect("allocate");
+
+        // Reproduce the state shfree publishes before it scrubs.
+        unsafe {
+            let blk = &*(p.sub(std::mem::size_of::<BlockHeader>())
+                as *const BlockHeader);
+            blk.reference_count.store(u32::MAX, Ordering::Release);
+        }
+
+        let res = shincref(p);
+        let rc = reference_count(p);
+        assert!(
+            res.is_err(),
+            "incref accepted a block that was being released (refcount now {:?})",
+            rc,
+        );
+        assert_ne!(
+            rc, Some(0),
+            "incref wrapped the release sentinel to zero, publishing a block \
+             the allocator will hand out while it is still being scrubbed",
+        );
+
+        // Leave the block in a state the arena can clean up.
+        unsafe {
+            let blk = &*(p.sub(std::mem::size_of::<BlockHeader>())
+                as *const BlockHeader);
+            blk.reference_count.store(1, Ordering::Release);
+        }
+        let _ = shfree(p);
+    }
+
+    // A block that is already free must not be resurrected: its bytes have
+    // been scrubbed and the allocator is entitled to hand it to anyone.
+    #[test]
+    fn incref_refuses_a_free_block() {
+        let _shm = crate::own_test_registry();
+        let p = shmalloc(64).expect("allocate");
+        shfree(p).expect("free");
+        assert_eq!(reference_count(p), Some(0), "block should read as free");
+        assert!(
+            shincref(p).is_err(),
+            "incref accepted a block that was already free",
+        );
+    }
 
     #[test]
     fn test_block_header_no_padding() {

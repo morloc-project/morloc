@@ -2539,9 +2539,16 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         SEXP obj_r = PROTECT(eval(call, arrow_ns));
         UNPROTECT(6);
 
-        // Incref shm so data stays alive
+        // Hold the block for as long as R references the imported buffers,
+        // and hand it to the tracker so the reference is released at the
+        // start of the next request rather than never. Track only a
+        // reference actually acquired: a refused incref means the block is
+        // free or being released, and tracking it anyway would make the
+        // next flush decrement a reference this pool never held.
         char* incref_err = NULL;
-        shincref((absptr_t)arrow_ptr, &incref_err);
+        if (shincref((absptr_t)arrow_ptr, &incref_err)) {
+            shm_tracker_push((absptr_t)arrow_ptr, NULL);
+        }
         if (incref_err) { free(incref_err); }
 
         free_schema(schema);
@@ -2652,6 +2659,7 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
     // SHM paths (RPTR source from upstream pool/daemon, or our own
     // unpack_with_schema for MESG msgpack args).
     bool is_rptr = (source == PACKET_SOURCE_RPTR);
+    bool tracked = false;
     uint8_t* voidstar = R_TRY_WITH(free_schema(schema), get_morloc_data_packet_value, packet, schema);
 
     if (is_rptr) {
@@ -2660,10 +2668,15 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         // it in the tracker so shm_tracker_flush() releases it at the
         // start of our next request -- after R has finished consuming
         // the deserialized form.
+        // Track only a reference actually acquired: a refused incref means
+        // the block is free or being released, and tracking it anyway would
+        // make the next flush decrement a reference this pool never held.
         char* incref_err = NULL;
-        shincref((absptr_t)voidstar, &incref_err);
+        if (shincref((absptr_t)voidstar, &incref_err)) {
+            shm_tracker_push((absptr_t)voidstar, schema);
+            tracked = true;
+        }
         if (incref_err) { free(incref_err); }
-        shm_tracker_push((absptr_t)voidstar, schema);
     }
 
     MORLOC_REJECT_NUL(check_nul, voidstar, schema, NULL, free_schema(schema));
@@ -2674,10 +2687,12 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
             char* free_err = NULL;
             shfree((absptr_t)voidstar, &free_err);
             if (free_err) { free(free_err); }
+        }
+        // The tracker owns the schema only where it took the block; the
+        // block itself belongs to its sender unless we allocated it.
+        if (!tracked) {
             free_schema(schema);
         }
-        // For RPTR, schema and voidstar are owned by the tracker; do not
-        // double-free here.
         MORLOC_ERROR("Failed to convert internal representation to R object");
     }
 
@@ -2688,6 +2703,8 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         char* free_err = NULL;
         shfree((absptr_t)voidstar, &free_err);
         if (free_err) { free(free_err); }
+    }
+    if (!tracked) {
         free_schema(schema);
     }
 
