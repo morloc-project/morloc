@@ -157,18 +157,6 @@ pub unsafe extern "C" fn shcalloc(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn shrealloc(
-    ptr: *mut c_void,
-    size: usize,
-    errmsg: *mut *mut c_char,
-) -> *mut c_void {
-    // TODO: implement shrealloc in shm.rs
-    let _ = (ptr, size);
-    set_errmsg(errmsg, &MorlocError::Shm("shrealloc not yet implemented".into()));
-    ptr::null_mut()
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn shfree(ptr: *mut c_void, errmsg: *mut *mut c_char) -> bool {
     ffi_try!(errmsg, false, shm::shfree(ptr as AbsPtr).map(|_| true))
 }
