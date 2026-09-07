@@ -348,12 +348,8 @@ fn arg_to_json(arg: &Arg, pos_index: usize) -> Value {
             format,
             ..
         } => {
-            let name = metavar
-                .as_deref()
-                .map(|m| m.to_lowercase())
-                .unwrap_or_else(|| format!("arg{}", pos_index));
             json!({
-                "name": name,
+                "name": arg.key(),
                 "role": "positional",
                 "position": pos_index,
                 "metavar": metavar,
@@ -394,9 +390,8 @@ fn arg_to_json(arg: &Arg, pos_index: usize) -> Value {
             format,
             ..
         } => {
-            let name = opt_name(long_opt.as_deref(), short_opt.as_deref());
             json!({
-                "name": name,
+                "name": arg.key(),
                 "role": "option",
                 "metavar": metavar,
                 "required": false,
@@ -427,9 +422,8 @@ fn arg_to_json(arg: &Arg, pos_index: usize) -> Value {
             desc,
             ..
         } => {
-            let name = opt_name(long_opt.as_deref(), short_opt.as_deref());
             json!({
-                "name": name,
+                "name": arg.key(),
                 "role": "flag",
                 "required": false,
                 "short": short_opt,
@@ -450,10 +444,7 @@ fn arg_to_json(arg: &Arg, pos_index: usize) -> Value {
             entries,
             ..
         } => {
-            let name = type_desc
-                .as_deref()
-                .map(|t| t.to_lowercase())
-                .unwrap_or_else(|| "group".to_string());
+            let name = arg.key().to_string();
             let entries_json: Vec<Value> = entries
                 .iter()
                 .map(|e| json!({ "key": e.key, "argument": arg_to_json(&e.arg, 0) }))
@@ -560,13 +551,6 @@ fn checks_json(checks: &[Check]) -> Value {
             })
             .collect(),
     )
-}
-
-/// Synthesize a parameter name for an option/flag: long form, else short.
-fn opt_name(long: Option<&str>, short: Option<&str>) -> String {
-    long.map(|s| s.to_string())
-        .or_else(|| short.map(|s| s.to_string()))
-        .unwrap_or_else(|| "option".to_string())
 }
 
 fn non_empty(s: &str) -> Option<&str> {
@@ -851,7 +835,6 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
     let mut props = Map::new();
     let mut required: Vec<Value> = Vec::new();
     let mut slots: Vec<ArgSlot> = Vec::with_capacity(cmd.args.len());
-    let mut pos_index = 0usize;
 
     // Insert a property, failing closed on a name collision (the forward map
     // would otherwise silently overwrite, letting two args collapse to one
@@ -868,23 +851,17 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
         match arg {
             Arg::Positional {
                 schema,
-                name,
                 many,
                 stdin,
                 desc,
                 ..
             } => {
-                // A positional's MCP property is its explicit `@name` when set,
-                // else the reserved, collision-proof key `_<1-based index>`. A
-                // metavar (FILE/INT/...) is a reused display placeholder and is
-                // never used as the key; the leading `_` of the default is
-                // reserved (a `@name` is validated at compile time not to start
-                // with `_`), so a name and an option can never collide with it.
-                let prop_name = name
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| format!("_{}", pos_index + 1));
+                // The key the compiler published: the explicit `@name`, else
+                // the reserved `_<1-based index>`. A metavar (FILE/INT/...) is
+                // a reused display placeholder and cannot serve as a key --
+                // one command may take two files. The leading `_` is reserved
+                // against author names, so the two can never collide.
+                let prop_name = arg.key().to_string();
                 let mut prop = mcp_type(schema.as_deref(), *many);
                 set_description(&mut prop, desc, None);
                 let is_req = !schema_is_optional(schema.as_deref()) && !*stdin;
@@ -896,18 +873,15 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
                     key: prop_name,
                     missing: Value::Null,
                 });
-                pos_index += 1;
             }
             Arg::Optional {
                 schema,
                 many,
-                short_opt,
-                long_opt,
                 default_val,
                 desc,
                 ..
             } => {
-                let name = opt_name(long_opt.as_deref(), short_opt.as_deref());
+                let name = arg.key().to_string();
                 let mut prop = mcp_type(schema.as_deref(), *many);
                 set_description(&mut prop, desc, default_val.as_deref());
                 insert_prop(&mut props, &name, prop)?;
@@ -918,13 +892,11 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
                 });
             }
             Arg::Flag {
-                short_opt,
-                long_opt,
                 default_val,
                 desc,
                 ..
             } => {
-                let name = opt_name(long_opt.as_deref(), short_opt.as_deref());
+                let name = arg.key().to_string();
                 let mut prop = json!({ "type": "boolean" });
                 set_description(&mut prop, desc, default_val.as_deref());
                 insert_prop(&mut props, &name, prop)?;
@@ -935,7 +907,6 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
             }
             Arg::Group {
                 schema,
-                type_desc,
                 group_opt,
                 entries,
                 desc,
@@ -946,10 +917,7 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
                 if group_opt.is_some() {
                     // Whole record passed as one JSON object property. Not
                     // marked required: an all-defaulted record may be omitted.
-                    let name = type_desc
-                        .as_deref()
-                        .map(|t| t.to_lowercase())
-                        .unwrap_or_else(|| "group".to_string());
+                    let name = arg.key().to_string();
                     let mut prop = parsed
                         .as_ref()
                         .map(schema_to_json_schema)
@@ -1249,7 +1217,7 @@ mod tests {
         let cmd = cmd_from_json(json!({
             "name": "inc", "type": "pure",
             "return": { "schema": "j" },
-            "args": [ { "kind": "opt", "schema": "j", "long": "count", "default": "5" } ],
+            "args": [ { "kind": "opt", "key": "count", "schema": "j", "long": "count", "default": "5" } ],
         }));
         let shape = command_to_tool_shape(&cmd).expect("servable");
         // Forward: property present, optional (not required).
@@ -1278,8 +1246,8 @@ mod tests {
             "return": { "schema": "j" },
             // Two positionals: the metavar is ignored; keys are `_1`, `_2`.
             "args": [
-                { "kind": "pos", "schema": "j", "metavar": "N" },
-                { "kind": "pos", "schema": "j" }
+                { "kind": "pos", "key": "_1", "schema": "j", "metavar": "N" },
+                { "kind": "pos", "key": "_2", "schema": "j" }
             ],
         }));
         let shape = command_to_tool_shape(&cmd).expect("servable");
@@ -1300,7 +1268,7 @@ mod tests {
         let cmd = cmd_from_json(json!({
             "name": "revcomp", "type": "pure",
             "return": { "schema": "j" },
-            "args": [ { "kind": "pos", "schema": "j", "name": "records" } ],
+            "args": [ { "kind": "pos", "key": "records", "schema": "j", "name": "records" } ],
         }));
         let shape = command_to_tool_shape(&cmd).expect("servable");
         assert!(shape.prop_names.contains("records"));
@@ -1320,8 +1288,8 @@ mod tests {
             "name": "cp", "type": "pure",
             "return": { "schema": "j" },
             "args": [
-                { "kind": "pos", "schema": "s", "metavar": "FILE" },
-                { "kind": "pos", "schema": "s", "metavar": "FILE" }
+                { "kind": "pos", "key": "_1", "schema": "s", "metavar": "FILE" },
+                { "kind": "pos", "key": "_2", "schema": "s", "metavar": "FILE" }
             ],
         }));
         let shape = command_to_tool_shape(&cmd).expect("servable (no collision)");
@@ -1335,10 +1303,10 @@ mod tests {
             "name": "conf", "type": "pure",
             "return": { "schema": "j" },
             "args": [ {
-                "kind": "grp", "schema": "m21aj1bs", "type": "Rec",
+                "kind": "grp", "key": "rec", "schema": "m21aj1bs", "type": "Rec",
                 "entries": [
-                    { "key": "a", "arg": { "kind": "opt", "long": "a", "default": "3" } },
-                    { "key": "b", "arg": { "kind": "opt", "long": "b", "default": "\"hi\"" } }
+                    { "key": "a", "arg": { "kind": "opt", "key": "a", "long": "a", "default": "3" } },
+                    { "key": "b", "arg": { "kind": "opt", "key": "b", "long": "b", "default": "\"hi\"" } }
                 ]
             } ],
         }));
@@ -1386,7 +1354,7 @@ mod tests {
         let cmd = cmd_from_json(json!({
             "name": "cat", "type": "remote",
             "return": { "schema": "as" },
-            "args": [ { "kind": "pos", "schema": "s", "metavar": "FILE", "stdin": true } ],
+            "args": [ { "kind": "pos", "key": "_1", "schema": "s", "metavar": "FILE", "stdin": true } ],
         }));
         assert!(command_to_tool_shape(&cmd).is_err());
     }

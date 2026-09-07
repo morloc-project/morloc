@@ -1,0 +1,34 @@
+-- A positional whose `@name` is the name a record field already publishes.
+--
+-- Each argument of a subcommand is addressed by one key in every
+-- machine-readable view. The per-category checks do not see this one: it is
+-- legal as a positional name and legal as a field name, and only collides
+-- once both are published side by side. Left unchecked the MCP builder fails
+-- closed and drops the whole command from the tool surface, so the author
+-- loses a tool and is told nothing.
+module keycollide (tally)
+
+import root-py
+
+source Py from "helpers.py" ("collide_tally" as collideTally)
+
+--' Options for the tally
+--' @unroll true
+record Opts where
+  --' how many to keep
+  --' @arg -n/--count
+  --' @default 1
+  count :: Int
+
+record py => Opts = "dict"
+
+collideTally :: Str -> Opts -> Int
+
+--' Count things
+tally ::
+  --' what to count
+  --' @name count
+  Str ->
+  Opts ->
+  Int
+tally = collideTally

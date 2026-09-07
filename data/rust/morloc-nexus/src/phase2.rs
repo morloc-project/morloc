@@ -1199,8 +1199,8 @@ mod tests {
                     "needed_pools": [0],
                     "desc": ["Add two integers"],
                     "args": [
-                        {"kind": "pos", "schema": "i8", "type": "Int", "metavar": "X", "quoted": false, "desc": [], "constraints": [], "metadata": {}},
-                        {"kind": "pos", "schema": "i8", "type": "Int", "metavar": "Y", "quoted": false, "desc": [], "constraints": [], "metadata": {}}
+                        {"kind": "pos", "key": "_1", "schema": "i8", "type": "Int", "metavar": "X", "quoted": false, "desc": [], "constraints": [], "metadata": {}},
+                        {"kind": "pos", "key": "_2", "schema": "i8", "type": "Int", "metavar": "Y", "quoted": false, "desc": [], "constraints": [], "metadata": {}}
                     ],
                     "return": {"schema": "i8", "type": "Int", "desc": [], "constraints": [], "metadata": {}},
                     "constraints": [],
@@ -1296,8 +1296,8 @@ mod tests {
                     "needed_pools": [0],
                     "desc": ["Search"],
                     "args": [
-                        {"kind": "pos", "schema": "s", "type": "Str", "metavar": "PATTERN", "quoted": false, "desc": ["the text to find"], "constraints": [], "metadata": {}},
-                        {"kind": "pos", "schema": "s", "type": "Str", "quoted": false, "desc": ["where to look"], "constraints": [], "metadata": {}}
+                        {"kind": "pos", "key": "_1", "schema": "s", "type": "Str", "metavar": "PATTERN", "quoted": false, "desc": ["the text to find"], "constraints": [], "metadata": {}},
+                        {"kind": "pos", "key": "_2", "schema": "s", "type": "Str", "quoted": false, "desc": ["where to look"], "constraints": [], "metadata": {}}
                     ],
                     "return": {"schema": "s", "type": "Str", "desc": [], "constraints": [], "metadata": {}},
                     "constraints": [],
@@ -1413,7 +1413,7 @@ mod tests {
                     "needed_pools": [0],
                     "desc": [],
                     "args": [
-                        {"kind": "opt", "schema": "s", "type": "Str", "metavar": "NAME", "quoted": false, "short": "n", "long": "name", "default": "world", "desc": [], "constraints": [], "metadata": {}}
+                        {"kind": "opt", "key": "name", "schema": "s", "type": "Str", "metavar": "NAME", "quoted": false, "short": "n", "long": "name", "default": "world", "desc": [], "constraints": [], "metadata": {}}
                     ],
                     "return": {"schema": "s", "type": "Str", "desc": [], "constraints": [], "metadata": {}},
                     "constraints": [],
@@ -1458,7 +1458,7 @@ mod tests {
                     "needed_pools": [0],
                     "desc": [],
                     "args": [
-                        {"kind": "flag", "short": "v", "long": "verbose", "long_rev": null, "default": "false", "desc": [], "metadata": {}}
+                        {"kind": "flag", "key": "verbose", "short": "v", "long": "verbose", "long_rev": null, "default": "false", "desc": [], "metadata": {}}
                     ],
                     "return": {"schema": "z", "type": "Unit", "desc": [], "constraints": [], "metadata": {}},
                     "constraints": [],
@@ -1516,7 +1516,7 @@ mod tests {
                     "needed_pools": [0],
                     "desc": [],
                     "args": [
-                        {"kind": "pos", "schema": "s", "type": "Str", "metavar": "S", "quoted": true, "desc": [], "constraints": [], "metadata": {}}
+                        {"kind": "pos", "key": "_1", "schema": "s", "type": "Str", "metavar": "S", "quoted": true, "desc": [], "constraints": [], "metadata": {}}
                     ],
                     "return": {"schema": "s", "type": "Str", "desc": [], "constraints": [], "metadata": {}},
                     "constraints": [],
@@ -1563,7 +1563,7 @@ mod tests {
                     "needed_pools": [0],
                     "desc": [],
                     "args": [
-                        {"kind": "opt", "schema": "s", "type": "Str", "metavar": "S", "quoted": true, "short": "y", "long": "yolo", "default": "\"yolo\"", "desc": [], "constraints": [], "metadata": {}}
+                        {"kind": "opt", "key": "yolo", "schema": "s", "type": "Str", "metavar": "S", "quoted": true, "short": "y", "long": "yolo", "default": "\"yolo\"", "desc": [], "constraints": [], "metadata": {}}
                     ],
                     "return": {"schema": "i8", "type": "Int", "desc": [], "constraints": [], "metadata": {}},
                     "constraints": [],
@@ -1617,14 +1617,15 @@ mod tests {
                     "args": [
                         {
                             "kind": "grp",
+                            "key": "opts",
                             "schema": "m22m1Int52m1Int5",
                             "type": "AlgConfig",
                             "metavar": "ALG_CONFIG",
                             "desc": [],
                             "group_opt": {"short": null, "long": "alg-config"},
                             "entries": [
-                                {"key": "m", "arg": {"kind": "opt", "schema": "i4", "type": "Int", "metavar": "INT", "quoted": false, "short": "m", "long": null, "default": "0", "desc": [], "constraints": [], "metadata": {}}},
-                                {"key": "n", "arg": {"kind": "opt", "schema": "i4", "type": "Int", "metavar": "INT", "quoted": false, "short": "n", "long": "nosy", "default": "0", "desc": [], "constraints": [], "metadata": {}}}
+                                {"key": "m", "arg": {"kind": "opt", "key": "m", "schema": "i4", "type": "Int", "metavar": "INT", "quoted": false, "short": "m", "long": null, "default": "0", "desc": [], "constraints": [], "metadata": {}}},
+                                {"key": "n", "arg": {"kind": "opt", "key": "n", "schema": "i4", "type": "Int", "metavar": "INT", "quoted": false, "short": "n", "long": "nosy", "default": "0", "desc": [], "constraints": [], "metadata": {}}}
                             ],
                             "constraints": [],
                             "metadata": {}

@@ -637,6 +637,15 @@ pub enum Arg {
     /// A positional CLI argument.
     #[serde(rename = "pos")]
     Positional {
+        /// The name this argument answers to wherever the interface is
+        /// consumed by a program: the JSON help, the MCP tool schema, and
+        /// the named form of an HTTP call. The compiler computes it once
+        /// (see `argKey` in `CodeGenerator/Nexus.hs`) so no consumer has to
+        /// invent one -- doing that independently is how `--json-help` and
+        /// `--mcp-tools` came to publish different names for one argument.
+        /// A positional is keyed by its explicit `@name`, else by its
+        /// 1-based position (`_1`, `_2`, ...).
+        key: String,
         /// Morloc serialization schema string. Used at dispatch time
         /// to parse the user's CLI input into a binary data packet.
         #[serde(default)]
@@ -724,6 +733,9 @@ pub enum Arg {
     /// An optional CLI argument with a long/short option name.
     #[serde(rename = "opt")]
     Optional {
+        /// Published key -- see [`Arg::Positional`]'s `key`. An option is
+        /// keyed by its long spelling, falling back to its short.
+        key: String,
         /// Morloc serialization schema for the option's value type.
         #[serde(default)]
         schema: Option<String>,
@@ -799,6 +811,9 @@ pub enum Arg {
     /// produces the value `true` or `false`.
     #[serde(rename = "flag")]
     Flag {
+        /// Published key -- see [`Arg::Positional`]'s `key`. A flag is keyed
+        /// by its long spelling, falling back to its short.
+        key: String,
         /// Single-character short option (e.g. `"v"` for `-v`).
         #[serde(default, rename = "short")]
         short_opt: Option<String>,
@@ -832,6 +847,11 @@ pub enum Arg {
     /// entries never need their own schemas.
     #[serde(rename = "grp")]
     Group {
+        /// Published key -- see [`Arg::Positional`]'s `key`. A group is keyed
+        /// by its record type name, lowercased. It is addressed under that
+        /// key only in the whole-object form (`group_opt` set); when the
+        /// record is unrolled, each entry's `key` is what a caller names.
+        key: String,
         /// Morloc schema for the whole record (a `Map` schema).
         #[serde(default)]
         schema: Option<String>,
@@ -970,6 +990,18 @@ pub fn parse_manifest(payload: &str) -> Result<Manifest, String> {
 // pattern-matching at every site.
 
 impl Arg {
+    /// The name this argument answers to in every machine-readable view.
+    /// Computed by the compiler and published, so a consumer reads it rather
+    /// than deriving one of its own.
+    pub fn key(&self) -> &str {
+        match self {
+            Arg::Positional { key, .. } => key,
+            Arg::Optional { key, .. } => key,
+            Arg::Flag { key, .. } => key,
+            Arg::Group { key, .. } => key,
+        }
+    }
+
     /// Single-character short option (e.g. `'f'` for `-f`). Returns
     /// None for positional and group args.
     pub fn short_opt_char(&self) -> Option<char> {
@@ -1156,6 +1188,7 @@ mod tests {
                     "args": [
                         {
                             "kind": "pos",
+                            "key": "_1",
                             "schema": "s",
                             "type": "Str",
                             "metavar": null,
@@ -1204,6 +1237,7 @@ mod tests {
                     "args": [
                         {
                             "kind": "pos",
+                            "key": "_1",
                             "schema": "s",
                             "type": "Str",
                             "metavar": "NAME",
@@ -1246,6 +1280,7 @@ mod tests {
                     "args": [
                         {
                             "kind": "pos",
+                            "key": "_1",
                             "schema": "<dict>m24name<list>a<str>s3age<list>a<int>i4",
                             "type": "People",
                             "metavar": null,

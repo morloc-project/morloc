@@ -15,6 +15,9 @@ names, default values, metavars, and CLI option flags.
 module Morloc.CodeGenerator.Docstrings
   ( processDocstrings
   , argLocPrefix
+  -- * Published argument keys
+  , argKey
+  , cliOptKey
   -- * CLI shape validation
   , ArgShape (..)
   , StrShape (..)
@@ -192,6 +195,9 @@ processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs retdoc) = do
   validateManyOrdering loc cmdargs
   validateFlagRevCollisions loc cmdargs
   validatePositionalNames loc cmdargs
+  -- After the two per-category checks: they leave collisions that cross
+  -- categories, which are just as fatal to the machine-readable views.
+  validateArgKeys loc cmdargs
   validateStdinArg loc cmdargs
   (t0, retdoc') <- reduceArgDoc i t (ArgDocAlias retdoc)
   t' <- resolveNestedTypes i t0
@@ -734,6 +740,86 @@ validateStdinArg loc cmdargs = do
 -- leading `_` (the reserved namespace of the default `_1`/`_2` keys and the
 -- MCP `_render` selector) or a duplicate would collide downstream. Runs on the
 -- assembled arg list, so it covers every positional construction path.
+-- | The name an argument is known by wherever the interface is consumed by a
+-- program: the JSON help, the MCP tool schema, and the named form of an HTTP
+-- call. Computed once, here, and published in the manifest as the @key@ field
+-- so no consumer has to invent one -- deriving it independently is how
+-- @--json-help@ and @--mcp-tools@ came to publish different names for one
+-- argument.
+--
+-- An option or flag is named by its long spelling, falling back to its short.
+-- A positional has no name of its own unless the author gave it one with
+-- @\@name@, so it is keyed by its 1-based position. Neither a metavar nor the
+-- morloc parameter name can serve: a metavar describes a type (@FILE@,
+-- @COUNT@) and repeats as soon as a command takes two files, and a parameter
+-- name may be dropped by eta-reduction and differs between implementations of
+-- one signature.
+--
+-- The leading underscore is reserved -- 'validatePositionalNames' rejects a
+-- @\@name@ that starts with one -- so a generated key can never collide with
+-- an author's.
+cliOptKey :: CliOpt -> Text
+cliOptKey (CliOptLong l) = l
+cliOptKey (CliOptBoth _ l) = l
+cliOptKey (CliOptShort c) = MT.singleton c
+
+-- | The published key of one argument. @n@ is its 1-based index among the
+-- positionals, and is ignored by every other kind.
+argKey :: Int -> CmdArg -> Text
+argKey n (CmdArgPos r) = fromMaybe ("_" <> MT.show' n) (argPosDocName r)
+argKey _ (CmdArgOpt r) = cliOptKey (argOptDocArg r)
+argKey _ (CmdArgFlag r) = cliOptKey (argFlagDocOpt r)
+-- A group is keyed only when it also carries an aggregate option to accept the
+-- whole record; when it is unrolled the fields are the only thing a caller
+-- addresses, and each carries its own key. The name matches the record type so
+-- a caller reading the glossary can find it.
+argKey _ (CmdArgGrp r) = MT.toLower (render (pretty (recDocType r)))
+
+-- | Every key one subcommand publishes, paired with a description of where it
+-- came from for the diagnostic. Mirrors what the machine-readable views
+-- advertise: a group contributes its own key only in the whole-record form,
+-- and its fields contribute theirs either way.
+publishedKeys :: [CmdArg] -> [(Text, Text)]
+publishedKeys cmdargs = go 1 cmdargs
+  where
+    go _ [] = []
+    go n (a : rest) = entries n a <> go (nextPos n a) rest
+
+    nextPos n (CmdArgPos _) = n + 1
+    nextPos n _ = n
+
+    entries n a@(CmdArgPos _) = [(argKey n a, "positional " <> MT.show' n)]
+    entries n a@(CmdArgOpt _) = [(argKey n a, "option `--" <> argKey n a <> "`")]
+    entries n a@(CmdArgFlag _) = [(argKey n a, "flag `--" <> argKey n a <> "`")]
+    entries n a@(CmdArgGrp r) =
+      [ (argKey n a, "record argument `" <> argKey n a <> "`")
+      | isJust (recDocOpt r) ]
+      <> [ (unKey k, "field `" <> unKey k <> "` of record `" <> argKey n a <> "`")
+         | (k, _) <- recDocEntries r ]
+
+-- | Reject two arguments of one subcommand that would publish the same key.
+--
+-- 'validatePositionalNames' and 'validateFlagRevCollisions' each police one
+-- category; a key collides across categories too -- a positional @\@name
+-- title@ against a record field @title@, or against a short-only option -- and
+-- the reserved @_render@ selector is in the same namespace. Left unchecked the
+-- MCP builder fails closed and drops the whole command from the tool surface
+-- with only a note on stderr, so the author loses a tool and is never told why.
+validateArgKeys :: MDoc -> [CmdArg] -> MorlocMonad ()
+validateArgKeys loc cmdargs = do
+  let keys = ("_render", "the output-projection selector") : publishedKeys cmdargs
+      grouped = Map.fromListWith (++) [(k, [src]) | (k, src) <- keys]
+      dups = [(k, srcs) | (k, srcs) <- Map.toList grouped, length srcs > 1]
+  case dups of
+    [] -> return ()
+    ((k, srcs) : _) ->
+      MM.throwSystemError $
+        loc <> "'" <> pretty k <> "' is the interface name of both "
+          <> hsep (punctuate " and" (map pretty (reverse srcs)))
+          <> ". Every argument of a subcommand must be named distinctly, "
+          <> "because one name is how a JSON, MCP or HTTP caller addresses "
+          <> "it; rename one with `@name`."
+
 validatePositionalNames :: MDoc -> [CmdArg] -> MorlocMonad ()
 validatePositionalNames loc cmdargs = do
   let names = [nm | CmdArgPos r <- cmdargs, Just nm <- [argPosDocName r]]
