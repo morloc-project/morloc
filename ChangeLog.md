@@ -11,7 +11,6 @@ Many bug fixes and better stress test coverage
    - it is not advertised until it can answer
    - waive it with `--eval-allow-no-auth` or `MORLOC_EVAL_ALLOW_NO_AUTH`
  - a serve asked to run unauthenticated off loopback says so at startup
->>>>>>> dev
 
 0.101.0 [2026-09-05]
 --------------------
