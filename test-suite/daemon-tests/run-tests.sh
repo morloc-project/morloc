@@ -336,7 +336,16 @@ shm_size_for_pid() {
 shm_count_for_pid() {
     local pidhex
     pidhex=$(printf '%06x' "$1")
-    ls -1 /dev/shm/mlc-${pidhex}-* 2>/dev/null | wc -l
+    # Counted by walking the glob rather than listing it. Under errexit a
+    # listing that matches nothing fails the pipeline and takes the whole
+    # suite down with it -- and "nothing" is exactly the answer expected of
+    # a daemon that has shut down and released its segments, which is the
+    # one moment worth asking.
+    local count=0 f
+    for f in /dev/shm/mlc-${pidhex}-*; do
+        [ -e "$f" ] && count=$((count + 1))
+    done
+    echo "$count"
 }
 
 # Resident set size of a process, in KB. `ps` rather than /proc so this also
