@@ -1729,6 +1729,11 @@ if should_run "soak"; then
 
     SOAK_DIR=$(mktemp -d)
     WORK_DIRS+=("$SOAK_DIR")
+    # Failure count on entry. If the group ends higher, the daemons' own
+    # output is printed in full below: the runtime reports shared-memory
+    # accounting faults there, and reading them beside the corrupted
+    # responses is most of how the two get connected.
+    SOAK_FAILED_BEFORE=$FAILED
     cp "$SCRIPT_DIR/soak.loc" "$SCRIPT_DIR/soak.py" "$SCRIPT_DIR/soak.hpp" \
         "$SOAK_DIR/"
     if ! (cd "$SOAK_DIR" && morloc make -o nexus soak.loc \
@@ -1846,7 +1851,7 @@ if should_run "soak"; then
             "$SOAK_LOG" 2>/dev/null | grep -c .) || soak_noise=0
         assert_test "daemon logged nothing unexpected" "0" "$soak_noise"
         if [ "$soak_noise" != "0" ]; then
-            echo "      $(head -c 400 "$SOAK_LOG")"
+            sed 's/^/      /' "$SOAK_LOG"
         fi
 
         # Still a working daemon at the end of all that.
@@ -1909,7 +1914,7 @@ if should_run "soak"; then
                 "$PIN_LOG" 2>/dev/null | grep -c .) || pin_noise=0
             assert_test "contended daemon logged nothing unexpected" "0" "$pin_noise"
             if [ "$pin_noise" != "0" ]; then
-                echo "      $(head -c 400 "$PIN_LOG")"
+                sed 's/^/      /' "$PIN_LOG"
             fi
 
             stop_daemon "$PIN_PID"
@@ -1966,10 +1971,18 @@ if should_run "soak"; then
                 "$THR_LOG" 2>/dev/null | grep -c .) || thr_noise=0
             assert_test "threaded pool logged nothing unexpected" "0" "$thr_noise"
             if [ "$thr_noise" != "0" ]; then
-                echo "      $(head -c 400 "$THR_LOG")"
+                sed 's/^/      /' "$THR_LOG"
             fi
 
             stop_daemon "$THR_PID"
+        fi
+
+        if [ "$FAILED" -gt "$SOAK_FAILED_BEFORE" ]; then
+            for lg in "$SOAK_LOG" "$SOAK_DIR/pinned.log" "$SOAK_DIR/threaded.log"; do
+                [ -s "$lg" ] || continue
+                echo "      --- $(basename "$lg") ---"
+                sed 's/^/      /' "$lg"
+            done
         fi
     fi
 

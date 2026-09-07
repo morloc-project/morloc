@@ -36,6 +36,7 @@ import http.client
 import json
 import sys
 import threading
+import time
 
 RETRY_LIMIT = 60
 RETRY_SLEEP = 0.25
@@ -116,6 +117,35 @@ class Client:
 EXPECTED_LIST_LEN = 10
 
 
+def explain_square(x, got):
+    """Say whether a wrong square is another request's answer.
+
+    Arguments are `(worker + 1) * 100000 + round * 1000 + i + 1`. If the
+    value returned is the exact square of a DIFFERENT well-formed argument,
+    the pool computed the right function on the wrong input -- which is a
+    different fault from returning damaged memory, and worth telling apart
+    without another CI round trip."""
+    if not isinstance(got, (int, float)):
+        return " (not a number)"
+    if isinstance(got, float) and (got != got or got in (float("inf"), float("-inf"))):
+        return " (not finite -- uninitialised memory)"
+    if got == 0:
+        return " (zero -- a zeroed block reads as 0)"
+    try:
+        root = round(got ** 0.5)
+    except (OverflowError, ValueError):
+        return " (unrepresentable)"
+    if root * root == got and root != x:
+        worker = root // 100000 - 1
+        rest = root % 100000
+        if 0 <= worker < 64:
+            return (" == %d^2, i.e. the square of worker %d's argument "
+                    "(round %d, call %d) -- right function, wrong input"
+                    % (root, worker, rest // 1000, rest % 1000))
+        return " == %d^2, the square of some other argument" % root
+    return " (not the square of any well-formed argument -- damaged memory)"
+
+
 def payload_for(worker_id, iteration, size):
     """A list whose every element identifies the request that asked for it.
 
@@ -127,6 +157,52 @@ def payload_for(worker_id, iteration, size):
     return [base + i for i in range(size)]
 
 
+def whose_payload(value, index):
+    """Name the request a stray payload element belongs to, or None.
+
+    Elements are `base + index` with the base encoding worker and iteration
+    (see payload_for), so a value that arrived in the wrong reply still says
+    where it came from. That distinguishes a block recycled into another
+    live request from a block filled with something else entirely."""
+    base = value - index
+    if base <= 0 or base % 1000 != 0:
+        return None
+    worker = base // 1000000 - 1
+    iteration = (base % 1000000) // 1000
+    if 0 <= worker < 64 and 0 <= iteration < 100000:
+        return "worker %d iteration %d" % (worker, iteration)
+    return None
+
+
+def describe_corruption(sent, got):
+    """Say what SHAPE the damage has, not merely that there is damage.
+
+    The three cases tell different stories and want different fixes. A
+    correct prefix followed by zeros is a block zeroed underneath the reader
+    while it read -- shfree zero-fills on the final reference drop, so that
+    is a use-after-free. A reply that is wholly another request's payload is
+    a block already recycled before the read started. Anything else is
+    neither, and worth seeing in full."""
+    n = len(sent)
+    prefix = 0
+    while prefix < n and prefix < len(got) and sent[prefix] == got[prefix]:
+        prefix += 1
+    tail = got[prefix:]
+    zeros = sum(1 for v in tail if v == 0)
+    nonzero = [(prefix + k, v) for k, v in enumerate(tail) if v != 0][:3]
+    head = "%d/%d elements correct" % (prefix, n)
+    if tail and zeros == len(tail):
+        return head + ", then %d zeros to the end (block zeroed under the reader)" % zeros
+    bits = ["%s, then %d of %d remaining are zero" % (head, zeros, len(tail))]
+    for idx, v in nonzero:
+        owner = whose_payload(v, idx)
+        bits.append(
+            "element %d = %d%s"
+            % (idx, v, (" -- belongs to %s" % owner) if owner else "")
+        )
+    return "; ".join(bits)
+
+
 def check_echo(worker_id, command, sent, got):
     if not isinstance(got, list):
         raise AssertionError(
@@ -134,17 +210,14 @@ def check_echo(worker_id, command, sent, got):
         )
     if len(got) != len(sent):
         raise AssertionError(
-            "worker %d: %s returned %d elements, sent %d"
+            "worker %d: %s returned %d elements, sent %d (a zeroed length "
+            "field reads as an empty list)"
             % (worker_id, command, len(got), len(sent))
         )
     if got != sent:
-        first_bad = next(
-            (k for k, (a, b) in enumerate(zip(sent, got)) if a != b), None
-        )
         raise AssertionError(
-            "worker %d: %s differs at element %s: sent %r, got %r"
-            % (worker_id, command, first_bad,
-               sent[first_bad], got[first_bad])
+            "worker %d: %s corrupted -- %s"
+            % (worker_id, command, describe_corruption(sent, got))
         )
 
 
@@ -162,11 +235,23 @@ def run_worker(port, worker_id, requests, errors, stats, barrier, rounds,
                 # that belongs to another request is visible rather than
                 # plausible.
                 x = (worker_id + 1) * 100000 + rnd * 1000 + i + 1
+                started = time.monotonic()
                 got = client.call("square", [x])
+                elapsed = time.monotonic() - started
                 if got != x * x:
+                    # Retry the identical request at once. A correct answer
+                    # second time says the damage was to memory in flight
+                    # rather than to anything durable, which is most of the
+                    # question.
+                    retry = client.call("square", [x])
                     raise AssertionError(
-                        "worker %d: square(%d) returned %r"
-                        % (worker_id, x, got)
+                        "worker %d: square(%d) returned %r%s; %s; "
+                        "call took %.3fs; immediate retry %s"
+                        % (worker_id, x, got, explain_square(x, got),
+                           "retry CORRECT" if retry == x * x
+                           else "retry ALSO WRONG (%r)" % (retry,),
+                           elapsed,
+                           "ok" if retry == x * x else "bad")
                     )
                 if churn:
                     # Both languages, alternating, so a block recycled under
@@ -232,7 +317,9 @@ def main():
         "mode=%s workers=%d rounds=%d ok=%d deferred=%d dropped=%d errors=%d"
         % (args.mode, workers, args.rounds, ok, deferred, dropped, len(errors))
     )
-    for e in errors[:5]:
+    # Every failure, not a sample: the shape of the damage varies between
+    # them and the variation is the evidence.
+    for e in errors:
         print("  " + e, file=sys.stderr)
     return 1 if errors else 0
 
