@@ -7,6 +7,10 @@
 -- emitted and where it lands: one borrow, two borrows sharing a lifetime, a
 -- borrow beside a Copy scalar, no borrow at all, and a borrowed container.
 -- Each is exercised on both the success and the @catch-fallback path.
+--
+-- This is also one of the two tests that pin the capture mode of an effect
+-- thunk: the thunks here outlive the frame that builds them, so they must
+-- capture by value. See rust-thunk-capture for the frames where they must not.
 
 module main (oneRef, twoRefs, mixed, copyOnly, listRef)
 

@@ -133,10 +133,16 @@ data OwnEnv = OwnEnv
   -- 'NativeContent' so 'letWrap' emits a deserialize let) and reassigned by the
   -- loop's continue, so its entry let is emitted @let mut@ ('rustMakeLet') and it
   -- is unioned into 'oeShared' so the body borrows/clones but never moves it.
+  , oeReturnsThunk :: Bool
+  -- ^ Whether the enclosing manifold's signature lets a closure leave its frame,
+  -- i.e. whether 'rustReturnType' renders the return as @impl Fn() -> T@. This
+  -- decides how an effect thunk captures: see 'lcMakeDoBlock'. It is read from
+  -- the same 'TypeM' that produces the signature, so the capture mode and the
+  -- return type cannot disagree.
   }
 
 emptyOwnEnv :: OwnEnv
-emptyOwnEnv = OwnEnv Set.empty Set.empty Set.empty Set.empty Set.empty
+emptyOwnEnv = OwnEnv Set.empty Set.empty Set.empty Set.empty Set.empty False
 
 type RustM = ReaderT OwnEnv (CMS.StateT RustState Identity)
 
@@ -1253,9 +1259,9 @@ borrowedIndicesOfForm form =
 -- mutating state, the scope is purely lexical -- sibling and nested manifolds
 -- cannot corrupt each other's view, and the answer does not depend on the fold's
 -- evaluation order.
-withManifoldScope :: Set.Set Int -> Set.Set Int -> Set.Set Int -> RustM a -> RustM a
-withManifoldScope borrowed shared carried =
-  local (\e -> OwnEnv {oeCurrent = borrowed, oeParent = oeCurrent e, oeShared = shared, oeParentShared = oeShared e, oeLoopCarried = carried})
+withManifoldScope :: Set.Set Int -> Set.Set Int -> Set.Set Int -> Bool -> RustM a -> RustM a
+withManifoldScope borrowed shared carried returnsThunk =
+  local (\e -> OwnEnv {oeCurrent = borrowed, oeParent = oeCurrent e, oeShared = shared, oeParentShared = oeShared e, oeLoopCarried = carried, oeReturnsThunk = returnsThunk})
 
 -- | Run an action in the caller's ownership scope, by making 'oeCurrent' the
 -- caller's set ('oeParent'). Used when rendering a manifold call whose arguments
@@ -1289,9 +1295,9 @@ rustSurround =
   defaultValue
     { surroundSerialManifoldM = \recurse sm@(SerialManifold _ _ form _ _) ->
         let carried = loopCarriedIdsSM sm
-         in withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesSM sm `Set.union` carried) carried (recurse sm)
+         in withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesSM sm `Set.union` carried) carried (rustReturnIsClosure (typeMof sm)) (recurse sm)
     , surroundNativeManifoldM = \recurse nm@(NativeManifold _ _ form _) ->
-        withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesNM nm) Set.empty (recurse nm)
+        withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesNM nm) Set.empty (rustReturnIsClosure (typeMof nm)) (recurse nm)
     }
 
 translateSegment :: SerialManifold -> RustM MDoc
@@ -1557,12 +1563,23 @@ rustLowerConfig mask =
     , lcReturn = \e -> "return" <+> e <> ";"
     , lcMakeIf = rustMakeIf
     , lcMakeLoop = rustMakeLoop
-    , lcMakeDoBlock = \_ stmts expr ->
+    -- An effect thunk captures by value only when it can outlive the frame that
+    -- builds it. The only such position is a manifold return typed
+    -- @impl Fn() -> T@ ('rustReturnType'); every other renderer erases the
+    -- effect row, so a closure reaching one is already a type error. A thunk in
+    -- any other frame is forced on the spot or handed to @mlc_catch@, which
+    -- consumes both arms before returning, so it borrows what it reads and
+    -- leaves the value usable afterwards. The C++ member captures by copy
+    -- unconditionally, which is safe there because a copy leaves the original
+    -- intact; @move@ does not.
+    , lcMakeDoBlock = \_ stmts expr -> do
+        escapes <- asks oeReturnsThunk
+        let header = if escapes then "move ||" else "||"
         return
           ( []
           , case stmts of
-              [] -> "move || {" <+> expr <+> "}"
-              _ -> "move || {" <> nest 4 (line <> vsep (stmts ++ [expr])) <> line <> "}"
+              [] -> header <+> "{" <+> expr <+> "}"
+              _ -> header <+> "{" <> nest 4 (line <> vsep (stmts ++ [expr])) <> line <> "}"
           )
     , lcSerialize = defaultSerialize (rustLowerConfig mask)
     , lcDeserialize = \_ -> defaultDeserialize (rustLowerConfig mask)

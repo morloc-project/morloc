@@ -1,0 +1,78 @@
+-- Rust pool: a value read inside a generated thunk is still readable after it.
+--
+-- An effectful statement and each arm of @catch are lowered to a closure that
+-- is called on the spot. A closure that takes ownership of everything it names
+-- consumes the locals it only reads, so a non-Copy value used inside one
+-- cannot be used again afterwards, and two arms of the same @catch cannot both
+-- name one value.
+--
+-- Covered here: a manifold parameter, a let-bound record, and a bound result,
+-- reused after an effectful statement, after a @catch, across both arms of a
+-- single @catch, and around the effectful statement of a tail-recursive loop.
+
+module main (afterSave, afterCatch, bothArms, recordReuse, loopReuse, letThunk, guardedTwice)
+
+import root-rust
+
+record Box where
+  tag :: Str
+  items :: [Int]
+record Rust => Box = "struct"
+
+source Rust from "own.rs" ("rt_len" as strLen)
+strLen :: Str -> Int
+
+-- The path is named once inside the @save thunk and twice after it.
+afterSave :: Str -> <IO, Err> [Int]
+afterSave p = do
+  @save 0 p [1, 2, 3]
+  xs <- @load p :: <IO, Err> [Int]
+  ys <- @load p :: <IO, Err> [Int]
+  concat [xs, ys]
+
+-- The path is named by four @catch thunks in sequence.
+afterCatch :: Str -> <IO, Err> [Int]
+afterCatch p = do
+  a <- @catch (@load p :: <IO, Err> [Int]) [9]
+  b <- @catch (@load p :: <IO, Err> [Int]) [8]
+  concat [a, b]
+
+-- Both arms of one @catch name the same path.
+bothArms :: Str -> <IO, Err> [Int]
+bothArms p = @catch (@load p :: <IO, Err> [Int]) [strLen p]
+
+-- A let-bound record is read inside the thunk and again after it.
+recordReuse :: Str -> <IO, Err> [Int]
+recordReuse p = do
+  let b = ({tag = "box", items = [4, 5]} :: Box)
+  @save 0 p (.items b)
+  xs <- @load p :: <IO, Err> [Int]
+  concat [xs, .items b]
+
+-- The loop variable is read inside the thunk and passed to the next iteration.
+loopReuse :: Str -> Int -> <IO, Err> [Int]
+loopReuse p n
+  ? n == 0 = @load p :: <IO, Err> [Int]
+  : do
+      @save 0 p [n]
+      loopReuse p (n - 1)
+
+-- A thunk bound by a let and forced later, over a path used again afterwards.
+letThunk :: Str -> <IO, Err> [Int]
+letThunk p = do
+  let t = (@load p :: <IO, Err> [Int])
+  a <- t
+  b <- @load p :: <IO, Err> [Int]
+  concat [a, b]
+
+-- A @catch in a helper that is itself effect-typed, reached twice: the helper's
+-- own frame may hand a closure out, so its two arms are captured differently
+-- from the ones above.
+guarded :: Str -> <IO, Err> [Int]
+guarded q = @catch (@load q :: <IO, Err> [Int]) [strLen q]
+
+guardedTwice :: Str -> <IO, Err> [Int]
+guardedTwice p = do
+  a <- guarded p
+  b <- guarded p
+  concat [a, b]
