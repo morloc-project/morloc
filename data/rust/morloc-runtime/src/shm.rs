@@ -1480,10 +1480,13 @@ fn shmalloc_unlocked(size: usize) -> Result<AbsPtr, MorlocError> {
     let final_blk = split_block(shm, blk, size)?;
     // SAFETY: final_blk is a valid BlockHeader in mmap'd SHM found by find_free_block.
     // The data region starts immediately after the header.
-    unsafe {
-        (*final_blk).reference_count.store(1, Ordering::Release);
-        Ok((final_blk as *mut u8).add(std::mem::size_of::<BlockHeader>()))
-    }
+    //
+    // The reference count was already set to 1 by `claim`, under the volume
+    // lock, at the moment the block was found. Setting it again here would be
+    // harmless but would suggest this is where ownership begins; it is not,
+    // and it cannot be, because between there and here the block is visible
+    // to every other process.
+    unsafe { Ok((final_blk as *mut u8).add(std::mem::size_of::<BlockHeader>())) }
 }
 
 fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
@@ -1498,17 +1501,51 @@ fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
     if blk.magic != BLK_MAGIC {
         return Err(MorlocError::Shm("Corrupted memory".into()));
     }
-    if blk.reference_count.load(Ordering::Acquire) == 0 {
-        return Err(MorlocError::Shm("Reference count already 0".into()));
-    }
-    let prev = blk.reference_count.fetch_sub(1, Ordering::AcqRel);
-    if prev == 1 {
-        // SAFETY: ptr points to blk.size bytes of SHM data we own (refcount just hit 0).
-        unsafe {
-            std::ptr::write_bytes(ptr, 0, blk.size);
+    // Scrub before publishing, not after. A count of zero is precisely what
+    // marks a block available, so a scrub that runs after the count drops
+    // writes zeros over whatever its next owner has already stored there --
+    // and on a machine with few cores that owner gets far enough to notice.
+    // Dropping the last reference to a sentinel instead leaves the block
+    // reading as in use, so no scanner will take it while the scrub runs, and
+    // zero is published only once the bytes are actually gone.
+    //
+    // The whole transition is a compare-exchange loop because reading the
+    // count and then acting on it are two separate steps: between them a
+    // concurrent free of the same block can move it, and a decrement issued
+    // on the strength of a stale read underflows a counter that everything
+    // else treats as "in use".
+    const TEARING_DOWN: u32 = u32::MAX;
+    loop {
+        let cur = blk.reference_count.load(Ordering::Acquire);
+        if cur == 0 {
+            return Err(MorlocError::Shm("Reference count already 0".into()));
         }
+        if cur == TEARING_DOWN {
+            // Another party is mid-scrub and owns the transition to zero.
+            return Err(MorlocError::Shm(
+                "Reference count already 0 (block is being released)".into(),
+            ));
+        }
+        let next = if cur == 1 { TEARING_DOWN } else { cur - 1 };
+        if blk
+            .reference_count
+            .compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            continue;
+        }
+        if next == TEARING_DOWN {
+            // SAFETY: ptr points to blk.size bytes of SHM data. This process
+            // held the last reference and has replaced it with a value that
+            // reads as in-use, so the block cannot be handed to anyone until
+            // the store below.
+            unsafe {
+                std::ptr::write_bytes(ptr, 0, blk.size);
+            }
+            blk.reference_count.store(0, Ordering::Release);
+        }
+        return Ok(());
     }
-    Ok(())
 }
 
 fn find_free_block(
@@ -1584,7 +1621,36 @@ fn find_free_block(
     let blk = unsafe {
         (new_shm as *mut u8).add(std::mem::size_of::<ShmHeader>()) as *mut BlockHeader
     };
+    // Claim it here too. A volume this process just created is discoverable
+    // by any other that opens the segment, so leaving its first block reading
+    // free has the same consequence as anywhere else.
+    unsafe {
+        shm_lock(&(*new_shm).lock)?;
+        claim(blk);
+        shm_unlock(&(*new_shm).lock);
+    }
     Ok(blk)
+}
+
+/// Take ownership of a free block. MUST be called while still holding the
+/// volume lock that found it.
+///
+/// A block is "free" precisely when its reference count reads zero, and that
+/// count lives in shared memory where every process can see it. Handing a
+/// block back to a caller while it still reads zero publishes it as
+/// available to every other process for as long as it takes the caller to
+/// claim it -- and `ALLOC_MUTEX`, the only thing serialising the steps
+/// between, is an ordinary in-process mutex. It keeps this process's own
+/// threads apart and says nothing about the pools, which are separate
+/// processes allocating from these same volumes. Two of them would be given
+/// the same block, then write over each other's data, split the same block
+/// in two different ways, and each free it once.
+///
+/// # Safety
+/// `blk` must be a valid BlockHeader in a mapped volume whose lock is held.
+#[inline]
+unsafe fn claim(blk: *mut BlockHeader) {
+    (*blk).reference_count.store(1, Ordering::Release);
 }
 
 fn find_free_block_in_volume(
@@ -1607,6 +1673,7 @@ fn find_free_block_in_volume(
                 && (*blk).reference_count.load(Ordering::Relaxed) == 0
                 && (*blk).size >= size
             {
+                claim(blk);
                 shm_unlock(&(*shm).lock);
                 return Ok(Some(blk));
             }
@@ -1620,6 +1687,7 @@ fn find_free_block_in_volume(
         };
 
         if let Some(blk) = scan_volume(start_blk, size, shm_end as *const u8) {
+            claim(blk);
             shm_unlock(&(*shm).lock);
             return Ok(Some(blk));
         }
@@ -1629,6 +1697,7 @@ fn find_free_block_in_volume(
             let first_blk = vol2abs_raw(0, shm) as *mut BlockHeader;
             let cursor_end = vol2abs_raw(cursor, shm);
             if let Some(blk) = scan_volume(first_blk, size, cursor_end as *const u8) {
+                claim(blk);
                 shm_unlock(&(*shm).lock);
                 return Ok(Some(blk));
             }
