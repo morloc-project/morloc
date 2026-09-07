@@ -1772,14 +1772,38 @@ pub unsafe extern "C" fn daemon_dispatch(
             return resp;
         }
 
+        // Re-encode each argument as JSON text for the pool. This has to go
+        // through the serializer, as the CLI path does in `dispatch::quoted`:
+        // wrapping a string's raw contents in quotes yields invalid JSON as
+        // soon as it holds a quote or a backslash, and a NUL would truncate
+        // the C string. Encoding escapes both, so the CString cannot fail.
+        // Done before the allocation below so an encoding failure returns
+        // without leaking the argument array.
+        let mut arg_texts: Vec<CString> = Vec::with_capacity(expected_nargs);
+        for val in parsed_args.iter() {
+            let encoded = serde_json::to_string(val)
+                .map_err(|e| e.to_string())
+                .and_then(|s| CString::new(s).map_err(|e| e.to_string()));
+            match encoded {
+                Ok(c) => arg_texts.push(c),
+                Err(e) => {
+                    (*resp).success = false;
+                    (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
+                    let c = CString::new(format!(
+                        "Failed to encode argument {}: {}",
+                        arg_texts.len() + 1,
+                        e
+                    ))
+                    .unwrap_or_default();
+                    (*resp).error = libc::strdup(c.as_ptr());
+                    return resp;
+                }
+            }
+        }
+
         args = libc::calloc(expected_nargs + 1, std::mem::size_of::<*mut c_void>())
             as *mut *mut c_void;
-        for (i, val) in parsed_args.iter().enumerate() {
-            let val_str = match val {
-                serde_json::Value::String(s) => format!("\"{}\"", s),
-                other => other.to_string(),
-            };
-            let c = CString::new(val_str).unwrap_or_default();
+        for (i, c) in arg_texts.iter().enumerate() {
             let dup = libc::strdup(c.as_ptr());
             *args.add(i) = initialize_positional(dup);
             libc::free(dup as *mut c_void);

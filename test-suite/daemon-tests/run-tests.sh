@@ -737,6 +737,34 @@ if should_run "http-json-args"; then
     val=$(json_field "$result" "result")
     assert_test "strlen of 'a]b[c}d{e' (object form) -> 9" "9" "$val"
 
+    # A string argument is re-serialized on its way to the pool. Doing that
+    # by wrapping the raw contents in quotes produces invalid JSON as soon
+    # as the value holds a quote, a backslash, or a control character, so
+    # each of these must arrive with its own length intact.
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/strlen" \
+        -H "Content-Type: application/json" \
+        -d '["say \"hi\""]')
+    val=$(json_field "$result" "result")
+    assert_test "strlen of 'say \"hi\"' -> 8" "8" "$val"
+
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/strlen" \
+        -H "Content-Type: application/json" \
+        -d '["a\\b"]')
+    val=$(json_field "$result" "result")
+    assert_test "strlen of a backslash between two letters -> 3" "3" "$val"
+
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/strlen" \
+        -H "Content-Type: application/json" \
+        -d '["a\nb"]')
+    val=$(json_field "$result" "result")
+    assert_test "strlen of a newline between two letters -> 3" "3" "$val"
+
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/strlen" \
+        -H "Content-Type: application/json" \
+        -d '{"args":["say \"hi\""]}')
+    val=$(json_field "$result" "result")
+    assert_test "strlen of 'say \"hi\"' (object form) -> 8" "8" "$val"
+
     stop_daemon "$LAST_DAEMON_PID"
     echo ""
 fi
