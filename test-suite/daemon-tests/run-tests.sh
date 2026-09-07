@@ -1693,20 +1693,38 @@ fi
 if should_run "soak"; then
     echo "${BOLD}[soak] Long-lived daemon under sustained load${RESET}"
 
+    # Concurrency is scaled to the machine. A hosted runner has a couple of
+    # cores; asking twelve simultaneous workers of it buys no interleaving
+    # that four would not already produce and costs wall clock the runner
+    # does not have. The floor keeps the phases meaningfully concurrent on a
+    # single-core box; the ceiling stops a large development machine from
+    # turning a gate into a benchmark.
+    SOAK_CPUS=$( (nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2) | head -1 )
+    case "$SOAK_CPUS" in ''|*[!0-9]*) SOAK_CPUS=2 ;; esac
+    SOAK_W=$((SOAK_CPUS * 2))
+    [ "$SOAK_W" -lt 4 ] && SOAK_W=4
+    [ "$SOAK_W" -gt 12 ] && SOAK_W=12
+    # The small-call flood is bounded by round trips rather than by work, so
+    # it can carry more connections than the payload phases.
+    SOAK_WB=$((SOAK_CPUS * 3))
+    [ "$SOAK_WB" -lt 6 ] && SOAK_WB=6
+    [ "$SOAK_WB" -gt 16 ] && SOAK_WB=16
+
     # Short is sized to finish in about half a minute while still putting
     # several thousand requests and a pool crash through the daemon. Long
     # multiplies the rounds rather than the workers: the same burst repeated
     # is what re-samples the scheduler, and each repeat is another chance at
-    # an interleaving that only happens sometimes.
+    # an interleaving that only happens sometimes. Widening instead would
+    # just queue on the cores available.
     if [ "$MORLOC_TEST_LEVEL" = "long" ]; then
-        SOAK_CHURN="--workers 12 --requests 25 --rounds 60"
-        SOAK_PIN_CHURN="--workers 12 --requests 20 --rounds 60"
-        SOAK_PIN_CONC="--workers 16 --requests 100 --rounds 40"
-        SOAK_THREAD_CHURN="--workers 12 --requests 20 --rounds 30"
+        SOAK_CHURN="--workers $SOAK_W --requests 25 --rounds 60"
+        SOAK_PIN_CHURN="--workers $SOAK_W --requests 20 --rounds 60"
+        SOAK_PIN_CONC="--workers $SOAK_WB --requests 100 --rounds 40"
+        SOAK_THREAD_CHURN="--workers $SOAK_W --requests 20 --rounds 30"
     else
-        SOAK_CHURN="--workers 8 --requests 12 --rounds 2"
-        SOAK_PIN_CHURN="--workers 8 --requests 10 --rounds 2"
-        SOAK_PIN_CONC="--workers 12 --requests 60 --rounds 2"
+        SOAK_CHURN="--workers $SOAK_W --requests 12 --rounds 2"
+        SOAK_PIN_CHURN="--workers $SOAK_W --requests 10 --rounds 2"
+        SOAK_PIN_CONC="--workers $SOAK_WB --requests 60 --rounds 2"
     fi
 
     SOAK_DIR=$(mktemp -d)
@@ -1753,7 +1771,7 @@ if should_run "soak"; then
         # wrong caller, or a block of shared memory recycled while still in
         # use, shows up.
         conc_out=$(python3 "$SCRIPT_DIR/soak-client.py" "$SOAK_PORT" conc \
-            --workers 8 --requests 60 2>&1) && conc_rc=0 || conc_rc=$?
+            --workers "$SOAK_W" --requests 60 2>&1) && conc_rc=0 || conc_rc=$?
         assert_test "concurrent requests all correct" "0" "$conc_rc"
         if [ "$conc_rc" != "0" ]; then
             echo "      $conc_out"
@@ -1778,7 +1796,7 @@ if should_run "soak"; then
         soak_pools=$(pgrep -P "$SOAK_PID" 2>/dev/null) || soak_pools=""
         for p in $soak_pools; do kill -9 "$p" 2>/dev/null || true; done
         crash_out=$(python3 "$SCRIPT_DIR/soak-client.py" "$SOAK_PORT" conc \
-            --workers 4 --requests 40 2>&1) && crash_rc=0 || crash_rc=$?
+            --workers $((SOAK_W / 2)) --requests 40 2>&1) && crash_rc=0 || crash_rc=$?
         assert_test "requests correct across a pool crash" "0" "$crash_rc"
         if [ "$crash_rc" != "0" ]; then
             echo "      $crash_out"
@@ -1853,7 +1871,11 @@ if should_run "soak"; then
         # that needs an unlucky interleaving is far likelier to be caught
         # here than on an idle twelve-core machine, which is the shape of
         # machine that hides one.
-        if command -v taskset >/dev/null 2>&1; then
+        # Pinning is only a constraint when it takes cores away. On a two-core
+        # runner the daemon is already crowded onto everything there is, so
+        # the phase would cost a daemon start-up to reproduce conditions that
+        # already hold.
+        if command -v taskset >/dev/null 2>&1 && [ "$SOAK_CPUS" -ge 4 ]; then
             PIN_PORT=$(pick_port)
             PIN_LOG="$SOAK_DIR/pinned.log"
             (cd "$SOAK_DIR" && exec taskset -c 0,1 morloc-nexus daemon ./nexus \
