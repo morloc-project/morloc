@@ -338,9 +338,8 @@ shm_count_for_pid() {
     pidhex=$(printf '%06x' "$1")
     # Counted by walking the glob rather than listing it. Under errexit a
     # listing that matches nothing fails the pipeline and takes the whole
-    # suite down with it -- and "nothing" is exactly the answer expected of
-    # a daemon that has shut down and released its segments, which is the
-    # one moment worth asking.
+    # suite with it -- and "nothing" is exactly the answer expected of a
+    # daemon that has shut down and released its segments.
     local count=0 f
     for f in /dev/shm/mlc-${pidhex}-*; do
         [ -e "$f" ] && count=$((count + 1))
@@ -366,6 +365,13 @@ fd_count_for_pid() {
         echo "na"
     fi
 }
+
+# Short by default, and short is what continuous integration runs: enough
+# load to catch a fault that happens on most runs, bounded to seconds.
+# `long` points the same tests at the same paths for minutes instead, which
+# is what a race needing an unlucky interleaving requires -- run it by hand
+# when hunting one (test.sh --long).
+MORLOC_TEST_LEVEL="${MORLOC_TEST_LEVEL:-short}"
 
 # ======================================================================
 # Test selector
@@ -1687,9 +1693,25 @@ fi
 if should_run "soak"; then
     echo "${BOLD}[soak] Long-lived daemon under sustained load${RESET}"
 
+    # Short is sized to finish in about half a minute while still putting
+    # several thousand requests and a pool crash through the daemon. Long
+    # multiplies the rounds rather than the workers: the same burst repeated
+    # is what re-samples the scheduler, and each repeat is another chance at
+    # an interleaving that only happens sometimes.
+    if [ "$MORLOC_TEST_LEVEL" = "long" ]; then
+        SOAK_CHURN="--workers 12 --requests 25 --rounds 60"
+        SOAK_PIN_CHURN="--workers 12 --requests 20 --rounds 60"
+        SOAK_PIN_CONC="--workers 16 --requests 100 --rounds 40"
+    else
+        SOAK_CHURN="--workers 8 --requests 12 --rounds 2"
+        SOAK_PIN_CHURN="--workers 8 --requests 10 --rounds 2"
+        SOAK_PIN_CONC="--workers 12 --requests 60 --rounds 2"
+    fi
+
     SOAK_DIR=$(mktemp -d)
     WORK_DIRS+=("$SOAK_DIR")
-    cp "$SCRIPT_DIR/soak.loc" "$SOAK_DIR/"
+    cp "$SCRIPT_DIR/soak.loc" "$SCRIPT_DIR/soak.py" "$SCRIPT_DIR/soak.hpp" \
+        "$SOAK_DIR/"
     if ! (cd "$SOAK_DIR" && morloc make -o nexus soak.loc \
             > /dev/null 2>"$SOAK_DIR/build.err"); then
         echo "  COMPILE FAIL: soak.loc"
@@ -1734,6 +1756,19 @@ if should_run "soak"; then
         assert_test "concurrent requests all correct" "0" "$conc_rc"
         if [ "$conc_rc" != "0" ]; then
             echo "      $conc_out"
+        fi
+
+        # Payloads large enough to be handed over in shared memory rather
+        # than carried inside the packet, through both languages, with the
+        # contents of every list keyed to the request that asked for it. This
+        # is the allocate / hand across / free / reuse path: if a block is
+        # recycled while another request still holds it, the reader sees the
+        # other request's data and the element comparison says which one.
+        churn_out=$(python3 "$SCRIPT_DIR/soak-client.py" "$SOAK_PORT" churn \
+            $SOAK_CHURN 2>&1) && churn_rc=0 || churn_rc=$?
+        assert_test "large payloads survive concurrent churn" "0" "$churn_rc"
+        if [ "$churn_rc" != "0" ]; then
+            echo "      $churn_out"
         fi
 
         # Kill the pools mid-flight and keep the load on. Every request must
@@ -1801,6 +1836,61 @@ if should_run "soak"; then
         assert_test "still serving after the soak" "200" "$final_status"
 
         stop_daemon "$SOAK_PID"
+
+        # Shared memory outlives the process that made it, so a daemon that
+        # exits without releasing its segments leaks at the machine level --
+        # invisible to anything measured while it was running, and cumulative
+        # across the restarts a long-lived service actually goes through.
+        sleep 1
+        leftover=$(shm_count_for_pid "$SOAK_PID")
+        assert_test "segments released when the daemon exits" "0" "$leftover"
+
+        # Same load again against a daemon confined to two cores. Threads that
+        # each have a core of their own rarely interleave inside a critical
+        # section; crowding them onto two makes the scheduler cut between
+        # instructions that normally run to completion undisturbed. A race
+        # that needs an unlucky interleaving is far likelier to be caught
+        # here than on an idle twelve-core machine, which is the shape of
+        # machine that hides one.
+        if command -v taskset >/dev/null 2>&1; then
+            PIN_PORT=$(pick_port)
+            PIN_LOG="$SOAK_DIR/pinned.log"
+            (cd "$SOAK_DIR" && exec taskset -c 0,1 morloc-nexus daemon ./nexus \
+                --http-port "$PIN_PORT" 2>"$PIN_LOG") &
+            PIN_PID=$!
+            DAEMON_PIDS+=("$PIN_PID")
+            wait_for_http "$PIN_PORT" 20 || true
+            curl -s -o /dev/null --max-time 30 -X POST \
+                "http://127.0.0.1:${PIN_PORT}/call/square" \
+                -H "Content-Type: application/json" -d '[3]'
+
+            pin_out=$(python3 "$SCRIPT_DIR/soak-client.py" "$PIN_PORT" churn \
+                $SOAK_PIN_CHURN 2>&1) && pin_rc=0 || pin_rc=$?
+            assert_test "correct under two-core contention" "0" "$pin_rc"
+            if [ "$pin_rc" != "0" ]; then
+                echo "      $pin_out"
+            fi
+
+            pin_conc=$(python3 "$SCRIPT_DIR/soak-client.py" "$PIN_PORT" conc \
+                $SOAK_PIN_CONC 2>&1) && pin_conc_rc=0 || pin_conc_rc=$?
+            assert_test "small calls correct under contention" "0" "$pin_conc_rc"
+            if [ "$pin_conc_rc" != "0" ]; then
+                echo "      $pin_conc"
+            fi
+
+            pin_noise=$(grep -vE \
+                -e '^morloc-daemon: listening ' \
+                -e '^morloc daemon: pool crash detected' \
+                -e '^ *pool [0-9]+: Pool process crashed with signal ' \
+                -e '^morloc daemon: recovery complete ' \
+                "$PIN_LOG" 2>/dev/null | grep -c .) || pin_noise=0
+            assert_test "contended daemon logged nothing unexpected" "0" "$pin_noise"
+            if [ "$pin_noise" != "0" ]; then
+                echo "      $(head -c 400 "$PIN_LOG")"
+            fi
+
+            stop_daemon "$PIN_PID"
+        fi
     fi
 
     echo ""
@@ -2374,9 +2464,9 @@ print('OK')
                 # sumInts: huge-input / scalar-output direction. Skipped once
                 # the sum leaves the range R can hold in its native integer,
                 # which is 32-bit however wide a morloc Int is: R answers NA and
-                # the pool refuses to pack it. That limit is a property of the R
-                # backend, not of the threshold this group is measuring, and it
-                # is reported separately.
+                # the pool refuses to pack it. That is a known limit of the R
+                # backend rather than anything about the threshold measured
+                # here, and it fails closed rather than answering wrongly.
                 if [ "$(it_expected_sum "$n")" -le 2147483647 ]; then
                     result=$(it_call sumInts "$json_arg")
                     actual_sum=$(json_field "$result" "result")

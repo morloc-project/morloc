@@ -9,13 +9,23 @@
 -- character block per element -- so every call puts real pressure on the
 -- shared-memory arena, which is where a daemon that leaks does so first.
 --
--- The two run in different pools on purpose: a soak that exercises one
+-- `cppEcho` and `pyEcho` return a list the caller sized. Small arguments
+-- travel inside the packet; past a threshold they are handed over in shared
+-- memory instead, and it is that second path -- allocate, hand across, free,
+-- reuse -- that a concurrent soak needs to hammer. One in each language,
+-- because a block recycled under one pool's threading is not evidence about
+-- the other.
+--
+-- The commands run in different pools on purpose: a soak that exercises one
 -- language would miss a leak or a fork-safety fault confined to the other.
 
-module soak (square, echoList)
+module soak (square, echoList, cppEcho, pyEcho)
 
 import root-cpp
 import root-py
+
+source Cpp from "soak.hpp" ("cppEcho")
+source Py from "soak.py" ("pyEcho")
 
 square :: Real -> Real
 square x = x * x
@@ -32,3 +42,6 @@ echoList = [ "alpha-twentyfourcharsxxxxx"
            , "iota-twentyfourcharsxxxxxx"
            , "kappa-twentyfourcharsxxxxx"
            ]
+
+cppEcho :: [Int] -> [Int]
+pyEcho  :: [Int] -> [Int]

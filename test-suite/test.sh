@@ -6,9 +6,15 @@
 # Each sub-suite is a self-contained runner that exits 0 on success, nonzero on
 # failure, and SKIPs internally when its prerequisites are missing.
 #
-# Usage: ./test.sh [suite...]
+# Usage: ./test.sh [--long] [suite...]
 #   No args runs every suite. Filter by name:
 #     ./test.sh daemon expose         # just those two
+#
+# --long trades minutes for sensitivity. The default sizing catches a fault
+# that shows up on most runs and finishes in seconds, which is what a
+# per-push gate can afford; --long repeats the same load far more times,
+# which is what a race needing an unlucky interleaving requires. Run it by
+# hand when hunting one -- it is not for continuous integration.
 #
 # Prerequisites vary by suite; most need a built morloc/nexus (`morloc init -f`).
 #
@@ -38,8 +44,24 @@ declare -A SUITE_RUNNER=(
     [expose]="expose-tests/run-tests.sh"
 )
 
+# Sizing: short unless asked otherwise. Exported because each sub-suite reads
+# it for itself -- there is no single knob that means the same thing to a
+# daemon soak and a leak sweep.
+export MORLOC_TEST_LEVEL="${MORLOC_TEST_LEVEL:-short}"
+args=()
+for a in "$@"; do
+    case "$a" in
+        --long)  export MORLOC_TEST_LEVEL=long ;;
+        --short) export MORLOC_TEST_LEVEL=short ;;
+        *)       args+=("$a") ;;
+    esac
+done
+if [[ "$MORLOC_TEST_LEVEL" == "long" ]]; then
+    echo "${BOLD:-}sizing: long${RESET:-} (minutes, for hunting rare races)"
+fi
+
 # Selection: all suites, or the names passed on the command line.
-selected=("$@")
+selected=("${args[@]+"${args[@]}"}")
 if [[ ${#selected[@]} -eq 0 ]]; then
     selected=("${SUITE_NAMES[@]}")
 fi

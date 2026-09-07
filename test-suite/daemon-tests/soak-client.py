@@ -16,8 +16,17 @@ are retried. What is never tolerated is a wrong answer, or a request that
 never succeeds at all.
 
 Usage: soak-client.py <port> <mode> [options]
-  mode `seq`  -- one connection, --requests calls in series
-  mode `conc` -- --workers connections in parallel, --requests calls each
+  mode `seq`   -- one connection, --requests calls in series
+  mode `conc`  -- --workers connections in parallel, --requests calls each
+  mode `churn` -- as `conc`, but every call carries a list long enough to be
+                  handed over in shared memory rather than inside the packet,
+                  so the allocate / hand across / free / reuse path is the one
+                  under pressure
+
+Workers wait on a barrier and start together, and `--rounds` repeats that
+burst. A race between two dispatches needs them to overlap; threads that
+drift apart as they start stop overlapping, and a burst that happens once
+only samples the schedule once.
 
 Prints one summary line of `key=value` pairs and exits non-zero if any
 request failed to complete or returned the wrong value.
@@ -107,28 +116,80 @@ class Client:
 EXPECTED_LIST_LEN = 10
 
 
-def run_worker(port, worker_id, requests, errors, stats):
+def payload_for(worker_id, iteration, size):
+    """A list whose every element identifies the request that asked for it.
+
+    Length alone would catch a truncated reply and nothing else. Contents
+    keyed to the worker and iteration mean a payload belonging to another
+    request in flight fails on the first element rather than looking
+    plausible."""
+    base = (worker_id + 1) * 1000000 + iteration * 1000
+    return [base + i for i in range(size)]
+
+
+def check_echo(worker_id, command, sent, got):
+    if not isinstance(got, list):
+        raise AssertionError(
+            "worker %d: %s returned %r, not a list" % (worker_id, command, got)
+        )
+    if len(got) != len(sent):
+        raise AssertionError(
+            "worker %d: %s returned %d elements, sent %d"
+            % (worker_id, command, len(got), len(sent))
+        )
+    if got != sent:
+        first_bad = next(
+            (k for k, (a, b) in enumerate(zip(sent, got)) if a != b), None
+        )
+        raise AssertionError(
+            "worker %d: %s differs at element %s: sent %r, got %r"
+            % (worker_id, command, first_bad,
+               sent[first_bad], got[first_bad])
+        )
+
+
+def run_worker(port, worker_id, requests, errors, stats, barrier, rounds,
+               churn, payload):
     client = Client(port, worker_id)
     try:
-        for i in range(requests):
-            # A value unique to this worker and iteration, so a result that
-            # belongs to another request is visible rather than plausible.
-            x = worker_id * 1000 + i + 1
-            got = client.call("square", [x])
-            if got != x * x:
-                raise AssertionError(
-                    "worker %d: square(%d) returned %r" % (worker_id, x, got)
-                )
-            # Alternate in the allocation-heavy command so the arena is under
-            # pressure for roughly half the run.
-            if i % 2 == 0:
-                lst = client.call("echoList", [])
-                if not isinstance(lst, list) or len(lst) != EXPECTED_LIST_LEN:
+        for rnd in range(rounds):
+            # Start together. Workers that trickle in serialise themselves,
+            # which is the opposite of what this is for.
+            if barrier is not None:
+                barrier.wait(timeout=120)
+            for i in range(requests):
+                # A value unique to this worker and iteration, so a result
+                # that belongs to another request is visible rather than
+                # plausible.
+                x = (worker_id + 1) * 100000 + rnd * 1000 + i + 1
+                got = client.call("square", [x])
+                if got != x * x:
                     raise AssertionError(
-                        "worker %d: echoList returned %r" % (worker_id, lst)
+                        "worker %d: square(%d) returned %r"
+                        % (worker_id, x, got)
                     )
+                if churn:
+                    # Both languages, alternating, so a block recycled under
+                    # one pool's threading is not mistaken for evidence about
+                    # the other.
+                    command = "cppEcho" if i % 2 == 0 else "pyEcho"
+                    sent = payload_for(worker_id, rnd * requests + i, payload)
+                    check_echo(worker_id, command,
+                               sent, client.call(command, [sent]))
+                elif i % 2 == 0:
+                    # Allocation-heavy, so the arena is under pressure for
+                    # roughly half the run.
+                    lst = client.call("echoList", [])
+                    if not isinstance(lst, list) or len(lst) != EXPECTED_LIST_LEN:
+                        raise AssertionError(
+                            "worker %d: echoList returned %r" % (worker_id, lst)
+                        )
     except Exception as exc:  # noqa: BLE001 - reported, not swallowed
         errors.append(str(exc))
+        if barrier is not None:
+            # A worker that stops early must not strand the others on the
+            # next round's barrier.
+            barrier.abort()
     finally:
         stats.append((client.ok, client.deferred, client.dropped))
         client.close()
@@ -137,18 +198,25 @@ def run_worker(port, worker_id, requests, errors, stats):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("port", type=int)
-    ap.add_argument("mode", choices=["seq", "conc"])
+    ap.add_argument("mode", choices=["seq", "conc", "churn"])
     ap.add_argument("--requests", type=int, default=200)
     ap.add_argument("--workers", type=int, default=1)
+    ap.add_argument("--rounds", type=int, default=1)
+    # Past the size at which a value stops riding inside the packet: eight
+    # bytes an element against a 64 KB threshold, so twelve thousand is
+    # comfortably over whichever way the element type is counted.
+    ap.add_argument("--payload", type=int, default=12000)
     args = ap.parse_args()
 
     workers = 1 if args.mode == "seq" else args.workers
     errors = []
     stats = []
+    barrier = threading.Barrier(workers) if workers > 1 else None
     threads = [
         threading.Thread(
             target=run_worker,
-            args=(args.port, w, args.requests, errors, stats),
+            args=(args.port, w, args.requests, errors, stats, barrier,
+                  args.rounds, args.mode == "churn", args.payload),
         )
         for w in range(workers)
     ]
@@ -161,8 +229,8 @@ def main():
     deferred = sum(s[1] for s in stats)
     dropped = sum(s[2] for s in stats)
     print(
-        "mode=%s workers=%d ok=%d deferred=%d dropped=%d errors=%d"
-        % (args.mode, workers, ok, deferred, dropped, len(errors))
+        "mode=%s workers=%d rounds=%d ok=%d deferred=%d dropped=%d errors=%d"
+        % (args.mode, workers, args.rounds, ok, deferred, dropped, len(errors))
     )
     for e in errors[:5]:
         print("  " + e, file=sys.stderr)
