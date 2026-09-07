@@ -152,6 +152,31 @@ jobs:
         run: cargo test --workspace --manifest-path data/rust/Cargo.toml
         timeout-minutes: 20
 
+      # The daemon, concurrency, packet and module-exposure suites. These
+      # drive built executables and a live daemon rather than the compiler,
+      # so they cover ground `stack test` cannot reach: shared-memory
+      # accounting across thousands of requests, worker threads serving
+      # concurrently, pools crashing and being rebuilt under load. Roughly
+      # 90s, and run before the long golden sweep so a broken runtime is
+      # reported in the first two minutes rather than the tenth.
+      - name: Test the runtime suites
+        run: ./test-suite/test.sh typecheck-benchmark concurrency daemon packet-io expose
+        timeout-minutes: 20
+
+      # Resource accumulation over repeated one-shot runs: zombie processes,
+      # shared-memory segments and temp directories left behind. The full
+      # sweep crosses six language combinations and takes minutes, which is
+      # more than a per-push gate should spend, so CI takes one
+      # single-language and one cross-language combination. Linux only: the
+      # checks read /dev/shm, which macOS does not present as a filesystem,
+      # where they would pass without measuring anything.
+      - name: Test resource accumulation under stress (Linux)
+        if: runner.os == 'Linux'
+        env:
+          MORLOC_STRESS_WORKLOADS: "cpp py-r"
+        run: ./test-suite/test.sh stress
+        timeout-minutes: 20
+
       - name: Test morloc
         run: |
           stack test --system-ghc --no-install-ghc morloc:morloc-test
