@@ -330,23 +330,17 @@ pub fn resolve_recur(schema: &Schema) -> &Schema {
 // SHM lifetime (I3): a deferred-free tracker flushed at dispatch entry, plus a
 // per-alloc RAII guard that reclaims a half-built block on panic.
 // ---------------------------------------------------------------------------
-thread_local! {
-    static SHM_TRACKER: Cell<Vec<*mut c_void>> = const { Cell::new(Vec::new()) };
-}
+/// Holds the deferred-release list so that the blocks are released when the
+/// thread ends as well as at the next dispatch. A worker is retired only
+/// after going idle for longer than the dispatch that would otherwise have
+/// flushed it, so releasing here is never earlier than the release it stands
+/// in for; it simply happens on a thread that has no next dispatch to do it.
+/// Without this a retired worker takes its last dispatch's blocks with it.
+struct ShmTracker(Cell<Vec<*mut c_void>>);
 
-fn track(ptr: *mut c_void) {
-    SHM_TRACKER.with(|t| {
-        let mut v = t.take();
-        v.push(ptr);
-        t.set(v);
-    });
-}
-
-/// Free all deferred SHM blocks from the previous dispatch. Generated
-/// `local_dispatch`/`remote_dispatch` call this at entry (cpp: pool.cpp:979).
-pub fn dispatch_flush() {
-    SHM_TRACKER.with(|t| {
-        let v = t.take();
+impl Drop for ShmTracker {
+    fn drop(&mut self) {
+        let v = self.0.take();
         for ptr in &v {
             let mut err: *mut c_char = std::ptr::null_mut();
             unsafe {
@@ -354,7 +348,34 @@ pub fn dispatch_flush() {
                 discard_err(err);
             }
         }
-        t.set(Vec::new());
+    }
+}
+
+thread_local! {
+    static SHM_TRACKER: ShmTracker = const { ShmTracker(Cell::new(Vec::new())) };
+}
+
+fn track(ptr: *mut c_void) {
+    SHM_TRACKER.with(|t| {
+        let mut v = t.0.take();
+        v.push(ptr);
+        t.0.set(v);
+    });
+}
+
+/// Free all deferred SHM blocks from the previous dispatch. Generated
+/// `local_dispatch`/`remote_dispatch` call this at entry (cpp: pool.cpp:979).
+pub fn dispatch_flush() {
+    SHM_TRACKER.with(|t| {
+        let v = t.0.take();
+        for ptr in &v {
+            let mut err: *mut c_char = std::ptr::null_mut();
+            unsafe {
+                shfree(*ptr, &mut err);
+                discard_err(err);
+            }
+        }
+        t.0.set(Vec::new());
     });
     // Reset any stale traceback frames from a prior dispatch (defensive; the
     // guard normally drains them when it forms the fail packet).

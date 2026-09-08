@@ -384,6 +384,15 @@ def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, tota
         traceback.print_exc(file=sys.stderr)
         sys.stderr.flush()
     finally:
+        # This worker is a process of its own and is leaving; its deferred
+        # releases have no next dispatch to perform them, and a process
+        # exiting does not decrement a reference other processes can see.
+        # The worker is idle or already failing here, so nothing it holds is
+        # still in use by a dispatch of its own.
+        try:
+            morloc.shm_tracker_flush()
+        except Exception:
+            pass
         sock.close()
 
 
@@ -542,6 +551,12 @@ def run_thread_pool(socket_path, tmpdir, shm_basename):
             traceback.print_exc(file=sys.stderr)
             sys.stderr.flush()
         finally:
+            # A thread leaving by any route takes its deferred releases with
+            # it, so perform them here as the surplus reap above does.
+            try:
+                morloc.shm_tracker_flush()
+            except Exception:
+                pass
             # Release the slot on a FATAL exit too (the surplus reap above already
             # released it and set the flag). Leaking `total` would make the
             # saturation gate `busy >= total` stop tripping, so a re-entrant

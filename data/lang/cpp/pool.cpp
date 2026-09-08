@@ -133,7 +133,30 @@ std::string interweave_strings(const std::vector<std::string>& first, const std:
 // Freed after foreign_call returns (args consumed) or at next dispatch start
 // (result consumed by caller in the synchronous call that returned it).
 struct ShmEntry { absptr_t ptr; };
-thread_local std::vector<ShmEntry> _shm_tracker;
+// Releasing the entries is shared by the ordinary flush and by thread
+// teardown, so it is written once and takes the container explicitly.
+static void _shm_release_entries(std::vector<ShmEntry>& entries) {
+    for (auto& e : entries) {
+        char* err = NULL;
+        // shfree decrements the refcount and zeros the block on final
+        // ref-drop, so a separate metadata-zeroing pass is unnecessary.
+        shfree(e.ptr, &err);
+        if (err) { free(err); }
+    }
+    entries.clear();
+}
+
+// The tracker releases what it still holds when its thread ends. A worker
+// is retired only after going idle for longer than the dispatch it would
+// otherwise have been flushed by, so this is never earlier than the flush
+// it stands in for -- it just happens on a thread that has no next
+// dispatch to do it. Making the container itself own the teardown avoids
+// depending on the destruction order of two thread-local objects.
+struct ShmTracker : std::vector<ShmEntry> {
+    ~ShmTracker() { _shm_release_entries(*this); }
+};
+
+thread_local ShmTracker _shm_tracker;
 
 // Owns a block this pool materialized from a packet, releasing it unless
 // ownership is handed elsewhere. Deserialization can throw, and a throwing
@@ -144,7 +167,6 @@ struct ShmOwned {
     explicit ShmOwned(void* p) : ptr((absptr_t)p) {}
     ShmOwned(const ShmOwned&) = delete;
     ShmOwned& operator=(const ShmOwned&) = delete;
-    void keep() { ptr = nullptr; }
     ~ShmOwned() {
         if (ptr != nullptr) {
             char* err = NULL;
@@ -155,14 +177,7 @@ struct ShmOwned {
 };
 
 static void _shm_tracker_flush() {
-    for (auto& e : _shm_tracker) {
-        char* err = NULL;
-        // shfree decrements the refcount and zeros the block on final
-        // ref-drop, so a separate metadata-zeroing pass is unnecessary.
-        shfree(e.ptr, &err);
-        if (err) { free(err); }
-    }
-    _shm_tracker.clear();
+    _shm_release_entries(_shm_tracker);
 }
 
 // Drop one tracker entry matching ptr (swap-with-last) and shfree the
