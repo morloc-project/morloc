@@ -51,6 +51,7 @@ module UnitTypeTests
   , postArgPropagationTests
   , tuplePatternLambdaTests
   , withDocstringTests
+  , patternSelectorTests
   , evalSandboxTests
   ) where
 
@@ -8368,6 +8369,103 @@ tuplePatternLambdaTests =
       , exprTestBad
           "wrong-typed field setter under direct application is rejected"
           (tplProg "(\\p -> (.0 = 7) p) t")
+      ]
+
+-- | Selector shapes a pattern accessor accepts and rejects, checked at
+-- the frontend because none of them reach codegen. A group entry is
+-- either a record key or a tuple index and the Selector carries one
+-- kind per level, so a group naming both has no representation: it
+-- must be reported against the source, not raised as an internal
+-- error. A setter's value is checked against the field it is written
+-- at, so a value that only inhabits the field's type after a widening
+-- coercion still has to be accepted.
+patternSelectorTests :: TestTree
+patternSelectorTests =
+  localOption (mkTimeout 2000000) $ -- 2s
+    testGroup
+      "pattern selector shapes"
+      [ expectError
+          "group mixing a record key and a tuple index is rejected"
+          [r|
+        module main (foo)
+        record R = R { a :: Int, b :: Str }
+        foo :: R -> (Int, Int)
+        foo r = .(.a, .0) r
+          |]
+      , expectError
+          "setter group mixing a record key and a tuple index is rejected"
+          [r|
+        module main (foo)
+        record R = R { a :: Int, b :: Str }
+        foo :: R -> R
+        foo r = .(.a = 1, .0 = 2) r
+          |]
+      , expectError
+          "chain mixing a record key and a tuple index on a tuple is rejected"
+          [r|
+        module main (foo)
+        foo :: (Int, Int) -> Int
+        foo t = .(.name, .0) t
+          |]
+      , expectPass
+          "setter writes a bare value into an optional field"
+          [r|
+        module main (foo)
+        record R = R { a :: ?Str, b :: Int }
+        base :: R
+        base = { a = "one", b = 1 }
+        foo :: R
+        foo = .(.a = "new") base
+          |]
+      , expectPass
+          "setter writes a bare value into an optional field of a literal"
+          [r|
+        module main (foo)
+        record R = R { a :: ?Str, b :: Int }
+        foo :: R
+        foo = .(.a = "new") { a = Null, b = 1 }
+          |]
+      , expectPass
+          "setter writes Null into an optional field"
+          [r|
+        module main (foo)
+        record R = R { a :: ?Str, b :: Int }
+        base :: R
+        base = { a = "one", b = 1 }
+        foo :: R
+        foo = .(.a = Null) base
+          |]
+      , expectError
+          "setter on a field that the receiver does not have is rejected"
+          [r|
+        module main (foo)
+        record R = R { a :: Int, b :: Str }
+        base :: R
+        base = { a = 1, b = "x" }
+        foo :: R
+        foo = .(.c = 1) base
+          |]
+      , -- An IFile is a handle onto bytes already written, and the
+        -- runtime walker that serves a pattern on one only reads. A
+        -- getter on an IFile receiver is therefore fine and a setter
+        -- is not; the pair is here so a change that made the setter
+        -- compile could not pass unnoticed.
+        expectPass
+          "getter on an IFile receiver is accepted"
+          [r|
+        module main (foo)
+        record R = R { a :: Int, b :: Str }
+        foo :: IFile R -> Int
+        foo f = .a f
+          |]
+      , expectError
+          "setter on an IFile receiver is rejected"
+          [r|
+        module main (foo)
+        record R = R { a :: Int, b :: Str }
+        foo :: IFile R -> R
+        foo f = .(.a = 1) f
+          |]
       ]
 
 -- | Frontend validation of `--' with:` docstring atoms (terminal

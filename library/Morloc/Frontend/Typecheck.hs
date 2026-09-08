@@ -15,6 +15,7 @@ segregation in the code generator.
 -}
 module Morloc.Frontend.Typecheck (typecheck, resolveTypes, evaluateAnnoSTypes, peakSExpr) where
 
+import qualified Data.List as List
 import qualified Data.IntMap.Strict as IntMap
 import Data.Text (Text)
 import qualified Data.Text as MT
@@ -632,39 +633,9 @@ synthE _ g (RealS si x) = return (g, BT.realU, RealS si x)
 synthE _ g (IntS si x) = return (g, BT.intU, IntS si x)
 synthE _ g (LogS x) = return (g, BT.boolU, LogS x)
 synthE _ g (StrS x) = return (g, BT.strU, StrS x)
--- Ensures pattern setting operations return the correct type.
--- Without this case, patterns that change type will pass silently, but lead to
--- corrupted data.
--- Setter pattern lambda: (\v -> .field v newVal) data
--- The body applies a pattern to 2+ args (data + set values).
--- Getters (1 arg) are NOT matched here and go through normal AppS.
-synthE
-  _
-  g0
-  ( AppS
-      f0@( AnnoS
-            _
-            _
-            ( LamS
-                [_]
-                ( AnnoS
-                    _
-                    _
-                    ( AppS
-                        ((AnnoS _ _ (ExeS (PatCall (PatternStruct _)))))
-                        (_ : _ : _)
-                      )
-                  )
-              )
-          )
-      [x0]
-    ) = do
-    (g1, patternType, f1) <- synthG g0 f0
-    case patternType of
-      (FunU _ selectType) -> do
-        (g2, dataType, x1) <- checkG g1 x0 selectType
-        return (g2, dataType, AppS f1 [x1])
-      _ -> error "This should be unreachable"
+-- A directly applied setter is a redex: reduce it so the setter's own
+-- rule below sees the receiver. See 'reduceSetterRedex'.
+synthE i g0 e | Just e' <- reduceSetterRedex e = synthE i g0 e'
 
 -- synthesize a string interpolation pattern
 synthE i g (AppS f@(AnnoS _ _ (ExeS (PatCall (PatternText _ _)))) es) = do
@@ -786,9 +757,12 @@ synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) [e0]) =
 -- inhabit a fixed-width @Int32@ slot via @checkE (IntS ...)@ instead
 -- of freezing to @Int@ under @synthG@. Same order-swap shape as the
 -- @IntrMap@ synth (see below).
-synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0 : es0)) = do
+synthE i g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0 : es0)) = do
   let (g1, slotVars) = statefulMap (\g _ -> newvar "set_slot_" g) g0 es0
-  (g2, outputType) <- selectorType g1 s |>> second (selectorSetter slotVars s)
+  (g2, structType) <- selectorType g1 s
+  outputType <- case selectorSetter slotVars s structType of
+    Just t -> return t
+    Nothing -> MM.throwSourcedError i "this setter's paths do not fit its receiver"
   (g3, datType, e1) <- checkG g2 e0 outputType
   rejectListSelectorTarget fgidx s (apply g3 datType)
   (g4, es1) <-
@@ -799,9 +773,17 @@ synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0 : e
       g3
       (zip es0 slotVars)
   let setTypes = map (apply g4) slotVars
-      patternType = FunU (apply g4 datType : setTypes) (apply g4 outputType)
+      receiverType = apply g4 datType
+      -- The setter returns its receiver with the written fields' types
+      -- replaced. Rebuilding from the receiver, rather than from the
+      -- selector's own structural type, is what keeps the fields the
+      -- selector does not name, and keeps the receiver's key order,
+      -- which is the record's layout on the wire.
+      resultType =
+        fromMaybe (apply g4 outputType) (selectorSetter setTypes s receiverType)
+      patternType = FunU (receiverType : setTypes) resultType
       f1 = AnnoS (Idx fgidx patternType) fcidx (ExeS (PatCall (PatternStruct s)))
-  return (g4, apply g4 outputType, AppS f1 (e1 : es1))
+  return (g4, resultType, AppS f1 (e1 : es1))
 synthE _ g (ExeS (PatCall (PatternText s ss@(length -> n)))) = do
   let t = FunU (take n (repeat BT.strU)) BT.strU
   return (g, t, ExeS (PatCall (PatternText s ss)))
@@ -1844,6 +1826,10 @@ checkE ::
     , TypeU
     , ExprS (Indexed TypeU) ManyPoly Int
     )
+-- A directly applied setter is a redex here too: the App-Check rule
+-- below would synthesise the wrapper lambda first, which is what hides
+-- the receiver. See 'reduceSetterRedex'.
+checkE i g e t | Just e' <- reduceSetterRedex e = checkE i g e' t
 -- The single-arg form (e.g. `List Int`) treats the arg as the element
 -- type. Guard against firing when the arg is non-Type-kinded (e.g.
 -- `Foo (n :: Nat) = ...` instantiated as `Foo 3` -- here `3` is a Nat
@@ -2292,6 +2278,45 @@ checkE i g UniS t = do
 -- subtype fails, partial application, arity mismatch) is delegated
 -- to checkEFallback, preserving the existing synth-and-subtype
 -- behaviour.
+-- A setter whose result type is already known. Seating the expected
+-- type into the value slots before anything is checked against them is
+-- what lets @.(.n = 42) r@ write an @I32@ field: checked on its own the
+-- literal freezes at @Int@ and the receiver check then reports @I32@
+-- against @Int@. The receiver is still checked before the values, so
+-- the field types it carries reach them too; the two orderings are not
+-- in conflict, because the expected type only ever pins slots the
+-- receiver would pin the same way.
+--
+-- A setter that changes its receiver's type has an output the expected
+-- type cannot be seated into, and falls back to synth-and-subtype.
+checkE i g0 e@(AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0 : es0@(_ : _))) t
+  | not (selectorHasBracket s) = do
+      let (g1, slotVars) = statefulMap (\g _ -> newvar "set_slot_" g) g0 es0
+      (g2, structType) <- selectorType g1 s
+      scope <- MM.getGeneralScope i
+      let seated = do
+            outputType <- selectorSetter slotVars s structType
+            g3 <- either (const Nothing) Just (subtype scope outputType (apply g2 t) g2)
+            return (g3, outputType)
+      case seated of
+        Nothing -> checkEFallback i g0 e t
+        Just (g3, outputType) -> do
+          (g4, datType, e1) <- checkG g3 e0 (apply g3 outputType)
+          rejectListSelectorTarget fgidx s (apply g4 datType)
+          (g5, es1) <-
+            statefulMapM
+              (\g (e', slotT) -> do
+                 (g'', _, e'') <- checkG g e' (apply g slotT)
+                 return (g'', e''))
+              g4
+              (zip es0 slotVars)
+          let setTypes = map (apply g5) slotVars
+              receiverType = apply g5 datType
+              resultType =
+                fromMaybe (apply g5 outputType) (selectorSetter setTypes s receiverType)
+              patternType = FunU (receiverType : setTypes) resultType
+              f1 = AnnoS (Idx fgidx patternType) fcidx (ExeS (PatCall (PatternStruct s)))
+          return (g5, resultType, AppS f1 (e1 : es1))
 checkE i g0 e@(AppS (AnnoS _ _ (ExeS _)) _) t = checkEFallback i g0 e t
 -- If the expected type is wrapped in OptionalU, the App-Check shortcut
 -- would pin the function's bare-existential return to the FULL optional
@@ -2416,17 +2441,76 @@ checkOptionalLit i g e innerT = do
       innerAnno = AnnoS (Idx idx appliedInner) i e'
   return (g', apply g' (OptionalU innerT), CoerceS CoerceToOptional innerAnno)
 
+-- | A setter is desugared into a lambda (@\\v -> pat v values...@) so
+-- that it can also be written unapplied, as in @map .(.x = 1) xs@.
+-- Applied directly, that wrapper changes what the typechecker sees
+-- first: the lambda is synthesised before its argument, so the setter
+-- rule meets a bare parameter where the receiver should be and has
+-- nothing to read the written fields' types from. The values are then
+-- pinned to whatever they synthesise to on their own, which is why
+-- @.(.a = "new") r@ was rejected when @a@ is @?Str@, and the rebuilt
+-- record's type keeps only the fields the selector names.
+--
+-- So reduce the redex before either direction of the typechecker looks
+-- at it. The parameter is compiler-generated, occurs exactly once, and
+-- occurs in argument position, so substituting the receiver for it is
+-- a copy rather than a duplication of work.
+reduceSetterRedex ::
+  ExprS Int ManyPoly Int ->
+  Maybe (ExprS Int ManyPoly Int)
+reduceSetterRedex
+  ( AppS
+      ( AnnoS _ _
+          ( LamS [v]
+              ( AnnoS _ _
+                  ( AppS
+                      pat@(AnnoS _ _ (ExeS (PatCall (PatternStruct _))))
+                      (AnnoS _ _ (BndS v') : values@(_ : _))
+                    )
+                )
+            )
+        )
+      [receiver]
+    )
+    | v == v' = Just (AppS pat (receiver : values))
+reduceSetterRedex _ = Nothing
+
 -- | Choose the record-shaped type with the most keys. Non-record cases
 -- fall back to the second argument (the standard "return the expected
 -- type" convention used by checkEFallback).
+--
+-- On a tie a structural expected type is kept, but re-laid-out in the
+-- order the synthesised type uses. A record's key order is its layout
+-- on the wire, and the synthesised type is the one the expression's own
+-- sub-nodes were built from; an expected type ordering the same keys
+-- differently -- a pattern selector's structural type sorts them --
+-- would relabel the fields without moving the values behind them.
+--
+-- A declared record is never re-laid-out. Its order is the one its
+-- language forms are written against, and a subtype against a declared
+-- record solves the synthesised side to it, so the two agree already.
 pickWiderRecord :: TypeU -> TypeU -> TypeU
-pickWiderRecord a b = case (recordKeyCount a, recordKeyCount b) of
-  (Just na, Just nb) | na > nb -> a
+pickWiderRecord a b = case (recordKeys a, recordKeys b) of
+  (Just ka, Just kb)
+    | length ka > length kb -> a
+    | ka /= kb, List.sort ka == List.sort kb -> reorderRecordKeys ka b
   _ -> b
   where
-    recordKeyCount (ExistU _ _ (rs, _)) = Just (length rs)
-    recordKeyCount (NamU _ _ _ rs) = Just (length rs)
-    recordKeyCount _ = Nothing
+    recordKeys (ExistU _ _ (rs, _)) = Just (map fst rs)
+    recordKeys (NamU _ _ _ rs) = Just (map fst rs)
+    recordKeys _ = Nothing
+
+-- | Rewrite a structural record type's rows into the given key order.
+-- The key list must be a permutation of the type's own keys; any key it
+-- does not name leaves the type untouched. A declared record ('NamU')
+-- is returned as it is: its row order is the order its per-language
+-- forms are built against.
+reorderRecordKeys :: [Key] -> TypeU -> TypeU
+reorderRecordKeys ks t = case t of
+  ExistU v ps (rs, rc) -> maybe t (\rs' -> ExistU v ps (rs', rc)) (permute rs)
+  _ -> t
+  where
+    permute rs = mapM (\k -> (,) k <$> lookup k rs) ks
 
 subtype' :: Int -> TypeU -> TypeU -> Gamma -> MorlocMonad Gamma
 subtype' i a b g = do

@@ -1145,7 +1145,7 @@ buildAccessor sp body
   | bodyHasBracket body = buildAccessorBracket sp body
   | otherwise = do
       desBody <- desugarAccessorBody body
-      result <- resolveBody desBody
+      result <- resolveBody sp desBody
       case result of
         ARGetter sel -> freshExprSpan sp (PatE (PatternStruct sel))
         ARSetter sel vals -> do
@@ -1481,19 +1481,19 @@ desugarAccessorTail CATEnd = return IATEnd
 desugarAccessorTail (CATSet e) = IATSet <$> desugarExpr e
 desugarAccessorTail (CATChain body) = IATChain <$> desugarAccessorBody body
 
-resolveBody :: IAccessorBody -> D AccessorResult
-resolveBody (IABKey name tail') = do
-  inner <- resolveTail tail'
+resolveBody :: Span -> IAccessorBody -> D AccessorResult
+resolveBody sp (IABKey name tail') = do
+  inner <- resolveTail sp tail'
   return (wrapKey name inner)
-resolveBody (IABIdx idx tail') = do
-  inner <- resolveTail tail'
+resolveBody sp (IABIdx idx tail') = do
+  inner <- resolveTail sp tail'
   return (wrapIdx idx inner)
-resolveBody (IABGroup entries) = resolveGroup entries
+resolveBody sp (IABGroup entries) = resolveGroup sp entries
 
-resolveTail :: IAccessorTail -> D AccessorResult
-resolveTail IATEnd = return (ARGetter SelectorEnd)
-resolveTail (IATSet expr) = return (ARSetter SelectorEnd [expr])
-resolveTail (IATChain body) = resolveBody body
+resolveTail :: Span -> IAccessorTail -> D AccessorResult
+resolveTail _ IATEnd = return (ARGetter SelectorEnd)
+resolveTail _ (IATSet expr) = return (ARSetter SelectorEnd [expr])
+resolveTail sp (IATChain body) = resolveBody sp body
 
 wrapKey :: Text -> AccessorResult -> AccessorResult
 wrapKey name (ARGetter sel) = ARGetter (SelectorKey (name, sel) [])
@@ -1503,26 +1503,42 @@ wrapIdx :: Int -> AccessorResult -> AccessorResult
 wrapIdx idx (ARGetter sel) = ARGetter (SelectorIdx (idx, sel) [])
 wrapIdx idx (ARSetter sel vals) = ARSetter (SelectorIdx (idx, sel) []) vals
 
-resolveGroup :: [IAccessorBody] -> D AccessorResult
-resolveGroup bodies = do
-  results <- mapM resolveBody bodies
+resolveGroup :: Span -> [IAccessorBody] -> D AccessorResult
+resolveGroup sp bodies = do
+  results <- mapM (resolveBody sp) bodies
   let getters = [s | ARGetter s <- results]
       setterPairs = [(s, vs) | ARSetter s vs <- results]
   case (getters, setterPairs) of
-    (gs, []) -> return (ARGetter (mergeSelectors gs))
-    ([], ss) -> return (ARSetter (mergeSelectors (map fst ss)) (concatMap snd ss))
-    _ -> dfail (Pos 0 0 "") "cannot mix getter and setter entries in .()"
+    (gs, []) -> ARGetter <$> mergeSelectors sp gs
+    ([], ss) -> do
+      sel <- mergeSelectors sp (map fst ss)
+      return (ARSetter sel (concatMap snd ss))
+    _ -> dfail (startPos sp) "cannot mix getter and setter entries in .()"
 
-mergeSelectors :: [Selector] -> Selector
-mergeSelectors [] = SelectorEnd
-mergeSelectors [s] = s
-mergeSelectors sels =
+-- A group's entries share one level of the receiver, and that level is
+-- either a record (named fields) or a tuple (numbered slots). A group
+-- naming both asks for a value that is both, which no receiver type can
+-- be, so it is a source error rather than an unrepresentable Selector.
+mergeSelectors :: Span -> [Selector] -> D Selector
+mergeSelectors _ [] = return SelectorEnd
+mergeSelectors _ [s] = return s
+mergeSelectors sp sels =
   let idxEntries = concat [s : ss | SelectorIdx s ss <- sels]
       keyEntries = concat [s : ss | SelectorKey s ss <- sels]
    in case (idxEntries, keyEntries) of
-        (is, []) -> case is of [] -> SelectorEnd; (x : xs) -> SelectorIdx x xs
-        ([], (x : xs)) -> SelectorKey x xs
-        _ -> error "Cannot mix key and index selectors in getter"
+        (is, []) -> return $ case is of [] -> SelectorEnd; (x : xs) -> SelectorIdx x xs
+        ([], (x : xs)) -> return (SelectorKey x xs)
+        (is, ks) ->
+          dfail (startPos sp) $
+            "this selector group names both a record field ("
+              <> renderKeys ks
+              <> ") and a tuple slot ("
+              <> renderIdxs is
+              <> "). A group's entries all read the same value, which is"
+              <> " either a record or a tuple, never both."
+  where
+    renderKeys ks = intercalate ", " ["." <> T.unpack k | (k, _) <- ks]
+    renderIdxs is = intercalate ", " ["." <> show i | (i, _) <- is]
 
 --------------------------------------------------------------------
 -- Irrefutable-pattern desugaring

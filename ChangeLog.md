@@ -2,6 +2,9 @@ Unreleased
 ----------
 
  - a function with an effectful return type may return a plain value
+ - a record keeps its field order through a getter or a setter
+ - a setter may write a plain value into an optional field
+ - a selector naming both a field and a tuple slot reports an error, not a crash
 
 0.102.1 [2026-09-05]
 --------------------

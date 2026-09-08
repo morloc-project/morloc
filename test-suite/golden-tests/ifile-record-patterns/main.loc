@@ -1,0 +1,242 @@
+-- Record-field (key) pattern access on IFile handles, and the parity
+-- check that says a selector reads the same value from a file as it
+-- does from memory.
+--
+-- 'ifile-data-patterns' covers the tuple-index and bracket axes; this
+-- covers the key axis, which the runtime walker resolves through the
+-- value schema's field table rather than a fixed offset. Each export
+-- saves a value, opens it as an IFile, applies a selector, and
+-- returns the selector's answer together with the answer the same
+-- selector gives on the in-memory value. The two must agree, so a
+-- single-column diff localises both a walker fault and a divergence
+-- between the two paths.
+--
+-- Key-axis coverage:
+--   * .key                          on a flat record
+--   * .(.a, .b, .c)                 group in declaration order
+--   * .(.c, .b, .a)                 group in reverse order
+--   * .key.key                      nested key chain
+--   * .key.<idx>.key                key through a tuple slot
+--   * .(.k.k, .k.<idx>.k)           group of chains
+--   * .(.k, .chain, .k)             a key named twice in one group
+--   * .key.(.a, .b)                 group beneath a key prefix
+--   * .[i].key                      bracket then key
+--   * .[i:j].key                    slice then key (broadcast)
+--   * .key.[i]                      key then bracket
+--   * .key.[i:j]                    key then slice
+--   * .<idx>.key                    tuple slot then key
+--   * .key.key.key                  three-deep key chain
+--   * .(.key, .chain)               group mixing a bare key and a chain
+--   * .(.a, .c)                     group skipping an intervening field
+--   * .(.key)                       degenerate one-entry group
+--   * .key                          whose value is a record
+--   * .key                          whose value is a tuple
+--   * .key.[i].key                  key, bracket, key
+--   * .<idx>.<idx>                  two tuple slots in a chain
+
+module main
+  ( flatKey
+  , keyGroup
+  , keyGroupReversed
+  , keyChain
+  , keyIndexKey
+  , chainGroup
+  , repeatedKey
+  , groupUnderKey
+  , bracketThenKey
+  , sliceThenKey
+  , keyThenBracket
+  , keyThenSlice
+  , indexThenKey
+  , deepKeyChain
+  , mixedGroup
+  , groupSkippingField
+  , degenerateGroup
+  , recordValuedKey
+  , tupleValuedKey
+  , keyBracketKey
+  , indexIndex
+  )
+
+import root
+
+record Loc = Loc
+  { latitude :: Str
+  , longitude :: Str
+  , altitude :: Str
+  }
+
+record Worker = Worker
+  { home :: Loc
+  , age :: Int
+  , job :: (Bool, Loc)
+  , tags :: [Str]
+  }
+
+record Nest = Nest
+  { outer :: Worker
+  , label :: Str
+  }
+
+record Person = Person
+  { name :: Str
+  , age :: Int
+  }
+
+record Team = Team
+  { members :: [Person]
+  , motto :: Str
+  }
+
+here :: Loc
+here = { latitude = "lat", longitude = "lon", altitude = "alt" }
+
+hand :: Worker
+hand =
+  { home = here
+  , age = 12
+  , job = (True, { latitude = "jlat", longitude = "jlon", altitude = "jalt" })
+  , tags = ["t0", "t1", "t2", "t3"]
+  }
+
+nest :: Nest
+nest = { outer = hand, label = "L" }
+
+squad :: Team
+squad =
+  { members = [ { name = "Alice", age = 30 }, { name = "Bob", age = 25 } ]
+  , motto = "onwards"
+  }
+
+crew :: [Loc]
+crew =
+  [ { latitude = "a0", longitude = "b0", altitude = "c0" }
+  , { latitude = "a1", longitude = "b1", altitude = "c1" }
+  , { latitude = "a2", longitude = "b2", altitude = "c2" }
+  ]
+
+flatKey :: Str -> <IO, Err> (Str, Str)
+flatKey path = do
+  @save 0 path here
+  f <- @open path :: <IO, Err> IFile Loc
+  (.longitude f, .longitude here)
+
+keyGroup :: Str -> <IO, Err> ((Str, Str, Str), (Str, Str, Str))
+keyGroup path = do
+  @save 0 path here
+  f <- @open path :: <IO, Err> IFile Loc
+  (.(.latitude, .longitude, .altitude) f, .(.latitude, .longitude, .altitude) here)
+
+keyGroupReversed :: Str -> <IO, Err> ((Str, Str, Str), (Str, Str, Str))
+keyGroupReversed path = do
+  @save 0 path here
+  f <- @open path :: <IO, Err> IFile Loc
+  (.(.altitude, .longitude, .latitude) f, .(.altitude, .longitude, .latitude) here)
+
+keyChain :: Str -> <IO, Err> (Str, Str)
+keyChain path = do
+  @save 0 path hand
+  f <- @open path :: <IO, Err> IFile Worker
+  (.home.altitude f, .home.altitude hand)
+
+keyIndexKey :: Str -> <IO, Err> (Str, Str)
+keyIndexKey path = do
+  @save 0 path hand
+  f <- @open path :: <IO, Err> IFile Worker
+  (.job.1.longitude f, .job.1.longitude hand)
+
+chainGroup :: Str -> <IO, Err> ((Str, Str), (Str, Str))
+chainGroup path = do
+  @save 0 path hand
+  f <- @open path :: <IO, Err> IFile Worker
+  (.(.home.altitude, .job.1.altitude) f, .(.home.altitude, .job.1.altitude) hand)
+
+repeatedKey :: Str -> <IO, Err> ((Int, Str, Int), (Int, Str, Int))
+repeatedKey path = do
+  @save 0 path hand
+  f <- @open path :: <IO, Err> IFile Worker
+  (.(.age, .job.1.altitude, .age) f, .(.age, .job.1.altitude, .age) hand)
+
+groupUnderKey :: Str -> <IO, Err> ((Str, Str), (Str, Str))
+groupUnderKey path = do
+  @save 0 path hand
+  f <- @open path :: <IO, Err> IFile Worker
+  (.home.(.altitude, .latitude) f, .home.(.altitude, .latitude) hand)
+
+bracketThenKey :: Str -> <IO, Err> (Str, Str)
+bracketThenKey path = do
+  @save 0 path crew
+  f <- @open path :: <IO, Err> IFile [Loc]
+  (.[1].altitude f, .[1].altitude crew)
+
+sliceThenKey :: Str -> <IO, Err> ([Str], [Str])
+sliceThenKey path = do
+  @save 0 path crew
+  f <- @open path :: <IO, Err> IFile [Loc]
+  (.[0:2].latitude f, .[0:2].latitude crew)
+
+keyThenBracket :: Str -> <IO, Err> (Str, Str)
+keyThenBracket path = do
+  @save 0 path hand
+  f <- @open path :: <IO, Err> IFile Worker
+  (.tags.[2] f, .tags.[2] hand)
+
+keyThenSlice :: Str -> <IO, Err> ([Str], [Str])
+keyThenSlice path = do
+  @save 0 path hand
+  f <- @open path :: <IO, Err> IFile Worker
+  (.tags.[1:3] f, .tags.[1:3] hand)
+
+indexThenKey :: Str -> <IO, Err> (Str, Str)
+indexThenKey path = do
+  @save 0 path (7, here)
+  f <- @open path :: <IO, Err> IFile (Int, Loc)
+  (.1.altitude f, .1.altitude (7, here))
+
+deepKeyChain :: Str -> <IO, Err> (Str, Str)
+deepKeyChain path = do
+  @save 0 path nest
+  f <- @open path :: <IO, Err> IFile Nest
+  (.outer.home.longitude f, .outer.home.longitude nest)
+
+mixedGroup :: Str -> <IO, Err> ((Int, Str), (Int, Str))
+mixedGroup path = do
+  @save 0 path hand
+  f <- @open path :: <IO, Err> IFile Worker
+  (.(.age, .home.latitude) f, .(.age, .home.latitude) hand)
+
+groupSkippingField :: Str -> <IO, Err> ((Str, Str), (Str, Str))
+groupSkippingField path = do
+  @save 0 path here
+  f <- @open path :: <IO, Err> IFile Loc
+  (.(.latitude, .altitude) f, .(.latitude, .altitude) here)
+
+degenerateGroup :: Str -> <IO, Err> (Str, Str)
+degenerateGroup path = do
+  @save 0 path here
+  f <- @open path :: <IO, Err> IFile Loc
+  (.(.altitude) f, .(.altitude) here)
+
+recordValuedKey :: Str -> <IO, Err> (Loc, Loc)
+recordValuedKey path = do
+  @save 0 path hand
+  f <- @open path :: <IO, Err> IFile Worker
+  (.home f, .home hand)
+
+tupleValuedKey :: Str -> <IO, Err> ((Bool, Loc), (Bool, Loc))
+tupleValuedKey path = do
+  @save 0 path hand
+  f <- @open path :: <IO, Err> IFile Worker
+  (.job f, .job hand)
+
+keyBracketKey :: Str -> <IO, Err> (Str, Str)
+keyBracketKey path = do
+  @save 0 path squad
+  f <- @open path :: <IO, Err> IFile Team
+  (.members.[1].name f, .members.[1].name squad)
+
+indexIndex :: Str -> <IO, Err> (Str, Str)
+indexIndex path = do
+  @save 0 path (("a", "b"), "c")
+  f <- @open path :: <IO, Err> IFile ((Str, Str), Str)
+  (.0.1 f, .0.1 (("a", "b"), "c"))

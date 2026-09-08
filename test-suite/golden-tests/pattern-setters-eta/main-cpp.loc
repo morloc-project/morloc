@@ -1,0 +1,18 @@
+module testcpp
+  ( etaSingle
+  , etaTwo
+  , etaReversed
+  , etaCaptured
+  , etaCapturedTwo
+  , etaNested
+  , etaTuple
+  , etaTupleCaptured
+  , etaGetter
+  , etaGetterGroup
+  , etaOfEta
+  )
+
+source Cpp from "types.hpp" ("point_t", "het_t", "nest_t")
+
+import .tests
+import root-cpp

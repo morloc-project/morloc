@@ -1,0 +1,97 @@
+-- A record's field order is its layout on the wire, so every node that
+-- carries the record's type has to agree about that order. A pattern
+-- selector's own structural type does not: it is built from the keys
+-- the selector names, in sorted order. When such a structural type is
+-- the one written onto a value-producing node, the producer lays the
+-- fields out in one order and the consumer reads them in another.
+--
+-- The record here is declared with its fields in reverse alphabetical
+-- order and every field has the same type, which is what makes a
+-- permutation observable at all: with distinct types a swap is a size
+-- or schema error, with same types it is silent.
+--
+-- Each export names the shape that reaches the value, not a bug. The
+-- expected answers are what the selector means, computed by hand.
+
+module main
+  ( setterThenKey
+  , setterThenGroup
+  , setterThenGroupReversed
+  , setterThenOtherKey
+  , setterThenAllOfThree
+  , setterOnBoundRecord
+  , setterAlone
+  , literalThenGroup
+  , tupleSlotThenGroup
+  , bracketThenGroup
+  , letBoundThenGroup
+  , lambdaThenGroup
+  )
+
+import root
+
+record Pair = Pair
+  { zed :: Str
+  , alpha :: Str
+  }
+
+record Triple = Triple
+  { zed :: Str
+  , mid :: Str
+  , alpha :: Str
+  }
+
+bound :: Pair
+bound = { zed = "z", alpha = "a" }
+
+-- Receiver is a bare literal, result read through a single-key getter.
+setterThenKey :: Str
+setterThenKey = .zed (.(.zed = "SET") { zed = "z", alpha = "a" })
+
+-- Receiver is a bare literal, result read through a group naming every
+-- field in declaration order.
+setterThenGroup :: (Str, Str)
+setterThenGroup = .(.zed, .alpha) (.(.zed = "SET") { zed = "z", alpha = "a" })
+
+-- Same, with the group written in the other order.
+setterThenGroupReversed :: (Str, Str)
+setterThenGroupReversed = .(.alpha, .zed) (.(.zed = "SET") { zed = "z", alpha = "a" })
+
+-- The getter names a field the setter did not write.
+setterThenOtherKey :: Str
+setterThenOtherKey = .alpha (.(.zed = "SET") { zed = "z", alpha = "a" })
+
+-- Three fields, the middle one written, all three read back.
+setterThenAllOfThree :: (Str, Str, Str)
+setterThenAllOfThree =
+  .(.zed, .mid, .alpha) (.(.mid = "SET") { zed = "z", mid = "m", alpha = "a" })
+
+-- Receiver is a term with a declared record type.
+setterOnBoundRecord :: (Str, Str)
+setterOnBoundRecord = .(.zed, .alpha) (.(.zed = "SET") bound)
+
+-- The setter's own result, with nothing reading it through a selector.
+setterAlone :: Pair
+setterAlone = .(.zed = "SET") { zed = "z", alpha = "a" }
+
+-- No setter: a literal read through a group.
+literalThenGroup :: (Str, Str)
+literalThenGroup = .(.zed, .alpha) { zed = "z", alpha = "a" }
+
+-- No setter: a record reached through a tuple slot, then a group.
+tupleSlotThenGroup :: (Str, Str)
+tupleSlotThenGroup = .(.zed, .alpha) (.1 (0, { zed = "z", alpha = "a" }))
+
+-- No setter: a record reached through a bracket index, then a group.
+bracketThenGroup :: (Str, Str)
+bracketThenGroup = .[0].(.zed, .alpha) [{ zed = "z", alpha = "a" }]
+
+-- The setter's result bound by a let before it is read.
+letBoundThenGroup :: (Str, Str)
+letBoundThenGroup =
+  let r = .(.zed = "SET") { zed = "z", alpha = "a" }
+  in .(.zed, .alpha) r
+
+-- The literal passed through a lambda before it is read.
+lambdaThenGroup :: (Str, Str)
+lambdaThenGroup = (\r -> .(.zed, .alpha) r) { zed = "z", alpha = "a" }

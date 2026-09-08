@@ -75,6 +75,7 @@ unitTests =
   , postArgPropagationTests
   , tuplePatternLambdaTests
   , withDocstringTests
+  , patternSelectorTests
   , evalSandboxTests
   , morlocDepsTests
   , versionConstraintTests

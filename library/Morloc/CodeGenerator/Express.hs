@@ -1037,9 +1037,12 @@ tryPatternAccessible callLang midx out steps rcvT bounds rcvE = do
         Just src -> Just <$>
           emitPatternAccessibleCall callLang midx out src steps rcvT bounds rcvE
 
--- | Unified PatternStruct dispatch. The App's args are
--- @[bracket_bounds..., receiver]@ when the selector has bracket
--- steps; otherwise just @[receiver]@.
+-- | Unified PatternStruct dispatch. A getter's args are
+-- @[bracket_bounds..., receiver]@, so a getter application always has
+-- @bracketArity sel + 1@ of them. A setter's are
+-- @[receiver, set_values...]@ and a setter selector never carries a
+-- bracket step (the desugar rejects one), so a longer argument list
+-- means a setter and the receiver is the first argument, not the last.
 --
 -- IFile-typed receivers route to the walker via 'emitIFileWalk',
 -- regardless of selector shape. Non-IFile receivers can use the
@@ -1048,6 +1051,12 @@ tryPatternAccessible callLang midx out steps rcvT bounds rcvE = do
 -- sourced error because the runtime path for unified-Selector
 -- patterns on in-memory values isn't implemented yet (the fragmented
 -- bracket-then-field form via separate PatCalls remains available).
+--
+-- A setter always takes the fallback. Both walkers this function can
+-- route to read a value out of a receiver and neither writes one back:
+-- the IFile walker reads a file, and a user 'PatternAccessible'
+-- instance implements @__extract_pattern__@. A setter rebuilds its
+-- receiver, which only the structural path expresses.
 dispatchPatternStruct
   :: Lang
   -> Int                       -- midx
@@ -1061,6 +1070,7 @@ dispatchPatternStruct
 dispatchPatternStruct callLang midx _cidxCall sel inputs out xsExpr fallback =
   case (inputs, xsExpr) of
     ([], []) -> fallback
+    _ | length inputs > bracketArity sel + 1 -> fallback
     _ -> do
       let n         = bracketArity sel
           rcvT      = last inputs

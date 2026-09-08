@@ -1,0 +1,47 @@
+-- A pattern application puts its receiver at one end of the argument
+-- list for a getter and at the other end for a setter: a getter is
+-- `pat bounds.. receiver` and a setter is `pat receiver values..`.
+-- Codegen dispatch that reads the receiver from a fixed end therefore
+-- picks a set-value when it meets a setter, and every decision keyed
+-- on the receiver's type -- routing to a user 'PatternAccessible'
+-- walker, or to the IFile walker -- is then made about the wrong
+-- value.
+--
+-- 'Box' carries a 'PatternAccessible' instance whose walker returns a
+-- recognisable string, so a setter that reaches the walker says so in
+-- its own output rather than merely producing a wrong record.
+--
+-- setLast writes the Box-typed field last, setFirst writes it first,
+-- and both must rebuild the record and read the field back.
+
+module main (setLast, setFirst, plainGet)
+
+import root-py
+
+type Py => (Box a) = "list" a
+
+source Py from "helpers.py" ("mkbox", "unbox")
+
+instance PatternAccessible Box where
+  source Py from "helpers.py" ("box_walker" as __extract_pattern__)
+
+mkbox :: a -> Box a
+unbox :: Box b -> b
+
+record Holder = Holder
+  { tag :: Str
+  , payload :: Box Str
+  }
+record Py => Holder = "dict"
+
+held :: Holder
+held = { tag = "t", payload = mkbox "p" }
+
+setLast :: Str
+setLast = unbox (.payload (.(.tag = "T2", .payload = mkbox "NEW") held))
+
+setFirst :: Str
+setFirst = .tag (.(.payload = mkbox "NEW", .tag = "T2") held)
+
+plainGet :: Str
+plainGet = unbox (.payload held)
