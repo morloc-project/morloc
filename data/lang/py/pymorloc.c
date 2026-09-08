@@ -1964,23 +1964,36 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
             "nn", (Py_ssize_t)&arrow_array, (Py_ssize_t)&arrow_schema);
         Py_DECREF(rb_class);
 
-        // Incref shm so it stays alive while pyarrow references the buffers.
-        // Track only a reference actually acquired: a refused incref means
-        // the block is free or being released, and tracking it anyway would
-        // make the next flush decrement a reference this pool never held.
-        char* incref_err = NULL;
-        if (shincref((absptr_t)voidstar, &incref_err)) {
+        // Keep the block alive while pyarrow references its buffers. A table
+        // that arrived by reference needs one taken on this pool's behalf; a
+        // table materialized here is already this pool's own and taking a
+        // second reference would leave it permanently held. Either way the
+        // tracker releases exactly one at the next dispatch, and a refused
+        // acquire means nothing was taken, so nothing is tracked.
+        bool arrow_owned = true;
+        if (source == PACKET_SOURCE_RPTR) {
+            char* incref_err = NULL;
+            arrow_owned = shincref((absptr_t)voidstar, &incref_err);
+            if (incref_err) { free(incref_err); }
+        }
+        if (arrow_owned) {
             shm_tracker_push((absptr_t)voidstar, NULL);
         }
-        if (incref_err) { free(incref_err); }
 
         free_schema(schema);
         if (!obj) return NULL;
         return obj;
     }
 
-    // Fast path: inline voidstar -- read directly from packet, no SHM needed
-    if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR) {
+    // Fast path: inline voidstar -- read directly from packet, no SHM
+    // needed. A payload that is compressed or encrypted cannot be walked
+    // where it lies, so it falls through to the general path, which expands
+    // the body and re-enters. Testing for the plain values rather than
+    // against the known transforms keeps a future one from being read as
+    // raw bytes.
+    if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR
+        && header->command.data.compression == PACKET_COMPRESSION_NONE
+        && header->command.data.encryption == PACKET_ENCRYPTION_NONE) {
         const uint8_t* payload = (const uint8_t*)packet + sizeof(morloc_packet_header_t) + header->offset;
         obj = from_voidstar(schema, (const void*)payload, (const void*)payload);
         PyTRACE(obj == NULL)
@@ -2071,6 +2084,14 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
             tracked = true;
         }
         if (incref_err) { free(incref_err); }
+    } else {
+        // A payload that did not arrive by reference was materialized into a
+        // block of this pool's own, and nothing else will free it. It is
+        // handed to the tracker rather than released here because a result
+        // can be a view onto these bytes rather than a copy of them, so the
+        // block has to outlive this call exactly as a referenced one does.
+        shm_tracker_push((absptr_t)voidstar, schema);
+        tracked = true;
     }
 
     obj = from_voidstar(schema, voidstar, NULL);

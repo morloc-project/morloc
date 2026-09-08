@@ -135,6 +135,25 @@ std::string interweave_strings(const std::vector<std::string>& first, const std:
 struct ShmEntry { absptr_t ptr; };
 thread_local std::vector<ShmEntry> _shm_tracker;
 
+// Owns a block this pool materialized from a packet, releasing it unless
+// ownership is handed elsewhere. Deserialization can throw, and a throwing
+// dispatch is answered with a fail packet rather than ending the pool, so a
+// block dropped on that path is lost once per bad request rather than once.
+struct ShmOwned {
+    absptr_t ptr;
+    explicit ShmOwned(void* p) : ptr((absptr_t)p) {}
+    ShmOwned(const ShmOwned&) = delete;
+    ShmOwned& operator=(const ShmOwned&) = delete;
+    void keep() { ptr = nullptr; }
+    ~ShmOwned() {
+        if (ptr != nullptr) {
+            char* err = NULL;
+            shfree(ptr, &err);
+            if (err) { free(err); }
+        }
+    }
+};
+
 static void _shm_tracker_flush() {
     for (auto& e : _shm_tracker) {
         char* err = NULL;
@@ -268,14 +287,20 @@ T _get_value(const uint8_t* packet, Schema* schema){
         arrow_from_shm(hdr, &as, &aa, &aerr);
         if (aerr) { PROPAGATE_ERROR(aerr); }
 
-        // Track only a reference actually acquired. A refused incref means
-        // the block is free or being released, and tracking it anyway would
-        // make the next flush decrement a reference this pool never held.
-        char* ierr = nullptr;
-        if (shincref((absptr_t)raw, &ierr)) {
+        // A table that arrived by reference needs one taken on this pool's
+        // behalf; a table materialized here is already this pool's own and
+        // taking a second reference would leave it permanently held. Either
+        // way the tracker releases exactly one at the next dispatch. A
+        // refused acquire means nothing was taken, so nothing is tracked.
+        bool arrow_owned = true;
+        if (source == PACKET_SOURCE_RPTR) {
+            char* ierr = nullptr;
+            arrow_owned = shincref((absptr_t)raw, &ierr);
+            if (ierr) { free(ierr); }
+        }
+        if (arrow_owned) {
             _shm_tracker.push_back({(absptr_t)raw});
         }
-        if (ierr) { free(ierr); }
 
         return mlc::ArrowTable(std::move(as), std::move(aa));
     } else {
@@ -381,6 +406,13 @@ T _get_value(const uint8_t* packet, Schema* schema){
         if(errmsg != NULL) {
             PROPAGATE_ERROR(errmsg)
         }
+
+        // A payload that did not arrive by reference was materialized into a
+        // block of this pool's own -- one contiguous allocation covering the
+        // whole value, so a single release covers it -- and nothing else will
+        // ever free it. A payload that did arrive by reference belongs to its
+        // sender.
+        ShmOwned owned(is_rptr ? nullptr : (void*)voidstar);
 
         // For RPTR data, increment refcount so the owner's tracker flush
         // won't destroy data we may still need (e.g. forwarded packets).

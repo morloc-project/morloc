@@ -918,6 +918,13 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
         if acquired {
             track(voidstar as *mut c_void);
         }
+    } else {
+        // A payload that did not arrive by reference was materialized into a
+        // block of this pool's own, and nothing else will free it. Hand it to
+        // the tracker, which is also panic-safe: the read below can throw and
+        // a throwing dispatch answers with a fail packet rather than ending
+        // the pool, so a block dropped there would be lost once per request.
+        track(voidstar as *mut c_void);
     }
     <T as FromVoidstar>::read(schema, voidstar, std::ptr::null())
 }

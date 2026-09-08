@@ -2541,22 +2541,33 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
 
         // Hold the block for as long as R references the imported buffers,
         // and hand it to the tracker so the reference is released at the
-        // start of the next request rather than never. Track only a
-        // reference actually acquired: a refused incref means the block is
-        // free or being released, and tracking it anyway would make the
-        // next flush decrement a reference this pool never held.
-        char* incref_err = NULL;
-        if (shincref((absptr_t)arrow_ptr, &incref_err)) {
+        // start of the next request rather than never. A table that arrived
+        // by reference needs one taken on this pool's behalf; a table
+        // materialized here is already this pool's own and a second
+        // reference would leave it permanently held.
+        bool arrow_owned = true;
+        if (source == PACKET_SOURCE_RPTR) {
+            char* incref_err = NULL;
+            arrow_owned = shincref((absptr_t)arrow_ptr, &incref_err);
+            if (incref_err) { free(incref_err); }
+        }
+        if (arrow_owned) {
             shm_tracker_push((absptr_t)arrow_ptr, NULL);
         }
-        if (incref_err) { free(incref_err); }
 
         free_schema(schema);
         return obj_r;
     }
 
-    // Fast path: inline voidstar -- read directly from packet, no SHM needed
-    if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR) {
+    // Fast path: inline voidstar -- read directly from packet, no SHM
+    // needed. A payload that is compressed or encrypted cannot be walked
+    // where it lies, so it falls through to the general path, which expands
+    // the body and re-enters. Testing for the plain values rather than
+    // against the known transforms keeps a future one from being read as
+    // raw bytes.
+    if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR
+        && header->command.data.compression == PACKET_COMPRESSION_NONE
+        && header->command.data.encryption == PACKET_ENCRYPTION_NONE) {
         const uint8_t* payload = packet + sizeof(morloc_packet_header_t) + header->offset;
         MORLOC_REJECT_NUL(check_nul, (const void*)payload, schema, (const void*)payload,
                           free_schema(schema));
