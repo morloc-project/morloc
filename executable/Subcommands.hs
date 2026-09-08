@@ -813,6 +813,10 @@ data ProgramCommand = ProgramCommand
   , pcReturnType :: T.Text
   , _pcArgSchemas :: [T.Text]
   , pcInternal :: Bool
+  , pcGroup :: Maybe T.Text
+    -- ^ The group a command is nested under, if any. A grouped command is
+    -- reached as @<group> <name>@, so the group belongs to how it is
+    -- invoked and not just to how it is displayed.
   }
 
 -- | The commands a user can actually invoke. The compiler synthesizes a
@@ -821,6 +825,12 @@ data ProgramCommand = ProgramCommand
 -- that reports a program's command surface.
 visibleCommands :: ProgramManifest -> [ProgramCommand]
 visibleCommands = filter (not . pcInternal) . pmCommands
+
+-- | What the user types to reach a command. A grouped command is a nested
+-- subcommand, so its group is part of the invocation.
+invocationOf :: ProgramCommand -> T.Text
+invocationOf c = maybe n (\g -> g <> " " <> n) (pcGroup c)
+  where n = pcName c
 
 instance JSON.FromJSON ModuleManifest where
   parseJSON = JSON.withObject "ModuleManifest" $ \o ->
@@ -854,6 +864,7 @@ instance JSON.FromJSON ProgramCommand where
       <*> parseReturnType o
       <*> o JSON..:? "arg_schemas" JSON..!= []
       <*> o JSON..:? "internal" JSON..!= False
+      <*> o JSON..:? "group"
     where
       -- What the command puts on standard output. A streaming command
       -- returns `()` and writes its data through a sink, so its `stream`
@@ -1098,7 +1109,7 @@ printProgram verbose p = do
   putStrLn $ "  " <> T.unpack name <> "  " <> summary
   if verbose > 0
     then
-      mapM_ (\c -> putStrLn $ "    " <> T.unpack (pcName c) <> " :: " <> T.unpack (pcReturnType c)) cmds
+      mapM_ (\c -> putStrLn $ "    " <> T.unpack (invocationOf c) <> " :: " <> T.unpack (pcReturnType c)) cmds
     else return ()
 
 -- ======================================================================

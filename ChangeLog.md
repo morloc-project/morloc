@@ -13,6 +13,8 @@ Unreleased
  - the help no longer publishes a wire form for a type the program never packs
  - declaring `@default` on a second terminal action is an error rather than
    silently ignored
+ - `morloc list -v` shows a grouped command as it must be typed, with its
+   group
 
 0.102.1 [2026-09-05]
 --------------------
