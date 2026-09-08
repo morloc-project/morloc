@@ -175,7 +175,7 @@ fn with_null(mut v: Value) -> Value {
 }
 
 /// True when a wire schema string denotes a top-level optional type.
-fn schema_is_optional(schema: Option<&str>) -> bool {
+pub(crate) fn schema_is_optional(schema: Option<&str>) -> bool {
     schema
         .and_then(|s| parse_schema(s).ok())
         .map(|p| p.serial_type == SerialType::Optional)

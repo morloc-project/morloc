@@ -1,0 +1,14 @@
+-- An optional positional may be omitted, so it can only be the last one: with
+-- fewer tokens than slots nothing says which slot a token filled. A required
+-- positional after an optional one must be rejected at build time, because clap
+-- leaves that arrangement unspecified rather than refusing it, and a release
+-- build would mis-parse in silence.
+
+module main (pick)
+
+type Py => Int = "int"
+type Py => Str = "str"
+
+source Py from "lib.py" ("pick")
+
+pick :: ?Str -> Int -> Int

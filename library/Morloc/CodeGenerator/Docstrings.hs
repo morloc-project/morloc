@@ -199,6 +199,7 @@ processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs retdoc) = do
   -- categories, which are just as fatal to the machine-readable views.
   validateArgKeys loc cmdargs
   validateStdinArg loc cmdargs
+  validateOptionalOrdering loc cmdargs
   (t0, retdoc') <- reduceArgDoc i t (ArgDocAlias retdoc)
   t' <- resolveNestedTypes i t0
   return $
@@ -448,10 +449,11 @@ resolveArgDocVars loc rs t r
       && not (not (null rs) && docUnroll r == Just True) =
       MM.throwSystemError $
         loc
-          <> " is given a default value, but positional arguments are"
-          <> " required and cannot take defaults. Either remove the"
-          <> " 'default:' line, or make the field optional by adding an"
-          <> " 'arg:' docstring entry (e.g. \"arg: -f/--flag\")."
+          <> " is given a default value, but a positional argument takes"
+          <> " its value from the command line and cannot take defaults."
+          <> " Either remove the 'default:' line, or move the argument off"
+          <> " the command line by adding an 'arg:' docstring entry"
+          <> " (e.g. \"arg: -f/--flag\")."
   -- list-of-elements (many) and per-field unroll describe
   -- incompatible CLI shapes for the same slot.
   | docMany r == Just True && docUnroll r == Just True =
@@ -734,6 +736,32 @@ validateStdinArg loc cmdargs = do
               <> " the stdin argument must be the last positional."
       | otherwise = go (argPosDocStdin r) rest
     go seenStdin (_ : rest) = go seenStdin rest
+
+-- An optional positional may be left off the command line, and a missing
+-- argument can only be the last one: with fewer tokens than slots there is no
+-- rule saying which slot a token filled. So every positional after an optional
+-- one must itself be droppable. clap leaves the opposite arrangement
+-- unspecified rather than rejecting it, which would make the mis-parse silent.
+validateOptionalOrdering :: MDoc -> [CmdArg] -> MorlocMonad ()
+validateOptionalOrdering loc = go False
+  where
+    droppable :: ArgPosDocSet -> Bool
+    droppable r = argPosDocStdin r || case argPosDocType r of
+      OptionalT _ -> True
+      _ -> False
+
+    go :: Bool -> [CmdArg] -> MorlocMonad ()
+    go _ [] = return ()
+    go seen (CmdArgPos r : rest)
+      | seen && not (droppable r) =
+          MM.throwSystemError $
+            loc <> "a required positional follows an optional one."
+              <> " An optional argument may be omitted, and an omitted argument"
+              <> " is necessarily the last, so every positional after one must"
+              <> " be optional too. Either reorder the arguments, or give this"
+              <> " one an 'arg:' docstring entry to make it an option."
+      | otherwise = go (seen || droppable r) rest
+    go seen (_ : rest) = go seen rest
 
 -- Reject positional `@name`s that are invalid or collide within a subcommand.
 -- A `@name` becomes the positional's property in the MCP tool schema, so a

@@ -479,7 +479,7 @@ fn build_command_args(
     for (i, marg) in mcmd.args.iter().enumerate() {
         let id: &'static str = leak(&format!("arg{}", i));
         match marg {
-            ManifestArg::Positional { many, stdin, .. } => {
+            ManifestArg::Positional { many, stdin, schema, metavar, key, .. } => {
                 // Positionals are rendered by `render_positional_block`
                 // (above, via `after_help`) so clap's bracketed
                 // `<argN>` default doesn't appear in help. They still
@@ -488,10 +488,27 @@ fn build_command_args(
                 // guarantees it is the last positional, so an optional
                 // trailing positional is unambiguous for clap); when
                 // omitted the nexus injects the `/dev/stdin` sentinel.
+                //
+                // An optional argument may be left out, and omitting it means
+                // null. That convention is not something `?T` says by itself --
+                // the type is a claim about the value, not about the slot -- it
+                // is adopted so the parser agrees with `--json-help` and the MCP
+                // tool shapes, which have always reported an optional argument
+                // as not required. The compiler guarantees such a positional is
+                // trailing.
+                let optional = crate::json_help::schema_is_optional(schema.as_deref());
                 let mut a = ClapArg::new(id)
-                    .required(!stdin)
+                    .required(!stdin && !optional)
                     .index(pos_idx as usize)
                     .hide(true);
+                // Name the slot in clap's own diagnostics. The rendered help
+                // uses `render_positional_block`, but a parse error comes from
+                // clap and would otherwise read `<arg0>`.
+                if let Some(m) = metavar {
+                    a = a.value_name(leak(m));
+                } else if !key.is_empty() {
+                    a = a.value_name(leak(key));
+                }
                 // Variadic positional: accept one or more tokens.
                 // The compiler guarantees a `many` positional is the
                 // last positional, which is clap's requirement too.
@@ -804,13 +821,17 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                     let v = preprocess_cli_value(raw, checks, *source, *q, &format!("argument #{}", i));
                     out.push(ArgValue::Value(v));
                 } else {
-                    // Required positional: clap guaranteed a value.
-                    let val = matches
-                        .get_one::<String>(&id)
-                        .cloned()
-                        .expect("clap-required positional must have a value");
-                    let v = preprocess_cli_value(val, checks, *source, *q, &format!("argument #{}", i));
-                    out.push(ArgValue::Value(v));
+                    // A value is guaranteed for a required positional; an
+                    // optional one may be absent, and absent means null. The
+                    // null is pushed bare: with no argv token there is nothing
+                    // for the checks or the source/form shape to act on.
+                    match matches.get_one::<String>(&id).cloned() {
+                        Some(val) => {
+                            let v = preprocess_cli_value(val, checks, *source, *q, &format!("argument #{}", i));
+                            out.push(ArgValue::Value(v));
+                        }
+                        None => out.push(ArgValue::Null),
+                    }
                 }
             }
             ManifestArg::Optional {
@@ -1120,11 +1141,13 @@ fn render_positional_block(mcmd: &ManifestCommand) -> String {
     for (i, marg) in positionals.iter().enumerate() {
         let prefix = format!("  {:<width$}  ", labels[i], width = label_width);
         let cont = " ".repeat(prefix.len());
-        let (type_desc, desc, format_hint) = match marg {
-            ManifestArg::Positional { type_desc, desc, format, .. } => (
+        let (type_desc, desc, format_hint, schema, stdin) = match marg {
+            ManifestArg::Positional { type_desc, desc, format, schema, stdin, .. } => (
                 type_desc.as_deref(),
                 desc.as_slice(),
                 format.as_deref(),
+                schema.as_deref(),
+                *stdin,
             ),
             _ => unreachable!("filtered to Positional only"),
         };
@@ -1142,6 +1165,12 @@ fn render_positional_block(mcmd: &ManifestCommand) -> String {
             if !f.trim().is_empty() {
                 lines.push(format!("format: {}", f));
             }
+        }
+        // Say that a slot may be left out. The type line shows `?T`, which
+        // states that the value may be null but not that the argument may be
+        // dropped; this is the only place on a terminal that says so.
+        if !stdin && crate::json_help::schema_is_optional(schema) {
+            lines.push(String::from("optional: omit for null"));
         }
         if lines.is_empty() {
             // Nothing to say beyond the index marker; emit just that

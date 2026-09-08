@@ -11,7 +11,14 @@ all:
 	./nexus --keep-null fromNullInt 99 >> obs.txt 2>> obs.err
 	./nexus --keep-null isNullInt null >> obs.txt 2>> obs.err
 	./nexus --keep-null isNullInt 5 >> obs.txt 2>> obs.err
+	./nexus --keep-null echoOptInt >> obs.txt 2>> obs.err
+	./nexus --keep-null echoOptStr >> obs.txt 2>> obs.err
+	./nexus --keep-null echoOptList >> obs.txt 2>> obs.err
+	./nexus --keep-null isNullInt >> obs.txt 2>> obs.err
+	printf 'from a file' > opt.dat
+	./nexus --keep-null readOpt opt.dat >> obs.txt 2>> obs.err
+	./nexus --keep-null readOpt >> obs.txt 2>> obs.err
 
 clean:
-	rm -rf nexus pools *err
+	rm -rf nexus pools *err opt.dat
 	rm -rf *-build *build.tmp*

@@ -1126,9 +1126,14 @@ fn run_remote_command(
                 pkt
             }
             ArgValue::Value(_) | ArgValue::Null => {
-                let raw_str = match arg_val {
-                    ArgValue::Value(s) => s.clone(),
-                    ArgValue::Null => "null".to_string(),
+                // An absent argument carries no argv token, and the
+                // source/form/check vocabulary describes how to read a token.
+                // Applying it to the stand-in `null` would ask the runtime to
+                // open a file of that name for a `source: file` argument, so a
+                // null is dispatched shapeless.
+                let (raw_str, shape) = match arg_val {
+                    ArgValue::Value(s) => (s.clone(), ArgShape::from_arg(arg_def)),
+                    ArgValue::Null => ("null".to_string(), None),
                     _ => unreachable!(),
                 };
                 let raw_str = if schema_is_float_scalar(schema_str) {
@@ -1136,7 +1141,6 @@ fn run_remote_command(
                 } else {
                     raw_str
                 };
-                let shape = ArgShape::from_arg(arg_def);
                 let json_str = apply_shape_to_argv(raw_str, shape.as_ref(), i);
                 let json_c = std::ffi::CString::new(json_str.as_str()).unwrap();
                 let c_arg = unsafe {
@@ -1836,10 +1840,12 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
                 )
             },
             _ => {
-                let raw_str = match arg_val {
-                    ArgValue::Value(s) => s.clone(),
-                    ArgValue::Null => "null".to_string(),
-                    ArgValue::Group { .. } => "null".to_string(),
+                // See the sibling branch above: a null has no token, so it is
+                // dispatched without the arg's source/form/check shape.
+                let (raw_str, shape) = match arg_val {
+                    ArgValue::Value(s) => (s.clone(), ArgShape::from_arg(arg_def)),
+                    ArgValue::Null => ("null".to_string(), None),
+                    ArgValue::Group { .. } => ("null".to_string(), None),
                     ArgValue::Many { .. } => unreachable!(),
                 };
                 let raw_str = if schema_is_float_scalar(schema_str) {
@@ -1847,7 +1853,6 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
                 } else {
                     raw_str
                 };
-                let shape = ArgShape::from_arg(arg_def);
                 let json_str = apply_shape_to_argv(raw_str, shape.as_ref(), i);
                 let json_c = std::ffi::CString::new(json_str.as_str()).unwrap();
                 let c_arg = unsafe {

@@ -4,6 +4,7 @@ module main
   , echoOptList
   , fromNullInt
   , isNullInt
+  , readOpt
   )
 
 type Py => Int = "int"
@@ -21,9 +22,9 @@ echoOptInt :: ?Int -> ?Int
 echoOptInt x = identity x
 
 
--- There is actually no way to represent a null string in the shell, "null"
--- would be interpretted as a string. If you really want to distinguish between
--- null and an empty string, make the argument optional and give null as a default.
+-- A quoted argument cannot carry a null: `null` on the command line is the
+-- three-letter string. Omitting the argument is how a null Str is written, and
+-- an optional argument may always be omitted.
 echoOptStr :: ?Str -> ?Str
 echoOptStr x = identity x
 
@@ -35,3 +36,13 @@ fromNullInt x = fromNull 0 x
 
 isNullInt :: ?Int -> Bool
 isNullInt x = isNull x
+
+-- An omitted argument has no token for `source: file` to interpret. Reading the
+-- stand-in null as a path would send the runtime looking for a file of that
+-- name, so an absent argument is dispatched without the argument's shape.
+readOpt ::
+  --' @metavar FILE
+  --' @source file
+  ?Str ->
+  ?Str
+readOpt x = identity x
