@@ -959,6 +959,7 @@ fn run_remote_command(
             data: *const u8, schema: *const morloc_runtime_types::cschema::CSchema,
             errmsg: *mut *mut std::ffi::c_char,
         ) -> *mut u8;
+        fn shfree(ptr: *mut std::ffi::c_void, errmsg: *mut *mut std::ffi::c_char) -> bool;
     }
 
     let socket = &sockets[cmd.pool_index];
@@ -1284,6 +1285,20 @@ fn run_remote_command(
     // `@stdout` and returns Unit doesn't get a phantom packet appended
     // past its stream footer. `--keep-null` overrides in both cases.
     print_result_c(result_ptr, c_schema, &full_packet, is_arrow, config);
+
+    // A result that arrived in shared memory came with a reference taken on
+    // this process's behalf, and one extracted from an inline packet was
+    // materialized here; either way the block is ours once it has been
+    // rendered. The process exits shortly after, so this reclaims little --
+    // but a receiver that keeps what it was handed is the contract every
+    // other consumer follows.
+    unsafe {
+        let mut ferr: *mut std::ffi::c_char = std::ptr::null_mut();
+        shfree(result_ptr as *mut std::ffi::c_void, &mut ferr);
+        if !ferr.is_null() {
+            libc::free(ferr as *mut std::ffi::c_void);
+        }
+    }
     unsafe { morloc_runtime_types::cschema::CSchema::free(c_schema) };
 }
 
