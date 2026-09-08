@@ -250,12 +250,18 @@ data ParsedDocLine
 --  * Otherwise, if the line starts with `<word>:` (no spaces in `<word>`)
 --    it is returned as a DocDirective. Validation against the allowlist
 --    of known directive names is done by the caller.
+-- | What a docstring line reads as when it is not a directive. Shared with
+-- 'parseDocKV' so a line the directive handler does not recognize can be
+-- kept exactly as the author wrote it.
+docDescLine :: Text -> Text
+docDescLine txt = T.stripEnd $ case T.uncons txt of
+  Just (' ', rest) -> rest
+  _ -> txt
+
 parseDocKV :: Text -> ParsedDocLine
 parseDocKV txt =
   let stripped = T.strip txt
-      descLine = T.stripEnd $ case T.uncons txt of
-        Just (' ', rest) -> rest
-        _ -> txt
+      descLine = docDescLine txt
    in case T.uncons stripped of
         Just ('\\', rest) -> DocDesc (T.stripEnd rest)
         Just ('@', rest) ->
@@ -319,7 +325,7 @@ argDocDirectiveKeys =
   , "arg", "true", "false", "return"
   , "source", "form", "check.<kind>"
   , "list.source", "list.form", "list.check.<kind>"
-  , "with", "mime"
+  , "with", "render", "mime"
   ]
 
 -- | Parse and lightly validate a media type (RFC 6838 `type/subtype`, e.g.
@@ -518,11 +524,52 @@ parseCheck kind raw = case kind of
 sourceDocDirectiveKeys :: [Text]
 sourceDocDirectiveKeys = ["name", "rsize"]
 
-unknownDirectiveWarning :: [Text] -> Text -> Text
-unknownDirectiveWarning knownKeys k =
-  "warning: unknown docstring directive '" <> k <> "'"
-  <> " (recognized: " <> T.intercalate ", " knownKeys <> "); "
-  <> "if this line was meant as prose, prefix its content with '\\' to suppress this warning"
+-- | Warn only when the key looks like a misspelling of a directive rather
+-- than like prose. Every unrecognized line used to warn, which made ordinary
+-- English -- any line whose first word ends in a colon, and any `@word` --
+-- noisy enough that authors were told to escape all prose. A key within one
+-- edit of a real directive is a typo worth reporting; anything further away
+-- is a sentence.
+unknownDirectiveWarning :: [Text] -> Text -> Text -> [Text]
+unknownDirectiveWarning knownKeys k line
+  | closedForm || not (null near) = [msg]
+  | otherwise = []
+  where
+    -- `@word` is the closed grammar. An unrecognized keyword there is a
+    -- mistake, and demoting it to prose without saying so leaves the
+    -- interface quietly different from the one the author wrote. The legacy
+    -- `key:` form is the one ordinary English collides with -- any sentence
+    -- whose first word ends in a colon -- so there a warning is reserved for
+    -- a key that looks like a misspelling.
+    closedForm = T.isPrefixOf "@" (T.stripStart line)
+    near = [n | n <- knownKeys, withinOneEdit k n]
+    msg =
+      "warning: docstring directive '" <> k <> "' is not recognized"
+      <> (if null near
+            then " (recognized: " <> T.intercalate ", " knownKeys <> ")"
+            else " (did you mean one of: " <> T.intercalate ", " near <> "?)")
+      <> "; if this line was meant as prose, prefix its content with "
+      <> "'\\' to suppress this warning"
+
+-- | True when one insertion, deletion, substitution or transposition turns
+-- the first word into the second, compared without regard to case.
+withinOneEdit :: Text -> Text -> Bool
+withinOneEdit a b = go (T.unpack (T.toLower a)) (T.unpack (T.toLower b))
+  where
+    go xs ys
+      | xs == ys = True
+      | otherwise = case (xs, ys) of
+          ([], zs) -> length zs == 1
+          (zs, []) -> length zs == 1
+          (x : xt, y : yt)
+            | x == y -> go xt yt
+            | otherwise ->
+                xt == yt
+                  || xt == (y : yt)
+                  || (x : xt) == yt
+                  || (case (xt, yt) of
+                        (x2 : xr, y2 : yr) -> x == y2 && x2 == y && xr == yr
+                        _ -> False)
 
 -- | Parse a single CLI-option directive value into the
 -- [`ArgDocVars`] slot, recording an error when the value matched a
@@ -615,9 +662,8 @@ processArgDocLines = foldl step ([], [], defaultValue)
           Right mt -> (errs, ws, d {docMime = Just mt})
           Left e   -> (errs <> ["in `@mime " <> v <> "`: " <> e], ws, d)
         _ ->
-          let w = unknownDirectiveWarning argDocDirectiveKeys k
-              desc = k <> ": " <> v
-           in (errs, ws <> [w], d {docLines = docLines d <> [desc]})
+          let w = unknownDirectiveWarning argDocDirectiveKeys k line
+           in (errs, ws <> w, d {docLines = docLines d <> [docDescLine line]})
 
     -- Parse one `with`/`render` directive into a WithSpec, appending it to
     -- docWith (or an error to errs).
@@ -654,7 +700,7 @@ processModuleDocLines = finalize . foldl step ([], Nothing, [])
                 Just epi -> epis <> [epi]
           in (desc, Just [], epis')
         _ ->
-          let line' = k <> ": " <> _v
+          let line' = docDescLine line
           in case curEpi of
             Nothing -> (desc <> [line'], Nothing, epis)
             Just epi -> (desc, Just (epi <> [line']), epis)
@@ -688,9 +734,8 @@ applySourceDocs lns src = foldl step ([], [], src) lns
           Left e -> (errs <> [e], ws, s)
           Right ns -> (errs, ws, s {srcRsize = ns})
         _ ->
-          let w = unknownDirectiveWarning sourceDocDirectiveKeys k
-              desc = k <> ": " <> v
-           in (errs, ws <> [w], s {srcNote = srcNote s <> [desc]})
+          let w = unknownDirectiveWarning sourceDocDirectiveKeys k line
+           in (errs, ws <> w, s {srcNote = srcNote s <> [docDescLine line]})
 
 -- | Parse an `rsize` value: one or more positive integers separated by
 -- whitespace. Each is the size of a leading call group; the final group is
