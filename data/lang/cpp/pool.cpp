@@ -1050,6 +1050,13 @@ uint8_t* cpp_local_dispatch(uint32_t mid, const uint8_t** args,
 uint8_t* cpp_remote_dispatch(uint32_t mid, const uint8_t** args,
                                      size_t nargs, void* ctx) {
     (void)nargs; (void)ctx;
+    // Every entry in the tracker is a reference this pool owns: a block it
+    // allocated, an argument it took a reference on, or a result reference
+    // inherited from a callee. Anyone holding a packet that left this pool
+    // holds a separate reference taken before it was sent. So releasing at
+    // a dispatch boundary is safe here for the same reason it is safe in
+    // the local dispatcher, and the two should not differ.
+    _shm_tracker_flush();
     morloc_debug_flush_dispatch();
     try {
         return remote_dispatch(mid, args);
