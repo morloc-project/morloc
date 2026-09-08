@@ -85,6 +85,10 @@ data FData = FData
     -- ^ Per-arg SerialAST, index-aligned with 'fdataArgSchemas'.
     -- Consumed at emit time to derive per-entry wire schemas for
     -- group args (see 'groupEntryWireSchemas').
+  , fdataReturnAst :: SerialAST
+    -- ^ The return's SerialAST. Says which constructors this command
+    -- actually packs, which the type glossary needs and cannot get from
+    -- the signature alone.
   , fdataReturnSchema :: Text
   , fdataReturnGeneralSchema :: Text
     -- ^ The return's wire schema with concrete-type hints stripped.
@@ -111,6 +115,8 @@ data GastData = GastData
   , commandArgAsts :: [SerialAST]
     -- ^ Per-arg SerialAST, index-aligned with 'commandArgSchemas'.
     -- Same role as 'fdataArgAsts'; see 'groupEntryWireSchemas'.
+  , commandReturnAst :: SerialAST
+    -- ^ Same role as 'fdataReturnAst'.
   }
 
 -- | Slice of a parent command's 'CmdDocSet' that internal
@@ -332,6 +338,7 @@ getFData (t, i, lang, doc, sockets) = do
       , fdataSubSockets = sockets
       , fdataArgSchemas = argSchemas
       , fdataArgAsts = argAsts
+      , fdataReturnAst = returnAst
       , fdataReturnSchema = returnSchema
       , fdataReturnGeneralSchema = returnGeneral
       , fdataCmdDocSet = doc
@@ -605,6 +612,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       , commandReturnGeneralSchema = returnGeneral
       , commandArgSchemas = argSchemas
       , commandArgAsts = argAsts
+      , commandReturnAst = retAst
       }
   where
     type2schema :: Type -> MorlocMonad Text
@@ -2002,14 +2010,38 @@ cmdSignatureTypes mStream doc =
 -- comes from a @Packable@ instance has no structure in the signature at all --
 -- the name is opaque there -- so its definition is taken from the instance,
 -- which states the wire form generically in the constructor's own parameters.
-namedTypesJson :: [Serial.PackerInstance] -> [Type] -> Text
-namedTypesJson instances ts =
+-- | Constructors this command hands to a pack function, taken from the
+-- serialization it will actually run. A name can appear in a signature and
+-- still never reach a packer -- unit is the common case, since it
+-- serializes as null -- so the signature alone cannot decide which
+-- packable definitions the help should publish.
+packedConstructors :: [SerialAST] -> Set.Set Text
+packedConstructors = Set.fromList . concatMap go
+  where
+    -- The general name, not the concrete one: a packable definition is
+    -- keyed by the morloc constructor, while an FVar prints as whatever
+    -- the implementation language calls it.
+    generalName (FV gv _) = render (pretty gv)
+
+    go s = case s of
+      SerialPack v (_, x) -> generalName v : go x
+      SerialList _ _ x -> go x
+      SerialTuple _ xs -> concatMap go xs
+      SerialObject _ _ _ entries -> concatMap (go . snd) entries
+      SerialClosure xs x -> concatMap go xs <> go x
+      SerialOptional _ x -> go x
+      _ -> []
+
+namedTypesJson :: Set.Set Text -> [Serial.PackerInstance] -> [Type] -> Text
+namedTypesJson packedHeads instances ts =
   jsonArr
-    ( map oneNamed (filter (isShown . snd3) (dedup (concatMap collect ts)))
+    ( map oneNamed (filter (isShown . snd3) allDefs)
         <> packableEntries ts
     )
   where
     snd3 (_, x, _) = x
+
+    allDefs = dedup (concatMap collect ts)
 
     -- A definition earns its place by defining a name the reader actually
     -- meets. A type can appear in a signature without appearing in the help:
@@ -2020,10 +2052,27 @@ namedTypesJson instances ts =
     isShown :: Text -> Bool
     isShown nm = Set.member nm shownNames
 
+    -- Printing a definition prints the names in its field types, so the
+    -- set the help shows has to close over itself: a record reached only
+    -- through another record's field is still a name the reader meets and
+    -- still needs defining. Seeded from the signature and grown until it
+    -- stops changing.
     shownNames :: Set.Set Text
-    shownNames =
-      Set.fromList
-        (concatMap (MT.split (\c -> not (isNameChar c)) . renderCliType) ts)
+    shownNames = grow seed
+      where
+        seed = Set.fromList (concatMap (namesOf . renderCliType) ts)
+        grow s0 =
+          let s1 = Set.union s0 . Set.fromList $
+                     [ n
+                     | (_, nm, fields) <- allDefs
+                     , Set.member nm s0
+                     , (_, ft) <- fields
+                     , n <- namesOf (renderCliType ft)
+                     ]
+          in if Set.size s1 == Set.size s0 then s0 else grow s1
+
+    namesOf :: Text -> [Text]
+    namesOf = MT.split (\c -> not (isNameChar c))
 
     isNameChar c = c == '_' || c `elem` (['a' .. 'z'] <> ['A' .. 'Z'] <> ['0' .. '9'])
 
@@ -2090,6 +2139,9 @@ namedTypesJson instances ts =
             | pin <- instances
             , Set.member (extractKey (Serial.piHead pin)) wanted
             , isShown (render (pretty (extractKey (Serial.piHead pin))))
+            , Set.member
+                (render (pretty (extractKey (Serial.piHead pin))))
+                packedHeads
             ]
 
     dedupOn f = go Set.empty
@@ -2653,7 +2705,9 @@ buildManifest ManifestInputs{..} =
         -- mangles pre-rename). Using the display name would emit
         -- dead pointers whenever the parent has a `--' name:`.
         , ("terminals", terminalsJson (fdataTermName fd) (cmdDocTerminals (fdataCmdDocSet fd)))
-        , ("named_types", namedTypesJson miPackerInstances
+        , ("named_types", namedTypesJson
+            (packedConstructors (fdataReturnAst fd : fdataArgAsts fd))
+            miPackerInstances
             (cmdSignatureTypes (Map.lookup (EV (fdataTermName fd)) miStreamTypes) (fdataCmdDocSet fd)))
         , ("metadata", metadataEmpty)
         , cmdGroupField (fdataMid fd)
@@ -2673,7 +2727,9 @@ buildManifest ManifestInputs{..} =
         , ("internal", jsonBool (isInternalTerminalName (commandTermName g)))
         -- Same term-name-for-mangling rationale as `remoteCmdJson`.
         , ("terminals", terminalsJson (commandTermName g) (cmdDocTerminals (commandDocs g)))
-        , ("named_types", namedTypesJson miPackerInstances
+        , ("named_types", namedTypesJson
+            (packedConstructors (commandReturnAst g : commandArgAsts g))
+            miPackerInstances
             (cmdSignatureTypes (Map.lookup (EV (commandTermName g)) miStreamTypes) (commandDocs g)))
         , ("metadata", metadataEmpty)
         , cmdGroupField (commandMid g)

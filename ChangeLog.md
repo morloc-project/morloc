@@ -8,6 +8,9 @@ Unreleased
  - `@append` starts a stream file that is not there yet
  - `@concat` leaves its destination alone when a merge fails, and accepts a
    destination that is also one of its sources
+ - the help defines every named type it prints, including one reached only
+   through another type's field
+ - the help no longer publishes a wire form for a type the program never packs
 
 0.102.1 [2026-09-05]
 --------------------

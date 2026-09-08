@@ -1,0 +1,262 @@
+=== json-help ===
+{
+  "morloc_version": "VERSION",
+  "program": {
+    "name": "main",
+    "description": [
+      "Exercises which named types the machine-readable help defines.",
+      ""
+    ]
+  },
+  "groups": [],
+  "commands": [
+    {
+      "name": "mapSize",
+      "kind": "remote",
+      "group": null,
+      "description": [
+        "Count the entries of a map, which is packable and is packed here"
+      ],
+      "arguments": [
+        {
+          "name": "_1",
+          "role": "positional",
+          "position": 0,
+          "metavar": null,
+          "required": true,
+          "variadic": false,
+          "stdin": false,
+          "quoted": false,
+          "default": null,
+          "description": [],
+          "type": {
+            "morloc": "Map Str Int",
+            "wire": "at2sj",
+            "structure": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "prefixItems": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "integer"
+                  }
+                ],
+                "minItems": 2,
+                "maxItems": 2
+              }
+            }
+          },
+          "named_type_kind": null,
+          "input": {
+            "source": "auto",
+            "form": "auto",
+            "checks": [],
+            "list_source": "inline",
+            "list_form": "auto",
+            "list_checks": [],
+            "format": null
+          }
+        }
+      ],
+      "return": {
+        "description": [],
+        "streaming": false,
+        "type": {
+          "morloc": "Int",
+          "wire": "j",
+          "structure": {
+            "type": "integer"
+          }
+        }
+      },
+      "terminals": []
+    },
+    {
+      "name": "touch",
+      "kind": "pure",
+      "group": null,
+      "description": [
+        "A command whose return is unit"
+      ],
+      "arguments": [
+        {
+          "name": "_1",
+          "role": "positional",
+          "position": 0,
+          "metavar": null,
+          "required": true,
+          "variadic": false,
+          "stdin": false,
+          "quoted": false,
+          "default": null,
+          "description": [],
+          "type": {
+            "morloc": "Int",
+            "wire": "j",
+            "structure": {
+              "type": "integer"
+            }
+          },
+          "named_type_kind": null,
+          "input": {
+            "source": "inline",
+            "form": "auto",
+            "checks": [],
+            "list_source": "inline",
+            "list_form": "auto",
+            "list_checks": [],
+            "format": null
+          }
+        }
+      ],
+      "return": {
+        "description": [],
+        "streaming": false,
+        "type": {
+          "morloc": "Unit",
+          "wire": "z",
+          "structure": {
+            "type": "null"
+          }
+        }
+      },
+      "terminals": []
+    },
+    {
+      "name": "showDb",
+      "kind": "pure",
+      "group": null,
+      "description": [
+        "A record whose field type is another record"
+      ],
+      "arguments": [
+        {
+          "name": "_1",
+          "role": "positional",
+          "position": 0,
+          "metavar": null,
+          "required": true,
+          "variadic": false,
+          "stdin": false,
+          "quoted": false,
+          "default": null,
+          "description": [],
+          "type": {
+            "morloc": "Int",
+            "wire": "j",
+            "structure": {
+              "type": "integer"
+            }
+          },
+          "named_type_kind": null,
+          "input": {
+            "source": "inline",
+            "form": "auto",
+            "checks": [],
+            "list_source": "inline",
+            "list_form": "auto",
+            "list_checks": [],
+            "format": null
+          }
+        }
+      ],
+      "return": {
+        "description": [],
+        "streaming": false,
+        "type": {
+          "morloc": "Db",
+          "wire": "m26nextIdj5itemsam25titles4doneb",
+          "structure": {
+            "type": "object",
+            "properties": {
+              "nextId": {
+                "type": "integer"
+              },
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "title": {
+                      "type": "string"
+                    },
+                    "done": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "title",
+                    "done"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "nextId",
+              "items"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "terminals": []
+    }
+  ],
+  "types": [
+    {
+      "name": "Map",
+      "kind": "packable",
+      "parameters": [
+        "key",
+        "val"
+      ],
+      "equals": "[(key, val)]"
+    },
+    {
+      "name": "Db",
+      "kind": "record",
+      "parameters": [],
+      "fields": [
+        {
+          "key": "nextId",
+          "type": "Int"
+        },
+        {
+          "key": "items",
+          "type": "[Todo]"
+        }
+      ]
+    },
+    {
+      "name": "Todo",
+      "kind": "record",
+      "parameters": [],
+      "fields": [
+        {
+          "key": "title",
+          "type": "Str"
+        },
+        {
+          "key": "done",
+          "type": "Bool"
+        }
+      ]
+    }
+  ]
+}
+=== touch -h ===
+A command whose return is unit
+
+Usage: ./main <nexus_options> touch <command_options>
+
+General Options:
+  -h, --help  Print help (see more with '--help')
+
+Positional arguments:
+  1:  type: Int
+
+Return: Unit
