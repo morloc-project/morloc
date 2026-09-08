@@ -739,6 +739,65 @@ pub unsafe extern "C" fn get_morloc_data_packet_value(
 
 // ── Call packet construction ─────────────────────────────────────────────────
 
+/// Take a reference on the shared block a data packet names, so the packet
+/// carries one of its own for as long as it is in flight. The sender holds
+/// this reference on behalf of whoever receives the packet: without it there
+/// is an interval between the send and the receiver taking its own reference
+/// in which nobody holds one, and the sender's own release can fall inside
+/// that interval and scrub the block under the reader.
+///
+/// A no-op for packets whose payload travels inside them.
+///
+/// Fails when the block can no longer be referenced. That is not a
+/// formality: the receiver takes ownership of this reference and releases
+/// it without checking, so a refusal that goes unnoticed here becomes a
+/// release of a reference nobody held. Under the older arrangement the
+/// receiver's own acquire caught this; the check has moved to the sender
+/// along with the ownership.
+pub(crate) unsafe fn donate_packet_reference(
+    packet: *const u8,
+) -> Result<(), MorlocError> {
+    use crate::shm::RelPtr;
+    if packet.is_null() {
+        return Ok(());
+    }
+    let header = packet as *const PacketHeader;
+    if (*header).command_type() != PACKET_TYPE_DATA {
+        return Ok(());
+    }
+    if (*header).command.data.source != PACKET_SOURCE_RPTR {
+        return Ok(());
+    }
+    let payload_start = 32 + (*header).offset as usize;
+    if ((*header).length as usize) < std::mem::size_of::<RelPtr>() {
+        return Ok(());
+    }
+    let relptr = *(packet.add(payload_start) as *const RelPtr);
+    let abs = crate::shm::rel2abs(relptr)?;
+    crate::shm::shincref(abs)
+}
+
+/// Give back a reference taken by `donate_packet_reference` when the packet
+/// it was taken for never reached anyone.
+pub(crate) unsafe fn revoke_packet_reference(packet: *const u8) {
+    use crate::shm::RelPtr;
+    if packet.is_null() {
+        return;
+    }
+    let header = packet as *const PacketHeader;
+    if (*header).command_type() != PACKET_TYPE_DATA
+        || (*header).command.data.source != PACKET_SOURCE_RPTR
+        || ((*header).length as usize) < std::mem::size_of::<RelPtr>()
+    {
+        return;
+    }
+    let payload_start = 32 + (*header).offset as usize;
+    let relptr = *(packet.add(payload_start) as *const RelPtr);
+    if let Ok(abs) = crate::shm::rel2abs(relptr) {
+        let _ = crate::shm::shfree(abs);
+    }
+}
+
 unsafe fn make_call_packet_gen(
     midx: u32,
     entrypoint: u8,
@@ -2216,6 +2275,77 @@ unsafe fn print_binary(
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod donation_tests {
+    //! The reference a sender takes on behalf of a recipient must keep the
+    //! block alive across the sender's own release. A concurrency soak can
+    //! only show that the window narrowed; this shows the ordering property
+    //! itself.
+    use super::*;
+
+    #[test]
+    fn a_donated_reference_survives_the_sender_release() {
+        let _shm = crate::own_test_registry();
+
+        let payload: &[u8] = b"the recipient must still see this";
+        let abs = crate::shm::shmalloc(payload.len()).expect("allocate");
+        unsafe {
+            std::ptr::copy_nonoverlapping(payload.as_ptr(), abs as *mut u8, payload.len());
+        }
+        assert_eq!(crate::shm::reference_count(abs), Some(1));
+
+        let rel = crate::shm::abs2rel(abs).expect("relptr");
+        let schema = crate::schema::Schema::primitive(crate::schema::SerialType::Uint8);
+        let cs = CSchema::from_rust(&schema);
+        let packet = unsafe { make_standard_data_packet(rel, cs) };
+        assert!(!packet.is_null(), "expected an RPTR packet");
+
+        // The sender takes the recipient's reference before the packet goes.
+        unsafe { donate_packet_reference(packet) }.expect("donate");
+        assert_eq!(crate::shm::reference_count(abs), Some(2));
+
+        // The sender now releases its own, as it does at its next dispatch.
+        crate::shm::shfree(abs).expect("sender release");
+
+        // The block must still be alive and unscrubbed for the recipient.
+        assert_eq!(
+            crate::shm::reference_count(abs), Some(1),
+            "the donated reference did not survive the sender's release",
+        );
+        let seen = unsafe { std::slice::from_raw_parts(abs as *const u8, payload.len()) };
+        assert_eq!(seen, payload, "block was scrubbed while the recipient still held it");
+
+        // The recipient releases exactly once, and the block is then free.
+        crate::shm::shfree(abs).expect("recipient release");
+        assert_eq!(crate::shm::reference_count(abs), Some(0));
+
+        unsafe { libc::free(packet as *mut libc::c_void) };
+        unsafe { CSchema::free(cs) };
+    }
+
+    #[test]
+    fn a_failed_send_gives_the_reference_back() {
+        let _shm = crate::own_test_registry();
+        let abs = crate::shm::shmalloc(64).expect("allocate");
+        let rel = crate::shm::abs2rel(abs).expect("relptr");
+        let schema = crate::schema::Schema::primitive(crate::schema::SerialType::Uint8);
+        let cs = CSchema::from_rust(&schema);
+        let packet = unsafe { make_standard_data_packet(rel, cs) };
+
+        unsafe { donate_packet_reference(packet) }.expect("donate");
+        assert_eq!(crate::shm::reference_count(abs), Some(2));
+        unsafe { revoke_packet_reference(packet) };
+        assert_eq!(
+            crate::shm::reference_count(abs), Some(1),
+            "a packet that reached nobody left its reference behind",
+        );
+
+        crate::shm::shfree(abs).expect("release");
+        unsafe { libc::free(packet as *mut libc::c_void) };
+        unsafe { CSchema::free(cs) };
+    }
+}
 
 #[cfg(test)]
 mod auto_routing_tests {

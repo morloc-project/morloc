@@ -2781,6 +2781,25 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
         }
     }
 
+    // The callee took a reference on the result's block before the packet
+    // left it, and that reference is ours now. Inherit it so the tracker
+    // releases it at the start of the next request, once R has finished
+    // with the deserialized form.
+    {
+        const morloc_packet_header_t* res_header =
+            (const morloc_packet_header_t*)result;
+        if (res_header->command.data.source == PACKET_SOURCE_RPTR) {
+            size_t relptr = *(size_t*)((uint8_t*)result
+                + res_header->offset + sizeof(morloc_packet_header_t));
+            char* resolve_err = NULL;
+            void* res_voidstar = rel2abs(relptr, &resolve_err);
+            if (resolve_err) { free(resolve_err); resolve_err = NULL; }
+            if (res_voidstar) {
+                shm_tracker_push((absptr_t)res_voidstar, NULL);
+            }
+        }
+    }
+
     // Get result size
     size_t result_length = R_TRY_WITH({free(packet); free(result);}, morloc_packet_size, result);
 

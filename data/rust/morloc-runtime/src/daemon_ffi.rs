@@ -1419,9 +1419,11 @@ unsafe fn adopt_rptr_result(packet: *const u8) {
     }
     let relptr = *(packet.add(payload_start) as *const RelPtr);
     if let Ok(abs) = crate::shm::rel2abs(relptr) {
-        if crate::shm::shincref(abs).is_ok() {
-            crate::eval_arena::record_if_active(abs);
-        }
+        // The producer took a reference on this block before the packet left
+        // it, and that reference is ours now. Take ownership rather than a
+        // second reference: acquiring here would be too late anyway, since
+        // the interval this is meant to cover has already elapsed.
+        crate::eval_arena::record_if_active(abs);
     }
 }
 

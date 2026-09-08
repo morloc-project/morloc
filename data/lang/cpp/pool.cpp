@@ -858,11 +858,9 @@ uint8_t* foreign_call_v(const char* socket_filename, size_t mid, const uint8_t**
             void* res_voidstar = rel2abs(relptr, &resolve_err);
             if (resolve_err) { free(resolve_err); resolve_err = NULL; }
             if (res_voidstar) {
-                char* incref_err = NULL;
-                if (shincref((absptr_t)res_voidstar, &incref_err)) {
-                    _shm_tracker.push_back({(absptr_t)res_voidstar});
-                }
-                if (incref_err) { free(incref_err); }
+                // The callee took a reference before sending; it is ours
+                // now. Inherit it rather than adding another.
+                _shm_tracker.push_back({(absptr_t)res_voidstar});
             }
         }
     }

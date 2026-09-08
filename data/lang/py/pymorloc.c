@@ -2342,11 +2342,9 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
             void* res_voidstar = rel2abs(relptr, &resolve_err);
             if (resolve_err) { free(resolve_err); resolve_err = NULL; }
             if (res_voidstar) {
-                char* incref_err = NULL;
-                if (shincref((absptr_t)res_voidstar, &incref_err)) {
-                    shm_tracker_push((absptr_t)res_voidstar, NULL);
-                }
-                if (incref_err) { free(incref_err); }
+                // The callee took a reference before sending; it is ours
+                // now. Inherit it rather than adding another.
+                shm_tracker_push((absptr_t)res_voidstar, NULL);
             }
         }
     }

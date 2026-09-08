@@ -1016,12 +1016,9 @@ unsafe fn finalize_call_result(result: *mut u8) -> *mut u8 {
         let voidstar = rel2abs(rel, &mut rerr);
         discard_err(rerr);
         if !voidstar.is_null() {
-            let mut ierr: *mut c_char = std::ptr::null_mut();
-            let acquired = shincref(voidstar, &mut ierr);
-            discard_err(ierr);
-            if acquired {
-                track(voidstar);
-            }
+            // The callee took a reference before sending; it is ours now.
+            // Inherit it rather than adding another.
+            track(voidstar);
         }
     }
 
