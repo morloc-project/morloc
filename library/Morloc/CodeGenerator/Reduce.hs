@@ -160,6 +160,19 @@ reduceNativeExpr ver ts lang (EvalN et wrapped) =
       | isProvablyPlain inner -> rebuild <$> reduceNativeExpr ver ts lang (retypeAsValue inner)
     _ -> EvalN et <$> reduceNativeExpr ver ts lang wrapped
 reduceNativeExpr ver ts lang (CoerceN c t ne) = CoerceN c t <$> reduceNativeExpr ver ts lang ne
+-- An effect-typed conditional that is NOT being forced still has to be one
+-- value. Its arms each yield a thunk, and two thunks are two different types
+-- that no conditional can agree on, so the suspension is commuted outwards: one
+-- thunk whose body is the eager conditional, with each arm forced inside it.
+-- This is the same identity as the force-distribution rule above, read in the
+-- other direction, and it is what lets an effectful `?`/`:` be returned rather
+-- than immediately used.
+reduceNativeExpr ver ts lang (IfN t c th el)
+  | isEffectF t = do
+      c' <- reduceNativeExpr ver ts lang c
+      th' <- reduceNativeExpr ver ts lang (EvalN (stripEffectF (typeFof th)) th)
+      el' <- reduceNativeExpr ver ts lang (EvalN (stripEffectF (typeFof el)) el)
+      return $ DoBlockN t (IfN (stripEffectF t) c' th' el')
 reduceNativeExpr ver ts lang (IfN t c th el) =
   IfN t <$> reduceNativeExpr ver ts lang c <*> reduceNativeExpr ver ts lang th <*> reduceNativeExpr ver ts lang el
 reduceNativeExpr ver ts lang (MapOptionalN t wt src ne) =
