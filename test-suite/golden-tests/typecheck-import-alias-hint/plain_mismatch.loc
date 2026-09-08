@@ -1,0 +1,8 @@
+--' An ordinary mismatch between two primitives. The alias hint must not
+--' fire here; neither name is an alias defined elsewhere.
+module main (f)
+
+import root-py
+
+f :: Int -> Str
+f x = x

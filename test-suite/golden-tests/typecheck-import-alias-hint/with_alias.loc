@@ -1,0 +1,8 @@
+--' Naming the alias in the import list is what makes the call check.
+module main (go)
+
+import root-py
+import .lib (touch, Path)
+
+go :: Str -> Str
+go p = touch p

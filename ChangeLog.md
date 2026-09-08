@@ -17,6 +17,8 @@ Unreleased
    group
  - shell completions offer every `morloc` subcommand, not the seven they were
    written with
+ - a type error against an alias defined in another module says that the alias
+   has to be imported alongside the term
 
 0.102.1 [2026-09-05]
 --------------------

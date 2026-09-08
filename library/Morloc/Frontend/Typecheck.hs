@@ -2007,11 +2007,15 @@ checkE i g1 e1@(LstS _) b = do
                   anno3 = AnnoS (Idx i (apply g3 a')) i finalExpr
               g4 <- checkListNatDims g3 natArgs anno3
               return (g4, apply g4 b', finalExpr)
-            Nothing -> MM.throwSourcedError i $
-              "Type mismatch:"
-              <> line <> "  expected: " <> prettyTypeU b'
-              <> line <> "  inferred: " <> prettyTypeU a'
-              <> line <> err
+            Nothing -> do
+              scope2 <- MM.getGeneralScope i
+              uniScope <- MM.getGeneralUniversalScope
+              MM.throwSourcedError i $
+                "Type mismatch:"
+                <> line <> "  expected: " <> prettyTypeU b'
+                <> line <> "  inferred: " <> prettyTypeU a'
+                <> line <> err
+                <> unimportedAliasHint scope2 uniScope b'
 --   Sub (with coercion fallback)
 -- Numeric literal defaulting: an `IntS` checked against any integer base
 -- type (Int / Int8..Int64 / UInt / UInt8..UInt64) takes on that expected
@@ -2402,12 +2406,14 @@ checkEFallback i g1 e1 b = do
           return (g3, apply g3 b', finalExpr)
         Nothing -> do
           scope2 <- MM.getGeneralScope i
+          uniScope <- MM.getGeneralUniversalScope
           MM.throwSourcedError i $
             "Type mismatch:"
             <> line <> "  expected: " <> prettyTypeU b'
             <> line <> "  inferred: " <> prettyTypeU a'
             <> line <> err
             <> missingInstanceHint scope2 a' b'
+            <> unimportedAliasHint scope2 uniScope b'
 
 -- | Check a compound literal (TupS or NamS) against the inner type of an
 -- Optional expected type, then wrap the result in @CoerceToOptional@.
@@ -2548,6 +2554,28 @@ subtype' i a b g = do
 -- can't dispatch without an instance. Append a hint pointing at
 -- the newtype so users don't have to decode the structural
 -- "Cannot compare" message.
+-- | A mismatch against a name this module cannot resolve but the program
+-- as a whole can. Importing a term does not import the type aliases its
+-- signature is written in, and an alias is transparent inside its own
+-- module and opaque across an import list that omits it -- so the call
+-- compiles at the import and fails at every use, with nothing in the
+-- message pointing at the cause.
+unimportedAliasHint :: Scope -> Scope -> TypeU -> MDoc
+unimportedAliasHint localScope universalScope expected
+  | Just v <- headVar expected
+  , not (Map.member v localScope)
+  , Map.member v universalScope =
+      line <> "  hint:" <+> squotes (pretty v)
+        <+> "is defined in another module and is not in scope here."
+        <+> "Importing a term does not bring in the type aliases its"
+        <+> "signature uses; name the type in the import list as well."
+  | otherwise = mempty
+  where
+    headVar t = case t of
+      VarU v -> Just v
+      AppU (VarU v) _ -> Just v
+      _ -> Nothing
+
 missingInstanceHint :: Scope -> TypeU -> TypeU -> MDoc
 missingInstanceHint scope inferred expected
   | Just nativeTv <- newtypeHead scope inferred
