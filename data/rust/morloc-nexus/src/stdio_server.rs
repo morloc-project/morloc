@@ -319,9 +319,11 @@ fn do_next(slot_id: i64) -> Resp {
             Ok(0)  => return Resp::Eof, // empty stdin: no data is legitimate
             Ok(32) => {}                // full header -> classify below
             Ok(n)  => return Resp::Err(format!(
-                "stdin ended after {} byte(s); not a morloc packet (a packet \
-                 header is 32 bytes). Foreign or truncated input is not \
-                 supported on stdin.",
+                "stdin ended after {} byte(s); a morloc packet header is 32. \
+                 Whatever writes this pipe is not emitting morloc framing. A \
+                 morloc program emits it only when asked, so add `-f packet` \
+                 to the command on the writing end. Foreign or truncated \
+                 input is not supported on stdin.",
                 n,
             )),
             Err(e) => return Resp::Err(e),
@@ -331,8 +333,9 @@ fn do_next(slot_id: i64) -> Resp {
             Err(_) => return Resp::Err(
                 "stdin is not a morloc packet; expected a morloc data or \
                  stream packet. Foreign formats (JSON, MessagePack, CSV, ...) \
-                 are not yet supported on stdin -- pipe morloc packet output \
-                 (the default streamed format) instead.".into(),
+                 are not supported on stdin. A morloc program writes packets \
+                 only when asked: add `-f packet` to the command on the \
+                 writing end of this pipe.".into(),
             ),
         };
         if header.is_stream() {

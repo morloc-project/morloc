@@ -19,6 +19,8 @@ Unreleased
    written with
  - a type error against an alias defined in another module says that the alias
    has to be imported alongside the term
+ - the stdin framing error names the remedy and no longer claims morloc
+   packets are the default output format
 
 0.102.1 [2026-09-05]
 --------------------
