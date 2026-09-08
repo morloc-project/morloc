@@ -10,7 +10,7 @@
 -- reused after an effectful statement, after a @catch, across both arms of a
 -- single @catch, and around the effectful statement of a tail-recursive loop.
 
-module main (afterSave, afterCatch, bothArms, recordReuse, loopReuse, letThunk, guardedTwice)
+module main (afterSave, afterCatch, bothArms, recordReuse, loopReuse, letThunk, guardedTwice, armShare)
 
 import root-rust
 
@@ -19,8 +19,9 @@ record Box where
   items :: [Int]
 record Rust => Box = "struct"
 
-source Rust from "own.rs" ("rt_len" as strLen)
+source Rust from "own.rs" ("rt_len" as strLen, "rt_nonempty" as nonEmpty)
 strLen :: Str -> Int
+nonEmpty :: [Int] -> <Err> [Int]
 
 -- The path is named once inside the @save thunk and twice after it.
 afterSave :: Str -> <IO, Err> [Int]
@@ -76,3 +77,9 @@ guardedTwice p = do
   a <- guarded p
   b <- guarded p
   concat [a, b]
+
+-- One arm reads the list while the other yields it. A thunk's result leaves the
+-- thunk by value, so yielding a value the sibling thunk is still reading has to
+-- copy it out rather than take it.
+armShare :: [Int] -> <IO, Err> [Int]
+armShare v = @catch (nonEmpty v) v

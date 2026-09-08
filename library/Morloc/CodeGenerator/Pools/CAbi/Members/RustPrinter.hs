@@ -89,7 +89,6 @@ printExpr (ICall f (Just ts) argGroups) =
 printExpr (ILambda args body) =
   "move |" <> hcat (punctuate ", " (map pretty args)) <> "| " <> printExpr body
 printExpr (IRawExpr d) = pretty d
-printExpr (IDoBlock e) = "move || { " <> printExpr e <> " }"
 printExpr (IEval e) = parens (printExpr e) <> "()"
 printExpr (IIntrinsicShow sid e) =
   "rustmorloc::show(&(" <> printExpr e <> "), schema(" <> pretty sid <> "))"

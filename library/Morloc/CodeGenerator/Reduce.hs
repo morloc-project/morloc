@@ -117,33 +117,29 @@ reduceNativeExpr ver ts lang (TupleN fv es) =
 reduceNativeExpr ver ts lang (RecordN o fv tps rs) =
   RecordN o fv tps <$> mapM (\(k, ne) -> (,) k <$> reduceNativeExpr ver ts lang ne) rs
 reduceNativeExpr ver ts lang (DoBlockN t ne) = DoBlockN t <$> reduceNativeExpr ver ts lang ne
--- Peephole: force an if/else whose branches are BOTH DoBlockN thunks by
--- pushing the force into each branch and cancelling with the wrap. This is the
--- conditional analog of the `EvalN . DoBlockN = id` rule just below: an
--- effect-typed conditional reaches here with both arms wrapped in a DoBlockN
--- (Serialize.hs `nativeExpr (MonoIf ..)` -- see `wrapEffectArms`), so forcing
--- it distributes the force over the arms and each wrap cancels.
--- Eliminates the `helper0 = (lambda: X); ... = (lambda: Y); n7 = helper0;
--- n7()` round-trip that every ?/: inside a do-block otherwise pays.
--- Only fires when both branches are DoBlockN AND neither is Unit-typed.
--- A raw-value branch would lower to `n2()` and crash; a Unit-typed
--- DoBlockN needs C++'s `[=](){ expr; return mlc::Unit{}; }` conversion
--- (CppTranslator.hs::lcMakeDoBlock) because the inner call (e.g.
--- `_mlc_save_voidstar`) returns `void` -- stripping the wrap leaves the
--- void return propagating up into `put_value(void, ...)`.
+-- Forcing a conditional is forcing whichever branch it takes, so the force
+-- distributes over the arms and the conditional itself becomes eager. This is
+-- what lets an effect-typed `?`/`:` be used as a value: a deferred effect is
+-- carried as a nullary thunk, and two arms producing thunks produce two
+-- DIFFERENT thunk types, which no single binding can name. Forcing inside each
+-- arm leaves the conditional yielding the value type both arms agree on.
+--
+-- Distributing also subsumes the wrapped case. An effect-typed conditional
+-- reaches here with both arms wrapped in a DoBlockN (Serialize.hs
+-- `wrapEffectArms`), and pushing the force inside cancels against each wrap by
+-- the `EvalN . DoBlockN = id` rule below -- eliminating the
+-- `helper0 = (lambda: X); ...; n7()` round-trip that every `?`/`:` inside a do
+-- block would otherwise pay.
+--
 -- The forced conditional is eager, so its type is the effect-stripped value
--- type: a bare value arm coerced into the effect slot carries an EffectF type
--- but reduces to a plain value here, and typing the IfN by that raw EffectF
--- would make the pool declare a thunk (std::function) and then assign it a bare
--- value. Stripping is safe for the thunk-producer case (an effect-typed call
--- arm), which reaches the pool as a thunk-valued conditional forced at the
--- serialize sink, not through this EvalN peephole.
-reduceNativeExpr ver ts lang (EvalN _ (IfN _ c (DoBlockN t1 th) (DoBlockN t2 el)))
-  | not (isDoBlockUnit t1) && not (isDoBlockUnit t2) = do
-      c' <- reduceNativeExpr ver ts lang c
-      th' <- reduceNativeExpr ver ts lang th
-      el' <- reduceNativeExpr ver ts lang el
-      return $ IfN (stripEffectF (typeFof th')) c' th' el'
+-- type: an arm coerced into the effect slot carries an EffectF type but reduces
+-- to a plain value here, and typing the IfN by that raw EffectF would make the
+-- pool declare a thunk and then assign it a bare value.
+reduceNativeExpr ver ts lang (EvalN et (IfN _ c th el)) = do
+  c' <- reduceNativeExpr ver ts lang c
+  th' <- reduceNativeExpr ver ts lang (EvalN (stripEffectF (typeFof th)) th)
+  el' <- reduceNativeExpr ver ts lang (EvalN (stripEffectF (typeFof el)) el)
+  return $ IfN (stripEffectF et) c' th' el'
 -- Generalized `EvalN . DoBlockN = id`, robust to a CoerceToOptional wedged
 -- between the force and the thunk. This is the optional-widened `@catch` shape:
 -- `@catch` collapses to a plain-typed value and the `<E>`+`?` migrate onto a

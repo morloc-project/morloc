@@ -141,7 +141,6 @@ data IExpr
   | ILambda [Text] IExpr
   | IPack Text IExpr -- packer(expr)
   | IRawExpr Text
-  | IDoBlock IExpr -- effect: lambda wrapping expression
   | IEval IExpr -- eval: call effect with no args
   | IIntrinsicSave Text Int IExpr IExpr IExpr -- format, schemaId, level, data, path
   | IIntrinsicLoad Int (Maybe IType) IExpr -- schemaId, returnType, path -> result (nullable)
@@ -867,6 +866,18 @@ nativeArgOwnership :: LowerConfig m -> NativeArg -> m IOwnership
 nativeArgOwnership cfg (NativeArgExpr e) = lcOwnership cfg e
 nativeArgOwnership cfg (NativeArgManifold nm) = lcArgManifoldOwnership cfg nm
 
+-- | Assemble a thunk from its already-adapted body.
+lowerDoBlock :: (Monad m) => LowerConfig m -> TypeF -> PoolDocs -> m PoolDocs
+lowerDoBlock cfg t x = do
+  (hoisted, effectExpr) <- lcMakeDoBlock cfg t (poolPriorLines x) (poolExpr x)
+  return
+    defaultValue
+      { poolExpr = effectExpr
+      , poolCompleteManifolds = poolCompleteManifolds x
+      , poolPriorLines = hoisted
+      , poolPriorExprs = poolPriorExprs x
+      }
+
 -- | Adapt a container element (an owned sink) to an owned value, using its
 -- ownership and type from the original IR.
 adaptOwnedElem :: (Monad m) => LowerConfig m -> NativeExpr -> PoolDocs -> m PoolDocs
@@ -1062,15 +1073,14 @@ lowerNativeExpr cfg _ (NullN_ t) = do
   -- that do type-tagged null forms.
   mayT <- lcTypeOf cfg t
   return $ defaultValue {poolExpr = lcPrintExpr cfg (INullLit mayT)}
-lowerNativeExpr cfg _ (DoBlockN_ t x) = do
-  (hoisted, effectExpr) <- lcMakeDoBlock cfg t (poolPriorLines x) (poolExpr x)
-  return
-    defaultValue
-      { poolExpr = effectExpr
-      , poolCompleteManifolds = poolCompleteManifolds x
-      , poolPriorLines = hoisted
-      , poolPriorExprs = poolPriorExprs x
-      }
+-- A thunk's result leaves the thunk by value, so it is an owned sink like a
+-- container element: a value that is merely borrowed here, or that is used
+-- somewhere else as well, has to be copied out rather than moved out. Without
+-- this, a thunk that yields a value another thunk is still reading -- the two
+-- arms of a `@catch` over one variable -- takes it away from them.
+lowerNativeExpr cfg (DoBlockN _ innerE) (DoBlockN_ t x) =
+  adaptOwnedElem cfg innerE x >>= lowerDoBlock cfg t
+lowerNativeExpr cfg _ (DoBlockN_ t x) = lowerDoBlock cfg t x
 lowerNativeExpr cfg _ (EvalN_ _ x) = return $ x {poolExpr = lcPrintExpr cfg (IEval (IRawExpr (render (poolExpr x))))}
 -- CoerceToOptional widens a value to an optional. Most languages treat a T as a
 -- valid ?T (identity); Rust must wrap the value in Some(..) (see lcCoerceOptional).

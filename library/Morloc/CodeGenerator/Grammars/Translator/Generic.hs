@@ -1082,8 +1082,6 @@ genericPrintExpr desc = go
               , ("body", bodyText)
               ]
     go (IRawExpr d) = pretty d
-    go (IDoBlock e) =
-      pretty $ substituteT (ldDoBlockExpr desc) [("expr", render (go e))]
     go (IEval e) = go e <> "()"
     go (IIntrinsicHash sid e) =
       let prefix = ldIntrinsicPrefix desc

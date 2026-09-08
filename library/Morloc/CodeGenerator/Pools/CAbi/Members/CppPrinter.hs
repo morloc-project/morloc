@@ -93,7 +93,6 @@ printExpr (ILambda args body) =
     <> printExpr body
     <> ";}"
 printExpr (IRawExpr d) = pretty d
-printExpr (IDoBlock e) = "[&](){return " <> printExpr e <> ";}"
 printExpr (IEval e) = printExpr e <> "()"
 printExpr (IIntrinsicHash sid e) =
   [idoc|_mlc_hash(#{printExpr e}, mlc_schema_table[#{pretty sid}])|]
