@@ -19,6 +19,7 @@ neg_22_nested_list_form.loc 1
 neg_23_list_form_packet_needs_file.loc 1
 neg_24_check_path_retired_letters.loc 1
 neg_25_check_path_unsatisfiable_combo.loc 1
+neg_26_two_default_actions.loc 1
 pos_01_defaults.loc 0
 pos_02_source_file_str.loc 0
 pos_04_bytes_inline.loc 0
@@ -27,3 +28,4 @@ pos_06_bytes_only_floats.loc 0
 pos_07_bytes_int32.loc 0
 pos_08_tuple_list_source.loc 0
 pos_09_record_list_source.loc 0
+pos_10_one_default_action.loc 0

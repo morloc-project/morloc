@@ -764,6 +764,10 @@ validateSigWith pos specs argDocs = do
     <> "` already appears on one of this signature's own argument "
     <> "declarations (via `@arg` / `@true` / `@false`). Pick a different "
     <> "short letter for the terminal action."
+  reportIfAny pos (drop 1 [wsLong s | s <- specs, wsDefault s]) $ \l ->
+    "`@default` is declared on more than one terminal action in this "
+    <> "signature; `--" <> l <> "` is the second. Exactly one action may "
+    <> "run when the caller names none."
 
 reportIfAny :: Pos -> [a] -> (a -> Text) -> D ()
 reportIfAny _ [] _ = return ()

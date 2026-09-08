@@ -1,0 +1,14 @@
+module main (once)
+
+import root
+
+shout :: [Int] -> Str
+shout _ = "shout"
+
+quiet :: [Int] -> Str
+quiet _ = "quiet"
+
+--' @render -a/--shout=shout @default
+--' @render -b/--quiet=quiet
+once :: [Int]
+once = [1,2,3]

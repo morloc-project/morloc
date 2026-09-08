@@ -11,6 +11,8 @@ Unreleased
  - the help defines every named type it prints, including one reached only
    through another type's field
  - the help no longer publishes a wire form for a type the program never packs
+ - declaring `@default` on a second terminal action is an error rather than
+   silently ignored
 
 0.102.1 [2026-09-05]
 --------------------

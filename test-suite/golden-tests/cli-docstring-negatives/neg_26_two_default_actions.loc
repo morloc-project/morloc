@@ -1,0 +1,16 @@
+module main (twice)
+
+import root
+
+shout :: [Int] -> Str
+shout _ = "shout"
+
+quiet :: [Int] -> Str
+quiet _ = "quiet"
+
+-- At most one terminal action may be the default; the manual states the
+-- constraint and nothing enforced it, so the first declared silently won.
+--' @render -a/--shout=shout @default
+--' @render -b/--quiet=quiet @default
+twice :: [Int]
+twice = [1,2,3]
