@@ -156,6 +156,30 @@ pub unsafe extern "C" fn shcalloc(
     ffi_try!(errmsg, ptr::null_mut(), shm::shcalloc(nmemb, size).map(|p| p as *mut c_void))
 }
 
+/// Report blocks currently held across every mapped volume. Writes the
+/// block count and byte total through the out pointers, and prints a
+/// size-class breakdown to stderr.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_shm_live_report(
+    out_blocks: *mut usize,
+    out_bytes: *mut usize,
+) {
+    let mut hist = [0usize; 40];
+    let (blocks, bytes) = shm::live_block_stats(&mut hist);
+    if !out_blocks.is_null() {
+        *out_blocks = blocks;
+    }
+    if !out_bytes.is_null() {
+        *out_bytes = bytes;
+    }
+    eprintln!("shm live: {} blocks, {} bytes", blocks, bytes);
+    for (i, n) in hist.iter().enumerate() {
+        if *n > 0 {
+            eprintln!("  size < 2^{:<2} : {} blocks", i, n);
+        }
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn shfree(ptr: *mut c_void, errmsg: *mut *mut c_char) -> bool {
     ffi_try!(errmsg, false, shm::shfree(ptr as AbsPtr).map(|_| true))

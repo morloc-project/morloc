@@ -850,6 +850,55 @@ pub fn reset_all() -> Result<(), MorlocError> {
     Ok(())
 }
 
+/// Blocks currently held across every mapped volume, and the bytes they
+/// cover. Walks each volume's block chain; a block is held when its
+/// reference count is non-zero.
+///
+/// Volume files only ever grow, so their size records what has been
+/// allocated rather than what is still in use. This reports the latter,
+/// which is what tells a leak apart from a working set that has settled.
+/// `hist` receives a count per power-of-two size class (index i covers
+/// sizes in [2^i, 2^(i+1))), which identifies what is being held rather
+/// than only how much.
+pub fn live_block_stats(hist: &mut [usize]) -> (usize, usize) {
+    let hdr_size = std::mem::size_of::<BlockHeader>();
+    let mut blocks = 0usize;
+    let mut bytes = 0usize;
+    let vols = VOLUMES.lock().unwrap();
+    for &slot_idx in &vols.used {
+        let slot = vols.slots[slot_idx as usize];
+        if slot.is_null() {
+            continue;
+        }
+        unsafe {
+            let base = (slot.ptr() as *mut u8).add(std::mem::size_of::<ShmHeader>());
+            let end = base.add(slot.data_size()) as *const u8;
+            let mut blk = base as *mut BlockHeader;
+            while (blk as *const u8) < end
+                && (end as usize) - (blk as usize) >= hdr_size
+            {
+                if (*blk).magic != BLK_MAGIC {
+                    break;
+                }
+                let size = (*blk).size;
+                if size == 0 || size > slot.data_size() {
+                    break;
+                }
+                if (*blk).reference_count.load(Ordering::Relaxed) != 0 {
+                    blocks += 1;
+                    bytes += size;
+                    if !hist.is_empty() {
+                        let cls = (usize::BITS - size.leading_zeros()) as usize;
+                        hist[cls.min(hist.len() - 1)] += 1;
+                    }
+                }
+                blk = (blk as *mut u8).add(hdr_size + size) as *mut BlockHeader;
+            }
+        }
+    }
+    (blocks, bytes)
+}
+
 /// Returns true if `ptr` falls inside any currently-mapped SHM volume.
 /// Used by `shfree` as a safety guard against being called with a
 /// stale pointer after `reset_all` (e.g. a worker that was holding an
@@ -2047,6 +2096,38 @@ mod tests {
              passes the header check and is acted on as live payload",
         );
 
+    }
+
+    // The census must see what the allocator has handed out, since the
+    // volume files themselves only record what was ever allocated and never
+    // shrink -- they cannot distinguish a leak from a settled working set.
+    #[test]
+    fn live_block_stats_counts_what_is_held() {
+        let _shm = crate::own_test_registry();
+        let mut hist = [0usize; 40];
+        let (base_blocks, base_bytes) = live_block_stats(&mut hist);
+
+        let a = shmalloc(4096).expect("a");
+        let b = shmalloc(4096).expect("b");
+        let mut hist2 = [0usize; 40];
+        let (held, bytes) = live_block_stats(&mut hist2);
+        assert_eq!(
+            held, base_blocks + 2,
+            "census did not see two freshly allocated blocks",
+        );
+        assert!(
+            bytes >= base_bytes + 8192,
+            "census undercounted the bytes held: {} vs {}", bytes, base_bytes + 8192,
+        );
+
+        shfree(a).expect("free a");
+        shfree(b).expect("free b");
+        let mut hist3 = [0usize; 40];
+        let (after, _) = live_block_stats(&mut hist3);
+        assert_eq!(
+            after, base_blocks,
+            "census still counts blocks that were released",
+        );
     }
 
     // A block whose last reference is being dropped is briefly marked with
