@@ -555,19 +555,14 @@ fn main() {
         // send to the appropriate pool, write the result packet.
         // Used by SLURM workers on remote compute nodes.
         //
-        // Compute-node nexuses come up cold -- no driver-side pool is
-        // reachable here -- so each manifest-declared pool whose
-        // socket isn't already alive needs to be started. The
-        // already-alive check is what makes same-host development /
-        // mock-test setups still work: when a parent nexus is the one
-        // that fork-exec'd this call-packet nexus (e.g. a local SLURM
-        // mock), the parent's pool is at the target socket already
-        // and we must not try to bind a second daemon to the same
-        // path. Pools we DID start die via PR_SET_PDEATHSIG when
-        // clean_exit drops this process.
-        let to_start: Vec<usize> = (0..manifest.pools.len())
-            .filter(|&i| !socket_is_alive(&sockets[i].socket_path))
-            .collect();
+        // Compute-node nexuses come up cold, so every manifest-declared
+        // pool has to be started here. Pool sockets live under this
+        // process's own temporary directory, which is created fresh at
+        // startup and inherited by nobody, so no pool of anyone else's is
+        // ever reachable at these paths -- not even a parent that
+        // fork-exec'd this process. Pools started here die via
+        // PR_SET_PDEATHSIG when clean_exit drops this process.
+        let to_start: Vec<usize> = (0..manifest.pools.len()).collect();
         if !to_start.is_empty() {
             if let Err(e) = process::start_daemons(&mut sockets, &to_start) {
                 eprintln!("Error: failed to start pools for call-packet dispatch: {}", e);
@@ -815,14 +810,6 @@ extern "C" fn frontend_shutdown_handler(_sig: libc::c_int) {
         router_terminate_children(r);
         libc::_exit(0);
     }
-}
-
-/// Quick liveness probe for a pool socket: try to connect; if the
-/// connect succeeds the socket file exists and something is listening.
-/// Used by call-packet mode to skip starting pools that a parent
-/// process (typical in same-host SLURM-mock setups) already has live.
-fn socket_is_alive(path: &str) -> bool {
-    std::os::unix::net::UnixStream::connect(path).is_ok()
 }
 
 /// Run a pre-built call packet on a remote worker node (SLURM mode).
