@@ -15,6 +15,8 @@ Unreleased
    silently ignored
  - `morloc list -v` shows a grouped command as it must be typed, with its
    group
+ - shell completions offer every `morloc` subcommand, not the seven they were
+   written with
 
 0.102.1 [2026-09-05]
 --------------------
