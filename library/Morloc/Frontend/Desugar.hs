@@ -1149,12 +1149,33 @@ buildAccessor sp body
       case result of
         ARGetter sel -> freshExprSpan sp (PatE (PatternStruct sel))
         ARSetter sel vals -> do
+          rejectOverlappingSets sp sel
           patI <- freshExprSpan sp (PatE (PatternStruct sel))
           lamI <- freshIdSpan sp
           let v = EV (".setter_" <> T.pack (show lamI))
           vArg <- freshExprSpan sp (VarE defaultValue v)
           appI <- freshExprSpan sp (AppE patI (vArg : vals))
           return (ExprI lamI (LamE [v] appI))
+
+-- A setter writes each of its paths into one rebuilt value, so no path may
+-- lead through another: `.(.home = a, .home.altitude = b)` asks for `home` to
+-- be replaced and for a field of it to be replaced at the same time, and there
+-- is no reading of that which uses both values. Getters have no such
+-- restriction -- naming a field twice there just reads it twice -- so this is
+-- checked only where values are assigned.
+rejectOverlappingSets :: Span -> Selector -> D ()
+rejectOverlappingSets sp sel =
+  case [p | p <- paths, q <- paths, p /= q, p `isPrefixOf` q] of
+    [] -> return ()
+    (p : _) ->
+      dfail (startPos sp) $
+        "this setter writes to " <> renderPath p <> " and to a field"
+          <> " inside it. Set the whole value or its parts, not both."
+  where
+    paths = ungroup sel
+    renderPath = concatMap step
+    step (Left i) = "." <> show i
+    step (Right k) = "." <> T.unpack k
 
 -- True when any sub-component of the body is a bracket accessor. When True,
 -- we use the lambda-based path below: bracket access lowers to function-call

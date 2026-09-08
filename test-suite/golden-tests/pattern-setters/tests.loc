@@ -54,4 +54,32 @@ test = -- map .(.1 = 9) [(1,2), (2,3)]
   , (==) (   .(.home.altitude,         .job.1.altitude)
          ( .(.home.altitude = 936.0, .job.1.altitude = 666.0) defaultWorker ))
        (936.0, 666.0)
+    -- Setters written in an order other than the declaration's. Every field
+    -- here shares a type, so nothing downstream can notice a swap: if the
+    -- values are paired with fields by position rather than by the name the
+    -- author wrote, these are the only tests that say so.
+  , (==) (.(.latitude, .longitude) (.(.longitude = -100.0, .latitude = 0.7) defaultLocation))
+       ( 0.7, -100.0 )
+  , (==) (.(.latitude, .altitude) (.(.altitude = 1.0, .latitude = 2.0) defaultLocation))
+       ( 2.0, 1.0 )
+  , (==) (.(.latitude, .longitude, .altitude)
+         (.(.altitude = 3.0, .longitude = 2.0, .latitude = 1.0) defaultLocation))
+       ( 1.0, 2.0, 3.0 )
+  , (==) (   .(.home.altitude,         .job.1.altitude)
+         ( .(.job.1.altitude = 666.0, .home.altitude = 936.0) defaultWorker ))
+       (936.0, 666.0)
+  , (==) (.(.2 = 9, .0 = 7) (1, 2, 3))
+       (7, 2, 9)
+    -- Two sets under one field. Matching a field name against a single
+    -- selector entry can only honour the first of these, so the second write
+    -- goes missing rather than wrong.
+  , (==) (   .(.home.altitude,         .home.latitude)
+         ( .(.home.altitude = 1.0, .home.latitude = 2.0) defaultWorker ))
+       (1.0, 2.0)
+    -- An entry that is itself a group carries two values, so the values are
+    -- not one per named field. Written before `.home`, which is declared
+    -- first, so the grouping and the ordering are exercised together.
+  , (==) (   .(.job.1.altitude,  .job.1.latitude,  .home.altitude)
+         ( .(.job.1.(.altitude = 1.0, .latitude = 2.0), .home.altitude = 3.0) defaultWorker ))
+       (1.0, 2.0, 3.0)
   ]

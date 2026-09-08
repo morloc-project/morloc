@@ -9,6 +9,11 @@ all:
 	./nexus setX      '{"x":0,"y":"hi","z":8}' 99 >> obs.txt 2>> obs.err
 	./nexus setTup    '[1,"old",3]' new           >> obs.txt 2>> obs.err
 	./nexus setNested '{"a":5,"p":["orig",7]}' rewritten >> obs.txt 2>> obs.err
+	./nexus setSwapped    '{"x":0,"y":"hi","z":0}' 7 9 >> obs.txt 2>> obs.err
+	./nexus setTupSwapped '[0,"mid",0]' 7 9            >> obs.txt 2>> obs.err
+	./nexus setMixed      '{"x":0,"y":"old","z":8}' new 5 >> obs.txt 2>> obs.err
+	./nexus setBoth       '{"a":5,"p":["orig",7]}' two 99 >> obs.txt 2>> obs.err
+	./nexus setEta        '[{"x":0,"y":"a","z":0}]' 4     >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus pools __pycache__ *.err
