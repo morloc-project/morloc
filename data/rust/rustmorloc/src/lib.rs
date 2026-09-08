@@ -30,9 +30,13 @@ use std::collections::{HashMap, VecDeque};
 use std::ffi::{c_char, c_void, CString};
 use morloc_runtime_types::cschema::CSchema;
 use morloc_runtime_types::packet::{
+    PACKET_COMPRESSION_NONE as PKT_COMPRESSION_NONE,
+    PACKET_ENCRYPTION_NONE as PKT_ENCRYPTION_NONE,
     PACKET_FORMAT_VOIDSTAR as PKT_FORMAT_VOIDSTAR,
     PACKET_SOURCE_MESG as PKT_SOURCE_MESG,
     PACKET_SOURCE_RPTR as PKT_SOURCE_RPTR,
+    PKT_COMPRESSION_OFF, PKT_ENCRYPTION_OFF, PKT_FORMAT_OFF, PKT_HEADER_SIZE,
+    PKT_LENGTH_OFF, PKT_OFFSET_OFF, PKT_SOURCE_OFF,
 };
 use morloc_runtime_types::shm_types::{align_up, encode_relptr, relptr_offset, Array, RelPtr, RELNULL};
 
@@ -184,16 +188,6 @@ fn cschema_of(schema: &Schema) -> *mut CSchema {
     })
 }
 
-// Packet header byte offsets (wire format is locked; see
-// morloc-runtime-types::packet PacketHeader, `#[repr(C, packed)]`, 32 bytes).
-// The source/format tag *values* are imported from morloc-runtime-types::packet
-// (single source of truth for the wire format). These byte *offsets* are not
-// exported as named constants there, so they stay local.
-const PKT_HEADER_SIZE: usize = 32;
-const PKT_SOURCE_OFF: usize = 12; // command.data.source
-const PKT_FORMAT_OFF: usize = 13; // command.data.format
-const PKT_OFFSET_OFF: usize = 20; // u32 metadata-block length
-const PKT_LENGTH_OFF: usize = 24; // u64 data-block length
 
 // ---------------------------------------------------------------------------
 // Error carrier for @throw (I2 typed panic payload). The pool host's dispatch
@@ -886,7 +880,17 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
     let source = *packet.add(PKT_SOURCE_OFF);
     let format = *packet.add(PKT_FORMAT_OFF);
 
-    if source == PKT_SOURCE_MESG && format == PKT_FORMAT_VOIDSTAR {
+    let compression = *packet.add(PKT_COMPRESSION_OFF);
+    let encryption = *packet.add(PKT_ENCRYPTION_OFF);
+    // A payload that is compressed or encrypted cannot be walked where it
+    // lies. Those fall through to the general path, which expands the body
+    // and re-enters. Testing for the plain values rather than against the
+    // known transforms keeps a future one from being read as raw bytes.
+    if source == PKT_SOURCE_MESG
+        && format == PKT_FORMAT_VOIDSTAR
+        && compression == PKT_COMPRESSION_NONE
+        && encryption == PKT_ENCRYPTION_NONE
+    {
         // Inline: voidstar lives in the packet buffer; relptrs are buffer-relative.
         let meta = core::ptr::read_unaligned(packet.add(PKT_OFFSET_OFF) as *const u32) as usize;
         let payload = packet.add(PKT_HEADER_SIZE + meta);
@@ -1629,6 +1633,73 @@ mod tests {
         let out = <T as FromVoidstar>::read(&schema, base, base);
         TEST_BASE.with(|b| b.set(None));
         out
+    }
+
+    /// Lay a flattened voidstar into a packet body and read it back through
+    /// `get_value`, which is what a pool actually calls. `roundtrip` covers
+    /// the walk; this covers the decision to walk in place, including the
+    /// header fields that decide it.
+    unsafe fn inline_packet_roundtrip<T: ToVoidstar + FromVoidstar>(
+        schema_str: &str,
+        value: &T,
+        compression: u8,
+    ) -> T {
+        let schema = parse_schema(schema_str).expect("parse schema");
+        let body = {
+            let _recur = RecurScope::enter(&schema);
+            let total = value.shm_size(&schema).max(1);
+            let mut buf = vec![0u8; total + 64];
+            let base = buf.as_mut_ptr();
+            TEST_BASE.with(|b| b.set(Some(base as usize)));
+            let mut cursor = base.add(schema.width);
+            value.write(base, &mut cursor, &schema);
+            TEST_BASE.with(|b| b.set(None));
+            buf
+        };
+
+        let mut packet = vec![0u8; PKT_HEADER_SIZE + body.len()];
+        packet[PKT_SOURCE_OFF] = PKT_SOURCE_MESG;
+        packet[PKT_FORMAT_OFF] = PKT_FORMAT_VOIDSTAR;
+        packet[PKT_COMPRESSION_OFF] = compression;
+        packet[PKT_ENCRYPTION_OFF] = PKT_ENCRYPTION_NONE;
+        // No metadata block; the body starts immediately after the header.
+        packet[PKT_OFFSET_OFF..PKT_OFFSET_OFF + 4].copy_from_slice(&0u32.to_le_bytes());
+        packet[PKT_LENGTH_OFF..PKT_LENGTH_OFF + 8]
+            .copy_from_slice(&(body.len() as u64).to_le_bytes());
+        packet[PKT_HEADER_SIZE..].copy_from_slice(&body);
+
+        // Relptrs in the body are relative to wherever the body begins, so
+        // point the walk's base at its position inside the packet.
+        let base = packet.as_ptr().add(PKT_HEADER_SIZE);
+        TEST_BASE.with(|b| b.set(Some(base as usize)));
+        let out = get_value::<T>(packet.as_ptr(), &schema);
+        TEST_BASE.with(|b| b.set(None));
+        out
+    }
+
+    #[test]
+    fn inline_packets_read_in_place() {
+        unsafe {
+            assert_eq!(inline_packet_roundtrip("i8", &42i64, PKT_COMPRESSION_NONE), 42i64);
+            assert_eq!(
+                inline_packet_roundtrip("s", &"hello".to_string(), PKT_COMPRESSION_NONE),
+                "hello".to_string(),
+            );
+            assert_eq!(
+                inline_packet_roundtrip("s", &String::new(), PKT_COMPRESSION_NONE),
+                String::new(),
+            );
+            let nested: Vec<Vec<i64>> = vec![vec![1, 2], vec![], vec![3]];
+            assert_eq!(
+                inline_packet_roundtrip("aai8", &nested, PKT_COMPRESSION_NONE),
+                nested,
+            );
+            let strs: Vec<String> = vec!["a".into(), "".into(), "ccc".into()];
+            assert_eq!(
+                inline_packet_roundtrip("as", &strs, PKT_COMPRESSION_NONE),
+                strs,
+            );
+        }
     }
 
     #[test]

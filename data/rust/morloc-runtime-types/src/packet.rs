@@ -469,6 +469,32 @@ pub struct PacketHeader {
     pub length: u64,
 }
 
+/// Byte offsets of a data command's fields within the 32-byte packet
+/// header, derived from the structs rather than written down, so they
+/// cannot drift from the layout they describe. Anything that reads a
+/// packet's bytes directly -- a language binding, a test, a writer
+/// patching a field in place -- must use these rather than re-deriving
+/// them; three independent copies of these numbers existed before, and
+/// one of them was wrong.
+pub const PKT_HEADER_SIZE: usize = 32;
+pub const PKT_CMD_OFF: usize = std::mem::offset_of!(PacketHeader, command);
+pub const PKT_CMD_TYPE_OFF: usize = PKT_CMD_OFF + std::mem::offset_of!(CommandData, cmd_type);
+pub const PKT_SOURCE_OFF: usize = PKT_CMD_OFF + std::mem::offset_of!(CommandData, source);
+pub const PKT_FORMAT_OFF: usize = PKT_CMD_OFF + std::mem::offset_of!(CommandData, format);
+pub const PKT_COMPRESSION_OFF: usize = PKT_CMD_OFF + std::mem::offset_of!(CommandData, compression);
+pub const PKT_ENCRYPTION_OFF: usize = PKT_CMD_OFF + std::mem::offset_of!(CommandData, encryption);
+pub const PKT_OFFSET_OFF: usize = std::mem::offset_of!(PacketHeader, offset);
+pub const PKT_LENGTH_OFF: usize = std::mem::offset_of!(PacketHeader, length);
+
+// Pin the wire layout: the C header and every binding assume these.
+const _: () = assert!(PKT_CMD_TYPE_OFF == 12);
+const _: () = assert!(PKT_SOURCE_OFF == 13);
+const _: () = assert!(PKT_FORMAT_OFF == 14);
+const _: () = assert!(PKT_COMPRESSION_OFF == 15);
+const _: () = assert!(PKT_ENCRYPTION_OFF == 16);
+const _: () = assert!(PKT_OFFSET_OFF == 20);
+const _: () = assert!(PKT_LENGTH_OFF == 24);
+
 const _: () = assert!(std::mem::size_of::<PacketHeader>() == 32);
 const _: () = assert!(std::mem::size_of::<PacketCommand>() == 8);
 const _: () = assert!(std::mem::size_of::<CommandCall>() == 8);

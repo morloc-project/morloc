@@ -988,11 +988,10 @@ pub(crate) unsafe fn build_persistence_data_packet(
     let mut header = PacketHeader::data_mesg(PACKET_FORMAT_VOIDSTAR, payload.len() as u64);
     header.offset = metadata.len() as u32;
     let hdr_bytes = header.to_bytes();
-    // Compression byte lives inside the 32-byte header at byte 15
-    // (see PacketHeader::data_mesg comment in packet.rs). Patch it
-    // in the serialized form.
+    // Patch the compression field in the serialized form; the offset is
+    // derived from the header layout rather than written down here.
     let mut hdr_bytes = hdr_bytes;
-    hdr_bytes[15] = compression_byte;
+    hdr_bytes[morloc_runtime_types::packet::PKT_COMPRESSION_OFF] = compression_byte;
 
     let mut out = Vec::with_capacity(32 + metadata.len() + payload.len());
     out.extend_from_slice(&hdr_bytes);

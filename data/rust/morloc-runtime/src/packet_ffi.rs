@@ -2374,9 +2374,7 @@ mod auto_routing_tests {
     };
     use crate::shm::{self, Array, RelPtr};
 
-    /// Byte offset of the `source` field inside the 32-byte packet
-    /// header (see `PacketHeader` in `packet.rs`).
-    const SOURCE_OFFSET: usize = 13;
+    use morloc_runtime_types::packet::PKT_SOURCE_OFF as SOURCE_OFFSET;
 
     #[must_use]
     fn ensure_shm() -> std::sync::RwLockReadGuard<'static, ()> {

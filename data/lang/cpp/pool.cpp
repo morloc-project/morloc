@@ -359,8 +359,15 @@ T _get_value(const uint8_t* packet, Schema* schema){
             }
         }
 
-        // Fast path: inline voidstar -- read directly from packet, no SHM needed
-        if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR) {
+        // Fast path: inline voidstar -- read directly from packet, no SHM
+        // needed. A payload that is compressed or encrypted cannot be walked
+        // where it lies, so it falls through to the general path, which
+        // expands the body and re-enters. Testing for the plain values rather
+        // than against the known transforms keeps a future one from being
+        // read as raw bytes.
+        if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR
+            && header->command.data.compression == PACKET_COMPRESSION_NONE
+            && header->command.data.encryption == PACKET_ENCRYPTION_NONE) {
             const uint8_t* payload = packet + sizeof(morloc_packet_header_t) + header->offset;
             T* dummy = nullptr;
             return from_voidstar(schema, (const void*)payload, dummy, (const void*)payload);

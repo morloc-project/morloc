@@ -2146,14 +2146,14 @@ unsafe fn arrow_load_json(
 ///     an SHM-resident voidstar or a parsed JSON/MSGPACK/Arrow result.
 ///
 /// Sites that read packet bytes for *forwarding* (cache.rs returning
-/// cached blobs to a downstream packet builder, slurm_ffi shipping
-/// arg packets to a remote worker) do not go through this function
-/// because they do not unpack -- they pass the bytes through. Those
-/// paths are uncompressed by convention (their writers are
-/// uncompressed, e.g. `put_cache_packet`) so they currently need no
-/// decompression. If a writer ever starts emitting compressed cache
-/// or slurm artifacts, the read sites in those files would need their
-/// own decompress call -- not this function.
+/// cached blobs to a downstream packet builder, slurm_ffi shipping arg
+/// packets to a remote worker) do not go through this function because
+/// they do not unpack -- they pass the bytes through, compressed body
+/// and all. `put_cache_packet` compresses whenever a cache compression
+/// level is set, so a forwarded argument can reach a pool with a zstd
+/// body and a voidstar format tag. Consumers therefore check the
+/// compression field before reading a payload where it lies, rather
+/// than trusting the format tag alone.
 pub unsafe extern "C" fn load_morloc_data_file(
     path: *const c_char,
     mut data: *mut u8,
