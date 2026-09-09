@@ -14,7 +14,7 @@
 // (Morloc.Abi). Provisioning refuses to run a prebuilt libmorloc/nexus whose
 // version differs from the compiler's expected value (fail-closed), preventing
 // silent cross-pool struct/offset corruption.
-#define MORLOC_ABI_VERSION 1
+#define MORLOC_ABI_VERSION 2
 
 // Atomic includes must sit outside any `extern "C"` block because the
 // C++ <atomic> header pulls in <type_traits> et al., which use C++
@@ -185,7 +185,7 @@ typedef enum {
                           // `[u32 home][u32 mid][u32 n][ (u32 len, bytes) x n ]`;
                           // the captured packets are opaque (serialized by the
                           // home language, deserialized by its dispatch table).
-    MORLOC_ENUM     = 25  // A `data` type whose constructors take no
+    MORLOC_ENUM     = 25, // A `data` type whose constructors take no
                           // arguments. One byte: the constructor's 0-based
                           // position in the declaration IS the wire tag.
                           // Constructor names travel in Schema.keys, so JSON
@@ -202,6 +202,21 @@ typedef enum {
                           // contract. Appending a constructor leaves every
                           // existing value byte-identical; reordering does
                           // not, and is a breaking change.
+    MORLOC_VARIANT  = 26  // A `data` type with at least one constructor that
+                          // takes arguments. Sixteen bytes: a tag byte at
+                          // offset 0, padding, and a relptr at offset 8 to
+                          // the arm's payload -- a tuple of that arm's
+                          // fields, RELNULL for an arm with none.
+                          //
+                          // The payload is behind a pointer so the slot's
+                          // width does not depend on any arm's, which is what
+                          // makes a recursive `data` type have a fixed size.
+                          // Wire form is
+                          // `v<count>(<klen><name><arity><schema>*arity)*`.
+                          //
+                          // Unlike every other type here, the payload's
+                          // schema is chosen by the TAG, so a walker has to
+                          // read the value and not just the schema.
     // Stream-handle types (`F`/`O`/`I`) share a 16-byte tagged-union wire
     // form. The schema code selects the morloc-level type; the tag byte
     // (byte 0 of the field) picks the encoding: `TAG_PATH` (0) means the
@@ -232,6 +247,7 @@ typedef enum {
 #define SCHEMA_ISTREAM  'I'
 #define SCHEMA_CLOSURE  'C'
 #define SCHEMA_ENUM     'e'
+#define SCHEMA_VARIANT  'v'
 
 // Schema: recursive type descriptor used for serialisation/deserialisation.
 //
@@ -570,12 +586,26 @@ typedef enum {
     MORLOC_X_CATCH,         // (fallible, fallback) -> value
     MORLOC_X_IF,            // (cond, then, else) -> value
     MORLOC_X_STREAM_LAYOUT, // IFile handle -> [(U64,U64,U64)]
-    MORLOC_X_TAG_TEST       // (subject, constructor) -> Bool. Compares the
-                            // one-byte tags of two `data` values. The nexus
-                            // answers this itself rather than dispatching to
-                            // a pool, because a tag is a byte it already
-                            // holds -- a pattern match on an enum in a pure
-                            // morloc function costs no pool round trip.
+    MORLOC_X_TAG_TEST,      // (subject) + a tag -> Bool. Tests whether a
+                            // `data` value carries a given constructor. The
+                            // tag travels as DATA, not as a second value:
+                            // a payload-bearing constructor is a function
+                            // into its type and has no value to compare
+                            // against. The nexus answers this itself rather
+                            // than dispatching to a pool, because the tag is
+                            // a byte it already holds -- a pattern match in
+                            // a pure morloc function costs no round trip.
+    MORLOC_X_CTOR_FIELD,    // (subject) + a tag and index -> field. Reads one
+                            // field out of a `data` value whose constructor
+                            // a guarding tag test has already established.
+                            // The tag selects the arm whose schema describes
+                            // the out-of-line payload; the index selects the
+                            // field within it.
+    MORLOC_X_CTOR_MAKE      // fields + a tag -> a `data` value. Builds the
+                            // tagged-pointer form: the tag, then the arm's
+                            // fields written out of line as a tuple. A
+                            // constructor with no arguments is its tag byte
+                            // and needs no node.
 } morloc_expression_type;
 
 typedef enum { APPLY_PATTERN, APPLY_LAMBDA, APPLY_FORMAT } morloc_app_expression_type;

@@ -9,6 +9,7 @@
 #include <queue>
 #include <deque>
 #include <optional>
+#include <variant>
 
 #include <algorithm>
 #include <tuple>
@@ -791,7 +792,7 @@ Wire check_range_narrow(const Src& data, const char* name) {
     return static_cast<Wire>(data);
 }
 
-// Primitives — always write at schema width so the wire format matches
+// Primitives -- always write at schema width so the wire format matches
 // the morloc type regardless of the C++ concrete type width.
 // Also instantiated for record types (which fall through to default).
 template<typename Primitive>
@@ -822,7 +823,7 @@ void* to_voidstar(void* dest, void** cursor, const Schema* schema, const Primiti
             case MORLOC_FLOAT32: *(float*)dest    = static_cast<float>(data);    break;
             case MORLOC_FLOAT64: *(double*)dest   = static_cast<double>(data);   break;
             case MORLOC_INT: {
-                // Inline BigInt: [size=1, value] — no allocation, no relptr
+                // Inline BigInt: [size=1, value] -- no allocation, no relptr
                 int64_t* fields = static_cast<int64_t*>(dest);
                 fields[0] = 1;
                 fields[1] = check_range_narrow<int64_t>(data, "Int");
@@ -982,7 +983,7 @@ void* to_voidstar(void* dest, void** cursor, const Schema* schema, const std::pa
 
 // Optional
 //
-// The Optional slot is a single relptr. Absent → RELNULL. Present →
+// The Optional slot is a single relptr. Absent -> RELNULL. Present ->
 // align the cursor for the inner T, write its relptr into the slot,
 // advance the cursor past T's width, then recurse to populate T.
 template<typename T>
@@ -1000,6 +1001,57 @@ void* to_voidstar(void* dest, void** cursor, const Schema* schema, const std::op
         to_voidstar(inner_dest, cursor, inner_schema, *data);
     }
     return dest;
+}
+
+// ---- Variant slots (payload-bearing `data`) --------------------------------
+//
+// A variant is a tag byte, seven bytes of padding, and a relative pointer to
+// the arm's fields -- Optional's slot shape with a tag in front. These
+// helpers keep the offsets, the payload alignment and the relptr encoding in
+// one place, so a generated overload only has to name its arm and hand over
+// the payload.
+
+#define MORLOC_VARIANT_PAYLOAD 8
+
+inline size_t variant_size_nullary(const Schema* schema) {
+    return resolve_recur(schema)->width;
+}
+
+template<typename T>
+size_t variant_size_payload(const Schema* schema, const Schema* arm, const T& payload) {
+    const Schema* s = resolve_recur(schema);
+    const Schema* a = resolve_recur(arm);
+    size_t align = schema_alignment_cpp(a);
+    if (align == 0) align = 1;
+    return s->width + (align - 1) + get_shm_size(a, payload);
+}
+
+inline void* write_variant_nullary(void* dest, uint8_t tag) {
+    *((uint8_t*)dest) = tag;
+    memset((char*)dest + 1, 0, MORLOC_VARIANT_PAYLOAD - 1);
+    *((relptr_t*)((char*)dest + MORLOC_VARIANT_PAYLOAD)) = RELNULL;
+    return dest;
+}
+
+template<typename T>
+void* write_variant_payload(void* dest, void** cursor, const Schema* arm,
+                            uint8_t tag, const T& payload) {
+    *((uint8_t*)dest) = tag;
+    memset((char*)dest + 1, 0, MORLOC_VARIANT_PAYLOAD - 1);
+    const Schema* a = resolve_recur(arm);
+    size_t align = schema_alignment_cpp(a);
+    if (align == 0) align = 1;
+    *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), align));
+    void* slot = *cursor;
+    *((relptr_t*)((char*)dest + MORLOC_VARIANT_PAYLOAD)) =
+        abs2rel_cpp(static_cast<absptr_t>(slot));
+    *cursor = static_cast<char*>(slot) + a->width;
+    to_voidstar(slot, cursor, a, payload);
+    return dest;
+}
+
+inline uint8_t read_variant_tag(const void* data) {
+    return *((const uint8_t*)data);
 }
 
 // shared_ptr<T>: the C++ surface form for `?T` at a recursive cycle.
@@ -1031,6 +1083,18 @@ void* to_voidstar(void* dest, void** cursor, const Schema* schema, const std::sh
 // Forward declaration for recursive calls
 template<typename T>
 T from_voidstar(const Schema* schema, const void* data, T* = nullptr, const void* base_ptr = nullptr);
+
+// Read the payload of a variant slot, given the schema of the arm the tag
+// selected. The caller has already switched on the tag, so the payload type
+// is known statically. Mirrors the Optional branch's relptr resolution,
+// including threading base_ptr so a file-backed region resolves correctly.
+template<typename T>
+T read_variant_payload(const Schema* arm, const void* data, const void* base_ptr = nullptr) {
+    relptr_t rel = *(const relptr_t*)((const char*)data + MORLOC_VARIANT_PAYLOAD);
+    const Schema* a = resolve_recur(arm);
+    const void* payload = resolve_relptr_cpp(rel, base_ptr);
+    return from_voidstar(a, payload, static_cast<T*>(nullptr), base_ptr);
+}
 
 // Tuple helper (needs forward declaration of from_voidstar)
 template<typename Tuple, size_t... Is>
@@ -1087,7 +1151,7 @@ T from_voidstar(const Schema* schema, const void* data, T*, const void* base_ptr
         // schema->offsets[] directly and would crash on a Recur.
         const Schema* elem_schema = resolve_recur(schema->parameters[0]);
 
-        // Fast path for primitive arrays — only when C++ type width
+        // Fast path for primitive arrays -- only when C++ type width
         // matches schema width (e.g. both 8 bytes). When they differ
         // (e.g. int=4 bytes vs i8 schema=8 bytes), fall through to
         // the element-by-element slow path which converts per element.
@@ -1197,7 +1261,7 @@ T from_voidstar(const Schema* schema, const void* data, T*, const void* base_ptr
             from_voidstar(inner_schema, inner_data, static_cast<PointeeT*>(nullptr), base_ptr));
     }
     else if constexpr (std::is_arithmetic_v<T>) {
-        // Primitives (int, double, float, etc.) — read at schema width and
+        // Primitives (int, double, float, etc.) -- read at schema width and
         // convert to the C++ type so narrow concrete types (e.g. int for Int)
         // work correctly with wider morloc schemas (e.g. i8).
         switch(schema->type) {
@@ -1262,9 +1326,12 @@ T from_voidstar(const Schema* schema, const void* data, T*, const void* base_ptr
         }
     }
     else {
-        // Non-arithmetic types (records, etc.) — generated overloads are
-        // preferred by overload resolution, but if we reach here, just
-        // reinterpret the bytes directly.
+        // Non-arithmetic types (records, etc.) reach here only when their
+        // generated overload was declared BEFORE this call. Otherwise
+        // ordinary lookup cannot see it and binds here instead, which
+        // reinterprets wire bytes as the target type -- for anything holding
+        // a pointer, a crash or worse. The assertion turns that into a
+        // compile error naming the offending call.
         return *(T*)data;
     }
 }

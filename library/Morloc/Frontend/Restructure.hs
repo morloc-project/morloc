@@ -141,6 +141,12 @@ checkForSelfRecursion d = do
   return d
   where
     isExprSelfRecursive :: ExprI -> MorlocMonad ()
+    -- A `data` type may refer to itself. Its constructor payloads are
+    -- reached through a pointer, so a value's width does not depend on how
+    -- deep the recursion goes -- the same reason a list- or option-guarded
+    -- alias is accepted below. A type with no base case is uninhabited
+    -- rather than ill-formed: nothing can build a value of it.
+    isExprSelfRecursive (ExprI _ (TypE (ExprTypeE _ _ _ _ _ TypedefEnum))) = return ()
     isExprSelfRecursive (ExprI i (TypE (ExprTypeE Nothing v vs t _ _)))
       -- Forward declaration with no body: parser lowers @type Foo@ to a
       -- body that is just @VarU Foo@ itself. Exempt these along with the

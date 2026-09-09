@@ -749,6 +749,95 @@ impl<T: FromVoidstar> FromVoidstar for Option<T> {
     }
 }
 
+// ---- Variant slots (payload-bearing `data`) --------------------------------
+//
+// A variant is a tag byte, seven bytes of padding, and a relative pointer to
+// the arm's fields -- the same slot shape as Optional, with a tag in front.
+// These helpers keep that layout here rather than in generated pool code:
+// the offsets, the alignment of the out-of-line payload and the relative-
+// pointer encoding are the runtime's business, and a pool cannot reach them
+// anyway (RelPtr and its helpers are not part of this crate's public API).
+
+/// Byte offset of a variant's payload pointer within its slot.
+const VARIANT_PAYLOAD: usize = 8;
+
+/// Size of a variant slot whose arm carries no fields.
+pub fn variant_size_nullary(schema: &Schema) -> usize {
+    resolve_recur(schema).width
+}
+
+/// Size of a variant slot plus the out-of-line payload of one arm, including
+/// any padding needed to align that payload.
+pub fn variant_size_payload<T: ToVoidstar>(
+    schema: &Schema,
+    arm: &Schema,
+    payload: &T,
+) -> usize {
+    let s = resolve_recur(schema);
+    let a = resolve_recur(arm);
+    s.width + (a.alignment().max(1) - 1) + payload.shm_size(a)
+}
+
+/// Write a variant slot for an arm with no fields: the tag, determined
+/// padding, and a null payload pointer.
+///
+/// # Safety
+/// `dest` must point at a writable slot of at least the schema's width.
+pub unsafe fn write_variant_nullary(dest: *mut u8, tag: u8) {
+    *dest = tag;
+    core::ptr::write_bytes(dest.add(1), 0, VARIANT_PAYLOAD - 1);
+    core::ptr::write_unaligned(dest.add(VARIANT_PAYLOAD) as *mut RelPtr, RELNULL);
+}
+
+/// Write a variant slot for an arm that carries fields: the tag, determined
+/// padding, and a pointer to the payload written at the cursor.
+///
+/// # Safety
+/// `dest` must point at a writable slot of at least the schema's width, and
+/// `cursor` must have room for the payload reported by `variant_size_payload`.
+pub unsafe fn write_variant_payload<T: ToVoidstar>(
+    dest: *mut u8,
+    cursor: &mut *mut u8,
+    arm: &Schema,
+    tag: u8,
+    payload: &T,
+) {
+    *dest = tag;
+    core::ptr::write_bytes(dest.add(1), 0, VARIANT_PAYLOAD - 1);
+    let a = resolve_recur(arm);
+    let align = a.alignment().max(1);
+    *cursor = align_up(*cursor as usize, align) as *mut u8;
+    let slot = *cursor;
+    let rel = to_rel(slot);
+    *cursor = slot.add(a.width);
+    payload.write(slot, cursor, a);
+    core::ptr::write_unaligned(dest.add(VARIANT_PAYLOAD) as *mut RelPtr, rel);
+}
+
+/// The tag a variant slot carries.
+///
+/// # Safety
+/// `data` must point at a variant slot.
+pub unsafe fn read_variant_tag(data: *const u8) -> u8 {
+    *data
+}
+
+/// Read the payload of a variant slot, given the schema of the arm its tag
+/// selected.
+///
+/// # Safety
+/// `data` must point at a variant slot whose payload pointer is live, and
+/// `arm` must be the schema of the arm named by its tag.
+pub unsafe fn read_variant_payload<T: FromVoidstar>(
+    arm: &Schema,
+    data: *const u8,
+    base: *const u8,
+) -> T {
+    let rel = core::ptr::read_unaligned(data.add(VARIANT_PAYLOAD) as *const RelPtr);
+    let a = resolve_recur(arm);
+    <T as FromVoidstar>::read(a, resolve(rel, base), base)
+}
+
 // ---- Box (cycle-break indirection, I7) ------------------------------------
 impl<T: ToVoidstar> ToVoidstar for Box<T> {
     fn shm_size(&self, schema: &Schema) -> usize { (**self).shm_size(schema) }
@@ -793,6 +882,10 @@ macro_rules! tuple_impl {
         }
     };
 }
+// A one-element tuple. Unused while tuples came only from morloc's `(a, b)`
+// syntax, which has no one-element form -- but a `data` arm carrying a
+// single field is boxed as `(T,)`, so the impl is needed.
+tuple_impl!(A 0);
 tuple_impl!(A 0, B 1);
 tuple_impl!(A 0, B 1, C 2);
 tuple_impl!(A 0, B 1, C 2, D 3);

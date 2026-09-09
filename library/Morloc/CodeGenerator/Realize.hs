@@ -278,7 +278,9 @@ realizeWithRegistry registry s0 = do
     scoreExpr rstat (IntS si x, i) = return (IntS si x, zipLang i rstat)
     scoreExpr rstat (LogS x, i) = return (LogS x, zipLang i rstat)
     scoreExpr rstat (StrS x, i) = return (StrS x, zipLang i rstat)
-    scoreExpr rstat (EnumS tv n j, i) = return (EnumS tv n j, zipLang i rstat)
+    scoreExpr rstat (ConS tv n j xs, i) = do
+      xs' <- mapM (scoreAnnoS rstat) xs
+      return (ConS tv n j xs', zipLang i rstat)
     scoreExpr rstat (LetS v e1 e2, i) = do
       e1' <- scoreAnnoS rstat e1
       -- Make the let-bound variable's RHS scores available to LetBndS
@@ -585,7 +587,9 @@ realizeWithRegistry registry s0 = do
     collapseExpr _ lang (IntS si x, Idx i _) = return (IntS si x, Idx i lang)
     collapseExpr _ lang (LogS x, Idx i _) = return (LogS x, Idx i lang)
     collapseExpr _ lang (StrS x, Idx i _) = return (StrS x, Idx i lang)
-    collapseExpr _ lang (EnumS tv n j, Idx i _) = return (EnumS tv n j, Idx i lang)
+    collapseExpr _ lang (ConS tv n j xs, Idx i _) = do
+      xs' <- mapM (collapseAnnoS lang) xs
+      return (ConS tv n j xs', Idx i lang)
     collapseExpr _ l1 (LetS v e1 e2, Idx i ss) = do
       lang <- chooseLanguage l1 (subtreeHasRec [e1, e2]) ss
       e1' <- collapseAnnoS lang e1
@@ -710,7 +714,7 @@ realizeWithRegistry registry s0 = do
             (IntS si x) -> return (IntS si x)
             (LogS x) -> return (LogS x)
             (StrS x) -> return (StrS x)
-            (EnumS tv n j) -> return (EnumS tv n j)
+            (ConS tv n j xs) -> ConS tv n j <$> mapM (f lang) xs
             (ExeS x) -> return (ExeS x)
             (LetS v e1 e2) -> LetS v <$> f lang e1 <*> f lang e2
             (LetBndS v) -> return (LetBndS v)

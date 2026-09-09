@@ -55,7 +55,14 @@ parameterize' _ (AnnoS g c (RealS si x)) = return (AnnoS g (c, []) (RealS si x))
 parameterize' _ (AnnoS g c (IntS si x)) = return (AnnoS g (c, []) (IntS si x))
 parameterize' _ (AnnoS g c (LogS x)) = return (AnnoS g (c, []) (LogS x))
 parameterize' _ (AnnoS g c (StrS x)) = return (AnnoS g (c, []) (StrS x))
-parameterize' _ (AnnoS g c (EnumS tv n i)) = return (AnnoS g (c, []) (EnumS tv n i))
+-- A constructor's arguments are ordinary expressions, so it needs whatever
+-- they need -- exactly as a list or tuple literal does. Reporting no
+-- arguments would build a manifold that captures nothing while its body
+-- still refers to the enclosing scope's bindings.
+parameterize' args (AnnoS g c (ConS tv n i xs)) = do
+  xs' <- mapM (parameterize' args) xs
+  let args' = pruneArgs args xs'
+  return $ AnnoS g (c, args') (ConS tv n i xs')
 parameterize' args (AnnoS g c (BndS v)) = do
   let args' = [r | r@(Arg _ v') <- args, v' == v]
   return $ AnnoS g (c, args') (BndS v)

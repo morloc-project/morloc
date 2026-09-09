@@ -1229,6 +1229,7 @@ renderConcreteForm (StrLitF s) = s
 renderConcreteForm StrVoidF = "_"
 renderConcreteForm (RecF (FV _ cv)) = unCVar cv
 renderConcreteForm (EnumF (FV _ cv) _) = unCVar cv
+renderConcreteForm (VariantF (FV _ cv) _) = unCVar cv
 renderConcreteForm (OptionalF t) = "?" <> renderConcreteForm t
 renderConcreteForm (EffectF _ t) = renderConcreteForm t
 renderConcreteForm (FunF ts t) =
@@ -1768,7 +1769,7 @@ expressPolyExpr fr pl pc (AnnoS (Idx midx (EffectT _ innerT)) c e)
     isPureDataLit IntS{}  = True
     isPureDataLit RealS{} = True
     isPureDataLit StrS{}  = True
-    isPureDataLit EnumS{} = True
+    isPureDataLit ConS{} = True
     isPureDataLit LogS{}  = True
     isPureDataLit _       = False
 expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (RealS _ x)) =
@@ -1785,8 +1786,20 @@ expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (StrS x)) 
 -- 'dispatchPrimLit' wire-parent step: an enum HAS no wire parent to convert
 -- from, and asking for one produces a spurious demand for a `Packable`
 -- instance between the type and a phantom parent.
-expressPolyExpr _ _ _ (AnnoS (Idx _ (VarT v)) (Idx cidx _, _) (EnumS _ n i)) =
-  return $ PolyEnum (Idx cidx v) n i
+-- Which form a constructor takes is a property of its TYPE, not of the
+-- constructor: an argument-free arm of a payload-bearing `data` is still a
+-- tagged pointer, because a value of that type has to be able to hold any
+-- arm. Deciding on this constructor's own arity would give `Leaf` a
+-- one-byte enum form inside a `Tree` whose other arm carries fields.
+expressPolyExpr findRemote parentLang _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (ConS _ n i xs)) = do
+  scope <- MM.getGeneralScope midx
+  if scopeDataIsEnum scope v
+    then return $ PolyEnum (Idx cidx v) n i
+    else do
+      xs' <- mapM (\x@(AnnoS (Idx xi xt) _ _) -> expressPolyExprWrap lang (Idx xi xt) x) xs
+      return $ PolyVariant (Idx cidx v) n i xs'
+  where
+    _ = (findRemote, parentLang, t)
 expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) UniS) =
   dispatchPrimLit midx lang t v (\tv -> PolyNull (Idx cidx (VarT tv)))
 -- Null carries the full type it stands in for. Earlier this was just
@@ -2175,7 +2188,7 @@ expressPolyApp _ (AnnoS (Idx i t) _ e) _ =
     tagExpr (IntS _ _) = "IntS"
     tagExpr (LogS _) = "LogS"
     tagExpr (StrS _) = "StrS"
-    tagExpr (EnumS _ _ _) = "EnumS"
+    tagExpr (ConS _ _ _ _) = "ConS"
     tagExpr (DoBlockS _) = "DoBlockS"
     tagExpr (EvalS _) = "EvalS"
     tagExpr (CoerceS _ _) = "CoerceS"

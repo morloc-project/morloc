@@ -371,6 +371,7 @@ renameNE old new = go where
   go e@(IntN _ _) = e
   go e@(StrN _ _) = e
   go e@(EnumN _ _ _) = e
+  go (VariantN t n i xs) = VariantN t n i (map go xs)
   go e@(NullN _) = e
   go (DoBlockN t ne) = DoBlockN t (go ne)
   go (EvalN t ne) = EvalN t (go ne)
@@ -543,6 +544,8 @@ invertSerialManifold sm0 =
     invertNativeExprM (IntN_ v x) = atomize (IntN v x) []
     invertNativeExprM (StrN_ v x) = atomize (StrN v x) []
     invertNativeExprM (EnumN_ v n i) = atomize (EnumN v n i) []
+    invertNativeExprM (VariantN_ v n i xs) =
+      atomize (VariantN v n i (map unD xs)) (concatMap getDeps xs)
     invertNativeExprM (NullN_ v) = atomize (NullN v) []
     -- keep dependencies inside suspend so thunk body stays lazy
     invertNativeExprM (DoBlockN_ t (D ne lets)) = return $ D (DoBlockN t (weave (D ne lets))) []
@@ -659,6 +662,8 @@ collectRecords e0@(SerialManifold i0 _ _ _ _) =
     seekRecs _ (RecF _) = []
     -- An enum is a leaf: no fields, so no records beneath it.
     seekRecs _ (EnumF _ _) = []
+    -- A variant's arms can hold records, so they are walked.
+    seekRecs d (VariantF _ as) = concatMap (concatMap (seekRecs d) . snd) as
 
 unifyRecords ::
   [ ( FVar

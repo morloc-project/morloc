@@ -383,6 +383,16 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     nativeExpr _ (MonoInt v x) = IntN <$> inferVar v <*> pure x
     nativeExpr _ (MonoStr v x) = StrN <$> inferVar v <*> pure x
     nativeExpr _ (MonoEnum v n i) = EnumN <$> inferVar v <*> pure n <*> pure i
+    -- The complete type comes from the declaration, not from the arm being
+    -- built: a constructor names one arm, but the value's wire form
+    -- describes them all.
+    nativeExpr args (MonoVariant v@(Idx vidx vtv) n i xs) = do
+      fv <- inferVar v
+      scope <- MM.getGeneralScope vidx
+      armTfs <- case scopeDataCtors scope vtv of
+        Just arms -> mapM (\(cn, ts) -> (,) cn <$> mapM (inferType . Idx vidx . typeOf) ts) arms
+        Nothing -> return [(n, [])]
+      VariantN (VariantF fv armTfs) n i <$> mapM (nativeExpr args) xs
     -- MonoNull now carries an Indexed Type for the full type the
     -- Null inhabits (e.g. @?(BTree Int)@). Use @inferType@ (=
     -- @inferConcreteType@) rather than @inferVar@ so the resulting
@@ -727,6 +737,7 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
             ps -> parens (pretty t <+> hsep (map go ps))
         go (RecF (FV t _)) = pretty t
         go (EnumF (FV t _) _) = pretty t
+        go (VariantF (FV t _) _) = pretty t
         go (AppF con args) = parens (go con <+> hsep (map go args))
         go (FunF args ret) =
           parens (hsep (punctuate " ->" (map go args ++ [go ret])))
@@ -870,6 +881,11 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     makeTypemap _ (MonoList (ann -> idx) _ es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
     makeTypemap _ (MonoTuple (ann -> idx) (map snd -> es)) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
     makeTypemap _ (MonoRecord _ (ann -> idx) _ (map (snd . snd) -> es)) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
+    -- A constructor's arguments are ordinary expressions and must be walked
+    -- like any other container's. Falling to the catch-all leaves them
+    -- unregistered, so a manifold built around one receives its arguments
+    -- serialized while the body expects native values.
+    makeTypemap _ (MonoVariant (ann -> idx) _ _ es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
     makeTypemap _ _ = Map.empty
 
     mergeTypes :: Either Type (Indexed Type) -> Either Type (Indexed Type) -> Either Type (Indexed Type)

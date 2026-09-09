@@ -524,6 +524,34 @@ fn calc_voidstar_size_inner_walk(
                 }
                 Ok(size)
             }
+            SerialType::Variant => {
+                // A variant slot is a tag plus a relptr to the arm's fields,
+                // so its flattened size is the slot, worst-case padding
+                // before the payload, and the payload's own total. A nullary
+                // arm has no payload and needs only the slot.
+                //
+                // Without this the walk would fall through to the slot width
+                // alone and the flatten buffer would be too small for any arm
+                // that carries fields.
+                let tag = *data;
+                let arm = schema.parameters.get(tag as usize).ok_or_else(|| {
+                    MorlocError::Serialization(format!(
+                        "variant tag {} is out of range; the type has {} arms",
+                        tag, schema.size
+                    ))
+                })?;
+                let relptr = *(data.add(8) as *const shm::RelPtr);
+                if relptr == shm::RELNULL {
+                    Ok(schema.width)
+                } else {
+                    let payload = shm::rel2abs(relptr)?;
+                    let align = arm.alignment().max(1);
+                    let prefix = schema.width.saturating_add(align - 1);
+                    let child_bound = upper_bound.saturating_sub(prefix);
+                    let inner = calc_voidstar_size_with_env(payload, arm, env, child_bound)?;
+                    Ok(prefix.saturating_add(inner))
+                }
+            }
             SerialType::Optional => {
                 // Optional is now a single relptr (schema.width = sizeof(RelPtr)).
                 // RELNULL → no payload; otherwise reserve room for:

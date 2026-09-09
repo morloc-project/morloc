@@ -84,10 +84,14 @@ pub enum MorlocExpressionType {
     StreamLayout = 30, // IFile handle -> [(U64,U64,U64)]. Per-sub-packet layout
                        // (element_offset, element_count, uncompressed_size);
                        // DATA packet -> single triple; empty stream -> [].
-    TagTest = 31,      // (subject, constructor) -> Bool. Compares the one-byte
-                       // tags of two `data` values. Answered in the nexus: the
-                       // tag is a byte it already holds, so a pattern match on
-                       // an enum needs no pool dispatch.
+    TagTest = 31,      // (subject) + a tag -> Bool. Answered in the nexus:
+                       // the tag is a byte it already holds, so a pattern
+                       // match needs no pool dispatch.
+    CtorField = 32,    // (subject) + a tag and index -> field. Reads one field
+                       // out of a `data` value whose arm a guarding tag test
+                       // has established.
+    CtorMake = 33,     // fields + a tag -> a `data` value. Builds the
+                       // tagged-pointer form from the arm's field values.
 }
 
 #[repr(C)]
@@ -224,17 +228,39 @@ pub struct MorlocMapExpression {
     pub list: *mut MorlocExpression,
 }
 
-// A constructor-pattern tag test: two `data` values whose one-byte tags
-// are compared. See MorlocExpressionType::TagTest.
+// A constructor-pattern tag test: a `data` value and the tag it must
+// carry. The tag is DATA rather than a second expression, because a
+// payload-bearing constructor is a function into its type and so has no
+// value to materialize and compare against.
+// See MorlocExpressionType::TagTest.
 #[repr(C)]
 pub struct MorlocTagTestExpression {
     pub subject: *mut MorlocExpression,
-    pub constructor: *mut MorlocExpression,
+    pub tag: u8,
 }
 
 // @catch: two-child expression carrying a fallible and a fallback.
 // The eval handler runs the fallible into a scratch buffer, memcpy's
 // on success, evaluates fallback into dest on failure.
+// A constructor-field projection: the value, the arm its tag selects, and
+// which field of that arm to read. Emitted only under a passing tag test.
+#[repr(C)]
+pub struct MorlocCtorFieldExpression {
+    pub subject: *mut MorlocExpression,
+    pub tag: u8,
+    pub index: u32,
+}
+
+// Constructing a payload-bearing `data` value: the arm's tag and one
+// expression per field. The arm's schema describes the fields as a tuple,
+// which is what the payload is written as.
+#[repr(C)]
+pub struct MorlocCtorMakeExpression {
+    pub fields: *mut *mut MorlocExpression,
+    pub nfields: usize,
+    pub tag: u8,
+}
+
 #[repr(C)]
 pub struct MorlocCatchExpression {
     pub fallible: *mut MorlocExpression,
@@ -285,6 +311,8 @@ pub union ExprUnion {
     pub save_expr: *mut MorlocSaveExpression,
     pub map_expr: *mut MorlocMapExpression,
     pub tag_test_expr: *mut MorlocTagTestExpression,
+    pub ctor_field_expr: *mut MorlocCtorFieldExpression,
+    pub ctor_make_expr: *mut MorlocCtorMakeExpression,
     pub catch_expr: *mut MorlocCatchExpression,
     pub if_expr: *mut MorlocIfExpression,
     // IFile-family expressions.
@@ -977,16 +1005,73 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
                 return Err(MorlocError::Other(msg));
             }
             let subject = build_expr(je.get("subject").unwrap_or(&serde_json::Value::Null))?;
-            let constructor =
-                build_expr(je.get("constructor").unwrap_or(&serde_json::Value::Null))?;
+            let tag = je
+                .get("tag_ordinal")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u8;
             let te = libc::calloc(1, std::mem::size_of::<MorlocTagTestExpression>())
                 as *mut MorlocTagTestExpression;
             (*te).subject = subject;
-            (*te).constructor = constructor;
+            (*te).tag = tag;
             let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
             (*expr).etype = MorlocExpressionType::TagTest;
             (*expr).schema = schema;
             (*expr).expr.tag_test_expr = te;
+            Ok(expr)
+        }
+
+        "ctormake" => {
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+            let c_schema_str = CString::new(schema_str).unwrap_or_default();
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let tag = je.get("tag_ordinal").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+            let jfields = je.get("fields").and_then(|v| v.as_array());
+            let n = jfields.map_or(0, |a| a.len());
+            let arr = libc::calloc(n.max(1), std::mem::size_of::<*mut MorlocExpression>())
+                as *mut *mut MorlocExpression;
+            if let Some(fs) = jfields {
+                for (i, f) in fs.iter().enumerate() {
+                    *arr.add(i) = build_expr(f)?;
+                }
+            }
+            let me = libc::calloc(1, std::mem::size_of::<MorlocCtorMakeExpression>())
+                as *mut MorlocCtorMakeExpression;
+            (*me).fields = arr;
+            (*me).nfields = n;
+            (*me).tag = tag;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::CtorMake;
+            (*expr).schema = schema;
+            (*expr).expr.ctor_make_expr = me;
+            Ok(expr)
+        }
+
+        "ctorfield" => {
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+            let c_schema_str = CString::new(schema_str).unwrap_or_default();
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let subject = build_expr(je.get("subject").unwrap_or(&serde_json::Value::Null))?;
+            let tag = je.get("tag_ordinal").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+            let index = je.get("field_index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let fe = libc::calloc(1, std::mem::size_of::<MorlocCtorFieldExpression>())
+                as *mut MorlocCtorFieldExpression;
+            (*fe).subject = subject;
+            (*fe).tag = tag;
+            (*fe).index = index;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::CtorField;
+            (*expr).schema = schema;
+            (*expr).expr.ctor_field_expr = fe;
             Ok(expr)
         }
 

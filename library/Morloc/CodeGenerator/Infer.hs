@@ -25,6 +25,8 @@ import qualified Control.Monad.State as CMS
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
+import qualified Data.Set as Set
+import qualified Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as T
 
@@ -59,9 +61,21 @@ inferConcreteType :: Lang -> Indexed Type -> MorlocMonad TypeF
 inferConcreteType _ (Idx i (UnkT _)) =
   MM.throwSourcedError i "Cannot infer concrete type for UnkT. This may be an unsolved generic term"
 inferConcreteType lang (Idx i (type2typeu -> generalType)) = do
-  concreteType <- inferConcreteTypeU lang (Idx i generalType)
-  (_, gscope) <- getScope i lang
-  inferConcreteTypeStructural lang i gscope generalType concreteType
+  (cscope0, gscope0) <- getScope i lang
+  anc <- CMS.gets stateVariantAncestors
+  -- A `data` type already being expanded resolves to its NAME and stops.
+  -- The check belongs here, at the single entry point, rather than deeper:
+  -- resolving a field reaches this function again from the top, and the
+  -- work below would expand the type before any inner guard could fire.
+  -- Recursion THROUGH a container (`data Rose = Rose [Rose]`) arrives this
+  -- way -- the field's head is the container, not the `data` type.
+  case dataHeadOf gscope0 generalType of
+    Just v | Set.member v anc ->
+      return $ VarF (FV v (CV (concreteNameOf cscope0 v)))
+    _ -> do
+      concreteType <- inferConcreteTypeU lang (Idx i generalType)
+      (_, gscope) <- getScope i lang
+      inferConcreteTypeStructural lang i gscope generalType concreteType
 
 -- | Parallel structural walk over (general, concrete) that handles the
 -- AppU/VarU mismatch case at any depth. Parameterised newtypes whose
@@ -88,6 +102,73 @@ inferConcreteTypeStructural lang i gscope g c = case (g, c) of
       <$> inferConcreteTypeStructural lang i gscope g' c'
   (OptionalU g', OptionalU c') ->
     OptionalF <$> inferConcreteTypeStructural lang i gscope g' c'
+  -- A payload-bearing `data`. Its arms' field types have to be resolved to
+  -- the target language here rather than in 'weave', which is pure and so
+  -- cannot reach the per-language scope: weaving a field against itself
+  -- would leave the morloc name in the concrete slot and emit `Real` where
+  -- a Rust pool needs `f64`. Argument-free constructors fall through, having
+  -- no fields to resolve.
+  -- Already being expanded: resolve to the NAME and stop. This guard sits
+  -- at the top of the intercept because the structural walk re-enters here
+  -- directly for an AppU's arguments, without passing through
+  -- 'inferConcreteType' -- which is how recursion through a container
+  -- (`data Rose = Rose [Rose]`) arrives.
+  (VarU vG, VarU (TV vC))
+    | Just _ <- scopeDataCtors gscope vG -> do
+        anc0 <- CMS.gets stateVariantAncestors
+        if Set.member vG anc0
+          then return $ VarF (FV vG (CV vC))
+          else inferVariantArms lang i gscope vG vC
+  _ -> inferConcreteTypeStructuralRest lang i gscope g c
+
+-- | Expand a `data` type's arms to the target language, with the type
+-- pushed onto the ancestor set for the duration.
+inferVariantArms :: Lang -> Int -> Scope -> TVar -> MT.Text -> MorlocMonad TypeF
+inferVariantArms lang i gscope vG vC = do
+  arms <- case scopeDataCtors gscope vG of
+    Just as -> return as
+    Nothing -> return []
+  if all (null . snd) arms
+    then return $ EnumF (FV vG (CV vC)) (map fst arms)
+    else do
+        cscope <- fst <$> getScope i lang
+        anc <- CMS.gets stateVariantAncestors
+        let -- A field naming a `data` type that is already being resolved is
+            -- left OPAQUE rather than expanded. Expanding it would re-enter
+            -- this case and never terminate, and it is unnecessary: the field
+            -- only needs that type's concrete NAME, which is its per-language
+            -- mapping when it has one and its own name when the pool
+            -- generates it. Leaving the reference opaque is also how a
+            -- recursive record survives this walk; the cycle is cut once,
+            -- later, where the wire form is built.
+            --
+            -- The set is carried in compiler state rather than as an
+            -- argument because a field's type is resolved by re-entering
+            -- 'inferConcreteType' at the top. A head-only test would miss
+            -- recursion THROUGH a container -- @data Rose = Rose [Rose]@
+            -- has head @List@, and expanding it reaches @Rose@ again.
+            dataHead t = case t of
+              VarU v | Just _ <- scopeDataCtors gscope v -> Just v
+              AppU (VarU v) _ | Just _ <- scopeDataCtors gscope v -> Just v
+              _ -> Nothing
+            concreteName v = case Map.lookup v cscope of
+              Just entries | (n : _) <- [n' | (_, body, _, _, _) <- entries
+                                            , Just n' <- [bodyNameOf body]] -> n
+              _ -> unTVar v
+            resolveField t = case dataHead t of
+              Just v | Set.member v anc || v == vG ->
+                return $ VarF (FV v (CV (concreteName v)))
+              _ -> inferConcreteType lang (Idx i (typeOf t))
+        CMS.modify (\st -> st { stateVariantAncestors = Set.insert vG anc })
+        arms' <- mapM (\(n, ts) -> (,) n <$> mapM resolveField ts) arms
+        CMS.modify (\st -> st { stateVariantAncestors = anc })
+        return $ VariantF (FV vG (CV vC)) arms'
+
+-- | The structural walk's remaining cases: shapes 'weave' cannot handle on
+-- its own, and the fallback to it.
+inferConcreteTypeStructuralRest
+  :: Lang -> Int -> Scope -> TypeU -> TypeU -> MorlocMonad TypeF
+inferConcreteTypeStructuralRest lang i gscope g c = case (g, c) of
   -- AppU general / VarU concrete: the per-language form takes no arguments
   -- while the general type has some.
   --
@@ -250,7 +331,7 @@ inferConcreteTypeUUniversal lang generalType = do
 -- cscope to distinguish legitimate user mappings from pairEval bnd-
 -- protect leaks.
 weave :: Scope -> TypeU -> TypeU -> Either MDoc TypeF
-weave gscope = w
+weave gscope = w Set.empty
   where
     -- A `data` type weaves to 'EnumF' rather than a plain 'VarF' so the
     -- constructor names reach codegen. Making this the canonical TypeF for
@@ -258,10 +339,28 @@ weave gscope = w
     -- otherwise only serialized positions (which come through SerialEnum)
     -- would see it, and a native-position enum would look like an opaque
     -- VarF with an unhelpful name.
-    w (VarU v1) (VarU (TV v2)) = return $ case scopeEnumCtors gscope v1 of
-      Just ctors -> EnumF (FV v1 (CV v2)) ctors
+    w anc (VarU v1) (VarU (TV v2)) = return $ case scopeDataCtors gscope v1 of
+      -- A type already being expanded stays an opaque name. Expansion
+      -- reaches a constructor's field types, so a field naming an enclosing
+      -- `data` would otherwise re-enter it forever -- and branch, once more
+      -- than one field does so. Leaving it opaque is how a record's
+      -- self-reference already survives this walk: the back-edge is cut
+      -- once, later, where the wire form is built and a name is available
+      -- to tie the knot.
+      _ | Set.member v1 anc -> VarF (FV v1 (CV v2))
+      Just ctors
+        -- Every constructor argument-free: the one-byte form.
+        | all (null . snd) ctors -> EnumF (FV v1 (CV v2)) (map fst ctors)
+        -- Otherwise a tagged pointer, and the arms' field types have to be
+        -- woven too so the payload's own schema is reachable.
+        | otherwise ->
+            VariantF (FV v1 (CV v2))
+              [ (n, [either (const (UnkF (FV v1 (CV v2)))) id (w anc' t t) | t <- fs])
+              | (n, fs) <- ctors ]
       Nothing -> VarF (FV v1 (CV v2))
-    w (FunU ts1 t1) (FunU ts2 t2) = FunF <$> zipWithM w ts1 ts2 <*> w t1 t2
+      where
+        anc' = Set.insert v1 anc
+    w anc (FunU ts1 t1) (FunU ts2 t2) = FunF <$> zipWithM (w anc) ts1 ts2 <*> w anc t1 t2
     -- AppU vs AppU: weave heads, then args. If heads weave but arg lists
     -- have mismatched lengths (e.g. general @Pair Int@ has 1 arg while
     -- the concrete-side resolution expanded to @"tuple" [int, ?(...)]@
@@ -269,58 +368,58 @@ weave gscope = w
     -- on @t1@. This is the same generalization the catch-all already
     -- performs for type-level mismatches; we just need to opt the AppU
     -- branch into it on arg-length failure instead of failing outright.
-    w t1@(AppU h1 ts1) t2@(AppU h2 ts2) =
-      case (AppF <$> w h1 h2 <*> weaveArgs ts1 ts2) of
+    w anc t1@(AppU h1 ts1) t2@(AppU h2 ts2) =
+      case (AppF <$> w anc h1 h2 <*> weaveArgs anc ts1 ts2) of
         r@(Right _) -> r
-        Left _ -> wStep t1 t2
-    w t1@(NamU o1 v1 ts1 rs1) t2@(NamU o2 v2 ts2 rs2)
+        Left _ -> wStep anc t1 t2
+    w anc t1@(NamU o1 v1 ts1 rs1) t2@(NamU o2 v2 ts2 rs2)
       | o1 == o2 && length ts1 == length ts2 && length rs1 == length rs2 =
           NamF o1 (FV v1 (CV (unTVar v2)))
-            <$> zipWithM w ts1 ts2
-            <*> zipWithM (\(_, t1') (k2', t2') -> (,) k2' <$> w t1' t2') rs1 rs2
+            <$> zipWithM (w anc) ts1 ts2
+            <*> zipWithM (\(_, t1') (k2', t2') -> (,) k2' <$> w anc t1' t2') rs1 rs2
       | otherwise = Left $ "failed to weave:" <+> "\n  t1:" <+> pretty t1 <+> "\n  t2:" <+> pretty t2
-    w (EffectU effs t1) (EffectU _ t2) = mkEffectF (resolveEffectSet effs) <$> w t1 t2
-    w (OptionalU t1) (OptionalU t2) = OptionalF <$> w t1 t2
-    w (NatLitU n) (NatLitU _) = return $ NatLitF n
-    w (NatLitU n) _ = return $ NatLitF n  -- Nat params may be erased in concrete type
-    w NatVoidU _ = return NatVoidF  -- Erased phantom Nat slot
-    w (NatAddU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
-    w (NatMulU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
-    w (NatSubU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
-    w (NatDivU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
-    w (NatVarU _) _ = return NatVoidF  -- Nat variable erased in concrete type
-    w (LabeledU _ t1) t2 = w t1 t2
-    w (ForallU v (VarU v')) _ | v == v' = return NatVoidF  -- Unresolved variable (UnkT pattern)
-    w t1 t2 = wStep t1 t2
+    w anc (EffectU effs t1) (EffectU _ t2) = mkEffectF (resolveEffectSet effs) <$> w anc t1 t2
+    w anc (OptionalU t1) (OptionalU t2) = OptionalF <$> w anc t1 t2
+    w _ (NatLitU n) (NatLitU _) = return $ NatLitF n
+    w _ (NatLitU n) _ = return $ NatLitF n  -- Nat params may be erased in concrete type
+    w _ NatVoidU _ = return NatVoidF  -- Erased phantom Nat slot
+    w _ (NatAddU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
+    w _ (NatMulU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
+    w _ (NatSubU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
+    w _ (NatDivU _ _) _ = return NatVoidF  -- Nat arithmetic erased in concrete type
+    w _ (NatVarU _) _ = return NatVoidF  -- Nat variable erased in concrete type
+    w anc (LabeledU _ t1) t2 = w anc t1 t2
+    w _ (ForallU v (VarU v')) _ | v == v' = return NatVoidF  -- Unresolved variable (UnkT pattern)
+    w anc t1 t2 = wStep anc t1 t2
 
     -- Step the general type one level via @evaluateStep@ and retry.
-    wStep t1 t2 = case T.evaluateStep gscope t1 of
+    wStep anc t1 t2 = case T.evaluateStep gscope t1 of
       Nothing -> Left $ "failed to weave:" <+> "\n  t1:" <+> pretty t1 <> "\n  t2:" <> pretty t2
       (Just t1') ->
         if t1 == t1'
           then Left ("failed to weave:" <> pretty t1 <+> "vs" <+> pretty t1')
-          else w t1' t2
+          else w anc t1' t2
 
     -- Weave type arguments, handling Nat params that may be erased OR
     -- preserved in the concrete type. When the concrete head is also a Nat
     -- expression, consume it in lockstep; otherwise consume only the general
     -- arg (erased in concrete). Either way we emit a NatLitF placeholder.
-    weaveArgs :: [TypeU] -> [TypeU] -> Either MDoc [TypeF]
-    weaveArgs [] [] = Right []
-    weaveArgs [] cs
+    weaveArgs :: Set.Set TVar -> [TypeU] -> [TypeU] -> Either MDoc [TypeF]
+    weaveArgs _ [] [] = Right []
+    weaveArgs _ [] cs
       | all isKindTypeU cs = Right []  -- trailing kind args in concrete only
       | otherwise = Left "concrete type has more non-Nat args than general type in weave"
-    weaveArgs (NatLitU n : gs) cs = (NatLitF n :) <$> weaveArgs gs (dropNatHead cs)
-    weaveArgs (NatVoidU : gs) cs = (NatVoidF :) <$> weaveArgs gs (dropNatHead cs)
-    weaveArgs (NatAddU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs gs (dropNatHead cs)
-    weaveArgs (NatMulU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs gs (dropNatHead cs)
-    weaveArgs (NatSubU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs gs (dropNatHead cs)
-    weaveArgs (NatDivU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs gs (dropNatHead cs)
+    weaveArgs anc (NatLitU n : gs) cs = (NatLitF n :) <$> weaveArgs anc gs (dropNatHead cs)
+    weaveArgs anc (NatVoidU : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropNatHead cs)
+    weaveArgs anc (NatAddU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropNatHead cs)
+    weaveArgs anc (NatMulU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropNatHead cs)
+    weaveArgs anc (NatSubU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropNatHead cs)
+    weaveArgs anc (NatDivU _ _ : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropNatHead cs)
     -- Unresolved nat dimension variable (opaque output dims): treat as erased
-    weaveArgs (NatVarU _ : gs) cs = (NatVoidF :) <$> weaveArgs gs (dropNatHead cs)
-    weaveArgs (ForallU v (VarU v') : gs) cs | v == v' = (NatVoidF :) <$> weaveArgs gs (dropNatHead cs)
-    weaveArgs (g:gs) (c:cs) = (:) <$> w g c <*> weaveArgs gs cs
-    weaveArgs _ [] = Left "general type has more non-Nat args than concrete type in weave"
+    weaveArgs anc (NatVarU _ : gs) cs = (NatVoidF :) <$> weaveArgs anc gs (dropNatHead cs)
+    weaveArgs anc (ForallU v (VarU v') : gs) cs | v == v' = (NatVoidF :) <$> weaveArgs anc gs (dropNatHead cs)
+    weaveArgs anc (g:gs) (c:cs) = (:) <$> w anc g c <*> weaveArgs anc gs cs
+    weaveArgs _ _ [] = Left "general type has more non-Nat args than concrete type in weave"
 
     -- Drop a leading kind-shaped concrete arg, if present.
     dropNatHead :: [TypeU] -> [TypeU]
@@ -399,3 +498,24 @@ inferConcreteVar lang t0@(Idx i v) = do
                 <+> pretty v <+> "= \"...\"' declaration,"
                 <+> "or import a module that provides one"
                 <+> parens ("e.g. root-" <> pretty lang) <> "."
+
+-- | Outer name of a per-language typedef body, when it names one.
+bodyNameOf :: TypeU -> Maybe MT.Text
+bodyNameOf (VarU (TV n)) = Just n
+bodyNameOf (AppU (VarU (TV n)) _) = Just n
+bodyNameOf (NamU _ (TV n) _ _) = Just n
+bodyNameOf _ = Nothing
+
+-- | The `data` type a type expression is headed by, if any.
+dataHeadOf :: Scope -> TypeU -> Maybe TVar
+dataHeadOf gscope t = case t of
+  VarU v | Just _ <- scopeDataCtors gscope v -> Just v
+  AppU (VarU v) _ | Just _ <- scopeDataCtors gscope v -> Just v
+  _ -> Nothing
+
+-- | A type's per-language name: its mapping when it declares one, its own
+-- name when the pool generates the type.
+concreteNameOf :: Scope -> TVar -> MT.Text
+concreteNameOf cscope v = case Map.lookup v cscope of
+  Just entries | (n : _) <- [n' | (_, body, _, _, _) <- entries, Just n' <- [bodyNameOf body]] -> n
+  _ -> unTVar v

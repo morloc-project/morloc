@@ -40,6 +40,7 @@ refutablePatternTests = testGroup "Refutable patterns (`|`-clauses)"
   , parseTests
   , guardInteractionTests
   , constructorPatternTests
+  , payloadPatternTests
   ]
 
 lexerTests :: TestTree
@@ -248,4 +249,108 @@ constructorPatternTests = testGroup "constructor patterns"
         \f :: Color -> Color\n\
         \f | c@Red = c\n\
         \  | Green = Green\n"
+  ]
+
+-- Constructor patterns that bind a payload.
+--
+-- `(Circle r)` is two things at once: a tag test on the scrutinee and a
+-- binding of the constructor's field to `r`. The argument-free tier needed
+-- only the first half.
+--
+-- NOTE while this is red: payload arms are rejected in desugar, so the
+-- acceptance cases fail and the rejection cases pass vacuously.
+payloadPatternTests :: TestTree
+payloadPatternTests = testGroup "constructor patterns with payloads"
+  [ testCase "a payload pattern binds its field" $
+      assertBool "Circle r binds r" . isRight $ parseMod
+        "module main (f)\n\
+        \data Shape = Circle Real | Dot\n\
+        \f :: Shape -> Real\n\
+        \f | (Circle r) = r\n\
+        \  | Dot = 0.0\n"
+
+  , testCase "a multi-field payload pattern binds every field" $
+      assertBool "Rect w h binds both" . isRight $ parseMod
+        "module main (f)\n\
+        \data Shape = Rect Real Real | Dot\n\
+        \f :: Shape -> Real\n\
+        \f | (Rect w h) = w\n\
+        \  | Dot = 0.0\n"
+
+  , testCase "a payload field may be matched rather than bound" $
+      assertBool "nested literal inside a constructor" . isRight $ parseMod
+        "module main (f)\n\
+        \data Shape = Circle Real | Dot\n\
+        \f :: Shape -> Str\n\
+        \f | (Circle 0.0) = \"degenerate\"\n\
+        \  | (Circle r) = \"round\"\n\
+        \  | Dot = \"dot\"\n"
+
+  , testCase "a wildcard may stand in for a payload field" $
+      assertBool "Circle _ ignores the field" . isRight $ parseMod
+        "module main (f)\n\
+        \data Shape = Circle Real | Dot\n\
+        \f :: Shape -> Str\n\
+        \f | (Circle _) = \"round\"\n\
+        \  | Dot = \"dot\"\n"
+
+  , -- Coverage is still by constructor: naming every one closes the set
+    -- whether or not the arms carry payloads.
+    testCase "payload arms still close the constructor set" $
+      assertBool "no catch-all needed" . isRight $ parseMod
+        "module main (f)\n\
+        \data Shape = Circle Real | Rect Real Real | Dot\n\
+        \f :: Shape -> Real\n\
+        \f | (Circle r) = r\n\
+        \  | (Rect w h) = w\n\
+        \  | Dot = 0.0\n"
+
+  , testCase "an incomplete payload clause set is rejected" $
+      assertBool "Dot unmatched" . isLeft $ parseMod
+        "module main (f)\n\
+        \data Shape = Circle Real | Rect Real Real | Dot\n\
+        \f :: Shape -> Real\n\
+        \f | (Circle r) = r\n\
+        \  | (Rect w h) = w\n"
+
+  , testCase "a payload pattern of the wrong arity is rejected" $
+      assertBool "Circle takes one field" . isLeft $ parseMod
+        "module main (f)\n\
+        \data Shape = Circle Real | Dot\n\
+        \f :: Shape -> Real\n\
+        \f | (Circle r s) = r\n\
+        \  | Dot = 0.0\n"
+
+  , -- A constructor whose fields are matched rather than bound does not
+    -- close that constructor: a Circle holding any other radius falls
+    -- past it. Getting this wrong is silent, because 'assembleCascade'
+    -- drops the final clause's test -- the Dot branch would simply
+    -- swallow every non-degenerate Circle.
+    testCase "a refutable payload field does not close its constructor" $
+      assertBool "Circle 0.0 does not cover Circle" . isLeft $ parseMod
+        "module main (f)\n\
+        \data Shape = Circle Real | Dot\n\
+        \f :: Shape -> Str\n\
+        \f | (Circle 0.0) = \"degenerate\"\n\
+        \  | Dot = \"dot\"\n"
+
+  , -- The mirror: repeating a constructor with DIFFERENT field patterns is
+    -- the ordinary way to write a special case ahead of the general one,
+    -- and must not be read as an unreachable duplicate.
+    testCase "a special case may precede the general one for a constructor" $
+      assertBool "Circle 0.0 then Circle r" . isRight $ parseMod
+        "module main (f)\n\
+        \data Shape = Circle Real | Dot\n\
+        \f :: Shape -> Str\n\
+        \f | (Circle 0.0) = \"degenerate\"\n\
+        \  | (Circle r) = \"round\"\n\
+        \  | Dot = \"dot\"\n"
+
+  , testCase "recursive constructor patterns parse" $
+      assertBool "Node l r" . isRight $ parseMod
+        "module main (f)\n\
+        \data Tree = Leaf | Node Tree Tree\n\
+        \f :: Tree -> Tree\n\
+        \f | (Node l r) = l\n\
+        \  | Leaf = Leaf\n"
   ]

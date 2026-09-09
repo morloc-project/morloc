@@ -77,6 +77,7 @@ unitTests =
   , withDocstringTests
   , patternSelectorTests
   , sumTypeTests
+  , variantTests
   , evalSandboxTests
   , morlocDepsTests
   , versionConstraintTests

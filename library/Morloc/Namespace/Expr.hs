@@ -399,6 +399,16 @@ data Intrinsic
                   -- an internal primitive has no surface syntax, so the
                   -- wire-level derivation work can replace it with nothing to
                   -- migrate.
+  | IntrCtorField -- ^ implicit field projection out of a matched `data`
+                  -- value: @subject -> constructor -> index -> field@.
+                  -- Emitted only by the desugar's constructor-pattern
+                  -- lowering, and deliberately NOT reachable from surface
+                  -- syntax -- a getter aimed at a `data` type is rejected,
+                  -- because which fields exist depends on the constructor.
+                  -- Here the constructor is known: the tag test guarding
+                  -- this projection has already established the arm, and
+                  -- short-circuiting in the emitted condition keeps the
+                  -- projection from running against any other one.
   | IntrFLength     -- ^ @flen :: IFile a -> <IO, Err> Int@ -- file element count.
                     -- Free from the footer's StreamDiag.element_count. Users
                     -- typically alias as @length@ via stdlib shims.
@@ -502,6 +512,7 @@ intrinsicName IntrClose = "close"
 intrinsicName IntrFSchema = "fschema"
 intrinsicName IntrMap = "map"
 intrinsicName IntrTagTest = "tagtest"
+intrinsicName IntrCtorField = "ctorfield"
 intrinsicName IntrFLength = "flen"
 intrinsicName IntrStreamLayout = "streamlayout"
 intrinsicName IntrNext = "next"
@@ -564,6 +575,7 @@ intrinsicIsIO IntrRead = False
 intrinsicIsIO IntrDatafile = False
 intrinsicIsIO IntrMap = False
 intrinsicIsIO IntrTagTest = False
+intrinsicIsIO IntrCtorField = False
 intrinsicIsIO IntrThrow = False
 intrinsicIsIO IntrCatch = False
 
@@ -609,6 +621,7 @@ parseIntrinsic _ = Nothing
 intrinsicArity :: Intrinsic -> Int
 intrinsicArity IntrSave = 3
 intrinsicArity IntrTagTest = 2
+intrinsicArity IntrCtorField = 3
 intrinsicArity IntrSaveM = 2
 intrinsicArity IntrSaveJ = 2
 intrinsicArity IntrLoad = 1
@@ -674,10 +687,16 @@ data Expr
   | IntE Integer
   | LogE Bool
   | StrE Text
-  -- | A `data` constructor with no arguments: its type, its name, and
-  -- its 0-based declaration ordinal. The ordinal is the wire tag, so
-  -- it is fixed at the declaration and carried rather than recomputed.
-  | EnumE TVar Text Int
+  -- | A `data` constructor applied to its arguments: the type, the
+  -- constructor's name, its 0-based declaration ordinal, and the argument
+  -- expressions. The ordinal is the wire tag, fixed at the declaration
+  -- rather than recomputed.
+  --
+  -- The argument list is empty for a constructor that takes none. Whether
+  -- the value is a byte or a tagged pointer is decided by the TYPE, not by
+  -- this constructor's own arity: a type is an enum only when every one of
+  -- its constructors is argument-free.
+  | ConE TVar Text Int [ExprI]
   | PatE Pattern
   | IfE ExprI ExprI ExprI
   | DoBlockE ExprI
@@ -814,8 +833,9 @@ data ExprS g f c
   | IntS Int Integer
   | LogS Bool
   | StrS Text
-  -- | A nullary `data` constructor: type, name, 0-based ordinal.
-  | EnumS TVar Text Int
+  -- | A `data` constructor applied to its arguments: type, name, 0-based
+  -- ordinal, argument expressions (empty when it takes none).
+  | ConS TVar Text Int [AnnoS g f c]
   | ExeS ExecutableExpr
   | LetS EVar (AnnoS g f c) (AnnoS g f c)
   | LetBndS EVar
@@ -982,7 +1002,7 @@ mapExprSM f (NamS rs) = NamS <$> mapM (secondM f) rs
 mapExprSM _ UniS = return UniS
 mapExprSM _ NullS = return NullS
 mapExprSM _ (BndS v) = return $ BndS v
-mapExprSM _ (EnumS tv n i) = return $ EnumS tv n i
+mapExprSM f (ConS tv n i xs) = ConS tv n i <$> mapM f xs
 mapExprSM _ (RealS i x) = return $ RealS i x
 mapExprSM _ (IntS i x) = return $ IntS i x
 mapExprSM _ (LogS x) = return $ LogS x
@@ -1187,7 +1207,7 @@ instance Pretty Expr where
   pretty (RealE x) = pretty (showRealLit x)
   pretty (IntE x) = pretty (show x)
   pretty (StrE x) = dquotes (pretty x)
-  pretty (EnumE tv n i) = pretty tv <> "." <> pretty n <> "@" <> pretty i
+  pretty (ConE tv n _ xs) = pretty tv <> "." <> pretty n <> tupled (map pretty xs)
   pretty (LogE x) = pretty x
   pretty (LetE bindings body) = vsep [pretty v <+> "=" <+> pretty e | (v, e) <- bindings] <+> "in" <+> pretty body
   pretty (AssE v e es) = pretty v <+> "=" <+> pretty e <+> "where" <+> (align . vsep . map pretty) es
@@ -1235,7 +1255,7 @@ instance (Foldable f) => Pretty (ExprS a f b) where
   pretty UniS = "UniS"
   pretty NullS = "NullS"
   pretty (BndS x) = "(BndS" <+> pretty x <> ")"
-  pretty (EnumS tv n i) = "(EnumS" <+> pretty tv <> "." <> pretty n <+> "=" <+> pretty i <> ")"
+  pretty (ConS tv n _ xs) = "(ConS" <+> pretty tv <> "." <> pretty n <+> list (map pretty xs) <> ")"
   pretty (RealS _ x) = pretty (showRealLit x)
   pretty (IntS _ x) = viaShow x
   pretty (LogS x) = viaShow x

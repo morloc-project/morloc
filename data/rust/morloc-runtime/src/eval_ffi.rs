@@ -2054,17 +2054,91 @@ unsafe fn morloc_eval_r(
         }
 
         MorlocExpressionType::TagTest => {
-            // A constructor-pattern tag test. Both children are `data`
-            // values, whose voidstar form is a single tag byte, so the
-            // comparison is a byte compare -- no pool dispatch, which is why
-            // a pattern match on an enum inside a pure morloc function stays
-            // in the nexus.
+            // A constructor-pattern tag test. The value's voidstar form
+            // begins with its tag byte for both tiers -- an argument-free
+            // `data` is that byte alone, a payload-bearing one is the byte
+            // then a pointer -- so the test reads one byte and compares it
+            // against the tag the pattern named. No pool dispatch, which is
+            // why matching inside a pure morloc function stays in the nexus.
             let te = (*expr).expr.tag_test_expr;
             let subject_ptr = morloc_eval_r((*te).subject, ptr::null_mut(), 0, bndvars)?;
-            let ctor_ptr = morloc_eval_r((*te).constructor, ptr::null_mut(), 0, bndvars)?;
-            let same = *(subject_ptr as *const u8) == *(ctor_ptr as *const u8);
+            let same = *(subject_ptr as *const u8) == (*te).tag;
             if !dest.is_null() {
                 *dest = u8::from(same);
+            }
+        }
+        MorlocExpressionType::CtorMake => {
+            // Build a payload-bearing `data` value: the tag, determined
+            // padding, and the arm's fields written out of line as a tuple.
+            // A nullary arm is handled as a plain tag literal upstream and
+            // never reaches here with fields.
+            let me = (*expr).expr.ctor_make_expr;
+            let vschema = (*expr).schema;
+            let tag = (*me).tag as usize;
+            if vschema.is_null() || tag >= (*vschema).size {
+                return Err(MorlocError::Other(format!(
+                    "constructor make: tag {tag} is out of range for this type"
+                )));
+            }
+            let arm = *(*vschema).parameters.add(tag);
+            if !dest.is_null() {
+                *dest = (*me).tag;
+                std::ptr::write_bytes(dest.add(1), 0, 7);
+                if (*me).nfields == 0 {
+                    *(dest.add(8) as *mut shm::RelPtr) = shm::RELNULL;
+                } else {
+                    // The payload is its own allocation, so each field is
+                    // materialized at its offset within the arm's tuple.
+                    let payload = shm::shmalloc((*arm).width)?;
+                    std::ptr::write_bytes(payload, 0, (*arm).width);
+                    for i in 0..(*me).nfields {
+                        let fexpr = *(*me).fields.add(i);
+                        let foff = *(*arm).offsets.add(i);
+                        // The width must be the FIELD's, not zero: a
+                        // non-null dest is checked against its schema's
+                        // width, and a mismatch is refused rather than
+                        // silently writing the wrong number of bytes.
+                        let fwidth = (*(*(*arm).parameters.add(i))).width;
+                        morloc_eval_r(fexpr, payload.add(foff), fwidth, bndvars)?;
+                    }
+                    *(dest.add(8) as *mut shm::RelPtr) = shm::abs2rel(payload)?;
+                }
+            }
+        }
+        MorlocExpressionType::CtorField => {
+            // Read one field out of a value whose arm a guarding tag test has
+            // already established. The slot is a tag then a relative pointer
+            // to the arm's fields, so this follows the pointer and hands back
+            // the field at its offset within the arm's tuple.
+            let fe = (*expr).expr.ctor_field_expr;
+            let subject_ptr = morloc_eval_r((*fe).subject, ptr::null_mut(), 0, bndvars)?;
+            let vschema = (*(*fe).subject).schema;
+            let tag = (*fe).tag as usize;
+            if vschema.is_null() || tag >= (*vschema).size {
+                return Err(MorlocError::Other(format!(
+                    "constructor field: tag {tag} is out of range for this type"
+                )));
+            }
+            // The arm's schema describes the out-of-line payload as a tuple
+            // of its fields, so the field's offset is that tuple's.
+            let arm = *(*vschema).parameters.add(tag);
+            let idx = (*fe).index as usize;
+            if idx >= (*arm).size {
+                return Err(MorlocError::Other(format!(
+                    "constructor field: index {idx} is out of range for this arm"
+                )));
+            }
+            let rel = *(subject_ptr.add(8) as *const shm::RelPtr);
+            if rel == shm::RELNULL {
+                return Err(MorlocError::Other(
+                    "constructor field read from an arm carrying no payload".into(),
+                ));
+            }
+            let payload = shm::rel2abs(rel)?;
+            let field_ptr = payload.add(*(*arm).offsets.add(idx));
+            if !dest.is_null() {
+                let w = (*(*(*arm).parameters.add(idx))).width;
+                std::ptr::copy_nonoverlapping(field_ptr, dest, w);
             }
         }
         MorlocExpressionType::If => {

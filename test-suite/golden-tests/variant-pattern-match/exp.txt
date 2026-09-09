@@ -1,0 +1,32 @@
+--- areaCircle ---
+12
+--- areaRect ---
+12
+--- areaDot ---
+0
+--- describeDegenerate ---
+"degenerate"
+--- describeRound ---
+"round"
+--- describeBox ---
+"box"
+--- describeDot ---
+"dot"
+--- unwrapNested ---
+12
+--- unwrapGeneral ---
+12
+--- unwrapEmpty ---
+0
+--- areaOfPy ---
+12
+--- areaOfCpp ---
+12
+--- areaOfR ---
+12
+--- areaOfRust ---
+12
+--- rejectsUnknownConstructor ---
+OK
+--- rejectsWrongArity ---
+OK

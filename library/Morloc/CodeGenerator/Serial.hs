@@ -78,6 +78,7 @@ serialAstToTypeWith onClosure = go
     go (SerialObject o n ps rs) = NamF o n ps (zip (map fst rs) (map (go . snd) rs))
     go (SerialRec v) = RecF v
     go (SerialEnum v ns) = EnumF v ns
+    go (SerialVariant v as) = VariantF v [(n, map go fs) | (n, fs) <- as]
     go (SerialReal x) = VarF x
     go (SerialFloat32 x) = VarF x
     go (SerialFloat64 x) = VarF x
@@ -239,6 +240,14 @@ serialAstToSchemaWith renderHint ast = emit ast
     emit (SerialEnum v ns) =
       renderHint v <> "e" <> encode64D (length ns)
         <> foldl (<>) "" (map encodeKey ns)
+    -- `v <count> ( <klen><ArmName> <arity> <schema>*arity )*`. The arity is
+    -- written out rather than implied so a reader can skip an arm without
+    -- understanding its field types.
+    emit (SerialVariant v@(FV (TV name) _) as) =
+      recDecl name <> renderHint v <> "v" <> encode64D (length as)
+        <> foldl (<>) "" [ encodeKey n <> encode64D (length fs)
+                             <> foldl (<>) "" (map emit fs)
+                         | (n, fs) <- as ]
     emit (SerialReal v) = renderHint v <> "f8" -- 64 bit float
     emit (SerialFloat32 v) = renderHint v <> "f4"
     emit (SerialFloat64 v) = renderHint v <> "f8"
@@ -314,6 +323,7 @@ collectRecursiveNames = go
     go (SerialTuple _ ss) = Set.unions (map go ss)
     go (SerialObject _ _ _ rs) = Set.unions (map (go . snd) rs)
     go (SerialOptional _ s) = go s
+    go (SerialVariant _ as) = Set.unions (map go (concatMap snd as))
     go _ = Set.empty
 
 -- | Emit a schema hint for a newtype boundary. For a default primitive
@@ -385,6 +395,7 @@ shallowType (SerialOptional _ s) = OptionalF (shallowType s)
 -- from pairEval bnd-protect leaks).
 shallowType (SerialRec v) = RecF v
 shallowType (SerialEnum v ns) = EnumF v ns
+shallowType (SerialVariant v as) = VariantF v [(n, map shallowType fs) | (n, fs) <- as]
 shallowType (SerialUnknown v) = UnkF v
 
 -- | One @Packable@ instance: the type it packs, the wire form it packs to,
@@ -513,6 +524,7 @@ setSerialHead v s = case s of
   SerialTuple _ xs -> SerialTuple v xs
   SerialObject o _ ps rs -> SerialObject o v ps rs
   SerialEnum _ ns -> SerialEnum v ns
+  SerialVariant _ as -> SerialVariant v as
   SerialRec _ -> SerialRec v
   SerialReal _ -> SerialReal v
   SerialFloat32 _ -> SerialFloat32 v
@@ -579,6 +591,20 @@ makeSerialAST m lang t0 = do
     -- A `data` type carries its constructor names in the TypeF, so the
     -- serializer needs no scope lookup: the names are the wire form.
     makeSerialAST' _ _ (EnumF v ns) = return $ SerialEnum v ns
+    makeSerialAST' gscope typepackers (VariantF v@(FV gv _) as) = do
+      anc <- MM.gets stateSerialAncestors
+      -- Cycle detection at the VariantF entry, as for NamF. A constructor
+      -- field naming a type already being lowered is the self-referential
+      -- back-edge, and it is representable precisely because the payload
+      -- sits behind a pointer: the slot's width does not depend on the
+      -- arms, so the width equation has a finite fixed point.
+      if Set.member gv anc
+        then return $ SerialRec v
+        else do
+          MM.modify (\s -> s { stateSerialAncestors = Set.insert gv anc })
+          as' <- mapM (\(n, fs) -> (,) n <$> mapM (makeSerialAST' gscope typepackers) fs) as
+          MM.modify (\s -> s { stateSerialAncestors = anc })
+          return $ SerialVariant v as'
     makeSerialAST' gscope typepackers ft@(VarF v@(FV gv cv)) = do
       anc <- MM.gets stateSerialAncestors
       -- Cycle detection: a bare reference to a record currently being
@@ -623,7 +649,8 @@ makeSerialAST m lang t0 = do
           | finalType == BT.u64U = return $ SerialUInt64 v
           -- A `data` type is nominal and closed; its constructor names
           -- come straight from the declaration.
-          | Just ctorNames <- scopeEnumCtors gscope gv = return $ SerialEnum v ctorNames
+          | scopeDataIsEnum gscope gv
+          , Just ctorNames <- scopeEnumCtors gscope gv = return $ SerialEnum v ctorNames
           | otherwise = do
               (cscope, _) <- getScope m lang
               case aliasShape of
@@ -1215,6 +1242,7 @@ unweaveTypeF (OptionalF t) =
 -- and supplies the structural identity.
 unweaveTypeF (RecF (FV gv cv)) = (VarU gv, VarU (cv2tv cv))
 unweaveTypeF (EnumF (FV gv cv) _) = (VarU gv, VarU (cv2tv cv))
+unweaveTypeF (VariantF (FV gv cv) _) = (VarU gv, VarU (cv2tv cv))
 
 -- Nat / Str types have no concrete/general distinction; duplicate as-is
 unweaveTypeF (NatLitF n) = (NatLitU n, NatLitU n)
@@ -1361,6 +1389,7 @@ isSerializable (SerialOptional _ x) = isSerializable x
 -- would have been introduced. Return True.
 isSerializable (SerialRec _) = True
 isSerializable (SerialEnum _ _) = True
+isSerializable (SerialVariant _ as) = all (all isSerializable . snd) as
 isSerializable (SerialUnknown _) = True -- are you feeling lucky?
 
 prettySerialOne :: SerialAST -> MDoc
@@ -1372,6 +1401,8 @@ prettySerialOne (SerialObject r _ _ rs) =
     vsep (map (\(k, v) -> parens (viaShow k) <> "=" <> prettySerialOne v) rs)
 prettySerialOne (SerialEnum v ns) =
   "SerialEnum" <> angles (pretty v) <> tupled (map pretty ns)
+prettySerialOne (SerialVariant v as) =
+  "SerialVariant" <> angles (pretty v) <> tupled [pretty n | (n, _) <- as]
 prettySerialOne (SerialReal _) = "SerialReal"
 prettySerialOne (SerialFloat32 _) = "SerialFloat32"
 prettySerialOne (SerialFloat64 _) = "SerialFloat64"

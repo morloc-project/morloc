@@ -29,6 +29,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
+import Data.Maybe (catMaybes, mapMaybe)
 import qualified Morloc.BaseTypes as BT
 import Morloc.Frontend.CST
 import Morloc.Frontend.Token hiding (startPos)
@@ -111,7 +112,7 @@ data DState = DState
   , dsWarnings :: ![Text] -- accumulated docstring warnings, drained by the caller
   , dsModuleDoc :: ![Text] -- module-level description lines
   , dsModuleEpilogues :: ![[Text]] -- epilogue blocks for top-level help
-  , dsDataCtors :: !(Map.Map Text [Text])
+  , dsDataCtors :: !(Map.Map Text [(Text, Int)])
     -- ^ Constructor names, in declaration order, for each `data` type
     -- declared in THIS module. Exhaustiveness needs the whole set, and
     -- this is the only place it is available: by the time imports are
@@ -1747,7 +1748,8 @@ freeVarsE (ExprI _ e) = case e of
   -- Value expressions that carry names
   VarE _ v            -> Set.singleton v
   -- A constructor is a closed value, not a reference to a binding.
-  EnumE{}             -> Set.empty
+  -- A constructor is a closed value; only its arguments can name bindings.
+  ConE _ _ _ xs       -> Set.unions (map freeVarsE xs)
   BopE l _ v r        -> Set.unions [freeVarsE l, Set.singleton v, freeVarsE r]
   LstE es             -> Set.unions (map freeVarsE es)
   TupE es             -> Set.unions (map freeVarsE es)
@@ -1834,8 +1836,6 @@ validateIrrefPat p =
 
 -- | Convert a `|`-clause argument expression into a refutable pattern,
 -- enforcing the pattern subset. Literals are permitted (unlike
--- 'exprToIrrefPat'); constructor patterns are deferred until sum types
--- introduce term-level constructors.
 exprToRefutPat :: Loc CstExpr -> D (Loc CstRefutPat)
 -- An UPPER-cased name in pattern position is a `data` constructor, not a
 -- binder. Getting this wrong is silent rather than loud: the name would
@@ -1845,6 +1845,17 @@ exprToRefutPat :: Loc CstExpr -> D (Loc CstRefutPat)
 exprToRefutPat (Loc sp (CVarE v@(EV n)))
   | not (T.null n) && isUpper (T.head n) = return (Loc sp (CRPatCon v []))
   | otherwise = return (Loc sp (CRPatVar v))
+-- A constructor applied to patterns, as in `(Circle r)`. The head must be a
+-- constructor: an application in pattern position has no other meaning, and
+-- reading it as anything else would silently turn a match into a binding.
+exprToRefutPat (Loc sp (CAppE (Loc _ (CVarE v@(EV n))) args))
+  | not (T.null n) && isUpper (T.head n) = do
+      args' <- mapM exprToRefutPat args
+      checkCtorArity sp n (length args')
+      return (Loc sp (CRPatCon v args'))
+exprToRefutPat (Loc sp (CAppE _ _)) =
+  dfail (startPos sp)
+    "only a `data` constructor may be applied in a `|` clause pattern"
 exprToRefutPat (Loc sp CUnderscoreE)    = return (Loc sp CRPatWild)
 exprToRefutPat lit@(Loc sp (CIntE _))   = return (Loc sp (CRPatLit lit))
 exprToRefutPat lit@(Loc sp (CRealE _))  = return (Loc sp (CRPatLit lit))
@@ -1867,29 +1878,81 @@ exprToRefutPat (Loc sp _) =
   dfail (startPos sp)
     "expected a pattern (variable, '_', literal, tuple, record, or label@pattern) in a `|` clause"
 
--- | A leaf of a refutable-pattern walk: either a variable bound at a
--- selector chain from the receiver, or a literal to test for equality at
--- a selector chain.
+-- | One step of the route from a clause's formal parameter down to a
+-- sub-pattern.
+--
+-- Tuple and record steps are ordinary projections and become a 'Selector'.
+-- A constructor-field step cannot: which fields a `data` value has depends
+-- on its constructor, so there is no projection to write and none is
+-- accepted from surface syntax. It is sound here only because the tag test
+-- guarding it has already fixed the constructor.
+data RefutStep
+  = StepIdx Int
+  | StepKey Text
+  | StepField EVar Int
+
+-- | A leaf of a refutable-pattern walk: a variable bound at a path from the
+-- receiver, or a value to test at one.
 data RefutLeaf
-  = RBind EVar Selector
-  | RTest (Loc CstExpr) Selector
-  -- | The value at this selector must carry this constructor's tag. Kept
+  = RBind EVar [RefutStep]
+  | RTest (Loc CstExpr) [RefutStep]
+  -- | The value at this path must carry this constructor's tag. Kept
   -- distinct from 'RTest' because that lowers to Eq's '==', and an enum has
   -- no Eq instance: a tag test goes through 'IntrTagTest' instead.
-  | RTagTest EVar Selector
+  | RTagTest EVar [RefutStep]
 
--- | Walk a refutable pattern to its leaves, accumulating a selector chain.
--- Mirrors 'walkIrrefPat' but also collects literal tests.
-walkRefutPat :: Loc CstRefutPat -> Selector -> [RefutLeaf]
-walkRefutPat (Loc _ (CRPatVar v))   sel = [RBind v sel]
-walkRefutPat (Loc _ CRPatWild)      _   = []
-walkRefutPat (Loc _ (CRPatLit e))   sel = [RTest e sel]
-walkRefutPat (Loc _ (CRPatCon v _)) sel = [RTagTest v sel]
-walkRefutPat (Loc _ (CRPatAs v p))  sel = RBind v sel : walkRefutPat p sel
-walkRefutPat (Loc _ (CRPatTup ps))  sel = concat
-  [ walkRefutPat p (extendSelIdx i sel) | (i, p) <- zip [0 ..] ps ]
-walkRefutPat (Loc _ (CRPatRec kps)) sel = concat
-  [ walkRefutPat p (extendSelKey k sel) | (Key k, p) <- kps ]
+-- | Walk a refutable pattern to its leaves, accumulating the path taken.
+-- Mirrors 'walkIrrefPat' but also collects tests.
+--
+-- Leaves come out in DFS pre-order, which the caller relies on: a tag test
+-- must be emitted before anything that projects through the constructor it
+-- establishes.
+walkRefutPat :: Loc CstRefutPat -> [RefutStep] -> [RefutLeaf]
+walkRefutPat (Loc _ (CRPatVar v))    path = [RBind v path]
+walkRefutPat (Loc _ CRPatWild)       _    = []
+walkRefutPat (Loc _ (CRPatLit e))    path = [RTest e path]
+walkRefutPat (Loc _ (CRPatCon v ps)) path =
+  RTagTest v path
+    : concat [ walkRefutPat p (path <> [StepField v i]) | (i, p) <- zip [0 ..] ps ]
+walkRefutPat (Loc _ (CRPatAs v p))   path = RBind v path : walkRefutPat p path
+walkRefutPat (Loc _ (CRPatTup ps))   path = concat
+  [ walkRefutPat p (path <> [StepIdx i]) | (i, p) <- zip [0 ..] ps ]
+walkRefutPat (Loc _ (CRPatRec kps))  path = concat
+  [ walkRefutPat p (path <> [StepKey k]) | (Key k, p) <- kps ]
+
+-- | Build the expression naming the value at a path from the receiver.
+--
+-- Consecutive projection steps are folded into a single 'Selector' so an
+-- ordinary tuple or record pattern emits exactly one getter, as it did
+-- before constructor fields existed. A constructor-field step breaks the
+-- run, since it is an intrinsic rather than a projection.
+subjectAt :: Span -> EVar -> [RefutStep] -> D ExprI
+subjectAt sp recv path = do
+  root <- freshExprSpan sp (VarE defaultValue recv)
+  go root path
+  where
+    go acc [] = return acc
+    go acc steps = case span isProjection steps of
+      ([], StepField ctor i : rest) -> do
+        nameE <- freshExprSpan sp (StrE (unEVar ctor))
+        idxE <- freshExprSpan sp (IntE (fromIntegral i))
+        acc' <- freshExprSpan sp (IntrinsicE IntrCtorField [acc, nameE, idxE])
+        go acc' rest
+      (projs, rest) -> do
+        acc' <- applySelector acc (foldl addStep SelectorEnd projs)
+        go acc' rest
+
+    isProjection (StepField _ _) = False
+    isProjection _ = True
+
+    addStep sel (StepIdx i) = extendSelIdx i sel
+    addStep sel (StepKey k) = extendSelKey k sel
+    addStep sel (StepField _ _) = sel
+
+    applySelector acc SelectorEnd = return acc
+    applySelector acc sel = do
+      patE <- freshExprSpan sp (PatE (PatternStruct sel))
+      freshExprSpan sp (AppE patE [acc])
 
 -- | Names bound by a refutable pattern, paired with the binding position.
 refutPatBoundNames :: Loc CstRefutPat -> [(Text, Pos)]
@@ -1932,10 +1995,10 @@ validateRefutClause pats =
 -- | Build @formal.selector == literal@ as a BopE, exactly as a
 -- user-written '==' desugars, so it flows through the standard binop
 -- reassociation and Eq-instance resolution.
-buildRefutTest :: EVar -> (Loc CstExpr, Selector) -> D ExprI
-buildRefutTest formal (litLoc, sel) = do
+buildRefutTest :: EVar -> (Loc CstExpr, [RefutStep]) -> D ExprI
+buildRefutTest formal (litLoc, path) = do
   let Loc lsp _ = litLoc
-  lhs <- selectorApp lsp formal sel
+  lhs <- subjectAt lsp formal path
   rhs <- desugarExpr litLoc
   opI <- freshIdSpan lsp
   freshExprSpan lsp (BopE lhs opI (EV "==") rhs)
@@ -1947,14 +2010,19 @@ buildRefutTest formal (litLoc, sel) = do
 refutClauseArg
   :: Set.Set EVar -> EVar -> Loc CstRefutPat -> D ([ExprI], [(EVar, ExprI)])
 refutClauseArg usedNames formal p = do
-  let leaves = walkRefutPat p SelectorEnd
-      binds  = [(v, sel) | RBind v sel <- leaves, Set.member v usedNames]
-      tests  = [(e, sel) | RTest e sel <- leaves]
-      tags   = [(v, sel) | RTagTest v sel <- leaves]
-  bindings  <- materializeIrrefLeaves (spanOf p) formal binds
-  testExprs <- mapM (buildRefutTest formal) tests
-  tagExprs  <- mapM (buildRefutTagTest (spanOf p) formal) tags
-  return (testExprs ++ tagExprs, bindings)
+  let leaves = walkRefutPat p []
+      binds  = [(v, path) | RBind v path <- leaves, Set.member v usedNames]
+  bindings <- mapM (\(v, path) -> (,) v <$> subjectAt (spanOf p) formal path) binds
+  -- Tests keep the walk's DFS order rather than being grouped by kind. A
+  -- projection through a constructor field is only meaningful once that
+  -- constructor's tag test has passed, and the emitted conjunction
+  -- short-circuits, so the outer test has to come first.
+  tests <- mapM (buildLeafTest formal (spanOf p)) leaves
+  return (catMaybes tests, bindings)
+  where
+    buildLeafTest f _  (RTest e path)    = Just <$> buildRefutTest f (e, path)
+    buildLeafTest f sp (RTagTest v path) = Just <$> buildRefutTagTest sp f (v, path)
+    buildLeafTest _ _  (RBind _ _)       = return Nothing
 
 -- | Lower one constructor pattern to a tag test on the projected value.
 --
@@ -1962,11 +2030,17 @@ refutClauseArg usedNames formal p = do
 -- an ordinary term reference, so it resolves through the same binding the
 -- `data` declaration created -- which is what makes a constructor borrowed
 -- from another type a type error rather than a silent mismatch.
-buildRefutTagTest :: Span -> EVar -> (EVar, Selector) -> D ExprI
-buildRefutTagTest sp formal (ctor, sel) = do
-  subject <- selectorApp sp formal sel
-  ctorE <- freshExprSpan sp (VarE defaultValue ctor)
-  freshExprSpan sp (IntrinsicE IntrTagTest [subject, ctorE])
+buildRefutTagTest :: Span -> EVar -> (EVar, [RefutStep]) -> D ExprI
+buildRefutTagTest sp formal (ctor, path) = do
+  subject <- subjectAt sp formal path
+  -- The constructor travels as its NAME, not as a reference to the term the
+  -- declaration bound. A payload constructor is a function into its type, so
+  -- a reference could not be typed against the value being tested, and by
+  -- codegen it has become a lambda whose arm is no longer recoverable. The
+  -- name is checked against the scrutinee's constructor table instead, which
+  -- rejects a borrowed constructor for either tier.
+  nameE <- freshExprSpan sp (StrE (unEVar ctor))
+  freshExprSpan sp (IntrinsicE IntrTagTest [subject, nameE])
 
 -- | Conjoin per-argument tests into one Bool without duplicating the
 -- clause body: @t1 && ... && tn@ as nested IfE returning True/False.
@@ -2032,7 +2106,8 @@ checkRefutCoverage sp name clausePatLists = do
     -- them covers the type, but the second clause can never be reached, and
     -- an unreachable clause is always a mistake.
     repeatedCtor = do
-      cs <- mapM singlePat clausePatLists >>= mapM refutPatCtorName
+      pats <- mapM singlePat clausePatLists
+      let cs = mapMaybe refutPatCoveringCtor pats
       case [c | (c, n) <- countOccurrences cs, n > (1 :: Int)] of
         (c : _) -> Just c
         [] -> Nothing
@@ -2051,18 +2126,65 @@ checkRefutCoverage sp name clausePatLists = do
     -- so wrongly calling a set exhaustive silently routes unmatched input
     -- into the last arm.
     ctorCoverage declared = do
-      cs <- mapM singlePat clausePatLists >>= mapM refutPatCtorName
-      case [ ns | (_, ns) <- Map.toList declared, any (`elem` ns) cs ] of
-        [ns] -> Just [n | n <- ns, n `notElem` cs]
-        _ -> Nothing
+      pats <- mapM singlePat clausePatLists
+      -- Only covering clauses count. A clause that refines a constructor
+      -- (@Circle 0.0@) neither closes it nor disqualifies the set: it is
+      -- an extra case ahead of the general one, so it is passed over
+      -- rather than aborting the analysis.
+      let cs = mapMaybe refutPatCoveringCtor pats
+      if null cs
+        then Nothing
+        else case [ map fst arms | (_, arms) <- Map.toList declared
+                                 , any ((`elem` cs) . fst) arms ] of
+          [ns] -> Just [n | n <- ns, n `notElem` cs]
+          _ -> Nothing
 
--- | The constructor named by a bare constructor pattern, if it is one.
-refutPatCtorName :: Loc CstRefutPat -> Maybe Text
-refutPatCtorName (Loc _ (CRPatCon (EV n) [])) = Just n
--- `c@Red` still names Red; the binding does not change which constructor
--- the clause covers.
-refutPatCtorName (Loc _ (CRPatAs _ p)) = refutPatCtorName p
-refutPatCtorName _ = Nothing
+-- | Reject a constructor pattern whose field count differs from the
+-- declaration. A constructor's arity is fixed by its `data` clause, so a
+-- mismatch cannot be a partial application the way it could be for an
+-- ordinary term -- there is nothing for the missing fields to become.
+checkCtorArity :: Span -> Text -> Int -> D ()
+checkCtorArity sp name given = do
+  declared <- State.gets dsDataCtors
+  case [ n | (_, arms) <- Map.toList declared, (c, n) <- arms, c == name ] of
+    (expected : _)
+      | expected /= given ->
+          dfail (startPos sp) $
+            "constructor '" ++ T.unpack name ++ "' takes "
+              ++ show expected ++ " argument" ++ (if expected == 1 then "" else "s")
+              ++ " but the pattern gives " ++ show given
+    _ -> return ()
+
+-- | The constructor a pattern COVERS, if any.
+--
+-- A constructor pattern covers its constructor only when it accepts every
+-- value carrying that tag, which means each of its fields must be matched
+-- irrefutably. @Circle r@ and @Circle _@ cover Circle; @Circle 0.0@ does
+-- not, because a Circle holding anything else falls past it.
+--
+-- Both users of this need that distinction and would be wrong without it.
+-- Coverage would call @Circle 0.0 | Dot@ exhaustive over Shape, and
+-- 'assembleCascade' DROPS the last clause's test, so a non-degenerate
+-- Circle would silently take the Dot branch. Redundancy would reject
+-- @Circle 0.0@ followed by @Circle r@, which is the ordinary way to write
+-- a special case before the general one.
+refutPatCoveringCtor :: Loc CstRefutPat -> Maybe Text
+refutPatCoveringCtor (Loc _ (CRPatCon (EV n) ps))
+  | all refutPatIrrefutable ps = Just n
+  | otherwise = Nothing
+-- `c@Red` still covers Red; the binding does not change which values match.
+refutPatCoveringCtor (Loc _ (CRPatAs _ p)) = refutPatCoveringCtor p
+refutPatCoveringCtor _ = Nothing
+
+-- | True when a pattern accepts every value of its type, binding only.
+refutPatIrrefutable :: Loc CstRefutPat -> Bool
+refutPatIrrefutable (Loc _ (CRPatVar _))    = True
+refutPatIrrefutable (Loc _ CRPatWild)       = True
+refutPatIrrefutable (Loc _ (CRPatAs _ p))   = refutPatIrrefutable p
+refutPatIrrefutable (Loc _ (CRPatTup ps))   = all refutPatIrrefutable ps
+refutPatIrrefutable (Loc _ (CRPatRec kps))  = all (refutPatIrrefutable . snd) kps
+refutPatIrrefutable (Loc _ (CRPatLit _))    = False
+refutPatIrrefutable (Loc _ (CRPatCon _ _))  = False
 
 -- | True when every clause is a single Bool-literal argument and the
 -- clauses cover both True and False.
@@ -2780,28 +2902,18 @@ desugarTypeDef sp (CstTypeAliasForward (v, vs)) = do
   e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t (ArgDocAlias docVars) TypedefPrimitive))
   return [e]
 desugarTypeDef sp (CstDataDef (v, vs) ctors) = do
-  -- A `data` declaration. Stage 1 covers the argument-free case, which is
-  -- morloc's enum: a closed constructor set, one byte on the wire, tagged
-  -- by declaration ordinal.
+  -- A `data` declaration: a closed set of named alternatives.
   --
-  -- The ordinal IS the wire tag, so the declaration order is part of the
-  -- type's wire contract: reordering constructors is a breaking change,
-  -- and appending is not. That is what makes a later `DNA + UNK` widening
-  -- free at the byte level.
-  case [ (tok, name) | (tok, name, args) <- ctors, not (null args) ] of
-    ((tok, name) : _) ->
-      dfail (locPos tok) $
-        "Constructor '" ++ T.unpack name ++ "' takes arguments, which is not yet \
-        \supported; a `data` constructor must currently take none"
-    [] -> return ()
+  -- The ordinal IS the wire tag, so declaration order is part of the type's
+  -- wire contract: appending a constructor keeps existing values
+  -- byte-identical, reordering does not.
   case firstRepeatedName [ (name, locPos tok) | (tok, name, _) <- ctors ] of
     Just (name, pos) ->
       dfail pos $
         "Constructor '" ++ T.unpack name ++ "' is declared twice in type '"
           ++ T.unpack (unTVar v) ++ "'"
     Nothing -> return ()
-  -- One byte per value is the whole point of the argument-free form, so the
-  -- tag must fit in one.
+  -- The tag is one byte in both wire forms.
   when (length ctors > 256) $
     dfail (startPos sp) $
       "Type '" ++ T.unpack (unTVar v) ++ "' has " ++ show (length ctors)
@@ -2809,27 +2921,45 @@ desugarTypeDef sp (CstDataDef (v, vs) ctors) = do
   docs <- lookupDocsAt (startPos sp)
   docVars <- if null docs then return defaultValue else processArgDocLinesD (startPos sp) docs
   rejectWithHere (startPos sp) "a data declaration" docVars
-  -- The constructor names live in the scope body. Reduction stops at the
-  -- nominal boundary, so this is carried rather than expanded, and codegen
-  -- reads it back to build the tag table and the schema string.
-  let names = [ name | (_, name, _) <- ctors ]
-      body = LitU (LList [LitU (LStr name) | name <- names])
-  State.modify $ \st -> st { dsDataCtors = Map.insert (unTVar v) names (dsDataCtors st) }
+  -- The constructor table lives in the scope body: each entry is its name
+  -- followed by its argument types. Reduction stops at the nominal
+  -- boundary, so this is carried rather than expanded, and both the
+  -- typechecker and codegen read it back.
+  let entries = [ (name, args) | (_, name, args) <- ctors ]
+      body = LitU (LList [ LitU (LList (LitU (LStr n) : args)) | (n, args) <- entries ])
+      -- The result type a constructor builds: the type applied to its own
+      -- parameters, so `Some :: a -> Opt a` rather than `a -> Opt`.
+      resultT = case vs of
+        [] -> VarU v
+        _ -> AppU (VarU v) (map (either (VarU . fst) id) vs)
+  State.modify $ \st ->
+    st { dsDataCtors = Map.insert (unTVar v) [(n, length as) | (n, as) <- entries] (dsDataCtors st) }
   typeDecl <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs body (ArgDocAlias docVars) TypedefEnum))
-  -- Each constructor becomes an ordinary nullary term. Making them real
-  -- top-level bindings is what gives uniqueness its teeth: a name already
-  -- bound collides through the existing duplicate-binding check rather
-  -- than through anything new here.
-  ctorDecls <- concatMapM (mkCtor sp v) (zip [0 ..] names)
+  -- Each constructor becomes an ordinary top-level term. Making them real
+  -- bindings is what gives uniqueness its teeth: a name already bound
+  -- collides through the existing duplicate-binding check.
+  ctorDecls <- concatMapM (mkCtor sp v resultT) (zip [0 ..] entries)
   return (typeDecl : ctorDecls)
   where
-    mkCtor :: Span -> TVar -> (Int, Text) -> D [ExprI]
-    mkCtor sp' tv (ordinal, name) = do
-      let et = EType (VarU tv) Set.empty (ArgDocSig defaultValue [] defaultValue) Map.empty
+    -- A constructor that takes arguments is a FUNCTION into its type, so it
+    -- is bound to a lambda that builds the value; one that takes none is
+    -- bound to the value itself.
+    mkCtor :: Span -> TVar -> TypeU -> (Int, (Text, [TypeU])) -> D [ExprI]
+    mkCtor sp' tv resultT (ordinal, (name, argTs)) = do
+      let sigT = if null argTs then resultT else FunU argTs resultT
+          et = EType (quantifyType sigT) Set.empty
+                 (ArgDocSig defaultValue (map (const defaultValue) argTs) defaultValue)
+                 Map.empty
       sig <- freshExprSpan sp' (SigE (Signature (EV name) Nothing et))
-      val <- freshExprSpan sp' (EnumE tv name ordinal)
+      params <- mapM (const (freshIrrefLamParam sp')) argTs
+      argRefs <- mapM (\p -> freshExprSpan sp' (VarE defaultValue p)) params
+      built <- freshExprSpan sp' (ConE tv name ordinal argRefs)
+      val <- if null params
+               then return built
+               else freshExprSpan sp' (LamE params built)
       ass <- freshExprSpan sp' (AssE (EV name) val [])
       return [sig, ass]
+
 desugarTypeDef sp (CstNamTypeWhere nt (v, vs) locEntries) = do
   -- A record / object / table declaration. These types are always
   -- nominal and own their per-language form; they behave structurally

@@ -278,6 +278,11 @@ data MorlocState = MorlocState
   -- ^ Module-level description lines (from docstrings before module declaration)
   , stateModuleEpilogues :: [[Text]]
   -- ^ Epilogue blocks for the top-level help output
+  , stateVariantAncestors :: Set.Set TVar
+  -- ^ `data` types whose arms are currently being resolved to a target
+  -- language. A field naming one of these is left opaque instead of
+  -- expanded, which is what terminates recursion THROUGH a container
+  -- (@data Rose = Rose [Rose]@) as well as a bare self-reference.
   , stateSerialAncestors :: Set.Set TVar
   -- ^ General-type names of records currently being lowered by
   -- 'makeSerialAST''. Used to detect guarded self-recursive records:
@@ -933,6 +938,7 @@ instance Defaultable MorlocState where
       , stateDebugTrace = False
       , stateModuleDoc = []
       , stateModuleEpilogues = []
+      , stateVariantAncestors = Set.empty
       , stateSerialAncestors = Set.empty
       }
 

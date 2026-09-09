@@ -46,6 +46,25 @@ pub enum SerialType {
     //   2+ : reserved (future: content hash, URI, inline blob, ...).
     // `kind` for the receiver's open call is determined by the schema
     // code (`F` -> IFILE, `O` -> OSTREAM, `I` -> ISTREAM).
+    Variant = 26,   // A `data` type with at least one constructor that takes
+                    // arguments. Sixteen bytes: a tag byte, padding, and a
+                    // relative pointer to the payload.
+                    //
+                    // The payload is reached through a pointer rather than
+                    // stored inline, so the slot's width does not depend on
+                    // any arm's width. That is what makes the width equation
+                    // for a recursive type terminate -- the same reason
+                    // Optional carries a pointer -- and it is why a value of
+                    // `data Tree = Leaf | Node Tree Tree` has a fixed size
+                    // however deep the tree goes.
+                    //
+                    // An arm's payload is a tuple of its fields, including
+                    // the empty tuple for an argument-free arm, whose pointer
+                    // is RELNULL and which allocates nothing. A one-field arm
+                    // costs nothing for the uniformity: a tuple has no header,
+                    // so a 1-tuple is byte-identical to the bare field.
+                    //
+                    // Tag == declaration ordinal, as for Enum.
     Enum = 25,      // A `data` type whose constructors take no arguments. One
                     // byte: the constructor's 0-based position in the
                     // declaration, which is the wire tag. Constructor names
@@ -79,6 +98,7 @@ const SCHEMA_IFILE: u8 = b'F';
 const SCHEMA_OSTREAM: u8 = b'O';
 const SCHEMA_ISTREAM: u8 = b'I';
 const SCHEMA_ENUM: u8 = b'e';
+const SCHEMA_VARIANT: u8 = b'v';
 
 /// Recursive schema definition, mirroring the C Schema struct.
 #[derive(Debug, Clone)]
@@ -229,8 +249,9 @@ impl Schema {
                     .max()
                     .unwrap_or(1)
             }
-            SerialType::Optional => {
-                // Pointer-aligned because the slot is now a relptr.
+            SerialType::Optional | SerialType::Variant => {
+                // Pointer-aligned: the slot holds a relptr (Variant also a
+                // tag byte, which does not raise the requirement).
                 std::mem::size_of::<usize>()
             }
         }
@@ -494,6 +515,45 @@ fn parse_schema_r(
                 )));
             }
             Ok((make_enum_schema(keys), p))
+        }
+        SCHEMA_VARIANT => {
+            // Variant: count, then N (key_len + name + arity + arity schemas).
+            // Each arm becomes a Tuple of its field schemas, so an
+            // argument-free arm is the empty tuple.
+            let (n, mut p) = read_count(bytes, cur)?;
+            let mut keys = Vec::with_capacity(n);
+            let mut params = Vec::with_capacity(n);
+            for _ in 0..n {
+                if p >= bytes.len() {
+                    return Err(MorlocError::Schema("expected variant arm name length".into()));
+                }
+                let (klen, kp) = read_count(bytes, p)?;
+                p = kp;
+                if p + klen > bytes.len() {
+                    return Err(MorlocError::Schema("variant arm name extends past end".into()));
+                }
+                let key = std::str::from_utf8(&bytes[p..p + klen])
+                    .map_err(|_| MorlocError::Schema("invalid UTF-8 in variant arm name".into()))?
+                    .to_string();
+                p += klen;
+                let (arity, ap) = read_count(bytes, p)?;
+                p = ap;
+                let mut fields = Vec::with_capacity(arity);
+                for _ in 0..arity {
+                    let (child, end) = parse_schema_r(bytes, p, declared)?;
+                    fields.push(child);
+                    p = end;
+                }
+                keys.push(key);
+                params.push(make_tuple_schema(fields));
+            }
+            if keys.len() > 256 {
+                return Err(MorlocError::Schema(format!(
+                    "variant has {} arms; the limit is 256 so a tag fits in one byte",
+                    keys.len()
+                )));
+            }
+            Ok((make_variant_schema(params, keys), p))
         }
         SCHEMA_TABLE => {
             // Table primitive (Arrow IPC).
@@ -835,6 +895,24 @@ fn make_enum_schema(keys: Vec<String>) -> Schema {
     }
 }
 
+/// Construct a Variant schema from its arm payloads and names.
+///
+/// Sixteen bytes regardless of the arms: a tag byte, padding, and a relptr,
+/// matching the tagged union in `stream_handle`. The payload lives behind
+/// the pointer, so nothing about an arm's size reaches this slot.
+fn make_variant_schema(params: Vec<Schema>, keys: Vec<String>) -> Schema {
+    Schema {
+        serial_type: SerialType::Variant,
+        size: params.len(),
+        width: 16,
+        offsets: Vec::new(),
+        hint: None,
+        parameters: params,
+        keys,
+        name: None,
+    }
+}
+
 fn make_table_schema(params: Vec<Schema>, keys: Vec<String>) -> Schema {
     Schema {
         serial_type: SerialType::Table,
@@ -1056,6 +1134,23 @@ fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
                     buf.push_str(key);
                 }
                 schema_to_string_inner(p, buf);
+            }
+        }
+        SerialType::Variant => {
+            buf.push('v');
+            write_count(buf, schema.size);
+            for (i, arm) in schema.parameters.iter().enumerate() {
+                if i < schema.keys.len() {
+                    let key = &schema.keys[i];
+                    write_count(buf, key.len());
+                    buf.push_str(key);
+                }
+                // The arm is a tuple of its fields; the fields are written
+                // out directly, with the tuple's size standing as the arity.
+                write_count(buf, arm.size);
+                for field in &arm.parameters {
+                    schema_to_string_inner(field, buf);
+                }
             }
         }
         SerialType::Enum => {
@@ -1302,6 +1397,69 @@ mod tests {
         assert_eq!(rendered, input, "byte-exact round-trip");
     }
 
+    // A sum type recursing through its own constructor arguments. This is
+    // the shape the boxed payload exists for: the slot is a tag plus a
+    // relative pointer whatever the arms hold, so the width equation has a
+    // finite fixed point where an inline payload would have none.
+    //
+    //   data Tree = Leaf | Node Tree Tree
+    //     -> &4Treev24Leaf04Node2^4Tree^4Tree
+    //
+    // Each arm is a tuple of its fields, so a nullary arm is the empty
+    // tuple and carries no payload allocation.
+    #[test]
+    fn test_parse_recursive_variant() {
+        let s = parse_schema("&4Treev24Leaf04Node2^4Tree^4Tree").unwrap();
+        assert_eq!(s.serial_type, SerialType::Variant);
+        assert_eq!(s.size, 2);
+        assert_eq!(s.keys, vec!["Leaf", "Node"]);
+        assert_eq!(s.name.as_deref(), Some("Tree"));
+        // Tag plus pointer, independent of what the arms hold.
+        assert_eq!(s.width, 16);
+        assert_eq!(s.alignment(), 8);
+        assert!(!s.is_fixed_width());
+
+        let leaf = &s.parameters[0];
+        assert_eq!(leaf.serial_type, SerialType::Tuple);
+        assert_eq!(leaf.parameters.len(), 0);
+
+        let node = &s.parameters[1];
+        assert_eq!(node.serial_type, SerialType::Tuple);
+        assert_eq!(node.parameters.len(), 2);
+        for field in &node.parameters {
+            assert_eq!(field.serial_type, SerialType::Recur);
+            assert_eq!(field.name.as_deref(), Some("Tree"));
+        }
+    }
+
+    #[test]
+    fn test_recursive_variant_recur_width_patched() {
+        // A back-reference parses with a placeholder width; the declaration
+        // patches it so an arm's payload is allocated and strided at the
+        // declared type's real width rather than a bare pointer's.
+        let s = parse_schema("&4Treev24Leaf04Node2^4Tree^4Tree").unwrap();
+        let node = &s.parameters[1];
+        for field in &node.parameters {
+            assert_eq!(field.width, s.width, "back-reference width follows the declaration");
+        }
+        assert_eq!(node.width, 2 * s.width, "payload tuple holds two full Trees");
+    }
+
+    #[test]
+    fn test_roundtrip_recursive_variant() {
+        let input = "&4Treev24Leaf04Node2^4Tree^4Tree";
+        let schema = parse_schema(input).unwrap();
+        assert_eq!(schema_to_string(&schema), input, "byte-exact round-trip");
+    }
+
+    #[test]
+    fn test_recursive_variant_without_declaration_is_rejected() {
+        // The same body with no `&` declaration is a dangling back-reference.
+        // It must fail rather than parse into a Recur nothing resolves.
+        let err = parse_schema("v24Leaf04Node2^4Tree^4Tree");
+        assert!(err.is_err(), "dangling back-reference must be refused");
+    }
+
     #[test]
     fn test_roundtrip_recursive_ll() {
         // Optional-guarded recursion also round-trips byte-exactly.
@@ -1471,6 +1629,75 @@ mod tests {
         assert!(
             !arr_var.array_data_is_flat(),
             "a record with a Str field must still be walked"
+        );
+    }
+
+    #[test]
+    fn test_parse_variant() {
+        // `data Shape = Circle Real | Rect Real Real | Dot`
+        // v <count> ( <klen><name> <arity> <schema>*arity )*
+        let s = parse_schema("v36Circle1f84Rect2f8f83Dot0").unwrap();
+        assert_eq!(s.serial_type, SerialType::Variant);
+        assert_eq!(s.size, 3);
+        assert_eq!(s.keys, vec!["Circle", "Rect", "Dot"]);
+        // Each arm's payload is a tuple of its fields, so the arity is
+        // visible as the tuple's own size -- including the empty arm.
+        assert_eq!(s.parameters.len(), 3);
+        assert_eq!(s.parameters[0].serial_type, SerialType::Tuple);
+        assert_eq!(s.parameters[0].size, 1);
+        assert_eq!(s.parameters[1].size, 2);
+        assert_eq!(s.parameters[2].size, 0);
+    }
+
+    #[test]
+    fn test_variant_slot_is_tag_plus_pointer() {
+        // The payload is reached through a pointer, so the slot width does
+        // not depend on any arm's width. That is what gives a recursive
+        // type a finite width, and it is why this is not fixed-width.
+        let s = parse_schema("v36Circle1f84Rect2f8f83Dot0").unwrap();
+        assert_eq!(s.width, 16, "tag byte plus padding plus a relptr");
+        assert_eq!(s.alignment(), 8, "pointer-aligned");
+        assert!(!s.is_fixed_width(), "the pointee is not fixed-width");
+
+        // An arm whose fields are wider must not change the slot.
+        let wide = parse_schema("v14Wide4f8f8f8f8").unwrap();
+        assert_eq!(wide.width, s.width, "slot width is independent of the arms");
+    }
+
+    #[test]
+    fn test_single_field_arm_is_byte_identical_to_its_field() {
+        // A one-field payload is stored as a 1-tuple. A tuple carries no
+        // header, so that costs nothing: the field sits at offset 0 and the
+        // tuple's width is the field's width. Uniformity is free, and it
+        // lets a payload field always be reached positionally.
+        let one = parse_schema("t1f8").unwrap();
+        let bare = parse_schema("f8").unwrap();
+        assert_eq!(one.width, bare.width);
+        assert_eq!(one.offsets, vec![0]);
+    }
+
+    #[test]
+    fn test_variant_roundtrips_through_render() {
+        for schema_str in ["v14Only0", "v36Circle1f84Rect2f8f83Dot0", "v24Leaf04Node2i4i4"] {
+            let parsed = parse_schema(schema_str)
+                .unwrap_or_else(|e| panic!("{schema_str} failed to parse: {e:?}"));
+            assert_eq!(schema_to_string(&parsed), schema_str);
+        }
+    }
+
+    #[test]
+    fn test_variant_over_256_arms_is_rejected() {
+        let n = 257usize;
+        let mut schema_str = format!("v{}", hs_encode64(n));
+        for i in 0..n {
+            let key = format!("C{i}");
+            schema_str.push_str(&hs_encode64(key.len()));
+            schema_str.push_str(&key);
+            schema_str.push_str(&hs_encode64(0));
+        }
+        assert!(
+            parse_schema(&schema_str).is_err(),
+            "a variant past the one-byte tag limit must be rejected"
         );
     }
 

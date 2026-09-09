@@ -1,0 +1,20 @@
+--- areaPyCircle ---
+12
+--- areaPyRect ---
+12
+--- areaPyDot ---
+0
+--- areaCpp ---
+12
+--- areaR ---
+12
+--- areaRust ---
+12
+--- roundTrip ---
+12
+--- shapes ---
+[3,6,0]
+--- jsonHelpVariant ---
+OK
+--- rejectsUnknownConstructor ---
+OK

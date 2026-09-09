@@ -184,6 +184,9 @@ rustTypeOf = f
     -- name refers to is either generated for this pool or supplied by the
     -- user through a `data Rust => X = "..."` mapping.
     f (EnumF (FV _ x) _) = return (pretty x)
+    -- A variant lowers to its concrete name; the `enum` carrying the arms
+    -- is generated for this pool or supplied by a `data Rust => X = "..."`.
+    f (VariantF (FV _ x) _) = return (pretty x)
     f (AppF t ts) = do
       t' <- f t
       let (typeTs, kindCount) = partitionKindArgsF ts
@@ -996,6 +999,7 @@ makeRustCode :: [MDoc] -> Map.Map Int ([Text], [Text], Text) -> [SerialManifold]
 makeRustCode includeDocs closureTable0 es = do
   structDocs <- generateRustStructs es
   enumDocs <- generateRustEnums es
+  variantDocs <- generateRustVariants es
   -- Keep only closures that actually cross a boundary (their signature reaches a
   -- serialize site); the rest stay thin `impl Fn`/`Rc` with no reify cost.
   closureTable <- restrictToCrossingClosures es closureTable0
@@ -1008,7 +1012,7 @@ makeRustCode includeDocs closureTable0 es = do
   program <- buildProgramM Map.empty Map.empty includeDocs [] es translateSegment getRustSchemaTable closureTable
   -- structDocs go in the schema-table section; the closure dispatch wrappers are
   -- free functions spliced into the signatures section.
-  return $ RP.printProgram (structDocs <> enumDocs) closureWrappers [] program
+  return $ RP.printProgram (structDocs <> enumDocs <> variantDocs) closureWrappers [] program
 
 -- | A closure value's Rust signature: result type + tupled argument types.
 -- Matches the signature seen at a serialize site for the same closure, so a
@@ -1119,6 +1123,10 @@ collectRustRecords =
 
     seek :: TypeF -> [(FVar, [(Key, TypeF)])]
     seek (NamF _ v _ rs) = (v, rs) : concatMap (seek . snd) rs
+    -- A record reachable only as a `data` arm's field still needs its
+    -- struct emitted, so the walk descends through arms as the enum
+    -- collector's does.
+    seek (VariantF _ as) = concatMap (concatMap seek . snd) as
     seek (AppF t ts) = concatMap seek (t : ts)
     seek (FunF ts t) = concatMap seek (t : ts)
     seek (OptionalF t) = seek t
@@ -1147,12 +1155,89 @@ collectRustEnums =
 
     seek :: TypeF -> [(FVar, [Text])]
     seek (EnumF v ns) = [(v, ns)]
+    seek (VariantF _ as) = concatMap (concatMap seek . snd) as
     seek (NamF _ _ _ rs) = concatMap (seek . snd) rs
     seek (AppF t ts) = concatMap seek (t : ts)
     seek (FunF ts t) = concatMap seek (t : ts)
     seek (OptionalF t) = seek t
     seek (EffectF _ t) = seek t
     seek _ = []
+
+-- | Collect every payload-bearing @data@ type used in these manifolds with
+-- its arms.
+--
+-- Occurrences are merged by keeping the WIDEST arm list rather than the
+-- first one seen. A constructor literal's type reports only the arm being
+-- built, so taking the first occurrence could declare a one-arm enum and
+-- leave every other constructor undeclared.
+collectRustVariants :: [SerialManifold] -> [(FVar, [(Text, [TypeF])])]
+collectRustVariants =
+  Map.elems
+    . Map.fromListWith wider
+    . map (\e@(FV gv _, _) -> (gv, e))
+    . concatMap (runIdentity . foldWithSerialManifoldM fm)
+  where
+    -- Merge ARM-WISE rather than by arm count. A constructor literal's type
+    -- reports only the arm being built, and reports it with no fields, so
+    -- comparing lengths cannot tell a complete one-arm type from a
+    -- truncated view of it -- and picking the truncated one would declare
+    -- an arm as nullary that the schema says carries a payload, which
+    -- writes RELNULL where the reader expects a pointer.
+    -- Merge arm-wise, but keep DECLARATION ORDER: an arm's position is its
+    -- wire tag, so sorting by name here would silently renumber every
+    -- constructor. The longer list is the more complete view of the type and
+    -- supplies the order; fields come from whichever occurrence has them,
+    -- since a constructor literal's type reports its own arm with none.
+    wider (v, as) (_, bs) = (v, [(n, pick n) | n <- order])
+      where
+        am = Map.fromList as
+        bm = Map.fromList bs
+        order = if length as >= length bs then map fst as else map fst bs
+        pick n = case (Map.lookup n am, Map.lookup n bm) of
+          (Just xs, Just ys) -> if null xs then ys else xs
+          (Just xs, Nothing) -> xs
+          (Nothing, Just ys) -> ys
+          _ -> []
+
+    fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
+    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (serialAstToType s)
+    ne efull e = return $ foldlNE (<>) (seek (typeFof efull)) e
+    se _ (SerializeS_ s xs) = return $ seek (serialAstToType s) <> xs
+    se _ e = return $ foldlSE (<>) [] e
+
+    seek :: TypeF -> [(FVar, [(Text, [TypeF])])]
+    seek (VariantF v as) = (v, as) : concatMap (concatMap seek . snd) as
+    seek (NamF _ _ _ rs) = concatMap (seek . snd) rs
+    seek (AppF t ts) = concatMap seek (t : ts)
+    seek (FunF ts t) = concatMap seek (t : ts)
+    seek (OptionalF t) = seek t
+    seek (EffectF _ t) = seek t
+    seek _ = []
+
+-- | Emit the enum definition and marshalling impls for every payload-bearing
+-- @data@ type in the pool. Ownership follows the same rule as records and
+-- enums: a user-mapped @data Rust => X = "..."@ writes its own type in
+-- sourced Rust and gets only the impls.
+generateRustVariants :: [SerialManifold] -> RustM [MDoc]
+generateRustVariants es = concat <$> mapM makeOne (collectRustVariants es)
+  where
+    makeOne (FV gv@(TV gvText) (CV cvText), arms) = do
+      userMapped <- cscopeDeclaresVariant gv cvText
+      arms' <- mapM (\(n, ts) -> (,) n <$> mapM rustFieldType ts) arms
+      let name = pretty cvText
+          impls = RP.printVariantImpls name arms'
+      return $ if userMapped
+                 then [impls]
+                 else [RP.printRustVariant name arms', impls]
+      where
+        _ = gvText
+
+    cscopeDeclaresVariant :: TVar -> Text -> RustM Bool
+    cscopeDeclaresVariant gv cvText = do
+      cscope <- CMS.gets rsCScope
+      return $ case Map.lookup gv cscope of
+        Just entries -> any (\(_, body, _, _, _) -> bodyName body == Just cvText) entries
+        Nothing -> False
 
 -- | Emit the @ToVoidstar@/@FromVoidstar@ impls for every @data@ type used in
 -- the pool, plus the enum definition itself when the pool owns it.
@@ -1563,7 +1648,29 @@ rustLowerConfig mask =
     -- `?T` is `Option<T>`, whose wire layout is type-driven; a widened value must
     -- be a real `Some(..)` (never a bare `T`) or put_value serializes the wrong
     -- shape. The coercion only ever wraps a non-optional inner, so this is safe.
+    , lcVariantLit = \cv n _ xs ->
+        let arm = pretty (unCVar cv) <> "::" <> pretty n
+        in if null xs
+             then arm
+             else arm <> parens ("Box::new" <> parens (tupled xs <> ","))
     , lcEnumLit = \cv n _ -> pretty (unCVar cv) <> "::" <> pretty n
+    , lcVariantTagTest = \cv n _ subj ->
+        "matches!" <> tupled [subj, pretty (unCVar cv) <> "::" <> pretty n <> " { .. }"]
+    -- The whole payload sits behind one box, mirroring the wire form, so an
+    -- arm has a single field whatever its arity and one spelling serves them
+    -- all. The guard has already established the arm, so the other branch is
+    -- unreachable rather than a fallback.
+    -- Matched through a REFERENCE. A pattern binding several fields emits
+    -- one projection per field against the same subject, so matching by
+    -- value would move the payload on the first and leave the rest with
+    -- nothing. Borrowing makes each projection independent; the clone is
+    -- what hands an owned value on from a borrowed place.
+    , lcCtorField = \cv n i subj ->
+        "match" <+> "&" <> parens subj <+> "{"
+          <+> pretty (unCVar cv) <> "::" <> pretty n <> "(mlc_b)"
+          <+> "=> mlc_b." <> pretty i <> ".clone(),"
+          <+> "_ => unreachable!()"
+          <+> "}"
     , lcTagTest = \a b -> parens (a <+> "==" <+> b)
     , lcCoerceOptional = \x -> "Some(" <> x <> ")"
     , lcTypeOf = \t -> Just . toIType <$> rustTypeOf t

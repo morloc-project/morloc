@@ -266,7 +266,7 @@ resolveTypes (AnnoS (Idx i t) ci e) =
     f (IntS si x) = IntS si x
     f (LogS x) = LogS x
     f (StrS x) = StrS x
-    f (EnumS tv n i) = EnumS tv n i
+    f (ConS tv n i xs) = ConS tv n i (map resolveTypes xs)
     f UniS = UniS
     f NullS = NullS
     f (DoBlockS e') = DoBlockS (resolveTypes e')
@@ -387,7 +387,9 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
     f _ g0 (IntS si x) = return (g0, IntS si x)
     f _ g0 (LogS x) = return (g0, LogS x)
     f _ g0 (StrS x) = return (g0, StrS x)
-    f _ g0 (EnumS tv n i) = return (g0, EnumS tv n i)
+    f _ g0 (ConS tv n i xs) = do
+      (g1, xs') <- statefulMapM resolveInstances g0 xs
+      return (g1, ConS tv n i xs')
     f _ g0 (ExeS x) = return (g0, ExeS x)
     f _ g0 (DoBlockS e) = resolveInstances g0 e |>> second DoBlockS
     f _ g0 (EvalS e) = resolveInstances g0 e |>> second EvalS
@@ -561,6 +563,32 @@ rejectListSelectorTarget i s t = do
         "Index getter" <+> pretty s
           <+> "requires a tuple or record, got a list."
           <+> "Use 'head' or '!!' for list access."
+    -- The evaluated form, so an alias cannot carry a `data` type past
+    -- the check the way the raw one would.
+    _ -> rejectSumSelectorTarget i s t'
+
+-- | Refuse a getter aimed at a `data` type.
+--
+-- A projection names a position, but which positions exist depends on
+-- which constructor a value carries, and that is not known until the
+-- value is matched. A getter would therefore be well typed only when
+-- every arm happened to agree at that position -- a property of one
+-- declaration rather than of the type, and one that a later arm silently
+-- breaks. Matching is the eliminator: a `|` clause fixes the constructor
+-- first, so its fields have definite types.
+rejectSumSelectorTarget :: Int -> Selector -> TypeU -> MorlocMonad ()
+rejectSumSelectorTarget i s t = do
+  scope <- MM.getGeneralScope i
+  let name = case t of
+        VarU v -> Just v
+        AppU (VarU v) _ -> Just v
+        _ -> Nothing
+  case name of
+    Just v | Just _ <- scopeDataCtors scope v ->
+      MM.throwSourcedError i $
+        "Getter" <+> pretty s <+> "cannot be applied to" <+> pretty v
+          <> ", which is a `data` type. Which fields exist depends on the"
+          <+> "constructor, so match on it with a `|` clause instead."
     _ -> return ()
 
 checkG ::
@@ -618,6 +646,44 @@ synthG g (AnnoS gi ci e) = do
     Nothing -> return ()
   return (g', t, annotatedBody)
 
+-- | The declared parameters of a type, as (var, kind) pairs.
+-- | The constructor a tag test names. The desugar always emits a bare
+-- reference here, so anything else is a compiler bug rather than a user
+-- error.
+-- | The text of a literal string argument. The constructor-pattern lowering
+-- always puts one here, so anything else is a compiler bug, not user error.
+literalStr :: AnnoS Int ManyPoly Int -> Maybe Text
+literalStr (AnnoS _ _ (StrS t)) = Just t
+literalStr _ = Nothing
+
+unAnnoSE :: AnnoS Int ManyPoly Int -> ExprS Int ManyPoly Int
+unAnnoSE (AnnoS _ _ e) = e
+
+-- | Resolve a constructor name against the scrutinee's own `data`
+-- declaration, yielding that constructor's field types with the type's
+-- parameters instantiated. Rejects a name that belongs to some other type,
+-- which is the check that keeps a clause set from mixing two `data` types.
+checkCtorBelongs :: Int -> Gamma -> TypeU -> Text -> MorlocMonad [TypeU]
+checkCtorBelongs i g subjectT n = do
+  scope <- MM.getGeneralScope i
+  let resolved = apply g subjectT
+      tv = extractKey resolved
+      args = case resolved of
+        AppU _ ts -> ts
+        _ -> []
+      params = [p | (p, _) <- typeParamsOf scope tv]
+      inst t = foldr (\(p, a) acc -> substituteTVar p a acc) t (zip params args)
+  case lookup n =<< scopeDataCtors scope tv of
+    Just fs -> return (map inst fs)
+    Nothing ->
+      MM.throwSourcedError i $
+        squotes (pretty n) <+> "is not a constructor of" <+> pretty resolved
+
+typeParamsOf :: Scope -> TVar -> [(TVar, Kind)]
+typeParamsOf scope v = case Map.lookup v scope of
+  Just ((ps, _, _, _, _) : _) -> [pk | Left pk <- ps]
+  _ -> []
+
 synthE ::
   Int ->
   Gamma ->
@@ -635,9 +701,38 @@ synthE _ g (RealS si x) = return (g, BT.realU, RealS si x)
 synthE _ g (IntS si x) = return (g, BT.intU, IntS si x)
 synthE _ g (LogS x) = return (g, BT.boolU, LogS x)
 synthE _ g (StrS x) = return (g, BT.strU, StrS x)
--- A constructor name is unique across the program, so it determines its
--- type on its own: no annotation, no instance search.
-synthE _ g (EnumS tv n i) = return (g, VarU tv, EnumS tv n i)
+-- A `data` constructor. The name is unique across the program, so it
+-- determines its type on its own -- no annotation, no instance search.
+--
+-- A constructor that takes arguments is checked against the argument types
+-- its declaration gave it. The type's own parameters are instantiated with
+-- fresh existentials first and shared across every argument and the result,
+-- which is what ties `Some x :: Opt a` to the `a` of `x`.
+synthE i g0 (ConS tv n ord xs) = do
+  scope <- MM.getGeneralScope i
+  let params = [p | (p, _) <- typeParamsOf scope tv]
+      (g1, freshArgs) = statefulMap (\g _ -> newvar (unTVar tv <> "_") g) g0 params
+      sub = zip params freshArgs
+      inst = foldr (\(p, fresh) t -> substituteTVar p fresh t) `flip` sub
+      resultT = case freshArgs of
+        [] -> VarU tv
+        _ -> AppU (VarU tv) freshArgs
+  declaredArgs <- case lookup n =<< scopeDataCtors scope tv of
+    Just as -> return (map inst as)
+    Nothing ->
+      MM.throwSourcedError i $
+        "Constructor" <+> squotes (pretty n) <+> "is not a constructor of type"
+          <+> pretty tv
+  when (length declaredArgs /= length xs) $
+    MM.throwSourcedError i $
+      "Constructor" <+> squotes (pretty n) <+> "takes"
+        <+> pretty (length declaredArgs) <+> "arguments but was given"
+        <+> pretty (length xs)
+  (g2, xs') <- statefulMapM (\g (x, t) -> do
+                                (g', _, x') <- checkG g x t
+                                return (g', x')) g1 (zip xs declaredArgs)
+  return (g2, apply g2 resultT, ConS tv n ord xs')
+
 -- A directly applied setter is a redex: reduce it so the setter's own
 -- rule below sees the receiver. See 'reduceSetterRedex'.
 synthE i g0 e | Just e' <- reduceSetterRedex e = synthE i g0 e'
@@ -1262,18 +1357,44 @@ synthE _ g (IntrinsicS IntrMap [funcE, listE]) = do
   return (g5, apply g5 resultT, IntrinsicS IntrMap [funcE', listE'])
 synthE _ _ (IntrinsicS IntrMap args) =
   error $ "IntrMap expects 2 args (lambda, list), got " <> show (length args)
--- IntrTagTest: the constructor-pattern tag test. Both arguments are the
--- same type (the scrutinee and a constructor of its type), so the second
--- is checked against the first's synthesized type -- which is what rejects
--- a constructor borrowed from a different `data` type in a clause.
-synthE i g (IntrinsicS IntrTagTest [subjectE, ctorE]) = do
-  (g1, subjectT, subjectE') <- synthG g subjectE
-  (g2, _, ctorE') <- checkG g1 ctorE subjectT
-  return (g2, BT.boolU, IntrinsicS IntrTagTest [subjectE', ctorE'])
-  where
-    _ = i
+-- IntrTagTest: the constructor-pattern tag test.
+--
+-- The second argument is the constructor's NAME, carried as data by the
+-- desugar rather than as a reference to the term the declaration bound. A
+-- payload constructor is a function into its type (@Circle :: Real ->
+-- Shape@), so it could never be checked as a value of the type being
+-- tested. Validating the name against the scrutinee's own constructor
+-- table works for both tiers and rejects a constructor borrowed from
+-- another type just as firmly as the value check it replaces.
+synthE i g (IntrinsicS IntrTagTest [subjectE, nameE])
+  | Just n <- literalStr nameE = do
+      (g1, subjectT, subjectE') <- synthG g subjectE
+      _ <- checkCtorBelongs i g1 subjectT n
+      (g2, _, nameE') <- synthG g1 nameE
+      return (g2, BT.boolU, IntrinsicS IntrTagTest [subjectE', nameE'])
 synthE _ _ (IntrinsicS IntrTagTest args) =
-  error $ "IntrTagTest expects 2 args (subject, constructor), got " <> show (length args)
+  error $ "IntrTagTest expects (subject, constructor name), got " <> show (length args)
+-- IntrCtorField: read one field out of a value whose constructor a guarding
+-- tag test has already established. The result is the constructor's declared
+-- field type with the owning type's parameters instantiated against the
+-- scrutinee -- the same table 'ConS' reads to CHECK arguments going in, read
+-- here to synthesize one coming out.
+synthE i g (IntrinsicS IntrCtorField [subjectE, nameE, idxE])
+  | Just n <- literalStr nameE
+  , IntS _ idx <- unAnnoSE idxE = do
+      (g1, subjectT, subjectE') <- synthG g subjectE
+      fieldTs <- checkCtorBelongs i g1 subjectT n
+      (g2, _, nameE') <- synthG g1 nameE
+      (g3, _, idxE') <- synthG g2 idxE
+      case drop (fromIntegral idx) fieldTs of
+        (t : _) ->
+          return (g3, apply g3 t, IntrinsicS IntrCtorField [subjectE', nameE', idxE'])
+        [] ->
+          MM.throwSourcedError i $
+            "constructor" <+> squotes (pretty n) <+> "has no field"
+              <+> pretty (show idx)
+synthE _ _ (IntrinsicS IntrCtorField args) =
+  error $ "IntrCtorField expects (subject, constructor name, index), got " <> show (length args)
 -- IntrWrite: @Int -> OStream a -> [a] -> <IO> ()@. Handle-before-list
 -- is the natural partial-application shape: @write 3 o@ is a
 -- reusable [a] -> <IO> () sink for callbacks. The handle is
@@ -1485,6 +1606,8 @@ intrinsicType IntrMap =
   error "intrinsicType: IntrMap must be typed via synthE's dedicated clause"
 intrinsicType IntrTagTest =
   error "intrinsicType: IntrTagTest must be typed via synthE's dedicated clause"
+intrinsicType IntrCtorField =
+  error "intrinsicType: IntrCtorField must be typed via synthE's dedicated clause"
 -- IntrStdin/Stdout/Stderr flow through intrinsicTypeG (fresh existential
 -- element type resolved by the user's inline ascription).
 intrinsicType IntrStdin =
@@ -3159,7 +3282,7 @@ peakSExpr (RealS _ x) = "RealS" <+> viaShow x
 peakSExpr (IntS _ x) = "IntS" <+> pretty x
 peakSExpr (LogS x) = "LogS" <+> pretty x
 peakSExpr (StrS x) = "StrS" <+> pretty x
-peakSExpr (EnumS tv n _) = "EnumS" <+> pretty tv <> "." <> pretty n
+peakSExpr (ConS tv n _ _) = "ConS" <+> pretty tv <> "." <> pretty n
 peakSExpr (ExeS exe) = "ExeS" <+> pretty exe
 peakSExpr (LetS v _ _) = "LetS" <+> pretty v
 peakSExpr (LetBndS v) = "LetBndS" <+> pretty v

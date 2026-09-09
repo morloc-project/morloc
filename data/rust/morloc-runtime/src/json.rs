@@ -268,6 +268,66 @@ fn json_to_voidstar_inner(
         SerialType::Sint32 => { let w = alloc(dest, 4)?; w.write_val::<i32>(0, parse_sint(text, i32::MIN as i64, i32::MAX as i64, "I32")? as i32); Ok(w.as_ptr()) }
         SerialType::Sint64 => { let w = alloc(dest, 8)?; w.write_val::<i64>(0, parse_sint(text, i64::MIN,        i64::MAX,        "I64")?);        Ok(w.as_ptr()) }
         SerialType::Uint8  => { let w = alloc(dest, 1)?; w.write_val::<u8>(0,  parse_uint(text, u8::MAX  as u64, "U8")?  as u8);  Ok(w.as_ptr()) }
+        // A variant is externally tagged: `{"Circle": [1.0]}` for an arm
+        // with fields, and the bare name `"Dot"` for one without. The
+        // single-key-object form is unambiguous and is what serde and most
+        // hand-written encoders already produce.
+        SerialType::Variant => {
+            let t = text.trim();
+            let (name, field_json): (String, Option<&RawValue>) =
+                if let Some(inner) = t.strip_prefix('"').and_then(|x| x.strip_suffix('"')) {
+                    (inner.to_string(), None)
+                } else {
+                    let obj: std::collections::BTreeMap<String, &RawValue> =
+                        serde_json::from_str(t).map_err(|e| {
+                            err(&format!("expected a tagged variant object: {e}"))
+                        })?;
+                    let mut it = obj.into_iter();
+                    match (it.next(), it.next()) {
+                        (Some((k, v)), None) => (k, Some(v)),
+                        _ => {
+                            return Err(err(
+                                "a variant object must have exactly one key, the constructor name",
+                            ))
+                        }
+                    }
+                };
+            let tag = schema.keys.iter().position(|k| *k == name).ok_or_else(|| {
+                err(&format!(
+                    "'{}' is not a constructor of this type; expected one of {}",
+                    name,
+                    schema.keys.join(", ")
+                ))
+            })?;
+            let arm = &schema.parameters[tag];
+            let w = alloc(dest, 16)?;
+            w.write_val::<u8>(0, tag as u8);
+            // The seven bytes between the tag and the payload pointer are
+            // written explicitly so a variant's bytes are fully determined by
+            // its value, rather than by whatever the allocator last left there.
+            for i in 1..8 {
+                w.write_val::<u8>(i, 0);
+            }
+            let payload_rel = if arm.size == 0 {
+                RELNULL
+            } else {
+                let fields_text = match field_json {
+                    Some(v) => v.get().to_string(),
+                    None => {
+                        return Err(err(&format!(
+                            "constructor '{name}' takes {} fields but was given none",
+                            arm.size
+                        )))
+                    }
+                };
+                let inner_rv: Box<RawValue> = serde_json::from_str(&fields_text)
+                    .map_err(|e| err(&format!("variant payload: {e}")))?;
+                let inner = json_to_voidstar(&inner_rv, arm, None, env)?;
+                shm::abs2rel(inner)?
+            };
+            w.write_val::<RelPtr>(8, payload_rel);
+            Ok(w.as_ptr())
+        }
         // JSON is the human- and LLM-facing format, so an enum reads and
         // writes as its constructor NAME. Only a declared name is accepted,
         // and a rejection names the whole legal set -- which is possible
@@ -791,6 +851,29 @@ fn to_json_inner(
         SerialType::Sint32 => map_io(write!(w, "{}", r.read_val::<i32>(0)))?,
         SerialType::Sint64 => map_io(write!(w, "{}", r.read_val::<i64>(0)))?,
         SerialType::Uint8  => map_io(write!(w, "{}", r.read_u8(0)))?,
+        SerialType::Variant => {
+            let tag = r.read_u8(0) as usize;
+            let name = schema.keys.get(tag).ok_or_else(|| {
+                MorlocError::Serialization(format!(
+                    "variant tag {} is out of range; the type has {} arms",
+                    tag, schema.size
+                ))
+            })?;
+            let arm = &schema.parameters[tag];
+            if arm.size == 0 {
+                map_io(write!(w, "\"{}\"", name))?
+            } else {
+                let payload = r.read_val::<RelPtr>(8);
+                map_io(write!(w, "{{\"{}\":", name))?;
+                if payload == RELNULL {
+                    map_io(w.write_all(b"null"))?;
+                } else {
+                    let inner = unsafe { ShmReader::new(shm::rel2abs(payload)?) };
+                    to_json(&inner, arm, w, env, pretty)?;
+                }
+                map_io(w.write_all(b"}"))?
+            }
+        }
         SerialType::Enum   => {
             let tag = r.read_u8(0) as usize;
             // A tag with no constructor means the value and the schema

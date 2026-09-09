@@ -153,6 +153,8 @@ module Morloc.Namespace.Type
   , substituteFirst
   , findFirst
   , scopeEnumCtors
+  , scopeDataCtors
+  , scopeDataIsEnum
   ) where
 
 import qualified Data.List as DL
@@ -329,15 +331,33 @@ type Scope =
 -- ('stopAtNominalBoundary'), so the body is carried, never expanded.
 --
 -- A constructor's position in this list is its wire tag.
-scopeEnumCtors :: Scope -> TVar -> Maybe [Text]
-scopeEnumCtors scope v = do
+scopeDataCtors :: Scope -> TVar -> Maybe [(Text, [TypeU])]
+scopeDataCtors scope v = do
   entries <- Map.lookup v scope
-  listToMaybe [ns | (_, body, _, _, TypedefEnum) <- entries, Just ns <- [ctorNames body]]
+  listToMaybe [cs | (_, body, _, _, TypedefEnum) <- entries, Just cs <- [ctors body]]
   where
-    ctorNames (LitU (LList xs)) = mapM litStr xs
-    ctorNames _ = Nothing
-    litStr (LitU (LStr n)) = Just n
-    litStr _ = Nothing
+    -- Each constructor is a list whose head is its name and whose tail is
+    -- its argument types, and the body is the list of those. 'LList' can
+    -- hold an arbitrary 'TypeU', which is what lets the argument types ride
+    -- along in a shape the rest of the compiler already knows how to carry.
+    ctors (LitU (LList xs)) = mapM oneCtor xs
+    ctors _ = Nothing
+    oneCtor (LitU (LList (LitU (LStr n) : args))) = Just (n, args)
+    oneCtor _ = Nothing
+
+-- | Just the constructor names, in declaration order. A constructor's
+-- position here is its wire tag.
+scopeEnumCtors :: Scope -> TVar -> Maybe [Text]
+scopeEnumCtors scope v = map fst <$> scopeDataCtors scope v
+
+-- | True when every constructor of this type takes no arguments.
+--
+-- This is a property of the TYPE, not of one constructor: it decides the
+-- wire form for all of them. An argument-free constructor sitting beside a
+-- payload-bearing one is a variant with an empty payload, not an enum
+-- member, because a value of the type has to be able to hold either.
+scopeDataIsEnum :: Scope -> TVar -> Bool
+scopeDataIsEnum scope v = maybe False (all (null . snd)) (scopeDataCtors scope v)
 
 -- | Flavors of named (keyed) types
 data NamType

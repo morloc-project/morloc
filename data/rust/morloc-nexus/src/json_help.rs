@@ -83,6 +83,15 @@ fn schema_to_json_schema(s: &Schema) -> Value {
         // a free string. This is what carrying the names in the wire
         // schema buys.
         Enum => json!({ "type": "string", "enum": s.keys }),
+        // Externally tagged: either a bare constructor name (an arm with
+        // no fields) or a one-key object whose key is the name.
+        Variant => json!({
+            "oneOf": [
+                { "type": "string", "enum": s.keys },
+                { "type": "object", "minProperties": 1, "maxProperties": 1,
+                  "propertyNames": { "enum": s.keys } }
+            ]
+        }),
         Array => {
             let items = s
                 .parameters

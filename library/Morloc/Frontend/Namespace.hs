@@ -134,6 +134,7 @@ copyState oldIdx newIdx = do
       , stateDebugTrace = stateDebugTrace s
       , stateModuleDoc = stateModuleDoc s
       , stateModuleEpilogues = stateModuleEpilogues s
+      , stateVariantAncestors = stateVariantAncestors s
       , stateSerialAncestors = stateSerialAncestors s
       }
   where

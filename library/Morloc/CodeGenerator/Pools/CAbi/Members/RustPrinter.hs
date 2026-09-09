@@ -27,6 +27,8 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter
   , printRustStruct
   , printRecordImpls
   , printRustEnum
+  , printRustVariant
+  , printVariantImpls
   , printEnumImpls
   , ClosureMarshal (..)
   ) where
@@ -411,6 +413,125 @@ printRustEnum name ctors =
     , indent 4 (vsep [pretty c <+> "=" <+> pretty i <> "," | (i, c) <- zip [0 :: Int ..] ctors])
     , "}"
     ]
+
+-- | Emit a Rust @enum@ for a payload-bearing @data@ type.
+--
+-- Every arm's fields sit behind ONE box, holding a tuple, which mirrors the
+-- wire form: a tag plus a relative pointer to the arm's fields. Boxing
+-- uniformly rather than only at self-referential positions is what lets a
+-- recursive type have a finite size without any recursion analysis here --
+-- and mutual recursion (@A@ through @B@ back to @A@) has no single-type
+-- test that would find it.
+--
+-- Deliberately NOT @Copy@ and NOT @#[repr(u8)]@, both of which the
+-- argument-free form carries. A box is not @Copy@, so deriving it would
+-- fail to compile on the first payload arm, and it must stay non-@Copy@ to
+-- agree with the ownership classifier. @repr(u8)@ describes a layout these
+-- hand-written impls do not use.
+printRustVariant :: MDoc -> [(T.Text, [MDoc])] -> MDoc
+printRustVariant name arms =
+  vsep
+    [ "#[derive(Clone)]"
+    , "enum" <+> name <+> "{"
+    , indent 4 (vsep [armDecl c ts | (c, ts) <- arms])
+    , "}"
+    ]
+  where
+    armDecl c [] = pretty c <> ","
+    armDecl c ts = pretty c <> parens ("Box<" <> tupled1 ts <> ">") <> ","
+
+-- | A one-element tuple needs its trailing comma or it is just parentheses.
+tupled1 :: [MDoc] -> MDoc
+tupled1 [t] = parens (t <> ",")
+tupled1 ts = tupled ts
+
+-- | Emit @ToVoidstar@/@FromVoidstar@ for a payload-bearing @data@ type.
+--
+-- The slot layout -- a tag, padding, and a relative pointer to the arm's
+-- fields written out of line -- lives in the runtime, not here. Generated
+-- code names an arm and hands over its payload; the runtime does the
+-- allocation, alignment and pointer encoding. That is the same division the
+-- other impls keep, and it is forced anyway: the relative-pointer helpers
+-- are not part of the runtime crate's public surface.
+--
+-- A boxed payload marshals as the tuple inside it, since @Box@ delegates.
+printVariantImpls :: MDoc -> [(T.Text, [MDoc])] -> MDoc
+printVariantImpls name arms = vsep [toImpl, "", fromImpl]
+  where
+    idxArms = zip [0 :: Int ..] arms
+
+    armPat c ts = name <> "::" <> pretty c <> (if null ts then "" else "(mlc_b)")
+
+    toImpl =
+      vsep
+        [ "impl ToVoidstar for" <+> name <+> "{"
+        , indent 4 $ vsep
+            [ "fn shm_size(&self, schema: &Schema) -> usize {"
+            , indent 4 $ vsep
+                -- The declaration must be in scope for any `^name`
+                -- back-reference inside an arm to resolve. Without this a
+                -- recursive variant works only when it is the call's
+                -- top-level schema -- reached through a list, a tuple, an
+                -- optional or a record field, it aborts.
+                [ "let _mlc_g = RecurScope::enter(resolve_recur(schema));"
+                , "match self {"
+                , indent 4 $ vsep
+                    [ armPat c ts <+> "=>" <+>
+                        (if null ts
+                           then "variant_size_nullary(schema),"
+                           else "variant_size_payload(schema, &resolve_recur(schema).parameters["
+                                  <> pretty i <> "], mlc_b),")
+                    | (i, (c, ts)) <- idxArms ]
+                , "}"
+                ]
+            , "}"
+            , "unsafe fn write(&self, dest: *mut u8, cursor: &mut *mut u8, schema: &Schema) {"
+            , indent 4 $ vsep
+                [ "let _mlc_g = RecurScope::enter(resolve_recur(schema));"
+                , "match self {"
+                , indent 4 $ vsep
+                    [ armPat c ts <+> "=>" <+>
+                        (if null ts
+                           then "write_variant_nullary(dest, " <> pretty i <> "u8),"
+                           else "write_variant_payload(dest, cursor, &resolve_recur(schema).parameters["
+                                  <> pretty i <> "], " <> pretty i <> "u8, mlc_b),")
+                    | (i, (c, ts)) <- idxArms ]
+                , "}"
+                ]
+            , "}"
+            ]
+        , "}"
+        ]
+
+    fromImpl =
+      vsep
+        [ "impl FromVoidstar for" <+> name <+> "{"
+        , indent 4 $ vsep
+            [ "unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self {"
+            , indent 4 $ vsep
+                [ "let mlc_s = resolve_recur(schema);"
+                , "let _mlc_g = RecurScope::enter(mlc_s);"
+                , "match read_variant_tag(data) {"
+                , indent 4 $ vsep
+                    ( [ pretty i <+> "=>" <+>
+                          (if null ts
+                             then name <> "::" <> pretty c <> ","
+                             else name <> "::" <> pretty c
+                                    <> parens ("read_variant_payload(&mlc_s.parameters["
+                                                 <> pretty i <> "], data, base)") <> ",")
+                      | (i, (c, ts)) <- idxArms ]
+                      -- The runtime range-checks a tag at the wire boundary,
+                      -- so reaching this arm means the value and its schema
+                      -- disagree: a bug, not bad input. Here the tag would
+                      -- otherwise index the arm list.
+                      <> ["t => panic!(\"" <> name <> ": no constructor for tag {}\", t),"]
+                    )
+                , "}"
+                ]
+            , "}"
+            ]
+        , "}"
+        ]
 
 -- | Emit @ToVoidstar@/@FromVoidstar@ for a @data@ type.
 --

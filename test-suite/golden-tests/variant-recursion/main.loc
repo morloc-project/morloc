@@ -1,0 +1,74 @@
+-- A `data` type whose constructor takes its own type.
+--
+-- This is the case the boxed payload exists for. A variant's slot is a tag
+-- plus a pointer whatever its arms hold, so the width equation has a finite
+-- fixed point; an inline payload would need `width(Tree) >= 1 + 2*width(Tree)`
+-- and have none. On the wire the type declares its own name so the arms can
+-- refer back to it: `&4Treev24Leaf04Node3f8^4Tree^4Tree`.
+--
+-- Recursion also has to survive every stage that walks a type: the schema
+-- emitter, which must declare the name before an arm back-references it; the
+-- serial AST builder, which must cut the cycle rather than expand it; and
+-- each pool's own type declaration, where a self-referential field needs an
+-- indirection or the native type has no finite size.
+--
+-- `total` and `size` recurse in morloc; `mirror` rebuilds a tree, so
+-- construction and elimination both run against the recursive form. Sending
+-- a tree through a pool round-trips the whole nested structure, not just a
+-- tag.
+
+module main
+  ( total
+  , size
+  , mirror
+  , totalViaPy
+  , totalViaCpp
+  , totalViaR
+  , totalViaRust
+  )
+
+import root-py
+import root-cpp
+import root-r
+import root-rust
+
+data Tree = Leaf | Node Real Tree Tree
+
+total :: Tree -> Real
+total | Leaf = 0.0
+      | (Node v l r) = v + total l + total r
+
+size :: Tree -> Real
+size | Leaf = 0.0
+     | (Node _ l r) = 1.0 + size l + size r
+
+-- Rebuilding a tree exercises construction and elimination together on the
+-- recursive form. The identity call keeps this realized in a pool: a
+-- self-recursive function with no sourced call stays in the nexus, whose
+-- recursion back-edge cannot yet be given a schema (a limitation unrelated
+-- to `data`, reachable from `loop x = loop x`).
+mirror :: Tree -> Tree
+mirror | Leaf = Leaf
+       | (Node v l r) = idPy (Node v (mirror r) (mirror l))
+
+source Py   from "tree.py"  ("ident" as idPy)
+source Cpp  from "tree.hpp" ("ident" as idCpp)
+source R    from "tree.R"   ("ident" as idR)
+source Rust from "tree.rs"  ("ident" as idRust)
+
+idPy   :: Tree -> Tree
+idCpp  :: Tree -> Tree
+idR    :: Tree -> Tree
+idRust :: Tree -> Tree
+
+totalViaPy :: Tree -> Real
+totalViaPy t = total (idPy t)
+
+totalViaCpp :: Tree -> Real
+totalViaCpp t = total (idCpp t)
+
+totalViaR :: Tree -> Real
+totalViaR t = total (idR t)
+
+totalViaRust :: Tree -> Real
+totalViaRust t = total (idRust t)

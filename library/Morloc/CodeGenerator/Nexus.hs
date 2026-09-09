@@ -213,7 +213,9 @@ data NexusExpr
   | OptNullX Text         -- absent ?T: at runtime sets tag=0 and leaves the
                           -- inner slot zero. Schema is the outer ?T schema so
                           -- the slot has the right width inside arrays/records.
-  | TagTestX Text NexusExpr NexusExpr
+  | TagTestX Text NexusExpr Int
+  | CtorFieldX Text NexusExpr Int Int
+  | CtorMakeX Text Int [NexusExpr]
       -- ^ schema (Bool), subject, constructor. Compares the one-byte tags of
       -- two `data` values. The nexus answers this itself: the tag is a byte
       -- it already holds, so a pattern match on an enum in a pure morloc
@@ -447,8 +449,18 @@ generalTypeToSerialAST' i anc (VarT v)
       -- try to serialize the table itself. This is the nexus's pure-morloc
       -- path, reached whenever a function over an enum has no sourced
       -- implementation and therefore runs in the nexus rather than a pool.
-      case scopeEnumCtors scope v of
+      case (if scopeDataIsEnum scope v then scopeEnumCtors scope v else Nothing) of
        Just ctors -> return $ SerialEnum (FV v (CV "")) ctors
+       -- A `data` whose constructors take arguments. Each arm's field types
+       -- are walked with this type pushed onto the ancestor set, so a
+       -- constructor naming its own type becomes a back-reference rather
+       -- than recursing forever -- the same cut the alias path below makes.
+       Nothing | Just arms <- scopeDataCtors scope v -> do
+                   let anc' = Set.insert v anc
+                   arms' <- mapM
+                     (\(n, ts) -> (,) n <$> mapM (generalTypeToSerialAST' i anc' . typeOf) ts)
+                     arms
+                   return $ SerialVariant (FV v (CV "")) arms'
        Nothing -> case Map.lookup v scope of
         (Just [(_, _, _, True, _)]) -> error "Cannot handle terminal types"
         (Just [([], t', _, False, _)]) -> do
@@ -578,6 +590,31 @@ resolveAliasApp i anc v ts
             <> ". If" <+> pretty v <+> "is a newtype handle, add"
             <+> "`newtype" <+> pretty v <+> "<params> = <wire-type>` in stdlib/internal."
 
+-- | The text of a literal string argument in a nexus-bound expression.
+nexusLiteralStr :: AnnoS (Indexed Type) One () -> Maybe Text
+nexusLiteralStr (AnnoS _ _ (StrS t)) = Just t
+nexusLiteralStr _ = Nothing
+
+-- | The value of a literal integer argument.
+nexusLiteralInt :: AnnoS (Indexed Type) One () -> Maybe Int
+nexusLiteralInt (AnnoS _ _ (IntS _ i)) = Just (fromIntegral i)
+nexusLiteralInt _ = Nothing
+
+-- | A constructor's tag: its position in its type's declaration order,
+-- read off the subject's own type. The typechecker has already resolved
+-- the name against that type, so a miss here is a compiler bug.
+nexusCtorTag :: AnnoS (Indexed Type) One () -> Text -> MorlocMonad Int
+nexusCtorTag (AnnoS (Idx i t) _ _) n = do
+  scope <- MM.gets stateUniversalGeneralTypedefs
+  let tv = case t of
+        VarT v -> Just v
+        AppT (VarT v) _ -> Just v
+        _ -> Nothing
+  case tv >>= \v -> map fst <$> scopeDataCtors scope v of
+    Just names | (k : _) <- [k' | (k', m) <- zip [0 ..] names, m == n] -> return k
+    _ -> MM.throwSourcedError i $
+      "compiler bug: no tag for constructor" <+> squotes (pretty n)
+
 -- | Replace the outermost FVar's general name with the alias's name.
 -- Used after expanding an alias body to keep the alias's identity on
 -- the SerialAST's outer node so the @&name@ wire declaration matches
@@ -590,6 +627,8 @@ retagOuterName v' s = case s of
   SerialTuple    (FV _ cv) xs      -> SerialTuple    (FV v' cv) xs
   SerialObject o (FV _ cv) ps rs   -> SerialObject o (FV v' cv) ps rs
   SerialOptional (FV _ cv) inner   -> SerialOptional (FV v' cv) inner
+  SerialEnum     (FV _ cv) ns      -> SerialEnum     (FV v' cv) ns
+  SerialVariant  (FV _ cv) as      -> SerialVariant  (FV v' cv) as
   _ -> s
 
 -- ======================================================================
@@ -733,8 +772,18 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- A `data` constructor is its tag byte, and an enum's voidstar form is
     -- exactly that byte -- so the constructor needs no node of its own here,
     -- only the one-byte literal it already is.
-    toNexusExpr (AnnoS _ _ (EnumS _ _ ordinal)) =
-      return $ LitX U8X (MT.pack (show ordinal))
+    -- An argument-free constructor of an all-nullary type is its tag byte,
+    -- and that byte IS the value's wire form, so it needs no node of its
+    -- own here. A constructor carrying arguments has a tagged-pointer form
+    -- the nexus evaluator does not build yet.
+    toNexusExpr (AnnoS (Idx ci t) _ (ConS _ _ ordinal xs))
+      | null xs = return $ LitX U8X (MT.pack (show ordinal))
+      | otherwise = do
+          sch <- type2schema t
+          fields <- mapM toNexusExpr xs
+          return (CtorMakeX sch ordinal fields)
+      where
+        _ = ci
     toNexusExpr (AnnoS _ _ (LogS True)) = return $ LitX BoolX "1"
     toNexusExpr (AnnoS _ _ (LogS False)) = return $ LitX BoolX "0"
     toNexusExpr (AnnoS _ _ UniS) = return $ LitX NullX "0"
@@ -776,8 +825,27 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- without any pool dispatch.
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrMap [funcE, listE])) =
       MapX <$> type2schema t <*> toNexusExpr funcE <*> toNexusExpr listE
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrTagTest [subjE, ctorE])) =
-      TagTestX <$> type2schema t <*> toNexusExpr subjE <*> toNexusExpr ctorE
+    -- The constructor arrives as a NAME. Its tag is its position in the
+    -- type's declaration order, which the subject's own schema carries, so
+    -- the test needs no second value to materialize -- and could not
+    -- materialize one for a payload arm, whose constructor is a function.
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrTagTest [subjE, nameE]))
+      | Just n <- nexusLiteralStr nameE = do
+          sch <- type2schema t
+          subj <- toNexusExpr subjE
+          tag <- nexusCtorTag subjE n
+          return (TagTestX sch subj tag)
+    -- Reading one field out of a value whose arm a guarding tag test has
+    -- established. Like the tag test, the arm travels as data: there is no
+    -- constructor value to apply, and the field's own schema comes from the
+    -- arm the tag selects.
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrCtorField [subjE, nameE, idxE]))
+      | Just n <- nexusLiteralStr nameE
+      , Just i <- nexusLiteralInt idxE = do
+          sch <- type2schema t
+          subj <- toNexusExpr subjE
+          tag <- nexusCtorTag subjE n
+          return (CtorFieldX sch subj tag i)
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrShow [arg])) =
       ShowX <$> type2schema t <*> toNexusExpr arg
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrRead [arg])) =
@@ -1610,6 +1678,26 @@ validateValueAgainstAST loc env path ast value = case (ast, value) of
   (SerialOptional _ _,     Aeson.Null) -> return ()
   (SerialOptional _ inner, v)          -> validateValueAgainstAST loc env path inner v
 
+  -- A `data` value is written as its constructor name, matching what the
+  -- runtime's JSON reader accepts. An enum is the bare name. A
+  -- payload-bearing arm is a single-key object keyed by the arm name,
+  -- whose value lists the arm's fields; an arm taking no arguments is
+  -- still spelled bare. An unlisted name falls through to the mismatch
+  -- reporter, which names the whole legal set.
+  (SerialEnum _ ctors, Aeson.String name)
+    | name `elem` ctors -> return ()
+  (SerialVariant _ arms, Aeson.String name)
+    | Just [] <- lookup name arms -> return ()
+  (SerialVariant _ arms, Aeson.Object o)
+    | [(k, fieldsVal)] <- KM.toList o
+    , Just fieldAsts <- lookup (AesonKey.toText k) arms
+    , Aeson.Array vs <- fieldsVal
+    , V.length vs == length fieldAsts ->
+        CM.zipWithM_
+          (\fieldAst v -> validateValueAgainstAST loc env path fieldAst v)
+          fieldAsts
+          (V.toList vs)
+
   -- Lists: array, with an optional fixed-length constraint.
   (SerialList _ dim elemAst, Aeson.Array arr) -> do
     case dim of
@@ -1762,6 +1850,7 @@ expectedJsonShape = go
     -- vocabulary fits in the message, which is the point of carrying
     -- the names rather than the ordinals.
     go (SerialEnum _ ns)             = "one of " <> MT.intercalate ", " ns
+    go (SerialVariant _ as)          = "one of " <> MT.intercalate ", " (map fst as)
     go (SerialIFile _)               = "IFile path (Str)"
     go (SerialOStream _)             = "OStream path (Str)"
     go (SerialIStream _)             = "IStream path (Str)"
@@ -2303,12 +2392,27 @@ exprToJson (BndX schema var) =
     , ("schema", jsonStr schema)
     , ("var", jsonStr var)
     ]
-exprToJson (TagTestX schema subjExpr ctorExpr) =
+exprToJson (TagTestX schema subjExpr tag) =
   jsonObj
     [ ("tag", jsonStr "tagtest")
     , ("schema", jsonStr schema)
     , ("subject", exprToJson subjExpr)
-    , ("constructor", exprToJson ctorExpr)
+    , ("tag_ordinal", jsonInt (fromIntegral tag))
+    ]
+exprToJson (CtorMakeX schema tag fields) =
+  jsonObj
+    [ ("tag", jsonStr "ctormake")
+    , ("schema", jsonStr schema)
+    , ("tag_ordinal", jsonInt (fromIntegral tag))
+    , ("fields", jsonArr (map exprToJson fields))
+    ]
+exprToJson (CtorFieldX schema subjExpr tag idx) =
+  jsonObj
+    [ ("tag", jsonStr "ctorfield")
+    , ("schema", jsonStr schema)
+    , ("subject", exprToJson subjExpr)
+    , ("tag_ordinal", jsonInt (fromIntegral tag))
+    , ("field_index", jsonInt (fromIntegral idx))
     ]
 exprToJson (MapX schema funcExpr listExpr) =
   jsonObj

@@ -53,6 +53,7 @@ module UnitTypeTests
   , withDocstringTests
   , patternSelectorTests
   , sumTypeTests
+  , variantTests
   , evalSandboxTests
   ) where
 
@@ -8928,17 +8929,6 @@ sumTypeTests =
           |]
           (fun [var "DNA", var "Strand"])
 
-      , -- Payload-bearing arms are stage 2; stage 1 must reject them
-        -- outright rather than accept them and mis-lower them.
-        exprTestBad
-          "a constructor with arguments is rejected in stage 1"
-          [r|
-        module main (f)
-        data Shape = Circle Real | Square Real
-        f :: Shape -> Shape
-        f x = x
-          |]
-
       , exprTestBad
           "a constructor repeated within one type is rejected"
           [r|
@@ -9022,4 +9012,254 @@ sumTypeTests =
         f :: Int
         f = A
           |]
+      ]
+
+-- Payload-bearing `data` constructors.
+--
+-- A constructor with arguments is a FUNCTION into its type: `Circle Real`
+-- gives `Circle :: Real -> Shape`. That is the whole difference from the
+-- argument-free tier, where a constructor is a value. A type is
+-- payload-bearing if ANY of its constructors takes an argument, so `Dot` in
+-- `data Shape = Circle Real | Dot` is a variant with an empty payload, not
+-- an enum member -- the wire form is a property of the type, not of the
+-- individual constructor.
+variantTests :: TestTree
+variantTests =
+  localOption (mkTimeout 1000000) $
+    testGroup
+      "sum types with payloads"
+      [ assertGeneralType
+          "a one-argument constructor is a function into its type"
+          [r|
+        module main (f)
+        data Shape = Circle Real | Dot
+        f = Circle
+          |]
+          (fun [real, var "Shape"])
+
+      , assertGeneralType
+          "a multi-argument constructor curries"
+          [r|
+        module main (f)
+        data Shape = Rect Real Real | Dot
+        f = Rect
+          |]
+          (fun [real, real, var "Shape"])
+
+      , -- A constructor with no arguments in a payload-bearing type is still
+        -- a plain value of that type.
+        assertGeneralType
+          "an argument-free constructor beside a payload one is a value"
+          [r|
+        module main (f)
+        data Shape = Circle Real | Dot
+        f :: Shape
+        f = Dot
+          |]
+          (var "Shape")
+
+      , assertGeneralType
+          "applying a constructor yields its type"
+          [r|
+        module main (f)
+        data Shape = Circle Real | Dot
+        f :: Shape
+        f = Circle 1.0
+          |]
+          (var "Shape")
+
+      , assertGeneralType
+          "a parameterized constructor carries the parameter"
+          [r|
+        module main (f)
+        data Opt a = None | Some a
+        f :: Int -> Opt Int
+        f x = Some x
+          |]
+          (fun [int, arr "Opt" [int]])
+
+      , -- The payload is behind a pointer on the wire, which is what gives
+        -- the recursive width equation a finite fixed point.
+        assertGeneralType
+          "a self-recursive data type is legal"
+          [r|
+        module main (f)
+        data Tree = Leaf | Node Tree Tree
+        f :: Tree -> Tree
+        f x = x
+          |]
+          (fun [var "Tree", var "Tree"])
+
+      , exprTestBad
+          "applying a constructor to too many arguments is rejected"
+          [r|
+        module main (f)
+        data Shape = Circle Real | Dot
+        f :: Shape
+        f = Circle 1.0 2.0
+          |]
+
+      , exprTestBad
+          "applying a constructor to the wrong type is rejected"
+          [r|
+        module main (f)
+        data Shape = Circle Real | Dot
+        f :: Shape
+        f = Circle "big"
+          |]
+
+      , exprTestBad
+          "an argument-free constructor is not a function"
+          [r|
+        module main (f)
+        data Shape = Circle Real | Dot
+        f :: Shape
+        f = Dot 1.0
+          |]
+
+      , -- A constructor is an ordinary function into its type, so supplying
+        -- some of its arguments yields a function expecting the rest. This
+        -- is what makes `map (Rect 4.5) heights` work.
+        assertGeneralType
+          "a constructor may be partially applied"
+          [r|
+        module main (f)
+        data Shape = Rect Real Real | Dot
+        f = Rect 4.5
+          |]
+          (fun [real, var "Shape"])
+
+      , -- Payload patterns are asserted here, through inference, and not
+        -- only in the pattern-lowering tests: those run the frontend
+        -- without the typechecker, so they cannot see that a payload
+        -- constructor is a FUNCTION into its type and therefore cannot be
+        -- checked as a value of it, the way an argument-free one can.
+        assertGeneralType
+          "a payload pattern binds its field at the field's type"
+          [r|
+        module main (f)
+        data Shape = Circle Real | Dot
+        f :: Shape -> Real
+        f | (Circle r) = r
+          | Dot = 0.0
+          |]
+          (fun [var "Shape", real])
+
+      , assertGeneralType
+          "a multi-field payload pattern types every field"
+          [r|
+        module main (f)
+        data Shape = Rect Real Real | Dot
+        f :: Shape -> Real
+        f | (Rect w h) = w
+          | Dot = 0.0
+          |]
+          (fun [var "Shape", real])
+
+      , -- The constructor-table lookup replaces the value check for a
+        -- payload type, so it has to keep rejecting a constructor borrowed
+        -- from another type just as firmly.
+        exprTestBad
+          "a constructor of another type is rejected in a payload clause"
+          [r|
+        module main (f)
+        data Shape = Circle Real | Dot
+        data Color = Red Real | Blue
+        f :: Shape -> Real
+        f | (Circle r) = r
+          | (Red x) = x
+          | Dot = 0.0
+          |]
+
+      , -- A getter names a position, but which positions exist depends on
+        -- the constructor, and that is not known until the value is
+        -- matched. Only a declaration whose arms happen to agree at that
+        -- position would type, and a later arm would silently break it.
+        exprTestBad
+          "an index getter cannot be applied to a data type"
+          [r|
+        module main (f)
+        data Shape = Circle Real | Rect Real Real
+        f :: Shape -> Real
+        f x = .[0] x
+          |]
+
+      , -- The same rejection has to survive an alias. A getter reaching a
+        -- `data` type through one is not a corner case: aliases are how
+        -- types are usually named in signatures, and the check is worth
+        -- nothing if the spelling of the type decides whether it applies.
+        exprTestBad
+          "an index getter cannot reach a data type through an alias"
+          [r|
+        module main (f)
+        data Shape = Circle Real | Rect Real Real
+        type MyShape = Shape
+        f :: MyShape -> Real
+        f x = .[0] x
+          |]
+
+        -- Recursion guards. A constructor field naming its own type is the
+        -- reason the payload sits behind a pointer at all, so these are the
+        -- shapes the representation exists to support.
+        --
+        -- Lowering a `data` expands its constructors' field types, because
+        -- the payload's own schema has to be reachable. A self-reference
+        -- therefore re-enters the type being lowered. Termination comes from
+        -- leaving a re-entrant reference opaque -- the same treatment a
+        -- record's self-reference gets -- and cutting the cycle once, later,
+        -- when the wire form is built. Without that, two self-referential
+        -- fields make the expansion branch, so it exhausts memory rather
+        -- than merely looping; hence a generation test with a timeout rather
+        -- than a type assertion.
+      , localOption (mkTimeout 20000000) $
+          testCase "a directly self-recursive data lowers" $
+            assertGenerates
+              [r|
+        module main (idt)
+        data Tree = Leaf | Node Tree Tree
+        source Py from "t.py" ("idt")
+        idt :: Tree -> Tree
+              |]
+
+      , -- Recursion reached through a list rather than directly. The
+        -- back-edge sits under an array element here, which is a different
+        -- position in the wire form than a bare field.
+        localOption (mkTimeout 20000000) $
+          testCase "a data recursing through a list lowers" $
+            assertGenerates
+              [r|
+        module main (idt)
+        type Py => List a = "list" a
+        data Rose = Rose [Rose]
+        source Py from "t.py" ("idt")
+        idt :: Rose -> Rose
+              |]
+
+      , -- A cycle spanning two type definitions is refused for every kind of
+        -- typedef, `data` included: the type evaluator's termination check
+        -- guards each definition's own name only, so a cycle across names
+        -- would still loop. The rejection is deliberate and up front, which
+        -- is what keeps the later reduce-and-retry sites from hanging.
+        exprTestBad
+          "mutually recursive data types are rejected"
+          [r|
+        module main (idt)
+        data Expr = Lit Real | Neg Term
+        data Term = Wrap Expr
+        source Py from "t.py" ("idt")
+        idt :: Expr -> Expr
+          |]
+
+      , -- A self-recursive type is still usable through a container, which
+        -- is the shape a real tree walk takes.
+        localOption (mkTimeout 20000000) $
+          testCase "a list of a recursive data lowers" $
+            assertGenerates
+              [r|
+        module main (idt)
+        type Py => List a = "list" a
+        data Tree = Leaf | Node Tree Tree
+        source Py from "t.py" ("idt")
+        idt :: [Tree] -> [Tree]
+              |]
       ]

@@ -423,6 +423,13 @@ data LowerConfig m = LowerConfig
   -- 'lcOwnership' of a manifold-call argument (named by index-aliasing after the
   -- caller's variables) reflects the caller rather than the callee being
   -- rendered. Default is identity (only Rust distinguishes ownership).
+  , lcVariantLit :: CVar -> Text -> Int -> [MDoc] -> MDoc
+  -- ^ Build a payload-bearing `data` value: the type's concrete name, the
+  -- arm's name, its 0-based tag, and the rendered field expressions.
+  --
+  -- Each backend constructs one its own way -- a Rust or C++ enum arm takes
+  -- its fields positionally, a Python dataclass is called by name, an R S3
+  -- value is a classed list -- so there is no shared spelling to default to.
   , lcEnumLit :: CVar -> Text -> Int -> MDoc
   -- ^ Render a `data` constructor as a value in this language: the enum's
   -- concrete type name, the constructor's name, and its 0-based tag.
@@ -431,6 +438,23 @@ data LowerConfig m = LowerConfig
   -- value IS. C++ and Rust name it (@DNA::A@). Python receives the tag as a
   -- plain int from the runtime, so the tag is the value. R holds a factor,
   -- whose storage is 1-based, so it needs the tag AND the name.
+  , lcVariantTagTest :: CVar -> Text -> Int -> MDoc -> MDoc
+  -- ^ Test whether a payload-bearing value carries a given arm: the type's
+  -- concrete name, the arm's name, its tag, and the subject.
+  --
+  -- Separate from 'lcTagTest' for the reason that hook's own note predicts:
+  -- once arms carry arguments, equality would compare payloads where a
+  -- pattern must test the discriminant alone. Every backend asks a
+  -- different way (@matches!@, @holds_alternative@, @isinstance@,
+  -- @inherits@), and none of them can be spelled from two rendered
+  -- expressions, so the arm has to arrive as data.
+  , lcCtorField :: CVar -> Text -> Int -> MDoc -> MDoc
+  -- ^ Read one field out of a value whose arm is already established: the
+  -- type's concrete name, the arm's name, the field's index, the subject.
+  --
+  -- Only ever emitted under a passing tag test, and unreachable from
+  -- surface syntax -- a getter aimed at a `data` type is rejected, because
+  -- which fields exist depends on the constructor.
   , lcTagTest :: MDoc -> MDoc -> MDoc
   -- ^ Test whether a value carries a given constructor's tag
   -- ('IntrTagTest'). Default is native @==@, which is the right answer in
@@ -1085,6 +1109,9 @@ lowerNativeExpr cfg _ (StrN_ (FV _ cv) v) =
   in return $ defaultValue {poolExpr = lcPrintExpr cfg (IStrLit hint v)}
 lowerNativeExpr cfg _ (EnumN_ (FV _ cv) n i) =
   return $ defaultValue {poolExpr = lcEnumLit cfg cv n i}
+lowerNativeExpr cfg _ (VariantN_ t n i xs)
+  | VariantF (FV _ cv) _ <- t = return $ mergePoolDocs (lcVariantLit cfg cv n i) xs
+  | otherwise = error $ "constructor literal carries a non-variant type: " <> show (pretty t)
 lowerNativeExpr cfg _ (NullN_ t) = do
   -- NullN_ now carries the full @TypeF@ of the Null's type slot
   -- (e.g. @?(BTree Int)@), not just the underlying constructor's
@@ -1241,10 +1268,31 @@ lowerNativeExpr cfg _ (IntrinsicN_ _ IntrClose maySchema [handleDocs]) =
 -- operation is a comparison in the target language, so it lowers through
 -- 'lcTagTest' (native @==@ by default). See the note on 'IntrTagTest' for
 -- why this is a tag test rather than an equality.
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrTagTest _ [subjectDocs, ctorDocs]) =
-  return $ mergePoolDocs
-    (const (lcTagTest cfg (poolExpr subjectDocs) (poolExpr ctorDocs)))
-    [subjectDocs, ctorDocs]
+-- A constructor-pattern tag test. The arm arrives as a literal name, so the
+-- subject's own type decides how to ask: an enum compares values, because
+-- for an argument-free constructor the value IS the tag; a variant must test
+-- the discriminant without touching the payload.
+lowerNativeExpr cfg (IntrinsicN _ _ _ [subjectE, StrN _ n]) (IntrinsicN_ _ IntrTagTest _ [subjectDocs, _]) =
+  case typeFof subjectE of
+    VariantF (FV _ cv) arms ->
+      return $ mergePoolDocs
+        (const (lcVariantTagTest cfg cv n (armIndex n (map fst arms)) (poolExpr subjectDocs)))
+        [subjectDocs]
+    EnumF (FV _ cv) names ->
+      return $ mergePoolDocs
+        (const (lcTagTest cfg (poolExpr subjectDocs)
+                  (lcEnumLit cfg cv n (armIndex n names))))
+        [subjectDocs]
+    t -> error $ "tag test on a type that is not a `data`: " <> show (pretty t)
+-- Reading one field out of a value whose arm a guarding tag test has already
+-- established. Emitted only under that guard, and with no surface spelling.
+lowerNativeExpr cfg (IntrinsicN _ _ _ [subjectE, StrN _ n, IntN _ i]) (IntrinsicN_ _ IntrCtorField _ [subjectDocs, _, _]) =
+  case typeFof subjectE of
+    VariantF (FV _ cv) _ ->
+      return $ mergePoolDocs
+        (const (lcCtorField cfg cv n (fromIntegral i) (poolExpr subjectDocs)))
+        [subjectDocs]
+    t -> error $ "constructor field projection on a non-variant: " <> show (pretty t)
 lowerNativeExpr cfg _ (IntrinsicN_ _ IntrFSchema _ [pathDocs]) =
   return $ pathDocs
     { poolExpr = lcPrintExpr cfg
@@ -1545,3 +1593,14 @@ defaultDeserialize cfg v s = do
 
 type IndexM = CMS.StateT IndexState Identity
 
+-- | A constructor's position in its type's declaration order, which is its
+-- wire tag.
+--
+-- The typechecker resolved this name against the type's own table before
+-- codegen ran, so a miss is a compiler bug. Saying so beats returning a
+-- past-the-end index, which is a tag no arm answers to and would surface as
+-- a wrong branch rather than an error.
+armIndex :: Text -> [Text] -> Int
+armIndex n names = case [i | (i, m) <- zip [0 ..] names, m == n] of
+  (i : _) -> i
+  [] -> error ("compiler bug: no tag for constructor " <> show n)

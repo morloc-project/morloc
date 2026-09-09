@@ -431,8 +431,40 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         , lcArgManifoldOwnership = \_ -> return Owned
         , lcOwnArg = \_ _ x -> x
         , lcWithCallerScope = id
+        -- Python calls the arm's generated dataclass; R builds a classed
+        -- list, whose class carries the arm name the same way a factor's
+        -- levels carry an enum's.
+        , lcVariantLit = \_ n _ xs ->
+            if ldEnumLitByName desc
+              then "list" <> tupled [dquotes (pretty n), "list" <> tupled xs]
+              -- A one-element Python tuple needs its trailing comma INSIDE
+              -- the parentheses, or it is just a parenthesised value.
+              else tupled [dquotes (pretty n), pyTuple xs]
         , lcEnumLit = \_ n i ->
             if ldEnumLitByName desc then dquotes (pretty n) else pretty i
+        -- TEMPORARY REPRESENTATION. A payload-bearing `data` crosses into
+        -- Python and R as a STRUCTURAL pair -- the constructor's name and a
+        -- sequence of its fields -- rather than as a declared native type.
+        --
+        -- This matches what morloc already does for the analogous types in
+        -- these two languages (a record is a dict / list, an enum is an int),
+        -- and it needs nothing the generic C marshallers cannot build. A
+        -- native form (a frozen dataclass per arm, an S3 classed list) is the
+        -- intended end state, but it needs a value to be converted at every
+        -- serialization boundary, and no such mechanism exists yet -- the one
+        -- coercion node in the compiler is driven by the typechecker for
+        -- optionals, not by a boundary. Building it is worth doing for every
+        -- composite type at once rather than for sum types alone.
+        , lcVariantTagTest = \_ n _ subj ->
+            if ldEnumLitByName desc
+              then parens (subj <> "[[1]]" <+> "==" <+> dquotes (pretty n))
+              else parens (parens subj <> "[0]" <+> "==" <+> dquotes (pretty n))
+        , lcCtorField = \_ _ i subj ->
+            if ldEnumLitByName desc
+              -- R indexes from one, so a field's position is its wire index
+              -- plus one; the wire index is what the compiler carries.
+              then subj <> "[[2]][[" <> pretty (i + 1) <> "]]"
+              else parens subj <> "[1][" <> pretty i <> "]"
         , lcTagTest = \a b -> parens (a <+> "==" <+> b)
         , lcCoerceOptional = id
         , lcTypeOf = \_ -> return Nothing
@@ -1597,3 +1629,16 @@ walkGenericSelectorBrackets desc =
     (\results -> case ldTupleConstructor desc of
         "" -> tupled results
         name -> pretty name <> tupled results)
+
+-- | The native name of one arm of a `data` type: the type's concrete name
+-- and the constructor's, joined. Python uses it as a class, R as an S3 class
+-- string; both are declared by the same generator.
+armClass :: CVar -> Text -> MDoc
+armClass cv n = pretty (unCVar cv) <> "_" <> pretty n
+
+-- | A Python tuple literal, with the trailing comma a one-element tuple
+-- needs to be a tuple at all.
+pyTuple :: [MDoc] -> MDoc
+pyTuple [] = "()"
+pyTuple [x] = parens (x <> ",")
+pyTuple xs = tupled xs

@@ -180,7 +180,7 @@ error:
 
 
 
-// ── Recursive-record env (named-schema stack) ─────────────────────────────
+// -- Recursive-record env (named-schema stack) -----------------------------
 //
 // Schemas built from wire forms like `&4Treem25valuej8childrena^4Tree`
 // carry a `name` on the outer (`Tree`) declaration and on every Recur
@@ -252,6 +252,26 @@ static int schema_to_npy_type(morloc_serial_type type) {
         case MORLOC_FLOAT64: return NPY_FLOAT64;
         default:             return -1;
     }
+}
+
+// Resolve a constructor name against a variant schema's key list, yielding
+// its tag. The tag is the constructor's position in the declaration, which
+// is what the wire carries; the keys arrive in that same order.
+static ssize_t variant_tag_of(const Schema* schema, PyObject* name) {
+    if (!PyUnicode_Check(name)) {
+        PyErr_SetString(PyExc_RuntimeError,
+            "a `data` value's first element must be its constructor name");
+        return -1;
+    }
+    const char* want = PyUnicode_AsUTF8(name);
+    if (!want) return -1;
+    for (size_t i = 0; i < schema->size; i++) {
+        if (schema->keys[i] && strcmp(schema->keys[i], want) == 0) {
+            return (ssize_t)i;
+        }
+    }
+    PyErr_Format(PyExc_RuntimeError, "'%s' is not a constructor of this type", want);
+    return -1;
 }
 
 PyObject* from_voidstar(const Schema* schema, const void* data, const void* base_ptr){ MAYFAIL
@@ -577,6 +597,53 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
                 Py_DECREF(key);
                 Py_DECREF(value);
             }
+            break;
+        }
+        case MORLOC_VARIANT: {
+            // A payload-bearing `data` value: a tag byte then a relptr to the
+            // arm's fields. It crosses as a STRUCTURAL pair -- the
+            // constructor's name and a tuple of its fields -- because the
+            // generic marshaller has no access to a pool-level class. See the
+            // note on the Python/R variant spelling in the code generator:
+            // this is a documented interim form, not the intended end state.
+            uint8_t tag = *(const uint8_t*)data;
+            if ((size_t)tag >= schema->size) {
+                PyErr_Format(PyExc_RuntimeError,
+                    "variant tag %u is out of range; the type has %zu arms",
+                    (unsigned)tag, schema->size);
+                goto error;
+            }
+            Schema* arm = schema->parameters[tag];
+            PyObject* name = PyUnicode_FromString(schema->keys[tag]);
+            if (!name) goto error;
+
+            PyObject* fields = NULL;
+            relptr_t vrelptr = *(const relptr_t*)((const char*)data + 8);
+            if (vrelptr == RELNULL) {
+                fields = PyTuple_New(0);
+            } else {
+                const void* payload;
+                if (base_ptr) {
+                    payload = (const char*)base_ptr + vrelptr;
+                } else {
+                    char* errmsg_v = NULL;
+                    payload = rel2abs(vrelptr, &errmsg_v);
+                    if (errmsg_v) {
+                        PyErr_SetString(PyExc_RuntimeError, errmsg_v);
+                        free(errmsg_v);
+                        Py_DECREF(name);
+                        goto error;
+                    }
+                }
+                // The arm's schema describes its fields as a tuple, so the
+                // existing walk over that shape builds the field sequence.
+                fields = from_voidstar(arm, payload, base_ptr);
+            }
+            if (!fields) { Py_DECREF(name); goto error; }
+            obj = PyTuple_Pack(2, name, fields);
+            Py_DECREF(name);
+            Py_DECREF(fields);
+            if (!obj) goto error;
             break;
         }
         case MORLOC_OPTIONAL: {
@@ -933,9 +1000,32 @@ static ssize_t get_shm_size_inner(const Schema* schema, PyObject* obj) {
                 return (ssize_t)required_size;
             }
 
+        case MORLOC_VARIANT: {
+            // ("Circle", (fields...)): the 16-byte slot, worst-case padding
+            // before the payload, and the payload's own size. A nullary arm
+            // has no payload and needs only the slot.
+            if (!PyTuple_Check(obj) || PyTuple_Size(obj) != 2) {
+                PyErr_SetString(PyExc_RuntimeError,
+                    "expected a (constructor, fields) pair for a `data` value");
+                return -1;
+            }
+            ssize_t vtag = variant_tag_of(schema, PyTuple_GetItem(obj, 0));
+            if (vtag < 0) return -1;
+            PyObject* vfields = PyTuple_GetItem(obj, 1);
+            const Schema* varm = schema->parameters[vtag];
+            if (varm->size == 0) {
+                return (ssize_t)schema->width;
+            }
+            ssize_t arm_size = get_shm_size((Schema*)varm, vfields);
+            if (arm_size == -1) return -1;
+            size_t varm_align = schema_alignment((Schema*)varm);
+            if (varm_align == 0) varm_align = 1;
+            return (ssize_t)schema->width + (ssize_t)(varm_align - 1) + arm_size;
+        }
+
         case MORLOC_OPTIONAL:
-            // Slot is sizeof(relptr) (= schema->width). Absent → just the slot.
-            // Present → slot + worst-case alignment padding for the inner T +
+            // Slot is sizeof(relptr) (= schema->width). Absent -> just the slot.
+            // Present -> slot + worst-case alignment padding for the inner T +
             // T's own total size (which already includes inner.width and any
             // variable extras T contributes).
             if (obj == Py_None) {
@@ -1340,8 +1430,43 @@ static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schem
             }
             break;
 
+        case MORLOC_VARIANT: {
+            // Tag byte, determined padding, then a relptr to the arm's
+            // fields written at the cursor. A nullary arm writes RELNULL and
+            // allocates nothing, matching the wire form.
+            if (!PyTuple_Check(obj) || PyTuple_Size(obj) != 2) {
+                PyErr_SetString(PyExc_RuntimeError,
+                    "expected a (constructor, fields) pair for a `data` value");
+                goto error;
+            }
+            ssize_t wtag = variant_tag_of(schema, PyTuple_GetItem(obj, 0));
+            if (wtag < 0) goto error;
+            PyObject* wfields = PyTuple_GetItem(obj, 1);
+            const Schema* warm = schema->parameters[wtag];
+            *((uint8_t*)dest) = (uint8_t)wtag;
+            memset((char*)dest + 1, 0, 7);
+            if (warm->size == 0) {
+                *(relptr_t*)((char*)dest + 8) = RELNULL;
+            } else {
+                size_t warm_align = schema_alignment((Schema*)warm);
+                if (warm_align == 0) warm_align = 1;
+                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, warm_align);
+                {
+                    char* rel_err = NULL;
+                    *(relptr_t*)((char*)dest + 8) = abs2rel(*cursor, &rel_err);
+                    if (rel_err) { free(rel_err); goto error; }
+                }
+                void* arm_dest = *cursor;
+                *cursor = (void*)((char*)*cursor + warm->width);
+                if (to_voidstar_inner(arm_dest, cursor, warm, wfields) != 0) {
+                    goto error;
+                }
+            }
+            break;
+        }
+
         case MORLOC_OPTIONAL:
-            // The slot is a relptr. Absent → write RELNULL. Present →
+            // The slot is a relptr. Absent -> write RELNULL. Present ->
             // align the cursor for the inner T, write the inner's relptr
             // into the slot, advance the cursor past T's width, then
             // recurse to fill T's body (T may push the cursor further
@@ -1425,7 +1550,7 @@ error:
 }
 
 
-// ── log emission bridge to libmorloc.so ──────────────────────────────────
+// -- log emission bridge to libmorloc.so ----------------------------------
 
 static PyObject* pybinding__log_next_id(PyObject* self, PyObject* args) {
     (void)self; (void)args;
@@ -1446,7 +1571,7 @@ static PyObject* pybinding__log_emit(PyObject* self, PyObject* args) {
 }
 
 
-// ── cache bridge to libmorloc.so ─────────────────────────────────────────
+// -- cache bridge to libmorloc.so -----------------------------------------
 
 static PyObject* pybinding__pool_hash(PyObject* self, PyObject* args) {
     (void)self; (void)args;
@@ -2931,7 +3056,7 @@ error:
     return NULL;
 }
 
-// ── Stream-handle bindings ──────────────────────────────────────────────
+// -- Stream-handle bindings ----------------------------------------------
 
 static PyObject* pybinding__mlc_open(PyObject* self, PyObject* args) { MAYFAIL
     const char* path;

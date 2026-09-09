@@ -50,6 +50,31 @@ fn pack_data_inner(
                 rmp::encode::write_uint(buf, *ptr as u64)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack uint: {}", e)))?;
             }
+            // A variant travels as a two-element array [tag, payload],
+            // a direct transcription of the voidstar slot. The payload is
+            // the arm's field tuple, or nil for an arm with no fields.
+            SerialType::Variant => {
+                let tag = *ptr;
+                let arm = schema.parameters.get(tag as usize).ok_or_else(|| {
+                    MorlocError::Serialization(format!(
+                        "variant tag {} is out of range; the type has {} arms",
+                        tag, schema.size
+                    ))
+                })?;
+                rmp::encode::write_array_len(buf, 2)
+                    .map_err(|e| MorlocError::Serialization(format!("msgpack variant: {}", e)))?;
+                rmp::encode::write_uint(buf, tag as u64)
+                    .map_err(|e| MorlocError::Serialization(format!("msgpack variant tag: {}", e)))?;
+                let payload = *(ptr.add(8) as *const shm::RelPtr);
+                if arm.size == 0 || payload == shm::RELNULL {
+                    rmp::encode::write_nil(buf).map_err(|e| {
+                        MorlocError::Serialization(format!("msgpack variant payload: {}", e))
+                    })?;
+                } else {
+                    let inner = shm::rel2abs(payload)?;
+                    pack_data(inner, arm, buf, env)?;
+                }
+            }
             // An enum travels msgpack as its ordinal, not its name.
             // msgpack is the machine format -- it carries packets and
             // on-disk values -- and spelling out "A"/"C"/"G"/"T" would
@@ -431,6 +456,40 @@ fn unpack_obj_inner(
                     unpack_obj(inner_ptr, inner_schema, cursor, reader, env)?;
                 }
             }
+            SerialType::Variant => {
+                // [tag, payload]. Read the tag, then unpack the arm the tag
+                // selects into the cursor region and point the slot at it.
+                decode::read_array_len(reader).map_err(|e| {
+                    MorlocError::Serialization(format!("msgpack variant array: {}", e))
+                })?;
+                let tag: i64 = decode::read_int(reader).map_err(|e| {
+                    MorlocError::Serialization(format!("msgpack variant tag: {}", e))
+                })?;
+                if tag < 0 || tag as usize >= schema.size {
+                    return Err(MorlocError::Serialization(format!(
+                        "variant tag {} is out of range; the type has {} arms",
+                        tag, schema.size
+                    )));
+                }
+                let arm = &schema.parameters[tag as usize];
+                *ptr = tag as u8;
+                std::ptr::write_bytes(ptr.add(1), 0, 7);
+                let relptr_slot = &mut *(ptr.add(8) as *mut shm::RelPtr);
+                if !reader.is_empty() && reader[0] == 0xc0 {
+                    decode::read_nil(reader).map_err(|e| {
+                        MorlocError::Serialization(format!("msgpack nil: {}", e))
+                    })?;
+                    *relptr_slot = shm::RELNULL;
+                } else {
+                    let inner_align = arm.alignment().max(1);
+                    let aligned = shm::align_up(*cursor as usize, inner_align);
+                    *cursor = aligned as AbsPtr;
+                    *relptr_slot = shm::abs2rel(*cursor)?;
+                    let inner_ptr = *cursor;
+                    *cursor = cursor.add(arm.width);
+                    unpack_obj(inner_ptr, arm, cursor, reader, env)?;
+                }
+            }
             SerialType::Table => {
                 // See pack_data: Tables are not msgpack-serialised. Hitting
                 // this case is a routing bug in the caller.
@@ -667,6 +726,28 @@ fn calc_size_r_inner(
                     calc_size_r(field_schema, reader, env)?;
                 }
             }
+            Ok(total)
+        }
+        SerialType::Variant => {
+            // The slot is 16 bytes; the arm's own data lands at the cursor.
+            let saved = *reader;
+            let mut total = schema.width;
+            if rmp::decode::read_array_len(reader).is_ok() {
+                if let Ok(tag) = rmp::decode::read_int::<i64, _>(reader) {
+                    if tag >= 0 && (tag as usize) < schema.size {
+                        let arm = &schema.parameters[tag as usize];
+                        if !reader.is_empty() && reader[0] == 0xc0 {
+                            rmp::decode::read_nil(reader).ok();
+                        } else {
+                            let inner_align = arm.alignment().max(1);
+                            total += inner_align - 1;
+                            total += calc_size_r_inner(arm, reader, env)?;
+                        }
+                        return Ok(total);
+                    }
+                }
+            }
+            *reader = saved;
             Ok(total)
         }
         SerialType::Optional => {

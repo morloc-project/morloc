@@ -199,6 +199,10 @@ data TypeF
   -- that list is the wire tag, so the order is part of the type's
   -- wire contract.
   | EnumF FVar [T.Text]
+  -- | A `data` type with at least one payload-bearing constructor: the
+  -- type's name, and each arm's name with its field types. Position in
+  -- the list is the wire tag.
+  | VariantF FVar [(T.Text, [TypeF])]
   | EffectF (Set.Set EffectLabel) TypeF
   | OptionalF TypeF
   | NatLitF Integer
@@ -370,6 +374,10 @@ data SerialAST
     -- travel in the schema so JSON renders the constructor rather than
     -- the ordinal and the runtime can reject an out-of-range tag.
     SerialEnum FVar [T.Text]
+  | -- | A `data` type with payload-bearing arms. Sixteen bytes on the
+    -- wire -- a tag and a pointer -- with each arm's fields serialized
+    -- as the tuple the pointer leads to.
+    SerialVariant FVar [(T.Text, [SerialAST])]
   | -- | depending on the language, this may or may not raise an error down the
     -- line, the parameter contains the variable name, which is useful only for
     -- source code comments.
@@ -413,6 +421,8 @@ instance Pretty SerialAST where
   pretty (SerialOptional v s) = parens ("SerialOptional" <+> pretty v <+> pretty s)
   pretty (SerialRec v) = parens ("SerialRec" <+> pretty v)
   pretty (SerialEnum v ns) = parens ("SerialEnum" <+> pretty v <+> list (map pretty ns))
+  pretty (SerialVariant v as) =
+    parens ("SerialVariant" <+> pretty v <+> list [pretty n | (n, _) <- as])
   pretty (SerialUnknown v) = parens ("SerialUnknown" <+> pretty v)
 
 data ExecutableExpressionPool
@@ -664,6 +674,8 @@ data PolyExpr
   -- All three travel because each backend needs a different one -- the
   -- name for C++/Rust, the tag for Python, both for R's factor.
   | PolyEnum (Indexed TVar) Text Int
+  -- | A payload-bearing constructor applied to its arguments.
+  | PolyVariant (Indexed TVar) Text Int [PolyExpr]
   -- The Indexed Type carries the FULL type of the Null (e.g.
   -- @?(BTree Int)@, NOT just the underlying TVar). Storing the
   -- complete type lets downstream passes (Serialize -> NativeExpr,
@@ -724,6 +736,7 @@ data MonoExpr
   | MonoInt (Indexed TVar) Integer
   | MonoStr (Indexed TVar) Text
   | MonoEnum (Indexed TVar) Text Int
+  | MonoVariant (Indexed TVar) Text Int [MonoExpr]
   -- See @PolyNull@ for the rationale: store the full type of the
   -- Null literal, not just the inner TVar.
   | MonoNull (Indexed Type)
@@ -837,6 +850,11 @@ data NativeExpr
   | IntN FVar Integer
   | StrN FVar Text
   | EnumN FVar Text Int
+  | VariantN TypeF Text Int [NativeExpr]
+  -- ^ Constructing a payload-bearing `data` value. Carries the COMPLETE
+  -- type, not just the constructor's own FVar: a value's schema describes
+  -- every arm, and rebuilding it from the arm being constructed would
+  -- describe a one-arm type that no other constructor belongs to.
   -- See @PolyNull@ in this module for the rationale on storing a
   -- @TypeF@ rather than an @FVar@: parameterised aliases lose their
   -- arg list if only the constructor name is kept.
@@ -954,6 +972,7 @@ foldlNE _ b (RealN_ _ _) = b
 foldlNE _ b (IntN_ _ _) = b
 foldlNE _ b (StrN_ _ _) = b
 foldlNE _ b (EnumN_ _ _ _) = b
+foldlNE f b (VariantN_ _ _ _ xs) = foldl f b xs
 foldlNE _ b (NullN_ _) = b
 foldlNE f b (DoBlockN_ _ x) = f b x
 foldlNE f b (EvalN_ _ x) = f b x
@@ -1060,6 +1079,8 @@ makeMonoidFoldDefault mempty' mappend' =
     monoidNativeExpr' (IntN_ v x) = return (mempty', IntN v x)
     monoidNativeExpr' (StrN_ v x) = return (mempty', StrN v x)
     monoidNativeExpr' (EnumN_ v n i) = return (mempty', EnumN v n i)
+    monoidNativeExpr' (VariantN_ v n i xs) =
+      return (foldl mappend' mempty' (map fst xs), VariantN v n i (map snd xs))
     monoidNativeExpr' (NullN_ v) = return (mempty', NullN v)
     monoidNativeExpr' (DoBlockN_ t (a, ne)) = return (a, DoBlockN t ne)
     monoidNativeExpr' (EvalN_ t (a, ne)) = return (a, EvalN t ne)
@@ -1209,6 +1230,7 @@ data NativeExpr_ nm se ne sr nr
   | IntN_ FVar Integer
   | StrN_ FVar Text
   | EnumN_ FVar Text Int
+  | VariantN_ TypeF Text Int [ne]
   -- See @PolyNull@ / @NullN@ for the rationale: store @TypeF@ not @FVar@.
   | NullN_ TypeF
   | DoBlockN_ TypeF ne
@@ -1415,6 +1437,9 @@ surroundFoldNativeExprM sfm fm = surroundNativeExprM sfm f
     f full@(IntN t x) = opFoldWithNativeExprM fm full (IntN_ t x)
     f full@(StrN t x) = opFoldWithNativeExprM fm full (StrN_ t x)
     f full@(EnumN t n i) = opFoldWithNativeExprM fm full (EnumN_ t n i)
+    f full@(VariantN t n i xs) = do
+      xs' <- mapM f xs
+      opFoldWithNativeExprM fm full (VariantN_ t n i xs')
     f full@(NullN t) = opFoldWithNativeExprM fm full (NullN_ t)
     f full@(DoBlockN t ne) = do
       ne' <- surroundFoldNativeExprM sfm fm ne
@@ -1463,6 +1488,7 @@ instance HasTypeF NativeExpr where
   -- The constructor names travel with the type here for the same reason
   -- they do in 'EnumF': a backend needs them to render the value.
   typeFof (EnumN v n _) = EnumF v [n]
+  typeFof (VariantN t _ _ _) = t
   typeFof (NullN t) = t
   typeFof (DoBlockN t _) = t
   typeFof (EvalN t _) = t
@@ -1674,6 +1700,7 @@ instance MFunctor NativeExpr where
         e@(IntN _ _) -> mapNativeExpr f e
         e@(StrN _ _) -> mapNativeExpr f e
         e@(EnumN _ _ _) -> mapNativeExpr f e
+        (VariantN t n i xs) -> mapNativeExpr f $ VariantN t n i (map (mgatedMap g f) xs)
         e@(NullN _) -> mapNativeExpr f e
         (DoBlockN t ne) -> mapNativeExpr f $ DoBlockN t (mgatedMap g f ne)
         (EvalN t ne) -> mapNativeExpr f $ EvalN t (mgatedMap g f ne)
@@ -1696,6 +1723,8 @@ instance Pretty TypeF where
       <+> encloseSep "{" "}" ", " [pretty k <+> "::" <+> pretty t | (k, t) <- rs]
   pretty (RecF v) = "^" <> pretty v
   pretty (EnumF v ns) = pretty v <+> encloseSep "{" "}" " | " (map pretty ns)
+  pretty (VariantF v as) =
+    pretty v <+> encloseSep "{" "}" " | " [pretty n <+> hsep (map pretty ts) | (n, ts) <- as]
   pretty (EffectF es t) =
     "<" <> hsep (punctuate "," (map pretty (Set.toList es))) <> ">" <+> pretty t
   pretty (OptionalF t) = "?" <> pretty t
@@ -1744,6 +1773,7 @@ instance Pretty PolyExpr where
   pretty (PolyInt _ _) = "PolyInt"
   pretty (PolyStr _ _) = "PolyStr"
   pretty (PolyEnum _ n _) = "PolyEnum" <> parens (pretty n)
+  pretty (PolyVariant _ n _ xs) = "PolyVariant" <> parens (pretty n) <> tupled (map pretty xs)
   pretty (PolyNull _) = "PolyNull"
   pretty (PolyDoBlock _ e) = "PolyDoBlock" <+> pretty e
   pretty (PolyEval _ e) = "PolyEval" <+> pretty e
@@ -1781,6 +1811,7 @@ instance Pretty MonoExpr where
   pretty (MonoInt _ x) = viaShow x
   pretty (MonoStr _ x) = viaShow x
   pretty (MonoEnum _ n _) = pretty n
+  pretty (MonoVariant _ n _ xs) = pretty n <> tupled (map pretty xs)
   pretty (MonoNull _) = "NULL"
   pretty (MonoDoBlock _ e) = "{" <> pretty e <> "}"
   pretty (MonoEval _ e) = "!" <> pretty e

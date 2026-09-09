@@ -149,6 +149,9 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       -- behind it is generated for this pool or supplied by the user
       -- through a `data Cpp => X = "..."` mapping.
       f (EnumF (FV _ x) _) = return $ pretty x
+      -- A variant lowers to its concrete name; the type carrying the arms
+      -- is generated for this pool or supplied by `data Cpp => X = "..."`.
+      f (VariantF (FV _ x) _) = return $ pretty x
       -- Kindless or polymorphic-row `Table` lowers to a VarF tagged with
       -- the general type variable @BT.table@. The wire schema marker is
       -- @T@ on the encoder side; here on the C++ side it must lower to
@@ -169,7 +172,13 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       -- and we raise 'leakError'.
       f (VarF (FV gv@(TV gvText) (CV cvText))) | gvText == cvText = do
         legit <- cscopeMatches gv cvText
-        if legit then return (pretty cvText) else leakError gvText
+        -- A `data` type this pool DECLARES defaults its concrete name to
+        -- its own, which is the same shape a bnd-protect leak produces.
+        -- The generated-type set is what separates them.
+        declared <- CMS.gets translatorVariantNames
+        if legit || Set.member gv declared
+          then return (pretty cvText)
+          else leakError gvText
       f (VarF (FV _ x)) = return $ pretty x
       f (FunF ts t) = do
         t' <- f t
@@ -191,7 +200,9 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
             let (typeTs, kindCount) = partitionKindArgsF ts
             ts' <- mapM f typeTs
             return . pretty $ expandMacro cvText (map render ts') kindCount
-          else leakError gvText
+          else do
+            declaredApp <- CMS.gets translatorVariantNames
+            if Set.member gv declaredApp then return (pretty cvText) else leakError gvText
       f (AppF t ts) = do
         -- $N in the CV template indexes TYPE args only; kind-kinded
         -- args (NatLitF, NatVoidF, StrLitF, StrVoidF) are structural
@@ -234,10 +245,17 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       -- cscope -- the same source pairEval uses. If cscope holds an
       -- entry, render its body's outer name. Otherwise the alias has
       -- no concrete C++ mapping and we raise 'leakError'.
-      f (RecF (FV gv@(TV _) _)) = do
+      f (RecF (FV gv@(TV gvName) _)) = do
         cscope <- CMS.gets translatorCScope
+        variantNames <- CMS.gets translatorVariantNames
         case Map.lookup gv cscope of
           Just ((_, body, _, _, _) : _) | Just cv <- bodyCV body -> return (pretty cv)
+          -- A back-reference to a `data` type names a type this pool
+          -- GENERATES, so it is already declared and needs no user mapping.
+          -- The leak diagnostic below is for recursive ALIASES, which have
+          -- no generated form and would otherwise reach the pool as a bare
+          -- morloc identifier.
+          _ | Set.member gv variantNames -> return (pretty gvName)
           _ -> leakError (unTVar gv)
       f (EffectF _ t) = do
         t' <- f t
@@ -312,6 +330,11 @@ data CppTranslatorState = CppTranslatorState
   -- ^ Per-labeled-midx pre-rendered log templates (see 'LogTemplate').
   -- The IIFE wrap is injected at the definition site so manifolds
   -- referenced by symbol (e.g. @std::bind(m1043, _1)@) also log.
+  , translatorVariantNames :: Set.Set TVar
+  -- ^ The payload-bearing `data` types this pool DECLARES. A `RecF`
+  -- back-reference naming one of these is legitimate and renders as that
+  -- name; the leak diagnostic is for recursive ALIASES, which have no
+  -- generated form and would reach the pool as a bare morloc identifier.
   , translatorSchemas :: Map.Map Text Int
   -- The merged C++ concrete scope (the same scope @pairEval@ consults).
   -- 'cppTypeOf' uses it as ground truth to distinguish two cases that
@@ -343,6 +366,7 @@ instance Defaultable CppTranslatorState where
       , translatorRemoteManifoldSet = Set.empty
       , translatorEffectLabels = Map.empty
       , translatorLogTemplates = Map.empty
+      , translatorVariantNames = Set.empty
       , translatorSchemas = Map.empty
       , translatorCScope = Map.empty
       , translatorDebugInfo = \_ -> ("", "")
@@ -452,6 +476,10 @@ makeCppCode ::
   Map.Map Int ([Text], [Text], Text) ->
   CppTranslator MDoc
 makeCppCode labels srcs es univeralScopeMap scopeMap closureTable0 = do
+  -- Seeded before any type is rendered: 'cppTypeOf' consults it to tell a
+  -- back-reference into a generated `data` type from an unmapped alias.
+  CMS.modify $ \st -> st
+    { translatorVariantNames = Set.fromList [gv | (FV gv _, _) <- collectCppVariants es] }
   templates <- CMS.gets translatorLogTemplates
   (srcDecl, srcSerial) <- generateSourcedSerializers univeralScopeMap scopeMap es
 
@@ -461,7 +489,10 @@ makeCppCode labels srcs es univeralScopeMap scopeMap closureTable0 = do
   signatures <- concat <$> mapM makeSignature es
 
   (autoDecl, autoSerial) <- generateAnonymousStructs
-  let serializationCode = autoDecl ++ srcDecl ++ autoSerial ++ srcSerial
+  -- Variant declarations lead: an arm may hold a generated record, and a
+  -- sourced header may name the variant type.
+  (varDecl, varSerial) <- generateCppVariants es
+  let serializationCode = varDecl ++ autoDecl ++ srcDecl ++ varSerial ++ autoSerial ++ srcSerial
 
   -- Restrict the closure machinery to closures that actually CROSS a boundary
   -- (their signature appears at a SerialClosure serialize site). Purely-local
@@ -730,7 +761,24 @@ cppLowerConfig reifyThunks =
     -- expression, so a bare `T` would serialize against a `?`-schema without the
     -- optional layer (a compound inner then hits "compound schema reached a
     -- scalar-sized type" at runtime). `make_optional` deduces T from the value.
+    -- Each arm is its own struct (two arms with the same field types must
+    -- stay distinguishable), so a value is that struct braced-initialised
+    -- and implicitly converted into the variant.
+    -- Each arm lives behind a shared_ptr inside the variant. That gives a
+    -- recursive arm a finite size and lets an arm holding another `data`
+    -- type need only a forward declaration, so declaration order between
+    -- two variants stops mattering.
+    , lcVariantLit = \cv n _ xs ->
+        let arm = pretty (unCVar cv) <> "_" <> pretty n
+        in pretty (unCVar cv) <> "{std::make_shared<" <> arm <> ">"
+             <> parens (arm <> encloseSep "{" "}" ", " xs) <> "}"
     , lcEnumLit = \cv n _ -> pretty (unCVar cv) <> "::" <> pretty n
+    , lcVariantTagTest = \cv n _ subj ->
+        "std::holds_alternative<std::shared_ptr<" <> pretty (unCVar cv) <> "_"
+          <> pretty n <> ">>" <> parens (parens subj <> ".v")
+    , lcCtorField = \cv n i subj ->
+        "std::get<std::shared_ptr<" <> pretty (unCVar cv) <> "_" <> pretty n <> ">>"
+          <> parens (parens subj <> ".v") <> "->f" <> pretty i
     , lcTagTest = \a b -> parens (a <+> "==" <+> b)
     , lcCoerceOptional = \x -> "std::make_optional(" <> x <> ")"
     , lcTypeOf = \t -> Just . toIType <$> cppTypeOf t
@@ -1517,6 +1565,108 @@ walkCppSelectorBrackets =
 
 typeParams :: [(Maybe TypeF, TypeF)] -> CppTranslator MDoc
 typeParams ts = CP.printRecordTemplate <$> mapM cppTypeOf [t | (Nothing, t) <- ts]
+
+-- | Collect every payload-bearing `data` type used in these manifolds with
+-- its arms, merging occurrences arm-wise. A constructor literal's type
+-- reports only the arm being built, and reports it with no fields, so taking
+-- the first occurrence could declare an arm as nullary that the schema says
+-- carries a payload.
+collectCppVariants :: [SerialManifold] -> [(FVar, [(Text, [TypeF])])]
+collectCppVariants =
+  Map.elems
+    . Map.fromListWith wider
+    . map (\e@(FV gv _, _) -> (gv, e))
+    . concatMap (runIdentity . foldWithSerialManifoldM fm)
+  where
+    -- Merge arm-wise, but keep DECLARATION ORDER: an arm's position is its
+    -- wire tag, so sorting by name here would silently renumber every
+    -- constructor. The longer list is the more complete view of the type and
+    -- supplies the order; fields come from whichever occurrence has them,
+    -- since a constructor literal's type reports its own arm with none.
+    wider (v, as) (_, bs) = (v, [(n, pick n) | n <- order])
+      where
+        am = Map.fromList as
+        bm = Map.fromList bs
+        order = if length as >= length bs then map fst as else map fst bs
+        pick n = case (Map.lookup n am, Map.lookup n bm) of
+          (Just xs, Just ys) -> if null xs then ys else xs
+          (Just xs, Nothing) -> xs
+          (Nothing, Just ys) -> ys
+          _ -> []
+
+    fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
+    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (serialAstToType s)
+    ne efull e = return $ foldlNE (<>) (seek (typeFof efull)) e
+    se _ (SerializeS_ s xs) = return $ seek (serialAstToType s) <> xs
+    se _ e = return $ foldlSE (<>) [] e
+
+    seek :: TypeF -> [(FVar, [(Text, [TypeF])])]
+    seek (VariantF v as) = (v, as) : concatMap (concatMap seek . snd) as
+    seek (NamF _ _ _ rs) = concatMap (seek . snd) rs
+    seek (AppF t ts) = concatMap seek (t : ts)
+    seek (FunF ts t) = concatMap seek (t : ts)
+    seek (OptionalF t) = seek t
+    seek (EffectF _ t) = seek t
+    seek _ = []
+
+-- | Emit the arm structs, the wrapper, and the marshalling for every
+-- payload-bearing `data` type in the pool. A user-mapped
+-- @data Cpp => X = "..."@ supplies its own type in sourced C++, so only the
+-- marshalling is emitted for it.
+-- | Every wrapper is emitted before any arm body, because an arm may hold
+-- another `data` type by value. Declarations therefore come out in two
+-- phases rather than one block per type.
+generateCppVariants :: [SerialManifold] -> CppTranslator ([MDoc], [MDoc])
+generateCppVariants es = do
+  parts <- mapM makeOne (collectCppVariants es)
+  let decls = concatMap (\(d, _, _, _) -> d) parts
+      bodies = concatMap (\(_, b, _, _) -> b) parts
+      fwds = concatMap (\(_, _, f, _) -> f) parts
+      serials = concatMap (\(_, _, _, x) -> x) parts
+  -- Types, then every marshaller SIGNATURE, then the definitions. The middle
+  -- phase is what stops a definition that appears later from being invisible
+  -- to an earlier call, which would bind to the header's raw-bytes fallback.
+  return (decls <> bodies <> fwds, serials)
+  where
+    makeOne (FV gv (CV cvText), arms) = do
+      userMapped <- variantIsUserMapped gv cvText
+      arms' <- mapM (\(n, ts) -> (,) n <$> mapM cppTypeOf ts) arms
+      let name = pretty cvText
+          -- Each arm's struct needs its own marshalling: the wrapper hands
+          -- the payload to the runtime as that struct, and the arm's schema
+          -- describes it as a tuple of fields. Without these the size and
+          -- write calls fall through to a generic template that reports the
+          -- slot alone, and the payload is written over its own slot.
+          armSerial (c, ts) =
+            let aname = name <> "_" <> pretty c
+                fields = [("f" <> pretty i, t) | (i, t) <- zip [(0 :: Int) ..] ts]
+            in [CP.printSerializer [] aname fields, CP.printDeserializer True [] aname fields]
+          serial = CP.printCppVariantSerializers name arms'
+          armSerials = concatMap armSerial [(c, ts) | (c, ts) <- arms', not (null ts)]
+          fwds = CP.printMarshalDecls name
+                   : [CP.printMarshalDecls (name <> "_" <> pretty c) | (c, ts) <- arms', not (null ts)]
+      return $ if userMapped
+                 then ([], [], fwds, armSerials <> [serial])
+                 else ( [CP.printCppVariantDecl name arms']
+                      , [CP.printCppVariantArms name arms']
+                      , fwds
+                      , armSerials <> [serial] )
+
+-- | True when the concrete scope holds an entry for this type whose body
+-- names @cvText@, i.e. the user wrote @data Cpp => X = "..."@ and supplies
+-- the type themselves. The @gv == cv@ shape alone cannot decide it: an
+-- unmapped type defaults its concrete name to its own.
+variantIsUserMapped :: TVar -> Text -> CppTranslator Bool
+variantIsUserMapped gv cvText = do
+  cscope <- CMS.gets translatorCScope
+  return $ case Map.lookup gv cscope of
+    Just entries -> any (\(_, body, _, _, _) -> outerName body == Just cvText) entries
+    Nothing -> False
+  where
+    outerName (VarU (TV n)) = Just n
+    outerName (AppU (VarU (TV n)) _) = Just n
+    outerName (NamU _ (TV n) _ _) = Just n
+    outerName _ = Nothing
 
 generateAnonymousStructs :: CppTranslator ([MDoc], [MDoc])
 generateAnonymousStructs = do

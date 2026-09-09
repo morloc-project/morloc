@@ -177,7 +177,7 @@ static bool shm_tracker_release_one(absptr_t ptr) {
 
 /// }}}
 
-// ── Recursive-record env (named-schema stack) ─────────────────────────────
+// -- Recursive-record env (named-schema stack) -----------------------------
 //
 // Mirrors the pymorloc.c stack: thread-local push/pop discipline so the
 // schema walkers can resolve MORLOC_RECUR back-references to their
@@ -284,6 +284,26 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj);
 
 // Public wrapper: maintain the recur env stack across the recursive walk
 // so MORLOC_RECUR arms can resolve their back-reference targets.
+// Resolve a constructor name against a variant schema's key list, yielding
+// its tag. The tag is the constructor's position in the declaration, which is
+// what the wire carries, and the keys arrive in that same order.
+static ssize_t variant_tag_of(const Schema* schema, SEXP obj) {
+    if (TYPEOF(obj) != VECSXP || Rf_length(obj) != 2) {
+        return -1;
+    }
+    SEXP name = VECTOR_ELT(obj, 0);
+    if (TYPEOF(name) != STRSXP || Rf_length(name) < 1) {
+        return -1;
+    }
+    const char* want = CHAR(STRING_ELT(name, 0));
+    for (size_t i = 0; i < schema->size; i++) {
+        if (schema->keys[i] && strcmp(schema->keys[i], want) == 0) {
+            return (ssize_t)i;
+        }
+    }
+    return -1;
+}
+
 static size_t get_shm_size(const Schema* schema, SEXP obj) {
     int pushed = recur_env_push(schema);
     size_t r = get_shm_size_inner(schema, obj);
@@ -482,9 +502,28 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
                 }
             }
 
+        case MORLOC_VARIANT: {
+            // list("Circle", list(fields...)): the 16-byte slot, worst-case
+            // padding before the payload, and the payload's own size. A
+            // nullary arm has no payload and needs only the slot.
+            ssize_t vtag = variant_tag_of(schema, obj);
+            if (vtag < 0) MORLOC_ERROR("not a constructor of this `data` type");
+            const Schema* varm = schema->parameters[vtag];
+            if (varm->size == 0) {
+                return schema->width;
+            }
+            {
+                SEXP vfields = VECTOR_ELT(obj, 1);
+                size_t arm_size = get_shm_size(varm, vfields);
+                size_t varm_align = schema_alignment(varm);
+                if (varm_align == 0) varm_align = 1;
+                return schema->width + (varm_align - 1) + arm_size;
+            }
+        }
+
         case MORLOC_OPTIONAL:
-            // Slot is sizeof(relptr) (= schema->width). Absent → just the slot.
-            // Present → slot + worst-case alignment padding for the inner T +
+            // Slot is sizeof(relptr) (= schema->width). Absent -> just the slot.
+            // Present -> slot + worst-case alignment padding for the inner T +
             // T's total size (its own width plus any variable extras).
             if (obj == R_NilValue) {
                 return schema->width;
@@ -722,7 +761,7 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
             HANDLE_UINT64();
             break;
         case MORLOC_INT: {
-            // Inline BigInt: [size=1, value] — no allocation needed
+            // Inline BigInt: [size=1, value] -- no allocation needed
             if (!(isInteger(obj) || isReal(obj))) {
                 MORLOC_ERROR("Expected integer or numeric for MORLOC_INT, but got %s", type2char(TYPEOF(obj)));
             }
@@ -977,8 +1016,36 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
             }
             break;
 
+        case MORLOC_VARIANT: {
+            // Tag byte, determined padding, then a relptr to the arm's
+            // fields written at the cursor. A nullary arm writes RELNULL and
+            // allocates nothing, matching the wire form.
+            ssize_t wtag = variant_tag_of(schema, obj);
+            if (wtag < 0) MORLOC_ERROR("not a constructor of this `data` type");
+            const Schema* warm = schema->parameters[wtag];
+            *((uint8_t*)dest) = (uint8_t)wtag;
+            memset((char*)dest + 1, 0, 7);
+            if (warm->size == 0) {
+                *(relptr_t*)((char*)dest + 8) = RELNULL;
+            } else {
+                SEXP wfields = VECTOR_ELT(obj, 1);
+                size_t warm_align = schema_alignment(warm);
+                if (warm_align == 0) warm_align = 1;
+                *cursor = (void*)(((uintptr_t)*cursor + warm_align - 1) & ~(uintptr_t)(warm_align - 1));
+                {
+                    char* rel_err = NULL;
+                    *(relptr_t*)((char*)dest + 8) = abs2rel(*cursor, &rel_err);
+                    if (rel_err) { free(rel_err); MORLOC_ERROR("abs2rel failed in MORLOC_VARIANT"); }
+                }
+                void* arm_dest = *cursor;
+                *cursor = (void*)((char*)*cursor + warm->width);
+                to_voidstar_inner(arm_dest, cursor, wfields, warm);
+            }
+            break;
+        }
+
         case MORLOC_OPTIONAL:
-            // The slot is a relptr. Absent → write RELNULL. Present →
+            // The slot is a relptr. Absent -> write RELNULL. Present ->
             // align the cursor for the inner T, write the inner's relptr
             // into the slot, advance the cursor past T's width, then
             // recurse to fill T's body.
@@ -1079,7 +1146,7 @@ static SEXP from_voidstar_inner(const void* data, const Schema* schema, const vo
         case MORLOC_SINT32:
             // R's integer reserves INT32_MIN as NA_integer_, so storing the
             // full Int32 range as INTSXP would conflate the legitimate value
-            // -2^31 with missing data. Use REALSXP (double) instead — int32
+            // -2^31 with missing data. Use REALSXP (double) instead -- int32
             // fits in 53 bits, so values round-trip exactly.
             obj = ScalarReal((double)(*(int32_t*)data));
             break;
@@ -1493,6 +1560,41 @@ static SEXP from_voidstar_inner(const void* data, const Schema* schema, const vo
             }
             setAttrib(obj, R_NamesSymbol, names);
             UNPROTECT(2);
+            break;
+        }
+        case MORLOC_VARIANT: {
+            // A payload-bearing `data` value crosses as a STRUCTURAL pair --
+            // the constructor's name and a list of its fields -- because the
+            // generic marshaller has no pool-level type to build. Documented
+            // interim form; see the note on the Python/R variant spelling in
+            // the code generator.
+            uint8_t vtag = *(const uint8_t*)data;
+            if ((size_t)vtag >= schema->size) {
+                MORLOC_ERROR("variant tag is out of range for this type");
+            }
+            const Schema* varm = schema->parameters[vtag];
+            relptr_t vrel = *(const relptr_t*)((const char*)data + 8);
+            SEXP vfields;
+            if (vrel == RELNULL) {
+                vfields = PROTECT(allocVector(VECSXP, 0));
+            } else {
+                const void* payload;
+                if (base_ptr) {
+                    payload = (const char*)base_ptr + vrel;
+                } else {
+                    char* rel_err = NULL;
+                    payload = rel2abs(vrel, &rel_err);
+                    if (rel_err) { free(rel_err); MORLOC_ERROR("rel2abs failed in MORLOC_VARIANT"); }
+                }
+                vfields = PROTECT(from_voidstar(payload, varm, base_ptr));
+            }
+            {
+                SEXP pair = PROTECT(allocVector(VECSXP, 2));
+                SET_VECTOR_ELT(pair, 0, mkString(schema->keys[vtag]));
+                SET_VECTOR_ELT(pair, 1, vfields);
+                UNPROTECT(2);
+                obj = pair;
+            }
             break;
         }
         case MORLOC_OPTIONAL: {
@@ -1963,7 +2065,7 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
 }
 
 
-// ── Stream-handle bindings ───────────────────────────────────────────────
+// -- Stream-handle bindings -----------------------------------------------
 
 // @open: returns a 64-bit handle. R has no native int64 SEXP type, so
 // we marshal via a length-1 numeric vector (double) which preserves
@@ -2903,7 +3005,7 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
 }
 
 
-// ── log emission bridge to libmorloc.so ──────────────────────────────────
+// -- log emission bridge to libmorloc.so ----------------------------------
 
 SEXP morloc_log_next_id_r(void) {
     uint64_t id = morloc_log_next_id();
@@ -3786,7 +3888,7 @@ SEXP morloc_worker_loop_c(SEXP pipe_fd_r, SEXP ack_fd_r, SEXP dispatch_r, SEXP r
 
 // }}} C-level worker loop
 
-// ── Cache bridge to libmorloc.so ───────────────────────────────────────────
+// -- Cache bridge to libmorloc.so -------------------------------------------
 
 // Compute a cache key. Inputs:
 //   midx_r:     integer manifold id

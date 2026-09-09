@@ -19,6 +19,7 @@ use std::ffi::{CString};
 use std::os::raw::{c_char, c_int, c_ulong, c_void};
 use std::sync::OnceLock;
 use rustmorloc::{parse_schema, Schema, ToVoidstar, FromVoidstar, RecurScope, resolve_recur};
+use rustmorloc::{variant_size_nullary, variant_size_payload, write_variant_nullary, write_variant_payload, read_variant_tag, read_variant_payload};
 // Function-value traits: a closure is applied as `f.callN(..)` (the trait method
 // must be in scope). The blanket impl covers native closures; boxed function
 // values (record fields) dispatch through the trait object.

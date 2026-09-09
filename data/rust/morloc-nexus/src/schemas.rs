@@ -44,6 +44,15 @@ pub(crate) fn render_schema_type(
         // Show the constructor set: it is the useful thing to know
         // about the type and it always fits, being closed.
         Enum => s.keys.join(" | "),
+        // Show each arm with its field count, which is what distinguishes
+        // the arms from an enum's bare names.
+        Variant => s
+            .keys
+            .iter()
+            .zip(s.parameters.iter())
+            .map(|(k, arm)| if arm.size == 0 { k.clone() } else { format!("{k}/{}", arm.size) })
+            .collect::<Vec<_>>()
+            .join(" | "),
         Sint8 => "I8".into(),
         Sint16 => "I16".into(),
         Sint32 => "Int".into(),
