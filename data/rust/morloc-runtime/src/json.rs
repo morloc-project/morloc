@@ -105,6 +105,19 @@ impl ShmReader {
 
 // ── JSON -> Voidstar ───────────────────────────────────────────────────────
 
+/// True for an enum, or an optional wrapping one. Used to decide whether a
+/// bare (unquoted) token should be retried as a constructor name.
+fn schema_is_enum_like(schema: &Schema) -> bool {
+    match schema.serial_type {
+        SerialType::Enum => true,
+        SerialType::Optional => schema
+            .parameters
+            .first()
+            .map_or(false, |p| p.serial_type == SerialType::Enum),
+        _ => false,
+    }
+}
+
 pub fn read_json_with_schema(json_str: &str, schema: &Schema) -> Result<AbsPtr, MorlocError> {
     read_json_with_schema_dest(None, json_str, schema)
 }
@@ -115,8 +128,27 @@ pub fn read_json_with_schema_dest(
     // Parse to RawValue (preserves the raw text of every leaf). Avoids
     // serde_json's f64 fallback for numbers that exceed i64/u64, which
     // silently corrupts BigInt (`Int`) values.
-    let rv: Box<RawValue> = serde_json::from_str(json_str)
-        .map_err(|e| MorlocError::Serialization(format!("JSON parse error: {}", e)))?;
+    let rv: Box<RawValue> = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(e) => {
+            // A bare constructor name is the natural way to spell an enum on
+            // the command line (`cmd G`), but it is not valid JSON on its
+            // own. Quoting it on the retry is unambiguous BECAUSE the first
+            // attempt already succeeded for every JSON literal: `null`,
+            // numbers and quoted strings all parse, so only a bare word
+            // reaches here. That is what keeps `?DNA` able to say `null`
+            // for absent while still accepting `G` for present.
+            if schema_is_enum_like(schema) {
+                let requoted = serde_json::to_string(json_str.trim())
+                    .map_err(|_| MorlocError::Serialization("JSON parse error".into()))?;
+                serde_json::from_str(&requoted).map_err(|e2| {
+                    MorlocError::Serialization(format!("JSON parse error: {}", e2))
+                })?
+            } else {
+                return Err(MorlocError::Serialization(format!("JSON parse error: {}", e)));
+            }
+        }
+    };
     let mut env: RecurEnv = Vec::new();
     json_to_voidstar(&rv, schema, dest, &mut env)
 }
@@ -236,6 +268,30 @@ fn json_to_voidstar_inner(
         SerialType::Sint32 => { let w = alloc(dest, 4)?; w.write_val::<i32>(0, parse_sint(text, i32::MIN as i64, i32::MAX as i64, "I32")? as i32); Ok(w.as_ptr()) }
         SerialType::Sint64 => { let w = alloc(dest, 8)?; w.write_val::<i64>(0, parse_sint(text, i64::MIN,        i64::MAX,        "I64")?);        Ok(w.as_ptr()) }
         SerialType::Uint8  => { let w = alloc(dest, 1)?; w.write_val::<u8>(0,  parse_uint(text, u8::MAX  as u64, "U8")?  as u8);  Ok(w.as_ptr()) }
+        // JSON is the human- and LLM-facing format, so an enum reads and
+        // writes as its constructor NAME. Only a declared name is accepted,
+        // and a rejection names the whole legal set -- which is possible
+        // precisely because the schema carries the constructor list.
+        SerialType::Enum => {
+            let t = text.trim();
+            let name = t.strip_prefix('"').and_then(|x| x.strip_suffix('"')).ok_or_else(|| {
+                err(&format!(
+                    "expected one of {}, got {}",
+                    schema.keys.join(", "),
+                    truncate_for_msg(t)
+                ))
+            })?;
+            let tag = schema.keys.iter().position(|k| k == name).ok_or_else(|| {
+                err(&format!(
+                    "'{}' is not a constructor of this type; expected one of {}",
+                    name,
+                    schema.keys.join(", ")
+                ))
+            })?;
+            let w = alloc(dest, 1)?;
+            w.write_val::<u8>(0, tag as u8);
+            Ok(w.as_ptr())
+        }
         SerialType::Uint16 => { let w = alloc(dest, 2)?; w.write_val::<u16>(0, parse_uint(text, u16::MAX as u64, "U16")? as u16); Ok(w.as_ptr()) }
         SerialType::Uint32 => { let w = alloc(dest, 4)?; w.write_val::<u32>(0, parse_uint(text, u32::MAX as u64, "U32")? as u32); Ok(w.as_ptr()) }
         SerialType::Uint64 => { let w = alloc(dest, 8)?; w.write_val::<u64>(0, parse_uint(text, u64::MAX,        "U64")?);        Ok(w.as_ptr()) }
@@ -735,6 +791,20 @@ fn to_json_inner(
         SerialType::Sint32 => map_io(write!(w, "{}", r.read_val::<i32>(0)))?,
         SerialType::Sint64 => map_io(write!(w, "{}", r.read_val::<i64>(0)))?,
         SerialType::Uint8  => map_io(write!(w, "{}", r.read_u8(0)))?,
+        SerialType::Enum   => {
+            let tag = r.read_u8(0) as usize;
+            // A tag with no constructor means the value and the schema
+            // disagree. Say so rather than inventing a name.
+            let name = schema.keys.get(tag).ok_or_else(|| {
+                MorlocError::Serialization(format!(
+                    "enum tag {} is out of range; the type has {} constructors ({})",
+                    tag,
+                    schema.size,
+                    schema.keys.join(", ")
+                ))
+            })?;
+            map_io(write!(w, "\"{}\"", name))?
+        }
         SerialType::Uint16 => map_io(write!(w, "{}", r.read_val::<u16>(0)))?,
         SerialType::Uint32 => map_io(write!(w, "{}", r.read_val::<u32>(0)))?,
         SerialType::Uint64 => map_io(write!(w, "{}", r.read_val::<u64>(0)))?,

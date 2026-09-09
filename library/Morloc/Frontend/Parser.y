@@ -56,10 +56,18 @@ import qualified Morloc.BaseTypes as BT
 --   current atom and the next token is '!', the parser can either reduce
 --   the chain or extend it with a new force_expr atom. Shift is correct
 --   (extend the atom chain, so `bar !x` = `bar (!x)`).
+-- - 2 from UPPER as an atom_expr (a `data` constructor in expression
+--   position): with an atom chain in hand and UPPER next, the parser can
+--   reduce the chain or extend it. Shift is correct (extend), so `f Red`
+--   is an application. Same class as the '_', '!', '(', '[' and '{' cases
+--   above.
 -- refut_clauses (`|`-pattern definitions) add no new conflicts: '|' is a
 --   reserved token, so `evar_or_op refut_clauses` does not overlap the
 --   `evar_or_op atom_exprs` (CAssE) or guard_clauses alternatives.
-%expect 96
+-- `data` declarations add no new conflicts either, the alternation bar
+--   included: '|' is reserved, and every `data` form starts with the
+--   keyword.
+%expect 98
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -102,6 +110,7 @@ import qualified Morloc.BaseTypes as BT
   'False'    { Located _ TokFalse _ }
   'type'     { Located _ TokType _ }
   'newtype'  { Located _ TokNewtype _ }
+  'data'     { Located _ TokData _ }
   'record'   { Located _ TokRecord _ }
   'object'   { Located _ TokObject _ }
   'class'    { Located _ TokClass _ }
@@ -348,6 +357,19 @@ typedef_decl :: { Loc CstExpr }
       { at $1 (CTypE (CstTypeAliasForward (TV (getName $2), $3))) }
   | 'newtype' '(' UPPER typedef_params ')'
       { at $1 (CTypE (CstTypeAliasForward (TV (getName $3), $4))) }
+  -- A `data` declaration. Stage 1 accepts only argument-free constructors,
+  -- but the grammar carries argument types so that the rejection happens in
+  -- Desugar, where it can point at the offending constructor.
+  | 'data' UPPER typedef_params '=' data_ctors
+      { at $1 (CTypE (CstDataDef (TV (getName $2), $3) $5)) }
+  | 'data' '(' UPPER typedef_params ')' '=' data_ctors
+      { at $1 (CTypE (CstDataDef (TV (getName $3), $4) $7)) }
+  -- Bind the type to a native form the target language already has, the
+  -- same way `type Lang => X = "..."` does.
+  | 'data' UPPER '=>' typedef_term '=' concrete_rhs
+      { at $1 (CTypE (CstTypeAlias (Just $2) $4 $6)) }
+  | 'data' LOWER '=>' typedef_term '=' concrete_rhs
+      { at $1 (CTypE (CstTypeAlias (Just $2) $4 $6)) }
   | nam_type typedef_term 'where' VLBRACE nam_entry_list_loc VRBRACE
       {% checkRecordTypeKeys (fst $1) $5 >> return (at (fst $1) (CTypE (CstNamTypeWhere (snd $1) $2 $5))) }
   | nam_type typedef_term '=' nam_constructor opt_nam_entries
@@ -371,6 +393,17 @@ nam_constructor :: { (Text, Bool, [TypeU]) }
   : STRING nam_constructor_args   { (getString $1, True, $2) }
   | UPPER                         { (getName $1, False, []) }
   | LOWER                         { (getName $1, False, []) }
+
+data_ctors :: { [(Located, Text, [TypeU])] }
+  : data_ctor                     { [$1] }
+  | data_ctors '|' data_ctor      { $1 ++ [$3] }
+
+data_ctor :: { (Located, Text, [TypeU]) }
+  : UPPER data_ctor_args          { ($1, getName $1, $2) }
+
+data_ctor_args :: { [TypeU] }
+  : {- empty -}                            { [] }
+  | data_ctor_args nam_constructor_arg     { $1 ++ [$2] }
 
 nam_constructor_args :: { [TypeU] }
   : {- empty -}                                  { [] }
@@ -827,6 +860,10 @@ bracket_axis :: { CstBracketAxis }
 var_expr :: { Loc CstExpr }
   : LOWER NSDOT LOWER         { Loc ($1 <-> $3) (CVarE (EV (getName $1 <> "." <> getName $3))) }
   | LOWER                     { at $1 (CVarE (EV (getName $1))) }
+  -- A bare UPPER name in expression position is a `data` constructor.
+  -- Constructor names are globally unique, so the name alone resolves to
+  -- its type and no qualified form is needed.
+  | UPPER                     { at $1 (CVarE (EV (getName $1))) }
 
 bool_expr :: { Loc CstExpr }
   : 'True'                     { at $1 (CLogE True) }
@@ -1273,6 +1310,7 @@ toDState ps = DState
   , dsWarnings = psWarnings ps
   , dsModuleDoc = psModuleDoc ps
   , dsModuleEpilogues = psModuleEpilogues ps
+  , dsDataCtors = Map.empty
   , dsStreamElems = psStreamElems ps
   }
 

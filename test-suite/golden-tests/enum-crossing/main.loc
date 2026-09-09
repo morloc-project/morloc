@@ -1,0 +1,65 @@
+-- An enum value crossing every pool language, in both directions.
+--
+-- `data` with nullary constructors is morloc's enum: one byte on the wire,
+-- carrying its constructor names in the schema so JSON renders "G" rather
+-- than the ordinal 2 and `--json-help` can advertise a closed set.
+--
+-- Two declaration paths are exercised, mirroring how records already work:
+--
+--   * Python and R take the COMPILER-GENERATED form. Nothing is declared
+--     per-language, so the pool builds it: an `enum.IntEnum` in Python and
+--     a `factor` (integer codes + levels) in R, each being that language's
+--     own idea of an enum.
+--   * C++ and Rust take the USER-MAPPED form (`data Cpp => DNA = "DNA"`),
+--     so the helper files supply `enum class DNA : uint8_t` and
+--     `#[repr(u8)] enum DNA` themselves.
+--
+-- Every complement pairs a non-first constructor with a non-last one, which
+-- is what catches an ordinal off-by-one -- in particular R's factor codes
+-- are 1-based while the wire tag is 0-based, so an identity-looking
+-- round-trip would hide the bug that `rComp` exposes.
+
+module main
+  ( pyComp
+  , cppComp
+  , rComp
+  , rustComp
+  , pyToCpp
+  , cppToR
+  , rToRust
+  , listComp
+  , optId
+  )
+
+import root-py
+import root-cpp
+import root-r
+import root-rust
+
+data DNA = A | C | G | T
+
+data Cpp  => DNA = "DNA"
+data Rust => DNA = "DNA"
+
+source Py   from "dna.py"  ("complement" as pyComp, "complement_all" as listComp, "opt_id" as optId)
+source Cpp  from "dna.hpp" ("complement" as cppComp)
+source R    from "dna.R"   ("complement" as rComp)
+source Rust from "dna.rs"  ("complement" as rustComp)
+
+pyComp   :: DNA -> DNA
+cppComp  :: DNA -> DNA
+rComp    :: DNA -> DNA
+rustComp :: DNA -> DNA
+listComp :: [DNA] -> [DNA]
+optId    :: ?DNA -> ?DNA
+
+-- Complementing twice is the identity, so each of these is a round trip
+-- through two different native representations.
+pyToCpp :: DNA -> DNA
+pyToCpp x = cppComp (pyComp x)
+
+cppToR :: DNA -> DNA
+cppToR x = rComp (cppComp x)
+
+rToRust :: DNA -> DNA
+rToRust x = rustComp (rComp x)

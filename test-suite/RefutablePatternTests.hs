@@ -39,6 +39,7 @@ refutablePatternTests = testGroup "Refutable patterns (`|`-clauses)"
   [ lexerTests
   , parseTests
   , guardInteractionTests
+  , constructorPatternTests
   ]
 
 lexerTests :: TestTree
@@ -132,3 +133,119 @@ guardInteractionTests = testGroup "with `?`-guards"
       , "f | 0 ? True = 1"
       , "      : 2"
       ]
+
+-- Constructor patterns over a nullary `data`.
+--
+-- These pin the three ways the existing `|`-clause machinery goes wrong if
+-- constructors become terms without matching pattern support. Each failure
+-- is silent, so each gets a test:
+--
+--   1. 'exprToRefutPat' maps a bare 'CVarE' to 'CRPatVar' -- a binder that
+--      matches everything. An UPPER constructor must not take that path.
+--   2. 'checkRefutCoverage' asks 'refutPatHasLit', which knows only about
+--      literals, so a constructor clause would read as an irrefutable
+--      catch-all and a non-exhaustive definition would be accepted.
+--   3. 'assembleCascade' then drops the final clause's condition outright,
+--      so the last constructor arm would answer for every unmatched input.
+--
+-- `Bool` already works this way ('boolExhaustive'), which is the precedent
+-- an n-constructor set generalizes.
+--
+-- NOTE while this is red: `data` does not parse yet, so the rejection cases
+-- pass vacuously. They only mean something once the acceptance cases pass.
+constructorPatternTests :: TestTree
+constructorPatternTests = testGroup "constructor patterns"
+  [ testCase "constructor clauses parse" $
+      assertBool "complement over DNA" . isRight $ parseMod
+        "module main (f)\n\
+        \data DNA = A | C | G | T\n\
+        \f :: DNA -> DNA\n\
+        \f | A = T\n\
+        \  | C = G\n\
+        \  | G = C\n\
+        \  | T = A\n"
+
+  , testCase "a complete clause set needs no catch-all" $
+      assertBool "all three constructors covered" . isRight $ parseMod
+        "module main (f)\n\
+        \data Color = Red | Green | Blue\n\
+        \f :: Color -> Int\n\
+        \f | Red = 0\n\
+        \  | Green = 1\n\
+        \  | Blue = 2\n"
+
+  , -- Trap 2/3: this must be rejected. If it is accepted, `f Blue` silently
+    -- returns the Green arm, because the last clause's test is discarded.
+    testCase "an incomplete clause set is rejected" $
+      assertBool "Blue is unmatched" . isLeft $ parseMod
+        "module main (f)\n\
+        \data Color = Red | Green | Blue\n\
+        \f :: Color -> Int\n\
+        \f | Red = 0\n\
+        \  | Green = 1\n"
+
+  , testCase "an incomplete clause set with a catch-all is accepted" $
+      assertBool "wildcard covers the rest" . isRight $ parseMod
+        "module main (f)\n\
+        \data Color = Red | Green | Blue\n\
+        \f :: Color -> Int\n\
+        \f | Red = 0\n\
+        \  | _ = 1\n"
+
+  , testCase "a repeated constructor clause is rejected" $
+      assertBool "Red matched twice" . isLeft $ parseMod
+        "module main (f)\n\
+        \data Color = Red | Green | Blue\n\
+        \f :: Color -> Int\n\
+        \f | Red = 0\n\
+        \  | Red = 1\n\
+        \  | Green = 2\n\
+        \  | Blue = 3\n"
+
+  , testCase "a clause after a catch-all is rejected" $
+      assertBool "Blue is unreachable" . isLeft $ parseMod
+        "module main (f)\n\
+        \data Color = Red | Green | Blue\n\
+        \f :: Color -> Int\n\
+        \f | Red = 0\n\
+        \  | c = 1\n\
+        \  | Blue = 2\n"
+
+  , -- Trap 1: a lowercase head binds, an UPPER head tests. If the UPPER
+    -- case fell through to CRPatVar, this would be a complete definition
+    -- and the second clause would be unreachable rather than rejected.
+    testCase "a lowercase binder is not a constructor test" $
+      assertBool "x binds and shadows the rest" . isLeft $ parseMod
+        "module main (f)\n\
+        \data Color = Red | Green | Blue\n\
+        \f :: Color -> Int\n\
+        \f | x = 0\n\
+        \  | Green = 1\n"
+
+  , testCase "constructor patterns nest inside a tuple" $
+      assertBool "pair of constructors" . isRight $ parseMod
+        "module main (f)\n\
+        \data Color = Red | Green\n\
+        \f :: (Color, Color) -> Int\n\
+        \f | (Red, Red) = 0\n\
+        \  | (a, b) = 1\n"
+
+  , testCase "constructor patterns nest inside a record" $
+      assertBool "constructor in a field position" . isRight $ parseMod
+        "module main (f)\n\
+        \data Color = Red | Green\n\
+        \record Cell where\n\
+        \  hue :: Color\n\
+        \  n :: Int\n\
+        \f :: Cell -> Int\n\
+        \f | {hue = Red, n = k} = k\n\
+        \  | c = 0\n"
+
+  , testCase "an as-pattern may bind a constructor match" $
+      assertBool "label@Red" . isRight $ parseMod
+        "module main (f)\n\
+        \data Color = Red | Green\n\
+        \f :: Color -> Color\n\
+        \f | c@Red = c\n\
+        \  | Green = Green\n"
+  ]

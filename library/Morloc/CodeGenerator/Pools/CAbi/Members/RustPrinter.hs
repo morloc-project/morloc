@@ -26,6 +26,8 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter
   , stripTypeParams
   , printRustStruct
   , printRecordImpls
+  , printRustEnum
+  , printEnumImpls
   , ClosureMarshal (..)
   ) where
 
@@ -394,6 +396,64 @@ printRustStruct name params fields =
     , indent 4 (vsep [f <> ":" <+> t <> "," | (f, t) <- fields])
     , "}"
     ]
+
+-- | Emit the definition of a pool-owned @data@ type.
+--
+-- @repr(u8)@ with explicit discriminants is what makes the wire tag and the
+-- native value the same byte: the constructor's declaration ordinal IS its
+-- tag, so no translation table is needed on either side.
+printRustEnum :: MDoc -> [T.Text] -> MDoc
+printRustEnum name ctors =
+  vsep
+    [ "#[repr(u8)]"
+    , "#[derive(Clone, Copy, PartialEq, Eq, Debug)]"
+    , "enum" <+> name <+> "{"
+    , indent 4 (vsep [pretty c <+> "=" <+> pretty i <> "," | (i, c) <- zip [0 :: Int ..] ctors])
+    , "}"
+    ]
+
+-- | Emit @ToVoidstar@/@FromVoidstar@ for a @data@ type.
+--
+-- The value is one byte and fixed-width, so @shm_size@ is the schema width
+-- and @write@ is a single store -- no cursor advance, because there is no
+-- out-of-line payload.
+printEnumImpls :: MDoc -> [T.Text] -> MDoc
+printEnumImpls name ctors = vsep [toImpl, "", fromImpl]
+  where
+    toImpl =
+      vsep
+        [ "impl ToVoidstar for" <+> name <+> "{"
+        , indent 4 $ vsep
+            [ "fn shm_size(&self, schema: &Schema) -> usize {"
+            , indent 4 "resolve_recur(schema).width"
+            , "}"
+            , "unsafe fn write(&self, dest: *mut u8, _cursor: &mut *mut u8, _schema: &Schema) {"
+            , indent 4 "*dest = *self as u8;"
+            , "}"
+            ]
+        , "}"
+        ]
+    fromImpl =
+      vsep
+        [ "impl FromVoidstar for" <+> name <+> "{"
+        , indent 4 $ vsep
+            [ "unsafe fn read(_schema: &Schema, data: *const u8, _base: *const u8) -> Self {"
+            , indent 4 $ vsep
+                [ "match *data {"
+                , indent 4 $ vsep
+                    ( [pretty i <+> "=>" <+> name <> "::" <> pretty c <> "," | (i, c) <- zip [0 :: Int ..] ctors]
+                        ++ [ -- The runtime range-checks every tag at the wire
+                             -- boundary, so reaching this arm means the value
+                             -- and its schema disagree: a bug, not bad input.
+                             "t => panic!(\"" <> name <> ": no constructor for tag {}\", t),"
+                           ]
+                    )
+                , "}"
+                ]
+            , "}"
+            ]
+        , "}"
+        ]
 
 -- | Per-field marshalling strategy for a record function field. A closure field
 -- is stored natively as @Rc<dyn MorlocFnN>@ (no @ToVoidstar@), so it is reified

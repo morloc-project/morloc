@@ -65,6 +65,7 @@ ldRemoteCallFn: "morloc_remote_call"
 
 # Record handling
 ldDictStyleRecords: false
+ldEnumLitByName: true
 ldQuoteRecordKeys: false
 
 # Import syntax

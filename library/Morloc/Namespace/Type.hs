@@ -152,10 +152,12 @@ module Morloc.Namespace.Type
   , mostSpecificSubtypes
   , substituteFirst
   , findFirst
+  , scopeEnumCtors
   ) where
 
 import qualified Data.List as DL
 import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import qualified Data.PartialOrd as P
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -289,7 +291,14 @@ removeEffectLabel lbl (EffectUnion a b) =
   base type; has its own per-language overrides (in root-cpp etc.).
   Opaque to reduction. Cannot be cyclic (no body to chain through).
 -}
-data TypedefKind = TypedefAlias | TypedefNewtype | TypedefPrimitive
+-- | How a type name was introduced. 'TypedefEnum' is a `data` whose
+-- constructors all take no arguments: nominal like a newtype, but with a
+-- closed constructor set and a one-byte wire form of its own.
+data TypedefKind
+  = TypedefAlias
+  | TypedefNewtype
+  | TypedefPrimitive
+  | TypedefEnum
   deriving (Show, Eq, Ord)
 
 {- | Scope maps each type name to its definitions: the type parameters, the
@@ -307,6 +316,28 @@ type Scope =
       , TypedefKind -- Alias (transparent) or Newtype (nominal, wire-equivalent)
       )
     ]
+
+-- | The constructor names of a `data` type, in declaration order, or
+-- Nothing if the name is not a `data` type.
+--
+-- A `data` declaration stores its constructor list in its scope body as a
+-- list of Str literals. That encoding is an implementation detail and this
+-- is the only function that knows it: the alternative was a new 'TypeU'
+-- constructor, which would force a decision at every one of the ~100 sites
+-- that match on 'TypeU' for the sake of a leaf that never takes part in
+-- unification. Reduction stops at the nominal boundary
+-- ('stopAtNominalBoundary'), so the body is carried, never expanded.
+--
+-- A constructor's position in this list is its wire tag.
+scopeEnumCtors :: Scope -> TVar -> Maybe [Text]
+scopeEnumCtors scope v = do
+  entries <- Map.lookup v scope
+  listToMaybe [ns | (_, body, _, _, TypedefEnum) <- entries, Just ns <- [ctorNames body]]
+  where
+    ctorNames (LitU (LList xs)) = mapM litStr xs
+    ctorNames _ = Nothing
+    litStr (LitU (LStr n)) = Just n
+    litStr _ = Nothing
 
 -- | Flavors of named (keyed) types
 data NamType

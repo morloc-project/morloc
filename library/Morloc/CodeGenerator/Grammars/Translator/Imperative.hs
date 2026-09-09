@@ -423,6 +423,26 @@ data LowerConfig m = LowerConfig
   -- 'lcOwnership' of a manifold-call argument (named by index-aliasing after the
   -- caller's variables) reflects the caller rather than the callee being
   -- rendered. Default is identity (only Rust distinguishes ownership).
+  , lcEnumLit :: CVar -> Text -> Int -> MDoc
+  -- ^ Render a `data` constructor as a value in this language: the enum's
+  -- concrete type name, the constructor's name, and its 0-based tag.
+  --
+  -- All three are needed because the backends disagree about what an enum
+  -- value IS. C++ and Rust name it (@DNA::A@). Python receives the tag as a
+  -- plain int from the runtime, so the tag is the value. R holds a factor,
+  -- whose storage is 1-based, so it needs the tag AND the name.
+  , lcTagTest :: MDoc -> MDoc -> MDoc
+  -- ^ Test whether a value carries a given constructor's tag
+  -- ('IntrTagTest'). Default is native @==@, which is the right answer in
+  -- every backend today: an argument-free constructor holds nothing, so
+  -- comparing values compares tags. Python's @IntEnum@, R's factor, a C++
+  -- @enum class@ and a Rust @enum@ all spell it the same way.
+  --
+  -- It is a hook rather than a hard-coded @==@ because that coincidence
+  -- ends when constructors carry arguments: equality would then compare
+  -- payloads where a pattern must test the discriminant alone, and each
+  -- language has its own way to ask (@holds_alternative@, @matches!@,
+  -- @isinstance@).
   , lcCoerceOptional :: MDoc -> MDoc
   -- ^ Widen a value to an optional (@CoerceToOptional@). Default is identity: in
   -- C++/Python/R a @T@ is a valid @?T@ (their serializers are schema-driven). In
@@ -1063,6 +1083,8 @@ lowerNativeExpr cfg _ (IntN_ (FV _ cv) v) = return $ defaultValue {poolExpr = lc
 lowerNativeExpr cfg _ (StrN_ (FV _ cv) v) =
   let hint = if cv == CV "" then Nothing else Just (unCVar cv)
   in return $ defaultValue {poolExpr = lcPrintExpr cfg (IStrLit hint v)}
+lowerNativeExpr cfg _ (EnumN_ (FV _ cv) n i) =
+  return $ defaultValue {poolExpr = lcEnumLit cfg cv n i}
 lowerNativeExpr cfg _ (NullN_ t) = do
   -- NullN_ now carries the full @TypeF@ of the Null's type slot
   -- (e.g. @?(BTree Int)@), not just the underlying constructor's
@@ -1215,6 +1237,14 @@ lowerNativeExpr cfg _ (IntrinsicN_ _ IntrClose maySchema [handleDocs]) =
       node | maySchema == Just BT.closeTmpUnlinkMarker = IIntrinsicUnlinkTemp raw
            | otherwise                                 = IIntrinsicClose raw
   in return $ handleDocs { poolExpr = lcPrintExpr cfg node }
+-- A constructor-pattern tag test. No schema and no runtime call: the whole
+-- operation is a comparison in the target language, so it lowers through
+-- 'lcTagTest' (native @==@ by default). See the note on 'IntrTagTest' for
+-- why this is a tag test rather than an equality.
+lowerNativeExpr cfg _ (IntrinsicN_ _ IntrTagTest _ [subjectDocs, ctorDocs]) =
+  return $ mergePoolDocs
+    (const (lcTagTest cfg (poolExpr subjectDocs) (poolExpr ctorDocs)))
+    [subjectDocs, ctorDocs]
 lowerNativeExpr cfg _ (IntrinsicN_ _ IntrFSchema _ [pathDocs]) =
   return $ pathDocs
     { poolExpr = lcPrintExpr cfg

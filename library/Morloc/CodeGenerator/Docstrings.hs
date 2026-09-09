@@ -149,9 +149,11 @@ resolveNestedTypes i = go []
               -- Record-newtype: attach the layout, keep the name.
               (Just [(_, typeOf -> parent@(NamT _ _ _ _), _, _, TypedefNewtype)]) ->
                 go seen' parent
-              -- Other newtypes and primitives are opaque by design.
+              -- Other newtypes, primitives and `data` types are opaque by
+              -- design: there is no parent to walk into.
               (Just [(_, _, _, _, TypedefNewtype)]) -> return t
               (Just [(_, _, _, _, TypedefPrimitive)]) -> return t
+              (Just [(_, _, _, _, TypedefEnum)]) -> return t
               (Just [(_, typeOf -> parent, _, _, TypedefAlias)]) -> go seen' parent
               _ -> return t
       AppT f as -> bindNamed <$> go seen f <*> mapM (go seen) as
@@ -348,6 +350,10 @@ reduceArgDoc i t@(VarT v) arg = do
     -- consulted.
     (Just [(_, _, _, _, TypedefNewtype)]) -> return (t, arg)
     (Just [(_, _, _, _, TypedefPrimitive)]) -> return (t, arg)
+    -- A `data` type's scope body is its constructor-name table, not a
+    -- parent type, so there is nothing to inherit from: its docstring
+    -- is its own, as for a newtype or primitive.
+    (Just [(_, _, _, _, TypedefEnum)]) -> return (t, arg)
     (Just [(_, typeOf -> parentType, parentArg, _, TypedefAlias)]) ->
       inheritArgDoc arg parentArg >>= reduceArgDoc i parentType
     (Just _) -> MM.throwSystemError $ "Multiple definitions for type alias '" <> pretty (unTVar v) <> "'"

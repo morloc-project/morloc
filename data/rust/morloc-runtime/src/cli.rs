@@ -2247,14 +2247,19 @@ pub unsafe extern "C" fn load_morloc_data_file(
     if !schema.is_null() && data_size > 0 {
         use crate::schema::SerialType;
         let rs = CSchema::to_rust(schema);
+        // An enum joins this rule for the same reason Str is here: its
+        // CLI surface is a bare identifier, so `cmd G` must mean the
+        // constructor G rather than fail as malformed JSON. The name is
+        // still validated against the constructor list downstream, so
+        // quoting here widens what parses, not what is accepted.
         let bare_str = match rs.serial_type {
             SerialType::String | SerialType::IFile
-        | SerialType::OStream | SerialType::IStream => true,
+        | SerialType::OStream | SerialType::IStream | SerialType::Enum => true,
             SerialType::Optional => rs
                 .parameters
                 .first()
                 .map(|p| matches!(p.serial_type, SerialType::String | SerialType::IFile
-                    | SerialType::OStream | SerialType::IStream))
+                    | SerialType::OStream | SerialType::IStream | SerialType::Enum))
                 .unwrap_or(false),
             _ => false,
         };

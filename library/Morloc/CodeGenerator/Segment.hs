@@ -129,6 +129,7 @@ segmentExpr _ _ (PolyLog v x) = return ([], (Nothing, MonoLog v x))
 segmentExpr _ _ (PolyReal v x) = return ([], (Nothing, MonoReal v x))
 segmentExpr _ _ (PolyInt v x) = return ([], (Nothing, MonoInt v x))
 segmentExpr _ _ (PolyStr v x) = return ([], (Nothing, MonoStr v x))
+segmentExpr _ _ (PolyEnum v n i) = return ([], (Nothing, MonoEnum v n i))
 segmentExpr _ _ (PolyNull v) = return ([], (Nothing, MonoNull v))
 segmentExpr m args (PolyDoBlock t e) = do
   (ms, (_, e')) <- segmentExpr m args e

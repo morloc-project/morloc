@@ -1,0 +1,27 @@
+--- pyCompA ---
+"T"
+--- pyCompC ---
+"G"
+--- cppCompG ---
+"C"
+--- rCompT ---
+"A"
+--- rCompC ---
+"G"
+--- rustCompA ---
+"T"
+--- pyToCpp ---
+"G"
+--- cppToR ---
+"C"
+--- rToRust ---
+"T"
+--- listComp ---
+["T","G","C","A"]
+--- optIdValue ---
+"G"
+--- optIdNull ---
+--- jsonHelpEnum ---
+OK
+--- rejectsUnknownConstructor ---
+OK

@@ -2053,6 +2053,20 @@ unsafe fn morloc_eval_r(
             }
         }
 
+        MorlocExpressionType::TagTest => {
+            // A constructor-pattern tag test. Both children are `data`
+            // values, whose voidstar form is a single tag byte, so the
+            // comparison is a byte compare -- no pool dispatch, which is why
+            // a pattern match on an enum inside a pure morloc function stays
+            // in the nexus.
+            let te = (*expr).expr.tag_test_expr;
+            let subject_ptr = morloc_eval_r((*te).subject, ptr::null_mut(), 0, bndvars)?;
+            let ctor_ptr = morloc_eval_r((*te).constructor, ptr::null_mut(), 0, bndvars)?;
+            let same = *(subject_ptr as *const u8) == *(ctor_ptr as *const u8);
+            if !dest.is_null() {
+                *dest = u8::from(same);
+            }
+        }
         MorlocExpressionType::If => {
             // Evaluate the condition (a Bool) into a fresh buffer and read
             // its byte (0 = false), then materialize the taken branch into

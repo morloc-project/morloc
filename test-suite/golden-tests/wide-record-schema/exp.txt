@@ -1,0 +1,12 @@
+--- wideSum ---
+2415
+--- wideFirst ---
+0
+--- wideLast ---
+69
+--- wideBoundary ---
+[63,64]
+--- longKeyRead ---
+42
+--- wideCross ---
+69

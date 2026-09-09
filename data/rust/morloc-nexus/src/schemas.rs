@@ -41,6 +41,9 @@ pub(crate) fn render_schema_type(
     match s.serial_type {
         Nil => "()".into(),
         Bool => "Bool".into(),
+        // Show the constructor set: it is the useful thing to know
+        // about the type and it always fits, being closed.
+        Enum => s.keys.join(" | "),
         Sint8 => "I8".into(),
         Sint16 => "I16".into(),
         Sint32 => "Int".into(),

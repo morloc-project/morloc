@@ -266,6 +266,7 @@ resolveTypes (AnnoS (Idx i t) ci e) =
     f (IntS si x) = IntS si x
     f (LogS x) = LogS x
     f (StrS x) = StrS x
+    f (EnumS tv n i) = EnumS tv n i
     f UniS = UniS
     f NullS = NullS
     f (DoBlockS e') = DoBlockS (resolveTypes e')
@@ -386,6 +387,7 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
     f _ g0 (IntS si x) = return (g0, IntS si x)
     f _ g0 (LogS x) = return (g0, LogS x)
     f _ g0 (StrS x) = return (g0, StrS x)
+    f _ g0 (EnumS tv n i) = return (g0, EnumS tv n i)
     f _ g0 (ExeS x) = return (g0, ExeS x)
     f _ g0 (DoBlockS e) = resolveInstances g0 e |>> second DoBlockS
     f _ g0 (EvalS e) = resolveInstances g0 e |>> second EvalS
@@ -633,6 +635,9 @@ synthE _ g (RealS si x) = return (g, BT.realU, RealS si x)
 synthE _ g (IntS si x) = return (g, BT.intU, IntS si x)
 synthE _ g (LogS x) = return (g, BT.boolU, LogS x)
 synthE _ g (StrS x) = return (g, BT.strU, StrS x)
+-- A constructor name is unique across the program, so it determines its
+-- type on its own: no annotation, no instance search.
+synthE _ g (EnumS tv n i) = return (g, VarU tv, EnumS tv n i)
 -- A directly applied setter is a redex: reduce it so the setter's own
 -- rule below sees the receiver. See 'reduceSetterRedex'.
 synthE i g0 e | Just e' <- reduceSetterRedex e = synthE i g0 e'
@@ -1257,6 +1262,18 @@ synthE _ g (IntrinsicS IntrMap [funcE, listE]) = do
   return (g5, apply g5 resultT, IntrinsicS IntrMap [funcE', listE'])
 synthE _ _ (IntrinsicS IntrMap args) =
   error $ "IntrMap expects 2 args (lambda, list), got " <> show (length args)
+-- IntrTagTest: the constructor-pattern tag test. Both arguments are the
+-- same type (the scrutinee and a constructor of its type), so the second
+-- is checked against the first's synthesized type -- which is what rejects
+-- a constructor borrowed from a different `data` type in a clause.
+synthE i g (IntrinsicS IntrTagTest [subjectE, ctorE]) = do
+  (g1, subjectT, subjectE') <- synthG g subjectE
+  (g2, _, ctorE') <- checkG g1 ctorE subjectT
+  return (g2, BT.boolU, IntrinsicS IntrTagTest [subjectE', ctorE'])
+  where
+    _ = i
+synthE _ _ (IntrinsicS IntrTagTest args) =
+  error $ "IntrTagTest expects 2 args (subject, constructor), got " <> show (length args)
 -- IntrWrite: @Int -> OStream a -> [a] -> <IO> ()@. Handle-before-list
 -- is the natural partial-application shape: @write 3 o@ is a
 -- reusable [a] -> <IO> () sink for callbacks. The handle is
@@ -1466,6 +1483,8 @@ intrinsicType IntrFlush = EffectU ioErrEffectSet BT.unitU
 -- IntrMap is handled by its own synthE clause and never reaches this fallback.
 intrinsicType IntrMap =
   error "intrinsicType: IntrMap must be typed via synthE's dedicated clause"
+intrinsicType IntrTagTest =
+  error "intrinsicType: IntrTagTest must be typed via synthE's dedicated clause"
 -- IntrStdin/Stdout/Stderr flow through intrinsicTypeG (fresh existential
 -- element type resolved by the user's inline ascription).
 intrinsicType IntrStdin =
@@ -3140,6 +3159,7 @@ peakSExpr (RealS _ x) = "RealS" <+> viaShow x
 peakSExpr (IntS _ x) = "IntS" <+> pretty x
 peakSExpr (LogS x) = "LogS" <+> pretty x
 peakSExpr (StrS x) = "StrS" <+> pretty x
+peakSExpr (EnumS tv n _) = "EnumS" <+> pretty tv <> "." <> pretty n
 peakSExpr (ExeS exe) = "ExeS" <+> pretty exe
 peakSExpr (LetS v _ _) = "LetS" <+> pretty v
 peakSExpr (LetBndS v) = "LetBndS" <+> pretty v

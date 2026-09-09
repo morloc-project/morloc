@@ -383,6 +383,22 @@ data Intrinsic
                   -- The pure-runtime evaluator executes this as a direct
                   -- per-element loop over MORLOC_ARRAY; the pool path resolves
                   -- it to the language's @Functor.map@ instance.
+  | IntrTagTest   -- ^ implicit @a -> a -> Bool@ tag test, emitted only by the
+                  -- desugar's constructor-pattern lowering. NOT user-facing --
+                  -- there is no entry in 'parseIntrinsic', as with 'IntrMap'.
+                  --
+                  -- It asks "does this value carry this constructor's tag",
+                  -- which is deliberately NOT equality. For an argument-free
+                  -- constructor the two coincide and every backend lowers it
+                  -- to its native @==@. Once constructors carry arguments they
+                  -- stop coinciding: equality would compare payloads, while a
+                  -- pattern must test the discriminant alone. Naming it a tag
+                  -- test means that later change is confined to this lowering.
+                  --
+                  -- It is also why constructor patterns do not wait on `Eq`:
+                  -- an internal primitive has no surface syntax, so the
+                  -- wire-level derivation work can replace it with nothing to
+                  -- migrate.
   | IntrFLength     -- ^ @flen :: IFile a -> <IO, Err> Int@ -- file element count.
                     -- Free from the footer's StreamDiag.element_count. Users
                     -- typically alias as @length@ via stdlib shims.
@@ -485,6 +501,7 @@ intrinsicName IntrOpen = "open"
 intrinsicName IntrClose = "close"
 intrinsicName IntrFSchema = "fschema"
 intrinsicName IntrMap = "map"
+intrinsicName IntrTagTest = "tagtest"
 intrinsicName IntrFLength = "flen"
 intrinsicName IntrStreamLayout = "streamlayout"
 intrinsicName IntrNext = "next"
@@ -546,6 +563,7 @@ intrinsicIsIO IntrShow = False
 intrinsicIsIO IntrRead = False
 intrinsicIsIO IntrDatafile = False
 intrinsicIsIO IntrMap = False
+intrinsicIsIO IntrTagTest = False
 intrinsicIsIO IntrThrow = False
 intrinsicIsIO IntrCatch = False
 
@@ -590,6 +608,7 @@ parseIntrinsic _ = Nothing
 -- | Expected number of arguments for each intrinsic
 intrinsicArity :: Intrinsic -> Int
 intrinsicArity IntrSave = 3
+intrinsicArity IntrTagTest = 2
 intrinsicArity IntrSaveM = 2
 intrinsicArity IntrSaveJ = 2
 intrinsicArity IntrLoad = 1
@@ -655,6 +674,10 @@ data Expr
   | IntE Integer
   | LogE Bool
   | StrE Text
+  -- | A `data` constructor with no arguments: its type, its name, and
+  -- its 0-based declaration ordinal. The ordinal is the wire tag, so
+  -- it is fixed at the declaration and carried rather than recomputed.
+  | EnumE TVar Text Int
   | PatE Pattern
   | IfE ExprI ExprI ExprI
   | DoBlockE ExprI
@@ -791,6 +814,8 @@ data ExprS g f c
   | IntS Int Integer
   | LogS Bool
   | StrS Text
+  -- | A nullary `data` constructor: type, name, 0-based ordinal.
+  | EnumS TVar Text Int
   | ExeS ExecutableExpr
   | LetS EVar (AnnoS g f c) (AnnoS g f c)
   | LetBndS EVar
@@ -957,6 +982,7 @@ mapExprSM f (NamS rs) = NamS <$> mapM (secondM f) rs
 mapExprSM _ UniS = return UniS
 mapExprSM _ NullS = return NullS
 mapExprSM _ (BndS v) = return $ BndS v
+mapExprSM _ (EnumS tv n i) = return $ EnumS tv n i
 mapExprSM _ (RealS i x) = return $ RealS i x
 mapExprSM _ (IntS i x) = return $ IntS i x
 mapExprSM _ (LogS x) = return $ LogS x
@@ -1133,6 +1159,7 @@ instance Pretty Expr where
           <+> sep (map (either pretty (parens . pretty)) vs)
     TypedefAlias -> body "type"
     TypedefNewtype -> body "newtype"
+    TypedefEnum -> body "data"
     where
       body keyword =
         keyword <+> pretty lang
@@ -1160,6 +1187,7 @@ instance Pretty Expr where
   pretty (RealE x) = pretty (showRealLit x)
   pretty (IntE x) = pretty (show x)
   pretty (StrE x) = dquotes (pretty x)
+  pretty (EnumE tv n i) = pretty tv <> "." <> pretty n <> "@" <> pretty i
   pretty (LogE x) = pretty x
   pretty (LetE bindings body) = vsep [pretty v <+> "=" <+> pretty e | (v, e) <- bindings] <+> "in" <+> pretty body
   pretty (AssE v e es) = pretty v <+> "=" <+> pretty e <+> "where" <+> (align . vsep . map pretty) es
@@ -1207,6 +1235,7 @@ instance (Foldable f) => Pretty (ExprS a f b) where
   pretty UniS = "UniS"
   pretty NullS = "NullS"
   pretty (BndS x) = "(BndS" <+> pretty x <> ")"
+  pretty (EnumS tv n i) = "(EnumS" <+> pretty tv <> "." <> pretty n <+> "=" <+> pretty i <> ")"
   pretty (RealS _ x) = pretty (showRealLit x)
   pretty (IntS _ x) = viaShow x
   pretty (LogS x) = viaShow x

@@ -50,6 +50,16 @@ fn pack_data_inner(
                 rmp::encode::write_uint(buf, *ptr as u64)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack uint: {}", e)))?;
             }
+            // An enum travels msgpack as its ordinal, not its name.
+            // msgpack is the machine format -- it carries packets and
+            // on-disk values -- and spelling out "A"/"C"/"G"/"T" would
+            // multiply a genome-sized [DNA] several-fold. The names are
+            // never lost: the schema string travels with the packet, and
+            // JSON (the human- and LLM-facing format) does render them.
+            SerialType::Enum => {
+                rmp::encode::write_uint(buf, *ptr as u64)
+                    .map_err(|e| MorlocError::Serialization(format!("msgpack enum: {}", e)))?;
+            }
             SerialType::Uint16 => {
                 rmp::encode::write_uint(buf, *(ptr as *const u16) as u64)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack uint: {}", e)))?;
@@ -270,6 +280,24 @@ fn unpack_obj_inner(
             SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64
             | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 => {
                 unpack_int(ptr, schema.serial_type, reader)?;
+            }
+            // Read the ordinal and reject a tag no constructor claims.
+            // This is the boundary check: a pool built against a different
+            // version of the type fails here, naming the legal set, rather
+            // than yielding a value that matches no arm deep in a manifold.
+            SerialType::Enum => {
+                let tag: i64 = decode::read_int(reader).map_err(|e| {
+                    MorlocError::Serialization(format!("msgpack enum tag: {}", e))
+                })?;
+                if tag < 0 || tag as usize >= schema.size {
+                    return Err(MorlocError::Serialization(format!(
+                        "enum tag {} is out of range; the type has {} constructors ({})",
+                        tag,
+                        schema.size,
+                        schema.keys.join(", ")
+                    )));
+                }
+                *ptr = tag as u8;
             }
             SerialType::Float32 => {
                 let f = read_float(reader)?;
@@ -580,7 +608,7 @@ fn calc_size_r_inner(
             rmp::decode::read_bool(reader).ok();
             Ok(1)
         }
-        SerialType::Sint8 | SerialType::Uint8 => { skip_int(reader)?; Ok(1) }
+        SerialType::Sint8 | SerialType::Uint8 | SerialType::Enum => { skip_int(reader)?; Ok(1) }
         SerialType::Sint16 | SerialType::Uint16 => { skip_int(reader)?; Ok(2) }
         SerialType::Sint32 | SerialType::Uint32 | SerialType::Float32 => { skip_int(reader)?; Ok(4) }
         SerialType::Sint64 | SerialType::Uint64 | SerialType::Float64 => { skip_int(reader)?; Ok(8) }

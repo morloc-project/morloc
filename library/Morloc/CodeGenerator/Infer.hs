@@ -252,7 +252,15 @@ inferConcreteTypeUUniversal lang generalType = do
 weave :: Scope -> TypeU -> TypeU -> Either MDoc TypeF
 weave gscope = w
   where
-    w (VarU v1) (VarU (TV v2)) = return $ VarF (FV v1 (CV v2))
+    -- A `data` type weaves to 'EnumF' rather than a plain 'VarF' so the
+    -- constructor names reach codegen. Making this the canonical TypeF for
+    -- an enum is what lets every backend recognize one structurally --
+    -- otherwise only serialized positions (which come through SerialEnum)
+    -- would see it, and a native-position enum would look like an opaque
+    -- VarF with an unhelpful name.
+    w (VarU v1) (VarU (TV v2)) = return $ case scopeEnumCtors gscope v1 of
+      Just ctors -> EnumF (FV v1 (CV v2)) ctors
+      Nothing -> VarF (FV v1 (CV v2))
     w (FunU ts1 t1) (FunU ts2 t2) = FunF <$> zipWithM w ts1 ts2 <*> w t1 t2
     -- AppU vs AppU: weave heads, then args. If heads weave but arg lists
     -- have mismatched lengths (e.g. general @Pair Int@ has 1 arg while

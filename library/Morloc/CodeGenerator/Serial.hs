@@ -77,6 +77,7 @@ serialAstToTypeWith onClosure = go
     go (SerialTuple v ss) = AppF (VarF v) (map go ss)
     go (SerialObject o n ps rs) = NamF o n ps (zip (map fst rs) (map (go . snd) rs))
     go (SerialRec v) = RecF v
+    go (SerialEnum v ns) = EnumF v ns
     go (SerialReal x) = VarF x
     go (SerialFloat32 x) = VarF x
     go (SerialFloat64 x) = VarF x
@@ -230,6 +231,14 @@ serialAstToSchemaWith renderHint ast = emit ast
       recDecl name <> renderHint v <> "m" <> encode64D (length rs)
         <> foldl (<>) "" (map keypair rs)
     emit (SerialRec (FV (TV name) _)) = "^" <> encodeKey name
+    -- `e <count> ( <klen><CtorName> )*`, with the type's own name carried
+    -- by the concrete-type hint exactly as a record's is -- `m` does not
+    -- spell out the record name either. Counts and key lengths use the
+    -- same encoding as `t` and `m`, so the escape covers the full
+    -- 256-constructor range.
+    emit (SerialEnum v ns) =
+      renderHint v <> "e" <> encode64D (length ns)
+        <> foldl (<>) "" (map encodeKey ns)
     emit (SerialReal v) = renderHint v <> "f8" -- 64 bit float
     emit (SerialFloat32 v) = renderHint v <> "f4"
     emit (SerialFloat64 v) = renderHint v <> "f8"
@@ -375,6 +384,7 @@ shallowType (SerialOptional _ s) = OptionalF (shallowType s)
 -- this in 'CppTranslator.hs' to distinguish legitimate user mappings
 -- from pairEval bnd-protect leaks).
 shallowType (SerialRec v) = RecF v
+shallowType (SerialEnum v ns) = EnumF v ns
 shallowType (SerialUnknown v) = UnkF v
 
 -- | One @Packable@ instance: the type it packs, the wire form it packs to,
@@ -502,6 +512,7 @@ setSerialHead v s = case s of
   SerialList _ d x -> SerialList v d x
   SerialTuple _ xs -> SerialTuple v xs
   SerialObject o _ ps rs -> SerialObject o v ps rs
+  SerialEnum _ ns -> SerialEnum v ns
   SerialRec _ -> SerialRec v
   SerialReal _ -> SerialReal v
   SerialFloat32 _ -> SerialFloat32 v
@@ -565,6 +576,9 @@ makeSerialAST m lang t0 = do
         Nothing -> MM.throwSourcedError m "Unsupported language"
         (Just langRegistry) -> return $ CV (lreSerialType langRegistry)
       return $ SerialUnknown (FV gv serialType)
+    -- A `data` type carries its constructor names in the TypeF, so the
+    -- serializer needs no scope lookup: the names are the wire form.
+    makeSerialAST' _ _ (EnumF v ns) = return $ SerialEnum v ns
     makeSerialAST' gscope typepackers ft@(VarF v@(FV gv cv)) = do
       anc <- MM.gets stateSerialAncestors
       -- Cycle detection: a bare reference to a record currently being
@@ -607,6 +621,9 @@ makeSerialAST m lang t0 = do
           | finalType == BT.u16U = return $ SerialUInt16 v
           | finalType == BT.u32U = return $ SerialUInt32 v
           | finalType == BT.u64U = return $ SerialUInt64 v
+          -- A `data` type is nominal and closed; its constructor names
+          -- come straight from the declaration.
+          | Just ctorNames <- scopeEnumCtors gscope gv = return $ SerialEnum v ctorNames
           | otherwise = do
               (cscope, _) <- getScope m lang
               case aliasShape of
@@ -1197,6 +1214,7 @@ unweaveTypeF (OptionalF t) =
 -- referenced NamF appears elsewhere in the surrounding TypeU/TypeF
 -- and supplies the structural identity.
 unweaveTypeF (RecF (FV gv cv)) = (VarU gv, VarU (cv2tv cv))
+unweaveTypeF (EnumF (FV gv cv) _) = (VarU gv, VarU (cv2tv cv))
 
 -- Nat / Str types have no concrete/general distinction; duplicate as-is
 unweaveTypeF (NatLitF n) = (NatLitU n, NatLitU n)
@@ -1342,6 +1360,7 @@ isSerializable (SerialOptional _ x) = isSerializable x
 -- SerialObject (which is serializable) -- otherwise no recursion
 -- would have been introduced. Return True.
 isSerializable (SerialRec _) = True
+isSerializable (SerialEnum _ _) = True
 isSerializable (SerialUnknown _) = True -- are you feeling lucky?
 
 prettySerialOne :: SerialAST -> MDoc
@@ -1351,6 +1370,8 @@ prettySerialOne (SerialTuple v xs) = "SerialTuple" <> angles (pretty v) <> tuple
 prettySerialOne (SerialObject r _ _ rs) =
   block 4 ("SerialObject@" <> viaShow r) $
     vsep (map (\(k, v) -> parens (viaShow k) <> "=" <> prettySerialOne v) rs)
+prettySerialOne (SerialEnum v ns) =
+  "SerialEnum" <> angles (pretty v) <> tupled (map pretty ns)
 prettySerialOne (SerialReal _) = "SerialReal"
 prettySerialOne (SerialFloat32 _) = "SerialFloat32"
 prettySerialOne (SerialFloat64 _) = "SerialFloat64"

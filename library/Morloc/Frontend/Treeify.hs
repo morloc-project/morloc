@@ -575,6 +575,7 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
     f namer (IntE x) = return (namer, IntS gi0 x)
     f namer (LogE x) = return (namer, LogS x)
     f namer (StrE x) = return (namer, StrS x)
+    f namer (EnumE tv n i) = return (namer, EnumS tv n i)
     f namer (PatE p) = return (namer, ExeS (PatCall p))
     f namer (DoBlockE e) = do
       (namer', e') <- collectAnnoS namer e

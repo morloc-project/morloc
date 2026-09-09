@@ -76,6 +76,7 @@ unitTests =
   , tuplePatternLambdaTests
   , withDocstringTests
   , patternSelectorTests
+  , sumTypeTests
   , evalSandboxTests
   , morlocDepsTests
   , versionConstraintTests

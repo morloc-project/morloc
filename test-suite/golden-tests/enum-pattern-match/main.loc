@@ -1,0 +1,75 @@
+-- Constructor patterns over a nullary `data`, which is how one operates on
+-- an enum: derived Eq is deliberately deferred, so `|`-clauses are the only
+-- eliminator and nothing here may use `==`.
+--
+-- `Bool` already behaves this way -- `notB | True = False | False = True`
+-- needs no catch-all because `boolExhaustive` knows Bool is a closed
+-- two-constructor set. An enum is the same rule over n constructors, and
+-- `complement` below is the direct generalization.
+--
+-- What this is really guarding is that a constructor pattern is a TAG TEST
+-- and not a binder. If an UPPER-cased head fell through to the ordinary
+-- variable case, `complement` would bind its argument to a name called `A`,
+-- match everything on the first clause, and answer T for every base -- with
+-- no error anywhere. `roundTrip` and `ordinalWalk` visit every constructor
+-- precisely so that failure cannot hide in an unvisited arm.
+
+module main
+  ( complement
+  , purine
+  , label
+  , firstOfPair
+  , roundTrip
+  , ordinalWalk
+  , crossPool
+  )
+
+import root-py
+
+data DNA = A | C | G | T
+
+source Py from "helpers.py" ("ident" as pyIdent)
+pyIdent :: DNA -> DNA
+
+-- Exhaustive over all four constructors, no catch-all. This is the shape
+-- that fails silently if a constructor clause reads as irrefutable: the
+-- coverage check would accept a SHORT clause list, and the cascade would
+-- then drop the final clause's test.
+complement :: DNA -> DNA
+complement | A = T
+           | C = G
+           | G = C
+           | T = A
+
+-- A partial clause list closed by an explicit catch-all.
+purine :: DNA -> Bool
+purine | A = True
+       | G = True
+       | _ = False
+
+label :: DNA -> Str
+label | A = "adenine"
+      | C = "cytosine"
+      | G = "guanine"
+      | T = "thymine"
+
+-- Constructor patterns nested inside a tuple pattern, mixed with a binder.
+firstOfPair :: (DNA, DNA) -> Str
+firstOfPair | (A, y) = "starts-A"
+            | (x, A) = "ends-A"
+            | (x, y) = "no-A"
+
+-- Complementing twice is the identity for every constructor, so this
+-- returns its input unchanged or the test fails on that base.
+roundTrip :: DNA -> DNA
+roundTrip x = complement (complement x)
+
+-- Walks the whole constructor set in one call; a clause that swallows
+-- everything collapses this to a single repeated label.
+ordinalWalk :: [DNA] -> [Str]
+ordinalWalk = map label
+
+-- The match happens in the nexus-side pool while the value originates in
+-- Python, so the tag must survive the crossing before it is tested.
+crossPool :: DNA -> Str
+crossPool x = label (pyIdent x)

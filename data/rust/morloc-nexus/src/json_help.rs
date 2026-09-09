@@ -77,6 +77,12 @@ fn schema_to_json_schema(s: &Schema) -> Value {
         }
         Float32 | Float64 => json!({ "type": "number" }),
         String => json!({ "type": "string" }),
+        // A closed constructor set becomes a JSON-Schema enum, so a
+        // caller -- a person reading --json-help, or a model calling
+        // the tool over MCP -- is handed the legal values instead of
+        // a free string. This is what carrying the names in the wire
+        // schema buys.
+        Enum => json!({ "type": "string", "enum": s.keys }),
         Array => {
             let items = s
                 .parameters

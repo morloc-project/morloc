@@ -370,6 +370,7 @@ renameNE old new = go where
   go e@(RealN _ _) = e
   go e@(IntN _ _) = e
   go e@(StrN _ _) = e
+  go e@(EnumN _ _ _) = e
   go e@(NullN _) = e
   go (DoBlockN t ne) = DoBlockN t (go ne)
   go (EvalN t ne) = EvalN t (go ne)
@@ -541,6 +542,7 @@ invertSerialManifold sm0 =
     invertNativeExprM (RealN_ v x) = atomize (RealN v x) []
     invertNativeExprM (IntN_ v x) = atomize (IntN v x) []
     invertNativeExprM (StrN_ v x) = atomize (StrN v x) []
+    invertNativeExprM (EnumN_ v n i) = atomize (EnumN v n i) []
     invertNativeExprM (NullN_ v) = atomize (NullN v) []
     -- keep dependencies inside suspend so thunk body stays lazy
     invertNativeExprM (DoBlockN_ t (D ne lets)) = return $ D (DoBlockN t (weave (D ne lets))) []
@@ -655,6 +657,8 @@ collectRecords e0@(SerialManifold i0 _ _ _ _) =
     -- A back-reference contributes nothing new: the record it names
     -- is already visited at the NamF site that introduced the cycle.
     seekRecs _ (RecF _) = []
+    -- An enum is a leaf: no fields, so no records beneath it.
+    seekRecs _ (EnumF _ _) = []
 
 unifyRecords ::
   [ ( FVar

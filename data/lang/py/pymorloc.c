@@ -243,6 +243,8 @@ static int schema_to_npy_type(morloc_serial_type type) {
         case MORLOC_SINT32:  return NPY_INT32;
         case MORLOC_SINT64:  return NPY_INT64;
         case MORLOC_UINT8:   return NPY_UINT8;
+        // An enum is a tag byte, so it maps to uint8 like any other.
+        case MORLOC_ENUM:    return NPY_UINT8;
         case MORLOC_UINT16:  return NPY_UINT16;
         case MORLOC_UINT32:  return NPY_UINT32;
         case MORLOC_UINT64:  return NPY_UINT64;
@@ -280,6 +282,12 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
             obj = PyLong_FromLongLong(*(int64_t*)data);
             break;
         case MORLOC_UINT8:
+            obj = PyLong_FromUnsignedLong(*(uint8_t*)data);
+            break;
+        // The runtime hands back the ordinal and the generated pool code
+        // wraps it in the enum class. Keeping the Python class out of the
+        // C runtime is what lets a bare [DNA] stay a raw buffer.
+        case MORLOC_ENUM:
             obj = PyLong_FromUnsignedLong(*(uint8_t*)data);
             break;
         case MORLOC_UINT16:
@@ -400,6 +408,11 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
                     case MORLOC_SINT32:  numpy_type_num = NPY_INT32; break;
                     case MORLOC_SINT64:  numpy_type_num = NPY_INT64; break;
                     case MORLOC_UINT8:   numpy_type_num = NPY_UINT8; break;
+                    // A [DNA] stays a compact uint8 buffer. Falling to the
+                    // NPY_OBJECT path below would build one Python object
+                    // per element, which is exactly what the one-byte form
+                    // exists to avoid.
+                    case MORLOC_ENUM:    numpy_type_num = NPY_UINT8; break;
                     case MORLOC_UINT16:  numpy_type_num = NPY_UINT16; break;
                     case MORLOC_UINT32:  numpy_type_num = NPY_UINT32; break;
                     case MORLOC_UINT64:  numpy_type_num = NPY_UINT64; break;
@@ -494,8 +507,17 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
                 }
                 // Note: Similar to the numpy case, we don't want to give ownership to Python.
                 // The bytearray is created from a copy of the data, so no additional handling is needed.
-            } else if (schema->parameters[0]->type == MORLOC_UINT8) {
+            } else if (schema->parameters[0]->type == MORLOC_UINT8
+                       || schema->parameters[0]->type == MORLOC_ENUM) {
                 // Default for UInt8 arrays when hint is "bytes" or absent.
+                //
+                // An enum array takes the same path: its elements are tag
+                // bytes, so the wire buffer is already the right shape. The
+                // alternative -- one Python object per element -- is what
+                // the one-byte form exists to avoid, and over a genomic
+                // [DNA] it is the difference between usable and not. The
+                // caller sees ordinals; the generated pool code is where an
+                // enum identity is reattached if one is wanted.
                 obj = PyBytes_FromStringAndSize((const char*)absptr, array->size);
                 if (obj == NULL) {
                     PyRAISE("Failed to one bytes")
@@ -691,6 +713,7 @@ static ssize_t get_shm_size_inner(const Schema* schema, PyObject* obj) {
         case MORLOC_UINT64:
         case MORLOC_FLOAT32:
         case MORLOC_FLOAT64:
+        case MORLOC_ENUM:
             return schema->width;
         case MORLOC_INT: {
             // Inline BigInt: 16 bytes for common case, more for overflow
@@ -761,6 +784,7 @@ static ssize_t get_shm_size_inner(const Schema* schema, PyObject* obj) {
                         case MORLOC_UINT64:
                         case MORLOC_FLOAT32:
                         case MORLOC_FLOAT64:
+                        case MORLOC_ENUM:
                             required_size += list_size * element_width;
                             break;
                         case MORLOC_IFILE:
@@ -994,6 +1018,26 @@ static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schem
         case MORLOC_UINT8:
             HANDLE_UINT_TYPE(uint8_t, PyLong_AsUnsignedLongLong, UINT8_MAX);
             break;
+        // The bound is the constructor count, not UINT8_MAX: a tag no
+        // constructor claims is a type error, and saying which values are
+        // legal is possible because the schema carries their names.
+        case MORLOC_ENUM: {
+            if (!PyLong_Check(obj)) {
+                PyErr_Format(PyExc_TypeError,
+                    "Expected an enum member (int) but got %s", Py_TYPE(obj)->tp_name);
+                goto error;
+            }
+            unsigned long long tag = PyLong_AsUnsignedLongLong(obj);
+            if (PyErr_Occurred() || tag >= (unsigned long long)schema->size) {
+                PyErr_Clear();
+                PyErr_Format(PyExc_ValueError,
+                    "enum tag %llu is out of range; the type has %zu constructors",
+                    tag, schema->size);
+                goto error;
+            }
+            *(uint8_t*)dest = (uint8_t)tag;
+            break;
+        }
         case MORLOC_UINT16:
             HANDLE_UINT_TYPE(uint16_t, PyLong_AsUnsignedLongLong, UINT16_MAX);
             break;

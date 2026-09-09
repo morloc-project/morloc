@@ -288,6 +288,7 @@ mkFinalizeDState idx srcMap = Desugar.DState
   , Desugar.dsWarnings = []
   , Desugar.dsModuleDoc = []
   , Desugar.dsModuleEpilogues = []
+  , Desugar.dsDataCtors = Map.empty
   , Desugar.dsStreamElems = Map.empty
   }
 

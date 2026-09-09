@@ -52,6 +52,7 @@ module UnitTypeTests
   , tuplePatternLambdaTests
   , withDocstringTests
   , patternSelectorTests
+  , sumTypeTests
   , evalSandboxTests
   ) where
 
@@ -639,7 +640,56 @@ typeAliasTests =
   localOption (mkTimeout 1000000) $ -- 1 second timeout
     testGroup
       "Test type alias substitutions"
-      [ assertGeneralType
+      [ -- A per-language form's right-hand side is a name in the TARGET
+        -- language, so it may legitimately coincide with the morloc name
+        -- on the left. Binding a type to a same-named native type is the
+        -- ordinary case, not a self-reference; both the vacuity check and
+        -- the self-recursion check have to leave it alone.
+        assertGeneralType
+          "a per-language form may repeat the type's own name"
+          [r|
+        module main (f)
+        newtype Foo = Int
+        type Cpp => Foo = "Foo"
+        f :: Foo -> Foo
+        f x = x
+          |]
+          (fun [var "Foo", var "Foo"])
+
+      , assertGeneralType
+          "a parameterized per-language form may repeat the name"
+          [r|
+        module main (f)
+        newtype Box a = List a
+        type Cpp => Box a = "Box<$1>" a
+        f :: Box Int -> Box Int
+        f x = x
+          |]
+          (fun [arr "Box" [int], arr "Box" [int]])
+
+      , -- The exemption is for the HEAD only. A morloc type in an argument
+        -- slot is still a morloc type, so real recursion is still caught.
+        exprTestBad
+          "a per-language form recursing through a parameter is rejected"
+          [r|
+        module main (f)
+        newtype Foo = Int
+        type Cpp => Foo = "Foo" Foo
+        f :: Foo -> Foo
+        f x = x
+          |]
+
+      , -- And a general alias with no language is unaffected.
+        exprTestBad
+          "a vacuous general alias is still rejected"
+          [r|
+        module main (f)
+        type Foo = Foo
+        f :: Foo -> Foo
+        f x = x
+          |]
+
+      , assertGeneralType
           "general type alias"
           [r|
         module main (f)
@@ -8758,5 +8808,218 @@ withDocstringTests =
           Int ->
           Int
         foo x = x
+          |]
+      ]
+
+-- Sum types: declaration syntax, constructor scoping, and typechecking.
+--
+-- Stage 1 is `data` with nullary constructors only. Constructors are bare
+-- terms in the module's term namespace and are globally unique; a name
+-- already bound is a hard error at the second declaration. Because a
+-- constructor name determines its type, `f = A` synthesizes `DNA` with no
+-- annotation.
+--
+-- NOTE while this is red: `data` is not yet a keyword, so every source
+-- below fails to parse. The positive cases therefore fail (which is the
+-- point), but the negative cases pass *vacuously* -- they are rejected for
+-- the wrong reason. A negative here only earns its keep once the positives
+-- are green.
+sumTypeTests :: TestTree
+sumTypeTests =
+  localOption (mkTimeout 1000000) $
+    testGroup
+      "sum types (`data`)"
+      [ -- The declaration introduces a nominal type usable in a signature.
+        assertGeneralType
+          "nullary data declares a type"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        f :: DNA -> DNA
+        f x = x
+          |]
+          (fun [var "DNA", var "DNA"])
+
+      , -- A constructor is a term of its own type.
+        assertGeneralType
+          "constructor is a term of the declared type"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        f :: DNA
+        f = G
+          |]
+          (var "DNA")
+
+      , -- Uniqueness is what makes this work: the name alone picks the type,
+        -- so no annotation is needed to synthesize it.
+        assertGeneralType
+          "constructor name alone determines the type"
+          [r|
+        module main (f)
+        data Color = Red | Green | Blue
+        f = Red
+          |]
+          (var "Color")
+
+      , assertGeneralType
+          "a single-constructor data is legal"
+          [r|
+        module main (f)
+        data Unitary = Only
+        f :: Unitary
+        f = Only
+          |]
+          (var "Unitary")
+
+      , assertGeneralType
+          "enum inside a list"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        f :: [DNA] -> [DNA]
+        f x = x
+          |]
+          (fun [lst (var "DNA"), lst (var "DNA")])
+
+      , assertGeneralType
+          "enum as a record field"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        record Site where
+          base :: DNA
+          pos  :: Int
+        f :: Site -> DNA
+        f = .base
+          |]
+          (fun [record' "Site" [(Key "base", var "DNA"), (Key "pos", int)], var "DNA"])
+
+      , assertGeneralType
+          "enum under an optional"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        f :: ?DNA -> ?DNA
+        f x = x
+          |]
+          (fun [OptionalU (var "DNA"), OptionalU (var "DNA")])
+
+      , assertGeneralType
+          "a per-language binding does not change the general type"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        data Cpp => DNA = "dna_t"
+        f :: DNA -> DNA
+        f x = x
+          |]
+          (fun [var "DNA", var "DNA"])
+
+      , -- Two distinct enums coexist as long as no constructor name repeats.
+        assertGeneralType
+          "two enums with disjoint constructors coexist"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        data Strand = Fwd | Rev
+        f :: DNA -> Strand
+        f _ = Fwd
+          |]
+          (fun [var "DNA", var "Strand"])
+
+      , -- Payload-bearing arms are stage 2; stage 1 must reject them
+        -- outright rather than accept them and mis-lower them.
+        exprTestBad
+          "a constructor with arguments is rejected in stage 1"
+          [r|
+        module main (f)
+        data Shape = Circle Real | Square Real
+        f :: Shape -> Shape
+        f x = x
+          |]
+
+      , exprTestBad
+          "a constructor repeated within one type is rejected"
+          [r|
+        module main (f)
+        data DNA = A | C | A | T
+        f :: DNA -> DNA
+        f x = x
+          |]
+
+      , -- The uniqueness rule, which is what buys the inference above.
+        exprTestBad
+          "a constructor colliding with another type's constructor is rejected"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        data Other = A | B
+        f :: DNA -> DNA
+        f x = x
+          |]
+
+      , exprTestBad
+          "a constructor colliding with an existing term is rejected"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        A :: Int
+        f :: DNA -> DNA
+        f x = x
+          |]
+
+      , exprTestBad
+          "an undeclared constructor is rejected"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        f :: DNA
+        f = N
+          |]
+
+      , exprTestBad
+          "a constructor of the wrong enum is rejected"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        data Strand = Fwd | Rev
+        f :: DNA
+        f = Fwd
+          |]
+
+      , -- Derived instances are deliberately deferred, so `==` on an enum
+        -- must be a clean error rather than an internal dump or a silent
+        -- fallthrough to some structural comparison.
+        exprTestBad
+          "== on an enum has no instance in stage 1"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        f :: DNA -> Bool
+        f x = x == A
+          |]
+
+      , -- A clause naming a constructor of a different type is a type
+        -- error, not a parse error: the constructor resolves fine, it just
+        -- does not belong to the scrutinee's type.
+        exprTestBad
+          "a constructor from another enum is rejected in a clause"
+          [r|
+        module main (f)
+        data Color = Red | Green
+        data Strand = Fwd | Rev
+        f :: Color -> Int
+        f | Red = 0
+          | Fwd = 1
+          |]
+
+      , exprTestBad
+          "an enum used where an unrelated type is expected is rejected"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        f :: Int
+        f = A
           |]
       ]

@@ -1,0 +1,12 @@
+--- sizeAsEnum ---
+4
+--- sizeAsBytes ---
+4
+--- sizeParity ---
+true
+--- countPurines ---
+5
+--- decodeHead ---
+"G"
+--- roundTripLength ---
+6

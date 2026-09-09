@@ -382,6 +382,7 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     nativeExpr _ (MonoReal v x) = RealN <$> inferVar v <*> pure x
     nativeExpr _ (MonoInt v x) = IntN <$> inferVar v <*> pure x
     nativeExpr _ (MonoStr v x) = StrN <$> inferVar v <*> pure x
+    nativeExpr _ (MonoEnum v n i) = EnumN <$> inferVar v <*> pure n <*> pure i
     -- MonoNull now carries an Indexed Type for the full type the
     -- Null inhabits (e.g. @?(BTree Int)@). Use @inferType@ (=
     -- @inferConcreteType@) rather than @inferVar@ so the resulting
@@ -725,6 +726,7 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
             [] -> pretty t
             ps -> parens (pretty t <+> hsep (map go ps))
         go (RecF (FV t _)) = pretty t
+        go (EnumF (FV t _) _) = pretty t
         go (AppF con args) = parens (go con <+> hsep (map go args))
         go (FunF args ret) =
           parens (hsep (punctuate " ->" (map go args ++ [go ret])))

@@ -150,13 +150,34 @@ checkForSelfRecursion d = do
       | classifyRecursion v t == Bare =
           MM.throwSourcedError i $ "Found unsupported self-recursive type alias:" <+> pretty v
       | otherwise = return ()
-    isExprSelfRecursive (ExprI i (TypE (ExprTypeE _ v ts t _ _)))
+    isExprSelfRecursive (ExprI i (TypE (ExprTypeE mlang v ts t _ _)))
       -- Language-specific typedefs: the same rule applied to the body
       -- and any TypeU parameter slots.
-      | any ((== Bare) . classifyRecursion v) (t : rights ts) =
+      | any ((== Bare) . classifyRecursion v) (langBodies mlang t ++ rights ts) =
           MM.throwSourcedError i $ "Found unsupported self-recursive type alias:" <+> pretty v
       | otherwise = return ()
     isExprSelfRecursive _ = return ()
+
+    -- Which parts of a per-language body the self-recursion rule applies
+    -- to.
+    --
+    -- When the right-hand side is a quoted native name (isTerminal), its
+    -- head lives in the TARGET language's namespace, not morloc's. If the
+    -- two coincide -- `type Cpp => Foo = "Foo"`, the ordinary way to bind
+    -- a morloc type to a same-named native one -- that is not a cycle, so
+    -- the head is dropped. Argument slots still hold morloc types, so they
+    -- stay under the rule and `type Cpp => Foo = "Foo" Foo` is still
+    -- rejected.
+    --
+    -- A non-terminal right-hand side (`type Cpp => A = B`) is an ordinary
+    -- morloc type expression, so nothing is dropped there.
+    --
+    -- `record Cpp => Ops = "Ops"` relies on the same exemption and only
+    -- avoids this check today by taking a different desugaring path.
+    langBodies :: Maybe (Lang, Bool) -> TypeU -> [TypeU]
+    langBodies (Just (_, True)) (VarU _) = []
+    langBodies (Just (_, True)) (AppU (VarU _) args) = args
+    langBodies _ b = [b]
 
 {- | Reject mutually recursive typedefs.
 

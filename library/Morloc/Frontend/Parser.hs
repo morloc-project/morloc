@@ -3971,6 +3971,7 @@ toDState ps = DState
   , dsWarnings = psWarnings ps
   , dsModuleDoc = psModuleDoc ps
   , dsModuleEpilogues = psModuleEpilogues ps
+  , dsDataCtors = Map.empty
   , dsStreamElems = psStreamElems ps
   }
 

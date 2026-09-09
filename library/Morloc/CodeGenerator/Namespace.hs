@@ -194,6 +194,11 @@ data TypeF
   -- (e.g. C++ rendering) must look it up in cscope using the TVar,
   -- not read the CVar directly.
   | RecF FVar
+  -- | A `data` type whose constructors take no arguments: the type's
+  -- name and its constructor names in declaration order. Position in
+  -- that list is the wire tag, so the order is part of the type's
+  -- wire contract.
+  | EnumF FVar [T.Text]
   | EffectF (Set.Set EffectLabel) TypeF
   | OptionalF TypeF
   | NatLitF Integer
@@ -360,6 +365,11 @@ data SerialAST
     -- back-ref token; the runtime resolves it back to the ancestor's
     -- Schema*.
     SerialRec FVar
+  | -- | A `data` type with argument-free constructors: one byte on the
+    -- wire, tagged by the constructor's position in this list. The names
+    -- travel in the schema so JSON renders the constructor rather than
+    -- the ordinal and the runtime can reject an out-of-range tag.
+    SerialEnum FVar [T.Text]
   | -- | depending on the language, this may or may not raise an error down the
     -- line, the parameter contains the variable name, which is useful only for
     -- source code comments.
@@ -402,6 +412,7 @@ instance Pretty SerialAST where
   pretty (SerialNull v) = parens ("SerialNull" <+> pretty v)
   pretty (SerialOptional v s) = parens ("SerialOptional" <+> pretty v <+> pretty s)
   pretty (SerialRec v) = parens ("SerialRec" <+> pretty v)
+  pretty (SerialEnum v ns) = parens ("SerialEnum" <+> pretty v <+> list (map pretty ns))
   pretty (SerialUnknown v) = parens ("SerialUnknown" <+> pretty v)
 
 data ExecutableExpressionPool
@@ -649,6 +660,10 @@ data PolyExpr
   | PolyReal (Indexed TVar) RealLit
   | PolyInt (Indexed TVar) Integer
   | PolyStr (Indexed TVar) Text
+  -- | A `data` constructor in a pool: its type, name and 0-based tag.
+  -- All three travel because each backend needs a different one -- the
+  -- name for C++/Rust, the tag for Python, both for R's factor.
+  | PolyEnum (Indexed TVar) Text Int
   -- The Indexed Type carries the FULL type of the Null (e.g.
   -- @?(BTree Int)@, NOT just the underlying TVar). Storing the
   -- complete type lets downstream passes (Serialize -> NativeExpr,
@@ -708,6 +723,7 @@ data MonoExpr
   | MonoReal (Indexed TVar) RealLit
   | MonoInt (Indexed TVar) Integer
   | MonoStr (Indexed TVar) Text
+  | MonoEnum (Indexed TVar) Text Int
   -- See @PolyNull@ for the rationale: store the full type of the
   -- Null literal, not just the inner TVar.
   | MonoNull (Indexed Type)
@@ -820,6 +836,7 @@ data NativeExpr
   | RealN FVar RealLit
   | IntN FVar Integer
   | StrN FVar Text
+  | EnumN FVar Text Int
   -- See @PolyNull@ in this module for the rationale on storing a
   -- @TypeF@ rather than an @FVar@: parameterised aliases lose their
   -- arg list if only the constructor name is kept.
@@ -936,6 +953,7 @@ foldlNE _ b (LogN_ _ _) = b
 foldlNE _ b (RealN_ _ _) = b
 foldlNE _ b (IntN_ _ _) = b
 foldlNE _ b (StrN_ _ _) = b
+foldlNE _ b (EnumN_ _ _ _) = b
 foldlNE _ b (NullN_ _) = b
 foldlNE f b (DoBlockN_ _ x) = f b x
 foldlNE f b (EvalN_ _ x) = f b x
@@ -1041,6 +1059,7 @@ makeMonoidFoldDefault mempty' mappend' =
     monoidNativeExpr' (RealN_ v x) = return (mempty', RealN v x)
     monoidNativeExpr' (IntN_ v x) = return (mempty', IntN v x)
     monoidNativeExpr' (StrN_ v x) = return (mempty', StrN v x)
+    monoidNativeExpr' (EnumN_ v n i) = return (mempty', EnumN v n i)
     monoidNativeExpr' (NullN_ v) = return (mempty', NullN v)
     monoidNativeExpr' (DoBlockN_ t (a, ne)) = return (a, DoBlockN t ne)
     monoidNativeExpr' (EvalN_ t (a, ne)) = return (a, EvalN t ne)
@@ -1189,6 +1208,7 @@ data NativeExpr_ nm se ne sr nr
   | RealN_ FVar RealLit
   | IntN_ FVar Integer
   | StrN_ FVar Text
+  | EnumN_ FVar Text Int
   -- See @PolyNull@ / @NullN@ for the rationale: store @TypeF@ not @FVar@.
   | NullN_ TypeF
   | DoBlockN_ TypeF ne
@@ -1394,6 +1414,7 @@ surroundFoldNativeExprM sfm fm = surroundNativeExprM sfm f
     f full@(RealN t x) = opFoldWithNativeExprM fm full (RealN_ t x)
     f full@(IntN t x) = opFoldWithNativeExprM fm full (IntN_ t x)
     f full@(StrN t x) = opFoldWithNativeExprM fm full (StrN_ t x)
+    f full@(EnumN t n i) = opFoldWithNativeExprM fm full (EnumN_ t n i)
     f full@(NullN t) = opFoldWithNativeExprM fm full (NullN_ t)
     f full@(DoBlockN t ne) = do
       ne' <- surroundFoldNativeExprM sfm fm ne
@@ -1439,6 +1460,9 @@ instance HasTypeF NativeExpr where
   typeFof (RealN v _) = VarF v
   typeFof (IntN v _) = VarF v
   typeFof (StrN v _) = VarF v
+  -- The constructor names travel with the type here for the same reason
+  -- they do in 'EnumF': a backend needs them to render the value.
+  typeFof (EnumN v n _) = EnumF v [n]
   typeFof (NullN t) = t
   typeFof (DoBlockN t _) = t
   typeFof (EvalN t _) = t
@@ -1649,6 +1673,7 @@ instance MFunctor NativeExpr where
         e@(RealN _ _) -> mapNativeExpr f e
         e@(IntN _ _) -> mapNativeExpr f e
         e@(StrN _ _) -> mapNativeExpr f e
+        e@(EnumN _ _ _) -> mapNativeExpr f e
         e@(NullN _) -> mapNativeExpr f e
         (DoBlockN t ne) -> mapNativeExpr f $ DoBlockN t (mgatedMap g f ne)
         (EvalN t ne) -> mapNativeExpr f $ EvalN t (mgatedMap g f ne)
@@ -1670,6 +1695,7 @@ instance Pretty TypeF where
     pretty v
       <+> encloseSep "{" "}" ", " [pretty k <+> "::" <+> pretty t | (k, t) <- rs]
   pretty (RecF v) = "^" <> pretty v
+  pretty (EnumF v ns) = pretty v <+> encloseSep "{" "}" " | " (map pretty ns)
   pretty (EffectF es t) =
     "<" <> hsep (punctuate "," (map pretty (Set.toList es))) <> ">" <+> pretty t
   pretty (OptionalF t) = "?" <> pretty t
@@ -1717,6 +1743,7 @@ instance Pretty PolyExpr where
   pretty (PolyReal _ _) = "PolyReal"
   pretty (PolyInt _ _) = "PolyInt"
   pretty (PolyStr _ _) = "PolyStr"
+  pretty (PolyEnum _ n _) = "PolyEnum" <> parens (pretty n)
   pretty (PolyNull _) = "PolyNull"
   pretty (PolyDoBlock _ e) = "PolyDoBlock" <+> pretty e
   pretty (PolyEval _ e) = "PolyEval" <+> pretty e
@@ -1753,6 +1780,7 @@ instance Pretty MonoExpr where
   pretty (MonoReal _ x) = pretty (showRealLit x)
   pretty (MonoInt _ x) = viaShow x
   pretty (MonoStr _ x) = viaShow x
+  pretty (MonoEnum _ n _) = pretty n
   pretty (MonoNull _) = "NULL"
   pretty (MonoDoBlock _ e) = "{" <> pretty e <> "}"
   pretty (MonoEval _ e) = "!" <> pretty e

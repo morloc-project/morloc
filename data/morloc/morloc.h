@@ -180,11 +180,28 @@ typedef enum {
     MORLOC_IFILE    = 21, // Random-access stream-file handle (read-only).
     MORLOC_OSTREAM  = 22, // Sequential stream-file writer handle.
     MORLOC_ISTREAM  = 23, // Sequential stream-file reader handle.
-    MORLOC_CLOSURE  = 24  // Function value: home language, manifold id, and
+    MORLOC_CLOSURE  = 24, // Function value: home language, manifold id, and
                           // captured argument packets. Wire form is
                           // `[u32 home][u32 mid][u32 n][ (u32 len, bytes) x n ]`;
                           // the captured packets are opaque (serialized by the
                           // home language, deserialized by its dispatch table).
+    MORLOC_ENUM     = 25  // A `data` type whose constructors take no
+                          // arguments. One byte: the constructor's 0-based
+                          // position in the declaration IS the wire tag.
+                          // Constructor names travel in Schema.keys, so JSON
+                          // renders the name rather than the ordinal and an
+                          // out-of-range tag is rejected by name. Wire form is
+                          // `e<count>(<klen><name>)*`.
+                          //
+                          // Slot 12 is deliberately not reused: it once held
+                          // MORLOC_TENSOR, and an old packet carrying a 12
+                          // would be silently reinterpreted rather than
+                          // rejected.
+                          //
+                          // Declaration order is part of the type's wire
+                          // contract. Appending a constructor leaves every
+                          // existing value byte-identical; reordering does
+                          // not, and is a breaking change.
     // Stream-handle types (`F`/`O`/`I`) share a 16-byte tagged-union wire
     // form. The schema code selects the morloc-level type; the tag byte
     // (byte 0 of the field) picks the encoding: `TAG_PATH` (0) means the
@@ -214,6 +231,7 @@ typedef enum {
 #define SCHEMA_OSTREAM  'O'
 #define SCHEMA_ISTREAM  'I'
 #define SCHEMA_CLOSURE  'C'
+#define SCHEMA_ENUM     'e'
 
 // Schema: recursive type descriptor used for serialisation/deserialisation.
 //
@@ -551,7 +569,13 @@ typedef enum {
     MORLOC_X_THROW,         // msg -> raises; never returns
     MORLOC_X_CATCH,         // (fallible, fallback) -> value
     MORLOC_X_IF,            // (cond, then, else) -> value
-    MORLOC_X_STREAM_LAYOUT  // IFile handle -> [(U64,U64,U64)]
+    MORLOC_X_STREAM_LAYOUT, // IFile handle -> [(U64,U64,U64)]
+    MORLOC_X_TAG_TEST       // (subject, constructor) -> Bool. Compares the
+                            // one-byte tags of two `data` values. The nexus
+                            // answers this itself rather than dispatching to
+                            // a pool, because a tag is a byte it already
+                            // holds -- a pattern match on an enum in a pure
+                            // morloc function costs no pool round trip.
 } morloc_expression_type;
 
 typedef enum { APPLY_PATTERN, APPLY_LAMBDA, APPLY_FORMAT } morloc_app_expression_type;
@@ -660,6 +684,13 @@ typedef struct morloc_map_expression_s {
     morloc_expression_t* list;
 } morloc_map_expression_t;
 
+// A constructor-pattern tag test: does `subject` carry the same tag as
+// `constructor`? Both are `data` values, so this compares one byte.
+typedef struct morloc_tag_test_expression_s {
+    morloc_expression_t* subject;
+    morloc_expression_t* constructor;
+} morloc_tag_test_expression_t;
+
 // @catch: run `fallible` into scratch, memcpy on success, else
 // evaluate `fallback` into dest.
 typedef struct morloc_catch_expression_s {
@@ -704,6 +735,7 @@ typedef struct morloc_expression_s {
         morloc_expression_t* unary_expr;
         morloc_save_expression_t* save_expr;
         morloc_map_expression_t* map_expr;
+        morloc_tag_test_expression_t* tag_test_expr;
         morloc_catch_expression_t* catch_expr;
         morloc_if_expression_t* if_expr;
         morloc_open_expression_t* open_expr;

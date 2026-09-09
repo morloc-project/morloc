@@ -306,6 +306,7 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
         case MORLOC_UINT64:
         case MORLOC_FLOAT32:
         case MORLOC_FLOAT64:
+        case MORLOC_ENUM:
             return schema->width;
         case MORLOC_INT:
             // Inline BigInt: R values always fit inline (16 bytes)
@@ -540,6 +541,24 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
         *(CTYPE*)dest = (CTYPE)value; \
     } while(0)
 
+// An enum's R form is a factor: integer storage plus a levels attribute,
+// which is R's own enum. The names come from the schema, so nothing has to
+// be generated into the pool.
+//
+// Factor codes are 1-based while the wire tag is 0-based. Both directions
+// of that conversion live here and nowhere else, because an off-by-one
+// between them corrupts silently -- every value still decodes, just to the
+// neighbouring constructor.
+static void attach_factor_levels(SEXP obj, const Schema* schema) {
+    SEXP levels = PROTECT(allocVector(STRSXP, (R_xlen_t)schema->size));
+    for (size_t i = 0; i < schema->size; i++) {
+        SET_STRING_ELT(levels, (R_xlen_t)i, mkChar(schema->keys[i]));
+    }
+    setAttrib(obj, R_LevelsSymbol, levels);
+    setAttrib(obj, R_ClassSymbol, mkString("factor"));
+    UNPROTECT(1);
+}
+
 #define HANDLE_UINT_TYPE(CTYPE, MAX) \
     do { \
         if (!(isInteger(obj) || isReal(obj))) { \
@@ -661,6 +680,38 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
         case MORLOC_UINT8:
             HANDLE_UINT_TYPE(uint8_t, UINT8_MAX);
             break;
+        // Bound by the constructor count rather than UINT8_MAX: a tag no
+        // constructor claims is a type error, not an overflow.
+        case MORLOC_ENUM: {
+            // A factor carries 1-based codes; a character vector names the
+            // constructor directly. A bare integer is deliberately NOT
+            // accepted: it would be ambiguous between the wire tag and a
+            // factor code, and the two differ by one.
+            long tag = -1;
+            if (isFactor(obj)) {
+                tag = (long)asInteger(obj) - 1;
+            } else if (isString(obj) && LENGTH(obj) == 1) {
+                const char* name = CHAR(STRING_ELT(obj, 0));
+                for (size_t i = 0; i < schema->size; i++) {
+                    if (strcmp(name, schema->keys[i]) == 0) {
+                        tag = (long)i;
+                        break;
+                    }
+                }
+                if (tag < 0) {
+                    MORLOC_ERROR("'%s' is not a constructor of this type", name);
+                }
+            } else {
+                MORLOC_ERROR("Expected a factor or a constructor name, but got %s",
+                             type2char(TYPEOF(obj)));
+            }
+            if (tag < 0 || (size_t)tag >= schema->size) {
+                MORLOC_ERROR("enum tag %ld is out of range; the type has %zu constructors",
+                             tag, schema->size);
+            }
+            *(uint8_t*)dest = (uint8_t)tag;
+            break;
+        }
         case MORLOC_UINT16:
             HANDLE_UINT_TYPE(uint16_t, UINT16_MAX);
             break;
@@ -1048,6 +1099,14 @@ static SEXP from_voidstar_inner(const void* data, const Schema* schema, const vo
         case MORLOC_UINT8:
             obj = ScalarInteger((int)(*(uint8_t*)data));
             break;
+        // The 0-based wire tag reaches R as a plain integer; the generated
+        // wrapper turns it into a factor, which is where the 1-based
+        // adjustment belongs -- R factor codes start at 1.
+        case MORLOC_ENUM:
+            obj = PROTECT(ScalarInteger((int)(*(uint8_t*)data) + 1));
+            attach_factor_levels(obj, schema);
+            UNPROTECT(1);
+            break;
         case MORLOC_UINT16:
             obj = ScalarInteger((int)(*(uint16_t*)data));
             break;
@@ -1224,6 +1283,24 @@ static SEXP from_voidstar_inner(const void* data, const Schema* schema, const vo
                         }
                         start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                         memcpy(RAW(obj), start, array->size * sizeof(uint8_t));
+                        UNPROTECT(1);
+                        break;
+                    // A factor's storage is an integer vector, so an enum
+                    // array widens to INTSXP here and the wrapper attaches
+                    // the levels. This costs R 4 bytes per element; that is
+                    // R's floor for a factor, not a property of the wire.
+                    case MORLOC_ENUM:
+                        obj = PROTECT(allocVector(INTSXP, array->size));
+                        if(array->size == 0) {
+                            attach_factor_levels(obj, element_schema);
+                            UNPROTECT(1);
+                            break;
+                        }
+                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
+                        for (size_t i = 0; i < array->size; i++) {
+                            INTEGER(obj)[i] = (int)(*(uint8_t*)(start + i)) + 1;
+                        }
+                        attach_factor_levels(obj, element_schema);
                         UNPROTECT(1);
                         break;
                     case MORLOC_UINT16:

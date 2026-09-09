@@ -213,6 +213,12 @@ data NexusExpr
   | OptNullX Text         -- absent ?T: at runtime sets tag=0 and leaves the
                           -- inner slot zero. Schema is the outer ?T schema so
                           -- the slot has the right width inside arrays/records.
+  | TagTestX Text NexusExpr NexusExpr
+      -- ^ schema (Bool), subject, constructor. Compares the one-byte tags of
+      -- two `data` values. The nexus answers this itself: the tag is a byte
+      -- it already holds, so a pattern match on an enum in a pure morloc
+      -- function costs no pool dispatch. Emitted only by the desugar's
+      -- constructor-pattern lowering.
   | MapX Text NexusExpr NexusExpr  -- schema (return type = List b), lambda, list.
                                    -- Emits the runtime Map intrinsic: per-element
                                    -- loop applying the lambda body to each input
@@ -436,7 +442,14 @@ generalTypeToSerialAST' i anc (VarT v)
   | Set.member v anc = return $ SerialRec (FV v (CV ""))
   | otherwise = do
       scope <- MM.gets stateUniversalGeneralTypedefs
-      case Map.lookup v scope of
+      -- A `data` type is a leaf here: its scope body is a constructor-name
+      -- table, not a parent type, so the alias-expansion path below would
+      -- try to serialize the table itself. This is the nexus's pure-morloc
+      -- path, reached whenever a function over an enum has no sourced
+      -- implementation and therefore runs in the nexus rather than a pool.
+      case scopeEnumCtors scope v of
+       Just ctors -> return $ SerialEnum (FV v (CV "")) ctors
+       Nothing -> case Map.lookup v scope of
         (Just [(_, _, _, True, _)]) -> error "Cannot handle terminal types"
         (Just [([], t', _, False, _)]) -> do
           -- Same retag-outer rule as in @resolveAliasApp@: the alias's
@@ -717,6 +730,11 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       resolveNumericToLitX litIx t (NL.RealSrc v)
     toNexusExpr (AnnoS (Idx _ t) _ (IntS litIx v)) =
       resolveNumericToLitX litIx t (NL.IntSrc v)
+    -- A `data` constructor is its tag byte, and an enum's voidstar form is
+    -- exactly that byte -- so the constructor needs no node of its own here,
+    -- only the one-byte literal it already is.
+    toNexusExpr (AnnoS _ _ (EnumS _ _ ordinal)) =
+      return $ LitX U8X (MT.pack (show ordinal))
     toNexusExpr (AnnoS _ _ (LogS True)) = return $ LitX BoolX "1"
     toNexusExpr (AnnoS _ _ (LogS False)) = return $ LitX BoolX "0"
     toNexusExpr (AnnoS _ _ UniS) = return $ LitX NullX "0"
@@ -758,6 +776,8 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- without any pool dispatch.
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrMap [funcE, listE])) =
       MapX <$> type2schema t <*> toNexusExpr funcE <*> toNexusExpr listE
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrTagTest [subjE, ctorE])) =
+      TagTestX <$> type2schema t <*> toNexusExpr subjE <*> toNexusExpr ctorE
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrShow [arg])) =
       ShowX <$> type2schema t <*> toNexusExpr arg
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrRead [arg])) =
@@ -993,6 +1013,9 @@ resolvedSourceJson mLit Nothing mschema
   | otherwise = case fmap classifySchema mschema of
       Just CatScalarPrim    -> sourceAtomJson SourceInline
       Just CatStr           -> sourceAtomJson SourceInline
+      -- A constructor is always written literally on the command line;
+      -- there is no reading under which `A` names a file.
+      Just CatEnum          -> sourceAtomJson SourceInline
       _                     -> jsonStr "auto"
 
 -- | Emit the outer form atom, or `"auto"` when none is set. `auto` is
@@ -1056,6 +1079,9 @@ renderFormatHint mschema many mSrc mForm cks mLSrc mLForm lcks
       Nothing -> Nothing
       Just s -> case classifySchema s of
         CatScalarPrim    -> Nothing
+        -- The legal values are already listed in the argument's own
+        -- help text, so a format hint would only repeat them.
+        CatEnum          -> Nothing
         CatStr           -> strFormatHint mSrc cks
         CatList elemS    -> listFormatHint elemS mSrc mForm cks mLSrc mLForm lcks
         CatOtherCompound -> Nothing
@@ -1156,6 +1182,7 @@ formListHint elemSchema mLSrc mLForm lcks =
 
     defaultPerLine es = case classifySchema es of
       CatStr           -> "path to text file with one string per line"
+      CatEnum          -> "path to text file with one constructor name per line"
       CatScalarPrim    -> "path to text file with one value per line"
       CatList _        -> "path to text file with one JSON array per line"
       CatOtherCompound -> "path to file with one row entry line (JSON or table)"
@@ -1439,6 +1466,7 @@ validateArgSpecs i cmdargs asts schemas = do
 data SchemaCat
   = CatScalarPrim       -- Bool, Int, Real, UInt*, Float*, Null, etc.
   | CatStr              -- Str (`s`)
+  | CatEnum             -- a `data` type with argument-free constructors (`e`)
   | CatList Text        -- `a<elem>` for any elem schema
   | CatOtherCompound    -- tuples, records, maps, tables
   deriving (Eq, Show)
@@ -1458,6 +1486,11 @@ classifySchema s0 =
               then CatScalarPrim
               else case MT.uncons core of
                 Just ('a', rest) -> CatList rest
+                -- An enum is a scalar whose surface form is a bare
+                -- identifier. Its schema is variable-length (the
+                -- constructor names follow), so it cannot join
+                -- 'isScalarPrimCore', which matches whole cores.
+                Just ('e', _)    -> CatEnum
                 _                -> CatOtherCompound
 
 isScalarPrimCore :: Text -> Bool
@@ -1725,6 +1758,10 @@ expectedJsonShape = go
     go (SerialNull _)                = "null"
     go (SerialBool _)                = "Bool"
     go (SerialString _)              = "Str"
+    -- Name the legal set: for a closed constructor list the whole
+    -- vocabulary fits in the message, which is the point of carrying
+    -- the names rather than the ordinals.
+    go (SerialEnum _ ns)             = "one of " <> MT.intercalate ", " ns
     go (SerialIFile _)               = "IFile path (Str)"
     go (SerialOStream _)             = "OStream path (Str)"
     go (SerialIStream _)             = "IStream path (Str)"
@@ -2265,6 +2302,13 @@ exprToJson (BndX schema var) =
     [ ("tag", jsonStr "bound")
     , ("schema", jsonStr schema)
     , ("var", jsonStr var)
+    ]
+exprToJson (TagTestX schema subjExpr ctorExpr) =
+  jsonObj
+    [ ("tag", jsonStr "tagtest")
+    , ("schema", jsonStr schema)
+    , ("subject", exprToJson subjExpr)
+    , ("constructor", exprToJson ctorExpr)
     ]
 exprToJson (MapX schema funcExpr listExpr) =
   jsonObj

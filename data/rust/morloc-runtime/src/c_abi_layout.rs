@@ -525,16 +525,16 @@ mod tests {
         let expr = header_enum_variants("morloc_expression_type");
         assert_eq!(
             expr.len(),
-            MorlocExpressionType::StreamLayout as usize + 1,
+            MorlocExpressionType::TagTest as usize + 1,
             "morloc.h names {} expression types, the Rust enum has {}: {:?}",
             expr.len(),
-            MorlocExpressionType::StreamLayout as usize + 1,
+            MorlocExpressionType::TagTest as usize + 1,
             expr
         );
         assert_eq!(expr.first().map(String::as_str), Some("MORLOC_X_DAT"));
         assert_eq!(
             expr.last().map(String::as_str),
-            Some("MORLOC_X_STREAM_LAYOUT")
+            Some("MORLOC_X_TAG_TEST")
         );
 
         let pat = header_enum_variants("morloc_pattern_type");

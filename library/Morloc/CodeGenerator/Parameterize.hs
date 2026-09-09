@@ -55,6 +55,7 @@ parameterize' _ (AnnoS g c (RealS si x)) = return (AnnoS g (c, []) (RealS si x))
 parameterize' _ (AnnoS g c (IntS si x)) = return (AnnoS g (c, []) (IntS si x))
 parameterize' _ (AnnoS g c (LogS x)) = return (AnnoS g (c, []) (LogS x))
 parameterize' _ (AnnoS g c (StrS x)) = return (AnnoS g (c, []) (StrS x))
+parameterize' _ (AnnoS g c (EnumS tv n i)) = return (AnnoS g (c, []) (EnumS tv n i))
 parameterize' args (AnnoS g c (BndS v)) = do
   let args' = [r | r@(Arg _ v') <- args, v' == v]
   return $ AnnoS g (c, args') (BndS v)

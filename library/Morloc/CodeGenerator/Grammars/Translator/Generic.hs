@@ -431,6 +431,9 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         , lcArgManifoldOwnership = \_ -> return Owned
         , lcOwnArg = \_ _ x -> x
         , lcWithCallerScope = id
+        , lcEnumLit = \_ n i ->
+            if ldEnumLitByName desc then dquotes (pretty n) else pretty i
+        , lcTagTest = \a b -> parens (a <+> "==" <+> b)
         , lcCoerceOptional = id
         , lcTypeOf = \_ -> return Nothing
         , lcSerialAstType = \_ -> return Nothing

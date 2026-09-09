@@ -145,6 +145,10 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
   cppTypeOf = f . typeFof
     where
       f (UnkF (FV _ x)) = return $ pretty x
+      -- An enum lowers to its concrete name; the `enum class X : uint8_t`
+      -- behind it is generated for this pool or supplied by the user
+      -- through a `data Cpp => X = "..."` mapping.
+      f (EnumF (FV _ x) _) = return $ pretty x
       -- Kindless or polymorphic-row `Table` lowers to a VarF tagged with
       -- the general type variable @BT.table@. The wire schema marker is
       -- @T@ on the encoder side; here on the C++ side it must lower to
@@ -726,6 +730,8 @@ cppLowerConfig reifyThunks =
     -- expression, so a bare `T` would serialize against a `?`-schema without the
     -- optional layer (a compound inner then hits "compound schema reached a
     -- scalar-sized type" at runtime). `make_optional` deduces T from the value.
+    , lcEnumLit = \cv n _ -> pretty (unCVar cv) <> "::" <> pretty n
+    , lcTagTest = \a b -> parens (a <+> "==" <+> b)
     , lcCoerceOptional = \x -> "std::make_optional(" <> x <> ")"
     , lcTypeOf = \t -> Just . toIType <$> cppTypeOf t
     , lcSerialAstType = serializeTypeOf

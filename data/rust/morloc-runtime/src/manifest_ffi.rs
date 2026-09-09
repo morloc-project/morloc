@@ -84,6 +84,10 @@ pub enum MorlocExpressionType {
     StreamLayout = 30, // IFile handle -> [(U64,U64,U64)]. Per-sub-packet layout
                        // (element_offset, element_count, uncompressed_size);
                        // DATA packet -> single triple; empty stream -> [].
+    TagTest = 31,      // (subject, constructor) -> Bool. Compares the one-byte
+                       // tags of two `data` values. Answered in the nexus: the
+                       // tag is a byte it already holds, so a pattern match on
+                       // an enum needs no pool dispatch.
 }
 
 #[repr(C)]
@@ -220,6 +224,14 @@ pub struct MorlocMapExpression {
     pub list: *mut MorlocExpression,
 }
 
+// A constructor-pattern tag test: two `data` values whose one-byte tags
+// are compared. See MorlocExpressionType::TagTest.
+#[repr(C)]
+pub struct MorlocTagTestExpression {
+    pub subject: *mut MorlocExpression,
+    pub constructor: *mut MorlocExpression,
+}
+
 // @catch: two-child expression carrying a fallible and a fallback.
 // The eval handler runs the fallible into a scratch buffer, memcpy's
 // on success, evaluates fallback into dest on failure.
@@ -272,6 +284,7 @@ pub union ExprUnion {
     pub unary_expr: *mut MorlocExpression,
     pub save_expr: *mut MorlocSaveExpression,
     pub map_expr: *mut MorlocMapExpression,
+    pub tag_test_expr: *mut MorlocTagTestExpression,
     pub catch_expr: *mut MorlocCatchExpression,
     pub if_expr: *mut MorlocIfExpression,
     // IFile-family expressions.
@@ -951,6 +964,29 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             (*expr).etype = MorlocExpressionType::Map;
             (*expr).schema = schema;
             (*expr).expr.map_expr = me;
+            Ok(expr)
+        }
+
+        "tagtest" => {
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+            let c_schema_str = CString::new(schema_str).unwrap_or_default();
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let subject = build_expr(je.get("subject").unwrap_or(&serde_json::Value::Null))?;
+            let constructor =
+                build_expr(je.get("constructor").unwrap_or(&serde_json::Value::Null))?;
+            let te = libc::calloc(1, std::mem::size_of::<MorlocTagTestExpression>())
+                as *mut MorlocTagTestExpression;
+            (*te).subject = subject;
+            (*te).constructor = constructor;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::TagTest;
+            (*expr).schema = schema;
+            (*expr).expr.tag_test_expr = te;
             Ok(expr)
         }
 

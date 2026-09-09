@@ -180,6 +180,10 @@ rustTypeOf = f
     f :: TypeF -> RustM MDoc
     f (UnkF (FV _ x)) = return (pretty x)
     f (VarF (FV _ x)) = return (pretty x)
+    -- An enum lowers to its concrete name; the `#[repr(u8)] enum` that
+    -- name refers to is either generated for this pool or supplied by the
+    -- user through a `data Rust => X = "..."` mapping.
+    f (EnumF (FV _ x) _) = return (pretty x)
     f (AppF t ts) = do
       t' <- f t
       let (typeTs, kindCount) = partitionKindArgsF ts
@@ -236,12 +240,6 @@ rustTypeOf = f
             Just ((_, body, _, _, _) : _) | Just name <- bodyName body -> return (pretty name)
             _ -> error $ "Rust: recursive record `" <> T.unpack gvText <> "` has no concrete mapping"
 
-    -- Outer name of a concrete-scope typedef body, when it contributes a name.
-    bodyName :: TypeU -> Maybe Text
-    bodyName (VarU (TV n)) = Just n
-    bodyName (AppU (VarU (TV n)) _) = Just n
-    bodyName (NamU _ (TV n) _ _) = Just n
-    bodyName _ = Nothing
 
 -- | The bare struct name for a record-literal constructor: 'rustTypeOf' with any
 -- generic `<..>` parameters stripped. A Rust struct literal takes no type
@@ -260,6 +258,11 @@ rustStructCtor recType = do
 -- from the resolved concrete type name, which is robust to type aliases.
 rustIsCopy :: TypeF -> Bool
 rustIsCopy (OptionalF t) = rustIsCopy t
+-- A `data` type with argument-free constructors is one byte and holds
+-- nothing, so it is Copy. A pool-owned enum derives Copy; a user-mapped
+-- one (`data Rust => X = "..."`) must derive it too, which is the same
+-- shape 'printRustEnum' emits.
+rustIsCopy (EnumF _ _) = True
 rustIsCopy (AppF (VarF (FV (TV gv) _)) ts)
   | T.isPrefixOf "Tuple" gv = all rustIsCopy (fst (partitionKindArgsF ts))
 rustIsCopy (VarF (FV _ (CV cv))) = cv `elem` copyScalars
@@ -992,6 +995,7 @@ subVersion = T.replace "__MORLOC_VERSION__" (MT.pack MV.versionStr)
 makeRustCode :: [MDoc] -> Map.Map Int ([Text], [Text], Text) -> [SerialManifold] -> RustM MDoc
 makeRustCode includeDocs closureTable0 es = do
   structDocs <- generateRustStructs es
+  enumDocs <- generateRustEnums es
   -- Keep only closures that actually cross a boundary (their signature reaches a
   -- serialize site); the rest stay thin `impl Fn`/`Rc` with no reify cost.
   closureTable <- restrictToCrossingClosures es closureTable0
@@ -1004,7 +1008,7 @@ makeRustCode includeDocs closureTable0 es = do
   program <- buildProgramM Map.empty Map.empty includeDocs [] es translateSegment getRustSchemaTable closureTable
   -- structDocs go in the schema-table section; the closure dispatch wrappers are
   -- free functions spliced into the signatures section.
-  return $ RP.printProgram structDocs closureWrappers [] program
+  return $ RP.printProgram (structDocs <> enumDocs) closureWrappers [] program
 
 -- | A closure value's Rust signature: result type + tupled argument types.
 -- Matches the signature seen at a serialize site for the same closure, so a
@@ -1120,6 +1124,65 @@ collectRustRecords =
     seek (OptionalF t) = seek t
     seek (EffectF _ t) = seek t
     seek _ = []
+
+-- | Outer name of a concrete-scope typedef body, when it contributes a name.
+bodyName :: TypeU -> Maybe Text
+bodyName (VarU (TV n)) = Just n
+bodyName (AppU (VarU (TV n)) _) = Just n
+bodyName (NamU _ (TV n) _ _) = Just n
+bodyName _ = Nothing
+
+-- | Collect every @data@ type used in these manifolds, keyed by its FVar,
+-- with its constructor names. Mirrors 'collectRustRecords'.
+collectRustEnums :: [SerialManifold] -> [(FVar, [Text])]
+collectRustEnums =
+  nubBy ((==) `on` \(FV gv _, _) -> gv)
+    . concatMap (runIdentity . foldWithSerialManifoldM fm)
+  where
+    fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
+    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (serialAstToType s)
+    ne efull e = return $ foldlNE (<>) (seek (typeFof efull)) e
+    se _ (SerializeS_ s xs) = return $ seek (serialAstToType s) <> xs
+    se _ e = return $ foldlSE (<>) [] e
+
+    seek :: TypeF -> [(FVar, [Text])]
+    seek (EnumF v ns) = [(v, ns)]
+    seek (NamF _ _ _ rs) = concatMap (seek . snd) rs
+    seek (AppF t ts) = concatMap seek (t : ts)
+    seek (FunF ts t) = concatMap seek (t : ts)
+    seek (OptionalF t) = seek t
+    seek (EffectF _ t) = seek t
+    seek _ = []
+
+-- | Emit the @ToVoidstar@/@FromVoidstar@ impls for every @data@ type used in
+-- the pool, plus the enum definition itself when the pool owns it.
+--
+-- Ownership follows the record rule: a user-mapped @data Rust => X = "..."@
+-- means the user writes the enum in sourced Rust and only the impls are
+-- emitted. Otherwise the pool generates both. The @gv == cv@ shape alone
+-- cannot decide this -- a user-written @data Rust => Foo = "Foo"@ produces
+-- exactly the same FVar as an unmapped @Foo@ -- so the concrete scope is
+-- consulted, as 'Cpp.cscopeMatches' does for the same ambiguity.
+generateRustEnums :: [SerialManifold] -> RustM [MDoc]
+generateRustEnums es = concat <$> mapM makeOne (collectRustEnums es)
+  where
+    makeOne (FV gv@(TV gvText) (CV cvText), ctors) = do
+      userMapped <- cscopeDeclares gv cvText
+      let name = pretty cvText
+          impls = RP.printEnumImpls name ctors
+      return $ if userMapped
+                 then [impls]
+                 else [RP.printRustEnum name ctors, impls]
+
+    -- True iff the concrete scope holds an entry for @gv@ whose body names
+    -- @cvText@; that is what distinguishes a real per-language mapping from
+    -- a name the compiler defaulted to the type's own.
+    cscopeDeclares :: TVar -> Text -> RustM Bool
+    cscopeDeclares gv cvText = do
+      cscope <- CMS.gets rsCScope
+      return $ case Map.lookup gv cscope of
+        Just entries -> any (\(_, body, _, _, _) -> bodyName body == Just cvText) entries
+        Nothing -> False
 
 -- | Emit a struct definition (only for autogenerated @= "struct"@ records) plus
 -- @ToVoidstar/FromVoidstar@ impls for every record used in the pool. User-mapped
@@ -1500,6 +1563,8 @@ rustLowerConfig mask =
     -- `?T` is `Option<T>`, whose wire layout is type-driven; a widened value must
     -- be a real `Some(..)` (never a bare `T`) or put_value serializes the wrong
     -- shape. The coercion only ever wraps a non-optional inner, so this is safe.
+    , lcEnumLit = \cv n _ -> pretty (unCVar cv) <> "::" <> pretty n
+    , lcTagTest = \a b -> parens (a <+> "==" <+> b)
     , lcCoerceOptional = \x -> "Some(" <> x <> ")"
     , lcTypeOf = \t -> Just . toIType <$> rustTypeOf t
     -- The serialize / raw-deserialize types use the WIRE form: a closure nested
