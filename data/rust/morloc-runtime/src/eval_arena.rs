@@ -54,6 +54,26 @@ thread_local! {
     static ARENA: RefCell<Option<ArenaState>> = const { RefCell::new(None) };
 }
 
+/// Every read of the arena goes through here, and nothing else may touch
+/// `ARENA` directly.
+///
+/// `LocalKey::with` panics once a thread-local has been destroyed. A thread's
+/// destructors run in an order nobody chooses, and this arena is reached from
+/// inside another object's destructor: a retired worker releases its deferred
+/// blocks through `shfree`, whose first act is to drop them from the arena. By
+/// then the arena, which lives in a different object, may already be gone.
+/// The panic then has to leave `shfree`, which is `extern "C"` and cannot
+/// unwind, so the process aborts -- after having answered correctly, which is
+/// what made it easy to miss.
+///
+/// To every caller here an arena that has been destroyed and an arena that was
+/// never entered are the same thing: there is nothing to record in and nothing
+/// to forget from. `None` says the arena could not be reached at all, and only
+/// `enter` has any reason to tell the two apart.
+fn with_arena<R>(f: impl FnOnce(&mut Option<ArenaState>) -> R) -> Option<R> {
+    ARENA.try_with(|cell| f(&mut cell.borrow_mut())).ok()
+}
+
 /// Initial capacity of the tracking vector. Sized to avoid libc-malloc
 /// reallocation for typical eval calls (a few dozen blocks). Growing
 /// beyond this is fine -- `Vec::push` reallocates via the system
@@ -72,59 +92,61 @@ pub struct ArenaGuard {
 
 impl Drop for ArenaGuard {
     fn drop(&mut self) {
-        ARENA.with(|cell| {
-            let state = cell.borrow_mut().take();
-            if let Some(state) = state {
-                for ptr in state.blocks {
-                    // Panic-safe: log and continue rather than propagate.
-                    // A panic inside Drop while already unwinding aborts
-                    // the process, which is strictly worse than leaving
-                    // one bad block alone and freeing the rest.
-                    if let Err(e) = shm::shfree(ptr) {
-                        eprintln!(
-                            "eval_arena drop: shfree failed for {:p}: {:?}",
-                            ptr, e
-                        );
-                    }
+        // Drain first, release after. `shfree` and `discard_handle` both call
+        // back into this module, so the arena must not be borrowed while they
+        // run -- the same discipline `rollback_to` follows and for the same
+        // reason.
+        let state = with_arena(|slot| slot.take()).flatten();
+        if let Some(state) = state {
+            for ptr in state.blocks {
+                // Panic-safe: log and continue rather than propagate.
+                // A panic inside Drop while already unwinding aborts
+                // the process, which is strictly worse than leaving
+                // one bad block alone and freeing the rest.
+                if let Err(e) = shm::shfree(ptr) {
+                    eprintln!(
+                        "eval_arena drop: shfree failed for {:p}: {:?}",
+                        ptr, e
+                    );
                 }
-                for path in state.files {
-                    if let Err(e) = std::fs::remove_file(&path) {
-                        if e.kind() != std::io::ErrorKind::NotFound {
-                            eprintln!(
-                                "eval_arena drop: remove_file failed for {}: {}",
-                                path.display(), e
-                            );
-                        }
-                    }
-                }
-                // Release any stream handles that were opened in this
-                // arena scope and not explicitly `@close`d. Without
-                // this, an exception unwinding out of a Python pool
-                // would leak slots forever and eventually exhaust the
-                // 16-bit slot space in long-running daemons.
-                //
-                // We use `discard_handle` (not `close_handle`) so an
-                // OStream that goes out of scope without an explicit
-                // `@close` does NOT silently grow a final footer. The
-                // file on disk keeps its temp footer, which is the
-                // honest signal that the writer never reached `@close`
-                // (crash, exception, or just an omitted call). Readers
-                // can drain it via IStream; IFile refuses it. The
-                // explicit-close path stays the only way to produce a
-                // final-footer file.
-                //
-                // Errors here are non-fatal -- the goal is to release
-                // resources, not to surface diagnostics during unwind.
-                for handle in state.slots {
-                    if let Err(e) = crate::stream::discard_handle(handle) {
+            }
+            for path in state.files {
+                if let Err(e) = std::fs::remove_file(&path) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
                         eprintln!(
-                            "eval_arena drop: discard_handle({}) failed: {:?}",
-                            handle, e
+                            "eval_arena drop: remove_file failed for {}: {}",
+                            path.display(), e
                         );
                     }
                 }
             }
-        });
+            // Release any stream handles that were opened in this
+            // arena scope and not explicitly `@close`d. Without
+            // this, an exception unwinding out of a Python pool
+            // would leak slots forever and eventually exhaust the
+            // 16-bit slot space in long-running daemons.
+            //
+            // We use `discard_handle` (not `close_handle`) so an
+            // OStream that goes out of scope without an explicit
+            // `@close` does NOT silently grow a final footer. The
+            // file on disk keeps its temp footer, which is the
+            // honest signal that the writer never reached `@close`
+            // (crash, exception, or just an omitted call). Readers
+            // can drain it via IStream; IFile refuses it. The
+            // explicit-close path stays the only way to produce a
+            // final-footer file.
+            //
+            // Errors here are non-fatal -- the goal is to release
+            // resources, not to surface diagnostics during unwind.
+            for handle in state.slots {
+                if let Err(e) = crate::stream::discard_handle(handle) {
+                    eprintln!(
+                        "eval_arena drop: discard_handle({}) failed: {:?}",
+                        handle, e
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -134,8 +156,11 @@ impl Drop for ArenaGuard {
 /// Side-effect: resets the per-command stdin-claim flag so each
 /// command starts with a fresh stdin budget of one reader.
 pub fn enter() -> Result<ArenaGuard, MorlocError> {
-    ARENA.with(|cell| {
-        let mut slot = cell.borrow_mut();
+    // The one caller that must distinguish a destroyed arena from an absent
+    // one: a scope cannot be opened on a thread that is already unwinding its
+    // thread-locals, and silently handing back a guard that tracks nothing
+    // would leak every block allocated under it.
+    let opened = with_arena(|slot| {
         if slot.is_some() {
             return Err(MorlocError::Other(
                 "eval_arena::enter called while an arena is already active on this thread".into(),
@@ -146,9 +171,18 @@ pub fn enter() -> Result<ArenaGuard, MorlocError> {
             files: Vec::new(),
             slots: Vec::new(),
         });
-        crate::cli::reset_stdin_claim();
-        Ok(ArenaGuard { _priv: () })
-    })
+        Ok(())
+    });
+    match opened {
+        Some(Ok(())) => {
+            crate::cli::reset_stdin_claim();
+            Ok(ArenaGuard { _priv: () })
+        }
+        Some(Err(e)) => Err(e),
+        None => Err(MorlocError::Other(
+            "eval_arena::enter called while the thread is shutting down".into(),
+        )),
+    }
 }
 
 /// Record `ptr` in the active arena. No-op if no arena is active.
@@ -161,8 +195,8 @@ pub fn record_if_active(ptr: AbsPtr) {
     if ptr.is_null() {
         return;
     }
-    ARENA.with(|cell| {
-        if let Some(s) = cell.borrow_mut().as_mut() {
+    with_arena(|slot| {
+        if let Some(s) = slot.as_mut() {
             s.blocks.push(ptr);
         }
     });
@@ -174,8 +208,8 @@ pub fn record_if_active(ptr: AbsPtr) {
 /// responsible for cleanup).
 #[inline]
 pub fn record_file_if_active(path: PathBuf) {
-    ARENA.with(|cell| {
-        if let Some(s) = cell.borrow_mut().as_mut() {
+    with_arena(|slot| {
+        if let Some(s) = slot.as_mut() {
             s.files.push(path);
         }
     });
@@ -197,8 +231,8 @@ pub fn forget_if_active(ptr: AbsPtr) {
     if ptr.is_null() {
         return;
     }
-    ARENA.with(|cell| {
-        if let Some(s) = cell.borrow_mut().as_mut() {
+    with_arena(|slot| {
+        if let Some(s) = slot.as_mut() {
             if let Some(idx) = s.blocks.iter().rposition(|&p| p == ptr) {
                 s.blocks.swap_remove(idx);
             }
@@ -212,8 +246,8 @@ pub fn forget_if_active(ptr: AbsPtr) {
 /// is not tracked.
 #[inline]
 pub fn forget_file_if_active(path: &std::path::Path) {
-    ARENA.with(|cell| {
-        if let Some(s) = cell.borrow_mut().as_mut() {
+    with_arena(|slot| {
+        if let Some(s) = slot.as_mut() {
             if let Some(idx) = s.files.iter().rposition(|p| p == path) {
                 s.files.swap_remove(idx);
             }
@@ -229,8 +263,8 @@ pub fn record_slot_if_active(handle: i64) {
     if handle < 0 {
         return;
     }
-    ARENA.with(|cell| {
-        if let Some(s) = cell.borrow_mut().as_mut() {
+    with_arena(|slot| {
+        if let Some(s) = slot.as_mut() {
             s.slots.push(handle);
         }
     });
@@ -245,8 +279,8 @@ pub fn forget_slot_if_active(handle: i64) {
     if handle < 0 {
         return;
     }
-    ARENA.with(|cell| {
-        if let Some(s) = cell.borrow_mut().as_mut() {
+    with_arena(|slot| {
+        if let Some(s) = slot.as_mut() {
             if let Some(idx) = s.slots.iter().rposition(|&h| h == handle) {
                 s.slots.swap_remove(idx);
             }
@@ -269,7 +303,7 @@ pub struct ArenaCheckpoint {
 /// Snapshot the current arena high-water marks. No-op-shaped (returns a
 /// zero-init checkpoint) if no arena is active.
 pub fn checkpoint() -> ArenaCheckpoint {
-    ARENA.with(|cell| match cell.borrow().as_ref() {
+    with_arena(|slot| match slot.as_ref() {
         Some(s) => ArenaCheckpoint {
             blocks: s.blocks.len(),
             files: s.files.len(),
@@ -277,6 +311,7 @@ pub fn checkpoint() -> ArenaCheckpoint {
         },
         None => ArenaCheckpoint { blocks: 0, files: 0, slots: 0 },
     })
+    .unwrap_or(ArenaCheckpoint { blocks: 0, files: 0, slots: 0 })
 }
 
 /// Release every arena resource recorded after `cp`. Errors are logged
@@ -290,17 +325,15 @@ pub fn checkpoint() -> ArenaCheckpoint {
 /// the borrow was still held.
 pub fn rollback_to(cp: ArenaCheckpoint) {
     let (blocks, files, slots): (Vec<AbsPtr>, Vec<PathBuf>, Vec<i64>) =
-        ARENA.with(|cell| {
-            let mut slot = cell.borrow_mut();
-            match slot.as_mut() {
-                Some(s) => (
-                    if s.blocks.len() > cp.blocks { s.blocks.split_off(cp.blocks) } else { Vec::new() },
-                    if s.files.len() > cp.files { s.files.split_off(cp.files) } else { Vec::new() },
-                    if s.slots.len() > cp.slots { s.slots.split_off(cp.slots) } else { Vec::new() },
-                ),
-                None => (Vec::new(), Vec::new(), Vec::new()),
-            }
-        });
+        with_arena(|slot| match slot.as_mut() {
+            Some(s) => (
+                if s.blocks.len() > cp.blocks { s.blocks.split_off(cp.blocks) } else { Vec::new() },
+                if s.files.len() > cp.files { s.files.split_off(cp.files) } else { Vec::new() },
+                if s.slots.len() > cp.slots { s.slots.split_off(cp.slots) } else { Vec::new() },
+            ),
+            None => (Vec::new(), Vec::new(), Vec::new()),
+        })
+        .unwrap_or_default();
     for ptr in blocks {
         if let Err(e) = shm::shfree(ptr) {
             eprintln!("eval_arena rollback: shfree failed for {:p}: {:?}", ptr, e);
@@ -322,7 +355,7 @@ pub fn rollback_to(cp: ArenaCheckpoint) {
 
 /// Returns true if an arena is currently active on this thread.
 pub fn is_active() -> bool {
-    ARENA.with(|cell| cell.borrow().is_some())
+    with_arena(|slot| slot.is_some()).unwrap_or(false)
 }
 
 // ── C-ABI wrappers for cross-library access ────────────────────────────────
@@ -373,16 +406,47 @@ mod tests {
     }
 
     fn arena_len() -> usize {
-        ARENA.with(|cell| cell.borrow().as_ref().map(|s| s.blocks.len()).unwrap_or(0))
+        with_arena(|slot| slot.as_ref().map(|s| s.blocks.len()).unwrap_or(0)).unwrap_or(0)
+    }
+
+    // A thread-local whose destructor reads the arena, which is what
+    // `ShmTracker` does through `shfree`. Registered before the arena is
+    // touched, so glibc destroys it last and the arena first -- the ordering
+    // that reaches a destroyed thread-local.
+    //
+    // Failure is an abort, not an assertion: the read panics, the panic has
+    // to leave `shfree`, and `shfree` is `extern "C"` and cannot unwind. That
+    // is exactly the shape of the bug, so the test reproduces it faithfully
+    // and takes the harness down with it when it regresses.
+    struct TeardownProbe;
+
+    impl Drop for TeardownProbe {
+        fn drop(&mut self) {
+            forget_if_active(0x1 as AbsPtr);
+            let _ = is_active();
+            let _ = checkpoint();
+        }
+    }
+
+    thread_local! {
+        static TEARDOWN_PROBE: TeardownProbe = const { TeardownProbe };
+    }
+
+    #[test]
+    fn arena_reads_survive_thread_teardown() {
+        let _shm = ensure_shm();
+        std::thread::spawn(|| {
+            TEARDOWN_PROBE.with(|_| {});
+            let guard = enter().unwrap();
+            drop(guard);
+        })
+        .join()
+        .expect("the worker thread must exit cleanly");
     }
 
     fn arena_contains(p: AbsPtr) -> bool {
-        ARENA.with(|cell| {
-            cell.borrow()
-                .as_ref()
-                .map(|s| s.blocks.contains(&p))
-                .unwrap_or(false)
-        })
+        with_arena(|slot| slot.as_ref().map(|s| s.blocks.contains(&p)).unwrap_or(false))
+            .unwrap_or(false)
     }
 
     #[test]

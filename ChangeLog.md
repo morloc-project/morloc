@@ -1,6 +1,7 @@
 Unreleased
 ----------
 
+ - a Rust pool no longer prints a panic and aborts once it has answered
  - a function with an effectful return type may return a plain value
  - a record keeps its field order through a getter or a setter
  - a setter may write a plain value into an optional field
