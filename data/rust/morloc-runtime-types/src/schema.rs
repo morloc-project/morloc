@@ -152,7 +152,23 @@ impl Schema {
             | SerialType::Uint64
             | SerialType::Float32
             | SerialType::Float64 => true,
-            SerialType::Tuple => self.parameters.iter().all(|p| p.is_fixed_width()),
+            // A record is laid out exactly as the tuple of its field types:
+            // both go through `calculate_tuple_layout`, and the field names
+            // live in the schema rather than the buffer. So the same rule
+            // applies -- fixed-width when every field is, which is what lets
+            // an array of them be bulk-copied instead of walked.
+            //
+            // Answering true here means the bytes BETWEEN fields are read as
+            // part of the value: bulk copy moves them, and the hash path
+            // folds them in. That is sound only because free memory is
+            // zeroed -- a fresh volume from the OS, and `shm::shfree`
+            // scrubbing a block before republishing it -- so alignment
+            // padding reads as zero rather than as whatever the block last
+            // held. Were that scrub ever dropped, a hash over a padded
+            // record or tuple would stop being reproducible.
+            SerialType::Tuple | SerialType::Map => {
+                self.parameters.iter().all(|p| p.is_fixed_width())
+            }
             // One byte, no payload: fixed-width, so `[Enum]` takes the flat
             // bulk-copy path rather than a per-element walk.
             SerialType::Enum => true,
@@ -1409,6 +1425,53 @@ mod tests {
                 .unwrap_or_else(|e| panic!("rendered {n}-field tuple did not reparse: {e:?}"));
             assert_eq!(reparsed.parameters.len(), n);
         }
+    }
+
+    #[test]
+    fn test_record_of_fixed_fields_is_fixed_width() {
+        // A record's voidstar layout IS a tuple's -- `make_map_schema` and
+        // `make_tuple_schema` both call `calculate_tuple_layout`, and the
+        // field names live in the schema, not the buffer. So a record whose
+        // fields are all fixed-width has a fixed total width and no
+        // out-of-line data, exactly as the matching tuple does.
+        let rec = parse_schema("m21xi41yi4").unwrap();
+        let tup = parse_schema("t2i4i4").unwrap();
+        assert_eq!(rec.serial_type, SerialType::Map);
+        assert_eq!(rec.width, tup.width, "record and tuple widths must agree");
+        assert_eq!(rec.offsets, tup.offsets, "and so must their offsets");
+        assert!(
+            rec.is_fixed_width(),
+            "a record of fixed-width fields is fixed-width, like the tuple it is laid out as"
+        );
+    }
+
+    #[test]
+    fn test_record_with_variable_field_is_not_fixed_width() {
+        // One variable-length field is enough to disqualify the whole
+        // record, the same rule Tuple applies.
+        for schema_str in ["m21xi41ys", "m21xi41yai4", "m21xi41y?i4"] {
+            let s = parse_schema(schema_str).unwrap();
+            assert!(
+                !s.is_fixed_width(),
+                "{schema_str} has a variable-width field and must not be fixed-width"
+            );
+        }
+    }
+
+    #[test]
+    fn test_array_of_fixed_records_is_flat() {
+        // The payoff: an array of fixed-field records can be bulk-copied
+        // rather than walked element by element.
+        let arr = parse_schema("am21xi41yi4").unwrap();
+        assert!(
+            arr.array_data_is_flat(),
+            "[{{x::I32, y::I32}}] must take the bulk path"
+        );
+        let arr_var = parse_schema("am21xi41ys").unwrap();
+        assert!(
+            !arr_var.array_data_is_flat(),
+            "a record with a Str field must still be walked"
+        );
     }
 
     #[test]
