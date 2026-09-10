@@ -18,6 +18,8 @@ all:
 	./nexus eqDiff >> obs.txt 2>> obs.err
 	echo "--- eqSameCpp ---" >> obs.txt
 	./nexus eqSameCpp >> obs.txt 2>> obs.err
+	echo "--- crated ---" >> obs.txt
+	./nexus crated >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus pools *.err *.manifest

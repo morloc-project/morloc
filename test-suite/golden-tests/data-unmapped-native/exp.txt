@@ -14,3 +14,5 @@ true
 false
 --- eqSameCpp ---
 true
+--- crated ---
+[{"label":"a","item":{"Wrap":[3.5]}},{"label":"a","item":{"Wrap":[3.5]}}]

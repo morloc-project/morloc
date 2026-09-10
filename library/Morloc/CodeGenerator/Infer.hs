@@ -351,15 +351,14 @@ weave gscope = w Set.empty
       Just ctors
         -- Every constructor argument-free: the one-byte form.
         | all (null . snd) ctors -> EnumF (FV v1 (CV v2)) (map fst ctors)
-        -- Otherwise a tagged pointer, and the arms' field types have to be
-        -- woven too so the payload's own schema is reachable.
-        | otherwise ->
-            VariantF (FV v1 (CV v2))
-              [ (n, [either (const (UnkF (FV v1 (CV v2)))) id (w anc' t t) | t <- fs])
-              | (n, fs) <- ctors ]
+        -- Otherwise a tagged pointer. The arms are NOT expanded here: a
+        -- field's concrete form is a per-language question and this walk
+        -- has only the general scope, so weaving a field against itself
+        -- would leave the morloc name where a pool needs its own. The
+        -- reference stays opaque and the arms are built where the wire
+        -- form is, which is the same place the recursive case is tied off.
+        | otherwise -> VarF (FV v1 (CV v2))
       Nothing -> VarF (FV v1 (CV v2))
-      where
-        anc' = Set.insert v1 anc
     w anc (FunU ts1 t1) (FunU ts2 t2) = FunF <$> zipWithM (w anc) ts1 ts2 <*> w anc t1 t2
     -- AppU vs AppU: weave heads, then args. If heads weave but arg lists
     -- have mismatched lengths (e.g. general @Pair Int@ has 1 arg while

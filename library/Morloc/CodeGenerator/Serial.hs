@@ -656,6 +656,18 @@ makeSerialAST m lang t0 = do
           -- come straight from the declaration.
           | scopeDataIsEnum gscope gv
           , Just ctorNames <- scopeEnumCtors gscope gv = return $ SerialEnum v ctorNames
+          -- A payload-bearing `data` reached by name. Its arms are absent
+          -- from the type because the walk that produced it is pure and
+          -- cannot resolve a field's per-language form, so they are built
+          -- from the declaration here, where the language is known.
+          | Just ctors <- scopeDataCtors gscope gv = withAncestorVar anc $ do
+              as <- mapM
+                (\(n, fs) -> (,) n <$> mapM
+                   (\fu -> inferConcreteType lang (Idx m (typeOf fu))
+                             >>= makeSerialAST' gscope typepackers)
+                   fs)
+                ctors
+              return $ SerialVariant v as
           | otherwise = do
               (cscope, _) <- getScope m lang
               case aliasShape of
