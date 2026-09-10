@@ -1,0 +1,92 @@
+-- The unit literal `()`.
+--
+-- `()` is the one value of `Unit`; `Null` is the absent value of `?T`. They
+-- are different values, and a pool has to spell them differently -- Rust's
+-- `()` and `Option::None` are not the same expression, so a unit literal
+-- emitted as a null does not compile at all.
+--
+-- Every case here forces the literal into a POOL. The nexus interprets it
+-- rather than printing it into a target language, so a program that keeps
+-- `()` in the nexus exercises none of this.
+--
+-- Three positions, each in three languages: a `()` returned by a pure
+-- function, a `()` as one arm of a guard whose other arm is effectful (so
+-- the literal carries an effect row), and a `()` closing a do-block whose
+-- statement before it is run for its effect alone.
+
+module main
+  ( pyUnit
+  , cppUnit
+  , rustUnit
+  , pyGuard
+  , cppGuard
+  , rustGuard
+  , pyBare
+  , cppBare
+  , rustBare
+  )
+
+import root-py
+import root-cpp
+import root-rust
+
+source Py   from "u.py"  ("ident" as pyIdent, "shout" as pyShout)
+source Cpp  from "u.hpp" ("ident" as cppIdent, "shout" as cppShout)
+source Rust from "u.rs"  ("ident" as rustIdent, "shout" as rustShout)
+
+pyIdent   :: Int -> Int
+cppIdent  :: Int -> Int
+rustIdent :: Int -> Int
+
+pyShout   :: Int -> <IO> ()
+cppShout  :: Int -> <IO> ()
+rustShout :: Int -> <IO> ()
+
+-- A pure `()`. The argument comes from the pool's own source function, so
+-- this manifold is realized there rather than in the nexus.
+discard :: Int -> ()
+discard x = ()
+
+-- Consuming the unit is what makes the case observable: the number proves
+-- the manifold that produced the `()` ran.
+after :: () -> Int -> Int
+after u x = x + 1
+
+pyUnit :: Int -> Int
+pyUnit n = after (discard (pyIdent n)) n
+
+cppUnit :: Int -> Int
+cppUnit n = after (discard (cppIdent n)) n
+
+rustUnit :: Int -> Int
+rustUnit n = after (discard (rustIdent n)) n
+
+pyGuard :: Int -> <IO> ()
+pyGuard n
+  ? n > 0 = pyShout n
+  : ()
+
+cppGuard :: Int -> <IO> ()
+cppGuard n
+  ? n > 0 = cppShout n
+  : ()
+
+rustGuard :: Int -> <IO> ()
+rustGuard n
+  ? n > 0 = rustShout n
+  : ()
+
+pyBare :: Int -> <IO> ()
+pyBare n = do
+  pyShout n
+  ()
+
+cppBare :: Int -> <IO> ()
+cppBare n = do
+  cppShout n
+  ()
+
+rustBare :: Int -> <IO> ()
+rustBare n = do
+  rustShout n
+  ()

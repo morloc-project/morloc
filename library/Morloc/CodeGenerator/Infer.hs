@@ -71,7 +71,7 @@ inferConcreteType lang (Idx i (type2typeu -> generalType)) = do
   -- Recursion THROUGH a container (`data Rose = Rose [Rose]`) arrives this
   -- way -- the field's head is the container, not the `data` type.
   case dataHeadOf gscope0 generalType of
-    Just v | Set.member v anc ->
+    Just key@(v, _) | Set.member key anc ->
       return $ VarF (FV v (CV (concreteNameOf cscope0 v)))
     _ -> do
       concreteType <- inferConcreteTypeU lang (Idx i generalType)
@@ -117,7 +117,7 @@ inferConcreteTypeStructural lang i gscope g c = case (g, c) of
   (VarU vG, VarU (TV vC))
     | Just _ <- scopeDataCtors gscope vG -> do
         anc0 <- CMS.gets stateVariantAncestors
-        if Set.member vG anc0
+        if Set.member (vG, []) anc0
           then return $ VarF (FV vG (CV vC))
           else inferVariantArms lang i gscope vG vC []
   -- An APPLIED `data`, e.g. @Try Str a@. Same treatment as the bare case,
@@ -129,7 +129,7 @@ inferConcreteTypeStructural lang i gscope g c = case (g, c) of
     | Just _ <- scopeDataCtors gscope vG
     , Just vC <- concreteHeadName c -> do
         anc0 <- CMS.gets stateVariantAncestors
-        if Set.member vG anc0
+        if Set.member (vG, tsG) anc0
           then return $ VarF (FV vG (CV vC))
           else inferVariantArms lang i gscope vG vC tsG
   _ -> inferConcreteTypeStructuralRest lang i gscope g c
@@ -175,19 +175,19 @@ inferVariantArms lang i gscope vG vC targs = do
             -- 'inferConcreteType' at the top. A head-only test would miss
             -- recursion THROUGH a container -- @data Rose = Rose [Rose]@
             -- has head @List@, and expanding it reaches @Rose@ again.
-            dataHead t = case t of
-              VarU v | Just _ <- scopeDataCtors gscope v -> Just v
-              AppU (VarU v) _ | Just _ <- scopeDataCtors gscope v -> Just v
-              _ -> Nothing
             concreteName v = case Map.lookup v cscope of
               Just entries | (n : _) <- [n' | (_, body, _, _, _) <- entries
                                             , Just n' <- [bodyNameOf body]] -> n
               _ -> unTVar v
-            resolveField t = case dataHead t of
-              Just v | Set.member v anc || v == vG ->
+            -- The test is on the INSTANTIATION, not the name: the inner
+            -- @Box Int@ of a @Box (Box Int)@ is a different type from the
+            -- one being resolved, and leaving it opaque would say the value
+            -- contains itself.
+            resolveField t = case dataHeadOf gscope t of
+              Just key@(v, _) | Set.member key anc || key == (vG, targs) ->
                 return $ VarF (FV v (CV (concreteName v)))
               _ -> inferConcreteType lang (Idx i (typeOf t))
-        CMS.modify (\st -> st { stateVariantAncestors = Set.insert vG anc })
+        CMS.modify (\st -> st { stateVariantAncestors = Set.insert (vG, targs) anc })
         arms' <- mapM (\(n, ts) -> (,) n <$> mapM resolveField ts) arms
         CMS.modify (\st -> st { stateVariantAncestors = anc })
         -- A parameterized `data` needs one concrete type per instantiation.
@@ -302,11 +302,14 @@ inferConcreteTypeWeave lang i gscope generalType concreteType =
               MM.throwSourcedError i $
                 "Cannot infer concrete type for" <+> pretty generalType <> "\nCould not reduce type"
 
-inferConcreteTypeUniversal :: Lang -> Type -> MorlocMonad TypeF
-inferConcreteTypeUniversal lang t@(type2typeu -> generalType) = do
+-- | The index is the source position errors are reported against and the
+-- site a `data` type's arms are resolved at; the scopes themselves are the
+-- universal ones, as the name says.
+inferConcreteTypeUniversal :: Lang -> Int -> Type -> MorlocMonad TypeF
+inferConcreteTypeUniversal lang i t@(type2typeu -> generalType) = do
   gscopeUni <- CMS.gets stateUniversalGeneralTypedefs
   concreteType <- inferConcreteTypeUUniversal lang generalType
-  inferConcreteTypeUniversalStructural lang gscopeUni t generalType concreteType
+  inferConcreteTypeUniversalStructural lang i gscopeUni t generalType concreteType
 
 -- | Structural walk over (general, concrete) in universal scope. Mirrors
 -- 'inferConcreteTypeStructural' but recurses via 'inferConcreteTypeUniversal'
@@ -317,13 +320,25 @@ inferConcreteTypeUniversal lang t@(type2typeu -> generalType) = do
 -- can't bridge that mismatch and its @evaluateStep@ fallback treats the
 -- newtype as opaque.
 inferConcreteTypeUniversalStructural
-  :: Lang -> Scope -> Type -> TypeU -> TypeU -> MorlocMonad TypeF
-inferConcreteTypeUniversalStructural lang gscopeUni t g c = case (g, c) of
+  :: Lang -> Int -> Scope -> Type -> TypeU -> TypeU -> MorlocMonad TypeF
+inferConcreteTypeUniversalStructural lang i gscopeUni t g c = case (g, c) of
   (EffectU effs g', EffectU _ c') ->
     mkEffectF (resolveEffectSet effs)
-      <$> inferConcreteTypeUniversalStructural lang gscopeUni t g' c'
+      <$> inferConcreteTypeUniversalStructural lang i gscopeUni t g' c'
   (OptionalU g', OptionalU c') ->
-    OptionalF <$> inferConcreteTypeUniversalStructural lang gscopeUni t g' c'
+    OptionalF <$> inferConcreteTypeUniversalStructural lang i gscopeUni t g' c'
+  -- A `data` type resolves to its arms here exactly as it does in the
+  -- module-scoped walk. Without this, the wire form of a parameterized
+  -- `data` is asked for as though it were an ordinary applied type, and
+  -- answered with a demand for a `Packable` instance -- which a sum type
+  -- no more needs than a tuple does.
+  (VarU vG, VarU (TV vC))
+    | Just _ <- scopeDataCtors gscopeUni vG ->
+        inferVariantArms lang i gscopeUni vG vC []
+  (AppU (VarU vG) tsG, _)
+    | Just _ <- scopeDataCtors gscopeUni vG
+    , Just vC <- universalConcreteHead c ->
+        inferVariantArms lang i gscopeUni vG vC tsG
   -- Same rule as in the module-scoped walk above.
   (AppU (VarU vG) ts, VarU (TV vC)) -> do
     cscopeUni <- MM.getConcreteUniversalScope lang
@@ -338,14 +353,14 @@ inferConcreteTypeUniversalStructural lang gscopeUni t g c = case (g, c) of
             <> "\ntype's. A parameter the native macro does not interpolate"
             <> "\nis still listed."
       else do
-        argTfs <- mapM (inferConcreteTypeUniversal lang . typeOf) ts
+        argTfs <- mapM (inferConcreteTypeUniversal lang i . typeOf) ts
         return $ AppF (VarF (FV vG (CV vC))) argTfs
   (AppU (VarU vG) ts1, AppU (VarU (TV vC)) ts2)
     | length ts1 == length ts2
     , length (fst (partitionKindArgsU ts1))
         == length (fst (partitionKindArgsU ts2)) -> do
         argTfs <- zipWithM
-          (inferConcreteTypeUniversalStructural lang gscopeUni t) ts1 ts2
+          (inferConcreteTypeUniversalStructural lang i gscopeUni t) ts1 ts2
         return $ AppF (VarF (FV vG (CV vC))) argTfs
   _ ->
     case weave gscopeUni g c of
@@ -353,11 +368,19 @@ inferConcreteTypeUniversalStructural lang gscopeUni t g c = case (g, c) of
       (Left _) -> case T.evaluateStep gscopeUni g of
         (Just reducedGType)
           | reducedGType /= g ->
-              inferConcreteTypeUniversal lang (typeOf reducedGType)
+              inferConcreteTypeUniversal lang i (typeOf reducedGType)
         _ ->
           MM.throwSystemError $
             "Failed to infer concrete type for" <+> pretty t
               <> ": Could not reduce type in broadest scope"
+
+-- | The concrete side of an applied type, which is either applied too or
+-- has already collapsed to a bare name. Mirrors @concreteHeadName@ in the
+-- module-scoped walk.
+universalConcreteHead :: TypeU -> Maybe MT.Text
+universalConcreteHead (AppU (VarU (TV n)) _) = Just n
+universalConcreteHead (VarU (TV n)) = Just n
+universalConcreteHead _ = Nothing
 
 inferConcreteTypeUUniversal :: Lang -> TypeU -> MorlocMonad TypeU
 inferConcreteTypeUUniversal lang generalType = do
@@ -573,10 +596,13 @@ bodyNameOf (NamU _ (TV n) _ _) = Just n
 bodyNameOf _ = Nothing
 
 -- | The `data` type a type expression is headed by, if any.
-dataHeadOf :: Scope -> TypeU -> Maybe TVar
+-- | A `data` type's instantiation: its name and the arguments it was
+-- applied to. Two instantiations of one parameterized type are two types,
+-- so the arguments are part of the identity.
+dataHeadOf :: Scope -> TypeU -> Maybe (TVar, [TypeU])
 dataHeadOf gscope t = case t of
-  VarU v | Just _ <- scopeDataCtors gscope v -> Just v
-  AppU (VarU v) _ | Just _ <- scopeDataCtors gscope v -> Just v
+  VarU v | Just _ <- scopeDataCtors gscope v -> Just (v, [])
+  AppU (VarU v) ts | Just _ <- scopeDataCtors gscope v -> Just (v, ts)
   _ -> Nothing
 
 -- | A type's per-language name: its mapping when it declares one, its own

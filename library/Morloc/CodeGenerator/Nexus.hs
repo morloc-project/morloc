@@ -374,7 +374,7 @@ makeSerialASTs mid lang t = do
 
 makeSerialAST :: Int -> Lang -> Type -> MorlocMonad SerialAST
 makeSerialAST mid lang t = do
-  ft <- Infer.inferConcreteTypeUniversal lang t
+  ft <- Infer.inferConcreteTypeUniversal lang mid t
   ast <- Serial.makeSerialAST mid lang ft
   -- Apply nat dimension constraints from the original type to the SerialAST.
   -- The TypeF may have lost nat params during alias expansion, but the

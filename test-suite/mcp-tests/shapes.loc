@@ -172,7 +172,7 @@ pureAnswer = 42
 mustFail ::
   --' metavar: X
   Int ->
-  <Err> Int
+  Int
 mustFail _ = @throw "intentional failure: boom"
 
 --' Add one; the pool implementation also prints to stdout. The stray

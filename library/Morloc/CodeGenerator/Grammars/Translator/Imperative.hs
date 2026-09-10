@@ -125,6 +125,11 @@ data IExpr
   | IRealLit (Maybe Text) RealLit  -- concrete type name (e.g. "float"), Nothing for default
   | IStrLit (Maybe Text) Text  -- concrete type name (e.g. "bytes"), Nothing for default
   | INullLit (Maybe IType)
+  | -- | The one value of @Unit@. Distinct from 'INullLit', which is
+    -- the absent value of an optional: a language whose unit and
+    -- none are different expressions (Rust's @()@ and
+    -- @Option::None@) cannot spell one with the other.
+    IUnitLit
   | IListLit [IExpr]
   | ITupleLit [IExpr]
   | IRecordLit NamType FVar [(Key, IExpr)]
@@ -1011,6 +1016,16 @@ armTagOf nm as = lookup nm (zip (map fst as) [0 ..])
 
 -- | The per-shape lowering rules. Reached through 'lowerNativeExpr', which
 -- adds the fallible-intrinsic wrap.
+-- | The unit type.
+--
+-- @()@ and @Null@ arrive at the same 'NullN' node because their wire form is
+-- the same absent-value byte, but their native spellings are not: Rust writes
+-- @()@ for the one and @Option::None@ for the other. An optional is never a
+-- unit, whatever it wraps.
+isUnitTypeF :: TypeF -> Bool
+isUnitTypeF (VarF (FV gv _)) = gv == BT.unit
+isUnitTypeF _ = False
+
 lowerNativeExprRaw ::
   (Monad m) =>
   LowerConfig m ->
@@ -1152,6 +1167,13 @@ lowerNativeExprRaw cfg _ (EnumN_ t n i)
 lowerNativeExprRaw cfg _ (VariantN_ t n i xs)
   | VariantF (FV _ cv) _ <- t = return $ mergePoolDocs (lcVariantLit cfg cv n i) xs
   | otherwise = error $ "constructor literal carries a non-variant type: " <> show (pretty t)
+-- The unit value. @UniS@ and @NullS@ share this node -- the wire form is
+-- the same absent-value byte -- but the native literal is not: a language
+-- with distinct unit and none spellings needs the one the type names. The
+-- type is resolved through the alias chain first, so @type Done = ()@ is
+-- still a unit.
+lowerNativeExprRaw cfg _ (NullN_ t)
+  | isUnitTypeF t = return $ defaultValue {poolExpr = lcPrintExpr cfg IUnitLit}
 lowerNativeExprRaw cfg _ (NullN_ t) = do
   -- NullN_ now carries the full @TypeF@ of the Null's type slot
   -- (e.g. @?(BTree Int)@), not just the underlying constructor's

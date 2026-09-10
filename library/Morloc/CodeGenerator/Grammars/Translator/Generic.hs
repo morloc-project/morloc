@@ -1087,6 +1087,9 @@ genericPrintExpr desc = go
     go (IBoolLit True) = pretty (ldBoolTrue desc)
     go (IBoolLit False) = pretty (ldBoolFalse desc)
     go (INullLit _) = pretty (ldNullLiteral desc)
+    -- A language that does not distinguish its unit from its none
+    -- spells both the same way.
+    go IUnitLit = pretty (ldNullLiteral desc)
     go (IIntLit _ i) = viaShow i <> pretty (ldIntLiteralSuffix desc)
     go (IRealLit _ (RealFinite r)) = viaShow r
     go (IRealLit _ RealPosInf) = pretty (ldRealPosInf desc)

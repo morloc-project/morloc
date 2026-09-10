@@ -1,0 +1,110 @@
+-- A `data` type with a type parameter, crossing pool boundaries.
+--
+-- A sum type needs no `Packable` instance, for the same reason a tuple
+-- needs none: its wire form follows from its declaration. That holds
+-- whether or not the type takes parameters -- the parameters are simply
+-- instantiated before the arms are read.
+--
+-- Two things separate a parameterized `data` from a monomorphic one. Each
+-- instantiation is its own wire form, so `Box Int` and `Box Str` in one
+-- program are two schemas; and a pool that declares its types needs one
+-- declaration per instantiation, which is why the generated native name
+-- carries an instance suffix.
+--
+-- A pool that declares its types cannot have a USER file name a generated
+-- type, so the C++ and Rust legs build and take apart their values in
+-- morloc and call out only for the payload. Python, which declares
+-- nothing, works against the value directly.
+
+module main
+  ( fromPy
+  , strFromPy
+  , boxes
+  , nested
+  , pairFromPy
+  , intoPy
+  , cppGrow
+  , rustGrow
+  , roundTrip
+  , madeInRust
+  , nestedCrate
+  )
+
+import .types
+import root-py
+import root-cpp
+import root-rust
+
+source Py from "boxes.py"
+  ( "py_full" as pyFull
+  , "py_str_full" as pyStrFull
+  , "py_nested" as pyNested
+  , "py_boxes" as pyBoxes
+  , "py_pair" as pyPair
+  , "py_sum" as pySum
+  , "py_grow" as pyGrow
+  , "py_crate" as pyCrate
+  )
+
+source Cpp  from "boxes.hpp" ("cpp_inc" as cppInc)
+source Rust from "boxes.rs"  ("rs_add10" as rustAdd10)
+
+pyFull    :: Int -> Box Int
+pyStrFull :: Str -> Box Str
+pyNested  :: Int -> Box (Box Int)
+pyBoxes   :: [Box Int]
+pyPair    :: Str -> Int -> Pair Str Int
+pySum     :: Box Int -> Int
+pyGrow    :: Box Int -> Box Int
+pyCrate   :: Int -> Crate (Crate Int)
+
+cppInc     :: Int -> Int
+rustAdd10  :: Int -> Int
+
+-- Built in one pool, read in the nexus.
+fromPy :: Int -> Box Int
+fromPy = pyFull
+
+-- A second instantiation of the same type in the same program.
+strFromPy :: Str -> Box Str
+strFromPy = pyStrFull
+
+boxes :: [Box Int]
+boxes = pyBoxes
+
+nested :: Int -> Box (Box Int)
+nested = pyNested
+
+pairFromPy :: Str -> Int -> Pair Str Int
+pairFromPy = pyPair
+
+-- Argument position: the nexus encodes the value the caller typed.
+intoPy :: Box Int -> Int
+intoPy = pySum
+
+-- Taken apart and rebuilt inside a pool that declares its types. The
+-- payload is what the source function sees, so no user file names the
+-- generated type.
+cppGrow :: Box Int -> Box Int
+cppGrow b = match b
+  | (Full x) = Full (cppInc x)
+  | Empty = Empty
+
+rustGrow :: Box Int -> Box Int
+rustGrow b = match b
+  | (Full x) = Full (rustAdd10 x)
+  | Empty = Empty
+
+-- Three pools in one call, so the wire form has to agree with all of them.
+roundTrip :: Box Int -> Box Int
+roundTrip x = rustGrow (cppGrow (pyGrow x))
+
+-- Constructed in a pool from a pool-native payload, with no value coming
+-- in from outside.
+madeInRust :: Int -> Box Int
+madeInRust n = Full (rustAdd10 n)
+
+-- A record inside itself at a different instantiation. Same question as
+-- `nested`, asked of the other kind of parameterized type.
+nestedCrate :: Int -> Crate (Crate Int)
+nestedCrate = pyCrate

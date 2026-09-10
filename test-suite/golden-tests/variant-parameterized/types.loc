@@ -1,0 +1,15 @@
+module types (*)
+
+-- A `data` type with a type parameter. Every instantiation is its own type
+-- on the wire and, in a pool that declares its types, its own native
+-- declaration: `Box Int` and `Box Str` cannot share one.
+data Box a = Empty | Full a
+
+-- Two parameters, one arm using both and one using neither.
+data Pair a b = Both a b | Neither
+
+-- A parameterized RECORD, which shares the machinery that decides whether an
+-- occurrence of a type is a reference back to one already being built. It is
+-- here so that the shared part stays covered from both sides.
+record Crate a where
+  item :: a

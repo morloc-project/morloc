@@ -1771,6 +1771,7 @@ expressPolyExpr fr pl pc (AnnoS (Idx midx (EffectT _ innerT)) c e)
     isPureDataLit StrS{}  = True
     isPureDataLit ConS{} = True
     isPureDataLit LogS{}  = True
+    isPureDataLit UniS    = True
     isPureDataLit _       = False
 expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (RealS _ x)) =
   dispatchPrimLit midx lang t v (\tv -> PolyReal (Idx cidx tv) x)
@@ -1791,15 +1792,20 @@ expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (StrS x)) 
 -- tagged pointer, because a value of that type has to be able to hold any
 -- arm. Deciding on this constructor's own arity would give `Leaf` a
 -- one-byte enum form inside a `Tree` whose other arm carries fields.
-expressPolyExpr findRemote parentLang _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (ConS _ n i xs)) = do
-  scope <- MM.getGeneralScope midx
-  if scopeDataIsEnum scope v
-    then return $ PolyEnum (Idx cidx v) n i
-    else do
-      xs' <- mapM (\x@(AnnoS (Idx xi xt) _ _) -> expressPolyExprWrap lang (Idx xi xt) x) xs
-      return $ PolyVariant (Idx cidx v) n i xs'
+-- The type is matched at its head but carried whole. A parameterized `data`
+-- arrives applied (@Box Int@), and the arguments decide both the wire form
+-- and the native declaration, so dropping them here would leave every arm's
+-- field types standing at the declaration's own parameters.
+expressPolyExpr findRemote parentLang _ (AnnoS (Idx midx t) (Idx cidx lang, _) (ConS _ n i xs))
+  | Just v <- dataHeadTVar t = do
+      scope <- MM.getGeneralScope midx
+      if scopeDataIsEnum scope v
+        then return $ PolyEnum (Idx cidx t) n i
+        else do
+          xs' <- mapM (\x@(AnnoS (Idx xi xt) _ _) -> expressPolyExprWrap lang (Idx xi xt) x) xs
+          return $ PolyVariant (Idx cidx t) n i xs'
   where
-    _ = (findRemote, parentLang, t)
+    _ = (findRemote, parentLang)
 expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) UniS) =
   dispatchPrimLit midx lang t v (\tv -> PolyNull (Idx cidx (VarT tv)))
 -- Null carries the full type it stands in for. Earlier this was just
@@ -2077,6 +2083,14 @@ expressPolyExpr _ _ parentType x@(AnnoS (Idx m t) _ _) = do
           <> "\n  t:" <+> pretty t
           <> "\n parentType:" <+> pretty parentType
           <> "\n x:" <+> pretty x
+
+-- | The head of a type a `data` constructor may inhabit: the name itself, or
+-- the name of an applied parameterized type. Nothing else can carry a
+-- constructor.
+dataHeadTVar :: Type -> Maybe TVar
+dataHeadTVar (VarT v) = Just v
+dataHeadTVar (AppT (VarT v) _) = Just v
+dataHeadTVar _ = Nothing
 
 expressPolyApp ::
   Lang ->

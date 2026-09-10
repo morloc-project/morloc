@@ -278,19 +278,18 @@ data MorlocState = MorlocState
   -- ^ Module-level description lines (from docstrings before module declaration)
   , stateModuleEpilogues :: [[Text]]
   -- ^ Epilogue blocks for the top-level help output
-  , stateVariantAncestors :: Set.Set TVar
-  -- ^ `data` types whose arms are currently being resolved to a target
-  -- language. A field naming one of these is left opaque instead of
-  -- expanded, which is what terminates recursion THROUGH a container
-  -- (@data Rose = Rose [Rose]@) as well as a bare self-reference.
-  , stateSerialAncestors :: Set.Set TVar
-  -- ^ General-type names of records currently being lowered by
-  -- 'makeSerialAST''. Used to detect guarded self-recursive records:
-  -- on the way down we insert the FVar's general name; if we hit it
-  -- again, we emit 'SerialRec' instead of expanding the cycle. The
-  -- field is reset to empty at every top-level 'makeSerialAST' call
-  -- and saved/restored around each NamF descent, so it never leaks
-  -- across unrelated invocations.
+  , stateVariantAncestors :: Set.Set (TVar, [TypeU])
+  -- ^ `data` type INSTANTIATIONS whose arms are currently being resolved
+  -- to a target language: the type's name paired with its applied type
+  -- arguments, empty for a type that takes none. A field naming one of
+  -- these is left opaque instead of expanded, which is what terminates
+  -- recursion THROUGH a container (@data Rose = Rose [Rose]@) as well as
+  -- a bare self-reference.
+  --
+  -- The arguments are part of the key because a name alone does not
+  -- identify a type: the inner @Box Int@ of a @Box (Box Int)@ is not the
+  -- outer one, and leaving it opaque would say the value contains
+  -- itself.
   }
   deriving (Show)
 
@@ -939,7 +938,6 @@ instance Defaultable MorlocState where
       , stateModuleDoc = []
       , stateModuleEpilogues = []
       , stateVariantAncestors = Set.empty
-      , stateSerialAncestors = Set.empty
       }
 
 instance Defaultable PackageMeta where

@@ -23,20 +23,20 @@ source Py from "stdio-wedge.py" ("mk")
 
 mk :: Int -> [Int]
 
-produceOk :: ([Int] -> <IO, Err> ()) -> <IO, Err> ()
+produceOk :: ([Int] -> <IO> ()) -> <IO> ()
 produceOk sink = do
   _ <- sink (mk 1)
   sink (mk 2)
 
-produceLeak :: ([Int] -> <IO, Err> ()) -> <IO, Err> ()
+produceLeak :: ([Int] -> <IO> ()) -> <IO> ()
 produceLeak sink = do
   _ <- sink (mk 1)
   @throw "leak: producer failed mid-stream"
 
 --' @stream
-useStdout :: <IO, Err> ()
+useStdout :: <IO> ()
 useStdout = @collect produceOk
 
 --' @stream
-leakStdout :: <IO, Err> ()
+leakStdout :: <IO> ()
 leakStdout = @collect produceLeak

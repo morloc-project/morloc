@@ -66,6 +66,7 @@ printExpr (IBoolLit False) = "false"
 -- path `<Option<T>>::None` pins the type without needing to extract the inner.
 printExpr (INullLit (Just t)) = "<" <> rustType t <> ">::None"
 printExpr (INullLit Nothing) = "None"
+printExpr IUnitLit = "()"
 printExpr (IIntLit Nothing i) = viaShow i
 printExpr (IIntLit (Just t) i) = parens (viaShow i <+> "as" <+> pretty t)
 printExpr (IRealLit Nothing r) = renderRealLit r

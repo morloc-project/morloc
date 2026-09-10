@@ -61,6 +61,7 @@ printExpr (IBoolLit False) = "false"
 -- declared, where the implicit conversion from nullopt_t suffices.
 printExpr (INullLit (Just t)) = renderIType t <> "{}"
 printExpr (INullLit Nothing) = "std::nullopt"
+printExpr IUnitLit = "mlc::Unit{}"
 printExpr (IIntLit Nothing i) = viaShow i
 printExpr (IIntLit (Just t) i)
   | t == "int" = viaShow i

@@ -56,7 +56,10 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
   where
     lang = LR.poolOf reg lang0
     inferType = inferConcreteType lang
-    inferTypeUniversal = inferConcreteTypeUniversal lang
+    -- Universal inference has no index of its own -- these are the sites
+    -- where the type reached us unindexed -- so errors and `data` arm
+    -- resolution are reported against the manifold being serialized.
+    inferTypeUniversal = inferConcreteTypeUniversal lang m0
     inferVar = inferConcreteVar lang
 
     typemap = makeTypemap m0 e0
@@ -382,26 +385,25 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     nativeExpr _ (MonoReal v x) = RealN <$> inferVar v <*> pure x
     nativeExpr _ (MonoInt v x) = IntN <$> inferVar v <*> pure x
     nativeExpr _ (MonoStr v x) = StrN <$> inferVar v <*> pure x
-    -- As for MonoVariant: the constructor table comes from the declaration.
-    -- A literal names ONE constructor, and a table holding only that one
-    -- would renumber every other constructor of the type.
-    nativeExpr _ (MonoEnum v@(Idx vidx vtv) n i) = do
-      fv <- inferVar v
-      scope <- MM.getGeneralScope vidx
-      let ctors = case scopeEnumCtors scope vtv of
-            Just cs -> cs
-            Nothing -> [n]
-      return $ EnumN (EnumF fv ctors) n i
     -- The complete type comes from the declaration, not from the arm being
     -- built: a constructor names one arm, but the value's wire form
-    -- describes them all.
-    nativeExpr args (MonoVariant v@(Idx vidx vtv) n i xs) = do
-      fv <- inferVar v
-      scope <- MM.getGeneralScope vidx
-      armTfs <- case scopeDataCtors scope vtv of
-        Just arms -> mapM (\(cn, ts) -> (,) cn <$> mapM (inferType . Idx vidx . typeOf) ts) arms
-        Nothing -> return [(n, [])]
-      VariantN (VariantF fv armTfs) n i <$> mapM (nativeExpr args) xs
+    -- describes them all. Inference is what reads the declaration -- and,
+    -- for a parameterized `data`, what instantiates its parameters with
+    -- this constructor's own type arguments before reading the arms.
+    nativeExpr _ (MonoEnum v@(Idx vidx _) n i) = do
+      tf <- inferType v
+      case tf of
+        EnumF{} -> return $ EnumN tf n i
+        _ -> MM.throwSourcedError vidx $
+               "Constructor" <+> squotes (pretty n)
+                 <+> "does not resolve to an enum:" <+> pretty tf
+    nativeExpr args (MonoVariant v@(Idx vidx _) n i xs) = do
+      tf <- inferType v
+      case tf of
+        VariantF{} -> VariantN tf n i <$> mapM (nativeExpr args) xs
+        _ -> MM.throwSourcedError vidx $
+               "Constructor" <+> squotes (pretty n)
+                 <+> "does not resolve to a sum type:" <+> pretty tf
     -- MonoNull now carries an Indexed Type for the full type the
     -- Null inhabits (e.g. @?(BTree Int)@). Use @inferType@ (=
     -- @inferConcreteType@) rather than @inferVar@ so the resulting

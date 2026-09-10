@@ -673,9 +673,16 @@ data PolyExpr
   -- | A `data` constructor in a pool: its type, name and 0-based tag.
   -- All three travel because each backend needs a different one -- the
   -- name for C++/Rust, the tag for Python, both for R's factor.
-  | PolyEnum (Indexed TVar) Text Int
+  --
+  -- As for @PolyNull@, the type is the FULL type the constructor
+  -- inhabits, not just its head: a parameterized `data` has one wire
+  -- form and one native declaration per instantiation, and the
+  -- arguments are what tell @Try Str Int@ from @Try Str Bool@. A head
+  -- alone leaves each arm's field types standing at the declaration's
+  -- own parameters, which no pool can spell.
+  | PolyEnum (Indexed Type) Text Int
   -- | A payload-bearing constructor applied to its arguments.
-  | PolyVariant (Indexed TVar) Text Int [PolyExpr]
+  | PolyVariant (Indexed Type) Text Int [PolyExpr]
   -- The Indexed Type carries the FULL type of the Null (e.g.
   -- @?(BTree Int)@, NOT just the underlying TVar). Storing the
   -- complete type lets downstream passes (Serialize -> NativeExpr,
@@ -735,8 +742,9 @@ data MonoExpr
   | MonoReal (Indexed TVar) RealLit
   | MonoInt (Indexed TVar) Integer
   | MonoStr (Indexed TVar) Text
-  | MonoEnum (Indexed TVar) Text Int
-  | MonoVariant (Indexed TVar) Text Int [MonoExpr]
+  -- See @PolyEnum@ for why these carry the whole type rather than its head.
+  | MonoEnum (Indexed Type) Text Int
+  | MonoVariant (Indexed Type) Text Int [MonoExpr]
   -- See @PolyNull@ for the rationale: store the full type of the
   -- Null literal, not just the inner TVar.
   | MonoNull (Indexed Type)

@@ -1,0 +1,26 @@
+--- fromPy ---
+{"Full":[3]}
+--- strFromPy ---
+{"Full":["hi"]}
+--- boxes ---
+[{"Full":[1]},"Empty"]
+--- nested ---
+{"Full":[{"Full":[5]}]}
+--- pairFromPy ---
+{"Both":["a",2]}
+--- intoPyFull ---
+4
+--- intoPyEmpty ---
+0
+--- cppGrow ---
+{"Full":[3]}
+--- rustGrow ---
+{"Full":[12]}
+--- roundTrip ---
+{"Full":[13]}
+--- roundTripEmpty ---
+"Empty"
+--- madeInRust ---
+{"Full":[17]}
+--- nestedCrate ---
+{"item":{"item":8}}
