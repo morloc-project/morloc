@@ -849,7 +849,7 @@ data NativeExpr
   | RealN FVar RealLit
   | IntN FVar Integer
   | StrN FVar Text
-  | EnumN FVar Text Int
+  | EnumN TypeF Text Int
   | VariantN TypeF Text Int [NativeExpr]
   -- ^ Constructing a payload-bearing `data` value. Carries the COMPLETE
   -- type, not just the constructor's own FVar: a value's schema describes
@@ -1229,7 +1229,7 @@ data NativeExpr_ nm se ne sr nr
   | RealN_ FVar RealLit
   | IntN_ FVar Integer
   | StrN_ FVar Text
-  | EnumN_ FVar Text Int
+  | EnumN_ TypeF Text Int
   | VariantN_ TypeF Text Int [ne]
   -- See @PolyNull@ / @NullN@ for the rationale: store @TypeF@ not @FVar@.
   | NullN_ TypeF
@@ -1487,7 +1487,7 @@ instance HasTypeF NativeExpr where
   typeFof (StrN v _) = VarF v
   -- The constructor names travel with the type here for the same reason
   -- they do in 'EnumF': a backend needs them to render the value.
-  typeFof (EnumN v n _) = EnumF v [n]
+  typeFof (EnumN t _ _) = t
   typeFof (VariantN t _ _ _) = t
   typeFof (NullN t) = t
   typeFof (DoBlockN t _) = t

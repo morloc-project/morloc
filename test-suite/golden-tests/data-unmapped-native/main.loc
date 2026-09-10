@@ -23,6 +23,9 @@ module main
   , roundTrip
   , enumsCpp
   , variantsCpp
+  , eqSame
+  , eqDiff
+  , eqSameCpp
   )
 
 import .rustside

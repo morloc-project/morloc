@@ -382,7 +382,16 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     nativeExpr _ (MonoReal v x) = RealN <$> inferVar v <*> pure x
     nativeExpr _ (MonoInt v x) = IntN <$> inferVar v <*> pure x
     nativeExpr _ (MonoStr v x) = StrN <$> inferVar v <*> pure x
-    nativeExpr _ (MonoEnum v n i) = EnumN <$> inferVar v <*> pure n <*> pure i
+    -- As for MonoVariant: the constructor table comes from the declaration.
+    -- A literal names ONE constructor, and a table holding only that one
+    -- would renumber every other constructor of the type.
+    nativeExpr _ (MonoEnum v@(Idx vidx vtv) n i) = do
+      fv <- inferVar v
+      scope <- MM.getGeneralScope vidx
+      let ctors = case scopeEnumCtors scope vtv of
+            Just cs -> cs
+            Nothing -> [n]
+      return $ EnumN (EnumF fv ctors) n i
     -- The complete type comes from the declaration, not from the arm being
     -- built: a constructor names one arm, but the value's wire form
     -- describes them all.

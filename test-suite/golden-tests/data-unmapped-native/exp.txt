@@ -8,3 +8,9 @@
 ["Blue","Blue"]
 --- variantsCpp ---
 [{"Wrap":[2.5]},{"Wrap":[2.5]}]
+--- eqSame ---
+true
+--- eqDiff ---
+false
+--- eqSameCpp ---
+true

@@ -1107,8 +1107,9 @@ lowerNativeExpr cfg _ (IntN_ (FV _ cv) v) = return $ defaultValue {poolExpr = lc
 lowerNativeExpr cfg _ (StrN_ (FV _ cv) v) =
   let hint = if cv == CV "" then Nothing else Just (unCVar cv)
   in return $ defaultValue {poolExpr = lcPrintExpr cfg (IStrLit hint v)}
-lowerNativeExpr cfg _ (EnumN_ (FV _ cv) n i) =
-  return $ defaultValue {poolExpr = lcEnumLit cfg cv n i}
+lowerNativeExpr cfg _ (EnumN_ t n i)
+  | EnumF (FV _ cv) _ <- t = return $ defaultValue {poolExpr = lcEnumLit cfg cv n i}
+  | otherwise = error $ "constructor literal carries a non-enum type: " <> show (pretty t)
 lowerNativeExpr cfg _ (VariantN_ t n i xs)
   | VariantF (FV _ cv) _ <- t = return $ mergePoolDocs (lcVariantLit cfg cv n i) xs
   | otherwise = error $ "constructor literal carries a non-variant type: " <> show (pretty t)

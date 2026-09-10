@@ -1,4 +1,4 @@
-module cppside (enumsCpp, variantsCpp)
+module cppside (enumsCpp, variantsCpp, eqSameCpp)
 
 import .types
 import root-cpp
@@ -8,3 +8,6 @@ enumsCpp = replicate 2 Blue
 
 variantsCpp :: [Box]
 variantsCpp = replicate 2 (Wrap 2.5)
+
+eqSameCpp :: Bool
+eqSameCpp = Blue == Blue
