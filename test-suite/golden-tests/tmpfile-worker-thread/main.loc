@@ -1,0 +1,28 @@
+-- @tmpfile's registry must follow the pool call, not the thread that happened
+-- to call it. A manifold is free to spawn threads -- that is how a native
+-- parallel map is written -- and a temp file created on one of them belongs to
+-- the call, so the call may close it and the end-of-call sweep must reclaim it
+-- if the call does not.
+--
+-- The registry is exercised through libmorloc's C ABI rather than through the
+-- @tmpfile syntax, because the thread case only arises inside native code: a
+-- morloc expression always evaluates on the thread that is running the
+-- manifold.
+--
+-- What fails when the registry is per-thread: a file made on a spawned thread
+-- cannot be closed from the manifold's thread, because the path is not in that
+-- thread's list. The same split also strands the file from the end-of-call
+-- sweep, which runs on the manifold's thread -- not asserted here, because a
+-- nexus removes its whole tmpdir on exit and a one-call test cannot tell a
+-- swept file from a discarded directory.
+
+module main (closeHere, closeThere, closeUnregistered)
+
+import root-cpp
+
+source Cpp from "thr.hpp"
+  ("closeHere", "closeThere", "closeUnregistered")
+
+closeHere :: Int -> Str
+closeThere :: Int -> Str
+closeUnregistered :: Int -> Str
