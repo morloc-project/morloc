@@ -387,34 +387,37 @@ rcPerm = cppAtIdx3 rMakePerm
 -- Vector with a Nat parameter has never gone through @save in the test
 -- suite. Each format takes a different code path inside voidstar.
 -- =========================================================================
-fileBin :: Str -> <IO, Err> (Vector 10 Real)
+fileBin :: Str -> <IO> (Vector 10 Real)
 fileBin path = do
   @save 0 path cppMakeReal10
-  @load path
+  Ok _tailv105 <- @load path
+  _tailv105
 
-fileJson :: Str -> <IO, Err> (Vector 10 Real)
+fileJson :: Str -> <IO> (Vector 10 Real)
 fileJson path = do
   @savej path cppMakeReal10
-  @load path
+  Ok _tailv106 <- @load path
+  _tailv106
 
-fileMsg :: Str -> <IO, Err> (Vector 10 Real)
+fileMsg :: Str -> <IO> (Vector 10 Real)
 fileMsg path = do
   @savem path cppMakeReal10
-  @load path
+  Ok _tailv107 <- @load path
+  _tailv107
 
 -- File IO + computation: after the round-trip, sum the loaded vector
 -- through the Python pool. Verifies that @load returns a value usable
 -- as a Vector (not just a structurally-equal list).
-fileSumBin :: Str -> <IO, Err> Real
+fileSumBin :: Str -> <IO> Real
 fileSumBin path = do
   @save 0 path cppMakeReal10
-  v <- @load path
+  Ok v <- @load path
   pySumReal10 v
 
-fileSumJson :: Str -> <IO, Err> Real
+fileSumJson :: Str -> <IO> Real
 fileSumJson path = do
   @savej path cppMakeReal10
-  v <- @load path
+  Ok v <- @load path
   pySumReal10 v
 
 -- =========================================================================

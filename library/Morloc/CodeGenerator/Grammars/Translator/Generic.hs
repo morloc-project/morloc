@@ -522,6 +522,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         , lcReleaseStmt = \v -> pretty (ldReleasePacketFn desc) <> "(" <> pretty v <> ")"
         , lcReturn = \e -> pretty $ substituteT (ldReturnTemplate desc) [("expr", render e)]
         , lcMakeDoBlock = genericMakeDoBlock desc cfg
+        , lcMakeTry = genericMakeTry desc
         , lcSerialize = defaultSerialize cfg
         , lcDeserialize = \_ -> defaultDeserialize cfg
         , lcReifyClosure = \v _ ->
@@ -1033,6 +1034,20 @@ genericMakeDoBlock desc cfg _ stmts expr
     suspendBlock = ldDoBlockBlock desc
     exprThunk = pretty $ substituteT (ldDoBlockExpr desc) [("expr", render expr)]
 
+-- | @try body@ as a call to the language's mlc_try helper with two unary
+-- lambdas. The parameter names avoid a leading underscore, which R does
+-- not accept in an identifier. Expression-shaped on purpose: a statement form would need a
+-- declared result variable, which Python and R cannot spell in an
+-- expression position and C++ would need the result type for.
+genericMakeTry :: LangDescriptor -> MDoc -> (MDoc -> MDoc) -> (MDoc -> MDoc) -> MDoc
+genericMakeTry desc thunk okWrap errWrap =
+  pretty (ldIntrinsicPrefix desc) <> "mlc_try"
+    <> tupled [thunk, lam "mlcTryV" (okWrap "mlcTryV"), lam "mlcTryM" (errWrap "mlcTryM")]
+  where
+    lam arg body =
+      pretty $ substituteT (ldLambdaTemplate desc)
+        [("args", arg), ("body", render body)]
+
 genericMakeLet :: LangDescriptor -> (Int -> MDoc) -> Int -> PoolDocs -> PoolDocs -> PoolDocs
 genericMakeLet desc namer i p1 p2 =
   let rs = poolPriorLines p1 ++ [namer i <+> pretty (ldAssignOp desc) <+> poolExpr p1] ++ poolPriorLines p2
@@ -1211,9 +1226,6 @@ genericPrintExpr desc = go
     go (IIntrinsicThrow msg) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_throw(" <> go msg <> ")"
-    go (IIntrinsicCatch fallible fallback) =
-      let prefix = ldIntrinsicPrefix desc
-       in pretty prefix <> "mlc_catch(" <> go fallible <> ", " <> go fallback <> ")"
     -- Unified pattern walker. Path string + handle + variable runtime
     -- args (bracket bounds) marshalled by the per-language wrapper into
     -- the C ABI (mlc_ifile_walk handle path args n_args). Python and R

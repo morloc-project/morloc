@@ -211,11 +211,7 @@ data IExpr
   | IIntrinsicStderr Int
       -- ^ @stderr :: <IO> OStream a: nullary. schemaId of `[a]`.
   | IIntrinsicThrow IExpr
-      -- ^ @throw :: Str -> <Err> a: raise a MorlocException with the message.
-  | IIntrinsicCatch IExpr IExpr
-      -- ^ @catch fallible fallback: fallible-first thunks. Runtime evaluates
-      --   fallible in a try; on any language-native exception, evaluates
-      --   fallback and returns its value.
+      -- ^ @throw :: e -> a: abandon the computation with this message.
 
 data IParam = IParam Text (Maybe IType)
 
@@ -578,6 +574,17 @@ data LowerConfig m = LowerConfig
   -- suspended-thunk expression). Monadic so a language whose thunk form
   -- cannot hold statements (e.g. a Python lambda) can mint a fresh name
   -- for a hoisted def-thunk.
+  , lcMakeTry :: MDoc -> (MDoc -> MDoc) -> (MDoc -> MDoc) -> MDoc
+  -- ^ @try body@: the body as a no-arg thunk, a builder wrapping a value
+  -- expression in the result's @Ok@ arm, and one wrapping a message
+  -- expression in its @Err@ arm.
+  --
+  -- The arms are passed as builders rather than rendered because only the
+  -- backend knows how to spell a unary lambda, and only the caller knows
+  -- how to spell a variant literal for this particular @Try@ -- which
+  -- differs between a mapped and a generated representation. Each backend
+  -- calls its own @mlc_try@ helper, which owns the language's notion of
+  -- which failures are catchable.
   , lcSerialize :: MDoc -> SerialAST -> m PoolDocs
   , lcDeserialize :: TypeF -> MDoc -> SerialAST -> m (MDoc, [MDoc])
   , lcReifyClosure :: MDoc -> SerialAST -> m MDoc
@@ -841,14 +848,17 @@ lowerSerialExpr cfg (SerialLetS _ (SerializeS _ _) _) (SerialLetS_ i e1 e2) = do
   -- end exactly at the body's last use of the bound variable rather than
   -- carrying it to the outer dispatch boundary.
   letResult <- lcMakeLet cfg svarNamer i Nothing False e1 e2
-  tmpIdx <- lcNewIndex cfg
-  let releaseLine = lcReleaseStmt cfg (render (svarNamer i))
-      releaseBody =
-        defaultValue
-          { poolExpr = helperNamer tmpIdx
-          , poolPriorLines = [releaseLine]
-          }
-  lcMakeLet cfg helperNamer tmpIdx Nothing False letResult releaseBody
+  if bodyIsBoundVar i e2
+    then return letResult
+    else do
+      tmpIdx <- lcNewIndex cfg
+      let releaseLine = lcReleaseStmt cfg (render (svarNamer i))
+          releaseBody =
+            defaultValue
+              { poolExpr = helperNamer tmpIdx
+              , poolPriorLines = [releaseLine]
+              }
+      lcMakeLet cfg helperNamer tmpIdx Nothing False letResult releaseBody
 lowerSerialExpr cfg _ (SerialLetS_ i e1 e2) =
   lcMakeLet cfg svarNamer i Nothing False e1 e2
 lowerSerialExpr cfg (NativeLetS _ rhsE _) (NativeLetS_ i e1 e2) =
@@ -975,17 +985,42 @@ storeElems cfg origEs xs
   | otherwise = return xs
 
 -- | Lower a native expression to PoolDocs via the IR.
+--
 lowerNativeExpr ::
   (Monad m) =>
   LowerConfig m ->
   NativeExpr ->
   NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) ->
   m PoolDocs
+lowerNativeExpr cfg origExpr ne = lowerNativeExprRaw cfg origExpr ne
+
+-- | Does a let's body evaluate to exactly the variable the let bound?
+--
+-- When it does, the packet the binding owns IS the result being handed
+-- back, so releasing it here would free what the caller is about to read.
+-- Ownership passes outward instead, and the dispatch boundary releases it
+-- with everything else it holds.
+bodyIsBoundVar :: Int -> PoolDocs -> Bool
+bodyIsBoundVar i body = render (poolExpr body) == render (svarNamer i)
+
+-- | A constructor's 0-based tag within an arm list.
+armTagOf :: T.Text -> [(T.Text, [TypeF])] -> Maybe Int
+armTagOf nm as = lookup nm (zip (map fst as) [0 ..])
+
+
+-- | The per-shape lowering rules. Reached through 'lowerNativeExpr', which
+-- adds the fallible-intrinsic wrap.
+lowerNativeExprRaw ::
+  (Monad m) =>
+  LowerConfig m ->
+  NativeExpr ->
+  NativeExpr_ PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs) ->
+  m PoolDocs
 -- Binary operator: emit (lhs op rhs) instead of function call
-lowerNativeExpr _ _ (AppExeN_ _ (SrcCallP src) (map snd -> [lhs, rhs]))
+lowerNativeExprRaw _ _ (AppExeN_ _ (SrcCallP src) (map snd -> [lhs, rhs]))
   | srcOperator src =
       return $ mergePoolDocs (\xs -> case xs of [l, r] -> parens (l <+> pretty (unSrcName (srcName src)) <+> r); _ -> error "binary operator requires exactly 2 args") [lhs, rhs]
-lowerNativeExpr cfg origExpr (AppExeN_ _ (SrcCallP src) es) = do
+lowerNativeExprRaw cfg origExpr (AppExeN_ _ (SrcCallP src) es) = do
   owns <- argOwnerships cfg origExpr
   let argTypes = map fst es
       handleFunctionArgs exprs =
@@ -995,7 +1030,7 @@ lowerNativeExpr cfg origExpr (AppExeN_ _ (SrcCallP src) es) = do
           . provideClosure src
           $ zipWith (\(i, t, own) e -> lcSourcedArg cfg (SourcedArg src i) own t e) (zip3 [0 ..] argTypes owns) exprs
   return $ mergePoolDocs handleFunctionArgs (map snd es)
-lowerNativeExpr cfg _ (AppExeN_ t (PatCallP p) xs) = do
+lowerNativeExprRaw cfg _ (AppExeN_ t (PatCallP p) xs) = do
   let es = map snd xs
   patResult <- lcEvalPattern cfg t p (map poolExpr es)
   return $
@@ -1009,24 +1044,24 @@ lowerNativeExpr cfg _ (AppExeN_ t (PatCallP p) xs) = do
 -- Manifold-call arguments go through lcSourcedArg too (identity for most
 -- languages; the Rust member borrows every native arg so a value can fan out to
 -- several manifold calls as shared borrows instead of a move-after-move).
-lowerNativeExpr cfg origExpr (AppExeN_ _ (LocalCallP idx) xs) = do
+lowerNativeExprRaw cfg origExpr (AppExeN_ _ (LocalCallP idx) xs) = do
   owns <- argOwnerships cfg origExpr
   let argTypes = map fst xs
   return $ mergePoolDocs (\es -> lcApplyClosure cfg (nvarNamer idx) (zipWith3 (\own t e -> lcSourcedArg cfg ClosureArg own t e) owns argTypes es)) (map snd xs)
-lowerNativeExpr cfg origExpr (AppExeN_ _ (RecCallP mid _) xs) = do
+lowerNativeExprRaw cfg origExpr (AppExeN_ _ (RecCallP mid _) xs) = do
   owns <- argOwnerships cfg origExpr
   let argTypes = map fst xs
   return $ mergePoolDocs (\es -> manNamer mid <> tupled (zipWith3 (\own t e -> lcSourcedArg cfg ManifoldArg own t e) owns argTypes es)) (map snd xs)
-lowerNativeExpr _ _ (ManN_ call) = return call
+lowerNativeExprRaw _ _ (ManN_ call) = return call
 -- The manifold return is an owned sink: adapt the returned value to an owned
 -- value (Rust clones a borrowed/place value; other members are unchanged) so a
 -- `&T`/place value does not reach the owned return slot.
-lowerNativeExpr cfg (ReturnN innerE) (ReturnN_ x) = do
+lowerNativeExprRaw cfg (ReturnN innerE) (ReturnN_ x) = do
   x' <- adaptOwnedElem cfg innerE x
   return $ x' {poolReturnFlag = True}
-lowerNativeExpr _ _ (ReturnN_ x) =
+lowerNativeExprRaw _ _ (ReturnN_ x) =
   return $ x {poolReturnFlag = True}
-lowerNativeExpr cfg (SerialLetN _ (SerializeS _ _) body) (SerialLetN_ i x1 x2) = do
+lowerNativeExprRaw cfg (SerialLetN _ (SerializeS _ _) body) (SerialLetN_ i x1 x2) = do
   -- Same shape as the SerialLetS-with-SerializeS case in lowerSerialExpr:
   -- the let-bound variable owns a put_value tracker entry, so wrap the
   -- body's result with a temp and emit a release call once the body
@@ -1036,48 +1071,51 @@ lowerNativeExpr cfg (SerialLetN _ (SerializeS _ _) body) (SerialLetN_ i x1 x2) =
   -- The body is a NativeExpr, so the temp's declared type must match it
   -- (rather than falling back to the serial type used for SerialLetS).
   letResult <- lcMakeLet cfg svarNamer i Nothing False x1 x2
-  tmpIdx <- lcNewIndex cfg
-  let bodyT = typeFof body
-      releaseLine = lcReleaseStmt cfg (render (svarNamer i))
-      releaseBody =
-        defaultValue
-          { poolExpr = helperNamer tmpIdx
-          , poolPriorLines = [releaseLine]
-          }
-  lcMakeLet cfg helperNamer tmpIdx (Just bodyT) False letResult releaseBody
-lowerNativeExpr cfg _ (SerialLetN_ i x1 x2) = lcMakeLet cfg svarNamer i Nothing False x1 x2
+  if bodyIsBoundVar i x2
+    then return letResult
+    else do
+      tmpIdx <- lcNewIndex cfg
+      let bodyT = typeFof body
+          releaseLine = lcReleaseStmt cfg (render (svarNamer i))
+          releaseBody =
+            defaultValue
+              { poolExpr = helperNamer tmpIdx
+              , poolPriorLines = [releaseLine]
+              }
+      lcMakeLet cfg helperNamer tmpIdx (Just bodyT) False letResult releaseBody
+lowerNativeExprRaw cfg _ (SerialLetN_ i x1 x2) = lcMakeLet cfg svarNamer i Nothing False x1 x2
 -- A native let binds an owned local, so its RHS is an owned sink: adapt the
 -- bound value (Rust clones a borrowed/place RHS -- e.g. a getter through a
 -- borrowed receiver -- to match the owned binding type; other members unchanged).
-lowerNativeExpr cfg (NativeLetN _ rhsE _) (NativeLetN_ i x1 x2) = do
+lowerNativeExprRaw cfg (NativeLetN _ rhsE _) (NativeLetN_ i x1 x2) = do
   x1' <- adaptOwnedElem cfg rhsE x1
   lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) (isBorrowableProjection rhsE) x1' x2
-lowerNativeExpr cfg _ (NativeLetN_ i x1 x2) = lcMakeLet cfg nvarNamer i Nothing False x1 x2
-lowerNativeExpr _ _ (LetVarN_ _ i) = return $ defaultValue {poolExpr = nvarNamer i}
-lowerNativeExpr _ _ (BndVarN_ _ i) = return $ defaultValue {poolExpr = nvarNamer i}
-lowerNativeExpr cfg _ (DeserializeN_ t s x) = do
+lowerNativeExprRaw cfg _ (NativeLetN_ i x1 x2) = lcMakeLet cfg nvarNamer i Nothing False x1 x2
+lowerNativeExprRaw _ _ (LetVarN_ _ i) = return $ defaultValue {poolExpr = nvarNamer i}
+lowerNativeExprRaw _ _ (BndVarN_ _ i) = return $ defaultValue {poolExpr = nvarNamer i}
+lowerNativeExprRaw cfg _ (DeserializeN_ t s x) = do
   (deserialized, assignments) <- lcDeserialize cfg t (poolExpr x) s
   return $
     x
       { poolExpr = deserialized
       , poolPriorLines = poolPriorLines x <> assignments
       }
-lowerNativeExpr cfg _ (ExeN_ _ (SrcCallP src)) = return $ defaultValue {poolExpr = lcSrcName cfg src}
-lowerNativeExpr _ _ (ExeN_ _ (PatCallP _)) = error "Unreachable: patterns are always used in applications"
-lowerNativeExpr _ _ (ExeN_ _ (LocalCallP idx)) = return $ defaultValue {poolExpr = nvarNamer idx}
-lowerNativeExpr _ _ (ExeN_ _ (RecCallP mid _)) = return $ defaultValue {poolExpr = manNamer mid}
-lowerNativeExpr cfg origExpr (ListN_ v t xs) = do
+lowerNativeExprRaw cfg _ (ExeN_ _ (SrcCallP src)) = return $ defaultValue {poolExpr = lcSrcName cfg src}
+lowerNativeExprRaw _ _ (ExeN_ _ (PatCallP _)) = error "Unreachable: patterns are always used in applications"
+lowerNativeExprRaw _ _ (ExeN_ _ (LocalCallP idx)) = return $ defaultValue {poolExpr = nvarNamer idx}
+lowerNativeExprRaw _ _ (ExeN_ _ (RecCallP mid _)) = return $ defaultValue {poolExpr = manNamer mid}
+lowerNativeExprRaw cfg origExpr (ListN_ v t xs) = do
   let elemEs = case origExpr of ListN _ _ es -> es; _ -> []
   xs' <- adaptOwnedElems cfg elemEs xs >>= storeElems cfg elemEs
   return $ mergePoolDocs (lcListConstructor cfg v t) xs'
-lowerNativeExpr cfg origExpr (TupleN_ v xs) = do
+lowerNativeExprRaw cfg origExpr (TupleN_ v xs) = do
   let slotTypes = case typeFof origExpr of
         AppF _ ts -> ts
         _ -> []
       elemEs = case origExpr of TupleN _ es -> es; _ -> []
   xs' <- adaptOwnedElems cfg elemEs xs >>= storeElems cfg elemEs
   return $ mergePoolDocs (lcTupleConstructor cfg v slotTypes) xs'
-lowerNativeExpr cfg origExpr (RecordN_ o v ps rs) = do
+lowerNativeExprRaw cfg origExpr (RecordN_ o v ps rs) = do
   let fieldEs = case origExpr of RecordN _ _ _ kvs -> map snd kvs; _ -> []
   es <- adaptOwnedElems cfg fieldEs (map snd rs) >>= storeElems cfg fieldEs
   let recType = typeFof origExpr
@@ -1088,8 +1126,8 @@ lowerNativeExpr cfg origExpr (RecordN_ o v ps rs) = do
       , poolPriorLines = concatMap poolPriorLines es <> poolPriorLines rec'
       , poolPriorExprs = concatMap poolPriorExprs es <> poolPriorExprs rec'
       }
-lowerNativeExpr cfg _ (LogN_ _ v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IBoolLit v)}
-lowerNativeExpr cfg _ (RealN_ (FV _ cv) v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IRealLit (Just (unCVar cv)) v)}
+lowerNativeExprRaw cfg _ (LogN_ _ v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IBoolLit v)}
+lowerNativeExprRaw cfg _ (RealN_ (FV _ cv) v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IRealLit (Just (unCVar cv)) v)}
 -- An integer literal whose slot resolved to a real type must be emitted in
 -- float form. The typechecker deliberately allows Int-literal-to-real
 -- promotion (it is what lets @4 + 2.3@ check), and the nexus side already
@@ -1099,21 +1137,21 @@ lowerNativeExpr cfg _ (RealN_ (FV _ cv) v) = return $ defaultValue {poolExpr = l
 -- run time by @pybinding__put_value@. Dispatch on the GENERAL type, which is
 -- the only place the promotion is visible; the concrete name is still passed
 -- through for the target language's own literal suffix.
-lowerNativeExpr cfg _ (IntN_ (FV gv cv) v)
+lowerNativeExprRaw cfg _ (IntN_ (FV gv cv) v)
   | BT.isRealBaseType (VarU gv) =
       return $ defaultValue
         {poolExpr = lcPrintExpr cfg (IRealLit (Just (unCVar cv)) (RealFinite (fromInteger v)))}
-lowerNativeExpr cfg _ (IntN_ (FV _ cv) v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IIntLit (Just (unCVar cv)) v)}
-lowerNativeExpr cfg _ (StrN_ (FV _ cv) v) =
+lowerNativeExprRaw cfg _ (IntN_ (FV _ cv) v) = return $ defaultValue {poolExpr = lcPrintExpr cfg (IIntLit (Just (unCVar cv)) v)}
+lowerNativeExprRaw cfg _ (StrN_ (FV _ cv) v) =
   let hint = if cv == CV "" then Nothing else Just (unCVar cv)
   in return $ defaultValue {poolExpr = lcPrintExpr cfg (IStrLit hint v)}
-lowerNativeExpr cfg _ (EnumN_ t n i)
+lowerNativeExprRaw cfg _ (EnumN_ t n i)
   | EnumF (FV _ cv) _ <- t = return $ defaultValue {poolExpr = lcEnumLit cfg cv n i}
   | otherwise = error $ "constructor literal carries a non-enum type: " <> show (pretty t)
-lowerNativeExpr cfg _ (VariantN_ t n i xs)
+lowerNativeExprRaw cfg _ (VariantN_ t n i xs)
   | VariantF (FV _ cv) _ <- t = return $ mergePoolDocs (lcVariantLit cfg cv n i) xs
   | otherwise = error $ "constructor literal carries a non-variant type: " <> show (pretty t)
-lowerNativeExpr cfg _ (NullN_ t) = do
+lowerNativeExprRaw cfg _ (NullN_ t) = do
   -- NullN_ now carries the full @TypeF@ of the Null's type slot
   -- (e.g. @?(BTree Int)@), not just the underlying constructor's
   -- @FVar@. Pass it through @lcTypeOf@ to get the IType the printer
@@ -1128,32 +1166,32 @@ lowerNativeExpr cfg _ (NullN_ t) = do
 -- somewhere else as well, has to be copied out rather than moved out. Without
 -- this, a thunk that yields a value another thunk is still reading -- the two
 -- arms of a `@catch` over one variable -- takes it away from them.
-lowerNativeExpr cfg (DoBlockN _ innerE) (DoBlockN_ t x) =
+lowerNativeExprRaw cfg (DoBlockN _ innerE) (DoBlockN_ t x) =
   adaptOwnedElem cfg innerE x >>= lowerDoBlock cfg t
-lowerNativeExpr cfg _ (DoBlockN_ t x) = lowerDoBlock cfg t x
-lowerNativeExpr cfg _ (EvalN_ _ x) = return $ x {poolExpr = lcPrintExpr cfg (IEval (IRawExpr (render (poolExpr x))))}
+lowerNativeExprRaw cfg _ (DoBlockN_ t x) = lowerDoBlock cfg t x
+lowerNativeExprRaw cfg _ (EvalN_ _ x) = return $ x {poolExpr = lcPrintExpr cfg (IEval (IRawExpr (render (poolExpr x))))}
 -- CoerceToOptional widens a value to an optional. Most languages treat a T as a
 -- valid ?T (identity); Rust must wrap the value in Some(..) (see lcCoerceOptional).
 -- The wrapped value must be OWNED first: `Some(&T)` is an `Option<&T>`, not the
 -- `Option<T>` the sink expects, so a borrowed/place inner is cloned before wrapping.
-lowerNativeExpr cfg (CoerceN _ _ innerE) (CoerceN_ CoerceToOptional _ x) = do
+lowerNativeExprRaw cfg (CoerceN _ _ innerE) (CoerceN_ CoerceToOptional _ x) = do
   x' <- adaptOwnedElem cfg innerE x
   -- Adapt the inner to its stored representation before wrapping (Rust boxes a
   -- closure into `Rc<dyn MorlocFnN>` so the payload matches the boxed
   -- `Option<Rc<dyn MorlocFnN>>` element type), mirroring list/tuple/record.
   boxed <- lcStoreField cfg (typeFof innerE) (poolExpr x')
   return $ x' {poolExpr = lcCoerceOptional cfg boxed}
-lowerNativeExpr cfg _ (CoerceN_ CoerceToOptional _ x) =
+lowerNativeExprRaw cfg _ (CoerceN_ CoerceToOptional _ x) =
   return $ x {poolExpr = lcCoerceOptional cfg (poolExpr x)}
 -- The two arms feed the conditional's owned result sink, so adapt each to an
 -- owned value (like every other owned sink); the condition is not a sink.
-lowerNativeExpr cfg origExpr@(IfN _ _ thenE elseE) (IfN_ _ condDocs thenDocs elseDocs) = do
+lowerNativeExprRaw cfg origExpr@(IfN _ _ thenE elseE) (IfN_ _ condDocs thenDocs elseDocs) = do
   thenDocs' <- adaptOwnedElem cfg thenE thenDocs
   elseDocs' <- adaptOwnedElem cfg elseE elseDocs
   lcMakeIf cfg origExpr condDocs thenDocs' elseDocs'
-lowerNativeExpr cfg origExpr (IfN_ _ condDocs thenDocs elseDocs) =
+lowerNativeExprRaw cfg origExpr (IfN_ _ condDocs thenDocs elseDocs) =
   lcMakeIf cfg origExpr condDocs thenDocs elseDocs
-lowerNativeExpr cfg (IntrinsicN _ _ _ [dataE]) (IntrinsicN_ _ IntrHash (Just schema) [dataDocs]) = do
+lowerNativeExprRaw cfg (IntrinsicN _ _ _ [dataE]) (IntrinsicN_ _ IntrHash (Just schema) [dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
   -- The hashed value crosses into a 'ToVoidstar' (&T) sink; own-adapt it so a
   -- borrowed non-Copy Rust value is cloned rather than double-borrowed
@@ -1163,7 +1201,7 @@ lowerNativeExpr cfg (IntrinsicN _ _ _ [dataE]) (IntrinsicN_ _ IntrHash (Just sch
 -- @save takes source args in (level, path, value) order; path-first
 -- (after the level) mirrors @savem/@savej. The runtime ABI is unchanged:
 -- IIntrinsicSave keeps (level, data, path).
-lowerNativeExpr cfg (IntrinsicN _ _ _ [_, _, dataE]) (IntrinsicN_ _ IntrSave (Just schema) [levelDocs, pathDocs, dataDocs]) = do
+lowerNativeExprRaw cfg (IntrinsicN _ _ _ [_, _, dataE]) (IntrinsicN_ _ IntrSave (Just schema) [levelDocs, pathDocs, dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
   -- The saved value crosses into a 'ToVoidstar' (&T) sink; own-adapt it (see
   -- @hash above). level and path are scalar/Str, not value sinks.
@@ -1179,7 +1217,7 @@ lowerNativeExpr cfg (IntrinsicN _ _ _ [_, _, dataE]) (IntrinsicN_ _ IntrSave (Ju
 -- The runtime ABI is unchanged: IIntrinsicSave keeps (level, data, path).
 -- They are not packet formats; codegen always passes a zero level
 -- expression so the printed call shape is uniform with @save.
-lowerNativeExpr cfg (IntrinsicN _ _ _ [_, dataE]) (IntrinsicN_ _ IntrSaveM (Just schema) [pathDocs, dataDocs]) = do
+lowerNativeExprRaw cfg (IntrinsicN _ _ _ [_, dataE]) (IntrinsicN_ _ IntrSaveM (Just schema) [pathDocs, dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
   dataDocs' <- adaptOwnedElem cfg dataE dataDocs
   let fmt = "msgpack"
@@ -1188,7 +1226,7 @@ lowerNativeExpr cfg (IntrinsicN _ _ _ [_, dataE]) (IntrinsicN_ _ IntrSaveM (Just
                    (IRawExpr (render (poolExpr dataDocs')))
                    (IRawExpr (render (poolExpr pathDocs)))
    in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [pathDocs, dataDocs']
-lowerNativeExpr cfg (IntrinsicN _ _ _ [_, dataE]) (IntrinsicN_ _ IntrSaveJ (Just schema) [pathDocs, dataDocs]) = do
+lowerNativeExprRaw cfg (IntrinsicN _ _ _ [_, dataE]) (IntrinsicN_ _ IntrSaveJ (Just schema) [pathDocs, dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
   dataDocs' <- adaptOwnedElem cfg dataE dataDocs
   let fmt = "json"
@@ -1197,7 +1235,7 @@ lowerNativeExpr cfg (IntrinsicN _ _ _ [_, dataE]) (IntrinsicN_ _ IntrSaveJ (Just
                    (IRawExpr (render (poolExpr dataDocs')))
                    (IRawExpr (render (poolExpr pathDocs)))
    in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [pathDocs, dataDocs']
-lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrLoad (Just schema) [pathDocs]) = do
+lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrLoad (Just schema) [pathDocs]) = do
   sid <- lcRegisterSchema cfg schema
   -- Post effect-migration, @load returns bare `T` (no OptionalF wrap).
   -- The pool-side shim `_mlc_load<T>` requires an explicit template
@@ -1206,13 +1244,13 @@ lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrLoad (Just schema) [pathDocs]) =
   -- resolved type unconditionally.
   innerType <- lcTypeOf cfg (typeFof origExpr)
   return $ pathDocs {poolExpr = lcPrintExpr cfg (IIntrinsicLoad sid innerType (IRawExpr (render (poolExpr pathDocs))))}
-lowerNativeExpr cfg (IntrinsicN _ _ _ [dataE]) (IntrinsicN_ _ IntrShow (Just schema) [dataDocs]) = do
+lowerNativeExprRaw cfg (IntrinsicN _ _ _ [dataE]) (IntrinsicN_ _ IntrShow (Just schema) [dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
   -- The shown value crosses into a 'ToVoidstar' (&T) sink; own-adapt it (see
   -- @hash above) so a borrowed non-Copy Rust value is cloned, not double-borrowed.
   dataDocs' <- adaptOwnedElem cfg dataE dataDocs
   return $ dataDocs' {poolExpr = lcPrintExpr cfg (IIntrinsicShow sid (IRawExpr (render (poolExpr dataDocs'))))}
-lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrRead (Just schema) [strDocs]) = do
+lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrRead (Just schema) [strDocs]) = do
   sid <- lcRegisterSchema cfg schema
   -- Same rationale as IntrLoad above: @read returns bare `T` now,
   -- pass the resolved type so `_mlc_read<T>` gets its template arg.
@@ -1223,14 +1261,14 @@ lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrRead (Just schema) [strDocs]) = 
 -- into the Intrinsic node's schema slot by Serialize.hs. Emit it as a
 -- string literal and discard the data expression; the type of the
 -- argument is all that matters.
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrSchema (Just s) [dataDocs]) =
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrSchema (Just s) [dataDocs]) =
   return $ dataDocs {poolExpr = lcPrintExpr cfg (IStrLit Nothing s)}
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrTypeof (Just s) [dataDocs]) =
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrTypeof (Just s) [dataDocs]) =
   return $ dataDocs {poolExpr = lcPrintExpr cfg (IStrLit Nothing s)}
 -- @open: dispatch on the resolved handle type. IFile/IStream go through
 -- the generic kind-byte runtime entry; OStream needs the element schema
 -- threaded so the runtime can write the stream header at open time.
-lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrOpen maySchema [pathDocs]) = do
+lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrOpen maySchema [pathDocs]) = do
   let unwrapHead (EffectF _ inner) = unwrapHead inner
       unwrapHead (AppF (VarF (FV v _)) _) = Just v
       unwrapHead (VarF (FV v _)) = Just v
@@ -1260,7 +1298,7 @@ lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrOpen maySchema [pathDocs]) = do
       error "@open: unsupported handle type"
 -- @close: a Str-path arg (marked by Serialize.hs) unlinks a registered temp
 -- file; a handle arg closes the stream/file handle.
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrClose maySchema [handleDocs]) =
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrClose maySchema [handleDocs]) =
   let raw = IRawExpr (render (poolExpr handleDocs))
       node | maySchema == Just BT.closeTmpUnlinkMarker = IIntrinsicUnlinkTemp raw
            | otherwise                                 = IIntrinsicClose raw
@@ -1273,7 +1311,7 @@ lowerNativeExpr cfg _ (IntrinsicN_ _ IntrClose maySchema [handleDocs]) =
 -- subject's own type decides how to ask: an enum compares values, because
 -- for an argument-free constructor the value IS the tag; a variant must test
 -- the discriminant without touching the payload.
-lowerNativeExpr cfg (IntrinsicN _ _ _ [subjectE, StrN _ n]) (IntrinsicN_ _ IntrTagTest _ [subjectDocs, _]) =
+lowerNativeExprRaw cfg (IntrinsicN _ _ _ [subjectE, StrN _ n]) (IntrinsicN_ _ IntrTagTest _ [subjectDocs, _]) =
   case typeFof subjectE of
     VariantF (FV _ cv) arms ->
       return $ mergePoolDocs
@@ -1287,28 +1325,28 @@ lowerNativeExpr cfg (IntrinsicN _ _ _ [subjectE, StrN _ n]) (IntrinsicN_ _ IntrT
     t -> error $ "tag test on a type that is not a `data`: " <> show (pretty t)
 -- Reading one field out of a value whose arm a guarding tag test has already
 -- established. Emitted only under that guard, and with no surface spelling.
-lowerNativeExpr cfg (IntrinsicN _ _ _ [subjectE, StrN _ n, IntN _ i]) (IntrinsicN_ _ IntrCtorField _ [subjectDocs, _, _]) =
+lowerNativeExprRaw cfg (IntrinsicN _ _ _ [subjectE, StrN _ n, IntN _ i]) (IntrinsicN_ _ IntrCtorField _ [subjectDocs, _, _]) =
   case typeFof subjectE of
     VariantF (FV _ cv) _ ->
       return $ mergePoolDocs
         (const (lcCtorField cfg cv n (fromIntegral i) (poolExpr subjectDocs)))
         [subjectDocs]
     t -> error $ "constructor field projection on a non-variant: " <> show (pretty t)
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrFSchema _ [pathDocs]) =
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrFSchema _ [pathDocs]) =
   return $ pathDocs
     { poolExpr = lcPrintExpr cfg
         (IIntrinsicFSchema (IRawExpr (render (poolExpr pathDocs))))
     }
 -- @flen: handle -> Int element count. No schema needed; the runtime
 -- returns a raw integer.
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrFLength _ [handleDocs]) =
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrFLength _ [handleDocs]) =
   return $ handleDocs
     { poolExpr = lcPrintExpr cfg
         (IIntrinsicFLength (IRawExpr (render (poolExpr handleDocs))))
     }
 -- @next: IStream handle -> <IO> [a]. The wrapper deserialises the
 -- materialised voidstar payload into a typed list of the result.
-lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrNext (Just schema) [handleDocs]) = do
+lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrNext (Just schema) [handleDocs]) = do
   sid <- lcRegisterSchema cfg schema
   let resultTf = case typeFof origExpr of
         EffectF _ inner -> inner
@@ -1322,7 +1360,7 @@ lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrNext (Just schema) [handleDocs])
 -- @streamLayout: IFile handle -> <IO> [(U64,U64,U64)]. The wrapper
 -- deserialises the materialised voidstar layout into a typed list of
 -- triples.
-lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrStreamLayout (Just schema) [handleDocs]) = do
+lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrStreamLayout (Just schema) [handleDocs]) = do
   sid <- lcRegisterSchema cfg schema
   let resultTf = case typeFof origExpr of
         EffectF _ inner -> inner
@@ -1335,7 +1373,7 @@ lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrStreamLayout (Just schema) [hand
     }
 -- @stream: derive an IStream handle from an IFile. The runtime opens
 -- a fresh slot bound to the same path.
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrStream _ [handleDocs]) =
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrStream _ [handleDocs]) =
   return $ handleDocs
     { poolExpr = lcPrintExpr cfg
         (IIntrinsicStream (IRawExpr (render (poolExpr handleDocs))))
@@ -1345,7 +1383,7 @@ lowerNativeExpr cfg _ (IntrinsicN_ _ IntrStream _ [handleDocs]) =
 -- (level, value, handle) to match the C ABI `mlc_write(level, handle,
 -- voidstar)` and the pool's `_mlc_write(schema, level, value, handle)`
 -- helper.
-lowerNativeExpr cfg (IntrinsicN _ _ _ [_, _, valueE]) (IntrinsicN_ _ IntrWrite (Just schema)
+lowerNativeExprRaw cfg (IntrinsicN _ _ _ [_, _, valueE]) (IntrinsicN_ _ IntrWrite (Just schema)
                                   [levelDocs, handleDocs, valueDocs]) = do
   sid <- lcRegisterSchema cfg schema
   -- The written value crosses into a 'ToVoidstar' (&T) sink; own-adapt it (see
@@ -1362,14 +1400,14 @@ lowerNativeExpr cfg (IntrinsicN _ _ _ [_, _, valueE]) (IntrinsicN_ _ IntrWrite (
     }
 -- @append: open an existing stream file for append, returning a fresh
 -- OStream handle.
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrAppend (Just schema) [pathDocs]) = do
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrAppend (Just schema) [pathDocs]) = do
   sid <- lcRegisterSchema cfg schema
   return $ pathDocs
     { poolExpr = lcPrintExpr cfg
         (IIntrinsicAppend sid (IRawExpr (render (poolExpr pathDocs))))
     }
 -- @concat: byte-level concat of N stream files into one.
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrConcat _ [pathsDocs, destDocs]) =
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrConcat _ [pathsDocs, destDocs]) =
   let allDocs = [pathsDocs, destDocs]
       raw d = IRawExpr (render (poolExpr d))
    in return $ pathsDocs
@@ -1380,47 +1418,50 @@ lowerNativeExpr cfg _ (IntrinsicN_ _ IntrConcat _ [pathsDocs, destDocs]) =
         , poolCompleteManifolds = concatMap poolCompleteManifolds allDocs
         }
 -- @flush: force any buffered elements out as a sub-packet.
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrFlush _ [handleDocs]) =
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrFlush _ [handleDocs]) =
   return $ handleDocs
     { poolExpr = lcPrintExpr cfg
         (IIntrinsicFlush (IRawExpr (render (poolExpr handleDocs))))
     }
 -- @tell: nullary; read the @stdout stream's element_count.
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrTell _ []) =
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrTell _ []) =
   return $ defaultValue { poolExpr = lcPrintExpr cfg IIntrinsicTell }
 -- @tmpfile: nullary; create + register a temp file, return its path.
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrTmpfile _ []) =
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrTmpfile _ []) =
   return $ defaultValue { poolExpr = lcPrintExpr cfg IIntrinsicTmpfile }
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrThrow _ [msgDocs]) =
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrThrow _ [msgDocs]) =
   return $ msgDocs
     { poolExpr = lcPrintExpr cfg
         (IIntrinsicThrow (IRawExpr (render (poolExpr msgDocs))))
     }
--- @catch: emit each arg raw. Serialize.hs::thunkifyForCatch has already
--- forced both args into DoBlockN thunks, so each poolExpr is a bound
--- thunk name (like `helperN`). The pool's mlc_catch helper invokes them.
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrCatch _ [fallibleDocs, fallbackDocs]) =
-  let allDocs = [fallibleDocs, fallbackDocs]
-      raw d = IRawExpr (render (poolExpr d))
-   in return $ fallibleDocs
-        { poolExpr = lcPrintExpr cfg
-            (IIntrinsicCatch (raw fallibleDocs) (raw fallbackDocs))
-        , poolPriorExprs = concatMap poolPriorExprs allDocs
-        , poolPriorLines = concatMap poolPriorLines allDocs
-        , poolCompleteManifolds = concatMap poolCompleteManifolds allDocs
+-- @try: Serialize.hs::thunkifyForTry has already forced the body into a
+-- DoBlockN thunk, so poolExpr is a no-arg callable (often a bound helper
+-- name). The Ok and Err arms are built here rather than in the runtime
+-- helper because a `Try` may be mapped to a native type or left for the
+-- compiler to generate, and only 'lcVariantLit' knows which.
+lowerNativeExprRaw cfg _ (IntrinsicN_ t IntrTry _ [bodyDocs])
+  | VariantF (FV _ cv) arms <- stripEffectF t
+  , Just okTag <- armTagOf BT.tryOkCtor arms
+  , Just errTag <- armTagOf BT.tryErrCtor arms =
+      return $ bodyDocs
+        { poolExpr = lcMakeTry cfg (poolExpr bodyDocs)
+            (\v -> lcVariantLit cfg cv BT.tryOkCtor okTag [v])
+            (\m -> lcVariantLit cfg cv BT.tryErrCtor errTag [m])
         }
+  | otherwise =
+      error $ "@try result is not a Try variant: " <> show (pretty t)
 -- @stdin / @stdout / @stderr: nullary intrinsics. The runtime enforces
 -- singleton opens per stdio kind; codegen just emits the call with the
 -- element schema.
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrStdin (Just schema) []) = do
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrStdin (Just schema) []) = do
   sid <- lcRegisterSchema cfg schema
   return $ defaultValue
     { poolExpr = lcPrintExpr cfg (IIntrinsicStdin sid) }
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrStdout (Just schema) []) = do
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrStdout (Just schema) []) = do
   sid <- lcRegisterSchema cfg schema
   return $ defaultValue
     { poolExpr = lcPrintExpr cfg (IIntrinsicStdout sid) }
-lowerNativeExpr cfg _ (IntrinsicN_ _ IntrStderr (Just schema) []) = do
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrStderr (Just schema) []) = do
   sid <- lcRegisterSchema cfg schema
   return $ defaultValue
     { poolExpr = lcPrintExpr cfg (IIntrinsicStderr sid) }
@@ -1431,7 +1472,7 @@ lowerNativeExpr cfg _ (IntrinsicN_ _ IntrStderr (Just schema) []) = do
 -- The schema slot from Serialize.hs carries the result type's msgpack
 -- schema so the wrapper can convert the returned voidstar via
 -- from_voidstar<T>.
-lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrIFileWalk (Just schema) (pathDocs : handleDocs : runtimeDocs)) = do
+lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrIFileWalk (Just schema) (pathDocs : handleDocs : runtimeDocs)) = do
   sid <- lcRegisterSchema cfg schema
   let resultTf = case typeFof origExpr of
         EffectF _ inner -> inner
@@ -1449,7 +1490,7 @@ lowerNativeExpr cfg origExpr (IntrinsicN_ _ IntrIFileWalk (Just schema) (pathDoc
     , poolPriorLines = concatMap poolPriorLines allDocs
     , poolCompleteManifolds = concatMap poolCompleteManifolds allDocs
     }
-lowerNativeExpr _ _ (IntrinsicN_ _ intr _ _) =
+lowerNativeExprRaw _ _ (IntrinsicN_ _ intr _ _) =
   error $ "Runtime intrinsic @" <> show intr <> " reached code generation without schema"
 -- Lift a source function through an Optional. Mirrors how
 -- expandDeserialize's SerialPack arm wraps an inner deserialization
@@ -1457,7 +1498,7 @@ lowerNativeExpr _ _ (IntrinsicN_ _ intr _ _) =
 -- expression evaluates to optional<wireT> (e.g. the wire form returned
 -- by @load), and we produce optional<userT> by applying `src` to the
 -- inner value when present.
-lowerNativeExpr cfg origExpr (MapOptionalN_ _ wireTf src innerDocs) = do
+lowerNativeExprRaw cfg origExpr (MapOptionalN_ _ wireTf src innerDocs) = do
   idx <- lcNewIndex cfg
   -- Result type: optional<userT>. origExpr's TypeF is the outer
   -- optional in user-facing form.

@@ -28,9 +28,9 @@ import root
 -- before the next @write, producing three distinct sub-packets on
 -- disk (1: [1,2,3]; 2: [4,5]; 3: [6,7,8,9]). Without `@flush`, all
 -- three @writes would coalesce into a single sub-packet at @close.
-writeThree :: Str -> <IO, Err> ()
+writeThree :: Str -> <IO> ()
 writeThree path = do
-  o <- @open path :: <IO, Err> OStream Int
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
   @write 0 o [1, 2, 3]
   @flush o
   @write 0 o [4, 5]
@@ -38,35 +38,39 @@ writeThree path = do
   @write 0 o [6, 7, 8, 9]
   @close o
 
-testFirstSubpacket :: Str -> <IO, Err> [Int]
+testFirstSubpacket :: Str -> <IO> [Int]
 testFirstSubpacket path = do
   writeThree path
-  s <- @open path :: <IO, Err> IStream Int
-  @next s
+  Ok s <- @open path :: <IO> (Try Str (IStream Int))
+  Ok _tailv65 <- @next s
+  _tailv65
 
-testSecondSubpacket :: Str -> <IO, Err> [Int]
+testSecondSubpacket :: Str -> <IO> [Int]
 testSecondSubpacket path = do
   writeThree path
-  s <- @open path :: <IO, Err> IStream Int
+  Ok s <- @open path :: <IO> (Try Str (IStream Int))
   @next s
-  @next s
+  Ok _tailv66 <- @next s
+  _tailv66
 
-testThirdSubpacket :: Str -> <IO, Err> [Int]
+testThirdSubpacket :: Str -> <IO> [Int]
 testThirdSubpacket path = do
   writeThree path
-  s <- @open path :: <IO, Err> IStream Int
+  Ok s <- @open path :: <IO> (Try Str (IStream Int))
   @next s
   @next s
-  @next s
+  Ok _tailv67 <- @next s
+  _tailv67
 
 -- After draining all three sub-packets, the next call returns [],
 -- and a fifth call (post-EOF) still returns [].
-testEofAfterDrain :: Str -> <IO, Err> [Int]
+testEofAfterDrain :: Str -> <IO> [Int]
 testEofAfterDrain path = do
   writeThree path
-  s <- @open path :: <IO, Err> IStream Int
+  Ok s <- @open path :: <IO> (Try Str (IStream Int))
   @next s
   @next s
   @next s
   @next s
-  @next s
+  Ok _tailv68 <- @next s
+  _tailv68

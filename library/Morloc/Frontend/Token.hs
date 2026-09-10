@@ -137,6 +137,7 @@ data Token
   | TokInfixl
   | TokInfixr
   | TokInfix
+  | TokMatch
   | TokLet
   | TokIn
   | TokDo
@@ -251,6 +252,7 @@ showToken TokEscapable = "'escapable'"
 showToken TokInfixl = "'infixl'"
 showToken TokInfixr = "'infixr'"
 showToken TokInfix = "'infix'"
+showToken TokMatch = "'match'"
 showToken TokLet = "'let'"
 showToken TokIn = "'in'"
 showToken TokDo = "'do'"

@@ -1414,71 +1414,29 @@ synthE _ g (IntrinsicS IntrWrite [levelE, handleE, listE]) = do
   (g3, _, levelE')  <- checkG g2 levelE  BT.intU
   (g4, _, listE')   <- checkG g3 listE   listExpectedT
   return ( g4
-         , EffectU ioErrEffectSet BT.unitU
+         , EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
          , IntrinsicS IntrWrite [levelE', handleE', listE']
          )
 synthE _ _ (IntrinsicS IntrWrite args) =
   error $ "IntrWrite expects 3 args (level, handle, list), got " <> show (length args)
--- Bespoke rule for @catch. The primary must carry Err. The fallback
--- declares its own effect row and the whole expression inherits it, so
--- the result row is (primary effects minus Err) UNION (fallback effects).
--- A pure fallback strips Err; a fallible fallback keeps it. Two
--- independent open row-tails in the union are rejected because the
--- effect infrastructure carries at most one tail variable per row.
-synthE i g (IntrinsicS IntrCatch [fallibleE, fallbackE]) = do
-  (g1, fallibleT, fallibleE') <- synthG g fallibleE
-  let fallibleT' = apply g1 fallibleT
-  case peelForallU fallibleT' of
-    EffectU effs innerT -> do
-      let labels = resolveEffectSet effs
-      unless (Set.member "Err" labels) $
-        throwTypeError i $
-          "@catch's first argument must have effect Err; got " <> prettyTypeU fallibleT'
-      -- A bare numeric-literal fallback is CHECKED against the fallible's
-      -- inner type; everything else is synthesized as before.
-      --
-      -- Synthesis commits a literal to its default (@Int@ for an integer,
-      -- @Real@ for a float) before it ever meets the fallible's type, so
-      -- @\@catch (tryInto x) 0@ reported "Cannot compare types Int and I64"
-      -- for every fixed-width target, and the same for an alias or newtype
-      -- over one. Checking hands the literal its expected type, which is what
-      -- the @IntS@/@RealS@ check rules need to walk the alias and wire-parent
-      -- chain.
-      --
-      -- The dispatch is on the literal itself rather than on purity in
-      -- general because the fallback may legitimately be effectful (a chained
-      -- @\@catch@ whose fallback declares @<Err>@), and an effectful value
-      -- cannot be checked against the plain inner type. A literal is pure by
-      -- construction, so this split needs no purity analysis. A literal buried
-      -- inside a compound fallback (@\@catch f [0]@) is still synthesized and
-      -- still defaults; that is the same "synthesis defaults literals"
-      -- behaviour found elsewhere and wants a bidirectional-checking decision
-      -- rather than a local patch here.
-      (g2, fallbackT, fallbackE') <- case fallbackE of
-        AnnoS _ _ (IntS _ _)  -> checkG g1 fallbackE (apply g1 innerT)
-        AnnoS _ _ (RealS _ _) -> checkG g1 fallbackE (apply g1 innerT)
-        _                     -> synthG g1 fallbackE
-      let fallbackT' = apply g2 fallbackT
-          (fbEffs, fbInnerT) = case peelForallU fallbackT' of
-            EffectU e t -> (e, t)
-            t           -> (emptyEffectSet, t)
-      g3 <- subtype' i fbInnerT (apply g2 innerT) g2
-      let strippedEffs = applyEff g3 (removeEffectLabel "Err" effs)
-          fbEffs' = applyEff g3 fbEffs
-          resultEffs = unionEffectSet strippedEffs fbEffs'
-          (_, tailVars) = effectSetParts resultEffs
-      when (Set.size tailVars > 1) $
-        throwTypeError i $
-          "@catch cannot polymorphically combine two open effect rows;"
-          <+> "annotate one argument's effect row."
-      let resultT = mkEffectU resultEffs (apply g3 innerT)
-      return (g3, resultT, IntrinsicS IntrCatch [fallibleE', fallbackE'])
-    _ ->
-      throwTypeError i $
-        "@catch's first argument must have effect Err; got a non-effectful type"
-        <+> prettyTypeU fallibleT'
-synthE i _ (IntrinsicS IntrCatch args) =
-  MM.throwCompilerBugAt i $ "IntrCatch expects 2 args (fallible, fallback), got " <> pretty (length args)
+-- Bespoke rule for @try. Its argument may fail in any number of ways --
+-- an intrinsic Err arm auto-required into a throw, a foreign function
+-- raising natively, an explicit @throw -- and those failures have no
+-- common type, so the caught error is always a rendered message. The
+-- result is therefore @Try Str a@ regardless of the body.
+--
+-- The body's own effects pass through: catching a failure does not
+-- discharge the IO the body performed on its way there. A pure body
+-- stays pure.
+synthE _ g (IntrinsicS IntrTry [bodyE]) = do
+  (g1, bodyT, bodyE') <- synthG g bodyE
+  let (effs, innerT) = case peelForallU (apply g1 bodyT) of
+        EffectU e t -> (e, t)
+        t           -> (emptyEffectSet, t)
+      resultT = mkEffectU effs (BT.tryU BT.strU innerT)
+  return (g1, resultT, IntrinsicS IntrTry [bodyE'])
+synthE i _ (IntrinsicS IntrTry args) =
+  MM.throwCompilerBugAt i $ "IntrTry expects 1 arg (body), got " <> pretty (length args)
 synthE i g (IntrinsicS intr args) = do
   (g', argTypes, args') <- synthArgs g args
   g'' <- checkIntrinsicArgs i g' intr argTypes
@@ -1502,31 +1460,32 @@ peelForallU t = t
 -- Receives the synthesized argument types so result types like `@next`'s `[a]`
 -- can extract `a` from the receiver's type.
 intrinsicTypeG :: Gamma -> Intrinsic -> [TypeU] -> (Gamma, TypeU)
--- @load :: Str -> <IO, Err> a. Failure (missing file, decode mismatch,
--- schema mismatch) raises Err; discharge with @catch.
+-- @load :: Str -> <IO> (Try Str a). Failure (missing file, decode
+-- mismatch, schema mismatch) is an Err arm, not an effect.
 intrinsicTypeG g IntrLoad _ =
   let (g', loadType) = newvar "load_" g
-  in (g', EffectU ioErrEffectSet loadType)
--- @read :: Str -> <Err> a. Pure JSON parse; failure raises Err.
+  in (g', EffectU ioEffectSet (BT.tryU BT.strU loadType))
+-- @read :: Str -> Try Str a. A JSON parse touches nothing, so with
+-- failure carried in the result it is pure and composes in `map`.
 intrinsicTypeG g IntrRead _ =
   let (g', readType) = newvar "read_" g
-  in (g', EffectU errEffectSet readType)
+  in (g', BT.tryU BT.strU readType)
 -- @open: polymorphic return -- the user's inline ascription (e.g.
 -- `@open path :: IFile Sequence`) resolves the existential to the
 -- concrete handle type at typecheck time; codegen then inspects the
 -- resolved TypeF to dispatch to the right runtime entry point.
--- Failure (missing/unreadable/non-packet) raises Err.
 intrinsicTypeG g IntrOpen _ =
   let (g', openType) = newvar "open_" g
-  in (g', EffectU ioErrEffectSet openType)
+  in (g', EffectU ioEffectSet (BT.tryU BT.strU openType))
 -- @close: arg is any handle type (a fresh existential); user-side use
 -- always has the handle bound to a known type, so this resolves
 -- without needing ascription.
 intrinsicTypeG g IntrClose _ = (g, EffectU ioEffectSet BT.unitU)
--- @next :: IStream a -> <IO, Err> [a]. Mid-stream decode failures raise Err.
+-- @next :: IStream a -> <IO> (Try Str [a]). Mid-stream decode failures
+-- come back as an Err arm.
 intrinsicTypeG g IntrNext [argT] =
   let a = streamElemTypeU argT in
-  (g, EffectU ioErrEffectSet (BT.listU a))
+  (g, EffectU ioEffectSet (BT.tryU BT.strU (BT.listU a)))
 -- @stream :: IFile a -> <IO> IStream a. Same trick, with the IStream
 -- head on the result side. The IFile was already validated at @open,
 -- so this handle-setup step does not itself fail with Err.
@@ -1534,27 +1493,32 @@ intrinsicTypeG g IntrStream [argT] =
   let a = streamElemTypeU argT in
   (g, EffectU ioEffectSet (AppU (VarU BT.istreamVar) [a]))
 -- @append: polymorphic return like @open; the user ascription resolves
--- to the concrete OStream/IStream/IFile shape. Failure raises Err.
+-- to the concrete OStream/IStream/IFile shape.
 intrinsicTypeG g IntrAppend _ =
   let (g', appendType) = newvar "append_" g
-  in (g', EffectU ioErrEffectSet appendType)
--- @stdin :: <IO, Err> IStream a. Claims the stdin slot; second open
--- fails via the CAS-per-kind uniqueness guard. Piped-content decode
+  in (g', EffectU ioEffectSet (BT.tryU BT.strU appendType))
+-- @stdin :: <IO> (Try Str (IStream a)). Claims the stdin slot; a second
+-- open fails via the CAS-per-kind uniqueness guard. Piped-content decode
 -- errors surface at @next, not here (no isatty pre-check -- users
 -- may want the handle before any read).
--- @stdout / @stderr: handle setup only; no Err since writes happen elsewhere.
+-- @stdout / @stderr: handle setup only, and they cannot fail.
 intrinsicTypeG g IntrStdin _ =
   let (g', a) = newvar "stdin_a" g in
-  (g', EffectU ioErrEffectSet (AppU (VarU BT.istreamVar) [a]))
+  (g', EffectU ioEffectSet (BT.tryU BT.strU (AppU (VarU BT.istreamVar) [a])))
 intrinsicTypeG g IntrStdout _ =
   let (g', a) = newvar "stdout_a" g in
   (g', EffectU ioEffectSet (AppU (VarU BT.ostreamVar) [a]))
 intrinsicTypeG g IntrStderr _ =
   let (g', a) = newvar "stderr_a" g in
   (g', EffectU ioEffectSet (AppU (VarU BT.ostreamVar) [a]))
+-- @throw :: e -> a. A bottom, not a tracked effect: it does not return,
+-- so there is nothing for an effect row to describe. The payload is
+-- rendered into the traceback at the throw site and does not survive as a
+-- value, which is what keeps behaviour the same whether the throw and the
+-- @try that catches it land in the same pool or not.
 intrinsicTypeG g IntrThrow _ =
   let (g', a) = newvar "throw_" g
-  in (g', EffectU errEffectSet a)
+  in (g', a)
 intrinsicTypeG g intr _ = (g, intrinsicType intr)
 
 -- | Extract the element type `a` from a `Handle a` (IFile/IStream/OStream)
@@ -1568,10 +1532,10 @@ streamElemTypeU t = t
 
 -- | Return type of a fully applied intrinsic (for intrinsics without fresh vars)
 intrinsicType :: Intrinsic -> TypeU
-intrinsicType IntrSave = EffectU ioErrEffectSet BT.unitU
-intrinsicType IntrSaveM = EffectU ioErrEffectSet BT.unitU
-intrinsicType IntrSaveJ = EffectU ioErrEffectSet BT.unitU
-intrinsicType IntrLoad = EffectU ioErrEffectSet (ExistU (TV "load_a") ([], Open) ([], Open))
+intrinsicType IntrSave = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
+intrinsicType IntrSaveM = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
+intrinsicType IntrSaveJ = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
+intrinsicType IntrLoad = EffectU ioEffectSet (BT.tryU BT.strU (ExistU (TV "load_a") ([], Open) ([], Open)))
 intrinsicType IntrHash = BT.strU
 intrinsicType IntrVersion = BT.strU
 intrinsicType IntrCompiled = BT.strU
@@ -1579,28 +1543,28 @@ intrinsicType IntrLang = BT.strU
 intrinsicType IntrSchema = BT.strU
 intrinsicType IntrTypeof = BT.strU
 intrinsicType IntrShow = BT.strU
-intrinsicType IntrRead = EffectU errEffectSet (ExistU (TV "read_a") ([], Open) ([], Open))
+intrinsicType IntrRead = BT.tryU BT.strU (ExistU (TV "read_a") ([], Open) ([], Open))
 intrinsicType IntrDatafile = BT.strU
 -- IntrOpen and IntrClose flow through intrinsicTypeG (fresh existentials).
 intrinsicType IntrOpen =
   error "intrinsicType: IntrOpen must be typed via intrinsicTypeG"
 intrinsicType IntrClose =
   error "intrinsicType: IntrClose must be typed via intrinsicTypeG"
-intrinsicType IntrFSchema = EffectU ioErrEffectSet BT.strU
-intrinsicType IntrFLength = EffectU ioErrEffectSet BT.intU
+intrinsicType IntrFSchema = EffectU ioEffectSet (BT.tryU BT.strU BT.strU)
+intrinsicType IntrFLength = EffectU ioEffectSet (BT.tryU BT.strU BT.intU)
 intrinsicType IntrStreamLayout =
-  EffectU ioErrEffectSet (BT.listU (BT.tupleU [BT.u64U, BT.u64U, BT.u64U]))
+  EffectU ioEffectSet (BT.tryU BT.strU (BT.listU (BT.tupleU [BT.u64U, BT.u64U, BT.u64U])))
 intrinsicType IntrTell = EffectU ioEffectSet BT.u64U
-intrinsicType IntrTmpfile = EffectU ioErrEffectSet BT.strU
+intrinsicType IntrTmpfile = EffectU ioEffectSet (BT.tryU BT.strU BT.strU)
 intrinsicType IntrNext =
   error "intrinsicType: IntrNext must be typed via intrinsicTypeG (carries arg-derived element type)"
 intrinsicType IntrStream =
   error "intrinsicType: IntrStream must be typed via intrinsicTypeG (carries arg-derived element type)"
-intrinsicType IntrWrite = EffectU ioErrEffectSet BT.unitU
+intrinsicType IntrWrite = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
 intrinsicType IntrAppend =
   error "intrinsicType: IntrAppend must be typed via intrinsicTypeG (polymorphic return)"
-intrinsicType IntrConcat = EffectU ioErrEffectSet BT.unitU
-intrinsicType IntrFlush = EffectU ioErrEffectSet BT.unitU
+intrinsicType IntrConcat = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
+intrinsicType IntrFlush = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
 -- IntrMap is handled by its own synthE clause and never reaches this fallback.
 intrinsicType IntrMap =
   error "intrinsicType: IntrMap must be typed via synthE's dedicated clause"
@@ -1618,8 +1582,8 @@ intrinsicType IntrStderr =
   error "intrinsicType: IntrStderr must be typed via intrinsicTypeG (polymorphic element type)"
 intrinsicType IntrThrow =
   error "intrinsicType: IntrThrow must be typed via intrinsicTypeG (polymorphic return type)"
-intrinsicType IntrCatch =
-  error "intrinsicType: IntrCatch must be typed via synthE's dedicated clause"
+intrinsicType IntrTry =
+  error "intrinsicType: IntrTry must be typed via synthE's dedicated clause"
 intrinsicType IntrCollect =
   error "intrinsicType: IntrCollect is expanded at desugar and never reaches typecheck"
 -- IntrIFileWalk is synthesized by Express.hs / Nexus.hs with a typed result;
@@ -1721,6 +1685,10 @@ checkIntrinsicArgs i g intr argTypes = do
           let (g'a, a) = newvar "flush_a_" g
               expectedT = AppU (VarU BT.ostreamVar) [a]
            in subtype' i handleT expectedT g'a
+        -- @throw's payload must already be a Str. The runtime reads it as
+        -- UTF-8 bytes, so any other shape would render as an empty message
+        -- and silently lose the error. Render first (@show) to throw
+        -- something structured.
         (IntrThrow, [msgT]) -> subtype' i msgT BT.strU g
         -- compile-time constants: no args
         (IntrVersion, []) -> return g

@@ -360,10 +360,10 @@ data Pattern
 
 -- | Compiler intrinsics: functions the compiler generates specialized code for.
 data Intrinsic
-  = IntrSave      -- ^ @save  :: Int -> Str -> a -> <IO, Err> () -- voidstar packet, with zstd level 0-9
-  | IntrSaveM     -- ^ @savem :: Str -> a -> <IO, Err> ()         -- raw msgpack file
-  | IntrSaveJ     -- ^ @savej :: Str -> a -> <IO, Err> ()         -- raw JSON file
-  | IntrLoad      -- ^ @load  :: Str -> <IO, Err> a               -- auto-detect format, auto-decompress packets; failure raises Err (catch with @catch)
+  = IntrSave      -- ^ @save  :: Int -> Str -> a -> <IO> (Try Str ()) -- voidstar packet, with zstd level 0-9
+  | IntrSaveM     -- ^ @savem :: Str -> a -> <IO> (Try Str ())    -- raw msgpack file
+  | IntrSaveJ     -- ^ @savej :: Str -> a -> <IO> (Try Str ())    -- raw JSON file
+  | IntrLoad      -- ^ @load  :: Str -> <IO> (Try Str a)          -- auto-detect format, auto-decompress packets; failure is an Err arm
   | IntrHash      -- ^ @hash   :: a -> Str           -- xxhash, hex string
   | IntrVersion   -- ^ @version :: Str               -- compiler version
   | IntrCompiled  -- ^ @compiled :: Str              -- compile timestamp
@@ -371,11 +371,11 @@ data Intrinsic
   | IntrSchema    -- ^ @schema  :: a -> Str          -- schema string
   | IntrTypeof    -- ^ @typeof  :: a -> Str          -- concrete type name
   | IntrShow      -- ^ @show   :: a -> Str           -- serialize to JSON string
-  | IntrRead      -- ^ @read   :: Str -> <Err> a     -- deserialize from JSON string; parse failure raises Err
+  | IntrRead      -- ^ @read   :: Str -> Try Str a   -- deserialize from JSON string; pure, so it composes in `map`
   | IntrDatafile  -- ^ @datafile :: Str -> Str       -- resolve installed data file path
-  | IntrOpen      -- ^ @open  :: Str -> <IO, Err> a  -- open a stream/file; `a` resolved via inline ascription to IFile/IStream/OStream; failure raises Err
+  | IntrOpen      -- ^ @open  :: Str -> <IO> (Try Str a)  -- open a stream/file; `a` resolved via inline ascription to IFile/IStream/OStream
   | IntrClose     -- ^ @close :: a -> <IO> ()        -- close any stream/file handle
-  | IntrFSchema   -- ^ @fschema :: Str -> <IO, Err> Str -- read a file's element schema without typed open
+  | IntrFSchema   -- ^ @fschema :: Str -> <IO> (Try Str Str) -- read a file's element schema without typed open
   | IntrMap       -- ^ implicit @(a -> b) -> List a -> List b@ map; emitted by
                   -- the desugar's bracket-accessor lowering when a slice is
                   -- followed by a chained accessor (e.g. @.[::-1].x pts@). NOT
@@ -409,61 +409,68 @@ data Intrinsic
                   -- this projection has already established the arm, and
                   -- short-circuiting in the emitted condition keeps the
                   -- projection from running against any other one.
-  | IntrFLength     -- ^ @flen :: IFile a -> <IO, Err> Int@ -- file element count.
+  | IntrFLength     -- ^ @flen :: IFile a -> <IO> (Try Str Int)@ -- file element count.
                     -- Free from the footer's StreamDiag.element_count. Users
                     -- typically alias as @length@ via stdlib shims.
-  | IntrStreamLayout -- ^ @streamLayout :: IFile [a] -> <IO, Err> [(U64,U64,U64)]@
+  | IntrStreamLayout -- ^ @streamLayout :: IFile [a] -> <IO> (Try Str [(U64,U64,U64)])@
                     -- -- per-sub-packet layout for parallel planning: one triple
                     -- @(elementOffset, elementCount, uncompressedSize)@ per
                     -- sub-packet, in file order. A DATA packet is the degenerate
                     -- single-chunk case (one triple @(0, count, size)@); an empty
                     -- stream yields @[]@. Derived at read time from the existing
                     -- sub-packet index + per-sub-packet headers (no wire change,
-                    -- no payload decompression). Malformed packets raise Err.
-  | IntrNext        -- ^ @next :: IStream a -> <IO, Err> [a]@ -- materialise the
+                    -- no payload decompression). A malformed packet is an Err arm.
+  | IntrNext        -- ^ @next :: IStream a -> <IO> (Try Str [a])@ -- materialise the
                     -- current sub-packet and advance the cursor. Returns an
                     -- empty list at EOF (further calls keep returning empty).
-                    -- Mid-stream decode failures raise Err.
+                    -- A mid-stream decode failure is an Err arm.
   | IntrStream      -- ^ @stream :: IFile a -> <IO> IStream a@ -- derive a
                     -- forward-only IStream from an open IFile, bound to the
                     -- same path with an independent fd, mmap, and cursor.
-  | IntrWrite       -- ^ @write :: Int -> OStream a -> [a] -> <IO, Err> ()@ --
+  | IntrWrite       -- ^ @write :: Int -> OStream a -> [a] -> <IO> (Try Str ())@ --
                     -- emit one sub-packet of element-list type. The Int is
                     -- the zstd compression level (0 = uncompressed); the
                     -- first @write fixes the level for the file's lifetime.
-                    -- I/O failure (disk full, broken pipe) raises Err.
-  | IntrAppend      -- ^ @append :: Str -> <IO, Err> (OStream a)@ -- open an
+                    -- I/O failure (disk full, broken pipe) is an Err arm.
+  | IntrAppend      -- ^ @append :: Str -> <IO> (Try Str (OStream a))@ -- open an
                     -- existing stream file for append. Forward-scan recovers
-                    -- the resume cursor; mismatched element schemas raise Err
+                    -- the resume cursor; a mismatched element schema is an Err arm
                     -- before any bytes are written.
-  | IntrConcat      -- ^ @concat :: [Str] -> Str -> <IO, Err> ()@ -- concatenate
+  | IntrConcat      -- ^ @concat :: [Str] -> Str -> <IO> (Try Str ())@ -- concatenate
                     -- a sequence of stream files via sendfile, exploiting
                     -- the stream-packet concat invariant.
-  | IntrFlush       -- ^ @flush :: OStream a -> <IO, Err> ()@ -- force buffered
+  | IntrFlush       -- ^ @flush :: OStream a -> <IO> (Try Str ())@ -- force buffered
                     -- writes to be emitted as a sub-packet immediately,
                     -- without closing the stream. No-op on an empty
                     -- buffer. Useful for tests that need deterministic
                     -- packet boundaries and for user code that wants to
                     -- make progress visible to concurrent readers.
-  | IntrStdin       -- ^ @stdin :: <IO, Err> IStream a@ -- nullary intrinsic
+  | IntrStdin       -- ^ @stdin :: <IO> (Try Str (IStream a))@ -- nullary intrinsic
                     -- that opens process stdin as an IStream. The nexus is
                     -- the sole owner of fd 0; @next routes through the
                     -- pool-nexus RPC socket. At most one @stdin per nexus
-                    -- (the second open raises Err via the CAS-per-kind
+                    -- (the second open gives an Err arm via the CAS-per-kind
                     -- guard). Read-time failures (EOF, malformed packet)
-                    -- surface at @next, which also carries `<IO, Err>`.
+                    -- surface at @next, whose result carries them as an Err arm.
   | IntrStdout      -- ^ @stdout :: <IO> OStream a@ -- nullary; opens
                     -- process stdout as an OStream. @write routes through
                     -- the nexus. At most one @stdout per nexus.
   | IntrStderr      -- ^ @stderr :: <IO> OStream a@ -- symmetric with
                     -- @stdout for stderr.
-  | IntrThrow       -- ^ @throw :: Str -> <Err> a@ -- raise a MorlocException
-                    -- with the given message. Return type is a fresh
-                    -- existential so `@throw` fits in any branch.
-  | IntrCatch       -- ^ @catch :: <e, Err> a -> <e> a -> <e> a@ --
-                    -- intercept a fallible expression, substituting the
-                    -- fallback value when it raises. Effect-strip removes
-                    -- Err; other effects propagate through.
+  | IntrThrow       -- ^ @throw :: e -> a@ -- abandon the computation,
+                    -- rendering the payload into the traceback. A bottom
+                    -- rather than a tracked effect: it does not return, so
+                    -- there is nothing for an effect row to describe. The
+                    -- return type is a fresh existential so `@throw` fits
+                    -- in any branch.
+  | IntrTry         -- ^ @try :: <e> a -> <e> (Try Str a)@ -- run the
+                    -- argument and convert an otherwise-uncaught failure
+                    -- into data. The argument is always suspended, as a
+                    -- property of the form rather than of its type, so a
+                    -- pure body works too. The error is a rendered message
+                    -- plus traceback: a body may fail in several unrelated
+                    -- ways and those have no common type. The body's own
+                    -- effects pass through.
   | IntrTell        -- ^ @tell :: <IO> U64@ -- the number of elements written
                     -- to the process's @stdout OStream so far (its
                     -- element_count). Used by the offset-aware `with:`/
@@ -525,7 +532,7 @@ intrinsicName IntrStdin = "stdin"
 intrinsicName IntrStdout = "stdout"
 intrinsicName IntrStderr = "stderr"
 intrinsicName IntrThrow = "throw"
-intrinsicName IntrCatch = "catch"
+intrinsicName IntrTry = "try"
 intrinsicName IntrTell = "tell"
 intrinsicName IntrCollect = "collect"
 intrinsicName IntrTmpfile = "tmpfile"
@@ -563,7 +570,7 @@ intrinsicIsIO IntrTmpfile = True
 intrinsicIsIO IntrCollect = True
 -- Synthesized post-typecheck (never user-written); IO by nature.
 intrinsicIsIO IntrIFileWalk = True
--- Pure or Err-only (no IO): safe to write directly in a sandboxed eval.
+-- No IO: safe to write directly in a sandboxed eval.
 intrinsicIsIO IntrHash = False
 intrinsicIsIO IntrVersion = False
 intrinsicIsIO IntrCompiled = False
@@ -577,7 +584,7 @@ intrinsicIsIO IntrMap = False
 intrinsicIsIO IntrTagTest = False
 intrinsicIsIO IntrCtorField = False
 intrinsicIsIO IntrThrow = False
-intrinsicIsIO IntrCatch = False
+intrinsicIsIO IntrTry = False
 
 -- | Parse a name to an intrinsic (Nothing if not a known intrinsic)
 parseIntrinsic :: Text -> Maybe Intrinsic
@@ -612,7 +619,7 @@ parseIntrinsic "stdin" = Just IntrStdin
 parseIntrinsic "stdout" = Just IntrStdout
 parseIntrinsic "stderr" = Just IntrStderr
 parseIntrinsic "throw" = Just IntrThrow
-parseIntrinsic "catch" = Just IntrCatch
+parseIntrinsic "try" = Just IntrTry
 parseIntrinsic "tell" = Just IntrTell
 parseIntrinsic "collect" = Just IntrCollect
 parseIntrinsic _ = Nothing
@@ -650,7 +657,7 @@ intrinsicArity IntrStdin = 0
 intrinsicArity IntrStdout = 0
 intrinsicArity IntrStderr = 0
 intrinsicArity IntrThrow = 1
-intrinsicArity IntrCatch = 2
+intrinsicArity IntrTry = 1
 intrinsicArity IntrTell = 0
 intrinsicArity IntrCollect = 1
 intrinsicArity IntrTmpfile = 0

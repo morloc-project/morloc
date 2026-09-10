@@ -536,6 +536,7 @@ classifyWord "escapable" = TokEscapable
 classifyWord "infixl" = TokInfixl
 classifyWord "infixr" = TokInfixr
 classifyWord "infix" = TokInfix
+classifyWord "match" = TokMatch
 classifyWord "let" = TokLet
 classifyWord "in" = TokIn
 classifyWord "do" = TokDo

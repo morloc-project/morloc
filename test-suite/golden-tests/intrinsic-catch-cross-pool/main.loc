@@ -21,7 +21,7 @@ import root-py
 import root-cpp
 
 source Cpp from "helper.hpp" ("cpp_fail")
-cpp_fail :: Str -> <Err> Int
+cpp_fail :: Str -> Int
 
 catchCross :: Str -> Int
-catchCross s = @catch (cpp_fail s) 55
+catchCross s = match (@try (cpp_fail s)) | (Ok _cv) = _cv | (Err _) = 55

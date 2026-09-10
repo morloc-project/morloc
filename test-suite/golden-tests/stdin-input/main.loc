@@ -33,10 +33,10 @@ produce n = mk n
 readStream ::
   --' stdin: true
   RFile ->
-  <IO, Err> [Int]
+  <IO> [Int]
 readStream f = do
-  fi <- @open f :: <IO, Err> (IStream Int)
-  xs <- @next fi
+  Ok fi <- @open f :: <IO> (Try Str ((IStream Int)))
+  Ok xs <- @next fi
   echo xs
 
 --' Read STRINGS as an IStream. Feeding an [Int] packet must fail the schema
@@ -44,10 +44,10 @@ readStream f = do
 readStr ::
   --' stdin: true
   RFile ->
-  <IO, Err> [Str]
+  <IO> [Str]
 readStr f = do
-  fi <- @open f :: <IO, Err> (IStream Str)
-  xs <- @next fi
+  Ok fi <- @open f :: <IO> (Try Str ((IStream Str)))
+  Ok xs <- @next fi
   echoStr xs
 
 --' IFile-first with IStream fallback (the filter idiom). A real file takes the
@@ -56,14 +56,15 @@ readStr f = do
 readAny ::
   --' stdin: true
   RFile ->
-  <IO, Err> Int
-readAny f =
-  @catch
-    ( do fi <- @open f :: <IO, Err> (IFile [Int])
-         n <- @flen fi
-         identI n
-    )
-    ( do fi <- @open f :: <IO, Err> (IStream Int)
-         n <- @flen fi
-         identI n
-    )
+  <IO> Int
+readAny f = do
+  _tr <- @try (do
+    Ok fi <- @open f :: <IO> (Try Str (IFile [Int]))
+    Ok n <- @flen fi
+    identI n)
+  match _tr
+    | (Ok _cv) = _cv
+    | (Err _) = (do
+        Ok si <- @open f :: <IO> (Try Str (IStream Int))
+        Ok n <- @flen si
+        identI n)

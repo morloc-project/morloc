@@ -115,128 +115,128 @@ crew =
   , { latitude = "a2", longitude = "b2", altitude = "c2" }
   ]
 
-flatKey :: Str -> <IO, Err> (Str, Str)
+flatKey :: Str -> <IO> (Str, Str)
 flatKey path = do
   @save 0 path here
-  f <- @open path :: <IO, Err> IFile Loc
+  Ok f <- @open path :: <IO> (Try Str (IFile Loc))
   (.longitude f, .longitude here)
 
-keyGroup :: Str -> <IO, Err> ((Str, Str, Str), (Str, Str, Str))
+keyGroup :: Str -> <IO> ((Str, Str, Str), (Str, Str, Str))
 keyGroup path = do
   @save 0 path here
-  f <- @open path :: <IO, Err> IFile Loc
+  Ok f <- @open path :: <IO> (Try Str (IFile Loc))
   (.(.latitude, .longitude, .altitude) f, .(.latitude, .longitude, .altitude) here)
 
-keyGroupReversed :: Str -> <IO, Err> ((Str, Str, Str), (Str, Str, Str))
+keyGroupReversed :: Str -> <IO> ((Str, Str, Str), (Str, Str, Str))
 keyGroupReversed path = do
   @save 0 path here
-  f <- @open path :: <IO, Err> IFile Loc
+  Ok f <- @open path :: <IO> (Try Str (IFile Loc))
   (.(.altitude, .longitude, .latitude) f, .(.altitude, .longitude, .latitude) here)
 
-keyChain :: Str -> <IO, Err> (Str, Str)
+keyChain :: Str -> <IO> (Str, Str)
 keyChain path = do
   @save 0 path hand
-  f <- @open path :: <IO, Err> IFile Worker
+  Ok f <- @open path :: <IO> (Try Str (IFile Worker))
   (.home.altitude f, .home.altitude hand)
 
-keyIndexKey :: Str -> <IO, Err> (Str, Str)
+keyIndexKey :: Str -> <IO> (Str, Str)
 keyIndexKey path = do
   @save 0 path hand
-  f <- @open path :: <IO, Err> IFile Worker
+  Ok f <- @open path :: <IO> (Try Str (IFile Worker))
   (.job.1.longitude f, .job.1.longitude hand)
 
-chainGroup :: Str -> <IO, Err> ((Str, Str), (Str, Str))
+chainGroup :: Str -> <IO> ((Str, Str), (Str, Str))
 chainGroup path = do
   @save 0 path hand
-  f <- @open path :: <IO, Err> IFile Worker
+  Ok f <- @open path :: <IO> (Try Str (IFile Worker))
   (.(.home.altitude, .job.1.altitude) f, .(.home.altitude, .job.1.altitude) hand)
 
-repeatedKey :: Str -> <IO, Err> ((Int, Str, Int), (Int, Str, Int))
+repeatedKey :: Str -> <IO> ((Int, Str, Int), (Int, Str, Int))
 repeatedKey path = do
   @save 0 path hand
-  f <- @open path :: <IO, Err> IFile Worker
+  Ok f <- @open path :: <IO> (Try Str (IFile Worker))
   (.(.age, .job.1.altitude, .age) f, .(.age, .job.1.altitude, .age) hand)
 
-groupUnderKey :: Str -> <IO, Err> ((Str, Str), (Str, Str))
+groupUnderKey :: Str -> <IO> ((Str, Str), (Str, Str))
 groupUnderKey path = do
   @save 0 path hand
-  f <- @open path :: <IO, Err> IFile Worker
+  Ok f <- @open path :: <IO> (Try Str (IFile Worker))
   (.home.(.altitude, .latitude) f, .home.(.altitude, .latitude) hand)
 
-bracketThenKey :: Str -> <IO, Err> (Str, Str)
+bracketThenKey :: Str -> <IO> (Str, Str)
 bracketThenKey path = do
   @save 0 path crew
-  f <- @open path :: <IO, Err> IFile [Loc]
+  Ok f <- @open path :: <IO> (Try Str (IFile [Loc]))
   (.[1].altitude f, .[1].altitude crew)
 
-sliceThenKey :: Str -> <IO, Err> ([Str], [Str])
+sliceThenKey :: Str -> <IO> ([Str], [Str])
 sliceThenKey path = do
   @save 0 path crew
-  f <- @open path :: <IO, Err> IFile [Loc]
+  Ok f <- @open path :: <IO> (Try Str (IFile [Loc]))
   (.[0:2].latitude f, .[0:2].latitude crew)
 
-keyThenBracket :: Str -> <IO, Err> (Str, Str)
+keyThenBracket :: Str -> <IO> (Str, Str)
 keyThenBracket path = do
   @save 0 path hand
-  f <- @open path :: <IO, Err> IFile Worker
+  Ok f <- @open path :: <IO> (Try Str (IFile Worker))
   (.tags.[2] f, .tags.[2] hand)
 
-keyThenSlice :: Str -> <IO, Err> ([Str], [Str])
+keyThenSlice :: Str -> <IO> ([Str], [Str])
 keyThenSlice path = do
   @save 0 path hand
-  f <- @open path :: <IO, Err> IFile Worker
+  Ok f <- @open path :: <IO> (Try Str (IFile Worker))
   (.tags.[1:3] f, .tags.[1:3] hand)
 
-indexThenKey :: Str -> <IO, Err> (Str, Str)
+indexThenKey :: Str -> <IO> (Str, Str)
 indexThenKey path = do
   @save 0 path (7, here)
-  f <- @open path :: <IO, Err> IFile (Int, Loc)
+  Ok f <- @open path :: <IO> (Try Str (IFile (Int, Loc)))
   (.1.altitude f, .1.altitude (7, here))
 
-deepKeyChain :: Str -> <IO, Err> (Str, Str)
+deepKeyChain :: Str -> <IO> (Str, Str)
 deepKeyChain path = do
   @save 0 path nest
-  f <- @open path :: <IO, Err> IFile Nest
+  Ok f <- @open path :: <IO> (Try Str (IFile Nest))
   (.outer.home.longitude f, .outer.home.longitude nest)
 
-mixedGroup :: Str -> <IO, Err> ((Int, Str), (Int, Str))
+mixedGroup :: Str -> <IO> ((Int, Str), (Int, Str))
 mixedGroup path = do
   @save 0 path hand
-  f <- @open path :: <IO, Err> IFile Worker
+  Ok f <- @open path :: <IO> (Try Str (IFile Worker))
   (.(.age, .home.latitude) f, .(.age, .home.latitude) hand)
 
-groupSkippingField :: Str -> <IO, Err> ((Str, Str), (Str, Str))
+groupSkippingField :: Str -> <IO> ((Str, Str), (Str, Str))
 groupSkippingField path = do
   @save 0 path here
-  f <- @open path :: <IO, Err> IFile Loc
+  Ok f <- @open path :: <IO> (Try Str (IFile Loc))
   (.(.latitude, .altitude) f, .(.latitude, .altitude) here)
 
-degenerateGroup :: Str -> <IO, Err> (Str, Str)
+degenerateGroup :: Str -> <IO> (Str, Str)
 degenerateGroup path = do
   @save 0 path here
-  f <- @open path :: <IO, Err> IFile Loc
+  Ok f <- @open path :: <IO> (Try Str (IFile Loc))
   (.(.altitude) f, .(.altitude) here)
 
-recordValuedKey :: Str -> <IO, Err> (Loc, Loc)
+recordValuedKey :: Str -> <IO> (Loc, Loc)
 recordValuedKey path = do
   @save 0 path hand
-  f <- @open path :: <IO, Err> IFile Worker
+  Ok f <- @open path :: <IO> (Try Str (IFile Worker))
   (.home f, .home hand)
 
-tupleValuedKey :: Str -> <IO, Err> ((Bool, Loc), (Bool, Loc))
+tupleValuedKey :: Str -> <IO> ((Bool, Loc), (Bool, Loc))
 tupleValuedKey path = do
   @save 0 path hand
-  f <- @open path :: <IO, Err> IFile Worker
+  Ok f <- @open path :: <IO> (Try Str (IFile Worker))
   (.job f, .job hand)
 
-keyBracketKey :: Str -> <IO, Err> (Str, Str)
+keyBracketKey :: Str -> <IO> (Str, Str)
 keyBracketKey path = do
   @save 0 path squad
-  f <- @open path :: <IO, Err> IFile Team
+  Ok f <- @open path :: <IO> (Try Str (IFile Team))
   (.members.[1].name f, .members.[1].name squad)
 
-indexIndex :: Str -> <IO, Err> (Str, Str)
+indexIndex :: Str -> <IO> (Str, Str)
 indexIndex path = do
   @save 0 path (("a", "b"), "c")
-  f <- @open path :: <IO, Err> IFile ((Str, Str), Str)
+  Ok f <- @open path :: <IO> (Try Str (IFile ((Str, Str), Str)))
   (.0.1 f, .0.1 (("a", "b"), "c"))

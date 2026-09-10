@@ -14,25 +14,27 @@ module main
 
 import root
 
-testCoalesceAll :: Str -> <IO, Err> [Int]
+testCoalesceAll :: Str -> <IO> [Int]
 testCoalesceAll path = do
-  o <- @open path :: <IO, Err> OStream Int
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
   @write 0 o [1, 2, 3]
   @write 0 o [4, 5]
   @write 0 o [6, 7, 8, 9]
   @close o
-  s <- @open path :: <IO, Err> IStream Int
-  @next s
+  Ok s <- @open path :: <IO> (Try Str (IStream Int))
+  Ok _tailv77 <- @next s
+  _tailv77
 
 -- Sister: after one @next pulls the coalesced packet, the next
 -- @next must return [] (no second sub-packet exists).
-testOneSubpacketOnly :: Str -> <IO, Err> [Int]
+testOneSubpacketOnly :: Str -> <IO> [Int]
 testOneSubpacketOnly path = do
-  o <- @open path :: <IO, Err> OStream Int
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
   @write 0 o [1, 2, 3]
   @write 0 o [4, 5]
   @write 0 o [6, 7, 8, 9]
   @close o
-  s <- @open path :: <IO, Err> IStream Int
+  Ok s <- @open path :: <IO> (Try Str (IStream Int))
   @next s
-  @next s
+  Ok _tailv78 <- @next s
+  _tailv78

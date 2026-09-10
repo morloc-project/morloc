@@ -30,7 +30,6 @@ module UnitTypeTests
   , effectEscapabilityTests
   , effectPartialApplicationTests
   , polymorphicEffectRowTests
-  , catchRowInheritTests
   , effectCoverageMessageTests
   , namespaceErrorTests
   , typeclassTests
@@ -4839,12 +4838,14 @@ polymorphicEffectRowTests =
         -- typecheck (guards against InstantiateL firing to solve
         -- `b := <e> b` and tripping the occurs check).
         expectPass
-          "1. @catch on polymorphic <e, Err> b with bare fallback"
+          "1. match on a polymorphic-row Try with a bare alternative"
           [r|
-        module main (withCatch)
-        escapable effect Err
-        withCatch :: (a -> <e, Err> b) -> a -> b -> <e> b
-        withCatch f x fb = @catch (f x) fb
+        module main (withTry)
+        data Try e a = Err e | Ok a
+        withTry :: (a -> <e> (Try Str b)) -> a -> b -> <e> b
+        withTry f x fb = do
+          r <- f x
+          match r | (Ok v) = v | (Err _) = fb
           |]
 
         -- A pure value filling a `<e> T` slot must NOT solve e := empty.
@@ -4876,12 +4877,17 @@ polymorphicEffectRowTests =
         -- in e. Each layer independently exercises the pure-into-
         -- existential-EffectU rule when its bare fallback is checked.
       , expectPass
-          "4. nested @catch, both layers polymorphic in e"
+          "4. nested match, both layers polymorphic in e"
           [r|
-        module main (withTwoCatches)
-        escapable effect Err
-        withTwoCatches :: (a -> <e, Err> b) -> (a -> <e, Err> b) -> a -> b -> <e> b
-        withTwoCatches f g x fb = @catch (f x) (@catch (g x) fb)
+        module main (withTwoTries)
+        data Try e a = Err e | Ok a
+        withTwoTries :: (a -> <e> (Try Str b)) -> (a -> <e> (Try Str b)) -> a -> b -> <e> b
+        withTwoTries f g x fb = do
+          r1 <- f x
+          r2 <- g x
+          match r1
+            | (Ok v) = v
+            | (Err _) = match r2 | (Ok w) = w | (Err _) = fb
           |]
 
         -- Two pure arguments: solving e := empty on the first would
@@ -4918,12 +4924,14 @@ polymorphicEffectRowTests =
         -- The pure-into-EffectU rule must NOT be bidirectional; the
         -- reverse (EffectU-into-pure) is unsound and must still reject.
       , expectError
-          "7. <Err> Int in Int slot rejected (wrong subtype direction)"
+          "7. <IO> Int in Int slot rejected (wrong subtype direction)"
           [r|
         module main (f)
-        escapable effect Err
+        effect IO
+        source Py ("io_int")
+        io_int :: <IO> Int
         f :: Int
-        f = @throw "x"
+        f = io_int
           |]
 
       , expectError
@@ -4957,94 +4965,6 @@ polymorphicEffectRowTests =
 -- "recover to pure" (fallback is <>) and "fall through to another
 -- fallible attempt" (fallback keeps Err). The primary's non-Err effects
 -- propagate too.
-catchRowInheritTests :: TestTree
-catchRowInheritTests =
-  localOption (mkTimeout 200000) $
-    testGroup
-      "@catch row-inheritance"
-      [ expectPass
-          "chained @catch: fallback raises Err, result is <Err>"
-          [r|
-        module main (chained)
-        escapable effect Err
-        source Py ("thrower1", "thrower2")
-        thrower1 :: <Err> Int
-        thrower2 :: <Err> Int
-        chained :: <Err> Int
-        chained = @catch thrower1 thrower2
-          |]
-
-      , expectPass
-          "nested @catch chain terminates in pure default -> stripped"
-          [r|
-        module main (safe)
-        escapable effect Err
-        source Py ("thrower1", "thrower2", "thrower3")
-        thrower1 :: <Err> Int
-        thrower2 :: <Err> Int
-        thrower3 :: <Err> Int
-        safe :: Int
-        safe = @catch thrower1 (@catch thrower2 (@catch thrower3 0))
-          |]
-
-      , expectPass
-          "primary <IO, Err>, pure fallback -> <IO>"
-          [r|
-        module main (recovered)
-        effect IO
-        escapable effect Err
-        source Py ("readIntOrFail")
-        readIntOrFail :: <IO, Err> Int
-        recovered :: <IO> Int
-        recovered = @catch readIntOrFail 0
-          |]
-
-      , expectPass
-          "primary <IO, Err>, <Err> fallback -> <IO, Err>"
-          [r|
-        module main (retried)
-        effect IO
-        escapable effect Err
-        source Py ("readIntOrFail", "retryOrFail")
-        readIntOrFail :: <IO, Err> Int
-        retryOrFail :: <Err> Int
-        retried :: <IO, Err> Int
-        retried = @catch readIntOrFail retryOrFail
-          |]
-
-      , expectPass
-          "concrete <Err> primary + pure fallback strips to plain type"
-          [r|
-        module main (safe)
-        escapable effect Err
-        source Py ("thrower")
-        thrower :: <Err> Int
-        safe :: Int
-        safe = @catch thrower 0
-          |]
-
-      , expectError
-          "two independent open effect rows in @catch rejected"
-          [r|
-        module main (twoTail)
-        escapable effect Err
-        twoTail :: (a -> <e, Err> b) -> (a -> <f> b) -> a -> b
-        twoTail f g x = @catch (f x) (g x)
-          |]
-      ]
-
--- | Effect-coverage error message shape.
---
--- After the message rewrite, effect-coverage failures name the
--- specific missing effects and adapt the fix suggestion based on
--- escapability (Err → mention @catch; other escapable → mention
--- handler function; all non-escapable → suggest declaration only).
---
--- Per the workspace convention we do NOT assert on exact message
--- text (it drifts as wording is tuned). We assert that these
--- programs are rejected (they must remain rejected under any future
--- message improvement) and rely on running the tests interactively
--- to eyeball the message quality.
 effectCoverageMessageTests :: TestTree
 effectCoverageMessageTests =
   localOption (mkTimeout 200000) $
@@ -5052,14 +4972,16 @@ effectCoverageMessageTests =
       "Effect-coverage error messages (rejection-only, message quality checked manually)"
       [ -- Err missing → message should suggest declare + mention @catch.
         expectError
-          "Err in body, sig declares only <IO> → rejected"
+          "effect in body, sig declares only <IO> → rejected"
           [r|
         module main (bad)
         effect IO
-        escapable effect Err
+        effect Audit
+        source Py ("paudit")
+        paudit :: Str -> <Audit> ()
         bad :: <IO> Int
         bad = do
-          @throw "oops"
+          paudit "oops"
           0
           |]
 

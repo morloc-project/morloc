@@ -7,5 +7,5 @@ two ::
   RFile ->
   --' stdin: true
   RFile ->
-  <IO, Err> ()
+  <IO> ()
 two _ _ = @throw "unused"

@@ -15,12 +15,12 @@ makeInts :: Int -> [Int]
 
 renderWhole :: [Int] -> Str
 
-produceRW :: ([Int] -> <IO, Err> ()) -> <IO, Err> ()
+produceRW :: ([Int] -> <IO> ()) -> <IO> ()
 produceRW sink = do
   _ <- sink (makeInts 0)
   sink (makeInts 1)
 
 --' Render the whole gathered list as one verbatim block
 --' render: -w/--whole=renderWhole
-streamRW :: <IO, Err> ()
+streamRW :: <IO> ()
 streamRW = @collect produceRW

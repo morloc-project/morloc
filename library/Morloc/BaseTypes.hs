@@ -39,6 +39,12 @@ module Morloc.BaseTypes
   , ifileVar
   , istreamVar
   , ostreamVar
+  , tryVar
+  , tryOkCtor
+  , tryErrCtor
+  , tryU
+  , isTryHead
+  , doDiscardPrefix
   , closeTmpUnlinkMarker
   , isIFileHead
   , mlcKindIFile
@@ -172,6 +178,47 @@ istreamVar = TV "IStream"
 
 ostreamVar :: TVar
 ostreamVar = TV "OStream"
+
+-- | @data Try e a = Err e | Ok a@, declared in the @internal@ stdlib module
+-- and named here so the compiler can give fallible intrinsics a result type
+-- and recognise one in the auto-require pass. Nothing about it is built in:
+-- it is an ordinary sum type with no coercion rules and no dedicated wire
+-- form, named the same way 'istreamVar' names @IStream@.
+--
+-- The constructor names travel as 'Text' because that is what 'IntrTagTest'
+-- and 'IntrCtorField' take -- a constructor is checked against the
+-- scrutinee's constructor table by name, not by term reference.
+tryVar :: TVar
+tryVar = TV "Try"
+
+tryOkCtor :: Text
+tryOkCtor = "Ok"
+
+tryErrCtor :: Text
+tryErrCtor = "Err"
+
+-- | @Try e a@ as a 'TypeU'.
+tryU :: TypeU -> TypeU -> TypeU
+tryU e a = AppU (VarU tryVar) [e, a]
+
+-- | True when a resolved type is headed by 'tryVar'. Callers must alias-
+-- evaluate first: this inspects the head as given, so a @type@ synonym over
+-- a @Try@ answers False until it has been expanded.
+isTryHead :: Type -> Bool
+isTryHead (AppT (VarT v) _) = v == tryVar
+isTryHead (VarT v)          = v == tryVar
+isTryHead _                 = False
+
+-- | Prefix of the variable a bare (unbound) do-block statement is bound to.
+--
+-- @desugarDo@ mints @_do_<index>@ for a statement whose value nothing
+-- consumes, and Treeify's renamer appends @\@<n>@ without disturbing the
+-- prefix. The auto-require pass keys on it to find the statements whose
+-- failure has nowhere to go, so the name is load-bearing rather than
+-- cosmetic: renaming the generated variable silently disables fail-fast on
+-- every bare statement in the language.
+doDiscardPrefix :: Text
+doDiscardPrefix = "_do_"
 
 mlcKindIFile :: Word8
 mlcKindIFile = 0

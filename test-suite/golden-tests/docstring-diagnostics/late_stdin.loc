@@ -9,5 +9,5 @@ f ::
   --' @stdin
   Str ->
   Str ->
-  <IO, Err> ()
+  <IO> ()
 f _ _ = @throw "unused"

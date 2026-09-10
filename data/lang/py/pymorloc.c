@@ -141,6 +141,21 @@ static PyObject* PyMorlocInternalError = NULL;
     goto error; \
     }
 
+// PyTRY for the machinery that carries values between pools: IPC, packet
+// construction and decode. These failures are not attributable to user data
+// or foreign-function behavior and leave the pool unable to continue, so
+// they raise PyMorlocInternalError -- which derives from BaseException and
+// so passes straight through `_mlc_catch`'s `except Exception:` -- rather
+// than the catchable RuntimeError that PyTRY raises.
+#define PyTRY_INFRA(fun, ...) \
+    fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
+    if(child_errmsg_ != NULL){ \
+        PyErr_Format(PyMorlocInternalError, \
+                     "morloc internal error (Py pool, %s:%d in %s):\n%s", \
+                     __FILE__, __LINE__, __func__, child_errmsg_); \
+        goto error; \
+    }
+
 #define PARSE_ARGS_OR_ABORT(args, fmt, ...) \
     if (!PyArg_ParseTuple((args), (fmt), __VA_ARGS__)) { \
         PyINTERNAL_ABORT("PyArg_ParseTuple failed"); \
@@ -2031,7 +2046,7 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
     // convert to a relative pointer conserved between language servers
     relptr_t relptr = PyTRY(abs2rel, voidstar);
 
-    packet = PyTRY(make_data_packet_auto, voidstar, relptr, schema);
+    packet = PyTRY_INFRA(make_data_packet_auto, voidstar, relptr, schema);
 
     {
         const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
@@ -2095,7 +2110,7 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
 
     // Arrow dispatch: if packet format is Arrow, import via C Data Interface
     if (format == PACKET_FORMAT_ARROW) {
-        voidstar = PyTRY(get_morloc_data_packet_value, (uint8_t*)packet, schema);
+        voidstar = PyTRY_INFRA(get_morloc_data_packet_value, (uint8_t*)packet, schema);
 
         const arrow_shm_header_t* arrow_hdr = (const arrow_shm_header_t*)voidstar;
 
@@ -2241,7 +2256,7 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
     // SHM paths (RPTR or MESG+MSGPACK)
     bool is_rptr = (source == PACKET_SOURCE_RPTR);
 
-    voidstar = PyTRY(get_morloc_data_packet_value, (uint8_t*)packet, schema);
+    voidstar = PyTRY_INFRA(get_morloc_data_packet_value, (uint8_t*)packet, schema);
 
     // For RPTR data, increment refcount so the owner's tracker flush
     // won't destroy data we may still need (e.g. forwarded packets).
@@ -2478,7 +2493,7 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
         Py_DECREF(item);
     }
 
-    packet = PyTRY(make_morloc_local_call_packet, (uint32_t)mid, arg_packets, (size_t)nargs);
+    packet = PyTRY_INFRA(make_morloc_local_call_packet, (uint32_t)mid, arg_packets, (size_t)nargs);
 
     free(arg_packets);
     arg_packets = NULL;
@@ -2494,9 +2509,9 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
     if (child_errmsg_ != NULL) {
         char* prior_err = get_prior_err();
         if (prior_err == NULL) {
-            PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_);
+            PyErr_Format(PyMorlocInternalError, "morloc internal error (Py pool, %s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_);
         } else {
-            PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_);
+            PyErr_Format(PyMorlocInternalError, "%s\nmorloc internal error (Py pool, %s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_);
             free(prior_err);
         }
         goto error;
@@ -3089,18 +3104,36 @@ error:
 // Fallible-first order matches the intrinsic type `@catch fallible fallback`.
 // Narrows to Exception (not BaseException) so KeyboardInterrupt / SystemExit
 // / GeneratorExit propagate as the user expects.
-static PyObject* pybinding__mlc_catch(PyObject* self, PyObject* args) { MAYFAIL
-    PyObject* fallible; PyObject* fallback;
-    PARSE_ARGS_OR_ABORT(args, "OO", &fallible, &fallback);
-    PyObject* r = PyObject_CallObject(fallible, NULL);
-    if (r == NULL) {
-        if (!PyErr_ExceptionMatches(PyExc_Exception)) {
-            return NULL;
-        }
-        PyErr_Clear();
-        r = PyObject_CallObject(fallback, NULL);
+// @try body: run the thunk and convert the outcome to data. `ok` wraps the
+// value, `err` the message; codegen supplies both because only it knows how
+// this Try is represented in Python.
+//
+// The catch is narrowed to Exception, so KeyboardInterrupt, SystemExit and
+// PyMorlocInternalError -- all BaseException-derived -- propagate instead of
+// becoming an Err arm.
+static PyObject* pybinding__mlc_try(PyObject* self, PyObject* args) { MAYFAIL
+    PyObject* body; PyObject* ok; PyObject* err;
+    PARSE_ARGS_OR_ABORT(args, "OOO", &body, &ok, &err);
+    PyObject* v = PyObject_CallObject(body, NULL);
+    if (v != NULL) {
+        PyObject* wrapped = PyObject_CallFunctionObjArgs(ok, v, NULL);
+        Py_DECREF(v);
+        return wrapped;
     }
-    return r;
+    if (!PyErr_ExceptionMatches(PyExc_Exception)) {
+        return NULL;
+    }
+    PyObject *etype, *evalue, *etrace;
+    PyErr_Fetch(&etype, &evalue, &etrace);
+    PyErr_NormalizeException(&etype, &evalue, &etrace);
+    PyObject* msg = evalue ? PyObject_Str(evalue) : PyUnicode_FromString("");
+    Py_XDECREF(etype); Py_XDECREF(evalue); Py_XDECREF(etrace);
+    if (msg == NULL) {
+        return NULL;
+    }
+    PyObject* wrapped = PyObject_CallFunctionObjArgs(err, msg, NULL);
+    Py_DECREF(msg);
+    return wrapped;
 error:
     return NULL;
 }
@@ -3536,7 +3569,7 @@ static PyMethodDef Methods[] = {
     {"mlc_tmpfile", pybinding__mlc_tmpfile, METH_NOARGS, "Create a temp file for the whole-form gather"},
     {"mlc_unlink_tmp", pybinding__mlc_unlink_tmp, METH_VARARGS, "Unlink a registered temp file"},
     {"mlc_throw", pybinding__mlc_throw, METH_VARARGS, "Raise a MorlocException with the given message"},
-    {"mlc_catch", pybinding__mlc_catch, METH_VARARGS, "Evaluate fallible; on exception, evaluate fallback"},
+    {"mlc_try", pybinding__mlc_try, METH_VARARGS, "Evaluate body; wrap the value with ok, or a caught message with err"},
     {NULL, NULL, 0, NULL} // this is a sentinel value
 };
 

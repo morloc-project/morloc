@@ -12,12 +12,12 @@ source Py from "helper.py"
   , "loadC"
   )
 
-loadA :: Int -> <Err> Int
-loadB :: Int -> <Err> Int
-loadC :: Int -> <Err> Int
+loadA :: Int -> Int
+loadB :: Int -> Int
+loadC :: Int -> Int
 
-chained :: Int -> <Err> Int
-chained n = @catch (loadA n) (loadB n)
+chained :: Int -> Int
+chained n = match (@try (loadA n)) | (Ok _cv) = _cv | (Err _) = (loadB n)
 
 nested :: Int -> Int
-nested n = @catch (loadA n) (@catch (loadB n) (@catch (loadC n) 999))
+nested n = match (@try (loadA n)) | (Ok _cv) = _cv | (Err _) = (match (@try (loadB n)) | (Ok _cv) = _cv | (Err _) = (match (@try (loadC n)) | (Ok _cv) = _cv | (Err _) = 999))

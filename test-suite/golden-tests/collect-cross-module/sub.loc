@@ -6,7 +6,7 @@ source Cpp from "handlers.hpp" ("mk" as mk, "tag" as tag)
 mk :: Int -> [Int]
 tag :: [Int] -> [Int]
 
-produce :: ([Int] -> <IO, Err> ()) -> <IO, Err> ()
+produce :: ([Int] -> <IO> ()) -> <IO> ()
 produce sink = do
   _ <- sink (mk 0)
   sink (mk 1)
@@ -19,5 +19,5 @@ produce sink = do
 -- (untagged) output.
 --' Stream two batches of integers
 --' @with -t/--tagged=tag @stream
-streamNums :: <IO, Err> ()
+streamNums :: <IO> ()
 streamNums = @collect produce

@@ -482,10 +482,6 @@ mod tests {
             func => "func",
             list => "list",
         ]);
-        assert_same_layout!(MorlocCatchExpression, "morloc_catch_expression_s", [
-            fallible => "fallible",
-            fallback => "fallback",
-        ]);
         assert_same_layout!(MorlocIfExpression, "morloc_if_expression_s", [
             cond => "cond",
             then_branch => "then_branch",

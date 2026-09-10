@@ -952,6 +952,15 @@ PROPAGATE_ERROR(errmsg)|]
           (True, _) -> "[=](){" <> nest 4 (line <> vsep (stmts <> [expr <> ";", "return mlc::Unit{};"])) <> line <> "}"
           (False, []) -> "[=](){return " <> expr <> ";}"
           (False, _) -> "[=](){" <> nest 4 (line <> vsep (stmts <> ["return " <> expr <> ";"])) <> line <> "}"
+    -- Generic lambdas: the Ok arm's parameter is whatever the body
+    -- returned and the Err arm's is a std::string, and both arms must
+    -- deduce the same Try type for _mlc_try's return.
+    , lcMakeTry = \thunk okWrap errWrap ->
+        "_mlc_try" <> tupled
+          [ thunk
+          , "[](auto&& mlcTryV) { return" <+> okWrap "mlcTryV" <> "; }"
+          , "[](const std::string& mlcTryM) { return" <+> errWrap "mlcTryM" <> "; }"
+          ]
     , lcSerialize = \v s -> serialize v s
     , lcDeserialize = \t v s -> do
         typestr <- cppTypeOf t
@@ -1583,7 +1592,12 @@ mergeLongest :: [(FVar, [Text])] -> [(FVar, [Text])]
 mergeLongest =
   Map.elems
     . Map.fromListWith (\a b -> if length (snd a) >= length (snd b) then a else b)
-    . map (\e@(FV gv _, _) -> (gv, e))
+    -- Keyed by the CONCRETE name, which is what the declaration is
+    -- called. A parameterized `data` has one concrete type per
+    -- instantiation, so keying by the general name would collapse
+    -- `Try Str ()` and `Try Str (IFile a)` into a single declaration
+    -- and the second use would name a type that was never emitted.
+    . map (\e@(FV _ cv, _) -> (cv, e))
 
 -- | Every argument-free @data@ type reachable in this pool.
 collectCppEnums :: [SerialManifold] -> [(FVar, [Text])]
@@ -1620,7 +1634,12 @@ collectCppVariants :: [SerialManifold] -> [(FVar, [(Text, [TypeF])])]
 collectCppVariants =
   Map.elems
     . Map.fromListWith wider
-    . map (\e@(FV gv _, _) -> (gv, e))
+    -- Keyed by the CONCRETE name, which is what the declaration is
+    -- called. A parameterized `data` has one concrete type per
+    -- instantiation, so keying by the general name would collapse
+    -- `Try Str ()` and `Try Str (IFile a)` into a single declaration
+    -- and the second use would name a type that was never emitted.
+    . map (\e@(FV _ cv, _) -> (cv, e))
     . concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     -- Merge arm-wise, but keep DECLARATION ORDER: an arm's position is its

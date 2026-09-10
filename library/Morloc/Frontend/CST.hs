@@ -128,6 +128,11 @@ data CstExpr
   | CAccessorE CstAccessorBody
   | CInterpE Text [Loc CstExpr] [Text] Text
   | CGuardExprE [(Loc CstExpr, Loc CstExpr)] (Loc CstExpr)
+  -- | @match scrutinee | p1 = b1 | p2 = b2@. The clause list has the same
+  -- shape as a `|`-definition's, so both lower through the same machinery;
+  -- the only difference is that a match binds one scrutinee with a `let`
+  -- where a definition abstracts over fresh formals.
+  | CMatchE !(Loc CstExpr) [([Loc CstExpr], Loc CstExpr)]
   | CIntrinsicE Text  -- ^ @name intrinsic reference (text is the name without @)
   | CParenE !(Loc CstExpr)  -- ^ parenthesized expression (preserves grouping for BopE chains)
   | CUnderscoreE  -- ^ '_' -- only legal in binding positions, checked in Desugar

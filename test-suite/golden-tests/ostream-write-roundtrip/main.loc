@@ -1,7 +1,7 @@
 -- OStream end-to-end: write -> close -> reopen as IFile/IStream.
 --
 -- Stage 4 introduces:
---   * @open path :: <IO, Err> (OStream T) -- typed create + flock + header
+--   * @open path :: <IO> (OStream T) -- typed create + flock + header
 --   * @write level handle value      -- emit one sub-packet
 --   * @close handle                  -- write final footer, fsync, close
 --   * @append schema path            -- resume an existing stream
@@ -21,61 +21,66 @@ import root
 
 -- 1. Write one sub-packet of three ints; reopen as IStream and read it
 -- back with one @next call (single sub-packet -> single @next).
-testWriteOne :: Str -> <IO, Err> [Int]
+testWriteOne :: Str -> <IO> [Int]
 testWriteOne path = do
-  s <- @open path :: <IO, Err> OStream Int
+  Ok s <- @open path :: <IO> (Try Str (OStream Int))
   @write 0 s [10, 20, 30]
   @close s
-  r <- @open path :: <IO, Err> IStream Int
-  @next r
+  Ok r <- @open path :: <IO> (Try Str (IStream Int))
+  Ok _tailv6 <- @next r
+  _tailv6
 
 -- 2. Write three sub-packets; reopen as IFile, check length.
-testWriteMulti :: Str -> <IO, Err> Int
+testWriteMulti :: Str -> <IO> Int
 testWriteMulti path = do
-  s <- @open path :: <IO, Err> OStream Int
+  Ok s <- @open path :: <IO> (Try Str (OStream Int))
   @write 0 s [1, 2, 3]
   @flush s
   @write 0 s [4, 5, 6, 7]
   @flush s
   @write 0 s [8]
   @close s
-  f <- @open path :: <IO, Err> IFile Int
-  @flen f
+  Ok f <- @open path :: <IO> (Try Str (IFile Int))
+  Ok _tailv7 <- @flen f
+  _tailv7
 
 -- 3. Write multi-sub-packet file, reopen as IStream, @next loop.
-testWriteIStream :: Str -> <IO, Err> [Int]
+testWriteIStream :: Str -> <IO> [Int]
 testWriteIStream path = do
-  o <- @open path :: <IO, Err> OStream Int
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
   @write 0 o [100, 200]
   @flush o
   @write 0 o [300, 400, 500]
   @close o
-  s <- @open path :: <IO, Err> IStream Int
+  Ok s <- @open path :: <IO> (Try Str (IStream Int))
   -- Take the first sub-packet; later @next would give [300,400,500],
   -- but Stage 3's golden already exercises the EOF loop.
-  @next s
+  Ok _tailv8 <- @next s
+  _tailv8
 
 -- 4. Append to a closed stream; total element count = sum of both runs.
-testAppendThenLength :: Str -> <IO, Err> Int
+testAppendThenLength :: Str -> <IO> Int
 testAppendThenLength path = do
-  o <- @open path :: <IO, Err> OStream Int
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
   @write 0 o [1, 2, 3]
   @close o
-  o2 <- @append path :: <IO, Err> OStream Int
+  Ok o2 <- @append path :: <IO> (Try Str (OStream Int))
   @write 0 o2 [4, 5]
   @close o2
-  f <- @open path :: <IO, Err> IFile Int
-  @flen f
+  Ok f <- @open path :: <IO> (Try Str (IFile Int))
+  Ok _tailv9 <- @flen f
+  _tailv9
 
 -- 5. Concat two source files; total element count = 3 + 2.
-testConcatTwo :: Str -> Str -> Str -> <IO, Err> Int
+testConcatTwo :: Str -> Str -> Str -> <IO> Int
 testConcatTwo a b dest = do
-  oa <- @open a :: <IO, Err> OStream Int
+  Ok oa <- @open a :: <IO> (Try Str (OStream Int))
   @write 0 oa [11, 22, 33]
   @close oa
-  ob <- @open b :: <IO, Err> OStream Int
+  Ok ob <- @open b :: <IO> (Try Str (OStream Int))
   @write 0 ob [44, 55]
   @close ob
   @concat [a, b] dest
-  f <- @open dest :: <IO, Err> IFile Int
-  @flen f
+  Ok f <- @open dest :: <IO> (Try Str (IFile Int))
+  Ok _tailv10 <- @flen f
+  _tailv10

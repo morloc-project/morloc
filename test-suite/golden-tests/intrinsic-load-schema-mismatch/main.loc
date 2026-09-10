@@ -4,13 +4,19 @@
 -- classified as user-attributable, so @catch intercepts.
 
 module main
+
   ( saveThenLoadWrongType
   )
+
+-- `Try` is declared in `internal` and reaches user code through `root`;
+-- a fallible intrinsic or `@try` needs it in scope.
+import root
 
 effect IO
 escapable effect Err
 
-saveThenLoadWrongType :: Str -> <IO, Err> Int
+saveThenLoadWrongType :: Str -> <IO> Int
 saveThenLoadWrongType path = do
   @save 0 path "not-an-int-payload"
-  @catch (@load path :: <IO, Err> Int) 999
+  _mrt3 <- @load path :: <IO> (Try Str (Int))
+  match _mrt3 | (Ok _cv) = _cv | (Err _) = 999

@@ -252,7 +252,9 @@ data NexusExpr
   | StdoutX   Text                  -- element schema (a) -- @stdout :: <IO> OStream a
   | StderrX   Text                  -- element schema (a) -- @stderr :: <IO> OStream a
   | ThrowX    NexusExpr             -- message expr -> raise MorlocError with msg
-  | CatchX    NexusExpr NexusExpr   -- fallible, fallback -- try/catch
+  | TryX      Text NexusExpr
+    -- ^ result schema (@Try Str a@), body. Evaluate the body under a
+    -- catch and materialize @Ok value@ or @Err message@ into the result.
   | IfX       Text NexusExpr NexusExpr NexusExpr
     -- ^ result schema, condition (Bool), then-branch, else-branch. The
     -- pure-nexus conditional: evaluate the condition and materialize the
@@ -486,8 +488,9 @@ generalTypeToSerialAST' i anc (AppT (VarT v) [t])
   | v == MBT.ifileVar   = return $ SerialIFile   (FV v (CV ""))
   | v == MBT.ostreamVar = return $ SerialOStream (FV v (CV ""))
   | v == MBT.istreamVar = return $ SerialIStream (FV v (CV ""))
-  | otherwise = resolveAliasApp i anc v [t]
+  | otherwise = appliedTypeToSerialAST i anc v [t]
 generalTypeToSerialAST' i anc (AppT (VarT v) ts)
+  | Set.member v anc = return $ SerialRec (FV v (CV ""))
   | v == (MBT.tuple (length ts)) =
       SerialTuple (FV v (CV "")) <$> mapM (generalTypeToSerialAST' i anc) ts
   -- A Table lowers to a SerialObject NamTable. The encoder emits the
@@ -501,7 +504,7 @@ generalTypeToSerialAST' i anc (AppT (VarT v) ts)
             _                  -> []
       in SerialObject NamTable (FV MBT.table (CV "")) []
            <$> mapM (secondM (generalTypeToSerialAST' i anc)) cols
-  | otherwise = resolveAliasApp i anc v ts
+  | otherwise = appliedTypeToSerialAST i anc v ts
 generalTypeToSerialAST' i anc (EffectT _ t) = generalTypeToSerialAST' i anc t
 generalTypeToSerialAST' i anc (OptionalT t) = do
   inner <- generalTypeToSerialAST' i anc t
@@ -557,6 +560,34 @@ checkExportedHigherOrder i name t = case findOffender t of
     findOffender ty
       | Serial.containsFunT ty = Just ("exported value is or contains a function", ty)
       | otherwise = Nothing
+
+-- | An applied type constructor: either a `data` type whose parameters must
+-- be instantiated before its arms are walked, or an alias to expand.
+--
+-- A `data` is a leaf here for the same reason a bare one is in the @VarT@
+-- clause: its scope body is a constructor table, not a parent type, so
+-- alias expansion would try to serialize the table itself. The difference
+-- is that the declaration's parameters must first be substituted with the
+-- applied arguments, or an arm mentioning a parameter would serialize the
+-- bare variable.
+appliedTypeToSerialAST :: Int -> Set TVar -> TVar -> [Type] -> MorlocMonad SerialAST
+appliedTypeToSerialAST i anc v ts = do
+  scope <- MM.gets stateUniversalGeneralTypedefs
+  case (if scopeDataIsEnum scope v then scopeEnumCtors scope v else Nothing) of
+    Just ctors -> return $ SerialEnum (FV v (CV "")) ctors
+    Nothing | Just arms <- scopeDataCtors scope v -> do
+                let params = case Map.lookup v scope of
+                      Just ((ps, _, _, _, _) : _) -> [tv | Left (tv, _) <- ps]
+                      _ -> []
+                    inst t = foldl (\acc (tv, arg) -> substituteTVar tv arg acc)
+                                   t (zip params ts)
+                    anc' = Set.insert v anc
+                arms' <- mapM
+                  (\(n, fts) ->
+                     (,) n <$> mapM (generalTypeToSerialAST' i anc' . inst . typeOf) fts)
+                  arms
+                return $ SerialVariant (FV v (CV "")) arms'
+    Nothing -> resolveAliasApp i anc v ts
 
 resolveAliasApp :: Int -> Set TVar -> TVar -> [Type] -> MorlocMonad SerialAST
 resolveAliasApp i anc v ts
@@ -667,6 +698,22 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       , commandReturnAst = retAst
       }
   where
+    -- Wrap a fallible intrinsic so the `Try` its type now promises is built
+    -- here rather than raised. The raw node is emitted at the INNER type --
+    -- its schema, its width, its handler all stay as they were -- and TryX
+    -- evaluates it into the Ok arm, converting a user throw into the Err
+    -- arm. This mirrors what the pool lowering does with mlc_try, and for
+    -- the same reason: the runtime entry points still signal failure by
+    -- raising, and rewriting all of them would be a much larger change.
+    withTryResult :: Type -> (Type -> MorlocMonad NexusExpr) -> MorlocMonad NexusExpr
+    withTryResult t build = case tryInner t of
+      Just inner -> TryX <$> type2schema t <*> build inner
+      Nothing -> build t
+      where
+        tryInner (EffectT _ inner) = tryInner inner
+        tryInner (AppT (VarT v) [_, a]) | v == MBT.tryVar = Just a
+        tryInner _ = Nothing
+
     type2schema :: Type -> MorlocMonad Text
     type2schema t = (render . Serial.serialAstToMsgpackSchema) <$> generalTypeToSerialAST i t
 
@@ -774,16 +821,21 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- only the one-byte literal it already is.
     -- An argument-free constructor of an all-nullary type is its tag byte,
     -- and that byte IS the value's wire form, so it needs no node of its
-    -- own here. A constructor carrying arguments has a tagged-pointer form
-    -- the nexus evaluator does not build yet.
-    toNexusExpr (AnnoS (Idx ci t) _ (ConS _ _ ordinal xs))
-      | null xs = return $ LitX U8X (MT.pack (show ordinal))
-      | otherwise = do
+    -- own here.
+    --
+    -- The test is on the TYPE, not on this constructor's arity: a nullary
+    -- arm of a payload-bearing type still has the 16-byte tagged-pointer
+    -- form, and emitting a one-byte literal for it would leave the payload
+    -- relptr to be read from whatever follows. Express.hs makes the same
+    -- distinction for the pool path.
+    toNexusExpr (AnnoS (Idx _ t) _ (ConS tv _ ordinal xs)) = do
+      scope <- MM.gets stateUniversalGeneralTypedefs
+      if scopeDataIsEnum scope tv
+        then return $ LitX U8X (MT.pack (show ordinal))
+        else do
           sch <- type2schema t
           fields <- mapM toNexusExpr xs
           return (CtorMakeX sch ordinal fields)
-      where
-        _ = ci
     toNexusExpr (AnnoS _ _ (LogS True)) = return $ LitX BoolX "1"
     toNexusExpr (AnnoS _ _ (LogS False)) = return $ LitX BoolX "0"
     toNexusExpr (AnnoS _ _ UniS) = return $ LitX NullX "0"
@@ -849,12 +901,12 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrShow [arg])) =
       ShowX <$> type2schema t <*> toNexusExpr arg
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrRead [arg])) =
-      ReadX <$> type2schema t <*> toNexusExpr arg
+      withTryResult t $ \inner -> ReadX <$> type2schema inner <*> toNexusExpr arg
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrHash [arg])) =
       HashX <$> type2schema t <*> toNexusExpr arg
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSave [levelExpr, path, valExpr])) =
-      SaveX "voidstar"
-        <$> type2schema t
+      withTryResult t $ \inner -> SaveX "voidstar"
+        <$> type2schema inner
         <*> toNexusExpr levelExpr
         <*> toNexusExpr valExpr
         <*> toNexusExpr path
@@ -864,39 +916,39 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- level field from save_expr) has a uniform shape. The runtime
     -- ignores the field for non-voidstar formats.
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSaveM [path, valExpr])) =
-      SaveX "msgpack"
-        <$> type2schema t
+      withTryResult t $ \inner -> SaveX "msgpack"
+        <$> type2schema inner
         <*> pure (LitX IntX "0")
         <*> toNexusExpr valExpr
         <*> toNexusExpr path
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSaveJ [path, valExpr])) =
-      SaveX "json"
-        <$> type2schema t
+      withTryResult t $ \inner -> SaveX "json"
+        <$> type2schema inner
         <*> pure (LitX IntX "0")
         <*> toNexusExpr valExpr
         <*> toNexusExpr path
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrLoad [path])) =
-      LoadX <$> type2schema t <*> toNexusExpr path
+      withTryResult t $ \inner -> LoadX <$> type2schema inner <*> toNexusExpr path
     -- @open: dispatch by result-type head. IFile/IStream go to OpenX
     -- (generic mlc_open(path, kind) entry); OStream goes to OpenOStreamX
     -- (typed mlc_open_ostream(schema_str, path) entry) since the writer
     -- needs the element schema at open time.
-    toNexusExpr (AnnoS (Idx iOpen t) _ (IntrinsicS IntrOpen [path])) = do
-      let peelEffect (EffectT _ inner) = peelEffect inner
-          peelEffect ot = ot
-          unwrapped = peelEffect t
-          peelHead (AppT h _) = peelHead h
+    toNexusExpr (AnnoS (Idx iOpen t) _ (IntrinsicS IntrOpen [path])) =
+      -- The handle type is inside the Try now, so the kind dispatch reads
+      -- the inner type while the node's own result stays the Try.
+      withTryResult t $ \handleT -> do
+      let peelHead (AppT h _) = peelHead h
           peelHead ot = ot
-          head_ = peelHead unwrapped
-          elemT = case unwrapped of
+          head_ = peelHead handleT
+          elemT = case handleT of
             AppT _ (a : _) -> a
-            _ -> unwrapped
+            _ -> handleT
       case head_ of
         VarT v
           | v == MBT.ifileVar   ->
-              OpenX <$> type2schema t <*> pure MBT.mlcKindIFile <*> toNexusExpr path
+              OpenX <$> type2schema handleT <*> pure MBT.mlcKindIFile <*> toNexusExpr path
           | v == MBT.istreamVar ->
-              OpenX <$> type2schema t <*> pure MBT.mlcKindIStream <*> toNexusExpr path
+              OpenX <$> type2schema handleT <*> pure MBT.mlcKindIStream <*> toNexusExpr path
           | v == MBT.ostreamVar ->
               OpenOStreamX <$> type2schema (MBT.handleStorageType v elemT)
                            <*> toNexusExpr path
@@ -906,36 +958,38 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
         _ ->
           MM.throwSourcedError iOpen $
             "@open: unsupported handle type" <+> pretty (show t)
-    toNexusExpr (AnnoS _ _ (IntrinsicS IntrClose [handle])) =
-      CloseX <$> toNexusExpr handle
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrClose [handle])) =
+      withTryResult t $ \_ -> CloseX <$> toNexusExpr handle
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrFSchema [path])) =
-      FSchemaX <$> type2schema t <*> toNexusExpr path
+      withTryResult t $ \inner -> FSchemaX <$> type2schema inner <*> toNexusExpr path
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrFLength [handle])) =
-      FLengthX <$> type2schema t <*> toNexusExpr handle
+      withTryResult t $ \inner -> FLengthX <$> type2schema inner <*> toNexusExpr handle
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrNext [handle])) =
-      NextX <$> type2schema t <*> toNexusExpr handle
+      withTryResult t $ \inner -> NextX <$> type2schema inner <*> toNexusExpr handle
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStreamLayout [handle])) =
-      StreamLayoutX <$> type2schema t <*> toNexusExpr handle
+      withTryResult t $ \inner -> StreamLayoutX <$> type2schema inner <*> toNexusExpr handle
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStream [handle])) =
       StreamX <$> type2schema t <*> toNexusExpr handle
-    toNexusExpr (AnnoS (Idx _ _) _ (IntrinsicS IntrWrite [levelE, handleE, valE@(AnnoS (Idx _ valT) _ _)])) =
-      WriteX
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrWrite [levelE, handleE, valE@(AnnoS (Idx _ valT) _ _)])) =
+      withTryResult t $ \_ -> WriteX
         <$> type2schema valT
         <*> toNexusExpr levelE
         <*> toNexusExpr valE
         <*> toNexusExpr handleE
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrAppend [pathE])) =
-      AppendX <$> type2schema (handleStorageOfResult t) <*> toNexusExpr pathE
-    toNexusExpr (AnnoS _ _ (IntrinsicS IntrConcat [pathsE, destE])) =
-      ConcatX <$> toNexusExpr pathsE <*> toNexusExpr destE
-    toNexusExpr (AnnoS _ _ (IntrinsicS IntrFlush [handle])) =
-      FlushX <$> toNexusExpr handle
+      withTryResult t $ \inner ->
+        AppendX <$> type2schema (handleStorageOfResult inner) <*> toNexusExpr pathE
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrConcat [pathsE, destE])) =
+      withTryResult t $ \_ -> ConcatX <$> toNexusExpr pathsE <*> toNexusExpr destE
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrFlush [handle])) =
+      withTryResult t $ \_ -> FlushX <$> toNexusExpr handle
     toNexusExpr (AnnoS _ _ (IntrinsicS IntrThrow [msg])) =
       ThrowX <$> toNexusExpr msg
-    toNexusExpr (AnnoS _ _ (IntrinsicS IntrCatch [fallible, fallback])) =
-      CatchX <$> toNexusExpr fallible <*> toNexusExpr fallback
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrTry [body])) =
+      TryX <$> type2schema t <*> toNexusExpr body
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStdin _)) =
-      StdinX <$> type2schema (handleStorageOfResult t)
+      withTryResult t $ \inner ->
+        StdinX <$> type2schema (handleStorageOfResult inner)
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStdout _)) =
       StdoutX <$> type2schema (handleStorageOfResult t)
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStderr _)) =
@@ -2555,11 +2609,11 @@ exprToJson (ThrowX msg) =
     [ ("tag", jsonStr "throw")
     , ("msg", exprToJson msg)
     ]
-exprToJson (CatchX fallible fallback) =
+exprToJson (TryX schema body) =
   jsonObj
-    [ ("tag", jsonStr "catch")
-    , ("fallible", exprToJson fallible)
-    , ("fallback", exprToJson fallback)
+    [ ("tag", jsonStr "try")
+    , ("schema", jsonStr schema)
+    , ("body", exprToJson body)
     ]
 exprToJson (IfX schema cond thenX elseX) =
   jsonObj

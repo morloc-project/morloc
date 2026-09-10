@@ -107,6 +107,24 @@
     Rf_eval(Rf_lang2(install("stop"), _cond), R_GlobalEnv); \
 } while (0)
 
+// R_TRY for the machinery that carries values between pools: IPC, packet
+// construction and decode. These failures are not attributable to user data
+// or foreign-function behavior and leave the pool unable to continue, so
+// they raise the MorlocInternalError-classed condition that morloc_mlc_catch
+// re-raises, rather than the catchable error() that R_TRY raises.
+#define R_TRY_INFRA(fun, ...) \
+    fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
+    if(child_errmsg_ != NULL){ \
+        MORLOC_INTERNAL_ABORT("%s", child_errmsg_); \
+    }
+
+#define R_TRY_WITH_INFRA(clean, fun, ...) \
+    fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
+    if(child_errmsg_ != NULL){ \
+        clean; \
+        MORLOC_INTERNAL_ABORT("%s", child_errmsg_); \
+    }
+
 /// }}}
 
 // {{{ shm_tracker
@@ -728,7 +746,29 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
             // factor code, and the two differ by one.
             long tag = -1;
             if (isFactor(obj)) {
-                tag = (long)asInteger(obj) - 1;
+                // Resolve through the factor's OWN levels rather than
+                // trusting its integer code. attach_factor_levels builds
+                // levels in schema order on the way out, but a factor a
+                // user built in sourced R carries whatever order R chose --
+                // factor("G", levels = c("T","G","C","A")) has code 2, and
+                // taking that as the tag silently decodes as the schema's
+                // second constructor.
+                SEXP levels = getAttrib(obj, R_LevelsSymbol);
+                int code = asInteger(obj);
+                if (isNull(levels) || code == NA_INTEGER
+                    || code < 1 || code > LENGTH(levels)) {
+                    MORLOC_ERROR("factor has no level for its code");
+                }
+                const char* name = CHAR(STRING_ELT(levels, code - 1));
+                for (size_t i = 0; i < schema->size; i++) {
+                    if (strcmp(name, schema->keys[i]) == 0) {
+                        tag = (long)i;
+                        break;
+                    }
+                }
+                if (tag < 0) {
+                    MORLOC_ERROR("'%s' is not a constructor of this type", name);
+                }
             } else if (isString(obj) && LENGTH(obj) == 1) {
                 const char* name = CHAR(STRING_ELT(obj, 0));
                 for (size_t i = 0; i < schema->size; i++) {
@@ -2029,7 +2069,7 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
 
     relptr_t relptr = R_TRY_WITH(free_schema(schema), abs2rel, voidstar);
 
-    uint8_t* packet = R_TRY_WITH(free_schema(schema), make_data_packet_auto, voidstar, relptr, schema);
+    uint8_t* packet = R_TRY_WITH_INFRA(free_schema(schema), make_data_packet_auto, voidstar, relptr, schema);
 
     const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
     bool tracked = false;
@@ -2686,7 +2726,7 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
 
     // Arrow dispatch: if packet format is Arrow, import via C Data Interface
     if (format == PACKET_FORMAT_ARROW) {
-        uint8_t* arrow_ptr = R_TRY_WITH(free_schema(schema),
+        uint8_t* arrow_ptr = R_TRY_WITH_INFRA(free_schema(schema),
             get_morloc_data_packet_value, packet, schema);
         const arrow_shm_header_t* arrow_hdr = (const arrow_shm_header_t*)arrow_ptr;
 
@@ -2850,7 +2890,7 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
     // unpack_with_schema for MESG msgpack args).
     bool is_rptr = (source == PACKET_SOURCE_RPTR);
     bool tracked = false;
-    uint8_t* voidstar = R_TRY_WITH(free_schema(schema), get_morloc_data_packet_value, packet, schema);
+    uint8_t* voidstar = R_TRY_WITH_INFRA(free_schema(schema), get_morloc_data_packet_value, packet, schema);
 
     if (is_rptr) {
         // Sender (daemon or peer pool) holds the original ref and will
@@ -2932,7 +2972,7 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
     }
 
     // Create call packet
-    uint8_t* packet = R_TRY(
+    uint8_t* packet = R_TRY_INFRA(
         make_morloc_local_call_packet,
         (uint32_t)mid,
         arg_packets,
@@ -2940,7 +2980,7 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
     );
 
     // Send/receive over socket
-    uint8_t* result = R_TRY_WITH(free(packet),
+    uint8_t* result = R_TRY_WITH_INFRA(free(packet),
         send_and_receive_over_socket,
         socket_path,
         packet

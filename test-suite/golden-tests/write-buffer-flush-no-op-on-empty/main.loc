@@ -14,27 +14,29 @@ module main
 
 import root
 
-writeWithLeadingEmptyFlushes :: Str -> <IO, Err> ()
+writeWithLeadingEmptyFlushes :: Str -> <IO> ()
 writeWithLeadingEmptyFlushes path = do
-  o <- @open path :: <IO, Err> OStream Int
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
   @flush o
   @flush o
   @write 0 o [100, 200, 300]
   @flush o
   @close o
 
-testEmptyFlushIsNoop :: Str -> <IO, Err> [Int]
+testEmptyFlushIsNoop :: Str -> <IO> [Int]
 testEmptyFlushIsNoop path = do
   writeWithLeadingEmptyFlushes path
-  s <- @open path :: <IO, Err> IStream Int
-  @next s
+  Ok s <- @open path :: <IO> (Try Str (IStream Int))
+  Ok _tailv75 <- @next s
+  _tailv75
 
 -- After the first (and only) sub-packet drains, the next @next
 -- returns []. Spurious empty packets would surface here as
 -- multiple [] reads or interleaving.
-testEmptyFlushThenEof :: Str -> <IO, Err> [Int]
+testEmptyFlushThenEof :: Str -> <IO> [Int]
 testEmptyFlushThenEof path = do
   writeWithLeadingEmptyFlushes path
-  s <- @open path :: <IO, Err> IStream Int
+  Ok s <- @open path :: <IO> (Try Str (IStream Int))
   @next s
-  @next s
+  Ok _tailv76 <- @next s
+  _tailv76

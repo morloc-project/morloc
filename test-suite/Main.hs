@@ -54,7 +54,6 @@ unitTests =
   , effectEscapabilityTests
   , effectPartialApplicationTests
   , polymorphicEffectRowTests
-  , catchRowInheritTests
   , effectCoverageMessageTests
   , namespaceErrorTests
   , typeclassTests

@@ -32,16 +32,20 @@ renderIntsOff :: U64 -> [Int] -> Str
 joinStrs :: [Str] -> Str
 
 -- morloc-native whole-list IFile handlers (need no per-language binding)
-sumIntsFile :: IFile [Int] -> <IO, Err> Int
-sumIntsFile f = @flen f
+sumIntsFile :: IFile [Int] -> <IO> Int
+sumIntsFile f = do
+  Ok _rv <- @flen f
+  _rv
 
-countStrsFile :: IFile [Str] -> <IO, Err> Int
-countStrsFile f = @flen f
+countStrsFile :: IFile [Str] -> <IO> Int
+countStrsFile f = do
+  Ok _rv <- @flen f
+  _rv
 
 notATemp :: Str
 notATemp = "collect-formatters-not-a-temp.txt"
 
-produceInts :: ([Int] -> <IO, Err> ()) -> <IO, Err> ()
+produceInts :: ([Int] -> <IO> ()) -> <IO> ()
 produceInts sink = do
   _ <- sink (makeInts 0)
   _ <- sink (makeInts 1)
@@ -54,10 +58,10 @@ produceInts sink = do
 --' @with -T/--tag-off=tagIntsOff(@offset) @stream
 --' @render -r/--text=renderInts @stream
 --' @render -R/--text-off=renderIntsOff(@offset) @stream
-streamInts :: <IO, Err> ()
+streamInts :: <IO> ()
 streamInts = @collect produceInts
 
-produceStrs :: ([Str] -> <IO, Err> ()) -> <IO, Err> ()
+produceStrs :: ([Str] -> <IO> ()) -> <IO> ()
 produceStrs sink = do
   _ <- sink (makeStrs 0)
   _ <- sink (makeStrs 1)
@@ -67,12 +71,12 @@ produceStrs sink = do
 --' @with -s/--sorted=sortStrs
 --' @with -m/--count=countStrsFile
 --' @render -r/--text=joinStrs @stream
-streamStrs :: <IO, Err> ()
+streamStrs :: <IO> ()
 streamStrs = @collect produceStrs
 
 --' Attempt to @close a non-temp path: must fail (not silently remove a file).
 --' The pure command runs in the nexus interpreter, whose @close(Str) path
 --' routes to the registered-temp guard and rejects an unregistered path with a
 --' clean "not a registered temp file" error. The test asserts it fails.
-badClose :: <IO, Err> ()
+badClose :: <IO> ()
 badClose = @close notATemp

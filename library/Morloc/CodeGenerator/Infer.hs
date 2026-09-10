@@ -29,6 +29,7 @@ import qualified Data.Set as Set
 import qualified Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as T
+import Numeric (showHex)
 
 -- TODO: do not use global scope here
 getScope :: Int -> Lang -> MorlocMonad (Scope, Scope)
@@ -118,16 +119,43 @@ inferConcreteTypeStructural lang i gscope g c = case (g, c) of
         anc0 <- CMS.gets stateVariantAncestors
         if Set.member vG anc0
           then return $ VarF (FV vG (CV vC))
-          else inferVariantArms lang i gscope vG vC
+          else inferVariantArms lang i gscope vG vC []
+  -- An APPLIED `data`, e.g. @Try Str a@. Same treatment as the bare case,
+  -- except the declaration's parameters must be instantiated with the
+  -- applied arguments before the arms are resolved -- otherwise an arm
+  -- mentioning a parameter resolves the bare variable and the type reaches
+  -- codegen as an AppF rather than a VariantF.
+  (AppU (VarU vG) tsG, _)
+    | Just _ <- scopeDataCtors gscope vG
+    , Just vC <- concreteHeadName c -> do
+        anc0 <- CMS.gets stateVariantAncestors
+        if Set.member vG anc0
+          then return $ VarF (FV vG (CV vC))
+          else inferVariantArms lang i gscope vG vC tsG
   _ -> inferConcreteTypeStructuralRest lang i gscope g c
+  where
+    -- The concrete side of an applied type is either applied too or has
+    -- already collapsed to a bare name.
+    concreteHeadName (AppU (VarU (TV n)) _) = Just n
+    concreteHeadName (VarU (TV n)) = Just n
+    concreteHeadName _ = Nothing
 
 -- | Expand a `data` type's arms to the target language, with the type
 -- pushed onto the ancestor set for the duration.
-inferVariantArms :: Lang -> Int -> Scope -> TVar -> MT.Text -> MorlocMonad TypeF
-inferVariantArms lang i gscope vG vC = do
-  arms <- case scopeDataCtors gscope vG of
+inferVariantArms
+  :: Lang -> Int -> Scope -> TVar -> MT.Text -> [TypeU] -> MorlocMonad TypeF
+inferVariantArms lang i gscope vG vC targs = do
+  arms0 <- case scopeDataCtors gscope vG of
     Just as -> return as
     Nothing -> return []
+  -- Instantiate the declaration's parameters with the applied arguments.
+  -- Empty for a bare `data`, in which case this is the identity.
+  let params = case Map.lookup vG gscope of
+        Just ((ps, _, _, _, _) : _) -> [tv | Left (tv, _) <- ps]
+        _ -> []
+      inst t = foldl (\acc (tv, arg) -> substituteTVar tv arg acc)
+                     t (zip params targs)
+      arms = [(n, map inst ts) | (n, ts) <- arms0]
   if all (null . snd) arms
     then return $ EnumF (FV vG (CV vC)) (map fst arms)
     else do
@@ -162,7 +190,34 @@ inferVariantArms lang i gscope vG vC = do
         CMS.modify (\st -> st { stateVariantAncestors = Set.insert vG anc })
         arms' <- mapM (\(n, ts) -> (,) n <$> mapM resolveField ts) arms
         CMS.modify (\st -> st { stateVariantAncestors = anc })
-        return $ VariantF (FV vG (CV vC)) arms'
+        -- A parameterized `data` needs one concrete type per instantiation.
+        -- A statically-typed pool declares the type by name, so `Try Str ()`
+        -- and `Try Str (IFile a)` would otherwise both emit a type called
+        -- `Try` and the second definition would lose to the first. The name
+        -- is derived from the resolved arms so two instantiations that agree
+        -- on every field share a definition, which is what makes the
+        -- declaration collector's dedup still work.
+        --
+        -- Only for a type the compiler generates: when the user mapped it
+        -- (`data Cpp => Try = "MyTry"`), the name they chose is the contract
+        -- and there is exactly one of it.
+        let generated = vC == unTVar vG
+            vC' | generated && not (null targs) = vC <> instanceSuffix arms'
+                | otherwise = vC
+        return $ VariantF (FV vG (CV vC')) arms'
+
+-- | A short, deterministic suffix distinguishing one instantiation of a
+-- parameterized `data` from another in a language that declares types by
+-- name. Derived from the resolved arms, so equal instantiations collide on
+-- purpose and unequal ones do not.
+instanceSuffix :: [(MT.Text, [TypeF])] -> MT.Text
+instanceSuffix arms =
+  "_" <> MT.pack (showHex (abs (hashText rendered) `mod` 0xFFFFFF) "")
+  where
+    rendered = MT.concat [n <> MT.pack (show (map pretty ts)) | (n, ts) <- arms]
+    -- djb2; any stable string hash would do. Kept local so the suffix does
+    -- not drift with a library's hashing implementation.
+    hashText = MT.foldl' (\h c -> h * 33 + fromEnum c) (5381 :: Int)
 
 -- | The structural walk's remaining cases: shapes 'weave' cannot handle on
 -- its own, and the fallback to it.

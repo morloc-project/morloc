@@ -12,7 +12,7 @@ import root-cpp
 source Cpp from "helpers.hpp" ("idc")
 idc :: Int -> Int
 
-vf :: Int -> <Err> Int
+vf :: Int -> Int
 vf x =
   ? x >= 0 = x
   : @throw "negative"

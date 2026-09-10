@@ -21,58 +21,66 @@ record Rust => Box = "struct"
 
 source Rust from "own.rs" ("rt_len" as strLen, "rt_nonempty" as nonEmpty)
 strLen :: Str -> Int
-nonEmpty :: [Int] -> <Err> [Int]
+nonEmpty :: [Int] -> [Int]
 
 -- The path is named once inside the @save thunk and twice after it.
-afterSave :: Str -> <IO, Err> [Int]
+afterSave :: Str -> <IO> [Int]
 afterSave p = do
   @save 0 p [1, 2, 3]
-  xs <- @load p :: <IO, Err> [Int]
-  ys <- @load p :: <IO, Err> [Int]
+  Ok xs <- @load p :: <IO> (Try Str ([Int]))
+  Ok ys <- @load p :: <IO> (Try Str ([Int]))
   concat [xs, ys]
 
 -- The path is named by four @catch thunks in sequence.
-afterCatch :: Str -> <IO, Err> [Int]
+afterCatch :: Str -> <IO> [Int]
 afterCatch p = do
-  a <- @catch (@load p :: <IO, Err> [Int]) [9]
-  b <- @catch (@load p :: <IO, Err> [Int]) [8]
+  _mrb1 <- @load p :: <IO> (Try Str ([Int]))
+  let a = match _mrb1 | (Ok _cv) = _cv | (Err _) = [9]
+  _mrb2 <- @load p :: <IO> (Try Str ([Int]))
+  let b = match _mrb2 | (Ok _cv) = _cv | (Err _) = [8]
   concat [a, b]
 
 -- Both arms of one @catch name the same path.
-bothArms :: Str -> <IO, Err> [Int]
-bothArms p = @catch (@load p :: <IO, Err> [Int]) [strLen p]
+bothArms :: Str -> <IO> [Int]
+bothArms p = do
+  _mr <- @load p :: <IO> (Try Str ([Int]))
+  match _mr | (Ok _cv) = _cv | (Err _) = [strLen p]
 
 -- A let-bound record is read inside the thunk and again after it.
-recordReuse :: Str -> <IO, Err> [Int]
+recordReuse :: Str -> <IO> [Int]
 recordReuse p = do
   let b = ({tag = "box", items = [4, 5]} :: Box)
   @save 0 p (.items b)
-  xs <- @load p :: <IO, Err> [Int]
+  Ok xs <- @load p :: <IO> (Try Str ([Int]))
   concat [xs, .items b]
 
 -- The loop variable is read inside the thunk and passed to the next iteration.
-loopReuse :: Str -> Int -> <IO, Err> [Int]
+loopReuse :: Str -> Int -> <IO> [Int]
 loopReuse p n
-  ? n == 0 = @load p :: <IO, Err> [Int]
+  ? n == 0 = do
+      Ok _lv <- @load p :: <IO> (Try Str ([Int]))
+      _lv
   : do
       @save 0 p [n]
       loopReuse p (n - 1)
 
 -- A thunk bound by a let and forced later, over a path used again afterwards.
-letThunk :: Str -> <IO, Err> [Int]
+letThunk :: Str -> <IO> [Int]
 letThunk p = do
-  let t = (@load p :: <IO, Err> [Int])
-  a <- t
-  b <- @load p :: <IO, Err> [Int]
+  let t = (@load p :: <IO> (Try Str ([Int])))
+  Ok a <- t
+  Ok b <- @load p :: <IO> (Try Str ([Int]))
   concat [a, b]
 
 -- A @catch in a helper that is itself effect-typed, reached twice: the helper's
 -- own frame may hand a closure out, so its two arms are captured differently
 -- from the ones above.
-guarded :: Str -> <IO, Err> [Int]
-guarded q = @catch (@load q :: <IO, Err> [Int]) [strLen q]
+guarded :: Str -> <IO> [Int]
+guarded q = do
+  _mr <- @load q :: <IO> (Try Str ([Int]))
+  match _mr | (Ok _cv) = _cv | (Err _) = [strLen q]
 
-guardedTwice :: Str -> <IO, Err> [Int]
+guardedTwice :: Str -> <IO> [Int]
 guardedTwice p = do
   a <- guarded p
   b <- guarded p
@@ -81,5 +89,5 @@ guardedTwice p = do
 -- One arm reads the list while the other yields it. A thunk's result leaves the
 -- thunk by value, so yielding a value the sibling thunk is still reading has to
 -- copy it out rather than take it.
-armShare :: [Int] -> <IO, Err> [Int]
-armShare v = @catch (nonEmpty v) v
+armShare :: [Int] -> <IO> [Int]
+armShare v = match (@try (nonEmpty v)) | (Ok _cv) = _cv | (Err _) = v

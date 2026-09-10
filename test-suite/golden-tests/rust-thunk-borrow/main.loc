@@ -15,6 +15,7 @@
 module main (oneRef, twoRefs, mixed, copyOnly, listRef)
 
 import root
+import root-rust
 
 type Rust => Int = "i64"
 type Rust => Str = "String"
@@ -28,28 +29,28 @@ source Rust from "helper.rs"
   , "from_list"
   )
 
-from_str :: Str -> <Err> [Int]
-from_two :: Str -> [Int] -> <Err> [Int]
-from_mixed :: Int -> Str -> <Err> [Int]
-from_copy :: Int -> <Err> [Int]
-from_list :: [Int] -> <Err> [Int]
+from_str :: Str -> [Int]
+from_two :: Str -> [Int] -> [Int]
+from_mixed :: Int -> Str -> [Int]
+from_copy :: Int -> [Int]
+from_list :: [Int] -> [Int]
 
 -- one borrowed parameter
 oneRef :: Str -> <IO> [Int]
-oneRef s = @catch (from_str s) (do [])
+oneRef s = match (@try (from_str s)) | (Ok _cv) = _cv | (Err _) = (do [])
 
 -- two borrowed parameters, which must share one lifetime
 twoRefs :: Str -> [Int] -> <IO> [Int]
-twoRefs s v = @catch (from_two s v) (do [])
+twoRefs s v = match (@try (from_two s v)) | (Ok _cv) = _cv | (Err _) = (do [])
 
 -- a Copy scalar beside a borrow: only the borrow carries the lifetime
 mixed :: Int -> Str -> <IO> [Int]
-mixed n s = @catch (from_mixed n s) (do [])
+mixed n s = match (@try (from_mixed n s)) | (Ok _cv) = _cv | (Err _) = (do [])
 
 -- no borrowed parameter, so no lifetime is introduced
 copyOnly :: Int -> <IO> [Int]
-copyOnly n = @catch (from_copy n) (do [])
+copyOnly n = match (@try (from_copy n)) | (Ok _cv) = _cv | (Err _) = (do [])
 
 -- a borrowed container rather than a borrowed scalar wrapper
 listRef :: [Int] -> <IO> [Int]
-listRef v = @catch (from_list v) (do [])
+listRef v = match (@try (from_list v)) | (Ok _cv) = _cv | (Err _) = (do [])

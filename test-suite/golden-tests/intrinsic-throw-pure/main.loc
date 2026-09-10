@@ -1,16 +1,20 @@
 module main (throwInt, throwUnit, caughtInt)
 
+-- `Try` is declared in `internal` and reaches user code through `root`;
+-- a fallible intrinsic or `@try` needs it in scope.
+import root
+
 escapable effect Err
 
 throwInt ::
   Int ->
-  <Err> Int
+  Int
 throwInt _ = @throw "PURE: boom int"
 
 throwUnit ::
   Int ->
-  <Err> ()
+  ()
 throwUnit _ = @throw "PURE: boom unit"
 
 caughtInt :: Int -> Int
-caughtInt x = @catch (throwInt x) x
+caughtInt x = match (@try (throwInt x)) | (Ok _cv) = _cv | (Err _) = x

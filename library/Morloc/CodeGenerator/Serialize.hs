@@ -512,28 +512,54 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
                      IntrWrite, IntrAppend, IntrConcat, IntrFlush,
                      IntrStdin, IntrStdout, IntrStderr, IntrThrow,
                      IntrTell, IntrTmpfile,
-                     IntrCatch] = do
+                     IntrTry] = do
           tf <- inferType t
           esBase <- mapM (nativeExpr m) es
-          -- @catch's args must both reach mlc_catch as no-arg callables;
-          -- see 'thunkifyForCatch' below.
+          -- @try's body must reach mlc_try as a no-arg callable; see
+          -- 'thunkifyForTry' below.
           let es' = case intr of
-                IntrCatch -> map thunkifyForCatch esBase
-                _         -> esBase
+                IntrTry -> map thunkifyForTry esBase
+                _       -> esBase
           es'' <- unpackDataArgIfNeeded m intr es'
           msch <- intrinsicSchema m intr tf es''
           let innerTf = case tf of
                 EffectF _ inner -> inner
                 other -> other
-          mPacker <- loadResultPacker m intr innerTf
-          let rawInnerTf = case mPacker of
-                Just (_, wireTf) -> wireTf
-                Nothing -> innerTf
+              -- A fallible intrinsic's own call still produces the bare
+              -- value; the Try is built around it below. Everything from
+              -- here to the wrap therefore works with the PAYLOAD type --
+              -- in particular the result packer, which is keyed on the
+              -- user-facing type and would find nothing against a Try.
+              payloadTf = stripTryF innerTf
+              -- @try itself already IS the wrap; wrapping it again would
+              -- nest a Try inside a Try and hand the lowering a payload
+              -- type where it expects the variant.
+              isFallible = intr /= IntrTry && payloadTf /= innerTf
+          -- @try produces the Try itself, so it keeps the variant type and
+          -- takes no result packer: whatever packing its body needed has
+          -- already happened inside the body.
+          mPacker <- if intr == IntrTry
+                       then return Nothing
+                       else loadResultPacker m intr payloadTf
+          let rawInnerTf
+                | intr == IntrTry = innerTf
+                | otherwise = case mPacker of
+                    Just (_, wireTf) -> wireTf
+                    Nothing -> payloadTf
               raw = IntrinsicN rawInnerTf intr msch es''
-          wrapped <- case mPacker of
+          packed <- case mPacker of
             Just (packerSrc, _) ->
-              return $ AppExeN innerTf (SrcCallP packerSrc) [NativeArgExpr raw]
+              return $ AppExeN payloadTf (SrcCallP packerSrc) [NativeArgExpr raw]
             Nothing -> return raw
+          -- Reuse @try rather than a bespoke wrap: converting a raised
+          -- failure into an Ok/Err value is exactly what it does, and
+          -- routing through it keeps one lowering (and one per-language
+          -- mlc_try) instead of two. The packer runs inside the body, so a
+          -- packer that raises is caught like any other failure.
+          let wrapped
+                | isFallible =
+                    IntrinsicN innerTf IntrTry Nothing [thunkifyForTry packed]
+                | otherwise = packed
           -- Wrap in DoBlockN only when the result still carries an effect
           -- (needs to be a thunk that EvalN or a language-native catch can
           -- invoke). @catch fully strips its Err effect when the residual
@@ -564,20 +590,23 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     -- mirror that here so intrinsics flow through the same pack/unpack
     -- machinery as ordinary functions instead of feeding the runtime a
     -- user-side struct it cannot serialize.
-    -- Wrap a NativeExpr in a DoBlockN so it renders as a no-arg thunk;
-    -- both of @catch's arguments reach mlc_catch as thunks it forces at
-    -- most once. An expression is already thunk-shaped in two ways: an
-    -- effect-typed one (which lowered to a DoBlockN upstream and carries
-    -- an EffectF type) and a do-block whose effect row is empty (a
-    -- DoBlockN whose stored type is its plain inner type -- e.g. a pure
-    -- fallback like `do []`). typeFof reports the DoBlockN's inner type,
-    -- so the type check alone misses the second case and re-wraps it into
-    -- DoBlockN (DoBlockN _); mlc_catch's `return fallback()` then yields
-    -- the inner thunk instead of the value. Match DoBlockN structurally
-    -- so both shapes pass through untouched.
-    thunkifyForCatch :: NativeExpr -> NativeExpr
-    thunkifyForCatch e@(DoBlockN _ _) = e
-    thunkifyForCatch e = case typeFof e of
+    -- Wrap a NativeExpr in a DoBlockN so it renders as a no-arg thunk:
+    -- @try's body reaches mlc_try as a thunk it forces at most once.
+    -- Suspension here is a property of the form, not of the body's type,
+    -- so a pure body is thunked too -- which is what lets @try catch a
+    -- foreign function that raises from otherwise pure code.
+    --
+    -- An expression is already thunk-shaped in two ways: an effect-typed
+    -- one (which lowered to a DoBlockN upstream and carries an EffectF
+    -- type) and a do-block whose effect row is empty (a DoBlockN whose
+    -- stored type is its plain inner type -- e.g. `do []`). typeFof
+    -- reports the DoBlockN's inner type, so the type check alone misses
+    -- the second case and re-wraps it into DoBlockN (DoBlockN _), which
+    -- yields the inner thunk instead of the value. Match DoBlockN
+    -- structurally so both shapes pass through untouched.
+    thunkifyForTry :: NativeExpr -> NativeExpr
+    thunkifyForTry e@(DoBlockN _ _) = e
+    thunkifyForTry e = case typeFof e of
       EffectF _ _ -> e
       t           -> DoBlockN t e
 
@@ -657,12 +686,12 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
       return . Just $ renderTypeFName (typeFof dataArg)
     intrinsicSchema m IntrLoad tf _ = do
       -- For @load, the return type is <IO, Err> a; the schema is for a.
-      let dataType = stripEffectF tf
+      let dataType = stripTryF (stripEffectF tf)
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m IntrRead tf _ = do
       -- For @read, the return type is <Err> a; the schema is for a.
-      let dataType = stripEffectF tf
+      let dataType = stripTryF (stripEffectF tf)
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m IntrIFileWalk tf _ = do
@@ -671,21 +700,21 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
       -- from_voidstar<T>). For bracket-index/struct chains the result
       -- is a single element type; for bracket-slice it is a list type.
       -- Either way, the post-EffectF type carries the right shape.
-      let dataType = stripEffectF tf
+      let dataType = stripTryF (stripEffectF tf)
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m IntrNext tf _ = do
       -- @next returns the sub-packet as `[a]`. The wrapper drops the
       -- EffectF wrap and serialises the list type so the per-language
       -- from_voidstar call materialises it correctly.
-      let dataType = stripEffectF tf
+      let dataType = stripTryF (stripEffectF tf)
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m IntrStreamLayout tf _ = do
       -- @streamLayout returns `[(U64,U64,U64)]`. Drop the EffectF wrap and
       -- serialise the list-of-triple type so the per-language from_voidstar
       -- call materialises it (an ordinary composite, as for @next).
-      let dataType = stripEffectF tf
+      let dataType = stripTryF (stripEffectF tf)
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     -- @write's data arg (at index 2, after level Int and handle) carries `[a]`;
@@ -727,8 +756,20 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
       ast <- Serial.makeSerialAST m lang (BT.handleStorageTypeF v a)
       return . render $ Serial.serialAstToMsgpackSchema ast
 
+    -- The payload of a Try's Ok arm, or the type unchanged when it is not
+    -- one. Intrinsics that report failure as data wrap their result, but
+    -- the schema a runtime entry point needs is still the inner one.
+    stripTryF :: TypeF -> TypeF
+    stripTryF (VariantF _ arms)
+      | Just [payload] <- lookup BT.tryOkCtor arms = payload
+    stripTryF other = other
+
     unwrapHandleHead :: TypeF -> Maybe (TVar, TypeF)
     unwrapHandleHead (EffectF _ inner) = unwrapHandleHead inner
+    -- The handle now arrives inside the Try the intrinsic returns, so peel
+    -- the Ok arm before reading the head.
+    unwrapHandleHead (VariantF _ arms)
+      | Just [payload] <- lookup BT.tryOkCtor arms = unwrapHandleHead payload
     unwrapHandleHead (AppF (VarF (FV v _)) (a : _)) = Just (v, a)
     unwrapHandleHead _ = Nothing
 

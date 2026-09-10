@@ -201,27 +201,41 @@ pub fn morloc_throw(msg: impl Into<String>) -> ! {
     std::panic::panic_any(MorlocThrow(msg.into()));
 }
 
-/// `@catch fallible fallback`: run `fallible`; on a catchable morloc throw,
-/// discard its partial manifold trace and run `fallback`. A non-throw panic (a
-/// genuine bug) propagates unchanged (mirrors the C++ MorlocException vs
-/// internal-abort split). Both arguments arrive pre-thunked (do-block closures).
-pub fn mlc_catch<T, F, G>(fallible: F, fallback: G) -> T
+/// Terminate on a failure of the machinery that carries values between pools:
+/// IPC, packet construction and decode. None of these are attributable to user
+/// data or foreign-function behavior, and none leave the pool able to continue,
+/// so they must not reach `mlc_try`. Aborting rather than returning a fail
+/// packet is what keeps them fatal across pools: a caller's socket read fails,
+/// which it classifies as infrastructure in turn.
+pub fn morloc_infra_abort(msg: impl AsRef<str>) -> ! {
+    eprintln!("morloc internal error (Rust pool): {}", msg.as_ref());
+    std::process::abort()
+}
+
+/// `@try body`: run `body` and convert the outcome to data. `ok` wraps the
+/// value, `err` the caught message; codegen supplies both because only it
+/// knows how this `Try` is represented in Rust.
+///
+/// Only a `MorlocThrow` payload becomes an `Err` arm. Any other panic is a
+/// genuine bug and resumes unwinding, which mirrors the C++ split between
+/// MorlocException and an internal abort.
+pub fn mlc_try<T, R, F, OK, ERR>(body: F, ok: OK, err: ERR) -> R
 where
     F: FnOnce() -> T,
-    G: FnOnce() -> T,
+    OK: FnOnce(T) -> R,
+    ERR: FnOnce(String) -> R,
 {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(fallible)) {
-        Ok(v) => v,
-        Err(payload) => {
-            if payload.downcast_ref::<MorlocThrow>().is_some() {
-                // The caught throw's partial trace must not leak into a later
-                // error's traceback.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(v) => ok(v),
+        Err(payload) => match payload.downcast::<MorlocThrow>() {
+            Ok(thrown) => {
+                // The caught throw's partial trace must not leak into a
+                // later error's traceback.
                 TRACEBACK.with(|t| t.borrow_mut().clear());
-                fallback()
-            } else {
-                std::panic::resume_unwind(payload);
+                err(thrown.0)
             }
-        }
+            Err(other) => std::panic::resume_unwind(other),
+        },
     }
 }
 
@@ -1106,7 +1120,7 @@ pub unsafe fn foreign_call(socket_filename: &str, mid: u32, args: &[*const u8]) 
     let mut err: *mut c_char = std::ptr::null_mut();
     let packet = make_morloc_local_call_packet(mid, args.as_ptr(), args.len(), &mut err);
     if !err.is_null() {
-        morloc_throw(cstr_take(err));
+        morloc_infra_abort(cstr_take(err));
     }
 
     pool_mark_busy();
@@ -1114,7 +1128,7 @@ pub unsafe fn foreign_call(socket_filename: &str, mid: u32, args: &[*const u8]) 
     pool_mark_idle();
     libc::free(packet as *mut c_void);
     if !err.is_null() {
-        morloc_throw(cstr_take(err));
+        morloc_infra_abort(cstr_take(err));
     }
 
     finalize_call_result(result)

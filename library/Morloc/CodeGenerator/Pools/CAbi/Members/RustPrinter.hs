@@ -102,8 +102,6 @@ printExpr (IIntrinsicRead sid (Just t) e) =
 printExpr (IIntrinsicRead sid Nothing e) =
   "rustmorloc::read(&(" <> printExpr e <> "), schema(" <> pretty sid <> "))"
 printExpr (IIntrinsicThrow msg) = "rustmorloc::morloc_throw(" <> printExpr msg <> ")"
-printExpr (IIntrinsicCatch fallible fallback) =
-  "rustmorloc::mlc_catch(" <> printExpr fallible <> ", " <> printExpr fallback <> ")"
 -- File / stream / IO intrinsics. Each mirrors the C++ `_mlc_*` helper
 -- (CppPrinter.hs) but calls the corresponding thin `rustmorloc` shim. A value
 -- argument is borrowed (`&(..)`, the ToVoidstar shape); a handle is a bare

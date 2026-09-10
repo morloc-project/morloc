@@ -26,42 +26,49 @@ module main
 
 import root-py
 
-twoStdin :: <IO, Err> (IStream Int)
+twoStdin :: <IO> (IStream Int)
 twoStdin = do
-  @stdin :: <IO, Err> IStream Int
-  @stdin :: <IO, Err> IStream Int
+  @stdin :: <IO> (Try Str (IStream Int))
+  Ok _tailv79 <- @stdin :: <IO> (Try Str (IStream Int))
+  _tailv79
 
-twoStdout :: <IO, Err> (OStream Int)
+twoStdout :: <IO> (OStream Int)
 twoStdout = do
-  @stdout :: <IO, Err> OStream Int
-  @stdout :: <IO, Err> OStream Int
+  @stdout :: <IO> OStream Int
+  @stdout :: <IO> OStream Int
 
-twoStderr :: <IO, Err> (OStream Int)
+twoStderr :: <IO> (OStream Int)
 twoStderr = do
-  @stderr :: <IO, Err> OStream Int
-  @stderr :: <IO, Err> OStream Int
+  @stderr :: <IO> OStream Int
+  @stderr :: <IO> OStream Int
 
-reopenAfterClose :: <IO, Err> ()
+reopenAfterClose :: <IO> ()
 reopenAfterClose = do
-  s1 <- @stdin :: <IO, Err> IStream Int
+  Ok s1 <- @stdin :: <IO> (Try Str (IStream Int))
   @close s1
-  s2 <- @stdin :: <IO, Err> IStream Int
+  Ok s2 <- @stdin :: <IO> (Try Str (IStream Int))
   @close s2
 
-allThreeAtOnce :: <IO, Err> ()
+allThreeAtOnce :: <IO> ()
 allThreeAtOnce = do
-  i <- @stdin :: <IO, Err> IStream Int
-  o <- @stdout :: <IO, Err> OStream Int
-  e <- @stderr :: <IO, Err> OStream Int
+  Ok i <- @stdin :: <IO> (Try Str (IStream Int))
+  o <- @stdout :: <IO> OStream Int
+  e <- @stderr :: <IO> OStream Int
   @close i
   @close o
   @close e
 
-openDevStdin :: <IO, Err> (IStream Int)
-openDevStdin = @open "/dev/stdin" :: <IO, Err> IStream Int
+openDevStdin :: <IO> (IStream Int)
+openDevStdin = do
+  Ok _rv <- @open "/dev/stdin" :: <IO> (Try Str (IStream Int))
+  _rv
 
-openDevStdout :: <IO, Err> (OStream Int)
-openDevStdout = @open "/dev/stdout" :: <IO, Err> OStream Int
+openDevStdout :: <IO> (OStream Int)
+openDevStdout = do
+  Ok _rv <- @open "/dev/stdout" :: <IO> (Try Str (OStream Int))
+  _rv
 
-openDevStderr :: <IO, Err> (OStream Int)
-openDevStderr = @open "/dev/stderr" :: <IO, Err> OStream Int
+openDevStderr :: <IO> (OStream Int)
+openDevStderr = do
+  Ok _rv <- @open "/dev/stderr" :: <IO> (Try Str (OStream Int))
+  _rv

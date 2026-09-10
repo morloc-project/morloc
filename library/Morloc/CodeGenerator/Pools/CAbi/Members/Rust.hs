@@ -1150,7 +1150,12 @@ mergeLongest :: [(FVar, [Text])] -> [(FVar, [Text])]
 mergeLongest =
   Map.elems
     . Map.fromListWith (\a b -> if length (snd a) >= length (snd b) then a else b)
-    . map (\e@(FV gv _, _) -> (gv, e))
+    -- Keyed by the CONCRETE name, which is what the declaration is
+    -- called. A parameterized `data` has one concrete type per
+    -- instantiation, so keying by the general name would collapse
+    -- `Try Str ()` and `Try Str (IFile a)` into a single declaration
+    -- and the second use would name a type that was never emitted.
+    . map (\e@(FV _ cv, _) -> (cv, e))
 
 collectRustEnums :: [SerialManifold] -> [(FVar, [Text])]
 collectRustEnums =
@@ -1184,7 +1189,12 @@ collectRustVariants :: [SerialManifold] -> [(FVar, [(Text, [TypeF])])]
 collectRustVariants =
   Map.elems
     . Map.fromListWith wider
-    . map (\e@(FV gv _, _) -> (gv, e))
+    -- Keyed by the CONCRETE name, which is what the declaration is
+    -- called. A parameterized `data` has one concrete type per
+    -- instantiation, so keying by the general name would collapse
+    -- `Try Str ()` and `Try Str (IFile a)` into a single declaration
+    -- and the second use would name a type that was never emitted.
+    . map (\e@(FV _ cv, _) -> (cv, e))
     . concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     -- Merge ARM-WISE rather than by arm count. A constructor literal's type
@@ -1763,6 +1773,15 @@ rustLowerConfig mask =
               [] -> header <+> "{" <+> expr <+> "}"
               _ -> header <+> "{" <> nest 4 (line <> vsep (stmts ++ [expr])) <> line <> "}"
           )
+    -- The helper hands back a plain Result so the panic-payload downcast
+    -- (which decides what is catchable) stays in rustmorloc; the arms are
+    -- built here because only the caller knows this Try's representation.
+    , lcMakeTry = \thunk okWrap errWrap ->
+        "rustmorloc::mlc_try" <> tupled
+          [ thunk
+          , "|mlcTryV|" <+> okWrap "mlcTryV"
+          , "|mlcTryM|" <+> errWrap "mlcTryM"
+          ]
     , lcSerialize = defaultSerialize (rustLowerConfig mask)
     , lcDeserialize = \_ -> defaultDeserialize (rustLowerConfig mask)
     -- Reify a crossing closure to its wire tuple via the arity-indexed trait

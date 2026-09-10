@@ -77,8 +77,8 @@ pub enum MorlocExpressionType {
     Stderr = 26,      // schema_str -> OStream handle bound to fd 2 (nexus-owned).
     Throw = 27,       // msg (Str expr) -> raises MorlocError with the message.
                       // Never returns; the return schema is a sentinel "z".
-    Catch = 28,       // (fallible, fallback) -> value. Evaluate fallible;
-                      // on Err, evaluate fallback into the caller's dest.
+    Try = 28,         // body -> Try Str a. Evaluate the body; a user throw
+                      // becomes the Err arm, anything else propagates.
     If = 29,          // (cond, then, else) -> value. Evaluate cond (a Bool);
                       // materialize the taken branch into the caller's dest.
     StreamLayout = 30, // IFile handle -> [(U64,U64,U64)]. Per-sub-packet layout
@@ -261,12 +261,6 @@ pub struct MorlocCtorMakeExpression {
     pub tag: u8,
 }
 
-#[repr(C)]
-pub struct MorlocCatchExpression {
-    pub fallible: *mut MorlocExpression,
-    pub fallback: *mut MorlocExpression,
-}
-
 // Pure-nexus conditional: evaluate `cond` (a Bool) and materialize the taken
 // branch into the caller's dest. `then_branch` and `else_branch` share the
 // result type (and schema) with the If node.
@@ -313,7 +307,6 @@ pub union ExprUnion {
     pub tag_test_expr: *mut MorlocTagTestExpression,
     pub ctor_field_expr: *mut MorlocCtorFieldExpression,
     pub ctor_make_expr: *mut MorlocCtorMakeExpression,
-    pub catch_expr: *mut MorlocCatchExpression,
     pub if_expr: *mut MorlocIfExpression,
     // IFile-family expressions.
     pub open_expr: *mut MorlocOpenExpression,
@@ -1458,20 +1451,24 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             Ok(expr)
         }
 
-        "catch" => {
-            let fallible = build_expr(je.get("fallible").unwrap_or(&serde_json::Value::Null))?;
-            let fallback = build_expr(je.get("fallback").unwrap_or(&serde_json::Value::Null))?;
-            let catch = libc::calloc(1, std::mem::size_of::<MorlocCatchExpression>()) as *mut MorlocCatchExpression;
-            (*catch).fallible = fallible;
-            (*catch).fallback = fallback;
+        "try" => {
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).ok_or_else(|| {
+                MorlocError::Other("try expression is missing its result schema".into())
+            })?;
+            let c_schema_str = CString::new(schema_str).map_err(|_| {
+                MorlocError::Other("try schema contains an interior NUL".into())
+            })?;
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let body = build_expr(je.get("body").unwrap_or(&serde_json::Value::Null))?;
             let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
-            (*expr).etype = MorlocExpressionType::Catch;
-            // Result schema comes from the fallback: the fallible may be
-            // @throw (Unit "z" sentinel) while the surrounding slot is
-            // sized for the actual return type. Manifest expressions are
-            // process-lifetime, so sharing the pointer is not a dangling risk.
-            (*expr).schema = (*fallback).schema;
-            (*expr).expr.catch_expr = catch;
+            (*expr).etype = MorlocExpressionType::Try;
+            (*expr).schema = schema;
+            (*expr).expr.unary_expr = body;
             Ok(expr)
         }
 

@@ -1,5 +1,5 @@
 -- Test @catch in an R-bound pool: same coverage as the Py/Cpp variants --
--- pure catch of @throw, catch inside a do-block, mixed <IO,Err> catch,
+-- pure catch of @throw, catch inside a do-block, mixed <IO> catch,
 -- and catch of a foreign R exception (stop() from a sourced function).
 module main (catchBare, catchInDo, catchMixedIO, catchForeignRaise, catchBangFallible)
 
@@ -9,32 +9,32 @@ import root-r
 source R from "helper.R" ("r_len", "r_may_fail")
 
 r_len      :: Str -> Int
-r_may_fail :: Str -> <Err> Int
+r_may_fail :: Str -> Int
 
 catchBare :: Int
-catchBare = @catch (@throw "boom") 42
+catchBare = match (@try (@throw "boom")) | (Ok _cv) = _cv | (Err _) = 42
 
 catchInDo :: Str -> <IO> Int
-catchInDo s = @catch (do
+catchInDo s = match (@try (do
     let n = r_len s
     ? n < 4 = @throw "too short"
     : n
-  ) 999
+  )) | (Ok _cv) = _cv | (Err _) = 999
 
 catchMixedIO :: Str -> <IO> Int
-catchMixedIO s = @catch (do
+catchMixedIO s = match (@try (do
     let n = r_len s
     ? n == 0 = @throw "empty"
     : n
-  ) (r_len "fallback")
+  )) | (Ok _cv) = _cv | (Err _) = (r_len "fallback")
 
 catchForeignRaise :: Str -> <IO> Int
-catchForeignRaise s = @catch (do
+catchForeignRaise s = match (@try (do
     let n = r_may_fail s
     n
-  ) 0
+  )) | (Ok _cv) = _cv | (Err _) = 0
 
 -- ! inside @catch's fallible seals at the arg site (Restructure.hs
 -- IntrCatch special-case). Empty string raises inside the try/catch.
 catchBangFallible :: Str -> Int
-catchBangFallible s = @catch !(r_may_fail s) 77
+catchBangFallible s = match (@try (r_may_fail s)) | (Ok _cv) = _cv | (Err _) = 77

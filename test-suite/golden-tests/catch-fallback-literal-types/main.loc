@@ -7,7 +7,7 @@
 --
 -- Covered here: the integer widths, the float widths (including an integer
 -- literal promoted into a float slot), a transparent alias over Int, a Str
--- fallback, an effectful fallback whose own <Err> row must still propagate,
+-- fallback, an effectful fallback whose own row must still propagate,
 -- and a chained @catch terminating in a bare literal.
 --
 -- A newtype over Int is exercised at the typecheck level in UnitTypeTests
@@ -28,93 +28,93 @@ import root-py
 type Count = Int
 
 source Py from "main.py" ("parse")
-parse :: Str -> <Err> a
+parse :: Str -> a
 
-readInt :: Str -> <Err> Int
+readInt :: Str -> Int
 readInt s = parse s
 
-readI64 :: Str -> <Err> I64
+readI64 :: Str -> I64
 readI64 s = parse s
 
-readU8 :: Str -> <Err> U8
+readU8 :: Str -> U8
 readU8 s = parse s
 
-readI8 :: Str -> <Err> I8
+readI8 :: Str -> I8
 readI8 s = parse s
 
-readU32 :: Str -> <Err> U32
+readU32 :: Str -> U32
 readU32 s = parse s
 
-readF32 :: Str -> <Err> F32
+readF32 :: Str -> F32
 readF32 s = parse s
 
-readF64 :: Str -> <Err> F64
+readF64 :: Str -> F64
 readF64 s = parse s
 
-readAlias :: Str -> <Err> Count
+readAlias :: Str -> Count
 readAlias s = parse s
 
-readStr :: Str -> <Err> Str
+readStr :: Str -> Str
 readStr s = parse s
 
 okInt :: Str -> Int
-okInt s = @catch (readInt s) 0
+okInt s = match (@try (readInt s)) | (Ok _cv) = _cv | (Err _) = 0
 
 okI64 :: Str -> I64
-okI64 s = @catch (readI64 s) 0
+okI64 s = match (@try (readI64 s)) | (Ok _cv) = _cv | (Err _) = 0
 
 okU8 :: Str -> U8
-okU8 s = @catch (readU8 s) 0
+okU8 s = match (@try (readU8 s)) | (Ok _cv) = _cv | (Err _) = 0
 
 okI8 :: Str -> I8
-okI8 s = @catch (readI8 s) 0
+okI8 s = match (@try (readI8 s)) | (Ok _cv) = _cv | (Err _) = 0
 
 okU32 :: Str -> U32
-okU32 s = @catch (readU32 s) 0
+okU32 s = match (@try (readU32 s)) | (Ok _cv) = _cv | (Err _) = 0
 
 okF32 :: Str -> F32
-okF32 s = @catch (readF32 s) 0.0
+okF32 s = match (@try (readF32 s)) | (Ok _cv) = _cv | (Err _) = 0.0
 
 okF64 :: Str -> F64
-okF64 s = @catch (readF64 s) 0.0
+okF64 s = match (@try (readF64 s)) | (Ok _cv) = _cv | (Err _) = 0.0
 
 okF32FromInt :: Str -> F32
-okF32FromInt s = @catch (readF32 s) 0
+okF32FromInt s = match (@try (readF32 s)) | (Ok _cv) = _cv | (Err _) = 0
 
 okAlias :: Str -> Count
-okAlias s = @catch (readAlias s) 0
+okAlias s = match (@try (readAlias s)) | (Ok _cv) = _cv | (Err _) = 0
 
 okStr :: Str -> Str
-okStr s = @catch (readStr s) "fallback"
+okStr s = match (@try (readStr s)) | (Ok _cv) = _cv | (Err _) = "fallback"
 
 failInt :: Int
-failInt = @catch (readInt "not json") 7
+failInt = match (@try (readInt "not json")) | (Ok _cv) = _cv | (Err _) = 7
 
 failI64 :: I64
-failI64 = @catch (readI64 "not json") 7
+failI64 = match (@try (readI64 "not json")) | (Ok _cv) = _cv | (Err _) = 7
 
 failU8 :: U8
-failU8 = @catch (readU8 "not json") 7
+failU8 = match (@try (readU8 "not json")) | (Ok _cv) = _cv | (Err _) = 7
 
 failF32 :: F32
-failF32 = @catch (readF32 "not json") 7
+failF32 = match (@try (readF32 "not json")) | (Ok _cv) = _cv | (Err _) = 7
 
 failAlias :: Count
-failAlias = @catch (readAlias "not json") 7
+failAlias = match (@try (readAlias "not json")) | (Ok _cv) = _cv | (Err _) = 7
 
 failStr :: Str
-failStr = @catch (readStr "not json") "fallback"
+failStr = match (@try (readStr "not json")) | (Ok _cv) = _cv | (Err _) = "fallback"
 
 -- An integer literal promoted into a float slot must reach the pool in float
 -- form; emitting a bare integer against an f4 schema failed at run time.
 failF32FromInt :: F32
-failF32FromInt = @catch (readF32 "not json") 7
+failF32FromInt = match (@try (readF32 "not json")) | (Ok _cv) = _cv | (Err _) = 7
 
 narrow :: I32 -> U8
-narrow x = @catch (tryInto x) 0
+narrow x = match (@try (tryInto x)) | (Ok _cv) = _cv | (Err _) = 0
 
 chained :: I64
-chained = @catch (readI64 "not json") (@catch (readI64 "also not json") 9)
+chained = match (@try (readI64 "not json")) | (Ok _cv) = _cv | (Err _) = (match (@try (readI64 "also not json")) | (Ok _cv) = _cv | (Err _) = 9)
 
-effRow :: Str -> <Err> I64
-effRow s = @catch (readI64 s) (readI64 s)
+effRow :: Str -> I64
+effRow s = match (@try (readI64 s)) | (Ok _cv) = _cv | (Err _) = (readI64 s)

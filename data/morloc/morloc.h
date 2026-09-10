@@ -721,13 +721,6 @@ typedef struct morloc_tag_test_expression_s {
     morloc_expression_t* constructor;
 } morloc_tag_test_expression_t;
 
-// @catch: run `fallible` into scratch, memcpy on success, else
-// evaluate `fallback` into dest.
-typedef struct morloc_catch_expression_s {
-    morloc_expression_t* fallible;
-    morloc_expression_t* fallback;
-} morloc_catch_expression_t;
-
 // Pure-nexus conditional. Both branches share the If node's schema.
 typedef struct morloc_if_expression_s {
     morloc_expression_t* cond;
@@ -766,7 +759,6 @@ typedef struct morloc_expression_s {
         morloc_save_expression_t* save_expr;
         morloc_map_expression_t* map_expr;
         morloc_tag_test_expression_t* tag_test_expr;
-        morloc_catch_expression_t* catch_expr;
         morloc_if_expression_t* if_expr;
         morloc_open_expression_t* open_expr;
         morloc_ifile_walk_expression_t* ifile_walk_expr;

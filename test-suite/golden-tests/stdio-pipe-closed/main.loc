@@ -7,7 +7,7 @@
 -- every later run failed "@stdout already open in this nexus".
 --
 -- Fixed behaviour: a broken pipe is an <IO> condition, not a recoverable
--- <Err>, so @catch does not swallow it. In one-shot CLI mode the nexus
+-- , so @catch does not swallow it. In one-shot CLI mode the nexus
 -- detects the closed downstream pipe and exits with the conventional
 -- SIGPIPE status (141) after a full teardown -- silently, like any Unix
 -- producer in a `... | head` pipeline.
@@ -28,17 +28,16 @@ module main (produceBig, produceInCatch)
 
 import root-py
 
-produceBig :: <IO, Err> ()
+produceBig :: <IO> ()
 produceBig = do
-  o <- @stdout :: <IO, Err> OStream Int
+  o <- @stdout :: <IO> OStream Int
   @write 0 o (range 0 100000)
   @close o
 
 produceInCatch :: <IO> ()
-produceInCatch =
-  @catch
-    ( do o <- @stdout :: <IO, Err> OStream Int
-         @write 0 o (range 0 100000)
-         @close o
-    )
-    ()
+produceInCatch = do
+  _tr <- @try (do
+    o <- @stdout :: <IO> (OStream Int)
+    @write 0 o (range 0 100000)
+    @close o)
+  match _tr | (Ok _cv) = _cv | (Err _) = ()

@@ -67,7 +67,7 @@ import qualified Morloc.BaseTypes as BT
 -- `data` declarations add no new conflicts either, the alternation bar
 --   included: '|' is reserved, and every `data` form starts with the
 --   keyword.
-%expect 98
+%expect 99
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -120,6 +120,7 @@ import qualified Morloc.BaseTypes as BT
   'infixl'   { Located _ TokInfixl _ }
   'infixr'   { Located _ TokInfixr _ }
   'infix'    { Located _ TokInfix _ }
+  'match'    { Located _ TokMatch _ }
   'let'      { Located _ TokLet _ }
   'in'       { Located _ TokIn _ }
   'do'       { Located _ TokDo _ }
@@ -658,8 +659,18 @@ expr :: { Loc CstExpr }
   : let_expr                { $1 }
   | lambda_expr             { $1 }
   | guard_expr              { $1 }
+  | match_expr              { $1 }
   | infix_expr              { $1 }
   | infix_expr '::' type    { at $2 (CAnnE $1 $3) }
+
+-- `match scrutinee | p = b ...`: the scrutinee is an infix_expr rather than
+-- a full expr so a `let`, lambda or guard cannot silently swallow the
+-- clauses; those forms need parentheses. Clause gathering reuses
+-- `refut_clauses`, which absorbs no VSEMI, so the layout separator that
+-- ends the enclosing statement also ends the match.
+match_expr :: { Loc CstExpr }
+  : 'match' infix_expr refut_clauses
+      { Loc ($1 <-> snd (last $3)) (CMatchE $2 $3) }
 
 guard_expr :: { Loc CstExpr }
   : guard_clauses ':' expr
@@ -806,6 +817,11 @@ do_stmts_explicit :: { [CstDoStmt] }
 
 do_stmt :: { [CstDoStmt] }
   : atom_expr '<-' expr        { [CstDoBind $1 $3] }
+  -- A refutable bind: `Ok x <- e`. The left side parses as an application
+  -- so a constructor pattern with fields is expressible; Desugar narrows
+  -- it to a pattern and rejects anything that is not one.
+  | atom_expr atom_exprs1 '<-' expr
+      { [CstDoBind (Loc ($1 <-> last $2) (CAppE $1 $2)) $4] }
   | 'let' VLBRACE let_bindings VRBRACE
       { [CstDoLet p e | (p, e) <- $3] }
   | expr                       { [CstDoBare $1] }

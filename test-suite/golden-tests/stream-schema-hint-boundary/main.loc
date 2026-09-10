@@ -44,44 +44,45 @@ record py => Other = "dict"
 type Tag = Str
 
 -- Record elements carry `<dict>`. Create, close, append, read back.
-appendRecord :: Str -> <IO, Err> [Ev]
+appendRecord :: Str -> <IO> [Ev]
 appendRecord path = do
-  o <- @open path :: <IO, Err> OStream Ev
+  Ok o <- @open path :: <IO> (Try Str (OStream Ev))
   @write 0 o (filter (\e -> .id e > 0) [{kind = "a", id = 1}])
   @close o
-  o2 <- @append path :: <IO, Err> OStream Ev
+  Ok o2 <- @append path :: <IO> (Try Str (OStream Ev))
   @write 0 o2 (filter (\e -> .id e > 0) [{kind = "b", id = 2}])
   @close o2
-  f <- @open path :: <IO, Err> IFile [Ev]
+  Ok f <- @open path :: <IO> (Try Str (IFile [Ev]))
   .[:] f
 
 -- A `type X = Str` alias carries `<str>`, so hints are not a record-only
 -- concern.
-appendAlias :: Str -> <IO, Err> [Tag]
+appendAlias :: Str -> <IO> [Tag]
 appendAlias path = do
-  o <- @open path :: <IO, Err> OStream Tag
+  Ok o <- @open path :: <IO> (Try Str (OStream Tag))
   @write 0 o (filter (\t -> size t > 0) ["one"])
   @close o
-  o2 <- @append path :: <IO, Err> OStream Tag
+  Ok o2 <- @append path :: <IO> (Try Str (OStream Tag))
   @write 0 o2 (filter (\t -> size t > 0) ["two"])
   @close o2
-  f <- @open path :: <IO, Err> IFile [Tag]
+  Ok f <- @open path :: <IO> (Try Str (IFile [Tag]))
   .[:] f
 
 -- Repeated appends: the resume cursor must survive more than one round.
-appendMany :: Str -> <IO, Err> Int
+appendMany :: Str -> <IO> Int
 appendMany path = do
-  o <- @open path :: <IO, Err> OStream Ev
+  Ok o <- @open path :: <IO> (Try Str (OStream Ev))
   @write 0 o (filter (\e -> .id e > 0) [{kind = "a", id = 1}])
   @close o
   add path 2
   add path 3
-  f <- @open path :: <IO, Err> IFile [Ev]
-  @flen f
+  Ok f <- @open path :: <IO> (Try Str (IFile [Ev]))
+  Ok n <- @flen f
+  n
   where
-    add :: Str -> Int -> <IO, Err> ()
+    add :: Str -> Int -> <IO> ()
     add p n = do
-      o <- @append p :: <IO, Err> OStream Ev
+      Ok o <- @append p :: <IO> (Try Str (OStream Ev))
       @write 0 o (filter (\e -> .id e > 0) [{kind = "z", id = n}])
       @close o
 
@@ -95,18 +96,19 @@ produceEv n = filter (\e -> .id e > 0) [{kind = "p", id = n}, {kind = "q", id = 
 readEv ::
   --' @stdin
   Str ->
-  <IO, Err> [Ev]
+  <IO> [Ev]
 readEv f = do
-  s <- @open f :: <IO, Err> IStream Ev
-  xs <- @next s
+  Ok s <- @open f :: <IO> (Try Str (IStream Ev))
+  Ok xs <- @next s
   filter (\e -> .id e > 0) xs
 
 -- Ignoring the hint must not make the check vacuous: a genuinely
 -- different element type is still a mismatch.
-readMismatch :: Str -> <IO, Err> [Other]
+readMismatch :: Str -> <IO> [Other]
 readMismatch path = do
-  o <- @open path :: <IO, Err> OStream Ev
+  Ok o <- @open path :: <IO> (Try Str (OStream Ev))
   @write 0 o (filter (\e -> .id e > 0) [{kind = "a", id = 1}])
   @close o
-  s <- @open path :: <IO, Err> IStream Other
-  @next s
+  Ok s <- @open path :: <IO> (Try Str (IStream Other))
+  Ok _tailv18 <- @next s
+  _tailv18

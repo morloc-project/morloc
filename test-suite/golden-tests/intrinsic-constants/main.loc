@@ -1,5 +1,6 @@
 module main (langstr)
 
+import root
 import root-py (idpy)
 import root-cpp (idcpp)
 import root-r (idr)
@@ -7,13 +8,14 @@ import root-r (idr)
 -- @load raises Err on missing file; @catch substitutes an empty list.
 -- The three round-tripped loads all succeed; the "zany" load is missing
 -- and falls through to the empty-list fallback.
-langstr :: <IO, Err> ([Str],[Str],[Str],[Str])
+langstr :: <IO> ([Str],[Str],[Str],[Str])
 langstr = do
   @save  0 "z" (idpy ["hi", @lang])
   @savem "zp" (idpy ["hi", @lang])
   @savej "zj" (idpy ["hi", @lang])
-  xs  <- @load "z"
-  ys  <- @load "zp"
-  zs  <- @load "zj"
-  bad <- @catch (@load "zany") []
+  Ok xs  <- @load "z"
+  Ok ys  <- @load "zp"
+  Ok zs  <- @load "zj"
+  _bad <- @load "zany"
+  let bad = match _bad | (Ok v) = v | (Err _) = []
   (xs, ys, zs, bad)

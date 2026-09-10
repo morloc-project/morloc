@@ -2058,8 +2058,16 @@ buildRefutClause
   :: [EVar] -> ([Loc CstRefutPat], Loc CstExpr) -> D (ExprI, ExprI)
 buildRefutClause formals (pats, bodyLoc) = do
   body' <- desugarExpr bodyLoc
+  let Loc bsp _ = bodyLoc
+  buildRefutClauseFrom formals pats bsp body'
+
+-- | 'buildRefutClause' over a body that is already desugared. A refutable
+-- `<-` bind has no CST body to hand over: its continuation is the rest of
+-- the do-block, which has been lowered by the time the pattern is known.
+buildRefutClauseFrom
+  :: [EVar] -> [Loc CstRefutPat] -> Span -> ExprI -> D (ExprI, ExprI)
+buildRefutClauseFrom formals pats bsp body' = do
   let usedNames = freeVarsE body'
-      Loc bsp _ = bodyLoc
   contribs <- mapM (\(f, p) -> refutClauseArg usedNames f p) (zip formals pats)
   let allTests = concatMap fst contribs
       allBinds = concatMap snd contribs
@@ -2083,16 +2091,31 @@ checkRefutCoverage sp name clausePatLists = do
           ("`|` patterns for '" ++ T.unpack (unEVar name)
            ++ "' match '" ++ T.unpack dup
            ++ "' more than once; the later clause is unreachable")
+      -- A set proven incomplete is rejected, naming what is missing.
+      --
+      -- When the constructor list is not visible -- the type was declared
+      -- in another module -- the set is allowed through and
+      -- 'assembleCascade' guards it at runtime. Demanding a catch-all
+      -- there would defeat the feature: the catch-all silently absorbs the
+      -- constructor the check exists to find.
+      --
+      -- Literals are the exception. Their domain is unbounded, so no
+      -- clause set over them can ever be complete and a catch-all is
+      -- genuinely required; saying so at compile time is more useful than
+      -- a runtime failure on the first unlisted value.
       | otherwise -> case ctorCoverage declared of
           Just missing
-            | null missing -> return ()
-            | otherwise -> dfail (startPos sp)
+            | not (null missing) -> dfail (startPos sp)
                 ("`|` patterns for '" ++ T.unpack (unEVar name)
                  ++ "' are not exhaustive; missing "
                  ++ T.unpack (T.intercalate ", " missing))
-          Nothing -> dfail (startPos sp)
-            ("`|` patterns for '" ++ T.unpack (unEVar name)
-             ++ "' are not exhaustive; add a final catch-all clause (a variable or '_')")
+          Nothing
+            | any (any refutPatIsLit) clausePatLists -> dfail (startPos sp)
+                ("`|` patterns for '" ++ T.unpack (unEVar name)
+                 ++ "' are not exhaustive; a literal pattern cannot cover"
+                 ++ " its type, so add a final catch-all clause (a variable"
+                 ++ " or '_')")
+          _ -> return ()
   where
     lastIrrefutable = case clausePatLists of
       [] -> False
@@ -2116,15 +2139,11 @@ checkRefutCoverage sp name clausePatLists = do
 
     -- Which declared constructors this clause set fails to name.
     --
-    -- @Just []@ means the set is complete, so no catch-all is required --
-    -- the same licence 'boolExhaustive' grants over Bool's two
-    -- constructors. @Nothing@ means the question does not apply (the
-    -- clauses are not all constructor patterns, or the type was declared
-    -- in another module and its constructor list is not visible here), and
-    -- the caller then demands a catch-all. Erring toward demanding one is
-    -- the safe direction: 'assembleCascade' DROPS the final clause's test,
-    -- so wrongly calling a set exhaustive silently routes unmatched input
-    -- into the last arm.
+    -- @Just []@ means the set is complete. @Nothing@ means the question
+    -- does not apply (the clauses are not all constructor patterns, or the
+    -- type was declared in another module and its constructor list is not
+    -- visible here) and nothing is claimed either way -- the runtime guard
+    -- that 'assembleCascade' installs is what makes that safe.
     ctorCoverage declared = do
       pats <- mapM singlePat clausePatLists
       -- Only covering clauses count. A clause that refines a constructor
@@ -2138,6 +2157,19 @@ checkRefutCoverage sp name clausePatLists = do
                                  , any ((`elem` cs) . fst) arms ] of
           [ns] -> Just [n | n <- ns, n `notElem` cs]
           _ -> Nothing
+
+-- | Does this pattern test a literal anywhere inside it?
+--
+-- Distinct from 'refutPatHasLit', which also counts a constructor pattern:
+-- here the question is specifically whether the clause set ranges over an
+-- unbounded domain, which a constructor never does.
+refutPatIsLit :: Loc CstRefutPat -> Bool
+refutPatIsLit (Loc _ (CRPatLit _))   = True
+refutPatIsLit (Loc _ (CRPatCon _ ps)) = any refutPatIsLit ps
+refutPatIsLit (Loc _ (CRPatAs _ p))  = refutPatIsLit p
+refutPatIsLit (Loc _ (CRPatTup ps))  = any refutPatIsLit ps
+refutPatIsLit (Loc _ (CRPatRec kps)) = any (refutPatIsLit . snd) kps
+refutPatIsLit _                      = False
 
 -- | Reject a constructor pattern whose field count differs from the
 -- declaration. A constructor's arity is fixed by its `data` clause, so a
@@ -2197,16 +2229,61 @@ boolExhaustive clausePatLists =
     singlePat [p] = Just p
     singlePat _   = Nothing
 
--- | Fold clauses into a right-nested IfE cascade; the last clause's body
--- is the base else (its condition is dropped -- soundness is guaranteed by
--- 'checkRefutCoverage').
-assembleCascade :: Span -> [(ExprI, ExprI)] -> D ExprI
-assembleCascade sp built = go (init built) (snd (last built))
+-- | Fold clauses into a right-nested IfE cascade.
+--
+-- When the last clause is a genuine catch-all its test is dropped and its
+-- body becomes the base, which is both correct and the shape every
+-- existing match compiles to. Otherwise the last clause keeps its test and
+-- the base is a throw: an input matching nothing is a bug in the clause
+-- set, and failing loudly is the only sound thing to do with it.
+--
+-- Keeping the test is what lets 'checkRefutCoverage' stay silent when it
+-- cannot see a type's constructors. Dropping it unconditionally would mean
+-- an unmatched value silently took the last arm.
+assembleCascade :: Span -> [[Loc CstRefutPat]] -> [(ExprI, ExprI)] -> D ExprI
+assembleCascade sp clausePats built
+  | lastIsCatchAll = go (init built) (snd (last built))
+  | otherwise = go built =<< noMatchBase
   where
+    lastIsCatchAll = case clausePats of
+      [] -> False
+      _  -> all refutPatIrrefutable (last clausePats)
+
+    noMatchBase = do
+      msgE <- freshExprSpan sp (StrE "no clause matched the argument")
+      freshExprSpan sp (IntrinsicE IntrThrow [msgE])
+
     go [] acc = return acc
     go ((cond, body) : rest) acc = do
       acc' <- go rest acc
       freshExprSpan sp (IfE cond body acc')
+
+-- | Lower `match scrutinee | p = b ...` into a LetE binding the scrutinee
+-- and a cascade over it.
+--
+-- Shares every step with 'desugarRefutClauses' except the last: a
+-- definition abstracts over fresh formals, a match binds one. Binding
+-- rather than applying a lambda keeps the scrutinee evaluated once and
+-- keeps the cascade's tests reading off a plain variable.
+desugarMatch
+  :: Span -> Loc CstExpr -> [([Loc CstExpr], Loc CstExpr)] -> D ExprI
+desugarMatch sp scrutinee clauses = do
+  clausePats <- mapM (\(args, body) -> do
+                        ps <- mapM exprToRefutPat args
+                        return (ps, body)) clauses
+  mapM_ checkSingle clausePats
+  mapM_ (validateRefutClause . fst) clausePats
+  formal <- freshIrrefLamParam sp
+  scrutinee' <- desugarExpr scrutinee
+  built <- mapM (buildRefutClause [formal]) clausePats
+  checkRefutCoverage sp (EV "match") (map fst clausePats)
+  cascade <- assembleCascade sp (map fst clausePats) built
+  freshExprSpan sp (LetE [(formal, scrutinee')] cascade)
+  where
+    checkSingle ([_], _) = return ()
+    checkSingle (ps, _) = dfail (startPos sp)
+      ("each `match` clause takes exactly one pattern, but this one has "
+       ++ show (length ps))
 
 -- | Lower `|`-clauses into a LamE over fresh formals. Callers wrap the
 -- result in an AssE with the definition's where-declarations.
@@ -2221,7 +2298,7 @@ desugarRefutClauses sp name clauses = do
   formals <- mapM (const (freshIrrefLamParam sp)) [1 .. arity]
   built <- mapM (buildRefutClause formals) clausePats
   checkRefutCoverage sp name (map fst clausePats)
-  cascade <- assembleCascade sp built
+  cascade <- assembleCascade sp (map fst clausePats) built
   freshExprSpan sp (LamE formals cascade)
   where
     checkArity [] = dfail (startPos sp) "empty `|` definition"
@@ -2312,19 +2389,62 @@ desugarDo _sp (CstDoBind _ (Loc rsp (CForceE _)) : _) =
     "redundant '!' on the right-hand side of '<-': the bind already sequences the effect."
     <> bangSemanticsNote
 desugarDo sp (CstDoBind p e : rest) = do
-  p' <- exprToIrrefPat p
-  e' <- desugarExpr e
-  forceE <- freshExprSpan sp (EvalE e')
-  bindings <- desugarIrrefPat p' forceE
-  restE <- desugarDo sp rest
-  freshExprSpan sp (LetE bindings restE)
+  rp <- exprToRefutPat p
+  if refutPatIrrefutable rp
+    then do
+      p' <- exprToIrrefPat p
+      e' <- desugarExpr e
+      forceE <- freshExprSpan sp (EvalE e')
+      bindings <- desugarIrrefPat p' forceE
+      restE <- desugarDo sp rest
+      freshExprSpan sp (LetE bindings restE)
+    else do
+      -- A refutable bind demands its pattern: `Ok x <- e` says the caller
+      -- wants the Ok arm and treats anything else as fatal. That is the
+      -- same obligation a bare statement's auto-require carries, arrived
+      -- at from the pattern rather than from the type, so it lowers to the
+      -- same shape: test, bind the payload, or throw.
+      validateRefutClause [rp]
+      formal <- freshIrrefLamParam sp
+      e' <- desugarExpr e
+      forceE <- freshExprSpan sp (EvalE e')
+      restE <- desugarDo sp rest
+      (tests, binds) <- refutClauseArg (freeVarsE restE) formal rp
+      cond <- conjoinTests sp tests
+      -- Throw the unmatched value itself rather than a bare sentence. For
+      -- the common `Ok x <- e` this is what carries the Err arm's message
+      -- into the traceback, and it stays useful for any other pattern
+      -- because the renderer works off the value's schema.
+      -- Throw the unmatched value, rendered. For the common `Ok x <- e`
+      -- this is what carries the Err arm's message into the traceback, and
+      -- it stays useful for any other pattern because @show works off the
+      -- value's schema. @throw itself takes a Str, so the render is
+      -- explicit here rather than implicit there.
+      subjectE <- freshExprSpan sp (VarE defaultValue formal)
+      shownE <- freshExprSpan sp (IntrinsicE IntrShow [subjectE])
+      throwE <- freshExprSpan sp (IntrinsicE IntrThrow [shownE])
+      trueE <- freshExprSpan sp (LogE True)
+      guardE <- freshExprSpan sp (IfE cond trueE throwE)
+      guardVar <- freshIrrefLamParam sp
+      -- Three links of the ordinary do-block LetE chain rather than a
+      -- cascade: the bind, then a guard whose value nothing reads (its
+      -- point is the throw), then the pattern's projections wrapping the
+      -- continuation. Keeping the chain shape is what lets the
+      -- bang-hoisting pass keep walking -- it recognises a do-block by
+      -- this shape, and an interposed IfE would strand a hoisted eval
+      -- outside its binding.
+      inner <- case binds of
+        [] -> return restE
+        _  -> freshExprSpan sp (LetE binds restE)
+      mid <- freshExprSpan sp (LetE [(guardVar, guardE)] inner)
+      freshExprSpan sp (LetE [(formal, forceE)] mid)
 desugarDo _sp (CstDoBare (Loc bsp (CForceE _)) : _) =
   dfail (startPos bsp) $
     "redundant '!' on a bare do statement: bare statements already sequence their effect."
     <> bangSemanticsNote
 desugarDo sp (CstDoBare e : rest) = do
   idx <- freshIdSpan sp
-  let discardVar = EV ("_do_" <> T.pack (show idx))
+  let discardVar = EV (BT.doDiscardPrefix <> T.pack (show idx))
   e' <- desugarExpr e
   forceE <- freshExprSpan sp (EvalE e')
   restE <- desugarDo sp rest
@@ -2456,6 +2576,7 @@ desugarExpr (Loc sp (CInterpE startText exprs mids endText)) = do
   exprs' <- mapM desugarExpr exprs
   mkInterpString sp startText exprs' mids endText
 desugarExpr (Loc sp (CGuardExprE guards defaultExpr)) = desugarGuards sp guards defaultExpr
+desugarExpr (Loc sp (CMatchE scrutinee clauses)) = desugarMatch sp scrutinee clauses
 
 -- Top-level declarations should not appear inside expressions
 desugarExpr (Loc _ CModE{}) = error "desugarExpr: unexpected CModE in expression position"
@@ -2569,14 +2690,53 @@ expandCollectBody ref body = do
   inner1 <- freshExprFrom ref (LetE [(oVar, bindStdout)] inner2)
   freshExprFrom ref (DoBlockE inner1)
 
--- | @write 0 o@ eta-expanded to a sink @\\v -> @write 0 o v@.
+-- | Bind the @Ok@ payload of a fallible intrinsic, throwing on @Err@.
+--
+-- Synthesized code cannot say `Ok v <- e`: it is built after parsing, so
+-- there is no clause to narrow. This assembles what that surface form
+-- lowers to -- bind the Try, guard its tag, bind the payload -- keeping
+-- the ordinary do-block LetE chain shape the bang-hoisting pass walks.
+bindOkFrom :: ExprI -> EVar -> ExprI -> ExprI -> D ExprI
+bindOkFrom ref v forcedTry body = do
+  idx <- freshIdPos (Pos 0 0 "")
+  let tmp = EV ("_ok_try_" <> T.pack (show idx))
+      gVar = EV (BT.doDiscardPrefix <> "ok_g_" <> T.pack (show idx))
+      subject = freshExprFrom ref (VarE defaultValue tmp)
+  s1 <- subject
+  okName <- freshExprFrom ref (StrE BT.tryOkCtor)
+  cond <- freshExprFrom ref (IntrinsicE IntrTagTest [s1, okName])
+  s2 <- subject
+  shown <- freshExprFrom ref (IntrinsicE IntrShow [s2])
+  throwE <- freshExprFrom ref (IntrinsicE IntrThrow [shown])
+  trueE <- freshExprFrom ref (LogE True)
+  guardE <- freshExprFrom ref (IfE cond trueE throwE)
+  s3 <- subject
+  okName2 <- freshExprFrom ref (StrE BT.tryOkCtor)
+  zeroIdx <- freshExprFrom ref (IntE 0)
+  fieldE <- freshExprFrom ref (IntrinsicE IntrCtorField [s3, okName2, zeroIdx])
+  inner <- freshExprFrom ref (LetE [(v, fieldE)] body)
+  mid <- freshExprFrom ref (LetE [(gVar, guardE)] inner)
+  freshExprFrom ref (LetE [(tmp, forcedTry)] mid)
+
+-- | @write 0 o@ eta-expanded to a sink @\\v -> do { @write 0 o v; () }@.
+--
+-- The write is a BARE do-statement so the auto-require pass guards it: a
+-- failed write abandons the run rather than handing the producer a Try it
+-- never asked for. Without the wrap the sink's type would be
+-- @[a] -> \<IO\> (Try Str ())@ and every user-written producer signature
+-- would have to name the Try.
 mkWriteSink :: ExprI -> ExprI -> ExprI -> D ExprI
 mkWriteSink ref zeroE oRef = do
   idx <- freshIdPos (Pos 0 0 "")
   let vVar = EV ("_collect_v_" <> T.pack (show idx))
+      dVar = EV (BT.doDiscardPrefix <> "collect_w_" <> T.pack (show idx))
   vRef <- freshExprFrom ref (VarE defaultValue vVar)
   writeE <- freshExprFrom ref (IntrinsicE IntrWrite [zeroE, oRef, vRef])
-  freshExprFrom ref (LamE [vVar] writeE)
+  forceWrite <- freshExprFrom ref (EvalE writeE)
+  unitE <- freshExprFrom ref UniE
+  bodyE <- freshExprFrom ref (LetE [(dVar, forceWrite)] unitE)
+  doE <- freshExprFrom ref (DoBlockE bodyE)
+  freshExprFrom ref (LamE [vVar] doE)
 
 
 --------------------------------------------------------------------
@@ -3666,7 +3826,7 @@ wrapWholeCollect useIFile params argSrcs ref handler collectArg = do
         t1 <- freshExprFrom ref (LetE [(g4, unlink)] rRef)
         t2 <- freshExprFrom ref (LetE [(g3, closeFBare)] t1)
         t3 <- freshExprFrom ref (LetE [(rV, handlerBind)] t2)
-        freshExprFrom ref (LetE [(fV, openFBind)] t3)
+        bindOkFrom ref fV openFBind t3
       else do
         loadBind <- do
           p <- freshExprFrom ref (VarE defaultValue pathV)
@@ -3676,11 +3836,11 @@ wrapWholeCollect useIFile params argSrcs ref handler collectArg = do
         appArgs <- buildStreamArgs ref params Nothing xsV argSrcs
         handlerApp <- freshExprFrom ref (AppE handlerRef appArgs)
         t1 <- freshExprFrom ref (LetE [(g3, unlink)] handlerApp)
-        freshExprFrom ref (LetE [(xsV, loadBind)] t1)
+        bindOkFrom ref xsV loadBind t1
   b1 <- freshExprFrom ref (LetE [(g2, closeOBare)] tailE)
   b2 <- freshExprFrom ref (LetE [(g1, gatherBare)] b1)
-  b3 <- freshExprFrom ref (LetE [(oV, openOBind)] b2)
-  b4 <- freshExprFrom ref (LetE [(pathV, tmpBind)] b3)
+  b3 <- bindOkFrom ref oV openOBind b2
+  b4 <- bindOkFrom ref pathV tmpBind b3
   freshExprFrom ref (DoBlockE b4)
 
 -- | Build the per-batch streaming do-block that replaces a @collect arg@:
@@ -3746,6 +3906,10 @@ wrapPerBatchCollect singletonWrap params argSrcs handler ref collectArg = do
 
 -- | @@write 0 o emit@, where @emit@ is @value@ (`with`) or @[value]@ (`render`,
 -- boxing a per-batch @Str@ into a @[Str]@ stream element).
+-- The write is a BARE do-statement so the auto-require pass guards it, for
+-- the same reason 'mkWriteSink' wraps its own: the synthesized sink must
+-- keep the type the user's handler signature declares, and a failed write
+-- must abandon the run rather than become a Try nobody reads.
 mkEmitWrite :: Bool -> ExprI -> EVar -> ExprI -> D ExprI
 mkEmitWrite singletonWrap ref oVar value = do
   emitted <- if singletonWrap
@@ -3753,7 +3917,13 @@ mkEmitWrite singletonWrap ref oVar value = do
                else return value
   oRef <- freshExprFrom ref (VarE defaultValue oVar)
   zeroE <- freshExprFrom ref (IntE 0)
-  freshExprFrom ref (IntrinsicE IntrWrite [zeroE, oRef, emitted])
+  idx <- freshIdPos (Pos 0 0 "")
+  writeE <- freshExprFrom ref (IntrinsicE IntrWrite [zeroE, oRef, emitted])
+  forceWrite <- freshExprFrom ref (EvalE writeE)
+  unitE <- freshExprFrom ref UniE
+  let dVar = EV (BT.doDiscardPrefix <> "emit_w_" <> T.pack (show idx))
+  bodyE <- freshExprFrom ref (LetE [(dVar, forceWrite)] unitE)
+  freshExprFrom ref (DoBlockE bodyE)
 
 -- | Synthesize the composed internal command for one `--' with:`
 -- atom on a parent signature. Emits only an @AssE@; parent per-arg

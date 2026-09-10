@@ -1279,6 +1279,8 @@ fn run_remote_command(
         process::clean_exit(1);
     }
 
+    die_on_top_level_err(result_ptr, &return_schema, c_schema);
+
     // Check if response is Arrow format
     let is_arrow = resp_header.is_data() && unsafe { resp_header.command.data.format } == packet::PACKET_FORMAT_ARROW;
 
@@ -1304,6 +1306,50 @@ fn run_remote_command(
         }
     }
     unsafe { morloc_runtime_types::cschema::CSchema::free(c_schema) };
+}
+
+/// A top-level `Err` arm is a failed run, not a successful result that
+/// happens to describe a failure. Without this the process prints the Err
+/// value and exits 0, which breaks `set -e`, shell pipelines and CI for
+/// every fallible export.
+///
+/// The whole value is rendered rather than just the payload: an arm may
+/// carry anything, and the JSON form is the one every other morloc surface
+/// already shows.
+fn die_on_top_level_err(
+    result_ptr: *mut u8,
+    return_schema: &morloc_runtime_types::schema::Schema,
+    c_schema: *const morloc_runtime_types::cschema::CSchema,
+) {
+    extern "C" {
+        fn mlc_show(
+            voidstar: *const std::ffi::c_void,
+            schema: *const morloc_runtime_types::cschema::CSchema,
+            errmsg: *mut *mut std::ffi::c_char,
+        ) -> *mut std::ffi::c_char;
+    }
+    if morloc_runtime_types::schema::SerialType::Variant != return_schema.serial_type {
+        return;
+    }
+    let tag = unsafe { *result_ptr } as usize;
+    if !return_schema.keys.get(tag).map(|k| k == "Err").unwrap_or(false) {
+        return;
+    }
+    let mut show_err: *mut std::ffi::c_char = std::ptr::null_mut();
+    let rendered = unsafe {
+        let out = mlc_show(result_ptr as *const std::ffi::c_void, c_schema, &mut show_err);
+        if out.is_null() {
+            process::take_c_errmsg(show_err).unwrap_or_else(|| "unknown error".into())
+        } else {
+            let text = std::ffi::CStr::from_ptr(out).to_string_lossy().into_owned();
+            libc::free(out as *mut std::ffi::c_void);
+            text
+        }
+    };
+    crate::runlog::record_error(&rendered);
+    eprintln!("Error: run failed\n{}", rendered);
+    // No CSchema free: clean_exit does not return.
+    process::clean_exit(1);
 }
 
 /// Print using the C library functions for correct voidstar handling.
@@ -1919,7 +1965,14 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
 
     // Extract voidstar value from the result packet
     let result_ptr = unsafe { get_morloc_data_packet_value(pkt_bytes.as_ptr(), c_return_schema, &mut errmsg) };
+    if result_ptr.is_null() {
+        let msg = process::take_c_errmsg(errmsg)
+            .unwrap_or_else(|| "unknown error".into());
+        eprintln!("Error: failed to extract result: {}", msg);
+        process::clean_exit(1);
+    }
 
+    die_on_top_level_err(result_ptr, &return_schema, c_return_schema);
     print_result_c(result_ptr, c_return_schema, &pkt_bytes, false, config);
 
     // Cleanup
