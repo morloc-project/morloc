@@ -403,11 +403,16 @@ printRustStruct name params fields =
 -- @repr(u8)@ with explicit discriminants is what makes the wire tag and the
 -- native value the same byte: the constructor's declaration ordinal IS its
 -- tag, so no translation table is needed on either side.
+--
+-- @PartialOrd@/@Ord@ derive over the variant order, which is the same
+-- declaration order every other backend compares in. Without them a
+-- comparison that compiles when the realizer puts it in a Python pool
+-- fails to compile when it puts it in a Rust one.
 printRustEnum :: MDoc -> [T.Text] -> MDoc
 printRustEnum name ctors =
   vsep
     [ "#[repr(u8)]"
-    , "#[derive(Clone, Copy, PartialEq, Eq, Debug)]"
+    , "#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]"
     , "pub enum" <+> name <+> "{"
     , indent 4 (vsep [pretty c <+> "=" <+> pretty i <> "," | (i, c) <- zip [0 :: Int ..] ctors])
     , "}"

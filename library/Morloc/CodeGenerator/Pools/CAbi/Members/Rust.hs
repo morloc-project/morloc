@@ -1673,7 +1673,7 @@ rustLowerConfig mask =
         in if null xs
              then arm
              else arm <> parens ("::std::boxed::Box::new" <> parens (RP.tupled1 xs))
-    , lcEnumLit = \cv n _ -> pretty (unCVar cv) <> "::" <> pretty n
+    , lcEnumLit = \cv _ n _ -> pretty (unCVar cv) <> "::" <> pretty n
     , lcVariantTagTest = \cv n _ subj ->
         "matches!" <> tupled [subj, pretty (unCVar cv) <> "::" <> pretty n <> " { .. }"]
     -- The whole payload sits behind one box, mirroring the wire form, so an
@@ -1691,7 +1691,8 @@ rustLowerConfig mask =
           <+> "=> mlc_b." <> pretty i <> ".clone(),"
           <+> "_ => unreachable!()"
           <+> "}"
-    , lcTagTest = \a b -> parens (a <+> "==" <+> b)
+    , lcEnumTagTest = \cv _ n _ subj ->
+        parens (subj <+> "==" <+> pretty (unCVar cv) <> "::" <> pretty n)
     , lcCoerceOptional = \x -> "Some(" <> x <> ")"
     , lcTypeOf = \t -> Just . toIType <$> rustTypeOf t
     -- The serialize / raw-deserialize types use the WIRE form: a closure nested

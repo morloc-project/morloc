@@ -426,24 +426,24 @@ data LowerConfig m = LowerConfig
   -- Each backend constructs one its own way -- a Rust or C++ enum arm takes
   -- its fields positionally, a Python dataclass is called by name, an R S3
   -- value is a classed list -- so there is no shared spelling to default to.
-  , lcEnumLit :: CVar -> Text -> Int -> MDoc
+  , lcEnumLit :: CVar -> [Text] -> Text -> Int -> MDoc
   -- ^ Render a `data` constructor as a value in this language: the enum's
-  -- concrete type name, the constructor's name, and its 0-based tag.
+  -- concrete type name, every constructor in declaration order, the
+  -- constructor's own name, and its 0-based tag.
   --
-  -- All three are needed because the backends disagree about what an enum
+  -- All four are needed because the backends disagree about what an enum
   -- value IS. C++ and Rust name it (@DNA::A@). Python receives the tag as a
-  -- plain int from the runtime, so the tag is the value. R holds a factor,
-  -- whose storage is 1-based, so it needs the tag AND the name.
+  -- plain int from the runtime, so the tag is the value. R holds an ordered
+  -- factor, which is its whole level set plus a 1-based code into it, so a
+  -- literal cannot be written without the other constructors.
   , lcVariantTagTest :: CVar -> Text -> Int -> MDoc -> MDoc
   -- ^ Test whether a payload-bearing value carries a given arm: the type's
   -- concrete name, the arm's name, its tag, and the subject.
   --
-  -- Separate from 'lcTagTest' for the reason that hook's own note predicts:
-  -- once arms carry arguments, equality would compare payloads where a
-  -- pattern must test the discriminant alone. Every backend asks a
-  -- different way (@matches!@, @holds_alternative@, @isinstance@,
-  -- @inherits@), and none of them can be spelled from two rendered
-  -- expressions, so the arm has to arrive as data.
+  -- Separate from 'lcEnumTagTest' because an arm carries arguments:
+  -- equality would compare payloads where a pattern must test the
+  -- discriminant alone. Every backend asks a different way (@matches!@,
+  -- @holds_alternative@, @isinstance@, @inherits@).
   , lcCtorField :: CVar -> Text -> Int -> MDoc -> MDoc
   -- ^ Read one field out of a value whose arm is already established: the
   -- type's concrete name, the arm's name, the field's index, the subject.
@@ -451,18 +451,19 @@ data LowerConfig m = LowerConfig
   -- Only ever emitted under a passing tag test, and unreachable from
   -- surface syntax -- a getter aimed at a `data` type is rejected, because
   -- which fields exist depends on the constructor.
-  , lcTagTest :: MDoc -> MDoc -> MDoc
-  -- ^ Test whether a value carries a given constructor's tag
-  -- ('IntrTagTest'). Default is native @==@, which is the right answer in
-  -- every backend today: an argument-free constructor holds nothing, so
-  -- comparing values compares tags. Python's @IntEnum@, R's factor, a C++
-  -- @enum class@ and a Rust @enum@ all spell it the same way.
+  , lcEnumTagTest :: CVar -> [Text] -> Text -> Int -> MDoc -> MDoc
+  -- ^ Test whether an argument-free constructor's value carries a given
+  -- tag ('IntrTagTest'): the enum's concrete type name, every constructor
+  -- in declaration order, the constructor under test, its 0-based tag, and
+  -- the subject.
   --
-  -- It is a hook rather than a hard-coded @==@ because that coincidence
-  -- ends when constructors carry arguments: equality would then compare
-  -- payloads where a pattern must test the discriminant alone, and each
-  -- language has its own way to ask (@holds_alternative@, @matches!@,
-  -- @isinstance@).
+  -- Sibling of 'lcVariantTagTest', and takes the same arguments for the
+  -- same reason: a test cannot be spelled from two rendered expressions
+  -- alone. An enum holds nothing but its tag, so every backend still
+  -- writes a native @==@ -- but against different right-hand sides, and R
+  -- deliberately compares against the bare constructor name rather than
+  -- against the factor 'lcEnumLit' builds, which would allocate a whole
+  -- level set per test.
   , lcCoerceOptional :: MDoc -> MDoc
   -- ^ Widen a value to an optional (@CoerceToOptional@). Default is identity: in
   -- C++/Python/R a @T@ is a valid @?T@ (their serializers are schema-driven). In
@@ -1146,7 +1147,7 @@ lowerNativeExprRaw cfg _ (StrN_ (FV _ cv) v) =
   let hint = if cv == CV "" then Nothing else Just (unCVar cv)
   in return $ defaultValue {poolExpr = lcPrintExpr cfg (IStrLit hint v)}
 lowerNativeExprRaw cfg _ (EnumN_ t n i)
-  | EnumF (FV _ cv) _ <- t = return $ defaultValue {poolExpr = lcEnumLit cfg cv n i}
+  | EnumF (FV _ cv) names <- t = return $ defaultValue {poolExpr = lcEnumLit cfg cv names n i}
   | otherwise = error $ "constructor literal carries a non-enum type: " <> show (pretty t)
 lowerNativeExprRaw cfg _ (VariantN_ t n i xs)
   | VariantF (FV _ cv) _ <- t = return $ mergePoolDocs (lcVariantLit cfg cv n i) xs
@@ -1304,13 +1305,12 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrClose maySchema [handleDocs]) =
            | otherwise                                 = IIntrinsicClose raw
   in return $ handleDocs { poolExpr = lcPrintExpr cfg node }
 -- A constructor-pattern tag test. No schema and no runtime call: the whole
--- operation is a comparison in the target language, so it lowers through
--- 'lcTagTest' (native @==@ by default). See the note on 'IntrTagTest' for
--- why this is a tag test rather than an equality.
--- A constructor-pattern tag test. The arm arrives as a literal name, so the
--- subject's own type decides how to ask: an enum compares values, because
--- for an argument-free constructor the value IS the tag; a variant must test
--- the discriminant without touching the payload.
+-- operation is a comparison in the target language. The arm arrives as a
+-- literal name, so the subject's own type decides how to ask -- an enum
+-- compares values, because for an argument-free constructor the value IS
+-- the tag, while a variant must test the discriminant without touching the
+-- payload. See the note on 'IntrTagTest' for why this is a tag test rather
+-- than an equality.
 lowerNativeExprRaw cfg (IntrinsicN _ _ _ [subjectE, StrN _ n]) (IntrinsicN_ _ IntrTagTest _ [subjectDocs, _]) =
   case typeFof subjectE of
     VariantF (FV _ cv) arms ->
@@ -1319,8 +1319,8 @@ lowerNativeExprRaw cfg (IntrinsicN _ _ _ [subjectE, StrN _ n]) (IntrinsicN_ _ In
         [subjectDocs]
     EnumF (FV _ cv) names ->
       return $ mergePoolDocs
-        (const (lcTagTest cfg (poolExpr subjectDocs)
-                  (lcEnumLit cfg cv n (armIndex n names))))
+        (const (lcEnumTagTest cfg cv names n (armIndex n names)
+                  (poolExpr subjectDocs)))
         [subjectDocs]
     t -> error $ "tag test on a type that is not a `data`: " <> show (pretty t)
 -- Reading one field out of a value whose arm a guarding tag test has already

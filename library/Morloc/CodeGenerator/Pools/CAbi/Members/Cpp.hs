@@ -776,14 +776,15 @@ cppLowerConfig reifyThunks =
         let arm = pretty (unCVar cv) <> "_" <> pretty n
         in pretty (unCVar cv) <> "{std::make_shared<" <> arm <> ">"
              <> parens (arm <> encloseSep "{" "}" ", " xs) <> "}"
-    , lcEnumLit = \cv n _ -> pretty (unCVar cv) <> "::" <> pretty n
+    , lcEnumLit = \cv _ n _ -> pretty (unCVar cv) <> "::" <> pretty n
     , lcVariantTagTest = \cv n _ subj ->
         "std::holds_alternative<std::shared_ptr<" <> pretty (unCVar cv) <> "_"
           <> pretty n <> ">>" <> parens (parens subj <> ".v")
     , lcCtorField = \cv n i subj ->
         "std::get<std::shared_ptr<" <> pretty (unCVar cv) <> "_" <> pretty n <> ">>"
           <> parens (parens subj <> ".v") <> "->f" <> pretty i
-    , lcTagTest = \a b -> parens (a <+> "==" <+> b)
+    , lcEnumTagTest = \cv _ n _ subj ->
+        parens (subj <+> "==" <+> pretty (unCVar cv) <> "::" <> pretty n)
     , lcCoerceOptional = \x -> "std::make_optional(" <> x <> ")"
     , lcTypeOf = \t -> Just . toIType <$> cppTypeOf t
     , lcSerialAstType = serializeTypeOf

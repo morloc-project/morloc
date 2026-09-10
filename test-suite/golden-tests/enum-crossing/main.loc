@@ -28,6 +28,8 @@ module main
   , cppToR
   , rToRust
   , listComp
+  , rListComp
+  , rNames
   , optId
   )
 
@@ -43,7 +45,7 @@ data Rust => DNA = "DNA"
 
 source Py   from "dna.py"  ("complement" as pyComp, "complement_all" as listComp, "opt_id" as optId)
 source Cpp  from "dna.hpp" ("complement" as cppComp)
-source R    from "dna.R"   ("complement" as rComp)
+source R    from "dna.R"   ("complement" as rComp, "complement_all" as rListComp, "names_of" as rNames)
 source Rust from "dna.rs"  ("complement" as rustComp)
 
 pyComp   :: DNA -> DNA
@@ -51,6 +53,8 @@ cppComp  :: DNA -> DNA
 rComp    :: DNA -> DNA
 rustComp :: DNA -> DNA
 listComp :: [DNA] -> [DNA]
+rListComp :: [DNA] -> [DNA]
+rNames :: [DNA] -> [DNA]
 optId    :: ?DNA -> ?DNA
 
 -- Complementing twice is the identity, so each of these is a round trip

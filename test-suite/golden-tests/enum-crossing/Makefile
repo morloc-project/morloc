@@ -22,6 +22,10 @@ all:
 	./nexus rToRust T >> obs.txt 2>> obs.err
 	echo "--- listComp ---" >> obs.txt
 	./nexus listComp '["A","C","G","T"]' >> obs.txt 2>> obs.err
+	echo "--- rListComp ---" >> obs.txt
+	./nexus rListComp '["A","C","G","T"]' >> obs.txt 2>> obs.err
+	echo "--- rNames ---" >> obs.txt
+	./nexus rNames '["G","T"]' >> obs.txt 2>> obs.err
 	echo "--- optIdValue ---" >> obs.txt
 	./nexus optId G >> obs.txt 2>> obs.err
 	echo "--- optIdNull ---" >> obs.txt

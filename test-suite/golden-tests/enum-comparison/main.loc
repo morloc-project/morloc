@@ -1,0 +1,93 @@
+-- Comparing a `data` value gives the same answer wherever the comparison
+-- is realized.
+--
+-- A constructor's tag is its position in the declaration, so `==` compares
+-- constructors and `<` orders them as they were written. Which pool a
+-- comparison lands in is the realizer's choice rather than the author's,
+-- so an answer that depends on the pool is a wrong answer in three of the
+-- four languages.
+--
+-- R is the case this test was written for. Its enum is a factor, and a
+-- factor is only comparable in level order when it is ORDERED -- an
+-- unordered one answers NA for `<`. Both halves have to agree, too: a
+-- value read off the wire and a literal written into the pool are the
+-- same ordered factor, and `form` says so. A literal written as a bare
+-- string compares as a character against an integer code and is equal to
+-- nothing at all.
+--
+-- Each comparison is pinned to one language by pairing it with an
+-- identity function sourced there. `nexusEq` and `nexusLt` name no source
+-- at all, so they stay in the nexus, which compares the wire bytes.
+
+module main
+  ( nexusEq
+  , nexusLt
+  , eqR
+  , ltR
+  , geR
+  , eqPy
+  , ltPy
+  , eqCpp
+  , ltCpp
+  , eqRust
+  , ltRust
+  , formWireR
+  , formLitR
+  )
+
+import root-r
+import root-py
+import root-cpp
+import root-rust
+
+data Color = Red | Green | Blue
+
+source R    from "compare.R"   ("ident" as idR, "form" as formR)
+source Py   from "compare.py"  ("ident" as idPy)
+source Cpp  from "compare.hpp" ("ident" as idCpp)
+source Rust from "compare.rs"  ("ident" as idRust)
+
+idR    :: Color -> Color
+idPy   :: Color -> Color
+idCpp  :: Color -> Color
+idRust :: Color -> Color
+formR  :: Color -> Str
+
+nexusEq :: Color -> Bool
+nexusEq c = c == Green
+
+nexusLt :: Color -> Bool
+nexusLt c = c < Green
+
+eqR :: Color -> Bool
+eqR c = idR c == Green
+
+ltR :: Color -> Bool
+ltR c = idR c < Green
+
+geR :: Color -> Bool
+geR c = idR c >= Green
+
+eqPy :: Color -> Bool
+eqPy c = idPy c == Green
+
+ltPy :: Color -> Bool
+ltPy c = idPy c < Green
+
+eqCpp :: Color -> Bool
+eqCpp c = idCpp c == Green
+
+ltCpp :: Color -> Bool
+ltCpp c = idCpp c < Green
+
+eqRust :: Color -> Bool
+eqRust c = idRust c == Green
+
+ltRust :: Color -> Bool
+ltRust c = idRust c < Green
+
+formWireR :: Color -> Str
+formWireR c = formR c
+
+formLitR :: Str
+formLitR = formR Blue

@@ -441,6 +441,11 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
                                 for(size_t i = 0; i < length; i++){
                                     size += get_shm_size(schema->parameters[0], STRING_ELT(obj, i));
                                 }
+                            } else if(schema->parameters[0]->type == MORLOC_ENUM){
+                                // Constructor names, which cost a tag byte
+                                // each: the names travel in the schema and
+                                // never in the buffer.
+                                size += length * schema->parameters[0]->width;
                             } else {
                                 MORLOC_ERROR("Expected character vector of length 1, but got length %zu", length);
                             }
@@ -598,9 +603,15 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
         *(CTYPE*)dest = (CTYPE)value; \
     } while(0)
 
-// An enum's R form is a factor: integer storage plus a levels attribute,
-// which is R's own enum. The names come from the schema, so nothing has to
-// be generated into the pool.
+// An enum's R form is an ordered factor: integer storage plus a levels
+// attribute, which is R's own enum. The names come from the schema, so
+// nothing has to be generated into the pool.
+//
+// Ordered, not plain: a constructor's declaration position is its tag, and
+// comparison follows that order in every other language. An unordered
+// factor makes `<` return NA with a warning, so an ordering that holds
+// everywhere else answers NA here. The levels are in declaration order, so
+// R's own comparison then agrees with the wire tag.
 //
 // Factor codes are 1-based while the wire tag is 0-based. Both directions
 // of that conversion live here and nowhere else, because an off-by-one
@@ -611,9 +622,39 @@ static void attach_factor_levels(SEXP obj, const Schema* schema) {
     for (size_t i = 0; i < schema->size; i++) {
         SET_STRING_ELT(levels, (R_xlen_t)i, mkChar(schema->keys[i]));
     }
+    SEXP klass = PROTECT(allocVector(STRSXP, 2));
+    SET_STRING_ELT(klass, 0, mkChar("ordered"));
+    SET_STRING_ELT(klass, 1, mkChar("factor"));
     setAttrib(obj, R_LevelsSymbol, levels);
-    setAttrib(obj, R_ClassSymbol, mkString("factor"));
-    UNPROTECT(1);
+    setAttrib(obj, R_ClassSymbol, klass);
+    UNPROTECT(2);
+}
+
+// Resolve a constructor name against the schema's table. A constructor's
+// position in the declaration IS its wire tag. Returns -1 when the name is
+// not a constructor of this type.
+static long enum_tag_of_name(const Schema* schema, const char* name) {
+    for (size_t i = 0; i < schema->size; i++) {
+        if (strcmp(name, schema->keys[i]) == 0) {
+            return (long)i;
+        }
+    }
+    return -1;
+}
+
+// The tag a factor's code means, resolved through the factor's OWN levels
+// rather than through its integer code. attach_factor_levels builds levels
+// in schema order on the way out, but a factor a user built in sourced R
+// carries whatever order R chose -- factor("G", levels = c("T","G","C","A"))
+// has code 2, and taking that as the tag silently decodes as the schema's
+// second constructor. Returns -1 for a code with no level; -2 for a level
+// that is not a constructor of this type.
+static long enum_tag_of_factor_code(const Schema* schema, SEXP levels, int code) {
+    if (isNull(levels) || code == NA_INTEGER || code < 1 || code > LENGTH(levels)) {
+        return -1;
+    }
+    long tag = enum_tag_of_name(schema, CHAR(STRING_ELT(levels, code - 1)));
+    return tag < 0 ? -2 : tag;
 }
 
 #define HANDLE_UINT_TYPE(CTYPE, MAX) \
@@ -746,37 +787,19 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
             // factor code, and the two differ by one.
             long tag = -1;
             if (isFactor(obj)) {
-                // Resolve through the factor's OWN levels rather than
-                // trusting its integer code. attach_factor_levels builds
-                // levels in schema order on the way out, but a factor a
-                // user built in sourced R carries whatever order R chose --
-                // factor("G", levels = c("T","G","C","A")) has code 2, and
-                // taking that as the tag silently decodes as the schema's
-                // second constructor.
                 SEXP levels = getAttrib(obj, R_LevelsSymbol);
                 int code = asInteger(obj);
-                if (isNull(levels) || code == NA_INTEGER
-                    || code < 1 || code > LENGTH(levels)) {
+                tag = enum_tag_of_factor_code(schema, levels, code);
+                if (tag == -1) {
                     MORLOC_ERROR("factor has no level for its code");
                 }
-                const char* name = CHAR(STRING_ELT(levels, code - 1));
-                for (size_t i = 0; i < schema->size; i++) {
-                    if (strcmp(name, schema->keys[i]) == 0) {
-                        tag = (long)i;
-                        break;
-                    }
-                }
-                if (tag < 0) {
-                    MORLOC_ERROR("'%s' is not a constructor of this type", name);
+                if (tag == -2) {
+                    MORLOC_ERROR("'%s' is not a constructor of this type",
+                                 CHAR(STRING_ELT(levels, code - 1)));
                 }
             } else if (isString(obj) && LENGTH(obj) == 1) {
                 const char* name = CHAR(STRING_ELT(obj, 0));
-                for (size_t i = 0; i < schema->size; i++) {
-                    if (strcmp(name, schema->keys[i]) == 0) {
-                        tag = (long)i;
-                        break;
-                    }
-                }
+                tag = enum_tag_of_name(schema, name);
                 if (tag < 0) {
                     MORLOC_ERROR("'%s' is not a constructor of this type", name);
                 }
@@ -932,6 +955,43 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
                 start = R_TRY(rel2abs, array->data);
                 R_TRY(mlc_write_handles_voidstar,
                     handles, array->size, start, element_schema->width, cursor);
+                break;
+            }
+
+            // An enum array is one vector carrying the levels, not a
+            // sequence of values that each carry them: pull an element out
+            // of a factor and the levels stay behind, leaving a bare
+            // integer the scalar path rejects. Resolve the whole vector
+            // here instead. A character vector of constructor names is
+            // accepted for the same reason the scalar path accepts one.
+            if (element_schema->type == MORLOC_ENUM
+                && (isFactor(obj) || TYPEOF(obj) == STRSXP)) {
+                *cursor = (void*)(*(char**)cursor + array->size * element_schema->width);
+                start = R_TRY(rel2abs, array->data);
+                SEXP levels = isFactor(obj)
+                    ? getAttrib(obj, R_LevelsSymbol)
+                    : R_NilValue;
+                for (size_t i = 0; i < array->size; i++) {
+                    long tag;
+                    if (isFactor(obj)) {
+                        int code = INTEGER(obj)[i];
+                        tag = enum_tag_of_factor_code(element_schema, levels, code);
+                        if (tag == -1) {
+                            MORLOC_ERROR("factor has no level for its code");
+                        }
+                        if (tag == -2) {
+                            MORLOC_ERROR("'%s' is not a constructor of this type",
+                                         CHAR(STRING_ELT(levels, code - 1)));
+                        }
+                    } else {
+                        const char* name = CHAR(STRING_ELT(obj, i));
+                        tag = enum_tag_of_name(element_schema, name);
+                        if (tag < 0) {
+                            MORLOC_ERROR("'%s' is not a constructor of this type", name);
+                        }
+                    }
+                    *(uint8_t*)(start + i * element_schema->width) = (uint8_t)tag;
+                }
                 break;
             }
 

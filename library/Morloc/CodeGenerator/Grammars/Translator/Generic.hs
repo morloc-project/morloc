@@ -440,8 +440,20 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
               -- A one-element Python tuple needs its trailing comma INSIDE
               -- the parentheses, or it is just a parenthesised value.
               else tupled [dquotes (pretty n), pyTuple xs]
-        , lcEnumLit = \_ n i ->
-            if ldEnumLitByName desc then dquotes (pretty n) else pretty i
+        , lcEnumLit = \_ names n i ->
+            if ldEnumLitByName desc
+              -- An R enum value is an ordered factor: its whole level set
+              -- plus a code into it. A literal has to be built the same
+              -- way, or the same morloc value has one R type when it is
+              -- read off the wire and another when it is written here --
+              -- and then `==` compares an integer code against a string
+              -- and `<` compares constructor names alphabetically.
+              then "factor" <> tupled
+                     [ dquotes (pretty n)
+                     , "levels =" <+> "c" <> tupled (map (dquotes . pretty) names)
+                     , "ordered = TRUE"
+                     ]
+              else pretty i
         -- TEMPORARY REPRESENTATION. A payload-bearing `data` crosses into
         -- Python and R as a STRUCTURAL pair -- the constructor's name and a
         -- sequence of its fields -- rather than as a declared native type.
@@ -465,7 +477,15 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
               -- plus one; the wire index is what the compiler carries.
               then subj <> "[[2]][[" <> pretty (i + 1) <> "]]"
               else parens subj <> "[1][" <> pretty i <> "]"
-        , lcTagTest = \a b -> parens (a <+> "==" <+> b)
+        -- A Python enum value IS its ordinal, so the test is against the
+        -- tag. An R one is a factor, and R matches a factor to a character
+        -- by label -- so comparing against the bare name runs the same test
+        -- the factor-to-factor form would, without building a level set to
+        -- run it against.
+        , lcEnumTagTest = \_ _ n i subj ->
+            if ldEnumLitByName desc
+              then parens (subj <+> "==" <+> dquotes (pretty n))
+              else parens (subj <+> "==" <+> pretty i)
         , lcCoerceOptional = id
         , lcTypeOf = \_ -> return Nothing
         , lcSerialAstType = \_ -> return Nothing

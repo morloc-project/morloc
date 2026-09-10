@@ -18,6 +18,10 @@
 "T"
 --- listComp ---
 ["T","G","C","A"]
+--- rListComp ---
+["T","G","C","A"]
+--- rNames ---
+["G","T"]
 --- optIdValue ---
 "G"
 --- optIdNull ---
