@@ -1,0 +1,13 @@
+-- Asking for a measurement and then nulling the only way it could be reported
+-- is contradictory, and is rejected rather than silently collecting timings
+-- that nothing will ever print.
+
+module bad (go)
+
+import root-py
+
+double :: Int -> Int
+double x = x * 2
+
+go :: Int -> Int
+go x = m@double x

@@ -195,6 +195,11 @@ pub struct RunLog {
     pub epilogue_ok: Option<String>,
     #[serde(default)]
     pub epilogue_fail: Option<String>,
+    /// Row shape for the end-of-run benchmark summary. Present when any
+    /// label carries `benchmark: true`; the nexus aggregates that
+    /// label's timing records and renders one row per label through it.
+    #[serde(default)]
+    pub benchmark_summary: Option<String>,
 }
 
 /// A single language pool daemon. Each pool is one OS process that

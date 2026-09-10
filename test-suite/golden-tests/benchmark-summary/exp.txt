@@ -1,0 +1,15 @@
+24
+BENCH quick incr py n=3
+BENCH slow triple py n=1
+45
+BENCH deep triple cpp n=2
+16
+BENCH quick incr py n=1
+BENCH slow triple py n=1
+80
+BENCH rs quad rust n=2
+rs start=2 pass=2
+unlogged=0
+exit:1
+rs fail=1 rows=0
+"rejected"

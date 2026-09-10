@@ -73,6 +73,10 @@ parse f (Code code) = do
   -- subfield neither this nor the per-label config supplies.
   MM.modify (\st -> st {stateLogTemplate = moduleConfigLogTemplate moduleConfig})
 
+  -- Likewise the program-wide @benchmark-template@: one row shape for the
+  -- end-of-run summary the nexus renders from every label's timings.
+  MM.modify (\st -> st {stateBenchTemplate = moduleConfigBenchTemplate moduleConfig})
+
   -- The main module's run-scope @prologue@ / @epilogue@ templates are
   -- rendered by the nexus at run boundaries. Sub-modules cannot
   -- contribute to these (a workflow has exactly one entry-point, so

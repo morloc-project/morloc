@@ -53,6 +53,10 @@ pub use morloc_runtime_types::schema::{parse_schema, Schema, SerialType};
 // NOT linked into this rlib; an rlib may carry undefined references.
 // ---------------------------------------------------------------------------
 extern "C" {
+    fn morloc_log_next_id() -> u64;
+    fn morloc_log_emit(tmpl: *const c_char, group: *const c_char,
+                       runtime_seconds: f64, call_id: u64);
+    fn morloc_bench_record(key: *const c_char, seconds: f64);
     fn shmalloc(size: usize, errmsg: *mut *mut c_char) -> *mut c_void;
     fn shfree(ptr: *mut c_void, errmsg: *mut *mut c_char) -> bool;
     fn shincref(ptr: *mut c_void, errmsg: *mut *mut c_char) -> bool;
@@ -429,6 +433,86 @@ impl Drop for FrameGuard {
             TRACEBACK.with(|t| t.borrow_mut().push_str(self.frame));
         }
     }
+}
+
+/// RAII wrapper for a labeled manifold: emits the start line on construction,
+/// the pass line and the benchmark record when the body returns, and the fail
+/// line if the body unwinds instead.
+///
+/// A guard rather than a `catch_unwind` because the failure path is exactly
+/// what `Drop` already models: `catch_unwind` would demand `UnwindSafe` of
+/// every manifold body, which a body holding raw pointers cannot promise.
+///
+/// The template strings are NUL-terminated literals emitted by the compiler,
+/// so they are passed straight through without an allocation. An absent
+/// template (the user nulled that subfield) is an empty string, and empty
+/// means "emit nothing".
+pub struct LogGuard {
+    group: &'static str,
+    pass_tmpl: &'static str,
+    fail_tmpl: &'static str,
+    bench_key: &'static str,
+    call_id: u64,
+    t0: std::time::Instant,
+}
+
+impl LogGuard {
+    #[inline]
+    pub fn new(
+        group: &'static str,
+        start_tmpl: &'static str,
+        pass_tmpl: &'static str,
+        fail_tmpl: &'static str,
+        bench_key: &'static str,
+    ) -> LogGuard {
+        let call_id = unsafe { morloc_log_next_id() };
+        if !start_tmpl.is_empty() {
+            emit_log(start_tmpl, group, 0.0, call_id);
+        }
+        LogGuard {
+            group,
+            pass_tmpl,
+            fail_tmpl,
+            bench_key,
+            call_id,
+            t0: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Drop for LogGuard {
+    /// Both outcomes are reported from `Drop` rather than from an explicit
+    /// call at the end of the body: a generated manifold body ends in
+    /// `return <expr>;`, so any statement placed after it is unreachable.
+    /// Dropping happens on every path out, and `thread::panicking()` is what
+    /// separates the two. Only the success path records a timing -- a call
+    /// that unwound did not do the work being measured.
+    #[inline]
+    fn drop(&mut self) {
+        let dt = self.t0.elapsed().as_secs_f64();
+        if std::thread::panicking() {
+            if !self.fail_tmpl.is_empty() {
+                emit_log(self.fail_tmpl, self.group, dt, self.call_id);
+            }
+            return;
+        }
+        if !self.pass_tmpl.is_empty() {
+            emit_log(self.pass_tmpl, self.group, dt, self.call_id);
+        }
+        if !self.bench_key.is_empty() {
+            if let Ok(k) = CString::new(self.bench_key) {
+                unsafe { morloc_bench_record(k.as_ptr(), dt) };
+            }
+        }
+    }
+}
+
+fn emit_log(tmpl: &str, group: &str, seconds: f64, call_id: u64) {
+    let (t, g) = match (CString::new(tmpl), CString::new(group)) {
+        (Ok(t), Ok(g)) => (t, g),
+        _ => return,
+    };
+    unsafe { morloc_log_emit(t.as_ptr(), g.as_ptr(), seconds, call_id) };
 }
 
 struct ShmGuard(Option<*mut c_void>);

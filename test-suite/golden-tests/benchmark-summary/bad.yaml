@@ -1,0 +1,5 @@
+benchmark-template:
+  summary: null
+
+labeled-groups:
+  m: { benchmark: true }

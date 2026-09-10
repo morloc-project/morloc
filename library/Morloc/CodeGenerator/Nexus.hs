@@ -2859,6 +2859,7 @@ buildManifest ManifestInputs{..} =
         [ ("prologue",     maybe jsonNull jsonStr (renderedPrologue rl))
         , ("epilogue_ok",   maybe jsonNull jsonStr (renderedEpilogueOk rl))
         , ("epilogue_fail", maybe jsonNull jsonStr (renderedEpilogueFail rl))
+        , ("benchmark_summary", maybe jsonNull jsonStr (renderedBenchSummary rl))
         ]
 
     -- Emit a real JSON null when the command has no group, not the

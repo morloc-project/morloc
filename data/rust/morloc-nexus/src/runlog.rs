@@ -174,6 +174,115 @@ pub fn emit_prologue() {
     });
 }
 
+/// One label's timings, folded as records are read.
+#[derive(Default)]
+struct Agg {
+    count: u64,
+    total: f64,
+    min: f64,
+    max: f64,
+    /// Sum of squares, for the sample standard deviation.
+    sumsq: f64,
+}
+
+impl Agg {
+    fn push(&mut self, x: f64) {
+        if self.count == 0 {
+            self.min = x;
+            self.max = x;
+        } else {
+            if x < self.min {
+                self.min = x;
+            }
+            if x > self.max {
+                self.max = x;
+            }
+        }
+        self.count += 1;
+        self.total += x;
+        self.sumsq += x * x;
+    }
+
+    fn mean(&self) -> f64 {
+        if self.count == 0 {
+            0.0
+        } else {
+            self.total / self.count as f64
+        }
+    }
+
+    /// Sample standard deviation; zero for a single observation.
+    fn stddev(&self) -> f64 {
+        if self.count < 2 {
+            return 0.0;
+        }
+        let n = self.count as f64;
+        let var = (self.sumsq - self.total * self.total / n) / (n - 1.0);
+        if var > 0.0 {
+            var.sqrt()
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Read the run's benchmark records and emit one summary row per label.
+///
+/// Records are written by the pools as they run (see `morloc_bench_record`),
+/// so by the time the nexus is exiting every completed call is on disk. Rows
+/// are ordered by (group, name, lang) rather than by arrival: the point of a
+/// benchmark is comparing runs, which a nondeterministic row order defeats.
+pub fn emit_benchmark_summary() {
+    let st = match STATE.get() {
+        Some(s) => s,
+        None => return,
+    };
+    let tmpl = match st.run_log.as_ref().and_then(|rl| rl.benchmark_summary.as_deref()) {
+        Some(t) => t,
+        None => return,
+    };
+    let path = match std::env::var_os("MORLOC_BENCH_RECORDS") {
+        Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
+        _ => return,
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        // No file means no benchmarked call ran; nothing to report.
+        Err(_) => return,
+    };
+
+    let mut aggs: std::collections::BTreeMap<(String, String, String), Agg> =
+        std::collections::BTreeMap::new();
+    for line in text.lines() {
+        let mut f = line.split('\t');
+        let (group, name, lang, secs) = match (f.next(), f.next(), f.next(), f.next()) {
+            (Some(g), Some(n), Some(l), Some(s)) => (g, n, l, s),
+            _ => continue,
+        };
+        let secs: f64 = match secs.parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        aggs.entry((group.to_string(), name.to_string(), lang.to_string()))
+            .or_default()
+            .push(secs);
+    }
+
+    for ((group, name, lang), a) in aggs {
+        let row = tmpl
+            .replace("{group}", &group)
+            .replace("{name}", &name)
+            .replace("{lang}", &lang)
+            .replace("{count}", &a.count.to_string())
+            .replace("{mean}", &format!("{:.6}", a.mean()))
+            .replace("{min}", &format!("{:.6}", a.min))
+            .replace("{max}", &format!("{:.6}", a.max))
+            .replace("{total}", &format!("{:.6}", a.total))
+            .replace("{stddev}", &format!("{:.6}", a.stddev()));
+        emit(&row);
+    }
+}
+
 /// Render and emit the appropriate epilogue branch. Idempotent. Called
 /// from `clean_exit`; safe to call from multiple paths.
 pub fn emit_epilogue(exit_code: i32) {

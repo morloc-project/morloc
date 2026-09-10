@@ -453,6 +453,20 @@ void morloc_log_emit(
     uint64_t call_id
 );
 
+// Record one timing for a `benchmark: true` labeled manifold. `key` is
+// the pre-rendered "group\tname\tlang" identity the compiler stamped on
+// the manifold; `seconds` is the duration of one successful call. The
+// record is appended to <tmpdir>/benchmark.records, which the nexus
+// aggregates at end of run into one summary row per label.
+//
+// A file rather than an in-process counter because pools do not share a
+// process model: C++/Rust run worker threads, Python/R fork worker
+// processes, and a counter in a forked child dies with it. Appends are
+// short enough to be atomic under O_APPEND, so concurrent workers --
+// threads or processes -- interleave whole records. NULL `key` is a
+// no-op, as is any call under MORLOC_QUIET.
+void morloc_bench_record(const char* key, double seconds);
+
 // ========================================================================
 // Per-run workdir lifecycle
 // ========================================================================

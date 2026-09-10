@@ -39,6 +39,7 @@ module Morloc.CodeGenerator.LogTemplate
   ( RenderedTemplate (..)
   , RenderedRunLog (..)
   , defaultLogTemplate
+  , defaultBenchSummary
   , collectRenderedTemplates
   , renderRunLogTemplate
   ) where
@@ -64,11 +65,17 @@ data RenderedTemplate = RenderedTemplate
   , renderedPass :: Maybe Text
   , renderedFail :: Maybe Text
   , renderedGroup :: Text
-    -- ^ The label group name (e.g. @\"a\"@ for @a:foo@). Passed through
+    -- ^ The label group name (e.g. @\"a\"@ for @a\@foo@). Passed through
     -- to the pool's log emit helper so a per-label log file under
     -- @$MORLOC_RUN_DIR/<group>/log@ can be opened. Empty when the
     -- manifold somehow lacks a label, in which case the per-label tee
     -- is suppressed at runtime.
+  , renderedBenchKey :: Maybe Text
+    -- ^ @Just \"group\\tname\\tlang\"@ when the label carries
+    -- @benchmark: true@: the identity the pool stamps on each timing
+    -- record for the nexus to aggregate at end of run. 'Nothing' leaves
+    -- the manifold unmeasured. Tab-separated because group, name and
+    -- language are all identifiers, so none can contain a tab.
   }
   deriving (Show, Eq, Generic)
 
@@ -84,8 +91,16 @@ defaultLogTemplate =
     , logTemplateFail = Just "[{date}] {module}:{line}:{name}:{lang} fail (time={runtime})"
     }
 
+-- | The built-in benchmark summary row. Readable rather than
+-- machine-shaped, because it is what a user sees on first flipping
+-- @benchmark: true@; a suite that wants columns overrides it.
+defaultBenchSummary :: Text
+defaultBenchSummary =
+  "{group}:{name} [{lang}] n={count} mean={mean} min={min} max={max}"
+
 -- | Walk 'stateManifoldConfig' and render templates for every labeled
--- midx that has @log: true@. Static placeholders are substituted from
+-- midx that has @log: true@ or @benchmark: true@. Static placeholders
+-- are substituted from
 -- 'stateName' (for @{name}@), 'stateSourceMap' (for @{module}@,
 -- @{line}@, @{column}@), and per-call info. Returns a map keyed by
 -- midx; codegen drops the result into per-language helper calls.
@@ -101,7 +116,7 @@ collectRenderedTemplates lang = do
   Map.fromList <$> mapM (renderOne lang programDefault names srcMap)
     [ (midx, cfg)
     | (midx, cfg) <- Map.toList cfgs
-    , manifoldConfigLog cfg == Just True
+    , manifoldConfigLog cfg == Just True || manifoldConfigBenchmark cfg == Just True
     , isJustLabel cfg
     ]
   where
@@ -118,7 +133,7 @@ renderOne ::
   MorlocMonad (Int, RenderedTemplate)
 renderOne lang programDefault names srcMap (midx, cfg) = do
   case manifoldConfigLogTemplate cfg of
-    Just (LogTemplate Nothing Nothing Nothing) ->
+    Just (LogTemplate Nothing Nothing Nothing) | logging ->
       MM.throwSourcedError srcIdx $
         "Labeled manifold has 'log: true' but its 'log-template' nulls"
         <+> "every subfield. This combination is contradictory; either"
@@ -127,18 +142,31 @@ renderOne lang programDefault names srcMap (midx, cfg) = do
     _ -> return ()
   let effective = mergeTemplates (manifoldConfigLogTemplate cfg) programDefault defaultLogTemplate
       staticVars = staticBindings lang names srcMap cfg midx
-      renderField picker = traverse (\t -> renderStatic t staticVars srcIdx) (picker effective)
+      -- A label may ask for benchmarking without logging, in which case
+      -- it is measured but emits no per-call line.
+      renderField picker
+        | not logging = return Nothing
+        | otherwise = traverse (\t -> renderStatic t staticVars srcIdx) (picker effective)
       groupTxt = case manifoldConfigLabel cfg of
         Just g -> g
         Nothing -> ""
+      nameTxt = case Map.lookup (fromMaybe midx (manifoldConfigLabelIdx cfg)) names of
+        Just (EV t) -> t
+        Nothing -> ""
+      benchKey
+        | manifoldConfigBenchmark cfg == Just True =
+            Just (T.intercalate "\t" [groupTxt, nameTxt, langName lang])
+        | otherwise = Nothing
   RenderedTemplate
     <$> renderField logTemplateStart
     <*> renderField logTemplatePass
     <*> renderField logTemplateFail
     <*> pure groupTxt
+    <*> pure benchKey
     >>= \r -> return (midx, r)
   where
     srcIdx = fromMaybe midx (manifoldConfigLabelIdx cfg)
+    logging = manifoldConfigLog cfg == Just True
 
 -- | Resolve the effective template. The built-in default is used only
 -- when neither a per-label nor a program-wide template is present; once
@@ -298,6 +326,37 @@ renderStaticWith runtimeNames tmpl vars errIdx templateKind = do
               <> "; runtime placeholders:"
               <+> pretty (T.unpack (T.intercalate ", " runtimeNames)) <> "."
 
+-- | Placeholders the nexus fills for a benchmark summary row, from the
+-- aggregate of one label's timing records. Keep aligned with the Rust
+-- nexus's summary renderer in @runlog.rs@.
+benchSummaryPlaceholders :: [Text]
+benchSummaryPlaceholders =
+  [ "group"
+  , "name"
+  , "lang"
+  , "count"
+  , "mean"
+  , "min"
+  , "max"
+  , "total"
+  , "stddev"
+  ]
+
+-- | The source index of some label asking to be benchmarked, if any.
+-- Doubles as the "is benchmarking on at all" test (deciding whether the
+-- summary template reaches the manifest) and as the position to blame
+-- when the request contradicts the template -- a config mistake reads
+-- far better pointed at the @group\@term@ that asked for it than at the
+-- YAML, which has no index of its own.
+benchmarkRequested :: MorlocMonad (Maybe Int)
+benchmarkRequested = do
+  cfgs <- MM.gets stateManifoldConfig
+  return $ listToMaybe
+    [ fromMaybe midx (manifoldConfigLabelIdx cfg)
+    | (midx, cfg) <- Map.toAscList cfgs
+    , manifoldConfigBenchmark cfg == Just True
+    ]
+
 perLabelRuntimePlaceholders :: [Text]
 perLabelRuntimePlaceholders = ["date", "runtime", "id"]
 
@@ -349,6 +408,9 @@ data RenderedRunLog = RenderedRunLog
   { renderedPrologue :: Maybe Text
   , renderedEpilogueOk :: Maybe Text
   , renderedEpilogueFail :: Maybe Text
+  , renderedBenchSummary :: Maybe Text
+    -- ^ The row the nexus renders once per benchmarked label at end of
+    -- run, after aggregating that label's timing records.
   }
   deriving (Show, Eq, Generic)
 
@@ -363,9 +425,16 @@ instance Binary RenderedRunLog
 renderRunLogTemplate :: MorlocMonad (Maybe RenderedRunLog)
 renderRunLogTemplate = do
   mRunLog <- MM.gets stateRunLog
-  case mRunLog of
-    Nothing -> return Nothing
-    Just rl -> do
+  mBench <- MM.gets stateBenchTemplate
+  mBenchIdx <- benchmarkRequested
+  let benchUsed = isJust mBenchIdx
+  -- The summary is a run-scope emission like the prologue, so it travels
+  -- in the same manifest record -- which therefore has to be produced
+  -- even when the program declares no prologue or epilogue at all.
+  case (mRunLog, mBench, benchUsed) of
+    (Nothing, Nothing, False) -> return Nothing
+    _ -> do
+      let rl = fromMaybe (RunLogTemplate Nothing Nothing) mRunLog
       bindings <- runScopeStaticBindings
       let renderRunScope :: Text -> MorlocMonad Text
           renderRunScope t =
@@ -375,6 +444,25 @@ renderRunLogTemplate = do
               bindings
               0           -- run-scope templates have no per-source idx
               "prologue/epilogue template"
+      let renderBench :: Text -> MorlocMonad Text
+          renderBench t =
+            renderStaticWith
+              benchSummaryPlaceholders
+              t
+              bindings
+              0
+              "benchmark-template"
+      benchSummary <- case (mBench, benchUsed) of
+        (Just (BenchTemplate Nothing), True) ->
+          MM.throwSourcedError (fromMaybe 0 mBenchIdx) $
+            "A label carries 'benchmark: true' but 'benchmark-template'"
+            <+> "nulls its 'summary'. This combination is contradictory:"
+            <+> "the timings would be collected and never reported. Either"
+            <+> "set 'benchmark: false', or omit the 'summary' override to"
+            <+> "keep the built-in row."
+        (Just (BenchTemplate (Just t)), _) -> Just <$> renderBench t
+        (Nothing, True) -> Just <$> renderBench defaultBenchSummary
+        _ -> return Nothing
       prologue <- traverse renderRunScope (runLogPrologue rl)
       (okT, failT) <- case runLogEpilogue rl of
         Nothing -> return (Nothing, Nothing)
@@ -388,6 +476,7 @@ renderRunLogTemplate = do
             { renderedPrologue = prologue
             , renderedEpilogueOk = okT
             , renderedEpilogueFail = failT
+            , renderedBenchSummary = benchSummary
             }
 
 -- | Static placeholder bindings for run-scope templates. Pulls the

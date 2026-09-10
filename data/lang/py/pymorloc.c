@@ -1585,6 +1585,18 @@ static PyObject* pybinding__log_emit(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
+static PyObject* pybinding__bench_record(PyObject* self, PyObject* args) {
+    const char* key;
+    double seconds;
+    (void)self;
+    // key accepts None (an unmeasured label), which libmorloc treats as a no-op.
+    if (!PyArg_ParseTuple(args, "zd", &key, &seconds)) {
+        return NULL;
+    }
+    morloc_bench_record(key, seconds);
+    Py_RETURN_NONE;
+}
+
 
 // -- cache bridge to libmorloc.so -----------------------------------------
 
@@ -3509,6 +3521,7 @@ error:
 static PyMethodDef Methods[] = {
     {"log_next_id", pybinding__log_next_id, METH_NOARGS, "Allocate a fresh log call id"},
     {"log_emit", pybinding__log_emit, METH_VARARGS, "Emit a formatted log line via libmorloc"},
+    {"bench_record", pybinding__bench_record, METH_VARARGS, "Record one benchmark timing via libmorloc"},
     {"pool_hash", pybinding__pool_hash, METH_NOARGS, "Return the pool's source fingerprint"},
     {"cache_path", pybinding__cache_path, METH_VARARGS, "Resolve per-label cache directory"},
     {"cache_lookup", pybinding__cache_lookup, METH_VARARGS, "Cache lookup; returns bytes or None"},

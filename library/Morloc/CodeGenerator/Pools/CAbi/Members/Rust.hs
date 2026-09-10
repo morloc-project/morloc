@@ -39,6 +39,7 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Morloc.CodeGenerator.Grammars.Common
+import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..), collectRenderedTemplates)
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
   ( ArgSite (..)
@@ -79,6 +80,9 @@ data RustState = RustState
   , rsDebugInfo :: Int -> (Text, Text)
   -- ^ Per-manifold @(userName, srcloc)@ (from 'makeManifoldDebugInfoLookup'),
   -- baked into each manifold's 'FrameGuard' frame line for error tracebacks.
+  , rsLogTemplates :: Map.Map Int RenderedTemplate
+  -- ^ Rendered @log:@ / @benchmark:@ templates per labeled manifold midx.
+  -- Drives the 'rustmorloc::LogGuard' wrap in 'rustMakeFunction'.
   , rsRecmap :: RecMap
   -- ^ Unified record types used in this pool; drives struct generation, the
   -- concrete struct name in 'rustTypeOf', and per-record marshalling impls.
@@ -103,7 +107,7 @@ data RustState = RustState
   }
 
 instance Defaultable RustState where
-  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> ("", "")) [] Map.empty Map.empty Map.empty
+  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> ("", "")) Map.empty [] Map.empty Map.empty Map.empty
 
 -- | The ownership environment: the borrowed (@&T@) parameter indices of the
 -- manifold whose body is currently being lowered ('oeCurrent') and of its
@@ -947,7 +951,8 @@ translate srcs es = do
   -- pool member; drives the reify path + home-pool dispatch wrappers for a
   -- closure this Rust pool produces and sends to another pool.
   closureTable <- computeClosureSchemas rustLang es
-  let st0 = defaultValue {rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask}
+  logTemplates <- collectRenderedTemplates rustLang
+  let st0 = defaultValue {rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsLogTemplates = logTemplates}
       code = CMS.evalState (runReaderT (makeRustCode includeDocs closureTable es) emptyOwnEnv) st0
 
   home <- MM.asks configHome
@@ -1978,5 +1983,30 @@ rustMakeFunction callIndex mname args manifoldType priorLines body headForm = do
           frameStmt =
             "let _mlc_frame = rustmorloc::FrameGuard::new("
               <> dquotes (pretty (RP.rustEscape frameText)) <> ");"
+          -- A labeled manifold is wrapped in a LogGuard: start on
+          -- construction, pass or fail on drop. Nothing is placed after the
+          -- body because a generated body ends in `return <expr>;`, which
+          -- makes any following statement unreachable -- Drop runs on every
+          -- path out regardless. The foreign-callee side is skipped for the
+          -- same reason as in the C++ member -- the caller pool's wrap already
+          -- spans the round trip.
+          litOrEmpty = maybe (dquotes mempty) (\t -> dquotes (pretty (RP.rustEscape t)))
+          logged = case Map.lookup callIndex (rsLogTemplates st) of
+            Just tmpl | not (isForeignCalleeForm headForm) -> Just tmpl
+            _ -> Nothing
+          bodyLines = case logged of
+            Nothing -> priorLines ++ [body]
+            Just tmpl ->
+              let guardStmt =
+                    "let _mlc_log = rustmorloc::LogGuard::new("
+                      <> hsep (punctuate ","
+                           [ dquotes (pretty (RP.rustEscape (renderedGroup tmpl)))
+                           , litOrEmpty (renderedStart tmpl)
+                           , litOrEmpty (renderedPass tmpl)
+                           , litOrEmpty (renderedFail tmpl)
+                           , litOrEmpty (renderedBenchKey tmpl)
+                           ])
+                      <> ");"
+               in guardStmt : priorLines ++ [body]
       return . Just $
-        vsep [decl <+> "{", indent 4 (vsep (frameStmt : priorLines ++ [body])), "}"]
+        vsep [decl <+> "{", indent 4 (vsep (frameStmt : bodyLines)), "}"]

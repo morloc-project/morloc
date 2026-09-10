@@ -139,7 +139,10 @@ def _tracked_foreign_call(*args):
     finally:
         _busy_ref.value -= 1
 
-def __mlc_wrap_log(group, start_tmpl, pass_tmpl, fail_tmpl, fn):
+def __mlc_wrap_log(group, start_tmpl, pass_tmpl, fail_tmpl, bench_key, fn):
+    # bench_key is "group\tname\tlang" when the label carries
+    # `benchmark: true`, else None. Only the success path records: a call that
+    # raised did not do the work being measured.
     def go(*args):
         call_id = morloc.log_next_id()
         t0 = time.monotonic()
@@ -147,8 +150,11 @@ def __mlc_wrap_log(group, start_tmpl, pass_tmpl, fail_tmpl, fn):
             morloc.log_emit(start_tmpl, group, 0.0, call_id)
         try:
             r = fn(*args)
+            dt = time.monotonic() - t0
             if pass_tmpl is not None:
-                morloc.log_emit(pass_tmpl, group, time.monotonic() - t0, call_id)
+                morloc.log_emit(pass_tmpl, group, dt, call_id)
+            if bench_key is not None:
+                morloc.bench_record(bench_key, dt)
             return r
         except BaseException:
             if fail_tmpl is not None:

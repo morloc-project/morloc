@@ -962,7 +962,16 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     -- spurious closure reify at the let binding even though the closure is
     -- consumed locally. Agrees with 'unwrapLetDef', which keeps such a manifold
     -- whole for native-partial lowering.
-    inferState (MonoManifold _ form _ e)
+    -- A Preserved manifold is one that must survive lowering as a real
+    -- function -- it carries a user label, so codegen has to have something
+    -- to wrap. That makes it a native value at its binding site for the same
+    -- reason a closure is, whatever its body does internally. Reporting
+    -- 'Serialized' here sends the binding down 'serialExpr', which strips the
+    -- very manifold 'unwrapLetDef' just decided to keep (the keep-guard tests
+    -- @m /= currentM@, and unwrapLetDef hands back the manifold's own index),
+    -- and the label then has no manifold to attach to in either pool.
+    inferState (MonoManifold _ form kind e)
+      | kind == Preserved = Unserialized
       | not (null (manifoldBound form)) = Unserialized
       | otherwise = inferState e
     inferState (MonoIf _ thenE _) = inferState thenE

@@ -1471,7 +1471,9 @@ printProgram desc prog =
     -- version. The shim is the per-language @__mlc_wrap_log@ helper; the
     -- three template strings are passed as arguments and the helper
     -- formats them on emission with the runtime values for @{date}@,
-    -- @{runtime}@, and @{id}@.
+    -- @{runtime}@, and @{id}@. A fifth argument carries the benchmark
+    -- identity when the label is measured, or the language's null when
+    -- it is not.
     logRebindings :: [MDoc]
     logRebindings
       | T.null (ldLogWrap desc) = []
@@ -1482,6 +1484,7 @@ printProgram desc prog =
                 , quoteOrNone (renderedStart tmpl)
                 , quoteOrNone (renderedPass tmpl)
                 , quoteOrNone (renderedFail tmpl)
+                , quoteOrNone (renderedBenchKey tmpl)
                 , manNamer i
                 ]
           | (i, tmpl) <- Map.toAscList (ipLogTemplates prog)

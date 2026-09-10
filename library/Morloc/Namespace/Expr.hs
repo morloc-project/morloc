@@ -26,6 +26,7 @@ module Morloc.Namespace.Expr
   , remoteResourceInts
   , ManifoldConfig (..)
   , LogTemplate (..)
+  , BenchTemplate (..)
   , RunLogTemplate (..)
   , EpilogueTemplate (..)
   , ModuleConfig (..)
@@ -159,6 +160,18 @@ data LogTemplate = LogTemplate
   }
   deriving (Show, Ord, Eq, Generic)
 
+-- | The shape of one row in the end-of-run benchmark summary. Lives at
+-- the top level of the program YAML as @benchmark-template@, beside
+-- @log-template@, and is program-wide rather than per-label: the nexus
+-- aggregates every label's timings and renders them through one
+-- template, so a per-label override would have nothing to apply to.
+-- 'Nothing' means \"use the built-in default\"; an explicit null
+-- @summary@ alongside @benchmark: true@ is contradictory and rejected.
+newtype BenchTemplate = BenchTemplate
+  { benchTemplateSummary :: Maybe Text
+  }
+  deriving (Show, Ord, Eq, Generic)
+
 -- | Run-scope log templates. 'runLogPrologue' fires at the nexus
 -- entrypoint immediately after argument parsing; the appropriate
 -- 'runLogEpilogue' subfield fires at clean exit (Ok) or via the
@@ -201,6 +214,9 @@ data ModuleConfig = ModuleConfig
   { moduleConfigDefaultGroup :: Maybe ManifoldConfig
   , moduleConfigLabeledGroups :: Map.Map Text ManifoldConfig
   , moduleConfigLogTemplate :: Maybe LogTemplate
+  , moduleConfigBenchTemplate :: Maybe BenchTemplate
+  -- ^ Top-level YAML field @benchmark-template@: the row shape for the
+  -- end-of-run summary emitted for labels carrying @benchmark: true@.
   , moduleConfigPrologue :: Maybe Text
   -- ^ Top-level YAML field @prologue@: a template string fired by the
   -- nexus at run start. See 'Morloc.CodeGenerator.LogTemplate' for the
@@ -882,6 +898,7 @@ instance Defaultable ModuleConfig where
       { moduleConfigDefaultGroup = Nothing
       , moduleConfigLabeledGroups = Map.empty
       , moduleConfigLogTemplate = Nothing
+      , moduleConfigBenchTemplate = Nothing
       , moduleConfigPrologue = Nothing
       , moduleConfigEpilogue = Nothing
       , moduleConfigHashInclude = Nothing
@@ -940,6 +957,7 @@ instance FromJSON ModuleConfig where
       <$> o .:? "default-group"
       <*> o .:? "labeled-groups" .!= Map.empty
       <*> o .:? "log-template"
+      <*> o .:? "benchmark-template"
       <*> o .:? "prologue"
       <*> o .:? "epilogue"
       <*> o .:? "hash-include"
@@ -953,6 +971,11 @@ instance FromJSON LogTemplate where
   parseJSON =
     Aeson.genericParseJSON $
       defaultOptions {fieldLabelModifier = stripPrefixAndKebabCase "logTemplate"}
+
+instance FromJSON BenchTemplate where
+  parseJSON =
+    Aeson.genericParseJSON $
+      defaultOptions {fieldLabelModifier = stripPrefixAndKebabCase "benchTemplate"}
 
 instance FromJSON EpilogueTemplate where
   parseJSON =

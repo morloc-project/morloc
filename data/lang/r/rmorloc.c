@@ -3138,6 +3138,22 @@ SEXP morloc_log_emit_r(SEXP tmpl_r, SEXP group_r, SEXP runtime_r, SEXP call_id_r
     return R_NilValue;
 }
 
+SEXP morloc_bench_record_r(SEXP key_r, SEXP seconds_r) {
+    // A NULL or NA key is an unmeasured label; libmorloc treats it as a no-op.
+    const char* key = NULL;
+    if (TYPEOF(key_r) == STRSXP && LENGTH(key_r) == 1) {
+        SEXP s = STRING_ELT(key_r, 0);
+        if (s != NA_STRING) {
+            const char* k = CHAR(s);
+            if (k && k[0] != '\0') {
+                key = k;
+            }
+        }
+    }
+    morloc_bench_record(key, asReal(seconds_r));
+    return R_NilValue;
+}
+
 SEXP morloc_is_ping(SEXP packet_r) { MAYFAIL
     if (TYPEOF(packet_r) != RAWSXP) {
         MORLOC_ERROR("packet must be a raw vector");
@@ -4209,6 +4225,7 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_mlc_show", (DL_FUNC) &morloc_mlc_show, 2},
         {"r_morloc_log_next_id", (DL_FUNC) &morloc_log_next_id_r, 0},
         {"r_morloc_log_emit", (DL_FUNC) &morloc_log_emit_r, 4},
+        {"r_morloc_bench_record", (DL_FUNC) &morloc_bench_record_r, 2},
         {"morloc_is_ping", (DL_FUNC) &morloc_is_ping, 1},
         {"morloc_is_local_call", (DL_FUNC) &morloc_is_local_call, 1},
         {"morloc_is_remote_call", (DL_FUNC) &morloc_is_remote_call, 1},

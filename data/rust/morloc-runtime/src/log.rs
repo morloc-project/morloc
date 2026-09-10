@@ -151,6 +151,70 @@ pub unsafe extern "C" fn morloc_log_emit(
     }
 }
 
+// -- Benchmark records ------------------------------------------------------
+//
+// A label carrying `benchmark: true` appends one timing record per successful
+// call to `<tmpdir>/benchmark.records`. The nexus aggregates the file at end of
+// run and renders one summary row per label.
+//
+// A file rather than an in-process accumulator because the pools do not share a
+// process model: the C++ and Rust pools run worker THREADS, while the Python and
+// R pools fork worker PROCESSES, and a counter in a forked child dies with it.
+// An O_APPEND write below PIPE_BUF is atomic on every platform morloc targets,
+// so concurrent workers -- threads or processes -- interleave whole lines.
+//
+// Only successful calls are recorded. A call that raised did not do the work
+// being measured, and folding its duration into the mean would report a number
+// that describes nothing.
+
+static BENCH_FILE: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
+
+/// Path of this run's benchmark record file, as published by the nexus in
+/// `MORLOC_BENCH_RECORDS`. `None` when the variable is unset, which is how a
+/// program that is not benchmarking pays nothing.
+pub fn bench_record_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("MORLOC_BENCH_RECORDS")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+/// Record one timing against a label. `key` is the pre-rendered
+/// "group\tname\tlang" identity the compiler stamped on the manifold.
+///
+/// Safety: `key` must be a NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn morloc_bench_record(key: *const c_char, seconds: f64) {
+    if key.is_null() || quiet() {
+        return;
+    }
+    let key_str = match CStr::from_ptr(key).to_str() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let line = format!("{}\t{:.9}\n", key_str, seconds);
+
+    let mut guard = match BENCH_FILE.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    if guard.is_none() {
+        let path = match bench_record_path() {
+            Some(p) => p,
+            None => return,
+        };
+        *guard = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok();
+    }
+    if let Some(f) = guard.as_mut() {
+        // One write_all of a short buffer is one write(2), which O_APPEND
+        // makes atomic against other writers.
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 /// Emit a fully-rendered run-scope line (prologue or epilogue) to
 /// stderr and tee to `$MORLOC_RUN_DIR/log` when the rundir is active.
 /// Distinct from [`morloc_log_emit`] because run-scope events are not

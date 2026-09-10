@@ -1,0 +1,13 @@
+benchmark-template:
+  summary: "BENCH {group} {name} {lang} n={count}"
+
+log-template:
+  start: "LOG {group} start"
+  pass: "LOG {group} pass"
+  fail: "LOG {group} FAILED {lang}"
+
+labeled-groups:
+  slow: { benchmark: true }
+  quick: { benchmark: true }
+  deep: { benchmark: true }
+  rs: { benchmark: true, log: true }

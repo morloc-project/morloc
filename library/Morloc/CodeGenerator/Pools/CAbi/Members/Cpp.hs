@@ -1064,12 +1064,20 @@ PROPAGATE_ERROR(errmsg)|]
                         startLine = emit (renderedStart tmpl) ("0.0" :: MDoc)
                         passLine = emit (renderedPass tmpl) "__mlc_dt.count()"
                         failLine = emit (renderedFail tmpl) "__mlc_dt.count()"
+                        -- Only the success path is measured: a call that
+                        -- raised did not do the work being timed.
+                        benchLine = case renderedBenchKey tmpl of
+                          Nothing -> mempty
+                          Just k ->
+                            let kq = dquotes (pretty (escapeCxxStringLit k))
+                             in [idoc|morloc_bench_record(#{kq}, __mlc_dt.count());|]
                         dtDecl = "std::chrono::duration<double> __mlc_dt = std::chrono::steady_clock::now() - __mlc_t0;"
                         innerLambda = "[&]()" <> line <> "{" <> nest 4 (line <> innerBlock) <> line <> "}()"
                         outerTry = block 4 "try" $ vsep
                           [ "auto __mlc_result =" <+> innerLambda <> ";"
                           , dtDecl
                           , passLine
+                          , benchLine
                           , "return __mlc_result;"
                           ]
                         outerCatch = block 4 "catch (...)" $ vsep
