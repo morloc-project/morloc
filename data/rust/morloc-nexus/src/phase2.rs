@@ -527,6 +527,7 @@ fn build_command_args(
                 desc,
                 many,
                 format,
+                schema,
                 ..
             } => {
                 let mut a = ClapArg::new(id).action(ArgAction::Set);
@@ -550,7 +551,13 @@ fn build_command_args(
                     // passed after a single occurrence (`--xs 1 2 3`).
                     a = a.num_args(1..).action(ArgAction::Append);
                 }
-                a = a.help(leak(&render_arg_help(desc, type_desc.as_deref(), None, format.as_deref())));
+                a = a.help(leak(&render_arg_help(
+                    desc,
+                    type_desc.as_deref(),
+                    None,
+                    format.as_deref(),
+                    crate::json_help::schema_constructor_line(schema.as_deref()),
+                )));
                 cmd = cmd.arg(a);
             }
             ManifestArg::Flag {
@@ -582,6 +589,7 @@ fn build_command_args(
                     desc,
                     Some("Bool"),
                     default_val.as_deref(),
+                    None,
                     None,
                 )));
                 cmd = cmd.arg(fwd);
@@ -616,6 +624,7 @@ fn build_command_args(
                 metavar,
                 type_desc,
                 desc,
+                schema,
                 ..
             } => {
                 // The optional whole-record JSON option.
@@ -640,13 +649,18 @@ fn build_command_args(
                         type_desc.as_deref(),
                         None,
                         None,
+                        None,
                     )));
                     cmd = cmd.arg(a);
                 }
                 // Per-field entries.
                 for (j, entry) in entries.iter().enumerate() {
                     let eid: &'static str = leak(&format!("{}_entry{}", id, j));
-                    cmd = add_group_entry_arg(cmd, eid, &entry.arg);
+                    let ctor_line = crate::json_help::group_entry_constructor_line(
+                        schema.as_deref(),
+                        &entry.key,
+                    );
+                    cmd = add_group_entry_arg(cmd, eid, &entry.arg, ctor_line);
                 }
             }
         }
@@ -689,7 +703,12 @@ fn add_terminal_flags(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapComma
 
 /// Add a clap arg representing one group entry (which is itself an
 /// Optional or Flag manifest [`Arg`]).
-fn add_group_entry_arg(mut cmd: ClapCommand, id: &'static str, marg: &ManifestArg) -> ClapCommand {
+fn add_group_entry_arg(
+    mut cmd: ClapCommand,
+    id: &'static str,
+    marg: &ManifestArg,
+    ctor_line: Option<String>,
+) -> ClapCommand {
     match marg {
         ManifestArg::Optional {
             long_opt,
@@ -716,7 +735,13 @@ fn add_group_entry_arg(mut cmd: ClapCommand, id: &'static str, marg: &ManifestAr
             if let Some(d) = default_val {
                 a = a.default_value(leak(d));
             }
-            a = a.help(leak(&render_arg_help(desc, type_desc.as_deref(), None, format.as_deref())));
+            a = a.help(leak(&render_arg_help(
+                desc,
+                type_desc.as_deref(),
+                None,
+                format.as_deref(),
+                ctor_line,
+            )));
             cmd = cmd.arg(a);
         }
         ManifestArg::Flag {
@@ -741,6 +766,7 @@ fn add_group_entry_arg(mut cmd: ClapCommand, id: &'static str, marg: &ManifestAr
                 desc,
                 Some("Bool"),
                 default_val.as_deref(),
+                None,
                 None,
             )));
             cmd = cmd.arg(fwd);
@@ -1069,6 +1095,7 @@ fn render_arg_help(
     type_desc: Option<&str>,
     default_val: Option<&str>,
     format_hint: Option<&str>,
+    ctor_line: Option<String>,
 ) -> String {
     let mut lines: Vec<String> = desc
         .iter()
@@ -1079,6 +1106,10 @@ fn render_arg_help(
         if !td.trim().is_empty() {
             lines.push(format!("type: {}", td));
         }
+    }
+    // A `data` type's name says nothing about which words are legal here.
+    if let Some(l) = ctor_line {
+        lines.push(l);
     }
     if let Some(f) = format_hint {
         if !f.trim().is_empty() {
@@ -1104,6 +1135,8 @@ fn render_arg_help(
 ///   1:  the first thing
 ///       type: UInt8
 ///   2:  type: [UInt8]
+///   3:  type: Color
+///       values: Red, Green, Blue
 /// ```
 ///
 /// Returns the empty string when the command has no positionals.
@@ -1160,6 +1193,11 @@ fn render_positional_block(mcmd: &ManifestCommand) -> String {
             if !td.trim().is_empty() {
                 lines.push(format!("type: {}", td));
             }
+        }
+        // A `data` type's name says nothing about which words are legal
+        // here, and this slot is where a person is about to type one.
+        if let Some(l) = crate::json_help::schema_constructor_line(schema) {
+            lines.push(l);
         }
         if let Some(f) = format_hint {
             if !f.trim().is_empty() {
@@ -1250,13 +1288,14 @@ mod tests {
             Some("Int"),
             None,
             None,
+            None,
         );
         assert_eq!(h, "Take the first integer\ntype: Int");
 
         // Empty description: the type line becomes the first line
         // so help reads as a compact list of facts without a
         // placeholder "missing description" line above the type.
-        let h = render_arg_help(&[], Some("Real"), None, None);
+        let h = render_arg_help(&[], Some("Real"), None, None, None);
         assert_eq!(h, "type: Real");
 
         // Multi-line description preserves every non-empty line in
@@ -1264,6 +1303,7 @@ mod tests {
         let h = render_arg_help(
             &["first".into(), "second".into()],
             Some("Str"),
+            None,
             None,
             None,
         );
@@ -1275,12 +1315,13 @@ mod tests {
             Some("Bool"),
             Some("false"),
             None,
+            None,
         );
         assert_eq!(h, "Verbose output\ntype: Bool\ndefault: false");
 
         // Empty type_desc / default are suppressed (no trailing
         // blank lines in the rendered help).
-        let h = render_arg_help(&["just a desc".into()], None, None, None);
+        let h = render_arg_help(&["just a desc".into()], None, None, None, None);
         assert_eq!(h, "just a desc");
 
         // Format hint slots in between type and default.
@@ -1289,11 +1330,60 @@ mod tests {
             Some("Str"),
             None,
             Some("must be the path of an existing readable file"),
+            None,
         );
         assert_eq!(
             h,
             "readable file path\ntype: Str\nformat: must be the path of an existing readable file"
         );
+    }
+
+    #[test]
+    fn arg_help_names_a_data_types_constructors() {
+        use crate::json_help::{group_entry_constructor_line, schema_constructor_line};
+
+        // An argument-free constructor is the value a person types, so
+        // the closed set is listed as values.
+        let h = render_arg_help(
+            &[],
+            Some("Color"),
+            None,
+            None,
+            schema_constructor_line(Some("e33Red5Green4Blue")),
+        );
+        assert_eq!(h, "type: Color\nvalues: Red, Green, Blue");
+
+        // Neither an optional nor a list changes which names are legal.
+        assert_eq!(
+            schema_constructor_line(Some("ae33Red5Green4Blue")).as_deref(),
+            Some("values: Red, Green, Blue")
+        );
+        assert_eq!(
+            schema_constructor_line(Some("?e33Red5Green4Blue")).as_deref(),
+            Some("values: Red, Green, Blue")
+        );
+
+        // A payload-bearing constructor is a shape rather than a word, so
+        // it is listed with the number of fields it takes.
+        assert_eq!(
+            schema_constructor_line(Some("v36Circle1f84Rect2f8f83Dot0")).as_deref(),
+            Some("constructors: Circle/1, Rect/2, Dot")
+        );
+
+        // A record the CLI destructured into options: the entry's own
+        // schema is the parameter under its key.
+        assert_eq!(
+            group_entry_constructor_line(Some("m14basee33Red5Green4Blue"), "base").as_deref(),
+            Some("values: Red, Green, Blue")
+        );
+        assert_eq!(
+            group_entry_constructor_line(Some("m14basee33Red5Green4Blue"), "missing"),
+            None
+        );
+
+        // A type with no constructor set adds no line.
+        let h = render_arg_help(&[], Some("Int"), None, None, schema_constructor_line(Some("i4")));
+        assert_eq!(h, "type: Int");
     }
 
     #[test]

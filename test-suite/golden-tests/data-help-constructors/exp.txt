@@ -1,0 +1,67 @@
+--- enum ---
+Name one color
+
+Usage: ./nexus <nexus_options> paint <command_options>
+
+General Options:
+  -h, --help  Print help (see more with '--help')
+
+Positional arguments:
+  1:  type: Color
+      values: Red, Green, Blue
+
+Return: Str
+--- optional enum ---
+Name a color that may be omitted
+
+Usage: ./nexus <nexus_options> shade <command_options>
+
+General Options:
+  -h, --help  Print help (see more with '--help')
+
+Positional arguments:
+  1:  type: ?Color
+      values: Red, Green, Blue
+      optional: omit for null
+
+Return: Int
+--- list of enum ---
+Count colors
+
+Usage: ./nexus <nexus_options> blend <command_options>
+
+General Options:
+  -h, --help  Print help (see more with '--help')
+
+Positional arguments:
+  1:  type: [Color]
+      values: Red, Green, Blue
+
+Return: Int
+--- variant ---
+Measure a shape
+
+Usage: ./nexus <nexus_options> measure <command_options>
+
+General Options:
+  -h, --help  Print help (see more with '--help')
+
+Positional arguments:
+  1:  type: Shape
+      constructors: Circle/1, Rect/2, Dot
+
+Return: Real
+--- named option ---
+Mix from a base color
+
+Usage: ./nexus <nexus_options> mix <command_options>
+
+General Options:
+  -h, --help  Print help (see more with '--help')
+
+Optional arguments:
+      --base <Color>  The base color
+                      type: Color
+                      values: Red, Green, Blue [default: "Red"]
+
+Return: Str

@@ -29,6 +29,7 @@ Unreleased
  - comparing a `data` value in an R pool answers what every other language
    answers, and ordering a `data` value works in a Rust pool
  - a list of `data` values crosses into and out of an R pool
+ - the help lists the constructors a `data` argument accepts
 
 0.102.1 [2026-09-05]
 --------------------

@@ -197,6 +197,58 @@ pub(crate) fn schema_is_optional(schema: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
+/// The help line a `data` argument needs and its type name alone does not
+/// give: which constructors the argument accepts.
+///
+/// The names ride in the wire schema, which is how `--json-help` and the
+/// MCP tool description have always been able to publish the closed set;
+/// this puts the same set on the terminal, where a person types the value.
+/// Optionals and arrays are looked through, since neither changes which
+/// names are legal.
+///
+/// An argument-free constructor IS the value, so those are listed as
+/// values. A payload-bearing one is a shape rather than a word, so those
+/// are listed as constructors, each with the number of fields it takes.
+pub(crate) fn schema_constructor_line(schema: Option<&str>) -> Option<String> {
+    constructor_line_of(&parse_schema(schema?).ok()?)
+}
+
+/// The same line for one field of a record the CLI destructured into
+/// options. A group entry carries no schema of its own -- dispatch
+/// reassembles the record, so the group's schema is the one the manifest
+/// records -- and the field's own schema is the parameter under its key.
+pub(crate) fn group_entry_constructor_line(
+    group_schema: Option<&str>,
+    key: &str,
+) -> Option<String> {
+    let group = parse_schema(group_schema?).ok()?;
+    let i = group.keys.iter().position(|k| k == key)?;
+    constructor_line_of(group.parameters.get(i)?)
+}
+
+fn constructor_line_of(s: &Schema) -> Option<String> {
+    match s.serial_type {
+        SerialType::Enum => Some(format!("values: {}", s.keys.join(", "))),
+        SerialType::Variant => Some(format!(
+            "constructors: {}",
+            s.keys
+                .iter()
+                .zip(s.parameters.iter())
+                .map(|(k, arm)| if arm.size == 0 {
+                    k.clone()
+                } else {
+                    format!("{k}/{}", arm.size)
+                })
+                .collect::<Vec<String>>()
+                .join(", ")
+        )),
+        SerialType::Optional | SerialType::Array => {
+            s.parameters.first().and_then(constructor_line_of)
+        }
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // --json-help: lossless morloc-native view
 // ---------------------------------------------------------------------------
