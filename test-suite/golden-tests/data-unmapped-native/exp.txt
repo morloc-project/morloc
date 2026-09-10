@@ -1,0 +1,10 @@
+--- enums ---
+["Green","Green","Green"]
+--- variants ---
+[{"Wrap":[1.5]},{"Wrap":[1.5]}]
+--- roundTrip ---
+["Empty","Empty"]
+--- enumsCpp ---
+["Blue","Blue"]
+--- variantsCpp ---
+[{"Wrap":[2.5]},{"Wrap":[2.5]}]

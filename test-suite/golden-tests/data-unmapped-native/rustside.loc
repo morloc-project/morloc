@@ -1,0 +1,13 @@
+module rustside (enums, variants, roundTrip)
+
+import .types
+import root-rust
+
+enums :: [Color]
+enums = replicate 3 Green
+
+variants :: [Box]
+variants = replicate 2 (Wrap 1.5)
+
+roundTrip :: [Box] -> [Box]
+roundTrip xs = replicate (length xs) Empty

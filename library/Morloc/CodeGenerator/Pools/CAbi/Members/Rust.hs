@@ -200,11 +200,11 @@ rustTypeOf = f
     -- compile). None == absent matches the voidstar single-relptr Optional.
     f (OptionalF t@(RecF _)) = do
       t' <- f t
-      return $ "Option<Box<" <> t' <> ">>"
+      return $ "::std::option::Option<::std::boxed::Box<" <> t' <> ">>"
     f (OptionalF t) = do
       -- The payload is a stored position; a function payload boxes ('rustFieldType').
       t' <- rustFieldType t
-      return $ "Option<" <> t' <> ">"
+      return $ "::std::option::Option<" <> t' <> ">"
     f (NatLitF _) = return mempty
     f NatVoidF = return mempty
     f (StrLitF _) = return mempty
@@ -1142,9 +1142,19 @@ bodyName _ = Nothing
 
 -- | Collect every @data@ type used in these manifolds, keyed by its FVar,
 -- with its constructor names. Mirrors 'collectRustRecords'.
+-- Keep the LONGEST constructor list, not the first seen. A constructor
+-- LITERAL reports a type whose table holds only its own arm, so a
+-- first-wins merge can define the type from one arm and silently renumber
+-- every other constructor -- an arm's position is its wire tag.
+mergeLongest :: [(FVar, [Text])] -> [(FVar, [Text])]
+mergeLongest =
+  Map.elems
+    . Map.fromListWith (\a b -> if length (snd a) >= length (snd b) then a else b)
+    . map (\e@(FV gv _, _) -> (gv, e))
+
 collectRustEnums :: [SerialManifold] -> [(FVar, [Text])]
 collectRustEnums =
-  nubBy ((==) `on` \(FV gv _, _) -> gv)
+  mergeLongest
     . concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
@@ -1365,7 +1375,7 @@ generateRustStructs es = concat <$> mapM makeOne (collectRustRecords es)
     oneField _ _ (k, Left param) = return (RP.rustFieldIdent k, param, True)
     oneField selfGv selfName (k, Right ty) = do
       ty' <- case ty of
-        OptionalF inner | refsRecord selfGv inner -> return $ "Option<Box<" <> selfName <> ">>"
+        OptionalF inner | refsRecord selfGv inner -> return $ "::std::option::Option<::std::boxed::Box<" <> selfName <> ">>"
         _ -> rustFieldType ty
       return (RP.rustFieldIdent k, ty', isVarWidthF ty)
 
@@ -1652,7 +1662,7 @@ rustLowerConfig mask =
         let arm = pretty (unCVar cv) <> "::" <> pretty n
         in if null xs
              then arm
-             else arm <> parens ("Box::new" <> parens (tupled xs <> ","))
+             else arm <> parens ("::std::boxed::Box::new" <> parens (RP.tupled1 xs))
     , lcEnumLit = \cv n _ -> pretty (unCVar cv) <> "::" <> pretty n
     , lcVariantTagTest = \cv n _ subj ->
         "matches!" <> tupled [subj, pretty (unCVar cv) <> "::" <> pretty n <> " { .. }"]

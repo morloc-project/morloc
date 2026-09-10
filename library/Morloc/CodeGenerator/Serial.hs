@@ -588,9 +588,14 @@ makeSerialAST m lang t0 = do
         Nothing -> MM.throwSourcedError m "Unsupported language"
         (Just langRegistry) -> return $ CV (lreSerialType langRegistry)
       return $ SerialUnknown (FV gv serialType)
-    -- A `data` type carries its constructor names in the TypeF, so the
-    -- serializer needs no scope lookup: the names are the wire form.
-    makeSerialAST' _ _ (EnumF v ns) = return $ SerialEnum v ns
+    -- The constructor table is the wire form, and a constructor LITERAL
+    -- reports a type holding only its own arm. Take the declaration's table
+    -- whenever the scope has it, so the schema cannot be narrowed to
+    -- whichever arm happened to be built here.
+    makeSerialAST' gscope _ (EnumF v@(FV gv _) ns) =
+      return . SerialEnum v $ case scopeEnumCtors gscope gv of
+        Just declared | length declared >= length ns -> declared
+        _ -> ns
     makeSerialAST' gscope typepackers (VariantF v@(FV gv _) as) = do
       anc <- MM.gets stateSerialAncestors
       -- Cycle detection at the VariantF entry, as for NamF. A constructor

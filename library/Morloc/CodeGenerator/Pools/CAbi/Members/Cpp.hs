@@ -27,6 +27,8 @@ import Control.Monad.Identity (Identity, runIdentity)
 import qualified Control.Monad.State as CMS
 import qualified Morloc.CodeGenerator.Pools.CAbi.Members.CppPrinter as CP
 import qualified Data.Char as DC
+import Data.Function (on)
+import Data.List (nubBy)
 import Data.Ord (comparing)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -492,7 +494,9 @@ makeCppCode labels srcs es univeralScopeMap scopeMap closureTable0 = do
   -- Variant declarations lead: an arm may hold a generated record, and a
   -- sourced header may name the variant type.
   (varDecl, varSerial) <- generateCppVariants es
-  let serializationCode = varDecl ++ autoDecl ++ srcDecl ++ varSerial ++ autoSerial ++ srcSerial
+  -- Enums lead: an arm or a record field may be one.
+  enumDecl <- generateCppEnums es
+  let serializationCode = enumDecl ++ varDecl ++ autoDecl ++ srcDecl ++ varSerial ++ autoSerial ++ srcSerial
 
   -- Restrict the closure machinery to closures that actually CROSS a boundary
   -- (their signature appears at a SerialClosure serialize site). Purely-local
@@ -1571,6 +1575,47 @@ typeParams ts = CP.printRecordTemplate <$> mapM cppTypeOf [t | (Nothing, t) <- t
 -- reports only the arm being built, and reports it with no fields, so taking
 -- the first occurrence could declare an arm as nullary that the schema says
 -- carries a payload.
+-- Keep the LONGEST constructor list, not the first seen. A constructor
+-- LITERAL reports a type whose table holds only its own arm, so a
+-- first-wins merge can define the type from one arm and silently renumber
+-- every other constructor -- an arm's position is its wire tag.
+mergeLongest :: [(FVar, [Text])] -> [(FVar, [Text])]
+mergeLongest =
+  Map.elems
+    . Map.fromListWith (\a b -> if length (snd a) >= length (snd b) then a else b)
+    . map (\e@(FV gv _, _) -> (gv, e))
+
+-- | Every argument-free @data@ type reachable in this pool.
+collectCppEnums :: [SerialManifold] -> [(FVar, [Text])]
+collectCppEnums =
+  mergeLongest
+    . concatMap (runIdentity . foldWithSerialManifoldM fm)
+  where
+    fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
+    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (serialAstToType s)
+    ne efull e = return $ foldlNE (<>) (seek (typeFof efull)) e
+    se _ (SerializeS_ s xs) = return $ seek (serialAstToType s) <> xs
+    se _ e = return $ foldlSE (<>) [] e
+
+    seek :: TypeF -> [(FVar, [Text])]
+    seek (EnumF v ns) = [(v, ns)]
+    seek (VariantF _ as) = concatMap (concatMap seek . snd) as
+    seek (NamF _ _ _ rs) = concatMap (seek . snd) rs
+    seek (AppF t ts) = concatMap seek (t : ts)
+    seek (FunF ts t) = concatMap seek (t : ts)
+    seek (OptionalF t) = seek t
+    seek (EffectF _ t) = seek t
+    seek _ = []
+
+-- | Declare each unmapped enum. A user-mapped type supplies its own
+-- definition, exactly as a mapped record does.
+generateCppEnums :: [SerialManifold] -> CppTranslator [MDoc]
+generateCppEnums es = concat <$> mapM makeOne (collectCppEnums es)
+  where
+    makeOne (FV gv (CV cvText), ctors) = do
+      userMapped <- variantIsUserMapped gv cvText
+      return [CP.printCppEnumDecl (pretty cvText) ctors | not userMapped]
+
 collectCppVariants :: [SerialManifold] -> [(FVar, [(Text, [TypeF])])]
 collectCppVariants =
   Map.elems

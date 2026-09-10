@@ -1,0 +1,10 @@
+module cppside (enumsCpp, variantsCpp)
+
+import .types
+import root-cpp
+
+enumsCpp :: [Color]
+enumsCpp = replicate 2 Blue
+
+variantsCpp :: [Box]
+variantsCpp = replicate 2 (Wrap 2.5)

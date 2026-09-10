@@ -1,0 +1,29 @@
+-- A `data` type with no per-language mapping, used inside a compiled pool.
+--
+-- When a type IS mapped (`data Rust => Shape = "Shape"`) the user's own file
+-- declares the native form. With no mapping the compiler has to invent one,
+-- and the name it invents is the morloc type's own. Getting that name wrong
+-- is not a type error anywhere in morloc: it surfaces only as native code
+-- that does not compile, or -- worse -- as a definition emitted under one
+-- name and referred to under another.
+--
+-- A constructor only reaches a pool when it is an ARGUMENT to something the
+-- pool runs. A bare export, a list literal and a `|`-pattern all stay in the
+-- nexus, so the whole native path is invisible to them.
+--
+-- The type is declared in its own module, since that is where a program of
+-- any size keeps its types, and a constructor has to survive the import.
+--
+-- `Box` is named to collide with Rust's own `Box`, which the generated
+-- payload boxing uses: a user type may take any name the language allows.
+
+module main
+  ( enums
+  , variants
+  , roundTrip
+  , enumsCpp
+  , variantsCpp
+  )
+
+import .rustside
+import .cppside

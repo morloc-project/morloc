@@ -462,6 +462,17 @@ inferConcreteVar lang t0@(Idx i v) = do
         -- realignment: for general aliases that have params but no args
         -- in this lookup, we still want to chase the alias by its head.
         gscopeUni <- MM.getGeneralUniversalScope
+        gscopeLocal <- MM.getGeneralScope i
+        let
+          -- A `data` type with no per-language mapping. Its general body is
+          -- the constructor table, not an alias, so chasing the body's head
+          -- resolves to whatever type that table is spelled with rather than
+          -- to anything the user wrote. The pool generates a native
+          -- definition under the type's own name, so that is the concrete
+          -- name here.
+          isData = case (scopeDataCtors gscopeLocal v, scopeDataCtors gscopeUni v) of
+                     (Nothing, Nothing) -> False
+                     _ -> True
         let
           -- Guard against self-recursive lookup: if the body's
           -- extracted key resolves back to v (e.g. a record whose
@@ -476,10 +487,11 @@ inferConcreteVar lang t0@(Idx i v) = do
           gscopeBody = case Map.lookup v gscopeUni of
             (Just ((_, body, _, _, _) : _)) | extractKey body /= v -> Just (extractKey body)
             _ -> Nothing
-        case gscopeBody of
+        case if isData then Nothing else gscopeBody of
           Just bodyKey -> do
             FV _ cv <- inferConcreteVar lang (Idx i bodyKey)
             return $ FV v cv
+          Nothing | isData -> return $ FV v (CV (unTVar v))
           Nothing -> do
             -- Last resort: transitive resolution via pairEval.
             (cscope, gscope) <- getScope i lang

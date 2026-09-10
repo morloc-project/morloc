@@ -30,6 +30,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter
   , printRustVariant
   , printVariantImpls
   , printEnumImpls
+  , tupled1
   , ClosureMarshal (..)
   ) where
 
@@ -50,7 +51,7 @@ rustType (ITyNamed name ps) = pretty name <> "<" <> hcat (punctuate ", " (map ru
 rustType (ITyPrim t) = pretty t
 rustType (ITyList t) = "Vec<" <> rustType t <> ">"
 rustType (ITyTuple ts) = tupled (map rustType ts)
-rustType (ITyOptional t) = "Option<" <> rustType t <> ">"
+rustType (ITyOptional t) = "::std::option::Option<" <> rustType t <> ">"
 rustType (ITyRecord name _ _) = pretty name
 rustType ITyUnit = "()"
 rustType ITySerial = "*const u8"
@@ -394,8 +395,8 @@ printRustStruct name params fields =
     -- one point is cloned at its by-value uses. All field types are Clone-able
     -- morloc types (scalars, Vec, String, Option, tuples, nested structs, Box).
     [ "#[derive(Clone)]"
-    , "struct" <+> name <> paramList params <+> "{"
-    , indent 4 (vsep [f <> ":" <+> t <> "," | (f, t) <- fields])
+    , "pub struct" <+> name <> paramList params <+> "{"
+    , indent 4 (vsep ["pub" <+> f <> ":" <+> t <> "," | (f, t) <- fields])
     , "}"
     ]
 
@@ -409,7 +410,7 @@ printRustEnum name ctors =
   vsep
     [ "#[repr(u8)]"
     , "#[derive(Clone, Copy, PartialEq, Eq, Debug)]"
-    , "enum" <+> name <+> "{"
+    , "pub enum" <+> name <+> "{"
     , indent 4 (vsep [pretty c <+> "=" <+> pretty i <> "," | (i, c) <- zip [0 :: Int ..] ctors])
     , "}"
     ]
@@ -432,13 +433,13 @@ printRustVariant :: MDoc -> [(T.Text, [MDoc])] -> MDoc
 printRustVariant name arms =
   vsep
     [ "#[derive(Clone)]"
-    , "enum" <+> name <+> "{"
+    , "pub enum" <+> name <+> "{"
     , indent 4 (vsep [armDecl c ts | (c, ts) <- arms])
     , "}"
     ]
   where
     armDecl c [] = pretty c <> ","
-    armDecl c ts = pretty c <> parens ("Box<" <> tupled1 ts <> ">") <> ","
+    armDecl c ts = pretty c <> parens ("::std::boxed::Box<" <> tupled1 ts <> ">") <> ","
 
 -- | A one-element tuple needs its trailing comma or it is just parentheses.
 tupled1 :: [MDoc] -> MDoc

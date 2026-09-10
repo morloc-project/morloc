@@ -25,6 +25,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.CppPrinter
     -- * Struct/serializer rendering
   , printStructTypedef
   , printMarshalDecls
+  , printCppEnumDecl
   , printCppVariantDecl
   , printCppVariantArms
   , printCppVariantSerializers
@@ -363,6 +364,20 @@ printMarshalDecls name =
 -- another `data` type by value and would otherwise need that type's wrapper
 -- to already exist. Splitting the two phases removes the ordering question
 -- entirely, rather than answering it with a topological sort.
+-- | Emit a C++ @enum class@ for an argument-free @data@ type.
+--
+-- A one-byte underlying type with explicit discriminants makes the native
+-- value and the wire tag the same byte, so a constructor's declaration
+-- ordinal needs no translation. Marshalling comes from the generic
+-- one-byte path; only the declaration is emitted here.
+printCppEnumDecl :: MDoc -> [Text] -> MDoc
+printCppEnumDecl name ctors =
+  vsep
+    [ "enum class" <+> name <+> ": uint8_t {"
+    , indent 4 (vsep [pretty c <+> "=" <+> pretty i <> "," | (i, c) <- zip [0 :: Int ..] ctors])
+    , "};"
+    ]
+
 printCppVariantDecl :: MDoc -> [(Text, [MDoc])] -> MDoc
 printCppVariantDecl name arms =
   vsep
