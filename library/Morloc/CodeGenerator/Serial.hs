@@ -233,6 +233,9 @@ serialAstToSchemaWith renderHint ast = emit ast
       recDecl name <> renderHint v <> "m" <> encode64D (length rs)
         <> foldl (<>) "" (map keypair rs)
     emit (SerialRec (FV (TV name) _)) = "^" <> encodeKey name
+    -- A `data` type's occurrence inside itself: a back-reference like the
+    -- record form above, carrying its arguments for the renderers' sake.
+    emit (SerialVariant (FV (TV name) _) _ []) = "^" <> encodeKey name
     -- `e <count> ( <klen><CtorName> )*`, with the type's own name carried
     -- by the concrete-type hint exactly as a record's is -- `m` does not
     -- spell out the record name either. Counts and key lengths use the
@@ -331,6 +334,7 @@ rerootUnder parent child = case serialOuterName parent of
   Just v -> go v child
   where
     go v (SerialRec (FV v' _)) | v' == v = parent
+    go v (SerialVariant (FV v' _) _ []) | v' == v = parent
     go v (SerialPack fv (p, s)) = SerialPack fv (p, go v s)
     go v (SerialList fv d s) = SerialList fv d (go v s)
     go v (SerialTuple fv ss) = SerialTuple fv (map (go v) ss)
@@ -346,6 +350,7 @@ serialOuterName (SerialPack _ (_, s)) = serialOuterName s
 serialOuterName (SerialList (FV v _) _ _) = Just v
 serialOuterName (SerialTuple (FV v _) _) = Just v
 serialOuterName (SerialObject _ (FV v _) _ _) = Just v
+serialOuterName (SerialVariant _ _ []) = Nothing
 serialOuterName (SerialVariant (FV v _) _ _) = Just v
 serialOuterName _ = Nothing
 
@@ -353,6 +358,7 @@ collectRecursiveNames :: SerialAST -> Set.Set TVar
 collectRecursiveNames = go
   where
     go (SerialRec (FV v _)) = Set.singleton v
+    go (SerialVariant (FV v _) _ []) = Set.singleton v
     go (SerialPack _ (_, s)) = go s
     go (SerialList _ _ s) = go s
     go (SerialTuple _ ss) = Set.unions (map go ss)
@@ -641,11 +647,16 @@ makeSerialAST m lang t0 = do
     -- type's occurrence inside itself (a `data` has at least one
     -- constructor, so nothing else has that shape). It names an
     -- instantiation on the path above, and that is where the knot is tied.
+    -- The back-edge keeps the instantiation's arguments and drops its arms,
+    -- the shape inference gave it: a renderer that declares the type by name
+    -- spells the element of a `[Tree a]` arm from those arguments, and a
+    -- back-reference without them has nothing to instantiate a template
+    -- with.
     makeSerialAST' gscope typepackers anc t@(VariantF v@(FV gv _) ps as)
-      | Set.member t anc = return $ SerialRec v
+      | Set.member t anc = return $ SerialVariant v ps []
       | null as =
           if any (isInstantiation gv ps) (Set.toList anc)
-            then return $ SerialRec v
+            then return $ SerialVariant v ps []
             else MM.throwSourcedError m $
               "Reference to a `data` instantiation that is not being built:"
                 <+> pretty t

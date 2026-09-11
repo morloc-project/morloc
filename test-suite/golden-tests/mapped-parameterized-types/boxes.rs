@@ -45,3 +45,16 @@ pub fn depth(t: &MyTree<i64>) -> i64 {
         MyTree::Leaf(_) => 1,
     }
 }
+
+#[derive(Clone)]
+pub enum MyRose<T> {
+    Tip(std::boxed::Box<(T,)>),
+    Branch(std::boxed::Box<(T, Vec<MyRose<T>>)>),
+}
+
+pub fn rose_size(t: &MyRose<i64>) -> i64 {
+    match t {
+        MyRose::Branch(b) => 1 + b.1.iter().map(rose_size).sum::<i64>(),
+        MyRose::Tip(_) => 1,
+    }
+}

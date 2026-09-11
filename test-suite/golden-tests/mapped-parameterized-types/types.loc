@@ -11,3 +11,7 @@ record Wrap a where
 -- A parameterized type that refers to itself, so the template names its
 -- own instantiation from inside its own arms.
 data Tree a = Leaf a | Node (Tree a) (Tree a)
+
+-- A parameterized type that refers to itself from inside a list, so the
+-- template names its own instantiation as an element type.
+data Rose a = Tip a | Branch a [Rose a]

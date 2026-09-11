@@ -32,6 +32,10 @@ module main
   , nexusTree
   , cppTree
   , rustTree
+  , nexusRose
+  , cppRose
+  , rustRose
+  , pyRose
   )
 
 import .types
@@ -48,6 +52,7 @@ source Py from "boxes.py"
   , "py_sum" as pySum
   , "py_grow" as pyGrow
   , "py_crate" as pyCrate
+  , "py_rose" as pyRoseOf
   )
 
 source Cpp  from "boxes.hpp" ("cpp_inc" as cppInc)
@@ -61,6 +66,7 @@ pyPair    :: Str -> Int -> Pair Str Int
 pySum     :: Box Int -> Int
 pyGrow    :: Box Int -> Box Int
 pyCrate   :: Int -> Crate (Crate Int)
+pyRoseOf  :: Int -> Rose Int
 
 cppInc     :: Int -> Int
 rustAdd10  :: Int -> Int
@@ -129,3 +135,17 @@ cppTree n = Node (Leaf (cppInc n)) (Leaf n)
 
 rustTree :: Int -> Tree Int
 rustTree n = Node (Leaf (rustAdd10 n)) (Leaf n)
+
+-- The self-reference sits inside a list, so each pool's declaration of the
+-- type names its own instantiation as an element type.
+nexusRose :: Int -> Rose Int
+nexusRose n = Branch n [Tip n, Branch n []]
+
+cppRose :: Int -> Rose Int
+cppRose n = Branch (cppInc n) [Tip n, Branch n [Tip n]]
+
+rustRose :: Int -> Rose Int
+rustRose n = Branch (rustAdd10 n) [Tip n, Branch n [Tip n]]
+
+pyRose :: Int -> Rose Int
+pyRose = pyRoseOf

@@ -1,6 +1,9 @@
 Unreleased
 ----------
 
+ - a `data` type may refer to itself from inside a list or other container
+   (`data Rose a = Tip a | Branch a [Rose a]`) in a C++ or Rust pool, and
+   under a user-mapped template
  - `@unroll` on a `data`-typed argument gives one option per constructor,
    mutually exclusive: a bare flag for an argument-free constructor, exactly
    as many values as fields for the rest; `@default` and `?T` make the

@@ -3,6 +3,7 @@
 #include <memory>
 #include <string>
 #include <variant>
+#include <vector>
 
 // A user-mapped `data` with a parameter is a class template. Its arms are
 // templates too, named after the wrapper with `_<Constructor>` appended to
@@ -31,6 +32,26 @@ template <typename T> struct MyTree {
 
 template <typename T> struct MyTree_Leaf { T f0; };
 template <typename T> struct MyTree_Node { MyTree<T> f0; MyTree<T> f1; };
+
+template <typename T> struct MyRose_Tip;
+template <typename T> struct MyRose_Branch;
+
+template <typename T> struct MyRose {
+    std::variant<std::shared_ptr<MyRose_Tip<T>>,
+                 std::shared_ptr<MyRose_Branch<T>>> v;
+};
+
+template <typename T> struct MyRose_Tip { T f0; };
+template <typename T> struct MyRose_Branch { T f0; std::vector<MyRose<T>> f1; };
+
+inline int rose_size(const MyRose<int>& t) {
+    if (auto p = std::get_if<std::shared_ptr<MyRose_Branch<int>>>(&t.v)) {
+        int n = 1;
+        for (const auto& k : (*p)->f1) n += rose_size(k);
+        return n;
+    }
+    return 1;
+}
 
 inline int depth(const MyTree<int>& t) {
     if (auto p = std::get_if<std::shared_ptr<MyTree_Node<int>>>(&t.v))

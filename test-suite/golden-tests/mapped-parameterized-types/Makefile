@@ -43,6 +43,14 @@ all:
 	./nexus cppDepth 1 >> obs.txt 2>> obs.err
 	echo "--- rustDepth ---" >> obs.txt
 	./nexus rustDepth 1 >> obs.txt 2>> obs.err
+	echo "--- cppRoseSize ---" >> obs.txt
+	./nexus cppRoseSize '{"Branch":[1,[{"Tip":[2]},{"Branch":[3,[{"Tip":[4]}]]}]]}' >> obs.txt 2>> obs.err
+	echo "--- rustRoseSize ---" >> obs.txt
+	./nexus rustRoseSize '{"Branch":[1,[{"Tip":[2]},{"Branch":[3,[{"Tip":[4]}]]}]]}' >> obs.txt 2>> obs.err
+	echo "--- cppRoseMade ---" >> obs.txt
+	./nexus cppRoseMade 1 >> obs.txt 2>> obs.err
+	echo "--- rustRoseMade ---" >> obs.txt
+	./nexus rustRoseMade 1 >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus pools __pycache__ *.err *.manifest

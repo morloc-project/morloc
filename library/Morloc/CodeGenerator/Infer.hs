@@ -109,16 +109,18 @@ inferConcreteTypeStructural lang i gscope g c = case (g, c) of
   -- would leave the morloc name in the concrete slot and emit `Real` where
   -- a Rust pool needs `f64`. Argument-free constructors fall through, having
   -- no fields to resolve.
-  -- Already being expanded: resolve to the NAME and stop. This guard sits
-  -- at the top of the intercept because the structural walk re-enters here
-  -- directly for an AppU's arguments, without passing through
+  -- Already being expanded: resolve to the back-edge and stop. This guard
+  -- sits at the top of the intercept because the structural walk re-enters
+  -- here directly for an AppU's arguments, without passing through
   -- 'inferConcreteType' -- which is how recursion through a container
-  -- (`data Rose = Rose [Rose]`) arrives.
+  -- (`data Rose = Rose [Rose]`) arrives. The back-edge carries the
+  -- instantiation's arguments, as a direct field's does, so the element of
+  -- a `[Rose a]` arm can still instantiate a template.
   (VarU vG, VarU (TV vC))
     | Just _ <- scopeDataCtors gscope vG -> do
         anc0 <- CMS.gets stateVariantAncestors
         if Set.member (vG, []) anc0
-          then return $ VarF (FV vG (CV vC))
+          then backEdgeHere vG []
           else inferVariantArms lang i gscope vG vC []
   -- An APPLIED `data`, e.g. @Try Str a@. Same treatment as the bare case,
   -- except the declaration's parameters must be instantiated with the
@@ -130,10 +132,13 @@ inferConcreteTypeStructural lang i gscope g c = case (g, c) of
     , Just vC <- concreteHeadName c -> do
         anc0 <- CMS.gets stateVariantAncestors
         if Set.member (vG, tsG) anc0
-          then return $ VarF (FV vG (CV vC))
+          then backEdgeHere vG tsG
           else inferVariantArms lang i gscope vG vC tsG
   _ -> inferConcreteTypeStructuralRest lang i gscope g c
   where
+    backEdgeHere vG tsG = do
+      (cscope, _) <- getScope i lang
+      backEdge lang i cscope vG tsG
     -- The concrete side of an applied type is either applied too or has
     -- already collapsed to a bare name.
     concreteHeadName (AppU (VarU (TV n)) _) = Just n

@@ -32,5 +32,13 @@
 {"Node":[{"Leaf":[2]},{"Leaf":[1]}]}
 --- rustTree ---
 {"Node":[{"Leaf":[11]},{"Leaf":[1]}]}
+--- nexusRose ---
+{"Branch":[1,[{"Tip":[1]},{"Branch":[1,[]]}]]}
+--- cppRose ---
+{"Branch":[2,[{"Tip":[1]},{"Branch":[1,[{"Tip":[1]}]]}]]}
+--- rustRose ---
+{"Branch":[11,[{"Tip":[1]},{"Branch":[1,[{"Tip":[1]}]]}]]}
+--- pyRose ---
+{"Branch":[1,[{"Tip":[1]},{"Branch":[1,[]]}]]}
 --- nonRegularRejected ---
 OK

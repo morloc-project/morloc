@@ -18,3 +18,8 @@ record Crate a where
 -- itself is the SAME instantiation, and has to be read as a back-edge; the
 -- `Box (Box Int)` above is a different one, and must not be.
 data Tree a = Leaf a | Node (Tree a) (Tree a)
+
+-- A parameterized type that refers to itself from inside a container. The
+-- self-reference is then an element type rather than a field, and reaches
+-- every renderer through the list rather than directly.
+data Rose a = Tip a | Branch a [Rose a]

@@ -39,3 +39,11 @@
 3
 --- rustDepth ---
 3
+--- cppRoseSize ---
+4
+--- rustRoseSize ---
+4
+--- cppRoseMade ---
+{"Branch":[2,[{"Tip":[1]},{"Branch":[1,[{"Tip":[1]}]]}]]}
+--- rustRoseMade ---
+{"Branch":[11,[{"Tip":[1]},{"Branch":[1,[{"Tip":[1]}]]}]]}

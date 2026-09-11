@@ -39,6 +39,10 @@ module main
   , roundTrip
   , cppDepth
   , rustDepth
+  , cppRoseSize
+  , rustRoseSize
+  , cppRoseMade
+  , rustRoseMade
   )
 
 import .types
@@ -55,13 +59,16 @@ data R    => (Box a) = "box" a
 data Cpp  => (Tree a) = "MyTree<$1>" a
 data Rust => (Tree a) = "MyTree<$1>" a
 
+data Cpp  => (Rose a) = "MyRose<$1>" a
+data Rust => (Rose a) = "MyRose<$1>" a
+
 record Cpp  => (Wrap a) = "MyWrap<$1>" a
 record Rust => (Wrap a) = "MyWrap<$1>" a
 record Py   => (Wrap a) = "dict" a
 record R    => (Wrap a) = "list" a
 
-source Cpp  from "boxes.hpp" ("grow" as cppGrow, "shout" as cppShout, "bump" as cppWrap, "inc" as cppInc, "depth" as cppDepthOf)
-source Rust from "boxes.rs"  ("grow" as rustGrow, "shout" as rustShout, "bump" as rustWrap, "inc" as rustInc, "depth" as rustDepthOf)
+source Cpp  from "boxes.hpp" ("grow" as cppGrow, "shout" as cppShout, "bump" as cppWrap, "inc" as cppInc, "depth" as cppDepthOf, "rose_size" as cppRoseSize)
+source Rust from "boxes.rs"  ("grow" as rustGrow, "shout" as rustShout, "bump" as rustWrap, "inc" as rustInc, "depth" as rustDepthOf, "rose_size" as rustRoseSize)
 source Py   from "boxes.py"  ("grow" as pyGrow, "bump" as pyWrap)
 source R    from "boxes.R"   ("grow" as rGrow, "bump" as rWrap)
 
@@ -83,6 +90,11 @@ rustInc   :: Int -> Int
 
 cppDepthOf  :: Tree Int -> Int
 rustDepthOf :: Tree Int -> Int
+
+-- Read straight off the wire into the user's template, whose recursive
+-- arm holds a vector of the instantiation.
+cppRoseSize  :: Rose Int -> Int
+rustRoseSize :: Rose Int -> Int
 
 -- A constructor literal built in the pool, against the user's template.
 cppMade :: Int -> Box Int
@@ -120,3 +132,11 @@ cppDepth n = cppDepthOf (Node (Leaf (cppInc n)) (Node (Leaf n) (Leaf n)))
 
 rustDepth :: Int -> Int
 rustDepth n = rustDepthOf (Node (Leaf (rustInc n)) (Node (Leaf n) (Leaf n)))
+
+-- Built in the pool and sent out, so the list element is the type's own
+-- instantiation on the way in and on the way out.
+cppRoseMade :: Int -> Rose Int
+cppRoseMade n = Branch (cppInc n) [Tip n, Branch n [Tip n]]
+
+rustRoseMade :: Int -> Rose Int
+rustRoseMade n = Branch (rustInc n) [Tip n, Branch n [Tip n]]

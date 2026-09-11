@@ -36,3 +36,7 @@ def py_grow(b):
 
 def py_crate(x):
     return {"item": {"item": x}}
+
+
+def py_rose(x):
+    return ("Branch", (x, [("Tip", (x,)), ("Branch", (x, []))]))

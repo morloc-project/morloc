@@ -36,6 +36,14 @@ all:
 	./nexus cppTree 1 >> obs.txt 2>> obs.err
 	echo "--- rustTree ---" >> obs.txt
 	./nexus rustTree 1 >> obs.txt 2>> obs.err
+	echo "--- nexusRose ---" >> obs.txt
+	./nexus nexusRose 1 >> obs.txt 2>> obs.err
+	echo "--- cppRose ---" >> obs.txt
+	./nexus cppRose 1 >> obs.txt 2>> obs.err
+	echo "--- rustRose ---" >> obs.txt
+	./nexus rustRose 1 >> obs.txt 2>> obs.err
+	echo "--- pyRose ---" >> obs.txt
+	./nexus pyRose 1 >> obs.txt 2>> obs.err
 	echo "--- nonRegularRejected ---" >> obs.txt
 	if morloc make -o nonregular nonregular.loc >> obs.err 2>&1; then echo UNEXPECTED >> obs.txt; else echo OK >> obs.txt; fi
 

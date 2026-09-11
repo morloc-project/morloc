@@ -386,6 +386,12 @@ data SerialAST
     -- as the tuple the pointer leads to. The type arguments ride along
     -- as they do on 'SerialObject', so the native type this lowers to
     -- can instantiate a user's template.
+    --
+    -- With no arms it is a back-reference to an ancestor instantiation of
+    -- the same type, as 'SerialRec' is for a record: a `data` type has at
+    -- least one constructor, so nothing else has that shape. It keeps the
+    -- arguments because a renderer that declares the type by name needs
+    -- them to spell the instantiation.
     SerialVariant FVar [TypeF] [(T.Text, [SerialAST])]
   | -- | depending on the language, this may or may not raise an error down the
     -- line, the parameter contains the variable name, which is useful only for
