@@ -1352,8 +1352,11 @@ formListHint elemSchema mLSrc mLForm lcks =
 -- per entry, matching the pre-split behavior for that entry.
 groupEntryWireSchemas :: SerialAST -> [(Key, Text)]
 groupEntryWireSchemas ast0 = case peelPack ast0 of
-    SerialObject _ _ _ kids ->
-      [(k, render (Serial.serialAstToMsgpackSchema child)) | (k, child) <- kids]
+    -- An entry of a recursive record refers back to the record; sliced out
+    -- on its own it would name a declaration it no longer sits under, so
+    -- it is re-rooted first.
+    rec@(SerialObject _ _ _ kids) ->
+      [(k, render (Serial.serialAstToMsgpackSchema (Serial.rerootUnder rec child))) | (k, child) <- kids]
     _ -> []
   where
     peelPack (SerialPack _ (_, inner)) = peelPack inner

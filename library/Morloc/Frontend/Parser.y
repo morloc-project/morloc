@@ -358,9 +358,8 @@ typedef_decl :: { Loc CstExpr }
       { at $1 (CTypE (CstTypeAliasForward (TV (getName $2), $3))) }
   | 'newtype' '(' UPPER typedef_params ')'
       { at $1 (CTypE (CstTypeAliasForward (TV (getName $3), $4))) }
-  -- A `data` declaration. Stage 1 accepts only argument-free constructors,
-  -- but the grammar carries argument types so that the rejection happens in
-  -- Desugar, where it can point at the offending constructor.
+  -- A `data` declaration: a closed set of constructors, each with zero or
+  -- more argument types.
   | 'data' UPPER typedef_params '=' data_ctors
       { at $1 (CTypE (CstDataDef (TV (getName $2), $3) $5)) }
   | 'data' '(' UPPER typedef_params ')' '=' data_ctors

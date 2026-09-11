@@ -1,0 +1,46 @@
+-- A record held in a constructor's payload, in the forms a record can take.
+--
+-- A record the user maps to a C++ type used to reach a pool without its
+-- marshallers when a constructor payload was the only place it appeared:
+-- the search for records needing marshallers did not look inside a `data`,
+-- so the payload's serializer bound to the header's raw-bytes fallback and
+-- the pool died on the first value. The self-recursive record adds the
+-- second half: its declaration sits inside the variant's schema, so its
+-- own back-reference has to resolve against a scope the record's
+-- marshaller pushes itself. The compiler-generated record covers the
+-- ordering of generated declarations, which the C++ member must lay out
+-- before any arm body that holds one by value.
+
+module main (heldCpp, chainCpp, madeCpp)
+
+import root-cpp
+import root-py
+
+record Pt where
+  name :: Str
+  x :: Real
+record Cpp => Pt = "pt_t"
+
+record Node where
+  v :: Int
+  next :: ?Node
+record Cpp => Node = "node_t"
+
+record Gen where
+  a :: Int
+  b :: Str
+record Cpp => Gen = "struct"
+
+data Expr = Leaf | Hold Pt | Chain Node | Made Gen
+
+source Cpp from "defs.hpp" ("ident" as idCpp)
+idCpp :: Expr -> Expr
+
+heldCpp :: Expr -> Expr
+heldCpp = idCpp
+
+chainCpp :: Expr -> Expr
+chainCpp = idCpp
+
+madeCpp :: Expr -> Expr
+madeCpp = idCpp

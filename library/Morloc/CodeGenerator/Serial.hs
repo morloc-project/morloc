@@ -29,6 +29,7 @@ module Morloc.CodeGenerator.Serial
   , serialAstToType
   , shallowType
   , serialAstToMsgpackSchema
+  , rerootUnder
   , serialAstToGeneralSchema
   , encode64
   , decode64
@@ -314,6 +315,40 @@ serialAstToSchemaWith renderHint ast = emit ast
 -- only declare a name on a SerialObject when something below it
 -- references that name, which keeps non-recursive records on their
 -- original (unprefixed) wire form.
+-- | Make a sub-tree of a serial AST self-contained, so it can be emitted
+-- as a schema of its own.
+--
+-- A cycle is cut where a type is re-entered, leaving a back-reference to
+-- the enclosing declaration. A sub-tree sliced out from under that
+-- declaration therefore carries back-references to a name it does not
+-- declare, and a schema rendered from it alone would not parse. Replacing
+-- each such reference with the enclosing tree itself declares the name
+-- inside the sub-tree: the enclosing tree's own back-references to that
+-- name then sit under the declaration they need.
+rerootUnder :: SerialAST -> SerialAST -> SerialAST
+rerootUnder parent child = case serialOuterName parent of
+  Nothing -> child
+  Just v -> go v child
+  where
+    go v (SerialRec (FV v' _)) | v' == v = parent
+    go v (SerialPack fv (p, s)) = SerialPack fv (p, go v s)
+    go v (SerialList fv d s) = SerialList fv d (go v s)
+    go v (SerialTuple fv ss) = SerialTuple fv (map (go v) ss)
+    go v (SerialObject nt fv ps rs) = SerialObject nt fv ps [(k, go v s) | (k, s) <- rs]
+    go v (SerialOptional fv s) = SerialOptional fv (go v s)
+    go v (SerialVariant fv ps as) = SerialVariant fv ps [(n, map (go v) fs) | (n, fs) <- as]
+    go _ s = s
+
+-- | The name a serial AST's outermost node would declare, if it were the
+-- target of a back-reference.
+serialOuterName :: SerialAST -> Maybe TVar
+serialOuterName (SerialPack _ (_, s)) = serialOuterName s
+serialOuterName (SerialList (FV v _) _ _) = Just v
+serialOuterName (SerialTuple (FV v _) _) = Just v
+serialOuterName (SerialObject _ (FV v _) _ _) = Just v
+serialOuterName (SerialVariant (FV v _) _ _) = Just v
+serialOuterName _ = Nothing
+
 collectRecursiveNames :: SerialAST -> Set.Set TVar
 collectRecursiveNames = go
   where

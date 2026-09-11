@@ -29,6 +29,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
+import Data.Char (isAlpha)
 import Data.Maybe (catMaybes, mapMaybe)
 import qualified Morloc.BaseTypes as BT
 import Morloc.Frontend.CST
@@ -1910,11 +1911,16 @@ exprToRefutPat (Loc sp _) =
     "expected a pattern (variable, '_', literal, tuple, record, or label@pattern) in a `|` clause"
 
 -- | Split a possibly namespace-qualified name into its qualifier and its
--- last component. The grammar produces at most one level (`p.Red`).
+-- last component. The grammar produces at most one level (`p.Red`), and a
+-- qualifier is always an identifier, so an operator name that happens to
+-- contain a dot (`.`, `.|.`) is not a qualified name.
 splitQualifier :: Text -> (Maybe Text, Text)
 splitQualifier n = case T.breakOnEnd "." n of
-  (q, base) | T.null q -> (Nothing, base)
-            | otherwise -> (Just (T.dropEnd 1 q), base)
+  (q, base)
+    | T.null q -> (Nothing, n)
+    | Just (c, _) <- T.uncons (T.dropEnd 1 q), isAlpha c || c == '_', not (T.null base) ->
+        (Just (T.dropEnd 1 q), base)
+    | otherwise -> (Nothing, n)
 
 -- | The bare constructor a pattern names. A tag test matches by name
 -- against the scrutinee's own constructor table, so the qualifier plays no

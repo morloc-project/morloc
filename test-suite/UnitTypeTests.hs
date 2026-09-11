@@ -7666,7 +7666,8 @@ recursiveRecordTests =
         f :: B6 -> B6
         |]
 
-        -- NEGATIVE: mutual recursion is rejected (out of scope this pass)
+        -- NEGATIVE: a cycle of records is rejected whether or not its fields
+        -- are guarded, since only a `data` on the cycle stops reduction
       , expectError
           "mutual recursion 2-cycle, unguarded, is rejected"
           [r|
@@ -9157,19 +9158,48 @@ variantTests =
         idt :: Rose -> Rose
               |]
 
-      , -- A cycle spanning two type definitions is refused for every kind of
-        -- typedef, `data` included: the type evaluator's termination check
-        -- guards each definition's own name only, so a cycle across names
-        -- would still loop. The rejection is deliberate and up front, which
-        -- is what keeps the later reduce-and-retry sites from hanging.
-        exprTestBad
-          "mutually recursive data types are rejected"
-          [r|
+      , -- Two `data` types that refer to each other. A `data` stops type
+        -- reduction at its own boundary and holds its payload behind a
+        -- pointer, so nothing that walks the cycle can loop and no value
+        -- has infinite width -- the same two facts that make a `data`
+        -- self-recursive, applied across two names.
+        localOption (mkTimeout 20000000) $
+          testCase "mutually recursive data types lower" $
+            assertGenerates
+              [r|
         module main (idt)
-        data Expr = Lit Real | Neg Term
+        data Expr = Lit | Neg Term
         data Term = Wrap Expr
         source Py from "t.py" ("idt")
         idt :: Expr -> Expr
+              |]
+
+      , -- A record on the cycle is fine as long as a `data` is on it too:
+        -- the `data` is where reduction stops.
+        localOption (mkTimeout 20000000) $
+          testCase "a record and a data recursing into each other lower" $
+            assertGenerates
+              [r|
+        module main (idt)
+        record Node where
+          body :: Expr
+        record Py => Node = "dict"
+        data Expr = Leaf | Branch Node
+        source Py from "t.py" ("idt")
+        idt :: Expr -> Expr
+              |]
+
+      , -- Without a `data` on the cycle nothing stops reduction: a cycle of
+        -- transparent aliases would loop the evaluator, and a cycle of
+        -- records has no cycle-level guard. Both stay rejected.
+        exprTestBad
+          "mutually recursive aliases are rejected"
+          [r|
+        module main (idt)
+        type A = [B]
+        type B = [A]
+        source Py from "t.py" ("idt")
+        idt :: A -> A
           |]
 
       , -- A self-recursive type is still usable through a container, which

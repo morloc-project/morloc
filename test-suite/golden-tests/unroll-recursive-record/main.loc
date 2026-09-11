@@ -1,0 +1,33 @@
+-- An unrolled record whose field refers back to the record.
+--
+-- A group reads its fields one at a time, each against its own slice of
+-- the record's schema. A slice of a recursive record carries a
+-- back-reference to the record it was cut from, so read on its own it
+-- names a declaration it no longer sits under. Both readers -- the
+-- per-field CLI option and the whole-record JSON bundle -- have to resolve
+-- that reference, and the per-entry schemas the compiler publishes for
+-- shape defaults have to be self-contained for the same reason.
+
+module main (depth)
+
+import root-py
+
+--' A linked chain
+--' @unroll true
+record Node where
+  --' this link's label
+  --' @arg -l/--label
+  --' @default null
+  label :: ?Str
+  --' the rest of the chain
+  --' @arg -n/--next
+  --' @default null
+  next :: ?Node
+record Py => Node = "dict"
+
+--' Count the links
+depth :: Node -> Int
+depth = countPy
+
+source Py from "chain.py" ("count" as countPy)
+countPy :: Node -> Int

@@ -46,7 +46,7 @@ restructure s = do
   MM.setCounter $ maximum (map AST.maxIndex (DAG.nodes s)) + 1
 
   checkForSelfRecursion s -- bare self-recursion is rejected; guarded forms pass
-    >>= checkMutualRecursion -- non-trivial SCCs over typedef-references are rejected
+    >>= checkMutualRecursion -- typedef cycles no `data` cuts are rejected
     >>= resolveImports -- rewrite DAG edges to map imported terms to their aliases
     >>= handleBinops -- resolve binary operators
     >>= hoistEvals -- hoist user '!' markers into do-block binds
@@ -133,7 +133,8 @@ mention the type applied to its own parameters, which is the parser's
 shape for parametric existence claims like @type Foo a = Foo a@.
 
 Mutual recursion is NOT diagnosed here; @checkMutualRecursion@ runs
-afterwards and rejects any non-trivial SCC over typedef references.
+afterwards and rejects any non-trivial SCC over typedef references that
+no `data` type cuts.
 -}
 checkForSelfRecursion :: DAG k e ExprI -> MorlocMonad (DAG k e ExprI)
 checkForSelfRecursion d = do
@@ -185,16 +186,25 @@ checkForSelfRecursion d = do
     langBodies (Just (_, True)) (AppU (VarU _) args) = args
     langBodies _ b = [b]
 
-{- | Reject mutually recursive typedefs.
+{- | Reject mutually recursive typedefs, unless a `data` cuts every cycle.
 
 Self-recursion guarded by @[_]@ or @?_@ is permitted by
 @checkForSelfRecursion@. Mutual recursion -- a cycle of two or more
-typedefs that reference each other -- is not supported, because the
-type-evaluator's bound-set termination only protects each typedef's
-own name; cycles across distinct typedef names would still loop. We
-diagnose them up front here so the compiler does not hang later in
-the reduce-and-retry sites in Realize/Express or in pairEval's alias
-chase.
+typedefs that reference each other -- is supported only when the cycle
+passes through a `data` type, for two reasons that both come from the
+nominal boundary a `data` puts up:
+
+  * Reduction stops at a `data`: the type evaluator carries its
+    constructor table rather than expanding it, so no walk over a type
+    can loop through the cycle. A cycle of transparent aliases
+    (@type A = [B]@, @type B = [A]@) has no such stop and would loop.
+
+  * A constructor's payload sits behind a pointer in every backend, so a
+    value's width does not depend on how the two types recurse into one
+    another. Whether a cycle of records is guarded (through @[_]@ or
+    @?_@) is a property of the cycle, and the guardedness check only
+    classifies each definition's own body; admitting record cycles would
+    admit unguarded ones with infinite width.
 
 Algorithm: collect typedefs across ALL modules in the DAG and build a
 single directed graph keyed by @(Maybe Lang, TVar)@ -- the typedef's
@@ -202,10 +212,12 @@ language scope (general = @Nothing@, language-specific = @Just lang@)
 paired with its name. An edge @A -> B@ exists iff @B@ appears
 anywhere in @A@'s body (regardless of guarding); references resolve
 to the same-language entry when one exists, otherwise to the general
-entry. Quotient by SCC via @Data.Graph.stronglyConnComp@. Any cyclic
-SCC of size >= 2 is illegal mutual recursion. Singleton SCCs (with
-or without a self-loop) are passed through: a self-loop indicates a
-self-recursion that @checkForSelfRecursion@ has already either
+entry. Quotient by SCC via @Data.Graph.stronglyConnComp@. For a cyclic
+SCC of size >= 2, delete its `data` members and recompute: a cycle that
+survives among the rest is illegal, and is the one named in the error,
+since those are the definitions the user has to break. Singleton SCCs
+(with or without a self-loop) are passed through: a self-loop indicates
+a self-recursion that @checkForSelfRecursion@ has already either
 permitted (guarded) or rejected (bare).
 
 The check is global rather than per-module because cycles can span
@@ -228,7 +240,7 @@ through the @a@ parameter.
 checkMutualRecursion :: DAG k e ExprI -> MorlocMonad (DAG k e ExprI)
 checkMutualRecursion d = do
   let allTypedefs = concatMap collectTypedefs (DAG.nodes d)
-      declared = Set.fromList [(scope, v) | (_, scope, v, _, _) <- allTypedefs]
+      declared = Set.fromList [(scope, v) | (_, scope, v, _, _, _) <- allTypedefs]
       -- Resolve a bare name reference to the right scope-qualified
       -- key. Same-language scope wins; otherwise fall back to the
       -- general scope. References to undeclared names (built-ins,
@@ -238,21 +250,38 @@ checkMutualRecursion d = do
         | Set.member (Nothing, x) declared = Just (Nothing, x)
         | otherwise = Nothing
       nodes =
-        [ ((i, scope, v), (scope, v), Set.toList outgoing)
-        | (i, scope, v, vs, t) <- allTypedefs
+        [ ((i, scope, v, kind), (scope, v), Set.toList outgoing)
+        | (i, scope, v, vs, t, kind) <- allTypedefs
         , let bound = Set.fromList [p | Left (p, _) <- vs]
         , let mentioned = Set.fromList (AST.findTypeTerms t) `Set.difference` bound
         , let outgoing = Set.fromList (mapMaybe (resolveRef scope) (Set.toList mentioned))
         ]
       sccs = Graph.stronglyConnComp nodes
-  mapM_ rejectCyclic sccs
+  mapM_ (rejectCyclic nodes) sccs
   return d
   where
-    rejectCyclic :: Graph.SCC (Int, Maybe Lang, TVar) -> MorlocMonad ()
-    rejectCyclic (Graph.CyclicSCC xs@(_:_))
+    rejectCyclic ::
+      [((Int, Maybe Lang, TVar, TypedefKind), (Maybe Lang, TVar), [(Maybe Lang, TVar)])] ->
+      Graph.SCC (Int, Maybe Lang, TVar, TypedefKind) ->
+      MorlocMonad ()
+    rejectCyclic nodes (Graph.CyclicSCC xs@(_:_))
       | length xs >= 2 =
-          let (firstIdx, scope0, _) = head xs
-              cycleNames = [v | (_, _, v) <- xs]
+          let members = Set.fromList [(scope, v) | (_, scope, v, kind) <- xs, kind /= TypedefEnum]
+              -- The same graph restricted to this SCC's non-`data`
+              -- members: a cycle here is one no `data` cuts.
+              induced =
+                [ (node, key, filter (`Set.member` members) outgoing)
+                | (node, key, outgoing) <- nodes
+                , Set.member key members
+                ]
+          in mapM_ rejectUncut (Graph.stronglyConnComp induced)
+    rejectCyclic _ _ = return ()
+
+    rejectUncut :: Graph.SCC (Int, Maybe Lang, TVar, TypedefKind) -> MorlocMonad ()
+    rejectUncut (Graph.CyclicSCC xs@(_:_))
+      | length xs >= 2 =
+          let (firstIdx, scope0, _, _) = head xs
+              cycleNames = [v | (_, _, v, _) <- xs]
               -- An SCC of size >= 2 has all members in the same
               -- scope: general typedefs never reference
               -- language-specific names, and language-to-general
@@ -262,12 +291,13 @@ checkMutualRecursion d = do
                 Nothing -> "type definitions"
                 Just lang -> pretty lang <+> "type definitions"
           in MM.throwSourcedError firstIdx $
-               "Mutual recursion between" <+> scopeMsg <+> "is not supported." <+>
+               "Mutual recursion between" <+> scopeMsg <+> "is not supported"
+                 <+> "unless a `data` type cuts the cycle." <+>
                "Cycle:" <+> hsep (punctuate "," (map pretty cycleNames))
-    rejectCyclic _ = return ()
+    rejectUncut _ = return ()
 
-    collectTypedefs :: ExprI -> [(Int, Maybe Lang, TVar, [Either (TVar, Kind) TypeU], TypeU)]
-    collectTypedefs (ExprI i (TypE (ExprTypeE form v vs t _ _))) = [(i, fmap fst form, v, vs, t)]
+    collectTypedefs :: ExprI -> [(Int, Maybe Lang, TVar, [Either (TVar, Kind) TypeU], TypeU, TypedefKind)]
+    collectTypedefs (ExprI i (TypE (ExprTypeE form v vs t _ kind))) = [(i, fmap fst form, v, vs, t, kind)]
     collectTypedefs (ExprI _ (ModE _ es)) = concatMap collectTypedefs es
     collectTypedefs _ = []
 

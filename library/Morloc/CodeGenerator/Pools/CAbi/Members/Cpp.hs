@@ -494,20 +494,28 @@ makeCppCode labels srcs es univeralScopeMap scopeMap closureTable0 = do
   CMS.modify $ \st -> st
     { translatorVariantNames = Set.fromList [gv | (FV gv _, _, _) <- collectCppVariants es] }
   templates <- CMS.gets translatorLogTemplates
-  (srcDecl, srcSerial) <- generateSourcedSerializers univeralScopeMap scopeMap es
+  (srcFwds, srcSerial, srcDeserial) <- generateSourcedSerializers univeralScopeMap scopeMap es
 
   -- write include statements for sources
   let includeDocs = map translateSource (unique . mapMaybe srcPath $ srcs)
 
   signatures <- concat <$> mapM makeSignature es
 
-  (autoDecl, autoSerial) <- generateAnonymousStructs
-  -- Variant declarations lead: an arm may hold a generated record, and a
-  -- sourced header may name the variant type.
-  (varDecl, varSerial) <- generateCppVariants es
-  -- Enums lead: an arm or a record field may be one.
+  (autoDecl, autoFwds, autoSerial) <- generateAnonymousStructs
+  (varWrappers, varArms, varFwds, varSerial) <- generateCppVariants es
   enumDecl <- generateCppEnums es
-  let serializationCode = enumDecl ++ varDecl ++ autoDecl ++ srcDecl ++ varSerial ++ autoSerial ++ srcSerial
+  -- Declaration order is forced by what holds what by value. An enum is a
+  -- byte, so it leads. A variant's wrapper holds its arms through pointers,
+  -- so every wrapper is complete before any arm body or record exists; a
+  -- generated record may then hold a wrapper by value, and an arm body may
+  -- hold a generated record by value, so records come before arm bodies.
+  -- Every marshaller SIGNATURE follows before any definition, so a
+  -- definition that appears later is visible to an earlier call rather
+  -- than leaving it to bind to the header's raw-bytes fallback.
+  let serializationCode =
+        enumDecl ++ varWrappers ++ autoDecl ++ varArms
+          ++ varFwds ++ autoFwds ++ srcFwds
+          ++ varSerial ++ autoSerial ++ srcSerial ++ srcDeserial
 
   -- Restrict the closure machinery to closures that actually CROSS a boundary
   -- (their signature appears at a SerialClosure serialize site). Purely-local
@@ -664,6 +672,9 @@ collectNamedRecordTVars e0 =
     seekNamedRecs (AppF t ts) = Set.unions (map seekNamedRecs (t : ts))
     seekNamedRecs (EffectF _ t) = seekNamedRecs t
     seekNamedRecs (OptionalF t) = seekNamedRecs t
+    -- A record held in a constructor's payload needs its marshaller as
+    -- much as one held in a field.
+    seekNamedRecs (VariantF _ ps as) = Set.unions (map seekNamedRecs (ps ++ concatMap snd as))
     seekNamedRecs _ = Set.empty
 
 makeTheMaker :: [Source] -> MorlocMonad [SysCommand]
@@ -1681,7 +1692,7 @@ collectCppVariants = concatMap (runIdentity . foldWithSerialManifoldM fm)
 -- | Every wrapper is emitted before any arm body, because an arm may hold
 -- another `data` type by value. Declarations therefore come out in two
 -- phases rather than one block per type.
-generateCppVariants :: [SerialManifold] -> CppTranslator ([MDoc], [MDoc])
+generateCppVariants :: [SerialManifold] -> CppTranslator ([MDoc], [MDoc], [MDoc], [MDoc])
 generateCppVariants es = do
   named <- mapM (\(v, ps, as) -> (\n -> (render n, (v, ps, as))) <$> cppTypeOf (VariantF v ps as))
                 (collectCppVariants es)
@@ -1695,10 +1706,10 @@ generateCppVariants es = do
       bodies = concatMap (\(_, b, _, _) -> b) parts
       fwds = concatMap (\(_, _, f, _) -> f) parts
       serials = concatMap (\(_, _, _, x) -> x) parts
-  -- Types, then every marshaller SIGNATURE, then the definitions. The middle
-  -- phase is what stops a definition that appears later from being invisible
-  -- to an earlier call, which would bind to the header's raw-bytes fallback.
-  return (decls <> bodies <> fwds, serials)
+  -- Wrappers, arm bodies, marshaller signatures and marshaller definitions
+  -- are returned apart so the caller can interleave the generated records
+  -- between the wrappers and the arm bodies.
+  return (decls, bodies, fwds, serials)
   where
     -- Merge arm-wise, but keep DECLARATION ORDER: an arm's position is its
     -- wire tag, so sorting by name here would silently renumber every
@@ -1731,8 +1742,8 @@ generateCppVariants es = do
             in [CP.printSerializer [] aname fields, CP.printDeserializer True [] aname fields]
           serial = CP.printCppVariantSerializers name arms'
           armSerials = concatMap armSerial [(c, ts) | (c, ts) <- arms', not (null ts)]
-          fwds = CP.printMarshalDecls name
-                   : [CP.printMarshalDecls (CP.armName name c) | (c, ts) <- arms', not (null ts)]
+          fwds = CP.printMarshalDecls [] name
+                   : [CP.printMarshalDecls [] (CP.armName name c) | (c, ts) <- arms', not (null ts)]
       return $ if userMapped
                  then ([], [], fwds, armSerials <> [serial])
                  else ( [CP.printCppVariantDecl name arms']
@@ -1756,15 +1767,18 @@ variantIsUserMapped gv cvText = do
     outerName (NamU _ (TV n) _ _) = Just n
     outerName _ = Nothing
 
-generateAnonymousStructs :: CppTranslator ([MDoc], [MDoc])
+-- | The struct, the marshaller signatures, and the marshaller definitions
+-- for every generated record, returned apart so the signatures can precede
+-- every definition in the pool.
+generateAnonymousStructs :: CppTranslator ([MDoc], [MDoc], [MDoc])
 generateAnonymousStructs = do
   recmap <- CMS.gets translatorRecmap
 
   xs <- mapM makeSerializers (reverse . map snd $ recmap)
 
-  return (concatMap fst xs, concatMap snd xs)
+  return (concatMap (\(d, _, _) -> d) xs, concatMap (\(_, f, _) -> f) xs, concatMap (\(_, _, x) -> x) xs)
   where
-    makeSerializers :: RecEntry -> CppTranslator ([MDoc], [MDoc])
+    makeSerializers :: RecEntry -> CppTranslator ([MDoc], [MDoc], [MDoc])
     makeSerializers rec = do
       let templateTerms = map (("T" <>) . pretty) ([1 ..] :: [Int])
           rs' = zip templateTerms (recFields rec)
@@ -1780,10 +1794,11 @@ generateAnonymousStructs = do
       let fields = [(pretty k, v) | (k, v) <- zip fieldNames fieldTypes]
 
       let structDecl = CP.printStructTypedef params rname fields
+          fwd = CP.printMarshalDecls params rtype
           serializer = CP.printSerializer params rtype fields
-          deserializer = CP.printDeserializer False params rtype fields
+          deserializer = CP.printDeserializer True params rtype fields
 
-      return ([structDecl], [serializer, deserializer])
+      return ([structDecl], [fwd], [serializer, deserializer])
 
     -- monadic form of `maybe` function
     maybeM :: (Monad m) => a -> (b -> m a) -> Maybe b -> m a
@@ -1796,6 +1811,7 @@ generateSourcedSerializers ::
   [SerialManifold] -> -- all segments that can be called in this pool
   CppTranslator
     ( [MDoc]
+    , [MDoc]
     , [MDoc]
     )
 generateSourcedSerializers univeralScopeMap scopeMap es0 = do
@@ -1831,7 +1847,7 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
       supplemental = Map.filterWithKey (\k _ -> Set.member k missingTypes) scope
       typedef = Map.unionWith mergeScopes perManifold' supplemental
 
-  foldl groupQuad ([], []) . concat . Map.elems <$> Map.mapWithKeyM (makeSerials scope) typedef
+  foldl groupTriple ([], [], []) . concat . Map.elems <$> Map.mapWithKeyM (makeSerials scope) typedef
   where
     -- given the universal map of scopes, pull out every one that is used in this subtree
     fm =
@@ -1871,17 +1887,27 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
         tvarsInType (OptionalU t) = tvarsInType t
         tvarsInType (OpU _ ts) = Set.unions (map tvarsInType ts)
         tvarsInType (LabeledU _ t) = tvarsInType t
+        -- A `data` body is its constructor table; the references to close
+        -- over are the constructors' field types.
+        tvarsInType t
+          | Just cs <- dataBodyCtors t = Set.unions [tvarsInType a | (_, as) <- cs, a <- as]
         tvarsInType _ = Set.empty
 
-    groupQuad :: ([a], [a]) -> (a, a) -> ([a], [a])
-    groupQuad (xs, ys) (x, y) = (x : xs, y : ys)
+    groupTriple :: ([a], [a], [a]) -> (a, a, a) -> ([a], [a], [a])
+    groupTriple (xs, ys, zs) (x, y, z) = (x : xs, y : ys, z : zs)
 
     makeSerials ::
-      Scope -> TVar -> [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind)] -> CppTranslator [(MDoc, MDoc)]
+      Scope -> TVar -> [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind)] -> CppTranslator [(MDoc, MDoc, MDoc)]
     makeSerials s v xs = catMaybes <$> mapM (makeSerial s v) xs
 
+    -- For each sourced record: the marshaller signatures, the serializer,
+    -- and the deserializer. The signatures go out before any marshaller
+    -- body, so a body that reaches this record -- a constructor payload
+    -- holding it, say -- binds to it rather than to the header's raw-bytes
+    -- fallback. An object is the exception: its signatures are not
+    -- declared ahead, as they never were.
     makeSerial ::
-      Scope -> TVar -> ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) -> CppTranslator (Maybe (MDoc, MDoc))
+      Scope -> TVar -> ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) -> CppTranslator (Maybe (MDoc, MDoc, MDoc))
     makeSerial _ _ (_, NamU _ (TV "struct") _ _, _, _, _) = return Nothing
     makeSerial _ _ (_, NamU _ (TV "arrow") _ _, _, _, _) = return Nothing
     -- A record with a function field is marshalled through the shared engine
@@ -1929,9 +1955,10 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
           rtype = renderTemplatedType v allParams kindCount
           rs' = map (second (evaluateTypeU scope)) rs
           fields = [(pretty k, showDefType selfName ps (typeOf t)) | (k, t) <- rs']
+          fwd = if r == NamObject then "" else CP.printMarshalDecls templateTerms rtype
           serializer = CP.printSerializer templateTerms rtype fields
-          deserializer = CP.printDeserializer (r == NamObject) templateTerms rtype fields
-      return $ Just (serializer, deserializer)
+          deserializer = CP.printDeserializer True templateTerms rtype fields
+      return $ Just (fwd, serializer, deserializer)
     makeSerial _ _ _ = return Nothing
 
     evaluateTypeU :: Scope -> TypeU -> TypeU

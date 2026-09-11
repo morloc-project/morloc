@@ -1,6 +1,13 @@
 Unreleased
 ----------
 
+ - two `data` types may refer to each other, and a record may sit on such a
+   cycle, so an abstract syntax tree can be declared as it is written
+ - a record held in a constructor's payload reaches a C++ pool with its
+   marshallers, and a compiler-generated record held there compiles
+ - an unrolled record whose field refers back to the record reads its
+   fields from the command line
+ - the composition operator `(.)` may be used as a value again
  - a `data` type carries its constructors through an explicit export list, a
    selective import, and a module that only re-exports it
  - a constructor imported under a namespace alias is written `p.Red`, in an

@@ -1,0 +1,18 @@
+--- eval ---
+-2.5
+--- evalT ---
+0
+--- evalViaPy ---
+-2.5
+--- evalViaCpp ---
+-2.5
+--- evalViaR ---
+-2.5
+--- evalViaRust ---
+-2.5
+--- termViaCpp ---
+0
+--- termViaRust ---
+0
+--- builtRust ---
+{"Twice":[{"Wrap":[{"Add":[{"Lit":[5]},{"Neg":["Zero"]}]}]}]}

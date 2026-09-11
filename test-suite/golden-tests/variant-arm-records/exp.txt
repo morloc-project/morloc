@@ -1,0 +1,8 @@
+--- heldCpp ---
+{"Hold":[{"name":"abc","x":1.5}]}
+--- chainCpp ---
+{"Chain":[{"v":1,"next":{"v":2,"next":null}}]}
+--- madeCpp ---
+{"Made":[{"a":7,"b":"q"}]}
+--- leaf ---
+"Leaf"

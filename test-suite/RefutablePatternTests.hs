@@ -222,6 +222,15 @@ constructorPatternTests = testGroup "constructor patterns"
         \f :: Int -> Int\n\
         \f = area.Circle\n"
 
+  , -- An operator's name may contain a dot without being qualified.
+    testCase "the composition operator is still a value" $
+      assertBool "(.) is not a qualified name" . isRight $ parseMod
+        "module main (f)\n\
+        \g :: Int -> Int\n\
+        \g x = x\n\
+        \f :: Int -> Int\n\
+        \f = (.) g g\n"
+
   , testCase "a constructor qualified by an undeclared alias is rejected" $
       assertBool "no import is aliased q" . isLeft $ parseMod
         "module main (f)\n\

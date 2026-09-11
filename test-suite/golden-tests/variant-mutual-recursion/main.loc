@@ -1,0 +1,97 @@
+-- Two `data` types that refer to each other.
+--
+-- This is the shape an abstract syntax tree takes: an expression holds a
+-- term, a term holds an expression. Each type's constructor payload sits
+-- behind a pointer, so a value's width does not depend on how the two
+-- recurse into one another, and reduction stops at a `data` boundary, so
+-- nothing that walks a type can loop through the cycle. The cycle is
+-- therefore admitted, where a cycle of records or aliases is not.
+--
+-- Both types also recurse into themselves, so the wire schema nests one
+-- named declaration inside another: `&4Expr ... &4Term ... ^4Expr ... ^4Term`.
+-- A back-reference to the outer name from inside the inner declaration has
+-- to resolve, and be given its width, across that nesting.
+--
+-- `Term` also holds a record the compiler generates (`Pt`), so an arm of a
+-- generated C++ variant holds a generated struct by value -- which only
+-- compiles if the struct is declared first -- and an arm's marshaller calls
+-- the struct's, which must be declared before it is defined.
+--
+-- Values are evaluated in the nexus, round-tripped through every pool, and
+-- built inside a pool and read back out.
+
+module main
+  ( eval
+  , evalT
+  , evalViaPy
+  , evalViaCpp
+  , evalViaR
+  , evalViaRust
+  , termViaCpp
+  , termViaRust
+  , builtRust
+  )
+
+import root-py
+import root-cpp
+import root-r
+import root-rust
+
+record Pt where
+  x :: Real
+  y :: Real
+record Cpp => Pt = "struct"
+record Rust => Pt = "struct"
+
+data Expr = Lit Real | Neg Term | Add Expr Expr
+
+data Term = Wrap Expr | Zero | Twice Term | At Pt
+
+eval :: Expr -> Real
+eval | (Lit v) = v
+     | (Neg t) = 0.0 - evalT t
+     | (Add a b) = eval a + eval b
+
+evalT :: Term -> Real
+evalT | (Wrap e) = eval e
+      | Zero = 0.0
+      | (Twice t) = 2.0 * evalT t
+      | (At p) = .x p + .y p
+
+source Py   from "ast.py"  ("ident" as idPy)
+source Cpp  from "ast.hpp" ("ident" as idCpp)
+source R    from "ast.R"   ("ident" as idR)
+source Rust from "ast.rs"  ("ident" as idRust, "ident_term" as idTermRust, "build" as buildRust)
+
+idPy   :: Expr -> Expr
+idCpp  :: Expr -> Expr
+idR    :: Expr -> Expr
+idRust :: Expr -> Expr
+idTermRust :: Term -> Term
+buildRust :: Real -> Term
+
+idTermCpp :: Term -> Term
+source Cpp from "ast.hpp" ("ident" as idTermCpp)
+
+evalViaPy :: Expr -> Real
+evalViaPy e = eval (idPy e)
+
+evalViaCpp :: Expr -> Real
+evalViaCpp e = eval (idCpp e)
+
+evalViaR :: Expr -> Real
+evalViaR e = eval (idR e)
+
+evalViaRust :: Expr -> Real
+evalViaRust e = eval (idRust e)
+
+-- the other half of the pair crossing on its own
+termViaCpp :: Term -> Real
+termViaCpp t = evalT (idTermCpp t)
+
+termViaRust :: Term -> Real
+termViaRust t = evalT (idTermRust t)
+
+-- built in a pool, read back through the nexus
+builtRust :: Real -> Term
+builtRust v = buildRust v

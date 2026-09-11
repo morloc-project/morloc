@@ -3044,6 +3044,46 @@ unsafe fn load_bundle_partial(
     Ok(out)
 }
 
+/// Per-field schemas of a record being read field by field. A field that
+/// back-references the record gets a self-contained copy, owned here and
+/// freed with the set; every other field borrows the record's own child.
+struct FieldSchemas {
+    ptrs: Vec<*const CSchema>,
+    owned: Vec<*mut CSchema>,
+}
+
+impl FieldSchemas {
+    unsafe fn new(schema: *const CSchema, rs: &crate::schema::Schema) -> FieldSchemas {
+        let mut ptrs = Vec::with_capacity(rs.parameters.len());
+        let mut owned = Vec::new();
+        for (i, fs) in rs.parameters.iter().enumerate() {
+            let needs_root = rs.name.as_deref().map_or(false, |n| crate::recur::refers_to(fs, n));
+            if needs_root {
+                let rooted = CSchema::from_rust(&crate::recur::reroot_under(rs, fs));
+                owned.push(rooted);
+                ptrs.push(rooted as *const CSchema);
+            } else {
+                ptrs.push(*(*schema).parameters.add(i));
+            }
+        }
+        FieldSchemas { ptrs, owned }
+    }
+
+    fn get(&self, i: usize) -> *const CSchema {
+        self.ptrs[i]
+    }
+}
+
+impl Drop for FieldSchemas {
+    fn drop(&mut self) {
+        for p in self.owned.drain(..) {
+            // SAFETY: every pointer here came from CSchema::from_rust above
+            // and is freed exactly once.
+            unsafe { CSchema::free(p) };
+        }
+    }
+}
+
 unsafe fn parse_cli_data_argument_unrolled(
     mut dest: *mut u8,
     default_value: *mut c_char,
@@ -3075,6 +3115,12 @@ unsafe fn parse_cli_data_argument_unrolled(
     }
 
     let n = rs.parameters.len();
+
+    // A field of a recursive record refers back to the record. Read on its
+    // own, that reference has nothing to resolve against, so such a field
+    // is read through a copy of its schema with the record spliced in.
+    // Fields that make no such reference use the record's own sub-schema.
+    let field_schemas = FieldSchemas::new(schema, &rs);
 
     // Source 1: bundle (per-field voidstar, may be absent or partial).
     let bundle_fields: Vec<Option<shm::AbsPtr>> = if default_value.is_null() {
@@ -3111,7 +3157,7 @@ unsafe fn parse_cli_data_argument_unrolled(
     for i in 0..n {
         let field_val = *fields.add(i);
         if !field_val.is_null() {
-            let elem_cs = *(*schema).parameters.add(i);
+            let elem_cs = field_schemas.get(i);
             let fs = &rs.parameters[i];
             let field_shape = per_field_shapes.and_then(|s| s.get(i)).copied();
             let loaded = if let Some(fshape) = field_shape.filter(|s| s.is_non_default()) {
@@ -3162,7 +3208,7 @@ unsafe fn parse_cli_data_argument_unrolled(
     for i in 0..n {
         let default_field = *default_fields.add(i);
         if !default_field.is_null() {
-            let elem_cs = *(*schema).parameters.add(i);
+            let elem_cs = field_schemas.get(i);
             let fs = &rs.parameters[i];
             let p = match shm::shcalloc(1, fs.width) {
                 Ok(p) => p,

@@ -195,7 +195,9 @@ pub fn load_record_fields_from_json(
                 return Err(err(&format!("unknown field '{}' in record bundle", k)));
             }
         }
-        let mut env: RecurEnv = Vec::new();
+        // Each field is walked on its own, so the record's own declaration
+        // is seeded: a field of a recursive record refers back to it.
+        let mut env: RecurEnv = recur::self_scope(schema);
         for (key, fs) in schema.keys.iter().zip(schema.parameters.iter()) {
             match obj.get(key) {
                 Some(child) => {
@@ -217,7 +219,7 @@ pub fn load_record_fields_from_json(
                 children.len()
             )));
         }
-        let mut env: RecurEnv = Vec::new();
+        let mut env: RecurEnv = recur::self_scope(schema);
         for (child, fs) in children.iter().zip(schema.parameters.iter()) {
             let abs = shm::shmalloc(fs.width)?;
             // SAFETY: abs is freshly allocated with fs.width bytes.

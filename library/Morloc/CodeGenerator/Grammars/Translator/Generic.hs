@@ -1668,12 +1668,6 @@ walkGenericSelectorBrackets desc =
         "" -> tupled results
         name -> pretty name <> tupled results)
 
--- | The native name of one arm of a `data` type: the type's concrete name
--- and the constructor's, joined. Python uses it as a class, R as an S3 class
--- string; both are declared by the same generator.
-armClass :: CVar -> Text -> MDoc
-armClass cv n = pretty (unCVar cv) <> "_" <> pretty n
-
 -- | A Python tuple literal, with the trailing comma a one-element tuple
 -- needs to be a tuple at all.
 pyTuple :: [MDoc] -> MDoc

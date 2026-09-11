@@ -349,15 +349,19 @@ printRecordTemplate ts = encloseSep "<" ">" "," ts
 --
 -- The default arguments live here rather than on the definition: C++ forbids
 -- repeating them for the same parameter in one scope.
-printMarshalDecls :: MDoc -> MDoc
-printMarshalDecls name =
+printMarshalDecls :: [MDoc] -> MDoc -> MDoc
+printMarshalDecls params name =
   vsep
-    [ "size_t get_shm_size(const Schema* schema, const" <+> name <> "& data);"
-    , "void* to_voidstar(void* dest, void** cursor, const Schema* schema, const"
+    [ tmpl <> "size_t get_shm_size(const Schema* schema, const" <+> name <> "& data);"
+    , tmpl <> "void* to_voidstar(void* dest, void** cursor, const Schema* schema, const"
         <+> name <> "& obj);"
-    , name <+> "from_voidstar(const Schema* schema, const void* anything,"
+    , tmpl <> name <+> "from_voidstar(const Schema* schema, const void* anything,"
         <+> name <> "* dummy = nullptr, const void* base_ptr = nullptr);"
     ]
+  where
+    tmpl = case params of
+      [] -> ""
+      _ -> printTemplateHeader params <> line
 
 -- | The forward declarations and wrapper for a variant.
 --
@@ -423,11 +427,19 @@ printCppVariantSerializers name arms =
   where
     idxArms = zip [(0 :: Int) ..] arms
 
+    -- Each marshaller pushes the type's own declaration onto the recursion
+    -- environment before descending. A variant may be declared INSIDE
+    -- another type's schema (`&Expr ... &Term ... ^Term ... ^Expr`), so a
+    -- back-reference to it from within its own arms resolves only if this
+    -- scope, not just the outermost one, is on the stack.
+    scopeDecl = "RecurEnvScope _recur_scope(resolve_recur(schema));"
+
     sizeFn =
       vsep
         [ "inline size_t get_shm_size(const Schema* schema, const" <+> name <> "& obj) {"
         , indent 4 $ vsep
-            [ "switch (obj.v.index()) {"
+            [ scopeDecl
+            , "switch (obj.v.index()) {"
             , indent 4 $ vsep
                 [ "case" <+> pretty i <> ":" <+>
                     (if null ts
@@ -446,7 +458,8 @@ printCppVariantSerializers name arms =
         [ "inline void* to_voidstar(void* dest, void** cursor, const Schema* schema, const"
             <+> name <> "& obj) {"
         , indent 4 $ vsep
-            [ "switch (obj.v.index()) {"
+            [ scopeDecl
+            , "switch (obj.v.index()) {"
             , indent 4 $ vsep
                 [ "case" <+> pretty i <> ":" <+>
                     (if null ts
@@ -475,6 +488,7 @@ printCppVariantSerializers name arms =
             [ "(void)dummy;"
             , name <+> "out;"
             , "const Schema* s = resolve_recur(schema);"
+            , "RecurEnvScope _recur_scope(s);"
             , "switch (read_variant_tag(data)) {"
             , indent 4 $ vsep
                 [ "case" <+> pretty i <> ": out.v ="
@@ -527,6 +541,7 @@ printSerializer params rtype fields =
 #{printTemplateHeader params}
 void* to_voidstar(void* dest, void** cursor, const Schema* schema, const #{rtype}& obj)
 {
+    RecurEnvScope _recur_scope(resolve_recur(schema));
 #{block 4 "" (vsep (zipWith assignField [0 ..] (map fst fields)))}
     return dest;
 }
@@ -557,9 +572,13 @@ printDeserializer fwdDeclared params rtype fields =
       -- and C++ forbids repeating them here. Anything not forward-declared
       -- keeps them, or a two-argument call has nowhere to find them.
       [idoc|#{rtype} from_voidstar(const Schema* schema, const void * anything, #{rtype}* dummy#{defArg "nullptr"}, const void* base_ptr#{defArg "nullptr"})|]
+    -- The record may be declared inside another type's schema, so its own
+    -- declaration is pushed before its fields are read: a back-reference
+    -- to it from within them resolves against this scope.
     body =
       vsep $
-        [[idoc|#{rtype} obj;|]]
+        [ "RecurEnvScope _recur_scope(resolve_recur(schema));"
+        , [idoc|#{rtype} obj;|] ]
           <> zipWith assignFields [0 ..] fields
           <> ["return obj;"]
 
@@ -576,7 +595,8 @@ printDeserializer fwdDeclared params rtype fields =
     headerGetSize = [idoc|size_t get_shm_size(const Schema* schema, const #{rtype}& data)|]
     bodyGetSize =
       vsep $
-        ["size_t size = 0;"]
+        [ "RecurEnvScope _recur_scope(resolve_recur(schema));"
+        , "size_t size = 0;" ]
           <> [getSize idx key | (idx, (key, _)) <- zip [0 ..] fields]
           <> ["return size;"]
 
