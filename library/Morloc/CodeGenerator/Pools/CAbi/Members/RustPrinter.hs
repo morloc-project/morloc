@@ -17,6 +17,7 @@ via 'toIType'), so this printer only unwraps the 'ITyNamed' carrier.
 -}
 module Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter
   ( printExpr
+  , typeHead
   , printStmt
   , printDispatch
   , printProgram
@@ -57,6 +58,14 @@ rustType ITyUnit = "()"
 rustType ITySerial = "*const u8"
 rustType ITyUnknown = "_"
 rustType t = error $ "RustPrinter: cannot render type " <> show t
+
+-- | A rendered type without its argument list: @MyBox<i64>@ gives @MyBox@,
+-- a plain name gives itself. A pattern names an enum by its head alone,
+-- because the qualified path a generic instantiation would need is not
+-- stable Rust in pattern position, and the subject's type pins the
+-- arguments anyway.
+typeHead :: MDoc -> MDoc
+typeHead t = pretty (fst (T.breakOn "<" (render t)))
 
 printExpr :: IExpr -> MDoc
 printExpr (IVar v) = pretty v
@@ -465,7 +474,10 @@ printVariantImpls name arms = vsep [toImpl, "", fromImpl]
   where
     idxArms = zip [0 :: Int ..] arms
 
-    armPat c ts = name <> "::" <> pretty c <> (if null ts then "" else "(mlc_b)")
+    -- Constructors are spelled through `Self` inside the impl: it is legal
+    -- in expression and pattern position alike, for a plain name and for a
+    -- generic instantiation the impl is written for.
+    armPat c ts = "Self::" <> pretty c <> (if null ts then "" else "(mlc_b)")
 
     toImpl =
       vsep
@@ -520,8 +532,8 @@ printVariantImpls name arms = vsep [toImpl, "", fromImpl]
                 , indent 4 $ vsep
                     ( [ pretty i <+> "=>" <+>
                           (if null ts
-                             then name <> "::" <> pretty c <> ","
-                             else name <> "::" <> pretty c
+                             then "Self::" <> pretty c <> ","
+                             else "Self::" <> pretty c
                                     <> parens ("read_variant_payload(&mlc_s.parameters["
                                                  <> pretty i <> "], data, base)") <> ",")
                       | (i, (c, ts)) <- idxArms ]
@@ -567,7 +579,7 @@ printEnumImpls name ctors = vsep [toImpl, "", fromImpl]
             , indent 4 $ vsep
                 [ "match *data {"
                 , indent 4 $ vsep
-                    ( [pretty i <+> "=>" <+> name <> "::" <> pretty c <> "," | (i, c) <- zip [0 :: Int ..] ctors]
+                    ( [pretty i <+> "=>" <+> "Self::" <> pretty c <> "," | (i, c) <- zip [0 :: Int ..] ctors]
                         ++ [ -- The runtime range-checks every tag at the wire
                              -- boundary, so reaching this arm means the value
                              -- and its schema disagree: a bug, not bad input.
@@ -664,7 +676,7 @@ printRecordImpls name params fields = vsep [toImpl, "", fromImpl]
             , indent 4 $ vsep
                 [ "let schema = resolve_recur(schema);"
                 , "let _g = RecurScope::enter(schema);"
-                , name <+> "{"
+                , "Self {"
                 , indent 4 $ vsep (map readField idx)
                 , "}"
                 ]

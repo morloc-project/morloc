@@ -146,14 +146,25 @@ instance HasCppType NativeManifold where
 instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
   cppTypeOf = f . typeFof
     where
+      -- A `data` type's name is its template instantiated with this
+      -- occurrence's arguments when the user gave it one (`MyBox<$1>`), and
+      -- the name itself otherwise -- a generated type is monomorphic per
+      -- instantiation and spells nothing of its arguments.
+      dataTypeName x ps
+        | T.any (== '$') x = do
+            let (typeTs, kindCount) = partitionKindArgsF ps
+            ts' <- mapM f typeTs
+            return . pretty $ expandMacro x (map render ts') kindCount
+        | otherwise = return (pretty x)
+
       f (UnkF (FV _ x)) = return $ pretty x
       -- An enum lowers to its concrete name; the `enum class X : uint8_t`
       -- behind it is generated for this pool or supplied by the user
       -- through a `data Cpp => X = "..."` mapping.
-      f (EnumF (FV _ x) _) = return $ pretty x
+      f (EnumF (FV _ (CV x)) ps _) = dataTypeName x ps
       -- A variant lowers to its concrete name; the type carrying the arms
       -- is generated for this pool or supplied by `data Cpp => X = "..."`.
-      f (VariantF (FV _ x) _) = return $ pretty x
+      f (VariantF (FV _ (CV x)) ps _) = dataTypeName x ps
       -- Kindless or polymorphic-row `Table` lowers to a VarF tagged with
       -- the general type variable @BT.table@. The wire schema marker is
       -- @T@ on the encoder side; here on the C++ side it must lower to
@@ -481,7 +492,7 @@ makeCppCode labels srcs es univeralScopeMap scopeMap closureTable0 = do
   -- Seeded before any type is rendered: 'cppTypeOf' consults it to tell a
   -- back-reference into a generated `data` type from an unmapped alias.
   CMS.modify $ \st -> st
-    { translatorVariantNames = Set.fromList [gv | (FV gv _, _) <- collectCppVariants es] }
+    { translatorVariantNames = Set.fromList [gv | (FV gv _, _, _) <- collectCppVariants es] }
   templates <- CMS.gets translatorLogTemplates
   (srcDecl, srcSerial) <- generateSourcedSerializers univeralScopeMap scopeMap es
 
@@ -772,19 +783,19 @@ cppLowerConfig reifyThunks =
     -- recursive arm a finite size and lets an arm holding another `data`
     -- type need only a forward declaration, so declaration order between
     -- two variants stops mattering.
-    , lcVariantLit = \cv n _ xs ->
-        let arm = pretty (unCVar cv) <> "_" <> pretty n
-        in pretty (unCVar cv) <> "{std::make_shared<" <> arm <> ">"
+    , lcVariantLit = \ty n _ xs ->
+        let arm = CP.armName ty n
+        in ty <> "{std::make_shared<" <> arm <> ">"
              <> parens (arm <> encloseSep "{" "}" ", " xs) <> "}"
-    , lcEnumLit = \cv _ n _ -> pretty (unCVar cv) <> "::" <> pretty n
-    , lcVariantTagTest = \cv n _ subj ->
-        "std::holds_alternative<std::shared_ptr<" <> pretty (unCVar cv) <> "_"
-          <> pretty n <> ">>" <> parens (parens subj <> ".v")
-    , lcCtorField = \cv n i subj ->
-        "std::get<std::shared_ptr<" <> pretty (unCVar cv) <> "_" <> pretty n <> ">>"
+    , lcEnumLit = \ty _ n _ -> ty <> "::" <> pretty n
+    , lcVariantTagTest = \ty n _ subj ->
+        "std::holds_alternative<std::shared_ptr<" <> CP.armName ty n <> ">>"
+          <> parens (parens subj <> ".v")
+    , lcCtorField = \ty n i subj ->
+        "std::get<std::shared_ptr<" <> CP.armName ty n <> ">>"
           <> parens (parens subj <> ".v") <> "->f" <> pretty i
-    , lcEnumTagTest = \cv _ n _ subj ->
-        parens (subj <+> "==" <+> pretty (unCVar cv) <> "::" <> pretty n)
+    , lcEnumTagTest = \ty _ n _ subj ->
+        parens (subj <+> "==" <+> ty <> "::" <> pretty n)
     , lcCoerceOptional = \x -> "std::make_optional(" <> x <> ")"
     , lcTypeOf = \t -> Just . toIType <$> cppTypeOf t
     , lcSerialAstType = serializeTypeOf
@@ -1621,8 +1632,8 @@ collectCppEnums =
     se _ e = return $ foldlSE (<>) [] e
 
     seek :: TypeF -> [(FVar, [Text])]
-    seek (EnumF v ns) = [(v, ns)]
-    seek (VariantF _ as) = concatMap (concatMap seek . snd) as
+    seek (EnumF v _ ns) = [(v, ns)]
+    seek (VariantF _ _ as) = concatMap (concatMap seek . snd) as
     seek (NamF _ _ _ rs) = concatMap (seek . snd) rs
     seek (AppF t ts) = concatMap seek (t : ts)
     seek (FunF ts t) = concatMap seek (t : ts)
@@ -1639,42 +1650,23 @@ generateCppEnums es = concat <$> mapM makeOne (collectCppEnums es)
       userMapped <- variantIsUserMapped gv cvText
       return [CP.printCppEnumDecl (pretty cvText) ctors | not userMapped]
 
-collectCppVariants :: [SerialManifold] -> [(FVar, [(Text, [TypeF])])]
-collectCppVariants =
-  Map.elems
-    . Map.fromListWith wider
-    -- Keyed by the CONCRETE name, which is what the declaration is
-    -- called. A parameterized `data` has one concrete type per
-    -- instantiation, so keying by the general name would collapse
-    -- `Try Str ()` and `Try Str (IFile a)` into a single declaration
-    -- and the second use would name a type that was never emitted.
-    . map (\e@(FV _ cv, _) -> (cv, e))
-    . concatMap (runIdentity . foldWithSerialManifoldM fm)
+-- | Every occurrence of a payload-bearing @data@ type in this pool, with
+-- the arguments it was applied to. Occurrences are not merged here: which
+-- ones name the same declaration is a question of the RENDERED name --
+-- a template instantiated twice is two types, a generated type is one per
+-- instantiation whatever it was applied to -- and rendering needs the
+-- translator, so the merge happens in 'generateCppVariants'.
+collectCppVariants :: [SerialManifold] -> [(FVar, [TypeF], [(Text, [TypeF])])]
+collectCppVariants = concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
-    -- Merge arm-wise, but keep DECLARATION ORDER: an arm's position is its
-    -- wire tag, so sorting by name here would silently renumber every
-    -- constructor. The longer list is the more complete view of the type and
-    -- supplies the order; fields come from whichever occurrence has them,
-    -- since a constructor literal's type reports its own arm with none.
-    wider (v, as) (_, bs) = (v, [(n, pick n) | n <- order])
-      where
-        am = Map.fromList as
-        bm = Map.fromList bs
-        order = if length as >= length bs then map fst as else map fst bs
-        pick n = case (Map.lookup n am, Map.lookup n bm) of
-          (Just xs, Just ys) -> if null xs then ys else xs
-          (Just xs, Nothing) -> xs
-          (Nothing, Just ys) -> ys
-          _ -> []
-
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
     ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (serialAstToType s)
     ne efull e = return $ foldlNE (<>) (seek (typeFof efull)) e
     se _ (SerializeS_ s xs) = return $ seek (serialAstToType s) <> xs
     se _ e = return $ foldlSE (<>) [] e
 
-    seek :: TypeF -> [(FVar, [(Text, [TypeF])])]
-    seek (VariantF v as) = (v, as) : concatMap (concatMap seek . snd) as
+    seek :: TypeF -> [(FVar, [TypeF], [(Text, [TypeF])])]
+    seek (VariantF v ps as) = (v, ps, as) : concatMap seek ps <> concatMap (concatMap seek . snd) as
     seek (NamF _ _ _ rs) = concatMap (seek . snd) rs
     seek (AppF t ts) = concatMap seek (t : ts)
     seek (FunF ts t) = concatMap seek (t : ts)
@@ -1691,7 +1683,14 @@ collectCppVariants =
 -- phases rather than one block per type.
 generateCppVariants :: [SerialManifold] -> CppTranslator ([MDoc], [MDoc])
 generateCppVariants es = do
-  parts <- mapM makeOne (collectCppVariants es)
+  named <- mapM (\(v, ps, as) -> (\n -> (render n, (v, ps, as))) <$> cppTypeOf (VariantF v ps as))
+                (collectCppVariants es)
+  -- Merged by the RENDERED name, which is what the declaration is called: a
+  -- template instantiated twice is two declarations, a generated type is
+  -- one per instantiation, and keying by the general name would collapse
+  -- `Try Str ()` and `Try Str (IFile a)` into one and leave the second use
+  -- naming a type that was never emitted.
+  parts <- mapM makeOne (Map.elems (Map.fromListWith wider named))
   let decls = concatMap (\(d, _, _, _) -> d) parts
       bodies = concatMap (\(_, b, _, _) -> b) parts
       fwds = concatMap (\(_, _, f, _) -> f) parts
@@ -1701,23 +1700,39 @@ generateCppVariants es = do
   -- to an earlier call, which would bind to the header's raw-bytes fallback.
   return (decls <> bodies <> fwds, serials)
   where
-    makeOne (FV gv (CV cvText), arms) = do
+    -- Merge arm-wise, but keep DECLARATION ORDER: an arm's position is its
+    -- wire tag, so sorting by name here would silently renumber every
+    -- constructor. The longer list is the more complete view of the type and
+    -- supplies the order; fields come from whichever occurrence has them,
+    -- since a constructor literal's type reports its own arm with none.
+    wider (v, ps, as) (_, _, bs) = (v, ps, [(n, pick n) | n <- order])
+      where
+        am = Map.fromList as
+        bm = Map.fromList bs
+        order = if length as >= length bs then map fst as else map fst bs
+        pick n = case (Map.lookup n am, Map.lookup n bm) of
+          (Just xs, Just ys) -> if null xs then ys else xs
+          (Just xs, Nothing) -> xs
+          (Nothing, Just ys) -> ys
+          _ -> []
+
+    makeOne (FV gv (CV cvText), ps, arms) = do
       userMapped <- variantIsUserMapped gv cvText
       arms' <- mapM (\(n, ts) -> (,) n <$> mapM cppTypeOf ts) arms
-      let name = pretty cvText
-          -- Each arm's struct needs its own marshalling: the wrapper hands
+      name <- cppTypeOf (VariantF (FV gv (CV cvText)) ps arms)
+      let -- Each arm's struct needs its own marshalling: the wrapper hands
           -- the payload to the runtime as that struct, and the arm's schema
           -- describes it as a tuple of fields. Without these the size and
           -- write calls fall through to a generic template that reports the
           -- slot alone, and the payload is written over its own slot.
           armSerial (c, ts) =
-            let aname = name <> "_" <> pretty c
+            let aname = CP.armName name c
                 fields = [("f" <> pretty i, t) | (i, t) <- zip [(0 :: Int) ..] ts]
             in [CP.printSerializer [] aname fields, CP.printDeserializer True [] aname fields]
           serial = CP.printCppVariantSerializers name arms'
           armSerials = concatMap armSerial [(c, ts) | (c, ts) <- arms', not (null ts)]
           fwds = CP.printMarshalDecls name
-                   : [CP.printMarshalDecls (name <> "_" <> pretty c) | (c, ts) <- arms', not (null ts)]
+                   : [CP.printMarshalDecls (CP.armName name c) | (c, ts) <- arms', not (null ts)]
       return $ if userMapped
                  then ([], [], fwds, armSerials <> [serial])
                  else ( [CP.printCppVariantDecl name arms']

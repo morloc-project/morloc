@@ -181,16 +181,28 @@ getRustSchemaTable = do
 rustTypeOf :: TypeF -> RustM MDoc
 rustTypeOf = f
   where
+    -- A nominal type's name is its template instantiated with this
+    -- occurrence's arguments when the user gave it one (`MyBox<$1>`), and
+    -- the name itself otherwise -- a generated type is monomorphic per
+    -- instantiation and spells nothing of its arguments. The arguments are
+    -- stored positions, so a function among them boxes ('rustFieldType').
+    nominalTypeName x ps
+      | T.any (== '$') x = do
+          let (typeTs, kindCount) = partitionKindArgsF ps
+          ts' <- mapM rustFieldType typeTs
+          return . pretty $ expandMacro x (map render ts') kindCount
+      | otherwise = return (pretty x)
+
     f :: TypeF -> RustM MDoc
     f (UnkF (FV _ x)) = return (pretty x)
     f (VarF (FV _ x)) = return (pretty x)
     -- An enum lowers to its concrete name; the `#[repr(u8)] enum` that
     -- name refers to is either generated for this pool or supplied by the
     -- user through a `data Rust => X = "..."` mapping.
-    f (EnumF (FV _ x) _) = return (pretty x)
+    f (EnumF (FV _ (CV x)) ps _) = nominalTypeName x ps
     -- A variant lowers to its concrete name; the `enum` carrying the arms
     -- is generated for this pool or supplied by a `data Rust => X = "..."`.
-    f (VariantF (FV _ x) _) = return (pretty x)
+    f (VariantF (FV _ (CV x)) ps _) = nominalTypeName x ps
     f (AppF t ts) = do
       t' <- f t
       let (typeTs, kindCount) = partitionKindArgsF ts
@@ -235,8 +247,9 @@ rustTypeOf = f
           params <- mapM f [t | ((_, Nothing), (_, t)) <- zip (recFields rec) rs]
           return $ recName rec <> if null params then "" else "<" <> hcat (punctuate ", " params) <> ">"
         Nothing -> error $ "Rust: record missing from recmap: " <> show v
-    -- User-mapped record: the concrete struct name is the CVar text.
-    f (NamF _ (FV _ (CV s)) _ _) = return (pretty s)
+    -- User-mapped record: the concrete struct name is the CVar text, or the
+    -- template it holds instantiated with this occurrence's arguments.
+    f (NamF _ (FV _ (CV s)) ps _) = nominalTypeName s ps
     -- Back-reference to a recursive record: resolve the concrete struct name
     -- via the concrete scope (the CVar slot is unreliable after weave).
     f (RecF (FV gv@(TV gvText) (CV cv)))
@@ -269,7 +282,7 @@ rustIsCopy (OptionalF t) = rustIsCopy t
 -- nothing, so it is Copy. A pool-owned enum derives Copy; a user-mapped
 -- one (`data Rust => X = "..."`) must derive it too, which is the same
 -- shape 'printRustEnum' emits.
-rustIsCopy (EnumF _ _) = True
+rustIsCopy (EnumF _ _ _) = True
 rustIsCopy (AppF (VarF (FV (TV gv) _)) ts)
   | T.isPrefixOf "Tuple" gv = all rustIsCopy (fst (partitionKindArgsF ts))
 rustIsCopy (VarF (FV _ (CV cv))) = cv `elem` copyScalars
@@ -1114,10 +1127,14 @@ makeClosureDispatch closureTable es = do
 -- one representative field list (from a use site). Unlike the shared recmap
 -- (which only collects @= "struct"@ records), this also collects user-mapped
 -- records (@record Rust => X = "Name"@) so their marshalling impls are emitted.
-collectRustRecords :: [SerialManifold] -> [(FVar, [(Key, TypeF)])]
+collectRustRecords :: [SerialManifold] -> [(FVar, [TypeF], [(Key, TypeF)])]
 collectRustRecords =
-  -- One entry per record (keyed by general TVar); keep the first field list.
-  nubBy ((==) `on` \(FV gv _, _) -> gv)
+  -- One entry per record; keep the first field list. A generated struct
+  -- covers every instantiation with generic parameters, so it is one entry
+  -- per general name. A user-mapped struct may be a template the user
+  -- wrote, and each instantiation needs its own marshalling, so those are
+  -- one entry per (name, arguments).
+  nubBy ((==) `on` \(FV gv cv, ps, _) -> (gv, if cv == CV "struct" then [] else ps))
     . concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
@@ -1126,12 +1143,12 @@ collectRustRecords =
     se _ (SerializeS_ s xs) = return $ seek (serialAstToType s) <> xs
     se _ e = return $ foldlSE (<>) [] e
 
-    seek :: TypeF -> [(FVar, [(Key, TypeF)])]
-    seek (NamF _ v _ rs) = (v, rs) : concatMap (seek . snd) rs
+    seek :: TypeF -> [(FVar, [TypeF], [(Key, TypeF)])]
+    seek (NamF _ v ps rs) = (v, ps, rs) : concatMap seek ps <> concatMap (seek . snd) rs
     -- A record reachable only as a `data` arm's field still needs its
     -- struct emitted, so the walk descends through arms as the enum
     -- collector's does.
-    seek (VariantF _ as) = concatMap (concatMap seek . snd) as
+    seek (VariantF _ ps as) = concatMap seek ps <> concatMap (concatMap seek . snd) as
     seek (AppF t ts) = concatMap seek (t : ts)
     seek (FunF ts t) = concatMap seek (t : ts)
     seek (OptionalF t) = seek t
@@ -1145,27 +1162,15 @@ bodyName (AppU (VarU (TV n)) _) = Just n
 bodyName (NamU _ (TV n) _ _) = Just n
 bodyName _ = Nothing
 
--- | Collect every @data@ type used in these manifolds, keyed by its FVar,
--- with its constructor names. Mirrors 'collectRustRecords'.
--- Keep the LONGEST constructor list, not the first seen. A constructor
--- LITERAL reports a type whose table holds only its own arm, so a
--- first-wins merge can define the type from one arm and silently renumber
--- every other constructor -- an arm's position is its wire tag.
-mergeLongest :: [(FVar, [Text])] -> [(FVar, [Text])]
-mergeLongest =
-  Map.elems
-    . Map.fromListWith (\a b -> if length (snd a) >= length (snd b) then a else b)
-    -- Keyed by the CONCRETE name, which is what the declaration is
-    -- called. A parameterized `data` has one concrete type per
-    -- instantiation, so keying by the general name would collapse
-    -- `Try Str ()` and `Try Str (IFile a)` into a single declaration
-    -- and the second use would name a type that was never emitted.
-    . map (\e@(FV _ cv, _) -> (cv, e))
-
-collectRustEnums :: [SerialManifold] -> [(FVar, [Text])]
-collectRustEnums =
-  mergeLongest
-    . concatMap (runIdentity . foldWithSerialManifoldM fm)
+-- | Every occurrence of an argument-free @data@ type in these manifolds,
+-- with its constructor names. Occurrences are merged in
+-- 'generateRustEnums' by rendered name, keeping the LONGEST constructor
+-- list rather than the first seen: a constructor LITERAL reports a type
+-- whose table holds only its own arm, so a first-wins merge could define
+-- the type from one arm and silently renumber every other constructor --
+-- an arm's position is its wire tag.
+collectRustEnums :: [SerialManifold] -> [(FVar, [TypeF], [Text])]
+collectRustEnums = concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
     ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (serialAstToType s)
@@ -1173,9 +1178,9 @@ collectRustEnums =
     se _ (SerializeS_ s xs) = return $ seek (serialAstToType s) <> xs
     se _ e = return $ foldlSE (<>) [] e
 
-    seek :: TypeF -> [(FVar, [Text])]
-    seek (EnumF v ns) = [(v, ns)]
-    seek (VariantF _ as) = concatMap (concatMap seek . snd) as
+    seek :: TypeF -> [(FVar, [TypeF], [Text])]
+    seek (EnumF v ps ns) = (v, ps, ns) : concatMap seek ps
+    seek (VariantF _ ps as) = concatMap seek ps <> concatMap (concatMap seek . snd) as
     seek (NamF _ _ _ rs) = concatMap (seek . snd) rs
     seek (AppF t ts) = concatMap seek (t : ts)
     seek (FunF ts t) = concatMap seek (t : ts)
@@ -1190,48 +1195,22 @@ collectRustEnums =
 -- first one seen. A constructor literal's type reports only the arm being
 -- built, so taking the first occurrence could declare a one-arm enum and
 -- leave every other constructor undeclared.
-collectRustVariants :: [SerialManifold] -> [(FVar, [(Text, [TypeF])])]
-collectRustVariants =
-  Map.elems
-    . Map.fromListWith wider
-    -- Keyed by the CONCRETE name, which is what the declaration is
-    -- called. A parameterized `data` has one concrete type per
-    -- instantiation, so keying by the general name would collapse
-    -- `Try Str ()` and `Try Str (IFile a)` into a single declaration
-    -- and the second use would name a type that was never emitted.
-    . map (\e@(FV _ cv, _) -> (cv, e))
-    . concatMap (runIdentity . foldWithSerialManifoldM fm)
+-- Occurrences are not merged here: which ones name the same declaration is
+-- a question of the RENDERED name -- a template instantiated twice is two
+-- types, a generated type is one per instantiation whatever it was applied
+-- to -- and rendering needs the translator, so the merge happens in
+-- 'generateRustVariants'.
+collectRustVariants :: [SerialManifold] -> [(FVar, [TypeF], [(Text, [TypeF])])]
+collectRustVariants = concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
-    -- Merge ARM-WISE rather than by arm count. A constructor literal's type
-    -- reports only the arm being built, and reports it with no fields, so
-    -- comparing lengths cannot tell a complete one-arm type from a
-    -- truncated view of it -- and picking the truncated one would declare
-    -- an arm as nullary that the schema says carries a payload, which
-    -- writes RELNULL where the reader expects a pointer.
-    -- Merge arm-wise, but keep DECLARATION ORDER: an arm's position is its
-    -- wire tag, so sorting by name here would silently renumber every
-    -- constructor. The longer list is the more complete view of the type and
-    -- supplies the order; fields come from whichever occurrence has them,
-    -- since a constructor literal's type reports its own arm with none.
-    wider (v, as) (_, bs) = (v, [(n, pick n) | n <- order])
-      where
-        am = Map.fromList as
-        bm = Map.fromList bs
-        order = if length as >= length bs then map fst as else map fst bs
-        pick n = case (Map.lookup n am, Map.lookup n bm) of
-          (Just xs, Just ys) -> if null xs then ys else xs
-          (Just xs, Nothing) -> xs
-          (Nothing, Just ys) -> ys
-          _ -> []
-
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
     ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (serialAstToType s)
     ne efull e = return $ foldlNE (<>) (seek (typeFof efull)) e
     se _ (SerializeS_ s xs) = return $ seek (serialAstToType s) <> xs
     se _ e = return $ foldlSE (<>) [] e
 
-    seek :: TypeF -> [(FVar, [(Text, [TypeF])])]
-    seek (VariantF v as) = (v, as) : concatMap (concatMap seek . snd) as
+    seek :: TypeF -> [(FVar, [TypeF], [(Text, [TypeF])])]
+    seek (VariantF v ps as) = (v, ps, as) : concatMap seek ps <> concatMap (concatMap seek . snd) as
     seek (NamF _ _ _ rs) = concatMap (seek . snd) rs
     seek (AppF t ts) = concatMap seek (t : ts)
     seek (FunF ts t) = concatMap seek (t : ts)
@@ -1244,18 +1223,46 @@ collectRustVariants =
 -- enums: a user-mapped @data Rust => X = "..."@ writes its own type in
 -- sourced Rust and gets only the impls.
 generateRustVariants :: [SerialManifold] -> RustM [MDoc]
-generateRustVariants es = concat <$> mapM makeOne (collectRustVariants es)
+generateRustVariants es = do
+  named <- mapM (\(v, ps, as) -> (\n -> (render n, (v, ps, as))) <$> rustTypeOf (VariantF v ps as))
+                (collectRustVariants es)
+  -- Merged by the RENDERED name, which is what the declaration is called: a
+  -- template instantiated twice is two declarations, a generated type is
+  -- one per instantiation, and keying by the general name would collapse
+  -- `Try Str ()` and `Try Str (IFile a)` into one and leave the second use
+  -- naming a type that was never emitted.
+  concat <$> mapM makeOne (Map.elems (Map.fromListWith wider named))
   where
-    makeOne (FV gv@(TV gvText) (CV cvText), arms) = do
+    -- Merge ARM-WISE rather than by arm count. A constructor literal's type
+    -- reports only the arm being built, and reports it with no fields, so
+    -- comparing lengths cannot tell a complete one-arm type from a
+    -- truncated view of it -- and picking the truncated one would declare
+    -- an arm as nullary that the schema says carries a payload, which
+    -- writes RELNULL where the reader expects a pointer.
+    -- Merge arm-wise, but keep DECLARATION ORDER: an arm's position is its
+    -- wire tag, so sorting by name here would silently renumber every
+    -- constructor. The longer list is the more complete view of the type and
+    -- supplies the order; fields come from whichever occurrence has them,
+    -- since a constructor literal's type reports its own arm with none.
+    wider (v, ps, as) (_, _, bs) = (v, ps, [(n, pick n) | n <- order])
+      where
+        am = Map.fromList as
+        bm = Map.fromList bs
+        order = if length as >= length bs then map fst as else map fst bs
+        pick n = case (Map.lookup n am, Map.lookup n bm) of
+          (Just xs, Just ys) -> if null xs then ys else xs
+          (Just xs, Nothing) -> xs
+          (Nothing, Just ys) -> ys
+          _ -> []
+
+    makeOne (FV gv (CV cvText), ps, arms) = do
       userMapped <- cscopeDeclaresVariant gv cvText
       arms' <- mapM (\(n, ts) -> (,) n <$> mapM rustFieldType ts) arms
-      let name = pretty cvText
-          impls = RP.printVariantImpls name arms'
+      name <- rustTypeOf (VariantF (FV gv (CV cvText)) ps arms)
+      let impls = RP.printVariantImpls name arms'
       return $ if userMapped
                  then [impls]
                  else [RP.printRustVariant name arms', impls]
-      where
-        _ = gvText
 
     cscopeDeclaresVariant :: TVar -> Text -> RustM Bool
     cscopeDeclaresVariant gv cvText = do
@@ -1274,12 +1281,20 @@ generateRustVariants es = concat <$> mapM makeOne (collectRustVariants es)
 -- exactly the same FVar as an unmapped @Foo@ -- so the concrete scope is
 -- consulted, as 'Cpp.cscopeMatches' does for the same ambiguity.
 generateRustEnums :: [SerialManifold] -> RustM [MDoc]
-generateRustEnums es = concat <$> mapM makeOne (collectRustEnums es)
+generateRustEnums es = do
+  named <- mapM (\(v, ps, ns) -> (\n -> (render n, (v, ps, ns))) <$> rustTypeOf (EnumF v ps ns))
+                (collectRustEnums es)
+  -- One entry per RENDERED name, as for variants: a user's template is one
+  -- type per instantiation, a generated enum one whatever it was applied
+  -- to. The longest constructor list is the complete one.
+  concat <$> mapM makeOne (Map.elems (Map.fromListWith longest named))
   where
-    makeOne (FV gv@(TV gvText) (CV cvText), ctors) = do
+    longest a@(_, _, as) b@(_, _, bs) = if length as >= length bs then a else b
+
+    makeOne (FV gv (CV cvText), ps, ctors) = do
       userMapped <- cscopeDeclares gv cvText
-      let name = pretty cvText
-          impls = RP.printEnumImpls name ctors
+      name <- rustTypeOf (EnumF (FV gv (CV cvText)) ps ctors)
+      let impls = RP.printEnumImpls name ctors
       return $ if userMapped
                  then [impls]
                  else [RP.printRustEnum name ctors, impls]
@@ -1340,8 +1355,8 @@ generateRustStructs es = concat <$> mapM makeOne (collectRustRecords es)
           _ -> return Nothing
       | otherwise = return Nothing
 
-    makeOne :: (FVar, [(Key, TypeF)]) -> RustM [MDoc]
-    makeOne (v@(FV gv _), rs) = case v of
+    makeOne :: (FVar, [TypeF], [(Key, TypeF)]) -> RustM [MDoc]
+    makeOne (v@(FV gv _), ps, rs) = case v of
       -- Autogenerated `= "struct"` record: drive from the unified RecEntry so a
       -- field whose native and wire types diverge (a custom-packer field)
       -- becomes a GENERIC parameter -- one struct `S<T1> { w: T1, .. }` covers
@@ -1367,14 +1382,17 @@ generateRustStructs es = concat <$> mapM makeOne (collectRustRecords es)
       -- marshalling impls are emitted, with concrete field types. A closure field
       -- reifies/reflects in place (via 'fieldMarshal'); the impl is emitted only
       -- when EVERY function field has a harvested crossing site, else struct-only.
-      FV _ (CV s) -> do
-        fields <- mapM (oneField gv (pretty s) . fmap Right) rs
+      FV _ (CV _) -> do
+        -- The struct's name at this instantiation: a template the user
+        -- wrote takes this occurrence's arguments.
+        name <- rustTypeOf (NamF NamRecord v ps rs)
+        fields <- mapM (oneField gv name . fmap Right) rs
         marshals <- mapM (\(k, ty) -> fieldMarshal gv k ty) rs
         let fields4 = zipWith (\(fld, ty, w) m -> (fld, ty, w, m)) fields marshals
             -- Emit the impl only when EVERY function field has a harvested marshal
             -- (a non-function field imposes no requirement); else struct-only.
             emitImpl = and (zipWith (\(_, ty) m -> not (isFunF ty) || maybe False (const True) m) rs marshals)
-        return [RP.printRecordImpls (pretty s) [] fields4 | emitImpl]
+        return [RP.printRecordImpls name [] fields4 | emitImpl]
 
     -- Number the generic (native/=wire) fields `T1, T2, ...`; concrete fields
     -- keep their unified type.
@@ -1673,14 +1691,19 @@ rustLowerConfig mask =
     -- `?T` is `Option<T>`, whose wire layout is type-driven; a widened value must
     -- be a real `Some(..)` (never a bare `T`) or put_value serializes the wrong
     -- shape. The coercion only ever wraps a non-optional inner, so this is safe.
-    , lcVariantLit = \cv n _ xs ->
-        let arm = pretty (unCVar cv) <> "::" <> pretty n
+    -- A constructor in EXPRESSION position is spelled through the qualified
+    -- path `<T>::Ctor`, which is legal for any rendered type -- a generic
+    -- instantiation `MyBox<i64>` included, where `MyBox<i64>::Ctor` is not.
+    -- In PATTERN position that path is not stable Rust, so a pattern names
+    -- the bare head (`MyBox::Ctor`); the subject's type pins the arguments.
+    , lcVariantLit = \ty n _ xs ->
+        let arm = "<" <> ty <> ">::" <> pretty n
         in if null xs
              then arm
              else arm <> parens ("::std::boxed::Box::new" <> parens (RP.tupled1 xs))
-    , lcEnumLit = \cv _ n _ -> pretty (unCVar cv) <> "::" <> pretty n
-    , lcVariantTagTest = \cv n _ subj ->
-        "matches!" <> tupled [subj, pretty (unCVar cv) <> "::" <> pretty n <> " { .. }"]
+    , lcEnumLit = \ty _ n _ -> "<" <> ty <> ">::" <> pretty n
+    , lcVariantTagTest = \ty n _ subj ->
+        "matches!" <> tupled [subj, RP.typeHead ty <> "::" <> pretty n <> " { .. }"]
     -- The whole payload sits behind one box, mirroring the wire form, so an
     -- arm has a single field whatever its arity and one spelling serves them
     -- all. The guard has already established the arm, so the other branch is
@@ -1690,14 +1713,14 @@ rustLowerConfig mask =
     -- value would move the payload on the first and leave the rest with
     -- nothing. Borrowing makes each projection independent; the clone is
     -- what hands an owned value on from a borrowed place.
-    , lcCtorField = \cv n i subj ->
+    , lcCtorField = \ty n i subj ->
         "match" <+> "&" <> parens subj <+> "{"
-          <+> pretty (unCVar cv) <> "::" <> pretty n <> "(mlc_b)"
+          <+> RP.typeHead ty <> "::" <> pretty n <> "(mlc_b)"
           <+> "=> mlc_b." <> pretty i <> ".clone(),"
           <+> "_ => unreachable!()"
           <+> "}"
-    , lcEnumTagTest = \cv _ n _ subj ->
-        parens (subj <+> "==" <+> pretty (unCVar cv) <> "::" <> pretty n)
+    , lcEnumTagTest = \ty _ n _ subj ->
+        parens (subj <+> "==" <+> "<" <> ty <> ">::" <> pretty n)
     , lcCoerceOptional = \x -> "Some(" <> x <> ")"
     , lcTypeOf = \t -> Just . toIType <$> rustTypeOf t
     -- The serialize / raw-deserialize types use the WIRE form: a closure nested

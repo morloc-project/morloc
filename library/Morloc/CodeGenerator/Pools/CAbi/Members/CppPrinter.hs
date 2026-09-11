@@ -25,6 +25,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.CppPrinter
     -- * Struct/serializer rendering
   , printStructTypedef
   , printMarshalDecls
+  , armName
   , printCppEnumDecl
   , printCppVariantDecl
   , printCppVariantArms
@@ -36,6 +37,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.CppPrinter
   ) where
 
 import Data.Text (Text)
+import qualified Data.Text as T
 import qualified Data.Map as Map
 import Morloc.CodeGenerator.Grammars.Common (DispatchEntry (..), manNamer)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
@@ -399,8 +401,16 @@ printCppVariantArms name arms = vsep [armStruct c ts | (c, ts) <- arms]
         , "};"
         ]
 
+-- | The struct that holds one arm's fields: the wrapper's name with
+-- @_<Constructor>@ appended to its HEAD. For a plain name that is
+-- @Shape_Circle@; for a template instantiation the suffix goes before the
+-- argument list, so @MyBox<int>@ has the arm @MyBox_Full<int>@ -- a
+-- template of its own, taking the wrapper's arguments. A user who maps a
+-- parameterized @data@ writes the arms to that convention.
 armName :: MDoc -> Text -> MDoc
-armName n c = n <> "_" <> pretty c
+armName n c =
+  let (headT, args) = T.breakOn "<" (render n)
+  in pretty headT <> "_" <> pretty c <> pretty args
 
 -- | Emit @to_voidstar@ / @from_voidstar@ / @get_shm_size@ for a variant.
 --

@@ -762,7 +762,7 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     -- one. Intrinsics that report failure as data wrap their result, but
     -- the schema a runtime entry point needs is still the inner one.
     stripTryF :: TypeF -> TypeF
-    stripTryF (VariantF _ arms)
+    stripTryF (VariantF _ _ arms)
       | Just [payload] <- lookup BT.tryOkCtor arms = payload
     stripTryF other = other
 
@@ -770,7 +770,7 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     unwrapHandleHead (EffectF _ inner) = unwrapHandleHead inner
     -- The handle now arrives inside the Try the intrinsic returns, so peel
     -- the Ok arm before reading the head.
-    unwrapHandleHead (VariantF _ arms)
+    unwrapHandleHead (VariantF _ _ arms)
       | Just [payload] <- lookup BT.tryOkCtor arms = unwrapHandleHead payload
     unwrapHandleHead (AppF (VarF (FV v _)) (a : _)) = Just (v, a)
     unwrapHandleHead _ = Nothing
@@ -788,8 +788,8 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
             [] -> pretty t
             ps -> parens (pretty t <+> hsep (map go ps))
         go (RecF (FV t _)) = pretty t
-        go (EnumF (FV t _) _) = pretty t
-        go (VariantF (FV t _) _) = pretty t
+        go (EnumF (FV t _) _ _) = pretty t
+        go (VariantF (FV t _) _ _) = pretty t
         go (AppF con args) = parens (go con <+> hsep (map go args))
         go (FunF args ret) =
           parens (hsep (punctuate " ->" (map go args ++ [go ret])))

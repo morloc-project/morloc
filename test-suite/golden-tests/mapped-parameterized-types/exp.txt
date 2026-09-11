@@ -1,0 +1,41 @@
+--- cppGrow ---
+{"Full":[2]}
+--- rustGrow ---
+{"Full":[11]}
+--- pyGrow ---
+{"Full":[101]}
+--- rGrow ---
+{"Full":[1001]}
+--- cppShout ---
+{"Full":["hi!"]}
+--- rustShout ---
+{"Full":["hi!"]}
+--- cppWrap ---
+{"item":2}
+--- rustWrap ---
+{"item":11}
+--- pyWrap ---
+{"item":101}
+--- rWrap ---
+{"item":1001}
+--- cppMade ---
+{"Full":[6]}
+--- rustMade ---
+{"Full":[15]}
+--- cppWrapMade ---
+{"item":6}
+--- rustWrapMade ---
+{"item":15}
+--- cppUnbox ---
+6
+0
+--- rustUnbox ---
+15
+0
+--- roundTrip ---
+{"Full":[1111]}
+"Empty"
+--- cppDepth ---
+3
+--- rustDepth ---
+3

@@ -1,0 +1,13 @@
+module types (*)
+
+-- A `data` and a `record`, each with a type parameter. Each is given its
+-- per-language form BY THE USER rather than generated, which is the form a
+-- sourced function can name and match on.
+data Box a = Empty | Full a
+
+record Wrap a where
+  item :: a
+
+-- A parameterized type that refers to itself, so the template names its
+-- own instantiation from inside its own arms.
+data Tree a = Leaf a | Node (Tree a) (Tree a)

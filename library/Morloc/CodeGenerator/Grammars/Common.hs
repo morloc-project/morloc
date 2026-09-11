@@ -661,9 +661,9 @@ collectRecords e0@(SerialManifold i0 _ _ _ _) =
     -- is already visited at the NamF site that introduced the cycle.
     seekRecs _ (RecF _) = []
     -- An enum is a leaf: no fields, so no records beneath it.
-    seekRecs _ (EnumF _ _) = []
+    seekRecs _ (EnumF _ _ _) = []
     -- A variant's arms can hold records, so they are walked.
-    seekRecs d (VariantF _ as) = concatMap (concatMap (seekRecs d) . snd) as
+    seekRecs d (VariantF _ _ as) = concatMap (concatMap (seekRecs d) . snd) as
 
 unifyRecords ::
   [ ( FVar

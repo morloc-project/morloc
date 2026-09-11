@@ -28,6 +28,10 @@ module main
   , roundTrip
   , madeInRust
   , nestedCrate
+  , nexusNested
+  , nexusTree
+  , cppTree
+  , rustTree
   )
 
 import .types
@@ -108,3 +112,20 @@ madeInRust n = Full (rustAdd10 n)
 -- `nested`, asked of the other kind of parameterized type.
 nestedCrate :: Int -> Crate (Crate Int)
 nestedCrate = pyCrate
+
+-- Built in the NEXUS rather than a pool, which has its own schema builder:
+-- a nested instantiation and a recursive type, each of which it has to
+-- tell from the other.
+nexusNested :: Int -> Box (Box Int)
+nexusNested n = Full (Full n)
+
+nexusTree :: Int -> Tree Int
+nexusTree n = Node (Leaf n) (Node (Leaf n) (Leaf n))
+
+-- The same recursive type built in a pool that declares its types, where
+-- the self-reference has to be spelled with the instantiation's own name.
+cppTree :: Int -> Tree Int
+cppTree n = Node (Leaf (cppInc n)) (Leaf n)
+
+rustTree :: Int -> Tree Int
+rustTree n = Node (Leaf (rustAdd10 n)) (Leaf n)

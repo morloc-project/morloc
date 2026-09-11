@@ -420,7 +420,15 @@ makeGastSerialASTs i t = do
 generalTypeToSerialAST :: Int -> Type -> MorlocMonad SerialAST
 generalTypeToSerialAST i = generalTypeToSerialAST' i Set.empty
 
-generalTypeToSerialAST' :: Int -> Set TVar -> Type -> MorlocMonad SerialAST
+-- The ancestor set holds the TYPES on the path above the one being
+-- lowered, and a self-reference is recognised against it. A structural
+-- occurrence (an applied type, a record) is a back-edge only when the same
+-- instantiation is already on the path: the inner @Box Int@ of a
+-- @Box (Box Int)@ is a different type from the outer, and cutting it would
+-- write a schema that says the value contains itself. A bare name is the
+-- one occurrence that carries no arguments -- an alias body's or record's
+-- own reference to itself -- so it matches by name.
+generalTypeToSerialAST' :: Int -> Set Type -> Type -> MorlocMonad SerialAST
 generalTypeToSerialAST' i anc (VarT v)
   | v == MBT.real = return $ SerialReal (FV v (CV ""))
   -- Dispatch f32/f64 to the precision-specific SerialAST constructors,
@@ -443,7 +451,7 @@ generalTypeToSerialAST' i anc (VarT v)
   | v == MBT.bool = return $ SerialBool (FV v (CV ""))
   | v == MBT.str = return $ SerialString (FV v (CV ""))
   | v == MBT.unit = return $ SerialNull (FV v (CV ""))
-  | Set.member v anc = return $ SerialRec (FV v (CV ""))
+  | any ((== Just v) . typeHeadT) (Set.toList anc) = return $ SerialRec (FV v (CV ""))
   | otherwise = do
       scope <- MM.gets stateUniversalGeneralTypedefs
       -- A `data` type is a leaf here: its scope body is a constructor-name
@@ -452,17 +460,17 @@ generalTypeToSerialAST' i anc (VarT v)
       -- path, reached whenever a function over an enum has no sourced
       -- implementation and therefore runs in the nexus rather than a pool.
       case (if scopeDataIsEnum scope v then scopeEnumCtors scope v else Nothing) of
-       Just ctors -> return $ SerialEnum (FV v (CV "")) ctors
+       Just ctors -> return $ SerialEnum (FV v (CV "")) [] ctors
        -- A `data` whose constructors take arguments. Each arm's field types
        -- are walked with this type pushed onto the ancestor set, so a
        -- constructor naming its own type becomes a back-reference rather
        -- than recursing forever -- the same cut the alias path below makes.
        Nothing | Just arms <- scopeDataCtors scope v -> do
-                   let anc' = Set.insert v anc
+                   anc' <- descendT i (VarT v) anc
                    arms' <- mapM
                      (\(n, ts) -> (,) n <$> mapM (generalTypeToSerialAST' i anc' . typeOf) ts)
                      arms
-                   return $ SerialVariant (FV v (CV "")) arms'
+                   return $ SerialVariant (FV v (CV "")) [] arms'
        Nothing -> case Map.lookup v scope of
         (Just [(_, _, _, True, _)]) -> error "Cannot handle terminal types"
         (Just [([], t', _, False, _)]) -> do
@@ -471,7 +479,8 @@ generalTypeToSerialAST' i anc (VarT v)
           -- @type Pat = [Pat]@), but the @&Pat@/@^Pat@ pair must agree
           -- on the alias's own name. Retag the outer SerialAST node
           -- with @v@ after recursing.
-          inner <- generalTypeToSerialAST' i (Set.insert v anc) (typeOf t')
+          anc' <- descendT i (VarT v) anc
+          inner <- generalTypeToSerialAST' i anc' (typeOf t')
           return $ retagOuterName v inner
         (Just [_]) -> MM.throwSourcedError i $
           "cannot serialize parameterised pure morloc type:" <+> pretty v
@@ -480,7 +489,8 @@ generalTypeToSerialAST' i anc (VarT v)
         x -> MM.throwSourcedError i $
           "cannot serialize type" <+> pretty v
             <+> "-- unexpected scope shape" <+> pretty (show x)
-generalTypeToSerialAST' i anc (AppT (VarT v) [t])
+generalTypeToSerialAST' i anc t0@(AppT (VarT v) [t])
+  | Set.member t0 anc = return $ SerialRec (FV v (CV ""))
   | v == MBT.list = SerialList (FV v (CV "")) Nothing <$> generalTypeToSerialAST' i anc t
   -- Stream-handle types share the 16-byte tagged-union wire form. The
   -- schema code (F/O/I) picks the receiver's open kind; the per-instance
@@ -488,9 +498,9 @@ generalTypeToSerialAST' i anc (AppT (VarT v) [t])
   | v == MBT.ifileVar   = return $ SerialIFile   (FV v (CV ""))
   | v == MBT.ostreamVar = return $ SerialOStream (FV v (CV ""))
   | v == MBT.istreamVar = return $ SerialIStream (FV v (CV ""))
-  | otherwise = appliedTypeToSerialAST i anc v [t]
-generalTypeToSerialAST' i anc (AppT (VarT v) ts)
-  | Set.member v anc = return $ SerialRec (FV v (CV ""))
+  | otherwise = appliedTypeToSerialAST i anc t0 v [t]
+generalTypeToSerialAST' i anc t0@(AppT (VarT v) ts)
+  | Set.member t0 anc = return $ SerialRec (FV v (CV ""))
   | v == (MBT.tuple (length ts)) =
       SerialTuple (FV v (CV "")) <$> mapM (generalTypeToSerialAST' i anc) ts
   -- A Table lowers to a SerialObject NamTable. The encoder emits the
@@ -504,23 +514,46 @@ generalTypeToSerialAST' i anc (AppT (VarT v) ts)
             _                  -> []
       in SerialObject NamTable (FV MBT.table (CV "")) []
            <$> mapM (secondM (generalTypeToSerialAST' i anc)) cols
-  | otherwise = appliedTypeToSerialAST i anc v ts
+  | otherwise = appliedTypeToSerialAST i anc t0 v ts
 generalTypeToSerialAST' i anc (EffectT _ t) = generalTypeToSerialAST' i anc t
 generalTypeToSerialAST' i anc (OptionalT t) = do
   inner <- generalTypeToSerialAST' i anc t
   return $ SerialOptional (FV (TV "Optional") (CV "")) inner
-generalTypeToSerialAST' i anc (NamT o v _ rs) =
-  -- Add @v@ to the ancestor set before recursing into the record's
-  -- fields: a recursive record (e.g. @record Tree where children :: [Tree]@)
-  -- has a field whose type mentions @Tree@ again, which would otherwise
-  -- expand back into the same NamT and loop. Parameter types are
-  -- already substituted into the field types @rs@ by this point, so
-  -- they do not need to appear in the resulting SerialAST.
-  let anc' = Set.insert v anc
-  in SerialObject o (FV v (CV "")) []
-       <$> mapM (secondM (generalTypeToSerialAST' i anc')) rs
+generalTypeToSerialAST' i anc t0@(NamT o v _ rs)
+  | Set.member t0 anc = return $ SerialRec (FV v (CV ""))
+  | otherwise = do
+      -- Add the record to the ancestor set before recursing into its
+      -- fields: a recursive record (e.g. @record Tree where children ::
+      -- [Tree]@) has a field whose type mentions @Tree@ again, which would
+      -- otherwise expand back into the same NamT and loop. Parameter types
+      -- are already substituted into the field types @rs@ by this point,
+      -- so they do not need to appear in the resulting SerialAST.
+      anc' <- descendT i t0 anc
+      SerialObject o (FV v (CV "")) []
+        <$> mapM (secondM (generalTypeToSerialAST' i anc')) rs
 generalTypeToSerialAST' i _ t = MM.throwSourcedError i $
   "cannot serialize type:" <+> pretty t
+
+-- | The general name at a type's head, when it has one.
+typeHeadT :: Type -> Maybe TVar
+typeHeadT (VarT v) = Just v
+typeHeadT (AppT (VarT v) _) = Just v
+typeHeadT (NamT _ v _ _) = Just v
+typeHeadT _ = Nothing
+
+-- | Step into a type, with a bound on how deep the walk may go. An
+-- expansion that does not converge -- a type whose every ply is a new
+-- instantiation -- has no finite wire form, and the bound is what turns
+-- that into an error a reader can act on rather than a compiler that
+-- allocates until the machine gives out. It sits far above any real
+-- nesting.
+descendT :: Int -> Type -> Set Type -> MorlocMonad (Set Type)
+descendT i t anc
+  | Set.size anc >= 100 =
+      MM.throwSourcedError i $
+        "Cannot build a wire form for" <+> pretty t <> ":"
+          <+> "its expansion does not terminate."
+  | otherwise = return (Set.insert t anc)
 
 
 -- | Reject main-module exports whose type carries a function in argument or
@@ -570,40 +603,37 @@ checkExportedHigherOrder i name t = case findOffender t of
 -- is that the declaration's parameters must first be substituted with the
 -- applied arguments, or an arm mentioning a parameter would serialize the
 -- bare variable.
-appliedTypeToSerialAST :: Int -> Set TVar -> TVar -> [Type] -> MorlocMonad SerialAST
-appliedTypeToSerialAST i anc v ts = do
+appliedTypeToSerialAST :: Int -> Set Type -> Type -> TVar -> [Type] -> MorlocMonad SerialAST
+appliedTypeToSerialAST i anc t0 v ts = do
   scope <- MM.gets stateUniversalGeneralTypedefs
   case (if scopeDataIsEnum scope v then scopeEnumCtors scope v else Nothing) of
-    Just ctors -> return $ SerialEnum (FV v (CV "")) ctors
+    Just ctors -> return $ SerialEnum (FV v (CV "")) [] ctors
     Nothing | Just arms <- scopeDataCtors scope v -> do
                 let params = case Map.lookup v scope of
                       Just ((ps, _, _, _, _) : _) -> [tv | Left (tv, _) <- ps]
                       _ -> []
                     inst t = foldl (\acc (tv, arg) -> substituteTVar tv arg acc)
                                    t (zip params ts)
-                    anc' = Set.insert v anc
+                anc' <- descendT i t0 anc
                 arms' <- mapM
                   (\(n, fts) ->
                      (,) n <$> mapM (generalTypeToSerialAST' i anc' . inst . typeOf) fts)
                   arms
-                return $ SerialVariant (FV v (CV "")) arms'
-    Nothing -> resolveAliasApp i anc v ts
+                return $ SerialVariant (FV v (CV "")) [] arms'
+    Nothing -> resolveAliasApp i anc t0 v ts
 
-resolveAliasApp :: Int -> Set TVar -> TVar -> [Type] -> MorlocMonad SerialAST
-resolveAliasApp i anc v ts
-  -- The same self-recursion cutoff as in the @VarT@ clause above:
-  -- if we encounter an alias we are already expanding, emit a
-  -- @SerialRec@ back-reference instead of recursing into its body.
-  -- The runtime parser resolves @^name@ against the enclosing
-  -- @&name@ that the encoder emits at the outer occurrence.
-  | Set.member v anc = return $ SerialRec (FV v (CV ""))
-  | otherwise = do
+-- The self-recursion cut for an applied alias is made by the caller, which
+-- tests the whole applied type against the ancestor set: a @^name@
+-- back-reference is emitted for an instantiation already being expanded,
+-- and the runtime resolves it against the enclosing @&name@.
+resolveAliasApp :: Int -> Set Type -> Type -> TVar -> [Type] -> MorlocMonad SerialAST
+resolveAliasApp i anc t0 v ts = do
       scope <- MM.gets stateUniversalGeneralTypedefs
       case Map.lookup v scope of
         (Just [(params, body, _, False, _)]) -> do
           let tvars = [tv | Left (tv, _) <- params]
               resolved = foldl (\acc (tv, arg) -> substituteTVar tv arg acc) (typeOf body) (zip tvars ts)
-              anc' = Set.insert v anc
+          anc' <- descendT i t0 anc
           inner <- generalTypeToSerialAST' i anc' resolved
           -- The expanded body's outer constructor is the alias's
           -- underlying shape (e.g. @Tuple2@ for @type Pair a = (a, ?(Pair a))@).
@@ -658,8 +688,8 @@ retagOuterName v' s = case s of
   SerialTuple    (FV _ cv) xs      -> SerialTuple    (FV v' cv) xs
   SerialObject o (FV _ cv) ps rs   -> SerialObject o (FV v' cv) ps rs
   SerialOptional (FV _ cv) inner   -> SerialOptional (FV v' cv) inner
-  SerialEnum     (FV _ cv) ns      -> SerialEnum     (FV v' cv) ns
-  SerialVariant  (FV _ cv) as      -> SerialVariant  (FV v' cv) as
+  SerialEnum     (FV _ cv) ps ns   -> SerialEnum     (FV v' cv) ps ns
+  SerialVariant  (FV _ cv) ps as   -> SerialVariant  (FV v' cv) ps as
   _ -> s
 
 -- ======================================================================
@@ -1738,11 +1768,11 @@ validateValueAgainstAST loc env path ast value = case (ast, value) of
   -- whose value lists the arm's fields; an arm taking no arguments is
   -- still spelled bare. An unlisted name falls through to the mismatch
   -- reporter, which names the whole legal set.
-  (SerialEnum _ ctors, Aeson.String name)
+  (SerialEnum _ _ ctors, Aeson.String name)
     | name `elem` ctors -> return ()
-  (SerialVariant _ arms, Aeson.String name)
+  (SerialVariant _ _ arms, Aeson.String name)
     | Just [] <- lookup name arms -> return ()
-  (SerialVariant _ arms, Aeson.Object o)
+  (SerialVariant _ _ arms, Aeson.Object o)
     | [(k, fieldsVal)] <- KM.toList o
     , Just fieldAsts <- lookup (AesonKey.toText k) arms
     , Aeson.Array vs <- fieldsVal
@@ -1903,8 +1933,8 @@ expectedJsonShape = go
     -- Name the legal set: for a closed constructor list the whole
     -- vocabulary fits in the message, which is the point of carrying
     -- the names rather than the ordinals.
-    go (SerialEnum _ ns)             = "one of " <> MT.intercalate ", " ns
-    go (SerialVariant _ as)          = "one of " <> MT.intercalate ", " (map fst as)
+    go (SerialEnum _ _ ns)           = "one of " <> MT.intercalate ", " ns
+    go (SerialVariant _ _ as)        = "one of " <> MT.intercalate ", " (map fst as)
     go (SerialIFile _)               = "IFile path (Str)"
     go (SerialOStream _)             = "OStream path (Str)"
     go (SerialIStream _)             = "IStream path (Str)"

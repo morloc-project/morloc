@@ -195,14 +195,19 @@ data TypeF
   -- not read the CVar directly.
   | RecF FVar
   -- | A `data` type whose constructors take no arguments: the type's
-  -- name and its constructor names in declaration order. Position in
-  -- that list is the wire tag, so the order is part of the type's
-  -- wire contract.
-  | EnumF FVar [T.Text]
+  -- name, the type arguments it is applied to, and its constructor names
+  -- in declaration order. Position in that list is the wire tag, so the
+  -- order is part of the type's wire contract.
+  --
+  -- The arguments are carried for the same reason 'NamF' carries its
+  -- parameters: a user's per-language form may be a template, and the
+  -- template is instantiated with them. A type the compiler generates
+  -- has a monomorphic name per instantiation and leaves them unread.
+  | EnumF FVar [TypeF] [T.Text]
   -- | A `data` type with at least one payload-bearing constructor: the
-  -- type's name, and each arm's name with its field types. Position in
-  -- the list is the wire tag.
-  | VariantF FVar [(T.Text, [TypeF])]
+  -- type's name, its type arguments, and each arm's name with its field
+  -- types. Position in the list is the wire tag.
+  | VariantF FVar [TypeF] [(T.Text, [TypeF])]
   | EffectF (Set.Set EffectLabel) TypeF
   | OptionalF TypeF
   | NatLitF Integer
@@ -373,11 +378,13 @@ data SerialAST
     -- wire, tagged by the constructor's position in this list. The names
     -- travel in the schema so JSON renders the constructor rather than
     -- the ordinal and the runtime can reject an out-of-range tag.
-    SerialEnum FVar [T.Text]
+    SerialEnum FVar [TypeF] [T.Text]
   | -- | A `data` type with payload-bearing arms. Sixteen bytes on the
     -- wire -- a tag and a pointer -- with each arm's fields serialized
-    -- as the tuple the pointer leads to.
-    SerialVariant FVar [(T.Text, [SerialAST])]
+    -- as the tuple the pointer leads to. The type arguments ride along
+    -- as they do on 'SerialObject', so the native type this lowers to
+    -- can instantiate a user's template.
+    SerialVariant FVar [TypeF] [(T.Text, [SerialAST])]
   | -- | depending on the language, this may or may not raise an error down the
     -- line, the parameter contains the variable name, which is useful only for
     -- source code comments.
@@ -420,8 +427,8 @@ instance Pretty SerialAST where
   pretty (SerialNull v) = parens ("SerialNull" <+> pretty v)
   pretty (SerialOptional v s) = parens ("SerialOptional" <+> pretty v <+> pretty s)
   pretty (SerialRec v) = parens ("SerialRec" <+> pretty v)
-  pretty (SerialEnum v ns) = parens ("SerialEnum" <+> pretty v <+> list (map pretty ns))
-  pretty (SerialVariant v as) =
+  pretty (SerialEnum v _ ns) = parens ("SerialEnum" <+> pretty v <+> list (map pretty ns))
+  pretty (SerialVariant v _ as) =
     parens ("SerialVariant" <+> pretty v <+> list [pretty n | (n, _) <- as])
   pretty (SerialUnknown v) = parens ("SerialUnknown" <+> pretty v)
 
@@ -1730,9 +1737,11 @@ instance Pretty TypeF where
     pretty v
       <+> encloseSep "{" "}" ", " [pretty k <+> "::" <+> pretty t | (k, t) <- rs]
   pretty (RecF v) = "^" <> pretty v
-  pretty (EnumF v ns) = pretty v <+> encloseSep "{" "}" " | " (map pretty ns)
-  pretty (VariantF v as) =
-    pretty v <+> encloseSep "{" "}" " | " [pretty n <+> hsep (map pretty ts) | (n, ts) <- as]
+  pretty (EnumF v ps ns) =
+    pretty v <+> hsep (map pretty ps) <+> encloseSep "{" "}" " | " (map pretty ns)
+  pretty (VariantF v ps as) =
+    pretty v <+> hsep (map pretty ps)
+      <+> encloseSep "{" "}" " | " [pretty n <+> hsep (map pretty ts) | (n, ts) <- as]
   pretty (EffectF es t) =
     "<" <> hsep (punctuate "," (map pretty (Set.toList es))) <> ">" <+> pretty t
   pretty (OptionalF t) = "?" <> pretty t

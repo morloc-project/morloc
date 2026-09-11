@@ -24,3 +24,13 @@
 {"Full":[17]}
 --- nestedCrate ---
 {"item":{"item":8}}
+--- nexusNested ---
+{"Full":[{"Full":[9]}]}
+--- nexusTree ---
+{"Node":[{"Leaf":[1]},{"Node":[{"Leaf":[1]},{"Leaf":[1]}]}]}
+--- cppTree ---
+{"Node":[{"Leaf":[2]},{"Leaf":[1]}]}
+--- rustTree ---
+{"Node":[{"Leaf":[11]},{"Leaf":[1]}]}
+--- nonRegularRejected ---
+OK

@@ -21,6 +21,7 @@ module Morloc.CodeGenerator.Infer
   , evalGeneralStep
   ) where
 
+import Control.Monad (when)
 import qualified Control.Monad.State as CMS
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
@@ -71,8 +72,7 @@ inferConcreteType lang (Idx i (type2typeu -> generalType)) = do
   -- Recursion THROUGH a container (`data Rose = Rose [Rose]`) arrives this
   -- way -- the field's head is the container, not the `data` type.
   case dataHeadOf gscope0 generalType of
-    Just key@(v, _) | Set.member key anc ->
-      return $ VarF (FV v (CV (concreteNameOf cscope0 v)))
+    Just key@(v, args) | Set.member key anc -> backEdge lang i cscope0 v args
     _ -> do
       concreteType <- inferConcreteTypeU lang (Idx i generalType)
       (_, gscope) <- getScope i lang
@@ -156,18 +156,27 @@ inferVariantArms lang i gscope vG vC targs = do
       inst t = foldl (\acc (tv, arg) -> substituteTVar tv arg acc)
                      t (zip params targs)
       arms = [(n, map inst ts) | (n, ts) <- arms0]
+  -- The applied arguments, resolved to this language, travel on the type:
+  -- a user's per-language form may be a template, and these are what it is
+  -- instantiated with. They are resolved before the arms so a self-reference
+  -- among them is cut by the ordinary guard rather than by this type's own.
+  --
+  -- An argument nothing ever pinned stays unknown rather than failing the
+  -- resolution: a phantom parameter of an argument-free `data` is never
+  -- rendered, and a literal like `A :: Tag a` with no use of `a` is
+  -- ordinary code. It is only a template that would try to spell it, and
+  -- the native compiler reports that where it happens.
+  ps <- mapM (argType lang i) targs
   if all (null . snd) arms
-    then return $ EnumF (FV vG (CV vC)) (map fst arms)
+    then return $ EnumF (FV vG (CV vC)) ps (map fst arms)
     else do
         cscope <- fst <$> getScope i lang
         anc <- CMS.gets stateVariantAncestors
         let -- A field naming a `data` type that is already being resolved is
-            -- left OPAQUE rather than expanded. Expanding it would re-enter
-            -- this case and never terminate, and it is unnecessary: the field
-            -- only needs that type's concrete NAME, which is its per-language
-            -- mapping when it has one and its own name when the pool
-            -- generates it. Leaving the reference opaque is also how a
-            -- recursive record survives this walk; the cycle is cut once,
+            -- left as a PLACEHOLDER rather than expanded. Expanding it would
+            -- re-enter this case and never terminate, and it is unnecessary:
+            -- the field only needs that instantiation's name and arguments,
+            -- which is what 'backEdge' carries. The cycle is cut once,
             -- later, where the wire form is built.
             --
             -- The set is carried in compiler state rather than as an
@@ -175,46 +184,78 @@ inferVariantArms lang i gscope vG vC targs = do
             -- 'inferConcreteType' at the top. A head-only test would miss
             -- recursion THROUGH a container -- @data Rose = Rose [Rose]@
             -- has head @List@, and expanding it reaches @Rose@ again.
-            concreteName v = case Map.lookup v cscope of
-              Just entries | (n : _) <- [n' | (_, body, _, _, _) <- entries
-                                            , Just n' <- [bodyNameOf body]] -> n
-              _ -> unTVar v
+            --
             -- The test is on the INSTANTIATION, not the name: the inner
             -- @Box Int@ of a @Box (Box Int)@ is a different type from the
-            -- one being resolved, and leaving it opaque would say the value
+            -- one being resolved, and cutting it would say the value
             -- contains itself.
             resolveField t = case dataHeadOf gscope t of
-              Just key@(v, _) | Set.member key anc || key == (vG, targs) ->
-                return $ VarF (FV v (CV (concreteName v)))
+              Just key@(v, args) | Set.member key anc || key == (vG, targs) ->
+                backEdge lang i cscope v args
               _ -> inferConcreteType lang (Idx i (typeOf t))
+        -- Guarding on the instantiation rather than the name is what lets
+        -- `Box (Box Int)` expand its inner type, and it is also what lets a
+        -- NON-REGULAR recursive type -- one whose every ply is a new
+        -- instantiation, `data Nest a = Nest (Nest [a])` -- expand without
+        -- end. Such a type has no finite native form, so the walk is bounded
+        -- and the bound is reported as the error it is, rather than left to
+        -- exhaust memory. The limit sits far above any nesting a real
+        -- program reaches.
+        when (Set.size anc >= 64) $
+          MM.throwSourcedError i $
+            "Cannot resolve" <+> squotes (pretty vG) <+> "applied to"
+              <+> hsep (map pretty targs) <> ":"
+              <+> "its expansion does not terminate."
         CMS.modify (\st -> st { stateVariantAncestors = Set.insert (vG, targs) anc })
         arms' <- mapM (\(n, ts) -> (,) n <$> mapM resolveField ts) arms
         CMS.modify (\st -> st { stateVariantAncestors = anc })
-        -- A parameterized `data` needs one concrete type per instantiation.
-        -- A statically-typed pool declares the type by name, so `Try Str ()`
-        -- and `Try Str (IFile a)` would otherwise both emit a type called
-        -- `Try` and the second definition would lose to the first. The name
-        -- is derived from the resolved arms so two instantiations that agree
-        -- on every field share a definition, which is what makes the
-        -- declaration collector's dedup still work.
-        --
-        -- Only for a type the compiler generates: when the user mapped it
-        -- (`data Cpp => Try = "MyTry"`), the name they chose is the contract
-        -- and there is exactly one of it.
-        let generated = vC == unTVar vG
-            vC' | generated && not (null targs) = vC <> instanceSuffix arms'
-                | otherwise = vC
-        return $ VariantF (FV vG (CV vC')) arms'
+        return $ VariantF (FV vG (CV (instanceName cscope vG targs))) ps arms'
+
+-- | The name a pool knows one instantiation of a `data` type by.
+--
+-- A statically-typed pool declares the type by name, so `Try Str ()` and
+-- `Try Str (IFile a)` need two names or the second definition loses to the
+-- first. A type the compiler generates gets a suffix derived from its
+-- ARGUMENTS -- not from its arms, which for a recursive type would name the
+-- type in terms of itself -- so the name is fixed before the arms are read
+-- and a self-reference can carry it. When the user mapped the type
+-- (`data Cpp => (Box a) = "MyBox<$1>" a`), the name they chose is the
+-- contract: a template, if it takes parameters, which the backend
+-- instantiates with the resolved arguments.
+instanceName :: Scope -> TVar -> [TypeU] -> MT.Text
+instanceName cscope v targs
+  | generated && not (null targs) = name <> instanceSuffix targs
+  | otherwise = name
+  where
+    name = concreteNameOf cscope v
+    generated = name == unTVar v
+
+-- | The placeholder a `data` type's own occurrence inside itself resolves
+-- to: the instantiation's name and resolved arguments, with no arms. The
+-- wire-form builder recognises the armless shape as the back-edge and ties
+-- the knot there; every renderer spells it as it would the full type.
+
+-- | Resolve one applied argument of a `data` type, keeping an unsolved one
+-- unsolved. See the note at its use in 'inferVariantArms'.
+argType :: Lang -> Int -> TypeU -> MorlocMonad TypeF
+argType lang i t = case typeOf t of
+  UnkT v -> return $ UnkF (FV v (CV (unTVar v)))
+  t' -> inferConcreteType lang (Idx i t')
+
+backEdge :: Lang -> Int -> Scope -> TVar -> [TypeU] -> MorlocMonad TypeF
+backEdge lang i cscope v args = do
+  ps <- mapM (argType lang i) args
+  return $ VariantF (FV v (CV (instanceName cscope v args))) ps []
 
 -- | A short, deterministic suffix distinguishing one instantiation of a
 -- parameterized `data` from another in a language that declares types by
--- name. Derived from the resolved arms, so equal instantiations collide on
--- purpose and unequal ones do not.
-instanceSuffix :: [(MT.Text, [TypeF])] -> MT.Text
-instanceSuffix arms =
+-- name. Derived from the applied arguments, so equal instantiations collide
+-- on purpose and unequal ones do not.
+instanceSuffix :: [TypeU] -> MT.Text
+instanceSuffix targs =
   "_" <> MT.pack (showHex (abs (hashText rendered) `mod` 0xFFFFFF) "")
   where
-    rendered = MT.concat [n <> MT.pack (show (map pretty ts)) | (n, ts) <- arms]
+    rendered = MT.pack (show (map pretty targs))
     -- djb2; any stable string hash would do. Kept local so the suffix does
     -- not drift with a library's hashing implementation.
     hashText = MT.foldl' (\h c -> h * 33 + fromEnum c) (5381 :: Int)
@@ -428,7 +469,7 @@ weave gscope = w Set.empty
       _ | Set.member v1 anc -> VarF (FV v1 (CV v2))
       Just ctors
         -- Every constructor argument-free: the one-byte form.
-        | all (null . snd) ctors -> EnumF (FV v1 (CV v2)) (map fst ctors)
+        | all (null . snd) ctors -> EnumF (FV v1 (CV v2)) [] (map fst ctors)
         -- Otherwise a tagged pointer. The arms are NOT expanded here: a
         -- field's concrete form is a per-language question and this walk
         -- has only the general scope, so weaving a field against itself
@@ -595,7 +636,6 @@ bodyNameOf (AppU (VarU (TV n)) _) = Just n
 bodyNameOf (NamU _ (TV n) _ _) = Just n
 bodyNameOf _ = Nothing
 
--- | The `data` type a type expression is headed by, if any.
 -- | A `data` type's instantiation: its name and the arguments it was
 -- applied to. Two instantiations of one parameterized type are two types,
 -- so the arguments are part of the identity.

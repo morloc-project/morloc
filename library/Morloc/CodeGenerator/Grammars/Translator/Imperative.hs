@@ -424,16 +424,21 @@ data LowerConfig m = LowerConfig
   -- 'lcOwnership' of a manifold-call argument (named by index-aliasing after the
   -- caller's variables) reflects the caller rather than the callee being
   -- rendered. Default is identity (only Rust distinguishes ownership).
-  , lcVariantLit :: CVar -> Text -> Int -> [MDoc] -> MDoc
-  -- ^ Build a payload-bearing `data` value: the type's concrete name, the
-  -- arm's name, its 0-based tag, and the rendered field expressions.
+  , lcVariantLit :: MDoc -> Text -> Int -> [MDoc] -> MDoc
+  -- ^ Build a payload-bearing `data` value: the type's native spelling at
+  -- this occurrence, the arm's name, its 0-based tag, and the rendered
+  -- field expressions.
+  --
+  -- The spelling is the RENDERED type, not the concrete name the type was
+  -- declared with: a user's per-language form may be a template, and what
+  -- a constructor of @Box Int@ has to name is the instantiation.
   --
   -- Each backend constructs one its own way -- a Rust or C++ enum arm takes
   -- its fields positionally, a Python dataclass is called by name, an R S3
   -- value is a classed list -- so there is no shared spelling to default to.
-  , lcEnumLit :: CVar -> [Text] -> Text -> Int -> MDoc
+  , lcEnumLit :: MDoc -> [Text] -> Text -> Int -> MDoc
   -- ^ Render a `data` constructor as a value in this language: the enum's
-  -- concrete type name, every constructor in declaration order, the
+  -- rendered type, every constructor in declaration order, the
   -- constructor's own name, and its 0-based tag.
   --
   -- All four are needed because the backends disagree about what an enum
@@ -441,24 +446,24 @@ data LowerConfig m = LowerConfig
   -- plain int from the runtime, so the tag is the value. R holds an ordered
   -- factor, which is its whole level set plus a 1-based code into it, so a
   -- literal cannot be written without the other constructors.
-  , lcVariantTagTest :: CVar -> Text -> Int -> MDoc -> MDoc
+  , lcVariantTagTest :: MDoc -> Text -> Int -> MDoc -> MDoc
   -- ^ Test whether a payload-bearing value carries a given arm: the type's
-  -- concrete name, the arm's name, its tag, and the subject.
+  -- rendered spelling, the arm's name, its tag, and the subject.
   --
   -- Separate from 'lcEnumTagTest' because an arm carries arguments:
   -- equality would compare payloads where a pattern must test the
   -- discriminant alone. Every backend asks a different way (@matches!@,
   -- @holds_alternative@, @isinstance@, @inherits@).
-  , lcCtorField :: CVar -> Text -> Int -> MDoc -> MDoc
+  , lcCtorField :: MDoc -> Text -> Int -> MDoc -> MDoc
   -- ^ Read one field out of a value whose arm is already established: the
-  -- type's concrete name, the arm's name, the field's index, the subject.
+  -- type's rendered spelling, the arm's name, the field's index, the subject.
   --
   -- Only ever emitted under a passing tag test, and unreachable from
   -- surface syntax -- a getter aimed at a `data` type is rejected, because
   -- which fields exist depends on the constructor.
-  , lcEnumTagTest :: CVar -> [Text] -> Text -> Int -> MDoc -> MDoc
+  , lcEnumTagTest :: MDoc -> [Text] -> Text -> Int -> MDoc -> MDoc
   -- ^ Test whether an argument-free constructor's value carries a given
-  -- tag ('IntrTagTest'): the enum's concrete type name, every constructor
+  -- tag ('IntrTagTest'): the enum's rendered type, every constructor
   -- in declaration order, the constructor under test, its 0-based tag, and
   -- the subject.
   --
@@ -1022,6 +1027,19 @@ armTagOf nm as = lookup nm (zip (map fst as) [0 ..])
 -- the same absent-value byte, but their native spellings are not: Rust writes
 -- @()@ for the one and @Option::None@ for the other. An optional is never a
 -- unit, whatever it wraps.
+-- | The native spelling of a `data` type at one occurrence: its per-language
+-- form with this instantiation's arguments filled in, which is what a
+-- constructor, a tag test or a field projection has to name. A language
+-- that renders no types has no spelling to give, and its forms for these do
+-- not name the type anyway, so the declared name stands in.
+nominalTypeDoc :: (Monad m) => LowerConfig m -> TypeF -> CVar -> m MDoc
+nominalTypeDoc cfg t cv = do
+  mayT <- lcTypeOf cfg t
+  return $ case mayT of
+    Just (ITyNamed n []) -> pretty n
+    Just it -> renderIType it
+    Nothing -> pretty (unCVar cv)
+
 isUnitTypeF :: TypeF -> Bool
 isUnitTypeF (VarF (FV gv _)) = gv == BT.unit
 isUnitTypeF _ = False
@@ -1162,10 +1180,14 @@ lowerNativeExprRaw cfg _ (StrN_ (FV _ cv) v) =
   let hint = if cv == CV "" then Nothing else Just (unCVar cv)
   in return $ defaultValue {poolExpr = lcPrintExpr cfg (IStrLit hint v)}
 lowerNativeExprRaw cfg _ (EnumN_ t n i)
-  | EnumF (FV _ cv) names <- t = return $ defaultValue {poolExpr = lcEnumLit cfg cv names n i}
+  | EnumF (FV _ cv) _ names <- t = do
+      ty <- nominalTypeDoc cfg t cv
+      return $ defaultValue {poolExpr = lcEnumLit cfg ty names n i}
   | otherwise = error $ "constructor literal carries a non-enum type: " <> show (pretty t)
 lowerNativeExprRaw cfg _ (VariantN_ t n i xs)
-  | VariantF (FV _ cv) _ <- t = return $ mergePoolDocs (lcVariantLit cfg cv n i) xs
+  | VariantF (FV _ cv) _ _ <- t = do
+      ty <- nominalTypeDoc cfg t cv
+      return $ mergePoolDocs (lcVariantLit cfg ty n i) xs
   | otherwise = error $ "constructor literal carries a non-variant type: " <> show (pretty t)
 -- The unit value. @UniS@ and @NullS@ share this node -- the wire form is
 -- the same absent-value byte -- but the native literal is not: a language
@@ -1335,13 +1357,15 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrClose maySchema [handleDocs]) =
 -- than an equality.
 lowerNativeExprRaw cfg (IntrinsicN _ _ _ [subjectE, StrN _ n]) (IntrinsicN_ _ IntrTagTest _ [subjectDocs, _]) =
   case typeFof subjectE of
-    VariantF (FV _ cv) arms ->
+    t@(VariantF (FV _ cv) _ arms) -> do
+      ty <- nominalTypeDoc cfg t cv
       return $ mergePoolDocs
-        (const (lcVariantTagTest cfg cv n (armIndex n (map fst arms)) (poolExpr subjectDocs)))
+        (const (lcVariantTagTest cfg ty n (armIndex n (map fst arms)) (poolExpr subjectDocs)))
         [subjectDocs]
-    EnumF (FV _ cv) names ->
+    t@(EnumF (FV _ cv) _ names) -> do
+      ty <- nominalTypeDoc cfg t cv
       return $ mergePoolDocs
-        (const (lcEnumTagTest cfg cv names n (armIndex n names)
+        (const (lcEnumTagTest cfg ty names n (armIndex n names)
                   (poolExpr subjectDocs)))
         [subjectDocs]
     t -> error $ "tag test on a type that is not a `data`: " <> show (pretty t)
@@ -1349,9 +1373,10 @@ lowerNativeExprRaw cfg (IntrinsicN _ _ _ [subjectE, StrN _ n]) (IntrinsicN_ _ In
 -- established. Emitted only under that guard, and with no surface spelling.
 lowerNativeExprRaw cfg (IntrinsicN _ _ _ [subjectE, StrN _ n, IntN _ i]) (IntrinsicN_ _ IntrCtorField _ [subjectDocs, _, _]) =
   case typeFof subjectE of
-    VariantF (FV _ cv) _ ->
+    t@(VariantF (FV _ cv) _ _) -> do
+      ty <- nominalTypeDoc cfg t cv
       return $ mergePoolDocs
-        (const (lcCtorField cfg cv n (fromIntegral i) (poolExpr subjectDocs)))
+        (const (lcCtorField cfg ty n (fromIntegral i) (poolExpr subjectDocs)))
         [subjectDocs]
     t -> error $ "constructor field projection on a non-variant: " <> show (pretty t)
 lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrFSchema _ [pathDocs]) =
@@ -1462,13 +1487,14 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrThrow _ [msgDocs]) =
 -- helper because a `Try` may be mapped to a native type or left for the
 -- compiler to generate, and only 'lcVariantLit' knows which.
 lowerNativeExprRaw cfg _ (IntrinsicN_ t IntrTry _ [bodyDocs])
-  | VariantF (FV _ cv) arms <- stripEffectF t
+  | tryT@(VariantF (FV _ cv) _ arms) <- stripEffectF t
   , Just okTag <- armTagOf BT.tryOkCtor arms
-  , Just errTag <- armTagOf BT.tryErrCtor arms =
+  , Just errTag <- armTagOf BT.tryErrCtor arms = do
+      ty <- nominalTypeDoc cfg tryT cv
       return $ bodyDocs
         { poolExpr = lcMakeTry cfg (poolExpr bodyDocs)
-            (\v -> lcVariantLit cfg cv BT.tryOkCtor okTag [v])
-            (\m -> lcVariantLit cfg cv BT.tryErrCtor errTag [m])
+            (\v -> lcVariantLit cfg ty BT.tryOkCtor okTag [v])
+            (\m -> lcVariantLit cfg ty BT.tryErrCtor errTag [m])
         }
   | otherwise =
       error $ "@try result is not a Try variant: " <> show (pretty t)

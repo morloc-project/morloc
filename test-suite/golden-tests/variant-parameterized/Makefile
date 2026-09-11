@@ -28,7 +28,17 @@ all:
 	./nexus madeInRust 7 >> obs.txt 2>> obs.err
 	echo "--- nestedCrate ---" >> obs.txt
 	./nexus nestedCrate 8 >> obs.txt 2>> obs.err
+	echo "--- nexusNested ---" >> obs.txt
+	./nexus nexusNested 9 >> obs.txt 2>> obs.err
+	echo "--- nexusTree ---" >> obs.txt
+	./nexus nexusTree 1 >> obs.txt 2>> obs.err
+	echo "--- cppTree ---" >> obs.txt
+	./nexus cppTree 1 >> obs.txt 2>> obs.err
+	echo "--- rustTree ---" >> obs.txt
+	./nexus rustTree 1 >> obs.txt 2>> obs.err
+	echo "--- nonRegularRejected ---" >> obs.txt
+	if morloc make -o nonregular nonregular.loc >> obs.err 2>&1; then echo UNEXPECTED >> obs.txt; else echo OK >> obs.txt; fi
 
 clean:
-	rm -rf nexus pools __pycache__ *.err *.manifest
+	rm -rf nexus nonregular pools __pycache__ *.err *.manifest
 	rm -rf *-build *build.tmp*

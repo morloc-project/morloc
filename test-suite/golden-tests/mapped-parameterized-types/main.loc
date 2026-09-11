@@ -1,0 +1,122 @@
+-- A parameterized type whose per-language form the USER declares.
+--
+-- `record Cpp => (Wrap a) = "MyWrap<$1>" a` names a template, and the
+-- parameter is what the template is instantiated with: `Wrap Int` is
+-- `MyWrap<int>` and `Wrap Str` is `MyWrap<std::string>`. That has always
+-- been how an alias's template works (`type Cpp => (List a) =
+-- "std::vector<$1>" a`). It has to hold for every nominal type that takes
+-- a template -- a `record` and a `data` alike -- in every language that
+-- renders a type: a template reaching the native compiler with its `$1`
+-- unexpanded is not a type error anywhere in morloc, only a build that
+-- fails in the pool's own language.
+--
+-- Python and R build every value structurally, so a mapping there is a
+-- hint on the wire and the value does not change shape. They are here so
+-- that the same declaration compiles and round-trips in all four, and so
+-- a value can travel through all four in one call.
+--
+-- Two instantiations of `Box` are used in the static languages, because a
+-- template that is only ever instantiated once is indistinguishable from
+-- a monomorphic mapping.
+
+module main
+  ( cppGrow
+  , rustGrow
+  , pyGrow
+  , rGrow
+  , cppShout
+  , rustShout
+  , cppWrap
+  , rustWrap
+  , pyWrap
+  , rWrap
+  , cppMade
+  , rustMade
+  , cppWrapMade
+  , rustWrapMade
+  , cppUnbox
+  , rustUnbox
+  , roundTrip
+  , cppDepth
+  , rustDepth
+  )
+
+import .types
+import root-py
+import root-cpp
+import root-r
+import root-rust
+
+data Cpp  => (Box a) = "MyBox<$1>" a
+data Rust => (Box a) = "MyBox<$1>" a
+data Py   => (Box a) = "box" a
+data R    => (Box a) = "box" a
+
+data Cpp  => (Tree a) = "MyTree<$1>" a
+data Rust => (Tree a) = "MyTree<$1>" a
+
+record Cpp  => (Wrap a) = "MyWrap<$1>" a
+record Rust => (Wrap a) = "MyWrap<$1>" a
+record Py   => (Wrap a) = "dict" a
+record R    => (Wrap a) = "list" a
+
+source Cpp  from "boxes.hpp" ("grow" as cppGrow, "shout" as cppShout, "bump" as cppWrap, "inc" as cppInc, "depth" as cppDepthOf)
+source Rust from "boxes.rs"  ("grow" as rustGrow, "shout" as rustShout, "bump" as rustWrap, "inc" as rustInc, "depth" as rustDepthOf)
+source Py   from "boxes.py"  ("grow" as pyGrow, "bump" as pyWrap)
+source R    from "boxes.R"   ("grow" as rGrow, "bump" as rWrap)
+
+cppGrow   :: Box Int -> Box Int
+rustGrow  :: Box Int -> Box Int
+pyGrow    :: Box Int -> Box Int
+rGrow     :: Box Int -> Box Int
+
+cppShout  :: Box Str -> Box Str
+rustShout :: Box Str -> Box Str
+
+cppWrap   :: Wrap Int -> Wrap Int
+rustWrap  :: Wrap Int -> Wrap Int
+pyWrap    :: Wrap Int -> Wrap Int
+rWrap     :: Wrap Int -> Wrap Int
+
+cppInc    :: Int -> Int
+rustInc   :: Int -> Int
+
+cppDepthOf  :: Tree Int -> Int
+rustDepthOf :: Tree Int -> Int
+
+-- A constructor literal built in the pool, against the user's template.
+cppMade :: Int -> Box Int
+cppMade n = Full (cppInc n)
+
+rustMade :: Int -> Box Int
+rustMade n = Full (rustInc n)
+
+cppWrapMade :: Int -> Wrap Int
+cppWrapMade n = {item = cppInc n}
+
+rustWrapMade :: Int -> Wrap Int
+rustWrapMade n = {item = rustInc n}
+
+-- A match in the pool, so the tag test runs against the user's template.
+cppUnbox :: Box Int -> Int
+cppUnbox b = match b
+  | (Full x) = cppInc x
+  | Empty = 0
+
+rustUnbox :: Box Int -> Int
+rustUnbox b = match b
+  | (Full x) = rustInc x
+  | Empty = 0
+
+-- Every pool in one call: +100, +1000, +1, +10.
+roundTrip :: Box Int -> Box Int
+roundTrip x = rustGrow (cppGrow (rGrow (pyGrow x)))
+
+-- A recursive template: the value is built in the pool, whose arm structs
+-- name the instantiation from inside themselves, and read by a sourced
+-- function written against the user's own template.
+cppDepth :: Int -> Int
+cppDepth n = cppDepthOf (Node (Leaf (cppInc n)) (Node (Leaf n) (Leaf n)))
+
+rustDepth :: Int -> Int
+rustDepth n = rustDepthOf (Node (Leaf (rustInc n)) (Node (Leaf n) (Leaf n)))
