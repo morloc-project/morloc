@@ -1,0 +1,55 @@
+--- one-field ---
+12
+--- two-fields ---
+7
+--- nullary ---
+0
+--- two-arms-refused ---
+OK
+--- required-missing ---
+OK
+--- wrong-arity ---
+OK
+--- optional-absent ---
+"none"
+"rect"
+--- default ---
+1
+4
+--- nested-constructor-value ---
+"red"
+"other"
+"bare"
+--- string-field ---
+"hello"
+"number"
+--- help ---
+Measure a shape
+
+Usage: ./nexus <nexus_options> area <command_options>
+
+General Options:
+  -h, --help  Print help (see more with '--help')
+
+Optional arguments:
+      --circle <Real>       a circle of some radius
+                            one of Shape's constructors; one is required
+      --rect <Real> <Real>  a box, width then height
+                            one of Shape's constructors; one is required
+      --dot                 a point, with no size
+                            one of Shape's constructors; one is required
+
+Return: Real
+
+Data Types:
+  Shape
+    A shape to measure
+    Circle Real     a circle of some radius
+    Rect Real Real  a box, width then height
+    Dot             a point, with no size
+--- json-help ---
+{"default": "\"Dot\"", "required": false, "role": "alternatives"}
+[('circle', 1), ('rect', 2), ('dot', 0)]
+--- mcp ---
+['shape'] ['shape']
+['message']

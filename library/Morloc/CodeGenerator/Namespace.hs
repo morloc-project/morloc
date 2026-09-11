@@ -143,6 +143,8 @@ module Morloc.CodeGenerator.Namespace
   , CmdArg (..)
   , CmdDocSet (..)
   , RecDocSet (..)
+  , AltDocSet (..)
+  , AltArm (..)
   , ArgOptDocSet (..)
   , ArgFlagDocSet (..)
   , ArgPosDocSet (..)
@@ -1875,7 +1877,43 @@ data CmdArg
     CmdArgGrp RecDocSet
   | -- argument group (made from a record)
     CmdArgFlag ArgFlagDocSet
-  -- flag option
+  | -- flag option
+    CmdArgAlt AltDocSet
+  -- one flag per constructor of a `data` type, mutually exclusive
+  deriving (Show, Ord, Eq)
+
+-- | A `data`-typed argument unrolled into one option per constructor. The
+-- options exclude one another; an argument-free constructor's option is a
+-- bare flag, and a payload-bearing one's takes exactly as many values as
+-- the constructor has fields.
+data AltDocSet = AltDocSet
+  { altDocType :: Type
+  , -- the argument's type, an optional over the `data` when it may be omitted
+    altDocDesc :: [Text]
+  , -- free description of the argument
+    altDocName :: Maybe Text
+  , -- an explicit `@name`, the key a program addresses the argument by
+    altDocMetavar :: Text
+  , -- the name the argument is shown under; the type's by default
+    altDocRequired :: Bool
+  , -- exactly one arm must be given; false when the type is optional or a
+    -- default is declared
+    altDocDefault :: Maybe Text
+  , -- the value when no arm is given, as JSON
+    altDocArms :: [AltArm]
+  }
+  deriving (Show, Ord, Eq)
+
+data AltArm = AltArm
+  { altArmCtor :: Text
+  , -- the constructor's own name
+    altArmLong :: Text
+  , -- the option's long spelling, the constructor's name lowercased
+    altArmFields :: [Type]
+  , -- the constructor's field types, one value each on the command line
+    altArmDesc :: [Text]
+    -- the constructor's docstring
+  }
   deriving (Show, Ord, Eq)
 
 data CmdDocSet = CmdDocSet

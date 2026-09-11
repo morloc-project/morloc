@@ -543,6 +543,47 @@ fn arg_to_json(arg: &Arg, pos_index: usize) -> Value {
                 "entries": entries_json,
             })
         }
+        Arg::Alt {
+            schema,
+            type_desc,
+            metavar,
+            desc,
+            required,
+            default_val,
+            arms,
+            ..
+        } => {
+            let arms_json: Vec<Value> = arms
+                .iter()
+                .map(|a| {
+                    let fields: Vec<Value> = a
+                        .fields
+                        .iter()
+                        .map(|f| json!({ "type": f.type_desc, "wire": f.schema }))
+                        .collect();
+                    json!({
+                        "constructor": a.ctor,
+                        "long": a.long,
+                        "description": a.desc,
+                        "fields": fields,
+                    })
+                })
+                .collect();
+            json!({
+                "name": arg.key(),
+                "role": "alternatives",
+                "metavar": metavar,
+                "required": required,
+                "default": default_val,
+                "description": desc,
+                "type": type_object(
+                    schema.as_deref(),
+                    arg.general_schema_str(),
+                    type_desc.as_deref(),
+                ),
+                "arms": arms_json,
+            })
+        }
     }
 }
 
@@ -1043,6 +1084,29 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
                         fields,
                     });
                 }
+            }
+            // An unrolled `data` is one property holding the whole value: a
+            // model writes the constructor JSON directly, the arms being a
+            // command-line convenience. Required when no arm may be omitted.
+            Arg::Alt {
+                schema,
+                required: is_req,
+                default_val,
+                desc,
+                ..
+            } => {
+                let name = arg.key().to_string();
+                let mut prop = mcp_type(schema.as_deref(), false);
+                set_description(&mut prop, &with_ctor_notes(cmd, arg.type_desc_str(), desc), default_val.as_deref());
+                if *is_req {
+                    required.push(Value::String(name.clone()));
+                }
+                insert_prop(&mut props, &name, prop)?;
+                let st = schema.as_deref().and_then(|s| parse_schema(s).ok());
+                slots.push(ArgSlot::Value {
+                    key: name,
+                    missing: cli_default_to_json(default_val.as_deref(), st.as_ref()),
+                });
             }
         }
     }

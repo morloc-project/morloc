@@ -412,7 +412,7 @@ impl<'a> ArgShape<'a> {
                     list_checks: list_checks.as_slice(),
                 })
             }
-            Arg::Flag { .. } | Arg::Group { .. } => None,
+            Arg::Flag { .. } | Arg::Group { .. } | Arg::Alt { .. } => None,
         }
     }
 
@@ -877,6 +877,41 @@ pub enum ArgValue {
     Many { tokens: Vec<String>, literal: bool },
 }
 
+
+/// Read one command-line token as a value of the given wire schema and
+/// render it back as JSON. This is how a constructor's field values are
+/// folded into the constructor's JSON: a token is read exactly as an
+/// argument of that type would be (a file, a bare constructor, a string),
+/// so the assembled value is the one the type's reader accepts.
+pub fn cli_token_to_json(token: &str, schema: &str) -> Result<String, String> {
+    extern "C" {
+        fn cli_token_to_json(
+            token: *const std::ffi::c_char,
+            schema: *const std::ffi::c_char,
+            errmsg: *mut *mut std::ffi::c_char,
+        ) -> *mut std::ffi::c_char;
+        fn free(p: *mut std::ffi::c_void);
+    }
+    let tok_c = std::ffi::CString::new(token).map_err(|e| e.to_string())?;
+    let sch_c = std::ffi::CString::new(schema).map_err(|e| e.to_string())?;
+    let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
+    unsafe {
+        let out = cli_token_to_json(tok_c.as_ptr(), sch_c.as_ptr(), &mut errmsg);
+        if out.is_null() {
+            let msg = if errmsg.is_null() {
+                "could not read value".to_string()
+            } else {
+                let m = std::ffi::CStr::from_ptr(errmsg).to_string_lossy().into_owned();
+                free(errmsg as *mut std::ffi::c_void);
+                m
+            };
+            return Err(msg);
+        }
+        let js = std::ffi::CStr::from_ptr(out).to_string_lossy().into_owned();
+        free(out as *mut std::ffi::c_void);
+        Ok(js)
+    }
+}
 
 /// Route a single positional value through the C-side parser. Picks
 /// the shape-aware FFI when the arg has any non-default

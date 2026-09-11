@@ -1,6 +1,15 @@
 Unreleased
 ----------
 
+ - `@unroll` on a `data`-typed argument gives one option per constructor,
+   mutually exclusive: a bare flag for an argument-free constructor, exactly
+   as many values as fields for the rest; `@default` and `?T` make the
+   choice optional
+ - a constructor whose lowercase name is `help` or `version` is refused on
+   an unrolled argument, since the command line owns those options
+ - an alias's docstrings now reach a use site through `?`: a `?Path` argument
+   enforces the alias's `@check.path`, and a positional `?Count` whose alias
+   declares a `@default` is rejected as a bare `Count` always was
  - a constructor is matched on the command line without regard to case;
    quoted JSON is still matched exactly, and two constructors of one type
    may no longer differ only in case

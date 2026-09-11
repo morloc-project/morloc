@@ -21,6 +21,7 @@
 use clap::{Arg as ClapArg, ArgAction, ArgGroup, ArgMatches, Command as ClapCommand};
 
 use crate::dispatch::{preprocess_cli_value, ArgValue};
+use morloc_runtime_types::schema::{parse_schema, SerialType};
 use morloc_manifest::{Arg as ManifestArg, Command as ManifestCommand, Manifest, Return, Terminal};
 
 /// Leak a string into a `&'static str` for clap's static-only
@@ -664,6 +665,56 @@ fn build_command_args(
                     cmd = add_group_entry_arg(cmd, eid, &entry.arg, ctor_line);
                 }
             }
+            ManifestArg::Alt { arms, required, default_val, type_desc, .. } => {
+                // One option per constructor, all in one exclusive group.
+                // An argument-free constructor is a bare flag; one with
+                // fields takes exactly that many values, named by type.
+                let mut members: Vec<&'static str> = Vec::with_capacity(arms.len());
+                for (j, arm) in arms.iter().enumerate() {
+                    let aid: &'static str = leak(&format!("{}_arm{}", id, j));
+                    let mut a = ClapArg::new(aid).long(leak(&arm.long));
+                    if arm.fields.is_empty() {
+                        a = a.action(ArgAction::SetTrue);
+                    } else {
+                        let names: Vec<&'static str> = arm
+                            .fields
+                            .iter()
+                            .map(|f| leak(f.type_desc.as_deref().unwrap_or("VALUE")))
+                            .collect();
+                        a = a
+                            .action(ArgAction::Set)
+                            .num_args(arm.fields.len())
+                            .value_names(names);
+                    }
+                    let mut lines: Vec<String> = arm
+                        .desc
+                        .iter()
+                        .filter(|d| !d.trim().is_empty())
+                        .cloned()
+                        .collect();
+                    // What the arm is one of, and what happens when none is
+                    // given: the choice is required, or falls to a default,
+                    // or the argument is left null.
+                    let standing = match (required, default_val) {
+                        (true, _) => "one is required".to_string(),
+                        (false, Some(d)) => format!("default: {}", shown_default(d, true)),
+                        (false, None) => "none means null".to_string(),
+                    };
+                    match type_desc {
+                        Some(td) => lines.push(format!("one of {}'s constructors; {}", td, standing)),
+                        None => lines.push(standing),
+                    }
+                    a = a.help(leak(&lines.join("\n")));
+                    cmd = cmd.arg(a);
+                    members.push(aid);
+                }
+                let gid: &'static str = leak(&format!("{}_alt", id));
+                let mut grp = ArgGroup::new(gid).multiple(false).required(*required);
+                for m in members {
+                    grp = grp.arg(m);
+                }
+                cmd = cmd.group(grp);
+            }
         }
     }
     cmd = add_terminal_flags(cmd, mcmd);
@@ -1001,6 +1052,55 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                     defaults,
                 });
             }
+            ManifestArg::Alt { arms, default_val, .. } => {
+                // The chosen arm becomes the JSON the type's wire form reads:
+                // the bare name for an argument-free constructor, the name
+                // keyed to its values otherwise. Each value is read the way
+                // any argument of its type is, then rendered back to JSON,
+                // so a file, a bare constructor or a string token all land
+                // in the right form. No arm given means the default, or
+                // null for an argument that may be omitted.
+                let mut chosen: Option<String> = None;
+                for (j, arm) in arms.iter().enumerate() {
+                    let aid = format!("{}_arm{}", id, j);
+                    if arm.fields.is_empty() {
+                        if matches.get_flag(&aid) {
+                            chosen = Some(serde_json::to_string(&arm.ctor).unwrap_or_default());
+                            break;
+                        }
+                    } else if let Some(vals) = matches.get_many::<String>(&aid) {
+                        let mut fields_json: Vec<String> = Vec::with_capacity(arm.fields.len());
+                        for (v, f) in vals.zip(arm.fields.iter()) {
+                            let js = match f.schema.as_deref() {
+                                Some(sch) => {
+                                    let tok = arm_field_token(v, sch);
+                                    match crate::dispatch::cli_token_to_json(&tok, sch) {
+                                        Ok(js) => js,
+                                        Err(e) => crate::runlog::die_with_error(&format!(
+                                            "--{}: {}", arm.long, e
+                                        )),
+                                    }
+                                }
+                                None => v.clone(),
+                            };
+                            fields_json.push(js);
+                        }
+                        chosen = Some(format!(
+                            "{{{}:[{}]}}",
+                            serde_json::to_string(&arm.ctor).unwrap_or_default(),
+                            fields_json.join(",")
+                        ));
+                        break;
+                    }
+                }
+                match chosen {
+                    Some(js) => out.push(ArgValue::Value(js)),
+                    None => match default_val {
+                        Some(d) => out.push(ArgValue::Value(d.clone())),
+                        None => out.push(ArgValue::Null),
+                    },
+                }
+            }
         }
     }
     out
@@ -1082,6 +1182,31 @@ pub(crate) fn first_desc(desc: &[String]) -> &str {
         .find(|d| !d.trim().is_empty())
         .map(|s| s.as_str())
         .unwrap_or("")
+}
+
+/// A constructor field's token, given the readings a positional of the
+/// same type gets before it is parsed: a string field takes the token as
+/// the string itself, the way a `Str` positional is quoted, and a real
+/// field takes `inf`/`nan` spellings.
+fn arm_field_token(tok: &str, schema: &str) -> String {
+    if crate::dispatch::schema_is_float_scalar(schema) {
+        if let Some(js) = crate::dispatch::maybe_float_special_to_json(tok) {
+            return js;
+        }
+    }
+    let is_str = parse_schema(schema).ok().map_or(false, |s| match s.serial_type {
+        SerialType::String => true,
+        SerialType::Optional => s
+            .parameters
+            .first()
+            .map_or(false, |p| p.serial_type == SerialType::String),
+        _ => false,
+    });
+    if is_str {
+        crate::dispatch::quoted(tok)
+    } else {
+        tok.to_string()
+    }
 }
 
 /// The default as the command line shows and accepts it. The manifest

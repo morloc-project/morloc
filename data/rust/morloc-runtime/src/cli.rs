@@ -3053,6 +3053,53 @@ unsafe fn load_bundle_partial(
     Ok(out)
 }
 
+/// Read one command-line token as a value of `schema_str` and render it as
+/// JSON. The token is read the way a single argument of that type is --
+/// through the source classifier, so a file, a bare constructor, a quoted
+/// string and a literal all resolve -- and the value is written back out as
+/// JSON text for a caller that is assembling a larger value. The returned
+/// string and any error message are malloc'd; the caller frees them.
+#[no_mangle]
+pub unsafe extern "C" fn cli_token_to_json(
+    token: *const c_char,
+    schema_str: *const c_char,
+    errmsg: *mut *mut c_char,
+) -> *mut c_char {
+    clear_errmsg(errmsg);
+    if token.is_null() || schema_str.is_null() {
+        set_errmsg(errmsg, &MorlocError::NullPointer);
+        return ptr::null_mut();
+    }
+    let schema_text = CStr::from_ptr(schema_str).to_string_lossy();
+    let rs = match crate::schema::parse_schema(&schema_text) {
+        Ok(s) => s,
+        Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+    };
+    let cs = CSchema::from_rust(&rs);
+    let scratch = match shm::shcalloc(1, rs.width) {
+        Ok(p) => p,
+        Err(e) => { CSchema::free(cs); set_errmsg(errmsg, &e); return ptr::null_mut(); }
+    };
+    let mut err: *mut c_char = ptr::null_mut();
+    let loaded = parse_cli_data_argument_singular(scratch, token as *mut c_char, cs, &mut err);
+    CSchema::free(cs);
+    if !err.is_null() {
+        *errmsg = err;
+        return ptr::null_mut();
+    }
+    if loaded.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other("could not read the value".into()));
+        return ptr::null_mut();
+    }
+    match crate::json::voidstar_to_json_string(loaded as shm::AbsPtr, &rs) {
+        Ok(js) => match std::ffi::CString::new(js) {
+            Ok(c) => c.into_raw(),
+            Err(_) => { set_errmsg(errmsg, &MorlocError::Other("value is not valid text".into())); ptr::null_mut() }
+        },
+        Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
+    }
+}
+
 /// Per-field schemas of a record being read field by field. A field that
 /// back-references the record gets a self-contained copy, owned here and
 /// freed with the set; every other field borrows the record's own child.

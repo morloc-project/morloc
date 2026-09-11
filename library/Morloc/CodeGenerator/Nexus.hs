@@ -1425,6 +1425,34 @@ argToJson key _ _ _ _ (CmdArgFlag r) =
     , ("desc", jsonStrArr (argFlagDocDesc r))
     , ("metadata", metadataEmpty)
     ]
+argToJson key mEmit mGeneral _ entrySchemas (CmdArgAlt r) =
+  jsonObj $
+    [ ("kind", jsonStr "alt"), ("key", jsonStr key) ]
+    ++ schemaField mEmit mGeneral
+    ++ [ ("type", jsonStr (typeDescStr (altDocType r)))
+       , ("metavar", jsonStr (altDocMetavar r))
+       , ("desc", jsonStrArr (altDocDesc r))
+       , ("required", jsonBool (altDocRequired r))
+       , ("default", maybe jsonNull jsonStr (altDocDefault r))
+       , ("arms", jsonArr [armJson arm | arm <- altDocArms r])
+       , ("metadata", metadataEmpty)
+       ]
+  where
+    -- A field's schema is keyed by its constructor and position.
+    armJson arm =
+      jsonObj
+        [ ("ctor", jsonStr (altArmCtor arm))
+        , ("long", jsonStr (altArmLong arm))
+        , ("desc", jsonStrArr (altArmDesc arm))
+        , ("fields", jsonArr
+            [ jsonObj
+                [ ("type", jsonStr (typeDescStr ft))
+                , ("schema", maybe jsonNull jsonStr
+                    (lookup (Key (altArmCtor arm <> "/" <> MT.pack (show i))) entrySchemas))
+                ]
+            | (i, ft) <- zip [(0 :: Int) ..] (altArmFields arm)
+            ])
+        ]
 argToJson key mEmit mGeneral _ entrySchemas (CmdArgGrp r) =
   jsonObj $
     [ ("kind", jsonStr "grp"), ("key", jsonStr key) ]
@@ -1607,6 +1635,7 @@ validateArgSpecs i cmdargs asts schemas = do
           checkArgShape argLoc schemaText arg
         CmdArgFlag _ -> return ()
         CmdArgGrp r  -> validateGroup argLoc r ast
+        CmdArgAlt r  -> validateAlt argLoc r ast
 
     checkArgShape :: MDoc -> Text -> CmdArg -> MorlocMonad ()
     checkArgShape argLoc schemaText arg =
@@ -1684,6 +1713,45 @@ checkDefault loc ast defaultText =
 
 -- Recurse into the entries of an unrolled record group, matching them
 -- against the SerialObject's per-field parameters.
+-- | An unrolled `data` argument's arms must be the type's constructors as
+-- the wire knows them, in the same order and with the same field counts;
+-- the default, if any, must be a value of the type.
+validateAlt :: MDoc -> AltDocSet -> SerialAST -> MorlocMonad ()
+validateAlt loc r ast = do
+  wireArms <- case altVariantArms ast of
+    Just as -> return as
+    Nothing -> MM.throwSystemError $
+      loc <> ": `@unroll` needs a `data`-typed argument, but the wire form is not one"
+  let declared = [(altArmCtor a, length (altArmFields a)) | a <- altDocArms r]
+  when (declared /= [(n, length fs) | (n, fs) <- wireArms]) $
+    MM.throwSystemError $
+      loc <> ": the constructors of the unrolled `data` disagree with its wire form"
+  CM.forM_ (altDocDefault r) (checkDefault loc ast)
+
+-- | The arms of the variant or enum an argument's serial AST is built on,
+-- looking through the optional an omittable argument wraps it in.
+altVariantArms :: SerialAST -> Maybe [(Text, [SerialAST])]
+altVariantArms (SerialPack _ (_, inner)) = altVariantArms inner
+altVariantArms (SerialOptional _ inner) = altVariantArms inner
+altVariantArms (SerialVariant _ _ as) = Just as
+altVariantArms (SerialEnum _ _ ns) = Just [(n, []) | n <- ns]
+altVariantArms _ = Nothing
+
+-- | The wire schema of each field of each arm, each made self-contained:
+-- an arm's field may refer back to the type it belongs to, and the nexus
+-- reads a field's value on its own.
+altArmFieldSchemas :: SerialAST -> [(Text, [Text])]
+altArmFieldSchemas ast0 = case peelPack ast0 of
+    v@(SerialVariant _ _ as) ->
+      [ (n, [render (Serial.serialAstToMsgpackSchema (Serial.rerootUnder v f)) | f <- fs])
+      | (n, fs) <- as ]
+    SerialEnum _ _ ns -> [(n, []) | n <- ns]
+    _ -> []
+  where
+    peelPack (SerialPack _ (_, inner)) = peelPack inner
+    peelPack (SerialOptional _ inner) = peelPack inner
+    peelPack x = x
+
 validateGroup :: MDoc -> RecDocSet -> SerialAST -> MorlocMonad ()
 validateGroup loc r ast = case peelGroupAst ast of
   Just (SerialObject _ _ _ pairs) -> do
@@ -2215,6 +2283,9 @@ cmdSignatureTypes mStream doc =
         <> case recDocType r of
              NamT _ _ _ fields -> map snd fields
              _ -> []
+    -- An unrolled `data` prints its type beside every arm, and each arm's
+    -- field types beside its values.
+    argTypes (CmdArgAlt r) = altDocType r : concatMap altArmFields (altDocArms r)
 
 -- | The glossary for one command: every named type its signature mentions,
 -- defined once and generically.
@@ -3100,6 +3171,10 @@ buildManifest ManifestInputs{..} =
         walk n (a : rest) (s : ss) (ast : as) =
           let entries = case a of
                           CmdArgGrp _ -> groupEntryWireSchemas ast
+                          CmdArgAlt _ ->
+                            [ (Key (n <> "/" <> MT.pack (show i)), fs)
+                            | (n, fss) <- altArmFieldSchemas ast
+                            , (i, fs) <- zip [(0 :: Int) ..] fss ]
                           _           -> []
               gen = render (Serial.serialAstToGeneralSchema ast)
           in argToJson (Docstrings.argKey n a) (Just s) (Just gen) (Just s) entries a

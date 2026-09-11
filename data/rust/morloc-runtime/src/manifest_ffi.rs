@@ -1711,6 +1711,26 @@ unsafe fn populate_arg(dst: *mut ManifestArg, src: &morloc_manifest::Arg) {
             (*dst).n_constraints = nc;
             (*dst).metadata_json = c_strdup("{}");
         }
+        // The per-constructor options are a command-line convenience; to
+        // every other caller the argument is one value of its type's wire
+        // form, which is what a positional is.
+        Arg::Alt {
+            schema,
+            type_desc,
+            metavar,
+            desc,
+            ..
+        } => {
+            (*dst).kind = ManifestArgKind::Pos;
+            (*dst).schema = nullable_strdup(schema.as_deref());
+            (*dst).type_desc = nullable_strdup(type_desc.as_deref());
+            (*dst).metavar = nullable_strdup(metavar.as_deref());
+            (*dst).quoted = false;
+            let (d, n) = populate_str_vec(desc);
+            (*dst).desc = d;
+            (*dst).n_desc = n;
+            (*dst).metadata_json = c_strdup("{}");
+        }
     }
 }
 

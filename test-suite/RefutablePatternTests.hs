@@ -67,6 +67,19 @@ dataDeclarationTests = testGroup "data declarations"
         \f :: Color -> Int\n\
         \f | _ = 0\n"
 
+  , -- A constructor's docstring may sit above the name itself when the
+    -- bar ends the line before it.
+    testCase "a constructor described on its own line is accepted" $
+      assertBool "docstring above the name" . isRight $ parseMod
+        "module main (f)\n\
+        \data Color =\n\
+        \  --' warm\n\
+        \  Red |\n\
+        \  --' cool\n\
+        \  Blue\n\
+        \f :: Color -> Int\n\
+        \f | _ = 0\n"
+
   , -- A constructor is a value, not an argument: the directives that shape
     -- an argument have no meaning on it.
     testCase "a directive on a constructor is rejected" $
