@@ -311,16 +311,17 @@ resolveImports d0 =
           return $ AST.setExport (ExportMany exports []) e
         (ExportMany ungroupedExports groups) ->
           let allExplicit = Set.unions (ungroupedExports : [exportGroupMembers g | g <- groups])
-              resolved = resolveExplicitTypeclasses allSymbols allExplicit
+              resolved = resolveExplicitSymbols allSymbols allExplicit
               missing = Set.map snd resolved `Set.difference` allSymbols
            in if Set.null missing
                 then do
                   -- Rebuild groups with resolved typeclasses
                   let resolvedGroups =
                         map
-                          (\g -> g {exportGroupMembers = resolveExplicitTypeclasses allSymbols (exportGroupMembers g)})
+                          (\g -> g {exportGroupMembers = resolveExplicitSymbols allSymbols (exportGroupMembers g)})
                           groups
-                      resolvedUngrouped = resolveExplicitTypeclasses allSymbols ungroupedExports
+                  resolvedUngrouped <-
+                    exportCtorsWithTypes allSymbols resolved (resolveExplicitSymbols allSymbols ungroupedExports)
                   return $ AST.setExport (ExportMany resolvedUngrouped resolvedGroups) e
                 else
                   MM.throwSystemError $
@@ -329,14 +330,42 @@ resolveImports d0 =
                       <+> "does not export the following terms or types:"
                       <+> list (map pretty (Set.toList missing))
 
-    resolveExplicitTypeclasses :: Set Symbol -> Set (Int, Symbol) -> Set (Int, Symbol)
-    resolveExplicitTypeclasses ss sis = Set.map f sis
+    -- An UPPER name in an export list parses as a type. Reclassify it as a
+    -- class when a class of that name is in scope, or as a term when only a
+    -- term of that name is -- which is how a `data` constructor is named
+    -- explicitly, since constructors are the one kind of term spelled
+    -- uppercase.
+    resolveExplicitSymbols :: Set Symbol -> Set (Int, Symbol) -> Set (Int, Symbol)
+    resolveExplicitSymbols ss sis = Set.map f sis
       where
         f :: (Int, Symbol) -> (Int, Symbol)
         f (i, TypeSymbol (TV x))
           | (ClassSymbol (ClassName x)) `Set.member` ss = (i, ClassSymbol (ClassName x))
+          | not (TypeSymbol (TV x) `Set.member` ss)
+          , TermSymbol (EV x) `Set.member` ss = (i, TermSymbol (EV x))
           | otherwise = (i, TypeSymbol (TV x))
         f x = x
+
+    -- A `data` type carries its constructors: exporting the type exports
+    -- the association, which is what an importer turns into the constructor
+    -- terms, and what a module further along re-exports without holding
+    -- the declaration. The terms themselves are NOT added to the export
+    -- list: the root's export list is the program's command surface, and
+    -- a constructor is not a command. The type may have been named in any
+    -- export group; the associations go with the ungrouped exports, since
+    -- a group is a set of commands.
+    exportCtorsWithTypes :: Set Symbol -> Set (Int, Symbol) -> Set (Int, Symbol) -> MorlocMonad (Set (Int, Symbol))
+    exportCtorsWithTypes ss allExplicit ungrouped = do
+      let exportedTypes = Set.fromList [t | (_, TypeSymbol t) <- Set.toList allExplicit]
+          carried =
+            Set.fromList
+              [ CtorSymbol t c
+              | CtorSymbol t c <- Set.toList ss
+              , Set.member t exportedTypes
+              ]
+          already = Set.map snd allExplicit
+      extra <- mapM addIndex (Set.toList (carried `Set.difference` already))
+      return $ Set.union ungrouped (Set.fromList extra)
 
     addIndex :: a -> MorlocMonad (Int, a)
     addIndex x = (,) <$> MM.getCounter <*> pure x
@@ -348,97 +377,134 @@ resolveImports d0 =
       ExprI -> -- importing module expression (with resolved exports)
       ExprI -> -- imported module expression  (with resolved exports)
       MorlocMonad [AliasedSymbol]
-    resolveEdge imp _ childX = case (importInclude imp, importNamespace imp, AST.findExport childX) of
-      (_, _, ExportAll) -> error "This should have been resolved already"
-      -- No namespace: existing behavior
-      (Nothing, Nothing, ExportMany exps gs) ->
+    resolveEdge imp _ childX = case (importInclude imp, AST.findExport childX) of
+      (_, ExportAll) -> error "This should have been resolved already"
+      -- No include list: everything the module exports, under the
+      -- namespace prefix when the import has one.
+      (Nothing, ExportMany exps gs) ->
         let allExps = Set.unions (exps : [exportGroupMembers g | g <- gs])
-         in return $ map (toAliasedSymbol . snd) (Set.toList allExps)
-      (Just ass, Nothing, ExportMany exps gs) -> return . catMaybes $ map (importAlias . unAliasedSymbol) ass
+         in return $ map (prefixAlias ns) (mapMaybe (toAliasedSymbol . snd) (Set.toList allExps))
+      (Just ass, ExportMany exps gs) -> return $ concatMap importAlias ass
         where
           allExps = Set.unions (exps : [exportGroupMembers g | g <- gs])
-          exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList allExps]
+          (termExps, typeExps) = exportMapsOf allExps
           excludes = map unSymbol (importExclude imp)
 
-          importAlias :: (Text, Text) -> Maybe AliasedSymbol
-          importAlias (name, alias)
-            | name `elem` excludes = Nothing
-            | otherwise = case Map.lookup name exportMap of
-                Nothing -> Nothing
-                (Just (TermSymbol _)) -> Just $ AliasedTerm (EV name) (EV alias)
-                (Just (TypeSymbol _)) -> Just $ AliasedType (TV name) (TV alias)
-                (Just (ClassSymbol _)) -> Just $ AliasedClass (ClassName name)
-      -- With namespace: prefix term aliases (V1: types/classes not prefixed)
-      (Nothing, Just ns, ExportMany exps gs) ->
-        let allExps = Set.unions (exps : [exportGroupMembers g | g <- gs])
-         in return $ map (prefixAlias ns . toAliasedSymbol . snd) (Set.toList allExps)
-      (Just ass, Just ns, ExportMany exps gs) -> return . catMaybes $ map (importAlias . unAliasedSymbol) ass
-        where
-          allExps = Set.unions (exps : [exportGroupMembers g | g <- gs])
-          exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList allExps]
-          excludes = map unSymbol (importExclude imp)
+          -- Resolve one item of the include list against the exports. A
+          -- `data` type brings its constructors, each aliased from the
+          -- exporter's own spelling to the bare name, under the prefix.
+          -- An UPPER item that names no type or class may still name a
+          -- constructor explicitly.
+          importAlias :: AliasedSymbol -> [AliasedSymbol]
+          importAlias (AliasedTerm (EV name) (EV alias))
+            | name `elem` excludes = []
+            | otherwise = case Map.lookup name termExps of
+                Just orig -> [prefixAlias ns (AliasedTerm orig (EV alias))]
+                Nothing -> []
+          importAlias (AliasedType (TV name) (TV alias))
+            | name `elem` excludes = []
+            | otherwise = case Map.lookup name typeExps of
+                Just (TypeSymbol t) ->
+                  AliasedType (TV name) (TV alias)
+                    : [ prefixAlias ns (AliasedTerm c (EV (ctorBaseName c)))
+                      | c <- ctorsOf allExps t
+                      , ctorBaseName c `notElem` excludes ]
+                Just (ClassSymbol _) -> [AliasedClass (ClassName name)]
+                _ -> case Map.lookup name termExps of
+                  Just orig -> [prefixAlias ns (AliasedTerm orig (EV alias))]
+                  Nothing -> []
+          importAlias (AliasedClass (ClassName name))
+            | name `elem` excludes = []
+            | otherwise = case Map.lookup name typeExps of
+                Just (ClassSymbol _) -> [AliasedClass (ClassName name)]
+                _ -> []
+      where
+        ns = importNamespace imp
 
-          importAlias :: (Text, Text) -> Maybe AliasedSymbol
-          importAlias (name, alias)
-            | name `elem` excludes = Nothing
-            | otherwise = case Map.lookup name exportMap of
-                Nothing -> Nothing
-                (Just (TermSymbol _)) -> Just $ prefixAlias ns (AliasedTerm (EV name) (EV alias))
-                (Just (TypeSymbol _)) -> Just $ AliasedType (TV name) (TV alias)
-                (Just (ClassSymbol _)) -> Just $ AliasedClass (ClassName name)
-
-    prefixAlias :: EVar -> AliasedSymbol -> AliasedSymbol
-    prefixAlias (EV ns) (AliasedTerm orig (EV alias)) = AliasedTerm orig (EV (ns <> "." <> alias))
+    prefixAlias :: Maybe EVar -> AliasedSymbol -> AliasedSymbol
+    prefixAlias (Just (EV ns)) (AliasedTerm orig (EV alias)) = AliasedTerm orig (EV (ns <> "." <> alias))
     prefixAlias _ sym = sym
+
+    -- The exports of a module keyed by name, terms apart from types and
+    -- classes so a `data` type and a constructor of the same name (the
+    -- ordinary `data Box = Box Int`) do not shadow one another. A term
+    -- entry maps the name an importer writes to the spelling the exporter
+    -- knows the term by, which differ for a constructor the exporter itself
+    -- imported under a namespace.
+    exportMapsOf :: Set (Int, Symbol) -> (Map Text EVar, Map Text Symbol)
+    exportMapsOf exps =
+      ( Map.fromList $
+          [(ctorBaseName c, c) | (_, CtorSymbol _ c) <- Set.toList exps]
+            ++ [(unEVar c, c) | (_, TermSymbol c) <- Set.toList exps]
+      , Map.fromList $
+          [(unSymbol s, s) | (_, s@(TypeSymbol _)) <- Set.toList exps]
+            ++ [(unSymbol s, s) | (_, s@(ClassSymbol _)) <- Set.toList exps]
+      )
+
+    -- The constructors an exported `data` type carries, under the spelling
+    -- the exporting module knows them by.
+    ctorsOf :: Set (Int, Symbol) -> TVar -> [EVar]
+    ctorsOf exps t = [c | (_, CtorSymbol t' c) <- Set.toList exps, t' == t]
+
+    -- A constructor's own name, with any namespace prefix removed. What an
+    -- importer receives is the bare name; the prefix, if any, is the
+    -- importer's own to add.
+    ctorBaseName :: EVar -> Text
+    ctorBaseName (EV c) = snd (T.breakOnEnd "." c)
 
     filterImports ::
       MVar ->
       Import -> -- the current node import list
       Export -> -- the imported modules export list
       MorlocMonad (Set Symbol)
-    -- No namespace, no include list: import everything
-    filterImports _ (Import _ Nothing exclude Nothing) (ExportMany exports gs) =
+    -- No include list: import everything, under the namespace prefix when
+    -- there is one. A carried constructor arrives under its bare name, as a
+    -- term of its own and as the association that lets this module export
+    -- it again with its type.
+    filterImports _ (Import _ Nothing exclude ns) (ExportMany exports gs) =
       let allExports = Set.unions (exports : [exportGroupMembers g | g <- gs])
-       in return $ (Set.map snd allExports) `Set.difference` (Set.fromList exclude)
-    -- With namespace, no include list: prefix all terms
-    filterImports _ (Import _ Nothing exclude (Just (EV ns))) (ExportMany exports gs) =
-      let allExports = Set.unions (exports : [exportGroupMembers g | g <- gs])
-       in return $ Set.map (prefixSymbol ns) ((Set.map snd allExports) `Set.difference` (Set.fromList exclude))
-    -- No namespace, with include list: existing behavior
-    filterImports m1 (Import m2 (Just as) (map unSymbol -> exclude) Nothing) (ExportMany exports gs) =
-      case partitionEithers . catMaybes $ map importAlias (map unAliasedSymbol as) of
+          kept = (Set.map snd allExports) `Set.difference` (Set.fromList exclude)
+       in return $ Set.unions (map (Set.fromList . map (prefixSymbol ns) . arriving) (Set.toList kept))
+      where
+        arriving (CtorSymbol t c) = [CtorSymbol t (EV (ctorBaseName c)), TermSymbol (EV (ctorBaseName c))]
+        arriving s = [s]
+    -- With an include list: only the named items, each resolved the same
+    -- way 'resolveEdge' resolves it.
+    filterImports m1 (Import m2 (Just as) (map unSymbol -> exclude) ns) (ExportMany exports gs) =
+      case partitionEithers (concatMap importAlias as) of
         ([], imps) -> return $ Set.fromList imps
         (missing, _) -> throwMissingImportError m1 m2 missing
       where
         allExports = Set.unions (exports : [exportGroupMembers g | g <- gs])
-        exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList allExports]
+        (termExps, typeExps) = exportMapsOf allExports
 
-        importAlias :: (Text, Text) -> Maybe (Either Text Symbol)
-        importAlias (name, alias)
-          | name `elem` exclude = Nothing
-          | otherwise = case Map.lookup name exportMap of
-              Nothing -> Just (Left name)
-              (Just (TermSymbol _)) -> Just . Right $ TermSymbol (EV alias)
-              (Just (TypeSymbol _)) -> Just . Right $ TypeSymbol (TV alias)
-              (Just (ClassSymbol _)) -> Just . Right $ ClassSymbol (ClassName alias)
-    -- With namespace and include list: prefix selected terms
-    filterImports m1 (Import m2 (Just as) (map unSymbol -> exclude) (Just (EV ns))) (ExportMany exports gs) =
-      case partitionEithers . catMaybes $ map importAlias (map unAliasedSymbol as) of
-        ([], imps) -> return $ Set.fromList imps
-        (missing, _) -> throwMissingImportError m1 m2 missing
-      where
-        allExports = Set.unions (exports : [exportGroupMembers g | g <- gs])
-        exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList allExports]
-
-        importAlias :: (Text, Text) -> Maybe (Either Text Symbol)
-        importAlias (name, alias)
-          | name `elem` exclude = Nothing
-          | otherwise = case Map.lookup name exportMap of
-              Nothing -> Just (Left name)
-              (Just (TermSymbol _)) -> Just . Right $ TermSymbol (EV (ns <> "." <> alias))
-              (Just (TypeSymbol _)) -> Just . Right $ TypeSymbol (TV alias)
-              (Just (ClassSymbol _)) -> Just . Right $ ClassSymbol (ClassName alias)
+        importAlias :: AliasedSymbol -> [Either Text Symbol]
+        importAlias (AliasedTerm (EV name) (EV alias))
+          | name `elem` exclude = []
+          | otherwise = case Map.lookup name termExps of
+              Just _ -> [Right (prefixSymbol ns (TermSymbol (EV alias)))]
+              Nothing -> [Left name]
+        importAlias (AliasedType (TV name) (TV alias))
+          | name `elem` exclude = []
+          | otherwise = case Map.lookup name typeExps of
+              Just (TypeSymbol t) ->
+                Right (TypeSymbol (TV alias))
+                  : concat
+                      [ map (Right . prefixSymbol ns) [CtorSymbol (TV alias) (EV base), TermSymbol (EV base)]
+                      | c <- ctorsOf allExports t
+                      , let base = ctorBaseName c
+                      , base `notElem` exclude ]
+              Just (ClassSymbol _) -> [Right (ClassSymbol (ClassName alias))]
+              _ -> case Map.lookup name termExps of
+                Just _ -> [Right (prefixSymbol ns (TermSymbol (EV alias)))]
+                Nothing -> [Left name]
+        importAlias (AliasedClass (ClassName name))
+          | name `elem` exclude = []
+          | otherwise = case Map.lookup name typeExps of
+              Just (ClassSymbol _) -> [Right (ClassSymbol (ClassName name))]
+              _ -> [Left name]
     filterImports _ _ _ = error "Unreachable -- all Export values should have been converted to ExportMany"
+
 
     -- Build the diagnostic for a failed selective import. Names that resolve
     -- to a typeclass method get a dedicated message explaining that methods
@@ -482,12 +548,19 @@ resolveImports d0 =
             Just cls -> ((name, cls) : methods, notExported)
             Nothing -> (methods, name : notExported)
 
-    prefixSymbol :: Text -> Symbol -> Symbol
-    prefixSymbol ns (TermSymbol (EV name)) = TermSymbol (EV (ns <> "." <> name))
+    prefixSymbol :: Maybe EVar -> Symbol -> Symbol
+    prefixSymbol (Just (EV ns)) (TermSymbol (EV name)) = TermSymbol (EV (ns <> "." <> name))
+    prefixSymbol (Just (EV ns)) (CtorSymbol t (EV name)) = CtorSymbol t (EV (ns <> "." <> name))
     prefixSymbol _ sym = sym
 
     findSymbols :: ExprI -> Set Symbol
     findSymbols (ExprI _ (ModE _ es)) = Set.unions (map findSymbols es)
+    -- A `data` declaration also records which terms are its constructors,
+    -- so they can follow the type through an export or import list. The
+    -- constructor terms themselves come from the signatures and bindings
+    -- the declaration desugared into.
+    findSymbols (ExprI _ (TypE (ExprTypeE Nothing v _ body _ TypedefEnum))) =
+      Set.fromList $ TypeSymbol v : [CtorSymbol v (EV c) | Just cs <- [dataBodyCtors body], (c, _) <- cs]
     findSymbols (ExprI _ (TypE (ExprTypeE _ v _ _ _ _))) = Set.singleton $ TypeSymbol v
     findSymbols (ExprI _ (AssE e _ _)) = Set.singleton $ TermSymbol e
     findSymbols (ExprI _ (ClsE (Typeclass _ cls _ _))) = Set.singleton $ ClassSymbol cls
@@ -503,16 +576,15 @@ resolveImports d0 =
     unSymbol (TypeSymbol (TV v)) = v
     unSymbol (TermSymbol (EV v)) = v
     unSymbol (ClassSymbol (ClassName v)) = v
+    unSymbol (CtorSymbol _ (EV v)) = v
 
-    unAliasedSymbol :: AliasedSymbol -> (Text, Text)
-    unAliasedSymbol (AliasedType x y) = (unTVar x, unTVar y)
-    unAliasedSymbol (AliasedTerm x y) = (unEVar x, unEVar y)
-    unAliasedSymbol (AliasedClass x) = (unClassName x, unClassName x)
-
-    toAliasedSymbol :: Symbol -> AliasedSymbol
-    toAliasedSymbol (TypeSymbol x) = AliasedType x x
-    toAliasedSymbol (TermSymbol x) = AliasedTerm x x
-    toAliasedSymbol (ClassSymbol x) = AliasedClass x
+    -- A carried constructor is imported under its bare name, whatever the
+    -- exporter called it.
+    toAliasedSymbol :: Symbol -> Maybe AliasedSymbol
+    toAliasedSymbol (TypeSymbol x) = Just (AliasedType x x)
+    toAliasedSymbol (TermSymbol x) = Just (AliasedTerm x x)
+    toAliasedSymbol (ClassSymbol x) = Just (AliasedClass x)
+    toAliasedSymbol (CtorSymbol _ c) = Just (AliasedTerm c (EV (ctorBaseName c)))
 
 handleTypeDeclarations ::
   DAG k e ExprI ->

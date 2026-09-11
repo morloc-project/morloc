@@ -1,6 +1,12 @@
 Unreleased
 ----------
 
+ - a `data` type carries its constructors through an explicit export list, a
+   selective import, and a module that only re-exports it
+ - a constructor imported under a namespace alias is written `p.Red`, in an
+   expression and in a `|` pattern alike
+ - a constructor in a binding position, and a dotted name whose qualifier is
+   no import alias, are errors rather than silent binders
  - a Rust pool no longer prints a panic and aborts once it has answered
  - a function with an effectful return type may return a plain value
  - a record keeps its field order through a getter or a setter

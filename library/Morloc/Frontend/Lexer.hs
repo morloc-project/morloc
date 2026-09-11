@@ -470,8 +470,13 @@ lexOne st@(LexState input pos toks _) = case input of
           }
 
 -- | Lex an identifier or keyword. The first character may be a letter or underscore.
--- When a lowercase identifier is immediately followed by '.' and a lowercase letter
--- (no space), emit TokNsDot between them to support qualified names (e.g., f.map).
+-- When a lowercase identifier is immediately followed by '.' and a letter
+-- (no space), emit TokNsDot between them to support qualified names: a
+-- lowercase tail is a term (`f.map`), an uppercase tail a constructor
+-- (`p.Red`). The head is always the alias of a namespaced import, which is
+-- lowercase, so `Foo.Bar` is never a qualified name. A composition of two
+-- names written without spaces (`f.g`) therefore reads as a qualified name;
+-- spaces disambiguate.
 -- Exception: if the preceding token is TokGetterDot, we're in a getter chain
 -- (e.g., .home.altitude) and the dot should NOT be treated as a namespace dot.
 lexIdent :: Pos -> String -> LexState -> Either LexError LexState
@@ -482,7 +487,7 @@ lexIdent pos input st =
       len = length word
    in case (tok, rest) of
         (TokLowerName _, '.' : c : rest')
-          | isLower c, not (afterGetterDot (lsTokens st)) ->
+          | isAlpha c, not (afterGetterDot (lsTokens st)) ->
               let dotPos = advanceCol pos len
                in Right st
                     { lsInput = c : rest'

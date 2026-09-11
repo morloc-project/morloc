@@ -876,9 +876,10 @@ bracket_axis :: { CstBracketAxis }
 var_expr :: { Loc CstExpr }
   : LOWER NSDOT LOWER         { Loc ($1 <-> $3) (CVarE (EV (getName $1 <> "." <> getName $3))) }
   | LOWER                     { at $1 (CVarE (EV (getName $1))) }
-  -- A bare UPPER name in expression position is a `data` constructor.
-  -- Constructor names are globally unique, so the name alone resolves to
-  -- its type and no qualified form is needed.
+  -- An UPPER name in expression position is a `data` constructor. A
+  -- constructor imported under a namespace alias is spelled `p.Red`, the
+  -- same dotted term the alias gives every other imported name.
+  | LOWER NSDOT UPPER         { Loc ($1 <-> $3) (CVarE (EV (getName $1 <> "." <> getName $3))) }
   | UPPER                     { at $1 (CVarE (EV (getName $1))) }
 
 bool_expr :: { Loc CstExpr }
@@ -1326,6 +1327,7 @@ toDState ps = DState
   , dsWarnings = psWarnings ps
   , dsModuleDoc = psModuleDoc ps
   , dsModuleEpilogues = psModuleEpilogues ps
+  , dsNamespaces = Set.empty
   , dsDataCtors = Map.empty
   , dsStreamElems = psStreamElems ps
   }
@@ -1521,6 +1523,7 @@ attachGroupAnnotations tokens groupToks dag =
     symText (TermSymbol (EV n)) = n
     symText (TypeSymbol (TV n)) = n
     symText (ClassSymbol (ClassName n)) = n
+    symText (CtorSymbol _ (EV n)) = n
 
 parseGroupHeaders :: [Located] -> [(T.Text, [T.Text], Pos)]
 parseGroupHeaders = foldl' accum [] . map extractLine

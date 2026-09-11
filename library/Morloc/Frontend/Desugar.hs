@@ -112,6 +112,9 @@ data DState = DState
   , dsWarnings :: ![Text] -- accumulated docstring warnings, drained by the caller
   , dsModuleDoc :: ![Text] -- module-level description lines
   , dsModuleEpilogues :: ![[Text]] -- epilogue blocks for top-level help
+  , dsNamespaces :: !(Set.Set Text)
+    -- ^ The `as` alias of every namespaced import in THIS module. A
+    -- pattern may name a constructor through such an alias.
   , dsDataCtors :: !(Map.Map Text [(Text, Int)])
     -- ^ Constructor names, in declaration order, for each `data` type
     -- declared in THIS module. Exhaustiveness needs the whole set, and
@@ -1604,7 +1607,21 @@ mergeSelectors sp sels =
 -- args, LHS of let, LHS of do-bind) are parsed as expressions to avoid
 -- LALR expr/pat overlap; this converter enforces the pattern subset.
 exprToIrrefPat :: Loc CstExpr -> D (Loc CstIrrefPat)
-exprToIrrefPat (Loc sp (CVarE v))       = return (Loc sp (CIPatVar v))
+-- A binding position takes a fresh name. A constructor is not one -- it
+-- would bind a variable spelled like the constructor, match every input,
+-- and silently make the definition total -- and neither is a name from
+-- another module.
+exprToIrrefPat (Loc sp (CVarE v@(EV n)))
+  | not (T.null base) && isUpper (T.head base) =
+      dfail (startPos sp) $
+        "a constructor (`" ++ T.unpack n ++ "`) cannot be a binding pattern;"
+          ++ " match on it with a `|` clause"
+  | isJust qual =
+      dfail (startPos sp) $
+        "a qualified name cannot be a pattern variable: `" ++ T.unpack n ++ "`"
+  | otherwise = return (Loc sp (CIPatVar v))
+  where
+    (qual, base) = splitQualifier n
 exprToIrrefPat (Loc sp CUnderscoreE)    = return (Loc sp CIPatWild)
 exprToIrrefPat (Loc sp (CAsE v inner))  = do
   inner' <- exprToIrrefPat inner
@@ -1840,19 +1857,33 @@ exprToRefutPat :: Loc CstExpr -> D (Loc CstRefutPat)
 -- An UPPER-cased name in pattern position is a `data` constructor, not a
 -- binder. Getting this wrong is silent rather than loud: the name would
 -- bind, the clause would match every input, and the arms below it would
--- become unreachable without any error. The grammar guarantees the split --
--- 'var_expr' only produces an UPPER name for a constructor.
+-- become unreachable without any error. The case of the name decides, and
+-- the name may carry a namespace qualifier (`p.Red`), so the test is on the
+-- last component. A qualified lowercase name is rejected outright: it can
+-- only mean a term from another module, and a pattern variable is a fresh
+-- binder, so there is nothing for the qualifier to refer to.
 exprToRefutPat (Loc sp (CVarE v@(EV n)))
-  | not (T.null n) && isUpper (T.head n) = return (Loc sp (CRPatCon v []))
+  | isCtor = do
+      ctor <- qualifiedCtor sp n
+      return (Loc sp (CRPatCon ctor []))
+  | isJust qual =
+      dfail (startPos sp) $
+        "a qualified name cannot be a pattern variable: `" ++ T.unpack n ++ "`"
   | otherwise = return (Loc sp (CRPatVar v))
+  where
+    (qual, base) = splitQualifier n
+    isCtor = not (T.null base) && isUpper (T.head base)
 -- A constructor applied to patterns, as in `(Circle r)`. The head must be a
 -- constructor: an application in pattern position has no other meaning, and
 -- reading it as anything else would silently turn a match into a binding.
-exprToRefutPat (Loc sp (CAppE (Loc _ (CVarE v@(EV n))) args))
-  | not (T.null n) && isUpper (T.head n) = do
+exprToRefutPat (Loc sp (CAppE (Loc _ (CVarE (EV n))) args))
+  | not (T.null base) && isUpper (T.head base) = do
+      ctor <- qualifiedCtor sp n
       args' <- mapM exprToRefutPat args
-      checkCtorArity sp n (length args')
-      return (Loc sp (CRPatCon v args'))
+      checkCtorArity sp (unEVar ctor) (length args')
+      return (Loc sp (CRPatCon ctor args'))
+  where
+    (_, base) = splitQualifier n
 exprToRefutPat (Loc sp (CAppE _ _)) =
   dfail (startPos sp)
     "only a `data` constructor may be applied in a `|` clause pattern"
@@ -1877,6 +1908,28 @@ exprToRefutPat (Loc sp (CNamE entries)) = do
 exprToRefutPat (Loc sp _) =
   dfail (startPos sp)
     "expected a pattern (variable, '_', literal, tuple, record, or label@pattern) in a `|` clause"
+
+-- | Split a possibly namespace-qualified name into its qualifier and its
+-- last component. The grammar produces at most one level (`p.Red`).
+splitQualifier :: Text -> (Maybe Text, Text)
+splitQualifier n = case T.breakOnEnd "." n of
+  (q, base) | T.null q -> (Nothing, base)
+            | otherwise -> (Just (T.dropEnd 1 q), base)
+
+-- | The bare constructor a pattern names. A tag test matches by name
+-- against the scrutinee's own constructor table, so the qualifier plays no
+-- part in the test; it is checked here against the module's import aliases
+-- so a misspelled alias is an error rather than silently ignored.
+qualifiedCtor :: Span -> Text -> D EVar
+qualifiedCtor sp n = case splitQualifier n of
+  (Nothing, base) -> return (EV base)
+  (Just q, base) -> do
+    aliases <- State.gets dsNamespaces
+    if Set.member q aliases
+      then return (EV base)
+      else dfail (startPos sp) $
+        "`" ++ T.unpack q ++ "` is not a namespace alias of any import in this module"
+        ++ " (in pattern `" ++ T.unpack n ++ "`)"
 
 -- | One step of the route from a clause's formal parameter down to a
 -- sub-pattern.
@@ -2475,7 +2528,20 @@ mkImplicitMain es = do
 
 desugarExpr :: Loc CstExpr -> D ExprI
 -- Variables and literals
-desugarExpr (Loc sp (CVarE v)) = freshExprSpan sp (VarE defaultValue v)
+-- A dotted name is a term reached through a namespaced import, so its
+-- qualifier must be the alias of one. The likely mistake otherwise is a
+-- composition written without spaces, which the lexer cannot tell apart.
+desugarExpr (Loc sp (CVarE v@(EV n))) = do
+  case splitQualifier n of
+    (Just q, base) -> do
+      aliases <- State.gets dsNamespaces
+      unless (Set.member q aliases) $
+        dfail (startPos sp) $
+          "`" ++ T.unpack q ++ "` is not a namespace alias of any import in this module"
+            ++ " (in `" ++ T.unpack n ++ "`); to compose, write `"
+            ++ T.unpack q ++ " . " ++ T.unpack base ++ "`"
+    _ -> return ()
+  freshExprSpan sp (VarE defaultValue v)
 desugarExpr (Loc sp (CIntE n)) = freshExprSpan sp (IntE n)
 desugarExpr (Loc sp (CRealE n)) = freshExprSpan sp (RealE n)
 desugarExpr (Loc sp (CStrE s)) = freshExprSpan sp (StrE s)
@@ -2777,6 +2843,10 @@ desugarTopLevel (Loc sp (CModE maybeName export body)) = do
     , dsModuleEpilogues = epis
     }
   expExprI <- desugarExport sp export
+  State.modify $ \s -> s
+    { dsNamespaces = Set.fromList
+        [ unEVar ns | Loc _ (CImpE (Import _ _ _ (Just ns))) <- body ]
+    }
   bodyExprs <- concatMapM desugarTopLevel body
   checkCtorUniqueness body
   modI <- freshIdSpan sp

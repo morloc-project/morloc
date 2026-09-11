@@ -1,0 +1,6 @@
+-- A middle module that re-exports a type it did not declare. The
+-- constructors have to travel with the type through here, or a module on
+-- the far side can name `Color` and never build one.
+module mid (Color)
+
+import .types (Color)

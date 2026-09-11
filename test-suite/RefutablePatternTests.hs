@@ -51,6 +51,10 @@ lexerTests = testGroup "lexer: '|' reservation"
       assertEqual "" [TokLowerName "a", TokPipe, TokLowerName "b"] (lex' "a|b")
   , testCase "'||' remains a multi-char operator (reservation is single-char)" $
       assertEqual "" [TokLowerName "a", TokOperator "||", TokLowerName "b"] (lex' "a || b")
+  , testCase "an alias-qualified constructor lexes as a namespace dot" $
+      assertEqual "" [TokLowerName "p", TokNsDot, TokUpperName "Red"] (lex' "p.Red")
+  , testCase "a composition written with spaces is not a qualified name" $
+      assertEqual "" [TokLowerName "f", TokDot, TokUpperName "Just"] (lex' "f . Just")
   ]
 
 parseTests :: TestTree
@@ -174,6 +178,57 @@ constructorPatternTests = testGroup "constructor patterns"
         \f | Red = 0\n\
         \  | Green = 1\n\
         \  | Blue = 2\n"
+
+  , -- A qualified lowercase name is a term from another module; in pattern
+    -- position it would otherwise become a binder named `p.x` that matches
+    -- everything and silently deadens every clause after it.
+    testCase "a qualified lowercase name cannot be a pattern variable" $
+      assertBool "p.x is not a binder" . isLeft $ parseMod
+        "module main (f)\n\
+        \import other as p\n\
+        \f :: Int -> Int\n\
+        \f | p.x = 0\n\
+        \  | _ = 1\n"
+
+  , testCase "an alias-qualified constructor pattern is accepted" $
+      assertBool "p.Red names a constructor" . isRight $ parseMod
+        "module main (f)\n\
+        \import other as p\n\
+        \f :: Int -> Int\n\
+        \f | p.Red = 0\n\
+        \  | _ = 1\n"
+
+  , -- The irrefutable side of the same trap: `go Red = ...` would bind a
+    -- variable named `Red` and match every input.
+    testCase "a constructor cannot be a binding pattern" $
+      assertBool "Red is not a binder" . isLeft $ parseMod
+        "module main (f)\n\
+        \data Color = Red | Green\n\
+        \f :: Color -> Int\n\
+        \f Red = 0\n"
+
+  , testCase "an alias-qualified constructor cannot be a binding pattern" $
+      assertBool "p.Red is not a binder" . isLeft $ parseMod
+        "module main (f)\n\
+        \import other as p\n\
+        \f :: Int -> Int\n\
+        \f p.Red = 0\n"
+
+  , -- A dotted name whose qualifier is no import alias is most likely a
+    -- composition written without spaces.
+    testCase "a qualifier that is not an import alias is rejected in an expression" $
+      assertBool "area.Circle is not a qualified name" . isLeft $ parseMod
+        "module main (f)\n\
+        \f :: Int -> Int\n\
+        \f = area.Circle\n"
+
+  , testCase "a constructor qualified by an undeclared alias is rejected" $
+      assertBool "no import is aliased q" . isLeft $ parseMod
+        "module main (f)\n\
+        \import other as p\n\
+        \f :: Int -> Int\n\
+        \f | q.Red = 0\n\
+        \  | _ = 1\n"
 
   , -- Trap 2/3: this must be rejected. If it is accepted, `f Blue` silently
     -- returns the Green arm, because the last clause's test is discarded.

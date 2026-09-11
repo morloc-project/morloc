@@ -151,6 +151,7 @@ module Morloc.Namespace.Type
   , findFirst
   , scopeEnumCtors
   , scopeDataCtors
+  , dataBodyCtors
   , scopeDataIsEnum
   ) where
 
@@ -306,16 +307,20 @@ type Scope =
 scopeDataCtors :: Scope -> TVar -> Maybe [(Text, [TypeU])]
 scopeDataCtors scope v = do
   entries <- Map.lookup v scope
-  listToMaybe [cs | (_, body, _, _, TypedefEnum) <- entries, Just cs <- [ctors body]]
+  listToMaybe [cs | (_, body, _, _, TypedefEnum) <- entries, Just cs <- [dataBodyCtors body]]
+
+-- | Decode a `data` declaration's body into its constructor table.
+--
+-- Each constructor is a list whose head is its name and whose tail is its
+-- argument types, and the body is the list of those. 'LList' can hold an
+-- arbitrary 'TypeU', which is what lets the argument types ride along in a
+-- shape the rest of the compiler already knows how to carry.
+dataBodyCtors :: TypeU -> Maybe [(Text, [TypeU])]
+dataBodyCtors (LitU (LList xs)) = mapM oneCtor xs
   where
-    -- Each constructor is a list whose head is its name and whose tail is
-    -- its argument types, and the body is the list of those. 'LList' can
-    -- hold an arbitrary 'TypeU', which is what lets the argument types ride
-    -- along in a shape the rest of the compiler already knows how to carry.
-    ctors (LitU (LList xs)) = mapM oneCtor xs
-    ctors _ = Nothing
     oneCtor (LitU (LList (LitU (LStr n) : args))) = Just (n, args)
     oneCtor _ = Nothing
+dataBodyCtors _ = Nothing
 
 -- | Just the constructor names, in declaration order. A constructor's
 -- position here is its wire tag.

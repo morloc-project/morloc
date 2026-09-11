@@ -250,6 +250,13 @@ data Symbol
   = TypeSymbol TVar
   | TermSymbol EVar
   | ClassSymbol ClassName
+  | CtorSymbol TVar EVar
+  -- ^ Records that a term is a constructor of a `data` type, so the
+  -- constructors can follow their type through an export or import list
+  -- and through any module that re-exports it. The term itself is still a
+  -- 'TermSymbol' (under whatever spelling the importer gave it, which the
+  -- second field tracks); this entry is the association only, and every
+  -- consumer that binds or links terms ignores it.
   deriving (Show, Ord, Eq)
 
 data ExportGroup = ExportGroup
@@ -1160,6 +1167,7 @@ instance Pretty Symbol where
   pretty (TypeSymbol x) = pretty x
   pretty (TermSymbol x) = pretty x
   pretty (ClassSymbol x) = pretty x
+  pretty (CtorSymbol t c) = pretty t <> "(" <> pretty c <> ")"
 
 instance Pretty AliasedSymbol where
   pretty (AliasedType x alias)
