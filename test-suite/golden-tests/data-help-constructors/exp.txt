@@ -51,6 +51,12 @@ Positional arguments:
       constructors: Circle/1, Rect/2, Dot
 
 Return: Real
+
+Data Types:
+  Shape
+    Circle Real
+    Rect Real Real
+    Dot
 --- named option ---
 Mix from a base color
 
@@ -62,6 +68,6 @@ General Options:
 Optional arguments:
       --base <Color>  The base color
                       type: Color
-                      values: Red, Green, Blue [default: "Red"]
+                      values: Red, Green, Blue [default: Red]
 
 Return: Str

@@ -442,6 +442,28 @@ pub struct NamedType {
     /// definition is their field list.
     #[serde(default)]
     pub equals: String,
+    /// The type's own description lines. Written for a `"data"`; empty
+    /// for the other kinds, which carry none.
+    #[serde(default)]
+    pub desc: Vec<String>,
+    /// A `"data"` type's constructors in declaration order, which is
+    /// also tag order. Empty for every other kind.
+    #[serde(default)]
+    pub constructors: Vec<NamedCtor>,
+}
+
+/// One constructor of a `"data"` [`NamedType`].
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct NamedCtor {
+    #[serde(default)]
+    pub name: String,
+    /// The constructor's field types, rendered as the help shows a type.
+    /// Empty for an argument-free constructor.
+    #[serde(default)]
+    pub fields: Vec<String>,
+    /// The prose written above the constructor, if any.
+    #[serde(default)]
+    pub desc: Vec<String>,
 }
 
 /// One field of a [`NamedType`].

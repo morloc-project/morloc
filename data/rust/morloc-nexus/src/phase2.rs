@@ -543,7 +543,8 @@ fn build_command_args(
                     a = a.value_name(leak(m));
                 }
                 if let Some(d) = default_val {
-                    a = a.default_value(leak(d));
+                    let ctor_typed = crate::json_help::schema_constructor_line(schema.as_deref()).is_some();
+                    a = a.default_value(leak(&shown_default(d, ctor_typed)));
                 }
                 if *many {
                     // Variadic option: collect every value supplied
@@ -733,7 +734,7 @@ fn add_group_entry_arg(
                 a = a.value_name(leak(m));
             }
             if let Some(d) = default_val {
-                a = a.default_value(leak(d));
+                a = a.default_value(leak(&shown_default(d, ctor_line.is_some())));
             }
             a = a.help(leak(&render_arg_help(
                 desc,
@@ -1083,6 +1084,21 @@ pub(crate) fn first_desc(desc: &[String]) -> &str {
         .unwrap_or("")
 }
 
+/// The default as the command line shows and accepts it. The manifest
+/// stores a constructor default as the JSON string the machine views need;
+/// on the command line a constructor is a bare word, so that is the form
+/// clap is given -- it is both what help prints and what is parsed when the
+/// option is absent.
+fn shown_default(default_val: &str, ctor_typed: bool) -> String {
+    let d = default_val.trim();
+    let is_quoted = d.len() >= 2 && d.starts_with('"') && d.ends_with('"');
+    if is_quoted && ctor_typed {
+        d[1..d.len() - 1].to_string()
+    } else {
+        default_val.to_string()
+    }
+}
+
 /// Render the help block for a manifest arg: the user's docstring
 /// description, followed on indented continuation lines by the arg's
 /// morloc type and, for flags with a declared default, the default
@@ -1108,6 +1124,7 @@ fn render_arg_help(
         }
     }
     // A `data` type's name says nothing about which words are legal here.
+    let is_ctor_typed = ctor_line.is_some();
     if let Some(l) = ctor_line {
         lines.push(l);
     }
@@ -1118,7 +1135,15 @@ fn render_arg_help(
     }
     if let Some(d) = default_val {
         if !d.trim().is_empty() {
-            lines.push(format!("default: {}", d));
+            // A constructor is typed bare on the command line, so its
+            // default is shown the way it is typed, not as the JSON string
+            // the manifest stores it as.
+            let shown = if is_ctor_typed {
+                d.trim().trim_matches('"')
+            } else {
+                d
+            };
+            lines.push(format!("default: {}", shown));
         }
     }
     lines.join("\n")

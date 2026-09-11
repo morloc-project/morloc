@@ -360,10 +360,10 @@ typedef_decl :: { Loc CstExpr }
       { at $1 (CTypE (CstTypeAliasForward (TV (getName $3), $4))) }
   -- A `data` declaration: a closed set of constructors, each with zero or
   -- more argument types.
-  | 'data' UPPER typedef_params '=' data_ctors
-      { at $1 (CTypE (CstDataDef (TV (getName $2), $3) $5)) }
-  | 'data' '(' UPPER typedef_params ')' '=' data_ctors
-      { at $1 (CTypE (CstDataDef (TV (getName $3), $4) $7)) }
+  | 'data' UPPER typedef_params data_ctors
+      { at $1 (CTypE (CstDataDef (TV (getName $2), $3) $4)) }
+  | 'data' '(' UPPER typedef_params ')' data_ctors
+      { at $1 (CTypE (CstDataDef (TV (getName $3), $4) $6)) }
   -- Bind the type to a native form the target language already has, the
   -- same way `type Lang => X = "..."` does.
   | 'data' UPPER '=>' typedef_term '=' concrete_rhs
@@ -394,9 +394,12 @@ nam_constructor :: { (Text, Bool, [TypeU]) }
   | UPPER                         { (getName $1, False, []) }
   | LOWER                         { (getName $1, False, []) }
 
-data_ctors :: { [(Located, Text, [TypeU])] }
-  : data_ctor                     { [$1] }
-  | data_ctors '|' data_ctor      { $1 ++ [$3] }
+-- Each constructor carries the `=` or `|` that introduces it: a docstring
+-- written above a constructor sits above that token, which is where the
+-- lexer attaches it.
+data_ctors :: { [(Located, Located, Text, [TypeU])] }
+  : '=' data_ctor                 { [withLead $1 $2] }
+  | data_ctors '|' data_ctor      { $1 ++ [withLead $2 $3] }
 
 data_ctor :: { (Located, Text, [TypeU]) }
   : UPPER data_ctor_args          { ($1, getName $1, $2) }
@@ -1523,6 +1526,10 @@ attachGroupAnnotations tokens groupToks dag =
     symText (TypeSymbol (TV n)) = n
     symText (ClassSymbol (ClassName n)) = n
     symText (CtorSymbol _ (EV n)) = n
+
+-- | Pair a constructor with the token that introduces it.
+withLead :: Located -> (Located, Text, [TypeU]) -> (Located, Located, Text, [TypeU])
+withLead lead (tok, name, args) = (lead, tok, name, args)
 
 parseGroupHeaders :: [Located] -> [(T.Text, [T.Text], Pos)]
 parseGroupHeaders = foldl' accum [] . map extractLine

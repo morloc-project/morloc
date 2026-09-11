@@ -302,6 +302,14 @@ fn named_type_glossary(m: &Manifest) -> Vec<Value> {
             entry.insert("parameters".into(), json!(t.parameters));
             if t.kind == "packable" {
                 entry.insert("equals".into(), json!(t.equals));
+            } else if t.kind == "data" {
+                entry.insert("desc".into(), json!(t.desc));
+                let ctors: Vec<Value> = t
+                    .constructors
+                    .iter()
+                    .map(|c| json!({ "name": c.name, "fields": c.fields, "desc": c.desc }))
+                    .collect();
+                entry.insert("constructors".into(), json!(ctors));
             } else {
                 let fields: Vec<Value> = t
                     .fields
@@ -930,7 +938,7 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
                 // against author names, so the two can never collide.
                 let prop_name = arg.key().to_string();
                 let mut prop = mcp_type(schema.as_deref(), *many);
-                set_description(&mut prop, desc, None);
+                set_description(&mut prop, &with_ctor_notes(cmd, arg.type_desc_str(), desc), None);
                 let is_req = !schema_is_optional(schema.as_deref()) && !*stdin;
                 if is_req {
                     required.push(Value::String(prop_name.clone()));
@@ -950,7 +958,7 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
             } => {
                 let name = arg.key().to_string();
                 let mut prop = mcp_type(schema.as_deref(), *many);
-                set_description(&mut prop, desc, default_val.as_deref());
+                set_description(&mut prop, &with_ctor_notes(cmd, arg.type_desc_str(), desc), default_val.as_deref());
                 insert_prop(&mut props, &name, prop)?;
                 let st = schema.as_deref().and_then(|s| parse_schema(s).ok());
                 slots.push(ArgSlot::Value {
@@ -1153,6 +1161,45 @@ fn mcp_type(schema: Option<&str>, many: bool) -> Value {
 
 /// Attach a `description` to a JSON Schema property from docstring lines and an
 /// optional default value. No-op when both are empty.
+/// An argument's description lines, followed by one line per described
+/// constructor when the argument's type is a `data` in the command's
+/// glossary. A model reading the tool sees what each name means, not just
+/// the closed set.
+fn with_ctor_notes(
+    cmd: &Command,
+    type_desc: Option<&str>,
+    desc: &[std::string::String],
+) -> Vec<std::string::String> {
+    let mut out: Vec<std::string::String> = desc.to_vec();
+    let Some(tn) = type_desc else { return out };
+    // The type may be wrapped (`?Color`, `[Color]`); the glossary name is
+    // the bare one.
+    let bare = tn.trim_start_matches(['?', '[']).trim_end_matches(']');
+    if let Some(t) = cmd
+        .named_types
+        .iter()
+        .find(|t| t.kind == "data" && t.name == bare)
+    {
+        let notes: Vec<std::string::String> = t
+            .constructors
+            .iter()
+            .filter_map(|c| {
+                let note: Vec<&str> =
+                    c.desc.iter().map(|l| l.as_str()).filter(|l| !l.is_empty()).collect();
+                if note.is_empty() {
+                    None
+                } else {
+                    Some(format!("{}: {}", c.name, note.join(" ")))
+                }
+            })
+            .collect();
+        if !notes.is_empty() {
+            out.push(notes.join("; "));
+        }
+    }
+    out
+}
+
 fn set_description(prop: &mut Value, desc: &[std::string::String], default: Option<&str>) {
     let mut parts: Vec<std::string::String> =
         desc.iter().filter(|l| !l.is_empty()).cloned().collect();

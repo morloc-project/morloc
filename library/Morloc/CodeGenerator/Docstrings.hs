@@ -104,6 +104,8 @@ overrideCmdDocLines ls (ArgDocRec vars fields) =
   ArgDocRec (vars { docLines = ls }) fields
 overrideCmdDocLines ls (ArgDocAlias vars) =
   ArgDocAlias (vars { docLines = ls })
+overrideCmdDocLines ls (ArgDocData vars ctors) =
+  ArgDocData (vars { docLines = ls }) ctors
 
 -- | A "In <module>:<function>, " prefix used to locate a faulty argument
 -- in diagnostics. Falls back gracefully when the module or term name is
@@ -316,6 +318,7 @@ getReturnDesc _ (Just ret) = [ret]
 getReturnDesc (ArgDocRec r _) _ = docLines r
 getReturnDesc (ArgDocSig r _ _) _ = docLines r
 getReturnDesc (ArgDocAlias r) _ = docLines r
+getReturnDesc (ArgDocData r _) _ = docLines r
 
 -- | The media type of a return value, inherited from a `@mime`-annotated
 -- return type alias by 'reduceArgDoc'. Nothing when the return type carries
@@ -324,6 +327,7 @@ getReturnMime :: ArgDoc -> Maybe Text
 getReturnMime (ArgDocRec r _) = docMime r
 getReturnMime (ArgDocSig r _ _) = docMime r
 getReturnMime (ArgDocAlias r) = docMime r
+getReturnMime (ArgDocData r _) = docMime r
 
 reduceArgDoc :: Int -> Type -> ArgDoc -> MorlocMonad (Type, ArgDoc)
 reduceArgDoc i t@(VarT v) arg = do
@@ -350,10 +354,12 @@ reduceArgDoc i t@(VarT v) arg = do
     -- consulted.
     (Just [(_, _, _, _, TypedefNewtype)]) -> return (t, arg)
     (Just [(_, _, _, _, TypedefPrimitive)]) -> return (t, arg)
-    -- A `data` type's scope body is its constructor-name table, not a
-    -- parent type, so there is nothing to inherit from: its docstring
-    -- is its own, as for a newtype or primitive.
-    (Just [(_, _, _, _, TypedefEnum)]) -> return (t, arg)
+    -- A `data` type's scope body is its constructor table, not a parent
+    -- type, so reduction stops here; but its own docstring, and its
+    -- constructors', reach the use site the way a record's fields' do.
+    (Just [(_, _, parentArg, _, TypedefEnum)]) -> do
+      arg' <- inheritArgDoc arg parentArg
+      return (t, arg')
     (Just [(_, typeOf -> parentType, parentArg, _, TypedefAlias)]) ->
       inheritArgDoc arg parentArg >>= reduceArgDoc i parentType
     (Just _) -> MM.throwSystemError $ "Multiple definitions for type alias '" <> pretty (unTVar v) <> "'"
@@ -366,6 +372,9 @@ reduceArgDoc i t@(VarT v) arg = do
     inheritArgDoc (ArgDocAlias r1) (ArgDocRec r2 rs) = do
       checkMimeConflict r1 r2
       return $ ArgDocRec (inheritArgDocVars r1 r2) rs
+    inheritArgDoc (ArgDocAlias r1) (ArgDocData r2 cs) = do
+      checkMimeConflict r1 r2
+      return $ ArgDocData (inheritArgDocVars r1 r2) cs
     inheritArgDoc _ _ = MM.throwSystemError $ "Cannot inherit docstrings for type alias '" <> pretty (unTVar v) <> "'"
 
     -- A media type is authoritative: a single value cannot be labeled two
@@ -408,9 +417,19 @@ reduceArgDoc i (NamT o v ps (map snd -> ts)) (ArgDocRec arg rs) = do
   let args = map (ArgDocAlias . snd) rs
       keys = map fst rs
   entries <- zipWithM (reduceArgDoc i) ts args
-  let args' = [r | (ArgDocAlias r) <- map snd entries]
+  -- A field's reduced doc keeps whatever shape its type gave it (a `data`
+  -- field carries its constructors, a record field its own fields); the
+  -- entry keeps the field-level variables from any of them.
+  let args' = map (argDocTop . snd) entries
   return (NamT o v ps (zip keys (map fst entries)), ArgDocRec arg (zip keys args'))
 reduceArgDoc _ t r = return (t, r)
+
+-- | The variables at the top of any docstring shape.
+argDocTop :: ArgDoc -> ArgDocVars
+argDocTop (ArgDocAlias r) = r
+argDocTop (ArgDocRec r _) = r
+argDocTop (ArgDocData r _) = r
+argDocTop (ArgDocSig r _ _) = r
 
 makeCmdArg :: MDoc -> Type -> ArgDoc -> MorlocMonad CmdArg
 makeCmdArg loc recType@(NamT _ _ _ rs) (ArgDocRec arg entries) = do
@@ -419,6 +438,7 @@ makeCmdArg loc recType@(NamT _ _ _ rs) (ArgDocRec arg entries) = do
   resolveArgDocVars loc typedEntries recType arg
 makeCmdArg loc t (ArgDocRec r _) = resolveArgDocVars loc [] t r
 makeCmdArg loc t (ArgDocAlias r) = resolveArgDocVars loc [] t r
+makeCmdArg loc t (ArgDocData r _) = resolveArgDocVars loc [] t r
 makeCmdArg _ _ (ArgDocSig _ _ _) = MM.throwSystemError "Illegal functional CLI parameter"
 
 resolveArgDocVars :: MDoc -> [(Key, (Type, ArgDocVars))] -> Type -> ArgDocVars -> MorlocMonad CmdArg
@@ -613,7 +633,9 @@ resolveOpt loc t r = do
             loc <> ": optional argument " <> pretty (makeArg opt)
             <> " has type ?Str with literal: true, so default must be null (got \""
             <> pretty def <> "\")"
-      | otherwise -> makeOpt many opt def
+      | otherwise -> do
+          def' <- canonicalCtorDefault t def
+          makeOpt many opt def'
   where
     isLiteralOptStr = docLiteral r == Just True && isOptionalStrType t
 
@@ -636,6 +658,24 @@ resolveOpt loc t r = do
         , argOptDocListForm = docListForm r
         , argOptDocListChecks = docListChecks r
         }
+
+-- | A `data`-typed option may give its default as the bare constructor
+-- name, matched without regard to case, the way the value is typed on the
+-- command line. The stored default is the constructor's own spelling as a
+-- JSON string, which is what every reader of the manifest expects.
+canonicalCtorDefault :: Type -> Text -> MorlocMonad Text
+canonicalCtorDefault t def = do
+  scope <- MM.gets stateUniversalGeneralTypedefs
+  let bare = MT.strip def
+      ctors = case t of
+        VarT v -> scopeEnumCtors scope v
+        OptionalT (VarT v) -> scopeEnumCtors scope v
+        _ -> Nothing
+  return $ case ctors of
+    Just names
+      | not (MT.isPrefixOf "\"" bare)
+      , [c] <- [c | c <- names, MT.toLower c == MT.toLower bare] -> "\"" <> c <> "\""
+    _ -> def
 
 makeArg ::
   CliOpt ->

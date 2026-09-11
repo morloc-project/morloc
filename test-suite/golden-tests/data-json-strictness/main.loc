@@ -1,0 +1,28 @@
+-- A constructor in JSON is matched exactly.
+--
+-- The command line matches a bare constructor without regard to case, for
+-- the person typing it. JSON is machine text with a contract, so a quoted
+-- constructor -- on its own, inside a record, inside a list -- is the
+-- author's spelling or nothing, and the rejection names the legal set.
+
+module main (rank, level, ranks)
+
+import root-py
+
+data Priority = Low | Medium | High
+
+record Task where
+  name :: Str
+  priority :: Priority
+record Py => Task = "dict"
+
+rank :: Priority -> Int
+rank | Low = 1
+     | Medium = 2
+     | High = 3
+
+level :: Task -> Int
+level t = rank (.priority t)
+
+ranks :: [Priority] -> Int
+ranks = length

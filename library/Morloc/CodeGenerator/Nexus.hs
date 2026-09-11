@@ -2245,16 +2245,76 @@ packedConstructors = Set.fromList . concatMap go
       SerialOptional _ x -> go x
       _ -> []
 
-namedTypesJson :: Set.Set Text -> [Serial.PackerInstance] -> [Type] -> Text
-namedTypesJson packedHeads instances ts =
+-- | What the glossary says about a `data` type: its own description and,
+-- per constructor in declaration order, the constructor's name, its field
+-- types as the help renders them, and its description.
+data DataTypeDoc = DataTypeDoc
+  { dataTypeParams :: [Text]
+  , dataTypeDesc :: [Text]
+  , dataTypeCtors :: [(Text, [Type], [Text])]
+  }
+
+-- | Every `data` type declared anywhere in the program, keyed by name.
+collectDataTypes :: MorlocMonad (Map.Map Text DataTypeDoc)
+collectDataTypes = do
+  scope <- MM.gets stateUniversalGeneralTypedefs
+  return $ Map.fromList
+    [ (unTVar v, DataTypeDoc params (docLines typeDoc) ctors)
+    | (v, entries) <- Map.toList scope
+    , (vs, body, ArgDocData typeDoc ctorDocs, _, TypedefEnum) <- entries
+    , Just table <- [dataBodyCtors body]
+    , let params = [unTVar p | Left (p, _) <- vs]
+    , let ctors =
+            [ (name, map typeOf fieldTs, docLines vars)
+            | ((name, fieldTs), vars) <- zip table (map snd ctorDocs <> repeat defaultValue)
+            ]
+    ]
+
+namedTypesJson :: Set.Set Text -> [Serial.PackerInstance] -> Map.Map Text DataTypeDoc -> [Type] -> Text
+namedTypesJson packedHeads instances dataTypes ts =
   jsonArr
     ( map oneNamed (filter (isShown . snd3) allDefs)
+        <> dataEntries
         <> packableEntries ts
     )
   where
+    -- A `data` type is a bare name wherever it appears, so the names the
+    -- help shows are searched for it directly. Its constructors' field
+    -- types may name further types, which the closure must reach.
+    dataEntries =
+      [ oneData nm d
+      | (nm, d) <- Map.toList dataTypes
+      , Set.member nm shownNames
+      ]
+
+    oneData nm (DataTypeDoc params desc ctors) =
+      jsonObj
+        [ ("name", jsonStr nm)
+        , ("kind", jsonStr "data")
+        , ("parameters", jsonArr (map jsonStr params))
+        , ("desc", jsonStrArr desc)
+        , ("constructors", jsonArr
+            [ jsonObj
+                [ ("name", jsonStr c)
+                , ("fields", jsonArr (map (jsonStr . renderCliType) fts))
+                , ("desc", jsonStrArr cdesc)
+                ]
+            | (c, fts, cdesc) <- ctors
+            ])
+        ]
+
     snd3 (_, x, _) = x
 
-    allDefs = dedup (concatMap collect ts)
+    -- A record may be reached only through a constructor's field; its
+    -- definition is collected from there as well, and shown only if the
+    -- closure reaches its name.
+    allDefs = dedup (concatMap collect ts <> concatMap collect ctorFieldTypes)
+    ctorFieldTypes =
+      [ ft
+      | DataTypeDoc _ _ ctors <- Map.elems dataTypes
+      , (_, fts, _) <- ctors
+      , ft <- fts
+      ]
 
     -- A definition earns its place by defining a name the reader actually
     -- meets. A type can appear in a signature without appearing in the help:
@@ -2282,6 +2342,13 @@ namedTypesJson packedHeads instances ts =
                      , (_, ft) <- fields
                      , n <- namesOf (renderCliType ft)
                      ]
+                     <> [ n
+                        | (nm, DataTypeDoc _ _ ctors) <- Map.toList dataTypes
+                        , Set.member nm s0
+                        , (_, fts, _) <- ctors
+                        , ft <- fts
+                        , n <- namesOf (renderCliType ft)
+                        ]
           in if Set.size s1 == Set.size s0 then s0 else grow s1
 
     namesOf :: Text -> [Text]
@@ -2790,6 +2857,10 @@ data ManifestInputs = ManifestInputs
     -- ^ Every @Packable@ instance in the program. A type whose wire form comes
     -- from an instance is opaque in a signature, so its glossary entry is taken
     -- from here rather than from the type itself.
+  , miDataTypes           :: !(Map.Map Text DataTypeDoc)
+    -- ^ Every `data` type in the program, by name: its constructors with
+    -- their field types and the prose written above each. A `data` is a
+    -- bare name in a signature, so its glossary entry comes from here.
   , miCapabilities        :: ![Text]
   , miTermDocs            :: !(Map.Map EVar [Text])
     -- ^ Term-level docstrings by term name. Used to look up the
@@ -2944,6 +3015,7 @@ buildManifest ManifestInputs{..} =
         , ("named_types", namedTypesJson
             (packedConstructors (fdataReturnAst fd : fdataArgAsts fd))
             miPackerInstances
+            miDataTypes
             (cmdSignatureTypes (Map.lookup (EV (fdataTermName fd)) miStreamTypes) (fdataCmdDocSet fd)))
         , ("metadata", metadataEmpty)
         , cmdGroupField (fdataMid fd)
@@ -2966,6 +3038,7 @@ buildManifest ManifestInputs{..} =
         , ("named_types", namedTypesJson
             (packedConstructors (commandReturnAst g : commandArgAsts g))
             miPackerInstances
+            miDataTypes
             (cmdSignatureTypes (Map.lookup (EV (commandTermName g)) miStreamTypes) (commandDocs g)))
         , ("metadata", metadataEmpty)
         , cmdGroupField (commandMid g)
@@ -3207,6 +3280,7 @@ generate cs rASTs helperRASTs = do
     return (ev, t)
 
   packerInstances <- Serial.findPackerInstances
+  dataTypes <- collectDataTypes
 
   let manifestJson =
         buildManifest
@@ -3230,6 +3304,7 @@ generate cs rASTs helperRASTs = do
             , miBuildParams         = buildParams
             , miRunLog              = runLog
             , miPackerInstances     = packerInstances
+            , miDataTypes           = dataTypes
             , miCapabilities        = capabilities
             , miTermDocs            = termDocs
             , miStreamElems         = streamElems

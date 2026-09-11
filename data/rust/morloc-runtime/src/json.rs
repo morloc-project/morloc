@@ -105,17 +105,46 @@ impl ShmReader {
 
 // ── JSON -> Voidstar ───────────────────────────────────────────────────────
 
-/// True for an enum, or an optional wrapping one. Used to decide whether a
-/// bare (unquoted) token should be retried as a constructor name.
-fn schema_is_enum_like(schema: &Schema) -> bool {
+/// The constructors a bare (unquoted) token could name: every constructor
+/// of an enum, the argument-free constructors of a variant (the others are
+/// shapes, not words), looking through an optional. `None` for a type a
+/// bare word can never name.
+pub fn bare_ctor_names(schema: &Schema) -> Option<Vec<&str>> {
     match schema.serial_type {
-        SerialType::Enum => true,
-        SerialType::Optional => schema
-            .parameters
-            .first()
-            .map_or(false, |p| p.serial_type == SerialType::Enum),
-        _ => false,
+        SerialType::Enum => Some(schema.keys.iter().map(|k| k.as_str()).collect()),
+        SerialType::Variant => Some(
+            schema
+                .keys
+                .iter()
+                .zip(schema.parameters.iter())
+                .filter(|(_, arm)| arm.size == 0)
+                .map(|(k, _)| k.as_str())
+                .collect(),
+        ),
+        SerialType::Optional => schema.parameters.first().and_then(bare_ctor_names),
+        _ => None,
     }
+}
+
+/// The constructor a bare token names, matched without regard to case.
+///
+/// A bare token is what a person types; the constructor's spelling is the
+/// author's convention, and the typist should not have to reproduce it. A
+/// quoted string is machine text and never reaches here, so JSON stays
+/// case-strict. Two constructors differing only in case are rejected at
+/// declaration, so a fold either finds one name or none.
+pub fn match_ctor_name<'a>(names: &[&'a str], token: &str) -> Option<&'a str> {
+    let want = token.to_lowercase();
+    names.iter().find(|k| k.to_lowercase() == want).copied()
+}
+
+/// True when a bare token names a constructor of this schema's type, which
+/// is what lets the token bypass the source classifier: a bare word that
+/// is a constructor is the value, not a file that failed to exist.
+pub fn is_bare_ctor_token(schema: &Schema, token: &str) -> bool {
+    bare_ctor_names(schema)
+        .map(|names| match_ctor_name(&names, token.trim()).is_some())
+        .unwrap_or(false)
 }
 
 pub fn read_json_with_schema(json_str: &str, schema: &Schema) -> Result<AbsPtr, MorlocError> {
@@ -138,8 +167,18 @@ pub fn read_json_with_schema_dest(
             // numbers and quoted strings all parse, so only a bare word
             // reaches here. That is what keeps `?DNA` able to say `null`
             // for absent while still accepting `G` for present.
-            if schema_is_enum_like(schema) {
-                let requoted = serde_json::to_string(json_str.trim())
+            let token = json_str.trim();
+            let word_shaped = !token.is_empty()
+                && token.chars().all(|c| c.is_alphanumeric() || c == '_');
+            if let Some(names) = bare_ctor_names(schema).filter(|_| word_shaped) {
+                let name = match_ctor_name(&names, token).ok_or_else(|| {
+                    MorlocError::Serialization(format!(
+                        "'{}' is not a constructor of this type; expected one of {}",
+                        token,
+                        names.join(", ")
+                    ))
+                })?;
+                let requoted = serde_json::to_string(name)
                     .map_err(|_| MorlocError::Serialization("JSON parse error".into()))?;
                 serde_json::from_str(&requoted).map_err(|e2| {
                     MorlocError::Serialization(format!("JSON parse error: {}", e2))

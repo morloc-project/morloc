@@ -1,0 +1,65 @@
+-- A `data` type on the command line, in the rolled form.
+--
+-- A constructor is written bare and matched without regard to case, so a
+-- person is never made to reproduce the author's capitalization: `high`,
+-- `HIGH` and `High` are the same value. That leniency belongs to the
+-- command line alone -- a quoted JSON string is machine text and is still
+-- matched exactly (see the data-json-strictness test).
+--
+-- Each constructor carries the prose written above it. The prose reaches
+-- terminal help as a Data Types block, `--json-help` as the glossary entry,
+-- and the MCP tool as part of the argument's description, so a person and
+-- a model are told the same thing about each name. An option's default may
+-- be given as the bare constructor, and a variadic option takes bare
+-- constructors too.
+
+module main (rank, pick, describe, shapes)
+
+import root-py
+
+--' How urgent a task is
+data Priority
+  --' can wait
+  = Low
+  --' this week
+  | Medium
+  --' today
+  | High
+
+--' A shape to measure
+data Shape
+  --' a circle of some radius
+  = Circle Real
+  --' a box, width then height
+  | Rect Real Real
+  | Dot
+
+--' Rank a priority
+rank :: Priority -> Int
+rank | Low = 1
+     | Medium = 2
+     | High = 3
+
+--' Pick a priority, defaulting to the middle
+pick ::
+  --' the priority
+  --' @arg -p/--priority
+  --' @default medium
+  Priority ->
+  Int
+pick = rank
+
+--' Name each shape's constructor
+describe :: Shape -> Str
+describe | (Circle _) = "circle"
+         | (Rect _ _) = "rect"
+         | Dot = "dot"
+
+--' Count the priorities given
+shapes ::
+  --' the priorities
+  --' @arg -p/--priority
+  --' @many
+  [Priority] ->
+  Int
+shapes = length

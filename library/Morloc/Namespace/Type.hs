@@ -743,6 +743,9 @@ data ArgDoc
       [ArgDocVars]
       ArgDocVars
   | ArgDocAlias ArgDocVars
+  | ArgDocData ArgDocVars [(Text, ArgDocVars)]
+  -- ^ A `data` declaration: the type's own docstring and one per
+  -- constructor, in declaration order.
   deriving (Show, Ord, Eq)
 
 -- Wraps all information stored in a type definition

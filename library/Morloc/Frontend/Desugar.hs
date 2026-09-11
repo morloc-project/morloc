@@ -878,6 +878,63 @@ namTypeDocs declPos locEntries = do
       locEntries
   return (ArgDocRec recDocVars (zip [k | (_, k, _) <- locEntries] fieldDocs))
 
+-- | Collect the docstrings attached to a `data` declaration: the block
+-- above the keyword, and the block above each constructor. A constructor
+-- takes prose only; the directives that shape a command-line argument
+-- belong to the argument, not to one of the values it may hold.
+dataTypeDocs :: Pos -> [(Located, Located, Text, [TypeU])] -> D ArgDoc
+dataTypeDocs declPos ctors = do
+  typeDocs <- lookupDocsAt declPos
+  typeVars <- processArgDocLinesD declPos typeDocs
+  rejectWithHere declPos "a data declaration" typeVars
+  ctorDocs <-
+    mapM
+      (\(lead, tok, name, _) -> do
+          -- The block sits above whichever token starts the constructor's
+          -- line: the `=` or `|` in the usual layout, the name itself when
+          -- the bar ends the previous line.
+          leadDocs <- lookupDocsAt (locPos lead)
+          (p, dl) <- if null leadDocs
+            then (,) (locPos tok) <$> lookupDocsAt (locPos tok)
+            else return (locPos lead, leadDocs)
+          vars <- processArgDocLinesD p dl
+          rejectDirectivesOnCtor p name vars
+          return (name, vars))
+      ctors
+  return (ArgDocData typeVars ctorDocs)
+
+-- | A constructor's docstring may describe it and nothing more.
+rejectDirectivesOnCtor :: Pos -> Text -> ArgDocVars -> D ()
+rejectDirectivesOnCtor pos name v =
+  case [ d | (d, present) <- directives, present ] of
+    [] -> return ()
+    (d : _) ->
+      dfail pos . T.unpack $
+        "`@" <> d <> "` is not allowed on constructor `" <> name
+          <> "`; a constructor's docstring may only describe it"
+  where
+    directives =
+      [ ("name", isJust (docName v))
+      , ("literal", isJust (docLiteral v))
+      , ("many", isJust (docMany v))
+      , ("stdin", isJust (docStdin v))
+      , ("unroll", isJust (docUnroll v))
+      , ("default", isJust (docDefault v))
+      , ("metavar", isJust (docMetavar v))
+      , ("arg", isJust (docArg v))
+      , ("true", isJust (docTrue v))
+      , ("false", isJust (docFalse v))
+      , ("return", isJust (docReturn v))
+      , ("source", isJust (docSource v))
+      , ("form", isJust (docForm v))
+      , ("check", not (null (docChecks v)))
+      , ("list.source", isJust (docListSource v))
+      , ("list.form", isJust (docListForm v))
+      , ("list.check", not (null (docListChecks v)))
+      , ("with", not (null (docWith v)))
+      , ("mime", isJust (docMime v))
+      ]
+
 rejectWithHere :: Pos -> Text -> ArgDocVars -> D ()
 rejectWithHere pos ctx v =
   case docWith v of
@@ -3071,7 +3128,7 @@ checkCtorUniqueness body =
         \`data` type; constructor names must be unique"
   where
     declCtors (Loc _ (CTypE (CstDataDef _ ctors))) =
-      dedupeByName [(name, locPos tok) | (tok, name, _) <- ctors]
+      dedupeByName [(name, locPos tok) | (_, tok, name, _) <- ctors]
     declCtors _ = []
     dedupeByName = go Set.empty
       where
@@ -3143,25 +3200,34 @@ desugarTypeDef sp (CstDataDef (v, vs) ctors) = do
   -- The ordinal IS the wire tag, so declaration order is part of the type's
   -- wire contract: appending a constructor keeps existing values
   -- byte-identical, reordering does not.
-  case firstRepeatedName [ (name, locPos tok) | (tok, name, _) <- ctors ] of
+  case firstRepeatedName [ (name, locPos tok) | (_, tok, name, _) <- ctors ] of
     Just (name, pos) ->
       dfail pos $
         "Constructor '" ++ T.unpack name ++ "' is declared twice in type '"
           ++ T.unpack (unTVar v) ++ "'"
+    Nothing -> return ()
+  -- The command line matches a constructor without regard to case, so two
+  -- constructors that differ only in case could not be told apart there.
+  -- Nobody writes that shape on purpose; rejecting it is what lets the
+  -- matching be total.
+  case firstRepeatedName [ (T.toLower name, locPos tok) | (_, tok, name, _) <- ctors ] of
+    Just (_, pos) ->
+      dfail pos $
+        "Type '" ++ T.unpack (unTVar v) ++ "' has two constructors that differ"
+          ++ " only in case; a constructor is matched without regard to case on"
+          ++ " the command line, so they could not be told apart"
     Nothing -> return ()
   -- The tag is one byte in both wire forms.
   when (length ctors > 256) $
     dfail (startPos sp) $
       "Type '" ++ T.unpack (unTVar v) ++ "' has " ++ show (length ctors)
         ++ " constructors; the limit is 256, so that a tag fits in one byte"
-  docs <- lookupDocsAt (startPos sp)
-  docVars <- if null docs then return defaultValue else processArgDocLinesD (startPos sp) docs
-  rejectWithHere (startPos sp) "a data declaration" docVars
+  doc <- dataTypeDocs (startPos sp) ctors
   -- The constructor table lives in the scope body: each entry is its name
   -- followed by its argument types. Reduction stops at the nominal
   -- boundary, so this is carried rather than expanded, and both the
   -- typechecker and codegen read it back.
-  let entries = [ (name, args) | (_, name, args) <- ctors ]
+  let entries = [ (name, args) | (_, _, name, args) <- ctors ]
       body = LitU (LList [ LitU (LList (LitU (LStr n) : args)) | (n, args) <- entries ])
       -- The result type a constructor builds: the type applied to its own
       -- parameters, so `Some :: a -> Opt a` rather than `a -> Opt`.
@@ -3170,7 +3236,7 @@ desugarTypeDef sp (CstDataDef (v, vs) ctors) = do
         _ -> AppU (VarU v) (map (either (VarU . fst) id) vs)
   State.modify $ \st ->
     st { dsDataCtors = Map.insert (unTVar v) [(n, length as) | (n, as) <- entries] (dsDataCtors st) }
-  typeDecl <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs body (ArgDocAlias docVars) TypedefEnum))
+  typeDecl <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs body doc TypedefEnum))
   -- Each constructor becomes an ordinary top-level term. Making them real
   -- bindings is what gives uniqueness its teeth: a name already bound
   -- collides through the existing duplicate-binding check.

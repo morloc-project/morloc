@@ -166,7 +166,9 @@ data CstTypeDef
   -- argument-free constructors; the list is carried so that the arity
   -- check reports at the offending constructor rather than the
   -- declaration, and so payload arms need no grammar change later.
-  | CstDataDef (TVar, [Either (TVar, Kind) TypeU]) [(Located, Text, [TypeU])]
+  | CstDataDef (TVar, [Either (TVar, Kind) TypeU]) [(Located, Located, Text, [TypeU])]
+  -- ^ Each constructor: the `=` or `|` introducing it (where its docstring
+  -- attaches), its own token, its name, and its field types.
   deriving (Show, Eq)
 
 data CstClassHead

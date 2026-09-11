@@ -41,6 +41,43 @@ refutablePatternTests = testGroup "Refutable patterns (`|`-clauses)"
   , guardInteractionTests
   , constructorPatternTests
   , payloadPatternTests
+  , dataDeclarationTests
+  ]
+
+dataDeclarationTests :: TestTree
+dataDeclarationTests = testGroup "data declarations"
+  [ -- The command line matches a constructor without regard to case, so
+    -- two that differ only in case could not be told apart there.
+    testCase "two constructors differing only in case are rejected" $
+      assertBool "Red and RED collide" . isLeft $ parseMod
+        "module main (f)\n\
+        \data Color = Red | RED\n\
+        \f :: Color -> Int\n\
+        \f | _ = 0\n"
+
+  , testCase "a described constructor is accepted" $
+      assertBool "prose above a constructor" . isRight $ parseMod
+        "module main (f)\n\
+        \--' A color\n\
+        \data Color\n\
+        \  --' warm\n\
+        \  = Red\n\
+        \  --' cool\n\
+        \  | Blue\n\
+        \f :: Color -> Int\n\
+        \f | _ = 0\n"
+
+  , -- A constructor is a value, not an argument: the directives that shape
+    -- an argument have no meaning on it.
+    testCase "a directive on a constructor is rejected" $
+      assertBool "@arg on Red" . isLeft $ parseMod
+        "module main (f)\n\
+        \data Color\n\
+        \  --' @arg -r/--red\n\
+        \  = Red\n\
+        \  | Blue\n\
+        \f :: Color -> Int\n\
+        \f | _ = 0\n"
   ]
 
 lexerTests :: TestTree

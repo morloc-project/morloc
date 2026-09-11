@@ -1,6 +1,15 @@
 Unreleased
 ----------
 
+ - a constructor is matched on the command line without regard to case;
+   quoted JSON is still matched exactly, and two constructors of one type
+   may no longer differ only in case
+ - a constructor may carry a docstring, shown in terminal help under a
+   `Data Types` block, in the `--json-help` glossary, and in the MCP tool's
+   argument description
+ - a `data`-typed option may give its default as the bare constructor, a
+   `@many` option takes bare constructors, and an argument-free constructor
+   of a payload-bearing `data` may be typed bare
  - two `data` types may refer to each other, and a record may sit on such a
    cycle, so an abstract syntax tree can be declared as it is written
  - a record held in a constructor's payload reaches a C++ pool with its

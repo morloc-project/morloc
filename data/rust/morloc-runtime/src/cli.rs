@@ -2744,9 +2744,18 @@ unsafe fn parse_cli_data_argument_singular(
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
     clear_errmsg(errmsg);
-    let classified = match classify_arg_source(arg) {
-        Ok(c) => c,
-        Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+    // A bare word that names a constructor of the argument's type is the
+    // value itself; the classifier would otherwise read it as a file that
+    // does not exist.
+    let token = CStr::from_ptr(arg).to_string_lossy();
+    let rs = CSchema::to_rust(schema);
+    let classified = if crate::json::is_bare_ctor_token(&rs, &token) {
+        Classified { kind: ArgSource::Inline, effective: arg }
+    } else {
+        match classify_arg_source(arg) {
+            Ok(c) => c,
+            Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+        }
     };
     parse_cli_data_argument_classified(dest, classified, schema, errmsg)
 }
