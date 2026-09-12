@@ -2041,68 +2041,66 @@ selectorGetter (ExistU _ (elemT : _, _) _) (SelectorBracketIndex s) =
 selectorGetter t SelectorBracketSlice = [t]
 selectorGetter _ _ = error "Unreachable"
 
--- | map over a type using a selector and update the type using set values
+-- | Seat a setter's value types into the type it writes them into: walk
+-- the selector, replace the type at each written path with the value's
+-- type, and leave everything else -- including a record's key order,
+-- which is its layout -- as it was.
+--
+-- Nothing when the type has no shape to walk into at some step: a
+-- receiver that is still an opaque variable, an index past a tuple's
+-- end, a key the record does not have. Those are all reported as type
+-- errors elsewhere, so the caller falls back rather than deciding here.
 selectorSetter ::
   [TypeU] -> -- types to which the selected fields are set
   Selector -> -- current selector pattern
   TypeU -> -- current type that is being updated
-  TypeU -- modified return type
-selectorSetter setTypes0 s0 t0 = fst (f t0 setTypes0 s0)
+  Maybe TypeU -- modified return type
+selectorSetter setTypes0 s0 t0 = fst <$> f t0 setTypes0 s0
   where
     f ::
       TypeU ->
       [TypeU] ->
       Selector ->
-      (TypeU, [TypeU]) -- the modified type and the list of remaining setters
-    f _ (t : ts) SelectorEnd = (t, ts)
+      Maybe (TypeU, [TypeU]) -- the modified type and the list of remaining setters
+    f _ (t : ts) SelectorEnd = Just (t, ts)
+    f _ [] SelectorEnd = Nothing
     -- Walk selectors left-to-right so the i-th selector consumes the i-th
     -- value from setTypes1; foldr would walk right-to-left and swap them.
-    f (ExistU v (ts, tc) (ks, kc)) setTypes1 (SelectorKey s ss) =
-      let (ks', setTypes2) = foldl' (flip subKey) (ks, setTypes1) (s : ss)
-       in (ExistU v (ts, tc) (ks', kc), setTypes2)
-    f (NamU o v ps ks) setTypes1 (SelectorKey s ss) =
-      let (ks', setTypes2) = foldl' (flip subKey) (ks, setTypes1) (s : ss)
-       in (NamU o v ps ks', setTypes2)
+    f (ExistU v (ts, tc) (ks, kc)) setTypes1 (SelectorKey s ss) = do
+      (ks', setTypes2) <- foldlM subKey (ks, setTypes1) (s : ss)
+      return (ExistU v (ts, tc) (ks', kc), setTypes2)
+    f (NamU o v ps ks) setTypes1 (SelectorKey s ss) = do
+      (ks', setTypes2) <- foldlM subKey (ks, setTypes1) (s : ss)
+      return (NamU o v ps ks', setTypes2)
     -- handle non-existential records
     --  * note that this may well change the field type of the record, this should
     --    raise an error later if such changes are not allowed
-    f (ExistU v (ts, tc) (ks, kc)) setTypes1 (SelectorIdx s ss) =
-      let (ts', setTypes2) = foldl subIdx (ts, setTypes1) (s : ss)
-       in (ExistU v (ts', tc) (ks, kc), setTypes2)
+    f (ExistU v (ts, tc) (ks, kc)) setTypes1 (SelectorIdx s ss) = do
+      (ts', setTypes2) <- foldlM subIdx (ts, setTypes1) (s : ss)
+      return (ExistU v (ts', tc) (ks, kc), setTypes2)
     -- handle non-existential tuples
     f (AppU t ts) setTypes1 (SelectorIdx s ss)
-      -- if this is a tuple, fine, proceed
-      | (VarU (BT.tuple (length ts))) == t =
-          let (ts', setTypes2) = foldl subIdx (ts, setTypes1) (s : ss)
-           in (AppU t ts', setTypes2)
-      -- otherwise die
-      | otherwise = error "Unreachable case"
+      | (VarU (BT.tuple (length ts))) == t = do
+          (ts', setTypes2) <- foldlM subIdx (ts, setTypes1) (s : ss)
+          return (AppU t ts', setTypes2)
     -- Bracket selectors are not valid as setter targets: there is no
     -- well-defined "set the i-th element of a list" semantics in the
     -- record-setter framework, and the parser explicitly rejects
-    -- setters on accessor chains containing brackets. Reaching here
-    -- means an upstream invariant was violated.
-    f _ _ (SelectorBracketIndex _) =
-      error "selectorSetter: bracket-index step in a setter selector"
-    f _ _ SelectorBracketSlice =
-      error "selectorSetter: bracket-slice step in a setter selector"
-    -- and die some more
-    f _ _ _ = error "Unreachable pattern case"
+    -- setters on accessor chains containing brackets.
+    f _ _ _ = Nothing
 
-    subKey :: (Text, Selector) -> ([(Key, TypeU)], [TypeU]) -> ([(Key, TypeU)], [TypeU])
-    subKey (k, s) (ks, setTypesN) = case lookup (Key k) ks of
-      Nothing -> error "Malformed pattern"
-      (Just priorType) -> (ks', setTypesN')
-        where
-          (newType, setTypesN') = f priorType setTypesN s
-          ks' = [if k' == k then (Key k, newType) else x | x@(Key k', _) <- ks]
+    subKey :: ([(Key, TypeU)], [TypeU]) -> (Text, Selector) -> Maybe ([(Key, TypeU)], [TypeU])
+    subKey (ks, setTypesN) (k, s) = do
+      priorType <- lookup (Key k) ks
+      (newType, setTypesN') <- f priorType setTypesN s
+      return ([if k' == k then (Key k, newType) else x | x@(Key k', _) <- ks], setTypesN')
 
-    subIdx :: ([TypeU], [TypeU]) -> (Int, Selector) -> ([TypeU], [TypeU])
+    subIdx :: ([TypeU], [TypeU]) -> (Int, Selector) -> Maybe ([TypeU], [TypeU])
     subIdx (ts, setTypesN) (i, s)
-      | i < length ts =
-          let (newType, setTypesN') = f (ts !! i) setTypesN s
-           in (take i ts <> [newType] <> drop (i + 1) ts, setTypesN')
-      | otherwise = error $ "Bad pattern, index " <> show i <> " is greather than tuple length"
+      | i < length ts = do
+          (newType, setTypesN') <- f (ts !! i) setTypesN s
+          return (take i ts <> [newType] <> drop (i + 1) ts, setTypesN')
+      | otherwise = Nothing
 
 extendList :: [a] -> [a] -> ([a], [a])
 extendList [] ys = (ys, ys)

@@ -14,13 +14,15 @@ import root
 -- non-trivial `bytes_uncompressed_total` in its StreamDiag. We do not
 -- need a huge file -- the Makefile sets a tiny buffer threshold so
 -- even a small payload trips the gate.
-mkStream :: Str -> <IO, Err> ()
+mkStream :: Str -> <IO> ()
 mkStream path = do
-  s <- @open path :: <IO, Err> OStream Int
+  Ok s <- @open path :: <IO> (Try Str (OStream Int))
   @write 0 s [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
   @flush s
   @write 0 s [11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
   @close s
 
-mkData :: Str -> <IO, Err> ()
-mkData path = @save 0 path [1, 2, 3, 4, 5]
+mkData :: Str -> <IO> ()
+mkData path = do
+  Ok _rv <- @save 0 path [1, 2, 3, 4, 5]
+  _rv

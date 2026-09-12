@@ -46,6 +46,39 @@ pub enum SerialType {
     //   2+ : reserved (future: content hash, URI, inline blob, ...).
     // `kind` for the receiver's open call is determined by the schema
     // code (`F` -> IFILE, `O` -> OSTREAM, `I` -> ISTREAM).
+    Variant = 26,   // A `data` type with at least one constructor that takes
+                    // arguments. Sixteen bytes: a tag byte, padding, and a
+                    // relative pointer to the payload.
+                    //
+                    // The payload is reached through a pointer rather than
+                    // stored inline, so the slot's width does not depend on
+                    // any arm's width. That is what makes the width equation
+                    // for a recursive type terminate -- the same reason
+                    // Optional carries a pointer -- and it is why a value of
+                    // `data Tree = Leaf | Node Tree Tree` has a fixed size
+                    // however deep the tree goes.
+                    //
+                    // An arm's payload is a tuple of its fields, including
+                    // the empty tuple for an argument-free arm, whose pointer
+                    // is RELNULL and which allocates nothing. A one-field arm
+                    // costs nothing for the uniformity: a tuple has no header,
+                    // so a 1-tuple is byte-identical to the bare field.
+                    //
+                    // Tag == declaration ordinal, as for Enum.
+    Enum = 25,      // A `data` type whose constructors take no arguments. One
+                    // byte: the constructor's 0-based position in the
+                    // declaration, which is the wire tag. Constructor names
+                    // travel in `keys` so JSON can render the name rather than
+                    // the ordinal, `--json-help` can advertise a closed set,
+                    // and an out-of-range tag can be rejected by name.
+                    //
+                    // Slot 12 is deliberately NOT reused here: it once held
+                    // MORLOC_TENSOR, and an old packet carrying a 12 would be
+                    // silently reinterpreted rather than rejected.
+                    //
+                    // Declaration order is part of the type's wire contract:
+                    // appending a constructor keeps every existing value
+                    // byte-identical, reordering does not.
 }
 
 /// Schema character codes for parsing schema strings.
@@ -64,6 +97,8 @@ const SCHEMA_TABLE: u8 = b'T';
 const SCHEMA_IFILE: u8 = b'F';
 const SCHEMA_OSTREAM: u8 = b'O';
 const SCHEMA_ISTREAM: u8 = b'I';
+const SCHEMA_ENUM: u8 = b'e';
+const SCHEMA_VARIANT: u8 = b'v';
 
 /// Recursive schema definition, mirroring the C Schema struct.
 #[derive(Debug, Clone)]
@@ -101,7 +136,7 @@ impl Schema {
         use crate::shm_types as shm;
         let width = match serial_type {
             SerialType::Nil => 0,
-            SerialType::Bool | SerialType::Sint8 | SerialType::Uint8 => 1,
+            SerialType::Bool | SerialType::Sint8 | SerialType::Uint8 | SerialType::Enum => 1,
             SerialType::Sint16 | SerialType::Uint16 => 2,
             SerialType::Sint32 | SerialType::Uint32 | SerialType::Float32 => 4,
             SerialType::Sint64 | SerialType::Uint64 | SerialType::Float64 => 8,
@@ -137,7 +172,26 @@ impl Schema {
             | SerialType::Uint64
             | SerialType::Float32
             | SerialType::Float64 => true,
-            SerialType::Tuple => self.parameters.iter().all(|p| p.is_fixed_width()),
+            // A record is laid out exactly as the tuple of its field types:
+            // both go through `calculate_tuple_layout`, and the field names
+            // live in the schema rather than the buffer. So the same rule
+            // applies -- fixed-width when every field is, which is what lets
+            // an array of them be bulk-copied instead of walked.
+            //
+            // Answering true here means the bytes BETWEEN fields are read as
+            // part of the value: bulk copy moves them, and the hash path
+            // folds them in. That is sound only because free memory is
+            // zeroed -- a fresh volume from the OS, and `shm::shfree`
+            // scrubbing a block before republishing it -- so alignment
+            // padding reads as zero rather than as whatever the block last
+            // held. Were that scrub ever dropped, a hash over a padded
+            // record or tuple would stop being reproducible.
+            SerialType::Tuple | SerialType::Map => {
+                self.parameters.iter().all(|p| p.is_fixed_width())
+            }
+            // One byte, no payload: fixed-width, so `[Enum]` takes the flat
+            // bulk-copy path rather than a per-element walk.
+            SerialType::Enum => true,
             SerialType::Optional => false,
             // A Recur back-references a record whose layout includes
             // variable-length payload; never fixed-width.
@@ -170,7 +224,9 @@ impl Schema {
     pub fn alignment(&self) -> usize {
         match self.serial_type {
             SerialType::Nil => 1,
-            SerialType::Bool | SerialType::Sint8 | SerialType::Uint8 => 1,
+            // An enum is a single tag byte, so it aligns like a u8. This is
+            // what lets it pack into an array with no padding.
+            SerialType::Bool | SerialType::Sint8 | SerialType::Uint8 | SerialType::Enum => 1,
             SerialType::Sint16 | SerialType::Uint16 => 2,
             SerialType::Sint32 | SerialType::Uint32 | SerialType::Float32 => 4,
             SerialType::Sint64 | SerialType::Uint64 | SerialType::Float64 => 8,
@@ -193,8 +249,9 @@ impl Schema {
                     .max()
                     .unwrap_or(1)
             }
-            SerialType::Optional => {
-                // Pointer-aligned because the slot is now a relptr.
+            SerialType::Optional | SerialType::Variant => {
+                // Pointer-aligned: the slot holds a relptr (Variant also a
+                // tag byte, which does not raise the requirement).
                 std::mem::size_of::<usize>()
             }
         }
@@ -388,9 +445,8 @@ fn parse_schema_r(
             if cur >= bytes.len() {
                 return Err(MorlocError::Schema("expected tuple size".into()));
             }
-            let n = decode_base62(bytes[cur])?;
+            let (n, mut p) = read_count(bytes, cur)?;
             let mut params = Vec::with_capacity(n);
-            let mut p = cur + 1;
             for _ in 0..n {
                 let (child, end) = parse_schema_r(bytes, p, declared)?;
                 params.push(child);
@@ -403,17 +459,16 @@ fn parse_schema_r(
             if cur >= bytes.len() {
                 return Err(MorlocError::Schema("expected map size".into()));
             }
-            let n = decode_base62(bytes[cur])?;
+            let (n, mut p) = read_count(bytes, cur)?;
             let mut params = Vec::with_capacity(n);
             let mut keys = Vec::with_capacity(n);
-            let mut p = cur + 1;
             for _ in 0..n {
-                // Read key: base-62 length char + that many bytes
+                // Read key: length (base-62, escaped past 63) + that many bytes
                 if p >= bytes.len() {
                     return Err(MorlocError::Schema("expected map key length".into()));
                 }
-                let key_len = decode_base62(bytes[p])?;
-                p += 1;
+                let (key_len, kp) = read_count(bytes, p)?;
+                p = kp;
                 if p + key_len > bytes.len() {
                     return Err(MorlocError::Schema("map key extends past end".into()));
                 }
@@ -428,6 +483,77 @@ fn parse_schema_r(
                 p = end;
             }
             Ok((make_map_schema(params, keys), p))
+        }
+        SCHEMA_ENUM => {
+            // Enum: count, then N (key_len + constructor name). No child
+            // schemas -- an argument-free constructor carries no payload.
+            let (n, mut p) = read_count(bytes, cur)?;
+            let mut keys = Vec::with_capacity(n);
+            for _ in 0..n {
+                if p >= bytes.len() {
+                    return Err(MorlocError::Schema("expected enum constructor length".into()));
+                }
+                let (klen, kp) = read_count(bytes, p)?;
+                p = kp;
+                if p + klen > bytes.len() {
+                    return Err(MorlocError::Schema(
+                        "enum constructor name extends past end".into(),
+                    ));
+                }
+                let key = std::str::from_utf8(&bytes[p..p + klen])
+                    .map_err(|_| {
+                        MorlocError::Schema("invalid UTF-8 in enum constructor name".into())
+                    })?
+                    .to_string();
+                p += klen;
+                keys.push(key);
+            }
+            if keys.len() > 256 {
+                return Err(MorlocError::Schema(format!(
+                    "enum has {} constructors; the limit is 256 so a tag fits in one byte",
+                    keys.len()
+                )));
+            }
+            Ok((make_enum_schema(keys), p))
+        }
+        SCHEMA_VARIANT => {
+            // Variant: count, then N (key_len + name + arity + arity schemas).
+            // Each arm becomes a Tuple of its field schemas, so an
+            // argument-free arm is the empty tuple.
+            let (n, mut p) = read_count(bytes, cur)?;
+            let mut keys = Vec::with_capacity(n);
+            let mut params = Vec::with_capacity(n);
+            for _ in 0..n {
+                if p >= bytes.len() {
+                    return Err(MorlocError::Schema("expected variant arm name length".into()));
+                }
+                let (klen, kp) = read_count(bytes, p)?;
+                p = kp;
+                if p + klen > bytes.len() {
+                    return Err(MorlocError::Schema("variant arm name extends past end".into()));
+                }
+                let key = std::str::from_utf8(&bytes[p..p + klen])
+                    .map_err(|_| MorlocError::Schema("invalid UTF-8 in variant arm name".into()))?
+                    .to_string();
+                p += klen;
+                let (arity, ap) = read_count(bytes, p)?;
+                p = ap;
+                let mut fields = Vec::with_capacity(arity);
+                for _ in 0..arity {
+                    let (child, end) = parse_schema_r(bytes, p, declared)?;
+                    fields.push(child);
+                    p = end;
+                }
+                keys.push(key);
+                params.push(make_tuple_schema(fields));
+            }
+            if keys.len() > 256 {
+                return Err(MorlocError::Schema(format!(
+                    "variant has {} arms; the limit is 256 so a tag fits in one byte",
+                    keys.len()
+                )));
+            }
+            Ok((make_variant_schema(params, keys), p))
         }
         SCHEMA_TABLE => {
             // Table primitive (Arrow IPC).
@@ -451,16 +577,15 @@ fn parse_schema_r(
                 if cur >= bytes.len() {
                     return Err(MorlocError::Schema("expected table column count after ':'".into()));
                 }
-                let n = decode_base62(bytes[cur])?;
+                let (n, mut p) = read_count(bytes, cur)?;
                 let mut params = Vec::with_capacity(n);
                 let mut keys = Vec::with_capacity(n);
-                let mut p = cur + 1;
                 for _ in 0..n {
                     if p >= bytes.len() {
                         return Err(MorlocError::Schema("expected table column key length".into()));
                     }
-                    let key_len = decode_base62(bytes[p])?;
-                    p += 1;
+                    let (key_len, kp) = read_count(bytes, p)?;
+                    p = kp;
                     if p + key_len > bytes.len() {
                         return Err(MorlocError::Schema("table column key extends past end".into()));
                     }
@@ -493,8 +618,7 @@ fn parse_named_key(bytes: &[u8], pos: usize) -> Result<(String, usize), MorlocEr
     if pos >= bytes.len() {
         return Err(MorlocError::Schema("expected name length".into()));
     }
-    let klen = decode_base62(bytes[pos])?;
-    let start = pos + 1;
+    let (klen, start) = read_count(bytes, pos)?;
     let end = start + klen;
     if end > bytes.len() {
         return Err(MorlocError::Schema("schema name extends past end".into()));
@@ -591,8 +715,70 @@ fn encode_base62(n: usize) -> char {
         36..=61 => (b'A' + (n - 36) as u8) as char,
         62 => '+',
         63 => '/',
-        _ => '\x07', // bell - error
+        // Unreachable: every caller goes through `write_count`, which
+        // splits a value of 64 or more into single-digit limbs before
+        // reaching here. A bare digit cannot represent it.
+        _ => unreachable!("base-62 digit out of range: {n}"),
     }
+}
+
+/// Read a count or key length, which the compiler encodes as one base-62
+/// digit or, for values of 64 or more, as an escape.
+///
+/// `Morloc.CodeGenerator.Serial.encode64` is the other side:
+///
+/// ```text
+/// encode64 i | i < 64    = <one base-62 digit>
+///            | otherwise = '=' : encode64 (i `mod` 64) ++ encode64 (i `div` 64)
+/// ```
+///
+/// so an escaped value is a little-endian base-64 numeral: a run of
+/// `'=' <digit>` limbs followed by a bare final digit. Written iteratively
+/// rather than recursively because the byte stream can come off the wire,
+/// and a long run of `=` must not become a deep call stack.
+///
+/// Returns the value and the position just past the last byte consumed.
+fn read_count(bytes: &[u8], pos: usize) -> Result<(usize, usize), MorlocError> {
+    let mut limbs: Vec<usize> = Vec::new();
+    let mut cur = pos;
+    loop {
+        if cur >= bytes.len() {
+            return Err(MorlocError::Schema("expected a count".into()));
+        }
+        if bytes[cur] == b'=' {
+            cur += 1;
+            if cur >= bytes.len() {
+                return Err(MorlocError::Schema(
+                    "truncated escaped count: '=' with no digit".into(),
+                ));
+            }
+            limbs.push(decode_base62(bytes[cur])?);
+            cur += 1;
+        } else {
+            limbs.push(decode_base62(bytes[cur])?);
+            cur += 1;
+            break;
+        }
+    }
+    let mut value: usize = 0;
+    for limb in limbs.iter().rev() {
+        value = value
+            .checked_mul(64)
+            .and_then(|v| v.checked_add(*limb))
+            .ok_or_else(|| MorlocError::Schema("count overflows a usize".into()))?;
+    }
+    Ok((value, cur))
+}
+
+/// Write a count or key length, mirroring `read_count`.
+fn write_count(buf: &mut String, n: usize) {
+    let mut rest = n;
+    while rest >= 64 {
+        buf.push('=');
+        buf.push(encode_base62(rest % 64));
+        rest /= 64;
+    }
+    buf.push(encode_base62(rest));
 }
 
 /// Parse a decimal integer from the byte stream. Returns (value, position after last digit).
@@ -690,6 +876,43 @@ fn make_map_schema(params: Vec<Schema>, keys: Vec<String>) -> Schema {
 /// Width is the size of the SHM relative pointer that owns the Arrow
 /// buffer; the column entries themselves do not contribute to in-memory
 /// layout because the data lives outside the schema-described region.
+/// Construct an Enum schema from its constructor names.
+///
+/// One byte wide and fixed-width, which is the whole point of the form:
+/// `array_data_is_flat` is then true for `[Enum]`, so an array of them is
+/// bulk-copied and gets the 64-byte-aligned data buffer that primitive
+/// numerics get. A `[DNA]` is byte-for-byte a `[U8]` in shared memory.
+fn make_enum_schema(keys: Vec<String>) -> Schema {
+    Schema {
+        serial_type: SerialType::Enum,
+        size: keys.len(),
+        width: 1,
+        offsets: Vec::new(),
+        hint: None,
+        parameters: Vec::new(),
+        keys,
+        name: None,
+    }
+}
+
+/// Construct a Variant schema from its arm payloads and names.
+///
+/// Sixteen bytes regardless of the arms: a tag byte, padding, and a relptr,
+/// matching the tagged union in `stream_handle`. The payload lives behind
+/// the pointer, so nothing about an arm's size reaches this slot.
+fn make_variant_schema(params: Vec<Schema>, keys: Vec<String>) -> Schema {
+    Schema {
+        serial_type: SerialType::Variant,
+        size: params.len(),
+        width: 16,
+        offsets: Vec::new(),
+        hint: None,
+        parameters: params,
+        keys,
+        name: None,
+    }
+}
+
 fn make_table_schema(params: Vec<Schema>, keys: Vec<String>) -> Schema {
     Schema {
         serial_type: SerialType::Table,
@@ -812,6 +1035,27 @@ pub fn schemas_compatible(a: &Schema, b: &Schema) -> bool {
         .all(|(pa, pb)| schemas_compatible(pa, pb))
 }
 
+/// Canonical form of a schema string: parsed, then re-rendered. This
+/// drops the `<hint>` prefixes that a compiler-generated pool schema
+/// carries, because `schema_to_string` does not emit them.
+///
+/// Every packet writer stores this form (`make_standard_data_packet`,
+/// `make_mesg_data_packet`, `make_stream_header_block`), so it is the
+/// only form that may be persisted or compared. An entry point that
+/// takes a schema string from a caller normalizes with this rather than
+/// trusting the caller to have done it: the nexus evaluator normalized
+/// and the pools did not, which is how the two came to disagree at
+/// `@append`.
+///
+/// An unparseable string is returned unchanged, so the caller's own
+/// parse produces the diagnostic rather than this function inventing one.
+pub fn canonicalize_schema_str(s: &str) -> String {
+    match parse_schema(s) {
+        Ok(parsed) => schema_to_string(&parsed),
+        Err(_) => s.to_string(),
+    }
+}
+
 /// String-form entry point for the wire-boundary comparator. Parses both
 /// operands via `parse_schema` and structurally compares. Returns true iff
 /// the two schemas describe compatible wire forms under the gradual-typing
@@ -842,7 +1086,7 @@ fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
     if schema.serial_type != SerialType::Recur {
         if let Some(ref n) = schema.name {
             buf.push('&');
-            buf.push(encode_base62(n.len()));
+            write_count(buf, n.len());
             buf.push_str(n);
         }
     }
@@ -875,21 +1119,46 @@ fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
         }
         SerialType::Tuple => {
             buf.push('t');
-            buf.push(encode_base62(schema.size));
+            write_count(buf, schema.size);
             for p in &schema.parameters {
                 schema_to_string_inner(p, buf);
             }
         }
         SerialType::Map => {
             buf.push('m');
-            buf.push(encode_base62(schema.size));
+            write_count(buf, schema.size);
             for (i, p) in schema.parameters.iter().enumerate() {
                 if i < schema.keys.len() {
                     let key = &schema.keys[i];
-                    buf.push(encode_base62(key.len()));
+                    write_count(buf, key.len());
                     buf.push_str(key);
                 }
                 schema_to_string_inner(p, buf);
+            }
+        }
+        SerialType::Variant => {
+            buf.push('v');
+            write_count(buf, schema.size);
+            for (i, arm) in schema.parameters.iter().enumerate() {
+                if i < schema.keys.len() {
+                    let key = &schema.keys[i];
+                    write_count(buf, key.len());
+                    buf.push_str(key);
+                }
+                // The arm is a tuple of its fields; the fields are written
+                // out directly, with the tuple's size standing as the arity.
+                write_count(buf, arm.size);
+                for field in &arm.parameters {
+                    schema_to_string_inner(field, buf);
+                }
+            }
+        }
+        SerialType::Enum => {
+            buf.push('e');
+            write_count(buf, schema.size);
+            for key in &schema.keys {
+                write_count(buf, key.len());
+                buf.push_str(key);
             }
         }
         SerialType::Int => {
@@ -907,11 +1176,11 @@ fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
             buf.push('T');
             if schema.size > 0 {
                 buf.push(':');
-                buf.push(encode_base62(schema.size));
+                write_count(buf, schema.size);
                 for (i, p) in schema.parameters.iter().enumerate() {
                     if i < schema.keys.len() {
                         let key = &schema.keys[i];
-                        buf.push(encode_base62(key.len()));
+                        write_count(buf, key.len());
                         buf.push_str(key);
                     }
                     schema_to_string_inner(p, buf);
@@ -923,7 +1192,7 @@ fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
             // guaranteed present by the parser (dangling refs are rejected).
             buf.push('^');
             if let Some(ref n) = schema.name {
-                buf.push(encode_base62(n.len()));
+                write_count(buf, n.len());
                 buf.push_str(n);
             }
         }
@@ -993,6 +1262,65 @@ mod tests {
         let s = parse_schema("<std::vector<$1>>ai4").unwrap();
         assert_eq!(s.serial_type, SerialType::Array);
         assert_eq!(s.hint.as_deref(), Some("std::vector<$1>"));
+    }
+
+    // A pool's schema string carries the language's concrete form as a
+    // `<hint>` prefix; every packet writer stores the hint-free form
+    // (schema_to_string drops hints by design). The two describe one wire
+    // type, so any comparison at a wire boundary must ignore the hint.
+    #[test]
+    fn canonicalize_drops_hints_and_is_idempotent() {
+        assert_eq!(canonicalize_schema_str("a<dict>m24kinds2idj"), "am24kinds2idj");
+        assert_eq!(canonicalize_schema_str("a<str>s"), "as");
+        assert_eq!(canonicalize_schema_str("<std::vector<$1>>ai4"), "ai4");
+        // already canonical
+        assert_eq!(canonicalize_schema_str("am24kinds2idj"), "am24kinds2idj");
+        // idempotent
+        let once = canonicalize_schema_str("a<dict>m21x<int>j1yj");
+        assert_eq!(canonicalize_schema_str(&once), once);
+        // dims survive; they are part of the type, not a hint
+        assert_eq!(canonicalize_schema_str("a:5j"), "a:5j");
+        // unparseable input is handed back untouched for the caller to report
+        assert_eq!(canonicalize_schema_str("not a schema"), "not a schema");
+    }
+
+    #[test]
+    fn compatible_ignores_concrete_type_hints() {
+        assert!(schema_strings_compatible("am24kinds2idj", "a<dict>m24kinds2idj"));
+        assert!(schema_strings_compatible("a<dict>m24kinds2idj", "am24kinds2idj"));
+        // Hints are not a record-only concern: `type Tag = Str` gets one too.
+        assert!(schema_strings_compatible("as", "a<str>s"));
+        // Nested hints (the C++ container forms) parse and are ignored.
+        assert!(schema_strings_compatible("ai4", "<std::vector<$1>>ai4"));
+        // A hint on an inner node, not just the outer one.
+        assert!(schema_strings_compatible("am21xj1yj", "a<dict>m21x<int>j1yj"));
+    }
+
+    // Ignoring hints must not make the check vacuous.
+    #[test]
+    fn compatible_rejects_genuinely_different_types() {
+        // different record keys
+        assert!(!schema_strings_compatible("am24kinds2idj", "a<dict>m25alphas4betaj"));
+        // different leaf type
+        assert!(!schema_strings_compatible("aj", "as"));
+        // different shape
+        assert!(!schema_strings_compatible("aj", "j"));
+        // tuple field order
+        assert!(!schema_strings_compatible("t2js", "t2sj"));
+        // different arity
+        assert!(!schema_strings_compatible("t2js", "t3jss"));
+    }
+
+    // An unconstrained array length (0) is a wildcard against a
+    // constrained one. This is deliberate: `make_array_schema_with_dim`
+    // gives both the same width and `is_fixed_width` is false for every
+    // Array, so the dim is a validation constraint (enforced on the JSON
+    // ingestion path) rather than a layout difference.
+    #[test]
+    fn compatible_treats_array_length_zero_as_wildcard() {
+        assert!(schema_strings_compatible("a:5j", "aj"));
+        assert!(schema_strings_compatible("aj", "a:5j"));
+        assert!(!schema_strings_compatible("a:5j", "a:6j"));
     }
 
     #[test]
@@ -1069,6 +1397,69 @@ mod tests {
         assert_eq!(rendered, input, "byte-exact round-trip");
     }
 
+    // A sum type recursing through its own constructor arguments. This is
+    // the shape the boxed payload exists for: the slot is a tag plus a
+    // relative pointer whatever the arms hold, so the width equation has a
+    // finite fixed point where an inline payload would have none.
+    //
+    //   data Tree = Leaf | Node Tree Tree
+    //     -> &4Treev24Leaf04Node2^4Tree^4Tree
+    //
+    // Each arm is a tuple of its fields, so a nullary arm is the empty
+    // tuple and carries no payload allocation.
+    #[test]
+    fn test_parse_recursive_variant() {
+        let s = parse_schema("&4Treev24Leaf04Node2^4Tree^4Tree").unwrap();
+        assert_eq!(s.serial_type, SerialType::Variant);
+        assert_eq!(s.size, 2);
+        assert_eq!(s.keys, vec!["Leaf", "Node"]);
+        assert_eq!(s.name.as_deref(), Some("Tree"));
+        // Tag plus pointer, independent of what the arms hold.
+        assert_eq!(s.width, 16);
+        assert_eq!(s.alignment(), 8);
+        assert!(!s.is_fixed_width());
+
+        let leaf = &s.parameters[0];
+        assert_eq!(leaf.serial_type, SerialType::Tuple);
+        assert_eq!(leaf.parameters.len(), 0);
+
+        let node = &s.parameters[1];
+        assert_eq!(node.serial_type, SerialType::Tuple);
+        assert_eq!(node.parameters.len(), 2);
+        for field in &node.parameters {
+            assert_eq!(field.serial_type, SerialType::Recur);
+            assert_eq!(field.name.as_deref(), Some("Tree"));
+        }
+    }
+
+    #[test]
+    fn test_recursive_variant_recur_width_patched() {
+        // A back-reference parses with a placeholder width; the declaration
+        // patches it so an arm's payload is allocated and strided at the
+        // declared type's real width rather than a bare pointer's.
+        let s = parse_schema("&4Treev24Leaf04Node2^4Tree^4Tree").unwrap();
+        let node = &s.parameters[1];
+        for field in &node.parameters {
+            assert_eq!(field.width, s.width, "back-reference width follows the declaration");
+        }
+        assert_eq!(node.width, 2 * s.width, "payload tuple holds two full Trees");
+    }
+
+    #[test]
+    fn test_roundtrip_recursive_variant() {
+        let input = "&4Treev24Leaf04Node2^4Tree^4Tree";
+        let schema = parse_schema(input).unwrap();
+        assert_eq!(schema_to_string(&schema), input, "byte-exact round-trip");
+    }
+
+    #[test]
+    fn test_recursive_variant_without_declaration_is_rejected() {
+        // The same body with no `&` declaration is a dangling back-reference.
+        // It must fail rather than parse into a Recur nothing resolves.
+        let err = parse_schema("v24Leaf04Node2^4Tree^4Tree");
+        assert!(err.is_err(), "dangling back-reference must be refused");
+    }
+
     #[test]
     fn test_roundtrip_recursive_ll() {
         // Optional-guarded recursion also round-trips byte-exactly.
@@ -1084,6 +1475,308 @@ mod tests {
         // panic or dereference into garbage.
         let result = parse_schema("^4Tree");
         assert!(result.is_err(), "dangling back-ref must be rejected");
+    }
+
+    // --- Wide-schema counts (>= 64) ------------------------------------
+    //
+    // The compiler encodes counts and key lengths with an escape for
+    // values that do not fit one base-62 digit
+    // (`Morloc.CodeGenerator.Serial.encode64`):
+    //
+    //     encode64 i | i < 64     = <one base-62 digit>
+    //                | otherwise  = '=' : encode64 (i `mod` 64)
+    //                                  ++ encode64 (i `div` 64)
+    //
+    // `hs_encode64` is an independent transcription of that function, used
+    // here as an oracle so these tests describe the wire format rather
+    // than whatever this module happens to implement.
+
+    fn hs_encode64(i: usize) -> String {
+        match i {
+            0..=9 => ((b'0' + i as u8) as char).to_string(),
+            10..=35 => ((b'a' + (i - 10) as u8) as char).to_string(),
+            36..=61 => ((b'A' + (i - 36) as u8) as char).to_string(),
+            62 => "+".to_string(),
+            63 => "/".to_string(),
+            _ => format!("={}{}", hs_encode64(i % 64), hs_encode64(i / 64)),
+        }
+    }
+
+    #[test]
+    fn test_hs_encode64_oracle() {
+        assert_eq!(hs_encode64(0), "0");
+        assert_eq!(hs_encode64(63), "/");
+        assert_eq!(hs_encode64(64), "=01");
+        assert_eq!(hs_encode64(255), "=/3");
+        assert_eq!(hs_encode64(256), "=04");
+    }
+
+    #[test]
+    fn test_parse_wide_tuple() {
+        for n in [63usize, 64, 255, 256] {
+            let schema_str = format!("t{}{}", hs_encode64(n), "i4".repeat(n));
+            let s = parse_schema(&schema_str)
+                .unwrap_or_else(|e| panic!("tuple of {n} fields failed to parse: {e:?}"));
+            assert_eq!(s.serial_type, SerialType::Tuple, "tuple of {n}");
+            assert_eq!(s.parameters.len(), n, "tuple of {n} arity");
+        }
+    }
+
+    #[test]
+    fn test_parse_wide_map() {
+        for n in [63usize, 64, 255, 256] {
+            let mut schema_str = format!("m{}", hs_encode64(n));
+            for i in 0..n {
+                let key = format!("k{i}");
+                schema_str.push_str(&hs_encode64(key.len()));
+                schema_str.push_str(&key);
+                schema_str.push_str("i4");
+            }
+            let s = parse_schema(&schema_str)
+                .unwrap_or_else(|e| panic!("record of {n} fields failed to parse: {e:?}"));
+            assert_eq!(s.parameters.len(), n, "record of {n} arity");
+            assert_eq!(s.keys.len(), n, "record of {n} keys");
+            assert_eq!(s.keys[n - 1], format!("k{}", n - 1));
+        }
+    }
+
+    #[test]
+    fn test_parse_long_record_key() {
+        // A field name of 64 characters needs the escape in its length slot.
+        for klen in [63usize, 64, 100] {
+            let key = "k".repeat(klen);
+            let schema_str = format!("m1{}{}i4", hs_encode64(klen), key);
+            let s = parse_schema(&schema_str)
+                .unwrap_or_else(|e| panic!("record key of {klen} chars failed to parse: {e:?}"));
+            assert_eq!(s.keys[0], key, "key of {klen} chars");
+        }
+    }
+
+    #[test]
+    fn test_parse_long_recursive_name() {
+        // `&<klen><name>` and `^<klen><name>` share the key-length encoding.
+        let name = "N".repeat(70);
+        let schema_str = format!(
+            "&{}{}m1{}{}?^{}{}",
+            hs_encode64(name.len()),
+            name,
+            hs_encode64(4),
+            "next",
+            hs_encode64(name.len()),
+            name
+        );
+        let s = parse_schema(&schema_str)
+            .unwrap_or_else(|e| panic!("long recursive name failed to parse: {e:?}"));
+        assert_eq!(s.name.as_deref(), Some(name.as_str()));
+    }
+
+    #[test]
+    fn test_render_wide_schema_roundtrips() {
+        // Rendering must not silently emit a filler byte for a count it
+        // cannot fit in one digit; the result has to parse back.
+        for n in [63usize, 64, 256] {
+            let schema_str = format!("t{}{}", hs_encode64(n), "i4".repeat(n));
+            let s = parse_schema(&schema_str).unwrap();
+            let rendered = schema_to_string(&s);
+            assert_eq!(rendered, schema_str, "render of a {n}-field tuple");
+            let reparsed = parse_schema(&rendered)
+                .unwrap_or_else(|e| panic!("rendered {n}-field tuple did not reparse: {e:?}"));
+            assert_eq!(reparsed.parameters.len(), n);
+        }
+    }
+
+    #[test]
+    fn test_record_of_fixed_fields_is_fixed_width() {
+        // A record's voidstar layout IS a tuple's -- `make_map_schema` and
+        // `make_tuple_schema` both call `calculate_tuple_layout`, and the
+        // field names live in the schema, not the buffer. So a record whose
+        // fields are all fixed-width has a fixed total width and no
+        // out-of-line data, exactly as the matching tuple does.
+        let rec = parse_schema("m21xi41yi4").unwrap();
+        let tup = parse_schema("t2i4i4").unwrap();
+        assert_eq!(rec.serial_type, SerialType::Map);
+        assert_eq!(rec.width, tup.width, "record and tuple widths must agree");
+        assert_eq!(rec.offsets, tup.offsets, "and so must their offsets");
+        assert!(
+            rec.is_fixed_width(),
+            "a record of fixed-width fields is fixed-width, like the tuple it is laid out as"
+        );
+    }
+
+    #[test]
+    fn test_record_with_variable_field_is_not_fixed_width() {
+        // One variable-length field is enough to disqualify the whole
+        // record, the same rule Tuple applies.
+        for schema_str in ["m21xi41ys", "m21xi41yai4", "m21xi41y?i4"] {
+            let s = parse_schema(schema_str).unwrap();
+            assert!(
+                !s.is_fixed_width(),
+                "{schema_str} has a variable-width field and must not be fixed-width"
+            );
+        }
+    }
+
+    #[test]
+    fn test_array_of_fixed_records_is_flat() {
+        // The payoff: an array of fixed-field records can be bulk-copied
+        // rather than walked element by element.
+        let arr = parse_schema("am21xi41yi4").unwrap();
+        assert!(
+            arr.array_data_is_flat(),
+            "[{{x::I32, y::I32}}] must take the bulk path"
+        );
+        let arr_var = parse_schema("am21xi41ys").unwrap();
+        assert!(
+            !arr_var.array_data_is_flat(),
+            "a record with a Str field must still be walked"
+        );
+    }
+
+    #[test]
+    fn test_parse_variant() {
+        // `data Shape = Circle Real | Rect Real Real | Dot`
+        // v <count> ( <klen><name> <arity> <schema>*arity )*
+        let s = parse_schema("v36Circle1f84Rect2f8f83Dot0").unwrap();
+        assert_eq!(s.serial_type, SerialType::Variant);
+        assert_eq!(s.size, 3);
+        assert_eq!(s.keys, vec!["Circle", "Rect", "Dot"]);
+        // Each arm's payload is a tuple of its fields, so the arity is
+        // visible as the tuple's own size -- including the empty arm.
+        assert_eq!(s.parameters.len(), 3);
+        assert_eq!(s.parameters[0].serial_type, SerialType::Tuple);
+        assert_eq!(s.parameters[0].size, 1);
+        assert_eq!(s.parameters[1].size, 2);
+        assert_eq!(s.parameters[2].size, 0);
+    }
+
+    #[test]
+    fn test_variant_slot_is_tag_plus_pointer() {
+        // The payload is reached through a pointer, so the slot width does
+        // not depend on any arm's width. That is what gives a recursive
+        // type a finite width, and it is why this is not fixed-width.
+        let s = parse_schema("v36Circle1f84Rect2f8f83Dot0").unwrap();
+        assert_eq!(s.width, 16, "tag byte plus padding plus a relptr");
+        assert_eq!(s.alignment(), 8, "pointer-aligned");
+        assert!(!s.is_fixed_width(), "the pointee is not fixed-width");
+
+        // An arm whose fields are wider must not change the slot.
+        let wide = parse_schema("v14Wide4f8f8f8f8").unwrap();
+        assert_eq!(wide.width, s.width, "slot width is independent of the arms");
+    }
+
+    #[test]
+    fn test_single_field_arm_is_byte_identical_to_its_field() {
+        // A one-field payload is stored as a 1-tuple. A tuple carries no
+        // header, so that costs nothing: the field sits at offset 0 and the
+        // tuple's width is the field's width. Uniformity is free, and it
+        // lets a payload field always be reached positionally.
+        let one = parse_schema("t1f8").unwrap();
+        let bare = parse_schema("f8").unwrap();
+        assert_eq!(one.width, bare.width);
+        assert_eq!(one.offsets, vec![0]);
+    }
+
+    #[test]
+    fn test_variant_roundtrips_through_render() {
+        for schema_str in ["v14Only0", "v36Circle1f84Rect2f8f83Dot0", "v24Leaf04Node2i4i4"] {
+            let parsed = parse_schema(schema_str)
+                .unwrap_or_else(|e| panic!("{schema_str} failed to parse: {e:?}"));
+            assert_eq!(schema_to_string(&parsed), schema_str);
+        }
+    }
+
+    #[test]
+    fn test_variant_over_256_arms_is_rejected() {
+        let n = 257usize;
+        let mut schema_str = format!("v{}", hs_encode64(n));
+        for i in 0..n {
+            let key = format!("C{i}");
+            schema_str.push_str(&hs_encode64(key.len()));
+            schema_str.push_str(&key);
+            schema_str.push_str(&hs_encode64(0));
+        }
+        assert!(
+            parse_schema(&schema_str).is_err(),
+            "a variant past the one-byte tag limit must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_parse_enum() {
+        // `data DNA = A | C | G | T`
+        let s = parse_schema("e41A1C1G1T").unwrap();
+        assert_eq!(s.serial_type, SerialType::Enum);
+        assert_eq!(s.size, 4);
+        assert_eq!(s.keys, vec!["A", "C", "G", "T"]);
+        assert!(s.parameters.is_empty(), "an enum constructor has no payload");
+    }
+
+    #[test]
+    fn test_enum_is_one_byte_and_flat() {
+        // The representation claim: one byte, fixed-width, so an array of
+        // them is bulk-copied exactly as a [U8] is.
+        let s = parse_schema("e41A1C1G1T").unwrap();
+        assert_eq!(s.width, 1, "enum width");
+        assert_eq!(s.alignment(), 1, "enum alignment");
+        assert!(s.is_fixed_width(), "enum must be fixed-width");
+
+        let arr = parse_schema("ae41A1C1G1T").unwrap();
+        assert!(arr.array_data_is_flat(), "[DNA] must take the flat path");
+        let bytes = parse_schema("au1").unwrap();
+        assert_eq!(
+            arr.parameters[0].width, bytes.parameters[0].width,
+            "[DNA] and [U8] must have the same element width"
+        );
+    }
+
+    #[test]
+    fn test_enum_roundtrips_through_render() {
+        for schema_str in ["e1", "e41A1C1G1T", "e21Aa_long_constructor_name"] {
+            let parsed = parse_schema(schema_str);
+            if let Ok(p) = parsed {
+                assert_eq!(schema_to_string(&p), schema_str, "render of {schema_str}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_enum_at_the_count_boundary() {
+        // 64 constructors needs the escaped count; 256 is the cap.
+        for n in [63usize, 64, 256] {
+            let mut schema_str = format!("e{}", hs_encode64(n));
+            for i in 0..n {
+                let key = format!("C{i}");
+                schema_str.push_str(&hs_encode64(key.len()));
+                schema_str.push_str(&key);
+            }
+            let s = parse_schema(&schema_str)
+                .unwrap_or_else(|e| panic!("enum of {n} constructors failed: {e:?}"));
+            assert_eq!(s.keys.len(), n);
+            assert_eq!(s.width, 1, "width stays one byte at {n} constructors");
+            assert_eq!(schema_to_string(&s), schema_str);
+        }
+    }
+
+    #[test]
+    fn test_enum_over_256_is_rejected() {
+        let n = 257usize;
+        let mut schema_str = format!("e{}", hs_encode64(n));
+        for i in 0..n {
+            let key = format!("C{i}");
+            schema_str.push_str(&hs_encode64(key.len()));
+            schema_str.push_str(&key);
+        }
+        assert!(
+            parse_schema(&schema_str).is_err(),
+            "an enum past the one-byte tag limit must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_malformed_count_is_rejected() {
+        // A truncated escape must be an error, never a silent zero.
+        assert!(parse_schema("t=").is_err(), "bare '=' count");
+        assert!(parse_schema("t=0").is_err(), "escape missing high digit");
     }
 }
 
@@ -1144,4 +1837,5 @@ mod compat_tests {
         assert_eq!(s.parameters[0].serial_type, SerialType::Uint8);
         assert_eq!(s.parameters[0].width, 1);
     }
+
 }

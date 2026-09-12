@@ -24,12 +24,20 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.CppPrinter
 
     -- * Struct/serializer rendering
   , printStructTypedef
+  , printMarshalDecls
+  , armName
+  , printCppEnumDecl
+  , printCppVariantDecl
+  , printCppVariantArms
+  , printCppVariantSerializers
   , printSerializer
   , printDeserializer
   , printTemplateHeader
   , printRecordTemplate
   ) where
 
+import Data.Text (Text)
+import qualified Data.Text as T
 import qualified Data.Map as Map
 import Morloc.CodeGenerator.Grammars.Common (DispatchEntry (..), manNamer)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
@@ -55,6 +63,7 @@ printExpr (IBoolLit False) = "false"
 -- declared, where the implicit conversion from nullopt_t suffices.
 printExpr (INullLit (Just t)) = renderIType t <> "{}"
 printExpr (INullLit Nothing) = "std::nullopt"
+printExpr IUnitLit = "mlc::Unit{}"
 printExpr (IIntLit Nothing i) = viaShow i
 printExpr (IIntLit (Just t) i)
   | t == "int" = viaShow i
@@ -93,7 +102,6 @@ printExpr (ILambda args body) =
     <> printExpr body
     <> ";}"
 printExpr (IRawExpr d) = pretty d
-printExpr (IDoBlock e) = "[&](){return " <> printExpr e <> ";}"
 printExpr (IEval e) = printExpr e <> "()"
 printExpr (IIntrinsicHash sid e) =
   [idoc|_mlc_hash(#{printExpr e}, mlc_schema_table[#{pretty sid}])|]
@@ -161,8 +169,6 @@ printExpr (IIntrinsicStderr sid) =
   [idoc|_mlc_open_stderr(mlc_schema_table[#{pretty sid}])|]
 printExpr (IIntrinsicThrow msg) =
   [idoc|_mlc_throw(#{printExpr msg})|]
-printExpr (IIntrinsicCatch fallible fallback) =
-  [idoc|_mlc_catch(#{printExpr fallible}, #{printExpr fallback})|]
 
 -- C++ non-finite literals: rely on the C99 macros INFINITY and NAN. They are
 -- float-typed per C99 but convert losslessly to double; non-default Real
@@ -321,6 +327,186 @@ printRecordTemplate [] = ""
 printRecordTemplate ts = encloseSep "<" ">" "," ts
 
 -- | Render a C++ struct definition.
+-- | Emit a payload-bearing `data` type: one struct per arm, wrapped in a
+-- struct holding a @std::variant@.
+--
+-- Each arm gets its OWN struct rather than sharing a tuple, because two arms
+-- may carry identical field types and must still be distinguishable -- a
+-- @std::variant<double, double>@ could not tell @Circle@ from @Radius@.
+--
+-- The wrapper is a struct rather than a bare alias so the type can be
+-- forward-declared: a recursive arm holds @std::shared_ptr<T>@, and an alias
+-- to @std::variant<...>@ cannot be named before its alternatives are
+-- complete.
+-- | Forward declarations of a generated type's three marshallers.
+--
+-- These are NON-TEMPLATE overloads, so a call to one is resolved by ordinary
+-- lookup at the point of the call -- not at instantiation. A definition that
+-- appears later is invisible, and the call silently binds to the header's
+-- generic fallback, which reinterprets the wire bytes as the target type.
+-- Declaring every marshaller before any definition removes the ordering
+-- question, as the two-phase struct emission does for the types themselves.
+--
+-- The default arguments live here rather than on the definition: C++ forbids
+-- repeating them for the same parameter in one scope.
+printMarshalDecls :: [MDoc] -> MDoc -> MDoc
+printMarshalDecls params name =
+  vsep
+    [ tmpl <> "size_t get_shm_size(const Schema* schema, const" <+> name <> "& data);"
+    , tmpl <> "void* to_voidstar(void* dest, void** cursor, const Schema* schema, const"
+        <+> name <> "& obj);"
+    , tmpl <> name <+> "from_voidstar(const Schema* schema, const void* anything,"
+        <+> name <> "* dummy = nullptr, const void* base_ptr = nullptr);"
+    ]
+  where
+    tmpl = case params of
+      [] -> ""
+      _ -> printTemplateHeader params <> line
+
+-- | The forward declarations and wrapper for a variant.
+--
+-- Emitted for EVERY variant before ANY arm body, because an arm may hold
+-- another `data` type by value and would otherwise need that type's wrapper
+-- to already exist. Splitting the two phases removes the ordering question
+-- entirely, rather than answering it with a topological sort.
+-- | Emit a C++ @enum class@ for an argument-free @data@ type.
+--
+-- A one-byte underlying type with explicit discriminants makes the native
+-- value and the wire tag the same byte, so a constructor's declaration
+-- ordinal needs no translation. Marshalling comes from the generic
+-- one-byte path; only the declaration is emitted here.
+printCppEnumDecl :: MDoc -> [Text] -> MDoc
+printCppEnumDecl name ctors =
+  vsep
+    [ "enum class" <+> name <+> ": uint8_t {"
+    , indent 4 (vsep [pretty c <+> "=" <+> pretty i <> "," | (i, c) <- zip [0 :: Int ..] ctors])
+    , "};"
+    ]
+
+printCppVariantDecl :: MDoc -> [(Text, [MDoc])] -> MDoc
+printCppVariantDecl name arms =
+  vsep
+    [ vsep ["struct" <+> armName name c <> ";" | (c, _) <- arms]
+    , "struct" <+> name <+> "{"
+    , indent 4 ("std::variant<"
+                  <> hsep (punctuate "," ["std::shared_ptr<" <> armName name c <> ">" | (c, _) <- arms])
+                  <> "> v;")
+    , "};"
+    ]
+
+-- | The arm bodies, emitted after every wrapper exists.
+printCppVariantArms :: MDoc -> [(Text, [MDoc])] -> MDoc
+printCppVariantArms name arms = vsep [armStruct c ts | (c, ts) <- arms]
+  where
+    armStruct c ts =
+      vsep
+        [ "struct" <+> armName name c <+> "{"
+        , indent 4 (vsep [t <+> "f" <> pretty i <> ";" | (i, t) <- zip [(0 :: Int) ..] ts])
+        , "};"
+        ]
+
+-- | The struct that holds one arm's fields: the wrapper's name with
+-- @_<Constructor>@ appended to its HEAD. For a plain name that is
+-- @Shape_Circle@; for a template instantiation the suffix goes before the
+-- argument list, so @MyBox<int>@ has the arm @MyBox_Full<int>@ -- a
+-- template of its own, taking the wrapper's arguments. A user who maps a
+-- parameterized @data@ writes the arms to that convention.
+armName :: MDoc -> Text -> MDoc
+armName n c =
+  let (headT, args) = T.breakOn "<" (render n)
+  in pretty headT <> "_" <> pretty c <> pretty args
+
+-- | Emit @to_voidstar@ / @from_voidstar@ / @get_shm_size@ for a variant.
+--
+-- The slot layout lives in the runtime helpers; these only pick an arm. The
+-- payload of an arm with fields is written as that arm's struct, which the
+-- record serializer already knows how to marshal.
+printCppVariantSerializers :: MDoc -> [(Text, [MDoc])] -> MDoc
+printCppVariantSerializers name arms =
+  vsep [sizeFn, "", toFn, "", fromFn]
+  where
+    idxArms = zip [(0 :: Int) ..] arms
+
+    -- Each marshaller pushes the type's own declaration onto the recursion
+    -- environment before descending. A variant may be declared INSIDE
+    -- another type's schema (`&Expr ... &Term ... ^Term ... ^Expr`), so a
+    -- back-reference to it from within its own arms resolves only if this
+    -- scope, not just the outermost one, is on the stack.
+    scopeDecl = "RecurEnvScope _recur_scope(resolve_recur(schema));"
+
+    sizeFn =
+      vsep
+        [ "inline size_t get_shm_size(const Schema* schema, const" <+> name <> "& obj) {"
+        , indent 4 $ vsep
+            [ scopeDecl
+            , "switch (obj.v.index()) {"
+            , indent 4 $ vsep
+                [ "case" <+> pretty i <> ":" <+>
+                    (if null ts
+                       then "return variant_size_nullary(schema);"
+                       else "return variant_size_payload(schema, resolve_recur(schema)->parameters["
+                              <> pretty i <> "], *std::get<std::shared_ptr<" <> armName name c <> ">>(obj.v));")
+                | (i, (c, ts)) <- idxArms ]
+            , "}"
+            , "return variant_size_nullary(schema);"
+            ]
+        , "}"
+        ]
+
+    toFn =
+      vsep
+        [ "inline void* to_voidstar(void* dest, void** cursor, const Schema* schema, const"
+            <+> name <> "& obj) {"
+        , indent 4 $ vsep
+            [ scopeDecl
+            , "switch (obj.v.index()) {"
+            , indent 4 $ vsep
+                [ "case" <+> pretty i <> ":" <+>
+                    (if null ts
+                       then "return write_variant_nullary(dest," <+> pretty i <> ");"
+                       else "return write_variant_payload(dest, cursor, resolve_recur(schema)->parameters["
+                              <> pretty i <> "]," <+> pretty i <> ", *std::get<std::shared_ptr<"
+                              <> armName name c <> ">>(obj.v));")
+                | (i, (c, ts)) <- idxArms ]
+            , "}"
+            , "return dest;"
+            ]
+        , "}"
+        ]
+
+    fromFn =
+      vsep
+        -- An OVERLOAD of from_voidstar, not a separate function: the reader
+        -- is a single template dispatching with `if constexpr`, and a
+        -- differently-named function is never reached from it. Matching the
+        -- template's signature (including the dummy pointer that carries the
+        -- result type) makes overload resolution prefer this, which is how
+        -- generated records are read too.
+        [ "inline" <+> name <+> "from_voidstar(const Schema* schema, const void* data,"
+            <+> name <> "* dummy, const void* base_ptr) {"
+        , indent 4 $ vsep
+            [ "(void)dummy;"
+            , name <+> "out;"
+            , "const Schema* s = resolve_recur(schema);"
+            , "RecurEnvScope _recur_scope(s);"
+            , "switch (read_variant_tag(data)) {"
+            , indent 4 $ vsep
+                [ "case" <+> pretty i <> ": out.v ="
+                    <+> (if null ts
+                           then "std::make_shared<" <> armName name c <> ">();"
+                           else "std::make_shared<" <> armName name c <> ">(read_variant_payload<"
+                                  <> armName name c <> ">(s->parameters[" <> pretty i
+                                  <> "], data, base_ptr));")
+                    <+> "break;"
+                | (i, (c, ts)) <- idxArms ]
+            , indent 0 ("default: throw std::runtime_error(\"" <> name
+                          <> ": no constructor for this tag\");")
+            , "}"
+            , "return out;"
+            ]
+        , "}"
+        ]
+
 printStructTypedef ::
   [MDoc] -> -- template parameters (e.g., ["T"])
   MDoc -> -- the name of the structure (e.g., "Person")
@@ -355,6 +541,7 @@ printSerializer params rtype fields =
 #{printTemplateHeader params}
 void* to_voidstar(void* dest, void** cursor, const Schema* schema, const #{rtype}& obj)
 {
+    RecurEnvScope _recur_scope(resolve_recur(schema));
 #{block 4 "" (vsep (zipWith assignField [0 ..] (map fst fields)))}
     return dest;
 }
@@ -366,12 +553,12 @@ void* to_voidstar(void* dest, void** cursor, const Schema* schema, const #{rtype
 
 -- | Render a C++ deserializer (from_voidstar + get_shm_size) for a struct.
 printDeserializer ::
-  Bool -> -- build object with constructor
+  Bool -> -- omit default arguments (the type is forward-declared)
   [MDoc] -> -- template parameters
   MDoc -> -- type of thing being deserialized
   [(MDoc, MDoc)] -> -- key and type for all fields
   MDoc
-printDeserializer _ params rtype fields =
+printDeserializer fwdDeclared params rtype fields =
   [idoc|
 #{printTemplateHeader params}
 #{block 4 header body}
@@ -381,12 +568,22 @@ printDeserializer _ params rtype fields =
 |]
   where
     header =
-      [idoc|#{rtype} from_voidstar(const Schema* schema, const void * anything, #{rtype}* dummy = nullptr, const void* base_ptr = nullptr)|]
+      -- A forward-declared type carries its defaults on the declaration,
+      -- and C++ forbids repeating them here. Anything not forward-declared
+      -- keeps them, or a two-argument call has nowhere to find them.
+      [idoc|#{rtype} from_voidstar(const Schema* schema, const void * anything, #{rtype}* dummy#{defArg "nullptr"}, const void* base_ptr#{defArg "nullptr"})|]
+    -- The record may be declared inside another type's schema, so its own
+    -- declaration is pushed before its fields are read: a back-reference
+    -- to it from within them resolves against this scope.
     body =
       vsep $
-        [[idoc|#{rtype} obj;|]]
+        [ "RecurEnvScope _recur_scope(resolve_recur(schema));"
+        , [idoc|#{rtype} obj;|] ]
           <> zipWith assignFields [0 ..] fields
           <> ["return obj;"]
+
+    defArg :: MDoc -> MDoc
+    defArg d = if fwdDeclared then "" else " = " <> d
 
     assignFields :: Int -> (MDoc, MDoc) -> MDoc
     assignFields idx (keyName, keyType) =
@@ -398,7 +595,8 @@ printDeserializer _ params rtype fields =
     headerGetSize = [idoc|size_t get_shm_size(const Schema* schema, const #{rtype}& data)|]
     bodyGetSize =
       vsep $
-        ["size_t size = 0;"]
+        [ "RecurEnvScope _recur_scope(resolve_recur(schema));"
+        , "size_t size = 0;" ]
           <> [getSize idx key | (idx, (key, _)) <- zip [0 ..] fields]
           <> ["return size;"]
 

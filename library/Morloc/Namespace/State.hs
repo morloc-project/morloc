@@ -167,6 +167,10 @@ data MorlocState = MorlocState
   -- ^ Program-wide log message template from the main module's YAML
   -- @log-template@ field. Per-label overrides live in 'ManifoldConfig';
   -- the resolution order is per-label > this field > built-in default.
+  , stateBenchTemplate :: Maybe BenchTemplate
+  -- ^ Program-wide benchmark summary row from the main module's YAML
+  -- @benchmark-template@ field. Program-wide only: the nexus renders every
+  -- benchmarked label's aggregate through this one row shape.
   , stateRunLog :: Maybe RunLogTemplate
   -- ^ Run-scope log templates from the main module's YAML @prologue@
   -- and @epilogue@ fields. The nexus renders @prologue@ at run start
@@ -278,14 +282,18 @@ data MorlocState = MorlocState
   -- ^ Module-level description lines (from docstrings before module declaration)
   , stateModuleEpilogues :: [[Text]]
   -- ^ Epilogue blocks for the top-level help output
-  , stateSerialAncestors :: Set.Set TVar
-  -- ^ General-type names of records currently being lowered by
-  -- 'makeSerialAST''. Used to detect guarded self-recursive records:
-  -- on the way down we insert the FVar's general name; if we hit it
-  -- again, we emit 'SerialRec' instead of expanding the cycle. The
-  -- field is reset to empty at every top-level 'makeSerialAST' call
-  -- and saved/restored around each NamF descent, so it never leaks
-  -- across unrelated invocations.
+  , stateVariantAncestors :: Set.Set (TVar, [TypeU])
+  -- ^ `data` type INSTANTIATIONS whose arms are currently being resolved
+  -- to a target language: the type's name paired with its applied type
+  -- arguments, empty for a type that takes none. A field naming one of
+  -- these is left opaque instead of expanded, which is what terminates
+  -- recursion THROUGH a container (@data Rose = Rose [Rose]@) as well as
+  -- a bare self-reference.
+  --
+  -- The arguments are part of the key because a name alone does not
+  -- identify a type: the inner @Box Int@ of a @Box (Box Int)@ is not the
+  -- outer one, and leaving it opaque would say the value contains
+  -- itself.
   }
   deriving (Show)
 
@@ -899,6 +907,7 @@ instance Defaultable MorlocState where
       , stateStreamElems = Map.empty
       , stateManifoldConfig = Map.empty
       , stateLogTemplate = Nothing
+      , stateBenchTemplate = Nothing
       , stateRunLog = Nothing
       , stateHashIncludePaths = []
       , stateSourceMap = Map.empty
@@ -933,7 +942,7 @@ instance Defaultable MorlocState where
       , stateDebugTrace = False
       , stateModuleDoc = []
       , stateModuleEpilogues = []
-      , stateSerialAncestors = Set.empty
+      , stateVariantAncestors = Set.empty
       }
 
 instance Defaultable PackageMeta where

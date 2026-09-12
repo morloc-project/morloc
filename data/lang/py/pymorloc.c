@@ -141,6 +141,21 @@ static PyObject* PyMorlocInternalError = NULL;
     goto error; \
     }
 
+// PyTRY for the machinery that carries values between pools: IPC, packet
+// construction and decode. These failures are not attributable to user data
+// or foreign-function behavior and leave the pool unable to continue, so
+// they raise PyMorlocInternalError -- which derives from BaseException and
+// so passes straight through `_mlc_catch`'s `except Exception:` -- rather
+// than the catchable RuntimeError that PyTRY raises.
+#define PyTRY_INFRA(fun, ...) \
+    fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
+    if(child_errmsg_ != NULL){ \
+        PyErr_Format(PyMorlocInternalError, \
+                     "morloc internal error (Py pool, %s:%d in %s):\n%s", \
+                     __FILE__, __LINE__, __func__, child_errmsg_); \
+        goto error; \
+    }
+
 #define PARSE_ARGS_OR_ABORT(args, fmt, ...) \
     if (!PyArg_ParseTuple((args), (fmt), __VA_ARGS__)) { \
         PyINTERNAL_ABORT("PyArg_ParseTuple failed"); \
@@ -180,7 +195,7 @@ error:
 
 
 
-// ── Recursive-record env (named-schema stack) ─────────────────────────────
+// -- Recursive-record env (named-schema stack) -----------------------------
 //
 // Schemas built from wire forms like `&4Treem25valuej8childrena^4Tree`
 // carry a `name` on the outer (`Tree`) declaration and on every Recur
@@ -243,6 +258,8 @@ static int schema_to_npy_type(morloc_serial_type type) {
         case MORLOC_SINT32:  return NPY_INT32;
         case MORLOC_SINT64:  return NPY_INT64;
         case MORLOC_UINT8:   return NPY_UINT8;
+        // An enum is a tag byte, so it maps to uint8 like any other.
+        case MORLOC_ENUM:    return NPY_UINT8;
         case MORLOC_UINT16:  return NPY_UINT16;
         case MORLOC_UINT32:  return NPY_UINT32;
         case MORLOC_UINT64:  return NPY_UINT64;
@@ -250,6 +267,26 @@ static int schema_to_npy_type(morloc_serial_type type) {
         case MORLOC_FLOAT64: return NPY_FLOAT64;
         default:             return -1;
     }
+}
+
+// Resolve a constructor name against a variant schema's key list, yielding
+// its tag. The tag is the constructor's position in the declaration, which
+// is what the wire carries; the keys arrive in that same order.
+static ssize_t variant_tag_of(const Schema* schema, PyObject* name) {
+    if (!PyUnicode_Check(name)) {
+        PyErr_SetString(PyExc_RuntimeError,
+            "a `data` value's first element must be its constructor name");
+        return -1;
+    }
+    const char* want = PyUnicode_AsUTF8(name);
+    if (!want) return -1;
+    for (size_t i = 0; i < schema->size; i++) {
+        if (schema->keys[i] && strcmp(schema->keys[i], want) == 0) {
+            return (ssize_t)i;
+        }
+    }
+    PyErr_Format(PyExc_RuntimeError, "'%s' is not a constructor of this type", want);
+    return -1;
 }
 
 PyObject* from_voidstar(const Schema* schema, const void* data, const void* base_ptr){ MAYFAIL
@@ -280,6 +317,12 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
             obj = PyLong_FromLongLong(*(int64_t*)data);
             break;
         case MORLOC_UINT8:
+            obj = PyLong_FromUnsignedLong(*(uint8_t*)data);
+            break;
+        // The runtime hands back the ordinal and the generated pool code
+        // wraps it in the enum class. Keeping the Python class out of the
+        // C runtime is what lets a bare [DNA] stay a raw buffer.
+        case MORLOC_ENUM:
             obj = PyLong_FromUnsignedLong(*(uint8_t*)data);
             break;
         case MORLOC_UINT16:
@@ -400,6 +443,11 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
                     case MORLOC_SINT32:  numpy_type_num = NPY_INT32; break;
                     case MORLOC_SINT64:  numpy_type_num = NPY_INT64; break;
                     case MORLOC_UINT8:   numpy_type_num = NPY_UINT8; break;
+                    // A [DNA] stays a compact uint8 buffer. Falling to the
+                    // NPY_OBJECT path below would build one Python object
+                    // per element, which is exactly what the one-byte form
+                    // exists to avoid.
+                    case MORLOC_ENUM:    numpy_type_num = NPY_UINT8; break;
                     case MORLOC_UINT16:  numpy_type_num = NPY_UINT16; break;
                     case MORLOC_UINT32:  numpy_type_num = NPY_UINT32; break;
                     case MORLOC_UINT64:  numpy_type_num = NPY_UINT64; break;
@@ -494,8 +542,17 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
                 }
                 // Note: Similar to the numpy case, we don't want to give ownership to Python.
                 // The bytearray is created from a copy of the data, so no additional handling is needed.
-            } else if (schema->parameters[0]->type == MORLOC_UINT8) {
+            } else if (schema->parameters[0]->type == MORLOC_UINT8
+                       || schema->parameters[0]->type == MORLOC_ENUM) {
                 // Default for UInt8 arrays when hint is "bytes" or absent.
+                //
+                // An enum array takes the same path: its elements are tag
+                // bytes, so the wire buffer is already the right shape. The
+                // alternative -- one Python object per element -- is what
+                // the one-byte form exists to avoid, and over a genomic
+                // [DNA] it is the difference between usable and not. The
+                // caller sees ordinals; the generated pool code is where an
+                // enum identity is reattached if one is wanted.
                 obj = PyBytes_FromStringAndSize((const char*)absptr, array->size);
                 if (obj == NULL) {
                     PyRAISE("Failed to one bytes")
@@ -555,6 +612,53 @@ PyObject* from_voidstar(const Schema* schema, const void* data, const void* base
                 Py_DECREF(key);
                 Py_DECREF(value);
             }
+            break;
+        }
+        case MORLOC_VARIANT: {
+            // A payload-bearing `data` value: a tag byte then a relptr to the
+            // arm's fields. It crosses as a STRUCTURAL pair -- the
+            // constructor's name and a tuple of its fields -- because the
+            // generic marshaller has no access to a pool-level class. See the
+            // note on the Python/R variant spelling in the code generator:
+            // this is a documented interim form, not the intended end state.
+            uint8_t tag = *(const uint8_t*)data;
+            if ((size_t)tag >= schema->size) {
+                PyErr_Format(PyExc_RuntimeError,
+                    "variant tag %u is out of range; the type has %zu arms",
+                    (unsigned)tag, schema->size);
+                goto error;
+            }
+            Schema* arm = schema->parameters[tag];
+            PyObject* name = PyUnicode_FromString(schema->keys[tag]);
+            if (!name) goto error;
+
+            PyObject* fields = NULL;
+            relptr_t vrelptr = *(const relptr_t*)((const char*)data + 8);
+            if (vrelptr == RELNULL) {
+                fields = PyTuple_New(0);
+            } else {
+                const void* payload;
+                if (base_ptr) {
+                    payload = (const char*)base_ptr + vrelptr;
+                } else {
+                    char* errmsg_v = NULL;
+                    payload = rel2abs(vrelptr, &errmsg_v);
+                    if (errmsg_v) {
+                        PyErr_SetString(PyExc_RuntimeError, errmsg_v);
+                        free(errmsg_v);
+                        Py_DECREF(name);
+                        goto error;
+                    }
+                }
+                // The arm's schema describes its fields as a tuple, so the
+                // existing walk over that shape builds the field sequence.
+                fields = from_voidstar(arm, payload, base_ptr);
+            }
+            if (!fields) { Py_DECREF(name); goto error; }
+            obj = PyTuple_Pack(2, name, fields);
+            Py_DECREF(name);
+            Py_DECREF(fields);
+            if (!obj) goto error;
             break;
         }
         case MORLOC_OPTIONAL: {
@@ -691,6 +795,7 @@ static ssize_t get_shm_size_inner(const Schema* schema, PyObject* obj) {
         case MORLOC_UINT64:
         case MORLOC_FLOAT32:
         case MORLOC_FLOAT64:
+        case MORLOC_ENUM:
             return schema->width;
         case MORLOC_INT: {
             // Inline BigInt: 16 bytes for common case, more for overflow
@@ -761,6 +866,7 @@ static ssize_t get_shm_size_inner(const Schema* schema, PyObject* obj) {
                         case MORLOC_UINT64:
                         case MORLOC_FLOAT32:
                         case MORLOC_FLOAT64:
+                        case MORLOC_ENUM:
                             required_size += list_size * element_width;
                             break;
                         case MORLOC_IFILE:
@@ -909,9 +1015,32 @@ static ssize_t get_shm_size_inner(const Schema* schema, PyObject* obj) {
                 return (ssize_t)required_size;
             }
 
+        case MORLOC_VARIANT: {
+            // ("Circle", (fields...)): the 16-byte slot, worst-case padding
+            // before the payload, and the payload's own size. A nullary arm
+            // has no payload and needs only the slot.
+            if (!PyTuple_Check(obj) || PyTuple_Size(obj) != 2) {
+                PyErr_SetString(PyExc_RuntimeError,
+                    "expected a (constructor, fields) pair for a `data` value");
+                return -1;
+            }
+            ssize_t vtag = variant_tag_of(schema, PyTuple_GetItem(obj, 0));
+            if (vtag < 0) return -1;
+            PyObject* vfields = PyTuple_GetItem(obj, 1);
+            const Schema* varm = schema->parameters[vtag];
+            if (varm->size == 0) {
+                return (ssize_t)schema->width;
+            }
+            ssize_t arm_size = get_shm_size((Schema*)varm, vfields);
+            if (arm_size == -1) return -1;
+            size_t varm_align = schema_alignment((Schema*)varm);
+            if (varm_align == 0) varm_align = 1;
+            return (ssize_t)schema->width + (ssize_t)(varm_align - 1) + arm_size;
+        }
+
         case MORLOC_OPTIONAL:
-            // Slot is sizeof(relptr) (= schema->width). Absent → just the slot.
-            // Present → slot + worst-case alignment padding for the inner T +
+            // Slot is sizeof(relptr) (= schema->width). Absent -> just the slot.
+            // Present -> slot + worst-case alignment padding for the inner T +
             // T's own total size (which already includes inner.width and any
             // variable extras T contributes).
             if (obj == Py_None) {
@@ -994,6 +1123,26 @@ static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schem
         case MORLOC_UINT8:
             HANDLE_UINT_TYPE(uint8_t, PyLong_AsUnsignedLongLong, UINT8_MAX);
             break;
+        // The bound is the constructor count, not UINT8_MAX: a tag no
+        // constructor claims is a type error, and saying which values are
+        // legal is possible because the schema carries their names.
+        case MORLOC_ENUM: {
+            if (!PyLong_Check(obj)) {
+                PyErr_Format(PyExc_TypeError,
+                    "Expected an enum member (int) but got %s", Py_TYPE(obj)->tp_name);
+                goto error;
+            }
+            unsigned long long tag = PyLong_AsUnsignedLongLong(obj);
+            if (PyErr_Occurred() || tag >= (unsigned long long)schema->size) {
+                PyErr_Clear();
+                PyErr_Format(PyExc_ValueError,
+                    "enum tag %llu is out of range; the type has %zu constructors",
+                    tag, schema->size);
+                goto error;
+            }
+            *(uint8_t*)dest = (uint8_t)tag;
+            break;
+        }
         case MORLOC_UINT16:
             HANDLE_UINT_TYPE(uint16_t, PyLong_AsUnsignedLongLong, UINT16_MAX);
             break;
@@ -1296,8 +1445,43 @@ static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schem
             }
             break;
 
+        case MORLOC_VARIANT: {
+            // Tag byte, determined padding, then a relptr to the arm's
+            // fields written at the cursor. A nullary arm writes RELNULL and
+            // allocates nothing, matching the wire form.
+            if (!PyTuple_Check(obj) || PyTuple_Size(obj) != 2) {
+                PyErr_SetString(PyExc_RuntimeError,
+                    "expected a (constructor, fields) pair for a `data` value");
+                goto error;
+            }
+            ssize_t wtag = variant_tag_of(schema, PyTuple_GetItem(obj, 0));
+            if (wtag < 0) goto error;
+            PyObject* wfields = PyTuple_GetItem(obj, 1);
+            const Schema* warm = schema->parameters[wtag];
+            *((uint8_t*)dest) = (uint8_t)wtag;
+            memset((char*)dest + 1, 0, 7);
+            if (warm->size == 0) {
+                *(relptr_t*)((char*)dest + 8) = RELNULL;
+            } else {
+                size_t warm_align = schema_alignment((Schema*)warm);
+                if (warm_align == 0) warm_align = 1;
+                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, warm_align);
+                {
+                    char* rel_err = NULL;
+                    *(relptr_t*)((char*)dest + 8) = abs2rel(*cursor, &rel_err);
+                    if (rel_err) { free(rel_err); goto error; }
+                }
+                void* arm_dest = *cursor;
+                *cursor = (void*)((char*)*cursor + warm->width);
+                if (to_voidstar_inner(arm_dest, cursor, warm, wfields) != 0) {
+                    goto error;
+                }
+            }
+            break;
+        }
+
         case MORLOC_OPTIONAL:
-            // The slot is a relptr. Absent → write RELNULL. Present →
+            // The slot is a relptr. Absent -> write RELNULL. Present ->
             // align the cursor for the inner T, write the inner's relptr
             // into the slot, advance the cursor past T's width, then
             // recurse to fill T's body (T may push the cursor further
@@ -1381,7 +1565,7 @@ error:
 }
 
 
-// ── log emission bridge to libmorloc.so ──────────────────────────────────
+// -- log emission bridge to libmorloc.so ----------------------------------
 
 static PyObject* pybinding__log_next_id(PyObject* self, PyObject* args) {
     (void)self; (void)args;
@@ -1401,8 +1585,20 @@ static PyObject* pybinding__log_emit(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
+static PyObject* pybinding__bench_record(PyObject* self, PyObject* args) {
+    const char* key;
+    double seconds;
+    (void)self;
+    // key accepts None (an unmeasured label), which libmorloc treats as a no-op.
+    if (!PyArg_ParseTuple(args, "zd", &key, &seconds)) {
+        return NULL;
+    }
+    morloc_bench_record(key, seconds);
+    Py_RETURN_NONE;
+}
 
-// ── cache bridge to libmorloc.so ─────────────────────────────────────────
+
+// -- cache bridge to libmorloc.so -----------------------------------------
 
 static PyObject* pybinding__pool_hash(PyObject* self, PyObject* args) {
     (void)self; (void)args;
@@ -1862,7 +2058,7 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
     // convert to a relative pointer conserved between language servers
     relptr_t relptr = PyTRY(abs2rel, voidstar);
 
-    packet = PyTRY(make_data_packet_auto, voidstar, relptr, schema);
+    packet = PyTRY_INFRA(make_data_packet_auto, voidstar, relptr, schema);
 
     {
         const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
@@ -1926,7 +2122,7 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
 
     // Arrow dispatch: if packet format is Arrow, import via C Data Interface
     if (format == PACKET_FORMAT_ARROW) {
-        voidstar = PyTRY(get_morloc_data_packet_value, (uint8_t*)packet, schema);
+        voidstar = PyTRY_INFRA(get_morloc_data_packet_value, (uint8_t*)packet, schema);
 
         const arrow_shm_header_t* arrow_hdr = (const arrow_shm_header_t*)voidstar;
 
@@ -1964,19 +2160,36 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
             "nn", (Py_ssize_t)&arrow_array, (Py_ssize_t)&arrow_schema);
         Py_DECREF(rb_class);
 
-        // Incref shm so it stays alive while pyarrow references the buffers
-        char* incref_err = NULL;
-        shincref((absptr_t)voidstar, &incref_err);
-        if (incref_err) { free(incref_err); }
-        shm_tracker_push((absptr_t)voidstar, NULL);
+        // Keep the block alive while pyarrow references its buffers. A table
+        // that arrived by reference needs one taken on this pool's behalf; a
+        // table materialized here is already this pool's own and taking a
+        // second reference would leave it permanently held. Either way the
+        // tracker releases exactly one at the next dispatch, and a refused
+        // acquire means nothing was taken, so nothing is tracked.
+        bool arrow_owned = true;
+        if (source == PACKET_SOURCE_RPTR) {
+            char* incref_err = NULL;
+            arrow_owned = shincref((absptr_t)voidstar, &incref_err);
+            if (incref_err) { free(incref_err); }
+        }
+        if (arrow_owned) {
+            shm_tracker_push((absptr_t)voidstar, NULL);
+        }
 
         free_schema(schema);
         if (!obj) return NULL;
         return obj;
     }
 
-    // Fast path: inline voidstar -- read directly from packet, no SHM needed
-    if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR) {
+    // Fast path: inline voidstar -- read directly from packet, no SHM
+    // needed. A payload that is compressed or encrypted cannot be walked
+    // where it lies, so it falls through to the general path, which expands
+    // the body and re-enters. Testing for the plain values rather than
+    // against the known transforms keeps a future one from being read as
+    // raw bytes.
+    if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR
+        && header->command.data.compression == PACKET_COMPRESSION_NONE
+        && header->command.data.encryption == PACKET_ENCRYPTION_NONE) {
         const uint8_t* payload = (const uint8_t*)packet + sizeof(morloc_packet_header_t) + header->offset;
         obj = from_voidstar(schema, (const void*)payload, (const void*)payload);
         PyTRACE(obj == NULL)
@@ -2055,15 +2268,24 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
     // SHM paths (RPTR or MESG+MSGPACK)
     bool is_rptr = (source == PACKET_SOURCE_RPTR);
 
-    voidstar = PyTRY(get_morloc_data_packet_value, (uint8_t*)packet, schema);
+    voidstar = PyTRY_INFRA(get_morloc_data_packet_value, (uint8_t*)packet, schema);
 
     // For RPTR data, increment refcount so the owner's tracker flush
     // won't destroy data we may still need (e.g. forwarded packets).
     if (is_rptr) {
         char* incref_err = NULL;
-        shincref((absptr_t)voidstar, &incref_err);
+        if (shincref((absptr_t)voidstar, &incref_err)) {
+            // Track for deferred decref (tracker takes schema ownership)
+            shm_tracker_push((absptr_t)voidstar, schema);
+            tracked = true;
+        }
         if (incref_err) { free(incref_err); }
-        // Track for deferred decref (tracker takes schema ownership)
+    } else {
+        // A payload that did not arrive by reference was materialized into a
+        // block of this pool's own, and nothing else will free it. It is
+        // handed to the tracker rather than released here because a result
+        // can be a view onto these bytes rather than a copy of them, so the
+        // block has to outlive this call exactly as a referenced one does.
         shm_tracker_push((absptr_t)voidstar, schema);
         tracked = true;
     }
@@ -2283,7 +2505,7 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
         Py_DECREF(item);
     }
 
-    packet = PyTRY(make_morloc_local_call_packet, (uint32_t)mid, arg_packets, (size_t)nargs);
+    packet = PyTRY_INFRA(make_morloc_local_call_packet, (uint32_t)mid, arg_packets, (size_t)nargs);
 
     free(arg_packets);
     arg_packets = NULL;
@@ -2299,9 +2521,9 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
     if (child_errmsg_ != NULL) {
         char* prior_err = get_prior_err();
         if (prior_err == NULL) {
-            PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_);
+            PyErr_Format(PyMorlocInternalError, "morloc internal error (Py pool, %s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_);
         } else {
-            PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_);
+            PyErr_Format(PyMorlocInternalError, "%s\nmorloc internal error (Py pool, %s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_);
             free(prior_err);
         }
         goto error;
@@ -2337,9 +2559,8 @@ static PyObject* pybinding__foreign_call(PyObject* self, PyObject* args) { MAYFA
             void* res_voidstar = rel2abs(relptr, &resolve_err);
             if (resolve_err) { free(resolve_err); resolve_err = NULL; }
             if (res_voidstar) {
-                char* incref_err = NULL;
-                shincref((absptr_t)res_voidstar, &incref_err);
-                if (incref_err) { free(incref_err); }
+                // The callee took a reference before sending; it is ours
+                // now. Inherit it rather than adding another.
                 shm_tracker_push((absptr_t)res_voidstar, NULL);
             }
         }
@@ -2862,7 +3083,7 @@ error:
     return NULL;
 }
 
-// ── Stream-handle bindings ──────────────────────────────────────────────
+// -- Stream-handle bindings ----------------------------------------------
 
 static PyObject* pybinding__mlc_open(PyObject* self, PyObject* args) { MAYFAIL
     const char* path;
@@ -2895,18 +3116,36 @@ error:
 // Fallible-first order matches the intrinsic type `@catch fallible fallback`.
 // Narrows to Exception (not BaseException) so KeyboardInterrupt / SystemExit
 // / GeneratorExit propagate as the user expects.
-static PyObject* pybinding__mlc_catch(PyObject* self, PyObject* args) { MAYFAIL
-    PyObject* fallible; PyObject* fallback;
-    PARSE_ARGS_OR_ABORT(args, "OO", &fallible, &fallback);
-    PyObject* r = PyObject_CallObject(fallible, NULL);
-    if (r == NULL) {
-        if (!PyErr_ExceptionMatches(PyExc_Exception)) {
-            return NULL;
-        }
-        PyErr_Clear();
-        r = PyObject_CallObject(fallback, NULL);
+// @try body: run the thunk and convert the outcome to data. `ok` wraps the
+// value, `err` the message; codegen supplies both because only it knows how
+// this Try is represented in Python.
+//
+// The catch is narrowed to Exception, so KeyboardInterrupt, SystemExit and
+// PyMorlocInternalError -- all BaseException-derived -- propagate instead of
+// becoming an Err arm.
+static PyObject* pybinding__mlc_try(PyObject* self, PyObject* args) { MAYFAIL
+    PyObject* body; PyObject* ok; PyObject* err;
+    PARSE_ARGS_OR_ABORT(args, "OOO", &body, &ok, &err);
+    PyObject* v = PyObject_CallObject(body, NULL);
+    if (v != NULL) {
+        PyObject* wrapped = PyObject_CallFunctionObjArgs(ok, v, NULL);
+        Py_DECREF(v);
+        return wrapped;
     }
-    return r;
+    if (!PyErr_ExceptionMatches(PyExc_Exception)) {
+        return NULL;
+    }
+    PyObject *etype, *evalue, *etrace;
+    PyErr_Fetch(&etype, &evalue, &etrace);
+    PyErr_NormalizeException(&etype, &evalue, &etrace);
+    PyObject* msg = evalue ? PyObject_Str(evalue) : PyUnicode_FromString("");
+    Py_XDECREF(etype); Py_XDECREF(evalue); Py_XDECREF(etrace);
+    if (msg == NULL) {
+        return NULL;
+    }
+    PyObject* wrapped = PyObject_CallFunctionObjArgs(err, msg, NULL);
+    Py_DECREF(msg);
+    return wrapped;
 error:
     return NULL;
 }
@@ -3282,6 +3521,7 @@ error:
 static PyMethodDef Methods[] = {
     {"log_next_id", pybinding__log_next_id, METH_NOARGS, "Allocate a fresh log call id"},
     {"log_emit", pybinding__log_emit, METH_VARARGS, "Emit a formatted log line via libmorloc"},
+    {"bench_record", pybinding__bench_record, METH_VARARGS, "Record one benchmark timing via libmorloc"},
     {"pool_hash", pybinding__pool_hash, METH_NOARGS, "Return the pool's source fingerprint"},
     {"cache_path", pybinding__cache_path, METH_VARARGS, "Resolve per-label cache directory"},
     {"cache_lookup", pybinding__cache_lookup, METH_VARARGS, "Cache lookup; returns bytes or None"},
@@ -3342,7 +3582,7 @@ static PyMethodDef Methods[] = {
     {"mlc_tmpfile", pybinding__mlc_tmpfile, METH_NOARGS, "Create a temp file for the whole-form gather"},
     {"mlc_unlink_tmp", pybinding__mlc_unlink_tmp, METH_VARARGS, "Unlink a registered temp file"},
     {"mlc_throw", pybinding__mlc_throw, METH_VARARGS, "Raise a MorlocException with the given message"},
-    {"mlc_catch", pybinding__mlc_catch, METH_VARARGS, "Evaluate fallible; on exception, evaluate fallback"},
+    {"mlc_try", pybinding__mlc_try, METH_VARARGS, "Evaluate body; wrap the value with ok, or a caught message with err"},
     {NULL, NULL, 0, NULL} // this is a sentinel value
 };
 

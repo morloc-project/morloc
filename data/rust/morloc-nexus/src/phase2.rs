@@ -21,6 +21,7 @@
 use clap::{Arg as ClapArg, ArgAction, ArgGroup, ArgMatches, Command as ClapCommand};
 
 use crate::dispatch::{preprocess_cli_value, ArgValue};
+use morloc_runtime_types::schema::{parse_schema, SerialType};
 use morloc_manifest::{Arg as ManifestArg, Command as ManifestCommand, Manifest, Return, Terminal};
 
 /// Leak a string into a `&'static str` for clap's static-only
@@ -479,7 +480,7 @@ fn build_command_args(
     for (i, marg) in mcmd.args.iter().enumerate() {
         let id: &'static str = leak(&format!("arg{}", i));
         match marg {
-            ManifestArg::Positional { many, stdin, .. } => {
+            ManifestArg::Positional { many, stdin, schema, metavar, key, .. } => {
                 // Positionals are rendered by `render_positional_block`
                 // (above, via `after_help`) so clap's bracketed
                 // `<argN>` default doesn't appear in help. They still
@@ -488,10 +489,27 @@ fn build_command_args(
                 // guarantees it is the last positional, so an optional
                 // trailing positional is unambiguous for clap); when
                 // omitted the nexus injects the `/dev/stdin` sentinel.
+                //
+                // An optional argument may be left out, and omitting it means
+                // null. That convention is not something `?T` says by itself --
+                // the type is a claim about the value, not about the slot -- it
+                // is adopted so the parser agrees with `--json-help` and the MCP
+                // tool shapes, which have always reported an optional argument
+                // as not required. The compiler guarantees such a positional is
+                // trailing.
+                let optional = crate::json_help::schema_is_optional(schema.as_deref());
                 let mut a = ClapArg::new(id)
-                    .required(!stdin)
+                    .required(!stdin && !optional)
                     .index(pos_idx as usize)
                     .hide(true);
+                // Name the slot in clap's own diagnostics. The rendered help
+                // uses `render_positional_block`, but a parse error comes from
+                // clap and would otherwise read `<arg0>`.
+                if let Some(m) = metavar {
+                    a = a.value_name(leak(m));
+                } else if !key.is_empty() {
+                    a = a.value_name(leak(key));
+                }
                 // Variadic positional: accept one or more tokens.
                 // The compiler guarantees a `many` positional is the
                 // last positional, which is clap's requirement too.
@@ -510,6 +528,7 @@ fn build_command_args(
                 desc,
                 many,
                 format,
+                schema,
                 ..
             } => {
                 let mut a = ClapArg::new(id).action(ArgAction::Set);
@@ -525,7 +544,8 @@ fn build_command_args(
                     a = a.value_name(leak(m));
                 }
                 if let Some(d) = default_val {
-                    a = a.default_value(leak(d));
+                    let ctor_typed = crate::json_help::schema_constructor_line(schema.as_deref()).is_some();
+                    a = a.default_value(leak(&shown_default(d, ctor_typed)));
                 }
                 if *many {
                     // Variadic option: collect every value supplied
@@ -533,7 +553,13 @@ fn build_command_args(
                     // passed after a single occurrence (`--xs 1 2 3`).
                     a = a.num_args(1..).action(ArgAction::Append);
                 }
-                a = a.help(leak(&render_arg_help(desc, type_desc.as_deref(), None, format.as_deref())));
+                a = a.help(leak(&render_arg_help(
+                    desc,
+                    type_desc.as_deref(),
+                    None,
+                    format.as_deref(),
+                    crate::json_help::schema_constructor_line(schema.as_deref()),
+                )));
                 cmd = cmd.arg(a);
             }
             ManifestArg::Flag {
@@ -565,6 +591,7 @@ fn build_command_args(
                     desc,
                     Some("Bool"),
                     default_val.as_deref(),
+                    None,
                     None,
                 )));
                 cmd = cmd.arg(fwd);
@@ -599,6 +626,7 @@ fn build_command_args(
                 metavar,
                 type_desc,
                 desc,
+                schema,
                 ..
             } => {
                 // The optional whole-record JSON option.
@@ -623,14 +651,69 @@ fn build_command_args(
                         type_desc.as_deref(),
                         None,
                         None,
+                        None,
                     )));
                     cmd = cmd.arg(a);
                 }
                 // Per-field entries.
                 for (j, entry) in entries.iter().enumerate() {
                     let eid: &'static str = leak(&format!("{}_entry{}", id, j));
-                    cmd = add_group_entry_arg(cmd, eid, &entry.arg);
+                    let ctor_line = crate::json_help::group_entry_constructor_line(
+                        schema.as_deref(),
+                        &entry.key,
+                    );
+                    cmd = add_group_entry_arg(cmd, eid, &entry.arg, ctor_line);
                 }
+            }
+            ManifestArg::Alt { arms, required, default_val, type_desc, .. } => {
+                // One option per constructor, all in one exclusive group.
+                // An argument-free constructor is a bare flag; one with
+                // fields takes exactly that many values, named by type.
+                let mut members: Vec<&'static str> = Vec::with_capacity(arms.len());
+                for (j, arm) in arms.iter().enumerate() {
+                    let aid: &'static str = leak(&format!("{}_arm{}", id, j));
+                    let mut a = ClapArg::new(aid).long(leak(&arm.long));
+                    if arm.fields.is_empty() {
+                        a = a.action(ArgAction::SetTrue);
+                    } else {
+                        let names: Vec<&'static str> = arm
+                            .fields
+                            .iter()
+                            .map(|f| leak(f.type_desc.as_deref().unwrap_or("VALUE")))
+                            .collect();
+                        a = a
+                            .action(ArgAction::Set)
+                            .num_args(arm.fields.len())
+                            .value_names(names);
+                    }
+                    let mut lines: Vec<String> = arm
+                        .desc
+                        .iter()
+                        .filter(|d| !d.trim().is_empty())
+                        .cloned()
+                        .collect();
+                    // What the arm is one of, and what happens when none is
+                    // given: the choice is required, or falls to a default,
+                    // or the argument is left null.
+                    let standing = match (required, default_val) {
+                        (true, _) => "one is required".to_string(),
+                        (false, Some(d)) => format!("default: {}", shown_default(d, true)),
+                        (false, None) => "none means null".to_string(),
+                    };
+                    match type_desc {
+                        Some(td) => lines.push(format!("one of {}'s constructors; {}", td, standing)),
+                        None => lines.push(standing),
+                    }
+                    a = a.help(leak(&lines.join("\n")));
+                    cmd = cmd.arg(a);
+                    members.push(aid);
+                }
+                let gid: &'static str = leak(&format!("{}_alt", id));
+                let mut grp = ArgGroup::new(gid).multiple(false).required(*required);
+                for m in members {
+                    grp = grp.arg(m);
+                }
+                cmd = cmd.group(grp);
             }
         }
     }
@@ -672,7 +755,12 @@ fn add_terminal_flags(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapComma
 
 /// Add a clap arg representing one group entry (which is itself an
 /// Optional or Flag manifest [`Arg`]).
-fn add_group_entry_arg(mut cmd: ClapCommand, id: &'static str, marg: &ManifestArg) -> ClapCommand {
+fn add_group_entry_arg(
+    mut cmd: ClapCommand,
+    id: &'static str,
+    marg: &ManifestArg,
+    ctor_line: Option<String>,
+) -> ClapCommand {
     match marg {
         ManifestArg::Optional {
             long_opt,
@@ -697,9 +785,15 @@ fn add_group_entry_arg(mut cmd: ClapCommand, id: &'static str, marg: &ManifestAr
                 a = a.value_name(leak(m));
             }
             if let Some(d) = default_val {
-                a = a.default_value(leak(d));
+                a = a.default_value(leak(&shown_default(d, ctor_line.is_some())));
             }
-            a = a.help(leak(&render_arg_help(desc, type_desc.as_deref(), None, format.as_deref())));
+            a = a.help(leak(&render_arg_help(
+                desc,
+                type_desc.as_deref(),
+                None,
+                format.as_deref(),
+                ctor_line,
+            )));
             cmd = cmd.arg(a);
         }
         ManifestArg::Flag {
@@ -724,6 +818,7 @@ fn add_group_entry_arg(mut cmd: ClapCommand, id: &'static str, marg: &ManifestAr
                 desc,
                 Some("Bool"),
                 default_val.as_deref(),
+                None,
                 None,
             )));
             cmd = cmd.arg(fwd);
@@ -804,13 +899,17 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                     let v = preprocess_cli_value(raw, checks, *source, *q, &format!("argument #{}", i));
                     out.push(ArgValue::Value(v));
                 } else {
-                    // Required positional: clap guaranteed a value.
-                    let val = matches
-                        .get_one::<String>(&id)
-                        .cloned()
-                        .expect("clap-required positional must have a value");
-                    let v = preprocess_cli_value(val, checks, *source, *q, &format!("argument #{}", i));
-                    out.push(ArgValue::Value(v));
+                    // A value is guaranteed for a required positional; an
+                    // optional one may be absent, and absent means null. The
+                    // null is pushed bare: with no argv token there is nothing
+                    // for the checks or the source/form shape to act on.
+                    match matches.get_one::<String>(&id).cloned() {
+                        Some(val) => {
+                            let v = preprocess_cli_value(val, checks, *source, *q, &format!("argument #{}", i));
+                            out.push(ArgValue::Value(v));
+                        }
+                        None => out.push(ArgValue::Null),
+                    }
                 }
             }
             ManifestArg::Optional {
@@ -953,6 +1052,55 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                     defaults,
                 });
             }
+            ManifestArg::Alt { arms, default_val, .. } => {
+                // The chosen arm becomes the JSON the type's wire form reads:
+                // the bare name for an argument-free constructor, the name
+                // keyed to its values otherwise. Each value is read the way
+                // any argument of its type is, then rendered back to JSON,
+                // so a file, a bare constructor or a string token all land
+                // in the right form. No arm given means the default, or
+                // null for an argument that may be omitted.
+                let mut chosen: Option<String> = None;
+                for (j, arm) in arms.iter().enumerate() {
+                    let aid = format!("{}_arm{}", id, j);
+                    if arm.fields.is_empty() {
+                        if matches.get_flag(&aid) {
+                            chosen = Some(serde_json::to_string(&arm.ctor).unwrap_or_default());
+                            break;
+                        }
+                    } else if let Some(vals) = matches.get_many::<String>(&aid) {
+                        let mut fields_json: Vec<String> = Vec::with_capacity(arm.fields.len());
+                        for (v, f) in vals.zip(arm.fields.iter()) {
+                            let js = match f.schema.as_deref() {
+                                Some(sch) => {
+                                    let tok = arm_field_token(v, sch);
+                                    match crate::dispatch::cli_token_to_json(&tok, sch) {
+                                        Ok(js) => js,
+                                        Err(e) => crate::runlog::die_with_error(&format!(
+                                            "--{}: {}", arm.long, e
+                                        )),
+                                    }
+                                }
+                                None => v.clone(),
+                            };
+                            fields_json.push(js);
+                        }
+                        chosen = Some(format!(
+                            "{{{}:[{}]}}",
+                            serde_json::to_string(&arm.ctor).unwrap_or_default(),
+                            fields_json.join(",")
+                        ));
+                        break;
+                    }
+                }
+                match chosen {
+                    Some(js) => out.push(ArgValue::Value(js)),
+                    None => match default_val {
+                        Some(d) => out.push(ArgValue::Value(d.clone())),
+                        None => out.push(ArgValue::Null),
+                    },
+                }
+            }
         }
     }
     out
@@ -1036,6 +1184,46 @@ pub(crate) fn first_desc(desc: &[String]) -> &str {
         .unwrap_or("")
 }
 
+/// A constructor field's token, given the readings a positional of the
+/// same type gets before it is parsed: a string field takes the token as
+/// the string itself, the way a `Str` positional is quoted, and a real
+/// field takes `inf`/`nan` spellings.
+fn arm_field_token(tok: &str, schema: &str) -> String {
+    if crate::dispatch::schema_is_float_scalar(schema) {
+        if let Some(js) = crate::dispatch::maybe_float_special_to_json(tok) {
+            return js;
+        }
+    }
+    let is_str = parse_schema(schema).ok().map_or(false, |s| match s.serial_type {
+        SerialType::String => true,
+        SerialType::Optional => s
+            .parameters
+            .first()
+            .map_or(false, |p| p.serial_type == SerialType::String),
+        _ => false,
+    });
+    if is_str {
+        crate::dispatch::quoted(tok)
+    } else {
+        tok.to_string()
+    }
+}
+
+/// The default as the command line shows and accepts it. The manifest
+/// stores a constructor default as the JSON string the machine views need;
+/// on the command line a constructor is a bare word, so that is the form
+/// clap is given -- it is both what help prints and what is parsed when the
+/// option is absent.
+fn shown_default(default_val: &str, ctor_typed: bool) -> String {
+    let d = default_val.trim();
+    let is_quoted = d.len() >= 2 && d.starts_with('"') && d.ends_with('"');
+    if is_quoted && ctor_typed {
+        d[1..d.len() - 1].to_string()
+    } else {
+        default_val.to_string()
+    }
+}
+
 /// Render the help block for a manifest arg: the user's docstring
 /// description, followed on indented continuation lines by the arg's
 /// morloc type and, for flags with a declared default, the default
@@ -1048,6 +1236,7 @@ fn render_arg_help(
     type_desc: Option<&str>,
     default_val: Option<&str>,
     format_hint: Option<&str>,
+    ctor_line: Option<String>,
 ) -> String {
     let mut lines: Vec<String> = desc
         .iter()
@@ -1059,6 +1248,11 @@ fn render_arg_help(
             lines.push(format!("type: {}", td));
         }
     }
+    // A `data` type's name says nothing about which words are legal here.
+    let is_ctor_typed = ctor_line.is_some();
+    if let Some(l) = ctor_line {
+        lines.push(l);
+    }
     if let Some(f) = format_hint {
         if !f.trim().is_empty() {
             lines.push(format!("format: {}", f));
@@ -1066,7 +1260,15 @@ fn render_arg_help(
     }
     if let Some(d) = default_val {
         if !d.trim().is_empty() {
-            lines.push(format!("default: {}", d));
+            // A constructor is typed bare on the command line, so its
+            // default is shown the way it is typed, not as the JSON string
+            // the manifest stores it as.
+            let shown = if is_ctor_typed {
+                d.trim().trim_matches('"')
+            } else {
+                d
+            };
+            lines.push(format!("default: {}", shown));
         }
     }
     lines.join("\n")
@@ -1083,6 +1285,8 @@ fn render_arg_help(
 ///   1:  the first thing
 ///       type: UInt8
 ///   2:  type: [UInt8]
+///   3:  type: Color
+///       values: Red, Green, Blue
 /// ```
 ///
 /// Returns the empty string when the command has no positionals.
@@ -1120,11 +1324,13 @@ fn render_positional_block(mcmd: &ManifestCommand) -> String {
     for (i, marg) in positionals.iter().enumerate() {
         let prefix = format!("  {:<width$}  ", labels[i], width = label_width);
         let cont = " ".repeat(prefix.len());
-        let (type_desc, desc, format_hint) = match marg {
-            ManifestArg::Positional { type_desc, desc, format, .. } => (
+        let (type_desc, desc, format_hint, schema, stdin) = match marg {
+            ManifestArg::Positional { type_desc, desc, format, schema, stdin, .. } => (
                 type_desc.as_deref(),
                 desc.as_slice(),
                 format.as_deref(),
+                schema.as_deref(),
+                *stdin,
             ),
             _ => unreachable!("filtered to Positional only"),
         };
@@ -1138,10 +1344,21 @@ fn render_positional_block(mcmd: &ManifestCommand) -> String {
                 lines.push(format!("type: {}", td));
             }
         }
+        // A `data` type's name says nothing about which words are legal
+        // here, and this slot is where a person is about to type one.
+        if let Some(l) = crate::json_help::schema_constructor_line(schema) {
+            lines.push(l);
+        }
         if let Some(f) = format_hint {
             if !f.trim().is_empty() {
                 lines.push(format!("format: {}", f));
             }
+        }
+        // Say that a slot may be left out. The type line shows `?T`, which
+        // states that the value may be null but not that the argument may be
+        // dropped; this is the only place on a terminal that says so.
+        if !stdin && crate::json_help::schema_is_optional(schema) {
+            lines.push(String::from("optional: omit for null"));
         }
         if lines.is_empty() {
             // Nothing to say beyond the index marker; emit just that
@@ -1199,8 +1416,8 @@ mod tests {
                     "needed_pools": [0],
                     "desc": ["Add two integers"],
                     "args": [
-                        {"kind": "pos", "schema": "i8", "type": "Int", "metavar": "X", "quoted": false, "desc": [], "constraints": [], "metadata": {}},
-                        {"kind": "pos", "schema": "i8", "type": "Int", "metavar": "Y", "quoted": false, "desc": [], "constraints": [], "metadata": {}}
+                        {"kind": "pos", "key": "_1", "schema": "i8", "type": "Int", "metavar": "X", "quoted": false, "desc": [], "constraints": [], "metadata": {}},
+                        {"kind": "pos", "key": "_2", "schema": "i8", "type": "Int", "metavar": "Y", "quoted": false, "desc": [], "constraints": [], "metadata": {}}
                     ],
                     "return": {"schema": "i8", "type": "Int", "desc": [], "constraints": [], "metadata": {}},
                     "constraints": [],
@@ -1221,13 +1438,14 @@ mod tests {
             Some("Int"),
             None,
             None,
+            None,
         );
         assert_eq!(h, "Take the first integer\ntype: Int");
 
         // Empty description: the type line becomes the first line
         // so help reads as a compact list of facts without a
         // placeholder "missing description" line above the type.
-        let h = render_arg_help(&[], Some("Real"), None, None);
+        let h = render_arg_help(&[], Some("Real"), None, None, None);
         assert_eq!(h, "type: Real");
 
         // Multi-line description preserves every non-empty line in
@@ -1235,6 +1453,7 @@ mod tests {
         let h = render_arg_help(
             &["first".into(), "second".into()],
             Some("Str"),
+            None,
             None,
             None,
         );
@@ -1246,12 +1465,13 @@ mod tests {
             Some("Bool"),
             Some("false"),
             None,
+            None,
         );
         assert_eq!(h, "Verbose output\ntype: Bool\ndefault: false");
 
         // Empty type_desc / default are suppressed (no trailing
         // blank lines in the rendered help).
-        let h = render_arg_help(&["just a desc".into()], None, None, None);
+        let h = render_arg_help(&["just a desc".into()], None, None, None, None);
         assert_eq!(h, "just a desc");
 
         // Format hint slots in between type and default.
@@ -1260,11 +1480,60 @@ mod tests {
             Some("Str"),
             None,
             Some("must be the path of an existing readable file"),
+            None,
         );
         assert_eq!(
             h,
             "readable file path\ntype: Str\nformat: must be the path of an existing readable file"
         );
+    }
+
+    #[test]
+    fn arg_help_names_a_data_types_constructors() {
+        use crate::json_help::{group_entry_constructor_line, schema_constructor_line};
+
+        // An argument-free constructor is the value a person types, so
+        // the closed set is listed as values.
+        let h = render_arg_help(
+            &[],
+            Some("Color"),
+            None,
+            None,
+            schema_constructor_line(Some("e33Red5Green4Blue")),
+        );
+        assert_eq!(h, "type: Color\nvalues: Red, Green, Blue");
+
+        // Neither an optional nor a list changes which names are legal.
+        assert_eq!(
+            schema_constructor_line(Some("ae33Red5Green4Blue")).as_deref(),
+            Some("values: Red, Green, Blue")
+        );
+        assert_eq!(
+            schema_constructor_line(Some("?e33Red5Green4Blue")).as_deref(),
+            Some("values: Red, Green, Blue")
+        );
+
+        // A payload-bearing constructor is a shape rather than a word, so
+        // it is listed with the number of fields it takes.
+        assert_eq!(
+            schema_constructor_line(Some("v36Circle1f84Rect2f8f83Dot0")).as_deref(),
+            Some("constructors: Circle/1, Rect/2, Dot")
+        );
+
+        // A record the CLI destructured into options: the entry's own
+        // schema is the parameter under its key.
+        assert_eq!(
+            group_entry_constructor_line(Some("m14basee33Red5Green4Blue"), "base").as_deref(),
+            Some("values: Red, Green, Blue")
+        );
+        assert_eq!(
+            group_entry_constructor_line(Some("m14basee33Red5Green4Blue"), "missing"),
+            None
+        );
+
+        // A type with no constructor set adds no line.
+        let h = render_arg_help(&[], Some("Int"), None, None, schema_constructor_line(Some("i4")));
+        assert_eq!(h, "type: Int");
     }
 
     #[test]
@@ -1296,8 +1565,8 @@ mod tests {
                     "needed_pools": [0],
                     "desc": ["Search"],
                     "args": [
-                        {"kind": "pos", "schema": "s", "type": "Str", "metavar": "PATTERN", "quoted": false, "desc": ["the text to find"], "constraints": [], "metadata": {}},
-                        {"kind": "pos", "schema": "s", "type": "Str", "quoted": false, "desc": ["where to look"], "constraints": [], "metadata": {}}
+                        {"kind": "pos", "key": "_1", "schema": "s", "type": "Str", "metavar": "PATTERN", "quoted": false, "desc": ["the text to find"], "constraints": [], "metadata": {}},
+                        {"kind": "pos", "key": "_2", "schema": "s", "type": "Str", "quoted": false, "desc": ["where to look"], "constraints": [], "metadata": {}}
                     ],
                     "return": {"schema": "s", "type": "Str", "desc": [], "constraints": [], "metadata": {}},
                     "constraints": [],
@@ -1413,7 +1682,7 @@ mod tests {
                     "needed_pools": [0],
                     "desc": [],
                     "args": [
-                        {"kind": "opt", "schema": "s", "type": "Str", "metavar": "NAME", "quoted": false, "short": "n", "long": "name", "default": "world", "desc": [], "constraints": [], "metadata": {}}
+                        {"kind": "opt", "key": "name", "schema": "s", "type": "Str", "metavar": "NAME", "quoted": false, "short": "n", "long": "name", "default": "world", "desc": [], "constraints": [], "metadata": {}}
                     ],
                     "return": {"schema": "s", "type": "Str", "desc": [], "constraints": [], "metadata": {}},
                     "constraints": [],
@@ -1458,7 +1727,7 @@ mod tests {
                     "needed_pools": [0],
                     "desc": [],
                     "args": [
-                        {"kind": "flag", "short": "v", "long": "verbose", "long_rev": null, "default": "false", "desc": [], "metadata": {}}
+                        {"kind": "flag", "key": "verbose", "short": "v", "long": "verbose", "long_rev": null, "default": "false", "desc": [], "metadata": {}}
                     ],
                     "return": {"schema": "z", "type": "Unit", "desc": [], "constraints": [], "metadata": {}},
                     "constraints": [],
@@ -1516,7 +1785,7 @@ mod tests {
                     "needed_pools": [0],
                     "desc": [],
                     "args": [
-                        {"kind": "pos", "schema": "s", "type": "Str", "metavar": "S", "quoted": true, "desc": [], "constraints": [], "metadata": {}}
+                        {"kind": "pos", "key": "_1", "schema": "s", "type": "Str", "metavar": "S", "quoted": true, "desc": [], "constraints": [], "metadata": {}}
                     ],
                     "return": {"schema": "s", "type": "Str", "desc": [], "constraints": [], "metadata": {}},
                     "constraints": [],
@@ -1563,7 +1832,7 @@ mod tests {
                     "needed_pools": [0],
                     "desc": [],
                     "args": [
-                        {"kind": "opt", "schema": "s", "type": "Str", "metavar": "S", "quoted": true, "short": "y", "long": "yolo", "default": "\"yolo\"", "desc": [], "constraints": [], "metadata": {}}
+                        {"kind": "opt", "key": "yolo", "schema": "s", "type": "Str", "metavar": "S", "quoted": true, "short": "y", "long": "yolo", "default": "\"yolo\"", "desc": [], "constraints": [], "metadata": {}}
                     ],
                     "return": {"schema": "i8", "type": "Int", "desc": [], "constraints": [], "metadata": {}},
                     "constraints": [],
@@ -1617,14 +1886,15 @@ mod tests {
                     "args": [
                         {
                             "kind": "grp",
+                            "key": "opts",
                             "schema": "m22m1Int52m1Int5",
                             "type": "AlgConfig",
                             "metavar": "ALG_CONFIG",
                             "desc": [],
                             "group_opt": {"short": null, "long": "alg-config"},
                             "entries": [
-                                {"key": "m", "arg": {"kind": "opt", "schema": "i4", "type": "Int", "metavar": "INT", "quoted": false, "short": "m", "long": null, "default": "0", "desc": [], "constraints": [], "metadata": {}}},
-                                {"key": "n", "arg": {"kind": "opt", "schema": "i4", "type": "Int", "metavar": "INT", "quoted": false, "short": "n", "long": "nosy", "default": "0", "desc": [], "constraints": [], "metadata": {}}}
+                                {"key": "m", "arg": {"kind": "opt", "key": "m", "schema": "i4", "type": "Int", "metavar": "INT", "quoted": false, "short": "m", "long": null, "default": "0", "desc": [], "constraints": [], "metadata": {}}},
+                                {"key": "n", "arg": {"kind": "opt", "key": "n", "schema": "i4", "type": "Int", "metavar": "INT", "quoted": false, "short": "n", "long": "nosy", "default": "0", "desc": [], "constraints": [], "metadata": {}}}
                             ],
                             "constraints": [],
                             "metadata": {}

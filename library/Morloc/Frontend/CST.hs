@@ -128,6 +128,11 @@ data CstExpr
   | CAccessorE CstAccessorBody
   | CInterpE Text [Loc CstExpr] [Text] Text
   | CGuardExprE [(Loc CstExpr, Loc CstExpr)] (Loc CstExpr)
+  -- | @match scrutinee | p1 = b1 | p2 = b2@. The clause list has the same
+  -- shape as a `|`-definition's, so both lower through the same machinery;
+  -- the only difference is that a match binds one scrutinee with a `let`
+  -- where a definition abstracts over fresh formals.
+  | CMatchE !(Loc CstExpr) [([Loc CstExpr], Loc CstExpr)]
   | CIntrinsicE Text  -- ^ @name intrinsic reference (text is the name without @)
   | CParenE !(Loc CstExpr)  -- ^ parenthesized expression (preserves grouping for BopE chains)
   | CUnderscoreE  -- ^ '_' -- only legal in binding positions, checked in Desugar
@@ -156,6 +161,14 @@ data CstTypeDef
   | CstTypeAliasForward (TVar, [Either (TVar, Kind) TypeU])
   | CstNamTypeWhere NamType (TVar, [Either (TVar, Kind) TypeU]) [(Located, Key, TypeU)]
   | CstNamTypeLegacy (Maybe Located) NamType (TVar, [Either (TVar, Kind) TypeU]) (Text, Bool, [TypeU]) [(Located, Key, TypeU)]
+  -- | A `data` declaration. Each entry is a constructor: its source
+  -- position, its name, and its argument types. Stage 1 accepts only
+  -- argument-free constructors; the list is carried so that the arity
+  -- check reports at the offending constructor rather than the
+  -- declaration, and so payload arms need no grammar change later.
+  | CstDataDef (TVar, [Either (TVar, Kind) TypeU]) [(Located, Located, Text, [TypeU])]
+  -- ^ Each constructor: the `=` or `|` introducing it (where its docstring
+  -- attaches), its own token, its name, and its field types.
   deriving (Show, Eq)
 
 data CstClassHead
@@ -190,12 +203,16 @@ data CstIrrefPat
 -- contain literals, so a well-typed receiver need not match -- hence
 -- "refutable". Built by 'Morloc.Frontend.Desugar.exprToRefutPat' from an
 -- expression in a `|`-clause, then lowered into a nested 'IfE' cascade of
--- equality tests (Eq's '==') and 'Selector' projections. Constructor
--- patterns are deferred until sum types introduce term-level constructors.
+-- equality tests (Eq's '==') and 'Selector' projections.
+--
+-- A constructor pattern is the one arm that does NOT lower to '=='. It
+-- becomes an 'IntrTagTest', which asks only whether the value carries that
+-- constructor's tag; see the note on 'IntrTagTest'.
 data CstRefutPat
   = CRPatVar EVar                            -- ^ x
   | CRPatWild                                -- ^ _
   | CRPatLit (Loc CstExpr)                   -- ^ literal: 0, 1.5, "s", True
+  | CRPatCon EVar [Loc CstRefutPat]          -- ^ a `data` constructor: Red, (Circle r)
   | CRPatTup [Loc CstRefutPat]               -- ^ (p1, ..., pn), n >= 2
   | CRPatRec [(Key, Loc CstRefutPat)]        -- ^ {a=p1, b=p2}
   | CRPatAs EVar (Loc CstRefutPat)           -- ^ label@pat

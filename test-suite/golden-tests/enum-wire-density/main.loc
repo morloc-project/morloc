@@ -1,0 +1,59 @@
+-- The representation claim, asserted rather than assumed: a nullary `data`
+-- costs one byte, and `[DNA]` is byte-for-byte a `[U8]` in shared memory.
+--
+-- This is the whole reason the enum tier exists. A four-letter alphabet
+-- should cost what a byte costs -- strictly better than Python's 24-byte
+-- ints, and no worse than characters -- which requires three things to hold
+-- at once:
+--
+--   * the schema's width is 1 and `is_fixed_width()` is true, so
+--   * `array_data_is_flat()` is true for `[DNA]`, so the array takes the
+--     bulk-memcpy path and the 64-byte-aligned data buffer that primitive
+--     numerics get, rather than the per-element walk, and
+--   * nothing in the pool materializes one object per base.
+--
+-- `sizeParity` is the load-bearing assertion: the same data measured as
+-- [DNA] and as [U8] must occupy the same number of bytes. If the enum ever
+-- becomes boxed, or picks up a per-element indirection the way Optional
+-- has, this is the test that says so -- the other exports would all still
+-- pass.
+--
+-- `countPurines` runs the whole buffer through a pool without naming a
+-- constructor, so a regression that turns the array into a list of enum
+-- objects shows up as time rather than as a wrong answer.
+
+module main
+  ( sizeAsEnum
+  , sizeAsBytes
+  , sizeParity
+  , countPurines
+  , decodeHead
+  , roundTripLength
+  )
+
+import root-py
+
+data DNA = A | C | G | T
+
+source Py from "density.py"
+  ( "byte_size"      as sizeAsEnum
+  , "byte_size"      as sizeAsBytes
+  , "count_purines"  as countPurines
+  , "head_base"      as decodeHead
+  , "identity"       as idBases
+  )
+
+sizeAsEnum  :: [DNA] -> Int
+sizeAsBytes :: [U8] -> Int
+countPurines :: [DNA] -> Int
+decodeHead :: [DNA] -> DNA
+idBases :: [DNA] -> [DNA]
+
+-- Both sides measure the same four values, once through the enum schema
+-- and once through the plain byte schema. Equal by construction if the
+-- enum is a byte; unequal the moment it is not.
+sizeParity :: [DNA] -> [U8] -> Bool
+sizeParity xs ys = sizeAsEnum xs == sizeAsBytes ys
+
+roundTripLength :: [DNA] -> Int
+roundTripLength xs = length (idBases xs)

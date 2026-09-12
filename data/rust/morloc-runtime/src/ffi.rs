@@ -156,16 +156,28 @@ pub unsafe extern "C" fn shcalloc(
     ffi_try!(errmsg, ptr::null_mut(), shm::shcalloc(nmemb, size).map(|p| p as *mut c_void))
 }
 
+/// Report blocks currently held across every mapped volume. Writes the
+/// block count and byte total through the out pointers, and prints a
+/// size-class breakdown to stderr.
 #[no_mangle]
-pub unsafe extern "C" fn shrealloc(
-    ptr: *mut c_void,
-    size: usize,
-    errmsg: *mut *mut c_char,
-) -> *mut c_void {
-    // TODO: implement shrealloc in shm.rs
-    let _ = (ptr, size);
-    set_errmsg(errmsg, &MorlocError::Shm("shrealloc not yet implemented".into()));
-    ptr::null_mut()
+pub unsafe extern "C" fn mlc_shm_live_report(
+    out_blocks: *mut usize,
+    out_bytes: *mut usize,
+) {
+    let mut hist = [0usize; 40];
+    let (blocks, bytes) = shm::live_block_stats(&mut hist);
+    if !out_blocks.is_null() {
+        *out_blocks = blocks;
+    }
+    if !out_bytes.is_null() {
+        *out_bytes = bytes;
+    }
+    eprintln!("shm live: {} blocks, {} bytes", blocks, bytes);
+    for (i, n) in hist.iter().enumerate() {
+        if *n > 0 {
+            eprintln!("  size < 2^{:<2} : {} blocks", i, n);
+        }
+    }
 }
 
 #[no_mangle]
@@ -511,6 +523,34 @@ fn calc_voidstar_size_inner_walk(
                     }
                 }
                 Ok(size)
+            }
+            SerialType::Variant => {
+                // A variant slot is a tag plus a relptr to the arm's fields,
+                // so its flattened size is the slot, worst-case padding
+                // before the payload, and the payload's own total. A nullary
+                // arm has no payload and needs only the slot.
+                //
+                // Without this the walk would fall through to the slot width
+                // alone and the flatten buffer would be too small for any arm
+                // that carries fields.
+                let tag = *data;
+                let arm = schema.parameters.get(tag as usize).ok_or_else(|| {
+                    MorlocError::Serialization(format!(
+                        "variant tag {} is out of range; the type has {} arms",
+                        tag, schema.size
+                    ))
+                })?;
+                let relptr = *(data.add(8) as *const shm::RelPtr);
+                if relptr == shm::RELNULL {
+                    Ok(schema.width)
+                } else {
+                    let payload = shm::rel2abs(relptr)?;
+                    let align = arm.alignment().max(1);
+                    let prefix = schema.width.saturating_add(align - 1);
+                    let child_bound = upper_bound.saturating_sub(prefix);
+                    let inner = calc_voidstar_size_with_env(payload, arm, env, child_bound)?;
+                    Ok(prefix.saturating_add(inner))
+                }
             }
             SerialType::Optional => {
                 // Optional is now a single relptr (schema.width = sizeof(RelPtr)).

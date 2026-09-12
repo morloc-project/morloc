@@ -1,0 +1,114 @@
+-- Schema comparison at the stream-file boundary must ignore per-language
+-- concrete-type hints.
+--
+-- A type whose general name is not a builtin base type gets a `<hint>`
+-- prefix in the pool's schema string: a record declared `record py => T
+-- = "dict"` becomes `a<dict>m...`, and `type Tag = Str` becomes
+-- `a<str>s`. Every packet writer stores the hint-free form, so any
+-- comparison that is a raw string equality against the pool's schema can
+-- never match for such a type.
+--
+-- Every function here forces its body into the py pool (the list
+-- operations come from root-py), which is what makes the pool's
+-- hint-bearing schema the one that reaches the runtime. The same code
+-- evaluated at the nexus takes a different path that normalizes first,
+-- so a nexus-only version of this test passes even when the pool one
+-- does not.
+--
+-- Two boundaries are covered because both compared schema strings
+-- raw: `@append` on a file, and a stream arriving on stdin.
+
+module main
+  ( appendRecord
+  , appendAlias
+  , appendMany
+  , readMismatch
+  , produceEv
+  , readEv
+  )
+
+import root-py
+
+record Ev where
+  kind :: Str
+  id :: Int
+
+record py => Ev = "dict"
+
+record Other where
+  alpha :: Str
+  beta :: Int
+
+record py => Other = "dict"
+
+type Tag = Str
+
+-- Record elements carry `<dict>`. Create, close, append, read back.
+appendRecord :: Str -> <IO> [Ev]
+appendRecord path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Ev))
+  @write 0 o (filter (\e -> .id e > 0) [{kind = "a", id = 1}])
+  @close o
+  Ok o2 <- @append path :: <IO> (Try Str (OStream Ev))
+  @write 0 o2 (filter (\e -> .id e > 0) [{kind = "b", id = 2}])
+  @close o2
+  Ok f <- @open path :: <IO> (Try Str (IFile [Ev]))
+  .[:] f
+
+-- A `type X = Str` alias carries `<str>`, so hints are not a record-only
+-- concern.
+appendAlias :: Str -> <IO> [Tag]
+appendAlias path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Tag))
+  @write 0 o (filter (\t -> size t > 0) ["one"])
+  @close o
+  Ok o2 <- @append path :: <IO> (Try Str (OStream Tag))
+  @write 0 o2 (filter (\t -> size t > 0) ["two"])
+  @close o2
+  Ok f <- @open path :: <IO> (Try Str (IFile [Tag]))
+  .[:] f
+
+-- Repeated appends: the resume cursor must survive more than one round.
+appendMany :: Str -> <IO> Int
+appendMany path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Ev))
+  @write 0 o (filter (\e -> .id e > 0) [{kind = "a", id = 1}])
+  @close o
+  add path 2
+  add path 3
+  Ok f <- @open path :: <IO> (Try Str (IFile [Ev]))
+  Ok n <- @flen f
+  n
+  where
+    add :: Str -> Int -> <IO> ()
+    add p n = do
+      Ok o <- @append p :: <IO> (Try Str (OStream Ev))
+      @write 0 o (filter (\e -> .id e > 0) [{kind = "z", id = n}])
+      @close o
+
+-- A record stream crossing stdin. The nexus compares the opener's
+-- declared schema against the incoming packet's; the opener's carries
+-- `<dict>` and the packet's does not.
+produceEv :: Int -> [Ev]
+produceEv n = filter (\e -> .id e > 0) [{kind = "p", id = n}, {kind = "q", id = n + 1}]
+
+--' Read records from a file, or from stdin when the path is omitted.
+readEv ::
+  --' @stdin
+  Str ->
+  <IO> [Ev]
+readEv f = do
+  Ok s <- @open f :: <IO> (Try Str (IStream Ev))
+  Ok xs <- @next s
+  filter (\e -> .id e > 0) xs
+
+-- Ignoring the hint must not make the check vacuous: a genuinely
+-- different element type is still a mismatch.
+readMismatch :: Str -> <IO> [Other]
+readMismatch path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Ev))
+  @write 0 o (filter (\e -> .id e > 0) [{kind = "a", id = 1}])
+  @close o
+  Ok s <- @open path :: <IO> (Try Str (IStream Other))
+  Ok _tailv18 <- @next s
+  _tailv18

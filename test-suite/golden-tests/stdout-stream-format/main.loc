@@ -26,9 +26,9 @@ module main
 
 import root-py
 
-streamInts :: <IO, Err> ()
+streamInts :: <IO> ()
 streamInts = do
-  o <- @stdout :: <IO, Err> OStream Int
+  o <- @stdout :: <IO> OStream Int
   @write 0 o [1, 2, 3]
   @flush o
   @write 0 o [4, 5]
@@ -37,9 +37,9 @@ streamInts = do
 returnInts :: [Int]
 returnInts = [1, 2, 3, 4, 5]
 
-streamStrs :: <IO, Err> ()
+streamStrs :: <IO> ()
 streamStrs = do
-  o <- @stdout :: <IO, Err> OStream Str
+  o <- @stdout :: <IO> OStream Str
   @write 0 o ["alpha", "beta"]
   @flush o
   @write 0 o ["gamma"]
@@ -51,9 +51,9 @@ returnStrs = ["alpha", "beta", "gamma"]
 -- Elements that themselves contain JSON brackets/commas: stresses the
 -- incremental-array assembly (only the outer list `[` / `]` per
 -- sub-packet is stripped; the tuple's own delimiters must survive).
-streamPairs :: <IO, Err> ()
+streamPairs :: <IO> ()
 streamPairs = do
-  o <- @stdout :: <IO, Err> OStream (Str, Int)
+  o <- @stdout :: <IO> OStream (Str, Int)
   @write 0 o [("a", 1), ("bb", 2)]
   @flush o
   @write 0 o [("ccc", 3)]
@@ -64,9 +64,9 @@ returnPairs = [("a", 1), ("bb", 2), ("ccc", 3)]
 
 -- Empty stream: open + close with no @write. Under -f json this must
 -- render as `[]` (one empty array), under -f jsonl as no output.
-streamEmpty :: <IO, Err> ()
+streamEmpty :: <IO> ()
 streamEmpty = do
-  o <- @stdout :: <IO, Err> OStream Int
+  o <- @stdout :: <IO> OStream Int
   @close o
 
 returnEmpty :: [Int]

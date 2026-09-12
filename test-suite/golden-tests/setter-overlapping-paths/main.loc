@@ -1,0 +1,30 @@
+-- A setter writes each of its paths into one rebuilt value, so no path may
+-- lead through another. Replacing a field and replacing something inside that
+-- field name two different results for the same slot, and there is no reading
+-- of the pair that uses both values.
+
+module main (bad)
+
+type Py => Real = "float"
+
+record Point = Point
+  { x :: Real
+  , y :: Real
+  }
+record Py => Point = "dict"
+
+record Line = Line
+  { start :: Point
+  , stop :: Point
+  }
+record Py => Line = "dict"
+
+source Py from "lib.py" ("ident")
+
+ident :: a -> a
+
+origin :: Point
+origin = {x = 0.0, y = 0.0}
+
+bad :: Line -> Line
+bad l = .(.start = origin, .start.x = 1.0) (ident l)

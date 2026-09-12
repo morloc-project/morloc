@@ -125,6 +125,11 @@ pub unsafe extern "C" fn pool_dispatch_packet(
         let args = (*call).args as *const *const u8;
         let nargs = (*call).nargs;
 
+        // Tag the dispatch so @tmpfile's registry can tell this call's files
+        // from a concurrent call's. The previous id is restored rather than
+        // cleared: pool_dispatch_packet can run under a daemon dispatch.
+        let (temp_owner, prev_temp_owner) = crate::intrinsics::begin_dispatch();
+
         let dispatch_fn = if is_local { local_dispatch } else { remote_dispatch };
         let result = dispatch_fn(mid, args, nargs, ctx);
 
@@ -133,7 +138,7 @@ pub unsafe extern "C" fn pool_dispatch_packet(
         // Remove any whole-form gather temp files this call left registered
         // (e.g. a handler that raised before its @close(path)). Success-path
         // temps are already gone via @close(path).
-        crate::intrinsics::sweep_call_temps();
+        crate::intrinsics::end_dispatch(temp_owner, prev_temp_owner);
 
         // Reclaim any stdio singleton (@stdout/@stderr/@stdin) this dispatch
         // left open -- e.g. an exception unwound past @close on a broken

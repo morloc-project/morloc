@@ -412,7 +412,7 @@ impl<'a> ArgShape<'a> {
                     list_checks: list_checks.as_slice(),
                 })
             }
-            Arg::Flag { .. } | Arg::Group { .. } => None,
+            Arg::Flag { .. } | Arg::Group { .. } | Arg::Alt { .. } => None,
         }
     }
 
@@ -878,6 +878,41 @@ pub enum ArgValue {
 }
 
 
+/// Read one command-line token as a value of the given wire schema and
+/// render it back as JSON. This is how a constructor's field values are
+/// folded into the constructor's JSON: a token is read exactly as an
+/// argument of that type would be (a file, a bare constructor, a string),
+/// so the assembled value is the one the type's reader accepts.
+pub fn cli_token_to_json(token: &str, schema: &str) -> Result<String, String> {
+    extern "C" {
+        fn cli_token_to_json(
+            token: *const std::ffi::c_char,
+            schema: *const std::ffi::c_char,
+            errmsg: *mut *mut std::ffi::c_char,
+        ) -> *mut std::ffi::c_char;
+        fn free(p: *mut std::ffi::c_void);
+    }
+    let tok_c = std::ffi::CString::new(token).map_err(|e| e.to_string())?;
+    let sch_c = std::ffi::CString::new(schema).map_err(|e| e.to_string())?;
+    let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
+    unsafe {
+        let out = cli_token_to_json(tok_c.as_ptr(), sch_c.as_ptr(), &mut errmsg);
+        if out.is_null() {
+            let msg = if errmsg.is_null() {
+                "could not read value".to_string()
+            } else {
+                let m = std::ffi::CStr::from_ptr(errmsg).to_string_lossy().into_owned();
+                free(errmsg as *mut std::ffi::c_void);
+                m
+            };
+            return Err(msg);
+        }
+        let js = std::ffi::CStr::from_ptr(out).to_string_lossy().into_owned();
+        free(out as *mut std::ffi::c_void);
+        Ok(js)
+    }
+}
+
 /// Route a single positional value through the C-side parser. Picks
 /// the shape-aware FFI when the arg has any non-default
 /// `source:` / `form:` / `list.*` configuration; otherwise falls back
@@ -959,6 +994,7 @@ fn run_remote_command(
             data: *const u8, schema: *const morloc_runtime_types::cschema::CSchema,
             errmsg: *mut *mut std::ffi::c_char,
         ) -> *mut u8;
+        fn shfree(ptr: *mut std::ffi::c_void, errmsg: *mut *mut std::ffi::c_char) -> bool;
     }
 
     let socket = &sockets[cmd.pool_index];
@@ -1125,9 +1161,14 @@ fn run_remote_command(
                 pkt
             }
             ArgValue::Value(_) | ArgValue::Null => {
-                let raw_str = match arg_val {
-                    ArgValue::Value(s) => s.clone(),
-                    ArgValue::Null => "null".to_string(),
+                // An absent argument carries no argv token, and the
+                // source/form/check vocabulary describes how to read a token.
+                // Applying it to the stand-in `null` would ask the runtime to
+                // open a file of that name for a `source: file` argument, so a
+                // null is dispatched shapeless.
+                let (raw_str, shape) = match arg_val {
+                    ArgValue::Value(s) => (s.clone(), ArgShape::from_arg(arg_def)),
+                    ArgValue::Null => ("null".to_string(), None),
                     _ => unreachable!(),
                 };
                 let raw_str = if schema_is_float_scalar(schema_str) {
@@ -1135,7 +1176,6 @@ fn run_remote_command(
                 } else {
                     raw_str
                 };
-                let shape = ArgShape::from_arg(arg_def);
                 let json_str = apply_shape_to_argv(raw_str, shape.as_ref(), i);
                 let json_c = std::ffi::CString::new(json_str.as_str()).unwrap();
                 let c_arg = unsafe {
@@ -1274,6 +1314,8 @@ fn run_remote_command(
         process::clean_exit(1);
     }
 
+    die_on_top_level_err(result_ptr, &return_schema, c_schema);
+
     // Check if response is Arrow format
     let is_arrow = resp_header.is_data() && unsafe { resp_header.command.data.format } == packet::PACKET_FORMAT_ARROW;
 
@@ -1284,7 +1326,65 @@ fn run_remote_command(
     // `@stdout` and returns Unit doesn't get a phantom packet appended
     // past its stream footer. `--keep-null` overrides in both cases.
     print_result_c(result_ptr, c_schema, &full_packet, is_arrow, config);
+
+    // A result that arrived in shared memory came with a reference taken on
+    // this process's behalf, and one extracted from an inline packet was
+    // materialized here; either way the block is ours once it has been
+    // rendered. The process exits shortly after, so this reclaims little --
+    // but a receiver that keeps what it was handed is the contract every
+    // other consumer follows.
+    unsafe {
+        let mut ferr: *mut std::ffi::c_char = std::ptr::null_mut();
+        shfree(result_ptr as *mut std::ffi::c_void, &mut ferr);
+        if !ferr.is_null() {
+            libc::free(ferr as *mut std::ffi::c_void);
+        }
+    }
     unsafe { morloc_runtime_types::cschema::CSchema::free(c_schema) };
+}
+
+/// A top-level `Err` arm is a failed run, not a successful result that
+/// happens to describe a failure. Without this the process prints the Err
+/// value and exits 0, which breaks `set -e`, shell pipelines and CI for
+/// every fallible export.
+///
+/// The whole value is rendered rather than just the payload: an arm may
+/// carry anything, and the JSON form is the one every other morloc surface
+/// already shows.
+fn die_on_top_level_err(
+    result_ptr: *mut u8,
+    return_schema: &morloc_runtime_types::schema::Schema,
+    c_schema: *const morloc_runtime_types::cschema::CSchema,
+) {
+    extern "C" {
+        fn mlc_show(
+            voidstar: *const std::ffi::c_void,
+            schema: *const morloc_runtime_types::cschema::CSchema,
+            errmsg: *mut *mut std::ffi::c_char,
+        ) -> *mut std::ffi::c_char;
+    }
+    if morloc_runtime_types::schema::SerialType::Variant != return_schema.serial_type {
+        return;
+    }
+    let tag = unsafe { *result_ptr } as usize;
+    if !return_schema.keys.get(tag).map(|k| k == "Err").unwrap_or(false) {
+        return;
+    }
+    let mut show_err: *mut std::ffi::c_char = std::ptr::null_mut();
+    let rendered = unsafe {
+        let out = mlc_show(result_ptr as *const std::ffi::c_void, c_schema, &mut show_err);
+        if out.is_null() {
+            process::take_c_errmsg(show_err).unwrap_or_else(|| "unknown error".into())
+        } else {
+            let text = std::ffi::CStr::from_ptr(out).to_string_lossy().into_owned();
+            libc::free(out as *mut std::ffi::c_void);
+            text
+        }
+    };
+    crate::runlog::record_error(&rendered);
+    eprintln!("Error: run failed\n{}", rendered);
+    // No CSchema free: clean_exit does not return.
+    process::clean_exit(1);
 }
 
 /// Print using the C library functions for correct voidstar handling.
@@ -1821,10 +1921,12 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
                 )
             },
             _ => {
-                let raw_str = match arg_val {
-                    ArgValue::Value(s) => s.clone(),
-                    ArgValue::Null => "null".to_string(),
-                    ArgValue::Group { .. } => "null".to_string(),
+                // See the sibling branch above: a null has no token, so it is
+                // dispatched without the arg's source/form/check shape.
+                let (raw_str, shape) = match arg_val {
+                    ArgValue::Value(s) => (s.clone(), ArgShape::from_arg(arg_def)),
+                    ArgValue::Null => ("null".to_string(), None),
+                    ArgValue::Group { .. } => ("null".to_string(), None),
                     ArgValue::Many { .. } => unreachable!(),
                 };
                 let raw_str = if schema_is_float_scalar(schema_str) {
@@ -1832,7 +1934,6 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
                 } else {
                     raw_str
                 };
-                let shape = ArgShape::from_arg(arg_def);
                 let json_str = apply_shape_to_argv(raw_str, shape.as_ref(), i);
                 let json_c = std::ffi::CString::new(json_str.as_str()).unwrap();
                 let c_arg = unsafe {
@@ -1899,7 +2000,14 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
 
     // Extract voidstar value from the result packet
     let result_ptr = unsafe { get_morloc_data_packet_value(pkt_bytes.as_ptr(), c_return_schema, &mut errmsg) };
+    if result_ptr.is_null() {
+        let msg = process::take_c_errmsg(errmsg)
+            .unwrap_or_else(|| "unknown error".into());
+        eprintln!("Error: failed to extract result: {}", msg);
+        process::clean_exit(1);
+    }
 
+    die_on_top_level_err(result_ptr, &return_schema, c_return_schema);
     print_result_c(result_ptr, c_return_schema, &pkt_bytes, false, config);
 
     // Cleanup

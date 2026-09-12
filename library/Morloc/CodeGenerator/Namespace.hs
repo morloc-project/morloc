@@ -143,6 +143,8 @@ module Morloc.CodeGenerator.Namespace
   , CmdArg (..)
   , CmdDocSet (..)
   , RecDocSet (..)
+  , AltDocSet (..)
+  , AltArm (..)
   , ArgOptDocSet (..)
   , ArgFlagDocSet (..)
   , ArgPosDocSet (..)
@@ -194,6 +196,20 @@ data TypeF
   -- (e.g. C++ rendering) must look it up in cscope using the TVar,
   -- not read the CVar directly.
   | RecF FVar
+  -- | A `data` type whose constructors take no arguments: the type's
+  -- name, the type arguments it is applied to, and its constructor names
+  -- in declaration order. Position in that list is the wire tag, so the
+  -- order is part of the type's wire contract.
+  --
+  -- The arguments are carried for the same reason 'NamF' carries its
+  -- parameters: a user's per-language form may be a template, and the
+  -- template is instantiated with them. A type the compiler generates
+  -- has a monomorphic name per instantiation and leaves them unread.
+  | EnumF FVar [TypeF] [T.Text]
+  -- | A `data` type with at least one payload-bearing constructor: the
+  -- type's name, its type arguments, and each arm's name with its field
+  -- types. Position in the list is the wire tag.
+  | VariantF FVar [TypeF] [(T.Text, [TypeF])]
   | EffectF (Set.Set EffectLabel) TypeF
   | OptionalF TypeF
   | NatLitF Integer
@@ -360,6 +376,23 @@ data SerialAST
     -- back-ref token; the runtime resolves it back to the ancestor's
     -- Schema*.
     SerialRec FVar
+  | -- | A `data` type with argument-free constructors: one byte on the
+    -- wire, tagged by the constructor's position in this list. The names
+    -- travel in the schema so JSON renders the constructor rather than
+    -- the ordinal and the runtime can reject an out-of-range tag.
+    SerialEnum FVar [TypeF] [T.Text]
+  | -- | A `data` type with payload-bearing arms. Sixteen bytes on the
+    -- wire -- a tag and a pointer -- with each arm's fields serialized
+    -- as the tuple the pointer leads to. The type arguments ride along
+    -- as they do on 'SerialObject', so the native type this lowers to
+    -- can instantiate a user's template.
+    --
+    -- With no arms it is a back-reference to an ancestor instantiation of
+    -- the same type, as 'SerialRec' is for a record: a `data` type has at
+    -- least one constructor, so nothing else has that shape. It keeps the
+    -- arguments because a renderer that declares the type by name needs
+    -- them to spell the instantiation.
+    SerialVariant FVar [TypeF] [(T.Text, [SerialAST])]
   | -- | depending on the language, this may or may not raise an error down the
     -- line, the parameter contains the variable name, which is useful only for
     -- source code comments.
@@ -402,6 +435,9 @@ instance Pretty SerialAST where
   pretty (SerialNull v) = parens ("SerialNull" <+> pretty v)
   pretty (SerialOptional v s) = parens ("SerialOptional" <+> pretty v <+> pretty s)
   pretty (SerialRec v) = parens ("SerialRec" <+> pretty v)
+  pretty (SerialEnum v _ ns) = parens ("SerialEnum" <+> pretty v <+> list (map pretty ns))
+  pretty (SerialVariant v _ as) =
+    parens ("SerialVariant" <+> pretty v <+> list [pretty n | (n, _) <- as])
   pretty (SerialUnknown v) = parens ("SerialUnknown" <+> pretty v)
 
 data ExecutableExpressionPool
@@ -649,6 +685,19 @@ data PolyExpr
   | PolyReal (Indexed TVar) RealLit
   | PolyInt (Indexed TVar) Integer
   | PolyStr (Indexed TVar) Text
+  -- | A `data` constructor in a pool: its type, name and 0-based tag.
+  -- All three travel because each backend needs a different one -- the
+  -- name for C++/Rust, the tag for Python, both for R's factor.
+  --
+  -- As for @PolyNull@, the type is the FULL type the constructor
+  -- inhabits, not just its head: a parameterized `data` has one wire
+  -- form and one native declaration per instantiation, and the
+  -- arguments are what tell @Try Str Int@ from @Try Str Bool@. A head
+  -- alone leaves each arm's field types standing at the declaration's
+  -- own parameters, which no pool can spell.
+  | PolyEnum (Indexed Type) Text Int
+  -- | A payload-bearing constructor applied to its arguments.
+  | PolyVariant (Indexed Type) Text Int [PolyExpr]
   -- The Indexed Type carries the FULL type of the Null (e.g.
   -- @?(BTree Int)@, NOT just the underlying TVar). Storing the
   -- complete type lets downstream passes (Serialize -> NativeExpr,
@@ -708,6 +757,9 @@ data MonoExpr
   | MonoReal (Indexed TVar) RealLit
   | MonoInt (Indexed TVar) Integer
   | MonoStr (Indexed TVar) Text
+  -- See @PolyEnum@ for why these carry the whole type rather than its head.
+  | MonoEnum (Indexed Type) Text Int
+  | MonoVariant (Indexed Type) Text Int [MonoExpr]
   -- See @PolyNull@ for the rationale: store the full type of the
   -- Null literal, not just the inner TVar.
   | MonoNull (Indexed Type)
@@ -820,6 +872,12 @@ data NativeExpr
   | RealN FVar RealLit
   | IntN FVar Integer
   | StrN FVar Text
+  | EnumN TypeF Text Int
+  | VariantN TypeF Text Int [NativeExpr]
+  -- ^ Constructing a payload-bearing `data` value. Carries the COMPLETE
+  -- type, not just the constructor's own FVar: a value's schema describes
+  -- every arm, and rebuilding it from the arm being constructed would
+  -- describe a one-arm type that no other constructor belongs to.
   -- See @PolyNull@ in this module for the rationale on storing a
   -- @TypeF@ rather than an @FVar@: parameterised aliases lose their
   -- arg list if only the constructor name is kept.
@@ -936,6 +994,8 @@ foldlNE _ b (LogN_ _ _) = b
 foldlNE _ b (RealN_ _ _) = b
 foldlNE _ b (IntN_ _ _) = b
 foldlNE _ b (StrN_ _ _) = b
+foldlNE _ b (EnumN_ _ _ _) = b
+foldlNE f b (VariantN_ _ _ _ xs) = foldl f b xs
 foldlNE _ b (NullN_ _) = b
 foldlNE f b (DoBlockN_ _ x) = f b x
 foldlNE f b (EvalN_ _ x) = f b x
@@ -1041,6 +1101,9 @@ makeMonoidFoldDefault mempty' mappend' =
     monoidNativeExpr' (RealN_ v x) = return (mempty', RealN v x)
     monoidNativeExpr' (IntN_ v x) = return (mempty', IntN v x)
     monoidNativeExpr' (StrN_ v x) = return (mempty', StrN v x)
+    monoidNativeExpr' (EnumN_ v n i) = return (mempty', EnumN v n i)
+    monoidNativeExpr' (VariantN_ v n i xs) =
+      return (foldl mappend' mempty' (map fst xs), VariantN v n i (map snd xs))
     monoidNativeExpr' (NullN_ v) = return (mempty', NullN v)
     monoidNativeExpr' (DoBlockN_ t (a, ne)) = return (a, DoBlockN t ne)
     monoidNativeExpr' (EvalN_ t (a, ne)) = return (a, EvalN t ne)
@@ -1189,6 +1252,8 @@ data NativeExpr_ nm se ne sr nr
   | RealN_ FVar RealLit
   | IntN_ FVar Integer
   | StrN_ FVar Text
+  | EnumN_ TypeF Text Int
+  | VariantN_ TypeF Text Int [ne]
   -- See @PolyNull@ / @NullN@ for the rationale: store @TypeF@ not @FVar@.
   | NullN_ TypeF
   | DoBlockN_ TypeF ne
@@ -1394,6 +1459,10 @@ surroundFoldNativeExprM sfm fm = surroundNativeExprM sfm f
     f full@(RealN t x) = opFoldWithNativeExprM fm full (RealN_ t x)
     f full@(IntN t x) = opFoldWithNativeExprM fm full (IntN_ t x)
     f full@(StrN t x) = opFoldWithNativeExprM fm full (StrN_ t x)
+    f full@(EnumN t n i) = opFoldWithNativeExprM fm full (EnumN_ t n i)
+    f full@(VariantN t n i xs) = do
+      xs' <- mapM f xs
+      opFoldWithNativeExprM fm full (VariantN_ t n i xs')
     f full@(NullN t) = opFoldWithNativeExprM fm full (NullN_ t)
     f full@(DoBlockN t ne) = do
       ne' <- surroundFoldNativeExprM sfm fm ne
@@ -1439,6 +1508,10 @@ instance HasTypeF NativeExpr where
   typeFof (RealN v _) = VarF v
   typeFof (IntN v _) = VarF v
   typeFof (StrN v _) = VarF v
+  -- The constructor names travel with the type here for the same reason
+  -- they do in 'EnumF': a backend needs them to render the value.
+  typeFof (EnumN t _ _) = t
+  typeFof (VariantN t _ _ _) = t
   typeFof (NullN t) = t
   typeFof (DoBlockN t _) = t
   typeFof (EvalN t _) = t
@@ -1649,6 +1722,8 @@ instance MFunctor NativeExpr where
         e@(RealN _ _) -> mapNativeExpr f e
         e@(IntN _ _) -> mapNativeExpr f e
         e@(StrN _ _) -> mapNativeExpr f e
+        e@(EnumN _ _ _) -> mapNativeExpr f e
+        (VariantN t n i xs) -> mapNativeExpr f $ VariantN t n i (map (mgatedMap g f) xs)
         e@(NullN _) -> mapNativeExpr f e
         (DoBlockN t ne) -> mapNativeExpr f $ DoBlockN t (mgatedMap g f ne)
         (EvalN t ne) -> mapNativeExpr f $ EvalN t (mgatedMap g f ne)
@@ -1670,6 +1745,11 @@ instance Pretty TypeF where
     pretty v
       <+> encloseSep "{" "}" ", " [pretty k <+> "::" <+> pretty t | (k, t) <- rs]
   pretty (RecF v) = "^" <> pretty v
+  pretty (EnumF v ps ns) =
+    pretty v <+> hsep (map pretty ps) <+> encloseSep "{" "}" " | " (map pretty ns)
+  pretty (VariantF v ps as) =
+    pretty v <+> hsep (map pretty ps)
+      <+> encloseSep "{" "}" " | " [pretty n <+> hsep (map pretty ts) | (n, ts) <- as]
   pretty (EffectF es t) =
     "<" <> hsep (punctuate "," (map pretty (Set.toList es))) <> ">" <+> pretty t
   pretty (OptionalF t) = "?" <> pretty t
@@ -1717,6 +1797,8 @@ instance Pretty PolyExpr where
   pretty (PolyReal _ _) = "PolyReal"
   pretty (PolyInt _ _) = "PolyInt"
   pretty (PolyStr _ _) = "PolyStr"
+  pretty (PolyEnum _ n _) = "PolyEnum" <> parens (pretty n)
+  pretty (PolyVariant _ n _ xs) = "PolyVariant" <> parens (pretty n) <> tupled (map pretty xs)
   pretty (PolyNull _) = "PolyNull"
   pretty (PolyDoBlock _ e) = "PolyDoBlock" <+> pretty e
   pretty (PolyEval _ e) = "PolyEval" <+> pretty e
@@ -1753,6 +1835,8 @@ instance Pretty MonoExpr where
   pretty (MonoReal _ x) = pretty (showRealLit x)
   pretty (MonoInt _ x) = viaShow x
   pretty (MonoStr _ x) = viaShow x
+  pretty (MonoEnum _ n _) = pretty n
+  pretty (MonoVariant _ n _ xs) = pretty n <> tupled (map pretty xs)
   pretty (MonoNull _) = "NULL"
   pretty (MonoDoBlock _ e) = "{" <> pretty e <> "}"
   pretty (MonoEval _ e) = "!" <> pretty e
@@ -1799,7 +1883,43 @@ data CmdArg
     CmdArgGrp RecDocSet
   | -- argument group (made from a record)
     CmdArgFlag ArgFlagDocSet
-  -- flag option
+  | -- flag option
+    CmdArgAlt AltDocSet
+  -- one flag per constructor of a `data` type, mutually exclusive
+  deriving (Show, Ord, Eq)
+
+-- | A `data`-typed argument unrolled into one option per constructor. The
+-- options exclude one another; an argument-free constructor's option is a
+-- bare flag, and a payload-bearing one's takes exactly as many values as
+-- the constructor has fields.
+data AltDocSet = AltDocSet
+  { altDocType :: Type
+  , -- the argument's type, an optional over the `data` when it may be omitted
+    altDocDesc :: [Text]
+  , -- free description of the argument
+    altDocName :: Maybe Text
+  , -- an explicit `@name`, the key a program addresses the argument by
+    altDocMetavar :: Text
+  , -- the name the argument is shown under; the type's by default
+    altDocRequired :: Bool
+  , -- exactly one arm must be given; false when the type is optional or a
+    -- default is declared
+    altDocDefault :: Maybe Text
+  , -- the value when no arm is given, as JSON
+    altDocArms :: [AltArm]
+  }
+  deriving (Show, Ord, Eq)
+
+data AltArm = AltArm
+  { altArmCtor :: Text
+  , -- the constructor's own name
+    altArmLong :: Text
+  , -- the option's long spelling, the constructor's name lowercased
+    altArmFields :: [Type]
+  , -- the constructor's field types, one value each on the command line
+    altArmDesc :: [Text]
+    -- the constructor's docstring
+  }
   deriving (Show, Ord, Eq)
 
 data CmdDocSet = CmdDocSet

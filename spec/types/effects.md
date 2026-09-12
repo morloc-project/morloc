@@ -92,7 +92,7 @@ Two readings of `<E> T` exist in the effect-typing literature:
 
 Morloc chose capabilities because:
 
-1. **Ergonomics.** `pure` at every boundary is noise. `@catch (@load p) 42` should not require `@catch (@load p) (pure 42)`. Do-block trailing expressions should not require `pure`. Pure exports like `foo :: <IO> Int; foo = 42` should typecheck without ceremony.
+1. **Ergonomics.** `pure` at every boundary is noise. A bare alternative in a `match` over a fallible result should not require `pure`. Do-block trailing expressions should not require `pure`. Pure exports like `foo :: <IO> Int; foo = 42` should typecheck without ceremony.
 
 2. **No correctness issue.** Subsumption `E1 ⊆ E2` is monotone in the "more effects" direction; a pure value is the trivial case that uses none of the granted capabilities. The reading is internally consistent.
 
@@ -100,7 +100,7 @@ Morloc chose capabilities because:
 
 ### Implementation site
 
-The pure-into-EffectU subtype rule lives in `library/Morloc/Typecheck/Internal.hs`, above the InstantiateL arm. It fires for both concrete and existential LHS; the existential case is what makes `@catch (f x) fb` typecheck when the fallback is bare in a polymorphic effect row.
+The pure-into-EffectU subtype rule lives in `library/Morloc/Typecheck/Internal.hs`, above the InstantiateL arm. It fires for both concrete and existential LHS; the existential case is what lets a bare value fill a `<e> b` slot when `b` is still unsolved, as in a helper that matches a `Try` returned by a polymorphic-row callback.
 
 
 ## Forcing Effects
@@ -213,7 +213,7 @@ The compiler does not validate these claims; they are an assertion by the librar
 - Effect labels in source signatures are required; the compiler does not infer them across the FFI boundary.
 - Effects cannot be parameterized (no `forall e. <e> T`); generic higher-order combinators accept effectful arguments through normal unification (`(a -> b)` with `b = <E> T`).
 - Effects in record and tuple literals are disallowed; construct effectful records inside a do-block.
-- The `Error` effect short-circuits within `sequenceE`/`mapE` (fail-fast). Validation-style error collection is expressed as data, not as the `Error` effect.
+- Failure is NOT an effect. A fallible operation returns `Try e a` (declared in the `internal` module) and `@try` converts an otherwise-uncaught native throw into one; there is no `Err` effect and no `@catch`. An effect row describes what a call may DO, and failing is a property of what it returns.
 
 ## See Also
 

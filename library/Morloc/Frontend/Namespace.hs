@@ -100,6 +100,7 @@ copyState oldIdx newIdx = do
       , stateStreamElems = stateStreamElems s
       , stateManifoldConfig = updateMap (stateManifoldConfig s)
       , stateLogTemplate = stateLogTemplate s
+      , stateBenchTemplate = stateBenchTemplate s
       , stateRunLog = stateRunLog s
       , stateHashIncludePaths = stateHashIncludePaths s
       , stateSourceMap = updateMap (stateSourceMap s)
@@ -134,7 +135,7 @@ copyState oldIdx newIdx = do
       , stateDebugTrace = stateDebugTrace s
       , stateModuleDoc = stateModuleDoc s
       , stateModuleEpilogues = stateModuleEpilogues s
-      , stateSerialAncestors = stateSerialAncestors s
+      , stateVariantAncestors = stateVariantAncestors s
       }
   where
     updateGMap g = case GMap.yIsX oldIdx newIdx g of

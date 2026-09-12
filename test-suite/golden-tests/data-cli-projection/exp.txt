@@ -1,0 +1,81 @@
+--- rank-cases ---
+3
+3
+3
+--- rank-unknown ---
+OK
+--- pick-default ---
+2
+1
+--- shapes-many ---
+3
+--- describe-payload ---
+"rect"
+"dot"
+--- help-rank ---
+Rank a priority
+
+Usage: ./nexus <nexus_options> rank <command_options>
+
+General Options:
+  -h, --help  Print help (see more with '--help')
+
+Positional arguments:
+  1:  How urgent a task is
+      type: Priority
+      values: Low, Medium, High
+
+Return: Int
+
+Data Types:
+  Priority
+    How urgent a task is
+    Low     can wait
+    Medium  this week
+    High    today
+--- help-pick ---
+Pick a priority, defaulting to the middle
+
+Usage: ./nexus <nexus_options> pick <command_options>
+
+General Options:
+  -h, --help  Print help (see more with '--help')
+
+Optional arguments:
+  -p, --priority <Priority>  the priority
+                             type: Priority
+                             values: Low, Medium, High [default: Medium]
+
+Return: Int
+
+Data Types:
+  Priority
+    How urgent a task is
+    Low     can wait
+    Medium  this week
+    High    today
+--- help-describe ---
+Name each shape's constructor
+
+Usage: ./nexus <nexus_options> describe <command_options>
+
+General Options:
+  -h, --help  Print help (see more with '--help')
+
+Positional arguments:
+  1:  A shape to measure
+      type: Shape
+      constructors: Circle/1, Rect/2, Dot
+
+Return: Str
+
+Data Types:
+  Shape
+    A shape to measure
+    Circle Real     a circle of some radius
+    Rect Real Real  a box, width then height
+    Dot
+--- json-help ---
+[{"constructors": [{"desc": ["can wait"], "fields": [], "name": "Low"}, {"desc": ["this week"], "fields": [], "name": "Medium"}, {"desc": ["today"], "fields": [], "name": "High"}], "desc": ["How urgent a task is"], "kind": "data", "name": "Priority", "parameters": []}, {"constructors": [{"desc": ["a circle of some radius"], "fields": ["Real"], "name": "Circle"}, {"desc": ["a box, width then height"], "fields": ["Real", "Real"], "name": "Rect"}, {"desc": [], "fields": [], "name": "Dot"}], "desc": ["A shape to measure"], "kind": "data", "name": "Shape", "parameters": []}]
+--- mcp-tools ---
+{"priority": {"description": "the priority Low: can wait; Medium: this week; High: today (default: \"Medium\")", "enum": ["Low", "Medium", "High"], "type": "string"}}

@@ -17,6 +17,7 @@ via 'toIType'), so this printer only unwraps the 'ITyNamed' carrier.
 -}
 module Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter
   ( printExpr
+  , typeHead
   , printStmt
   , printDispatch
   , printProgram
@@ -26,6 +27,11 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter
   , stripTypeParams
   , printRustStruct
   , printRecordImpls
+  , printRustEnum
+  , printRustVariant
+  , printVariantImpls
+  , printEnumImpls
+  , tupled1
   , ClosureMarshal (..)
   ) where
 
@@ -46,12 +52,20 @@ rustType (ITyNamed name ps) = pretty name <> "<" <> hcat (punctuate ", " (map ru
 rustType (ITyPrim t) = pretty t
 rustType (ITyList t) = "Vec<" <> rustType t <> ">"
 rustType (ITyTuple ts) = tupled (map rustType ts)
-rustType (ITyOptional t) = "Option<" <> rustType t <> ">"
+rustType (ITyOptional t) = "::std::option::Option<" <> rustType t <> ">"
 rustType (ITyRecord name _ _) = pretty name
 rustType ITyUnit = "()"
 rustType ITySerial = "*const u8"
 rustType ITyUnknown = "_"
 rustType t = error $ "RustPrinter: cannot render type " <> show t
+
+-- | A rendered type without its argument list: @MyBox<i64>@ gives @MyBox@,
+-- a plain name gives itself. A pattern names an enum by its head alone,
+-- because the qualified path a generic instantiation would need is not
+-- stable Rust in pattern position, and the subject's type pins the
+-- arguments anyway.
+typeHead :: MDoc -> MDoc
+typeHead t = pretty (fst (T.breakOn "<" (render t)))
 
 printExpr :: IExpr -> MDoc
 printExpr (IVar v) = pretty v
@@ -61,6 +75,7 @@ printExpr (IBoolLit False) = "false"
 -- path `<Option<T>>::None` pins the type without needing to extract the inner.
 printExpr (INullLit (Just t)) = "<" <> rustType t <> ">::None"
 printExpr (INullLit Nothing) = "None"
+printExpr IUnitLit = "()"
 printExpr (IIntLit Nothing i) = viaShow i
 printExpr (IIntLit (Just t) i) = parens (viaShow i <+> "as" <+> pretty t)
 printExpr (IRealLit Nothing r) = renderRealLit r
@@ -89,7 +104,6 @@ printExpr (ICall f (Just ts) argGroups) =
 printExpr (ILambda args body) =
   "move |" <> hcat (punctuate ", " (map pretty args)) <> "| " <> printExpr body
 printExpr (IRawExpr d) = pretty d
-printExpr (IDoBlock e) = "move || { " <> printExpr e <> " }"
 printExpr (IEval e) = parens (printExpr e) <> "()"
 printExpr (IIntrinsicShow sid e) =
   "rustmorloc::show(&(" <> printExpr e <> "), schema(" <> pretty sid <> "))"
@@ -98,8 +112,6 @@ printExpr (IIntrinsicRead sid (Just t) e) =
 printExpr (IIntrinsicRead sid Nothing e) =
   "rustmorloc::read(&(" <> printExpr e <> "), schema(" <> pretty sid <> "))"
 printExpr (IIntrinsicThrow msg) = "rustmorloc::morloc_throw(" <> printExpr msg <> ")"
-printExpr (IIntrinsicCatch fallible fallback) =
-  "rustmorloc::mlc_catch(" <> printExpr fallible <> ", " <> printExpr fallback <> ")"
 -- File / stream / IO intrinsics. Each mirrors the C++ `_mlc_*` helper
 -- (CppPrinter.hs) but calls the corresponding thin `rustmorloc` shim. A value
 -- argument is borrowed (`&(..)`, the ToVoidstar shape); a handle is a bare
@@ -391,10 +403,195 @@ printRustStruct name params fields =
     -- one point is cloned at its by-value uses. All field types are Clone-able
     -- morloc types (scalars, Vec, String, Option, tuples, nested structs, Box).
     [ "#[derive(Clone)]"
-    , "struct" <+> name <> paramList params <+> "{"
-    , indent 4 (vsep [f <> ":" <+> t <> "," | (f, t) <- fields])
+    , "pub struct" <+> name <> paramList params <+> "{"
+    , indent 4 (vsep ["pub" <+> f <> ":" <+> t <> "," | (f, t) <- fields])
     , "}"
     ]
+
+-- | Emit the definition of a pool-owned @data@ type.
+--
+-- @repr(u8)@ with explicit discriminants is what makes the wire tag and the
+-- native value the same byte: the constructor's declaration ordinal IS its
+-- tag, so no translation table is needed on either side.
+--
+-- @PartialOrd@/@Ord@ derive over the variant order, which is the same
+-- declaration order every other backend compares in. Without them a
+-- comparison that compiles when the realizer puts it in a Python pool
+-- fails to compile when it puts it in a Rust one.
+printRustEnum :: MDoc -> [T.Text] -> MDoc
+printRustEnum name ctors =
+  vsep
+    [ "#[repr(u8)]"
+    , "#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]"
+    , "pub enum" <+> name <+> "{"
+    , indent 4 (vsep [pretty c <+> "=" <+> pretty i <> "," | (i, c) <- zip [0 :: Int ..] ctors])
+    , "}"
+    ]
+
+-- | Emit a Rust @enum@ for a payload-bearing @data@ type.
+--
+-- Every arm's fields sit behind ONE box, holding a tuple, which mirrors the
+-- wire form: a tag plus a relative pointer to the arm's fields. Boxing
+-- uniformly rather than only at self-referential positions is what lets a
+-- recursive type have a finite size without any recursion analysis here --
+-- and mutual recursion (@A@ through @B@ back to @A@) has no single-type
+-- test that would find it.
+--
+-- Deliberately NOT @Copy@ and NOT @#[repr(u8)]@, both of which the
+-- argument-free form carries. A box is not @Copy@, so deriving it would
+-- fail to compile on the first payload arm, and it must stay non-@Copy@ to
+-- agree with the ownership classifier. @repr(u8)@ describes a layout these
+-- hand-written impls do not use.
+printRustVariant :: MDoc -> [(T.Text, [MDoc])] -> MDoc
+printRustVariant name arms =
+  vsep
+    [ "#[derive(Clone)]"
+    , "pub enum" <+> name <+> "{"
+    , indent 4 (vsep [armDecl c ts | (c, ts) <- arms])
+    , "}"
+    ]
+  where
+    armDecl c [] = pretty c <> ","
+    armDecl c ts = pretty c <> parens ("::std::boxed::Box<" <> tupled1 ts <> ">") <> ","
+
+-- | A one-element tuple needs its trailing comma or it is just parentheses.
+tupled1 :: [MDoc] -> MDoc
+tupled1 [t] = parens (t <> ",")
+tupled1 ts = tupled ts
+
+-- | Emit @ToVoidstar@/@FromVoidstar@ for a payload-bearing @data@ type.
+--
+-- The slot layout -- a tag, padding, and a relative pointer to the arm's
+-- fields written out of line -- lives in the runtime, not here. Generated
+-- code names an arm and hands over its payload; the runtime does the
+-- allocation, alignment and pointer encoding. That is the same division the
+-- other impls keep, and it is forced anyway: the relative-pointer helpers
+-- are not part of the runtime crate's public surface.
+--
+-- A boxed payload marshals as the tuple inside it, since @Box@ delegates.
+printVariantImpls :: MDoc -> [(T.Text, [MDoc])] -> MDoc
+printVariantImpls name arms = vsep [toImpl, "", fromImpl]
+  where
+    idxArms = zip [0 :: Int ..] arms
+
+    -- Constructors are spelled through `Self` inside the impl: it is legal
+    -- in expression and pattern position alike, for a plain name and for a
+    -- generic instantiation the impl is written for.
+    armPat c ts = "Self::" <> pretty c <> (if null ts then "" else "(mlc_b)")
+
+    toImpl =
+      vsep
+        [ "impl ToVoidstar for" <+> name <+> "{"
+        , indent 4 $ vsep
+            [ "fn shm_size(&self, schema: &Schema) -> usize {"
+            , indent 4 $ vsep
+                -- The declaration must be in scope for any `^name`
+                -- back-reference inside an arm to resolve. Without this a
+                -- recursive variant works only when it is the call's
+                -- top-level schema -- reached through a list, a tuple, an
+                -- optional or a record field, it aborts.
+                [ "let _mlc_g = RecurScope::enter(resolve_recur(schema));"
+                , "match self {"
+                , indent 4 $ vsep
+                    [ armPat c ts <+> "=>" <+>
+                        (if null ts
+                           then "variant_size_nullary(schema),"
+                           else "variant_size_payload(schema, &resolve_recur(schema).parameters["
+                                  <> pretty i <> "], mlc_b),")
+                    | (i, (c, ts)) <- idxArms ]
+                , "}"
+                ]
+            , "}"
+            , "unsafe fn write(&self, dest: *mut u8, cursor: &mut *mut u8, schema: &Schema) {"
+            , indent 4 $ vsep
+                [ "let _mlc_g = RecurScope::enter(resolve_recur(schema));"
+                , "match self {"
+                , indent 4 $ vsep
+                    [ armPat c ts <+> "=>" <+>
+                        (if null ts
+                           then "write_variant_nullary(dest, " <> pretty i <> "u8),"
+                           else "write_variant_payload(dest, cursor, &resolve_recur(schema).parameters["
+                                  <> pretty i <> "], " <> pretty i <> "u8, mlc_b),")
+                    | (i, (c, ts)) <- idxArms ]
+                , "}"
+                ]
+            , "}"
+            ]
+        , "}"
+        ]
+
+    fromImpl =
+      vsep
+        [ "impl FromVoidstar for" <+> name <+> "{"
+        , indent 4 $ vsep
+            [ "unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self {"
+            , indent 4 $ vsep
+                [ "let mlc_s = resolve_recur(schema);"
+                , "let _mlc_g = RecurScope::enter(mlc_s);"
+                , "match read_variant_tag(data) {"
+                , indent 4 $ vsep
+                    ( [ pretty i <+> "=>" <+>
+                          (if null ts
+                             then "Self::" <> pretty c <> ","
+                             else "Self::" <> pretty c
+                                    <> parens ("read_variant_payload(&mlc_s.parameters["
+                                                 <> pretty i <> "], data, base)") <> ",")
+                      | (i, (c, ts)) <- idxArms ]
+                      -- The runtime range-checks a tag at the wire boundary,
+                      -- so reaching this arm means the value and its schema
+                      -- disagree: a bug, not bad input. Here the tag would
+                      -- otherwise index the arm list.
+                      <> ["t => panic!(\"" <> name <> ": no constructor for tag {}\", t),"]
+                    )
+                , "}"
+                ]
+            , "}"
+            ]
+        , "}"
+        ]
+
+-- | Emit @ToVoidstar@/@FromVoidstar@ for a @data@ type.
+--
+-- The value is one byte and fixed-width, so @shm_size@ is the schema width
+-- and @write@ is a single store -- no cursor advance, because there is no
+-- out-of-line payload.
+printEnumImpls :: MDoc -> [T.Text] -> MDoc
+printEnumImpls name ctors = vsep [toImpl, "", fromImpl]
+  where
+    toImpl =
+      vsep
+        [ "impl ToVoidstar for" <+> name <+> "{"
+        , indent 4 $ vsep
+            [ "fn shm_size(&self, schema: &Schema) -> usize {"
+            , indent 4 "resolve_recur(schema).width"
+            , "}"
+            , "unsafe fn write(&self, dest: *mut u8, _cursor: &mut *mut u8, _schema: &Schema) {"
+            , indent 4 "*dest = *self as u8;"
+            , "}"
+            ]
+        , "}"
+        ]
+    fromImpl =
+      vsep
+        [ "impl FromVoidstar for" <+> name <+> "{"
+        , indent 4 $ vsep
+            [ "unsafe fn read(_schema: &Schema, data: *const u8, _base: *const u8) -> Self {"
+            , indent 4 $ vsep
+                [ "match *data {"
+                , indent 4 $ vsep
+                    ( [pretty i <+> "=>" <+> "Self::" <> pretty c <> "," | (i, c) <- zip [0 :: Int ..] ctors]
+                        ++ [ -- The runtime range-checks every tag at the wire
+                             -- boundary, so reaching this arm means the value
+                             -- and its schema disagree: a bug, not bad input.
+                             "t => panic!(\"" <> name <> ": no constructor for tag {}\", t),"
+                           ]
+                    )
+                , "}"
+                ]
+            , "}"
+            ]
+        , "}"
+        ]
 
 -- | Per-field marshalling strategy for a record function field. A closure field
 -- is stored natively as @Rc<dyn MorlocFnN>@ (no @ToVoidstar@), so it is reified
@@ -479,7 +676,7 @@ printRecordImpls name params fields = vsep [toImpl, "", fromImpl]
             , indent 4 $ vsep
                 [ "let schema = resolve_recur(schema);"
                 , "let _g = RecurScope::enter(schema);"
-                , name <+> "{"
+                , "Self {"
                 , indent 4 $ vsep (map readField idx)
                 , "}"
                 ]

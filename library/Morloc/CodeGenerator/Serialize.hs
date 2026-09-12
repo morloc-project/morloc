@@ -56,7 +56,10 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
   where
     lang = LR.poolOf reg lang0
     inferType = inferConcreteType lang
-    inferTypeUniversal = inferConcreteTypeUniversal lang
+    -- Universal inference has no index of its own -- these are the sites
+    -- where the type reached us unindexed -- so errors and `data` arm
+    -- resolution are reported against the manifold being serialized.
+    inferTypeUniversal = inferConcreteTypeUniversal lang m0
     inferVar = inferConcreteVar lang
 
     typemap = makeTypemap m0 e0
@@ -382,6 +385,25 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     nativeExpr _ (MonoReal v x) = RealN <$> inferVar v <*> pure x
     nativeExpr _ (MonoInt v x) = IntN <$> inferVar v <*> pure x
     nativeExpr _ (MonoStr v x) = StrN <$> inferVar v <*> pure x
+    -- The complete type comes from the declaration, not from the arm being
+    -- built: a constructor names one arm, but the value's wire form
+    -- describes them all. Inference is what reads the declaration -- and,
+    -- for a parameterized `data`, what instantiates its parameters with
+    -- this constructor's own type arguments before reading the arms.
+    nativeExpr _ (MonoEnum v@(Idx vidx _) n i) = do
+      tf <- inferType v
+      case tf of
+        EnumF{} -> return $ EnumN tf n i
+        _ -> MM.throwSourcedError vidx $
+               "Constructor" <+> squotes (pretty n)
+                 <+> "does not resolve to an enum:" <+> pretty tf
+    nativeExpr args (MonoVariant v@(Idx vidx _) n i xs) = do
+      tf <- inferType v
+      case tf of
+        VariantF{} -> VariantN tf n i <$> mapM (nativeExpr args) xs
+        _ -> MM.throwSourcedError vidx $
+               "Constructor" <+> squotes (pretty n)
+                 <+> "does not resolve to a sum type:" <+> pretty tf
     -- MonoNull now carries an Indexed Type for the full type the
     -- Null inhabits (e.g. @?(BTree Int)@). Use @inferType@ (=
     -- @inferConcreteType@) rather than @inferVar@ so the resulting
@@ -492,28 +514,54 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
                      IntrWrite, IntrAppend, IntrConcat, IntrFlush,
                      IntrStdin, IntrStdout, IntrStderr, IntrThrow,
                      IntrTell, IntrTmpfile,
-                     IntrCatch] = do
+                     IntrTry] = do
           tf <- inferType t
           esBase <- mapM (nativeExpr m) es
-          -- @catch's args must both reach mlc_catch as no-arg callables;
-          -- see 'thunkifyForCatch' below.
+          -- @try's body must reach mlc_try as a no-arg callable; see
+          -- 'thunkifyForTry' below.
           let es' = case intr of
-                IntrCatch -> map thunkifyForCatch esBase
-                _         -> esBase
+                IntrTry -> map thunkifyForTry esBase
+                _       -> esBase
           es'' <- unpackDataArgIfNeeded m intr es'
           msch <- intrinsicSchema m intr tf es''
           let innerTf = case tf of
                 EffectF _ inner -> inner
                 other -> other
-          mPacker <- loadResultPacker m intr innerTf
-          let rawInnerTf = case mPacker of
-                Just (_, wireTf) -> wireTf
-                Nothing -> innerTf
+              -- A fallible intrinsic's own call still produces the bare
+              -- value; the Try is built around it below. Everything from
+              -- here to the wrap therefore works with the PAYLOAD type --
+              -- in particular the result packer, which is keyed on the
+              -- user-facing type and would find nothing against a Try.
+              payloadTf = stripTryF innerTf
+              -- @try itself already IS the wrap; wrapping it again would
+              -- nest a Try inside a Try and hand the lowering a payload
+              -- type where it expects the variant.
+              isFallible = intr /= IntrTry && payloadTf /= innerTf
+          -- @try produces the Try itself, so it keeps the variant type and
+          -- takes no result packer: whatever packing its body needed has
+          -- already happened inside the body.
+          mPacker <- if intr == IntrTry
+                       then return Nothing
+                       else loadResultPacker m intr payloadTf
+          let rawInnerTf
+                | intr == IntrTry = innerTf
+                | otherwise = case mPacker of
+                    Just (_, wireTf) -> wireTf
+                    Nothing -> payloadTf
               raw = IntrinsicN rawInnerTf intr msch es''
-          wrapped <- case mPacker of
+          packed <- case mPacker of
             Just (packerSrc, _) ->
-              return $ AppExeN innerTf (SrcCallP packerSrc) [NativeArgExpr raw]
+              return $ AppExeN payloadTf (SrcCallP packerSrc) [NativeArgExpr raw]
             Nothing -> return raw
+          -- Reuse @try rather than a bespoke wrap: converting a raised
+          -- failure into an Ok/Err value is exactly what it does, and
+          -- routing through it keeps one lowering (and one per-language
+          -- mlc_try) instead of two. The packer runs inside the body, so a
+          -- packer that raises is caught like any other failure.
+          let wrapped
+                | isFallible =
+                    IntrinsicN innerTf IntrTry Nothing [thunkifyForTry packed]
+                | otherwise = packed
           -- Wrap in DoBlockN only when the result still carries an effect
           -- (needs to be a thunk that EvalN or a language-native catch can
           -- invoke). @catch fully strips its Err effect when the residual
@@ -544,20 +592,23 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     -- mirror that here so intrinsics flow through the same pack/unpack
     -- machinery as ordinary functions instead of feeding the runtime a
     -- user-side struct it cannot serialize.
-    -- Wrap a NativeExpr in a DoBlockN so it renders as a no-arg thunk;
-    -- both of @catch's arguments reach mlc_catch as thunks it forces at
-    -- most once. An expression is already thunk-shaped in two ways: an
-    -- effect-typed one (which lowered to a DoBlockN upstream and carries
-    -- an EffectF type) and a do-block whose effect row is empty (a
-    -- DoBlockN whose stored type is its plain inner type -- e.g. a pure
-    -- fallback like `do []`). typeFof reports the DoBlockN's inner type,
-    -- so the type check alone misses the second case and re-wraps it into
-    -- DoBlockN (DoBlockN _); mlc_catch's `return fallback()` then yields
-    -- the inner thunk instead of the value. Match DoBlockN structurally
-    -- so both shapes pass through untouched.
-    thunkifyForCatch :: NativeExpr -> NativeExpr
-    thunkifyForCatch e@(DoBlockN _ _) = e
-    thunkifyForCatch e = case typeFof e of
+    -- Wrap a NativeExpr in a DoBlockN so it renders as a no-arg thunk:
+    -- @try's body reaches mlc_try as a thunk it forces at most once.
+    -- Suspension here is a property of the form, not of the body's type,
+    -- so a pure body is thunked too -- which is what lets @try catch a
+    -- foreign function that raises from otherwise pure code.
+    --
+    -- An expression is already thunk-shaped in two ways: an effect-typed
+    -- one (which lowered to a DoBlockN upstream and carries an EffectF
+    -- type) and a do-block whose effect row is empty (a DoBlockN whose
+    -- stored type is its plain inner type -- e.g. `do []`). typeFof
+    -- reports the DoBlockN's inner type, so the type check alone misses
+    -- the second case and re-wraps it into DoBlockN (DoBlockN _), which
+    -- yields the inner thunk instead of the value. Match DoBlockN
+    -- structurally so both shapes pass through untouched.
+    thunkifyForTry :: NativeExpr -> NativeExpr
+    thunkifyForTry e@(DoBlockN _ _) = e
+    thunkifyForTry e = case typeFof e of
       EffectF _ _ -> e
       t           -> DoBlockN t e
 
@@ -637,12 +688,12 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
       return . Just $ renderTypeFName (typeFof dataArg)
     intrinsicSchema m IntrLoad tf _ = do
       -- For @load, the return type is <IO, Err> a; the schema is for a.
-      let dataType = stripEffectF tf
+      let dataType = stripTryF (stripEffectF tf)
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m IntrRead tf _ = do
       -- For @read, the return type is <Err> a; the schema is for a.
-      let dataType = stripEffectF tf
+      let dataType = stripTryF (stripEffectF tf)
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m IntrIFileWalk tf _ = do
@@ -651,21 +702,21 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
       -- from_voidstar<T>). For bracket-index/struct chains the result
       -- is a single element type; for bracket-slice it is a list type.
       -- Either way, the post-EffectF type carries the right shape.
-      let dataType = stripEffectF tf
+      let dataType = stripTryF (stripEffectF tf)
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m IntrNext tf _ = do
       -- @next returns the sub-packet as `[a]`. The wrapper drops the
       -- EffectF wrap and serialises the list type so the per-language
       -- from_voidstar call materialises it correctly.
-      let dataType = stripEffectF tf
+      let dataType = stripTryF (stripEffectF tf)
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m IntrStreamLayout tf _ = do
       -- @streamLayout returns `[(U64,U64,U64)]`. Drop the EffectF wrap and
       -- serialise the list-of-triple type so the per-language from_voidstar
       -- call materialises it (an ordinary composite, as for @next).
-      let dataType = stripEffectF tf
+      let dataType = stripTryF (stripEffectF tf)
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     -- @write's data arg (at index 2, after level Int and handle) carries `[a]`;
@@ -707,8 +758,20 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
       ast <- Serial.makeSerialAST m lang (BT.handleStorageTypeF v a)
       return . render $ Serial.serialAstToMsgpackSchema ast
 
+    -- The payload of a Try's Ok arm, or the type unchanged when it is not
+    -- one. Intrinsics that report failure as data wrap their result, but
+    -- the schema a runtime entry point needs is still the inner one.
+    stripTryF :: TypeF -> TypeF
+    stripTryF (VariantF _ _ arms)
+      | Just [payload] <- lookup BT.tryOkCtor arms = payload
+    stripTryF other = other
+
     unwrapHandleHead :: TypeF -> Maybe (TVar, TypeF)
     unwrapHandleHead (EffectF _ inner) = unwrapHandleHead inner
+    -- The handle now arrives inside the Try the intrinsic returns, so peel
+    -- the Ok arm before reading the head.
+    unwrapHandleHead (VariantF _ _ arms)
+      | Just [payload] <- lookup BT.tryOkCtor arms = unwrapHandleHead payload
     unwrapHandleHead (AppF (VarF (FV v _)) (a : _)) = Just (v, a)
     unwrapHandleHead _ = Nothing
 
@@ -725,6 +788,8 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
             [] -> pretty t
             ps -> parens (pretty t <+> hsep (map go ps))
         go (RecF (FV t _)) = pretty t
+        go (EnumF (FV t _) _ _) = pretty t
+        go (VariantF (FV t _) _ _) = pretty t
         go (AppF con args) = parens (go con <+> hsep (map go args))
         go (FunF args ret) =
           parens (hsep (punctuate " ->" (map go args ++ [go ret])))
@@ -868,6 +933,11 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     makeTypemap _ (MonoList (ann -> idx) _ es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
     makeTypemap _ (MonoTuple (ann -> idx) (map snd -> es)) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
     makeTypemap _ (MonoRecord _ (ann -> idx) _ (map (snd . snd) -> es)) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
+    -- A constructor's arguments are ordinary expressions and must be walked
+    -- like any other container's. Falling to the catch-all leaves them
+    -- unregistered, so a manifold built around one receives its arguments
+    -- serialized while the body expects native values.
+    makeTypemap _ (MonoVariant (ann -> idx) _ _ es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
     makeTypemap _ _ = Map.empty
 
     mergeTypes :: Either Type (Indexed Type) -> Either Type (Indexed Type) -> Either Type (Indexed Type)
@@ -892,7 +962,16 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     -- spurious closure reify at the let binding even though the closure is
     -- consumed locally. Agrees with 'unwrapLetDef', which keeps such a manifold
     -- whole for native-partial lowering.
-    inferState (MonoManifold _ form _ e)
+    -- A Preserved manifold is one that must survive lowering as a real
+    -- function -- it carries a user label, so codegen has to have something
+    -- to wrap. That makes it a native value at its binding site for the same
+    -- reason a closure is, whatever its body does internally. Reporting
+    -- 'Serialized' here sends the binding down 'serialExpr', which strips the
+    -- very manifold 'unwrapLetDef' just decided to keep (the keep-guard tests
+    -- @m /= currentM@, and unwrapLetDef hands back the manifold's own index),
+    -- and the label then has no manifold to attach to in either pool.
+    inferState (MonoManifold _ form kind e)
+      | kind == Preserved = Unserialized
       | not (null (manifoldBound form)) = Unserialized
       | otherwise = inferState e
     inferState (MonoIf _ thenE _) = inferState thenE

@@ -133,6 +133,11 @@ data LangDescriptor = LangDescriptor
     ldRemoteCallFn :: !Text -- "morloc.remote_call" or "morloc_remote_call"
   , -- Record access
     ldDictStyleRecords :: !Bool -- True: NamRecord/dict use bracket access, others use dot (Python)
+  , ldEnumLitByName :: !Bool
+    -- ^ How a `data` constructor is written as a value. True: by NAME, as
+    -- R does, where an enum is a factor and a factor compares equal to its
+    -- level label. False: by TAG, as Python does, where the runtime hands
+    -- the pool a plain int and the ordinal is the value.
   , ldQuoteRecordKeys :: !Bool -- True: "k" => v (Julia), False: k=v (Python, R)
   , -- Import syntax
     ldQualifiedImports :: !Bool -- True: qualify source names with module path (Python)
@@ -304,6 +309,7 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldRemoteCallFn" (Y.String "")
             . ins "ldReleasePacketFn" (Y.String "morloc.release_packet_shm")
             . ins "ldDictStyleRecords" (Y.Bool False)
+            . ins "ldEnumLitByName" (Y.Bool False)
             . ins "ldQuoteRecordKeys" (Y.Bool True)
             . ins "ldQualifiedImports" (Y.Bool False)
             . ins "ldRunCommand" (Y.Array mempty)
@@ -394,6 +400,7 @@ defaultLangDescriptor name ext =
     , ldIntLiteralSuffix = ""
     , ldRemoteCallFn = ""
     , ldDictStyleRecords = False
+    , ldEnumLitByName = False
     , ldQuoteRecordKeys = True
     , ldQualifiedImports = False
     , ldIncludeRelToFile = False

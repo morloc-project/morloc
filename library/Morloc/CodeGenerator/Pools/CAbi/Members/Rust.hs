@@ -39,6 +39,7 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Morloc.CodeGenerator.Grammars.Common
+import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..), collectRenderedTemplates)
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
   ( ArgSite (..)
@@ -79,6 +80,9 @@ data RustState = RustState
   , rsDebugInfo :: Int -> (Text, Text)
   -- ^ Per-manifold @(userName, srcloc)@ (from 'makeManifoldDebugInfoLookup'),
   -- baked into each manifold's 'FrameGuard' frame line for error tracebacks.
+  , rsLogTemplates :: Map.Map Int RenderedTemplate
+  -- ^ Rendered @log:@ / @benchmark:@ templates per labeled manifold midx.
+  -- Drives the 'rustmorloc::LogGuard' wrap in 'rustMakeFunction'.
   , rsRecmap :: RecMap
   -- ^ Unified record types used in this pool; drives struct generation, the
   -- concrete struct name in 'rustTypeOf', and per-record marshalling impls.
@@ -103,7 +107,7 @@ data RustState = RustState
   }
 
 instance Defaultable RustState where
-  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> ("", "")) [] Map.empty Map.empty Map.empty
+  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> ("", "")) Map.empty [] Map.empty Map.empty Map.empty
 
 -- | The ownership environment: the borrowed (@&T@) parameter indices of the
 -- manifold whose body is currently being lowered ('oeCurrent') and of its
@@ -133,10 +137,16 @@ data OwnEnv = OwnEnv
   -- 'NativeContent' so 'letWrap' emits a deserialize let) and reassigned by the
   -- loop's continue, so its entry let is emitted @let mut@ ('rustMakeLet') and it
   -- is unioned into 'oeShared' so the body borrows/clones but never moves it.
+  , oeReturnsThunk :: Bool
+  -- ^ Whether the enclosing manifold's signature lets a closure leave its frame,
+  -- i.e. whether 'rustReturnType' renders the return as @impl Fn() -> T@. This
+  -- decides how an effect thunk captures: see 'lcMakeDoBlock'. It is read from
+  -- the same 'TypeM' that produces the signature, so the capture mode and the
+  -- return type cannot disagree.
   }
 
 emptyOwnEnv :: OwnEnv
-emptyOwnEnv = OwnEnv Set.empty Set.empty Set.empty Set.empty Set.empty
+emptyOwnEnv = OwnEnv Set.empty Set.empty Set.empty Set.empty Set.empty False
 
 type RustM = ReaderT OwnEnv (CMS.StateT RustState Identity)
 
@@ -171,9 +181,28 @@ getRustSchemaTable = do
 rustTypeOf :: TypeF -> RustM MDoc
 rustTypeOf = f
   where
+    -- A nominal type's name is its template instantiated with this
+    -- occurrence's arguments when the user gave it one (`MyBox<$1>`), and
+    -- the name itself otherwise -- a generated type is monomorphic per
+    -- instantiation and spells nothing of its arguments. The arguments are
+    -- stored positions, so a function among them boxes ('rustFieldType').
+    nominalTypeName x ps
+      | T.any (== '$') x = do
+          let (typeTs, kindCount) = partitionKindArgsF ps
+          ts' <- mapM rustFieldType typeTs
+          return . pretty $ expandMacro x (map render ts') kindCount
+      | otherwise = return (pretty x)
+
     f :: TypeF -> RustM MDoc
     f (UnkF (FV _ x)) = return (pretty x)
     f (VarF (FV _ x)) = return (pretty x)
+    -- An enum lowers to its concrete name; the `#[repr(u8)] enum` that
+    -- name refers to is either generated for this pool or supplied by the
+    -- user through a `data Rust => X = "..."` mapping.
+    f (EnumF (FV _ (CV x)) ps _) = nominalTypeName x ps
+    -- A variant lowers to its concrete name; the `enum` carrying the arms
+    -- is generated for this pool or supplied by a `data Rust => X = "..."`.
+    f (VariantF (FV _ (CV x)) ps _) = nominalTypeName x ps
     f (AppF t ts) = do
       t' <- f t
       let (typeTs, kindCount) = partitionKindArgsF ts
@@ -187,11 +216,11 @@ rustTypeOf = f
     -- compile). None == absent matches the voidstar single-relptr Optional.
     f (OptionalF t@(RecF _)) = do
       t' <- f t
-      return $ "Option<Box<" <> t' <> ">>"
+      return $ "::std::option::Option<::std::boxed::Box<" <> t' <> ">>"
     f (OptionalF t) = do
       -- The payload is a stored position; a function payload boxes ('rustFieldType').
       t' <- rustFieldType t
-      return $ "Option<" <> t' <> ">"
+      return $ "::std::option::Option<" <> t' <> ">"
     f (NatLitF _) = return mempty
     f NatVoidF = return mempty
     f (StrLitF _) = return mempty
@@ -218,8 +247,9 @@ rustTypeOf = f
           params <- mapM f [t | ((_, Nothing), (_, t)) <- zip (recFields rec) rs]
           return $ recName rec <> if null params then "" else "<" <> hcat (punctuate ", " params) <> ">"
         Nothing -> error $ "Rust: record missing from recmap: " <> show v
-    -- User-mapped record: the concrete struct name is the CVar text.
-    f (NamF _ (FV _ (CV s)) _ _) = return (pretty s)
+    -- User-mapped record: the concrete struct name is the CVar text, or the
+    -- template it holds instantiated with this occurrence's arguments.
+    f (NamF _ (FV _ (CV s)) ps _) = nominalTypeName s ps
     -- Back-reference to a recursive record: resolve the concrete struct name
     -- via the concrete scope (the CVar slot is unreliable after weave).
     f (RecF (FV gv@(TV gvText) (CV cv)))
@@ -230,12 +260,6 @@ rustTypeOf = f
             Just ((_, body, _, _, _) : _) | Just name <- bodyName body -> return (pretty name)
             _ -> error $ "Rust: recursive record `" <> T.unpack gvText <> "` has no concrete mapping"
 
-    -- Outer name of a concrete-scope typedef body, when it contributes a name.
-    bodyName :: TypeU -> Maybe Text
-    bodyName (VarU (TV n)) = Just n
-    bodyName (AppU (VarU (TV n)) _) = Just n
-    bodyName (NamU _ (TV n) _ _) = Just n
-    bodyName _ = Nothing
 
 -- | The bare struct name for a record-literal constructor: 'rustTypeOf' with any
 -- generic `<..>` parameters stripped. A Rust struct literal takes no type
@@ -254,6 +278,11 @@ rustStructCtor recType = do
 -- from the resolved concrete type name, which is robust to type aliases.
 rustIsCopy :: TypeF -> Bool
 rustIsCopy (OptionalF t) = rustIsCopy t
+-- A `data` type with argument-free constructors is one byte and holds
+-- nothing, so it is Copy. A pool-owned enum derives Copy; a user-mapped
+-- one (`data Rust => X = "..."`) must derive it too, which is the same
+-- shape 'printRustEnum' emits.
+rustIsCopy (EnumF _ _ _) = True
 rustIsCopy (AppF (VarF (FV (TV gv) _)) ts)
   | T.isPrefixOf "Tuple" gv = all rustIsCopy (fst (partitionKindArgsF ts))
 rustIsCopy (VarF (FV _ (CV cv))) = cv `elem` copyScalars
@@ -935,7 +964,8 @@ translate srcs es = do
   -- pool member; drives the reify path + home-pool dispatch wrappers for a
   -- closure this Rust pool produces and sends to another pool.
   closureTable <- computeClosureSchemas rustLang es
-  let st0 = defaultValue {rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask}
+  logTemplates <- collectRenderedTemplates rustLang
+  let st0 = defaultValue {rsDebugInfo = debugInfo, rsRecmap = recmap, rsCScope = mergedRustScope, rsSrcTypeVarMask = srcTypeVarMask, rsLogTemplates = logTemplates}
       code = CMS.evalState (runReaderT (makeRustCode includeDocs closureTable es) emptyOwnEnv) st0
 
   home <- MM.asks configHome
@@ -986,6 +1016,8 @@ subVersion = T.replace "__MORLOC_VERSION__" (MT.pack MV.versionStr)
 makeRustCode :: [MDoc] -> Map.Map Int ([Text], [Text], Text) -> [SerialManifold] -> RustM MDoc
 makeRustCode includeDocs closureTable0 es = do
   structDocs <- generateRustStructs es
+  enumDocs <- generateRustEnums es
+  variantDocs <- generateRustVariants es
   -- Keep only closures that actually cross a boundary (their signature reaches a
   -- serialize site); the rest stay thin `impl Fn`/`Rc` with no reify cost.
   closureTable <- restrictToCrossingClosures es closureTable0
@@ -998,7 +1030,7 @@ makeRustCode includeDocs closureTable0 es = do
   program <- buildProgramM Map.empty Map.empty includeDocs [] es translateSegment getRustSchemaTable closureTable
   -- structDocs go in the schema-table section; the closure dispatch wrappers are
   -- free functions spliced into the signatures section.
-  return $ RP.printProgram structDocs closureWrappers [] program
+  return $ RP.printProgram (structDocs <> enumDocs <> variantDocs) closureWrappers [] program
 
 -- | A closure value's Rust signature: result type + tupled argument types.
 -- Matches the signature seen at a serialize site for the same closure, so a
@@ -1095,10 +1127,14 @@ makeClosureDispatch closureTable es = do
 -- one representative field list (from a use site). Unlike the shared recmap
 -- (which only collects @= "struct"@ records), this also collects user-mapped
 -- records (@record Rust => X = "Name"@) so their marshalling impls are emitted.
-collectRustRecords :: [SerialManifold] -> [(FVar, [(Key, TypeF)])]
+collectRustRecords :: [SerialManifold] -> [(FVar, [TypeF], [(Key, TypeF)])]
 collectRustRecords =
-  -- One entry per record (keyed by general TVar); keep the first field list.
-  nubBy ((==) `on` \(FV gv _, _) -> gv)
+  -- One entry per record; keep the first field list. A generated struct
+  -- covers every instantiation with generic parameters, so it is one entry
+  -- per general name. A user-mapped struct may be a template the user
+  -- wrote, and each instantiation needs its own marshalling, so those are
+  -- one entry per (name, arguments).
+  nubBy ((==) `on` \(FV gv cv, ps, _) -> (gv, if cv == CV "struct" then [] else ps))
     . concatMap (runIdentity . foldWithSerialManifoldM fm)
   where
     fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
@@ -1107,13 +1143,171 @@ collectRustRecords =
     se _ (SerializeS_ s xs) = return $ seek (serialAstToType s) <> xs
     se _ e = return $ foldlSE (<>) [] e
 
-    seek :: TypeF -> [(FVar, [(Key, TypeF)])]
-    seek (NamF _ v _ rs) = (v, rs) : concatMap (seek . snd) rs
+    seek :: TypeF -> [(FVar, [TypeF], [(Key, TypeF)])]
+    seek (NamF _ v ps rs) = (v, ps, rs) : concatMap seek ps <> concatMap (seek . snd) rs
+    -- A record reachable only as a `data` arm's field still needs its
+    -- struct emitted, so the walk descends through arms as the enum
+    -- collector's does.
+    seek (VariantF _ ps as) = concatMap seek ps <> concatMap (concatMap seek . snd) as
     seek (AppF t ts) = concatMap seek (t : ts)
     seek (FunF ts t) = concatMap seek (t : ts)
     seek (OptionalF t) = seek t
     seek (EffectF _ t) = seek t
     seek _ = []
+
+-- | Outer name of a concrete-scope typedef body, when it contributes a name.
+bodyName :: TypeU -> Maybe Text
+bodyName (VarU (TV n)) = Just n
+bodyName (AppU (VarU (TV n)) _) = Just n
+bodyName (NamU _ (TV n) _ _) = Just n
+bodyName _ = Nothing
+
+-- | Every occurrence of an argument-free @data@ type in these manifolds,
+-- with its constructor names. Occurrences are merged in
+-- 'generateRustEnums' by rendered name, keeping the LONGEST constructor
+-- list rather than the first seen: a constructor LITERAL reports a type
+-- whose table holds only its own arm, so a first-wins merge could define
+-- the type from one arm and silently renumber every other constructor --
+-- an arm's position is its wire tag.
+collectRustEnums :: [SerialManifold] -> [(FVar, [TypeF], [Text])]
+collectRustEnums = concatMap (runIdentity . foldWithSerialManifoldM fm)
+  where
+    fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
+    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (serialAstToType s)
+    ne efull e = return $ foldlNE (<>) (seek (typeFof efull)) e
+    se _ (SerializeS_ s xs) = return $ seek (serialAstToType s) <> xs
+    se _ e = return $ foldlSE (<>) [] e
+
+    seek :: TypeF -> [(FVar, [TypeF], [Text])]
+    seek (EnumF v ps ns) = (v, ps, ns) : concatMap seek ps
+    seek (VariantF _ ps as) = concatMap seek ps <> concatMap (concatMap seek . snd) as
+    seek (NamF _ _ _ rs) = concatMap (seek . snd) rs
+    seek (AppF t ts) = concatMap seek (t : ts)
+    seek (FunF ts t) = concatMap seek (t : ts)
+    seek (OptionalF t) = seek t
+    seek (EffectF _ t) = seek t
+    seek _ = []
+
+-- | Collect every payload-bearing @data@ type used in these manifolds with
+-- its arms.
+--
+-- Occurrences are merged by keeping the WIDEST arm list rather than the
+-- first one seen. A constructor literal's type reports only the arm being
+-- built, so taking the first occurrence could declare a one-arm enum and
+-- leave every other constructor undeclared.
+-- Occurrences are not merged here: which ones name the same declaration is
+-- a question of the RENDERED name -- a template instantiated twice is two
+-- types, a generated type is one per instantiation whatever it was applied
+-- to -- and rendering needs the translator, so the merge happens in
+-- 'generateRustVariants'.
+collectRustVariants :: [SerialManifold] -> [(FVar, [TypeF], [(Text, [TypeF])])]
+collectRustVariants = concatMap (runIdentity . foldWithSerialManifoldM fm)
+  where
+    fm = defaultValue {opFoldWithNativeExprM = ne, opFoldWithSerialExprM = se}
+    ne _ (DeserializeN_ t s xs) = return $ xs <> seek t <> seek (serialAstToType s)
+    ne efull e = return $ foldlNE (<>) (seek (typeFof efull)) e
+    se _ (SerializeS_ s xs) = return $ seek (serialAstToType s) <> xs
+    se _ e = return $ foldlSE (<>) [] e
+
+    seek :: TypeF -> [(FVar, [TypeF], [(Text, [TypeF])])]
+    seek (VariantF v ps as) = (v, ps, as) : concatMap seek ps <> concatMap (concatMap seek . snd) as
+    seek (NamF _ _ _ rs) = concatMap (seek . snd) rs
+    seek (AppF t ts) = concatMap seek (t : ts)
+    seek (FunF ts t) = concatMap seek (t : ts)
+    seek (OptionalF t) = seek t
+    seek (EffectF _ t) = seek t
+    seek _ = []
+
+-- | Emit the enum definition and marshalling impls for every payload-bearing
+-- @data@ type in the pool. Ownership follows the same rule as records and
+-- enums: a user-mapped @data Rust => X = "..."@ writes its own type in
+-- sourced Rust and gets only the impls.
+generateRustVariants :: [SerialManifold] -> RustM [MDoc]
+generateRustVariants es = do
+  named <- mapM (\(v, ps, as) -> (\n -> (render n, (v, ps, as))) <$> rustTypeOf (VariantF v ps as))
+                (collectRustVariants es)
+  -- Merged by the RENDERED name, which is what the declaration is called: a
+  -- template instantiated twice is two declarations, a generated type is
+  -- one per instantiation, and keying by the general name would collapse
+  -- `Try Str ()` and `Try Str (IFile a)` into one and leave the second use
+  -- naming a type that was never emitted.
+  concat <$> mapM makeOne (Map.elems (Map.fromListWith wider named))
+  where
+    -- Merge ARM-WISE rather than by arm count. A constructor literal's type
+    -- reports only the arm being built, and reports it with no fields, so
+    -- comparing lengths cannot tell a complete one-arm type from a
+    -- truncated view of it -- and picking the truncated one would declare
+    -- an arm as nullary that the schema says carries a payload, which
+    -- writes RELNULL where the reader expects a pointer.
+    -- Merge arm-wise, but keep DECLARATION ORDER: an arm's position is its
+    -- wire tag, so sorting by name here would silently renumber every
+    -- constructor. The longer list is the more complete view of the type and
+    -- supplies the order; fields come from whichever occurrence has them,
+    -- since a constructor literal's type reports its own arm with none.
+    wider (v, ps, as) (_, _, bs) = (v, ps, [(n, pick n) | n <- order])
+      where
+        am = Map.fromList as
+        bm = Map.fromList bs
+        order = if length as >= length bs then map fst as else map fst bs
+        pick n = case (Map.lookup n am, Map.lookup n bm) of
+          (Just xs, Just ys) -> if null xs then ys else xs
+          (Just xs, Nothing) -> xs
+          (Nothing, Just ys) -> ys
+          _ -> []
+
+    makeOne (FV gv (CV cvText), ps, arms) = do
+      userMapped <- cscopeDeclaresVariant gv cvText
+      arms' <- mapM (\(n, ts) -> (,) n <$> mapM rustFieldType ts) arms
+      name <- rustTypeOf (VariantF (FV gv (CV cvText)) ps arms)
+      let impls = RP.printVariantImpls name arms'
+      return $ if userMapped
+                 then [impls]
+                 else [RP.printRustVariant name arms', impls]
+
+    cscopeDeclaresVariant :: TVar -> Text -> RustM Bool
+    cscopeDeclaresVariant gv cvText = do
+      cscope <- CMS.gets rsCScope
+      return $ case Map.lookup gv cscope of
+        Just entries -> any (\(_, body, _, _, _) -> bodyName body == Just cvText) entries
+        Nothing -> False
+
+-- | Emit the @ToVoidstar@/@FromVoidstar@ impls for every @data@ type used in
+-- the pool, plus the enum definition itself when the pool owns it.
+--
+-- Ownership follows the record rule: a user-mapped @data Rust => X = "..."@
+-- means the user writes the enum in sourced Rust and only the impls are
+-- emitted. Otherwise the pool generates both. The @gv == cv@ shape alone
+-- cannot decide this -- a user-written @data Rust => Foo = "Foo"@ produces
+-- exactly the same FVar as an unmapped @Foo@ -- so the concrete scope is
+-- consulted, as 'Cpp.cscopeMatches' does for the same ambiguity.
+generateRustEnums :: [SerialManifold] -> RustM [MDoc]
+generateRustEnums es = do
+  named <- mapM (\(v, ps, ns) -> (\n -> (render n, (v, ps, ns))) <$> rustTypeOf (EnumF v ps ns))
+                (collectRustEnums es)
+  -- One entry per RENDERED name, as for variants: a user's template is one
+  -- type per instantiation, a generated enum one whatever it was applied
+  -- to. The longest constructor list is the complete one.
+  concat <$> mapM makeOne (Map.elems (Map.fromListWith longest named))
+  where
+    longest a@(_, _, as) b@(_, _, bs) = if length as >= length bs then a else b
+
+    makeOne (FV gv (CV cvText), ps, ctors) = do
+      userMapped <- cscopeDeclares gv cvText
+      name <- rustTypeOf (EnumF (FV gv (CV cvText)) ps ctors)
+      let impls = RP.printEnumImpls name ctors
+      return $ if userMapped
+                 then [impls]
+                 else [RP.printRustEnum name ctors, impls]
+
+    -- True iff the concrete scope holds an entry for @gv@ whose body names
+    -- @cvText@; that is what distinguishes a real per-language mapping from
+    -- a name the compiler defaulted to the type's own.
+    cscopeDeclares :: TVar -> Text -> RustM Bool
+    cscopeDeclares gv cvText = do
+      cscope <- CMS.gets rsCScope
+      return $ case Map.lookup gv cscope of
+        Just entries -> any (\(_, body, _, _, _) -> bodyName body == Just cvText) entries
+        Nothing -> False
 
 -- | Emit a struct definition (only for autogenerated @= "struct"@ records) plus
 -- @ToVoidstar/FromVoidstar@ impls for every record used in the pool. User-mapped
@@ -1161,8 +1355,8 @@ generateRustStructs es = concat <$> mapM makeOne (collectRustRecords es)
           _ -> return Nothing
       | otherwise = return Nothing
 
-    makeOne :: (FVar, [(Key, TypeF)]) -> RustM [MDoc]
-    makeOne (v@(FV gv _), rs) = case v of
+    makeOne :: (FVar, [TypeF], [(Key, TypeF)]) -> RustM [MDoc]
+    makeOne (v@(FV gv _), ps, rs) = case v of
       -- Autogenerated `= "struct"` record: drive from the unified RecEntry so a
       -- field whose native and wire types diverge (a custom-packer field)
       -- becomes a GENERIC parameter -- one struct `S<T1> { w: T1, .. }` covers
@@ -1188,14 +1382,17 @@ generateRustStructs es = concat <$> mapM makeOne (collectRustRecords es)
       -- marshalling impls are emitted, with concrete field types. A closure field
       -- reifies/reflects in place (via 'fieldMarshal'); the impl is emitted only
       -- when EVERY function field has a harvested crossing site, else struct-only.
-      FV _ (CV s) -> do
-        fields <- mapM (oneField gv (pretty s) . fmap Right) rs
+      FV _ (CV _) -> do
+        -- The struct's name at this instantiation: a template the user
+        -- wrote takes this occurrence's arguments.
+        name <- rustTypeOf (NamF NamRecord v ps rs)
+        fields <- mapM (oneField gv name . fmap Right) rs
         marshals <- mapM (\(k, ty) -> fieldMarshal gv k ty) rs
         let fields4 = zipWith (\(fld, ty, w) m -> (fld, ty, w, m)) fields marshals
             -- Emit the impl only when EVERY function field has a harvested marshal
             -- (a non-function field imposes no requirement); else struct-only.
             emitImpl = and (zipWith (\(_, ty) m -> not (isFunF ty) || maybe False (const True) m) rs marshals)
-        return [RP.printRecordImpls (pretty s) [] fields4 | emitImpl]
+        return [RP.printRecordImpls name [] fields4 | emitImpl]
 
     -- Number the generic (native/=wire) fields `T1, T2, ...`; concrete fields
     -- keep their unified type.
@@ -1211,7 +1408,7 @@ generateRustStructs es = concat <$> mapM makeOne (collectRustRecords es)
     oneField _ _ (k, Left param) = return (RP.rustFieldIdent k, param, True)
     oneField selfGv selfName (k, Right ty) = do
       ty' <- case ty of
-        OptionalF inner | refsRecord selfGv inner -> return $ "Option<Box<" <> selfName <> ">>"
+        OptionalF inner | refsRecord selfGv inner -> return $ "::std::option::Option<::std::boxed::Box<" <> selfName <> ">>"
         _ -> rustFieldType ty
       return (RP.rustFieldIdent k, ty', isVarWidthF ty)
 
@@ -1253,9 +1450,9 @@ borrowedIndicesOfForm form =
 -- mutating state, the scope is purely lexical -- sibling and nested manifolds
 -- cannot corrupt each other's view, and the answer does not depend on the fold's
 -- evaluation order.
-withManifoldScope :: Set.Set Int -> Set.Set Int -> Set.Set Int -> RustM a -> RustM a
-withManifoldScope borrowed shared carried =
-  local (\e -> OwnEnv {oeCurrent = borrowed, oeParent = oeCurrent e, oeShared = shared, oeParentShared = oeShared e, oeLoopCarried = carried})
+withManifoldScope :: Set.Set Int -> Set.Set Int -> Set.Set Int -> Bool -> RustM a -> RustM a
+withManifoldScope borrowed shared carried returnsThunk =
+  local (\e -> OwnEnv {oeCurrent = borrowed, oeParent = oeCurrent e, oeShared = shared, oeParentShared = oeShared e, oeLoopCarried = carried, oeReturnsThunk = returnsThunk})
 
 -- | Run an action in the caller's ownership scope, by making 'oeCurrent' the
 -- caller's set ('oeParent'). Used when rendering a manifold call whose arguments
@@ -1289,9 +1486,9 @@ rustSurround =
   defaultValue
     { surroundSerialManifoldM = \recurse sm@(SerialManifold _ _ form _ _) ->
         let carried = loopCarriedIdsSM sm
-         in withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesSM sm `Set.union` carried) carried (recurse sm)
+         in withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesSM sm `Set.union` carried) carried (rustReturnIsClosure (typeMof sm)) (recurse sm)
     , surroundNativeManifoldM = \recurse nm@(NativeManifold _ _ form _) ->
-        withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesNM nm) Set.empty (recurse nm)
+        withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesNM nm) Set.empty (rustReturnIsClosure (typeMof nm)) (recurse nm)
     }
 
 translateSegment :: SerialManifold -> RustM MDoc
@@ -1494,6 +1691,36 @@ rustLowerConfig mask =
     -- `?T` is `Option<T>`, whose wire layout is type-driven; a widened value must
     -- be a real `Some(..)` (never a bare `T`) or put_value serializes the wrong
     -- shape. The coercion only ever wraps a non-optional inner, so this is safe.
+    -- A constructor in EXPRESSION position is spelled through the qualified
+    -- path `<T>::Ctor`, which is legal for any rendered type -- a generic
+    -- instantiation `MyBox<i64>` included, where `MyBox<i64>::Ctor` is not.
+    -- In PATTERN position that path is not stable Rust, so a pattern names
+    -- the bare head (`MyBox::Ctor`); the subject's type pins the arguments.
+    , lcVariantLit = \ty n _ xs ->
+        let arm = "<" <> ty <> ">::" <> pretty n
+        in if null xs
+             then arm
+             else arm <> parens ("::std::boxed::Box::new" <> parens (RP.tupled1 xs))
+    , lcEnumLit = \ty _ n _ -> "<" <> ty <> ">::" <> pretty n
+    , lcVariantTagTest = \ty n _ subj ->
+        "matches!" <> tupled [subj, RP.typeHead ty <> "::" <> pretty n <> " { .. }"]
+    -- The whole payload sits behind one box, mirroring the wire form, so an
+    -- arm has a single field whatever its arity and one spelling serves them
+    -- all. The guard has already established the arm, so the other branch is
+    -- unreachable rather than a fallback.
+    -- Matched through a REFERENCE. A pattern binding several fields emits
+    -- one projection per field against the same subject, so matching by
+    -- value would move the payload on the first and leave the rest with
+    -- nothing. Borrowing makes each projection independent; the clone is
+    -- what hands an owned value on from a borrowed place.
+    , lcCtorField = \ty n i subj ->
+        "match" <+> "&" <> parens subj <+> "{"
+          <+> RP.typeHead ty <> "::" <> pretty n <> "(mlc_b)"
+          <+> "=> mlc_b." <> pretty i <> ".clone(),"
+          <+> "_ => unreachable!()"
+          <+> "}"
+    , lcEnumTagTest = \ty _ n _ subj ->
+        parens (subj <+> "==" <+> "<" <> ty <> ">::" <> pretty n)
     , lcCoerceOptional = \x -> "Some(" <> x <> ")"
     , lcTypeOf = \t -> Just . toIType <$> rustTypeOf t
     -- The serialize / raw-deserialize types use the WIRE form: a closure nested
@@ -1557,13 +1784,33 @@ rustLowerConfig mask =
     , lcReturn = \e -> "return" <+> e <> ";"
     , lcMakeIf = rustMakeIf
     , lcMakeLoop = rustMakeLoop
-    , lcMakeDoBlock = \_ stmts expr ->
+    -- An effect thunk captures by value only when it can outlive the frame that
+    -- builds it. The only such position is a manifold return typed
+    -- @impl Fn() -> T@ ('rustReturnType'); every other renderer erases the
+    -- effect row, so a closure reaching one is already a type error. A thunk in
+    -- any other frame is forced on the spot or handed to @mlc_catch@, which
+    -- consumes both arms before returning, so it borrows what it reads and
+    -- leaves the value usable afterwards. The C++ member captures by copy
+    -- unconditionally, which is safe there because a copy leaves the original
+    -- intact; @move@ does not.
+    , lcMakeDoBlock = \_ stmts expr -> do
+        escapes <- asks oeReturnsThunk
+        let header = if escapes then "move ||" else "||"
         return
           ( []
           , case stmts of
-              [] -> "move || {" <+> expr <+> "}"
-              _ -> "move || {" <> nest 4 (line <> vsep (stmts ++ [expr])) <> line <> "}"
+              [] -> header <+> "{" <+> expr <+> "}"
+              _ -> header <+> "{" <> nest 4 (line <> vsep (stmts ++ [expr])) <> line <> "}"
           )
+    -- The helper hands back a plain Result so the panic-payload downcast
+    -- (which decides what is catchable) stays in rustmorloc; the arms are
+    -- built here because only the caller knows this Try's representation.
+    , lcMakeTry = \thunk okWrap errWrap ->
+        "rustmorloc::mlc_try" <> tupled
+          [ thunk
+          , "|mlcTryV|" <+> okWrap "mlcTryV"
+          , "|mlcTryM|" <+> errWrap "mlcTryM"
+          ]
     , lcSerialize = defaultSerialize (rustLowerConfig mask)
     , lcDeserialize = \_ -> defaultDeserialize (rustLowerConfig mask)
     -- Reify a crossing closure to its wire tuple via the arity-indexed trait
@@ -1759,5 +2006,30 @@ rustMakeFunction callIndex mname args manifoldType priorLines body headForm = do
           frameStmt =
             "let _mlc_frame = rustmorloc::FrameGuard::new("
               <> dquotes (pretty (RP.rustEscape frameText)) <> ");"
+          -- A labeled manifold is wrapped in a LogGuard: start on
+          -- construction, pass or fail on drop. Nothing is placed after the
+          -- body because a generated body ends in `return <expr>;`, which
+          -- makes any following statement unreachable -- Drop runs on every
+          -- path out regardless. The foreign-callee side is skipped for the
+          -- same reason as in the C++ member -- the caller pool's wrap already
+          -- spans the round trip.
+          litOrEmpty = maybe (dquotes mempty) (\t -> dquotes (pretty (RP.rustEscape t)))
+          logged = case Map.lookup callIndex (rsLogTemplates st) of
+            Just tmpl | not (isForeignCalleeForm headForm) -> Just tmpl
+            _ -> Nothing
+          bodyLines = case logged of
+            Nothing -> priorLines ++ [body]
+            Just tmpl ->
+              let guardStmt =
+                    "let _mlc_log = rustmorloc::LogGuard::new("
+                      <> hsep (punctuate ","
+                           [ dquotes (pretty (RP.rustEscape (renderedGroup tmpl)))
+                           , litOrEmpty (renderedStart tmpl)
+                           , litOrEmpty (renderedPass tmpl)
+                           , litOrEmpty (renderedFail tmpl)
+                           , litOrEmpty (renderedBenchKey tmpl)
+                           ])
+                      <> ");"
+               in guardStmt : priorLines ++ [body]
       return . Just $
-        vsep [decl <+> "{", indent 4 (vsep (frameStmt : priorLines ++ [body])), "}"]
+        vsep [decl <+> "{", indent 4 (vsep (frameStmt : bodyLines)), "}"]

@@ -30,9 +30,13 @@ use std::collections::{HashMap, VecDeque};
 use std::ffi::{c_char, c_void, CString};
 use morloc_runtime_types::cschema::CSchema;
 use morloc_runtime_types::packet::{
+    PACKET_COMPRESSION_NONE as PKT_COMPRESSION_NONE,
+    PACKET_ENCRYPTION_NONE as PKT_ENCRYPTION_NONE,
     PACKET_FORMAT_VOIDSTAR as PKT_FORMAT_VOIDSTAR,
     PACKET_SOURCE_MESG as PKT_SOURCE_MESG,
     PACKET_SOURCE_RPTR as PKT_SOURCE_RPTR,
+    PKT_COMPRESSION_OFF, PKT_ENCRYPTION_OFF, PKT_FORMAT_OFF, PKT_HEADER_SIZE,
+    PKT_LENGTH_OFF, PKT_OFFSET_OFF, PKT_SOURCE_OFF,
 };
 use morloc_runtime_types::shm_types::{align_up, encode_relptr, relptr_offset, Array, RelPtr, RELNULL};
 
@@ -49,6 +53,10 @@ pub use morloc_runtime_types::schema::{parse_schema, Schema, SerialType};
 // NOT linked into this rlib; an rlib may carry undefined references.
 // ---------------------------------------------------------------------------
 extern "C" {
+    fn morloc_log_next_id() -> u64;
+    fn morloc_log_emit(tmpl: *const c_char, group: *const c_char,
+                       runtime_seconds: f64, call_id: u64);
+    fn morloc_bench_record(key: *const c_char, seconds: f64);
     fn shmalloc(size: usize, errmsg: *mut *mut c_char) -> *mut c_void;
     fn shfree(ptr: *mut c_void, errmsg: *mut *mut c_char) -> bool;
     fn shincref(ptr: *mut c_void, errmsg: *mut *mut c_char) -> bool;
@@ -184,16 +192,6 @@ fn cschema_of(schema: &Schema) -> *mut CSchema {
     })
 }
 
-// Packet header byte offsets (wire format is locked; see
-// morloc-runtime-types::packet PacketHeader, `#[repr(C, packed)]`, 32 bytes).
-// The source/format tag *values* are imported from morloc-runtime-types::packet
-// (single source of truth for the wire format). These byte *offsets* are not
-// exported as named constants there, so they stay local.
-const PKT_HEADER_SIZE: usize = 32;
-const PKT_SOURCE_OFF: usize = 12; // command.data.source
-const PKT_FORMAT_OFF: usize = 13; // command.data.format
-const PKT_OFFSET_OFF: usize = 20; // u32 metadata-block length
-const PKT_LENGTH_OFF: usize = 24; // u64 data-block length
 
 // ---------------------------------------------------------------------------
 // Error carrier for @throw (I2 typed panic payload). The pool host's dispatch
@@ -207,27 +205,41 @@ pub fn morloc_throw(msg: impl Into<String>) -> ! {
     std::panic::panic_any(MorlocThrow(msg.into()));
 }
 
-/// `@catch fallible fallback`: run `fallible`; on a catchable morloc throw,
-/// discard its partial manifold trace and run `fallback`. A non-throw panic (a
-/// genuine bug) propagates unchanged (mirrors the C++ MorlocException vs
-/// internal-abort split). Both arguments arrive pre-thunked (do-block closures).
-pub fn mlc_catch<T, F, G>(fallible: F, fallback: G) -> T
+/// Terminate on a failure of the machinery that carries values between pools:
+/// IPC, packet construction and decode. None of these are attributable to user
+/// data or foreign-function behavior, and none leave the pool able to continue,
+/// so they must not reach `mlc_try`. Aborting rather than returning a fail
+/// packet is what keeps them fatal across pools: a caller's socket read fails,
+/// which it classifies as infrastructure in turn.
+pub fn morloc_infra_abort(msg: impl AsRef<str>) -> ! {
+    eprintln!("morloc internal error (Rust pool): {}", msg.as_ref());
+    std::process::abort()
+}
+
+/// `@try body`: run `body` and convert the outcome to data. `ok` wraps the
+/// value, `err` the caught message; codegen supplies both because only it
+/// knows how this `Try` is represented in Rust.
+///
+/// Only a `MorlocThrow` payload becomes an `Err` arm. Any other panic is a
+/// genuine bug and resumes unwinding, which mirrors the C++ split between
+/// MorlocException and an internal abort.
+pub fn mlc_try<T, R, F, OK, ERR>(body: F, ok: OK, err: ERR) -> R
 where
     F: FnOnce() -> T,
-    G: FnOnce() -> T,
+    OK: FnOnce(T) -> R,
+    ERR: FnOnce(String) -> R,
 {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(fallible)) {
-        Ok(v) => v,
-        Err(payload) => {
-            if payload.downcast_ref::<MorlocThrow>().is_some() {
-                // The caught throw's partial trace must not leak into a later
-                // error's traceback.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(v) => ok(v),
+        Err(payload) => match payload.downcast::<MorlocThrow>() {
+            Ok(thrown) => {
+                // The caught throw's partial trace must not leak into a
+                // later error's traceback.
                 TRACEBACK.with(|t| t.borrow_mut().clear());
-                fallback()
-            } else {
-                std::panic::resume_unwind(payload);
+                err(thrown.0)
             }
-        }
+            Err(other) => std::panic::resume_unwind(other),
+        },
     }
 }
 
@@ -336,23 +348,17 @@ pub fn resolve_recur(schema: &Schema) -> &Schema {
 // SHM lifetime (I3): a deferred-free tracker flushed at dispatch entry, plus a
 // per-alloc RAII guard that reclaims a half-built block on panic.
 // ---------------------------------------------------------------------------
-thread_local! {
-    static SHM_TRACKER: Cell<Vec<*mut c_void>> = const { Cell::new(Vec::new()) };
-}
+/// Holds the deferred-release list so that the blocks are released when the
+/// thread ends as well as at the next dispatch. A worker is retired only
+/// after going idle for longer than the dispatch that would otherwise have
+/// flushed it, so releasing here is never earlier than the release it stands
+/// in for; it simply happens on a thread that has no next dispatch to do it.
+/// Without this a retired worker takes its last dispatch's blocks with it.
+struct ShmTracker(Cell<Vec<*mut c_void>>);
 
-fn track(ptr: *mut c_void) {
-    SHM_TRACKER.with(|t| {
-        let mut v = t.take();
-        v.push(ptr);
-        t.set(v);
-    });
-}
-
-/// Free all deferred SHM blocks from the previous dispatch. Generated
-/// `local_dispatch`/`remote_dispatch` call this at entry (cpp: pool.cpp:979).
-pub fn dispatch_flush() {
-    SHM_TRACKER.with(|t| {
-        let v = t.take();
+impl Drop for ShmTracker {
+    fn drop(&mut self) {
+        let v = self.0.take();
         for ptr in &v {
             let mut err: *mut c_char = std::ptr::null_mut();
             unsafe {
@@ -360,7 +366,34 @@ pub fn dispatch_flush() {
                 discard_err(err);
             }
         }
-        t.set(Vec::new());
+    }
+}
+
+thread_local! {
+    static SHM_TRACKER: ShmTracker = const { ShmTracker(Cell::new(Vec::new())) };
+}
+
+fn track(ptr: *mut c_void) {
+    SHM_TRACKER.with(|t| {
+        let mut v = t.0.take();
+        v.push(ptr);
+        t.0.set(v);
+    });
+}
+
+/// Free all deferred SHM blocks from the previous dispatch. Generated
+/// `local_dispatch`/`remote_dispatch` call this at entry (cpp: pool.cpp:979).
+pub fn dispatch_flush() {
+    SHM_TRACKER.with(|t| {
+        let v = t.0.take();
+        for ptr in &v {
+            let mut err: *mut c_char = std::ptr::null_mut();
+            unsafe {
+                shfree(*ptr, &mut err);
+                discard_err(err);
+            }
+        }
+        t.0.set(Vec::new());
     });
     // Reset any stale traceback frames from a prior dispatch (defensive; the
     // guard normally drains them when it forms the fail packet).
@@ -400,6 +433,86 @@ impl Drop for FrameGuard {
             TRACEBACK.with(|t| t.borrow_mut().push_str(self.frame));
         }
     }
+}
+
+/// RAII wrapper for a labeled manifold: emits the start line on construction,
+/// the pass line and the benchmark record when the body returns, and the fail
+/// line if the body unwinds instead.
+///
+/// A guard rather than a `catch_unwind` because the failure path is exactly
+/// what `Drop` already models: `catch_unwind` would demand `UnwindSafe` of
+/// every manifold body, which a body holding raw pointers cannot promise.
+///
+/// The template strings are NUL-terminated literals emitted by the compiler,
+/// so they are passed straight through without an allocation. An absent
+/// template (the user nulled that subfield) is an empty string, and empty
+/// means "emit nothing".
+pub struct LogGuard {
+    group: &'static str,
+    pass_tmpl: &'static str,
+    fail_tmpl: &'static str,
+    bench_key: &'static str,
+    call_id: u64,
+    t0: std::time::Instant,
+}
+
+impl LogGuard {
+    #[inline]
+    pub fn new(
+        group: &'static str,
+        start_tmpl: &'static str,
+        pass_tmpl: &'static str,
+        fail_tmpl: &'static str,
+        bench_key: &'static str,
+    ) -> LogGuard {
+        let call_id = unsafe { morloc_log_next_id() };
+        if !start_tmpl.is_empty() {
+            emit_log(start_tmpl, group, 0.0, call_id);
+        }
+        LogGuard {
+            group,
+            pass_tmpl,
+            fail_tmpl,
+            bench_key,
+            call_id,
+            t0: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Drop for LogGuard {
+    /// Both outcomes are reported from `Drop` rather than from an explicit
+    /// call at the end of the body: a generated manifold body ends in
+    /// `return <expr>;`, so any statement placed after it is unreachable.
+    /// Dropping happens on every path out, and `thread::panicking()` is what
+    /// separates the two. Only the success path records a timing -- a call
+    /// that unwound did not do the work being measured.
+    #[inline]
+    fn drop(&mut self) {
+        let dt = self.t0.elapsed().as_secs_f64();
+        if std::thread::panicking() {
+            if !self.fail_tmpl.is_empty() {
+                emit_log(self.fail_tmpl, self.group, dt, self.call_id);
+            }
+            return;
+        }
+        if !self.pass_tmpl.is_empty() {
+            emit_log(self.pass_tmpl, self.group, dt, self.call_id);
+        }
+        if !self.bench_key.is_empty() {
+            if let Ok(k) = CString::new(self.bench_key) {
+                unsafe { morloc_bench_record(k.as_ptr(), dt) };
+            }
+        }
+    }
+}
+
+fn emit_log(tmpl: &str, group: &str, seconds: f64, call_id: u64) {
+    let (t, g) = match (CString::new(tmpl), CString::new(group)) {
+        (Ok(t), Ok(g)) => (t, g),
+        _ => return,
+    };
+    unsafe { morloc_log_emit(t.as_ptr(), g.as_ptr(), seconds, call_id) };
 }
 
 struct ShmGuard(Option<*mut c_void>);
@@ -734,6 +847,95 @@ impl<T: FromVoidstar> FromVoidstar for Option<T> {
     }
 }
 
+// ---- Variant slots (payload-bearing `data`) --------------------------------
+//
+// A variant is a tag byte, seven bytes of padding, and a relative pointer to
+// the arm's fields -- the same slot shape as Optional, with a tag in front.
+// These helpers keep that layout here rather than in generated pool code:
+// the offsets, the alignment of the out-of-line payload and the relative-
+// pointer encoding are the runtime's business, and a pool cannot reach them
+// anyway (RelPtr and its helpers are not part of this crate's public API).
+
+/// Byte offset of a variant's payload pointer within its slot.
+const VARIANT_PAYLOAD: usize = 8;
+
+/// Size of a variant slot whose arm carries no fields.
+pub fn variant_size_nullary(schema: &Schema) -> usize {
+    resolve_recur(schema).width
+}
+
+/// Size of a variant slot plus the out-of-line payload of one arm, including
+/// any padding needed to align that payload.
+pub fn variant_size_payload<T: ToVoidstar>(
+    schema: &Schema,
+    arm: &Schema,
+    payload: &T,
+) -> usize {
+    let s = resolve_recur(schema);
+    let a = resolve_recur(arm);
+    s.width + (a.alignment().max(1) - 1) + payload.shm_size(a)
+}
+
+/// Write a variant slot for an arm with no fields: the tag, determined
+/// padding, and a null payload pointer.
+///
+/// # Safety
+/// `dest` must point at a writable slot of at least the schema's width.
+pub unsafe fn write_variant_nullary(dest: *mut u8, tag: u8) {
+    *dest = tag;
+    core::ptr::write_bytes(dest.add(1), 0, VARIANT_PAYLOAD - 1);
+    core::ptr::write_unaligned(dest.add(VARIANT_PAYLOAD) as *mut RelPtr, RELNULL);
+}
+
+/// Write a variant slot for an arm that carries fields: the tag, determined
+/// padding, and a pointer to the payload written at the cursor.
+///
+/// # Safety
+/// `dest` must point at a writable slot of at least the schema's width, and
+/// `cursor` must have room for the payload reported by `variant_size_payload`.
+pub unsafe fn write_variant_payload<T: ToVoidstar>(
+    dest: *mut u8,
+    cursor: &mut *mut u8,
+    arm: &Schema,
+    tag: u8,
+    payload: &T,
+) {
+    *dest = tag;
+    core::ptr::write_bytes(dest.add(1), 0, VARIANT_PAYLOAD - 1);
+    let a = resolve_recur(arm);
+    let align = a.alignment().max(1);
+    *cursor = align_up(*cursor as usize, align) as *mut u8;
+    let slot = *cursor;
+    let rel = to_rel(slot);
+    *cursor = slot.add(a.width);
+    payload.write(slot, cursor, a);
+    core::ptr::write_unaligned(dest.add(VARIANT_PAYLOAD) as *mut RelPtr, rel);
+}
+
+/// The tag a variant slot carries.
+///
+/// # Safety
+/// `data` must point at a variant slot.
+pub unsafe fn read_variant_tag(data: *const u8) -> u8 {
+    *data
+}
+
+/// Read the payload of a variant slot, given the schema of the arm its tag
+/// selected.
+///
+/// # Safety
+/// `data` must point at a variant slot whose payload pointer is live, and
+/// `arm` must be the schema of the arm named by its tag.
+pub unsafe fn read_variant_payload<T: FromVoidstar>(
+    arm: &Schema,
+    data: *const u8,
+    base: *const u8,
+) -> T {
+    let rel = core::ptr::read_unaligned(data.add(VARIANT_PAYLOAD) as *const RelPtr);
+    let a = resolve_recur(arm);
+    <T as FromVoidstar>::read(a, resolve(rel, base), base)
+}
+
 // ---- Box (cycle-break indirection, I7) ------------------------------------
 impl<T: ToVoidstar> ToVoidstar for Box<T> {
     fn shm_size(&self, schema: &Schema) -> usize { (**self).shm_size(schema) }
@@ -778,6 +980,10 @@ macro_rules! tuple_impl {
         }
     };
 }
+// A one-element tuple. Unused while tuples came only from morloc's `(a, b)`
+// syntax, which has no one-element form -- but a `data` arm carrying a
+// single field is boxed as `(T,)`, so the impl is needed.
+tuple_impl!(A 0);
 tuple_impl!(A 0, B 1);
 tuple_impl!(A 0, B 1, C 2);
 tuple_impl!(A 0, B 1, C 2, D 3);
@@ -886,7 +1092,17 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
     let source = *packet.add(PKT_SOURCE_OFF);
     let format = *packet.add(PKT_FORMAT_OFF);
 
-    if source == PKT_SOURCE_MESG && format == PKT_FORMAT_VOIDSTAR {
+    let compression = *packet.add(PKT_COMPRESSION_OFF);
+    let encryption = *packet.add(PKT_ENCRYPTION_OFF);
+    // A payload that is compressed or encrypted cannot be walked where it
+    // lies. Those fall through to the general path, which expands the body
+    // and re-enters. Testing for the plain values rather than against the
+    // known transforms keeps a future one from being read as raw bytes.
+    if source == PKT_SOURCE_MESG
+        && format == PKT_FORMAT_VOIDSTAR
+        && compression == PKT_COMPRESSION_NONE
+        && encryption == PKT_ENCRYPTION_NONE
+    {
         // Inline: voidstar lives in the packet buffer; relptrs are buffer-relative.
         let meta = core::ptr::read_unaligned(packet.add(PKT_OFFSET_OFF) as *const u32) as usize;
         let payload = packet.add(PKT_HEADER_SIZE + meta);
@@ -902,12 +1118,24 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
         morloc_throw(msg);
     }
     if source == PKT_SOURCE_RPTR {
-        shincref(voidstar as *mut c_void, &mut err);
+        // Track only a reference actually acquired: a refused incref means
+        // the block is free or being released, and tracking it anyway would
+        // make the next flush decrement a reference this pool never held.
+        let acquired = shincref(voidstar as *mut c_void, &mut err);
         if !err.is_null() {
             libc::free(err as *mut c_void);
             err = std::ptr::null_mut();
         }
         let _ = err;
+        if acquired {
+            track(voidstar as *mut c_void);
+        }
+    } else {
+        // A payload that did not arrive by reference was materialized into a
+        // block of this pool's own, and nothing else will free it. Hand it to
+        // the tracker, which is also panic-safe: the read below can throw and
+        // a throwing dispatch answers with a fail packet rather than ending
+        // the pool, so a block dropped there would be lost once per request.
         track(voidstar as *mut c_void);
     }
     <T as FromVoidstar>::read(schema, voidstar, std::ptr::null())
@@ -976,7 +1204,7 @@ pub unsafe fn foreign_call(socket_filename: &str, mid: u32, args: &[*const u8]) 
     let mut err: *mut c_char = std::ptr::null_mut();
     let packet = make_morloc_local_call_packet(mid, args.as_ptr(), args.len(), &mut err);
     if !err.is_null() {
-        morloc_throw(cstr_take(err));
+        morloc_infra_abort(cstr_take(err));
     }
 
     pool_mark_busy();
@@ -984,7 +1212,7 @@ pub unsafe fn foreign_call(socket_filename: &str, mid: u32, args: &[*const u8]) 
     pool_mark_idle();
     libc::free(packet as *mut c_void);
     if !err.is_null() {
-        morloc_throw(cstr_take(err));
+        morloc_infra_abort(cstr_take(err));
     }
 
     finalize_call_result(result)
@@ -1011,9 +1239,8 @@ unsafe fn finalize_call_result(result: *mut u8) -> *mut u8 {
         let voidstar = rel2abs(rel, &mut rerr);
         discard_err(rerr);
         if !voidstar.is_null() {
-            let mut ierr: *mut c_char = std::ptr::null_mut();
-            shincref(voidstar, &mut ierr);
-            discard_err(ierr);
+            // The callee took a reference before sending; it is ours now.
+            // Inherit it rather than adding another.
             track(voidstar);
         }
     }
@@ -1625,6 +1852,73 @@ mod tests {
         let out = <T as FromVoidstar>::read(&schema, base, base);
         TEST_BASE.with(|b| b.set(None));
         out
+    }
+
+    /// Lay a flattened voidstar into a packet body and read it back through
+    /// `get_value`, which is what a pool actually calls. `roundtrip` covers
+    /// the walk; this covers the decision to walk in place, including the
+    /// header fields that decide it.
+    unsafe fn inline_packet_roundtrip<T: ToVoidstar + FromVoidstar>(
+        schema_str: &str,
+        value: &T,
+        compression: u8,
+    ) -> T {
+        let schema = parse_schema(schema_str).expect("parse schema");
+        let body = {
+            let _recur = RecurScope::enter(&schema);
+            let total = value.shm_size(&schema).max(1);
+            let mut buf = vec![0u8; total + 64];
+            let base = buf.as_mut_ptr();
+            TEST_BASE.with(|b| b.set(Some(base as usize)));
+            let mut cursor = base.add(schema.width);
+            value.write(base, &mut cursor, &schema);
+            TEST_BASE.with(|b| b.set(None));
+            buf
+        };
+
+        let mut packet = vec![0u8; PKT_HEADER_SIZE + body.len()];
+        packet[PKT_SOURCE_OFF] = PKT_SOURCE_MESG;
+        packet[PKT_FORMAT_OFF] = PKT_FORMAT_VOIDSTAR;
+        packet[PKT_COMPRESSION_OFF] = compression;
+        packet[PKT_ENCRYPTION_OFF] = PKT_ENCRYPTION_NONE;
+        // No metadata block; the body starts immediately after the header.
+        packet[PKT_OFFSET_OFF..PKT_OFFSET_OFF + 4].copy_from_slice(&0u32.to_le_bytes());
+        packet[PKT_LENGTH_OFF..PKT_LENGTH_OFF + 8]
+            .copy_from_slice(&(body.len() as u64).to_le_bytes());
+        packet[PKT_HEADER_SIZE..].copy_from_slice(&body);
+
+        // Relptrs in the body are relative to wherever the body begins, so
+        // point the walk's base at its position inside the packet.
+        let base = packet.as_ptr().add(PKT_HEADER_SIZE);
+        TEST_BASE.with(|b| b.set(Some(base as usize)));
+        let out = get_value::<T>(packet.as_ptr(), &schema);
+        TEST_BASE.with(|b| b.set(None));
+        out
+    }
+
+    #[test]
+    fn inline_packets_read_in_place() {
+        unsafe {
+            assert_eq!(inline_packet_roundtrip("i8", &42i64, PKT_COMPRESSION_NONE), 42i64);
+            assert_eq!(
+                inline_packet_roundtrip("s", &"hello".to_string(), PKT_COMPRESSION_NONE),
+                "hello".to_string(),
+            );
+            assert_eq!(
+                inline_packet_roundtrip("s", &String::new(), PKT_COMPRESSION_NONE),
+                String::new(),
+            );
+            let nested: Vec<Vec<i64>> = vec![vec![1, 2], vec![], vec![3]];
+            assert_eq!(
+                inline_packet_roundtrip("aai8", &nested, PKT_COMPRESSION_NONE),
+                nested,
+            );
+            let strs: Vec<String> = vec!["a".into(), "".into(), "ccc".into()];
+            assert_eq!(
+                inline_packet_roundtrip("as", &strs, PKT_COMPRESSION_NONE),
+                strs,
+            );
+        }
     }
 
     #[test]

@@ -5,7 +5,7 @@
 -- list once, then returns an empty list at EOF. The cursor is part of
 -- the registry slot, so subsequent @next calls keep returning empty.
 --
--- @stream :: IFile a -> <IO, Err> IStream a derives a forward-only IStream
+-- @stream :: IFile a -> <IO> IStream a derives a forward-only IStream
 -- from an open IFile, bound to the same path with an independent fd
 -- and cursor. The two handles read independently.
 --
@@ -22,31 +22,35 @@ module main
 import root
 
 -- 1. Open as IStream and pull the first (only) sub-packet.
-testNextOnce :: Str -> <IO, Err> [Str]
+testNextOnce :: Str -> <IO> [Str]
 testNextOnce path = do
   @save 0 path ["one", "two", "three"]
-  s <- @open path :: <IO, Err> IStream Str
-  @next s
+  Ok s <- @open path :: <IO> (Try Str (IStream Str))
+  Ok _tailv33 <- @next s
+  _tailv33
 
 -- 2. After EOF, subsequent @next calls return empty.
-testNextEofTwice :: Str -> <IO, Err> [Str]
+testNextEofTwice :: Str -> <IO> [Str]
 testNextEofTwice path = do
   @save 0 path ["alpha", "beta"]
-  s <- @open path :: <IO, Err> IStream Str
-  _ <- @next s
-  @next s
+  Ok s <- @open path :: <IO> (Try Str (IStream Str))
+  Ok _ <- @next s
+  Ok _tailv34 <- @next s
+  _tailv34
 
 -- 3. Derive an IStream from an IFile and walk it.
-testStreamFromIFile :: Str -> <IO, Err> [Int]
+testStreamFromIFile :: Str -> <IO> [Int]
 testStreamFromIFile path = do
   @save 0 path [11, 22, 33]
-  f <- @open path :: <IO, Err> IFile Int
+  Ok f <- @open path :: <IO> (Try Str (IFile Int))
   s <- @stream f
-  @next s
+  Ok _tailv35 <- @next s
+  _tailv35
 
 -- 4. Int element type round-trip.
-testIntList :: Str -> <IO, Err> [Int]
+testIntList :: Str -> <IO> [Int]
 testIntList path = do
   @save 0 path [100, 200, 300, 400]
-  s <- @open path :: <IO, Err> IStream Int
-  @next s
+  Ok s <- @open path :: <IO> (Try Str (IStream Int))
+  Ok _tailv36 <- @next s
+  _tailv36

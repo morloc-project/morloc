@@ -1,0 +1,5 @@
+module types (*)
+
+data Color = Red | Green | Blue
+
+data Box = Wrap Real | Empty

@@ -1,0 +1,12 @@
+--- exact ---
+3
+3
+2
+--- quoted-wrong-case ---
+OK
+--- field-wrong-case ---
+OK
+--- list-wrong-case ---
+OK
+--- bare-is-lenient ---
+3

@@ -17,18 +17,26 @@ record Person where
   age :: Int
 record Py => Person = "dict"
 
-mkListInt :: Str -> <IO, Err> ()
-mkListInt path = @save 0 path [10, 20, 30, 40, 50]
+mkListInt :: Str -> <IO> ()
+mkListInt path = do
+  Ok _rv <- @save 0 path [10, 20, 30, 40, 50]
+  _rv
 
-mkListRecord :: Str -> <IO, Err> ()
-mkListRecord path = @save 0 path
-  [ {name = "Alice", age = 30}
-  , {name = "Bob",   age = 25}
-  , {name = "Carol", age = 40}
-  ]
+mkListRecord :: Str -> <IO> ()
+mkListRecord path = do
+  let _payload = [ {name = "Alice", age = 30}
+    , {name = "Bob",   age = 25}
+    , {name = "Carol", age = 40}
+    ]
+  @save 0 path _payload
+  ()
 
-mkScalar :: Str -> <IO, Err> ()
-mkScalar path = @save 0 path 42
+mkScalar :: Str -> <IO> ()
+mkScalar path = do
+  Ok _rv <- @save 0 path 42
+  _rv
 
-mkEmpty :: Str -> <IO, Err> ()
-mkEmpty path = @save 0 path ([] :: [Int])
+mkEmpty :: Str -> <IO> ()
+mkEmpty path = do
+  Ok _rv <- @save 0 path ([] :: [Int])
+  _rv

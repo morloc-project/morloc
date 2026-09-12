@@ -23,22 +23,28 @@ record NestedRow where
   members :: [Person]
 record Py => NestedRow = "dict"
 
-mkFlatList :: Str -> <IO, Err> ()
-mkFlatList path = @save 0 path [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+mkFlatList :: Str -> <IO> ()
+mkFlatList path = do
+  Ok _rv <- @save 0 path [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+  _rv
 
-mkRecords :: Str -> <IO, Err> ()
-mkRecords path = @save 0 path
-  [ {name = "Alice", age = 30, tags = ["a", "b"]}
-  , {name = "Bob",   age = 25, tags = ["c"]}
-  , {name = "Carol", age = 40, tags = ["d", "e", "f"]}
-  ]
+mkRecords :: Str -> <IO> ()
+mkRecords path = do
+  let _payload = [ {name = "Alice", age = 30, tags = ["a", "b"]}
+    , {name = "Bob",   age = 25, tags = ["c"]}
+    , {name = "Carol", age = 40, tags = ["d", "e", "f"]}
+    ]
+  @save 0 path _payload
+  ()
 
 -- Not list-shaped at the top level -- only exercised as a DATA packet.
-mkNested :: Str -> <IO, Err> ()
-mkNested path = @save 0 path
-  { label = "team-a"
-  , members =
-      [ {name = "Alice", age = 30, tags = ["a", "b"]}
-      , {name = "Bob",   age = 25, tags = ["c"]}
-      ]
-  }
+mkNested :: Str -> <IO> ()
+mkNested path = do
+  let _payload = { label = "team-a"
+    , members =
+        [ {name = "Alice", age = 30, tags = ["a", "b"]}
+        , {name = "Bob",   age = 25, tags = ["c"]}
+        ]
+    }
+  @save 0 path _payload
+  ()

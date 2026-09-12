@@ -1,0 +1,86 @@
+-- A `data` argument unrolled into mutually exclusive options.
+--
+-- A sum type is how a program says "one of these, and only one". Unrolled,
+-- each constructor becomes an option: an argument-free constructor is a
+-- bare flag, a constructor with fields takes exactly as many values as it
+-- has fields, and giving two arms at once is refused. Exactly one arm is
+-- required unless the argument may be omitted (`?Shape`, absent means
+-- null) or declares a default. Each arm's help is its constructor's
+-- docstring, and a field value is read the way any argument of its type
+-- is, so a file path or a bare constructor works inside an arm.
+
+module main (area, describe, count, paint, say)
+
+import root-py
+
+--' A shape to measure
+data Shape
+  --' a circle of some radius
+  = Circle Real
+  --' a box, width then height
+  | Rect Real Real
+  --' a point, with no size
+  | Dot
+
+data Color = Red | Green | Blue
+
+--' Paint a shape
+data Paint
+  --' a solid color
+  = Solid Color
+  --' no paint at all
+  | Bare
+
+--' Measure a shape
+area ::
+  --' the shape
+  --' @unroll
+  Shape ->
+  Real
+area | (Circle r) = 3.0 * r * r
+     | (Rect w h) = w * h
+     | Dot = 0.0
+
+--' Describe a shape, or its absence
+describe ::
+  --' the shape, if any
+  --' @unroll
+  ?Shape ->
+  Str
+describe = describePy
+
+source Py from "shapes.py" ("describe" as describePy)
+describePy :: ?Shape -> Str
+
+--' Count the corners, defaulting to a dot
+count ::
+  --' the shape
+  --' @unroll
+  --' @default dot
+  Shape ->
+  Int
+count | (Circle _) = 0
+      | (Rect _ _) = 4
+      | Dot = 1
+
+--' Name the paint
+paint ::
+  --' the paint
+  --' @unroll
+  Paint ->
+  Str
+paint | (Solid Red) = "red"
+      | (Solid _) = "other"
+      | Bare = "bare"
+
+data Msg = Text Str | Num Int
+
+--' Echo a message
+say ::
+  --' the message
+  --' @unroll
+  --' @name message
+  Msg ->
+  Str
+say | (Text s) = s
+    | (Num _) = "number"

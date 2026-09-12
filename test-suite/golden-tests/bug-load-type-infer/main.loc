@@ -1,6 +1,6 @@
 -- Regression: @load's fresh-variable return type must be propagated
 -- from the enclosing function's declared return type through the
--- do-block handler.  Post effect-migration, @load returns `<IO, Err> a`
+-- do-block handler.  Post effect-migration, @load returns `<IO> a`
 -- and the same inference constraint applies to `a`.
 module main (roundTrip)
 
@@ -9,8 +9,8 @@ import root-py
 source Py from "helper.py" ("identity")
 identity :: a -> a
 
-roundTrip :: Int -> Str -> <IO, Err> Int
+roundTrip :: Int -> Str -> <IO> Int
 roundTrip x path = do
   @save 0 path (identity x)
-  x <- @load path
+  Ok x <- @load path
   x

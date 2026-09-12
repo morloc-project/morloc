@@ -1392,6 +1392,41 @@ unsafe fn emit_raw_media(
     (*resp).mime = libc::strdup(mime);
 }
 
+/// Take a reference on a result packet's shared-memory block, if it has one,
+/// and record it in the active eval arena so it is released when the request
+/// ends.
+///
+/// A packet whose payload is inline carries no block and needs nothing. One
+/// that points into shared memory is owned by the pool that produced it, and
+/// that pool frees it at the head of its next dispatch -- soon enough to
+/// matter when requests overlap.
+///
+/// # Safety
+/// `packet` must be a well-formed morloc packet.
+unsafe fn adopt_rptr_result(packet: *const u8) {
+    use crate::packet::{PacketHeader, PACKET_SOURCE_RPTR};
+    use crate::shm::RelPtr;
+    if packet.is_null() {
+        return;
+    }
+    let header = packet as *const PacketHeader;
+    if (*header).command.data.source != PACKET_SOURCE_RPTR {
+        return;
+    }
+    let payload_start = 32 + (*header).offset as usize;
+    if ((*header).length as usize) < std::mem::size_of::<RelPtr>() {
+        return;
+    }
+    let relptr = *(packet.add(payload_start) as *const RelPtr);
+    if let Ok(abs) = crate::shm::rel2abs(relptr) {
+        // The producer took a reference on this block before the packet left
+        // it, and that reference is ours now. Take ownership rather than a
+        // second reference: acquiring here would be too late anyway, since
+        // the interval this is meant to cover has already elapsed.
+        crate::eval_arena::record_if_active(abs);
+    }
+}
+
 // -- Dispatch -----------------------------------------------------------------
 
 #[no_mangle]
@@ -1739,14 +1774,38 @@ pub unsafe extern "C" fn daemon_dispatch(
             return resp;
         }
 
+        // Re-encode each argument as JSON text for the pool. This has to go
+        // through the serializer, as the CLI path does in `dispatch::quoted`:
+        // wrapping a string's raw contents in quotes yields invalid JSON as
+        // soon as it holds a quote or a backslash, and a NUL would truncate
+        // the C string. Encoding escapes both, so the CString cannot fail.
+        // Done before the allocation below so an encoding failure returns
+        // without leaking the argument array.
+        let mut arg_texts: Vec<CString> = Vec::with_capacity(expected_nargs);
+        for val in parsed_args.iter() {
+            let encoded = serde_json::to_string(val)
+                .map_err(|e| e.to_string())
+                .and_then(|s| CString::new(s).map_err(|e| e.to_string()));
+            match encoded {
+                Ok(c) => arg_texts.push(c),
+                Err(e) => {
+                    (*resp).success = false;
+                    (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
+                    let c = CString::new(format!(
+                        "Failed to encode argument {}: {}",
+                        arg_texts.len() + 1,
+                        e
+                    ))
+                    .unwrap_or_default();
+                    (*resp).error = libc::strdup(c.as_ptr());
+                    return resp;
+                }
+            }
+        }
+
         args = libc::calloc(expected_nargs + 1, std::mem::size_of::<*mut c_void>())
             as *mut *mut c_void;
-        for (i, val) in parsed_args.iter().enumerate() {
-            let val_str = match val {
-                serde_json::Value::String(s) => format!("\"{}\"", s),
-                other => other.to_string(),
-            };
-            let c = CString::new(val_str).unwrap_or_default();
+        for (i, c) in arg_texts.iter().enumerate() {
             let dup = libc::strdup(c.as_ptr());
             *args.add(i) = initialize_positional(dup);
             libc::free(dup as *mut c_void);
@@ -2050,6 +2109,21 @@ pub unsafe extern "C" fn daemon_dispatch(
                 (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                 (*resp).error = err;
             } else {
+                // Take a reference on a result that lives in shared memory,
+                // and hand it to the arena so it is released when this
+                // request ends.
+                //
+                // Without this the block is read while nothing holds it on
+                // this side: the pool that produced it keeps it only until
+                // its own next dispatch, and with several requests in flight
+                // that dispatch can arrive while this one is still reading.
+                // What comes back is then a prefix of the right answer
+                // followed by zeros, because releasing a block scrubs it.
+                // The pools already do exactly this to each other -- a pool
+                // receiving another pool's result increfs it and tracks it --
+                // and the daemon was the one consumer that did not.
+                adopt_rptr_result(result_packet);
+
                 let packet_error =
                     get_morloc_data_packet_error_message(result_packet, &mut err);
                 if !packet_error.is_null() {

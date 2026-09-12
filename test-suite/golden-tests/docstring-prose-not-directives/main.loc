@@ -1,0 +1,27 @@
+--' Ordinary English in a docstring is prose, not a directive.
+--'
+--\ Any line whose first word ends in a colon, and any `@word`, was read as
+--\ a directive and reached the help rewritten -- an `@` dropped, a colon
+--\ invented. Every line is now kept as the author wrote it. Whether it also
+--\ warns depends on the form: `@word` is the closed grammar, so an unknown
+--\ keyword there is still reported, while the legacy `key:` form collides
+--\ with ordinary English and warns only on a near-miss.
+module main (f, g)
+
+import root
+
+alt :: [Int] -> Str
+alt _ = "alt"
+
+--' Do a thing
+--' Note: this is a fast path.
+--' @append reopens the file
+--' See http://example.com for details
+--' @render -a/--alt=alt
+f :: [Int]
+f = [1,2,3]
+
+--' A real directive still takes effect
+--' @name renamed
+g :: Int -> Int
+g x = x

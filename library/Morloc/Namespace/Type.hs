@@ -96,8 +96,6 @@ module Morloc.Namespace.Type
   , resolveEffectSet
   , emptyEffectSet
   , ioEffectSet
-  , errEffectSet
-  , ioErrEffectSet
   , effectSubsetOf
   , effectSetHasVar
   , effectSetParts
@@ -105,7 +103,6 @@ module Morloc.Namespace.Type
   , isEmptyEffectSet
   , normalizeEffectSet
   , unionEffectSet
-  , removeEffectLabel
   , mkEffectU
   , mkEffectT
   , prettyEffectSet
@@ -152,10 +149,15 @@ module Morloc.Namespace.Type
   , mostSpecificSubtypes
   , substituteFirst
   , findFirst
+  , scopeEnumCtors
+  , scopeDataCtors
+  , dataBodyCtors
+  , scopeDataIsEnum
   ) where
 
 import qualified Data.List as DL
 import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import qualified Data.PartialOrd as P
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -189,14 +191,6 @@ emptyEffectSet = EffectSet Set.empty
 -- | An IO effect set
 ioEffectSet :: EffectSet
 ioEffectSet = EffectSet (Set.singleton "IO")
-
--- | An Err effect set. Carried by @throw and discharged by @catch.
-errEffectSet :: EffectSet
-errEffectSet = EffectSet (Set.singleton "Err")
-
--- | Combined IO+Err effect set for fallible I/O intrinsics.
-ioErrEffectSet :: EffectSet
-ioErrEffectSet = EffectSet (Set.fromList ["IO", "Err"])
 
 -- | Check if one effect set is a subset of another (resolved labels).
 -- Unsolved EffectVar resolves to empty, so EffectVar is a subset of everything.
@@ -255,23 +249,6 @@ normalizeEffectSet es =
 unionEffectSet :: EffectSet -> EffectSet -> EffectSet
 unionEffectSet a b = normalizeEffectSet (EffectUnion a b)
 
--- | Strip a specific label from an effect set. Concrete labels are removed
--- from an 'EffectSet'; 'EffectUnion' recurses into both sides and normalizes
--- the result. Callers MUST reject a bare 'EffectVar' before invoking this
--- helper because row-var membership is not decidable here -- silently
--- no-op-stripping would let ill-typed programs through the effect-strip
--- rule. We panic on the misuse rather than silently misbehave.
--- Removing a concrete label from a row variable is a no-op: the
--- variable's substitution is unknown, so we neither add nor remove any
--- concrete label. Callers must independently verify the label was
--- concretely present in the row (via 'resolveEffectSet') before relying
--- on the strip; otherwise this silently succeeds on a row that never
--- carried the label.
-removeEffectLabel :: EffectLabel -> EffectSet -> EffectSet
-removeEffectLabel lbl (EffectSet ls) = EffectSet (Set.delete lbl ls)
-removeEffectLabel _   v@(EffectVar _) = v
-removeEffectLabel lbl (EffectUnion a b) =
-  normalizeEffectSet (EffectUnion (removeEffectLabel lbl a) (removeEffectLabel lbl b))
 
 ---- Type definitions
 
@@ -289,7 +266,14 @@ removeEffectLabel lbl (EffectUnion a b) =
   base type; has its own per-language overrides (in root-cpp etc.).
   Opaque to reduction. Cannot be cyclic (no body to chain through).
 -}
-data TypedefKind = TypedefAlias | TypedefNewtype | TypedefPrimitive
+-- | How a type name was introduced. 'TypedefEnum' is a `data` whose
+-- constructors all take no arguments: nominal like a newtype, but with a
+-- closed constructor set and a one-byte wire form of its own.
+data TypedefKind
+  = TypedefAlias
+  | TypedefNewtype
+  | TypedefPrimitive
+  | TypedefEnum
   deriving (Show, Eq, Ord)
 
 {- | Scope maps each type name to its definitions: the type parameters, the
@@ -307,6 +291,50 @@ type Scope =
       , TypedefKind -- Alias (transparent) or Newtype (nominal, wire-equivalent)
       )
     ]
+
+-- | The constructor names of a `data` type, in declaration order, or
+-- Nothing if the name is not a `data` type.
+--
+-- A `data` declaration stores its constructor list in its scope body as a
+-- list of Str literals. That encoding is an implementation detail and this
+-- is the only function that knows it: the alternative was a new 'TypeU'
+-- constructor, which would force a decision at every one of the ~100 sites
+-- that match on 'TypeU' for the sake of a leaf that never takes part in
+-- unification. Reduction stops at the nominal boundary
+-- ('stopAtNominalBoundary'), so the body is carried, never expanded.
+--
+-- A constructor's position in this list is its wire tag.
+scopeDataCtors :: Scope -> TVar -> Maybe [(Text, [TypeU])]
+scopeDataCtors scope v = do
+  entries <- Map.lookup v scope
+  listToMaybe [cs | (_, body, _, _, TypedefEnum) <- entries, Just cs <- [dataBodyCtors body]]
+
+-- | Decode a `data` declaration's body into its constructor table.
+--
+-- Each constructor is a list whose head is its name and whose tail is its
+-- argument types, and the body is the list of those. 'LList' can hold an
+-- arbitrary 'TypeU', which is what lets the argument types ride along in a
+-- shape the rest of the compiler already knows how to carry.
+dataBodyCtors :: TypeU -> Maybe [(Text, [TypeU])]
+dataBodyCtors (LitU (LList xs)) = mapM oneCtor xs
+  where
+    oneCtor (LitU (LList (LitU (LStr n) : args))) = Just (n, args)
+    oneCtor _ = Nothing
+dataBodyCtors _ = Nothing
+
+-- | Just the constructor names, in declaration order. A constructor's
+-- position here is its wire tag.
+scopeEnumCtors :: Scope -> TVar -> Maybe [Text]
+scopeEnumCtors scope v = map fst <$> scopeDataCtors scope v
+
+-- | True when every constructor of this type takes no arguments.
+--
+-- This is a property of the TYPE, not of one constructor: it decides the
+-- wire form for all of them. An argument-free constructor sitting beside a
+-- payload-bearing one is a variant with an empty payload, not an enum
+-- member, because a value of the type has to be able to hold either.
+scopeDataIsEnum :: Scope -> TVar -> Bool
+scopeDataIsEnum scope v = maybe False (all (null . snd)) (scopeDataCtors scope v)
 
 -- | Flavors of named (keyed) types
 data NamType
@@ -715,6 +743,9 @@ data ArgDoc
       [ArgDocVars]
       ArgDocVars
   | ArgDocAlias ArgDocVars
+  | ArgDocData ArgDocVars [(Text, ArgDocVars)]
+  -- ^ A `data` declaration: the type's own docstring and one per
+  -- constructor, in declaration order.
   deriving (Show, Ord, Eq)
 
 -- Wraps all information stored in a type definition

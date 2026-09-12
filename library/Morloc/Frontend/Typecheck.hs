@@ -15,6 +15,7 @@ segregation in the code generator.
 -}
 module Morloc.Frontend.Typecheck (typecheck, resolveTypes, evaluateAnnoSTypes, peakSExpr) where
 
+import qualified Data.List as List
 import qualified Data.IntMap.Strict as IntMap
 import Data.Text (Text)
 import qualified Data.Text as MT
@@ -265,6 +266,7 @@ resolveTypes (AnnoS (Idx i t) ci e) =
     f (IntS si x) = IntS si x
     f (LogS x) = LogS x
     f (StrS x) = StrS x
+    f (ConS tv n k xs) = ConS tv n k (map resolveTypes xs)
     f UniS = UniS
     f NullS = NullS
     f (DoBlockS e') = DoBlockS (resolveTypes e')
@@ -385,6 +387,9 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
     f _ g0 (IntS si x) = return (g0, IntS si x)
     f _ g0 (LogS x) = return (g0, LogS x)
     f _ g0 (StrS x) = return (g0, StrS x)
+    f _ g0 (ConS tv n i xs) = do
+      (g1, xs') <- statefulMapM resolveInstances g0 xs
+      return (g1, ConS tv n i xs')
     f _ g0 (ExeS x) = return (g0, ExeS x)
     f _ g0 (DoBlockS e) = resolveInstances g0 e |>> second DoBlockS
     f _ g0 (EvalS e) = resolveInstances g0 e |>> second EvalS
@@ -558,6 +563,32 @@ rejectListSelectorTarget i s t = do
         "Index getter" <+> pretty s
           <+> "requires a tuple or record, got a list."
           <+> "Use 'head' or '!!' for list access."
+    -- The evaluated form, so an alias cannot carry a `data` type past
+    -- the check the way the raw one would.
+    _ -> rejectSumSelectorTarget i s t'
+
+-- | Refuse a getter aimed at a `data` type.
+--
+-- A projection names a position, but which positions exist depends on
+-- which constructor a value carries, and that is not known until the
+-- value is matched. A getter would therefore be well typed only when
+-- every arm happened to agree at that position -- a property of one
+-- declaration rather than of the type, and one that a later arm silently
+-- breaks. Matching is the eliminator: a `|` clause fixes the constructor
+-- first, so its fields have definite types.
+rejectSumSelectorTarget :: Int -> Selector -> TypeU -> MorlocMonad ()
+rejectSumSelectorTarget i s t = do
+  scope <- MM.getGeneralScope i
+  let name = case t of
+        VarU v -> Just v
+        AppU (VarU v) _ -> Just v
+        _ -> Nothing
+  case name of
+    Just v | Just _ <- scopeDataCtors scope v ->
+      MM.throwSourcedError i $
+        "Getter" <+> pretty s <+> "cannot be applied to" <+> pretty v
+          <> ", which is a `data` type. Which fields exist depends on the"
+          <+> "constructor, so match on it with a `|` clause instead."
     _ -> return ()
 
 checkG ::
@@ -615,6 +646,44 @@ synthG g (AnnoS gi ci e) = do
     Nothing -> return ()
   return (g', t, annotatedBody)
 
+-- | The declared parameters of a type, as (var, kind) pairs.
+-- | The constructor a tag test names. The desugar always emits a bare
+-- reference here, so anything else is a compiler bug rather than a user
+-- error.
+-- | The text of a literal string argument. The constructor-pattern lowering
+-- always puts one here, so anything else is a compiler bug, not user error.
+literalStr :: AnnoS Int ManyPoly Int -> Maybe Text
+literalStr (AnnoS _ _ (StrS t)) = Just t
+literalStr _ = Nothing
+
+unAnnoSE :: AnnoS Int ManyPoly Int -> ExprS Int ManyPoly Int
+unAnnoSE (AnnoS _ _ e) = e
+
+-- | Resolve a constructor name against the scrutinee's own `data`
+-- declaration, yielding that constructor's field types with the type's
+-- parameters instantiated. Rejects a name that belongs to some other type,
+-- which is the check that keeps a clause set from mixing two `data` types.
+checkCtorBelongs :: Int -> Gamma -> TypeU -> Text -> MorlocMonad [TypeU]
+checkCtorBelongs i g subjectT n = do
+  scope <- MM.getGeneralScope i
+  let resolved = apply g subjectT
+      tv = extractKey resolved
+      args = case resolved of
+        AppU _ ts -> ts
+        _ -> []
+      params = [p | (p, _) <- typeParamsOf scope tv]
+      inst t = foldr (\(p, a) acc -> substituteTVar p a acc) t (zip params args)
+  case lookup n =<< scopeDataCtors scope tv of
+    Just fs -> return (map inst fs)
+    Nothing ->
+      MM.throwSourcedError i $
+        squotes (pretty n) <+> "is not a constructor of" <+> pretty resolved
+
+typeParamsOf :: Scope -> TVar -> [(TVar, Kind)]
+typeParamsOf scope v = case Map.lookup v scope of
+  Just ((ps, _, _, _, _) : _) -> [pk | Left pk <- ps]
+  _ -> []
+
 synthE ::
   Int ->
   Gamma ->
@@ -632,39 +701,41 @@ synthE _ g (RealS si x) = return (g, BT.realU, RealS si x)
 synthE _ g (IntS si x) = return (g, BT.intU, IntS si x)
 synthE _ g (LogS x) = return (g, BT.boolU, LogS x)
 synthE _ g (StrS x) = return (g, BT.strU, StrS x)
--- Ensures pattern setting operations return the correct type.
--- Without this case, patterns that change type will pass silently, but lead to
--- corrupted data.
--- Setter pattern lambda: (\v -> .field v newVal) data
--- The body applies a pattern to 2+ args (data + set values).
--- Getters (1 arg) are NOT matched here and go through normal AppS.
-synthE
-  _
-  g0
-  ( AppS
-      f0@( AnnoS
-            _
-            _
-            ( LamS
-                [_]
-                ( AnnoS
-                    _
-                    _
-                    ( AppS
-                        ((AnnoS _ _ (ExeS (PatCall (PatternStruct _)))))
-                        (_ : _ : _)
-                      )
-                  )
-              )
-          )
-      [x0]
-    ) = do
-    (g1, patternType, f1) <- synthG g0 f0
-    case patternType of
-      (FunU _ selectType) -> do
-        (g2, dataType, x1) <- checkG g1 x0 selectType
-        return (g2, dataType, AppS f1 [x1])
-      _ -> error "This should be unreachable"
+-- A `data` constructor. The name is unique across the program, so it
+-- determines its type on its own -- no annotation, no instance search.
+--
+-- A constructor that takes arguments is checked against the argument types
+-- its declaration gave it. The type's own parameters are instantiated with
+-- fresh existentials first and shared across every argument and the result,
+-- which is what ties `Some x :: Opt a` to the `a` of `x`.
+synthE i g0 (ConS tv n ord xs) = do
+  scope <- MM.getGeneralScope i
+  let params = [p | (p, _) <- typeParamsOf scope tv]
+      (g1, freshArgs) = statefulMap (\g _ -> newvar (unTVar tv <> "_") g) g0 params
+      sub = zip params freshArgs
+      inst = foldr (\(p, fresh) t -> substituteTVar p fresh t) `flip` sub
+      resultT = case freshArgs of
+        [] -> VarU tv
+        _ -> AppU (VarU tv) freshArgs
+  declaredArgs <- case lookup n =<< scopeDataCtors scope tv of
+    Just as -> return (map inst as)
+    Nothing ->
+      MM.throwSourcedError i $
+        "Constructor" <+> squotes (pretty n) <+> "is not a constructor of type"
+          <+> pretty tv
+  when (length declaredArgs /= length xs) $
+    MM.throwSourcedError i $
+      "Constructor" <+> squotes (pretty n) <+> "takes"
+        <+> pretty (length declaredArgs) <+> "arguments but was given"
+        <+> pretty (length xs)
+  (g2, xs') <- statefulMapM (\g (x, t) -> do
+                                (g', _, x') <- checkG g x t
+                                return (g', x')) g1 (zip xs declaredArgs)
+  return (g2, apply g2 resultT, ConS tv n ord xs')
+
+-- A directly applied setter is a redex: reduce it so the setter's own
+-- rule below sees the receiver. See 'reduceSetterRedex'.
+synthE i g0 e | Just e' <- reduceSetterRedex e = synthE i g0 e'
 
 -- synthesize a string interpolation pattern
 synthE i g (AppS f@(AnnoS _ _ (ExeS (PatCall (PatternText _ _)))) es) = do
@@ -786,9 +857,12 @@ synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) [e0]) =
 -- inhabit a fixed-width @Int32@ slot via @checkE (IntS ...)@ instead
 -- of freezing to @Int@ under @synthG@. Same order-swap shape as the
 -- @IntrMap@ synth (see below).
-synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0 : es0)) = do
+synthE i g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0 : es0)) = do
   let (g1, slotVars) = statefulMap (\g _ -> newvar "set_slot_" g) g0 es0
-  (g2, outputType) <- selectorType g1 s |>> second (selectorSetter slotVars s)
+  (g2, structType) <- selectorType g1 s
+  outputType <- case selectorSetter slotVars s structType of
+    Just t -> return t
+    Nothing -> MM.throwSourcedError i "this setter's paths do not fit its receiver"
   (g3, datType, e1) <- checkG g2 e0 outputType
   rejectListSelectorTarget fgidx s (apply g3 datType)
   (g4, es1) <-
@@ -799,9 +873,17 @@ synthE _ g0 (AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0 : e
       g3
       (zip es0 slotVars)
   let setTypes = map (apply g4) slotVars
-      patternType = FunU (apply g4 datType : setTypes) (apply g4 outputType)
+      receiverType = apply g4 datType
+      -- The setter returns its receiver with the written fields' types
+      -- replaced. Rebuilding from the receiver, rather than from the
+      -- selector's own structural type, is what keeps the fields the
+      -- selector does not name, and keeps the receiver's key order,
+      -- which is the record's layout on the wire.
+      resultType =
+        fromMaybe (apply g4 outputType) (selectorSetter setTypes s receiverType)
+      patternType = FunU (receiverType : setTypes) resultType
       f1 = AnnoS (Idx fgidx patternType) fcidx (ExeS (PatCall (PatternStruct s)))
-  return (g4, apply g4 outputType, AppS f1 (e1 : es1))
+  return (g4, resultType, AppS f1 (e1 : es1))
 synthE _ g (ExeS (PatCall (PatternText s ss@(length -> n)))) = do
   let t = FunU (take n (repeat BT.strU)) BT.strU
   return (g, t, ExeS (PatCall (PatternText s ss)))
@@ -1275,6 +1357,44 @@ synthE _ g (IntrinsicS IntrMap [funcE, listE]) = do
   return (g5, apply g5 resultT, IntrinsicS IntrMap [funcE', listE'])
 synthE _ _ (IntrinsicS IntrMap args) =
   error $ "IntrMap expects 2 args (lambda, list), got " <> show (length args)
+-- IntrTagTest: the constructor-pattern tag test.
+--
+-- The second argument is the constructor's NAME, carried as data by the
+-- desugar rather than as a reference to the term the declaration bound. A
+-- payload constructor is a function into its type (@Circle :: Real ->
+-- Shape@), so it could never be checked as a value of the type being
+-- tested. Validating the name against the scrutinee's own constructor
+-- table works for both tiers and rejects a constructor borrowed from
+-- another type just as firmly as the value check it replaces.
+synthE i g (IntrinsicS IntrTagTest [subjectE, nameE])
+  | Just n <- literalStr nameE = do
+      (g1, subjectT, subjectE') <- synthG g subjectE
+      _ <- checkCtorBelongs i g1 subjectT n
+      (g2, _, nameE') <- synthG g1 nameE
+      return (g2, BT.boolU, IntrinsicS IntrTagTest [subjectE', nameE'])
+synthE _ _ (IntrinsicS IntrTagTest args) =
+  error $ "IntrTagTest expects (subject, constructor name), got " <> show (length args)
+-- IntrCtorField: read one field out of a value whose constructor a guarding
+-- tag test has already established. The result is the constructor's declared
+-- field type with the owning type's parameters instantiated against the
+-- scrutinee -- the same table 'ConS' reads to CHECK arguments going in, read
+-- here to synthesize one coming out.
+synthE i g (IntrinsicS IntrCtorField [subjectE, nameE, idxE])
+  | Just n <- literalStr nameE
+  , IntS _ idx <- unAnnoSE idxE = do
+      (g1, subjectT, subjectE') <- synthG g subjectE
+      fieldTs <- checkCtorBelongs i g1 subjectT n
+      (g2, _, nameE') <- synthG g1 nameE
+      (g3, _, idxE') <- synthG g2 idxE
+      case drop (fromIntegral idx) fieldTs of
+        (t : _) ->
+          return (g3, apply g3 t, IntrinsicS IntrCtorField [subjectE', nameE', idxE'])
+        [] ->
+          MM.throwSourcedError i $
+            "constructor" <+> squotes (pretty n) <+> "has no field"
+              <+> pretty (show idx)
+synthE _ _ (IntrinsicS IntrCtorField args) =
+  error $ "IntrCtorField expects (subject, constructor name, index), got " <> show (length args)
 -- IntrWrite: @Int -> OStream a -> [a] -> <IO> ()@. Handle-before-list
 -- is the natural partial-application shape: @write 3 o@ is a
 -- reusable [a] -> <IO> () sink for callbacks. The handle is
@@ -1294,71 +1414,29 @@ synthE _ g (IntrinsicS IntrWrite [levelE, handleE, listE]) = do
   (g3, _, levelE')  <- checkG g2 levelE  BT.intU
   (g4, _, listE')   <- checkG g3 listE   listExpectedT
   return ( g4
-         , EffectU ioErrEffectSet BT.unitU
+         , EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
          , IntrinsicS IntrWrite [levelE', handleE', listE']
          )
 synthE _ _ (IntrinsicS IntrWrite args) =
   error $ "IntrWrite expects 3 args (level, handle, list), got " <> show (length args)
--- Bespoke rule for @catch. The primary must carry Err. The fallback
--- declares its own effect row and the whole expression inherits it, so
--- the result row is (primary effects minus Err) UNION (fallback effects).
--- A pure fallback strips Err; a fallible fallback keeps it. Two
--- independent open row-tails in the union are rejected because the
--- effect infrastructure carries at most one tail variable per row.
-synthE i g (IntrinsicS IntrCatch [fallibleE, fallbackE]) = do
-  (g1, fallibleT, fallibleE') <- synthG g fallibleE
-  let fallibleT' = apply g1 fallibleT
-  case peelForallU fallibleT' of
-    EffectU effs innerT -> do
-      let labels = resolveEffectSet effs
-      unless (Set.member "Err" labels) $
-        throwTypeError i $
-          "@catch's first argument must have effect Err; got " <> prettyTypeU fallibleT'
-      -- A bare numeric-literal fallback is CHECKED against the fallible's
-      -- inner type; everything else is synthesized as before.
-      --
-      -- Synthesis commits a literal to its default (@Int@ for an integer,
-      -- @Real@ for a float) before it ever meets the fallible's type, so
-      -- @\@catch (tryInto x) 0@ reported "Cannot compare types Int and I64"
-      -- for every fixed-width target, and the same for an alias or newtype
-      -- over one. Checking hands the literal its expected type, which is what
-      -- the @IntS@/@RealS@ check rules need to walk the alias and wire-parent
-      -- chain.
-      --
-      -- The dispatch is on the literal itself rather than on purity in
-      -- general because the fallback may legitimately be effectful (a chained
-      -- @\@catch@ whose fallback declares @<Err>@), and an effectful value
-      -- cannot be checked against the plain inner type. A literal is pure by
-      -- construction, so this split needs no purity analysis. A literal buried
-      -- inside a compound fallback (@\@catch f [0]@) is still synthesized and
-      -- still defaults; that is the same "synthesis defaults literals"
-      -- behaviour found elsewhere and wants a bidirectional-checking decision
-      -- rather than a local patch here.
-      (g2, fallbackT, fallbackE') <- case fallbackE of
-        AnnoS _ _ (IntS _ _)  -> checkG g1 fallbackE (apply g1 innerT)
-        AnnoS _ _ (RealS _ _) -> checkG g1 fallbackE (apply g1 innerT)
-        _                     -> synthG g1 fallbackE
-      let fallbackT' = apply g2 fallbackT
-          (fbEffs, fbInnerT) = case peelForallU fallbackT' of
-            EffectU e t -> (e, t)
-            t           -> (emptyEffectSet, t)
-      g3 <- subtype' i fbInnerT (apply g2 innerT) g2
-      let strippedEffs = applyEff g3 (removeEffectLabel "Err" effs)
-          fbEffs' = applyEff g3 fbEffs
-          resultEffs = unionEffectSet strippedEffs fbEffs'
-          (_, tailVars) = effectSetParts resultEffs
-      when (Set.size tailVars > 1) $
-        throwTypeError i $
-          "@catch cannot polymorphically combine two open effect rows;"
-          <+> "annotate one argument's effect row."
-      let resultT = mkEffectU resultEffs (apply g3 innerT)
-      return (g3, resultT, IntrinsicS IntrCatch [fallibleE', fallbackE'])
-    _ ->
-      throwTypeError i $
-        "@catch's first argument must have effect Err; got a non-effectful type"
-        <+> prettyTypeU fallibleT'
-synthE i _ (IntrinsicS IntrCatch args) =
-  MM.throwCompilerBugAt i $ "IntrCatch expects 2 args (fallible, fallback), got " <> pretty (length args)
+-- Bespoke rule for @try. Its argument may fail in any number of ways --
+-- an intrinsic Err arm auto-required into a throw, a foreign function
+-- raising natively, an explicit @throw -- and those failures have no
+-- common type, so the caught error is always a rendered message. The
+-- result is therefore @Try Str a@ regardless of the body.
+--
+-- The body's own effects pass through: catching a failure does not
+-- discharge the IO the body performed on its way there. A pure body
+-- stays pure.
+synthE _ g (IntrinsicS IntrTry [bodyE]) = do
+  (g1, bodyT, bodyE') <- synthG g bodyE
+  let (effs, innerT) = case peelForallU (apply g1 bodyT) of
+        EffectU e t -> (e, t)
+        t           -> (emptyEffectSet, t)
+      resultT = mkEffectU effs (BT.tryU BT.strU innerT)
+  return (g1, resultT, IntrinsicS IntrTry [bodyE'])
+synthE i _ (IntrinsicS IntrTry args) =
+  MM.throwCompilerBugAt i $ "IntrTry expects 1 arg (body), got " <> pretty (length args)
 synthE i g (IntrinsicS intr args) = do
   (g', argTypes, args') <- synthArgs g args
   g'' <- checkIntrinsicArgs i g' intr argTypes
@@ -1382,31 +1460,32 @@ peelForallU t = t
 -- Receives the synthesized argument types so result types like `@next`'s `[a]`
 -- can extract `a` from the receiver's type.
 intrinsicTypeG :: Gamma -> Intrinsic -> [TypeU] -> (Gamma, TypeU)
--- @load :: Str -> <IO, Err> a. Failure (missing file, decode mismatch,
--- schema mismatch) raises Err; discharge with @catch.
+-- @load :: Str -> <IO> (Try Str a). Failure (missing file, decode
+-- mismatch, schema mismatch) is an Err arm, not an effect.
 intrinsicTypeG g IntrLoad _ =
   let (g', loadType) = newvar "load_" g
-  in (g', EffectU ioErrEffectSet loadType)
--- @read :: Str -> <Err> a. Pure JSON parse; failure raises Err.
+  in (g', EffectU ioEffectSet (BT.tryU BT.strU loadType))
+-- @read :: Str -> Try Str a. A JSON parse touches nothing, so with
+-- failure carried in the result it is pure and composes in `map`.
 intrinsicTypeG g IntrRead _ =
   let (g', readType) = newvar "read_" g
-  in (g', EffectU errEffectSet readType)
+  in (g', BT.tryU BT.strU readType)
 -- @open: polymorphic return -- the user's inline ascription (e.g.
 -- `@open path :: IFile Sequence`) resolves the existential to the
 -- concrete handle type at typecheck time; codegen then inspects the
 -- resolved TypeF to dispatch to the right runtime entry point.
--- Failure (missing/unreadable/non-packet) raises Err.
 intrinsicTypeG g IntrOpen _ =
   let (g', openType) = newvar "open_" g
-  in (g', EffectU ioErrEffectSet openType)
+  in (g', EffectU ioEffectSet (BT.tryU BT.strU openType))
 -- @close: arg is any handle type (a fresh existential); user-side use
 -- always has the handle bound to a known type, so this resolves
 -- without needing ascription.
 intrinsicTypeG g IntrClose _ = (g, EffectU ioEffectSet BT.unitU)
--- @next :: IStream a -> <IO, Err> [a]. Mid-stream decode failures raise Err.
+-- @next :: IStream a -> <IO> (Try Str [a]). Mid-stream decode failures
+-- come back as an Err arm.
 intrinsicTypeG g IntrNext [argT] =
   let a = streamElemTypeU argT in
-  (g, EffectU ioErrEffectSet (BT.listU a))
+  (g, EffectU ioEffectSet (BT.tryU BT.strU (BT.listU a)))
 -- @stream :: IFile a -> <IO> IStream a. Same trick, with the IStream
 -- head on the result side. The IFile was already validated at @open,
 -- so this handle-setup step does not itself fail with Err.
@@ -1414,27 +1493,32 @@ intrinsicTypeG g IntrStream [argT] =
   let a = streamElemTypeU argT in
   (g, EffectU ioEffectSet (AppU (VarU BT.istreamVar) [a]))
 -- @append: polymorphic return like @open; the user ascription resolves
--- to the concrete OStream/IStream/IFile shape. Failure raises Err.
+-- to the concrete OStream/IStream/IFile shape.
 intrinsicTypeG g IntrAppend _ =
   let (g', appendType) = newvar "append_" g
-  in (g', EffectU ioErrEffectSet appendType)
--- @stdin :: <IO, Err> IStream a. Claims the stdin slot; second open
--- fails via the CAS-per-kind uniqueness guard. Piped-content decode
+  in (g', EffectU ioEffectSet (BT.tryU BT.strU appendType))
+-- @stdin :: <IO> (Try Str (IStream a)). Claims the stdin slot; a second
+-- open fails via the CAS-per-kind uniqueness guard. Piped-content decode
 -- errors surface at @next, not here (no isatty pre-check -- users
 -- may want the handle before any read).
--- @stdout / @stderr: handle setup only; no Err since writes happen elsewhere.
+-- @stdout / @stderr: handle setup only, and they cannot fail.
 intrinsicTypeG g IntrStdin _ =
   let (g', a) = newvar "stdin_a" g in
-  (g', EffectU ioErrEffectSet (AppU (VarU BT.istreamVar) [a]))
+  (g', EffectU ioEffectSet (BT.tryU BT.strU (AppU (VarU BT.istreamVar) [a])))
 intrinsicTypeG g IntrStdout _ =
   let (g', a) = newvar "stdout_a" g in
   (g', EffectU ioEffectSet (AppU (VarU BT.ostreamVar) [a]))
 intrinsicTypeG g IntrStderr _ =
   let (g', a) = newvar "stderr_a" g in
   (g', EffectU ioEffectSet (AppU (VarU BT.ostreamVar) [a]))
+-- @throw :: e -> a. A bottom, not a tracked effect: it does not return,
+-- so there is nothing for an effect row to describe. The payload is
+-- rendered into the traceback at the throw site and does not survive as a
+-- value, which is what keeps behaviour the same whether the throw and the
+-- @try that catches it land in the same pool or not.
 intrinsicTypeG g IntrThrow _ =
   let (g', a) = newvar "throw_" g
-  in (g', EffectU errEffectSet a)
+  in (g', a)
 intrinsicTypeG g intr _ = (g, intrinsicType intr)
 
 -- | Extract the element type `a` from a `Handle a` (IFile/IStream/OStream)
@@ -1448,10 +1532,10 @@ streamElemTypeU t = t
 
 -- | Return type of a fully applied intrinsic (for intrinsics without fresh vars)
 intrinsicType :: Intrinsic -> TypeU
-intrinsicType IntrSave = EffectU ioErrEffectSet BT.unitU
-intrinsicType IntrSaveM = EffectU ioErrEffectSet BT.unitU
-intrinsicType IntrSaveJ = EffectU ioErrEffectSet BT.unitU
-intrinsicType IntrLoad = EffectU ioErrEffectSet (ExistU (TV "load_a") ([], Open) ([], Open))
+intrinsicType IntrSave = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
+intrinsicType IntrSaveM = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
+intrinsicType IntrSaveJ = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
+intrinsicType IntrLoad = EffectU ioEffectSet (BT.tryU BT.strU (ExistU (TV "load_a") ([], Open) ([], Open)))
 intrinsicType IntrHash = BT.strU
 intrinsicType IntrVersion = BT.strU
 intrinsicType IntrCompiled = BT.strU
@@ -1459,31 +1543,35 @@ intrinsicType IntrLang = BT.strU
 intrinsicType IntrSchema = BT.strU
 intrinsicType IntrTypeof = BT.strU
 intrinsicType IntrShow = BT.strU
-intrinsicType IntrRead = EffectU errEffectSet (ExistU (TV "read_a") ([], Open) ([], Open))
+intrinsicType IntrRead = BT.tryU BT.strU (ExistU (TV "read_a") ([], Open) ([], Open))
 intrinsicType IntrDatafile = BT.strU
 -- IntrOpen and IntrClose flow through intrinsicTypeG (fresh existentials).
 intrinsicType IntrOpen =
   error "intrinsicType: IntrOpen must be typed via intrinsicTypeG"
 intrinsicType IntrClose =
   error "intrinsicType: IntrClose must be typed via intrinsicTypeG"
-intrinsicType IntrFSchema = EffectU ioErrEffectSet BT.strU
-intrinsicType IntrFLength = EffectU ioErrEffectSet BT.intU
+intrinsicType IntrFSchema = EffectU ioEffectSet (BT.tryU BT.strU BT.strU)
+intrinsicType IntrFLength = EffectU ioEffectSet (BT.tryU BT.strU BT.intU)
 intrinsicType IntrStreamLayout =
-  EffectU ioErrEffectSet (BT.listU (BT.tupleU [BT.u64U, BT.u64U, BT.u64U]))
+  EffectU ioEffectSet (BT.tryU BT.strU (BT.listU (BT.tupleU [BT.u64U, BT.u64U, BT.u64U])))
 intrinsicType IntrTell = EffectU ioEffectSet BT.u64U
-intrinsicType IntrTmpfile = EffectU ioErrEffectSet BT.strU
+intrinsicType IntrTmpfile = EffectU ioEffectSet (BT.tryU BT.strU BT.strU)
 intrinsicType IntrNext =
   error "intrinsicType: IntrNext must be typed via intrinsicTypeG (carries arg-derived element type)"
 intrinsicType IntrStream =
   error "intrinsicType: IntrStream must be typed via intrinsicTypeG (carries arg-derived element type)"
-intrinsicType IntrWrite = EffectU ioErrEffectSet BT.unitU
+intrinsicType IntrWrite = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
 intrinsicType IntrAppend =
   error "intrinsicType: IntrAppend must be typed via intrinsicTypeG (polymorphic return)"
-intrinsicType IntrConcat = EffectU ioErrEffectSet BT.unitU
-intrinsicType IntrFlush = EffectU ioErrEffectSet BT.unitU
+intrinsicType IntrConcat = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
+intrinsicType IntrFlush = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
 -- IntrMap is handled by its own synthE clause and never reaches this fallback.
 intrinsicType IntrMap =
   error "intrinsicType: IntrMap must be typed via synthE's dedicated clause"
+intrinsicType IntrTagTest =
+  error "intrinsicType: IntrTagTest must be typed via synthE's dedicated clause"
+intrinsicType IntrCtorField =
+  error "intrinsicType: IntrCtorField must be typed via synthE's dedicated clause"
 -- IntrStdin/Stdout/Stderr flow through intrinsicTypeG (fresh existential
 -- element type resolved by the user's inline ascription).
 intrinsicType IntrStdin =
@@ -1494,8 +1582,8 @@ intrinsicType IntrStderr =
   error "intrinsicType: IntrStderr must be typed via intrinsicTypeG (polymorphic element type)"
 intrinsicType IntrThrow =
   error "intrinsicType: IntrThrow must be typed via intrinsicTypeG (polymorphic return type)"
-intrinsicType IntrCatch =
-  error "intrinsicType: IntrCatch must be typed via synthE's dedicated clause"
+intrinsicType IntrTry =
+  error "intrinsicType: IntrTry must be typed via synthE's dedicated clause"
 intrinsicType IntrCollect =
   error "intrinsicType: IntrCollect is expanded at desugar and never reaches typecheck"
 -- IntrIFileWalk is synthesized by Express.hs / Nexus.hs with a typed result;
@@ -1597,6 +1685,10 @@ checkIntrinsicArgs i g intr argTypes = do
           let (g'a, a) = newvar "flush_a_" g
               expectedT = AppU (VarU BT.ostreamVar) [a]
            in subtype' i handleT expectedT g'a
+        -- @throw's payload must already be a Str. The runtime reads it as
+        -- UTF-8 bytes, so any other shape would render as an empty message
+        -- and silently lose the error. Render first (@show) to throw
+        -- something structured.
         (IntrThrow, [msgT]) -> subtype' i msgT BT.strU g
         -- compile-time constants: no args
         (IntrVersion, []) -> return g
@@ -1844,6 +1936,10 @@ checkE ::
     , TypeU
     , ExprS (Indexed TypeU) ManyPoly Int
     )
+-- A directly applied setter is a redex here too: the App-Check rule
+-- below would synthesise the wrapper lambda first, which is what hides
+-- the receiver. See 'reduceSetterRedex'.
+checkE i g e t | Just e' <- reduceSetterRedex e = checkE i g e' t
 -- The single-arg form (e.g. `List Int`) treats the arg as the element
 -- type. Guard against firing when the arg is non-Type-kinded (e.g.
 -- `Foo (n :: Nat) = ...` instantiated as `Foo 3` -- here `3` is a Nat
@@ -2021,11 +2117,15 @@ checkE i g1 e1@(LstS _) b = do
                   anno3 = AnnoS (Idx i (apply g3 a')) i finalExpr
               g4 <- checkListNatDims g3 natArgs anno3
               return (g4, apply g4 b', finalExpr)
-            Nothing -> MM.throwSourcedError i $
-              "Type mismatch:"
-              <> line <> "  expected: " <> prettyTypeU b'
-              <> line <> "  inferred: " <> prettyTypeU a'
-              <> line <> err
+            Nothing -> do
+              scope2 <- MM.getGeneralScope i
+              uniScope <- MM.getGeneralUniversalScope
+              MM.throwSourcedError i $
+                "Type mismatch:"
+                <> line <> "  expected: " <> prettyTypeU b'
+                <> line <> "  inferred: " <> prettyTypeU a'
+                <> line <> err
+                <> unimportedAliasHint scope2 uniScope b'
 --   Sub (with coercion fallback)
 -- Numeric literal defaulting: an `IntS` checked against any integer base
 -- type (Int / Int8..Int64 / UInt / UInt8..UInt64) takes on that expected
@@ -2292,6 +2392,45 @@ checkE i g UniS t = do
 -- subtype fails, partial application, arity mismatch) is delegated
 -- to checkEFallback, preserving the existing synth-and-subtype
 -- behaviour.
+-- A setter whose result type is already known. Seating the expected
+-- type into the value slots before anything is checked against them is
+-- what lets @.(.n = 42) r@ write an @I32@ field: checked on its own the
+-- literal freezes at @Int@ and the receiver check then reports @I32@
+-- against @Int@. The receiver is still checked before the values, so
+-- the field types it carries reach them too; the two orderings are not
+-- in conflict, because the expected type only ever pins slots the
+-- receiver would pin the same way.
+--
+-- A setter that changes its receiver's type has an output the expected
+-- type cannot be seated into, and falls back to synth-and-subtype.
+checkE i g0 e@(AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0 : es0@(_ : _))) t
+  | not (selectorHasBracket s) = do
+      let (g1, slotVars) = statefulMap (\g _ -> newvar "set_slot_" g) g0 es0
+      (g2, structType) <- selectorType g1 s
+      scope <- MM.getGeneralScope i
+      let seated = do
+            outputType <- selectorSetter slotVars s structType
+            g3 <- either (const Nothing) Just (subtype scope outputType (apply g2 t) g2)
+            return (g3, outputType)
+      case seated of
+        Nothing -> checkEFallback i g0 e t
+        Just (g3, outputType) -> do
+          (g4, datType, e1) <- checkG g3 e0 (apply g3 outputType)
+          rejectListSelectorTarget fgidx s (apply g4 datType)
+          (g5, es1) <-
+            statefulMapM
+              (\g (e', slotT) -> do
+                 (g'', _, e'') <- checkG g e' (apply g slotT)
+                 return (g'', e''))
+              g4
+              (zip es0 slotVars)
+          let setTypes = map (apply g5) slotVars
+              receiverType = apply g5 datType
+              resultType =
+                fromMaybe (apply g5 outputType) (selectorSetter setTypes s receiverType)
+              patternType = FunU (receiverType : setTypes) resultType
+              f1 = AnnoS (Idx fgidx patternType) fcidx (ExeS (PatCall (PatternStruct s)))
+          return (g5, resultType, AppS f1 (e1 : es1))
 checkE i g0 e@(AppS (AnnoS _ _ (ExeS _)) _) t = checkEFallback i g0 e t
 -- If the expected type is wrapped in OptionalU, the App-Check shortcut
 -- would pin the function's bare-existential return to the FULL optional
@@ -2377,12 +2516,14 @@ checkEFallback i g1 e1 b = do
           return (g3, apply g3 b', finalExpr)
         Nothing -> do
           scope2 <- MM.getGeneralScope i
+          uniScope <- MM.getGeneralUniversalScope
           MM.throwSourcedError i $
             "Type mismatch:"
             <> line <> "  expected: " <> prettyTypeU b'
             <> line <> "  inferred: " <> prettyTypeU a'
             <> line <> err
             <> missingInstanceHint scope2 a' b'
+            <> unimportedAliasHint scope2 uniScope b'
 
 -- | Check a compound literal (TupS or NamS) against the inner type of an
 -- Optional expected type, then wrap the result in @CoerceToOptional@.
@@ -2416,17 +2557,76 @@ checkOptionalLit i g e innerT = do
       innerAnno = AnnoS (Idx idx appliedInner) i e'
   return (g', apply g' (OptionalU innerT), CoerceS CoerceToOptional innerAnno)
 
+-- | A setter is desugared into a lambda (@\\v -> pat v values...@) so
+-- that it can also be written unapplied, as in @map .(.x = 1) xs@.
+-- Applied directly, that wrapper changes what the typechecker sees
+-- first: the lambda is synthesised before its argument, so the setter
+-- rule meets a bare parameter where the receiver should be and has
+-- nothing to read the written fields' types from. The values are then
+-- pinned to whatever they synthesise to on their own, which is why
+-- @.(.a = "new") r@ was rejected when @a@ is @?Str@, and the rebuilt
+-- record's type keeps only the fields the selector names.
+--
+-- So reduce the redex before either direction of the typechecker looks
+-- at it. The parameter is compiler-generated, occurs exactly once, and
+-- occurs in argument position, so substituting the receiver for it is
+-- a copy rather than a duplication of work.
+reduceSetterRedex ::
+  ExprS Int ManyPoly Int ->
+  Maybe (ExprS Int ManyPoly Int)
+reduceSetterRedex
+  ( AppS
+      ( AnnoS _ _
+          ( LamS [v]
+              ( AnnoS _ _
+                  ( AppS
+                      pat@(AnnoS _ _ (ExeS (PatCall (PatternStruct _))))
+                      (AnnoS _ _ (BndS v') : values@(_ : _))
+                    )
+                )
+            )
+        )
+      [receiver]
+    )
+    | v == v' = Just (AppS pat (receiver : values))
+reduceSetterRedex _ = Nothing
+
 -- | Choose the record-shaped type with the most keys. Non-record cases
 -- fall back to the second argument (the standard "return the expected
 -- type" convention used by checkEFallback).
+--
+-- On a tie a structural expected type is kept, but re-laid-out in the
+-- order the synthesised type uses. A record's key order is its layout
+-- on the wire, and the synthesised type is the one the expression's own
+-- sub-nodes were built from; an expected type ordering the same keys
+-- differently -- a pattern selector's structural type sorts them --
+-- would relabel the fields without moving the values behind them.
+--
+-- A declared record is never re-laid-out. Its order is the one its
+-- language forms are written against, and a subtype against a declared
+-- record solves the synthesised side to it, so the two agree already.
 pickWiderRecord :: TypeU -> TypeU -> TypeU
-pickWiderRecord a b = case (recordKeyCount a, recordKeyCount b) of
-  (Just na, Just nb) | na > nb -> a
+pickWiderRecord a b = case (recordKeys a, recordKeys b) of
+  (Just ka, Just kb)
+    | length ka > length kb -> a
+    | ka /= kb, List.sort ka == List.sort kb -> reorderRecordKeys ka b
   _ -> b
   where
-    recordKeyCount (ExistU _ _ (rs, _)) = Just (length rs)
-    recordKeyCount (NamU _ _ _ rs) = Just (length rs)
-    recordKeyCount _ = Nothing
+    recordKeys (ExistU _ _ (rs, _)) = Just (map fst rs)
+    recordKeys (NamU _ _ _ rs) = Just (map fst rs)
+    recordKeys _ = Nothing
+
+-- | Rewrite a structural record type's rows into the given key order.
+-- The key list must be a permutation of the type's own keys; any key it
+-- does not name leaves the type untouched. A declared record ('NamU')
+-- is returned as it is: its row order is the order its per-language
+-- forms are built against.
+reorderRecordKeys :: [Key] -> TypeU -> TypeU
+reorderRecordKeys ks t = case t of
+  ExistU v ps (rs, rc) -> maybe t (\rs' -> ExistU v ps (rs', rc)) (permute rs)
+  _ -> t
+  where
+    permute rs = mapM (\k -> (,) k <$> lookup k rs) ks
 
 subtype' :: Int -> TypeU -> TypeU -> Gamma -> MorlocMonad Gamma
 subtype' i a b g = do
@@ -2464,6 +2664,28 @@ subtype' i a b g = do
 -- can't dispatch without an instance. Append a hint pointing at
 -- the newtype so users don't have to decode the structural
 -- "Cannot compare" message.
+-- | A mismatch against a name this module cannot resolve but the program
+-- as a whole can. Importing a term does not import the type aliases its
+-- signature is written in, and an alias is transparent inside its own
+-- module and opaque across an import list that omits it -- so the call
+-- compiles at the import and fails at every use, with nothing in the
+-- message pointing at the cause.
+unimportedAliasHint :: Scope -> Scope -> TypeU -> MDoc
+unimportedAliasHint localScope universalScope expected
+  | Just v <- headVar expected
+  , not (Map.member v localScope)
+  , Map.member v universalScope =
+      line <> "  hint:" <+> squotes (pretty v)
+        <+> "is defined in another module and is not in scope here."
+        <+> "Importing a term does not bring in the type aliases its"
+        <+> "signature uses; name the type in the import list as well."
+  | otherwise = mempty
+  where
+    headVar t = case t of
+      VarU v -> Just v
+      AppU (VarU v) _ -> Just v
+      _ -> Nothing
+
 missingInstanceHint :: Scope -> TypeU -> TypeU -> MDoc
 missingInstanceHint scope inferred expected
   | Just nativeTv <- newtypeHead scope inferred
@@ -3028,6 +3250,7 @@ peakSExpr (RealS _ x) = "RealS" <+> viaShow x
 peakSExpr (IntS _ x) = "IntS" <+> pretty x
 peakSExpr (LogS x) = "LogS" <+> pretty x
 peakSExpr (StrS x) = "StrS" <+> pretty x
+peakSExpr (ConS tv n _ _) = "ConS" <+> pretty tv <> "." <> pretty n
 peakSExpr (ExeS exe) = "ExeS" <+> pretty exe
 peakSExpr (LetS v _ _) = "LetS" <+> pretty v
 peakSExpr (LetBndS v) = "LetBndS" <+> pretty v

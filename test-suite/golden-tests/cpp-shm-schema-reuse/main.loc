@@ -1,0 +1,31 @@
+module main (foo)
+
+import root-cpp
+import root-py
+
+source Cpp from "helper.hpp" ("cgen", "cadd")
+source Py from "sum.py" ("psum")
+
+cgen :: Int -> [Int]
+cadd :: Int -> Int -> Int
+psum :: [Int] -> Int
+
+-- Guards the ownership of the C++ pool's shared-memory tracker entries.
+--
+-- `bar` binds one serialized list and uses it twice, which makes the
+-- generated pool emit a release for the let-bound packet. `foo` evaluates
+-- `bar` twice in a single dispatch, so that release runs twice against the
+-- same schema-table entry. Schema table entries live for the process and
+-- are shared by every dispatch with the same wire type, so a tracker that
+-- frees one turns the second release into a double free.
+--
+-- The list must be large enough to cross the inline threshold: below it a
+-- packet carries its data inline, no shared memory is tracked, and the
+-- release is a no-op.
+bar :: Int -> Int
+bar n =
+  let xs = cgen n
+  in cadd (psum xs) (psum xs)
+
+foo :: Int -> Int
+foo n = cadd (bar n) (bar n)

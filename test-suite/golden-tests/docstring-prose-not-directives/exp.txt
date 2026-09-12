@@ -1,0 +1,11 @@
+=== help ===
+Do a thing
+Note: this is a fast path.
+@append reopens the file
+See http://example.com for details
+
+OK: legacy-form prose is silent
+OK: unknown closed-form keyword warns
+OK: render directive works
+OK: name directive works
+OK: near miss warns

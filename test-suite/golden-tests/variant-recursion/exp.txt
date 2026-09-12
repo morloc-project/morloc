@@ -1,0 +1,20 @@
+--- totalLeaf ---
+0
+--- totalTree ---
+6
+--- sizeTree ---
+3
+--- mirrorTree ---
+{"Node":[1,{"Node":[3,"Leaf","Leaf"]},{"Node":[2,"Leaf","Leaf"]}]}
+--- mirrorTwiceIsIdentity ---
+6
+--- totalViaPy ---
+6
+--- totalViaCpp ---
+6
+--- totalViaR ---
+6
+--- totalViaRust ---
+6
+--- rejectsDanglingArity ---
+OK

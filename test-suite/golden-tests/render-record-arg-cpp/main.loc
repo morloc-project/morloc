@@ -20,7 +20,7 @@ record Opts where
   lo :: ?Int
 record Cpp => Opts = "struct"
 
-produce :: (Int -> Bool) -> ([Int] -> <IO, Err> ()) -> <IO, Err> ()
+produce :: (Int -> Bool) -> ([Int] -> <IO> ()) -> <IO> ()
 produce keep sink = do
   _ <- sink (mk 0)
   sink (mk 1)
@@ -29,7 +29,7 @@ produce keep sink = do
 --' @with -d/--doubled=dbl @stream
 --' @render -j/--joined=joinAll
 --' @render -b/--buffered=joinAll @stream
-report :: Opts -> <IO, Err> ()
+report :: Opts -> <IO> ()
 report opts = do
   let keep = ? isNull (.lo opts) = const True
              : let limit = require (.lo opts)

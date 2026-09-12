@@ -1,0 +1,30 @@
+--- complementA ---
+"T"
+--- complementC ---
+"G"
+--- complementG ---
+"C"
+--- complementT ---
+"A"
+--- purineA ---
+true
+--- purineC ---
+false
+--- purineG ---
+true
+--- purineT ---
+false
+--- firstOfPairHead ---
+"starts-A"
+--- firstOfPairTail ---
+"ends-A"
+--- firstOfPairNone ---
+"no-A"
+--- roundTripC ---
+"C"
+--- roundTripT ---
+"T"
+--- ordinalWalk ---
+["adenine","cytosine","guanine","thymine"]
+--- crossPool ---
+"guanine"

@@ -77,13 +77,21 @@ pub enum MorlocExpressionType {
     Stderr = 26,      // schema_str -> OStream handle bound to fd 2 (nexus-owned).
     Throw = 27,       // msg (Str expr) -> raises MorlocError with the message.
                       // Never returns; the return schema is a sentinel "z".
-    Catch = 28,       // (fallible, fallback) -> value. Evaluate fallible;
-                      // on Err, evaluate fallback into the caller's dest.
+    Try = 28,         // body -> Try Str a. Evaluate the body; a user throw
+                      // becomes the Err arm, anything else propagates.
     If = 29,          // (cond, then, else) -> value. Evaluate cond (a Bool);
                       // materialize the taken branch into the caller's dest.
     StreamLayout = 30, // IFile handle -> [(U64,U64,U64)]. Per-sub-packet layout
                        // (element_offset, element_count, uncompressed_size);
                        // DATA packet -> single triple; empty stream -> [].
+    TagTest = 31,      // (subject) + a tag -> Bool. Answered in the nexus:
+                       // the tag is a byte it already holds, so a pattern
+                       // match needs no pool dispatch.
+    CtorField = 32,    // (subject) + a tag and index -> field. Reads one field
+                       // out of a `data` value whose arm a guarding tag test
+                       // has established.
+    CtorMake = 33,     // fields + a tag -> a `data` value. Builds the
+                       // tagged-pointer form from the arm's field values.
 }
 
 #[repr(C)]
@@ -220,13 +228,37 @@ pub struct MorlocMapExpression {
     pub list: *mut MorlocExpression,
 }
 
+// A constructor-pattern tag test: a `data` value and the tag it must
+// carry. The tag is DATA rather than a second expression, because a
+// payload-bearing constructor is a function into its type and so has no
+// value to materialize and compare against.
+// See MorlocExpressionType::TagTest.
+#[repr(C)]
+pub struct MorlocTagTestExpression {
+    pub subject: *mut MorlocExpression,
+    pub tag: u8,
+}
+
 // @catch: two-child expression carrying a fallible and a fallback.
 // The eval handler runs the fallible into a scratch buffer, memcpy's
 // on success, evaluates fallback into dest on failure.
+// A constructor-field projection: the value, the arm its tag selects, and
+// which field of that arm to read. Emitted only under a passing tag test.
 #[repr(C)]
-pub struct MorlocCatchExpression {
-    pub fallible: *mut MorlocExpression,
-    pub fallback: *mut MorlocExpression,
+pub struct MorlocCtorFieldExpression {
+    pub subject: *mut MorlocExpression,
+    pub tag: u8,
+    pub index: u32,
+}
+
+// Constructing a payload-bearing `data` value: the arm's tag and one
+// expression per field. The arm's schema describes the fields as a tuple,
+// which is what the payload is written as.
+#[repr(C)]
+pub struct MorlocCtorMakeExpression {
+    pub fields: *mut *mut MorlocExpression,
+    pub nfields: usize,
+    pub tag: u8,
 }
 
 // Pure-nexus conditional: evaluate `cond` (a Bool) and materialize the taken
@@ -272,7 +304,9 @@ pub union ExprUnion {
     pub unary_expr: *mut MorlocExpression,
     pub save_expr: *mut MorlocSaveExpression,
     pub map_expr: *mut MorlocMapExpression,
-    pub catch_expr: *mut MorlocCatchExpression,
+    pub tag_test_expr: *mut MorlocTagTestExpression,
+    pub ctor_field_expr: *mut MorlocCtorFieldExpression,
+    pub ctor_make_expr: *mut MorlocCtorMakeExpression,
     pub if_expr: *mut MorlocIfExpression,
     // IFile-family expressions.
     pub open_expr: *mut MorlocOpenExpression,
@@ -954,6 +988,86 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             Ok(expr)
         }
 
+        "tagtest" => {
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+            let c_schema_str = CString::new(schema_str).unwrap_or_default();
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let subject = build_expr(je.get("subject").unwrap_or(&serde_json::Value::Null))?;
+            let tag = je
+                .get("tag_ordinal")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u8;
+            let te = libc::calloc(1, std::mem::size_of::<MorlocTagTestExpression>())
+                as *mut MorlocTagTestExpression;
+            (*te).subject = subject;
+            (*te).tag = tag;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::TagTest;
+            (*expr).schema = schema;
+            (*expr).expr.tag_test_expr = te;
+            Ok(expr)
+        }
+
+        "ctormake" => {
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+            let c_schema_str = CString::new(schema_str).unwrap_or_default();
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let tag = je.get("tag_ordinal").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+            let jfields = je.get("fields").and_then(|v| v.as_array());
+            let n = jfields.map_or(0, |a| a.len());
+            let arr = libc::calloc(n.max(1), std::mem::size_of::<*mut MorlocExpression>())
+                as *mut *mut MorlocExpression;
+            if let Some(fs) = jfields {
+                for (i, f) in fs.iter().enumerate() {
+                    *arr.add(i) = build_expr(f)?;
+                }
+            }
+            let me = libc::calloc(1, std::mem::size_of::<MorlocCtorMakeExpression>())
+                as *mut MorlocCtorMakeExpression;
+            (*me).fields = arr;
+            (*me).nfields = n;
+            (*me).tag = tag;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::CtorMake;
+            (*expr).schema = schema;
+            (*expr).expr.ctor_make_expr = me;
+            Ok(expr)
+        }
+
+        "ctorfield" => {
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+            let c_schema_str = CString::new(schema_str).unwrap_or_default();
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let subject = build_expr(je.get("subject").unwrap_or(&serde_json::Value::Null))?;
+            let tag = je.get("tag_ordinal").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+            let index = je.get("field_index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let fe = libc::calloc(1, std::mem::size_of::<MorlocCtorFieldExpression>())
+                as *mut MorlocCtorFieldExpression;
+            (*fe).subject = subject;
+            (*fe).tag = tag;
+            (*fe).index = index;
+            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+            (*expr).etype = MorlocExpressionType::CtorField;
+            (*expr).schema = schema;
+            (*expr).expr.ctor_field_expr = fe;
+            Ok(expr)
+        }
+
         "interpolation" => {
             let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
             let jstrs = je.get("strings").and_then(|v| v.as_array());
@@ -1337,20 +1451,24 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
             Ok(expr)
         }
 
-        "catch" => {
-            let fallible = build_expr(je.get("fallible").unwrap_or(&serde_json::Value::Null))?;
-            let fallback = build_expr(je.get("fallback").unwrap_or(&serde_json::Value::Null))?;
-            let catch = libc::calloc(1, std::mem::size_of::<MorlocCatchExpression>()) as *mut MorlocCatchExpression;
-            (*catch).fallible = fallible;
-            (*catch).fallback = fallback;
+        "try" => {
+            let schema_str = je.get("schema").and_then(|v| v.as_str()).ok_or_else(|| {
+                MorlocError::Other("try expression is missing its result schema".into())
+            })?;
+            let c_schema_str = CString::new(schema_str).map_err(|_| {
+                MorlocError::Other("try schema contains an interior NUL".into())
+            })?;
+            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+            if !err.is_null() {
+                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+                libc::free(err as *mut c_void);
+                return Err(MorlocError::Other(msg));
+            }
+            let body = build_expr(je.get("body").unwrap_or(&serde_json::Value::Null))?;
             let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
-            (*expr).etype = MorlocExpressionType::Catch;
-            // Result schema comes from the fallback: the fallible may be
-            // @throw (Unit "z" sentinel) while the surrounding slot is
-            // sized for the actual return type. Manifest expressions are
-            // process-lifetime, so sharing the pointer is not a dangling risk.
-            (*expr).schema = (*fallback).schema;
-            (*expr).expr.catch_expr = catch;
+            (*expr).etype = MorlocExpressionType::Try;
+            (*expr).schema = schema;
+            (*expr).expr.unary_expr = body;
             Ok(expr)
         }
 
@@ -1591,6 +1709,26 @@ unsafe fn populate_arg(dst: *mut ManifestArg, src: &morloc_manifest::Arg) {
             let (cs, nc) = populate_constraints(constraints);
             (*dst).constraints = cs;
             (*dst).n_constraints = nc;
+            (*dst).metadata_json = c_strdup("{}");
+        }
+        // The per-constructor options are a command-line convenience; to
+        // every other caller the argument is one value of its type's wire
+        // form, which is what a positional is.
+        Arg::Alt {
+            schema,
+            type_desc,
+            metavar,
+            desc,
+            ..
+        } => {
+            (*dst).kind = ManifestArgKind::Pos;
+            (*dst).schema = nullable_strdup(schema.as_deref());
+            (*dst).type_desc = nullable_strdup(type_desc.as_deref());
+            (*dst).metavar = nullable_strdup(metavar.as_deref());
+            (*dst).quoted = false;
+            let (d, n) = populate_str_vec(desc);
+            (*dst).desc = d;
+            (*dst).n_desc = n;
             (*dst).metadata_json = c_strdup("{}");
         }
     }

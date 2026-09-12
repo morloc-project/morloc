@@ -19,7 +19,7 @@ mk :: Int -> [Int]
 joinAll :: [Int] -> Str
 toBytes :: [Int] -> Vector U8
 
-produce :: ([Int] -> <IO, Err> ()) -> <IO, Err> ()
+produce :: ([Int] -> <IO> ()) -> <IO> ()
 produce sink = do
   _ <- sink (mk 0)
   sink (mk 1)
@@ -27,5 +27,5 @@ produce sink = do
 --' Stream integer batches
 --' render: -j/--joined=joinAll
 --' render: -b/--bytes=toBytes
-stream :: <IO, Err> ()
+stream :: <IO> ()
 stream = @collect produce

@@ -1,39 +1,38 @@
--- @catch composed through a helper whose fallible-arg lambda carries
--- a polymorphic effect row (`<e, Err>`). Two independent compiler
--- properties must both hold for this to compile:
+-- @try composed through a helper whose body carries a polymorphic effect
+-- row. The property under test is that a bare-value alternative can be
+-- checked into a slot whose type is an unsolved existential under an
+-- effect row: without an existential-into-EffectU subtype rule, `fb :: b`
+-- checked against `<e> b` triggers an occurs check at InstantiateL.
 --
---   1. @catch's synth rule accepts a fallible whose effect row is
---      `<Err | e>` where `e` is a row variable, rather than requiring
---      `Err` to be the only label (fixed by dropping `effectSetHasVar`
---      rejection in Typecheck.hs's IntrCatch clause).
---
---   2. The subtype checker accepts a bare-value fallback into the
---      `<e> b` slot that @catch's rule constructs, even when `b` is
---      an unsolved existential. Without an existential-into-EffectU
---      subtype rule, `fb :: b` checked against `<e> b` triggers an
---      occurs check at InstantiateL and typecheck fails.
+-- This used to be an @catch test whose fallible carried `<e, Err>`. Err is
+-- no longer an effect -- failure is a `Try` value -- so the row here is
+-- just `<e>` and the recovery is a match on the Try.
 
 module main
+
   ( catchIntLoadFallback
   , catchIntLoadPrimary
   )
 
-effect IO
-escapable effect Err
+import root
+import root-py
 
--- Both arguments to @catch are polymorphic in `e`. The bare-value
--- fallback `fb :: b` fills the `<e> b` slot via the pure-into-effect
--- subtype rule extended to existentials.
-withCatch :: (a -> <e, Err> b) -> a -> b -> <e> b
-withCatch f x fb = @catch (f x) fb
+-- `f x` may perform any effects `e`; the result is a Try the caller
+-- unwraps, falling back to `fb`.
+withTry :: (a -> <e> (Try Str b)) -> a -> b -> <e> b
+withTry f x fb = do
+  r <- f x
+  match r
+    | (Ok v) = v
+    | (Err _) = fb
 
-tryLoad :: Str -> <IO, Err> Int
+tryLoad :: Str -> <IO> (Try Str Int)
 tryLoad path = @load path
 
 catchIntLoadFallback :: <IO> Int
 catchIntLoadFallback =
-  withCatch tryLoad "/tmp/poly-catch-no-such-file.dat" -1
+  withTry tryLoad "/tmp/poly-catch-no-such-file.dat" -1
 
 catchIntLoadPrimary :: Str -> <IO> Int
 catchIntLoadPrimary path =
-  withCatch tryLoad path 0
+  withTry tryLoad path 0

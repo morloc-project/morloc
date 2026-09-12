@@ -79,7 +79,21 @@ pairEval cscope gscope =
         Left _ ->
           case expandNewtypeBodyOneStep gscope t of
             Just t' -> f (bumpBnd t bnd) t'
-            Nothing -> generalTransformType Set.empty id resolveFail cscope t
+            Nothing
+              -- A `data` type with no explicit per-language form is its own
+              -- concrete form: the pool generates a native enum under the
+              -- type's own name, the way an unmapped record generates a
+              -- struct. Unlike a newtype there is no body to fall through
+              -- to -- the scope body is a constructor-name table, not a
+              -- parent type -- so this must be answered here rather than by
+              -- 'expandNewtypeBodyOneStep'.
+              | isDataType gscope t -> return t
+              | otherwise -> generalTransformType Set.empty id resolveFail cscope t
+
+    isDataType :: Scope -> TypeU -> Bool
+    isDataType scope (VarU v) = maybe False (const True) (scopeEnumCtors scope v)
+    isDataType scope (AppU (VarU v) _) = maybe False (const True) (scopeEnumCtors scope v)
+    isDataType _ _ = False
 
     -- One-step body expansion for non-NamU newtypes. Returns Nothing
     -- for everything else (NamU newtypes are handled by the main walk
@@ -305,6 +319,10 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
                          NamU{} -> recurse bnd' substituted
                          _ -> resolve bnd t0
                        (TypedefPrimitive, _) -> resolve bnd t0
+                       -- A `data` type is nominal and its scope body is a
+                       -- constructor-name table, not a structural body, so
+                       -- reduction stops here in every case.
+                       (TypedefEnum, _) -> resolve bnd t0
                        (TypedefAlias, True) -> terminate bnd' substituted
                        (TypedefAlias, False) -> recurse bnd' substituted
                 Nothing ->
@@ -352,6 +370,7 @@ generalTransformType bnd0 recurse' resolve' scope = f bnd0
                        NamU{} -> recurse bnd' t2
                        _ -> resolve bnd t0
                      TypedefPrimitive -> resolve bnd t0
+                     TypedefEnum -> resolve bnd t0
                      TypedefAlias
                        | isTerminal -> terminate bnd' t2
                        | otherwise -> recurse bnd' t2
@@ -711,6 +730,7 @@ wireParentRoot scope t = case expandWireParent scope t of
 stopAtNominalBoundary :: TypedefKind -> Bool
 stopAtNominalBoundary TypedefNewtype = True
 stopAtNominalBoundary TypedefPrimitive = True
+stopAtNominalBoundary TypedefEnum = True
 stopAtNominalBoundary TypedefAlias = False
 
 -- | Halt only at primitives. Used by schema generation, which follows the

@@ -31,65 +31,65 @@ module main
   , catchListStrFallback
   )
 
+-- `Try` is declared in `internal` and reaches user code through `root`;
+-- a fallible intrinsic or `@try` needs it in scope.
+import root
+
 effect IO
 escapable effect Err
 
 -- Str return through @catch. Sub-block: character data.
 -- One @catch wraps the whole save+load round-trip so both @save's
--- and @load's <Err> effect are absorbed together.
+-- and @load's effect are absorbed together.
 catchStrHappy :: Str -> <IO> Str
 catchStrHappy path =
-  @catch
-    (do
+  do
        @save 0 path "hello, morloc"
-       @load path :: <IO, Err> Str)
-    "fallback-not-used"
+       r_try <- @load path :: <IO> (Try Str (Str))
+       match r_try | (Ok _cv) = _cv | (Err _) = "fallback-not-used"
 
 catchStrFallback :: <IO> Str
-catchStrFallback =
-  @catch (@load "/tmp/catch-varwidth-no-such-file.dat" :: <IO, Err> Str)
-    "fallback-str-content"
+catchStrFallback = do
+  _mr <- @load "/tmp/catch-varwidth-no-such-file.dat" :: <IO> (Try Str (Str))
+  match _mr | (Ok _cv) = _cv | (Err _) = "fallback-str-content"
 
 -- [Int] return through @catch. Sub-block: element storage.
 catchListHappy :: Str -> <IO> [Int]
 catchListHappy path =
-  @catch
-    (do
+  do
        @save 0 path [10, 20, 30, 40]
-       @load path :: <IO, Err> [Int])
-    [-1]
+       r_try <- @load path :: <IO> (Try Str ([Int]))
+       match r_try | (Ok _cv) = _cv | (Err _) = [-1]
 
 catchListFallback :: <IO> [Int]
-catchListFallback =
-  @catch (@load "/tmp/catch-varwidth-no-such-file.dat" :: <IO, Err> [Int])
-    [99, 98, 97]
+catchListFallback = do
+  _mr <- @load "/tmp/catch-varwidth-no-such-file.dat" :: <IO> (Try Str ([Int]))
+  match _mr | (Ok _cv) = _cv | (Err _) = [99, 98, 97]
 
 -- (Int, Str) return through @catch. Sub-block: the Str's char data
 -- inside the tuple's Str field.
 catchTupleHappy :: Str -> <IO> (Int, Str)
 catchTupleHappy path =
-  @catch
-    (do
+  do
        @save 0 path (42, "answer")
-       @load path :: <IO, Err> (Int, Str))
-    (0, "fallback")
+       r_try <- @load path :: <IO> (Try Str ((Int, Str)))
+       match r_try | (Ok _cv) = _cv | (Err _) = (0, "fallback")
 
 catchTupleFallback :: <IO> (Int, Str)
-catchTupleFallback =
-  @catch (@load "/tmp/catch-varwidth-no-such-file.dat" :: <IO, Err> (Int, Str))
-    (999, "sentinel")
+catchTupleFallback = do
+  _mr <- @load "/tmp/catch-varwidth-no-such-file.dat" :: <IO> (Try Str ((Int, Str)))
+  match _mr | (Ok _cv) = _cv | (Err _) = (999, "sentinel")
 
 -- [Str] return through @catch. Sub-block: outer Array + per-element
 -- Array headers + per-element char storage. Two levels of indirection.
 catchListStrHappy :: Str -> <IO> [Str]
 catchListStrHappy path =
-  @catch
-    (do
+  do
        @save 0 path ["alpha", "bravo", "charlie"]
-       @load path :: <IO, Err> [Str])
-    ["fallback"]
+       r_try <- @load path :: <IO> (Try Str ([Str]))
+       match r_try | (Ok _cv) = _cv | (Err _) = ["fallback"]
 
 catchListStrFallback :: <IO> [Str]
-catchListStrFallback =
-  @catch (@load "/tmp/catch-varwidth-no-such-file.dat" :: <IO, Err> [Str])
-    ["a", "b"]
+catchListStrFallback = do
+  _mr <- @load "/tmp/catch-varwidth-no-such-file.dat" :: <IO> (Try Str ([Str]))
+  match _mr | (Ok _cv) = _cv | (Err _) = ["a", "b"]

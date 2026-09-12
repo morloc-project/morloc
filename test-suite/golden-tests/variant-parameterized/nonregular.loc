@@ -1,0 +1,14 @@
+-- A NON-REGULAR recursive type: every ply of its expansion is a new
+-- instantiation, so it has no finite wire form. It must be rejected with
+-- an error, not expanded until memory runs out.
+module nonregular (go)
+
+import root-py
+
+data Nest a = Tip a | Deep (Nest [a])
+
+source Py from "boxes.py" ("py_full" as mk)
+mk :: Nest Int -> Nest Int
+
+go :: Nest Int -> Nest Int
+go = mk

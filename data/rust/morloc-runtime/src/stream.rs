@@ -1224,6 +1224,19 @@ pub(crate) fn allocate_slot_cas() -> Result<(usize, &'static RegistrySlot), Morl
 /// subpacket_entries array that the slot referenced. The caller must
 /// already have done any kind-specific finalisation (e.g. write final
 /// footer for OStream).
+/// Transfer a freshly allocated block to the registry. The slot owns it
+/// from here: its lifetime is the slot's, which spans dispatches and can
+/// be shared across processes, so it must not be released when the
+/// allocating eval scope exits. Returns the relptr for assignment.
+fn slot_owns(rel: RelPtr) -> RelPtr {
+    if rel != shm_types_crate::RELNULL {
+        if let Ok(abs) = crate::shm::rel2abs(rel) {
+            crate::eval_arena::forget_if_active(abs);
+        }
+    }
+    rel
+}
+
 fn release_slot_locked(slot: &RegistrySlot) {
     use std::sync::atomic::Ordering;
 
@@ -1463,11 +1476,11 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
         unsafe {
             let mp = slot as *const RegistrySlot as *mut RegistrySlot;
             (*mp).kind = MLC_KIND_IFILE;
-            (*mp).file_path = path_rel;
+            (*mp).file_path = slot_owns(path_rel);
             (*mp).file_path_len = path.len() as u32;
-            (*mp).schema_str = schema_rel;
+            (*mp).schema_str = slot_owns(schema_rel);
             (*mp).schema_str_len = parsed.schema_str.len() as u32;
-            (*mp).subpacket_entries = idx_rel;
+            (*mp).subpacket_entries = slot_owns(idx_rel);
             (*mp).subpacket_entries_len = parsed.subpacket_entries.len() as u64;
             // IFile's sub-packet entry array is immutable -- set once
             // from the parsed final footer and never grown. cap = 0
@@ -1583,9 +1596,9 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
         unsafe {
             let mp = slot as *const RegistrySlot as *mut RegistrySlot;
             (*mp).kind = MLC_KIND_ISTREAM;
-            (*mp).file_path = path_rel;
+            (*mp).file_path = slot_owns(path_rel);
             (*mp).file_path_len = path.len() as u32;
-            (*mp).schema_str = schema_rel;
+            (*mp).schema_str = slot_owns(schema_rel);
             (*mp).schema_str_len = parsed.schema_str.len() as u32;
             (*mp).subpacket_entries = shm_types_crate::RELNULL;
             (*mp).subpacket_entries_len = 0;
@@ -1732,6 +1745,14 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
 {
     use std::sync::atomic::Ordering;
 
+    // The declared schema is published to the nexus, which compares it
+    // against the schema on each incoming packet. A pool passes the
+    // compiler's hint-bearing string and the wire never carries hints,
+    // so store the canonical form.
+    let schema_owned =
+        morloc_runtime_types::schema::canonicalize_schema_str(schema_str);
+    let schema_str: &str = &schema_owned;
+
     // Pool processes attach lazily; without this, the first stdio open
     // from a pool sees a null REGISTRY_BASE and stdio_claim_slot
     // returns None. Idempotent + cheap on the fast path.
@@ -1843,11 +1864,11 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
             (*mp).kind = kind;
             (*mp).is_stdio = 1;
             (*mp).stdio_kind = stdio_kind;
-            (*mp).file_path = path_rel;
+            (*mp).file_path = slot_owns(path_rel);
             (*mp).file_path_len = sentinel.len() as u32;
-            (*mp).schema_str = schema_rel;
+            (*mp).schema_str = slot_owns(schema_rel);
             (*mp).schema_str_len = schema_str.len() as u32;
-            (*mp).subpacket_entries = idx_rel;
+            (*mp).subpacket_entries = slot_owns(idx_rel);
             (*mp).subpacket_entries_len = 0;
             (*mp).subpacket_entries_cap = idx_cap;
             (*mp).body_start = stdio_body_start;
@@ -1858,7 +1879,7 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
             (*mp).opener_pid = std::process::id();
             (*mp).opener_pid_start_time = read_pid_start_time();
             (*mp).diag = StreamDiag::new();
-            (*mp).write_buffer = buf_rel;
+            (*mp).write_buffer = slot_owns(buf_rel);
             (*mp).write_buffer_index_cap = 0;
             (*mp).write_buffer_index_count = 0;
             (*mp).write_buffer_data_used = 0;
@@ -2197,7 +2218,6 @@ pub fn shared_open_ostream_with_schema(
     schema_str: &str,
 ) -> Result<i64, MorlocError> {
     use std::ffi::CString;
-    use std::sync::atomic::Ordering;
     use morloc_runtime_types::schema::SerialType;
     use morloc_runtime_types::packet::make_stream_header_block;
 
@@ -2241,6 +2261,22 @@ pub fn shared_open_ostream_with_schema(
             path, e,
         )));
     }
+    init_ostream_on_locked_fd(fd, path, schema_str, parsed_schema, header_bytes)
+}
+
+/// Initialise an already-open, already-locked descriptor as an empty
+/// `OStream` and publish a handle for it. The caller owns `fd` and must hold
+/// the exclusive lock across the call, so the decision to start the file and
+/// the truncation acting on it cannot straddle a window in which another
+/// writer finishes. `fd` is closed on error.
+fn init_ostream_on_locked_fd(
+    fd: libc::c_int,
+    path: &str,
+    schema_str: &str,
+    parsed_schema: morloc_runtime_types::schema::Schema,
+    header_bytes: Vec<u8>,
+) -> Result<i64, MorlocError> {
+    use std::sync::atomic::Ordering;
     if unsafe { libc::ftruncate(fd, 0) } != 0 {
         let e = std::io::Error::last_os_error();
         unsafe { libc::close(fd); }
@@ -2284,11 +2320,11 @@ pub fn shared_open_ostream_with_schema(
         unsafe {
             let mp = slot as *const RegistrySlot as *mut RegistrySlot;
             (*mp).kind = MLC_KIND_OSTREAM;
-            (*mp).file_path = path_rel;
+            (*mp).file_path = slot_owns(path_rel);
             (*mp).file_path_len = path.len() as u32;
-            (*mp).schema_str = schema_rel;
+            (*mp).schema_str = slot_owns(schema_rel);
             (*mp).schema_str_len = schema_str.len() as u32;
-            (*mp).subpacket_entries = idx_buf_rel;
+            (*mp).subpacket_entries = slot_owns(idx_buf_rel);
             (*mp).subpacket_entries_len = 0;
             (*mp).subpacket_entries_cap = idx_cap_initial;
             (*mp).body_start = body_start;
@@ -2302,7 +2338,7 @@ pub fn shared_open_ostream_with_schema(
             // Write buffer fields. index_cap is set lazily on first
             // @write -- elem_width isn't known until then since the
             // schema-string parse happens below.
-            (*mp).write_buffer = buf_rel;
+            (*mp).write_buffer = slot_owns(buf_rel);
             (*mp).write_buffer_index_cap = 0;
             (*mp).write_buffer_index_count = 0;
             (*mp).write_buffer_data_used = 0;
@@ -2350,6 +2386,7 @@ pub fn shared_open_ostream_with_schema(
     install_process_local_slot(handle, local);
     Ok(handle)
 }
+
 
 /// Explicit `@close`: writes final footer (status = CLOSED) + fdatasync
 /// for OStream, then releases the slot. Caller-visible failures (pwrite,
@@ -2974,7 +3011,7 @@ fn append_shared_subpacket_index(
     let new_rel = crate::shm::abs2rel(new_abs as *mut u8)?;
     unsafe {
         let mp = slot as *const RegistrySlot as *mut RegistrySlot;
-        (*mp).subpacket_entries = new_rel;
+        (*mp).subpacket_entries = slot_owns(new_rel);
         (*mp).subpacket_entries_len = len + 1;
         (*mp).subpacket_entries_cap = new_cap;
     }
@@ -4081,56 +4118,30 @@ pub fn shared_append_to_path(
     use std::ffi::CString;
     use std::sync::atomic::Ordering;
 
-    // Step 1: mmap read-only to find the resume offset and validate
-    // the schema. Mmap is unmapped before reopening RW.
-    let (mmap_ptr, mmap_size) = mmap_file_readonly(path)?;
-    let parsed = match parse_stream_file(path, mmap_ptr, mmap_size) {
-        Ok(p) => p,
-        Err(e) => {
-            unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
-            return Err(e);
-        }
-    };
-    if parsed.schema_str != expected_schema_str {
-        unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
-        return Err(MorlocError::Other(format!(
-            "@append: schema mismatch on '{}': file has '{}', open requested '{}'",
-            path, parsed.schema_str, expected_schema_str
-        )));
-    }
-    let stream_hdr = match parse_stream_header(mmap_ptr, mmap_size) {
-        Ok(h) => h,
-        Err(e) => {
-            unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
-            return Err(e);
-        }
-    };
-    let resume_off = if let Some(last_entry) = parsed.subpacket_entries.last() {
-        let last_off = last_entry.offset;
-        match read_subpacket_size(mmap_ptr, mmap_size, last_off) {
-            Ok(sz) => last_off + sz,
-            Err(e) => {
-                unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
-                return Err(e);
-            }
-        }
-    } else {
-        stream_hdr.body_start
-    };
-    let element_count_at_resume = parsed.element_count;
-    let value_schema_clone = parsed.value_schema.clone();
-    let elem_schema_clone = parsed.elem_schema.clone();
-    let subpacket_entries_clone: Vec<morloc_runtime_types::packet::SubpacketEntry> =
-        parsed.subpacket_entries.clone();
-    let schema_str_clone = parsed.schema_str.clone();
-    unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
+    reject_dev_stdio_path(path)?;
 
-    // Step 2: reopen RW, flock, truncate at resume offset.
+    // The caller's string may carry `<hint>` prefixes (a pool passes the
+    // schema the compiler baked into its dispatch table); the header
+    // never does. Canonicalize before comparing, and compare
+    // structurally so a caller that skips normalization is still served.
+    let requested_schema_str =
+        morloc_runtime_types::schema::canonicalize_schema_str(expected_schema_str);
+
     let c_path = CString::new(path).map_err(|e| {
         MorlocError::Other(format!("@append: path contains NUL: {}", e))
     })?;
+
+    // Lock before reading anything. The size, the choice between starting
+    // the file and resuming it, and the truncation that acts on that choice
+    // all happen under one lock, so a writer that finishes in between
+    // cannot have its records cut away by an offset computed before they
+    // existed.
     let fd = unsafe {
-        libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC, 0)
+        libc::open(
+            c_path.as_ptr(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC,
+            0o644,
+        )
     };
     if fd < 0 {
         return Err(MorlocError::Io(std::io::Error::last_os_error()));
@@ -4143,6 +4154,97 @@ pub fn shared_append_to_path(
             "@append: failed to flock '{}': {}", path, e
         )));
     }
+
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        let e = std::io::Error::last_os_error();
+        unsafe { libc::close(fd); }
+        return Err(MorlocError::Io(e));
+    }
+    let file_size = st.st_size as u64;
+
+    // An empty file holds nothing to protect: either it was absent until
+    // the open above, or a previous writer died before writing a header.
+    // Either way this is where the log starts.
+    if file_size == 0 {
+        let parsed_schema = if requested_schema_str.is_empty() {
+            morloc_runtime_types::schema::Schema::primitive(
+                morloc_runtime_types::schema::SerialType::Nil,
+            )
+        } else {
+            match parse_schema(&requested_schema_str) {
+                Ok(s) => s,
+                Err(e) => {
+                    unsafe { libc::close(fd); }
+                    return Err(MorlocError::Schema(format!(
+                        "@append: unparseable schema '{}': {}",
+                        requested_schema_str, e,
+                    )));
+                }
+            }
+        };
+        if let Err(e) =
+            reject_non_list_stream_schema(&parsed_schema, "@append", path)
+        {
+            unsafe { libc::close(fd); }
+            return Err(e);
+        }
+        let header_bytes =
+            morloc_runtime_types::packet::make_stream_header_block(&parsed_schema);
+        return init_ostream_on_locked_fd(
+            fd, path, &requested_schema_str, parsed_schema, header_bytes,
+        );
+    }
+
+    // Resume. The mapping is built on the locked descriptor rather than a
+    // fresh open, so nothing can change the file between the parse and the
+    // truncation below.
+    let (mmap_ptr, mmap_size) = match mmap_fd_readonly(fd, file_size, path) {
+        Ok(t) => t,
+        Err(e) => {
+            unsafe { libc::close(fd); }
+            return Err(e);
+        }
+    };
+    let unmap_and = |e: MorlocError| -> MorlocError {
+        unsafe {
+            libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize);
+            libc::close(fd);
+        }
+        e
+    };
+    let parsed = match parse_stream_file(path, mmap_ptr, mmap_size) {
+        Ok(p) => p,
+        Err(e) => return Err(unmap_and(e)),
+    };
+    if !morloc_runtime_types::schema::schema_strings_compatible(
+        &parsed.schema_str, &requested_schema_str,
+    ) {
+        return Err(unmap_and(MorlocError::Other(format!(
+            "@append: schema mismatch on '{}': file has '{}', open requested '{}'",
+            path, parsed.schema_str, requested_schema_str
+        ))));
+    }
+    let stream_hdr = match parse_stream_header(mmap_ptr, mmap_size) {
+        Ok(h) => h,
+        Err(e) => return Err(unmap_and(e)),
+    };
+    let resume_off = if let Some(last_entry) = parsed.subpacket_entries.last() {
+        let last_off = last_entry.offset;
+        match read_subpacket_size(mmap_ptr, mmap_size, last_off) {
+            Ok(sz) => last_off + sz,
+            Err(e) => return Err(unmap_and(e)),
+        }
+    } else {
+        stream_hdr.body_start
+    };
+    let element_count_at_resume = parsed.element_count;
+    let value_schema_clone = parsed.value_schema.clone();
+    let elem_schema_clone = parsed.elem_schema.clone();
+    let subpacket_entries_clone: Vec<morloc_runtime_types::packet::SubpacketEntry> =
+        parsed.subpacket_entries.clone();
+    let schema_str_clone = parsed.schema_str.clone();
+    unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
     let trunc_rc = unsafe { libc::ftruncate(fd, resume_off as libc::off_t) };
     if trunc_rc != 0 {
         let e = std::io::Error::last_os_error();
@@ -4195,11 +4297,11 @@ pub fn shared_append_to_path(
         unsafe {
             let mp = slot as *const RegistrySlot as *mut RegistrySlot;
             (*mp).kind = MLC_KIND_OSTREAM;
-            (*mp).file_path = path_rel;
+            (*mp).file_path = slot_owns(path_rel);
             (*mp).file_path_len = path.len() as u32;
-            (*mp).schema_str = schema_rel;
+            (*mp).schema_str = slot_owns(schema_rel);
             (*mp).schema_str_len = schema_str_clone.len() as u32;
-            (*mp).subpacket_entries = idx_buf_rel;
+            (*mp).subpacket_entries = slot_owns(idx_buf_rel);
             (*mp).subpacket_entries_len = preseed_len as u64;
             (*mp).subpacket_entries_cap = idx_cap_initial;
             (*mp).body_start = stream_hdr.body_start;
@@ -4210,7 +4312,7 @@ pub fn shared_append_to_path(
             (*mp).opener_pid = std::process::id();
             (*mp).opener_pid_start_time = read_pid_start_time();
             (*mp).diag = diag;
-            (*mp).write_buffer = buf_rel;
+            (*mp).write_buffer = slot_owns(buf_rel);
             (*mp).write_buffer_index_cap = 0;
             (*mp).write_buffer_index_count = 0;
             (*mp).write_buffer_data_used = 0;
@@ -4919,6 +5021,37 @@ pub fn read_schema_from_file(path: &str) -> Result<String, MorlocError> {
 }
 
 // ── mmap helpers ──────────────────────────────────────────────────────────
+
+/// Map an already-open descriptor read-only. Used where the caller must
+/// hold a lock across both the mapping and whatever it decides from it, so
+/// reopening the path would defeat the lock.
+fn mmap_fd_readonly(
+    fd: std::os::unix::io::RawFd,
+    size: u64,
+    path: &str,
+) -> Result<(AbsPtr, u64), MorlocError> {
+    if size == 0 {
+        return Err(MorlocError::Packet(format!(
+            "file '{}' is empty (cannot be a stream packet)", path
+        )));
+    }
+    let ptr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            size as usize,
+            libc::PROT_READ,
+            libc::MAP_PRIVATE,
+            fd,
+            0,
+        )
+    };
+    if ptr == libc::MAP_FAILED {
+        return Err(MorlocError::Other(format!(
+            "mmap failed for '{}': {}", path, std::io::Error::last_os_error()
+        )));
+    }
+    Ok((ptr as AbsPtr, size))
+}
 
 fn mmap_file_readonly(path: &str) -> Result<(AbsPtr, u64), MorlocError> {
     let f = OpenOptions::new()
@@ -5803,21 +5936,13 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
         return Err(MorlocError::Other("@concat: paths list is empty".into()));
     }
 
-    let c_dest = CString::new(dest).map_err(|e| {
-        MorlocError::Other(format!("@concat: dest path contains NUL: {}", e))
-    })?;
-    // `@concat` overwrites `dest` silently. No flock guard here:
-    // this is a one-shot batch merge that lacks a shared lock layer.
-    let dest_fd = unsafe {
-        libc::open(
-            c_dest.as_ptr(),
-            libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC,
-            0o644,
-        )
-    };
-    if dest_fd < 0 {
-        return Err(MorlocError::Io(std::io::Error::last_os_error()));
-    }
+    // Built beside the destination and renamed onto it at the end, so a
+    // source that is also the destination is read from its original bytes
+    // and a merge that fails leaves the destination as it was. No flock
+    // guard: this is a one-shot batch merge with no shared lock layer.
+    let staged = crate::utility::AtomicFile::create(std::path::Path::new(dest))
+        .map_err(MorlocError::Io)?;
+    let dest_fd = staged.as_raw_fd();
     let mut dest_cursor: u64 = 0;
     let mut merged_entries: Vec<morloc_runtime_types::packet::SubpacketEntry> = Vec::new();
     let mut total_element_count: u64 = 0;
@@ -5831,8 +5956,6 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
         let (mmap_ptr, mmap_size) = match mmap_file_readonly(p) {
             Ok(t) => t,
             Err(e) => {
-                unsafe { libc::close(dest_fd); }
-                let _ = unsafe { libc::unlink(c_dest.as_ptr()) };
                 return Err(e);
             }
         };
@@ -5841,8 +5964,6 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
             Err(e) => {
                 unsafe {
                     libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize);
-                    libc::close(dest_fd);
-                    libc::unlink(c_dest.as_ptr());
                 }
                 return Err(e);
             }
@@ -5851,11 +5972,13 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
             None => {
                 reference_schema = Some(parsed.schema_str.clone());
             }
-            Some(ref_str) if *ref_str != parsed.schema_str => {
+            Some(ref_str)
+                if !morloc_runtime_types::schema::schema_strings_compatible(
+                    ref_str, &parsed.schema_str,
+                ) =>
+            {
                 unsafe {
                     libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize);
-                    libc::close(dest_fd);
-                    libc::unlink(c_dest.as_ptr());
                 }
                 return Err(MorlocError::Other(format!(
                     "@concat: schema mismatch -- '{}' has '{}', earlier had '{}'",
@@ -5869,8 +5992,6 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
             Err(e) => {
                 unsafe {
                     libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize);
-                    libc::close(dest_fd);
-                    libc::unlink(c_dest.as_ptr());
                 }
                 return Err(e);
             }
@@ -5888,8 +6009,6 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
                 Err(e) => {
                     unsafe {
                         libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize);
-                        libc::close(dest_fd);
-                        libc::unlink(c_dest.as_ptr());
                     }
                     return Err(e);
                 }
@@ -5907,8 +6026,7 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
         let c_src = match CString::new(p) {
             Ok(c) => c,
             Err(e) => {
-                unsafe { libc::close(dest_fd); libc::unlink(c_dest.as_ptr()); }
-                return Err(MorlocError::Other(format!(
+                                return Err(MorlocError::Other(format!(
                     "@concat: source path '{}' contains NUL: {}", p, e
                 )));
             }
@@ -5918,15 +6036,14 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
         };
         if src_fd < 0 {
             let e = std::io::Error::last_os_error();
-            unsafe { libc::close(dest_fd); libc::unlink(c_dest.as_ptr()); }
-            return Err(MorlocError::Io(e));
+                        return Err(MorlocError::Io(e));
         }
 
         if i == 0 {
             // Preserve the source's stream header verbatim so the
             // merged file's schema metadata block matches.
             if let Err(e) = sendfile_range(dest_fd, src_fd, 0, body_start, dest_cursor) {
-                unsafe { libc::close(src_fd); libc::close(dest_fd); libc::unlink(c_dest.as_ptr()); }
+                unsafe { libc::close(src_fd); }
                 return Err(e);
             }
             dest_cursor += body_start;
@@ -5943,7 +6060,7 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
         if body_end > body_start {
             let body_len = body_end - body_start;
             if let Err(e) = sendfile_range(dest_fd, src_fd, body_start, body_len, dest_cursor) {
-                unsafe { libc::close(src_fd); libc::close(dest_fd); libc::unlink(c_dest.as_ptr()); }
+                unsafe { libc::close(src_fd); }
                 return Err(e);
             }
             dest_cursor += body_len;
@@ -5961,21 +6078,8 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
         &merged_entries,
         morloc_runtime_types::packet::FOOTER_STATUS_CLOSED,
     );
-    if let Err(e) = pwrite_all_fd(dest_fd, &footer, dest_cursor) {
-        unsafe {
-            libc::close(dest_fd);
-            libc::unlink(c_dest.as_ptr());
-        }
-        return Err(e);
-    }
-    let rc = unsafe { fdatasync_fd(dest_fd) };
-    if rc != 0 {
-        let e = std::io::Error::last_os_error();
-        unsafe { libc::close(dest_fd); }
-        return Err(MorlocError::Io(e));
-    }
-    unsafe { libc::close(dest_fd); }
-    Ok(())
+    pwrite_all_fd(dest_fd, &footer, dest_cursor)?;
+    staged.commit().map_err(MorlocError::Io)
 }
 
 /// Finalise an OStream on close: replace the temp footer with a final
@@ -7993,7 +8097,29 @@ pub fn open_dispatch_istream(path: &str, schema_str: &str) -> Result<i64, Morloc
     if is_stdin_device(path) {
         return open_stdio(MLC_KIND_ISTREAM, STDIO_KIND_STDIN, schema_str);
     }
-    shared_open_istream(path)
+    // A stream file is self-describing, so the reader decodes from the
+    // file's own schema and needs no argument. The ascribed type still
+    // matters: the pool walks the resulting voidstar with its
+    // compile-time schema, so a mismatch is a structural walk of a
+    // buffer that schema does not describe. Both strings are in hand
+    // here, so check once at open rather than producing garbage later.
+    let handle = shared_open_istream(path)?;
+    if !schema_str.is_empty() {
+        let stored = shared_handle_schema_str(handle)?;
+        let requested =
+            morloc_runtime_types::schema::canonicalize_schema_str(schema_str);
+        if !morloc_runtime_types::schema::schema_strings_compatible(
+            &stored, &requested,
+        ) {
+            let _ = shared_close_handle(handle);
+            return Err(MorlocError::Other(format!(
+                "@open IStream: schema mismatch on '{}': \
+                 file has '{}', open requested '{}'",
+                path, stored, requested
+            )));
+        }
+    }
+    Ok(handle)
 }
 
 // ── `morloc-nexus view` conversion helpers ────────────────────────────────
@@ -8352,11 +8478,11 @@ pub fn shared_open_ifile_recovered(
         unsafe {
             let mp = slot as *const RegistrySlot as *mut RegistrySlot;
             (*mp).kind = MLC_KIND_IFILE;
-            (*mp).file_path = path_rel;
+            (*mp).file_path = slot_owns(path_rel);
             (*mp).file_path_len = path.len() as u32;
-            (*mp).schema_str = schema_rel;
+            (*mp).schema_str = slot_owns(schema_rel);
             (*mp).schema_str_len = parsed.schema_str.len() as u32;
-            (*mp).subpacket_entries = idx_rel;
+            (*mp).subpacket_entries = slot_owns(idx_rel);
             (*mp).subpacket_entries_len = subpacket_entries.len() as u64;
             (*mp).subpacket_entries_cap = 0;
             (*mp).body_start = parsed.body_start;
@@ -8502,6 +8628,57 @@ mod tests {
     /// confirm open_ifile + close_handle round-trip. Sub-packet walking
     /// + cache + pattern eval are exercised in task #13's integration
     /// tests.
+    // A slot's path/schema/index/buffer blocks belong to the registry.
+    // Their lifetime is the slot's, which spans dispatches and can be
+    // shared across processes, so allocating them while an eval arena
+    // is active must not enroll them in that arena. If it does, arena
+    // scope exit frees blocks the registry still owns and the eventual
+    // slot release frees them a second time.
+    #[test]
+    fn arena_scope_exit_leaves_slot_blocks_owned() {
+        let _shm = crate::own_test_registry();
+        let dir = std::env::temp_dir().join(format!(
+            "morloc_arena_slot_test_{}", std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("arena_slot.idx");
+
+        let schema = crate::schema::Schema::primitive(
+            crate::schema::SerialType::Uint32,
+        );
+        let schema_str =
+            morloc_runtime_types::schema::schema_to_string(&list_schema(&schema));
+
+        let handle = {
+            let _arena = crate::eval_arena::enter().unwrap();
+            shared_open_ostream_with_schema(path.to_str().unwrap(), &schema_str)
+                .unwrap()
+        };
+
+        let (_gen, slot_idx) = unpack_handle(handle);
+        let slot = slot_ref(slot_idx).expect("slot index in range");
+        for (field, rel) in [
+            ("file_path", slot.file_path),
+            ("schema_str", slot.schema_str),
+            ("subpacket_entries", slot.subpacket_entries),
+            ("write_buffer", slot.write_buffer),
+        ] {
+            if rel == shm_types_crate::RELNULL {
+                continue;
+            }
+            let abs = crate::shm::rel2abs(rel).expect("slot relptr resolves");
+            let rc = crate::shm::reference_count(abs);
+            assert!(
+                matches!(rc, Some(c) if c > 0),
+                "slot {} block was released while the slot still owns it (refcount {:?})",
+                field, rc,
+            );
+        }
+
+        shared_close_handle(handle).unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn open_close_empty_stream_file() {
         let _shm = crate::own_test_registry();
@@ -8534,6 +8711,256 @@ mod tests {
 
         // Re-close is an error.
         assert!(shared_close_handle(handle).is_err());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // A pool hands the runtime the schema string the compiler baked into
+    // its dispatch table, which carries the language's concrete-type hint
+    // (`a<dict>m...`). The stream header stores the hint-free form,
+    // because every writer renders through `schema_to_string`. An append
+    // must accept the pool's form: the two describe one wire type.
+    //
+    // The nexus's own evaluator normalizes before calling, so only the
+    // pool path exercises this.
+    #[test]
+    fn concat_supports_in_place_append() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("inplace");
+        let a = dir.join("a.idx");
+        let b = dir.join("b.idx");
+        write_int_stream(&a, &[&[1, 2, 3]]);
+        write_int_stream(&b, &[&[4, 5]]);
+
+        // Merging a file into itself is the obvious way to append a batch
+        // to a log, and it must not consume the file it is reading.
+        concat_files(
+            &[a.to_str().unwrap(), b.to_str().unwrap()],
+            a.to_str().unwrap(),
+        )
+        .expect("a destination that is also a source must be supported");
+        assert_eq!(stream_len(&a), 5);
+    }
+
+    #[test]
+    fn concat_preserves_dest_on_missing_source() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("missing");
+        let good = dir.join("good.idx");
+        let dest = dir.join("dest.idx");
+        write_int_stream(&good, &[&[1, 2, 3]]);
+        write_int_stream(&dest, &[&[9, 9, 9, 9]]);
+
+        // A merge that cannot run must leave the destination alone; it is
+        // a file the user asked to merge into, not scratch space.
+        let missing = dir.join("not-here.idx");
+        assert!(
+            concat_files(
+                &[good.to_str().unwrap(), missing.to_str().unwrap()],
+                dest.to_str().unwrap(),
+            )
+            .is_err(),
+            "a missing source must be an error",
+        );
+        assert!(dest.exists(), "the destination must survive a failed merge");
+        assert_eq!(stream_len(&dest), 4);
+    }
+
+    #[test]
+    fn concat_preserves_dest_on_schema_mismatch() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("schema");
+        let ints = dir.join("ints.idx");
+        let other = dir.join("other.idx");
+        let dest = dir.join("dest.idx");
+        write_int_stream(&ints, &[&[1, 2]]);
+        std::fs::write(
+            &other,
+            build_stream_file(
+                &TSchema::primitive(TSerialType::Sint32),
+                &[&[3, 4]],
+            ),
+        )
+        .unwrap();
+        write_int_stream(&dest, &[&[7, 7, 7]]);
+
+        assert!(
+            concat_files(
+                &[ints.to_str().unwrap(), other.to_str().unwrap()],
+                dest.to_str().unwrap(),
+            )
+            .is_err(),
+            "sources disagreeing on element type must be an error",
+        );
+        assert!(dest.exists(), "the destination must survive a failed merge");
+        assert_eq!(stream_len(&dest), 3);
+    }
+
+    #[test]
+    fn concat_leaves_no_temp_on_failure() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("temps");
+        let good = dir.join("good.idx");
+        let dest = dir.join("dest.idx");
+        write_int_stream(&good, &[&[1]]);
+        write_int_stream(&dest, &[&[2]]);
+
+        let missing = dir.join("not-here.idx");
+        let _ = concat_files(
+            &[good.to_str().unwrap(), missing.to_str().unwrap()],
+            dest.to_str().unwrap(),
+        );
+
+        // Building beside the destination is only safe if the scaffolding
+        // is removed when the build does not finish.
+        let strays: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(strays.is_empty(), "left behind: {:?}", strays);
+    }
+
+    fn concat_test_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "morloc_concat_{}_{}", tag, std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_int_stream(path: &std::path::Path, subs: &[&[i64]]) {
+        let elem = TSchema::primitive(TSerialType::Sint64);
+        std::fs::write(path, build_stream_file(&elem, subs)).unwrap();
+    }
+
+    fn stream_len(path: &std::path::Path) -> u64 {
+        let h = open_ifile(path.to_str().unwrap()).unwrap();
+        let n = handle_length(h).unwrap();
+        shared_close_handle(h).unwrap();
+        n
+    }
+
+    #[test]
+    fn append_creates_an_absent_file() {
+        let _shm = crate::own_test_registry();
+        let dir = std::env::temp_dir().join(format!(
+            "morloc_append_create_test_{}", std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let schema = "ai4";
+
+        // Appending to a path that does not exist yet starts the file.
+        // Without this an append-only log has no way to begin except by
+        // falling back to an open, which truncates.
+        let fresh = dir.join("fresh.idx");
+        let f = fresh.to_str().unwrap();
+        let _ = std::fs::remove_file(f);
+        let h = shared_append_to_path(f, schema)
+            .expect("append must create a file that is not there yet");
+        shared_close_handle(h).unwrap();
+
+        // What it created is a stream file the ordinary readers accept.
+        let (mp, sz) = mmap_file_readonly(f).unwrap();
+        let parsed = parse_stream_file(f, mp, sz).unwrap();
+        unsafe { libc::munmap(mp as *mut libc::c_void, sz as usize); }
+        assert_eq!(parsed.schema_str, schema);
+        assert_eq!(parsed.element_count, 0);
+
+        // A second append opens the file it just made, rather than
+        // creating it again.
+        let h2 = shared_append_to_path(f, schema).expect("second append");
+        shared_close_handle(h2).unwrap();
+
+        let _ = std::fs::remove_file(f);
+    }
+
+    #[test]
+    fn an_appended_file_matches_one_that_was_opened() {
+        let _shm = crate::own_test_registry();
+        let dir = std::env::temp_dir().join(format!(
+            "morloc_append_parity_test_{}", std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let schema = "ai4";
+
+        // Creating by appending and creating by opening must agree, or a
+        // log's first record would sit in a differently shaped file than
+        // every record after it.
+        let a = dir.join("via_append.idx");
+        let b = dir.join("via_open.idx");
+        let (pa, pb) = (a.to_str().unwrap(), b.to_str().unwrap());
+        let _ = std::fs::remove_file(pa);
+        let _ = std::fs::remove_file(pb);
+
+        // The registry slot must agree too, not just the bytes: a hint-
+        // bearing string reaching one path and the canonical form reaching
+        // the other would make a handle's reported schema depend on whether
+        // the file happened to exist.
+        let h = shared_append_to_path(pa, schema).unwrap();
+        let via_append = shared_handle_schema_str(h).unwrap();
+        shared_close_handle(h).unwrap();
+        let g = shared_open_ostream_with_schema(pb, schema).unwrap();
+        let via_open = shared_handle_schema_str(g).unwrap();
+        shared_close_handle(g).unwrap();
+        assert_eq!(via_append, via_open, "handle schema must not depend on the path taken");
+
+        assert_eq!(
+            std::fs::read(pa).unwrap(),
+            std::fs::read(pb).unwrap(),
+            "a file created by appending must match one created by opening",
+        );
+
+        let _ = std::fs::remove_file(pa);
+        let _ = std::fs::remove_file(pb);
+    }
+
+    #[test]
+    fn append_accepts_hint_bearing_schema() {
+        let _shm = crate::own_test_registry();
+        let dir = std::env::temp_dir().join(format!(
+            "morloc_append_hint_test_{}", std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("hinted.idx");
+        let p = path.to_str().unwrap();
+
+        // A two-field record of (Str, Int): the shape `record py => T =
+        // "dict"` produces. Stored hint-free, requested with `<dict>`.
+        let stored_form = "am24kinds2idj";
+        let pool_form = "a<dict>m24kinds2idj";
+
+        let out = shared_open_ostream_with_schema(p, pool_form).unwrap();
+        shared_close_handle(out).unwrap();
+
+        // The header keeps the canonical form regardless of what the
+        // opener passed.
+        let parsed_hdr = {
+            let (mp, sz) = mmap_file_readonly(p).unwrap();
+            let parsed = parse_stream_file(p, mp, sz).unwrap();
+            unsafe { libc::munmap(mp as *mut libc::c_void, sz as usize); }
+            parsed.schema_str
+        };
+        assert_eq!(parsed_hdr, stored_form);
+
+        // Appending with the pool's hint-bearing form must work.
+        let app = shared_append_to_path(p, pool_form)
+            .expect("append must accept a hint-bearing schema");
+        shared_close_handle(app).unwrap();
+
+        // The hint-free form must work too -- a library caller that read
+        // the schema back off the file passes this.
+        let app2 = shared_append_to_path(p, stored_form)
+            .expect("append must accept the canonical schema");
+        shared_close_handle(app2).unwrap();
+
+        // A genuinely different element type is still refused.
+        assert!(
+            shared_append_to_path(p, "a<dict>m25alphas4betaj").is_err(),
+            "append must still reject a different element type",
+        );
 
         let _ = std::fs::remove_file(&path);
     }

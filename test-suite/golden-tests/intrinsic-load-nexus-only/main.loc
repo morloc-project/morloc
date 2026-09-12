@@ -18,10 +18,11 @@
 -- across the three save formats (binary voidstar, msgpack, json).
 --
 -- @load and @save both raise Err on failure now; the round-trip
--- signatures declare `<IO, Err>` so that propagates. The missing-file
+-- signatures declare `<IO>` so that propagates. The missing-file
 -- case is exercised via @catch to demonstrate the fallback pattern.
 
 module main
+
   ( binInt
   , msgInt
   , jsonInt
@@ -43,100 +44,124 @@ module main
   , loadMissing
   )
 
+-- `Try` is declared in `internal` and reaches user code through `root`;
+-- a fallible intrinsic or `@try` needs it in scope.
+import root
+
 effect IO
 effect Err
 
-binInt :: Int -> Str -> <IO, Err> Int
+binInt :: Int -> Str -> <IO> Int
 binInt x path = do
   @save 0 path x
-  @load path
+  Ok _tailv45 <- @load path
+  _tailv45
 
-msgInt :: Int -> Str -> <IO, Err> Int
+msgInt :: Int -> Str -> <IO> Int
 msgInt x path = do
   @savem path x
-  @load path
+  Ok _tailv46 <- @load path
+  _tailv46
 
-jsonInt :: Int -> Str -> <IO, Err> Int
+jsonInt :: Int -> Str -> <IO> Int
 jsonInt x path = do
   @savej path x
-  @load path
+  Ok _tailv47 <- @load path
+  _tailv47
 
-binReal :: Real -> Str -> <IO, Err> Real
+binReal :: Real -> Str -> <IO> Real
 binReal x path = do
   @save 0 path x
-  @load path
+  Ok _tailv48 <- @load path
+  _tailv48
 
-msgReal :: Real -> Str -> <IO, Err> Real
+msgReal :: Real -> Str -> <IO> Real
 msgReal x path = do
   @savem path x
-  @load path
+  Ok _tailv49 <- @load path
+  _tailv49
 
-jsonReal :: Real -> Str -> <IO, Err> Real
+jsonReal :: Real -> Str -> <IO> Real
 jsonReal x path = do
   @savej path x
-  @load path
+  Ok _tailv50 <- @load path
+  _tailv50
 
-binStr :: Str -> Str -> <IO, Err> Str
+binStr :: Str -> Str -> <IO> Str
 binStr s path = do
   @save 0 path s
-  @load path
+  Ok _tailv51 <- @load path
+  _tailv51
 
-msgStr :: Str -> Str -> <IO, Err> Str
+msgStr :: Str -> Str -> <IO> Str
 msgStr s path = do
   @savem path s
-  @load path
+  Ok _tailv52 <- @load path
+  _tailv52
 
-jsonStr :: Str -> Str -> <IO, Err> Str
+jsonStr :: Str -> Str -> <IO> Str
 jsonStr s path = do
   @savej path s
-  @load path
+  Ok _tailv53 <- @load path
+  _tailv53
 
-binList :: [Str] -> Str -> <IO, Err> [Str]
+binList :: [Str] -> Str -> <IO> [Str]
 binList xs path = do
   @save 0 path xs
-  @load path
+  Ok _tailv54 <- @load path
+  _tailv54
 
-msgList :: [Str] -> Str -> <IO, Err> [Str]
+msgList :: [Str] -> Str -> <IO> [Str]
 msgList xs path = do
   @savem path xs
-  @load path
+  Ok _tailv55 <- @load path
+  _tailv55
 
-jsonList :: [Str] -> Str -> <IO, Err> [Str]
+jsonList :: [Str] -> Str -> <IO> [Str]
 jsonList xs path = do
   @savej path xs
-  @load path
+  Ok _tailv56 <- @load path
+  _tailv56
 
-binTup :: (Int, Str) -> Str -> <IO, Err> (Int, Str)
+binTup :: (Int, Str) -> Str -> <IO> (Int, Str)
 binTup t path = do
   @save 0 path t
-  @load path
+  Ok _tailv57 <- @load path
+  _tailv57
 
-msgTup :: (Int, Str) -> Str -> <IO, Err> (Int, Str)
+msgTup :: (Int, Str) -> Str -> <IO> (Int, Str)
 msgTup t path = do
   @savem path t
-  @load path
+  Ok _tailv58 <- @load path
+  _tailv58
 
-jsonTup :: (Int, Str) -> Str -> <IO, Err> (Int, Str)
+jsonTup :: (Int, Str) -> Str -> <IO> (Int, Str)
 jsonTup t path = do
   @savej path t
-  @load path
+  Ok _tailv59 <- @load path
+  _tailv59
 
-binFixedTupList :: [(Int, Real)] -> Str -> <IO, Err> [(Int, Real)]
+binFixedTupList :: [(Int, Real)] -> Str -> <IO> [(Int, Real)]
 binFixedTupList xs path = do
   @save 0 path xs
-  @load path
+  Ok _tailv60 <- @load path
+  _tailv60
 
-msgFixedTupList :: [(Int, Real)] -> Str -> <IO, Err> [(Int, Real)]
+msgFixedTupList :: [(Int, Real)] -> Str -> <IO> [(Int, Real)]
 msgFixedTupList xs path = do
   @savem path xs
-  @load path
+  Ok _tailv61 <- @load path
+  _tailv61
 
-jsonFixedTupList :: [(Int, Real)] -> Str -> <IO, Err> [(Int, Real)]
+jsonFixedTupList :: [(Int, Real)] -> Str -> <IO> [(Int, Real)]
 jsonFixedTupList xs path = do
   @savej path xs
-  @load path
+  Ok _tailv62 <- @load path
+  _tailv62
 
 -- @load on a missing file raises Err; @catch intercepts and substitutes
 -- the sentinel (-1) so the caller sees a well-defined value.
 loadMissing :: Str -> <IO> Int
-loadMissing path = @catch (@load path :: <IO, Err> Int) (-1)
+loadMissing path = do
+  _mr <- @load path :: <IO> (Try Str (Int))
+  match _mr | (Ok _cv) = _cv | (Err _) = (-1)

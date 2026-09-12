@@ -13,7 +13,7 @@ module main (nv)
 import root-py
 import root-cpp
 
-nv :: Int -> Int -> <Err> Int
+nv :: Int -> Int -> Int
 nv a b =
   ? a > 0 = @throw "outer"
   : (? b > 0 = 1 : 2)

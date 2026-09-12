@@ -8,6 +8,7 @@ module main
   , countWords
   , mapSize
   , fileHead
+  , pairFiles
   )
 
 import root-py
@@ -44,6 +45,23 @@ sumMany ::
   [Int] ->
   Int
 sumMany xs = sumInts xs
+
+--' Join two paths with a semicolon
+--\ Pins the argument-key contract that every machine-readable view shares:
+--\ an explicit `@name` is the key, a `@metavar` never is (both positionals
+--\ share one here, as any command taking two files would), and an unnamed
+--\ positional falls back to its own 1-based index rather than being
+--\ renumbered by the named one before it.
+pairFiles ::
+  --' the file to read from
+  --' @name source
+  --' @metavar FILE
+  Str ->
+  --' the file to write to
+  --' @metavar FILE
+  Str ->
+  Str
+pairFiles a b = joinSemi [a, b]
 
 --' System configuration passed as a flattened flag group
 --' metavar: SYS_CONFIG

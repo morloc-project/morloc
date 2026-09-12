@@ -28,33 +28,39 @@ module main
 
 import root
 
-leakNoFlush :: Str -> <IO, Err> ()
+leakNoFlush :: Str -> <IO> ()
 leakNoFlush path = do
-  o <- @open path :: <IO, Err> OStream Int
-  @write 0 o [1, 2, 3]
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
+  Ok _tailu25 <- @write 0 o [1, 2, 3]
+  _tailu25
 
-leakWithFlush :: Str -> <IO, Err> ()
+leakWithFlush :: Str -> <IO> ()
 leakWithFlush path = do
-  o <- @open path :: <IO, Err> OStream Int
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
   @write 0 o [10, 20, 30, 40]
-  @flush o
+  Ok _tailu26 <- @flush o
+  _tailu26
 
-observeNoFlush :: Str -> <IO, Err> Int
+observeNoFlush :: Str -> <IO> Int
 observeNoFlush path = do
-  s <- @open path :: <IO, Err> IStream Int
-  @flen s
+  Ok s <- @open path :: <IO> (Try Str (IStream Int))
+  Ok _tailv41 <- @flen s
+  _tailv41
 
-observeWithFlush :: Str -> <IO, Err> Int
+observeWithFlush :: Str -> <IO> Int
 observeWithFlush path = do
-  s <- @open path :: <IO, Err> IStream Int
-  @flen s
+  Ok s <- @open path :: <IO> (Try Str (IStream Int))
+  Ok _tailv42 <- @flen s
+  _tailv42
 
-observeNoFlushNext :: Str -> <IO, Err> [Int]
+observeNoFlushNext :: Str -> <IO> [Int]
 observeNoFlushNext path = do
-  s <- @open path :: <IO, Err> IStream Int
-  @next s
+  Ok s <- @open path :: <IO> (Try Str (IStream Int))
+  Ok _tailv43 <- @next s
+  _tailv43
 
-observeWithFlushNext :: Str -> <IO, Err> [Int]
+observeWithFlushNext :: Str -> <IO> [Int]
 observeWithFlushNext path = do
-  s <- @open path :: <IO, Err> IStream Int
-  @next s
+  Ok s <- @open path :: <IO> (Try Str (IStream Int))
+  Ok _tailv44 <- @next s
+  _tailv44

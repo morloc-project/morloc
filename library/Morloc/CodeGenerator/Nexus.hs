@@ -85,6 +85,10 @@ data FData = FData
     -- ^ Per-arg SerialAST, index-aligned with 'fdataArgSchemas'.
     -- Consumed at emit time to derive per-entry wire schemas for
     -- group args (see 'groupEntryWireSchemas').
+  , fdataReturnAst :: SerialAST
+    -- ^ The return's SerialAST. Says which constructors this command
+    -- actually packs, which the type glossary needs and cannot get from
+    -- the signature alone.
   , fdataReturnSchema :: Text
   , fdataReturnGeneralSchema :: Text
     -- ^ The return's wire schema with concrete-type hints stripped.
@@ -111,6 +115,8 @@ data GastData = GastData
   , commandArgAsts :: [SerialAST]
     -- ^ Per-arg SerialAST, index-aligned with 'commandArgSchemas'.
     -- Same role as 'fdataArgAsts'; see 'groupEntryWireSchemas'.
+  , commandReturnAst :: SerialAST
+    -- ^ Same role as 'fdataReturnAst'.
   }
 
 -- | Slice of a parent command's 'CmdDocSet' that internal
@@ -207,6 +213,14 @@ data NexusExpr
   | OptNullX Text         -- absent ?T: at runtime sets tag=0 and leaves the
                           -- inner slot zero. Schema is the outer ?T schema so
                           -- the slot has the right width inside arrays/records.
+  | TagTestX Text NexusExpr Int
+  | CtorFieldX Text NexusExpr Int Int
+  | CtorMakeX Text Int [NexusExpr]
+      -- ^ schema (Bool), subject, constructor. Compares the one-byte tags of
+      -- two `data` values. The nexus answers this itself: the tag is a byte
+      -- it already holds, so a pattern match on an enum in a pure morloc
+      -- function costs no pool dispatch. Emitted only by the desugar's
+      -- constructor-pattern lowering.
   | MapX Text NexusExpr NexusExpr  -- schema (return type = List b), lambda, list.
                                    -- Emits the runtime Map intrinsic: per-element
                                    -- loop applying the lambda body to each input
@@ -238,7 +252,9 @@ data NexusExpr
   | StdoutX   Text                  -- element schema (a) -- @stdout :: <IO> OStream a
   | StderrX   Text                  -- element schema (a) -- @stderr :: <IO> OStream a
   | ThrowX    NexusExpr             -- message expr -> raise MorlocError with msg
-  | CatchX    NexusExpr NexusExpr   -- fallible, fallback -- try/catch
+  | TryX      Text NexusExpr
+    -- ^ result schema (@Try Str a@), body. Evaluate the body under a
+    -- catch and materialize @Ok value@ or @Err message@ into the result.
   | IfX       Text NexusExpr NexusExpr NexusExpr
     -- ^ result schema, condition (Bool), then-branch, else-branch. The
     -- pure-nexus conditional: evaluate the condition and materialize the
@@ -332,6 +348,7 @@ getFData (t, i, lang, doc, sockets) = do
       , fdataSubSockets = sockets
       , fdataArgSchemas = argSchemas
       , fdataArgAsts = argAsts
+      , fdataReturnAst = returnAst
       , fdataReturnSchema = returnSchema
       , fdataReturnGeneralSchema = returnGeneral
       , fdataCmdDocSet = doc
@@ -357,7 +374,7 @@ makeSerialASTs mid lang t = do
 
 makeSerialAST :: Int -> Lang -> Type -> MorlocMonad SerialAST
 makeSerialAST mid lang t = do
-  ft <- Infer.inferConcreteTypeUniversal lang t
+  ft <- Infer.inferConcreteTypeUniversal lang mid t
   ast <- Serial.makeSerialAST mid lang ft
   -- Apply nat dimension constraints from the original type to the SerialAST.
   -- The TypeF may have lost nat params during alias expansion, but the
@@ -403,7 +420,15 @@ makeGastSerialASTs i t = do
 generalTypeToSerialAST :: Int -> Type -> MorlocMonad SerialAST
 generalTypeToSerialAST i = generalTypeToSerialAST' i Set.empty
 
-generalTypeToSerialAST' :: Int -> Set TVar -> Type -> MorlocMonad SerialAST
+-- The ancestor set holds the TYPES on the path above the one being
+-- lowered, and a self-reference is recognised against it. A structural
+-- occurrence (an applied type, a record) is a back-edge only when the same
+-- instantiation is already on the path: the inner @Box Int@ of a
+-- @Box (Box Int)@ is a different type from the outer, and cutting it would
+-- write a schema that says the value contains itself. A bare name is the
+-- one occurrence that carries no arguments -- an alias body's or record's
+-- own reference to itself -- so it matches by name.
+generalTypeToSerialAST' :: Int -> Set Type -> Type -> MorlocMonad SerialAST
 generalTypeToSerialAST' i anc (VarT v)
   | v == MBT.real = return $ SerialReal (FV v (CV ""))
   -- Dispatch f32/f64 to the precision-specific SerialAST constructors,
@@ -426,10 +451,27 @@ generalTypeToSerialAST' i anc (VarT v)
   | v == MBT.bool = return $ SerialBool (FV v (CV ""))
   | v == MBT.str = return $ SerialString (FV v (CV ""))
   | v == MBT.unit = return $ SerialNull (FV v (CV ""))
-  | Set.member v anc = return $ SerialRec (FV v (CV ""))
+  | any ((== Just v) . typeHeadT) (Set.toList anc) = return $ SerialRec (FV v (CV ""))
   | otherwise = do
       scope <- MM.gets stateUniversalGeneralTypedefs
-      case Map.lookup v scope of
+      -- A `data` type is a leaf here: its scope body is a constructor-name
+      -- table, not a parent type, so the alias-expansion path below would
+      -- try to serialize the table itself. This is the nexus's pure-morloc
+      -- path, reached whenever a function over an enum has no sourced
+      -- implementation and therefore runs in the nexus rather than a pool.
+      case (if scopeDataIsEnum scope v then scopeEnumCtors scope v else Nothing) of
+       Just ctors -> return $ SerialEnum (FV v (CV "")) [] ctors
+       -- A `data` whose constructors take arguments. Each arm's field types
+       -- are walked with this type pushed onto the ancestor set, so a
+       -- constructor naming its own type becomes a back-reference rather
+       -- than recursing forever -- the same cut the alias path below makes.
+       Nothing | Just arms <- scopeDataCtors scope v -> do
+                   anc' <- descendT i (VarT v) anc
+                   arms' <- mapM
+                     (\(n, ts) -> (,) n <$> mapM (generalTypeToSerialAST' i anc' . typeOf) ts)
+                     arms
+                   return $ SerialVariant (FV v (CV "")) [] arms'
+       Nothing -> case Map.lookup v scope of
         (Just [(_, _, _, True, _)]) -> error "Cannot handle terminal types"
         (Just [([], t', _, False, _)]) -> do
           -- Same retag-outer rule as in @resolveAliasApp@: the alias's
@@ -437,7 +479,8 @@ generalTypeToSerialAST' i anc (VarT v)
           -- @type Pat = [Pat]@), but the @&Pat@/@^Pat@ pair must agree
           -- on the alias's own name. Retag the outer SerialAST node
           -- with @v@ after recursing.
-          inner <- generalTypeToSerialAST' i (Set.insert v anc) (typeOf t')
+          anc' <- descendT i (VarT v) anc
+          inner <- generalTypeToSerialAST' i anc' (typeOf t')
           return $ retagOuterName v inner
         (Just [_]) -> MM.throwSourcedError i $
           "cannot serialize parameterised pure morloc type:" <+> pretty v
@@ -446,7 +489,8 @@ generalTypeToSerialAST' i anc (VarT v)
         x -> MM.throwSourcedError i $
           "cannot serialize type" <+> pretty v
             <+> "-- unexpected scope shape" <+> pretty (show x)
-generalTypeToSerialAST' i anc (AppT (VarT v) [t])
+generalTypeToSerialAST' i anc t0@(AppT (VarT v) [t])
+  | Set.member t0 anc = return $ SerialRec (FV v (CV ""))
   | v == MBT.list = SerialList (FV v (CV "")) Nothing <$> generalTypeToSerialAST' i anc t
   -- Stream-handle types share the 16-byte tagged-union wire form. The
   -- schema code (F/O/I) picks the receiver's open kind; the per-instance
@@ -454,8 +498,9 @@ generalTypeToSerialAST' i anc (AppT (VarT v) [t])
   | v == MBT.ifileVar   = return $ SerialIFile   (FV v (CV ""))
   | v == MBT.ostreamVar = return $ SerialOStream (FV v (CV ""))
   | v == MBT.istreamVar = return $ SerialIStream (FV v (CV ""))
-  | otherwise = resolveAliasApp i anc v [t]
-generalTypeToSerialAST' i anc (AppT (VarT v) ts)
+  | otherwise = appliedTypeToSerialAST i anc t0 v [t]
+generalTypeToSerialAST' i anc t0@(AppT (VarT v) ts)
+  | Set.member t0 anc = return $ SerialRec (FV v (CV ""))
   | v == (MBT.tuple (length ts)) =
       SerialTuple (FV v (CV "")) <$> mapM (generalTypeToSerialAST' i anc) ts
   -- A Table lowers to a SerialObject NamTable. The encoder emits the
@@ -469,23 +514,46 @@ generalTypeToSerialAST' i anc (AppT (VarT v) ts)
             _                  -> []
       in SerialObject NamTable (FV MBT.table (CV "")) []
            <$> mapM (secondM (generalTypeToSerialAST' i anc)) cols
-  | otherwise = resolveAliasApp i anc v ts
+  | otherwise = appliedTypeToSerialAST i anc t0 v ts
 generalTypeToSerialAST' i anc (EffectT _ t) = generalTypeToSerialAST' i anc t
 generalTypeToSerialAST' i anc (OptionalT t) = do
   inner <- generalTypeToSerialAST' i anc t
   return $ SerialOptional (FV (TV "Optional") (CV "")) inner
-generalTypeToSerialAST' i anc (NamT o v _ rs) =
-  -- Add @v@ to the ancestor set before recursing into the record's
-  -- fields: a recursive record (e.g. @record Tree where children :: [Tree]@)
-  -- has a field whose type mentions @Tree@ again, which would otherwise
-  -- expand back into the same NamT and loop. Parameter types are
-  -- already substituted into the field types @rs@ by this point, so
-  -- they do not need to appear in the resulting SerialAST.
-  let anc' = Set.insert v anc
-  in SerialObject o (FV v (CV "")) []
-       <$> mapM (secondM (generalTypeToSerialAST' i anc')) rs
+generalTypeToSerialAST' i anc t0@(NamT o v _ rs)
+  | Set.member t0 anc = return $ SerialRec (FV v (CV ""))
+  | otherwise = do
+      -- Add the record to the ancestor set before recursing into its
+      -- fields: a recursive record (e.g. @record Tree where children ::
+      -- [Tree]@) has a field whose type mentions @Tree@ again, which would
+      -- otherwise expand back into the same NamT and loop. Parameter types
+      -- are already substituted into the field types @rs@ by this point,
+      -- so they do not need to appear in the resulting SerialAST.
+      anc' <- descendT i t0 anc
+      SerialObject o (FV v (CV "")) []
+        <$> mapM (secondM (generalTypeToSerialAST' i anc')) rs
 generalTypeToSerialAST' i _ t = MM.throwSourcedError i $
   "cannot serialize type:" <+> pretty t
+
+-- | The general name at a type's head, when it has one.
+typeHeadT :: Type -> Maybe TVar
+typeHeadT (VarT v) = Just v
+typeHeadT (AppT (VarT v) _) = Just v
+typeHeadT (NamT _ v _ _) = Just v
+typeHeadT _ = Nothing
+
+-- | Step into a type, with a bound on how deep the walk may go. An
+-- expansion that does not converge -- a type whose every ply is a new
+-- instantiation -- has no finite wire form, and the bound is what turns
+-- that into an error a reader can act on rather than a compiler that
+-- allocates until the machine gives out. It sits far above any real
+-- nesting.
+descendT :: Int -> Type -> Set Type -> MorlocMonad (Set Type)
+descendT i t anc
+  | Set.size anc >= 100 =
+      MM.throwSourcedError i $
+        "Cannot build a wire form for" <+> pretty t <> ":"
+          <+> "its expansion does not terminate."
+  | otherwise = return (Set.insert t anc)
 
 
 -- | Reject main-module exports whose type carries a function in argument or
@@ -526,21 +594,46 @@ checkExportedHigherOrder i name t = case findOffender t of
       | Serial.containsFunT ty = Just ("exported value is or contains a function", ty)
       | otherwise = Nothing
 
-resolveAliasApp :: Int -> Set TVar -> TVar -> [Type] -> MorlocMonad SerialAST
-resolveAliasApp i anc v ts
-  -- The same self-recursion cutoff as in the @VarT@ clause above:
-  -- if we encounter an alias we are already expanding, emit a
-  -- @SerialRec@ back-reference instead of recursing into its body.
-  -- The runtime parser resolves @^name@ against the enclosing
-  -- @&name@ that the encoder emits at the outer occurrence.
-  | Set.member v anc = return $ SerialRec (FV v (CV ""))
-  | otherwise = do
+-- | An applied type constructor: either a `data` type whose parameters must
+-- be instantiated before its arms are walked, or an alias to expand.
+--
+-- A `data` is a leaf here for the same reason a bare one is in the @VarT@
+-- clause: its scope body is a constructor table, not a parent type, so
+-- alias expansion would try to serialize the table itself. The difference
+-- is that the declaration's parameters must first be substituted with the
+-- applied arguments, or an arm mentioning a parameter would serialize the
+-- bare variable.
+appliedTypeToSerialAST :: Int -> Set Type -> Type -> TVar -> [Type] -> MorlocMonad SerialAST
+appliedTypeToSerialAST i anc t0 v ts = do
+  scope <- MM.gets stateUniversalGeneralTypedefs
+  case (if scopeDataIsEnum scope v then scopeEnumCtors scope v else Nothing) of
+    Just ctors -> return $ SerialEnum (FV v (CV "")) [] ctors
+    Nothing | Just arms <- scopeDataCtors scope v -> do
+                let params = case Map.lookup v scope of
+                      Just ((ps, _, _, _, _) : _) -> [tv | Left (tv, _) <- ps]
+                      _ -> []
+                    inst t = foldl (\acc (tv, arg) -> substituteTVar tv arg acc)
+                                   t (zip params ts)
+                anc' <- descendT i t0 anc
+                arms' <- mapM
+                  (\(n, fts) ->
+                     (,) n <$> mapM (generalTypeToSerialAST' i anc' . inst . typeOf) fts)
+                  arms
+                return $ SerialVariant (FV v (CV "")) [] arms'
+    Nothing -> resolveAliasApp i anc t0 v ts
+
+-- The self-recursion cut for an applied alias is made by the caller, which
+-- tests the whole applied type against the ancestor set: a @^name@
+-- back-reference is emitted for an instantiation already being expanded,
+-- and the runtime resolves it against the enclosing @&name@.
+resolveAliasApp :: Int -> Set Type -> Type -> TVar -> [Type] -> MorlocMonad SerialAST
+resolveAliasApp i anc t0 v ts = do
       scope <- MM.gets stateUniversalGeneralTypedefs
       case Map.lookup v scope of
         (Just [(params, body, _, False, _)]) -> do
           let tvars = [tv | Left (tv, _) <- params]
               resolved = foldl (\acc (tv, arg) -> substituteTVar tv arg acc) (typeOf body) (zip tvars ts)
-              anc' = Set.insert v anc
+          anc' <- descendT i t0 anc
           inner <- generalTypeToSerialAST' i anc' resolved
           -- The expanded body's outer constructor is the alias's
           -- underlying shape (e.g. @Tuple2@ for @type Pair a = (a, ?(Pair a))@).
@@ -558,6 +651,31 @@ resolveAliasApp i anc v ts
             <> ". If" <+> pretty v <+> "is a newtype handle, add"
             <+> "`newtype" <+> pretty v <+> "<params> = <wire-type>` in stdlib/internal."
 
+-- | The text of a literal string argument in a nexus-bound expression.
+nexusLiteralStr :: AnnoS (Indexed Type) One () -> Maybe Text
+nexusLiteralStr (AnnoS _ _ (StrS t)) = Just t
+nexusLiteralStr _ = Nothing
+
+-- | The value of a literal integer argument.
+nexusLiteralInt :: AnnoS (Indexed Type) One () -> Maybe Int
+nexusLiteralInt (AnnoS _ _ (IntS _ i)) = Just (fromIntegral i)
+nexusLiteralInt _ = Nothing
+
+-- | A constructor's tag: its position in its type's declaration order,
+-- read off the subject's own type. The typechecker has already resolved
+-- the name against that type, so a miss here is a compiler bug.
+nexusCtorTag :: AnnoS (Indexed Type) One () -> Text -> MorlocMonad Int
+nexusCtorTag (AnnoS (Idx i t) _ _) n = do
+  scope <- MM.gets stateUniversalGeneralTypedefs
+  let tv = case t of
+        VarT v -> Just v
+        AppT (VarT v) _ -> Just v
+        _ -> Nothing
+  case tv >>= \v -> map fst <$> scopeDataCtors scope v of
+    Just names | (k : _) <- [k' | (k', m) <- zip [0 ..] names, m == n] -> return k
+    _ -> MM.throwSourcedError i $
+      "compiler bug: no tag for constructor" <+> squotes (pretty n)
+
 -- | Replace the outermost FVar's general name with the alias's name.
 -- Used after expanding an alias body to keep the alias's identity on
 -- the SerialAST's outer node so the @&name@ wire declaration matches
@@ -570,6 +688,8 @@ retagOuterName v' s = case s of
   SerialTuple    (FV _ cv) xs      -> SerialTuple    (FV v' cv) xs
   SerialObject o (FV _ cv) ps rs   -> SerialObject o (FV v' cv) ps rs
   SerialOptional (FV _ cv) inner   -> SerialOptional (FV v' cv) inner
+  SerialEnum     (FV _ cv) ps ns   -> SerialEnum     (FV v' cv) ps ns
+  SerialVariant  (FV _ cv) ps as   -> SerialVariant  (FV v' cv) ps as
   _ -> s
 
 -- ======================================================================
@@ -605,8 +725,25 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       , commandReturnGeneralSchema = returnGeneral
       , commandArgSchemas = argSchemas
       , commandArgAsts = argAsts
+      , commandReturnAst = retAst
       }
   where
+    -- Wrap a fallible intrinsic so the `Try` its type now promises is built
+    -- here rather than raised. The raw node is emitted at the INNER type --
+    -- its schema, its width, its handler all stay as they were -- and TryX
+    -- evaluates it into the Ok arm, converting a user throw into the Err
+    -- arm. This mirrors what the pool lowering does with mlc_try, and for
+    -- the same reason: the runtime entry points still signal failure by
+    -- raising, and rewriting all of them would be a much larger change.
+    withTryResult :: Type -> (Type -> MorlocMonad NexusExpr) -> MorlocMonad NexusExpr
+    withTryResult t build = case tryInner t of
+      Just inner -> TryX <$> type2schema t <*> build inner
+      Nothing -> build t
+      where
+        tryInner (EffectT _ inner) = tryInner inner
+        tryInner (AppT (VarT v) [_, a]) | v == MBT.tryVar = Just a
+        tryInner _ = Nothing
+
     type2schema :: Type -> MorlocMonad Text
     type2schema t = (render . Serial.serialAstToMsgpackSchema) <$> generalTypeToSerialAST i t
 
@@ -709,6 +846,26 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       resolveNumericToLitX litIx t (NL.RealSrc v)
     toNexusExpr (AnnoS (Idx _ t) _ (IntS litIx v)) =
       resolveNumericToLitX litIx t (NL.IntSrc v)
+    -- A `data` constructor is its tag byte, and an enum's voidstar form is
+    -- exactly that byte -- so the constructor needs no node of its own here,
+    -- only the one-byte literal it already is.
+    -- An argument-free constructor of an all-nullary type is its tag byte,
+    -- and that byte IS the value's wire form, so it needs no node of its
+    -- own here.
+    --
+    -- The test is on the TYPE, not on this constructor's arity: a nullary
+    -- arm of a payload-bearing type still has the 16-byte tagged-pointer
+    -- form, and emitting a one-byte literal for it would leave the payload
+    -- relptr to be read from whatever follows. Express.hs makes the same
+    -- distinction for the pool path.
+    toNexusExpr (AnnoS (Idx _ t) _ (ConS tv _ ordinal xs)) = do
+      scope <- MM.gets stateUniversalGeneralTypedefs
+      if scopeDataIsEnum scope tv
+        then return $ LitX U8X (MT.pack (show ordinal))
+        else do
+          sch <- type2schema t
+          fields <- mapM toNexusExpr xs
+          return (CtorMakeX sch ordinal fields)
     toNexusExpr (AnnoS _ _ (LogS True)) = return $ LitX BoolX "1"
     toNexusExpr (AnnoS _ _ (LogS False)) = return $ LitX BoolX "0"
     toNexusExpr (AnnoS _ _ UniS) = return $ LitX NullX "0"
@@ -750,15 +907,36 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- without any pool dispatch.
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrMap [funcE, listE])) =
       MapX <$> type2schema t <*> toNexusExpr funcE <*> toNexusExpr listE
+    -- The constructor arrives as a NAME. Its tag is its position in the
+    -- type's declaration order, which the subject's own schema carries, so
+    -- the test needs no second value to materialize -- and could not
+    -- materialize one for a payload arm, whose constructor is a function.
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrTagTest [subjE, nameE]))
+      | Just n <- nexusLiteralStr nameE = do
+          sch <- type2schema t
+          subj <- toNexusExpr subjE
+          tag <- nexusCtorTag subjE n
+          return (TagTestX sch subj tag)
+    -- Reading one field out of a value whose arm a guarding tag test has
+    -- established. Like the tag test, the arm travels as data: there is no
+    -- constructor value to apply, and the field's own schema comes from the
+    -- arm the tag selects.
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrCtorField [subjE, nameE, idxE]))
+      | Just n <- nexusLiteralStr nameE
+      , Just idx <- nexusLiteralInt idxE = do
+          sch <- type2schema t
+          subj <- toNexusExpr subjE
+          tag <- nexusCtorTag subjE n
+          return (CtorFieldX sch subj tag idx)
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrShow [arg])) =
       ShowX <$> type2schema t <*> toNexusExpr arg
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrRead [arg])) =
-      ReadX <$> type2schema t <*> toNexusExpr arg
+      withTryResult t $ \inner -> ReadX <$> type2schema inner <*> toNexusExpr arg
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrHash [arg])) =
       HashX <$> type2schema t <*> toNexusExpr arg
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSave [levelExpr, path, valExpr])) =
-      SaveX "voidstar"
-        <$> type2schema t
+      withTryResult t $ \inner -> SaveX "voidstar"
+        <$> type2schema inner
         <*> toNexusExpr levelExpr
         <*> toNexusExpr valExpr
         <*> toNexusExpr path
@@ -768,39 +946,39 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- level field from save_expr) has a uniform shape. The runtime
     -- ignores the field for non-voidstar formats.
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSaveM [path, valExpr])) =
-      SaveX "msgpack"
-        <$> type2schema t
+      withTryResult t $ \inner -> SaveX "msgpack"
+        <$> type2schema inner
         <*> pure (LitX IntX "0")
         <*> toNexusExpr valExpr
         <*> toNexusExpr path
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSaveJ [path, valExpr])) =
-      SaveX "json"
-        <$> type2schema t
+      withTryResult t $ \inner -> SaveX "json"
+        <$> type2schema inner
         <*> pure (LitX IntX "0")
         <*> toNexusExpr valExpr
         <*> toNexusExpr path
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrLoad [path])) =
-      LoadX <$> type2schema t <*> toNexusExpr path
+      withTryResult t $ \inner -> LoadX <$> type2schema inner <*> toNexusExpr path
     -- @open: dispatch by result-type head. IFile/IStream go to OpenX
     -- (generic mlc_open(path, kind) entry); OStream goes to OpenOStreamX
     -- (typed mlc_open_ostream(schema_str, path) entry) since the writer
     -- needs the element schema at open time.
-    toNexusExpr (AnnoS (Idx iOpen t) _ (IntrinsicS IntrOpen [path])) = do
-      let peelEffect (EffectT _ inner) = peelEffect inner
-          peelEffect ot = ot
-          unwrapped = peelEffect t
-          peelHead (AppT h _) = peelHead h
+    toNexusExpr (AnnoS (Idx iOpen t) _ (IntrinsicS IntrOpen [path])) =
+      -- The handle type is inside the Try now, so the kind dispatch reads
+      -- the inner type while the node's own result stays the Try.
+      withTryResult t $ \handleT -> do
+      let peelHead (AppT h _) = peelHead h
           peelHead ot = ot
-          head_ = peelHead unwrapped
-          elemT = case unwrapped of
+          head_ = peelHead handleT
+          elemT = case handleT of
             AppT _ (a : _) -> a
-            _ -> unwrapped
+            _ -> handleT
       case head_ of
         VarT v
           | v == MBT.ifileVar   ->
-              OpenX <$> type2schema t <*> pure MBT.mlcKindIFile <*> toNexusExpr path
+              OpenX <$> type2schema handleT <*> pure MBT.mlcKindIFile <*> toNexusExpr path
           | v == MBT.istreamVar ->
-              OpenX <$> type2schema t <*> pure MBT.mlcKindIStream <*> toNexusExpr path
+              OpenX <$> type2schema handleT <*> pure MBT.mlcKindIStream <*> toNexusExpr path
           | v == MBT.ostreamVar ->
               OpenOStreamX <$> type2schema (MBT.handleStorageType v elemT)
                            <*> toNexusExpr path
@@ -810,36 +988,38 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
         _ ->
           MM.throwSourcedError iOpen $
             "@open: unsupported handle type" <+> pretty (show t)
-    toNexusExpr (AnnoS _ _ (IntrinsicS IntrClose [handle])) =
-      CloseX <$> toNexusExpr handle
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrClose [handle])) =
+      withTryResult t $ \_ -> CloseX <$> toNexusExpr handle
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrFSchema [path])) =
-      FSchemaX <$> type2schema t <*> toNexusExpr path
+      withTryResult t $ \inner -> FSchemaX <$> type2schema inner <*> toNexusExpr path
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrFLength [handle])) =
-      FLengthX <$> type2schema t <*> toNexusExpr handle
+      withTryResult t $ \inner -> FLengthX <$> type2schema inner <*> toNexusExpr handle
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrNext [handle])) =
-      NextX <$> type2schema t <*> toNexusExpr handle
+      withTryResult t $ \inner -> NextX <$> type2schema inner <*> toNexusExpr handle
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStreamLayout [handle])) =
-      StreamLayoutX <$> type2schema t <*> toNexusExpr handle
+      withTryResult t $ \inner -> StreamLayoutX <$> type2schema inner <*> toNexusExpr handle
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStream [handle])) =
       StreamX <$> type2schema t <*> toNexusExpr handle
-    toNexusExpr (AnnoS (Idx _ _) _ (IntrinsicS IntrWrite [levelE, handleE, valE@(AnnoS (Idx _ valT) _ _)])) =
-      WriteX
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrWrite [levelE, handleE, valE@(AnnoS (Idx _ valT) _ _)])) =
+      withTryResult t $ \_ -> WriteX
         <$> type2schema valT
         <*> toNexusExpr levelE
         <*> toNexusExpr valE
         <*> toNexusExpr handleE
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrAppend [pathE])) =
-      AppendX <$> type2schema (handleStorageOfResult t) <*> toNexusExpr pathE
-    toNexusExpr (AnnoS _ _ (IntrinsicS IntrConcat [pathsE, destE])) =
-      ConcatX <$> toNexusExpr pathsE <*> toNexusExpr destE
-    toNexusExpr (AnnoS _ _ (IntrinsicS IntrFlush [handle])) =
-      FlushX <$> toNexusExpr handle
+      withTryResult t $ \inner ->
+        AppendX <$> type2schema (handleStorageOfResult inner) <*> toNexusExpr pathE
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrConcat [pathsE, destE])) =
+      withTryResult t $ \_ -> ConcatX <$> toNexusExpr pathsE <*> toNexusExpr destE
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrFlush [handle])) =
+      withTryResult t $ \_ -> FlushX <$> toNexusExpr handle
     toNexusExpr (AnnoS _ _ (IntrinsicS IntrThrow [msg])) =
       ThrowX <$> toNexusExpr msg
-    toNexusExpr (AnnoS _ _ (IntrinsicS IntrCatch [fallible, fallback])) =
-      CatchX <$> toNexusExpr fallible <*> toNexusExpr fallback
+    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrTry [body])) =
+      TryX <$> type2schema t <*> toNexusExpr body
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStdin _)) =
-      StdinX <$> type2schema (handleStorageOfResult t)
+      withTryResult t $ \inner ->
+        StdinX <$> type2schema (handleStorageOfResult inner)
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStdout _)) =
       StdoutX <$> type2schema (handleStorageOfResult t)
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStderr _)) =
@@ -985,6 +1165,9 @@ resolvedSourceJson mLit Nothing mschema
   | otherwise = case fmap classifySchema mschema of
       Just CatScalarPrim    -> sourceAtomJson SourceInline
       Just CatStr           -> sourceAtomJson SourceInline
+      -- A constructor is always written literally on the command line;
+      -- there is no reading under which `A` names a file.
+      Just CatEnum          -> sourceAtomJson SourceInline
       _                     -> jsonStr "auto"
 
 -- | Emit the outer form atom, or `"auto"` when none is set. `auto` is
@@ -1048,6 +1231,9 @@ renderFormatHint mschema many mSrc mForm cks mLSrc mLForm lcks
       Nothing -> Nothing
       Just s -> case classifySchema s of
         CatScalarPrim    -> Nothing
+        -- The legal values are already listed in the argument's own
+        -- help text, so a format hint would only repeat them.
+        CatEnum          -> Nothing
         CatStr           -> strFormatHint mSrc cks
         CatList elemS    -> listFormatHint elemS mSrc mForm cks mLSrc mLForm lcks
         CatOtherCompound -> Nothing
@@ -1148,6 +1334,7 @@ formListHint elemSchema mLSrc mLForm lcks =
 
     defaultPerLine es = case classifySchema es of
       CatStr           -> "path to text file with one string per line"
+      CatEnum          -> "path to text file with one constructor name per line"
       CatScalarPrim    -> "path to text file with one value per line"
       CatList _        -> "path to text file with one JSON array per line"
       CatOtherCompound -> "path to file with one row entry line (JSON or table)"
@@ -1165,8 +1352,11 @@ formListHint elemSchema mLSrc mLForm lcks =
 -- per entry, matching the pre-split behavior for that entry.
 groupEntryWireSchemas :: SerialAST -> [(Key, Text)]
 groupEntryWireSchemas ast0 = case peelPack ast0 of
-    SerialObject _ _ _ kids ->
-      [(k, render (Serial.serialAstToMsgpackSchema child)) | (k, child) <- kids]
+    -- An entry of a recursive record refers back to the record; sliced out
+    -- on its own it would name a declaration it no longer sits under, so
+    -- it is re-rooted first.
+    rec@(SerialObject _ _ _ kids) ->
+      [(k, render (Serial.serialAstToMsgpackSchema (Serial.rerootUnder rec child))) | (k, child) <- kids]
     _ -> []
   where
     peelPack (SerialPack _ (_, inner)) = peelPack inner
@@ -1185,10 +1375,10 @@ groupEntryWireSchemas ast0 = case peelPack ast0 of
 --                     it as "general_schema".
 --   * @entrySchemas@  per-entry wire schemas for 'CmdArgGrp'; unused
 --                     for pos/opt/flag.
-argToJson :: Maybe Text -> Maybe Text -> Maybe Text -> [(Key, Text)] -> CmdArg -> Text
-argToJson mEmit mGeneral mShape _ (CmdArgPos r) =
+argToJson :: Text -> Maybe Text -> Maybe Text -> Maybe Text -> [(Key, Text)] -> CmdArg -> Text
+argToJson key mEmit mGeneral mShape _ (CmdArgPos r) =
   jsonObj $
-    [ ("kind", jsonStr "pos") ]
+    [ ("kind", jsonStr "pos"), ("key", jsonStr key) ]
     ++ schemaField mEmit mGeneral
     ++ [ ("type", jsonStr (typeDescStr (argPosDocType r)))
        , ("name", jsonMaybeStr (argPosDocName r))
@@ -1204,9 +1394,9 @@ argToJson mEmit mGeneral mShape _ (CmdArgPos r) =
          (argPosDocLiteral r)
          (argPosDocSource r) (argPosDocForm r) (argPosDocChecks r)
          (argPosDocListSource r) (argPosDocListForm r) (argPosDocListChecks r)
-argToJson mEmit mGeneral mShape _ (CmdArgOpt r) =
+argToJson key mEmit mGeneral mShape _ (CmdArgOpt r) =
   jsonObj $
-    [ ("kind", jsonStr "opt") ]
+    [ ("kind", jsonStr "opt"), ("key", jsonStr key) ]
     ++ schemaField mEmit mGeneral
     ++ [ ("type", jsonStr (typeDescStr (argOptDocType r)))
        , ("metavar", jsonStr (argOptDocMetavar r))
@@ -1223,9 +1413,10 @@ argToJson mEmit mGeneral mShape _ (CmdArgOpt r) =
          (argOptDocLiteral r)
          (argOptDocSource r) (argOptDocForm r) (argOptDocChecks r)
          (argOptDocListSource r) (argOptDocListForm r) (argOptDocListChecks r)
-argToJson _ _ _ _ (CmdArgFlag r) =
+argToJson key _ _ _ _ (CmdArgFlag r) =
   jsonObj
     [ ("kind", jsonStr "flag")
+    , ("key", jsonStr key)
     , ("short", cliOptShortJson (argFlagDocOpt r))
     , ("long", cliOptLongJson (argFlagDocOpt r))
     , ("long_rev", flagRevJson (argFlagDocOptRev r))
@@ -1234,15 +1425,43 @@ argToJson _ _ _ _ (CmdArgFlag r) =
     , ("desc", jsonStrArr (argFlagDocDesc r))
     , ("metadata", metadataEmpty)
     ]
-argToJson mEmit mGeneral _ entrySchemas (CmdArgGrp r) =
+argToJson key mEmit mGeneral _ entrySchemas (CmdArgAlt r) =
   jsonObj $
-    [ ("kind", jsonStr "grp") ]
+    [ ("kind", jsonStr "alt"), ("key", jsonStr key) ]
+    ++ schemaField mEmit mGeneral
+    ++ [ ("type", jsonStr (typeDescStr (altDocType r)))
+       , ("metavar", jsonStr (altDocMetavar r))
+       , ("desc", jsonStrArr (altDocDesc r))
+       , ("required", jsonBool (altDocRequired r))
+       , ("default", maybe jsonNull jsonStr (altDocDefault r))
+       , ("arms", jsonArr [armJson arm | arm <- altDocArms r])
+       , ("metadata", metadataEmpty)
+       ]
+  where
+    -- A field's schema is keyed by its constructor and position.
+    armJson arm =
+      jsonObj
+        [ ("ctor", jsonStr (altArmCtor arm))
+        , ("long", jsonStr (altArmLong arm))
+        , ("desc", jsonStrArr (altArmDesc arm))
+        , ("fields", jsonArr
+            [ jsonObj
+                [ ("type", jsonStr (typeDescStr ft))
+                , ("schema", maybe jsonNull jsonStr
+                    (lookup (Key (altArmCtor arm <> "/" <> MT.pack (show i))) entrySchemas))
+                ]
+            | (i, ft) <- zip [(0 :: Int) ..] (altArmFields arm)
+            ])
+        ]
+argToJson key mEmit mGeneral _ entrySchemas (CmdArgGrp r) =
+  jsonObj $
+    [ ("kind", jsonStr "grp"), ("key", jsonStr key) ]
     ++ schemaField mEmit mGeneral
     ++ [ ("type", jsonStr (render (pretty (recDocType r))))
        , ("metavar", jsonStr (recDocMetavar r))
        , ("desc", jsonStrArr (recDocDesc r))
        , ("group_opt", grpOptJson (recDocOpt r))
-       , ("entries", jsonArr [grpEntryJson k v | (k, v) <- recDocEntries r])
+       , ("entries", jsonArr [grpEntryJson fieldKey v | (fieldKey, v) <- recDocEntries r])
        , ("constraints", constraintsJsonFor (recDocType r))
        , ("metadata", metadataEmpty)
        ]
@@ -1256,10 +1475,13 @@ argToJson mEmit mGeneral _ entrySchemas (CmdArgGrp r) =
 
     -- No emit-schema (group's schema is authoritative); per-entry
     -- shape schema so Str/scalar entries pick the correct defaults.
-    grpEntryJson key entry =
+    -- An unrolled field is addressed by its record field name, so that is
+    -- both the entry's key and the published key of the option backing it.
+    grpEntryJson fieldKey entry =
       jsonObj
-        [ ("key", jsonStr (unKey key))
-        , ("arg", argToJson Nothing Nothing (lookup key entrySchemas) []
+        [ ("key", jsonStr (unKey fieldKey))
+        , ("arg", argToJson (unKey fieldKey) Nothing Nothing
+                    (lookup fieldKey entrySchemas) []
                     (either CmdArgFlag CmdArgOpt entry))
         ]
 
@@ -1413,6 +1635,7 @@ validateArgSpecs i cmdargs asts schemas = do
           checkArgShape argLoc schemaText arg
         CmdArgFlag _ -> return ()
         CmdArgGrp r  -> validateGroup argLoc r ast
+        CmdArgAlt r  -> validateAlt argLoc r ast
 
     checkArgShape :: MDoc -> Text -> CmdArg -> MorlocMonad ()
     checkArgShape argLoc schemaText arg =
@@ -1427,6 +1650,7 @@ validateArgSpecs i cmdargs asts schemas = do
 data SchemaCat
   = CatScalarPrim       -- Bool, Int, Real, UInt*, Float*, Null, etc.
   | CatStr              -- Str (`s`)
+  | CatEnum             -- a `data` type with argument-free constructors (`e`)
   | CatList Text        -- `a<elem>` for any elem schema
   | CatOtherCompound    -- tuples, records, maps, tables
   deriving (Eq, Show)
@@ -1446,6 +1670,11 @@ classifySchema s0 =
               then CatScalarPrim
               else case MT.uncons core of
                 Just ('a', rest) -> CatList rest
+                -- An enum is a scalar whose surface form is a bare
+                -- identifier. Its schema is variable-length (the
+                -- constructor names follow), so it cannot join
+                -- 'isScalarPrimCore', which matches whole cores.
+                Just ('e', _)    -> CatEnum
                 _                -> CatOtherCompound
 
 isScalarPrimCore :: Text -> Bool
@@ -1484,6 +1713,45 @@ checkDefault loc ast defaultText =
 
 -- Recurse into the entries of an unrolled record group, matching them
 -- against the SerialObject's per-field parameters.
+-- | An unrolled `data` argument's arms must be the type's constructors as
+-- the wire knows them, in the same order and with the same field counts;
+-- the default, if any, must be a value of the type.
+validateAlt :: MDoc -> AltDocSet -> SerialAST -> MorlocMonad ()
+validateAlt loc r ast = do
+  wireArms <- case altVariantArms ast of
+    Just as -> return as
+    Nothing -> MM.throwSystemError $
+      loc <> ": `@unroll` needs a `data`-typed argument, but the wire form is not one"
+  let declared = [(altArmCtor a, length (altArmFields a)) | a <- altDocArms r]
+  when (declared /= [(n, length fs) | (n, fs) <- wireArms]) $
+    MM.throwSystemError $
+      loc <> ": the constructors of the unrolled `data` disagree with its wire form"
+  CM.forM_ (altDocDefault r) (checkDefault loc ast)
+
+-- | The arms of the variant or enum an argument's serial AST is built on,
+-- looking through the optional an omittable argument wraps it in.
+altVariantArms :: SerialAST -> Maybe [(Text, [SerialAST])]
+altVariantArms (SerialPack _ (_, inner)) = altVariantArms inner
+altVariantArms (SerialOptional _ inner) = altVariantArms inner
+altVariantArms (SerialVariant _ _ as) = Just as
+altVariantArms (SerialEnum _ _ ns) = Just [(n, []) | n <- ns]
+altVariantArms _ = Nothing
+
+-- | The wire schema of each field of each arm, each made self-contained:
+-- an arm's field may refer back to the type it belongs to, and the nexus
+-- reads a field's value on its own.
+altArmFieldSchemas :: SerialAST -> [(Text, [Text])]
+altArmFieldSchemas ast0 = case peelPack ast0 of
+    v@(SerialVariant _ _ as) ->
+      [ (n, [render (Serial.serialAstToMsgpackSchema (Serial.rerootUnder v f)) | f <- fs])
+      | (n, fs) <- as ]
+    SerialEnum _ _ ns -> [(n, []) | n <- ns]
+    _ -> []
+  where
+    peelPack (SerialPack _ (_, inner)) = peelPack inner
+    peelPack (SerialOptional _ inner) = peelPack inner
+    peelPack x = x
+
 validateGroup :: MDoc -> RecDocSet -> SerialAST -> MorlocMonad ()
 validateGroup loc r ast = case peelGroupAst ast of
   Just (SerialObject _ _ _ pairs) -> do
@@ -1564,6 +1832,26 @@ validateValueAgainstAST loc env path ast value = case (ast, value) of
   -- Optional: null OR the inner type's value.
   (SerialOptional _ _,     Aeson.Null) -> return ()
   (SerialOptional _ inner, v)          -> validateValueAgainstAST loc env path inner v
+
+  -- A `data` value is written as its constructor name, matching what the
+  -- runtime's JSON reader accepts. An enum is the bare name. A
+  -- payload-bearing arm is a single-key object keyed by the arm name,
+  -- whose value lists the arm's fields; an arm taking no arguments is
+  -- still spelled bare. An unlisted name falls through to the mismatch
+  -- reporter, which names the whole legal set.
+  (SerialEnum _ _ ctors, Aeson.String name)
+    | name `elem` ctors -> return ()
+  (SerialVariant _ _ arms, Aeson.String name)
+    | Just [] <- lookup name arms -> return ()
+  (SerialVariant _ _ arms, Aeson.Object o)
+    | [(k, fieldsVal)] <- KM.toList o
+    , Just fieldAsts <- lookup (AesonKey.toText k) arms
+    , Aeson.Array vs <- fieldsVal
+    , V.length vs == length fieldAsts ->
+        CM.zipWithM_
+          (\fieldAst v -> validateValueAgainstAST loc env path fieldAst v)
+          fieldAsts
+          (V.toList vs)
 
   -- Lists: array, with an optional fixed-length constraint.
   (SerialList _ dim elemAst, Aeson.Array arr) -> do
@@ -1713,6 +2001,11 @@ expectedJsonShape = go
     go (SerialNull _)                = "null"
     go (SerialBool _)                = "Bool"
     go (SerialString _)              = "Str"
+    -- Name the legal set: for a closed constructor list the whole
+    -- vocabulary fits in the message, which is the point of carrying
+    -- the names rather than the ordinals.
+    go (SerialEnum _ _ ns)           = "one of " <> MT.intercalate ", " ns
+    go (SerialVariant _ _ as)        = "one of " <> MT.intercalate ", " (map fst as)
     go (SerialIFile _)               = "IFile path (Str)"
     go (SerialOStream _)             = "OStream path (Str)"
     go (SerialIStream _)             = "IStream path (Str)"
@@ -1990,6 +2283,9 @@ cmdSignatureTypes mStream doc =
         <> case recDocType r of
              NamT _ _ _ fields -> map snd fields
              _ -> []
+    -- An unrolled `data` prints its type beside every arm, and each arm's
+    -- field types beside its values.
+    argTypes (CmdArgAlt r) = altDocType r : concatMap altArmFields (altDocArms r)
 
 -- | The glossary for one command: every named type its signature mentions,
 -- defined once and generically.
@@ -1998,14 +2294,95 @@ cmdSignatureTypes mStream doc =
 -- comes from a @Packable@ instance has no structure in the signature at all --
 -- the name is opaque there -- so its definition is taken from the instance,
 -- which states the wire form generically in the constructor's own parameters.
-namedTypesJson :: [Serial.PackerInstance] -> [Type] -> Text
-namedTypesJson instances ts =
+-- | Constructors this command hands to a pack function, taken from the
+-- serialization it will actually run. A name can appear in a signature and
+-- still never reach a packer -- unit is the common case, since it
+-- serializes as null -- so the signature alone cannot decide which
+-- packable definitions the help should publish.
+packedConstructors :: [SerialAST] -> Set.Set Text
+packedConstructors = Set.fromList . concatMap go
+  where
+    -- The general name, not the concrete one: a packable definition is
+    -- keyed by the morloc constructor, while an FVar prints as whatever
+    -- the implementation language calls it.
+    generalName (FV gv _) = render (pretty gv)
+
+    go s = case s of
+      SerialPack v (_, x) -> generalName v : go x
+      SerialList _ _ x -> go x
+      SerialTuple _ xs -> concatMap go xs
+      SerialObject _ _ _ entries -> concatMap (go . snd) entries
+      SerialClosure xs x -> concatMap go xs <> go x
+      SerialOptional _ x -> go x
+      _ -> []
+
+-- | What the glossary says about a `data` type: its type parameters, its
+-- own description and, per constructor in declaration order, the
+-- constructor's name, its field types as the help renders them, and its
+-- description.
+data DataTypeDoc = DataTypeDoc [Text] [Text] [(Text, [Type], [Text])]
+
+-- | Every `data` type declared anywhere in the program, keyed by name.
+collectDataTypes :: MorlocMonad (Map.Map Text DataTypeDoc)
+collectDataTypes = do
+  scope <- MM.gets stateUniversalGeneralTypedefs
+  return $ Map.fromList
+    [ (unTVar v, DataTypeDoc params (docLines typeDoc) ctors)
+    | (v, entries) <- Map.toList scope
+    , (vs, body, ArgDocData typeDoc ctorDocs, _, TypedefEnum) <- entries
+    , Just table <- [dataBodyCtors body]
+    , let params = [unTVar p | Left (p, _) <- vs]
+    , let ctors =
+            [ (name, map typeOf fieldTs, docLines vars)
+            | ((name, fieldTs), vars) <- zip table (map snd ctorDocs <> repeat defaultValue)
+            ]
+    ]
+
+namedTypesJson :: Set.Set Text -> [Serial.PackerInstance] -> Map.Map Text DataTypeDoc -> [Type] -> Text
+namedTypesJson packedHeads instances dataTypes ts =
   jsonArr
-    ( map oneNamed (filter (isShown . snd3) (dedup (concatMap collect ts)))
+    ( map oneNamed (filter (isShown . snd3) allDefs)
+        <> dataEntries
         <> packableEntries ts
     )
   where
+    -- A `data` type is a bare name wherever it appears, so the names the
+    -- help shows are searched for it directly. Its constructors' field
+    -- types may name further types, which the closure must reach.
+    dataEntries =
+      [ oneData nm d
+      | (nm, d) <- Map.toList dataTypes
+      , Set.member nm shownNames
+      ]
+
+    oneData nm (DataTypeDoc params desc ctors) =
+      jsonObj
+        [ ("name", jsonStr nm)
+        , ("kind", jsonStr "data")
+        , ("parameters", jsonArr (map jsonStr params))
+        , ("desc", jsonStrArr desc)
+        , ("constructors", jsonArr
+            [ jsonObj
+                [ ("name", jsonStr c)
+                , ("fields", jsonArr (map (jsonStr . renderCliType) fts))
+                , ("desc", jsonStrArr cdesc)
+                ]
+            | (c, fts, cdesc) <- ctors
+            ])
+        ]
+
     snd3 (_, x, _) = x
+
+    -- A record may be reached only through a constructor's field; its
+    -- definition is collected from there as well, and shown only if the
+    -- closure reaches its name.
+    allDefs = dedup (concatMap collect ts <> concatMap collect ctorFieldTypes)
+    ctorFieldTypes =
+      [ ft
+      | DataTypeDoc _ _ ctors <- Map.elems dataTypes
+      , (_, fts, _) <- ctors
+      , ft <- fts
+      ]
 
     -- A definition earns its place by defining a name the reader actually
     -- meets. A type can appear in a signature without appearing in the help:
@@ -2016,10 +2393,34 @@ namedTypesJson instances ts =
     isShown :: Text -> Bool
     isShown nm = Set.member nm shownNames
 
+    -- Printing a definition prints the names in its field types, so the
+    -- set the help shows has to close over itself: a record reached only
+    -- through another record's field is still a name the reader meets and
+    -- still needs defining. Seeded from the signature and grown until it
+    -- stops changing.
     shownNames :: Set.Set Text
-    shownNames =
-      Set.fromList
-        (concatMap (MT.split (\c -> not (isNameChar c)) . renderCliType) ts)
+    shownNames = grow seed
+      where
+        seed = Set.fromList (concatMap (namesOf . renderCliType) ts)
+        grow s0 =
+          let s1 = Set.union s0 . Set.fromList $
+                     [ n
+                     | (_, nm, fields) <- allDefs
+                     , Set.member nm s0
+                     , (_, ft) <- fields
+                     , n <- namesOf (renderCliType ft)
+                     ]
+                     <> [ n
+                        | (nm, DataTypeDoc _ _ ctors) <- Map.toList dataTypes
+                        , Set.member nm s0
+                        , (_, fts, _) <- ctors
+                        , ft <- fts
+                        , n <- namesOf (renderCliType ft)
+                        ]
+          in if Set.size s1 == Set.size s0 then s0 else grow s1
+
+    namesOf :: Text -> [Text]
+    namesOf = MT.split (\c -> not (isNameChar c))
 
     isNameChar c = c == '_' || c `elem` (['a' .. 'z'] <> ['A' .. 'Z'] <> ['0' .. '9'])
 
@@ -2086,6 +2487,9 @@ namedTypesJson instances ts =
             | pin <- instances
             , Set.member (extractKey (Serial.piHead pin)) wanted
             , isShown (render (pretty (extractKey (Serial.piHead pin))))
+            , Set.member
+                (render (pretty (extractKey (Serial.piHead pin))))
+                packedHeads
             ]
 
     dedupOn f = go Set.empty
@@ -2209,6 +2613,28 @@ exprToJson (BndX schema var) =
     [ ("tag", jsonStr "bound")
     , ("schema", jsonStr schema)
     , ("var", jsonStr var)
+    ]
+exprToJson (TagTestX schema subjExpr tag) =
+  jsonObj
+    [ ("tag", jsonStr "tagtest")
+    , ("schema", jsonStr schema)
+    , ("subject", exprToJson subjExpr)
+    , ("tag_ordinal", jsonInt (fromIntegral tag))
+    ]
+exprToJson (CtorMakeX schema tag fields) =
+  jsonObj
+    [ ("tag", jsonStr "ctormake")
+    , ("schema", jsonStr schema)
+    , ("tag_ordinal", jsonInt (fromIntegral tag))
+    , ("fields", jsonArr (map exprToJson fields))
+    ]
+exprToJson (CtorFieldX schema subjExpr tag idx) =
+  jsonObj
+    [ ("tag", jsonStr "ctorfield")
+    , ("schema", jsonStr schema)
+    , ("subject", exprToJson subjExpr)
+    , ("tag_ordinal", jsonInt (fromIntegral tag))
+    , ("field_index", jsonInt (fromIntegral idx))
     ]
 exprToJson (MapX schema funcExpr listExpr) =
   jsonObj
@@ -2351,11 +2777,11 @@ exprToJson (ThrowX msg) =
     [ ("tag", jsonStr "throw")
     , ("msg", exprToJson msg)
     ]
-exprToJson (CatchX fallible fallback) =
+exprToJson (TryX schema body) =
   jsonObj
-    [ ("tag", jsonStr "catch")
-    , ("fallible", exprToJson fallible)
-    , ("fallback", exprToJson fallback)
+    [ ("tag", jsonStr "try")
+    , ("schema", jsonStr schema)
+    , ("body", exprToJson body)
     ]
 exprToJson (IfX schema cond thenX elseX) =
   jsonObj
@@ -2499,6 +2925,10 @@ data ManifestInputs = ManifestInputs
     -- ^ Every @Packable@ instance in the program. A type whose wire form comes
     -- from an instance is opaque in a signature, so its glossary entry is taken
     -- from here rather than from the type itself.
+  , miDataTypes           :: !(Map.Map Text DataTypeDoc)
+    -- ^ Every `data` type in the program, by name: its constructors with
+    -- their field types and the prose written above each. A `data` is a
+    -- bare name in a signature, so its glossary entry comes from here.
   , miCapabilities        :: ![Text]
   , miTermDocs            :: !(Map.Map EVar [Text])
     -- ^ Term-level docstrings by term name. Used to look up the
@@ -2601,6 +3031,7 @@ buildManifest ManifestInputs{..} =
         [ ("prologue",     maybe jsonNull jsonStr (renderedPrologue rl))
         , ("epilogue_ok",   maybe jsonNull jsonStr (renderedEpilogueOk rl))
         , ("epilogue_fail", maybe jsonNull jsonStr (renderedEpilogueFail rl))
+        , ("benchmark_summary", maybe jsonNull jsonStr (renderedBenchSummary rl))
         ]
 
     -- Emit a real JSON null when the command has no group, not the
@@ -2649,7 +3080,10 @@ buildManifest ManifestInputs{..} =
         -- mangles pre-rename). Using the display name would emit
         -- dead pointers whenever the parent has a `--' name:`.
         , ("terminals", terminalsJson (fdataTermName fd) (cmdDocTerminals (fdataCmdDocSet fd)))
-        , ("named_types", namedTypesJson miPackerInstances
+        , ("named_types", namedTypesJson
+            (packedConstructors (fdataReturnAst fd : fdataArgAsts fd))
+            miPackerInstances
+            miDataTypes
             (cmdSignatureTypes (Map.lookup (EV (fdataTermName fd)) miStreamTypes) (fdataCmdDocSet fd)))
         , ("metadata", metadataEmpty)
         , cmdGroupField (fdataMid fd)
@@ -2669,7 +3103,10 @@ buildManifest ManifestInputs{..} =
         , ("internal", jsonBool (isInternalTerminalName (commandTermName g)))
         -- Same term-name-for-mangling rationale as `remoteCmdJson`.
         , ("terminals", terminalsJson (commandTermName g) (cmdDocTerminals (commandDocs g)))
-        , ("named_types", namedTypesJson miPackerInstances
+        , ("named_types", namedTypesJson
+            (packedConstructors (commandReturnAst g : commandArgAsts g))
+            miPackerInstances
+            miDataTypes
             (cmdSignatureTypes (Map.lookup (EV (commandTermName g)) miStreamTypes) (commandDocs g)))
         , ("metadata", metadataEmpty)
         , cmdGroupField (commandMid g)
@@ -2713,30 +3150,41 @@ buildManifest ManifestInputs{..} =
     -- their schema in the JSON output (it's never used at dispatch
     -- time for boolean flags) but we still consume the schema slot to
     -- keep the index alignment intact for subsequent args.
+    -- @n@ counts the positionals seen so far, so a positional's published
+    -- key is its 1-based place among them rather than its place among all
+    -- arguments; options and flags do not occupy a numbered slot.
     argsJson :: [CmdArg] -> [Text] -> [SerialAST] -> Text
     argsJson docArgs schemas asts =
-      jsonArr (walk docArgs schemas asts)
+      jsonArr (walk 1 docArgs schemas asts)
       where
-        walk :: [CmdArg] -> [Text] -> [SerialAST] -> [Text]
-        walk [] _ _ = []
+        nextPos n (CmdArgPos _) = n + 1
+        nextPos n _ = n
+
+        walk :: Int -> [CmdArg] -> [Text] -> [SerialAST] -> [Text]
+        walk _ [] _ _ = []
         -- Flags consume a schema slot but emit no `schema` field.
-        walk (a@(CmdArgFlag _) : rest) (_ : ss) (_ : as) =
-          argToJson Nothing Nothing Nothing [] a : walk rest ss as
-        walk (a : rest) (s : ss) (ast : as) =
+        walk n (a@(CmdArgFlag _) : rest) (_ : ss) (_ : as) =
+          argToJson (Docstrings.argKey n a) Nothing Nothing Nothing [] a : walk (nextPos n a) rest ss as
+        walk n (a : rest) (s : ss) (ast : as) =
           let entries = case a of
                           CmdArgGrp _ -> groupEntryWireSchemas ast
+                          CmdArgAlt _ ->
+                            [ (Key (arm <> "/" <> MT.pack (show i)), fs)
+                            | (arm, fss) <- altArmFieldSchemas ast
+                            , (i, fs) <- zip [(0 :: Int) ..] fss ]
                           _           -> []
               gen = render (Serial.serialAstToGeneralSchema ast)
-          in argToJson (Just s) (Just gen) (Just s) entries a : walk rest ss as
-        walk (a : rest) [] _ =
+          in argToJson (Docstrings.argKey n a) (Just s) (Just gen) (Just s) entries a
+               : walk (nextPos n a) rest ss as
+        walk n (a : rest) [] _ =
           -- Defensive: more args than schemas. Emit with no schema so
           -- we fail cleanly downstream rather than silently misaligning.
-          argToJson Nothing Nothing Nothing [] a : walk rest [] []
-        walk (a : rest) (s : ss) [] =
+          argToJson (Docstrings.argKey n a) Nothing Nothing Nothing [] a : walk (nextPos n a) rest [] []
+        walk n (a : rest) (s : ss) [] =
           -- Defensive: validateArgSpecs should have caught this. Emit
           -- with no per-entry schemas rather than crash. Without the
           -- AST there is no general form to derive.
-          argToJson (Just s) Nothing (Just s) [] a : walk rest ss []
+          argToJson (Docstrings.argKey n a) (Just s) Nothing (Just s) [] a : walk (nextPos n a) rest ss []
 
     -- Nested @return@ object replacing v1's flat @return_schema@ /
     -- @return_type@ / @return_desc@. Also carries @constraints@ and
@@ -2904,6 +3352,7 @@ generate cs rASTs helperRASTs = do
     return (ev, t)
 
   packerInstances <- Serial.findPackerInstances
+  dataTypes <- collectDataTypes
 
   let manifestJson =
         buildManifest
@@ -2927,6 +3376,7 @@ generate cs rASTs helperRASTs = do
             , miBuildParams         = buildParams
             , miRunLog              = runLog
             , miPackerInstances     = packerInstances
+            , miDataTypes           = dataTypes
             , miCapabilities        = capabilities
             , miTermDocs            = termDocs
             , miStreamElems         = streamElems

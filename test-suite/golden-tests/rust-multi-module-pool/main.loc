@@ -1,0 +1,21 @@
+module main (vec, mat, total)
+
+-- Several stdlib Rust modules in one pool. Each `source Rust from "..."` file
+-- is spliced into the pool crate root with `include!`, so root-rust/core.rs,
+-- vector-rust/vector.rs and tensor-rust/tensor.rs all share one namespace.
+-- Any top-level name two of them declare is a compile error (or, for a macro,
+-- a silent shadow). Using a symbol from each file is what pulls all three
+-- includes into the same crate.
+
+import root-rust
+import vector-rust
+import tensor-rust
+
+vec :: Vector 3 Real
+vec = ones1 3
+
+mat :: Matrix 2 2 Real
+mat = fill2 7.0 2 2
+
+total :: Real
+total = fold (\b a -> b + a) 0.0 (fill1 2.5 4 :: Vector 4 Real)

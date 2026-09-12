@@ -41,6 +41,18 @@ pub(crate) fn render_schema_type(
     match s.serial_type {
         Nil => "()".into(),
         Bool => "Bool".into(),
+        // Show the constructor set: it is the useful thing to know
+        // about the type and it always fits, being closed.
+        Enum => s.keys.join(" | "),
+        // Show each arm with its field count, which is what distinguishes
+        // the arms from an enum's bare names.
+        Variant => s
+            .keys
+            .iter()
+            .zip(s.parameters.iter())
+            .map(|(k, arm)| if arm.size == 0 { k.clone() } else { format!("{k}/{}", arm.size) })
+            .collect::<Vec<_>>()
+            .join(" | "),
         Sint8 => "I8".into(),
         Sint16 => "I16".into(),
         Sint32 => "Int".into(),
@@ -142,7 +154,21 @@ pub fn render_command_schemas(cmd: &Command) -> Option<String> {
     let records: Vec<&NamedType> = cmd
         .named_types
         .iter()
-        .filter(|t| t.kind != "table" && t.kind != "packable")
+        .filter(|t| t.kind != "table" && t.kind != "packable" && t.kind != "data")
+        .collect();
+    // A `data` earns a block when it says more than the argument's own
+    // `values:` line already does: a description of the type or of a
+    // constructor, or a constructor with fields.
+    let datas: Vec<&NamedType> = cmd
+        .named_types
+        .iter()
+        .filter(|t| {
+            t.kind == "data"
+                && (t.desc.iter().any(|l| !l.is_empty())
+                    || t.constructors.iter().any(|c| {
+                        !c.fields.is_empty() || c.desc.iter().any(|l| !l.is_empty())
+                    }))
+        })
         .collect();
     let tables: Vec<&NamedType> =
         cmd.named_types.iter().filter(|t| t.kind == "table").collect();
@@ -156,6 +182,13 @@ pub fn render_command_schemas(cmd: &Command) -> Option<String> {
     if !records.is_empty() {
         out.push_str("Record Schemas:\n");
         out.push_str(&render_named(&records));
+    }
+    if !datas.is_empty() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str("Data Types:\n");
+        out.push_str(&render_datas(&datas));
     }
     if !tables.is_empty() {
         if !out.is_empty() {
@@ -177,6 +210,47 @@ pub fn render_command_schemas(cmd: &Command) -> Option<String> {
         out.pop();
     }
     Some(out)
+}
+
+/// Render `data` types, one block each: the name, its description when it
+/// has one, then each constructor with its field types and the prose
+/// written above it. A value is typed by the constructor's name alone
+/// when it takes no fields, so that is what a reader is looking for.
+fn render_datas(defs: &[&NamedType]) -> String {
+    let mut out = String::new();
+    for (i, def) in defs.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&format!("  {}\n", def.name));
+        for line in def.desc.iter().filter(|l| !l.is_empty()) {
+            out.push_str(&format!("    {}\n", line));
+        }
+        let heads: Vec<String> = def
+            .constructors
+            .iter()
+            .map(|c| {
+                if c.fields.is_empty() {
+                    c.name.clone()
+                } else {
+                    format!("{} {}", c.name, c.fields.join(" "))
+                }
+            })
+            .collect();
+        let width = heads.iter().map(|h| h.len()).max().unwrap_or(0);
+        for (c, head) in def.constructors.iter().zip(heads.iter()) {
+            let desc: Vec<&str> = c.desc.iter().map(|l| l.as_str()).filter(|l| !l.is_empty()).collect();
+            if desc.is_empty() {
+                out.push_str(&format!("    {}\n", head));
+            } else {
+                out.push_str(&format!("    {:width$}  {}\n", head, desc[0], width = width));
+                for line in &desc[1..] {
+                    out.push_str(&format!("    {:width$}  {}\n", "", line, width = width));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Render types whose definition is a wire form rather than a field

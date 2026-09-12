@@ -8,3 +8,9 @@ null
 99
 true
 false
+null
+null
+null
+true
+"from a file"
+null

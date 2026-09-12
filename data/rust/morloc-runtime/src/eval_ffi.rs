@@ -2002,57 +2002,178 @@ unsafe fn morloc_eval_r(
             return Err(MorlocError::UserThrow(String::from_utf8_lossy(bytes).into_owned()));
         }
 
-        MorlocExpressionType::Catch => {
-            // Pass @catch's dest through to fallible: fallible writes
-            // directly into the caller's slot. On success, no copy is
-            // needed. On failure, rollback frees fallible's arena
-            // allocations, we clear any partial write, then evaluate
-            // fallback into the same dest.
-            //
-            // Schema note: @catch's dest is sized per the fallback's
-            // schema (see manifest_ffi.rs: catch's result schema comes
-            // from fallback because fallible may be @throw with a Unit
-            // sentinel). morloc_eval_r's dest/width consistency check
-            // requires the passed width to match the callee's own
-            // schema width, so we pass fallible's schema width, not
-            // @catch's. This is safe because:
-            //   - non-@throw fallible has the same type-width as the
-            //     fallback by the typechecker's @catch rule, so
-            //     fallible_width == width and dest is fully populated.
-            //   - @throw as fallible has schema width 0; it never
-            //     writes to dest anyway (always returns Err), so the
-            //     trailing dest bytes are irrelevant on the Ok branch
-            //     (unreachable) and overwritten by fallback on the
-            //     Err branch.
-            let catch = (*expr).expr.catch_expr;
-            let fallible = (*catch).fallible;
-            let fallback = (*catch).fallback;
-            let fallible_width = (*(*fallible).schema).width;
+        MorlocExpressionType::Try => {
+            // Build a `Try Str a` around the body's outcome. The layout is
+            // the ordinary variant one (see CtorMake): a tag byte, seven
+            // written-out padding bytes, then a relptr to the arm's tuple.
+            let body = (*expr).expr.unary_expr;
+            let vschema = (*expr).schema;
+            if vschema.is_null() || (*vschema).size < 2 {
+                return Err(MorlocError::Other(
+                    "@try's result schema is not a two-armed Try".into(),
+                ));
+            }
+            if dest.is_null() {
+                return Err(MorlocError::Other("@try needs a destination".into()));
+            }
+            // Find the arms by NAME. The tag is the declaration ordinal, and
+            // which of Ok / Err comes first in `internal` is not something
+            // this handler should encode.
+            let arm_index = |want: &str| -> Option<usize> {
+                (0..(*vschema).size).find(|j| {
+                    let k = *(*vschema).keys.add(*j);
+                    !k.is_null()
+                        && CStr::from_ptr(k).to_str().map(|n| n == want).unwrap_or(false)
+                })
+            };
+            let (ok_tag, err_tag) = match (arm_index("Ok"), arm_index("Err")) {
+                (Some(o), Some(e)) => (o, e),
+                _ => {
+                    return Err(MorlocError::Other(
+                        "@try's result schema has no Ok/Err arms".into(),
+                    ))
+                }
+            };
+            let ok_arm = *(*vschema).parameters.add(ok_tag);
+            let err_arm = *(*vschema).parameters.add(err_tag);
+            // Both arms are indexed at field 0 below. A type named Try whose
+            // arms carry no fields is reachable -- constructor uniqueness is
+            // per-module -- and would read past an empty offsets array.
+            if (*ok_arm).size < 1 || (*err_arm).size < 1 {
+                return Err(MorlocError::Other(
+                    "@try's result schema has an Ok or Err arm with no field".into(),
+                ));
+            }
+
+            // The body writes straight into the Ok arm's single field, so a
+            // success costs no copy. A user throw rolls the arena back to
+            // before the attempt, which releases whatever the body had
+            // allocated on its way to failing.
             let cp = crate::eval_arena::checkpoint();
-            match morloc_eval_r(fallible, dest, fallible_width, bndvars) {
-                Ok(src_ptr) => {
-                    // morloc_eval_r's calling convention is loose: most
-                    // handlers write into `dest` and return `Ok(dest)`,
-                    // but a few (Dat with is_voidstar=true, some Bnd
-                    // paths) return a different pointer to the value.
-                    // If we got a different pointer back, memcpy from
-                    // it. Common path is src_ptr == dest, hitting the
-                    // early return with zero copy.
-                    if !src_ptr.is_null() && src_ptr != dest && width > 0 {
-                        ptr::copy_nonoverlapping(src_ptr as *const u8, dest, width);
-                    }
+            let ok_payload = shm::shmalloc((*ok_arm).width)?;
+            ptr::write_bytes(ok_payload, 0, (*ok_arm).width);
+            let ok_off = *(*ok_arm).offsets.add(0);
+            let ok_width = (*(*(*ok_arm).parameters.add(0))).width;
+            match morloc_eval_r(body, ok_payload.add(ok_off), ok_width, bndvars) {
+                Ok(_) => {
+                    *dest = ok_tag as u8;
+                    ptr::write_bytes(dest.add(1), 0, 7);
+                    *(dest.add(8) as *mut shm::RelPtr) = shm::abs2rel(ok_payload)?;
                 }
                 Err(e) if is_user_throw(&e) => {
                     crate::eval_arena::rollback_to(cp);
-                    if width > 0 {
-                        ptr::write_bytes(dest, 0, width);
-                    }
-                    morloc_eval_r(fallback, dest, width, bndvars)?;
+                    let msg = e.to_string();
+                    let bytes = msg.as_bytes();
+                    let str_relptr: shm::RelPtr = if !bytes.is_empty() {
+                        shm::abs2rel(shm::shmemcpy(bytes.as_ptr(), bytes.len())?)?
+                    } else {
+                        shm::RELNULL
+                    };
+                    let err_payload = shm::shmalloc((*err_arm).width)?;
+                    ptr::write_bytes(err_payload, 0, (*err_arm).width);
+                    let err_off = *(*err_arm).offsets.add(0);
+                    let arr = shm::Array { size: bytes.len(), data: str_relptr };
+                    ptr::copy_nonoverlapping(
+                        &arr as *const shm::Array as *const u8,
+                        err_payload.add(err_off),
+                        std::mem::size_of::<shm::Array>(),
+                    );
+                    *dest = err_tag as u8;
+                    ptr::write_bytes(dest.add(1), 0, 7);
+                    *(dest.add(8) as *mut shm::RelPtr) = shm::abs2rel(err_payload)?;
                 }
                 Err(e) => return Err(e),
             }
         }
 
+        MorlocExpressionType::TagTest => {
+            // A constructor-pattern tag test. The value's voidstar form
+            // begins with its tag byte for both tiers -- an argument-free
+            // `data` is that byte alone, a payload-bearing one is the byte
+            // then a pointer -- so the test reads one byte and compares it
+            // against the tag the pattern named. No pool dispatch, which is
+            // why matching inside a pure morloc function stays in the nexus.
+            let te = (*expr).expr.tag_test_expr;
+            let subject_ptr = morloc_eval_r((*te).subject, ptr::null_mut(), 0, bndvars)?;
+            let same = *(subject_ptr as *const u8) == (*te).tag;
+            if !dest.is_null() {
+                *dest = u8::from(same);
+            }
+        }
+        MorlocExpressionType::CtorMake => {
+            // Build a payload-bearing `data` value: the tag, determined
+            // padding, and the arm's fields written out of line as a tuple.
+            // A nullary arm is handled as a plain tag literal upstream and
+            // never reaches here with fields.
+            let me = (*expr).expr.ctor_make_expr;
+            let vschema = (*expr).schema;
+            let tag = (*me).tag as usize;
+            if vschema.is_null() || tag >= (*vschema).size {
+                return Err(MorlocError::Other(format!(
+                    "constructor make: tag {tag} is out of range for this type"
+                )));
+            }
+            let arm = *(*vschema).parameters.add(tag);
+            if !dest.is_null() {
+                *dest = (*me).tag;
+                std::ptr::write_bytes(dest.add(1), 0, 7);
+                if (*me).nfields == 0 {
+                    *(dest.add(8) as *mut shm::RelPtr) = shm::RELNULL;
+                } else {
+                    // The payload is its own allocation, so each field is
+                    // materialized at its offset within the arm's tuple.
+                    let payload = shm::shmalloc((*arm).width)?;
+                    std::ptr::write_bytes(payload, 0, (*arm).width);
+                    for i in 0..(*me).nfields {
+                        let fexpr = *(*me).fields.add(i);
+                        let foff = *(*arm).offsets.add(i);
+                        // The width must be the FIELD's, not zero: a
+                        // non-null dest is checked against its schema's
+                        // width, and a mismatch is refused rather than
+                        // silently writing the wrong number of bytes.
+                        let fwidth = (*(*(*arm).parameters.add(i))).width;
+                        morloc_eval_r(fexpr, payload.add(foff), fwidth, bndvars)?;
+                    }
+                    *(dest.add(8) as *mut shm::RelPtr) = shm::abs2rel(payload)?;
+                }
+            }
+        }
+        MorlocExpressionType::CtorField => {
+            // Read one field out of a value whose arm a guarding tag test has
+            // already established. The slot is a tag then a relative pointer
+            // to the arm's fields, so this follows the pointer and hands back
+            // the field at its offset within the arm's tuple.
+            let fe = (*expr).expr.ctor_field_expr;
+            let subject_ptr = morloc_eval_r((*fe).subject, ptr::null_mut(), 0, bndvars)?;
+            let vschema = (*(*fe).subject).schema;
+            let tag = (*fe).tag as usize;
+            if vschema.is_null() || tag >= (*vschema).size {
+                return Err(MorlocError::Other(format!(
+                    "constructor field: tag {tag} is out of range for this type"
+                )));
+            }
+            // The arm's schema describes the out-of-line payload as a tuple
+            // of its fields, so the field's offset is that tuple's.
+            let arm = *(*vschema).parameters.add(tag);
+            let idx = (*fe).index as usize;
+            if idx >= (*arm).size {
+                return Err(MorlocError::Other(format!(
+                    "constructor field: index {idx} is out of range for this arm"
+                )));
+            }
+            let rel = *(subject_ptr.add(8) as *const shm::RelPtr);
+            if rel == shm::RELNULL {
+                return Err(MorlocError::Other(
+                    "constructor field read from an arm carrying no payload".into(),
+                ));
+            }
+            let payload = shm::rel2abs(rel)?;
+            let field_ptr = payload.add(*(*arm).offsets.add(idx));
+            if !dest.is_null() {
+                let w = (*(*(*arm).parameters.add(idx))).width;
+                std::ptr::copy_nonoverlapping(field_ptr, dest, w);
+            }
+        }
         MorlocExpressionType::If => {
             // Evaluate the condition (a Bool) into a fresh buffer and read
             // its byte (0 = false), then materialize the taken branch into

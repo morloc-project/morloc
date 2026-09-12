@@ -701,7 +701,17 @@ pub unsafe extern "C" fn send_packet_to_foreign_server(
         return 0;
     }
 
+    // The result carries its own reference from here, taken before the packet
+    // leaves this process. See `donate_packet_reference`.
+    if let Err(e) = crate::packet_ffi::donate_packet_reference(packet) {
+        set_errmsg(errmsg, &e);
+        return 0;
+    }
+
     if !send_all(client_fd, packet, size) {
+        // Nobody received the packet, so nobody will release the reference
+        // taken for its recipient.
+        crate::packet_ffi::revoke_packet_reference(packet);
         set_errmsg(errmsg, &MorlocError::Ipc(format!(
             "Failed to send over client {}", client_fd
         )));

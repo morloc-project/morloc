@@ -14,7 +14,7 @@ use std::sync::Mutex;
 pub use morloc_runtime_types::shm_types::{
     align_up, encode_relptr, relptr_is_sentinel, relptr_offset, relptr_volume_index,
     AbsPtr, Array, BlockHeader, MorlocVolEntry, RelPtr, ShmHeader, VolPtr,
-    BLK_MAGIC, BLOCK_ALIGN, MAX_FILENAME_SIZE, MAX_PATH_SIZE, MAX_VOLUME_NUMBER,
+    BLK_ABSORBED, BLK_MAGIC, BLOCK_ALIGN, MAX_FILENAME_SIZE, MAX_PATH_SIZE, MAX_VOLUME_NUMBER,
     OFFSET_MASK, RELNULL, SHM_MAGIC, VOLNULL,
 };
 
@@ -386,6 +386,12 @@ static VOLUMES: Mutex<VolumeTable> = Mutex::new(VolumeTable {
 });
 
 static ALLOC_MUTEX: Mutex<()> = Mutex::new(());
+
+/// Reference-count value marking a block whose last reference has been
+/// dropped and whose bytes are being scrubbed. It reads as in-use, so no
+/// allocator can claim the block until the scrub completes and publishes
+/// zero.
+const TEARING_DOWN: u32 = u32::MAX;
 
 // ── Thread-local PRNG (for random slot allocation) ─────────────────────────
 
@@ -844,6 +850,55 @@ pub fn reset_all() -> Result<(), MorlocError> {
     Ok(())
 }
 
+/// Blocks currently held across every mapped volume, and the bytes they
+/// cover. Walks each volume's block chain; a block is held when its
+/// reference count is non-zero.
+///
+/// Volume files only ever grow, so their size records what has been
+/// allocated rather than what is still in use. This reports the latter,
+/// which is what tells a leak apart from a working set that has settled.
+/// `hist` receives a count per power-of-two size class (index i covers
+/// sizes in [2^i, 2^(i+1))), which identifies what is being held rather
+/// than only how much.
+pub fn live_block_stats(hist: &mut [usize]) -> (usize, usize) {
+    let hdr_size = std::mem::size_of::<BlockHeader>();
+    let mut blocks = 0usize;
+    let mut bytes = 0usize;
+    let vols = VOLUMES.lock().unwrap();
+    for &slot_idx in &vols.used {
+        let slot = vols.slots[slot_idx as usize];
+        if slot.is_null() {
+            continue;
+        }
+        unsafe {
+            let base = (slot.ptr() as *mut u8).add(std::mem::size_of::<ShmHeader>());
+            let end = base.add(slot.data_size()) as *const u8;
+            let mut blk = base as *mut BlockHeader;
+            while (blk as *const u8) < end
+                && (end as usize) - (blk as usize) >= hdr_size
+            {
+                if (*blk).magic != BLK_MAGIC {
+                    break;
+                }
+                let size = (*blk).size;
+                if size == 0 || size > slot.data_size() {
+                    break;
+                }
+                if (*blk).reference_count.load(Ordering::Relaxed) != 0 {
+                    blocks += 1;
+                    bytes += size;
+                    if !hist.is_empty() {
+                        let cls = (usize::BITS - size.leading_zeros()) as usize;
+                        hist[cls.min(hist.len() - 1)] += 1;
+                    }
+                }
+                blk = (blk as *mut u8).add(hdr_size + size) as *mut BlockHeader;
+            }
+        }
+    }
+    (blocks, bytes)
+}
+
 /// Returns true if `ptr` falls inside any currently-mapped SHM volume.
 /// Used by `shfree` as a safety guard against being called with a
 /// stale pointer after `reset_all` (e.g. a worker that was holding an
@@ -975,14 +1030,70 @@ pub fn shincref(ptr: AbsPtr) -> Result<(), MorlocError> {
     if ptr.is_null() {
         return Err(MorlocError::Shm("Cannot incref NULL pointer".into()));
     }
+    // A pointer into a volume that has since been unmapped (pool-crash
+    // recovery calls `reset_all`) must not be dereferenced. `shfree` takes
+    // the same guard.
+    if !ptr_is_in_any_volume(ptr) {
+        return Err(MorlocError::Shm(
+            "Cannot incref a pointer outside every mapped volume".into(),
+        ));
+    }
     // SAFETY: ptr was returned by shmalloc, which places a BlockHeader immediately before
     // the returned data pointer. Magic check below validates the header.
     let blk = unsafe { &*(ptr.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader) };
+    if blk.magic == BLK_ABSORBED {
+        return Err(MorlocError::Shm(
+            "Cannot incref a block that was merged into its predecessor \
+             (the caller is holding a stale pointer)".into(),
+        ));
+    }
     if blk.magic != BLK_MAGIC {
         return Err(MorlocError::Shm("Corrupted memory - invalid magic".into()));
     }
-    blk.reference_count.fetch_add(1, Ordering::AcqRel);
-    Ok(())
+    // Refuse the same two states `shfree` refuses. Zero means the block is
+    // free and its bytes are gone; the teardown sentinel means another
+    // party owns the transition to zero and is scrubbing right now. A
+    // reference taken in either state describes nothing, and taking one on
+    // the sentinel is destructive: incrementing it wraps to zero, which is
+    // the value the allocator reads as free, so the block is handed to a
+    // new owner while the previous one is still zeroing it.
+    loop {
+        let cur = blk.reference_count.load(Ordering::Acquire);
+        if cur == 0 {
+            return Err(MorlocError::Shm("Cannot incref a free block".into()));
+        }
+        if cur == TEARING_DOWN {
+            return Err(MorlocError::Shm(
+                "Cannot incref a block that is being released".into(),
+            ));
+        }
+        if blk
+            .reference_count
+            .compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return Ok(());
+        }
+    }
+}
+
+/// Current reference count of a shared memory block, or `None` when
+/// `ptr` is null or the header magic does not validate. A count of 0
+/// means the block is free and its bytes have been scrubbed.
+pub fn reference_count(ptr: AbsPtr) -> Option<u32> {
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: as in `shincref` -- shmalloc places a BlockHeader
+    // immediately before the returned pointer; the magic check
+    // validates that this pointer actually sits at a block start.
+    let blk = unsafe {
+        &*(ptr.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader)
+    };
+    if blk.magic != BLK_MAGIC {
+        return None;
+    }
+    Some(blk.reference_count.load(Ordering::Acquire))
 }
 
 /// Return the allocation size of an SHM block, in O(1), reading the
@@ -1480,10 +1591,13 @@ fn shmalloc_unlocked(size: usize) -> Result<AbsPtr, MorlocError> {
     let final_blk = split_block(shm, blk, size)?;
     // SAFETY: final_blk is a valid BlockHeader in mmap'd SHM found by find_free_block.
     // The data region starts immediately after the header.
-    unsafe {
-        (*final_blk).reference_count.store(1, Ordering::Release);
-        Ok((final_blk as *mut u8).add(std::mem::size_of::<BlockHeader>()))
-    }
+    //
+    // The reference count was already set to 1 by `claim`, under the volume
+    // lock, at the moment the block was found. Setting it again here would be
+    // harmless but would suggest this is where ownership begins; it is not,
+    // and it cannot be, because between there and here the block is visible
+    // to every other process.
+    unsafe { Ok((final_blk as *mut u8).add(std::mem::size_of::<BlockHeader>())) }
 }
 
 fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
@@ -1495,20 +1609,59 @@ fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
     let blk = unsafe {
         &*(ptr.sub(std::mem::size_of::<BlockHeader>()) as *const BlockHeader)
     };
+    if blk.magic == BLK_ABSORBED {
+        return Err(MorlocError::Shm(
+            "Cannot free a block that was merged into its predecessor \
+             (the caller is holding a stale pointer)".into(),
+        ));
+    }
     if blk.magic != BLK_MAGIC {
         return Err(MorlocError::Shm("Corrupted memory".into()));
     }
-    if blk.reference_count.load(Ordering::Acquire) == 0 {
-        return Err(MorlocError::Shm("Reference count already 0".into()));
-    }
-    let prev = blk.reference_count.fetch_sub(1, Ordering::AcqRel);
-    if prev == 1 {
-        // SAFETY: ptr points to blk.size bytes of SHM data we own (refcount just hit 0).
-        unsafe {
-            std::ptr::write_bytes(ptr, 0, blk.size);
+    // Scrub before publishing, not after. A count of zero is precisely what
+    // marks a block available, so a scrub that runs after the count drops
+    // writes zeros over whatever its next owner has already stored there --
+    // and on a machine with few cores that owner gets far enough to notice.
+    // Dropping the last reference to a sentinel instead leaves the block
+    // reading as in use, so no scanner will take it while the scrub runs, and
+    // zero is published only once the bytes are actually gone.
+    //
+    // The whole transition is a compare-exchange loop because reading the
+    // count and then acting on it are two separate steps: between them a
+    // concurrent free of the same block can move it, and a decrement issued
+    // on the strength of a stale read underflows a counter that everything
+    // else treats as "in use".
+    loop {
+        let cur = blk.reference_count.load(Ordering::Acquire);
+        if cur == 0 {
+            return Err(MorlocError::Shm("Reference count already 0".into()));
         }
+        if cur == TEARING_DOWN {
+            // Another party is mid-scrub and owns the transition to zero.
+            return Err(MorlocError::Shm(
+                "Reference count already 0 (block is being released)".into(),
+            ));
+        }
+        let next = if cur == 1 { TEARING_DOWN } else { cur - 1 };
+        if blk
+            .reference_count
+            .compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            continue;
+        }
+        if next == TEARING_DOWN {
+            // SAFETY: ptr points to blk.size bytes of SHM data. This process
+            // held the last reference and has replaced it with a value that
+            // reads as in-use, so the block cannot be handed to anyone until
+            // the store below.
+            unsafe {
+                std::ptr::write_bytes(ptr, 0, blk.size);
+            }
+            blk.reference_count.store(0, Ordering::Release);
+        }
+        return Ok(());
     }
-    Ok(())
 }
 
 fn find_free_block(
@@ -1584,7 +1737,36 @@ fn find_free_block(
     let blk = unsafe {
         (new_shm as *mut u8).add(std::mem::size_of::<ShmHeader>()) as *mut BlockHeader
     };
+    // Claim it here too. A volume this process just created is discoverable
+    // by any other that opens the segment, so leaving its first block reading
+    // free has the same consequence as anywhere else.
+    unsafe {
+        shm_lock(&(*new_shm).lock)?;
+        claim(blk);
+        shm_unlock(&(*new_shm).lock);
+    }
     Ok(blk)
+}
+
+/// Take ownership of a free block. MUST be called while still holding the
+/// volume lock that found it.
+///
+/// A block is "free" precisely when its reference count reads zero, and that
+/// count lives in shared memory where every process can see it. Handing a
+/// block back to a caller while it still reads zero publishes it as
+/// available to every other process for as long as it takes the caller to
+/// claim it -- and `ALLOC_MUTEX`, the only thing serialising the steps
+/// between, is an ordinary in-process mutex. It keeps this process's own
+/// threads apart and says nothing about the pools, which are separate
+/// processes allocating from these same volumes. Two of them would be given
+/// the same block, then write over each other's data, split the same block
+/// in two different ways, and each free it once.
+///
+/// # Safety
+/// `blk` must be a valid BlockHeader in a mapped volume whose lock is held.
+#[inline]
+unsafe fn claim(blk: *mut BlockHeader) {
+    (*blk).reference_count.store(1, Ordering::Release);
 }
 
 fn find_free_block_in_volume(
@@ -1607,6 +1789,7 @@ fn find_free_block_in_volume(
                 && (*blk).reference_count.load(Ordering::Relaxed) == 0
                 && (*blk).size >= size
             {
+                claim(blk);
                 shm_unlock(&(*shm).lock);
                 return Ok(Some(blk));
             }
@@ -1620,6 +1803,7 @@ fn find_free_block_in_volume(
         };
 
         if let Some(blk) = scan_volume(start_blk, size, shm_end as *const u8) {
+            claim(blk);
             shm_unlock(&(*shm).lock);
             return Ok(Some(blk));
         }
@@ -1629,6 +1813,7 @@ fn find_free_block_in_volume(
             let first_blk = vol2abs_raw(0, shm) as *mut BlockHeader;
             let cursor_end = vol2abs_raw(cursor, shm);
             if let Some(blk) = scan_volume(first_blk, size, cursor_end as *const u8) {
+                claim(blk);
                 shm_unlock(&(*shm).lock);
                 return Ok(Some(blk));
             }
@@ -1658,13 +1843,23 @@ unsafe fn scan_volume(
         // Merge adjacent free blocks
         while (*blk).reference_count.load(Ordering::Relaxed) == 0 {
             let next = (blk as *mut u8).add(hdr_size + (*blk).size) as *mut BlockHeader;
+            // The whole header must lie inside the region: starting inside it
+            // is not enough, since the next thing done is a 16-byte read.
             if (next as *const u8) >= end
+                || (end as usize) - (next as usize) < hdr_size
                 || (*next).magic != BLK_MAGIC
                 || (*next).reference_count.load(Ordering::Relaxed) != 0
             {
                 break;
             }
-            (*blk).size += hdr_size + (*next).size;
+            // The absorbed header becomes interior bytes of the survivor.
+            // Stamp it so a pointer to the absorbed block stops reading as
+            // a block: leaving a valid header inside a live allocation is
+            // the allocator lying about its own structure, and every
+            // validating entry point believes it.
+            let next_size = (*next).size;
+            (*next).magic = BLK_ABSORBED;
+            (*blk).size += hdr_size + next_size;
         }
 
         if (*blk).reference_count.load(Ordering::Relaxed) == 0 && (*blk).size >= size {
@@ -1688,6 +1883,16 @@ fn split_block(
 
         shm_lock(&(*shm).lock)?;
 
+        // A block smaller than the request would underflow the remainder and
+        // send the split below to write a header outside the mapping. The
+        // search is supposed to return only blocks large enough; refuse
+        // rather than trust it.
+        if (*blk).size < size {
+            shm_unlock(&(*shm).lock);
+            return Err(MorlocError::Shm(
+                "Block smaller than the request reached the split".into(),
+            ));
+        }
         let remaining = (*blk).size - size;
         (*blk).size = size;
 
@@ -1703,6 +1908,12 @@ fn split_block(
             let data_start = (shm as *const u8).add(std::mem::size_of::<ShmHeader>());
             (*shm).cursor = (new_free as *const u8).offset_from(data_start) as VolPtr;
         } else {
+            // Too small to head, so it becomes interior bytes of the block.
+            // Stamp whatever header may be sitting there, for the same reason
+            // the merge does.
+            if remaining >= std::mem::size_of::<u32>() {
+                (*new_free).magic = BLK_ABSORBED;
+            }
             (*blk).size += remaining;
             (*shm).cursor = VOLNULL;
         }
@@ -1842,6 +2053,136 @@ pub unsafe fn vol2abs(ptr: VolPtr, shm: *const ShmHeader) -> AbsPtr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Merging a free block into its predecessor turns the absorbed block's
+    // header into interior bytes of the survivor. A pointer to the absorbed
+    // block must stop validating at that moment: if its header still reads
+    // as a block, a stale pointer passes every check and the allocator acts
+    // on payload bytes as though they were a header.
+    #[test]
+    fn coalescing_invalidates_the_absorbed_block_header() {
+        let hdr = std::mem::size_of::<BlockHeader>();
+        let body = 256usize;
+
+        // A synthetic volume holding two adjacent free blocks, so the merge
+        // is exercised without depending on where the live allocator's
+        // cursor happens to sit.
+        let mut backing = vec![0u64; (2 * (hdr + body)) / 8 + 8];
+        let base = backing.as_mut_ptr() as *mut u8;
+        let end = unsafe { base.add(2 * (hdr + body)) } as *const u8;
+
+        let first = base as *mut BlockHeader;
+        let second = unsafe { base.add(hdr + body) as *mut BlockHeader };
+        unsafe {
+            (*first).magic = BLK_MAGIC;
+            (*first).size = body;
+            (*first).reference_count = AtomicU32::new(0);
+            (*second).magic = BLK_MAGIC;
+            (*second).size = body;
+            (*second).reference_count = AtomicU32::new(0);
+        }
+
+        // Ask for more than either block alone can serve, forcing the merge.
+        let found = unsafe { scan_volume(first, body + 8, end) };
+        assert_eq!(found, Some(first), "expected the pair to merge");
+        assert!(
+            unsafe { (*first).size } >= 2 * body,
+            "merged block did not absorb its neighbour",
+        );
+
+        assert_eq!(
+            unsafe { (*second).magic }, BLK_ABSORBED,
+            "absorbed block still reads as a block, so a stale pointer to it \
+             passes the header check and is acted on as live payload",
+        );
+
+    }
+
+    // The census must see what the allocator has handed out, since the
+    // volume files themselves only record what was ever allocated and never
+    // shrink -- they cannot distinguish a leak from a settled working set.
+    #[test]
+    fn live_block_stats_counts_what_is_held() {
+        let _shm = crate::own_test_registry();
+        let mut hist = [0usize; 40];
+        let (base_blocks, base_bytes) = live_block_stats(&mut hist);
+
+        let a = shmalloc(4096).expect("a");
+        let b = shmalloc(4096).expect("b");
+        let mut hist2 = [0usize; 40];
+        let (held, bytes) = live_block_stats(&mut hist2);
+        assert_eq!(
+            held, base_blocks + 2,
+            "census did not see two freshly allocated blocks",
+        );
+        assert!(
+            bytes >= base_bytes + 8192,
+            "census undercounted the bytes held: {} vs {}", bytes, base_bytes + 8192,
+        );
+
+        shfree(a).expect("free a");
+        shfree(b).expect("free b");
+        let mut hist3 = [0usize; 40];
+        let (after, _) = live_block_stats(&mut hist3);
+        assert_eq!(
+            after, base_blocks,
+            "census still counts blocks that were released",
+        );
+    }
+
+    // A block whose last reference is being dropped is briefly marked with
+    // a sentinel that reads as in-use, so nothing can claim it while its
+    // bytes are being scrubbed. Acquiring a reference in that window must
+    // be refused: incrementing the sentinel wraps it to zero, which is the
+    // value the allocator reads as "free", so the block would be handed to
+    // a new owner while the previous owner is still zeroing it.
+    #[test]
+    fn incref_refuses_a_block_whose_last_reference_is_dropping() {
+        let _shm = crate::own_test_registry();
+        let p = shmalloc(64).expect("allocate");
+
+        // Reproduce the state shfree publishes before it scrubs.
+        unsafe {
+            let blk = &*(p.sub(std::mem::size_of::<BlockHeader>())
+                as *const BlockHeader);
+            blk.reference_count.store(u32::MAX, Ordering::Release);
+        }
+
+        let res = shincref(p);
+        let rc = reference_count(p);
+        assert!(
+            res.is_err(),
+            "incref accepted a block that was being released (refcount now {:?})",
+            rc,
+        );
+        assert_ne!(
+            rc, Some(0),
+            "incref wrapped the release sentinel to zero, publishing a block \
+             the allocator will hand out while it is still being scrubbed",
+        );
+
+        // Leave the block in a state the arena can clean up.
+        unsafe {
+            let blk = &*(p.sub(std::mem::size_of::<BlockHeader>())
+                as *const BlockHeader);
+            blk.reference_count.store(1, Ordering::Release);
+        }
+        let _ = shfree(p);
+    }
+
+    // A block that is already free must not be resurrected: its bytes have
+    // been scrubbed and the allocator is entitled to hand it to anyone.
+    #[test]
+    fn incref_refuses_a_free_block() {
+        let _shm = crate::own_test_registry();
+        let p = shmalloc(64).expect("allocate");
+        shfree(p).expect("free");
+        assert_eq!(reference_count(p), Some(0), "block should read as free");
+        assert!(
+            shincref(p).is_err(),
+            "incref accepted a block that was already free",
+        );
+    }
 
     #[test]
     fn test_block_header_no_padding() {

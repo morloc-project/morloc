@@ -1,0 +1,43 @@
+-- A conditional whose arms are effectful, in a Rust pool.
+--
+-- A deferred effect is carried as a nullary thunk, so a conditional over two of
+-- them yields a thunk and its binding must be typed as one. Covered here: a
+-- guard returning a value, one returning unit, one whose arms are do blocks,
+-- and one nested inside another, none of them recursive -- the tail-recursive
+-- form is lowered as a loop and takes a different path.
+
+module main (pick, pickUnit, pickDo, pickNested)
+
+import root-rust
+
+source Rust from "own.rs"
+  ( "re_emit" as emit
+  , "re_nop" as nop
+  )
+
+emit :: Int -> <IO> Int
+nop :: <IO> ()
+
+pick :: Bool -> <IO> Int
+pick b
+  ? b = emit 1
+  : emit 2
+
+pickUnit :: Bool -> <IO> ()
+pickUnit b
+  ? b = nop
+  : nop
+
+pickDo :: Bool -> <IO> Int
+pickDo b
+  ? b = do
+      x <- emit 3
+      emit x
+  : do
+      y <- emit 4
+      emit y
+
+pickNested :: Bool -> Bool -> <IO> Int
+pickNested b c
+  ? b = pick c
+  : emit 9

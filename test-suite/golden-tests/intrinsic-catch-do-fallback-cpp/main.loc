@@ -31,15 +31,15 @@ import root-cpp
 
 source Cpp from "helper.hpp" ("cpp_maybe_list")
 
-cpp_maybe_list :: Str -> <Err> [Int]
+cpp_maybe_list :: Str -> [Int]
 
 catchListDoFb :: Str -> <IO> [Int]
-catchListDoFb s = @catch (cpp_maybe_list s) (do [])
+catchListDoFb s = match (@try (cpp_maybe_list s)) | (Ok _cv) = _cv | (Err _) = (do [])
 
 catchListDoFbOpt :: Str -> <IO> ?[Int]
-catchListDoFbOpt s = @catch (cpp_maybe_list s) (do [])
+catchListDoFbOpt s = match (@try (cpp_maybe_list s)) | (Ok _cv) = _cv | (Err _) = (do [])
 
 catchLetDoFb :: Str -> <IO> [Int]
-catchLetDoFb s = @catch (cpp_maybe_list s) (do
+catchLetDoFb s = match (@try (cpp_maybe_list s)) | (Ok _cv) = _cv | (Err _) = (do
     let x = 7
     [x, x])

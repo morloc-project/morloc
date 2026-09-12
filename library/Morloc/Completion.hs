@@ -215,6 +215,27 @@ generateBash manifests =
       ++ morlocBashCompletion
       ++ concatMap programBashCompletion manifests
 
+-- | The `morloc` subcommands, paired with the one-line description zsh
+-- shows beside each. Written once and rendered into both shells, so the two
+-- cannot drift apart. This has to track the parser in
+-- @executable\/Subcommands.hs@: a command missing here is not completable.
+morlocSubcommands :: [(String, String)]
+morlocSubcommands =
+  [ ("make", "Build a morloc script")
+  , ("install", "Install one or more morloc modules")
+  , ("uninstall", "Uninstall a module or program")
+  , ("list", "List installed modules and programs")
+  , ("typecheck", "Typecheck a morloc program")
+  , ("dump", "Dump parsed code")
+  , ("init", "Initialize morloc environment")
+  , ("new", "Create a new morloc package")
+  , ("eval", "Evaluate a morloc expression")
+  , ("config", "Manage the per-machine build configuration")
+  , ("lang-support", "Print the language-support table (JSON)")
+  , ("envspec", "Emit the environment requirement spec without building")
+  , ("versions", "Print the contract/ABI versions (JSON)")
+  ]
+
 morlocBashCompletion :: [String]
 morlocBashCompletion =
   [ "_morloc() {"
@@ -224,7 +245,7 @@ morlocBashCompletion =
   , "  prev=\"${COMP_WORDS[COMP_CWORD-1]}\""
   , ""
   , "  if [[ $COMP_CWORD -eq 1 ]]; then"
-  , "    COMPREPLY=($(compgen -W \"make install typecheck dump init list uninstall\" -- \"$cur\"))"
+  , "    COMPREPLY=($(compgen -W \"" <> unwords (map fst morlocSubcommands) <> "\" -- \"$cur\"))"
   , "    return"
   , "  fi"
   , ""
@@ -416,14 +437,8 @@ morlocZshCompletion =
   [ "_morloc() {"
   , "  local -a subcmds"
   , "  subcmds=("
-  , "    'make:Build a morloc script'"
-  , "    'install:Install a morloc module'"
-  , "    'typecheck:Typecheck a morloc program'"
-  , "    'dump:Dump parsed code'"
-  , "    'init:Initialize morloc environment'"
-  , "    'list:List installed modules and programs'"
-  , "    'uninstall:Uninstall a module or program'"
-  , "  )"
+  ] <> [ "    '" <> n <> ":" <> d <> "'" | (n, d) <- morlocSubcommands ] <>
+  [ "  )"
   , ""
   , "  if (( CURRENT == 2 )); then"
   , "    _describe 'subcommand' subcmds"

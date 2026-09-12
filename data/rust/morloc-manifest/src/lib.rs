@@ -195,6 +195,11 @@ pub struct RunLog {
     pub epilogue_ok: Option<String>,
     #[serde(default)]
     pub epilogue_fail: Option<String>,
+    /// Row shape for the end-of-run benchmark summary. Present when any
+    /// label carries `benchmark: true`; the nexus aggregates that
+    /// label's timing records and renders one row per label through it.
+    #[serde(default)]
+    pub benchmark_summary: Option<String>,
 }
 
 /// A single language pool daemon. Each pool is one OS process that
@@ -437,6 +442,28 @@ pub struct NamedType {
     /// definition is their field list.
     #[serde(default)]
     pub equals: String,
+    /// The type's own description lines. Written for a `"data"`; empty
+    /// for the other kinds, which carry none.
+    #[serde(default)]
+    pub desc: Vec<String>,
+    /// A `"data"` type's constructors in declaration order, which is
+    /// also tag order. Empty for every other kind.
+    #[serde(default)]
+    pub constructors: Vec<NamedCtor>,
+}
+
+/// One constructor of a `"data"` [`NamedType`].
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct NamedCtor {
+    #[serde(default)]
+    pub name: String,
+    /// The constructor's field types, rendered as the help shows a type.
+    /// Empty for an argument-free constructor.
+    #[serde(default)]
+    pub fields: Vec<String>,
+    /// The prose written above the constructor, if any.
+    #[serde(default)]
+    pub desc: Vec<String>,
 }
 
 /// One field of a [`NamedType`].
@@ -637,6 +664,15 @@ pub enum Arg {
     /// A positional CLI argument.
     #[serde(rename = "pos")]
     Positional {
+        /// The name this argument answers to wherever the interface is
+        /// consumed by a program: the JSON help, the MCP tool schema, and
+        /// the named form of an HTTP call. The compiler computes it once
+        /// (see `argKey` in `CodeGenerator/Nexus.hs`) so no consumer has to
+        /// invent one -- doing that independently is how `--json-help` and
+        /// `--mcp-tools` came to publish different names for one argument.
+        /// A positional is keyed by its explicit `@name`, else by its
+        /// 1-based position (`_1`, `_2`, ...).
+        key: String,
         /// Morloc serialization schema string. Used at dispatch time
         /// to parse the user's CLI input into a binary data packet.
         #[serde(default)]
@@ -724,6 +760,9 @@ pub enum Arg {
     /// An optional CLI argument with a long/short option name.
     #[serde(rename = "opt")]
     Optional {
+        /// Published key -- see [`Arg::Positional`]'s `key`. An option is
+        /// keyed by its long spelling, falling back to its short.
+        key: String,
         /// Morloc serialization schema for the option's value type.
         #[serde(default)]
         schema: Option<String>,
@@ -799,6 +838,9 @@ pub enum Arg {
     /// produces the value `true` or `false`.
     #[serde(rename = "flag")]
     Flag {
+        /// Published key -- see [`Arg::Positional`]'s `key`. A flag is keyed
+        /// by its long spelling, falling back to its short.
+        key: String,
         /// Single-character short option (e.g. `"v"` for `-v`).
         #[serde(default, rename = "short")]
         short_opt: Option<String>,
@@ -832,6 +874,11 @@ pub enum Arg {
     /// entries never need their own schemas.
     #[serde(rename = "grp")]
     Group {
+        /// Published key -- see [`Arg::Positional`]'s `key`. A group is keyed
+        /// by its record type name, lowercased. It is addressed under that
+        /// key only in the whole-object form (`group_opt` set); when the
+        /// record is unrolled, each entry's `key` is what a caller names.
+        key: String,
         /// Morloc schema for the whole record (a `Map` schema).
         #[serde(default)]
         schema: Option<String>,
@@ -871,6 +918,76 @@ pub enum Arg {
         #[serde(default)]
         metadata: Metadata,
     },
+    /// A `data`-typed argument unrolled into one option per constructor.
+    /// The options exclude one another: an argument-free constructor's is
+    /// a bare flag, a payload-bearing one's takes exactly its field count
+    /// in values. The value dispatched is the JSON the type's wire form
+    /// reads, assembled from the chosen arm.
+    #[serde(rename = "alt")]
+    Alt {
+        /// Published key -- the type name, lowercased. Each arm is
+        /// addressed by its own `long`.
+        key: String,
+        /// Morloc schema of the whole argument (the variant or enum, under
+        /// an optional when the argument may be omitted).
+        #[serde(default)]
+        schema: Option<String>,
+        /// Hint-stripped form of `schema`; see [`Arg::Group`].
+        #[serde(default)]
+        general_schema: Option<String>,
+        /// User-facing type name (e.g. `"Shape"`, `"?Shape"`).
+        #[serde(default, rename = "type")]
+        type_desc: Option<String>,
+        /// Display placeholder for the argument as a whole.
+        #[serde(default)]
+        metavar: Option<String>,
+        /// Description lines for the argument.
+        #[serde(default)]
+        desc: Vec<String>,
+        /// Exactly one arm must be given. False when the argument is
+        /// optional (absent means null) or carries a default.
+        #[serde(default)]
+        required: bool,
+        /// The value when no arm is given, as JSON. Absent for an
+        /// optional argument, whose absence is null.
+        #[serde(default, rename = "default")]
+        default_val: Option<String>,
+        /// One entry per constructor, in declaration order.
+        #[serde(default)]
+        arms: Vec<AltArm>,
+        /// **Reserved.** Not read in v2.
+        #[serde(default)]
+        metadata: Metadata,
+    },
+}
+
+/// One constructor of an [`Arg::Alt`].
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AltArm {
+    /// The constructor's own name, as the wire form spells it.
+    #[serde(default)]
+    pub ctor: String,
+    /// The option's long spelling, the constructor's name lowercased.
+    #[serde(default)]
+    pub long: String,
+    /// The constructor's docstring.
+    #[serde(default)]
+    pub desc: Vec<String>,
+    /// The constructor's fields, one value each on the command line.
+    #[serde(default)]
+    pub fields: Vec<AltField>,
+}
+
+/// One field of an [`AltArm`].
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AltField {
+    /// User-facing type name.
+    #[serde(default, rename = "type")]
+    pub type_desc: Option<String>,
+    /// The field's own wire schema, self-contained: a field that refers
+    /// back to the type it belongs to declares it.
+    #[serde(default)]
+    pub schema: Option<String>,
 }
 
 /// Nested CLI option that accepts the entire record (associated with
@@ -970,6 +1087,19 @@ pub fn parse_manifest(payload: &str) -> Result<Manifest, String> {
 // pattern-matching at every site.
 
 impl Arg {
+    /// The name this argument answers to in every machine-readable view.
+    /// Computed by the compiler and published, so a consumer reads it rather
+    /// than deriving one of its own.
+    pub fn key(&self) -> &str {
+        match self {
+            Arg::Positional { key, .. } => key,
+            Arg::Optional { key, .. } => key,
+            Arg::Flag { key, .. } => key,
+            Arg::Group { key, .. } => key,
+            Arg::Alt { key, .. } => key,
+        }
+    }
+
     /// Single-character short option (e.g. `'f'` for `-f`). Returns
     /// None for positional and group args.
     pub fn short_opt_char(&self) -> Option<char> {
@@ -1024,6 +1154,7 @@ impl Arg {
         match self {
             Arg::Optional { default_val, .. } => default_val.as_deref(),
             Arg::Flag { default_val, .. } => default_val.as_deref(),
+            Arg::Alt { default_val, .. } => default_val.as_deref(),
             _ => None,
         }
     }
@@ -1035,6 +1166,7 @@ impl Arg {
             Arg::Positional { metavar, .. } => metavar.as_deref(),
             Arg::Optional { metavar, .. } => metavar.as_deref(),
             Arg::Group { metavar, .. } => metavar.as_deref(),
+            Arg::Alt { metavar, .. } => metavar.as_deref(),
             _ => None,
         }
     }
@@ -1046,7 +1178,8 @@ impl Arg {
             Arg::Positional { desc, .. }
             | Arg::Optional { desc, .. }
             | Arg::Flag { desc, .. }
-            | Arg::Group { desc, .. } => desc,
+            | Arg::Group { desc, .. }
+            | Arg::Alt { desc, .. } => desc,
         }
     }
 
@@ -1056,7 +1189,8 @@ impl Arg {
         match self {
             Arg::Positional { type_desc, .. }
             | Arg::Optional { type_desc, .. }
-            | Arg::Group { type_desc, .. } => type_desc.as_deref(),
+            | Arg::Group { type_desc, .. }
+            | Arg::Alt { type_desc, .. } => type_desc.as_deref(),
             Arg::Flag { .. } => None,
         }
     }
@@ -1069,7 +1203,8 @@ impl Arg {
         match self {
             Arg::Positional { schema, .. }
             | Arg::Optional { schema, .. }
-            | Arg::Group { schema, .. } => schema.as_deref(),
+            | Arg::Group { schema, .. }
+            | Arg::Alt { schema, .. } => schema.as_deref(),
             Arg::Flag { .. } => None,
         }
     }
@@ -1082,7 +1217,8 @@ impl Arg {
         let general = match self {
             Arg::Positional { general_schema, .. }
             | Arg::Optional { general_schema, .. }
-            | Arg::Group { general_schema, .. } => general_schema.as_deref(),
+            | Arg::Group { general_schema, .. }
+            | Arg::Alt { general_schema, .. } => general_schema.as_deref(),
             Arg::Flag { .. } => None,
         };
         general.or_else(|| self.schema_str())
@@ -1097,7 +1233,7 @@ impl Arg {
             Arg::Positional { constraints, .. }
             | Arg::Optional { constraints, .. }
             | Arg::Group { constraints, .. } => constraints,
-            Arg::Flag { .. } => &[],
+            Arg::Flag { .. } | Arg::Alt { .. } => &[],
         }
     }
 
@@ -1156,6 +1292,7 @@ mod tests {
                     "args": [
                         {
                             "kind": "pos",
+                            "key": "_1",
                             "schema": "s",
                             "type": "Str",
                             "metavar": null,
@@ -1204,6 +1341,7 @@ mod tests {
                     "args": [
                         {
                             "kind": "pos",
+                            "key": "_1",
                             "schema": "s",
                             "type": "Str",
                             "metavar": "NAME",
@@ -1246,6 +1384,7 @@ mod tests {
                     "args": [
                         {
                             "kind": "pos",
+                            "key": "_1",
                             "schema": "<dict>m24name<list>a<str>s3age<list>a<int>i4",
                             "type": "People",
                             "metavar": null,

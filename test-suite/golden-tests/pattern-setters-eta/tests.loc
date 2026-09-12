@@ -1,0 +1,79 @@
+module tests
+  ( etaSingle
+  , etaTwo
+  , etaReversed
+  , etaCaptured
+  , etaCapturedTwo
+  , etaNested
+  , etaTuple
+  , etaTupleCaptured
+  , etaGetter
+  , etaGetterGroup
+  , etaOfEta
+  )
+
+import root
+
+record Point = Point { x :: Real, y :: Real }
+record Py => Point = "dict"
+record R => Point = "list"
+record Cpp => Point = "point_t"
+
+-- Fields declared in reverse alphabetical order and read back in both
+-- orders: a rebuild that lays the record out by anything other than the
+-- receiver's own order shows up here.
+record Het = Het { zed :: Str, alpha :: Int }
+record Py => Het = "dict"
+record R => Het = "list"
+record Cpp => Het = "het_t"
+
+record Nest = Nest { inner :: Point, tag :: Str }
+record Py => Nest = "dict"
+record R => Nest = "list"
+record Cpp => Nest = "nest_t"
+
+points :: [Point]
+points = [ {x = 1.5, y = 2.5}, {x = 3.5, y = 4.5} ]
+
+hets :: [Het]
+hets = [ {zed = "z1", alpha = 1}, {zed = "z2", alpha = 2} ]
+
+nests :: [Nest]
+nests = [ {inner = {x = 1.5, y = 2.5}, tag = "n1"} ]
+
+pairs :: [(Int, Int)]
+pairs = [ (1, 2), (3, 4) ]
+
+etaSingle :: [Point]
+etaSingle = map .(.x = 9.5) points
+
+etaTwo :: [Point]
+etaTwo = map .(.y = 7.5, .x = 9.5) points
+
+etaReversed :: [Het]
+etaReversed = map .(.alpha = 99, .zed = "SET") hets
+
+etaCaptured :: Real -> [Point]
+etaCaptured v = map .(.x = v) points
+
+etaCapturedTwo :: Real -> Real -> [Point]
+etaCapturedTwo a b = map .(.y = b, .x = a) points
+
+etaNested :: Real -> [Nest]
+etaNested v = map .(.inner.x = v) nests
+
+etaTuple :: [(Int, Int)]
+etaTuple = map .(.1 = 9) pairs
+
+etaTupleCaptured :: Int -> [(Int, Int)]
+etaTupleCaptured n = map .(.0 = n) pairs
+
+etaGetter :: [Str]
+etaGetter = map .zed hets
+
+etaGetterGroup :: [(Int, Str)]
+etaGetterGroup = map .(.alpha, .zed) hets
+
+-- A setter and a getter both eta-expanded, one feeding the other.
+etaOfEta :: [Real]
+etaOfEta = map .x (map .(.x = 9.5) points)

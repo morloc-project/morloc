@@ -1,0 +1,18 @@
+--- pyUnit ---
+5
+--- cppUnit ---
+5
+--- rustUnit ---
+5
+--- pyGuard ---
+py shout 1
+--- cppGuard ---
+cpp shout 1
+--- rustGuard ---
+rust shout 1
+--- pyBare ---
+py shout 2
+--- cppBare ---
+cpp shout 2
+--- rustBare ---
+rust shout 2

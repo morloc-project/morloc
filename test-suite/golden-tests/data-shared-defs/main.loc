@@ -1,0 +1,67 @@
+-- A shared definition library used from hand-written native code in two
+-- compiled languages at once.
+--
+-- Every type is declared once in `types.loc` and every native file names
+-- what it needs. The three declaration styles are exercised together
+-- because they resolve by different paths: a `data` with no per-language
+-- form, a record the compiler emits under "struct", and a record the
+-- native file declares itself.
+--
+-- The load-bearing case is a `data` field reached THROUGH a record. A
+-- record mapped to a native name restates none of its fields, so nothing
+-- pairs a field against a concrete counterpart -- the arms have to come
+-- from the declaration. Resolving them against themselves instead leaves
+-- the morloc spelling in the native slot, which no language has, and it is
+-- not a type error anywhere in morloc: it surfaces only as native code
+-- naming a type that does not exist.
+
+module main
+  ( describeRust
+  , describeCpp
+  , stepRust
+  , stepCpp
+  , planRust
+  , planCpp
+  , madeRust
+  , crossed
+  )
+
+import .types
+import root-rust
+import root-cpp
+
+source Rust from "defs.rs"
+  ( "rs_describe"  as describeRust
+  , "rs_step_desc" as stepRust
+  , "rs_plan_desc" as planRust
+  , "rs_make_plan" as makePlanRust
+  )
+
+source Cpp from "defs.hpp"
+  ( "cpp_describe"  as describeCpp
+  , "cpp_step_desc" as stepCpp
+  , "cpp_plan_desc" as planCpp
+  )
+
+-- A bare `data` crossing into each language
+describeRust :: Action -> Str
+describeCpp  :: Action -> Str
+
+-- A `data` inside a compiler-emitted record
+stepRust :: Step -> Str
+stepCpp  :: Step -> Str
+
+-- A `data` inside a record the native file declares
+planRust :: Plan -> Str
+planCpp  :: Plan -> Str
+
+-- Built in a pool and read back out, so the wire form round-trips
+makePlanRust :: Str -> Plan
+
+madeRust :: Str -> Plan
+madeRust s = makePlanRust s
+
+-- Built in one pool, described in the other: the two native representations
+-- of one morloc type have to agree on the wire.
+crossed :: Str -> Str
+crossed s = planCpp (makePlanRust s)

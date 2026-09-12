@@ -1,0 +1,40 @@
+--' Exercises which named types the machine-readable help defines.
+--'
+--\ Three claims:
+--\   * a record reached only through another record's field is defined,
+--\     not merely named
+--\   * a packable constructor the command actually packs is published
+--\   * one that only appears in the signature is not -- unit serializes
+--\     as null and never reaches a pack function
+module main (touch, showDb, mapSize)
+
+import root-py
+import map-py
+
+source Py from "helpers.py" ("map_size" as mapSizePy)
+
+mapSizePy :: Map Str Int -> Int
+
+record Todo where
+  title :: Str
+  done :: Bool
+
+record Db where
+  nextId :: Int
+  items :: [Todo]
+
+record py => Todo = "dict"
+record py => Db = "dict"
+
+--' A command whose return is unit
+touch :: Int -> <IO> ()
+touch x = do
+  ()
+
+--' A record whose field type is another record
+showDb :: Int -> Db
+showDb n = { nextId = n, items = [] }
+
+--' Count the entries of a map, which is packable and is packed here
+mapSize :: Map Str Int -> Int
+mapSize m = mapSizePy m

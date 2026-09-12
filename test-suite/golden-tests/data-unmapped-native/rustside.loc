@@ -1,0 +1,39 @@
+module rustside (enums, variants, roundTrip, eqSame, eqDiff, crated)
+
+import .types
+import root-rust
+
+enums :: [Color]
+enums = replicate 3 Green
+
+variants :: [Box]
+variants = replicate 2 (Wrap 1.5)
+
+roundTrip :: [Box] -> [Box]
+roundTrip xs = replicate (length xs) Empty
+
+-- `Color` appears in neither signature, so the only thing that can tell the
+-- pool its constructor table is the declaration. A table gathered from the
+-- literals present would hold one arm and renumber every other constructor,
+-- which is silent: the pool agrees with itself and disagrees with the wire.
+-- Both use the LAST constructor, whose tag a truncated table moves to zero.
+eqSame :: Bool
+eqSame = Blue == Blue
+
+eqDiff :: Bool
+eqDiff = Blue == Red
+
+-- A payload constructor reached through a RECORD FIELD rather than directly.
+-- A record's fields are resolved by a different path than a bare type, and
+-- that path has to reach each arm's field types too: an arm resolved against
+-- itself keeps the morloc name where the pool needs its own, which is not a
+-- type error anywhere -- it surfaces only as native code naming a type that
+-- does not exist there.
+record Crate where
+  label :: Str
+  item :: Box
+record Rust => Crate = "struct"
+record Cpp  => Crate = "struct"
+
+crated :: [Crate]
+crated = replicate 2 {label = "a", item = Wrap 3.5}

@@ -1,0 +1,7 @@
+--' A module whose signature is written in terms of its own alias.
+module lib (Path, touch)
+
+type Path = Str
+
+touch :: Path -> Path
+touch p = p

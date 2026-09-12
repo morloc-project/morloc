@@ -46,7 +46,7 @@ restructure s = do
   MM.setCounter $ maximum (map AST.maxIndex (DAG.nodes s)) + 1
 
   checkForSelfRecursion s -- bare self-recursion is rejected; guarded forms pass
-    >>= checkMutualRecursion -- non-trivial SCCs over typedef-references are rejected
+    >>= checkMutualRecursion -- typedef cycles no `data` cuts are rejected
     >>= resolveImports -- rewrite DAG edges to map imported terms to their aliases
     >>= handleBinops -- resolve binary operators
     >>= hoistEvals -- hoist user '!' markers into do-block binds
@@ -133,7 +133,8 @@ mention the type applied to its own parameters, which is the parser's
 shape for parametric existence claims like @type Foo a = Foo a@.
 
 Mutual recursion is NOT diagnosed here; @checkMutualRecursion@ runs
-afterwards and rejects any non-trivial SCC over typedef references.
+afterwards and rejects any non-trivial SCC over typedef references that
+no `data` type cuts.
 -}
 checkForSelfRecursion :: DAG k e ExprI -> MorlocMonad (DAG k e ExprI)
 checkForSelfRecursion d = do
@@ -141,6 +142,12 @@ checkForSelfRecursion d = do
   return d
   where
     isExprSelfRecursive :: ExprI -> MorlocMonad ()
+    -- A `data` type may refer to itself. Its constructor payloads are
+    -- reached through a pointer, so a value's width does not depend on how
+    -- deep the recursion goes -- the same reason a list- or option-guarded
+    -- alias is accepted below. A type with no base case is uninhabited
+    -- rather than ill-formed: nothing can build a value of it.
+    isExprSelfRecursive (ExprI _ (TypE (ExprTypeE _ _ _ _ _ TypedefEnum))) = return ()
     isExprSelfRecursive (ExprI i (TypE (ExprTypeE Nothing v vs t _ _)))
       -- Forward declaration with no body: parser lowers @type Foo@ to a
       -- body that is just @VarU Foo@ itself. Exempt these along with the
@@ -150,24 +157,54 @@ checkForSelfRecursion d = do
       | classifyRecursion v t == Bare =
           MM.throwSourcedError i $ "Found unsupported self-recursive type alias:" <+> pretty v
       | otherwise = return ()
-    isExprSelfRecursive (ExprI i (TypE (ExprTypeE _ v ts t _ _)))
+    isExprSelfRecursive (ExprI i (TypE (ExprTypeE mlang v ts t _ _)))
       -- Language-specific typedefs: the same rule applied to the body
       -- and any TypeU parameter slots.
-      | any ((== Bare) . classifyRecursion v) (t : rights ts) =
+      | any ((== Bare) . classifyRecursion v) (langBodies mlang t ++ rights ts) =
           MM.throwSourcedError i $ "Found unsupported self-recursive type alias:" <+> pretty v
       | otherwise = return ()
     isExprSelfRecursive _ = return ()
 
-{- | Reject mutually recursive typedefs.
+    -- Which parts of a per-language body the self-recursion rule applies
+    -- to.
+    --
+    -- When the right-hand side is a quoted native name (isTerminal), its
+    -- head lives in the TARGET language's namespace, not morloc's. If the
+    -- two coincide -- `type Cpp => Foo = "Foo"`, the ordinary way to bind
+    -- a morloc type to a same-named native one -- that is not a cycle, so
+    -- the head is dropped. Argument slots still hold morloc types, so they
+    -- stay under the rule and `type Cpp => Foo = "Foo" Foo` is still
+    -- rejected.
+    --
+    -- A non-terminal right-hand side (`type Cpp => A = B`) is an ordinary
+    -- morloc type expression, so nothing is dropped there.
+    --
+    -- `record Cpp => Ops = "Ops"` relies on the same exemption and only
+    -- avoids this check today by taking a different desugaring path.
+    langBodies :: Maybe (Lang, Bool) -> TypeU -> [TypeU]
+    langBodies (Just (_, True)) (VarU _) = []
+    langBodies (Just (_, True)) (AppU (VarU _) args) = args
+    langBodies _ b = [b]
+
+{- | Reject mutually recursive typedefs, unless a `data` cuts every cycle.
 
 Self-recursion guarded by @[_]@ or @?_@ is permitted by
 @checkForSelfRecursion@. Mutual recursion -- a cycle of two or more
-typedefs that reference each other -- is not supported, because the
-type-evaluator's bound-set termination only protects each typedef's
-own name; cycles across distinct typedef names would still loop. We
-diagnose them up front here so the compiler does not hang later in
-the reduce-and-retry sites in Realize/Express or in pairEval's alias
-chase.
+typedefs that reference each other -- is supported only when the cycle
+passes through a `data` type, for two reasons that both come from the
+nominal boundary a `data` puts up:
+
+  * Reduction stops at a `data`: the type evaluator carries its
+    constructor table rather than expanding it, so no walk over a type
+    can loop through the cycle. A cycle of transparent aliases
+    (@type A = [B]@, @type B = [A]@) has no such stop and would loop.
+
+  * A constructor's payload sits behind a pointer in every backend, so a
+    value's width does not depend on how the two types recurse into one
+    another. Whether a cycle of records is guarded (through @[_]@ or
+    @?_@) is a property of the cycle, and the guardedness check only
+    classifies each definition's own body; admitting record cycles would
+    admit unguarded ones with infinite width.
 
 Algorithm: collect typedefs across ALL modules in the DAG and build a
 single directed graph keyed by @(Maybe Lang, TVar)@ -- the typedef's
@@ -175,10 +212,12 @@ language scope (general = @Nothing@, language-specific = @Just lang@)
 paired with its name. An edge @A -> B@ exists iff @B@ appears
 anywhere in @A@'s body (regardless of guarding); references resolve
 to the same-language entry when one exists, otherwise to the general
-entry. Quotient by SCC via @Data.Graph.stronglyConnComp@. Any cyclic
-SCC of size >= 2 is illegal mutual recursion. Singleton SCCs (with
-or without a self-loop) are passed through: a self-loop indicates a
-self-recursion that @checkForSelfRecursion@ has already either
+entry. Quotient by SCC via @Data.Graph.stronglyConnComp@. For a cyclic
+SCC of size >= 2, delete its `data` members and recompute: a cycle that
+survives among the rest is illegal, and is the one named in the error,
+since those are the definitions the user has to break. Singleton SCCs
+(with or without a self-loop) are passed through: a self-loop indicates
+a self-recursion that @checkForSelfRecursion@ has already either
 permitted (guarded) or rejected (bare).
 
 The check is global rather than per-module because cycles can span
@@ -201,7 +240,7 @@ through the @a@ parameter.
 checkMutualRecursion :: DAG k e ExprI -> MorlocMonad (DAG k e ExprI)
 checkMutualRecursion d = do
   let allTypedefs = concatMap collectTypedefs (DAG.nodes d)
-      declared = Set.fromList [(scope, v) | (_, scope, v, _, _) <- allTypedefs]
+      declared = Set.fromList [(scope, v) | (_, scope, v, _, _, _) <- allTypedefs]
       -- Resolve a bare name reference to the right scope-qualified
       -- key. Same-language scope wins; otherwise fall back to the
       -- general scope. References to undeclared names (built-ins,
@@ -211,21 +250,38 @@ checkMutualRecursion d = do
         | Set.member (Nothing, x) declared = Just (Nothing, x)
         | otherwise = Nothing
       nodes =
-        [ ((i, scope, v), (scope, v), Set.toList outgoing)
-        | (i, scope, v, vs, t) <- allTypedefs
+        [ ((i, scope, v, kind), (scope, v), Set.toList outgoing)
+        | (i, scope, v, vs, t, kind) <- allTypedefs
         , let bound = Set.fromList [p | Left (p, _) <- vs]
         , let mentioned = Set.fromList (AST.findTypeTerms t) `Set.difference` bound
         , let outgoing = Set.fromList (mapMaybe (resolveRef scope) (Set.toList mentioned))
         ]
       sccs = Graph.stronglyConnComp nodes
-  mapM_ rejectCyclic sccs
+  mapM_ (rejectCyclic nodes) sccs
   return d
   where
-    rejectCyclic :: Graph.SCC (Int, Maybe Lang, TVar) -> MorlocMonad ()
-    rejectCyclic (Graph.CyclicSCC xs@(_:_))
+    rejectCyclic ::
+      [((Int, Maybe Lang, TVar, TypedefKind), (Maybe Lang, TVar), [(Maybe Lang, TVar)])] ->
+      Graph.SCC (Int, Maybe Lang, TVar, TypedefKind) ->
+      MorlocMonad ()
+    rejectCyclic nodes (Graph.CyclicSCC xs@(_:_))
       | length xs >= 2 =
-          let (firstIdx, scope0, _) = head xs
-              cycleNames = [v | (_, _, v) <- xs]
+          let members = Set.fromList [(scope, v) | (_, scope, v, kind) <- xs, kind /= TypedefEnum]
+              -- The same graph restricted to this SCC's non-`data`
+              -- members: a cycle here is one no `data` cuts.
+              induced =
+                [ (node, key, filter (`Set.member` members) outgoing)
+                | (node, key, outgoing) <- nodes
+                , Set.member key members
+                ]
+          in mapM_ rejectUncut (Graph.stronglyConnComp induced)
+    rejectCyclic _ _ = return ()
+
+    rejectUncut :: Graph.SCC (Int, Maybe Lang, TVar, TypedefKind) -> MorlocMonad ()
+    rejectUncut (Graph.CyclicSCC xs@(_:_))
+      | length xs >= 2 =
+          let (firstIdx, scope0, _, _) = head xs
+              cycleNames = [v | (_, _, v, _) <- xs]
               -- An SCC of size >= 2 has all members in the same
               -- scope: general typedefs never reference
               -- language-specific names, and language-to-general
@@ -235,12 +291,13 @@ checkMutualRecursion d = do
                 Nothing -> "type definitions"
                 Just lang -> pretty lang <+> "type definitions"
           in MM.throwSourcedError firstIdx $
-               "Mutual recursion between" <+> scopeMsg <+> "is not supported." <+>
+               "Mutual recursion between" <+> scopeMsg <+> "is not supported"
+                 <+> "unless a `data` type cuts the cycle." <+>
                "Cycle:" <+> hsep (punctuate "," (map pretty cycleNames))
-    rejectCyclic _ = return ()
+    rejectUncut _ = return ()
 
-    collectTypedefs :: ExprI -> [(Int, Maybe Lang, TVar, [Either (TVar, Kind) TypeU], TypeU)]
-    collectTypedefs (ExprI i (TypE (ExprTypeE form v vs t _ _))) = [(i, fmap fst form, v, vs, t)]
+    collectTypedefs :: ExprI -> [(Int, Maybe Lang, TVar, [Either (TVar, Kind) TypeU], TypeU, TypedefKind)]
+    collectTypedefs (ExprI i (TypE (ExprTypeE form v vs t _ kind))) = [(i, fmap fst form, v, vs, t, kind)]
     collectTypedefs (ExprI _ (ModE _ es)) = concatMap collectTypedefs es
     collectTypedefs _ = []
 
@@ -284,16 +341,17 @@ resolveImports d0 =
           return $ AST.setExport (ExportMany exports []) e
         (ExportMany ungroupedExports groups) ->
           let allExplicit = Set.unions (ungroupedExports : [exportGroupMembers g | g <- groups])
-              resolved = resolveExplicitTypeclasses allSymbols allExplicit
+              resolved = resolveExplicitSymbols allSymbols allExplicit
               missing = Set.map snd resolved `Set.difference` allSymbols
            in if Set.null missing
                 then do
                   -- Rebuild groups with resolved typeclasses
                   let resolvedGroups =
                         map
-                          (\g -> g {exportGroupMembers = resolveExplicitTypeclasses allSymbols (exportGroupMembers g)})
+                          (\g -> g {exportGroupMembers = resolveExplicitSymbols allSymbols (exportGroupMembers g)})
                           groups
-                      resolvedUngrouped = resolveExplicitTypeclasses allSymbols ungroupedExports
+                  resolvedUngrouped <-
+                    exportCtorsWithTypes allSymbols resolved (resolveExplicitSymbols allSymbols ungroupedExports)
                   return $ AST.setExport (ExportMany resolvedUngrouped resolvedGroups) e
                 else
                   MM.throwSystemError $
@@ -302,14 +360,42 @@ resolveImports d0 =
                       <+> "does not export the following terms or types:"
                       <+> list (map pretty (Set.toList missing))
 
-    resolveExplicitTypeclasses :: Set Symbol -> Set (Int, Symbol) -> Set (Int, Symbol)
-    resolveExplicitTypeclasses ss sis = Set.map f sis
+    -- An UPPER name in an export list parses as a type. Reclassify it as a
+    -- class when a class of that name is in scope, or as a term when only a
+    -- term of that name is -- which is how a `data` constructor is named
+    -- explicitly, since constructors are the one kind of term spelled
+    -- uppercase.
+    resolveExplicitSymbols :: Set Symbol -> Set (Int, Symbol) -> Set (Int, Symbol)
+    resolveExplicitSymbols ss sis = Set.map f sis
       where
         f :: (Int, Symbol) -> (Int, Symbol)
         f (i, TypeSymbol (TV x))
           | (ClassSymbol (ClassName x)) `Set.member` ss = (i, ClassSymbol (ClassName x))
+          | not (TypeSymbol (TV x) `Set.member` ss)
+          , TermSymbol (EV x) `Set.member` ss = (i, TermSymbol (EV x))
           | otherwise = (i, TypeSymbol (TV x))
         f x = x
+
+    -- A `data` type carries its constructors: exporting the type exports
+    -- the association, which is what an importer turns into the constructor
+    -- terms, and what a module further along re-exports without holding
+    -- the declaration. The terms themselves are NOT added to the export
+    -- list: the root's export list is the program's command surface, and
+    -- a constructor is not a command. The type may have been named in any
+    -- export group; the associations go with the ungrouped exports, since
+    -- a group is a set of commands.
+    exportCtorsWithTypes :: Set Symbol -> Set (Int, Symbol) -> Set (Int, Symbol) -> MorlocMonad (Set (Int, Symbol))
+    exportCtorsWithTypes ss allExplicit ungrouped = do
+      let exportedTypes = Set.fromList [t | (_, TypeSymbol t) <- Set.toList allExplicit]
+          carried =
+            Set.fromList
+              [ CtorSymbol t c
+              | CtorSymbol t c <- Set.toList ss
+              , Set.member t exportedTypes
+              ]
+          already = Set.map snd allExplicit
+      extra <- mapM addIndex (Set.toList (carried `Set.difference` already))
+      return $ Set.union ungrouped (Set.fromList extra)
 
     addIndex :: a -> MorlocMonad (Int, a)
     addIndex x = (,) <$> MM.getCounter <*> pure x
@@ -321,97 +407,134 @@ resolveImports d0 =
       ExprI -> -- importing module expression (with resolved exports)
       ExprI -> -- imported module expression  (with resolved exports)
       MorlocMonad [AliasedSymbol]
-    resolveEdge imp _ childX = case (importInclude imp, importNamespace imp, AST.findExport childX) of
-      (_, _, ExportAll) -> error "This should have been resolved already"
-      -- No namespace: existing behavior
-      (Nothing, Nothing, ExportMany exps gs) ->
+    resolveEdge imp _ childX = case (importInclude imp, AST.findExport childX) of
+      (_, ExportAll) -> error "This should have been resolved already"
+      -- No include list: everything the module exports, under the
+      -- namespace prefix when the import has one.
+      (Nothing, ExportMany exps gs) ->
         let allExps = Set.unions (exps : [exportGroupMembers g | g <- gs])
-         in return $ map (toAliasedSymbol . snd) (Set.toList allExps)
-      (Just ass, Nothing, ExportMany exps gs) -> return . catMaybes $ map (importAlias . unAliasedSymbol) ass
+         in return $ map (prefixAlias ns) (mapMaybe (toAliasedSymbol . snd) (Set.toList allExps))
+      (Just ass, ExportMany exps gs) -> return $ concatMap importAlias ass
         where
           allExps = Set.unions (exps : [exportGroupMembers g | g <- gs])
-          exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList allExps]
+          (termExps, typeExps) = exportMapsOf allExps
           excludes = map unSymbol (importExclude imp)
 
-          importAlias :: (Text, Text) -> Maybe AliasedSymbol
-          importAlias (name, alias)
-            | name `elem` excludes = Nothing
-            | otherwise = case Map.lookup name exportMap of
-                Nothing -> Nothing
-                (Just (TermSymbol _)) -> Just $ AliasedTerm (EV name) (EV alias)
-                (Just (TypeSymbol _)) -> Just $ AliasedType (TV name) (TV alias)
-                (Just (ClassSymbol _)) -> Just $ AliasedClass (ClassName name)
-      -- With namespace: prefix term aliases (V1: types/classes not prefixed)
-      (Nothing, Just ns, ExportMany exps gs) ->
-        let allExps = Set.unions (exps : [exportGroupMembers g | g <- gs])
-         in return $ map (prefixAlias ns . toAliasedSymbol . snd) (Set.toList allExps)
-      (Just ass, Just ns, ExportMany exps gs) -> return . catMaybes $ map (importAlias . unAliasedSymbol) ass
-        where
-          allExps = Set.unions (exps : [exportGroupMembers g | g <- gs])
-          exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList allExps]
-          excludes = map unSymbol (importExclude imp)
+          -- Resolve one item of the include list against the exports. A
+          -- `data` type brings its constructors, each aliased from the
+          -- exporter's own spelling to the bare name, under the prefix.
+          -- An UPPER item that names no type or class may still name a
+          -- constructor explicitly.
+          importAlias :: AliasedSymbol -> [AliasedSymbol]
+          importAlias (AliasedTerm (EV name) (EV alias))
+            | name `elem` excludes = []
+            | otherwise = case Map.lookup name termExps of
+                Just orig -> [prefixAlias ns (AliasedTerm orig (EV alias))]
+                Nothing -> []
+          importAlias (AliasedType (TV name) (TV alias))
+            | name `elem` excludes = []
+            | otherwise = case Map.lookup name typeExps of
+                Just (TypeSymbol t) ->
+                  AliasedType (TV name) (TV alias)
+                    : [ prefixAlias ns (AliasedTerm c (EV (ctorBaseName c)))
+                      | c <- ctorsOf allExps t
+                      , ctorBaseName c `notElem` excludes ]
+                Just (ClassSymbol _) -> [AliasedClass (ClassName name)]
+                _ -> case Map.lookup name termExps of
+                  Just orig -> [prefixAlias ns (AliasedTerm orig (EV alias))]
+                  Nothing -> []
+          importAlias (AliasedClass (ClassName name))
+            | name `elem` excludes = []
+            | otherwise = case Map.lookup name typeExps of
+                Just (ClassSymbol _) -> [AliasedClass (ClassName name)]
+                _ -> []
+      where
+        ns = importNamespace imp
 
-          importAlias :: (Text, Text) -> Maybe AliasedSymbol
-          importAlias (name, alias)
-            | name `elem` excludes = Nothing
-            | otherwise = case Map.lookup name exportMap of
-                Nothing -> Nothing
-                (Just (TermSymbol _)) -> Just $ prefixAlias ns (AliasedTerm (EV name) (EV alias))
-                (Just (TypeSymbol _)) -> Just $ AliasedType (TV name) (TV alias)
-                (Just (ClassSymbol _)) -> Just $ AliasedClass (ClassName name)
-
-    prefixAlias :: EVar -> AliasedSymbol -> AliasedSymbol
-    prefixAlias (EV ns) (AliasedTerm orig (EV alias)) = AliasedTerm orig (EV (ns <> "." <> alias))
+    prefixAlias :: Maybe EVar -> AliasedSymbol -> AliasedSymbol
+    prefixAlias (Just (EV ns)) (AliasedTerm orig (EV alias)) = AliasedTerm orig (EV (ns <> "." <> alias))
     prefixAlias _ sym = sym
+
+    -- The exports of a module keyed by name, terms apart from types and
+    -- classes so a `data` type and a constructor of the same name (the
+    -- ordinary `data Box = Box Int`) do not shadow one another. A term
+    -- entry maps the name an importer writes to the spelling the exporter
+    -- knows the term by, which differ for a constructor the exporter itself
+    -- imported under a namespace.
+    exportMapsOf :: Set (Int, Symbol) -> (Map Text EVar, Map Text Symbol)
+    exportMapsOf exps =
+      ( Map.fromList $
+          [(ctorBaseName c, c) | (_, CtorSymbol _ c) <- Set.toList exps]
+            ++ [(unEVar c, c) | (_, TermSymbol c) <- Set.toList exps]
+      , Map.fromList $
+          [(unSymbol s, s) | (_, s@(TypeSymbol _)) <- Set.toList exps]
+            ++ [(unSymbol s, s) | (_, s@(ClassSymbol _)) <- Set.toList exps]
+      )
+
+    -- The constructors an exported `data` type carries, under the spelling
+    -- the exporting module knows them by.
+    ctorsOf :: Set (Int, Symbol) -> TVar -> [EVar]
+    ctorsOf exps t = [c | (_, CtorSymbol t' c) <- Set.toList exps, t' == t]
+
+    -- A constructor's own name, with any namespace prefix removed. What an
+    -- importer receives is the bare name; the prefix, if any, is the
+    -- importer's own to add.
+    ctorBaseName :: EVar -> Text
+    ctorBaseName (EV c) = snd (T.breakOnEnd "." c)
 
     filterImports ::
       MVar ->
       Import -> -- the current node import list
       Export -> -- the imported modules export list
       MorlocMonad (Set Symbol)
-    -- No namespace, no include list: import everything
-    filterImports _ (Import _ Nothing exclude Nothing) (ExportMany exports gs) =
+    -- No include list: import everything, under the namespace prefix when
+    -- there is one. A carried constructor arrives under its bare name, as a
+    -- term of its own and as the association that lets this module export
+    -- it again with its type.
+    filterImports _ (Import _ Nothing exclude ns) (ExportMany exports gs) =
       let allExports = Set.unions (exports : [exportGroupMembers g | g <- gs])
-       in return $ (Set.map snd allExports) `Set.difference` (Set.fromList exclude)
-    -- With namespace, no include list: prefix all terms
-    filterImports _ (Import _ Nothing exclude (Just (EV ns))) (ExportMany exports gs) =
-      let allExports = Set.unions (exports : [exportGroupMembers g | g <- gs])
-       in return $ Set.map (prefixSymbol ns) ((Set.map snd allExports) `Set.difference` (Set.fromList exclude))
-    -- No namespace, with include list: existing behavior
-    filterImports m1 (Import m2 (Just as) (map unSymbol -> exclude) Nothing) (ExportMany exports gs) =
-      case partitionEithers . catMaybes $ map importAlias (map unAliasedSymbol as) of
+          kept = (Set.map snd allExports) `Set.difference` (Set.fromList exclude)
+       in return $ Set.unions (map (Set.fromList . map (prefixSymbol ns) . arriving) (Set.toList kept))
+      where
+        arriving (CtorSymbol t c) = [CtorSymbol t (EV (ctorBaseName c)), TermSymbol (EV (ctorBaseName c))]
+        arriving s = [s]
+    -- With an include list: only the named items, each resolved the same
+    -- way 'resolveEdge' resolves it.
+    filterImports m1 (Import m2 (Just as) (map unSymbol -> exclude) ns) (ExportMany exports gs) =
+      case partitionEithers (concatMap importAlias as) of
         ([], imps) -> return $ Set.fromList imps
         (missing, _) -> throwMissingImportError m1 m2 missing
       where
         allExports = Set.unions (exports : [exportGroupMembers g | g <- gs])
-        exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList allExports]
+        (termExps, typeExps) = exportMapsOf allExports
 
-        importAlias :: (Text, Text) -> Maybe (Either Text Symbol)
-        importAlias (name, alias)
-          | name `elem` exclude = Nothing
-          | otherwise = case Map.lookup name exportMap of
-              Nothing -> Just (Left name)
-              (Just (TermSymbol _)) -> Just . Right $ TermSymbol (EV alias)
-              (Just (TypeSymbol _)) -> Just . Right $ TypeSymbol (TV alias)
-              (Just (ClassSymbol _)) -> Just . Right $ ClassSymbol (ClassName alias)
-    -- With namespace and include list: prefix selected terms
-    filterImports m1 (Import m2 (Just as) (map unSymbol -> exclude) (Just (EV ns))) (ExportMany exports gs) =
-      case partitionEithers . catMaybes $ map importAlias (map unAliasedSymbol as) of
-        ([], imps) -> return $ Set.fromList imps
-        (missing, _) -> throwMissingImportError m1 m2 missing
-      where
-        allExports = Set.unions (exports : [exportGroupMembers g | g <- gs])
-        exportMap = Map.fromList [(unSymbol s, s) | (_, s) <- Set.toList allExports]
-
-        importAlias :: (Text, Text) -> Maybe (Either Text Symbol)
-        importAlias (name, alias)
-          | name `elem` exclude = Nothing
-          | otherwise = case Map.lookup name exportMap of
-              Nothing -> Just (Left name)
-              (Just (TermSymbol _)) -> Just . Right $ TermSymbol (EV (ns <> "." <> alias))
-              (Just (TypeSymbol _)) -> Just . Right $ TypeSymbol (TV alias)
-              (Just (ClassSymbol _)) -> Just . Right $ ClassSymbol (ClassName alias)
+        importAlias :: AliasedSymbol -> [Either Text Symbol]
+        importAlias (AliasedTerm (EV name) (EV alias))
+          | name `elem` exclude = []
+          | otherwise = case Map.lookup name termExps of
+              Just _ -> [Right (prefixSymbol ns (TermSymbol (EV alias)))]
+              Nothing -> [Left name]
+        importAlias (AliasedType (TV name) (TV alias))
+          | name `elem` exclude = []
+          | otherwise = case Map.lookup name typeExps of
+              Just (TypeSymbol t) ->
+                Right (TypeSymbol (TV alias))
+                  : concat
+                      [ map (Right . prefixSymbol ns) [CtorSymbol (TV alias) (EV base), TermSymbol (EV base)]
+                      | c <- ctorsOf allExports t
+                      , let base = ctorBaseName c
+                      , base `notElem` exclude ]
+              Just (ClassSymbol _) -> [Right (ClassSymbol (ClassName alias))]
+              _ -> case Map.lookup name termExps of
+                Just _ -> [Right (prefixSymbol ns (TermSymbol (EV alias)))]
+                Nothing -> [Left name]
+        importAlias (AliasedClass (ClassName name))
+          | name `elem` exclude = []
+          | otherwise = case Map.lookup name typeExps of
+              Just (ClassSymbol _) -> [Right (ClassSymbol (ClassName name))]
+              _ -> [Left name]
     filterImports _ _ _ = error "Unreachable -- all Export values should have been converted to ExportMany"
+
 
     -- Build the diagnostic for a failed selective import. Names that resolve
     -- to a typeclass method get a dedicated message explaining that methods
@@ -455,12 +578,19 @@ resolveImports d0 =
             Just cls -> ((name, cls) : methods, notExported)
             Nothing -> (methods, name : notExported)
 
-    prefixSymbol :: Text -> Symbol -> Symbol
-    prefixSymbol ns (TermSymbol (EV name)) = TermSymbol (EV (ns <> "." <> name))
+    prefixSymbol :: Maybe EVar -> Symbol -> Symbol
+    prefixSymbol (Just (EV ns)) (TermSymbol (EV name)) = TermSymbol (EV (ns <> "." <> name))
+    prefixSymbol (Just (EV ns)) (CtorSymbol t (EV name)) = CtorSymbol t (EV (ns <> "." <> name))
     prefixSymbol _ sym = sym
 
     findSymbols :: ExprI -> Set Symbol
     findSymbols (ExprI _ (ModE _ es)) = Set.unions (map findSymbols es)
+    -- A `data` declaration also records which terms are its constructors,
+    -- so they can follow the type through an export or import list. The
+    -- constructor terms themselves come from the signatures and bindings
+    -- the declaration desugared into.
+    findSymbols (ExprI _ (TypE (ExprTypeE Nothing v _ body _ TypedefEnum))) =
+      Set.fromList $ TypeSymbol v : [CtorSymbol v (EV c) | Just cs <- [dataBodyCtors body], (c, _) <- cs]
     findSymbols (ExprI _ (TypE (ExprTypeE _ v _ _ _ _))) = Set.singleton $ TypeSymbol v
     findSymbols (ExprI _ (AssE e _ _)) = Set.singleton $ TermSymbol e
     findSymbols (ExprI _ (ClsE (Typeclass _ cls _ _))) = Set.singleton $ ClassSymbol cls
@@ -476,16 +606,15 @@ resolveImports d0 =
     unSymbol (TypeSymbol (TV v)) = v
     unSymbol (TermSymbol (EV v)) = v
     unSymbol (ClassSymbol (ClassName v)) = v
+    unSymbol (CtorSymbol _ (EV v)) = v
 
-    unAliasedSymbol :: AliasedSymbol -> (Text, Text)
-    unAliasedSymbol (AliasedType x y) = (unTVar x, unTVar y)
-    unAliasedSymbol (AliasedTerm x y) = (unEVar x, unEVar y)
-    unAliasedSymbol (AliasedClass x) = (unClassName x, unClassName x)
-
-    toAliasedSymbol :: Symbol -> AliasedSymbol
-    toAliasedSymbol (TypeSymbol x) = AliasedType x x
-    toAliasedSymbol (TermSymbol x) = AliasedTerm x x
-    toAliasedSymbol (ClassSymbol x) = AliasedClass x
+    -- A carried constructor is imported under its bare name, whatever the
+    -- exporter called it.
+    toAliasedSymbol :: Symbol -> Maybe AliasedSymbol
+    toAliasedSymbol (TypeSymbol x) = Just (AliasedType x x)
+    toAliasedSymbol (TermSymbol x) = Just (AliasedTerm x x)
+    toAliasedSymbol (ClassSymbol x) = Just (AliasedClass x)
+    toAliasedSymbol (CtorSymbol _ c) = Just (AliasedTerm c (EV (ctorBaseName c)))
 
 handleTypeDeclarations ::
   DAG k e ExprI ->
@@ -738,18 +867,14 @@ hoistEvals = DAG.mapNodeM hoistNode
         (\(k, e) -> do (e', bs) <- hoistIn e; return ((k, e'), bs))
         rs
       return (ExprI i (NamE rs'), bs)
-    -- @catch's args are boundaries: '!' inside a fallible or fallback
-    -- seals at the arg site instead of hoisting above the @catch. Without
-    -- this, `@catch !(foo x) fb` would rewrite to `do { v <- foo x; @catch
-    -- v fb }`, evaluating the fallible outside @catch's try/catch scope
-    -- and defeating the catch entirely (and rejecting at typecheck since
-    -- the fallible would then be pure). Both args are sealed because the
-    -- fallback is lazy at runtime -- a bang in fallback that hoisted up
-    -- would fire eagerly even on the happy path.
-    hoistIn (ExprI i (IntrinsicE IntrCatch [fallible, fallback])) = do
-      fallible' <- hoistBoundary fallible
-      fallback' <- hoistBoundary fallback
-      return (ExprI i (IntrinsicE IntrCatch [fallible', fallback']), [])
+    -- @try's argument is a boundary: '!' inside the body seals at the arg
+    -- site instead of hoisting above the @try. Without this,
+    -- `@try !(foo x)` would rewrite to `do { v <- foo x; @try v }`,
+    -- evaluating the body outside @try's try/catch scope and leaving the
+    -- @try inert -- it would report success on a body that already failed.
+    hoistIn (ExprI i (IntrinsicE IntrTry [body])) = do
+      body' <- hoistBoundary body
+      return (ExprI i (IntrinsicE IntrTry [body']), [])
     hoistIn (ExprI i (IntrinsicE intr es)) = do
       (es', bs) <- mapAndCollect hoistIn es
       return (ExprI i (IntrinsicE intr es'), bs)

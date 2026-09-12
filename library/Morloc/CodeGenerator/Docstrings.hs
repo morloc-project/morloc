@@ -15,6 +15,9 @@ names, default values, metavars, and CLI option flags.
 module Morloc.CodeGenerator.Docstrings
   ( processDocstrings
   , argLocPrefix
+  -- * Published argument keys
+  , argKey
+  , cliOptKey
   -- * CLI shape validation
   , ArgShape (..)
   , StrShape (..)
@@ -41,6 +44,7 @@ module Morloc.CodeGenerator.Docstrings
   ) where
 
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Morloc.BaseTypes as MBT
 import Morloc.CodeGenerator.Namespace
@@ -101,6 +105,8 @@ overrideCmdDocLines ls (ArgDocRec vars fields) =
   ArgDocRec (vars { docLines = ls }) fields
 overrideCmdDocLines ls (ArgDocAlias vars) =
   ArgDocAlias (vars { docLines = ls })
+overrideCmdDocLines ls (ArgDocData vars ctors) =
+  ArgDocData (vars { docLines = ls }) ctors
 
 -- | A "In <module>:<function>, " prefix used to locate a faulty argument
 -- in diagnostics. Falls back gracefully when the module or term name is
@@ -146,9 +152,11 @@ resolveNestedTypes i = go []
               -- Record-newtype: attach the layout, keep the name.
               (Just [(_, typeOf -> parent@(NamT _ _ _ _), _, _, TypedefNewtype)]) ->
                 go seen' parent
-              -- Other newtypes and primitives are opaque by design.
+              -- Other newtypes, primitives and `data` types are opaque by
+              -- design: there is no parent to walk into.
               (Just [(_, _, _, _, TypedefNewtype)]) -> return t
               (Just [(_, _, _, _, TypedefPrimitive)]) -> return t
+              (Just [(_, _, _, _, TypedefEnum)]) -> return t
               (Just [(_, typeOf -> parent, _, _, TypedefAlias)]) -> go seen' parent
               _ -> return t
       AppT f as -> bindNamed <$> go seen f <*> mapM (go seen) as
@@ -192,7 +200,11 @@ processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs retdoc) = do
   validateManyOrdering loc cmdargs
   validateFlagRevCollisions loc cmdargs
   validatePositionalNames loc cmdargs
+  -- After the two per-category checks: they leave collisions that cross
+  -- categories, which are just as fatal to the machine-readable views.
+  validateArgKeys loc cmdargs
   validateStdinArg loc cmdargs
+  validateOptionalOrdering loc cmdargs
   (t0, retdoc') <- reduceArgDoc i t (ArgDocAlias retdoc)
   t' <- resolveNestedTypes i t0
   return $
@@ -307,6 +319,7 @@ getReturnDesc _ (Just ret) = [ret]
 getReturnDesc (ArgDocRec r _) _ = docLines r
 getReturnDesc (ArgDocSig r _ _) _ = docLines r
 getReturnDesc (ArgDocAlias r) _ = docLines r
+getReturnDesc (ArgDocData r _) _ = docLines r
 
 -- | The media type of a return value, inherited from a `@mime`-annotated
 -- return type alias by 'reduceArgDoc'. Nothing when the return type carries
@@ -315,9 +328,19 @@ getReturnMime :: ArgDoc -> Maybe Text
 getReturnMime (ArgDocRec r _) = docMime r
 getReturnMime (ArgDocSig r _ _) = docMime r
 getReturnMime (ArgDocAlias r) = docMime r
+getReturnMime (ArgDocData r _) = docMime r
 
 reduceArgDoc :: Int -> Type -> ArgDoc -> MorlocMonad (Type, ArgDoc)
-reduceArgDoc i t@(VarT v) arg = do
+reduceArgDoc = reduceArgDocFrom Set.empty
+
+-- | The walk proper, carrying the record names already entered. A record
+-- may hold itself through an optional field, and a cycle walked here would
+-- never end: a name met again is left as it stands, its documentation
+-- having been collected the first time.
+reduceArgDocFrom :: Set.Set TVar -> Int -> Type -> ArgDoc -> MorlocMonad (Type, ArgDoc)
+reduceArgDocFrom seen i t@(VarT v) arg
+  | Set.member v seen = return (t, arg)
+  | otherwise = do
   scope <- MM.getGeneralScope i
   -- The doc-processing index for an imported command carries the *importing*
   -- module's typedef scope (empty for a bare re-export into the root), while
@@ -335,14 +358,20 @@ reduceArgDoc i t@(VarT v) arg = do
     -- their own). Walk into the NamU so the CLI flag derivation sees
     -- the per-field @arg:@/@metavar:@/@default:@ directives.
     (Just [(_, typeOf -> parentType@(NamT _ _ _ _), parentArg, _, TypedefNewtype)]) ->
-      inheritArgDoc arg parentArg >>= reduceArgDoc i parentType
+      inheritArgDoc arg parentArg >>= reduceArgDocFrom (Set.insert v seen) i parentType
     -- Newtype and primitive boundaries otherwise stop inheritance:
     -- their docstring is their own, the wire-parent's (if any) is not
     -- consulted.
     (Just [(_, _, _, _, TypedefNewtype)]) -> return (t, arg)
     (Just [(_, _, _, _, TypedefPrimitive)]) -> return (t, arg)
+    -- A `data` type's scope body is its constructor table, not a parent
+    -- type, so reduction stops here; but its own docstring, and its
+    -- constructors', reach the use site the way a record's fields' do.
+    (Just [(_, _, parentArg, _, TypedefEnum)]) -> do
+      arg' <- inheritArgDoc arg parentArg
+      return (t, arg')
     (Just [(_, typeOf -> parentType, parentArg, _, TypedefAlias)]) ->
-      inheritArgDoc arg parentArg >>= reduceArgDoc i parentType
+      inheritArgDoc arg parentArg >>= reduceArgDocFrom (Set.insert v seen) i parentType
     (Just _) -> MM.throwSystemError $ "Multiple definitions for type alias '" <> pretty (unTVar v) <> "'"
     Nothing -> return (t, arg)
   where
@@ -353,6 +382,9 @@ reduceArgDoc i t@(VarT v) arg = do
     inheritArgDoc (ArgDocAlias r1) (ArgDocRec r2 rs) = do
       checkMimeConflict r1 r2
       return $ ArgDocRec (inheritArgDocVars r1 r2) rs
+    inheritArgDoc (ArgDocAlias r1) (ArgDocData r2 cs) = do
+      checkMimeConflict r1 r2
+      return $ ArgDocData (inheritArgDocVars r1 r2) cs
     inheritArgDoc _ _ = MM.throwSystemError $ "Cannot inherit docstrings for type alias '" <> pretty (unTVar v) <> "'"
 
     -- A media type is authoritative: a single value cannot be labeled two
@@ -391,13 +423,27 @@ reduceArgDoc i t@(VarT v) arg = do
         , docWith = if null (docWith r1) then docWith r2 else docWith r1
         , docMime = docMime r1 <|> docMime r2
         }
-reduceArgDoc i (NamT o v ps (map snd -> ts)) (ArgDocRec arg rs) = do
+reduceArgDocFrom seen i (NamT o v ps (map snd -> ts)) (ArgDocRec arg rs) = do
   let args = map (ArgDocAlias . snd) rs
       keys = map fst rs
-  entries <- zipWithM (reduceArgDoc i) ts args
-  let args' = [r | (ArgDocAlias r) <- map snd entries]
+  entries <- zipWithM (reduceArgDocFrom (Set.insert v seen) i) ts args
+  -- A field's reduced doc keeps whatever shape its type gave it (a `data`
+  -- field carries its constructors, a record field its own fields); the
+  -- entry keeps the field-level variables from any of them.
+  let args' = map (argDocTop . snd) entries
   return (NamT o v ps (zip keys (map fst entries)), ArgDocRec arg (zip keys args'))
-reduceArgDoc _ t r = return (t, r)
+-- An argument that may be omitted is documented as the type it holds.
+reduceArgDocFrom seen i (OptionalT t) arg = do
+  (t', arg') <- reduceArgDocFrom seen i t arg
+  return (OptionalT t', arg')
+reduceArgDocFrom _ _ t r = return (t, r)
+
+-- | The variables at the top of any docstring shape.
+argDocTop :: ArgDoc -> ArgDocVars
+argDocTop (ArgDocAlias r) = r
+argDocTop (ArgDocRec r _) = r
+argDocTop (ArgDocData r _) = r
+argDocTop (ArgDocSig r _ _) = r
 
 makeCmdArg :: MDoc -> Type -> ArgDoc -> MorlocMonad CmdArg
 makeCmdArg loc recType@(NamT _ _ _ rs) (ArgDocRec arg entries) = do
@@ -406,6 +452,9 @@ makeCmdArg loc recType@(NamT _ _ _ rs) (ArgDocRec arg entries) = do
   resolveArgDocVars loc typedEntries recType arg
 makeCmdArg loc t (ArgDocRec r _) = resolveArgDocVars loc [] t r
 makeCmdArg loc t (ArgDocAlias r) = resolveArgDocVars loc [] t r
+makeCmdArg loc t (ArgDocData r ctors)
+  | docUnroll r == Just True = resolveAlt loc t r ctors
+  | otherwise = resolveArgDocVars loc [] t r
 makeCmdArg _ _ (ArgDocSig _ _ _) = MM.throwSystemError "Illegal functional CLI parameter"
 
 resolveArgDocVars :: MDoc -> [(Key, (Type, ArgDocVars))] -> Type -> ArgDocVars -> MorlocMonad CmdArg
@@ -442,10 +491,11 @@ resolveArgDocVars loc rs t r
       && not (not (null rs) && docUnroll r == Just True) =
       MM.throwSystemError $
         loc
-          <> " is given a default value, but positional arguments are"
-          <> " required and cannot take defaults. Either remove the"
-          <> " 'default:' line, or make the field optional by adding an"
-          <> " 'arg:' docstring entry (e.g. \"arg: -f/--flag\")."
+          <> " is given a default value, but a positional argument takes"
+          <> " its value from the command line and cannot take defaults."
+          <> " Either remove the 'default:' line, or move the argument off"
+          <> " the command line by adding an 'arg:' docstring entry"
+          <> " (e.g. \"arg: -f/--flag\")."
   -- list-of-elements (many) and per-field unroll describe
   -- incompatible CLI shapes for the same slot.
   | docMany r == Just True && docUnroll r == Just True =
@@ -460,6 +510,73 @@ resolveArgDocVars loc rs t r
   | otherwise = resolvePos t r |>> CmdArgPos
   where
     isStdin = docStdin r == Just True
+
+-- | Unroll a `data`-typed argument into one option per constructor.
+--
+-- The constructors' field types come from the declaration, since the
+-- docstring carries only names and prose. The argument may be left off
+-- when its type is optional (the value is then null) or when it declares a
+-- default; otherwise exactly one arm is required.
+resolveAlt :: MDoc -> Type -> ArgDocVars -> [(Text, ArgDocVars)] -> MorlocMonad CmdArg
+resolveAlt loc t r ctorDocs = do
+  when (docMany r == Just True) $
+    MM.throwSystemError $ loc <> " cannot combine `@many` with `@unroll`."
+  when (isJust (docArg r)) $
+    MM.throwSystemError $
+      loc <> " cannot combine `@arg` with `@unroll` on a `data` argument;"
+        <> " the constructors are the options."
+  when (docStdin r == Just True) $
+    MM.throwSystemError $ loc <> " cannot combine `@stdin` with `@unroll`."
+  -- The value is assembled from the arms, so nothing reads a token for the
+  -- argument as a whole and the shape directives have nothing to act on.
+  when (isJust (docSource r) || isJust (docForm r) || isJust (docLiteral r)
+          || not (null (docChecks r)) || isJust (docListSource r)
+          || isJust (docListForm r) || not (null (docListChecks r))) $
+    MM.throwSystemError $
+      loc <> ": `@source`, `@form`, `@literal` and `@check` do not apply to an"
+        <> " unrolled `data` argument; each constructor's values are read as"
+        <> " arguments of their own types"
+  scope <- MM.gets stateUniversalGeneralTypedefs
+  let (isOpt, tv) = case t of
+        OptionalT (VarT v) -> (True, Just v)
+        VarT v -> (False, Just v)
+        _ -> (False, Nothing)
+  table <- case tv >>= scopeDataCtors scope of
+    Just cs -> return cs
+    Nothing ->
+      MM.throwSystemError $
+        loc <> ": `@unroll` on a `data` argument needs the type's declaration"
+          <> " in scope, and `" <> pretty (render (pretty t)) <> "` has none"
+  def <- traverse (canonicalCtorDefault t) (docDefault r)
+  let docsOf c = fromMaybe defaultValue (lookup c ctorDocs)
+      arms =
+        [ AltArm
+            { altArmCtor = c
+            , altArmLong = MT.toLower c
+            , altArmFields = map typeOf fieldTs
+            , altArmDesc = docLines (docsOf c)
+            }
+        | (c, fieldTs) <- table
+        ]
+  -- An arm's option is spelled by its constructor, so a constructor whose
+  -- name is one the command line already owns would be unreachable.
+  case [altArmCtor a | a <- arms, altArmLong a `elem` reservedLongs] of
+    (c : _) ->
+      MM.throwSystemError $
+        loc <> ": constructor `" <> pretty c <> "` would become the option `--"
+          <> pretty (MT.toLower c) <> "`, which the command line reserves;"
+          <> " rename the constructor"
+    [] -> return ()
+  return . CmdArgAlt $
+    AltDocSet
+      { altDocType = t
+      , altDocDesc = docLines r
+      , altDocName = docName r
+      , altDocMetavar = fromMaybe (makeOptMeta t) (docMetavar r)
+      , altDocRequired = not isOpt && isNothing def
+      , altDocDefault = def
+      , altDocArms = arms
+      }
 
 resolveGrp :: MDoc -> Type -> ArgDocVars -> [(Key, (Type, ArgDocVars))] -> MorlocMonad CmdArg
 resolveGrp loc recType@(NamT _ v _ _) arg argEntries = do
@@ -599,7 +716,9 @@ resolveOpt loc t r = do
             loc <> ": optional argument " <> pretty (makeArg opt)
             <> " has type ?Str with literal: true, so default must be null (got \""
             <> pretty def <> "\")"
-      | otherwise -> makeOpt many opt def
+      | otherwise -> do
+          def' <- canonicalCtorDefault t def
+          makeOpt many opt def'
   where
     isLiteralOptStr = docLiteral r == Just True && isOptionalStrType t
 
@@ -622,6 +741,31 @@ resolveOpt loc t r = do
         , argOptDocListForm = docListForm r
         , argOptDocListChecks = docListChecks r
         }
+
+-- | The long spellings the command line keeps for itself; an arm may not
+-- take one, since the built-in wins and the arm can never be given.
+reservedLongs :: [Text]
+reservedLongs = ["help", "version"]
+
+-- | A `data`-typed option may give its default as the bare constructor
+-- name, matched without regard to case, the way the value is typed on the
+-- command line. Only an argument-free constructor is a value on its own; a
+-- payload-bearing one is left as written, for the JSON check to name. The
+-- stored default is the constructor's own spelling as a JSON string, which
+-- is what every reader of the manifest expects.
+canonicalCtorDefault :: Type -> Text -> MorlocMonad Text
+canonicalCtorDefault t def = do
+  scope <- MM.gets stateUniversalGeneralTypedefs
+  let bare = MT.strip def
+      ctors = case t of
+        VarT v -> scopeDataCtors scope v
+        OptionalT (VarT v) -> scopeDataCtors scope v
+        _ -> Nothing
+  return $ case ctors of
+    Just table
+      | not (MT.isPrefixOf "\"" bare)
+      , [c] <- [c | (c, []) <- table, MT.toLower c == MT.toLower bare] -> "\"" <> c <> "\""
+    _ -> def
 
 makeArg ::
   CliOpt ->
@@ -729,11 +873,130 @@ validateStdinArg loc cmdargs = do
       | otherwise = go (argPosDocStdin r) rest
     go seenStdin (_ : rest) = go seenStdin rest
 
+-- An optional positional may be left off the command line, and a missing
+-- argument can only be the last one: with fewer tokens than slots there is no
+-- rule saying which slot a token filled. So every positional after an optional
+-- one must itself be droppable. clap leaves the opposite arrangement
+-- unspecified rather than rejecting it, which would make the mis-parse silent.
+validateOptionalOrdering :: MDoc -> [CmdArg] -> MorlocMonad ()
+validateOptionalOrdering loc = go False
+  where
+    droppable :: ArgPosDocSet -> Bool
+    droppable r = argPosDocStdin r || case argPosDocType r of
+      OptionalT _ -> True
+      _ -> False
+
+    go :: Bool -> [CmdArg] -> MorlocMonad ()
+    go _ [] = return ()
+    go seen (CmdArgPos r : rest)
+      | seen && not (droppable r) =
+          MM.throwSystemError $
+            loc <> "a required positional follows an optional one."
+              <> " An optional argument may be omitted, and an omitted argument"
+              <> " is necessarily the last, so every positional after one must"
+              <> " be optional too. Either reorder the arguments, or give this"
+              <> " one an 'arg:' docstring entry to make it an option."
+      | otherwise = go (seen || droppable r) rest
+    go seen (_ : rest) = go seen rest
+
 -- Reject positional `@name`s that are invalid or collide within a subcommand.
 -- A `@name` becomes the positional's property in the MCP tool schema, so a
 -- leading `_` (the reserved namespace of the default `_1`/`_2` keys and the
 -- MCP `_render` selector) or a duplicate would collide downstream. Runs on the
 -- assembled arg list, so it covers every positional construction path.
+-- | The name an argument is known by wherever the interface is consumed by a
+-- program: the JSON help, the MCP tool schema, and the named form of an HTTP
+-- call. Computed once, here, and published in the manifest as the @key@ field
+-- so no consumer has to invent one -- deriving it independently is how
+-- @--json-help@ and @--mcp-tools@ came to publish different names for one
+-- argument.
+--
+-- An option or flag is named by its long spelling, falling back to its short.
+-- A positional has no name of its own unless the author gave it one with
+-- @\@name@, so it is keyed by its 1-based position. Neither a metavar nor the
+-- morloc parameter name can serve: a metavar describes a type (@FILE@,
+-- @COUNT@) and repeats as soon as a command takes two files, and a parameter
+-- name may be dropped by eta-reduction and differs between implementations of
+-- one signature.
+--
+-- The leading underscore is reserved -- 'validatePositionalNames' rejects a
+-- @\@name@ that starts with one -- so a generated key can never collide with
+-- an author's.
+cliOptKey :: CliOpt -> Text
+cliOptKey (CliOptLong l) = l
+cliOptKey (CliOptBoth _ l) = l
+cliOptKey (CliOptShort c) = MT.singleton c
+
+-- | The published key of one argument. @n@ is its 1-based index among the
+-- positionals, and is ignored by every other kind.
+argKey :: Int -> CmdArg -> Text
+argKey n (CmdArgPos r) = fromMaybe ("_" <> MT.show' n) (argPosDocName r)
+argKey _ (CmdArgOpt r) = cliOptKey (argOptDocArg r)
+argKey _ (CmdArgFlag r) = cliOptKey (argFlagDocOpt r)
+-- A group is keyed only when it also carries an aggregate option to accept the
+-- whole record; when it is unrolled the fields are the only thing a caller
+-- addresses, and each carries its own key. The name matches the record type so
+-- a caller reading the glossary can find it.
+argKey _ (CmdArgGrp r) = MT.toLower (render (pretty (recDocType r)))
+-- An unrolled `data` is one value to every caller but the command line, so
+-- it is keyed by its `@name` or its type -- the type it holds, not the
+-- optional an omittable argument wraps it in.
+argKey _ (CmdArgAlt r) = fromMaybe (MT.toLower (render (pretty (unwrapOpt (altDocType r))))) (altDocName r)
+  where
+    unwrapOpt (OptionalT t) = t
+    unwrapOpt t = t
+
+-- | Every key one subcommand publishes, paired with a description of where it
+-- came from for the diagnostic. Mirrors what the machine-readable views
+-- advertise: a group contributes its own key only in the whole-record form,
+-- and its fields contribute theirs either way.
+publishedKeys :: [CmdArg] -> [(Text, Text)]
+publishedKeys cmdargs = go 1 cmdargs
+  where
+    go _ [] = []
+    go n (a : rest) = entries n a <> go (nextPos n a) rest
+
+    nextPos n (CmdArgPos _) = n + 1
+    nextPos n _ = n
+
+    entries n a@(CmdArgPos _) = [(argKey n a, "positional " <> MT.show' n)]
+    entries n a@(CmdArgOpt _) = [(argKey n a, "option `--" <> argKey n a <> "`")]
+    entries n a@(CmdArgFlag _) = [(argKey n a, "flag `--" <> argKey n a <> "`")]
+    entries n a@(CmdArgGrp r) =
+      [ (argKey n a, "record argument `" <> argKey n a <> "`")
+      | isJust (recDocOpt r) ]
+      <> [ (unKey k, "field `" <> unKey k <> "` of record `" <> argKey n a <> "`")
+         | (k, _) <- recDocEntries r ]
+    -- An unrolled `data` is addressed by its arms on the command line and
+    -- by its own key everywhere else.
+    entries n a@(CmdArgAlt r) =
+      (argKey n a, "unrolled `data` argument `" <> argKey n a <> "`")
+        : [ (altArmLong arm, "constructor `" <> altArmCtor arm <> "` of `" <> argKey n a <> "`")
+          | arm <- altDocArms r ]
+
+-- | Reject two arguments of one subcommand that would publish the same key.
+--
+-- 'validatePositionalNames' and 'validateFlagRevCollisions' each police one
+-- category; a key collides across categories too -- a positional @\@name
+-- title@ against a record field @title@, or against a short-only option -- and
+-- the reserved @_render@ selector is in the same namespace. Left unchecked the
+-- MCP builder fails closed and drops the whole command from the tool surface
+-- with only a note on stderr, so the author loses a tool and is never told why.
+validateArgKeys :: MDoc -> [CmdArg] -> MorlocMonad ()
+validateArgKeys loc cmdargs = do
+  let keys = ("_render", "the output-projection selector") : publishedKeys cmdargs
+      grouped = Map.fromListWith (++) [(k, [src]) | (k, src) <- keys]
+      dups = [(k, srcs) | (k, srcs) <- Map.toList grouped, length srcs > 1]
+  case dups of
+    [] -> return ()
+    ((k, srcs) : _) ->
+      MM.throwSystemError $
+        loc <> "'" <> pretty k <> "' is the interface name of both "
+          <> hsep (punctuate " and" (map pretty (reverse srcs)))
+          <> ". Every argument of a subcommand must be named distinctly, "
+          <> "because one name is how a JSON, MCP or HTTP caller addresses "
+          <> "it; rename one with `@name`."
+
 validatePositionalNames :: MDoc -> [CmdArg] -> MorlocMonad ()
 validatePositionalNames loc cmdargs = do
   let names = [nm | CmdArgPos r <- cmdargs, Just nm <- [argPosDocName r]]
@@ -781,6 +1044,7 @@ validateFlagRevCollisions loc cmdargs = do
     collect (CmdArgGrp r) =
          concatMap (collect . CmdArgOpt)  [opt | (_, Right opt) <- recDocEntries r]
       ++ concatMap (collect . CmdArgFlag) [fl  | (_, Left  fl)  <- recDocEntries r]
+    collect (CmdArgAlt r) = [(altArmLong arm, "unroll:") | arm <- altDocArms r]
     collect (CmdArgPos _)  = []
 
     -- The main and reverse halves of a flag come from `true:` or
@@ -1179,6 +1443,7 @@ validateCmdArg schema (CmdArgOpt r) =
   Just <$> validateArgShape schema (argOptDocMany r) (argDocVarsFromOpt r)
 validateCmdArg _ (CmdArgFlag _) = Right Nothing
 validateCmdArg _ (CmdArgGrp _)  = Right Nothing
+validateCmdArg _ (CmdArgAlt _)  = Right Nothing
 
 -- | Project the shape-relevant docstring fields out of an
 -- 'ArgPosDocSet'. The other fields (metavar, description, etc.) are

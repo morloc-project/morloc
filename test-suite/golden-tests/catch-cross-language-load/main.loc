@@ -37,7 +37,7 @@ effect IO
 escapable effect Err
 
 -- Save via C++ pool (native std::vector<double>).
-saveCpp :: Str -> <IO, Err> Real
+saveCpp :: Str -> <IO> Real
 saveCpp path = do
   @save 0 path cppMkVec4
   cppSumVec4 cppMkVec4
@@ -47,16 +47,16 @@ saveCpp path = do
 -- and load succeeds. Sum the loaded vector in Python to prove the
 -- data landed correctly.
 loadPyHappy :: Str -> <IO> Real
-loadPyHappy path =
-  @catch
-    (do v <- @load path :: <IO, Err> (Vector 4 Real)
-        pySumVec4 v)
-    (0.0 - 1.0)
+loadPyHappy path = do
+  _tr <- @try (do
+    Ok v <- @load path :: <IO> (Try Str (Vector 4 Real))
+    pySumVec4 v)
+  match _tr | (Ok _cv) = _cv | (Err _) = (0.0 - 1.0)
 
 -- Load a Vector 4 Real packet as [Str]. Wire form differs, so the
 -- schema-check in the load path raises UserThrow; @catch intercepts
 -- and returns the sentinel.
 loadPyMismatch :: Str -> <IO> [Str]
-loadPyMismatch path =
-  @catch (@load path :: <IO, Err> [Str])
-    ["schema-mismatch-caught"]
+loadPyMismatch path = do
+  _mr <- @load path :: <IO> (Try Str ([Str]))
+  match _mr | (Ok _cv) = _cv | (Err _) = ["schema-mismatch-caught"]

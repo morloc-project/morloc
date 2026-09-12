@@ -117,6 +117,9 @@ prettyFoldManifold =
     makeNativeExpr _ (RealN_ _ v) = return $ defaultValue {poolExpr = viaShow v}
     makeNativeExpr _ (IntN_ _ v) = return $ defaultValue {poolExpr = viaShow v}
     makeNativeExpr _ (StrN_ _ v) = return $ defaultValue {poolExpr = dquotes $ pretty v}
+    makeNativeExpr _ (EnumN_ _ n _) = return $ defaultValue {poolExpr = pretty n}
+    makeNativeExpr _ (VariantN_ _ n _ xs) =
+      return $ defaultValue {poolExpr = pretty n <> tupled (map poolExpr xs)}
     makeNativeExpr _ (NullN_ _) = return $ defaultValue {poolExpr = "None"}
     makeNativeExpr _ _ = return $ defaultValue {poolExpr = "<unhandled>"}
 

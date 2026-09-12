@@ -23,13 +23,14 @@ module main
 import root
 
 -- Single compressed sub-packet, drained in one @next.
-testCompressedReadback :: Str -> <IO, Err> [Int]
+testCompressedReadback :: Str -> <IO> [Int]
 testCompressedReadback path = do
-  o <- @open path :: <IO, Err> OStream Int
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
   @write 3 o [100, 200, 300, 400, 500]
   @close o
-  s <- @open path :: <IO, Err> IStream Int
-  @next s
+  Ok s <- @open path :: <IO> (Try Str (IStream Int))
+  Ok _tailv73 <- @next s
+  _tailv73
 
 -- Three compressed sub-packets concatenated, drained back to back.
 -- Verifies that the cursor advances through compressed-payload
@@ -39,16 +40,17 @@ testCompressedReadback path = do
 -- sub-packets on disk. Without `@flush`, the three writes coalesce
 -- into one packet at @close and the test would see one big payload
 -- instead of three.
-testCompressedThreeBatch :: Str -> <IO, Err> [Int]
+testCompressedThreeBatch :: Str -> <IO> [Int]
 testCompressedThreeBatch path = do
-  o <- @open path :: <IO, Err> OStream Int
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
   @write 3 o [1, 2, 3]
   @flush o
   @write 3 o [40, 50]
   @flush o
   @write 3 o [600, 700, 800, 900]
   @close o
-  s <- @open path :: <IO, Err> IStream Int
+  Ok s <- @open path :: <IO> (Try Str (IStream Int))
   @next s
   @next s
-  @next s
+  Ok _tailv74 <- @next s
+  _tailv74

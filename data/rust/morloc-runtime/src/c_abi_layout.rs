@@ -482,10 +482,6 @@ mod tests {
             func => "func",
             list => "list",
         ]);
-        assert_same_layout!(MorlocCatchExpression, "morloc_catch_expression_s", [
-            fallible => "fallible",
-            fallback => "fallback",
-        ]);
         assert_same_layout!(MorlocIfExpression, "morloc_if_expression_s", [
             cond => "cond",
             then_branch => "then_branch",
@@ -525,16 +521,16 @@ mod tests {
         let expr = header_enum_variants("morloc_expression_type");
         assert_eq!(
             expr.len(),
-            MorlocExpressionType::StreamLayout as usize + 1,
+            MorlocExpressionType::CtorMake as usize + 1,
             "morloc.h names {} expression types, the Rust enum has {}: {:?}",
             expr.len(),
-            MorlocExpressionType::StreamLayout as usize + 1,
+            MorlocExpressionType::CtorMake as usize + 1,
             expr
         );
         assert_eq!(expr.first().map(String::as_str), Some("MORLOC_X_DAT"));
         assert_eq!(
             expr.last().map(String::as_str),
-            Some("MORLOC_X_STREAM_LAYOUT")
+            Some("MORLOC_X_CTOR_MAKE")
         );
 
         let pat = header_enum_variants("morloc_pattern_type");

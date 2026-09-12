@@ -6,6 +6,8 @@
 --   * a multi-sibling getter group `.(.0, .2)` -> a tuple
 --   * record/tuple SETTERS `.(.field = v)` (rebuild with one leaf replaced;
 --     the receiver is bound once and unchanged fields are cloned)
+--   * a setter naming several fields in an order other than the declaration's,
+--     over fields of one type, where nothing downstream can notice a swap
 --
 -- idrust forces the pattern evaluation into the Rust pool.
 --
@@ -19,6 +21,11 @@ module main
   , setX
   , setTup
   , setNested
+  , setSwapped
+  , setTupSwapped
+  , setMixed
+  , setBoth
+  , setEta
   )
 
 import root-rust
@@ -61,3 +68,29 @@ setTup t v = .(.1 = v) (idrust t)
 -- nested setter: set element 0 of the tuple field .p
 setNested :: Rec2 -> Str -> Rec2
 setNested r v = .(.p.0 = v) (idrust r)
+
+-- Both fields hold an Int and are named in the reverse of their declaration, so
+-- a value paired with a field by position rather than by name lands on the
+-- wrong one and nothing else in the program can tell.
+setSwapped :: Rec -> Int -> Int -> Rec
+setSwapped r u v = .(.z = u, .x = v) (idrust r)
+
+-- The same for a tuple whose two set slots share a type.
+setTupSwapped :: (Int, Str, Int) -> Int -> Int -> (Int, Str, Int)
+setTupSwapped t u v = .(.2 = u, .0 = v) (idrust t)
+
+-- Reversed order over fields of different types. Before the values were paired
+-- by name this shape did not miscompile, it failed to compile: an Int landed in
+-- a Str field and rustc said so. The non-Copy field also exercises the clone
+-- that rebuilds an untouched field.
+setMixed :: Rec -> Str -> Int -> Rec
+setMixed r s n = .(.y = s, .x = n) (idrust r)
+
+-- Two writes under one field. Matching the field name against a single
+-- selector entry honours only the first, so the second write disappears.
+setBoth :: Rec2 -> Str -> Int -> Rec2
+setBoth r s n = .(.p.0 = s, .p.1 = n) (idrust r)
+
+-- The setter reached through a higher-order call rather than applied directly.
+setEta :: [Rec] -> Int -> [Rec]
+setEta rs v = idrust (map .(.z = v, .x = v) rs)

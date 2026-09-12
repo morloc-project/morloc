@@ -17,6 +17,7 @@
 // STL algorithms and utilities
 #include <algorithm>
 #include <tuple>
+#include <variant>
 #include <functional>
 #include <limits>
 #include <utility>

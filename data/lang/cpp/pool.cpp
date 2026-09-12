@@ -67,6 +67,30 @@ public:
       throw MorlocException(errmsg_buffer); \
     }
 
+// A failure of the machinery that carries values between pools: IPC, packet
+// construction and decode, shared-memory resolution. None of these are
+// attributable to user data, paths or foreign-function behavior, and none
+// leave the pool able to continue, so they must not be interceptable by
+// @try. Deliberately NOT a MorlocException subclass, for the same reason
+// MorlocPipeClosed is not: the broad catch in _mlc_catch must let it pass.
+//
+// The top-level dispatch turns this into an abort rather than a fail packet.
+// A caller in another pool then sees its socket read fail, which is itself an
+// infrastructure failure there, so fatality propagates across pools without
+// the fail packet needing to carry a classification.
+class MorlocInfraError : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+#define PROPAGATE_INFRA_ERROR(errmsg) \
+    if(errmsg != NULL) { \
+      char errmsg_buffer[MAX_ERRMSG_SIZE] = { 0 }; \
+      snprintf(errmsg_buffer, MAX_ERRMSG_SIZE, "Error C++ pool (%s:%d in %s):\n%s" , __FILE__, __LINE__, __func__, errmsg); \
+      free(errmsg); \
+      throw MorlocInfraError(errmsg_buffer); \
+    }
+
 // Terminal helper for morloc-compiler / runtime invariant violations
 // (unreachable branches, contract violations from libmorloc, arity
 // mismatches emitted by codegen). Prints a diagnostic to stderr, then
@@ -132,34 +156,66 @@ std::string interweave_strings(const std::vector<std::string>& first, const std:
 // Thread-local list of SHM pointers allocated by _put_value.
 // Freed after foreign_call returns (args consumed) or at next dispatch start
 // (result consumed by caller in the synchronous call that returned it).
-struct ShmEntry { absptr_t ptr; Schema* schema; };
-thread_local std::vector<ShmEntry> _shm_tracker;
-
-static void _shm_tracker_flush() {
-    for (auto& e : _shm_tracker) {
+struct ShmEntry { absptr_t ptr; };
+// Releasing the entries is shared by the ordinary flush and by thread
+// teardown, so it is written once and takes the container explicitly.
+static void _shm_release_entries(std::vector<ShmEntry>& entries) {
+    for (auto& e : entries) {
         char* err = NULL;
         // shfree decrements the refcount and zeros the block on final
         // ref-drop, so a separate metadata-zeroing pass is unnecessary.
         shfree(e.ptr, &err);
         if (err) { free(err); }
     }
-    _shm_tracker.clear();
+    entries.clear();
 }
 
-// Drop one tracker entry matching ptr (swap-with-last), shfree the
-// block, and free its schema. Used by _release_packet_shm to free
+// The tracker releases what it still holds when its thread ends. A worker
+// is retired only after going idle for longer than the dispatch it would
+// otherwise have been flushed by, so this is never earlier than the flush
+// it stands in for -- it just happens on a thread that has no next
+// dispatch to do it. Making the container itself own the teardown avoids
+// depending on the destruction order of two thread-local objects.
+struct ShmTracker : std::vector<ShmEntry> {
+    ~ShmTracker() { _shm_release_entries(*this); }
+};
+
+thread_local ShmTracker _shm_tracker;
+
+// Owns a block this pool materialized from a packet, releasing it unless
+// ownership is handed elsewhere. Deserialization can throw, and a throwing
+// dispatch is answered with a fail packet rather than ending the pool, so a
+// block dropped on that path is lost once per bad request rather than once.
+struct ShmOwned {
+    absptr_t ptr;
+    explicit ShmOwned(void* p) : ptr((absptr_t)p) {}
+    ShmOwned(const ShmOwned&) = delete;
+    ShmOwned& operator=(const ShmOwned&) = delete;
+    ~ShmOwned() {
+        if (ptr != nullptr) {
+            char* err = NULL;
+            shfree(ptr, &err);
+            if (err) { free(err); }
+        }
+    }
+};
+
+static void _shm_tracker_flush() {
+    _shm_release_entries(_shm_tracker);
+}
+
+// Drop one tracker entry matching ptr (swap-with-last) and shfree the
+// block. Used by _release_packet_shm to free
 // a _put_value-tracked packet's SHM as soon as its codegen-determined
 // scope ends, rather than waiting for the next dispatch flush.
 static bool _shm_tracker_release_one(absptr_t ptr) {
     for (size_t i = 0; i < _shm_tracker.size(); i++) {
         if (_shm_tracker[i].ptr == ptr) {
-            Schema* schema = _shm_tracker[i].schema;
             _shm_tracker[i] = _shm_tracker.back();
             _shm_tracker.pop_back();
             char* err = NULL;
             shfree(ptr, &err);
             if (err) { free(err); }
-            if (schema) { free_schema(schema); }
             return true;
         }
     }
@@ -205,7 +261,7 @@ uint8_t* _put_value(const T& value, Schema* schema) {
         char* err = nullptr;
         void* shm_ptr = rel2abs(relptr, &err);
         if (err) { free(err); }
-        if (shm_ptr) { _shm_tracker.push_back({(absptr_t)shm_ptr, nullptr}); }
+        if (shm_ptr) { _shm_tracker.push_back({(absptr_t)shm_ptr}); }
         return packet;
     } else {
         // Arrow dispatch: schema marker `T` (MORLOC_TABLE) routes through
@@ -223,13 +279,13 @@ uint8_t* _put_value(const T& value, Schema* schema) {
             uint8_t* packet = make_data_packet_auto(voidstar, relptr, schema, &errmsg);
             if (errmsg) {
                 shfree_cpp(voidstar);
-                PROPAGATE_ERROR(errmsg);
+                PROPAGATE_INFRA_ERROR(errmsg);
             }
 
             const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
             if (hdr->command.data.source == PACKET_SOURCE_RPTR) {
                 // SHM referenced by packet -- track for deferred cleanup
-                _shm_tracker.push_back({(absptr_t)voidstar, schema});
+                _shm_tracker.push_back({(absptr_t)voidstar});
             } else {
                 // Data inlined in packet -- free SHM immediately. shfree
                 // zeros the block on final ref-drop.
@@ -261,19 +317,29 @@ T _get_value(const uint8_t* packet, Schema* schema){
         // Arrow import: packet -> arrow_from_shm -> ArrowTable
         char* errmsg = nullptr;
         uint8_t* raw = get_morloc_data_packet_value(packet, schema, &errmsg);
-        if (errmsg) { PROPAGATE_ERROR(errmsg); }
+        if (errmsg) { PROPAGATE_INFRA_ERROR(errmsg); }
 
         const arrow_shm_header_t* hdr = (const arrow_shm_header_t*)raw;
         struct ArrowSchema as;
         struct ArrowArray aa;
         char* aerr = nullptr;
         arrow_from_shm(hdr, &as, &aa, &aerr);
-        if (aerr) { PROPAGATE_ERROR(aerr); }
+        if (aerr) { PROPAGATE_INFRA_ERROR(aerr); }
 
-        char* ierr = nullptr;
-        shincref((absptr_t)raw, &ierr);
-        if (ierr) { free(ierr); }
-        _shm_tracker.push_back({(absptr_t)raw, nullptr});
+        // A table that arrived by reference needs one taken on this pool's
+        // behalf; a table materialized here is already this pool's own and
+        // taking a second reference would leave it permanently held. Either
+        // way the tracker releases exactly one at the next dispatch. A
+        // refused acquire means nothing was taken, so nothing is tracked.
+        bool arrow_owned = true;
+        if (source == PACKET_SOURCE_RPTR) {
+            char* ierr = nullptr;
+            arrow_owned = shincref((absptr_t)raw, &ierr);
+            if (ierr) { free(ierr); }
+        }
+        if (arrow_owned) {
+            _shm_tracker.push_back({(absptr_t)raw});
+        }
 
         return mlc::ArrowTable(std::move(as), std::move(aa));
     } else {
@@ -357,8 +423,15 @@ T _get_value(const uint8_t* packet, Schema* schema){
             }
         }
 
-        // Fast path: inline voidstar -- read directly from packet, no SHM needed
-        if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR) {
+        // Fast path: inline voidstar -- read directly from packet, no SHM
+        // needed. A payload that is compressed or encrypted cannot be walked
+        // where it lies, so it falls through to the general path, which
+        // expands the body and re-enters. Testing for the plain values rather
+        // than against the known transforms keeps a future one from being
+        // read as raw bytes.
+        if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR
+            && header->command.data.compression == PACKET_COMPRESSION_NONE
+            && header->command.data.encryption == PACKET_ENCRYPTION_NONE) {
             const uint8_t* payload = packet + sizeof(morloc_packet_header_t) + header->offset;
             T* dummy = nullptr;
             return from_voidstar(schema, (const void*)payload, dummy, (const void*)payload);
@@ -370,16 +443,24 @@ T _get_value(const uint8_t* packet, Schema* schema){
         char* errmsg = NULL;
         uint8_t* voidstar = get_morloc_data_packet_value(packet, schema, &errmsg);
         if(errmsg != NULL) {
-            PROPAGATE_ERROR(errmsg)
+            PROPAGATE_INFRA_ERROR(errmsg)
         }
+
+        // A payload that did not arrive by reference was materialized into a
+        // block of this pool's own -- one contiguous allocation covering the
+        // whole value, so a single release covers it -- and nothing else will
+        // ever free it. A payload that did arrive by reference belongs to its
+        // sender.
+        ShmOwned owned(is_rptr ? nullptr : (void*)voidstar);
 
         // For RPTR data, increment refcount so the owner's tracker flush
         // won't destroy data we may still need (e.g. forwarded packets).
         if (is_rptr) {
             char* incref_err = NULL;
-            shincref((absptr_t)voidstar, &incref_err);
+            if (shincref((absptr_t)voidstar, &incref_err)) {
+                _shm_tracker.push_back({(absptr_t)voidstar});
+            }
             if (incref_err) { free(incref_err); }
-            _shm_tracker.push_back({(absptr_t)voidstar, schema});
         }
 
         T* dummy = nullptr;
@@ -558,15 +639,31 @@ inline _MlcThrowHelper _mlc_throw(const std::string& msg) {
 // return its result. Template deduction picks the return type from the
 // fallible thunk. The fallback must return the same type.
 //
-// MorlocPipeClosed is re-thrown ahead of the broad catch: a broken pipe is
-// an <IO> condition, not a user-recoverable <Err>, so it must escape @catch
-// instead of being misrouted into a fallback. All other std::exceptions
-// (@throw, @read/@load failures, foreign <Err> helpers) stay catchable.
-template<typename FL, typename FB>
-auto _mlc_catch(FL&& fallible, FB&& fallback) -> decltype(fallible()) {
-    try { return fallible(); }
+// @try body: run the thunk and convert the outcome to data. `ok` wraps the
+// value, `err` the message; codegen supplies both because only it knows how
+// this Try is represented in C++.
+//
+// MorlocPipeClosed and MorlocInfraError are re-thrown ahead of the broad
+// catch. A broken pipe is an <IO> condition and an infrastructure failure is
+// not attributable to user code, so neither is a user-recoverable error and
+// both must escape rather than being turned into an Err arm. All other
+// std::exceptions (@throw, foreign helpers that raise) become Err.
+// The return type is deduced from `err` rather than `ok`: a Unit-returning
+// intrinsic's body is `void`, so `ok(body())` is ill-formed as a deduction
+// context even though the void branch never evaluates it.
+template<typename FL, typename OK, typename ERR>
+auto _mlc_try(FL&& body, OK&& ok, ERR&& err) -> decltype(err(std::string())) {
+    try {
+        if constexpr (std::is_void_v<decltype(body())>) {
+            body();
+            return ok(mlc::Unit{});
+        } else {
+            return ok(body());
+        }
+    }
     catch (const MorlocPipeClosed&) { throw; }
-    catch (const std::exception&) { return fallback(); }
+    catch (const MorlocInfraError&) { throw; }
+    catch (const std::exception& e) { return err(std::string(e.what())); }
 }
 // @fschema: read a file's element schema string without opening it.
 inline std::string _mlc_fschema(const std::string& path) {
@@ -823,14 +920,14 @@ uint8_t* foreign_call_v(const char* socket_filename, size_t mid, const uint8_t**
     snprintf(socket_path, sizeof(socket_path), "%s/%s", g_tmpdir, socket_filename);
 
     uint8_t* packet = make_morloc_local_call_packet((uint32_t)mid, args_array, nargs, &errmsg);
-    PROPAGATE_ERROR(errmsg)
+    PROPAGATE_INFRA_ERROR(errmsg)
 
     pool_mark_busy();
     uint8_t* result = send_and_receive_over_socket(socket_path, packet, &errmsg);
     pool_mark_idle();
 
     free(packet);
-    PROPAGATE_ERROR(errmsg)
+    PROPAGATE_INFRA_ERROR(errmsg)
 
     {
         char* fail_check_err = NULL;
@@ -855,10 +952,9 @@ uint8_t* foreign_call_v(const char* socket_filename, size_t mid, const uint8_t**
             void* res_voidstar = rel2abs(relptr, &resolve_err);
             if (resolve_err) { free(resolve_err); resolve_err = NULL; }
             if (res_voidstar) {
-                char* incref_err = NULL;
-                shincref((absptr_t)res_voidstar, &incref_err);
-                if (incref_err) { free(incref_err); }
-                _shm_tracker.push_back({(absptr_t)res_voidstar, nullptr});
+                // The callee took a reference before sending; it is ours
+                // now. Inherit it rather than adding another.
+                _shm_tracker.push_back({(absptr_t)res_voidstar});
             }
         }
     }
@@ -1031,6 +1127,12 @@ uint8_t* cpp_local_dispatch(uint32_t mid, const uint8_t** args,
         // Broken pipe: a distinguished, non-abort failure. The nexus owns
         // fd 1 and decides the pipeline exit status.
         return make_fail_packet(e.what());
+    } catch (const MorlocInfraError& e) {
+        // Not recoverable and not the user's doing. Aborting rather than
+        // returning a fail packet is what keeps it fatal across pools: a
+        // caller's socket read fails, which it classifies as infrastructure
+        // in turn, so no fail packet has to carry the classification.
+        MLC_INTERNAL_ABORT(e.what());
     } catch (const std::exception& e) {
         return make_fail_packet_with_trace(e.what());
     } catch (const char* e) {
@@ -1048,6 +1150,13 @@ uint8_t* cpp_local_dispatch(uint32_t mid, const uint8_t** args,
 uint8_t* cpp_remote_dispatch(uint32_t mid, const uint8_t** args,
                                      size_t nargs, void* ctx) {
     (void)nargs; (void)ctx;
+    // Every entry in the tracker is a reference this pool owns: a block it
+    // allocated, an argument it took a reference on, or a result reference
+    // inherited from a callee. Anyone holding a packet that left this pool
+    // holds a separate reference taken before it was sent. So releasing at
+    // a dispatch boundary is safe here for the same reason it is safe in
+    // the local dispatcher, and the two should not differ.
+    _shm_tracker_flush();
     morloc_debug_flush_dispatch();
     try {
         return remote_dispatch(mid, args);
@@ -1055,6 +1164,12 @@ uint8_t* cpp_remote_dispatch(uint32_t mid, const uint8_t** args,
         // Broken pipe: a distinguished, non-abort failure. The nexus owns
         // fd 1 and decides the pipeline exit status.
         return make_fail_packet(e.what());
+    } catch (const MorlocInfraError& e) {
+        // Not recoverable and not the user's doing. Aborting rather than
+        // returning a fail packet is what keeps it fatal across pools: a
+        // caller's socket read fails, which it classifies as infrastructure
+        // in turn, so no fail packet has to carry the classification.
+        MLC_INTERNAL_ABORT(e.what());
     } catch (const std::exception& e) {
         return make_fail_packet_with_trace(e.what());
     } catch (const char* e) {

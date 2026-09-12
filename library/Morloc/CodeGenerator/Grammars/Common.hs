@@ -184,46 +184,52 @@ patternSetter ::
   [MDoc] -> -- ordered arguments substituted at set sites
   MDoc -- the returned data structure with a new spine that reuses unchanged fields
 patternSetter makeTuple makeRecord accessTuple accessRecord finalizeSet dat0 t0 s0 args0 =
-  snd (setter dat0 t0 s0 args0)
+  setter dat0 t0 (zip (ungroup s0) args0)
   where
-    setter :: MDoc -> TypeF -> Selector -> [MDoc] -> ([MDoc], MDoc)
+    -- A value belongs to the field the author named it at, not to the next
+    -- declared field that happens to be mentioned. 'ungroup' enumerates the
+    -- selector's leaf paths in written order, which is the order the
+    -- desugarer concatenated the values in, so zipping the two pairs each
+    -- value with its own path once and for all. The rebuild still walks the
+    -- DECLARED fields, because a record literal is positional in at least one
+    -- member; what changed is that a field now looks up its value instead of
+    -- consuming whatever is next.
+    --
+    -- Carrying paths rather than a shrinking argument list also settles the
+    -- case of two sets under one field: `.home.altitude` and `.home.latitude`
+    -- reach `home` as two paths and both survive the descent, where matching
+    -- the field name against one selector entry could only ever honour the
+    -- first of them.
+    setter :: MDoc -> TypeF -> [([Either Int Text], MDoc)] -> MDoc
+    setter dat1 t1 ps = case [v | ([], v) <- ps] of
+      -- A path with no steps left names this node itself, so the node is
+      -- replaced outright. Written twice, the later write wins, which is what
+      -- the type checker and the nexus evaluator both already do.
+      (_ : _) -> last [v | ([], v) <- ps]
+      [] -> case t1 of
+        (AppF _ ts1) ->
+          makeTuple t1
+            [ rebuild (accessTuple t1 dat1 i) t (into (Left i) ps)
+            | (i, t) <- zip [0 ..] ts1
+            ]
+        (NamF _ _ _ rs1) ->
+          makeRecord t1
+            [ rebuild (accessRecord t1 dat1 k) t (into (Right k) ps)
+            | (Key k, t) <- rs1
+            ]
+        -- Every path was checked against the receiver's type when the setter
+        -- was typed, so a step into something with no fields means an
+        -- upstream invariant was violated rather than a user error.
+        _ -> error "patternSetter: a set path descends into a type with no fields"
 
-    -- tuple setters. A field accessor is used bare as a recursion RECEIVER for a
-    -- changed field, but an UNCHANGED field's value is passed through
-    -- 'finalizeSet' (e.g. Rust clones it into the owned rebuild). Applying the
-    -- clone only to unchanged leaves avoids cloning a changed field's whole
-    -- subtree just to rebuild part of it.
-    setter dat1 tupleType@(AppF _ ts1) (SelectorIdx s1 ss1) args1 =
-      second (makeTuple tupleType) $ statefulMap (chooseField dat1 (s1 : ss1)) args1 (zip [0 ..] ts1)
-      where
-        chooseField :: MDoc -> [(Int, Selector)] -> [MDoc] -> (Int, TypeF) -> ([MDoc], MDoc)
-        chooseField dat ss args (i, t) =
-          let dat' = accessTuple tupleType dat i
-           in case (lookup i ss) of
-                (Just s) -> setter dat' t s args
-                Nothing -> (args, finalizeSet t dat')
+    -- A field nobody wrote to keeps its value; one that was written is rebuilt
+    -- from the paths that reach it.
+    rebuild :: MDoc -> TypeF -> [([Either Int Text], MDoc)] -> MDoc
+    rebuild dat t [] = finalizeSet t dat
+    rebuild dat t ps = setter dat t ps
 
-    -- record setters
-    setter dat1 recType@(NamF _ _ _ rs1) (SelectorKey s1 ss1) args1 =
-      second (makeRecord recType) $ statefulMap (chooseField dat1 (s1 : ss1)) args1 rs1
-      where
-        chooseField :: MDoc -> [(Text, Selector)] -> [MDoc] -> (Key, TypeF) -> ([MDoc], MDoc)
-        chooseField dat ss args (Key k, t) =
-          let dat' = accessRecord recType dat k
-           in case (lookup k ss) of
-                (Just s) -> setter dat' t s args
-                Nothing -> (args, finalizeSet t dat')
-    -- Bracket selectors are not valid setter targets: bracket-index /
-    -- bracket-slice describe element access on arrays, not record-style
-    -- field assignment. The parser already rejects setters on accessor
-    -- chains containing brackets; reaching here means an upstream
-    -- invariant was violated.
-    setter _ _ (SelectorBracketIndex _) _ =
-      error "patternSetter: bracket-index step in a setter selector"
-    setter _ _ SelectorBracketSlice _ =
-      error "patternSetter: bracket-slice step in a setter selector"
-    setter _ _ _ (arg : args2) = (args2, arg)
-    setter _ _ _ [] = error "Illegal setter"
+    into :: Either Int Text -> [([Either Int Text], MDoc)] -> [([Either Int Text], MDoc)]
+    into k ps = [(rest, v) | (step : rest, v) <- ps, step == k]
 
 -- | Walk a 'Selector' that may contain bracket steps, emitting per-language
 -- source for each step and threading the bracket runtime args in DFS order.
@@ -364,6 +370,8 @@ renameNE old new = go where
   go e@(RealN _ _) = e
   go e@(IntN _ _) = e
   go e@(StrN _ _) = e
+  go e@(EnumN _ _ _) = e
+  go (VariantN t n i xs) = VariantN t n i (map go xs)
   go e@(NullN _) = e
   go (DoBlockN t ne) = DoBlockN t (go ne)
   go (EvalN t ne) = EvalN t (go ne)
@@ -535,6 +543,9 @@ invertSerialManifold sm0 =
     invertNativeExprM (RealN_ v x) = atomize (RealN v x) []
     invertNativeExprM (IntN_ v x) = atomize (IntN v x) []
     invertNativeExprM (StrN_ v x) = atomize (StrN v x) []
+    invertNativeExprM (EnumN_ v n i) = atomize (EnumN v n i) []
+    invertNativeExprM (VariantN_ v n i xs) =
+      atomize (VariantN v n i (map unD xs)) (concatMap getDeps xs)
     invertNativeExprM (NullN_ v) = atomize (NullN v) []
     -- keep dependencies inside suspend so thunk body stays lazy
     invertNativeExprM (DoBlockN_ t (D ne lets)) = return $ D (DoBlockN t (weave (D ne lets))) []
@@ -649,6 +660,10 @@ collectRecords e0@(SerialManifold i0 _ _ _ _) =
     -- A back-reference contributes nothing new: the record it names
     -- is already visited at the NamF site that introduced the cycle.
     seekRecs _ (RecF _) = []
+    -- An enum is a leaf: no fields, so no records beneath it.
+    seekRecs _ (EnumF _ _ _) = []
+    -- A variant's arms can hold records, so they are walked.
+    seekRecs d (VariantF _ _ as) = concatMap (concatMap (seekRecs d) . snd) as
 
 unifyRecords ::
   [ ( FVar

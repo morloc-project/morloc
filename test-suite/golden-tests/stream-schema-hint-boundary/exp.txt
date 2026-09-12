@@ -1,0 +1,10 @@
+--- appendRecord ---
+[{"kind":"a","id":1},{"kind":"b","id":2}]
+--- appendAlias ---
+["one","two"]
+--- appendMany ---
+3
+--- readEv via stdin ---
+[{"kind":"p","id":7},{"kind":"q","id":8}]
+--- readMismatch ---
+OK: mismatched element type rejected

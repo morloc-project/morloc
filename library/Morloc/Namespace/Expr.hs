@@ -26,6 +26,7 @@ module Morloc.Namespace.Expr
   , remoteResourceInts
   , ManifoldConfig (..)
   , LogTemplate (..)
+  , BenchTemplate (..)
   , RunLogTemplate (..)
   , EpilogueTemplate (..)
   , ModuleConfig (..)
@@ -159,6 +160,18 @@ data LogTemplate = LogTemplate
   }
   deriving (Show, Ord, Eq, Generic)
 
+-- | The shape of one row in the end-of-run benchmark summary. Lives at
+-- the top level of the program YAML as @benchmark-template@, beside
+-- @log-template@, and is program-wide rather than per-label: the nexus
+-- aggregates every label's timings and renders them through one
+-- template, so a per-label override would have nothing to apply to.
+-- 'Nothing' means \"use the built-in default\"; an explicit null
+-- @summary@ alongside @benchmark: true@ is contradictory and rejected.
+newtype BenchTemplate = BenchTemplate
+  { benchTemplateSummary :: Maybe Text
+  }
+  deriving (Show, Ord, Eq, Generic)
+
 -- | Run-scope log templates. 'runLogPrologue' fires at the nexus
 -- entrypoint immediately after argument parsing; the appropriate
 -- 'runLogEpilogue' subfield fires at clean exit (Ok) or via the
@@ -201,6 +214,9 @@ data ModuleConfig = ModuleConfig
   { moduleConfigDefaultGroup :: Maybe ManifoldConfig
   , moduleConfigLabeledGroups :: Map.Map Text ManifoldConfig
   , moduleConfigLogTemplate :: Maybe LogTemplate
+  , moduleConfigBenchTemplate :: Maybe BenchTemplate
+  -- ^ Top-level YAML field @benchmark-template@: the row shape for the
+  -- end-of-run summary emitted for labels carrying @benchmark: true@.
   , moduleConfigPrologue :: Maybe Text
   -- ^ Top-level YAML field @prologue@: a template string fired by the
   -- nexus at run start. See 'Morloc.CodeGenerator.LogTemplate' for the
@@ -234,6 +250,13 @@ data Symbol
   = TypeSymbol TVar
   | TermSymbol EVar
   | ClassSymbol ClassName
+  | CtorSymbol TVar EVar
+  -- ^ Records that a term is a constructor of a `data` type, so the
+  -- constructors can follow their type through an export or import list
+  -- and through any module that re-exports it. The term itself is still a
+  -- 'TermSymbol' (under whatever spelling the importer gave it, which the
+  -- second field tracks); this entry is the association only, and every
+  -- consumer that binds or links terms ignores it.
   deriving (Show, Ord, Eq)
 
 data ExportGroup = ExportGroup
@@ -360,10 +383,10 @@ data Pattern
 
 -- | Compiler intrinsics: functions the compiler generates specialized code for.
 data Intrinsic
-  = IntrSave      -- ^ @save  :: Int -> Str -> a -> <IO, Err> () -- voidstar packet, with zstd level 0-9
-  | IntrSaveM     -- ^ @savem :: Str -> a -> <IO, Err> ()         -- raw msgpack file
-  | IntrSaveJ     -- ^ @savej :: Str -> a -> <IO, Err> ()         -- raw JSON file
-  | IntrLoad      -- ^ @load  :: Str -> <IO, Err> a               -- auto-detect format, auto-decompress packets; failure raises Err (catch with @catch)
+  = IntrSave      -- ^ @save  :: Int -> Str -> a -> <IO> (Try Str ()) -- voidstar packet, with zstd level 0-9
+  | IntrSaveM     -- ^ @savem :: Str -> a -> <IO> (Try Str ())    -- raw msgpack file
+  | IntrSaveJ     -- ^ @savej :: Str -> a -> <IO> (Try Str ())    -- raw JSON file
+  | IntrLoad      -- ^ @load  :: Str -> <IO> (Try Str a)          -- auto-detect format, auto-decompress packets; failure is an Err arm
   | IntrHash      -- ^ @hash   :: a -> Str           -- xxhash, hex string
   | IntrVersion   -- ^ @version :: Str               -- compiler version
   | IntrCompiled  -- ^ @compiled :: Str              -- compile timestamp
@@ -371,11 +394,11 @@ data Intrinsic
   | IntrSchema    -- ^ @schema  :: a -> Str          -- schema string
   | IntrTypeof    -- ^ @typeof  :: a -> Str          -- concrete type name
   | IntrShow      -- ^ @show   :: a -> Str           -- serialize to JSON string
-  | IntrRead      -- ^ @read   :: Str -> <Err> a     -- deserialize from JSON string; parse failure raises Err
+  | IntrRead      -- ^ @read   :: Str -> Try Str a   -- deserialize from JSON string; pure, so it composes in `map`
   | IntrDatafile  -- ^ @datafile :: Str -> Str       -- resolve installed data file path
-  | IntrOpen      -- ^ @open  :: Str -> <IO, Err> a  -- open a stream/file; `a` resolved via inline ascription to IFile/IStream/OStream; failure raises Err
+  | IntrOpen      -- ^ @open  :: Str -> <IO> (Try Str a)  -- open a stream/file; `a` resolved via inline ascription to IFile/IStream/OStream
   | IntrClose     -- ^ @close :: a -> <IO> ()        -- close any stream/file handle
-  | IntrFSchema   -- ^ @fschema :: Str -> <IO, Err> Str -- read a file's element schema without typed open
+  | IntrFSchema   -- ^ @fschema :: Str -> <IO> (Try Str Str) -- read a file's element schema without typed open
   | IntrMap       -- ^ implicit @(a -> b) -> List a -> List b@ map; emitted by
                   -- the desugar's bracket-accessor lowering when a slice is
                   -- followed by a chained accessor (e.g. @.[::-1].x pts@). NOT
@@ -383,61 +406,94 @@ data Intrinsic
                   -- The pure-runtime evaluator executes this as a direct
                   -- per-element loop over MORLOC_ARRAY; the pool path resolves
                   -- it to the language's @Functor.map@ instance.
-  | IntrFLength     -- ^ @flen :: IFile a -> <IO, Err> Int@ -- file element count.
+  | IntrTagTest   -- ^ implicit @a -> a -> Bool@ tag test, emitted only by the
+                  -- desugar's constructor-pattern lowering. NOT user-facing --
+                  -- there is no entry in 'parseIntrinsic', as with 'IntrMap'.
+                  --
+                  -- It asks "does this value carry this constructor's tag",
+                  -- which is deliberately NOT equality. For an argument-free
+                  -- constructor the two coincide and every backend lowers it
+                  -- to its native @==@. Once constructors carry arguments they
+                  -- stop coinciding: equality would compare payloads, while a
+                  -- pattern must test the discriminant alone. Naming it a tag
+                  -- test means that later change is confined to this lowering.
+                  --
+                  -- It is also why constructor patterns do not wait on `Eq`:
+                  -- an internal primitive has no surface syntax, so the
+                  -- wire-level derivation work can replace it with nothing to
+                  -- migrate.
+  | IntrCtorField -- ^ implicit field projection out of a matched `data`
+                  -- value: @subject -> constructor -> index -> field@.
+                  -- Emitted only by the desugar's constructor-pattern
+                  -- lowering, and deliberately NOT reachable from surface
+                  -- syntax -- a getter aimed at a `data` type is rejected,
+                  -- because which fields exist depends on the constructor.
+                  -- Here the constructor is known: the tag test guarding
+                  -- this projection has already established the arm, and
+                  -- short-circuiting in the emitted condition keeps the
+                  -- projection from running against any other one.
+  | IntrFLength     -- ^ @flen :: IFile a -> <IO> (Try Str Int)@ -- file element count.
                     -- Free from the footer's StreamDiag.element_count. Users
                     -- typically alias as @length@ via stdlib shims.
-  | IntrStreamLayout -- ^ @streamLayout :: IFile [a] -> <IO, Err> [(U64,U64,U64)]@
+  | IntrStreamLayout -- ^ @streamLayout :: IFile [a] -> <IO> (Try Str [(U64,U64,U64)])@
                     -- -- per-sub-packet layout for parallel planning: one triple
                     -- @(elementOffset, elementCount, uncompressedSize)@ per
                     -- sub-packet, in file order. A DATA packet is the degenerate
                     -- single-chunk case (one triple @(0, count, size)@); an empty
                     -- stream yields @[]@. Derived at read time from the existing
                     -- sub-packet index + per-sub-packet headers (no wire change,
-                    -- no payload decompression). Malformed packets raise Err.
-  | IntrNext        -- ^ @next :: IStream a -> <IO, Err> [a]@ -- materialise the
+                    -- no payload decompression). A malformed packet is an Err arm.
+  | IntrNext        -- ^ @next :: IStream a -> <IO> (Try Str [a])@ -- materialise the
                     -- current sub-packet and advance the cursor. Returns an
                     -- empty list at EOF (further calls keep returning empty).
-                    -- Mid-stream decode failures raise Err.
+                    -- A mid-stream decode failure is an Err arm.
   | IntrStream      -- ^ @stream :: IFile a -> <IO> IStream a@ -- derive a
                     -- forward-only IStream from an open IFile, bound to the
                     -- same path with an independent fd, mmap, and cursor.
-  | IntrWrite       -- ^ @write :: Int -> OStream a -> [a] -> <IO, Err> ()@ --
+  | IntrWrite       -- ^ @write :: Int -> OStream a -> [a] -> <IO> (Try Str ())@ --
                     -- emit one sub-packet of element-list type. The Int is
                     -- the zstd compression level (0 = uncompressed); the
                     -- first @write fixes the level for the file's lifetime.
-                    -- I/O failure (disk full, broken pipe) raises Err.
-  | IntrAppend      -- ^ @append :: Str -> <IO, Err> (OStream a)@ -- open an
+                    -- I/O failure (disk full, broken pipe) is an Err arm.
+  | IntrAppend      -- ^ @append :: Str -> <IO> (Try Str (OStream a))@ -- open an
                     -- existing stream file for append. Forward-scan recovers
-                    -- the resume cursor; mismatched element schemas raise Err
+                    -- the resume cursor; a mismatched element schema is an Err arm
                     -- before any bytes are written.
-  | IntrConcat      -- ^ @concat :: [Str] -> Str -> <IO, Err> ()@ -- concatenate
+  | IntrConcat      -- ^ @concat :: [Str] -> Str -> <IO> (Try Str ())@ -- concatenate
                     -- a sequence of stream files via sendfile, exploiting
                     -- the stream-packet concat invariant.
-  | IntrFlush       -- ^ @flush :: OStream a -> <IO, Err> ()@ -- force buffered
+  | IntrFlush       -- ^ @flush :: OStream a -> <IO> (Try Str ())@ -- force buffered
                     -- writes to be emitted as a sub-packet immediately,
                     -- without closing the stream. No-op on an empty
                     -- buffer. Useful for tests that need deterministic
                     -- packet boundaries and for user code that wants to
                     -- make progress visible to concurrent readers.
-  | IntrStdin       -- ^ @stdin :: <IO, Err> IStream a@ -- nullary intrinsic
+  | IntrStdin       -- ^ @stdin :: <IO> (Try Str (IStream a))@ -- nullary intrinsic
                     -- that opens process stdin as an IStream. The nexus is
                     -- the sole owner of fd 0; @next routes through the
                     -- pool-nexus RPC socket. At most one @stdin per nexus
-                    -- (the second open raises Err via the CAS-per-kind
+                    -- (the second open gives an Err arm via the CAS-per-kind
                     -- guard). Read-time failures (EOF, malformed packet)
-                    -- surface at @next, which also carries `<IO, Err>`.
+                    -- surface at @next, whose result carries them as an Err arm.
   | IntrStdout      -- ^ @stdout :: <IO> OStream a@ -- nullary; opens
                     -- process stdout as an OStream. @write routes through
                     -- the nexus. At most one @stdout per nexus.
   | IntrStderr      -- ^ @stderr :: <IO> OStream a@ -- symmetric with
                     -- @stdout for stderr.
-  | IntrThrow       -- ^ @throw :: Str -> <Err> a@ -- raise a MorlocException
-                    -- with the given message. Return type is a fresh
-                    -- existential so `@throw` fits in any branch.
-  | IntrCatch       -- ^ @catch :: <e, Err> a -> <e> a -> <e> a@ --
-                    -- intercept a fallible expression, substituting the
-                    -- fallback value when it raises. Effect-strip removes
-                    -- Err; other effects propagate through.
+  | IntrThrow       -- ^ @throw :: e -> a@ -- abandon the computation,
+                    -- rendering the payload into the traceback. A bottom
+                    -- rather than a tracked effect: it does not return, so
+                    -- there is nothing for an effect row to describe. The
+                    -- return type is a fresh existential so `@throw` fits
+                    -- in any branch.
+  | IntrTry         -- ^ @try :: <e> a -> <e> (Try Str a)@ -- run the
+                    -- argument and convert an otherwise-uncaught failure
+                    -- into data. The argument is always suspended, as a
+                    -- property of the form rather than of its type, so a
+                    -- pure body works too. The error is a rendered message
+                    -- plus traceback: a body may fail in several unrelated
+                    -- ways and those have no common type. The body's own
+                    -- effects pass through.
   | IntrTell        -- ^ @tell :: <IO> U64@ -- the number of elements written
                     -- to the process's @stdout OStream so far (its
                     -- element_count). Used by the offset-aware `with:`/
@@ -485,6 +541,8 @@ intrinsicName IntrOpen = "open"
 intrinsicName IntrClose = "close"
 intrinsicName IntrFSchema = "fschema"
 intrinsicName IntrMap = "map"
+intrinsicName IntrTagTest = "tagtest"
+intrinsicName IntrCtorField = "ctorfield"
 intrinsicName IntrFLength = "flen"
 intrinsicName IntrStreamLayout = "streamlayout"
 intrinsicName IntrNext = "next"
@@ -497,7 +555,7 @@ intrinsicName IntrStdin = "stdin"
 intrinsicName IntrStdout = "stdout"
 intrinsicName IntrStderr = "stderr"
 intrinsicName IntrThrow = "throw"
-intrinsicName IntrCatch = "catch"
+intrinsicName IntrTry = "try"
 intrinsicName IntrTell = "tell"
 intrinsicName IntrCollect = "collect"
 intrinsicName IntrTmpfile = "tmpfile"
@@ -535,7 +593,7 @@ intrinsicIsIO IntrTmpfile = True
 intrinsicIsIO IntrCollect = True
 -- Synthesized post-typecheck (never user-written); IO by nature.
 intrinsicIsIO IntrIFileWalk = True
--- Pure or Err-only (no IO): safe to write directly in a sandboxed eval.
+-- No IO: safe to write directly in a sandboxed eval.
 intrinsicIsIO IntrHash = False
 intrinsicIsIO IntrVersion = False
 intrinsicIsIO IntrCompiled = False
@@ -546,8 +604,10 @@ intrinsicIsIO IntrShow = False
 intrinsicIsIO IntrRead = False
 intrinsicIsIO IntrDatafile = False
 intrinsicIsIO IntrMap = False
+intrinsicIsIO IntrTagTest = False
+intrinsicIsIO IntrCtorField = False
 intrinsicIsIO IntrThrow = False
-intrinsicIsIO IntrCatch = False
+intrinsicIsIO IntrTry = False
 
 -- | Parse a name to an intrinsic (Nothing if not a known intrinsic)
 parseIntrinsic :: Text -> Maybe Intrinsic
@@ -582,7 +642,7 @@ parseIntrinsic "stdin" = Just IntrStdin
 parseIntrinsic "stdout" = Just IntrStdout
 parseIntrinsic "stderr" = Just IntrStderr
 parseIntrinsic "throw" = Just IntrThrow
-parseIntrinsic "catch" = Just IntrCatch
+parseIntrinsic "try" = Just IntrTry
 parseIntrinsic "tell" = Just IntrTell
 parseIntrinsic "collect" = Just IntrCollect
 parseIntrinsic _ = Nothing
@@ -590,6 +650,8 @@ parseIntrinsic _ = Nothing
 -- | Expected number of arguments for each intrinsic
 intrinsicArity :: Intrinsic -> Int
 intrinsicArity IntrSave = 3
+intrinsicArity IntrTagTest = 2
+intrinsicArity IntrCtorField = 3
 intrinsicArity IntrSaveM = 2
 intrinsicArity IntrSaveJ = 2
 intrinsicArity IntrLoad = 1
@@ -618,7 +680,7 @@ intrinsicArity IntrStdin = 0
 intrinsicArity IntrStdout = 0
 intrinsicArity IntrStderr = 0
 intrinsicArity IntrThrow = 1
-intrinsicArity IntrCatch = 2
+intrinsicArity IntrTry = 1
 intrinsicArity IntrTell = 0
 intrinsicArity IntrCollect = 1
 intrinsicArity IntrTmpfile = 0
@@ -655,6 +717,16 @@ data Expr
   | IntE Integer
   | LogE Bool
   | StrE Text
+  -- | A `data` constructor applied to its arguments: the type, the
+  -- constructor's name, its 0-based declaration ordinal, and the argument
+  -- expressions. The ordinal is the wire tag, fixed at the declaration
+  -- rather than recomputed.
+  --
+  -- The argument list is empty for a constructor that takes none. Whether
+  -- the value is a byte or a tagged pointer is decided by the TYPE, not by
+  -- this constructor's own arity: a type is an enum only when every one of
+  -- its constructors is argument-free.
+  | ConE TVar Text Int [ExprI]
   | PatE Pattern
   | IfE ExprI ExprI ExprI
   | DoBlockE ExprI
@@ -791,6 +863,9 @@ data ExprS g f c
   | IntS Int Integer
   | LogS Bool
   | StrS Text
+  -- | A `data` constructor applied to its arguments: type, name, 0-based
+  -- ordinal, argument expressions (empty when it takes none).
+  | ConS TVar Text Int [AnnoS g f c]
   | ExeS ExecutableExpr
   | LetS EVar (AnnoS g f c) (AnnoS g f c)
   | LetBndS EVar
@@ -830,6 +905,7 @@ instance Defaultable ModuleConfig where
       { moduleConfigDefaultGroup = Nothing
       , moduleConfigLabeledGroups = Map.empty
       , moduleConfigLogTemplate = Nothing
+      , moduleConfigBenchTemplate = Nothing
       , moduleConfigPrologue = Nothing
       , moduleConfigEpilogue = Nothing
       , moduleConfigHashInclude = Nothing
@@ -888,6 +964,7 @@ instance FromJSON ModuleConfig where
       <$> o .:? "default-group"
       <*> o .:? "labeled-groups" .!= Map.empty
       <*> o .:? "log-template"
+      <*> o .:? "benchmark-template"
       <*> o .:? "prologue"
       <*> o .:? "epilogue"
       <*> o .:? "hash-include"
@@ -901,6 +978,11 @@ instance FromJSON LogTemplate where
   parseJSON =
     Aeson.genericParseJSON $
       defaultOptions {fieldLabelModifier = stripPrefixAndKebabCase "logTemplate"}
+
+instance FromJSON BenchTemplate where
+  parseJSON =
+    Aeson.genericParseJSON $
+      defaultOptions {fieldLabelModifier = stripPrefixAndKebabCase "benchTemplate"}
 
 instance FromJSON EpilogueTemplate where
   parseJSON =
@@ -957,6 +1039,7 @@ mapExprSM f (NamS rs) = NamS <$> mapM (secondM f) rs
 mapExprSM _ UniS = return UniS
 mapExprSM _ NullS = return NullS
 mapExprSM _ (BndS v) = return $ BndS v
+mapExprSM f (ConS tv n i xs) = ConS tv n i <$> mapM f xs
 mapExprSM _ (RealS i x) = return $ RealS i x
 mapExprSM _ (IntS i x) = return $ IntS i x
 mapExprSM _ (LogS x) = return $ LogS x
@@ -1084,6 +1167,7 @@ instance Pretty Symbol where
   pretty (TypeSymbol x) = pretty x
   pretty (TermSymbol x) = pretty x
   pretty (ClassSymbol x) = pretty x
+  pretty (CtorSymbol t c) = pretty t <> "(" <> pretty c <> ")"
 
 instance Pretty AliasedSymbol where
   pretty (AliasedType x alias)
@@ -1133,6 +1217,7 @@ instance Pretty Expr where
           <+> sep (map (either pretty (parens . pretty)) vs)
     TypedefAlias -> body "type"
     TypedefNewtype -> body "newtype"
+    TypedefEnum -> body "data"
     where
       body keyword =
         keyword <+> pretty lang
@@ -1160,6 +1245,7 @@ instance Pretty Expr where
   pretty (RealE x) = pretty (showRealLit x)
   pretty (IntE x) = pretty (show x)
   pretty (StrE x) = dquotes (pretty x)
+  pretty (ConE tv n _ xs) = pretty tv <> "." <> pretty n <> tupled (map pretty xs)
   pretty (LogE x) = pretty x
   pretty (LetE bindings body) = vsep [pretty v <+> "=" <+> pretty e | (v, e) <- bindings] <+> "in" <+> pretty body
   pretty (AssE v e es) = pretty v <+> "=" <+> pretty e <+> "where" <+> (align . vsep . map pretty) es
@@ -1207,6 +1293,7 @@ instance (Foldable f) => Pretty (ExprS a f b) where
   pretty UniS = "UniS"
   pretty NullS = "NullS"
   pretty (BndS x) = "(BndS" <+> pretty x <> ")"
+  pretty (ConS tv n _ xs) = "(ConS" <+> pretty tv <> "." <> pretty n <+> list (map pretty xs) <> ")"
   pretty (RealS _ x) = pretty (showRealLit x)
   pretty (IntS _ x) = viaShow x
   pretty (LogS x) = viaShow x

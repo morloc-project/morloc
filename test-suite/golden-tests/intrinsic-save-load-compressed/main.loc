@@ -18,6 +18,7 @@
 -- successfully).
 
 module main
+
   ( binIntLvl0
   , binIntLvl1
   , binIntLvl5
@@ -26,35 +27,45 @@ module main
   , binListLvl5
   )
 
+-- `Try` is declared in `internal` and reaches user code through `root`;
+-- a fallible intrinsic or `@try` needs it in scope.
+import root
+
 effect IO
 effect Err
 
-binIntLvl0 :: Int -> Str -> <IO, Err> Int
+binIntLvl0 :: Int -> Str -> <IO> Int
 binIntLvl0 x path = do
   @save 0 path x
-  @load path
+  Ok _tailv85 <- @load path
+  _tailv85
 
-binIntLvl1 :: Int -> Str -> <IO, Err> Int
+binIntLvl1 :: Int -> Str -> <IO> Int
 binIntLvl1 x path = do
   @save 1 path x
-  @load path
+  Ok _tailv86 <- @load path
+  _tailv86
 
-binIntLvl5 :: Int -> Str -> <IO, Err> Int
+binIntLvl5 :: Int -> Str -> <IO> Int
 binIntLvl5 x path = do
   @save 5 path x
-  @load path
+  Ok _tailv87 <- @load path
+  _tailv87
 
-binIntLvl9 :: Int -> Str -> <IO, Err> Int
+binIntLvl9 :: Int -> Str -> <IO> Int
 binIntLvl9 x path = do
   @save 9 path x
-  @load path
+  Ok _tailv88 <- @load path
+  _tailv88
 
-binListLvl0 :: [Int] -> Str -> <IO, Err> [Int]
+binListLvl0 :: [Int] -> Str -> <IO> [Int]
 binListLvl0 xs path = do
   @save 0 path xs
-  @load path
+  Ok _tailv89 <- @load path
+  _tailv89
 
-binListLvl5 :: [Int] -> Str -> <IO, Err> [Int]
+binListLvl5 :: [Int] -> Str -> <IO> [Int]
 binListLvl5 xs path = do
   @save 5 path xs
-  @load path
+  Ok _tailv90 <- @load path
+  _tailv90

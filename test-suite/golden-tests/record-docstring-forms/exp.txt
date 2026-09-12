@@ -1,10 +1,10 @@
 --- where form ---
-name=settings
+name=_1
 metavar=SETTINGS
 description=Some settings
 morloc=Config
 --- constructor form ---
-name=settings
+name=_1
 metavar=SETTINGS
 description=Some settings
 morloc=Config

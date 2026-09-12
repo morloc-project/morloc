@@ -1,0 +1,16 @@
+module testr
+  ( etaSingle
+  , etaTwo
+  , etaReversed
+  , etaCaptured
+  , etaCapturedTwo
+  , etaNested
+  , etaTuple
+  , etaTupleCaptured
+  , etaGetter
+  , etaGetterGroup
+  , etaOfEta
+  )
+
+import .tests
+import root-r

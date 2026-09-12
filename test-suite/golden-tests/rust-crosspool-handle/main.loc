@@ -18,13 +18,14 @@ module main (testRoundTrip)
 import root-rust
 import root-py
 
-testRoundTrip :: Str -> <IO, Err> Int
+testRoundTrip :: Str -> <IO> Int
 testRoundTrip path = do
-  o <- @open (idrust path) :: <IO, Err> OStream Int
+  Ok o <- @open (idrust path) :: <IO> (Try Str (OStream Int))
   @write 0 o (idpy [1, 2, 3])
   @write 0 o (idrust [1, 2, 3])
   @write 0 o (idpy [4, 5])
   @write 0 o (idrust [6, 7, 8])
   @close o
-  s <- @open path :: <IO, Err> IStream Int
-  @flen s
+  Ok s <- @open path :: <IO> (Try Str (IStream Int))
+  Ok _tailv16 <- @flen s
+  _tailv16

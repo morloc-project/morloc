@@ -1,0 +1,72 @@
+-- A pattern's receiver and the pattern itself need not be realised in
+-- the same pool. The receiver is produced in one language, the setter
+-- or getter runs in another, and the record crosses the boundary in
+-- between -- twice for a setter, which reads the receiver apart and
+-- puts a new one back together.
+--
+-- The record's fields are declared in reverse alphabetical order and
+-- share a type, so a rebuild that lays them out in any order but the
+-- declaration's is visible in the answer rather than in a schema error.
+-- Each language pins one end of the crossing in turn.
+
+module main
+  ( setPyToCpp
+  , setCppToPy
+  , setPyToR
+  , setRToPy
+  , getPyToCpp
+  , getCppToR
+  , setNestedPyToCpp
+  , setTwoCppToPy
+  , setThenGetAcross
+  )
+
+source Cpp from "types.hpp" ("pair_t", "box_t")
+
+import root
+import root-py
+import root-r
+import root-cpp
+
+record Pair = Pair { zed :: Str, alpha :: Str }
+record Py => Pair = "dict"
+record R => Pair = "list"
+record Cpp => Pair = "pair_t"
+
+record Box = Box { inner :: Pair, n :: Int }
+record Py => Box = "dict"
+record R => Box = "list"
+record Cpp => Box = "box_t"
+
+pair :: Pair
+pair = { zed = "z", alpha = "a" }
+
+box :: Box
+box = { inner = { zed = "z", alpha = "a" }, n = 7 }
+
+setPyToCpp :: Pair
+setPyToCpp = idcpp (.(.zed = "SET") (idpy pair))
+
+setCppToPy :: Pair
+setCppToPy = idpy (.(.zed = "SET") (idcpp pair))
+
+setPyToR :: Pair
+setPyToR = idr (.(.zed = "SET") (idpy pair))
+
+setRToPy :: Pair
+setRToPy = idpy (.(.zed = "SET") (idr pair))
+
+getPyToCpp :: (Str, Str)
+getPyToCpp = idcpp (.(.zed, .alpha) (idpy pair))
+
+getCppToR :: (Str, Str)
+getCppToR = idr (.(.alpha, .zed) (idcpp pair))
+
+setNestedPyToCpp :: Box
+setNestedPyToCpp = idcpp (.(.inner.alpha = "SET") (idpy box))
+
+setTwoCppToPy :: Pair
+setTwoCppToPy = idpy (.(.alpha = "A2", .zed = "Z2") (idcpp pair))
+
+setThenGetAcross :: (Str, Str)
+setThenGetAcross = idr (.(.zed, .alpha) (idcpp (.(.zed = "SET") (idpy pair))))

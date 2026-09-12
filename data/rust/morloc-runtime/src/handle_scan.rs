@@ -339,7 +339,8 @@ pub fn rewrite_data_packet_for_persistence(
     packet: &[u8],
 ) -> Result<Vec<u8>, MorlocError> {
     use morloc_runtime_types::packet::{
-        PacketHeader, PACKET_FORMAT_VOIDSTAR, read_schema_from_meta,
+        PacketHeader, PACKET_COMPRESSION_NONE, PACKET_FORMAT_VOIDSTAR,
+        read_schema_from_meta,
     };
     use morloc_runtime_types::schema::parse_schema;
 
@@ -356,6 +357,13 @@ pub fn rewrite_data_packet_for_persistence(
     if format != PACKET_FORMAT_VOIDSTAR {
         // msgpack / JSON already carry paths as strings; nothing to
         // rewrite for cross-nexus.
+        return Ok(packet.to_vec());
+    }
+    // A compressed body is not a voidstar to walk, whatever the format
+    // field says about what it will be once expanded. Walking it would
+    // read the frame as structure and could rewrite bytes inside it.
+    let compression = unsafe { hdr.command.data.compression };
+    if compression != PACKET_COMPRESSION_NONE {
         return Ok(packet.to_vec());
     }
 

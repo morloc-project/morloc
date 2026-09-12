@@ -107,6 +107,24 @@
     Rf_eval(Rf_lang2(install("stop"), _cond), R_GlobalEnv); \
 } while (0)
 
+// R_TRY for the machinery that carries values between pools: IPC, packet
+// construction and decode. These failures are not attributable to user data
+// or foreign-function behavior and leave the pool unable to continue, so
+// they raise the MorlocInternalError-classed condition that morloc_mlc_catch
+// re-raises, rather than the catchable error() that R_TRY raises.
+#define R_TRY_INFRA(fun, ...) \
+    fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
+    if(child_errmsg_ != NULL){ \
+        MORLOC_INTERNAL_ABORT("%s", child_errmsg_); \
+    }
+
+#define R_TRY_WITH_INFRA(clean, fun, ...) \
+    fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
+    if(child_errmsg_ != NULL){ \
+        clean; \
+        MORLOC_INTERNAL_ABORT("%s", child_errmsg_); \
+    }
+
 /// }}}
 
 // {{{ shm_tracker
@@ -177,7 +195,7 @@ static bool shm_tracker_release_one(absptr_t ptr) {
 
 /// }}}
 
-// ── Recursive-record env (named-schema stack) ─────────────────────────────
+// -- Recursive-record env (named-schema stack) -----------------------------
 //
 // Mirrors the pymorloc.c stack: thread-local push/pop discipline so the
 // schema walkers can resolve MORLOC_RECUR back-references to their
@@ -284,6 +302,26 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj);
 
 // Public wrapper: maintain the recur env stack across the recursive walk
 // so MORLOC_RECUR arms can resolve their back-reference targets.
+// Resolve a constructor name against a variant schema's key list, yielding
+// its tag. The tag is the constructor's position in the declaration, which is
+// what the wire carries, and the keys arrive in that same order.
+static ssize_t variant_tag_of(const Schema* schema, SEXP obj) {
+    if (TYPEOF(obj) != VECSXP || Rf_length(obj) != 2) {
+        return -1;
+    }
+    SEXP name = VECTOR_ELT(obj, 0);
+    if (TYPEOF(name) != STRSXP || Rf_length(name) < 1) {
+        return -1;
+    }
+    const char* want = CHAR(STRING_ELT(name, 0));
+    for (size_t i = 0; i < schema->size; i++) {
+        if (schema->keys[i] && strcmp(schema->keys[i], want) == 0) {
+            return (ssize_t)i;
+        }
+    }
+    return -1;
+}
+
 static size_t get_shm_size(const Schema* schema, SEXP obj) {
     int pushed = recur_env_push(schema);
     size_t r = get_shm_size_inner(schema, obj);
@@ -306,6 +344,7 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
         case MORLOC_UINT64:
         case MORLOC_FLOAT32:
         case MORLOC_FLOAT64:
+        case MORLOC_ENUM:
             return schema->width;
         case MORLOC_INT:
             // Inline BigInt: R values always fit inline (16 bytes)
@@ -402,6 +441,11 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
                                 for(size_t i = 0; i < length; i++){
                                     size += get_shm_size(schema->parameters[0], STRING_ELT(obj, i));
                                 }
+                            } else if(schema->parameters[0]->type == MORLOC_ENUM){
+                                // Constructor names, which cost a tag byte
+                                // each: the names travel in the schema and
+                                // never in the buffer.
+                                size += length * schema->parameters[0]->width;
                             } else {
                                 MORLOC_ERROR("Expected character vector of length 1, but got length %zu", length);
                             }
@@ -481,9 +525,28 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
                 }
             }
 
+        case MORLOC_VARIANT: {
+            // list("Circle", list(fields...)): the 16-byte slot, worst-case
+            // padding before the payload, and the payload's own size. A
+            // nullary arm has no payload and needs only the slot.
+            ssize_t vtag = variant_tag_of(schema, obj);
+            if (vtag < 0) MORLOC_ERROR("not a constructor of this `data` type");
+            const Schema* varm = schema->parameters[vtag];
+            if (varm->size == 0) {
+                return schema->width;
+            }
+            {
+                SEXP vfields = VECTOR_ELT(obj, 1);
+                size_t arm_size = get_shm_size(varm, vfields);
+                size_t varm_align = schema_alignment(varm);
+                if (varm_align == 0) varm_align = 1;
+                return schema->width + (varm_align - 1) + arm_size;
+            }
+        }
+
         case MORLOC_OPTIONAL:
-            // Slot is sizeof(relptr) (= schema->width). Absent → just the slot.
-            // Present → slot + worst-case alignment padding for the inner T +
+            // Slot is sizeof(relptr) (= schema->width). Absent -> just the slot.
+            // Present -> slot + worst-case alignment padding for the inner T +
             // T's total size (its own width plus any variable extras).
             if (obj == R_NilValue) {
                 return schema->width;
@@ -539,6 +602,60 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
         } \
         *(CTYPE*)dest = (CTYPE)value; \
     } while(0)
+
+// An enum's R form is an ordered factor: integer storage plus a levels
+// attribute, which is R's own enum. The names come from the schema, so
+// nothing has to be generated into the pool.
+//
+// Ordered, not plain: a constructor's declaration position is its tag, and
+// comparison follows that order in every other language. An unordered
+// factor makes `<` return NA with a warning, so an ordering that holds
+// everywhere else answers NA here. The levels are in declaration order, so
+// R's own comparison then agrees with the wire tag.
+//
+// Factor codes are 1-based while the wire tag is 0-based. Both directions
+// of that conversion live here and nowhere else, because an off-by-one
+// between them corrupts silently -- every value still decodes, just to the
+// neighbouring constructor.
+static void attach_factor_levels(SEXP obj, const Schema* schema) {
+    SEXP levels = PROTECT(allocVector(STRSXP, (R_xlen_t)schema->size));
+    for (size_t i = 0; i < schema->size; i++) {
+        SET_STRING_ELT(levels, (R_xlen_t)i, mkChar(schema->keys[i]));
+    }
+    SEXP klass = PROTECT(allocVector(STRSXP, 2));
+    SET_STRING_ELT(klass, 0, mkChar("ordered"));
+    SET_STRING_ELT(klass, 1, mkChar("factor"));
+    setAttrib(obj, R_LevelsSymbol, levels);
+    setAttrib(obj, R_ClassSymbol, klass);
+    UNPROTECT(2);
+}
+
+// Resolve a constructor name against the schema's table. A constructor's
+// position in the declaration IS its wire tag. Returns -1 when the name is
+// not a constructor of this type.
+static long enum_tag_of_name(const Schema* schema, const char* name) {
+    for (size_t i = 0; i < schema->size; i++) {
+        if (strcmp(name, schema->keys[i]) == 0) {
+            return (long)i;
+        }
+    }
+    return -1;
+}
+
+// The tag a factor's code means, resolved through the factor's OWN levels
+// rather than through its integer code. attach_factor_levels builds levels
+// in schema order on the way out, but a factor a user built in sourced R
+// carries whatever order R chose -- factor("G", levels = c("T","G","C","A"))
+// has code 2, and taking that as the tag silently decodes as the schema's
+// second constructor. Returns -1 for a code with no level; -2 for a level
+// that is not a constructor of this type.
+static long enum_tag_of_factor_code(const Schema* schema, SEXP levels, int code) {
+    if (isNull(levels) || code == NA_INTEGER || code < 1 || code > LENGTH(levels)) {
+        return -1;
+    }
+    long tag = enum_tag_of_name(schema, CHAR(STRING_ELT(levels, code - 1)));
+    return tag < 0 ? -2 : tag;
+}
 
 #define HANDLE_UINT_TYPE(CTYPE, MAX) \
     do { \
@@ -661,6 +778,42 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
         case MORLOC_UINT8:
             HANDLE_UINT_TYPE(uint8_t, UINT8_MAX);
             break;
+        // Bound by the constructor count rather than UINT8_MAX: a tag no
+        // constructor claims is a type error, not an overflow.
+        case MORLOC_ENUM: {
+            // A factor carries 1-based codes; a character vector names the
+            // constructor directly. A bare integer is deliberately NOT
+            // accepted: it would be ambiguous between the wire tag and a
+            // factor code, and the two differ by one.
+            long tag = -1;
+            if (isFactor(obj)) {
+                SEXP levels = getAttrib(obj, R_LevelsSymbol);
+                int code = asInteger(obj);
+                tag = enum_tag_of_factor_code(schema, levels, code);
+                if (tag == -1) {
+                    MORLOC_ERROR("factor has no level for its code");
+                }
+                if (tag == -2) {
+                    MORLOC_ERROR("'%s' is not a constructor of this type",
+                                 CHAR(STRING_ELT(levels, code - 1)));
+                }
+            } else if (isString(obj) && LENGTH(obj) == 1) {
+                const char* name = CHAR(STRING_ELT(obj, 0));
+                tag = enum_tag_of_name(schema, name);
+                if (tag < 0) {
+                    MORLOC_ERROR("'%s' is not a constructor of this type", name);
+                }
+            } else {
+                MORLOC_ERROR("Expected a factor or a constructor name, but got %s",
+                             type2char(TYPEOF(obj)));
+            }
+            if (tag < 0 || (size_t)tag >= schema->size) {
+                MORLOC_ERROR("enum tag %ld is out of range; the type has %zu constructors",
+                             tag, schema->size);
+            }
+            *(uint8_t*)dest = (uint8_t)tag;
+            break;
+        }
         case MORLOC_UINT16:
             HANDLE_UINT_TYPE(uint16_t, UINT16_MAX);
             break;
@@ -671,7 +824,7 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
             HANDLE_UINT64();
             break;
         case MORLOC_INT: {
-            // Inline BigInt: [size=1, value] — no allocation needed
+            // Inline BigInt: [size=1, value] -- no allocation needed
             if (!(isInteger(obj) || isReal(obj))) {
                 MORLOC_ERROR("Expected integer or numeric for MORLOC_INT, but got %s", type2char(TYPEOF(obj)));
             }
@@ -805,6 +958,43 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
                 break;
             }
 
+            // An enum array is one vector carrying the levels, not a
+            // sequence of values that each carry them: pull an element out
+            // of a factor and the levels stay behind, leaving a bare
+            // integer the scalar path rejects. Resolve the whole vector
+            // here instead. A character vector of constructor names is
+            // accepted for the same reason the scalar path accepts one.
+            if (element_schema->type == MORLOC_ENUM
+                && (isFactor(obj) || TYPEOF(obj) == STRSXP)) {
+                *cursor = (void*)(*(char**)cursor + array->size * element_schema->width);
+                start = R_TRY(rel2abs, array->data);
+                SEXP levels = isFactor(obj)
+                    ? getAttrib(obj, R_LevelsSymbol)
+                    : R_NilValue;
+                for (size_t i = 0; i < array->size; i++) {
+                    long tag;
+                    if (isFactor(obj)) {
+                        int code = INTEGER(obj)[i];
+                        tag = enum_tag_of_factor_code(element_schema, levels, code);
+                        if (tag == -1) {
+                            MORLOC_ERROR("factor has no level for its code");
+                        }
+                        if (tag == -2) {
+                            MORLOC_ERROR("'%s' is not a constructor of this type",
+                                         CHAR(STRING_ELT(levels, code - 1)));
+                        }
+                    } else {
+                        const char* name = CHAR(STRING_ELT(obj, i));
+                        tag = enum_tag_of_name(element_schema, name);
+                        if (tag < 0) {
+                            MORLOC_ERROR("'%s' is not a constructor of this type", name);
+                        }
+                    }
+                    *(uint8_t*)(start + i * element_schema->width) = (uint8_t)tag;
+                }
+                break;
+            }
+
             switch (TYPEOF(obj)) {
                 case STRSXP:
                     {
@@ -926,8 +1116,36 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
             }
             break;
 
+        case MORLOC_VARIANT: {
+            // Tag byte, determined padding, then a relptr to the arm's
+            // fields written at the cursor. A nullary arm writes RELNULL and
+            // allocates nothing, matching the wire form.
+            ssize_t wtag = variant_tag_of(schema, obj);
+            if (wtag < 0) MORLOC_ERROR("not a constructor of this `data` type");
+            const Schema* warm = schema->parameters[wtag];
+            *((uint8_t*)dest) = (uint8_t)wtag;
+            memset((char*)dest + 1, 0, 7);
+            if (warm->size == 0) {
+                *(relptr_t*)((char*)dest + 8) = RELNULL;
+            } else {
+                SEXP wfields = VECTOR_ELT(obj, 1);
+                size_t warm_align = schema_alignment(warm);
+                if (warm_align == 0) warm_align = 1;
+                *cursor = (void*)(((uintptr_t)*cursor + warm_align - 1) & ~(uintptr_t)(warm_align - 1));
+                {
+                    char* rel_err = NULL;
+                    *(relptr_t*)((char*)dest + 8) = abs2rel(*cursor, &rel_err);
+                    if (rel_err) { free(rel_err); MORLOC_ERROR("abs2rel failed in MORLOC_VARIANT"); }
+                }
+                void* arm_dest = *cursor;
+                *cursor = (void*)((char*)*cursor + warm->width);
+                to_voidstar_inner(arm_dest, cursor, wfields, warm);
+            }
+            break;
+        }
+
         case MORLOC_OPTIONAL:
-            // The slot is a relptr. Absent → write RELNULL. Present →
+            // The slot is a relptr. Absent -> write RELNULL. Present ->
             // align the cursor for the inner T, write the inner's relptr
             // into the slot, advance the cursor past T's width, then
             // recurse to fill T's body.
@@ -1028,7 +1246,7 @@ static SEXP from_voidstar_inner(const void* data, const Schema* schema, const vo
         case MORLOC_SINT32:
             // R's integer reserves INT32_MIN as NA_integer_, so storing the
             // full Int32 range as INTSXP would conflate the legitimate value
-            // -2^31 with missing data. Use REALSXP (double) instead — int32
+            // -2^31 with missing data. Use REALSXP (double) instead -- int32
             // fits in 53 bits, so values round-trip exactly.
             obj = ScalarReal((double)(*(int32_t*)data));
             break;
@@ -1047,6 +1265,14 @@ static SEXP from_voidstar_inner(const void* data, const Schema* schema, const vo
         }
         case MORLOC_UINT8:
             obj = ScalarInteger((int)(*(uint8_t*)data));
+            break;
+        // The 0-based wire tag reaches R as a plain integer; the generated
+        // wrapper turns it into a factor, which is where the 1-based
+        // adjustment belongs -- R factor codes start at 1.
+        case MORLOC_ENUM:
+            obj = PROTECT(ScalarInteger((int)(*(uint8_t*)data) + 1));
+            attach_factor_levels(obj, schema);
+            UNPROTECT(1);
             break;
         case MORLOC_UINT16:
             obj = ScalarInteger((int)(*(uint16_t*)data));
@@ -1224,6 +1450,24 @@ static SEXP from_voidstar_inner(const void* data, const Schema* schema, const vo
                         }
                         start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                         memcpy(RAW(obj), start, array->size * sizeof(uint8_t));
+                        UNPROTECT(1);
+                        break;
+                    // A factor's storage is an integer vector, so an enum
+                    // array widens to INTSXP here and the wrapper attaches
+                    // the levels. This costs R 4 bytes per element; that is
+                    // R's floor for a factor, not a property of the wire.
+                    case MORLOC_ENUM:
+                        obj = PROTECT(allocVector(INTSXP, array->size));
+                        if(array->size == 0) {
+                            attach_factor_levels(obj, element_schema);
+                            UNPROTECT(1);
+                            break;
+                        }
+                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
+                        for (size_t i = 0; i < array->size; i++) {
+                            INTEGER(obj)[i] = (int)(*(uint8_t*)(start + i)) + 1;
+                        }
+                        attach_factor_levels(obj, element_schema);
                         UNPROTECT(1);
                         break;
                     case MORLOC_UINT16:
@@ -1416,6 +1660,41 @@ static SEXP from_voidstar_inner(const void* data, const Schema* schema, const vo
             }
             setAttrib(obj, R_NamesSymbol, names);
             UNPROTECT(2);
+            break;
+        }
+        case MORLOC_VARIANT: {
+            // A payload-bearing `data` value crosses as a STRUCTURAL pair --
+            // the constructor's name and a list of its fields -- because the
+            // generic marshaller has no pool-level type to build. Documented
+            // interim form; see the note on the Python/R variant spelling in
+            // the code generator.
+            uint8_t vtag = *(const uint8_t*)data;
+            if ((size_t)vtag >= schema->size) {
+                MORLOC_ERROR("variant tag is out of range for this type");
+            }
+            const Schema* varm = schema->parameters[vtag];
+            relptr_t vrel = *(const relptr_t*)((const char*)data + 8);
+            SEXP vfields;
+            if (vrel == RELNULL) {
+                vfields = PROTECT(allocVector(VECSXP, 0));
+            } else {
+                const void* payload;
+                if (base_ptr) {
+                    payload = (const char*)base_ptr + vrel;
+                } else {
+                    char* rel_err = NULL;
+                    payload = rel2abs(vrel, &rel_err);
+                    if (rel_err) { free(rel_err); MORLOC_ERROR("rel2abs failed in MORLOC_VARIANT"); }
+                }
+                vfields = PROTECT(from_voidstar(payload, varm, base_ptr));
+            }
+            {
+                SEXP pair = PROTECT(allocVector(VECSXP, 2));
+                SET_VECTOR_ELT(pair, 0, mkString(schema->keys[vtag]));
+                SET_VECTOR_ELT(pair, 1, vfields);
+                UNPROTECT(2);
+                obj = pair;
+            }
             break;
         }
         case MORLOC_OPTIONAL: {
@@ -1850,7 +2129,7 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
 
     relptr_t relptr = R_TRY_WITH(free_schema(schema), abs2rel, voidstar);
 
-    uint8_t* packet = R_TRY_WITH(free_schema(schema), make_data_packet_auto, voidstar, relptr, schema);
+    uint8_t* packet = R_TRY_WITH_INFRA(free_schema(schema), make_data_packet_auto, voidstar, relptr, schema);
 
     const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
     bool tracked = false;
@@ -1886,7 +2165,7 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
 }
 
 
-// ── Stream-handle bindings ───────────────────────────────────────────────
+// -- Stream-handle bindings -----------------------------------------------
 
 // @open: returns a 64-bit handle. R has no native int64 SEXP type, so
 // we marshal via a length-1 numeric vector (double) which preserves
@@ -2507,7 +2786,7 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
 
     // Arrow dispatch: if packet format is Arrow, import via C Data Interface
     if (format == PACKET_FORMAT_ARROW) {
-        uint8_t* arrow_ptr = R_TRY_WITH(free_schema(schema),
+        uint8_t* arrow_ptr = R_TRY_WITH_INFRA(free_schema(schema),
             get_morloc_data_packet_value, packet, schema);
         const arrow_shm_header_t* arrow_hdr = (const arrow_shm_header_t*)arrow_ptr;
 
@@ -2539,17 +2818,35 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         SEXP obj_r = PROTECT(eval(call, arrow_ns));
         UNPROTECT(6);
 
-        // Incref shm so data stays alive
-        char* incref_err = NULL;
-        shincref((absptr_t)arrow_ptr, &incref_err);
-        if (incref_err) { free(incref_err); }
+        // Hold the block for as long as R references the imported buffers,
+        // and hand it to the tracker so the reference is released at the
+        // start of the next request rather than never. A table that arrived
+        // by reference needs one taken on this pool's behalf; a table
+        // materialized here is already this pool's own and a second
+        // reference would leave it permanently held.
+        bool arrow_owned = true;
+        if (source == PACKET_SOURCE_RPTR) {
+            char* incref_err = NULL;
+            arrow_owned = shincref((absptr_t)arrow_ptr, &incref_err);
+            if (incref_err) { free(incref_err); }
+        }
+        if (arrow_owned) {
+            shm_tracker_push((absptr_t)arrow_ptr, NULL);
+        }
 
         free_schema(schema);
         return obj_r;
     }
 
-    // Fast path: inline voidstar -- read directly from packet, no SHM needed
-    if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR) {
+    // Fast path: inline voidstar -- read directly from packet, no SHM
+    // needed. A payload that is compressed or encrypted cannot be walked
+    // where it lies, so it falls through to the general path, which expands
+    // the body and re-enters. Testing for the plain values rather than
+    // against the known transforms keeps a future one from being read as
+    // raw bytes.
+    if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR
+        && header->command.data.compression == PACKET_COMPRESSION_NONE
+        && header->command.data.encryption == PACKET_ENCRYPTION_NONE) {
         const uint8_t* payload = packet + sizeof(morloc_packet_header_t) + header->offset;
         MORLOC_REJECT_NUL(check_nul, (const void*)payload, schema, (const void*)payload,
                           free_schema(schema));
@@ -2652,7 +2949,8 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
     // SHM paths (RPTR source from upstream pool/daemon, or our own
     // unpack_with_schema for MESG msgpack args).
     bool is_rptr = (source == PACKET_SOURCE_RPTR);
-    uint8_t* voidstar = R_TRY_WITH(free_schema(schema), get_morloc_data_packet_value, packet, schema);
+    bool tracked = false;
+    uint8_t* voidstar = R_TRY_WITH_INFRA(free_schema(schema), get_morloc_data_packet_value, packet, schema);
 
     if (is_rptr) {
         // Sender (daemon or peer pool) holds the original ref and will
@@ -2660,10 +2958,15 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         // it in the tracker so shm_tracker_flush() releases it at the
         // start of our next request -- after R has finished consuming
         // the deserialized form.
+        // Track only a reference actually acquired: a refused incref means
+        // the block is free or being released, and tracking it anyway would
+        // make the next flush decrement a reference this pool never held.
         char* incref_err = NULL;
-        shincref((absptr_t)voidstar, &incref_err);
+        if (shincref((absptr_t)voidstar, &incref_err)) {
+            shm_tracker_push((absptr_t)voidstar, schema);
+            tracked = true;
+        }
         if (incref_err) { free(incref_err); }
-        shm_tracker_push((absptr_t)voidstar, schema);
     }
 
     MORLOC_REJECT_NUL(check_nul, voidstar, schema, NULL, free_schema(schema));
@@ -2674,10 +2977,12 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
             char* free_err = NULL;
             shfree((absptr_t)voidstar, &free_err);
             if (free_err) { free(free_err); }
+        }
+        // The tracker owns the schema only where it took the block; the
+        // block itself belongs to its sender unless we allocated it.
+        if (!tracked) {
             free_schema(schema);
         }
-        // For RPTR, schema and voidstar are owned by the tracker; do not
-        // double-free here.
         MORLOC_ERROR("Failed to convert internal representation to R object");
     }
 
@@ -2688,6 +2993,8 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         char* free_err = NULL;
         shfree((absptr_t)voidstar, &free_err);
         if (free_err) { free(free_err); }
+    }
+    if (!tracked) {
         free_schema(schema);
     }
 
@@ -2725,7 +3032,7 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
     }
 
     // Create call packet
-    uint8_t* packet = R_TRY(
+    uint8_t* packet = R_TRY_INFRA(
         make_morloc_local_call_packet,
         (uint32_t)mid,
         arg_packets,
@@ -2733,7 +3040,7 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
     );
 
     // Send/receive over socket
-    uint8_t* result = R_TRY_WITH(free(packet),
+    uint8_t* result = R_TRY_WITH_INFRA(free(packet),
         send_and_receive_over_socket,
         socket_path,
         packet
@@ -2764,6 +3071,25 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
         }
     }
 
+    // The callee took a reference on the result's block before the packet
+    // left it, and that reference is ours now. Inherit it so the tracker
+    // releases it at the start of the next request, once R has finished
+    // with the deserialized form.
+    {
+        const morloc_packet_header_t* res_header =
+            (const morloc_packet_header_t*)result;
+        if (res_header->command.data.source == PACKET_SOURCE_RPTR) {
+            size_t relptr = *(size_t*)((uint8_t*)result
+                + res_header->offset + sizeof(morloc_packet_header_t));
+            char* resolve_err = NULL;
+            void* res_voidstar = rel2abs(relptr, &resolve_err);
+            if (resolve_err) { free(resolve_err); resolve_err = NULL; }
+            if (res_voidstar) {
+                shm_tracker_push((absptr_t)res_voidstar, NULL);
+            }
+        }
+    }
+
     // Get result size
     size_t result_length = R_TRY_WITH({free(packet); free(result);}, morloc_packet_size, result);
 
@@ -2779,7 +3105,7 @@ SEXP morloc_foreign_call(SEXP socket_path_r, SEXP mid_r, SEXP args_r) { MAYFAIL
 }
 
 
-// ── log emission bridge to libmorloc.so ──────────────────────────────────
+// -- log emission bridge to libmorloc.so ----------------------------------
 
 SEXP morloc_log_next_id_r(void) {
     uint64_t id = morloc_log_next_id();
@@ -2809,6 +3135,22 @@ SEXP morloc_log_emit_r(SEXP tmpl_r, SEXP group_r, SEXP runtime_r, SEXP call_id_r
     double runtime = asReal(runtime_r);
     uint64_t call_id = (uint64_t)asReal(call_id_r);
     morloc_log_emit(tmpl, group, runtime, call_id);
+    return R_NilValue;
+}
+
+SEXP morloc_bench_record_r(SEXP key_r, SEXP seconds_r) {
+    // A NULL or NA key is an unmeasured label; libmorloc treats it as a no-op.
+    const char* key = NULL;
+    if (TYPEOF(key_r) == STRSXP && LENGTH(key_r) == 1) {
+        SEXP s = STRING_ELT(key_r, 0);
+        if (s != NA_STRING) {
+            const char* k = CHAR(s);
+            if (k && k[0] != '\0') {
+                key = k;
+            }
+        }
+    }
+    morloc_bench_record(key, asReal(seconds_r));
     return R_NilValue;
 }
 
@@ -3662,7 +4004,7 @@ SEXP morloc_worker_loop_c(SEXP pipe_fd_r, SEXP ack_fd_r, SEXP dispatch_r, SEXP r
 
 // }}} C-level worker loop
 
-// ── Cache bridge to libmorloc.so ───────────────────────────────────────────
+// -- Cache bridge to libmorloc.so -------------------------------------------
 
 // Compute a cache key. Inputs:
 //   midx_r:     integer manifold id
@@ -3883,6 +4225,7 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_mlc_show", (DL_FUNC) &morloc_mlc_show, 2},
         {"r_morloc_log_next_id", (DL_FUNC) &morloc_log_next_id_r, 0},
         {"r_morloc_log_emit", (DL_FUNC) &morloc_log_emit_r, 4},
+        {"r_morloc_bench_record", (DL_FUNC) &morloc_bench_record_r, 2},
         {"morloc_is_ping", (DL_FUNC) &morloc_is_ping, 1},
         {"morloc_is_local_call", (DL_FUNC) &morloc_is_local_call, 1},
         {"morloc_is_remote_call", (DL_FUNC) &morloc_is_remote_call, 1},

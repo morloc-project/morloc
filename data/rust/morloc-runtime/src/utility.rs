@@ -108,44 +108,94 @@ pub unsafe fn raise_nofile_limit() {
     }
 }
 
-/// Rust-friendly entry point shared by every in-crate caller.
-/// Writes to `.<basename>.tmp.<pid>.<seq>` first, fsyncs, renames,
-/// then fsyncs the parent dir. The tmp basename's PID + monotonic
-/// counter avoids collisions between concurrent writers to the same
-/// directory.
-pub fn write_atomic_path(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let dir = path.parent().unwrap_or(std::path::Path::new("."));
-    let basename = path
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| String::from("out"));
-    let tmp_path = dir.join(format!(
-        ".{}.tmp.{}.{}",
-        basename,
-        std::process::id(),
-        seq
-    ));
+/// A file built beside its destination and moved onto it when finished.
+///
+/// The content is written to `.<basename>.tmp.<pid>.<seq>` in the
+/// destination's own directory, which keeps the rename within one
+/// filesystem and therefore atomic. A reader of the destination sees
+/// either the previous file or the completed one, never a partial build,
+/// and a build that does not finish leaves the destination untouched --
+/// the temporary is removed on drop. The PID and a monotonic counter in
+/// the temporary's name keep concurrent writers to one directory apart.
+///
+/// Callers that hold the bytes should use `write_atomic_path`. This type
+/// exists for a producer that never brings the content into memory, such
+/// as a `sendfile` copy, and so needs the descriptor itself.
+pub struct AtomicFile {
+    tmp: std::path::PathBuf,
+    dest: std::path::PathBuf,
+    file: Option<std::fs::File>,
+}
 
-    let result = (|| -> std::io::Result<()> {
-        let mut f = std::fs::File::create(&tmp_path)?;
-        if !bytes.is_empty() {
-            f.write_all(bytes)?;
+impl AtomicFile {
+    /// Open a temporary beside `dest`. When `dest` already exists its
+    /// permissions are carried over, so replacing a file does not
+    /// silently widen or narrow who can read it.
+    pub fn create(dest: &std::path::Path) -> std::io::Result<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = dest.parent().unwrap_or(std::path::Path::new("."));
+        let basename = dest
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| String::from("out"));
+        let tmp = dir.join(format!(
+            ".{}.tmp.{}.{}",
+            basename,
+            std::process::id(),
+            seq
+        ));
+        let file = std::fs::File::create(&tmp)?;
+        if let Ok(meta) = std::fs::metadata(dest) {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = meta.permissions().mode() & 0o7777;
+            let _ = file.set_permissions(std::fs::Permissions::from_mode(mode));
         }
-        f.sync_all()?;
-        drop(f);
-        std::fs::rename(&tmp_path, path)?;
+        Ok(AtomicFile { tmp, dest: dest.to_path_buf(), file: Some(file) })
+    }
+
+    /// The descriptor being built. Valid until `commit`.
+    pub fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
+        use std::os::unix::io::AsRawFd;
+        self.file.as_ref().expect("AtomicFile used after commit").as_raw_fd()
+    }
+
+    pub fn as_file_mut(&mut self) -> &mut std::fs::File {
+        self.file.as_mut().expect("AtomicFile used after commit")
+    }
+
+    /// Flush the content to disk and move it onto the destination.
+    pub fn commit(mut self) -> std::io::Result<()> {
+        let file = self.file.take().expect("AtomicFile committed twice");
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&self.tmp, &self.dest)?;
+        let dir = self.dest.parent().unwrap_or(std::path::Path::new("."));
         if let Ok(dir_f) = std::fs::File::open(dir) {
             let _ = dir_f.sync_all();
         }
         Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp_path);
     }
-    result
+}
+
+impl Drop for AtomicFile {
+    fn drop(&mut self) {
+        // Present only when `commit` did not run, so the build failed or
+        // was abandoned and the destination must keep what it had.
+        if self.file.take().is_some() {
+            let _ = std::fs::remove_file(&self.tmp);
+        }
+    }
+}
+
+/// Rust-friendly entry point shared by every in-crate caller.
+pub fn write_atomic_path(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut staged = AtomicFile::create(path)?;
+    if !bytes.is_empty() {
+        staged.as_file_mut().write_all(bytes)?;
+    }
+    staged.commit()
 }
 
 #[no_mangle]

@@ -361,31 +361,34 @@ cornersPyToR = rCornersT3 pyMakeT3
 -- (4) File IO: @save/@savej/@savem of a Matrix. The wire form is
 -- ((Int,Int), Vector (d1*d2) a) which has never been pushed through @save.
 -- =========================================================================
-matFileBin :: Str -> <IO, Err> (Matrix 3 4 Real)
+matFileBin :: Str -> <IO> (Matrix 3 4 Real)
 matFileBin path = do
   @save 0 path cppMakeMat34
-  @load path
+  Ok _tailv38 <- @load path
+  _tailv38
 
-matFileJson :: Str -> <IO, Err> (Matrix 3 4 Real)
+matFileJson :: Str -> <IO> (Matrix 3 4 Real)
 matFileJson path = do
   @savej path cppMakeMat34
-  @load path
+  Ok _tailv39 <- @load path
+  _tailv39
 
-matFileMsg :: Str -> <IO, Err> (Matrix 3 4 Real)
+matFileMsg :: Str -> <IO> (Matrix 3 4 Real)
 matFileMsg path = do
   @savem path cppMakeMat34
-  @load path
+  Ok _tailv40 <- @load path
+  _tailv40
 
-matFileSumBin :: Str -> <IO, Err> Real
+matFileSumBin :: Str -> <IO> Real
 matFileSumBin path = do
   @save 0 path cppMakeMat34
-  m <- @load path
+  Ok m <- @load path
   pySumMat34 m
 
-matFileSumJson :: Str -> <IO, Err> Real
+matFileSumJson :: Str -> <IO> Real
 matFileSumJson path = do
   @savej path cppMakeMat34
-  m <- @load path
+  Ok m <- @load path
   pySumMat34 m
 
 -- =========================================================================

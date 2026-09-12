@@ -1,0 +1,19 @@
+-- The declaring module. Its export list is explicit and names the TYPES
+-- only: a `data` type carries its constructors with it, so nothing else is
+-- needed for an importer to build a value.
+module types (Color, Shape, describe, area)
+
+import root-py
+
+data Color = Red | Green | Blue
+
+data Shape = Circle Real | Dot
+
+describe :: Color -> Str
+describe | Red = "red"
+         | Green = "green"
+         | Blue = "blue"
+
+area :: Shape -> Real
+area | (Circle r) = 3.0 * r * r
+     | Dot = 0.0

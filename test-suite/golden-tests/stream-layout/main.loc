@@ -1,6 +1,6 @@
 -- @streamLayout: per-sub-packet layout of an indexed IFile, for parallel planning.
 --
--- @streamLayout :: IFile [a] -> <IO, Err> [(U64, U64, U64)]
+-- @streamLayout :: IFile [a] -> <IO> [(U64, U64, U64)]
 --   returns one (elementOffset, elementCount, uncompressedSize) triple per
 --   sub-packet, in file order. A DATA packet is the degenerate single-chunk
 --   case. The layout is derived at read time from the sub-packet index and
@@ -30,55 +30,58 @@ projCounts :: [(U64, U64, U64)] -> [U64]
 chunkCount :: [(U64, U64, U64)] -> Int
 
 -- Write three sub-packets (element counts 3, 4, 1) and reopen as an IFile.
-openThree :: Str -> <IO, Err> IFile [Int]
+openThree :: Str -> <IO> IFile [Int]
 openThree path = do
-  o <- @open path :: <IO, Err> OStream Int
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
   @write 0 o [1, 2, 3]
   @flush o
   @write 0 o [4, 5, 6, 7]
   @flush o
   @write 0 o [8]
   @close o
-  @open path :: <IO, Err> IFile [Int]
+  Ok _tailv97 <- @open path :: <IO> (Try Str (IFile [Int]))
+  _tailv97
 
-offsets :: Str -> <IO, Err> [U64]
+offsets :: Str -> <IO> [U64]
 offsets path = do
   f <- openThree path
-  layout <- @streamLayout f
+  Ok layout <- @streamLayout f
   projOffsets layout
 
-counts :: Str -> <IO, Err> [U64]
+counts :: Str -> <IO> [U64]
 counts path = do
   f <- openThree path
-  layout <- @streamLayout f
+  Ok layout <- @streamLayout f
   projCounts layout
 
-numChunks :: Str -> <IO, Err> Int
+numChunks :: Str -> <IO> Int
 numChunks path = do
   f <- openThree path
-  layout <- @streamLayout f
+  Ok layout <- @streamLayout f
   chunkCount layout
 
-totalElems :: Str -> <IO, Err> Int
+totalElems :: Str -> <IO> Int
 totalElems path = do
   f <- openThree path
-  @flen f
+  Ok _tailv98 <- @flen f
+  _tailv98
 
 -- DATA-packet single-chunk case: a monolithic @save'd list opens as an
 -- IFile whose layout is exactly one triple (offset 0, count = #elements).
-openData :: Str -> <IO, Err> IFile [Int]
+openData :: Str -> <IO> IFile [Int]
 openData path = do
   @save 0 path [10, 20, 30, 40]
-  @open path :: <IO, Err> IFile [Int]
+  Ok _tailv99 <- @open path :: <IO> (Try Str (IFile [Int]))
+  _tailv99
 
-dataOffsets :: Str -> <IO, Err> [U64]
+dataOffsets :: Str -> <IO> [U64]
 dataOffsets path = do
   f <- openData path
-  layout <- @streamLayout f
+  Ok layout <- @streamLayout f
   projOffsets layout
 
-dataCounts :: Str -> <IO, Err> [U64]
+dataCounts :: Str -> <IO> [U64]
 dataCounts path = do
   f <- openData path
-  layout <- @streamLayout f
+  Ok layout <- @streamLayout f
   projCounts layout

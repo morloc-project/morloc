@@ -46,6 +46,7 @@ import Morloc.CodeGenerator.Reduce (reduce)
 import Morloc.CodeGenerator.Serialize (serialize)
 import qualified Morloc.Data.DAG as DAG
 import qualified Morloc.Frontend.API as F
+import Morloc.Frontend.AutoRequire (autoRequire)
 import qualified Morloc.Frontend.AST as AST
 import Morloc.Frontend.Restructure (restructure)
 import Morloc.Frontend.Treeify (treeify)
@@ -83,7 +84,10 @@ typecheck path code =
     >>= lowerGuests
     -- resolve all TypeU types to Type
     |>> map F.resolveTypes
-    -- resolve all TypeU types to Type
+    -- fail fast on a discarded Try (types are concrete here, instances
+    -- still Many, so one insertion covers every realization)
+    >>= mapM autoRequire
+    -- check for value contradictions between implementations
     >>= mapM F.valuecheck
     -- check for value contradictions between implementations
     >>= realityCheck

@@ -10,5 +10,5 @@ f ::
   Str ->
   --' @stdin
   Str ->
-  <IO, Err> ()
+  <IO> ()
 f _ _ = @throw "unused"

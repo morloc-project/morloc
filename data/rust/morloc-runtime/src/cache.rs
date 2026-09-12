@@ -566,7 +566,8 @@ pub unsafe extern "C" fn morloc_cache_store(
     // Structural hash matches the caller-side lookup key semantics
     // (see slurm_ffi::remote_call using `hash_voidstar`) so store and
     // lookup agree. Seed 0 is the shared default across the runtime.
-    let data_hash = match hash_voidstar_inner(voidstar as *const u8, &rs, 0) {
+    let mut env: crate::recur::RecurEnv = Vec::new();
+    let data_hash = match hash_voidstar_inner(voidstar as *const u8, &rs, 0, &mut env) {
         Ok(h) => h,
         Err(e) => {
             free_schema(schema);
@@ -659,7 +660,8 @@ pub unsafe extern "C" fn hash_voidstar(
 ) -> u64 {
     clear_errmsg(errmsg);
     let rs = CSchema::to_rust(schema);
-    match hash_voidstar_inner(data as *const u8, &rs, seed) {
+    let mut env: crate::recur::RecurEnv = Vec::new();
+    match hash_voidstar_inner(data as *const u8, &rs, seed, &mut env) {
         Ok(h) => h,
         Err(e) => {
             set_errmsg(errmsg, &e);
@@ -668,10 +670,24 @@ pub unsafe extern "C" fn hash_voidstar(
     }
 }
 
+/// Push `schema` onto the declaration stack when it names one, so a
+/// `Recur` back-reference below it resolves, then walk. `with_scope`
+/// pushes only for a named non-Recur node, which is exactly the
+/// declaration sites.
 fn hash_voidstar_inner(
     data: *const u8,
     schema: &crate::schema::Schema,
     seed: u64,
+    env: &mut crate::recur::RecurEnv,
+) -> Result<u64, MorlocError> {
+    crate::recur::with_scope(env, schema, |env| hash_voidstar_walk(data, schema, seed, env))
+}
+
+fn hash_voidstar_walk(
+    data: *const u8,
+    schema: &crate::schema::Schema,
+    seed: u64,
+    env: &mut crate::recur::RecurEnv,
 ) -> Result<u64, MorlocError> {
     use crate::schema::SerialType;
     use crate::utility::mix;
@@ -770,6 +786,7 @@ fn hash_voidstar_inner(
                             elem_data.add(i * elem_width),
                             &schema.parameters[0],
                             h,
+                            env,
                         )?;
                     }
                     Ok(h)
@@ -786,12 +803,87 @@ fn hash_voidstar_inner(
                             data.add(schema.offsets[i]),
                             &schema.parameters[i],
                             h,
+                            env,
                         )?;
                     }
                     Ok(h)
                 }
             }
-            _ => {
+            SerialType::Optional => {
+                // The slot is a relative pointer, so its bytes are an
+                // ADDRESS. Hashing them makes equal values at different
+                // offsets differ, and -- far worse -- makes different values
+                // that land on the same recycled block agree. Hash presence,
+                // then the pointed-to value.
+                let relptr = *(data as *const shm::RelPtr);
+                if relptr == shm::RELNULL || schema.parameters.is_empty() {
+                    Ok(hash::xxh64_with_seed(&[0u8], seed))
+                } else {
+                    let inner = shm::rel2abs(relptr)?;
+                    hash_voidstar_inner(inner, &schema.parameters[0], mix(seed, 1), env)
+                }
+            }
+            SerialType::Variant => {
+                // Tag then payload, for the same reason as Optional: bytes
+                // 8..16 are a pointer. The tag alone is not enough -- two
+                // values of one arm would collide -- and the 7 pad bytes
+                // between are never hashed, so they cannot perturb the key.
+                let tag = *data;
+                let arm = schema.parameters.get(tag as usize).ok_or_else(|| {
+                    MorlocError::Serialization(format!(
+                        "variant tag {} is out of range; the type has {} arms",
+                        tag, schema.size
+                    ))
+                })?;
+                let seed = mix(seed, tag as u64);
+                let relptr = *(data.add(8) as *const shm::RelPtr);
+                if relptr == shm::RELNULL {
+                    Ok(hash::xxh64_with_seed(&[], seed))
+                } else {
+                    let inner = shm::rel2abs(relptr)?;
+                    hash_voidstar_inner(inner, arm, seed, env)
+                }
+            }
+            SerialType::Recur => {
+                // Resolve the back-reference to its declaration and hash as
+                // though the data carried that schema, mirroring how the
+                // relptr-adjusting walker resolves one.
+                let name = schema.name.as_deref().unwrap_or("");
+                let target_ptr = crate::recur::lookup(env, name)?;
+                let target = &*target_ptr;
+                hash_voidstar_inner(data, target, seed, env)
+            }
+            SerialType::Table => {
+                // An Arrow buffer reached through an Array header, so the
+                // width bytes are again a size plus a pointer. Hash the
+                // buffer itself.
+                let arr = &*(data as *const shm::Array);
+                let seed = mix(seed, arr.size as u64);
+                if arr.size == 0 || arr.data == shm::RELNULL {
+                    return Ok(hash::xxh64_with_seed(&[], seed));
+                }
+                let buf = shm::rel2abs(arr.data)?;
+                let bytes = std::slice::from_raw_parts(buf, arr.size);
+                Ok(hash::xxh64_with_seed(bytes, seed))
+            }
+            // Everything below is a fixed-width scalar holding no pointer,
+            // so its bytes ARE its value. Enumerated rather than left to a
+            // catch-all: a type whose slot holds a relative pointer must
+            // never reach a raw-byte hash, and a wildcard here is how one
+            // silently would.
+            SerialType::Nil
+            | SerialType::Bool
+            | SerialType::Sint8
+            | SerialType::Sint16
+            | SerialType::Sint32
+            | SerialType::Sint64
+            | SerialType::Uint8
+            | SerialType::Uint16
+            | SerialType::Uint32
+            | SerialType::Uint64
+            | SerialType::Float32
+            | SerialType::Float64
+            | SerialType::Enum => {
                 let bytes = std::slice::from_raw_parts(data, schema.width);
                 Ok(hash::xxh64_with_seed(bytes, seed))
             }
@@ -855,7 +947,8 @@ pub unsafe extern "C" fn hash_morloc_packet(
             return false;
         }
         let rs = CSchema::to_rust(schema);
-        match hash_voidstar_inner(voidstar, &rs, seed) {
+        let mut env: crate::recur::RecurEnv = Vec::new();
+        match hash_voidstar_inner(voidstar, &rs, seed, &mut env) {
             Ok(h) => *hash_out = h,
             Err(e) => {
                 set_errmsg(errmsg, &e);
@@ -988,11 +1081,10 @@ pub(crate) unsafe fn build_persistence_data_packet(
     let mut header = PacketHeader::data_mesg(PACKET_FORMAT_VOIDSTAR, payload.len() as u64);
     header.offset = metadata.len() as u32;
     let hdr_bytes = header.to_bytes();
-    // Compression byte lives inside the 32-byte header at byte 15
-    // (see PacketHeader::data_mesg comment in packet.rs). Patch it
-    // in the serialized form.
+    // Patch the compression field in the serialized form; the offset is
+    // derived from the header layout rather than written down here.
     let mut hdr_bytes = hdr_bytes;
-    hdr_bytes[15] = compression_byte;
+    hdr_bytes[morloc_runtime_types::packet::PKT_COMPRESSION_OFF] = compression_byte;
 
     let mut out = Vec::with_capacity(32 + metadata.len() + payload.len());
     out.extend_from_slice(&hdr_bytes);
@@ -1139,4 +1231,79 @@ pub unsafe extern "C" fn check_cache_packet(
     let result = libc::strdup(filename);
     libc::free(filename as *mut c_void);
     result
+}
+
+#[cfg(test)]
+mod hash_pointer_tests {
+    use super::*;
+    use crate::json;
+    use crate::schema::parse_schema;
+
+    // Hash two independently built values of the same content. Anything whose
+    // voidstar slot holds a relative pointer lands at a different offset on
+    // each build, so a hash over the slot's raw bytes differs here -- and,
+    // once a freed block is recycled, two DIFFERENT values agree instead.
+    // That is a cache hit returning the previous call's result, so these
+    // assert on structure rather than address.
+    fn hash_of(json_text: &str, schema_str: &str) -> u64 {
+        let schema = parse_schema(schema_str).unwrap();
+        let ptr = json::read_json_with_schema(json_text, &schema).unwrap();
+        let mut env: crate::recur::RecurEnv = Vec::new();
+        hash_voidstar_inner(ptr as *const u8, &schema, 0, &mut env).unwrap()
+    }
+
+    #[test]
+    fn optional_hash_is_content_addressed() {
+        let _shm = crate::init_test_shm();
+        assert_eq!(hash_of("42", "?i4"), hash_of("42", "?i4"));
+        assert_eq!(hash_of("null", "?i4"), hash_of("null", "?i4"));
+        assert_ne!(
+            hash_of("42", "?i4"),
+            hash_of("43", "?i4"),
+            "distinct payloads must not collide"
+        );
+        assert_ne!(
+            hash_of("null", "?i4"),
+            hash_of("0", "?i4"),
+            "absent must differ from a present zero"
+        );
+    }
+
+    #[test]
+    fn optional_of_compound_hash_is_content_addressed() {
+        let _shm = crate::init_test_shm();
+        assert_eq!(hash_of("[1,2,3]", "?ai4"), hash_of("[1,2,3]", "?ai4"));
+        assert_ne!(hash_of("[1,2,3]", "?ai4"), hash_of("[1,2,4]", "?ai4"));
+    }
+
+    #[test]
+    fn variant_hash_covers_tag_and_payload() {
+        let _shm = crate::init_test_shm();
+        let sch = "v26Circle1f83Dot0";
+        assert_eq!(hash_of(r#"{"Circle":[1.5]}"#, sch), hash_of(r#"{"Circle":[1.5]}"#, sch));
+        assert_eq!(hash_of(r#""Dot""#, sch), hash_of(r#""Dot""#, sch));
+        assert_ne!(
+            hash_of(r#"{"Circle":[1.5]}"#, sch),
+            hash_of(r#"{"Circle":[2.5]}"#, sch),
+            "same arm, different payload"
+        );
+        assert_ne!(
+            hash_of(r#"{"Circle":[1.5]}"#, sch),
+            hash_of(r#""Dot""#, sch),
+            "different arms"
+        );
+    }
+
+    #[test]
+    fn recursive_variant_hash_resolves_the_back_reference() {
+        let _shm = crate::init_test_shm();
+        // A back-reference must resolve to its declaration; without that the
+        // node has only a placeholder width and cannot be hashed correctly.
+        let sch = "&4Treev24Leaf04Node2^4Tree^4Tree";
+        let leaf = r#""Leaf""#;
+        let node = r#"{"Node":["Leaf","Leaf"]}"#;
+        assert_eq!(hash_of(leaf, sch), hash_of(leaf, sch));
+        assert_eq!(hash_of(node, sch), hash_of(node, sch));
+        assert_ne!(hash_of(leaf, sch), hash_of(node, sch));
+    }
 }

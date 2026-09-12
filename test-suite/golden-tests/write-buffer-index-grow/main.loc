@@ -19,33 +19,34 @@ module main
 
 import root-py -- python only needed for `range`
 
-writeBig :: Str -> <IO, Err> ()
+writeBig :: Str -> <IO> ()
 writeBig path = do
-  o <- @open path :: <IO, Err> OStream Int
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
   @write 0 o (range 1 3001)
   @close o
 
-testIndexGrowTotalCount :: Str -> <IO, Err> Int
+testIndexGrowTotalCount :: Str -> <IO> Int
 testIndexGrowTotalCount path = do
   writeBig path
-  s <- @open path :: <IO, Err> IStream Int
-  @flen s
+  Ok s <- @open path :: <IO> (Try Str (IStream Int))
+  Ok _tailv32 <- @flen s
+  _tailv32
 
-testIndexGrowFirstElement :: Str -> <IO, Err> Int
+testIndexGrowFirstElement :: Str -> <IO> Int
 testIndexGrowFirstElement path = do
   writeBig path
-  s <- @open path :: <IO, Err> IStream Int
-  xs <- @next s
+  Ok s <- @open path :: <IO> (Try Str (IStream Int))
+  Ok xs <- @next s
   .[0] xs
 
 -- The element AT the original 1024 -> 2048 grow boundary
 -- (zero-indexed: element at position 1024 has value 1025).
 -- This pins that the grow's data-region memmove + relptr
 -- adjustment didn't corrupt elements straddling the boundary.
-testIndexGrowAtBoundary :: Str -> <IO, Err> Int
+testIndexGrowAtBoundary :: Str -> <IO> Int
 testIndexGrowAtBoundary path = do
   writeBig path
-  s <- @open path :: <IO, Err> IStream Int
-  xs <- @next s
+  Ok s <- @open path :: <IO> (Try Str (IStream Int))
+  Ok xs <- @next s
   -- The 1025th element (1-indexed) is value 1025.
   .[1024] xs

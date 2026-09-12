@@ -1,0 +1,8 @@
+--' A misspelled directive is still reported, with the name it resembles.
+module typo (h)
+
+import root
+
+--' @metavr FILE
+h :: Int -> Int
+h x = x

@@ -67,9 +67,10 @@ server inverts them to the positional array `daemon_dispatch` expects.
 
 | morloc source | MCP effect | tested by |
 |---|---|---|
-| `--' metavar: N` | property **name** = lowercased metavar | `shape`: `addOne` -> `n` |
-| (no metavar) | property name = `arg0`, `arg1`, ... | `shape`: `sumMany` -> `arg0` |
-| plain typed positional | property is required | `shape`: `addOne.required = [n]` |
+| `--' @name x` | property **name** = `x` | `shape`: `named` -> `x` |
+| (no `@name`) | property name = `_1`, `_2`, ... by position | `shape`: `addOne` -> `_1` |
+| `--' @metavar N` | **no effect on the name** -- a metavar describes a type, so it repeats when a command takes two of them | `shape`: `addOne` -> `_1`, not `n` |
+| plain typed positional | property is required | `shape`: `addOne.required = [_1]` |
 | `?T` positional | not required + type unions `"null"` | `shape`: `maybeDouble` |
 | `--' many: true` | property is an `array` of the element type | `shape`: `sumMany` |
 | `Int`/`Real`/`Str`/`Bool` | `integer`/`number`/`string`/`boolean` | `shape`: scalar types |

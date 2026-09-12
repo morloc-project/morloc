@@ -9,6 +9,13 @@ all:
 	# --mcp-tools: MCP tools/list payload (no version field).
 	printf -- '=== mcp-tools ===\n' >> obs.txt
 	./main --mcp-tools 2>> obs.err >> obs.txt
+	# An optional positional may be left off the command line. The CLI, the
+	# json help and the MCP shape have to agree that it is not required, so
+	# the call is exercised here beside the two views that describe it.
+	printf -- '=== optional positional omitted ===\n' >> obs.txt
+	./main maybeDouble >> obs.txt 2>> obs.err
+	printf -- '=== optional positional supplied ===\n' >> obs.txt
+	./main maybeDouble 21 >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf main main.manifest pools __pycache__ obs.err build.err

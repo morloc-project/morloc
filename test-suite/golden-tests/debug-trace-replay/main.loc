@@ -40,14 +40,22 @@ boomList xs = idpy (pyThrowList xs)
 boomTup :: (Int, Str) -> Str
 boomTup t = idpy (pyThrowTup t)
 
-loadInt :: Str -> <IO, Err> Int
-loadInt path = @load path
+loadInt :: Str -> <IO> Int
+loadInt path = do
+  Ok _rv <- @load path
+  _rv
 
-loadReal :: Str -> <IO, Err> Real
-loadReal path = @load path
+loadReal :: Str -> <IO> Real
+loadReal path = do
+  Ok _rv <- @load path
+  _rv
 
-loadList :: Str -> <IO, Err> [Int]
-loadList path = @load path
+loadList :: Str -> <IO> [Int]
+loadList path = do
+  Ok _rv <- @load path
+  _rv
 
-loadTup :: Str -> <IO, Err> (Int, Str)
-loadTup path = @load path
+loadTup :: Str -> <IO> (Int, Str)
+loadTup path = do
+  Ok _rv <- @load path
+  _rv

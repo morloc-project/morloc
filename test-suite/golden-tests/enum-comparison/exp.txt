@@ -1,0 +1,36 @@
+--- nexusEq ---
+true
+false
+--- nexusLt ---
+true
+false
+--- eqR ---
+true
+false
+--- ltR ---
+true
+false
+--- geR ---
+true
+false
+--- eqPy ---
+true
+false
+--- ltPy ---
+true
+false
+--- eqCpp ---
+true
+false
+--- ltCpp ---
+true
+false
+--- eqRust ---
+true
+false
+--- ltRust ---
+true
+false
+--- rFormAgrees ---
+"ordered factor"
+"ordered factor"

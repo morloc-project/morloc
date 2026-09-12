@@ -15,15 +15,15 @@ source R from "helper.R" ("r_len", "r_show_len")
 r_len :: Str -> Int
 r_show_len :: Str -> Str
 
-plainThrow :: <Err> ()
+plainThrow :: ()
 plainThrow = @throw "PLAIN: boom"
 
-interpThrow :: Str -> <Err> ()
+interpThrow :: Str -> ()
 interpThrow s = do
   let shown = r_show_len s
   @throw "INTERP: #{s} n=#{shown}"
 
-guardThrow :: Str -> <Err> Int
+guardThrow :: Str -> Int
 guardThrow s = do
   let n = r_len s
   let shown = r_show_len s

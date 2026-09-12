@@ -1,0 +1,60 @@
+-- A payload-bearing `data` crossing every pool language, in the USER-MAPPED
+-- form: each helper file declares the native type itself and morloc emits
+-- only the marshalling, exactly as a `record Cpp => Ops = "Ops"` already
+-- works today.
+--
+-- This is the form that matters for a source function that needs to
+-- DISCRIMINATE arms. A pool imports a user's module, never the reverse, so
+-- a compiler-generated arm class has no name a user's file could refer to.
+-- Mapping the type puts the declaration in the user's own file, where they
+-- can match on it.
+--
+-- Naming convention the mapping implies: the morloc type maps to one native
+-- name, and each arm is that name plus `_<Constructor>`. Positional fields
+-- are `f0`, `f1`, ... in the languages that need names for them; Rust and
+-- C++ reach them positionally.
+--
+-- `area` is written four times, once per language, against four native
+-- representations of one morloc type. `roundTrip` sends a value through two
+-- different pools, so the wire form has to agree with all of them.
+
+module main
+  ( areaPy
+  , areaCpp
+  , areaR
+  , areaRust
+  , roundTrip
+  , shapes
+  )
+
+import root-py
+import root-cpp
+import root-r
+import root-rust
+
+data Shape = Circle Real | Rect Real Real | Dot
+
+data Cpp  => Shape = "Shape"
+data Rust => Shape = "Shape"
+
+source Py   from "shapes.py"  ("area" as areaPy, "grow" as growPy)
+source Cpp  from "shapes.hpp" ("area" as areaCpp, "grow" as growCpp)
+source R    from "shapes.R"   ("area" as areaR)
+source Rust from "shapes.rs"  ("area" as areaRust)
+
+areaPy   :: Shape -> Real
+areaCpp  :: Shape -> Real
+areaR    :: Shape -> Real
+areaRust :: Shape -> Real
+
+growPy  :: Shape -> Shape
+growCpp :: Shape -> Shape
+
+-- Grown in one pool, grown again in another, measured in a third.
+roundTrip :: Shape -> Real
+roundTrip x = areaR (growCpp (growPy x))
+
+-- A list of variants: each element carries its own tag and payload, so the
+-- array is not flat the way a list of enums is.
+shapes :: [Shape] -> [Real]
+shapes = map areaPy

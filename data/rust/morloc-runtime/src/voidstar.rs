@@ -23,6 +23,26 @@ use crate::shm::{self, AbsPtr, Array, RelPtr};
 /// stack so each `^<name>` resolves to the matching `&<name>` ancestor.
 /// The `with_env` helper threads that state through; the public entry
 /// here just initializes an empty stack.
+/// Byte offset of a Variant's payload pointer within its 16-byte slot.
+/// The tag occupies byte 0; bytes 1..8 are padding kept for a future
+/// tag-version discriminator, mirroring the stream-handle union.
+const VARIANT_PAYLOAD_OFFSET: usize = 8;
+
+/// The schema of the arm a variant value currently holds.
+///
+/// Unlike Optional, whose pointee always has the single child schema, a
+/// variant's payload type is chosen by the tag. Every walk over a variant
+/// therefore has to read the value and not just the schema -- which is also
+/// where a tag from a mismatched producer is caught.
+fn variant_arm_schema(tag: u8, schema: &Schema) -> Result<&Schema, MorlocError> {
+    schema.parameters.get(tag as usize).ok_or_else(|| {
+        MorlocError::Serialization(format!(
+            "variant tag {} is out of range; the type has {} arms",
+            tag, schema.size
+        ))
+    })
+}
+
 pub fn adjust_relptrs(
     data: AbsPtr,
     schema: &Schema,
@@ -97,6 +117,20 @@ fn adjust_relptrs_inner(
                         base_rel,
                         env,
                     )?;
+                }
+                Ok(())
+            }
+            SerialType::Variant => {
+                // Tag byte, then a relptr to the arm's payload tuple.
+                // Rebase the pointer, then recurse so the payload's own
+                // pointers are rebased too.
+                let arm = variant_arm_schema(*data, schema)?;
+                let relptr_slot =
+                    &mut *(data.add(VARIANT_PAYLOAD_OFFSET) as *mut RelPtr);
+                if *relptr_slot != shm::RELNULL {
+                    *relptr_slot += base_rel;
+                    let inner_abs = shm::rel2abs(*relptr_slot)?;
+                    adjust_relptrs_with_env(inner_abs, arm, base_rel, env)?;
                 }
                 Ok(())
             }
@@ -200,6 +234,19 @@ unsafe fn shift_buffer_relptrs_inner(
                     )?;
                 }
             }
+        }
+        SerialType::Variant => {
+            let tag = *buf_base.add(field_offset);
+            let arm = variant_arm_schema(tag, schema)?;
+            let relptr_slot = &mut *(buf_base
+                .add(field_offset + VARIANT_PAYLOAD_OFFSET)
+                as *mut RelPtr);
+            if *relptr_slot == shm::RELNULL {
+                return Ok(());
+            }
+            *relptr_slot += delta;
+            let inner_offset = *relptr_slot as usize;
+            shift_buffer_relptrs_with_env(buf_base, inner_offset, arm, delta, env)?;
         }
         SerialType::Optional => {
             if schema.parameters.is_empty() { return Ok(()); }
@@ -354,6 +401,16 @@ fn remap_volume_indices_inner(
                 }
                 Ok(())
             }
+            SerialType::Variant => {
+                let arm = variant_arm_schema(*data, schema)?;
+                let relptr_slot = data.add(VARIANT_PAYLOAD_OFFSET) as *mut RelPtr;
+                if *relptr_slot != shm::RELNULL {
+                    *(relptr_slot as *mut u64) ^= xor_mask;
+                    let inner_abs = shm::rel2abs(*relptr_slot)?;
+                    remap_volume_indices_with_env(inner_abs, arm, xor_mask, env)?;
+                }
+                Ok(())
+            }
             SerialType::Optional => {
                 let relptr_slot = data as *mut RelPtr;
                 let v = *relptr_slot;
@@ -425,7 +482,33 @@ pub fn read_binary_with_hint(
 /// Counterpart of [`deep_copy`]: deep_copy allocates the same set of
 /// sub-blocks that shfree_inplace releases.
 pub unsafe fn shfree_inplace(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
+    let mut env: RecurEnv = Vec::new();
+    shfree_inplace_with_env(ptr, schema, &mut env)
+}
+
+/// As [`shfree_inplace`], carrying the declaration stack so a `Recur`
+/// back-reference can be resolved. Without it a recursive type's tail is
+/// silently skipped and its blocks leak.
+unsafe fn shfree_inplace_with_env(
+    ptr: AbsPtr,
+    schema: &Schema,
+    env: &mut RecurEnv,
+) -> Result<(), MorlocError> {
+    recur::with_scope(env, schema, |env| shfree_inplace_walk(ptr, schema, env))
+}
+
+unsafe fn shfree_inplace_walk(
+    ptr: AbsPtr,
+    schema: &Schema,
+    env: &mut RecurEnv,
+) -> Result<(), MorlocError> {
     match schema.serial_type {
+        SerialType::Recur => {
+            // Resolve to the declaration and free as if the data carried it.
+            let name = schema.name.as_deref().unwrap_or("");
+            let target = &*recur::lookup(env, name)?;
+            return shfree_inplace_walk(ptr, target, env);
+        }
         SerialType::String => {
             let arr = &*(ptr as *const Array);
             if arr.size > 0 && arr.data >= 0 {
@@ -456,7 +539,7 @@ pub unsafe fn shfree_inplace(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocE
                 if !elem_schema.is_fixed_width() {
                     let w = elem_schema.width;
                     for i in 0..arr.size {
-                        shfree_inplace(data.add(i * w), elem_schema)?;
+                        shfree_inplace_with_env(data.add(i * w), elem_schema, env)?;
                     }
                 }
                 shm::shfree(data)?;
@@ -464,7 +547,20 @@ pub unsafe fn shfree_inplace(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocE
         }
         SerialType::Tuple | SerialType::Map => {
             for i in 0..schema.parameters.len() {
-                shfree_inplace(ptr.add(schema.offsets[i]), &schema.parameters[i])?;
+                shfree_inplace_with_env(ptr.add(schema.offsets[i]), &schema.parameters[i], env)?;
+            }
+        }
+        SerialType::Variant => {
+            // Free the arm's payload, then null the pointer so the slot is
+            // left in the same well-defined empty state an argument-free
+            // arm already has.
+            let arm = variant_arm_schema(*ptr, schema)?;
+            let relptr_slot =
+                &mut *(ptr.add(VARIANT_PAYLOAD_OFFSET) as *mut shm::RelPtr);
+            if *relptr_slot != shm::RELNULL {
+                let inner_abs = shm::rel2abs(*relptr_slot)?;
+                shfree_inplace_with_env(inner_abs, arm, env)?;
+                *relptr_slot = shm::RELNULL;
             }
         }
         SerialType::Optional => {
@@ -474,7 +570,7 @@ pub unsafe fn shfree_inplace(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocE
             let relptr_slot = &mut *(ptr as *mut shm::RelPtr);
             if *relptr_slot != shm::RELNULL && !schema.parameters.is_empty() {
                 let inner_abs = shm::rel2abs(*relptr_slot)?;
-                shfree_inplace(inner_abs, &schema.parameters[0])?;
+                shfree_inplace_with_env(inner_abs, &schema.parameters[0], env)?;
                 *relptr_slot = shm::RELNULL;
             }
         }
@@ -550,7 +646,46 @@ pub unsafe fn deep_copy_with<R>(
 where
     R: Fn(RelPtr) -> Result<crate::shm::AbsPtr, MorlocError>,
 {
+    let mut env: RecurEnv = Vec::new();
+    deep_copy_with_env(src, dst, schema, resolve, &mut env)
+}
+
+/// As [`deep_copy_with`], carrying the declaration stack so a `Recur`
+/// back-reference resolves.
+///
+/// Without it a back-reference falls to the fixed-primitive arm and is
+/// bit-copied at the declaration's width -- which for any pointer-carrying
+/// type copies the POINTER, so the "deep" copy aliases the source's subtree
+/// and dangles once the source is freed.
+unsafe fn deep_copy_with_env<R>(
+    src: *const u8,
+    dst: *mut u8,
+    schema: &Schema,
+    resolve: &R,
+    env: &mut RecurEnv,
+) -> Result<(), MorlocError>
+where
+    R: Fn(RelPtr) -> Result<crate::shm::AbsPtr, MorlocError>,
+{
+    recur::with_scope(env, schema, |env| deep_copy_walk(src, dst, schema, resolve, env))
+}
+
+unsafe fn deep_copy_walk<R>(
+    src: *const u8,
+    dst: *mut u8,
+    schema: &Schema,
+    resolve: &R,
+    env: &mut RecurEnv,
+) -> Result<(), MorlocError>
+where
+    R: Fn(RelPtr) -> Result<crate::shm::AbsPtr, MorlocError>,
+{
     match schema.serial_type {
+        SerialType::Recur => {
+            let name = schema.name.as_deref().unwrap_or("");
+            let target = &*recur::lookup(env, name)?;
+            deep_copy_walk(src, dst, target, resolve, env)?;
+        }
         SerialType::String => {
             let src_arr = &*(src as *const Array);
             let dst_arr = &mut *(dst as *mut Array);
@@ -610,11 +745,12 @@ where
                     std::ptr::copy_nonoverlapping(src_data, new_data, src_arr.size * elem_width);
                 } else {
                     for i in 0..src_arr.size {
-                        deep_copy_with(
+                        deep_copy_with_env(
                             src_data.add(i * elem_width),
                             new_data.add(i * elem_width),
                             elem_schema,
                             resolve,
+                            env,
                         )?;
                     }
                 }
@@ -626,7 +762,28 @@ where
         SerialType::Tuple | SerialType::Map => {
             for i in 0..schema.parameters.len() {
                 let off = schema.offsets[i];
-                deep_copy_with(src.add(off), dst.add(off), &schema.parameters[i], resolve)?;
+                deep_copy_with_env(src.add(off), dst.add(off), &schema.parameters[i], resolve, env)?;
+            }
+        }
+        SerialType::Variant => {
+            // Carry the tag across, then deep-copy the payload the tag
+            // selects into a fresh allocation.
+            let tag = *src;
+            *dst = tag;
+            // Determined bytes between tag and payload pointer, as at every
+            // other site that writes a variant slot.
+            std::ptr::write_bytes(dst.add(1), 0, VARIANT_PAYLOAD_OFFSET - 1);
+            let arm = variant_arm_schema(tag, schema)?;
+            let src_relptr = *(src.add(VARIANT_PAYLOAD_OFFSET) as *const RelPtr);
+            let dst_relptr_slot = dst.add(VARIANT_PAYLOAD_OFFSET) as *mut RelPtr;
+            if src_relptr == shm::RELNULL {
+                *dst_relptr_slot = shm::RELNULL;
+            } else {
+                let src_inner = resolve(src_relptr)?;
+                let dst_inner = shm::shmalloc(arm.width)?;
+                std::ptr::write_bytes(dst_inner, 0, arm.width);
+                deep_copy_with_env(src_inner, dst_inner, arm, resolve, env)?;
+                *dst_relptr_slot = shm::abs2rel(dst_inner)?;
             }
         }
         SerialType::Optional => {
@@ -642,7 +799,7 @@ where
                 let src_inner = resolve(src_relptr)?;
                 let dst_inner = shm::shmalloc(inner_schema.width)?;
                 std::ptr::write_bytes(dst_inner, 0, inner_schema.width);
-                deep_copy_with(src_inner, dst_inner, inner_schema, resolve)?;
+                deep_copy_with_env(src_inner, dst_inner, inner_schema, resolve, env)?;
                 *dst_relptr_slot = shm::abs2rel(dst_inner)?;
             }
         }
@@ -848,6 +1005,35 @@ fn flatten_fixup_inner(
                         buf, buf_offset + schema.offsets[i],
                         data.add(schema.offsets[i]), &schema.parameters[i], cursor, env,
                     )?;
+                }
+            }
+            SerialType::Variant => {
+                // The tag is already in buf (the parent copied the slot's
+                // width). Follow the payload pointer, copy the arm's body
+                // in at the cursor, and rewrite the buf-side pointer to be
+                // buffer-relative.
+                let arm = variant_arm_schema(*data, schema)?;
+                let orig_relptr =
+                    *(data.add(VARIANT_PAYLOAD_OFFSET) as *const RelPtr);
+                let buf_relptr = &mut *(buf
+                    .as_mut_ptr()
+                    .add(buf_offset + VARIANT_PAYLOAD_OFFSET)
+                    as *mut RelPtr);
+                if orig_relptr == shm::RELNULL {
+                    *buf_relptr = shm::RELNULL;
+                } else {
+                    let inner_align = arm.alignment().max(1);
+                    *cursor = shm::align_up(*cursor, inner_align);
+                    let inner_buf_offset = *cursor;
+                    *buf_relptr = inner_buf_offset as RelPtr;
+                    let orig_inner = shm::rel2abs(orig_relptr)?;
+                    let inner_width = arm.width;
+                    buf[inner_buf_offset..inner_buf_offset + inner_width]
+                        .copy_from_slice(std::slice::from_raw_parts(
+                            orig_inner, inner_width,
+                        ));
+                    *cursor += inner_width;
+                    flatten_fixup(buf, inner_buf_offset, orig_inner, arm, cursor, env)?;
                 }
             }
             SerialType::Optional => {
@@ -1123,6 +1309,25 @@ fn patch_slot_inner(
                         tail_end_pos(field_data, field_schema, field_tail_start, env)?;
                 }
             }
+            SerialType::Variant => {
+                let tag = *data;
+                let arm = variant_arm_schema(tag, schema)?;
+                let relptr_in =
+                    *(data.add(VARIANT_PAYLOAD_OFFSET) as *const RelPtr);
+                let new_value: i64 = if relptr_in == shm::RELNULL {
+                    shm::RELNULL as i64
+                } else {
+                    let inner_align = arm.alignment().max(1);
+                    (shm::align_up(tail_start, inner_align) as u64 | vol_mask) as i64
+                };
+                // The tag travels in the slot itself; bytes 1..8 stay zero.
+                dest[0] = tag;
+                for b in dest[1..VARIANT_PAYLOAD_OFFSET].iter_mut() {
+                    *b = 0;
+                }
+                dest[VARIANT_PAYLOAD_OFFSET..VARIANT_PAYLOAD_OFFSET + 8]
+                    .copy_from_slice(&new_value.to_le_bytes());
+            }
             SerialType::Optional => {
                 let relptr_in = *(data as *const RelPtr);
                 let new_value: i64 = if relptr_in == shm::RELNULL {
@@ -1265,6 +1470,20 @@ fn emit_tail_inner<S: EmitSink>(
                     )?;
                 }
             }
+            SerialType::Variant => {
+                let arm = variant_arm_schema(*data, schema)?;
+                let relptr_in =
+                    *(data.add(VARIANT_PAYLOAD_OFFSET) as *const RelPtr);
+                if relptr_in != shm::RELNULL {
+                    let inner_align = arm.alignment().max(1);
+                    let inner_pos = shm::align_up(e.cursor(), inner_align);
+                    e.pad_to(inner_pos)?;
+                    let inner_data = shm::rel2abs(relptr_in)?;
+                    let after_inner_slot = inner_pos + arm.width;
+                    emit_slot(e, inner_data, arm, after_inner_slot, env)?;
+                    emit_tail(e, inner_data, arm, env)?;
+                }
+            }
             SerialType::Optional => {
                 let relptr_in = *(data as *const RelPtr);
                 if relptr_in != shm::RELNULL {
@@ -1388,6 +1607,20 @@ fn tail_end_pos_inner(
                     )?;
                 }
                 Ok(cur)
+            }
+            SerialType::Variant => {
+                let arm = variant_arm_schema(*data, schema)?;
+                let relptr_in =
+                    *(data.add(VARIANT_PAYLOAD_OFFSET) as *const RelPtr);
+                if relptr_in == shm::RELNULL {
+                    Ok(start)
+                } else {
+                    let inner_align = arm.alignment().max(1);
+                    let inner_pos = shm::align_up(start, inner_align);
+                    let inner_data = shm::rel2abs(relptr_in)?;
+                    let after_inner_slot = inner_pos + arm.width;
+                    tail_end_pos(inner_data, arm, after_inner_slot, env)
+                }
             }
             SerialType::Optional => {
                 let relptr_in = *(data as *const RelPtr);

@@ -1,5 +1,5 @@
 module main (bad)
 import root
 
-bad :: <IO, Err> ()
+bad :: <IO> ()
 bad = @close "not-a-registered-temp.txt"

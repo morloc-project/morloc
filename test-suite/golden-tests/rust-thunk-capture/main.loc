@@ -1,0 +1,93 @@
+-- Rust pool: a value read inside a generated thunk is still readable after it.
+--
+-- An effectful statement and each arm of @catch are lowered to a closure that
+-- is called on the spot. A closure that takes ownership of everything it names
+-- consumes the locals it only reads, so a non-Copy value used inside one
+-- cannot be used again afterwards, and two arms of the same @catch cannot both
+-- name one value.
+--
+-- Covered here: a manifold parameter, a let-bound record, and a bound result,
+-- reused after an effectful statement, after a @catch, across both arms of a
+-- single @catch, and around the effectful statement of a tail-recursive loop.
+
+module main (afterSave, afterCatch, bothArms, recordReuse, loopReuse, letThunk, guardedTwice, armShare)
+
+import root-rust
+
+record Box where
+  tag :: Str
+  items :: [Int]
+record Rust => Box = "struct"
+
+source Rust from "own.rs" ("rt_len" as strLen, "rt_nonempty" as nonEmpty)
+strLen :: Str -> Int
+nonEmpty :: [Int] -> [Int]
+
+-- The path is named once inside the @save thunk and twice after it.
+afterSave :: Str -> <IO> [Int]
+afterSave p = do
+  @save 0 p [1, 2, 3]
+  Ok xs <- @load p :: <IO> (Try Str ([Int]))
+  Ok ys <- @load p :: <IO> (Try Str ([Int]))
+  concat [xs, ys]
+
+-- The path is named by four @catch thunks in sequence.
+afterCatch :: Str -> <IO> [Int]
+afterCatch p = do
+  _mrb1 <- @load p :: <IO> (Try Str ([Int]))
+  let a = match _mrb1 | (Ok _cv) = _cv | (Err _) = [9]
+  _mrb2 <- @load p :: <IO> (Try Str ([Int]))
+  let b = match _mrb2 | (Ok _cv) = _cv | (Err _) = [8]
+  concat [a, b]
+
+-- Both arms of one @catch name the same path.
+bothArms :: Str -> <IO> [Int]
+bothArms p = do
+  _mr <- @load p :: <IO> (Try Str ([Int]))
+  match _mr | (Ok _cv) = _cv | (Err _) = [strLen p]
+
+-- A let-bound record is read inside the thunk and again after it.
+recordReuse :: Str -> <IO> [Int]
+recordReuse p = do
+  let b = ({tag = "box", items = [4, 5]} :: Box)
+  @save 0 p (.items b)
+  Ok xs <- @load p :: <IO> (Try Str ([Int]))
+  concat [xs, .items b]
+
+-- The loop variable is read inside the thunk and passed to the next iteration.
+loopReuse :: Str -> Int -> <IO> [Int]
+loopReuse p n
+  ? n == 0 = do
+      Ok _lv <- @load p :: <IO> (Try Str ([Int]))
+      _lv
+  : do
+      @save 0 p [n]
+      loopReuse p (n - 1)
+
+-- A thunk bound by a let and forced later, over a path used again afterwards.
+letThunk :: Str -> <IO> [Int]
+letThunk p = do
+  let t = (@load p :: <IO> (Try Str ([Int])))
+  Ok a <- t
+  Ok b <- @load p :: <IO> (Try Str ([Int]))
+  concat [a, b]
+
+-- A @catch in a helper that is itself effect-typed, reached twice: the helper's
+-- own frame may hand a closure out, so its two arms are captured differently
+-- from the ones above.
+guarded :: Str -> <IO> [Int]
+guarded q = do
+  _mr <- @load q :: <IO> (Try Str ([Int]))
+  match _mr | (Ok _cv) = _cv | (Err _) = [strLen q]
+
+guardedTwice :: Str -> <IO> [Int]
+guardedTwice p = do
+  a <- guarded p
+  b <- guarded p
+  concat [a, b]
+
+-- One arm reads the list while the other yields it. A thunk's result leaves the
+-- thunk by value, so yielding a value the sibling thunk is still reading has to
+-- copy it out rather than take it.
+armShare :: [Int] -> <IO> [Int]
+armShare v = match (@try (nonEmpty v)) | (Ok _cv) = _cv | (Err _) = v

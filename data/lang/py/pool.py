@@ -139,7 +139,10 @@ def _tracked_foreign_call(*args):
     finally:
         _busy_ref.value -= 1
 
-def __mlc_wrap_log(group, start_tmpl, pass_tmpl, fail_tmpl, fn):
+def __mlc_wrap_log(group, start_tmpl, pass_tmpl, fail_tmpl, bench_key, fn):
+    # bench_key is "group\tname\tlang" when the label carries
+    # `benchmark: true`, else None. Only the success path records: a call that
+    # raised did not do the work being measured.
     def go(*args):
         call_id = morloc.log_next_id()
         t0 = time.monotonic()
@@ -147,8 +150,11 @@ def __mlc_wrap_log(group, start_tmpl, pass_tmpl, fail_tmpl, fn):
             morloc.log_emit(start_tmpl, group, 0.0, call_id)
         try:
             r = fn(*args)
+            dt = time.monotonic() - t0
             if pass_tmpl is not None:
-                morloc.log_emit(pass_tmpl, group, time.monotonic() - t0, call_id)
+                morloc.log_emit(pass_tmpl, group, dt, call_id)
+            if bench_key is not None:
+                morloc.bench_record(bench_key, dt)
             return r
         except BaseException:
             if fail_tmpl is not None:
@@ -384,6 +390,15 @@ def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, tota
         traceback.print_exc(file=sys.stderr)
         sys.stderr.flush()
     finally:
+        # This worker is a process of its own and is leaving; its deferred
+        # releases have no next dispatch to perform them, and a process
+        # exiting does not decrement a reference other processes can see.
+        # The worker is idle or already failing here, so nothing it holds is
+        # still in use by a dispatch of its own.
+        try:
+            morloc.shm_tracker_flush()
+        except Exception:
+            pass
         sock.close()
 
 
@@ -542,6 +557,12 @@ def run_thread_pool(socket_path, tmpdir, shm_basename):
             traceback.print_exc(file=sys.stderr)
             sys.stderr.flush()
         finally:
+            # A thread leaving by any route takes its deferred releases with
+            # it, so perform them here as the surplus reap above does.
+            try:
+                morloc.shm_tracker_flush()
+            except Exception:
+                pass
             # Release the slot on a FATAL exit too (the surplus reap above already
             # released it and set the flag). Leaking `total` would make the
             # saturation gate `busy >= total` stop tripping, so a re-entrant

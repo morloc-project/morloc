@@ -54,6 +54,9 @@ toE (AnnoS (Idx _ t) _ (RealS si x)) = LitP (Idx si t) (MNum x)
 toE (AnnoS (Idx _ t) _ (IntS si x)) = LitP (Idx si t) (MInt x)
 toE (AnnoS g _ (LogS x)) = LitP g (MLog x)
 toE (AnnoS g _ (StrS x)) = LitP g (MStr x)
+-- A constructor is a closed literal; its name is the value the
+-- value-checker can see.
+toE (AnnoS g _ (ConS _ n _ _)) = LitP g (MStr n)
 toE (AnnoS g _ (ExeS (SrcCall s))) = SrcP g s
 toE (AnnoS g _ (ExeS (PatCall (PatternText s ss)))) =
   LitP g (MStr (s <> DT.concat ["#{}" <> s' | s' <- ss]))

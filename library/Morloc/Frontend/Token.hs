@@ -127,6 +127,7 @@ data Token
   | TokFalse
   | TokType
   | TokNewtype
+  | TokData
   | TokRecord
   | TokObject
   | TokClass
@@ -136,6 +137,7 @@ data Token
   | TokInfixl
   | TokInfixr
   | TokInfix
+  | TokMatch
   | TokLet
   | TokIn
   | TokDo
@@ -240,6 +242,7 @@ showToken TokTrue = "'True'"
 showToken TokFalse = "'False'"
 showToken TokType = "'type'"
 showToken TokNewtype = "'newtype'"
+showToken TokData = "'data'"
 showToken TokRecord = "'record'"
 showToken TokObject = "'object'"
 showToken TokClass = "'class'"
@@ -249,6 +252,7 @@ showToken TokEscapable = "'escapable'"
 showToken TokInfixl = "'infixl'"
 showToken TokInfixr = "'infixr'"
 showToken TokInfix = "'infix'"
+showToken TokMatch = "'match'"
 showToken TokLet = "'let'"
 showToken TokIn = "'in'"
 showToken TokDo = "'do'"

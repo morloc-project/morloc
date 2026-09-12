@@ -25,44 +25,50 @@ module main
 import root-rust
 
 -- 1. Open as IStream and pull the first (only) sub-packet.
-testNextOnce :: Str -> <IO, Err> [Str]
+testNextOnce :: Str -> <IO> [Str]
 testNextOnce path = do
   @save 0 path ["one", "two", "three"]
-  s <- @open path :: <IO, Err> IStream Str
-  @next s
+  Ok s <- @open path :: <IO> (Try Str (IStream Str))
+  Ok _tailv91 <- @next s
+  _tailv91
 
 -- 2. After EOF, subsequent @next calls return empty.
-testNextEofTwice :: Str -> <IO, Err> [Str]
+testNextEofTwice :: Str -> <IO> [Str]
 testNextEofTwice path = do
   @save 0 path ["alpha", "beta"]
-  s <- @open path :: <IO, Err> IStream Str
-  _ <- @next s
-  @next s
+  Ok s <- @open path :: <IO> (Try Str (IStream Str))
+  Ok _ <- @next s
+  Ok _tailv92 <- @next s
+  _tailv92
 
 -- 3. Derive an IStream from an IFile and walk it.
-testStreamFromIFile :: Str -> <IO, Err> [Int]
+testStreamFromIFile :: Str -> <IO> [Int]
 testStreamFromIFile path = do
   @save 0 path [11, 22, 33]
-  f <- @open path :: <IO, Err> IFile Int
+  Ok f <- @open path :: <IO> (Try Str (IFile Int))
   s <- @stream f
-  @next s
+  Ok _tailv93 <- @next s
+  _tailv93
 
 -- 4. Int element type round-trip.
-testIntList :: Str -> <IO, Err> [Int]
+testIntList :: Str -> <IO> [Int]
 testIntList path = do
   @save 0 path [100, 200, 300, 400]
-  s <- @open path :: <IO, Err> IStream Int
-  @next s
+  Ok s <- @open path :: <IO> (Try Str (IStream Int))
+  Ok _tailv94 <- @next s
+  _tailv94
 
 -- 5. Element count of a saved list via IFile.
-testLength :: Str -> <IO, Err> Int
+testLength :: Str -> <IO> Int
 testLength path = do
   @save 0 path [1, 2, 3, 4, 5, 6, 7]
-  f <- @open path :: <IO, Err> IFile Int
-  @flen f
+  Ok f <- @open path :: <IO> (Try Str (IFile Int))
+  Ok _tailv95 <- @flen f
+  _tailv95
 
 -- 6. Read a file's element schema string without opening it.
-testFschema :: Str -> <IO, Err> Str
+testFschema :: Str -> <IO> Str
 testFschema path = do
   @save 0 path [1, 2, 3]
-  @fschema path
+  Ok _tailv96 <- @fschema path
+  _tailv96

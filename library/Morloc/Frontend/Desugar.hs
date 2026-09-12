@@ -29,6 +29,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
+import Data.Char (isAlpha)
 import qualified Morloc.BaseTypes as BT
 import Morloc.Frontend.CST
 import Morloc.Frontend.Token hiding (startPos)
@@ -111,6 +112,14 @@ data DState = DState
   , dsWarnings :: ![Text] -- accumulated docstring warnings, drained by the caller
   , dsModuleDoc :: ![Text] -- module-level description lines
   , dsModuleEpilogues :: ![[Text]] -- epilogue blocks for top-level help
+  , dsNamespaces :: !(Set.Set Text)
+    -- ^ The `as` alias of every namespaced import in THIS module. A
+    -- pattern may name a constructor through such an alias.
+  , dsDataCtors :: !(Map.Map Text [(Text, Int)])
+    -- ^ Constructor names, in declaration order, for each `data` type
+    -- declared in THIS module. Exhaustiveness needs the whole set, and
+    -- this is the only place it is available: by the time imports are
+    -- merged the clause structure has already become an IfE cascade.
   , dsStreamElems :: !(Map.Map EVar TypeU)
     -- ^ For each command whose body reaches `@collect`, the batch type
     -- it writes to standard output. Such a command returns `()` at the
@@ -250,12 +259,18 @@ data ParsedDocLine
 --  * Otherwise, if the line starts with `<word>:` (no spaces in `<word>`)
 --    it is returned as a DocDirective. Validation against the allowlist
 --    of known directive names is done by the caller.
+-- | What a docstring line reads as when it is not a directive. Shared with
+-- 'parseDocKV' so a line the directive handler does not recognize can be
+-- kept exactly as the author wrote it.
+docDescLine :: Text -> Text
+docDescLine txt = T.stripEnd $ case T.uncons txt of
+  Just (' ', rest) -> rest
+  _ -> txt
+
 parseDocKV :: Text -> ParsedDocLine
 parseDocKV txt =
   let stripped = T.strip txt
-      descLine = T.stripEnd $ case T.uncons txt of
-        Just (' ', rest) -> rest
-        _ -> txt
+      descLine = docDescLine txt
    in case T.uncons stripped of
         Just ('\\', rest) -> DocDesc (T.stripEnd rest)
         Just ('@', rest) ->
@@ -319,7 +334,7 @@ argDocDirectiveKeys =
   , "arg", "true", "false", "return"
   , "source", "form", "check.<kind>"
   , "list.source", "list.form", "list.check.<kind>"
-  , "with", "mime"
+  , "with", "render", "mime"
   ]
 
 -- | Parse and lightly validate a media type (RFC 6838 `type/subtype`, e.g.
@@ -518,11 +533,52 @@ parseCheck kind raw = case kind of
 sourceDocDirectiveKeys :: [Text]
 sourceDocDirectiveKeys = ["name", "rsize"]
 
-unknownDirectiveWarning :: [Text] -> Text -> Text
-unknownDirectiveWarning knownKeys k =
-  "warning: unknown docstring directive '" <> k <> "'"
-  <> " (recognized: " <> T.intercalate ", " knownKeys <> "); "
-  <> "if this line was meant as prose, prefix its content with '\\' to suppress this warning"
+-- | Warn only when the key looks like a misspelling of a directive rather
+-- than like prose. Every unrecognized line used to warn, which made ordinary
+-- English -- any line whose first word ends in a colon, and any `@word` --
+-- noisy enough that authors were told to escape all prose. A key within one
+-- edit of a real directive is a typo worth reporting; anything further away
+-- is a sentence.
+unknownDirectiveWarning :: [Text] -> Text -> Text -> [Text]
+unknownDirectiveWarning knownKeys k line
+  | closedForm || not (null near) = [msg]
+  | otherwise = []
+  where
+    -- `@word` is the closed grammar. An unrecognized keyword there is a
+    -- mistake, and demoting it to prose without saying so leaves the
+    -- interface quietly different from the one the author wrote. The legacy
+    -- `key:` form is the one ordinary English collides with -- any sentence
+    -- whose first word ends in a colon -- so there a warning is reserved for
+    -- a key that looks like a misspelling.
+    closedForm = T.isPrefixOf "@" (T.stripStart line)
+    near = [n | n <- knownKeys, withinOneEdit k n]
+    msg =
+      "warning: docstring directive '" <> k <> "' is not recognized"
+      <> (if null near
+            then " (recognized: " <> T.intercalate ", " knownKeys <> ")"
+            else " (did you mean one of: " <> T.intercalate ", " near <> "?)")
+      <> "; if this line was meant as prose, prefix its content with "
+      <> "'\\' to suppress this warning"
+
+-- | True when one insertion, deletion, substitution or transposition turns
+-- the first word into the second, compared without regard to case.
+withinOneEdit :: Text -> Text -> Bool
+withinOneEdit a b = go (T.unpack (T.toLower a)) (T.unpack (T.toLower b))
+  where
+    go xs ys
+      | xs == ys = True
+      | otherwise = case (xs, ys) of
+          ([], zs) -> length zs == 1
+          (zs, []) -> length zs == 1
+          (x : xt, y : yt)
+            | x == y -> go xt yt
+            | otherwise ->
+                xt == yt
+                  || xt == (y : yt)
+                  || (x : xt) == yt
+                  || (case (xt, yt) of
+                        (x2 : xr, y2 : yr) -> x == y2 && x2 == y && xr == yr
+                        _ -> False)
 
 -- | Parse a single CLI-option directive value into the
 -- [`ArgDocVars`] slot, recording an error when the value matched a
@@ -615,9 +671,8 @@ processArgDocLines = foldl step ([], [], defaultValue)
           Right mt -> (errs, ws, d {docMime = Just mt})
           Left e   -> (errs <> ["in `@mime " <> v <> "`: " <> e], ws, d)
         _ ->
-          let w = unknownDirectiveWarning argDocDirectiveKeys k
-              desc = k <> ": " <> v
-           in (errs, ws <> [w], d {docLines = docLines d <> [desc]})
+          let w = unknownDirectiveWarning argDocDirectiveKeys k line
+           in (errs, ws <> w, d {docLines = docLines d <> [docDescLine line]})
 
     -- Parse one `with`/`render` directive into a WithSpec, appending it to
     -- docWith (or an error to errs).
@@ -654,7 +709,7 @@ processModuleDocLines = finalize . foldl step ([], Nothing, [])
                 Just epi -> epis <> [epi]
           in (desc, Just [], epis')
         _ ->
-          let line' = k <> ": " <> _v
+          let line' = docDescLine line
           in case curEpi of
             Nothing -> (desc <> [line'], Nothing, epis)
             Just epi -> (desc, Just (epi <> [line']), epis)
@@ -688,9 +743,8 @@ applySourceDocs lns src = foldl step ([], [], src) lns
           Left e -> (errs <> [e], ws, s)
           Right ns -> (errs, ws, s {srcRsize = ns})
         _ ->
-          let w = unknownDirectiveWarning sourceDocDirectiveKeys k
-              desc = k <> ": " <> v
-           in (errs, ws <> [w], s {srcNote = srcNote s <> [desc]})
+          let w = unknownDirectiveWarning sourceDocDirectiveKeys k line
+           in (errs, ws <> w, s {srcNote = srcNote s <> [docDescLine line]})
 
 -- | Parse an `rsize` value: one or more positive integers separated by
 -- whitespace. Each is the size of a leading call group; the final group is
@@ -764,6 +818,10 @@ validateSigWith pos specs argDocs = do
     <> "` already appears on one of this signature's own argument "
     <> "declarations (via `@arg` / `@true` / `@false`). Pick a different "
     <> "short letter for the terminal action."
+  reportIfAny pos (drop 1 [wsLong s | s <- specs, wsDefault s]) $ \l ->
+    "`@default` is declared on more than one terminal action in this "
+    <> "signature; `--" <> l <> "` is the second. Exactly one action may "
+    <> "run when the caller names none."
 
 reportIfAny :: Pos -> [a] -> (a -> Text) -> D ()
 reportIfAny _ [] _ = return ()
@@ -818,6 +876,63 @@ namTypeDocs declPos locEntries = do
           return fieldDoc)
       locEntries
   return (ArgDocRec recDocVars (zip [k | (_, k, _) <- locEntries] fieldDocs))
+
+-- | Collect the docstrings attached to a `data` declaration: the block
+-- above the keyword, and the block above each constructor. A constructor
+-- takes prose only; the directives that shape a command-line argument
+-- belong to the argument, not to one of the values it may hold.
+dataTypeDocs :: Pos -> [(Located, Located, Text, [TypeU])] -> D ArgDoc
+dataTypeDocs declPos ctors = do
+  typeDocs <- lookupDocsAt declPos
+  typeVars <- processArgDocLinesD declPos typeDocs
+  rejectWithHere declPos "a data declaration" typeVars
+  ctorDocs <-
+    mapM
+      (\(lead, tok, name, _) -> do
+          -- The block sits above whichever token starts the constructor's
+          -- line: the `=` or `|` in the usual layout, the name itself when
+          -- the bar ends the previous line.
+          leadDocs <- lookupDocsAt (locPos lead)
+          (p, dl) <- if null leadDocs
+            then (,) (locPos tok) <$> lookupDocsAt (locPos tok)
+            else return (locPos lead, leadDocs)
+          vars <- processArgDocLinesD p dl
+          rejectDirectivesOnCtor p name vars
+          return (name, vars))
+      ctors
+  return (ArgDocData typeVars ctorDocs)
+
+-- | A constructor's docstring may describe it and nothing more.
+rejectDirectivesOnCtor :: Pos -> Text -> ArgDocVars -> D ()
+rejectDirectivesOnCtor pos name v =
+  case [ d | (d, present) <- directives, present ] of
+    [] -> return ()
+    (d : _) ->
+      dfail pos . T.unpack $
+        "`@" <> d <> "` is not allowed on constructor `" <> name
+          <> "`; a constructor's docstring may only describe it"
+  where
+    directives =
+      [ ("name", isJust (docName v))
+      , ("literal", isJust (docLiteral v))
+      , ("many", isJust (docMany v))
+      , ("stdin", isJust (docStdin v))
+      , ("unroll", isJust (docUnroll v))
+      , ("default", isJust (docDefault v))
+      , ("metavar", isJust (docMetavar v))
+      , ("arg", isJust (docArg v))
+      , ("true", isJust (docTrue v))
+      , ("false", isJust (docFalse v))
+      , ("return", isJust (docReturn v))
+      , ("source", isJust (docSource v))
+      , ("form", isJust (docForm v))
+      , ("check", not (null (docChecks v)))
+      , ("list.source", isJust (docListSource v))
+      , ("list.form", isJust (docListForm v))
+      , ("list.check", not (null (docListChecks v)))
+      , ("with", not (null (docWith v)))
+      , ("mime", isJust (docMime v))
+      ]
 
 rejectWithHere :: Pos -> Text -> ArgDocVars -> D ()
 rejectWithHere pos ctx v =
@@ -1145,16 +1260,37 @@ buildAccessor sp body
   | bodyHasBracket body = buildAccessorBracket sp body
   | otherwise = do
       desBody <- desugarAccessorBody body
-      result <- resolveBody desBody
+      result <- resolveBody sp desBody
       case result of
         ARGetter sel -> freshExprSpan sp (PatE (PatternStruct sel))
         ARSetter sel vals -> do
+          rejectOverlappingSets sp sel
           patI <- freshExprSpan sp (PatE (PatternStruct sel))
           lamI <- freshIdSpan sp
           let v = EV (".setter_" <> T.pack (show lamI))
           vArg <- freshExprSpan sp (VarE defaultValue v)
           appI <- freshExprSpan sp (AppE patI (vArg : vals))
           return (ExprI lamI (LamE [v] appI))
+
+-- A setter writes each of its paths into one rebuilt value, so no path may
+-- lead through another: `.(.home = a, .home.altitude = b)` asks for `home` to
+-- be replaced and for a field of it to be replaced at the same time, and there
+-- is no reading of that which uses both values. Getters have no such
+-- restriction -- naming a field twice there just reads it twice -- so this is
+-- checked only where values are assigned.
+rejectOverlappingSets :: Span -> Selector -> D ()
+rejectOverlappingSets sp sel =
+  case [p | p <- paths, q <- paths, p /= q, p `isPrefixOf` q] of
+    [] -> return ()
+    (p : _) ->
+      dfail (startPos sp) $
+        "this setter writes to " <> renderPath p <> " and to a field"
+          <> " inside it. Set the whole value or its parts, not both."
+  where
+    paths = ungroup sel
+    renderPath = concatMap step
+    step (Left i) = "." <> show i
+    step (Right k) = "." <> T.unpack k
 
 -- True when any sub-component of the body is a bracket accessor. When True,
 -- we use the lambda-based path below: bracket access lowers to function-call
@@ -1460,19 +1596,19 @@ desugarAccessorTail CATEnd = return IATEnd
 desugarAccessorTail (CATSet e) = IATSet <$> desugarExpr e
 desugarAccessorTail (CATChain body) = IATChain <$> desugarAccessorBody body
 
-resolveBody :: IAccessorBody -> D AccessorResult
-resolveBody (IABKey name tail') = do
-  inner <- resolveTail tail'
+resolveBody :: Span -> IAccessorBody -> D AccessorResult
+resolveBody sp (IABKey name tail') = do
+  inner <- resolveTail sp tail'
   return (wrapKey name inner)
-resolveBody (IABIdx idx tail') = do
-  inner <- resolveTail tail'
+resolveBody sp (IABIdx idx tail') = do
+  inner <- resolveTail sp tail'
   return (wrapIdx idx inner)
-resolveBody (IABGroup entries) = resolveGroup entries
+resolveBody sp (IABGroup entries) = resolveGroup sp entries
 
-resolveTail :: IAccessorTail -> D AccessorResult
-resolveTail IATEnd = return (ARGetter SelectorEnd)
-resolveTail (IATSet expr) = return (ARSetter SelectorEnd [expr])
-resolveTail (IATChain body) = resolveBody body
+resolveTail :: Span -> IAccessorTail -> D AccessorResult
+resolveTail _ IATEnd = return (ARGetter SelectorEnd)
+resolveTail _ (IATSet expr) = return (ARSetter SelectorEnd [expr])
+resolveTail sp (IATChain body) = resolveBody sp body
 
 wrapKey :: Text -> AccessorResult -> AccessorResult
 wrapKey name (ARGetter sel) = ARGetter (SelectorKey (name, sel) [])
@@ -1482,26 +1618,42 @@ wrapIdx :: Int -> AccessorResult -> AccessorResult
 wrapIdx idx (ARGetter sel) = ARGetter (SelectorIdx (idx, sel) [])
 wrapIdx idx (ARSetter sel vals) = ARSetter (SelectorIdx (idx, sel) []) vals
 
-resolveGroup :: [IAccessorBody] -> D AccessorResult
-resolveGroup bodies = do
-  results <- mapM resolveBody bodies
+resolveGroup :: Span -> [IAccessorBody] -> D AccessorResult
+resolveGroup sp bodies = do
+  results <- mapM (resolveBody sp) bodies
   let getters = [s | ARGetter s <- results]
       setterPairs = [(s, vs) | ARSetter s vs <- results]
   case (getters, setterPairs) of
-    (gs, []) -> return (ARGetter (mergeSelectors gs))
-    ([], ss) -> return (ARSetter (mergeSelectors (map fst ss)) (concatMap snd ss))
-    _ -> dfail (Pos 0 0 "") "cannot mix getter and setter entries in .()"
+    (gs, []) -> ARGetter <$> mergeSelectors sp gs
+    ([], ss) -> do
+      sel <- mergeSelectors sp (map fst ss)
+      return (ARSetter sel (concatMap snd ss))
+    _ -> dfail (startPos sp) "cannot mix getter and setter entries in .()"
 
-mergeSelectors :: [Selector] -> Selector
-mergeSelectors [] = SelectorEnd
-mergeSelectors [s] = s
-mergeSelectors sels =
+-- A group's entries share one level of the receiver, and that level is
+-- either a record (named fields) or a tuple (numbered slots). A group
+-- naming both asks for a value that is both, which no receiver type can
+-- be, so it is a source error rather than an unrepresentable Selector.
+mergeSelectors :: Span -> [Selector] -> D Selector
+mergeSelectors _ [] = return SelectorEnd
+mergeSelectors _ [s] = return s
+mergeSelectors sp sels =
   let idxEntries = concat [s : ss | SelectorIdx s ss <- sels]
       keyEntries = concat [s : ss | SelectorKey s ss <- sels]
    in case (idxEntries, keyEntries) of
-        (is, []) -> case is of [] -> SelectorEnd; (x : xs) -> SelectorIdx x xs
-        ([], (x : xs)) -> SelectorKey x xs
-        _ -> error "Cannot mix key and index selectors in getter"
+        (is, []) -> return $ case is of [] -> SelectorEnd; (x : xs) -> SelectorIdx x xs
+        ([], (x : xs)) -> return (SelectorKey x xs)
+        (is, ks) ->
+          dfail (startPos sp) $
+            "this selector group names both a record field ("
+              <> renderKeys ks
+              <> ") and a tuple slot ("
+              <> renderIdxs is
+              <> "). A group's entries all read the same value, which is"
+              <> " either a record or a tuple, never both."
+  where
+    renderKeys ks = intercalate ", " ["." <> T.unpack k | (k, _) <- ks]
+    renderIdxs is = intercalate ", " ["." <> show i | (i, _) <- is]
 
 --------------------------------------------------------------------
 -- Irrefutable-pattern desugaring
@@ -1512,7 +1664,21 @@ mergeSelectors sels =
 -- args, LHS of let, LHS of do-bind) are parsed as expressions to avoid
 -- LALR expr/pat overlap; this converter enforces the pattern subset.
 exprToIrrefPat :: Loc CstExpr -> D (Loc CstIrrefPat)
-exprToIrrefPat (Loc sp (CVarE v))       = return (Loc sp (CIPatVar v))
+-- A binding position takes a fresh name. A constructor is not one -- it
+-- would bind a variable spelled like the constructor, match every input,
+-- and silently make the definition total -- and neither is a name from
+-- another module.
+exprToIrrefPat (Loc sp (CVarE v@(EV n)))
+  | not (T.null base) && isUpper (T.head base) =
+      dfail (startPos sp) $
+        "a constructor (`" ++ T.unpack n ++ "`) cannot be a binding pattern;"
+          ++ " match on it with a `|` clause"
+  | isJust qual =
+      dfail (startPos sp) $
+        "a qualified name cannot be a pattern variable: `" ++ T.unpack n ++ "`"
+  | otherwise = return (Loc sp (CIPatVar v))
+  where
+    (qual, base) = splitQualifier n
 exprToIrrefPat (Loc sp CUnderscoreE)    = return (Loc sp CIPatWild)
 exprToIrrefPat (Loc sp (CAsE v inner))  = do
   inner' <- exprToIrrefPat inner
@@ -1655,6 +1821,9 @@ freeVarsE :: ExprI -> Set.Set EVar
 freeVarsE (ExprI _ e) = case e of
   -- Value expressions that carry names
   VarE _ v            -> Set.singleton v
+  -- A constructor is a closed value, not a reference to a binding.
+  -- A constructor is a closed value; only its arguments can name bindings.
+  ConE _ _ _ xs       -> Set.unions (map freeVarsE xs)
   BopE l _ v r        -> Set.unions [freeVarsE l, Set.singleton v, freeVarsE r]
   LstE es             -> Set.unions (map freeVarsE es)
   TupE es             -> Set.unions (map freeVarsE es)
@@ -1741,10 +1910,40 @@ validateIrrefPat p =
 
 -- | Convert a `|`-clause argument expression into a refutable pattern,
 -- enforcing the pattern subset. Literals are permitted (unlike
--- 'exprToIrrefPat'); constructor patterns are deferred until sum types
--- introduce term-level constructors.
 exprToRefutPat :: Loc CstExpr -> D (Loc CstRefutPat)
-exprToRefutPat (Loc sp (CVarE v))       = return (Loc sp (CRPatVar v))
+-- An UPPER-cased name in pattern position is a `data` constructor, not a
+-- binder. Getting this wrong is silent rather than loud: the name would
+-- bind, the clause would match every input, and the arms below it would
+-- become unreachable without any error. The case of the name decides, and
+-- the name may carry a namespace qualifier (`p.Red`), so the test is on the
+-- last component. A qualified lowercase name is rejected outright: it can
+-- only mean a term from another module, and a pattern variable is a fresh
+-- binder, so there is nothing for the qualifier to refer to.
+exprToRefutPat (Loc sp (CVarE v@(EV n)))
+  | isCtor = do
+      ctor <- qualifiedCtor sp n
+      return (Loc sp (CRPatCon ctor []))
+  | isJust qual =
+      dfail (startPos sp) $
+        "a qualified name cannot be a pattern variable: `" ++ T.unpack n ++ "`"
+  | otherwise = return (Loc sp (CRPatVar v))
+  where
+    (qual, base) = splitQualifier n
+    isCtor = not (T.null base) && isUpper (T.head base)
+-- A constructor applied to patterns, as in `(Circle r)`. The head must be a
+-- constructor: an application in pattern position has no other meaning, and
+-- reading it as anything else would silently turn a match into a binding.
+exprToRefutPat (Loc sp (CAppE (Loc _ (CVarE (EV n))) args))
+  | not (T.null base) && isUpper (T.head base) = do
+      ctor <- qualifiedCtor sp n
+      args' <- mapM exprToRefutPat args
+      checkCtorArity sp (unEVar ctor) (length args')
+      return (Loc sp (CRPatCon ctor args'))
+  where
+    (_, base) = splitQualifier n
+exprToRefutPat (Loc sp (CAppE _ _)) =
+  dfail (startPos sp)
+    "only a `data` constructor may be applied in a `|` clause pattern"
 exprToRefutPat (Loc sp CUnderscoreE)    = return (Loc sp CRPatWild)
 exprToRefutPat lit@(Loc sp (CIntE _))   = return (Loc sp (CRPatLit lit))
 exprToRefutPat lit@(Loc sp (CRealE _))  = return (Loc sp (CRPatLit lit))
@@ -1767,30 +1966,115 @@ exprToRefutPat (Loc sp _) =
   dfail (startPos sp)
     "expected a pattern (variable, '_', literal, tuple, record, or label@pattern) in a `|` clause"
 
--- | A leaf of a refutable-pattern walk: either a variable bound at a
--- selector chain from the receiver, or a literal to test for equality at
--- a selector chain.
-data RefutLeaf
-  = RBind EVar Selector
-  | RTest (Loc CstExpr) Selector
+-- | Split a possibly namespace-qualified name into its qualifier and its
+-- last component. The grammar produces at most one level (`p.Red`), and a
+-- qualifier is always an identifier, so an operator name that happens to
+-- contain a dot (`.`, `.|.`) is not a qualified name.
+splitQualifier :: Text -> (Maybe Text, Text)
+splitQualifier n = case T.breakOnEnd "." n of
+  (q, base)
+    | T.null q -> (Nothing, n)
+    | Just (c, _) <- T.uncons (T.dropEnd 1 q), isAlpha c || c == '_', not (T.null base) ->
+        (Just (T.dropEnd 1 q), base)
+    | otherwise -> (Nothing, n)
 
--- | Walk a refutable pattern to its leaves, accumulating a selector chain.
--- Mirrors 'walkIrrefPat' but also collects literal tests.
-walkRefutPat :: Loc CstRefutPat -> Selector -> [RefutLeaf]
-walkRefutPat (Loc _ (CRPatVar v))   sel = [RBind v sel]
-walkRefutPat (Loc _ CRPatWild)      _   = []
-walkRefutPat (Loc _ (CRPatLit e))   sel = [RTest e sel]
-walkRefutPat (Loc _ (CRPatAs v p))  sel = RBind v sel : walkRefutPat p sel
-walkRefutPat (Loc _ (CRPatTup ps))  sel = concat
-  [ walkRefutPat p (extendSelIdx i sel) | (i, p) <- zip [0 ..] ps ]
-walkRefutPat (Loc _ (CRPatRec kps)) sel = concat
-  [ walkRefutPat p (extendSelKey k sel) | (Key k, p) <- kps ]
+-- | The bare constructor a pattern names. A tag test matches by name
+-- against the scrutinee's own constructor table, so the qualifier plays no
+-- part in the test; it is checked here against the module's import aliases
+-- so a misspelled alias is an error rather than silently ignored.
+qualifiedCtor :: Span -> Text -> D EVar
+qualifiedCtor sp n = case splitQualifier n of
+  (Nothing, base) -> return (EV base)
+  (Just q, base) -> do
+    aliases <- State.gets dsNamespaces
+    if Set.member q aliases
+      then return (EV base)
+      else dfail (startPos sp) $
+        "`" ++ T.unpack q ++ "` is not a namespace alias of any import in this module"
+        ++ " (in pattern `" ++ T.unpack n ++ "`)"
+
+-- | One step of the route from a clause's formal parameter down to a
+-- sub-pattern.
+--
+-- Tuple and record steps are ordinary projections and become a 'Selector'.
+-- A constructor-field step cannot: which fields a `data` value has depends
+-- on its constructor, so there is no projection to write and none is
+-- accepted from surface syntax. It is sound here only because the tag test
+-- guarding it has already fixed the constructor.
+data RefutStep
+  = StepIdx Int
+  | StepKey Text
+  | StepField EVar Int
+
+-- | A leaf of a refutable-pattern walk: a variable bound at a path from the
+-- receiver, or a value to test at one.
+data RefutLeaf
+  = RBind EVar [RefutStep]
+  | RTest (Loc CstExpr) [RefutStep]
+  -- | The value at this path must carry this constructor's tag. Kept
+  -- distinct from 'RTest' because that lowers to Eq's '==', and an enum has
+  -- no Eq instance: a tag test goes through 'IntrTagTest' instead.
+  | RTagTest EVar [RefutStep]
+
+-- | Walk a refutable pattern to its leaves, accumulating the path taken.
+-- Mirrors 'walkIrrefPat' but also collects tests.
+--
+-- Leaves come out in DFS pre-order, which the caller relies on: a tag test
+-- must be emitted before anything that projects through the constructor it
+-- establishes.
+walkRefutPat :: Loc CstRefutPat -> [RefutStep] -> [RefutLeaf]
+walkRefutPat (Loc _ (CRPatVar v))    path = [RBind v path]
+walkRefutPat (Loc _ CRPatWild)       _    = []
+walkRefutPat (Loc _ (CRPatLit e))    path = [RTest e path]
+walkRefutPat (Loc _ (CRPatCon v ps)) path =
+  RTagTest v path
+    : concat [ walkRefutPat p (path <> [StepField v i]) | (i, p) <- zip [0 ..] ps ]
+walkRefutPat (Loc _ (CRPatAs v p))   path = RBind v path : walkRefutPat p path
+walkRefutPat (Loc _ (CRPatTup ps))   path = concat
+  [ walkRefutPat p (path <> [StepIdx i]) | (i, p) <- zip [0 ..] ps ]
+walkRefutPat (Loc _ (CRPatRec kps))  path = concat
+  [ walkRefutPat p (path <> [StepKey k]) | (Key k, p) <- kps ]
+
+-- | Build the expression naming the value at a path from the receiver.
+--
+-- Consecutive projection steps are folded into a single 'Selector' so an
+-- ordinary tuple or record pattern emits exactly one getter, as it did
+-- before constructor fields existed. A constructor-field step breaks the
+-- run, since it is an intrinsic rather than a projection.
+subjectAt :: Span -> EVar -> [RefutStep] -> D ExprI
+subjectAt sp recv path = do
+  root <- freshExprSpan sp (VarE defaultValue recv)
+  go root path
+  where
+    go acc [] = return acc
+    go acc steps = case span isProjection steps of
+      ([], StepField ctor i : rest) -> do
+        nameE <- freshExprSpan sp (StrE (unEVar ctor))
+        idxE <- freshExprSpan sp (IntE (fromIntegral i))
+        acc' <- freshExprSpan sp (IntrinsicE IntrCtorField [acc, nameE, idxE])
+        go acc' rest
+      (projs, rest) -> do
+        acc' <- applySelector acc (foldl addStep SelectorEnd projs)
+        go acc' rest
+
+    isProjection (StepField _ _) = False
+    isProjection _ = True
+
+    addStep sel (StepIdx i) = extendSelIdx i sel
+    addStep sel (StepKey k) = extendSelKey k sel
+    addStep sel (StepField _ _) = sel
+
+    applySelector acc SelectorEnd = return acc
+    applySelector acc sel = do
+      patE <- freshExprSpan sp (PatE (PatternStruct sel))
+      freshExprSpan sp (AppE patE [acc])
 
 -- | Names bound by a refutable pattern, paired with the binding position.
 refutPatBoundNames :: Loc CstRefutPat -> [(Text, Pos)]
 refutPatBoundNames (Loc sp (CRPatVar (EV n)))  = [(n, startPos sp)]
 refutPatBoundNames (Loc _  CRPatWild)          = []
 refutPatBoundNames (Loc _  (CRPatLit _))       = []
+refutPatBoundNames (Loc _  (CRPatCon _ ps))    = concatMap refutPatBoundNames ps
 refutPatBoundNames (Loc sp (CRPatAs (EV n) p)) = (n, startPos sp) : refutPatBoundNames p
 refutPatBoundNames (Loc _  (CRPatTup ps))      = concatMap refutPatBoundNames ps
 refutPatBoundNames (Loc _  (CRPatRec kps))     = concatMap (refutPatBoundNames . snd) kps
@@ -1804,6 +2088,11 @@ refutPatBoolLit _ = Nothing
 -- literals is irrefutable and always matches (a valid catch-all).
 refutPatHasLit :: Loc CstRefutPat -> Bool
 refutPatHasLit (Loc _ (CRPatLit _))   = True
+-- A constructor pattern is refutable. Reporting otherwise would make
+-- 'checkRefutCoverage' read the last clause as an unconditional catch-all,
+-- and 'assembleCascade' then DROPS that clause's test -- so an unmatched
+-- input would silently take the final arm.
+refutPatHasLit (Loc _ (CRPatCon _ _)) = True
 refutPatHasLit (Loc _ (CRPatVar _))   = False
 refutPatHasLit (Loc _ CRPatWild)      = False
 refutPatHasLit (Loc _ (CRPatAs _ p))  = refutPatHasLit p
@@ -1821,10 +2110,10 @@ validateRefutClause pats =
 -- | Build @formal.selector == literal@ as a BopE, exactly as a
 -- user-written '==' desugars, so it flows through the standard binop
 -- reassociation and Eq-instance resolution.
-buildRefutTest :: EVar -> (Loc CstExpr, Selector) -> D ExprI
-buildRefutTest formal (litLoc, sel) = do
+buildRefutTest :: EVar -> (Loc CstExpr, [RefutStep]) -> D ExprI
+buildRefutTest formal (litLoc, path) = do
   let Loc lsp _ = litLoc
-  lhs <- selectorApp lsp formal sel
+  lhs <- subjectAt lsp formal path
   rhs <- desugarExpr litLoc
   opI <- freshIdSpan lsp
   freshExprSpan lsp (BopE lhs opI (EV "==") rhs)
@@ -1836,12 +2125,37 @@ buildRefutTest formal (litLoc, sel) = do
 refutClauseArg
   :: Set.Set EVar -> EVar -> Loc CstRefutPat -> D ([ExprI], [(EVar, ExprI)])
 refutClauseArg usedNames formal p = do
-  let leaves = walkRefutPat p SelectorEnd
-      binds  = [(v, sel) | RBind v sel <- leaves, Set.member v usedNames]
-      tests  = [(e, sel) | RTest e sel <- leaves]
-  bindings  <- materializeIrrefLeaves (spanOf p) formal binds
-  testExprs <- mapM (buildRefutTest formal) tests
-  return (testExprs, bindings)
+  let leaves = walkRefutPat p []
+      binds  = [(v, path) | RBind v path <- leaves, Set.member v usedNames]
+  bindings <- mapM (\(v, path) -> (,) v <$> subjectAt (spanOf p) formal path) binds
+  -- Tests keep the walk's DFS order rather than being grouped by kind. A
+  -- projection through a constructor field is only meaningful once that
+  -- constructor's tag test has passed, and the emitted conjunction
+  -- short-circuits, so the outer test has to come first.
+  tests <- mapM (buildLeafTest formal (spanOf p)) leaves
+  return (catMaybes tests, bindings)
+  where
+    buildLeafTest f _  (RTest e path)    = Just <$> buildRefutTest f (e, path)
+    buildLeafTest f sp (RTagTest v path) = Just <$> buildRefutTagTest sp f (v, path)
+    buildLeafTest _ _  (RBind _ _)       = return Nothing
+
+-- | Lower one constructor pattern to a tag test on the projected value.
+--
+-- Deliberately not an '==': see 'IntrTagTest'. The constructor is emitted as
+-- an ordinary term reference, so it resolves through the same binding the
+-- `data` declaration created -- which is what makes a constructor borrowed
+-- from another type a type error rather than a silent mismatch.
+buildRefutTagTest :: Span -> EVar -> (EVar, [RefutStep]) -> D ExprI
+buildRefutTagTest sp formal (ctor, path) = do
+  subject <- subjectAt sp formal path
+  -- The constructor travels as its NAME, not as a reference to the term the
+  -- declaration bound. A payload constructor is a function into its type, so
+  -- a reference could not be typed against the value being tested, and by
+  -- codegen it has become a lambda whose arm is no longer recoverable. The
+  -- name is checked against the scrutinee's constructor table instead, which
+  -- rejects a borrowed constructor for either tier.
+  nameE <- freshExprSpan sp (StrE (unEVar ctor))
+  freshExprSpan sp (IntrinsicE IntrTagTest [subject, nameE])
 
 -- | Conjoin per-argument tests into one Bool without duplicating the
 -- clause body: @t1 && ... && tn@ as nested IfE returning True/False.
@@ -1859,8 +2173,16 @@ buildRefutClause
   :: [EVar] -> ([Loc CstRefutPat], Loc CstExpr) -> D (ExprI, ExprI)
 buildRefutClause formals (pats, bodyLoc) = do
   body' <- desugarExpr bodyLoc
+  let Loc bsp _ = bodyLoc
+  buildRefutClauseFrom formals pats bsp body'
+
+-- | 'buildRefutClause' over a body that is already desugared. A refutable
+-- `<-` bind has no CST body to hand over: its continuation is the rest of
+-- the do-block, which has been lowered by the time the pattern is known.
+buildRefutClauseFrom
+  :: [EVar] -> [Loc CstRefutPat] -> Span -> ExprI -> D (ExprI, ExprI)
+buildRefutClauseFrom formals pats bsp body' = do
   let usedNames = freeVarsE body'
-      Loc bsp _ = bodyLoc
   contribs <- mapM (\(f, p) -> refutClauseArg usedNames f p) (zip formals pats)
   let allTests = concatMap fst contribs
       allBinds = concatMap snd contribs
@@ -1875,16 +2197,141 @@ buildRefutClause formals (pats, bodyLoc) = do
 -- irrefutable, or -- for a single Bool argument -- the clauses together
 -- cover {True, False}.
 checkRefutCoverage :: Span -> EVar -> [[Loc CstRefutPat]] -> D ()
-checkRefutCoverage sp name clausePatLists
-  | lastIrrefutable                 = return ()
-  | boolExhaustive clausePatLists   = return ()
-  | otherwise = dfail (startPos sp)
-      ("`|` patterns for '" ++ T.unpack (unEVar name)
-       ++ "' are not exhaustive; add a final catch-all clause (a variable or '_')")
+checkRefutCoverage sp name clausePatLists = do
+  declared <- State.gets dsDataCtors
+  case () of
+    _ | lastIrrefutable -> return ()
+      | boolExhaustive clausePatLists -> return ()
+      | Just dup <- repeatedCtor -> dfail (startPos sp)
+          ("`|` patterns for '" ++ T.unpack (unEVar name)
+           ++ "' match '" ++ T.unpack dup
+           ++ "' more than once; the later clause is unreachable")
+      -- A set proven incomplete is rejected, naming what is missing.
+      --
+      -- When the constructor list is not visible -- the type was declared
+      -- in another module -- the set is allowed through and
+      -- 'assembleCascade' guards it at runtime. Demanding a catch-all
+      -- there would defeat the feature: the catch-all silently absorbs the
+      -- constructor the check exists to find.
+      --
+      -- Literals are the exception. Their domain is unbounded, so no
+      -- clause set over them can ever be complete and a catch-all is
+      -- genuinely required; saying so at compile time is more useful than
+      -- a runtime failure on the first unlisted value.
+      | otherwise -> case ctorCoverage declared of
+          Just missing
+            | not (null missing) -> dfail (startPos sp)
+                ("`|` patterns for '" ++ T.unpack (unEVar name)
+                 ++ "' are not exhaustive; missing "
+                 ++ T.unpack (T.intercalate ", " missing))
+          Nothing
+            | any (any refutPatIsLit) clausePatLists -> dfail (startPos sp)
+                ("`|` patterns for '" ++ T.unpack (unEVar name)
+                 ++ "' are not exhaustive; a literal pattern cannot cover"
+                 ++ " its type, so add a final catch-all clause (a variable"
+                 ++ " or '_')")
+          _ -> return ()
   where
     lastIrrefutable = case clausePatLists of
       [] -> False
       _  -> not (any refutPatHasLit (last clausePatLists))
+
+    singlePat [p] = Just p
+    singlePat _   = Nothing
+
+    -- A constructor matched by more than one clause. Coverage alone cannot
+    -- catch this: a set that repeats one constructor and still names all of
+    -- them covers the type, but the second clause can never be reached, and
+    -- an unreachable clause is always a mistake.
+    repeatedCtor = do
+      pats <- mapM singlePat clausePatLists
+      let cs = mapMaybe refutPatCoveringCtor pats
+      case [c | (c, n) <- countOccurrences cs, n > (1 :: Int)] of
+        (c : _) -> Just c
+        [] -> Nothing
+
+    countOccurrences cs = Map.toList (Map.fromListWith (+) [(c, 1) | c <- cs])
+
+    -- Which declared constructors this clause set fails to name.
+    --
+    -- @Just []@ means the set is complete. @Nothing@ means the question
+    -- does not apply (the clauses are not all constructor patterns, or the
+    -- type was declared in another module and its constructor list is not
+    -- visible here) and nothing is claimed either way -- the runtime guard
+    -- that 'assembleCascade' installs is what makes that safe.
+    ctorCoverage declared = do
+      pats <- mapM singlePat clausePatLists
+      -- Only covering clauses count. A clause that refines a constructor
+      -- (@Circle 0.0@) neither closes it nor disqualifies the set: it is
+      -- an extra case ahead of the general one, so it is passed over
+      -- rather than aborting the analysis.
+      let cs = mapMaybe refutPatCoveringCtor pats
+      if null cs
+        then Nothing
+        else case [ map fst arms | (_, arms) <- Map.toList declared
+                                 , any ((`elem` cs) . fst) arms ] of
+          [ns] -> Just [n | n <- ns, n `notElem` cs]
+          _ -> Nothing
+
+-- | Does this pattern test a literal anywhere inside it?
+--
+-- Distinct from 'refutPatHasLit', which also counts a constructor pattern:
+-- here the question is specifically whether the clause set ranges over an
+-- unbounded domain, which a constructor never does.
+refutPatIsLit :: Loc CstRefutPat -> Bool
+refutPatIsLit (Loc _ (CRPatLit _))   = True
+refutPatIsLit (Loc _ (CRPatCon _ ps)) = any refutPatIsLit ps
+refutPatIsLit (Loc _ (CRPatAs _ p))  = refutPatIsLit p
+refutPatIsLit (Loc _ (CRPatTup ps))  = any refutPatIsLit ps
+refutPatIsLit (Loc _ (CRPatRec kps)) = any (refutPatIsLit . snd) kps
+refutPatIsLit _                      = False
+
+-- | Reject a constructor pattern whose field count differs from the
+-- declaration. A constructor's arity is fixed by its `data` clause, so a
+-- mismatch cannot be a partial application the way it could be for an
+-- ordinary term -- there is nothing for the missing fields to become.
+checkCtorArity :: Span -> Text -> Int -> D ()
+checkCtorArity sp name given = do
+  declared <- State.gets dsDataCtors
+  case [ n | (_, arms) <- Map.toList declared, (c, n) <- arms, c == name ] of
+    (expected : _)
+      | expected /= given ->
+          dfail (startPos sp) $
+            "constructor '" ++ T.unpack name ++ "' takes "
+              ++ show expected ++ " argument" ++ (if expected == 1 then "" else "s")
+              ++ " but the pattern gives " ++ show given
+    _ -> return ()
+
+-- | The constructor a pattern COVERS, if any.
+--
+-- A constructor pattern covers its constructor only when it accepts every
+-- value carrying that tag, which means each of its fields must be matched
+-- irrefutably. @Circle r@ and @Circle _@ cover Circle; @Circle 0.0@ does
+-- not, because a Circle holding anything else falls past it.
+--
+-- Both users of this need that distinction and would be wrong without it.
+-- Coverage would call @Circle 0.0 | Dot@ exhaustive over Shape, and
+-- 'assembleCascade' DROPS the last clause's test, so a non-degenerate
+-- Circle would silently take the Dot branch. Redundancy would reject
+-- @Circle 0.0@ followed by @Circle r@, which is the ordinary way to write
+-- a special case before the general one.
+refutPatCoveringCtor :: Loc CstRefutPat -> Maybe Text
+refutPatCoveringCtor (Loc _ (CRPatCon (EV n) ps))
+  | all refutPatIrrefutable ps = Just n
+  | otherwise = Nothing
+-- `c@Red` still covers Red; the binding does not change which values match.
+refutPatCoveringCtor (Loc _ (CRPatAs _ p)) = refutPatCoveringCtor p
+refutPatCoveringCtor _ = Nothing
+
+-- | True when a pattern accepts every value of its type, binding only.
+refutPatIrrefutable :: Loc CstRefutPat -> Bool
+refutPatIrrefutable (Loc _ (CRPatVar _))    = True
+refutPatIrrefutable (Loc _ CRPatWild)       = True
+refutPatIrrefutable (Loc _ (CRPatAs _ p))   = refutPatIrrefutable p
+refutPatIrrefutable (Loc _ (CRPatTup ps))   = all refutPatIrrefutable ps
+refutPatIrrefutable (Loc _ (CRPatRec kps))  = all (refutPatIrrefutable . snd) kps
+refutPatIrrefutable (Loc _ (CRPatLit _))    = False
+refutPatIrrefutable (Loc _ (CRPatCon _ _))  = False
 
 -- | True when every clause is a single Bool-literal argument and the
 -- clauses cover both True and False.
@@ -1897,16 +2344,61 @@ boolExhaustive clausePatLists =
     singlePat [p] = Just p
     singlePat _   = Nothing
 
--- | Fold clauses into a right-nested IfE cascade; the last clause's body
--- is the base else (its condition is dropped -- soundness is guaranteed by
--- 'checkRefutCoverage').
-assembleCascade :: Span -> [(ExprI, ExprI)] -> D ExprI
-assembleCascade sp built = go (init built) (snd (last built))
+-- | Fold clauses into a right-nested IfE cascade.
+--
+-- When the last clause is a genuine catch-all its test is dropped and its
+-- body becomes the base, which is both correct and the shape every
+-- existing match compiles to. Otherwise the last clause keeps its test and
+-- the base is a throw: an input matching nothing is a bug in the clause
+-- set, and failing loudly is the only sound thing to do with it.
+--
+-- Keeping the test is what lets 'checkRefutCoverage' stay silent when it
+-- cannot see a type's constructors. Dropping it unconditionally would mean
+-- an unmatched value silently took the last arm.
+assembleCascade :: Span -> [[Loc CstRefutPat]] -> [(ExprI, ExprI)] -> D ExprI
+assembleCascade sp clausePats built
+  | lastIsCatchAll = go (init built) (snd (last built))
+  | otherwise = go built =<< noMatchBase
   where
+    lastIsCatchAll = case clausePats of
+      [] -> False
+      _  -> all refutPatIrrefutable (last clausePats)
+
+    noMatchBase = do
+      msgE <- freshExprSpan sp (StrE "no clause matched the argument")
+      freshExprSpan sp (IntrinsicE IntrThrow [msgE])
+
     go [] acc = return acc
     go ((cond, body) : rest) acc = do
       acc' <- go rest acc
       freshExprSpan sp (IfE cond body acc')
+
+-- | Lower `match scrutinee | p = b ...` into a LetE binding the scrutinee
+-- and a cascade over it.
+--
+-- Shares every step with 'desugarRefutClauses' except the last: a
+-- definition abstracts over fresh formals, a match binds one. Binding
+-- rather than applying a lambda keeps the scrutinee evaluated once and
+-- keeps the cascade's tests reading off a plain variable.
+desugarMatch
+  :: Span -> Loc CstExpr -> [([Loc CstExpr], Loc CstExpr)] -> D ExprI
+desugarMatch sp scrutinee clauses = do
+  clausePats <- mapM (\(args, body) -> do
+                        ps <- mapM exprToRefutPat args
+                        return (ps, body)) clauses
+  mapM_ checkSingle clausePats
+  mapM_ (validateRefutClause . fst) clausePats
+  formal <- freshIrrefLamParam sp
+  scrutinee' <- desugarExpr scrutinee
+  built <- mapM (buildRefutClause [formal]) clausePats
+  checkRefutCoverage sp (EV "match") (map fst clausePats)
+  cascade <- assembleCascade sp (map fst clausePats) built
+  freshExprSpan sp (LetE [(formal, scrutinee')] cascade)
+  where
+    checkSingle ([_], _) = return ()
+    checkSingle (ps, _) = dfail (startPos sp)
+      ("each `match` clause takes exactly one pattern, but this one has "
+       ++ show (length ps))
 
 -- | Lower `|`-clauses into a LamE over fresh formals. Callers wrap the
 -- result in an AssE with the definition's where-declarations.
@@ -1921,7 +2413,7 @@ desugarRefutClauses sp name clauses = do
   formals <- mapM (const (freshIrrefLamParam sp)) [1 .. arity]
   built <- mapM (buildRefutClause formals) clausePats
   checkRefutCoverage sp name (map fst clausePats)
-  cascade <- assembleCascade sp built
+  cascade <- assembleCascade sp (map fst clausePats) built
   freshExprSpan sp (LamE formals cascade)
   where
     checkArity [] = dfail (startPos sp) "empty `|` definition"
@@ -2012,19 +2504,62 @@ desugarDo _sp (CstDoBind _ (Loc rsp (CForceE _)) : _) =
     "redundant '!' on the right-hand side of '<-': the bind already sequences the effect."
     <> bangSemanticsNote
 desugarDo sp (CstDoBind p e : rest) = do
-  p' <- exprToIrrefPat p
-  e' <- desugarExpr e
-  forceE <- freshExprSpan sp (EvalE e')
-  bindings <- desugarIrrefPat p' forceE
-  restE <- desugarDo sp rest
-  freshExprSpan sp (LetE bindings restE)
+  rp <- exprToRefutPat p
+  if refutPatIrrefutable rp
+    then do
+      p' <- exprToIrrefPat p
+      e' <- desugarExpr e
+      forceE <- freshExprSpan sp (EvalE e')
+      bindings <- desugarIrrefPat p' forceE
+      restE <- desugarDo sp rest
+      freshExprSpan sp (LetE bindings restE)
+    else do
+      -- A refutable bind demands its pattern: `Ok x <- e` says the caller
+      -- wants the Ok arm and treats anything else as fatal. That is the
+      -- same obligation a bare statement's auto-require carries, arrived
+      -- at from the pattern rather than from the type, so it lowers to the
+      -- same shape: test, bind the payload, or throw.
+      validateRefutClause [rp]
+      formal <- freshIrrefLamParam sp
+      e' <- desugarExpr e
+      forceE <- freshExprSpan sp (EvalE e')
+      restE <- desugarDo sp rest
+      (tests, binds) <- refutClauseArg (freeVarsE restE) formal rp
+      cond <- conjoinTests sp tests
+      -- Throw the unmatched value itself rather than a bare sentence. For
+      -- the common `Ok x <- e` this is what carries the Err arm's message
+      -- into the traceback, and it stays useful for any other pattern
+      -- because the renderer works off the value's schema.
+      -- Throw the unmatched value, rendered. For the common `Ok x <- e`
+      -- this is what carries the Err arm's message into the traceback, and
+      -- it stays useful for any other pattern because @show works off the
+      -- value's schema. @throw itself takes a Str, so the render is
+      -- explicit here rather than implicit there.
+      subjectE <- freshExprSpan sp (VarE defaultValue formal)
+      shownE <- freshExprSpan sp (IntrinsicE IntrShow [subjectE])
+      throwE <- freshExprSpan sp (IntrinsicE IntrThrow [shownE])
+      trueE <- freshExprSpan sp (LogE True)
+      guardE <- freshExprSpan sp (IfE cond trueE throwE)
+      guardVar <- freshIrrefLamParam sp
+      -- Three links of the ordinary do-block LetE chain rather than a
+      -- cascade: the bind, then a guard whose value nothing reads (its
+      -- point is the throw), then the pattern's projections wrapping the
+      -- continuation. Keeping the chain shape is what lets the
+      -- bang-hoisting pass keep walking -- it recognises a do-block by
+      -- this shape, and an interposed IfE would strand a hoisted eval
+      -- outside its binding.
+      inner <- case binds of
+        [] -> return restE
+        _  -> freshExprSpan sp (LetE binds restE)
+      mid <- freshExprSpan sp (LetE [(guardVar, guardE)] inner)
+      freshExprSpan sp (LetE [(formal, forceE)] mid)
 desugarDo _sp (CstDoBare (Loc bsp (CForceE _)) : _) =
   dfail (startPos bsp) $
     "redundant '!' on a bare do statement: bare statements already sequence their effect."
     <> bangSemanticsNote
 desugarDo sp (CstDoBare e : rest) = do
   idx <- freshIdSpan sp
-  let discardVar = EV ("_do_" <> T.pack (show idx))
+  let discardVar = EV (BT.doDiscardPrefix <> T.pack (show idx))
   e' <- desugarExpr e
   forceE <- freshExprSpan sp (EvalE e')
   restE <- desugarDo sp rest
@@ -2055,7 +2590,20 @@ mkImplicitMain es = do
 
 desugarExpr :: Loc CstExpr -> D ExprI
 -- Variables and literals
-desugarExpr (Loc sp (CVarE v)) = freshExprSpan sp (VarE defaultValue v)
+-- A dotted name is a term reached through a namespaced import, so its
+-- qualifier must be the alias of one. The likely mistake otherwise is a
+-- composition written without spaces, which the lexer cannot tell apart.
+desugarExpr (Loc sp (CVarE v@(EV n))) = do
+  case splitQualifier n of
+    (Just q, base) -> do
+      aliases <- State.gets dsNamespaces
+      unless (Set.member q aliases) $
+        dfail (startPos sp) $
+          "`" ++ T.unpack q ++ "` is not a namespace alias of any import in this module"
+            ++ " (in `" ++ T.unpack n ++ "`); to compose, write `"
+            ++ T.unpack q ++ " . " ++ T.unpack base ++ "`"
+    _ -> return ()
+  freshExprSpan sp (VarE defaultValue v)
 desugarExpr (Loc sp (CIntE n)) = freshExprSpan sp (IntE n)
 desugarExpr (Loc sp (CRealE n)) = freshExprSpan sp (RealE n)
 desugarExpr (Loc sp (CStrE s)) = freshExprSpan sp (StrE s)
@@ -2156,6 +2704,7 @@ desugarExpr (Loc sp (CInterpE startText exprs mids endText)) = do
   exprs' <- mapM desugarExpr exprs
   mkInterpString sp startText exprs' mids endText
 desugarExpr (Loc sp (CGuardExprE guards defaultExpr)) = desugarGuards sp guards defaultExpr
+desugarExpr (Loc sp (CMatchE scrutinee clauses)) = desugarMatch sp scrutinee clauses
 
 -- Top-level declarations should not appear inside expressions
 desugarExpr (Loc _ CModE{}) = error "desugarExpr: unexpected CModE in expression position"
@@ -2269,14 +2818,53 @@ expandCollectBody ref body = do
   inner1 <- freshExprFrom ref (LetE [(oVar, bindStdout)] inner2)
   freshExprFrom ref (DoBlockE inner1)
 
--- | @write 0 o@ eta-expanded to a sink @\\v -> @write 0 o v@.
+-- | Bind the @Ok@ payload of a fallible intrinsic, throwing on @Err@.
+--
+-- Synthesized code cannot say `Ok v <- e`: it is built after parsing, so
+-- there is no clause to narrow. This assembles what that surface form
+-- lowers to -- bind the Try, guard its tag, bind the payload -- keeping
+-- the ordinary do-block LetE chain shape the bang-hoisting pass walks.
+bindOkFrom :: ExprI -> EVar -> ExprI -> ExprI -> D ExprI
+bindOkFrom ref v forcedTry body = do
+  idx <- freshIdPos (Pos 0 0 "")
+  let tmp = EV ("_ok_try_" <> T.pack (show idx))
+      gVar = EV (BT.doDiscardPrefix <> "ok_g_" <> T.pack (show idx))
+      subject = freshExprFrom ref (VarE defaultValue tmp)
+  s1 <- subject
+  okName <- freshExprFrom ref (StrE BT.tryOkCtor)
+  cond <- freshExprFrom ref (IntrinsicE IntrTagTest [s1, okName])
+  s2 <- subject
+  shown <- freshExprFrom ref (IntrinsicE IntrShow [s2])
+  throwE <- freshExprFrom ref (IntrinsicE IntrThrow [shown])
+  trueE <- freshExprFrom ref (LogE True)
+  guardE <- freshExprFrom ref (IfE cond trueE throwE)
+  s3 <- subject
+  okName2 <- freshExprFrom ref (StrE BT.tryOkCtor)
+  zeroIdx <- freshExprFrom ref (IntE 0)
+  fieldE <- freshExprFrom ref (IntrinsicE IntrCtorField [s3, okName2, zeroIdx])
+  inner <- freshExprFrom ref (LetE [(v, fieldE)] body)
+  mid <- freshExprFrom ref (LetE [(gVar, guardE)] inner)
+  freshExprFrom ref (LetE [(tmp, forcedTry)] mid)
+
+-- | @write 0 o@ eta-expanded to a sink @\\v -> do { @write 0 o v; () }@.
+--
+-- The write is a BARE do-statement so the auto-require pass guards it: a
+-- failed write abandons the run rather than handing the producer a Try it
+-- never asked for. Without the wrap the sink's type would be
+-- @[a] -> \<IO\> (Try Str ())@ and every user-written producer signature
+-- would have to name the Try.
 mkWriteSink :: ExprI -> ExprI -> ExprI -> D ExprI
 mkWriteSink ref zeroE oRef = do
   idx <- freshIdPos (Pos 0 0 "")
   let vVar = EV ("_collect_v_" <> T.pack (show idx))
+      dVar = EV (BT.doDiscardPrefix <> "collect_w_" <> T.pack (show idx))
   vRef <- freshExprFrom ref (VarE defaultValue vVar)
   writeE <- freshExprFrom ref (IntrinsicE IntrWrite [zeroE, oRef, vRef])
-  freshExprFrom ref (LamE [vVar] writeE)
+  forceWrite <- freshExprFrom ref (EvalE writeE)
+  unitE <- freshExprFrom ref UniE
+  bodyE <- freshExprFrom ref (LetE [(dVar, forceWrite)] unitE)
+  doE <- freshExprFrom ref (DoBlockE bodyE)
+  freshExprFrom ref (LamE [vVar] doE)
 
 
 --------------------------------------------------------------------
@@ -2317,7 +2905,12 @@ desugarTopLevel (Loc sp (CModE maybeName export body)) = do
     , dsModuleEpilogues = epis
     }
   expExprI <- desugarExport sp export
+  State.modify $ \s -> s
+    { dsNamespaces = Set.fromList
+        [ unEVar ns | Loc _ (CImpE (Import _ _ _ (Just ns))) <- body ]
+    }
   bodyExprs <- concatMapM desugarTopLevel body
+  checkCtorUniqueness body
   modI <- freshIdSpan sp
   return [ExprI modI (ModE (MV name) (expExprI : bodyExprs))]
 desugarTopLevel (Loc sp (CImpE imp)) = do
@@ -2507,6 +3100,42 @@ isVacuousAlias v vs = go
     go (OptionalU t) = go t
     go _ = False
 
+-- | Reject a `data` constructor whose name another `data` declaration in
+-- this module has already taken.
+--
+-- Constructor names are globally unique, and that is what lets the
+-- typechecker read `Red` and know it means `Color` without an annotation or
+-- an ambiguity search. Nothing else enforces it: morloc deliberately allows
+-- one term name to have several realizations, so the ordinary
+-- duplicate-binding machinery treats two constructors named `A` as two
+-- implementations of one term rather than as a clash.
+--
+-- Duplicates WITHIN one declaration are reported by 'desugarTypeDef' with a
+-- message that names the type, so they are collapsed here first and only
+-- cross-declaration collisions reach this check.
+--
+-- The rule is deliberately the strict direction: relaxing it later (scoped
+-- or qualified constructors) is easy, and tightening it after code depends
+-- on shadowing is not.
+checkCtorUniqueness :: [Loc CstExpr] -> D ()
+checkCtorUniqueness body =
+  case firstRepeatedName (concatMap declCtors body) of
+    Nothing -> return ()
+    Just (name, pos) ->
+      dfail pos $
+        "Constructor '" ++ T.unpack name ++ "' is already declared by another \
+        \`data` type; constructor names must be unique"
+  where
+    declCtors (Loc _ (CTypE (CstDataDef _ ctors))) =
+      dedupeByName [(name, locPos tok) | (_, tok, name, _) <- ctors]
+    declCtors _ = []
+    dedupeByName = go Set.empty
+      where
+        go _ [] = []
+        go seen (x@(n, _) : xs)
+          | Set.member n seen = go seen xs
+          | otherwise = x : go (Set.insert n seen) xs
+
 desugarTypeDef :: Span -> CstTypeDef -> D [ExprI]
 desugarTypeDef sp (CstTypeAlias maybeLangTok (v, vs) (t, isTerminal)) = do
   -- Reject vacuous aliases: bodies that are nothing but the alias's own
@@ -2521,7 +3150,14 @@ desugarTypeDef sp (CstTypeAlias maybeLangTok (v, vs) (t, isTerminal)) = do
   -- the two cases are no longer distinguishable. The list-guarded form
   -- @type X = [X]@ is intentionally accepted: its inhabitants are
   -- nested empty lists, which is a legitimate (if niche) shape.
-  when (isVacuousAlias v vs t) $
+  -- The vacuity check applies only to GENERAL aliases. In a per-language
+  -- form the two sides live in different namespaces: the left is a morloc
+  -- type name and the right is a native one, so `type Cpp => Foo = "Foo"`
+  -- says "Foo is spelled Foo in C++" rather than "Foo is itself". Binding a
+  -- morloc type to a same-named native type is both legal and common --
+  -- `record Cpp => Ops = "Ops"` does it already, and only escapes this
+  -- check by taking a different clause.
+  when (maybeLangTok == Nothing && isVacuousAlias v vs t) $
     dfail (startPos sp) $
       "Type alias '" ++ T.unpack (unTVar v) ++
       "' has a vacuous body: it reduces to a self-reference with no payload"
@@ -2557,6 +3193,74 @@ desugarTypeDef sp (CstTypeAliasForward (v, vs)) = do
   rejectWithHere (startPos sp) "a primitive type declaration" docVars
   e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t (ArgDocAlias docVars) TypedefPrimitive))
   return [e]
+desugarTypeDef sp (CstDataDef (v, vs) ctors) = do
+  -- A `data` declaration: a closed set of named alternatives.
+  --
+  -- The ordinal IS the wire tag, so declaration order is part of the type's
+  -- wire contract: appending a constructor keeps existing values
+  -- byte-identical, reordering does not.
+  case firstRepeatedName [ (name, locPos tok) | (_, tok, name, _) <- ctors ] of
+    Just (name, pos) ->
+      dfail pos $
+        "Constructor '" ++ T.unpack name ++ "' is declared twice in type '"
+          ++ T.unpack (unTVar v) ++ "'"
+    Nothing -> return ()
+  -- The command line matches a constructor without regard to case, so two
+  -- constructors that differ only in case could not be told apart there.
+  -- Nobody writes that shape on purpose; rejecting it is what lets the
+  -- matching be total.
+  case firstRepeatedName [ (T.toLower name, locPos tok) | (_, tok, name, _) <- ctors ] of
+    Just (_, pos) ->
+      dfail pos $
+        "Type '" ++ T.unpack (unTVar v) ++ "' has two constructors that differ"
+          ++ " only in case; a constructor is matched without regard to case on"
+          ++ " the command line, so they could not be told apart"
+    Nothing -> return ()
+  -- The tag is one byte in both wire forms.
+  when (length ctors > 256) $
+    dfail (startPos sp) $
+      "Type '" ++ T.unpack (unTVar v) ++ "' has " ++ show (length ctors)
+        ++ " constructors; the limit is 256, so that a tag fits in one byte"
+  doc <- dataTypeDocs (startPos sp) ctors
+  -- The constructor table lives in the scope body: each entry is its name
+  -- followed by its argument types. Reduction stops at the nominal
+  -- boundary, so this is carried rather than expanded, and both the
+  -- typechecker and codegen read it back.
+  let entries = [ (name, args) | (_, _, name, args) <- ctors ]
+      body = LitU (LList [ LitU (LList (LitU (LStr n) : args)) | (n, args) <- entries ])
+      -- The result type a constructor builds: the type applied to its own
+      -- parameters, so `Some :: a -> Opt a` rather than `a -> Opt`.
+      resultT = case vs of
+        [] -> VarU v
+        _ -> AppU (VarU v) (map (either (VarU . fst) id) vs)
+  State.modify $ \st ->
+    st { dsDataCtors = Map.insert (unTVar v) [(n, length as) | (n, as) <- entries] (dsDataCtors st) }
+  typeDecl <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs body doc TypedefEnum))
+  -- Each constructor becomes an ordinary top-level term. Making them real
+  -- bindings is what gives uniqueness its teeth: a name already bound
+  -- collides through the existing duplicate-binding check.
+  ctorDecls <- concatMapM (mkCtor sp v resultT) (zip [0 ..] entries)
+  return (typeDecl : ctorDecls)
+  where
+    -- A constructor that takes arguments is a FUNCTION into its type, so it
+    -- is bound to a lambda that builds the value; one that takes none is
+    -- bound to the value itself.
+    mkCtor :: Span -> TVar -> TypeU -> (Int, (Text, [TypeU])) -> D [ExprI]
+    mkCtor sp' tv resultT (ordinal, (name, argTs)) = do
+      let sigT = if null argTs then resultT else FunU argTs resultT
+          et = EType (quantifyType sigT) Set.empty
+                 (ArgDocSig defaultValue (map (const defaultValue) argTs) defaultValue)
+                 Map.empty
+      sig <- freshExprSpan sp' (SigE (Signature (EV name) Nothing et))
+      params <- mapM (const (freshIrrefLamParam sp')) argTs
+      argRefs <- mapM (\p -> freshExprSpan sp' (VarE defaultValue p)) params
+      built <- freshExprSpan sp' (ConE tv name ordinal argRefs)
+      body <- if null params
+                then return built
+                else freshExprSpan sp' (LamE params built)
+      ass <- freshExprSpan sp' (AssE (EV name) body [])
+      return [sig, ass]
+
 desugarTypeDef sp (CstNamTypeWhere nt (v, vs) locEntries) = do
   -- A record / object / table declaration. These types are always
   -- nominal and own their per-language form; they behave structurally
@@ -3263,7 +3967,7 @@ wrapWholeCollect useIFile params argSrcs ref handler collectArg = do
         t1 <- freshExprFrom ref (LetE [(g4, unlink)] rRef)
         t2 <- freshExprFrom ref (LetE [(g3, closeFBare)] t1)
         t3 <- freshExprFrom ref (LetE [(rV, handlerBind)] t2)
-        freshExprFrom ref (LetE [(fV, openFBind)] t3)
+        bindOkFrom ref fV openFBind t3
       else do
         loadBind <- do
           p <- freshExprFrom ref (VarE defaultValue pathV)
@@ -3273,11 +3977,11 @@ wrapWholeCollect useIFile params argSrcs ref handler collectArg = do
         appArgs <- buildStreamArgs ref params Nothing xsV argSrcs
         handlerApp <- freshExprFrom ref (AppE handlerRef appArgs)
         t1 <- freshExprFrom ref (LetE [(g3, unlink)] handlerApp)
-        freshExprFrom ref (LetE [(xsV, loadBind)] t1)
+        bindOkFrom ref xsV loadBind t1
   b1 <- freshExprFrom ref (LetE [(g2, closeOBare)] tailE)
   b2 <- freshExprFrom ref (LetE [(g1, gatherBare)] b1)
-  b3 <- freshExprFrom ref (LetE [(oV, openOBind)] b2)
-  b4 <- freshExprFrom ref (LetE [(pathV, tmpBind)] b3)
+  b3 <- bindOkFrom ref oV openOBind b2
+  b4 <- bindOkFrom ref pathV tmpBind b3
   freshExprFrom ref (DoBlockE b4)
 
 -- | Build the per-batch streaming do-block that replaces a @collect arg@:
@@ -3343,6 +4047,10 @@ wrapPerBatchCollect singletonWrap params argSrcs handler ref collectArg = do
 
 -- | @@write 0 o emit@, where @emit@ is @value@ (`with`) or @[value]@ (`render`,
 -- boxing a per-batch @Str@ into a @[Str]@ stream element).
+-- The write is a BARE do-statement so the auto-require pass guards it, for
+-- the same reason 'mkWriteSink' wraps its own: the synthesized sink must
+-- keep the type the user's handler signature declares, and a failed write
+-- must abandon the run rather than become a Try nobody reads.
 mkEmitWrite :: Bool -> ExprI -> EVar -> ExprI -> D ExprI
 mkEmitWrite singletonWrap ref oVar value = do
   emitted <- if singletonWrap
@@ -3350,7 +4058,13 @@ mkEmitWrite singletonWrap ref oVar value = do
                else return value
   oRef <- freshExprFrom ref (VarE defaultValue oVar)
   zeroE <- freshExprFrom ref (IntE 0)
-  freshExprFrom ref (IntrinsicE IntrWrite [zeroE, oRef, emitted])
+  idx <- freshIdPos (Pos 0 0 "")
+  writeE <- freshExprFrom ref (IntrinsicE IntrWrite [zeroE, oRef, emitted])
+  forceWrite <- freshExprFrom ref (EvalE writeE)
+  unitE <- freshExprFrom ref UniE
+  let dVar = EV (BT.doDiscardPrefix <> "emit_w_" <> T.pack (show idx))
+  bodyE <- freshExprFrom ref (LetE [(dVar, forceWrite)] unitE)
+  freshExprFrom ref (DoBlockE bodyE)
 
 -- | Synthesize the composed internal command for one `--' with:`
 -- atom on a parent signature. Emits only an @AssE@; parent per-arg

@@ -2,7 +2,7 @@
 --   (a) @catch intercepts a raised @throw and substitutes the fallback
 --   (b) when the fallible does NOT throw, its value passes through
 --       unchanged (fallback ignored)
---   (c) mixed <IO,Err> effect strips to <IO>: a fallible that does
+--   (c) mixed <IO> effect strips to <IO>: a fallible that does
 --       Python I/O and may throw catches to a fallback that itself
 --       does I/O
 --   (d) a foreign exception (Python-side raise from a sourced function)
@@ -51,69 +51,69 @@ source Py from "helper.py"
   )
 
 py_len      :: Str -> Int
-py_may_fail :: Str -> <Err> Int
+py_may_fail :: Str -> Int
 py_add      :: Int -> Int -> Int
 py_pair     :: Int -> Int -> (Int, Int)
 py_sum_list :: [Int] -> Int
 
 catchBare :: Int
-catchBare = @catch (@throw "boom") 42
+catchBare = match (@try (@throw "boom")) | (Ok _cv) = _cv | (Err _) = 42
 
 catchInDo :: Str -> Int
-catchInDo s = @catch (do
+catchInDo s = match (@try (do
     let n = py_len s
     ? n < 4 = @throw "too short"
     : n
-  ) 999
+  )) | (Ok _cv) = _cv | (Err _) = 999
 
 catchMixedIO :: Str -> Int
-catchMixedIO s = @catch (do
+catchMixedIO s = match (@try (do
     let n = py_len s
     ? n == 0 = @throw "empty"
     : n
-  ) (py_len "fallback")
+  )) | (Ok _cv) = _cv | (Err _) = (py_len "fallback")
 
 catchForeignRaise :: Str -> Int
-catchForeignRaise s = @catch (do
+catchForeignRaise s = match (@try (do
     let n = py_may_fail s
     n
-  ) 0
+  )) | (Ok _cv) = _cv | (Err _) = 0
 
 catchBangFallible :: Str -> Int
-catchBangFallible s = @catch !(py_may_fail s) 77
+catchBangFallible s = match (@try (py_may_fail s)) | (Ok _cv) = _cv | (Err _) = 77
 
 -- @catch (@read s) passed as an argument to a sourced Python function.
--- @read is <Err>-only, so the strip is complete and the @catch
+-- @read is -only, so the strip is complete and the @catch
 -- expression has plain-Int type. The pool must call py_add with the
 -- forced value, not with a lambda that returns the value.
 catchReadAsArg :: Str -> Int -> Int
-catchReadAsArg s x = py_add (@catch (@read s) 0) x
+catchReadAsArg s x = py_add (match (@read s) | (Ok _cv) = _cv | (Err _) = 0) x
 
 -- @catch (@throw ...) with plain-Int result passed as an argument.
 -- Same shape as catchReadAsArg but exercises the @throw side of the
 -- @catch dispatch (fallible always raises).
 catchThrowAsArg :: Int -> Int
-catchThrowAsArg x = py_add (@catch (@throw "raised-inside-arg") 42) x
+catchThrowAsArg x = py_add (match (@try (@throw "raised-inside-arg")) | (Ok _cv) = _cv | (Err _) = 42) x
 
 -- @catch on a foreign-raising sourced function passed as an argument.
 -- The fallible is a sourced Python function whose signature declares
--- <Err>; runtime catches the native ValueError.
+-- ; runtime catches the native ValueError.
 catchForeignAsArg :: Str -> Int -> Int
-catchForeignAsArg s x = py_add (@catch (py_may_fail s) 0) x
+catchForeignAsArg s x = py_add (match (@try (py_may_fail s)) | (Ok _cv) = _cv | (Err _) = 0) x
 
 -- Both arguments to py_add are @catch expressions.
 catchAsBothArgs :: Str -> Str -> Int
-catchAsBothArgs a b = py_add (@catch (@read a) 0) (@catch (@read b) 0)
+catchAsBothArgs a b = py_add (match (@read a) | (Ok _cv) = _cv | (Err _) = 0) (match (@read b) | (Ok _cv) = _cv | (Err _) = 0)
 
 -- @catch result embedded in a list literal, then passed as an argument.
 catchInListArg :: Str -> Int
-catchInListArg s = py_sum_list [1, @catch (@read s) 0, 3]
+catchInListArg s = py_sum_list [1, match (@read s) | (Ok _cv) = _cv | (Err _) = 0, 3]
 
 -- @catch result inside a tuple constructor.
 catchInTupleArg :: Str -> (Int, Int)
-catchInTupleArg s = py_pair (@catch (@read s) 0) 99
+catchInTupleArg s = py_pair (match (@read s) | (Ok _cv) = _cv | (Err _) = 0) 99
 
 -- Full round-trip: @show, then @read (inside @catch), then use the
 -- recovered value as an argument to a sourced function.
 catchReadRoundTrip :: Int -> Int
-catchReadRoundTrip n = py_add (@catch (@read (@show n)) 0) 1000
+catchReadRoundTrip n = py_add (match (@read (@show n)) | (Ok _cv) = _cv | (Err _) = 0) 1000

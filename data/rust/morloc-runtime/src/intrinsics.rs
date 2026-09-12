@@ -283,17 +283,89 @@ unsafe fn write_data_packet_parts_to_fd(
 // ── Temp-file gather (whole-form with:/render:) ────────────────────────────
 //
 // @tmpfile creates a fresh empty file in the morloc tmpdir and registers it
-// in a per-call (thread-local) list. The whole-form handler synthesis gathers
-// a stream into this file, applies the handler, then removes it with
-// @close(path) (mlc_unlink_tmp). Any temp left registered at the end of the
-// pool call is swept by sweep_call_temps (called from pool_dispatch_packet),
-// so a handler that raises mid-call cannot leak the file. The list is
-// thread-local: each pool worker sees only the temps of the call it is running,
-// so concurrent dispatches never unlink each other's files.
+// against the call that is running. The whole-form handler synthesis gathers a
+// stream into this file, applies the handler, then removes it with @close(path)
+// (mlc_unlink_tmp). Any temp still registered when the call ends is swept by
+// end_dispatch (from pool_dispatch_packet), so a handler that raises mid-call
+// cannot leak the file.
+//
+// The registry is process-wide and keyed by call id, not thread. A manifold may
+// spawn threads -- that is how a native parallel map is written -- and a temp
+// created on one of them belongs to the call, so the call can close it and the
+// sweep can reclaim it. Keying on the thread instead strands such a file: it is
+// invisible to @close from the manifold's own thread and to the sweep, which
+// also runs there.
+//
+// A thread the runtime did not start carries no call id (TEMP_OWNER_NONE),
+// so its temps are recorded unowned. Those are reclaimed when the in-flight
+// dispatch count falls to zero: a live unowned temp implies its creating thread
+// is running, which implies some dispatch is still in flight, so a zero
+// crossing can only find garbage. A detached thread that outlives its dispatch
+// is outside this contract -- it is already using call-scoped state after the
+// call is gone.
+
+struct TempEntry {
+    /// Call that owns the file, or TEMP_OWNER_NONE when it was created on a
+    /// thread the runtime did not start.
+    owner: u64,
+    path: std::path::PathBuf,
+}
+
+struct TempRegistry {
+    entries: Vec<TempEntry>,
+    /// Dispatches currently executing in this process. Guards the reclamation
+    /// of unowned temps: they are only collectable while nothing is running.
+    ///
+    /// Kept under the registry's own lock rather than in an atomic so that
+    /// observing the zero and collecting against it are one step. A separate
+    /// counter lets a dispatch start, and its spawned thread register a temp,
+    /// between another dispatch reading zero and acting on it -- which deletes
+    /// a file that is in use.
+    active: usize,
+}
+
+static TEMP_REGISTRY: std::sync::Mutex<TempRegistry> =
+    std::sync::Mutex::new(TempRegistry { entries: Vec::new(), active: 0 });
+
+/// Source of dispatch identities for the temp registry.
+///
+/// Deliberately NOT the stream registry's `call_id`. That one is random and
+/// unique across processes because it tags SHM slots a cross-process sweeper
+/// reads; this registry lives in one process, so a plain counter suffices --
+/// and it costs an atomic increment rather than a read from /dev/urandom on
+/// every manifold dispatch. Borrowing the stream id would also start tagging
+/// every `@open` in a pool as belonging to a call, changing which slots the
+/// stream sweeper considers its own.
+static TEMP_OWNER_COUNTER: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
+/// The dispatch this thread is running, or 0 on a thread the runtime did not
+/// start (a thread a manifold spawned).
+const TEMP_OWNER_NONE: u64 = 0;
 
 thread_local! {
-    static CALL_TEMPS: std::cell::RefCell<Vec<std::path::PathBuf>> =
-        const { std::cell::RefCell::new(Vec::new()) };
+    static CURRENT_TEMP_OWNER: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(TEMP_OWNER_NONE) };
+}
+
+fn current_temp_owner() -> u64 {
+    CURRENT_TEMP_OWNER.with(|c| c.get())
+}
+
+/// Mark the start of a dispatch. Returns `(this dispatch's id, the id to
+/// restore)`; the restore value matters because a pool dispatch can run
+/// underneath a daemon dispatch on the same thread.
+pub fn begin_dispatch() -> (u64, u64) {
+    let id = TEMP_OWNER_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let prev = CURRENT_TEMP_OWNER.with(|c| {
+        let old = c.get();
+        c.set(id);
+        old
+    });
+    if let Ok(mut reg) = TEMP_REGISTRY.lock() {
+        reg.active += 1;
+    }
+    (id, prev)
 }
 
 /// @tmpfile :: <IO, Err> Str. Create a fresh empty file in the morloc tmpdir,
@@ -314,7 +386,12 @@ pub unsafe extern "C" fn mlc_tmpfile(errmsg: *mut *mut c_char) -> *mut c_char {
     libc::close(fd);
     buf.pop(); // drop the NUL mkstemp left in place
     let path = String::from_utf8_lossy(&buf).into_owned();
-    CALL_TEMPS.with(|t| t.borrow_mut().push(std::path::PathBuf::from(&path)));
+    if let Ok(mut reg) = TEMP_REGISTRY.lock() {
+        reg.entries.push(TempEntry {
+            owner: current_temp_owner(),
+            path: std::path::PathBuf::from(&path),
+        });
+    }
     match CString::new(path) {
         Ok(cs) => cs.into_raw(),
         Err(_) => {
@@ -341,16 +418,28 @@ pub unsafe extern "C" fn mlc_unlink_tmp(
         }
     };
     let pb = std::path::PathBuf::from(path_str);
-    let registered = CALL_TEMPS.with(|t| {
-        let mut v = t.borrow_mut();
-        match v.iter().position(|p| p == &pb) {
-            Some(i) => {
-                v.remove(i);
-                true
+    // Refused only when the file demonstrably belongs to a DIFFERENT call.
+    // An unowned id on either side is a thread the runtime did not start, which
+    // is evidence of nothing, so it is allowed: a spawned thread closing its
+    // own call's file and a call closing a file its thread made are both the
+    // ordinary case. Nothing wider is opened up by this -- paths come from
+    // mkstemp, so the only way to name one is to have been handed it.
+    let me = current_temp_owner();
+    let unowned = TEMP_OWNER_NONE;
+    let registered = match TEMP_REGISTRY.lock() {
+        Ok(mut reg) => {
+            match reg.entries.iter().position(|e| {
+                e.path == pb && (me == unowned || e.owner == unowned || e.owner == me)
+            }) {
+                Some(i) => {
+                    reg.entries.remove(i);
+                    true
+                }
+                None => false,
             }
-            None => false,
         }
-    });
+        Err(_) => false,
+    };
     if !registered {
         set_errmsg(errmsg, &MorlocError::Other(format!(
             "@close: '{}' is not a registered temp file; @close only removes \
@@ -368,15 +457,37 @@ pub unsafe extern "C" fn mlc_unlink_tmp(
     0
 }
 
-/// Remove any temp files still registered for the current call. Called from
+/// Mark the end of the dispatch `call_id`, restore the enclosing dispatch's id
+/// `prev`, and remove any temp files still registered for `call_id`. Called from
 /// pool_dispatch_packet after each dispatch returns, so a raising handler that
 /// skipped its @close(path) cannot leak the gather file.
-pub fn sweep_call_temps() {
-    CALL_TEMPS.with(|t| {
-        for p in t.borrow_mut().drain(..) {
-            let _ = std::fs::remove_file(&p);
+///
+/// The retirement and the sweep share one critical section: an unowned temp --
+/// made on a thread the runtime did not start -- is only known to be garbage
+/// while no dispatch is running, so the count has to still read zero at the
+/// moment the file is taken out of the registry.
+pub fn end_dispatch(call_id: u64, prev: u64) {
+    CURRENT_TEMP_OWNER.with(|c| c.set(prev));
+    let doomed: Vec<std::path::PathBuf> = match TEMP_REGISTRY.lock() {
+        Ok(mut reg) => {
+            reg.active = reg.active.saturating_sub(1);
+            let last = reg.active == 0;
+            let mut out = Vec::new();
+            reg.entries.retain(|e| {
+                let collect =
+                    e.owner == call_id || (last && e.owner == TEMP_OWNER_NONE);
+                if collect {
+                    out.push(e.path.clone());
+                }
+                !collect
+            });
+            out
         }
-    });
+        Err(_) => Vec::new(),
+    };
+    for p in doomed {
+        let _ = std::fs::remove_file(&p);
+    }
 }
 
 // ── mlc_save_voidstar: serialize to binary voidstar packet file ────────────

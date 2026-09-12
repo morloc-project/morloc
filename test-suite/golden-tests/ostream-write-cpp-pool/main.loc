@@ -21,25 +21,27 @@ import root-cpp
 -- The whole do-block runs inside a Cpp manifold thanks to the outer
 -- `idcpp`. Every @open / @write / through @close / @next fires
 -- `pool.cpp`'s `_mlc_*` bridge wrappers.
-testPoolWriteRoundtrip :: Str -> <IO, Err> [Int]
+testPoolWriteRoundtrip :: Str -> <IO> [Int]
 testPoolWriteRoundtrip path = idcpp (do
-  s <- @open path :: <IO, Err> OStream Int
+  Ok s <- @open path :: <IO> (Try Str (OStream Int))
   @write 0 s [10, 20, 30]
   @close s
-  r <- @open path :: <IO, Err> IStream Int
-  @next r)
+  Ok r <- @open path :: <IO> (Try Str (IStream Int))
+  Ok _tailv63 <- @next r)
+  _tailv63
 
 -- Three @write calls inside a single Cpp manifold so the pool-side
 -- state mutation across calls is exercised (each call holds the
 -- registry lock briefly, mutates entry.cursor + subpacket_index, and
 -- releases). After @close, the @flen on the IFile reads the final
 -- footer's element count.
-testPoolWriteMulti :: Str -> <IO, Err> Int
+testPoolWriteMulti :: Str -> <IO> Int
 testPoolWriteMulti path = idcpp (do
-  s <- @open path :: <IO, Err> OStream Int
+  Ok s <- @open path :: <IO> (Try Str (OStream Int))
   @write 0 s [1, 2, 3]
   @write 0 s [4, 5, 6, 7]
   @write 0 s [8]
   @close s
-  f <- @open path :: <IO, Err> IFile Int
-  @flen f)
+  Ok f <- @open path :: <IO> (Try Str (IFile Int))
+  Ok _tailv64 <- @flen f)
+  _tailv64

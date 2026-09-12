@@ -1,0 +1,81 @@
+-- Eliminating a payload-bearing `data` by pattern matching, entirely in
+-- morloc, with no per-language declaration anywhere.
+--
+-- Nothing here names a native type, so every pool must build the variant
+-- itself. That is the point: a constructor with arguments has to work in
+-- the generated form before any user-mapped form is worth having, and it
+-- is the only path a source function cannot paper over by hand.
+--
+-- The clause sets exercise the parts of matching that a nullary
+-- constructor never reaches:
+--
+--   * binding a field (`Circle r`), and several at once (`Rect w h`)
+--   * MATCHING a field rather than binding it (`Circle 0.0`), which does
+--     NOT close its constructor -- a Circle of any other radius must fall
+--     through to the general clause rather than to `Dot`
+--   * a wildcard field, which does close it
+--   * a constructor pattern nested inside another (`Wrap (Circle r)`)
+--
+-- `describe` is the load-bearing one. If a refining clause were treated as
+-- covering its constructor the clause set would look exhaustive one clause
+-- early, and the cascade drops the last clause's test -- so a non-degenerate
+-- Circle would silently answer "dot".
+
+module main
+  ( area
+  , describe
+  , unwrapArea
+  , areaOfPy
+  , areaOfCpp
+  , areaOfR
+  , areaOfRust
+  )
+
+import root-py
+import root-cpp
+import root-r
+import root-rust
+
+data Shape = Circle Real | Rect Real Real | Dot
+
+data Boxed = Wrap Shape | Empty
+
+area :: Shape -> Real
+area | (Circle r) = 3.0 * r * r
+     | (Rect w h) = w * h
+     | Dot = 0.0
+
+describe :: Shape -> Str
+describe | (Circle 0.0) = "degenerate"
+         | (Circle _) = "round"
+         | (Rect w h) = "box"
+         | Dot = "dot"
+
+unwrapArea :: Boxed -> Real
+unwrapArea | (Wrap (Circle r)) = 3.0 * r * r
+           | (Wrap s) = area s
+           | Empty = 0.0
+
+source Py   from "shapes.py"  ("ident" as idPy)
+source Cpp  from "shapes.hpp" ("ident" as idCpp)
+source R    from "shapes.R"   ("ident" as idR)
+source Rust from "shapes.rs"  ("ident" as idRust)
+
+idPy   :: Shape -> Shape
+idCpp  :: Shape -> Shape
+idR    :: Shape -> Shape
+idRust :: Shape -> Shape
+
+-- Each of these sends the value into a pool and matches on the way back,
+-- so the generated representation has to survive a full round trip.
+areaOfPy :: Shape -> Real
+areaOfPy x = area (idPy x)
+
+areaOfCpp :: Shape -> Real
+areaOfCpp x = area (idCpp x)
+
+areaOfR :: Shape -> Real
+areaOfR x = area (idR x)
+
+areaOfRust :: Shape -> Real
+areaOfRust x = area (idRust x)

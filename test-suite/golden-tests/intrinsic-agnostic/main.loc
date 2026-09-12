@@ -1,5 +1,9 @@
 module main (test)
 
+-- `Try` is declared in `internal` and reaches user code through `root`;
+-- a fallible intrinsic or `@try` needs it in scope.
+import root
+
 -- Test intrinsics in a language-independent (nexus-only) context.
 -- No language-specific root imports -- all evaluation happens in the nexus.
 --

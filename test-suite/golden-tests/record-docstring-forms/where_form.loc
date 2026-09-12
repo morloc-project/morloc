@@ -2,6 +2,11 @@
 -- The two record spellings must agree: `record X where` and the
 -- constructor form `record X = X { ... }` differ only in syntax, so a
 -- docstring above either one reaches the generated interface.
+--
+-- The inherited metavar reaches the help as a display placeholder and does
+-- not become the argument's interface name: a metavar describes a type, so
+-- it repeats whenever a command takes two of them. The unnamed positional is
+-- keyed `_1`.
 module whereForm (f)
 
 import root-py

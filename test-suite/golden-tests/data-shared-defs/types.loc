@@ -1,0 +1,47 @@
+-- The shared definition library: every type this program speaks, declared
+-- once, in one module, and imported by everything that touches it.
+--
+-- This is the shape a real tool takes. Its native code is hand-written and
+-- has to NAME these types, which is what makes the per-language declarations
+-- load-bearing rather than decorative.
+--
+-- The two languages differ in what they can name. A sourced Rust file is
+-- spliced into the pool crate root, where item order does not matter, so it
+-- can name a type the compiler generates -- `Action` and `Level` carry no
+-- Rust declaration for that reason. A sourced C++ header is included before
+-- the compiler's own declarations, so it can name nothing generated and
+-- every type it speaks is declared in the header and mapped here.
+--
+-- A record mapped to a native name restates none of its fields, so nothing
+-- pairs a field against a concrete counterpart. A field that is itself a
+-- `data` therefore has to have its arms resolved from the declaration rather
+-- than from the type it arrived on; resolved against themselves they keep
+-- the morloc spelling, which no language has.
+module types (*)
+
+--' What one planned change does
+data Action
+  = Mkdir Str
+  | Rename Str Str
+  | Chmod Str Int
+  | Noop
+data Cpp => Action = "Action"
+
+--' How much a report matters
+data Level = Info | Warn | Fail
+data Cpp => Level = "Level"
+
+--' A numbered step: a `data` field inside a record each language declares
+record Step where
+  n :: Int
+  action :: Action
+record Cpp  => Step = "Step"
+record Rust => Step = "Step"
+
+--' A whole plan: a `data` field inside a record each language declares
+record Plan where
+  label :: Str
+  first :: Action
+  level :: Level
+record Cpp  => Plan = "Plan"
+record Rust => Plan = "Plan"

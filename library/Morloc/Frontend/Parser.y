@@ -56,10 +56,18 @@ import qualified Morloc.BaseTypes as BT
 --   current atom and the next token is '!', the parser can either reduce
 --   the chain or extend it with a new force_expr atom. Shift is correct
 --   (extend the atom chain, so `bar !x` = `bar (!x)`).
+-- - 2 from UPPER as an atom_expr (a `data` constructor in expression
+--   position): with an atom chain in hand and UPPER next, the parser can
+--   reduce the chain or extend it. Shift is correct (extend), so `f Red`
+--   is an application. Same class as the '_', '!', '(', '[' and '{' cases
+--   above.
 -- refut_clauses (`|`-pattern definitions) add no new conflicts: '|' is a
 --   reserved token, so `evar_or_op refut_clauses` does not overlap the
 --   `evar_or_op atom_exprs` (CAssE) or guard_clauses alternatives.
-%expect 96
+-- `data` declarations add no new conflicts either, the alternation bar
+--   included: '|' is reserved, and every `data` form starts with the
+--   keyword.
+%expect 99
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -102,6 +110,7 @@ import qualified Morloc.BaseTypes as BT
   'False'    { Located _ TokFalse _ }
   'type'     { Located _ TokType _ }
   'newtype'  { Located _ TokNewtype _ }
+  'data'     { Located _ TokData _ }
   'record'   { Located _ TokRecord _ }
   'object'   { Located _ TokObject _ }
   'class'    { Located _ TokClass _ }
@@ -111,6 +120,7 @@ import qualified Morloc.BaseTypes as BT
   'infixl'   { Located _ TokInfixl _ }
   'infixr'   { Located _ TokInfixr _ }
   'infix'    { Located _ TokInfix _ }
+  'match'    { Located _ TokMatch _ }
   'let'      { Located _ TokLet _ }
   'in'       { Located _ TokIn _ }
   'do'       { Located _ TokDo _ }
@@ -348,6 +358,18 @@ typedef_decl :: { Loc CstExpr }
       { at $1 (CTypE (CstTypeAliasForward (TV (getName $2), $3))) }
   | 'newtype' '(' UPPER typedef_params ')'
       { at $1 (CTypE (CstTypeAliasForward (TV (getName $3), $4))) }
+  -- A `data` declaration: a closed set of constructors, each with zero or
+  -- more argument types.
+  | 'data' UPPER typedef_params data_ctors
+      { at $1 (CTypE (CstDataDef (TV (getName $2), $3) $4)) }
+  | 'data' '(' UPPER typedef_params ')' data_ctors
+      { at $1 (CTypE (CstDataDef (TV (getName $3), $4) $6)) }
+  -- Bind the type to a native form the target language already has, the
+  -- same way `type Lang => X = "..."` does.
+  | 'data' UPPER '=>' typedef_term '=' concrete_rhs
+      { at $1 (CTypE (CstTypeAlias (Just $2) $4 $6)) }
+  | 'data' LOWER '=>' typedef_term '=' concrete_rhs
+      { at $1 (CTypE (CstTypeAlias (Just $2) $4 $6)) }
   | nam_type typedef_term 'where' VLBRACE nam_entry_list_loc VRBRACE
       {% checkRecordTypeKeys (fst $1) $5 >> return (at (fst $1) (CTypE (CstNamTypeWhere (snd $1) $2 $5))) }
   | nam_type typedef_term '=' nam_constructor opt_nam_entries
@@ -371,6 +393,20 @@ nam_constructor :: { (Text, Bool, [TypeU]) }
   : STRING nam_constructor_args   { (getString $1, True, $2) }
   | UPPER                         { (getName $1, False, []) }
   | LOWER                         { (getName $1, False, []) }
+
+-- Each constructor carries the `=` or `|` that introduces it: a docstring
+-- written above a constructor sits above that token, which is where the
+-- lexer attaches it.
+data_ctors :: { [(Located, Located, Text, [TypeU])] }
+  : '=' data_ctor                 { [withLead $1 $2] }
+  | data_ctors '|' data_ctor      { $1 ++ [withLead $2 $3] }
+
+data_ctor :: { (Located, Text, [TypeU]) }
+  : UPPER data_ctor_args          { ($1, getName $1, $2) }
+
+data_ctor_args :: { [TypeU] }
+  : {- empty -}                            { [] }
+  | data_ctor_args nam_constructor_arg     { $1 ++ [$2] }
 
 nam_constructor_args :: { [TypeU] }
   : {- empty -}                                  { [] }
@@ -625,8 +661,18 @@ expr :: { Loc CstExpr }
   : let_expr                { $1 }
   | lambda_expr             { $1 }
   | guard_expr              { $1 }
+  | match_expr              { $1 }
   | infix_expr              { $1 }
   | infix_expr '::' type    { at $2 (CAnnE $1 $3) }
+
+-- `match scrutinee | p = b ...`: the scrutinee is an infix_expr rather than
+-- a full expr so a `let`, lambda or guard cannot silently swallow the
+-- clauses; those forms need parentheses. Clause gathering reuses
+-- `refut_clauses`, which absorbs no VSEMI, so the layout separator that
+-- ends the enclosing statement also ends the match.
+match_expr :: { Loc CstExpr }
+  : 'match' infix_expr refut_clauses
+      { Loc ($1 <-> snd (last $3)) (CMatchE $2 $3) }
 
 guard_expr :: { Loc CstExpr }
   : guard_clauses ':' expr
@@ -773,6 +819,11 @@ do_stmts_explicit :: { [CstDoStmt] }
 
 do_stmt :: { [CstDoStmt] }
   : atom_expr '<-' expr        { [CstDoBind $1 $3] }
+  -- A refutable bind: `Ok x <- e`. The left side parses as an application
+  -- so a constructor pattern with fields is expressible; Desugar narrows
+  -- it to a pattern and rejects anything that is not one.
+  | atom_expr atom_exprs1 '<-' expr
+      { [CstDoBind (Loc ($1 <-> last $2) (CAppE $1 $2)) $4] }
   | 'let' VLBRACE let_bindings VRBRACE
       { [CstDoLet p e | (p, e) <- $3] }
   | expr                       { [CstDoBare $1] }
@@ -827,6 +878,11 @@ bracket_axis :: { CstBracketAxis }
 var_expr :: { Loc CstExpr }
   : LOWER NSDOT LOWER         { Loc ($1 <-> $3) (CVarE (EV (getName $1 <> "." <> getName $3))) }
   | LOWER                     { at $1 (CVarE (EV (getName $1))) }
+  -- An UPPER name in expression position is a `data` constructor. A
+  -- constructor imported under a namespace alias is spelled `p.Red`, the
+  -- same dotted term the alias gives every other imported name.
+  | LOWER NSDOT UPPER         { Loc ($1 <-> $3) (CVarE (EV (getName $1 <> "." <> getName $3))) }
+  | UPPER                     { at $1 (CVarE (EV (getName $1))) }
 
 bool_expr :: { Loc CstExpr }
   : 'True'                     { at $1 (CLogE True) }
@@ -1273,6 +1329,8 @@ toDState ps = DState
   , dsWarnings = psWarnings ps
   , dsModuleDoc = psModuleDoc ps
   , dsModuleEpilogues = psModuleEpilogues ps
+  , dsNamespaces = Set.empty
+  , dsDataCtors = Map.empty
   , dsStreamElems = psStreamElems ps
   }
 
@@ -1467,6 +1525,11 @@ attachGroupAnnotations tokens groupToks dag =
     symText (TermSymbol (EV n)) = n
     symText (TypeSymbol (TV n)) = n
     symText (ClassSymbol (ClassName n)) = n
+    symText (CtorSymbol _ (EV n)) = n
+
+-- | Pair a constructor with the token that introduces it.
+withLead :: Located -> (Located, Text, [TypeU]) -> (Located, Located, Text, [TypeU])
+withLead lead (tok, name, args) = (lead, tok, name, args)
 
 parseGroupHeaders :: [Located] -> [(T.Text, [T.Text], Pos)]
 parseGroupHeaders = foldl' accum [] . map extractLine

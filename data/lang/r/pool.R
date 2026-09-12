@@ -100,7 +100,7 @@ morloc_mlc_throw <- function(msg) {
 }
 # Raise a genuine morloc-invariant violation (compiler bug, contract
 # violation, unreachable branch). Uses the MorlocInternalError class;
-# morloc_mlc_catch inspects and re-raises so @catch cannot swallow it.
+# morloc_mlc_try inspects and re-raises so @try cannot swallow it.
 # The condition still derives from "error" so R's default handling
 # prints a stacktrace; the class marker is what routes it past @catch.
 morloc_mlc_internal_abort <- function(msg) {
@@ -112,12 +112,20 @@ morloc_mlc_internal_abort <- function(msg) {
 # @catch: evaluate fallible; on any error EXCEPT MorlocInternalError,
 # evaluate fallback. MorlocInternalError bypasses -- genuine compiler
 # bugs propagate past user @catch and terminate the pool.
-morloc_mlc_catch <- function(fallible, fallback) {
+# @try body: run the thunk and convert the outcome to data. `ok` wraps the
+# value, `err` the message; codegen supplies both because only it knows how
+# this Try is represented in R.
+#
+# A MorlocInternalError is re-raised rather than becoming an Err arm: it
+# marks a compiler or infrastructure fault, which is not the user's to
+# recover from. An interrupt is not an "error" condition in R, so tryCatch
+# lets it past without help.
+morloc_mlc_try <- function(body, ok, err) {
   tryCatch(
-    fallible(),
+    ok(body()),
     error = function(e) {
       if (inherits(e, "MorlocInternalError")) stop(e)
-      fallback()
+      err(conditionMessage(e))
     }
   )
 }
@@ -174,13 +182,14 @@ morloc_foreign_call <- function(...) {
   .orig_foreign_call(...)
 }
 
-.mlc_wrap_log <- function(group, start_tmpl, pass_tmpl, fail_tmpl, fn) {
+.mlc_wrap_log <- function(group, start_tmpl, pass_tmpl, fail_tmpl, bench_key, fn) {
   # Eagerly resolve `fn` so the closure captures the ORIGINAL function. The
   # rebinding pattern `mN <- .mlc_wrap_log(..., mN)` reassigns the global
   # mN to this wrapper; without force(), R's lazy promise for `fn` only
   # resolves when first used inside the wrapper, by which point mN points
   # at the wrapper itself -- the wrapper calls itself, infinite recursion.
-  force(group); force(start_tmpl); force(pass_tmpl); force(fail_tmpl); force(fn)
+  force(group); force(start_tmpl); force(pass_tmpl); force(fail_tmpl)
+  force(bench_key); force(fn)
   function(...) {
     call_id <- .Call("r_morloc_log_next_id")
     t0 <- Sys.time()
@@ -189,9 +198,12 @@ morloc_foreign_call <- function(...) {
     }
     tryCatch({
       r <- fn(...)
+      dt <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
       if (!is.null(pass_tmpl)) {
-        dt <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
         .Call("r_morloc_log_emit", pass_tmpl, group, dt, call_id)
+      }
+      if (!is.null(bench_key)) {
+        .Call("r_morloc_bench_record", bench_key, dt)
       }
       r
     }, error = function(e) {

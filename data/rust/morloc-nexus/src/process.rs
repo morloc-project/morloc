@@ -658,6 +658,17 @@ pub fn init_shm() -> (String, String) {
         }
     };
     set_tmpdir(tmpdir.clone());
+
+    // Point every pool at this run's benchmark record file. An env var
+    // rather than a per-language setter because pools inherit it for
+    // free -- Python and R never enter libmorloc's pool_main, so a
+    // C-ABI setter would have to be bound four times over. Unset means
+    // "not benchmarking", and morloc_bench_record is then a no-op.
+    std::env::set_var(
+        "MORLOC_BENCH_RECORDS",
+        std::path::Path::new(&tmpdir).join("benchmark.records"),
+    );
+
     cleanup_stale_shm();
 
     let job_hash = make_job_hash(42);
@@ -894,6 +905,11 @@ pub fn clean_exit(exit_code: i32) -> ! {
             libc::free(err as *mut libc::c_void);
         }
     }
+
+    // Aggregate and emit the benchmark summary while the tmpdir still
+    // exists -- the records live inside it -- and after the pools are
+    // reaped, so every completed call has been written.
+    crate::runlog::emit_benchmark_summary();
 
     // Clean up tmpdir
     if let Some(dir) = get_tmpdir() {

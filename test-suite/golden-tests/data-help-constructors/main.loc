@@ -1,0 +1,52 @@
+-- A `data` argument's constructor set reaches the terminal.
+--
+-- The names ride in the wire schema, which is how `--json-help` and the
+-- MCP tool description have always published them. Terminal help showed
+-- only the type name, so a person at a prompt had to read the source to
+-- learn which words the argument accepts -- while a model calling the same
+-- program over MCP was handed the closed set.
+--
+-- The set is read by walking the argument's own schema, so every position
+-- one can hold is covered: bare, under an optional, under a list, and
+-- behind a named option. A payload-bearing constructor is a shape rather
+-- than a word, so it is listed with the field count that tells the two
+-- apart.
+
+module main (paint, shade, blend, measure, mix)
+
+import root-py
+
+data Color = Red | Green | Blue
+
+data Shape = Circle Real | Rect Real Real | Dot
+
+--' Name one color
+paint :: Color -> Str
+paint | Red = "warm"
+      | _ = "cool"
+
+--' Name a color that may be omitted
+shade :: ?Color -> Int
+shade _ = 0
+
+--' Count colors
+blend :: [Color] -> Int
+blend = length
+
+--' Measure a shape
+measure :: Shape -> Real
+measure | (Circle r) = r
+        | (Rect w h) = w * h
+        | Dot = 0.0
+
+--' Mixing options
+--' unroll: true
+record Mix where
+  --' The base color
+  --' arg: --base
+  --' default: "Red"
+  base :: Color
+
+--' Mix from a base color
+mix :: Mix -> Str
+mix m = paint (.base m)

@@ -1,0 +1,18 @@
+--- describeRust ---
+"rename a b"
+--- describeCpp ---
+"chmod f 7"
+--- describeNoop ---
+"noop"
+--- stepRust ---
+"3:mkdir d"
+--- stepCpp ---
+"4:rename x y"
+--- planRust ---
+"p\/fail\/mkdir d"
+--- planCpp ---
+"q\/info\/noop"
+--- madeRust ---
+{"label":"built","first":{"Rename":["a","b"]},"level":"Warn"}
+--- crossed ---
+"both\/warn\/rename a b"

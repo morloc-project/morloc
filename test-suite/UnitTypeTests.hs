@@ -30,7 +30,6 @@ module UnitTypeTests
   , effectEscapabilityTests
   , effectPartialApplicationTests
   , polymorphicEffectRowTests
-  , catchRowInheritTests
   , effectCoverageMessageTests
   , namespaceErrorTests
   , typeclassTests
@@ -51,6 +50,9 @@ module UnitTypeTests
   , postArgPropagationTests
   , tuplePatternLambdaTests
   , withDocstringTests
+  , patternSelectorTests
+  , sumTypeTests
+  , variantTests
   , evalSandboxTests
   ) where
 
@@ -638,7 +640,56 @@ typeAliasTests =
   localOption (mkTimeout 1000000) $ -- 1 second timeout
     testGroup
       "Test type alias substitutions"
-      [ assertGeneralType
+      [ -- A per-language form's right-hand side is a name in the TARGET
+        -- language, so it may legitimately coincide with the morloc name
+        -- on the left. Binding a type to a same-named native type is the
+        -- ordinary case, not a self-reference; both the vacuity check and
+        -- the self-recursion check have to leave it alone.
+        assertGeneralType
+          "a per-language form may repeat the type's own name"
+          [r|
+        module main (f)
+        newtype Foo = Int
+        type Cpp => Foo = "Foo"
+        f :: Foo -> Foo
+        f x = x
+          |]
+          (fun [var "Foo", var "Foo"])
+
+      , assertGeneralType
+          "a parameterized per-language form may repeat the name"
+          [r|
+        module main (f)
+        newtype Box a = List a
+        type Cpp => Box a = "Box<$1>" a
+        f :: Box Int -> Box Int
+        f x = x
+          |]
+          (fun [arr "Box" [int], arr "Box" [int]])
+
+      , -- The exemption is for the HEAD only. A morloc type in an argument
+        -- slot is still a morloc type, so real recursion is still caught.
+        exprTestBad
+          "a per-language form recursing through a parameter is rejected"
+          [r|
+        module main (f)
+        newtype Foo = Int
+        type Cpp => Foo = "Foo" Foo
+        f :: Foo -> Foo
+        f x = x
+          |]
+
+      , -- And a general alias with no language is unaffected.
+        exprTestBad
+          "a vacuous general alias is still rejected"
+          [r|
+        module main (f)
+        type Foo = Foo
+        f :: Foo -> Foo
+        f x = x
+          |]
+
+      , assertGeneralType
           "general type alias"
           [r|
         module main (f)
@@ -4787,12 +4838,14 @@ polymorphicEffectRowTests =
         -- typecheck (guards against InstantiateL firing to solve
         -- `b := <e> b` and tripping the occurs check).
         expectPass
-          "1. @catch on polymorphic <e, Err> b with bare fallback"
+          "1. match on a polymorphic-row Try with a bare alternative"
           [r|
-        module main (withCatch)
-        escapable effect Err
-        withCatch :: (a -> <e, Err> b) -> a -> b -> <e> b
-        withCatch f x fb = @catch (f x) fb
+        module main (withTry)
+        data Try e a = Err e | Ok a
+        withTry :: (a -> <e> (Try Str b)) -> a -> b -> <e> b
+        withTry f x fb = do
+          r <- f x
+          match r | (Ok v) = v | (Err _) = fb
           |]
 
         -- A pure value filling a `<e> T` slot must NOT solve e := empty.
@@ -4824,12 +4877,17 @@ polymorphicEffectRowTests =
         -- in e. Each layer independently exercises the pure-into-
         -- existential-EffectU rule when its bare fallback is checked.
       , expectPass
-          "4. nested @catch, both layers polymorphic in e"
+          "4. nested match, both layers polymorphic in e"
           [r|
-        module main (withTwoCatches)
-        escapable effect Err
-        withTwoCatches :: (a -> <e, Err> b) -> (a -> <e, Err> b) -> a -> b -> <e> b
-        withTwoCatches f g x fb = @catch (f x) (@catch (g x) fb)
+        module main (withTwoTries)
+        data Try e a = Err e | Ok a
+        withTwoTries :: (a -> <e> (Try Str b)) -> (a -> <e> (Try Str b)) -> a -> b -> <e> b
+        withTwoTries f g x fb = do
+          r1 <- f x
+          r2 <- g x
+          match r1
+            | (Ok v) = v
+            | (Err _) = match r2 | (Ok w) = w | (Err _) = fb
           |]
 
         -- Two pure arguments: solving e := empty on the first would
@@ -4866,12 +4924,14 @@ polymorphicEffectRowTests =
         -- The pure-into-EffectU rule must NOT be bidirectional; the
         -- reverse (EffectU-into-pure) is unsound and must still reject.
       , expectError
-          "7. <Err> Int in Int slot rejected (wrong subtype direction)"
+          "7. <IO> Int in Int slot rejected (wrong subtype direction)"
           [r|
         module main (f)
-        escapable effect Err
+        effect IO
+        source Py ("io_int")
+        io_int :: <IO> Int
         f :: Int
-        f = @throw "x"
+        f = io_int
           |]
 
       , expectError
@@ -4905,94 +4965,6 @@ polymorphicEffectRowTests =
 -- "recover to pure" (fallback is <>) and "fall through to another
 -- fallible attempt" (fallback keeps Err). The primary's non-Err effects
 -- propagate too.
-catchRowInheritTests :: TestTree
-catchRowInheritTests =
-  localOption (mkTimeout 200000) $
-    testGroup
-      "@catch row-inheritance"
-      [ expectPass
-          "chained @catch: fallback raises Err, result is <Err>"
-          [r|
-        module main (chained)
-        escapable effect Err
-        source Py ("thrower1", "thrower2")
-        thrower1 :: <Err> Int
-        thrower2 :: <Err> Int
-        chained :: <Err> Int
-        chained = @catch thrower1 thrower2
-          |]
-
-      , expectPass
-          "nested @catch chain terminates in pure default -> stripped"
-          [r|
-        module main (safe)
-        escapable effect Err
-        source Py ("thrower1", "thrower2", "thrower3")
-        thrower1 :: <Err> Int
-        thrower2 :: <Err> Int
-        thrower3 :: <Err> Int
-        safe :: Int
-        safe = @catch thrower1 (@catch thrower2 (@catch thrower3 0))
-          |]
-
-      , expectPass
-          "primary <IO, Err>, pure fallback -> <IO>"
-          [r|
-        module main (recovered)
-        effect IO
-        escapable effect Err
-        source Py ("readIntOrFail")
-        readIntOrFail :: <IO, Err> Int
-        recovered :: <IO> Int
-        recovered = @catch readIntOrFail 0
-          |]
-
-      , expectPass
-          "primary <IO, Err>, <Err> fallback -> <IO, Err>"
-          [r|
-        module main (retried)
-        effect IO
-        escapable effect Err
-        source Py ("readIntOrFail", "retryOrFail")
-        readIntOrFail :: <IO, Err> Int
-        retryOrFail :: <Err> Int
-        retried :: <IO, Err> Int
-        retried = @catch readIntOrFail retryOrFail
-          |]
-
-      , expectPass
-          "concrete <Err> primary + pure fallback strips to plain type"
-          [r|
-        module main (safe)
-        escapable effect Err
-        source Py ("thrower")
-        thrower :: <Err> Int
-        safe :: Int
-        safe = @catch thrower 0
-          |]
-
-      , expectError
-          "two independent open effect rows in @catch rejected"
-          [r|
-        module main (twoTail)
-        escapable effect Err
-        twoTail :: (a -> <e, Err> b) -> (a -> <f> b) -> a -> b
-        twoTail f g x = @catch (f x) (g x)
-          |]
-      ]
-
--- | Effect-coverage error message shape.
---
--- After the message rewrite, effect-coverage failures name the
--- specific missing effects and adapt the fix suggestion based on
--- escapability (Err → mention @catch; other escapable → mention
--- handler function; all non-escapable → suggest declaration only).
---
--- Per the workspace convention we do NOT assert on exact message
--- text (it drifts as wording is tuned). We assert that these
--- programs are rejected (they must remain rejected under any future
--- message improvement) and rely on running the tests interactively
--- to eyeball the message quality.
 effectCoverageMessageTests :: TestTree
 effectCoverageMessageTests =
   localOption (mkTimeout 200000) $
@@ -5000,14 +4972,16 @@ effectCoverageMessageTests =
       "Effect-coverage error messages (rejection-only, message quality checked manually)"
       [ -- Err missing → message should suggest declare + mention @catch.
         expectError
-          "Err in body, sig declares only <IO> → rejected"
+          "effect in body, sig declares only <IO> → rejected"
           [r|
         module main (bad)
         effect IO
-        escapable effect Err
+        effect Audit
+        source Py ("paudit")
+        paudit :: Str -> <Audit> ()
         bad :: <IO> Int
         bad = do
-          @throw "oops"
+          paudit "oops"
           0
           |]
 
@@ -7692,7 +7666,8 @@ recursiveRecordTests =
         f :: B6 -> B6
         |]
 
-        -- NEGATIVE: mutual recursion is rejected (out of scope this pass)
+        -- NEGATIVE: a cycle of records is rejected whether or not its fields
+        -- are guarded, since only a `data` on the cycle stops reduction
       , expectError
           "mutual recursion 2-cycle, unguarded, is rejected"
           [r|
@@ -8370,6 +8345,103 @@ tuplePatternLambdaTests =
           (tplProg "(\\p -> (.0 = 7) p) t")
       ]
 
+-- | Selector shapes a pattern accessor accepts and rejects, checked at
+-- the frontend because none of them reach codegen. A group entry is
+-- either a record key or a tuple index and the Selector carries one
+-- kind per level, so a group naming both has no representation: it
+-- must be reported against the source, not raised as an internal
+-- error. A setter's value is checked against the field it is written
+-- at, so a value that only inhabits the field's type after a widening
+-- coercion still has to be accepted.
+patternSelectorTests :: TestTree
+patternSelectorTests =
+  localOption (mkTimeout 2000000) $ -- 2s
+    testGroup
+      "pattern selector shapes"
+      [ expectError
+          "group mixing a record key and a tuple index is rejected"
+          [r|
+        module main (foo)
+        record R = R { a :: Int, b :: Str }
+        foo :: R -> (Int, Int)
+        foo r = .(.a, .0) r
+          |]
+      , expectError
+          "setter group mixing a record key and a tuple index is rejected"
+          [r|
+        module main (foo)
+        record R = R { a :: Int, b :: Str }
+        foo :: R -> R
+        foo r = .(.a = 1, .0 = 2) r
+          |]
+      , expectError
+          "chain mixing a record key and a tuple index on a tuple is rejected"
+          [r|
+        module main (foo)
+        foo :: (Int, Int) -> Int
+        foo t = .(.name, .0) t
+          |]
+      , expectPass
+          "setter writes a bare value into an optional field"
+          [r|
+        module main (foo)
+        record R = R { a :: ?Str, b :: Int }
+        base :: R
+        base = { a = "one", b = 1 }
+        foo :: R
+        foo = .(.a = "new") base
+          |]
+      , expectPass
+          "setter writes a bare value into an optional field of a literal"
+          [r|
+        module main (foo)
+        record R = R { a :: ?Str, b :: Int }
+        foo :: R
+        foo = .(.a = "new") { a = Null, b = 1 }
+          |]
+      , expectPass
+          "setter writes Null into an optional field"
+          [r|
+        module main (foo)
+        record R = R { a :: ?Str, b :: Int }
+        base :: R
+        base = { a = "one", b = 1 }
+        foo :: R
+        foo = .(.a = Null) base
+          |]
+      , expectError
+          "setter on a field that the receiver does not have is rejected"
+          [r|
+        module main (foo)
+        record R = R { a :: Int, b :: Str }
+        base :: R
+        base = { a = 1, b = "x" }
+        foo :: R
+        foo = .(.c = 1) base
+          |]
+      , -- An IFile is a handle onto bytes already written, and the
+        -- runtime walker that serves a pattern on one only reads. A
+        -- getter on an IFile receiver is therefore fine and a setter
+        -- is not; the pair is here so a change that made the setter
+        -- compile could not pass unnoticed.
+        expectPass
+          "getter on an IFile receiver is accepted"
+          [r|
+        module main (foo)
+        record R = R { a :: Int, b :: Str }
+        foo :: IFile R -> Int
+        foo f = .a f
+          |]
+      , expectError
+          "setter on an IFile receiver is rejected"
+          [r|
+        module main (foo)
+        record R = R { a :: Int, b :: Str }
+        foo :: IFile R -> R
+        foo f = .(.a = 1) f
+          |]
+      ]
+
 -- | Frontend validation of `--' with:` docstring atoms (terminal
 -- actions on CLI-exported commands). One positive sanity check plus
 -- coverage of the rejection paths in Frontend/Desugar.hs. Type-level
@@ -8661,4 +8733,485 @@ withDocstringTests =
           Int
         foo x = x
           |]
+      ]
+
+-- Sum types: declaration syntax, constructor scoping, and typechecking.
+--
+-- Stage 1 is `data` with nullary constructors only. Constructors are bare
+-- terms in the module's term namespace and are globally unique; a name
+-- already bound is a hard error at the second declaration. Because a
+-- constructor name determines its type, `f = A` synthesizes `DNA` with no
+-- annotation.
+--
+-- NOTE while this is red: `data` is not yet a keyword, so every source
+-- below fails to parse. The positive cases therefore fail (which is the
+-- point), but the negative cases pass *vacuously* -- they are rejected for
+-- the wrong reason. A negative here only earns its keep once the positives
+-- are green.
+sumTypeTests :: TestTree
+sumTypeTests =
+  localOption (mkTimeout 1000000) $
+    testGroup
+      "sum types (`data`)"
+      [ -- The declaration introduces a nominal type usable in a signature.
+        assertGeneralType
+          "nullary data declares a type"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        f :: DNA -> DNA
+        f x = x
+          |]
+          (fun [var "DNA", var "DNA"])
+
+      , -- A constructor is a term of its own type.
+        assertGeneralType
+          "constructor is a term of the declared type"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        f :: DNA
+        f = G
+          |]
+          (var "DNA")
+
+      , -- Uniqueness is what makes this work: the name alone picks the type,
+        -- so no annotation is needed to synthesize it.
+        assertGeneralType
+          "constructor name alone determines the type"
+          [r|
+        module main (f)
+        data Color = Red | Green | Blue
+        f = Red
+          |]
+          (var "Color")
+
+      , assertGeneralType
+          "a single-constructor data is legal"
+          [r|
+        module main (f)
+        data Unitary = Only
+        f :: Unitary
+        f = Only
+          |]
+          (var "Unitary")
+
+      , assertGeneralType
+          "enum inside a list"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        f :: [DNA] -> [DNA]
+        f x = x
+          |]
+          (fun [lst (var "DNA"), lst (var "DNA")])
+
+      , assertGeneralType
+          "enum as a record field"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        record Site where
+          base :: DNA
+          pos  :: Int
+        f :: Site -> DNA
+        f = .base
+          |]
+          (fun [record' "Site" [(Key "base", var "DNA"), (Key "pos", int)], var "DNA"])
+
+      , assertGeneralType
+          "enum under an optional"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        f :: ?DNA -> ?DNA
+        f x = x
+          |]
+          (fun [OptionalU (var "DNA"), OptionalU (var "DNA")])
+
+      , assertGeneralType
+          "a per-language binding does not change the general type"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        data Cpp => DNA = "dna_t"
+        f :: DNA -> DNA
+        f x = x
+          |]
+          (fun [var "DNA", var "DNA"])
+
+      , -- Two distinct enums coexist as long as no constructor name repeats.
+        assertGeneralType
+          "two enums with disjoint constructors coexist"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        data Strand = Fwd | Rev
+        f :: DNA -> Strand
+        f _ = Fwd
+          |]
+          (fun [var "DNA", var "Strand"])
+
+      , exprTestBad
+          "a constructor repeated within one type is rejected"
+          [r|
+        module main (f)
+        data DNA = A | C | A | T
+        f :: DNA -> DNA
+        f x = x
+          |]
+
+      , -- The uniqueness rule, which is what buys the inference above.
+        exprTestBad
+          "a constructor colliding with another type's constructor is rejected"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        data Other = A | B
+        f :: DNA -> DNA
+        f x = x
+          |]
+
+      , exprTestBad
+          "a constructor colliding with an existing term is rejected"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        A :: Int
+        f :: DNA -> DNA
+        f x = x
+          |]
+
+      , exprTestBad
+          "an undeclared constructor is rejected"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        f :: DNA
+        f = N
+          |]
+
+      , exprTestBad
+          "a constructor of the wrong enum is rejected"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        data Strand = Fwd | Rev
+        f :: DNA
+        f = Fwd
+          |]
+
+      , -- Derived instances are deliberately deferred, so `==` on an enum
+        -- must be a clean error rather than an internal dump or a silent
+        -- fallthrough to some structural comparison.
+        exprTestBad
+          "== on an enum has no instance in stage 1"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        f :: DNA -> Bool
+        f x = x == A
+          |]
+
+      , -- A clause naming a constructor of a different type is a type
+        -- error, not a parse error: the constructor resolves fine, it just
+        -- does not belong to the scrutinee's type.
+        exprTestBad
+          "a constructor from another enum is rejected in a clause"
+          [r|
+        module main (f)
+        data Color = Red | Green
+        data Strand = Fwd | Rev
+        f :: Color -> Int
+        f | Red = 0
+          | Fwd = 1
+          |]
+
+      , exprTestBad
+          "an enum used where an unrelated type is expected is rejected"
+          [r|
+        module main (f)
+        data DNA = A | C | G | T
+        f :: Int
+        f = A
+          |]
+      ]
+
+-- Payload-bearing `data` constructors.
+--
+-- A constructor with arguments is a FUNCTION into its type: `Circle Real`
+-- gives `Circle :: Real -> Shape`. That is the whole difference from the
+-- argument-free tier, where a constructor is a value. A type is
+-- payload-bearing if ANY of its constructors takes an argument, so `Dot` in
+-- `data Shape = Circle Real | Dot` is a variant with an empty payload, not
+-- an enum member -- the wire form is a property of the type, not of the
+-- individual constructor.
+variantTests :: TestTree
+variantTests =
+  localOption (mkTimeout 1000000) $
+    testGroup
+      "sum types with payloads"
+      [ assertGeneralType
+          "a one-argument constructor is a function into its type"
+          [r|
+        module main (f)
+        data Shape = Circle Real | Dot
+        f = Circle
+          |]
+          (fun [real, var "Shape"])
+
+      , assertGeneralType
+          "a multi-argument constructor curries"
+          [r|
+        module main (f)
+        data Shape = Rect Real Real | Dot
+        f = Rect
+          |]
+          (fun [real, real, var "Shape"])
+
+      , -- A constructor with no arguments in a payload-bearing type is still
+        -- a plain value of that type.
+        assertGeneralType
+          "an argument-free constructor beside a payload one is a value"
+          [r|
+        module main (f)
+        data Shape = Circle Real | Dot
+        f :: Shape
+        f = Dot
+          |]
+          (var "Shape")
+
+      , assertGeneralType
+          "applying a constructor yields its type"
+          [r|
+        module main (f)
+        data Shape = Circle Real | Dot
+        f :: Shape
+        f = Circle 1.0
+          |]
+          (var "Shape")
+
+      , assertGeneralType
+          "a parameterized constructor carries the parameter"
+          [r|
+        module main (f)
+        data Opt a = None | Some a
+        f :: Int -> Opt Int
+        f x = Some x
+          |]
+          (fun [int, arr "Opt" [int]])
+
+      , -- The payload is behind a pointer on the wire, which is what gives
+        -- the recursive width equation a finite fixed point.
+        assertGeneralType
+          "a self-recursive data type is legal"
+          [r|
+        module main (f)
+        data Tree = Leaf | Node Tree Tree
+        f :: Tree -> Tree
+        f x = x
+          |]
+          (fun [var "Tree", var "Tree"])
+
+      , exprTestBad
+          "applying a constructor to too many arguments is rejected"
+          [r|
+        module main (f)
+        data Shape = Circle Real | Dot
+        f :: Shape
+        f = Circle 1.0 2.0
+          |]
+
+      , exprTestBad
+          "applying a constructor to the wrong type is rejected"
+          [r|
+        module main (f)
+        data Shape = Circle Real | Dot
+        f :: Shape
+        f = Circle "big"
+          |]
+
+      , exprTestBad
+          "an argument-free constructor is not a function"
+          [r|
+        module main (f)
+        data Shape = Circle Real | Dot
+        f :: Shape
+        f = Dot 1.0
+          |]
+
+      , -- A constructor is an ordinary function into its type, so supplying
+        -- some of its arguments yields a function expecting the rest. This
+        -- is what makes `map (Rect 4.5) heights` work.
+        assertGeneralType
+          "a constructor may be partially applied"
+          [r|
+        module main (f)
+        data Shape = Rect Real Real | Dot
+        f = Rect 4.5
+          |]
+          (fun [real, var "Shape"])
+
+      , -- Payload patterns are asserted here, through inference, and not
+        -- only in the pattern-lowering tests: those run the frontend
+        -- without the typechecker, so they cannot see that a payload
+        -- constructor is a FUNCTION into its type and therefore cannot be
+        -- checked as a value of it, the way an argument-free one can.
+        assertGeneralType
+          "a payload pattern binds its field at the field's type"
+          [r|
+        module main (f)
+        data Shape = Circle Real | Dot
+        f :: Shape -> Real
+        f | (Circle r) = r
+          | Dot = 0.0
+          |]
+          (fun [var "Shape", real])
+
+      , assertGeneralType
+          "a multi-field payload pattern types every field"
+          [r|
+        module main (f)
+        data Shape = Rect Real Real | Dot
+        f :: Shape -> Real
+        f | (Rect w h) = w
+          | Dot = 0.0
+          |]
+          (fun [var "Shape", real])
+
+      , -- The constructor-table lookup replaces the value check for a
+        -- payload type, so it has to keep rejecting a constructor borrowed
+        -- from another type just as firmly.
+        exprTestBad
+          "a constructor of another type is rejected in a payload clause"
+          [r|
+        module main (f)
+        data Shape = Circle Real | Dot
+        data Color = Red Real | Blue
+        f :: Shape -> Real
+        f | (Circle r) = r
+          | (Red x) = x
+          | Dot = 0.0
+          |]
+
+      , -- A getter names a position, but which positions exist depends on
+        -- the constructor, and that is not known until the value is
+        -- matched. Only a declaration whose arms happen to agree at that
+        -- position would type, and a later arm would silently break it.
+        exprTestBad
+          "an index getter cannot be applied to a data type"
+          [r|
+        module main (f)
+        data Shape = Circle Real | Rect Real Real
+        f :: Shape -> Real
+        f x = .[0] x
+          |]
+
+      , -- The same rejection has to survive an alias. A getter reaching a
+        -- `data` type through one is not a corner case: aliases are how
+        -- types are usually named in signatures, and the check is worth
+        -- nothing if the spelling of the type decides whether it applies.
+        exprTestBad
+          "an index getter cannot reach a data type through an alias"
+          [r|
+        module main (f)
+        data Shape = Circle Real | Rect Real Real
+        type MyShape = Shape
+        f :: MyShape -> Real
+        f x = .[0] x
+          |]
+
+        -- Recursion guards. A constructor field naming its own type is the
+        -- reason the payload sits behind a pointer at all, so these are the
+        -- shapes the representation exists to support.
+        --
+        -- Lowering a `data` expands its constructors' field types, because
+        -- the payload's own schema has to be reachable. A self-reference
+        -- therefore re-enters the type being lowered. Termination comes from
+        -- leaving a re-entrant reference opaque -- the same treatment a
+        -- record's self-reference gets -- and cutting the cycle once, later,
+        -- when the wire form is built. Without that, two self-referential
+        -- fields make the expansion branch, so it exhausts memory rather
+        -- than merely looping; hence a generation test with a timeout rather
+        -- than a type assertion.
+      , localOption (mkTimeout 20000000) $
+          testCase "a directly self-recursive data lowers" $
+            assertGenerates
+              [r|
+        module main (idt)
+        data Tree = Leaf | Node Tree Tree
+        source Py from "t.py" ("idt")
+        idt :: Tree -> Tree
+              |]
+
+      , -- Recursion reached through a list rather than directly. The
+        -- back-edge sits under an array element here, which is a different
+        -- position in the wire form than a bare field.
+        localOption (mkTimeout 20000000) $
+          testCase "a data recursing through a list lowers" $
+            assertGenerates
+              [r|
+        module main (idt)
+        type Py => List a = "list" a
+        data Rose = Rose [Rose]
+        source Py from "t.py" ("idt")
+        idt :: Rose -> Rose
+              |]
+
+      , -- Two `data` types that refer to each other. A `data` stops type
+        -- reduction at its own boundary and holds its payload behind a
+        -- pointer, so nothing that walks the cycle can loop and no value
+        -- has infinite width -- the same two facts that make a `data`
+        -- self-recursive, applied across two names.
+        localOption (mkTimeout 20000000) $
+          testCase "mutually recursive data types lower" $
+            assertGenerates
+              [r|
+        module main (idt)
+        data Expr = Lit | Neg Term
+        data Term = Wrap Expr
+        source Py from "t.py" ("idt")
+        idt :: Expr -> Expr
+              |]
+
+      , -- A record on the cycle is fine as long as a `data` is on it too:
+        -- the `data` is where reduction stops.
+        localOption (mkTimeout 20000000) $
+          testCase "a record and a data recursing into each other lower" $
+            assertGenerates
+              [r|
+        module main (idt)
+        record Node where
+          body :: Expr
+        record Py => Node = "dict"
+        data Expr = Leaf | Branch Node
+        source Py from "t.py" ("idt")
+        idt :: Expr -> Expr
+              |]
+
+      , -- Without a `data` on the cycle nothing stops reduction: a cycle of
+        -- transparent aliases would loop the evaluator, and a cycle of
+        -- records has no cycle-level guard. Both stay rejected.
+        exprTestBad
+          "mutually recursive aliases are rejected"
+          [r|
+        module main (idt)
+        type A = [B]
+        type B = [A]
+        source Py from "t.py" ("idt")
+        idt :: A -> A
+          |]
+
+      , -- A self-recursive type is still usable through a container, which
+        -- is the shape a real tree walk takes.
+        localOption (mkTimeout 20000000) $
+          testCase "a list of a recursive data lowers" $
+            assertGenerates
+              [r|
+        module main (idt)
+        type Py => List a = "list" a
+        data Tree = Leaf | Node Tree Tree
+        source Py from "t.py" ("idt")
+        idt :: [Tree] -> [Tree]
+              |]
       ]

@@ -1,0 +1,125 @@
+-- Schema counts and key lengths at and past the one-digit boundary.
+--
+-- The compiler writes every count and key length with
+-- `Morloc.CodeGenerator.Serial.encode64`: a single base-62 digit up to 63,
+-- and an escape (`'=' lo hi`, little-endian base-64) beyond it. A record of
+-- 64 or more fields, a table of 64 or more columns, or a field name of 64
+-- or more characters therefore emits an escaped count.
+--
+-- Nothing in the language rules these out and neither is exotic: 70 columns
+-- is an ordinary table row and a 64-character field name is an ordinary
+-- generated one. Both cross a language boundary here, because the schema
+-- string is what the far pool parses.
+--
+-- The `f63`/`f64` pair straddles the boundary exactly, and `wideSum` folds
+-- every field, so a count read as the wrong number truncates the record
+-- rather than merely failing to parse.
+
+module main
+  ( wideSum
+  , wideFirst
+  , wideLast
+  , wideBoundary
+  , longKeyRead
+  , wideCross
+  )
+
+import root-py
+import root-cpp
+
+record Wide where
+  f00 :: Int
+  f01 :: Int
+  f02 :: Int
+  f03 :: Int
+  f04 :: Int
+  f05 :: Int
+  f06 :: Int
+  f07 :: Int
+  f08 :: Int
+  f09 :: Int
+  f10 :: Int
+  f11 :: Int
+  f12 :: Int
+  f13 :: Int
+  f14 :: Int
+  f15 :: Int
+  f16 :: Int
+  f17 :: Int
+  f18 :: Int
+  f19 :: Int
+  f20 :: Int
+  f21 :: Int
+  f22 :: Int
+  f23 :: Int
+  f24 :: Int
+  f25 :: Int
+  f26 :: Int
+  f27 :: Int
+  f28 :: Int
+  f29 :: Int
+  f30 :: Int
+  f31 :: Int
+  f32 :: Int
+  f33 :: Int
+  f34 :: Int
+  f35 :: Int
+  f36 :: Int
+  f37 :: Int
+  f38 :: Int
+  f39 :: Int
+  f40 :: Int
+  f41 :: Int
+  f42 :: Int
+  f43 :: Int
+  f44 :: Int
+  f45 :: Int
+  f46 :: Int
+  f47 :: Int
+  f48 :: Int
+  f49 :: Int
+  f50 :: Int
+  f51 :: Int
+  f52 :: Int
+  f53 :: Int
+  f54 :: Int
+  f55 :: Int
+  f56 :: Int
+  f57 :: Int
+  f58 :: Int
+  f59 :: Int
+  f60 :: Int
+  f61 :: Int
+  f62 :: Int
+  f63 :: Int
+  f64 :: Int
+  f65 :: Int
+  f66 :: Int
+  f67 :: Int
+  f68 :: Int
+  f69 :: Int
+
+record Cpp => Wide = "Wide"
+
+record Named where
+  a_field_name_needing_an_escaped_length_xxxxxxxxxxxxxxxxxxxxxxxxx :: Int
+  other :: Int
+
+source Py from "wide.py" ("wide_sum" as wideSum, "identity" as idWide)
+source Cpp from "wide.hpp" ("wide_first" as wideFirst, "wide_last" as wideLast)
+
+wideSum :: Wide -> Int
+idWide :: Wide -> Wide
+wideFirst :: Wide -> Int
+wideLast :: Wide -> Int
+
+wideBoundary :: Wide -> (Int, Int)
+wideBoundary w = (.f63 w, .f64 w)
+
+longKeyRead :: Named -> Int
+longKeyRead = .a_field_name_needing_an_escaped_length_xxxxxxxxxxxxxxxxxxxxxxxxx
+
+-- Python builds it, C++ reads it: the schema string has to survive the
+-- crossing, not just the local pool.
+wideCross :: Wide -> Int
+wideCross w = wideLast (idWide w)

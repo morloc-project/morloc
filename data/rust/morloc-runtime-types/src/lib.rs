@@ -35,7 +35,7 @@ pub use cschema::is_top_null;
 /// provisioning can refuse a prebuilt binary whose version differs from the
 /// compiler's expected value. Bump it (and the header) whenever the C ABI or
 /// wire packet format changes.
-pub const MORLOC_ABI_VERSION: u32 = 1;
+pub const MORLOC_ABI_VERSION: u32 = 2;
 
 #[cfg(test)]
 mod abi_version_tests {

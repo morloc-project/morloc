@@ -77,6 +77,21 @@ fn schema_to_json_schema(s: &Schema) -> Value {
         }
         Float32 | Float64 => json!({ "type": "number" }),
         String => json!({ "type": "string" }),
+        // A closed constructor set becomes a JSON-Schema enum, so a
+        // caller -- a person reading --json-help, or a model calling
+        // the tool over MCP -- is handed the legal values instead of
+        // a free string. This is what carrying the names in the wire
+        // schema buys.
+        Enum => json!({ "type": "string", "enum": s.keys }),
+        // Externally tagged: either a bare constructor name (an arm with
+        // no fields) or a one-key object whose key is the name.
+        Variant => json!({
+            "oneOf": [
+                { "type": "string", "enum": s.keys },
+                { "type": "object", "minProperties": 1, "maxProperties": 1,
+                  "propertyNames": { "enum": s.keys } }
+            ]
+        }),
         Array => {
             let items = s
                 .parameters
@@ -175,11 +190,63 @@ fn with_null(mut v: Value) -> Value {
 }
 
 /// True when a wire schema string denotes a top-level optional type.
-fn schema_is_optional(schema: Option<&str>) -> bool {
+pub(crate) fn schema_is_optional(schema: Option<&str>) -> bool {
     schema
         .and_then(|s| parse_schema(s).ok())
         .map(|p| p.serial_type == SerialType::Optional)
         .unwrap_or(false)
+}
+
+/// The help line a `data` argument needs and its type name alone does not
+/// give: which constructors the argument accepts.
+///
+/// The names ride in the wire schema, which is how `--json-help` and the
+/// MCP tool description have always been able to publish the closed set;
+/// this puts the same set on the terminal, where a person types the value.
+/// Optionals and arrays are looked through, since neither changes which
+/// names are legal.
+///
+/// An argument-free constructor IS the value, so those are listed as
+/// values. A payload-bearing one is a shape rather than a word, so those
+/// are listed as constructors, each with the number of fields it takes.
+pub(crate) fn schema_constructor_line(schema: Option<&str>) -> Option<String> {
+    constructor_line_of(&parse_schema(schema?).ok()?)
+}
+
+/// The same line for one field of a record the CLI destructured into
+/// options. A group entry carries no schema of its own -- dispatch
+/// reassembles the record, so the group's schema is the one the manifest
+/// records -- and the field's own schema is the parameter under its key.
+pub(crate) fn group_entry_constructor_line(
+    group_schema: Option<&str>,
+    key: &str,
+) -> Option<String> {
+    let group = parse_schema(group_schema?).ok()?;
+    let i = group.keys.iter().position(|k| k == key)?;
+    constructor_line_of(group.parameters.get(i)?)
+}
+
+fn constructor_line_of(s: &Schema) -> Option<String> {
+    match s.serial_type {
+        SerialType::Enum => Some(format!("values: {}", s.keys.join(", "))),
+        SerialType::Variant => Some(format!(
+            "constructors: {}",
+            s.keys
+                .iter()
+                .zip(s.parameters.iter())
+                .map(|(k, arm)| if arm.size == 0 {
+                    k.clone()
+                } else {
+                    format!("{k}/{}", arm.size)
+                })
+                .collect::<Vec<String>>()
+                .join(", ")
+        )),
+        SerialType::Optional | SerialType::Array => {
+            s.parameters.first().and_then(constructor_line_of)
+        }
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +302,14 @@ fn named_type_glossary(m: &Manifest) -> Vec<Value> {
             entry.insert("parameters".into(), json!(t.parameters));
             if t.kind == "packable" {
                 entry.insert("equals".into(), json!(t.equals));
+            } else if t.kind == "data" {
+                entry.insert("desc".into(), json!(t.desc));
+                let ctors: Vec<Value> = t
+                    .constructors
+                    .iter()
+                    .map(|c| json!({ "name": c.name, "fields": c.fields, "desc": c.desc }))
+                    .collect();
+                entry.insert("constructors".into(), json!(ctors));
             } else {
                 let fields: Vec<Value> = t
                     .fields
@@ -348,12 +423,8 @@ fn arg_to_json(arg: &Arg, pos_index: usize) -> Value {
             format,
             ..
         } => {
-            let name = metavar
-                .as_deref()
-                .map(|m| m.to_lowercase())
-                .unwrap_or_else(|| format!("arg{}", pos_index));
             json!({
-                "name": name,
+                "name": arg.key(),
                 "role": "positional",
                 "position": pos_index,
                 "metavar": metavar,
@@ -394,9 +465,8 @@ fn arg_to_json(arg: &Arg, pos_index: usize) -> Value {
             format,
             ..
         } => {
-            let name = opt_name(long_opt.as_deref(), short_opt.as_deref());
             json!({
-                "name": name,
+                "name": arg.key(),
                 "role": "option",
                 "metavar": metavar,
                 "required": false,
@@ -427,9 +497,8 @@ fn arg_to_json(arg: &Arg, pos_index: usize) -> Value {
             desc,
             ..
         } => {
-            let name = opt_name(long_opt.as_deref(), short_opt.as_deref());
             json!({
-                "name": name,
+                "name": arg.key(),
                 "role": "flag",
                 "required": false,
                 "short": short_opt,
@@ -450,10 +519,7 @@ fn arg_to_json(arg: &Arg, pos_index: usize) -> Value {
             entries,
             ..
         } => {
-            let name = type_desc
-                .as_deref()
-                .map(|t| t.to_lowercase())
-                .unwrap_or_else(|| "group".to_string());
+            let name = arg.key().to_string();
             let entries_json: Vec<Value> = entries
                 .iter()
                 .map(|e| json!({ "key": e.key, "argument": arg_to_json(&e.arg, 0) }))
@@ -475,6 +541,47 @@ fn arg_to_json(arg: &Arg, pos_index: usize) -> Value {
                 "named_type_kind": arg.kind_constraint(),
                 "group_option": group_option,
                 "entries": entries_json,
+            })
+        }
+        Arg::Alt {
+            schema,
+            type_desc,
+            metavar,
+            desc,
+            required,
+            default_val,
+            arms,
+            ..
+        } => {
+            let arms_json: Vec<Value> = arms
+                .iter()
+                .map(|a| {
+                    let fields: Vec<Value> = a
+                        .fields
+                        .iter()
+                        .map(|f| json!({ "type": f.type_desc, "wire": f.schema }))
+                        .collect();
+                    json!({
+                        "constructor": a.ctor,
+                        "long": a.long,
+                        "description": a.desc,
+                        "fields": fields,
+                    })
+                })
+                .collect();
+            json!({
+                "name": arg.key(),
+                "role": "alternatives",
+                "metavar": metavar,
+                "required": required,
+                "default": default_val,
+                "description": desc,
+                "type": type_object(
+                    schema.as_deref(),
+                    arg.general_schema_str(),
+                    type_desc.as_deref(),
+                ),
+                "arms": arms_json,
             })
         }
     }
@@ -560,13 +667,6 @@ fn checks_json(checks: &[Check]) -> Value {
             })
             .collect(),
     )
-}
-
-/// Synthesize a parameter name for an option/flag: long form, else short.
-fn opt_name(long: Option<&str>, short: Option<&str>) -> String {
-    long.map(|s| s.to_string())
-        .or_else(|| short.map(|s| s.to_string()))
-        .unwrap_or_else(|| "option".to_string())
 }
 
 fn non_empty(s: &str) -> Option<&str> {
@@ -851,7 +951,6 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
     let mut props = Map::new();
     let mut required: Vec<Value> = Vec::new();
     let mut slots: Vec<ArgSlot> = Vec::with_capacity(cmd.args.len());
-    let mut pos_index = 0usize;
 
     // Insert a property, failing closed on a name collision (the forward map
     // would otherwise silently overwrite, letting two args collapse to one
@@ -868,25 +967,19 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
         match arg {
             Arg::Positional {
                 schema,
-                name,
                 many,
                 stdin,
                 desc,
                 ..
             } => {
-                // A positional's MCP property is its explicit `@name` when set,
-                // else the reserved, collision-proof key `_<1-based index>`. A
-                // metavar (FILE/INT/...) is a reused display placeholder and is
-                // never used as the key; the leading `_` of the default is
-                // reserved (a `@name` is validated at compile time not to start
-                // with `_`), so a name and an option can never collide with it.
-                let prop_name = name
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| format!("_{}", pos_index + 1));
+                // The key the compiler published: the explicit `@name`, else
+                // the reserved `_<1-based index>`. A metavar (FILE/INT/...) is
+                // a reused display placeholder and cannot serve as a key --
+                // one command may take two files. The leading `_` is reserved
+                // against author names, so the two can never collide.
+                let prop_name = arg.key().to_string();
                 let mut prop = mcp_type(schema.as_deref(), *many);
-                set_description(&mut prop, desc, None);
+                set_description(&mut prop, &with_ctor_notes(cmd, arg.type_desc_str(), desc), None);
                 let is_req = !schema_is_optional(schema.as_deref()) && !*stdin;
                 if is_req {
                     required.push(Value::String(prop_name.clone()));
@@ -896,20 +989,17 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
                     key: prop_name,
                     missing: Value::Null,
                 });
-                pos_index += 1;
             }
             Arg::Optional {
                 schema,
                 many,
-                short_opt,
-                long_opt,
                 default_val,
                 desc,
                 ..
             } => {
-                let name = opt_name(long_opt.as_deref(), short_opt.as_deref());
+                let name = arg.key().to_string();
                 let mut prop = mcp_type(schema.as_deref(), *many);
-                set_description(&mut prop, desc, default_val.as_deref());
+                set_description(&mut prop, &with_ctor_notes(cmd, arg.type_desc_str(), desc), default_val.as_deref());
                 insert_prop(&mut props, &name, prop)?;
                 let st = schema.as_deref().and_then(|s| parse_schema(s).ok());
                 slots.push(ArgSlot::Value {
@@ -918,13 +1008,11 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
                 });
             }
             Arg::Flag {
-                short_opt,
-                long_opt,
                 default_val,
                 desc,
                 ..
             } => {
-                let name = opt_name(long_opt.as_deref(), short_opt.as_deref());
+                let name = arg.key().to_string();
                 let mut prop = json!({ "type": "boolean" });
                 set_description(&mut prop, desc, default_val.as_deref());
                 insert_prop(&mut props, &name, prop)?;
@@ -935,7 +1023,6 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
             }
             Arg::Group {
                 schema,
-                type_desc,
                 group_opt,
                 entries,
                 desc,
@@ -946,10 +1033,7 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
                 if group_opt.is_some() {
                     // Whole record passed as one JSON object property. Not
                     // marked required: an all-defaulted record may be omitted.
-                    let name = type_desc
-                        .as_deref()
-                        .map(|t| t.to_lowercase())
-                        .unwrap_or_else(|| "group".to_string());
+                    let name = arg.key().to_string();
                     let mut prop = parsed
                         .as_ref()
                         .map(schema_to_json_schema)
@@ -1000,6 +1084,29 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
                         fields,
                     });
                 }
+            }
+            // An unrolled `data` is one property holding the whole value: a
+            // model writes the constructor JSON directly, the arms being a
+            // command-line convenience. Required when no arm may be omitted.
+            Arg::Alt {
+                schema,
+                required: is_req,
+                default_val,
+                desc,
+                ..
+            } => {
+                let name = arg.key().to_string();
+                let mut prop = mcp_type(schema.as_deref(), false);
+                set_description(&mut prop, &with_ctor_notes(cmd, arg.type_desc_str(), desc), default_val.as_deref());
+                if *is_req {
+                    required.push(Value::String(name.clone()));
+                }
+                insert_prop(&mut props, &name, prop)?;
+                let st = schema.as_deref().and_then(|s| parse_schema(s).ok());
+                slots.push(ArgSlot::Value {
+                    key: name,
+                    missing: cli_default_to_json(default_val.as_deref(), st.as_ref()),
+                });
             }
         }
     }
@@ -1118,6 +1225,45 @@ fn mcp_type(schema: Option<&str>, many: bool) -> Value {
 
 /// Attach a `description` to a JSON Schema property from docstring lines and an
 /// optional default value. No-op when both are empty.
+/// An argument's description lines, followed by one line per described
+/// constructor when the argument's type is a `data` in the command's
+/// glossary. A model reading the tool sees what each name means, not just
+/// the closed set.
+fn with_ctor_notes(
+    cmd: &Command,
+    type_desc: Option<&str>,
+    desc: &[std::string::String],
+) -> Vec<std::string::String> {
+    let mut out: Vec<std::string::String> = desc.to_vec();
+    let Some(tn) = type_desc else { return out };
+    // The type may be wrapped (`?Color`, `[Color]`); the glossary name is
+    // the bare one.
+    let bare = tn.trim_start_matches(['?', '[']).trim_end_matches(']');
+    if let Some(t) = cmd
+        .named_types
+        .iter()
+        .find(|t| t.kind == "data" && t.name == bare)
+    {
+        let notes: Vec<std::string::String> = t
+            .constructors
+            .iter()
+            .filter_map(|c| {
+                let note: Vec<&str> =
+                    c.desc.iter().map(|l| l.as_str()).filter(|l| !l.is_empty()).collect();
+                if note.is_empty() {
+                    None
+                } else {
+                    Some(format!("{}: {}", c.name, note.join(" ")))
+                }
+            })
+            .collect();
+        if !notes.is_empty() {
+            out.push(notes.join("; "));
+        }
+    }
+    out
+}
+
 fn set_description(prop: &mut Value, desc: &[std::string::String], default: Option<&str>) {
     let mut parts: Vec<std::string::String> =
         desc.iter().filter(|l| !l.is_empty()).cloned().collect();
@@ -1249,7 +1395,7 @@ mod tests {
         let cmd = cmd_from_json(json!({
             "name": "inc", "type": "pure",
             "return": { "schema": "j" },
-            "args": [ { "kind": "opt", "schema": "j", "long": "count", "default": "5" } ],
+            "args": [ { "kind": "opt", "key": "count", "schema": "j", "long": "count", "default": "5" } ],
         }));
         let shape = command_to_tool_shape(&cmd).expect("servable");
         // Forward: property present, optional (not required).
@@ -1278,8 +1424,8 @@ mod tests {
             "return": { "schema": "j" },
             // Two positionals: the metavar is ignored; keys are `_1`, `_2`.
             "args": [
-                { "kind": "pos", "schema": "j", "metavar": "N" },
-                { "kind": "pos", "schema": "j" }
+                { "kind": "pos", "key": "_1", "schema": "j", "metavar": "N" },
+                { "kind": "pos", "key": "_2", "schema": "j" }
             ],
         }));
         let shape = command_to_tool_shape(&cmd).expect("servable");
@@ -1300,7 +1446,7 @@ mod tests {
         let cmd = cmd_from_json(json!({
             "name": "revcomp", "type": "pure",
             "return": { "schema": "j" },
-            "args": [ { "kind": "pos", "schema": "j", "name": "records" } ],
+            "args": [ { "kind": "pos", "key": "records", "schema": "j", "name": "records" } ],
         }));
         let shape = command_to_tool_shape(&cmd).expect("servable");
         assert!(shape.prop_names.contains("records"));
@@ -1320,8 +1466,8 @@ mod tests {
             "name": "cp", "type": "pure",
             "return": { "schema": "j" },
             "args": [
-                { "kind": "pos", "schema": "s", "metavar": "FILE" },
-                { "kind": "pos", "schema": "s", "metavar": "FILE" }
+                { "kind": "pos", "key": "_1", "schema": "s", "metavar": "FILE" },
+                { "kind": "pos", "key": "_2", "schema": "s", "metavar": "FILE" }
             ],
         }));
         let shape = command_to_tool_shape(&cmd).expect("servable (no collision)");
@@ -1335,10 +1481,10 @@ mod tests {
             "name": "conf", "type": "pure",
             "return": { "schema": "j" },
             "args": [ {
-                "kind": "grp", "schema": "m21aj1bs", "type": "Rec",
+                "kind": "grp", "key": "rec", "schema": "m21aj1bs", "type": "Rec",
                 "entries": [
-                    { "key": "a", "arg": { "kind": "opt", "long": "a", "default": "3" } },
-                    { "key": "b", "arg": { "kind": "opt", "long": "b", "default": "\"hi\"" } }
+                    { "key": "a", "arg": { "kind": "opt", "key": "a", "long": "a", "default": "3" } },
+                    { "key": "b", "arg": { "kind": "opt", "key": "b", "long": "b", "default": "\"hi\"" } }
                 ]
             } ],
         }));
@@ -1386,7 +1532,7 @@ mod tests {
         let cmd = cmd_from_json(json!({
             "name": "cat", "type": "remote",
             "return": { "schema": "as" },
-            "args": [ { "kind": "pos", "schema": "s", "metavar": "FILE", "stdin": true } ],
+            "args": [ { "kind": "pos", "key": "_1", "schema": "s", "metavar": "FILE", "stdin": true } ],
         }));
         assert!(command_to_tool_shape(&cmd).is_err());
     }

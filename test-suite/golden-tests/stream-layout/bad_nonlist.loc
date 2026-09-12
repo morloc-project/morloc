@@ -3,7 +3,8 @@ module main (bad)
 
 import root
 
-bad :: Str -> <IO, Err> [(U64, U64, U64)]
+bad :: Str -> <IO> [(U64, U64, U64)]
 bad path = do
-  f <- @open path :: <IO, Err> IFile Int
-  @streamLayout f
+  Ok f <- @open path :: <IO> (Try Str (IFile Int))
+  Ok _tailv100 <- @streamLayout f
+  _tailv100

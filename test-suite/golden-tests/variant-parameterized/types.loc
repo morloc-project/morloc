@@ -1,0 +1,25 @@
+module types (*)
+
+-- A `data` type with a type parameter. Every instantiation is its own type
+-- on the wire and, in a pool that declares its types, its own native
+-- declaration: `Box Int` and `Box Str` cannot share one.
+data Box a = Empty | Full a
+
+-- Two parameters, one arm using both and one using neither.
+data Pair a b = Both a b | Neither
+
+-- A parameterized RECORD, which shares the machinery that decides whether an
+-- occurrence of a type is a reference back to one already being built. It is
+-- here so that the shared part stays covered from both sides.
+record Crate a where
+  item :: a
+
+-- A parameterized type that refers to itself. Its own occurrence inside
+-- itself is the SAME instantiation, and has to be read as a back-edge; the
+-- `Box (Box Int)` above is a different one, and must not be.
+data Tree a = Leaf a | Node (Tree a) (Tree a)
+
+-- A parameterized type that refers to itself from inside a container. The
+-- self-reference is then an element type rather than a field, and reaches
+-- every renderer through the list rather than directly.
+data Rose a = Tip a | Branch a [Rose a]

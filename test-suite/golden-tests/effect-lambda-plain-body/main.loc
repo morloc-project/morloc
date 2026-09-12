@@ -1,0 +1,64 @@
+-- A lambda whose RETURN TYPE carries an effect must not force its body. The
+-- force is only correct when the body actually yields a thunk; a body that is a
+-- literal, a bound parameter or a let binding is already a value, and applying
+-- it fails at runtime -- as `'int' object is not callable` in Python and
+-- E0618 in Rust.
+--
+-- The effect row is the whole variable: every function below returns <IO>, and
+-- the same shapes without it have always worked. Both a bare higher-order
+-- argument and a record field are covered, because neither requires the other,
+-- and both a language that boxes closures (Rust) and one that does not (Python).
+module main
+  ( argLiteral
+  , argParam
+  , argLet
+  , argEffectful
+  , recParam
+  , rustArgParam
+  , rustRecParam
+  )
+
+import root-py
+import root-rust
+
+record Ops where
+  inc :: Int -> <IO> Int
+  same :: Int -> <IO> Int
+record Py => Ops = "dict"
+record Rust => Ops = "Ops"
+
+type Rust => Int = "i64"
+
+source Py from "host.py" ("apply_fn" as applyF, "use_ops" as useOps, "tick")
+source Rust from "host.rs" ("rs_apply_fn" as rsApplyF, "rs_use_ops" as rsUseOps)
+
+applyF :: (Int -> <IO> Int) -> Int -> <IO> Int
+useOps :: Ops -> Int -> <IO> Int
+tick :: Int -> <IO> Int
+rsApplyF :: (Int -> <IO> Int) -> Int -> <IO> Int
+rsUseOps :: Ops -> Int -> <IO> Int
+
+-- a literal body was always fine: IntN is already treated as a value
+argLiteral :: Int -> <IO> Int
+argLiteral k = applyF (\x -> 42) k
+
+-- the bound parameter is a value too, and must not be forced
+argParam :: Int -> <IO> Int
+argParam k = applyF (\x -> x) k
+
+-- as is a let binding
+argLet :: Int -> <IO> Int
+argLet k = applyF (\x -> let y = x in y) k
+
+-- a body that genuinely performs the effect still needs its force
+argEffectful :: Int -> <IO> Int
+argEffectful k = applyF (\x -> tick x) k
+
+recParam :: Int -> <IO> Int
+recParam k = useOps { inc = (\x -> tick x), same = (\x -> x) } k
+
+rustArgParam :: Int -> <IO> Int
+rustArgParam k = rsApplyF (\x -> x) k
+
+rustRecParam :: Int -> <IO> Int
+rustRecParam k = rsUseOps { inc = (\x -> x), same = (\x -> x) } k

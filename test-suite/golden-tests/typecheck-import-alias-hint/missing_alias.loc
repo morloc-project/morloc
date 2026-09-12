@@ -1,0 +1,9 @@
+--' Imports the term but not the alias its signature uses. The import
+--' succeeds and every call then fails to typecheck.
+module main (go)
+
+import root-py
+import .lib (touch)
+
+go :: Str -> Str
+go p = touch p

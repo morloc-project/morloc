@@ -14,7 +14,7 @@
 // (Morloc.Abi). Provisioning refuses to run a prebuilt libmorloc/nexus whose
 // version differs from the compiler's expected value (fail-closed), preventing
 // silent cross-pool struct/offset corruption.
-#define MORLOC_ABI_VERSION 1
+#define MORLOC_ABI_VERSION 2
 
 // Atomic includes must sit outside any `extern "C"` block because the
 // C++ <atomic> header pulls in <type_traits> et al., which use C++
@@ -94,6 +94,9 @@ typedef void*   absptr_t;
 // Magic numbers for integrity checks.
 #define SHM_MAGIC 0xFECA0DF0
 #define BLK_MAGIC 0x0CB10DF0
+// Written over a block header merged into its predecessor: the header is
+// now interior bytes of the survivor and must stop reading as a block.
+#define BLK_ABSORBED 0x0CB1DEAD
 
 #define MAX_VOLUME_NUMBER 32768
 
@@ -177,11 +180,43 @@ typedef enum {
     MORLOC_IFILE    = 21, // Random-access stream-file handle (read-only).
     MORLOC_OSTREAM  = 22, // Sequential stream-file writer handle.
     MORLOC_ISTREAM  = 23, // Sequential stream-file reader handle.
-    MORLOC_CLOSURE  = 24  // Function value: home language, manifold id, and
+    MORLOC_CLOSURE  = 24, // Function value: home language, manifold id, and
                           // captured argument packets. Wire form is
                           // `[u32 home][u32 mid][u32 n][ (u32 len, bytes) x n ]`;
                           // the captured packets are opaque (serialized by the
                           // home language, deserialized by its dispatch table).
+    MORLOC_ENUM     = 25, // A `data` type whose constructors take no
+                          // arguments. One byte: the constructor's 0-based
+                          // position in the declaration IS the wire tag.
+                          // Constructor names travel in Schema.keys, so JSON
+                          // renders the name rather than the ordinal and an
+                          // out-of-range tag is rejected by name. Wire form is
+                          // `e<count>(<klen><name>)*`.
+                          //
+                          // Slot 12 is deliberately not reused: it once held
+                          // MORLOC_TENSOR, and an old packet carrying a 12
+                          // would be silently reinterpreted rather than
+                          // rejected.
+                          //
+                          // Declaration order is part of the type's wire
+                          // contract. Appending a constructor leaves every
+                          // existing value byte-identical; reordering does
+                          // not, and is a breaking change.
+    MORLOC_VARIANT  = 26  // A `data` type with at least one constructor that
+                          // takes arguments. Sixteen bytes: a tag byte at
+                          // offset 0, padding, and a relptr at offset 8 to
+                          // the arm's payload -- a tuple of that arm's
+                          // fields, RELNULL for an arm with none.
+                          //
+                          // The payload is behind a pointer so the slot's
+                          // width does not depend on any arm's, which is what
+                          // makes a recursive `data` type have a fixed size.
+                          // Wire form is
+                          // `v<count>(<klen><name><arity><schema>*arity)*`.
+                          //
+                          // Unlike every other type here, the payload's
+                          // schema is chosen by the TAG, so a walker has to
+                          // read the value and not just the schema.
     // Stream-handle types (`F`/`O`/`I`) share a 16-byte tagged-union wire
     // form. The schema code selects the morloc-level type; the tag byte
     // (byte 0 of the field) picks the encoding: `TAG_PATH` (0) means the
@@ -211,6 +246,8 @@ typedef enum {
 #define SCHEMA_OSTREAM  'O'
 #define SCHEMA_ISTREAM  'I'
 #define SCHEMA_CLOSURE  'C'
+#define SCHEMA_ENUM     'e'
+#define SCHEMA_VARIANT  'v'
 
 // Schema: recursive type descriptor used for serialisation/deserialisation.
 //
@@ -416,6 +453,20 @@ void morloc_log_emit(
     uint64_t call_id
 );
 
+// Record one timing for a `benchmark: true` labeled manifold. `key` is
+// the pre-rendered "group\tname\tlang" identity the compiler stamped on
+// the manifold; `seconds` is the duration of one successful call. The
+// record is appended to <tmpdir>/benchmark.records, which the nexus
+// aggregates at end of run into one summary row per label.
+//
+// A file rather than an in-process counter because pools do not share a
+// process model: C++/Rust run worker threads, Python/R fork worker
+// processes, and a counter in a forked child dies with it. Appends are
+// short enough to be atomic under O_APPEND, so concurrent workers --
+// threads or processes -- interleave whole records. NULL `key` is a
+// no-op, as is any call under MORLOC_QUIET.
+void morloc_bench_record(const char* key, double seconds);
+
 // ========================================================================
 // Per-run workdir lifecycle
 // ========================================================================
@@ -548,7 +599,27 @@ typedef enum {
     MORLOC_X_THROW,         // msg -> raises; never returns
     MORLOC_X_CATCH,         // (fallible, fallback) -> value
     MORLOC_X_IF,            // (cond, then, else) -> value
-    MORLOC_X_STREAM_LAYOUT  // IFile handle -> [(U64,U64,U64)]
+    MORLOC_X_STREAM_LAYOUT, // IFile handle -> [(U64,U64,U64)]
+    MORLOC_X_TAG_TEST,      // (subject) + a tag -> Bool. Tests whether a
+                            // `data` value carries a given constructor. The
+                            // tag travels as DATA, not as a second value:
+                            // a payload-bearing constructor is a function
+                            // into its type and has no value to compare
+                            // against. The nexus answers this itself rather
+                            // than dispatching to a pool, because the tag is
+                            // a byte it already holds -- a pattern match in
+                            // a pure morloc function costs no round trip.
+    MORLOC_X_CTOR_FIELD,    // (subject) + a tag and index -> field. Reads one
+                            // field out of a `data` value whose constructor
+                            // a guarding tag test has already established.
+                            // The tag selects the arm whose schema describes
+                            // the out-of-line payload; the index selects the
+                            // field within it.
+    MORLOC_X_CTOR_MAKE      // fields + a tag -> a `data` value. Builds the
+                            // tagged-pointer form: the tag, then the arm's
+                            // fields written out of line as a tuple. A
+                            // constructor with no arguments is its tag byte
+                            // and needs no node.
 } morloc_expression_type;
 
 typedef enum { APPLY_PATTERN, APPLY_LAMBDA, APPLY_FORMAT } morloc_app_expression_type;
@@ -657,12 +728,12 @@ typedef struct morloc_map_expression_s {
     morloc_expression_t* list;
 } morloc_map_expression_t;
 
-// @catch: run `fallible` into scratch, memcpy on success, else
-// evaluate `fallback` into dest.
-typedef struct morloc_catch_expression_s {
-    morloc_expression_t* fallible;
-    morloc_expression_t* fallback;
-} morloc_catch_expression_t;
+// A constructor-pattern tag test: does `subject` carry the same tag as
+// `constructor`? Both are `data` values, so this compares one byte.
+typedef struct morloc_tag_test_expression_s {
+    morloc_expression_t* subject;
+    morloc_expression_t* constructor;
+} morloc_tag_test_expression_t;
 
 // Pure-nexus conditional. Both branches share the If node's schema.
 typedef struct morloc_if_expression_s {
@@ -701,7 +772,7 @@ typedef struct morloc_expression_s {
         morloc_expression_t* unary_expr;
         morloc_save_expression_t* save_expr;
         morloc_map_expression_t* map_expr;
-        morloc_catch_expression_t* catch_expr;
+        morloc_tag_test_expression_t* tag_test_expr;
         morloc_if_expression_t* if_expr;
         morloc_open_expression_t* open_expr;
         morloc_ifile_walk_expression_t* ifile_walk_expr;
@@ -1135,7 +1206,6 @@ void* shmemcpy(void* src, size_t size, ERRMSG);
 bool shfree(absptr_t ptr, ERRMSG);
 bool shincref(absptr_t ptr, ERRMSG);
 void* shcalloc(size_t nmemb, size_t size, ERRMSG);
-void* shrealloc(void* ptr, size_t size, ERRMSG);
 size_t total_shm_size(void);
 volptr_t rel2vol(relptr_t ptr, ERRMSG);
 absptr_t rel2abs(relptr_t ptr, ERRMSG);

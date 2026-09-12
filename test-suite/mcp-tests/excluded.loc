@@ -24,7 +24,8 @@ readStdin ::
   --' stdin: true
   --' metavar: FILE
   Str ->
-  <IO, Err> [Int]
+  <IO> [Int]
 readStdin f = do
-  fi <- @open f :: <IO, Err> (IStream Int)
-  @next fi
+  Ok fi <- (@open f :: <IO> (Try Str (IStream Int)))
+  Ok xs <- @next fi
+  xs

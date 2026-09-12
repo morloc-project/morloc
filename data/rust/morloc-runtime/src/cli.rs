@@ -2146,14 +2146,14 @@ unsafe fn arrow_load_json(
 ///     an SHM-resident voidstar or a parsed JSON/MSGPACK/Arrow result.
 ///
 /// Sites that read packet bytes for *forwarding* (cache.rs returning
-/// cached blobs to a downstream packet builder, slurm_ffi shipping
-/// arg packets to a remote worker) do not go through this function
-/// because they do not unpack -- they pass the bytes through. Those
-/// paths are uncompressed by convention (their writers are
-/// uncompressed, e.g. `put_cache_packet`) so they currently need no
-/// decompression. If a writer ever starts emitting compressed cache
-/// or slurm artifacts, the read sites in those files would need their
-/// own decompress call -- not this function.
+/// cached blobs to a downstream packet builder, slurm_ffi shipping arg
+/// packets to a remote worker) do not go through this function because
+/// they do not unpack -- they pass the bytes through, compressed body
+/// and all. `put_cache_packet` compresses whenever a cache compression
+/// level is set, so a forwarded argument can reach a pool with a zstd
+/// body and a voidstar format tag. Consumers therefore check the
+/// compression field before reading a payload where it lies, rather
+/// than trusting the format tag alone.
 pub unsafe extern "C" fn load_morloc_data_file(
     path: *const c_char,
     mut data: *mut u8,
@@ -2247,14 +2247,19 @@ pub unsafe extern "C" fn load_morloc_data_file(
     if !schema.is_null() && data_size > 0 {
         use crate::schema::SerialType;
         let rs = CSchema::to_rust(schema);
+        // An enum joins this rule for the same reason Str is here: its
+        // CLI surface is a bare identifier, so `cmd G` must mean the
+        // constructor G rather than fail as malformed JSON. The name is
+        // still validated against the constructor list downstream, so
+        // quoting here widens what parses, not what is accepted.
         let bare_str = match rs.serial_type {
             SerialType::String | SerialType::IFile
-        | SerialType::OStream | SerialType::IStream => true,
+        | SerialType::OStream | SerialType::IStream | SerialType::Enum => true,
             SerialType::Optional => rs
                 .parameters
                 .first()
                 .map(|p| matches!(p.serial_type, SerialType::String | SerialType::IFile
-                    | SerialType::OStream | SerialType::IStream))
+                    | SerialType::OStream | SerialType::IStream | SerialType::Enum))
                 .unwrap_or(false),
             _ => false,
         };
@@ -2739,9 +2744,18 @@ unsafe fn parse_cli_data_argument_singular(
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
     clear_errmsg(errmsg);
-    let classified = match classify_arg_source(arg) {
-        Ok(c) => c,
-        Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+    // A bare word that names a constructor of the argument's type is the
+    // value itself; the classifier would otherwise read it as a file that
+    // does not exist.
+    let token = CStr::from_ptr(arg).to_string_lossy();
+    let rs = CSchema::to_rust(schema);
+    let classified = if crate::json::is_bare_ctor_token(&rs, &token) {
+        Classified { kind: ArgSource::Inline, effective: arg }
+    } else {
+        match classify_arg_source(arg) {
+            Ok(c) => c,
+            Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+        }
     };
     parse_cli_data_argument_classified(dest, classified, schema, errmsg)
 }
@@ -3039,6 +3053,93 @@ unsafe fn load_bundle_partial(
     Ok(out)
 }
 
+/// Read one command-line token as a value of `schema_str` and render it as
+/// JSON. The token is read the way a single argument of that type is --
+/// through the source classifier, so a file, a bare constructor, a quoted
+/// string and a literal all resolve -- and the value is written back out as
+/// JSON text for a caller that is assembling a larger value. The returned
+/// string and any error message are malloc'd; the caller frees them.
+#[no_mangle]
+pub unsafe extern "C" fn cli_token_to_json(
+    token: *const c_char,
+    schema_str: *const c_char,
+    errmsg: *mut *mut c_char,
+) -> *mut c_char {
+    clear_errmsg(errmsg);
+    if token.is_null() || schema_str.is_null() {
+        set_errmsg(errmsg, &MorlocError::NullPointer);
+        return ptr::null_mut();
+    }
+    let schema_text = CStr::from_ptr(schema_str).to_string_lossy();
+    let rs = match crate::schema::parse_schema(&schema_text) {
+        Ok(s) => s,
+        Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+    };
+    let cs = CSchema::from_rust(&rs);
+    let scratch = match shm::shcalloc(1, rs.width) {
+        Ok(p) => p,
+        Err(e) => { CSchema::free(cs); set_errmsg(errmsg, &e); return ptr::null_mut(); }
+    };
+    let mut err: *mut c_char = ptr::null_mut();
+    let loaded = parse_cli_data_argument_singular(scratch, token as *mut c_char, cs, &mut err);
+    CSchema::free(cs);
+    if !err.is_null() {
+        *errmsg = err;
+        return ptr::null_mut();
+    }
+    if loaded.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other("could not read the value".into()));
+        return ptr::null_mut();
+    }
+    match crate::json::voidstar_to_json_string(loaded as shm::AbsPtr, &rs) {
+        Ok(js) => match std::ffi::CString::new(js) {
+            Ok(c) => c.into_raw(),
+            Err(_) => { set_errmsg(errmsg, &MorlocError::Other("value is not valid text".into())); ptr::null_mut() }
+        },
+        Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
+    }
+}
+
+/// Per-field schemas of a record being read field by field. A field that
+/// back-references the record gets a self-contained copy, owned here and
+/// freed with the set; every other field borrows the record's own child.
+struct FieldSchemas {
+    ptrs: Vec<*const CSchema>,
+    owned: Vec<*mut CSchema>,
+}
+
+impl FieldSchemas {
+    unsafe fn new(schema: *const CSchema, rs: &crate::schema::Schema) -> FieldSchemas {
+        let mut ptrs = Vec::with_capacity(rs.parameters.len());
+        let mut owned = Vec::new();
+        for (i, fs) in rs.parameters.iter().enumerate() {
+            let needs_root = rs.name.as_deref().map_or(false, |n| crate::recur::refers_to(fs, n));
+            if needs_root {
+                let rooted = CSchema::from_rust(&crate::recur::reroot_under(rs, fs));
+                owned.push(rooted);
+                ptrs.push(rooted as *const CSchema);
+            } else {
+                ptrs.push(*(*schema).parameters.add(i));
+            }
+        }
+        FieldSchemas { ptrs, owned }
+    }
+
+    fn get(&self, i: usize) -> *const CSchema {
+        self.ptrs[i]
+    }
+}
+
+impl Drop for FieldSchemas {
+    fn drop(&mut self) {
+        for p in self.owned.drain(..) {
+            // SAFETY: every pointer here came from CSchema::from_rust above
+            // and is freed exactly once.
+            unsafe { CSchema::free(p) };
+        }
+    }
+}
+
 unsafe fn parse_cli_data_argument_unrolled(
     mut dest: *mut u8,
     default_value: *mut c_char,
@@ -3070,6 +3171,12 @@ unsafe fn parse_cli_data_argument_unrolled(
     }
 
     let n = rs.parameters.len();
+
+    // A field of a recursive record refers back to the record. Read on its
+    // own, that reference has nothing to resolve against, so such a field
+    // is read through a copy of its schema with the record spliced in.
+    // Fields that make no such reference use the record's own sub-schema.
+    let field_schemas = FieldSchemas::new(schema, &rs);
 
     // Source 1: bundle (per-field voidstar, may be absent or partial).
     let bundle_fields: Vec<Option<shm::AbsPtr>> = if default_value.is_null() {
@@ -3106,7 +3213,7 @@ unsafe fn parse_cli_data_argument_unrolled(
     for i in 0..n {
         let field_val = *fields.add(i);
         if !field_val.is_null() {
-            let elem_cs = *(*schema).parameters.add(i);
+            let elem_cs = field_schemas.get(i);
             let fs = &rs.parameters[i];
             let field_shape = per_field_shapes.and_then(|s| s.get(i)).copied();
             let loaded = if let Some(fshape) = field_shape.filter(|s| s.is_non_default()) {
@@ -3157,7 +3264,7 @@ unsafe fn parse_cli_data_argument_unrolled(
     for i in 0..n {
         let default_field = *default_fields.add(i);
         if !default_field.is_null() {
-            let elem_cs = *(*schema).parameters.add(i);
+            let elem_cs = field_schemas.get(i);
             let fs = &rs.parameters[i];
             let p = match shm::shcalloc(1, fs.width) {
                 Ok(p) => p,

@@ -1,4 +1,5 @@
 module main
+
   ( showInt
   , showReal
   , showBool
@@ -31,11 +32,15 @@ module main
   , showShowInt
   )
 
+-- `Try` is declared in `internal` and reaches user code through `root`;
+-- a fallible intrinsic or `@try` needs it in scope.
+import root
+
 -- No language-specific imports: all nexus-level evaluation
 --
--- @read moved to `<Err> a` in the effect-migration; parse failure
+-- @read moved to `a` in the effect-migration; parse failure
 -- raises Err instead of returning None. Every @read caller either
--- @catches (with a sentinel) or declares <Err> in its signature.
+-- @catches (with a sentinel) or declares in its signature.
 
 effect Err
 
@@ -69,12 +74,12 @@ showRecord = @show {x = 1, y = 2}
 showNested :: Str
 showNested = @show [[1, 2], [3, 4]]
 
--- @read is now `<Err> a`; wrap in @catch to recover a value to @show.
+-- @read is now `a`; wrap in @catch to recover a value to @show.
 showOptSome :: Str
-showOptSome = @show (@catch (@read "42") -1)
+showOptSome = @show (match (@read "42") | (Ok _cv) = _cv | (Err _) = -1)
 
 showOptNone :: Str
-showOptNone = @show (@catch (@read "bad") -1)
+showOptNone = @show (match (@read "bad") | (Ok _cv) = _cv | (Err _) = -1)
 
 showEmptyList :: Str
 showEmptyList = @show ([] :: [Int])
@@ -82,60 +87,60 @@ showEmptyList = @show ([] :: [Int])
 -- === @read tests -- each returns bare `a`; sentinel on Err ===
 
 readInt :: Int
-readInt = @catch (@read "42") -1
+readInt = match (@read "42") | (Ok _cv) = _cv | (Err _) = -1
 
 readReal :: Real
-readReal = @catch (@read "3.14") -1.0
+readReal = match (@read "3.14") | (Ok _cv) = _cv | (Err _) = -1.0
 
 readBool :: Bool
-readBool = @catch (@read "true") False
+readBool = match (@read "true") | (Ok _cv) = _cv | (Err _) = False
 
 readStr :: Str
-readStr = @catch (@read "\"hello\"") "err"
+readStr = match (@read "\"hello\"") | (Ok _cv) = _cv | (Err _) = "err"
 
 readList :: [Int]
-readList = @catch (@read "[1,2,3]") []
+readList = match (@read "[1,2,3]") | (Ok _cv) = _cv | (Err _) = []
 
 readTuple :: (Int, Str)
-readTuple = @catch (@read "[10,\"abc\"]") (0, "err")
+readTuple = match (@read "[10,\"abc\"]") | (Ok _cv) = _cv | (Err _) = (0, "err")
 
 readRecord :: Point
-readRecord = @catch (@read "{\"x\":1,\"y\":2}") {x = 0, y = 0}
+readRecord = match (@read "{\"x\":1,\"y\":2}") | (Ok _cv) = _cv | (Err _) = {x = 0, y = 0}
 
 readInvalid :: Int
-readInvalid = @catch (@read "not_a_number") -1
+readInvalid = match (@read "not_a_number") | (Ok _cv) = _cv | (Err _) = -1
 
 readTypeMismatch :: Int
-readTypeMismatch = @catch (@read "\"hello\"") -1
+readTypeMismatch = match (@read "\"hello\"") | (Ok _cv) = _cv | (Err _) = -1
 
 readEmptyStr :: Int
-readEmptyStr = @catch (@read "") -1
+readEmptyStr = match (@read "") | (Ok _cv) = _cv | (Err _) = -1
 
 -- === round-trip tests: same shape via @catch ===
 
 roundTripInt :: Int
-roundTripInt = @catch (@read (@show 42)) -1
+roundTripInt = match (@read (@show 42)) | (Ok _cv) = _cv | (Err _) = -1
 
 roundTripReal :: Real
-roundTripReal = @catch (@read (@show 3.14)) -1.0
+roundTripReal = match (@read (@show 3.14)) | (Ok _cv) = _cv | (Err _) = -1.0
 
 roundTripBool :: Bool
-roundTripBool = @catch (@read (@show True)) False
+roundTripBool = match (@read (@show True)) | (Ok _cv) = _cv | (Err _) = False
 
 roundTripStr :: Str
-roundTripStr = @catch (@read (@show "hello")) "err"
+roundTripStr = match (@read (@show "hello")) | (Ok _cv) = _cv | (Err _) = "err"
 
 roundTripList :: [Int]
-roundTripList = @catch (@read (@show [1, 2, 3])) []
+roundTripList = match (@read (@show [1, 2, 3])) | (Ok _cv) = _cv | (Err _) = []
 
 roundTripTuple :: (Int, Str)
-roundTripTuple = @catch (@read (@show (10, "abc"))) (0, "err")
+roundTripTuple = match (@read (@show (10, "abc"))) | (Ok _cv) = _cv | (Err _) = (0, "err")
 
 roundTripRecord :: Point
-roundTripRecord = @catch (@read (@show {x = 1, y = 2})) {x = 0, y = 0}
+roundTripRecord = match (@read (@show {x = 1, y = 2})) | (Ok _cv) = _cv | (Err _) = {x = 0, y = 0}
 
 roundTripNested :: [[Int]]
-roundTripNested = @catch (@read (@show [[1, 2], [3, 4]])) []
+roundTripNested = match (@read (@show [[1, 2], [3, 4]])) | (Ok _cv) = _cv | (Err _) = []
 
 -- === edge case: @show of @show ===
 

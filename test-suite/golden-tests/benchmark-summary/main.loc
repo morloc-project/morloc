@@ -1,0 +1,72 @@
+-- `benchmark: true` on a labeled group measures every successful call to that
+-- manifold and reports one summary row per label at end of run. It is the
+-- measurement counterpart to `log: true`, which reports each call as it
+-- happens: a benchmark wants the aggregate, not a line per iteration.
+--
+-- Labels are per-call-site, so one term measured under two labels yields two
+-- rows, and the call counts (n=2, n=3) are what show records were folded
+-- rather than echoed. The two settings are independent: a benchmark-only run
+-- emits no log line, and a label carrying both reports the pair from one
+-- place. The measurement follows the manifold into whatever pool realizes it,
+-- so {lang} distinguishes rows that would otherwise collide. Rows come out
+-- ordered by (group, name, lang) rather than by arrival, because a benchmark
+-- exists to be compared against another run and arrival order is not
+-- reproducible. And a call that raised is not a measurement of anything, so it
+-- is reported and dropped rather than folded in.
+
+module main (run, cppOnly, crossLet, rustBoth, rustFail)
+
+import root-py
+import root-cpp
+import root-rust
+
+source Py from "lib.py" ("incr")
+source Cpp from "lib.hpp" ("triple")
+source Rust from "lib.rs" ("quad", "rust_pos" as rustPos)
+
+incr :: Int -> Int
+triple :: Int -> Int
+quad :: Int -> Int
+rustPos :: Int -> Bool
+
+-- Realized entirely in the C++ pool, so the wrap is emitted by the C++
+-- printer rather than the generic one and the row carries lang=cpp.
+cppOnly :: Int -> Int
+cppOnly x = deep@triple (deep@triple x)
+
+-- A labeled cross-pool call bound in a NON-TAIL let. The wrap belongs to the
+-- caller pool exactly once: a second row under a different {lang} would mean
+-- the foreign callee was wrapped too, and n=2 would mean the enclosing
+-- manifold picked up the label as well. Both are double-counting, which is
+-- worse than no measurement because it looks like a result.
+crossLet :: Int -> Int
+crossLet x =
+  let a = slow@triple x
+      b = quick@incr a
+   in b
+
+run :: Int -> Int
+run x =
+  let a = quick@incr x
+      b = quick@incr a
+      c = quick@incr b
+   in slow@triple c
+
+-- Realized entirely in the Rust pool, where one guard reports the start line,
+-- the pass line and the timing. A label carrying both settings therefore pins
+-- all three against each other: the recorded count must agree with the two
+-- call sites and with the two log lines, not drift from them.
+rustBoth :: Int -> Int
+rustBoth x = rs@quad (rs@quad x)
+
+-- A labeled manifold that raises. The fail line fires in place of the pass
+-- line and no row is recorded for the call: a call that raised did not do the
+-- work being measured, so folding its duration into the mean would report a
+-- number describing nothing. {lang} in the fail line is what shows the failing
+-- manifold was the Rust one, since a call with no row names no language.
+boom :: Int -> Int
+boom x ? rustPos x = @throw "boom: no work was done"
+       : x
+
+rustFail :: Int -> Int
+rustFail x = rs@boom x

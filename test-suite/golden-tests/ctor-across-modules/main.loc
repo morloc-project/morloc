@@ -1,0 +1,39 @@
+-- Constructors crossing module boundaries.
+--
+-- Three routes, each of which was broken:
+--
+--  * an explicit export list naming only the type (`types.loc`), which used
+--    to fail at the export check because an UPPER export item could only be
+--    a type;
+--  * a re-exporting middle module (`mid.loc`), which has no constructor
+--    table of its own;
+--  * a namespace-aliased import, under which every constructor is renamed
+--    to `m.Red` -- a spelling that could not be written, so the type was
+--    nameable and uninhabitable.
+--
+-- The alias-qualified form is exercised in both expression and pattern
+-- position; the selective import brings `Shape`'s constructors in bare.
+
+module main (fromMid, matchAlias, selective, roundtrip)
+
+import .types (Shape, describe, area)
+import .mid as m
+import root-py
+
+-- a constructor reached through the re-exporting module, under an alias
+fromMid :: Str
+fromMid = describe m.Green
+
+-- alias-qualified constructors in pattern position
+matchAlias :: Color -> Str
+matchAlias | m.Red = "R"
+           | m.Green = "G"
+           | m.Blue = "B"
+
+-- a selective import brings the type's constructors in bare
+selective :: Real -> Real
+selective r = area (Circle r) + area Dot
+
+-- a value built here under the alias, matched in the declaring module
+roundtrip :: Str
+roundtrip = describe m.Blue

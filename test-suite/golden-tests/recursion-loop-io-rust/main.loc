@@ -21,6 +21,10 @@ emit :: Int -> <IO> Int
 -- loop iterates effect-free and forces the base emit at the end. Exercises the
 -- Rust native-loop lowering under an <IO> return (the loop force path in Rust,
 -- which the py <IO> goldens cover but no Rust golden did).
+--
+-- It is also one of the two tests that pin the capture mode of an effect thunk:
+-- the loop's thunk outlives the frame that builds it, so it must capture by
+-- value. See rust-thunk-capture for the frames where it must not.
 sumEmit :: Int -> Int -> <IO> Int
 sumEmit acc n
   ? eq n 0 = emit acc

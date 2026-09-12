@@ -19,7 +19,7 @@
       ],
       "arguments": [
         {
-          "name": "arg0",
+          "name": "_1",
           "role": "positional",
           "position": 0,
           "metavar": null,
@@ -113,7 +113,7 @@
             {
               "key": "tmpDir",
               "argument": {
-                "name": "tmp-dir",
+                "name": "tmpDir",
                 "role": "option",
                 "metavar": "FILE",
                 "required": false,
@@ -143,7 +143,7 @@
             {
               "key": "numThreads",
               "argument": {
-                "name": "threads",
+                "name": "numThreads",
                 "role": "option",
                 "metavar": "INT",
                 "required": false,
@@ -173,7 +173,7 @@
             {
               "key": "removeCaches",
               "argument": {
-                "name": "clean",
+                "name": "removeCaches",
                 "role": "flag",
                 "required": false,
                 "short": null,
@@ -217,7 +217,7 @@
       ],
       "arguments": [
         {
-          "name": "arg0",
+          "name": "_1",
           "role": "positional",
           "position": 0,
           "metavar": null,
@@ -271,7 +271,7 @@
       ],
       "arguments": [
         {
-          "name": "arg0",
+          "name": "_1",
           "role": "positional",
           "position": 0,
           "metavar": null,
@@ -335,7 +335,7 @@
       ],
       "arguments": [
         {
-          "name": "file",
+          "name": "_1",
           "role": "positional",
           "position": 0,
           "metavar": "FILE",
@@ -415,6 +415,90 @@
       ]
     },
     {
+      "name": "pairFiles",
+      "kind": "remote",
+      "group": null,
+      "description": [
+        "Join two paths with a semicolon"
+      ],
+      "arguments": [
+        {
+          "name": "source",
+          "role": "positional",
+          "position": 0,
+          "metavar": "FILE",
+          "required": true,
+          "variadic": false,
+          "stdin": false,
+          "quoted": true,
+          "default": null,
+          "description": [
+            "the file to read from"
+          ],
+          "type": {
+            "morloc": "Str",
+            "wire": "s",
+            "structure": {
+              "type": "string"
+            }
+          },
+          "named_type_kind": null,
+          "input": {
+            "source": "inline",
+            "form": "auto",
+            "checks": [],
+            "list_source": "inline",
+            "list_form": "auto",
+            "list_checks": [],
+            "format": "literal string"
+          }
+        },
+        {
+          "name": "_2",
+          "role": "positional",
+          "position": 1,
+          "metavar": "FILE",
+          "required": true,
+          "variadic": false,
+          "stdin": false,
+          "quoted": true,
+          "default": null,
+          "description": [
+            "the file to write to"
+          ],
+          "type": {
+            "morloc": "Str",
+            "wire": "s",
+            "structure": {
+              "type": "string"
+            }
+          },
+          "named_type_kind": null,
+          "input": {
+            "source": "inline",
+            "form": "auto",
+            "checks": [],
+            "list_source": "inline",
+            "list_form": "auto",
+            "list_checks": [],
+            "format": "literal string"
+          }
+        }
+      ],
+      "return": {
+        "description": [],
+        "streaming": false,
+        "type": {
+          "morloc": "Str",
+          "wire": "s",
+          "structure": {
+            "type": "string"
+          }
+        }
+      },
+      "terminals": []
+    },
+    {
       "name": "addOne",
       "kind": "pure",
       "group": null,
@@ -423,7 +507,7 @@
       ],
       "arguments": [
         {
-          "name": "n",
+          "name": "_1",
           "role": "positional",
           "position": 0,
           "metavar": "N",
@@ -474,7 +558,7 @@
       ],
       "arguments": [
         {
-          "name": "arg0",
+          "name": "_1",
           "role": "positional",
           "position": 0,
           "metavar": null,
@@ -683,6 +767,28 @@
       }
     },
     {
+      "name": "pairFiles",
+      "description": "Join two paths with a semicolon",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "description": "the file to read from"
+          },
+          "_2": {
+            "type": "string",
+            "description": "the file to write to"
+          }
+        },
+        "required": [
+          "source",
+          "_2"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "addOne",
       "description": "Add one to an integer",
       "inputSchema": {
@@ -717,3 +823,6 @@
     }
   ]
 }
+=== optional positional omitted ===
+=== optional positional supplied ===
+21

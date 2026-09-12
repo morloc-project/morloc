@@ -32,17 +32,17 @@ type RFile = Str
 produce :: Int -> [Int]
 produce n = mk n
 
-producer :: ([Int] -> <IO, Err> ()) -> <IO, Err> ()
+producer :: ([Int] -> <IO> ()) -> <IO> ()
 producer sink = do
   _ <- sink (mk 0)
   sink (mk 1)
 
 --' Plain reader whose only arg is the imported `RFile` alias. If the alias
 --' docstrings propagate, this arg is optional (stdin) and check.path'd.
-readCmd :: RFile -> <IO, Err> [Int]
+readCmd :: RFile -> <IO> [Int]
 readCmd f = do
-  fi <- @open f :: <IO, Err> (IStream Int)
-  xs <- @next fi
+  Ok fi <- @open f :: <IO> (Try Str ((IStream Int)))
+  Ok xs <- @next fi
   echo xs
 
 --' Terminal-action command (mosm `cut` shape): a render.buffer terminal plus a
@@ -50,5 +50,5 @@ readCmd f = do
 --' optional (stdin) here too.
 --' @name streamcmd
 --' @render -r/--text=renderInts @stream
-streamCmd :: Slice -> RFile -> <IO, Err> ()
+streamCmd :: Slice -> RFile -> <IO> ()
 streamCmd s f = @collect producer

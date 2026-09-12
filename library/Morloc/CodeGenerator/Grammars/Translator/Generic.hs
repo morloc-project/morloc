@@ -431,6 +431,61 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         , lcArgManifoldOwnership = \_ -> return Owned
         , lcOwnArg = \_ _ x -> x
         , lcWithCallerScope = id
+        -- Python calls the arm's generated dataclass; R builds a classed
+        -- list, whose class carries the arm name the same way a factor's
+        -- levels carry an enum's.
+        , lcVariantLit = \_ n _ xs ->
+            if ldEnumLitByName desc
+              then "list" <> tupled [dquotes (pretty n), "list" <> tupled xs]
+              -- A one-element Python tuple needs its trailing comma INSIDE
+              -- the parentheses, or it is just a parenthesised value.
+              else tupled [dquotes (pretty n), pyTuple xs]
+        , lcEnumLit = \_ names n i ->
+            if ldEnumLitByName desc
+              -- An R enum value is an ordered factor: its whole level set
+              -- plus a code into it. A literal has to be built the same
+              -- way, or the same morloc value has one R type when it is
+              -- read off the wire and another when it is written here --
+              -- and then `==` compares an integer code against a string
+              -- and `<` compares constructor names alphabetically.
+              then "factor" <> tupled
+                     [ dquotes (pretty n)
+                     , "levels =" <+> "c" <> tupled (map (dquotes . pretty) names)
+                     , "ordered = TRUE"
+                     ]
+              else pretty i
+        -- TEMPORARY REPRESENTATION. A payload-bearing `data` crosses into
+        -- Python and R as a STRUCTURAL pair -- the constructor's name and a
+        -- sequence of its fields -- rather than as a declared native type.
+        --
+        -- This matches what morloc already does for the analogous types in
+        -- these two languages (a record is a dict / list, an enum is an int),
+        -- and it needs nothing the generic C marshallers cannot build. A
+        -- native form (a frozen dataclass per arm, an S3 classed list) is the
+        -- intended end state, but it needs a value to be converted at every
+        -- serialization boundary, and no such mechanism exists yet -- the one
+        -- coercion node in the compiler is driven by the typechecker for
+        -- optionals, not by a boundary. Building it is worth doing for every
+        -- composite type at once rather than for sum types alone.
+        , lcVariantTagTest = \_ n _ subj ->
+            if ldEnumLitByName desc
+              then parens (subj <> "[[1]]" <+> "==" <+> dquotes (pretty n))
+              else parens (parens subj <> "[0]" <+> "==" <+> dquotes (pretty n))
+        , lcCtorField = \_ _ i subj ->
+            if ldEnumLitByName desc
+              -- R indexes from one, so a field's position is its wire index
+              -- plus one; the wire index is what the compiler carries.
+              then subj <> "[[2]][[" <> pretty (i + 1) <> "]]"
+              else parens subj <> "[1][" <> pretty i <> "]"
+        -- A Python enum value IS its ordinal, so the test is against the
+        -- tag. An R one is a factor, and R matches a factor to a character
+        -- by label -- so comparing against the bare name runs the same test
+        -- the factor-to-factor form would, without building a level set to
+        -- run it against.
+        , lcEnumTagTest = \_ _ n i subj ->
+            if ldEnumLitByName desc
+              then parens (subj <+> "==" <+> dquotes (pretty n))
+              else parens (subj <+> "==" <+> pretty i)
         , lcCoerceOptional = id
         , lcTypeOf = \_ -> return Nothing
         , lcSerialAstType = \_ -> return Nothing
@@ -487,6 +542,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         , lcReleaseStmt = \v -> pretty (ldReleasePacketFn desc) <> "(" <> pretty v <> ")"
         , lcReturn = \e -> pretty $ substituteT (ldReturnTemplate desc) [("expr", render e)]
         , lcMakeDoBlock = genericMakeDoBlock desc cfg
+        , lcMakeTry = genericMakeTry desc
         , lcSerialize = defaultSerialize cfg
         , lcDeserialize = \_ -> defaultDeserialize cfg
         , lcReifyClosure = \v _ ->
@@ -998,6 +1054,20 @@ genericMakeDoBlock desc cfg _ stmts expr
     suspendBlock = ldDoBlockBlock desc
     exprThunk = pretty $ substituteT (ldDoBlockExpr desc) [("expr", render expr)]
 
+-- | @try body@ as a call to the language's mlc_try helper with two unary
+-- lambdas. The parameter names avoid a leading underscore, which R does
+-- not accept in an identifier. Expression-shaped on purpose: a statement form would need a
+-- declared result variable, which Python and R cannot spell in an
+-- expression position and C++ would need the result type for.
+genericMakeTry :: LangDescriptor -> MDoc -> (MDoc -> MDoc) -> (MDoc -> MDoc) -> MDoc
+genericMakeTry desc thunk okWrap errWrap =
+  pretty (ldIntrinsicPrefix desc) <> "mlc_try"
+    <> tupled [thunk, lam "mlcTryV" (okWrap "mlcTryV"), lam "mlcTryM" (errWrap "mlcTryM")]
+  where
+    lam arg body =
+      pretty $ substituteT (ldLambdaTemplate desc)
+        [("args", arg), ("body", render body)]
+
 genericMakeLet :: LangDescriptor -> (Int -> MDoc) -> Int -> PoolDocs -> PoolDocs -> PoolDocs
 genericMakeLet desc namer i p1 p2 =
   let rs = poolPriorLines p1 ++ [namer i <+> pretty (ldAssignOp desc) <+> poolExpr p1] ++ poolPriorLines p2
@@ -1017,6 +1087,9 @@ genericPrintExpr desc = go
     go (IBoolLit True) = pretty (ldBoolTrue desc)
     go (IBoolLit False) = pretty (ldBoolFalse desc)
     go (INullLit _) = pretty (ldNullLiteral desc)
+    -- A language that does not distinguish its unit from its none
+    -- spells both the same way.
+    go IUnitLit = pretty (ldNullLiteral desc)
     go (IIntLit _ i) = viaShow i <> pretty (ldIntLiteralSuffix desc)
     go (IRealLit _ (RealFinite r)) = viaShow r
     go (IRealLit _ RealPosInf) = pretty (ldRealPosInf desc)
@@ -1082,8 +1155,6 @@ genericPrintExpr desc = go
               , ("body", bodyText)
               ]
     go (IRawExpr d) = pretty d
-    go (IDoBlock e) =
-      pretty $ substituteT (ldDoBlockExpr desc) [("expr", render (go e))]
     go (IEval e) = go e <> "()"
     go (IIntrinsicHash sid e) =
       let prefix = ldIntrinsicPrefix desc
@@ -1178,9 +1249,6 @@ genericPrintExpr desc = go
     go (IIntrinsicThrow msg) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_throw(" <> go msg <> ")"
-    go (IIntrinsicCatch fallible fallback) =
-      let prefix = ldIntrinsicPrefix desc
-       in pretty prefix <> "mlc_catch(" <> go fallible <> ", " <> go fallback <> ")"
     -- Unified pattern walker. Path string + handle + variable runtime
     -- args (bracket bounds) marshalled by the per-language wrapper into
     -- the C ABI (mlc_ifile_walk handle path args n_args). Python and R
@@ -1403,7 +1471,9 @@ printProgram desc prog =
     -- version. The shim is the per-language @__mlc_wrap_log@ helper; the
     -- three template strings are passed as arguments and the helper
     -- formats them on emission with the runtime values for @{date}@,
-    -- @{runtime}@, and @{id}@.
+    -- @{runtime}@, and @{id}@. A fifth argument carries the benchmark
+    -- identity when the label is measured, or the language's null when
+    -- it is not.
     logRebindings :: [MDoc]
     logRebindings
       | T.null (ldLogWrap desc) = []
@@ -1414,6 +1484,7 @@ printProgram desc prog =
                 , quoteOrNone (renderedStart tmpl)
                 , quoteOrNone (renderedPass tmpl)
                 , quoteOrNone (renderedFail tmpl)
+                , quoteOrNone (renderedBenchKey tmpl)
                 , manNamer i
                 ]
           | (i, tmpl) <- Map.toAscList (ipLogTemplates prog)
@@ -1596,3 +1667,10 @@ walkGenericSelectorBrackets desc =
     (\results -> case ldTupleConstructor desc of
         "" -> tupled results
         name -> pretty name <> tupled results)
+
+-- | A Python tuple literal, with the trailing comma a one-element tuple
+-- needs to be a tuple at all.
+pyTuple :: [MDoc] -> MDoc
+pyTuple [] = "()"
+pyTuple [x] = parens (x <> ",")
+pyTuple xs = tupled xs
