@@ -1,69 +1,127 @@
-Unreleased
-----------
+0.103.0 [2026-09-12]
+--------------------
 
- - a `data` type may refer to itself from inside a list or other container
-   (`data Rose a = Tip a | Branch a [Rose a]`) in a C++ or Rust pool, and
-   under a user-mapped template
- - `@unroll` on a `data`-typed argument gives one option per constructor,
-   mutually exclusive: a bare flag for an argument-free constructor, exactly
-   as many values as fields for the rest; `@default` and `?T` make the
-   choice optional
- - a constructor whose lowercase name is `help` or `version` is refused on
-   an unrolled argument, since the command line owns those options
- - an alias's docstrings now reach a use site through `?`: a `?Path` argument
-   enforces the alias's `@check.path`, and a positional `?Count` whose alias
-   declares a `@default` is rejected as a bare `Count` always was
- - a constructor is matched on the command line without regard to case;
-   quoted JSON is still matched exactly, and two constructors of one type
-   may no longer differ only in case
- - a constructor may carry a docstring, shown in terminal help under a
-   `Data Types` block, in the `--json-help` glossary, and in the MCP tool's
-   argument description
- - a `data`-typed option may give its default as the bare constructor, a
-   `@many` option takes bare constructors, and an argument-free constructor
-   of a payload-bearing `data` may be typed bare
- - two `data` types may refer to each other, and a record may sit on such a
-   cycle, so an abstract syntax tree can be declared as it is written
- - a record held in a constructor's payload reaches a C++ pool with its
-   marshallers, and a compiler-generated record held there compiles
- - an unrolled record whose field refers back to the record reads its
-   fields from the command line
- - the composition operator `(.)` may be used as a value again
- - a `data` type carries its constructors through an explicit export list, a
-   selective import, and a module that only re-exports it
- - a constructor imported under a namespace alias is written `p.Red`, in an
-   expression and in a `|` pattern alike
- - a constructor in a binding position, and a dotted name whose qualifier is
-   no import alias, are errors rather than silent binders
- - a Rust pool no longer prints a panic and aborts once it has answered
- - a function with an effectful return type may return a plain value
- - a record keeps its field order through a getter or a setter
- - a setter may write a plain value into an optional field
- - a selector naming both a field and a tuple slot reports an error, not a crash
- - `@append` starts a stream file that is not there yet
- - `@concat` leaves its destination alone when a merge fails, and accepts a
-   destination that is also one of its sources
- - the help defines every named type it prints, including one reached only
-   through another type's field
- - the help no longer publishes a wire form for a type the program never packs
- - declaring `@default` on a second terminal action is an error rather than
+Sum types
+ * `data` declares a closed set of alternatives, and a constructor is a value
+   of that type: `data Color = Red | Green | Blue`. Constructors may carry
+   fields: `data Shape = Circle Real | Rect Real Real | Dot`
+ * A value is eliminated by pattern matching, in a `|` clause set or in a
+   `match` expression; clauses are checked for exhaustiveness and redundancy,
+   and a constructor pattern nests inside another. A getter into a
+   payload-bearing type is rejected, since which fields exist depends on the
+   tag
+ * A `data` type may be recursive, through a container (`data Rose a = Tip a |
+   Branch a [Rose a]`) or mutually with another `data`, and a record may sit
+   on such a cycle, so an abstract syntax tree is declared as it is written
+ * A `data` type takes parameters, and its per-language form is a template
+   instantiated per use (`Box Int` is `MyBox<int>`); a non-regular type is
+   reported rather than expanded without end
+ * Constructors travel with their type across module boundaries: exporting
+   `Color` carries `Red`, `Green` and `Blue`, a selective import brings them,
+   a re-export passes them on, and one imported under a namespace is written
+   `p.Red` in expressions and patterns alike
+ * Every backend has a native form, generated when the declaration names
+   none. An argument-free type is an int-backed enumeration in Python, an
+   ordered factor in R, a scoped enumeration in C++ and an enum in Rust, and
+   comparing or ordering its values agrees with the declaration in every
+   language; a payload-bearing type is a generated variant in C++ and Rust
+ * A constructor may carry a docstring, shown in terminal help under a `Data
+   Types` block, in the `--json-help` glossary, and in the MCP tool's argument
+   description
+ * On the command line a bare token names a constructor without regard to
+   case; the help lists the constructors an argument accepts; a `data`-typed
+   option may default to a bare constructor and a `@many` option takes them.
+   `@unroll` on a `data` argument gives one mutually exclusive option per
+   constructor: a bare flag for an argument-free constructor, exactly as many
+   values as fields for the rest
+ * The wire form: an argument-free type is one byte, so an array of them is
+   a byte buffer; a payload-bearing type is a tag and a pointer to its fields.
+   The tag is the constructor's position in the declaration, so appending an
+   alternative keeps every existing value valid and reordering does not
+ * Constructors are unique across a program, which is what lets a bare
+   constructor be typed without annotation; two constructors of one type may
+   not differ only in case, and a constructor named `help` or `version`
+   cannot be unrolled
+
+Failure is a value: `Try` replaces the `Err` effect
+ * The standard library declares `data Try e a = Err e | Ok a`, and every
+   fallible intrinsic (`@read`, `@load`, ...) returns `Try Str a` instead of
+   carrying an `<Err>` effect. Nothing about it is built into the compiler:
+   it obeys the same constructor, wire and matching rules as any other `data`
+ * `@try e` replaces `@catch`: it takes any expression, runs it with native
+   exceptions caught, and yields `Ok` or `Err` with the message. A parse that
+   may fail can now be mapped over a list rather than confined to a do-block
+ * A result is consumed with `match e | (Ok x) = ... | (Err m) = ...`, or
+   with a refutable bind in a do-block, `Ok x <- @load path`
+ * A do-block statement whose `Try` result goes unbound fails fast on `Err`;
+   binding it, to a name or to `_`, opts out. A failed export writes its
+   message to stderr and exits nonzero rather than printing an error value
+   as a success
+ * A function with an effectful return type may return a plain value, and an
+   effectful conditional compiles whether it is forced or returned
+ * Breaking: every fallible signature changes shape, and `<Err>`, `@catch`
+   are gone. A fallible intrinsic or `@try` requires `import root`, which
+   brings `Try`. `@throw` takes a string only
+
+Benchmarks
+ * A labeled group may carry `benchmark: true`. Where `log: true` reports
+   every call, a benchmark reports one row per label at end of run through
+   the program-wide `benchmark-template` (`summary` subfield) with `{count}`,
+   `{mean}`, `{min}`, `{max}`, `{total}` and `{stddev}` of every successful
+   call; rows are ordered by `(group, name, lang)` so runs compare. Rust
+   pools now honor labels, and a labeled cross-pool call bound in a non-tail
+   let keeps its label
+
+Generated command line interfaces
+ * An optional argument may be left off the command line, which passes null;
+   a required positional may no longer follow an optional one
+ * Breaking: every machine-readable view (`--json-help`, MCP, HTTP) publishes
+   one name per argument, computed once and stored in the manifest: the
+   author's `@name` or the position. A name colliding across categories is a
+   build error rather than a silently dropped tool
+ * The help defines every named type it prints, including one reached only
+   through another type's field, and publishes no wire form for a type the
+   command never packs
+ * A second `@default` terminal action is a compile error rather than
    silently ignored
- - `morloc list -v` shows a grouped command as it must be typed, with its
-   group
- - shell completions offer every `morloc` subcommand, not the seven they were
-   written with
- - a type error against an alias defined in another module says that the alias
+ * Prose in a docstring reaches the help as written; an ordinary sentence
+   beginning `Word:` no longer warns, and a misspelled directive names the
+   one it resembles
+ * `morloc list -v` shows a grouped command as it must be typed, and the
+   shell completions offer every subcommand
+
+Other
+ * A setter naming several fields writes each value to the field it was
+   written at, not to the next declared field; a record keeps its field order
+   through a getter or setter; a setter may write a plain value into an
+   optional field; a selector naming both a field and a tuple slot reports an
+   error instead of crashing
+ * `@append` starts a stream file that is not there yet; `@concat` leaves its
+   destination alone when a merge fails and accepts a destination that is
+   also one of its sources; a stream whose elements have a named type can be
+   appended to and piped between processes again
+ * Results crossing pools in shared memory are handed off with their
+   reference, so a daemon under concurrent load no longer reads zeros or
+   another request's payload; the allocator claims a block under its lock
+   and refuses to acquire a dying one
+ * Shared-memory leaks closed: a retired worker's deferred blocks, a payload
+   a pool expanded for itself, a table held for the life of the process, a
+   Rust pool that never released what it received, a C++ pool freeing a
+   borrowed schema, and the eval arena double-freeing registry-owned blocks
+ * A record of fixed-width fields is copied and hashed as one block
+ * A Rust pool no longer prints a panic and aborts after answering, and
+   captures an effect thunk by value only when it escapes the frame
+ * A temp file made on a worker thread belongs to the call that made it
+ * A value sent over the HTTP API is encoded, not quoted, so a string with a
+   quote or backslash arrives intact
+ * A type error against an alias defined in another module says the alias
    has to be imported alongside the term
- - the stdin framing error names the remedy and no longer claims morloc
-   packets are the default output format
- - prose in a docstring reaches the help as written, with no `@` dropped and
-   no colon invented
- - an ordinary sentence beginning `Word:` no longer warns; a misspelled
-   directive still does, and names the one it resembles
- - comparing a `data` value in an R pool answers what every other language
-   answers, and ordering a `data` value works in a Rust pool
- - a list of `data` values crosses into and out of an R pool
- - the help lists the constructors a `data` argument accepts
+ * The stdin framing error names the flag to add (`-f packet`) and where
+ * `morloc init` takes a lock, so two runs no longer race each other's
+   destructive steps; built artifacts are renamed into place atomically
+ * The runtime test suites run on macOS
+ * ABI version 1 -> 2: a prebuilt runtime or nexus from before this release
+   is refused rather than silently mismatched
 
 0.102.1 [2026-09-05]
 --------------------
