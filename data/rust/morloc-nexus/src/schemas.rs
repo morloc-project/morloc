@@ -2,13 +2,11 @@
 //! per-command `--help` output.
 //!
 //! The layouts come from the command's `named_types`, which the
-//! compiler fills by walking the whole signature. They used to be
-//! reconstructed here from each argument's wire schema, keyed on its
-//! rendered type name -- which only worked when the named type *was*
-//! the whole type. Wrap a record in a list and the name still appeared
-//! in the type while its definition silently vanished, because a wire
-//! schema cannot carry a morloc type name and `[Hit]` is not a name to
-//! key on. The compiler has the type; it says what the names are.
+//! compiler fills by walking the whole signature: a wire schema cannot
+//! carry a morloc type name, so a renderer keyed on wire schemas alone
+//! loses a name as soon as its record is wrapped in a list (`[Hit]` is
+//! not a name to key on). Only the compiler, which has the type, can
+//! say what the names are.
 //!
 //! The renderer is parser-agnostic -- it walks the manifest, not
 //! argv -- and the rendered block is plumbed into clap's
@@ -222,7 +220,7 @@ fn render_datas(defs: &[&NamedType]) -> String {
         if i > 0 {
             out.push('\n');
         }
-        out.push_str(&format!("  {}\n", def.name));
+        out.push_str(&format!("  {}\n", head_of(def)));
         for line in def.desc.iter().filter(|l| !l.is_empty()) {
             out.push_str(&format!("    {}\n", line));
         }
@@ -253,18 +251,24 @@ fn render_datas(defs: &[&NamedType]) -> String {
     out
 }
 
+/// A definition's head: the name followed by its type parameters, in
+/// which the body is stated. `Box a` over `value :: a` says where the
+/// parameter goes; a bare `Box` would leave the `a` unexplained.
+fn head_of(def: &NamedType) -> String {
+    if def.parameters.is_empty() {
+        def.name.clone()
+    } else {
+        format!("{} {}", def.name, def.parameters.join(" "))
+    }
+}
+
 /// Render types whose definition is a wire form rather than a field
 /// list: `Name p1 p2 = <form>`, stated in the constructor's own
 /// parameters so one line covers every use of it.
 fn render_packables(defs: &[&NamedType]) -> String {
     let mut out = String::new();
     for def in defs {
-        let head = if def.parameters.is_empty() {
-            def.name.clone()
-        } else {
-            format!("{} {}", def.name, def.parameters.join(" "))
-        };
-        out.push_str(&format!("  {} = {}\n", head, def.equals));
+        out.push_str(&format!("  {} = {}\n", head_of(def), def.equals));
     }
     out
 }
@@ -277,7 +281,7 @@ fn render_named(defs: &[&NamedType]) -> String {
         if i > 0 {
             out.push('\n');
         }
-        out.push_str(&format!("  {}\n", def.name));
+        out.push_str(&format!("  {}\n", head_of(def)));
         let width = def.fields.iter().map(|f| f.key.len()).max().unwrap_or(0);
         for f in &def.fields {
             out.push_str(&format!(

@@ -2244,18 +2244,6 @@ namTagLabel NamRecord = "record"
 namTagLabel NamObject = "object"
 namTagLabel NamTable  = "table"
 
--- | Every named type reachable from a command's signature, in discovery
--- order and deduplicated by name.
---
--- The help prints a type by name and defines each name once beneath the
--- argument list. A name is only useful there if it is actually defined,
--- and a record reached through a list, tuple, or optional is exactly as
--- opaque to a caller as one at the top level -- more so, since it is the
--- shape they will be handed. Walking the whole type is what makes
--- `[Hit]` mean something.
--- | Every type a command's signature mentions: each argument (a group
--- contributes the record itself, whose fields the walk then reaches)
--- and the return.
 -- | The types a command's help actually shows.
 --
 -- The glossary defines the names a reader meets, so it is built from what is
@@ -2287,13 +2275,6 @@ cmdSignatureTypes mStream doc =
     -- field types beside its values.
     argTypes (CmdArgAlt r) = altDocType r : concatMap altArmFields (altDocArms r)
 
--- | The glossary for one command: every named type its signature mentions,
--- defined once and generically.
---
--- Records and tables are read off the signature itself. A type whose wire form
--- comes from a @Packable@ instance has no structure in the signature at all --
--- the name is opaque there -- so its definition is taken from the instance,
--- which states the wire form generically in the constructor's own parameters.
 -- | Constructors this command hands to a pack function, taken from the
 -- serialization it will actually run. A name can appear in a signature and
 -- still never reach a packer -- unit is the common case, since it
@@ -2322,6 +2303,28 @@ packedConstructors = Set.fromList . concatMap go
 -- description.
 data DataTypeDoc = DataTypeDoc [Text] [Text] [(Text, [Type], [Text])]
 
+-- | What the glossary says about a record or object: its kind, its type
+-- parameters, and its fields as declared, laid out in those parameters
+-- with transparent aliases resolved to what they name.
+data RecordTypeDoc = RecordTypeDoc NamType [Text] [(Key, Type)]
+
+-- | Every record and object declared anywhere in the program, keyed by
+-- the name its values print under: the constructor, which for
+-- @record Foo = Bar {..}@ is @Bar@. A name declared more than once is
+-- left out, as every other reader of the scope leaves it unresolved.
+collectRecordTypes :: MorlocMonad (Map.Map Text RecordTypeDoc)
+collectRecordTypes = do
+  scope <- MM.gets stateUniversalGeneralTypedefs
+  fmap (Map.fromList . catMaybes) . CM.forM (Map.elems scope) $ \entries ->
+    case entries of
+      [(vs, body@(NamU _ _ _ _), _, _, TypedefNewtype)] -> do
+        resolved <- Docstrings.resolveDeclaredType (typeOf body)
+        return $ case resolved of
+          NamT o con _ fields ->
+            Just (render (pretty con), RecordTypeDoc o [unTVar p | Left (p, _) <- vs] fields)
+          _ -> Nothing
+      _ -> return Nothing
+
 -- | Every `data` type declared anywhere in the program, keyed by name.
 collectDataTypes :: MorlocMonad (Map.Map Text DataTypeDoc)
 collectDataTypes = do
@@ -2338,14 +2341,47 @@ collectDataTypes = do
             ]
     ]
 
-namedTypesJson :: Set.Set Text -> [Serial.PackerInstance] -> Map.Map Text DataTypeDoc -> [Type] -> Text
-namedTypesJson packedHeads instances dataTypes ts =
+-- | The glossary for one command: every named type its signature mentions,
+-- defined once and generically.
+--
+-- A record is stated from its declaration and a @data@ from its constructor
+-- table. A type whose wire form comes from a @Packable@ instance has no
+-- structure in the signature at all -- the name is opaque there -- so its
+-- definition is taken from the instance, which states the wire form
+-- generically in the constructor's own parameters. Only an anonymous row,
+-- which has no declaration, is read off the signature itself.
+namedTypesJson :: Set.Set Text -> [Serial.PackerInstance] -> Map.Map Text RecordTypeDoc -> Map.Map Text DataTypeDoc -> [Type] -> Text
+namedTypesJson packedHeads instances recordTypes dataTypes ts =
   jsonArr
-    ( map oneNamed (filter (isShown . snd3) allDefs)
+    ( map oneNamed recordEntries
         <> dataEntries
         <> packableEntries ts
     )
   where
+    -- Records in the order the help meets them: those the signature walk
+    -- reaches, then those reached by name alone, through another
+    -- definition's field or a constructor's field.
+    recordEntries = filter (isShown . defName) (dedup (walked <> declared))
+
+    defName (_, nm, _, _) = nm
+
+    -- A record the signature walk reaches is stated from its declaration
+    -- when it has one. The declaration carries the parameters and lays
+    -- the fields out in them; the signature carries whatever the
+    -- typechecker left there, which is the declaration's layout when the
+    -- value passes through and one use site's instantiation when the
+    -- command builds it.
+    walked = dedup [fromDeclaration d | d <- concatMap collect ts]
+
+    fromDeclaration (o, nm, fields) = case Map.lookup nm recordTypes of
+      Just (RecordTypeDoc o' params fields') -> (o', nm, params, fields')
+      Nothing -> (o, nm, [], fields)
+
+    declared =
+      [ (o, nm, params, fields)
+      | (nm, RecordTypeDoc o params fields) <- Map.toList recordTypes
+      ]
+
     -- A `data` type is a bare name wherever it appears, so the names the
     -- help shows are searched for it directly. Its constructors' field
     -- types may name further types, which the closure must reach.
@@ -2371,19 +2407,6 @@ namedTypesJson packedHeads instances dataTypes ts =
             ])
         ]
 
-    snd3 (_, x, _) = x
-
-    -- A record may be reached only through a constructor's field; its
-    -- definition is collected from there as well, and shown only if the
-    -- closure reaches its name.
-    allDefs = dedup (concatMap collect ts <> concatMap collect ctorFieldTypes)
-    ctorFieldTypes =
-      [ ft
-      | DataTypeDoc _ _ ctors <- Map.elems dataTypes
-      , (_, fts, _) <- ctors
-      , ft <- fts
-      ]
-
     -- A definition earns its place by defining a name the reader actually
     -- meets. A type can appear in a signature without appearing in the help:
     -- an option group is destructured into flags, an anonymous record row is
@@ -2405,7 +2428,7 @@ namedTypesJson packedHeads instances dataTypes ts =
         grow s0 =
           let s1 = Set.union s0 . Set.fromList $
                      [ n
-                     | (_, nm, fields) <- allDefs
+                     | (_, nm, _, fields) <- walked <> declared
                      , Set.member nm s0
                      , (_, ft) <- fields
                      , n <- namesOf (renderCliType ft)
@@ -2450,18 +2473,13 @@ namedTypesJson packedHeads instances dataTypes ts =
     unwrapColumn NamTable (AppT (VarT (TV "List")) [el]) = el
     unwrapColumn _ t = t
 
-    dedup = go Set.empty
-      where
-        go _ [] = []
-        go seen (x@(_, nm, _) : rest)
-          | Set.member nm seen = go seen rest
-          | otherwise = x : go (Set.insert nm seen) rest
+    dedup = dedupOn defName
 
-    oneNamed (o, nm, fields) =
+    oneNamed (o, nm, params, fields) =
       jsonObj
         [ ("name", jsonStr nm)
         , ("kind", jsonStr (namTagLabel o))
-        , ("parameters", jsonArr [])
+        , ("parameters", jsonArr (map jsonStr params))
         , ("fields", jsonArr
             [ jsonObj [("key", jsonStr (unKey k)), ("type", jsonStr (renderCliType ft))]
             | (k, ft) <- fields
@@ -2925,6 +2943,10 @@ data ManifestInputs = ManifestInputs
     -- ^ Every @Packable@ instance in the program. A type whose wire form comes
     -- from an instance is opaque in a signature, so its glossary entry is taken
     -- from here rather than from the type itself.
+  , miRecordTypes         :: !(Map.Map Text RecordTypeDoc)
+    -- ^ Every record and object in the program, by name: its parameters and
+    -- its fields as declared. The glossary states a record from here so one
+    -- entry serves every instantiation a command uses.
   , miDataTypes           :: !(Map.Map Text DataTypeDoc)
     -- ^ Every `data` type in the program, by name: its constructors with
     -- their field types and the prose written above each. A `data` is a
@@ -3084,6 +3106,7 @@ buildManifest ManifestInputs{..} =
         , ("named_types", namedTypesJson
             (packedConstructors (fdataReturnAst fd : fdataArgAsts fd))
             miPackerInstances
+            miRecordTypes
             miDataTypes
             (cmdSignatureTypes (Map.lookup (EV (fdataTermName fd)) miStreamTypes) (fdataCmdDocSet fd)))
         , ("metadata", metadataEmpty)
@@ -3108,6 +3131,7 @@ buildManifest ManifestInputs{..} =
         , ("named_types", namedTypesJson
             (packedConstructors (commandReturnAst g : commandArgAsts g))
             miPackerInstances
+            miRecordTypes
             miDataTypes
             (cmdSignatureTypes (Map.lookup (EV (commandTermName g)) miStreamTypes) (commandDocs g)))
         , ("metadata", metadataEmpty)
@@ -3354,6 +3378,7 @@ generate cs rASTs helperRASTs = do
     return (ev, t)
 
   packerInstances <- Serial.findPackerInstances
+  recordTypes <- collectRecordTypes
   dataTypes <- collectDataTypes
 
   let manifestJson =
@@ -3378,6 +3403,7 @@ generate cs rASTs helperRASTs = do
             , miBuildParams         = buildParams
             , miRunLog              = runLog
             , miPackerInstances     = packerInstances
+            , miRecordTypes         = recordTypes
             , miDataTypes           = dataTypes
             , miCapabilities        = capabilities
             , miTermDocs            = termDocs

@@ -12,7 +12,7 @@ Positional arguments:
 Return: Int
 
 Record Schemas:
-  Box
+  Box a
     it :: a
 --- takeStr help ---
 Take a box of Str
@@ -28,7 +28,7 @@ Positional arguments:
 Return: Int
 
 Record Schemas:
-  Box
+  Box a
     it :: a
 --- json-help ---
 takeInt morloc=Box Int wire=m12itj
