@@ -3,6 +3,8 @@ Unreleased
 
  - a Python source file named after a standard-library module (`ast.py`,
    `json.py`) no longer answers later imports of that module in the pool
+ - `@try` around a handle-returning intrinsic (`@open`, `@stream`) builds
+   in a C++ pool under clang, so the same program compiles on macOS
 
 0.103.0 [2026-09-12]
 --------------------

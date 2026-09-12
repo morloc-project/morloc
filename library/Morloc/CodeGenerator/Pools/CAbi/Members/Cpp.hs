@@ -973,13 +973,17 @@ PROPAGATE_ERROR(errmsg)|]
           (True, _) -> "[=](){" <> nest 4 (line <> vsep (stmts <> [expr <> ";", "return mlc::Unit{};"])) <> line <> "}"
           (False, []) -> "[=](){return " <> expr <> ";}"
           (False, _) -> "[=](){" <> nest 4 (line <> vsep (stmts <> ["return " <> expr <> ";"])) <> line <> "}"
-    -- Generic lambdas: the Ok arm's parameter is whatever the body
-    -- returned and the Err arm's is a std::string, and both arms must
-    -- deduce the same Try type for _mlc_try's return.
-    , lcMakeTry = \thunk okWrap errWrap ->
+    -- The Ok arm's parameter is declared as the payload type, so a body
+    -- whose native result merely converts to it (a handle intrinsic answers
+    -- int64_t where the handle type is uint64_t) converts at the call, where
+    -- an implicit conversion is allowed, and not inside the arm's brace
+    -- initializer, where narrowing is an error. The Err arm's is a
+    -- std::string, and both arms must deduce the same Try type for
+    -- _mlc_try's return.
+    , lcMakeTry = \thunk okT okWrap errWrap ->
         "_mlc_try" <> tupled
           [ thunk
-          , "[](auto&& mlcTryV) { return" <+> okWrap "mlcTryV" <> "; }"
+          , "[](" <> maybe "auto&&" (<> " const&") okT <+> "mlcTryV) { return" <+> okWrap "mlcTryV" <> "; }"
           , "[](const std::string& mlcTryM) { return" <+> errWrap "mlcTryM" <> "; }"
           ]
     , lcSerialize = \v s -> serialize v s

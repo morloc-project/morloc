@@ -585,7 +585,11 @@ data LowerConfig m = LowerConfig
   -- suspended-thunk expression). Monadic so a language whose thunk form
   -- cannot hold statements (e.g. a Python lambda) can mint a fresh name
   -- for a hoisted def-thunk.
-  , lcMakeTry :: MDoc -> (MDoc -> MDoc) -> (MDoc -> MDoc) -> MDoc
+  -- The second argument is the Ok arm's payload type, when the language can
+  -- name it; a typed language declares the Ok callback's parameter with it,
+  -- so the body's result converts at the call rather than inside the arm's
+  -- initializer.
+  , lcMakeTry :: MDoc -> Maybe MDoc -> (MDoc -> MDoc) -> (MDoc -> MDoc) -> MDoc
   -- ^ @try body@: the body as a no-arg thunk, a builder wrapping a value
   -- expression in the result's @Ok@ arm, and one wrapping a message
   -- expression in its @Err@ arm.
@@ -1491,8 +1495,11 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ t IntrTry _ [bodyDocs])
   , Just okTag <- armTagOf BT.tryOkCtor arms
   , Just errTag <- armTagOf BT.tryErrCtor arms = do
       ty <- nominalTypeDoc cfg tryT cv
+      okT <- case lookup BT.tryOkCtor arms of
+        Just [payloadT] -> fmap renderIType <$> lcTypeOf cfg payloadT
+        _ -> return Nothing
       return $ bodyDocs
-        { poolExpr = lcMakeTry cfg (poolExpr bodyDocs)
+        { poolExpr = lcMakeTry cfg (poolExpr bodyDocs) okT
             (\v -> lcVariantLit cfg ty BT.tryOkCtor okTag [v])
             (\m -> lcVariantLit cfg ty BT.tryErrCtor errTag [m])
         }
