@@ -1,5 +1,5 @@
-Unreleased
-----------
+0.103.1 [2026-09-12]
+--------------------
 
  - a Python source file named after a standard-library module (`ast.py`,
    `json.py`) no longer answers later imports of that module in the pool
