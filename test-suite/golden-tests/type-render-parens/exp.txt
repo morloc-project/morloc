@@ -1,0 +1,39 @@
+--- boxTodo ---
+  1:  type: Str
+Return: Box Todo
+--- optTodo ---
+  1:  type: Str
+Return: ?Todo
+--- boxBox ---
+  1:  type: Str
+Return: Box (Box Todo)
+--- boxList ---
+  1:  type: Str
+Return: Box [Todo]
+--- takeBox ---
+  1:  type: Box Todo
+  2:  type: ?Todo
+Return: Int
+--- count ---
+Data Types:
+  Item
+    Boxed (Box Todo)
+    Pair Todo Todo
+    Listed [Todo]
+    Tup (Int, Todo)
+    OptBoxed ?(Box Todo)
+--- json-help ---
+boxTodo args=[Str] return=Box Todo
+optTodo args=[Str] return=?Todo
+boxBox args=[Str] return=Box (Box Todo)
+boxList args=[Str] return=Box [Todo]
+takeBox args=[Box Todo, ?Todo] return=Int
+count args=[Item] return=Int
+Item.Boxed fields=["Box Todo"]
+Item.Pair fields=["Todo", "Todo"]
+Item.Listed fields=["[Todo]"]
+Item.Tup fields=["(Int, Todo)"]
+Item.OptBoxed fields=["?(Box Todo)"]
+--- run ---
+{"value":{"title":"x"}}
+1

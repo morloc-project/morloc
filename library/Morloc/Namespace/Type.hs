@@ -1734,6 +1734,9 @@ instance Pretty Type where
       f _ (StrLitT s) = dquotes (pretty s)
       f _ (StrConcatT a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
       f _ StrVoidT = "_"
+      -- A named type without parameters is a single token and never needs
+      -- parentheses, whatever position it sits in.
+      f _ (NamT _ n [] _) = pretty n
       f False t = parens (f True t)
       f _ (FunT [] t) = "() -> " <> f False t
       f _ (FunT ts t) = hsep $ punctuate " -> " (map (f False) (ts <> [t]))
@@ -1838,6 +1841,7 @@ instance Pretty TypeU where
       f _ (LitU (LList es)) = "[" <> hcat (punctuate ", " (map (f True) es)) <> "]"
       f _ (LitU (LSet es)) = "{" <> hcat (punctuate ", " (map (f True) es)) <> "}"
       f _ (LabeledU (TV n) t) = pretty n <> "@" <> f False t
+      f _ (NamU _ n [] _) = pretty n
       f False t = parens (f True t)
       f _ (ExistU v (ts, _) (rs, _)) =
         "*"

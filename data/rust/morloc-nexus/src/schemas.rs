@@ -231,7 +231,9 @@ fn render_datas(defs: &[&NamedType]) -> String {
                 if c.fields.is_empty() {
                     c.name.clone()
                 } else {
-                    format!("{} {}", c.name, c.fields.join(" "))
+                    let fields: Vec<String> =
+                        c.fields.iter().map(|f| as_argument(f)).collect();
+                    format!("{} {}", c.name, fields.join(" "))
                 }
             })
             .collect();
@@ -249,6 +251,34 @@ fn render_datas(defs: &[&NamedType]) -> String {
         }
     }
     out
+}
+
+/// A rendered type as it must be spelled in argument position: an
+/// application (`Box Todo`) takes parentheses, since `Boxed Box Todo`
+/// reads as two fields; a self-delimiting form (`[Todo]`, `(Int, Todo)`,
+/// `{a = Int}`, `?(Box Todo)`) or a bare name does not.
+///
+/// The test is a space outside every `()`, `[]` and `{}` pair. That holds
+/// because the compiler's type printer always separates the parts of an
+/// application, an arrow or an effect row with a space and parenthesizes
+/// every other compound form itself. `<` and `>` are not brackets here:
+/// `->` contains one.
+fn as_argument(t: &str) -> String {
+    let mut depth: i32 = 0;
+    let mut spaced = false;
+    for ch in t.chars() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ' ' if depth == 0 => spaced = true,
+            _ => {}
+        }
+    }
+    if spaced {
+        format!("({})", t)
+    } else {
+        t.to_string()
+    }
 }
 
 /// A definition's head: the name followed by its type parameters, in
@@ -293,4 +323,23 @@ fn render_named(defs: &[&NamedType]) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::as_argument;
+
+    #[test]
+    fn applications_take_parentheses_in_argument_position() {
+        for t in ["Box Todo", "Vector 4 Int", "Table {name = Str}", "<IO> Int", "Int -> Int"] {
+            assert_eq!(as_argument(t), format!("({})", t), "{t}");
+        }
+    }
+
+    #[test]
+    fn atoms_and_delimited_forms_stay_bare() {
+        for t in ["Todo", "a", "_", "[Box Todo]", "(Int, Todo)", "{a = Box Todo}", "?(Box Todo)", "?Todo", "(n + 1)"] {
+            assert_eq!(as_argument(t), t, "{t}");
+        }
+    }
 }

@@ -78,6 +78,7 @@ unitTests =
   , sumTypeTests
   , variantTests
   , evalSandboxTests
+  , typeRenderParenTests
   , morlocDepsTests
   , versionConstraintTests
   , sizeParseTests

@@ -1,0 +1,46 @@
+-- A type in help output carries exactly the parentheses its source form
+-- needs. A nullary named type is an atom and never takes them, in any
+-- position: `Box Todo`, `?Todo`, `Box (Box Todo)`. A constructor field
+-- that is itself an application takes them, since `Boxed Box Todo` is the
+-- spelling of a two-field constructor: `Boxed (Box Todo)`. Self-delimiting
+-- forms (`[Todo]`, `(Int, Todo)`, `?(Box Todo)`) stay as they are.
+module main (boxTodo, optTodo, boxBox, boxList, takeBox, count)
+
+import root-py
+
+record Todo where
+  title :: Str
+record py => Todo = "dict"
+
+record Box a where
+  value :: a
+record py => Box a = "dict" a
+
+data Item
+  = Boxed (Box Todo)
+  | Pair Todo Todo
+  | Listed [Todo]
+  | Tup (Int, Todo)
+  | OptBoxed ?(Box Todo)
+
+boxTodo :: Str -> Box Todo
+boxTodo t = { value = { title = t } }
+
+optTodo :: Str -> ?Todo
+optTodo t = { title = t }
+
+boxBox :: Str -> Box (Box Todo)
+boxBox t = { value = { value = { title = t } } }
+
+boxList :: Str -> Box [Todo]
+boxList t = { value = [{ title = t }] }
+
+takeBox :: Box Todo -> ?Todo -> Int
+takeBox b t = 1
+
+count :: Item -> Int
+count | (Boxed _) = 1
+      | (Pair _ _) = 2
+      | (Listed xs) = 0
+      | (Tup _) = 2
+      | (OptBoxed _) = 1

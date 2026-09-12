@@ -44,6 +44,7 @@ module Morloc.Typecheck.Internal
   , cleanTypeName
   , prettyTypeU
   , prettyTypeUPair
+  , isAtomicType
   , isNatExpr
   , isStrExpr
   , isRecExpr
@@ -2811,6 +2812,7 @@ isAtomicType (ListLitU _) = True
 isAtomicType (SetLitU _) = True
 isAtomicType RecEmptyU = True
 isAtomicType (RecExtendU _ _ _) = True  -- {f=a, ...} is bracket-delimited
+isAtomicType (NamU _ _ [] _) = True
 isAtomicType _ = False
 
 -- | User-facing type display: clean variable names, no forall, no angle brackets.
@@ -2881,6 +2883,7 @@ prettyTypeU = renderClean . cleanTypeName
     f _ (ProjectFieldU r fld) = f False r <> "." <> f False fld
     f _ (RecSingletonU k v) = "Singleton" <+> f False k <+> f False v
     f _ (LabeledU (TV n) t) = pretty n <> "@" <> f False t
+    f _ (NamU _ n [] _) = pretty n
     f False t = parens (f True t)
     f _ (ExistU v (ts, _) (rs, _)) =
       tv v

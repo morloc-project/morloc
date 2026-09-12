@@ -55,10 +55,12 @@ module UnitTypeTests
   , sumTypeTests
   , variantTests
   , evalSandboxTests
+  , typeRenderParenTests
   ) where
 
 import Morloc (typecheck, typecheckFrontend, generatePools)
 import Morloc.Frontend.Namespace
+import Morloc.Data.Doc (pretty, render)
 import Morloc.Frontend.Typecheck (evaluateAnnoSTypes)
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
@@ -9256,3 +9258,36 @@ variantTests =
         idt :: [Tree] -> [Tree]
               |]
       ]
+
+-- | A nullary named type is one token, so it never takes parentheses, in
+-- any position. Every printer of a type agrees: the 'Pretty' instances for
+-- 'Type' and 'TypeU', the typecheck-diagnostic printer 'prettyTypeU', and
+-- the constraint-argument test 'isAtomicType'. A parameterized named type
+-- in argument position still takes them.
+typeRenderParenTests :: TestTree
+typeRenderParenTests =
+  testGroup "nullary named types render bare"
+    [ testCase "Pretty Type: record argument of an application" $
+        render (pretty (AppT box [todoT])) @?= "Box Todo"
+    , testCase "Pretty Type: record under an optional" $
+        render (pretty (OptionalT todoT)) @?= "?Todo"
+    , testCase "Pretty Type: applied record nested in an application" $
+        render (pretty (AppT box [NamT NamRecord (TV "Box") [todoT] []])) @?= "Box (Box Todo)"
+    , testCase "Pretty TypeU: record argument of an application" $
+        render (pretty (AppU boxU [todoU])) @?= "Box Todo"
+    , testCase "Pretty TypeU: record under an optional" $
+        render (pretty (OptionalU todoU)) @?= "?Todo"
+    , testCase "prettyTypeU: record argument of an application" $
+        render (MTI.prettyTypeU (AppU boxU [todoU])) @?= "Box Todo"
+    , testCase "prettyTypeU: applied record nested in an application" $
+        render (MTI.prettyTypeU (AppU boxU [NamU NamRecord (TV "Box") [todoU] []])) @?= "Box (Box Todo)"
+    , testCase "isAtomicType: nullary record is atomic" $
+        MTI.isAtomicType todoU @?= True
+    , testCase "isAtomicType: applied record is not atomic" $
+        MTI.isAtomicType (NamU NamRecord (TV "Box") [todoU] []) @?= False
+    ]
+  where
+    box = VarT (TV "Box")
+    boxU = VarU (TV "Box")
+    todoT = NamT NamRecord (TV "Todo") [] [(Key "title", VarT (TV "Str"))]
+    todoU = NamU NamRecord (TV "Todo") [] [(Key "title", VarU (TV "Str"))]
