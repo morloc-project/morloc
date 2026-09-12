@@ -13,6 +13,6 @@
 --- fromSubCopy ---
 "sub.copy:hi"
 --- fromSibling ---
-"sibling:hi"
+"sibling:\"hi\":helper"
 --- fromPymorloc ---
 "pymorloc:hi"

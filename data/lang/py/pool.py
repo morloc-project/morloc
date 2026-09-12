@@ -62,14 +62,15 @@ def _mlc_import_source(module_path):
     # `copy` and `time` are imported above, and they pull in others such as
     # `heapq` transitively -- and importing by name returns that module instead
     # of the user's file, so none of their functions are found. The set is not
-    # one a user can be expected to know, so resolve the file on the search path
+    # one a user can be expected to know, so resolve the file under the source
+    # roots (the program's own, the working directory, the morloc module plane)
     # and load it from there.
     #
     # The module is registered under a reserved key, so it neither reads nor
     # replaces a real module of the same name: a plain `import copy` from inside
     # a user file still reaches the standard library.
     rel = module_path.replace(".", os.sep) + ".py"
-    for root in sys.path:
+    for root in _mlc_source_roots:
         candidate = os.path.join(root, rel)
         if os.path.isfile(candidate):
             key = "_mlc_src_" + module_path.replace(".", "_")
