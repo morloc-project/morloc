@@ -1,3 +1,9 @@
+Unreleased
+----------
+
+ - a command's docstring takes an `@epilogue` block, printed at the foot of
+   that subcommand's help; blank lines and `#` comments in it are kept
+
 0.103.2 [2026-09-12]
 --------------------
 

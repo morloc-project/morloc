@@ -1940,6 +1940,9 @@ data CmdDocSet = CmdDocSet
     -- terminal-action declarations (`--' with:`) attached to this command.
     -- Empty for internal / synthesized entries and for commands without any
     -- `--' with:` atom. Populated verbatim from the signature preamble.
+  , cmdDocEpilogues :: [[Text]]
+    -- `@epilogue` blocks from the signature preamble, rendered verbatim at
+    -- the foot of this command's help.
   }
   deriving (Show, Ord, Eq)
 

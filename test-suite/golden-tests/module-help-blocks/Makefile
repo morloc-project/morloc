@@ -8,6 +8,10 @@ all:
 	./tool -h >> obs.txt 2>> obs.err
 	printf -- '--- multi long description ---\n' >> obs.txt
 	./tool --help 2>> obs.err | sed -n '1,/^Usage:/p' >> obs.txt
+	printf -- '--- multi subcommand short ---\n' >> obs.txt
+	./tool greet -h >> obs.txt 2>> obs.err
+	printf -- '--- multi subcommand long epilogue ---\n' >> obs.txt
+	./tool greet --help 2>> obs.err | sed -n '/^Examples:/,/^Nexus Options:/p' >> obs.txt
 	printf -- '--- single short ---\n' >> obs.txt
 	./solo -h >> obs.txt 2>> obs.err
 	printf -- '--- single long description ---\n' >> obs.txt

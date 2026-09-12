@@ -50,6 +50,7 @@ module UnitTypeTests
   , postArgPropagationTests
   , tuplePatternLambdaTests
   , withDocstringTests
+  , epilogueDocstringTests
   , patternSelectorTests
   , sumTypeTests
   , variantTests
@@ -8439,6 +8440,46 @@ patternSelectorTests =
         record R = R { a :: Int, b :: Str }
         foo :: IFile R -> R
         foo f = .(.a = 1) f
+          |]
+      ]
+
+-- | Placement of `@epilogue` in a term docstring. A command's epilogue
+-- belongs on its signature preamble, like `@with`; anywhere else it has
+-- no help screen to render on and is rejected rather than kept as prose.
+epilogueDocstringTests :: TestTree
+epilogueDocstringTests =
+  localOption (mkTimeout 1000000) $ -- 1s
+    testGroup
+      "@epilogue placement"
+      [ expectPass
+          "@epilogue on a signature preamble"
+          [r|
+        module main (foo)
+        --' Do a thing
+        --' @epilogue
+        --' Examples:
+        --'   main foo 1
+        foo :: Int -> Int
+        foo x = x
+          |]
+      , expectError
+          "@epilogue on an argument-level docstring is rejected"
+          [r|
+        module main (foo)
+        foo ::
+          --' @epilogue
+          --' Examples:
+          Int ->
+          Int
+        foo x = x
+          |]
+      , expectError
+          "@epilogue on an export without a signature is rejected"
+          [r|
+        module main (foo)
+        --' @epilogue
+        --' Examples:
+        foo = 42
           |]
       ]
 

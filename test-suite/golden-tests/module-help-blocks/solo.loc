@@ -4,7 +4,9 @@
 -- thing it does does, and neither has anywhere else to appear.
 --
 -- The module epilogue also has to coexist with the command's own
--- positional and return blocks rather than replacing them.
+-- positional and return blocks rather than replacing them, and with the
+-- command's own epilogue: the module's block comes first, the command's
+-- after it.
 --' A one-trick program
 --' The trick is addition.
 --' @epilogue
@@ -15,5 +17,8 @@ module solo (add)
 import root-py
 
 --' Add two integers
+--' @epilogue
+--' Notes:
+--'   integers only
 add :: Int -> Int -> Int
 add x y = x + y

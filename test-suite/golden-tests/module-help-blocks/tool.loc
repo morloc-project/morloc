@@ -2,6 +2,11 @@
 -- synopsis `-h` shows; every line reaches `--help`. An `@epilogue` block
 -- is the trailing "Examples:" section, and renders under both.
 --
+-- A command's own `@epilogue` renders under that subcommand's help, and
+-- only there: the top-level help shows the module's block alone. Blank
+-- lines and `#` comments inside the block survive, so examples can be
+-- annotated.
+--
 -- The single-command layout in solo.loc puts the epilogue after the
 -- command's own positional/return blocks rather than instead of them.
 --' A demo toolbox
@@ -15,6 +20,11 @@ module tool (greet, add)
 import root-py
 
 --' Greet someone
+--' @epilogue
+--' Examples:
+--'
+--' # greet by name
+--' tool greet Weena
 greet :: Str -> Str
 greet name = "Hello, " <> name
 

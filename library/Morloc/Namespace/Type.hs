@@ -733,6 +733,9 @@ data ArgDocVars = ArgDocVars
   , docListChecks :: [Check]
   , docWith :: [WithSpec]
   , docMime :: Maybe Text
+  , docEpilogues :: [[Text]]
+    -- ^ `@epilogue` blocks: verbatim lines printed at the foot of the
+    -- command's help, after its argument and return blocks
   }
   deriving (Show, Ord, Eq)
 
@@ -799,6 +802,7 @@ instance Defaultable ArgDocVars where
       , docListChecks = []
       , docWith = []
       , docMime = Nothing
+      , docEpilogues = []
       }
 
 instance Typelike Type where
