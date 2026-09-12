@@ -923,11 +923,11 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- arm the tag selects.
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrCtorField [subjE, nameE, idxE]))
       | Just n <- nexusLiteralStr nameE
-      , Just i <- nexusLiteralInt idxE = do
+      , Just idx <- nexusLiteralInt idxE = do
           sch <- type2schema t
           subj <- toNexusExpr subjE
           tag <- nexusCtorTag subjE n
-          return (CtorFieldX sch subj tag i)
+          return (CtorFieldX sch subj tag idx)
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrShow [arg])) =
       ShowX <$> type2schema t <*> toNexusExpr arg
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrRead [arg])) =
@@ -2316,14 +2316,11 @@ packedConstructors = Set.fromList . concatMap go
       SerialOptional _ x -> go x
       _ -> []
 
--- | What the glossary says about a `data` type: its own description and,
--- per constructor in declaration order, the constructor's name, its field
--- types as the help renders them, and its description.
-data DataTypeDoc = DataTypeDoc
-  { dataTypeParams :: [Text]
-  , dataTypeDesc :: [Text]
-  , dataTypeCtors :: [(Text, [Type], [Text])]
-  }
+-- | What the glossary says about a `data` type: its type parameters, its
+-- own description and, per constructor in declaration order, the
+-- constructor's name, its field types as the help renders them, and its
+-- description.
+data DataTypeDoc = DataTypeDoc [Text] [Text] [(Text, [Type], [Text])]
 
 -- | Every `data` type declared anywhere in the program, keyed by name.
 collectDataTypes :: MorlocMonad (Map.Map Text DataTypeDoc)
@@ -3172,8 +3169,8 @@ buildManifest ManifestInputs{..} =
           let entries = case a of
                           CmdArgGrp _ -> groupEntryWireSchemas ast
                           CmdArgAlt _ ->
-                            [ (Key (n <> "/" <> MT.pack (show i)), fs)
-                            | (n, fss) <- altArmFieldSchemas ast
+                            [ (Key (arm <> "/" <> MT.pack (show i)), fs)
+                            | (arm, fss) <- altArmFieldSchemas ast
                             , (i, fs) <- zip [(0 :: Int) ..] fss ]
                           _           -> []
               gen = render (Serial.serialAstToGeneralSchema ast)

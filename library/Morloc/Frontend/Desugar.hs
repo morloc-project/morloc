@@ -30,7 +30,6 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Char (isAlpha)
-import Data.Maybe (catMaybes, mapMaybe)
 import qualified Morloc.BaseTypes as BT
 import Morloc.Frontend.CST
 import Morloc.Frontend.Token hiding (startPos)
@@ -3256,10 +3255,10 @@ desugarTypeDef sp (CstDataDef (v, vs) ctors) = do
       params <- mapM (const (freshIrrefLamParam sp')) argTs
       argRefs <- mapM (\p -> freshExprSpan sp' (VarE defaultValue p)) params
       built <- freshExprSpan sp' (ConE tv name ordinal argRefs)
-      val <- if null params
-               then return built
-               else freshExprSpan sp' (LamE params built)
-      ass <- freshExprSpan sp' (AssE (EV name) val [])
+      body <- if null params
+                then return built
+                else freshExprSpan sp' (LamE params built)
+      ass <- freshExprSpan sp' (AssE (EV name) body [])
       return [sig, ass]
 
 desugarTypeDef sp (CstNamTypeWhere nt (v, vs) locEntries) = do

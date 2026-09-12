@@ -675,7 +675,7 @@ makeSerialAST m lang t0 = do
     -- instantiation is on the path above it.
     makeSerialAST' gscope typepackers anc ft@(VarF v@(FV gv cv))
       | any ((== Just gv) . typeFHead) (Set.toList anc) = return $ SerialRec v
-      | otherwise = dispatchVarF anc
+      | otherwise = dispatchVarF
       where
         -- Push this type onto the ancestor set for the scope of the body
         -- recursion. Mirrors the @withAncestor@ in the AppF branch and the
@@ -686,7 +686,7 @@ makeSerialAST m lang t0 = do
         withAncestorVar :: Set.Set TypeF -> (Set.Set TypeF -> MorlocMonad a) -> MorlocMonad a
         withAncestorVar anc0 action = descend ft anc0 >>= action
 
-        dispatchVarF anc
+        dispatchVarF
           | finalType == BT.tableU = return $ SerialObject NamTable v [] []
           | finalType == BT.unitU = return $ SerialNull v
           | finalType == BT.boolU = return $ SerialBool v
@@ -876,7 +876,7 @@ makeSerialAST m lang t0 = do
     -- share a name, and each gets its own expansion.
     makeSerialAST' gscope typepackers anc ft@(AppF (VarF fv@(FV generalTypeName _)) ts0)
       | Set.member ft anc = return $ SerialRec fv
-      | otherwise = dispatchAppF anc
+      | otherwise = dispatchAppF
       where
         -- Add the outer type to the ancestor set for the scope of the body
         -- recursion. Mirrors the NamF branch. Required for self-recursive
@@ -886,7 +886,7 @@ makeSerialAST m lang t0 = do
         withAncestor :: Set.Set TypeF -> (Set.Set TypeF -> MorlocMonad a) -> MorlocMonad a
         withAncestor anc0 action = descend ft anc0 >>= action
 
-        dispatchAppF anc
+        dispatchAppF
           | null runtimeTs = makeSerialAST' gscope typepackers anc (VarF fv)
           -- An applied `data` type that arrived unresolved. A record's field
           -- types come out of the pure weave, which cannot expand a `data`

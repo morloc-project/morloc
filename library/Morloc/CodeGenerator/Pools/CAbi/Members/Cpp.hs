@@ -27,8 +27,6 @@ import Control.Monad.Identity (Identity, runIdentity)
 import qualified Control.Monad.State as CMS
 import qualified Morloc.CodeGenerator.Pools.CAbi.Members.CppPrinter as CP
 import qualified Data.Char as DC
-import Data.Function (on)
-import Data.List (nubBy)
 import Data.Ord (comparing)
 import qualified Data.Set as Set
 import Data.Text (Text)

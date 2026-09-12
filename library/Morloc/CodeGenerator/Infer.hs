@@ -21,7 +21,6 @@ module Morloc.CodeGenerator.Infer
   , evalGeneralStep
   ) where
 
-import Control.Monad (when)
 import qualified Control.Monad.State as CMS
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
