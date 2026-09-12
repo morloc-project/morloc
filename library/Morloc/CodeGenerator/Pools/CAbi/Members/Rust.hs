@@ -1805,7 +1805,7 @@ rustLowerConfig mask =
     -- The helper hands back a plain Result so the panic-payload downcast
     -- (which decides what is catchable) stays in rustmorloc; the arms are
     -- built here because only the caller knows this Try's representation.
-    , lcMakeTry = \thunk okWrap errWrap ->
+    , lcMakeTry = \thunk _ okWrap errWrap ->
         "rustmorloc::mlc_try" <> tupled
           [ thunk
           , "|mlcTryV|" <+> okWrap "mlcTryV"

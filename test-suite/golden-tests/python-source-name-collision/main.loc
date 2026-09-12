@@ -16,7 +16,12 @@
 -- copy.py imports base64 to check that a real stdlib import from inside a
 -- file with a colliding name still reaches the standard library. sibling.py
 -- checks the harder direction: a source file importing the very module that
--- another source file shadows must still get the standard library.
+-- another source file shadows must still get the standard library -- both
+-- one that is already loaded (`copy`) and one that is not (`json`), since the
+-- program's source root sits on sys.path and would otherwise answer a lazy
+-- import of any stdlib module a source file happens to be named after.
+-- sibling.py also imports helper.py by bare name, which is how a source file
+-- reaches a sibling that is neither sourced nor installed.
 --
 -- pymorloc.py covers a second mechanism with the same symptom: the pool's own
 -- runtime import used to be answered by a user file of that name, because the

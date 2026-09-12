@@ -1059,8 +1059,8 @@ genericMakeDoBlock desc cfg _ stmts expr
 -- not accept in an identifier. Expression-shaped on purpose: a statement form would need a
 -- declared result variable, which Python and R cannot spell in an
 -- expression position and C++ would need the result type for.
-genericMakeTry :: LangDescriptor -> MDoc -> (MDoc -> MDoc) -> (MDoc -> MDoc) -> MDoc
-genericMakeTry desc thunk okWrap errWrap =
+genericMakeTry :: LangDescriptor -> MDoc -> Maybe MDoc -> (MDoc -> MDoc) -> (MDoc -> MDoc) -> MDoc
+genericMakeTry desc thunk _ okWrap errWrap =
   pretty (ldIntrinsicPrefix desc) <> "mlc_try"
     <> tupled [thunk, lam "mlcTryV" (okWrap "mlcTryV"), lam "mlcTryM" (errWrap "mlcTryM")]
   where

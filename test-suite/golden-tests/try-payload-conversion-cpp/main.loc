@@ -1,0 +1,33 @@
+-- `@try` in a C++ pool wraps the body's result into the Ok arm of a
+-- generated Try. The arm is a struct built by brace initialization, which
+-- forbids narrowing, and the body's native result need not have the arm
+-- field's exact type: a handle intrinsic answers a signed 64-bit integer
+-- while the handle type is declared unsigned. The conversion is sound (a
+-- handle never has its top bit set) and is accepted anywhere C++ allows an
+-- implicit conversion, but inside braces GCC only warns and clang refuses,
+-- so a pool that built on Linux failed to build on macOS.
+--
+-- The package compiles with -Werror=narrowing so GCC holds the clang line
+-- and the test fails on either compiler when the arm is built from a value
+-- of the wrong type.
+
+module main (readBack, readTwice)
+
+import root-cpp
+
+readBack :: Str -> <IO> Int
+readBack path = do
+  @save 0 path [7, 8, 9]
+  Ok f <- @open path :: <IO> (Try Str (IFile [Int]))
+  .[2] f
+
+-- Two handle-typed trys in one manifold, one under a match, so both wrap
+-- shapes are emitted.
+readTwice :: Str -> <IO> Int
+readTwice path = do
+  @save 0 path [1, 2, 3]
+  Ok f <- @open path :: <IO> (Try Str (IFile [Int]))
+  r <- (@open path :: <IO> (Try Str (IFile [Int])))
+  match r
+    | (Ok g) = (.[0] f) + (.[1] g)
+    | (Err _) = 0

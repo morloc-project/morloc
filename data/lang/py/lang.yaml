@@ -12,15 +12,19 @@ cost: 3
 # Python's str natively supports interior NUL bytes.
 allow_string_null: true
 preamble:
-  # Two steps, in this order, on purpose. The morloc-owned directories go on
-  # first so that `import pymorloc` below cannot be answered by a user source
-  # file named pymorloc.py; the program's own source root goes on afterwards so
-  # that user code still takes precedence for everything else. The resulting
-  # sys.path is the same either way -- only the moment of the import differs.
+  # The morloc-owned directories go on the front of sys.path before the runtime
+  # is imported, so `import pymorloc` cannot be answered by a user source file
+  # of that name. The program's own source root and the working directory are
+  # searched for sourced files through _mlc_source_roots, never through
+  # sys.path, and go on the END of sys.path only so that a sourced file can
+  # import a plain sibling by bare name. Ahead of the standard library they
+  # would answer any lazy `import ast` or `import json` made later in the
+  # process with a user file that happens to share the name.
   - 'sys.path = [os.path.expanduser("{{opt}}"), os.path.expanduser("{{lib}}"), os.path.expanduser("{{state}}/modules/python")] + sys.path'
   - "import importlib"
   - "import pymorloc as morloc"
-  - 'sys.path = [os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")), os.path.expanduser(".")] + sys.path'
+  - '_mlc_source_roots = [os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")), os.path.expanduser("."), os.path.expanduser("{{lib}}")]'
+  - 'sys.path = sys.path + _mlc_source_roots[:2]'
 
 # Literals
 ldBoolTrue: "True"

@@ -1,0 +1,3 @@
+name: try-payload-conversion-cpp
+version: 0.1.0
+cxx-flags: ["-Werror=narrowing"]
