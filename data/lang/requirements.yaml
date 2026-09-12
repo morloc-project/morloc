@@ -15,8 +15,13 @@ toolchain:
   # cc-rs fails with "failed to find tool ar". cxx-compiler hard-depends on that
   # activation chain, so keeping it in core guarantees $AR is always exported,
   # not only when a program happens to declare a cpp pool.
-  - { package: c-compiler,   version: "*", phase: build }
-  - { package: cxx-compiler, version: "*", phase: build }
+  #
+  # Both are held below 2: the 2.x metapackages depend on the bare `gcc`/`clang`
+  # packages instead of `gcc_linux-64`/`clang_osx-arm64`, so a 2.x solve has no
+  # compiler activation at all -- no activate.d, no $CC/$CXX/$AR, and on macOS no
+  # `bin/gcc` either. 1.x is the last line that carries the activation chain.
+  - { package: c-compiler,   version: "<2", phase: build }
+  - { package: cxx-compiler, version: "<2", phase: build }
   - { package: make,         version: "*", phase: build }
   - { package: pkg-config,   version: "*", phase: build }
   # git is universal to the installation system: `morloc install` clones modules

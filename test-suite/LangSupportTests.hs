@@ -45,6 +45,15 @@ langSupportTests =
             let names = map pkgName (lsToolchain t)
             assertBool "c-compiler" ("c-compiler" `elem` names)
             assertBool "rust" ("rust" `elem` names)
+        , testCase "compiler metapackages stay on the activation-bearing 1.x line" $ withParsed $ \t -> do
+            -- c-compiler/cxx-compiler 2.x depend on the bare gcc/clang packages,
+            -- which ship no activate.d and so never export $CC/$CXX/$AR.
+            let cpp = maybe [] leRequires (Map.lookup "cpp" (lsLanguages t))
+                pins = [ (pkgName p, pkgConstraint p)
+                       | p <- lsToolchain t ++ cpp
+                       , pkgName p `elem` ["c-compiler", "cxx-compiler"] ]
+            assertBool "both metapackages present" (length pins == 3)
+            mapM_ (\(n, c) -> assertBool (T.unpack n <> " excludes 2.x: " <> T.unpack c) (T.isInfixOf "<2" c)) pins
         , testCase "python runtime is capped below the 3.14 break" $ withParsed $ \t ->
             case Map.lookup "py" (lsLanguages t) >>= leRuntime of
               Just rs -> assertBool "python ceiling <3.14" (T.isInfixOf "<3.14" (rsVersion rs))
