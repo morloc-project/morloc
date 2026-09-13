@@ -21,3 +21,4 @@ z.*
 *.hp
 *.prof
 *.ps
+__pycache__/
