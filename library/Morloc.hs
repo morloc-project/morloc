@@ -44,6 +44,7 @@ import Morloc.CodeGenerator.Segment (segment)
 import Morloc.CodeGenerator.Serial (checkPackerCoherence)
 import Morloc.CodeGenerator.Reduce (reduce)
 import Morloc.CodeGenerator.Serialize (serialize)
+import Morloc.CodeGenerator.Suspension (lowerSuspensions)
 import qualified Morloc.Data.DAG as DAG
 import qualified Morloc.Frontend.API as F
 import Morloc.Frontend.AutoRequire (autoRequire)
@@ -52,7 +53,7 @@ import Morloc.Frontend.Restructure (restructure)
 import Morloc.Frontend.Treeify (treeify)
 import qualified Morloc.Data.PoolHash as PoolHash
 import qualified Morloc.Monad as MM
-import Morloc.ProgramBuilder.Build (buildProgram)
+import Morloc.ProgramBuilder.Build (buildProgram, withStagingCleanup)
 
 -- | Check the general types only
 typecheckFrontend ::
@@ -116,7 +117,7 @@ generatePools rASTs0 = do
     >>= mapM (\ph -> do
                  ph' <- insertEffectBoundaries ph
                  checkEffectBoundaries ph'
-                 return ph')
+                 lowerSuspensions ph')
     >>= mapM segment |>> concat
     >>= mapM serialize
     >>= mapM reduce
@@ -131,7 +132,11 @@ writeProgram ::
   -- | source code text
   Code ->
   MorlocMonad ()
-writeProgram translateFn path code = do
+writeProgram translateFn path code =
+  -- Guest lowering lands artifacts in the build's staging tree before the
+  -- program builder runs, so a failure anywhere in between must discard that
+  -- tree or an aborted build leaves a .tmp.<pid> directory beside the program.
+  withStagingCleanup $ do
   typecheck path code
     -- A constructor whose Packable instances disagree about its wire form
     -- cannot be serialized consistently by every language that shares it, and
@@ -188,7 +193,7 @@ writeProgram translateFn path code = do
             >>= mapM (\ph -> do
                          ph' <- insertEffectBoundaries ph
                          checkEffectBoundaries ph'
-                         return ph')
+                         lowerSuspensions ph')
             >>= mapM segment |>> concat
             >>= mapM serialize
             >>= mapM reduce

@@ -39,6 +39,7 @@ module Morloc.Monad
 
     -- * reusable counter
   , startCounter
+  , freshManifoldIndex
   , getCounter
   , getCounterWithPos
   , setCounter
@@ -136,10 +137,35 @@ emptyState path v =
     , stateOutfile = path
     }
 
+-- | Reuse the counter for the variable indices of code generation. Every
+-- index handed out so far names an expression, some of them manifolds, so
+-- the manifold allocator is seeded past them first.
 startCounter :: MorlocMonad ()
 startCounter = do
+  seedManifoldCounter
   s <- get
   put $ s {stateCounter = 0}
+
+-- | Move the manifold allocator past every expression index handed out
+-- so far, so a manifold created by code generation never shares an index
+-- with one the frontend named.
+seedManifoldCounter :: MorlocMonad ()
+seedManifoldCounter = do
+  s <- get
+  put $ s {stateManifoldCounter = max (stateManifoldCounter s) (stateCounter s + 1)}
+
+-- | A fresh manifold index, carrying the source position of a parent
+-- index so diagnostics can locate the manifold.
+freshManifoldIndex :: Int -> MorlocMonad Int
+freshManifoldIndex parentIdx = do
+  seedManifoldCounter
+  s <- get
+  let i = stateManifoldCounter s
+      srcs = case Map.lookup parentIdx (stateSourceMap s) of
+        Just loc -> Map.insert i loc (stateSourceMap s)
+        Nothing -> stateSourceMap s
+  put $ s {stateManifoldCounter = i + 1, stateSourceMap = srcs}
+  return i
 
 getCounter :: MorlocMonad Int
 getCounter = do

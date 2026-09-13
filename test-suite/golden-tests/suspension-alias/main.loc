@@ -1,0 +1,27 @@
+-- A row spelled through a type alias is the same suspension as one
+-- written out: a bind runs it, a do-block tail runs it, and a foreign
+-- function declared with the alias receives the callable, not its value.
+module main (bound, tail, held)
+
+import root-py
+
+source Py from "lib.py" ("get", "put", "run_twice")
+
+type IOInt = <IO> Int
+
+get :: Int -> IOInt
+put :: Int -> <IO> Int
+run_twice :: IOInt -> <IO> Int
+
+bound :: Int -> <IO> Int
+bound n = do
+  x <- get n
+  do (x + 1)
+
+tail :: Int -> <IO> Int
+tail n = do
+  put n
+  get n
+
+held :: Int -> <IO> Int
+held n = run_twice (get n)

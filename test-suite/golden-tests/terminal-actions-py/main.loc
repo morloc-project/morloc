@@ -40,7 +40,7 @@ formatCsv xs = printCsv xs
 
 --' Join all strings into one semicolon-separated summary
 summarize :: [Str] -> <IO> Str
-summarize xs = joinSemi xs
+summarize xs = do (joinSemi xs)
 
 --' Pure semicolon join (no IO effect on the terminal)
 sumPure :: [Str] -> Str

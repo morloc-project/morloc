@@ -1,18 +1,12 @@
--- Optional widening UNDER an effect wrapper.
+-- Optional widening UNDER a suspension.
 --
--- A do-block always synthesizes an effectful type <E> T. When such a
--- block is checked against a declared <E> ?T return, the inner T must be
--- widened to ?T with the optional placed UNDER the effect (?Int,
--- never ?(Int)). Before the fix, tryCoerce could not see the
--- OptionalU beneath the EffectU wrapper, so Int <: ?Int fell
--- through with a hard "Type mismatch".
+-- A do-block is a suspension <E> T. When such a block is checked against a
+-- declared <E> ?T return, the value it yields is widened to ?T inside the
+-- suspension (the coercion acts on the result of the run, never on the
+-- thunk), and the export boundary serializes the optional wire form.
 --
--- `mkOpt` exercises the widening (its do-block is Int, its declared
--- return is ?Int). `@catch` then discharges Err, leaving a plain
--- ?Int that the nexus serializes with the optional wire form. This checks
--- the end-to-end path: typecheck coercion insertion, the CoerceToOptional
--- codegen retag under the effect, and optional serialization at the
--- nexus boundary.
+-- `mkOpt` is a suspension of Int that may throw; `@try` over it is a
+-- suspension of a Try; the match widens its Int arm against the Null arm.
 
 module main
   ( presentSmall
@@ -22,18 +16,18 @@ module main
 import root
 import root-py
 
-mkOpt :: Int -> ?Int
+mkOpt :: Int -> <> Int
 mkOpt x = do
     let bound = x
     ? x < 4 = @throw "value must be >= 4"
     : bound
 
-presentSmall :: ?Int
-presentSmall =
-  let r = @try (mkOpt 5)
-  in match r | (Ok v) = v | (Err _) = Null
+presentSmall :: <> ?Int
+presentSmall = do
+  r <- @try (mkOpt 5)
+  match r | (Ok v) = v | (Err _) = Null
 
-presentBig :: ?Int
-presentBig =
-  let r = @try (mkOpt 42)
-  in match r | (Ok v) = v | (Err _) = Null
+presentBig :: <> ?Int
+presentBig = do
+  r <- @try (mkOpt 42)
+  match r | (Ok v) = v | (Err _) = Null

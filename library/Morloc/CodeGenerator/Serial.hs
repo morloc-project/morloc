@@ -21,6 +21,10 @@ module Morloc.CodeGenerator.Serial
   , PackerInstance (..)
   , wireSerialAstToType
   , containsFunT
+  , containsEffectT
+  , checkReadDataType
+  , checkWriteDataType
+  , containsFunF
   , serialAstHasString
   , chooseSerializationCycle
   , isSerializable
@@ -130,6 +134,60 @@ containsFunT (NamT _ _ ts rs) = any containsFunT ts || any (containsFunT . snd) 
 containsFunT (EffectT _ t) = containsFunT t
 containsFunT (OptionalT t) = containsFunT t
 containsFunT _ = False
+
+-- | True when a suspension appears anywhere in the type.
+containsEffectT :: Type -> Bool
+containsEffectT (EffectT _ _) = True
+containsEffectT (FunT ts t) = any containsEffectT ts || containsEffectT t
+containsEffectT (AppT t ts) = containsEffectT t || any containsEffectT ts
+containsEffectT (NamT _ _ ts rs) = any containsEffectT ts || any (containsEffectT . snd) rs
+containsEffectT (OptionalT t) = containsEffectT t
+containsEffectT _ = False
+
+-- | A data-reading intrinsic (@load, @read, @next, @open, @stdin) yields
+-- what a file holds, which is data: a function or a suspension has no
+-- file form. The result type is usually left to inference, which solves it
+-- to whatever the value is used as, so the check waits until the type is
+-- known and refuses the read rather than decoding the file under a closure
+-- schema.
+checkReadDataType :: Int -> Intrinsic -> Type -> MorlocMonad ()
+checkReadDataType i intr t0
+  | containsEffectT t || containsFunT t =
+      MM.throwSourcedError i $
+        "@" <> pretty (intrinsicName intr) <+> "reads data, but its result type"
+          <+> pretty t0 <+> "holds a function or suspension."
+          <+> "Annotate the result with a data type, e.g."
+          <+> "`@load path :: <IO> (Try Str Int)`."
+  | otherwise = return ()
+  where
+    -- The intrinsic's own row is the suspension the read is; only what it
+    -- yields must be data.
+    t = case t0 of
+      EffectT _ inner -> inner
+      _ -> t0
+
+-- | The counterpart for a data-writing intrinsic (@save, @savem, @savej,
+-- @write): what it writes must be data. A suspension or function is a
+-- closure naming a manifold of this build, which means nothing in a file.
+checkWriteDataType :: Int -> Intrinsic -> Bool -> MDoc -> MorlocMonad ()
+checkWriteDataType i intr holdsClosure tdoc
+  | holdsClosure =
+      MM.throwSourcedError i $
+        "@" <> pretty (intrinsicName intr) <+> "writes data, but its argument type"
+          <+> tdoc <+> "holds a function or suspension."
+          <+> "Run the suspension first (x <- e) and write the value."
+  | otherwise = return ()
+
+-- | True when a function appears anywhere in a concrete type. A suspension
+-- is a function of no arguments at this level.
+containsFunF :: TypeF -> Bool
+containsFunF (FunF _ _) = True
+containsFunF (AppF t ts) = containsFunF t || any containsFunF ts
+containsFunF (NamF _ _ ts rs) = any containsFunF ts || any (containsFunF . snd) rs
+containsFunF (EnumF _ ts _) = any containsFunF ts
+containsFunF (VariantF _ ts arms) = any containsFunF ts || any (any containsFunF . snd) arms
+containsFunF (OptionalF t) = containsFunF t
+containsFunF _ = False
 
 -- | Whether a serialized value can carry a native string anywhere inside it.
 --
@@ -1172,7 +1230,6 @@ makeSerialAST m lang t0 = do
           ts <- mapM (makeSerialAST' gscope typepackers anc' . snd) rs
           let entries = zip (map fst rs) ts
           return $ SerialObject o n ps entries
-    makeSerialAST' gscope typepackers anc (EffectF _ t) = makeSerialAST' gscope typepackers anc t
     makeSerialAST' gscope typepackers anc (OptionalF t) = do
       inner <- makeSerialAST' gscope typepackers anc t
       let v = case t of
@@ -1340,9 +1397,6 @@ unweaveTypeF (NamF n (FV gv cv) ps rs) =
       keys = map fst rs
       (vsg, vsc) = unzip $ map (unweaveTypeF . snd) rs
    in (NamU n gv psg (zip keys vsg), NamU n (cv2tv cv) psc (zip keys vsc))
-unweaveTypeF (EffectF effs t) =
-  let (gt, ct) = unweaveTypeF t
-   in (mkEffectU (EffectSet effs) gt, mkEffectU (EffectSet effs) ct)
 unweaveTypeF (OptionalF t) =
   let (gt, ct) = unweaveTypeF t
    in (OptionalU gt, OptionalU ct)
@@ -1381,7 +1435,8 @@ weaveTypeF (NamU n gv psg rsg) (NamU _ cv psc rsc) =
         (map fst rsg)
         (zipWith weaveTypeF (map snd rsg) (map snd rsc))
     )
-weaveTypeF (EffectU effs gt) (EffectU _ ct) = mkEffectF (resolveEffectSet effs) (weaveTypeF gt ct)
+-- A suspension is a closure of no arguments in every pool.
+weaveTypeF (EffectU _ gt) (EffectU _ ct) = FunF [] (weaveTypeF gt ct)
 weaveTypeF (OptionalU gt) (OptionalU ct) = OptionalF (weaveTypeF gt ct)
 weaveTypeF ((ExistU gv _ _)) (ExistU cv _ _) = UnkF (FV gv (tv2cv cv))
 weaveTypeF (NatLitU n) (NatLitU _) = NatLitF n

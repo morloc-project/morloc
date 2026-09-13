@@ -1,0 +1,98 @@
+-- The help defines each named type once, generically: the glossary entry
+-- for `Box a` states its parameters and lays out its fields in them, so
+-- one definition holds for every instantiation a command returns. The
+-- definition comes from the declaration, not from any one use site, so
+-- it is the same whether a command builds the record with a literal or
+-- passes it through, and a name reached only through a data
+-- constructor's field is defined like any other.
+module main (mkInt, mkStr, passBox, mkWrap, mkTree, mkOpt, mkOptStr, viaCtor, legacy, holder, mkQ)
+
+import root-py
+
+--' A box around anything
+record Box a where
+  value :: a
+record py => Box a = "dict" a
+
+--' A box in a record
+record Wrap a where
+  inner :: Box a
+record py => Wrap a = "dict" a
+
+record Tree a where
+  node :: a
+  kids :: [Tree a]
+record py => Tree a = "dict" a
+
+record Todo where
+  title :: Str
+record py => Todo = "dict"
+
+type Task = Todo
+
+record Holder where
+  task :: Task
+record py => Holder = "dict"
+
+record Foo = Bar {x :: Int}
+record py => Foo = "dict"
+
+type Pair a = (a, a)
+type Two a b = (a, b)
+
+--' Fields written with parameterized aliases, one crossing its names
+record Q a b where
+  same :: Pair a
+  crossed :: Two b a
+record py => Q a b = "dict" a b
+
+data Item = Task Todo | Note Str
+
+--' maybe-like
+data Opt a
+  --' nothing
+  = Nope
+  --' something
+  | Some a
+
+--' Box an Int by literal
+mkInt :: Int -> Box Int
+mkInt n = { value = n }
+
+--' Box a Str by literal
+mkStr :: Str -> Box Str
+mkStr s = { value = s }
+
+--' Pass a box through
+passBox :: Box Int -> Box Int
+passBox b = b
+
+--' Nest a box by literal
+mkWrap :: Int -> Wrap Int
+mkWrap n = { inner = { value = n } }
+
+--' A self-referential record by literal
+mkTree :: Int -> Tree Int
+mkTree n = { node = n, kids = [] }
+
+mkOpt :: Int -> Opt Int
+mkOpt n = Some n
+
+mkOptStr :: Str -> Opt Str
+mkOptStr s = Some s
+
+--' A record reached only through a constructor's field
+viaCtor :: Item -> Int
+viaCtor i = 1
+
+--' A record whose constructor is named apart from its type
+legacy :: Foo -> Int
+legacy f = 1
+
+--' A record field written as an alias of another record
+holder :: Str -> Holder
+holder s = { task = { title = s } }
+
+--' A record whose fields are written with parameterized aliases
+mkQ :: Int -> Str -> Q Int Str
+mkQ n s = { same = (n, n), crossed = (s, n) }

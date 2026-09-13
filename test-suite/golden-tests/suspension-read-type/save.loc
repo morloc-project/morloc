@@ -1,0 +1,7 @@
+module save (put)
+
+import root
+import root-py
+
+put :: Str -> Int -> <IO> (Try Str ())
+put path x = @savem path x

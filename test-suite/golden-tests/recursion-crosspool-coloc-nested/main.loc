@@ -16,7 +16,7 @@ bump  :: Int -> Int          -- cpp-only
 
 run :: Int -> Int -> <IO> Int
 run n acc
-  ? n <= 0 = acc
+  ? n <= 0 = do acc
   : do
       logIt acc
       let a = mix acc n

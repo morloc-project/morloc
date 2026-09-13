@@ -59,25 +59,28 @@ py_sum_list :: [Int] -> Int
 catchBare :: Int
 catchBare = match (@try (@throw "boom")) | (Ok _cv) = _cv | (Err _) = 42
 
-catchInDo :: Str -> Int
-catchInDo s = match (@try (do
-    let n = py_len s
-    ? n < 4 = @throw "too short"
-    : n
-  )) | (Ok _cv) = _cv | (Err _) = 999
+catchInDo :: Str -> <> Int
+catchInDo s = do
+  r <- @try (do
+      let n = py_len s
+      ? n < 4 = @throw "too short"
+      : n)
+  match r | (Ok _cv) = _cv | (Err _) = 999
 
-catchMixedIO :: Str -> Int
-catchMixedIO s = match (@try (do
-    let n = py_len s
-    ? n == 0 = @throw "empty"
-    : n
-  )) | (Ok _cv) = _cv | (Err _) = (py_len "fallback")
+catchMixedIO :: Str -> <> Int
+catchMixedIO s = do
+  r <- @try (do
+      let n = py_len s
+      ? n == 0 = @throw "empty"
+      : n)
+  match r | (Ok _cv) = _cv | (Err _) = (py_len "fallback")
 
-catchForeignRaise :: Str -> Int
-catchForeignRaise s = match (@try (do
-    let n = py_may_fail s
-    n
-  )) | (Ok _cv) = _cv | (Err _) = 0
+catchForeignRaise :: Str -> <> Int
+catchForeignRaise s = do
+  r <- @try (do
+      let n = py_may_fail s
+      n)
+  match r | (Ok _cv) = _cv | (Err _) = 0
 
 catchBangFallible :: Str -> Int
 catchBangFallible s = match (@try (py_may_fail s)) | (Ok _cv) = _cv | (Err _) = 77

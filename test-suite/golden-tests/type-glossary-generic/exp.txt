@@ -1,0 +1,83 @@
+--- json-help ---
+mkInt returns Box Int
+mkStr returns Box Str
+passBox returns Box Int
+mkWrap returns Wrap Int
+mkTree returns Tree Int
+mkOpt returns Opt Int
+mkOptStr returns Opt Str
+viaCtor returns Int
+legacy returns Int
+holder returns Holder
+mkQ returns Q Int Str
+type Box a kind=record value :: a
+type Wrap a kind=record inner :: Box a
+type Tree a kind=record node :: a, kids :: [Tree a]
+type Opt a kind=data Nope | Some a
+type Todo kind=record title :: Str
+type Item kind=data Task Todo | Note Str
+type Bar kind=record x :: Int
+type Holder kind=record task :: Todo
+type Q a b kind=record same :: (a, a), crossed :: (b, a)
+--- mkStr help ---
+Box a Str by literal
+
+Usage: ./main <nexus_options> mkStr <command_options>
+
+General Options:
+  -h, --help  Print help (see more with '--help')
+
+Positional arguments:
+  1:  type: Str
+      format: literal string
+
+Return: Box Str
+
+Record Schemas:
+  Box a
+    value :: a
+--- mkOptStr help ---
+
+Usage: ./main <nexus_options> mkOptStr <command_options>
+
+General Options:
+  -h, --help  Print help (see more with '--help')
+
+Positional arguments:
+  1:  type: Str
+      format: literal string
+
+Return: Opt Str
+
+Data Types:
+  Opt a
+    maybe-like
+    Nope    nothing
+    Some a  something
+--- viaCtor help ---
+A record reached only through a constructor's field
+
+Usage: ./main <nexus_options> viaCtor <command_options>
+
+General Options:
+  -h, --help  Print help (see more with '--help')
+
+Positional arguments:
+  1:  type: Item
+      constructors: Task/1, Note/1
+
+Return: Int
+
+Record Schemas:
+  Todo
+    title :: Str
+
+Data Types:
+  Item
+    Task Todo
+    Note Str
+--- run ---
+{"value":"hello"}
+{"inner":{"value":3}}
+{"task":{"title":"x"}}
+{"same":[1,1],"crossed":["y",1]}

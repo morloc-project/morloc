@@ -1,0 +1,79 @@
+-- A suspension crosses a pool boundary as a closure of no arguments: it is
+-- reified where it was built and every run on the far side is one call
+-- back home. A function whose result is a suspension crosses the same way,
+-- and applying it on the far side yields a suspension. A serial entry point
+-- (a loop-lowered recursion's, a foreign callee's) reflects a suspension
+-- argument as a closure and runs the root of its result exactly once.
+module main (heldValue, expression, carried, forced, sink, sinkCpp, inRecord, inOptional, absent)
+
+import root
+import root-py
+import root-cpp
+
+source Py from "gen.py" ("nextInt", "savePoint")
+nextInt :: Int -> <IO> Int
+savePoint :: [Int] -> <IO> ()
+
+record Job where
+  run :: <IO> Int
+  name :: Str
+record py => Job = "dict"
+record Cpp => Job = "Job"
+
+source Cpp from "take.hpp" ("takeThunk", "cppDec", "cppDone", "runJobTwice", "runOpt")
+takeThunk :: <IO> Int -> <IO> Int
+cppDec :: Int -> Int
+cppDone :: Int -> Bool
+runJobTwice :: Job -> <IO> Int
+runOpt :: ?(<IO> Int) -> <IO> Int
+
+heldValue :: Int -> <IO> Int
+heldValue k = do
+  let t = nextInt k
+  x <- takeThunk t
+  y <- takeThunk t
+  do (x + y)
+
+expression :: Int -> <IO> Int
+expression k = takeThunk (nextInt k)
+
+loop :: <IO> Int -> Int -> <IO> Int
+loop pull n = ? n <= 0 = (do 0) : loop pull (n - 1)
+
+carried :: Int -> <IO> Int
+carried k = loop (nextInt k) 2
+
+loopForced :: <IO> Int -> Int -> <IO> Int
+loopForced pull n = ? n <= 0 = pull : loopForced pull (n - 1)
+
+forced :: Int -> <IO> Int
+forced k = loopForced (nextInt k) 2
+
+applySink :: ([Int] -> <IO> ()) -> Int -> <IO> ()
+applySink f n =
+  ? n <= 0 = (do ())
+  : do
+      _ <- f [n]
+      applySink f (n - 1)
+
+sink :: Int -> <IO> ()
+sink n = applySink savePoint n
+
+applySinkCpp :: ([Int] -> <IO> ()) -> Int -> <IO> ()
+applySinkCpp f n =
+  ? cppDone n = (do ())
+  : do
+      _ <- f [n]
+      applySinkCpp f (cppDec n)
+
+sinkCpp :: Int -> <IO> ()
+sinkCpp n = applySinkCpp savePoint n
+
+inRecord :: Int -> <IO> Int
+inRecord k = runJobTwice { run = nextInt k, name = "j" }
+
+inOptional :: Int -> <IO> Int
+inOptional k = runOpt (nextInt k)
+
+absent :: Int -> <IO> Int
+absent k = runOpt Null

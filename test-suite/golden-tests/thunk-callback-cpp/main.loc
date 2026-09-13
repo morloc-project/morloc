@@ -2,17 +2,15 @@
 -- must fire its effect on invocation, not return an unforced thunk.
 --
 -- The compiler represents an <IO> T value as std::function<T()> --
--- a captured, deferred computation forced with (). Morloc-to-morloc
--- code cooperates through forceExportThunks and do-block statement
--- forcing. Foreign C++ code (any template `Sink sink; sink(x);`)
+-- a suspension, run with (). Morloc-to-morloc code runs it with a
+-- do-block bind. Foreign C++ code (any template `Sink sink; sink(x);`)
 -- does not: it invokes the callback as f(x) and discards the return
--- value. If the callback's manifold returns a thunk, the effect
--- never runs.
+-- value. If the callback's manifold returned a suspension, the effect
+-- would never run.
 --
--- The fix is wrapEffectForces at the LamS boundary in
--- CodeGenerator/Express.hs: whenever a lambda manifold's return type
--- has an EffectT layer, the body is wrapped in PolyEval so the
--- manifold returns the plain value with the effect already fired.
+-- The host adapter ('CallbackReturn' in EffectBoundary) runs a
+-- callback's result for the host: a lambda handed to a sourced function
+-- returns the value with the effect already performed.
 
 module main (bareCallback, lambdaCallback, bareMultiEffect, lambdaMultiEffect)
 
@@ -34,10 +32,8 @@ totalSoFar  :: <IO> Int
 resetTally  :: <IO> ()
 
 -- Same C++ template + function, re-declared with a multi-label
--- effect. Exercises 'peelAllEffects' at the callback boundary: the
--- receiver type has to strip every EffectT layer, otherwise the
--- callback manifold returns a partially-forced thunk that the
--- outer forEach template still can't consume.
+-- effect. A wider row is still one layer: the callback's result is run
+-- once, and the outer forEach template consumes the value.
 forEachE    :: [Int] -> (Int -> <IO, Error> ()) -> <IO, Error> ()
 tapE        :: Int -> <IO, Error> ()
 

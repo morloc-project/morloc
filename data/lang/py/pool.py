@@ -33,6 +33,15 @@ _shutdown_wakeup_fd = -1
 # The language preamble (runtime bootstrap: `import pymorloc as morloc`, path
 # setup) and the generated schema/closure tables run at module top, in the
 # coordinator parent -- they are thread-free and the parent depends on them.
+# A wire codec is either a schema string (a value) or a closure codec: the
+# closure tuple's schema, the codecs of the closure's arguments, and the
+# codec of its result. A function whose result is a suspension (a closure
+# of no arguments) has a closure codec as its result codec, and so on
+# through any depth. Defined ahead of the generated closure table, which
+# is built from it.
+def mlc_closure_codec(tuple_schema, arg_codecs, res_codec):
+    return ("__mlc_closure__", tuple_schema, arg_codecs, res_codec)
+
 # AUTO include preamble start
 # <<<BREAK>>>
 # AUTO include preamble end
@@ -169,49 +178,82 @@ def __mlc_wrap_log(group, start_tmpl, pass_tmpl, fail_tmpl, bench_key, fn):
 # boundary it travels as the wire tuple (home_language, manifold_id,
 # captured_packets) and is applied on the far side by calling back to this pool.
 
+MLC_HOME_LANG = "py"
+
+
+def _mlc_is_closure_codec(codec):
+    return isinstance(codec, tuple) and len(codec) == 4 and codec[0] == "__mlc_closure__"
+
+
+def mlc_encode(value, codec):
+    # Serialize a native value by its codec: a closure is reified first.
+    if _mlc_is_closure_codec(codec):
+        return morloc.put_value(mlc_reify(value, MLC_HOME_LANG), codec[1])
+    return morloc.put_value(value, codec)
+
+
+def mlc_decode(pkt, codec):
+    # Deserialize a packet by its codec: a closure is reflected into a
+    # callable that calls back to its home pool.
+    if _mlc_is_closure_codec(codec):
+        return mlc_reflect_from_tuple(morloc.get_value(pkt, codec[1]), codec[2], codec[3])
+    return morloc.get_value(pkt, codec)
+
+
 def mlc_reify(f, home_lang):
-    # Recover (mid, captured) from a closure and serialize its captured values.
-    # partial.func.__name__ is "m<mid>"; partial.args are the captured values in
-    # the manifold's context-argument order; mlc_closure_table[mid] holds their
-    # schemas.
-    mid = int(f.func.__name__[1:])
-    captured = list(f.args)
-    cap_schemas = mlc_closure_table.get(mid, [])
-    packets = [morloc.put_value(c, s) for c, s in zip(captured, cap_schemas)]
+    # Recover (home, mid, captured) from a closure and serialize its captured
+    # values. A closure built here is a functools.partial over a manifold
+    # function m<mid>, with the captured values in the manifold's
+    # context-argument order; mlc_closure_table[mid] holds their codecs. A
+    # closure reflected from another pool carries its origin and is passed
+    # back as it came.
+    origin = getattr(f, "__mlc_origin__", None)
+    if origin is not None:
+        return origin
+    if isinstance(f, functools.partial):
+        mid = int(f.func.__name__[1:])
+        captured = list(f.args)
+    else:
+        # A manifold function itself: a function value with nothing captured.
+        mid = int(f.__name__[1:])
+        captured = []
+    cap_codecs = mlc_closure_table.get(mid, [])
+    packets = [mlc_encode(c, s) for c, s in zip(captured, cap_codecs)]
     return (home_lang, mid, packets)
 
 
-def mlc_reflect_from_tuple(tup, arg_schemas, res_schema):
+def mlc_reflect_from_tuple(tup, arg_codecs, res_codec):
     # Rebuild a callable from an already-deserialized closure wire tuple
     # (home_lang, mid, captured_packets). On application it serializes its
-    # arguments, appends them to the captured packets, and calls back to the
-    # producing pool via foreign_call on the closure's manifold id. Used when the
-    # closure is nested in an aggregate whose enclosing get_value has already
-    # parsed the tuple.
+    # arguments, appends them to the captured packets, calls back to the
+    # producing pool via foreign_call on the closure's manifold id, and
+    # decodes the result. Used when the closure is nested in an aggregate
+    # whose enclosing get_value has already parsed the tuple.
     home_lang, mid, captured = tup
     sock = os.path.join(global_state["tmpdir"], "pipe-" + home_lang)
     def _call(*args):
-        packets = list(captured) + [morloc.put_value(a, s) for a, s in zip(args, arg_schemas)]
-        return morloc.get_value(morloc.foreign_call(sock, mid, packets), res_schema)
+        packets = list(captured) + [mlc_encode(a, s) for a, s in zip(args, arg_codecs)]
+        return mlc_decode(morloc.foreign_call(sock, mid, packets), res_codec)
+    _call.__mlc_origin__ = (home_lang, mid, list(captured))
     return _call
 
 
-def mlc_reflect(pkt, tuple_schema, arg_schemas, res_schema):
+def mlc_reflect(pkt, tuple_schema, arg_codecs, res_codec):
     # Rebuild a callable from a raw incoming closure wire packet: deserialize the
     # tuple, then reflect it. Used when the closure is the top-level crossing
     # value (the whole packet is the closure tuple).
-    return mlc_reflect_from_tuple(morloc.get_value(pkt, tuple_schema), arg_schemas, res_schema)
+    return mlc_reflect_from_tuple(morloc.get_value(pkt, tuple_schema), arg_codecs, res_codec)
 
 
-def mlc_make_closure_dispatch(mid, arg_schemas, res_schema):
-    # Serial dispatch wrapper for a closure manifold: deserialize the incoming
+def mlc_make_closure_dispatch(mid, arg_codecs, res_codec):
+    # Serial dispatch wrapper for a closure manifold: decode the incoming
     # captured ++ bound argument packets, call the native manifold, and
-    # serialize the result. Registered under the closure's mid so a foreign
+    # encode the result. Registered under the closure's mid so a foreign
     # apply reaches it.
     fn = globals()["m" + str(mid)]
     def _wrapper(*sargs):
-        args = [morloc.get_value(s, sch) for s, sch in zip(sargs, arg_schemas)]
-        return morloc.put_value(fn(*args), res_schema)
+        args = [mlc_decode(s, sch) for s, sch in zip(sargs, arg_codecs)]
+        return mlc_encode(fn(*args), res_codec)
     return _wrapper
 
 

@@ -1,0 +1,8 @@
+"[Int]"
+"[Int]"
+"(Int, [Int])"
+"(Int, [Int])"
+"Box (Box Int)"
+"Box (Box Int)"
+"Int -> Int"
+"Int -> Int"

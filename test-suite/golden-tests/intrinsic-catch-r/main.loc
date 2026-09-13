@@ -15,24 +15,27 @@ catchBare :: Int
 catchBare = match (@try (@throw "boom")) | (Ok _cv) = _cv | (Err _) = 42
 
 catchInDo :: Str -> <IO> Int
-catchInDo s = match (@try (do
-    let n = r_len s
-    ? n < 4 = @throw "too short"
-    : n
-  )) | (Ok _cv) = _cv | (Err _) = 999
+catchInDo s = do
+  r <- @try (do
+      let n = r_len s
+      ? n < 4 = @throw "too short"
+      : n)
+  match r | (Ok _cv) = _cv | (Err _) = 999
 
 catchMixedIO :: Str -> <IO> Int
-catchMixedIO s = match (@try (do
-    let n = r_len s
-    ? n == 0 = @throw "empty"
-    : n
-  )) | (Ok _cv) = _cv | (Err _) = (r_len "fallback")
+catchMixedIO s = do
+  r <- @try (do
+      let n = r_len s
+      ? n == 0 = @throw "empty"
+      : n)
+  match r | (Ok _cv) = _cv | (Err _) = (r_len "fallback")
 
 catchForeignRaise :: Str -> <IO> Int
-catchForeignRaise s = match (@try (do
-    let n = r_may_fail s
-    n
-  )) | (Ok _cv) = _cv | (Err _) = 0
+catchForeignRaise s = do
+  r <- @try (do
+      let n = r_may_fail s
+      n)
+  match r | (Ok _cv) = _cv | (Err _) = 0
 
 -- ! inside @catch's fallible seals at the arg site (Restructure.hs
 -- IntrCatch special-case). Empty string raises inside the try/catch.

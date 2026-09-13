@@ -1,13 +1,12 @@
--- A lambda whose RETURN TYPE carries an effect must not force its body. The
--- force is only correct when the body actually yields a thunk; a body that is a
--- literal, a bound parameter or a let binding is already a value, and applying
--- it fails at runtime -- as `'int' object is not callable` in Python and
--- E0618 in Rust.
+-- A lambda at a slot typed `Int -> <IO> Int` must return a suspension, so a
+-- body that is a literal, a bound parameter or a let binding is written
+-- `do v`: a constant suspension. The host receives the callback through the
+-- eager adapter, so `f(x)` runs the suspension and yields the value; the
+-- host never sees a thunk it must call itself.
 --
--- The effect row is the whole variable: every function below returns <IO>, and
--- the same shapes without it have always worked. Both a bare higher-order
--- argument and a record field are covered, because neither requires the other,
--- and both a language that boxes closures (Rust) and one that does not (Python).
+-- Every function below returns <IO>. Both a bare higher-order argument and a
+-- record field are covered, because neither requires the other, and both a
+-- language that boxes closures (Rust) and one that does not (Python).
 module main
   ( argLiteral
   , argParam
@@ -38,27 +37,27 @@ tick :: Int -> <IO> Int
 rsApplyF :: (Int -> <IO> Int) -> Int -> <IO> Int
 rsUseOps :: Ops -> Int -> <IO> Int
 
--- a literal body was always fine: IntN is already treated as a value
+-- a constant suspension of a literal
 argLiteral :: Int -> <IO> Int
-argLiteral k = applyF (\x -> 42) k
+argLiteral k = applyF (\x -> do 42) k
 
--- the bound parameter is a value too, and must not be forced
+-- a constant suspension of the bound parameter
 argParam :: Int -> <IO> Int
-argParam k = applyF (\x -> x) k
+argParam k = applyF (\x -> do x) k
 
--- as is a let binding
+-- and of a let-bound value
 argLet :: Int -> <IO> Int
-argLet k = applyF (\x -> let y = x in y) k
+argLet k = applyF (\x -> let y = x in do y) k
 
--- a body that genuinely performs the effect still needs its force
+-- a body that is itself a suspension
 argEffectful :: Int -> <IO> Int
 argEffectful k = applyF (\x -> tick x) k
 
 recParam :: Int -> <IO> Int
-recParam k = useOps { inc = (\x -> tick x), same = (\x -> x) } k
+recParam k = useOps { inc = (\x -> tick x), same = (\x -> do x) } k
 
 rustArgParam :: Int -> <IO> Int
-rustArgParam k = rsApplyF (\x -> x) k
+rustArgParam k = rsApplyF (\x -> do x) k
 
 rustRecParam :: Int -> <IO> Int
-rustRecParam k = rsUseOps { inc = (\x -> x), same = (\x -> x) } k
+rustRecParam k = rsUseOps { inc = (\x -> do x), same = (\x -> do x) } k

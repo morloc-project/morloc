@@ -1008,6 +1008,11 @@ tuple_impl!(A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7);
 /// id, serialized captured environment).
 pub type ClosureOrigin = (String, i64, Vec<Vec<u8>>);
 
+/// A borrowed function value. A manifold receives a captured closure by
+/// reference; passing it on where a function value is taken by value goes
+/// through this wrapper, which is a function value itself.
+pub struct FnRef<'r, T: ?Sized>(pub &'r T);
+
 /// A crossing closure: a native closure plus the origin needed to reify it.
 pub struct FatClosure<F> {
     pub f: F,
@@ -1040,7 +1045,42 @@ macro_rules! morloc_fn {
             fn $call(&self, $($a: &$A,)+) -> R { (**self).$call($($a,)+) }
             fn $reify(&self) -> Option<&ClosureOrigin> { (**self).$reify() }
         }
+        // A borrowed function value (a closure handed to a manifold by
+        // reference), wrapped so it can be passed on where a function value
+        // is taken by value.
+        impl<'r, $($A,)+ R, T: $trait<$($A,)+ R> + ?Sized> $trait<$($A,)+ R> for FnRef<'r, T> {
+            #[inline]
+            fn $call(&self, $($a: &$A,)+) -> R { (*self.0).$call($($a,)+) }
+            fn $reify(&self) -> Option<&ClosureOrigin> { (*self.0).$reify() }
+        }
     };
+}
+
+// A function value of no arguments: a suspension. Written out because the
+// macro's argument list is non-empty.
+pub trait MorlocFn0<R> {
+    fn call0(&self) -> R;
+    fn reify0(&self) -> Option<&ClosureOrigin>;
+}
+impl<R, F: Fn() -> R> MorlocFn0<R> for F {
+    #[inline]
+    fn call0(&self) -> R { self() }
+    fn reify0(&self) -> Option<&ClosureOrigin> { None }
+}
+impl<R, F: Fn() -> R> MorlocFn0<R> for FatClosure<F> {
+    #[inline]
+    fn call0(&self) -> R { (self.f)() }
+    fn reify0(&self) -> Option<&ClosureOrigin> { Some(&self.origin) }
+}
+impl<R, T: MorlocFn0<R> + ?Sized> MorlocFn0<R> for std::rc::Rc<T> {
+    #[inline]
+    fn call0(&self) -> R { (**self).call0() }
+    fn reify0(&self) -> Option<&ClosureOrigin> { (**self).reify0() }
+}
+impl<'r, R, T: MorlocFn0<R> + ?Sized> MorlocFn0<R> for FnRef<'r, T> {
+    #[inline]
+    fn call0(&self) -> R { (*self.0).call0() }
+    fn reify0(&self) -> Option<&ClosureOrigin> { (*self.0).reify0() }
 }
 
 morloc_fn!(MorlocFn1, call1, reify1, (A1, a1));

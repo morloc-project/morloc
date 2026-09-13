@@ -1,0 +1,10 @@
+module main (saveIt)
+
+import root
+import root-py
+
+source Py from "lib.py" ("get")
+get :: Int -> <IO> Int
+
+saveIt :: Str -> <IO> (Try Str ())
+saveIt path = @savem path (get 1)

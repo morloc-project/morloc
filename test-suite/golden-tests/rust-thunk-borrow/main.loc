@@ -37,20 +37,20 @@ from_list :: [Int] -> [Int]
 
 -- one borrowed parameter
 oneRef :: Str -> <IO> [Int]
-oneRef s = match (@try (from_str s)) | (Ok _cv) = _cv | (Err _) = (do [])
+oneRef s = match (@try (from_str s)) | (Ok _cv) = (do _cv) | (Err _) = (do [])
 
 -- two borrowed parameters, which must share one lifetime
 twoRefs :: Str -> [Int] -> <IO> [Int]
-twoRefs s v = match (@try (from_two s v)) | (Ok _cv) = _cv | (Err _) = (do [])
+twoRefs s v = match (@try (from_two s v)) | (Ok _cv) = (do _cv) | (Err _) = (do [])
 
 -- a Copy scalar beside a borrow: only the borrow carries the lifetime
 mixed :: Int -> Str -> <IO> [Int]
-mixed n s = match (@try (from_mixed n s)) | (Ok _cv) = _cv | (Err _) = (do [])
+mixed n s = match (@try (from_mixed n s)) | (Ok _cv) = (do _cv) | (Err _) = (do [])
 
 -- no borrowed parameter, so no lifetime is introduced
 copyOnly :: Int -> <IO> [Int]
-copyOnly n = match (@try (from_copy n)) | (Ok _cv) = _cv | (Err _) = (do [])
+copyOnly n = match (@try (from_copy n)) | (Ok _cv) = (do _cv) | (Err _) = (do [])
 
 -- a borrowed container rather than a borrowed scalar wrapper
 listRef :: [Int] -> <IO> [Int]
-listRef v = match (@try (from_list v)) | (Ok _cv) = _cv | (Err _) = (do [])
+listRef v = match (@try (from_list v)) | (Ok _cv) = (do _cv) | (Err _) = (do [])

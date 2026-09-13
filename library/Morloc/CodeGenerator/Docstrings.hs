@@ -30,6 +30,7 @@ module Morloc.CodeGenerator.Docstrings
   -- * Schema-text predicates (used by emit helpers in Nexus.hs)
   , peelHint
   , resolveNestedTypes
+  , resolveDeclaredType
   , peelRecDecl
   , isStrWireSchema
   , isOptStrWireSchema
@@ -139,16 +140,33 @@ argLocPrefix i = do
 -- read once the fields are defined beneath the argument list. A
 -- transparent alias has no name worth keeping and becomes its target.
 resolveNestedTypes :: Int -> Type -> MorlocMonad Type
-resolveNestedTypes i = go []
+resolveNestedTypes i t = do
+  scope <- MM.getGeneralScope i
+  resolveNestedTypesIn scope t
+
+-- | 'resolveNestedTypes' for a type declaration. A declaration belongs to
+-- no command, so only the universal scope is consulted.
+resolveDeclaredType :: Type -> MorlocMonad Type
+resolveDeclaredType = resolveNestedTypesIn Map.empty
+
+-- | The walk behind 'resolveNestedTypes': a name is looked up in the given
+-- scope first and in the universal scope after.
+resolveNestedTypesIn :: Scope -> Type -> MorlocMonad Type
+resolveNestedTypesIn scope = go []
   where
+    lookupName :: TVar -> MorlocMonad (Maybe [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind)])
+    lookupName v = do
+      uni <- MM.gets stateUniversalGeneralTypedefs
+      return (Map.lookup v scope <|> Map.lookup v uni)
+
+    go :: [Text] -> Type -> MorlocMonad Type
     go seen t = case t of
       VarT v
         | render (pretty v) `elem` seen -> return t
         | otherwise -> do
-            scope <- MM.getGeneralScope i
-            uni <- MM.gets stateUniversalGeneralTypedefs
+            entry <- lookupName v
             let seen' = render (pretty v) : seen
-            case Map.lookup v scope <|> Map.lookup v uni of
+            case entry of
               -- Record-newtype: attach the layout, keep the name.
               (Just [(_, typeOf -> parent@(NamT _ _ _ _), _, _, TypedefNewtype)]) ->
                 go seen' parent
@@ -159,7 +177,20 @@ resolveNestedTypes i = go []
               (Just [(_, _, _, _, TypedefEnum)]) -> return t
               (Just [(_, typeOf -> parent, _, _, TypedefAlias)]) -> go seen' parent
               _ -> return t
-      AppT f as -> bindNamed <$> go seen f <*> mapM (go seen) as
+      AppT f as -> do
+        as' <- mapM (go seen) as
+        entry <- case f of
+          VarT v | render (pretty v) `notElem` seen -> lookupName v
+          _ -> return Nothing
+        case (f, entry) of
+          -- A parameterized alias is applied by substituting the arguments
+          -- into its body, which is then resolved like a type written in
+          -- place: `Pair Int` with `type Pair a = (a, a)` is `(Int, Int)`.
+          (VarT v, Just [(vs, body, _, _, TypedefAlias)])
+            | params <- [p | Left (p, _) <- vs]
+            , length params == length as' ->
+                go (render (pretty v) : seen) (substituteAll (zip params as') (typeOf body))
+          _ -> bindNamed <$> go seen f <*> pure as'
       FunT as b -> FunT <$> mapM (go seen) as <*> go seen b
       NamT o v ps fields -> do
         let seen' = render (pretty v) : seen
@@ -183,6 +214,16 @@ resolveNestedTypes i = go []
     bindNamed (NamT o v ps fields) as
       | length ps == length as = NamT o v as fields
     bindNamed f as = AppT f as
+
+    -- Simultaneous substitution. Each parameter is first renamed to a
+    -- name no written type can carry, then each of those is replaced by
+    -- its argument, so an argument that mentions a later parameter's
+    -- name is not substituted a second time.
+    substituteAll :: [(TVar, Type)] -> Type -> Type
+    substituteAll binds t0 =
+      let fresh = [TV ("$" <> MT.show' i) | i <- [0 :: Int ..]]
+          renamed = foldr (\(p, fv) t -> substituteTVar p (VarT fv) t) t0 (zip (map fst binds) fresh)
+       in foldr (\(fv, a) t -> substituteTVar fv a t) renamed (zip fresh (map snd binds))
 
 -- dispatch docstring info for each argument to `processArgDoc`
 processArgDoc :: Int -> Type -> ArgDoc -> MorlocMonad CmdDocSet
@@ -215,6 +256,7 @@ processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs retdoc) = do
       , cmdDocRet = (t', getReturnDesc retdoc' (docReturn cmddoc))
       , cmdDocRetMime = getReturnMime retdoc'
       , cmdDocTerminals = docWith cmddoc
+      , cmdDocEpilogues = docEpilogues cmddoc
       }
 processArgDoc i t (ArgDocSig cmddoc [] retdoc) = do
   loc <- argLocPrefix i
@@ -229,6 +271,7 @@ processArgDoc i t (ArgDocSig cmddoc [] retdoc) = do
       , cmdDocRet = (t', getReturnDesc retdoc' (docReturn cmddoc))
       , cmdDocRetMime = getReturnMime retdoc'
       , cmdDocTerminals = docWith cmddoc
+      , cmdDocEpilogues = docEpilogues cmddoc
       }
 processArgDoc i t (ArgDocAlias r) = do
   loc <- argLocPrefix i
@@ -247,6 +290,7 @@ processArgDoc i t (ArgDocAlias r) = do
       , cmdDocRet = (t', [])
       , cmdDocRetMime = getReturnMime r'
       , cmdDocTerminals = []
+      , cmdDocEpilogues = docEpilogues r
       }
 processArgDoc i t r = do
   (t', r') <- reduceArgDoc i t r
@@ -267,6 +311,7 @@ processArgDoc i t r = do
           , cmdDocRet = (t', [])
           , cmdDocRetMime = Nothing
           , cmdDocTerminals = []
+          , cmdDocEpilogues = []
           }
     _ -> MM.throwSystemError "Expected a record type with docstrings but found a non-record type"
 
@@ -422,6 +467,7 @@ reduceArgDocFrom seen i t@(VarT v) arg
         , docListChecks = if null (docListChecks r1) then docListChecks r2 else docListChecks r1
         , docWith = if null (docWith r1) then docWith r2 else docWith r1
         , docMime = docMime r1 <|> docMime r2
+        , docEpilogues = if null (docEpilogues r1) then docEpilogues r2 else docEpilogues r1
         }
 reduceArgDocFrom seen i (NamT o v ps (map snd -> ts)) (ArgDocRec arg rs) = do
   let args = map (ArgDocAlias . snd) rs

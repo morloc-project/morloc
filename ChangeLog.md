@@ -1,3 +1,11 @@
+0.104.0 [2026-09-13]
+--------------------
+
+ - correct doctrine for effects
+ - allow `@epilogue` for commands, not just programs
+ - fix Futhark build issue
+ - many bug and formatting fixes
+
 0.103.2 [2026-09-12]
 --------------------
 

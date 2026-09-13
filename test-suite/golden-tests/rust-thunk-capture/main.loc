@@ -90,4 +90,4 @@ guardedTwice p = do
 -- thunk by value, so yielding a value the sibling thunk is still reading has to
 -- copy it out rather than take it.
 armShare :: [Int] -> <IO> [Int]
-armShare v = match (@try (nonEmpty v)) | (Ok _cv) = _cv | (Err _) = v
+armShare v = match (@try (nonEmpty v)) | (Ok _cv) = (do _cv) | (Err _) = (do v)

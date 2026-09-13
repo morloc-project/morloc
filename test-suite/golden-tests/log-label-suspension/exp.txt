@@ -1,0 +1,6 @@
+1
+starts=1 dones=1 total>=1:True
+2
+starts=2 dones=2 total>=2:True
+2
+starts=2 dones=2 total>=2:True

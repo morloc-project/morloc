@@ -1,0 +1,24 @@
+-- A data-reading intrinsic (@load here) yields what a file holds, and a
+-- file holds data: never a suspension or a function. The result type is
+-- usually left to inference, and inference solves it to whatever the
+-- value is used as. When one arm of a match returns the loaded value and
+-- the other arm is a do-block, the loaded value is unified with the
+-- do-block's suspension type, and the read would decode the file under
+-- a closure schema. The build must refuse the read instead. The same
+-- program with the loaded value lifted (`do v`) is the intended form.
+module main (robust)
+
+import root
+import root-py
+
+source Py from "gen.py" ("addOne")
+addOne :: Int -> Int
+
+robust :: Str -> <IO> Int
+robust path = do
+  a <- @load "cache/#{path}"
+  match a
+    | (Ok v) = do v
+    | (Err _) = do
+        c <- @load "disk/#{path}"
+        do (addOne (unwrap c))

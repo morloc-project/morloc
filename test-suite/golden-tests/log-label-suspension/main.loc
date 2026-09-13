@@ -1,0 +1,26 @@
+-- A log label on a call whose result is a suspension measures each run of
+-- the suspension, not the application that builds it. `direct` runs its
+-- suspension at the export root, `held` hands it to a foreign function
+-- that runs it twice, and `heldCpp` does the same from a C++ pool: one
+-- start/done pair per run, each about a second long, and the sum of the
+-- reported runtimes is at least the number of runs in seconds.
+module main (direct, held, heldCpp)
+
+import root-py
+import root-cpp
+
+source Py from "lib.py" ("slow_io", "run_twice")
+source Cpp from "lib.hpp" ("run_twice_cpp")
+
+slow_io :: Int -> <IO> Int
+run_twice :: <IO> Int -> <IO> Int
+run_twice_cpp :: <IO> Int -> <IO> Int
+
+direct :: Int -> <IO> Int
+direct x = timed@slow_io x
+
+held :: Int -> <IO> Int
+held x = run_twice (timed@slow_io x)
+
+heldCpp :: Int -> <IO> Int
+heldCpp x = run_twice_cpp (timed@slow_io x)

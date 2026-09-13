@@ -1298,15 +1298,23 @@ T from_voidstar(const Schema* schema, const void* data, T*, const void* base_ptr
                 if (size <= 1) {
                     // Inline: second field is the value directly
                     int64_t val = (size == 0) ? 0 : fields[1];
-                    // Check if the value fits in the target C++ type
-                    if (sizeof(T) < 8) {
-                        int64_t tmin = std::numeric_limits<T>::min();
-                        int64_t tmax = std::numeric_limits<T>::max();
-                        if (val < tmin || val > tmax) {
+                    // An integral target must hold the value exactly; a
+                    // floating target takes the nearest representable value.
+                    if constexpr (std::is_integral_v<T>) {
+                        bool fits;
+                        if constexpr (std::is_signed_v<T>) {
+                            fits = val >= static_cast<int64_t>(std::numeric_limits<T>::min())
+                                && val <= static_cast<int64_t>(std::numeric_limits<T>::max());
+                        } else {
+                            fits = val >= 0
+                                && static_cast<uint64_t>(val) <= static_cast<uint64_t>(std::numeric_limits<T>::max());
+                        }
+                        if (!fits) {
                             std::ostringstream oss;
                             oss << "Integer overflow: value " << val
                                 << " does not fit in " << (sizeof(T) * 8) << "-bit type"
-                                << " (range " << tmin << " to " << tmax << ")";
+                                << " (range " << +std::numeric_limits<T>::min()
+                                << " to " << +std::numeric_limits<T>::max() << ")";
                             throw std::overflow_error(oss.str());
                         }
                     }
@@ -1316,9 +1324,11 @@ T from_voidstar(const Schema* schema, const void* data, T*, const void* base_ptr
                     std::ostringstream oss;
                     oss << "Integer overflow: " << size << "-limb integer"
                         << " (" << (size * 64) << " bits)"
-                        << " does not fit in " << (sizeof(T) * 8) << "-bit type"
-                        << " (range " << static_cast<int64_t>(std::numeric_limits<T>::min())
-                        << " to " << static_cast<int64_t>(std::numeric_limits<T>::max()) << ")";
+                        << " does not fit in " << (sizeof(T) * 8) << "-bit type";
+                    if constexpr (std::is_integral_v<T>) {
+                        oss << " (range " << +std::numeric_limits<T>::min()
+                            << " to " << +std::numeric_limits<T>::max() << ")";
+                    }
                     throw std::overflow_error(oss.str());
                 }
             }

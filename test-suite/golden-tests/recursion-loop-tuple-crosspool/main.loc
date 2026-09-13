@@ -74,7 +74,7 @@ runTriple n xs acc
 -- the serial re-use of the carried list across the foreign side effect.
 runIO :: Int -> [Int] -> Int -> <IO> Int
 runIO n xs acc
-  ? n == 0 = acc
+  ? n == 0 = do acc
   : do
       logIt xs
       let (xs', c) = stepC xs

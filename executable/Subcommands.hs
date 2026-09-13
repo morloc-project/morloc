@@ -53,6 +53,7 @@ import Morloc.Namespace.Expr
 import Morloc.Namespace.Prim
 import Morloc.Namespace.State
 import Morloc.Namespace.Type
+import qualified Morloc.ProgramBuilder.Build as Build
 import qualified Morloc.ProgramBuilder.Install as Install
 import Morloc.ProgramBuilder.Paths (installedManifestPath, buildDirName)
 import Morloc.Typecheck.Internal (prettyTypeU)
@@ -622,8 +623,13 @@ cmdTypecheck args _ config buildConfig = do
               verbosity
               config
               buildConfig
-              ( M.typecheck path code
-                  >>= (generatePools . snd)
+              -- Realization lowers guest sources into the build's staging
+              -- tree; a typecheck never builds, so the tree is discarded
+              -- whether or not the check passed.
+              ( do
+                  pools <- Build.withStagingCleanup (M.typecheck path code >>= (generatePools . snd))
+                  Build.discardStagingDir
+                  return pools
               )
               |>> writeTypecheckOutput verbosity
           putDoc (result <> "\n")

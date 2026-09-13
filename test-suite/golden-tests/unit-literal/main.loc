@@ -64,17 +64,17 @@ rustUnit n = after (discard (rustIdent n)) n
 pyGuard :: Int -> <IO> ()
 pyGuard n
   ? n > 0 = pyShout n
-  : ()
+  : do ()
 
 cppGuard :: Int -> <IO> ()
 cppGuard n
   ? n > 0 = cppShout n
-  : ()
+  : do ()
 
 rustGuard :: Int -> <IO> ()
 rustGuard n
   ? n > 0 = rustShout n
-  : ()
+  : do ()
 
 pyBare :: Int -> <IO> ()
 pyBare n = do

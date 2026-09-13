@@ -6,12 +6,9 @@
 -- into a PolyRemoteInterface. If the local wrap doesn't force the
 -- transported EffectT value, the C++ foreign driver invoking
 -- `sink(x)` drops the thunk exactly as it did in the single-language
--- case fixed by thunk-callback-cpp. The single-language fix at
--- Express.hs's local LamS/eta sites (wrapEffectForces) does NOT
--- reach the cross-language sites at Express.hs:1251 (LamS+AppS
--- not-isLocal) and Express.hs:1474 (implicit-eta not-isLocal). The
--- established mechanism for that boundary is pushForceIntoRemote
--- (see the EvalS handler for the pattern).
+-- case covered by thunk-callback-cpp. The host adapter
+-- ('CallbackReturn' in EffectBoundary) must reach the cross-language
+-- sites as well as the local ones.
 --
 -- Two shapes exercise the same cross-language manifold-lowering:
 --   * bare foreign function passed as callback  (implicit-eta, 1474)
@@ -42,11 +39,9 @@ tapPy     :: Int -> <IO> ()
 totalPy   :: <IO> Int
 resetPy   :: <IO> ()
 
--- Multi-label effect variants. Exercises 'peelAllEffects' on the
--- cross-language pushForceIntoRemote path -- every EffectT layer
--- on the callback's return has to be stripped, otherwise the
--- receiver-side C++ variable type and the wire schema disagree
--- (schema is always fully unwrapped by makeSerialAST).
+-- Multi-label effect variants. A wider row is still one layer: the
+-- callback's result is run once for the host, and the receiver-side C++
+-- variable type and the wire schema must agree on the value type.
 forEachE  :: [Int] -> (Int -> <IO, Error> ()) -> <IO, Error> ()
 tapPyE    :: Int -> <IO, Error> ()
 

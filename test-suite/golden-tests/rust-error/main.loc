@@ -19,10 +19,10 @@ pyId :: Int -> Int
 -- @throw inside a manifold: raises with the message; unwinding through the
 -- manifold appends its traceback frame.
 checkLen :: [Int] -> Int
-checkLen xs = do
+checkLen xs =
   let n = rustLen xs
-  ? rustLt2 n = @throw "checkLen: list too short"
-  : n
+  in ? rustLt2 n = @throw "checkLen: list too short"
+     : n
 
 -- @catch of a bare throw, and of a real manifold throw (fallback recovers).
 catchBare :: Int
@@ -34,6 +34,6 @@ safeCheck xs = match (@try (checkLen xs)) | (Ok _cv) = _cv | (Err _) = 0
 -- cross-pool: the rust throw crosses into the py-hosted caller; the traceback
 -- carries frames from BOTH pools.
 crossThrow :: [Int] -> Int
-crossThrow xs = do
+crossThrow xs =
   let n = checkLen xs
-  pyId n
+  in pyId n

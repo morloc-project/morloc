@@ -428,10 +428,6 @@ unfoldFun (FunU args ret) =
   let (args', ret') = unfoldFun ret in (args ++ args', ret')
 unfoldFun t = ([], t)
 
--- tuple constructor names are exactly "Tuple" followed by digits
-isTupleName :: Text -> Bool
-isTupleName nm = "Tuple" `T.isPrefixOf` nm && T.all (`elem` ("0123456789" :: String)) (T.drop 5 nm)
-
 -- the surface shape of a morloc type, as this guest cares about it
 data MShape = MArr Text Int | MTup [TypeU] | MOther
 

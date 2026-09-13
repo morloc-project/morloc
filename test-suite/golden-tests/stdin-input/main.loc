@@ -63,7 +63,7 @@ readAny f = do
     Ok n <- @flen fi
     identI n)
   match _tr
-    | (Ok _cv) = _cv
+    | (Ok _cv) = do _cv
     | (Err _) = (do
         Ok si <- @open f :: <IO> (Try Str (IStream Int))
         Ok n <- @flen si

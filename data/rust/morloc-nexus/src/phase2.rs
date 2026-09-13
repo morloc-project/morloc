@@ -252,6 +252,7 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
             root = root.long_about(leak(&desc.join("\n")));
         }
         root = append_after_help(root, &epilogue);
+        root = append_after_help(root, &render_epilogues(&cmd.epilogues));
         return crate::help::finalize(root, crate::help::usage_single_root(prog_name));
     }
 
@@ -298,6 +299,7 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
                         .about(leak(first_desc(&cmd.desc))),
                 );
                 let sub = build_command_args(sub, cmd, manifest);
+                let sub = append_after_help(sub, &render_epilogues(&cmd.epilogues));
                 let sub = crate::help::finalize(
                     sub,
                     crate::help::usage_multi_sub(
@@ -321,6 +323,7 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
                     .about(leak(first_desc(&cmd.desc))),
             );
             let sub = build_command_args(sub, cmd, manifest);
+            let sub = append_after_help(sub, &render_epilogues(&cmd.epilogues));
             let sub = crate::help::finalize(
                 sub,
                 crate::help::usage_multi_sub(prog_name, None, &cmd.name),

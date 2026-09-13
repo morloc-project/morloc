@@ -1,0 +1,10 @@
+module main (saveIt)
+
+import root
+import root-cpp
+
+source Cpp from "lib.hpp" ("get")
+get :: Int -> <IO> Int
+
+saveIt :: Str -> <IO> (Try Str ())
+saveIt path = @savem path (get 1)

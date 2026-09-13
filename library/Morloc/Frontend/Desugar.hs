@@ -235,6 +235,12 @@ captureDeclDocs pos name = do
       <> "`--' @with` atoms to that signature's docstring. "
       <> "Offending atom: `@with " <> renderWithSpec s <> "`."
     [] -> return ()
+  case docEpilogues vars of
+    (_ : _) -> dfail pos . T.unpack $
+      "`@epilogue` requires an explicit signature above the definition. "
+      <> "Add a `" <> unEVar name <> " :: <type>` line and move the "
+      <> "`--' @epilogue` block to that signature's docstring."
+    [] -> return ()
   let descLines = docLines vars
   case descLines of
     [] -> return ()
@@ -334,7 +340,7 @@ argDocDirectiveKeys =
   , "arg", "true", "false", "return"
   , "source", "form", "check.<kind>"
   , "list.source", "list.form", "list.check.<kind>"
-  , "with", "render", "mime"
+  , "with", "render", "mime", "epilogue"
   ]
 
 -- | Parse and lightly validate a media type (RFC 6838 `type/subtype`, e.g.
@@ -610,10 +616,29 @@ applyCliOptDirective k v = case parseCliOpt v of
           <> "letter, or the long form '--" <> k <> "'."
      in ([msg], Nothing)
 
+-- | Parse the docstring lines of one term, argument, or type. An
+-- `@epilogue` directive opens a block: every later line, directive-shaped
+-- or not, is kept verbatim in that block until the docstring ends or
+-- another `@epilogue` opens the next one. Blank lines survive, so an
+-- examples block can be spaced and commented.
 processArgDocLines :: [Text] -> ([Text], [Text], ArgDocVars)
-processArgDocLines = foldl step ([], [], defaultValue)
+processArgDocLines = finalize . foldl step ([], [], defaultValue, Nothing)
   where
-    step (errs, ws, d) line = case parseDocKV line of
+    finalize (errs, ws, d, cur) = (errs, ws, closeEpilogue d cur)
+
+    closeEpilogue d Nothing = d
+    closeEpilogue d (Just epi) = d {docEpilogues = docEpilogues d <> [epi]}
+
+    step (errs, ws, d, Just epi) line = case parseDocKV line of
+      DocDirective "epilogue" _ -> (errs, ws, closeEpilogue d (Just epi), Just [])
+      DocDesc v -> (errs, ws, d, Just (epi <> [v]))
+      DocDirective _ _ -> (errs, ws, d, Just (epi <> [docDescLine line]))
+    step (errs, ws, d, Nothing) line = case parseDocKV line of
+      DocDirective "epilogue" _ -> (errs, ws, d, Just [])
+      _ -> let (errs', ws', d') = stepDirective (errs, ws, d) line
+            in (errs', ws', d', Nothing)
+
+    stepDirective (errs, ws, d) line = case parseDocKV line of
       DocDesc v
         | T.null v -> (errs, ws, d)
         | otherwise -> (errs, ws, d {docLines = docLines d <> [v]})
@@ -932,10 +957,11 @@ rejectDirectivesOnCtor pos name v =
       , ("list.check", not (null (docListChecks v)))
       , ("with", not (null (docWith v)))
       , ("mime", isJust (docMime v))
+      , ("epilogue", not (null (docEpilogues v)))
       ]
 
 rejectWithHere :: Pos -> Text -> ArgDocVars -> D ()
-rejectWithHere pos ctx v =
+rejectWithHere pos ctx v = do
   case docWith v of
     [] -> return ()
     (s : _) -> dfail pos . T.unpack $
@@ -943,6 +969,12 @@ rejectWithHere pos ctx v =
       <> "; it may only appear in a signature preamble (the `--'` "
       <> "lines directly above `name ::`). Offending atom: `@with "
       <> renderWithSpec s <> "`."
+  case docEpilogues v of
+    [] -> return ()
+    _ -> dfail pos . T.unpack $
+      "`@epilogue` is not allowed on " <> ctx
+      <> "; it may only appear in a signature preamble (the `--'` "
+      <> "lines directly above `name ::`) or above `module`."
 
 renderWithSpec :: WithSpec -> Text
 renderWithSpec (WithSpec mShort l (EV t) _ _ _ _) =

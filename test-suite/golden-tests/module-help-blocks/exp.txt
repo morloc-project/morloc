@@ -18,6 +18,31 @@ A demo toolbox
 It does several things.
 
 Usage: ./tool <nexus_options> <command> <command_options>
+--- multi subcommand short ---
+Greet someone
+
+Usage: ./tool <nexus_options> greet <command_options>
+
+General Options:
+  -h, --help  Print help (see more with '--help')
+
+Positional arguments:
+  1:  type: Str
+      format: literal string
+
+Return: Str
+
+Examples:
+
+# greet by name
+tool greet Weena
+--- multi subcommand long epilogue ---
+Examples:
+
+# greet by name
+tool greet Weena
+
+Nexus Options:
 --- single short ---
 A one-trick program
 
@@ -34,6 +59,9 @@ Return: Int
 
 Examples:
   solo 1 2
+
+Notes:
+  integers only
 --- single long description ---
 A one-trick program
 The trick is addition.
@@ -65,3 +93,6 @@ Positional arguments:
   1:  type: Int
 
 Return: Str
+
+Examples:
+  cmdonly 42

@@ -5,5 +5,8 @@ module cmdonly (render)
 import root-py
 
 --' Convert a number to text
+--' @epilogue
+--' Examples:
+--'   cmdonly 42
 render :: Int -> Str
 render x = show x

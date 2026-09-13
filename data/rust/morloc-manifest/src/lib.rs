@@ -284,6 +284,10 @@ pub struct Command {
     /// summary used in subcommand listings.
     #[serde(default)]
     pub desc: Vec<String>,
+    /// Epilogue blocks shown at the foot of this command's help, after
+    /// its argument and return blocks.
+    #[serde(default)]
+    pub epilogues: Vec<Vec<String>>,
     /// Argument list, in declaration order. Each entry is a
     /// discriminated union -- see [`Arg`].
     #[serde(default)]

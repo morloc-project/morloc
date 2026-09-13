@@ -54,7 +54,7 @@ import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
 import qualified Morloc.Version
-import qualified System.Directory as Dir
+import Morloc.ProgramBuilder.Build (BuildDirs (..), resolveBuildDirs)
 import Morloc.ProgramBuilder.Paths (buildDirName, resolveDatafileAgainstRoot)
 
 -- ======================================================================
@@ -363,14 +363,26 @@ getFData (t, i, lang, doc, sockets) = do
 -- the same AST at the call sites, so 'validateArgSpecs' (operating on
 -- the AST) and the manifest emitter (operating on the rendered text)
 -- never go out of sync.
+-- | The wire forms of a command's arguments and result. The program's
+-- caller is a host that only has values: a suspension at the root of an
+-- argument is built from the value it supplies, and the suspension at the
+-- root of the result is run for it, so both cross the boundary as their
+-- result type. A suspension below the root has no such form
+-- ('checkExportedHigherOrder' rejects it before this runs).
 makeSerialASTs :: Int -> Lang -> Type -> MorlocMonad ([SerialAST], SerialAST)
 makeSerialASTs mid lang (FunT ts t) = do
-  ss <- mapM (makeSerialAST mid lang) ts
-  s <- makeSerialAST mid lang t
+  ss <- mapM (makeSerialAST mid lang . hostRoot) ts
+  s <- makeSerialAST mid lang (hostRoot t)
   return (ss, s)
 makeSerialASTs mid lang t = do
-  s <- makeSerialAST mid lang t
+  s <- makeSerialAST mid lang (hostRoot t)
   return ([], s)
+
+-- | The type a value has on the host side of the program boundary: the
+-- result of a root suspension, the value itself otherwise.
+hostRoot :: Type -> Type
+hostRoot (EffectT _ t) = t
+hostRoot t = t
 
 makeSerialAST :: Int -> Lang -> Type -> MorlocMonad SerialAST
 makeSerialAST mid lang t = do
@@ -418,7 +430,12 @@ makeGastSerialASTs i t = do
 -- top-level constant bindings whose RHS is a recursive-type literal
 -- route through @annotateGasts@ here rather than through a pool.
 generalTypeToSerialAST :: Int -> Type -> MorlocMonad SerialAST
-generalTypeToSerialAST i = generalTypeToSerialAST' i Set.empty
+-- The nexus evaluator runs a suspension where it is written, so an
+-- expression of type <E> T produces a T. Only the root is a suspension the
+-- evaluator runs; one nested inside a value is a closure the evaluator
+-- cannot hold, and the walk below refuses it.
+generalTypeToSerialAST i (EffectT _ t) = generalTypeToSerialAST' i Set.empty t
+generalTypeToSerialAST i t = generalTypeToSerialAST' i Set.empty t
 
 -- The ancestor set holds the TYPES on the path above the one being
 -- lowered, and a self-reference is recognised against it. A structural
@@ -515,7 +532,6 @@ generalTypeToSerialAST' i anc t0@(AppT (VarT v) ts)
       in SerialObject NamTable (FV MBT.table (CV "")) []
            <$> mapM (secondM (generalTypeToSerialAST' i anc)) cols
   | otherwise = appliedTypeToSerialAST i anc t0 v ts
-generalTypeToSerialAST' i anc (EffectT _ t) = generalTypeToSerialAST' i anc t
 generalTypeToSerialAST' i anc (OptionalT t) = do
   inner <- generalTypeToSerialAST' i anc t
   return $ SerialOptional (FV (TV "Optional") (CV "")) inner
@@ -589,10 +605,22 @@ checkExportedHigherOrder i name t = case findOffender t of
         ((n, a) : _) -> Just ("argument" <+> pretty n <+> "is a function", a)
         [] | Serial.containsFunT ret ->
              Just ("return type contains a function", ret)
-           | otherwise -> Nothing
+           | otherwise -> case [(n, a) | (n, a) <- zip [1 :: Int ..] ts, nestedSuspension a] of
+               ((n, a) : _) -> Just ("argument" <+> pretty n <+> "holds a suspension below its root", a)
+               [] | nestedSuspension ret ->
+                    Just ("return type holds a suspension below its root", ret)
+                  | otherwise -> Nothing
     findOffender ty
       | Serial.containsFunT ty = Just ("exported value is or contains a function", ty)
+      | nestedSuspension ty = Just ("exported value holds a suspension below its root", ty)
       | otherwise = Nothing
+
+    -- A suspension at the root of an argument or result is adapted at the
+    -- program boundary (built from, or run for, the caller); one nested in
+    -- a container, an optional or another suspension has no value form the
+    -- caller could send or receive.
+    nestedSuspension :: Type -> Bool
+    nestedSuspension = Serial.containsEffectT . hostRoot
 
 -- | An applied type constructor: either a `data` type whose parameters must
 -- be instantiated before its arms are walked, or an alias to expand.
@@ -751,6 +779,21 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- Used by every IFile-routing case in toNexusExpr (BracketSlice,
     -- BracketIndex, PatternStruct) so the path-encoding logic is in one
     -- place.
+    -- A suspension held as a value has no representation in the nexus
+    -- evaluator, which has no closure values; it must be run in place
+    -- (bound with <-) or realized in a pool.
+    heldSuspension :: MDoc -> AnnoS (Indexed Type) One () -> MorlocMonad ()
+    heldSuspension how (AnnoS (Idx ix (EffectT _ _)) _ _) =
+      MM.throwSourcedError ix $
+        "A suspension" <+> how <+> "in code the program evaluates itself cannot be held:"
+          <+> "the evaluator runs a suspension where it is written and cannot run it later."
+          <+> "Run it first (x <- e), or give the function a language (source) so a pool holds it."
+    heldSuspension _ _ = return ()
+
+    writeCheck :: Int -> Intrinsic -> AnnoS (Indexed Type) One () -> MorlocMonad ()
+    writeCheck ix intr (AnnoS (Idx _ vt) _ _) =
+      Serial.checkWriteDataType ix intr (Serial.containsEffectT vt || Serial.containsFunT vt) (pretty vt)
+
     emitIFileWalkX
       :: Type
       -> AnnoS (Indexed Type) One ()
@@ -825,11 +868,15 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
           emitIFileWalkX t rE steps []
       | otherwise =
           AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [rE]
-    toNexusExpr (AnnoS (Idx _ t) _ (AppS e es)) = AppX <$> type2schema t <*> toNexusExpr e <*> mapM toNexusExpr es
+    toNexusExpr (AnnoS (Idx _ t) _ (AppS e es)) = do
+      mapM_ (heldSuspension "passed as an argument") es
+      AppX <$> type2schema t <*> toNexusExpr e <*> mapM toNexusExpr es
     toNexusExpr (AnnoS _ _ (LamS vs e)) = LamX (map (render . pretty) vs) <$> toNexusExpr e
     toNexusExpr (AnnoS (Idx _ (FunT _ t)) _ (ExeS (PatCall p))) = PatX <$> type2schema t <*> pure p
     toNexusExpr (AnnoS (Idx _ t) _ (BndS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
-    toNexusExpr (AnnoS (Idx _ t) _ (LstS es)) = LstX <$> type2schema t <*> mapM toNexusExpr es
+    toNexusExpr (AnnoS (Idx _ t) _ (LstS es)) = do
+      mapM_ (heldSuspension "stored in a list") es
+      LstX <$> type2schema t <*> mapM toNexusExpr es
     -- TupS construction. Multi-field patterns are no longer fragmented
     -- at desugar time (they emit a unified PatCall (PatternStruct ...)
     -- instead), so any TupS reaching here is a user-written tuple
@@ -880,15 +927,21 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS (Idx _ t) _ (LetBndS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
     -- Desugar let to lambda application: let x = e1 in e2 -> (\x -> e2) e1
     toNexusExpr (AnnoS (Idx _ t) _ (LetS v e1 body)) = do
+      heldSuspension "bound with let" e1
       schema <- type2schema t
-      bodyX <- toNexusExpr body
       e1X <- toNexusExpr e1
+      bodyX <- toNexusExpr body
       return $ AppX schema (LamX [render (pretty v)] bodyX) [e1X]
     toNexusExpr (AnnoS (Idx _ ift) _ (IfS cond thenB elseB)) =
       IfX <$> type2schema ift
           <*> toNexusExpr cond
           <*> toNexusExpr thenB
           <*> toNexusExpr elseB
+    -- The nexus evaluator has no closure values, so it runs a suspension
+    -- where it is written. That is the law's own rule at a force, since
+    -- running a suspension just built is running its body; every other
+    -- position, where the suspension would be held and run later, zero
+    -- times or more than once, is refused above.
     toNexusExpr (AnnoS _ _ (DoBlockS e)) = toNexusExpr e
     toNexusExpr (AnnoS _ _ (EvalS e)) = toNexusExpr e
     -- CoerceToOptional changes the value's runtime layout: the voidstar
@@ -930,35 +983,40 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
           return (CtorFieldX sch subj tag idx)
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrShow [arg])) =
       ShowX <$> type2schema t <*> toNexusExpr arg
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrRead [arg])) =
-      withTryResult t $ \inner -> ReadX <$> type2schema inner <*> toNexusExpr arg
+    toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrRead [arg])) =
+      Serial.checkReadDataType ix IntrRead t >>
+      withTryResult t (\inner -> ReadX <$> type2schema inner <*> toNexusExpr arg)
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrHash [arg])) =
       HashX <$> type2schema t <*> toNexusExpr arg
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSave [levelExpr, path, valExpr])) =
-      withTryResult t $ \inner -> SaveX "voidstar"
+    toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrSave [levelExpr, path, valExpr])) =
+      writeCheck ix IntrSave valExpr >>
+      withTryResult t (\inner -> SaveX "voidstar"
         <$> type2schema inner
         <*> toNexusExpr levelExpr
         <*> toNexusExpr valExpr
-        <*> toNexusExpr path
+        <*> toNexusExpr path)
     -- @savem/@savej take source args in (path, value) order for
     -- partial-application ergonomics. They carry no compression level;
     -- emit a zero literal so the nexus dispatch (which always reads a
     -- level field from save_expr) has a uniform shape. The runtime
     -- ignores the field for non-voidstar formats.
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSaveM [path, valExpr])) =
-      withTryResult t $ \inner -> SaveX "msgpack"
+    toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrSaveM [path, valExpr])) =
+      writeCheck ix IntrSaveM valExpr >>
+      withTryResult t (\inner -> SaveX "msgpack"
         <$> type2schema inner
         <*> pure (LitX IntX "0")
         <*> toNexusExpr valExpr
-        <*> toNexusExpr path
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSaveJ [path, valExpr])) =
-      withTryResult t $ \inner -> SaveX "json"
+        <*> toNexusExpr path)
+    toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrSaveJ [path, valExpr])) =
+      writeCheck ix IntrSaveJ valExpr >>
+      withTryResult t (\inner -> SaveX "json"
         <$> type2schema inner
         <*> pure (LitX IntX "0")
         <*> toNexusExpr valExpr
-        <*> toNexusExpr path
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrLoad [path])) =
-      withTryResult t $ \inner -> LoadX <$> type2schema inner <*> toNexusExpr path
+        <*> toNexusExpr path)
+    toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrLoad [path])) =
+      Serial.checkReadDataType ix IntrLoad t >>
+      withTryResult t (\inner -> LoadX <$> type2schema inner <*> toNexusExpr path)
     -- @open: dispatch by result-type head. IFile/IStream go to OpenX
     -- (generic mlc_open(path, kind) entry); OStream goes to OpenOStreamX
     -- (typed mlc_open_ostream(schema_str, path) entry) since the writer
@@ -966,7 +1024,8 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS (Idx iOpen t) _ (IntrinsicS IntrOpen [path])) =
       -- The handle type is inside the Try now, so the kind dispatch reads
       -- the inner type while the node's own result stays the Try.
-      withTryResult t $ \handleT -> do
+      Serial.checkReadDataType iOpen IntrOpen t >>
+      withTryResult t (\handleT -> do
       let peelHead (AppT h _) = peelHead h
           peelHead ot = ot
           head_ = peelHead handleT
@@ -987,25 +1046,27 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
                 "@open: result type must be IFile/IStream/OStream, got " <> pretty v
         _ ->
           MM.throwSourcedError iOpen $
-            "@open: unsupported handle type" <+> pretty (show t)
+            "@open: unsupported handle type" <+> pretty (show t))
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrClose [handle])) =
       withTryResult t $ \_ -> CloseX <$> toNexusExpr handle
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrFSchema [path])) =
       withTryResult t $ \inner -> FSchemaX <$> type2schema inner <*> toNexusExpr path
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrFLength [handle])) =
       withTryResult t $ \inner -> FLengthX <$> type2schema inner <*> toNexusExpr handle
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrNext [handle])) =
-      withTryResult t $ \inner -> NextX <$> type2schema inner <*> toNexusExpr handle
+    toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrNext [handle])) =
+      Serial.checkReadDataType ix IntrNext t >>
+      withTryResult t (\inner -> NextX <$> type2schema inner <*> toNexusExpr handle)
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStreamLayout [handle])) =
       withTryResult t $ \inner -> StreamLayoutX <$> type2schema inner <*> toNexusExpr handle
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStream [handle])) =
       StreamX <$> type2schema t <*> toNexusExpr handle
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrWrite [levelE, handleE, valE@(AnnoS (Idx _ valT) _ _)])) =
-      withTryResult t $ \_ -> WriteX
+    toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrWrite [levelE, handleE, valE@(AnnoS (Idx _ valT) _ _)])) =
+      writeCheck ix IntrWrite valE >>
+      withTryResult t (\_ -> WriteX
         <$> type2schema valT
         <*> toNexusExpr levelE
         <*> toNexusExpr valE
-        <*> toNexusExpr handleE
+        <*> toNexusExpr handleE)
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrAppend [pathE])) =
       withTryResult t $ \inner ->
         AppendX <$> type2schema (handleStorageOfResult inner) <*> toNexusExpr pathE
@@ -1017,9 +1078,10 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       ThrowX <$> toNexusExpr msg
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrTry [body])) =
       TryX <$> type2schema t <*> toNexusExpr body
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStdin _)) =
-      withTryResult t $ \inner ->
-        StdinX <$> type2schema (handleStorageOfResult inner)
+    toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrStdin _)) =
+      Serial.checkReadDataType ix IntrStdin t >>
+      withTryResult t (\inner ->
+        StdinX <$> type2schema (handleStorageOfResult inner))
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStdout _)) =
       StdoutX <$> type2schema (handleStorageOfResult t)
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStderr _)) =
@@ -2244,18 +2306,6 @@ namTagLabel NamRecord = "record"
 namTagLabel NamObject = "object"
 namTagLabel NamTable  = "table"
 
--- | Every named type reachable from a command's signature, in discovery
--- order and deduplicated by name.
---
--- The help prints a type by name and defines each name once beneath the
--- argument list. A name is only useful there if it is actually defined,
--- and a record reached through a list, tuple, or optional is exactly as
--- opaque to a caller as one at the top level -- more so, since it is the
--- shape they will be handed. Walking the whole type is what makes
--- `[Hit]` mean something.
--- | Every type a command's signature mentions: each argument (a group
--- contributes the record itself, whose fields the walk then reaches)
--- and the return.
 -- | The types a command's help actually shows.
 --
 -- The glossary defines the names a reader meets, so it is built from what is
@@ -2287,13 +2337,6 @@ cmdSignatureTypes mStream doc =
     -- field types beside its values.
     argTypes (CmdArgAlt r) = altDocType r : concatMap altArmFields (altDocArms r)
 
--- | The glossary for one command: every named type its signature mentions,
--- defined once and generically.
---
--- Records and tables are read off the signature itself. A type whose wire form
--- comes from a @Packable@ instance has no structure in the signature at all --
--- the name is opaque there -- so its definition is taken from the instance,
--- which states the wire form generically in the constructor's own parameters.
 -- | Constructors this command hands to a pack function, taken from the
 -- serialization it will actually run. A name can appear in a signature and
 -- still never reach a packer -- unit is the common case, since it
@@ -2322,6 +2365,28 @@ packedConstructors = Set.fromList . concatMap go
 -- description.
 data DataTypeDoc = DataTypeDoc [Text] [Text] [(Text, [Type], [Text])]
 
+-- | What the glossary says about a record or object: its kind, its type
+-- parameters, and its fields as declared, laid out in those parameters
+-- with transparent aliases resolved to what they name.
+data RecordTypeDoc = RecordTypeDoc NamType [Text] [(Key, Type)]
+
+-- | Every record and object declared anywhere in the program, keyed by
+-- the name its values print under: the constructor, which for
+-- @record Foo = Bar {..}@ is @Bar@. A name declared more than once is
+-- left out, as every other reader of the scope leaves it unresolved.
+collectRecordTypes :: MorlocMonad (Map.Map Text RecordTypeDoc)
+collectRecordTypes = do
+  scope <- MM.gets stateUniversalGeneralTypedefs
+  fmap (Map.fromList . catMaybes) . CM.forM (Map.elems scope) $ \entries ->
+    case entries of
+      [(vs, body@(NamU _ _ _ _), _, _, TypedefNewtype)] -> do
+        resolved <- Docstrings.resolveDeclaredType (typeOf body)
+        return $ case resolved of
+          NamT o con _ fields ->
+            Just (render (pretty con), RecordTypeDoc o [unTVar p | Left (p, _) <- vs] fields)
+          _ -> Nothing
+      _ -> return Nothing
+
 -- | Every `data` type declared anywhere in the program, keyed by name.
 collectDataTypes :: MorlocMonad (Map.Map Text DataTypeDoc)
 collectDataTypes = do
@@ -2338,14 +2403,47 @@ collectDataTypes = do
             ]
     ]
 
-namedTypesJson :: Set.Set Text -> [Serial.PackerInstance] -> Map.Map Text DataTypeDoc -> [Type] -> Text
-namedTypesJson packedHeads instances dataTypes ts =
+-- | The glossary for one command: every named type its signature mentions,
+-- defined once and generically.
+--
+-- A record is stated from its declaration and a @data@ from its constructor
+-- table. A type whose wire form comes from a @Packable@ instance has no
+-- structure in the signature at all -- the name is opaque there -- so its
+-- definition is taken from the instance, which states the wire form
+-- generically in the constructor's own parameters. Only an anonymous row,
+-- which has no declaration, is read off the signature itself.
+namedTypesJson :: Set.Set Text -> [Serial.PackerInstance] -> Map.Map Text RecordTypeDoc -> Map.Map Text DataTypeDoc -> [Type] -> Text
+namedTypesJson packedHeads instances recordTypes dataTypes ts =
   jsonArr
-    ( map oneNamed (filter (isShown . snd3) allDefs)
+    ( map oneNamed recordEntries
         <> dataEntries
         <> packableEntries ts
     )
   where
+    -- Records in the order the help meets them: those the signature walk
+    -- reaches, then those reached by name alone, through another
+    -- definition's field or a constructor's field.
+    recordEntries = filter (isShown . defName) (dedup (walked <> declared))
+
+    defName (_, nm, _, _) = nm
+
+    -- A record the signature walk reaches is stated from its declaration
+    -- when it has one. The declaration carries the parameters and lays
+    -- the fields out in them; the signature carries whatever the
+    -- typechecker left there, which is the declaration's layout when the
+    -- value passes through and one use site's instantiation when the
+    -- command builds it.
+    walked = dedup [fromDeclaration d | d <- concatMap collect ts]
+
+    fromDeclaration (o, nm, fields) = case Map.lookup nm recordTypes of
+      Just (RecordTypeDoc o' params fields') -> (o', nm, params, fields')
+      Nothing -> (o, nm, [], fields)
+
+    declared =
+      [ (o, nm, params, fields)
+      | (nm, RecordTypeDoc o params fields) <- Map.toList recordTypes
+      ]
+
     -- A `data` type is a bare name wherever it appears, so the names the
     -- help shows are searched for it directly. Its constructors' field
     -- types may name further types, which the closure must reach.
@@ -2371,19 +2469,6 @@ namedTypesJson packedHeads instances dataTypes ts =
             ])
         ]
 
-    snd3 (_, x, _) = x
-
-    -- A record may be reached only through a constructor's field; its
-    -- definition is collected from there as well, and shown only if the
-    -- closure reaches its name.
-    allDefs = dedup (concatMap collect ts <> concatMap collect ctorFieldTypes)
-    ctorFieldTypes =
-      [ ft
-      | DataTypeDoc _ _ ctors <- Map.elems dataTypes
-      , (_, fts, _) <- ctors
-      , ft <- fts
-      ]
-
     -- A definition earns its place by defining a name the reader actually
     -- meets. A type can appear in a signature without appearing in the help:
     -- an option group is destructured into flags, an anonymous record row is
@@ -2405,7 +2490,7 @@ namedTypesJson packedHeads instances dataTypes ts =
         grow s0 =
           let s1 = Set.union s0 . Set.fromList $
                      [ n
-                     | (_, nm, fields) <- allDefs
+                     | (_, nm, _, fields) <- walked <> declared
                      , Set.member nm s0
                      , (_, ft) <- fields
                      , n <- namesOf (renderCliType ft)
@@ -2450,18 +2535,13 @@ namedTypesJson packedHeads instances dataTypes ts =
     unwrapColumn NamTable (AppT (VarT (TV "List")) [el]) = el
     unwrapColumn _ t = t
 
-    dedup = go Set.empty
-      where
-        go _ [] = []
-        go seen (x@(_, nm, _) : rest)
-          | Set.member nm seen = go seen rest
-          | otherwise = x : go (Set.insert nm seen) rest
+    dedup = dedupOn defName
 
-    oneNamed (o, nm, fields) =
+    oneNamed (o, nm, params, fields) =
       jsonObj
         [ ("name", jsonStr nm)
         , ("kind", jsonStr (namTagLabel o))
-        , ("parameters", jsonArr [])
+        , ("parameters", jsonArr (map jsonStr params))
         , ("fields", jsonArr
             [ jsonObj [("key", jsonStr (unKey k)), ("type", jsonStr (renderCliType ft))]
             | (k, ft) <- fields
@@ -2925,6 +3005,10 @@ data ManifestInputs = ManifestInputs
     -- ^ Every @Packable@ instance in the program. A type whose wire form comes
     -- from an instance is opaque in a signature, so its glossary entry is taken
     -- from here rather than from the type itself.
+  , miRecordTypes         :: !(Map.Map Text RecordTypeDoc)
+    -- ^ Every record and object in the program, by name: its parameters and
+    -- its fields as declared. The glossary states a record from here so one
+    -- entry serves every instantiation a command uses.
   , miDataTypes           :: !(Map.Map Text DataTypeDoc)
     -- ^ Every `data` type in the program, by name: its constructors with
     -- their field types and the prose written above each. A `data` is a
@@ -3070,6 +3154,7 @@ buildManifest ManifestInputs{..} =
         , ("pool", jsonInt (miLangToPool (socketLang (fdataSocket fd))))
         , ("needed_pools", jsonArr (map (jsonInt . miLangToPool . socketLang) (fdataSubSockets fd)))
         , ("desc", jsonStrArr (cmdDocDesc (fdataCmdDocSet fd)))
+        , ("epilogues", jsonArr (map jsonStrArr (cmdDocEpilogues (fdataCmdDocSet fd))))
         , ("args", argsJson (cmdDocArgs (fdataCmdDocSet fd)) (fdataArgSchemas fd) (fdataArgAsts fd))
         , ("return", returnJson (fdataReturnSchema fd) (fdataReturnGeneralSchema fd) (fst (cmdDocRet (fdataCmdDocSet fd))) (snd (cmdDocRet (fdataCmdDocSet fd))) (cmdDocRetMime (fdataCmdDocSet fd)))
         , ("constraints", jsonArr [])
@@ -3083,6 +3168,7 @@ buildManifest ManifestInputs{..} =
         , ("named_types", namedTypesJson
             (packedConstructors (fdataReturnAst fd : fdataArgAsts fd))
             miPackerInstances
+            miRecordTypes
             miDataTypes
             (cmdSignatureTypes (Map.lookup (EV (fdataTermName fd)) miStreamTypes) (fdataCmdDocSet fd)))
         , ("metadata", metadataEmpty)
@@ -3096,6 +3182,7 @@ buildManifest ManifestInputs{..} =
         [ ("name", jsonStr (commandName g))
         , ("type", jsonStr "pure")
         , ("desc", jsonStrArr (cmdDocDesc (commandDocs g)))
+        , ("epilogues", jsonArr (map jsonStrArr (cmdDocEpilogues (commandDocs g))))
         , ("args", argsJson (cmdDocArgs (commandDocs g)) (commandArgSchemas g) (commandArgAsts g))
         , ("return", returnJson (commandReturnSchema g) (commandReturnGeneralSchema g) (fst (cmdDocRet (commandDocs g))) (snd (cmdDocRet (commandDocs g))) (cmdDocRetMime (commandDocs g)))
         , ("expr", exprToJson (commandExpr g))
@@ -3106,6 +3193,7 @@ buildManifest ManifestInputs{..} =
         , ("named_types", namedTypesJson
             (packedConstructors (commandReturnAst g : commandArgAsts g))
             miPackerInstances
+            miRecordTypes
             miDataTypes
             (cmdSignatureTypes (Map.lookup (EV (commandTermName g)) miStreamTypes) (commandDocs g)))
         , ("metadata", metadataEmpty)
@@ -3253,33 +3341,11 @@ generate cs rASTs helperRASTs = do
       fdata = map (inheritParentArgDocs parentArgMap) fdataRaw
       gasts = map (inheritParentArgDocs parentArgMap) gastsRaw
 
-  -- Get build time and compute build directory
+  -- Get build time and the build directory (shared with the program builder
+  -- and any pre-build pass, see 'Morloc.ProgramBuilder.Build.resolveBuildDirs')
   buildTime <- liftIO $ floor <$> Time.getPOSIXTime
   programName <- MM.getModuleName
-  -- The build key (--name / -o / source basename; the --save name for eval).
-  programKey <- MM.getProgramKey
-  buildParent <- MM.gets stateBuildParentDir
-  -- Directory identity. For @make@ it is the build key (--name / -o / source
-  -- basename), so several sources built in one working directory get distinct
-  -- <key>-build dirs. For a real install it is the MODULE name: the source file
-  -- (conventionally main.loc) is not the program's identity, so exe/<module>,
-  -- its nested <module>-build, and the bin launcher share that one name. Eval is
-  -- the exception: its module is a synthetic "main" (an anonymous expression has
-  -- no declaration), so its identity is the build key -- the --save name, else
-  -- the ephemeral "eval" -- NOT the module, or every --save would collide on
-  -- exe/main. Both modes nest the build dir one level below its root, so a
-  -- pool's sources are always at ../../.. .
-  let dirKey = if stateInstall st && not (stateEvalMode st) then programName else programKey
-  -- The source/install ROOT: exe/<module> for install (a mirror of the working
-  -- directory), the working directory (or --build-dir) for make.
-  buildRoot <-
-    if stateInstall st
-      then return (MC.exeDir config </> dirKey)
-      else do
-        cwd <- liftIO Dir.getCurrentDirectory
-        liftIO $ Dir.makeAbsolute (fromMaybe cwd buildParent)
-  let buildDir = buildRoot </> buildDirName dirKey
-  CMS.modify (\s -> s {stateInstallDir = Just buildDir, stateBuildRoot = Just buildRoot})
+  BuildDirs dirKey buildRoot buildDir <- resolveBuildDirs
 
   poolRegistry <- MM.gets stateLangRegistry
   let allSockets = concatMap (\x -> fdataSocket x : fdataSubSockets x) fdata
@@ -3352,6 +3418,7 @@ generate cs rASTs helperRASTs = do
     return (ev, t)
 
   packerInstances <- Serial.findPackerInstances
+  recordTypes <- collectRecordTypes
   dataTypes <- collectDataTypes
 
   let manifestJson =
@@ -3376,6 +3443,7 @@ generate cs rASTs helperRASTs = do
             , miBuildParams         = buildParams
             , miRunLog              = runLog
             , miPackerInstances     = packerInstances
+            , miRecordTypes         = recordTypes
             , miDataTypes           = dataTypes
             , miCapabilities        = capabilities
             , miTermDocs            = termDocs

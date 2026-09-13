@@ -1,0 +1,104 @@
+-- A suspension `<E> T` is a value distinct from `T`, a closure of no
+-- arguments in the pool, and the same value in every position: let-bound,
+-- a record field, a list element, an argument to `id`, an argument to a
+-- sourced function (which receives the callable and runs it as it likes),
+-- the result of `<-`, and a suspension of a suspension. Running is per
+-- use: each `<-` runs it again. Arguments of an effectful call are values
+-- computed once, at the application. A pure value enters a suspension slot
+-- only through `do`, which builds a constant suspension; `<>` is the row of
+-- a suspension that performs nothing. `do t` is `t`, at any depth; a
+-- suspension's body may build a constructor over a captured variable.
+module main
+  ( letReuse
+  , recordField
+  , listElement
+  , viaId
+  , constant
+  , argumentOnce
+  , nested
+  , nestedIdentity
+  , constructed
+  , pure
+  )
+
+import root
+import root-py
+
+source Py from "gen.py" ("nextInt", "double", "takeThunk")
+nextInt :: Int -> <IO> Int
+double :: Int -> Int
+takeThunk :: <IO> Int -> <IO> Int
+
+record Job where
+  run :: <IO> Int
+  name :: Str
+record py => Job = "dict"
+
+letReuse :: Int -> <IO> Int
+letReuse k = do
+  let t = nextInt k
+  a <- t
+  b <- t
+  do (a + b)
+
+mkJob :: Int -> Job
+mkJob k = { run = nextInt k, name = "j" }
+
+recordField :: Int -> <IO> Int
+recordField k = do
+  let j = mkJob k
+  a <- (.run j)
+  b <- (.run j)
+  do (a + b)
+
+listElement :: Int -> <IO> Int
+listElement k = do
+  let js = [nextInt k, nextInt (k + 1)]
+  a <- (.[1] js)
+  do a
+
+viaId :: Int -> <IO> Int
+viaId k = id (nextInt k)
+
+constant :: Int -> <IO> Int
+constant k = takeThunk (do k)
+
+argumentOnce :: Int -> <IO> Int
+argumentOnce k = do
+  let t = nextInt (double k)
+  a <- t
+  b <- t
+  do (a + b)
+
+prepare :: Int -> <IO> (<IO> Int)
+prepare k = do
+  x <- nextInt k
+  nextInt x
+
+nested :: Int -> <IO> Int
+nested k = do
+  stmt <- prepare k
+  a <- stmt
+  b <- stmt
+  do (a + b)
+
+twoLayers :: Int -> <IO> (<IO> Int)
+twoLayers k = do (prepare k)
+
+nestedIdentity :: Int -> <IO> Int
+nestedIdentity k = do
+  stmt <- twoLayers k
+  a <- stmt
+  b <- stmt
+  do (a + b)
+
+data Shape = Circle Int | Square
+
+ident :: Int -> Int
+ident x = x
+
+constructed :: Int -> <IO> Shape
+constructed r = do (Circle (ident r))
+
+pure :: Int -> <> Int
+pure k = do (k + 1)

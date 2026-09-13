@@ -1,0 +1,6 @@
+log-template:
+  start: "LOG {group} {name} start"
+  pass:  "LOG {group} {name} done in {runtime}s"
+
+labeled-groups:
+  timed: { log: true }

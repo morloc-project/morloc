@@ -78,9 +78,9 @@ cppFromPyMulti a b
   : pyIO2 0 0
 
 -- (5) Multi-effect `<IO, Error>` source called from the Cpp side.
--- `pushForceIntoRemote` in Express.hs peels ALL EffectT layers when it
--- fires; if the receiver wrap is done per-layer or once total, the
--- multi-layer path can diverge from (1)'s single-layer path.
+-- The remote callee's entry point runs one layer of its result
+-- (EffectBoundary 'ForeignCalleeReturn'); a wider row is still one layer,
+-- so this path must agree with (1)'s.
 cppFromPyEffErr :: Int -> <IO, Error> Int
 cppFromPyEffErr n
   ? cppGate n = pyIOError n
