@@ -15,17 +15,24 @@ launcher wrappers that point at the built @manifest.json@.
 -}
 module Morloc.ProgramBuilder.Build
   ( buildProgram
+  , BuildDirs (..)
+  , resolveBuildDirs
+  , ensureStagingDir
+  , stagingPoolsDir
+  , discardStagingDir
+  , withStagingCleanup
   ) where
 
 import Control.Exception (IOException, try)
 import Control.Monad.Except (catchError, throwError)
 import qualified Data.Map as Map
+import qualified Morloc.Config as MC
 import Morloc.Data.Doc ((<+>), line, vsep, pretty)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import Morloc.Namespace.Prim
 import Morloc.Namespace.State
-import Morloc.ProgramBuilder.Paths (buildMarker)
+import Morloc.ProgramBuilder.Paths (buildDirName, buildMarker)
 import qualified Morloc.System as MS
 import qualified System.Directory as SD
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv)
@@ -34,46 +41,131 @@ import System.FilePath (takeDirectory, takeFileName)
 import System.IO.Error (ioeGetFileName)
 import System.Process (CreateProcess (env), callProcess, createProcess, getCurrentPid, proc, waitForProcess)
 
+-- | The build layout, resolved once by 'resolveBuildDirs'.
+data BuildDirs = BuildDirs
+  { bdKey :: String
+  -- ^ directory identity: the launcher name and the @<key>@ of @<key>-build@
+  , bdRoot :: Path
+  -- ^ the source/install ROOT (see 'stateBuildRoot')
+  , bdBuildDir :: Path
+  -- ^ @root </> <key>-build@ (see 'stateInstallDir')
+  }
+
+-- | Resolve the build layout, caching it in 'stateBuildRoot' /
+-- 'stateInstallDir' so every consumer (the nexus manifest, the staging tree,
+-- guest-language artifacts) agrees on one location.
+--
+-- Directory identity: for @make@ it is the build key (--name / -o / source
+-- basename), so several sources built in one working directory get distinct
+-- <key>-build dirs. For a real install it is the MODULE name: the source file
+-- (conventionally main.loc) is not the program's identity, so exe/<module>,
+-- its nested <module>-build, and the bin launcher share that one name. Eval is
+-- the exception: its module is a synthetic "main" (an anonymous expression has
+-- no declaration), so its identity is the build key -- the --save name, else
+-- the ephemeral "eval" -- NOT the module, or every --save would collide on
+-- exe/main. Both modes nest the build dir one level below its root, so a
+-- pool's sources are always at ../../.. .
+--
+-- The root is the source/install ROOT: exe/<module> for install (a mirror of
+-- the working directory), the working directory (or --build-dir) for make.
+resolveBuildDirs :: MorlocMonad BuildDirs
+resolveBuildDirs = do
+  st <- MM.get
+  config <- MM.ask
+  programName <- MM.getModuleName
+  programKey <- MM.getProgramKey
+  let dirKey = if stateInstall st && not (stateEvalMode st) then programName else programKey
+  case (stateBuildRoot st, stateInstallDir st) of
+    (Just root, Just buildDir) -> return (BuildDirs dirKey root buildDir)
+    _ -> do
+      root <-
+        if stateInstall st
+          then return (MC.exeDir config </> dirKey)
+          else do
+            cwd <- liftIO SD.getCurrentDirectory
+            liftIO $ SD.makeAbsolute (fromMaybe cwd (stateBuildParentDir st))
+      let buildDir = root </> buildDirName dirKey
+      MM.modify (\s -> s {stateInstallDir = Just buildDir, stateBuildRoot = Just root})
+      return (BuildDirs dirKey root buildDir)
+
+-- | The unit 'buildProgram' atomically swaps into place. For install it is the
+-- ROOT (exe/<key>): swapping it wholesale means a --force reinstall replaces
+-- stale mirrored sources too, not just the nested build. @make@ owns only
+-- <key>-build and must never swap the working directory.
+swapTargetOf :: MorlocMonad Path
+swapTargetOf = do
+  dirs <- resolveBuildDirs
+  isInstall <- MM.gets stateInstall
+  return (if isInstall then bdRoot dirs else bdBuildDir dirs)
+
+-- | The staging directory the build assembles in, created (with its marker) on
+-- first call and cached in 'stateStagingDir'. Returns @(staging, dst)@: the
+-- staging root, and the directory inside it where the manifest + pools tree
+-- lands -- the staging root itself for make (= <key>-build), or the nested
+-- <key>-build/ under it for install (whose root also holds the source mirror
+-- that installProgram lands post-swap). Staging is a sibling of the swap
+-- target (same parent) so the final rename is atomic; a crash mid-build leaves
+-- the previous good build untouched.
+--
+-- A pass that runs before 'buildProgram' but must land artifacts in the build
+-- tree (a guest language's compiled objects) calls this and writes under
+-- @dst@; the build then finds the directory already prepared.
+ensureStagingDir :: MorlocMonad (Path, Path)
+ensureStagingDir = do
+  swapTarget <- swapTargetOf
+  mStaging <- MM.gets stateStagingDir
+  staging <- case mStaging of
+    Just s -> return s
+    Nothing -> do
+      pid <- liftIO getCurrentPid
+      let staging = swapTarget <> ".tmp." <> show pid
+      liftIO $ SD.createDirectoryIfMissing True (takeDirectory swapTarget)
+      liftIO $ removeDirIfExists staging
+      liftIO $ SD.createDirectoryIfMissing True staging
+      liftIO $ MT.writeFile (staging </> buildMarker) ""
+      MM.modify (\s -> s {stateStagingDir = Just staging})
+      return staging
+  dst <- stagingDst staging
+  liftIO $ SD.createDirectoryIfMissing True dst
+  return (staging, dst)
+
+-- | Where the manifest + pools tree lands inside a staging root.
+stagingDst :: Path -> MorlocMonad Path
+stagingDst staging = do
+  buildDir <- bdBuildDir <$> resolveBuildDirs
+  isInstall <- MM.gets stateInstall
+  return (if isInstall then staging </> takeFileName buildDir else staging)
+
+-- | The @pools/@ directory of the staging tree, if one has been created.
+-- Reads state only: nothing is created.
+stagingPoolsDir :: MorlocMonad (Maybe Path)
+stagingPoolsDir = do
+  mStaging <- MM.gets stateStagingDir
+  case mStaging of
+    Nothing -> return Nothing
+    Just staging -> Just . (</> "pools") <$> stagingDst staging
+
+-- | Remove the staging directory, if one was created, and forget it. Called
+-- on every failure path so an aborted build never leaves a @.tmp.<pid>@ tree
+-- beside the program.
+discardStagingDir :: MorlocMonad ()
+discardStagingDir = do
+  mStaging <- MM.gets stateStagingDir
+  case mStaging of
+    Nothing -> return ()
+    Just staging -> do
+      liftIO $ removeDirIfExists staging
+      MM.modify (\s -> s {stateStagingDir = Nothing})
+
+-- | Run an action, discarding the staging directory if it fails.
+withStagingCleanup :: MorlocMonad a -> MorlocMonad a
+withStagingCleanup action = action `catchError` \e -> discardStagingDir >> throwError e
+
 buildProgram :: (Script, [WrapperFile], [Script]) -> MorlocMonad ()
 buildProgram (manifest, wrappers, pools) = do
-  mBuildDir <- MM.gets stateInstallDir
-  buildDir <- case mBuildDir of
-    Just d -> return d
-    Nothing -> liftIO SD.getCurrentDirectory
   isInstall <- MM.gets stateInstall
-  mRoot <- MM.gets stateBuildRoot
   force <- MM.gets stateInstallForce
-
-  -- The atomically-swapped, marker-owned unit. For install it is the ROOT
-  -- (exe/<key>): swapping it wholesale means a --force reinstall replaces
-  -- stale mirrored sources too, not just the nested build. `make` owns only
-  -- <key>-build and must never swap the working directory.
-  let swapTarget = if isInstall then maybe buildDir id mRoot else buildDir
-
-  -- Install-mode guard: refuse to clobber a populated install root without
-  -- --force, so a failed reinstall can never destroy an existing program
-  -- before its bin/ entry is checked.
-  when isInstall $ do
-    dirExists <- liftIO $ SD.doesDirectoryExist swapTarget
-    when dirExists $ do
-      contents <- liftIO $ SD.listDirectory swapTarget
-      when (not (null contents) && not force) $
-        MM.throwSystemError $ "Install directory already exists: " <> pretty swapTarget
-          <> ". Use --force to overwrite."
-
-  -- Build into a sibling staging directory (same parent, so the later
-  -- rename is atomic), then swap it into place. A crash mid-build leaves
-  -- the previous good build untouched. The manifest + pools tree is written
-  -- into `dst`: the staging root for make (= <key>-build), or the nested
-  -- <key>-build/ under the staging root for install (whose root also holds
-  -- the source mirror that installProgram lands post-swap).
-  pid <- liftIO getCurrentPid
-  let parent = takeDirectory swapTarget
-      staging = swapTarget <> ".tmp." <> show pid
-      dst = if isInstall then staging </> takeFileName buildDir else staging
-  liftIO $ SD.createDirectoryIfMissing True parent
-  liftIO $ removeDirIfExists staging
-  liftIO $ SD.createDirectoryIfMissing True staging
+  swapTarget <- swapTargetOf
   origDir <- liftIO SD.getCurrentDirectory
 
   -- Resolve the project root while the working directory is still the one it was
@@ -84,15 +176,25 @@ buildProgram (manifest, wrappers, pools) = do
   projectRoot <- liftIO $ SD.makeAbsolute (fromMaybe "." mProjectRoot)
 
   ( do
-      liftIO $ MT.writeFile (staging </> buildMarker) ""
-      liftIO $ SD.createDirectoryIfMissing True dst
+      -- Install-mode guard: refuse to clobber a populated install root without
+      -- --force, so a failed reinstall can never destroy an existing program
+      -- before its bin/ entry is checked.
+      when isInstall $ do
+        dirExists <- liftIO $ SD.doesDirectoryExist swapTarget
+        when dirExists $ do
+          contents <- liftIO $ SD.listDirectory swapTarget
+          when (not (null contents) && not force) $
+            MM.throwSystemError $ "Install directory already exists: " <> pretty swapTarget
+              <> ". Use --force to overwrite."
+      (staging, dst) <- ensureStagingDir
       liftIO $ SD.setCurrentDirectory dst
       buildAll projectRoot (manifest : pools)
       liftIO $ SD.setCurrentDirectory origDir
       liftIO $ swapIn staging swapTarget
+      MM.modify (\s -> s {stateStagingDir = Nothing})
     ) `catchError` \e -> do
       liftIO $ SD.setCurrentDirectory origDir
-      liftIO $ removeDirIfExists staging
+      discardStagingDir
       throwError e
 
   -- Launcher wrappers land at their absolute targets (the root: CWD for make,

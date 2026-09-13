@@ -54,7 +54,7 @@ import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
 import qualified Morloc.Version
-import qualified System.Directory as Dir
+import Morloc.ProgramBuilder.Build (BuildDirs (..), resolveBuildDirs)
 import Morloc.ProgramBuilder.Paths (buildDirName, resolveDatafileAgainstRoot)
 
 -- ======================================================================
@@ -3333,33 +3333,11 @@ generate cs rASTs helperRASTs = do
       fdata = map (inheritParentArgDocs parentArgMap) fdataRaw
       gasts = map (inheritParentArgDocs parentArgMap) gastsRaw
 
-  -- Get build time and compute build directory
+  -- Get build time and the build directory (shared with the program builder
+  -- and any pre-build pass, see 'Morloc.ProgramBuilder.Build.resolveBuildDirs')
   buildTime <- liftIO $ floor <$> Time.getPOSIXTime
   programName <- MM.getModuleName
-  -- The build key (--name / -o / source basename; the --save name for eval).
-  programKey <- MM.getProgramKey
-  buildParent <- MM.gets stateBuildParentDir
-  -- Directory identity. For @make@ it is the build key (--name / -o / source
-  -- basename), so several sources built in one working directory get distinct
-  -- <key>-build dirs. For a real install it is the MODULE name: the source file
-  -- (conventionally main.loc) is not the program's identity, so exe/<module>,
-  -- its nested <module>-build, and the bin launcher share that one name. Eval is
-  -- the exception: its module is a synthetic "main" (an anonymous expression has
-  -- no declaration), so its identity is the build key -- the --save name, else
-  -- the ephemeral "eval" -- NOT the module, or every --save would collide on
-  -- exe/main. Both modes nest the build dir one level below its root, so a
-  -- pool's sources are always at ../../.. .
-  let dirKey = if stateInstall st && not (stateEvalMode st) then programName else programKey
-  -- The source/install ROOT: exe/<module> for install (a mirror of the working
-  -- directory), the working directory (or --build-dir) for make.
-  buildRoot <-
-    if stateInstall st
-      then return (MC.exeDir config </> dirKey)
-      else do
-        cwd <- liftIO Dir.getCurrentDirectory
-        liftIO $ Dir.makeAbsolute (fromMaybe cwd buildParent)
-  let buildDir = buildRoot </> buildDirName dirKey
-  CMS.modify (\s -> s {stateInstallDir = Just buildDir, stateBuildRoot = Just buildRoot})
+  BuildDirs dirKey buildRoot buildDir <- resolveBuildDirs
 
   poolRegistry <- MM.gets stateLangRegistry
   let allSockets = concatMap (\x -> fdataSocket x : fdataSubSockets x) fdata

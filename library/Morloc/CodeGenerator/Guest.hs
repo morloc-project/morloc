@@ -43,7 +43,7 @@ data GuestSource = GuestSource
 data BuildOpts = BuildOpts
   { boBackend :: Maybe Text -- ^ backend selector; Nothing = the guest default
   , boDevice :: Maybe Text -- ^ optional device selector; guest-specific meaning
-  , boOutDir :: Path -- ^ where artifacts are written (pools/<module>/)
+  , boOutDir :: Path -- ^ where artifacts are written (<key>-build/pools/<host>/<host>-guests/<guest>/)
   }
 
 -- | The linkable output of a guest build plus the interface descriptor(s) for

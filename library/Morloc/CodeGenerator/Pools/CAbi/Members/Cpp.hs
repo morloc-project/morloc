@@ -68,6 +68,7 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.Version as MV
 import Morloc.Quasi
 import qualified Morloc.System as MS
+import Morloc.ProgramBuilder.Build (stagingPoolsDir)
 import qualified Morloc.TypeEval as TE
 
 -- HACK: repeating these here is hacky
@@ -438,7 +439,7 @@ translate srcs es = do
   -- makeTheMaker see exactly the same absolute paths. Before this,
   -- `#include "./src/foo.hpp"` could not be resolved against
   -- `-I/abs/src` because the `src/` prefix was duplicated.
-  (srcs', _, _) <- handleFlagsAndPaths srcs
+  (srcs', cxxFlags, includeDirs) <- handleFlagsAndPaths srcs
 
   labels <- collectLogLabels <$> MM.gets stateManifoldConfig
   templates <- collectRenderedTemplates cppLang
@@ -457,7 +458,7 @@ translate srcs es = do
         }
       code = CMS.evalState (makeCppCode labels srcs' es universalScopeMap scopeMap closureTable) translatorState
 
-  maker <- makeTheMaker srcs'
+  maker <- makeTheMaker cxxFlags includeDirs
 
   let poolSubdir = ML.poolDirKey cppLang
 
@@ -699,16 +700,14 @@ collectNamedRecordTVars e0 =
     seekNamedRecs (VariantF _ ps as) = Set.unions (map seekNamedRecs (ps ++ concatMap snd as))
     seekNamedRecs _ = Set.empty
 
-makeTheMaker :: [Source] -> MorlocMonad [SysCommand]
-makeTheMaker srcs = do
+makeTheMaker :: [Text] -> [Path] -> MorlocMonad [SysCommand]
+makeTheMaker flags includes = do
   let poolSubdir = ML.poolDirKey cppLang
   let outfile = pretty $ "pools" </> poolSubdir </> ML.makeExecutablePoolName cppLang
   let src = pretty $ "pools" </> poolSubdir </> ML.makeSourcePoolName cppLang
   -- The member-agnostic host translation unit (owns main()/pool_main); the C++
   -- member (pool.cpp) provides cpp_register. Compiled as a second TU and linked.
   let hostSrc = pretty $ "pools" </> poolSubdir </> "pool_host.cpp"
-
-  (_, flags, includes) <- handleFlagsAndPaths srcs
 
   bconf <- MM.gets stateBuildConfig
   let sanitizeFlags = case buildConfigSanitize bconf of
@@ -2175,8 +2174,24 @@ flagAndPath reg src@(Source _ srcL (Just p) _ _ _ _ _ _ _) | LR.poolOf reg srcL 
       exists <- liftIO $ MS.doesFileExist absPath
       unless exists . MM.throwSystemError $
         "Source file not found:" <+> pretty absPath
-      return (src {srcPath = Just absPath}, libFlags, Just absDir)
+      incPath <- poolRelative absPath
+      return (src {srcPath = Just incPath}, libFlags, Just absDir)
   where
+    -- A header generated inside the pool's own directory (guest glue under
+    -- <pool>/cpp-guests/) is included by its pool-relative path: the pool
+    -- source then holds no build-time staging path, so an unchanged program
+    -- rebuilds to identical bytes (the pool hash keys the runtime cache) and
+    -- the include still resolves after the staging tree is swapped into
+    -- place. Every other source keeps its absolute path.
+    poolRelative :: Path -> MorlocMonad Path
+    poolRelative absPath = do
+      mPools <- stagingPoolsDir
+      case mPools of
+        Nothing -> return absPath
+        Just pools -> do
+          poolDir <- liftIO $ MS.canonicalizePath (pools </> ML.poolDirKey cppLang)
+          return (MS.makeRelative poolDir absPath)
+
     lookupHeader :: String -> MorlocMonad Path
     lookupHeader base = do
       home <- MM.asks configHome

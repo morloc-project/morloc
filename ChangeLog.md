@@ -3,6 +3,12 @@ Unreleased
 
  - a command's docstring takes an `@epilogue` block, printed at the foot of
    that subcommand's help; blank lines and `#` comments in it are kept
+ - a `Futhark` program no longer leaves a `pools/` directory beside its
+   sources: the compiled kernels and glue land in `<name>-build/` with the
+   rest of the build
+ - a C++ pool rejects an `Int` that does not fit its unsigned target instead
+   of wrapping it, and reads an `Int` into a floating target without a
+   spurious range error
 
 0.103.2 [2026-09-12]
 --------------------

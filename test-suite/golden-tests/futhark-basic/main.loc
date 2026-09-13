@@ -7,6 +7,12 @@ import tensor-cpp
 import vector
 import vector-cpp
 
+-- The guest artifacts (kernels.{c,h,json,o}, glue header) land inside the
+-- build directory beside the host pool, never in a stray pools/ under cwd, and
+-- the pool source includes the glue by a pool-relative path, so rebuilding an
+-- unchanged program reproduces the same pool bytes (its hash keys the runtime
+-- cache).
+--
 -- Sourcing idiomatic Futhark directly: morloc compiles kernels.fut into the C++
 -- pool and generates the marshalling glue. Exercises Matrix (rank 2), Vector
 -- (rank 1), and scalar (rank 0) entry types over F32.

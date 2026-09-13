@@ -113,6 +113,7 @@ copyState oldIdx newIdx = do
       , stateInstallForce = stateInstallForce s
       , stateInstallDir = stateInstallDir s
       , stateBuildRoot = stateBuildRoot s
+      , stateStagingDir = stateStagingDir s
       , stateProgramKey = stateProgramKey s
       , stateWrapperSpecs = stateWrapperSpecs s
       , stateBuildParentDir = stateBuildParentDir s

@@ -206,6 +206,12 @@ data MorlocState = MorlocState
   -- live here and a pool resolves them at @../../..@. For install this is
   -- the atomically-swapped, marker-owned unit; @stateInstallDir@ nests
   -- inside it. @buildDir = root </> (key <> "-build")@.
+  , stateStagingDir :: Maybe Path
+  -- ^ The staging directory a build assembles in before it is swapped into
+  -- @stateInstallDir@ (make) or @stateBuildRoot@ (install). Created on first
+  -- use by the build or by a pre-build pass that must land artifacts in the
+  -- build tree (guest-language objects); the build swaps it in, and any
+  -- failure discards it.
   , stateProgramKey :: Maybe String
   -- ^ Program identity for the build directory (@<key>-build@ / @exe/<key>@).
   -- Set to @--name@ if given, else the source-file basename. @Nothing@ falls
@@ -925,6 +931,7 @@ instance Defaultable MorlocState where
       , stateInstallForce = False
       , stateInstallDir = Nothing
       , stateBuildRoot = Nothing
+      , stateStagingDir = Nothing
       , stateProgramKey = Nothing
       , stateWrapperSpecs = Nothing
       , stateBuildParentDir = Nothing

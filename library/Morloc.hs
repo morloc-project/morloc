@@ -53,7 +53,7 @@ import Morloc.Frontend.Restructure (restructure)
 import Morloc.Frontend.Treeify (treeify)
 import qualified Morloc.Data.PoolHash as PoolHash
 import qualified Morloc.Monad as MM
-import Morloc.ProgramBuilder.Build (buildProgram)
+import Morloc.ProgramBuilder.Build (buildProgram, withStagingCleanup)
 
 -- | Check the general types only
 typecheckFrontend ::
@@ -132,7 +132,11 @@ writeProgram ::
   -- | source code text
   Code ->
   MorlocMonad ()
-writeProgram translateFn path code = do
+writeProgram translateFn path code =
+  -- Guest lowering lands artifacts in the build's staging tree before the
+  -- program builder runs, so a failure anywhere in between must discard that
+  -- tree or an aborted build leaves a .tmp.<pid> directory beside the program.
+  withStagingCleanup $ do
   typecheck path code
     -- A constructor whose Packable instances disagree about its wire form
     -- cannot be serialized consistently by every language that shares it, and

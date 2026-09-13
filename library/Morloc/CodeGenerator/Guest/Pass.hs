@@ -14,8 +14,9 @@ downstream code sees an ordinary host source. Build products (objects, link
 flags) are injected into the package metadata so the host pool links them.
 
 Currently the only guest is Futhark and the only host is C++. Artifacts are
-written under @pools/<module>/<host>-guests/<guest>/@ (alongside the host pool),
-one directory per guest language, with absolute paths.
+written under @<key>-build/pools/<host>/<host>-guests/<guest>/@ (alongside the
+host pool, via the program builder's staging tree), one directory per guest
+language, with absolute paths.
 -}
 module Morloc.CodeGenerator.Guest.Pass
   ( lowerGuests
@@ -27,7 +28,7 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
-import System.Directory (canonicalizePath, createDirectoryIfMissing, getCurrentDirectory)
+import System.Directory (canonicalizePath, createDirectoryIfMissing)
 
 import Morloc.CodeGenerator.Guest
 import Morloc.CodeGenerator.Guest.Futhark (FutharkEntry, futharkGuest, hostSigTypes, resolveFutharkBuild)
@@ -35,6 +36,7 @@ import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc (pretty, render)
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
+import Morloc.ProgramBuilder.Build (ensureStagingDir)
 
 -- | Lower every guest source in the typed AST to host glue. A no-op when there
 -- are no guest sources.
@@ -135,17 +137,19 @@ rewriteSrc bindings = runIdentity . go
 -- build environment + product injection
 -- ---------------------------------------------------------------------------
 
--- Guest artifacts live alongside the host pool, under
--- pools/<host>/<host>-guests/<guest>/ -- one directory per guest language so
--- multiple guests never collide. Guests always attach to the C++ host pool,
--- whose subdir is the "cpp" language key. Absolute paths are used downstream
--- so the source-rewrite and link resolve regardless of build cwd.
+-- Guest artifacts live alongside the host pool inside the build tree, under
+-- <key>-build/pools/<host>/<host>-guests/<guest>/ -- one directory per guest
+-- language so multiple guests never collide. Guests always attach to the C++
+-- host pool, whose subdir is the "cpp" language key. This pass runs before the
+-- program builder, so it lands the files in the builder's staging tree
+-- ('ensureStagingDir'), which is later swapped into <key>-build. Absolute paths
+-- are used downstream so the source-rewrite and link resolve regardless of
+-- build cwd.
 setupBuildDir :: Text -> MorlocMonad Path
 setupBuildDir guestName = do
-  cwd <- MM.liftIO getCurrentDirectory
-  -- The host is always the C++ pool, whose subdir key is "cpp".
+  (_, dst) <- ensureStagingDir
   let poolSubdir = "cpp"
-  let dir = cwd </> "pools" </> poolSubdir </> "cpp-guests" </> T.unpack guestName
+  let dir = dst </> "pools" </> poolSubdir </> "cpp-guests" </> T.unpack guestName
   MM.liftIO (createDirectoryIfMissing True dir)
   return dir
 
