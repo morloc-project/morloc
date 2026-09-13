@@ -169,6 +169,29 @@ walk m ctx e = do
     _ -> return ()
   descend m ctx e
 
+-- | The two sides of a remote call must agree on the value the wire
+-- carries: the callee's entry point runs one layer of its result and the
+-- caller receives the interface type, so the callee's return has a root
+-- suspension exactly when the interface type has one (a suspension of a
+-- suspension ships its inner thunk as a closure). Walked at
+-- 'ForeignCalleeReturn' with that agreement as the check, in place of the
+-- plain-value rule of the other boundaries.
+walkCallee :: Int -> Type -> PolyExpr -> MorlocMonad ()
+walkCallee m iface body = do
+  case polyOuterType body of
+    Just t | hasOuterEffect t /= hasOuterEffect iface ->
+      MM.throwCompilerBug $
+        "EffectBoundary invariant violated at manifold m"
+          <> pretty m <> ":\n"
+          <> "  boundary : " <> viaShow ForeignCalleeReturn <> "\n"
+          <> "  callee   : " <> pretty t <> "\n"
+          <> "  caller   : " <> pretty iface <> "\n"
+          <> "  expected : the callee's return and the caller's interface type to\n"
+          <> "             agree on whether the wire carries a suspension.\n"
+          <> "Root cause: 'insertEffectBoundaries' peeled one side and not the other."
+    _ -> return ()
+  descend m ForeignCalleeReturn body
+
 -- | Does the declared type at this position violate the boundary's
 -- expected calling convention?
 mismatch :: BoundaryContext -> Type -> Bool
@@ -214,7 +237,7 @@ throwBoundaryBug m ctx t node =
 --     declared return type.
 descend :: Int -> BoundaryContext -> PolyExpr -> MorlocMonad ()
 descend m _ (PolyManifold _ _ _ _ body) = walk m LocalRoot body
-descend m _ (PolyRemoteInterface _ _ _ _ body) = walk m ForeignCalleeReturn body
+descend m _ (PolyRemoteInterface _ (Idx _ t) _ _ body) = walkCallee m t body
 descend m ctx (PolyReturn body) = walk m ctx body
 descend m _ (PolyLet _ e1 e2) = do
   walk m LocalRoot e1
@@ -269,7 +292,7 @@ rewrite m (PolyApp fn xs) = do
   -- Every other consumer -- a local 'LocalCallP', an export, a wire
   -- crossing -- forces the closure's result at its own consumption site,
   -- so intra-pool closures are left as thunks.
-  let xs'' = if isSrcCallHead fn' then map maybeForceCallbackArg xs' else xs'
+  xs'' <- if isSrcCallHead fn' then mapM maybeForceCallbackArg xs' else return xs'
   maybeSuspendRemoteReceive <$> maybeSuspendSourceCall fn' xs''
 rewrite _ (PolyManifold l m' f k e) = do
   e' <- rewrite m' e
@@ -349,13 +372,6 @@ maybeSuspendSourceCall fn@(PolyExe (Idx gidx exeT0) (SrcCallP src)) xs = do
             Just ty -> Idx gidx (peelCallbackResult ty)
             Nothing -> Idx gidx (maybe (VarT (TV "Unit")) id (polyOuterType x))
       return ([(i, x)], PolyLetVar t i)
-
-    -- Mirrors 'maybeForceCallbackArg', which descends into lists, tuples and
-    -- records of callbacks.
-    peelCallbackResult (FunT ins (EffectT _ r)) = FunT ins r
-    peelCallbackResult (AppT c ts) = AppT c (map peelCallbackResult ts)
-    peelCallbackResult (NamT o v ps rs) = NamT o v ps [(k, peelCallbackResult ft) | (k, ft) <- rs]
-    peelCallbackResult ty = ty
 
     isAtom (PolyBndVar _ _) = True
     isAtom (PolyLetVar _ _) = True
@@ -463,9 +479,9 @@ cancelPolyEval t e =
 -- return, a wire crossing), and leaving the closure body a thunk keeps its
 -- rendered type consistent between its definition and its use sites (a
 -- forced body renders @T@ but an argument slot is typed @<E> T@).
-maybeForceCallbackArg :: PolyExpr -> PolyExpr
+maybeForceCallbackArg :: PolyExpr -> MorlocMonad PolyExpr
 maybeForceCallbackArg e@(PolyManifold _ m form _ _)
-  | isLambdaForm form = forceReturnPosition m e
+  | isLambdaForm form = return (forceReturnPosition m e)
 -- A callback nested inside a structured argument (a list/tuple/record of
 -- closures passed to the source call) is invoked exactly the same way by the
 -- foreign code, so descend into the structure and force those too. The
@@ -475,13 +491,30 @@ maybeForceCallbackArg e@(PolyManifold _ m form _ _)
 -- Non-closure elements fall through unchanged (both the value and the type
 -- peel are no-ops on a non-effectful element).
 maybeForceCallbackArg (PolyList v ts es) =
-  PolyList v (map peelCallbackType ts) (map maybeForceCallbackArg es)
+  PolyList v (map peelCallbackType ts) <$> mapM maybeForceCallbackArg es
 maybeForceCallbackArg (PolyTuple v xs) =
-  PolyTuple v [(peelCallbackType t, maybeForceCallbackArg x) | (t, x) <- xs]
+  PolyTuple v <$> mapM (\(t, x) -> (,) (peelCallbackType t) <$> maybeForceCallbackArg x) xs
 maybeForceCallbackArg (PolyRecord nt v ts fs) =
   PolyRecord nt v (map peelCallbackType ts)
-    [(k, (peelCallbackType t, maybeForceCallbackArg x)) | (k, (t, x)) <- fs]
-maybeForceCallbackArg e = e
+    <$> mapM (\(k, (t, x)) -> (,) k . (,) (peelCallbackType t) <$> maybeForceCallbackArg x) fs
+-- The structure may be built rather than written at the call: a helper
+-- whose parameter two of its callbacks share is inlined as a let around
+-- the structure, and when the helper lands in another pool the let is the
+-- body of a remote call whose result crosses back as data. The callbacks
+-- sit at the bottom either way and are invoked the same way by the host,
+-- so descend to them. The type the crossing carries is peeled in step; a
+-- record named rather than spelled out is expanded first, since its
+-- declaration is what the wire schema would otherwise be read from.
+maybeForceCallbackArg (PolyLet i v e) = PolyLet i v <$> maybeForceCallbackArg e
+maybeForceCallbackArg (PolyReturn e) = PolyReturn <$> maybeForceCallbackArg e
+maybeForceCallbackArg (PolyManifold l m form k e) =
+  PolyManifold l m form k <$> maybeForceCallbackArg e
+maybeForceCallbackArg (PolyApp (PolyRemoteInterface l (Idx i t) ids rf inner) xs) = do
+  scope <- MM.getGeneralScope i
+  let t' = either (const t) unresolvedType2type (TE.evaluateType scope (type2typeu t))
+  inner' <- maybeForceCallbackArg inner
+  return $ PolyApp (PolyRemoteInterface l (Idx i (peelCallbackResult t')) ids rf inner') xs
+maybeForceCallbackArg e = return e
 
 -- | Peel one 'EffectT' layer off the RETURN of a function-typed element, so
 -- @Int -> \<E\> ()@ becomes @Int -> ()@. Mirrors the value-level force of a
@@ -493,6 +526,15 @@ peelCallbackType (Idx i t) = Idx i (peel t)
   where
     peel (FunT ins (EffectT _ inner)) = FunT ins inner
     peel other = other
+
+-- | 'peelCallbackType' through the containers 'maybeForceCallbackArg'
+-- descends into: a list, tuple or record of callbacks carries the peeled
+-- element types once its callbacks are forced.
+peelCallbackResult :: Type -> Type
+peelCallbackResult (FunT ins (EffectT _ r)) = FunT ins r
+peelCallbackResult (AppT c ts) = AppT c (map peelCallbackResult ts)
+peelCallbackResult (NamT o v ps rs) = NamT o v ps [(k, peelCallbackResult ft) | (k, ft) <- rs]
+peelCallbackResult ty = ty
 
 -- | A lambda-shaped manifold form (an unapplied or partially-applied
 -- function value), as opposed to a saturated 'ManifoldFull' call.

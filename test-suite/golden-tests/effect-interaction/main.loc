@@ -1,5 +1,5 @@
--- Broad interaction test: effects × optionals × lists × mixed-effect
--- branches × higher-order thunks × cross-language. Each export
+-- Broad interaction test: effects x optionals x lists x mixed-effect
+-- branches x higher-order thunks x cross-language. Each export
 -- exercises one interaction shape the narrower coverage goldens do
 -- not; together they pin the intersection of 'EffectBoundary' with
 -- the rest of morloc's type system.
@@ -18,10 +18,9 @@ module main
   , nestedGuardR
   , thunkForcedTwicePy
   , crossOptRToCpp
-  -- Slot-level subsumption: plain values at positions declared '<E> T'.
-  -- Row subsumption type-checks these ('T <: <E> T' via '{} ⊆ E'),
-  -- but every target language's runtime shape is a nullary callable at
-  -- these positions; each pure sub-expression must be Suspend-wrapped.
+  -- Suspensions built by applying a sourced '<E>'-returning function, at
+  -- an argument, list and tuple position: each is a nullary callable in
+  -- every target language, and the host runs it.
   , argPurePy
   , argPureCpp
   , argPureR
@@ -160,7 +159,7 @@ listOfThunksCpp = cppSumThunks [cppAddOne 1, cppAddOne 2, cppAddOne 3]
 -- (6) Guard whose branches have different effect signatures. The
 -- then-branch calls pyAddOne (<IO>), the else-branch calls pyMaybeError
 -- (<IO,Error>). Row subsumption places the whole guard at <IO,Error>.
--- Tests 'polyOuterType (PolyIf …)' fold across mixed-effect branches.
+-- Tests 'polyOuterType (PolyIf ..)' fold across mixed-effect branches.
 guardSubsumePy :: Int -> <IO, Error> Int
 guardSubsumePy x
   ? x > 0 = pyAddOne x
@@ -169,7 +168,7 @@ guardSubsumePy x
 -- (7) Multi-clause guard, Cpp-anchored, with three effect strata and
 -- pure fall-throughs: '<IO,Error>' (top), '<IO>' (middle), pure
 -- (third clause), pure (default). Row subsumption places the whole
--- guard at '<IO,Error>'. Exercises 'polyOuterType (PolyIf …)' folding
+-- guard at '<IO,Error>'. Exercises 'polyOuterType (PolyIf ..)' folding
 -- across mixed pure/effectful branches at the same guard -- the pure
 -- branches must be Suspend-wrapped at the branch position to match
 -- the guard's '<IO,Error> Int' return type.

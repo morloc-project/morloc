@@ -555,27 +555,33 @@ realizeWithRegistry registry s0 = do
     --   <> indent 2 (vsep [ "*" <+> pretty t <+> ":" <+> pretty y | y@(AnnoS (Idx _ t) _ _, _)  <- xs'])
 
     -- Propagate downwards
+    -- A lambda is a value built where it appears, so it lives in its
+    -- parent's language; only its body chooses, and a call the body makes
+    -- elsewhere is an ordinary crossing there. The scores of a lambda are
+    -- its body's, so the parent's choice already accounts for the body.
     collapseExpr _ l1 (LamS vs x, Idx i ss) = do
-      lang <- chooseLanguage l1 (subtreeHasRec [x]) ss
+      lang <- case l1 of
+        Just _ -> return l1
+        Nothing -> chooseLanguage l1 (subtreeHasRec [x]) ss
       x' <- collapseAnnoS lang x
       return (LamS vs x', Idx i lang)
     collapseExpr _ l1 (AppS f xs, Idx i ss) = do
       lang <- chooseLanguage l1 (subtreeHasRec (f : xs)) ss
       f' <- collapseAnnoS lang f
-      xs' <- mapM (collapseAnnoS lang) xs
+      xs' <- mapM (if isSourceHead f' then collapseCarried lang else collapseAnnoS lang) xs
       return (AppS f' xs', Idx i lang)
     -- Propagate data
     collapseExpr _ l1 (e@(LstS xs), Idx i ss) = do
-      lang <- if isFunctionalData e then return l1 else chooseLanguage l1 (subtreeHasRec xs) ss
-      xs' <- mapM (collapseAnnoS lang) xs
+      lang <- if isFunctionalData e then functionalDataLang i l1 else chooseLanguage l1 (subtreeHasRec xs) ss
+      xs' <- mapM (collapseElement e lang) xs
       return (LstS xs', Idx i lang)
     collapseExpr _ l1 (e@(TupS xs), Idx i ss) = do
-      lang <- if isFunctionalData e then return l1 else chooseLanguage l1 (subtreeHasRec xs) ss
-      xs' <- mapM (collapseAnnoS lang) xs
+      lang <- if isFunctionalData e then functionalDataLang i l1 else chooseLanguage l1 (subtreeHasRec xs) ss
+      xs' <- mapM (collapseElement e lang) xs
       return (TupS xs', Idx i lang)
     collapseExpr _ l1 (e@(NamS rs), Idx i ss) = do
-      lang <- if isFunctionalData e then return l1 else chooseLanguage l1 (subtreeHasRec (map snd rs)) ss
-      xs' <- mapM (collapseAnnoS lang . snd) rs
+      lang <- if isFunctionalData e then functionalDataLang i l1 else chooseLanguage l1 (subtreeHasRec (map snd rs)) ss
+      xs' <- mapM (collapseElement e lang . snd) rs
       return (NamS (zip (map fst rs) xs'), Idx i lang)
     -- collapse leaf expressions
     collapseExpr _ _ (ExeS x@(SrcCall src), Idx i _) = return (ExeS x, Idx i (Just (srcLang src)))
@@ -654,6 +660,53 @@ realizeWithRegistry registry s0 = do
     -- recursive body co-located with its head whenever that is cost-competitive,
     -- WITHOUT hard-pinning: a genuinely cheaper cross-pool body (e.g. cross-pool
     -- mutual recursion whose partner is another language entirely) still wins.
+    -- An element of a container. A container holding function values sits
+    -- in its parent's language, and so does each function value it holds:
+    -- a closure is homed with the container that carries it and reaches
+    -- any other pool from inside its body. Its body is collapsed as usual,
+    -- so a call it makes elsewhere becomes an ordinary crossing there.
+    -- A function value handed straight to a sourced function is carried the
+    -- same way: the host's pool holds the callable it is given.
+    collapseElement ::
+      ExprS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
+      Maybe Lang ->
+      AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
+      MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
+    collapseElement container lang x
+      | isFunctionalData container = collapseCarried lang x
+      | otherwise = collapseAnnoS lang x
+
+    -- A structure holding function values lives in the pool that holds
+    -- it; with no pool around it (the root of a command) there is nowhere
+    -- for the function values to live.
+    functionalDataLang :: Int -> Maybe Lang -> MorlocMonad (Maybe Lang)
+    functionalDataLang _ l@(Just _) = return l
+    functionalDataLang i Nothing =
+      MM.throwSourcedError i
+        "A record, list or tuple holding function values cannot be the result of a command: a function value has no form outside a pool"
+
+    collapseCarried ::
+      Maybe Lang ->
+      AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
+      MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
+    collapseCarried lang x@(AnnoS (Idx _ t) _ _)
+      | isClosureType t = do
+          AnnoS g (Idx i _) e' <- collapseAnnoS lang x
+          return (AnnoS g (Idx i lang) e')
+      | otherwise = collapseAnnoS lang x
+
+    -- The head of an application is a sourced function, reached directly or
+    -- through the term that names it.
+    isSourceHead :: AnnoS (Indexed Type) One (Indexed (Maybe Lang)) -> Bool
+    isSourceHead (AnnoS _ _ (ExeS (SrcCall _))) = True
+    isSourceHead (AnnoS _ _ (VarS _ (One x))) = isSourceHead x
+    isSourceHead _ = False
+
+    isClosureType :: Type -> Bool
+    isClosureType (FunT _ _) = True
+    isClosureType (EffectT _ _) = True
+    isClosureType _ = False
+
     chooseLanguage :: Maybe Lang -> Bool -> [(Lang, Score)] -> MorlocMonad (Maybe Lang)
     chooseLanguage l1 recSpine ss = do
       let recPenalty l2 = case l1 of
@@ -1093,9 +1146,11 @@ renameCallS old new = go
     go (AnnoS g c (CallS v)) | v == old = AnnoS g c (CallS new)
     go (AnnoS g c e)                    = AnnoS g c (mapExprS go e)
 
--- Check if this expression is a data structure that contains
--- a function. If so, then the data structure is must be in the
--- same language as the parent (since functions can't be serialized)
+-- Check if this expression is a data structure that contains a function
+-- value (a suspension among them). If so, the data structure is in the
+-- same language as the parent, and so is each function value it holds
+-- ('collapseElement'): a closure crosses a pool boundary as a value of its
+-- home pool, and that pool is the one the container is built in.
 isFunctionalData :: ExprS (Indexed Type) f a -> Bool
 isFunctionalData (LstS xs) = any isFunctionalDataAnnoS xs
 isFunctionalData (TupS xs) = any isFunctionalDataAnnoS xs
@@ -1107,4 +1162,5 @@ isFunctionalDataAnnoS (AnnoS (Idx _ t) _ e) = handleType t || isFunctionalData e
   where
     handleType :: Type -> Bool
     handleType (FunT _ _) = True
+    handleType (EffectT _ _) = True
     handleType _ = False

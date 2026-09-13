@@ -3,6 +3,16 @@ Unreleased
 
  - a program may import more than one `root-*` module and still use `show`
    (two instances with the same intrinsic body were reported as conflicting)
+ - a record, list or tuple of functions (suspensions among them) can be
+   handed to a host function in any language, however it was built; the
+   host receives values, never thunks
+ - a function value whose argument or result is itself a function, or that
+   captures one, now crosses into and out of a Rust pool; the "cannot cross
+   into or out of a Rust pool yet" refusal is gone
+ - a suspension of a suspension crosses pools correctly (the outer layer
+   runs once, the inner thunk as many times as it is run)
+ - Rust pools: a closure that leaves the frame that built it, or is stored
+   in a record or list, owns what it captures
  - tables keep their nulls, and date/timestamp/duration, binary, large
    string and nested list columns now cross between pools intact
  - read snappy- and zstd-compressed Parquet files (every common writer's

@@ -21,6 +21,7 @@ import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
+import qualified Data.Map as Map
 
 {- | Add arguments that are required for each term. Unneeded arguments are
 removed at each step.
@@ -28,15 +29,17 @@ removed at each step.
 parameterize ::
   AnnoS (Indexed Type) One (Indexed Lang) ->
   MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]))
-parameterize (AnnoS m@(Idx _ (FunT inputs _)) c (LamS vs x)) = do
+parameterize (AnnoS m@(Idx midx (FunT inputs _)) c (LamS vs x)) = do
   MM.sayVVV "Entering parameterize LamS"
   ids <- MM.takeFromCounter (length inputs)
+  recordArgTypes midx ids inputs
   let args0 = fromJust $ safeZipWith Arg ids vs
   x' <- parameterize' args0 x
   return $ AnnoS m (c, args0) (LamS vs x')
-parameterize (AnnoS m@(Idx _ (FunT inputs _)) c@(Idx _ lang) (BndS v)) = do
+parameterize (AnnoS m@(Idx midx (FunT inputs _)) c@(Idx _ lang) (BndS v)) = do
   MM.sayVVV $ "Entering parameterize VarS function - " <> pretty v <> "@" <> pretty lang
   ids <- MM.takeFromCounter (length inputs)
+  recordArgTypes midx ids inputs
   let vs = map EV (freshVarsAZ [])
       args0 = fromJust $ safeZipWith Arg ids vs
   return $ AnnoS m (c, args0) (BndS v)
@@ -82,12 +85,13 @@ parameterize' args (AnnoS g c (NamS entries)) = do
   xs' <- mapM (parameterize' args . snd) entries
   let args' = pruneArgs args xs'
   return $ AnnoS g (c, args') (NamS (zip (map fst entries) xs'))
-parameterize' args (AnnoS g@(Idx _ (FunT _ _)) c (LamS vs x)) = do
+parameterize' args (AnnoS g@(Idx midx (FunT inputs _)) c (LamS vs x)) = do
   -- Bind exactly the lambda's own parameters. A lambda may bind FEWER params
   -- than its (right-flattened) function type has inputs when its body returns a
   -- function, e.g. @\y -> mul base y@ at type @Int -> Int -> Int@ -- the surplus
   -- inputs belong to the nested returned closure, not to this lambda.
   ids <- MM.takeFromCounter (length vs)
+  recordArgTypes midx ids inputs
   let contextArgs = [r | r@(Arg _ v) <- args, v `notElem` vs] -- remove shadowed arguments
       boundArgs = fromJust $ safeZipWith Arg ids vs
   x' <- parameterize' (contextArgs <> boundArgs) x
@@ -154,3 +158,8 @@ freshVarsAZ exclude =
   filter
     (`notElem` exclude)
     ([1 ..] >>= flip replicateM ['a' .. 'z'] |>> MT.pack)
+
+-- | Remember each minted argument's declared type (see 'stateArgTypes').
+recordArgTypes :: Int -> [Int] -> [Type] -> MorlocMonad ()
+recordArgTypes midx ids ts =
+  MM.modify (\st -> st {stateArgTypes = foldr (\(i, t) -> Map.insert i (Idx midx t)) (stateArgTypes st) (zip ids ts)})

@@ -1,0 +1,57 @@
+-- A callback handed to a host function is invoked as `f(x)` and its result
+-- is taken as a value, so a lambda whose return is `<E> T` is forced at that
+-- boundary. The force must reach the callback however the argument was
+-- built: here the record and list of callbacks come from a helper whose
+-- parameter is named by more than one field, so inlining the helper shares
+-- the parameter through a let, and the callbacks sit under that let rather
+-- than directly in the argument. Without the force the Python host receives
+-- thunks and the Rust pool renders `impl Fn` inside a trait object.
+--
+-- Both hosts are covered: Python (no boxing) and Rust (boxed fields).
+
+module main (viaPy, viaRust, listPy, listRust, sharedLet)
+
+import root-py
+import root-rust
+
+record Ops where
+  inc :: Int -> <IO> Int
+  scale :: Int -> <IO> Int
+record Py => Ops = "dict"
+record Rust => Ops = "Ops"
+
+type Rust => Int = "i64"
+
+source Py from "host.py" ("tick", "use_ops" as useOps, "use_list" as useList)
+source Rust from "host.rs" ("rs_use_ops" as rsUseOps, "rs_use_list" as rsUseList)
+
+tick :: Int -> <IO> Int
+useOps :: Ops -> Int -> <IO> Int
+useList :: [Int -> <IO> Int] -> Int -> <IO> Int
+rsUseOps :: Ops -> Int -> <IO> Int
+rsUseList :: [Int -> <IO> Int] -> Int -> <IO> Int
+
+-- `k` is named by both fields, so the inlined helper let-binds it
+ops :: Int -> Ops
+ops k = { inc = (\x -> tick (x + k)), scale = (\x -> tick (x * k)) }
+
+fns :: Int -> [Int -> <IO> Int]
+fns k = [(\x -> tick (x + k)), (\x -> tick (x * k))]
+
+viaPy :: Int -> Int -> <IO> Int
+viaPy k n = useOps (ops k) n
+
+viaRust :: Int -> Int -> <IO> Int
+viaRust k n = rsUseOps (ops k) n
+
+listPy :: Int -> Int -> <IO> Int
+listPy k n = useList (fns k) n
+
+listRust :: Int -> Int -> <IO> Int
+listRust k n = rsUseList (fns k) n
+
+-- the let is written by hand rather than produced by inlining
+sharedLet :: Int -> Int -> <IO> Int
+sharedLet k n =
+  let m = k + 1
+   in useOps { inc = (\x -> tick (x + m)), scale = (\x -> tick (x * m)) } n

@@ -174,7 +174,7 @@ applyLambdas ai
       ( AppS
           ( AnnoS
               (Idx i2 (FunT (_tv : tas) tb2))
-              c
+              _
               (LamS (v : vs) e2)
             )
           (e1 : es)
@@ -199,8 +199,12 @@ applyLambdas ai
   where
     nrefs = countRefs v e2
     -- The residual application with one parameter/argument pair consumed.
+    -- The residual lambda is a value built at the application site, so it
+    -- carries the application's annotation (its language), not the
+    -- definition's: left partially applied, it is the closure this site
+    -- constructs.
     rebuild body =
-      AnnoS i1 tb1 (AppS (AnnoS (Idx i2 (FunT tas tb2)) c (LamS vs body)) es)
+      AnnoS i1 tb1 (AppS (AnnoS (Idx i2 (FunT tas tb2)) tb1 (LamS vs body)) es)
 -- Normalize a computed-function head before applying. The head may reduce to a
 -- 'LetS' or 'LamS' only AFTER its own lambda-evaluation -- e.g. forcing an
 -- effectful do-block, @!{ _ <- eff; \\y -> .. }@ applied, cancels

@@ -1,0 +1,288 @@
+--- pair-py-py rootResult ---
+3
+--- pair-py-py rootArg ---
+3
+--- pair-py-py recordField ---
+3
+--- pair-py-py listElem ---
+3
+--- pair-py-py callback ---
+3
+--- pair-py-py pinned ---
+3
+--- pair-py-py relay ---
+3
+--- pair-py-py closureResult ---
+3
+--- pair-py-py nestedSusp ---
+4
+--- pair-py-cpp rootResult ---
+3
+--- pair-py-cpp rootArg ---
+3
+--- pair-py-cpp recordField ---
+3
+--- pair-py-cpp listElem ---
+3
+--- pair-py-cpp callback ---
+3
+--- pair-py-cpp pinned ---
+3
+--- pair-py-cpp relay ---
+3
+--- pair-py-cpp closureResult ---
+3
+--- pair-py-cpp nestedSusp ---
+4
+--- pair-py-r rootResult ---
+3
+--- pair-py-r rootArg ---
+3
+--- pair-py-r recordField ---
+3
+--- pair-py-r listElem ---
+3
+--- pair-py-r callback ---
+3
+--- pair-py-r pinned ---
+3
+--- pair-py-r relay ---
+3
+--- pair-py-r closureResult ---
+3
+--- pair-py-r nestedSusp ---
+4
+--- pair-py-rust rootResult ---
+3
+--- pair-py-rust rootArg ---
+3
+--- pair-py-rust recordField ---
+3
+--- pair-py-rust listElem ---
+3
+--- pair-py-rust callback ---
+3
+--- pair-py-rust pinned ---
+3
+--- pair-py-rust relay ---
+3
+--- nested-py-rust closureResult ---
+3
+--- nested-py-rust nestedSusp ---
+4
+--- pair-cpp-py rootResult ---
+3
+--- pair-cpp-py rootArg ---
+3
+--- pair-cpp-py recordField ---
+3
+--- pair-cpp-py listElem ---
+3
+--- pair-cpp-py callback ---
+3
+--- pair-cpp-py pinned ---
+3
+--- pair-cpp-py relay ---
+3
+--- pair-cpp-py closureResult ---
+3
+--- pair-cpp-py nestedSusp ---
+4
+--- pair-cpp-cpp rootResult ---
+3
+--- pair-cpp-cpp rootArg ---
+3
+--- pair-cpp-cpp recordField ---
+3
+--- pair-cpp-cpp listElem ---
+3
+--- pair-cpp-cpp callback ---
+3
+--- pair-cpp-cpp pinned ---
+3
+--- pair-cpp-cpp relay ---
+3
+--- pair-cpp-cpp closureResult ---
+3
+--- pair-cpp-cpp nestedSusp ---
+4
+--- pair-cpp-r rootResult ---
+3
+--- pair-cpp-r rootArg ---
+3
+--- pair-cpp-r recordField ---
+3
+--- pair-cpp-r listElem ---
+3
+--- pair-cpp-r callback ---
+3
+--- pair-cpp-r pinned ---
+3
+--- pair-cpp-r relay ---
+3
+--- pair-cpp-r closureResult ---
+3
+--- pair-cpp-r nestedSusp ---
+4
+--- pair-cpp-rust rootResult ---
+3
+--- pair-cpp-rust rootArg ---
+3
+--- pair-cpp-rust recordField ---
+3
+--- pair-cpp-rust listElem ---
+3
+--- pair-cpp-rust callback ---
+3
+--- pair-cpp-rust pinned ---
+3
+--- pair-cpp-rust relay ---
+3
+--- nested-cpp-rust closureResult ---
+3
+--- nested-cpp-rust nestedSusp ---
+4
+--- pair-r-py rootResult ---
+3
+--- pair-r-py rootArg ---
+3
+--- pair-r-py recordField ---
+3
+--- pair-r-py listElem ---
+3
+--- pair-r-py callback ---
+3
+--- pair-r-py pinned ---
+3
+--- pair-r-py relay ---
+3
+--- pair-r-py closureResult ---
+3
+--- pair-r-py nestedSusp ---
+4
+--- pair-r-cpp rootResult ---
+3
+--- pair-r-cpp rootArg ---
+3
+--- pair-r-cpp recordField ---
+3
+--- pair-r-cpp listElem ---
+3
+--- pair-r-cpp callback ---
+3
+--- pair-r-cpp pinned ---
+3
+--- pair-r-cpp relay ---
+3
+--- pair-r-cpp closureResult ---
+3
+--- pair-r-cpp nestedSusp ---
+4
+--- pair-r-r rootResult ---
+3
+--- pair-r-r rootArg ---
+3
+--- pair-r-r recordField ---
+3
+--- pair-r-r listElem ---
+3
+--- pair-r-r callback ---
+3
+--- pair-r-r pinned ---
+3
+--- pair-r-r relay ---
+3
+--- pair-r-r closureResult ---
+3
+--- pair-r-r nestedSusp ---
+4
+--- pair-r-rust rootResult ---
+3
+--- pair-r-rust rootArg ---
+3
+--- pair-r-rust recordField ---
+3
+--- pair-r-rust listElem ---
+3
+--- pair-r-rust callback ---
+3
+--- pair-r-rust pinned ---
+3
+--- pair-r-rust relay ---
+3
+--- nested-r-rust closureResult ---
+3
+--- nested-r-rust nestedSusp ---
+4
+--- pair-rust-py rootResult ---
+3
+--- pair-rust-py rootArg ---
+3
+--- pair-rust-py recordField ---
+3
+--- pair-rust-py listElem ---
+3
+--- pair-rust-py callback ---
+3
+--- pair-rust-py pinned ---
+3
+--- pair-rust-py relay ---
+3
+--- nested-rust-py closureResult ---
+3
+--- nested-rust-py nestedSusp ---
+4
+--- pair-rust-cpp rootResult ---
+3
+--- pair-rust-cpp rootArg ---
+3
+--- pair-rust-cpp recordField ---
+3
+--- pair-rust-cpp listElem ---
+3
+--- pair-rust-cpp callback ---
+3
+--- pair-rust-cpp pinned ---
+3
+--- pair-rust-cpp relay ---
+3
+--- nested-rust-cpp closureResult ---
+3
+--- nested-rust-cpp nestedSusp ---
+4
+--- pair-rust-r rootResult ---
+3
+--- pair-rust-r rootArg ---
+3
+--- pair-rust-r recordField ---
+3
+--- pair-rust-r listElem ---
+3
+--- pair-rust-r callback ---
+3
+--- pair-rust-r pinned ---
+3
+--- pair-rust-r relay ---
+3
+--- nested-rust-r closureResult ---
+3
+--- nested-rust-r nestedSusp ---
+4
+--- pair-rust-rust rootResult ---
+3
+--- pair-rust-rust rootArg ---
+3
+--- pair-rust-rust recordField ---
+3
+--- pair-rust-rust listElem ---
+3
+--- pair-rust-rust callback ---
+3
+--- pair-rust-rust pinned ---
+3
+--- pair-rust-rust relay ---
+3
+--- nested-rust-rust closureResult ---
+3
+--- nested-rust-rust nestedSusp ---
+4
