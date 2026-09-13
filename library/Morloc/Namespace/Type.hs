@@ -1708,7 +1708,7 @@ instance Pretty Type where
       f _ (AppT (VarT (TV "Tuple8")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
       -- A row over a suspension is a second layer and is parenthesized so
       -- it cannot be read as a row union.
-      f _ (EffectT effs t) =
+      f True (EffectT effs t) =
         "<" <> hcat (punctuate "," (map pretty (Set.toList effs))) <> ">" <+> layer t
       f _ (OptionalT t) = "?" <> f False t
       f _ (NatLitT n) = pretty n
@@ -1773,7 +1773,7 @@ instance Pretty TypeU where
       f _ (AppU (VarU (TV "Tuple6")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
       f _ (AppU (VarU (TV "Tuple7")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
       f _ (AppU (VarU (TV "Tuple8")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-      f _ (EffectU effs t) = prettyEffectSet effs <+> layerU t
+      f True (EffectU effs t) = prettyEffectSet effs <+> layerU t
       f _ (OptionalU t) = "?" <> f False t
       f _ NatVoidU = "_"
       f _ (StrVarU v) = pretty v

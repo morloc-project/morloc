@@ -430,7 +430,12 @@ makeGastSerialASTs i t = do
 -- top-level constant bindings whose RHS is a recursive-type literal
 -- route through @annotateGasts@ here rather than through a pool.
 generalTypeToSerialAST :: Int -> Type -> MorlocMonad SerialAST
-generalTypeToSerialAST i = generalTypeToSerialAST' i Set.empty
+-- The nexus evaluator runs a suspension where it is written, so an
+-- expression of type <E> T produces a T. Only the root is a suspension the
+-- evaluator runs; one nested inside a value is a closure the evaluator
+-- cannot hold, and the walk below refuses it.
+generalTypeToSerialAST i (EffectT _ t) = generalTypeToSerialAST' i Set.empty t
+generalTypeToSerialAST i t = generalTypeToSerialAST' i Set.empty t
 
 -- The ancestor set holds the TYPES on the path above the one being
 -- lowered, and a self-reference is recognised against it. A structural
@@ -527,7 +532,6 @@ generalTypeToSerialAST' i anc t0@(AppT (VarT v) ts)
       in SerialObject NamTable (FV MBT.table (CV "")) []
            <$> mapM (secondM (generalTypeToSerialAST' i anc)) cols
   | otherwise = appliedTypeToSerialAST i anc t0 v ts
-generalTypeToSerialAST' i anc (EffectT _ t) = generalTypeToSerialAST' i anc t
 generalTypeToSerialAST' i anc (OptionalT t) = do
   inner <- generalTypeToSerialAST' i anc t
   return $ SerialOptional (FV (TV "Optional") (CV "")) inner
@@ -921,8 +925,8 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS (Idx _ t) _ (LetS v e1 body)) = do
       heldSuspension "bound with let" e1
       schema <- type2schema t
-      bodyX <- toNexusExpr body
       e1X <- toNexusExpr e1
+      bodyX <- toNexusExpr body
       return $ AppX schema (LamX [render (pretty v)] bodyX) [e1X]
     toNexusExpr (AnnoS (Idx _ ift) _ (IfS cond thenB elseB)) =
       IfX <$> type2schema ift
@@ -975,8 +979,9 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
           return (CtorFieldX sch subj tag idx)
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrShow [arg])) =
       ShowX <$> type2schema t <*> toNexusExpr arg
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrRead [arg])) =
-      withTryResult t $ \inner -> ReadX <$> type2schema inner <*> toNexusExpr arg
+    toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrRead [arg])) =
+      Serial.checkReadDataType ix IntrRead t >>
+      withTryResult t (\inner -> ReadX <$> type2schema inner <*> toNexusExpr arg)
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrHash [arg])) =
       HashX <$> type2schema t <*> toNexusExpr arg
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSave [levelExpr, path, valExpr])) =
@@ -1002,8 +1007,9 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
         <*> pure (LitX IntX "0")
         <*> toNexusExpr valExpr
         <*> toNexusExpr path
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrLoad [path])) =
-      withTryResult t $ \inner -> LoadX <$> type2schema inner <*> toNexusExpr path
+    toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrLoad [path])) =
+      Serial.checkReadDataType ix IntrLoad t >>
+      withTryResult t (\inner -> LoadX <$> type2schema inner <*> toNexusExpr path)
     -- @open: dispatch by result-type head. IFile/IStream go to OpenX
     -- (generic mlc_open(path, kind) entry); OStream goes to OpenOStreamX
     -- (typed mlc_open_ostream(schema_str, path) entry) since the writer
@@ -1011,7 +1017,8 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS (Idx iOpen t) _ (IntrinsicS IntrOpen [path])) =
       -- The handle type is inside the Try now, so the kind dispatch reads
       -- the inner type while the node's own result stays the Try.
-      withTryResult t $ \handleT -> do
+      Serial.checkReadDataType iOpen IntrOpen t >>
+      withTryResult t (\handleT -> do
       let peelHead (AppT h _) = peelHead h
           peelHead ot = ot
           head_ = peelHead handleT
@@ -1032,15 +1039,16 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
                 "@open: result type must be IFile/IStream/OStream, got " <> pretty v
         _ ->
           MM.throwSourcedError iOpen $
-            "@open: unsupported handle type" <+> pretty (show t)
+            "@open: unsupported handle type" <+> pretty (show t))
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrClose [handle])) =
       withTryResult t $ \_ -> CloseX <$> toNexusExpr handle
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrFSchema [path])) =
       withTryResult t $ \inner -> FSchemaX <$> type2schema inner <*> toNexusExpr path
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrFLength [handle])) =
       withTryResult t $ \inner -> FLengthX <$> type2schema inner <*> toNexusExpr handle
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrNext [handle])) =
-      withTryResult t $ \inner -> NextX <$> type2schema inner <*> toNexusExpr handle
+    toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrNext [handle])) =
+      Serial.checkReadDataType ix IntrNext t >>
+      withTryResult t (\inner -> NextX <$> type2schema inner <*> toNexusExpr handle)
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStreamLayout [handle])) =
       withTryResult t $ \inner -> StreamLayoutX <$> type2schema inner <*> toNexusExpr handle
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStream [handle])) =
@@ -1062,9 +1070,10 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       ThrowX <$> toNexusExpr msg
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrTry [body])) =
       TryX <$> type2schema t <*> toNexusExpr body
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStdin _)) =
-      withTryResult t $ \inner ->
-        StdinX <$> type2schema (handleStorageOfResult inner)
+    toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrStdin _)) =
+      Serial.checkReadDataType ix IntrStdin t >>
+      withTryResult t (\inner ->
+        StdinX <$> type2schema (handleStorageOfResult inner))
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStdout _)) =
       StdoutX <$> type2schema (handleStorageOfResult t)
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStderr _)) =

@@ -22,6 +22,7 @@ module Morloc.CodeGenerator.Serial
   , wireSerialAstToType
   , containsFunT
   , containsEffectT
+  , checkReadDataType
   , serialAstHasString
   , chooseSerializationCycle
   , isSerializable
@@ -140,6 +141,28 @@ containsEffectT (AppT t ts) = containsEffectT t || any containsEffectT ts
 containsEffectT (NamT _ _ ts rs) = any containsEffectT ts || any (containsEffectT . snd) rs
 containsEffectT (OptionalT t) = containsEffectT t
 containsEffectT _ = False
+
+-- | A data-reading intrinsic (@load, @read, @next, @open, @stdin) yields
+-- what a file holds, which is data: a function or a suspension has no
+-- file form. The result type is usually left to inference, which solves it
+-- to whatever the value is used as, so the check waits until the type is
+-- known and refuses the read rather than decoding the file under a closure
+-- schema.
+checkReadDataType :: Int -> Intrinsic -> Type -> MorlocMonad ()
+checkReadDataType i intr t0
+  | containsEffectT t || containsFunT t =
+      MM.throwSourcedError i $
+        "@" <> pretty (intrinsicName intr) <+> "reads data, but its result type"
+          <+> pretty t0 <+> "holds a function or suspension."
+          <+> "Annotate the result with a data type, e.g."
+          <+> "`@load path :: <IO> (Try Str Int)`."
+  | otherwise = return ()
+  where
+    -- The intrinsic's own row is the suspension the read is; only what it
+    -- yields must be data.
+    t = case t0 of
+      EffectT _ inner -> inner
+      _ -> t0
 
 -- | Whether a serialized value can carry a native string anywhere inside it.
 --

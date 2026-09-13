@@ -1,0 +1,12 @@
+module main (robust)
+
+import root
+
+robust :: Str -> <IO> Int
+robust path = do
+  a <- @load "cache/#{path}"
+  match a
+    | (Ok v) = v
+    | (Err _) = do
+        c <- @load "disk/#{path}"
+        unwrap c

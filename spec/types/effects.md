@@ -253,6 +253,7 @@ The compiler does not validate these claims; they are an assertion by the librar
 
 - Effect labels in source signatures are required; the compiler does not infer them across the FFI boundary.
 - A row may carry one variable (`<IO, e> T`); a suspension instantiates a type variable like any other value (`id (randint 0 9)`, a list `[<Rand> Int]`, a record field).
+- A data-reading intrinsic (`@load`, `@read`, `@next`, `@open`, `@stdin`) yields data: its result type may not contain a suspension or a function. Inference can solve the result to one, as when a loaded value is one arm of a `match` whose other arm is a do-block; the build refuses the read and asks for an annotation, and the intended form is `(Ok v) = do v`.
 - Failure is NOT an effect. A fallible operation returns `Try e a` (declared in the `internal` module) and `@try` converts an otherwise-uncaught native throw into one; there is no `Err` effect and no `@catch`. An effect row describes what a call may DO, and failing is a property of what it returns.
 
 ## See Also

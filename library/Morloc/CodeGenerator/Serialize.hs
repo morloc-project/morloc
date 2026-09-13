@@ -419,7 +419,7 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     -- are eager; an intrinsic declared with a suspension result reaches
     -- here as the body of the closure manifold that suspends it
     -- ('Suspension.lowerSuspensions'), typed by its result.
-    nativeExpr m (MonoIntrinsic t intr es)
+    nativeExpr m (MonoIntrinsic t@(Idx tidx gt) intr es)
       | intr `elem` [IntrSave, IntrSaveM, IntrSaveJ, IntrLoad, IntrRead,
                      IntrOpen, IntrClose, IntrFSchema,
                      IntrFLength, IntrStreamLayout, IntrNext, IntrStream,
@@ -427,6 +427,8 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
                      IntrStdin, IntrStdout, IntrStderr, IntrThrow,
                      IntrTell, IntrTmpfile,
                      IntrTry] = do
+          when (intr `elem` [IntrLoad, IntrRead, IntrNext, IntrOpen, IntrStdin]) $
+            Serial.checkReadDataType tidx intr gt
           tf <- inferType t
           esBase <- mapM (nativeExpr m) es
           -- @try's body must reach mlc_try as a no-arg callable; see

@@ -9285,6 +9285,10 @@ typeRenderParenTests =
         render (MTI.prettyTypeU (AppU boxU [todoU])) @?= "Box Todo"
     , testCase "prettyTypeU: applied record nested in an application" $
         render (MTI.prettyTypeU (AppU boxU [NamU NamRecord (TV "Box") [todoU] []])) @?= "Box (Box Todo)"
+    , testCase "Pretty Type: suspension argument of an application" $
+        render (pretty (AppT box [EffectT ioSet (VarT (TV "Int"))])) @?= "Box (<IO> Int)"
+    , testCase "Pretty TypeU: suspension argument of an application" $
+        render (pretty (AppU boxU [EffectU ioEffectSet (VarU (TV "Int"))])) @?= "Box (<IO> Int)"
     , testCase "isAtomicType: nullary record is atomic" $
         MTI.isAtomicType todoU @?= True
     , testCase "isAtomicType: applied record is not atomic" $
@@ -9295,6 +9299,7 @@ typeRenderParenTests =
     boxU = VarU (TV "Box")
     todoT = NamT NamRecord (TV "Todo") [] [(Key "title", VarT (TV "Str"))]
     todoU = NamU NamRecord (TV "Todo") [] [(Key "title", VarU (TV "Str"))]
+    ioSet = Set.singleton "IO"
 
 -- | A suspension @<E> T@ is a value distinct from @T@ with no coercion
 -- either way; @do v@ is the only way to build one from a value; the empty

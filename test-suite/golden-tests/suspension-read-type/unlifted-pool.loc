@@ -1,0 +1,16 @@
+module main (robust)
+
+import root
+import root-py
+
+source Py from "gen.py" ("addOne")
+addOne :: Int -> Int
+
+robust :: Str -> <IO> Int
+robust path = do
+  a <- @load "cache/#{path}"
+  match a
+    | (Ok v) = v
+    | (Err _) = do
+        c <- @load "disk/#{path}"
+        do (addOne (unwrap c))
