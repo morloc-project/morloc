@@ -3,8 +3,10 @@
 -- position: `Box Todo`, `?Todo`, `Box (Box Todo)`. A constructor field
 -- that is itself an application takes them, since `Boxed Box Todo` is the
 -- spelling of a two-field constructor: `Boxed (Box Todo)`. Self-delimiting
--- forms (`[Todo]`, `(Int, Todo)`, `?(Box Todo)`) stay as they are.
-module main (boxTodo, optTodo, boxBox, boxList, takeBox, count)
+-- forms (`[Todo]`, `(Int, Todo)`, `?(Box Todo)`) stay as they are. A type
+-- is one line however wide: `wide`'s tuple is longer than a terminal row
+-- and must not carry a line break into the manifest.
+module main (boxTodo, optTodo, boxBox, boxList, takeBox, count, wide)
 
 import root-py
 
@@ -44,3 +46,6 @@ count | (Boxed _) = 1
       | (Listed xs) = 0
       | (Tup _) = 2
       | (OptBoxed _) = 1
+
+wide :: (Box Todo, Box Todo, Box Todo, Box Todo, Box Todo, Box Todo, Box Todo) -> Int
+wide _ = 7

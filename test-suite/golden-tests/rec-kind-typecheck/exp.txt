@@ -1,4 +1,4 @@
-g :: (Holder b a) -> (Holder b a)
+g :: Holder b a -> Holder b a
 use :: Holder {x=Int, y=Str} Int
 useUnion :: Holder {x=Int, y=Str} Int
 useDiff :: Holder {x=Int} Int

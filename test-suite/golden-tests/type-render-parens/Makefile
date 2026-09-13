@@ -7,6 +7,8 @@ all:
 	./nexus count -h 2>> obs.err | sed -n '/^Data Types:/,$$p' >> obs.txt
 	echo "--- json-help ---" >> obs.txt
 	./nexus --json-help 2>> obs.err | python3 describe.py >> obs.txt
+	echo "--- manifest ---" >> obs.txt
+	python3 -c "import json; print(sum('\n' in a['type'] for c in json.load(open('nexus-build/manifest.json'))['commands'] for a in c['args']))" >> obs.txt
 	echo "--- run ---" >> obs.txt
 	./nexus boxTodo x >> obs.txt 2>> obs.err
 	./nexus count '{"Boxed":[{"value":{"title":"x"}}]}' >> obs.txt 2>> obs.err

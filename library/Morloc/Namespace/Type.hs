@@ -64,6 +64,7 @@ module Morloc.Namespace.Type
   , TyLit (..)
   , extractKey
   , collectExtends
+  , isTupleName
   , type2typeu
   , EType (..)
   , unresolvedType2type
@@ -161,6 +162,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.PartialOrd as P
 import qualified Data.Set as Set
 import Data.Text (Text)
+import qualified Data.Char as C
 import qualified Data.Text as DT
 import Morloc.Data.Doc
 import Morloc.Namespace.Prim
@@ -1693,19 +1695,22 @@ containsUnk StrVoidT = False
 instance Pretty NamType where
   pretty _ = mempty
 
+-- | The name of a tuple constructor, @Tuple2@ through @Tuple8@.
+isTupleName :: Text -> Bool
+isTupleName n = case DT.stripPrefix "Tuple" n of
+  Just k -> not (DT.null k) && DT.all C.isDigit k
+  Nothing -> False
+
 instance Pretty Type where
   pretty t0 = f True t0
     where
       f _ (UnkT v) = pretty v
       f _ (VarT v) = pretty v
       f _ (AppT (VarT (TV "List")) [t]) = "[" <> f True t <> "]"
-      f _ (AppT (VarT (TV "Tuple2")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-      f _ (AppT (VarT (TV "Tuple3")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-      f _ (AppT (VarT (TV "Tuple4")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-      f _ (AppT (VarT (TV "Tuple5")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-      f _ (AppT (VarT (TV "Tuple6")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-      f _ (AppT (VarT (TV "Tuple7")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-      f _ (AppT (VarT (TV "Tuple8")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
+      -- A tuple is one line however wide it is: its rendering reaches help
+      -- text and manifest fields, where a soft line break would be a
+      -- newline inside a type.
+      f _ (AppT (VarT (TV n)) ts) | isTupleName n = "(" <> hcat (punctuate ", " (map (f True) ts)) <> ")"
       -- A row over a suspension is a second layer and is parenthesized so
       -- it cannot be read as a row union.
       f True (EffectT effs t) =
@@ -1724,8 +1729,11 @@ instance Pretty Type where
       -- parentheses, whatever position it sits in.
       f _ (NamT _ n [] _) = pretty n
       f False t = parens (f True t)
-      f _ (FunT [] t) = "() -> " <> f False t
-      f _ (FunT ts t) = hsep $ punctuate " -> " (map (f False) (ts <> [t]))
+      -- An arrow associates to the right, so only a function in argument
+      -- position needs parentheses; an application or a suspension there
+      -- reads unambiguously.
+      f _ (FunT [] t) = "() -> " <> f True t
+      f _ (FunT ts t) = hsep $ punctuate " ->" (map arrowArg ts <> [f True t])
       f _ (AppT t ts) = hsep (map (f False) (t : ts))
       -- Named types (records / objects / tables) render as "name [p1 ...]",
       -- Haskell-style. No tag and no inline field block; the record/table
@@ -1738,6 +1746,8 @@ instance Pretty Type where
         in pretty n <> params
       layer t@(EffectT _ _) = parens (f True t)
       layer t = f False t
+      arrowArg t@(FunT _ _) = parens (f True t)
+      arrowArg t = f True t
 
 -- | Walk a chain of nested 'RecExtendU' nodes and return its leaf fields
 -- in source order plus the eventual tail expression (typically
@@ -1766,13 +1776,7 @@ instance Pretty TypeU where
       f _ (NatVarU v) = pretty v
       f _ (ExistU v ([], _) ([], _)) = "*" <> pretty v
       f _ (AppU (VarU (TV "List")) [t]) = "[" <> f True t <> "]"
-      f _ (AppU (VarU (TV "Tuple2")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-      f _ (AppU (VarU (TV "Tuple3")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-      f _ (AppU (VarU (TV "Tuple4")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-      f _ (AppU (VarU (TV "Tuple5")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-      f _ (AppU (VarU (TV "Tuple6")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-      f _ (AppU (VarU (TV "Tuple7")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-      f _ (AppU (VarU (TV "Tuple8")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
+      f _ (AppU (VarU (TV n)) ts) | isTupleName n = "(" <> hcat (punctuate ", " (map (f True) ts)) <> ")"
       f True (EffectU effs t) = prettyEffectSet effs <+> layerU t
       f _ (OptionalU t) = "?" <> f False t
       f _ NatVoidU = "_"
@@ -1836,8 +1840,8 @@ instance Pretty TypeU where
           <> pretty v
             <+> list (map (f False) ts)
             <+> list (map ((\(x, y) -> tupled [x, y]) . bimap pretty (f True)) rs)
-      f _ (FunU [] t) = "() -> " <> f False t
-      f _ (FunU ts t) = hsep $ punctuate " ->" (map (f False) (ts <> [t]))
+      f _ (FunU [] t) = "() -> " <> f True t
+      f _ (FunU ts t) = hsep $ punctuate " ->" (map arrowArgU ts <> [f True t])
       f _ (ForallU v t) = "forall" <+> pretty v <+> "." <+> f True t
       f _ (AppU t ts) = hsep $ map (f False) (t : ts)
       -- See the NamT case in 'Pretty Type' above for the rendering rules.
@@ -1848,6 +1852,8 @@ instance Pretty TypeU where
         in pretty n <> params
       layerU t@(EffectU _ _) = parens (f True t)
       layerU t = f False t
+      arrowArgU t@(FunU _ _) = parens (f True t)
+      arrowArgU t = f True t
 
 instance Pretty EType where
   pretty (EType t (Set.toList -> cs) _ _) = case cs of

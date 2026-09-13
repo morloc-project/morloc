@@ -73,7 +73,7 @@ module Morloc.PatternChain.Grammar
 import qualified Morloc.BaseTypes as BT
 import Morloc.Namespace.Expr (Selector (..))
 import Morloc.Namespace.Prim (Key (..), TVar (..))
-import Morloc.Namespace.Type (TypeU (..))
+import Morloc.Namespace.Type (TypeU (..), isTupleName)
 
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -348,10 +348,6 @@ walkStep t StepBracketSlice = case t of
     AppU (VarU (TV "Vector")) _ -> Right t
     VarU (TV "Str") -> Right t
     _ -> Left (WalkExpectedSliceable t)
-
-isTupleName :: Text -> Bool
-isTupleName name =
-    T.isPrefixOf "Tuple" name && T.all (`elem` ("0123456789" :: String)) (T.drop 5 name)
 
 -- Build a Tuple type (or a bare type for singleton groups). Multi-child
 -- groups produce TupleN with N = length of the child list.

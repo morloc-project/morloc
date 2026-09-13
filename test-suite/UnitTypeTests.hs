@@ -9289,6 +9289,26 @@ typeRenderParenTests =
         render (pretty (AppT box [EffectT ioSet (VarT (TV "Int"))])) @?= "Box (<IO> Int)"
     , testCase "Pretty TypeU: suspension argument of an application" $
         render (pretty (AppU boxU [EffectU ioEffectSet (VarU (TV "Int"))])) @?= "Box (<IO> Int)"
+    , testCase "Pretty Type: arrow with one space each side" $
+        render (pretty (FunT [intT] intT)) @?= "Int -> Int"
+    , testCase "Pretty Type: application in arrow position" $
+        render (pretty (FunT [todoT, AppT box [todoT]] (AppT box [todoT]))) @?= "Todo -> Box Todo -> Box Todo"
+    , testCase "Pretty Type: function argument keeps its parentheses" $
+        render (pretty (FunT [FunT [intT] intT] intT)) @?= "(Int -> Int) -> Int"
+    , testCase "Pretty TypeU: application in arrow position" $
+        render (pretty (FunU [todoU, AppU boxU [todoU]] (AppU boxU [todoU]))) @?= "Todo -> Box Todo -> Box Todo"
+    , testCase "Pretty TypeU: function argument keeps its parentheses" $
+        render (pretty (FunU [FunU [intU] intU] intU)) @?= "(Int -> Int) -> Int"
+    , testCase "prettyTypeU: application in arrow position" $
+        render (MTI.prettyTypeU (FunU [todoU, AppU boxU [todoU]] (AppU boxU [todoU]))) @?= "Todo -> Box Todo -> Box Todo"
+    , testCase "prettyTypeU: function argument keeps its parentheses" $
+        render (MTI.prettyTypeU (FunU [FunU [intU] intU] intU)) @?= "(Int -> Int) -> Int"
+    , testCase "Pretty Type: a wide tuple stays on one line" $
+        render (pretty (AppT (VarT (TV "Tuple5")) (replicate 5 longT))) @?= wideTuple
+    , testCase "Pretty TypeU: a wide tuple stays on one line" $
+        render (pretty (AppU (VarU (TV "Tuple5")) (replicate 5 longU))) @?= wideTuple
+    , testCase "prettyTypeU: a wide tuple stays on one line" $
+        render (MTI.prettyTypeU (AppU (VarU (TV "Tuple5")) (replicate 5 longU))) @?= wideTuple
     , testCase "isAtomicType: nullary record is atomic" $
         MTI.isAtomicType todoU @?= True
     , testCase "isAtomicType: applied record is not atomic" $
@@ -9300,6 +9320,11 @@ typeRenderParenTests =
     todoT = NamT NamRecord (TV "Todo") [] [(Key "title", VarT (TV "Str"))]
     todoU = NamU NamRecord (TV "Todo") [] [(Key "title", VarU (TV "Str"))]
     ioSet = Set.singleton "IO"
+    intT = VarT (TV "Int")
+    intU = VarU (TV "Int")
+    longT = VarT (TV "LongNamedRecordNumberOne")
+    longU = VarU (TV "LongNamedRecordNumberOne")
+    wideTuple = "(" <> MT.intercalate ", " (replicate 5 "LongNamedRecordNumberOne") <> ")"
 
 -- | A suspension @<E> T@ is a value distinct from @T@ with no coercion
 -- either way; @do v@ is the only way to build one from a value; the empty

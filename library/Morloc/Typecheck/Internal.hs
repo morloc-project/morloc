@@ -2818,13 +2818,7 @@ prettyTypeU = renderClean . cleanTypeName
     -- other variable -- not with the '*a' diagnostic convention.
     f _ (ExistU v ([], _) ([], _)) = tv v
     f _ (AppU (VarU (TV "List")) [t]) = "[" <> f True t <> "]"
-    f _ (AppU (VarU (TV "Tuple2")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-    f _ (AppU (VarU (TV "Tuple3")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-    f _ (AppU (VarU (TV "Tuple4")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-    f _ (AppU (VarU (TV "Tuple5")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-    f _ (AppU (VarU (TV "Tuple6")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-    f _ (AppU (VarU (TV "Tuple7")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-    f _ (AppU (VarU (TV "Tuple8")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
+    f _ (AppU (VarU (TV n)) ts) | isTupleName n = "(" <> hcat (punctuate ", " (map (f True) ts)) <> ")"
     f _ (EffectU effs t) = prettyEffectSet effs <+> layerU t
     f _ (OptionalU t) = "?" <> f False t
     f _ (NatLitU n) = pretty n
@@ -2873,8 +2867,8 @@ prettyTypeU = renderClean . cleanTypeName
       tv v
         <+> list (map (f False) ts)
         <+> list [tupled [pretty k, f True t] | (k, t) <- rs]
-    f _ (FunU [] t) = "() -> " <> f False t
-    f _ (FunU ts t) = hsep $ punctuate " ->" (map (f False) (ts <> [t]))
+    f _ (FunU [] t) = "() -> " <> f True t
+    f _ (FunU ts t) = hsep $ punctuate " ->" (map arrowArg ts <> [f True t])
     f _ (ForallU _ t) = f True t
     f _ (AppU t ts) = hsep $ map (f False) (t : ts)
     f _ (NamU _ n ps _) =
@@ -2884,6 +2878,8 @@ prettyTypeU = renderClean . cleanTypeName
       in pretty n <> params
     layerU t@(EffectU _ _) = parens (f True t)
     layerU t = f False t
+    arrowArg t@(FunU _ _) = parens (f True t)
+    arrowArg t = f True t
 
 -- | Render two TypeUs with a shared rename pool so distinct freshened
 -- variables get distinct clean names. Without this, calling

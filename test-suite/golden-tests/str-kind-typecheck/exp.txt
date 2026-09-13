@@ -1,1 +1,1 @@
-use :: a -> (Tagged "hello" a)
+use :: a -> Tagged "hello" a
