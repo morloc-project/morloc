@@ -1,0 +1,65 @@
+module main
+  ( lossyCast, exactCast, nullsNotOptional, nullsOptional, widened
+  , dictText, dictInts, reordered
+  , kindlessIntoTyped
+  , parquetHead
+  , writeSnappy
+  )
+
+import root
+import root-py
+import root-cpp
+import table-py
+import table-cpp
+
+-- Boundary checks on tables: the declared morloc column schema is enforced
+-- when a table leaves a pool (cast to the declared types, lossless only;
+-- nulls refused in non-optional columns; declared columns first) and again
+-- when a typed consumer receives one produced under a kindless type.
+-- Dictionary-encoded columns are decoded to their value type. A
+-- snappy-compressed Parquet file, the default output of every common
+-- writer, loads. The consumer is C++ so that every
+-- table actually crosses a pool boundary.
+
+source Py from "src.py"
+  ( "floatsAsInt", "wholeFloats", "withNulls", "int32s"
+  , "dictText" as mkDictText, "dictInts" as mkDictInts
+  , "reordered" as mkReordered, "writeSnappy" )
+
+floatsAsInt :: Int -> Table n {x = Int}
+wholeFloats :: Int -> Table n {x = Int}
+withNulls :: Int -> Table n {x = Int}
+withNullsOpt :: Int -> Table n {x = ?Int}
+int32s :: Int -> Table n {x = Int}
+mkDictText :: Int -> Table
+mkDictInts :: Int -> Table
+mkReordered :: Int -> Table n {x = Int, y = Str}
+describe :: Table -> Str
+describeTyped :: Table n {x = Int} -> Str
+writeSnappy :: Str -> Str
+
+source Py from "src.py" ("withNulls" as withNullsOpt, "floatsAsInt" as kindlessFloats)
+kindlessFloats :: Int -> Table
+source Cpp from "src.hpp" ("describeCpp" as describe, "describeCpp" as describeTyped)
+
+lossyCast :: Int -> Str
+lossyCast n = describe (floatsAsInt n)
+exactCast :: Int -> Str
+exactCast n = describe (wholeFloats n)
+nullsNotOptional :: Int -> Str
+nullsNotOptional n = describe (withNulls n)
+nullsOptional :: Int -> Str
+nullsOptional n = describe (withNullsOpt n)
+widened :: Int -> Str
+widened n = describe (int32s n)
+dictText :: Int -> Str
+dictText n = describe (mkDictText n)
+dictInts :: Int -> Str
+dictInts n = describe (mkDictInts n)
+reordered :: Int -> Str
+reordered n = describe (mkReordered n)
+-- A kindless producer feeding a typed consumer is checked on receipt.
+kindlessIntoTyped :: Int -> Str
+kindlessIntoTyped n = describeTyped (kindlessFloats n)
+parquetHead :: Table -> Table
+parquetHead = sliceRows 0 2

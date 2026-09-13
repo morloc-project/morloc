@@ -1153,6 +1153,9 @@ collectRustRecords =
     se _ e = return $ foldlSE (<>) [] e
 
     seek :: TypeF -> [(FVar, [TypeF], [(Key, TypeF)])]
+    -- A table is an Arrow record batch with its own marshalling in
+    -- rustmorloc, not a struct to generate.
+    seek (NamF NamTable _ _ _) = []
     seek (NamF _ v ps rs) = (v, ps, rs) : concatMap seek ps <> concatMap (seek . snd) rs
     -- A record reachable only as a `data` arm's field still needs its
     -- struct emitted, so the walk descends through arms as the enum
@@ -1851,6 +1854,7 @@ rustLowerConfig mask =
     , lcMakeLambda = \_sig mname contextArgs boundArgs -> rustClosureWrapper mname contextArgs boundArgs
     , lcClosureSig = \_ -> return ""
     , lcRegisterSchema = rustRegisterSchema
+    , lcTableImportFn = Nothing
     }
 
 -- | Assemble a @let@ binding at the PoolDocs level. A serialize let (mt =

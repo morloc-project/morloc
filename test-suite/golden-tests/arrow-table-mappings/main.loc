@@ -1,0 +1,40 @@
+module main (pyKind, pyRoundTrip, rKind, rRoundTrip, crossKinds)
+
+import root
+import root-py
+import root-r
+import root-cpp
+
+-- A module chooses the native type its tables take in each language. Here
+-- Python sees pyarrow.Table (not the RecordBatch that crosses the wire) and
+-- R sees a plain data.frame; both are converted on receipt and coerced back
+-- on export, so functions written against those types just work.
+
+type ArrowTable
+type Py => ArrowTable = "pyarrow.Table"
+type R => ArrowTable = "data.frame"
+type Cpp => ArrowTable = "mlc::ArrowTable"
+
+source Py from "src.py" ("mkTable", "kindOf", "addRow")
+source R from "src.R" ("mkFrame", "kindOfR", "addRowR")
+source Cpp from "src.hpp" ("describeCpp")
+
+mkTable :: Int -> ArrowTable
+kindOf :: ArrowTable -> Str
+addRow :: ArrowTable -> ArrowTable
+mkFrame :: Int -> ArrowTable
+kindOfR :: ArrowTable -> Str
+addRowR :: ArrowTable -> ArrowTable
+describeCpp :: ArrowTable -> Str
+
+-- A table built in R arrives in Python as the mapped type, and vice versa.
+pyKind :: Int -> Str
+pyKind n = kindOf (mkFrame n)
+rKind :: Int -> Str
+rKind n = kindOfR (mkTable n)
+pyRoundTrip :: Int -> Str
+pyRoundTrip n = describeCpp (addRow (mkFrame n))
+rRoundTrip :: Int -> Str
+rRoundTrip n = describeCpp (addRowR (mkTable n))
+crossKinds :: Int -> Str
+crossKinds n = describeCpp (addRowR (addRow (mkFrame n)))

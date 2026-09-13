@@ -171,7 +171,7 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       -- @mlc::ArrowTable@ regardless of any concrete-type hint (the
       -- legacy @<arrow>@ hint has been retired -- recognition is now
       -- by general-type identity, not by the concrete-name slot).
-      f (VarF (FV gv _)) | gv == BT.table = return "mlc::ArrowTable"
+      f (VarF (FV gv _)) | BT.isTableVar gv = return "mlc::ArrowTable"
       -- Leak guard. pairEval leaves bnd-protected recursive aliases as
       -- @VarU v@ with the morloc-side TVar untouched; weave then
       -- synthesizes a CVar from that TVar's text, so the resulting
@@ -1166,6 +1166,7 @@ PROPAGATE_ERROR(errmsg)|]
               Nothing ->
                 [idoc|std::bind(#{bindArgs})|]
     , lcRegisterSchema = cppRegisterSchema
+    , lcTableImportFn = Nothing
     }
   where
     -- For serialization, records become tuples (that's what _put_value/to_voidstar expects)

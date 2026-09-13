@@ -28,7 +28,6 @@ module Morloc.CodeGenerator.Serial
   , serialAstHasString
   , chooseSerializationCycle
   , isSerializable
-  , hasArrowHint
   , prettySerialOne
   , serialAstToType
   , shallowType
@@ -745,7 +744,7 @@ makeSerialAST m lang t0 = do
         withAncestorVar anc0 action = descend ft anc0 >>= action
 
         dispatchVarF
-          | finalType == BT.tableU = return $ SerialObject NamTable v [] []
+          | BT.isTableU finalType = return $ SerialObject NamTable v [] []
           | finalType == BT.unitU = return $ SerialNull v
           | finalType == BT.boolU = return $ SerialBool v
           | finalType == BT.strU = return $ SerialString v
@@ -974,12 +973,12 @@ makeSerialAST m lang t0 = do
           -- (or bare @T@ for empty / polymorphic-row); no concrete-type hint
           -- is needed because @T@ is itself the dispatch token to the Arrow
           -- C Data Interface path.
-          | generalTypeName == BT.table = case runtimeTs of
+          | BT.isTableVar generalTypeName = case runtimeTs of
               [NamF _ _ _ recRs] -> do
                 colASTs <- mapM (\(k, tf) -> (,) k <$> makeSerialAST' gscope typepackers anc tf) recRs
-                return $ SerialObject NamTable (FV BT.table (CV "")) [] colASTs
+                return $ SerialObject NamTable fv [] colASTs
               _ ->
-                return $ SerialObject NamTable (FV BT.table (CV "")) [] []
+                return $ SerialObject NamTable fv [] []
           | otherwise = case aliasShape of
               -- Outer alias body is list-shaped (`type Deque a = List a`,
               -- `type Vector n a = List a`, user-defined `type MyArr a = [a]`).
@@ -1497,15 +1496,6 @@ reduceNat (NatDivU a b) = do
   y <- reduceNat b
   if y == 0 then Nothing else Just (x `div` y)
 reduceNat _ = Nothing
-
--- | True iff this SerialAST root is a Table (Arrow IPC primitive).
--- Used at codegen sites that need to route through the Arrow C Data
--- Interface rather than the general msgpack path. Identity is the
--- structural NamTable tag; the old @<arrow>@ concrete-type hint has
--- been retired (the wire-form @T@ marker now carries the dispatch).
-hasArrowHint :: SerialAST -> Bool
-hasArrowHint (SerialObject NamTable _ _ _) = True
-hasArrowHint _ = False
 
 {- | Given a list of possible ways to (de)serialize data between two languages,
 choose one (or none if the list is empty). Currently I just take the first

@@ -1,0 +1,10 @@
+--- pyKind ---
+"pyarrow.lib.Table"
+--- rKind ---
+"data.frame"
+--- pyRoundTrip ---
+"x:i:[1, 2, 3, 4]; y:u:['a', 'b', 'c', 'd']"
+--- rRoundTrip ---
+"x:i:[1, 2, 3, 4]; y:u:['a', 'b', 'c', 'd']"
+--- crossKinds ---
+"x:i:[1, 2, 3, 4, 4]; y:u:['a', 'b', 'c', 'd', 'd']"

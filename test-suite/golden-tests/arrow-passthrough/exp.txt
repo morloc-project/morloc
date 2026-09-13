@@ -1,0 +1,16 @@
+--- same ---
+"x:[1, 2, 3, 4, 5]; y:['a', 'b', 'c', 'd', 'e']"
+--- same no-borrow ---
+"x:[1, 2, 3, 4, 5]; y:['a', 'b', 'c', 'd', 'e']"
+--- sameTwice ---
+"x:[1, 2, 3, 4, 5]; y:['a', 'b', 'c', 'd', 'e']"
+--- sameTwice no-borrow ---
+"x:[1, 2, 3, 4, 5]; y:['a', 'b', 'c', 'd', 'e']"
+--- renamed ---
+"renamed:[1, 2, 3, 4, 5]; y:['a', 'b', 'c', 'd', 'e']"
+--- renamed no-borrow ---
+"renamed:[1, 2, 3, 4, 5]; y:['a', 'b', 'c', 'd', 'e']"
+--- sliced ---
+"x:[2, 3, 4, 5]; y:['b', 'c', 'd', 'e']"
+--- sliced no-borrow ---
+"x:[2, 3, 4, 5]; y:['b', 'c', 'd', 'e']"

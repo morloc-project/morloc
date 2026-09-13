@@ -29,10 +29,13 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{c_char, c_void, CString};
 use morloc_runtime_types::cschema::CSchema;
+use arrow_array::ffi::{from_ffi, to_ffi, FFI_ArrowArray, FFI_ArrowSchema};
+use arrow_array::{Array as _, RecordBatch, StructArray};
 use morloc_runtime_types::packet::{
     PACKET_COMPRESSION_NONE as PKT_COMPRESSION_NONE,
     PACKET_ENCRYPTION_NONE as PKT_ENCRYPTION_NONE,
     PACKET_FORMAT_VOIDSTAR as PKT_FORMAT_VOIDSTAR,
+    PACKET_FORMAT_ARROW as PKT_FORMAT_ARROW,
     PACKET_SOURCE_MESG as PKT_SOURCE_MESG,
     PACKET_SOURCE_RPTR as PKT_SOURCE_RPTR,
     PKT_COMPRESSION_OFF, PKT_ENCRYPTION_OFF, PKT_FORMAT_OFF, PKT_HEADER_SIZE,
@@ -46,6 +49,10 @@ use morloc_runtime_types::shm_types::{align_up, encode_relptr, relptr_offset, Ar
 // morloc_runtime_types then resolves as rustmorloc's transitive dep by exact
 // metadata hash, sidestepping crate-name ambiguity across rust-deps.
 pub use morloc_runtime_types::schema::{parse_schema, Schema, SerialType};
+// The Arrow crates a table-typed pool needs, so a module can map `Table` to
+// `rustmorloc::arrow_array::RecordBatch` without declaring the crates itself.
+pub use arrow_array;
+pub use arrow_schema;
 
 
 // ---------------------------------------------------------------------------
@@ -66,6 +73,15 @@ extern "C" {
                              schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut u8;
     fn get_morloc_data_packet_value(data: *const u8, schema: *const CSchema,
                                     errmsg: *mut *mut c_char) -> *mut u8;
+    // Tables: Arrow C Data Interface <-> SHM table block (see arrow_ffi.rs).
+    fn arrow_to_shm_typed(array: *mut FFI_ArrowArray, schema: *const FFI_ArrowSchema,
+                          declared: *const CSchema, errmsg: *mut *mut c_char) -> isize;
+    fn arrow_from_shm(header: *const c_void, out_schema: *mut FFI_ArrowSchema,
+                      out_array: *mut FFI_ArrowArray, errmsg: *mut *mut c_char) -> i32;
+    fn arrow_validate(header: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> i32;
+    fn make_arrow_data_packet(relptr: isize, schema: *const CSchema) -> *mut u8;
+    fn arrow_borrow_register(base: *const u8, rel: isize);
+    fn arrow_borrow_clear();
     fn make_fail_packet(msg: *const c_char) -> *mut u8;
     // Inline-threshold control: force a captured closure value to serialize
     // SELF-CONTAINED (embedded, not a SHM relptr) so its packet survives the
@@ -384,6 +400,7 @@ fn track(ptr: *mut c_void) {
 /// Free all deferred SHM blocks from the previous dispatch. Generated
 /// `local_dispatch`/`remote_dispatch` call this at entry (cpp: pool.cpp:979).
 pub fn dispatch_flush() {
+    unsafe { arrow_borrow_clear() };
     SHM_TRACKER.with(|t| {
         let v = t.0.take();
         for ptr in &v {
@@ -546,12 +563,57 @@ pub trait ToVoidstar {
     /// `dest` must point at a `schema.width`-byte inline slot and `*cursor`
     /// into a buffer with at least `self.shm_size(schema)` bytes remaining.
     unsafe fn write(&self, dest: *mut u8, cursor: &mut *mut u8, schema: &Schema);
+    /// A table exports itself as an Arrow C Data Interface pair instead of
+    /// walking the voidstar layout; every other type has no Arrow form.
+    fn arrow_export(&self) -> Option<(FFI_ArrowArray, FFI_ArrowSchema)> {
+        None
+    }
 }
 pub trait FromVoidstar: Sized {
     /// # Safety
     /// `data` must point at a valid `schema`-shaped inline slot; `base` is the
     /// relptr resolution base (see `resolve`).
     unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self;
+    /// A table builds itself from an imported Arrow C Data Interface pair;
+    /// every other type has no Arrow form.
+    ///
+    /// # Safety
+    /// `array` and `schema` must be valid, unreleased structs.
+    unsafe fn arrow_import(array: FFI_ArrowArray, schema: &FFI_ArrowSchema) -> Option<Self> {
+        let _ = (array, schema);
+        None
+    }
+}
+
+// ---- tables ---------------------------------------------------------------
+// A table never takes the voidstar path: `put_value` and `get_value` route a
+// Table-typed schema through the Arrow C Data Interface, so the walk methods
+// are unreachable for it.
+impl ToVoidstar for RecordBatch {
+    fn shm_size(&self, _schema: &Schema) -> usize {
+        morloc_infra_abort("a table cannot be written through the voidstar path")
+    }
+    unsafe fn write(&self, _dest: *mut u8, _cursor: &mut *mut u8, _schema: &Schema) {
+        morloc_infra_abort("a table cannot be written through the voidstar path")
+    }
+    fn arrow_export(&self) -> Option<(FFI_ArrowArray, FFI_ArrowSchema)> {
+        let data = StructArray::from(self.clone()).into_data();
+        match to_ffi(&data) {
+            Ok(pair) => Some(pair),
+            Err(e) => morloc_throw(format!("exporting table: {}", e)),
+        }
+    }
+}
+impl FromVoidstar for RecordBatch {
+    unsafe fn read(_schema: &Schema, _data: *const u8, _base: *const u8) -> Self {
+        morloc_infra_abort("a table cannot be read through the voidstar path")
+    }
+    unsafe fn arrow_import(array: FFI_ArrowArray, schema: &FFI_ArrowSchema) -> Option<Self> {
+        match from_ffi(array, schema) {
+            Ok(data) => Some(RecordBatch::from(StructArray::from(data))),
+            Err(e) => morloc_throw(format!("importing table: {}", e)),
+        }
+    }
 }
 
 // ---- scalars --------------------------------------------------------------
@@ -1102,6 +1164,31 @@ morloc_fn!(MorlocFn8, call8, reify8, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5
 /// `schema` must describe `value`'s wire type.
 pub unsafe fn put_value<T: ToVoidstar>(value: &T, schema: &Schema) -> *mut u8 {
     let _recur = RecurScope::enter(schema);
+    if schema.serial_type == SerialType::Table {
+        let (mut array, ffi_schema) = match value.arrow_export() {
+            Some(pair) => pair,
+            None => morloc_infra_abort("Table-typed value is not an Arrow record batch"),
+        };
+        let cs = cschema_of(schema);
+        let mut err: *mut c_char = std::ptr::null_mut();
+        // Consumes `array`; its Drop is then a no-op.
+        let relptr = arrow_to_shm_typed(&mut array, &ffi_schema, cs, &mut err);
+        drop(array);
+        drop(ffi_schema);
+        if !err.is_null() {
+            return fail_packet_from_c(err, "arrow_to_shm failed in put_value");
+        }
+        let packet = make_arrow_data_packet(relptr, cs);
+        if packet.is_null() {
+            morloc_infra_abort("make_arrow_data_packet failed");
+        }
+        let root = rel2abs(relptr, &mut err);
+        discard_err(err);
+        if !root.is_null() {
+            track(root);
+        }
+        return packet;
+    }
     let total = value.shm_size(schema).max(1);
     let mut err: *mut c_char = std::ptr::null_mut();
     let root = shmalloc(total, &mut err) as *mut u8;
@@ -1131,6 +1218,46 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
     let _recur = RecurScope::enter(schema);
     let source = *packet.add(PKT_SOURCE_OFF);
     let format = *packet.add(PKT_FORMAT_OFF);
+
+    if schema.serial_type == SerialType::Table {
+        if format != PKT_FORMAT_ARROW {
+            morloc_throw("table-typed value did not arrive as an Arrow packet");
+        }
+        let cs = cschema_of(schema);
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let block = get_morloc_data_packet_value(packet, cs, &mut err);
+        if !err.is_null() {
+            morloc_throw(cstr_take(err));
+        }
+        // Hold the block for this dispatch, as for any received reference.
+        let mut own = true;
+        if source == PKT_SOURCE_RPTR {
+            own = shincref(block as *mut c_void, &mut err);
+            discard_err(err);
+            err = std::ptr::null_mut();
+        }
+        if own {
+            track(block as *mut c_void);
+            let rel = abs2rel(block as *mut c_void, &mut err);
+            if err.is_null() {
+                arrow_borrow_register(block, rel);
+            }
+            discard_err(err);
+            err = std::ptr::null_mut();
+        }
+        if arrow_validate(block as *const c_void, cs, &mut err) != 0 {
+            morloc_throw(cstr_take(err));
+        }
+        let mut ffi_schema = FFI_ArrowSchema::empty();
+        let mut array = FFI_ArrowArray::empty();
+        if arrow_from_shm(block as *const c_void, &mut ffi_schema, &mut array, &mut err) != 0 {
+            morloc_throw(cstr_take(err));
+        }
+        return match <T as FromVoidstar>::arrow_import(array, &ffi_schema) {
+            Some(v) => v,
+            None => morloc_infra_abort("Table-typed value requested as a non-Arrow type"),
+        };
+    }
 
     let compression = *packet.add(PKT_COMPRESSION_OFF);
     let encryption = *packet.add(PKT_ENCRYPTION_OFF);

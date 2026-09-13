@@ -44,6 +44,7 @@ pub mod eval_arena;
 pub mod eval_ffi;
 pub mod stream;
 pub mod handle_scan;
+pub mod arrow_shm;
 pub mod arrow_ffi;
 pub mod arrow_ipc_reader;
 pub mod pool_ffi;

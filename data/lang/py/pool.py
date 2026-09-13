@@ -13,6 +13,7 @@ from collections import OrderedDict
 from multiprocessing import Process, Value, RawValue
 import ctypes
 import functools
+import importlib
 import importlib.util
 
 
@@ -198,6 +199,30 @@ def mlc_decode(pkt, codec):
     if _mlc_is_closure_codec(codec):
         return mlc_reflect_from_tuple(morloc.get_value(pkt, codec[1]), codec[2], codec[3])
     return morloc.get_value(pkt, codec)
+
+
+# A table arrives as a pyarrow.RecordBatch over shared memory. When the
+# module maps Table to another library's type, convert here; the known
+# libraries take the batch through the Arrow PyCapsule interface without a
+# copy where they can. Any other name is called as module.attr(batch).
+def mlc_table_import(batch, typename):
+    if typename in ("arrow", "pyarrow.RecordBatch"):
+        return batch
+    if typename == "pyarrow.Table":
+        import pyarrow
+        return pyarrow.Table.from_batches([batch])
+    if typename == "polars.DataFrame":
+        import polars
+        return polars.from_arrow(batch)
+    if typename == "pandas.DataFrame":
+        return batch.to_pandas()
+    if typename == "duckdb.DuckDBPyRelation":
+        import duckdb
+        return duckdb.from_arrow(batch)
+    modname, _, attr = typename.rpartition(".")
+    if not modname:
+        raise TypeError("cannot import a table as %r: not a dotted type name" % typename)
+    return getattr(importlib.import_module(modname), attr)(batch)
 
 
 def mlc_reify(f, home_lang):

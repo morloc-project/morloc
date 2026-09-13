@@ -1,67 +1,50 @@
 #ifndef MLC_ARROW_HPP
 #define MLC_ARROW_HPP
 
-// mlc_arrow.hpp -- thin RAII wrapper around Arrow C Data Interface structs
-// for use in morloc C++ pools.  Holds ArrowSchema + ArrowArray as a single
-// move-only value.  The pool template dispatches arrow-hinted schemas to
-// arrow_to_shm / arrow_from_shm (in libmorloc.so) via this type.
+// mlc_arrow.hpp -- shared-ownership handle on an Arrow C Data Interface pair
+// (ArrowSchema + ArrowArray) for use in morloc C++ pools. Copying a table
+// shares it; the structs are released when the last copy goes away. A table
+// derived from another (a renamed or sliced view over the same buffers)
+// keeps its source alive for as long as it lives, so a view never outlives
+// what it points into. The pool template moves tables between SHM and this
+// type through arrow_to_shm / arrow_from_shm in libmorloc.so.
 //
-// User code should include <nanoarrow/nanoarrow.h> to build and read columns.
+// User code reads and builds columns with <nanoarrow/nanoarrow.h>.
 
 #include "morloc.h"
 #include <cstring>
+#include <memory>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace mlc {
 
 class ArrowTable {
 public:
-    // Construct from moved-in C Data Interface structs.
-    // Takes ownership of release callbacks.
+    // Take ownership of C Data Interface structs (and their release
+    // callbacks). The sources are zeroed so the caller cannot release
+    // them a second time.
     ArrowTable(struct ArrowSchema schema, struct ArrowArray array)
-        : schema_(schema), array_(array)
+        : impl_(std::make_shared<Impl>(schema, array, nullptr))
     {
-        // Zero the source structs so the caller does not double-release
         memset(&schema, 0, sizeof(schema));
         memset(&array, 0, sizeof(array));
     }
 
-    ~ArrowTable() {
-        if (array_.release) array_.release(&array_);
-        if (schema_.release) schema_.release(&schema_);
-    }
+    ArrowTable(const ArrowTable&) = default;
+    ArrowTable(ArrowTable&&) noexcept = default;
+    ArrowTable& operator=(const ArrowTable&) = default;
+    ArrowTable& operator=(ArrowTable&&) noexcept = default;
 
-    // Move-only
-    ArrowTable(ArrowTable&& other) noexcept
-        : schema_(other.schema_), array_(other.array_)
-    {
-        memset(&other.schema_, 0, sizeof(other.schema_));
-        memset(&other.array_, 0, sizeof(other.array_));
-    }
+    // Arrow data is immutable; views are read-only.
+    const struct ArrowSchema* schema() const { return &impl_->schema; }
+    const struct ArrowArray*  array()  const { return &impl_->array; }
+    int64_t n_columns() const { return impl_->schema.n_children; }
+    int64_t n_rows()    const { return impl_->array.length; }
 
-    ArrowTable& operator=(ArrowTable&& other) noexcept {
-        if (this != &other) {
-            if (array_.release) array_.release(&array_);
-            if (schema_.release) schema_.release(&schema_);
-            schema_ = other.schema_;
-            array_ = other.array_;
-            memset(&other.schema_, 0, sizeof(other.schema_));
-            memset(&other.array_, 0, sizeof(other.array_));
-        }
-        return *this;
-    }
-
-    ArrowTable(const ArrowTable&) = delete;
-    ArrowTable& operator=(const ArrowTable&) = delete;
-
-    // Accessors (const -- arrow data is immutable)
-    const struct ArrowSchema* schema() const { return &schema_; }
-    const struct ArrowArray*  array()  const { return &array_; }
-    int64_t n_columns() const { return schema_.n_children; }
-    int64_t n_rows()    const { return array_.length; }
-
-    // Build from shared memory header (zero-copy import)
+    // Zero-copy view over a table block in SHM. The block must outlive
+    // the returned table.
     static ArrowTable from_shm(const arrow_shm_header_t* hdr) {
         struct ArrowSchema as;
         struct ArrowArray aa;
@@ -72,53 +55,84 @@ public:
             free(err);
             throw std::runtime_error(msg);
         }
-        return ArrowTable(std::move(as), std::move(aa));
+        return ArrowTable(as, aa);
     }
 
-    // Move table data to shared memory: copies buffers into a contiguous SHM
-    // block, frees the original heap buffers, then repoints this table's
-    // internal ArrowSchema/ArrowArray into the SHM block (zero-copy).
-    // After this call the table is still usable but backed by SHM.
-    // Returns relptr to the SHM block for use in packets.
-    relptr_t move_to_shm() {
-        // Step 1: copy all column data into contiguous SHM
-        char* copy_err = nullptr;
-        relptr_t rp = arrow_to_shm(&array_, &schema_, &copy_err);
-        if (copy_err) {
-            std::string msg(copy_err);
-            free(copy_err);
+    // Copies of this table's structs whose release does nothing, for
+    // handing to a consumer that expects to own its input. Valid only
+    // while this table (or a table derived from it) is alive.
+    void lend(struct ArrowSchema* schema, struct ArrowArray* array) const {
+        *schema = impl_->schema;
+        *array = impl_->array;
+        schema->release = lent_schema_release;
+        array->release = lent_array_release;
+    }
+
+    // A table over structs that alias this table's buffers -- typically
+    // built from lend() copies with a name or a slice changed. The result
+    // owns the given structs and keeps this table alive as long as it
+    // lives, so the aliased memory stays valid.
+    ArrowTable derive(struct ArrowSchema schema, struct ArrowArray array) const {
+        return ArrowTable(std::make_shared<Impl>(schema, array, impl_));
+    }
+
+    // Move this table's data into a fresh SHM block (or, when it is a
+    // table this pool received and returns unchanged, pass that block
+    // through), bringing it into agreement with the declared morloc
+    // column schema when one is given, and repoint this table at the
+    // block. Returns the block's relptr for use in packets; the block is
+    // the caller's to track and release.
+    relptr_t move_to_shm(const Schema* declared = nullptr) {
+        // The structs are lent, never consumed: other copies of this
+        // table may still be using them, and the consumer's release is
+        // then a no-op on the copies while `impl_` keeps them alive.
+        struct ArrowSchema s;
+        struct ArrowArray a;
+        lend(&s, &a);
+        char* err = nullptr;
+        relptr_t rp = arrow_to_shm_typed(&a, &s, declared, &err);
+        if (err) {
+            std::string msg(err);
+            free(err);
             throw std::runtime_error(msg);
         }
-
-        // Step 2: release heap-backed structs (frees all original buffers)
-        if (array_.release) array_.release(&array_);
-        if (schema_.release) schema_.release(&schema_);
-        memset(&schema_, 0, sizeof(schema_));
-        memset(&array_, 0, sizeof(array_));
-
-        // Step 3: resolve SHM pointer and rebuild structs pointing into it
-        char* resolve_err = nullptr;
-        void* abs = rel2abs(rp, &resolve_err);
-        if (resolve_err) {
-            std::string msg(resolve_err);
-            free(resolve_err);
-            throw std::runtime_error(msg);
-        }
-
-        char* shm_err = nullptr;
-        arrow_from_shm((const arrow_shm_header_t*)abs, &schema_, &array_, &shm_err);
-        if (shm_err) {
-            std::string msg(shm_err);
-            free(shm_err);
-            throw std::runtime_error(msg);
-        }
-
+        *this = from_shm(resolve(rp));
         return rp;
     }
 
 private:
-    struct ArrowSchema schema_;
-    struct ArrowArray array_;
+    struct Impl {
+        struct ArrowSchema schema;
+        struct ArrowArray array;
+        std::shared_ptr<Impl> parent;
+
+        Impl(struct ArrowSchema s, struct ArrowArray a, std::shared_ptr<Impl> p)
+            : schema(s), array(a), parent(std::move(p)) {}
+        ~Impl() {
+            if (array.release) array.release(&array);
+            if (schema.release) schema.release(&schema);
+        }
+        Impl(const Impl&) = delete;
+        Impl& operator=(const Impl&) = delete;
+    };
+
+    explicit ArrowTable(std::shared_ptr<Impl> impl) : impl_(std::move(impl)) {}
+
+    static const arrow_shm_header_t* resolve(relptr_t rp) {
+        char* err = nullptr;
+        void* abs = rel2abs(rp, &err);
+        if (err) {
+            std::string msg(err);
+            free(err);
+            throw std::runtime_error(msg);
+        }
+        return (const arrow_shm_header_t*)abs;
+    }
+
+    static void lent_schema_release(struct ArrowSchema* s) { s->release = nullptr; }
+    static void lent_array_release(struct ArrowArray* a) { a->release = nullptr; }
+
+    std::shared_ptr<Impl> impl_;
 };
 
 } // namespace mlc

@@ -51,6 +51,7 @@ static void shm_tracker_flush(void) {
         }
     }
     shm_tracker_count = 0;
+    arrow_borrow_clear();
 }
 
 // Drop one tracker entry matching ptr (swap-with-last), shfree the
@@ -1983,6 +1984,70 @@ error:
     return NULL;
 }
 
+// -- Arrow export via the PyCapsule interface --------------------------------
+
+// Move a C Data Interface struct out of a capsule: copy the struct and mark
+// the capsule's copy released so the capsule destructor does not free the
+// buffers a second time.
+static bool py_move_capsule(PyObject* cap, const char* name, void* dst, size_t size) {
+    void* src = PyCapsule_GetPointer(cap, name);
+    if (!src) return false;
+    memcpy(dst, src, size);
+    // Every C Data Interface struct places `release` at the same position
+    // relative to its end; clearing it marks the source as moved-from.
+    if (strcmp(name, "arrow_schema") == 0) {
+        ((struct ArrowSchema*)src)->release = NULL;
+    } else if (strcmp(name, "arrow_array") == 0) {
+        ((struct ArrowArray*)src)->release = NULL;
+    } else {
+        ((struct ArrowArrayStream*)src)->release = NULL;
+    }
+    return true;
+}
+
+// Export any object that speaks the Arrow PyCapsule interface (pyarrow,
+// polars, pandas >= 2.2, duckdb, ...) into a fresh SHM table block. The
+// array form is preferred; a stream producer is drained and concatenated.
+// Returns RELNULL with either `*errmsg` set or a Python exception pending.
+static relptr_t py_export_arrow_to_shm(PyObject* obj, const Schema* schema, char** errmsg) {
+    if (PyObject_HasAttrString(obj, "__arrow_c_array__")) {
+        PyObject* caps = PyObject_CallMethod(obj, "__arrow_c_array__", NULL);
+        if (!caps) return RELNULL;
+        if (!PyTuple_Check(caps) || PyTuple_Size(caps) != 2) {
+            Py_DECREF(caps);
+            PyErr_SetString(PyExc_TypeError, "__arrow_c_array__ must return (schema_capsule, array_capsule)");
+            return RELNULL;
+        }
+        struct ArrowSchema arrow_schema;
+        struct ArrowArray arrow_array;
+        bool ok = py_move_capsule(PyTuple_GET_ITEM(caps, 0), "arrow_schema", &arrow_schema, sizeof(arrow_schema))
+               && py_move_capsule(PyTuple_GET_ITEM(caps, 1), "arrow_array", &arrow_array, sizeof(arrow_array));
+        Py_DECREF(caps);
+        if (!ok) return RELNULL;
+        relptr_t relptr = arrow_to_shm_typed(&arrow_array, &arrow_schema, schema, errmsg);
+        if (arrow_schema.release) arrow_schema.release(&arrow_schema);
+        return relptr;
+    }
+    if (PyObject_HasAttrString(obj, "__arrow_c_stream__")) {
+        PyObject* cap = PyObject_CallMethod(obj, "__arrow_c_stream__", NULL);
+        if (!cap) return RELNULL;
+        struct ArrowArrayStream* stream = (struct ArrowArrayStream*)malloc(sizeof(struct ArrowArrayStream));
+        bool ok = stream && py_move_capsule(cap, "arrow_array_stream", stream, sizeof(*stream));
+        Py_DECREF(cap);
+        if (!ok) { free(stream); return RELNULL; }
+        // The runtime moves the stream out of this shell and releases it
+        // when drained; only the shell is ours to free.
+        relptr_t relptr = arrow_stream_to_shm_typed(stream, schema, errmsg);
+        free(stream);
+        return relptr;
+    }
+    PyErr_SetString(PyExc_TypeError,
+        "table value does not implement the Arrow PyCapsule interface "
+        "(__arrow_c_array__ or __arrow_c_stream__)");
+    return RELNULL;
+}
+
+
 // Transforms a value into a message ready for the socket
 static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
     uint8_t* packet = NULL;
@@ -2002,31 +2067,16 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
     // Arrow C Data Interface. The legacy `<arrow>` hint has been retired;
     // the schema type itself now signals the dispatch.
     if (schema->type == MORLOC_TABLE) {
-        // Export pyarrow object via C Data Interface -> copy to shm -> packet
-        struct ArrowSchema arrow_schema;
-        struct ArrowArray arrow_array;
-
-        // Call obj._export_to_c(arrow_array_ptr, arrow_schema_ptr)
-        PyObject* export_result = PyObject_CallMethod(
-            obj, "_export_to_c",
-            "nn", (Py_ssize_t)&arrow_array, (Py_ssize_t)&arrow_schema);
-        if (!export_result) {
-            free_schema(schema);
-            PyINTERNAL_ABORT("Failed to export pyarrow object via C Data Interface");
-        }
-        Py_DECREF(export_result);
-
         char* errmsg = NULL;
-        relptr_t relptr = arrow_to_shm(&arrow_array, &arrow_schema, &errmsg);
-
-        // Release the exported C Data Interface structs
-        if (arrow_schema.release) arrow_schema.release(&arrow_schema);
-        if (arrow_array.release) arrow_array.release(&arrow_array);
-
+        relptr_t relptr = py_export_arrow_to_shm(obj, schema, &errmsg);
         if (errmsg) {
             free_schema(schema);
             PyErr_SetString(PyExc_RuntimeError, errmsg);
             free(errmsg);
+            return NULL;
+        }
+        if (PyErr_Occurred()) {
+            free_schema(schema);
             return NULL;
         }
 
@@ -2120,11 +2170,28 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
 
     schema = PyTRY(parse_schema, schema_str)
 
-    // Arrow dispatch: if packet format is Arrow, import via C Data Interface
-    if (format == PACKET_FORMAT_ARROW) {
+    // Arrow dispatch: a table-typed value is an Arrow packet and vice
+    // versa; either half without the other is a routing error.
+    if (format == PACKET_FORMAT_ARROW || schema->type == MORLOC_TABLE) {
+        if (format != PACKET_FORMAT_ARROW) {
+            free_schema(schema);
+            PyRAISE("table-typed value did not arrive as an Arrow packet");
+        }
+        if (schema->type != MORLOC_TABLE) {
+            free_schema(schema);
+            PyRAISE("Arrow packet received for a non-table type");
+        }
         voidstar = PyTRY_INFRA(get_morloc_data_packet_value, (uint8_t*)packet, schema);
 
         const arrow_shm_header_t* arrow_hdr = (const arrow_shm_header_t*)voidstar;
+
+        char* validate_err = NULL;
+        if (arrow_validate(arrow_hdr, schema, &validate_err) != 0) {
+            free_schema(schema);
+            PyErr_SetString(PyExc_RuntimeError, validate_err ? validate_err : "arrow table failed validation");
+            free(validate_err);
+            return NULL;
+        }
 
         struct ArrowSchema arrow_schema;
         struct ArrowArray arrow_array;
@@ -2174,6 +2241,9 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         }
         if (arrow_owned) {
             shm_tracker_push((absptr_t)voidstar, NULL);
+            char* rerr = NULL;
+            relptr_t rel = abs2rel(voidstar, &rerr);
+            if (rerr) { free(rerr); } else { arrow_borrow_register((const uint8_t*)voidstar, rel); }
         }
 
         free_schema(schema);

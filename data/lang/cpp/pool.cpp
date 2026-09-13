@@ -202,6 +202,7 @@ struct ShmOwned {
 
 static void _shm_tracker_flush() {
     _shm_release_entries(_shm_tracker);
+    arrow_borrow_clear();
 }
 
 // Drop one tracker entry matching ptr (swap-with-last) and shfree the
@@ -253,7 +254,7 @@ uint8_t* _put_value(const T& value, Schema* schema) {
         // const_cast is safe here: the value is always a temporary from
         // a manifold call, never a truly const object.
         mlc::ArrowTable& tbl = const_cast<mlc::ArrowTable&>(value);
-        relptr_t relptr = tbl.move_to_shm();
+        relptr_t relptr = tbl.move_to_shm(schema);
 
         uint8_t* packet = make_arrow_data_packet(relptr, schema);
         if (!packet) { MLC_INTERNAL_ABORT("failed to create arrow data packet"); }
@@ -314,12 +315,21 @@ T _get_value(const uint8_t* packet, Schema* schema){
     uint8_t format = header->command.data.format;
 
     if constexpr (std::is_same_v<T, mlc::ArrowTable>) {
-        // Arrow import: packet -> arrow_from_shm -> ArrowTable
+        // Arrow import: packet -> validate -> arrow_from_shm -> ArrowTable
+        if (format != PACKET_FORMAT_ARROW) {
+            MLC_INTERNAL_ABORT("table-typed value did not arrive as an Arrow packet");
+        }
         char* errmsg = nullptr;
         uint8_t* raw = get_morloc_data_packet_value(packet, schema, &errmsg);
         if (errmsg) { PROPAGATE_INFRA_ERROR(errmsg); }
 
         const arrow_shm_header_t* hdr = (const arrow_shm_header_t*)raw;
+        char* verr = nullptr;
+        if (arrow_validate(hdr, schema, &verr) != 0) {
+            std::string msg(verr ? verr : "arrow table failed validation");
+            free(verr);
+            throw MorlocException(msg);
+        }
         struct ArrowSchema as;
         struct ArrowArray aa;
         char* aerr = nullptr;
@@ -339,6 +349,9 @@ T _get_value(const uint8_t* packet, Schema* schema){
         }
         if (arrow_owned) {
             _shm_tracker.push_back({(absptr_t)raw});
+            char* rerr = nullptr;
+            relptr_t rel = abs2rel((absptr_t)raw, &rerr);
+            if (rerr) { free(rerr); } else { arrow_borrow_register(raw, rel); }
         }
 
         return mlc::ArrowTable(std::move(as), std::move(aa));

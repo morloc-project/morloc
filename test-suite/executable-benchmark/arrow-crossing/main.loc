@@ -1,0 +1,31 @@
+module main (direct, hop1, hop2, hop3)
+
+import root
+import root-py
+import root-cpp
+
+-- Cross-pool table cost as a function of pipeline depth. `direct` never
+-- leaves the Python pool (the baseline); each further command adds one
+-- pass-through hop. Wall time and MORLOC_ARROW_STATS bytes-copied reports
+-- are what bench.sh collects: the bytes must not grow with depth.
+
+type ArrowTable
+type Py => ArrowTable = "pyarrow.RecordBatch"
+type Cpp => ArrowTable = "mlc::ArrowTable"
+
+source Py from "src.py" ("mkTable", "nrows", "idPy")
+source Cpp from "src.hpp" ("idCpp")
+
+mkTable :: Int -> ArrowTable
+nrows :: ArrowTable -> Int
+idPy :: ArrowTable -> ArrowTable
+idCpp :: ArrowTable -> ArrowTable
+
+direct :: Int -> Int
+direct n = nrows (mkTable n)
+hop1 :: Int -> Int
+hop1 n = nrows (idCpp (mkTable n))
+hop2 :: Int -> Int
+hop2 n = nrows (idPy (idCpp (mkTable n)))
+hop3 :: Int -> Int
+hop3 n = nrows (idCpp (idPy (idCpp (mkTable n))))

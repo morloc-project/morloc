@@ -644,6 +644,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
                     , ("captured_list", capturedList)
                     ]
         , lcRegisterSchema = registerSchemaIndex
+        , lcTableImportFn = ldTableImportFn desc
         }
 
 {- | Record access: for languages with ldDictStyleRecords=True,

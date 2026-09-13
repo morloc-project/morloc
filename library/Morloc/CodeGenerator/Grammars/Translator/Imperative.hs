@@ -662,6 +662,10 @@ data LowerConfig m = LowerConfig
   -- whose closures need no static signature.
   , lcRegisterSchema :: Text -> m Int
   -- ^ Register a schema string and return its unique ID (index into schema table)
+  , lcTableImportFn :: Maybe Text
+  -- ^ A runtime helper that converts a received Arrow record batch into the
+  -- language type a module maps @Table@ to, given that type's name. Nothing
+  -- for languages with a single table type.
   }
 
 -- | True if a closure appears anywhere inside the AST. An aggregate is
@@ -752,6 +756,16 @@ expandSerialize cfg v0 s0 = do
         )
     construct _ _ = error "Unreachable in expandSerialize"
 
+-- | A table always arrives as an Arrow record batch; when the module maps
+-- @Table@ to some other library type and the language has a converter,
+-- wrap the deserialized value in it, naming the mapped type.
+tableImport :: LowerConfig m -> SerialAST -> IExpr -> IExpr
+tableImport cfg (SerialObject NamTable (FV _ (CV cv)) _ _) e
+  | Just fn <- lcTableImportFn cfg
+  , not (T.null cv) =
+      ICall fn Nothing [[e, IRawExpr (render (dquotes (pretty cv)))]]
+tableImport _ _ e = e
+
 {- | Expand deserialization into IR statements.
 Returns (final expression representing the deserialized value, prior statements).
 -}
@@ -765,7 +779,8 @@ expandDeserialize cfg v0 s0
   | isMsgpackLeaf cfg s0 = do
       schemaId <- lcRegisterSchema cfg (render $ serialAstToMsgpackSchema s0)
       desType <- lcDeserialAstType cfg s0
-      return (IDesCall schemaId desType (serialAstHasString s0) (IRawExpr (render v0)), [])
+      let call = IDesCall schemaId desType (serialAstHasString s0) (IRawExpr (render v0))
+      return (tableImport cfg s0 call, [])
   | otherwise = do
       idx <- lcNewIndex cfg
       rawType <- lcRawDeserialAstType cfg s0

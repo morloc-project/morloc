@@ -257,6 +257,17 @@ mlc_decode <- function(pkt, codec) {
 # Recover (home, mid, captured) from a closure and serialize its captured
 # values; mlc_closure_table[[mid]] holds their codecs. A closure reflected
 # from another pool carries its origin and is passed back as it came.
+# A table arrives as an arrow RecordBatch. When the module maps Table to
+# another type, convert here; the export side accepts anything
+# arrow::as_record_batch understands, so a data.frame round-trips.
+mlc_table_import <- function(batch, typename) {
+  if (typename %in% c("arrow", "arrow::RecordBatch", "RecordBatch")) return(batch)
+  if (typename == "arrow::Table") return(arrow::arrow_table(batch))
+  if (typename == "data.frame") return(as.data.frame(batch))
+  if (typename == "tibble") return(tibble::as_tibble(batch))
+  stop(paste0("cannot import a table as '", typename, "'"))
+}
+
 mlc_reify <- function(f, home_lang) {
   origin <- attr(f, "morloc_origin")
   if (!is.null(origin)) return(origin)

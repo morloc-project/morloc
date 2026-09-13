@@ -1,3 +1,22 @@
+Unreleased
+----------
+
+ - tables keep their nulls, and date/timestamp/duration, binary, large
+   string and nested list columns now cross between pools intact
+ - read snappy- and zstd-compressed Parquet files (every common writer's
+   default), not only uncompressed ones
+ - a table returned unchanged from a pool is passed through by reference
+   instead of copied; `MORLOC_ARROW_NO_BORROW=1` disables this,
+   `MORLOC_ARROW_STATS=1` reports bytes copied
+ - a declared table schema is enforced at every pool boundary: columns are
+   converted to their declared types only when nothing is lost, and a null
+   in a column not declared optional is an error
+ - map `Table` to `polars.DataFrame`, `pandas.DataFrame`, `pyarrow.Table`
+   or an R `data.frame` in a module's type mapping; any producer that
+   implements the Arrow PyCapsule interface is accepted
+ - Rust pools take tables as `rustmorloc::arrow_array::RecordBatch`
+ - `ArrowTable` is recognised as a table type beside `Table`
+
 0.104.0 [2026-09-13]
 --------------------
 
