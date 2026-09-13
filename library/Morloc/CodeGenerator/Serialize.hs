@@ -431,6 +431,15 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
             Serial.checkReadDataType tidx intr gt
           tf <- inferType t
           esBase <- mapM (nativeExpr m) es
+          let writeCheck d =
+                let dtf = typeFof d
+                in Serial.checkWriteDataType tidx intr (Serial.containsFunF dtf) (pretty (renderTypeFName dtf))
+          case (intr, esBase) of
+            (IntrSave, _ : _ : d : _) -> writeCheck d
+            (IntrSaveM, _ : d : _) -> writeCheck d
+            (IntrSaveJ, _ : d : _) -> writeCheck d
+            (IntrWrite, _ : _ : d : _) -> writeCheck d
+            _ -> return ()
           -- @try's body must reach mlc_try as a no-arg callable; see
           -- 'thunkifyForTry' below.
           let es' = case intr of

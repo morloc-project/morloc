@@ -1,0 +1,6 @@
+module main (saveIt)
+
+import root
+
+saveIt :: Str -> <IO> (Try Str ())
+saveIt path = @savem path (do 1)

@@ -790,6 +790,10 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
           <+> "Run it first (x <- e), or give the function a language (source) so a pool holds it."
     heldSuspension _ _ = return ()
 
+    writeCheck :: Int -> Intrinsic -> AnnoS (Indexed Type) One () -> MorlocMonad ()
+    writeCheck ix intr (AnnoS (Idx _ vt) _ _) =
+      Serial.checkWriteDataType ix intr (Serial.containsEffectT vt || Serial.containsFunT vt) (pretty vt)
+
     emitIFileWalkX
       :: Type
       -> AnnoS (Indexed Type) One ()
@@ -984,29 +988,32 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       withTryResult t (\inner -> ReadX <$> type2schema inner <*> toNexusExpr arg)
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrHash [arg])) =
       HashX <$> type2schema t <*> toNexusExpr arg
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSave [levelExpr, path, valExpr])) =
-      withTryResult t $ \inner -> SaveX "voidstar"
+    toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrSave [levelExpr, path, valExpr])) =
+      writeCheck ix IntrSave valExpr >>
+      withTryResult t (\inner -> SaveX "voidstar"
         <$> type2schema inner
         <*> toNexusExpr levelExpr
         <*> toNexusExpr valExpr
-        <*> toNexusExpr path
+        <*> toNexusExpr path)
     -- @savem/@savej take source args in (path, value) order for
     -- partial-application ergonomics. They carry no compression level;
     -- emit a zero literal so the nexus dispatch (which always reads a
     -- level field from save_expr) has a uniform shape. The runtime
     -- ignores the field for non-voidstar formats.
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSaveM [path, valExpr])) =
-      withTryResult t $ \inner -> SaveX "msgpack"
+    toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrSaveM [path, valExpr])) =
+      writeCheck ix IntrSaveM valExpr >>
+      withTryResult t (\inner -> SaveX "msgpack"
         <$> type2schema inner
         <*> pure (LitX IntX "0")
         <*> toNexusExpr valExpr
-        <*> toNexusExpr path
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrSaveJ [path, valExpr])) =
-      withTryResult t $ \inner -> SaveX "json"
+        <*> toNexusExpr path)
+    toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrSaveJ [path, valExpr])) =
+      writeCheck ix IntrSaveJ valExpr >>
+      withTryResult t (\inner -> SaveX "json"
         <$> type2schema inner
         <*> pure (LitX IntX "0")
         <*> toNexusExpr valExpr
-        <*> toNexusExpr path
+        <*> toNexusExpr path)
     toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrLoad [path])) =
       Serial.checkReadDataType ix IntrLoad t >>
       withTryResult t (\inner -> LoadX <$> type2schema inner <*> toNexusExpr path)
@@ -1053,12 +1060,13 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
       withTryResult t $ \inner -> StreamLayoutX <$> type2schema inner <*> toNexusExpr handle
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrStream [handle])) =
       StreamX <$> type2schema t <*> toNexusExpr handle
-    toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrWrite [levelE, handleE, valE@(AnnoS (Idx _ valT) _ _)])) =
-      withTryResult t $ \_ -> WriteX
+    toNexusExpr (AnnoS (Idx ix t) _ (IntrinsicS IntrWrite [levelE, handleE, valE@(AnnoS (Idx _ valT) _ _)])) =
+      writeCheck ix IntrWrite valE >>
+      withTryResult t (\_ -> WriteX
         <$> type2schema valT
         <*> toNexusExpr levelE
         <*> toNexusExpr valE
-        <*> toNexusExpr handleE
+        <*> toNexusExpr handleE)
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS IntrAppend [pathE])) =
       withTryResult t $ \inner ->
         AppendX <$> type2schema (handleStorageOfResult inner) <*> toNexusExpr pathE

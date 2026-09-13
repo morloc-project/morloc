@@ -23,6 +23,8 @@ module Morloc.CodeGenerator.Serial
   , containsFunT
   , containsEffectT
   , checkReadDataType
+  , checkWriteDataType
+  , containsFunF
   , serialAstHasString
   , chooseSerializationCycle
   , isSerializable
@@ -163,6 +165,29 @@ checkReadDataType i intr t0
     t = case t0 of
       EffectT _ inner -> inner
       _ -> t0
+
+-- | The counterpart for a data-writing intrinsic (@save, @savem, @savej,
+-- @write): what it writes must be data. A suspension or function is a
+-- closure naming a manifold of this build, which means nothing in a file.
+checkWriteDataType :: Int -> Intrinsic -> Bool -> MDoc -> MorlocMonad ()
+checkWriteDataType i intr holdsClosure tdoc
+  | holdsClosure =
+      MM.throwSourcedError i $
+        "@" <> pretty (intrinsicName intr) <+> "writes data, but its argument type"
+          <+> tdoc <+> "holds a function or suspension."
+          <+> "Run the suspension first (x <- e) and write the value."
+  | otherwise = return ()
+
+-- | True when a function appears anywhere in a concrete type. A suspension
+-- is a function of no arguments at this level.
+containsFunF :: TypeF -> Bool
+containsFunF (FunF _ _) = True
+containsFunF (AppF t ts) = containsFunF t || any containsFunF ts
+containsFunF (NamF _ _ ts rs) = any containsFunF ts || any (containsFunF . snd) rs
+containsFunF (EnumF _ ts _) = any containsFunF ts
+containsFunF (VariantF _ ts arms) = any containsFunF ts || any (any containsFunF . snd) arms
+containsFunF (OptionalF t) = containsFunF t
+containsFunF _ = False
 
 -- | Whether a serialized value can carry a native string anywhere inside it.
 --
