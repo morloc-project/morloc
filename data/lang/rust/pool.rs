@@ -13,7 +13,7 @@
 // mirrors pool_host.cpp: --health probe, PDEATHSIG, panic hook, schema init.
 // NOTE: the marker string must not appear anywhere above the first real
 // marker (the splicer splits on every occurrence).
-#![allow(dead_code, unused_variables, unused_unsafe, unused_mut, non_snake_case, unused_imports, unused_parens)]
+#![allow(dead_code, unused_variables, unused_unsafe, unused_mut, non_snake_case, non_camel_case_types, unused_imports, unused_parens)]
 
 use std::ffi::{CString};
 use std::os::raw::{c_char, c_int, c_ulong, c_void};
