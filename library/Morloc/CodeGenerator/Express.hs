@@ -1456,14 +1456,24 @@ expressPolyExpr
             args = [i | Arg i _ <- appArgs]
             allParentArgs = args <> [i | (_, Just (i, _), _) <- xsInfo]
             lets = [PolyLet i e | (_, Just (i, e), _) <- xsInfo]
-            passedParentArgs = concat [[r | r <- allParentArgs, r == i] | i <- callArgs]
+            passedParentArgs = unique (concat [[r | r <- allParentArgs, r == i] | i <- callArgs])
             nContextArgs = length appArgs - length vs
 
             lambdaTypeMap = zip vs (map (Idx cidxLam) lamInputTypes)
-            boundVars =
-              [ PolyBndVar (maybe (A parentLang) C (lookup v lambdaTypeMap)) i
-              | Arg i v <- appArgs
-              ]
+            -- The values handed to the interface are exactly the indices the
+            -- callee binds, in that order. An argument realized in another
+            -- language is computed here and bound to a fresh index, so the
+            -- list of indices the call names is not the list of this
+            -- lambda's own arguments; supplying one while naming the other
+            -- leaves the callee reading a variable nothing assigned.
+            appArgVar = [(i, v) | Arg i v <- appArgs]
+            letArgVar = [(i, e) | (_, Just (i, _), e) <- xsInfo]
+            boundVars = map boundVar passedParentArgs
+            boundVar i = case lookup i letArgVar of
+              Just e -> e
+              Nothing -> case lookup i appArgVar of
+                Just v -> PolyBndVar (maybe (A parentLang) C (lookup v lambdaTypeMap)) i
+                Nothing -> error "unreachable: a called index is bound here or minted here"
             untypedContextArgs = map unvalue $ take nContextArgs appArgs
             typedPassedArgs = fromJust $ safeZipWith (\(Arg i _) t -> Arg i (Just t)) (drop nContextArgs lamArgs) lamInputTypes
 
@@ -2377,6 +2387,13 @@ polyFreeVars = go
     -- loop; a continue's values are ordinary sub-expressions in the loop scope.
     go (PolyLoop _ ids e) = Set.difference (go e) (Set.fromList ids)
     go (PolyLoopContinue xs) = Set.unions (map go xs)
+    -- A cross-pool call names the enclosing indices it sends. They also
+    -- reach here through the application's argument list whenever the two
+    -- agree, so this clause changes nothing in a well-formed tree -- and
+    -- it is what makes the free-variable computation total rather than
+    -- dependent on every construction site remembering to keep them in
+    -- step. The callee body is a separate scope and contributes nothing.
+    go (PolyRemoteInterface _ _ is _ _) = Set.fromList is
     go _ = Set.empty
 
 -- | Resolve a function name to its manifold ID and determine if the call is cross-language.

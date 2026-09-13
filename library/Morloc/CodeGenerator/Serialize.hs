@@ -27,6 +27,8 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Monad as MM
+import qualified Data.Set as Set
+import qualified Control.Monad as CM
 
 {- | This step is performed after segmentation, so all terms are in the same
 language. Here we need to determine where inputs are (de)serialized and the
@@ -158,6 +160,14 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       -- 'SerialClosure' (reify), exactly as 'unwrapLetDef' keeps a let-bound
       -- closure whole.
       | isClosureForm form = do
+          -- A function value the host created has no identity to send: the
+          -- wire form of a closure is the manifold to call back into, and
+          -- the host's callable is not one. Refused here, where a closure
+          -- is serialized, rather than at run time in each pool.
+          hostOrigin <- MM.gets stateHostOriginClosures
+          CM.when (Set.member m hostOrigin) $
+            MM.throwSourcedError m
+              "a function value created by host code cannot cross a pool boundary; apply it in the pool that received it, or have the host return the data it would compute"
           ne <- nativeExpr m orig
           se <- serializeS "closure value" m ne
           case inner of

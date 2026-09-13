@@ -1,0 +1,99 @@
+-- The vocabulary every instance provides, in two roles. The home role is
+-- where a computation lives (it appends to the counter); the away role is
+-- where a value is applied or forced. An instance module sources one role
+-- in one language; a main module pairs a home with an away.
+module (*)
+
+import root
+
+--' A record that holds a suspension beside data
+record Holder where
+  run :: <IO> Int
+  tag :: Int
+
+--' A record that holds a callback
+record Caller where
+  inc :: Int -> <IO> Int
+
+--' A record that holds a pure function
+record Purer where
+  apply :: Int -> Int
+
+-- home role ------------------------------------------------------------
+
+--' Append one byte to the counter file and return its size
+tickHome :: Str -> <IO> Int
+identHome :: Int -> Int
+markHome :: Str -> Str
+lenHome :: Str -> Int
+--' A sourced function value of arity two
+addHome :: Int -> Int -> Int
+--' Raises when run
+failHome :: Str -> <IO> Int
+--' A CURRIED host: written `def mk(k): return lambda x: ...`, so it is
+--' called as `mk(k)(x)`. That is a property of the host's source layout,
+--' not of the morloc type, so the type is the ordinary flat one and the
+--' layout is declared at the source statement with `@rsize`.
+mkHome :: Int -> Int -> Int
+--' A large vector, to be captured
+bigHome :: Int -> [Int]
+--' Applies a pure callback once (the home side's host)
+usePureHome :: (Int -> Int) -> Int -> Int
+--' Runs its argument three times (the home side's host)
+takeThunkHome :: <IO> Int -> <IO> Int
+
+-- away role ------------------------------------------------------------
+
+identAway :: Int -> Int
+--' Append one byte to a counter file on the away side; a sourced function
+--' value of arity two whose partial application is `Int -> <IO> Int`
+bumpAway :: Str -> Int -> <IO> Int
+--' Runs its argument three times, returns the last result
+takeThunkAway :: <IO> Int -> <IO> Int
+--' Never runs its argument, returns 0
+dropThunkAway :: <IO> Int -> <IO> Int
+--' Runs the field three times, adds the tag
+useRecordAway :: Holder -> <IO> Int
+--' Runs the first element three times
+useListAway :: [<IO> Int] -> <IO> Int
+--' Runs the first slot three times, adds the second
+useTupleAway :: (<IO> Int, Int) -> <IO> Int
+--' Runs the payload three times, or returns 0
+useOptAway :: ?(<IO> Int) -> <IO> Int
+--' Runs the first record's field three times
+useNestedAway :: [Holder] -> <IO> Int
+--' Applies the callback three times to the argument
+useCallbackAway :: (Int -> <IO> Int) -> Int -> <IO> Int
+--' Applies a pure callback once
+usePureAway :: (Int -> Int) -> Int -> Int
+--' Applies a two-argument callback once
+useArity2Away :: (Int -> Int -> Int) -> Int -> Int -> Int
+--' Applies the record's callback three times
+usePinnedAway :: Caller -> Int -> <IO> Int
+--' Applies a function-taking function to a function
+useHofAway :: ((Int -> Int) -> Int) -> (Int -> Int) -> Int
+--' The same, where the function the host hands back into morloc has an
+--' effectful result: the second inbound host->morloc entry point
+useHofEffAway :: ((Int -> <IO> Int) -> <IO> Int) -> (Int -> <IO> Int) -> <IO> Int
+--' The callback's parameter is ITSELF higher-order, so the host convention
+--' of its type must be computed recursively, not one level deep
+useHof2Away :: (((Int -> <IO> Int) -> <IO> Int) -> <IO> Int) -> <IO> Int
+--' Applies a pure list of functions to the argument and sums
+useListPureAway :: [Int -> Int] -> Int -> Int
+--' Runs a function-returning suspension's producer, then applies its result
+useMkAway :: (Int -> <IO> (Int -> Int)) -> Int -> Int -> <IO> Int
+--' Runs the outer suspension once and its result three times
+useThunk2Away :: <IO> (<IO> Int) -> <IO> Int
+--' Runs the suspension once and applies its result
+useThunkFnAway :: <IO> (Int -> Int) -> Int -> <IO> Int
+--' Applies a suspension-taking function to a suspension
+useFnThunkAway :: (<IO> Int -> <IO> Int) -> <IO> Int -> <IO> Int
+--' Also curried: `def pass_through(f): return f`, called as `pass(f)(x)`
+passAway :: (Int -> <IO> Int) -> Int -> <IO> Int
+--' A higher-order function in the style of the root map
+mapAway :: (Int -> Int) -> [Int] -> [Int]
+--' Appends to the file named by the first argument and adds the length of
+--' the second; two arguments that a caller may compute
+awayTwo :: Str -> Str -> Int -> <IO> Int
+--' The same with the PLAIN argument first and the computed one second
+awayMix :: Int -> Str -> <IO> Int

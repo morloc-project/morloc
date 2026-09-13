@@ -1,0 +1,40 @@
+-- A function value that HOST code created has no identity to send across a
+-- pool boundary: the wire form of a closure is the manifold to call back
+-- into, and a host's callable is not one. Re-running the call that produced
+-- it is not an option either -- that call is effectful, so running it again
+-- would run its effects again.
+--
+-- So this is a declared limit, not a defect: the value may be applied in
+-- the pool that received it (`localOk`, which must keep working), but
+-- handing it to another pool is refused. Today the refusal is a runtime
+-- error from the pool that is asked to reify it; the build-time refusal is
+-- designed but not implemented (invariant H' in
+-- /work/plans/suspension-crossing-protocol.md), so this test accepts
+-- either, and asserts only that the failure is loud and names the cause.
+
+module main (localOk, crossesPools)
+
+import root-py
+import root-cpp
+
+type Cpp => Int = "int"
+
+source Py from "hosts.py" ("mk_adder" as mkAdder, "use_pure" as usePurePy)
+source Cpp from "hosts.hpp" ("use_pure" as usePureCpp)
+
+--' a Python host that returns a function value
+mkAdder :: Int -> <IO> (Int -> Int)
+usePurePy :: (Int -> Int) -> Int -> Int
+usePureCpp :: (Int -> Int) -> Int -> Int
+
+--' applying it in the pool that received it is legal
+localOk :: Int -> <IO> Int
+localOk k = do
+  f <- mkAdder k
+  usePurePy f 2
+
+--' sending it to another pool is not
+crossesPools :: Int -> <IO> Int
+crossesPools k = do
+  f <- mkAdder k
+  usePureCpp f 2

@@ -1,0 +1,418 @@
+-- Every cell, written once against the harness names. A main module pairs
+-- this with a home instance (where the counted computation lives) and an
+-- away instance (where the value is applied or forced); the checker is
+-- Python, a third pool in most pairings. A cell's counter file is its own,
+-- under the prefix the command is given.
+module (test, crossComputedArg, crossTwoComputed, crossComputedMixed, crossComputedPure, hofArgEff2, hofArgEff, rootArgHost, rootUnforced, rootPool, rootBothSides, rootFailTry, recordField, listElem, tupleSlot, optSome, optNone, nestedRecord, callbackEff, callbackPure, callbackArity2, pinned, captureStr, captureRecord, captureBig, captureThunk, hofArg, mkResult, thunkOfThunk, thunkOfFn, fnOfThunk, captureClosure, captureForeign, harvestCoincide, sourcedCallback, sourcedRecursive, sourcedRelay, hostReturned, mapLocal, mapSourced, mapField, mapReturned, mapForwarded, closureResult, nestedSusp, relayPool, escapeReturned, escapeRecord, escapeList, escapeCombinator, chosenFn, chosenThunk, forwardedCapture)
+
+import .harness
+import root
+
+-- the checker's types, as the stdlib's root.test declares them
+type Py => Int = "int"
+type Py => Str = "str"
+type Py => Bool = "bool"
+type Py => (List a) = "list" a
+type Py => (Tuple2 a b) = "tuple" a b
+
+source Py from "check.py" ("testEqual", "printResult")
+testEqual :: Str -> a -> a -> (Int, Int) -> (Int, Int)
+printResult :: (Int, Int) -> (Int, Int)
+
+-- the computation under test: morloc-defined, its body at home
+homeEff :: Str -> Int -> <IO> Int
+homeEff p x = do
+  n <- tickHome p
+  identHome (n + x)
+
+-- a suspension of a suspension: the outer run ticks once and yields the
+-- inner thunk
+prepare :: Str -> <IO> (<IO> Int)
+prepare p = do
+  _ <- tickHome p
+  homeEff p 0
+
+-- a function returning a suspension, built at home
+mkF2 :: Str -> Int -> <IO> Int
+mkF2 p = let q = markHome p in \x -> homeEff q x
+
+-- a function returning a function, built at home
+mkE :: Str -> Int -> Int
+mkE p = let q = markHome p in \x -> lenHome q + x
+
+mkOps :: Str -> Purer
+mkOps p = { apply = \x -> lenHome p + x }
+
+mkList :: Str -> [Int -> Int]
+mkList p = [\x -> lenHome p + x, \x -> lenHome (markHome p) + x]
+
+compose :: (Int -> Int) -> Int -> Int
+compose g = \x -> usePureHome g x
+
+choose :: Bool -> Int -> Int
+choose b ? b = (\x -> x + x) : (\x -> x)
+
+chooseT :: Str -> Bool -> Int -> <IO> Int
+chooseT p b n ? b = homeEff p n : homeEff p (n + n)
+
+-- a recursive helper over a function-typed parameter
+applyN :: (Int -> <IO> Int) -> Int -> <IO> Int
+applyN f n
+  ? n <= 0 = (do 0)
+  : do
+      c <- f n
+      r <- applyN f (n - 1)
+      identHome (c + r)
+
+myMap :: (Int -> Int) -> [Int] -> [Int]
+myMap f xs = mapAway f (mapAway f xs)
+
+outer :: (Int -> Int) -> Int -> Int
+outer g x = inner g x + inner g (x + 1)
+
+inner :: (Int -> Int) -> Int -> Int
+inner g y = g y + g y
+
+awayPass :: <IO> Int -> <IO> Int
+awayPass t = do
+  let _z = identAway 1
+  t
+
+-- cells ----------------------------------------------------------------
+
+rootArgHost :: Str -> <IO> Int
+rootArgHost p = takeThunkAway (homeEff p 0)
+
+rootUnforced :: Str -> <IO> Int
+rootUnforced p = dropThunkAway (homeEff p 0)
+
+rootPool :: Str -> <IO> Int
+rootPool p = do
+  let t = homeEff p 0
+  _ <- t
+  _ <- t
+  c <- t
+  identAway c
+
+rootBothSides :: Str -> <IO> Int
+rootBothSides p = do
+  let t = homeEff p 0
+  _ <- t
+  takeThunkAway t
+
+rootFailTry :: Str -> <IO> Int
+rootFailTry p = do
+  r <- @try (takeThunkAway (failHome p))
+  match r | (Ok _) = 0 | (Err _) = 1
+
+recordField :: Str -> <IO> Int
+recordField p = useRecordAway { run = homeEff p 0, tag = 10 }
+
+listElem :: Str -> <IO> Int
+listElem p = useListAway [homeEff p 0]
+
+tupleSlot :: Str -> <IO> Int
+tupleSlot p = useTupleAway (homeEff p 0, 10)
+
+optSome :: Str -> <IO> Int
+optSome p = useOptAway (homeEff p 0)
+
+optNone :: Str -> <IO> Int
+optNone _ = useOptAway Null
+
+nestedRecord :: Str -> <IO> Int
+nestedRecord p = useNestedAway [{ run = homeEff p 0, tag = 1 }]
+
+callbackEff :: Str -> <IO> Int
+callbackEff p = useCallbackAway (\x -> homeEff p x) 0
+
+callbackPure :: Int
+callbackPure = usePureAway (\x -> identHome (x + 5)) 1
+
+callbackArity2 :: Int
+callbackArity2 = useArity2Away (\x y -> identHome (x * 10 + y)) 3 4
+
+pinned :: Str -> <IO> Int
+pinned p = usePinnedAway { inc = \x -> homeEff p x } 0
+
+captureStr :: Int
+captureStr = let s = markHome "abcd" in usePureAway (\x -> lenHome s + x) 1
+
+captureRecord :: Str -> Int
+captureRecord p = let h = ({ run = homeEff p 0, tag = 7 } :: Holder) in usePureAway (\x -> .tag h + x) 1
+
+captureBig :: Int
+captureBig = let v = bigHome 100000 in usePureAway (\x -> length v + x) 1
+
+captureThunk :: Str -> <IO> Int
+captureThunk p = let t = homeEff p 0 in useCallbackAway (\_ -> t) 0
+
+hofArg :: Int
+hofArg = useHofAway (\g -> g 3 + 1) (\x -> identHome x)
+
+-- the host chooses the callable bound to `g`, so `g` enters morloc at a
+-- function-typed lambda parameter rather than as a source call's result
+hofArgEff :: Str -> <IO> Int
+hofArgEff p = useHofEffAway (\g -> do { x <- g 3; identHome x }) (\x -> homeEff p x)
+
+-- the host supplies `h`, whose own parameter is a function with an
+-- effectful result: the host convention of `h`'s type is only right if it
+-- is computed all the way down, and the argument morloc hands to `h` must
+-- travel the other way (an adapter is contravariant).
+--
+-- Everything here is on the away side on purpose. `h` is a value the host
+-- created, so it cannot cross a pool boundary (see the refusal golden
+-- `host-closure-cannot-cross`); using a home-side computation inside would
+-- make this cell test that limit instead of the adapter, and would do so
+-- only in the pairings where the realizer happens to split it.
+hofArgEff2 :: Str -> <IO> Int
+hofArgEff2 p = useHof2Away (\h -> do { x <- h (\y -> bumpAway p y); identAway x })
+
+mkResult :: Str -> <IO> Int
+mkResult p = useMkAway (\a -> do { _ <- tickHome p; \b -> a + b }) 1 2
+
+thunkOfThunk :: Str -> <IO> Int
+thunkOfThunk p = useThunk2Away (prepare p)
+
+thunkOfFn :: Str -> <IO> Int
+thunkOfFn _ = useThunkFnAway (do (\x -> x + 1)) 1
+
+fnOfThunk :: Str -> <IO> Int
+fnOfThunk p = useFnThunkAway (\t -> do { _ <- t; _ <- t; t }) (homeEff p 0)
+
+captureClosure :: Str -> <IO> Int
+captureClosure p = let g = \x -> identHome (x + 1) in useCallbackAway (\y -> homeEff p (g y + g y)) 0
+
+captureForeign :: Int
+captureForeign = let g = identAway in usePureHome (\x -> g x + g x) 1
+
+harvestCoincide :: Int
+harvestCoincide =
+  let g = \s -> lenHome s
+      h2 = \y -> g "ab" + g "cde" + y
+   in identHome (h2 1) + identHome (h2 2)
+
+-- An argument of a cross-pool call that the CALLER must compute (it is
+-- realized in the caller's language) is bound to a fresh index at the call
+-- site. The interface must then name that index and be handed its value;
+-- naming one list and supplying another leaves the callee reading a
+-- variable that was never assigned.
+crossComputedArg :: Str -> <IO> Int
+crossComputedArg p = applyN (\x -> bumpAway (markHome p) x) 3
+
+-- two computed arguments, of different types, so a positional slip shows
+crossTwoComputed :: Str -> <IO> Int
+crossTwoComputed p = applyN (\x -> awayTwo (markHome p) (markHome "abc") x) 3
+
+-- the plain argument FIRST and the computed one second, so a fix that
+-- assumes the supplied and named lists coincide in order is caught
+crossComputedMixed :: Str -> <IO> Int
+crossComputedMixed p = applyN (\x -> awayMix x (markHome p)) 3
+
+-- the pure twin of the above: green today, and the regression guard for a
+-- fix that touches the path both take
+crossComputedPure :: Int
+crossComputedPure = usePureAway (\x -> lenHome (markHome "abcd") + x) 1
+
+sourcedCallback :: Int
+sourcedCallback = usePureAway (addHome 1) 2
+
+sourcedRecursive :: Str -> <IO> Int
+sourcedRecursive p = applyN (bumpAway p) 3
+
+-- the host hands back the callback it was given; the call is curried, so
+-- each application is `pass_through(g)(0)`
+sourcedRelay :: Str -> <IO> Int
+sourcedRelay p = do
+  _ <- passAway (\x -> homeEff p x) 0
+  _ <- passAway (\x -> homeEff p x) 0
+  passAway (\x -> homeEff p x) 0
+
+-- a curried host, applied in full: the intermediate callable never becomes
+-- a morloc value
+hostReturned :: Int
+hostReturned = identHome (mkHome 1 2 + mkHome 1 3)
+
+mapLocal :: [Int]
+mapLocal = mapAway (\x -> x + 5) [1, 2]
+
+mapSourced :: [Int]
+mapSourced = mapAway (addHome 5) [1, 2]
+
+mapField :: [Int]
+mapField = let r = ({ apply = \x -> x + 5 } :: Purer) in mapAway (.apply r) [1, 2]
+
+mapReturned :: [Int]
+mapReturned = mapAway (mkE "abcde") [1, 2]
+
+mapForwarded :: [Int]
+mapForwarded = myMap (\x -> x + 1) [1, 2]
+
+closureResult :: Str -> <IO> Int
+closureResult p = do
+  let f = mkF2 p
+  _ <- f 1
+  _ <- f 1
+  c <- f 1
+  identAway c
+
+nestedSusp :: Str -> <IO> Int
+nestedSusp p = do
+  s <- prepare p
+  _ <- s
+  _ <- s
+  c <- s
+  identAway c
+
+relayPool :: Str -> <IO> Int
+relayPool p = takeThunkHome (awayPass (homeEff p 0))
+
+escapeReturned :: Int
+escapeReturned = mkE "abc" 1 + mkE (markHome "abcd") 10
+
+escapeRecord :: Int
+escapeRecord = usePureAway (.apply (mkOps "abc")) 1 + usePureAway (.apply (mkOps "abcd")) 10
+
+escapeList :: Int
+escapeList = useListPureAway (mkList "abc") 1 + useListPureAway (mkList "abcd") 10
+
+escapeCombinator :: Int
+escapeCombinator = compose (\x -> lenHome "abc" + x) 1 + compose (\x -> lenHome "abcd" + x) 10
+
+chosenFn :: Int
+chosenFn = choose True 4 + choose False 4
+
+chosenThunk :: Str -> <IO> Int
+chosenThunk p = do
+  a <- chooseT p True 4
+  c <- chooseT p False 4
+  identHome (a + c)
+
+forwardedCapture :: Int
+forwardedCapture = outer (\x -> identHome x) 1
+
+-- the report --------------------------------------------------------------
+
+-- A cell that raises reports -1 rather than ending the run, so one red
+-- never hides the others.
+orNeg :: Try Str Int -> Int
+orNeg r = match r | (Ok v) = v | (Err _) = 0 - 1
+
+test :: Str -> <IO> Bool
+test p = do
+  r1 <- @try (rootArgHost (p <> "-1"))
+  let c1 = orNeg r1
+  r2 <- @try (rootUnforced (p <> "-2"))
+  let c2 = orNeg r2
+  r3 <- @try (rootPool (p <> "-3"))
+  let c3 = orNeg r3
+  r4 <- @try (rootBothSides (p <> "-4"))
+  let c4 = orNeg r4
+  r5 <- @try (rootFailTry (p <> "-5"))
+  let c5 = orNeg r5
+  r6 <- @try (recordField (p <> "-6"))
+  let c6 = orNeg r6
+  r7 <- @try (listElem (p <> "-7"))
+  let c7 = orNeg r7
+  r8 <- @try (tupleSlot (p <> "-8"))
+  let c8 = orNeg r8
+  r9 <- @try (optSome (p <> "-9"))
+  let c9 = orNeg r9
+  r10 <- @try (optNone (p <> "-10"))
+  let c10 = orNeg r10
+  r11 <- @try (nestedRecord (p <> "-11"))
+  let c11 = orNeg r11
+  r12 <- @try (callbackEff (p <> "-12"))
+  let c12 = orNeg r12
+  r15 <- @try (pinned (p <> "-15"))
+  let c15 = orNeg r15
+  r19 <- @try (captureThunk (p <> "-19"))
+  let c19 = orNeg r19
+  r20b <- @try (hofArgEff (p <> "-20b"))
+  let c20b = orNeg r20b
+  r20c <- @try (hofArgEff2 (p <> "-20c"))
+  let c20c = orNeg r20c
+  r21 <- @try (mkResult (p <> "-21"))
+  let c21 = orNeg r21
+  r22 <- @try (thunkOfThunk (p <> "-22"))
+  let c22 = orNeg r22
+  r23 <- @try (thunkOfFn (p <> "-23"))
+  let c23 = orNeg r23
+  r24 <- @try (fnOfThunk (p <> "-24"))
+  let c24 = orNeg r24
+  r25 <- @try (captureClosure (p <> "-25"))
+  let c25 = orNeg r25
+  r29 <- @try (sourcedRecursive (p <> "-29"))
+  let c29 = orNeg r29
+  r29a <- @try (crossComputedArg (p <> "-29a"))
+  let c29a = orNeg r29a
+  r29b <- @try (crossTwoComputed (p <> "-29b"))
+  let c29b = orNeg r29b
+  r29c <- @try (crossComputedMixed (p <> "-29c"))
+  let c29c = orNeg r29c
+  r30 <- @try (sourcedRelay (p <> "-30"))
+  let c30 = orNeg r30
+  r38 <- @try (closureResult (p <> "-38"))
+  let c38 = orNeg r38
+  r39 <- @try (nestedSusp (p <> "-39"))
+  let c39 = orNeg r39
+  r40 <- @try (relayPool (p <> "-40"))
+  let c40 = orNeg r40
+  r46 <- @try (chosenThunk (p <> "-46"))
+  let c46 = orNeg r46
+  let r =
+        ( testEqual "01 rootArgHost" c1 3
+        . testEqual "02 rootUnforced" c2 0
+        . testEqual "03 rootPool" c3 3
+        . testEqual "04 rootBothSides" c4 4
+        . testEqual "05 rootFailTry" c5 1
+        . testEqual "06 recordField" c6 13
+        . testEqual "07 listElem" c7 3
+        . testEqual "08 tupleSlot" c8 13
+        . testEqual "09 optSome" c9 3
+        . testEqual "10 optNone" c10 0
+        . testEqual "11 nestedRecord" c11 3
+        . testEqual "12 callbackEff" c12 3
+        . testEqual "13 callbackPure" callbackPure 6
+        . testEqual "14 callbackArity2" callbackArity2 34
+        . testEqual "15 pinned" c15 3
+        . testEqual "16 captureStr" captureStr 5
+        . testEqual "17 captureRecord" (captureRecord (p <> "-17")) 8
+        . testEqual "18 captureBig" captureBig 100001
+        . testEqual "19 captureThunk" c19 3
+        . testEqual "20 hofArg" hofArg 4
+        . testEqual "20b hofArgEff" c20b 4
+        . testEqual "20c hofArgEff2" c20c 1
+        . testEqual "21 mkResult" c21 3
+        . testEqual "22 thunkOfThunk" c22 4
+        . testEqual "23 thunkOfFn" c23 2
+        . testEqual "24 fnOfThunk" c24 3
+        . testEqual "25 captureClosure" c25 5
+        . testEqual "26 captureForeign" captureForeign 2
+        . testEqual "27 harvestCoincide" harvestCoincide 13
+        . testEqual "28 sourcedCallback" sourcedCallback 3
+        . testEqual "29 sourcedRecursive" c29 6
+        . testEqual "29a crossComputedArg" c29a 6
+        . testEqual "29b crossTwoComputed" c29b 15
+        . testEqual "29c crossComputedMixed" c29c 12
+        . testEqual "29d crossComputedPure" crossComputedPure 5
+        . testEqual "30 sourcedRelay" c30 3
+        . testEqual "31 hostReturned" hostReturned 7
+        . testEqual "33 mapLocal" mapLocal [6, 7]
+        . testEqual "34 mapSourced" mapSourced [6, 7]
+        . testEqual "35 mapField" mapField [6, 7]
+        . testEqual "36 mapReturned" mapReturned [6, 7]
+        . testEqual "37 mapForwarded" mapForwarded [3, 4]
+        . testEqual "38 closureResult" c38 4
+        . testEqual "39 nestedSusp" c39 4
+        . testEqual "40 relayPool" c40 3
+        . testEqual "41 escapeReturned" escapeReturned 18
+        . testEqual "42 escapeRecord" escapeRecord 18
+        . testEqual "43 escapeList" escapeList 36
+        . testEqual "44 escapeCombinator" escapeCombinator 18
+        . testEqual "45 chosenFn" chosenFn 12
+        . testEqual "46 chosenThunk" c46 15
+        . testEqual "47 forwardedCapture" forwardedCapture 6
+        ) (0, 0)
+  let final = printResult r
+  .0 final == 0

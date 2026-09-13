@@ -558,21 +558,42 @@ crossingClosureSigs es = Set.fromList <$> mapM astSig (concatMap collectSerializ
     astSig (SerialClosure ins out) = closureCppSig (map serialAstToType ins) (serialAstToType out)
     astSig _ = return "" -- collectSerializedClosures returns only SerialClosure
 
--- | Keep in the closure table only closures whose signature can cross a
--- boundary. Everything else is a purely-local closure that needs no reify or
--- dispatch machinery.
+-- | Keep in the closure table only closures that can cross a boundary.
+-- Everything else is a purely-local closure that needs no reify or dispatch
+-- machinery.
+--
+-- Crossing is TRANSITIVE over captures: reifying a closure serializes the
+-- values it captured, so a function value captured by a crossing closure is
+-- itself reified and needs the same machinery. Closing only over the
+-- closures that reach a serialize site leaves such a capture emitted as a
+-- bare @std::bind@, and reifying it throws "cannot reify a non-morloc C++
+-- closure" at run time. The fixed point is taken over signatures, as the
+-- serialize sites are matched, so it may keep a closure that never crosses
+-- (an unused reify thunk) but can never drop one that does.
 restrictToCrossingClosures ::
   [SerialManifold] ->
   Map.Map Int ([SerialAST], [SerialAST], SerialAST) ->
   CppTranslator (Map.Map Int ([SerialAST], [SerialAST], SerialAST))
 restrictToCrossingClosures es closureTable = do
-  crossingSigs <- crossingClosureSigs es
+  seedSigs <- crossingClosureSigs es
   let candidates =
         [ nm | nm@(NativeManifold i _ _ _) <- concatMap collectClosureManifolds es
              , Map.member i closureTable ]
-  crossing <-
-    Set.fromList . map fst . filter (\(_, sig) -> Set.member sig crossingSigs)
-      <$> mapM (\nm@(NativeManifold i _ _ _) -> (,) i <$> manifoldCppSig nm) candidates
+  -- each closure manifold: its own signature, and the signatures of the
+  -- function values it captures
+  entries <- mapM (\nm@(NativeManifold i _ form _) -> do
+                     sig <- manifoldCppSig nm
+                     capSigs <- mapM (\(FunF ins out) -> closureCppSig ins out)
+                                  [ t | Arg _ o <- manifoldContext form
+                                      , Just t@(FunF _ _) <- [orNativeType o] ]
+                     return (i, sig, capSigs))
+                  candidates
+  let close sigs =
+        let sigs' = Set.union sigs
+              (Set.fromList (concat [cs | (_, sig, cs) <- entries, Set.member sig sigs]))
+         in if Set.size sigs' == Set.size sigs then sigs else close sigs'
+      crossingSigs = close seedSigs
+      crossing = Set.fromList [i | (i, sig, _) <- entries, Set.member sig crossingSigs]
   return $ Map.filterWithKey (\i _ -> Set.member i crossing) closureTable
 
 -- | For each defunctionalized closure manifold, emit a serial dispatch wrapper

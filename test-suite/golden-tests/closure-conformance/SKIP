@@ -1,0 +1,13 @@
+The baseline for the closure/suspension representation work
+(/work/plans/closure-conformance-plan.md). Seven of its ten programs pass
+every cell; the three Rust programs do not compile, because the Rust member
+spells one morloc function type five different ways and the conversions
+between them do not compose. That is the D3 redesign target
+(/work/plans/d3-rust-closure-representation.md).
+
+Runnable now: `make` builds and runs the ten programs, `make cells` builds
+each (program, cell) alone so one red does not mask the rest. Remove this
+file when D3 lands and every cell is green in all ten programs; that is the
+acceptance test for the redesign. Doing so also needs an exp.txt holding the
+output of a green run -- the directory has none, which is why the SKIP is
+checked before the Makefile and exp.txt are.

@@ -1,0 +1,15 @@
+cell-*
+cells.txt
+cnt-*
+*.log
+*.buildlog
+home-cpp
+home-r
+home-rust
+away-cpp
+away-r
+away-rust
+local-py
+local-cpp
+local-r
+local-rust
