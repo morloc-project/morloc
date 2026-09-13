@@ -29,6 +29,7 @@ import Morloc.CodeGenerator.EffectBoundary (polyOuterType)
 import Morloc.CodeGenerator.Express (polyFreeVars)
 import Morloc.CodeGenerator.Namespace
 import qualified Data.Set as Set
+import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
 
 lowerSuspensions :: PolyHead -> MorlocMonad PolyHead
@@ -50,7 +51,10 @@ walk lang (PolyEval t e) = PolyEval t <$> walk lang e
 walk lang (PolyIntrinsic (Idx i (EffectT _ t)) intr xs) = do
   xs' <- mapM (walk lang) xs
   suspend lang i (PolyIntrinsic (Idx i t) intr xs')
-walk _ (PolyManifold l m form k e) = PolyManifold l m form k <$> walk l e
+walk _ (PolyManifold l m form k e) = do
+  e' <- walk l e
+  moveLabelIntoSuspension m e'
+  return $ PolyManifold l m form k e'
 walk _ (PolyRemoteInterface l t is rf e) = PolyRemoteInterface l t is rf <$> walk l e
 walk lang (PolyLet i e1 e2) = PolyLet i <$> walk lang e1 <*> walk lang e2
 walk lang (PolyReturn e) = PolyReturn <$> walk lang e
@@ -85,6 +89,30 @@ suspend lang cidx e = do
   m <- MM.freshManifoldIndex cidx
   let ctx = [Arg i None | i <- Set.toList (polyFreeVars e)]
   return $ PolyManifold lang m (ManifoldPart ctx []) Transparent (returned e)
+
+-- | A log label or benchmark on a manifold measures what the manifold
+-- does. When the manifold's whole result is a suspension, applying it
+-- only builds the closure, and the work happens each time the closure is
+-- run; the label moves onto the closure manifold so every run is measured
+-- and the application is not.
+moveLabelIntoSuspension :: Int -> PolyExpr -> MorlocMonad ()
+moveLabelIntoSuspension m body = case suspensionOf body of
+  Just m' -> do
+    cfgs <- MM.gets stateManifoldConfig
+    case Map.lookup m cfgs of
+      Just cfg | isMeasured cfg ->
+        MM.modify $ \s -> s { stateManifoldConfig =
+          Map.insert m' cfg { manifoldConfigCache = Nothing }
+            (Map.insert m cfg { manifoldConfigLog = Nothing, manifoldConfigBenchmark = Nothing } cfgs) }
+      _ -> return ()
+  Nothing -> return ()
+  where
+    isMeasured cfg = manifoldConfigLog cfg == Just True || manifoldConfigBenchmark cfg == Just True
+    -- The closure of no arguments a body returns, through its lets.
+    suspensionOf (PolyLet _ _ e2) = suspensionOf e2
+    suspensionOf (PolyReturn e) = suspensionOf e
+    suspensionOf (PolyManifold _ m' (ManifoldPart _ []) _ _) = Just m'
+    suspensionOf _ = Nothing
 
 -- | A manifold body returns its tail. The return is pushed through lets to
 -- the tail; a tail that already returns is left alone.
