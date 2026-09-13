@@ -30,6 +30,7 @@ module Morloc.CodeGenerator.Serial
   , isSerializable
   , prettySerialOne
   , serialAstToType
+  , serialAstToNativeType
   , shallowType
   , serialAstToMsgpackSchema
   , rerootUnder
@@ -73,9 +74,20 @@ data AliasShape
 -- independent: macro indices @$N@ count TYPE args only, so the dim
 -- slot here doesn't shift @$N@ positions in the per-language form.
 serialAstToTypeWith :: ([SerialAST] -> SerialAST -> TypeF) -> SerialAST -> TypeF
-serialAstToTypeWith onClosure = go
+serialAstToTypeWith = serialAstToTypeWith' (\_ inner -> inner)
+
+-- | 'serialAstToTypeWith' with control over a custom-packed node as well. The
+-- packer handler is given the packer and the type of the form BENEATH it, and
+-- decides which of the two a caller means: the wire shape the value travels as,
+-- or the native type the pool holds.
+serialAstToTypeWith' ::
+  (TypePacker -> TypeF -> TypeF) ->
+  ([SerialAST] -> SerialAST -> TypeF) ->
+  SerialAST ->
+  TypeF
+serialAstToTypeWith' onPack onClosure = go
   where
-    go (SerialPack _ (_, s)) = go s
+    go (SerialPack _ (p, s)) = onPack p (go s)
     go (SerialList v (Just d) s) = AppF (VarF v) [d, go s]
     go (SerialList v Nothing s) = AppF (VarF v) [go s]
     go (SerialTuple v ss) = AppF (VarF v) (map go ss)
@@ -110,6 +122,20 @@ serialAstToTypeWith onClosure = go
 serialAstToType :: SerialAST -> TypeF
 serialAstToType =
   serialAstToTypeWith (\ins out -> FunF (map serialAstToType ins) (serialAstToType out))
+
+{- | The NATIVE type a wire form denotes: at a custom-packed node this is the
+type the pool actually holds, where 'serialAstToType' gives the shape the value
+travels as. The two differ exactly at a 'SerialPack', and confusing them is how
+one side of a boundary comes to name a type the other side does not: a closure
+whose argument is custom-packed is @Wrapped -> Int@ natively and @Int -> Int@ on
+the wire, and code that must AGREE with a native declaration (a record field's
+type, a manifold's signature) has to ask this question rather than the other.
+-}
+serialAstToNativeType :: SerialAST -> TypeF
+serialAstToNativeType =
+  serialAstToTypeWith'
+    (\p _ -> typePackerPacked p)
+    (\ins out -> FunF (map serialAstToNativeType ins) (serialAstToNativeType out))
 
 -- | Like 'serialAstToType', but a closure is rendered as the given wire-tuple
 -- leaf type instead of its native callable type ('FunF'). A defunctionalized

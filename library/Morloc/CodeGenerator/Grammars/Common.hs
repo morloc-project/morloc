@@ -43,6 +43,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , collectSerializedClosures
   , serialClosuresOf
   , collectSerialObjects
+  , serialObjectsOfAST
   , computeClosureSchemas
   , closureSchemaTexts
   , orNativeType
@@ -124,7 +125,7 @@ mergePoolDocs f ms =
 -- rejection is 'checkRsizeArity', which runs in the monad where a legible
 -- error can be raised; this function is the pure renderer and must not be the
 -- thing that decides a program is invalid.
-provideClosure :: Source -> [MDoc] -> [[MDoc]]
+provideClosure :: Source -> [a] -> [[a]]
 provideClosure src args0 = f (srcRsize src) args0
   where
     f [] args = [args]
@@ -863,7 +864,7 @@ serialClosuresOf = go
 -- 'makeSerialAST'/'MorlocMonad'). Covers both serialize ('SerializeS') and
 -- deserialize ('DeserializeN') sites, and records nested in an outer aggregate.
 collectSerialObjects :: SerialManifold -> [(FVar, [(Key, SerialAST)])]
-collectSerialObjects = concatMap serialObjectsOf . allSerialASTs
+collectSerialObjects = concatMap serialObjectsOfAST . allSerialASTs
   where
     allSerialASTs :: SerialManifold -> [SerialAST]
     allSerialASTs = runIdentity . surroundFoldSerialManifoldM defaultValue fw
@@ -880,7 +881,14 @@ collectSerialObjects = concatMap serialObjectsOf . allSerialASTs
               _ -> foldlNE (<>) mempty folded
         }
     serialObjectsOf :: SerialAST -> [(FVar, [(Key, SerialAST)])]
-    serialObjectsOf = go
+    serialObjectsOf = serialObjectsOfAST
+
+-- | Every record node in a wire form, with its fields. A record reached only
+-- through a closure's captured or bound arguments -- one that no manifold
+-- serializes directly -- is found here too, which is what a backend needs to
+-- know it must emit that record's marshalling.
+serialObjectsOfAST :: SerialAST -> [(FVar, [(Key, SerialAST)])]
+serialObjectsOfAST = go
       where
         go (SerialObject _ v _ rs) = (v, rs) : concatMap (go . snd) rs
         go (SerialClosure ins out) = concatMap go ins <> go out

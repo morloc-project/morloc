@@ -815,6 +815,7 @@ cppLowerConfig :: Map.Map Text MDoc -> LowerConfig CppTranslatorM
 cppLowerConfig reifyThunks =
   LowerConfig
     { lcSrcName = \src -> pretty (srcName src)
+    , lcApplySrcGroup = \f as -> f <+> tupled as
     , lcSourcedArg = \_ _ _ x -> x
     , lcOwnership = \_ -> return Owned
     , lcArgManifoldOwnership = \_ -> return Owned
@@ -1166,7 +1167,7 @@ PROPAGATE_ERROR(errmsg)|]
           resType <- cppTypeOf out
           return $ resType <> tupled argTypes
         _ -> return ""
-    , lcMakePass = \mname _ -> return mname
+    , lcMakePass = \_sig mname _ -> return mname
     , lcMakeLambda = \sig mname contextArgs boundArgs ->
         let ctxNames = map argNamer contextArgs
             vs' = take (length boundArgs) (map (\j -> "std::placeholders::_" <> viaShow j) ([1 ..] :: [Int]))

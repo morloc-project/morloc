@@ -1,0 +1,70 @@
+-- A closure whose ARGUMENT is a custom-packed type, crossing a pool boundary.
+--
+-- `Wrapped` is a newtype over `Int` whose native form in the static backends is
+-- a distinct struct (`MyWrap`, `MyWrapC`) while its WIRE form is `Int`. A
+-- closure taking a `Wrapped` therefore has a native signature that differs from
+-- the signature the same closure has at the serialize site.
+--
+-- That difference is the point. A backend that decides which closures need
+-- call-back machinery by matching RENDERED SIGNATURES sees the two as unrelated,
+-- drops the closure from its dispatch table, and builds it with no identity --
+-- so applying it from the other pool fails at run time even though nothing in
+-- the program is wrong. Matching on the native type on both sides is what makes
+-- the two agree.
+--
+-- The closure's body lives only in Python, so it must genuinely call home.
+
+module main (crossRust, crossCpp, resultRust, resultCpp)
+
+import root-py
+import root-rust
+import root-cpp
+
+newtype Wrapped = Int
+type Rust => Wrapped = "MyWrap"
+type Cpp => Wrapped = "MyWrapC"
+type Py => Wrapped = "int"
+
+instance Packable Int Wrapped where
+  source Rust from "wrap.rs" ("pack_wrap" as pack, "unpack_wrap" as unpack)
+  source Cpp from "wrap.hpp" ("pack_wrap_cpp" as pack, "unpack_wrap_cpp" as unpack)
+  source Py from "wrap.py" ("pack_wrap" as pack, "unpack_wrap" as unpack)
+
+source Py from "wrap.py" ("tick", "add_wrapped" as addWrapped, "mk_wrapped_from" as mkFrom, "apply_wrapped_py" as applyPy, "mk_wrapped_py" as mkPy)
+source Rust from "wrap.rs" ("apply_wrapped" as applyRust, "mk_wrapped" as mkRust, "apply_mk" as applyMkRust, "add_wrapped_rust" as addWrappedRust)
+source Cpp from "wrap.hpp" ("apply_wrapped_cpp" as applyCpp, "mk_wrapped_cpp" as mkCpp, "apply_mk_cpp" as applyMkCpp)
+
+tick :: <IO> Int
+addWrapped :: Int -> Wrapped -> Int
+applyRust :: (Wrapped -> Int) -> Wrapped -> Int
+mkRust :: Int -> Wrapped
+applyCpp :: (Wrapped -> Int) -> Wrapped -> Int
+mkCpp :: Int -> Wrapped
+mkFrom :: Int -> Int -> Wrapped
+applyMkRust :: (Int -> Wrapped) -> Int -> Int
+applyMkCpp :: (Int -> Wrapped) -> Int -> Int
+addWrappedRust :: Int -> Wrapped -> Int
+applyPy :: (Wrapped -> Int) -> Wrapped -> Int
+mkPy :: Int -> Wrapped
+
+
+crossRust :: Int -> <IO> Int
+crossRust a = do
+  _ <- tick
+  applyRust (\w -> addWrapped a w) (mkRust 10)
+
+crossCpp :: Int -> <IO> Int
+crossCpp a = do
+  _ <- tick
+  applyCpp (\w -> addWrapped a w) (mkCpp 10)
+
+-- the packed type is the closure's RESULT rather than its argument
+resultRust :: Int -> <IO> Int
+resultRust a = do
+  _ <- tick
+  applyMkRust (\x -> mkFrom a x) 10
+
+resultCpp :: Int -> <IO> Int
+resultCpp a = do
+  _ <- tick
+  applyMkCpp (\x -> mkFrom a x) 10

@@ -628,7 +628,8 @@ printRecordImpls name params fields = vsep [toImpl, "", fromImpl]
     -- so the two callers (shm_size, write) share it without cloning the captured
     -- packets twice.
     fieldVal f Nothing = "self." <> f
-    fieldVal f (Just cm) = "self." <> f <> "." <> cmReify cm <> "().unwrap()"
+    fieldVal f (Just cm) =
+      "rustmorloc::require_origin(self." <> f <> "." <> cmReify cm <> "())"
 
     toImpl =
       vsep

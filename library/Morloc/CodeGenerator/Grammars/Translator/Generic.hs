@@ -421,6 +421,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
     cfg =
       LowerConfig
         { lcSrcName = srcNamer
+        , lcApplySrcGroup = \f as -> f <+> tupled as
         , lcSourcedArg = \_ _ _ x -> x
         , lcOwnership = \_ -> return Owned
         , lcArgManifoldOwnership = \_ -> return Owned
@@ -611,7 +612,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
                     let endKw = ldBlockEnd desc
                      in vsep [header, indent 4 (vsep $ wrapError (priorLines <> [body])), pretty endKw]
         , lcClosureSig = \_ -> return ""
-        , lcMakePass = \mname _ ->
+        , lcMakePass = \_sig mname _ ->
             return . pretty $
               substituteT (ldPassTemplate desc)
                 [("fn", render mname), ("mid", T.drop 1 (render mname))]
