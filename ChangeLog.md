@@ -1,6 +1,8 @@
 Unreleased
 ----------
 
+ - a program may import more than one `root-*` module and still use `show`
+   (two instances with the same intrinsic body were reported as conflicting)
  - tables keep their nulls, and date/timestamp/duration, binary, large
    string and nested list columns now cross between pools intact
  - read snappy- and zstd-compressed Parquet files (every common writer's

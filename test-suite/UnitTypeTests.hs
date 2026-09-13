@@ -2734,6 +2734,32 @@ unitValuecheckTests =
            f :: Foo a => a
            f = bar
       |]
+      , valuecheckPass
+          "identical intrinsic bodies across instances pass"
+          [r|
+         module foo (f)
+           class Show a where
+             show :: a -> Str
+           instance Show Int where
+             show x = @show x
+           instance Show Int where
+             show x = @show x
+           f :: Int -> Str
+           f = show
+      |]
+      , valuecheckFail
+          "distinct intrinsic bodies across instances fail"
+          [r|
+         module foo (f)
+           class Show a where
+             show :: a -> Str
+           instance Show Int where
+             show x = @show x
+           instance Show Int where
+             show x = @show 1
+           f :: Int -> Str
+           f = show
+      |]
       ]
 
 {- | Tests for infix operator functionality
