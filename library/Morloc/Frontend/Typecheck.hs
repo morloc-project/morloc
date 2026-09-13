@@ -1300,8 +1300,8 @@ synthE i g (DoBlockS e) = do
   -- like a typeclass method 'random :: forall a. <Random> a' otherwise
   -- appears as ForallU (EffectU ...) and falls into the bareT branch,
   -- producing '<collected> (forall a. <Random> a)' -- a nested effect
-  -- type. Mirrors the stripForallU call in synthE (EvalS ...).
-  let (g1', t1') = stripForallU g1 (apply g1 t1)
+  -- type. Mirrors the forcedView call in synthE (EvalS ...).
+  (g1', t1') <- forcedView i g1 t1
   case t1' of
     EffectU _ iT -> do
       -- Final expr is effectful: wrap it in EvalS so codegen forces the
@@ -1321,7 +1321,7 @@ synthE _ g (CoerceS coercion e) = do
   return (g1, applyCoercion coercion t1, CoerceS coercion e1)
 synthE i g (EvalS e) = do
   (g1, t1, e1) <- synthG g e
-  let (g1', t1') = stripForallU g1 (apply g1 t1)
+  (g1', t1') <- forcedView i g1 t1
   case t1' of
     EffectU _ a -> return (g1', a, EvalS e1)
     ExistU _ _ _ -> do
@@ -1447,6 +1447,21 @@ synthE i g (IntrinsicS intr args) = do
 stripForallU :: Gamma -> TypeU -> (Gamma, TypeU)
 stripForallU g (ForallU v t) = stripForallU (g +> v) (substitute v t)
 stripForallU g t = (g, t)
+
+-- | The type of an expression at a position that runs it: foralls
+-- stripped, and an alias that names a suspension (@type IOInt = <IO> Int@)
+-- expanded so the row is visible.
+forcedView :: Int -> Gamma -> TypeU -> MorlocMonad (Gamma, TypeU)
+forcedView i g t0 = do
+  let (g1, t1) = stripForallU g (apply g t0)
+  case t1 of
+    EffectU _ _ -> return (g1, t1)
+    ExistU _ _ _ -> return (g1, t1)
+    _ -> do
+      scope <- MM.getGeneralScope i
+      return $ case TE.evaluateType scope t1 of
+        Right t2@(EffectU _ _) -> (g1, t2)
+        _ -> (g1, t1)
 
 -- | Peel ForallU layers without touching bound variables. Cheap for
 -- inspecting the underlying constructor of an annotation type (e.g. to
@@ -1989,7 +2004,7 @@ checkE i g (IfS cond thenE elseE) t = do
 -- statement is run, as in 'synthE'.
 checkE i g (DoBlockS e) t@(EffectU _ (EffectU _ _)) = do
   (g1, t1, e1) <- synthG g e
-  let (g1', t1') = stripForallU g1 (apply g1 t1)
+  (g1', t1') <- forcedView i g1 t1
   scope <- MM.getGeneralScope i
   case t1' of
     EffectU _ iT
@@ -2009,7 +2024,7 @@ checkE i g (EvalS e) t = do
   -- then check the inner type against the expected type.
   -- This avoids creating an EffectVar that is never solved.
   (g1, t1, e1) <- synthG g e
-  let (g1', t1') = stripForallU g1 (apply g1 t1)
+  (g1', t1') <- forcedView i g1 t1
   case t1' of
     EffectU _ a -> do
       g2 <- subtype' i a t g1'

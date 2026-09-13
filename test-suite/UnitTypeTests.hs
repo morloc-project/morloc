@@ -9346,6 +9346,33 @@ suspensionLawTests =
         passPlain k = run_t k
           |]
       , expectPass
+          "a bind runs a suspension whose type is an alias"
+          [r|
+        module main (viaAlias)
+        effect IO
+        source Py ("get")
+        type IOInt = <IO> Int
+        get :: Int -> IOInt
+        viaAlias :: Int -> <IO> Int
+        viaAlias n = do
+          x <- get n
+          do x
+          |]
+      , expectPass
+          "a do-block tail of alias type is run"
+          [r|
+        module main (viaAlias)
+        effect IO
+        source Py ("get", "put")
+        type IOInt = <IO> Int
+        get :: Int -> IOInt
+        put :: Int -> <IO> Int
+        viaAlias :: Int -> <IO> Int
+        viaAlias n = do
+          put n
+          get n
+          |]
+      , expectPass
           "do builds the constant suspension that fills it"
           [r|
         module main (passPlain)

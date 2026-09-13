@@ -53,6 +53,7 @@ import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Data.GMap as GMap
 import Morloc.Data.Doc
 import qualified Morloc.Monad as MM
+import qualified Morloc.TypeEval as TE
 
 -- | The calling convention imposed by the surrounding boundary.
 data BoundaryContext
@@ -323,8 +324,11 @@ rewrite _ leaf = return leaf
 -- a variable or a literal is bound outside the suspension, so running the
 -- suspension twice runs the host call twice and nothing else.
 maybeSuspendSourceCall :: PolyExpr -> [PolyExpr] -> MorlocMonad PolyExpr
-maybeSuspendSourceCall fn@(PolyExe (Idx gidx exeT) (SrcCallP src)) xs = do
+maybeSuspendSourceCall fn@(PolyExe (Idx gidx exeT0) (SrcCallP src)) xs = do
   declared <- declaredResultIsSuspension gidx src (length xs)
+  -- The row may be spelled through an alias (@type IOInt = <IO> Int@).
+  scope <- MM.getGeneralScope gidx
+  let exeT = either (const exeT0) unresolvedType2type (TE.evaluateType scope (type2typeu exeT0))
   case appReturn exeT (length xs) of
     Just (EffectT effs ret) | declared -> do
       let fn' = PolyExe (Idx gidx (peelReturn exeT)) (SrcCallP src)
@@ -383,11 +387,14 @@ maybeSuspendSourceCall fn xs = return (PolyApp fn xs)
 -- index may belong to the definition around it; a source with no
 -- signature on record is judged by its instantiated type.
 declaredResultIsSuspension :: Int -> Source -> Int -> MorlocMonad Bool
-declaredResultIsSuspension _ src n = do
+declaredResultIsSuspension gidx src n = do
   sgmap <- MM.gets stateSignatures
+  scope <- MM.getGeneralScope gidx
   let declared = [e | sg <- GMap.elems sgmap, Just e <- [signatureOf sg]]
+      -- The declaration may spell the row through an alias.
+      expanded t = either (const t) id (TE.evaluateType scope t)
   return $ case declared of
-    (e : _) -> suspended (etype e)
+    (e : _) -> suspended (expanded (etype e))
     [] -> True
   where
     signatureOf (Monomorphic (TermTypes (Just e) srcs _))
