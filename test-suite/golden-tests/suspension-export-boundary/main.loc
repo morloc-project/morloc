@@ -1,0 +1,20 @@
+-- The program's caller is a host that has values, not suspensions. A
+-- suspension at the root of a command's argument is built from the value
+-- the caller supplies; the suspension at the root of its result is run for
+-- the caller. A suspension below the root has no such form and is rejected
+-- when the program is built.
+module main (rootReturn, rootArg)
+
+import root-py
+
+source Py from "gen.py" ("nextInt")
+nextInt :: Int -> <IO> Int
+
+rootReturn :: Int -> <IO> Int
+rootReturn k = nextInt k
+
+rootArg :: <IO> Int -> Int -> <IO> Int
+rootArg t n = do
+  a <- t
+  b <- t
+  do (a + b + n)

@@ -618,9 +618,8 @@ solveEff v s g =
 -- effect row carries at most one tail variable. A closed row uses
 -- subsumption (label subset: fewer effects are usable where more are
 -- expected); an open row solves its tail variable so the rows agree.
--- The empty row is the monoid identity, so a pure value (empty left
--- row) simply subsumes into any closed expected row. Once the rows are
--- reconciled, recurse on the carried inner types.
+-- The empty row is a row like any other and is included in every row.
+-- Once the rows are reconciled, recurse on the carried inner types.
 subtypeEffRows ::
   Scope -> EffectSet -> EffectSet -> TypeU -> TypeU -> Gamma -> Either MDoc Gamma
 subtypeEffRows scope e1 e2 i1 i2 g =
@@ -660,10 +659,17 @@ subtypeEffRows scope e1 e2 i1 i2 g =
             then solveEff t1 (EffectSet (Set.difference l2 l1)) g >>= recurse
             else
               subtypeError lhs rhs (missingMsg (Set.difference l1 l2))
-        -- closed <: right open : l2 must fit, solve the tail to the remainder
+        -- closed <: right open : l2 must fit, solve the tail to the remainder.
+        -- The remainder is a lower bound on the tail; when it is empty (the
+        -- left row is <> or already covered) there is nothing to record, and
+        -- the tail stays open for a later constraint to solve.
         ([], [t2]) ->
           if Set.isSubsetOf l2 l1
-            then solveEff t2 (EffectSet (Set.difference l1 l2)) g >>= recurse
+            then
+              let remainder = Set.difference l1 l2
+               in if Set.null remainder
+                    then recurse g
+                    else solveEff t2 (EffectSet remainder) g >>= recurse
             else
               subtypeError lhs rhs (missingMsg (Set.difference l2 l1))
         -- open <: open
@@ -992,23 +998,15 @@ subtype scope a@ExistU {} b@ExistU {} g
 -- EffectU: row-unifying covariant subtyping. Closed rows use subsumption
 -- (<E1> T1 <: <E2> T2 when E1 is a subset of E2); an open row solves its
 -- single tail variable in gammaEffSubs to make the rows agree. See
--- 'subtypeEffRows'. The empty effect set is the monoid identity (<> A ==
--- A), so a left side that solves to empty is treated as its inner type.
+-- 'subtypeEffRows'. The empty row is a row: @<> T <: <E> T@ for every E.
 subtype scope (EffectU e1 i1) (EffectU e2 i2) g = subtypeEffRows scope e1 e2 i1 i2 g
--- Effectful type on the left, non-effectful on the right. The empty
--- effect set is the monoid identity (<> A == A), so a left side that
--- solves to empty is just its inner type. Effects CANNOT fill a
--- polymorphic type variable: a bare existential (a closed type variable
--- from a polymorphic function) is rejected so that identity-style
--- combinators don't silently accept effectful arguments they have no
--- way to discharge. To pass an effectful value through such a
--- combinator, the user must bind it in a do-block first, e.g.
--- @do { x <- e ; f x }@. Functions that are genuinely effect-aware
--- declare their parameters with explicit @<...> a@ row-polymorphic
--- effects; those match the EffectU <: EffectU clause above.
-subtype scope t1@(EffectU e1 i1) t2 g
-  | isEmptyEffectSet (applyEff g e1) = subtype scope i1 t2 g
-  | otherwise =
+-- A suspension is a value like any other, so it instantiates a type
+-- variable. Against any other non-suspension type it is a mismatch: a
+-- suspension is not its result, and only running it (a do-block bind)
+-- yields one.
+subtype scope t1@(EffectU _ _) t2@(ExistU _ ([], _) _) g =
+  occursCheck t2 t1 "InstantiateR" >> instantiate scope t1 t2 g
+subtype _ t1@(EffectU _ _) t2 _ =
       subtypeError t1 t2 $
         "an effectful value cannot be used where a non-effectful type is"
           <+> "expected; bind it in a do-block first (x <- e) and pass"
@@ -1114,20 +1112,6 @@ subtype scope t1@(NamU o1 v1 p1 ((k1, x1) : rs1)) t2@(NamU o2 v2 p2 es2) g0 =
     (Just (_, x2), rs2) ->
       subtype scope x1 x2 g0
         >>= subtype scope (NamU o1 v1 p1 rs1) (NamU o2 v2 p2 rs2)
--- Pure-into-EffectU rule (must precede the generic InstantiateL /
--- InstantiateR arms below). A pure value fits into any effect-typed
--- slot; the effect wrap is transparently absorbed by context. We
--- recurse only on the inner type -- do NOT route through
--- subtypeEffRows, which would over-eagerly solve a row-variable on
--- the RHS to empty (interpreting the contrived empty LHS row as a
--- real constraint) and later force unrelated call sites to that
--- empty solution.
---
--- Fires for both concrete and existential LHS. For an existential
--- LHS this avoids the occurs check that would fire in InstantiateL
--- when the RHS's inner references the same existential (typical
--- @catch fallback shape `fb :: b` vs expected `<e> b`).
-subtype scope a (EffectU _e2 i2) g = subtype scope a i2 g
 --  Ea not in FV(a)
 --  g1[Ea] |- A <=: Ea -| g2
 -- ----------------------------------------- <:InstantiateR
@@ -2841,7 +2825,7 @@ prettyTypeU = renderClean . cleanTypeName
     f _ (AppU (VarU (TV "Tuple6")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
     f _ (AppU (VarU (TV "Tuple7")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
     f _ (AppU (VarU (TV "Tuple8")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-    f _ (EffectU effs t) = prettyEffectSet effs <+> f False t
+    f _ (EffectU effs t) = prettyEffectSet effs <+> layerU t
     f _ (OptionalU t) = "?" <> f False t
     f _ (NatLitU n) = pretty n
     f _ (NatAddU a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
@@ -2898,6 +2882,8 @@ prettyTypeU = renderClean . cleanTypeName
                    then mempty
                    else space <> hsep (map (f False) ps)
       in pretty n <> params
+    layerU t@(EffectU _ _) = parens (f True t)
+    layerU t = f False t
 
 -- | Render two TypeUs with a shared rename pool so distinct freshened
 -- variables get distinct clean names. Without this, calling

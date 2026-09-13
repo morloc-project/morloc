@@ -1274,10 +1274,10 @@ synthE i g (IfS cond thenE elseE) = do
   let t2' = apply g4 t2
       t3' = apply g4 t3
   -- Try strict subtype both directions first (zero-coercion path), then
-  -- fall back to tryCoerce (which handles a -> ?a, a -> <E> a, and chains).
-  -- The principle: a pure value can always be lifted into an effectful
-  -- (or optional) wrapper, so mixed pure/effectful branches unify by
-  -- lifting the pure one. Going the other way is unsafe and not allowed.
+  -- fall back to tryCoerce (which handles a -> ?a and chains). Two
+  -- suspension branches join by row inclusion (<> T <: <E> T); a value
+  -- branch against a suspension branch is a type error, since a value is
+  -- never silently a suspension.
   case subtype scope t3' t2' g4 of
     Right g5 -> return (g5, apply g5 t2, IfS cond' thenE' elseE')
     Left _ -> case subtype scope t2' t3' g4 of
@@ -1311,9 +1311,9 @@ synthE i g (DoBlockS e) = do
       let collected = collectDoEffects e1'
       return (g1', EffectU collected iT, DoBlockS e1')
     bareT -> do
-      -- Pure final: the block's type is <collected> bareT. An empty or
-      -- smaller effect set is a subtype of any expected effect set, so no
-      -- pure-to-effect lift is needed at the use site.
+      -- Pure final: the block returns it, so the block's type is
+      -- <collected> bareT; with nothing forced that is <> bareT, still a
+      -- suspension.
       let collected = collectDoEffects e1
       return (g1', EffectU collected bareT, DoBlockS e1)
 synthE _ g (CoerceS coercion e) = do
@@ -1430,10 +1430,9 @@ synthE _ _ (IntrinsicS IntrWrite args) =
 -- stays pure.
 synthE _ g (IntrinsicS IntrTry [bodyE]) = do
   (g1, bodyT, bodyE') <- synthG g bodyE
-  let (effs, innerT) = case peelForallU (apply g1 bodyT) of
-        EffectU e t -> (e, t)
-        t           -> (emptyEffectSet, t)
-      resultT = mkEffectU effs (BT.tryU BT.strU innerT)
+  let resultT = case peelForallU (apply g1 bodyT) of
+        EffectU e t -> mkEffectU e (BT.tryU BT.strU t)
+        t           -> BT.tryU BT.strU t
   return (g1, resultT, IntrinsicS IntrTry [bodyE'])
 synthE i _ (IntrinsicS IntrTry args) =
   MM.throwCompilerBugAt i $ "IntrTry expects 1 arg (body), got " <> pretty (length args)
@@ -1818,9 +1817,7 @@ application ::
 --  g1 |- A->C o e =>> C -| g2
 application i g0 es0 (FunU as0 b0) = do
   (g1, as1, es1, remainder) <- zipCheck i g0 es0 as0
-  let consumedParams = take (length es0) as0
-      baseFunType    = apply g1 $ FunU (as1 <> remainder) b0
-      funType        = liftAbsorbedEffects g0 g1 consumedParams as1 baseFunType
+  let funType = apply g1 $ FunU (as1 <> remainder) b0
   insetSay $ "remainder:" <+> vsep (map pretty remainder)
   return (g1, funType, es1)
 
@@ -1845,48 +1842,19 @@ application i g0 es (ExistU v@(TV s) ([], _) _) =
         Right Nothing -> return g2
         Right (Just g') -> return g'
       (g4, as1, es', _) <- zipCheck i g3 es eas
-      let baseFun = apply g4 (FunU as1 ea)
-          funType = liftAbsorbedEffects g3 g4 eas as1 baseFun
+      let funType = apply g4 (FunU as1 ea)
       return (g4, funType, es')
     -- if the variable has already been solved, use solved value
     Nothing -> case lookupU v g0 of
       (Just (FunU ts t)) -> do
         (g1, ts', es', _) <- zipCheck i g0 es ts
-        let baseFun = apply g1 (FunU ts' t)
-            funType = liftAbsorbedEffects g0 g1 ts ts' baseFun
+        let funType = apply g1 (FunU ts' t)
         return (g1, funType, es')
       (Just t) -> throwTypeError i $ "Application of term with non-functional type:\n   " <+> prettyTypeU t
       Nothing -> throwTypeError i $ "Expected function, but could not find type of term\n   " <+> pretty v
 application i _ _ t =
   throwTypeError i $
     "Application of non-functional expression of type:" <+> prettyTypeU t
-
--- | Collect effects from consumed args whose *declared* param was a bare
--- existential (the absorbing position created by the EffectU<:ExistU
--- instantiation rule in 'subtype'). Lift those effects onto the terminal
--- output of the residual function type. 'mkEffectU' keeps this
--- idempotent: wrapping an already-effectful terminal merges; an empty
--- set is a no-op. This preserves the invariant that any effect at the
--- top level of an argument's type must reach the terminal output, which
--- the bare-existential subtyping path would otherwise hide inside a
--- consumed (and thus invisible) slot.
-liftAbsorbedEffects
-  :: Gamma             -- pre-zipCheck gamma (declared param shapes here)
-  -> Gamma             -- post-zipCheck gamma (arg solutions here)
-  -> [TypeU]           -- declared params for consumed args
-  -> [TypeU]           -- post-checkG arg types
-  -> TypeU             -- residual function type to wrap
-  -> TypeU
-liftAbsorbedEffects g0 g1 params args fty =
-  let effs = foldr unionEffectSet emptyEffectSet
-        [ topLevelEffects (apply g1 a)
-        | (p, a) <- zip params args
-        , isAbsorbing (apply g0 p)
-        ]
-   in wrapTerminalEffects effs fty
-  where
-    isAbsorbing (ExistU _ _ _) = True
-    isAbsorbing _              = False
 
 -- Tip together the arguments passed to an application
 zipCheck ::
@@ -2013,6 +1981,29 @@ checkE i g (IfS cond thenE elseE) t = do
 -- DoBlockS falls through to the general synth+subtype/coerce case (below).
 -- synthE DoBlockS produces a flattened EffectU, and subtype handles effectful
 -- finals via <E1> T <: <E2> T, while tryCoerce handles pure-final auto-lift.
+-- A do-block checked against a two-layer suspension @<E> (<E'> T)@ is the
+-- outer layer, and its final statement, itself a suspension, may be
+-- returned rather than run: this is the only way to build a suspension
+-- that yields a suspension. When the returned reading does not fit (the
+-- final statement is itself two layers deep, so @do t@ is @t@), the
+-- statement is run, as in 'synthE'.
+checkE i g (DoBlockS e) t@(EffectU _ (EffectU _ _)) = do
+  (g1, t1, e1) <- synthG g e
+  let (g1', t1') = stripForallU g1 (apply g1 t1)
+  scope <- MM.getGeneralScope i
+  case t1' of
+    EffectU _ iT
+      | Right g2 <- subtype scope (EffectU (collectDoEffects e1) t1') t g1' ->
+          return (g2, apply g2 t, DoBlockS e1)
+      | otherwise -> do
+          e1' <- wrapFinalEvalS i iT e1
+          let blockT = EffectU (collectDoEffects e1') iT
+          g2 <- subtype' i blockT t g1'
+          return (g2, apply g2 t, DoBlockS e1')
+    bareT -> do
+      let blockT = EffectU (collectDoEffects e1) bareT
+      g2 <- subtype' i blockT t g1'
+      return (g2, apply g2 t, DoBlockS e1)
 checkE i g (EvalS e) t = do
   -- Synthesize first to get concrete EffectSet in annotations,
   -- then check the inner type against the expected type.
@@ -2741,29 +2732,16 @@ checkListNatDims g _ _ = return g
 -- Returns a list of coercions (inside-out) and the resulting gamma.
 -- Recursion terminates when the target is not OptionalU.
 tryCoerce :: Scope -> TypeU -> TypeU -> Gamma -> Maybe ([Coercion], Gamma)
--- Widen through matching effect wrappers: @<E> T@ coerces to @<E> ?T@ by
--- widening the inner value type. Mirrors subtype's effect handling
--- (Morloc.Typecheck.Internal, the EffectU <: EffectU rule). This is what
--- lets a do-block or @catch result (always @<E> T@) satisfy a declared
--- @<E> ?T@ return. The rows must already agree after substitution -- they
--- do for a synthesized result checked against a concrete declared type;
--- open-row tails simply decline (no widening, unchanged behaviour). The
--- inner OptionalU is placed under the EffectU by 'applyCoercion'.
+-- Widen through effect wrappers: @<E1> T@ coerces to @<E2> ?T@ by
+-- widening the inner value type, when the closed row E1 is included in
+-- the closed row E2 (the same inclusion the EffectU <: EffectU subtype
+-- rule uses). This is what lets a do-block result satisfy a declared
+-- @<E> ?T@ return. Open-row tails decline. The inner OptionalU is placed
+-- under the EffectU by 'applyCoercion'.
 tryCoerce scope (EffectU e1 i1) (EffectU e2 i2) g
-  | applyEff g e1 == applyEff g e2 = tryCoerce scope i1 i2 g
--- Pure source into an effectful target: a pure value inhabits any effect
--- slot (effects are capabilities), so peel the target effect and coerce the
--- inner value. Mirrors subtype's Pure-into-EffectU rule
--- (Morloc.Typecheck.Internal). This is what lets a bare value arm of an
--- effect-typed conditional widen to the declared optional inner, e.g.
--- @? c = @throw : x@ against @<Err> ?Int@ where @x :: Int@. An effectful
--- source is excluded (the both-effectful clause above handles a matching
--- pair; a mismatched effectful source must not silently drop its effects).
-tryCoerce scope a (EffectU _ i2) g
-  | not (isEffectful a) = tryCoerce scope a i2 g
+  | closedIncluded (applyEff g e1) (applyEff g e2) = tryCoerce scope i1 i2 g
   where
-    isEffectful EffectU{} = True
-    isEffectful _         = False
+    closedIncluded a b = not (effectSetHasVar a) && not (effectSetHasVar b) && effectSubsetOf a b
 tryCoerce scope a (OptionalU b) g =
   case subtype scope a b g of
     Right g' -> Just ([CoerceToOptional], g')

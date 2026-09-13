@@ -12,9 +12,8 @@ Exercises the local pure combinators the boundary pass depends on:
   * 'boundaryExpectsPlain': every 'BoundaryContext' returns the
     documented calling convention.
 
-  * The 'cancelPolyEval' peephole: @Force ∘ Suspend = id@ and the
-    "force on a plain value is a no-op" rule that the retired
-    'pushForceIntoRemote' used to establish structurally.
+  * The 'cancelPolyEval' peephole: Force . Suspend = id, and a force on a
+    plain value is dropped.
 
 Property-shaped tests for the Poly-stage rewrite ('insertEffectBoundaries')
 are covered by the paired golden tests
@@ -71,8 +70,8 @@ boundaryContextTests =
         boundaryExpectsPlain CallbackReturn @?= True
     , testCase "SourceCall is pass-through (as-declared)" $
         boundaryExpectsPlain SourceCall @?= False
-    , testCase "SerializeSink expects plain (wire input)" $
-        boundaryExpectsPlain SerializeSink @?= True
+    , testCase "SerializeSink is pass-through (a suspension crosses as a closure)" $
+        boundaryExpectsPlain SerializeSink @?= False
     ]
 
 polyOuterTypeTests :: TestTree

@@ -19,13 +19,13 @@ plainThrow :: ()
 plainThrow = @throw "PLAIN: boom"
 
 interpThrow :: Str -> ()
-interpThrow s = do
+interpThrow s =
   let shown = py_show_len s
-  @throw "INTERP: #{s} n=#{shown}"
+  in @throw "INTERP: #{s} n=#{shown}"
 
 guardThrow :: Str -> Int
-guardThrow s = do
+guardThrow s =
   let n = py_len s
-  let shown = py_show_len s
-  ? n < 4 = @throw "GUARD: too short n=#{shown}"
-  : n
+      shown = py_show_len s
+  in ? n < 4 = @throw "GUARD: too short n=#{shown}"
+     : n

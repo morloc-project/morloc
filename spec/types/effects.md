@@ -36,7 +36,7 @@ An effect set is one of:
 - a variable, used internally during inference
 - a union of two effect sets
 
-The order of labels is irrelevant. Duplicates collapse. The empty effect set marks a value as pure but suspended (rare in practice; pure values normally have no annotation at all).
+The order of labels is irrelevant. Duplicates collapse. The empty row is a row: `<> T` is a suspension that performs nothing, a distinct type from `T`. A do-block that forces nothing has this type.
 
 ## Subtyping
 
@@ -58,50 +58,89 @@ a :: <IO> Int
 a = rint                  -- type error: Error is not in <IO>
 ```
 
-Pure types are subtypes of any effect type via coercion (see below), but the reverse coercion from `<E> T` to `T` is not available. The only way to extract a pure `T` from a suspended `<E> T` is to force it inside a do-block.
+There is no coercion between `T` and `<E> T` in either direction. The only way from `<E> T` to `T` is to run it inside a do-block, and the only way from `T` to `<E> T` is `do v` (see "The law" below).
 
 See [[subtyping.md]] for the full subtyping relation.
 
-## Pure-to-Effect Coercion
+## The law
 
-A pure value lifts implicitly to any effect type:
+Morloc's suspensions follow call-by-push-value. Every term denotes a value;
+`<E> T` is the value `U(F_E T)`: a thunk of a computation that may perform
+the effects in `E` and yields a `T`. The rules:
 
-```
-  T  coerces to  <E> T   for any E
-```
+1. **Two sorts.** `T` and `<E> T` are different types with no coercion
+   either way. Effect labels index `F`; a row is an upper bound on what a
+   run may do; rows compare by inclusion; the compiler gives labels no
+   operational meaning.
 
-This is what makes the trailing expression of a do-block work without an explicit `pure`:
+2. **Introduction.** `do { s1; ...; sn; tail }` builds the thunk
+   `thunk(s1; ...; sn; tail')`. It is the only construct that builds a
+   suspension from statements and the only place `return` appears: a pure
+   tail `v` is `return v`; a suspension tail `t` is `force t` (so
+   `do t = t`). A `do` that forces nothing still builds a thunk:
+   `do 42 :: <> Int`. This is the only lift: `foo (do 42)` fills a
+   `<e> Int` slot; `foo 42` is a type error.
 
-```morloc
-mkConfig :: Real -> Int -> <Rand> Config
-mkConfig lr bs = do
-  seed <- randint 0 999999
-  {lr = lr, bs = bs, seed = seed}
-```
+3. **Elimination.** `x <- t` is `force t to x`; a bare statement is
+   `force t to _`. Nothing else runs a suspension: not application, not
+   binding, not projection, not passing, not returning, not crossing a
+   pool. `!e` is sugar for a `<-` at the nearest enclosing do-block.
+   Forcing a value that is not a suspension is a type error.
 
-The final record literal is pure; it coerces to `<Rand> Config` to match the declared return.
+4. **Per use.** Every force runs the computation again. The compiler
+   never shares, hoists, memoizes, duplicates or drops a run. Pure work is
+   call-by-value and may be reordered; only row work is ordered. The
+   timing of a pure abort (a `@throw`, a host exception) is unspecified.
 
-The lift inserts a thunk wrapper at compile time. At runtime, forcing the thunk just yields the pure value.
+5. **Application.** `f x` where `f :: A -> <E> C` denotes
+   `thunk((force f) x)`; it runs nothing. Pure application is eager.
+   Arguments are values: a pure argument expression is evaluated once at
+   the application and captured; a suspension argument is captured as a
+   thunk.
 
-### Design rationale: capabilities, not commitments
+6. **Rows.** `<E1> T1 <: <E2> T2` iff `E1` is a subset of `E2` and `T1 <: T2`. A row
+   variable with no other constraint is `<>` at ground. `<E> (<E'> T)` is
+   two thunk layers, never merged with `<E,E'> T`; it is written only with
+   parentheses (`<E> <E'> T` is a parse error), and a do-block builds one
+   when it is checked against that type: its suspension tail is then
+   returned rather than run.
 
-Two readings of `<E> T` exist in the effect-typing literature:
+7. **Positions.** A suspension is the same value in every position:
+   argument, parameter, `let`, return, record field, list element, sum
+   arm, optional payload, instance of a type variable, wire. In every
+   pool it is a closure of no arguments and shares all of `A -> B`'s
+   machinery, including crossing a pool boundary as a closure that calls
+   back to its home pool once per run.
 
-- **Commitment**: `<E> T` means "this value DOES perform E." Pure values are structurally distinct and must be lifted with `pure`/`return`. Haskell (`IO`), Idris `Eff`, Frank, and Effekt take this position.
-- **Capability**: `<E> T` means "this value MAY perform E." The row is an upper bound on permitted effects, not a claim about performed effects. A pure value inhabits any effect slot trivially. Koka takes this position; so does Morloc.
+8. **The host adapter.** A host language has no thunks: calling is
+   forcing. At a sourced function the compiler translates:
+   `eager[[D]] = D`; `eager[[<E> R]] = () -> eager[[R]]`;
+   `eager[[A -> R]] = eager[[A]] -> eager[[R]]`, with the terminal `<E>`
+   absorbed into the call. So `f :: A -> B -> <E> C` is called as
+   `f(x, y)`, `g :: B -> <E> C` as `g(y)`, and `h :: <E> C` as `h()`;
+   `f x` on the morloc side is the thunk of that call; a morloc function
+   handed to a host at an `A -> <E> C` slot is passed as `\a -> force(g a)`;
+   a suspension handed to a host is the callable itself. The program's
+   caller is a host too: a suspension at the root of a command's argument
+   is built from the value supplied, the suspension at the root of its
+   result is run for the caller, and a suspension below the root of
+   either is rejected when the program is built. A remote pool is not a
+   host: nothing is adapted, the callee's entry point runs one layer, and
+   the caller holds `thunk(rpc)`.
 
-Morloc chose capabilities because:
+9. **Instrumentation.** A directive on a suspension (`log@action`,
+   benchmark labels, `cache: true` on an effectful manifold) wraps the
+   run, never the application, which is free. `cache@` builds an
+   idempotent suspension by the user's explicit choice.
 
-1. **Ergonomics.** `pure` at every boundary is noise. A bare alternative in a `match` over a fallible result should not require `pure`. Do-block trailing expressions should not require `pure`. Pure exports like `foo :: <IO> Int; foo = 42` should typecheck without ceremony.
+10. **Handlers.** `escapable effect E` means E has handlers; only a
+    sourced function can be one (`<E, e> a -> <e> a`), and it discharges
+    only effects of its own language. The inescapable-argument rule is a
+    lint on declared signatures.
 
-2. **No correctness issue.** Subsumption `E1 ⊆ E2` is monotone in the "more effects" direction; a pure value is the trivial case that uses none of the granted capabilities. The reading is internally consistent.
-
-3. **The "dishonesty" objection dissolves.** A literal `4 :: <Rand> Int` is not a lie under the capability reading — 4 names a value in the set of random-Int outcomes where the probability of 4 is exactly 1. The same intuition already applies to classical subtyping: `5 :: Number` is not dishonest despite 5 being an integer.
-
-### Implementation site
-
-The pure-into-EffectU subtype rule lives in `library/Morloc/Typecheck/Internal.hs`, above the InstantiateL arm. It fires for both concrete and existential LHS; the existential case is what lets a bare value fill a `<e> b` slot when `b` is still unsolved, as in a helper that matches a `Try` returned by a polymorphic-row callback.
-
+Vocabulary: `<E> T` is a *suspension*; `E` is its *row* of *effects*. A
+suspension is never "erased", "stripped" or "an annotation on `T`"; it is
+only ever run.
 
 ## Forcing Effects
 
@@ -119,20 +158,24 @@ do
 
 A do-block has type `<E> T` where `E` is the union of effects of all forced sub-expressions and `T` is the type of the trailing expression.
 
-### Unit force
+### Inline force
 
-The `!` prefix operator forces a single suspended value at expression position:
-
-```morloc
-!randint 0 9   :: Int
-```
-
-A `!e` expression has the inner type of `e` but propagates `e`'s effect set to the enclosing term. Using `!` inside a function body widens that function's effect set:
+The `!` prefix operator is sugar for a `<-` bind at the nearest enclosing do-block: `!e` in an expression is `x <- e` inserted above the statement that contains it, with `x` in its place.
 
 ```morloc
 addRand :: Int -> <Rand> Int
-addRand x = x + !randint 0 9
+addRand x = do (x + !randint 0 9)
 ```
+
+desugars to
+
+```morloc
+addRand x = do
+  r <- randint 0 9
+  x + r
+```
+
+so the effect is performed by the do-block that contains the `!`, which must exist and must carry the row.
 
 If the enclosing function's declared effect set does not cover the forced effect, the program is rejected (see [[#effect-checking]]).
 
@@ -141,21 +184,19 @@ If the enclosing function's declared effect set does not cover the forced effect
 The effect set of an expression is determined structurally:
 
 ```
-  effects(x)             =  E      where x has type <E> T
-  effects(x)             =  {}     where x has pure type
+  effects(x)             =  {}     holding a suspension performs nothing
   effects(f a)           =  effects(f) union effects(a)
-  effects(!e)            =  effects(e)
+                                   the call-by-value work of the arguments
+  effects(x <- t)        =  E      where t has type <E> T
+  effects(!e)            =  effects(e <- ...)
   effects(\x. e)         =  effects(e) minus effects bound by lambdas under e
   effects(let x = e1 in e2)
                          =  effects(e1) union effects(e2)
-  effects(do { ... })    =  union of effects of all forced sub-expressions
-  effects({f1 = e1, ...})  =  {} if all ei pure; otherwise the record is ill-typed
-                              (use a do-block to construct effectful records)
-  effects(<E> T literal annotation)
-                         =  E
+  effects(do { ... })    =  union of effects of all forced statements
+  effects({f1 = e1, ...})  =  union of effects(ei); a field may hold a suspension
 ```
 
-Effects do *not* propagate through unforced thunks. A reference to `randint :: Int -> Int -> <Rand> Int` in a position where the function value itself is the meaning (e.g. passing it as an argument) carries no effect; only application or forcing does.
+Only a force performs effects. A reference to `randint :: Int -> Int -> <Rand> Int`, a suspension held in a variable, a suspension stored in a record or list, and an application `randint 0 9` all carry no effect; the effect appears where the suspension is run.
 
 ## Effect Checking
 
@@ -195,7 +236,7 @@ g :: <Rand> Int -> Int
 g x = f x                           -- ERROR: <Rand> not in <IO, Error>
 ```
 
-**Declared-but-unused (allowed, may warn).** The signature lists effects the body does not introduce. The pure-to-effect coercion lifts the body silently; this is sometimes intentional (forward-compatible stubs). A future `-Weffect-declared-unused` may flag it.
+**Declared-but-unused (allowed, may warn).** The signature lists effects the body does not introduce, as in `stub :: Int -> <IO> Int; stub k = do (k + 1)`, whose body is a `<> Int` and satisfies `<IO> Int` by row inclusion. This is sometimes intentional (forward-compatible stubs). A future `-Weffect-declared-unused` may flag it. The body must still be a suspension: `stub k = k + 1` is a type error.
 
 ## Source Signatures
 
@@ -211,8 +252,7 @@ The compiler does not validate these claims; they are an assertion by the librar
 ## Restrictions
 
 - Effect labels in source signatures are required; the compiler does not infer them across the FFI boundary.
-- Effects cannot be parameterized (no `forall e. <e> T`); generic higher-order combinators accept effectful arguments through normal unification (`(a -> b)` with `b = <E> T`).
-- Effects in record and tuple literals are disallowed; construct effectful records inside a do-block.
+- A row may carry one variable (`<IO, e> T`); a suspension instantiates a type variable like any other value (`id (randint 0 9)`, a list `[<Rand> Int]`, a record field).
 - Failure is NOT an effect. A fallible operation returns `Try e a` (declared in the `internal` module) and `@try` converts an otherwise-uncaught native throw into one; there is no `Err` effect and no `@catch`. An effect row describes what a call may DO, and failing is a property of what it returns.
 
 ## See Also

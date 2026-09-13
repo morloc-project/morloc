@@ -17,7 +17,7 @@ dec :: Int -> Int
 
 run :: Int -> [Int] -> Int -> <IO> Int
 run n xs acc
-  ? n == 0 = acc
+  ? n == 0 = do acc
   : do
       logIt xs
       let (xs', c) = step xs

@@ -31,19 +31,20 @@ type Py => Int = "int"
 foo :: Int -> <Error> Int
 
 -- runs a suspended <Error> computation and discharges the (escapable)
--- Error effect, returning -1 on failure
+-- Error effect, returning -1 on failure. What it hands back is still a
+-- suspension, with the row that remains: here the empty row.
 handleError :: <Error, e> a -> <e> a
 
-gDirect :: Int -> Int
+gDirect :: Int -> <> Int
 gDirect x = handleError (foo x)
 
-gDoWrap :: Int -> Int
+gDoWrap :: Int -> <> Int
 gDoWrap x = do { handleError (foo x) }
 
-gDoForce :: Int -> Int
+gDoForce :: Int -> <> Int
 gDoForce x = handleError (do { v <- foo x ; v })
 
-gDoBind :: Int -> Int
+gDoBind :: Int -> <> Int
 gDoBind x = handleError (do { foo x })
 
 -- handleError takes an explicitly effect-typed parameter (<Error, e> a),

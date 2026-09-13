@@ -44,6 +44,7 @@ import Morloc.CodeGenerator.Segment (segment)
 import Morloc.CodeGenerator.Serial (checkPackerCoherence)
 import Morloc.CodeGenerator.Reduce (reduce)
 import Morloc.CodeGenerator.Serialize (serialize)
+import Morloc.CodeGenerator.Suspension (lowerSuspensions)
 import qualified Morloc.Data.DAG as DAG
 import qualified Morloc.Frontend.API as F
 import Morloc.Frontend.AutoRequire (autoRequire)
@@ -116,7 +117,7 @@ generatePools rASTs0 = do
     >>= mapM (\ph -> do
                  ph' <- insertEffectBoundaries ph
                  checkEffectBoundaries ph'
-                 return ph')
+                 lowerSuspensions ph')
     >>= mapM segment |>> concat
     >>= mapM serialize
     >>= mapM reduce
@@ -188,7 +189,7 @@ writeProgram translateFn path code = do
             >>= mapM (\ph -> do
                          ph' <- insertEffectBoundaries ph
                          checkEffectBoundaries ph'
-                         return ph')
+                         lowerSuspensions ph')
             >>= mapM segment |>> concat
             >>= mapM serialize
             >>= mapM reduce

@@ -1,0 +1,33 @@
+--- heldValue ---
+takeThunk received a callable
+nextInt 1
+nextInt 1
+takeThunk received a callable
+nextInt 1
+nextInt 1
+28
+--- expression ---
+takeThunk received a callable
+nextInt 1
+nextInt 1
+14
+--- carried ---
+0
+--- forced ---
+nextInt 1
+7
+--- sink ---
+savePoint [2]
+savePoint [1]
+--- sinkCpp ---
+savePoint [2]
+savePoint [1]
+--- inRecord ---
+nextInt 1
+nextInt 1
+14
+--- inOptional ---
+nextInt 1
+7
+--- absent ---
+-1

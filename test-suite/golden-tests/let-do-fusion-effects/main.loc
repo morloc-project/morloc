@@ -4,17 +4,15 @@
 --
 -- Hazards probed:
 --   1. <IO> effects on a chain whose statements come from multiple langs.
---      pushForceIntoRemote in Express.hs strips EffectT from the cross-
---      language manifold's return type so the remote pool returns the
---      forced concrete type. This must keep working when fusion changes
---      the chain's manifold structure.
+--      A remote callee's entry point runs one layer of its result so the
+--      remote pool returns the value ('ForeignCalleeReturn'). This must
+--      keep working when fusion changes the chain's manifold structure.
 --   2. Multi-label effects (<IO, Error>) on a fused do-block. The chain's
 --      effect set must be inferred from its statements; if Realize picks
 --      a lang based on bindings only, multi-label effect inference must
 --      not change.
---   3. Pure expression at the tail of an effectful do-block (must coerce
---      from `a` to `<IO> a` via CoerceToEffect; the coercion site must
---      survive fusion).
+--   3. Pure expression at the tail of an effectful do-block (the block
+--      returns it; the return must survive fusion).
 -- ============================================================================
 
 module main

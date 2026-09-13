@@ -1,13 +1,11 @@
 -- Regression: @catch whose FALLBACK is a do-block that carries no
 -- residual effect (an empty-row do-block).
 --
--- @catch strips the Err row from its fallible; when nothing else
--- remains the whole expression is plain-typed. A do-block fallback is
--- already a thunk (a DoBlockN) whose stored type is that plain inner
--- type, so a thunk-shaping test gated on "type == EffectF" misses it
--- and wraps it a second time into a thunk-that-returns-a-thunk. The
--- pool's catch helper does `return fallback()`, which then yields the
--- inner lambda instead of the value. Unlike C++/Rust (which fail to
+-- A do-block fallback arm is a suspension, and so is the Ok arm written
+-- as `do _cv`; the match joins two suspensions of the same type and the
+-- export boundary runs the chosen one. A fallback wrapped a second time
+-- (a suspension of a suspension) would yield the inner closure instead
+-- of the value. Unlike C++/Rust (which fail to
 -- compile), a Python pool returns that callable with no error, so the
 -- defect surfaces only at RUNTIME: the returned closure fails to
 -- serialize / prints as the wrong value. A build-only test would pass
@@ -35,14 +33,14 @@ source Py from "helper.py" ("py_maybe_list")
 py_maybe_list :: Str -> [Int]
 
 catchListDoFb :: Str -> <IO> [Int]
-catchListDoFb s = match (@try (py_maybe_list s)) | (Ok _cv) = _cv | (Err _) = (do [])
+catchListDoFb s = match (@try (py_maybe_list s)) | (Ok _cv) = (do _cv) | (Err _) = (do [])
 
 catchListDoFbOpt :: Str -> <IO> ?[Int]
-catchListDoFbOpt s = match (@try (py_maybe_list s)) | (Ok _cv) = _cv | (Err _) = (do [])
+catchListDoFbOpt s = match (@try (py_maybe_list s)) | (Ok _cv) = (do _cv) | (Err _) = (do [])
 
 catchLetDoFb :: Str -> <IO> [Int]
 catchLetDoFb s = match (@try (py_maybe_list s))
-  | (Ok _cv) = _cv
+  | (Ok _cv) = (do _cv)
   | (Err _) = (do
       let x = 7
       [x, x])

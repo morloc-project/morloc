@@ -363,14 +363,26 @@ getFData (t, i, lang, doc, sockets) = do
 -- the same AST at the call sites, so 'validateArgSpecs' (operating on
 -- the AST) and the manifest emitter (operating on the rendered text)
 -- never go out of sync.
+-- | The wire forms of a command's arguments and result. The program's
+-- caller is a host that only has values: a suspension at the root of an
+-- argument is built from the value it supplies, and the suspension at the
+-- root of the result is run for it, so both cross the boundary as their
+-- result type. A suspension below the root has no such form
+-- ('checkExportedHigherOrder' rejects it before this runs).
 makeSerialASTs :: Int -> Lang -> Type -> MorlocMonad ([SerialAST], SerialAST)
 makeSerialASTs mid lang (FunT ts t) = do
-  ss <- mapM (makeSerialAST mid lang) ts
-  s <- makeSerialAST mid lang t
+  ss <- mapM (makeSerialAST mid lang . hostRoot) ts
+  s <- makeSerialAST mid lang (hostRoot t)
   return (ss, s)
 makeSerialASTs mid lang t = do
-  s <- makeSerialAST mid lang t
+  s <- makeSerialAST mid lang (hostRoot t)
   return ([], s)
+
+-- | The type a value has on the host side of the program boundary: the
+-- result of a root suspension, the value itself otherwise.
+hostRoot :: Type -> Type
+hostRoot (EffectT _ t) = t
+hostRoot t = t
 
 makeSerialAST :: Int -> Lang -> Type -> MorlocMonad SerialAST
 makeSerialAST mid lang t = do
@@ -589,10 +601,22 @@ checkExportedHigherOrder i name t = case findOffender t of
         ((n, a) : _) -> Just ("argument" <+> pretty n <+> "is a function", a)
         [] | Serial.containsFunT ret ->
              Just ("return type contains a function", ret)
-           | otherwise -> Nothing
+           | otherwise -> case [(n, a) | (n, a) <- zip [1 :: Int ..] ts, nestedSuspension a] of
+               ((n, a) : _) -> Just ("argument" <+> pretty n <+> "holds a suspension below its root", a)
+               [] | nestedSuspension ret ->
+                    Just ("return type holds a suspension below its root", ret)
+                  | otherwise -> Nothing
     findOffender ty
       | Serial.containsFunT ty = Just ("exported value is or contains a function", ty)
+      | nestedSuspension ty = Just ("exported value holds a suspension below its root", ty)
       | otherwise = Nothing
+
+    -- A suspension at the root of an argument or result is adapted at the
+    -- program boundary (built from, or run for, the caller); one nested in
+    -- a container, an optional or another suspension has no value form the
+    -- caller could send or receive.
+    nestedSuspension :: Type -> Bool
+    nestedSuspension = Serial.containsEffectT . hostRoot
 
 -- | An applied type constructor: either a `data` type whose parameters must
 -- be instantiated before its arms are walked, or an alias to expand.
@@ -751,6 +775,17 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- Used by every IFile-routing case in toNexusExpr (BracketSlice,
     -- BracketIndex, PatternStruct) so the path-encoding logic is in one
     -- place.
+    -- A suspension held as a value has no representation in the nexus
+    -- evaluator, which has no closure values; it must be run in place
+    -- (bound with <-) or realized in a pool.
+    heldSuspension :: MDoc -> AnnoS (Indexed Type) One () -> MorlocMonad ()
+    heldSuspension how (AnnoS (Idx ix (EffectT _ _)) _ _) =
+      MM.throwSourcedError ix $
+        "A suspension" <+> how <+> "in code the program evaluates itself cannot be held:"
+          <+> "the evaluator runs a suspension where it is written and cannot run it later."
+          <+> "Run it first (x <- e), or give the function a language (source) so a pool holds it."
+    heldSuspension _ _ = return ()
+
     emitIFileWalkX
       :: Type
       -> AnnoS (Indexed Type) One ()
@@ -825,11 +860,15 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
           emitIFileWalkX t rE steps []
       | otherwise =
           AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [rE]
-    toNexusExpr (AnnoS (Idx _ t) _ (AppS e es)) = AppX <$> type2schema t <*> toNexusExpr e <*> mapM toNexusExpr es
+    toNexusExpr (AnnoS (Idx _ t) _ (AppS e es)) = do
+      mapM_ (heldSuspension "passed as an argument") es
+      AppX <$> type2schema t <*> toNexusExpr e <*> mapM toNexusExpr es
     toNexusExpr (AnnoS _ _ (LamS vs e)) = LamX (map (render . pretty) vs) <$> toNexusExpr e
     toNexusExpr (AnnoS (Idx _ (FunT _ t)) _ (ExeS (PatCall p))) = PatX <$> type2schema t <*> pure p
     toNexusExpr (AnnoS (Idx _ t) _ (BndS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
-    toNexusExpr (AnnoS (Idx _ t) _ (LstS es)) = LstX <$> type2schema t <*> mapM toNexusExpr es
+    toNexusExpr (AnnoS (Idx _ t) _ (LstS es)) = do
+      mapM_ (heldSuspension "stored in a list") es
+      LstX <$> type2schema t <*> mapM toNexusExpr es
     -- TupS construction. Multi-field patterns are no longer fragmented
     -- at desugar time (they emit a unified PatCall (PatternStruct ...)
     -- instead), so any TupS reaching here is a user-written tuple
@@ -880,6 +919,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS (Idx _ t) _ (LetBndS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
     -- Desugar let to lambda application: let x = e1 in e2 -> (\x -> e2) e1
     toNexusExpr (AnnoS (Idx _ t) _ (LetS v e1 body)) = do
+      heldSuspension "bound with let" e1
       schema <- type2schema t
       bodyX <- toNexusExpr body
       e1X <- toNexusExpr e1
@@ -889,6 +929,11 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
           <*> toNexusExpr cond
           <*> toNexusExpr thenB
           <*> toNexusExpr elseB
+    -- The nexus evaluator has no closure values, so it runs a suspension
+    -- where it is written. That is the law's own rule at a force, since
+    -- running a suspension just built is running its body; every other
+    -- position, where the suspension would be held and run later, zero
+    -- times or more than once, is refused above.
     toNexusExpr (AnnoS _ _ (DoBlockS e)) = toNexusExpr e
     toNexusExpr (AnnoS _ _ (EvalS e)) = toNexusExpr e
     -- CoerceToOptional changes the value's runtime layout: the voidstar

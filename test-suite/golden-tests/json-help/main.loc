@@ -118,7 +118,7 @@ formatLines xs = printEach xs
 
 --' Join all strings into one semicolon-separated summary
 summarize :: [Str] -> <IO> Str
-summarize xs = joinSemi xs
+summarize xs = do (joinSemi xs)
 
 --' Read the lines of a file
 --' with: -l/--lines=formatLines

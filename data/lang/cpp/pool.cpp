@@ -1010,12 +1010,15 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
 // stored in a std::function<R(A...)> and when a template HOF deduces its type
 // directly; and it carries the manifold id + captured-value reifier so that,
 // when it crosses a boundary, reify can recover (home_language, mid, captured).
+// A closure reflected from another pool is a MorlocClosure too, whose
+// `home` names that pool: reifying it hands back the origin it came with.
 template <class Sig> struct MorlocClosure;
 template <class R, class... A>
 struct MorlocClosure<R(A...)> {
     std::function<R(A...)> fn;
     int64_t mid;
     std::function<std::vector<std::vector<uint8_t>>()> reify_captured;
+    std::string home = "cpp";
     R operator()(A... args) const { return fn(args...); }
 };
 
@@ -1051,7 +1054,7 @@ _mlc_reify(const std::function<R(A...)>& f) {
     if (clo == nullptr) {
         throw MorlocException("cannot reify a non-morloc C++ closure");
     }
-    return std::make_tuple(std::string("cpp"), clo->mid, clo->reify_captured());
+    return std::make_tuple(clo->home, clo->mid, clo->reify_captured());
 }
 
 

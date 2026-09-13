@@ -855,7 +855,6 @@ instance Typelike Type where
   normalizeType (EffectT effs t) = EffectT effs (normalizeType t)
   -- An optional never wraps an effect: <E> ?T is the canonical form, so
   -- push an OptionalT under a directly-nested EffectT.
-  normalizeType (OptionalT (EffectT effs t)) = mkEffectT effs (OptionalT (normalizeType t))
   normalizeType (OptionalT t) = OptionalT (normalizeType t)
   normalizeType (NatAddT a b) = NatAddT (normalizeType a) (normalizeType b)
   normalizeType (NatMulT a b) = NatMulT (normalizeType a) (normalizeType b)
@@ -1046,7 +1045,6 @@ instance Typelike TypeU where
   normalizeType (EffectU effs t) = mkEffectU effs (normalizeType t)
   -- An optional never wraps an effect: <E> ?T is the canonical form, so
   -- push an OptionalU under a directly-nested EffectU.
-  normalizeType (OptionalU (EffectU effs t)) = mkEffectU effs (OptionalU (normalizeType t))
   normalizeType (OptionalU t) = OptionalU (normalizeType t)
   normalizeType t@(NatVarU _) = t
   -- Unified carriers: recurse into payload so nested forms are normalized.
@@ -1557,27 +1555,15 @@ mkSize c = OpU OpSize [c]
 mkProjectField :: TypeU -> TypeU -> TypeU
 mkProjectField r f = OpU OpProjectField [r, f]
 
--- | Smart constructor for an effectful type. The empty effect set is the
--- monoid identity (@<> A == A@) so a provably-empty set returns the inner
--- type directly. Nested effectful types are flattened so the invariant
--- "an EffectU never directly wraps another EffectU" holds everywhere.
+-- | A suspension type @<E> T@ with its row normalized. The empty row is a
+-- row: @<> T@ is a thunk yielding a @T@, not a @T@. A row over a
+-- suspension is a second layer, never merged with the first.
 mkEffectU :: EffectSet -> TypeU -> TypeU
-mkEffectU es t =
-  let es' = normalizeEffectSet es
-   in if isEmptyEffectSet es'
-        then t
-        else case t of
-               EffectU es2 t2 -> mkEffectU (unionEffectSet es' es2) t2
-               _ -> EffectU es' t
+mkEffectU es t = EffectU (normalizeEffectSet es) t
 
--- | Ground-level companion to 'mkEffectU'. An empty label set collapses
--- to the inner type; nested 'EffectT' are merged.
+-- | Ground-level companion to 'mkEffectU'.
 mkEffectT :: Set.Set EffectLabel -> Type -> Type
-mkEffectT ls t
-  | Set.null ls = t
-  | otherwise = case t of
-      EffectT ls2 t2 -> mkEffectT (Set.union ls ls2) t2
-      _ -> EffectT ls t
+mkEffectT = EffectT
 
 type2typeu :: Type -> TypeU
 type2typeu (VarT v) = VarU v
@@ -1720,10 +1706,10 @@ instance Pretty Type where
       f _ (AppT (VarT (TV "Tuple6")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
       f _ (AppT (VarT (TV "Tuple7")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
       f _ (AppT (VarT (TV "Tuple8")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
+      -- A row over a suspension is a second layer and is parenthesized so
+      -- it cannot be read as a row union.
       f _ (EffectT effs t) =
-        -- mkEffectT collapses an empty label set to the inner type, so a
-        -- surviving EffectT always carries at least one label.
-        "<" <> hcat (punctuate "," (map pretty (Set.toList effs))) <> ">" <+> f False t
+        "<" <> hcat (punctuate "," (map pretty (Set.toList effs))) <> ">" <+> layer t
       f _ (OptionalT t) = "?" <> f False t
       f _ (NatLitT n) = pretty n
       f _ (NatAddT a b) = "(" <> f True a <+> "+" <+> f True b <> ")"
@@ -1750,6 +1736,8 @@ instance Pretty Type where
                      then mempty
                      else space <> hsep (map (f False) ps)
         in pretty n <> params
+      layer t@(EffectT _ _) = parens (f True t)
+      layer t = f False t
 
 -- | Walk a chain of nested 'RecExtendU' nodes and return its leaf fields
 -- in source order plus the eventual tail expression (typically
@@ -1785,7 +1773,7 @@ instance Pretty TypeU where
       f _ (AppU (VarU (TV "Tuple6")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
       f _ (AppU (VarU (TV "Tuple7")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
       f _ (AppU (VarU (TV "Tuple8")) ts) = encloseSep "(" ")" ", " (map (f True) ts)
-      f _ (EffectU effs t) = prettyEffectSet effs <+> f False t
+      f _ (EffectU effs t) = prettyEffectSet effs <+> layerU t
       f _ (OptionalU t) = "?" <> f False t
       f _ NatVoidU = "_"
       f _ (StrVarU v) = pretty v
@@ -1858,6 +1846,8 @@ instance Pretty TypeU where
                      then mempty
                      else space <> hsep (map (f False) ps)
         in pretty n <> params
+      layerU t@(EffectU _ _) = parens (f True t)
+      layerU t = f False t
 
 instance Pretty EType where
   pretty (EType t (Set.toList -> cs) _ _) = case cs of

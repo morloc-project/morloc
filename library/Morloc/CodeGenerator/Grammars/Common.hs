@@ -44,6 +44,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , serialClosuresOf
   , collectSerialObjects
   , computeClosureSchemas
+  , closureSchemaTexts
   , orNativeType
   , collectLogLabels
   , collectManifoldIds
@@ -651,7 +652,6 @@ collectRecords e0@(SerialManifold i0 _ _ _ _) =
     seekRecs m (AppF t ts) = concatMap (seekRecs m) (t : ts)
     seekRecs _ (UnkF _) = []
     seekRecs _ (VarF _) = []
-    seekRecs m (EffectF _ t) = seekRecs m t
     seekRecs m (OptionalF t) = seekRecs m t
     seekRecs _ (NatLitF _) = []
     seekRecs _ NatVoidF = []
@@ -821,7 +821,7 @@ collectClosureManifolds = runIdentity . surroundFoldSerialManifoldM defaultValue
         { opFoldWithNativeManifoldM = \orig folded ->
             let NativeManifold_ _ _ form child = folded
              in return $
-                  if not (null (manifoldBound form)) then orig : child else child
+                  if isClosureForm form then orig : child else child
         }
 
 -- | Every 'SerialClosure' AST that is serialized (reified across a language
@@ -892,13 +892,15 @@ collectSerialObjects = concatMap serialObjectsOf . allSerialASTs
 
 -- | For each nested closure in the given manifolds, compute its serial wire
 -- schemas: the captured (context) arg schemas, the bound (remaining) arg
--- schemas, and the result schema. Keyed by the closure's manifold id. The
--- native def takes @captured ++ bound@ in that order. These drive both the
--- home-pool serial dispatch wrapper (deserialize captured ++ bound -> call the
--- native closure -> serialize result) and the reify path (serialize only the
--- captured values into the wire tuple).
+-- wire forms, and the result wire form. Keyed by the closure's manifold id.
+-- The native def takes @captured ++ bound@ in that order. These drive both
+-- the home-pool serial dispatch wrapper (decode captured ++ bound -> call the
+-- native closure -> encode result) and the reify path (encode only the
+-- captured values into the wire tuple). A form that is itself a closure (an
+-- argument or result of function type, a suspension among them) is rendered
+-- by each language as a closure codec rather than a schema string.
 computeClosureSchemas ::
-  Lang -> [SerialManifold] -> MorlocMonad (Map.Map Int ([Text], [Text], Text))
+  Lang -> [SerialManifold] -> MorlocMonad (Map.Map Int ([SerialAST], [SerialAST], SerialAST))
 computeClosureSchemas lang sms =
   Map.fromList <$> mapM one (filter isNativeContext (concatMap collectClosureManifolds sms))
   where
@@ -912,6 +914,9 @@ computeClosureSchemas lang sms =
     -- native closure to reify; a wrapper for it would mismatch those parameters.
     isNativeContext (NativeManifold _ _ form _) = all isNativeArg (typeMofForm form)
     isNativeArg (Arg _ (Native _)) = True
+    -- A captured or bound function value (a closure, a suspension among
+    -- them) is native too; it crosses reified inside this closure's tuple.
+    isNativeArg (Arg _ (Function _ _)) = True
     isNativeArg _ = False
 
     one nm@(NativeManifold i _ form _) = do
@@ -920,13 +925,17 @@ computeClosureSchemas lang sms =
           resT = case typeFof nm of
             FunF _ out -> out
             other -> other
-      capSchemas <- mapM (schemaOf i) ctxTs
-      bndSchemas <- mapM (schemaOf i) bndTs
-      resSchema <- schemaOf i resT
-      return (i, (capSchemas, bndSchemas, resSchema))
+      capAsts <- mapM (makeSerialAST i lang) ctxTs
+      bndAsts <- mapM (makeSerialAST i lang) bndTs
+      resAst <- makeSerialAST i lang resT
+      return (i, (capAsts, bndAsts, resAst))
 
-    schemaOf :: Int -> TypeF -> MorlocMonad Text
-    schemaOf i t = render . serialAstToMsgpackSchema <$> makeSerialAST i lang t
+-- | A closure table entry rendered as plain wire schemas: captured, bound,
+-- result. For a member whose runtime reads schema strings only.
+closureSchemaTexts :: ([SerialAST], [SerialAST], SerialAST) -> ([Text], [Text], Text)
+closureSchemaTexts (caps, bnds, res) = (map schemaText caps, map schemaText bnds, schemaText res)
+  where
+    schemaText = render . serialAstToMsgpackSchema
 
 -- | The native ('R'/'LR') type carried by a context arg, or 'Nothing' for a
 -- serial-only ('L') arg. Used by the closure passes to pull the captured

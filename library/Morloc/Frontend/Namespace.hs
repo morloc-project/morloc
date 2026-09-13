@@ -84,6 +84,7 @@ copyState oldIdx newIdx = do
       { statePackageMeta = statePackageMeta s
       , stateVerbosity = stateVerbosity s
       , stateCounter = stateCounter s
+      , stateManifoldCounter = stateManifoldCounter s
       , stateDepth = stateDepth s
       , stateSignatures = updateGMap (stateSignatures s)
       , stateTypeclasses = stateTypeclasses s

@@ -7,12 +7,20 @@ Copyright   : (c) Zebulun Arendsee, 2016-2026
 License     : Apache-2.0
 Maintainer  : z@morloc.io
 
+A suspension @<E> T@ is a value distinct from @T@: a thunk of a
+computation, a closure of no arguments in every pool. Only a force runs
+it, and every force runs it again. The one place eagerness enters is the
+host adapter: a host language has no thunks, so at a sourced function the
+compiler suspends the host call (its result is declared @<E> T@) and runs
+a morloc callback's result for the host ('CallbackReturn'); at the
+program boundary it runs the root of a command's result and builds a
+constant suspension from a command's argument.
+
 Every position in the codegen IR sits under some /boundary/ -- the
 outermost export return, an argument to a foreign consumer, the receive
-slot of a cross-language RPC, a wire serializer, etc. Each boundary
-imposes a calling convention on the value at that position: either a
-plain 'T' or a thunk '<E> T' (represented in every target language as
-a nullary callable).
+slot of a cross-language RPC, etc. Each boundary imposes a calling
+convention on the value at that position: either the result of a run
+(a plain 'T') or the suspension itself.
 
 The module centralises the invariant with two passes:
 
@@ -39,10 +47,10 @@ module Morloc.CodeGenerator.EffectBoundary
   , insertExportBoundaries
   , boundaryExpectsPlain
   , polyOuterType
-  , forceSerializedThunk
   ) where
 
 import Morloc.CodeGenerator.Namespace
+import qualified Morloc.Data.GMap as GMap
 import Morloc.Data.Doc
 import qualified Morloc.Monad as MM
 
@@ -72,7 +80,8 @@ data BoundaryContext
     -- position must be suspended to match the declared type.
     SourceCall
   | -- | Input to a wire serializer ('SerializeS', 'AppPoolS' arg
-    -- position): must be a plain value; a thunk here must be forced.
+    -- position). A suspension here crosses as a closure, like any
+    -- function value; nothing is forced.
     SerializeSink
   deriving (Eq, Show)
 
@@ -88,7 +97,7 @@ boundaryExpectsPlain ForeignCalleeReturn  = True
 boundaryExpectsPlain ForeignCallerReceive = False
 boundaryExpectsPlain CallbackReturn       = True
 boundaryExpectsPlain SourceCall           = False
-boundaryExpectsPlain SerializeSink        = True
+boundaryExpectsPlain SerializeSink        = False
 
 -- | The outer 'Type' of a 'PolyExpr' node, if derivable. 'PolyApp'
 -- collapses a 'FunT'-typed head to its return. 'PolyIf' folds branches
@@ -141,7 +150,7 @@ hasOuterEffect _             = False
 
 -- | Post-'insertEffectBoundaries' invariant check. Walks the tree; at
 -- every 'plain'-expecting boundary ('ExportRoot',
--- 'ForeignCalleeReturn', 'CallbackReturn', 'SerializeSink') the
+-- 'ForeignCalleeReturn', 'CallbackReturn') the
 -- declared type must have no outer 'EffectT'. Any violation is a
 -- compiler bug -- either the insertion pass missed a row or the row's
 -- rewrite is incorrect.
@@ -230,6 +239,7 @@ descend m _ (PolyList _ _ xs) = mapM_ (walk m LocalRoot) xs
 descend m _ (PolyTuple _ xs) = mapM_ (walk m LocalRoot . snd) xs
 descend m _ (PolyRecord _ _ _ rs) = mapM_ (walk m LocalRoot . snd . snd) rs
 descend m _ (PolyIntrinsic _ _ xs) = mapM_ (walk m LocalRoot) xs
+descend m _ (PolyVariant _ _ _ xs) = mapM_ (walk m LocalRoot) xs
 -- Walk the loop body at the enclosing ctx: base leaves (forced to plain by
 -- 'rewrite's loop case) flow to that boundary; a 'PolyLoopContinue' leaf is
 -- control flow with 'polyOuterType' = Nothing, so it never trips the boundary
@@ -259,9 +269,7 @@ rewrite m (PolyApp fn xs) = do
   -- crossing -- forces the closure's result at its own consumption site,
   -- so intra-pool closures are left as thunks.
   let xs'' = if isSrcCallHead fn' then map maybeForceCallbackArg xs' else xs'
-  return
-    . maybeSuspendRemoteReceive
-    $ maybeSuspendSourceCall fn' xs''
+  maybeSuspendRemoteReceive <$> maybeSuspendSourceCall fn' xs''
 rewrite _ (PolyManifold l m' f k e) = do
   e' <- rewrite m' e
   return $ PolyManifold l m' f k e'
@@ -277,11 +285,7 @@ rewrite m (PolyEval t e) = do
   e' <- rewrite m e
   return $ cancelPolyEval t e'
 rewrite m (PolyCoerce c t e)    = PolyCoerce c t <$> rewrite m e
-rewrite m (PolyIf c t' e) = do
-  c'  <- rewrite m c
-  t'' <- rewrite m t'
-  e'  <- rewrite m e
-  return $ suspendMixedIfBranches m c' t'' e'
+rewrite m (PolyIf c t' e) = PolyIf <$> rewrite m c <*> rewrite m t' <*> rewrite m e
 -- Force the loop's base leaves so their <IO> is discharged before the
 -- serialize sink / export boundary (the continue leaves are control flow and
 -- are left unforced by 'forceReturnPosition's loop case).
@@ -295,6 +299,7 @@ rewrite m (PolyRecord o v ps rs) =
     mapM (\(k,(t,x)) -> (,) k . (,) t <$> rewrite m x) rs
 rewrite m (PolyIntrinsic t intr xs) =
   PolyIntrinsic t intr <$> mapM (rewrite m) xs
+rewrite m (PolyVariant t n i xs) = PolyVariant t n i <$> mapM (rewrite m) xs
 rewrite _ leaf = return leaf
 
 -- | If a 'PolyApp' of a source call has an application-result type
@@ -312,14 +317,52 @@ rewrite _ leaf = return leaf
 --
 -- Partial applications (arity mismatch) are left untouched; their
 -- result type is a function type, not a value at a boundary.
-maybeSuspendSourceCall :: PolyExpr -> [PolyExpr] -> PolyExpr
-maybeSuspendSourceCall fn@(PolyExe (Idx gidx exeT) (SrcCallP src)) xs =
+--
+-- The arguments are values: each is computed once, at the application,
+-- and the suspension captures the result. An argument that is not already
+-- a variable or a literal is bound outside the suspension, so running the
+-- suspension twice runs the host call twice and nothing else.
+maybeSuspendSourceCall :: PolyExpr -> [PolyExpr] -> MorlocMonad PolyExpr
+maybeSuspendSourceCall fn@(PolyExe (Idx gidx exeT) (SrcCallP src)) xs = do
+  declared <- declaredResultIsSuspension gidx src (length xs)
   case appReturn exeT (length xs) of
-    Just (EffectT effs ret) ->
+    Just (EffectT effs ret) | declared -> do
       let fn' = PolyExe (Idx gidx (peelReturn exeT)) (SrcCallP src)
-       in PolyDoBlock (Idx gidx (EffectT effs ret)) (PolyApp fn' xs)
-    _ -> PolyApp fn xs
+          argTypes = case exeT of
+            FunT ins _ -> map Just ins
+            _ -> repeat Nothing
+      (binds, xs') <- unzip <$> zipWithM bindArg argTypes xs
+      let suspended = PolyDoBlock (Idx gidx (EffectT effs ret)) (PolyApp fn' xs')
+      return $ foldr (\(i, e) body -> PolyLet i e body) suspended (concat binds)
+    _ -> return (PolyApp fn xs)
   where
+    bindArg _ x | isAtom x = return ([], x)
+    bindArg mt x = do
+      i <- MM.getCounter
+      -- A callback's result was forced for the host ('maybeForceCallbackArg'),
+      -- so the value bound here has the peeled function type.
+      let t = case mt of
+            Just ty -> Idx gidx (peelCallbackResult ty)
+            Nothing -> Idx gidx (maybe (VarT (TV "Unit")) id (polyOuterType x))
+      return ([(i, x)], PolyLetVar t i)
+
+    -- Mirrors 'maybeForceCallbackArg', which descends into lists, tuples and
+    -- records of callbacks.
+    peelCallbackResult (FunT ins (EffectT _ r)) = FunT ins r
+    peelCallbackResult (AppT c ts) = AppT c (map peelCallbackResult ts)
+    peelCallbackResult (NamT o v ps rs) = NamT o v ps [(k, peelCallbackResult ft) | (k, ft) <- rs]
+    peelCallbackResult ty = ty
+
+    isAtom (PolyBndVar _ _) = True
+    isAtom (PolyLetVar _ _) = True
+    isAtom (PolyInt _ _) = True
+    isAtom (PolyReal _ _) = True
+    isAtom (PolyStr _ _) = True
+    isAtom (PolyLog _ _) = True
+    isAtom (PolyNull _) = True
+    isAtom (PolyEnum _ _ _) = True
+    isAtom _ = False
+
     appReturn (FunT ins ret) n | n == length ins = Just ret
     appReturn (FunT _ _) _ = Nothing
     appReturn t 0 = Just t
@@ -328,35 +371,58 @@ maybeSuspendSourceCall fn@(PolyExe (Idx gidx exeT) (SrcCallP src)) xs =
     peelReturn (FunT ins (EffectT _ ret)) = FunT ins ret
     peelReturn (EffectT _ ret)            = ret
     peelReturn t                          = t
-maybeSuspendSourceCall fn xs = PolyApp fn xs
+maybeSuspendSourceCall fn xs = return (PolyApp fn xs)
 
--- | 'ForeignCallerReceive' Suspend. When a cross-language RPC value is
--- received back into the caller pool, the wire format has stripped the
--- '<E>' layer (see 'makeSerialAST'' 'EffectF' case in Serial.hs). If
--- the caller-side 'PolyRemoteInterface' still declares an outer
--- 'EffectT', the deserialized plain value must be re-wrapped so the
--- enclosing manifold's declared return type still matches its body.
---
--- Peels ALL outer 'EffectT' layers -- one 'PolyDoBlock' per layer -- so
--- nested '<E1><E2> T' is handled if it ever appears ('mkEffectT'
--- flattens in practice, but the peeler doesn't rely on that).
+-- | Whether the source function's own signature declares its result, after
+-- the given number of arguments, as a suspension. The host adapter applies
+-- to that declaration: the host function is eager and its call is the body
+-- of the suspension. A result that is a type variable instantiated to a
+-- suspension (an instance method such as an index access) is a value the
+-- host hands back as it is, a thunk among them, and is not adapted. The
+-- signature is found by the source it implements, since the call's own
+-- index may belong to the definition around it; a source with no
+-- signature on record is judged by its instantiated type.
+declaredResultIsSuspension :: Int -> Source -> Int -> MorlocMonad Bool
+declaredResultIsSuspension _ src n = do
+  sgmap <- MM.gets stateSignatures
+  let declared = [e | sg <- GMap.elems sgmap, Just e <- [signatureOf sg]]
+  return $ case declared of
+    (e : _) -> suspended (etype e)
+    [] -> True
+  where
+    signatureOf (Monomorphic (TermTypes (Just e) srcs _))
+      | any (sameSource . snd) srcs = Just e
+    signatureOf (Polymorphic _ _ e ts)
+      | any (any (sameSource . snd) . termConcrete) ts = Just e
+    signatureOf _ = Nothing
+    -- The host function itself: its name in its language and file, whatever
+    -- alias a module gives it.
+    sameSource (Idx _ s) = srcName s == srcName src && srcPath s == srcPath src && srcLang s == srcLang src
+    suspended t = case resultAfter (peelForall t) of
+      Just (EffectU _ _) -> True
+      _ -> False
+    peelForall (ForallU _ t) = peelForall t
+    peelForall t = t
+    resultAfter (FunU ins ret)
+      | n == length ins = Just ret
+      | n < length ins = Just (FunU (drop n ins) ret)
+      | otherwise = Nothing
+    resultAfter t
+      | n == 0 = Just t
+      | otherwise = Nothing
+
+-- | 'ForeignCallerReceive' Suspend. A remote call whose result is a
+-- suspension is itself the suspension on the caller's side: the callee's
+-- entry point runs one layer ('ForeignCalleeReturn'), so the caller holds
+-- a thunk whose body is the call, and forcing it is the call. The
+-- interface's own type is the value the wire carries: one layer peeled.
 maybeSuspendRemoteReceive :: PolyExpr -> PolyExpr
 maybeSuspendRemoteReceive
     (PolyApp (PolyRemoteInterface lang (Idx gidx t) argIds rf inner) xs)
-  | EffectT _ _ <- t =
-      wrapPeeled gidx t
-        (PolyApp (PolyRemoteInterface lang (Idx gidx (peelAllEffects t))
-                                       argIds rf inner) xs)
-  where
-    wrapPeeled g (EffectT effs inner') e =
-      PolyDoBlock (Idx g (EffectT effs inner')) (wrapPeeled g inner' e)
-    wrapPeeled _ _ e = e
+  | EffectT _ inner' <- t =
+      PolyDoBlock (Idx gidx t)
+        (PolyApp (PolyRemoteInterface lang (Idx gidx inner') argIds rf inner) xs)
 maybeSuspendRemoteReceive e = e
-
--- | Peel every outer 'EffectT' layer.
-peelAllEffects :: Type -> Type
-peelAllEffects (EffectT _ inner) = peelAllEffects inner
-peelAllEffects t = t
 
 -- | Peephole cancellation for 'PolyEval'. If the value reached after
 -- unwrapping any adjacent 'PolyDoBlock' is already plain, drop the
@@ -373,42 +439,6 @@ cancelPolyEval t e =
    in case polyOuterType inner of
         Just innerT | not (hasOuterEffect innerT) -> inner
         _                                         -> PolyEval t e
-
--- | Mixed-effect 'PolyIf' branch Suspend. If the folded outer type of a
--- 'PolyIf' has an 'EffectT' (per 'polyOuterType' 's "at-least-as-
--- effectful-as-most-effectful-branch" rule), every branch that is
--- itself plain must be wrapped in 'PolyDoBlock' so its runtime shape
--- (a nullary callable in every target language) agrees with the other
--- branches -- and with any surrounding assignment @T ni = branch;@
--- where @T@ is the guard's thunk type.
---
--- Without this rule, C++ emits @std::function<int()> helper = 42;@ on
--- a pure branch and gcc rejects the assignment. Python and R happen to
--- accept the same shape (int / integer assigned to a variable), so the
--- runtime bug is a C++-first regression, but the rule fires in every
--- language uniformly for consistency.
---
--- The 'Idx m' index is the ambient 'PolyManifold' 's midx, threaded
--- through 'rewrite'; the effect layer at this position is just
--- typedef-lookup context for downstream lowering.
-suspendMixedIfBranches :: Int -> PolyExpr -> PolyExpr -> PolyExpr -> PolyExpr
-suspendMixedIfBranches m cond thenB elseB =
-  case polyOuterType (PolyIf cond thenB elseB) of
-    Just guardT
-      | hasOuterEffect guardT ->
-          PolyIf cond (suspendIfPlain m guardT thenB) (suspendIfPlain m guardT elseB)
-    _ -> PolyIf cond thenB elseB
-  where
-    -- 'PolyDoBlock' is already a thunk at codegen regardless of its
-    -- stored type ('mkEffectT' can collapse '<{}> T = T', so the type
-    -- may say plain while the runtime shape is a lambda). Wrapping
-    -- again would produce a lambda-of-lambda; check structurally
-    -- instead of by 'polyOuterType' alone.
-    suspendIfPlain m' guardT branch = case branch of
-      PolyDoBlock{} -> branch
-      _ -> case polyOuterType branch of
-        Just t | not (hasOuterEffect t) -> PolyDoBlock (Idx m' guardT) branch
-        _                               -> branch
 
 -- | 'CallbackReturn' Force. A closure passed as an argument to a foreign
 -- source call is invoked as @f(x)@ by the source implementation, which
@@ -446,18 +476,16 @@ maybeForceCallbackArg (PolyRecord nt v ts fs) =
     [(k, (peelCallbackType t, maybeForceCallbackArg x)) | (k, (t, x)) <- fs]
 maybeForceCallbackArg e = e
 
--- | Peel every 'EffectT' layer off the RETURN of a function-typed element, so
+-- | Peel one 'EffectT' layer off the RETURN of a function-typed element, so
 -- @Int -> \<E\> ()@ becomes @Int -> ()@. Mirrors the value-level force of a
--- callback ('forceReturnPosition' / 'forceLayers'): once the closure value is
--- forced, the slot that holds it must carry the plain (peeled) type. A no-op on
--- any non-effectful or non-function type.
+-- callback ('forceReturnPosition' / 'forceLayers'): once the closure's
+-- result is run, the slot that holds it must carry the peeled type. A no-op
+-- on any non-effectful or non-function type.
 peelCallbackType :: Indexed Type -> Indexed Type
 peelCallbackType (Idx i t) = Idx i (peel t)
   where
-    peel (FunT ins ret) = FunT ins (peelEff ret)
+    peel (FunT ins (EffectT _ inner)) = FunT ins inner
     peel other = other
-    peelEff (EffectT _ inner) = peelEff inner
-    peelEff other = other
 
 -- | A lambda-shaped manifold form (an unapplied or partially-applied
 -- function value), as opposed to a saturated 'ManifoldFull' call.
@@ -489,76 +517,43 @@ forceReturnPosition m (PolyLoop t ids e) = PolyLoop t ids (goLoop e)
     goLoop (PolyIf c a b) = PolyIf c (goLoop a) (goLoop b)
     goLoop (PolyLet i v x) = PolyLet i v (goLoop x)
     goLoop cont@(PolyLoopContinue _) = cont
-    -- A base that just returns a loop-carried slot is a PLAIN value, not a
-    -- suspended computation: under the capability model a plain 'T' is already a
-    -- valid '<E> T', so there is no thunk to force ('acc()' would be wrong).
-    -- Strip the spurious outer effect from the slot's stored type and leave it
-    -- unforced. Restricted to a bare carried-var reference (index in the loop's
-    -- 'ids'); a genuine-thunk base (e.g. 'let t = srcIO acc in t', where 't' is
-    -- NOT a carried id) still routes to 'forceReturnPosition' and IS forced.
-    -- Shared root with 'Serialize.patchCarriedForm': the carried slot is
-    -- effect-typed from a base occurrence while the continue reassigns a plain
-    -- 'T'. The principled fix (type the slot by its continue type at the source)
-    -- would collapse both peels; until then keep them cross-referenced.
-    goLoop base = case stripCarriedBase base of
-      (Just base') -> base'
-      Nothing -> forceReturnPosition m base
-
-    stripCarriedBase (PolyReturn x) = PolyReturn <$> stripCarriedBase x
-    stripCarriedBase (PolyBndVar three i)
-      | i `elem` ids = (\three' -> PolyBndVar three' i) <$> stripThreeEffect three
-    stripCarriedBase (PolyLetVar (Idx ix ty) i)
-      | i `elem` ids = (\ty' -> PolyLetVar (Idx ix ty') i) <$> stripPlainEffect ty
-    stripCarriedBase _ = Nothing
-
-    stripThreeEffect (B ty) = B <$> stripPlainEffect ty
-    stripThreeEffect (C (Idx ix ty)) = (\ty' -> C (Idx ix ty')) <$> stripPlainEffect ty
-    stripThreeEffect _ = Nothing
-
-    -- Strip one outer effect layer, but only from a non-function value (an
-    -- effect-typed closure accumulator must keep its force/native representation).
-    stripPlainEffect (EffectT _ inner)
-      | not (isFunT inner) = Just inner
-    stripPlainEffect _ = Nothing
-
-    isFunT (FunT {}) = True
-    isFunT _ = False
+    goLoop base = forceReturnPosition m base
 forceReturnPosition m e =
   case polyOuterType e of
     Just t | hasOuterEffect t -> forceLayers m t e
     _ -> e
 
--- | One 'PolyEval' per 'EffectT' layer. Peephole-cancels adjacent
--- 'PolyDoBlock' at the head so @Force . Suspend = id@.
+-- | Force exactly one layer: running a suspension yields its result,
+-- which may itself be a suspension. Peephole-cancels a 'PolyDoBlock' at
+-- the head so @Force . Suspend = id@.
 forceLayers :: Int -> Type -> PolyExpr -> PolyExpr
-forceLayers m (EffectT _ inner) (PolyDoBlock _ inside) =
-  forceLayers m inner inside
-forceLayers m (EffectT _ inner) e =
-  forceLayers m inner (PolyEval (Idx m inner) e)
+forceLayers _ (EffectT _ _) (PolyDoBlock _ inside) = inside
+forceLayers m (EffectT _ inner) e = PolyEval (Idx m inner) e
 forceLayers _ _ e = e
 
--- | Export-boundary pass. Called from 'Morloc.CodeGenerator.Express.express'
--- with the export's full 'Type' (which 'PolyHead' does not carry). Handles
--- two boundaries in one visit:
+-- | Entry-point boundary pass. Called from
+-- 'Morloc.CodeGenerator.Express.express' with the manifold's full 'Type'
+-- (which 'PolyHead' does not carry). Handles two boundaries in one visit:
 --
---   * 'ExportArg' Suspend: every 'PolyBndVar' reference to an arg whose
---     declared type is 'EffectT' is wrapped in 'PolyDoBlock'. The wire
---     delivers the CLI arg as a plain value (peeled), so the manifold
---     body must re-suspend it before the manifold's own '<E> T' uses
---     invoke it as a thunk.
+--   * 'ExportArg' Suspend, for a command only: the program's caller is a
+--     host that has values, not suspensions, so an argument declared
+--     '<E> T' arrives as a plain 'T' and every reference to it is wrapped
+--     in 'PolyDoBlock', a suspension with a constant result. A helper's
+--     arguments arrive from another manifold, a suspension among them as
+--     a closure, and need no adapting.
 --
 --   * 'ExportRoot' Force: the manifold body's return position is walked
---     (through 'PolyReturn' / 'PolyLet' / 'PolyManifold') and every
---     'EffectT' layer of the declared return type is forced -- one
---     'PolyEval' per layer -- so the wire ships a plain value.
+--     (through 'PolyReturn' / 'PolyLet' / 'PolyManifold') and a root
+--     'EffectT' of the declared return type is run -- one 'PolyEval' --
+--     so the wire ships the value the caller asked for.
 --
 -- Kept separate from 'insertEffectBoundaries' because the export type
 -- is not stored in 'PolyHead'; 'Express.express' calls both passes,
--- with the export 'Type' threaded here explicitly.
-insertExportBoundaries :: Int -> Type -> PolyHead -> PolyHead
-insertExportBoundaries cidx t (PolyHead lang midx args body) =
+-- with the 'Type' threaded here explicitly.
+insertExportBoundaries :: Bool -> Int -> Type -> PolyHead -> PolyHead
+insertExportBoundaries isCommand cidx t (PolyHead lang midx args body) =
   let inputTs = case t of FunT inputs _ -> inputs; _ -> []
-      thunkArgIds = [ann a | (a, EffectT _ _) <- zip args inputTs]
+      thunkArgIds = [ann a | isCommand, (a, EffectT _ _) <- zip args inputTs]
       retT = case t of FunT _ ret -> ret; t' -> t'
       body' = suspendThunkArgs thunkArgIds body
       body'' = forceExportReturn cidx retT body'
@@ -603,25 +598,13 @@ insertExportBoundaries cidx t (PolyHead lang midx args body) =
       | otherwise = e
 
 -- | 'ForeignCalleeReturn' Force. The callee of a 'PolyRemoteInterface'
--- runs in a foreign pool and must ship a plain value across the wire;
--- 'makeSerialAST'' strips 'EffectF' from the wire schema, so a
--- callee-side thunk in the return position would serialise as an
--- unserializable callable (Python 'lambda', C++ 'std::function', etc.)
--- and the caller-side deserialize would fail. The 'SourceCall' Suspend
--- rule and this Force are cancelled by the 'forceLayers' peephole when
--- they meet at a source call return.
+-- runs in a foreign pool; its entry point is the run of one layer of its
+-- result, whose value ships across the wire, while the caller holds the
+-- call itself as a suspension ('maybeSuspendRemoteReceive'). The
+-- 'SourceCall' Suspend rule and this Force are cancelled by the
+-- 'forceLayers' peephole when they meet at a source call return.
 forceCalleeBody :: PolyExpr -> PolyExpr
 forceCalleeBody (PolyManifold l m f k body) =
   PolyManifold l m f k (forceReturnPosition m body)
 forceCalleeBody e = e
 
--- | 'SerializeSink' peephole. When a value about to cross the wire is
--- a bare 'DoBlockN', wrap it in 'EvalN' so the serializer sees a plain
--- value, not a callable. Sources of 'DoBlockN' at a serialize sink
--- today are effect-tagged intrinsics ('@save', '@load'), cross-language
--- RPC receiver-side wraps, and 'PolyDoBlock' at a position the upstream
--- 'PolyEval' insertion did not cover. Kept at 'NativeExpr' granularity
--- because two of those three sources are NativeExpr-only concerns.
-forceSerializedThunk :: NativeExpr -> NativeExpr
-forceSerializedThunk ne@(DoBlockN _ inner) = EvalN (typeFof inner) ne
-forceSerializedThunk ne = ne

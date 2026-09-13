@@ -177,8 +177,8 @@ guardMultiCpp :: Int -> <IO, Error> Int
 guardMultiCpp x
   ? x > 100 = cppMaybeError x
   ? x >  10 = cppAddOne x
-  ? x >   0 = cppPureAdd x 1000
-  :           cppPureAdd 0 0
+  ? x >   0 = do (cppPureAdd x 1000)
+  :           do (cppPureAdd 0 0)
 
 -- (8) R-side nested guard whose inner branches themselves contain
 -- effectful '<-' binds. R's 'function() expr' thunk shape is exercised
@@ -191,7 +191,7 @@ nestedGuardR x
       ? y > 100 = do
           z <- rAddOne y
           z + 5000
-      : y
+      : do y
   : do 0
 
 -- (9) The same source called twice inside a do-block. Each '<-' binding
@@ -205,11 +205,10 @@ thunkForcedTwicePy = do
   b <- pyCounter
   a + b
 
--- (10) Cross-language optional-of-thunk: R produces '<IO> ?Int', Cpp
--- consumes the optional through 'cppFromNull'. Tests the wire schema's
--- treatment of an OptionalF-inside-EffectF-inside-EffectF (well:
--- EffectF stripped, so OptionalF direct) crossing two language
--- boundaries, and the receiver-manifold's Suspend re-wrap.
+-- (10) Cross-language suspension of an optional: R produces '<IO> ?Int',
+-- Cpp consumes the optional through 'cppFromNull'. The remote callee runs
+-- the suspension and ships the optional; the caller holds the call as a
+-- suspension of '?Int' across two language boundaries.
 crossOptRToCpp :: Int -> <IO> Int
 crossOptRToCpp x = do
   m <- rReadOpt x
@@ -219,15 +218,9 @@ crossOptRToCpp x = do
 -- Slot-level subsumption exports (11-20)
 ------------------------------------------------------------
 
--- (11-13) Function-argument position was omitted from this file after
--- attempting to write 'argPure* = pyApplyThunk 42' etc. The
--- typechecker rejected the arg-slot subsumption with "Missing
--- concrete": 'CoerceToEffect' was retired in the effect-system
--- redesign, so 'Int' is NOT a subtype of '<IO> Int' at argument
--- position. Pure->effect promotion is only implicit in the row-poly
--- LUB at 'IfS' branches (which is what today's 'suspendMixedIfBranches'
--- rule addresses); at every other position the user must lift
--- explicitly through a source that constructs the thunk.
+-- (11-13) A value never fills a suspension slot: 'pyApplyThunk 42' is a
+-- type error. The suspension is written `do 42`, or comes from a
+-- source that builds it.
 argPurePy :: <IO> Int
 argPurePy = pyApplyThunk (pyAddOne 41)
 

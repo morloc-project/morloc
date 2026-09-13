@@ -142,6 +142,11 @@ data MorlocState = MorlocState
   { statePackageMeta :: [PackageMeta]
   , stateVerbosity :: Int
   , stateCounter :: Int
+  , stateManifoldCounter :: Int
+    -- ^ The next free manifold index. Manifold indices come from the
+    -- frontend's expression indices; a manifold that code generation
+    -- creates after the counter is reused for variables takes its index
+    -- from here, seeded above every index the frontend allotted.
   , stateDepth :: Int
   , stateSignatures :: GMap Int Int SignatureSet
   , stateTypeclasses :: Map.Map EVar Instance
@@ -891,6 +896,7 @@ instance Defaultable MorlocState where
       { statePackageMeta = []
       , stateVerbosity = 0
       , stateCounter = -1
+      , stateManifoldCounter = 0
       , stateDepth = 0
       , stateSignatures = GMap Map.empty Map.empty
       , stateTypeclasses = Map.empty

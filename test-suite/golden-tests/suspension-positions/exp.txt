@@ -1,0 +1,36 @@
+--- letReuse ---
+nextInt 1
+nextInt 1
+14
+--- recordField ---
+nextInt 1
+nextInt 1
+14
+--- listElement ---
+nextInt 2
+8
+--- viaId ---
+nextInt 1
+7
+--- constant ---
+takeThunk received a callable
+2
+--- argumentOnce ---
+double 1
+nextInt 2
+nextInt 2
+16
+--- nested ---
+nextInt 1
+nextInt 7
+nextInt 7
+26
+--- nestedIdentity ---
+nextInt 1
+nextInt 7
+nextInt 7
+26
+--- constructed ---
+{"Circle":[1]}
+--- pure ---
+2

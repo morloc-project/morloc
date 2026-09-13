@@ -640,7 +640,7 @@ data LowerConfig m = LowerConfig
       MDoc ->
       Maybe HeadManifoldForm ->
       m (Maybe MDoc)
-  -- ^ mid, name, all args, manifold type, priorLines, body, headForm
+  -- ^ mid, name, all args, return (body) type, priorLines, body, headForm
   -- Returns Nothing if dedup'd (C++), Just funcDef otherwise. The mid
   -- is threaded so the per-manifold error-wrap can look up user name
   -- and srcloc for the trace line.
@@ -1218,7 +1218,8 @@ lowerNativeExprRaw cfg _ (NullN_ t) = do
 lowerNativeExprRaw cfg (DoBlockN _ innerE) (DoBlockN_ t x) =
   adaptOwnedElem cfg innerE x >>= lowerDoBlock cfg t
 lowerNativeExprRaw cfg _ (DoBlockN_ t x) = lowerDoBlock cfg t x
-lowerNativeExprRaw cfg _ (EvalN_ _ x) = return $ x {poolExpr = lcPrintExpr cfg (IEval (IRawExpr (render (poolExpr x))))}
+-- Running a suspension is applying a closure to no arguments.
+lowerNativeExprRaw cfg _ (EvalN_ _ x) = return $ x {poolExpr = lcApplyClosure cfg (poolExpr x) []}
 -- CoerceToOptional widens a value to an optional. Most languages treat a T as a
 -- valid ?T (identity); Rust must wrap the value in Some(..) (see lcCoerceOptional).
 -- The wrapped value must be OWNED first: `Some(&T)` is an `Option<&T>`, not the
@@ -1318,8 +1319,7 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrTypeof (Just s) [dataDocs]) =
 -- the generic kind-byte runtime entry; OStream needs the element schema
 -- threaded so the runtime can write the stream header at open time.
 lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrOpen maySchema [pathDocs]) = do
-  let unwrapHead (EffectF _ inner) = unwrapHead inner
-      unwrapHead (AppF (VarF (FV v _)) _) = Just v
+  let unwrapHead (AppF (VarF (FV v _)) _) = Just v
       unwrapHead (VarF (FV v _)) = Just v
       unwrapHead _ = Nothing
   let headVar = unwrapHead (typeFof origExpr)
@@ -1399,10 +1399,7 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrFLength _ [handleDocs]) =
 -- materialised voidstar payload into a typed list of the result.
 lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrNext (Just schema) [handleDocs]) = do
   sid <- lcRegisterSchema cfg schema
-  let resultTf = case typeFof origExpr of
-        EffectF _ inner -> inner
-        other -> other
-  resultType <- lcTypeOf cfg resultTf
+  resultType <- lcTypeOf cfg (typeFof origExpr)
   return $ handleDocs
     { poolExpr = lcPrintExpr cfg
         (IIntrinsicNext sid resultType
@@ -1413,10 +1410,7 @@ lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrNext (Just schema) [handleDoc
 -- triples.
 lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrStreamLayout (Just schema) [handleDocs]) = do
   sid <- lcRegisterSchema cfg schema
-  let resultTf = case typeFof origExpr of
-        EffectF _ inner -> inner
-        other -> other
-  resultType <- lcTypeOf cfg resultTf
+  resultType <- lcTypeOf cfg (typeFof origExpr)
   return $ handleDocs
     { poolExpr = lcPrintExpr cfg
         (IIntrinsicStreamLayout sid resultType
@@ -1491,7 +1485,7 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrThrow _ [msgDocs]) =
 -- helper because a `Try` may be mapped to a native type or left for the
 -- compiler to generate, and only 'lcVariantLit' knows which.
 lowerNativeExprRaw cfg _ (IntrinsicN_ t IntrTry _ [bodyDocs])
-  | tryT@(VariantF (FV _ cv) _ arms) <- stripEffectF t
+  | tryT@(VariantF (FV _ cv) _ arms) <- t
   , Just okTag <- armTagOf BT.tryOkCtor arms
   , Just errTag <- armTagOf BT.tryErrCtor arms = do
       ty <- nominalTypeDoc cfg tryT cv
@@ -1529,10 +1523,7 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrStderr (Just schema) []) = do
 -- from_voidstar<T>.
 lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrIFileWalk (Just schema) (pathDocs : handleDocs : runtimeDocs)) = do
   sid <- lcRegisterSchema cfg schema
-  let resultTf = case typeFof origExpr of
-        EffectF _ inner -> inner
-        other -> other
-  resultType <- lcTypeOf cfg resultTf
+  resultType <- lcTypeOf cfg (typeFof origExpr)
   let allDocs = pathDocs : handleDocs : runtimeDocs
       raw d = IRawExpr (render (poolExpr d))
   return $ handleDocs
@@ -1579,8 +1570,8 @@ lowerSerialManifold ::
   SerialManifold ->
   SerialManifold_ PoolDocs ->
   m PoolDocs
-lowerSerialManifold cfg sm (SerialManifold_ m _ form headForm e) =
-  lowerManifold cfg m form (Just headForm) (typeMof sm) e
+lowerSerialManifold cfg (SerialManifold _ _ _ _ body) (SerialManifold_ m _ form headForm e) =
+  lowerManifold cfg m form (Just headForm) (typeMof body) e
 
 {- | Lower a native manifold to PoolDocs.
 Replaces translateManifold from Common.hs for native manifolds.
@@ -1591,9 +1582,13 @@ lowerNativeManifold ::
   NativeManifold ->
   NativeManifold_ PoolDocs ->
   m PoolDocs
-lowerNativeManifold cfg nm (NativeManifold_ m _ form e) =
-  lowerManifold cfg m form Nothing (typeMof nm) e
+lowerNativeManifold cfg (NativeManifold _ _ _ body) (NativeManifold_ m _ form e) =
+  lowerManifold cfg m form Nothing (typeMof body) e
 
+-- | The manifold's def takes every argument of its form and returns its
+-- body's value, whose type is the given 'TypeM' (a closure type when the
+-- body is a function value). A closure form is then applied to its context
+-- arguments to produce the closure value the surrounding expression uses.
 lowerManifold ::
   (Monad m, HasTypeM t) =>
   LowerConfig m ->
@@ -1603,7 +1598,7 @@ lowerManifold ::
   TypeM ->
   PoolDocs ->
   m PoolDocs
-lowerManifold cfg m form headForm manifoldType bodyPool = do
+lowerManifold cfg m form headForm bodyType bodyPool = do
   let PoolDocs completeManifolds bodyExpr priorLines priorExprs retFlag = bodyPool
       -- Apply lcReturn at the manifold boundary if a nested ReturnS_/ReturnN_
       -- set the return flag. Deferring lcReturn to here lets intermediate
@@ -1613,7 +1608,7 @@ lowerManifold cfg m form headForm manifoldType bodyPool = do
       body = if retFlag then lcReturn cfg bodyExpr else bodyExpr
       args = typeMofForm form
       mname = manNamer m
-  maybeNewManifold <- lcMakeFunction cfg m mname args manifoldType priorLines body headForm
+  maybeNewManifold <- lcMakeFunction cfg m mname args bodyType priorLines body headForm
   call <- case form of
         (ManifoldPass _) -> lcMakePass cfg mname args
         -- Wrap each manifold-call argument through lcSourcedArg (identity for
@@ -1637,11 +1632,8 @@ lowerManifold cfg m form headForm manifoldType bodyPool = do
         (ManifoldPart rs vs) -> do
           -- The closure's callable signature is result(bound...) -- only the
           -- REMAINING parameters, never the captured context args. Build it
-          -- from the bound args and the manifold's result type.
-          let resultType = case manifoldType of
-                Function _ o -> o
-                o -> o
-              sigType = Function [typeMof t | Arg _ t <- vs] resultType
+          -- from the bound args and the body's type.
+          let sigType = Function [typeMof t | Arg _ t <- vs] bodyType
           sig <- lcClosureSig cfg sigType
           lcMakeLambda cfg sig mname (typeMofRs rs) [Arg i (typeMof t) | Arg i t <- vs]
   return $

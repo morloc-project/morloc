@@ -21,6 +21,7 @@ module Morloc.CodeGenerator.Serial
   , PackerInstance (..)
   , wireSerialAstToType
   , containsFunT
+  , containsEffectT
   , serialAstHasString
   , chooseSerializationCycle
   , isSerializable
@@ -130,6 +131,15 @@ containsFunT (NamT _ _ ts rs) = any containsFunT ts || any (containsFunT . snd) 
 containsFunT (EffectT _ t) = containsFunT t
 containsFunT (OptionalT t) = containsFunT t
 containsFunT _ = False
+
+-- | True when a suspension appears anywhere in the type.
+containsEffectT :: Type -> Bool
+containsEffectT (EffectT _ _) = True
+containsEffectT (FunT ts t) = any containsEffectT ts || containsEffectT t
+containsEffectT (AppT t ts) = containsEffectT t || any containsEffectT ts
+containsEffectT (NamT _ _ ts rs) = any containsEffectT ts || any (containsEffectT . snd) rs
+containsEffectT (OptionalT t) = containsEffectT t
+containsEffectT _ = False
 
 -- | Whether a serialized value can carry a native string anywhere inside it.
 --
@@ -1172,7 +1182,6 @@ makeSerialAST m lang t0 = do
           ts <- mapM (makeSerialAST' gscope typepackers anc' . snd) rs
           let entries = zip (map fst rs) ts
           return $ SerialObject o n ps entries
-    makeSerialAST' gscope typepackers anc (EffectF _ t) = makeSerialAST' gscope typepackers anc t
     makeSerialAST' gscope typepackers anc (OptionalF t) = do
       inner <- makeSerialAST' gscope typepackers anc t
       let v = case t of
@@ -1340,9 +1349,6 @@ unweaveTypeF (NamF n (FV gv cv) ps rs) =
       keys = map fst rs
       (vsg, vsc) = unzip $ map (unweaveTypeF . snd) rs
    in (NamU n gv psg (zip keys vsg), NamU n (cv2tv cv) psc (zip keys vsc))
-unweaveTypeF (EffectF effs t) =
-  let (gt, ct) = unweaveTypeF t
-   in (mkEffectU (EffectSet effs) gt, mkEffectU (EffectSet effs) ct)
 unweaveTypeF (OptionalF t) =
   let (gt, ct) = unweaveTypeF t
    in (OptionalU gt, OptionalU ct)
@@ -1381,7 +1387,8 @@ weaveTypeF (NamU n gv psg rsg) (NamU _ cv psc rsc) =
         (map fst rsg)
         (zipWith weaveTypeF (map snd rsg) (map snd rsc))
     )
-weaveTypeF (EffectU effs gt) (EffectU _ ct) = mkEffectF (resolveEffectSet effs) (weaveTypeF gt ct)
+-- A suspension is a closure of no arguments in every pool.
+weaveTypeF (EffectU _ gt) (EffectU _ ct) = FunF [] (weaveTypeF gt ct)
 weaveTypeF (OptionalU gt) (OptionalU ct) = OptionalF (weaveTypeF gt ct)
 weaveTypeF ((ExistU gv _ _)) (ExistU cv _ _) = UnkF (FV gv (tv2cv cv))
 weaveTypeF (NatLitU n) (NatLitU _) = NatLitF n

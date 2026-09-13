@@ -169,6 +169,11 @@ data LangDescriptor = LangDescriptor
   , ldDoBlockBlock :: !Text -- e.g. "function(){\n{{body}}\n}" or "" for pass-through
   , -- Partial application
     ldPartialTemplate :: !Text -- e.g. "functools.partial({{fn_with_context}})"
+  , ldPassTemplate :: !Text
+    -- ^ A manifold function used as a value with nothing captured.
+    -- Substitutions: {{fn}} (the manifold name) and {{mid}} (its index), so
+    -- a language that cannot introspect its functions (R) can tag the value
+    -- for later reification.
   , -- Import
     ldImportTemplate :: !Text -- e.g. "{{namespace}} = importlib.import_module(\"{{module_path}}\")"
   , -- Socket path
@@ -322,6 +327,7 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldDoBlockExpr" (Y.String "(() -> {{expr}})")
             . ins "ldDoBlockBlock" (Y.String "")
             . ins "ldPartialTemplate" (Y.String "({{bound_args}}) -> {{fn}}({{all_args}})")
+            . ins "ldPassTemplate" (Y.String "{{fn}}")
             . ins "ldImportTemplate" (Y.String "")
             . ins "ldSocketPathTemplate" (Y.String "")
             . ins "ldResourcePackTemplate" (Y.String "[{{mem}}, {{time}}, {{cpus}}, {{gpus}}]")
@@ -417,6 +423,7 @@ defaultLangDescriptor name ext =
     , ldDoBlockExpr = "(() -> {{expr}})"
     , ldDoBlockBlock = ""
     , ldPartialTemplate = "({{bound_args}}) -> {{fn}}({{all_args}})"
+    , ldPassTemplate = "{{fn}}"
     , ldImportTemplate = ""
     , ldSocketPathTemplate = ""
     , ldResourcePackTemplate = "[{{mem}}, {{time}}, {{cpus}}, {{gpus}}]"

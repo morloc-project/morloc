@@ -56,6 +56,7 @@ module UnitTypeTests
   , variantTests
   , evalSandboxTests
   , typeRenderParenTests
+  , suspensionLawTests
   ) where
 
 import Morloc (typecheck, typecheckFrontend, generatePools)
@@ -3872,23 +3873,20 @@ effectSubtypeTests =
       , assertSubtypeBad "drop effect: <IO,Error> A </: A"
           [] (ioErrEff a) a
 
-        -- === Empty effect is the monoid identity: <> A == A ===
-        -- The empty effect set is NOT a suspended computation; it is
-        -- definitionally the inner type.  Effect coercion was removed,
-        -- so this holds through the subtype relation alone, in both
-        -- directions -- there is no `tryCoerce` step to involve.
-      , assertSubtypeGamma "empty effect identity: <> A <: A"
-          [] (emptyEff a) a []
-      , assertSubtypeGamma "empty effect identity: A <: <> A"
-          [] a (emptyEff a) []
+        -- === The empty row is a row: <> A is a suspension, not an A ===
+        -- A suspension and its result are different types with no
+        -- coercion either way; the only way from <> A to A is running it.
+      , assertSubtypeBad "empty row is a suspension: <> A </: A"
+          [] (emptyEff a) a
+      , assertSubtypeBad "a value is not a suspension: A </: <> A"
+          [] a (emptyEff a)
+      , assertSubtypeGamma "empty row is included in every row: <> A <: <IO> A"
+          [] (emptyEff a) (ioEff a) []
 
-        -- === Pure-to-effect is plain subsumption, NOT coercion ===
-        -- The old pure-to-effect lift (`tryCoerce` / CoerceToEffect)
-        -- was removed.  A pure value satisfies an effectful slot
-        -- directly through subtyping: <> A == A and {} is a subset of
-        -- any effect row, so `A <: <IO> A` holds with no coercion step.
-      , assertSubtypeGamma "pure <: <IO> via subsumption (no coercion)"
-          [] a (ioEff a) []
+        -- === No lift: a value never inhabits a suspension slot ===
+        -- `do v` is the only way to build a suspension from a value.
+      , assertSubtypeBad "pure </: <IO>: no implicit lift"
+          [] a (ioEff a)
 
         -- === Recursion through inner type ===
         -- The subtype rule recurses on the inner types after the
@@ -3945,14 +3943,14 @@ effectSynthesisTests =
   localOption (mkTimeout 100000) $ -- 0.1 second timeout
     testGroup
       "Effect synthesis tests"
-      [ -- pure do-block with no effects infers empty effect set
+      [ -- a do-block that forces nothing is still a suspension: <> Int
         assertGeneralType
           "pure do-block"
           [r|
         module main (x)
         x = do 42
           |]
-          int
+          (emptyEff int)
       , assertGeneralType
           "do-block with with one function call"
           [r|
@@ -3983,7 +3981,7 @@ effectSynthesisTests =
             let y = 1
             y
           |]
-          int
+          (emptyEff int)
       , assertGeneralType
           "do-block with bind and let"
           [r|
@@ -3997,7 +3995,7 @@ effectSynthesisTests =
             z
           |]
           (ioEff int)
-      , -- pure expression in do-block produces empty effects
+      , -- a pure tail is returned; the block is a suspension with the empty row
         assertGeneralType
           "pure expression in do-block"
           [r|
@@ -4005,7 +4003,7 @@ effectSynthesisTests =
         add :: Int -> Int -> Int
         x = do add 1 2
           |]
-          int
+          (emptyEff int)
       , assertGeneralType
           "do-block with multiple effect labels"
           [r|
@@ -4567,8 +4565,8 @@ effectEscapabilityTests =
           |]
           int
       , -- Tail-variable handler <Error, e> a -> <e> a applied: Error is
-        -- discharged and the row variable solves to the empty row, so
-        -- the applied result reduces to a pure Int.
+        -- discharged and the row variable solves to the empty row. The
+        -- result is still a suspension, with the empty row.
         assertGeneralType
           "escapable Error discharged, row variable solved (applied)"
           [r|
@@ -4578,10 +4576,10 @@ effectEscapabilityTests =
         source Py ("handle")
         foo :: Int -> <Error> Int
         handle :: <Error, e> a -> <e> a
-        x :: Int
+        x :: <> Int
         x = handle (foo 1)
           |]
-          int
+          (emptyEff int)
       , -- An inescapable effect propagates THROUGH application: passt
         -- keeps Cap in its result, so applying it to an effectful
         -- argument yields <Cap> Int (the effect is not dropped).
@@ -4807,14 +4805,12 @@ effectPartialApplicationTests =
           |]
           (ioEff int)
 
-        -- Negative: row-polymorphic handler signature.  The first
-        -- parameter is <Error, e> a, an EffectU -- NOT a bare
-        -- ExistU -- so isAbsorbing rejects it and the lift must not
-        -- fire.  The Error effect is escapable and discharged by the
-        -- handler; the result must be pure Int with no spurious <IO>
-        -- or <Error> manufactured by the lift.
-      , assertGeneralType
-          "handleEsc: row-poly handler discharges escapable Error, lift does not interfere"
+        -- Row-polymorphic handler signature: the Error effect is
+        -- escapable and discharged by the handler; the unannotated result
+        -- is a suspension with an open row (the empty row at ground), and
+        -- no <IO> or <Error> is manufactured.
+      , expectPass
+          "handleEsc: row-poly handler discharges escapable Error"
           [r|
         module main (h)
         escapable effect Error
@@ -4824,7 +4820,6 @@ effectPartialApplicationTests =
         handle :: <Error, e> a -> <e> a
         h = handle (foo 1)
           |]
-          int
       ]
 
 -- | Pure values filling `<e> T` slots must recurse on the inner type
@@ -4851,28 +4846,38 @@ polymorphicEffectRowTests =
           match r | (Ok v) = v | (Err _) = fb
           |]
 
-        -- A pure value filling a `<e> T` slot must NOT solve e := empty.
-        -- The surrounding <IO> constraint is the real solver.
+        -- A constant suspension `do 42 :: <> Int` in a `<e> Int` slot;
+        -- the result <> Int satisfies the export's <IO> Int by row
+        -- inclusion.
       , expectPass
-          "2. pure Int in <e> Int slot does not pin e to empty"
+          "2. constant suspension in <e> Int slot"
           [r|
         module main (pureRoot)
         effect IO
         passThrough :: <e> Int -> <e> Int
         passThrough x = x
         pureRoot :: <IO> Int
-        pureRoot = passThrough 42
+        pureRoot = passThrough (do 42)
           |]
 
-        -- Trivial concrete-into-concrete pure lift still works.
-      , expectPass
-          "3. pure Int in <IO, Err> Int slot"
+        -- A value never inhabits a suspension slot; `do 42` does.
+      , expectError
+          "3a. bare Int in <IO, Err> Int slot is rejected"
           [r|
         module main (x)
         effect IO
         escapable effect Err
         x :: <IO, Err> Int
         x = 42
+          |]
+      , expectPass
+          "3b. do 42 in <IO, Err> Int slot"
+          [r|
+        module main (x)
+        effect IO
+        escapable effect Err
+        x :: <IO, Err> Int
+        x = do 42
           |]
 
         -- === Nested polymorphic @catch ===
@@ -4893,17 +4898,17 @@ polymorphicEffectRowTests =
             | (Err _) = match r2 | (Ok w) = w | (Err _) = fb
           |]
 
-        -- Two pure arguments: solving e := empty on the first would
-        -- fail to unify against the export's <IO> on the second.
+        -- Two constant suspensions: the row variable is the empty row,
+        -- which the export's <IO> includes.
       , expectPass
-          "5. row-var survives two pure arguments"
+          "5. row-var survives two constant suspensions"
           [r|
         module main (run)
         effect IO
         pick :: <e> Int -> <e> Int -> <e> Int
         pick x _ = x
         run :: <IO> Int
-        run = pick 42 99
+        run = pick (do 42) (do 99)
           |]
 
         -- === Pure-then-effectful ordering ===
@@ -4911,7 +4916,7 @@ polymorphicEffectRowTests =
         -- var must be solvable to <IO> by the second arg despite the
         -- first arg not constraining it.
       , expectPass
-          "6. row-var solved by effectful second arg after pure first"
+          "6. row-var solved by effectful second arg after a constant suspension"
           [r|
         module main (run)
         effect IO
@@ -4920,7 +4925,7 @@ polymorphicEffectRowTests =
         seq2 :: <e> Int -> <e> Int -> <e> Int
         seq2 _ y = y
         run :: <IO> Int
-        run = seq2 42 (saveInt 99)
+        run = seq2 (do 42) (saveInt 99)
           |]
 
         -- === Negative: effect cannot drop when caller expects pure ===
@@ -6787,7 +6792,7 @@ letBindingTests =
             let y = 42
             y
           |]
-          int
+          (emptyEff int)
 
       , assertGeneralType
           "do-block with multi-binding let (omit repeated let)"
@@ -6798,7 +6803,7 @@ letBindingTests =
                 b = 2
             b
           |]
-          int
+          (emptyEff int)
 
       , assertGeneralType
           "do-block with separate let statements"
@@ -6809,7 +6814,7 @@ letBindingTests =
             let b = 2
             b
           |]
-          int
+          (emptyEff int)
 
       , assertGeneralType
           "do-block let interleaved with bind"
@@ -6830,17 +6835,17 @@ letBindingTests =
       , assertGeneralType
           "do with explicit braces and semicolons"
           "module main (x)\nx = do { 42 }"
-          int
+          (emptyEff int)
 
       , assertGeneralType
           "do with explicit braces, let, and semicolons"
           "module main (x)\nx = do { let a = 1; a }"
-          int
+          (emptyEff int)
 
       , assertGeneralType
           "do with explicit braces, multiple lets"
           "module main (x)\nx = do { let a = 1; let b = 2; b }"
-          int
+          (emptyEff int)
       ]
 
 -- ============================================================
@@ -7325,7 +7330,7 @@ newtypeTests =
         effect IO
         newtype MyList a = List a
         f :: MyList Int -> <IO> MyList Int
-        f x = x
+        f x = do x
           |]
           (fun [arr "MyList" [int], ioEff (arr "MyList" [int])])
 
@@ -7893,11 +7898,10 @@ bidirectionalAppCheckTests =
           y <- act x
           y
         |]
-      , -- The exact shape from mosm's parseComposition: a `?:` whose Null
-        -- branch is optional and whose other branch is an effectful do-block
-        -- yielding a bare value. checkE pushes the <Err> ?Int expectation
-        -- into both branches; the do-block branch coerces via the effect
-        -- traversal.
+      , -- A `?:` whose Null branch is a constant suspension of an optional
+        -- and whose other branch is an effectful do-block yielding a bare
+        -- value. checkE pushes the <Err> ?Int expectation into both
+        -- branches; the do-block branch widens its inner type.
         expectPass
           "null-guarded effectful do-block branch coerces to optional"
           [r|
@@ -7908,7 +7912,7 @@ bidirectionalAppCheckTests =
         isZero :: Int -> Bool
         foo :: Int -> <Err> ?Int
         foo x
-          ? isZero x = Null
+          ? isZero x = do Null
           : do y <- act x
                y
         |]
@@ -8505,7 +8509,7 @@ withDocstringTests =
         fmt x = fmt x
         --' with: -l/--lines=fmt
         foo :: Int -> <IO> Int
-        foo x = x
+        foo x = do x
           |]
 
         -- Multiple `with:` lines with distinct short/long are legal.
@@ -8521,7 +8525,7 @@ withDocstringTests =
         --' with: -l/--lines=fmt
         --' with: -a/--alt=alt
         foo :: Int -> <IO> Int
-        foo x = x
+        foo x = do x
           |]
 
         -- A pure terminal (no `<IO>`) on an effectful parent is legal.
@@ -8536,7 +8540,7 @@ withDocstringTests =
         showInt x = showInt x
         --' with: -s/--show=showInt
         foo :: Int -> <IO> Int
-        foo x = x
+        foo x = do x
           |]
 
         -- A pure terminal on a pure parent is legal. Composed entry is
@@ -8576,7 +8580,7 @@ withDocstringTests =
         --' with: -l/--lines=fmt
         --' with: -a/--lines=fmt
         foo :: Int -> <IO> Int
-        foo x = x
+        foo x = do x
           |]
 
         -- Duplicate short -> reject.
@@ -8589,7 +8593,7 @@ withDocstringTests =
         --' with: -l/--lines=fmt
         --' with: -l/--alt=fmt
         foo :: Int -> <IO> Int
-        foo x = x
+        foo x = do x
           |]
 
         -- Short-only spec (`-l` without `--long`) -> reject.
@@ -8601,7 +8605,7 @@ withDocstringTests =
         fmt x = fmt x
         --' with: -l=fmt
         foo :: Int -> <IO> Int
-        foo x = x
+        foo x = do x
           |]
 
         -- Reserved long `--help` -> reject.
@@ -8613,7 +8617,7 @@ withDocstringTests =
         fmt x = fmt x
         --' with: --help=fmt
         foo :: Int -> <IO> Int
-        foo x = x
+        foo x = do x
           |]
 
         -- Reserved short `-h` -> reject.
@@ -8625,7 +8629,7 @@ withDocstringTests =
         fmt x = fmt x
         --' with: -h/--halt=fmt
         foo :: Int -> <IO> Int
-        foo x = x
+        foo x = do x
           |]
 
         -- `with:` on argument-level docstring -> reject (command-only).
@@ -8662,7 +8666,7 @@ withDocstringTests =
         fmt x = fmt x
         --' with: -l/--lines fmt
         foo :: Int -> <IO> Int
-        foo x = x
+        foo x = do x
           |]
 
         -- Empty term after `=` -> reject.
@@ -8672,7 +8676,7 @@ withDocstringTests =
         module main (foo)
         --' with: -l/--lines=
         foo :: Int -> <IO> Int
-        foo x = x
+        foo x = do x
           |]
 
         -- Long form must be lowercase-kebab. UPPER-cased long is rejected.
@@ -8684,7 +8688,7 @@ withDocstringTests =
         fmt x = fmt x
         --' with: --Lines=fmt
         foo :: Int -> <IO> Int
-        foo x = x
+        foo x = do x
           |]
 
         -- Digit short is rejected (would collide with negative-number args).
@@ -8696,7 +8700,7 @@ withDocstringTests =
         fmt x = fmt x
         --' with: -1/--lines=fmt
         foo :: Int -> <IO> Int
-        foo x = x
+        foo x = do x
           |]
 
         -- `with:` long clashes with an argument-declared long. Both
@@ -8743,7 +8747,7 @@ withDocstringTests =
         --' with: --bar-baz=fmt
         --' with: --bar_baz=fmt
         foo :: Int -> <IO> Int
-        foo x = x
+        foo x = do x
           |]
 
         -- Synthesized name collides with a user-defined top-level
@@ -8758,7 +8762,7 @@ withDocstringTests =
         mlcp_foo_lines n = n
         --' with: -l/--lines=fmt
         foo :: Int -> <IO> Int
-        foo x = x
+        foo x = do x
           |]
 
         -- A leading-underscore long flag name is rejected: those names are
@@ -9291,3 +9295,140 @@ typeRenderParenTests =
     boxU = VarU (TV "Box")
     todoT = NamT NamRecord (TV "Todo") [] [(Key "title", VarT (TV "Str"))]
     todoU = NamU NamRecord (TV "Todo") [] [(Key "title", VarU (TV "Str"))]
+
+-- | A suspension @<E> T@ is a value distinct from @T@ with no coercion
+-- either way; @do v@ is the only way to build one from a value; the empty
+-- row is a row; a row over a suspension is a second layer, distinct from
+-- a row union and written only with parentheses.
+suspensionLawTests :: TestTree
+suspensionLawTests =
+  localOption (mkTimeout 5000000) $
+    testGroup
+      "suspension law"
+      [ expectError
+          "a value does not fill a suspension slot"
+          [r|
+        module main (passPlain)
+        effect IO
+        source Py ("run_t")
+        run_t :: <IO> Int -> <IO> Int
+        passPlain :: Int -> <IO> Int
+        passPlain k = run_t k
+          |]
+      , expectPass
+          "do builds the constant suspension that fills it"
+          [r|
+        module main (passPlain)
+        effect IO
+        source Py ("run_t")
+        run_t :: <IO> Int -> <IO> Int
+        passPlain :: Int -> <IO> Int
+        passPlain k = run_t (do k)
+          |]
+      , expectError
+          "a declared row is not a lift of a pure body"
+          [r|
+        module main (stub)
+        effect IO
+        stub :: Int -> <IO> Int
+        stub k = k + 1
+          |]
+      , expectError
+          "a guard base case is not lifted"
+          [r|
+        module main (loop)
+        effect IO
+        source Py ("next_int")
+        next_int :: Int -> <IO> Int
+        source Py ("le")
+        le :: Int -> Int -> Bool
+        loop :: Int -> Int -> <IO> Int
+        loop k n = ? le n 0 = 0 : next_int n
+          |]
+      , expectPass
+          "a constant suspension joins an effectful branch by row inclusion"
+          [r|
+        module main (loop)
+        effect IO
+        source Py ("next_int")
+        next_int :: Int -> <IO> Int
+        source Py ("le")
+        le :: Int -> Int -> Bool
+        loop :: Int -> Int -> <IO> Int
+        loop k n = ? le n 0 = (do 0) : next_int n
+          |]
+      , expectError
+          "a do-block is a suspension, not a value, at a pure return"
+          [r|
+        module main (f)
+        f :: Int -> Int
+        f x = do
+          let y = x
+          y
+          |]
+      , assertGeneralType
+          "the empty row is a row"
+          [r|
+        module main (f)
+        f :: Int -> <> Int
+        f x = do x
+          |]
+          (fun [int, emptyEff int])
+      , assertGeneralType
+          "a row over a suspension is a second layer"
+          [r|
+        module main (prep)
+        effect IO
+        source Py ("next_int")
+        next_int :: Int -> <IO> Int
+        prep :: Int -> <IO> (<IO> Int)
+        prep k = do
+          x <- next_int k
+          next_int x
+          |]
+          (fun [int, ioEff (ioEff int)])
+      , expectError
+          "two layers are not one layer"
+          [r|
+        module main (once)
+        effect IO
+        source Py ("next_int")
+        next_int :: Int -> <IO> Int
+        prep :: Int -> <IO> (<IO> Int)
+        prep k = do
+          x <- next_int k
+          next_int x
+        once :: Int -> <IO> Int
+        once k = prep k
+          |]
+      , expectError
+          "a second layer is written with parentheses"
+          [r|
+        module main (prep)
+        effect IO
+        prep :: Int -> <IO> <IO> Int
+        prep k = do (do k)
+          |]
+      , expectPass
+          "a suspension instantiates a type variable"
+          [r|
+        module main (viaId)
+        effect IO
+        source Py ("next_int")
+        next_int :: Int -> <IO> Int
+        ident :: a -> a
+        ident x = x
+        viaId :: Int -> <IO> Int
+        viaId k = ident (next_int k)
+          |]
+      , expectError
+          "a suspension is not its result"
+          [r|
+        module main (f)
+        effect IO
+        source Py ("next_int")
+        next_int :: Int -> <IO> Int
+        f :: Int -> Int
+        f k = next_int k
+          |]
+      ]

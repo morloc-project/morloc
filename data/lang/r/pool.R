@@ -3,6 +3,15 @@
 # coordinator parent -- they are thread-free and the parent's .Call wrappers and
 # fork machinery depend on them (dyn.load in particular MUST run before the
 # parent calls any morloc_* function).
+# A wire codec is either a schema string (a value) or a closure codec: the
+# closure tuple's schema, the codecs of the closure's arguments, and the
+# codec of its result, recursively. Defined ahead of the generated closure
+# table, which is built from it.
+mlc_closure_codec <- function(tuple_schema, arg_codecs, res_codec) {
+  structure(list(tuple_schema = tuple_schema, arg_codecs = arg_codecs, res_codec = res_codec),
+            class = "mlc_closure_codec")
+}
+
 # AUTO include preamble start
 # <<<BREAK>>>
 # AUTO include preamble end
@@ -222,44 +231,76 @@ morloc_foreign_call <- function(...) {
 # (home_language, manifold_id, captured_packets) and is applied on the far side
 # by calling back to this pool.
 
+MLC_HOME_LANG <- "r"
+
+mlc_is_closure_codec <- function(codec) inherits(codec, "mlc_closure_codec")
+
+# Serialize a native value by its codec: a closure is reified first.
+mlc_encode <- function(value, codec) {
+  if (mlc_is_closure_codec(codec)) {
+    morloc_put_value(mlc_reify(value, MLC_HOME_LANG), codec$tuple_schema)
+  } else {
+    morloc_put_value(value, codec)
+  }
+}
+
+# Deserialize a packet by its codec: a closure is reflected into a callable
+# that calls back to its home pool.
+mlc_decode <- function(pkt, codec) {
+  if (mlc_is_closure_codec(codec)) {
+    mlc_reflect_from_tuple(morloc_get_value(pkt, codec$tuple_schema), codec$arg_codecs, codec$res_codec)
+  } else {
+    morloc_get_value(pkt, codec)
+  }
+}
+
+# Recover (home, mid, captured) from a closure and serialize its captured
+# values; mlc_closure_table[[mid]] holds their codecs. A closure reflected
+# from another pool carries its origin and is passed back as it came.
 mlc_reify <- function(f, home_lang) {
+  origin <- attr(f, "morloc_origin")
+  if (!is.null(origin)) return(origin)
   mid <- attr(f, "morloc_mid")
   captured <- attr(f, "morloc_captured")
   if (is.null(captured)) captured <- list()
-  cap_schemas <- mlc_closure_table[[as.character(mid)]]
-  if (is.null(cap_schemas)) cap_schemas <- list()
-  packets <- lapply(seq_along(captured), function(i) morloc_put_value(captured[[i]], cap_schemas[[i]]))
+  cap_codecs <- mlc_closure_table[[as.character(mid)]]
+  if (is.null(cap_codecs)) cap_codecs <- list()
+  packets <- lapply(seq_along(captured), function(i) mlc_encode(captured[[i]], cap_codecs[[i]]))
   list(home_lang, as.integer(mid), packets)
 }
 
 # Rebuild a callable from an already-deserialized closure wire tuple
 # (home_lang, mid, captured_packets), used when the closure is nested in an
-# aggregate whose enclosing get_value has already parsed the tuple.
-mlc_reflect_from_tuple <- function(tup, arg_schemas, res_schema) {
+# aggregate whose enclosing get_value has already parsed the tuple. On
+# application it encodes its arguments, calls back to the producing pool,
+# and decodes the result.
+mlc_reflect_from_tuple <- function(tup, arg_codecs, res_codec) {
   home_lang <- tup[[1]]
   mid <- tup[[2]]
   captured <- tup[[3]]
   sock <- paste0(global_state$tmpdir, "/pipe-", home_lang)
-  function(...) {
+  f <- function(...) {
     args <- list(...)
-    arg_packets <- lapply(seq_along(args), function(i) morloc_put_value(args[[i]], arg_schemas[[i]]))
+    arg_packets <- lapply(seq_along(args), function(i) mlc_encode(args[[i]], arg_codecs[[i]]))
     packets <- c(captured, arg_packets)
-    morloc_get_value(morloc_foreign_call(sock, as.integer(mid), packets), res_schema)
+    mlc_decode(morloc_foreign_call(sock, as.integer(mid), packets), res_codec)
   }
+  attr(f, "morloc_origin") <- list(home_lang, as.integer(mid), captured)
+  f
 }
 
 # Rebuild a callable from a raw incoming closure wire packet, used when the
 # closure is the top-level crossing value (the whole packet is the tuple).
-mlc_reflect <- function(pkt, tuple_schema, arg_schemas, res_schema) {
-  mlc_reflect_from_tuple(morloc_get_value(pkt, tuple_schema), arg_schemas, res_schema)
+mlc_reflect <- function(pkt, tuple_schema, arg_codecs, res_codec) {
+  mlc_reflect_from_tuple(morloc_get_value(pkt, tuple_schema), arg_codecs, res_codec)
 }
 
-mlc_make_closure_dispatch <- function(mid, arg_schemas, res_schema) {
+mlc_make_closure_dispatch <- function(mid, arg_codecs, res_codec) {
   fn <- get(paste0("m", mid))
   function(...) {
     sargs <- list(...)
-    args <- lapply(seq_along(sargs), function(i) morloc_get_value(sargs[[i]], arg_schemas[[i]]))
-    morloc_put_value(do.call(fn, args), res_schema)
+    args <- lapply(seq_along(sargs), function(i) mlc_decode(sargs[[i]], arg_codecs[[i]]))
+    mlc_encode(do.call(fn, args), res_codec)
   }
 }
 

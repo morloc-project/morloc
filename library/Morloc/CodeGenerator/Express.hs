@@ -18,6 +18,7 @@ module Morloc.CodeGenerator.Express
   , addCacheWraps
   , addDebugWraps
   , addLoopWraps
+  , polyFreeVars
   ) where
 
 import qualified Data.Set as Set
@@ -124,7 +125,11 @@ express e@(AnnoS (Idx midx t) (Idx cidx _, _) _) = do
   -- stripped from the type by 'insertExportBoundaries'.
   let retEffects = extractReturnEffects t
   MM.modify (\s -> s { stateManifoldEffects = Map.insert midx retEffects (stateManifoldEffects s) })
-  insertExportBoundaries cidx t <$> expressCore e
+  -- A command's arguments come from the program's caller as values; a
+  -- helper's arrive from another manifold, a suspension among them as a
+  -- closure. Only a command adapts its arguments.
+  isCommand <- elem midx <$> MM.gets stateExports
+  insertExportBoundaries isCommand cidx t <$> expressCore e
   where
     extractReturnEffects (FunT _ (EffectT effs _)) = effs
     extractReturnEffects (EffectT effs _) = effs
@@ -692,13 +697,12 @@ decideRemoteness reg bconf (Just mconfig) l1 l2 = case manifoldConfigRemote mcon
     (_, True) -> Just $ ForeignCall
     _ -> Nothing
 
--- Express a function argument. A do-block passed where an effect-typed
--- (thunk) parameter is expected must be suspended whole -- identically to
--- a bare effectful application argument -- so the handler receives an
--- unevaluated thunk. Keep the EffectT on the inner expression so its
--- source call is auto-suspended (Grammars.Common). The shared DoBlockS
--- clause still strips EffectT for a return/export-position do-block, which
--- forceExportThunks / pushForceIntoRemote discharge at the boundary.
+-- Express a function argument. A do-block passed where a suspension
+-- parameter is expected is suspended whole -- identically to a bare
+-- effectful application argument -- so the callee receives the
+-- suspension. The EffectT stays on the inner expression so its source
+-- call is suspended by 'EffectBoundary'; a return-position do-block is
+-- run by the boundary pass.
 expressPolyArg ::
   Lang ->
   Indexed Type ->
@@ -1231,7 +1235,6 @@ renderConcreteForm (RecF (FV _ cv)) = unCVar cv
 renderConcreteForm (EnumF (FV _ cv) _ _) = unCVar cv
 renderConcreteForm (VariantF (FV _ cv) _ _) = unCVar cv
 renderConcreteForm (OptionalF t) = "?" <> renderConcreteForm t
-renderConcreteForm (EffectF _ t) = renderConcreteForm t
 renderConcreteForm (FunF ts t) =
   "(" <> T.intercalate "," (map renderConcreteForm ts) <> ")->" <> renderConcreteForm t
 renderConcreteForm (UnkF (FV _ cv)) = unCVar cv
@@ -1841,6 +1844,10 @@ expressPolyExpr _ _ _ (AnnoS (Idx midx t) (Idx cidx _, _) NullS) =
     peelOpt (OptionalT inner)       = peelOpt inner
     peelOpt t'@(VarT _)             = Just t'
     peelOpt t'@(AppT (VarT _) _)    = Just t'
+    -- An absent suspension or function value: the payload type is spelled
+    -- by its own constructor, so it passes through whole.
+    peelOpt t'@(EffectT _ _)        = Just t'
+    peelOpt t'@(FunT _ _)           = Just t'
     peelOpt _                       = Nothing
 -- A list literal at type `Foo a1 ... an` has exactly one element-type arg
 -- (the rest, if any, are Nat-kinded phantom dims, e.g. for Vector n a).
@@ -2349,6 +2356,7 @@ polyFreeVars = go
     go (PolyEval _ e) = go e
     go (PolyCoerce _ _ e) = go e
     go (PolyIntrinsic _ _ es) = Set.unions (map go es)
+    go (PolyVariant _ _ _ es) = Set.unions (map go es)
     -- The loop-carried ids are re-bound each iteration, so they are local to the
     -- loop; a continue's values are ordinary sub-expressions in the loop scope.
     go (PolyLoop _ ids e) = Set.difference (go e) (Set.fromList ids)

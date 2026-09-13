@@ -79,6 +79,7 @@ unitTests =
   , variantTests
   , evalSandboxTests
   , typeRenderParenTests
+  , suspensionLawTests
   , morlocDepsTests
   , versionConstraintTests
   , sizeParseTests

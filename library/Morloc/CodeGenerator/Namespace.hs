@@ -41,9 +41,6 @@ module Morloc.CodeGenerator.Namespace
   , partitionKindArgsF
   , partitionKindArgsT
   , partitionKindArgsU
-  , mkEffectF
-  , isEffectF
-  , stripEffectF
 
     -- ** Typeclasses
   , HasTypeF (..)
@@ -59,6 +56,7 @@ module Morloc.CodeGenerator.Namespace
   , ManifoldKind (..)
   , manifoldContext
   , manifoldBound
+  , isClosureForm
   , ArgTypes (..)
   , argTypesToTypeM
 
@@ -160,7 +158,6 @@ module Morloc.CodeGenerator.Namespace
 
 import Control.Monad.Identity (runIdentity)
 import qualified Data.Char as Char
-import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Morloc.Data.Doc
@@ -210,7 +207,6 @@ data TypeF
   -- type's name, its type arguments, and each arm's name with its field
   -- types. Position in the list is the wire tag.
   | VariantF FVar [TypeF] [(T.Text, [TypeF])]
-  | EffectF (Set.Set EffectLabel) TypeF
   | OptionalF TypeF
   | NatLitF Integer
   -- | Erased phantom Nat slot. See NatVoidU in 'Morloc.Namespace.Type'
@@ -220,28 +216,6 @@ data TypeF
   | StrVoidF -- ^ Erased phantom Str slot. Mirrors NatVoidF.
   deriving (Show, Ord, Eq)
 
--- | Codegen-level companion to 'mkEffectU' / 'mkEffectT'. The empty
--- effect set is the monoid identity (@<> A == A@) so a provably-empty
--- label set returns the inner type; nested 'EffectF' are merged.
-mkEffectF :: Set.Set EffectLabel -> TypeF -> TypeF
-mkEffectF ls t
-  | Set.null ls = t
-  | otherwise = case t of
-      EffectF ls2 t2 -> mkEffectF (Set.union ls ls2) t2
-      _ -> EffectF ls t
-
--- | True iff the outermost constructor is an effect wrapper (@<E> T@).
-isEffectF :: TypeF -> Bool
-isEffectF (EffectF _ _) = True
-isEffectF _ = False
-
--- | Strip all outer effect wrappers to recover the bare value type. An
--- effect-typed value and the value it wraps have the same runtime
--- representation (effects are erased); this recovers the eager type when a
--- thunk-valued effect expression is forced.
-stripEffectF :: TypeF -> TypeF
-stripEffectF (EffectF _ t) = stripEffectF t
-stripEffectF t = t
 
 -- | True iff a TypeF entry is kind-kinded (Nat or Str): a kind literal
 -- or the erased-phantom sentinel. These positions are structural
@@ -543,6 +517,13 @@ manifoldBound :: ManifoldForm a b -> [Arg b]
 manifoldBound (ManifoldFull _) = []
 manifoldBound (ManifoldPass xs) = xs
 manifoldBound (ManifoldPart _ ys) = ys
+
+-- | A function-valued manifold: a closure over its context arguments,
+-- taking its bound arguments when called. A closure of no bound arguments
+-- is a suspension. A 'ManifoldFull' is a saturated call producing a value.
+isClosureForm :: ManifoldForm a b -> Bool
+isClosureForm (ManifoldFull _) = False
+isClosureForm _ = True
 
 instance Bifunctor ManifoldForm where
   bimapM f _ (ManifoldFull xs) = ManifoldFull <$> mapM (\(Arg i x) -> Arg i <$> f x) xs
@@ -1027,6 +1008,7 @@ polySubExprs (PolyIf a b c) = [a, b, c]
 polySubExprs (PolyLoop _ _ e) = [e]
 polySubExprs (PolyLoopContinue xs) = xs
 polySubExprs (PolyIntrinsic _ _ xs) = xs
+polySubExprs (PolyVariant _ _ _ xs) = xs
 polySubExprs _ = []
 
 data MonoidFold m a = MonoidFold
@@ -1542,16 +1524,16 @@ instance HasTypeS (Maybe TypeF) where
   typeSof (Just t) = typeSof t
   typeSof Nothing = PassthroughS
 
--- The type of a manifold accounts for its remaining (bound) parameters: a
--- partially-applied / unapplied manifold (a closure) is a function
--- @bound-types -> return-type@, while a saturated manifold (no bound args) is
--- just its return type. Mirrors 'typeMof'/'typeSof', which build the function
--- type from the form; without this a closure reports its result type and the
+-- | A closure manifold ('ManifoldPart' / 'ManifoldPass') is a function from
+-- its bound arguments to its return type; with no bound arguments it is a
+-- suspension, a function of no arguments. A saturated manifold is just its
+-- return type. Mirrors 'typeMof'/'typeSof', which build the function type
+-- from the form; without this a closure reports its result type and the
 -- serialization machinery mistakes it for a serializable value.
 instance HasTypeF NativeManifold where
-  typeFof (NativeManifold _ _ form ne) = case map val (manifoldBound form) of
-    [] -> typeFof ne
-    bts -> FunF bts (typeFof ne)
+  typeFof (NativeManifold _ _ form ne)
+    | isClosureForm form = FunF (map val (manifoldBound form)) (typeFof ne)
+    | otherwise = typeFof ne
 
 instance HasTypeS SerialExpr where
   typeSof (ManS sm) = typeSof sm
@@ -1750,8 +1732,6 @@ instance Pretty TypeF where
   pretty (VariantF v ps as) =
     pretty v <+> hsep (map pretty ps)
       <+> encloseSep "{" "}" " | " [pretty n <+> hsep (map pretty ts) | (n, ts) <- as]
-  pretty (EffectF es t) =
-    "<" <> hsep (punctuate "," (map pretty (Set.toList es))) <> ">" <+> pretty t
   pretty (OptionalF t) = "?" <> pretty t
   pretty (NatLitF n) = pretty n
   pretty NatVoidF = "_"

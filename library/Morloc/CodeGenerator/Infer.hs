@@ -95,11 +95,11 @@ inferConcreteType lang (Idx i (type2typeu -> generalType)) = do
 inferConcreteTypeStructural
   :: Lang -> Int -> Scope -> TypeU -> TypeU -> MorlocMonad TypeF
 inferConcreteTypeStructural lang i gscope g c = case (g, c) of
-  -- Pierce EffectU / OptionalU wrappers so the AppU/VarU intercept
-  -- fires through them: @<IO> (IFile a)@, @?(IFile a)@, etc.
-  (EffectU effs g', EffectU _ c') ->
-    mkEffectF (resolveEffectSet effs)
-      <$> inferConcreteTypeStructural lang i gscope g' c'
+  -- A suspension is a closure of no arguments in every pool. Pierce it,
+  -- and an optional, so the AppU/VarU intercept fires through them:
+  -- @<IO> (IFile a)@, @?(IFile a)@, etc.
+  (EffectU _ g', EffectU _ c') ->
+    FunF [] <$> inferConcreteTypeStructural lang i gscope g' c'
   (OptionalU g', OptionalU c') ->
     OptionalF <$> inferConcreteTypeStructural lang i gscope g' c'
   -- A payload-bearing `data`. Its arms' field types have to be resolved to
@@ -367,9 +367,8 @@ inferConcreteTypeUniversal lang i t@(type2typeu -> generalType) = do
 inferConcreteTypeUniversalStructural
   :: Lang -> Int -> Scope -> Type -> TypeU -> TypeU -> MorlocMonad TypeF
 inferConcreteTypeUniversalStructural lang i gscopeUni t g c = case (g, c) of
-  (EffectU effs g', EffectU _ c') ->
-    mkEffectF (resolveEffectSet effs)
-      <$> inferConcreteTypeUniversalStructural lang i gscopeUni t g' c'
+  (EffectU _ g', EffectU _ c') ->
+    FunF [] <$> inferConcreteTypeUniversalStructural lang i gscopeUni t g' c'
   (OptionalU g', OptionalU c') ->
     OptionalF <$> inferConcreteTypeUniversalStructural lang i gscopeUni t g' c'
   -- A `data` type resolves to its arms here exactly as it does in the
@@ -500,7 +499,7 @@ weave gscope = w Set.empty
             <$> zipWithM (w anc) ts1 ts2
             <*> zipWithM (\(_, t1') (k2', t2') -> (,) k2' <$> w anc t1' t2') rs1 rs2
       | otherwise = Left $ "failed to weave:" <+> "\n  t1:" <+> pretty t1 <+> "\n  t2:" <+> pretty t2
-    w anc (EffectU effs t1) (EffectU _ t2) = mkEffectF (resolveEffectSet effs) <$> w anc t1 t2
+    w anc (EffectU _ t1) (EffectU _ t2) = FunF [] <$> w anc t1 t2
     w anc (OptionalU t1) (OptionalU t2) = OptionalF <$> w anc t1 t2
     w _ (NatLitU n) (NatLitU _) = return $ NatLitF n
     w _ (NatLitU n) _ = return $ NatLitF n  -- Nat params may be erased in concrete type

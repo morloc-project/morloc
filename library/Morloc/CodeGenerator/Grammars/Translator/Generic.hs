@@ -115,7 +115,7 @@ translateBuiltin lang desc srcs es = do
         return (docs, tbl)
   labels <- collectLogLabels <$> gets stateManifoldConfig
   templates <- collectRenderedTemplates lang
-  closureTable <- computeClosureSchemas lang es
+  closureTable <- Map.map (renderClosureCodecs desc) <$> computeClosureSchemas lang es
   -- Keep the preamble (runtime bootstrap) at module top / parent load, and pass
   -- the user includes separately so interpreted pools can defer them past the
   -- worker fork (macOS fork-safety); see 'ipIncludes'.
@@ -171,7 +171,7 @@ translateExternal cmd lang desc srcs es = do
         return (docs, tbl)
   labels <- collectLogLabels <$> gets stateManifoldConfig
   templates <- collectRenderedTemplates lang
-  closureTable <- computeClosureSchemas lang es
+  closureTable <- Map.map (renderClosureCodecs desc) <$> computeClosureSchemas lang es
   -- Out-of-process codegen path: includes stay at module top (no fork-defer),
   -- so pass them as sources and leave the deferred-includes slot empty.
   let program = buildProgram labels templates includeDocs [] mDocs es schemas closureTable
@@ -416,12 +416,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
     -- Shared arg-schema list + result-schema doc for the two reflect hooks;
     -- mlc_reflect and mlc_reflect_from_tuple differ only in whether the wire
     -- tuple has already been parsed.
-    reflectSchemas ins out =
-      let argSchemas = map (dquotes . pretty . render . Serial.serialAstToMsgpackSchema) ins
-          argListDoc = case ldListStyle desc of
-            BracketList -> list argSchemas
-            _ -> pretty (ldGenericListFn desc) <> tupled argSchemas
-       in (argListDoc, dquotes (pretty (render (Serial.serialAstToMsgpackSchema out))))
+    reflectSchemas ins out = (codecList desc (map (codecDoc desc) ins), codecDoc desc out)
 
     cfg =
       LowerConfig
@@ -616,7 +611,10 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
                     let endKw = ldBlockEnd desc
                      in vsep [header, indent 4 (vsep $ wrapError (priorLines <> [body])), pretty endKw]
         , lcClosureSig = \_ -> return ""
-        , lcMakePass = \mname _ -> return mname
+        , lcMakePass = \mname _ ->
+            return . pretty $
+              substituteT (ldPassTemplate desc)
+                [("fn", render mname), ("mid", T.drop 1 (render mname))]
         , lcMakeLambda = \_sig mname contextArgs boundArgs ->
             let ctxNames = map argNamer contextArgs
                 bndNames = map argNamer boundArgs
@@ -1433,7 +1431,7 @@ printProgram desc prog =
                     substituteT
                       (ldClosureTableEntry desc)
                       [ ("mid", T.pack (show mid))
-                      , ("caps", render (closureLangList [dquotes (pretty c) | c <- caps]))
+                      , ("caps", render (closureLangList (map pretty caps)))
                       ]
                 | (mid, (caps, _, _)) <- Map.toAscList (ipClosureTable prog)
                 ]
@@ -1458,8 +1456,8 @@ printProgram desc prog =
                 substituteT
                   (ldClosureRegisterEntry desc)
                   [ ("mid", T.pack (show mid))
-                  , ("args", render (closureLangList [dquotes (pretty s) | s <- caps <> bnds]))
-                  , ("res", render (dquotes (pretty res)))
+                  , ("args", render (closureLangList (map pretty (caps <> bnds))))
+                  , ("res", res)
                   ]
             | (mid, (caps, bnds, res)) <- Map.toAscList (ipClosureTable prog)
             ]
@@ -1674,3 +1672,29 @@ pyTuple :: [MDoc] -> MDoc
 pyTuple [] = "()"
 pyTuple [x] = parens (x <> ",")
 pyTuple xs = tupled xs
+
+-- | A wire codec as the language's runtime reads it: a schema string for
+-- a value, or a closure codec (the closure tuple's schema, its arguments'
+-- codecs, its result's codec) for a function value, applied recursively so
+-- a function whose result is a suspension is described all the way down.
+codecDoc :: LangDescriptor -> SerialAST -> MDoc
+codecDoc desc s@(SerialClosure ins out) =
+  "mlc_closure_codec"
+    <> tupled
+      [ dquotes (pretty (render (Serial.serialAstToMsgpackSchema s)))
+      , codecList desc (map (codecDoc desc) ins)
+      , codecDoc desc out
+      ]
+codecDoc _ s = dquotes (pretty (render (Serial.serialAstToMsgpackSchema s)))
+
+-- | A list of codecs in the language's own list style.
+codecList :: LangDescriptor -> [MDoc] -> MDoc
+codecList desc xs = case ldListStyle desc of
+  BracketList -> list xs
+  _ -> pretty (ldGenericListFn desc) <> tupled xs
+
+-- | The closure table entry of one manifold, rendered: captured codecs,
+-- bound codecs, result codec.
+renderClosureCodecs :: LangDescriptor -> ([SerialAST], [SerialAST], SerialAST) -> ([Text], [Text], Text)
+renderClosureCodecs desc (caps, bnds, res) =
+  (map (render . codecDoc desc) caps, map (render . codecDoc desc) bnds, render (codecDoc desc res))

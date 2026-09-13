@@ -1,0 +1,9 @@
+module main (jobs)
+
+import root-py
+
+source Py from "gen.py" ("nextInt")
+nextInt :: Int -> <IO> Int
+
+jobs :: Int -> [<IO> Int]
+jobs k = [nextInt k, nextInt (k + 1)]

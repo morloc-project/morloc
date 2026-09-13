@@ -19,7 +19,6 @@ module Morloc.CodeGenerator.Serialize
 
 import Data.Text (Text)
 import qualified Morloc.BaseTypes as BT
-import Morloc.CodeGenerator.EffectBoundary (forceSerializedThunk)
 import Morloc.CodeGenerator.Infer
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.Serial as Serial
@@ -77,16 +76,11 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
         t' <- inferTypeUniversal t
         return $ Arg i (L (serialArgType t'))
       where
-        -- The serial/wire form of an argument is always its PEELED type: it
-        -- arrives across a socket as a plain value ('makeSerialAST' likewise
-        -- strips 'EffectF' from the wire schema). A plain data value returned at
-        -- an '<E> T' position is recorded by 'makeTypemap' with an outer
-        -- 'EffectF' (a capability annotation, not a wire wrapper); left in place
-        -- it renders a spurious thunk ('std::function') that mismatches the plain
-        -- deserialize. Strip it. A genuine callback param is an OUTER 'FunF'
-        -- (any effect sits on its result), so 'stripEffectF' is a no-op there and
-        -- it still routes to the closure-reflecting 'SerialS' path.
-        serialArgType tf = case stripEffectF tf of
+        -- A function-typed argument, a suspension included (a function of
+        -- no arguments), has no wire form of its own: it crosses as a
+        -- closure and is reflected on the far side, so it routes to the
+        -- closure-reflecting 'SerialS' path.
+        serialArgType tf = case tf of
           sf@(FunF {}) -> SerialS sf
           sf -> typeSof sf
 
@@ -135,7 +129,7 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
       -- with the export's serial signature.
       | kind == Preserved && m /= currentM = do
           ne <- nativeExpr m orig
-          se <- serializeS "preserved manifold" m (forceSerializedThunk ne)
+          se <- serializeS "preserved manifold" m ne
           -- If the body was 'MonoReturn'-wrapped (standard shape from
           -- 'ensurePolyReturn'), the inner 'ReturnN' lives inside the
           -- NativeManifold function; surface 'ReturnS' here so the
@@ -152,9 +146,9 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
       -- 'serializeS' so its 'typeFof' (a function) serializes as a
       -- 'SerialClosure' (reify), exactly as 'unwrapLetDef' keeps a let-bound
       -- closure whole.
-      | not (null (manifoldBound form)) = do
+      | isClosureForm form = do
           ne <- nativeExpr m orig
-          se <- serializeS "closure value" m (forceSerializedThunk ne)
+          se <- serializeS "closure value" m ne
           case inner of
             MonoReturn _ -> return (ReturnS se)
             _ -> return se
@@ -188,7 +182,7 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     serialExpr _ (MonoBndVar (C t) i) = BndVarS <$> fmap Just (inferType t) <*> pure i
     serialExpr m (MonoIf cond thenE elseE) = do
       ne <- nativeExpr m (MonoIf cond thenE elseE)
-      serializeS "serialE MonoIf" m (forceSerializedThunk ne)
+      serializeS "serialE MonoIf" m ne
     -- Native-loop lowering. Walk the loop body -- a decision tree of guards
     -- ('MonoIf') and lets over base and continue leaves -- into a 'LoopBody'.
     -- Guards/continue-values/let-RHS are lowered through 'nativeExpr' over the
@@ -208,7 +202,6 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
         buildLoopBody (MonoReturn e) = buildLoopBody e
         -- Descend a do-block on the continue path: its inner binds (per-iteration
         -- effects) become loop-body lets emitted before the continue reassignment.
-        buildLoopBody (MonoDoBlock _ e) = buildLoopBody e
         buildLoopBody (MonoLoopContinue args)
           | length args == length ids = LoopContinue <$> mapM (nativeExpr m) args
           | otherwise = error $
@@ -223,15 +216,12 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
                   LoopNLet i ne1 <$> buildLoopBody e2
         -- Any other leaf is a base case: serialize the CURRENT native value.
         buildLoopBody base =
-          LoopBase <$> (nativeExpr m base >>= serializeS "loop base" m . forceSerializedThunk)
+          LoopBase <$> (nativeExpr m base >>= serializeS "loop base" m)
     serialExpr _ (MonoLoopContinue {}) = error "morloc: MonoLoopContinue reached serialExpr outside MonoLoop extraction"
-    -- Thunk-producing intrinsics: convert to native and serialize with the
-    -- inner type (strip EffectF) so the wire format matches the forced value.
-    serialExpr m (MonoDoBlock _ e) = serialExpr m e
     serialExpr _ (MonoExe _ _) = error "Can represent MonoSrc as SerialExpr"
     serialExpr _ MonoPoolCall {} = error "MonoPoolCall does not map to a SerialExpr"
     serialExpr _ (MonoApp MonoManifold {} _) = error "Illegal?"
-    serialExpr m e = nativeExpr m e >>= serializeS "serialE e" m . forceSerializedThunk
+    serialExpr m e = nativeExpr m e >>= serializeS "serialE e" m
 
     serialArg ::
       Int ->
@@ -415,98 +405,20 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
       condNe <- nativeExpr m cond
       thenNe <- nativeExpr m thenE
       elseNe <- nativeExpr m elseE
+      -- The arms agree on one type (a suspension arm meets a suspension
+      -- arm, both closures); a Null arm defers to its sibling's type.
       let ifType = case (thenNe, elseNe) of
             (NullN _, _) -> typeFof elseNe
-            (_, NullN _) -> typeFof thenNe
-            -- Prefer an effect-typed arm: the arms unify to one type, but a
-            -- pure value arm carries the bare (non-Effect) type while its
-            -- sibling carries the effect wrapper. Taking the then arm's type
-            -- unconditionally would type an @throw guard chain by its value arm
-            -- when that arm is first, so the arm-wrapping below (which fires on
-            -- an EffectF ifType) would not run and the value arm would stay
-            -- bare against the throwing arm's thunk.
-            _ -> case (typeFof thenNe, typeFof elseNe) of
-                   (tt@(EffectF _ _), _) -> tt
-                   (_, te@(EffectF _ _)) -> te
-                   (tt, _) -> tt
-          -- An effect-typed conditional is represented as a thunk (forced by an
-          -- enclosing DoBlock/EvalN or at the serialize sink), so every arm must
-          -- itself yield a thunk. Computations (a source call, a do-block, an
-          -- @throw, a nested guard chain whose own arms are thunks) already
-          -- lower to a thunk when effect-typed; a VALUE-producing arm lowers to
-          -- a plain value, which is then assigned or forced as if it were a
-          -- thunk and crashes (C++: a value assigned to a std::function;
-          -- Python: a value called as `n()`). A value-producing arm is a bare
-          -- value (variable, literal, container coerced into the effect slot)
-          -- OR a nested conditional whose own arms are all value-producing
-          -- (`? b>0 = 1 : 2` yields a value, not a thunk) -- so the check
-          -- recurses through IfN. Wrap those arms in a DoBlockN. NullN arms keep
-          -- the optional-handling shape.
-          producesValue e = case e of
-            BndVarN {} -> True
-            LetVarN {} -> True
-            IntN {} -> True
-            RealN {} -> True
-            StrN {} -> True
-            LogN {} -> True
-            ListN {} -> True
-            TupleN {} -> True
-            RecordN {} -> True
-            DeserializeN {} -> True
-            IfN _ _ a b -> producesValue a && producesValue b
-            -- Value-passthrough wrappers: the value flows out of the tail /
-            -- inner expression, whose shape -- not this wrapper's own
-            -- (possibly effect-annotated) type -- decides. A coercion whose
-            -- inner is a value stays a value (a coerced pure call whose effect
-            -- was stripped by the optional widening); a `let .. in <value>`
-            -- (NativeLetN/SerialLetN) or a returned value is a value too. A
-            -- coercion / let over an effectful computation (the do-block /
-            -- @catch widening) recurses to that computation and is NOT a value.
-            CoerceN _ _ a -> producesValue a
-            NativeLetN _ _ a -> producesValue a
-            SerialLetN _ _ a -> producesValue a
-            ReturnN a -> producesValue a
-            -- A PURE computation (a foreign source call, a local manifold, an
-            -- intrinsic, an optional-lift) yields a plain value; an effect-typed
-            -- one already lowers to a thunk-producer upstream (it reaches the
-            -- arm wrapped in a DoBlockN) and must not be re-wrapped. So gate on
-            -- the node's own type. This distinguishes a value arm widened to an
-            -- effect slot (e.g. `? x>N = @throw : idc x` :: <Err> ?Int, where
-            -- the widening leaves the call pure) from a genuinely effectful one.
-            AppExeN t _ _ -> not (isEffectF t)
-            ExeN t _ -> not (isEffectF t)
-            ManN nm -> not (isEffectF (typeFof nm))
-            IntrinsicN t _ _ _ -> not (isEffectF t)
-            MapOptionalN t _ _ _ -> not (isEffectF t)
-            _ -> False
-          wrapArm e = if producesValue e then DoBlockN (typeFof e) e else e
-          isNull NullN{} = True
-          isNull _       = False
-          -- The single gate the whole effect-conditional invariant hinges on:
-          -- wrap both arms into thunks exactly when the conditional is
-          -- effect-typed and is NOT the optional (Null-bearing) shape. 'ifType'
-          -- above prefers the EffectF arm precisely so this fires, and the
-          -- DoBlockN arms produced here are what the EvalN/IfN peephole in
-          -- Reduce.hs recognises and collapses back to eager form when the
-          -- conditional is immediately forced.
-          wrapEffectArms = isEffectF ifType && not (isNull thenNe || isNull elseNe)
-          (thenNe', elseNe')
-            | wrapEffectArms = (wrapArm thenNe, wrapArm elseNe)
-            | otherwise      = (thenNe, elseNe)
-      return $ IfN ifType condNe thenNe' elseNe'
-    nativeExpr m (MonoDoBlock t e) = DoBlockN <$> inferType t <*> nativeExpr m e
+            _ -> typeFof thenNe
+      return $ IfN ifType condNe thenNe elseNe
+    nativeExpr _ (MonoDoBlock _ _) =
+      error "morloc bug: a suspension reached serialization unlowered (Suspension.lowerSuspensions runs first)"
     nativeExpr m (MonoEval t e) = EvalN <$> inferType t <*> nativeExpr m e
     nativeExpr m (MonoCoerce c t e) = CoerceN c <$> inferType t <*> nativeExpr m e
-    -- Runtime intrinsics with thunk return types (save/load): the C functions
-    -- (mlc_save, mlc_load) are eager, so we wrap them in DoBlockN to produce a
-    -- proper thunk that EvalN can call.
-    --
-    -- IntrIFileWalk is intentionally NOT in this list: its morloc-level
-    -- result type is the bare element type (Express.hs assigns @out@
-    -- without an <IO> wrapper), so wrapping it in DoBlockN produces a
-    -- thunk that no EvalN insertion site invokes. The walker is eager;
-    -- emit it as a plain inline call and let surrounding expressions
-    -- consume the value directly.
+    -- Runtime intrinsics (save/load, streams, @try, ...). The C functions
+    -- are eager; an intrinsic declared with a suspension result reaches
+    -- here as the body of the closure manifold that suspends it
+    -- ('Suspension.lowerSuspensions'), typed by its result.
     nativeExpr m (MonoIntrinsic t intr es)
       | intr `elem` [IntrSave, IntrSaveM, IntrSaveJ, IntrLoad, IntrRead,
                      IntrOpen, IntrClose, IntrFSchema,
@@ -524,9 +436,7 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
                 _       -> esBase
           es'' <- unpackDataArgIfNeeded m intr es'
           msch <- intrinsicSchema m intr tf es''
-          let innerTf = case tf of
-                EffectF _ inner -> inner
-                other -> other
+          let innerTf = tf
               -- A fallible intrinsic's own call still produces the bare
               -- value; the Try is built around it below. Everything from
               -- here to the wrap therefore works with the PAYLOAD type --
@@ -562,15 +472,7 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
                 | isFallible =
                     IntrinsicN innerTf IntrTry Nothing [thunkifyForTry packed]
                 | otherwise = packed
-          -- Wrap in DoBlockN only when the result still carries an effect
-          -- (needs to be a thunk that EvalN or a language-native catch can
-          -- invoke). @catch fully strips its Err effect when the residual
-          -- row is empty, yielding a plain-typed value; wrapping such a
-          -- value in DoBlockN turns it into a callable that never gets
-          -- forced when passed as a function argument.
-          return $ case tf of
-            EffectF _ _ -> DoBlockN tf wrapped
-            _           -> wrapped
+          return wrapped
     nativeExpr m (MonoIntrinsic t intr es) = do
       tf <- inferType t
       es' <- mapM (nativeExpr m) es
@@ -592,25 +494,18 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     -- mirror that here so intrinsics flow through the same pack/unpack
     -- machinery as ordinary functions instead of feeding the runtime a
     -- user-side struct it cannot serialize.
-    -- Wrap a NativeExpr in a DoBlockN so it renders as a no-arg thunk:
-    -- @try's body reaches mlc_try as a thunk it forces at most once.
-    -- Suspension here is a property of the form, not of the body's type,
-    -- so a pure body is thunked too -- which is what lets @try catch a
-    -- foreign function that raises from otherwise pure code.
-    --
-    -- An expression is already thunk-shaped in two ways: an effect-typed
-    -- one (which lowered to a DoBlockN upstream and carries an EffectF
-    -- type) and a do-block whose effect row is empty (a DoBlockN whose
-    -- stored type is its plain inner type -- e.g. `do []`). typeFof
-    -- reports the DoBlockN's inner type, so the type check alone misses
-    -- the second case and re-wraps it into DoBlockN (DoBlockN _), which
-    -- yields the inner thunk instead of the value. Match DoBlockN
-    -- structurally so both shapes pass through untouched.
+    -- @try's body reaches mlc_try as a callable of no arguments that it
+    -- runs at most once. A suspension already is one. A pure body is
+    -- wrapped in a 'DoBlockN', a rendering device for an inline lambda
+    -- that the try runs immediately in the same scope; it never escapes
+    -- as a value, so it needs none of a suspension's machinery. This is
+    -- what lets @try catch a foreign function that raises from otherwise
+    -- pure code.
     thunkifyForTry :: NativeExpr -> NativeExpr
     thunkifyForTry e@(DoBlockN _ _) = e
     thunkifyForTry e = case typeFof e of
-      EffectF _ _ -> e
-      t           -> DoBlockN t e
+      FunF [] _ -> e
+      t         -> DoBlockN t e
 
 
     unpackDataArgIfNeeded ::
@@ -687,13 +582,13 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
       -- emitted as a literal by the translator; the argument is erased.
       return . Just $ renderTypeFName (typeFof dataArg)
     intrinsicSchema m IntrLoad tf _ = do
-      -- For @load, the return type is <IO, Err> a; the schema is for a.
-      let dataType = stripTryF (stripEffectF tf)
+      -- For @load, the result type is Try Str a; the schema is for a.
+      let dataType = stripTryF tf
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m IntrRead tf _ = do
-      -- For @read, the return type is <Err> a; the schema is for a.
-      let dataType = stripTryF (stripEffectF tf)
+      -- For @read, the result type is Try Str a; the schema is for a.
+      let dataType = stripTryF tf
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m IntrIFileWalk tf _ = do
@@ -701,22 +596,21 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
       -- (the per-language wrapper deserializes the voidstar via
       -- from_voidstar<T>). For bracket-index/struct chains the result
       -- is a single element type; for bracket-slice it is a list type.
-      -- Either way, the post-EffectF type carries the right shape.
-      let dataType = stripTryF (stripEffectF tf)
+      -- Either way, the result type carries the right shape.
+      let dataType = stripTryF tf
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m IntrNext tf _ = do
-      -- @next returns the sub-packet as `[a]`. The wrapper drops the
-      -- EffectF wrap and serialises the list type so the per-language
-      -- from_voidstar call materialises it correctly.
-      let dataType = stripTryF (stripEffectF tf)
+      -- @next yields the sub-packet as `[a]`; the list type is serialised so
+      -- the per-language from_voidstar call materialises it correctly.
+      let dataType = stripTryF tf
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m IntrStreamLayout tf _ = do
-      -- @streamLayout returns `[(U64,U64,U64)]`. Drop the EffectF wrap and
-      -- serialise the list-of-triple type so the per-language from_voidstar
-      -- call materialises it (an ordinary composite, as for @next).
-      let dataType = stripTryF (stripEffectF tf)
+      -- @streamLayout yields `[(U64,U64,U64)]`; the list-of-triple type is
+      -- serialised so the per-language from_voidstar call materialises it
+      -- (an ordinary composite, as for @next).
+      let dataType = stripTryF tf
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     -- @write's data arg (at index 2, after level Int and handle) carries `[a]`;
@@ -748,7 +642,6 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     intrinsicSchema _ IntrClose _ (argNE : _)
       | isStrHead (typeFof argNE) = return (Just BT.closeTmpUnlinkMarker)
       where
-        isStrHead (EffectF _ t) = isStrHead t
         isStrHead (VarF (FV v _)) = v == BT.str
         isStrHead _ = False
     intrinsicSchema _ _ _ _ = return Nothing
@@ -767,7 +660,6 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     stripTryF other = other
 
     unwrapHandleHead :: TypeF -> Maybe (TVar, TypeF)
-    unwrapHandleHead (EffectF _ inner) = unwrapHandleHead inner
     -- The handle now arrives inside the Try the intrinsic returns, so peel
     -- the Ok arm before reading the head.
     unwrapHandleHead (VariantF _ _ arms)
@@ -793,7 +685,6 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
         go (AppF con args) = parens (go con <+> hsep (map go args))
         go (FunF args ret) =
           parens (hsep (punctuate " ->" (map go args ++ [go ret])))
-        go (EffectF _ t) = go t
         go (OptionalF t) = "?" <> go t
         go (NatLitF n) = pretty n
         go NatVoidF = "_"
@@ -972,7 +863,7 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     -- and the label then has no manifold to attach to in either pool.
     inferState (MonoManifold _ form kind e)
       | kind == Preserved = Unserialized
-      | not (null (manifoldBound form)) = Unserialized
+      | isClosureForm form = Unserialized
       | otherwise = inferState e
     inferState (MonoIf _ thenE _) = inferState thenE
     inferState (MonoLoop _ _ e) = inferState e
@@ -1001,7 +892,7 @@ unwrapLetDef :: Int -> MonoExpr -> (Int, MonoExpr)
 unwrapLetDef currentM orig@(MonoManifold m _ kind _)
   | kind == Preserved && m /= currentM = (m, orig)
 unwrapLetDef currentM orig@(MonoManifold m form _ _)
-  | not (null (manifoldBound form)) && m /= currentM = (m, orig)
+  | isClosureForm form && m /= currentM = (m, orig)
 unwrapLetDef _ (MonoManifold m _ _ (MonoReturn e)) = (m, e)
 unwrapLetDef _ (MonoManifold m _ _ e) = (m, e)
 unwrapLetDef m (MonoReturn e) = (m, e)
@@ -1115,11 +1006,8 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
     -- Make the continue-derived native type authoritative for every serial
     -- carried slot: recover the type of a serial-only slot (which 'prepareArg'
     -- left 'L PassthroughS') and override a stale base-occurrence type with the
-    -- plain type the continue actually circulates. (The effect-strip half of this
-    -- -- an '<IO>' accumulator recorded with an '<IO> T' type -- is owned by
-    -- 'serialArgType'; here we simply trust the continue type.) Function-typed
-    -- slots (native-only closures) are left alone. See also 'stripCarriedBase'
-    -- (EffectBoundary), the same continue-vs-base-type mismatch at the force site.
+    -- plain type the continue actually circulates. Function-typed slots
+    -- (native-only closures, a carried suspension among them) are left alone.
     patchCarriedForm ::
       Map.Map Int TypeF ->
       ManifoldForm (Or TypeS TypeF) TypeS ->

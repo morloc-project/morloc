@@ -1,0 +1,6 @@
+module main (runAll)
+
+import root-py
+
+runAll :: [<IO> Int] -> <IO> Int
+runAll xs = do 0

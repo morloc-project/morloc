@@ -67,7 +67,7 @@ import qualified Morloc.BaseTypes as BT
 -- `data` declarations add no new conflicts either, the alternation bar
 --   included: '|' is reserved, and every `data` form starts with the
 --   keyword.
-%expect 99
+%expect 104
 
 %token
   VLBRACE    { Located _ TokVLBrace _ }
@@ -132,6 +132,7 @@ import qualified Morloc.BaseTypes as BT
   UPPER      { Located _ (TokUpperName _) _ }
   '+'        { Located _ (TokOperator "+") _ }
   '/'        { Located _ (TokOperator "/") _ }
+  '<>'       { Located _ (TokOperator "<>") _ }
   OPERATOR   { Located _ (TokOperator _) _ }
   INTEGER    { Located _ (TokInteger _) _ }
   FLOAT      { Located _ (TokFloat _) _ }
@@ -468,7 +469,8 @@ non_string_type :: { TypeU }
   | non_string_non_fun            { $1 }
 
 non_string_non_fun :: { TypeU }
-  : '<' effect_row '>' non_string_non_fun  {% mkEffectRow $1 $2 >>= \es -> return (mkEffectU es $4) }
+  : '<' effect_row '>' non_string_add  {% mkEffectRow $1 $2 >>= \es -> return (mkEffectU es $4) }
+  | '<>' non_string_add       { mkEffectU emptyEffectSet $2 }
   | non_string_add            { $1 }
 
 non_string_add :: { TypeU }
@@ -921,7 +923,8 @@ fun_type :: { TypeU }
   : non_fun_type '->' type   { case $3 of { FunU args ret -> FunU ($1 : args) ret; t -> FunU [$1] t } }
 
 non_fun_type :: { TypeU }
-  : '<' effect_row '>' non_fun_type  {% mkEffectRow $1 $2 >>= \es -> return (mkEffectU es $4) }
+  : '<' effect_row '>' add_type  {% mkEffectRow $1 $2 >>= \es -> return (mkEffectU es $4) }
+  | '<>' add_type             { mkEffectU emptyEffectSet $2 }
   | add_type                  { $1 }
 
 add_type :: { TypeU }
@@ -1008,7 +1011,8 @@ sig_fun_args :: { [(Pos, TypeU)] }
   | pos_non_fun_type                     { [$1] }
 
 pos_non_fun_type :: { (Pos, TypeU) }
-  : '<' effect_row '>' pos_non_fun_type  {% mkEffectRow $1 $2 >>= \es -> return (locPos $1, mkEffectU es (snd $4)) }
+  : '<' effect_row '>' pos_add_type  {% mkEffectRow $1 $2 >>= \es -> return (locPos $1, mkEffectU es (snd $4)) }
+  | '<>' pos_add_type  { (locPos $1, mkEffectU emptyEffectSet (snd $2)) }
   | pos_add_type       { $1 }
 
 pos_add_type :: { (Pos, TypeU) }
@@ -1048,6 +1052,7 @@ single_constraint :: { Constraint }
 
 operator_name :: { Located }
   : OPERATOR                  { $1 }
+  | '<>'                      { $1 }
   | '+'                       { $1 }
   | '*'                       { $1 }
   | '<'                       { $1 }
