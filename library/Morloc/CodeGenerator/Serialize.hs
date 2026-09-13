@@ -672,26 +672,27 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     -- Render a TypeF as a user-facing Morloc type string (for @typeof).
     -- Uses the general type variable name (not the language-concrete one),
     -- matching what the user wrote in their source.
+    -- The name is the general type's rendering, so it matches what the
+    -- nexus prints for the same expression. The concrete type is mapped
+    -- back onto the general constructors by its general-side names.
     renderTypeFName :: TypeF -> Text
-    renderTypeFName = render . go
+    renderTypeFName = render . pretty . go
       where
-        go (UnkF (FV t _)) = pretty t
-        go (VarF (FV t _)) = pretty t
-        go (NamF _ (FV t _) params _) =
-          case params of
-            [] -> pretty t
-            ps -> parens (pretty t <+> hsep (map go ps))
-        go (RecF (FV t _)) = pretty t
-        go (EnumF (FV t _) _ _) = pretty t
-        go (VariantF (FV t _) _ _) = pretty t
-        go (AppF con args) = parens (go con <+> hsep (map go args))
-        go (FunF args ret) =
-          parens (hsep (punctuate " ->" (map go args ++ [go ret])))
-        go (OptionalF t) = "?" <> go t
-        go (NatLitF n) = pretty n
-        go NatVoidF = "_"
-        go (StrLitF s) = dquotes (pretty s)
-        go StrVoidF = "_"
+        go (UnkF (FV t _)) = UnkT t
+        go (VarF (FV t _)) = VarT t
+        go (NamF o (FV t _) params rs) = NamT o t (map go params) [(k, go v) | (k, v) <- rs]
+        go (RecF (FV t _)) = VarT t
+        go (EnumF (FV t _) [] _) = VarT t
+        go (EnumF (FV t _) params _) = AppT (VarT t) (map go params)
+        go (VariantF (FV t _) [] _) = VarT t
+        go (VariantF (FV t _) params _) = AppT (VarT t) (map go params)
+        go (AppF con args) = AppT (go con) (map go args)
+        go (FunF args ret) = FunT (map go args) (go ret)
+        go (OptionalF t) = OptionalT (go t)
+        go (NatLitF n) = NatLitT n
+        go NatVoidF = NatVoidT
+        go (StrLitF s) = StrLitT s
+        go StrVoidF = StrVoidT
 
     lowerCacheBody ::
       SerializationState ->

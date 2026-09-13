@@ -1,0 +1,37 @@
+-- `@typeof` is a compile-time constant naming the argument's type, and the
+-- name is the same string whether the expression lands in a pool or in
+-- the nexus. Each pair below is the same type reached both ways.
+module main (poolList, nexusList, poolTuple, nexusTuple, poolBox, nexusBox, poolFn, nexusFn)
+
+import root
+import root-py
+
+source Py from "lib.py" ("ident")
+ident :: Int -> Int
+
+record Box a = Box { item :: a }
+record py => Box a = "dict" { item :: a }
+
+poolList :: Int -> Str
+poolList x = @typeof [ident x]
+
+nexusList :: Int -> Str
+nexusList x = @typeof [x]
+
+poolTuple :: Int -> Str
+poolTuple x = @typeof (ident x, [x])
+
+nexusTuple :: Int -> Str
+nexusTuple x = @typeof (x, [x])
+
+poolBox :: Int -> Str
+poolBox x = @typeof ({ item = { item = ident x } } :: Box (Box Int))
+
+nexusBox :: Int -> Str
+nexusBox x = @typeof ({ item = { item = x } } :: Box (Box Int))
+
+poolFn :: Int -> Str
+poolFn x = @typeof (\y -> ident (x + y))
+
+nexusFn :: Int -> Str
+nexusFn x = @typeof (\y -> x + y)
