@@ -14,7 +14,7 @@
 --
 -- The closure's body lives only in Python, so it must genuinely call home.
 
-module main (crossRust, crossCpp, resultRust, resultCpp)
+module main (crossRust, crossCpp, resultRust, resultCpp, recordField)
 
 import root-py
 import root-rust
@@ -30,8 +30,8 @@ instance Packable Int Wrapped where
   source Cpp from "wrap.hpp" ("pack_wrap_cpp" as pack, "unpack_wrap_cpp" as unpack)
   source Py from "wrap.py" ("pack_wrap" as pack, "unpack_wrap" as unpack)
 
-source Py from "wrap.py" ("tick", "add_wrapped" as addWrapped, "mk_wrapped_from" as mkFrom, "apply_wrapped_py" as applyPy, "mk_wrapped_py" as mkPy)
-source Rust from "wrap.rs" ("apply_wrapped" as applyRust, "mk_wrapped" as mkRust, "apply_mk" as applyMkRust, "add_wrapped_rust" as addWrappedRust)
+source Py from "wrap.py" ("tick", "add_wrapped" as addWrapped, "mk_wrapped_from" as mkFrom, "apply_wrapped_py" as applyPy, "mk_wrapped_py" as mkPy, "use_ops" as useOps)
+source Rust from "wrap.rs" ("apply_wrapped" as applyRust, "mk_wrapped" as mkRust, "apply_mk" as applyMkRust, "add_wrapped_rust" as addWrappedRust, "tick_rust" as tickRust)
 source Cpp from "wrap.hpp" ("apply_wrapped_cpp" as applyCpp, "mk_wrapped_cpp" as mkCpp, "apply_mk_cpp" as applyMkCpp)
 
 tick :: <IO> Int
@@ -68,3 +68,29 @@ resultCpp :: Int -> <IO> Int
 resultCpp a = do
   _ <- tick
   applyMkCpp (\x -> mkFrom a x) 10
+
+-- A record of closures built in Rust and sent to a Python host, where the
+-- closure field's ARGUMENT is the custom-packed type. Rust holds it natively
+-- (`MyWrap`) while the wire carries `Int`, so the proxy the receiver builds and
+-- the field the sender declares are the same type only if the packer is applied
+-- at the crossing rather than skipped.
+record Ops where
+  f :: Wrapped -> Int
+
+record Rust => Ops = "Ops"
+record Py => Ops = "dict"
+
+addWrappedRust :: Int -> Wrapped -> Int
+tickRust :: <IO> Int
+mkPy :: Int -> Wrapped
+useOps :: Ops -> Wrapped -> Int
+
+mkOps :: Int -> <IO> Ops
+mkOps a = do
+  _ <- tickRust
+  {f = \w -> addWrappedRust a w}
+
+recordField :: Int -> <IO> Int
+recordField a = do
+  ops <- mkOps a
+  useOps ops (mkPy 10)

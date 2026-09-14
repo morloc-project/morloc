@@ -6,17 +6,19 @@
 -- and one nested inside another, none of them recursive -- the tail-recursive
 -- form is lowered as a loop and takes a different path.
 
-module main (pick, pickUnit, pickDo, pickNested)
+module main (pick, pickUnit, pickDo, pickNested, forcedTwice)
 
 import root-rust
 
 source Rust from "own.rs"
   ( "re_emit" as emit
   , "re_nop" as nop
+  , "re_tick" as tick
   )
 
 emit :: Int -> <IO> Int
 nop :: <IO> ()
+tick :: Str -> <IO> Int
 
 pick :: Bool -> <IO> Int
 pick b
@@ -41,3 +43,20 @@ pickNested :: Bool -> Bool -> <IO> Int
 pickNested b c
   ? b = pick c
   : emit 9
+
+-- The conditional yields a SUSPENSION, so choosing an arm must not run it.
+-- Bound once and forced three times, the effect must happen exactly three
+-- times: once per force, not once per arm and not once per condition test.
+-- The cases above check only values, which cannot see a change in how often
+-- an arm runs.
+pickTick :: Str -> Bool -> <IO> Int
+pickTick p b
+  ? b = tick p
+  : tick p
+
+forcedTwice :: Str -> Bool -> <IO> Int
+forcedTwice p b = do
+  let t = pickTick p b
+  _ <- t
+  _ <- t
+  t

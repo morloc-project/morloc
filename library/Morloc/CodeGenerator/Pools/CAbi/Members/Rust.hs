@@ -138,16 +138,10 @@ data OwnEnv = OwnEnv
   -- 'NativeContent' so 'letWrap' emits a deserialize let) and reassigned by the
   -- loop's continue, so its entry let is emitted @let mut@ ('rustMakeLet') and it
   -- is unioned into 'oeShared' so the body borrows/clones but never moves it.
-  , oeReturnsThunk :: Bool
-  -- ^ Whether the current manifold's signature lets a closure leave its frame:
-  -- its return is, or holds, a function value ('rustReturnEscapes'). This
-  -- decides how an effect thunk captures: see 'lcMakeDoBlock'. It is read from
-  -- the same 'TypeM' that produces the signature, so the capture mode and the
-  -- return type cannot disagree.
   }
 
 emptyOwnEnv :: OwnEnv
-emptyOwnEnv = OwnEnv Set.empty Set.empty Set.empty Set.empty Set.empty False
+emptyOwnEnv = OwnEnv Set.empty Set.empty Set.empty Set.empty Set.empty
 
 type RustM = ReaderT OwnEnv (CMS.StateT RustState Identity)
 
@@ -327,14 +321,6 @@ rustReturnType (Native t) = case typeFof t of
   FunF ts inner -> rustReturnType (Function (map typeMof ts) (typeMof inner))
   tf -> rustTypeOf tf
 
--- | Whether a manifold's return lets a closure leave the frame: the return
--- is a function value, or a container (record, list, tuple, optional) that
--- holds one at any depth. Such a closure must own its captures.
-rustReturnEscapes :: TypeM -> Bool
-rustReturnEscapes (Function _ _) = True
-rustReturnEscapes (Native t) = containsFunF (typeFof t)
-rustReturnEscapes _ = False
-
 -- | The Rust type of a record field. A function-typed field is stored as a fat
 -- trait object @Rc<dyn MorlocFnN<A1,..,An,R>>@ -- a bare @impl Fn@ is illegal in
 -- a field, and the trait object carries the reify capability a crossing closure
@@ -360,7 +346,7 @@ rustClosureWireLeaf = VarF (FV (TV "Closure") (CV "rustmorloc::ClosureOrigin"))
 -- node returns False, and so does a list/optional OF records (@[R]@/@?R@) -- those
 -- fall through to the generic @Vec@/@Option@ codec plus the record's impl.
 rustDivertsClosure :: SerialAST -> Bool
-rustDivertsClosure = isJust . closurePath
+rustDivertsClosure = maybe False pathHasClosure . wirePath
 
 -- | Whether a manifold parameter is passed as a shared reference. Mirrors the
 -- by-reference cases in 'rustArgOf'.
@@ -591,6 +577,8 @@ sharedOf = Map.keysSet . Map.filter (>= 2)
 -- closure is a trait object behind `Rc`, which must outlive every frame, so a
 -- closure built in such a frame must own its captures ('capInit'). A
 -- nested manifold's containers count too, which only over-clones.
+
+
 -- | The closure manifolds whose value reaches a sourced function-typed
 -- parameter DIRECTLY, and nothing else.
 --
@@ -643,31 +631,6 @@ thinSinkNames mask es = Set.filter occursOnlyHere sites
 
     funParamAt src k = case Map.lookup (srcName src) mask of
       Just bs | k < length bs -> snd (bs !! k)
-      _ -> False
-
-storesClosureSM :: SerialManifold -> Bool
-storesClosureSM = runIdentity . foldWithSerialManifoldM storesClosureOps
-
-storesClosureNM :: NativeManifold -> Bool
-storesClosureNM = runIdentity . foldWithNativeManifoldM storesClosureOps
-
-storesClosureOps :: FoldWithManifoldM Identity Bool Bool Bool Bool Bool Bool
-storesClosureOps =
-  FoldWithManifoldM
-    { opFoldWithSerialManifoldM = \_ full -> return (foldlSM (||) False full)
-    , opFoldWithNativeManifoldM = \_ full -> return (foldlNM (||) False full)
-    , opFoldWithSerialExprM = \_ node -> return (foldlSE (||) False node)
-    , opFoldWithNativeExprM = \orig node -> return (stores orig || foldlNE (||) False node)
-    , opFoldWithSerialArgM = \_ node -> return (foldlSA (||) False node)
-    , opFoldWithNativeArgM = \_ node -> return (foldlNA (||) False node)
-    }
-  where
-    stores e = case e of
-      ListN {} -> containsFunF (typeFof e)
-      TupleN {} -> containsFunF (typeFof e)
-      RecordN {} -> containsFunF (typeFof e)
-      MapOptionalN {} -> containsFunF (typeFof e)
-      CoerceN {} -> containsFunF (typeFof e)
       _ -> False
 
 -- | The shared indices of a serial manifold: variables used at more than one
@@ -884,51 +847,76 @@ capInit a@(Arg i t) = do
 -- C++ member also still lacks.)
 -- | How a proxy hands one of its arguments to the wire: a value is put as it
 -- is; a closure is reified first (its wire form is its origin tuple).
-closureArgPush :: Int -> SerialAST -> Int -> MDoc
-closureArgPush i (SerialClosure ins _) sid =
-  "__pkts.push(rustmorloc::put_value(&rustmorloc::require_origin(__a" <> pretty i <> ".reify" <> pretty (length ins) <> "()), " <> sch sid <> "));"
-closureArgPush i _ sid =
-  "__pkts.push(rustmorloc::put_value(__a" <> pretty i <> ", " <> sch sid <> "));"
+closureArgPush :: Int -> SerialAST -> Int -> RustM MDoc
+closureArgPush i ast sid = do
+  toWire <- reifyInPlace ast
+  let a = "__a" <> pretty i
+      v = maybe a (\f -> "&" <> parens (f a)) toWire
+  return $ "__pkts.push(rustmorloc::put_value(" <> v <> ", " <> sch sid <> "));"
 
 -- | How a proxy reads the result of its call off the wire: a value is got
 -- as it is; a closure arrives as its origin tuple and is reflected into a
 -- proxy of its own, so a closure may return a closure across pools.
 closureResultRead :: SerialAST -> MDoc -> Int -> RustM MDoc
-closureResultRead out@(SerialClosure _ _) call sid = do
-  assemble <- rustReflectClosureAssembler out
-  return $ assemble ("rustmorloc::get_value(" <> call <> ", " <> sch sid <> ")")
 closureResultRead out call sid = do
-  resT <- rustTypeOf (serialAstToType out)
-  return $ "rustmorloc::get_value::<" <> resT <> ">(" <> call <> ", " <> sch sid <> ")"
+  fromWire <- reflectInPlace out
+  wireT <- rustTypeOf (wireSerialAstToType rustClosureWireLeaf out)
+  let got = "rustmorloc::get_value::<" <> wireT <> ">(" <> call <> ", " <> sch sid <> ")"
+  return $ maybe got ($ got) fromWire
 
--- | Where the closures sit inside a wire form. A value's wire form is a
--- function of its 'SerialAST' and of nothing else -- not of its 'TypeM', not
--- of its rendered signature, not of its arity -- so both ends of the wire are
--- rendered from this one traversal and cannot desynchronize.
-data ClosurePath
-  = ClosureLeaf SerialAST
-  | OverList ClosurePath
-  | OverOpt ClosurePath
-  | OverTuple [Maybe ClosurePath]
+-- | Where a value differs between the form a pool holds and the form it
+-- travels as. A value's wire form is a function of its 'SerialAST' and of
+-- nothing else -- not of its 'TypeM', not of its rendered signature, not of
+-- its arity -- so both ends of the wire are rendered from this one traversal
+-- and cannot desynchronize.
+--
+-- Two node kinds differ. A CLOSURE travels as the manifold to call back into
+-- plus its captured environment. A custom-PACKED type travels as whatever its
+-- packer unpacks it to, which is why a packed node carries the path of the
+-- form beneath it as well.
+data WirePath
+  = AtClosure SerialAST
+  | AtPack TypePacker (Maybe WirePath)
+  | OverList WirePath
+  | OverOpt WirePath
+  | OverTuple [Maybe WirePath]
 
--- | The closure positions of a wire form, or 'Nothing' if it holds none. A
--- record is 'Nothing': it marshals through its own generated impl, which
--- handles its closure fields itself.
-closurePath :: SerialAST -> Maybe ClosurePath
-closurePath ast@(SerialClosure _ _) = Just (ClosureLeaf ast)
-closurePath (SerialList _ _ inner) = OverList <$> closurePath inner
-closurePath (SerialOptional _ inner) = OverOpt <$> closurePath inner
-closurePath (SerialPack _ (_, inner)) = closurePath inner
-closurePath (SerialTuple _ ss)
+-- | The positions of a wire form that differ from the native value, or
+-- 'Nothing' where the two coincide. A record is 'Nothing': it marshals
+-- through its own generated impl, which handles its own fields.
+wirePath :: SerialAST -> Maybe WirePath
+wirePath ast@(SerialClosure _ _) = Just (AtClosure ast)
+wirePath (SerialPack _ (p, inner)) = Just (AtPack p (wirePath inner))
+wirePath (SerialList _ _ inner) = OverList <$> wirePath inner
+wirePath (SerialOptional _ inner) = OverOpt <$> wirePath inner
+wirePath (SerialTuple _ ss)
   | all isNothing ps = Nothing
   | otherwise = Just (OverTuple ps)
   where
-    ps = map closurePath ss
-closurePath _ = Nothing
+    ps = map wirePath ss
+wirePath _ = Nothing
+
+-- | Whether a path holds a closure. Routing an aggregate through the
+-- structural reify/reflect is a question about CLOSURES only -- the generic
+-- codec handles a packer perfectly well on its own -- so it is answered from
+-- the one traversal rather than by a second one that could drift from it.
+pathHasClosure :: WirePath -> Bool
+pathHasClosure (AtClosure _) = True
+pathHasClosure (AtPack _ inner) = maybe False pathHasClosure inner
+pathHasClosure (OverList p) = pathHasClosure p
+pathHasClosure (OverOpt p) = pathHasClosure p
+pathHasClosure (OverTuple ps) = any (maybe False pathHasClosure) ps
 
 -- | Rebuild a native value from its wire form: each origin becomes a proxy.
-renderReflect :: ClosurePath -> RustM (MDoc -> MDoc)
-renderReflect (ClosureLeaf ast) = rustReflectClosureAssembler ast
+renderReflect :: WirePath -> RustM (MDoc -> MDoc)
+renderReflect (AtClosure ast) = rustReflectClosureAssembler ast
+-- The wire carries what the packer unpacks to, so rebuilding the native value
+-- means rebuilding that form first and then packing it.
+renderReflect (AtPack p inner) = do
+  f <- maybe (return id) renderReflect inner
+  let packer = pretty (srcName (typePackerForward p))
+      ref v = if rustIsCopy (typePackerUnpacked p) then v else "&" <> parens v
+  return $ \v -> packer <> parens (ref (f v))
 renderReflect (OverList p) = do
   f <- renderReflect p
   return $ \v -> v <> ".into_iter().map(|__e| " <> f "__e" <> ").collect::<Vec<_>>()"
@@ -953,11 +941,17 @@ renderReflect (OverTuple ps) = do
 
 -- | The dual: reduce a native value to its wire form by reifying each
 -- closure to its origin. Clause for clause the inverse of 'renderReflect',
--- because both are driven by the same 'ClosurePath'.
-renderReify :: ClosurePath -> RustM (MDoc -> MDoc)
-renderReify (ClosureLeaf (SerialClosure ins _)) =
+-- because both are driven by the same 'WirePath'.
+renderReify :: WirePath -> RustM (MDoc -> MDoc)
+renderReify (AtClosure (SerialClosure ins _)) =
   return $ \v -> "rustmorloc::require_origin(" <> parens v <> ".reify" <> pretty (length ins) <> "())"
-renderReify (ClosureLeaf _) = error "renderReify: a closure leaf is a SerialClosure"
+renderReify (AtClosure _) = error "renderReify: a closure node is a SerialClosure"
+-- The inverse: unpack to the form the wire carries, then reduce that.
+renderReify (AtPack p inner) = do
+  f <- maybe (return id) renderReify inner
+  let unpacker = pretty (srcName (typePackerReverse p))
+      ref v = if rustIsCopy (typePackerPacked p) then v else "&" <> parens v
+  return $ \v -> f (unpacker <> parens (ref v))
 renderReify (OverList p) = do
   f <- renderReify p
   return $ \v -> v <> ".iter().map(|__e| " <> f "__e" <> ").collect::<Vec<_>>()"
@@ -979,10 +973,10 @@ renderReify (OverTuple ps) = do
     slot v j = v <> "." <> pretty j
 
 reflectInPlace :: SerialAST -> RustM (Maybe (MDoc -> MDoc))
-reflectInPlace = traverse renderReflect . closurePath
+reflectInPlace = traverse renderReflect . wirePath
 
 reifyInPlace :: SerialAST -> RustM (Maybe (MDoc -> MDoc))
-reifyInPlace = traverse renderReify . closurePath
+reifyInPlace = traverse renderReify . wirePath
 
 -- | Reflect an incoming closure wire tuple into a native function value.
 -- Shares the origin-preserving assembler with the nested and record-field
@@ -1004,14 +998,14 @@ rustReflectClosure _ _ = error "rustReflectClosure: expected SerialClosure"
 -- vs a @FromVoidstar::read@ off the record's wire slot).
 rustReflectClosureAssembler :: SerialAST -> RustM (MDoc -> MDoc)
 rustReflectClosureAssembler (SerialClosure ins out) = do
-  argTs <- mapM (rustTypeOf . serialAstToType) ins
-  resT <- rustTypeOf (serialAstToType out)
+  argTs <- mapM (rustTypeOf . serialAstToNativeType) ins
+  resT <- rustTypeOf (serialAstToNativeType out)
   argSids <- mapM (rustRegisterSchema . render . serialAstToMsgpackSchema) ins
   resSid <- rustRegisterSchema (render (serialAstToMsgpackSchema out))
   resultDoc <- closureResultRead out "rustmorloc::foreign_call(__sock, __c.1.1 as u32, &__pkts)" resSid
+  pushes <- sequence [closureArgPush i ast sid | (i, ast, sid) <- zip3 [(0 :: Int) ..] ins argSids]
   let n = length ins
       params = ["__a" <> pretty i <> ": &" <> t | (i, t) <- zip [(0 :: Int) ..] argTs]
-      pushes = [closureArgPush i ast sid | (i, ast, sid) <- zip3 [(0 :: Int) ..] ins argSids]
       dynT =
         "std::rc::Rc<dyn rustmorloc::MorlocFn" <> pretty n
           <> "<" <> hcat (punctuate ", " (argTs <> [resT])) <> ">>"
@@ -1311,7 +1305,7 @@ makeClosureDispatch closureAsts closureTable es = do
               , "}"
               ]
       -- The wire form of each capture travels with its schema id: the origin
-      -- builder reduces the value through the same 'closurePath' the dispatch
+      -- builder reduces the value through the same 'wirePath' the dispatch
       -- wrapper rebuilds it through.
       return (wrapper, (render (manNamer i), (i, zip capSids capAsts)))
 
@@ -1649,9 +1643,9 @@ borrowedIndicesOfForm form =
 -- mutating state, the scope is purely lexical -- sibling and nested manifolds
 -- cannot corrupt each other's view, and the answer does not depend on the fold's
 -- evaluation order.
-withManifoldScope :: Set.Set Int -> Set.Set Int -> Set.Set Int -> Bool -> RustM a -> RustM a
-withManifoldScope borrowed shared carried returnsThunk =
-  local (\e -> OwnEnv {oeCurrent = borrowed, oeParent = oeCurrent e, oeShared = shared, oeParentShared = oeShared e, oeLoopCarried = carried, oeReturnsThunk = returnsThunk})
+withManifoldScope :: Set.Set Int -> Set.Set Int -> Set.Set Int -> RustM a -> RustM a
+withManifoldScope borrowed shared carried =
+  local (\e -> OwnEnv {oeCurrent = borrowed, oeParent = oeCurrent e, oeShared = shared, oeParentShared = oeShared e, oeLoopCarried = carried})
 
 -- | Run an action in the caller's ownership scope, by making 'oeCurrent' the
 -- caller's set ('oeParent'). Used when rendering a manifold call whose arguments
@@ -1683,11 +1677,11 @@ loopCarriedIdsSM (SerialManifold _ _ _ _ se) = go se
 rustSurround :: SurroundManifoldM RustM PoolDocs PoolDocs PoolDocs PoolDocs (TypeS, PoolDocs) (TypeM, PoolDocs)
 rustSurround =
   defaultValue
-    { surroundSerialManifoldM = \recurse sm@(SerialManifold _ _ form _ body) ->
+    { surroundSerialManifoldM = \recurse sm@(SerialManifold _ _ form _ _) ->
         let carried = loopCarriedIdsSM sm
-         in withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesSM sm `Set.union` carried) carried (rustReturnEscapes (typeMof body) || storesClosureSM sm) (recurse sm)
-    , surroundNativeManifoldM = \recurse nm@(NativeManifold _ _ form body) ->
-        withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesNM nm) Set.empty (rustReturnEscapes (typeMof body) || storesClosureNM nm) (recurse nm)
+         in withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesSM sm `Set.union` carried) carried (recurse sm)
+    , surroundNativeManifoldM = \recurse nm@(NativeManifold _ _ form _) ->
+        withManifoldScope (borrowedIndicesOfForm form) (sharedIndicesNM nm) Set.empty (recurse nm)
     }
 
 translateSegment :: SerialManifold -> RustM MDoc
@@ -2150,34 +2144,22 @@ rustMakeLoop ids body = do
 rustMakeIf :: NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> RustM PoolDocs
 rustMakeIf origExpr condDocs thenDocs elseDocs = do
   idx <- getCounter
-  escapes <- asks oeReturnsThunk
   let v = helperNamer idx
-  ifStmt <- case typeFof origExpr of
-    -- Two suspension arms are two closure types no one binding can name, so
-    -- the choice is made inside one closure: running it runs whichever arm
-    -- the condition picks, which is what running the chosen arm would do.
-    FunF [] _ -> do
-      let header = if escapes then "move ||" else "||"
-      return $
-        vsep
-          [ "let" <+> v <+> "=" <+> header <+> "if" <+> parens (poolExpr condDocs) <+> "{"
-          , indent 4 (vsep (poolPriorLines thenDocs ++ [poolExpr thenDocs <> ".call0()"]))
-          , "} else {"
-          , indent 4 (vsep (poolPriorLines elseDocs ++ [poolExpr elseDocs <> ".call0()"]))
-          , "};"
-          ]
-    tf -> do
-      typeStr <- rustTypeOf tf
-      -- Two function-valued arms are two closure types; the binding is the
-      -- trait object both coerce to.
-      -- both arms are already the trait object the binding is typed with
-      let arm d = poolExpr d
+  -- Both arms have the same rendered type, function-valued or not, so the
+  -- conditional SELECTS one and the binding names that type. A suspension
+  -- used to be special-cased into a third closure that re-tested the
+  -- condition on every force, because no binding could name the two arms'
+  -- distinct closure types; one spelling for a function value removed the
+  -- reason. Selecting costs one allocation and one indirection less, and
+  -- evaluates the condition once.
+  ifStmt <- do
+      typeStr <- rustTypeOf (typeFof origExpr)
       return $
         vsep
           [ "let" <+> v <> ":" <+> typeStr <+> "= if" <+> parens (poolExpr condDocs) <+> "{"
-          , indent 4 (vsep (poolPriorLines thenDocs ++ [arm thenDocs]))
+          , indent 4 (vsep (poolPriorLines thenDocs ++ [poolExpr thenDocs]))
           , "} else {"
-          , indent 4 (vsep (poolPriorLines elseDocs ++ [arm elseDocs]))
+          , indent 4 (vsep (poolPriorLines elseDocs ++ [poolExpr elseDocs]))
           , "};"
           ]
   return $
