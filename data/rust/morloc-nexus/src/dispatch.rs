@@ -1411,11 +1411,11 @@ pub(crate) fn print_result_c(
         fn print_arrow_as_json(
             data: *const std::ffi::c_void,
             errmsg: *mut *mut std::ffi::c_char,
-        ) -> bool;
+        ) -> i32;
         fn print_arrow_as_table(
             data: *const std::ffi::c_void,
             errmsg: *mut *mut std::ffi::c_char,
-        ) -> bool;
+        ) -> i32;
         fn pack_with_schema(
             mlc: *const std::ffi::c_void,
             schema: *const morloc_runtime_types::cschema::CSchema,
@@ -1432,18 +1432,22 @@ pub(crate) fn print_result_c(
     match config.output_format {
         OutputFormat::Json => {
             if is_arrow {
-                let ok = unsafe {
+                let rc = unsafe {
                     if config.print_flag {
                         print_arrow_as_table(ptr as *const std::ffi::c_void, &mut errmsg)
                     } else {
                         print_arrow_as_json(ptr as *const std::ffi::c_void, &mut errmsg)
                     }
                 };
-                if !ok {
-                    let msg = process::take_c_errmsg(errmsg)
-                        .unwrap_or_else(|| "unknown error".into());
-                    eprintln!("Error: {}", msg);
-                    process::clean_exit(1);
+                match rc {
+                    PRINT_RESULT_OK => {}
+                    PRINT_RESULT_PIPE_CLOSED => process::exit_broken_pipe(),
+                    _ => {
+                        let msg = process::take_c_errmsg(errmsg)
+                            .unwrap_or_else(|| "unknown error".into());
+                        eprintln!("Error: {}", msg);
+                        process::clean_exit(1);
+                    }
                 }
             } else {
                 let rc = unsafe {

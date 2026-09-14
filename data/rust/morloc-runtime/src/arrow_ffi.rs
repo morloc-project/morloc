@@ -4,6 +4,7 @@
 //! generic reader/writer live in `arrow_shm`.
 
 use std::ffi::{c_char, c_void, CStr};
+use std::io::Write;
 use std::sync::Arc;
 
 use arrow_array::cast::AsArray;
@@ -15,6 +16,7 @@ use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use crate::arrow_shm::{self, ArrowShmHeader};
 use crate::cschema::CSchema;
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
+use morloc_runtime_types::{PRINT_RESULT_ERR, PRINT_RESULT_OK, PRINT_RESULT_PIPE_CLOSED};
 use crate::schema::{Schema, SerialType};
 use crate::shm::{self, RelPtr};
 
@@ -317,26 +319,29 @@ fn json_seq(arr: &dyn Array, out: &mut String) {
     out.push(']');
 }
 
-unsafe fn write_stdout(s: &str) {
-    libc::fwrite(s.as_ptr() as *const c_void, 1, s.len(), libc_stdout());
-}
-
-unsafe fn libc_stdout() -> *mut libc::FILE {
-    extern "C" {
-        static stdout: *mut libc::FILE;
+/// Write a rendered block to stdout with the same result codes as
+/// `print_voidstar`: a closed pipe is distinguished from other failures.
+unsafe fn write_stdout(s: &str, errmsg: *mut *mut c_char) -> i32 {
+    let mut w = std::io::stdout().lock();
+    match w.write_all(s.as_bytes()).and_then(|_| w.flush()) {
+        Ok(()) => PRINT_RESULT_OK,
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => PRINT_RESULT_PIPE_CLOSED,
+        Err(e) => {
+            set_errmsg(errmsg, &MorlocError::Serialization(e.to_string()));
+            PRINT_RESULT_ERR
+        }
     }
-    stdout
 }
 
 /// Print a block as a JSON array of row objects, one line.
 #[no_mangle]
-pub unsafe extern "C" fn print_arrow_as_json(data: *const c_void, errmsg: *mut *mut c_char) -> bool {
+pub unsafe extern "C" fn print_arrow_as_json(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
     clear_errmsg(errmsg);
     let batch = match arrow_shm::shm_to_batch(data as *const ArrowShmHeader) {
         Ok(b) => b,
         Err(e) => {
             set_errmsg(errmsg, &e);
-            return false;
+            return PRINT_RESULT_ERR;
         }
     };
     let mut out = String::new();
@@ -357,20 +362,19 @@ pub unsafe extern "C" fn print_arrow_as_json(data: *const c_void, errmsg: *mut *
         out.push('}');
     }
     out.push_str("]\n");
-    write_stdout(&out);
-    true
+    write_stdout(&out, errmsg)
 }
 
 /// Print a block as a tab-separated table: a header line of column names,
 /// then one line per row with cells rendered as in the JSON form.
 #[no_mangle]
-pub unsafe extern "C" fn print_arrow_as_table(data: *const c_void, errmsg: *mut *mut c_char) -> bool {
+pub unsafe extern "C" fn print_arrow_as_table(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
     clear_errmsg(errmsg);
     let batch = match arrow_shm::shm_to_batch(data as *const ArrowShmHeader) {
         Ok(b) => b,
         Err(e) => {
             set_errmsg(errmsg, &e);
-            return false;
+            return PRINT_RESULT_ERR;
         }
     };
     let mut out = String::new();
@@ -387,8 +391,7 @@ pub unsafe extern "C" fn print_arrow_as_table(data: *const c_void, errmsg: *mut 
         }
         out.push('\n');
     }
-    write_stdout(&out);
-    true
+    write_stdout(&out, errmsg)
 }
 
 // -- Arrow detection / JSON -> table -----------------------------------------
