@@ -10,7 +10,7 @@
 -- reused after an effectful statement, after a @catch, across both arms of a
 -- single @catch, and around the effectful statement of a tail-recursive loop.
 
-module main (afterSave, afterCatch, bothArms, recordReuse, loopReuse, letThunk, guardedTwice, armShare)
+module main (afterSave, afterCatch, bothArms, recordReuse, loopReuse, letThunk, guardedTwice, armShare, closureFrame)
 
 import root-rust
 
@@ -19,9 +19,23 @@ record Box where
   items :: [Int]
 record Rust => Box = "struct"
 
-source Rust from "own.rs" ("rt_len" as strLen, "rt_nonempty" as nonEmpty)
+source Rust from "own.rs"
+  ( "rt_len" as strLen
+  , "rt_nonempty" as nonEmpty
+  , "rt_bump" as bump
+  , "rt_peek" as peek
+  , "rt_use_cmds" as useCmds
+  )
 strLen :: Str -> Int
 nonEmpty :: [Int] -> [Int]
+bump :: Int -> Int
+peek :: Int -> Int
+useCmds :: Cmds -> Int -> Int
+
+record Cmds where
+  step :: Int -> Int
+  view :: Int -> Int
+record Rust => Cmds = "Cmds"
 
 -- The path is named once inside the @save thunk and twice after it.
 afterSave :: Str -> <IO> [Int]
@@ -91,3 +105,15 @@ guardedTwice p = do
 -- copy it out rather than take it.
 armShare :: [Int] -> <IO> [Int]
 armShare v = match (@try (nonEmpty v)) | (Ok _cv) = (do _cv) | (Err _) = (do v)
+
+-- The same reuse, in a frame that ALSO builds a record of function values.
+-- A whole-frame "something here holds a closure" flag must not decide how an
+-- unrelated thunk captures: the cases above all pass without this one, because
+-- none of their frames holds a closure.
+closureFrame :: Str -> <IO> Int
+closureFrame p = do
+  r <- (@load p :: <IO> (Try Str [Int]))
+  let base = match r
+        | (Ok xs) = strLen p
+        | (Err _) = strLen p
+  useCmds {step = bump, view = peek} base

@@ -1091,7 +1091,7 @@ pub fn require_origin(origin: Option<&ClosureOrigin>) -> ClosureOrigin {
 }
 
 macro_rules! morloc_fn {
-    ($trait:ident, $closure:ident, $call:ident, $reify:ident, $( ($A:ident, $a:ident) ),+ ) => {
+    ($trait:ident, $closure:ident, $fnptr:ident, $call:ident, $reify:ident, $( ($A:ident, $a:ident) ),+ ) => {
         pub trait $trait<$($A,)+ R> {
             fn $call(&self, $($a: &$A,)+) -> R;
             fn $reify(&self) -> Option<&ClosureOrigin>;
@@ -1154,6 +1154,22 @@ macro_rules! morloc_fn {
                 self.origin.get()
             }
         }
+        /// A capture-free closure as a plain function pointer. Coercion happens
+        /// at this call, so a caller never has to name the result type -- which
+        /// it could not do anyway, since the arity of a partially applied
+        /// manifold's morloc type counts its captured context arguments.
+        pub fn $fnptr<$($A,)+ R>(f: fn($(&$A,)+) -> R) -> fn($(&$A,)+) -> R { f }
+
+        /// A function pointer is already the thinnest form there is, so the
+        /// adapter is the identity. Anchoring this on a CONCRETE self type is
+        /// what lets it coexist with the trait-object impl: the two self types
+        /// are disjoint, so there is no overlap to reason about, and both
+        /// parameters appear in the self type, so neither is unconstrained.
+        impl<$($A,)+ R> ThinFn for fn($(&$A,)+) -> R {
+            type Out = Self;
+            fn thin(&self) -> Self { *self }
+        }
+
         /// The ONE thin `Fn` adapter. Host code may declare a higher-order
         /// parameter as `F: Fn(&A..) -> R`, which a trait object cannot
         /// satisfy, so a function value is handed over as one of these.
@@ -1227,6 +1243,11 @@ pub trait ThinFn {
     type Out;
     fn thin(&self) -> Self::Out;
 }
+pub fn fn_ptr0<R>(f: fn() -> R) -> fn() -> R { f }
+impl<R> ThinFn for fn() -> R {
+    type Out = Self;
+    fn thin(&self) -> Self { *self }
+}
 impl<R: 'static> ThinFn for std::rc::Rc<dyn MorlocFn0<R>> {
     type Out = Box<dyn Fn() -> R>;
     fn thin(&self) -> Self::Out {
@@ -1235,14 +1256,14 @@ impl<R: 'static> ThinFn for std::rc::Rc<dyn MorlocFn0<R>> {
     }
 }
 
-morloc_fn!(MorlocFn1, Closure1, call1, reify1, (A1, a1));
-morloc_fn!(MorlocFn2, Closure2, call2, reify2, (A1, a1), (A2, a2));
-morloc_fn!(MorlocFn3, Closure3, call3, reify3, (A1, a1), (A2, a2), (A3, a3));
-morloc_fn!(MorlocFn4, Closure4, call4, reify4, (A1, a1), (A2, a2), (A3, a3), (A4, a4));
-morloc_fn!(MorlocFn5, Closure5, call5, reify5, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5));
-morloc_fn!(MorlocFn6, Closure6, call6, reify6, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6));
-morloc_fn!(MorlocFn7, Closure7, call7, reify7, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7));
-morloc_fn!(MorlocFn8, Closure8, call8, reify8, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7), (A8, a8));
+morloc_fn!(MorlocFn1, Closure1, fn_ptr1, call1, reify1, (A1, a1));
+morloc_fn!(MorlocFn2, Closure2, fn_ptr2, call2, reify2, (A1, a1), (A2, a2));
+morloc_fn!(MorlocFn3, Closure3, fn_ptr3, call3, reify3, (A1, a1), (A2, a2), (A3, a3));
+morloc_fn!(MorlocFn4, Closure4, fn_ptr4, call4, reify4, (A1, a1), (A2, a2), (A3, a3), (A4, a4));
+morloc_fn!(MorlocFn5, Closure5, fn_ptr5, call5, reify5, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5));
+morloc_fn!(MorlocFn6, Closure6, fn_ptr6, call6, reify6, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6));
+morloc_fn!(MorlocFn7, Closure7, fn_ptr7, call7, reify7, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7));
+morloc_fn!(MorlocFn8, Closure8, fn_ptr8, call8, reify8, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7), (A8, a8));
 
 // ---------------------------------------------------------------------------
 // Packet bridge (production). `put_value` serializes a native value into a

@@ -89,6 +89,8 @@ data RustState = RustState
   , rsCScope :: Scope
   -- ^ The merged Rust concrete typedef scope; resolves a recursive back-ref
   -- (@RecF@) to its concrete struct name (as C++'s translatorCScope does).
+  , rsThinSinks :: Set.Set Text
+  -- ^ Closure manifolds that need no trait object: see 'thinSinkNames'.
   , rsSrcTypeVarMask :: Map.Map SrcName [(Bool, Bool)]
   -- ^ Per sourced function, per parameter position: @(isBareTypeVar,
   -- isFunctionParam)@ from the declared morloc signature. @isBareTypeVar@: the
@@ -106,7 +108,7 @@ data RustState = RustState
   }
 
 instance Defaultable RustState where
-  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> ("", "")) Map.empty [] Map.empty Map.empty Map.empty
+  defaultValue = RustState 0 Map.empty Set.empty Set.empty (\_ -> ("", "")) Map.empty [] Map.empty Set.empty Map.empty Map.empty
 
 -- | The ownership environment: the borrowed (@&T@) parameter indices of the
 -- manifold whose body is currently being lowered ('oeCurrent') and of its
@@ -589,6 +591,60 @@ sharedOf = Map.keysSet . Map.filter (>= 2)
 -- closure is a trait object behind `Rc`, which must outlive every frame, so a
 -- closure built in such a frame must own its captures ('capInit'). A
 -- nested manifold's containers count too, which only over-clones.
+-- | The closure manifolds whose value reaches a sourced function-typed
+-- parameter DIRECTLY, and nothing else.
+--
+-- That position is the only consumer in generated Rust which accepts a plain
+-- function: a record field, a list or tuple element, another closure's
+-- capture, and a manifold's return are all rendered as the trait object, so a
+-- function value reaching any of them must be able to BE one. A closure whose
+-- value reaches only this position therefore needs no trait object, and a
+-- stateless one needs no allocation either.
+--
+-- Occurrence is counted rather than assumed: a manifold reaching this position
+-- once and a record field elsewhere must take the general form, so a name is
+-- kept only if EVERY occurrence of it is such an argument.
+thinSinkNames :: Map.Map SrcName [(Bool, Bool)] -> [SerialManifold] -> Set.Set Text
+thinSinkNames mask es = Set.filter occursOnlyHere sites
+  where
+    sites = Set.unions (map (runIdentity . foldWithSerialManifoldM ops) es)
+
+    -- A name is kept only if the whole pool builds that closure exactly once.
+    -- Anything built more than once may reach a second consumer, and the two
+    -- occurrences cannot take different forms.
+    occursOnlyHere n = Map.findWithDefault (0 :: Int) n allCounts == 1
+    allCounts =
+      Map.fromListWith (+)
+        [ (render (manNamer i), 1)
+        | sm <- es
+        , NativeManifold i _ form _ <- collectClosureManifolds sm
+        , isClosureForm form
+        ]
+
+    ops :: FoldWithManifoldM Identity (Set.Set Text) (Set.Set Text) (Set.Set Text) (Set.Set Text) (Set.Set Text) (Set.Set Text)
+    ops =
+      FoldWithManifoldM
+        { opFoldWithSerialManifoldM = \_ full -> return (foldlSM Set.union Set.empty full)
+        , opFoldWithNativeManifoldM = \_ full -> return (foldlNM Set.union Set.empty full)
+        , opFoldWithSerialExprM = \_ node -> return (foldlSE Set.union Set.empty node)
+        , opFoldWithNativeExprM = \orig node -> return (Set.union (atSite orig) (foldlNE Set.union Set.empty node))
+        , opFoldWithSerialArgM = \_ node -> return (foldlSA Set.union Set.empty node)
+        , opFoldWithNativeArgM = \_ node -> return (foldlNA Set.union Set.empty node)
+        }
+
+    atSite (AppExeN _ (SrcCallP src) args) =
+      Set.fromList
+        [ render (manNamer i)
+        | (k, NativeArgManifold (NativeManifold i _ form _)) <- zip [(0 :: Int) ..] args
+        , isClosureForm form
+        , funParamAt src k
+        ]
+    atSite _ = Set.empty
+
+    funParamAt src k = case Map.lookup (srcName src) mask of
+      Just bs | k < length bs -> snd (bs !! k)
+      _ -> False
+
 storesClosureSM :: SerialManifold -> Bool
 storesClosureSM = runIdentity . foldWithSerialManifoldM storesClosureOps
 
@@ -768,16 +824,39 @@ rustClosureWrapper sig mname ctxArgs boundArgs = do
                   <> hcat (punctuate ", " capExprs) <> "])"
           return ("rustmorloc::Closure" <> pretty n <> "::new", [mkFn])
   let ctorArgs = ["__caps", callFn] <> mkArgs
+      boxedDoc =
+        vsep
+          [ "{"
+          , indent 4 $
+              vsep
+                [ "let __caps:" <+> capsT <+> "=" <+> rustTuple capInits <> ";"
+                , "std::rc::Rc::new(" <> ctor <> tupled ctorArgs <> ") as" <+> sig
+                ]
+          , "}"
+          ]
+      -- A closure that captures nothing and has no dispatch entry holds no
+      -- state and carries no identity, so the trait object buys nothing it
+      -- could use: it is a plain function, and a plain function is a POINTER.
+      -- Emitting it as one lets a sourced higher-order parameter monomorphize
+      -- over a compile-time constant instead of loading a vtable and
+      -- allocating twice, once per element.
+      --
+      -- This is the only position where a function value takes a second form,
+      -- and choosing it wrongly cannot miscompile: every position that needs a
+      -- value able to cross renders as the trait object, which a function
+      -- pointer does not satisfy, so a bad choice is a type error in the
+      -- generated Rust rather than a wrong answer at run time.
+      thinDoc =
+        "rustmorloc::fn_ptr" <> pretty n
+          <> parens ("|" <> hcat (punctuate ", " boundTyped) <> "|"
+                       <+> "unsafe {" <+> mname <> tupled callArgs <+> "}")
+  thinSinks <- CMS.gets rsThinSinks
   return $
-    vsep
-      [ "{"
-      , indent 4 $
-          vsep
-            [ "let __caps:" <+> capsT <+> "=" <+> rustTuple capInits <> ";"
-            , "std::rc::Rc::new(" <> ctor <> tupled ctorArgs <> ") as" <+> sig
-            ]
-      , "}"
-      ]
+    if null ctxArgs
+      && not (Map.member (render mname) reifyInfo)
+      && Set.member (render mname) thinSinks
+      then thinDoc
+      else boxedDoc
 
 -- | Copy one captured value into the tuple the closure owns. A function
 -- value is an 'Rc' clone (a refcount bump); a non-'Copy' value is cloned so
@@ -856,9 +935,19 @@ renderReflect (OverList p) = do
 renderReflect (OverOpt p) = do
   f <- renderReflect p
   return $ \v -> v <> ".map(|__e| " <> f "__e" <> ")"
+-- The source expression is bound ONCE before the slots project out of it.
+-- Substituting it per slot would re-evaluate it, and at a dispatch wrapper
+-- that expression deserializes a packet: an n-slot tuple would be stitched
+-- from n independent deserializations, each with its own shared-memory block
+-- to track and free.
 renderReflect (OverTuple ps) = do
+  u <- getCounter
   fs <- mapM (traverse renderReflect) ps
-  return $ \v -> tupled [maybe (slot v j) ($ slot v j) mf | (j, mf) <- zip [(0 :: Int) ..] fs]
+  let t = "__tup" <> pretty u
+  return $ \v ->
+    "{ let" <+> t <+> "=" <+> v <> ";"
+      <+> tupled [maybe (slot t j) ($ slot t j) mf | (j, mf) <- zip [(0 :: Int) ..] fs]
+      <+> "}"
   where
     slot v j = v <> "." <> pretty j
 
@@ -875,9 +964,17 @@ renderReify (OverList p) = do
 renderReify (OverOpt p) = do
   f <- renderReify p
   return $ \v -> v <> ".as_ref().map(|__e| " <> f "__e" <> ")"
+-- A slot that is not a closure is COPIED into the wire tuple. Projecting it
+-- out by value would move it out of the shared reference the origin builder
+-- holds, which a non-'Copy' slot does not allow; a closure slot is only
+-- borrowed, so it projects directly.
 renderReify (OverTuple ps) = do
   fs <- mapM (traverse renderReify) ps
-  return $ \v -> tupled [maybe (slot v j) ($ slot v j) mf | (j, mf) <- zip [(0 :: Int) ..] fs]
+  return $ \v ->
+    tupled
+      [ maybe (parens (slot v j) <> ".clone()") ($ slot v j) mf
+      | (j, mf) <- zip [(0 :: Int) ..] fs
+      ]
   where
     slot v j = v <> "." <> pretty j
 
@@ -1077,7 +1174,8 @@ makeRustCode includeDocs closureAsts closureTable0 es = do
   -- can apply it) and the reify info (mid + captured schema ids) that
   -- 'rustClosureWrapper' uses to build the closure's origin builder.
   (closureWrappers, reifyInfo) <- makeClosureDispatch closureAsts closureTable es
-  CMS.modify $ \s -> s {rsReifyInfo = reifyInfo}
+  mask <- CMS.gets rsSrcTypeVarMask
+  CMS.modify $ \s -> s {rsReifyInfo = reifyInfo, rsThinSinks = thinSinkNames mask es}
   program <- buildProgramM Map.empty Map.empty includeDocs [] es translateSegment getRustSchemaTable closureTable
   -- structDocs go in the schema-table section; the closure dispatch wrappers are
   -- free functions spliced into the signatures section.
@@ -1898,14 +1996,21 @@ rustLowerConfig mask =
     -- leaves the value usable afterwards. The C++ member captures by copy
     -- unconditionally, which is safe there because a copy leaves the original
     -- intact; @move@ does not.
-    , lcMakeDoBlock = \_ stmts expr -> do
-        escapes <- asks oeReturnsThunk
-        let header = if escapes then "move ||" else "||"
+    -- The thunk BORROWS what it reads, always. Every suspension has already
+    -- become a closure manifold with an explicit capture list by the time a
+    -- pool is rendered, so the only thunk left here is the inline device a
+    -- `try` runs immediately in the same scope: it never escapes, and nothing
+    -- it touches may be taken from the frame that is still using it.
+    --
+    -- Capturing by value instead would steal every non-'Copy' value the body
+    -- reads -- not because THIS thunk outlives anything, but because some
+    -- unrelated part of the same frame happened to hold a function value.
+    , lcMakeDoBlock = \_ stmts expr ->
         return
           ( []
           , case stmts of
-              [] -> header <+> "{" <+> expr <+> "}"
-              _ -> header <+> "{" <> nest 4 (line <> vsep (stmts ++ [expr])) <> line <> "}"
+              [] -> "||" <+> "{" <+> expr <+> "}"
+              _ -> "||" <+> "{" <> nest 4 (line <> vsep (stmts ++ [expr])) <> line <> "}"
           )
     -- The helper hands back a plain Result so the panic-payload downcast
     -- (which decides what is catchable) stays in rustmorloc; the arms are

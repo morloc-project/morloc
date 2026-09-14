@@ -53,6 +53,7 @@ import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.Platform as P
 import Morloc.CodeGenerator.Serial
   ( serialAstToType
+  , serialAstToNativeType
   , wireSerialAstToType
   , containsFunT
   , containsEffectT
@@ -555,7 +556,12 @@ manifoldCppSig nm@(NativeManifold _ _ form _) =
 crossingClosureSigs :: [SerialManifold] -> CppTranslator (Set.Set Text)
 crossingClosureSigs es = Set.fromList <$> mapM astSig (concatMap collectSerializedClosures es)
   where
-    astSig (SerialClosure ins out) = closureCppSig (map serialAstToType ins) (serialAstToType out)
+    -- Rendered NATIVELY, because the other side of this join is a manifold's
+    -- native signature. The wire rendering discards a custom packer, so a
+    -- closure whose argument or result is packed would render two different
+    -- strings here and at 'manifoldCppSig', match nothing, and be dropped.
+    astSig (SerialClosure ins out) =
+      closureCppSig (map serialAstToNativeType ins) (serialAstToNativeType out)
     astSig _ = return "" -- collectSerializedClosures returns only SerialClosure
 
 -- | Keep in the closure table only closures that can cross a boundary.
@@ -583,9 +589,10 @@ restrictToCrossingClosures es closureTable = do
   -- function values it captures
   entries <- mapM (\nm@(NativeManifold i _ form _) -> do
                      sig <- manifoldCppSig nm
-                     capSigs <- mapM (\(FunF ins out) -> closureCppSig ins out)
-                                  [ t | Arg _ o <- manifoldContext form
-                                      , Just t@(FunF _ _) <- [orNativeType o] ]
+                     capSigs <- sequence
+                                  [ closureCppSig ins out
+                                  | Arg _ o <- manifoldContext form
+                                  , Just (FunF ins out) <- [orNativeType o] ]
                      return (i, sig, capSigs))
                   candidates
   let close sigs =
