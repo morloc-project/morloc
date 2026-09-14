@@ -1450,8 +1450,8 @@ char* quoted(const char* input);
 // 141 (128 + SIGPIPE) to match conventional CLI behavior.
 int32_t print_voidstar(const void* voidstar, const Schema* schema, bool keep_null, ERRMSG);
 int32_t pretty_print_voidstar(const void* voidstar, const Schema* schema, bool keep_null, ERRMSG);
-bool print_arrow_as_json(const void* data, ERRMSG);
-bool print_arrow_as_table(const void* data, ERRMSG);
+int32_t print_arrow_as_json(const void* data, ERRMSG);
+int32_t print_arrow_as_table(const void* data, ERRMSG);
 bool print_hex_dump(const uint8_t* data, size_t size, ERRMSG);
 char* voidstar_to_json_string(const void* voidstar, const Schema* schema, ERRMSG);
 

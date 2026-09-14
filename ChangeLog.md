@@ -1,3 +1,9 @@
+0.105.1 [2026-09-14]
+--------------------
+
+ * macos-specific bug fix
+ * add benchmark for deep data recursion
+
 0.105.0 [2026-09-14]
 --------------------
 

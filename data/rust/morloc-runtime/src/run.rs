@@ -109,6 +109,7 @@ fn parent_of(pid: i32) -> Option<i32> {
 /// `((weird) name)` -- so splitting the line on whitespace, or on the FIRST
 /// `)`, lands on the wrong field. Scanning from the last `)` is what makes the
 /// following fields (state, then ppid) unambiguous.
+#[cfg(any(target_os = "linux", test))]
 fn parse_ppid_from_stat(stat: &str) -> Option<i32> {
     let after_comm = stat.rsplit_once(')')?.1;
     after_comm.split_whitespace().nth(1)?.parse().ok()

@@ -1,0 +1,57 @@
+-- @throw in a Rust-bound pool, in every value position the lowering puts it:
+--   (a) a manifold whose whole body is a throw, with a scalar and a list
+--       result type: the raise is the value that gets serialized
+--   (b) a throw as one arm of a conditional whose other arm is a value
+--   (c) a match whose every remaining arm throws (the shape `unwrap` has),
+--       so the throw is the value bound for the statements after it
+--   (d) string interpolation flowing into the message
+--   (e) @try recovering from each shape
+-- The build must also be clean: a raise typed as the value it stands in
+-- for leaves nothing unreachable for rustc to warn about.
+module main (tailThrow, tailThrowList, guardThrow, armsThrow, unwrapT, safeArms)
+
+import root
+import root-rust
+
+type Rust => Int = "i64"
+type Rust => Str = "String"
+type Rust => Bool = "bool"
+type Rust => (List a) = "Vec<$1>" a
+
+source Rust from "h.rs" ("rust_len" as rustLen, "rust_show_len" as rustShowLen, "rust_lt2" as rustLt2)
+
+rustLen :: Str -> Int
+rustShowLen :: Str -> Str
+rustLt2 :: Int -> Bool
+
+tailThrow :: Str -> Int
+tailThrow s =
+  let shown = rustShowLen s
+  in @throw "TAIL: #{s} n=#{shown}"
+
+tailThrowList :: Str -> [Int]
+tailThrowList s =
+  let n = rustLen s
+  in @throw "TAILLIST"
+
+guardThrow :: Str -> Int
+guardThrow s =
+  let n = rustLen s
+      shown = rustShowLen s
+  in ? n < 4 = @throw "GUARD: too short n=#{shown}"
+     : n
+
+armsThrow :: Str -> Int
+armsThrow s = match (rustLt2 (rustLen s))
+  | True = @throw "ARMS: short"
+  | False = @throw "ARMS: long"
+
+unwrapT :: Str -> Int
+unwrapT s = rustLen (match (@try (tailThrow s))
+  | (Ok v) = @show v
+  | (Err e) = @throw e)
+
+safeArms :: Str -> Int
+safeArms s = match (@try (armsThrow s))
+  | (Ok v) = v
+  | (Err _) = 0

@@ -4,6 +4,10 @@
 # Usage: ./run-all.sh [test...]
 #   With no arguments, runs all tests. Pass test names to run a subset:
 #   ./run-all.sh zombie concurrent
+#
+# The workload tests (zombie, concurrent, crash, valgrind) run one golden
+# program per language combination. deep-recursion builds its own programs
+# in every pool language and runs once, after the sweep.
 
 set -euo pipefail
 
@@ -109,6 +113,33 @@ run_test() {
     fi
 }
 
+# Run a self-contained suite once. It prints its own per-case lines, which
+# are shown indented; its exit status is the verdict.
+run_suite() {
+    local test_script="$1"
+    local test_name="$2"
+
+    printf "%-20s %-8s\n" "$test_name" "[all]"
+
+    local output start_time elapsed rc
+    start_time=$(now_ms)
+    output=$("$SCRIPT_DIR/$test_script" 2>&1); rc=$?
+    elapsed=$(( $(now_ms) - start_time ))
+    echo "$output" | sed 's/^/    /'
+    printf "%-20s %-8s ... " "$test_name" "[all]"
+    if [[ $rc -eq 0 ]]; then
+        printf "%sPASS%s (%d.%01ds)\n" "$GREEN" "$RESET" "$((elapsed/1000))" "$(( (elapsed%1000) / 100 ))"
+        PASSED=$((PASSED + 1))
+    elif [[ "$(echo "$output" | tail -1)" == SKIP* ]]; then
+        echo "${YELLOW}SKIP${RESET}"
+        SKIPPED=$((SKIPPED + 1))
+    else
+        echo "${RED}FAIL${RESET}"
+        FAILED=$((FAILED + 1))
+        FAILURES+=("$test_name [all]")
+    fi
+}
+
 # Determine which tests to run
 SELECTED=("$@")
 should_run() {
@@ -140,6 +171,10 @@ for workload in "${WORKLOAD_ORDER[@]}"; do
         run_test "valgrind-check.sh" "valgrind" "$workload"
     fi
 done
+
+if should_run "deep"; then
+    run_suite "deep-recursion.sh" "deep-recursion"
+fi
 
 echo ""
 echo "=== Results ==="

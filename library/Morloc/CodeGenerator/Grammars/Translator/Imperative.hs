@@ -215,8 +215,10 @@ data IExpr
       -- ^ @stdout :: <IO> OStream a: nullary. schemaId of `[a]`.
   | IIntrinsicStderr Int
       -- ^ @stderr :: <IO> OStream a: nullary. schemaId of `[a]`.
-  | IIntrinsicThrow IExpr
-      -- ^ @throw :: e -> a: abandon the computation with this message.
+  | IIntrinsicThrow (Maybe IType) IExpr
+      -- ^ @throw :: e -> a: abandon the computation with this message. The
+      -- result type @a@ appears nowhere but the return, so a statically
+      -- typed member that spells the raise as a value needs it given.
 
 data IParam = IParam Text (Maybe IType)
 
@@ -1503,10 +1505,11 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrTell _ []) =
 -- @tmpfile: nullary; create + register a temp file, return its path.
 lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrTmpfile _ []) =
   return $ defaultValue { poolExpr = lcPrintExpr cfg IIntrinsicTmpfile }
-lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrThrow _ [msgDocs]) =
+lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrThrow _ [msgDocs]) = do
+  resultType <- lcTypeOf cfg (typeFof origExpr)
   return $ msgDocs
     { poolExpr = lcPrintExpr cfg
-        (IIntrinsicThrow (IRawExpr (render (poolExpr msgDocs))))
+        (IIntrinsicThrow resultType (IRawExpr (render (poolExpr msgDocs))))
     }
 -- @try: Serialize.hs::thunkifyForTry has already forced the body into a
 -- DoBlockN thunk, so poolExpr is a no-arg callable (often a bound helper

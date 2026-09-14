@@ -1,0 +1,115 @@
+-- Deep recursion over a recursive `data` type, realized in ONE pool.
+--
+-- Every function is written in morloc; the only sourced code is the
+-- root-LANG primitives. The tail-recursive forms lower to native loops and
+-- must run at any depth; the non-tail forms are bounded by the host stack
+-- and run at a shallow depth as a correctness check.
+module main
+  ( chainCount
+  , chainReverse
+  , altCount
+  , evenDeep
+  , chainTotal
+  , caterpillarSize
+  , chain
+  , treeCount
+  )
+
+import root-LANG
+
+data Tree = Leaf | Node Int Tree Tree
+
+-- A right spine of depth n built by tail recursion: the accumulator IS the
+-- deep value, one level deeper each iteration.
+chainHelp :: Int -> Tree -> Tree
+chainHelp n acc
+  ? n == 0 = acc
+  : chainHelp (n - 1) (Node 1 Leaf acc)
+
+chain :: Int -> Tree
+chain n = chainHelp n Leaf
+
+-- Tail-recursive walk down the spine. The catch-all last clause keeps the
+-- cascade free of a no-match throw base.
+spineCount :: Int -> Tree -> Int
+spineCount | acc (Node _ _ r) = spineCount (acc + 1) r
+           | acc _ = acc
+
+-- Reverse the spine: input and accumulator are both deep, and every
+-- iteration projects the deep field out of the input.
+reverseHelp :: Tree -> Tree -> Tree
+reverseHelp | acc (Node v l r) = reverseHelp (Node v l acc) r
+            | acc _ = acc
+
+-- Non-tail walk: the recursive call is under `+`.
+total :: Tree -> Int
+total | Leaf = 0
+      | (Node v l r) = v + total l + total r
+
+-- Built and consumed inside the pool; the tree crosses only manifold
+-- boundaries, never the nexus.
+chainCount :: Int -> Int
+chainCount n = spineCount 0 (chain n)
+
+chainReverse :: Int -> Int
+chainReverse n = spineCount 0 (reverseHelp Leaf (chain n))
+
+chainTotal :: Int -> Int
+chainTotal n = total (chain n)
+
+-- The tree crosses the nexus: printed by `chain`, parsed for `treeCount`.
+treeCount :: Tree -> Int
+treeCount t = spineCount 0 t
+
+-- Mutual tail recursion on integers.
+evenDeep :: Int -> Bool
+evenDeep n
+  ? n == 0 = True
+  : oddDeep (n - 1)
+
+oddDeep :: Int -> Bool
+oddDeep n
+  ? n == 0 = False
+  : evenDeep (n - 1)
+
+-- Mutual tail recursion on two mutually recursive types: a strictly
+-- alternating chain A -> B -> A -> ... of depth n, built and counted.
+data AltA = ALeaf | ANode Int AltB
+data AltB = BLeaf | BNode Int AltA
+
+buildA :: Int -> AltA -> AltA
+buildA n acc
+  ? n == 0 = acc
+  : buildB (n - 1) (BNode 1 acc)
+
+buildB :: Int -> AltB -> AltA
+buildB n acc
+  ? n == 0 = ANode 1 acc
+  : buildA (n - 1) (ANode 1 acc)
+
+countA :: Int -> AltA -> Int
+countA | acc (ANode v b) = countB (acc + v) b
+       | acc _ = acc
+
+countB :: Int -> AltB -> Int
+countB | acc (BNode v a) = countA (acc + v) a
+       | acc _ = acc
+
+altCount :: Int -> Int
+altCount n = countA 0 (buildA n ALeaf)
+
+-- A rose tree: recursion goes through `map`, so each level is a closure
+-- call and the walk cannot be a tail loop. A caterpillar of depth n has
+-- one child per node.
+data Rose = Rose Int [Rose]
+
+caterpillarHelp :: Int -> Rose -> Rose
+caterpillarHelp n acc
+  ? n == 0 = acc
+  : caterpillarHelp (n - 1) (Rose 1 [acc])
+
+roseSize :: Rose -> Int
+roseSize | (Rose _ kids) = 1 + sum (map roseSize kids)
+
+caterpillarSize :: Int -> Int
+caterpillarSize n = roseSize (caterpillarHelp n (Rose 1 []))
