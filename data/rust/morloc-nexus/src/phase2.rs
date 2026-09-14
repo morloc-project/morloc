@@ -10,7 +10,7 @@
 //!
 //! * Auto-generated help that matches the rest of clap's output.
 //! * Unknown-flag rejection (no more silent typos).
-//! * Per-subcommand `--help` for free.
+//! * Per-subcommand help for free, at the tier `-h`/`-hh`/`-hhh` asks for.
 //! * Late-binding of nexus-level flags the user wrote after the
 //!   wrapper target (e.g. `./prog --log-dir X cmd`), which would
 //!   otherwise be swallowed by the top-level `trailing_var_arg`.
@@ -66,7 +66,7 @@ pub fn parse_run(
     prog_name: &str,
     format_explicit: bool,
 ) -> ParsedCommand {
-    let root = build_root(manifest, prog_name);
+    let root = build_root(manifest, prog_name, help_level(user_zone));
     // Internal (compiler-synthesized) commands never surface at the
     // top level; they participate in dispatch only via terminal-flag
     // redirect. Compute single vs multi mode from the visible slice.
@@ -145,6 +145,32 @@ pub fn parse_run(
     ParsedCommand { cmd_index, values, render }
 }
 
+/// How much a help page discloses, from how many times the user asked.
+///
+/// Every `h` in a short cluster (`-h`, `-hh`, `-qhh`) and every `--help`
+/// counts one; the sum is clamped to the three tiers. A token after `--`
+/// is a positional and never counts. Returns 1 when no help was asked
+/// for at all, which callers never render.
+///
+/// 1. `-h`: the synopsis line, the arguments with their types and
+///    formats, the return type.
+/// 2. `-hh`: the description lines after the first, and epilogues.
+/// 3. `-hhh`: the record, data, table and wire-form schemas.
+pub fn help_level(user_zone: &[String]) -> u8 {
+    let mut n: usize = 0;
+    for tok in user_zone {
+        if tok == "--" {
+            break;
+        }
+        if tok == "--help" {
+            n += 1;
+        } else if crate::cli::looks_like_flag(tok) && !tok.starts_with("--") {
+            n += tok[1..].chars().filter(|&c| c == 'h').count();
+        }
+    }
+    n.clamp(1, 3) as u8
+}
+
 /// One-line "did you mean to place this left of `@`" hint when a
 /// clap-manifest error rejects a token that matches a known long
 /// nexus flag. Short flags aren't hinted -- their palettes overlap
@@ -220,10 +246,10 @@ fn redirect_via_terminal(
 /// (nested under a group-subcommand layer when the manifest declares
 /// `groups`).
 ///
-/// Exposed publicly so the help renderer in [`crate::help`] can build
-/// the same command tree to render help text without invoking
-/// parsing.
-pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
+/// `level` is the help tier the tree is built for (see [`help_level`]):
+/// every page is rendered by clap's short help, and the tier decides
+/// what the tree carries before clap sees it.
+pub fn build_root(manifest: &Manifest, prog_name: &str, level: u8) -> ClapCommand {
     let visible_count = manifest.commands.iter().filter(|c| !c.internal).count();
     let single = visible_count == 1 && manifest.groups.is_empty();
 
@@ -245,14 +271,16 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
         // docstrings describe it and `build_command_args` sees only one of
         // them.
         let desc = single_root_desc(&manifest.desc, &cmd.desc);
-        let mut root = build_command_args(root, cmd, manifest)
-            .about(leak(first_desc(&desc)))
-            .arg_required_else_help(false);
-        if !desc.is_empty() {
-            root = root.long_about(leak(&desc.join("\n")));
+        let mut root = with_description(
+            build_command_args(root, cmd, manifest, level),
+            &desc,
+            level,
+        )
+        .arg_required_else_help(false);
+        if level >= 2 {
+            root = append_after_help(root, &epilogue);
+            root = append_after_help(root, &render_epilogues(&cmd.epilogues));
         }
-        root = append_after_help(root, &epilogue);
-        root = append_after_help(root, &render_epilogues(&cmd.epilogues));
         return crate::help::finalize(root, crate::help::usage_single_root(prog_name));
     }
 
@@ -260,16 +288,10 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
         .subcommand_required(true)
         .arg_required_else_help(true);
     root = crate::help::add_general_options(root);
-    if let Some(first) = manifest.desc.first() {
-        root = root.about(leak(first));
+    root = with_description(root, &manifest.desc, level);
+    if level >= 2 {
+        root = append_after_help(root, &epilogue);
     }
-    // `about` is the one-line synopsis `-h` shows; `long_about` carries
-    // every description line for `--help`, the same split
-    // `build_command_args` gives each subcommand.
-    if !manifest.desc.is_empty() {
-        root = root.long_about(leak(&manifest.desc.join("\n")));
-    }
-    root = append_after_help(root, &epilogue);
     root = crate::help::finalize(root, crate::help::usage_multi_root(prog_name));
 
     // Each CmdGroup becomes its own clap subcommand; its members
@@ -279,12 +301,7 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
             .subcommand_required(true)
             .arg_required_else_help(true);
         grp_cmd = crate::help::add_general_options(grp_cmd);
-        if let Some(first) = grp.desc.first() {
-            grp_cmd = grp_cmd.about(leak(first));
-        }
-        if !grp.desc.is_empty() {
-            grp_cmd = grp_cmd.long_about(leak(&grp.desc.join("\n")));
-        }
+        grp_cmd = with_description(grp_cmd, &grp.desc, level);
         grp_cmd = crate::help::finalize(
             grp_cmd,
             crate::help::usage_multi_group(prog_name, &grp.name),
@@ -298,8 +315,12 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
                     ClapCommand::new(leak(&cmd.name))
                         .about(leak(first_desc(&cmd.desc))),
                 );
-                let sub = build_command_args(sub, cmd, manifest);
-                let sub = append_after_help(sub, &render_epilogues(&cmd.epilogues));
+                let sub = build_command_args(sub, cmd, manifest, level);
+                let sub = if level >= 2 {
+                    append_after_help(sub, &render_epilogues(&cmd.epilogues))
+                } else {
+                    sub
+                };
                 let sub = crate::help::finalize(
                     sub,
                     crate::help::usage_multi_sub(
@@ -322,8 +343,12 @@ pub fn build_root(manifest: &Manifest, prog_name: &str) -> ClapCommand {
                 ClapCommand::new(leak(&cmd.name))
                     .about(leak(first_desc(&cmd.desc))),
             );
-            let sub = build_command_args(sub, cmd, manifest);
-            let sub = append_after_help(sub, &render_epilogues(&cmd.epilogues));
+            let sub = build_command_args(sub, cmd, manifest, level);
+            let sub = if level >= 2 {
+                append_after_help(sub, &render_epilogues(&cmd.epilogues))
+            } else {
+                sub
+            };
             let sub = crate::help::finalize(
                 sub,
                 crate::help::usage_multi_sub(prog_name, None, &cmd.name),
@@ -436,6 +461,7 @@ fn build_command_args(
     mut cmd: ClapCommand,
     mcmd: &ManifestCommand,
     manifest: &Manifest,
+    level: u8,
 ) -> ClapCommand {
     cmd = cmd
         .allow_negative_numbers(true)
@@ -444,16 +470,12 @@ fn build_command_args(
         // and re-emitted by `render_positional_block` under a
         // "Positional arguments:" header in `after_help`.
         .next_help_heading("Optional arguments");
-    // Long help: concatenate every desc line so clap renders the
-    // full block under `<sub> --help`.
-    if !mcmd.desc.is_empty() {
-        cmd = cmd.long_about(leak(&mcmd.desc.join("\n")));
-    }
+    cmd = with_description(cmd, &mcmd.desc, level);
 
     // Record / Table Schemas block: the schema-walking renderer
     // reconstructs named-type layouts from each typed arg's schema
     // string. Goes into clap's `after_help` so the block sits
-    // beneath the args list under `<sub> --help`. The Return line
+    // beneath the args list under `<sub> -hhh`. The Return line
     // also lives here so it stays attached to the command (clap has
     // no first-class slot for return-type metadata).
     let mut after = String::new();
@@ -468,11 +490,13 @@ fn build_command_args(
         }
         after.push_str(&ret_block);
     }
-    if let Some(block) = crate::schemas::render_command_schemas(mcmd) {
-        if !after.is_empty() {
-            after.push_str("\n\n");
+    if level >= 3 {
+        if let Some(block) = crate::schemas::render_command_schemas(mcmd) {
+            if !after.is_empty() {
+                after.push_str("\n\n");
+            }
+            after.push_str(&block);
         }
-        after.push_str(&block);
     }
     if !after.is_empty() {
         cmd = cmd.after_help(leak(&after));
@@ -1178,6 +1202,33 @@ fn reverse_flag_help(long_opt: Option<&str>, short_opt: Option<&str>) -> String 
         (None, Some(s)) => format!("Turn -{} off", s),
         (None, None) => "Turn the flag off".to_string(),
     }
+}
+
+/// Give a command its description as the help tier shows it.
+///
+/// `about` is always the first line: clap prints it both at the head
+/// of the command's own page and beside the name in its parent's
+/// command list, and the list wants one line whatever the tier. From
+/// the second tier up the page itself shows every line, which is done
+/// by replacing the template's `{about-with-newline}` slot with the
+/// full text, leaving the parent's list untouched.
+fn with_description(cmd: ClapCommand, desc: &[String], level: u8) -> ClapCommand {
+    let first = first_desc(desc);
+    if first.is_empty() {
+        return cmd;
+    }
+    let cmd = cmd.about(leak(first));
+    if level < 2 || desc.len() < 2 {
+        return cmd;
+    }
+    let full = desc
+        .iter()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+    cmd.help_template(leak(&format!(
+        "{full}\n\n{{usage-heading}} {{usage}}\n\n{{all-args}}{{after-help}}"
+    )))
 }
 
 pub(crate) fn first_desc(desc: &[String]) -> &str {
@@ -1957,5 +2008,175 @@ mod tests {
             }
             _ => panic!("expected Group"),
         }
+    }
+}
+
+#[cfg(test)]
+mod help_level_tests {
+    use super::*;
+    use morloc_manifest::parse_manifest;
+
+    /// Multi-command manifest with everything the help tiers disclose
+    /// progressively: a two-line module description, a module epilogue,
+    /// a two-line command description, a command epilogue, and a named
+    /// record type in the command's signature.
+    fn fixture_tiers() -> Manifest {
+        let v = env!("CARGO_PKG_VERSION");
+        let json = format!(
+            r#"{{
+                "name": "main",
+                "build": {{"path": "/tmp/test", "time": 0, "morloc_version": "{}"}},
+                "pools": [
+                    {{"lang": "py", "exec": ["python3", "pool.py"], "socket": "pipe-py", "metadata": {{}}}}
+                ],
+                "desc": ["A demo toolbox", "It does several things."],
+                "epilogues": [["Examples:", "  main add 1 2"]],
+                "commands": [
+                    {{
+                        "name": "add",
+                        "type": "remote",
+                        "mid": 1,
+                        "pool": 0,
+                        "needed_pools": [0],
+                        "desc": ["Add two integers", "Overflow is not checked."],
+                        "epilogues": [["Usage notes:", "  add 1 2"]],
+                        "args": [
+                            {{"kind": "pos", "key": "_1", "schema": "i8", "type": "Int", "metavar": "X", "quoted": false, "desc": [], "constraints": [], "metadata": {{}}}}
+                        ],
+                        "return": {{"schema": "{{a:i8}}", "type": "Pair", "desc": [], "constraints": [], "metadata": {{}}}},
+                        "named_types": [
+                            {{"name": "Pair", "kind": "record", "fields": [{{"key": "a", "type": "Int"}}]}}
+                        ],
+                        "constraints": [],
+                        "metadata": {{}},
+                        "group": null
+                    }},
+                    {{"name": "beta", "type": "remote", "mid": 2, "pool": 0, "needed_pools": [0], "desc": ["Do beta"], "args": [], "return": {{"schema": "z", "type": "Unit", "desc": [], "constraints": [], "metadata": {{}}}}, "constraints": [], "metadata": {{}}, "group": null}}
+                ],
+                "groups": [],
+                "capabilities": ["log"],
+                "metadata": {{}}
+            }}"#,
+            v
+        );
+        parse_manifest(&json).unwrap()
+    }
+
+    fn s(x: &str) -> String {
+        x.to_string()
+    }
+
+    #[test]
+    fn help_level_counts_every_h_and_help() {
+        assert_eq!(help_level(&[]), 1);
+        assert_eq!(help_level(&[s("add"), s("1")]), 1);
+        assert_eq!(help_level(&[s("-h")]), 1);
+        assert_eq!(help_level(&[s("--help")]), 1);
+        assert_eq!(help_level(&[s("-hh")]), 2);
+        assert_eq!(help_level(&[s("add"), s("-h"), s("-h")]), 2);
+        assert_eq!(help_level(&[s("--help"), s("--help")]), 2);
+        assert_eq!(help_level(&[s("-h"), s("--help"), s("-h")]), 3);
+        assert_eq!(help_level(&[s("-hhh")]), 3);
+        assert_eq!(help_level(&[s("-hhhhhh")]), 3);
+        // Clustered with another short flag.
+        assert_eq!(help_level(&[s("-qhh")]), 2);
+        // `--` ends option parsing; an `h` after it is a positional.
+        assert_eq!(help_level(&[s("--"), s("-hhh")]), 1);
+        // A negative number is not a short cluster.
+        assert_eq!(help_level(&[s("-5h")]), 1);
+        // A long option other than --help is never counted.
+        assert_eq!(help_level(&[s("--hhh")]), 1);
+    }
+
+    fn root_help(level: u8) -> String {
+        build_root(&fixture_tiers(), "main", level).render_help().to_string()
+    }
+
+    fn sub_help(level: u8) -> String {
+        let mut root = build_root(&fixture_tiers(), "main", level);
+        root.find_subcommand_mut("add").unwrap().render_help().to_string()
+    }
+
+    #[test]
+    fn level_one_shows_synopsis_and_arguments_only() {
+        let top = root_help(1);
+        assert!(top.contains("A demo toolbox"));
+        assert!(!top.contains("It does several things."));
+        assert!(!top.contains("Examples:"));
+        assert!(!top.contains("Nexus Options"));
+        assert!(top.contains("  add   Add two integers"));
+
+        let sub = sub_help(1);
+        assert!(sub.contains("Add two integers"));
+        assert!(!sub.contains("Overflow is not checked."));
+        assert!(!sub.contains("Usage notes:"));
+        assert!(sub.contains("Positional arguments:"));
+        assert!(sub.contains("Return: Pair"));
+        assert!(!sub.contains("Record Schemas:"));
+        assert!(!sub.contains("Nexus Options"));
+    }
+
+    #[test]
+    fn level_two_adds_description_and_epilogues() {
+        let top = root_help(2);
+        assert!(top.contains("A demo toolbox\nIt does several things."));
+        // The command list stays one line per command at every tier.
+        assert!(top.contains("  add   Add two integers\n  beta  Do beta\n"));
+        assert!(top.contains("Examples:\n  main add 1 2"));
+        assert!(!top.contains("Nexus Options"));
+
+        let sub = sub_help(2);
+        assert!(sub.contains("Add two integers\nOverflow is not checked."));
+        assert!(sub.contains("Usage notes:\n  add 1 2"));
+        assert!(!sub.contains("Record Schemas:"));
+    }
+
+    #[test]
+    fn level_three_adds_schemas() {
+        let sub = sub_help(3);
+        assert!(sub.contains("Overflow is not checked."));
+        assert!(sub.contains("Usage notes:"));
+        assert!(sub.contains("Record Schemas:\n  Pair\n    a :: Int"));
+        assert!(!sub.contains("Nexus Options"));
+    }
+
+    #[test]
+    fn help_flag_documents_its_repetition() {
+        let sub = sub_help(1);
+        assert!(sub.contains("-hh"));
+        assert!(sub.contains("-hhh"));
+        assert!(sub.contains("-h @"));
+    }
+
+    /// clap renders the help flag as an error whose text is the help
+    /// page. `--help` must produce the same page as `-h` at the same
+    /// level: the tier is the only knob, never the spelling.
+    fn help_via_clap(level: u8, argv: &[&str]) -> String {
+        let root = build_root(&fixture_tiers(), "main", level);
+        let mut full = vec!["main"];
+        full.extend_from_slice(argv);
+        let err = root.try_get_matches_from(full).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        err.to_string()
+    }
+
+    #[test]
+    fn long_help_spelling_renders_the_same_page_as_short() {
+        for level in 1..=3 {
+            assert_eq!(
+                help_via_clap(level, &["add", "-h"]),
+                help_via_clap(level, &["add", "--help"]),
+            );
+            assert_eq!(
+                help_via_clap(level, &["-h"]),
+                help_via_clap(level, &["--help"]),
+            );
+        }
+        // The repeated spelling is parsed by clap as a cluster and
+        // still lands on the help page.
+        assert_eq!(
+            help_via_clap(3, &["add", "-hhh"]),
+            help_via_clap(3, &["add", "-h"]),
+        );
     }
 }

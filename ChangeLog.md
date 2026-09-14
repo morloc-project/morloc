@@ -1,3 +1,8 @@
+Unreleased
+----------
+
+ * tier generated-program help by repeating -h (-h, -hh, -hhh)
+
 0.105.2 [2026-09-14]
 --------------------
 

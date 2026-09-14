@@ -28,7 +28,7 @@ all:
 	./nexus say --text hello >> obs.txt 2>> obs.err
 	./nexus say --num 3 >> obs.txt 2>> obs.err
 	echo "--- help ---" >> obs.txt
-	./nexus area -h >> obs.txt 2>> obs.err
+	./nexus area -hhh >> obs.txt 2>> obs.err
 	echo "--- json-help ---" >> obs.txt
 	./nexus --json-help | python3 -c 'import json,sys; m=json.load(sys.stdin); c=[x for x in m["commands"] if x["name"]=="count"][0]; a=c["arguments"][0]; print(json.dumps({k:a[k] for k in ("role","required","default")}, sort_keys=True)); print([ (r["long"], len(r["fields"])) for r in a["arms"]])' >> obs.txt 2>> obs.err
 	echo "--- mcp ---" >> obs.txt

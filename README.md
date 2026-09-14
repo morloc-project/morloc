@@ -130,7 +130,8 @@ Commands:
   sumOfSums  Add up a list of lists, summing each in parallel
 
 General Options:
-  -h, --help  Print help (see more with '--help')
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
 ```
 
 `./sums sum -h` goes further and prints the argument types the compiler derived.

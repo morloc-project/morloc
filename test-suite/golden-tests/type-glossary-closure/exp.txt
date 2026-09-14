@@ -254,7 +254,8 @@ A command whose return is unit
 Usage: ./main <nexus_options> touch <command_options>
 
 General Options:
-  -h, --help  Print help (see more with '--help')
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
 
 Positional arguments:
   1:  type: Int

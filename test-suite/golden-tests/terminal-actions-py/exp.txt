@@ -28,27 +28,22 @@ gamma
 42
 --- describe --say ---
 int(42)
---- fhead --help lines (grep terminal flags + descriptions) ---
-  -l, --lines
-          Print each string on its own line
-  -c, --csv
-          Print each string quoted, comma-separated on one line
-  -s, --sum
-          Join all strings into one semicolon-separated summary
-  -p, --plain
-          Pure semicolon join (no IO effect on the terminal)
---- describe --help lines (grep --say) ---
-      --say
-          Human-readable form of an integer
+--- fhead -h lines (grep terminal flags + descriptions) ---
+  -l, --lines  Print each string on its own line
+  -c, --csv    Print each string quoted, comma-separated on one line
+  -s, --sum    Join all strings into one semicolon-separated summary
+  -p, --plain  Pure semicolon join (no IO effect on the terminal)
+--- describe -h lines (grep --say) ---
+      --say   Human-readable form of an integer
   --say:   Unit
---- fhead --help Return block (per-formatter return types) ---
+--- fhead -h Return block (per-formatter return types) ---
 Return:
   default:    [Str]
   -l/--lines: Unit
   -c/--csv:   Unit
   -s/--sum:   Str
   -p/--plain: Str
---- describe --help Return block (single terminal) ---
+--- describe -h Return block (single terminal) ---
 Return:
   default: Int
   --say:   Unit
@@ -56,5 +51,5 @@ Return:
 OK: sibling terminals rejected
 --- ./nexus mlcp_fhead_lines (should error) ---
 OK: internal entry hidden
---- top-level --help mlcp match count (expect 0) ---
+--- top-level -h mlcp match count (expect 0) ---
 0

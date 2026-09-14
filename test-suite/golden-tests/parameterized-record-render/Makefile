@@ -2,9 +2,9 @@ all:
 	rm -f *.err obs.txt
 	morloc make -o box main.loc 2> build.err
 	printf -- '--- takeInt help ---\n' > obs.txt
-	./box takeInt -h >> obs.txt 2>> obs.err
+	./box takeInt -hhh >> obs.txt 2>> obs.err
 	printf -- '--- takeStr help ---\n' >> obs.txt
-	./box takeStr -h >> obs.txt 2>> obs.err
+	./box takeStr -hhh >> obs.txt 2>> obs.err
 	printf -- '--- json-help ---\n' >> obs.txt
 	./box --json-help 2>> obs.err | python3 describe.py >> obs.txt
 	printf -- '--- run ---\n' >> obs.txt

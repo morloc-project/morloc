@@ -1,11 +1,15 @@
 -- A module docstring describes the whole program. Its first line is the
--- synopsis `-h` shows; every line reaches `--help`. An `@epilogue` block
--- is the trailing "Examples:" section, and renders under both.
+-- synopsis `-h` shows; the rest reaches `-hh`. An `@epilogue` block is
+-- the trailing "Examples:" section, and renders from `-hh` up. `--help`
+-- is the same flag spelled long, and repeats the same way.
 --
--- A command's own `@epilogue` renders under that subcommand's help, and
--- only there: the top-level help shows the module's block alone. Blank
--- lines and `#` comments inside the block survive, so examples can be
--- annotated.
+-- A command's own docstring and `@epilogue` split the same way under
+-- that subcommand's help, and only there: the top-level help shows the
+-- module's blocks alone. Blank lines and `#` comments inside an epilogue
+-- survive, so examples can be annotated.
+--
+-- Record schemas are the last tier, `-hhh`: a command whose signature
+-- names a record shows nothing of its layout below that.
 --
 -- The single-command layout in solo.loc puts the epilogue after the
 -- command's own positional/return blocks rather than instead of them.
@@ -15,7 +19,7 @@
 --' Examples:
 --'   tool greet Weena
 --'   tool add 1 2
-module tool (greet, add)
+module tool (greet, add, describe)
 
 import root-py
 
@@ -31,3 +35,14 @@ greet name = "Hello, " <> name
 --' Add two integers
 add :: Int -> Int -> Int
 add x y = x + y
+
+record Person where
+  name :: Str
+  age :: Int
+
+record Py => Person = "dict"
+
+--' Describe a person
+--' Age is reported in whole years.
+describe :: Person -> Str
+describe p = .name p

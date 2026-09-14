@@ -7,7 +7,7 @@ all:
 	./main --json-help 2>> obs.err \
 	  | sed 's/"morloc_version": "[^"]*"/"morloc_version": "VERSION"/' >> obs.txt
 	printf -- '=== touch -h ===\n' >> obs.txt
-	./main touch -h >> obs.txt 2>> obs.err
+	./main touch -hhh >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf main main.manifest pools __pycache__ obs.err build.err

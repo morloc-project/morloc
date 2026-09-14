@@ -25,7 +25,8 @@ Box a Str by literal
 Usage: ./main <nexus_options> mkStr <command_options>
 
 General Options:
-  -h, --help  Print help (see more with '--help')
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
 
 Positional arguments:
   1:  type: Str
@@ -41,7 +42,8 @@ Record Schemas:
 Usage: ./main <nexus_options> mkOptStr <command_options>
 
 General Options:
-  -h, --help  Print help (see more with '--help')
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
 
 Positional arguments:
   1:  type: Str
@@ -60,7 +62,8 @@ A record reached only through a constructor's field
 Usage: ./main <nexus_options> viaCtor <command_options>
 
 General Options:
-  -h, --help  Print help (see more with '--help')
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
 
 Positional arguments:
   1:  type: Item

@@ -31,15 +31,15 @@ all:
 	printf -- '--- describe --say ---\n' >> obs.txt
 	./nexus describe --say 42 >> obs.txt 2>> obs.err
 	# --- Help output: presence + descriptions ---
-	printf -- '--- fhead --help lines (grep terminal flags + descriptions) ---\n' >> obs.txt
-	./nexus fhead --help 2>> obs.err | grep -E '(-l, --lines|-c, --csv|-s, --sum|-p, --plain|Print each string|Join all|Pure semicolon|comma-separated)' >> obs.txt
-	printf -- '--- describe --help lines (grep --say) ---\n' >> obs.txt
-	./nexus describe --help 2>> obs.err | grep -E '(--say|Human-readable)' >> obs.txt
+	printf -- '--- fhead -h lines (grep terminal flags + descriptions) ---\n' >> obs.txt
+	./nexus fhead -h 2>> obs.err | grep -E '(-l, --lines|-c, --csv|-s, --sum|-p, --plain|Print each string|Join all|Pure semicolon|comma-separated)' >> obs.txt
+	printf -- '--- describe -h lines (grep --say) ---\n' >> obs.txt
+	./nexus describe -h 2>> obs.err | grep -E '(--say|Human-readable)' >> obs.txt
 	# --- Return block lists the return type per formatter flag ---
-	printf -- '--- fhead --help Return block (per-formatter return types) ---\n' >> obs.txt
-	./nexus fhead --help 2>> obs.err | awk '/^Return:/{f=1} f&&/^$$/{exit} f{print}' >> obs.txt
-	printf -- '--- describe --help Return block (single terminal) ---\n' >> obs.txt
-	./nexus describe --help 2>> obs.err | awk '/^Return:/{f=1} f&&/^$$/{exit} f{print}' >> obs.txt
+	printf -- '--- fhead -h Return block (per-formatter return types) ---\n' >> obs.txt
+	./nexus fhead -h 2>> obs.err | awk '/^Return:/{f=1} f&&/^$$/{exit} f{print}' >> obs.txt
+	printf -- '--- describe -h Return block (single terminal) ---\n' >> obs.txt
+	./nexus describe -h 2>> obs.err | awk '/^Return:/{f=1} f&&/^$$/{exit} f{print}' >> obs.txt
 	# --- Sibling mutual exclusion: -l -c must error (nonzero exit) ---
 	printf -- '--- fhead -l -c (should error) ---\n' >> obs.txt
 	if ./nexus fhead -l -c lines.txt >> obs.txt 2>> obs.err; then \
@@ -54,9 +54,9 @@ all:
 	else \
 		echo "OK: internal entry hidden" >> obs.txt; \
 	fi
-	# --- Top-level --help must NOT list mlcp_* entries ---
-	printf -- '--- top-level --help mlcp match count (expect 0) ---\n' >> obs.txt
-	./nexus --help 2>> obs.err | grep -c 'mlcp_' >> obs.txt; true
+	# --- Top-level -h must NOT list mlcp_* entries ---
+	printf -- '--- top-level -h mlcp match count (expect 0) ---\n' >> obs.txt
+	./nexus -h 2>> obs.err | grep -c 'mlcp_' >> obs.txt; true
 
 clean:
 	rm -rf nexus pools __pycache__ lines.txt

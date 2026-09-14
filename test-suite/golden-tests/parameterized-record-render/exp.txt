@@ -4,7 +4,8 @@ Take a box of Int
 Usage: ./box <nexus_options> takeInt <command_options>
 
 General Options:
-  -h, --help  Print help (see more with '--help')
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
 
 Positional arguments:
   1:  type: Box Int
@@ -20,7 +21,8 @@ Take a box of Str
 Usage: ./box <nexus_options> takeStr <command_options>
 
 General Options:
-  -h, --help  Print help (see more with '--help')
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
 
 Positional arguments:
   1:  type: Box Str
