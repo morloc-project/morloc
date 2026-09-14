@@ -1246,7 +1246,7 @@ genericPrintExpr desc = go
     go (IIntrinsicStderr sid) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_open_stderr(" <> schemaRef sid <> ")"
-    go (IIntrinsicThrow msg) =
+    go (IIntrinsicThrow _ msg) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_throw(" <> go msg <> ")"
     -- Unified pattern walker. Path string + handle + variable runtime

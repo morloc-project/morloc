@@ -167,7 +167,7 @@ printExpr (IIntrinsicStdout sid) =
   [idoc|_mlc_open_stdout(mlc_schema_table[#{pretty sid}])|]
 printExpr (IIntrinsicStderr sid) =
   [idoc|_mlc_open_stderr(mlc_schema_table[#{pretty sid}])|]
-printExpr (IIntrinsicThrow msg) =
+printExpr (IIntrinsicThrow _ msg) =
   [idoc|_mlc_throw(#{printExpr msg})|]
 
 -- C++ non-finite literals: rely on the C99 macros INFINITY and NAN. They are

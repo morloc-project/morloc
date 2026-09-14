@@ -216,9 +216,18 @@ fn cschema_of(schema: &Schema) -> *mut CSchema {
 // ---------------------------------------------------------------------------
 pub struct MorlocThrow(pub String);
 
-/// Raise a catchable morloc error from generated code (`@throw`).
+/// Raise a catchable morloc error (`@throw`) from sourced Rust.
 pub fn morloc_throw(msg: impl Into<String>) -> ! {
     std::panic::panic_any(MorlocThrow(msg.into()));
+}
+
+/// `@throw` in a value position of generated code, typed as the value it
+/// stands in for. Generated code binds every sub-expression to a typed name
+/// and serializes the last one, so the raise must carry that type: a `!`
+/// there leaves the next statement unreachable and gives `put_value` no
+/// `ToVoidstar` to resolve.
+pub fn morloc_throw_as<T>(msg: impl Into<String>) -> T {
+    morloc_throw(msg)
 }
 
 /// Terminate on a failure of the machinery that carries values between pools:

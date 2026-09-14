@@ -1,3 +1,11 @@
+Unreleased
+----------
+
+ * a Rust pool builds when a function's body is a bare `@throw`, or when
+   every remaining arm of a `match` throws (the shape of `unwrap`); such a
+   program failed to compile (`!: ToVoidstar`) or built with rustc
+   unreachable-code warnings
+
 0.105.0 [2026-09-14]
 --------------------
 

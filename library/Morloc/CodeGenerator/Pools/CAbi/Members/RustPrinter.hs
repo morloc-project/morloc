@@ -111,7 +111,12 @@ printExpr (IIntrinsicRead sid (Just t) e) =
   "rustmorloc::read::<" <> rustType t <> ">(&(" <> printExpr e <> "), schema(" <> pretty sid <> "))"
 printExpr (IIntrinsicRead sid Nothing e) =
   "rustmorloc::read(&(" <> printExpr e <> "), schema(" <> pretty sid <> "))"
-printExpr (IIntrinsicThrow msg) = "rustmorloc::morloc_throw(" <> printExpr msg <> ")"
+-- A raise in a value position is typed as that value so the surrounding
+-- expression keeps its type: `!` would leave the statements after a
+-- throwing arm unreachable and give a serialized throw no `ToVoidstar`.
+printExpr (IIntrinsicThrow (Just t) msg) =
+  "rustmorloc::morloc_throw_as::<" <> rustType t <> ">(" <> printExpr msg <> ")"
+printExpr (IIntrinsicThrow Nothing msg) = "rustmorloc::morloc_throw(" <> printExpr msg <> ")"
 -- File / stream / IO intrinsics. Each mirrors the C++ `_mlc_*` helper
 -- (CppPrinter.hs) but calls the corresponding thin `rustmorloc` shim. A value
 -- argument is borrowed (`&(..)`, the ToVoidstar shape); a handle is a bare
