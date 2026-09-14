@@ -468,6 +468,10 @@ generalTypeToSerialAST' i anc (VarT v)
   | v == MBT.bool = return $ SerialBool (FV v (CV ""))
   | v == MBT.str = return $ SerialString (FV v (CV ""))
   | v == MBT.unit = return $ SerialNull (FV v (CV ""))
+  -- A kindless table declared without parameters is a terminal type; it
+  -- lowers to the bare @T@ wire token rather than the alias-expansion
+  -- path below, which rejects terminals.
+  | MBT.isTableVar v = return $ SerialObject NamTable (FV v (CV "")) [] []
   | any ((== Just v) . typeHeadT) (Set.toList anc) = return $ SerialRec (FV v (CV ""))
   | otherwise = do
       scope <- MM.gets stateUniversalGeneralTypedefs
@@ -521,11 +525,10 @@ generalTypeToSerialAST' i anc t0@(AppT (VarT v) ts)
   | v == (MBT.tuple (length ts)) =
       SerialTuple (FV v (CV "")) <$> mapM (generalTypeToSerialAST' i anc) ts
   -- A Table lowers to a SerialObject NamTable. The encoder emits the
-  -- @T@ wire token (or @T:K<entries>@ when the row is concrete);
-  -- 'Serial.hasArrowHint' identifies these structurally for the
-  -- Arrow-SHM dispatch. No concrete-type hint is attached -- the @T@
-  -- marker itself is the dispatch signal.
-  | v == MBT.table =
+  -- @T@ wire token (or @T:K<entries>@ when the row is concrete), which
+  -- is itself the dispatch signal for the Arrow-SHM path; no
+  -- concrete-type hint is attached.
+  | MBT.isTableVar v =
       let cols = case ts of
             [_, NamT _ _ _ rs] -> rs
             _                  -> []

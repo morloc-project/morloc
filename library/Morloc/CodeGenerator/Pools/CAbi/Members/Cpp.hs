@@ -53,6 +53,7 @@ import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.Platform as P
 import Morloc.CodeGenerator.Serial
   ( serialAstToType
+  , serialAstToNativeType
   , wireSerialAstToType
   , containsFunT
   , containsEffectT
@@ -171,7 +172,7 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
       -- @mlc::ArrowTable@ regardless of any concrete-type hint (the
       -- legacy @<arrow>@ hint has been retired -- recognition is now
       -- by general-type identity, not by the concrete-name slot).
-      f (VarF (FV gv _)) | gv == BT.table = return "mlc::ArrowTable"
+      f (VarF (FV gv _)) | BT.isTableVar gv = return "mlc::ArrowTable"
       -- Leak guard. pairEval leaves bnd-protected recursive aliases as
       -- @VarU v@ with the morloc-side TVar untouched; weave then
       -- synthesizes a CVar from that TVar's text, so the resulting
@@ -555,24 +556,51 @@ manifoldCppSig nm@(NativeManifold _ _ form _) =
 crossingClosureSigs :: [SerialManifold] -> CppTranslator (Set.Set Text)
 crossingClosureSigs es = Set.fromList <$> mapM astSig (concatMap collectSerializedClosures es)
   where
-    astSig (SerialClosure ins out) = closureCppSig (map serialAstToType ins) (serialAstToType out)
+    -- Rendered NATIVELY, because the other side of this join is a manifold's
+    -- native signature. The wire rendering discards a custom packer, so a
+    -- closure whose argument or result is packed would render two different
+    -- strings here and at 'manifoldCppSig', match nothing, and be dropped.
+    astSig (SerialClosure ins out) =
+      closureCppSig (map serialAstToNativeType ins) (serialAstToNativeType out)
     astSig _ = return "" -- collectSerializedClosures returns only SerialClosure
 
--- | Keep in the closure table only closures whose signature can cross a
--- boundary. Everything else is a purely-local closure that needs no reify or
--- dispatch machinery.
+-- | Keep in the closure table only closures that can cross a boundary.
+-- Everything else is a purely-local closure that needs no reify or dispatch
+-- machinery.
+--
+-- Crossing is TRANSITIVE over captures: reifying a closure serializes the
+-- values it captured, so a function value captured by a crossing closure is
+-- itself reified and needs the same machinery. Closing only over the
+-- closures that reach a serialize site leaves such a capture emitted as a
+-- bare @std::bind@, and reifying it throws "cannot reify a non-morloc C++
+-- closure" at run time. The fixed point is taken over signatures, as the
+-- serialize sites are matched, so it may keep a closure that never crosses
+-- (an unused reify thunk) but can never drop one that does.
 restrictToCrossingClosures ::
   [SerialManifold] ->
   Map.Map Int ([SerialAST], [SerialAST], SerialAST) ->
   CppTranslator (Map.Map Int ([SerialAST], [SerialAST], SerialAST))
 restrictToCrossingClosures es closureTable = do
-  crossingSigs <- crossingClosureSigs es
+  seedSigs <- crossingClosureSigs es
   let candidates =
         [ nm | nm@(NativeManifold i _ _ _) <- concatMap collectClosureManifolds es
              , Map.member i closureTable ]
-  crossing <-
-    Set.fromList . map fst . filter (\(_, sig) -> Set.member sig crossingSigs)
-      <$> mapM (\nm@(NativeManifold i _ _ _) -> (,) i <$> manifoldCppSig nm) candidates
+  -- each closure manifold: its own signature, and the signatures of the
+  -- function values it captures
+  entries <- mapM (\nm@(NativeManifold i _ form _) -> do
+                     sig <- manifoldCppSig nm
+                     capSigs <- sequence
+                                  [ closureCppSig ins out
+                                  | Arg _ o <- manifoldContext form
+                                  , Just (FunF ins out) <- [orNativeType o] ]
+                     return (i, sig, capSigs))
+                  candidates
+  let close sigs =
+        let sigs' = Set.union sigs
+              (Set.fromList (concat [cs | (_, sig, cs) <- entries, Set.member sig sigs]))
+         in if Set.size sigs' == Set.size sigs then sigs else close sigs'
+      crossingSigs = close seedSigs
+      crossing = Set.fromList [i | (i, sig, _) <- entries, Set.member sig crossingSigs]
   return $ Map.filterWithKey (\i _ -> Set.member i crossing) closureTable
 
 -- | For each defunctionalized closure manifold, emit a serial dispatch wrapper
@@ -794,6 +822,7 @@ cppLowerConfig :: Map.Map Text MDoc -> LowerConfig CppTranslatorM
 cppLowerConfig reifyThunks =
   LowerConfig
     { lcSrcName = \src -> pretty (srcName src)
+    , lcApplySrcGroup = \f as -> f <+> tupled as
     , lcSourcedArg = \_ _ _ x -> x
     , lcOwnership = \_ -> return Owned
     , lcArgManifoldOwnership = \_ -> return Owned
@@ -1145,7 +1174,7 @@ PROPAGATE_ERROR(errmsg)|]
           resType <- cppTypeOf out
           return $ resType <> tupled argTypes
         _ -> return ""
-    , lcMakePass = \mname _ -> return mname
+    , lcMakePass = \_sig mname _ -> return mname
     , lcMakeLambda = \sig mname contextArgs boundArgs ->
         let ctxNames = map argNamer contextArgs
             vs' = take (length boundArgs) (map (\j -> "std::placeholders::_" <> viaShow j) ([1 ..] :: [Int]))
@@ -1166,6 +1195,7 @@ PROPAGATE_ERROR(errmsg)|]
               Nothing ->
                 [idoc|std::bind(#{bindArgs})|]
     , lcRegisterSchema = cppRegisterSchema
+    , lcTableImportFn = Nothing
     }
   where
     -- For serialization, records become tuples (that's what _put_value/to_voidstar expects)

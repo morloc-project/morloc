@@ -158,6 +158,8 @@ data LangDescriptor = LangDescriptor
     ldAllowStringNull :: !Bool
   , -- External codegen (optional)
     ldCodegenCommand :: !(Maybe Text) -- e.g. "morloc-codegen-generic"
+  , -- Converter from an Arrow record batch to a module's mapped table type
+    ldTableImportFn :: !(Maybe Text) -- e.g. "mlc_table_import"
   , -- == Template fields (Layer 1 & 2) ==
 
     -- Assignment
@@ -305,6 +307,7 @@ instance Y.FromJSON LangDescriptor where
             . maybe id (setK "ldAllowStringNull") allowNullVal
             . ins "ldAllowStringNull" (Y.Bool True)
             . ins "ldCodegenCommand" Y.Null
+            . ins "ldTableImportFn" Y.Null
             . ins "ldRealPosInf" (Y.String "")
             . ins "ldRealNegInf" (Y.String "")
             . ins "ldRealNaN" (Y.String "")
@@ -417,6 +420,7 @@ defaultLangDescriptor name ext =
     , ldIsCompiled = False
     , ldAllowStringNull = True
     , ldCodegenCommand = Nothing
+    , ldTableImportFn = Nothing
     , -- Template fields
       ldAssignOp = "="
     , ldLambdaTemplate = "({{args}}) -> {{body}}"

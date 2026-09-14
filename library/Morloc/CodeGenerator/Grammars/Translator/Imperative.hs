@@ -396,6 +396,13 @@ data IOwnership
 -- | Per-language configuration for lowering
 data LowerConfig m = LowerConfig
   { lcSrcName :: Source -> MDoc
+  , lcApplySrcGroup :: MDoc -> [MDoc] -> MDoc
+  -- ^ Apply one CONTINUATION group of a curried source call (@f(a)(b)@, the
+  -- groups a source statement's @\@rsize@ declares). The first group is the
+  -- call itself; each later group applies the function value the previous
+  -- group returned. Default is juxtaposition, which is how a host language
+  -- with first-class callables spells it; Rust applies a function value
+  -- through its trait method instead.
   , lcSourcedArg :: ArgSite -> IOwnership -> TypeM -> MDoc -> MDoc
   -- ^ How to pass one argument at a call, given the call kind ('ArgSite'), the
   -- argument's ownership ('IOwnership'), its 'TypeM', and its rendered
@@ -644,9 +651,10 @@ data LowerConfig m = LowerConfig
   -- Returns Nothing if dedup'd (C++), Just funcDef otherwise. The mid
   -- is threaded so the per-manifold error-wrap can look up user name
   -- and srcloc for the trace line.
-  , lcMakePass :: MDoc -> [Arg TypeM] -> m MDoc
+  , lcMakePass :: MDoc -> MDoc -> [Arg TypeM] -> m MDoc
   -- ^ Render a whole function/operator passed to a higher-order function
-  -- (@ManifoldPass@), given the manifold name and its parameters. Most
+  -- (@ManifoldPass@), given the closure's own callable signature (from
+  -- 'lcClosureSig'), the manifold name and its parameters. Most
   -- languages pass the manifold by name; the Rust member wraps it in a safe
   -- closure that adapts each argument to the manifold's parameter convention
   -- (deref a Copy scalar, forward a reference) since a bare @unsafe fn@ does
@@ -662,6 +670,10 @@ data LowerConfig m = LowerConfig
   -- whose closures need no static signature.
   , lcRegisterSchema :: Text -> m Int
   -- ^ Register a schema string and return its unique ID (index into schema table)
+  , lcTableImportFn :: Maybe Text
+  -- ^ A runtime helper that converts a received Arrow record batch into the
+  -- language type a module maps @Table@ to, given that type's name. Nothing
+  -- for languages with a single table type.
   }
 
 -- | True if a closure appears anywhere inside the AST. An aggregate is
@@ -752,6 +764,16 @@ expandSerialize cfg v0 s0 = do
         )
     construct _ _ = error "Unreachable in expandSerialize"
 
+-- | A table always arrives as an Arrow record batch; when the module maps
+-- @Table@ to some other library type and the language has a converter,
+-- wrap the deserialized value in it, naming the mapped type.
+tableImport :: LowerConfig m -> SerialAST -> IExpr -> IExpr
+tableImport cfg (SerialObject NamTable (FV _ (CV cv)) _ _) e
+  | Just fn <- lcTableImportFn cfg
+  , not (T.null cv) =
+      ICall fn Nothing [[e, IRawExpr (render (dquotes (pretty cv)))]]
+tableImport _ _ e = e
+
 {- | Expand deserialization into IR statements.
 Returns (final expression representing the deserialized value, prior statements).
 -}
@@ -765,7 +787,8 @@ expandDeserialize cfg v0 s0
   | isMsgpackLeaf cfg s0 = do
       schemaId <- lcRegisterSchema cfg (render $ serialAstToMsgpackSchema s0)
       desType <- lcDeserialAstType cfg s0
-      return (IDesCall schemaId desType (serialAstHasString s0) (IRawExpr (render v0)), [])
+      let call = IDesCall schemaId desType (serialAstHasString s0) (IRawExpr (render v0))
+      return (tableImport cfg s0 call, [])
   | otherwise = do
       idx <- lcNewIndex cfg
       rawType <- lcRawDeserialAstType cfg s0
@@ -1061,12 +1084,18 @@ lowerNativeExprRaw _ _ (AppExeN_ _ (SrcCallP src) (map snd -> [lhs, rhs]))
 lowerNativeExprRaw cfg origExpr (AppExeN_ _ (SrcCallP src) es) = do
   owns <- argOwnerships cfg origExpr
   let argTypes = map fst es
+      -- Only the FIRST group is passed to the source function; every later
+      -- group is applied to the function value the previous group returned,
+      -- so those arguments take the closure-application convention rather
+      -- than the host's parameter convention.
+      firstGroup = case provideClosure src [0 .. length es - 1] of
+        (g : _) -> g
+        [] -> []
+      site i = if i `elem` firstGroup then SourcedArg src i else ClosureArg
       handleFunctionArgs exprs =
-        (<>) (lcSrcName cfg src)
-          . hsep
-          . map tupled
-          . provideClosure src
-          $ zipWith (\(i, t, own) e -> lcSourcedArg cfg (SourcedArg src i) own t e) (zip3 [0 ..] argTypes owns) exprs
+        case provideClosure src (zipWith (\(i, t, own) e -> lcSourcedArg cfg (site i) own t e) (zip3 [0 ..] argTypes owns) exprs) of
+          [] -> lcSrcName cfg src
+          (g0 : gs) -> foldl (lcApplySrcGroup cfg) (lcSrcName cfg src <> tupled g0) gs
   return $ mergePoolDocs handleFunctionArgs (map snd es)
 lowerNativeExprRaw cfg _ (AppExeN_ t (PatCallP p) xs) = do
   let es = map snd xs
@@ -1610,7 +1639,11 @@ lowerManifold cfg m form headForm bodyType bodyPool = do
       mname = manNamer m
   maybeNewManifold <- lcMakeFunction cfg m mname args bodyType priorLines body headForm
   call <- case form of
-        (ManifoldPass _) -> lcMakePass cfg mname args
+        (ManifoldPass _) -> do
+          -- An unapplied manifold's callable signature is its whole type:
+          -- every parameter is still to come.
+          sig <- lcClosureSig cfg (Function [t | Arg _ t <- args] bodyType)
+          lcMakePass cfg sig mname args
         -- Wrap each manifold-call argument through lcSourcedArg (identity for
         -- most languages; the Rust member adapts each native arg to the callee's
         -- convention by ownership, so an already-borrowed arg passes as `&T` and

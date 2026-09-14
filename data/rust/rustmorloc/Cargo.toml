@@ -11,6 +11,9 @@ crate-type = ["rlib"]
 [dependencies]
 libc = { workspace = true }
 morloc-runtime-types = { path = "../morloc-runtime-types" }
+# Tables cross as Arrow record batches through the C Data Interface.
+arrow-array = { version = "58", features = ["ffi"] }
+arrow-schema = "58"
 
 [dev-dependencies]
 # Tests round-trip through the pure marshalling walk against a local buffer

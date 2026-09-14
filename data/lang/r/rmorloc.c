@@ -170,6 +170,7 @@ static void shm_tracker_flush(void) {
         }
     }
     shm_tracker_count = 0;
+    arrow_borrow_clear();
 }
 
 // Drop one tracker entry matching ptr (swap-with-last), shfree the
@@ -2083,27 +2084,40 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
 
         SEXP arrow_ns = PROTECT(R_FindNamespace(mkString("arrow")));
         SEXP export_fn = PROTECT(MORLOC_FIND_IN_FRAME(arrow_ns, install("ExportRecordBatch")));
-        if (export_fn == R_UnboundValue) {
-            UNPROTECT(2);
+        SEXP coerce_fn = PROTECT(MORLOC_FIND_IN_FRAME(arrow_ns, install("as_record_batch")));
+        if (export_fn == R_UnboundValue || coerce_fn == R_UnboundValue) {
+            UNPROTECT(3);
             free_schema(schema);
             MORLOC_ERROR("arrow::ExportRecordBatch not found; is the arrow package installed?");
         }
 
+        // Anything arrow can view as a record batch (a data.frame, a Table,
+        // a RecordBatch itself) is exported; the coercion is a no-op on a
+        // RecordBatch.
+        SEXP coerce_call = PROTECT(lang2(coerce_fn, obj_r));
+        SEXP batch_r = PROTECT(eval(coerce_call, arrow_ns));
         SEXP array_ptr_r = PROTECT(R_MakeExternalPtr(&arrow_array, R_NilValue, R_NilValue));
         SEXP schema_ptr_r = PROTECT(R_MakeExternalPtr(&arrow_schema, R_NilValue, R_NilValue));
-        SEXP call = PROTECT(lang4(export_fn, obj_r, array_ptr_r, schema_ptr_r));
+        SEXP call = PROTECT(lang4(export_fn, batch_r, array_ptr_r, schema_ptr_r));
         eval(call, arrow_ns);
-        UNPROTECT(5);
+        UNPROTECT(8);
 
+        // arrow_to_shm_typed consumes the array; the schema is only read.
         char* errmsg = NULL;
-        relptr_t relptr = arrow_to_shm(&arrow_array, &arrow_schema, &errmsg);
-
+        relptr_t relptr = arrow_to_shm_typed(&arrow_array, &arrow_schema, schema, &errmsg);
         if (arrow_schema.release) arrow_schema.release(&arrow_schema);
-        if (arrow_array.release) arrow_array.release(&arrow_array);
 
         if (errmsg) {
             free_schema(schema);
             MORLOC_ERROR("Arrow export failed: %s", errmsg);
+        }
+
+        // The block is this pool's own until the next dispatch releases it.
+        char* resolve_err = NULL;
+        void* shm_ptr = rel2abs(relptr, &resolve_err);
+        if (resolve_err) { free(resolve_err); }
+        if (shm_ptr) {
+            shm_tracker_push((absptr_t)shm_ptr, NULL);
         }
 
         uint8_t* packet = make_arrow_data_packet(relptr, schema);
@@ -2784,11 +2798,26 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
     Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
     free(schema_str);
 
-    // Arrow dispatch: if packet format is Arrow, import via C Data Interface
-    if (format == PACKET_FORMAT_ARROW) {
+    // Arrow dispatch: a table-typed value is an Arrow packet and vice
+    // versa; either half without the other is a routing error.
+    if (format == PACKET_FORMAT_ARROW || schema->type == MORLOC_TABLE) {
+        if (format != PACKET_FORMAT_ARROW) {
+            free_schema(schema);
+            MORLOC_ERROR("table-typed value did not arrive as an Arrow packet");
+        }
+        if (schema->type != MORLOC_TABLE) {
+            free_schema(schema);
+            MORLOC_ERROR("Arrow packet received for a non-table type");
+        }
         uint8_t* arrow_ptr = R_TRY_WITH_INFRA(free_schema(schema),
             get_morloc_data_packet_value, packet, schema);
         const arrow_shm_header_t* arrow_hdr = (const arrow_shm_header_t*)arrow_ptr;
+
+        char* validate_err = NULL;
+        if (arrow_validate(arrow_hdr, schema, &validate_err) != 0) {
+            free_schema(schema);
+            MORLOC_ERROR("Arrow table failed validation: %s", validate_err ? validate_err : "");
+        }
 
         struct ArrowSchema arrow_schema;
         struct ArrowArray arrow_array;
@@ -2832,6 +2861,9 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         }
         if (arrow_owned) {
             shm_tracker_push((absptr_t)arrow_ptr, NULL);
+            char* rerr = NULL;
+            relptr_t rel = abs2rel(arrow_ptr, &rerr);
+            if (rerr) { free(rerr); } else { arrow_borrow_register((const uint8_t*)arrow_ptr, rel); }
         }
 
         free_schema(schema);

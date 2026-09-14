@@ -1,0 +1,26 @@
+module (*)
+
+import .harness
+import root-py
+
+record Py => Holder = "dict"
+record Py => Caller = "dict"
+record Py => Purer = "dict"
+
+source Py from "hosts.py"
+  ( "home_tick" as tickHome
+  , "home_ident" as identHome
+  , "home_mark" as markHome
+  , "home_str_len" as lenHome
+  , "home_add" as addHome
+  , "home_fail" as failHome
+  , "home_big" as bigHome
+  , "home_use_pure" as usePureHome
+  , "home_take_thunk" as takeThunkHome
+  )
+
+-- a curried host: `mk(k)` returns a callable, so the call is `mk(k)(x)`
+source Py from "hosts.py" where
+  --' name: home_mk
+  --' @rsize 1
+  mkHome

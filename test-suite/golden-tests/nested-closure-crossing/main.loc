@@ -1,0 +1,40 @@
+-- Function values nested in function values crossing a Rust boundary: a
+-- closure applied to a closure from another pool (each direction), and a
+-- crossing closure that captures a closure. Every nested function value is
+-- a trait object in Rust, reified on the way out and reflected on the way
+-- in, so the shape needs no special casing at the wire.
+
+module main (pyHofRustArg, rustHofPyArg, captured)
+
+import root-py
+import root-rust
+
+type Rust => Int = "i64"
+
+source Py from "host.py" ("py_double" as pyDouble, "use_callback" as useCbPy)
+source Rust from "host.rs" ("rs_double" as rsDouble)
+
+pyDouble :: Int -> Int
+useCbPy :: (Int -> Int) -> Int -> Int
+rsDouble :: Int -> Int
+
+-- a Python-homed function taking a function
+hofPy :: (Int -> Int) -> Int
+hofPy g = pyDouble (g 3)
+
+-- a Rust-homed function taking a function
+hofRs :: (Int -> Int) -> Int
+hofRs g = rsDouble (g 3)
+
+pyHofRustArg :: Int -> Int
+pyHofRustArg k = hofPy (\x -> rsDouble x + k)
+
+rustHofPyArg :: Int -> Int
+rustHofPyArg k = hofRs (\x -> pyDouble x + k)
+
+-- the callback handed to the Python host has a Rust body that captures a
+-- Python-homed closure
+captured :: Int -> Int
+captured k =
+  let g = \x -> pyDouble x + k
+   in useCbPy (\y -> rsDouble (g y)) 1

@@ -1,0 +1,20 @@
+--- lossyCast ---
+column 'x' has Arrow type Float64 whose values do not convert losslessly to the declared Int
+--- exactCast ---
+"x:l:[1, 2]"
+--- nullsNotOptional ---
+column 'x' is declared non-nullable (Int) but contains 1 null(s); declare it optional
+--- nullsOptional ---
+"x:l:[1, null, 3]"
+--- widened ---
+"x:l:[1, 2, 3]"
+--- dictText ---
+"d:u:['a', 'b', 'a']"
+--- dictInts ---
+"d:l:[10, 20, 10]"
+--- reordered ---
+"x:l:[1, 2]; y:u:['a', 'b']; z:g:[0.5, 1.5]"
+--- kindlessIntoTyped ---
+Column 'x' has Arrow type 'g' but is declared as Int
+--- parquetHead ---
+[{"x":1,"y":"a"},{"x":2,"y":"b"}]

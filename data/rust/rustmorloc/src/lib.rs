@@ -29,10 +29,13 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{c_char, c_void, CString};
 use morloc_runtime_types::cschema::CSchema;
+use arrow_array::ffi::{from_ffi, to_ffi, FFI_ArrowArray, FFI_ArrowSchema};
+use arrow_array::{Array as _, RecordBatch, StructArray};
 use morloc_runtime_types::packet::{
     PACKET_COMPRESSION_NONE as PKT_COMPRESSION_NONE,
     PACKET_ENCRYPTION_NONE as PKT_ENCRYPTION_NONE,
     PACKET_FORMAT_VOIDSTAR as PKT_FORMAT_VOIDSTAR,
+    PACKET_FORMAT_ARROW as PKT_FORMAT_ARROW,
     PACKET_SOURCE_MESG as PKT_SOURCE_MESG,
     PACKET_SOURCE_RPTR as PKT_SOURCE_RPTR,
     PKT_COMPRESSION_OFF, PKT_ENCRYPTION_OFF, PKT_FORMAT_OFF, PKT_HEADER_SIZE,
@@ -46,6 +49,10 @@ use morloc_runtime_types::shm_types::{align_up, encode_relptr, relptr_offset, Ar
 // morloc_runtime_types then resolves as rustmorloc's transitive dep by exact
 // metadata hash, sidestepping crate-name ambiguity across rust-deps.
 pub use morloc_runtime_types::schema::{parse_schema, Schema, SerialType};
+// The Arrow crates a table-typed pool needs, so a module can map `Table` to
+// `rustmorloc::arrow_array::RecordBatch` without declaring the crates itself.
+pub use arrow_array;
+pub use arrow_schema;
 
 
 // ---------------------------------------------------------------------------
@@ -66,6 +73,15 @@ extern "C" {
                              schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut u8;
     fn get_morloc_data_packet_value(data: *const u8, schema: *const CSchema,
                                     errmsg: *mut *mut c_char) -> *mut u8;
+    // Tables: Arrow C Data Interface <-> SHM table block (see arrow_ffi.rs).
+    fn arrow_to_shm_typed(array: *mut FFI_ArrowArray, schema: *const FFI_ArrowSchema,
+                          declared: *const CSchema, errmsg: *mut *mut c_char) -> isize;
+    fn arrow_from_shm(header: *const c_void, out_schema: *mut FFI_ArrowSchema,
+                      out_array: *mut FFI_ArrowArray, errmsg: *mut *mut c_char) -> i32;
+    fn arrow_validate(header: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> i32;
+    fn make_arrow_data_packet(relptr: isize, schema: *const CSchema) -> *mut u8;
+    fn arrow_borrow_register(base: *const u8, rel: isize);
+    fn arrow_borrow_clear();
     fn make_fail_packet(msg: *const c_char) -> *mut u8;
     // Inline-threshold control: force a captured closure value to serialize
     // SELF-CONTAINED (embedded, not a SHM relptr) so its packet survives the
@@ -225,11 +241,14 @@ pub fn morloc_infra_abort(msg: impl AsRef<str>) -> ! {
 /// MorlocException and an internal abort.
 pub fn mlc_try<T, R, F, OK, ERR>(body: F, ok: OK, err: ERR) -> R
 where
-    F: FnOnce() -> T,
+    F: MorlocFn0<T>,
     OK: FnOnce(T) -> R,
     ERR: FnOnce(String) -> R,
 {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+    // The body is a SUSPENSION, so it is taken as one: that accepts an inline
+    // thunk (through the `Fn` blanket) and an `Rc<dyn MorlocFn0>` held in a
+    // variable alike, rather than only the former.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body.call0())) {
         Ok(v) => ok(v),
         Err(payload) => match payload.downcast::<MorlocThrow>() {
             Ok(thrown) => {
@@ -384,6 +403,7 @@ fn track(ptr: *mut c_void) {
 /// Free all deferred SHM blocks from the previous dispatch. Generated
 /// `local_dispatch`/`remote_dispatch` call this at entry (cpp: pool.cpp:979).
 pub fn dispatch_flush() {
+    unsafe { arrow_borrow_clear() };
     SHM_TRACKER.with(|t| {
         let v = t.0.take();
         for ptr in &v {
@@ -546,12 +566,57 @@ pub trait ToVoidstar {
     /// `dest` must point at a `schema.width`-byte inline slot and `*cursor`
     /// into a buffer with at least `self.shm_size(schema)` bytes remaining.
     unsafe fn write(&self, dest: *mut u8, cursor: &mut *mut u8, schema: &Schema);
+    /// A table exports itself as an Arrow C Data Interface pair instead of
+    /// walking the voidstar layout; every other type has no Arrow form.
+    fn arrow_export(&self) -> Option<(FFI_ArrowArray, FFI_ArrowSchema)> {
+        None
+    }
 }
 pub trait FromVoidstar: Sized {
     /// # Safety
     /// `data` must point at a valid `schema`-shaped inline slot; `base` is the
     /// relptr resolution base (see `resolve`).
     unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self;
+    /// A table builds itself from an imported Arrow C Data Interface pair;
+    /// every other type has no Arrow form.
+    ///
+    /// # Safety
+    /// `array` and `schema` must be valid, unreleased structs.
+    unsafe fn arrow_import(array: FFI_ArrowArray, schema: &FFI_ArrowSchema) -> Option<Self> {
+        let _ = (array, schema);
+        None
+    }
+}
+
+// ---- tables ---------------------------------------------------------------
+// A table never takes the voidstar path: `put_value` and `get_value` route a
+// Table-typed schema through the Arrow C Data Interface, so the walk methods
+// are unreachable for it.
+impl ToVoidstar for RecordBatch {
+    fn shm_size(&self, _schema: &Schema) -> usize {
+        morloc_infra_abort("a table cannot be written through the voidstar path")
+    }
+    unsafe fn write(&self, _dest: *mut u8, _cursor: &mut *mut u8, _schema: &Schema) {
+        morloc_infra_abort("a table cannot be written through the voidstar path")
+    }
+    fn arrow_export(&self) -> Option<(FFI_ArrowArray, FFI_ArrowSchema)> {
+        let data = StructArray::from(self.clone()).into_data();
+        match to_ffi(&data) {
+            Ok(pair) => Some(pair),
+            Err(e) => morloc_throw(format!("exporting table: {}", e)),
+        }
+    }
+}
+impl FromVoidstar for RecordBatch {
+    unsafe fn read(_schema: &Schema, _data: *const u8, _base: *const u8) -> Self {
+        morloc_infra_abort("a table cannot be read through the voidstar path")
+    }
+    unsafe fn arrow_import(array: FFI_ArrowArray, schema: &FFI_ArrowSchema) -> Option<Self> {
+        match from_ffi(array, schema) {
+            Ok(data) => Some(RecordBatch::from(StructArray::from(data))),
+            Err(e) => morloc_throw(format!("importing table: {}", e)),
+        }
+    }
 }
 
 // ---- scalars --------------------------------------------------------------
@@ -1008,50 +1073,119 @@ tuple_impl!(A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7);
 /// id, serialized captured environment).
 pub type ClosureOrigin = (String, i64, Vec<Vec<u8>>);
 
-/// A borrowed function value. A manifold receives a captured closure by
-/// reference; passing it on where a function value is taken by value goes
-/// through this wrapper, which is a function value itself.
-pub struct FnRef<'r, T: ?Sized>(pub &'r T);
-
-/// A crossing closure: a native closure plus the origin needed to reify it.
-pub struct FatClosure<F> {
-    pub f: F,
-    pub origin: ClosureOrigin,
+/// Raise on a function value that has no origin to send. A closure morloc
+/// built carries the manifold to call back into; a callable host code made
+/// has no such identity, and neither does a closure whose context is not
+/// wholly native (those cross by the serial path instead). Every site that
+/// needs an origin goes through here, so the failure names its cause once.
+pub fn require_origin(origin: Option<&ClosureOrigin>) -> ClosureOrigin {
+    match origin {
+        Some(o) => o.clone(),
+        None => morloc_throw(
+            "cannot send a function value that morloc did not create: it has no \
+             manifold to call back into. Apply it in the pool that received it, \
+             or have the host return the data it would compute."
+                .to_string(),
+        ),
+    }
 }
 
 macro_rules! morloc_fn {
-    ($trait:ident, $call:ident, $reify:ident, $( ($A:ident, $a:ident) ),+ ) => {
+    ($trait:ident, $closure:ident, $fnptr:ident, $call:ident, $reify:ident, $( ($A:ident, $a:ident) ),+ ) => {
         pub trait $trait<$($A,)+ R> {
             fn $call(&self, $($a: &$A,)+) -> R;
             fn $reify(&self) -> Option<&ClosureOrigin>;
         }
-        // A native closure: callable, no recoverable origin.
+        // A plain native closure. Host code declares a higher-order parameter
+        // as either `F: Fn(&A..) -> R` or `impl MorlocFnN<A.., R>`; this impl
+        // is what lets one generated form satisfy both. It has no origin, so a
+        // value reaching morloc this way cannot be sent onward.
         impl<$($A,)+ R, F: Fn($(&$A,)+) -> R> $trait<$($A,)+ R> for F {
             #[inline]
             fn $call(&self, $($a: &$A,)+) -> R { self($($a,)+) }
             fn $reify(&self) -> Option<&ClosureOrigin> { None }
         }
-        // A crossing closure: reifies to its stored origin.
-        impl<$($A,)+ R, F: Fn($(&$A,)+) -> R> $trait<$($A,)+ R> for FatClosure<F> {
-            #[inline]
-            fn $call(&self, $($a: &$A,)+) -> R { (self.f)($($a,)+) }
-            fn $reify(&self) -> Option<&ClosureOrigin> { Some(&self.origin) }
-        }
-        // A boxed function value (a record field, or a reflected proxy) is itself
-        // a function value, so `&impl MorlocFnN` accepts it as well as a thin
-        // closure. Delegates through the pointer to the object's own impl.
+        // A function value is held as `Rc<dyn $trait>`, and that is itself a
+        // function value, so it can be passed wherever one is taken.
         impl<$($A,)+ R, T: $trait<$($A,)+ R> + ?Sized> $trait<$($A,)+ R> for std::rc::Rc<T> {
             #[inline]
             fn $call(&self, $($a: &$A,)+) -> R { (**self).$call($($a,)+) }
             fn $reify(&self) -> Option<&ClosureOrigin> { (**self).$reify() }
         }
-        // A borrowed function value (a closure handed to a manifold by
-        // reference), wrapped so it can be passed on where a function value
-        // is taken by value.
-        impl<'r, $($A,)+ R, T: $trait<$($A,)+ R> + ?Sized> $trait<$($A,)+ R> for FnRef<'r, T> {
+        /// A morloc-built function value: the environment it captured, the
+        /// manifold call, and how to reify that environment. `call` and `mk`
+        /// are non-capturing, so they are plain function pointers reading the
+        /// one copy of the captures -- the whole value is a single allocation
+        /// and the captures are copied once.
+        pub struct $closure<C, $($A,)+ R> {
+            caps: C,
+            call: fn(&C, $(&$A,)+) -> R,
+            mk: Option<fn(&C) -> ClosureOrigin>,
+            origin: std::cell::OnceCell<ClosureOrigin>,
+        }
+        impl<C, $($A,)+ R> $closure<C, $($A,)+ R> {
+            /// A closure that can be reified: the origin is built on first
+            /// use and cached, so one that never crosses pays nothing.
+            pub fn new(caps: C, call: fn(&C, $(&$A,)+) -> R, mk: fn(&C) -> ClosureOrigin) -> Self {
+                Self { caps, call, mk: Some(mk), origin: std::cell::OnceCell::new() }
+            }
+            /// A closure with no dispatch entry, so nothing can call back
+            /// into it and it has no origin to offer.
+            pub fn local(caps: C, call: fn(&C, $(&$A,)+) -> R) -> Self {
+                Self { caps, call, mk: None, origin: std::cell::OnceCell::new() }
+            }
+            /// A closure reflected from another pool. It answers with the
+            /// origin it ARRIVED with, so a value crossing A -> B -> C calls
+            /// back to A rather than to B.
+            pub fn proxy(caps: C, call: fn(&C, $(&$A,)+) -> R, origin: ClosureOrigin) -> Self {
+                let cell = std::cell::OnceCell::new();
+                let _ = cell.set(origin);
+                Self { caps, call, mk: None, origin: cell }
+            }
+        }
+        impl<C, $($A,)+ R> $trait<$($A,)+ R> for $closure<C, $($A,)+ R> {
             #[inline]
-            fn $call(&self, $($a: &$A,)+) -> R { (*self.0).$call($($a,)+) }
-            fn $reify(&self) -> Option<&ClosureOrigin> { (*self.0).$reify() }
+            fn $call(&self, $($a: &$A,)+) -> R { (self.call)(&self.caps, $($a,)+) }
+            fn $reify(&self) -> Option<&ClosureOrigin> {
+                if self.origin.get().is_none() {
+                    let mk = self.mk?;
+                    let _ = self.origin.set(mk(&self.caps));
+                }
+                self.origin.get()
+            }
+        }
+        /// A capture-free closure as a plain function pointer. Coercion happens
+        /// at this call, so a caller never has to name the result type -- which
+        /// it could not do anyway, since the arity of a partially applied
+        /// manifold's morloc type counts its captured context arguments.
+        pub fn $fnptr<$($A,)+ R>(f: fn($(&$A,)+) -> R) -> fn($(&$A,)+) -> R { f }
+
+        /// A function pointer is already the thinnest form there is, so the
+        /// adapter is the identity. Anchoring this on a CONCRETE self type is
+        /// what lets it coexist with the trait-object impl: the two self types
+        /// are disjoint, so there is no overlap to reason about, and both
+        /// parameters appear in the self type, so neither is unconstrained.
+        impl<$($A,)+ R> ThinFn for fn($(&$A,)+) -> R {
+            type Out = Self;
+            fn thin(&self) -> Self { *self }
+        }
+
+        /// The ONE thin `Fn` adapter. Host code may declare a higher-order
+        /// parameter as `F: Fn(&A..) -> R`, which a trait object cannot
+        /// satisfy, so a function value is handed over as one of these.
+        ///
+        /// It is a trait rather than a family of named functions so the
+        /// ARITY comes from the value's own type: a caller cannot read the
+        /// arity off the morloc type at the call, because a partially
+        /// applied manifold's type counts its captured context arguments
+        /// too. The adapter has no origin, so a value that reaches morloc
+        /// back through a host parameter cannot be sent onward.
+        impl<$($A: 'static,)+ R: 'static> ThinFn for std::rc::Rc<dyn $trait<$($A,)+ R>> {
+            type Out = Box<dyn Fn($(&$A,)+) -> R>;
+            fn thin(&self) -> Self::Out {
+                let v = self.clone();
+                Box::new(move |$($a,)+| v.$call($($a,)+))
+            }
         }
     };
 }
@@ -1067,30 +1201,69 @@ impl<R, F: Fn() -> R> MorlocFn0<R> for F {
     fn call0(&self) -> R { self() }
     fn reify0(&self) -> Option<&ClosureOrigin> { None }
 }
-impl<R, F: Fn() -> R> MorlocFn0<R> for FatClosure<F> {
-    #[inline]
-    fn call0(&self) -> R { (self.f)() }
-    fn reify0(&self) -> Option<&ClosureOrigin> { Some(&self.origin) }
-}
 impl<R, T: MorlocFn0<R> + ?Sized> MorlocFn0<R> for std::rc::Rc<T> {
     #[inline]
     fn call0(&self) -> R { (**self).call0() }
     fn reify0(&self) -> Option<&ClosureOrigin> { (**self).reify0() }
 }
-impl<'r, R, T: MorlocFn0<R> + ?Sized> MorlocFn0<R> for FnRef<'r, T> {
+pub struct Closure0<C, R> {
+    caps: C,
+    call: fn(&C) -> R,
+    mk: Option<fn(&C) -> ClosureOrigin>,
+    origin: std::cell::OnceCell<ClosureOrigin>,
+}
+impl<C, R> Closure0<C, R> {
+    pub fn new(caps: C, call: fn(&C) -> R, mk: fn(&C) -> ClosureOrigin) -> Self {
+        Self { caps, call, mk: Some(mk), origin: std::cell::OnceCell::new() }
+    }
+    pub fn local(caps: C, call: fn(&C) -> R) -> Self {
+        Self { caps, call, mk: None, origin: std::cell::OnceCell::new() }
+    }
+    pub fn proxy(caps: C, call: fn(&C) -> R, origin: ClosureOrigin) -> Self {
+        let cell = std::cell::OnceCell::new();
+        let _ = cell.set(origin);
+        Self { caps, call, mk: None, origin: cell }
+    }
+}
+impl<C, R> MorlocFn0<R> for Closure0<C, R> {
     #[inline]
-    fn call0(&self) -> R { (*self.0).call0() }
-    fn reify0(&self) -> Option<&ClosureOrigin> { (*self.0).reify0() }
+    fn call0(&self) -> R { (self.call)(&self.caps) }
+    fn reify0(&self) -> Option<&ClosureOrigin> {
+        if self.origin.get().is_none() {
+            let mk = self.mk?;
+            let _ = self.origin.set(mk(&self.caps));
+        }
+        self.origin.get()
+    }
+}
+/// A function value rendered as a plain `Fn`, for host code that declares a
+/// higher-order parameter that way. See the impls generated beside each
+/// `MorlocFnN`.
+pub trait ThinFn {
+    type Out;
+    fn thin(&self) -> Self::Out;
+}
+pub fn fn_ptr0<R>(f: fn() -> R) -> fn() -> R { f }
+impl<R> ThinFn for fn() -> R {
+    type Out = Self;
+    fn thin(&self) -> Self { *self }
+}
+impl<R: 'static> ThinFn for std::rc::Rc<dyn MorlocFn0<R>> {
+    type Out = Box<dyn Fn() -> R>;
+    fn thin(&self) -> Self::Out {
+        let v = self.clone();
+        Box::new(move || v.call0())
+    }
 }
 
-morloc_fn!(MorlocFn1, call1, reify1, (A1, a1));
-morloc_fn!(MorlocFn2, call2, reify2, (A1, a1), (A2, a2));
-morloc_fn!(MorlocFn3, call3, reify3, (A1, a1), (A2, a2), (A3, a3));
-morloc_fn!(MorlocFn4, call4, reify4, (A1, a1), (A2, a2), (A3, a3), (A4, a4));
-morloc_fn!(MorlocFn5, call5, reify5, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5));
-morloc_fn!(MorlocFn6, call6, reify6, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6));
-morloc_fn!(MorlocFn7, call7, reify7, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7));
-morloc_fn!(MorlocFn8, call8, reify8, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7), (A8, a8));
+morloc_fn!(MorlocFn1, Closure1, fn_ptr1, call1, reify1, (A1, a1));
+morloc_fn!(MorlocFn2, Closure2, fn_ptr2, call2, reify2, (A1, a1), (A2, a2));
+morloc_fn!(MorlocFn3, Closure3, fn_ptr3, call3, reify3, (A1, a1), (A2, a2), (A3, a3));
+morloc_fn!(MorlocFn4, Closure4, fn_ptr4, call4, reify4, (A1, a1), (A2, a2), (A3, a3), (A4, a4));
+morloc_fn!(MorlocFn5, Closure5, fn_ptr5, call5, reify5, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5));
+morloc_fn!(MorlocFn6, Closure6, fn_ptr6, call6, reify6, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6));
+morloc_fn!(MorlocFn7, Closure7, fn_ptr7, call7, reify7, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7));
+morloc_fn!(MorlocFn8, Closure8, fn_ptr8, call8, reify8, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7), (A8, a8));
 
 // ---------------------------------------------------------------------------
 // Packet bridge (production). `put_value` serializes a native value into a
@@ -1102,6 +1275,31 @@ morloc_fn!(MorlocFn8, call8, reify8, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5
 /// `schema` must describe `value`'s wire type.
 pub unsafe fn put_value<T: ToVoidstar>(value: &T, schema: &Schema) -> *mut u8 {
     let _recur = RecurScope::enter(schema);
+    if schema.serial_type == SerialType::Table {
+        let (mut array, ffi_schema) = match value.arrow_export() {
+            Some(pair) => pair,
+            None => morloc_infra_abort("Table-typed value is not an Arrow record batch"),
+        };
+        let cs = cschema_of(schema);
+        let mut err: *mut c_char = std::ptr::null_mut();
+        // Consumes `array`; its Drop is then a no-op.
+        let relptr = arrow_to_shm_typed(&mut array, &ffi_schema, cs, &mut err);
+        drop(array);
+        drop(ffi_schema);
+        if !err.is_null() {
+            return fail_packet_from_c(err, "arrow_to_shm failed in put_value");
+        }
+        let packet = make_arrow_data_packet(relptr, cs);
+        if packet.is_null() {
+            morloc_infra_abort("make_arrow_data_packet failed");
+        }
+        let root = rel2abs(relptr, &mut err);
+        discard_err(err);
+        if !root.is_null() {
+            track(root);
+        }
+        return packet;
+    }
     let total = value.shm_size(schema).max(1);
     let mut err: *mut c_char = std::ptr::null_mut();
     let root = shmalloc(total, &mut err) as *mut u8;
@@ -1131,6 +1329,46 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
     let _recur = RecurScope::enter(schema);
     let source = *packet.add(PKT_SOURCE_OFF);
     let format = *packet.add(PKT_FORMAT_OFF);
+
+    if schema.serial_type == SerialType::Table {
+        if format != PKT_FORMAT_ARROW {
+            morloc_throw("table-typed value did not arrive as an Arrow packet");
+        }
+        let cs = cschema_of(schema);
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let block = get_morloc_data_packet_value(packet, cs, &mut err);
+        if !err.is_null() {
+            morloc_throw(cstr_take(err));
+        }
+        // Hold the block for this dispatch, as for any received reference.
+        let mut own = true;
+        if source == PKT_SOURCE_RPTR {
+            own = shincref(block as *mut c_void, &mut err);
+            discard_err(err);
+            err = std::ptr::null_mut();
+        }
+        if own {
+            track(block as *mut c_void);
+            let rel = abs2rel(block as *mut c_void, &mut err);
+            if err.is_null() {
+                arrow_borrow_register(block, rel);
+            }
+            discard_err(err);
+            err = std::ptr::null_mut();
+        }
+        if arrow_validate(block as *const c_void, cs, &mut err) != 0 {
+            morloc_throw(cstr_take(err));
+        }
+        let mut ffi_schema = FFI_ArrowSchema::empty();
+        let mut array = FFI_ArrowArray::empty();
+        if arrow_from_shm(block as *const c_void, &mut ffi_schema, &mut array, &mut err) != 0 {
+            morloc_throw(cstr_take(err));
+        }
+        return match <T as FromVoidstar>::arrow_import(array, &ffi_schema) {
+            Some(v) => v,
+            None => morloc_infra_abort("Table-typed value requested as a non-Arrow type"),
+        };
+    }
 
     let compression = *packet.add(PKT_COMPRESSION_OFF);
     let encryption = *packet.add(PKT_ENCRYPTION_OFF);
@@ -2094,4 +2332,54 @@ mod tests {
             assert_eq!(roundtrip::<Vec<LL>>(&format!("a{SCHEMA}"), &list), list);
         }
     }
+
+    // --- function values -------------------------------------------------
+
+    fn origin_of(n: i64) -> ClosureOrigin {
+        ("rust".to_string(), n, vec![vec![1u8]])
+    }
+
+    #[test]
+    fn closure_calls_through_a_trait_object() {
+        let f: std::rc::Rc<dyn MorlocFn1<i64, i64>> = std::rc::Rc::new(Closure1::local(
+            (7i64,),
+            |c: &(i64,), a: &i64| c.0 + a,
+        ));
+        assert_eq!(f.call1(&5), 12);
+        // an Rc of a function value is a function value
+        let g: std::rc::Rc<dyn MorlocFn1<i64, i64>> = std::rc::Rc::new(f.clone());
+        assert_eq!(g.call1(&5), 12);
+    }
+
+    #[test]
+    fn a_local_closure_has_no_origin() {
+        let f = Closure0::local((), |_: &()| 1i64);
+        assert!(f.reify0().is_none());
+    }
+
+    #[test]
+    fn the_origin_is_built_once_and_cached() {
+        // `mk` is a plain fn pointer, so the count lives beside the captures
+        let f = Closure0::new(
+            (std::cell::Cell::new(0u32),),
+            |_: &(std::cell::Cell<u32>,)| 1i64,
+            |c: &(std::cell::Cell<u32>,)| {
+                c.0.set(c.0.get() + 1);
+                origin_of(42)
+            },
+        );
+        assert_eq!(f.reify0(), Some(&origin_of(42)));
+        assert_eq!(f.reify0(), Some(&origin_of(42)));
+        assert_eq!(f.reify0(), Some(&origin_of(42)));
+        assert_eq!(f.caps.0.get(), 1, "the origin must be built exactly once");
+    }
+
+    #[test]
+    fn a_proxy_answers_with_the_origin_it_arrived_with() {
+        // a value crossing A -> B -> C must call back to A, not to B
+        let f = Closure1::proxy((), |_: &(), a: &i64| *a, origin_of(3));
+        assert_eq!(f.reify1(), Some(&origin_of(3)));
+        assert_eq!(f.reify1(), Some(&origin_of(3)));
+    }
+
 }

@@ -1,0 +1,71 @@
+-- A closure that outlives the Rust frame that builds it owns what it
+-- captures. Three ways a closure escapes a frame whose parameter is a
+-- borrowed `&String`: returned as the frame's value, stored in a record the
+-- frame returns, stored in a list the frame returns. The helpers are used
+-- twice so they stay shared manifolds with borrowed parameters rather than
+-- being inlined into the export, whose own parameter is an owned local.
+--
+-- `viaCombinator` returns a closure built by a combinator over a local
+-- closure: the combinator's function-typed parameter is borrowed, and the
+-- returned value must not borrow it.
+--
+-- `chosen` picks between two function values, and `chosenThunk` between
+-- two suspensions: two closure types no one binding can name, so the
+-- chosen one is a trait object (or, for suspensions, one closure that
+-- runs whichever arm the condition picks).
+
+module main (returned, inRecord, inList, viaCombinator, chosen, chosenThunk)
+
+import root-rust
+
+record Ops where
+  inc :: Int -> Int
+record Rust => Ops = "Ops"
+
+source Rust from "host.rs" ("mark", "str_len" as strLen, "use_ops" as useOps, "use_list" as useList, "apply_twice" as applyTwice, "tick")
+
+mark :: Str -> Str
+strLen :: Str -> Int
+useOps :: Ops -> Int -> Int
+useList :: [Int -> Int] -> Int -> Int
+applyTwice :: (Int -> Int) -> Int -> Int
+tick :: Int -> <IO> Int
+
+mkF :: Str -> Int -> Int
+mkF p = let q = mark p in \x -> strLen q + x
+
+mkOps :: Str -> Ops
+mkOps p = { inc = \x -> strLen p + x }
+
+mkList :: Str -> [Int -> Int]
+mkList p = [\x -> strLen p + x, \x -> strLen (mark p) + x]
+
+returned :: Str -> Int
+returned p = mkF p 1 + mkF (mark p) 10
+
+inRecord :: Str -> Int
+inRecord p = useOps (mkOps p) 1 + useOps (mkOps (mark p)) 10
+
+inList :: Str -> Int
+inList p = useList (mkList p) 1 + useList (mkList (mark p)) 10
+
+compose :: (Int -> Int) -> Int -> Int
+compose g = \x -> applyTwice g x
+
+viaCombinator :: Str -> Int
+viaCombinator p = compose (\x -> strLen p + x) 1 + compose (\x -> strLen (mark p) + x) 10
+
+choose :: Bool -> Int -> Int
+choose b ? b = (\x -> x + x) : (\x -> x)
+
+chosen :: Bool -> Int -> Int
+chosen b n = choose b n + choose (not b) n
+
+chooseT :: Bool -> Int -> <IO> Int
+chooseT b n ? b = tick n : tick (n + n)
+
+chosenThunk :: Bool -> Int -> <IO> Int
+chosenThunk b n = do
+  a <- chooseT b n
+  c <- chooseT (not b) n
+  a + c

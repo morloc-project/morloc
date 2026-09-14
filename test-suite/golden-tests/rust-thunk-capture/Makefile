@@ -11,6 +11,7 @@ all:
 	./nexus guardedTwice missing.dat >> obs.txt 2>> obs.err
 	./nexus armShare '[1,2,3]' >> obs.txt 2>> obs.err
 	./nexus armShare '[]' >> obs.txt 2>> obs.err
+	./nexus closureFrame missing.dat >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus pools *.err rt.dat

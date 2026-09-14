@@ -1,22 +1,34 @@
+0.105.0 [2026-09-14]
+--------------------
+
+ * heavy testing and debugging of cross-pool closure codegen
+ * slightly better table support
+   - support snappy/zstd compressed Parquet files
+   - zero copy cross-table immutable table support (copy on change)
+     - `MORLOC_ARROW_NO_BORROW=1` disables this
+     - `MORLOC_ARROW_STATS=1` reports bytes copied
+   - table schemas are enforced at every pool boundary
+ * other bug fixes
+
 0.104.0 [2026-09-13]
 --------------------
 
- - correct doctrine for effects
- - allow `@epilogue` for commands, not just programs
- - fix Futhark build issue
- - many bug and formatting fixes
+ * correct doctrine for effects
+ * allow `@epilogue` for commands, not just programs
+ * fix Futhark build issue
+ * many bug and formatting fixes
 
 0.103.2 [2026-09-12]
 --------------------
 
- - Pin <2 for conda cxx-compilers
+ * Pin <2 for conda cxx-compilers
 
 0.103.1 [2026-09-12]
 --------------------
 
- - a Python source file named after a standard-library module (`ast.py`,
+ * a Python source file named after a standard-library module (`ast.py`,
    `json.py`) no longer answers later imports of that module in the pool
- - `@try` around a handle-returning intrinsic (`@open`, `@stream`) builds
+ * `@try` around a handle-returning intrinsic (`@open`, `@stream`) builds
    in a C++ pool under clang, so the same program compiles on macOS
 
 0.103.0 [2026-09-12]

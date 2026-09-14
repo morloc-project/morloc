@@ -1,0 +1,47 @@
+-- A suspension field of a record handed to a host, where the suspension's
+-- body is a call into the other pool. The record is homed with the host
+-- (see `closure-field-language`), so the suspension is a closure of that
+-- pool whose body is a foreign call.
+--
+-- FAILS (found 2026-09-13, unfiled): the argument of the foreign call is
+-- serialized outside the suspension and captured as a packet, so the
+-- suspension's manifold has a serial context argument and is left out of
+-- the closure table ('computeClosureSchemas', which keeps only closures
+-- whose whole signature is native). The record's serializer then finds no
+-- origin to reify: Rust panics in `Ops::shm_size` on `reify0().unwrap()`
+-- when the record is captured by an enclosing suspension.
+
+module main (pyHost, rustHost)
+
+import root-py
+import root-rust
+
+record Ops where
+  inc :: Int -> Int
+  total :: <IO> Int
+record Py => Ops = "dict"
+record Rust => Ops = "Ops"
+
+type Rust => Int = "i64"
+
+source Py from "host.py" ("py_double" as pyDouble, "py_tick" as pyTick, "py_use_ops" as pyUseOps)
+source Rust from "host.rs" ("rs_double" as rsDouble, "rs_tick" as rsTick, "rs_use_ops" as rsUseOps)
+
+pyDouble :: Int -> Int
+pyTick :: Int -> <IO> Int
+pyUseOps :: Ops -> Int -> <IO> Int
+rsDouble :: Int -> Int
+rsTick :: Int -> <IO> Int
+rsUseOps :: Ops -> Int -> <IO> Int
+
+rustOps :: Int -> Ops
+rustOps k = { inc = (\x -> rsDouble x + k), total = rsTick k }
+
+pyHost :: Int -> Int -> <IO> Int
+pyHost k n = pyUseOps (rustOps k) n
+
+pyOps :: Int -> Ops
+pyOps k = { inc = (\x -> pyDouble x + k), total = pyTick k }
+
+rustHost :: Int -> Int -> <IO> Int
+rustHost k n = rsUseOps (pyOps k) n

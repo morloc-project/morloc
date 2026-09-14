@@ -13,6 +13,7 @@ from collections import OrderedDict
 from multiprocessing import Process, Value, RawValue
 import ctypes
 import functools
+import importlib
 import importlib.util
 
 
@@ -200,6 +201,30 @@ def mlc_decode(pkt, codec):
     return morloc.get_value(pkt, codec)
 
 
+# A table arrives as a pyarrow.RecordBatch over shared memory. When the
+# module maps Table to another library's type, convert here; the known
+# libraries take the batch through the Arrow PyCapsule interface without a
+# copy where they can. Any other name is called as module.attr(batch).
+def mlc_table_import(batch, typename):
+    if typename in ("arrow", "pyarrow.RecordBatch"):
+        return batch
+    if typename == "pyarrow.Table":
+        import pyarrow
+        return pyarrow.Table.from_batches([batch])
+    if typename == "polars.DataFrame":
+        import polars
+        return polars.from_arrow(batch)
+    if typename == "pandas.DataFrame":
+        return batch.to_pandas()
+    if typename == "duckdb.DuckDBPyRelation":
+        import duckdb
+        return duckdb.from_arrow(batch)
+    modname, _, attr = typename.rpartition(".")
+    if not modname:
+        raise TypeError("cannot import a table as %r: not a dotted type name" % typename)
+    return getattr(importlib.import_module(modname), attr)(batch)
+
+
 def mlc_reify(f, home_lang):
     # Recover (home, mid, captured) from a closure and serialize its captured
     # values. A closure built here is a functools.partial over a manifold
@@ -211,15 +236,42 @@ def mlc_reify(f, home_lang):
     if origin is not None:
         return origin
     if isinstance(f, functools.partial):
-        mid = int(f.func.__name__[1:])
+        mid = _mlc_manifold_id(f.func)
         captured = list(f.args)
     else:
         # A manifold function itself: a function value with nothing captured.
-        mid = int(f.__name__[1:])
+        mid = _mlc_manifold_id(f)
         captured = []
-    cap_codecs = mlc_closure_table.get(mid, [])
+    # The codecs say what this manifold captures. A missing entry, or a
+    # count that disagrees, would otherwise serialize the wrong captures
+    # (a zip truncates silently), so the far side would call back with
+    # arguments the closure never had.
+    if mid not in mlc_closure_table:
+        raise RuntimeError(
+            f"morloc: no closure codecs for manifold {mid}; it was not "
+            "registered as a crossing closure")
+    cap_codecs = mlc_closure_table[mid]
+    if len(captured) != len(cap_codecs):
+        raise RuntimeError(
+            f"morloc: manifold {mid} captured {len(captured)} values but "
+            f"{len(cap_codecs)} codecs are registered")
     packets = [mlc_encode(c, s) for c, s in zip(captured, cap_codecs)]
     return (home_lang, mid, packets)
+
+
+def _mlc_manifold_id(f):
+    # A morloc-made callable is a generated manifold named m<mid>. Anything
+    # else -- a callable the host created, or one morloc received and did
+    # not record an origin for -- cannot be reified: the far side has no
+    # manifold to call back into. Mirrors the C++ pool's
+    # "cannot reify a non-morloc closure".
+    name = getattr(f, "__name__", None)
+    if name is not None and name.startswith("m") and name[1:].isdigit():
+        return int(name[1:])
+    raise RuntimeError(
+        "morloc: cannot reify a callable that morloc did not create "
+        f"({name!r}); a function value made by host code has no identity "
+        "to send across a pool boundary")
 
 
 def mlc_reflect_from_tuple(tup, arg_codecs, res_codec):

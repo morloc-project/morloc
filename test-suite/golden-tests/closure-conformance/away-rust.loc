@@ -1,0 +1,41 @@
+module (*)
+
+import .harness
+import root-rust
+
+record Rust => Holder = "Holder"
+record Rust => Caller = "Caller"
+record Rust => Purer = "Purer"
+
+source Rust from "hosts.rs"
+  ( "away_ident" as identAway
+  , "away_bump" as bumpAway
+  , "away_take_thunk" as takeThunkAway
+  , "away_drop_thunk" as dropThunkAway
+  , "away_use_record" as useRecordAway
+  , "away_use_list" as useListAway
+  , "away_use_tuple" as useTupleAway
+  , "away_use_opt" as useOptAway
+  , "away_use_nested" as useNestedAway
+  , "away_use_callback" as useCallbackAway
+  , "away_use_pure" as usePureAway
+  , "away_use_arity2" as useArity2Away
+  , "away_use_pinned" as usePinnedAway
+  , "away_use_hof" as useHofAway
+  , "away_use_hof_eff" as useHofEffAway
+  , "away_use_hof2" as useHof2Away
+  , "away_use_list_pure" as useListPureAway
+  , "away_use_mk" as useMkAway
+  , "away_use_thunk2" as useThunk2Away
+  , "away_use_thunk_fn" as useThunkFnAway
+  , "away_use_fn_thunk" as useFnThunkAway
+  , "away_map_away" as mapAway
+  , "away_two" as awayTwo
+  , "away_mix" as awayMix
+  )
+
+-- also curried: `pass_through(f)` returns the callable, applied as `(f)(x)`
+source Rust from "hosts.rs" where
+  --' name: away_pass_through
+  --' @rsize 1
+  passAway

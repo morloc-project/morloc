@@ -1,0 +1,24 @@
+-- A closure that cannot cross a pool boundary should not be built as though it
+-- could. This program has ONE pool, so no closure in it can ever be sent
+-- anywhere; the lambda captures nothing and its manifold gets no dispatch
+-- entry, which is the compiler's own statement that it has no identity to
+-- carry. It is nevertheless handed to a sourced higher-order function, whose
+-- parameter is an ordinary `F: Fn` -- a position that accepts a plain closure.
+--
+-- Emitting a reference-counted trait object there costs an allocation and a
+-- virtual call per element, in the one case where the machinery buys nothing.
+-- The checks below read the generated pool because the cost is invisible in
+-- the program's output: the answer is right either way. They count the vtable
+-- and the allocation rather than any particular spelling of the good path.
+
+module main (viaMap)
+
+import root-rust
+
+source Rust from "bench.rs" ("iota", "sum_vec" as sumVec)
+
+iota :: Int -> [Int]
+sumVec :: [Int] -> Int
+
+viaMap :: Int -> Int
+viaMap n = sumVec (map (\x -> x * 2) (iota n))

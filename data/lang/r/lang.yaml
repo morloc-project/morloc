@@ -50,6 +50,7 @@ ldFieldAccess: dollar
 
 # Serialize/deserialize
 ldSerializeFn: "morloc_put_value"
+ldTableImportFn: "mlc_table_import"
 ldDeserializeFn: "morloc_get_value"
 ldReleasePacketFn: "morloc_release_packet_shm"
 ldIntrinsicPrefix: "morloc_"

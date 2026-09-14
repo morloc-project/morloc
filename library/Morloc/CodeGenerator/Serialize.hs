@@ -27,6 +27,8 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Monad as MM
+import qualified Data.Set as Set
+import qualified Control.Monad as CM
 
 {- | This step is performed after segmentation, so all terms are in the same
 language. Here we need to determine where inputs are (de)serialized and the
@@ -46,7 +48,12 @@ serialize mh = do
 -- packer) is visible and the value marshals exactly as a native host value
 -- would. 'poolOf' is identity for ordinary (self-hosting) languages.
 serializeHosted :: LR.LangRegistry -> MonoHead -> MorlocMonad SerialManifold
-serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
+serializeHosted reg mh = do
+  argTypes <- MM.gets stateArgTypes
+  serializeHosted' reg argTypes mh
+
+serializeHosted' :: LR.LangRegistry -> Map.Map Int (Indexed Type) -> MonoHead -> MorlocMonad SerialManifold
+serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
   form0 <- ManifoldFull <$> mapM prepareArg args0
 
   se1 <- serialExpr m0 e0
@@ -61,7 +68,13 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
     inferTypeUniversal = inferConcreteTypeUniversal lang m0
     inferVar = inferConcreteVar lang
 
-    typemap = makeTypemap m0 e0
+    -- A use that forwards an argument as a packet records no type; the
+    -- declared type recorded when the argument was minted fills the gap, so
+    -- a closure capturing such an argument still knows what it holds.
+    -- A use that forwards an argument as a packet records no type; the
+    -- declared type recorded when the argument was minted fills the gap, so
+    -- a closure capturing such an argument still knows what it holds.
+    typemap = Map.union (makeTypemap m0 e0) (Map.map Right argTypes)
 
     prepareArg ::
       Arg None ->
@@ -147,6 +160,14 @@ serializeHosted reg (MonoHead lang0 m0 args0 headForm0 e0) = do
       -- 'SerialClosure' (reify), exactly as 'unwrapLetDef' keeps a let-bound
       -- closure whole.
       | isClosureForm form = do
+          -- A function value the host created has no identity to send: the
+          -- wire form of a closure is the manifold to call back into, and
+          -- the host's callable is not one. Refused here, where a closure
+          -- is serialized, rather than at run time in each pool.
+          hostOrigin <- MM.gets stateHostOriginClosures
+          CM.when (Set.member m hostOrigin) $
+            MM.throwSourcedError m
+              "a function value created by host code cannot cross a pool boundary; apply it in the pool that received it, or have the host return the data it would compute"
           ne <- nativeExpr m orig
           se <- serializeS "closure value" m ne
           case inner of
@@ -1033,10 +1054,20 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
 
     wireNativeManifold :: NativeManifold_ (D NativeExpr) -> MorlocMonad (D NativeManifold)
     wireNativeManifold (NativeManifold_ m _ form (req, e)) = do
-      let form' = afirst (specialize req) form
+      -- A closure captures values, never packets: a capture is part of the
+      -- closure's wire form (reified with it, handed back to its body by the
+      -- home pool's dispatch), and only a native value has one. A body that
+      -- needs the packet, for a call into another pool, serializes the value
+      -- when it runs ('letWrap'), once per run.
+      let form0 = if isClosureForm form then afirst (const nativeCapture) form else form
+          form' = afirst (specialize req) form0
           req' = Map.map fst (manifoldToMap form')
       e' <- letWrap m form' req e
       return (req', NativeManifold m lang form' e')
+      where
+        nativeCapture (LR _ t) = R t
+        nativeCapture (L (SerialS t)) = R t
+        nativeCapture o = o
 
     wireSerialExpr (LetVarS_ t i) = return (Map.singleton i SerialContent, LetVarS t i)
     wireSerialExpr (BndVarS_ t i) = return (Map.singleton i SerialContent, BndVarS t i)
@@ -1176,6 +1207,12 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
       MorlocMonad (D NativeExpr)
     wireNativeExpr (LetVarN_ t i) = return (Map.singleton i NativeContent, LetVarN t i)
     wireNativeExpr (BndVarN_ t i) = return (Map.singleton i NativeContent, BndVarN t i)
+    -- A function value applied through its index is a native use of that
+    -- variable: a closure that arrived as a packet (a parameter of function
+    -- type, reflected from another pool) must be deserialized before the
+    -- call, exactly as a variable read would have it.
+    wireNativeExpr (AppExeN_ t exe@(LocalCallP i) (unzip -> (reqs, es))) =
+      return (Map.unionsWith (<>) (Map.singleton i NativeContent : reqs), AppExeN t exe es)
     wireNativeExpr (SerialLetN_ i (req1, se1) (req2, ne2)) = do
       let req' = Map.unionWith (<>) req1 req2
       e' <- case Map.lookup i req2 of
@@ -1291,3 +1328,4 @@ instance Semigroup Request where
 
 data SerializationState = Serialized | Unserialized
   deriving (Show, Eq, Ord)
+

@@ -1456,14 +1456,24 @@ expressPolyExpr
             args = [i | Arg i _ <- appArgs]
             allParentArgs = args <> [i | (_, Just (i, _), _) <- xsInfo]
             lets = [PolyLet i e | (_, Just (i, e), _) <- xsInfo]
-            passedParentArgs = concat [[r | r <- allParentArgs, r == i] | i <- callArgs]
+            passedParentArgs = unique (concat [[r | r <- allParentArgs, r == i] | i <- callArgs])
             nContextArgs = length appArgs - length vs
 
             lambdaTypeMap = zip vs (map (Idx cidxLam) lamInputTypes)
-            boundVars =
-              [ PolyBndVar (maybe (A parentLang) C (lookup v lambdaTypeMap)) i
-              | Arg i v <- appArgs
-              ]
+            -- The values handed to the interface are exactly the indices the
+            -- callee binds, in that order. An argument realized in another
+            -- language is computed here and bound to a fresh index, so the
+            -- list of indices the call names is not the list of this
+            -- lambda's own arguments; supplying one while naming the other
+            -- leaves the callee reading a variable nothing assigned.
+            appArgVar = [(i, v) | Arg i v <- appArgs]
+            letArgVar = [(i, e) | (_, Just (i, _), e) <- xsInfo]
+            boundVars = map boundVar passedParentArgs
+            boundVar i = case lookup i letArgVar of
+              Just e -> e
+              Nothing -> case lookup i appArgVar of
+                Just v -> PolyBndVar (maybe (A parentLang) C (lookup v lambdaTypeMap)) i
+                Nothing -> error "unreachable: a called index is bound here or minted here"
             untypedContextArgs = map unvalue $ take nContextArgs appArgs
             typedPassedArgs = fromJust $ safeZipWith (\(Arg i _) t -> Arg i (Just t)) (drop nContextArgs lamArgs) lamInputTypes
 
@@ -1513,15 +1523,29 @@ expressPolyExpr
 
             let x' = PolyLetVar (Idx cidx t) idx
             return ([idx], Just (idx, letVal), x')
-expressPolyExpr _ _ _ (AnnoS lambdaType@(Idx midx _) (Idx _ lang, manifoldArguments) (LamS vs body)) = do
-  body' <- expressPolyExprWrap lang lambdaType body
-
+expressPolyExpr _ parentLang _ (AnnoS lambdaType@(Idx midx _) (Idx _ lang, manifoldArguments) (LamS vs body)) = do
+  -- A lambda value lives in the language of the expression that builds it
+  -- (Realize pins it there); this clause has no crossing for a lambda in a
+  -- foreign slot, so a disagreement here would land the lambda's manifold
+  -- in the wrong pool.
+  when (lang /= parentLang) $
+    MM.throwCompilerBugAt midx $
+      "a lambda value is realized in " <> pretty lang
+        <> " inside an expression realized in " <> pretty parentLang
+        <> "; a lambda takes the language of the expression that builds it"
   -- Only the leading @length vs@ inputs belong to THIS lambda; when the body
   -- returns a function (a curried type flattened by 'normalizeType'), the
   -- surplus inputs belong to the returned closure, expressed within @body@.
-  inputTypes <- case val lambdaType of
-    (FunT ts _) -> return (take (length vs) ts)
-    _ -> return []
+  -- The body's type is what is left once this lambda's inputs are consumed.
+  -- It is the type a crossing inside the body carries: with the lambda's
+  -- whole type the body would cross as a function value, and a suspension
+  -- at its root would be run by the callee and reflected by the caller.
+  (inputTypes, bodyType) <- case val lambdaType of
+    (FunT ts ret)
+      | length ts > length vs -> return (take (length vs) ts, FunT (drop (length vs) ts) ret)
+      | otherwise -> return (ts, ret)
+    t -> return ([], t)
+  body' <- expressPolyExprWrap lang (mkIdx body bodyType) body
 
   let contextArguments = map unvalue $ take (length manifoldArguments - length vs) manifoldArguments
       boundArguments = map unvalue $ drop (length contextArguments) manifoldArguments
@@ -2008,13 +2032,15 @@ expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx _, _) (CoerceS coercio
   let innerType = unapplyCoercion coercion t
   x' <- expressPolyExprWrap parentLang (Idx cidx innerType) x
   return $ PolyCoerce coercion (Idx cidx t) x'
-expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx _lang, _) (EvalS x)) = do
+expressPolyExpr _ parentLang _ (AnnoS (Idx _ t) (Idx cidx _lang, _) (EvalS x@(AnnoS (Idx _ tx) _ _))) = do
   -- Source-level force. Cross-language handling (peel the
-  -- 'PolyRemoteInterface' type and force the callee) is now the
+  -- 'PolyRemoteInterface' type and force the callee) is the
   -- responsibility of the Poly-stage 'EffectBoundary' pass, which
   -- walks the resulting tree and reconciles both sides of any
-  -- 'PolyRemoteInterface' it finds.
-  x' <- expressPolyExprWrap parentLang (Idx cidx t) x
+  -- 'PolyRemoteInterface' it finds. The forced expression keeps its own
+  -- type (the suspension) below the force: a crossing there carries the
+  -- suspension, and the force runs it here.
+  x' <- expressPolyExprWrap parentLang (Idx cidx tx) x
   return $ PolyEval (Idx cidx t) x'
 -- IntrMap (the desugar-emitted implicit map for bracket-accessor
 -- chains): for the pool path, resolve the per-language
@@ -2361,6 +2387,13 @@ polyFreeVars = go
     -- loop; a continue's values are ordinary sub-expressions in the loop scope.
     go (PolyLoop _ ids e) = Set.difference (go e) (Set.fromList ids)
     go (PolyLoopContinue xs) = Set.unions (map go xs)
+    -- A cross-pool call names the enclosing indices it sends. They also
+    -- reach here through the application's argument list whenever the two
+    -- agree, so this clause changes nothing in a well-formed tree -- and
+    -- it is what makes the free-variable computation total rather than
+    -- dependent on every construction site remembering to keep them in
+    -- step. The callee body is a separate scope and contributes nothing.
+    go (PolyRemoteInterface _ _ is _ _) = Set.fromList is
     go _ = Set.empty
 
 -- | Resolve a function name to its manifold ID and determine if the call is cross-language.

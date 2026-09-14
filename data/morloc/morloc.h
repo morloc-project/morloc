@@ -14,7 +14,7 @@
 // (Morloc.Abi). Provisioning refuses to run a prebuilt libmorloc/nexus whose
 // version differs from the compiler's expected value (fail-closed), preventing
 // silent cross-pool struct/offset corruption.
-#define MORLOC_ABI_VERSION 2
+#define MORLOC_ABI_VERSION 3
 
 // Atomic includes must sit outside any `extern "C"` block because the
 // C++ <atomic> header pulls in <type_traits> et al., which use C++
@@ -1157,28 +1157,85 @@ struct ArrowArray {
     void* private_data;
 };
 
+struct ArrowArrayStream {
+    int (*get_schema)(struct ArrowArrayStream*, struct ArrowSchema* out);
+    int (*get_next)(struct ArrowArrayStream*, struct ArrowArray* out);
+    const char* (*get_last_error)(struct ArrowArrayStream*);
+    void (*release)(struct ArrowArrayStream*);
+    void* private_data;
+};
+
 #endif // ARROW_C_DATA_INTERFACE
 
 #define ARROW_SHM_MAGIC    0xA770DA7A
+#define ARROW_SHM_VERSION  2
 #define ARROW_BUFFER_ALIGN 64
 #define ARROW_ALIGN_UP(x)  (((x) + ARROW_BUFFER_ALIGN - 1) & ~((size_t)ARROW_BUFFER_ALIGN - 1))
 
-typedef struct arrow_column_desc {
-    morloc_serial_type type;
-    uint64_t length;
-    uint64_t null_count;
-    uint32_t name_offset;
-    uint16_t name_length;
-    uint64_t data_offset;
-    uint64_t data_size;
-} arrow_column_desc_t;
+// Flags a table node carries verbatim from ArrowSchema.flags.
+#define ARROW_FLAG_DICTIONARY_ORDERED 1
+#define ARROW_FLAG_NULLABLE           2
+#define ARROW_FLAG_MAP_KEYS_SORTED    4
+
+// A table block: a descriptor table over opaque Arrow buffers. Node 0 is
+// the root struct array; the children of node k are the contiguous nodes
+// starting at child_index. Buffers are LOCAL (bytes in this block) or
+// NULL (the slot the C Data Interface leaves as a null pointer); EXTERN
+// is reserved. Every offset is relative to the block start. Consumers
+// never walk these directly: arrow_from_shm builds C Data Interface views
+// whose buffer pointers point into the block.
+#define ARROW_BUF_NULL   0
+#define ARROW_BUF_LOCAL  1
+#define ARROW_BUF_EXTERN 2
 
 typedef struct arrow_shm_header {
     uint32_t magic;
+    uint32_t version;
     uint32_t n_columns;
+    uint32_t n_nodes;
     uint64_t n_rows;
     uint64_t total_size;
+    uint64_t metadata_offset;
+    uint32_t metadata_length;
+    uint32_t n_buffers;
+    uint32_t nodes_offset;
+    uint32_t buffers_offset;
+    uint32_t strtab_offset;
+    uint32_t strtab_length;
 } arrow_shm_header_t;
+
+typedef struct arrow_node_desc {
+    int64_t  length;
+    int64_t  null_count;
+    int64_t  offset;
+    int64_t  flags;
+    uint32_t format_offset;
+    uint32_t name_offset;
+    uint32_t metadata_offset;
+    uint32_t buffer_index;
+    uint32_t n_buffers;
+    uint32_t child_index;
+    uint32_t n_children;
+    uint32_t dictionary_index;
+} arrow_node_desc_t;
+
+typedef struct arrow_buffer_desc {
+    uint64_t size;
+    uint64_t offset;
+    uint64_t extern_ref;
+    uint32_t kind;
+    uint32_t pad;
+} arrow_buffer_desc_t;
+
+#if defined(__cplusplus)
+static_assert(sizeof(arrow_shm_header_t) == 64, "arrow_shm_header_t must be 64 bytes");
+static_assert(sizeof(arrow_node_desc_t) == 64, "arrow_node_desc_t must be 64 bytes");
+static_assert(sizeof(arrow_buffer_desc_t) == 32, "arrow_buffer_desc_t must be 32 bytes");
+#else
+_Static_assert(sizeof(arrow_shm_header_t) == 64, "arrow_shm_header_t must be 64 bytes");
+_Static_assert(sizeof(arrow_node_desc_t) == 64, "arrow_node_desc_t must be 64 bytes");
+_Static_assert(sizeof(arrow_buffer_desc_t) == 32, "arrow_buffer_desc_t must be 32 bytes");
+#endif
 
 // ========================================================================
 // Section 10: Slurm / resource types
@@ -1486,14 +1543,30 @@ void pool_mark_idle(void);
 // Section 20: Function declarations -- Arrow
 // ========================================================================
 
-size_t arrow_element_size(morloc_serial_type type);
-const char* arrow_format_string(morloc_serial_type type);
-morloc_serial_type arrow_format_to_type(const char* format);
-relptr_t arrow_to_shm(const struct ArrowArray* array, const struct ArrowSchema* schema, ERRMSG);
+// Move a C Data Interface struct array into a fresh SHM block. Takes
+// ownership of `array` (its release callback runs once the copy is made);
+// `schema` is only read. The typed form additionally casts declared columns
+// to their declared types, refuses nulls in non-optional columns, and
+// orders declared columns first. Returns RELNULL with ERRMSG set on error.
+relptr_t arrow_to_shm(struct ArrowArray* array, const struct ArrowSchema* schema, ERRMSG);
+relptr_t arrow_to_shm_typed(struct ArrowArray* array, const struct ArrowSchema* schema,
+                            const Schema* declared, ERRMSG);
+// As arrow_to_shm_typed for a C stream interface producer: every batch the
+// stream yields is concatenated into one table. Takes ownership of the
+// stream (releasing it when drained).
+relptr_t arrow_stream_to_shm_typed(struct ArrowArrayStream* stream, const Schema* declared, ERRMSG);
+// Check a block against the morloc column schema it is received under:
+// every declared column present with an acceptable physical type, and no
+// nulls or nullable flag on a column declared non-optional. 0 on success.
 int arrow_validate(const arrow_shm_header_t* header, const Schema* schema, ERRMSG);
-const void* arrow_column_data(const arrow_shm_header_t* header, uint32_t col_index);
-const arrow_column_desc_t* arrow_column_desc(const arrow_shm_header_t* header, uint32_t col_index);
-const char* arrow_column_name(const arrow_shm_header_t* header, uint32_t col_index);
+// Record a block this pool received so a table returned unchanged is passed
+// through with a fresh reference instead of a copy; forget them where the
+// pool releases its received blocks. MORLOC_ARROW_NO_BORROW=1 disables the
+// pass-through entirely.
+void arrow_borrow_register(const uint8_t* base, relptr_t rel);
+void arrow_borrow_clear(void);
+// Bytes memcpy'd into SHM by table writes in this process so far.
+uint64_t arrow_copied_bytes(void);
 int arrow_from_shm(const arrow_shm_header_t* header,
                    struct ArrowSchema* out_schema,
                    struct ArrowArray* out_array, ERRMSG);

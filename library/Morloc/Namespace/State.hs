@@ -233,6 +233,18 @@ data MorlocState = MorlocState
   -- ^ Map from group name to (description lines, member export indices)
   , stateManifoldLang :: Map Int Lang
   -- ^ Map from export manifold ID to its pool language
+  , stateHostOriginClosures :: Set.Set Int
+  -- ^ Manifolds that wrap a function value a HOST created (the adapter at
+  -- a sourced call's result). Such a value has no identity of its own, so
+  -- the wrapper cannot be reified and the closure cannot cross a pool
+  -- boundary; reaching a serialize site is a build error rather than a
+  -- runtime one.
+  , stateArgTypes :: Map Int (Indexed Type)
+  -- ^ The declared type of every manifold argument, by argument index, with
+  -- the index of the lambda that binds it (for scope lookups). Recorded when
+  -- the argument is minted; a use that forwards the argument as a packet
+  -- records no type of its own, and a closure capturing it still has to
+  -- know what it holds.
   , stateManifoldEffects :: Map Int (Set.Set EffectLabel)
   -- ^ Map from export manifold ID to its original return effect labels
   , stateProjectRoot :: Maybe Path
@@ -940,6 +952,8 @@ instance Defaultable MorlocState where
       , stateLangRegistry = LR.emptyRegistry
       , stateExportGroups = Map.empty
       , stateManifoldLang = Map.empty
+      , stateHostOriginClosures = Set.empty
+      , stateArgTypes = Map.empty
       , stateManifoldEffects = Map.empty
       , stateProjectRoot = Nothing
       , stateEnvSpecLangs = []

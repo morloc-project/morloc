@@ -35,6 +35,8 @@ module Morloc.BaseTypes
   , matrix
   , tensor
   , table
+  , arrowTable
+  , isTableVar
   , record
   , ifileVar
   , istreamVar
@@ -73,6 +75,7 @@ module Morloc.BaseTypes
   , boolU
   , strU
   , tableU
+  , isTableU
   , tupleU
   , listU
   , effectU
@@ -160,6 +163,15 @@ tensor k = TV $ "Tensor" <> pretty k
 
 table :: TVar
 table = TV "Table"
+
+-- | The kindless Arrow-table name used while the bare table is developed
+-- apart from the stdlib @table@ module. Dispatches exactly as @Table@.
+arrowTable :: TVar
+arrowTable = TV "ArrowTable"
+
+-- | True for every general type name that lowers to the Arrow SHM path.
+isTableVar :: TVar -> Bool
+isTableVar v = v == table || v == arrowTable
 
 record :: TVar
 record = TV "Record"
@@ -351,6 +363,11 @@ strU = VarU $ TV "Str"
 
 tableU :: TypeU
 tableU = VarU $ TV "Table"
+
+-- | True for a bare general type that lowers to the Arrow SHM path.
+isTableU :: TypeU -> Bool
+isTableU (VarU v) = isTableVar v
+isTableU _ = False
 
 listU :: TypeU -> TypeU
 listU t = AppU (VarU list) [t]

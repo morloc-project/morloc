@@ -52,7 +52,10 @@ module Morloc.CodeGenerator.EffectBoundary
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Data.GMap as GMap
 import Morloc.Data.Doc
+import Control.Monad (foldM)
 import qualified Morloc.Monad as MM
+import qualified Morloc.Data.Map as Map
+import qualified Data.Set as Set
 import qualified Morloc.TypeEval as TE
 
 -- | The calling convention imposed by the surrounding boundary.
@@ -169,6 +172,29 @@ walk m ctx e = do
     _ -> return ()
   descend m ctx e
 
+-- | The two sides of a remote call must agree on the value the wire
+-- carries: the callee's entry point runs one layer of its result and the
+-- caller receives the interface type, so the callee's return has a root
+-- suspension exactly when the interface type has one (a suspension of a
+-- suspension ships its inner thunk as a closure). Walked at
+-- 'ForeignCalleeReturn' with that agreement as the check, in place of the
+-- plain-value rule of the other boundaries.
+walkCallee :: Int -> Type -> PolyExpr -> MorlocMonad ()
+walkCallee m iface body = do
+  case polyOuterType body of
+    Just t | hasOuterEffect t /= hasOuterEffect iface ->
+      MM.throwCompilerBug $
+        "EffectBoundary invariant violated at manifold m"
+          <> pretty m <> ":\n"
+          <> "  boundary : " <> viaShow ForeignCalleeReturn <> "\n"
+          <> "  callee   : " <> pretty t <> "\n"
+          <> "  caller   : " <> pretty iface <> "\n"
+          <> "  expected : the callee's return and the caller's interface type to\n"
+          <> "             agree on whether the wire carries a suspension.\n"
+          <> "Root cause: 'insertEffectBoundaries' peeled one side and not the other."
+    _ -> return ()
+  descend m ForeignCalleeReturn body
+
 -- | Does the declared type at this position violate the boundary's
 -- expected calling convention?
 mismatch :: BoundaryContext -> Type -> Bool
@@ -214,7 +240,7 @@ throwBoundaryBug m ctx t node =
 --     declared return type.
 descend :: Int -> BoundaryContext -> PolyExpr -> MorlocMonad ()
 descend m _ (PolyManifold _ _ _ _ body) = walk m LocalRoot body
-descend m _ (PolyRemoteInterface _ _ _ _ body) = walk m ForeignCalleeReturn body
+descend m _ (PolyRemoteInterface _ (Idx _ t) _ _ body) = walkCallee m t body
 descend m ctx (PolyReturn body) = walk m ctx body
 descend m _ (PolyLet _ e1 e2) = do
   walk m LocalRoot e1
@@ -254,54 +280,56 @@ descend _ _ _ = return ()
 -- at Force boundaries.
 insertEffectBoundaries :: PolyHead -> MorlocMonad PolyHead
 insertEffectBoundaries (PolyHead lang midx args body) = do
-  body' <- rewrite midx body
+  body' <- rewrite lang midx body
   return $ PolyHead lang midx args body'
 
 -- | Threads the ambient 'PolyManifold' midx, used to index any
--- 'PolyDoBlock' / 'PolyEval' the pass has to synthesise.
-rewrite :: Int -> PolyExpr -> MorlocMonad PolyExpr
-rewrite m (PolyApp fn xs) = do
-  fn'  <- rewrite m fn
-  xs'  <- mapM (rewrite m) xs
+-- 'PolyDoBlock' / 'PolyEval' the pass has to synthesise, and the pool the
+-- expression is generated into, which is the pool any adapter closure
+-- belongs to.
+rewrite :: Lang -> Int -> PolyExpr -> MorlocMonad PolyExpr
+rewrite lang m (PolyApp fn xs) = do
+  fn'  <- rewrite lang m fn
+  xs'  <- mapM (rewrite lang m) xs
   -- A closure passed directly to a foreign source call is invoked as
   -- @f(x)@ by the source implementation, which discards the thunk, so its
   -- effect must be forced eagerly here (the 'CallbackReturn' boundary).
   -- Every other consumer -- a local 'LocalCallP', an export, a wire
   -- crossing -- forces the closure's result at its own consumption site,
   -- so intra-pool closures are left as thunks.
-  let xs'' = if isSrcCallHead fn' then map maybeForceCallbackArg xs' else xs'
-  maybeSuspendRemoteReceive <$> maybeSuspendSourceCall fn' xs''
-rewrite _ (PolyManifold l m' f k e) = do
-  e' <- rewrite m' e
+  xs'' <- if isSrcCallHead fn' then mapM maybeForceCallbackArg xs' else return xs'
+  maybeSuspendRemoteReceive <$> maybeSuspendSourceCall lang fn' xs''
+rewrite _ _ (PolyManifold l m' f k e) = do
+  e' <- rewrite l m' e
   return $ PolyManifold l m' f k e'
-rewrite m (PolyRemoteInterface l ti is rf e) = do
-  e' <- rewrite m e
+rewrite lang m (PolyRemoteInterface l ti is rf e) = do
+  e' <- rewrite lang m e
   return $ PolyRemoteInterface l ti is rf (forceCalleeBody e')
-rewrite m (PolyLet i e1 e2)     = PolyLet i <$> rewrite m e1 <*> rewrite m e2
-rewrite m (PolyReturn e)        = PolyReturn <$> rewrite m e
-rewrite m (PolyCacheBody l m' as e) = PolyCacheBody l m' as <$> rewrite m e
-rewrite m (PolyDebugWrap m' as e)   = PolyDebugWrap m' as <$> rewrite m e
-rewrite m (PolyDoBlock t e)     = PolyDoBlock t <$> rewrite m e
-rewrite m (PolyEval t e) = do
-  e' <- rewrite m e
+rewrite lang m (PolyLet i e1 e2)     = PolyLet i <$> rewrite lang m e1 <*> rewrite lang m e2
+rewrite lang m (PolyReturn e)        = PolyReturn <$> rewrite lang m e
+rewrite lang m (PolyCacheBody l m' as e) = PolyCacheBody l m' as <$> rewrite lang m e
+rewrite lang m (PolyDebugWrap m' as e)   = PolyDebugWrap m' as <$> rewrite lang m e
+rewrite lang m (PolyDoBlock t e)     = PolyDoBlock t <$> rewrite lang m e
+rewrite lang m (PolyEval t e) = do
+  e' <- rewrite lang m e
   return $ cancelPolyEval t e'
-rewrite m (PolyCoerce c t e)    = PolyCoerce c t <$> rewrite m e
-rewrite m (PolyIf c t' e) = PolyIf <$> rewrite m c <*> rewrite m t' <*> rewrite m e
+rewrite lang m (PolyCoerce c t e)    = PolyCoerce c t <$> rewrite lang m e
+rewrite lang m (PolyIf c t' e) = PolyIf <$> rewrite lang m c <*> rewrite lang m t' <*> rewrite lang m e
 -- Force the loop's base leaves so their <IO> is discharged before the
 -- serialize sink / export boundary (the continue leaves are control flow and
 -- are left unforced by 'forceReturnPosition's loop case).
-rewrite m (PolyLoop t ids e) = forceReturnPosition m . PolyLoop t ids <$> rewrite m e
-rewrite m (PolyLoopContinue es) = PolyLoopContinue <$> mapM (rewrite m) es
-rewrite m (PolyList v ts xs)  = PolyList v ts <$> mapM (rewrite m) xs
-rewrite m (PolyTuple v xs)    =
-  PolyTuple v <$> mapM (\(t,x) -> (,) t <$> rewrite m x) xs
-rewrite m (PolyRecord o v ps rs) =
+rewrite lang m (PolyLoop t ids e) = forceReturnPosition m . PolyLoop t ids <$> rewrite lang m e
+rewrite lang m (PolyLoopContinue es) = PolyLoopContinue <$> mapM (rewrite lang m) es
+rewrite lang m (PolyList v ts xs)  = PolyList v ts <$> mapM (rewrite lang m) xs
+rewrite lang m (PolyTuple v xs)    =
+  PolyTuple v <$> mapM (\(t,x) -> (,) t <$> rewrite lang m x) xs
+rewrite lang m (PolyRecord o v ps rs) =
   PolyRecord o v ps <$>
-    mapM (\(k,(t,x)) -> (,) k . (,) t <$> rewrite m x) rs
-rewrite m (PolyIntrinsic t intr xs) =
-  PolyIntrinsic t intr <$> mapM (rewrite m) xs
-rewrite m (PolyVariant t n i xs) = PolyVariant t n i <$> mapM (rewrite m) xs
-rewrite _ leaf = return leaf
+    mapM (\(k,(t,x)) -> (,) k . (,) t <$> rewrite lang m x) rs
+rewrite lang m (PolyIntrinsic t intr xs) =
+  PolyIntrinsic t intr <$> mapM (rewrite lang m) xs
+rewrite lang m (PolyVariant t n i xs) = PolyVariant t n i <$> mapM (rewrite lang m) xs
+rewrite _ _ leaf = return leaf
 
 -- | If a 'PolyApp' of a source call has an application-result type
 -- carrying an outer 'EffectT', suspend the application in 'PolyDoBlock'
@@ -323,20 +351,24 @@ rewrite _ leaf = return leaf
 -- and the suspension captures the result. An argument that is not already
 -- a variable or a literal is bound outside the suspension, so running the
 -- suspension twice runs the host call twice and nothing else.
-maybeSuspendSourceCall :: PolyExpr -> [PolyExpr] -> MorlocMonad PolyExpr
-maybeSuspendSourceCall fn@(PolyExe (Idx gidx exeT0) (SrcCallP src)) xs = do
+maybeSuspendSourceCall :: Lang -> PolyExpr -> [PolyExpr] -> MorlocMonad PolyExpr
+maybeSuspendSourceCall lang fn@(PolyExe (Idx gidx exeT0) (SrcCallP src)) xs = do
   declared <- declaredResultIsSuspension gidx src (length xs)
   -- The row may be spelled through an alias (@type IOInt = <IO> Int@).
   scope <- MM.getGeneralScope gidx
   let exeT = either (const exeT0) unresolvedType2type (TE.evaluateType scope (type2typeu exeT0))
   case appReturn exeT (length xs) of
     Just (EffectT effs ret) | declared -> do
-      let fn' = PolyExe (Idx gidx (peelReturn exeT)) (SrcCallP src)
+      let fn' = PolyExe (Idx gidx (hostResultType (peelReturn exeT))) (SrcCallP src)
           argTypes = case exeT of
             FunT ins _ -> map Just ins
             _ -> repeat Nothing
       (binds, xs') <- unzip <$> zipWithM bindArg argTypes xs
-      let suspended = PolyDoBlock (Idx gidx (EffectT effs ret)) (PolyApp fn' xs')
+      -- The host's value is adapted to morloc's calling convention before
+      -- anything sees it ('lazyAdaptValue').
+      adapted <- maybe (PolyApp fn' xs') snd
+        <$> lazyAdaptHostValue lang gidx ret (PolyApp fn' xs')
+      let suspended = PolyDoBlock (Idx gidx (EffectT effs ret)) adapted
       return $ foldr (\(i, e) body -> PolyLet i e body) suspended (concat binds)
     _ -> return (PolyApp fn xs)
   where
@@ -346,16 +378,9 @@ maybeSuspendSourceCall fn@(PolyExe (Idx gidx exeT0) (SrcCallP src)) xs = do
       -- A callback's result was forced for the host ('maybeForceCallbackArg'),
       -- so the value bound here has the peeled function type.
       let t = case mt of
-            Just ty -> Idx gidx (peelCallbackResult ty)
+            Just ty -> Idx gidx (eagerType ty)
             Nothing -> Idx gidx (maybe (VarT (TV "Unit")) id (polyOuterType x))
       return ([(i, x)], PolyLetVar t i)
-
-    -- Mirrors 'maybeForceCallbackArg', which descends into lists, tuples and
-    -- records of callbacks.
-    peelCallbackResult (FunT ins (EffectT _ r)) = FunT ins r
-    peelCallbackResult (AppT c ts) = AppT c (map peelCallbackResult ts)
-    peelCallbackResult (NamT o v ps rs) = NamT o v ps [(k, peelCallbackResult ft) | (k, ft) <- rs]
-    peelCallbackResult ty = ty
 
     isAtom (PolyBndVar _ _) = True
     isAtom (PolyLetVar _ _) = True
@@ -375,7 +400,167 @@ maybeSuspendSourceCall fn@(PolyExe (Idx gidx exeT0) (SrcCallP src)) xs = do
     peelReturn (FunT ins (EffectT _ ret)) = FunT ins ret
     peelReturn (EffectT _ ret)            = ret
     peelReturn t                          = t
-maybeSuspendSourceCall fn xs = return (PolyApp fn xs)
+
+    -- What the host actually hands back, at every depth.
+    hostResultType = eagerType
+maybeSuspendSourceCall _ fn xs = return (PolyApp fn xs)
+
+-- | The other direction of the same boundary: a host that receives a
+-- morloc callback may call it with a function value of its own choosing,
+-- so a function-typed PARAMETER of such a callback arrives in the host's
+-- eager convention. Its declared type is peeled to what the host actually
+-- passes, and the body sees the value through @lazy[[ ]]@, so every use
+-- inside the callback is an ordinary morloc function value again.
+adaptCallbackParams :: Lang -> Int -> PolyExpr -> MorlocMonad PolyExpr
+adaptCallbackParams lang m (PolyManifold l mi (ManifoldPart ctx bnd) k body) = do
+  (bnd', body') <- foldM adaptOne (bnd, body) bnd
+  return (PolyManifold l mi (ManifoldPart ctx bnd') k body')
+  where
+    adaptOne (bs, b) (Arg i (Just t)) = do
+      i' <- MM.getCounter
+      -- The adapter decides the host's spelling of the type and hands it
+      -- back, so the parameter slot and the value cannot disagree.
+      adapted <- lazyAdaptValue lang m t (PolyBndVar (C (Idx m (eagerType t))) i)
+      case adapted of
+        Nothing -> return (bs, b)
+        Just (hostT, wrapper) -> do
+          MM.modify $ \st -> st {stateArgTypes =
+            Map.insert i (Idx m hostT) (Map.insert i' (Idx m t) (stateArgTypes st))}
+          let bs' = [if j == i then Arg j (Just hostT) else a | a@(Arg j _) <- bs]
+          return (bs', PolyLet i' wrapper (substBndVar i i' t b))
+    adaptOne acc _ = return acc
+adaptCallbackParams _ _ e = return e
+
+-- | Rebind every reference to variable @i@ so it names @i'@ instead. A
+-- variable is referenced in two ways -- as a 'PolyBndVar' node, and as an
+-- index in an enclosed manifold's captured (context) arguments -- and both
+-- must move, or a closure below would still capture the unadapted value.
+-- Indices are minted from one counter and never reused, so no binder below
+-- can shadow @i@ and the walk needs no scope.
+substBndVar :: Int -> Int -> Type -> PolyExpr -> PolyExpr
+substBndVar i i' t = go
+  where
+    go (PolyBndVar (C (Idx gi _)) j) | j == i = PolyLetVar (Idx gi t) i'
+    go (PolyBndVar _ j) | j == i = PolyLetVar (Idx i' t) i'
+    go (PolyManifold l m f k e) = PolyManifold l m (form f) k (go e)
+    go (PolyExe ti (LocalCallP j)) | j == i = PolyExe ti (LocalCallP i')
+    go (PolyRemoteInterface l ti is rf e) =
+      PolyRemoteInterface l ti (map idx is) rf (go e)
+    go (PolyLet j a b) = PolyLet j (go a) (go b)
+    go (PolyReturn e) = PolyReturn (go e)
+    go (PolyApp h xs) = PolyApp (go h) (map go xs)
+    go (PolyCacheBody lbl m as e) = PolyCacheBody lbl m as (go e)
+    go (PolyDebugWrap m as e) = PolyDebugWrap m as (go e)
+    go (PolyList v ts xs) = PolyList v ts (map go xs)
+    go (PolyTuple v xs) = PolyTuple v [(ty, go x) | (ty, x) <- xs]
+    go (PolyRecord o v ps rs) = PolyRecord o v ps [(key, (ty, go x)) | (key, (ty, x)) <- rs]
+    go (PolyDoBlock ty e) = PolyDoBlock ty (go e)
+    go (PolyEval ty e) = PolyEval ty (go e)
+    go (PolyCoerce co ty e) = PolyCoerce co ty (go e)
+    go (PolyIf a b c) = PolyIf (go a) (go b) (go c)
+    go (PolyLoop ty ids e) = PolyLoop ty (map idx ids) (go e)
+    go (PolyLoopContinue xs) = PolyLoopContinue (map go xs)
+    go (PolyIntrinsic ty intr xs) = PolyIntrinsic ty intr (map go xs)
+    go (PolyVariant ty n j xs) = PolyVariant ty n j (map go xs)
+    go leaf = leaf
+
+    idx j = if j == i then i' else j
+    arg (Arg j x) = Arg (idx j) x
+    -- A captured argument and a saturated call's arguments are references;
+    -- a bound argument is a binder and keeps its own index.
+    form (ManifoldFull xs) = ManifoldFull (map arg xs)
+    form (ManifoldPass ys) = ManifoldPass ys
+    form (ManifoldPart ctx bnd) = ManifoldPart (map arg ctx) bnd
+
+-- | @lazy[[ ]]@, the inverse of the host adapter @eager[[ ]]@ (the law,
+-- rule 8). A host has no thunks: it returns a callable that yields its
+-- result, while a morloc function value of type @A -> \<E\> C@ returns a
+-- suspension. So a function value received FROM a host is wrapped in a
+-- closure of morloc's own making, @\a -> do (g a)@, before anything sees
+-- it: applying the wrapper builds the suspension the type promises, and
+-- the wrapper is an ordinary manifold, so it has an identity like any
+-- other closure rather than being an opaque foreign callable.
+--
+-- Only a function whose result carries an effect needs adapting: at
+-- @A -> C@ the two conventions already agree, and @eager[[ ]]@ is the
+-- identity there. A value with no function in it is returned unchanged.
+lazyAdaptValue :: Lang -> Int -> Type -> PolyExpr -> MorlocMonad (Maybe (Type, PolyExpr))
+lazyAdaptValue = adaptValue Inbound
+
+-- | The inbound adapter for a value the HOST created (a sourced call's
+-- result). The wrapper is recorded so a later attempt to send it across a
+-- pool boundary is refused: the host's callable has no identity to send,
+-- and re-running the call that produced it would run its effects again.
+lazyAdaptHostValue :: Lang -> Int -> Type -> PolyExpr -> MorlocMonad (Maybe (Type, PolyExpr))
+lazyAdaptHostValue lang gidx t e = do
+  adapted <- adaptValue Inbound lang gidx t e
+  case adapted of
+    Just (_, PolyLet _ _ (PolyManifold _ m _ _ _)) ->
+      MM.modify $ \st -> st {stateHostOriginClosures = Set.insert m (stateHostOriginClosures st)}
+    _ -> return ()
+  return adapted
+
+-- | The other direction: a morloc function value handed to a host. The
+-- host calls it and takes the result, so the wrapper runs the suspension
+-- ("a morloc function handed to a host at an @A -> \<E\> C@ slot is passed
+-- as @\a -> force (g a)@", the law, rule 8). Used for a value that is not
+-- a lambda whose return could be forced in place -- a variable, say -- and
+-- for the arguments an inbound wrapper hands on to the host.
+eagerAdaptValue :: Lang -> Int -> Type -> PolyExpr -> MorlocMonad (Maybe (Type, PolyExpr))
+eagerAdaptValue = adaptValue Outbound
+
+data AdaptDir = Inbound | Outbound
+
+-- | Adapt one function value across the morloc/host boundary.
+--
+-- An adapter is CONTRAVARIANT: it adapts the result in its own direction
+-- and the arguments in the opposite one, because the arguments travel the
+-- other way. An inbound wrapper is called by morloc with morloc values and
+-- calls the host, so its arguments go out; an outbound wrapper is called by
+-- the host with host values and calls morloc, so its arguments come in.
+-- The two directions are therefore mutually recursive, and the recursion
+-- terminates because each step strips one arrow.
+--
+-- Only a function whose result carries an effect needs adapting: at
+-- @A -> C@ the two conventions already agree.
+adaptValue :: AdaptDir -> Lang -> Int -> Type -> PolyExpr -> MorlocMonad (Maybe (Type, PolyExpr))
+adaptValue dir lang gidx t e = case t of
+  FunT as (EffectT effs c) -> do
+    g <- MM.getCounter
+    ids <- mapM (const MM.getCounter) as
+    m <- MM.freshManifoldIndex gidx
+    let calleeType = case dir of
+          Inbound -> eagerType t
+          Outbound -> t
+        boundArgs = [Arg i (Just (slotType a)) | (i, a) <- zip ids as]
+        -- the argument slots carry the convention of the caller: morloc's
+        -- for an inbound wrapper, the host's for an outbound one
+        slotType a = case dir of
+          Inbound -> a
+          Outbound -> eagerType a
+    -- each argument crosses the boundary the other way
+    args <- mapM (adaptArg dir) (zip ids as)
+    let callee = PolyExe (Idx gidx calleeType) (LocalCallP g)
+        applied = PolyApp callee args
+        body = case dir of
+          Inbound -> PolyDoBlock (Idx gidx (EffectT effs c)) applied
+          Outbound -> PolyEval (Idx gidx c) applied
+        wrapper = PolyManifold lang m (ManifoldPart [Arg g None] boundArgs) Transparent (PolyReturn body)
+    MM.modify $ \st -> st {stateArgTypes =
+      foldr (\(i, a) -> Map.insert i (Idx gidx a)) (stateArgTypes st)
+            ((g, calleeType) : [(i, slotType a) | (i, a) <- zip ids as])}
+    return (Just (calleeType, PolyLet g e wrapper))
+  _ -> return Nothing
+  where
+    flipDir Inbound = Outbound
+    flipDir Outbound = Inbound
+    adaptArg d (i, a) = do
+      let callerType = case d of
+            Inbound -> a
+            Outbound -> eagerType a
+          ref = PolyBndVar (C (Idx gidx callerType)) i
+      adapted <- adaptValue (flipDir d) lang gidx a ref
+      return (maybe ref snd adapted)
 
 -- | Whether the source function's own signature declares its result, after
 -- the given number of arguments, as a suspension. The host adapter applies
@@ -463,9 +648,9 @@ cancelPolyEval t e =
 -- return, a wire crossing), and leaving the closure body a thunk keeps its
 -- rendered type consistent between its definition and its use sites (a
 -- forced body renders @T@ but an argument slot is typed @<E> T@).
-maybeForceCallbackArg :: PolyExpr -> PolyExpr
-maybeForceCallbackArg e@(PolyManifold _ m form _ _)
-  | isLambdaForm form = forceReturnPosition m e
+maybeForceCallbackArg :: PolyExpr -> MorlocMonad PolyExpr
+maybeForceCallbackArg e@(PolyManifold lang m form _ _)
+  | isLambdaForm form = adaptCallbackParams lang m (forceReturnPosition m e)
 -- A callback nested inside a structured argument (a list/tuple/record of
 -- closures passed to the source call) is invoked exactly the same way by the
 -- foreign code, so descend into the structure and force those too. The
@@ -475,13 +660,30 @@ maybeForceCallbackArg e@(PolyManifold _ m form _ _)
 -- Non-closure elements fall through unchanged (both the value and the type
 -- peel are no-ops on a non-effectful element).
 maybeForceCallbackArg (PolyList v ts es) =
-  PolyList v (map peelCallbackType ts) (map maybeForceCallbackArg es)
+  PolyList v (map peelCallbackType ts) <$> mapM maybeForceCallbackArg es
 maybeForceCallbackArg (PolyTuple v xs) =
-  PolyTuple v [(peelCallbackType t, maybeForceCallbackArg x) | (t, x) <- xs]
+  PolyTuple v <$> mapM (\(t, x) -> (,) (peelCallbackType t) <$> maybeForceCallbackArg x) xs
 maybeForceCallbackArg (PolyRecord nt v ts fs) =
   PolyRecord nt v (map peelCallbackType ts)
-    [(k, (peelCallbackType t, maybeForceCallbackArg x)) | (k, (t, x)) <- fs]
-maybeForceCallbackArg e = e
+    <$> mapM (\(k, (t, x)) -> (,) k . (,) (peelCallbackType t) <$> maybeForceCallbackArg x) fs
+-- The structure may be built rather than written at the call: a helper
+-- whose parameter two of its callbacks share is inlined as a let around
+-- the structure, and when the helper lands in another pool the let is the
+-- body of a remote call whose result crosses back as data. The callbacks
+-- sit at the bottom either way and are invoked the same way by the host,
+-- so descend to them. The type the crossing carries is peeled in step; a
+-- record named rather than spelled out is expanded first, since its
+-- declaration is what the wire schema would otherwise be read from.
+maybeForceCallbackArg (PolyLet i v e) = PolyLet i v <$> maybeForceCallbackArg e
+maybeForceCallbackArg (PolyReturn e) = PolyReturn <$> maybeForceCallbackArg e
+maybeForceCallbackArg (PolyManifold l m form k e) =
+  PolyManifold l m form k <$> maybeForceCallbackArg e
+maybeForceCallbackArg (PolyApp (PolyRemoteInterface l (Idx i t) ids rf inner) xs) = do
+  scope <- MM.getGeneralScope i
+  let t' = either (const t) unresolvedType2type (TE.evaluateType scope (type2typeu t))
+  inner' <- maybeForceCallbackArg inner
+  return $ PolyApp (PolyRemoteInterface l (Idx i (eagerType t')) ids rf inner') xs
+maybeForceCallbackArg e = return e
 
 -- | Peel one 'EffectT' layer off the RETURN of a function-typed element, so
 -- @Int -> \<E\> ()@ becomes @Int -> ()@. Mirrors the value-level force of a
@@ -489,10 +691,28 @@ maybeForceCallbackArg e = e
 -- result is run, the slot that holds it must carry the peeled type. A no-op
 -- on any non-effectful or non-function type.
 peelCallbackType :: Indexed Type -> Indexed Type
-peelCallbackType (Idx i t) = Idx i (peel t)
+peelCallbackType (Idx i t) = Idx i (eagerType t)
+
+-- | @eager[[ ]]@ (the law, rule 8): the type a value has on the host's
+-- side of the boundary. A host has no thunks, so a function it holds
+-- returns its result rather than a suspension of it, and that holds at
+-- every depth -- a function's arguments and result, a container's
+-- elements, a record's fields. A suspension itself is unchanged: it
+-- crosses to a host as the callable of no arguments it already is.
+--
+-- This is the ONLY definition of the convention. Every site that records
+-- the type of a value being handed to, or received from, a host reads it
+-- here; computing it again per site is how the type and the value came to
+-- disagree (a one-level copy left an inner parameter lazy while the value
+-- was adapted all the way down).
+eagerType :: Type -> Type
+eagerType (FunT as r) = FunT (map eagerType as) (eagerType (stripRoot r))
   where
-    peel (FunT ins (EffectT _ inner)) = FunT ins inner
-    peel other = other
+    stripRoot (EffectT _ c) = c
+    stripRoot c = c
+eagerType (AppT c ts) = AppT c (map eagerType ts)
+eagerType (NamT o v ps rs) = NamT o v ps [(k, eagerType t) | (k, t) <- rs]
+eagerType t = t
 
 -- | A lambda-shaped manifold form (an unapplied or partially-applied
 -- function value), as opposed to a saturated 'ManifoldFull' call.

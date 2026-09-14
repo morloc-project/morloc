@@ -48,6 +48,7 @@ ldFieldAccess: dot
 
 # Serialize/deserialize
 ldSerializeFn: "morloc.put_value"
+ldTableImportFn: "mlc_table_import"
 ldDeserializeFn: "morloc.get_value"
 ldReleasePacketFn: "morloc.release_packet_shm"
 ldIntrinsicPrefix: "morloc."

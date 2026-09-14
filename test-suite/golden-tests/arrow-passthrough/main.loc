@@ -1,0 +1,32 @@
+module main (same, sameTwice, renamed, sliced)
+
+import root
+import root-py
+import root-cpp
+import table-py
+import table-cpp
+
+-- A table returned unchanged by a pool is passed through by reference; a
+-- table returned with any change -- here a renamed column and a row slice
+-- over the very same buffers -- must arrive changed. The Makefile runs every
+-- command with and without MORLOC_ARROW_NO_BORROW=1 and the outputs must be
+-- identical, so the pass-through is invisible except in cost.
+
+source Py from "src.py" ("mk", "describe", "idPy")
+source Cpp from "src.hpp" ("idCpp", "renameFirst", "dropFirstRow")
+
+mk :: Int -> Table
+describe :: Table -> Str
+idPy :: Table -> Table
+idCpp :: Table -> Table
+renameFirst :: Table -> Table
+dropFirstRow :: Table -> Table
+
+same :: Int -> Str
+same n = describe (idCpp (mk n))
+sameTwice :: Int -> Str
+sameTwice n = describe (idCpp (idPy (idCpp (mk n))))
+renamed :: Int -> Str
+renamed n = describe (renameFirst (mk n))
+sliced :: Int -> Str
+sliced n = describe (dropFirstRow (mk n))

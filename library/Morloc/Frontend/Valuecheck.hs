@@ -315,6 +315,10 @@ checkPair i (NamP g1 ((k, x) : rs1)) (NamP g2 rs2) =
   case lookup k rs2 of
     (Just y) -> checkPair i x y >> checkPair i (NamP g1 rs1) (NamP g2 rs2)
     Nothing -> error "Unreachable if typechecker has passed"
+-- The same intrinsic over pairwise-equivalent arguments
+checkPair i e1@(IntrinsicP _ a xs) e2@(IntrinsicP _ b ys)
+  | a == b && length xs == length ys = mapM_ (uncurry (checkPair i)) (zip xs ys)
+  | otherwise = valueError i e1 e2 "Non-equivalent intrinsics"
 -- Primitives must be equal
 checkPair i e1@(LitP _ x) e2@(LitP _ y)
   | x == y = return ()

@@ -1,0 +1,73 @@
+module main
+  ( py_py, py_cpp, py_r, py_rust
+  , cpp_py, cpp_cpp, cpp_r, cpp_rust
+  , r_py, r_cpp, r_r, r_rust
+  , rust_py, rust_cpp, rust_r, rust_rust
+  )
+
+import root
+import root-py
+import root-cpp
+import root-r
+import root-rust
+
+-- Cross-language Arrow conformance matrix. Each language builds the same
+-- canonical table (every supported column type, a null in every column,
+-- 64-bit extremes, empty string next to null, non-ASCII text, binary,
+-- temporal, and a list column) and each language describes whatever it
+-- receives as the same ASCII text. Every (writer, reader) pair and every
+-- fixture case (full, one, empty, allnull) must print the identical
+-- description, so the expected output is one text repeated.
+
+type ArrowTable
+type Py => ArrowTable = "pyarrow.RecordBatch"
+type Cpp => ArrowTable = "mlc::ArrowTable"
+type R => ArrowTable = "arrow::RecordBatch"
+type Rust => ArrowTable = "rustmorloc::arrow_array::RecordBatch"
+
+source Py from "src.py" ("mk" as mkPy, "describe" as descPy)
+source Cpp from "src.hpp" ("conformance::mk" as mkCpp, "conformance::describe" as descCpp)
+source R from "src.R" ("mk" as mkR, "describe" as descR)
+source Rust from "src.rs" ("mk" as mkRust, "describe" as descRust)
+
+mkPy :: Str -> ArrowTable
+mkCpp :: Str -> ArrowTable
+mkR :: Str -> ArrowTable
+mkRust :: Str -> ArrowTable
+descPy :: ArrowTable -> Str
+descCpp :: ArrowTable -> Str
+descR :: ArrowTable -> Str
+descRust :: ArrowTable -> Str
+
+py_py :: Str -> Str
+py_py c = descPy (mkPy c)
+py_cpp :: Str -> Str
+py_cpp c = descCpp (mkPy c)
+py_r :: Str -> Str
+py_r c = descR (mkPy c)
+py_rust :: Str -> Str
+py_rust c = descRust (mkPy c)
+cpp_py :: Str -> Str
+cpp_py c = descPy (mkCpp c)
+cpp_cpp :: Str -> Str
+cpp_cpp c = descCpp (mkCpp c)
+cpp_r :: Str -> Str
+cpp_r c = descR (mkCpp c)
+cpp_rust :: Str -> Str
+cpp_rust c = descRust (mkCpp c)
+r_py :: Str -> Str
+r_py c = descPy (mkR c)
+r_cpp :: Str -> Str
+r_cpp c = descCpp (mkR c)
+r_r :: Str -> Str
+r_r c = descR (mkR c)
+r_rust :: Str -> Str
+r_rust c = descRust (mkR c)
+rust_py :: Str -> Str
+rust_py c = descPy (mkRust c)
+rust_cpp :: Str -> Str
+rust_cpp c = descCpp (mkRust c)
+rust_r :: Str -> Str
+rust_r c = descR (mkRust c)
+rust_rust :: Str -> Str
+rust_rust c = descRust (mkRust c)

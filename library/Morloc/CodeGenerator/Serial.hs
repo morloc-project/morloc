@@ -28,9 +28,9 @@ module Morloc.CodeGenerator.Serial
   , serialAstHasString
   , chooseSerializationCycle
   , isSerializable
-  , hasArrowHint
   , prettySerialOne
   , serialAstToType
+  , serialAstToNativeType
   , shallowType
   , serialAstToMsgpackSchema
   , rerootUnder
@@ -74,9 +74,20 @@ data AliasShape
 -- independent: macro indices @$N@ count TYPE args only, so the dim
 -- slot here doesn't shift @$N@ positions in the per-language form.
 serialAstToTypeWith :: ([SerialAST] -> SerialAST -> TypeF) -> SerialAST -> TypeF
-serialAstToTypeWith onClosure = go
+serialAstToTypeWith = serialAstToTypeWith' (\_ inner -> inner)
+
+-- | 'serialAstToTypeWith' with control over a custom-packed node as well. The
+-- packer handler is given the packer and the type of the form BENEATH it, and
+-- decides which of the two a caller means: the wire shape the value travels as,
+-- or the native type the pool holds.
+serialAstToTypeWith' ::
+  (TypePacker -> TypeF -> TypeF) ->
+  ([SerialAST] -> SerialAST -> TypeF) ->
+  SerialAST ->
+  TypeF
+serialAstToTypeWith' onPack onClosure = go
   where
-    go (SerialPack _ (_, s)) = go s
+    go (SerialPack _ (p, s)) = onPack p (go s)
     go (SerialList v (Just d) s) = AppF (VarF v) [d, go s]
     go (SerialList v Nothing s) = AppF (VarF v) [go s]
     go (SerialTuple v ss) = AppF (VarF v) (map go ss)
@@ -111,6 +122,20 @@ serialAstToTypeWith onClosure = go
 serialAstToType :: SerialAST -> TypeF
 serialAstToType =
   serialAstToTypeWith (\ins out -> FunF (map serialAstToType ins) (serialAstToType out))
+
+{- | The NATIVE type a wire form denotes: at a custom-packed node this is the
+type the pool actually holds, where 'serialAstToType' gives the shape the value
+travels as. The two differ exactly at a 'SerialPack', and confusing them is how
+one side of a boundary comes to name a type the other side does not: a closure
+whose argument is custom-packed is @Wrapped -> Int@ natively and @Int -> Int@ on
+the wire, and code that must AGREE with a native declaration (a record field's
+type, a manifold's signature) has to ask this question rather than the other.
+-}
+serialAstToNativeType :: SerialAST -> TypeF
+serialAstToNativeType =
+  serialAstToTypeWith'
+    (\p _ -> typePackerPacked p)
+    (\ins out -> FunF (map serialAstToNativeType ins) (serialAstToNativeType out))
 
 -- | Like 'serialAstToType', but a closure is rendered as the given wire-tuple
 -- leaf type instead of its native callable type ('FunF'). A defunctionalized
@@ -745,7 +770,7 @@ makeSerialAST m lang t0 = do
         withAncestorVar anc0 action = descend ft anc0 >>= action
 
         dispatchVarF
-          | finalType == BT.tableU = return $ SerialObject NamTable v [] []
+          | BT.isTableU finalType = return $ SerialObject NamTable v [] []
           | finalType == BT.unitU = return $ SerialNull v
           | finalType == BT.boolU = return $ SerialBool v
           | finalType == BT.strU = return $ SerialString v
@@ -974,12 +999,12 @@ makeSerialAST m lang t0 = do
           -- (or bare @T@ for empty / polymorphic-row); no concrete-type hint
           -- is needed because @T@ is itself the dispatch token to the Arrow
           -- C Data Interface path.
-          | generalTypeName == BT.table = case runtimeTs of
+          | BT.isTableVar generalTypeName = case runtimeTs of
               [NamF _ _ _ recRs] -> do
                 colASTs <- mapM (\(k, tf) -> (,) k <$> makeSerialAST' gscope typepackers anc tf) recRs
-                return $ SerialObject NamTable (FV BT.table (CV "")) [] colASTs
+                return $ SerialObject NamTable fv [] colASTs
               _ ->
-                return $ SerialObject NamTable (FV BT.table (CV "")) [] []
+                return $ SerialObject NamTable fv [] []
           | otherwise = case aliasShape of
               -- Outer alias body is list-shaped (`type Deque a = List a`,
               -- `type Vector n a = List a`, user-defined `type MyArr a = [a]`).
@@ -1497,15 +1522,6 @@ reduceNat (NatDivU a b) = do
   y <- reduceNat b
   if y == 0 then Nothing else Just (x `div` y)
 reduceNat _ = Nothing
-
--- | True iff this SerialAST root is a Table (Arrow IPC primitive).
--- Used at codegen sites that need to route through the Arrow C Data
--- Interface rather than the general msgpack path. Identity is the
--- structural NamTable tag; the old @<arrow>@ concrete-type hint has
--- been retired (the wire-form @T@ marker now carries the dispatch).
-hasArrowHint :: SerialAST -> Bool
-hasArrowHint (SerialObject NamTable _ _ _) = True
-hasArrowHint _ = False
 
 {- | Given a list of possible ways to (de)serialize data between two languages,
 choose one (or none if the list is empty). Currently I just take the first

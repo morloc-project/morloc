@@ -248,7 +248,19 @@ realizeWithRegistry registry s0 = do
       -- they are required for resolving the application language
       let rstat' = rstat {rLangs = [], rApplied = xs}
 
-      f' <- scoreAnnoS rstat' f
+      f0 <- scoreAnnoS rstat' f
+
+      -- A head with no language of its own is a function-typed parameter: the
+      -- caller supplies its value, so it lives wherever the expression holding
+      -- it lives. Clearing the ambient languages to derive the head's own
+      -- language leaves such a head with no candidate at all, and the
+      -- application's language is then decided entirely by its arguments --
+      -- which is how a call on a parameter gets placed in another pool and
+      -- drags the function value across the boundary with it.
+      f' <-
+        if null (scoresOf f0)
+          then scoreAnnoS (rstat {rApplied = xs}) f
+          else return f0
 
       -- best scores for each language for f
       let scores = scoresOf f'
@@ -256,7 +268,7 @@ realizeWithRegistry registry s0 = do
 
       xs' <- mapM (scoreAnnoS rstat'') xs
 
-      let pairss = [minPairs pairs | AnnoS _ (Idx _ pairs) _ <- xs']
+      let pairss = [(t, minPairs pairs) | AnnoS (Idx _ t) (Idx _ pairs) _ <- xs']
       let best = scoreApp scores pairss
 
       return (AppS f' xs', Idx i best)
@@ -291,8 +303,8 @@ realizeWithRegistry registry s0 = do
       e2' <- scoreAnnoS rstat' e2
       -- Score the chain like an application: the binding's RHS and the body
       -- both contribute, with cross-language penalties applied per-lang.
-      let best = scoreApp [] [ minPairs (scoresOf e1')
-                             , minPairs (scoresOf e2')
+      let best = scoreApp [] [ (annoType e1', minPairs (scoresOf e1'))
+                             , (annoType e2', minPairs (scoresOf e2'))
                              ]
       return (LetS v e1' e2', Idx i best)
     scoreExpr rstat (LetBndS v, i) =
@@ -311,9 +323,9 @@ realizeWithRegistry registry s0 = do
       -- returns a parameter, score 0 in every language) mask the real cost of a
       -- heavy branch (e.g. a cross-pool recursive loop body), collapsing the
       -- manifold's language choice to an arbitrary tiebreak. Mirrors 'LetS'.
-      let best = scoreApp [] [ minPairs (scoresOf c')
-                             , minPairs (scoresOf t')
-                             , minPairs (scoresOf e')
+      let best = scoreApp [] [ (annoType c', minPairs (scoresOf c'))
+                             , (annoType t', minPairs (scoresOf t'))
+                             , (annoType e', minPairs (scoresOf e'))
                              ]
       return (IfS c' t' e', Idx i best)
     scoreExpr rstat (DoBlockS x, i) = do
@@ -330,7 +342,7 @@ realizeWithRegistry registry s0 = do
       let Idx _ langScores = zipLang i rstat
           best = case xs' of
             [] -> langScores
-            _ -> scoreApp [] [minPairs (scoresOf x') | x' <- xs']
+            _ -> scoreApp [] [(annoType x', minPairs (scoresOf x')) | x' <- xs']
       return (IntrinsicS intr xs', Idx i best)
 
     -- calculate the score for an application based on the score of the function
@@ -340,21 +352,23 @@ realizeWithRegistry registry s0 = do
         , Score -- the score of the ith implementation
         )
       ] ->
-      [ [ ( Lang -- the language of the jth implementation of the kth argument
-          , Score -- the score of the jth implementation of the kth argument
-          )
-        ]
+      [ ( Type -- the type of the kth argument, priced by 'crossingPayloadCost'
+        , [ ( Lang -- the language of the jth implementation of the kth argument
+            , Score -- the score of the jth implementation of the kth argument
+            )
+          ]
+        )
       ] ->
       [(Lang, Score)]
     -- if nothing is known, nothing is returned
-    scoreApp [] (concat -> []) = []
+    scoreApp [] (concatMap snd -> []) = []
     -- if none of the arguments are language-specific, the scores are based only
     -- on the functions
-    scoreApp scores (concat -> []) = scores
+    scoreApp scores (concatMap snd -> []) = scores
     -- if the function is not language-specific, calculate the cost of calling
     -- all arguments from each possible language context
     scoreApp [] pairss =
-      let score = [(lang, (0, 0)) | lang <- unique $ map fst (concat pairss)]
+      let score = [(lang, (0, 0)) | lang <- unique $ map fst (concatMap snd pairss)]
        in scoreApp score pairss
     -- if arguments and function have implementations, calculate cost relative to
     -- each function implementation
@@ -363,8 +377,14 @@ realizeWithRegistry registry s0 = do
         , foldl
             addScore
             s1
-            [ minimumDef noScore [addScore s2 (transScore l1 l2) | (l2, s2) <- pairs]
-            | pairs <- pairss
+            [ -- An argument with no candidates carries no language information,
+              -- so it costs nothing and constrains nothing. It is NOT
+              -- unrealizable: the clause above says the same of a head with no
+              -- candidates. Folding in the "no realization" sentinel instead
+              -- would swamp every real cross-language difference, after which
+              -- the enclosing choice is made by rounding error.
+              minimumDef (0, 0) [addScore s2 (crossScore t l1 l2) | (l2, s2) <- pairs]
+            | (t, pairs) <- pairss
             ]
         )
       | (l1, s1) <- scores
@@ -437,8 +457,54 @@ realizeWithRegistry registry s0 = do
     -- The switch component is the pure lexicographic tiebreaker (see 'Score'):
     -- among languages of equal cost it keeps the value in the parent's language,
     -- the boundary-minimizing choice the old backward-only +1 biasedCost made.
+    -- | The general type an annotated expression carries.
+    annoType :: AnnoS (Indexed Type) f c -> Type
+    annoType (AnnoS (Idx _ t) _ _) = t
+
     transScore :: Lang -> Lang -> Score
     transScore l1 l2 = (pairwiseCost l1 l2, if l1 == l2 then 0 else 1)
+
+    -- | What it costs to move a value of this type across a pool boundary,
+    -- added to the cost of the language pair itself. Zero within a pool,
+    -- where nothing is moved.
+    crossScore :: Type -> Lang -> Lang -> Score
+    crossScore t l1 l2
+      | l1 == l2 = transScore l1 l2
+      | otherwise = let (c, sw) = transScore l1 l2 in (c + crossingPayloadCost t, sw)
+
+    -- | THE EXTENSION POINT for pricing a crossing by WHAT is moved rather
+    -- than only by where it is going.
+    --
+    -- It answers zero for every type, which is exactly the historical
+    -- behaviour: a crossing costs what the language pair costs, whether it
+    -- carries a byte or a gigabyte. Every alternative is a research question,
+    -- so the choice is named and given one home rather than being spread
+    -- through the scorer.
+    --
+    -- Three types are mispriced by the flat answer, in rough order of how
+    -- badly:
+    --
+    --   * A FUNCTION value is not moved at all. It is replaced by a proxy
+    --     that calls home on every application, so its real cost is
+    --     (number of applications) x (round trip) -- unbounded, and not
+    --     knowable from the type. Anything finite here understates it.
+    --   * A variable-width aggregate costs its serialized size, which is a
+    --     property of the value rather than of the type. A type-level answer
+    --     can only be a prior on size.
+    --   * A fixed-width primitive is very nearly free, and is the one case
+    --     the flat answer overcharges relative to the others.
+    --
+    -- The smallest useful refinement is a constant: zero for primitives and
+    -- fixed-width containers of them, one for everything else. Richer answers
+    -- (size priors from a type, amortizing a function value over an estimated
+    -- call count, letting a backend declare its own table) all fit here
+    -- without touching the scorer.
+    --
+    -- Any refinement must remain a pure function of the type: this runs before
+    -- values exist. The type given is the general type at the crossing point,
+    -- already monomorphized, so a cost may depend on type parameters.
+    crossingPayloadCost :: Type -> Int
+    crossingPayloadCost _ = 0
 
     cost ::
       Maybe Lang -> -- parent language (if given)
@@ -555,27 +621,33 @@ realizeWithRegistry registry s0 = do
     --   <> indent 2 (vsep [ "*" <+> pretty t <+> ":" <+> pretty y | y@(AnnoS (Idx _ t) _ _, _)  <- xs'])
 
     -- Propagate downwards
+    -- A lambda is a value built where it appears, so it lives in its
+    -- parent's language; only its body chooses, and a call the body makes
+    -- elsewhere is an ordinary crossing there. The scores of a lambda are
+    -- its body's, so the parent's choice already accounts for the body.
     collapseExpr _ l1 (LamS vs x, Idx i ss) = do
-      lang <- chooseLanguage l1 (subtreeHasRec [x]) ss
+      lang <- case l1 of
+        Just _ -> return l1
+        Nothing -> chooseLanguage l1 (subtreeHasRec [x]) ss
       x' <- collapseAnnoS lang x
       return (LamS vs x', Idx i lang)
     collapseExpr _ l1 (AppS f xs, Idx i ss) = do
       lang <- chooseLanguage l1 (subtreeHasRec (f : xs)) ss
       f' <- collapseAnnoS lang f
-      xs' <- mapM (collapseAnnoS lang) xs
+      xs' <- mapM (if isSourceHead f' then collapseCarried lang else collapseAnnoS lang) xs
       return (AppS f' xs', Idx i lang)
     -- Propagate data
     collapseExpr _ l1 (e@(LstS xs), Idx i ss) = do
-      lang <- if isFunctionalData e then return l1 else chooseLanguage l1 (subtreeHasRec xs) ss
-      xs' <- mapM (collapseAnnoS lang) xs
+      lang <- if isFunctionalData e then functionalDataLang i l1 else chooseLanguage l1 (subtreeHasRec xs) ss
+      xs' <- mapM (collapseElement e lang) xs
       return (LstS xs', Idx i lang)
     collapseExpr _ l1 (e@(TupS xs), Idx i ss) = do
-      lang <- if isFunctionalData e then return l1 else chooseLanguage l1 (subtreeHasRec xs) ss
-      xs' <- mapM (collapseAnnoS lang) xs
+      lang <- if isFunctionalData e then functionalDataLang i l1 else chooseLanguage l1 (subtreeHasRec xs) ss
+      xs' <- mapM (collapseElement e lang) xs
       return (TupS xs', Idx i lang)
     collapseExpr _ l1 (e@(NamS rs), Idx i ss) = do
-      lang <- if isFunctionalData e then return l1 else chooseLanguage l1 (subtreeHasRec (map snd rs)) ss
-      xs' <- mapM (collapseAnnoS lang . snd) rs
+      lang <- if isFunctionalData e then functionalDataLang i l1 else chooseLanguage l1 (subtreeHasRec (map snd rs)) ss
+      xs' <- mapM (collapseElement e lang . snd) rs
       return (NamS (zip (map fst rs) xs'), Idx i lang)
     -- collapse leaf expressions
     collapseExpr _ _ (ExeS x@(SrcCall src), Idx i _) = return (ExeS x, Idx i (Just (srcLang src)))
@@ -654,6 +726,53 @@ realizeWithRegistry registry s0 = do
     -- recursive body co-located with its head whenever that is cost-competitive,
     -- WITHOUT hard-pinning: a genuinely cheaper cross-pool body (e.g. cross-pool
     -- mutual recursion whose partner is another language entirely) still wins.
+    -- An element of a container. A container holding function values sits
+    -- in its parent's language, and so does each function value it holds:
+    -- a closure is homed with the container that carries it and reaches
+    -- any other pool from inside its body. Its body is collapsed as usual,
+    -- so a call it makes elsewhere becomes an ordinary crossing there.
+    -- A function value handed straight to a sourced function is carried the
+    -- same way: the host's pool holds the callable it is given.
+    collapseElement ::
+      ExprS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
+      Maybe Lang ->
+      AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
+      MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
+    collapseElement container lang x
+      | isFunctionalData container = collapseCarried lang x
+      | otherwise = collapseAnnoS lang x
+
+    -- A structure holding function values lives in the pool that holds
+    -- it; with no pool around it (the root of a command) there is nowhere
+    -- for the function values to live.
+    functionalDataLang :: Int -> Maybe Lang -> MorlocMonad (Maybe Lang)
+    functionalDataLang _ l@(Just _) = return l
+    functionalDataLang i Nothing =
+      MM.throwSourcedError i
+        "A record, list or tuple holding function values cannot be the result of a command: a function value has no form outside a pool"
+
+    collapseCarried ::
+      Maybe Lang ->
+      AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
+      MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
+    collapseCarried lang x@(AnnoS (Idx _ t) _ _)
+      | isClosureType t = do
+          AnnoS g (Idx i _) e' <- collapseAnnoS lang x
+          return (AnnoS g (Idx i lang) e')
+      | otherwise = collapseAnnoS lang x
+
+    -- The head of an application is a sourced function, reached directly or
+    -- through the term that names it.
+    isSourceHead :: AnnoS (Indexed Type) One (Indexed (Maybe Lang)) -> Bool
+    isSourceHead (AnnoS _ _ (ExeS (SrcCall _))) = True
+    isSourceHead (AnnoS _ _ (VarS _ (One x))) = isSourceHead x
+    isSourceHead _ = False
+
+    isClosureType :: Type -> Bool
+    isClosureType (FunT _ _) = True
+    isClosureType (EffectT _ _) = True
+    isClosureType _ = False
+
     chooseLanguage :: Maybe Lang -> Bool -> [(Lang, Score)] -> MorlocMonad (Maybe Lang)
     chooseLanguage l1 recSpine ss = do
       let recPenalty l2 = case l1 of
@@ -1093,9 +1212,11 @@ renameCallS old new = go
     go (AnnoS g c (CallS v)) | v == old = AnnoS g c (CallS new)
     go (AnnoS g c e)                    = AnnoS g c (mapExprS go e)
 
--- Check if this expression is a data structure that contains
--- a function. If so, then the data structure is must be in the
--- same language as the parent (since functions can't be serialized)
+-- Check if this expression is a data structure that contains a function
+-- value (a suspension among them). If so, the data structure is in the
+-- same language as the parent, and so is each function value it holds
+-- ('collapseElement'): a closure crosses a pool boundary as a value of its
+-- home pool, and that pool is the one the container is built in.
 isFunctionalData :: ExprS (Indexed Type) f a -> Bool
 isFunctionalData (LstS xs) = any isFunctionalDataAnnoS xs
 isFunctionalData (TupS xs) = any isFunctionalDataAnnoS xs
@@ -1107,4 +1228,5 @@ isFunctionalDataAnnoS (AnnoS (Idx _ t) _ e) = handleType t || isFunctionalData e
   where
     handleType :: Type -> Bool
     handleType (FunT _ _) = True
+    handleType (EffectT _ _) = True
     handleType _ = False
