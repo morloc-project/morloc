@@ -1,0 +1,77 @@
+-- Deep values and deep recursion that cross pools. Each language
+-- contributes its own primitives under distinct names, so which pool
+-- realizes a function is decided by which primitives it calls.
+module main
+  ( cppToPy
+  , pyToCpp
+  , pingPong
+  , pingPongTree
+  )
+
+import root-py
+import root-cpp
+
+data Tree = Leaf | Node Int Tree Tree
+
+source Py from "prim.py" ("dec" as decPy, "inc" as incPy, "is_zero" as isZeroPy)
+decPy :: Int -> Int
+incPy :: Int -> Int
+isZeroPy :: Int -> Bool
+
+source Cpp from "prim.hpp" ("dec" as decCpp, "inc" as incCpp, "is_zero" as isZeroCpp)
+decCpp :: Int -> Int
+incCpp :: Int -> Int
+isZeroCpp :: Int -> Bool
+
+chainCpp :: Int -> Tree -> Tree
+chainCpp n acc
+  ? isZeroCpp n = acc
+  : chainCpp (decCpp n) (Node 1 Leaf acc)
+
+chainPy :: Int -> Tree -> Tree
+chainPy n acc
+  ? isZeroPy n = acc
+  : chainPy (decPy n) (Node 1 Leaf acc)
+
+countPy :: Int -> Tree -> Int
+countPy | acc (Node _ _ r) = countPy (incPy acc) r
+        | acc _ = acc
+
+countCpp :: Int -> Tree -> Int
+countCpp | acc (Node _ _ r) = countCpp (incCpp acc) r
+         | acc _ = acc
+
+-- The deep tree crosses between the pools once, in each direction.
+cppToPy :: Int -> Int
+cppToPy n = countPy 0 (chainCpp n Leaf)
+
+pyToCpp :: Int -> Int
+pyToCpp n = countCpp 0 (chainPy n Leaf)
+
+-- Mutual tail recursion whose two halves live in different pools.
+ping :: Int -> Int -> Int
+ping n acc
+  ? isZeroPy n = acc
+  : pong (decPy n) (incPy acc)
+
+pong :: Int -> Int -> Int
+pong n acc
+  ? isZeroCpp n = acc
+  : ping (decCpp n) (incCpp acc)
+
+pingPong :: Int -> Int
+pingPong n = ping n 0
+
+-- The same, carrying a growing tree across the boundary at every step.
+pingT :: Int -> Tree -> Tree
+pingT n acc
+  ? isZeroPy n = acc
+  : pongT (decPy n) (Node 1 Leaf acc)
+
+pongT :: Int -> Tree -> Tree
+pongT n acc
+  ? isZeroCpp n = acc
+  : pingT (decCpp n) (Node 1 Leaf acc)
+
+pingPongTree :: Int -> Int
+pingPongTree n = countCpp 0 (pingT n Leaf)
