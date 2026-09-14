@@ -28,6 +28,8 @@ custom-packer fields crossing a boundary are not yet implemented.
 module Morloc.CodeGenerator.Pools.CAbi.Members.Rust
   ( translate
   , rustLang
+  , RustProfile (..)
+  , resolveRustProfile
   ) where
 
 import Control.Monad.Identity (Identity, runIdentity)
@@ -52,6 +54,8 @@ import Morloc.CodeGenerator.Grammars.Translator.Imperative
   , toIType
   )
 import Morloc.CodeGenerator.Namespace
+import Morloc.Build.CargoLock (lockCoversCrates, mergeCargoLocks)
+import qualified Morloc.Build.Params as BP
 import qualified Morloc.Data.PoolHash as PH
 import qualified Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter as RP
 import Morloc.CodeGenerator.Serial (containsFunF, serialAstToMsgpackSchema, serialAstToNativeType, serialAstToType, shallowType, wireSerialAstToType)
@@ -1116,6 +1120,7 @@ translate srcs es = do
   deps <- rustDepsUnion
   localCrates <- rustLocalDeps
   installDir <- MM.gets stateInstallDir
+  profile <- MM.gets stateLangParams >>= either (MM.throwSystemError . pretty) return . resolveRustProfile
   -- The pool crate/bin name is derived from the build LOCATION (unique per
   -- program/build-dir, stable across edits of one program). With a shared cargo
   -- --target-dir (used to cache rustmorloc/deps across builds), this keeps one
@@ -1124,14 +1129,27 @@ translate srcs es = do
   -- crate per edit. Falls back to a source hash if the build dir is unset.
   let poolSrc = subVersion (render code)
       crateName = "pool_" <> PH.hashText (maybe poolSrc T.pack installDir)
-      (cargoToml, buildRs) = makeCargoDocs crateName deps localCrates home
-  maker <- makeTheMaker crateName
+      (cargoToml, buildRs) = makeCargoDocs crateName deps localCrates home profile
+  -- The pool starts from the environment's lock: the lock persisted with the
+  -- Rust workspace (so every crate shared with rustmorloc resolves to the
+  -- version rustmorloc was built against) extended by the crates earlier
+  -- pools resolved. Cargo prunes the entries the pool does not use and never
+  -- re-resolves what the lock pins, so the shared target-dir holds one build
+  -- of each dependency rather than one per registry-index snapshot, and the
+  -- registry is consulted only for a crate no pool in this environment has
+  -- needed before; the pins cargo adds are merged back after the build.
+  locks <- rustLockPaths
+  lockText <- mergeCargoLocks <$> readRustLock (rlBase locks) <*> readLockIfPresent (rlEnv locks)
+  let registryCrates = Map.keys (Map.filterWithKey (\c _ -> not (Map.member c localCrates)) deps)
+      -- A local crate carries its own dependencies, which the lock cannot pin.
+      offline = Map.null localCrates && lockCoversCrates lockText registryCrates
+  maker <- makeTheMaker crateName offline locks
   let poolSubdir = ML.poolDirKey rustLang
 
   -- The Rust pool is a real Cargo project: `src/main.rs` is the rendered pool
   -- code, `Cargo.toml` pulls in rustmorloc (path dep) + any declared rust-deps,
-  -- and `build.rs` supplies the libmorloc.so link. `cargo build`
-  -- (makeTheMaker) does dependency resolution and linking.
+  -- `Cargo.lock` pins their versions, and `build.rs` supplies the libmorloc.so
+  -- link. `cargo build` (makeTheMaker) does dependency resolution and linking.
   return $
     Script
       { scriptBase = "pool"
@@ -1140,12 +1158,49 @@ translate srcs es = do
           "." :/ Dir "pools"
             [ Dir poolSubdir
                 [ File "Cargo.toml" (Code (render cargoToml))
+                , File "Cargo.lock" (Code lockText)
                 , File "build.rs" (Code (render buildRs))
                 , Dir "src" [File "main.rs" (Code poolSrc)]
                 ]
             ]
       , scriptMake = maker
       }
+
+-- | The two locks a pool build reads and the one it writes back to.
+data RustLocks = RustLocks
+  { rlBase :: FilePath
+  -- ^ the workspace lock persisted by @morloc init@ beside the rustmorloc
+  -- source the pool path-depends on; immutable runtime, the authority for
+  -- every crate rustmorloc pulls in
+  , rlEnv :: FilePath
+  -- ^ the environment lock under the mutable state root: the base extended
+  -- by every crate a pool built here has resolved; absent until first needed
+  }
+
+rustLockPaths :: MorlocMonad RustLocks
+rustLockPaths = do
+  home <- MM.asks configHome
+  state <- MM.asks configState
+  return
+    RustLocks
+      { rlBase = home </> "rust" </> "Cargo.lock"
+      , rlEnv = state </> "cache" </> "rust-env.lock"
+      }
+
+readRustLock :: FilePath -> MorlocMonad Text
+readRustLock lockPath = do
+  exists <- liftIO (MS.doesFileExist lockPath)
+  if exists
+    then liftIO (MT.readFile lockPath)
+    else
+      MM.throwSystemError $
+        "missing Rust workspace lock at " <> squotes (pretty lockPath)
+          <> "; run `morloc init -f` to persist the Rust runtime source"
+
+readLockIfPresent :: FilePath -> MorlocMonad Text
+readLockIfPresent lockPath = do
+  exists <- liftIO (MS.doesFileExist lockPath)
+  if exists then liftIO (MT.readFile lockPath) else return ""
 
 -- | Emit an @include!@ of a sourced Rust file at the pool crate root, so its
 -- @pub fn@s become directly callable by name (mirroring C++ @#include@).
@@ -1731,6 +1786,39 @@ rustDepsUnion = do
     Map.empty
     (concatMap (map (\(c, ds) -> (c, dsVersion ds)) . Map.toList . packageRustDeps) metas)
 
+-- | The pool crate's @[profile.release]@ settings, as TOML literals (string
+-- forms carry their quotes). Both come from the @rust:@ build parameters.
+data RustProfile = RustProfile
+  { rpLto :: Text
+  , rpOptLevel :: Text
+  }
+  deriving (Eq, Show)
+
+-- | Resolve the release profile from build parameters, validating against
+-- Cargo's own vocabulary. @rust:lto@ takes the values Cargo's @lto@ field takes
+-- (@off@, @false@, @thin@, @fat@, @true@) and defaults to @thin@: cross-crate
+-- LTO over rustmorloc and the Arrow crates, which costs seconds per pool link
+-- and is what a test run turns off. @rust:opt-level@ takes @0@-@3@, @s@ or @z@
+-- and defaults to @2@. Returns 'Left' with a user-facing message on an unknown
+-- value.
+resolveRustProfile :: BP.LangParams -> Either Text RustProfile
+resolveRustProfile lp = do
+  lto <- pick "lto" "thin" ltoValues
+  opt <- pick "opt-level" "2" optValues
+  return (RustProfile lto opt)
+  where
+    -- (accepted spelling, TOML literal)
+    ltoValues = [("off", "\"off\""), ("false", "false"), ("thin", "\"thin\""), ("fat", "\"fat\""), ("true", "true")]
+    optValues = [(v, v) | v <- ["0", "1", "2", "3"]] ++ [("s", "\"s\""), ("z", "\"z\"")]
+    pick key def table =
+      let v = fromMaybe def (BP.lookupParam "rust" key lp)
+       in case lookup v table of
+            Just lit -> Right lit
+            Nothing ->
+              Left $
+                "unknown rust:" <> key <> " value '" <> v <> "'; expected one of "
+                  <> T.intercalate ", " (map fst table)
+
 -- | Render the generated pool crate's @Cargo.toml@ and @build.rs@. rustmorloc
 -- is a path dependency on the source persisted at @$MORLOC_HOME/rust@ (by
 -- @morloc init@); external crates come from the DAG-wide rust-deps union.
@@ -1740,8 +1828,8 @@ rustDepsUnion = do
 -- rustmorloc/morloc-runtime (the SHM arena relies on Drop-on-unwind cleanup).
 -- @crateName@ is unique per program (a source hash) so a shared target-dir
 -- never collides one program's pool binary with another's.
-makeCargoDocs :: Text -> Map.Map Text Text -> Map.Map Text FilePath -> FilePath -> (MDoc, MDoc)
-makeCargoDocs crateName deps localCrates home =
+makeCargoDocs :: Text -> Map.Map Text Text -> Map.Map Text FilePath -> FilePath -> RustProfile -> (MDoc, MDoc)
+makeCargoDocs crateName deps localCrates home profile =
   let rustmorlocPath = home </> "rust" </> "rustmorloc"
       libDir = home </> "lib"
       nameLit = dquotes (pretty crateName)
@@ -1770,11 +1858,12 @@ makeCargoDocs crateName deps localCrates home =
           , vsep localLines
           , ""
           , "[profile.release]"
-          , "opt-level = 2"
-          -- lto matches the data/rust workspace profile so the rustmorloc built
-          -- by `morloc init`'s warm-up (workspace profile) is reused here rather
-          -- than recompiled under a differing (no-lto) fingerprint.
-          , [idoc|lto = "thin"|]
+          -- The defaults match the data/rust workspace profile so the
+          -- rustmorloc built by `morloc init`'s warm-up is reused here rather
+          -- than recompiled under a differing fingerprint; a non-default lto
+          -- or opt-level builds (and caches) its own set of dependencies.
+          , "opt-level = " <> pretty (rpOptLevel profile)
+          , "lto = " <> pretty (rpLto profile)
           , [idoc|panic = "unwind"|]
           ]
       -- No runtime rpath: the pool is relocatable and finds libmorloc via
@@ -1790,14 +1879,16 @@ makeCargoDocs crateName deps localCrates home =
   in (cargoToml, buildRs)
 
 -- | Build the Rust pool with @cargo build@ (one unified dependency resolution
--- over rustmorloc + any external crates), then copy the produced binary to the
+-- over rustmorloc + any external crates, pinned by the shipped Cargo.lock;
+-- @offline@ when that lock already covers every crate), merge the pins cargo
+-- added into the environment lock, then copy the binary to the
 -- @pool-rust.out@ path the manifest/nexus expect. @MORLOC_HOME@ is set on the
 -- command so rustmorloc's build.rs locates libmorloc.so. The @--target-dir@ is
 -- shared across programs so rustmorloc + deps compile once and cache (cargo's
 -- own lock serialises concurrent builds; the per-program @crateName@ keeps each
 -- program's output binary distinct within that shared dir).
-makeTheMaker :: Text -> MorlocMonad [SysCommand]
-makeTheMaker crateName = do
+makeTheMaker :: Text -> Bool -> RustLocks -> MorlocMonad [SysCommand]
+makeTheMaker crateName offline locks = do
   -- cargo is required at make time (a Rust pool is a Cargo project). Fail fast
   -- with a clear message rather than a raw shell "command not found".
   cargoAvail <- liftIO (findExecutable "cargo")
@@ -1811,6 +1902,7 @@ makeTheMaker crateName = do
   let poolSubdir = ML.poolDirKey rustLang
       outRel = pretty $ "pools" </> poolSubdir </> ML.makeExecutablePoolName rustLang
       manifestPath = pretty $ "pools" </> poolSubdir </> "Cargo.toml"
+      poolLock = "pools" </> poolSubdir </> "Cargo.lock"
       -- The shared cargo build cache is regenerable STATE, not runtime: it lives
       -- under the state root, never inside the immutable runtime lib/.
       targetDir = state </> "cache" </> "rust-build"
@@ -1819,13 +1911,20 @@ makeTheMaker crateName = do
       homeD = pretty home
       -- Paths are single-quoted: they are interpolated into a shell string and
       -- $MORLOC_HOME (hence targetDir/binPath) may contain spaces.
+      -- With every crate pinned by the shipped Cargo.lock, cargo needs nothing
+      -- from the network; --offline makes an unexpected fetch a hard error
+      -- rather than a silent re-resolution against a newer registry index.
+      offlineFlag = if offline then " --offline" else "" :: MDoc
       buildCmd =
         SysRun . Code . render $
-          [idoc|MORLOC_HOME='#{homeD}' cargo build --release --manifest-path '#{manifestPath}' --target-dir '#{targetD}'|]
+          [idoc|MORLOC_HOME='#{homeD}' cargo build --release#{offlineFlag} --manifest-path '#{manifestPath}' --target-dir '#{targetD}'|]
       copyCmd =
         SysRun . Code . render $
           [idoc|cp '#{binPath}' '#{outRel}'|]
-  return [buildCmd, copyCmd]
+      -- Runs only after a successful build, so a failed resolution never
+      -- writes anything into the environment lock.
+      mergeCmd = SysMergeCargoLock (rlBase locks) (rlEnv locks) poolLock
+  return [buildCmd, mergeCmd, copyCmd]
 
 -- | The lowering configuration. The core fields are real; the fields for
 -- closures/partial application, remote calls, caching, and pattern evaluation

@@ -26,6 +26,7 @@ import System.Directory
   , listDirectory
   , makeAbsolute
   )
+import System.Environment (getEnvironment)
 import System.FilePath ((</>))
 import qualified System.IO as SI
 import qualified System.Process as SP
@@ -132,7 +133,20 @@ readIfPresentBytes path = do
   exists <- doesFileExist path
   if exists then Just <$> BS.readFile path else return Nothing
 
+-- | Run @make@ with the suite's build parameters. Rust pools default to
+-- cross-crate thin LTO, which re-optimizes rustmorloc and the Arrow crates on
+-- every pool link (seconds of CPU per test) and, because concurrent cargo
+-- builds serialize on the shared target-dir lock, stalls every other Rust
+-- test in flight. The suite turns it off unless the caller has already set
+-- @MORLOC_LANG_PARAMS@; a test that must exercise the shipped profile passes
+-- @-X rust:lto=thin@ in its Makefile, which outranks the environment.
 runQuietly :: [String] -> IO ()
 runQuietly args = do
-  _ <- SP.readCreateProcessWithExitCode (SP.proc "make" args) ""
+  env <- getEnvironment
+  let env' = case lookup langParamsVar env of
+        Just _ -> env
+        Nothing -> (langParamsVar, "rust:lto=off") : env
+  _ <- SP.readCreateProcessWithExitCode (SP.proc "make" args) {SP.env = Just env'} ""
   return ()
+  where
+    langParamsVar = "MORLOC_LANG_PARAMS"

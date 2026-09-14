@@ -1,7 +1,7 @@
 all:
 	: > obs.txt
 	rm -f *.err
-	morloc make -o nexus main.loc 2> build.err
+	morloc make -X rust:lto=thin -o nexus main.loc 2> build.err
 	./nexus crossApply 6 >> obs.txt 2>> obs.err
 
 clean:

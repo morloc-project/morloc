@@ -19,6 +19,7 @@ import MorlocDepsTests (morlocDepsTests)
 import PatternChainTests (patternChainTests)
 import PropertyTests (propertyTests)
 import RefutablePatternTests (refutablePatternTests)
+import RustPoolBuildTests (rustPoolBuildTests)
 import SchemaHintTests (schemaHintTests)
 import SizeParseTests (sizeParseTests)
 import SystemConfigTests (systemConfigTests)
@@ -86,6 +87,7 @@ unitTests =
   , patternChainTests
   , irrefutablePatternLexerTests
   , refutablePatternTests
+  , rustPoolBuildTests
   , effectBoundaryTests
   , schemaHintTests
   , systemConfigTests

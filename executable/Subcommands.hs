@@ -67,6 +67,7 @@ import System.Directory
   , removeFile
   , setCurrentDirectory
   )
+import System.Environment (lookupEnv)
 import System.Exit (exitFailure, exitSuccess)
 import System.FilePath (dropExtension, takeBaseName, takeDirectory, takeFileName)
 import System.IO (hPutStrLn, stderr)
@@ -240,15 +241,21 @@ buildInstalledModules args verbosity conf buildConfig moduleTexts libpath = do
       -- --unsafe-skip-null-check, --inline-size, --no-shm, --tmpdir, and
       -- --debug flags are `morloc make` opt-ins only, so default them here
       -- (safer). Build parameters, however, still flow from the build
-      -- config's `lang-params` (this path has no `-X` command line). The
-      -- program identity is the module name (the source is always main.loc,
-      -- so its basename is unhelpful).
-      let mopts =
-            defaultMakeOptions
-              { moLangParams = fromMaybe Map.empty (buildConfigLangParams buildConfig')
-              , moProgramKey = Just name
-              }
-      makeAndInstall (Just locFile) Nothing (Code code) [] verbosity' config buildConfig' forceOverwrite mopts
+      -- config's `lang-params` and the environment (this path has no `-X`
+      -- command line). The program identity is the module name (the source
+      -- is always main.loc, so its basename is unhelpful).
+      resolved <- resolveLangParams buildConfig' []
+      case resolved of
+        Left err -> do
+          hPutStrLn stderr (T.unpack err)
+          return False
+        Right langParams -> do
+          let mopts =
+                defaultMakeOptions
+                  { moLangParams = langParams
+                  , moProgramKey = Just name
+                  }
+          makeAndInstall (Just locFile) Nothing (Code code) [] verbosity' config buildConfig' forceOverwrite mopts
 
 -- | The per-invocation @morloc make@ options that flow into 'MorlocState'.
 -- Grouped into a record so the many-argument 'makeAndInstall' does not grow a
@@ -283,15 +290,24 @@ defaultMakeOptions =
     , moOffline = False
     }
 
--- | Resolve build parameters: parse each @-X LANG:KEY=VALUE@ and overlay them on
--- the build config's @lang-params@ (command line wins). Returns 'Left' with a
--- user-facing message on a malformed argument.
-resolveLangParams :: BuildConfig -> [String] -> Either T.Text LangParams
+-- | Resolve build parameters by layering, lowest to highest: the build
+-- config's @lang-params@, the @MORLOC_LANG_PARAMS@ environment variable (a
+-- @;@-separated @LANG:KEY=VALUE@ list, the channel for a harness or shell
+-- session that cannot edit every command line), and the @-X@ arguments.
+-- Returns 'Left' with a user-facing message on a malformed entry.
+resolveLangParams :: BuildConfig -> [String] -> IO (Either T.Text LangParams)
 resolveLangParams buildConfig rawArgs = do
-  triples <- mapM BP.parseLangParam rawArgs
-  let cli = BP.foldLangParams triples
-      base = fromMaybe Map.empty (buildConfigLangParams buildConfig)
-  return (BP.mergeLangParams base cli)
+  envVar <- lookupEnv langParamsEnvVar
+  return $ do
+    envTriples <- maybe (Right []) (prefixErr . BP.parseLangParamList) envVar
+    cliTriples <- mapM BP.parseLangParam rawArgs
+    let base = fromMaybe Map.empty (buildConfigLangParams buildConfig)
+    return (base `BP.mergeLangParams` BP.foldLangParams envTriples `BP.mergeLangParams` BP.foldLangParams cliTriples)
+  where
+    prefixErr = either (Left . (("in " <> T.pack langParamsEnvVar <> ": ") <>)) Right
+
+langParamsEnvVar :: String
+langParamsEnvVar = "MORLOC_LANG_PARAMS"
 
 -- | Apply 'MakeOptions' to the compiler state.
 applyMakeOptions :: MakeOptions -> MorlocState -> MorlocState
@@ -401,7 +417,8 @@ cmdMakeWith args verbosity config buildConfig path code progKey = do
       outfile = case makeCliOut args of
         "" -> Nothing
         x -> Just x
-  case resolveLangParams buildConfig (makeLangParams args) of
+  resolved <- resolveLangParams buildConfig (makeLangParams args)
+  case resolved of
     Left err -> do
       hPutStrLn stderr (T.unpack err)
       return False
