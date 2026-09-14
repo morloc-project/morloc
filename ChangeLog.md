@@ -1,53 +1,34 @@
-Unreleased
-----------
+0.105.0 [2026-09-14]
+--------------------
 
- - a program may import more than one `root-*` module and still use `show`
-   (two instances with the same intrinsic body were reported as conflicting)
- - a record, list or tuple of functions (suspensions among them) can be
-   handed to a host function in any language, however it was built; the
-   host receives values, never thunks
- - a function value whose argument or result is itself a function, or that
-   captures one, now crosses into and out of a Rust pool; the "cannot cross
-   into or out of a Rust pool yet" refusal is gone
- - a suspension of a suspension crosses pools correctly (the outer layer
-   runs once, the inner thunk as many times as it is run)
- - Rust pools: a closure that leaves the frame that built it, or is stored
-   in a record or list, owns what it captures
- - tables keep their nulls, and date/timestamp/duration, binary, large
-   string and nested list columns now cross between pools intact
- - read snappy- and zstd-compressed Parquet files (every common writer's
-   default), not only uncompressed ones
- - a table returned unchanged from a pool is passed through by reference
-   instead of copied; `MORLOC_ARROW_NO_BORROW=1` disables this,
-   `MORLOC_ARROW_STATS=1` reports bytes copied
- - a declared table schema is enforced at every pool boundary: columns are
-   converted to their declared types only when nothing is lost, and a null
-   in a column not declared optional is an error
- - map `Table` to `polars.DataFrame`, `pandas.DataFrame`, `pyarrow.Table`
-   or an R `data.frame` in a module's type mapping; any producer that
-   implements the Arrow PyCapsule interface is accepted
- - Rust pools take tables as `rustmorloc::arrow_array::RecordBatch`
- - `ArrowTable` is recognised as a table type beside `Table`
+ * heavy testing and debugging of cross-pool closure codegen
+ * slightly better table support
+   - support snappy/zstd compressed Parquet files
+   - zero copy cross-table immutable table support (copy on change)
+     - `MORLOC_ARROW_NO_BORROW=1` disables this
+     - `MORLOC_ARROW_STATS=1` reports bytes copied
+   - table schemas are enforced at every pool boundary
+ * other bug fixes
 
 0.104.0 [2026-09-13]
 --------------------
 
- - correct doctrine for effects
- - allow `@epilogue` for commands, not just programs
- - fix Futhark build issue
- - many bug and formatting fixes
+ * correct doctrine for effects
+ * allow `@epilogue` for commands, not just programs
+ * fix Futhark build issue
+ * many bug and formatting fixes
 
 0.103.2 [2026-09-12]
 --------------------
 
- - Pin <2 for conda cxx-compilers
+ * Pin <2 for conda cxx-compilers
 
 0.103.1 [2026-09-12]
 --------------------
 
- - a Python source file named after a standard-library module (`ast.py`,
+ * a Python source file named after a standard-library module (`ast.py`,
    `json.py`) no longer answers later imports of that module in the pool
- - `@try` around a handle-returning intrinsic (`@open`, `@stream`) builds
+ * `@try` around a handle-returning intrinsic (`@open`, `@stream`) builds
    in a C++ pool under clang, so the same program compiles on macOS
 
 0.103.0 [2026-09-12]
