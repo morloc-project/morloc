@@ -47,6 +47,7 @@ jobs:
           stack-version: 'latest'
 
       - name: Setup Rust
+        id: rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Stack dependencies
@@ -68,6 +69,29 @@ jobs:
           key: cargo-${{ matrix.os }}-${{ hashFiles('data/rust/Cargo.lock') }}
           restore-keys: |
             cargo-${{ matrix.os }}-
+
+      # The compiled dependencies of every Rust pool: rustmorloc, Arrow, serde
+      # and the rest, built once per profile into the shared cargo target dir
+      # under the morloc state root (which defaults to MORLOC_HOME). Without
+      # this each run rebuilds them from source at the head of the Rust golden
+      # queue, once for the profile the suite uses and once for the shipped
+      # profile the LTO-pinned goldens use. Per-program pool artifacts are
+      # excluded: a pool is rebuilt on every make anyway, so caching them only
+      # inflates the archive. Keyed on the toolchain and the workspace lock;
+      # a lock change falls back to the previous archive, from which every
+      # crate whose version did not move is still reused.
+      - name: Cache Rust pool dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/morloc/cache/rust-build
+            !~/.local/share/morloc/cache/rust-build/release/pool_*
+            !~/.local/share/morloc/cache/rust-build/release/deps/pool_*
+            !~/.local/share/morloc/cache/rust-build/release/.fingerprint/pool_*
+            !~/.local/share/morloc/cache/rust-build/release/build/pool_*
+          key: rust-build-${{ matrix.os }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('data/rust/Cargo.lock') }}
+          restore-keys: |
+            rust-build-${{ matrix.os }}-${{ steps.rust.outputs.cachekey }}-
 
       - name: Increase shared memory (needed for morloc SHM pool tests)
         if: runner.os == 'Linux'
