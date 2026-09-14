@@ -6,6 +6,7 @@ all:
 	./nexus crossCpp 5 >> obs.txt 2>> obs.err
 	./nexus resultRust 5 >> obs.txt 2>> obs.err
 	./nexus resultCpp 5 >> obs.txt 2>> obs.err
+	./nexus recordField 5 >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus pools __pycache__ *.err *.manifest

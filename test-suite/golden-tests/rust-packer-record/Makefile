@@ -1,7 +1,7 @@
 all:
 	rm -f *.err
 	: > obs.txt
-	morloc make -o nexus main.loc 2> build.err
+	morloc make -X rust:lto=thin -o nexus main.loc 2> build.err
 	./nexus roundRec '{"w":42,"s":"hi","n":9}'  >> obs.txt 2>> obs.err
 	./nexus getN     '{"w":7,"s":"x","n":100}'  >> obs.txt 2>> obs.err
 	./nexus getW     '{"w":55,"s":"y","n":1}'   >> obs.txt 2>> obs.err

@@ -1,7 +1,7 @@
 all:
 	: > obs.txt
 	rm -f *.err
-	morloc make -o nexus main.loc 2> build.err
+	morloc make -X rust:lto=thin -o nexus main.loc 2> build.err
 	if grep -q "^warning" build.err; then echo "UNEXPECTED: build warnings" >> obs.txt; else echo "OK: clean build" >> obs.txt; fi
 	./nexus tailThrow "hello"        2>  obs.err ; echo "exit:$$?" >> obs.txt
 	grep -oE "TAIL: hello n=5"       obs.err       >> obs.txt

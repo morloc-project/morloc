@@ -627,10 +627,12 @@ optLangParams =
             <> metavar "LANG:KEY=VALUE"
             <> help
                 ( "Pass a build parameter to a language's builder, e.g. "
-                    ++ "-X futhark:backend=cuda or -X cpp:flags=-march=native. "
-                    ++ "Repeatable. The value is taken verbatim; morloc does not "
-                    ++ "interpret it -- the language's builder does. The reserved "
-                    ++ "key 'flags' accumulates in order as raw compiler flags."
+                    ++ "-X futhark:backend=cuda, -X cpp:flags=-march=native or "
+                    ++ "-X rust:lto=off. Repeatable. The value is taken verbatim; "
+                    ++ "morloc does not interpret it -- the language's builder does. "
+                    ++ "The reserved key 'flags' accumulates in order as raw compiler "
+                    ++ "flags. Overrides the build config and MORLOC_LANG_PARAMS "
+                    ++ "(a ;-separated list of the same entries)."
                 )
         )
     )

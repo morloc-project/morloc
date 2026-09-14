@@ -3,7 +3,7 @@ CASES = full one empty allnull
 
 all:
 	rm -f *.err obs.txt
-	morloc make -o nexus main.loc 2> build.err
+	morloc make -X rust:lto=thin -o nexus main.loc 2> build.err
 	for p in $(PAIRS); do for c in $(CASES); do echo "--- $$p $$c ---" >> obs.txt; ./nexus $$p $$c >> obs.txt 2>> obs.err; done; done
 
 clean:

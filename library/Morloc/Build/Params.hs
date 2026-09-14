@@ -14,14 +14,16 @@ interpret keys or values. Each language's builder reads the entries it
 understands and validates values locally.
 
 Parameters are stored as @lang -> key -> value@. Precedence, low to high, is
-compiled-in default < build-config @lang-params@ < command-line @-X@. Most keys
-are single-valued and the higher layer wins. The reserved 'flagsKey' has list
+compiled-in default < build-config @lang-params@ < the @MORLOC_LANG_PARAMS@
+environment variable (a @;@-separated list of @LANG:KEY=VALUE@ entries) <
+command-line @-X@. Most keys are single-valued and the higher layer wins. The reserved 'flagsKey' has list
 semantics instead: repeated entries accumulate in order and layers concatenate
 (never dedup, never reorder), so raw compiler flags survive intact.
 -}
 module Morloc.Build.Params
   ( LangParams
   , parseLangParam
+  , parseLangParamList
   , parseLangKey
   , foldLangParams
   , mergeLangParams
@@ -75,6 +77,17 @@ parseLangParam s =
   where
     invalid =
       "invalid -X argument '" <> T.pack s <> "'; expected LANG:KEY=VALUE"
+
+-- | Parse a @;@-separated list of @LANG:KEY=VALUE@ entries, the syntax of the
+-- @MORLOC_LANG_PARAMS@ environment variable. Empty entries (a stray or trailing
+-- separator) are skipped; one malformed entry rejects the whole list. A value
+-- cannot contain @;@.
+parseLangParamList :: String -> Either Text [(Text, Text, Text)]
+parseLangParamList = mapM parseLangParam . filter (not . null) . splitOn ';'
+  where
+    splitOn c str = case break (== c) str of
+      (chunk, []) -> [chunk]
+      (chunk, _ : rest) -> chunk : splitOn c rest
 
 -- | Parse a @LANG:KEY@ argument (no value), for removing a parameter. Splits on
 -- the first @:@; both parts must be non-empty.

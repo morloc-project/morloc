@@ -895,6 +895,11 @@ data SysCommand
   | SysRun Code
   | SysInstall Path
   | SysUnlink Path
+  | -- | Merge a freshly built Rust pool's Cargo.lock into the environment
+    -- lock: @SysMergeCargoLock base env pool@ rewrites @env@ as @base@ plus
+    -- the crates in @env@ and @pool@ that @base@ lacks (see
+    -- "Morloc.Build.CargoLock").
+    SysMergeCargoLock Path Path Path
   deriving (Show, Ord, Eq)
 
 data Script

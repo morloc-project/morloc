@@ -30,6 +30,7 @@ import qualified Morloc.Config as MC
 import Morloc.Data.Doc ((<+>), line, vsep, pretty)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
+import qualified Morloc.Build.CargoLock as CL
 import Morloc.Namespace.Prim
 import Morloc.Namespace.State
 import Morloc.ProgramBuilder.Paths (buildDirName, buildMarker)
@@ -392,5 +393,6 @@ describeWriteFailure _ = return "Failed to write generated files."
 runSysCommand :: SysCommand -> MorlocMonad ()
 runSysCommand (SysExe path) = liftIO $ callProcess "chmod" ["755", path]
 runSysCommand (SysRun (Code cmd)) = MM.runCommand "runSysCommand" cmd
+runSysCommand (SysMergeCargoLock base env pool) = liftIO $ CL.mergeLockFiles base env pool
 runSysCommand other =
   MM.throwSystemError $ "Unsupported SysCommand: " <> pretty (show other)

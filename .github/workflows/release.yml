@@ -130,6 +130,7 @@ jobs:
       # libmorloc.so + morloc-nexus + the rustmorloc rlib from the bundled
       # sources (prebuilt/rust) with this toolchain.
       - uses: dtolnay/rust-toolchain@stable
+        id: rust
       - uses: haskell-actions/setup@v2
         with:
           ghc-version: '9.6.7'
@@ -143,6 +144,33 @@ jobs:
             .stack-work
           key: stack-deps-release-${{ hashFiles('stack.yaml.lock', 'package.yaml') }}
           restore-keys: stack-deps-release-
+      # Crate sources and index entries, so the runtime build and every pinned
+      # pool resolve without the registry. The bundled prebuilt/rust carries
+      # the same lock as the checkout, so the checkout's lock keys it.
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-release-${{ hashFiles('data/rust/Cargo.lock') }}
+          restore-keys: cargo-release-
+      # The compiled dependencies of every Rust pool, built once per profile
+      # into the shared cargo target dir under the morloc state root (which
+      # defaults to MORLOC_HOME); per-program pool artifacts are excluded
+      # because a pool is rebuilt on every make anyway. Mirrors the push
+      # workflow; see the comment there.
+      - name: Cache Rust pool dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/morloc/cache/rust-build
+            !~/.local/share/morloc/cache/rust-build/release/pool_*
+            !~/.local/share/morloc/cache/rust-build/release/deps/pool_*
+            !~/.local/share/morloc/cache/rust-build/release/.fingerprint/pool_*
+            !~/.local/share/morloc/cache/rust-build/release/build/pool_*
+          key: rust-build-release-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('data/rust/Cargo.lock') }}
+          restore-keys: rust-build-release-${{ steps.rust.outputs.cachekey }}-
       - name: Increase shared memory
         run: sudo mount -o remount,size=4G /dev/shm
       - name: Install system dependencies
@@ -207,7 +235,7 @@ jobs:
       - name: Run the runtime suites
         env:
           MORLOC_STRESS_WORKLOADS: "cpp py-r"
-        run: ./test-suite/test.sh
+        run: ./test-suite/test.sh typecheck-benchmark concurrency daemon packet-io expose
         timeout-minutes: 30
 
       # And `stack test` with no target, which adds morloc-integration-test
