@@ -15,7 +15,7 @@
 
 <div align="center">
 <h1>Morloc</h1>
-<h2>the function is the unit, not the application</h2>
+<h2>Making the function, not the application, the unit of composition</h2>
 </div>
 
 Morloc is a typed language for composing functions written in other languages.
@@ -27,12 +27,29 @@ and it checks every boundary those cross before anything runs. The interface is
 not a convention an author remembered to follow. It is a consequence of a
 declaration.
 
-Because Morloc types are language-neutral, the implementation behind a type may
+Because Morloc types are language-agnostic, the implementation behind a type may
 come from any supported language, or from a composition of functions written in
 several. The compiler generates the code that carries data between them.
 
-**[Read the manual](https://morloc-project.github.io/docs)** -- it is the real
-documentation, and everything below is a sample of it.
+## Install
+
+Morloc runs natively on Linux, macOS (new ARM chips), and Windows WSL.
+
+Run this to install the Morloc Installation Manager (`mim`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/morloc-project/morloc-manager/main/scripts/install.sh | sh
+mim new     # bulid the environment
+mim shell   # drop into a shell
+mim demo    # pull cool morloc demos
+```
+
+The build is native by default, add the `--engine docker` flag to build in a
+container (or `podman` or `apptainer`). The environment automatically handles
+dependencies for Morloc builds via the Pixi package manager. See the manual
+section [Getting Started](https://morloc-project.github.io/docs/#_getting_started) for more info.
+
+You may freeze Morloc environments into Docker images with `mim freeze`.
 
 ## An example
 
@@ -124,45 +141,6 @@ Morloc module can import and re-export. None of these is a separate build or a
 separate description, so none of them can drift from the functions: change a
 return type and every one of them moves on the next build.
 
-## Install
-
-Morloc runs natively on Linux and Apple Silicon macOS. On Windows, use
-[WSL](https://learn.microsoft.com/en-us/windows/wsl/about) and follow the Linux
-instructions inside it.
-
-Everything is installed and managed by `mim`, the Morloc installation manager:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/morloc-project/morloc-manager/main/scripts/install.sh | sh
-```
-
-This drops a single static binary into `~/.local/bin` (no `sudo`, no changes to
-your shell startup files). If that directory is not on your `PATH`, the
-installer prints the command to add it.
-
-Then create an environment -- a self-contained Morloc installation with its own
-solved toolchain -- and enter it:
-
-```sh
-mim new      # first run takes a few minutes
-mim shell
-```
-
-This builds natively on your host without installing anything system-wide. To
-keep Morloc inside a container instead, pass `mim new --engine docker` (podman
-and apptainer are also supported).
-
-Inside the shell, `morloc` is on your `PATH`. No language toolchain is installed
-up front; Python, C++, R, and Rust are provisioned on demand the first time you
-build a program that uses them, and imported modules are fetched automatically
-at versions compatible with your compiler.
-
-Now paste the three files above into a directory and run `morloc make sums.loc`.
-
-The manual covers all of this in more detail, including the container backends,
-NixOS, corporate CA bundles, and what to do when something fails:
-[Getting Started](https://morloc-project.github.io/docs/#_getting_started).
-
 ## Learn Morloc
 
 The [manual](https://morloc-project.github.io/docs) is written to be read front
@@ -198,20 +176,19 @@ development, editor support is current for vim and Pygments and stale for VS
 Code/Zed, some aspects of the type system are still experimental, and the module
 registry is unbuilt.
 
-You will hit sharp edges. That is what the
-[issue tracker](https://github.com/morloc-project/morloc/issues) is for.
+Play with the cutting edge and you might bleed. Track your blood over here:
+[issue tracker](https://github.com/morloc-project/morloc/issues).
 
 ## Getting involved
 
-The hard part is finished. The library is nearly empty -- outside
-[morloclib](https://github.com/morloclib) there is barely an ecosystem at all,
-and a compiler cannot generate one. That is where I need people:
+The hard part is finished. The ongoing work is the long tail of bug fixes and
+ecosystem development. That is where I need people. Here's where you can help:
 
-- **Write a module.** Take something you already maintain, give it types, and
-  publish it.
 - **Report what breaks.** A bug report is worth more to me than a patch right
   now. Unexpected behavior, a bad error message, a gap in the manual, and
   anything harder than it should have been all count.
+- **Write a module.** Take something you already maintain, give it types, and
+  publish it.
 - **Fix the editor tooling.** Add support for your favorite editor.
 - **Bring a language.** Every new language brings fun design questions, I would
   be happy to work with you in bringing your language into the Morloc ecosystem.
