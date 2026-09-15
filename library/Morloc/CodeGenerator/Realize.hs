@@ -551,36 +551,54 @@ realizeWithRegistry registry s0 = do
           Type ->
           [(AnnoS (Indexed Type) One (Indexed (Maybe Lang)), Maybe Lang)] ->
           MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)), Maybe Lang)
-        handleMany gt' xs' =
-          -- Compatible match: structural equality with UnkT as wildcard.
-          -- Preserves alias specificity (Array Int matches Array (UnkT a)
-          -- but not List (UnkT a)) while handling unsolved generics.
-          case [x | x@(AnnoS (Idx _ t) _ _, _) <- xs', compatibleType gt' t] of
-            (x' : _) -> return x'
-            [] -> do
-              gscope <- MM.getGeneralScope i
-              -- Reduce gt' one step toward the root type and retry.
-              -- This walks the alias chain: C -> B -> A -> Str,
-              -- preferring the most specific matching instance.
-              case TE.reduceType gscope (type2typeu gt') of
-                Just gt'' -> handleMany (typeOf gt'') xs'
-                Nothing ->
-                  -- reduceType only reduces the top-level constructor. When
-                  -- aliases appear inside compound types (e.g., Celsius -> Celsius
-                  -- where type Celsius = Int), reduce leaf aliases one step.
-                  case TE.reduceTypeLeaves gscope (type2typeu gt') of
-                    Just gt'' -> handleMany (typeOf gt'') xs'
-                    Nothing ->
-                      case xs' of
-                        -- All candidates have identical types: duplicates from
-                        -- different imports (e.g., mempty from root-py and root-cpp).
-                        (x'@(AnnoS (Idx _ t0) _ _, _) : rest)
-                          | compatibleType gt' t0
-                          , all (\(AnnoS (Idx _ t) _ _, _) -> compatibleType t0 t) rest -> return x'
-                        _ ->
-                          MM.throwSourcedError i $
-                            "No matching implementation found for" <+> squotes (pretty v)
-                              <+> "at type" <+> pretty gt'
+        handleMany gt' xs' = do
+          gscope <- MM.getGeneralScope i
+          -- gt' followed by each step of its alias chain toward the root
+          -- type (C -> B -> A -> Str). A candidate matches at the first
+          -- link its head is compatible with, so an instance on a nearer
+          -- alias is preferred over one on a farther alias, and a sibling
+          -- alias never matches at all.
+          let chain = gt' : List.unfoldr (fmap (\t -> (t, t)) . reduceStep gscope) gt'
+              matched =
+                [ (lvl, type2typeu t, x)
+                | x@(AnnoS (Idx _ t) _ _, _) <- xs'
+                , Just lvl <- [List.findIndex (`compatibleType` t) chain]
+                ]
+              -- Instance heads are ordered by subsumption (UnkT lowers to
+              -- a per-leaf forall), so a well-formed set of matches has a
+              -- unique greatest element: the most specific instance. Heads
+              -- that tie on specificity (distinct aliases of one type) are
+              -- separated by chain position; incomparable maxima mean the
+              -- heads overlap without either specializing the other.
+              maxima = mostSpecific [h | (_, h, _) <- matched]
+              best = [(lvl, h, x) | (lvl, h, x) <- matched, any (equivalent h) maxima]
+              nearest = [(h, x) | (lvl, h, x) <- best, lvl == minimum [l | (l, _, _) <- best]]
+          case nearest of
+            [] ->
+              MM.throwSourcedError i $
+                "No matching implementation found for" <+> squotes (pretty v)
+                  <+> "at type" <+> pretty gt'
+            -- one head, possibly sourced several times (duplicate imports)
+            ((h0, x) : rest) | all (equivalent h0 . fst) rest -> return x
+            -- The use site does not fix the type, so the overlap cannot be
+            -- judged here. A generic export is dropped before code
+            -- generation, so the pick below is never observed there.
+            ((_, x) : _) | containsUnk gt' -> return x
+            _ ->
+              MM.throwSourcedError i $
+                "Ambiguous instances for" <+> squotes (pretty v)
+                  <+> "at type" <+> pretty gt' <> ":"
+                  <> "\n" <> indent 2 (vsep (map pretty maxima))
+                  <> "\nEach matches, and none is more specific than the others."
+                  <> "\nDeclare an instance for their common specialization to"
+                  <+> "disambiguate, or remove one of them."
+
+        -- One alias-reduction step: the top-level constructor first, then
+        -- (when aliases sit inside a compound type, e.g. Celsius -> Celsius
+        -- with type Celsius = Int) the leaves.
+        reduceStep :: Scope -> Type -> Maybe Type
+        reduceStep gscope t =
+          typeOf <$> (TE.reduceType gscope (type2typeu t) <|> TE.reduceTypeLeaves gscope (type2typeu t))
 
         -- Structural type equality with UnkT as wildcard.
         -- UnkT arises from unsolved generics (e.g., mempty :: List (UnkT a)).
