@@ -13,7 +13,7 @@ use std::path::Path;
 use std::ptr;
 
 use morloc_runtime_types::cschema::CSchema;
-use morloc_runtime_types::packet::{PacketHeader, PACKET_FORMAT_ARROW, MLC_KIND_IFILE};
+use morloc_runtime_types::packet::{PacketHeader, MLC_KIND_IFILE};
 use morloc_runtime_types::pattern::{
     check_pattern_against_schema, parse_pattern, path_to_walker_input, EncodedArg,
 };
@@ -22,7 +22,7 @@ use morloc_runtime_types::schema::{parse_schema, Schema};
 use crate::cli::{OutputForm, ViewArgs};
 use crate::dispatch::{print_result_c, NexusConfig};
 use crate::file::{classify_path, Classification, DataArg, DEFAULT_PROBE_BYTES};
-use crate::loader::load_with_schema;
+use crate::loader::load_with_parsed_schema;
 use crate::process::{self, redirect_stdout_to, take_c_errmsg};
 
 /// One runtime argument to `mlc_ifile_walk`. Must match the runtime's
@@ -1016,7 +1016,10 @@ fn load_input_as_voidstar(
             &parsed,
         )
     } else {
-        let loaded = load_with_schema(&args.target, schema_str)?;
+        let schema = parse_schema(schema_str)
+            .map_err(|e| format!("failed to parse schema '{}': {}", schema_str, e))?;
+        let is_arrow = schema.serial_type == morloc_runtime_types::schema::SerialType::Table;
+        let loaded = load_with_parsed_schema(&args.target, schema)?;
         let mut errmsg: *mut c_char = ptr::null_mut();
         let voidstar = unsafe {
             get_morloc_data_packet_value(
@@ -1030,7 +1033,6 @@ fn load_input_as_voidstar(
                 "failed to extract value from '{}': {}", args.target, msg
             ));
         }
-        let is_arrow = packet_format_is_arrow(loaded.as_slice());
         // Keep loaded alive by moving it into the returned struct;
         // its Drop frees the packet + CSchema when the caller is done.
         let c_schema = loaded.c_schema;
@@ -1310,21 +1312,6 @@ fn resolve_schema_str(args: &ViewArgs, cls: &Classification) -> Result<String, S
          Inputs without a morloc-packet header need an explicit --schema STRING.",
         args.target
     ))
-}
-
-/// True iff the loaded packet's DATA-command format byte is ARROW.
-/// Used by `print_result_c` to route to the table-only output path.
-fn packet_format_is_arrow(packet: &[u8]) -> bool {
-    if packet.len() < 32 {
-        return false;
-    }
-    let mut hdr_bytes = [0u8; 32];
-    hdr_bytes.copy_from_slice(&packet[..32]);
-    let hdr = match PacketHeader::from_bytes(&hdr_bytes) {
-        Ok(h) => h,
-        Err(_) => return false,
-    };
-    hdr.is_data() && unsafe { hdr.command.data.format } == PACKET_FORMAT_ARROW
 }
 
 #[cfg(test)]

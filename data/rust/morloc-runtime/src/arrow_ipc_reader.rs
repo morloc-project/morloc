@@ -10,13 +10,12 @@ use std::ptr;
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
-use arrow_ipc::reader::{FileReader, StreamReader};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema, SchemaRef};
 
 use crate::arrow_ffi::is_arrow_table_schema;
 use crate::arrow_shm::{self, ArrowShmHeader};
 use crate::cschema::CSchema;
-use crate::error::{clear_errmsg, set_errmsg, MorlocError};
+use crate::error::{set_errmsg, MorlocError};
 use crate::schema::{Schema, SerialType};
 use crate::shm::{self, RelPtr};
 
@@ -91,8 +90,16 @@ pub unsafe extern "C" fn write_arrow_ipc_to_buffer(
     out_len: *mut usize,
     errmsg: *mut *mut c_char,
 ) -> i32 {
+    crate::error::guarded(errmsg, 1, || write_arrow_ipc_to_buffer_impl(header, out_buf, out_len, errmsg))
+}
+
+unsafe fn write_arrow_ipc_to_buffer_impl(
+    header: *const ArrowShmHeader,
+    out_buf: *mut *mut u8,
+    out_len: *mut usize,
+    errmsg: *mut *mut c_char,
+) -> i32 {
     use arrow_ipc::writer::FileWriter;
-    clear_errmsg(errmsg);
     *out_buf = ptr::null_mut();
     *out_len = 0;
     let batch = match arrow_shm::shm_to_batch(header) {
@@ -135,8 +142,16 @@ pub unsafe extern "C" fn write_parquet_to_buffer(
     out_len: *mut usize,
     errmsg: *mut *mut c_char,
 ) -> i32 {
+    crate::error::guarded(errmsg, 1, || write_parquet_to_buffer_impl(header, out_buf, out_len, errmsg))
+}
+
+unsafe fn write_parquet_to_buffer_impl(
+    header: *const ArrowShmHeader,
+    out_buf: *mut *mut u8,
+    out_len: *mut usize,
+    errmsg: *mut *mut c_char,
+) -> i32 {
     use parquet::arrow::ArrowWriter;
-    clear_errmsg(errmsg);
     *out_buf = ptr::null_mut();
     *out_len = 0;
     let batch = match arrow_shm::shm_to_batch(header) {
@@ -180,8 +195,17 @@ pub unsafe extern "C" fn write_csv_to_buffer(
     out_len: *mut usize,
     errmsg: *mut *mut c_char,
 ) -> i32 {
+    crate::error::guarded(errmsg, 1, || write_csv_to_buffer_impl(header, delimiter, out_buf, out_len, errmsg))
+}
+
+unsafe fn write_csv_to_buffer_impl(
+    header: *const ArrowShmHeader,
+    delimiter: u8,
+    out_buf: *mut *mut u8,
+    out_len: *mut usize,
+    errmsg: *mut *mut c_char,
+) -> i32 {
     use arrow_csv::writer::WriterBuilder;
-    clear_errmsg(errmsg);
     *out_buf = ptr::null_mut();
     *out_len = 0;
     let batch = match arrow_shm::shm_to_batch(header) {
@@ -215,7 +239,15 @@ pub unsafe extern "C" fn read_arrow_ipc_to_shm(
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> RelPtr {
-    clear_errmsg(errmsg);
+    crate::error::guarded(errmsg, shm::RELNULL, || read_arrow_ipc_to_shm_impl(data, data_len, schema, errmsg))
+}
+
+unsafe fn read_arrow_ipc_to_shm_impl(
+    data: *const u8,
+    data_len: usize,
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> RelPtr {
     if data.is_null() || schema.is_null() || data_len == 0 {
         set_errmsg(errmsg, &MorlocError::Other("NULL data or schema".into()));
         return shm::RELNULL;
@@ -227,40 +259,190 @@ pub unsafe extern "C" fn read_arrow_ipc_to_shm(
         return shm::RELNULL;
     }
 
-    let (file_schema, batches) = if is_arrow_file_magic(bytes) {
-        let reader = match FileReader::try_new(Cursor::new(bytes), None) {
-            Ok(r) => r,
-            Err(e) => {
-                set_errmsg(errmsg, &MorlocError::Other(format!("Failed to open Arrow IPC file: {}", e)));
-                return shm::RELNULL;
-            }
-        };
-        let s = reader.schema();
-        match reader.collect::<Result<Vec<_>, _>>() {
-            Ok(v) => (s, v),
-            Err(e) => {
-                set_errmsg(errmsg, &MorlocError::Other(format!("Failed to read Arrow IPC batches: {}", e)));
-                return shm::RELNULL;
+    let decoded = if is_arrow_file_magic(bytes) { read_ipc_file(bytes) } else { read_ipc_stream(bytes) };
+    match decoded {
+        Ok((file_schema, batches)) => batches_to_shm(batches, file_schema, &rs, errmsg),
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            shm::RELNULL
+        }
+    }
+}
+
+/// Decode an Arrow IPC payload into a fresh block and return its absolute
+/// address, or NULL with `errmsg` set: the shape a packet reader wants.
+///
+/// # Safety
+/// As `read_arrow_ipc_to_shm`.
+pub unsafe fn ipc_payload_to_block(
+    data: *const u8,
+    data_len: usize,
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> *mut std::ffi::c_void {
+    let rel = read_arrow_ipc_to_shm(data, data_len, schema, errmsg);
+    if rel == shm::RELNULL {
+        return ptr::null_mut();
+    }
+    match shm::rel2abs(rel) {
+        Ok(abs) => abs as *mut std::ffi::c_void,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Largest decompressed size a compressed IPC buffer may announce. The
+/// decoder allocates the announced size before it reads a byte, and an
+/// allocation that fails ends the process, so the announcement is checked
+/// against this bound first. Four gibibytes is the reach of the 32-bit
+/// offsets most columns use and is allocatable wherever such a table
+/// could be decoded at all.
+const MAX_DECOMPRESSED_BUFFER: i64 = 1 << 32;
+
+/// Refuse a compressed record batch whose buffers announce more than
+/// `MAX_DECOMPRESSED_BUFFER` bytes each, before the decoder trusts them.
+fn check_compressed_sizes(batch: &arrow_ipc::RecordBatch<'_>, body: &[u8]) -> Result<(), MorlocError> {
+    if batch.compression().is_none() {
+        return Ok(());
+    }
+    for b in batch.buffers().iter().flatten() {
+        let off = usize::try_from(b.offset()).map_err(|_| MorlocError::Other("negative IPC buffer offset".into()))?;
+        let len = usize::try_from(b.length()).map_err(|_| MorlocError::Other("negative IPC buffer length".into()))?;
+        off.checked_add(len)
+            .filter(|&e| e <= body.len())
+            .ok_or_else(|| MorlocError::Other("IPC buffer lies outside the message body".into()))?;
+        if len >= 8 {
+            let announced = i64::from_le_bytes(body[off..off + 8].try_into().unwrap());
+            if announced > MAX_DECOMPRESSED_BUFFER {
+                return Err(MorlocError::Other(format!(
+                    "IPC buffer announces {} decompressed bytes, more than the {} this reader accepts",
+                    announced, MAX_DECOMPRESSED_BUFFER
+                )));
             }
         }
+    }
+    Ok(())
+}
+
+/// The flatbuffer inside an encapsulated message: the optional
+/// continuation marker and the length prefix stripped.
+fn message_flatbuffer(meta: &[u8]) -> &[u8] {
+    if meta.len() >= 8 && meta[..4] == [0xFF, 0xFF, 0xFF, 0xFF] {
+        &meta[8..]
+    } else if meta.len() >= 4 {
+        &meta[4..]
     } else {
-        let reader = match StreamReader::try_new(Cursor::new(bytes), None) {
-            Ok(r) => r,
-            Err(e) => {
-                set_errmsg(errmsg, &MorlocError::Other(format!("Failed to open Arrow IPC stream: {}", e)));
-                return shm::RELNULL;
-            }
-        };
-        let s = reader.schema();
-        match reader.collect::<Result<Vec<_>, _>>() {
-            Ok(v) => (s, v),
-            Err(e) => {
-                set_errmsg(errmsg, &MorlocError::Other(format!("Failed to read Arrow IPC stream batches: {}", e)));
-                return shm::RELNULL;
-            }
+        &[]
+    }
+}
+
+/// Check the compressed sizes a message's batch announces for its body.
+fn check_message(message: &arrow_ipc::Message<'_>, body: &[u8]) -> Result<(), MorlocError> {
+    if let Some(rb) = message.header_as_record_batch() {
+        check_compressed_sizes(&rb, body)?;
+    }
+    if let Some(rb) = message.header_as_dictionary_batch().and_then(|d| d.data()) {
+        check_compressed_sizes(&rb, body)?;
+    }
+    Ok(())
+}
+
+/// Decode an Arrow IPC file. Every block is bounds-checked against the
+/// bytes in hand before the decoder sees it: the footer's block table is
+/// what a damaged file lies about, and the stock reader allocates each
+/// block's announced size before reading it.
+fn read_ipc_file(bytes: &[u8]) -> Result<(SchemaRef, Vec<RecordBatch>), MorlocError> {
+    use arrow_buffer::Buffer;
+    use arrow_ipc::reader::{read_footer_length, FileDecoder};
+    let bad = |what: String| MorlocError::Other(format!("Failed to open Arrow IPC file: {}", what));
+    if bytes.len() < 10 {
+        return Err(bad("file is shorter than its trailer".into()));
+    }
+    let trailer_start = bytes.len() - 10;
+    let footer_len = read_footer_length(bytes[trailer_start..].try_into().unwrap()).map_err(|e| bad(e.to_string()))?;
+    let footer_start = trailer_start
+        .checked_sub(footer_len)
+        .ok_or_else(|| bad("footer length exceeds the file".into()))?;
+    let footer = arrow_ipc::root_as_footer(&bytes[footer_start..trailer_start]).map_err(|e| bad(format!("{:?}", e)))?;
+    let schema = Arc::new(arrow_ipc::convert::fb_to_schema(
+        footer.schema().ok_or_else(|| bad("footer carries no schema".into()))?,
+    ));
+    let buffer = Buffer::from(bytes);
+    // A block's bytes, bounds-checked and with its announced compressed
+    // sizes checked, before the decoder sees them.
+    let checked_block = |block: &arrow_ipc::Block| -> Result<Buffer, MorlocError> {
+        let off = usize::try_from(block.offset()).map_err(|_| bad("negative block offset".into()))?;
+        let meta = usize::try_from(block.metaDataLength()).map_err(|_| bad("negative block metadata length".into()))?;
+        let body = usize::try_from(block.bodyLength()).map_err(|_| bad("negative block body length".into()))?;
+        let len = meta.checked_add(body).ok_or_else(|| bad("block length overflows".into()))?;
+        let end = off.checked_add(len).ok_or_else(|| bad("block end overflows".into()))?;
+        if end > bytes.len() {
+            return Err(bad("a block lies outside the file".into()));
         }
+        let data = buffer.slice_with_length(off, len);
+        let (meta_bytes, body_bytes) = data.split_at(meta);
+        if let Ok(message) = arrow_ipc::root_as_message(message_flatbuffer(meta_bytes)) {
+            check_message(&message, body_bytes)?;
+        }
+        Ok(data)
     };
-    batches_to_shm(batches, file_schema, &rs, errmsg)
+    let mut decoder = FileDecoder::new(schema.clone(), footer.version());
+    for block in footer.dictionaries().iter().flatten() {
+        let data = checked_block(block)?;
+        decoder.read_dictionary(block, &data).map_err(|e| bad(format!("dictionary: {}", e)))?;
+    }
+    let mut batches = Vec::new();
+    for block in footer.recordBatches().iter().flatten() {
+        let data = checked_block(block)?;
+        if let Some(b) = decoder
+            .read_record_batch(block, &data)
+            .map_err(|e| MorlocError::Other(format!("Failed to read Arrow IPC batches: {}", e)))?
+        {
+            batches.push(b);
+        }
+    }
+    Ok((schema, batches))
+}
+
+/// Decode an Arrow IPC stream. The stream decoder only ever copies bytes
+/// it has, so the one thing to check ahead of it is what compressed
+/// buffers announce.
+fn read_ipc_stream(bytes: &[u8]) -> Result<(SchemaRef, Vec<RecordBatch>), MorlocError> {
+    use arrow_buffer::Buffer;
+    use arrow_ipc::reader::StreamDecoder;
+    let bad = |what: String| MorlocError::Other(format!("Failed to read Arrow IPC stream: {}", what));
+    let mut pos = 0usize;
+    let u32_at = |at: usize| -> Option<u32> { bytes.get(at..at + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap())) };
+    loop {
+        let mut meta_len = match u32_at(pos) { Some(n) => n, None => break };
+        pos += 4;
+        if meta_len == 0xFFFF_FFFF {
+            meta_len = match u32_at(pos) { Some(n) => n, None => break };
+            pos += 4;
+        }
+        if meta_len == 0 {
+            break;
+        }
+        let meta_end = match pos.checked_add(meta_len as usize).filter(|&e| e <= bytes.len()) { Some(e) => e, None => break };
+        let message = match arrow_ipc::root_as_message(&bytes[pos..meta_end]) { Ok(m) => m, Err(_) => break };
+        let body_end = match usize::try_from(message.bodyLength()).ok().and_then(|n| meta_end.checked_add(n)).filter(|&e| e <= bytes.len()) {
+            Some(e) => e,
+            None => break,
+        };
+        check_message(&message, &bytes[meta_end..body_end])?;
+        pos = body_end;
+    }
+    let mut decoder = StreamDecoder::new();
+    let mut buffer = Buffer::from(bytes);
+    let mut batches = Vec::new();
+    while let Some(b) = decoder.decode(&mut buffer).map_err(|e| bad(e.to_string()))? {
+        batches.push(b);
+    }
+    decoder.finish().map_err(|e| bad(e.to_string()))?;
+    let schema = decoder.schema().ok_or_else(|| bad("stream carries no schema".into()))?;
+    Ok((schema, batches))
 }
 
 /// The Arrow type a declared morloc column parses as. CSV cells are
@@ -317,23 +499,24 @@ fn inferred_csv_type(dt: &DataType) -> DataType {
     }
 }
 
-/// The schema a CSV is parsed with: declared columns first, parsed as
-/// declared; the header's other columns after, parsed as inferred and
-/// nullable. A declared column absent from the header is an error.
+/// The schema a CSV is parsed with: the header's columns in header order,
+/// since the parser binds fields to columns by position. A declared
+/// column is parsed as declared; any other is parsed as inferred and
+/// nullable. A declared column absent from the header is an error. The
+/// declared-first order the block carries is applied afterwards by
+/// `align_to_declared`.
 fn csv_parse_schema(rs: &Schema, inferred: &ArrowSchema) -> Result<ArrowSchema, MorlocError> {
-    let mut fields: Vec<Field> = Vec::with_capacity(inferred.fields().len());
-    for (k, p) in rs.keys.iter().zip(rs.parameters.iter()) {
+    for k in rs.keys.iter() {
         if inferred.index_of(k).is_err() {
             return Err(MorlocError::Other(format!("Declared column '{}' missing from CSV header", k)));
         }
-        fields.push(declared_field(k, p)?);
     }
-    let declared: std::collections::HashSet<&str> = rs.keys.iter().map(|s| s.as_str()).collect();
+    let mut fields: Vec<Field> = Vec::with_capacity(inferred.fields().len());
     for f in inferred.fields() {
-        if declared.contains(f.name().as_str()) {
-            continue;
+        match rs.keys.iter().position(|k| k == f.name()) {
+            Some(i) => fields.push(declared_field(f.name(), &rs.parameters[i])?),
+            None => fields.push(Field::new(f.name(), inferred_csv_type(f.data_type()), true)),
         }
-        fields.push(Field::new(f.name(), inferred_csv_type(f.data_type()), true));
     }
     Ok(ArrowSchema::new(fields))
 }
@@ -382,7 +565,16 @@ pub unsafe extern "C" fn morloc_csv_infer(
     out_info: *mut *mut c_char,
     errmsg: *mut *mut c_char,
 ) -> bool {
-    clear_errmsg(errmsg);
+    crate::error::guarded(errmsg, false, || morloc_csv_infer_impl(data, data_len, delimiter, out_info, errmsg))
+}
+
+unsafe fn morloc_csv_infer_impl(
+    data: *const u8,
+    data_len: usize,
+    delimiter: u8,
+    out_info: *mut *mut c_char,
+    errmsg: *mut *mut c_char,
+) -> bool {
     *out_info = ptr::null_mut();
     if data.is_null() || data_len == 0 {
         set_errmsg(errmsg, &MorlocError::Other("empty input".into()));
@@ -431,9 +623,18 @@ pub unsafe extern "C" fn read_csv_to_shm(
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> RelPtr {
+    crate::error::guarded(errmsg, shm::RELNULL, || read_csv_to_shm_impl(data, data_len, delimiter, schema, errmsg))
+}
+
+unsafe fn read_csv_to_shm_impl(
+    data: *const u8,
+    data_len: usize,
+    delimiter: u8,
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> RelPtr {
     use arrow_csv::ReaderBuilder;
 
-    clear_errmsg(errmsg);
     if data.is_null() || schema.is_null() || data_len == 0 {
         set_errmsg(errmsg, &MorlocError::Other("NULL data or schema".into()));
         return shm::RELNULL;
@@ -495,10 +696,18 @@ pub unsafe extern "C" fn read_parquet_to_shm(
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> RelPtr {
+    crate::error::guarded(errmsg, shm::RELNULL, || read_parquet_to_shm_impl(data, data_len, schema, errmsg))
+}
+
+unsafe fn read_parquet_to_shm_impl(
+    data: *const u8,
+    data_len: usize,
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> RelPtr {
     use bytes::Bytes;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-    clear_errmsg(errmsg);
     if data.is_null() || schema.is_null() || data_len == 0 {
         set_errmsg(errmsg, &MorlocError::Other("NULL data or schema".into()));
         return shm::RELNULL;
@@ -534,4 +743,157 @@ pub unsafe extern "C" fn read_parquet_to_shm(
         }
     };
     batches_to_shm(batches, file_schema, &rs, errmsg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow_array::{Int64Array, StringArray};
+    use arrow_schema::Field;
+
+    fn fixture() -> RecordBatch {
+        let schema = ArrowSchema::new(vec![
+            Field::new("x", DataType::Int64, true),
+            Field::new("s", DataType::Utf8, true),
+        ]);
+        RecordBatch::try_new(
+            Arc::new(schema),
+            vec![
+                Arc::new(Int64Array::from(vec![Some(1), None, Some(3)])),
+                Arc::new(StringArray::from(vec![Some("a"), None, Some("ccc")])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// A table schema declaring the given columns, as the C ABI takes it.
+    fn declared(cols: &[(&str, SerialType)]) -> *mut CSchema {
+        CSchema::from_rust(&Schema::table(
+            cols.iter().map(|(_, t)| Schema::primitive(*t)).collect(),
+            cols.iter().map(|(k, _)| k.to_string()).collect(),
+        ))
+    }
+
+    fn ipc_bytes() -> Vec<u8> {
+        let batch = fixture();
+        let mut buf = Vec::new();
+        let mut w = arrow_ipc::writer::FileWriter::try_new(&mut buf, &batch.schema()).unwrap();
+        w.write(&batch).unwrap();
+        w.finish().unwrap();
+        buf
+    }
+
+    fn parquet_bytes() -> Vec<u8> {
+        let batch = fixture();
+        let mut buf = Vec::new();
+        let mut w = parquet::arrow::ArrowWriter::try_new(&mut buf, batch.schema(), None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+        buf
+    }
+
+    /// Every outcome of a reader over a damaged file is an error or a
+    /// table, never an abort. The readers run under a C ABI where an
+    /// unwinding panic ends the process, so this test is its own witness:
+    /// an unguarded decoder panic kills the test binary.
+    fn survives_mutations(name: &str, valid: &[u8], read: &dyn Fn(&[u8], *const CSchema, *mut *mut c_char) -> RelPtr) {
+        let _guard = crate::init_test_shm();
+        let schema = declared(&[]);
+        let mut seed: u64 = 0x9E3779B97F4A7C15;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut errors = 0usize;
+        let rounds: usize = std::env::var("MORLOC_TEST_MUTATIONS").ok().and_then(|s| s.parse().ok()).unwrap_or(400);
+        for _ in 0..rounds {
+            let mut bytes = valid.to_vec();
+            let flips = 1 + (next() % 3) as usize;
+            for _ in 0..flips {
+                let at = (next() as usize) % bytes.len();
+                bytes[at] ^= (next() % 255 + 1) as u8;
+            }
+            let mut err: *mut c_char = ptr::null_mut();
+            let rel = read(&bytes, schema, &mut err);
+            if rel == shm::RELNULL {
+                assert!(!err.is_null(), "{}: a refused file must carry a message", name);
+                unsafe { libc::free(err as *mut libc::c_void) };
+                errors += 1;
+            } else {
+                assert!(err.is_null());
+                let base = shm::rel2abs(rel).unwrap();
+                assert!(unsafe { arrow_shm::BlockView::open(base as *const ArrowShmHeader) }.is_ok());
+                let _ = shm::shfree(base);
+            }
+        }
+        assert!(errors > 0, "{}: no mutation was refused", name);
+        unsafe { CSchema::free(schema) };
+    }
+
+    #[test]
+    fn damaged_arrow_ipc_is_refused_not_fatal() {
+        survives_mutations("arrow ipc", &ipc_bytes(), &|b, s, e| unsafe {
+            read_arrow_ipc_to_shm(b.as_ptr(), b.len(), s, e)
+        });
+    }
+
+    #[test]
+    fn damaged_parquet_is_refused_not_fatal() {
+        survives_mutations("parquet", &parquet_bytes(), &|b, s, e| unsafe {
+            read_parquet_to_shm(b.as_ptr(), b.len(), s, e)
+        });
+    }
+
+    fn read_csv(text: &[u8], schema: *mut CSchema) -> RecordBatch {
+        let mut err: *mut c_char = ptr::null_mut();
+        let rel = unsafe { read_csv_to_shm(text.as_ptr(), text.len(), b',', schema, &mut err) };
+        assert!(err.is_null(), "{}", unsafe { std::ffi::CStr::from_ptr(err) }.to_string_lossy());
+        let base = shm::rel2abs(rel).unwrap();
+        unsafe { arrow_shm::shm_to_batch(base as *const ArrowShmHeader) }.unwrap()
+    }
+
+    #[test]
+    fn csv_columns_bind_by_header_name_not_position() {
+        let _guard = crate::init_test_shm();
+        // Header order opposite to the declaration.
+        let schema = declared(&[("age", SerialType::Sint64), ("name", SerialType::String)]);
+        let back = read_csv(b"name,age\nalice,30\nbob,41\n", schema);
+        unsafe { CSchema::free(schema) };
+        assert_eq!(back.schema().field(0).name(), "age");
+        assert_eq!(back.schema().field(1).name(), "name");
+        let age = back.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(age.values(), &[30, 41]);
+        let name = back.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(name.value(0), "alice");
+
+        // Two same-typed columns: a positional binding would swap them
+        // without an error.
+        let schema = declared(&[("last", SerialType::String), ("first", SerialType::String)]);
+        let back = read_csv(b"first,last\nada,lovelace\n", schema);
+        unsafe { CSchema::free(schema) };
+        assert_eq!(back.schema().field(0).name(), "last");
+        let last = back.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(last.value(0), "lovelace");
+        let first = back.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(first.value(0), "ada");
+
+        // An undeclared column keeps its header position after the
+        // declared ones.
+        let schema = declared(&[("y", SerialType::Sint64)]);
+        let back = read_csv(b"x,y,z\n1,2,3\n", schema);
+        unsafe { CSchema::free(schema) };
+        let schema_back = back.schema();
+        let names: Vec<&str> = schema_back.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(names, ["y", "x", "z"]);
+    }
+
+    #[test]
+    fn damaged_csv_is_refused_not_fatal() {
+        let csv = b"x,s\n1,a\n2,\"b,b\"\n3,ccc\n";
+        survives_mutations("csv", csv, &|b, s, e| unsafe {
+            read_csv_to_shm(b.as_ptr(), b.len(), b',', s, e)
+        });
+    }
 }

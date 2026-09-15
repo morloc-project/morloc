@@ -1316,8 +1316,9 @@ fn run_remote_command(
 
     die_on_top_level_err(result_ptr, &return_schema, c_schema);
 
-    // Check if response is Arrow format
-    let is_arrow = resp_header.is_data() && unsafe { resp_header.command.data.format } == packet::PACKET_FORMAT_ARROW;
+    // A table-typed result is a block whatever packet form carried it
+    // (a reference, or a file a cached result was read back from).
+    let is_arrow = return_schema.serial_type == morloc_runtime_types::schema::SerialType::Table;
 
     // Print using the C library for correct output. Top-level null-ish
     // suppression (Unit and Optional-None producing empty stdout) is
@@ -1690,8 +1691,8 @@ pub(crate) fn print_result_c(
             }
         }
         OutputFormat::Arrow | OutputFormat::Parquet | OutputFormat::Csv => {
-            // Table-only output formats. The pool returns an Arrow SHM
-            // pointer (PACKET_FORMAT_ARROW); we serialize from there.
+            // Table-only output formats: the result is a table block,
+            // serialized from there.
             if !is_arrow {
                 eprintln!(
                     "Error: --format=arrow|parquet|csv requires a Table return type"

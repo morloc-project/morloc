@@ -822,11 +822,10 @@ where
             }
         }
         SerialType::Table => {
-            // Arrow IPC tables are a single relptr to an out-of-line Arrow
-            // buffer. Properly deep-copying requires reproducing the buffer,
-            // which is not implemented yet.
+            // A table's value is a whole block rather than a slot of
+            // `width` bytes, so it has no place inside another value.
             return Err(MorlocError::Other(
-                "voidstar::deep_copy: Table type not yet supported".into(),
+                "voidstar::deep_copy: a table cannot be copied into a slot".into(),
             ));
         }
         _ => {
@@ -860,6 +859,14 @@ pub fn flatten_into(
     let total = crate::ffi::calc_voidstar_size_inner(data, schema)?;
     buf.clear();
     buf.resize(total, 0);
+
+    if schema.serial_type == SerialType::Table {
+        // A table's flat form is its block, already self-contained: every
+        // offset inside it is relative to the block start.
+        // SAFETY: `total` is the block's checked size.
+        unsafe { std::ptr::copy_nonoverlapping(data, buf.as_mut_ptr(), total) };
+        return Ok(());
+    }
 
     // SAFETY: data points to at least schema.width bytes in SHM; buf has total >= schema.width bytes.
     unsafe { std::ptr::copy_nonoverlapping(data, buf.as_mut_ptr(), schema.width) };

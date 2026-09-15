@@ -854,16 +854,11 @@ fn hash_voidstar_walk(
                 hash_voidstar_inner(data, target, seed, env)
             }
             SerialType::Table => {
-                // An Arrow buffer reached through an Array header, so the
-                // width bytes are again a size plus a pointer. Hash the
-                // buffer itself.
-                let arr = &*(data as *const shm::Array);
-                let seed = mix(seed, arr.size as u64);
-                if arr.size == 0 || arr.data == shm::RELNULL {
-                    return Ok(hash::xxh64_with_seed(&[], seed));
-                }
-                let buf = shm::rel2abs(arr.data)?;
-                let bytes = std::slice::from_raw_parts(buf, arr.size);
+                // `data` is the table's block. Its bytes are its value:
+                // every offset is block-relative and the padding is
+                // zeroed, so equal tables produce equal blocks.
+                let n = crate::arrow_shm::block_size(data as *const crate::arrow_shm::ArrowShmHeader)?;
+                let bytes = std::slice::from_raw_parts(data, n);
                 Ok(hash::xxh64_with_seed(bytes, seed))
             }
             // Everything below is a fixed-width scalar holding no pointer,
@@ -1267,6 +1262,39 @@ mod hash_pointer_tests {
             hash_of("0", "?i4"),
             "absent must differ from a present zero"
         );
+    }
+
+    #[test]
+    fn table_hash_covers_the_block_and_round_trips_through_a_flat_packet() {
+        use arrow_array::{Int64Array, RecordBatch};
+        use arrow_schema::{DataType, Field, Schema as ArrowSchema};
+        use std::sync::Arc;
+        let _shm = crate::init_test_shm();
+        let schema = parse_schema("T").unwrap();
+        let table = |xs: Vec<i64>| {
+            let s = ArrowSchema::new(vec![Field::new("x", DataType::Int64, true)]);
+            let b = RecordBatch::try_new(Arc::new(s), vec![Arc::new(Int64Array::from(xs))]).unwrap();
+            let rel = crate::arrow_shm::write_batch(&b, None).unwrap();
+            (b, shm::rel2abs(rel).unwrap())
+        };
+        let hash = |p: *mut u8| {
+            let mut env: crate::recur::RecurEnv = Vec::new();
+            hash_voidstar_inner(p as *const u8, &schema, 0, &mut env).unwrap()
+        };
+        let (b1, t1) = table(vec![1, 2, 3]);
+        let (_, t2) = table(vec![1, 2, 3]);
+        let (_, t3) = table(vec![1, 2, 4]);
+        assert_eq!(hash(t1), hash(t2), "equal tables in different blocks must agree");
+        assert_ne!(hash(t1), hash(t3));
+
+        // The flat form is the block itself, and reading it back yields an
+        // equal table in a fresh block.
+        let flat = crate::voidstar::flatten_to_buffer(t1, &schema).unwrap();
+        assert_eq!(flat.len(), unsafe { crate::arrow_shm::block_size(t1 as *const _) }.unwrap());
+        let back = crate::voidstar::read_binary(&flat, &schema).unwrap();
+        let batch = unsafe { crate::arrow_shm::shm_to_batch(back as *const _) }.unwrap();
+        assert_eq!(batch, b1);
+        assert_eq!(hash(back), hash(t1));
     }
 
     #[test]

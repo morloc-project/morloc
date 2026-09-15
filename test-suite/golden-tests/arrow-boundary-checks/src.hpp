@@ -31,6 +31,8 @@ inline std::string describeCpp(const mlc::ArrowTable& t) {
             char buf[64];
             if (f == "l" || f == "i" || f == "s" || f == "c") {
                 snprintf(buf, sizeof buf, "%lld", (long long)ArrowArrayViewGetIntUnsafe(cv, r)); out += buf;
+            } else if (f == "L" || f == "I" || f == "S" || f == "C") {
+                snprintf(buf, sizeof buf, "%llu", (unsigned long long)ArrowArrayViewGetUIntUnsafe(cv, r)); out += buf;
             } else if (f == "g" || f == "f") {
                 snprintf(buf, sizeof buf, "%g", ArrowArrayViewGetDoubleUnsafe(cv, r)); out += buf;
             } else if (f == "u" || f == "U") {

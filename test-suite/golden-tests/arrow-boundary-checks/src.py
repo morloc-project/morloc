@@ -48,3 +48,8 @@ def describe(t):
 def writeSnappy(path):
     pq.write_table(pa.table({"x": [1, 2, 3], "y": ["a", "b", "c"]}), path)
     return path
+
+
+def numericIds(n):
+    # Declared {id = Str}; an identifier stored as a number.
+    return pa.RecordBatch.from_arrays([pa.array([7, 8], pa.int64())], names=["id"])

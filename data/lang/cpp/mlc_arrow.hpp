@@ -12,7 +12,6 @@
 // User code reads and builds columns with <nanoarrow/nanoarrow.h>.
 
 #include "morloc.h"
-#include <cstring>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -23,14 +22,20 @@ namespace mlc {
 class ArrowTable {
 public:
     // Take ownership of C Data Interface structs (and their release
-    // callbacks). The sources are zeroed so the caller cannot release
-    // them a second time.
-    ArrowTable(struct ArrowSchema schema, struct ArrowArray array)
-        : impl_(std::make_shared<Impl>(schema, array, nullptr))
+    // callbacks) through pointers. The sources are marked released, so a
+    // caller that releases them afterwards releases nothing.
+    ArrowTable(struct ArrowSchema* schema, struct ArrowArray* array)
+        : impl_(std::make_shared<Impl>(*schema, *array, nullptr))
     {
-        memset(&schema, 0, sizeof(schema));
-        memset(&array, 0, sizeof(array));
+        schema->release = nullptr;
+        array->release = nullptr;
     }
+
+    // Take ownership of C Data Interface structs passed by value. The
+    // copies passed in are consumed; the caller's originals still carry
+    // their release callbacks and must not be released again.
+    ArrowTable(struct ArrowSchema schema, struct ArrowArray array)
+        : impl_(std::make_shared<Impl>(schema, array, nullptr)) {}
 
     ArrowTable(const ArrowTable&) = default;
     ArrowTable(ArrowTable&&) noexcept = default;
@@ -55,7 +60,7 @@ public:
             free(err);
             throw std::runtime_error(msg);
         }
-        return ArrowTable(as, aa);
+        return ArrowTable(&as, &aa);
     }
 
     // Copies of this table's structs whose release does nothing, for
@@ -71,7 +76,14 @@ public:
     // A table over structs that alias this table's buffers -- typically
     // built from lend() copies with a name or a slice changed. The result
     // owns the given structs and keeps this table alive as long as it
-    // lives, so the aliased memory stays valid.
+    // lives, so the aliased memory stays valid. The pointer form marks the
+    // sources released; the by-value form consumes the copies it is given.
+    ArrowTable derive(struct ArrowSchema* schema, struct ArrowArray* array) const {
+        ArrowTable t(std::make_shared<Impl>(*schema, *array, impl_));
+        schema->release = nullptr;
+        array->release = nullptr;
+        return t;
+    }
     ArrowTable derive(struct ArrowSchema schema, struct ArrowArray array) const {
         return ArrowTable(std::make_shared<Impl>(schema, array, impl_));
     }
@@ -96,7 +108,17 @@ public:
             free(err);
             throw std::runtime_error(msg);
         }
-        *this = from_shm(resolve(rp));
+        const arrow_shm_header_t* hdr = resolve(rp);
+        try {
+            *this = from_shm(hdr);
+        } catch (...) {
+            // The block is not yet tracked by anyone: release it here or
+            // it is held for the life of the program.
+            char* ferr = nullptr;
+            shfree((absptr_t)hdr, &ferr);
+            if (ferr) free(ferr);
+            throw;
+        }
         return rp;
     }
 

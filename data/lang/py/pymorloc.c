@@ -2297,7 +2297,11 @@ static relptr_t py_export_arrow_to_shm(PyObject* obj, const Schema* schema, char
 }
 
 
-// Transforms a value into a message ready for the socket
+// Transforms a value into a message ready for the socket. With the
+// optional third argument true the packet is self-contained -- the value
+// travels inside it rather than as a reference to a shared-memory block
+// -- for a value that must outlive this dispatch's blocks, such as a
+// closure's captured value applied back later from another pool.
 static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
     uint8_t* packet = NULL;
     Schema* schema = NULL;
@@ -2307,8 +2311,9 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
 
     PyObject* obj;
     const char* schema_str;
+    int self_contained = 0;
 
-    PARSE_ARGS_OR_ABORT(args, "Os", &obj, &schema_str);
+    PARSE_ARGS_OR_ABORT(args, "Os|p", &obj, &schema_str, &self_contained);
 
     schema = PyTRY(parse_schema, schema_str);
 
@@ -2329,19 +2334,23 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
             return NULL;
         }
 
-        packet = make_arrow_data_packet(relptr, schema);
-        if (!packet) {
-            free_schema(schema);
-            PyINTERNAL_ABORT("Failed to create arrow data packet");
-        }
-
-        // Track shm for cleanup
+        // The block is this pool's own until the next dispatch releases it.
         char* resolve_err = NULL;
         void* shm_ptr = rel2abs(relptr, &resolve_err);
         if (resolve_err) { free(resolve_err); }
         if (shm_ptr) {
             shm_tracker_push((absptr_t)shm_ptr, NULL);
-            tracked = true;
+        }
+
+        if (self_contained) {
+            packet = PyTRY_INFRA(make_inline_data_packet, shm_ptr, schema);
+        } else {
+            packet = make_arrow_data_packet(relptr, schema);
+        }
+        // The `error:` label frees the schema; freeing it here as well
+        // would free it twice.
+        if (!packet) {
+            PyINTERNAL_ABORT("Failed to create arrow data packet");
         }
 
         packet_size = PyTRY(morloc_packet_size, packet);
@@ -2357,7 +2366,11 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
     // convert to a relative pointer conserved between language servers
     relptr_t relptr = PyTRY(abs2rel, voidstar);
 
-    packet = PyTRY_INFRA(make_data_packet_auto, voidstar, relptr, schema);
+    if (self_contained) {
+        packet = PyTRY_INFRA(make_inline_data_packet, voidstar, schema);
+    } else {
+        packet = PyTRY_INFRA(make_data_packet_auto, voidstar, relptr, schema);
+    }
 
     {
         const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
@@ -2419,27 +2432,52 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
 
     schema = PyTRY(parse_schema, schema_str)
 
-    // Arrow dispatch: a table-typed value is an Arrow packet and vice
-    // versa; either half without the other is a routing error.
-    if (format == PACKET_FORMAT_ARROW || schema->type == MORLOC_TABLE) {
-        if (format != PACKET_FORMAT_ARROW) {
-            free_schema(schema);
-            PyRAISE("table-typed value did not arrive as an Arrow packet");
+    // Arrow dispatch: a table-typed value is a block. It arrives by
+    // reference (an Arrow packet) or in a form the runtime materializes
+    // into a block of this pool's own (a cached result read back from a
+    // file, a captured value carried inline). Every error below leaves
+    // `schema` to the `error:` label; freeing it here as well would free
+    // it twice.
+    if (schema->type == MORLOC_TABLE) {
+        if (format == PACKET_FORMAT_ARROW && source != PACKET_SOURCE_RPTR) {
+            PyRAISE("Arrow packet does not name a shared-memory block");
         }
-        if (schema->type != MORLOC_TABLE) {
-            free_schema(schema);
-            PyRAISE("Arrow packet received for a non-table type");
-        }
+        bool materialized = (source != PACKET_SOURCE_RPTR);
         voidstar = PyTRY_INFRA(get_morloc_data_packet_value, (uint8_t*)packet, schema);
 
         const arrow_shm_header_t* arrow_hdr = (const arrow_shm_header_t*)voidstar;
 
         char* validate_err = NULL;
         if (arrow_validate(arrow_hdr, schema, &validate_err) != 0) {
-            free_schema(schema);
+            if (materialized) {
+                char* ferr = NULL;
+                shfree((absptr_t)voidstar, &ferr);
+                if (ferr) { free(ferr); }
+            }
             PyErr_SetString(PyExc_RuntimeError, validate_err ? validate_err : "arrow table failed validation");
             free(validate_err);
-            return NULL;
+            goto error;
+        }
+
+        // Hold the block for as long as pyarrow references its buffers,
+        // releasing it at the next dispatch. A table that arrived by
+        // reference needs one taken on this pool's behalf; the sender
+        // donated one before sending, so a refusal means the block is
+        // gone and the view would read scrubbed memory. A table
+        // materialized here is already this pool's own.
+        if (!materialized) {
+            char* incref_err = NULL;
+            bool acquired = shincref((absptr_t)voidstar, &incref_err);
+            if (incref_err) { free(incref_err); }
+            if (!acquired) {
+                PyINTERNAL_ABORT("received table's shared-memory block is no longer live");
+            }
+        }
+        shm_tracker_push((absptr_t)voidstar, NULL);
+        {
+            char* rerr = NULL;
+            relptr_t rel = abs2rel(voidstar, &rerr);
+            if (rerr) { free(rerr); } else { arrow_borrow_register((const uint8_t*)voidstar, rel); }
         }
 
         struct ArrowSchema arrow_schema;
@@ -2447,18 +2485,15 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         char* arrow_err = NULL;
         arrow_from_shm(arrow_hdr, &arrow_schema, &arrow_array, &arrow_err);
         if (arrow_err) {
-            free_schema(schema);
             PyErr_SetString(PyExc_RuntimeError, arrow_err);
             free(arrow_err);
-            return NULL;
+            goto error;
         }
 
-        // Import via pyarrow RecordBatch.from_buffers or _import_from_c
         PyObject* pyarrow_mod = PyImport_ImportModule("pyarrow");
         if (!pyarrow_mod) {
             if (arrow_schema.release) arrow_schema.release(&arrow_schema);
             if (arrow_array.release) arrow_array.release(&arrow_array);
-            free_schema(schema);
             PyRAISE("pyarrow is required for arrow-typed data");
         }
 
@@ -2467,37 +2502,25 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         if (!rb_class) {
             if (arrow_schema.release) arrow_schema.release(&arrow_schema);
             if (arrow_array.release) arrow_array.release(&arrow_array);
-            free_schema(schema);
             PyINTERNAL_ABORT("Failed to get pyarrow.RecordBatch");
         }
 
-        // Use RecordBatch._import_from_c(array_ptr, schema_ptr)
+        // RecordBatch._import_from_c(array_ptr, schema_ptr) moves both
+        // structs and, on every path known, releases them itself when it
+        // fails. The releases below are then no-ops; they hold only if an
+        // import fails without releasing.
         obj = PyObject_CallMethod(rb_class, "_import_from_c",
             "nn", (Py_ssize_t)&arrow_array, (Py_ssize_t)&arrow_schema);
         Py_DECREF(rb_class);
-
-        // Keep the block alive while pyarrow references its buffers. A table
-        // that arrived by reference needs one taken on this pool's behalf; a
-        // table materialized here is already this pool's own and taking a
-        // second reference would leave it permanently held. Either way the
-        // tracker releases exactly one at the next dispatch, and a refused
-        // acquire means nothing was taken, so nothing is tracked.
-        bool arrow_owned = true;
-        if (source == PACKET_SOURCE_RPTR) {
-            char* incref_err = NULL;
-            arrow_owned = shincref((absptr_t)voidstar, &incref_err);
-            if (incref_err) { free(incref_err); }
-        }
-        if (arrow_owned) {
-            shm_tracker_push((absptr_t)voidstar, NULL);
-            char* rerr = NULL;
-            relptr_t rel = abs2rel(voidstar, &rerr);
-            if (rerr) { free(rerr); } else { arrow_borrow_register((const uint8_t*)voidstar, rel); }
-        }
+        if (arrow_schema.release) arrow_schema.release(&arrow_schema);
+        if (arrow_array.release) arrow_array.release(&arrow_array);
 
         free_schema(schema);
         if (!obj) return NULL;
         return obj;
+    }
+    if (format == PACKET_FORMAT_ARROW) {
+        PyRAISE("Arrow packet received for a non-table type");
     }
 
     // Fast path: inline voidstar -- read directly from packet, no SHM
@@ -2589,16 +2612,20 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
 
     voidstar = PyTRY_INFRA(get_morloc_data_packet_value, (uint8_t*)packet, schema);
 
-    // For RPTR data, increment refcount so the owner's tracker flush
-    // won't destroy data we may still need (e.g. forwarded packets).
+    // A value that arrived by reference needs a reference of this pool's
+    // own so the sender's flush cannot reclaim it while it is read or
+    // forwarded. The sender donated one before sending, so a refusal
+    // means the block is already gone.
     if (is_rptr) {
         char* incref_err = NULL;
-        if (shincref((absptr_t)voidstar, &incref_err)) {
-            // Track for deferred decref (tracker takes schema ownership)
-            shm_tracker_push((absptr_t)voidstar, schema);
-            tracked = true;
-        }
+        bool acquired = shincref((absptr_t)voidstar, &incref_err);
         if (incref_err) { free(incref_err); }
+        if (!acquired) {
+            PyINTERNAL_ABORT("received value's shared-memory block is no longer live");
+        }
+        // Track for deferred decref (tracker takes schema ownership)
+        shm_tracker_push((absptr_t)voidstar, schema);
+        tracked = true;
     } else {
         // A payload that did not arrive by reference was materialized into a
         // block of this pool's own, and nothing else will free it. It is

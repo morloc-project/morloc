@@ -241,9 +241,13 @@ static void _release_packet_shm(const uint8_t* packet) {
     }
 }
 
-// Transforms a serialized value into a message ready for the socket
+// Transforms a serialized value into a message ready for the socket. A
+// self-contained packet carries the value inside it rather than a
+// reference to a shared-memory block, for a value that must outlive this
+// dispatch's blocks, such as a closure's captured value applied back later
+// from another pool.
 template <typename T>
-uint8_t* _put_value(const T& value, Schema* schema) {
+uint8_t* _put_value(const T& value, Schema* schema, bool self_contained = false) {
     if constexpr (std::is_same_v<T, mlc::ArrowTable>) {
         // Arrow export: move table data into SHM, build packet.
         // const_cast is safe here: the value is always a temporary from
@@ -251,13 +255,20 @@ uint8_t* _put_value(const T& value, Schema* schema) {
         mlc::ArrowTable& tbl = const_cast<mlc::ArrowTable&>(value);
         relptr_t relptr = tbl.move_to_shm(schema);
 
-        uint8_t* packet = make_arrow_data_packet(relptr, schema);
-        if (!packet) { MLC_INTERNAL_ABORT("failed to create arrow data packet"); }
-
+        // The block is this pool's own until the next dispatch releases it.
         char* err = nullptr;
         void* shm_ptr = rel2abs(relptr, &err);
         if (err) { free(err); }
         if (shm_ptr) { _shm_tracker.push_back({(absptr_t)shm_ptr}); }
+
+        uint8_t* packet = nullptr;
+        if (self_contained) {
+            packet = make_inline_data_packet(shm_ptr, schema, &err);
+            if (err) { PROPAGATE_INFRA_ERROR(err); }
+        } else {
+            packet = make_arrow_data_packet(relptr, schema);
+        }
+        if (!packet) { MLC_INTERNAL_ABORT("failed to create arrow data packet"); }
         return packet;
     } else {
         // Arrow dispatch: schema marker `T` (MORLOC_TABLE) routes through
@@ -272,7 +283,9 @@ uint8_t* _put_value(const T& value, Schema* schema) {
             relptr_t relptr = abs2rel_cpp(voidstar);
 
             char* errmsg = nullptr;
-            uint8_t* packet = make_data_packet_auto(voidstar, relptr, schema, &errmsg);
+            uint8_t* packet = self_contained
+                ? make_inline_data_packet(voidstar, schema, &errmsg)
+                : make_data_packet_auto(voidstar, relptr, schema, &errmsg);
             if (errmsg) {
                 shfree_cpp(voidstar);
                 PROPAGATE_INFRA_ERROR(errmsg);
@@ -306,13 +319,20 @@ T _get_value(const uint8_t* packet, Schema* schema){
     uint8_t format = header->command.data.format;
 
     if constexpr (std::is_same_v<T, mlc::ArrowTable>) {
-        // Arrow import: packet -> validate -> arrow_from_shm -> ArrowTable
-        if (format != PACKET_FORMAT_ARROW) {
-            MLC_INTERNAL_ABORT("table-typed value did not arrive as an Arrow packet");
+        // A table is a block. It arrives by reference (an Arrow packet) or
+        // in a form the runtime materializes into a block of this pool's
+        // own (a cached result read back from a file, a captured value
+        // carried inline).
+        if (format == PACKET_FORMAT_ARROW && source != PACKET_SOURCE_RPTR) {
+            MLC_INTERNAL_ABORT("Arrow packet does not name a shared-memory block");
         }
+        bool materialized = (source != PACKET_SOURCE_RPTR);
         char* errmsg = nullptr;
         uint8_t* raw = get_morloc_data_packet_value(packet, schema, &errmsg);
         if (errmsg) { PROPAGATE_INFRA_ERROR(errmsg); }
+        // A materialized block is released here unless the tracker takes
+        // it; a referenced one belongs to its sender until acquired.
+        ShmOwned owned(materialized ? (void*)raw : nullptr);
 
         const arrow_shm_header_t* hdr = (const arrow_shm_header_t*)raw;
         char* verr = nullptr;
@@ -321,31 +341,34 @@ T _get_value(const uint8_t* packet, Schema* schema){
             free(verr);
             throw MorlocException(msg);
         }
-        struct ArrowSchema as;
-        struct ArrowArray aa;
-        char* aerr = nullptr;
-        arrow_from_shm(hdr, &as, &aa, &aerr);
-        if (aerr) { PROPAGATE_INFRA_ERROR(aerr); }
 
-        // A table that arrived by reference needs one taken on this pool's
-        // behalf; a table materialized here is already this pool's own and
-        // taking a second reference would leave it permanently held. Either
-        // way the tracker releases exactly one at the next dispatch. A
-        // refused acquire means nothing was taken, so nothing is tracked.
-        bool arrow_owned = true;
-        if (source == PACKET_SOURCE_RPTR) {
+        // Hold the block for as long as the table references its buffers,
+        // releasing it at the next dispatch. A table that arrived by
+        // reference needs one taken on this pool's behalf; the sender
+        // donated one before sending, so a refusal means the block is gone
+        // and the view would read scrubbed memory.
+        if (!materialized) {
             char* ierr = nullptr;
-            arrow_owned = shincref((absptr_t)raw, &ierr);
+            bool acquired = shincref((absptr_t)raw, &ierr);
             if (ierr) { free(ierr); }
+            if (!acquired) {
+                MLC_INTERNAL_ABORT("received table's shared-memory block is no longer live");
+            }
         }
-        if (arrow_owned) {
-            _shm_tracker.push_back({(absptr_t)raw});
+        _shm_tracker.push_back({(absptr_t)raw});
+        owned.ptr = nullptr;
+        {
             char* rerr = nullptr;
             relptr_t rel = abs2rel((absptr_t)raw, &rerr);
             if (rerr) { free(rerr); } else { arrow_borrow_register(raw, rel); }
         }
 
-        return mlc::ArrowTable(std::move(as), std::move(aa));
+        struct ArrowSchema as;
+        struct ArrowArray aa;
+        char* aerr = nullptr;
+        arrow_from_shm(hdr, &as, &aa, &aerr);
+        if (aerr) { PROPAGATE_INFRA_ERROR(aerr); }
+        return mlc::ArrowTable(&as, &aa);
     } else {
         if (format == PACKET_FORMAT_ARROW) {
             MLC_INTERNAL_ABORT("arrow data but C++ type is not mlc::ArrowTable");
@@ -457,14 +480,18 @@ T _get_value(const uint8_t* packet, Schema* schema){
         // sender.
         ShmOwned owned(is_rptr ? nullptr : (void*)voidstar);
 
-        // For RPTR data, increment refcount so the owner's tracker flush
-        // won't destroy data we may still need (e.g. forwarded packets).
+        // A value that arrived by reference needs a reference of this
+        // pool's own so the sender's flush cannot reclaim it while it is
+        // read or forwarded. The sender donated one before sending, so a
+        // refusal means the block is already gone.
         if (is_rptr) {
             char* incref_err = NULL;
-            if (shincref((absptr_t)voidstar, &incref_err)) {
-                _shm_tracker.push_back({(absptr_t)voidstar});
-            }
+            bool acquired = shincref((absptr_t)voidstar, &incref_err);
             if (incref_err) { free(incref_err); }
+            if (!acquired) {
+                MLC_INTERNAL_ABORT("received value's shared-memory block is no longer live");
+            }
+            _shm_tracker.push_back({(absptr_t)voidstar});
         }
 
         T* dummy = nullptr;
@@ -1027,27 +1054,20 @@ struct MorlocClosure<R(A...)> {
 };
 
 // Serialize one captured native value into a SELF-CONTAINED packet for the
-// closure wire form. The inline threshold is forced to max so the value is
-// embedded in the packet (PACKET_SOURCE_MESG) rather than left as a shared-
-// memory relptr (PACKET_SOURCE_RPTR): a relptr packet dangles once the
-// producing manifold's SHM is reclaimed, which happens before the crossed
-// closure is applied back, silently losing the captured data. The returned
-// byte vector owns its bytes and is portable across pools (and --no-shm).
+// closure wire form: the value is embedded in the packet
+// (PACKET_SOURCE_MESG) rather than left as a shared-memory relptr
+// (PACKET_SOURCE_RPTR), which would dangle once the producing manifold's
+// SHM is reclaimed -- before the crossed closure is applied back. The
+// returned byte vector owns its bytes and is portable across pools (and
+// --no-shm).
 template <typename T>
 std::vector<uint8_t> _mlc_reify_capture(const T& value, Schema* schema) {
-    uint64_t saved = morloc_get_inline_threshold();
-    morloc_set_inline_threshold(INT64_MAX);
-    uint8_t* packet;
-    try {
-        packet = _put_value(value, schema);
-    } catch (...) {
-        morloc_set_inline_threshold((int64_t)saved);
-        throw;
-    }
-    morloc_set_inline_threshold((int64_t)saved);
+    uint8_t* packet = _put_value(value, schema, true);
     const morloc_packet_header_t* h = (const morloc_packet_header_t*)packet;
     size_t n = sizeof(morloc_packet_header_t) + h->offset + h->length;
-    return std::vector<uint8_t>(packet, packet + n);
+    std::vector<uint8_t> bytes(packet, packet + n);
+    free(packet);
+    return bytes;
 }
 
 // Reify a crossing closure into its wire tuple (home_language, mid, captured).

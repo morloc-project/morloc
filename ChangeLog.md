@@ -2,6 +2,13 @@ Unreleased
 ----------
 
  * tier generated-program help by repeating -h (-h, -hh, -hhh)
+ * harden the bare `Table`
+   - CSV columns bind to a declared schema by header name, not position
+   - a JSON table literal whose numbers do not fit the declared width is refused
+   - a `Str` column accepts numeric data, rendered as text
+   - `@cache` works over tables, and a closure may capture one
+   - a damaged Arrow, Parquet or CSV file is refused instead of ending the pool
+   - a declared table column must be a primitive, `Str`, or an optional of one
 
 0.105.2 [2026-09-14]
 --------------------

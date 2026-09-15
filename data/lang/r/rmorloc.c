@@ -60,6 +60,16 @@
 
 #define MORLOC_ERROR(msg, ...) error(msg, ##__VA_ARGS__);
 
+// Raise an R error from a heap-allocated message the runtime handed back,
+// freeing it first: error() does not return, so the text is copied into
+// this frame before the longjmp.
+static void morloc_error_take(const char* prefix, char* heap_msg) {
+    char msg[1024];
+    snprintf(msg, sizeof(msg), "%s%s", prefix, heap_msg ? heap_msg : "");
+    free(heap_msg);
+    error("%s", msg);
+}
+
 // Reject a voidstar carrying an interior NUL in a Str slot. `guard` is
 // codegen's per-call decision; `cleanup` releases whatever the caller owns
 // before the longjmp out of error(). The path returned by the runtime names
@@ -2315,10 +2325,17 @@ SEXP morloc_close_socket(SEXP socket_id_r) {
 
 
 // put_value
-SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
+// With `self_contained_r` true the packet embeds the value rather than
+// referencing a shared-memory block, for a value that must outlive this
+// dispatch's blocks, such as a closure's captured value applied back
+// later from another pool.
+SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r, SEXP self_contained_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
         MORLOC_INTERNAL_ABORT("schema must be a single string");
     }
+    bool self_contained = (TYPEOF(self_contained_r) == LGLSXP && LENGTH(self_contained_r) == 1)
+                        ? (LOGICAL(self_contained_r)[0] == TRUE)
+                        : false;
 
     const char* schema_cstr = CHAR(STRING_ELT(schema_str_r, 0));
 
@@ -2375,7 +2392,12 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
             shm_tracker_push((absptr_t)shm_ptr, NULL);
         }
 
-        uint8_t* packet = make_arrow_data_packet(relptr, schema);
+        uint8_t* packet = NULL;
+        if (self_contained) {
+            packet = R_TRY_WITH_INFRA(free_schema(schema), make_inline_data_packet, shm_ptr, schema);
+        } else {
+            packet = make_arrow_data_packet(relptr, schema);
+        }
         if (!packet) {
             free_schema(schema);
             MORLOC_INTERNAL_ABORT("Failed to create arrow data packet");
@@ -2398,7 +2420,12 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
 
     relptr_t relptr = R_TRY_WITH(free_schema(schema), abs2rel, voidstar);
 
-    uint8_t* packet = R_TRY_WITH_INFRA(free_schema(schema), make_data_packet_auto, voidstar, relptr, schema);
+    uint8_t* packet = NULL;
+    if (self_contained) {
+        packet = R_TRY_WITH_INFRA(free_schema(schema), make_inline_data_packet, voidstar, schema);
+    } else {
+        packet = R_TRY_WITH_INFRA(free_schema(schema), make_data_packet_auto, voidstar, relptr, schema);
+    }
 
     const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
     bool tracked = false;
@@ -3053,25 +3080,51 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
     Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
     free(schema_str);
 
-    // Arrow dispatch: a table-typed value is an Arrow packet and vice
-    // versa; either half without the other is a routing error.
-    if (format == PACKET_FORMAT_ARROW || schema->type == MORLOC_TABLE) {
-        if (format != PACKET_FORMAT_ARROW) {
+    // Arrow dispatch: a table-typed value is a block. It arrives by
+    // reference (an Arrow packet) or in a form the runtime materializes
+    // into a block of this pool's own (a cached result read back from a
+    // file, a captured value carried inline).
+    if (schema->type == MORLOC_TABLE) {
+        if (format == PACKET_FORMAT_ARROW && source != PACKET_SOURCE_RPTR) {
             free_schema(schema);
-            MORLOC_ERROR("table-typed value did not arrive as an Arrow packet");
+            MORLOC_ERROR("Arrow packet does not name a shared-memory block");
         }
-        if (schema->type != MORLOC_TABLE) {
-            free_schema(schema);
-            MORLOC_ERROR("Arrow packet received for a non-table type");
-        }
+        bool materialized = (source != PACKET_SOURCE_RPTR);
         uint8_t* arrow_ptr = R_TRY_WITH_INFRA(free_schema(schema),
             get_morloc_data_packet_value, packet, schema);
         const arrow_shm_header_t* arrow_hdr = (const arrow_shm_header_t*)arrow_ptr;
 
         char* validate_err = NULL;
         if (arrow_validate(arrow_hdr, schema, &validate_err) != 0) {
+            if (materialized) {
+                char* ferr = NULL;
+                shfree((absptr_t)arrow_ptr, &ferr);
+                if (ferr) { free(ferr); }
+            }
             free_schema(schema);
-            MORLOC_ERROR("Arrow table failed validation: %s", validate_err ? validate_err : "");
+            morloc_error_take("Arrow table failed validation: ", validate_err);
+        }
+
+        // Hold the block for as long as R references the imported buffers,
+        // releasing it at the start of the next request. A table that
+        // arrived by reference needs one taken on this pool's behalf; the
+        // sender donated one before sending, so a refusal means the block
+        // is gone and the view would read scrubbed memory. A table
+        // materialized here is already this pool's own.
+        if (!materialized) {
+            char* incref_err = NULL;
+            bool acquired = shincref((absptr_t)arrow_ptr, &incref_err);
+            if (incref_err) { free(incref_err); }
+            if (!acquired) {
+                free_schema(schema);
+                MORLOC_INTERNAL_ABORT("received table's shared-memory block is no longer live");
+            }
+        }
+        shm_tracker_push((absptr_t)arrow_ptr, NULL);
+        {
+            char* rerr = NULL;
+            relptr_t rel = abs2rel(arrow_ptr, &rerr);
+            if (rerr) { free(rerr); } else { arrow_borrow_register((const uint8_t*)arrow_ptr, rel); }
         }
 
         struct ArrowSchema arrow_schema;
@@ -3079,10 +3132,8 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         char* arrow_err = NULL;
         arrow_from_shm(arrow_hdr, &arrow_schema, &arrow_array, &arrow_err);
         if (arrow_err) {
-            if (arrow_schema.release) arrow_schema.release(&arrow_schema);
-            if (arrow_array.release) arrow_array.release(&arrow_array);
             free_schema(schema);
-            MORLOC_ERROR("Arrow import failed: %s", arrow_err);
+            morloc_error_take("Arrow import failed: ", arrow_err);
         }
 
         // Import via R arrow package: arrow::ImportRecordBatch(array_ptr, schema_ptr)
@@ -3096,33 +3147,25 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
             MORLOC_ERROR("arrow::ImportRecordBatch not found; is the arrow package installed?");
         }
 
+        // ImportRecordBatch moves both structs and, on every path known,
+        // releases them itself when it fails; an R error raised past that
+        // point unwinds through here with nothing left to release. The
+        // releases after the call are then no-ops; they hold only if an
+        // import fails without releasing.
         SEXP array_ptr_r = PROTECT(R_MakeExternalPtr(&arrow_array, R_NilValue, R_NilValue));
         SEXP schema_ptr_r = PROTECT(R_MakeExternalPtr(&arrow_schema, R_NilValue, R_NilValue));
         SEXP call = PROTECT(lang3(import_fn, array_ptr_r, schema_ptr_r));
         SEXP obj_r = PROTECT(eval(call, arrow_ns));
         UNPROTECT(6);
-
-        // Hold the block for as long as R references the imported buffers,
-        // and hand it to the tracker so the reference is released at the
-        // start of the next request rather than never. A table that arrived
-        // by reference needs one taken on this pool's behalf; a table
-        // materialized here is already this pool's own and a second
-        // reference would leave it permanently held.
-        bool arrow_owned = true;
-        if (source == PACKET_SOURCE_RPTR) {
-            char* incref_err = NULL;
-            arrow_owned = shincref((absptr_t)arrow_ptr, &incref_err);
-            if (incref_err) { free(incref_err); }
-        }
-        if (arrow_owned) {
-            shm_tracker_push((absptr_t)arrow_ptr, NULL);
-            char* rerr = NULL;
-            relptr_t rel = abs2rel(arrow_ptr, &rerr);
-            if (rerr) { free(rerr); } else { arrow_borrow_register((const uint8_t*)arrow_ptr, rel); }
-        }
+        if (arrow_schema.release) arrow_schema.release(&arrow_schema);
+        if (arrow_array.release) arrow_array.release(&arrow_array);
 
         free_schema(schema);
         return obj_r;
+    }
+    if (format == PACKET_FORMAT_ARROW) {
+        free_schema(schema);
+        MORLOC_ERROR("Arrow packet received for a non-table type");
     }
 
     // Fast path: inline voidstar -- read directly from packet, no SHM
@@ -3245,18 +3288,20 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         // it in the tracker so shm_tracker_flush() releases it at the
         // start of our next request -- after R has finished consuming
         // the deserialized form.
-        // Track only a reference actually acquired: a refused incref means
-        // the block is free or being released, and tracking it anyway would
-        // make the next flush decrement a reference this pool never held.
+        // The sender donated a reference before sending, so a refused
+        // acquire means the block is already gone.
         char* incref_err = NULL;
-        if (shincref((absptr_t)voidstar, &incref_err)) {
-            shm_tracker_push((absptr_t)voidstar, schema);
-            tracked = true;
-        }
+        bool acquired = shincref((absptr_t)voidstar, &incref_err);
         if (incref_err) { free(incref_err); }
+        if (!acquired) {
+            free_schema(schema);
+            MORLOC_INTERNAL_ABORT("received value's shared-memory block is no longer live");
+        }
+        shm_tracker_push((absptr_t)voidstar, schema);
+        tracked = true;
     }
 
-    MORLOC_REJECT_NUL(check_nul, voidstar, schema, NULL, free_schema(schema));
+    MORLOC_REJECT_NUL(check_nul, voidstar, schema, NULL, { if (!tracked) free_schema(schema); });
 
     SEXP obj_r = from_voidstar(voidstar, schema, NULL);
     if (obj_r == NULL) {
@@ -4508,7 +4553,7 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_close_socket", (DL_FUNC) &morloc_close_socket, 1},
         {"morloc_foreign_call", (DL_FUNC) &morloc_foreign_call, 3},
         {"morloc_get_value", (DL_FUNC) &morloc_get_value, 3},
-        {"morloc_put_value", (DL_FUNC) &morloc_put_value, 2},
+        {"morloc_put_value", (DL_FUNC) &morloc_put_value, 3},
         {"morloc_mlc_show", (DL_FUNC) &morloc_mlc_show, 2},
         {"r_morloc_log_next_id", (DL_FUNC) &morloc_log_next_id_r, 0},
         {"r_morloc_log_emit", (DL_FUNC) &morloc_log_emit_r, 4},

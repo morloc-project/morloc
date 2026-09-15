@@ -16,6 +16,7 @@ pack\/unpack calls into the manifold tree.
 -}
 module Morloc.CodeGenerator.Serial
   ( makeSerialAST
+  , checkTableColumns
   , checkPackerCoherence
   , findPackerInstances
   , PackerInstance (..)
@@ -675,6 +676,41 @@ setSerialHead v s = case s of
   -- independent, so there is no head to rename.
   SerialClosure _ _ -> s
 
+-- | A declared column is checked against the block's Arrow type at every
+-- crossing, and only the flat primitives have an Arrow form the runtime
+-- can name. A list or record column in a declaration would compile and
+-- then fail on the first receive, so it is refused wherever a table type
+-- is lowered.
+checkTableColumns :: Int -> [(Key, SerialAST)] -> MorlocMonad ()
+checkTableColumns m cols =
+  case [k | (k, ast) <- cols, not (isArrowColumn ast)] of
+    [] -> return ()
+    bad -> MM.throwSourcedError m $
+      "A declared table column must be a primitive, Str, or an optional of one;"
+      <+> "the type of column" <+> hsep (punctuate "," (map (squotes . pretty) bad))
+      <+> "has no Arrow form the runtime can check"
+
+-- | True iff a serial form can be declared as a table column: a flat
+-- primitive, a string, or an optional of one.
+isArrowColumn :: SerialAST -> Bool
+isArrowColumn (SerialOptional _ inner) = isArrowColumn inner
+isArrowColumn (SerialReal _) = True
+isArrowColumn (SerialFloat32 _) = True
+isArrowColumn (SerialFloat64 _) = True
+isArrowColumn (SerialInt _) = True
+isArrowColumn (SerialInt8 _) = True
+isArrowColumn (SerialInt16 _) = True
+isArrowColumn (SerialInt32 _) = True
+isArrowColumn (SerialInt64 _) = True
+isArrowColumn (SerialUInt _) = True
+isArrowColumn (SerialUInt8 _) = True
+isArrowColumn (SerialUInt16 _) = True
+isArrowColumn (SerialUInt32 _) = True
+isArrowColumn (SerialUInt64 _) = True
+isArrowColumn (SerialBool _) = True
+isArrowColumn (SerialString _) = True
+isArrowColumn _ = False
+
 makeSerialAST :: Int -> Lang -> TypeF -> MorlocMonad SerialAST
 makeSerialAST m lang t0 = do
   instances <- findPackerInstances
@@ -1002,6 +1038,7 @@ makeSerialAST m lang t0 = do
           | BT.isTableVar generalTypeName = case runtimeTs of
               [NamF _ _ _ recRs] -> do
                 colASTs <- mapM (\(k, tf) -> (,) k <$> makeSerialAST' gscope typepackers anc tf) recRs
+                checkTableColumns m colASTs
                 return $ SerialObject NamTable fv [] colASTs
               _ ->
                 return $ SerialObject NamTable fv [] []

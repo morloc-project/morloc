@@ -80,14 +80,10 @@ extern "C" {
                       out_array: *mut FFI_ArrowArray, errmsg: *mut *mut c_char) -> i32;
     fn arrow_validate(header: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> i32;
     fn make_arrow_data_packet(relptr: isize, schema: *const CSchema) -> *mut u8;
+    fn make_inline_data_packet(voidstar: *mut c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut u8;
     fn arrow_borrow_register(base: *const u8, rel: isize);
     fn arrow_borrow_clear();
     fn make_fail_packet(msg: *const c_char) -> *mut u8;
-    // Inline-threshold control: force a captured closure value to serialize
-    // SELF-CONTAINED (embedded, not a SHM relptr) so its packet survives the
-    // producing manifold's SHM reclamation (see `reify_capture`).
-    fn morloc_set_inline_threshold(bytes: i64);
-    fn morloc_get_inline_threshold() -> u64;
     // Cross-pool foreign call primitives (see `foreign_call`).
     fn make_morloc_local_call_packet(midx: u32, arg_packets: *const *const u8,
                                      nargs: usize, errmsg: *mut *mut c_char) -> *mut u8;
@@ -1901,31 +1897,39 @@ morloc_fn!(MorlocFn8, Closure8, fn_ptr8, call8, reify8, (A1, a1), (A2, a2), (A3,
 /// # Safety
 /// `schema` must describe `value`'s wire type.
 pub unsafe fn put_value<T: ToVoidstar>(value: &T, schema: &Schema) -> *mut u8 {
+    put_value_as(value, schema, false)
+}
+
+/// `put_value`, with `self_contained` asking for a packet that carries
+/// the value inside it rather than a reference to a shared-memory block:
+/// for a value that must outlive this dispatch's blocks, such as a
+/// closure's captured value applied back later from another pool.
+///
+/// # Safety
+/// `schema` must describe `value`'s wire type.
+pub unsafe fn put_value_as<T: ToVoidstar>(value: &T, schema: &Schema, self_contained: bool) -> *mut u8 {
     let _recur = RecurScope::enter(schema);
     if schema.serial_type == SerialType::Table {
-        let (mut array, ffi_schema) = match value.arrow_export() {
-            Some(pair) => pair,
-            None => morloc_infra_abort("Table-typed value is not an Arrow record batch"),
+        return match arrow_put(value, schema) {
+            Ok(relptr) => {
+                let cs = cschema_of(schema);
+                let mut err: *mut c_char = std::ptr::null_mut();
+                let packet = if self_contained {
+                    let block = rel2abs(relptr, &mut err);
+                    if block.is_null() {
+                        return fail_packet_from_c(err, "rel2abs failed in put_value");
+                    }
+                    make_inline_data_packet(block, cs, &mut err)
+                } else {
+                    make_arrow_data_packet(relptr, cs)
+                };
+                if packet.is_null() {
+                    return fail_packet_from_c(err, "table packet construction failed in put_value");
+                }
+                packet
+            }
+            Err(err) => fail_packet_from_c(err, "arrow_to_shm failed in put_value"),
         };
-        let cs = cschema_of(schema);
-        let mut err: *mut c_char = std::ptr::null_mut();
-        // Consumes `array`; its Drop is then a no-op.
-        let relptr = arrow_to_shm_typed(&mut array, &ffi_schema, cs, &mut err);
-        drop(array);
-        drop(ffi_schema);
-        if !err.is_null() {
-            return fail_packet_from_c(err, "arrow_to_shm failed in put_value");
-        }
-        let packet = make_arrow_data_packet(relptr, cs);
-        if packet.is_null() {
-            morloc_infra_abort("make_arrow_data_packet failed");
-        }
-        let root = rel2abs(relptr, &mut err);
-        discard_err(err);
-        if !root.is_null() {
-            track(root);
-        }
-        return packet;
     }
     let total = value.shm_size(schema).max(1);
     let mut err: *mut c_char = std::ptr::null_mut();
@@ -1938,9 +1942,13 @@ pub unsafe fn put_value<T: ToVoidstar>(value: &T, schema: &Schema) -> *mut u8 {
     value.write(root, &mut cursor, schema); // panic -> guard shfree
     let relptr = abs2rel(root as *mut c_void, &mut err);
     let cs = cschema_of(schema);
-    let packet = make_data_packet_auto(root as *mut c_void, relptr, cs, &mut err);
+    let packet = if self_contained {
+        make_inline_data_packet(root as *mut c_void, cs, &mut err)
+    } else {
+        make_data_packet_auto(root as *mut c_void, relptr, cs, &mut err)
+    };
     if packet.is_null() {
-        return fail_packet_from_c(err, "make_data_packet_auto failed"); // guard shfree
+        return fail_packet_from_c(err, "packet construction failed in put_value"); // guard shfree
     }
     // Defer the root's free to the next dispatch (I3). Safe for both RPTR
     // packets (data still referenced) and inline packets (data already copied
@@ -1948,6 +1956,30 @@ pub unsafe fn put_value<T: ToVoidstar>(value: &T, schema: &Schema) -> *mut u8 {
     guard.commit();
     track(root as *mut c_void);
     packet
+}
+
+/// Lay a table out as a block of this pool's own, released with this
+/// dispatch, and return its reference. `Err` carries the C error string.
+unsafe fn arrow_put<T: ToVoidstar>(value: &T, schema: &Schema) -> Result<isize, *mut c_char> {
+    let (mut array, ffi_schema) = match value.arrow_export() {
+        Some(pair) => pair,
+        None => morloc_infra_abort("Table-typed value is not an Arrow record batch"),
+    };
+    let cs = cschema_of(schema);
+    let mut err: *mut c_char = std::ptr::null_mut();
+    // Consumes `array`; its Drop is then a no-op.
+    let relptr = arrow_to_shm_typed(&mut array, &ffi_schema, cs, &mut err);
+    drop(array);
+    drop(ffi_schema);
+    if !err.is_null() {
+        return Err(err);
+    }
+    let root = rel2abs(relptr, &mut err);
+    discard_err(err);
+    if !root.is_null() {
+        track(root);
+    }
+    Ok(relptr)
 }
 
 /// # Safety
@@ -1958,34 +1990,47 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
     let format = *packet.add(PKT_FORMAT_OFF);
 
     if schema.serial_type == SerialType::Table {
-        if format != PKT_FORMAT_ARROW {
-            morloc_throw("table-typed value did not arrive as an Arrow packet");
+        // A table is a block. It arrives by reference (an Arrow packet) or
+        // in a form the runtime materializes into a block of this pool's
+        // own (a cached result read back from a file, a captured value
+        // carried inline).
+        if format == PKT_FORMAT_ARROW && source != PKT_SOURCE_RPTR {
+            morloc_infra_abort("Arrow packet does not name a shared-memory block");
         }
+        let materialized = source != PKT_SOURCE_RPTR;
         let cs = cschema_of(schema);
         let mut err: *mut c_char = std::ptr::null_mut();
         let block = get_morloc_data_packet_value(packet, cs, &mut err);
         if !err.is_null() {
             morloc_throw(cstr_take(err));
         }
-        // Hold the block for this dispatch, as for any received reference.
-        let mut own = true;
-        if source == PKT_SOURCE_RPTR {
-            own = shincref(block as *mut c_void, &mut err);
-            discard_err(err);
-            err = std::ptr::null_mut();
-        }
-        if own {
-            track(block as *mut c_void);
-            let rel = abs2rel(block as *mut c_void, &mut err);
-            if err.is_null() {
-                arrow_borrow_register(block, rel);
-            }
-            discard_err(err);
-            err = std::ptr::null_mut();
-        }
+        // A materialized block is released here unless the tracker takes
+        // it; a referenced one belongs to its sender until acquired.
+        let guard = ShmGuard(if materialized { Some(block as *mut c_void) } else { None });
         if arrow_validate(block as *const c_void, cs, &mut err) != 0 {
             morloc_throw(cstr_take(err));
         }
+        // Hold the block for as long as the batch references its buffers,
+        // releasing it at the next dispatch. A table that arrived by
+        // reference needs one taken on this pool's behalf; the sender
+        // donated one before sending, so a refusal means the block is gone
+        // and the view would read scrubbed memory.
+        if !materialized {
+            let acquired = shincref(block as *mut c_void, &mut err);
+            discard_err(err);
+            err = std::ptr::null_mut();
+            if !acquired {
+                morloc_infra_abort("received table's shared-memory block is no longer live");
+            }
+        }
+        guard.commit();
+        track(block as *mut c_void);
+        let rel = abs2rel(block as *mut c_void, &mut err);
+        if err.is_null() {
+            arrow_borrow_register(block, rel);
+        }
+        discard_err(err);
+        err = std::ptr::null_mut();
         let mut ffi_schema = FFI_ArrowSchema::empty();
         let mut array = FFI_ArrowArray::empty();
         if arrow_from_shm(block as *const c_void, &mut ffi_schema, &mut array, &mut err) != 0 {
@@ -1995,6 +2040,9 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
             Some(v) => v,
             None => morloc_infra_abort("Table-typed value requested as a non-Arrow type"),
         };
+    }
+    if format == PKT_FORMAT_ARROW {
+        morloc_infra_abort("Arrow packet received for a non-table type");
     }
 
     let compression = *packet.add(PKT_COMPRESSION_OFF);
@@ -2023,18 +2071,16 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
         morloc_throw(msg);
     }
     if source == PKT_SOURCE_RPTR {
-        // Track only a reference actually acquired: a refused incref means
-        // the block is free or being released, and tracking it anyway would
-        // make the next flush decrement a reference this pool never held.
+        // A value that arrived by reference needs a reference of this
+        // pool's own so the sender's flush cannot reclaim it while it is
+        // read or forwarded. The sender donated one before sending, so a
+        // refusal means the block is already gone.
         let acquired = shincref(voidstar as *mut c_void, &mut err);
-        if !err.is_null() {
-            libc::free(err as *mut c_void);
-            err = std::ptr::null_mut();
+        discard_err(err);
+        if !acquired {
+            morloc_infra_abort("received value's shared-memory block is no longer live");
         }
-        let _ = err;
-        if acquired {
-            track(voidstar as *mut c_void);
-        }
+        track(voidstar as *mut c_void);
     } else {
         // A payload that did not arrive by reference was materialized into a
         // block of this pool's own, and nothing else will free it. Hand it to
@@ -2046,28 +2092,16 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
     <T as FromVoidstar>::read(schema, voidstar, std::ptr::null())
 }
 
-// Restore the inline threshold on drop (including a panic unwind out of
-// `put_value`), mirroring the C++ `_mlc_reify_capture` save/restore.
-struct ThresholdGuard(u64);
-impl Drop for ThresholdGuard {
-    fn drop(&mut self) {
-        unsafe { morloc_set_inline_threshold(self.0 as i64) }
-    }
-}
-
-/// Serialize a captured value into a SELF-CONTAINED wire packet: the inline
-/// threshold is forced so the packet embeds its voidstar rather than a SHM
-/// relptr that would dangle once the producing manifold's SHM is reclaimed
-/// (a crossing closure is applied back later, from another pool). Returns the
-/// owned packet bytes. Port of the C++ pool's `_mlc_reify_capture`.
+/// Serialize a captured value into a SELF-CONTAINED wire packet: the packet
+/// embeds its voidstar rather than a SHM relptr that would dangle once the
+/// producing manifold's SHM is reclaimed (a crossing closure is applied
+/// back later, from another pool). Returns the owned packet bytes. Port of
+/// the C++ pool's `_mlc_reify_capture`.
 ///
 /// # Safety
 /// `schema` must describe `value`'s wire type.
 pub unsafe fn reify_capture<T: ToVoidstar>(value: &T, schema: &Schema) -> Vec<u8> {
-    let saved = morloc_get_inline_threshold();
-    let _guard = ThresholdGuard(saved);
-    morloc_set_inline_threshold(i64::MAX);
-    let packet = put_value(value, schema);
+    let packet = put_value_as(value, schema, true);
     let offset = core::ptr::read_unaligned(packet.add(PKT_OFFSET_OFF) as *const u32) as usize;
     let length = core::ptr::read_unaligned(packet.add(PKT_LENGTH_OFF) as *const u64) as usize;
     let n = PKT_HEADER_SIZE + offset + length;

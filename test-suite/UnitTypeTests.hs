@@ -196,6 +196,15 @@ assertGenerates code = do
     Right _ -> return ()
     Left e -> assertFailure ("expected pool generation to succeed: " <> show e)
 
+-- | Assert that a program is refused during pool generation: the frontend
+-- accepts it, and lowering to the wire form is where it fails.
+assertGenerationFails :: MT.Text -> Assertion
+assertGenerationFails code = do
+  result <- runGen code
+  case result of
+    Right _ -> assertFailure "expected pool generation to fail"
+    Left _ -> return ()
+
 emptyConfig :: IO Config
 emptyConfig = do
   home <- SD.getHomeDirectory
@@ -9245,6 +9254,34 @@ variantTests =
         data Term = Wrap Expr
         source Py from "t.py" ("idt")
         idt :: Expr -> Expr
+              |]
+
+      , -- A declared table column is checked against the block's Arrow
+        -- type at every crossing, and only flat primitives, Str and
+        -- optionals of them have an Arrow form the runtime can name. A
+        -- list column would compile and fail on the first receive, so it
+        -- is refused when the wire form is built.
+        localOption (mkTimeout 20000000) $
+          testCase "a declared table column must be primitive" $ do
+            assertGenerates
+              [r|
+        module main (idt)
+        newtype Table (n :: Nat) (r :: Rec)
+        type Py => (Table (n :: Nat) (r :: Rec)) = "arrow" n r
+        type Py => Int = "int"
+        type Py => Str = "str"
+        source Py from "t.py" ("idt")
+        idt :: Table n {x = Int, s = ?Str} -> Table n {x = Int, s = ?Str}
+              |]
+            assertGenerationFails
+              [r|
+        module main (idt)
+        newtype Table (n :: Nat) (r :: Rec)
+        type Py => (Table (n :: Nat) (r :: Rec)) = "arrow" n r
+        type Py => Int = "int"
+        type Py => List a = "list" a
+        source Py from "t.py" ("idt")
+        idt :: Table n {xs = [Int]} -> Table n {xs = [Int]}
               |]
 
       , -- A record on the cycle is fine as long as a `data` is on it too:

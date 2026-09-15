@@ -528,12 +528,13 @@ generalTypeToSerialAST' i anc t0@(AppT (VarT v) ts)
   -- @T@ wire token (or @T:K<entries>@ when the row is concrete), which
   -- is itself the dispatch signal for the Arrow-SHM path; no
   -- concrete-type hint is attached.
-  | MBT.isTableVar v =
+  | MBT.isTableVar v = do
       let cols = case ts of
             [_, NamT _ _ _ rs] -> rs
             _                  -> []
-      in SerialObject NamTable (FV MBT.table (CV "")) []
-           <$> mapM (secondM (generalTypeToSerialAST' i anc)) cols
+      colASTs <- mapM (secondM (generalTypeToSerialAST' i anc)) cols
+      Serial.checkTableColumns i colASTs
+      return $ SerialObject NamTable (FV MBT.table (CV "")) [] colASTs
   | otherwise = appliedTypeToSerialAST i anc t0 v ts
 generalTypeToSerialAST' i anc (OptionalT t) = do
   inner <- generalTypeToSerialAST' i anc t

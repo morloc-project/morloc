@@ -4,6 +4,7 @@ module main
   , kindlessIntoTyped
   , parquetHead
   , writeSnappy
+  , numericIds, csvByName, csvSameTyped, narrowed
   )
 
 import root
@@ -20,11 +21,18 @@ import table-cpp
 -- snappy-compressed Parquet file, the default output of every common
 -- writer, loads. The consumer is C++ so that every
 -- table actually crosses a pool boundary.
+--
+-- A numeric column declared Str is rendered as text (an identifier stored
+-- as a number). A CSV binds its columns to the declaration by header name,
+-- not position, including two same-typed columns whose swap would be
+-- silent. A JSON literal whose numbers do not fit the declared width is
+-- refused rather than truncated.
 
 source Py from "src.py"
   ( "floatsAsInt", "wholeFloats", "withNulls", "int32s"
   , "dictText" as mkDictText, "dictInts" as mkDictInts
-  , "reordered" as mkReordered, "writeSnappy" )
+  , "reordered" as mkReordered, "writeSnappy"
+  , "numericIds" as mkNumericIds )
 
 floatsAsInt :: Int -> Table n {x = Int}
 wholeFloats :: Int -> Table n {x = Int}
@@ -34,6 +42,7 @@ int32s :: Int -> Table n {x = Int}
 mkDictText :: Int -> Table
 mkDictInts :: Int -> Table
 mkReordered :: Int -> Table n {x = Int, y = Str}
+mkNumericIds :: Int -> Table n {id = Str}
 describe :: Table -> Str
 describeTyped :: Table n {x = Int} -> Str
 writeSnappy :: Str -> Str
@@ -63,3 +72,11 @@ kindlessIntoTyped :: Int -> Str
 kindlessIntoTyped n = describeTyped (kindlessFloats n)
 parquetHead :: Table -> Table
 parquetHead = sliceRows 0 2
+numericIds :: Int -> Str
+numericIds n = describe (mkNumericIds n)
+csvByName :: Table n {age = Int, name = Str} -> Str
+csvByName = describe
+csvSameTyped :: Table n {last = Str, first = Str} -> Str
+csvSameTyped = describe
+narrowed :: Table n {x = U8} -> Str
+narrowed = describe
