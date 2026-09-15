@@ -481,6 +481,19 @@ static ssize_t variant_tag_of(const Schema* schema, SEXP obj) {
     return -1;
 }
 
+// Element i of an atomic vector as a scalar of the same type.
+static SEXP r_atomic_elt(SEXP obj, size_t i) {
+    switch (TYPEOF(obj)) {
+        case LGLSXP:  return ScalarLogical(LOGICAL(obj)[i]);
+        case INTSXP:  return ScalarInteger(INTEGER(obj)[i]);
+        case REALSXP: return ScalarReal(REAL(obj)[i]);
+        case RAWSXP:  return ScalarRaw(RAW(obj)[i]);
+        default:
+            MORLOC_ERROR("not an atomic vector: %s", type2char(TYPEOF(obj)));
+    }
+    return R_NilValue;
+}
+
 static void r_size_step(r_walk_t* w, const Schema* schema, SEXP obj, size_t idx);
 
 // Account for a child. `inline_slot` says the child's fixed width lies
@@ -613,9 +626,19 @@ static void r_size_step(r_walk_t* w, const Schema* schema, SEXP obj, size_t idx)
                     case INTSXP:
                     case REALSXP:
                     case RAWSXP:
-                        {
+                        if (elem->type == MORLOC_OPTIONAL) {
+                            // An atomic vector standing for a list of
+                            // optionals: the writer takes every element
+                            // as present, so each costs its slot plus an
+                            // out-of-line inner value.
+                            for (size_t i = 0; i < length; i++) {
+                                SEXP e = PROTECT(r_atomic_elt(obj, i));
+                                r_size_step(w, elem, e, 0);
+                                UNPROTECT(1);
+                            }
+                        } else {
                             // Inline BigInt and fixed-width types: width covers the full element
-                            size += length * schema->parameters[0]->width;
+                            size += length * elem->width;
                         }
                         break;
                     default:
