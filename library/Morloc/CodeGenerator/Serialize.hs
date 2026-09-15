@@ -343,21 +343,19 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
         remaining -> inferType $ Idx idx (FunT remaining outputType)
       return $ AppExeN appType (LocalCallP i) args
     nativeExpr m (MonoCacheBody lbl midx args body) = do
-      -- Inside a Preserved manifold the bound vars are native, so the
-      -- wrap must reference n0/n1/... -- 'serialExpr' here would emit
-      -- s0/s1/... and miscompile.
-      se <- lowerCacheBody Unserialized m lbl midx args body
-      let t' = case typeSof se of
-            SerialS tf -> tf
-            _ -> error "CacheBody body must lower to a serial form"
+      -- The wrap names the manifold's bound variables, whose form follows
+      -- the body: a body that calls into another pool binds them serial
+      -- (s0/s1/...), while a native body inside a Preserved manifold
+      -- binds them native (n0/n1/...). Naming the wrong form here would
+      -- miscompile.
+      se <- lowerCacheBody (inferState body) m lbl midx args body
+      t' <- serialResultType "CacheBody" se
       naturalizeN "MonoCacheBody" m lang t' se
     nativeExpr m (MonoDebugWrap midx args body) = do
       -- Same reasoning as MonoCacheBody: inside Preserved the bound
       -- vars are native and must reference n0/n1/...
       se <- lowerDebugWrap Unserialized m midx args body
-      let t' = case typeSof se of
-            SerialS tf -> tf
-            _ -> error "DebugWrap body must lower to a serial form"
+      t' <- serialResultType "DebugWrap" se
       naturalizeN "MonoDebugWrap" m lang t' se
     nativeExpr _ (MonoApp _ _) = error "Illegal application"
     nativeExpr _ (MonoExe t exe) = ExeN <$> inferType t <*> pure exe
@@ -748,11 +746,17 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
                             <> pretty i <> "); function values have no wire form"
                         return (arg, sa)
                     ) args
-      let t' = case typeSof body' of
-            SerialS tf -> tf
-            _ -> error "CacheBody body must lower to a serial form"
+      t' <- serialResultType "CacheBody" body'
       resSa <- Serial.makeSerialAST m lang t'
       return $ CacheBodyS t' resSa lbl midx args' body'
+
+    -- | The serial type a wrapped body produces (a call into another pool
+    -- carries its type as a function of its already applied arguments).
+    serialResultType :: MDoc -> SerialExpr -> MorlocMonad TypeF
+    serialResultType what body' = case extractSerial (typeSof body') of
+      Just tf -> return tf
+      Nothing -> MM.throwCompilerBug $
+        what <+> "body must lower to a serial form, found" <+> pretty (typeSof body')
 
     -- | Parallel of 'lowerCacheBody' for the debug-trace wrap. Pairs
     -- each arg with its 'SerialAST' so the catch block can serialize
@@ -795,9 +799,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       -- (a remote-dispatch body) has typeSof = FunctionS _ (SerialS
       -- t), not SerialS t directly, so peel a function result if
       -- present.
-      let t' = case extractSerial (typeSof body') of
-            Just tf -> tf
-            Nothing -> error "DebugWrap body must lower to a serial form"
+      t' <- serialResultType "DebugWrap" body'
       return $ DebugWrapS t' midx args' body'
 
     extractSerial :: TypeS -> Maybe TypeF

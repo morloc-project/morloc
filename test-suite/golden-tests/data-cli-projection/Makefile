@@ -17,11 +17,11 @@ all:
 	./nexus describe '{"Rect":[2.0,3.0]}' >> obs.txt 2>> obs.err
 	./nexus describe dot >> obs.txt 2>> obs.err
 	echo "--- help-rank ---" >> obs.txt
-	./nexus rank -h >> obs.txt 2>> obs.err
+	./nexus rank -hhh >> obs.txt 2>> obs.err
 	echo "--- help-pick ---" >> obs.txt
-	./nexus pick -h >> obs.txt 2>> obs.err
+	./nexus pick -hhh >> obs.txt 2>> obs.err
 	echo "--- help-describe ---" >> obs.txt
-	./nexus describe -h >> obs.txt 2>> obs.err
+	./nexus describe -hhh >> obs.txt 2>> obs.err
 	echo "--- json-help ---" >> obs.txt
 	./nexus --json-help | python3 -c 'import json,sys; m=json.load(sys.stdin); print(json.dumps([t for t in m["types"] if t["kind"]=="data"], sort_keys=True))' >> obs.txt 2>> obs.err
 	echo "--- mcp-tools ---" >> obs.txt

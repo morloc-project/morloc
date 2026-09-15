@@ -29,7 +29,8 @@ Measure a shape
 Usage: ./nexus <nexus_options> area <command_options>
 
 General Options:
-  -h, --help  Print help (see more with '--help')
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
 
 Optional arguments:
       --circle <Real>       a circle of some radius

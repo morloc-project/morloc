@@ -18,7 +18,8 @@ Rank a priority
 Usage: ./nexus <nexus_options> rank <command_options>
 
 General Options:
-  -h, --help  Print help (see more with '--help')
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
 
 Positional arguments:
   1:  How urgent a task is
@@ -39,7 +40,8 @@ Pick a priority, defaulting to the middle
 Usage: ./nexus <nexus_options> pick <command_options>
 
 General Options:
-  -h, --help  Print help (see more with '--help')
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
 
 Optional arguments:
   -p, --priority <Priority>  the priority
@@ -60,7 +62,8 @@ Name each shape's constructor
 Usage: ./nexus <nexus_options> describe <command_options>
 
 General Options:
-  -h, --help  Print help (see more with '--help')
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
 
 Positional arguments:
   1:  A shape to measure

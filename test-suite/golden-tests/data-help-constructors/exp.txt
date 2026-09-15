@@ -4,7 +4,8 @@ Name one color
 Usage: ./nexus <nexus_options> paint <command_options>
 
 General Options:
-  -h, --help  Print help (see more with '--help')
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
 
 Positional arguments:
   1:  type: Color
@@ -17,7 +18,8 @@ Name a color that may be omitted
 Usage: ./nexus <nexus_options> shade <command_options>
 
 General Options:
-  -h, --help  Print help (see more with '--help')
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
 
 Positional arguments:
   1:  type: ?Color
@@ -31,7 +33,8 @@ Count colors
 Usage: ./nexus <nexus_options> blend <command_options>
 
 General Options:
-  -h, --help  Print help (see more with '--help')
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
 
 Positional arguments:
   1:  type: [Color]
@@ -44,7 +47,8 @@ Measure a shape
 Usage: ./nexus <nexus_options> measure <command_options>
 
 General Options:
-  -h, --help  Print help (see more with '--help')
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
 
 Positional arguments:
   1:  type: Shape
@@ -63,7 +67,8 @@ Mix from a base color
 Usage: ./nexus <nexus_options> mix <command_options>
 
 General Options:
-  -h, --help  Print help (see more with '--help')
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
 
 Optional arguments:
       --base <Color>  The base color

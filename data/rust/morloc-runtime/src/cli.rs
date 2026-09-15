@@ -2551,6 +2551,12 @@ pub unsafe extern "C" fn load_morloc_data_file(
                     libc::free(data as *mut c_void);
                     if !err.is_null() { *errmsg = err; return ptr::null_mut(); }
                     return result;
+                } else if format == packet::PACKET_FORMAT_ARROW && arrow_target {
+                    // A table written out as a self-contained packet
+                    // carries Arrow IPC bytes.
+                    let block = crate::arrow_ipc_reader::ipc_payload_to_block(payload, length, schema, errmsg);
+                    libc::free(data as *mut c_void);
+                    return block;
                 } else {
                     libc::free(data as *mut c_void);
                     set_errmsg(errmsg, &MorlocError::Other(format!("Unsupported format 0x{:02x} in '{}'", format, path_str)));

@@ -60,6 +60,16 @@
 
 #define MORLOC_ERROR(msg, ...) error(msg, ##__VA_ARGS__);
 
+// Raise an R error from a heap-allocated message the runtime handed back,
+// freeing it first: error() does not return, so the text is copied into
+// this frame before the longjmp.
+static void morloc_error_take(const char* prefix, char* heap_msg) {
+    char msg[1024];
+    snprintf(msg, sizeof(msg), "%s%s", prefix, heap_msg ? heap_msg : "");
+    free(heap_msg);
+    error("%s", msg);
+}
+
 // Reject a voidstar carrying an interior NUL in a Str slot. `guard` is
 // codegen's per-call decision; `cleanup` releases whatever the caller owns
 // before the longjmp out of error(). The path returned by the runtime names
@@ -87,25 +97,36 @@
 // invariant violation is a bug report, and the location is the useful
 // part. Use ONLY for genuine bugs; user-attributable failures must go
 // through MORLOC_ERROR so @catch can intercept.
-#define MORLOC_INTERNAL_ABORT(msg, ...) do { \
-    SEXP _cond = PROTECT(allocVector(VECSXP, 2)); \
-    SEXP _names = PROTECT(allocVector(STRSXP, 2)); \
-    SEXP _cls = PROTECT(allocVector(STRSXP, 3)); \
-    char _buf[4096]; \
-    snprintf(_buf, sizeof(_buf), "morloc internal error (R pool, %s:%d in %s): " msg, \
-             __FILE__, __LINE__, __func__, ##__VA_ARGS__); \
-    SET_STRING_ELT(_names, 0, mkChar("message")); \
-    SET_STRING_ELT(_names, 1, mkChar("call")); \
-    SET_VECTOR_ELT(_cond, 0, mkString(_buf)); \
-    SET_VECTOR_ELT(_cond, 1, R_NilValue); \
-    setAttrib(_cond, R_NamesSymbol, _names); \
-    SET_STRING_ELT(_cls, 0, mkChar("MorlocInternalError")); \
-    SET_STRING_ELT(_cls, 1, mkChar("error")); \
-    SET_STRING_ELT(_cls, 2, mkChar("condition")); \
-    setAttrib(_cond, R_ClassSymbol, _cls); \
-    UNPROTECT(3); \
-    Rf_eval(Rf_lang2(install("stop"), _cond), R_GlobalEnv); \
-} while (0)
+static void __attribute__((noinline)) morloc_internal_abort_impl(
+    const char* file, int line, const char* func, const char* fmt, ...
+) {
+    char _msg[3584];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(_msg, sizeof(_msg), fmt, ap);
+    va_end(ap);
+    char _buf[4096];
+    snprintf(_buf, sizeof(_buf), "morloc internal error (R pool, %s:%d in %s): %s",
+             file, line, func, _msg);
+    SEXP _cond = PROTECT(allocVector(VECSXP, 2));
+    SEXP _names = PROTECT(allocVector(STRSXP, 2));
+    SEXP _cls = PROTECT(allocVector(STRSXP, 3));
+    SET_STRING_ELT(_names, 0, mkChar("message"));
+    SET_STRING_ELT(_names, 1, mkChar("call"));
+    SET_VECTOR_ELT(_cond, 0, mkString(_buf));
+    SET_VECTOR_ELT(_cond, 1, R_NilValue);
+    setAttrib(_cond, R_NamesSymbol, _names);
+    SET_STRING_ELT(_cls, 0, mkChar("MorlocInternalError"));
+    SET_STRING_ELT(_cls, 1, mkChar("error"));
+    SET_STRING_ELT(_cls, 2, mkChar("condition"));
+    setAttrib(_cond, R_ClassSymbol, _cls);
+    UNPROTECT(3);
+    Rf_eval(Rf_lang2(install("stop"), _cond), R_GlobalEnv);
+}
+// The buffers live in the helper's frame, not the caller's, so a walker
+// that can abort does not carry them on every level.
+#define MORLOC_INTERNAL_ABORT(msg, ...) \
+    morloc_internal_abort_impl(__FILE__, __LINE__, __func__, msg, ##__VA_ARGS__)
 
 // R_TRY for the machinery that carries values between pools: IPC, packet
 // construction and decode. These failures are not attributable to user data
@@ -206,13 +227,19 @@ typedef struct {
     const Schema* schema;
 } recur_env_entry_t;
 
-#define RECUR_ENV_MAX 64
-static __thread recur_env_entry_t recur_env_stack[RECUR_ENV_MAX];
-static __thread int recur_env_depth = 0;
+static __thread recur_env_entry_t* recur_env_stack = NULL;
+static __thread size_t recur_env_depth = 0;
+static __thread size_t recur_env_cap = 0;
 
 static int recur_env_push(const Schema* schema) {
     if (schema == NULL || schema->name == NULL || schema->type == MORLOC_RECUR) return 0;
-    if (recur_env_depth >= RECUR_ENV_MAX) return 0;
+    if (recur_env_depth >= recur_env_cap) {
+        size_t cap = recur_env_cap ? recur_env_cap * 2 : 64;
+        recur_env_entry_t* grown = (recur_env_entry_t*)realloc(recur_env_stack, cap * sizeof(recur_env_entry_t));
+        if (grown == NULL) error("out of memory growing the schema declaration stack");
+        recur_env_stack = grown;
+        recur_env_cap = cap;
+    }
     recur_env_stack[recur_env_depth].name = schema->name;
     recur_env_stack[recur_env_depth].schema = schema;
     recur_env_depth++;
@@ -225,8 +252,8 @@ static void recur_env_pop(int pushed) {
 
 static const Schema* recur_env_lookup(const char* name) {
     if (name == NULL) return NULL;
-    for (int i = recur_env_depth - 1; i >= 0; i--) {
-        const recur_env_entry_t* e = &recur_env_stack[i];
+    for (size_t i = recur_env_depth; i > 0; i--) {
+        const recur_env_entry_t* e = &recur_env_stack[i - 1];
         if (e->name != NULL && strcmp(e->name, name) == 0) {
             return e->schema;
         }
@@ -297,12 +324,153 @@ static int64_t i64_from_sexp(SEXP obj) {
 
 // }}} bit64 helpers
 
+// {{{ marshalling walks
+//
+// A value is marshalled in three passes -- size, write, read -- and each is
+// an explicit-stack traversal rather than a recursive one, so a value's depth
+// is bounded by memory and not by the C stack. A frame names one node; the
+// driver pops a frame, keeps the recursion environment in step with it, and
+// calls the pass's step, which does the node's own work and hands its
+// compound children back to the walk. A leaf (a scalar, a string, a vector
+// of scalars) is stepped on the spot.
+//
+// Frames are only needed when the schema can describe a value of unbounded
+// depth, which is when it holds a back-reference. Otherwise the walk runs in
+// direct mode: a child is stepped by calling the step from its parent's, and
+// the depth is the schema's own height.
+//
+// A list of compound elements is visited once per element: the step handles
+// element `idx` and re-pushes its own frame beneath the element's, so the
+// frame stack stays proportional to depth rather than to element count. A
+// read builds each container before its elements and stores every child into
+// its parent's slot as soon as it exists, so the whole partial result is
+// reachable from the PROTECTed root and no level needs a PROTECT of its own.
+//
+// An R error is a longjmp, so nothing here owns memory that a longjmp could
+// strand: the frame stack is a reusable buffer, and the recur env is reset at
+// every entry point (walks never nest).
+
+typedef enum {
+    R_SLOT_ROOT,   // the walk's result
+    R_SLOT_LIST    // SET_VECTOR_ELT(parent, index, obj)
+} r_slot_kind_t;
+
+typedef struct {
+    const Schema* schema;   // the node's schema, resolved by the driver
+    SEXP obj;               // size/write: the value; read: the parent container
+    void* dest;             // write: the node's slot; read: its wire data
+    void* aux;              // a sequence's element region, kept across visits
+    size_t idx;             // the element to visit, for a sequence
+    R_xlen_t slot;          // read: index into the parent
+    unsigned char slot_kind;
+    unsigned char inline_slot; // size: the parent already counted this node's width
+    unsigned char env_pushed;
+    unsigned char pop_env;     // sentinel: pop the recur env and nothing else
+} r_frame_t;
+
+typedef struct {
+    r_frame_t* frames;
+    size_t len;
+    size_t cap;
+    r_frame_t cur;
+    int direct;
+    ssize_t total;          // size pass
+    void** cursor;          // write pass
+    const void* base_ptr;   // read pass
+    SEXP result;            // read pass: the root, PROTECTed until returned
+} r_walk_t;
+
+// The frame buffer outlives any one walk so an error's longjmp leaves
+// nothing to free.
+static __thread r_frame_t* r_frames = NULL;
+static __thread size_t r_frames_cap = 0;
+
+// True iff a back-reference occurs anywhere under `schema`.
+static int r_schema_has_recur(const Schema* schema) {
+    if (schema == NULL) return 0;
+    if (schema->type == MORLOC_RECUR) return 1;
+    // An enum's size counts constructors and it has no parameters.
+    if (schema->parameters == NULL) return 0;
+    for (size_t i = 0; i < schema->size; i++) {
+        if (r_schema_has_recur(schema->parameters[i])) return 1;
+    }
+    return 0;
+}
+
+// A child of a schema that cannot describe unbounded depth is stepped by
+// call; only a schema holding a back-reference needs a frame.
+static int r_flat(const r_walk_t* w, const Schema* schema) {
+    return w->direct || !r_schema_has_recur(schema);
+}
+
+static void r_walk_init(r_walk_t* w, const Schema* root) {
+    memset(w, 0, sizeof(*w));
+    w->direct = !r_schema_has_recur(root);
+    recur_env_depth = 0;
+}
+
+static void r_push(r_walk_t* w, const r_frame_t* f) {
+    if (w->len >= r_frames_cap) {
+        size_t cap = r_frames_cap ? r_frames_cap * 2 : 64;
+        r_frame_t* grown = (r_frame_t*)realloc(r_frames, cap * sizeof(r_frame_t));
+        if (grown == NULL) {
+            MORLOC_ERROR("out of memory growing the marshalling walk");
+        }
+        r_frames = grown;
+        r_frames_cap = cap;
+    }
+    r_frames[w->len++] = *f;
+}
+
+// Visit the current node again for element `idx`, carrying `aux`.
+static void r_resume(r_walk_t* w, size_t idx, void* aux) {
+    r_frame_t f = w->cur;
+    f.idx = idx;
+    f.aux = aux;
+    f.inline_slot = 0;
+    f.env_pushed = 1;
+    r_push(w, &f);
+}
+
+// Resolve a back-reference to the declaration on the env stack.
+static const Schema* r_resolve(const Schema* schema) {
+    if (schema->type != MORLOC_RECUR) return schema;
+    const Schema* target = recur_env_lookup(schema->name);
+    if (target == NULL) {
+        MORLOC_INTERNAL_ABORT("Recur back-reference to undeclared schema name '%s'",
+                     schema->name ? schema->name : "?");
+    }
+    return target;
+}
+
+// Pop the next frame into w->cur, keeping the recur env in step: a named
+// declaration is pushed on its first visit and popped by a sentinel frame
+// beneath its children. Returns 0 when the walk is done.
+static int r_next(r_walk_t* w) {
+    while (w->len > 0) {
+        r_frame_t f = r_frames[--w->len];
+        if (f.pop_env) {
+            recur_env_pop(1);
+            continue;
+        }
+        f.schema = r_resolve(f.schema);
+        if (!f.env_pushed && recur_env_push(f.schema)) {
+            r_frame_t sentinel;
+            memset(&sentinel, 0, sizeof(sentinel));
+            sentinel.pop_env = 1;
+            r_push(w, &sentinel);
+            f.env_pushed = 1;
+        }
+        w->cur = f;
+        return 1;
+    }
+    return 0;
+}
+
+// }}} marshalling walks
+
 // {{{ to_voidstar
 
-static size_t get_shm_size_inner(const Schema* schema, SEXP obj);
-
-// Public wrapper: maintain the recur env stack across the recursive walk
-// so MORLOC_RECUR arms can resolve their back-reference targets.
 // Resolve a constructor name against a variant schema's key list, yielding
 // its tag. The tag is the constructor's position in the declaration, which is
 // what the wire carries, and the keys arrive in that same order.
@@ -323,54 +491,54 @@ static ssize_t variant_tag_of(const Schema* schema, SEXP obj) {
     return -1;
 }
 
-static size_t get_shm_size(const Schema* schema, SEXP obj) {
-    int pushed = recur_env_push(schema);
-    size_t r = get_shm_size_inner(schema, obj);
-    recur_env_pop(pushed);
-    return r;
+// Element i of an atomic vector as a scalar of the same type.
+static SEXP r_atomic_elt(SEXP obj, size_t i) {
+    switch (TYPEOF(obj)) {
+        case LGLSXP:  return ScalarLogical(LOGICAL(obj)[i]);
+        case INTSXP:  return ScalarInteger(INTEGER(obj)[i]);
+        case REALSXP: return ScalarReal(REAL(obj)[i]);
+        case RAWSXP:  return ScalarRaw(RAW(obj)[i]);
+        default:
+            MORLOC_ERROR("not an atomic vector: %s", type2char(TYPEOF(obj)));
+    }
+    return R_NilValue;
 }
 
-static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
+static void r_size_step(r_walk_t* w, const Schema* schema, SEXP obj, size_t idx);
+
+// Account for a child. `inline_slot` says the child's fixed width lies
+// inside the parent's (tuple and record fields), so only its tail is added.
+static void r_size_child(r_walk_t* w, const Schema* schema, SEXP obj, int inline_slot) {
+    const Schema* s = r_resolve(schema);
+    if (r_flat(w, s)) {
+        if (inline_slot) w->total -= (ssize_t)s->width;
+        r_size_step(w, s, obj, 0);
+        return;
+    }
+    r_frame_t f;
+    memset(&f, 0, sizeof(f));
+    f.schema = s;
+    f.obj = obj;
+    f.inline_slot = (unsigned char)inline_slot;
+    r_push(w, &f);
+}
+
+static void r_size_step(r_walk_t* w, const Schema* schema, SEXP obj, size_t idx) {
     size_t size = 0;
     switch (schema->type) {
-        case MORLOC_NIL:
-        case MORLOC_BOOL:
-        case MORLOC_SINT8:
-        case MORLOC_SINT16:
-        case MORLOC_SINT32:
-        case MORLOC_SINT64:
-        case MORLOC_UINT8:
-        case MORLOC_UINT16:
-        case MORLOC_UINT32:
-        case MORLOC_UINT64:
-        case MORLOC_FLOAT32:
-        case MORLOC_FLOAT64:
-        case MORLOC_ENUM:
-            return schema->width;
-        case MORLOC_INT:
-            // Inline BigInt: R values always fit inline (16 bytes)
-            return 16;
-        case MORLOC_IFILE:
-        case MORLOC_OSTREAM:
-        case MORLOC_ISTREAM: {
-            // Stream-handle field: look up the exact suballoc cost via
-            // the registry (returns 8 + path_len for TAG_PATH, 0 for
-            // empty).
-            int64_t handle = i64_from_sexp(obj);
-            char* err = NULL;
-            int64_t n = mlc_handle_path_len(handle, &err);
-            if (n < 0) {
-                char msg[512];
-                snprintf(msg, sizeof(msg), "mlc_handle_path_len: %s",
-                         err ? err : "(null)");
-                free(err);
-                MORLOC_ERROR("%s", msg);
-            }
-            return sizeof(Array) + (size_t)n;
-        }
         case MORLOC_STRING:
         case MORLOC_ARRAY:
             {
+                const Schema* elem = r_resolve(schema->parameters[0]);
+                int per_visit = 0;
+                if (idx > 0) {
+                    // A sequence of compound elements, one per visit.
+                    size_t n = (size_t)LENGTH(obj);
+                    if (idx >= n) return;
+                    if (idx + 1 < n) r_resume(w, idx + 1, NULL);
+                    r_size_child(w, elem, VECTOR_ELT(obj, idx), 0);
+                    return;
+                }
                 size_t length = (size_t)LENGTH(obj);
                 size = sizeof(Array);
                 // worst-case cursor alignment padding for element data.
@@ -413,7 +581,8 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
                     int64_t paths_total = R_TRY(mlc_handles_path_lens,
                         handles, length, NULL);
                     size += length * sizeof(Array) + (size_t)paths_total;
-                    return size;
+                    w->total += (ssize_t)size;
+                    return;
                 }
                 const char* str;
 
@@ -425,7 +594,8 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
                 // with no element data; the inner switch's TYPE-based
                 // arms would otherwise fall to default and error.
                 if (TYPEOF(obj) == NILSXP) {
-                    return size;
+                    w->total += (ssize_t)size;
+                    return;
                 }
 
                 switch (TYPEOF(obj)) {
@@ -434,42 +604,63 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
                         size += (size_t)strlen(str);  // Do not include null terminator
                         break;
                     case STRSXP:
-                        if (LENGTH(obj) == 1) {
-                            str = CHAR(STRING_ELT(obj, 0));
-                            size += (size_t)strlen(str);  // Do not include null terminator
-                        } else {
-                            if(schema->parameters[0]->type == MORLOC_STRING){
-                                for(size_t i = 0; i < length; i++){
-                                    size += get_shm_size(schema->parameters[0], STRING_ELT(obj, i));
-                                }
-                            } else if(schema->parameters[0]->type == MORLOC_ENUM){
-                                // Constructor names, which cost a tag byte
-                                // each: the names travel in the schema and
-                                // never in the buffer.
-                                size += length * schema->parameters[0]->width;
-                            } else {
+                        if (schema->type == MORLOC_STRING) {
+                            if (LENGTH(obj) != 1) {
                                 MORLOC_ERROR("Expected character vector of length 1, but got length %zu", length);
                             }
+                            str = CHAR(STRING_ELT(obj, 0));
+                            size += (size_t)strlen(str);  // Do not include null terminator
+                        } else if(elem->type == MORLOC_STRING){
+                            for(size_t i = 0; i < length; i++){
+                                r_size_child(w, elem, STRING_ELT(obj, i), 0);
+                            }
+                        } else if(elem->type == MORLOC_ENUM){
+                            // Constructor names, which cost a tag byte
+                            // each: the names travel in the schema and
+                            // never in the buffer.
+                            size += length * elem->width;
+                        } else {
+                            MORLOC_ERROR("Expected a list for this array, but got a character vector");
                         }
                         break;
                     case VECSXP:  // This handles lists
-                        for (int i = 0; i < length; i++) {
-                            size += get_shm_size(schema->parameters[0], VECTOR_ELT(obj, i));
+                        if (r_flat(w, elem)) {
+                            for (size_t i = 0; i < length; i++) {
+                                r_size_child(w, elem, VECTOR_ELT(obj, i), 0);
+                            }
+                        } else {
+                            per_visit = 1;
                         }
                         break;
                     case LGLSXP:
                     case INTSXP:
                     case REALSXP:
                     case RAWSXP:
-                        {
+                        if (elem->type == MORLOC_OPTIONAL) {
+                            // An atomic vector standing for a list of
+                            // optionals: the writer takes every element
+                            // as present, so each costs its slot plus an
+                            // out-of-line inner value.
+                            for (size_t i = 0; i < length; i++) {
+                                SEXP e = PROTECT(r_atomic_elt(obj, i));
+                                r_size_step(w, elem, e, 0);
+                                UNPROTECT(1);
+                            }
+                        } else {
                             // Inline BigInt and fixed-width types: width covers the full element
-                            size += length * schema->parameters[0]->width;
+                            size += length * elem->width;
                         }
                         break;
                     default:
                         MORLOC_ERROR("Unsupported type in get_shm_size array: %s", type2char(TYPEOF(obj)));
                 }
-                return size;
+                w->total += (ssize_t)size;
+                if (per_visit && length > 0) {
+                    // One compound element per visit, starting here.
+                    if (length > 1) r_resume(w, 1, NULL);
+                    r_size_child(w, elem, VECTOR_ELT(obj, 0), 0);
+                }
+                return;
             }
 
         case MORLOC_TUPLE:
@@ -480,47 +671,39 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
             {
                 size_t array_size = (size_t)xlength(obj);
                 if (array_size != schema->size) {
-                    MORLOC_ERROR("Expected tuple of length %zu, but found list of length %zu", schema->size, size);
+                    MORLOC_ERROR("Expected tuple of length %zu, but found list of length %zu", schema->size, array_size);
                 }
-                size = schema->width;
+                w->total += (ssize_t)schema->width;
                 for (R_xlen_t i = 0; i < (R_xlen_t)array_size; ++i) {
                     SEXP item = VECTOR_ELT(obj, i);
-                    size_t elem = get_shm_size(schema->parameters[i], item);
-                    if (elem > schema->parameters[i]->width) {
-                        size += elem - schema->parameters[i]->width;
-                    }
+                    r_size_child(w, schema->parameters[i], item, 1);
                 }
-                return size;
+                return;
             }
 
         case MORLOC_MAP:
             {
                 if (isNewList(obj)) {
                     // Handle named list
-                    size = schema->width;
+                    w->total += (ssize_t)schema->width;
                     SEXP names = getAttrib(obj, R_NamesSymbol);
                     if (names == R_NilValue) {
                         error("List must have names for MORLOC_MAP");
                     }
                     for (size_t i = 0; i < schema->size; ++i) {
-                        SEXP key = PROTECT(mkChar(schema->keys[i]));
                         int index = -1;
                         for (int j = 0; j < length(obj); j++) {
-                            if (strcmp(CHAR(STRING_ELT(names, j)), CHAR(key)) == 0) {
+                            if (strcmp(CHAR(STRING_ELT(names, j)), schema->keys[i]) == 0) {
                                 index = j;
                                 break;
                             }
                         }
                         if (index != -1) {
                             SEXP value = VECTOR_ELT(obj, index);
-                            size_t elem = get_shm_size(schema->parameters[i], value);
-                            if (elem > schema->parameters[i]->width) {
-                                size += elem - schema->parameters[i]->width;
-                            }
+                            r_size_child(w, schema->parameters[i], value, 1);
                         }
-                        UNPROTECT(1);
                     }
-                    return size;
+                    return;
                 } else {
                     error("Expected a named list for MORLOC_MAP");
                 }
@@ -534,14 +717,16 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
             if (vtag < 0) MORLOC_ERROR("not a constructor of this `data` type");
             const Schema* varm = schema->parameters[vtag];
             if (varm->size == 0) {
-                return schema->width;
+                w->total += (ssize_t)schema->width;
+                return;
             }
             {
                 SEXP vfields = VECTOR_ELT(obj, 1);
-                size_t arm_size = get_shm_size(varm, vfields);
                 size_t varm_align = schema_alignment(varm);
                 if (varm_align == 0) varm_align = 1;
-                return schema->width + (varm_align - 1) + arm_size;
+                w->total += (ssize_t)(schema->width + (varm_align - 1));
+                r_size_child(w, varm, vfields, 0);
+                return;
             }
         }
 
@@ -550,22 +735,55 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
             // Present -> slot + worst-case alignment padding for the inner T +
             // T's total size (its own width plus any variable extras).
             if (obj == R_NilValue) {
-                return schema->width;
+                w->total += (ssize_t)schema->width;
+                return;
             }
             {
-                size_t inner_size = get_shm_size(schema->parameters[0], obj);
-                size_t inner_align = schema_alignment(schema->parameters[0]);
+                const Schema* inner = r_resolve(schema->parameters[0]);
+                size_t inner_align = schema_alignment(inner);
                 if (inner_align == 0) inner_align = 1;
-                return schema->width + (inner_align - 1) + inner_size;
+                w->total += (ssize_t)(schema->width + (inner_align - 1));
+                r_size_child(w, inner, obj, 0);
+                return;
             }
 
-        case MORLOC_RECUR: {
-            const Schema* target = recur_env_lookup(schema->name);
-            if (target == NULL) {
-                MORLOC_INTERNAL_ABORT("Recur back-reference to undeclared schema name '%s'",
-                             schema->name ? schema->name : "?");
+        case MORLOC_NIL:
+        case MORLOC_BOOL:
+        case MORLOC_SINT8:
+        case MORLOC_SINT16:
+        case MORLOC_SINT32:
+        case MORLOC_SINT64:
+        case MORLOC_UINT8:
+        case MORLOC_UINT16:
+        case MORLOC_UINT32:
+        case MORLOC_UINT64:
+        case MORLOC_FLOAT32:
+        case MORLOC_FLOAT64:
+        case MORLOC_ENUM:
+            w->total += (ssize_t)schema->width;
+            return;
+        case MORLOC_INT:
+            // Inline BigInt: R values always fit inline (16 bytes)
+            w->total += 16;
+            return;
+        case MORLOC_IFILE:
+        case MORLOC_OSTREAM:
+        case MORLOC_ISTREAM: {
+            // Stream-handle field: look up the exact suballoc cost via
+            // the registry (returns 8 + path_len for TAG_PATH, 0 for
+            // empty).
+            int64_t handle = i64_from_sexp(obj);
+            char* err = NULL;
+            int64_t n = mlc_handle_path_len(handle, &err);
+            if (n < 0) {
+                char msg[512];
+                snprintf(msg, sizeof(msg), "mlc_handle_path_len: %s",
+                         err ? err : "(null)");
+                free(err);
+                MORLOC_ERROR("%s", msg);
             }
-            return get_shm_size_inner(target, obj);
+            w->total += (ssize_t)(sizeof(Array) + (size_t)n);
+            return;
         }
 
         default:
@@ -573,9 +791,20 @@ static size_t get_shm_size_inner(const Schema* schema, SEXP obj) {
             break;
     }
 
-    return size;
+    w->total += (ssize_t)size;
 }
 
+// The bytes a value occupies in shared memory.
+static size_t get_shm_size(const Schema* schema, SEXP obj) {
+    r_walk_t w;
+    r_walk_init(&w, schema);
+    r_size_child(&w, schema, obj, 0);
+    while (r_next(&w)) {
+        if (w.cur.inline_slot) w.total -= (ssize_t)w.cur.schema->width;
+        r_size_step(&w, w.cur.schema, w.cur.obj, w.cur.idx);
+    }
+    return (size_t)(w.total < 0 ? 0 : w.total);
+}
 
 // IEEE 754 double can exactly represent every integer in [-2^53, 2^53].
 // Beyond that, fixed-width 64-bit integers cannot survive a round-trip
@@ -736,27 +965,36 @@ static long enum_tag_of_factor_code(const Schema* schema, SEXP levels, int code)
         *(uint64_t*)dest = (uint64_t)value; \
     } while(0)
 
-static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const Schema* schema);
+// {{{ write pass
 
-// Public entry point: push the schema's declaration name (if any) onto
-// the recur env, dispatch to the inner walker, then pop. Recur arms
-// inside _inner resolve targets via recur_env_lookup.
-static void* to_voidstar_inner(void* dest, void** cursor, SEXP obj, const Schema* schema){
-    int pushed = recur_env_push(schema);
-    void* r = to_voidstar_inner_impl(dest, cursor, obj, schema);
-    recur_env_pop(pushed);
-    return r;
+static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj, size_t idx);
+
+// Write a child into its slot: a leaf now, a compound node by call or by
+// frame.
+static void r_write_child(r_walk_t* w, const Schema* schema, void* dest, SEXP obj) {
+    const Schema* s = r_resolve(schema);
+    if (r_flat(w, s)) {
+        r_write_step(w, s, dest, obj, 0);
+        return;
+    }
+    r_frame_t f;
+    memset(&f, 0, sizeof(f));
+    f.schema = s;
+    f.obj = obj;
+    f.dest = dest;
+    r_push(w, &f);
 }
 
-static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const Schema* schema){
+static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj, size_t idx){
     MAYFAIL
+    void** cursor = w->cursor;
 
     switch (schema->type) {
         case MORLOC_NIL:
+            // A nil slot has no width; nothing is written for it.
             if (obj != R_NilValue) {
                 MORLOC_ERROR("Expected NULL for MORLOC_NIL, but got %s", type2char(TYPEOF(obj)));
             }
-            *((int8_t*)dest) = (int8_t)0;
             break;
         case MORLOC_BOOL:
             if (!isLogical(obj)) {
@@ -920,6 +1158,15 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
             // (a label must precede a statement). gcc allowed it; clang/ld64
             // (macOS) rejects it. Matches the braced MORLOC_RECUR/ISTREAM cases.
             Array* array = (Array*)dest;
+            if (idx > 0) {
+                // A sequence of compound elements, one per visit.
+                if (idx >= array->size) break;
+                const Schema* elem = r_resolve(schema->parameters[0]);
+                char* start = (char*)w->cur.aux;
+                if (idx + 1 < array->size) r_resume(w, idx + 1, start);
+                r_write_child(w, elem, start + idx * elem->width, VECTOR_ELT(obj, idx));
+                break;
+            }
             array->size = (size_t)length(obj);
             if(array->size == 0){
                 array->data = RELNULL;
@@ -930,7 +1177,7 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
             // (bumps to 64 for primitive numerics for SIMD/BLAS)
             *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, array_data_alignment(schema->parameters[0]));
             array->data = R_TRY(abs2rel, *cursor);
-            Schema* element_schema = schema->parameters[0];
+            const Schema* element_schema = r_resolve(schema->parameters[0]);
             char* start;
 
             // Batched stream-handle array write: one registry lock for
@@ -1005,7 +1252,7 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
                             start = R_TRY(rel2abs, array->data);
                             for(size_t i = 0; i < array->size; i++){
                                 SEXP elem = STRING_ELT(obj, i);
-                                to_voidstar_inner(start + i * element_schema->width, cursor, elem, element_schema);
+                                r_write_child(w, element_schema, start + i * element_schema->width, elem);
                             }
                         } else {
                             MORLOC_ERROR("Expected character vector of length 1, but got length %ld", array->size);
@@ -1023,17 +1270,25 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
                 case VECSXP:  // This handles lists
                     *cursor = (void*)(*(char**)cursor + array->size * element_schema->width);
                     start = R_TRY(rel2abs, array->data);
-                    for (int i = 0; i < array->size; i++) {
+                    if (!r_flat(w, element_schema)) {
+                        // One compound element per visit, starting here.
+                        if (array->size > 1) r_resume(w, 1, start);
+                        r_write_child(w, element_schema, start, VECTOR_ELT(obj, 0));
+                        break;
+                    }
+                    for (size_t i = 0; i < array->size; i++) {
                         SEXP elem = VECTOR_ELT(obj, i);
-                        to_voidstar_inner(start + i * element_schema->width, cursor, elem, element_schema);
+                        r_write_child(w, element_schema, start + i * element_schema->width, elem);
                     }
                     break;
+                // A scalar element is a temporary; it is written before the
+                // next is made, never handed to a frame.
                 case LGLSXP:
                     *cursor = (void*)(*(char**)cursor + array->size * element_schema->width);
                     start = R_TRY(rel2abs, array->data);
                     for (int i = 0; i < array->size; i++) {
                         SEXP elem = PROTECT(ScalarLogical(LOGICAL(obj)[i]));
-                        to_voidstar_inner(start + i * element_schema->width, cursor, elem, element_schema);
+                        r_write_step(w, element_schema, start + i * element_schema->width, elem, 0);
                         UNPROTECT(1);
                     }
                     break;
@@ -1042,7 +1297,7 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
                     start = R_TRY(rel2abs, array->data);
                     for (int i = 0; i < array->size; i++) {
                         SEXP elem = PROTECT(ScalarInteger(INTEGER(obj)[i]));
-                        to_voidstar_inner(start + i * element_schema->width, cursor, elem, element_schema);
+                        r_write_step(w, element_schema, start + i * element_schema->width, elem, 0);
                         UNPROTECT(1);
                     }
                     break;
@@ -1061,7 +1316,7 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
                     }
                     for (int i = 0; i < array->size; i++) {
                         SEXP elem = PROTECT(ScalarReal(REAL(obj)[i]));
-                        to_voidstar_inner(start + i * element_schema->width, cursor, elem, element_schema);
+                        r_write_step(w, element_schema, start + i * element_schema->width, elem, 0);
                         UNPROTECT(1);
                     }
                     break;
@@ -1079,11 +1334,11 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
             {
                 R_xlen_t size = xlength(obj);
                 if ((size_t)size != schema->size) {
-                    MORLOC_ERROR("Expected tuple of length %zu, but found list of length %zu", schema->size, size);
+                    MORLOC_ERROR("Expected tuple of length %zu, but found list of length %zu", schema->size, (size_t)size);
                 }
                 for (R_xlen_t i = 0; i < size; ++i) {
                     SEXP item = VECTOR_ELT(obj, i);
-                    to_voidstar_inner(dest + schema->offsets[i], cursor, item, schema->parameters[i]);
+                    r_write_child(w, schema->parameters[i], (char*)dest + schema->offsets[i], item);
                 }
             }
             break;
@@ -1097,19 +1352,17 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
                         MORLOC_ERROR("List must have names for MORLOC_MAP");
                     }
                     for (size_t i = 0; i < schema->size; ++i) {
-                        SEXP key = PROTECT(mkChar(schema->keys[i]));
                         int index = -1;
                         for (int j = 0; j < length(obj); j++) {
-                            if (strcmp(CHAR(STRING_ELT(names, j)), CHAR(key)) == 0) {
+                            if (strcmp(CHAR(STRING_ELT(names, j)), schema->keys[i]) == 0) {
                                 index = j;
                                 break;
                             }
                         }
                         if (index != -1) {
                             SEXP value = VECTOR_ELT(obj, index);
-                            to_voidstar_inner(dest + schema->offsets[i], cursor, value, schema->parameters[i]);
+                            r_write_child(w, schema->parameters[i], (char*)dest + schema->offsets[i], value);
                         }
-                        UNPROTECT(1);
                     }
                 } else {
                     MORLOC_ERROR("Expected a named list for MORLOC_MAP");
@@ -1132,7 +1385,7 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
                 SEXP wfields = VECTOR_ELT(obj, 1);
                 size_t warm_align = schema_alignment(warm);
                 if (warm_align == 0) warm_align = 1;
-                *cursor = (void*)(((uintptr_t)*cursor + warm_align - 1) & ~(uintptr_t)(warm_align - 1));
+                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, warm_align);
                 {
                     char* rel_err = NULL;
                     *(relptr_t*)((char*)dest + 8) = abs2rel(*cursor, &rel_err);
@@ -1140,7 +1393,7 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
                 }
                 void* arm_dest = *cursor;
                 *cursor = (void*)((char*)*cursor + warm->width);
-                to_voidstar_inner(arm_dest, cursor, wfields, warm);
+                r_write_child(w, warm, arm_dest, wfields);
             }
             break;
         }
@@ -1148,15 +1401,15 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
         case MORLOC_OPTIONAL:
             // The slot is a relptr. Absent -> write RELNULL. Present ->
             // align the cursor for the inner T, write the inner's relptr
-            // into the slot, advance the cursor past T's width, then
-            // recurse to fill T's body.
+            // into the slot, advance the cursor past T's width, then fill
+            // T's body.
             if (obj == R_NilValue) {
                 *((relptr_t*)dest) = RELNULL;
             } else {
-                const Schema* inner_schema = schema->parameters[0];
+                const Schema* inner_schema = r_resolve(schema->parameters[0]);
                 size_t inner_align = schema_alignment(inner_schema);
                 if (inner_align == 0) inner_align = 1;
-                *cursor = (void*)(((uintptr_t)*cursor + inner_align - 1) & ~(uintptr_t)(inner_align - 1));
+                *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, inner_align);
                 {
                     char* rel_err = NULL;
                     *(relptr_t*)dest = abs2rel(*cursor, &rel_err);
@@ -1164,31 +1417,28 @@ static void* to_voidstar_inner_impl(void* dest, void** cursor, SEXP obj, const S
                 }
                 void* inner_dest = *cursor;
                 *cursor = (void*)((char*)*cursor + inner_schema->width);
-                to_voidstar_inner(inner_dest, cursor, obj, inner_schema);
+                r_write_child(w, inner_schema, inner_dest, obj);
             }
             break;
-
-        case MORLOC_RECUR: {
-            const Schema* target = recur_env_lookup(schema->name);
-            if (target == NULL) {
-                MORLOC_INTERNAL_ABORT("Recur back-reference to undeclared schema name '%s'",
-                             schema->name ? schema->name : "?");
-            }
-            // Dispatch directly to _inner so the Recur node itself
-            // does not push its own (lookup-key) name onto the env.
-            to_voidstar_inner_impl(dest, cursor, obj, target);
-            break;
-        }
 
         default:
             MORLOC_ERROR("Unhandled schema type %d in to_voidstar_inner", (int)schema->type);
             break;
     }
-
-    return dest;
-
 }
 
+// Write `obj` into the slot at `dest`, appending variable-length parts at
+// the cursor.
+static void* to_voidstar_inner(void* dest, void** cursor, SEXP obj, const Schema* schema){
+    r_walk_t w;
+    r_walk_init(&w, schema);
+    w.cursor = cursor;
+    r_write_child(&w, schema, dest, obj);
+    while (r_next(&w)) {
+        r_write_step(&w, w.cur.schema, w.cur.dest, w.cur.obj, w.cur.idx);
+    }
+    return dest;
+}
 
 // NOTE: If to_voidstar_inner calls error() (via MORLOC_ERROR or R_TRY), the shared
 // memory at dest leaks. This only happens on type mismatches (a development-time
@@ -1205,23 +1455,45 @@ static void* to_voidstar(SEXP obj, const Schema* schema) {
     return to_voidstar_inner(dest, &cursor, obj, schema);
 }
 
+// }}} write pass
+
 // }}} to_voidstar
 
 // {{{ from_voidstar
 
-static SEXP from_voidstar_inner(const void* data, const Schema* schema, const void* base_ptr);
-
-// Public entry point: push/pop the recur env around every call so the
-// inner walker can resolve MORLOC_RECUR via recur_env_lookup.
-static SEXP from_voidstar(const void* data, const Schema* schema, const void* base_ptr) {
-    int pushed = recur_env_push(schema);
-    SEXP r = from_voidstar_inner(data, schema, base_ptr);
-    recur_env_pop(pushed);
-    return r;
+// Store a finished node into its parent's slot, or as the PROTECTed root.
+static void r_store(r_walk_t* w, unsigned char slot_kind, SEXP parent, R_xlen_t slot, SEXP obj) {
+    if (slot_kind == R_SLOT_ROOT) {
+        w->result = obj;
+        PROTECT(obj);
+        return;
+    }
+    SET_VECTOR_ELT(parent, slot, obj);
 }
 
-static SEXP from_voidstar_inner(const void* data, const Schema* schema, const void* base_ptr) {
+static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, size_t idx, unsigned char slot_kind, SEXP parent, R_xlen_t slot);
+
+// Read a child into its parent's slot: a leaf now, a compound node by call
+// or by frame.
+static void r_read_child(r_walk_t* w, const Schema* schema, const void* data, unsigned char slot_kind, SEXP parent, R_xlen_t slot) {
+    const Schema* s = r_resolve(schema);
+    if (r_flat(w, s)) {
+        r_read_step(w, s, data, 0, slot_kind, parent, slot);
+        return;
+    }
+    r_frame_t f;
+    memset(&f, 0, sizeof(f));
+    f.schema = s;
+    f.dest = (void*)data;
+    f.obj = parent;
+    f.slot = slot;
+    f.slot_kind = slot_kind;
+    r_push(w, &f);
+}
+
+static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, size_t idx, unsigned char slot_kind, SEXP parent, R_xlen_t slot) {
     MAYFAIL
+    const void* base_ptr = w->base_ptr;
 
     if(data == NULL){
         MORLOC_ERROR("NULL data (%s:%d in %s)", __FILE__, __LINE__, __func__);
@@ -1231,10 +1503,23 @@ static SEXP from_voidstar_inner(const void* data, const Schema* schema, const vo
         MORLOC_ERROR("NULL schema (%s:%d in %s)", __FILE__, __LINE__, __func__);
     }
 
+    if (idx > 0) {
+        // A list of compound elements, one per visit: `parent` is the
+        // container built on the first visit.
+        const Array* array = (const Array*)data;
+        if (idx >= array->size) return;
+        const Schema* element_schema = r_resolve(schema->parameters[0]);
+        const char* start = (const char*)w->cur.aux;
+        if (idx + 1 < array->size) r_resume(w, idx + 1, w->cur.aux);
+        r_read_child(w, element_schema, start + element_schema->width * idx, slot_kind, parent, (R_xlen_t)idx);
+        return;
+    }
+
     SEXP obj = R_NilValue;
     switch (schema->type) {
         case MORLOC_NIL:
-            return R_NilValue;
+            obj = R_NilValue;
+            break;
         case MORLOC_BOOL:
             obj = ScalarLogical((bool)*(uint8_t*)data);
             break;
@@ -1374,7 +1659,7 @@ static SEXP from_voidstar_inner(const void* data, const Schema* schema, const vo
         case MORLOC_ARRAY:
             {
                 Array* array = (Array*)data;
-                Schema* element_schema = schema->parameters[0];
+                const Schema* element_schema = r_resolve(schema->parameters[0]);
                 char* start;
 
                 switch(element_schema->type){
@@ -1608,60 +1893,60 @@ static SEXP from_voidstar_inner(const void* data, const Schema* schema, const vo
                         break;
                     default:
                         {
+                            // A list of compound values: store it, then fill
+                            // its elements in place.
                             obj = PROTECT(allocVector(VECSXP, array->size));
+                            r_store(w, slot_kind, parent, slot, obj);
+                            UNPROTECT(1);
                             if(array->size == 0) {
-                                UNPROTECT(1);
-                                break;
+                                return;
                             }
                             start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
                             size_t width = element_schema->width;
-                            for (size_t i = 0; i < array->size; i++) {
-                                SEXP item = from_voidstar(start + width * i, element_schema, base_ptr);
-                                if (item == R_NilValue) {
-                                    UNPROTECT(1);
-                                    obj = R_NilValue;
-                                    goto error;
+                            if (r_flat(w, element_schema)) {
+                                for (size_t i = 0; i < array->size; i++) {
+                                    r_read_child(w, element_schema, start + width * i, R_SLOT_LIST, obj, (R_xlen_t)i);
                                 }
-                                SET_VECTOR_ELT(obj, i, item);
+                                return;
                             }
-                            UNPROTECT(1);
+                            // One compound element per visit, starting here;
+                            // later visits find the container in `parent`.
+                            w->cur.obj = obj;
+                            w->cur.slot_kind = R_SLOT_LIST;
+                            if (array->size > 1) r_resume(w, 1, start);
+                            r_read_child(w, element_schema, start, R_SLOT_LIST, obj, 0);
+                            return;
                         }
-                        break;
                 }
             }
             break;
         case MORLOC_TUPLE: {
             obj = PROTECT(allocVector(VECSXP, schema->size));
+            r_store(w, slot_kind, parent, slot, obj);
+            UNPROTECT(1);
             for (size_t i = 0; i < schema->size; i++) {
                 void* item_ptr = (char*)data + schema->offsets[i];
-                SEXP item = from_voidstar(item_ptr, schema->parameters[i], base_ptr);
-                if (item == R_NilValue) {
-                    UNPROTECT(1);
-                    obj = R_NilValue;
-                    goto error;
-                }
-                SET_VECTOR_ELT(obj, i, item);
+                r_read_child(w, schema->parameters[i], item_ptr, R_SLOT_LIST, obj, (R_xlen_t)i);
             }
-            UNPROTECT(1);
-            break;
+            return;
         }
         case MORLOC_MAP: {
             // R_NilValue is a legitimate field value: it stands for both
             // MORLOC_NIL fields and absent MORLOC_OPTIONAL fields (the
-            // recursive `?T` tail of an LL, for instance). Real errors
-            // inside from_voidstar take the R error() longjmp path and
-            // never return, so reaching the return at all means success.
+            // recursive `?T` tail of an LL, for instance).
             obj = PROTECT(allocVector(VECSXP, schema->size));
             SEXP names = PROTECT(allocVector(STRSXP, schema->size));
             for (size_t i = 0; i < schema->size; i++) {
-                void* item_ptr = (char*)data + schema->offsets[i];
-                SEXP value = from_voidstar(item_ptr, schema->parameters[i], base_ptr);
-                SET_VECTOR_ELT(obj, i, value);
                 SET_STRING_ELT(names, i, mkChar(schema->keys[i]));
             }
             setAttrib(obj, R_NamesSymbol, names);
+            r_store(w, slot_kind, parent, slot, obj);
             UNPROTECT(2);
-            break;
+            for (size_t i = 0; i < schema->size; i++) {
+                void* item_ptr = (char*)data + schema->offsets[i];
+                r_read_child(w, schema->parameters[i], item_ptr, R_SLOT_LIST, obj, (R_xlen_t)i);
+            }
+            return;
         }
         case MORLOC_VARIANT: {
             // A payload-bearing `data` value crosses as a STRUCTURAL pair --
@@ -1674,69 +1959,49 @@ static SEXP from_voidstar_inner(const void* data, const Schema* schema, const vo
                 MORLOC_ERROR("variant tag is out of range for this type");
             }
             const Schema* varm = schema->parameters[vtag];
+            SEXP pair = PROTECT(allocVector(VECSXP, 2));
+            SET_VECTOR_ELT(pair, 0, mkString(schema->keys[vtag]));
+            r_store(w, slot_kind, parent, slot, pair);
+            UNPROTECT(1);
             relptr_t vrel = *(const relptr_t*)((const char*)data + 8);
-            SEXP vfields;
             if (vrel == RELNULL) {
-                vfields = PROTECT(allocVector(VECSXP, 0));
-            } else {
-                const void* payload;
-                if (base_ptr) {
-                    payload = (const char*)base_ptr + vrel;
-                } else {
-                    char* rel_err = NULL;
-                    payload = rel2abs(vrel, &rel_err);
-                    if (rel_err) { free(rel_err); MORLOC_ERROR("rel2abs failed in MORLOC_VARIANT"); }
-                }
-                vfields = PROTECT(from_voidstar(payload, varm, base_ptr));
+                SET_VECTOR_ELT(pair, 1, allocVector(VECSXP, 0));
+                return;
             }
-            {
-                SEXP pair = PROTECT(allocVector(VECSXP, 2));
-                SET_VECTOR_ELT(pair, 0, mkString(schema->keys[vtag]));
-                SET_VECTOR_ELT(pair, 1, vfields);
-                UNPROTECT(2);
-                obj = pair;
-            }
-            break;
+            const void* payload = R_TRY(resolve_relptr, vrel, base_ptr);
+            r_read_child(w, varm, payload, R_SLOT_LIST, pair, 1);
+            return;
         }
         case MORLOC_OPTIONAL: {
             // The Optional slot is a relptr (RELNULL = absent). Resolve and
-            // recurse into the inner T's body when present.
+            // read the inner T's body into this same slot when present.
             relptr_t relptr = *(const relptr_t*)data;
             if (relptr == RELNULL) {
-                return R_NilValue;
+                obj = R_NilValue;
+                break;
             }
-            const void* inner_abs;
-            if (base_ptr) {
-                inner_abs = (const char*)base_ptr + relptr;
-            } else {
-                char* rel_err = NULL;
-                inner_abs = rel2abs(relptr, &rel_err);
-                if (rel_err) { free(rel_err); MORLOC_ERROR("rel2abs failed in MORLOC_OPTIONAL"); }
-            }
-            obj = from_voidstar(inner_abs, schema->parameters[0], base_ptr);
-            break;
-        }
-        case MORLOC_RECUR: {
-            const Schema* target = recur_env_lookup(schema->name);
-            if (target == NULL) {
-                MORLOC_INTERNAL_ABORT("Recur back-reference to undeclared schema name '%s'",
-                             schema->name ? schema->name : "?");
-                goto error;
-            }
-            // Dispatch directly to _inner so the Recur node does not push
-            // its own (lookup-key) name onto the env stack.
-            obj = from_voidstar_inner(data, target, base_ptr);
-            break;
+            const void* inner_abs = R_TRY(resolve_relptr, relptr, base_ptr);
+            r_read_child(w, schema->parameters[0], inner_abs, slot_kind, parent, slot);
+            return;
         }
         default:
             MORLOC_ERROR("Unsupported schema type %d in from_voidstar", (int)schema->type);
-            goto error;
     }
 
-    return obj;
+    r_store(w, slot_kind, parent, slot, obj);
+}
 
-error:
-    return R_NilValue;
+// Build the R value at `data`. The result is unprotected on return.
+static SEXP from_voidstar(const void* data, const Schema* schema, const void* base_ptr) {
+    r_walk_t w;
+    r_walk_init(&w, schema);
+    w.base_ptr = base_ptr;
+    r_read_child(&w, schema, data, R_SLOT_ROOT, R_NilValue, 0);
+    while (r_next(&w)) {
+        r_read_step(&w, w.cur.schema, w.cur.dest, w.cur.idx, w.cur.slot_kind, w.cur.obj, w.cur.slot);
+    }
+    UNPROTECT(1);
+    return w.result;
 }
 
 // }}} from_voidstar
@@ -2060,10 +2325,17 @@ SEXP morloc_close_socket(SEXP socket_id_r) {
 
 
 // put_value
-SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
+// With `self_contained_r` true the packet embeds the value rather than
+// referencing a shared-memory block, for a value that must outlive this
+// dispatch's blocks, such as a closure's captured value applied back
+// later from another pool.
+SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r, SEXP self_contained_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
         MORLOC_INTERNAL_ABORT("schema must be a single string");
     }
+    bool self_contained = (TYPEOF(self_contained_r) == LGLSXP && LENGTH(self_contained_r) == 1)
+                        ? (LOGICAL(self_contained_r)[0] == TRUE)
+                        : false;
 
     const char* schema_cstr = CHAR(STRING_ELT(schema_str_r, 0));
 
@@ -2120,7 +2392,12 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
             shm_tracker_push((absptr_t)shm_ptr, NULL);
         }
 
-        uint8_t* packet = make_arrow_data_packet(relptr, schema);
+        uint8_t* packet = NULL;
+        if (self_contained) {
+            packet = R_TRY_WITH_INFRA(free_schema(schema), make_inline_data_packet, shm_ptr, schema);
+        } else {
+            packet = make_arrow_data_packet(relptr, schema);
+        }
         if (!packet) {
             free_schema(schema);
             MORLOC_INTERNAL_ABORT("Failed to create arrow data packet");
@@ -2143,7 +2420,12 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
 
     relptr_t relptr = R_TRY_WITH(free_schema(schema), abs2rel, voidstar);
 
-    uint8_t* packet = R_TRY_WITH_INFRA(free_schema(schema), make_data_packet_auto, voidstar, relptr, schema);
+    uint8_t* packet = NULL;
+    if (self_contained) {
+        packet = R_TRY_WITH_INFRA(free_schema(schema), make_inline_data_packet, voidstar, schema);
+    } else {
+        packet = R_TRY_WITH_INFRA(free_schema(schema), make_data_packet_auto, voidstar, relptr, schema);
+    }
 
     const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
     bool tracked = false;
@@ -2798,25 +3080,51 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
     Schema* schema = R_TRY_WITH(free(schema_str), parse_schema, schema_str);
     free(schema_str);
 
-    // Arrow dispatch: a table-typed value is an Arrow packet and vice
-    // versa; either half without the other is a routing error.
-    if (format == PACKET_FORMAT_ARROW || schema->type == MORLOC_TABLE) {
-        if (format != PACKET_FORMAT_ARROW) {
+    // Arrow dispatch: a table-typed value is a block. It arrives by
+    // reference (an Arrow packet) or in a form the runtime materializes
+    // into a block of this pool's own (a cached result read back from a
+    // file, a captured value carried inline).
+    if (schema->type == MORLOC_TABLE) {
+        if (format == PACKET_FORMAT_ARROW && source != PACKET_SOURCE_RPTR) {
             free_schema(schema);
-            MORLOC_ERROR("table-typed value did not arrive as an Arrow packet");
+            MORLOC_ERROR("Arrow packet does not name a shared-memory block");
         }
-        if (schema->type != MORLOC_TABLE) {
-            free_schema(schema);
-            MORLOC_ERROR("Arrow packet received for a non-table type");
-        }
+        bool materialized = (source != PACKET_SOURCE_RPTR);
         uint8_t* arrow_ptr = R_TRY_WITH_INFRA(free_schema(schema),
             get_morloc_data_packet_value, packet, schema);
         const arrow_shm_header_t* arrow_hdr = (const arrow_shm_header_t*)arrow_ptr;
 
         char* validate_err = NULL;
         if (arrow_validate(arrow_hdr, schema, &validate_err) != 0) {
+            if (materialized) {
+                char* ferr = NULL;
+                shfree((absptr_t)arrow_ptr, &ferr);
+                if (ferr) { free(ferr); }
+            }
             free_schema(schema);
-            MORLOC_ERROR("Arrow table failed validation: %s", validate_err ? validate_err : "");
+            morloc_error_take("Arrow table failed validation: ", validate_err);
+        }
+
+        // Hold the block for as long as R references the imported buffers,
+        // releasing it at the start of the next request. A table that
+        // arrived by reference needs one taken on this pool's behalf; the
+        // sender donated one before sending, so a refusal means the block
+        // is gone and the view would read scrubbed memory. A table
+        // materialized here is already this pool's own.
+        if (!materialized) {
+            char* incref_err = NULL;
+            bool acquired = shincref((absptr_t)arrow_ptr, &incref_err);
+            if (incref_err) { free(incref_err); }
+            if (!acquired) {
+                free_schema(schema);
+                MORLOC_INTERNAL_ABORT("received table's shared-memory block is no longer live");
+            }
+        }
+        shm_tracker_push((absptr_t)arrow_ptr, NULL);
+        {
+            char* rerr = NULL;
+            relptr_t rel = abs2rel(arrow_ptr, &rerr);
+            if (rerr) { free(rerr); } else { arrow_borrow_register((const uint8_t*)arrow_ptr, rel); }
         }
 
         struct ArrowSchema arrow_schema;
@@ -2824,10 +3132,8 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         char* arrow_err = NULL;
         arrow_from_shm(arrow_hdr, &arrow_schema, &arrow_array, &arrow_err);
         if (arrow_err) {
-            if (arrow_schema.release) arrow_schema.release(&arrow_schema);
-            if (arrow_array.release) arrow_array.release(&arrow_array);
             free_schema(schema);
-            MORLOC_ERROR("Arrow import failed: %s", arrow_err);
+            morloc_error_take("Arrow import failed: ", arrow_err);
         }
 
         // Import via R arrow package: arrow::ImportRecordBatch(array_ptr, schema_ptr)
@@ -2841,33 +3147,25 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
             MORLOC_ERROR("arrow::ImportRecordBatch not found; is the arrow package installed?");
         }
 
+        // ImportRecordBatch moves both structs and, on every path known,
+        // releases them itself when it fails; an R error raised past that
+        // point unwinds through here with nothing left to release. The
+        // releases after the call are then no-ops; they hold only if an
+        // import fails without releasing.
         SEXP array_ptr_r = PROTECT(R_MakeExternalPtr(&arrow_array, R_NilValue, R_NilValue));
         SEXP schema_ptr_r = PROTECT(R_MakeExternalPtr(&arrow_schema, R_NilValue, R_NilValue));
         SEXP call = PROTECT(lang3(import_fn, array_ptr_r, schema_ptr_r));
         SEXP obj_r = PROTECT(eval(call, arrow_ns));
         UNPROTECT(6);
-
-        // Hold the block for as long as R references the imported buffers,
-        // and hand it to the tracker so the reference is released at the
-        // start of the next request rather than never. A table that arrived
-        // by reference needs one taken on this pool's behalf; a table
-        // materialized here is already this pool's own and a second
-        // reference would leave it permanently held.
-        bool arrow_owned = true;
-        if (source == PACKET_SOURCE_RPTR) {
-            char* incref_err = NULL;
-            arrow_owned = shincref((absptr_t)arrow_ptr, &incref_err);
-            if (incref_err) { free(incref_err); }
-        }
-        if (arrow_owned) {
-            shm_tracker_push((absptr_t)arrow_ptr, NULL);
-            char* rerr = NULL;
-            relptr_t rel = abs2rel(arrow_ptr, &rerr);
-            if (rerr) { free(rerr); } else { arrow_borrow_register((const uint8_t*)arrow_ptr, rel); }
-        }
+        if (arrow_schema.release) arrow_schema.release(&arrow_schema);
+        if (arrow_array.release) arrow_array.release(&arrow_array);
 
         free_schema(schema);
         return obj_r;
+    }
+    if (format == PACKET_FORMAT_ARROW) {
+        free_schema(schema);
+        MORLOC_ERROR("Arrow packet received for a non-table type");
     }
 
     // Fast path: inline voidstar -- read directly from packet, no SHM
@@ -2990,18 +3288,20 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         // it in the tracker so shm_tracker_flush() releases it at the
         // start of our next request -- after R has finished consuming
         // the deserialized form.
-        // Track only a reference actually acquired: a refused incref means
-        // the block is free or being released, and tracking it anyway would
-        // make the next flush decrement a reference this pool never held.
+        // The sender donated a reference before sending, so a refused
+        // acquire means the block is already gone.
         char* incref_err = NULL;
-        if (shincref((absptr_t)voidstar, &incref_err)) {
-            shm_tracker_push((absptr_t)voidstar, schema);
-            tracked = true;
-        }
+        bool acquired = shincref((absptr_t)voidstar, &incref_err);
         if (incref_err) { free(incref_err); }
+        if (!acquired) {
+            free_schema(schema);
+            MORLOC_INTERNAL_ABORT("received value's shared-memory block is no longer live");
+        }
+        shm_tracker_push((absptr_t)voidstar, schema);
+        tracked = true;
     }
 
-    MORLOC_REJECT_NUL(check_nul, voidstar, schema, NULL, free_schema(schema));
+    MORLOC_REJECT_NUL(check_nul, voidstar, schema, NULL, { if (!tracked) free_schema(schema); });
 
     SEXP obj_r = from_voidstar(voidstar, schema, NULL);
     if (obj_r == NULL) {
@@ -4253,7 +4553,7 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_close_socket", (DL_FUNC) &morloc_close_socket, 1},
         {"morloc_foreign_call", (DL_FUNC) &morloc_foreign_call, 3},
         {"morloc_get_value", (DL_FUNC) &morloc_get_value, 3},
-        {"morloc_put_value", (DL_FUNC) &morloc_put_value, 2},
+        {"morloc_put_value", (DL_FUNC) &morloc_put_value, 3},
         {"morloc_mlc_show", (DL_FUNC) &morloc_mlc_show, 2},
         {"r_morloc_log_next_id", (DL_FUNC) &morloc_log_next_id_r, 0},
         {"r_morloc_log_emit", (DL_FUNC) &morloc_log_emit_r, 4},

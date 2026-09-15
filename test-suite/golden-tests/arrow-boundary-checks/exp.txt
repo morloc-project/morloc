@@ -16,5 +16,14 @@ column 'x' is declared non-nullable (Int) but contains 1 null(s); declare it opt
 "x:l:[1, 2]; y:u:['a', 'b']; z:g:[0.5, 1.5]"
 --- kindlessIntoTyped ---
 Column 'x' has Arrow type 'g' but is declared as Int
+--- numericIds ---
+"id:u:['7', '8']"
 --- parquetHead ---
 [{"x":1,"y":"a"},{"x":2,"y":"b"}]
+--- csvByName ---
+"age:l:[30, 41]; name:u:['alice', 'bob']"
+--- csvSameTyped ---
+"last:u:['lovelace']; first:u:['ada']"
+--- narrowed ---
+"x:C:[255]"
+Error: failed to parse argument #0: Value 300 in column 'x' row 0 does not fit the declared Uint8

@@ -338,30 +338,40 @@ printRecordTemplate ts = encloseSep "<" ">" "," ts
 -- forward-declared: a recursive arm holds @std::shared_ptr<T>@, and an alias
 -- to @std::variant<...>@ cannot be named before its alternatives are
 -- complete.
--- | Forward declarations of a generated type's three marshallers.
+-- | The marshalling node of a generated type: the @MlcNode@ specialization
+-- with its three walk steps declared.
 --
--- These are NON-TEMPLATE overloads, so a call to one is resolved by ordinary
--- lookup at the point of the call -- not at instantiation. A definition that
--- appears later is invisible, and the call silently binds to the header's
--- generic fallback, which reinterprets the wire bytes as the target type.
--- Declaring every marshaller before any definition removes the ordering
--- question, as the two-phase struct emission does for the types themselves.
---
--- The default arguments live here rather than on the definition: C++ forbids
--- repeating them for the same parameter in one scope.
+-- The whole class goes out before any step body, so a body that reaches
+-- this type -- an arm holding it, a record field of it -- finds a complete
+-- class to name. Bodies follow as out-of-line member definitions, which is
+-- how two generated types can marshal each other in either order.
 printMarshalDecls :: [MDoc] -> MDoc -> MDoc
 printMarshalDecls params name =
   vsep
-    [ tmpl <> "size_t get_shm_size(const Schema* schema, const" <+> name <> "& data);"
-    , tmpl <> "void* to_voidstar(void* dest, void** cursor, const Schema* schema, const"
-        <+> name <> "& obj);"
-    , tmpl <> name <+> "from_voidstar(const Schema* schema, const void* anything,"
-        <+> name <> "* dummy = nullptr, const void* base_ptr = nullptr);"
+    [ specializationHeader params
+    , "struct MlcNode<" <> name <> "> {"
+    , indent 4 $ vsep
+        [ "static void size_step(MlcSizeWalk& w, const Schema* schema, const"
+            <+> name <> "& obj, size_t idx);"
+        , "static void write_step(MlcWriteWalk& w, const Schema* schema, void* dest, const"
+            <+> name <> "& obj, size_t idx);"
+        , "static void read_step(MlcReadWalk& w, const Schema* schema, const void* data,"
+            <+> name <> "* out, size_t idx);"
+        ]
+    , "};"
     ]
-  where
-    tmpl = case params of
-      [] -> ""
-      _ -> printTemplateHeader params <> line
+
+-- | @template<>@ for an explicit specialization, the parameter list for a
+-- partial one.
+specializationHeader :: [MDoc] -> MDoc
+specializationHeader [] = "template<>"
+specializationHeader params = printTemplateHeader params
+
+-- | The header of an out-of-line member of a specialization: an explicit
+-- specialization's members take none, a partial one's repeat its parameters.
+memberHeader :: [MDoc] -> MDoc
+memberHeader [] = ""
+memberHeader params = printTemplateHeader params <> line
 
 -- | The forward declarations and wrapper for a variant.
 --
@@ -416,93 +426,71 @@ armName n c =
   let (headT, args) = T.breakOn "<" (render n)
   in pretty headT <> "_" <> pretty c <> pretty args
 
--- | Emit @to_voidstar@ / @from_voidstar@ / @get_shm_size@ for a variant.
+-- | Emit the three walk steps of a variant wrapper.
 --
--- The slot layout lives in the runtime helpers; these only pick an arm. The
--- payload of an arm with fields is written as that arm's struct, which the
--- record serializer already knows how to marshal.
+-- The slot layout lives in the runtime; these only pick an arm. An arm with
+-- fields hands its struct to the walk, which the arm's own node marshals.
 printCppVariantSerializers :: MDoc -> [(Text, [MDoc])] -> MDoc
 printCppVariantSerializers name arms =
   vsep [sizeFn, "", toFn, "", fromFn]
   where
     idxArms = zip [(0 :: Int) ..] arms
 
-    -- Each marshaller pushes the type's own declaration onto the recursion
-    -- environment before descending. A variant may be declared INSIDE
-    -- another type's schema (`&Expr ... &Term ... ^Term ... ^Expr`), so a
-    -- back-reference to it from within its own arms resolves only if this
-    -- scope, not just the outermost one, is on the stack.
-    scopeDecl = "RecurEnvScope _recur_scope(resolve_recur(schema));"
+    armPayload c = "*std::get<std::shared_ptr<" <> armName name c <> ">>(obj.v)"
 
     sizeFn =
       vsep
-        [ "inline size_t get_shm_size(const Schema* schema, const" <+> name <> "& obj) {"
+        [ "void MlcNode<" <> name <> ">::size_step(MlcSizeWalk& w, const Schema* schema, const"
+            <+> name <> "& obj, size_t) {"
         , indent 4 $ vsep
-            [ scopeDecl
-            , "switch (obj.v.index()) {"
+            [ "switch (obj.v.index()) {"
             , indent 4 $ vsep
                 [ "case" <+> pretty i <> ":" <+>
                     (if null ts
-                       then "return variant_size_nullary(schema);"
-                       else "return variant_size_payload(schema, resolve_recur(schema)->parameters["
-                              <> pretty i <> "], *std::get<std::shared_ptr<" <> armName name c <> ">>(obj.v));")
+                       then "w.total += schema->width; break;"
+                       else "w.variant_payload(schema, schema->parameters["
+                              <> pretty i <> "], " <> armPayload c <> "); break;")
                 | (i, (c, ts)) <- idxArms ]
             , "}"
-            , "return variant_size_nullary(schema);"
             ]
         , "}"
         ]
 
     toFn =
       vsep
-        [ "inline void* to_voidstar(void* dest, void** cursor, const Schema* schema, const"
-            <+> name <> "& obj) {"
+        [ "void MlcNode<" <> name <> ">::write_step(MlcWriteWalk& w, const Schema* schema, void* dest, const"
+            <+> name <> "& obj, size_t) {"
         , indent 4 $ vsep
-            [ scopeDecl
-            , "switch (obj.v.index()) {"
+            [ "switch (obj.v.index()) {"
             , indent 4 $ vsep
                 [ "case" <+> pretty i <> ":" <+>
                     (if null ts
-                       then "return write_variant_nullary(dest," <+> pretty i <> ");"
-                       else "return write_variant_payload(dest, cursor, resolve_recur(schema)->parameters["
-                              <> pretty i <> "]," <+> pretty i <> ", *std::get<std::shared_ptr<"
-                              <> armName name c <> ">>(obj.v));")
+                       then "write_variant_nullary(dest," <+> pretty i <> "); break;"
+                       else "w.variant_payload(dest, schema->parameters["
+                              <> pretty i <> "]," <+> pretty i <> ", " <> armPayload c <> "); break;")
                 | (i, (c, ts)) <- idxArms ]
             , "}"
-            , "return dest;"
             ]
         , "}"
         ]
 
     fromFn =
       vsep
-        -- An OVERLOAD of from_voidstar, not a separate function: the reader
-        -- is a single template dispatching with `if constexpr`, and a
-        -- differently-named function is never reached from it. Matching the
-        -- template's signature (including the dummy pointer that carries the
-        -- result type) makes overload resolution prefer this, which is how
-        -- generated records are read too.
-        [ "inline" <+> name <+> "from_voidstar(const Schema* schema, const void* data,"
-            <+> name <> "* dummy, const void* base_ptr) {"
+        [ "void MlcNode<" <> name <> ">::read_step(MlcReadWalk& w, const Schema* schema, const void* data,"
+            <+> name <> "* out, size_t) {"
         , indent 4 $ vsep
-            [ "(void)dummy;"
-            , name <+> "out;"
-            , "const Schema* s = resolve_recur(schema);"
-            , "RecurEnvScope _recur_scope(s);"
-            , "switch (read_variant_tag(data)) {"
+            [ "switch (read_variant_tag(data)) {"
             , indent 4 $ vsep
-                [ "case" <+> pretty i <> ": out.v ="
-                    <+> (if null ts
-                           then "std::make_shared<" <> armName name c <> ">();"
-                           else "std::make_shared<" <> armName name c <> ">(read_variant_payload<"
-                                  <> armName name c <> ">(s->parameters[" <> pretty i
-                                  <> "], data, base_ptr));")
-                    <+> "break;"
+                [ "case" <+> pretty i <> ":" <+>
+                    (if null ts
+                       then "out->v = std::make_shared<" <> armName name c <> ">(); break;"
+                       else "{ auto arm = std::make_shared<" <> armName name c
+                              <> ">(); out->v = arm; w.variant_payload(schema->parameters["
+                              <> pretty i <> "], data, arm.get()); break; }")
                 | (i, (c, ts)) <- idxArms ]
             , indent 0 ("default: throw std::runtime_error(\"" <> name
                           <> ": no constructor for this tag\");")
             , "}"
-            , "return out;"
             ]
         , "}"
         ]
@@ -522,15 +510,7 @@ printStructTypedef params rname fields = vsep [template, struct]
         (vsep [t <+> k <> ";" | (k, t) <- fields])
         <> ";"
 
--- | Render a C++ serializer (to_voidstar) for a struct.
---
--- Writes each field directly via per-field to_voidstar calls instead of
--- wrapping the whole record in a `std::make_tuple` and re-dispatching to
--- the tuple overload. The tuple form needed to copy/move every field
--- into the temporary tuple, which fails to compile when a field is
--- move-only (e.g. `std::optional<std::unique_ptr<T>>` -- the C++
--- encoding of a recursive `?T`). The per-field form mirrors the
--- deserializer and avoids that constraint.
+-- | Render the write step of a struct: each field into its slot.
 printSerializer ::
   [MDoc] -> -- template parameters
   MDoc -> -- type of thing being serialized
@@ -538,67 +518,41 @@ printSerializer ::
   MDoc
 printSerializer params rtype fields =
   [idoc|
-#{printTemplateHeader params}
-void* to_voidstar(void* dest, void** cursor, const Schema* schema, const #{rtype}& obj)
+#{memberHeader params}void MlcNode<#{rtype}>::write_step(MlcWriteWalk& w, const Schema* schema, void* dest, const #{rtype}& obj, size_t)
 {
-    RecurEnvScope _recur_scope(resolve_recur(schema));
-#{block 4 "" (vsep (zipWith assignField [0 ..] (map fst fields)))}
-    return dest;
+#{block 4 "" (vsep (zipWith writeField [0 ..] (map fst fields)))}
 }
 |]
   where
-    assignField :: Int -> MDoc -> MDoc
-    assignField idx key =
-      [idoc|to_voidstar((char*)dest + schema->offsets[#{pretty idx}], cursor, schema->parameters[#{pretty idx}], obj.#{key});|]
+    writeField :: Int -> MDoc -> MDoc
+    writeField idx key =
+      [idoc|w.child(schema->parameters[#{pretty idx}], (char*)dest + schema->offsets[#{pretty idx}], obj.#{key});|]
 
--- | Render a C++ deserializer (from_voidstar + get_shm_size) for a struct.
+-- | Render the read and size steps of a struct.
 printDeserializer ::
-  Bool -> -- omit default arguments (the type is forward-declared)
   [MDoc] -> -- template parameters
   MDoc -> -- type of thing being deserialized
   [(MDoc, MDoc)] -> -- key and type for all fields
   MDoc
-printDeserializer fwdDeclared params rtype fields =
+printDeserializer params rtype fields =
   [idoc|
-#{printTemplateHeader params}
-#{block 4 header body}
+#{memberHeader params}void MlcNode<#{rtype}>::read_step(MlcReadWalk& w, const Schema* schema, const void* data, #{rtype}* out, size_t)
+{
+#{block 4 "" (vsep (zipWith readField [0 ..] (map fst fields)))}
+}
 
-#{printTemplateHeader params}
-#{block 4 headerGetSize bodyGetSize}
+#{memberHeader params}void MlcNode<#{rtype}>::size_step(MlcSizeWalk& w, const Schema* schema, const #{rtype}& obj, size_t)
+{
+    w.total += schema->width;
+#{block 4 "" (vsep (zipWith sizeField [0 ..] (map fst fields)))}
+}
 |]
   where
-    header =
-      -- A forward-declared type carries its defaults on the declaration,
-      -- and C++ forbids repeating them here. Anything not forward-declared
-      -- keeps them, or a two-argument call has nowhere to find them.
-      [idoc|#{rtype} from_voidstar(const Schema* schema, const void * anything, #{rtype}* dummy#{defArg "nullptr"}, const void* base_ptr#{defArg "nullptr"})|]
-    -- The record may be declared inside another type's schema, so its own
-    -- declaration is pushed before its fields are read: a back-reference
-    -- to it from within them resolves against this scope.
-    body =
-      vsep $
-        [ "RecurEnvScope _recur_scope(resolve_recur(schema));"
-        , [idoc|#{rtype} obj;|] ]
-          <> zipWith assignFields [0 ..] fields
-          <> ["return obj;"]
+    readField :: Int -> MDoc -> MDoc
+    readField idx key =
+      [idoc|w.child(schema->parameters[#{pretty idx}], (const char*)data + schema->offsets[#{pretty idx}], &out->#{key});|]
 
-    defArg :: MDoc -> MDoc
-    defArg d = if fwdDeclared then "" else " = " <> d
-
-    assignFields :: Int -> (MDoc, MDoc) -> MDoc
-    assignFields idx (keyName, keyType) =
-      vsep
-        [ [idoc|#{keyType}* elemental_dumby_#{keyName} = nullptr;|]
-        , [idoc|obj.#{keyName} = from_voidstar(schema->parameters[#{pretty idx}], (char*)anything + schema->offsets[#{pretty idx}], elemental_dumby_#{keyName}, base_ptr);|]
-        ]
-
-    headerGetSize = [idoc|size_t get_shm_size(const Schema* schema, const #{rtype}& data)|]
-    bodyGetSize =
-      vsep $
-        [ "RecurEnvScope _recur_scope(resolve_recur(schema));"
-        , "size_t size = 0;" ]
-          <> [getSize idx key | (idx, (key, _)) <- zip [0 ..] fields]
-          <> ["return size;"]
-
-    getSize :: Int -> MDoc -> MDoc
-    getSize idx key = [idoc|size += get_shm_size(schema->parameters[#{pretty idx}], data.#{key});|]
+    -- A field's fixed width lies inside the record's, so only its tail counts.
+    sizeField :: Int -> MDoc -> MDoc
+    sizeField idx key =
+      [idoc|w.child(schema->parameters[#{pretty idx}], obj.#{key}, true);|]

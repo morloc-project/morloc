@@ -1,0 +1,83 @@
+module main (cachedResult, cachedArg, captured, capturedCpp, capturedList)
+
+import root
+import root-py
+import root-cpp
+import table-py
+import table-cpp
+
+-- A table in the runtime's other machinery. A cached function may return
+-- a table (the second run reads it back from the cache file, so the
+-- consumer receives it as a file rather than a reference) or take one (the
+-- key hashes the block). A closure may capture a table, or any value too
+-- large to travel inline, and be applied from another pool after the
+-- dispatch that created it has released its blocks: the captured value
+-- must travel inside the closure.
+
+source Py from "src.py"
+  ( "mk", "describe" as describePy, "rowAt", "tick", "mkListIO", "vsum", "addInt", "applyItPy" )
+source Cpp from "src.hpp" ("describeCpp", "applyIt", "tickCpp", "applyIntCpp", "mkCpp", "rowAtCpp")
+
+mk :: Int -> Table
+describePy :: Table -> Str
+describeCpp :: Table -> Str
+rowAt :: Table -> Int -> Str
+tick :: <IO> Int
+tickCpp :: <IO> Int
+mkListIO :: Int -> <IO> [Int]
+vsum :: [Int] -> Int
+addInt :: Int -> Int -> Int
+applyIt :: (Int -> Str) -> Int -> Str
+applyItPy :: (Int -> Str) -> Int -> Str
+mkCpp :: Int -> Table
+rowAtCpp :: Table -> Int -> Str
+applyIntCpp :: (Int -> Int) -> Int -> Int
+
+cachedResult :: Int -> Str
+cachedResult n = describeCpp (a@mk n)
+
+cachedArg :: Int -> Str
+cachedArg n = a@describePy (mk n)
+
+mkT :: Int -> <IO> Table
+mkT n = do
+  _ <- tick
+  mk n
+
+mkRower :: Int -> <IO> (Int -> Str)
+mkRower n = do
+  t <- mkT n
+  (\k -> rowAt t k)
+
+captured :: Int -> <IO> Str
+captured n = do
+  _ <- tickCpp
+  f <- mkRower n
+  applyIt f 1
+
+mkTCpp :: Int -> <IO> Table
+mkTCpp n = do
+  _ <- tickCpp
+  mkCpp n
+
+mkRowerCpp :: Int -> <IO> (Int -> Str)
+mkRowerCpp n = do
+  t <- mkTCpp n
+  (\k -> rowAtCpp t k)
+
+capturedCpp :: Int -> <IO> Str
+capturedCpp n = do
+  _ <- tick
+  f <- mkRowerCpp n
+  applyItPy f 1
+
+mkAdder :: Int -> <IO> (Int -> Int)
+mkAdder n = do
+  xs <- mkListIO n
+  (\y -> addInt (vsum xs) y)
+
+capturedList :: Int -> <IO> Int
+capturedList n = do
+  _ <- tickCpp
+  f <- mkAdder n
+  applyIntCpp f 10

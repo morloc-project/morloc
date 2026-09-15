@@ -132,6 +132,12 @@ pub struct Schema {
 }
 
 impl Schema {
+    /// A table schema declaring the given columns (none for the bare
+    /// `T` form).
+    pub fn table(params: Vec<Schema>, keys: Vec<String>) -> Self {
+        make_table_schema(params, keys)
+    }
+
     pub fn primitive(serial_type: SerialType) -> Self {
         use crate::shm_types as shm;
         let width = match serial_type {

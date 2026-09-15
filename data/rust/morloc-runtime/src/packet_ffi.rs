@@ -632,6 +632,12 @@ pub unsafe extern "C" fn get_morloc_data_packet_value(
                     Ok(abs) => abs,
                     Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
                 }
+            } else if format == PACKET_FORMAT_ARROW {
+                // A table written out as a self-contained packet carries
+                // Arrow IPC bytes.
+                crate::arrow_ipc_reader::ipc_payload_to_block(
+                    data.add(payload_start), payload_len, schema, errmsg,
+                ) as *mut u8
             } else {
                 set_errmsg(errmsg, &MorlocError::Packet(
                     format!("Invalid format from mesg: 0x{:02x}", format)
@@ -1068,34 +1074,50 @@ pub unsafe extern "C" fn make_data_packet_auto(
     );
 
     if flat_size <= threshold {
-        match crate::voidstar::flatten_to_buffer(voidstar as AbsPtr, &rs) {
-            Ok(blob) => {
-                let packet = make_data_packet_with_schema(
-                    blob.as_ptr(),
-                    blob.len(),
-                    schema,
-                    PACKET_SOURCE_MESG,
-                    PACKET_FORMAT_VOIDSTAR,
-                    PACKET_COMPRESSION_NONE,
-                    PACKET_ENCRYPTION_NONE,
-                    PACKET_STATUS_PASS,
-                );
-                if packet.is_null() {
-                    set_errmsg(errmsg, &MorlocError::Packet("Failed to create inline data packet".into()));
-                }
-                return packet;
-            }
-            Err(e) => {
-                set_errmsg(errmsg, &e);
-                return ptr::null_mut();
-            }
-        }
+        return make_inline_data_packet(voidstar, schema, errmsg);
     }
 
     if crate::packet::shm_enabled() {
         make_standard_data_packet(relptr, schema)
     } else {
         make_file_data_packet_voidstar(voidstar, schema, &rs, errmsg)
+    }
+}
+
+/// A packet that carries the value's flat form inside it, whatever its
+/// size: the inline arm of `make_data_packet_auto`, also used for a
+/// value that must outlive the shared-memory block it was laid out in (a
+/// closure's captured value, applied back after the producing dispatch
+/// has released its blocks). A table's flat form is its block.
+#[no_mangle]
+pub unsafe extern "C" fn make_inline_data_packet(
+    voidstar: *mut c_void,
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> *mut u8 {
+    clear_errmsg(errmsg);
+    let rs = CSchema::to_rust(schema);
+    match crate::voidstar::flatten_to_buffer(voidstar as AbsPtr, &rs) {
+        Ok(blob) => {
+            let packet = make_data_packet_with_schema(
+                blob.as_ptr(),
+                blob.len(),
+                schema,
+                PACKET_SOURCE_MESG,
+                PACKET_FORMAT_VOIDSTAR,
+                PACKET_COMPRESSION_NONE,
+                PACKET_ENCRYPTION_NONE,
+                PACKET_STATUS_PASS,
+            );
+            if packet.is_null() {
+                set_errmsg(errmsg, &MorlocError::Packet("Failed to create inline data packet".into()));
+            }
+            packet
+        }
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            ptr::null_mut()
+        }
     }
 }
 

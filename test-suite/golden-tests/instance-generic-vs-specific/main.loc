@@ -1,0 +1,65 @@
+-- A catch-all instance (instance C a) must lose to any applicable
+-- specific instance, whatever order the instances were declared in.
+-- Describe declares the catch-all first, Label declares it last.
+-- ambiguous.loc covers two overlapping heads with no common specialization.
+
+module main (describeInt, describeList, describeVec, describeReal,
+             labelInt, labelList, labelVec, labelReal)
+
+import root-py
+
+newtype Vec (n :: Nat) a = List a
+
+class Describe a where
+  describe :: a -> Str
+
+instance Describe a where
+  source Py from "describe.py" ("d_generic" as describe)
+
+instance Describe Int where
+  source Py from "describe.py" ("d_int" as describe)
+
+instance Describe (List a) where
+  source Py from "describe.py" ("d_list" as describe)
+
+instance Describe (Vec n a) where
+  source Py from "describe.py" ("d_vec" as describe)
+
+class Label a where
+  label :: a -> Str
+
+instance Label Int where
+  source Py from "describe.py" ("l_int" as label)
+
+instance Label (List a) where
+  source Py from "describe.py" ("l_list" as label)
+
+instance Label (Vec n a) where
+  source Py from "describe.py" ("l_vec" as label)
+
+instance Label a where
+  source Py from "describe.py" ("l_generic" as label)
+
+describeInt :: Int -> Str
+describeInt = describe
+
+describeList :: [Int] -> Str
+describeList xs = describe xs
+
+describeVec :: Vec 3 Int -> Str
+describeVec = describe
+
+describeReal :: Real -> Str
+describeReal x = describe x
+
+labelInt :: Int -> Str
+labelInt = label
+
+labelList :: [Int] -> Str
+labelList xs = label xs
+
+labelVec :: Vec 3 Int -> Str
+labelVec = label
+
+labelReal :: Real -> Str
+labelReal x = label x

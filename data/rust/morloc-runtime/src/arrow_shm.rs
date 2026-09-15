@@ -1,12 +1,14 @@
 //! Arrow tables in shared memory.
 //!
 //! A table is one Arrow struct array (a record batch) stored as a descriptor
-//! table over opaque byte buffers. The layer never interprets a buffer: it
-//! records how many buffers each array node has and how long each is, and
-//! the consumer's Arrow library derives their meaning from the node's
-//! C Data Interface format string, exactly as it would for any imported
-//! array. Nested types, validity bitmaps, temporal types and 64-bit offsets
-//! therefore need no code here.
+//! table over opaque byte buffers. The layer never interprets a buffer's
+//! contents: it records how many buffers each array node has and how long
+//! each is, and the consumer's Arrow library derives their meaning from the
+//! node's C Data Interface format string, exactly as it would for any
+//! imported array. The reader does check, once per block, that every
+//! node's length is covered by the buffers it names, because the C Data
+//! Interface carries no buffer lengths and every consumer recomputes them
+//! from the length.
 //!
 //! Block layout, all offsets relative to the block start:
 //!
@@ -177,10 +179,11 @@ fn decode_dictionaries(batch: &RecordBatch) -> Result<RecordBatch, MorlocError> 
 }
 
 /// The Arrow type a declared morloc column type stands for, or None when
-/// the declared type has no single physical form (a `Str` may travel as
-/// `Utf8` or `LargeUtf8`).
+/// the declared type has no Arrow form. A `Str` is accepted in any text
+/// form (see `declared_accepts`) and anything else is rendered as `Utf8`.
 fn declared_target(st: SerialType) -> Option<DataType> {
     Some(match st {
+        SerialType::String => DataType::Utf8,
         SerialType::Bool => DataType::Boolean,
         SerialType::Sint8 => DataType::Int8,
         SerialType::Sint16 => DataType::Int16,
@@ -348,21 +351,43 @@ pub fn normalize(batch: &RecordBatch) -> Result<RecordBatch, MorlocError> {
 // -- Writer ------------------------------------------------------------------
 
 /// Byte length of a C Data Interface metadata blob: an int32 pair count
-/// followed by (int32 length, bytes) for each key and each value.
+/// followed by (int32 length, bytes) for each key and each value. For a
+/// blob handed over by a producer's library, which owns its memory.
 unsafe fn c_metadata_len(p: *const c_char) -> usize {
     if p.is_null() {
         return 0;
     }
-    let mut cur = p as *const u8;
-    let n = ptr::read_unaligned(cur as *const i32);
-    cur = cur.add(4);
-    for _ in 0..n.max(0) {
+    c_metadata_len_bounded(p as *const u8, usize::MAX).unwrap_or(0)
+}
+
+/// As `c_metadata_len` for a blob that must lie within `limit` bytes of
+/// `p`: None when a count or length prefix would carry the walk past it.
+unsafe fn c_metadata_len_bounded(p: *const u8, limit: usize) -> Option<usize> {
+    let read_i32 = |at: usize| -> Option<i32> {
+        if at.checked_add(4)? <= limit {
+            Some(ptr::read_unaligned(p.add(at) as *const i32))
+        } else {
+            None
+        }
+    };
+    let n = read_i32(0)?;
+    if n < 0 {
+        return None;
+    }
+    let mut cur = 4usize;
+    for _ in 0..n {
         for _ in 0..2 {
-            let len = ptr::read_unaligned(cur as *const i32);
-            cur = cur.add(4 + len.max(0) as usize);
+            let len = read_i32(cur)?;
+            if len < 0 {
+                return None;
+            }
+            cur = cur.checked_add(4 + len as usize)?;
+            if cur > limit {
+                return None;
+            }
         }
     }
-    cur as usize - p as usize
+    Some(cur)
 }
 
 struct BufPlan {
@@ -706,6 +731,12 @@ impl BlockView {
             if n.format_offset == 0 || !str_ok(n.format_offset) || !str_ok(n.name_offset) || !str_ok(n.metadata_offset) {
                 return Err(err(format!("Arrow SHM node {} names a string outside the table", k)));
             }
+            if n.metadata_offset != 0
+                && c_metadata_len_bounded(self.strtab.add(n.metadata_offset as usize), strlen - n.metadata_offset as usize)
+                    .is_none()
+            {
+                return Err(err(format!("Arrow SHM node {} has a metadata blob that leaves the string table", k)));
+            }
             if n.buffer_index as usize + n.n_buffers as usize > n_bufs {
                 return Err(err(format!("Arrow SHM node {} names buffers outside the table", k)));
             }
@@ -736,6 +767,183 @@ impl BlockView {
                     }
                 }
                 _ => return Err(err(format!("Arrow SHM buffer {} has unsupported kind {}", i, b.kind))),
+            }
+        }
+        self.validate_lengths()
+    }
+
+    /// The C Data Interface schema of the subtree rooted at node `k`,
+    /// built from the format strings so arrow-rs can name each node's
+    /// type. Only the types matter here, not names or metadata.
+    unsafe fn node_type(&self, k: usize, depth: usize) -> Result<FFI_ArrowSchema, MorlocError> {
+        if depth > 64 {
+            return Err(err("Arrow SHM node tree is nested more than 64 deep"));
+        }
+        let n = self.node(k);
+        let children = (0..n.n_children as usize)
+            .map(|j| self.node_type(n.child_index as usize + j, depth + 1))
+            .collect::<Result<Vec<_>, _>>()?;
+        let format = self.string_str(n.format_offset);
+        FFI_ArrowSchema::try_new(format, children, None)
+            .map_err(|e| err(format!("Arrow SHM node {} has format '{}' this runtime cannot read: {}", k, format, e)))
+    }
+
+    /// Every node's length must be covered by the buffers it names and by
+    /// its children, since consumers derive buffer lengths from `length`
+    /// and would otherwise read past the block.
+    unsafe fn validate_lengths(&self) -> Result<(), MorlocError> {
+        let root = DataType::try_from(&self.node_type(0, 0)?)
+            .map_err(|e| err(format!("Arrow SHM root has a type this runtime cannot read: {}", e)))?;
+        let h = self.header();
+        if self.node(0).length as u64 != h.n_rows {
+            return Err(err("Arrow SHM root length disagrees with the header's row count"));
+        }
+        let mut queue: std::collections::VecDeque<(usize, DataType)> = std::collections::VecDeque::new();
+        queue.push_back((0, root));
+        while let Some((k, dt)) = queue.pop_front() {
+            let n = self.node(k);
+            self.validate_node_buffers(k, &dt)?;
+            let children = child_types(&dt);
+            if children.len() != n.n_children as usize {
+                return Err(err(format!(
+                    "Arrow SHM node {} has {} children but its type {} needs {}",
+                    k, n.n_children, dt, children.len()
+                )));
+            }
+            for (j, c) in children.into_iter().enumerate() {
+                let ck = n.child_index as usize + j;
+                let cl = self.node(ck).length;
+                let need = match &dt {
+                    DataType::Struct(_) | DataType::Union(_, arrow_schema::UnionMode::Sparse) => Some(n.length),
+                    DataType::FixedSizeList(_, w) => Some(n.length.saturating_mul(*w as i64)),
+                    _ => self.last_offset_of(n, &dt)?,
+                };
+                if let Some(need) = need {
+                    if cl < need {
+                        return Err(err(format!(
+                            "Arrow SHM node {} has length {} but its parent node {} needs at least {}",
+                            ck, cl, k, need
+                        )));
+                    }
+                }
+                queue.push_back((ck, c));
+            }
+        }
+        Ok(())
+    }
+
+    /// The width of the offsets an Arrow type carries in its first buffer,
+    /// or None for a type without offsets.
+    fn offset_width(dt: &DataType) -> Option<usize> {
+        match dt {
+            DataType::Utf8 | DataType::Binary | DataType::List(_) | DataType::Map(_, _) => Some(4),
+            DataType::LargeUtf8 | DataType::LargeBinary | DataType::LargeList(_) => Some(8),
+            _ => None,
+        }
+    }
+
+    /// The last entry of a node's offsets buffer, which bounds its data
+    /// buffer or child; None for a type without offsets.
+    unsafe fn last_offset_of(&self, n: &ArrowNodeDesc, dt: &DataType) -> Result<Option<i64>, MorlocError> {
+        Ok(match Self::offset_width(dt) {
+            Some(4) => Some(self.last_offset::<i32>(n)?),
+            Some(_) => Some(self.last_offset::<i64>(n)?),
+            None => None,
+        })
+    }
+
+    /// The last entry of a node's offsets buffer (the buffer after the
+    /// validity slot).
+    unsafe fn last_offset<T: arrow_buffer::ArrowNativeType + Into<i64>>(&self, n: &ArrowNodeDesc) -> Result<i64, MorlocError> {
+        if n.length == 0 {
+            return Ok(0);
+        }
+        let b = self.buffer(n.buffer_index as usize + 1);
+        let at = n.length as usize * std::mem::size_of::<T>();
+        if b.kind != BUF_LOCAL || (b.size as usize) < at + std::mem::size_of::<T>() {
+            return Err(err("Arrow SHM offsets buffer is shorter than the node's length"));
+        }
+        let v: T = ptr::read_unaligned(self.base.add(b.offset as usize + at) as *const T);
+        Ok(v.into())
+    }
+
+    unsafe fn validate_node_buffers(&self, k: usize, dt: &DataType) -> Result<(), MorlocError> {
+        let n = self.node(k);
+        let length = n.length as usize;
+        let lay = layout(dt);
+        let bad = |what: String| err(format!("Arrow SHM node {} ({}): {}", k, dt, what));
+        let size_of = |i: usize| -> usize {
+            let b = self.buffer(n.buffer_index as usize + i);
+            if b.kind == BUF_LOCAL { b.size as usize } else { 0 }
+        };
+        let bitmap_bytes = (length + 7) / 8;
+
+        let mut i = 0usize;
+        let mut expected = lay.buffers.len();
+        if lay.can_contain_null_mask {
+            expected += 1;
+            if (n.n_buffers as usize) < 1 {
+                return Err(bad("no validity slot".into()));
+            }
+            let b = self.buffer(n.buffer_index as usize);
+            if b.kind == BUF_NULL {
+                if n.null_count > 0 {
+                    return Err(bad(format!("null_count {} with no validity bitmap", n.null_count)));
+                }
+            } else if size_of(0) < bitmap_bytes {
+                return Err(bad(format!("validity bitmap of {} bytes for length {}", size_of(0), length)));
+            }
+            i = 1;
+        }
+        if lay.variadic {
+            // Views: the views buffer, N data buffers, then N recorded sizes.
+            if (n.n_buffers as usize) < expected + 1 {
+                return Err(bad("too few buffers for a view type".into()));
+            }
+            let n_data = n.n_buffers as usize - expected - 1;
+            if size_of(i) < length * 16 {
+                return Err(bad(format!("views buffer of {} bytes for length {}", size_of(i), length)));
+            }
+            let sizes = self.buffer(n.buffer_index as usize + n.n_buffers as usize - 1);
+            if sizes.kind != BUF_LOCAL || (sizes.size as usize) < n_data * 8 {
+                return Err(bad("buffer sizes table shorter than the data buffer count".into()));
+            }
+            for d in 0..n_data {
+                let recorded = ptr::read_unaligned(self.base.add(sizes.offset as usize + d * 8) as *const i64);
+                if recorded < 0 || recorded as usize > size_of(i + 1 + d) {
+                    return Err(bad(format!("data buffer {} is shorter than its recorded size {}", d, recorded)));
+                }
+            }
+            return Ok(());
+        }
+        if n.n_buffers as usize != expected {
+            return Err(bad(format!("{} buffers where its type needs {}", n.n_buffers, expected)));
+        }
+        // Offsets-bearing types carry length + 1 entries in their first
+        // buffer, and the buffer or child after it must reach the last one.
+        let has_offsets = Self::offset_width(dt).is_some();
+        for (j, spec) in lay.buffers.iter().enumerate() {
+            let have = size_of(i + j);
+            let need = match spec {
+                arrow_data::BufferSpec::FixedWidth { byte_width, .. } => {
+                    if j == 0 && has_offsets && length > 0 {
+                        (length + 1) * byte_width
+                    } else {
+                        length * byte_width
+                    }
+                }
+                arrow_data::BufferSpec::BitMap => bitmap_bytes,
+                arrow_data::BufferSpec::VariableWidth => {
+                    let last = self.last_offset_of(n, dt)?.unwrap_or(0);
+                    if last < 0 {
+                        return Err(bad("negative last offset".into()));
+                    }
+                    last as usize
+                }
+                arrow_data::BufferSpec::AlwaysNull => 0,
+            };
+            if have < need {
+                return Err(bad(format!("buffer {} holds {} bytes but length {} needs {}", i + j, have, length, need)));
             }
         }
         Ok(())
@@ -783,6 +991,22 @@ impl BlockView {
 
     pub fn column_node(&self, j: usize) -> &ArrowNodeDesc {
         self.node(self.node(0).child_index as usize + j)
+    }
+}
+
+/// The child types of a nested Arrow type, in child order.
+fn child_types(dt: &DataType) -> Vec<DataType> {
+    match dt {
+        DataType::Struct(fields) => fields.iter().map(|f| f.data_type().clone()).collect(),
+        DataType::List(f)
+        | DataType::LargeList(f)
+        | DataType::ListView(f)
+        | DataType::LargeListView(f)
+        | DataType::FixedSizeList(f, _)
+        | DataType::Map(f, _) => vec![f.data_type().clone()],
+        DataType::Union(fields, _) => fields.iter().map(|(_, f)| f.data_type().clone()).collect(),
+        DataType::RunEndEncoded(r, v) => vec![r.data_type().clone(), v.data_type().clone()],
+        _ => vec![],
     }
 }
 
@@ -890,6 +1114,10 @@ pub unsafe fn shm_to_ffi(
     out_schema: *mut FFI_ArrowSchema,
     out_array: *mut FFI_ArrowArray,
 ) -> Result<(), MorlocError> {
+    // On failure the caller finds released (all-zero) structs, never
+    // whatever its stack held before.
+    ptr::write_bytes(out_schema as *mut RawSchema, 0, 1);
+    ptr::write_bytes(out_array as *mut RawArray, 0, 1);
     let view = BlockView::open(header)?;
     let h = view.header();
     let n_nodes = h.n_nodes as usize;
@@ -966,6 +1194,17 @@ pub unsafe fn shm_to_ffi(
 
 fn align8(x: usize) -> usize {
     (x + 7) & !7
+}
+
+/// The byte length of a checked block. A table's serialized form is the
+/// block itself, so this is its size wherever a value's flat size is
+/// needed (hashing, caching, inline packets).
+///
+/// # Safety
+/// `header` must be a live block.
+pub unsafe fn block_size(header: *const ArrowShmHeader) -> Result<usize, MorlocError> {
+    let view = BlockView::open(header)?;
+    Ok(view.header().total_size as usize)
 }
 
 /// Read a block back as an arrow-rs record batch. Buffers still point into
@@ -1101,6 +1340,13 @@ pub unsafe fn try_borrow(
         eprintln!("try_borrow: {} candidate(s)", candidates.len());
     }
     for (base, rel) in candidates {
+        // The header alone rules out most candidates, before the block
+        // is checked in full.
+        let h = &*(base as *const ArrowShmHeader);
+        if h.magic != ARROW_SHM_MAGIC || h.n_rows != a.length as u64 || h.n_columns as i64 != a.n_children {
+            if trace { eprintln!("try_borrow: candidate differs in shape"); }
+            continue;
+        }
         let view = match BlockView::open(base as *const ArrowShmHeader) {
             Ok(v) => v,
             Err(e) => {
@@ -1116,7 +1362,7 @@ pub unsafe fn try_borrow(
         // block is passed through only when that would change nothing.
         if let Some(d) = declared {
             if d.size > 0 {
-                if validate(base as *const ArrowShmHeader, d).is_err() {
+                if validate_view(&view, d).is_err() {
                     continue;
                 }
                 let in_order = d.keys.iter().enumerate().all(|(i, k)| view.column_index(k) == Some(i));
@@ -1141,7 +1387,11 @@ pub unsafe fn try_borrow(
 /// # Safety
 /// `header` must be a live block.
 pub unsafe fn validate(header: *const ArrowShmHeader, declared: &Schema) -> Result<(), MorlocError> {
-    let view = BlockView::open(header)?;
+    validate_view(&BlockView::open(header)?, declared)
+}
+
+/// `validate` over an already checked view.
+fn validate_view(view: &BlockView, declared: &Schema) -> Result<(), MorlocError> {
     if declared.serial_type != SerialType::Table {
         return Err(err("Expected a Table schema for arrow validation"));
     }
@@ -1478,6 +1728,163 @@ mod tests {
             let adopted = unsafe { ffi_to_batch(&mut a as *mut _, &s as *const _) }.unwrap();
             assert!(a.is_released());
             assert_eq!(adopted, batch);
+        });
+    }
+
+    #[test]
+    fn failed_import_leaves_the_out_structs_released() {
+        with_shm(|| {
+            let batch = fixture();
+            let rel = write_batch(&batch, None).unwrap();
+            let base = shm::rel2abs(rel).unwrap();
+            let mut s = FFI_ArrowSchema::empty();
+            let mut a = FFI_ArrowArray::empty();
+            // Garbage in the out structs must not survive a failed import:
+            // a caller that tests `release` afterwards would call it.
+            unsafe {
+                (*(&mut s as *mut FFI_ArrowSchema as *mut RawSchema)).release = Some(release_child_schema);
+                (*(&mut a as *mut FFI_ArrowArray as *mut RawArray)).release = Some(release_child_array);
+                (*(base as *mut ArrowShmHeader)).magic = 0;
+            }
+            assert!(unsafe { shm_to_ffi(base as *const ArrowShmHeader, &mut s, &mut a) }.is_err());
+            assert!(unsafe { (*(&s as *const FFI_ArrowSchema as *const RawSchema)).release.is_none() });
+            assert!(a.is_released());
+        });
+    }
+
+    /// The block's node descriptor `k`, for corrupting a written block.
+    unsafe fn node_mut(base: *mut u8, k: usize) -> &'static mut ArrowNodeDesc {
+        let h = &*(base as *const ArrowShmHeader);
+        &mut *(base.add(h.nodes_offset as usize) as *mut ArrowNodeDesc).add(k)
+    }
+
+    fn open_err(base: *mut u8) -> String {
+        format!("{}", unsafe { BlockView::open(base as *const ArrowShmHeader) }.err().expect("block accepted"))
+    }
+
+    #[test]
+    fn node_lengths_are_tied_to_buffer_sizes() {
+        with_shm(|| {
+            // Fixture columns are root(0) b(1) i(2) u(3) f(4) s(5) ls(6) ts(7) li(8) li.item(9).
+            let write = || {
+                let rel = write_batch(&fixture(), None).unwrap();
+                shm::rel2abs(rel).unwrap()
+            };
+            let base = write();
+            assert!(unsafe { BlockView::open(base as *const ArrowShmHeader) }.is_ok());
+
+            // A fixed-width column whose length outruns its data buffer.
+            unsafe { node_mut(base, 2).length = 1 << 20 };
+            assert!(open_err(base).contains("node 2"), "{}", open_err(base));
+
+            // A bitmap column whose length outruns its bitmaps.
+            let base = write();
+            unsafe { node_mut(base, 1).length = 1 << 20 };
+            assert!(open_err(base).contains("node 1"));
+
+            // A variable-width column whose offsets buffer is too short
+            // for its length.
+            let base = write();
+            unsafe { node_mut(base, 5).length = 1 << 20 };
+            assert!(open_err(base).contains("node 5"));
+
+            // A variable-width column whose last offset points past its
+            // data buffer.
+            let base = write();
+            unsafe {
+                let n = node_mut(base, 5);
+                let h = &*(base as *const ArrowShmHeader);
+                let bufs = base.add(h.buffers_offset as usize) as *const ArrowBufferDesc;
+                let offsets = &*bufs.add(n.buffer_index as usize + 1);
+                let last = base.add(offsets.offset as usize + n.length as usize * 4) as *mut i32;
+                *last = 1 << 20;
+            }
+            assert!(open_err(base).contains("node 5"));
+
+            // A list whose child is shorter than its last offset.
+            let base = write();
+            unsafe { node_mut(base, 9).length = 0 };
+            assert!(open_err(base).contains("node 9") || open_err(base).contains("node 8"));
+
+            // A root whose children are shorter than it.
+            let base = write();
+            unsafe {
+                node_mut(base, 0).length = 4;
+                (*(base as *mut ArrowShmHeader)).n_rows = 4;
+            }
+            assert!(open_err(base).contains("node 0"), "{}", open_err(base));
+
+            // A null count with no validity bitmap to back it.
+            let base = write();
+            unsafe {
+                let h = &*(base as *const ArrowShmHeader);
+                let n = node_mut(base, 2);
+                let bufs = base.add(h.buffers_offset as usize) as *mut ArrowBufferDesc;
+                (*bufs.add(n.buffer_index as usize)).kind = BUF_NULL;
+            }
+            assert!(open_err(base).contains("node 2"));
+
+            // A node whose length disagrees with the row count.
+            let base = write();
+            unsafe { (*(base as *mut ArrowShmHeader)).n_rows = 7 };
+            assert!(open_err(base).contains("row"));
+        });
+    }
+
+    #[test]
+    fn metadata_blobs_are_bounded_by_the_string_table() {
+        with_shm(|| {
+            let mut md = std::collections::HashMap::new();
+            md.insert("k".to_string(), "v".to_string());
+            let schema = ArrowSchema::new(vec![Field::new("x", DataType::Int64, true).with_metadata(md)]);
+            let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(Int64Array::from(vec![1, 2]))]).unwrap();
+            let rel = write_batch(&batch, None).unwrap();
+            let base = shm::rel2abs(rel).unwrap();
+            let back = unsafe { shm_to_batch(base as *const ArrowShmHeader) }.unwrap();
+            assert_eq!(back.schema().field(0).metadata().get("k").map(|s| s.as_str()), Some("v"));
+
+            // Inflate the blob's pair count so a walk over it would leave
+            // the string table.
+            unsafe {
+                let h = &*(base as *const ArrowShmHeader);
+                let n = node_mut(base, 1);
+                assert!(n.metadata_offset != 0);
+                let blob = base.add(h.strtab_offset as usize + n.metadata_offset as usize) as *mut i32;
+                ptr::write_unaligned(blob, 1 << 30);
+            }
+            assert!(open_err(base).contains("metadata"), "{}", open_err(base));
+        });
+    }
+
+    #[test]
+    fn declared_str_accepts_any_text_and_casts_numbers() {
+        with_shm(|| {
+            let declared = Schema::table(vec![Schema::primitive(SerialType::String)], vec!["id".into()]);
+            let text = |dt: DataType, col: ArrayRef| {
+                let schema = ArrowSchema::new(vec![Field::new("id", dt, true)]);
+                RecordBatch::try_new(Arc::new(schema), vec![col]).unwrap()
+            };
+            // Every text form passes through unchanged.
+            for b in [
+                text(DataType::Utf8, Arc::new(StringArray::from(vec!["7", "8"]))),
+                text(DataType::LargeUtf8, Arc::new(LargeStringArray::from(vec!["7", "8"]))),
+                text(DataType::Utf8View, Arc::new(arrow_array::StringViewArray::from(vec!["7", "8"]))),
+            ] {
+                let rel = write_batch(&b, Some(&declared)).unwrap();
+                let base = shm::rel2abs(rel).unwrap();
+                unsafe { validate(base as *const ArrowShmHeader, &declared) }.unwrap();
+                let view = unsafe { BlockView::open(base as *const ArrowShmHeader) }.unwrap();
+                let expected = FFI_ArrowSchema::try_from(b.column(0).data_type()).unwrap();
+                assert_eq!(view.string_str(view.column_node(0).format_offset), expected.format());
+            }
+            // A numeric identifier is rendered as text.
+            let ints = text(DataType::Int64, Arc::new(Int64Array::from(vec![7, 8])));
+            let rel = write_batch(&ints, Some(&declared)).unwrap();
+            let base = shm::rel2abs(rel).unwrap();
+            let back = unsafe { shm_to_batch(base as *const ArrowShmHeader) }.unwrap();
+            let col = back.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+            assert_eq!(col.value(0), "7");
+            assert_eq!(col.value(1), "8");
         });
     }
 }

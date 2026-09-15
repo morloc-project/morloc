@@ -1,0 +1,20 @@
+-- Two instances whose heads overlap without either specializing the other:
+-- one fixes the first tuple slot, the other the second. A use at (Int, Str)
+-- matches both and is more specific than neither, so no selection is
+-- defensible and the build must be rejected.
+
+module ambiguous (describePair)
+
+import root-py
+
+class Describe a where
+  describe :: a -> Str
+
+instance Describe (a, Str) where
+  source Py from "describe.py" ("d_list" as describe)
+
+instance Describe (Int, b) where
+  source Py from "describe.py" ("d_int" as describe)
+
+describePair :: (Int, Str) -> Str
+describePair = describe

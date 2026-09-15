@@ -1,0 +1,24 @@
+-- A record whose fields alternate one-byte and eight-byte types has
+-- alignment padding between them, so its wire width exceeds the sum of its
+-- fields' widths. The C++ record size must count the padding: a size that
+-- sums the fields alone under-allocates the shared-memory block and the last
+-- fields are written past its end. The values cross the C++ pool boundary
+-- twice (into `bump`, back out) and must come back intact.
+module main (bump)
+
+import root-cpp
+
+record Padded = Padded
+  { a :: Bool
+  , b :: Int
+  , c :: Bool
+  , d :: Int
+  , e :: Bool
+  }
+record Cpp => Padded = "struct"
+
+bump :: Padded -> Padded
+bump p = shift p
+
+shift :: Padded -> Padded
+shift p = { a = not (.a p), b = .b p + 1, c = not (.c p), d = .d p + 1, e = not (.e p) }

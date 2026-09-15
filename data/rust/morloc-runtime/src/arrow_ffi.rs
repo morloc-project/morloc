@@ -15,7 +15,7 @@ use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 
 use crate::arrow_shm::{self, ArrowShmHeader};
 use crate::cschema::CSchema;
-use crate::error::{clear_errmsg, set_errmsg, MorlocError};
+use crate::error::{set_errmsg, MorlocError};
 use morloc_runtime_types::{PRINT_RESULT_ERR, PRINT_RESULT_OK, PRINT_RESULT_PIPE_CLOSED};
 use crate::schema::{Schema, SerialType};
 use crate::shm::{self, RelPtr};
@@ -47,7 +47,15 @@ pub unsafe extern "C" fn arrow_to_shm_typed(
     declared: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> RelPtr {
-    clear_errmsg(errmsg);
+    crate::error::guarded(errmsg, shm::RELNULL, || arrow_to_shm_typed_impl(array, schema, declared, errmsg))
+}
+
+unsafe fn arrow_to_shm_typed_impl(
+    array: *mut FFI_ArrowArray,
+    schema: *const FFI_ArrowSchema,
+    declared: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> RelPtr {
     let declared_rs = if declared.is_null() { None } else { Some(CSchema::to_rust(declared)) };
     // A table this pool received and is returning unchanged is passed
     // through with a fresh reference; the caller's structs are released
@@ -100,8 +108,15 @@ pub unsafe extern "C" fn arrow_stream_to_shm_typed(
     declared: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> RelPtr {
+    crate::error::guarded(errmsg, shm::RELNULL, || arrow_stream_to_shm_typed_impl(stream, declared, errmsg))
+}
+
+unsafe fn arrow_stream_to_shm_typed_impl(
+    stream: *mut arrow_array::ffi_stream::FFI_ArrowArrayStream,
+    declared: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> RelPtr {
     use arrow_array::ffi_stream::ArrowArrayStreamReader;
-    clear_errmsg(errmsg);
     if stream.is_null() {
         set_errmsg(errmsg, &MorlocError::Other("NULL arrow stream".into()));
         return shm::RELNULL;
@@ -153,7 +168,15 @@ pub unsafe extern "C" fn arrow_from_shm(
     out_array: *mut FFI_ArrowArray,
     errmsg: *mut *mut c_char,
 ) -> i32 {
-    clear_errmsg(errmsg);
+    crate::error::guarded(errmsg, 1, || arrow_from_shm_impl(header, out_schema, out_array, errmsg))
+}
+
+unsafe fn arrow_from_shm_impl(
+    header: *const ArrowShmHeader,
+    out_schema: *mut FFI_ArrowSchema,
+    out_array: *mut FFI_ArrowArray,
+    errmsg: *mut *mut c_char,
+) -> i32 {
     match arrow_shm::shm_to_ffi(header, out_schema, out_array) {
         Ok(()) => 0,
         Err(e) => {
@@ -172,7 +195,14 @@ pub unsafe extern "C" fn arrow_validate(
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> i32 {
-    clear_errmsg(errmsg);
+    crate::error::guarded(errmsg, 1, || arrow_validate_impl(header, schema, errmsg))
+}
+
+unsafe fn arrow_validate_impl(
+    header: *const ArrowShmHeader,
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> i32 {
     if schema.is_null() {
         set_errmsg(errmsg, &MorlocError::Other("NULL schema for arrow validation".into()));
         return 1;
@@ -336,7 +366,10 @@ unsafe fn write_stdout(s: &str, errmsg: *mut *mut c_char) -> i32 {
 /// Print a block as a JSON array of row objects, one line.
 #[no_mangle]
 pub unsafe extern "C" fn print_arrow_as_json(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
-    clear_errmsg(errmsg);
+    crate::error::guarded(errmsg, PRINT_RESULT_ERR, || print_arrow_as_json_impl(data, errmsg))
+}
+
+unsafe fn print_arrow_as_json_impl(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
     let batch = match arrow_shm::shm_to_batch(data as *const ArrowShmHeader) {
         Ok(b) => b,
         Err(e) => {
@@ -369,7 +402,10 @@ pub unsafe extern "C" fn print_arrow_as_json(data: *const c_void, errmsg: *mut *
 /// then one line per row with cells rendered as in the JSON form.
 #[no_mangle]
 pub unsafe extern "C" fn print_arrow_as_table(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
-    clear_errmsg(errmsg);
+    crate::error::guarded(errmsg, PRINT_RESULT_ERR, || print_arrow_as_table_impl(data, errmsg))
+}
+
+unsafe fn print_arrow_as_table_impl(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
     let batch = match arrow_shm::shm_to_batch(data as *const ArrowShmHeader) {
         Ok(b) => b,
         Err(e) => {
@@ -555,7 +591,14 @@ pub unsafe extern "C" fn read_json_to_arrow_shm(
     schema: *const CSchema,
     errmsg: *mut *mut c_char,
 ) -> RelPtr {
-    clear_errmsg(errmsg);
+    crate::error::guarded(errmsg, shm::RELNULL, || read_json_to_arrow_shm_impl(json, schema, errmsg))
+}
+
+unsafe fn read_json_to_arrow_shm_impl(
+    json: *const c_char,
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> RelPtr {
     if json.is_null() || schema.is_null() {
         set_errmsg(errmsg, &MorlocError::Other("NULL json or schema".into()));
         return shm::RELNULL;
@@ -656,7 +699,9 @@ pub fn json_value_to_batch(value: &serde_json::Value, rs: &Schema) -> Result<Rec
 }
 
 /// Build one typed Arrow array from JSON cells. A JSON null is a null cell
-/// and is accepted only in a nullable column.
+/// and is accepted only in a nullable column. A number is stored only when
+/// the declared width holds it exactly; one that does not fit is an error
+/// naming the column and row, never a truncated value.
 fn json_column(
     st: SerialType,
     nullable: bool,
@@ -668,7 +713,14 @@ fn json_column(
     fn bad(name: &str, row: usize, expected: &str) -> MorlocError {
         MorlocError::Other(format!("Expected {} in column '{}' row {}", expected, name, row))
     }
-    fn ints(values: &[&serde_json::Value], nullable: bool, name: &str) -> Result<Vec<Option<i64>>, MorlocError> {
+    fn overflow(name: &str, row: usize, v: &serde_json::Value, st: SerialType) -> MorlocError {
+        MorlocError::Other(format!("Value {} in column '{}' row {} does not fit the declared {:?}", v, name, row, st))
+    }
+    /// Every cell as an exact integer, then narrowed by `TryFrom`.
+    fn ints<T>(values: &[&serde_json::Value], nullable: bool, name: &str, st: SerialType) -> Result<Vec<Option<T>>, MorlocError>
+    where
+        T: TryFrom<i64> + TryFrom<u64>,
+    {
         values
             .iter()
             .enumerate()
@@ -676,10 +728,14 @@ fn json_column(
                 if v.is_null() {
                     return if nullable { Ok(None) } else { Err(bad(name, i, "integer")) };
                 }
-                v.as_i64()
-                    .or_else(|| v.as_u64().map(|x| x as i64))
-                    .map(Some)
-                    .ok_or_else(|| bad(name, i, "integer"))
+                let fitted = if let Some(x) = v.as_i64() {
+                    T::try_from(x).ok()
+                } else if let Some(x) = v.as_u64() {
+                    T::try_from(x).ok()
+                } else {
+                    return Err(bad(name, i, "integer"));
+                };
+                fitted.map(Some).ok_or_else(|| overflow(name, i, v, st))
             })
             .collect()
     }
@@ -692,6 +748,26 @@ fn json_column(
                     return if nullable { Ok(None) } else { Err(bad(name, i, "number")) };
                 }
                 v.as_f64().map(Some).ok_or_else(|| bad(name, i, "number"))
+            })
+            .collect()
+    }
+    /// A double narrowed to single precision only when the value survives
+    /// the round trip (a finite value beyond f32's range would become
+    /// infinite; precision loss is the accepted cost of declaring Float32).
+    fn float32s(values: &[&serde_json::Value], nullable: bool, name: &str) -> Result<Vec<Option<f32>>, MorlocError> {
+        floats(values, nullable, name)?
+            .into_iter()
+            .enumerate()
+            .map(|(i, o)| match o {
+                None => Ok(None),
+                Some(x) => {
+                    let y = x as f32;
+                    if x.is_finite() && !y.is_finite() {
+                        Err(overflow(name, i, values[i], SerialType::Float32))
+                    } else {
+                        Ok(Some(y))
+                    }
+                }
             })
             .collect()
     }
@@ -710,15 +786,15 @@ fn json_column(
                 .collect::<Result<_, _>>()?;
             Arc::new(BooleanArray::from(v))
         }
-        SerialType::Sint8 => Arc::new(Int8Array::from(ints(values, nullable, name)?.into_iter().map(|o| o.map(|x| x as i8)).collect::<Vec<_>>())),
-        SerialType::Sint16 => Arc::new(Int16Array::from(ints(values, nullable, name)?.into_iter().map(|o| o.map(|x| x as i16)).collect::<Vec<_>>())),
-        SerialType::Sint32 => Arc::new(Int32Array::from(ints(values, nullable, name)?.into_iter().map(|o| o.map(|x| x as i32)).collect::<Vec<_>>())),
-        SerialType::Sint64 | SerialType::Int => Arc::new(Int64Array::from(ints(values, nullable, name)?)),
-        SerialType::Uint8 => Arc::new(UInt8Array::from(ints(values, nullable, name)?.into_iter().map(|o| o.map(|x| x as u8)).collect::<Vec<_>>())),
-        SerialType::Uint16 => Arc::new(UInt16Array::from(ints(values, nullable, name)?.into_iter().map(|o| o.map(|x| x as u16)).collect::<Vec<_>>())),
-        SerialType::Uint32 => Arc::new(UInt32Array::from(ints(values, nullable, name)?.into_iter().map(|o| o.map(|x| x as u32)).collect::<Vec<_>>())),
-        SerialType::Uint64 => Arc::new(UInt64Array::from(ints(values, nullable, name)?.into_iter().map(|o| o.map(|x| x as u64)).collect::<Vec<_>>())),
-        SerialType::Float32 => Arc::new(Float32Array::from(floats(values, nullable, name)?.into_iter().map(|o| o.map(|x| x as f32)).collect::<Vec<_>>())),
+        SerialType::Sint8 => Arc::new(Int8Array::from(ints::<i8>(values, nullable, name, st)?)),
+        SerialType::Sint16 => Arc::new(Int16Array::from(ints::<i16>(values, nullable, name, st)?)),
+        SerialType::Sint32 => Arc::new(Int32Array::from(ints::<i32>(values, nullable, name, st)?)),
+        SerialType::Sint64 | SerialType::Int => Arc::new(Int64Array::from(ints::<i64>(values, nullable, name, st)?)),
+        SerialType::Uint8 => Arc::new(UInt8Array::from(ints::<u8>(values, nullable, name, st)?)),
+        SerialType::Uint16 => Arc::new(UInt16Array::from(ints::<u16>(values, nullable, name, st)?)),
+        SerialType::Uint32 => Arc::new(UInt32Array::from(ints::<u32>(values, nullable, name, st)?)),
+        SerialType::Uint64 => Arc::new(UInt64Array::from(ints::<u64>(values, nullable, name, st)?)),
+        SerialType::Float32 => Arc::new(Float32Array::from(float32s(values, nullable, name)?)),
         SerialType::Float64 => Arc::new(Float64Array::from(floats(values, nullable, name)?)),
         SerialType::String => {
             let v: Vec<Option<&str>> = values
@@ -741,4 +817,53 @@ fn json_column(
         }
     };
     Ok(arr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn table(cols: &[(&str, SerialType)]) -> Schema {
+        Schema::table(
+            cols.iter().map(|(_, t)| Schema::primitive(*t)).collect(),
+            cols.iter().map(|(k, _)| k.to_string()).collect(),
+        )
+    }
+
+    fn column(st: SerialType, json: &str) -> Result<ArrayRef, MorlocError> {
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        let rs = table(&[("c", st)]);
+        json_value_to_batch(&v, &rs).map(|b| b.column(0).clone())
+    }
+
+    #[test]
+    fn json_numbers_that_do_not_fit_the_declared_width_are_refused() {
+        use arrow_array::*;
+        let refused = [
+            (SerialType::Uint8, "[{\"c\": 300}]"),
+            (SerialType::Uint8, "[{\"c\": -1}]"),
+            (SerialType::Sint8, "[{\"c\": 200}]"),
+            (SerialType::Sint16, "[{\"c\": 70000}]"),
+            (SerialType::Sint32, "[{\"c\": 2147483648}]"),
+            (SerialType::Uint32, "[{\"c\": -7}]"),
+            (SerialType::Sint64, "[{\"c\": 18446744073709551615}]"),
+            (SerialType::Float32, "[{\"c\": 1e300}]"),
+        ];
+        for (st, json) in refused {
+            let e = column(st, json).err().unwrap_or_else(|| panic!("{:?} accepted {}", st, json));
+            let msg = format!("{}", e);
+            assert!(msg.contains("column 'c' row 0"), "{}", msg);
+        }
+        // The edges of each width are kept exactly.
+        let ok = column(SerialType::Uint8, "[{\"c\": 255}, {\"c\": 0}]").unwrap();
+        assert_eq!(ok.as_any().downcast_ref::<UInt8Array>().unwrap().values(), &[255, 0]);
+        let ok = column(SerialType::Sint8, "[{\"c\": -128}, {\"c\": 127}]").unwrap();
+        assert_eq!(ok.as_any().downcast_ref::<Int8Array>().unwrap().values(), &[-128, 127]);
+        let ok = column(SerialType::Uint64, "[{\"c\": 18446744073709551615}]").unwrap();
+        assert_eq!(ok.as_any().downcast_ref::<UInt64Array>().unwrap().values(), &[u64::MAX]);
+        let ok = column(SerialType::Sint64, "[{\"c\": -9223372036854775808}]").unwrap();
+        assert_eq!(ok.as_any().downcast_ref::<Int64Array>().unwrap().values(), &[i64::MIN]);
+        let ok = column(SerialType::Float32, "[{\"c\": 0.1}]").unwrap();
+        assert_eq!(ok.as_any().downcast_ref::<Float32Array>().unwrap().values(), &[0.1f32]);
+    }
 }

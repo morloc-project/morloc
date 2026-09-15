@@ -212,10 +212,12 @@ typedef struct {
     const Schema* schema;
 } recur_env_entry_t;
 
-#define RECUR_ENV_MAX 64
-static __thread recur_env_entry_t recur_env_stack[RECUR_ENV_MAX];
-static __thread int recur_env_depth = 0;
+static __thread recur_env_entry_t* recur_env_stack = NULL;
+static __thread size_t recur_env_depth = 0;
+static __thread size_t recur_env_cap = 0;
 
+// Returns 1 when pushed, 0 when the schema is not a declaration, -1 with
+// a Python error set when the stack cannot grow.
 static int recur_env_push(const Schema* schema) {
     // Only schemas with a non-null name and not Recur-typed are
     // declarations. Recur nodes share the `name` field as a lookup key,
@@ -223,11 +225,15 @@ static int recur_env_push(const Schema* schema) {
     if (schema == NULL || schema->name == NULL || schema->type == MORLOC_RECUR) {
         return 0;
     }
-    if (recur_env_depth >= RECUR_ENV_MAX) {
-        // Stack overflow indicates pathological nesting; bail rather
-        // than silently dropping a declaration. The caller will see a
-        // failed lookup downstream.
-        return 0;
+    if (recur_env_depth >= recur_env_cap) {
+        size_t cap = recur_env_cap ? recur_env_cap * 2 : 64;
+        recur_env_entry_t* grown = (recur_env_entry_t*)realloc(recur_env_stack, cap * sizeof(recur_env_entry_t));
+        if (grown == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        recur_env_stack = grown;
+        recur_env_cap = cap;
     }
     recur_env_stack[recur_env_depth].name = schema->name;
     recur_env_stack[recur_env_depth].schema = schema;
@@ -241,8 +247,8 @@ static void recur_env_pop(int pushed) {
 
 static const Schema* recur_env_lookup(const char* name) {
     if (name == NULL) return NULL;
-    for (int i = recur_env_depth - 1; i >= 0; i--) {
-        const recur_env_entry_t* e = &recur_env_stack[i];
+    for (size_t i = recur_env_depth; i > 0; i--) {
+        const recur_env_entry_t* e = &recur_env_stack[i - 1];
         if (e->name != NULL && strcmp(e->name, name) == 0) {
             return e->schema;
         }
@@ -290,436 +296,520 @@ static ssize_t variant_tag_of(const Schema* schema, PyObject* name) {
     return -1;
 }
 
-PyObject* from_voidstar(const Schema* schema, const void* data, const void* base_ptr){ MAYFAIL
+// -- Marshalling walks ------------------------------------------------------
+//
+// A value is marshalled in three passes -- size, write, read -- and each is
+// an explicit-stack traversal rather than a recursive one, so a value's depth
+// is bounded by memory and not by the C stack. A frame names one node; the
+// driver pops a frame, keeps the recursion environment in step with it, and
+// calls the pass's step, which does the node's own work and hands its
+// compound children back to the walk. A leaf (a scalar, a string, an array of
+// scalars) is stepped on the spot.
+//
+// Frames are only needed when the schema can describe a value of unbounded
+// depth, which is when it holds a back-reference. Otherwise the walk runs in
+// direct mode: a child is stepped by calling the step from its parent's, and
+// the depth is the schema's own height.
+//
+// A sequence of compound elements is visited once per element: the step
+// handles element `idx` and re-pushes its own frame beneath the element's,
+// so the frame stack stays proportional to depth rather than to element
+// count. A read builds each container before its elements and stores every
+// child into its parent's slot as soon as it exists, so the whole partial
+// result is reachable from the root and nothing needs a reference of its own.
 
-    PyObject* obj = NULL;
-    // Push the schema's name (if it is a `&<name>X` declaration) onto
-    // the recursive-env stack before descending. Pop on the way out via
-    // the goto-error path or normal return. Recur lookups inside the
-    // body resolve against this stack.
-    int _recur_pushed = recur_env_push(schema);
+typedef enum {
+    PY_SLOT_ROOT,   // the walk's result
+    PY_SLOT_TUPLE,  // PyTuple_SET_ITEM(parent, index, obj)
+    PY_SLOT_LIST,   // PyList_SET_ITEM(parent, index, obj)
+    PY_SLOT_DICT,   // PyDict_SetItemString(parent, key, obj)
+    PY_SLOT_NPY     // PyArray_SETITEM(parent, index, obj)
+} py_slot_kind_t;
+
+typedef struct {
+    const Schema* schema;   // the node's schema, resolved by the driver
+    PyObject* obj;          // size/write: the value; read: the parent container
+    void* dest;             // write: the node's slot; read: its wire data
+    void* aux;              // a sequence's element region, kept across visits
+    size_t idx;             // the element to visit, for a sequence
+    Py_ssize_t slot;        // read: index into the parent
+    const char* key;        // read: dict key into the parent
+    unsigned char slot_kind;
+    unsigned char inline_slot; // size: the parent already counted this node's width
+    unsigned char env_pushed;
+    unsigned char pop_env;     // sentinel: pop the recur env and nothing else
+} py_frame_t;
+
+typedef struct {
+    py_frame_t* frames;
+    size_t len;
+    size_t cap;
+    py_frame_t cur;
+    int direct;
+    size_t env_base;        // recur env depth at entry, restored on exit
+    ssize_t total;          // size pass
+    void** cursor;          // write pass
+    const void* base_ptr;   // read pass
+    PyObject* result;       // read pass: the root, owned until returned
+    PyObject* keep;         // references the walk holds until it ends
+} py_walk_t;
+
+// True iff a back-reference occurs anywhere under `schema`.
+static int py_schema_has_recur(const Schema* schema) {
+    if (schema == NULL) return 0;
+    if (schema->type == MORLOC_RECUR) return 1;
+    // An enum's size counts constructors and it has no parameters.
+    if (schema->parameters == NULL) return 0;
+    for (size_t i = 0; i < schema->size; i++) {
+        if (py_schema_has_recur(schema->parameters[i])) return 1;
+    }
+    return 0;
+}
+
+// A child of a schema that cannot describe unbounded depth is stepped by
+// call; only a schema holding a back-reference needs a frame.
+static int py_flat(const py_walk_t* w, const Schema* schema) {
+    return w->direct || !py_schema_has_recur(schema);
+}
+
+static void py_walk_init(py_walk_t* w, const Schema* root) {
+    memset(w, 0, sizeof(*w));
+    w->direct = !py_schema_has_recur(root);
+    w->env_base = recur_env_depth;
+}
+
+static void py_walk_free(py_walk_t* w) {
+    free(w->frames);
+    w->frames = NULL;
+    Py_CLEAR(w->keep);
+    recur_env_depth = w->env_base;
+}
+
+static int py_push(py_walk_t* w, const py_frame_t* f) {
+    if (w->len >= w->cap) {
+        size_t cap = w->cap ? w->cap * 2 : 64;
+        py_frame_t* grown = (py_frame_t*)realloc(w->frames, cap * sizeof(py_frame_t));
+        if (grown == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        w->frames = grown;
+        w->cap = cap;
+    }
+    w->frames[w->len++] = *f;
+    return 0;
+}
+
+// Visit the current node again for element `idx`, carrying `aux`.
+static int py_resume(py_walk_t* w, size_t idx, void* aux) {
+    py_frame_t f = w->cur;
+    f.idx = idx;
+    f.aux = aux;
+    f.inline_slot = 0;
+    f.env_pushed = 1;
+    return py_push(w, &f);
+}
+
+// Keep a reference alive for the rest of the walk (a numpy object-array
+// element handed out as a new reference). Steals `obj`.
+static int py_keep(py_walk_t* w, PyObject* obj) {
+    if (w->keep == NULL) {
+        w->keep = PyList_New(0);
+        if (w->keep == NULL) { Py_DECREF(obj); return -1; }
+    }
+    int r = PyList_Append(w->keep, obj);
+    Py_DECREF(obj);
+    return r;
+}
+
+// Resolve a back-reference to the declaration on the env stack.
+static const Schema* py_resolve(const Schema* schema) {
+    if (schema->type != MORLOC_RECUR) return schema;
+    const Schema* target = recur_env_lookup(schema->name);
+    if (target == NULL) {
+        PyErr_Format(PyMorlocInternalError,
+            "morloc internal error (Py pool, %s:%d in %s):\nRecur back-reference to undeclared schema name '%s'\n",
+            __FILE__, __LINE__, __func__, schema->name ? schema->name : "?");
+    }
+    return target;
+}
+
+// Pop the next frame into w->cur, keeping the recur env in step: a named
+// declaration is pushed on its first visit and popped by a sentinel frame
+// beneath its children. Returns 1 with a frame to step, 0 when the walk is
+// done, -1 on error.
+static int py_next(py_walk_t* w) {
+    while (w->len > 0) {
+        py_frame_t f = w->frames[--w->len];
+        if (f.pop_env) {
+            recur_env_pop(1);
+            continue;
+        }
+        const Schema* s = py_resolve(f.schema);
+        if (s == NULL) return -1;
+        f.schema = s;
+        if (!f.env_pushed) {
+            int pushed = recur_env_push(s);
+            if (pushed < 0) return -1;
+            if (pushed) {
+                py_frame_t sentinel;
+                memset(&sentinel, 0, sizeof(sentinel));
+                sentinel.pop_env = 1;
+                if (py_push(w, &sentinel) != 0) return -1;
+                f.env_pushed = 1;
+            }
+        }
+        w->cur = f;
+        return 1;
+    }
+    return 0;
+}
+
+// -- size pass --------------------------------------------------------------
+
+// Extract N IFile handles from a Python list of bit64 ints into `out`.
+// Sets PyErr and returns -1 if any element isn't a Python int. Used by
+// the [IFile a] sizing and write fast paths; both batched mlc_handles_*
+// calls take `const int64_t*`, so any Python sequence whose elements
+// are Python ints can feed them after one round of extraction.
+static int extract_ifile_handles_pylist(PyObject* list, int64_t* out, Py_ssize_t n) {
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject* item = PyList_GetItem(list, i);
+        long long h = PyLong_AsLongLong(item);
+        if (h == -1 && PyErr_Occurred()) {
+            return -1;
+        }
+        out[i] = (int64_t)h;
+    }
+    return 0;
+}
+
+static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_t idx);
+
+// Account for a child. `inline_slot` says the child's fixed width lies
+// inside the parent's (tuple and record fields), so only its tail is added.
+static int py_size_child(py_walk_t* w, const Schema* schema, PyObject* obj, int inline_slot) {
+    const Schema* s = py_resolve(schema);
+    if (s == NULL) return -1;
+    if (py_flat(w, s)) {
+        if (inline_slot) w->total -= (ssize_t)s->width;
+        return py_size_step(w, s, obj, 0);
+    }
+    py_frame_t f;
+    memset(&f, 0, sizeof(f));
+    f.schema = s;
+    f.obj = obj;
+    f.inline_slot = (unsigned char)inline_slot;
+    return py_push(w, &f);
+}
+
+static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_t idx) {
     switch (schema->type) {
         case MORLOC_NIL:
-            recur_env_pop(_recur_pushed);
-            Py_RETURN_NONE;
         case MORLOC_BOOL:
-            obj = PyBool_FromLong(*(bool*)data);
-            break;
         case MORLOC_SINT8:
-            obj = PyLong_FromLong(*(int8_t*)data);
-            break;
         case MORLOC_SINT16:
-            obj = PyLong_FromLong(*(int16_t*)data);
-            break;
         case MORLOC_SINT32:
-            obj = PyLong_FromLong(*(int32_t*)data);
-            break;
         case MORLOC_SINT64:
-            obj = PyLong_FromLongLong(*(int64_t*)data);
-            break;
         case MORLOC_UINT8:
-            obj = PyLong_FromUnsignedLong(*(uint8_t*)data);
-            break;
-        // The runtime hands back the ordinal and the generated pool code
-        // wraps it in the enum class. Keeping the Python class out of the
-        // C runtime is what lets a bare [DNA] stay a raw buffer.
-        case MORLOC_ENUM:
-            obj = PyLong_FromUnsignedLong(*(uint8_t*)data);
-            break;
         case MORLOC_UINT16:
-            obj = PyLong_FromUnsignedLong(*(uint16_t*)data);
-            break;
         case MORLOC_UINT32:
-            obj = PyLong_FromUnsignedLong(*(uint32_t*)data);
-            break;
         case MORLOC_UINT64:
-            obj = PyLong_FromUnsignedLongLong(*(uint64_t*)data);
-            break;
         case MORLOC_FLOAT32:
-            obj = PyFloat_FromDouble(*(float*)data);
-            break;
         case MORLOC_FLOAT64:
-            obj = PyFloat_FromDouble(*(double*)data);
-            break;
+        case MORLOC_ENUM:
+            w->total += (ssize_t)schema->width;
+            return 0;
         case MORLOC_INT: {
-            // Inline BigInt: [size:i64, value_or_relptr:i64]
-            int64_t* fields = (int64_t*)data;
-            int64_t bigint_size = fields[0];
-            if (bigint_size <= 1) {
-                // Inline: second field is the value directly
-                int64_t val = (bigint_size == 0) ? 0 : fields[1];
-                obj = PyLong_FromLongLong(val);
-            } else {
-                // Overflow: second field is relptr to limb array
-                void* limb_ptr = resolve_relptr(*(relptr_t*)&fields[1], base_ptr, NULL);
-                obj = _PyLong_FromByteArray(
-                    (const unsigned char*)limb_ptr,
-                    bigint_size * sizeof(uint64_t),
-                    1, 1  // little-endian, signed
-                );
+            // Inline BigInt: 16 bytes for common case, more for overflow
+            if (!PyLong_Check(obj)) {
+                PyRAISE("Expected int for MORLOC_INT, but got %s", Py_TYPE(obj)->tp_name);
             }
-            break;
+            size_t nbits = _PyLong_NumBits(obj);
+            if (nbits == (size_t)-1 && PyErr_Occurred()) return -1;
+            size_t nbytes = (nbits + 8) / 8;
+            size_t nlimbs = (nbytes + 7) / 8;
+            if (nlimbs <= 1) {
+                w->total += 16;  // inline
+            } else {
+                w->total += (ssize_t)(16 + _Alignof(uint64_t) - 1 + nlimbs * sizeof(uint64_t));
+            }
+            return 0;
         }
         case MORLOC_IFILE:
         case MORLOC_OSTREAM:
         case MORLOC_ISTREAM: {
-            uint8_t kind = (schema->type == MORLOC_IFILE)   ? MLC_KIND_IFILE
-                         : (schema->type == MORLOC_OSTREAM) ? MLC_KIND_OSTREAM
-                         :                                    MLC_KIND_ISTREAM;
-            int64_t handle = PyTRY(mlc_read_handle_voidstar,
-                                   data, base_ptr, kind);
-            obj = PyLong_FromLongLong((long long)handle);
-            if (!obj) {
-                PyINTERNAL_ABORT("Failed to wrap stream handle as PyLong");
+            // F/O/I share the tagged stream-handle field wire form; look
+            // up the exact suballoc cost via the registry (returns 8 +
+            // path_len for TAG_PATH, 0 for empty).
+            if (!PyLong_Check(obj)) {
+                PyRAISE("Expected int for stream-handle, but got %s",
+                        Py_TYPE(obj)->tp_name);
             }
-            break;
+            long long handle_ll = PyLong_AsLongLong(obj);
+            if (handle_ll == -1 && PyErr_Occurred()) return -1;
+            char* err = NULL;
+            int64_t n = mlc_handle_path_len((int64_t)handle_ll, &err);
+            if (n < 0) {
+                PyErr_SetString(PyExc_RuntimeError,
+                                err ? err : "mlc_handle_path_len failed");
+                free(err);
+                return -1;
+            }
+            w->total += (ssize_t)(sizeof(Array) + (size_t)n);
+            return 0;
         }
-        case MORLOC_STRING: {
-            Array* str_array = (Array*)data;
-            void* tmp_ptr = NULL;
-
-            if (str_array->size != 0) {
-                tmp_ptr = PyTRY(resolve_relptr, str_array->data, base_ptr);
-            }
-
-            if (schema->hint != NULL && strcmp(schema->hint, "bytes") == 0) {
-                // load binary data as a python bytes object
-                if (str_array->size == 0) {
-                    obj = PyBytes_FromStringAndSize("", 0);  // empty bytes object
-                } else {
-                    obj = PyBytes_FromStringAndSize(tmp_ptr, str_array->size);
-                }
-                if (!obj) {
-                    PyRAISE("Failed to parse data as bytes");
-                }
-            } else if (schema->hint != NULL && strcmp(schema->hint, "bytearray") == 0) {
-                // load binary data as a python bytearray object
-                if (str_array->size == 0) {
-                    obj = PyByteArray_FromStringAndSize("", 0);  // empty bytearray object
-                } else {
-                    obj = PyByteArray_FromStringAndSize(tmp_ptr, str_array->size);
-                }
-                if (!obj) {
-                    PyRAISE("Failed to parse data as bytearray");
-                }
-            } else {
-                // otherwise, load this as a str type
-                if (str_array->size == 0) {
-                    obj = PyUnicode_New(0, 127);  // empty string object
-                } else {
-                    obj = PyUnicode_FromStringAndSize(tmp_ptr, str_array->size);
-                }
-                if (!obj) {
-                    PyRAISE("Failed to parse data as string");
-                }
-            }
-            break;
-        }
+        case MORLOC_STRING:
         case MORLOC_ARRAY: {
-            Array* array = (Array*)data;
-            // Producer writes RELNULL into array->data for empty arrays
-            // (see cppmorloc to_voidstar), so resolve only when non-empty.
-            void* absptr = NULL;
-            if (array->size != 0) {
-                absptr = PyTRY(resolve_relptr, array->data, base_ptr);
+            if (schema->type == MORLOC_STRING && !(PyUnicode_Check(obj) || PyBytes_Check(obj) || PyByteArray_Check(obj) )) {
+                PyRAISE("Expected str or bytes for MORLOC_STRING, but got %s", Py_TYPE(obj)->tp_name);
             }
-            // The "numpy.ndarray" hint is authoritative: the user wants a
-            // NumPy array, regardless of element type. For fixed-width
-            // primitive elements we use the natural dtype (zero-copy / fast
-            // memcpy). For everything else (MORLOC_INT BigInt, MORLOC_STRING,
-            // nested tuples/arrays/records, MORLOC_NIL, MORLOC_OPTIONAL) we
-            // build an `np.empty(n, dtype=object)` and fill via recursive
-            // from_voidstar per element. This preserves Functor's container
-            // invariance: `map asString ([1,2,3] :: Vector 3 Int)` stays a
-            // NumPy ndarray on both sides, the dtype just shifts from int64
-            // to object.
-            int numpy_type_num = -1;
-            bool numpy_hint = (schema->hint != NULL && strcmp(schema->hint, "numpy.ndarray") == 0);
-            if (numpy_hint) {
-                Schema* element_schema = schema->parameters[0];
-                switch (element_schema->type) {
-                    case MORLOC_BOOL:    numpy_type_num = NPY_BOOL; break;
-                    case MORLOC_SINT8:   numpy_type_num = NPY_INT8; break;
-                    case MORLOC_SINT16:  numpy_type_num = NPY_INT16; break;
-                    case MORLOC_SINT32:  numpy_type_num = NPY_INT32; break;
-                    case MORLOC_SINT64:  numpy_type_num = NPY_INT64; break;
-                    case MORLOC_UINT8:   numpy_type_num = NPY_UINT8; break;
-                    // A [DNA] stays a compact uint8 buffer. Falling to the
-                    // NPY_OBJECT path below would build one Python object
-                    // per element, which is exactly what the one-byte form
-                    // exists to avoid.
-                    case MORLOC_ENUM:    numpy_type_num = NPY_UINT8; break;
-                    case MORLOC_UINT16:  numpy_type_num = NPY_UINT16; break;
-                    case MORLOC_UINT32:  numpy_type_num = NPY_UINT32; break;
-                    case MORLOC_UINT64:  numpy_type_num = NPY_UINT64; break;
-                    case MORLOC_FLOAT32: numpy_type_num = NPY_FLOAT32; break;
-                    case MORLOC_FLOAT64: numpy_type_num = NPY_FLOAT64; break;
-                    default: numpy_type_num = NPY_OBJECT; break;  // boxed dtype=object path below
-                }
+            if (schema->type == MORLOC_ARRAY && !(PyList_Check(obj) || PyBytes_Check(obj) || PyByteArray_Check(obj) || PyObject_HasAttrString(obj, "__array_interface__"))) {
+                PyRAISE("Expected list, bytes, bytearray, or numpy array for MORLOC_ARRAY, but got %s", Py_TYPE(obj)->tp_name);
             }
-            if (numpy_type_num == NPY_OBJECT) {
-                // Boxed path: build dtype=object array and fill via
-                // recursive from_voidstar. Each slot stores a PyObject*
-                // pointer; SETITEM handles INCREF/DECREF correctly.
-                import_numpy();
-                npy_intp dims[] = {array->size};
-                obj = PyArray_SimpleNew(1, dims, NPY_OBJECT);
-                if (obj == NULL) {
-                    PyINTERNAL_ABORT("Failed to allocate numpy object array");
-                }
-                if (array->size > 0) {
-                    char* start = (char*)absptr;
-                    size_t width = schema->parameters[0]->width;
-                    Schema* element_schema = schema->parameters[0];
-                    PyArrayObject* arr = (PyArrayObject*)obj;
-                    for (size_t i = 0; i < array->size; i++) {
-                        PyObject* item = from_voidstar(element_schema, start + width * i, base_ptr);
-                        if (!item) {
-                            PyRAISE("Failed to convert element for numpy object array");
-                        }
-                        // PyArray_SETITEM copies the PyObject* into the slot
-                        // and bumps its refcount on the way in; we drop our
-                        // local reference afterwards.
-                        if (PyArray_SETITEM(arr, PyArray_GETPTR1(arr, i), item) < 0) {
-                            Py_DECREF(item);
-                            PyRAISE("Failed to set element in numpy object array");
-                        }
-                        Py_DECREF(item);
-                    }
-                }
-            } else if (numpy_type_num >= 0) {
-                import_numpy();
-                npy_intp dims[] = {array->size};
-                // Own the buffer when the source is inline (packet buffer is
-                // freed shortly after get_value returns; a view would see
-                // recycled memory) or empty (no data to view). Otherwise take
-                // a zero-copy view over SHM, which outlives this array via
-                // the deferred shm_tracker decref.
-                if (base_ptr != NULL || array->size == 0) {
-                    obj = PyArray_SimpleNew(1, dims, numpy_type_num);
-                    if (obj == NULL) {
-                        PyINTERNAL_ABORT("Failed to allocate numpy array");
-                    }
-                    if (array->size > 0) {
-                        size_t nbytes = (size_t)array->size *
-                                        (size_t)PyArray_ITEMSIZE((PyArrayObject*)obj);
-                        memcpy(PyArray_DATA((PyArrayObject*)obj), absptr, nbytes);
-                    }
-                } else {
-                    obj = PyArray_SimpleNewFromData(1, dims, numpy_type_num, absptr);
-                    if(obj == NULL) {
-                        PyRAISE("Failed to parse data");
-                    }
-                }
-                // Note that we do not want to give ownership to Python.
-                // This is shared memory, which means python should not mutate it.
-            } else if (schema->hint != NULL && strcmp(schema->hint, "list") == 0) {
-                // Explicit "list" hint takes precedence over the UInt8 fast-path
-                // below: the user declared `type Py => (List a) = "list" a`
-                // (or similar), so honour that representation even for UInt8
-                // elements. Without this, a [UInt8] packet would silently
-                // arrive as `bytes` and mismatch a Python-pool list literal
-                // of the same morloc type.
-                obj = PyList_New(array->size);
-                if(obj == NULL){
-                    PyINTERNAL_ABORT("Failed to allocate list");
-                }
-                if(array->size > 0){
-                    char* start = (char*)absptr;
-                    size_t width = schema->parameters[0]->width;
-                    Schema* element_schema = schema->parameters[0];
-                    for (size_t i = 0; i < array->size; i++) {
-                        PyObject* item = from_voidstar(element_schema, start + width * i, base_ptr);
-                        if (!item || PyList_SetItem(obj, i, item) < 0) {
-                            PyRAISE("Failed to access element in list")
-                        }
-                    }
-                }
-            } else if (schema->hint != NULL && strcmp(schema->hint, "bytearray") == 0) {
-                obj = PyByteArray_FromStringAndSize((const char*)absptr, array->size);
-                if (!obj) {
-                    PyErr_SetString(PyExc_TypeError, "Failed to create bytearray");
-                    goto error;
-                }
-                // Note: Similar to the numpy case, we don't want to give ownership to Python.
-                // The bytearray is created from a copy of the data, so no additional handling is needed.
-            } else if (schema->parameters[0]->type == MORLOC_UINT8
-                       || schema->parameters[0]->type == MORLOC_ENUM) {
-                // Default for UInt8 arrays when hint is "bytes" or absent.
-                //
-                // An enum array takes the same path: its elements are tag
-                // bytes, so the wire buffer is already the right shape. The
-                // alternative -- one Python object per element -- is what
-                // the one-byte form exists to avoid, and over a genomic
-                // [DNA] it is the difference between usable and not. The
-                // caller sees ordinals; the generated pool code is where an
-                // enum identity is reattached if one is wanted.
-                obj = PyBytes_FromStringAndSize((const char*)absptr, array->size);
-                if (obj == NULL) {
-                    PyRAISE("Failed to one bytes")
-                }
-            } else {
-                // No hint OR an unrecognized hint (e.g. `<dict>` from a
-                // Packable outer type like Map): materialize the wire form
-                // as a Python list. The hint describes the POST-pack native
-                // shape produced by generated code above this layer, not
-                // the wire shape from_voidstar is decoding.
-                obj = PyList_New(array->size);
-                if(obj == NULL){
-                    PyINTERNAL_ABORT("Failed to allocate list");
-                }
-                if(array->size > 0){
-                    char* start = (char*)absptr;
-                    size_t width = schema->parameters[0]->width;
-                    Schema* element_schema = schema->parameters[0];
-                    for (size_t i = 0; i < array->size; i++) {
-                        PyObject* item = from_voidstar(element_schema, start + width * i, base_ptr);
-                        if (!item || PyList_SetItem(obj, i, item) < 0) {
-                            PyRAISE("Failed to access element in list");
-                        }
-                    }
-                }
-            }
-            break;
-        }
-        case MORLOC_TUPLE: {
-            obj = PyTuple_New(schema->size);
-            if(obj == NULL){
-                PyRAISE("Failed in tuple");
-            }
-            for (size_t i = 0; i < schema->size; i++) {
-                void* item_ptr = (char*)data + schema->offsets[i];
-                PyObject* item = from_voidstar(schema->parameters[i], item_ptr, base_ptr);
-                if (!item || PyTuple_SetItem(obj, i, item) < 0) {
-                    PyRAISE("Failed to access tuple element");
-                }
-            }
-            break;
-        }
-        case MORLOC_MAP: {
-            obj = PyDict_New();
-            if(obj == NULL){
-                PyRAISE("Failed in map");
-            }
-            for (size_t i = 0; i < schema->size; i++) {
-                void* item_ptr = (char*)data + schema->offsets[i];
-                PyObject* value = from_voidstar(schema->parameters[i], item_ptr, base_ptr);
-                PyObject* key = PyUnicode_FromString(schema->keys[i]);
-                if (!value || !key || PyDict_SetItem(obj, key, value) < 0) {
-                    Py_XDECREF(value);
-                    Py_XDECREF(key);
-                    PyRAISE("Failed to access map element");
-                }
-                Py_DECREF(key);
-                Py_DECREF(value);
-            }
-            break;
-        }
-        case MORLOC_VARIANT: {
-            // A payload-bearing `data` value: a tag byte then a relptr to the
-            // arm's fields. It crosses as a STRUCTURAL pair -- the
-            // constructor's name and a tuple of its fields -- because the
-            // generic marshaller has no access to a pool-level class. See the
-            // note on the Python/R variant spelling in the code generator:
-            // this is a documented interim form, not the intended end state.
-            uint8_t tag = *(const uint8_t*)data;
-            if ((size_t)tag >= schema->size) {
-                PyErr_Format(PyExc_RuntimeError,
-                    "variant tag %u is out of range; the type has %zu arms",
-                    (unsigned)tag, schema->size);
-                goto error;
-            }
-            Schema* arm = schema->parameters[tag];
-            PyObject* name = PyUnicode_FromString(schema->keys[tag]);
-            if (!name) goto error;
 
-            PyObject* fields = NULL;
-            relptr_t vrelptr = *(const relptr_t*)((const char*)data + 8);
-            if (vrelptr == RELNULL) {
-                fields = PyTuple_New(0);
-            } else {
-                const void* payload;
-                if (base_ptr) {
-                    payload = (const char*)base_ptr + vrelptr;
-                } else {
-                    char* errmsg_v = NULL;
-                    payload = rel2abs(vrelptr, &errmsg_v);
-                    if (errmsg_v) {
-                        PyErr_SetString(PyExc_RuntimeError, errmsg_v);
-                        free(errmsg_v);
-                        Py_DECREF(name);
-                        goto error;
+            const Schema* element_schema = py_resolve(schema->parameters[0]);
+            if (element_schema == NULL) return -1;
+            int per_element = !py_flat(w, element_schema);
+
+            if (idx == 0) {
+                // The header and worst-case cursor alignment padding for the
+                // element data. String stays at natural element alignment (1
+                // byte for chars); Array bumps to 64 for primitive numeric
+                // elements (SIMD/BLAS).
+                size_t buf_align = (schema->type == MORLOC_STRING)
+                    ? schema_alignment(schema->parameters[0])
+                    : array_data_alignment(element_schema);
+                w->total += (ssize_t)(sizeof(Array) + buf_align - 1);
+
+                if (PyList_Check(obj)) {
+                    Py_ssize_t list_size = PyList_Size(obj);
+                    size_t element_width = element_schema->width;
+                    switch(element_schema->type){
+                        case MORLOC_NIL:
+                        case MORLOC_BOOL:
+                        case MORLOC_SINT8:
+                        case MORLOC_SINT16:
+                        case MORLOC_SINT32:
+                        case MORLOC_SINT64:
+                        case MORLOC_UINT8:
+                        case MORLOC_UINT16:
+                        case MORLOC_UINT32:
+                        case MORLOC_UINT64:
+                        case MORLOC_FLOAT32:
+                        case MORLOC_FLOAT64:
+                        case MORLOC_ENUM:
+                            w->total += (ssize_t)(list_size * element_width);
+                            return 0;
+                        case MORLOC_IFILE:
+                        case MORLOC_OSTREAM:
+                        case MORLOC_ISTREAM: {
+                            // Batched suballoc-size lookup for arrays of
+                            // stream handles: one registry lock for N
+                            // handles instead of N.
+                            int64_t* handles = (int64_t*)malloc(list_size * sizeof(int64_t));
+                            if (!handles) {
+                                PyINTERNAL_ABORT("get_shm_size: out of memory sizing stream-handle array");
+                            }
+                            if (extract_ifile_handles_pylist(obj, handles, list_size) != 0) {
+                                free(handles);
+                                return -1;
+                            }
+                            char* err = NULL;
+                            int64_t paths_total = mlc_handles_path_lens(
+                                handles, (size_t)list_size, NULL, &err);
+                            free(handles);
+                            if (paths_total < 0) {
+                                PyErr_SetString(PyExc_RuntimeError,
+                                    err ? err : "mlc_handles_path_lens failed");
+                                free(err);
+                                return -1;
+                            }
+                            w->total += (ssize_t)(list_size * element_width) + (ssize_t)paths_total;
+                            return 0;
+                        }
+                        default:
+                            if (!per_element) {
+                                for (Py_ssize_t i = 0; i < list_size; i++) {
+                                    if (py_size_child(w, element_schema, PyList_GetItem(obj, i), 0) != 0) return -1;
+                                }
+                                return 0;
+                            }
+                            break;  // one compound element per visit, below
                     }
+                } else if (PyObject_HasAttrString(obj, "__array_interface__")) {
+                    import_numpy();
+                    PyArrayObject *arr = (PyArrayObject *)obj;
+                    npy_intp *dims = PyArray_DIMS(arr);
+                    int ndim = PyArray_NDIM(arr);
+                    size_t total_elements = 1;
+                    for (int i = 0; i < ndim; i++) {
+                        total_elements *= dims[i];
+                    }
+                    // Per-element sizing required when (a) dtype=object
+                    // (slots are PyObject*) or (b) the morloc element
+                    // schema is variable-width -- numpy's flat inline
+                    // storage does not match morloc's wire layout (e.g.
+                    // numpy int64 is 8 bytes per slot but morloc Int is
+                    // a 16-byte BigInt header plus optional limb tail).
+                    if (PyArray_TYPE(arr) == NPY_OBJECT
+                        || !schema_is_fixed_width((Schema*)element_schema)) {
+                        if (!per_element) {
+                            for (size_t i = 0; i < total_elements; i++) {
+                                PyObject* item = PyArray_GETITEM(arr, PyArray_GETPTR1(arr, i));
+                                if (!item) {
+                                    PyRAISE("Failed to read element from numpy array");
+                                }
+                                int r = py_size_child(w, element_schema, item, 0);
+                                Py_DECREF(item);
+                                if (r != 0) return -1;
+                            }
+                            return 0;
+                        }
+                        // one compound element per visit, below
+                    } else {
+                        w->total += (ssize_t)(total_elements * element_schema->width);
+                        return 0;
+                    }
+                } else if (PyBytes_Check(obj)) {
+                    w->total += (ssize_t)PyBytes_GET_SIZE(obj);
+                    return 0;
+                } else if (PyByteArray_Check(obj)) {
+                    w->total += (ssize_t)PyByteArray_GET_SIZE(obj);
+                    return 0;
+                } else if (PyUnicode_Check(obj)) {
+                    Py_ssize_t len = 0;
+                    if (PyUnicode_AsUTF8AndSize(obj, &len) == NULL) return -1;
+                    w->total += (ssize_t)len;
+                    return 0;
+                } else {
+                    PyRAISE("Unsupported data type");
                 }
-                // The arm's schema describes its fields as a tuple, so the
-                // existing walk over that shape builds the field sequence.
-                fields = from_voidstar(arm, payload, base_ptr);
             }
-            if (!fields) { Py_DECREF(name); goto error; }
-            obj = PyTuple_Pack(2, name, fields);
-            Py_DECREF(name);
-            Py_DECREF(fields);
-            if (!obj) goto error;
-            break;
+
+            // A sequence of compound elements, one per visit.
+            {
+                int is_list = PyList_Check(obj);
+                size_t n = is_list ? (size_t)PyList_Size(obj) : (size_t)PyArray_SIZE((PyArrayObject*)obj);
+                if (idx >= n) return 0;
+                PyObject* item;
+                if (is_list) {
+                    item = PyList_GetItem(obj, idx);
+                } else {
+                    item = PyArray_GETITEM((PyArrayObject*)obj, PyArray_GETPTR1((PyArrayObject*)obj, idx));
+                    if (!item) {
+                        PyRAISE("Failed to read element from numpy array");
+                    }
+                    if (py_keep(w, item) != 0) return -1;
+                }
+                if (idx + 1 < n && py_resume(w, idx + 1, NULL) != 0) return -1;
+                return py_size_child(w, element_schema, item, 0);
+            }
         }
+
+        case MORLOC_TUPLE: {
+            if (!PyTuple_Check(obj) && !PyList_Check(obj)) {
+                PyRAISE("Expected tuple or list for MORLOC_TUPLE, but got %s", Py_TYPE(obj)->tp_name);
+            }
+            Py_ssize_t size = PyTuple_Check(obj) ? PyTuple_Size(obj) : PyList_Size(obj);
+            if ((size_t)size != schema->size) {
+                PyRAISE("Tuple/List size mismatch");
+            }
+            w->total += (ssize_t)schema->width;
+            for (Py_ssize_t i = 0; i < size; ++i) {
+                PyObject* item = PyTuple_Check(obj) ? PyTuple_GetItem(obj, i) : PyList_GetItem(obj, i);
+                if (py_size_child(w, schema->parameters[i], item, 1) != 0) return -1;
+            }
+            return 0;
+        }
+
+        case MORLOC_MAP: {
+            if (!PyDict_Check(obj)) {
+                PyRAISE("Expected dict for MORLOC_MAP, but got %s", Py_TYPE(obj)->tp_name);
+            }
+            w->total += (ssize_t)schema->width;
+            for (size_t i = 0; i < schema->size; ++i) {
+                PyObject* key = PyUnicode_FromString(schema->keys[i]);
+                PyObject* value = PyDict_GetItem(obj, key);
+                Py_DECREF(key);
+                if (value) {
+                    if (py_size_child(w, schema->parameters[i], value, 1) != 0) return -1;
+                }
+            }
+            return 0;
+        }
+
+        case MORLOC_VARIANT: {
+            // ("Circle", (fields...)): the 16-byte slot, worst-case padding
+            // before the payload, and the payload's own size. A nullary arm
+            // has no payload and needs only the slot.
+            if (!PyTuple_Check(obj) || PyTuple_Size(obj) != 2) {
+                PyErr_SetString(PyExc_RuntimeError,
+                    "expected a (constructor, fields) pair for a `data` value");
+                return -1;
+            }
+            ssize_t vtag = variant_tag_of(schema, PyTuple_GetItem(obj, 0));
+            if (vtag < 0) return -1;
+            PyObject* vfields = PyTuple_GetItem(obj, 1);
+            const Schema* varm = schema->parameters[vtag];
+            if (varm->size == 0) {
+                w->total += (ssize_t)schema->width;
+                return 0;
+            }
+            size_t varm_align = schema_alignment((Schema*)varm);
+            if (varm_align == 0) varm_align = 1;
+            w->total += (ssize_t)schema->width + (ssize_t)(varm_align - 1);
+            return py_size_child(w, varm, vfields, 0);
+        }
+
         case MORLOC_OPTIONAL: {
-            // The Optional slot is a relptr (RELNULL = absent). Resolve and
-            // recurse into the inner T's body when present. base_ptr is
-            // set when the data lives inline in a packet payload (relptrs
-            // are payload-relative); otherwise we go through SHM.
-            relptr_t relptr = *(const relptr_t*)data;
-            if (relptr == RELNULL) {
-                recur_env_pop(_recur_pushed);
-                Py_RETURN_NONE;
+            // Slot is sizeof(relptr) (= schema->width). Absent -> just the slot.
+            // Present -> slot + worst-case alignment padding for the inner T +
+            // T's own total size (which already includes inner.width and any
+            // variable extras T contributes).
+            if (obj == Py_None) {
+                w->total += (ssize_t)schema->width;
+                return 0;
             }
-            const void* inner_abs;
-            if (base_ptr) {
-                inner_abs = (const char*)base_ptr + relptr;
-            } else {
-                char* errmsg_resolve = NULL;
-                inner_abs = rel2abs(relptr, &errmsg_resolve);
-                if (errmsg_resolve) {
-                    PyErr_SetString(PyExc_RuntimeError, errmsg_resolve);
-                    free(errmsg_resolve);
-                    goto error;
-                }
-            }
-            obj = from_voidstar(schema->parameters[0], inner_abs, base_ptr);
-            if (!obj) {
-                PyRAISE("Failed to deserialize optional inner value");
-            }
-            break;
+            const Schema* inner = py_resolve(schema->parameters[0]);
+            if (inner == NULL) return -1;
+            size_t inner_align = schema_alignment((Schema*)inner);
+            if (inner_align == 0) inner_align = 1;
+            w->total += (ssize_t)schema->width + (ssize_t)(inner_align - 1);
+            return py_size_child(w, inner, obj, 0);
         }
-        case MORLOC_RECUR: {
-            // Back-reference: resolve to the named declaration on the
-            // env stack and deserialise as if we were already inside
-            // that schema. The data shape at this slot is whatever the
-            // declaration body specifies; the env carries the matching
-            // Schema pointer so the recursive call can navigate.
-            const Schema* target = recur_env_lookup(schema->name);
-            if (target == NULL) {
-                PyINTERNAL_ABORT("Recur back-reference to undeclared schema name '%s'",
-                        schema->name ? schema->name : "?");
-            }
-            obj = from_voidstar(target, data, base_ptr);
-            if (!obj) {
-                PyRAISE("Failed to deserialize recursive value");
-            }
-            break;
-        }
+
         default:
-            PyRAISE("Unsupported schema type %d in from_voidstar", (int)schema->type);
+            PyRAISE("Unsupported schema type %d in calc_required_size", (int)schema->type);
     }
 
-    recur_env_pop(_recur_pushed);
-    return obj;
+    PyINTERNAL_ABORT("Reached the unreachable");
 
 error:
-    recur_env_pop(_recur_pushed);
-    Py_XDECREF(obj);
-    return NULL;
+    return -1;
 }
 
+// The bytes a value occupies in shared memory, or -1 with a Python error set.
+ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
+    py_walk_t w;
+    py_walk_init(&w, schema);
+    ssize_t result = -1;
+    if (py_size_child(&w, schema, obj, 0) != 0) goto done;
+    for (;;) {
+        int r = py_next(&w);
+        if (r < 0) goto done;
+        if (r == 0) break;
+        if (w.cur.inline_slot) w.total -= (ssize_t)w.cur.schema->width;
+        if (py_size_step(&w, w.cur.schema, w.cur.obj, w.cur.idx) != 0) goto done;
+    }
+    result = w.total;
+done:
+    py_walk_free(&w);
+    return result;
+}
+
+
+// -- write pass -------------------------------------------------------------
 
 #define HANDLE_SINT_TYPE(CTYPE, PYLONG_FUNC, MIN, MAX) \
     do { \
@@ -749,357 +839,32 @@ error:
         *(CTYPE*)dest = (CTYPE)value; \
     } while(0)
 
+static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObject* obj, size_t idx);
 
-
-static ssize_t get_shm_size_inner(const Schema* schema, PyObject* obj);
-
-// Extract N IFile handles from a Python list of bit64 ints into `out`.
-// Sets PyErr and returns -1 if any element isn't a Python int. Used by
-// the [IFile a] sizing and write fast paths; both batched mlc_handles_*
-// calls take `const int64_t*`, so any Python sequence whose elements
-// are Python ints can feed them after one round of extraction.
-static int extract_ifile_handles_pylist(PyObject* list, int64_t* out, Py_ssize_t n) {
-    for (Py_ssize_t i = 0; i < n; i++) {
-        PyObject* item = PyList_GetItem(list, i);
-        long long h = PyLong_AsLongLong(item);
-        if (h == -1 && PyErr_Occurred()) {
-            return -1;
-        }
-        out[i] = (int64_t)h;
+// Write a child into its slot: a leaf now, a compound node by call or by
+// frame.
+static int py_write_child(py_walk_t* w, const Schema* schema, void* dest, PyObject* obj) {
+    const Schema* s = py_resolve(schema);
+    if (s == NULL) return -1;
+    if (py_flat(w, s)) {
+        return py_write_step(w, s, dest, obj, 0);
     }
-    return 0;
+    py_frame_t f;
+    memset(&f, 0, sizeof(f));
+    f.schema = s;
+    f.obj = obj;
+    f.dest = dest;
+    return py_push(w, &f);
 }
 
-// Wrap get_shm_size_inner so the recursive-env stack is maintained at
-// every entry. Inner code calls get_shm_size (this wrapper), which
-// pushes the schema's declaration name (if any) before delegating to
-// _inner. Recur nodes themselves don't push (recur_env_push skips them)
-// so a back-ref resolution does not pollute the stack.
-ssize_t get_shm_size(const Schema* schema, PyObject* obj) {
-    int pushed = recur_env_push(schema);
-    ssize_t r = get_shm_size_inner(schema, obj);
-    recur_env_pop(pushed);
-    return r;
-}
-
-static ssize_t get_shm_size_inner(const Schema* schema, PyObject* obj) {
+static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObject* obj, size_t idx) { MAYFAIL
+    void** cursor = w->cursor;
     switch (schema->type) {
         case MORLOC_NIL:
-        case MORLOC_BOOL:
-        case MORLOC_SINT8:
-        case MORLOC_SINT16:
-        case MORLOC_SINT32:
-        case MORLOC_SINT64:
-        case MORLOC_UINT8:
-        case MORLOC_UINT16:
-        case MORLOC_UINT32:
-        case MORLOC_UINT64:
-        case MORLOC_FLOAT32:
-        case MORLOC_FLOAT64:
-        case MORLOC_ENUM:
-            return schema->width;
-        case MORLOC_INT: {
-            // Inline BigInt: 16 bytes for common case, more for overflow
-            if (!PyLong_Check(obj)) {
-                PyRAISE("Expected int for MORLOC_INT, but got %s", Py_TYPE(obj)->tp_name);
-            }
-            size_t nbits = _PyLong_NumBits(obj);
-            if (nbits == (size_t)-1 && PyErr_Occurred()) return -1;
-            size_t nbytes = (nbits + 8) / 8;
-            size_t nlimbs = (nbytes + 7) / 8;
-            if (nlimbs <= 1) return 16;  // inline
-            return 16 + _Alignof(uint64_t) - 1 + nlimbs * sizeof(uint64_t);
-        }
-        case MORLOC_IFILE:
-        case MORLOC_OSTREAM:
-        case MORLOC_ISTREAM: {
-            // F/O/I share the tagged stream-handle field wire form; look
-            // up the exact suballoc cost via the registry (returns 8 +
-            // path_len for TAG_PATH, 0 for empty).
-            if (!PyLong_Check(obj)) {
-                PyRAISE("Expected int for stream-handle, but got %s",
-                        Py_TYPE(obj)->tp_name);
-            }
-            long long handle_ll = PyLong_AsLongLong(obj);
-            if (handle_ll == -1 && PyErr_Occurred()) return -1;
-            char* err = NULL;
-            int64_t n = mlc_handle_path_len((int64_t)handle_ll, &err);
-            if (n < 0) {
-                PyErr_SetString(PyExc_RuntimeError,
-                                err ? err : "mlc_handle_path_len failed");
-                free(err);
-                return -1;
-            }
-            return sizeof(Array) + (ssize_t)n;
-        }
-        case MORLOC_STRING:
-        case MORLOC_ARRAY:
-            if (schema->type == MORLOC_STRING && !(PyUnicode_Check(obj) || PyBytes_Check(obj) || PyByteArray_Check(obj) )) {
-                PyRAISE("Expected str or bytes for MORLOC_STRING, but got %s", Py_TYPE(obj)->tp_name);
-            }
-            if (schema->type == MORLOC_ARRAY && !(PyList_Check(obj) || PyBytes_Check(obj) || PyByteArray_Check(obj) || PyObject_HasAttrString(obj, "__array_interface__"))) {
-                PyRAISE("Expected list, bytes, bytearray, or numpy array for MORLOC_ARRAY, but got %s", Py_TYPE(obj)->tp_name);
-            }
-        
-            {
-                ssize_t required_size = 0;
-                // worst-case cursor alignment padding for element data.
-                // String stays at natural element alignment (1 byte for chars);
-                // Array bumps to 64 for primitive numeric elements (SIMD/BLAS).
-                size_t buf_align = (schema->type == MORLOC_STRING)
-                    ? schema_alignment(schema->parameters[0])
-                    : array_data_alignment(schema->parameters[0]);
-                required_size += (ssize_t)(buf_align - 1);
-
-                if (PyList_Check(obj)) {
-                    Py_ssize_t list_size = PyList_Size(obj);
-                    size_t element_width = schema->parameters[0]->width;
-                    switch(schema->parameters[0]->type){
-                        case MORLOC_NIL:
-                        case MORLOC_BOOL:
-                        case MORLOC_SINT8:
-                        case MORLOC_SINT16:
-                        case MORLOC_SINT32:
-                        case MORLOC_SINT64:
-                        case MORLOC_UINT8:
-                        case MORLOC_UINT16:
-                        case MORLOC_UINT32:
-                        case MORLOC_UINT64:
-                        case MORLOC_FLOAT32:
-                        case MORLOC_FLOAT64:
-                        case MORLOC_ENUM:
-                            required_size += list_size * element_width;
-                            break;
-                        case MORLOC_IFILE:
-                        case MORLOC_OSTREAM:
-                        case MORLOC_ISTREAM: {
-                            // Batched suballoc-size lookup for arrays of
-                            // stream handles: one registry lock for N
-                            // handles instead of N.
-                            int64_t* handles = (int64_t*)malloc(list_size * sizeof(int64_t));
-                            if (!handles) {
-                                PyINTERNAL_ABORT("get_shm_size: out of memory sizing stream-handle array");
-                            }
-                            if (extract_ifile_handles_pylist(obj, handles, list_size) != 0) {
-                                free(handles);
-                                return -1;
-                            }
-                            char* err = NULL;
-                            int64_t paths_total = mlc_handles_path_lens(
-                                handles, (size_t)list_size, NULL, &err);
-                            free(handles);
-                            if (paths_total < 0) {
-                                PyErr_SetString(PyExc_RuntimeError,
-                                    err ? err : "mlc_handles_path_lens failed");
-                                free(err);
-                                return -1;
-                            }
-                            required_size += list_size * element_width
-                                           + (ssize_t)paths_total;
-                            break;
-                        }
-                        case MORLOC_INT:
-                        case MORLOC_STRING:
-                        case MORLOC_ARRAY:
-                        case MORLOC_TUPLE:
-                        case MORLOC_MAP:
-                        case MORLOC_OPTIONAL:
-                            for(size_t i = 0; i < (size_t)list_size; i++){
-                               required_size += get_shm_size(schema->parameters[0], PyList_GetItem(obj, i));
-                            }
-                            break;
-                        default:
-                            // Schema layer added a new variable-width element type;
-                            // walk per-element conservatively rather than silently
-                            // under-counting and corrupting the SHM allocation.
-                            for(size_t i = 0; i < (size_t)list_size; i++){
-                               required_size += get_shm_size(schema->parameters[0], PyList_GetItem(obj, i));
-                            }
-                            break;
-                    }
-                } else if (PyObject_HasAttrString(obj, "__array_interface__")) {
-                    import_numpy();
-                    PyArrayObject *arr = (PyArrayObject *)obj;
-                    npy_intp *dims = PyArray_DIMS(arr);
-                    int ndim = PyArray_NDIM(arr);
-                    size_t total_elements = 1;
-                    for (int i = 0; i < ndim; i++) {
-                        total_elements *= dims[i];
-                    }
-                    // Per-element sizing required when (a) dtype=object
-                    // (slots are PyObject*) or (b) the morloc element
-                    // schema is variable-width -- numpy's flat inline
-                    // storage does not match morloc's wire layout (e.g.
-                    // numpy int64 is 8 bytes per slot but morloc Int is
-                    // a 16-byte BigInt header plus optional limb tail).
-                    if (PyArray_TYPE(arr) == NPY_OBJECT
-                        || !schema_is_fixed_width(schema->parameters[0])) {
-                        Schema* element_schema = schema->parameters[0];
-                        for (size_t i = 0; i < total_elements; i++) {
-                            PyObject* item = PyArray_GETITEM(arr, PyArray_GETPTR1(arr, i));
-                            if (!item) {
-                                PyRAISE("Failed to read element from numpy array");
-                            }
-                            ssize_t element_size = get_shm_size(element_schema, item);
-                            Py_DECREF(item);
-                            if (element_size == -1) {
-                                return -1;
-                            }
-                            required_size += element_size;
-                        }
-                    } else {
-                        required_size += total_elements * schema->parameters[0]->width;
-                    }
-                } else if (PyBytes_Check(obj)) {
-                    required_size += (ssize_t)PyBytes_GET_SIZE(obj);
-                } else if (PyByteArray_Check(obj)) {
-                    required_size += (ssize_t)PyByteArray_GET_SIZE(obj);
-                } else if (PyUnicode_Check(obj)) {
-                    PyUnicode_AsUTF8AndSize(obj, &required_size);
-                } else {
-                    PyRAISE("Unsupported data type");
-                }
-
-                required_size += sizeof(Array);
-                return required_size;
-            }
-
-        case MORLOC_TUPLE:
-            if (!PyTuple_Check(obj) && !PyList_Check(obj)) {
-                PyRAISE("Expected tuple or list for MORLOC_TUPLE, but got %s", Py_TYPE(obj)->tp_name);
-            }
-
-            {
-                Py_ssize_t size = PyTuple_Check(obj) ? PyTuple_Size(obj) : PyList_Size(obj);
-                if ((size_t)size != schema->size) {
-                    PyRAISE("Tuple/List size mismatch");
-                }
-
-                size_t required_size = schema->width;
-
-                for (Py_ssize_t i = 0; i < size; ++i) {
-                    PyObject* item = PyTuple_Check(obj) ? PyTuple_GetItem(obj, i) : PyList_GetItem(obj, i);
-                    ssize_t element_size = get_shm_size(schema->parameters[i], item);
-                    if(element_size != -1){
-                        if ((size_t)element_size > schema->parameters[i]->width) {
-                            required_size += (size_t)element_size - schema->parameters[i]->width;
-                        }
-                    } else {
-                        return -1;
-                    }
-                }
-                return (ssize_t)required_size;
-            }
-
-        case MORLOC_MAP:
-            if (!PyDict_Check(obj)) {
-                PyRAISE("Expected dict for MORLOC_MAP, but got %s", Py_TYPE(obj)->tp_name);
-            }
-
-            {
-                size_t required_size = schema->width;
-                for (size_t i = 0; i < schema->size; ++i) {
-                    PyObject* key = PyUnicode_FromString(schema->keys[i]);
-                    PyObject* value = PyDict_GetItem(obj, key);
-                    Py_DECREF(key);
-                    if (value) {
-                        ssize_t element_size = get_shm_size(schema->parameters[i], value);
-                        if(element_size != -1){
-                            if ((size_t)element_size > schema->parameters[i]->width) {
-                                required_size += (size_t)element_size - schema->parameters[i]->width;
-                            }
-                        } else {
-                            return -1;
-                        }
-                    }
-                }
-                return (ssize_t)required_size;
-            }
-
-        case MORLOC_VARIANT: {
-            // ("Circle", (fields...)): the 16-byte slot, worst-case padding
-            // before the payload, and the payload's own size. A nullary arm
-            // has no payload and needs only the slot.
-            if (!PyTuple_Check(obj) || PyTuple_Size(obj) != 2) {
-                PyErr_SetString(PyExc_RuntimeError,
-                    "expected a (constructor, fields) pair for a `data` value");
-                return -1;
-            }
-            ssize_t vtag = variant_tag_of(schema, PyTuple_GetItem(obj, 0));
-            if (vtag < 0) return -1;
-            PyObject* vfields = PyTuple_GetItem(obj, 1);
-            const Schema* varm = schema->parameters[vtag];
-            if (varm->size == 0) {
-                return (ssize_t)schema->width;
-            }
-            ssize_t arm_size = get_shm_size((Schema*)varm, vfields);
-            if (arm_size == -1) return -1;
-            size_t varm_align = schema_alignment((Schema*)varm);
-            if (varm_align == 0) varm_align = 1;
-            return (ssize_t)schema->width + (ssize_t)(varm_align - 1) + arm_size;
-        }
-
-        case MORLOC_OPTIONAL:
-            // Slot is sizeof(relptr) (= schema->width). Absent -> just the slot.
-            // Present -> slot + worst-case alignment padding for the inner T +
-            // T's own total size (which already includes inner.width and any
-            // variable extras T contributes).
-            if (obj == Py_None) {
-                return (ssize_t)schema->width;
-            }
-            {
-                ssize_t inner_size = get_shm_size(schema->parameters[0], obj);
-                if (inner_size == -1) return -1;
-                size_t inner_align = schema_alignment(schema->parameters[0]);
-                if (inner_align == 0) inner_align = 1;
-                return (ssize_t)schema->width + (ssize_t)(inner_align - 1) + inner_size;
-            }
-
-        case MORLOC_RECUR: {
-            // Resolve and recurse on the target. Note this calls the
-            // _inner helper directly so the Recur node itself does not
-            // get pushed (it isn't a declaration); the target's own
-            // declaration is already on the stack from the enclosing
-            // walk.
-            const Schema* target = recur_env_lookup(schema->name);
-            if (target == NULL) {
-                PyINTERNAL_ABORT("Recur back-reference to undeclared schema name '%s'",
-                        schema->name ? schema->name : "?");
-            }
-            return get_shm_size_inner(target, obj);
-        }
-
-        default:
-            PyRAISE("Unsupported schema type %d in calc_required_size", (int)schema->type);
-    }
-
-    PyINTERNAL_ABORT("Reached the unreachable");
-
-error:
-    return -1;
-}
-
-
-
-static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schema, PyObject* obj);
-
-// Public entry point: push the schema's declaration name (if any) and
-// delegate to the inner walker. The push/pop discipline lets Recur arms
-// inside the inner walker resolve via the env stack.
-int to_voidstar_inner(void* dest, void** cursor, const Schema* schema, PyObject* obj) {
-    int pushed = recur_env_push(schema);
-    int r = to_voidstar_inner_impl(dest, cursor, schema, obj);
-    recur_env_pop(pushed);
-    return r;
-}
-
-static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schema, PyObject* obj) { MAYFAIL
-    switch (schema->type) {
-        case MORLOC_NIL:
+            // A nil slot has no width; nothing is written for it.
             if (obj != Py_None) {
                 PyRAISE("Expected None for MORLOC_NIL, but got %s", Py_TYPE(obj)->tp_name);
             }
-            *((int8_t*)dest) = (int8_t)0;
             break;
 
         case MORLOC_BOOL:
@@ -1240,23 +1005,46 @@ static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schem
             break;
         }
         case MORLOC_STRING:
-        case MORLOC_ARRAY:
+        case MORLOC_ARRAY: {
             if (schema->type == MORLOC_STRING && !(PyUnicode_Check(obj) || PyBytes_Check(obj)  || PyByteArray_Check(obj))) {
                 PyRAISE("Expected str or bytes for MORLOC_STRING, but got %s", Py_TYPE(obj)->tp_name);
             }
-    
-            if (schema->type == MORLOC_ARRAY && !(PyList_Check(obj) || PyBytes_Check(obj) || PyByteArray_Check(obj) || PyObject_HasAttrString(obj, "__array_interface__"))) { 
+
+            if (schema->type == MORLOC_ARRAY && !(PyList_Check(obj) || PyBytes_Check(obj) || PyByteArray_Check(obj) || PyObject_HasAttrString(obj, "__array_interface__"))) {
                 PyRAISE("Expected list, bytes, bytearray, or numpy array for MORLOC_ARRAY, but got %s", Py_TYPE(obj)->tp_name);
             }
-    
+
+            const Schema* element_schema = py_resolve(schema->parameters[0]);
+            if (element_schema == NULL) goto error;
+            size_t width = element_schema->width;
+            Array* result = (Array*)dest;
+
+            if (idx > 0) {
+                // A sequence of compound elements, one per visit.
+                Py_ssize_t n = (Py_ssize_t)result->size;
+                if ((Py_ssize_t)idx >= n) break;
+                char* start = (char*)w->cur.aux;
+                PyObject* item;
+                if (PyList_Check(obj)) {
+                    item = PyList_GetItem(obj, idx);
+                } else {
+                    item = PyArray_GETITEM((PyArrayObject*)obj, PyArray_GETPTR1((PyArrayObject*)obj, idx));
+                    if (!item) { goto error; }
+                    if (py_keep(w, item) != 0) goto error;
+                }
+                if ((Py_ssize_t)idx + 1 < n && py_resume(w, idx + 1, start) != 0) goto error;
+                if (py_write_child(w, element_schema, start + width * idx, item) != 0) goto error;
+                break;
+            }
+
             {
                 Py_ssize_t size;
 
-                // "bytes" type is mutable, so it exposes a non-const pointer 
+                // "bytes" type is mutable, so it exposes a non-const pointer
                 char* mutable_data = NULL;
 
                 // strings type are immutable, so const
-                const char* immutable_data = NULL; 
+                const char* immutable_data = NULL;
 
                 // Distinguish a numpy array we can memcpy bulk off
                 // PyArray_DATA from one we must walk per-element via
@@ -1288,7 +1076,7 @@ static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schem
                     // not, and memcpy would read past numpy's buffer
                     // and write corrupt headers into SHM.
                     if (PyArray_TYPE(arr) == NPY_OBJECT
-                        || !schema_is_fixed_width(schema->parameters[0])) {
+                        || !schema_is_fixed_width((Schema*)element_schema)) {
                         // Boxed numpy array OR variable-width element
                         // schema: leave immutable_data NULL and dispatch
                         // to the per-element path below.
@@ -1302,9 +1090,9 @@ static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schem
                     }
                 } else {
                     immutable_data = PyUnicode_AsUTF8AndSize(obj, &size);
+                    if (immutable_data == NULL) goto error;
                 }
-    
-                Array* result = (Array*)dest;
+
                 result->size = (size_t)size;
 
                 if(result->size == 0){
@@ -1318,28 +1106,25 @@ static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schem
                 {
                     size_t buf_align = (schema->type == MORLOC_STRING)
                         ? schema_alignment(schema->parameters[0])
-                        : array_data_alignment(schema->parameters[0]);
+                        : array_data_alignment(element_schema);
                     *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, buf_align);
                 }
 
                 result->data = PyTRY(abs2rel, *cursor);
 
                 if (PyList_Check(obj) || numpy_per_element) {
-                    // Per-element recursion: works for Python lists and
-                    // numpy arrays that need per-element walking
-                    // (dtype=object, or any variable-width element
-                    // schema where numpy's flat storage cannot stand in
-                    // for the wire layout). Element access differs
-                    // (PyList_GetItem vs PyArray_GETITEM), but the
-                    // wire-layout and recursion shape are identical.
-                    size_t width = schema->parameters[0]->width;
+                    // Per-element walk: works for Python lists and numpy
+                    // arrays that need per-element handling (dtype=object,
+                    // or any variable-width element schema where numpy's
+                    // flat storage cannot stand in for the wire layout).
+                    // Element access differs (PyList_GetItem vs
+                    // PyArray_GETITEM), but the wire layout is identical.
 
                     // Move the cursor to the location immediately after the
                     // fixed sized elements
                     *cursor = (void*)(*(char**)cursor + size * width);
 
                     char* start = (char*) PyTRY(rel2abs, result->data);
-                    Schema* element_schema = schema->parameters[0];
                     PyArrayObject* arr = numpy_per_element ? (PyArrayObject*)obj : NULL;
                     // Batched stream-handle-array write: one registry lock for all N handles.
                     if ((element_schema->type == MORLOC_IFILE
@@ -1367,6 +1152,20 @@ static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schem
                         }
                         break;
                     }
+                    if (!py_flat(w, element_schema)) {
+                        // One compound element per visit, starting here.
+                        PyObject* item;
+                        if (numpy_per_element) {
+                            item = PyArray_GETITEM(arr, PyArray_GETPTR1(arr, 0));
+                            if (!item) { goto error; }
+                            if (py_keep(w, item) != 0) goto error;
+                        } else {
+                            item = PyList_GetItem(obj, 0);
+                        }
+                        if (size > 1 && py_resume(w, 1, start) != 0) goto error;
+                        if (py_write_child(w, element_schema, start, item) != 0) goto error;
+                        break;
+                    }
                     for (Py_ssize_t i = 0; i < size; i++) {
                         PyObject* item;
                         if (numpy_per_element) {
@@ -1379,7 +1178,7 @@ static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schem
                             // PyList_GetItem returns a BORROWED reference.
                             item = PyList_GetItem(obj, i);
                         }
-                        int rc = to_voidstar_inner(start + width * i, cursor, element_schema, item);
+                        int rc = py_write_child(w, element_schema, start + width * i, item);
                         if (numpy_per_element) {
                             Py_DECREF(item);
                         }
@@ -1395,8 +1194,6 @@ static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schem
                     *cursor = (void*)(*(char**)cursor + size);
                 }
                 else{
-                    size_t width = schema->parameters[0]->width;
-
                     absptr_t tmp_ptr = PyTRY(rel2abs, result->data);
                     memcpy(tmp_ptr, immutable_data, size * width);
 
@@ -1406,7 +1203,7 @@ static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schem
                 }
             }
             break;
-
+        }
 
         case MORLOC_TUPLE:
             if (!PyTuple_Check(obj) && !PyList_Check(obj)) {
@@ -1420,7 +1217,7 @@ static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schem
                 }
                 for (Py_ssize_t i = 0; i < size; ++i) {
                     PyObject* item = PyTuple_Check(obj) ? PyTuple_GetItem(obj, i) : PyList_GetItem(obj, i);
-                    if (to_voidstar_inner((char*)dest + schema->offsets[i], cursor, schema->parameters[i], item) != 0) {
+                    if (py_write_child(w, schema->parameters[i], (char*)dest + schema->offsets[i], item) != 0) {
                         goto error;
                     }
                 }
@@ -1438,7 +1235,7 @@ static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schem
                     PyObject* value = PyDict_GetItem(obj, key);
                     Py_DECREF(key);
                     if (value) {
-                        if (to_voidstar_inner((char*)dest + schema->offsets[i], cursor, schema->parameters[i], value) != 0) {
+                        if (py_write_child(w, schema->parameters[i], (char*)dest + schema->offsets[i], value) != 0) {
                             goto error;
                         }
                     }
@@ -1474,7 +1271,7 @@ static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schem
                 }
                 void* arm_dest = *cursor;
                 *cursor = (void*)((char*)*cursor + warm->width);
-                if (to_voidstar_inner(arm_dest, cursor, warm, wfields) != 0) {
+                if (py_write_child(w, warm, arm_dest, wfields) != 0) {
                     goto error;
                 }
             }
@@ -1484,14 +1281,15 @@ static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schem
         case MORLOC_OPTIONAL:
             // The slot is a relptr. Absent -> write RELNULL. Present ->
             // align the cursor for the inner T, write the inner's relptr
-            // into the slot, advance the cursor past T's width, then
-            // recurse to fill T's body (T may push the cursor further
-            // for its own variable-length payload).
+            // into the slot, advance the cursor past T's width, then fill
+            // T's body (T may push the cursor further for its own
+            // variable-length payload).
             if (obj == Py_None) {
                 *((relptr_t*)dest) = RELNULL;
             } else {
-                const Schema* inner_schema = schema->parameters[0];
-                size_t inner_align = schema_alignment(inner_schema);
+                const Schema* inner_schema = py_resolve(schema->parameters[0]);
+                if (inner_schema == NULL) goto error;
+                size_t inner_align = schema_alignment((Schema*)inner_schema);
                 if (inner_align == 0) inner_align = 1;
                 *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, inner_align);
                 {
@@ -1501,27 +1299,11 @@ static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schem
                 }
                 void* inner_dest = *cursor;
                 *cursor = (void*)((char*)*cursor + inner_schema->width);
-                if (to_voidstar_inner(inner_dest, cursor, inner_schema, obj) != 0) {
+                if (py_write_child(w, inner_schema, inner_dest, obj) != 0) {
                     goto error;
                 }
             }
             break;
-
-        case MORLOC_RECUR: {
-            // Resolve and dispatch on the named declaration. We call
-            // the inner function directly because the Recur node is
-            // not itself a declaration and the target's declaration is
-            // already on the stack from an outer push.
-            const Schema* target = recur_env_lookup(schema->name);
-            if (target == NULL) {
-                PyINTERNAL_ABORT("Recur back-reference to undeclared schema name '%s'",
-                        schema->name ? schema->name : "?");
-            }
-            if (to_voidstar_inner_impl(dest, cursor, target, obj) != 0) {
-                goto error;
-            }
-            break;
-        }
 
         default:
             PyRAISE("Unsupported schema type %d in to_voidstar_inner", (int)schema->type);
@@ -1531,6 +1313,26 @@ static int to_voidstar_inner_impl(void* dest, void** cursor, const Schema* schem
 
 error:
     return -1;
+}
+
+// Write `obj` into the slot at `dest`, appending variable-length parts at
+// the cursor. Returns 0, or -1 with a Python error set.
+int to_voidstar_inner(void* dest, void** cursor, const Schema* schema, PyObject* obj) {
+    py_walk_t w;
+    py_walk_init(&w, schema);
+    w.cursor = cursor;
+    int result = -1;
+    if (py_write_child(&w, schema, dest, obj) != 0) goto done;
+    for (;;) {
+        int r = py_next(&w);
+        if (r < 0) goto done;
+        if (r == 0) break;
+        if (py_write_step(&w, w.cur.schema, w.cur.dest, w.cur.obj, w.cur.idx) != 0) goto done;
+    }
+    result = 0;
+done:
+    py_walk_free(&w);
+    return result;
 }
 
 void* to_voidstar(const Schema* schema, PyObject* obj){ MAYFAIL
@@ -1563,6 +1365,453 @@ error:
       free(free_errmsg);
   }
   return NULL;
+}
+
+
+// -- read pass --------------------------------------------------------------
+
+// Store a finished node into its parent's slot (or as the root). Steals
+// `obj`; on failure it is released and -1 returned.
+static int py_store(py_walk_t* w, unsigned char slot_kind, PyObject* parent, Py_ssize_t slot, const char* key, PyObject* obj) {
+    switch (slot_kind) {
+        case PY_SLOT_ROOT:
+            w->result = obj;
+            return 0;
+        case PY_SLOT_TUPLE:
+            PyTuple_SET_ITEM(parent, slot, obj);
+            return 0;
+        case PY_SLOT_LIST:
+            PyList_SET_ITEM(parent, slot, obj);
+            return 0;
+        case PY_SLOT_DICT: {
+            int r = PyDict_SetItemString(parent, key, obj);
+            Py_DECREF(obj);
+            return r;
+        }
+        case PY_SLOT_NPY: {
+            // PyArray_SETITEM copies the PyObject* into the slot and bumps
+            // its refcount on the way in; we drop our reference afterwards.
+            int r = PyArray_SETITEM((PyArrayObject*)parent, PyArray_GETPTR1((PyArrayObject*)parent, slot), obj);
+            Py_DECREF(obj);
+            return r;
+        }
+    }
+    Py_DECREF(obj);
+    return -1;
+}
+
+static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, size_t idx, unsigned char slot_kind, PyObject* parent, Py_ssize_t slot, const char* key);
+
+// Read a child into its parent's slot: a leaf now, a compound node by call
+// or by frame.
+static int py_read_child(py_walk_t* w, const Schema* schema, const void* data, unsigned char slot_kind, PyObject* parent, Py_ssize_t slot, const char* key) {
+    const Schema* s = py_resolve(schema);
+    if (s == NULL) return -1;
+    if (py_flat(w, s)) {
+        return py_read_step(w, s, data, 0, slot_kind, parent, slot, key);
+    }
+    py_frame_t f;
+    memset(&f, 0, sizeof(f));
+    f.schema = s;
+    f.dest = (void*)data;
+    f.obj = parent;
+    f.slot = slot;
+    f.key = key;
+    f.slot_kind = slot_kind;
+    return py_push(w, &f);
+}
+
+static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, size_t idx, unsigned char slot_kind, PyObject* parent, Py_ssize_t slot, const char* key) { MAYFAIL
+    const void* base_ptr = w->base_ptr;
+    PyObject* obj = NULL;
+
+    if (idx > 0) {
+        // A sequence of compound elements, one per visit: `parent` is the
+        // container built on the first visit.
+        const Array* array = (const Array*)data;
+        if (idx >= array->size) return 0;
+        const Schema* element_schema = py_resolve(schema->parameters[0]);
+        if (element_schema == NULL) return -1;
+        const char* start = (const char*)w->cur.aux;
+        if (idx + 1 < array->size && py_resume(w, idx + 1, w->cur.aux) != 0) return -1;
+        return py_read_child(w, element_schema, start + element_schema->width * idx, slot_kind, parent, (Py_ssize_t)idx, NULL);
+    }
+
+    switch (schema->type) {
+        case MORLOC_NIL:
+            Py_INCREF(Py_None);
+            obj = Py_None;
+            break;
+        case MORLOC_BOOL:
+            obj = PyBool_FromLong(*(bool*)data);
+            break;
+        case MORLOC_SINT8:
+            obj = PyLong_FromLong(*(int8_t*)data);
+            break;
+        case MORLOC_SINT16:
+            obj = PyLong_FromLong(*(int16_t*)data);
+            break;
+        case MORLOC_SINT32:
+            obj = PyLong_FromLong(*(int32_t*)data);
+            break;
+        case MORLOC_SINT64:
+            obj = PyLong_FromLongLong(*(int64_t*)data);
+            break;
+        case MORLOC_UINT8:
+            obj = PyLong_FromUnsignedLong(*(uint8_t*)data);
+            break;
+        // The runtime hands back the ordinal and the generated pool code
+        // wraps it in the enum class. Keeping the Python class out of the
+        // C runtime is what lets a bare [DNA] stay a raw buffer.
+        case MORLOC_ENUM:
+            obj = PyLong_FromUnsignedLong(*(uint8_t*)data);
+            break;
+        case MORLOC_UINT16:
+            obj = PyLong_FromUnsignedLong(*(uint16_t*)data);
+            break;
+        case MORLOC_UINT32:
+            obj = PyLong_FromUnsignedLong(*(uint32_t*)data);
+            break;
+        case MORLOC_UINT64:
+            obj = PyLong_FromUnsignedLongLong(*(uint64_t*)data);
+            break;
+        case MORLOC_FLOAT32:
+            obj = PyFloat_FromDouble(*(float*)data);
+            break;
+        case MORLOC_FLOAT64:
+            obj = PyFloat_FromDouble(*(double*)data);
+            break;
+        case MORLOC_INT: {
+            // Inline BigInt: [size:i64, value_or_relptr:i64]
+            int64_t* fields = (int64_t*)data;
+            int64_t bigint_size = fields[0];
+            if (bigint_size <= 1) {
+                // Inline: second field is the value directly
+                int64_t val = (bigint_size == 0) ? 0 : fields[1];
+                obj = PyLong_FromLongLong(val);
+            } else {
+                // Overflow: second field is relptr to limb array
+                void* limb_ptr = resolve_relptr(*(relptr_t*)&fields[1], base_ptr, NULL);
+                obj = _PyLong_FromByteArray(
+                    (const unsigned char*)limb_ptr,
+                    bigint_size * sizeof(uint64_t),
+                    1, 1  // little-endian, signed
+                );
+            }
+            break;
+        }
+        case MORLOC_IFILE:
+        case MORLOC_OSTREAM:
+        case MORLOC_ISTREAM: {
+            uint8_t kind = (schema->type == MORLOC_IFILE)   ? MLC_KIND_IFILE
+                         : (schema->type == MORLOC_OSTREAM) ? MLC_KIND_OSTREAM
+                         :                                    MLC_KIND_ISTREAM;
+            int64_t handle = PyTRY(mlc_read_handle_voidstar,
+                                   data, base_ptr, kind);
+            obj = PyLong_FromLongLong((long long)handle);
+            if (!obj) {
+                PyINTERNAL_ABORT("Failed to wrap stream handle as PyLong");
+            }
+            break;
+        }
+        case MORLOC_STRING: {
+            Array* str_array = (Array*)data;
+            void* tmp_ptr = NULL;
+
+            if (str_array->size != 0) {
+                tmp_ptr = PyTRY(resolve_relptr, str_array->data, base_ptr);
+            }
+
+            if (schema->hint != NULL && strcmp(schema->hint, "bytes") == 0) {
+                // load binary data as a python bytes object
+                if (str_array->size == 0) {
+                    obj = PyBytes_FromStringAndSize("", 0);  // empty bytes object
+                } else {
+                    obj = PyBytes_FromStringAndSize(tmp_ptr, str_array->size);
+                }
+                if (!obj) {
+                    PyRAISE("Failed to parse data as bytes");
+                }
+            } else if (schema->hint != NULL && strcmp(schema->hint, "bytearray") == 0) {
+                // load binary data as a python bytearray object
+                if (str_array->size == 0) {
+                    obj = PyByteArray_FromStringAndSize("", 0);  // empty bytearray object
+                } else {
+                    obj = PyByteArray_FromStringAndSize(tmp_ptr, str_array->size);
+                }
+                if (!obj) {
+                    PyRAISE("Failed to parse data as bytearray");
+                }
+            } else {
+                // otherwise, load this as a str type
+                if (str_array->size == 0) {
+                    obj = PyUnicode_New(0, 127);  // empty string object
+                } else {
+                    obj = PyUnicode_FromStringAndSize(tmp_ptr, str_array->size);
+                }
+                if (!obj) {
+                    PyRAISE("Failed to parse data as string");
+                }
+            }
+            break;
+        }
+        case MORLOC_ARRAY: {
+            Array* array = (Array*)data;
+            // Producer writes RELNULL into array->data for empty arrays
+            // (see cppmorloc to_voidstar), so resolve only when non-empty.
+            void* absptr = NULL;
+            if (array->size != 0) {
+                absptr = PyTRY(resolve_relptr, array->data, base_ptr);
+            }
+            const Schema* element_schema = py_resolve(schema->parameters[0]);
+            if (element_schema == NULL) goto error;
+            size_t width = element_schema->width;
+            // The "numpy.ndarray" hint is authoritative: the user wants a
+            // NumPy array, regardless of element type. For fixed-width
+            // primitive elements we use the natural dtype (zero-copy / fast
+            // memcpy). For everything else (MORLOC_INT BigInt, MORLOC_STRING,
+            // nested tuples/arrays/records, MORLOC_NIL, MORLOC_OPTIONAL) we
+            // build an `np.empty(n, dtype=object)` and fill it element by
+            // element. This preserves Functor's container invariance: `map
+            // asString ([1,2,3] :: Vector 3 Int)` stays a NumPy ndarray on
+            // both sides, the dtype just shifts from int64 to object.
+            int numpy_type_num = -1;
+            bool numpy_hint = (schema->hint != NULL && strcmp(schema->hint, "numpy.ndarray") == 0);
+            if (numpy_hint) {
+                switch (element_schema->type) {
+                    case MORLOC_BOOL:    numpy_type_num = NPY_BOOL; break;
+                    case MORLOC_SINT8:   numpy_type_num = NPY_INT8; break;
+                    case MORLOC_SINT16:  numpy_type_num = NPY_INT16; break;
+                    case MORLOC_SINT32:  numpy_type_num = NPY_INT32; break;
+                    case MORLOC_SINT64:  numpy_type_num = NPY_INT64; break;
+                    case MORLOC_UINT8:   numpy_type_num = NPY_UINT8; break;
+                    // A [DNA] stays a compact uint8 buffer. Falling to the
+                    // NPY_OBJECT path below would build one Python object
+                    // per element, which is exactly what the one-byte form
+                    // exists to avoid.
+                    case MORLOC_ENUM:    numpy_type_num = NPY_UINT8; break;
+                    case MORLOC_UINT16:  numpy_type_num = NPY_UINT16; break;
+                    case MORLOC_UINT32:  numpy_type_num = NPY_UINT32; break;
+                    case MORLOC_UINT64:  numpy_type_num = NPY_UINT64; break;
+                    case MORLOC_FLOAT32: numpy_type_num = NPY_FLOAT32; break;
+                    case MORLOC_FLOAT64: numpy_type_num = NPY_FLOAT64; break;
+                    default: numpy_type_num = NPY_OBJECT; break;  // boxed dtype=object path below
+                }
+            }
+            unsigned char elem_slot_kind = PY_SLOT_LIST;
+            if (numpy_type_num == NPY_OBJECT) {
+                // Boxed path: build dtype=object array and fill it element
+                // by element. Each slot stores a PyObject* pointer; SETITEM
+                // handles INCREF/DECREF correctly.
+                import_numpy();
+                npy_intp dims[] = {array->size};
+                obj = PyArray_SimpleNew(1, dims, NPY_OBJECT);
+                if (obj == NULL) {
+                    PyINTERNAL_ABORT("Failed to allocate numpy object array");
+                }
+                elem_slot_kind = PY_SLOT_NPY;
+            } else if (numpy_type_num >= 0) {
+                import_numpy();
+                npy_intp dims[] = {array->size};
+                // Own the buffer when the source is inline (packet buffer is
+                // freed shortly after get_value returns; a view would see
+                // recycled memory) or empty (no data to view). Otherwise take
+                // a zero-copy view over SHM, which outlives this array via
+                // the deferred shm_tracker decref.
+                if (base_ptr != NULL || array->size == 0) {
+                    obj = PyArray_SimpleNew(1, dims, numpy_type_num);
+                    if (obj == NULL) {
+                        PyINTERNAL_ABORT("Failed to allocate numpy array");
+                    }
+                    if (array->size > 0) {
+                        size_t nbytes = (size_t)array->size *
+                                        (size_t)PyArray_ITEMSIZE((PyArrayObject*)obj);
+                        memcpy(PyArray_DATA((PyArrayObject*)obj), absptr, nbytes);
+                    }
+                } else {
+                    obj = PyArray_SimpleNewFromData(1, dims, numpy_type_num, absptr);
+                    if(obj == NULL) {
+                        PyRAISE("Failed to parse data");
+                    }
+                }
+                // Note that we do not want to give ownership to Python.
+                // This is shared memory, which means python should not mutate it.
+                break;
+            } else if (schema->hint != NULL && strcmp(schema->hint, "list") == 0) {
+                // Explicit "list" hint takes precedence over the UInt8 fast-path
+                // below: the user declared `type Py => (List a) = "list" a`
+                // (or similar), so honour that representation even for UInt8
+                // elements. Without this, a [UInt8] packet would silently
+                // arrive as `bytes` and mismatch a Python-pool list literal
+                // of the same morloc type.
+                obj = PyList_New(array->size);
+                if(obj == NULL){
+                    PyINTERNAL_ABORT("Failed to allocate list");
+                }
+            } else if (schema->hint != NULL && strcmp(schema->hint, "bytearray") == 0) {
+                obj = PyByteArray_FromStringAndSize((const char*)absptr, array->size);
+                if (!obj) {
+                    PyErr_SetString(PyExc_TypeError, "Failed to create bytearray");
+                    goto error;
+                }
+                // Note: Similar to the numpy case, we don't want to give ownership to Python.
+                // The bytearray is created from a copy of the data, so no additional handling is needed.
+                break;
+            } else if (element_schema->type == MORLOC_UINT8
+                       || element_schema->type == MORLOC_ENUM) {
+                // Default for UInt8 arrays when hint is "bytes" or absent.
+                //
+                // An enum array takes the same path: its elements are tag
+                // bytes, so the wire buffer is already the right shape. The
+                // alternative -- one Python object per element -- is what
+                // the one-byte form exists to avoid, and over a genomic
+                // [DNA] it is the difference between usable and not. The
+                // caller sees ordinals; the generated pool code is where an
+                // enum identity is reattached if one is wanted.
+                obj = PyBytes_FromStringAndSize((const char*)absptr, array->size);
+                if (obj == NULL) {
+                    PyRAISE("Failed to one bytes")
+                }
+                break;
+            } else {
+                // No hint OR an unrecognized hint (e.g. `<dict>` from a
+                // Packable outer type like Map): materialize the wire form
+                // as a Python list. The hint describes the POST-pack native
+                // shape produced by generated code above this layer, not
+                // the wire shape from_voidstar is decoding.
+                obj = PyList_New(array->size);
+                if(obj == NULL){
+                    PyINTERNAL_ABORT("Failed to allocate list");
+                }
+            }
+            // A list or object array: store it, then fill its elements.
+            if (py_store(w, slot_kind, parent, slot, key, obj) != 0) return -1;
+            if (array->size == 0) return 0;
+            char* start = (char*)absptr;
+            if (py_flat(w, element_schema)) {
+                for (size_t i = 0; i < array->size; i++) {
+                    if (py_read_child(w, element_schema, start + width * i, elem_slot_kind, obj, (Py_ssize_t)i, NULL) != 0) return -1;
+                }
+                return 0;
+            }
+            // One compound element per visit, starting here; later visits
+            // find the container in `parent`.
+            w->cur.obj = obj;
+            w->cur.slot_kind = elem_slot_kind;
+            if (array->size > 1 && py_resume(w, 1, start) != 0) return -1;
+            return py_read_child(w, element_schema, start, elem_slot_kind, obj, 0, NULL);
+        }
+        case MORLOC_TUPLE: {
+            obj = PyTuple_New(schema->size);
+            if(obj == NULL){
+                PyRAISE("Failed in tuple");
+            }
+            if (py_store(w, slot_kind, parent, slot, key, obj) != 0) return -1;
+            for (size_t i = 0; i < schema->size; i++) {
+                void* item_ptr = (char*)data + schema->offsets[i];
+                if (py_read_child(w, schema->parameters[i], item_ptr, PY_SLOT_TUPLE, obj, (Py_ssize_t)i, NULL) != 0) return -1;
+            }
+            return 0;
+        }
+        case MORLOC_MAP: {
+            obj = PyDict_New();
+            if(obj == NULL){
+                PyRAISE("Failed in map");
+            }
+            if (py_store(w, slot_kind, parent, slot, key, obj) != 0) return -1;
+            for (size_t i = 0; i < schema->size; i++) {
+                void* item_ptr = (char*)data + schema->offsets[i];
+                if (py_read_child(w, schema->parameters[i], item_ptr, PY_SLOT_DICT, obj, 0, schema->keys[i]) != 0) return -1;
+            }
+            return 0;
+        }
+        case MORLOC_VARIANT: {
+            // A payload-bearing `data` value: a tag byte then a relptr to the
+            // arm's fields. It crosses as a STRUCTURAL pair -- the
+            // constructor's name and a tuple of its fields -- because the
+            // generic marshaller has no access to a pool-level class. See the
+            // note on the Python/R variant spelling in the code generator:
+            // this is a documented interim form, not the intended end state.
+            uint8_t tag = *(const uint8_t*)data;
+            if ((size_t)tag >= schema->size) {
+                PyErr_Format(PyExc_RuntimeError,
+                    "variant tag %u is out of range; the type has %zu arms",
+                    (unsigned)tag, schema->size);
+                goto error;
+            }
+            const Schema* arm = schema->parameters[tag];
+            PyObject* name = PyUnicode_FromString(schema->keys[tag]);
+            if (!name) goto error;
+            obj = PyTuple_New(2);
+            if (!obj) { Py_DECREF(name); goto error; }
+            PyTuple_SET_ITEM(obj, 0, name);
+            if (py_store(w, slot_kind, parent, slot, key, obj) != 0) return -1;
+            // The pair now belongs to its parent; the error path must not
+            // release it again.
+            PyObject* pair = obj;
+            obj = NULL;
+
+            relptr_t vrelptr = *(const relptr_t*)((const char*)data + 8);
+            if (vrelptr == RELNULL) {
+                PyObject* fields = PyTuple_New(0);
+                if (!fields) return -1;
+                PyTuple_SET_ITEM(pair, 1, fields);
+                return 0;
+            }
+            const void* payload = PyTRY(resolve_relptr, vrelptr, base_ptr);
+            // The arm's schema describes its fields as a tuple, so the walk
+            // over that shape builds the field sequence.
+            return py_read_child(w, arm, payload, PY_SLOT_TUPLE, pair, 1, NULL);
+        }
+        case MORLOC_OPTIONAL: {
+            // The Optional slot is a relptr (RELNULL = absent). Resolve and
+            // read the inner T's body into this same slot when present.
+            // base_ptr is set when the data lives inline in a packet payload
+            // (relptrs are payload-relative); otherwise we go through SHM.
+            relptr_t relptr = *(const relptr_t*)data;
+            if (relptr == RELNULL) {
+                Py_INCREF(Py_None);
+                obj = Py_None;
+                break;
+            }
+            const void* inner_abs = PyTRY(resolve_relptr, relptr, base_ptr);
+            return py_read_child(w, schema->parameters[0], inner_abs, slot_kind, parent, slot, key);
+        }
+        default:
+            PyRAISE("Unsupported schema type %d in from_voidstar", (int)schema->type);
+    }
+
+    if (obj == NULL) goto error;
+    return py_store(w, slot_kind, parent, slot, key, obj);
+
+error:
+    Py_XDECREF(obj);
+    return -1;
+}
+
+// Build the Python value at `data`, or NULL with a Python error set.
+PyObject* from_voidstar(const Schema* schema, const void* data, const void* base_ptr){
+    py_walk_t w;
+    py_walk_init(&w, schema);
+    w.base_ptr = base_ptr;
+    if (py_read_child(&w, schema, data, PY_SLOT_ROOT, NULL, 0, NULL) != 0) goto error;
+    for (;;) {
+        int r = py_next(&w);
+        if (r < 0) goto error;
+        if (r == 0) break;
+        if (py_read_step(&w, w.cur.schema, w.cur.dest, w.cur.idx, w.cur.slot_kind, w.cur.obj, w.cur.slot, w.cur.key) != 0) goto error;
+    }
+    {
+        PyObject* result = w.result;
+        w.result = NULL;
+        py_walk_free(&w);
+        return result;
+    }
+
+error:
+    Py_CLEAR(w.result);
+    py_walk_free(&w);
+    return NULL;
 }
 
 
@@ -2048,7 +2297,11 @@ static relptr_t py_export_arrow_to_shm(PyObject* obj, const Schema* schema, char
 }
 
 
-// Transforms a value into a message ready for the socket
+// Transforms a value into a message ready for the socket. With the
+// optional third argument true the packet is self-contained -- the value
+// travels inside it rather than as a reference to a shared-memory block
+// -- for a value that must outlive this dispatch's blocks, such as a
+// closure's captured value applied back later from another pool.
 static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
     uint8_t* packet = NULL;
     Schema* schema = NULL;
@@ -2058,8 +2311,9 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
 
     PyObject* obj;
     const char* schema_str;
+    int self_contained = 0;
 
-    PARSE_ARGS_OR_ABORT(args, "Os", &obj, &schema_str);
+    PARSE_ARGS_OR_ABORT(args, "Os|p", &obj, &schema_str, &self_contained);
 
     schema = PyTRY(parse_schema, schema_str);
 
@@ -2080,19 +2334,23 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
             return NULL;
         }
 
-        packet = make_arrow_data_packet(relptr, schema);
-        if (!packet) {
-            free_schema(schema);
-            PyINTERNAL_ABORT("Failed to create arrow data packet");
-        }
-
-        // Track shm for cleanup
+        // The block is this pool's own until the next dispatch releases it.
         char* resolve_err = NULL;
         void* shm_ptr = rel2abs(relptr, &resolve_err);
         if (resolve_err) { free(resolve_err); }
         if (shm_ptr) {
             shm_tracker_push((absptr_t)shm_ptr, NULL);
-            tracked = true;
+        }
+
+        if (self_contained) {
+            packet = PyTRY_INFRA(make_inline_data_packet, shm_ptr, schema);
+        } else {
+            packet = make_arrow_data_packet(relptr, schema);
+        }
+        // The `error:` label frees the schema; freeing it here as well
+        // would free it twice.
+        if (!packet) {
+            PyINTERNAL_ABORT("Failed to create arrow data packet");
         }
 
         packet_size = PyTRY(morloc_packet_size, packet);
@@ -2108,7 +2366,11 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
     // convert to a relative pointer conserved between language servers
     relptr_t relptr = PyTRY(abs2rel, voidstar);
 
-    packet = PyTRY_INFRA(make_data_packet_auto, voidstar, relptr, schema);
+    if (self_contained) {
+        packet = PyTRY_INFRA(make_inline_data_packet, voidstar, schema);
+    } else {
+        packet = PyTRY_INFRA(make_data_packet_auto, voidstar, relptr, schema);
+    }
 
     {
         const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
@@ -2170,27 +2432,52 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
 
     schema = PyTRY(parse_schema, schema_str)
 
-    // Arrow dispatch: a table-typed value is an Arrow packet and vice
-    // versa; either half without the other is a routing error.
-    if (format == PACKET_FORMAT_ARROW || schema->type == MORLOC_TABLE) {
-        if (format != PACKET_FORMAT_ARROW) {
-            free_schema(schema);
-            PyRAISE("table-typed value did not arrive as an Arrow packet");
+    // Arrow dispatch: a table-typed value is a block. It arrives by
+    // reference (an Arrow packet) or in a form the runtime materializes
+    // into a block of this pool's own (a cached result read back from a
+    // file, a captured value carried inline). Every error below leaves
+    // `schema` to the `error:` label; freeing it here as well would free
+    // it twice.
+    if (schema->type == MORLOC_TABLE) {
+        if (format == PACKET_FORMAT_ARROW && source != PACKET_SOURCE_RPTR) {
+            PyRAISE("Arrow packet does not name a shared-memory block");
         }
-        if (schema->type != MORLOC_TABLE) {
-            free_schema(schema);
-            PyRAISE("Arrow packet received for a non-table type");
-        }
+        bool materialized = (source != PACKET_SOURCE_RPTR);
         voidstar = PyTRY_INFRA(get_morloc_data_packet_value, (uint8_t*)packet, schema);
 
         const arrow_shm_header_t* arrow_hdr = (const arrow_shm_header_t*)voidstar;
 
         char* validate_err = NULL;
         if (arrow_validate(arrow_hdr, schema, &validate_err) != 0) {
-            free_schema(schema);
+            if (materialized) {
+                char* ferr = NULL;
+                shfree((absptr_t)voidstar, &ferr);
+                if (ferr) { free(ferr); }
+            }
             PyErr_SetString(PyExc_RuntimeError, validate_err ? validate_err : "arrow table failed validation");
             free(validate_err);
-            return NULL;
+            goto error;
+        }
+
+        // Hold the block for as long as pyarrow references its buffers,
+        // releasing it at the next dispatch. A table that arrived by
+        // reference needs one taken on this pool's behalf; the sender
+        // donated one before sending, so a refusal means the block is
+        // gone and the view would read scrubbed memory. A table
+        // materialized here is already this pool's own.
+        if (!materialized) {
+            char* incref_err = NULL;
+            bool acquired = shincref((absptr_t)voidstar, &incref_err);
+            if (incref_err) { free(incref_err); }
+            if (!acquired) {
+                PyINTERNAL_ABORT("received table's shared-memory block is no longer live");
+            }
+        }
+        shm_tracker_push((absptr_t)voidstar, NULL);
+        {
+            char* rerr = NULL;
+            relptr_t rel = abs2rel(voidstar, &rerr);
+            if (rerr) { free(rerr); } else { arrow_borrow_register((const uint8_t*)voidstar, rel); }
         }
 
         struct ArrowSchema arrow_schema;
@@ -2198,18 +2485,15 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         char* arrow_err = NULL;
         arrow_from_shm(arrow_hdr, &arrow_schema, &arrow_array, &arrow_err);
         if (arrow_err) {
-            free_schema(schema);
             PyErr_SetString(PyExc_RuntimeError, arrow_err);
             free(arrow_err);
-            return NULL;
+            goto error;
         }
 
-        // Import via pyarrow RecordBatch.from_buffers or _import_from_c
         PyObject* pyarrow_mod = PyImport_ImportModule("pyarrow");
         if (!pyarrow_mod) {
             if (arrow_schema.release) arrow_schema.release(&arrow_schema);
             if (arrow_array.release) arrow_array.release(&arrow_array);
-            free_schema(schema);
             PyRAISE("pyarrow is required for arrow-typed data");
         }
 
@@ -2218,37 +2502,25 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         if (!rb_class) {
             if (arrow_schema.release) arrow_schema.release(&arrow_schema);
             if (arrow_array.release) arrow_array.release(&arrow_array);
-            free_schema(schema);
             PyINTERNAL_ABORT("Failed to get pyarrow.RecordBatch");
         }
 
-        // Use RecordBatch._import_from_c(array_ptr, schema_ptr)
+        // RecordBatch._import_from_c(array_ptr, schema_ptr) moves both
+        // structs and, on every path known, releases them itself when it
+        // fails. The releases below are then no-ops; they hold only if an
+        // import fails without releasing.
         obj = PyObject_CallMethod(rb_class, "_import_from_c",
             "nn", (Py_ssize_t)&arrow_array, (Py_ssize_t)&arrow_schema);
         Py_DECREF(rb_class);
-
-        // Keep the block alive while pyarrow references its buffers. A table
-        // that arrived by reference needs one taken on this pool's behalf; a
-        // table materialized here is already this pool's own and taking a
-        // second reference would leave it permanently held. Either way the
-        // tracker releases exactly one at the next dispatch, and a refused
-        // acquire means nothing was taken, so nothing is tracked.
-        bool arrow_owned = true;
-        if (source == PACKET_SOURCE_RPTR) {
-            char* incref_err = NULL;
-            arrow_owned = shincref((absptr_t)voidstar, &incref_err);
-            if (incref_err) { free(incref_err); }
-        }
-        if (arrow_owned) {
-            shm_tracker_push((absptr_t)voidstar, NULL);
-            char* rerr = NULL;
-            relptr_t rel = abs2rel(voidstar, &rerr);
-            if (rerr) { free(rerr); } else { arrow_borrow_register((const uint8_t*)voidstar, rel); }
-        }
+        if (arrow_schema.release) arrow_schema.release(&arrow_schema);
+        if (arrow_array.release) arrow_array.release(&arrow_array);
 
         free_schema(schema);
         if (!obj) return NULL;
         return obj;
+    }
+    if (format == PACKET_FORMAT_ARROW) {
+        PyRAISE("Arrow packet received for a non-table type");
     }
 
     // Fast path: inline voidstar -- read directly from packet, no SHM
@@ -2340,16 +2612,20 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
 
     voidstar = PyTRY_INFRA(get_morloc_data_packet_value, (uint8_t*)packet, schema);
 
-    // For RPTR data, increment refcount so the owner's tracker flush
-    // won't destroy data we may still need (e.g. forwarded packets).
+    // A value that arrived by reference needs a reference of this pool's
+    // own so the sender's flush cannot reclaim it while it is read or
+    // forwarded. The sender donated one before sending, so a refusal
+    // means the block is already gone.
     if (is_rptr) {
         char* incref_err = NULL;
-        if (shincref((absptr_t)voidstar, &incref_err)) {
-            // Track for deferred decref (tracker takes schema ownership)
-            shm_tracker_push((absptr_t)voidstar, schema);
-            tracked = true;
-        }
+        bool acquired = shincref((absptr_t)voidstar, &incref_err);
         if (incref_err) { free(incref_err); }
+        if (!acquired) {
+            PyINTERNAL_ABORT("received value's shared-memory block is no longer live");
+        }
+        // Track for deferred decref (tracker takes schema ownership)
+        shm_tracker_push((absptr_t)voidstar, schema);
+        tracked = true;
     } else {
         // A payload that did not arrive by reference was materialized into a
         // block of this pool's own, and nothing else will free it. It is

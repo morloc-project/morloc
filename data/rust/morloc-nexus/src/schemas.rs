@@ -1,5 +1,5 @@
 //! Renderer for the Record / Table Schemas blocks shown under
-//! per-command `--help` output.
+//! per-command `-hhh` output.
 //!
 //! The layouts come from the command's `named_types`, which the
 //! compiler fills by walking the whole signature: a wire schema cannot
@@ -11,7 +11,7 @@
 //! The renderer is parser-agnostic -- it walks the manifest, not
 //! argv -- and the rendered block is plumbed into clap's
 //! `after_help` slot by [`crate::phase2::build_root`] so each
-//! per-command `--help` shows the named-type field layouts it
+//! per-command `-hhh` shows the named-type field layouts it
 //! references.
 //!
 //! The public surface is [`render_command_schemas`]: given a

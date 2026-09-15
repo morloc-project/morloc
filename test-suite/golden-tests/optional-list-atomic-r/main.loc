@@ -1,0 +1,15 @@
+-- A list of optionals whose R value is an atomic vector rather than a list:
+-- an R function that returns `c(1L, 2L)` for `[?Int]`. The writer takes
+-- each element as a present optional, which costs a slot plus an
+-- out-of-line inner value; a sizer that counts only the slots
+-- under-allocates the block by the inner values, and the writer runs past
+-- it: past a few thousand elements the cursor leaves the volume.
+module main (ints, reals, bools)
+
+import root-r
+
+source R from "mk.R" ("mkInts" as ints, "mkReals" as reals, "mkBools" as bools)
+
+ints :: Int -> [?Int]
+reals :: Int -> [?Real]
+bools :: Int -> [?Bool]

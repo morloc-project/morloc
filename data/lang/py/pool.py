@@ -186,11 +186,13 @@ def _mlc_is_closure_codec(codec):
     return isinstance(codec, tuple) and len(codec) == 4 and codec[0] == "__mlc_closure__"
 
 
-def mlc_encode(value, codec):
-    # Serialize a native value by its codec: a closure is reified first.
+def mlc_encode(value, codec, self_contained=False):
+    # Serialize a native value by its codec: a closure is reified first. A
+    # self-contained packet embeds the value rather than referencing a
+    # shared-memory block, for a value that must outlive this dispatch.
     if _mlc_is_closure_codec(codec):
-        return morloc.put_value(mlc_reify(value, MLC_HOME_LANG), codec[1])
-    return morloc.put_value(value, codec)
+        return morloc.put_value(mlc_reify(value, MLC_HOME_LANG), codec[1], self_contained)
+    return morloc.put_value(value, codec, self_contained)
 
 
 def mlc_decode(pkt, codec):
@@ -255,7 +257,9 @@ def mlc_reify(f, home_lang):
         raise RuntimeError(
             f"morloc: manifold {mid} captured {len(captured)} values but "
             f"{len(cap_codecs)} codecs are registered")
-    packets = [mlc_encode(c, s) for c, s in zip(captured, cap_codecs)]
+    # A captured value is applied back after this dispatch has released
+    # its blocks, so it must travel inside its packet.
+    packets = [mlc_encode(c, s, True) for c, s in zip(captured, cap_codecs)]
     return (home_lang, mid, packets)
 
 

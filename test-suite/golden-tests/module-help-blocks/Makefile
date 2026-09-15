@@ -4,22 +4,26 @@ all:
 	morloc make -o solo solo.loc 2> build.solo.err
 	morloc make -o modonly modonly.loc 2> build.modonly.err
 	morloc make -o cmdonly cmdonly.loc 2> build.cmdonly.err
-	printf -- '--- multi short ---\n' > obs.txt
+	printf -- '--- multi -h ---\n' > obs.txt
 	./tool -h >> obs.txt 2>> obs.err
-	printf -- '--- multi long description ---\n' >> obs.txt
-	./tool --help 2>> obs.err | sed -n '1,/^Usage:/p' >> obs.txt
-	printf -- '--- multi subcommand short ---\n' >> obs.txt
+	printf -- '--- multi -hh ---\n' >> obs.txt
+	./tool -hh >> obs.txt 2>> obs.err
+	printf -- '--- multi --help --help ---\n' >> obs.txt
+	./tool --help --help >> obs.txt 2>> obs.err
+	printf -- '--- multi subcommand -h ---\n' >> obs.txt
 	./tool greet -h >> obs.txt 2>> obs.err
-	printf -- '--- multi subcommand long epilogue ---\n' >> obs.txt
-	./tool greet --help 2>> obs.err | sed -n '/^Examples:/,/^Nexus Options:/p' >> obs.txt
-	printf -- '--- single short ---\n' >> obs.txt
+	printf -- '--- multi subcommand -hh ---\n' >> obs.txt
+	./tool greet -hh >> obs.txt 2>> obs.err
+	printf -- '--- multi subcommand -hhh ---\n' >> obs.txt
+	./tool describe -hhh >> obs.txt 2>> obs.err
+	printf -- '--- single -h ---\n' >> obs.txt
 	./solo -h >> obs.txt 2>> obs.err
-	printf -- '--- single long description ---\n' >> obs.txt
-	./solo --help 2>> obs.err | sed -n '1,/^Usage:/p' >> obs.txt
-	printf -- '--- module description only ---\n' >> obs.txt
-	./modonly -h >> obs.txt 2>> obs.err
-	printf -- '--- command description only ---\n' >> obs.txt
-	./cmdonly -h >> obs.txt 2>> obs.err
+	printf -- '--- single -hh ---\n' >> obs.txt
+	./solo -hh >> obs.txt 2>> obs.err
+	printf -- '--- module description only -hh ---\n' >> obs.txt
+	./modonly -hh >> obs.txt 2>> obs.err
+	printf -- '--- command description only -hh ---\n' >> obs.txt
+	./cmdonly -hh >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf tool solo modonly cmdonly pools log __pycache__ *.err

@@ -1,0 +1,15 @@
+--- cachedResult ---
+"x:l:[1, 2, 3]; y:u:['a', 'b', 'c']"
+"x:l:[1, 2, 3]; y:u:['a', 'b', 'c']"
+--- cachedArg ---
+"x:[1, 2, 3]; y:['a', 'b', 'c']"
+"x:[1, 2, 3]; y:['a', 'b', 'c']"
+mk calls: 2
+describe calls: 1
+dats: 2
+--- captured ---
+"x=2 y=b"
+--- capturedCpp ---
+"x=11 y=odd"
+--- capturedList ---
+16

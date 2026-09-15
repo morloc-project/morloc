@@ -4,7 +4,7 @@ all:
 	# Prose survives verbatim: the `@` is not dropped, no colon is invented,
 	# and a bare URL is not read as a directive.
 	printf -- '=== help ===\n' >> obs.txt
-	./nexus f --help 2>> obs.err | sed -n '1,5p' >> obs.txt
+	./nexus f -hh 2>> obs.err | sed -n '1,5p' >> obs.txt
 	# A sentence in the legacy `key:` form, and a bare URL, are prose.
 	if grep -qE "'Note'|'http'" build.err; then \
 	  echo "FAIL: legacy-form prose warned" >> obs.txt; else echo "OK: legacy-form prose is silent" >> obs.txt; fi

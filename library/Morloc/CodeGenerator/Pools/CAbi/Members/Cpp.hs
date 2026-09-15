@@ -1823,7 +1823,7 @@ generateCppVariants es = do
           armSerial (c, ts) =
             let aname = CP.armName name c
                 fields = [("f" <> pretty i, t) | (i, t) <- zip [(0 :: Int) ..] ts]
-            in [CP.printSerializer [] aname fields, CP.printDeserializer True [] aname fields]
+            in [CP.printSerializer [] aname fields, CP.printDeserializer [] aname fields]
           serial = CP.printCppVariantSerializers name arms'
           armSerials = concatMap armSerial [(c, ts) | (c, ts) <- arms', not (null ts)]
           fwds = CP.printMarshalDecls [] name
@@ -1880,7 +1880,7 @@ generateAnonymousStructs = do
       let structDecl = CP.printStructTypedef params rname fields
           fwd = CP.printMarshalDecls params rtype
           serializer = CP.printSerializer params rtype fields
-          deserializer = CP.printDeserializer True params rtype fields
+          deserializer = CP.printDeserializer params rtype fields
 
       return ([structDecl], [fwd], [serializer, deserializer])
 
@@ -1905,13 +1905,13 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
     (Just scope) -> return scope
     Nothing -> return Map.empty
 
-  -- Restrict serializer emission to record types this pool actually needs.
+  -- Restrict marshaller emission to record types this pool actually needs.
   -- perManifold accumulates every typedef visible in each manifold's scope
   -- (populated in Frontend/Restructure.hs from the module import graph), so
   -- without a filter every named C++ record from any imported module gets a
-  -- to_voidstar / from_voidstar / get_shm_size definition -- and if no
-  -- manifold references it, findSources never pulls in the header that
-  -- declares the struct, leaving the emitted body unbacked (invalid C++).
+  -- marshalling node -- and if no manifold references it, findSources never
+  -- pulls in the header that declares the struct, leaving the emitted body
+  -- unbacked (invalid C++).
   --
   -- We seed with the named record TVars actually referenced in this pool's
   -- SerialManifold trees (schemas + expression types), close under record-
@@ -1984,12 +1984,10 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
       Scope -> TVar -> [([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind)] -> CppTranslator [(MDoc, MDoc, MDoc)]
     makeSerials s v xs = catMaybes <$> mapM (makeSerial s v) xs
 
-    -- For each sourced record: the marshaller signatures, the serializer,
-    -- and the deserializer. The signatures go out before any marshaller
-    -- body, so a body that reaches this record -- a constructor payload
-    -- holding it, say -- binds to it rather than to the header's raw-bytes
-    -- fallback. An object is the exception: its signatures are not
-    -- declared ahead, as they never were.
+    -- For each sourced record: the marshalling node, the write step, and
+    -- the read and size steps. The node goes out before any step body, so
+    -- a body that reaches this record -- a constructor payload holding it,
+    -- say -- finds a complete class to name.
     makeSerial ::
       Scope -> TVar -> ([Either (TVar, Kind) TypeU], TypeU, ArgDoc, Bool, TypedefKind) -> CppTranslator (Maybe (MDoc, MDoc, MDoc))
     makeSerial _ _ (_, NamU _ (TV "struct") _ _, _, _, _) = return Nothing
@@ -2000,7 +1998,7 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
     -- cannot render a function field, so skip generating one.
     makeSerial scope _ (_, NamU _ _ _ rs, _, _, _)
       | any (holdsClosure . typeOf . evaluateTypeU scope . snd) rs = return Nothing
-    makeSerial scope _ (ps, NamU r (TV v) _ rs, _, _, _) = do
+    makeSerial scope _ (ps, NamU _ (TV v) _ rs, _, _, _) = do
       let selfName = TV v
           -- The struct's own name is needed by showDefType so a `?T`
           -- field referring back to T can be emitted as
@@ -2039,9 +2037,9 @@ generateSourcedSerializers univeralScopeMap scopeMap es0 = do
           rtype = renderTemplatedType v allParams kindCount
           rs' = map (second (evaluateTypeU scope)) rs
           fields = [(pretty k, showDefType selfName ps (typeOf t)) | (k, t) <- rs']
-          fwd = if r == NamObject then "" else CP.printMarshalDecls templateTerms rtype
+          fwd = CP.printMarshalDecls templateTerms rtype
           serializer = CP.printSerializer templateTerms rtype fields
-          deserializer = CP.printDeserializer True templateTerms rtype fields
+          deserializer = CP.printDeserializer templateTerms rtype fields
       return $ Just (fwd, serializer, deserializer)
     makeSerial _ _ _ = return Nothing
 

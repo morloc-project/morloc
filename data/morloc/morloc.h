@@ -1435,6 +1435,7 @@ void free_morloc_call(morloc_call_t* call);
 int print_morloc_data_packet(const uint8_t* packet, const Schema* schema, ERRMSG);
 int flatten_voidstar_to_buffer(const void* data, const Schema* schema, uint8_t** out_buf, size_t* out_size, ERRMSG);
 uint8_t* make_data_packet_auto(void* voidstar, relptr_t relptr, const Schema* schema, ERRMSG);
+uint8_t* make_inline_data_packet(void* voidstar, const Schema* schema, ERRMSG);
 int adjust_voidstar_relptrs(void* data, const Schema* schema, relptr_t base_rel, ERRMSG);
 void* read_voidstar_binary(const uint8_t* blob, size_t blob_size, const Schema* schema, ERRMSG);
 bool parse_morloc_call_arguments(uint8_t* packet, uint8_t** args, size_t* nargs, ERRMSG);

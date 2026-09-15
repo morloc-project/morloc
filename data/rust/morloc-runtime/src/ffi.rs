@@ -609,6 +609,10 @@ fn calc_voidstar_size_inner_walk(
                     Ok(size)
                 }
             }
+            SerialType::Table => {
+                // A table's flat form is its block, header included.
+                crate::arrow_shm::block_size(data as *const crate::arrow_shm::ArrowShmHeader)
+            }
             SerialType::Recur => {
                 // Resolve to the named declaration and recompute size
                 // using that schema. The variable-length data behind a

@@ -120,7 +120,7 @@ tableField key ls =
 
 -- | Tables separated by one blank line, a single newline at the end.
 renderLock :: Lock -> Text
-renderLock (Lock header packages trailer) =
-  T.intercalate "\n" (map T.unlines (headerPart ++ map snd packages ++ trailer))
+renderLock lock =
+  T.intercalate "\n" (map T.unlines (headerPart ++ map snd (lockPackages lock) ++ lockTrailer lock))
   where
-    headerPart = [header | not (null header)]
+    headerPart = [lockHeader lock | not (null (lockHeader lock))]

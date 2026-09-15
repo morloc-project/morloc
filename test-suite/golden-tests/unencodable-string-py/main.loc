@@ -1,0 +1,12 @@
+-- A Python str that has no UTF-8 encoding (a lone surrogate, the shape a
+-- surrogateescape-decoded file name takes) cannot cross as a Str. The
+-- conversion fails, and that failure must surface as an error rather than
+-- as a crash of the pool.
+module main (good, bad)
+
+import root-py
+
+source Py from "strs.py" ("good", "bad")
+
+good :: Int -> Str
+bad :: Int -> Str

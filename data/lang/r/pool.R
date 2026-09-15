@@ -68,7 +68,7 @@ morloc_foreign_call                  <- function(...){ .Call("morloc_foreign_cal
 # of those paths is hot enough for the walk to matter. Generated manifolds
 # always pass the flag explicitly.
 morloc_get_value                     <- function(packet, schema, check_nul = TRUE){ .Call("morloc_get_value", packet, schema, check_nul) }
-morloc_put_value                     <- function(...){ .Call("morloc_put_value",                     ...) }
+morloc_put_value                     <- function(value, schema, self_contained = FALSE){ .Call("morloc_put_value", value, schema, self_contained) }
 morloc_release_packet_shm            <- function(...){ .Call("morloc_release_packet_shm",            ...) }
 morloc_mlc_show                      <- function(...){ .Call("morloc_mlc_show",                      ...) }
 morloc_mlc_save                      <- function(...){ .Call("morloc_mlc_save",                      ...) }
@@ -236,11 +236,14 @@ MLC_HOME_LANG <- "r"
 mlc_is_closure_codec <- function(codec) inherits(codec, "mlc_closure_codec")
 
 # Serialize a native value by its codec: a closure is reified first.
-mlc_encode <- function(value, codec) {
+# Serialize a native value by its codec: a closure is reified first. A
+# self-contained packet embeds the value rather than referencing a
+# shared-memory block, for a value that must outlive this dispatch.
+mlc_encode <- function(value, codec, self_contained = FALSE) {
   if (mlc_is_closure_codec(codec)) {
-    morloc_put_value(mlc_reify(value, MLC_HOME_LANG), codec$tuple_schema)
+    morloc_put_value(mlc_reify(value, MLC_HOME_LANG), codec$tuple_schema, self_contained)
   } else {
-    morloc_put_value(value, codec)
+    morloc_put_value(value, codec, self_contained)
   }
 }
 
@@ -276,7 +279,9 @@ mlc_reify <- function(f, home_lang) {
   if (is.null(captured)) captured <- list()
   cap_codecs <- mlc_closure_table[[as.character(mid)]]
   if (is.null(cap_codecs)) cap_codecs <- list()
-  packets <- lapply(seq_along(captured), function(i) mlc_encode(captured[[i]], cap_codecs[[i]]))
+  # A captured value is applied back after this dispatch has released its
+  # blocks, so it must travel inside its packet.
+  packets <- lapply(seq_along(captured), function(i) mlc_encode(captured[[i]], cap_codecs[[i]], TRUE))
   list(home_lang, as.integer(mid), packets)
 }
 

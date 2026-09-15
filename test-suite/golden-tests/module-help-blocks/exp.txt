@@ -1,30 +1,74 @@
---- multi short ---
+--- multi -h ---
 A demo toolbox
 
 Usage: ./tool <nexus_options> <command> <command_options>
 
 Commands:
-  greet  Greet someone
-  add    Add two integers
+  greet     Greet someone
+  add       Add two integers
+  describe  Describe a person
 
 General Options:
-  -h, --help  Print help (see more with '--help')
-
-Examples:
-  tool greet Weena
-  tool add 1 2
---- multi long description ---
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
+--- multi -hh ---
 A demo toolbox
 It does several things.
 
 Usage: ./tool <nexus_options> <command> <command_options>
---- multi subcommand short ---
+
+Commands:
+  greet     Greet someone
+  add       Add two integers
+  describe  Describe a person
+
+General Options:
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
+
+Examples:
+  tool greet Weena
+  tool add 1 2
+--- multi --help --help ---
+A demo toolbox
+It does several things.
+
+Usage: ./tool <nexus_options> <command> <command_options>
+
+Commands:
+  greet     Greet someone
+  add       Add two integers
+  describe  Describe a person
+
+General Options:
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
+
+Examples:
+  tool greet Weena
+  tool add 1 2
+--- multi subcommand -h ---
 Greet someone
 
 Usage: ./tool <nexus_options> greet <command_options>
 
 General Options:
-  -h, --help  Print help (see more with '--help')
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
+
+Positional arguments:
+  1:  type: Str
+      format: literal string
+
+Return: Str
+--- multi subcommand -hh ---
+Greet someone
+
+Usage: ./tool <nexus_options> greet <command_options>
+
+General Options:
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
 
 Positional arguments:
   1:  type: Str
@@ -36,20 +80,50 @@ Examples:
 
 # greet by name
 tool greet Weena
---- multi subcommand long epilogue ---
-Examples:
+--- multi subcommand -hhh ---
+Describe a person
+Age is reported in whole years.
 
-# greet by name
-tool greet Weena
+Usage: ./tool <nexus_options> describe <command_options>
 
-Nexus Options:
---- single short ---
+General Options:
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
+
+Positional arguments:
+  1:  type: Person
+
+Return: Str
+
+Record Schemas:
+  Person
+    name :: Str
+    age  :: Int
+--- single -h ---
 A one-trick program
 
 Usage: ./solo <nexus_options> @ <command_options>
 
 General Options:
-  -h, --help  Print help (see more with '--help')
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
+
+Positional arguments:
+  1:  type: Int
+  2:  type: Int
+
+Return: Int
+--- single -hh ---
+A one-trick program
+The trick is addition.
+
+Add two integers
+
+Usage: ./solo <nexus_options> @ <command_options>
+
+General Options:
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
 
 Positional arguments:
   1:  type: Int
@@ -62,32 +136,28 @@ Examples:
 
 Notes:
   integers only
---- single long description ---
-A one-trick program
-The trick is addition.
-
-Add two integers
-
-Usage: ./solo <nexus_options> @ <command_options>
---- module description only ---
+--- module description only -hh ---
 Convert a number to text
+The conversion is decimal.
 
 Usage: ./modonly <nexus_options> @ <command_options>
 
 General Options:
-  -h, --help  Print help (see more with '--help')
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
 
 Positional arguments:
   1:  type: Int
 
 Return: Str
---- command description only ---
+--- command description only -hh ---
 Convert a number to text
 
 Usage: ./cmdonly <nexus_options> @ <command_options>
 
 General Options:
-  -h, --help  Print help (see more with '--help')
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
 
 Positional arguments:
   1:  type: Int

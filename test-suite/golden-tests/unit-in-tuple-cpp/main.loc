@@ -1,0 +1,23 @@
+-- A Unit beside another field in a C++ tuple. Unit has no width on the wire
+-- and shares its offset with the field after it, so a Unit that writes a byte
+-- overwrites that field's first byte; a trailing Unit would write past the
+-- value. Nothing may be written for it, whichever order the fields go in.
+module main (flipUB, bumpUI, lastUnit)
+
+import root-cpp
+
+source Cpp from "units.hpp" ("mk_ub" as mkUB, "mk_ui" as mkUI, "mk_iu" as mkIU, "flip_ub" as flipUBCpp)
+
+mkUB :: Bool -> (Unit, Bool)
+mkUI :: Int -> (Unit, Int)
+mkIU :: Int -> (Int, Unit)
+flipUBCpp :: (Unit, Bool) -> (Unit, Bool)
+
+flipUB :: Bool -> (Unit, Bool)
+flipUB b = flipUBCpp (mkUB b)
+
+bumpUI :: Int -> (Unit, Int)
+bumpUI n = mkUI n
+
+lastUnit :: Int -> (Int, Unit)
+lastUnit n = mkIU n
