@@ -53,24 +53,24 @@ fi
 PASSED=0 FAILED=0 XFAILED=0 XPASSED=0
 PROBLEMS=()
 
-# The depth at which a pool's recursive value (de)serializer overflows its
-# worker stack (issue 89). A tail loop whose value crosses a manifold boundary
-# fails from this depth on. The alternating AltA/AltB chain has a shallower
-# frame per level, so it reaches further.
-stack_limit() {
+# The depth at which a pool's value can no longer be freed: a chain's
+# shared_ptr (C++) or Box (Rust) links unwind one destructor frame per level
+# on the 2 MiB worker stack. Python and R free deep values iteratively. The
+# (de)serializers themselves walk without recursion (issue 89), so up to this
+# depth a tail loop's value crosses a manifold boundary at any size.
+drop_limit() {
     case "$1" in
-        py)   echo 30000 ;;
-        cpp)  echo 5000 ;;
-        r)    echo 700 ;;
-        rust) echo 20000 ;;
+        cpp)  echo 65000 ;;
+        *)    echo 0 ;;
     esac
 }
-alt_limit() {
+# Projecting a field out of a Rust value clones the projected subtree, and
+# the derived Clone recurses one frame per level (issue 91); it gives out
+# before Rust's own destructor limit would.
+clone_limit() {
     case "$1" in
-        py)   echo 30000 ;;
-        cpp)  echo 20000 ;;
-        r)    echo 700 ;;
-        rust) echo 20000 ;;
+        rust) echo 30000 ;;
+        *)    echo 0 ;;
     esac
 }
 
@@ -78,15 +78,14 @@ alt_limit() {
 expected_failure() {
     local module=$1 fn=$2 depth=$3
     case "$module:$fn" in
-        py:chainCount|py:chainReverse|cpp:chainCount|cpp:chainReverse|\
-        r:chainCount|r:chainReverse|rust:chainCount|rust:chainReverse)
-            (( depth >= $(stack_limit "$module") )) && echo "#89" ;;
-        py:altCount|cpp:altCount|r:altCount|rust:altCount)
-            (( depth >= $(alt_limit "$module") )) && echo "#89" ;;
+        rust:chainCount|rust:chainReverse|rust:altCount)
+            (( depth >= $(clone_limit rust) )) && echo "#91" ;;
+        cpp:chainCount|cpp:chainReverse|cpp:altCount)
+            (( depth >= $(drop_limit cpp) )) && echo "recursive-destructor" ;;
         py:roundtrip)
             (( depth >= 6000 )) && echo "#92" ;;
         cross:cppToPy|cross:pyToCpp)
-            (( depth >= $(stack_limit cpp) )) && echo "#89" ;;
+            (( depth >= $(drop_limit cpp) )) && echo "recursive-destructor" ;;
         cross:pingPong)
             (( depth >= 300 )) && echo "#93" ;;
     esac

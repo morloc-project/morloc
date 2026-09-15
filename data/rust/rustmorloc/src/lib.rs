@@ -309,7 +309,39 @@ unsafe fn resolve(rel: RelPtr, base: *const u8) -> *const u8 {
 // outlives the walk (RAII scope pops before the tree is dropped).
 // ---------------------------------------------------------------------------
 thread_local! {
-    static RECUR_ENV: Cell<Vec<(String, *const Schema)>> = const { Cell::new(Vec::new()) };
+    static RECUR_ENV: RefCell<Vec<(String, *const Schema)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Push a named declaration onto the recur env; false when `schema` is not a
+/// declaration (unnamed, or itself a back-reference).
+fn recur_env_push(schema: &Schema) -> bool {
+    match &schema.name {
+        Some(name) if schema.serial_type != SerialType::Recur => {
+            RECUR_ENV.with(|e| {
+                let mut v = e.borrow_mut();
+                // A node reached through a transparent wrapper (Box) carries
+                // the declaration its parent just pushed.
+                if v.last().map(|(_, p)| *p) == Some(schema as *const Schema) {
+                    return false;
+                }
+                v.push((name.clone(), schema as *const Schema));
+                true
+            })
+        }
+        _ => false,
+    }
+}
+
+fn recur_env_pop() {
+    RECUR_ENV.with(|e| e.borrow_mut().pop());
+}
+
+fn recur_env_depth() -> usize {
+    RECUR_ENV.with(|e| e.borrow().len())
+}
+
+fn recur_env_truncate(depth: usize) {
+    RECUR_ENV.with(|e| e.borrow_mut().truncate(depth));
 }
 
 pub struct RecurScope {
@@ -317,35 +349,16 @@ pub struct RecurScope {
 }
 impl RecurScope {
     /// Push `schema`'s named declaration (if any) onto the recur env for the
-    /// lifetime of the returned guard. Generated record impls call this at the
-    /// top of their walk so a nested back-ref resolves at any depth (this is
-    /// stricter than the C++ member, whose write path only pushes at the top).
+    /// lifetime of the returned guard, so a back-reference met by a walk that
+    /// starts under it resolves.
     pub fn enter(schema: &Schema) -> RecurScope {
-        let pushed = if schema.serial_type != SerialType::Recur {
-            if let Some(name) = &schema.name {
-                RECUR_ENV.with(|e| {
-                    let mut v = e.take();
-                    v.push((name.clone(), schema as *const Schema));
-                    e.set(v);
-                });
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-        RecurScope { pushed }
+        RecurScope { pushed: recur_env_push(schema) }
     }
 }
 impl Drop for RecurScope {
     fn drop(&mut self) {
         if self.pushed {
-            RECUR_ENV.with(|e| {
-                let mut v = e.take();
-                v.pop();
-                e.set(v);
-            });
+            recur_env_pop();
         }
     }
 }
@@ -359,10 +372,7 @@ pub fn resolve_recur(schema: &Schema) -> &Schema {
     }
     let name = schema.name.as_deref().unwrap_or("");
     let found = RECUR_ENV.with(|e| {
-        let v = e.take();
-        let ptr = v.iter().rev().find(|(n, _)| n == name).map(|(_, p)| *p);
-        e.set(v);
-        ptr
+        e.borrow().iter().rev().find(|(n, _)| n == name).map(|(_, p)| *p)
     });
     match found {
         // SAFETY: the pointer references a declaration node in the same parsed
@@ -563,18 +573,67 @@ impl Drop for ShmGuard {
 }
 
 // ---------------------------------------------------------------------------
-// The marshalling traits. Per-record impls are emitted by the translator.
+// The marshalling traits.
+//
+// A value is marshalled in three passes -- size, write, read -- and each is an
+// explicit-stack walk, so a value's depth is bounded by memory rather than by
+// the worker thread's stack. `shm_size`, `write` and `read` are the entry
+// points; for a compound type their default bodies run a walk, and the type
+// supplies the walk's steps. A leaf (a scalar or a string) marks `IS_LEAF`,
+// implements the entry points directly, and is handled inline by whichever
+// step reaches it.
+//
 // `shm_size` returns the FULL size (inline width + variable region, incl.
 // worst-case alignment padding). `write` fills the inline slot at `dest` and
 // appends variable data at `*cursor`, advancing it. `read` reconstructs a
 // native value; `base` is the inline-packet/test buffer base or null for SHM.
+//
+// Frames are only needed when the schema can describe a value of unbounded
+// depth, which is when it holds a back-reference. Otherwise the walk runs in
+// direct mode: a compound child is stepped by calling its step from the
+// parent's, and the depth is the schema's own height. A framed read is
+// bottom-up: a node's step pushes a finish frame and then its compound
+// children; the finish frame pops the children's values off a typed value
+// stack and pushes the node's own.
 // ---------------------------------------------------------------------------
 pub trait ToVoidstar {
-    fn shm_size(&self, schema: &Schema) -> usize;
+    /// A scalar: sized and written directly, never given a frame.
+    const IS_LEAF: bool = false;
+
+    fn shm_size(&self, schema: &Schema) -> usize
+    where
+        Self: Sized,
+    {
+        let mut w = SizeWalk::new(schema);
+        w.child(self, schema, false);
+        w.run()
+    }
     /// # Safety
     /// `dest` must point at a `schema.width`-byte inline slot and `*cursor`
     /// into a buffer with at least `self.shm_size(schema)` bytes remaining.
-    unsafe fn write(&self, dest: *mut u8, cursor: &mut *mut u8, schema: &Schema);
+    unsafe fn write(&self, dest: *mut u8, cursor: &mut *mut u8, schema: &Schema)
+    where
+        Self: Sized,
+    {
+        let mut w = WriteWalk::new(schema, cursor);
+        w.child(self, dest, schema);
+        w.run();
+    }
+    /// Add this node's own bytes to the walk and hand it the compound
+    /// children. `schema` is resolved; `idx` is the element to visit for a
+    /// sequence stepped one element per visit, else 0.
+    fn size_step(&self, w: &mut SizeWalk, schema: &Schema, idx: usize) {
+        let _ = (w, schema, idx);
+        morloc_infra_abort("size_step reached a type that has no walk step")
+    }
+    /// Write this node's own slot and hand the walk the compound children.
+    ///
+    /// # Safety
+    /// As for `write`.
+    unsafe fn write_step(&self, w: &mut WriteWalk, dest: *mut u8, schema: &Schema, idx: usize) {
+        let _ = (w, dest, schema, idx);
+        morloc_infra_abort("write_step reached a type that has no walk step")
+    }
     /// A table exports itself as an Arrow C Data Interface pair instead of
     /// walking the voidstar layout; every other type has no Arrow form.
     fn arrow_export(&self) -> Option<(FFI_ArrowArray, FFI_ArrowSchema)> {
@@ -582,10 +641,35 @@ pub trait ToVoidstar {
     }
 }
 pub trait FromVoidstar: Sized {
+    /// A scalar: read directly, never given a frame.
+    const IS_LEAF: bool = false;
+
     /// # Safety
     /// `data` must point at a valid `schema`-shaped inline slot; `base` is the
     /// relptr resolution base (see `resolve`).
-    unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self;
+    unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self {
+        let mut w = ReadWalk::new(schema, base);
+        w.read_root::<Self>(schema, data)
+    }
+    /// Framed read, first half: push this node's finish frame, then its
+    /// compound children. `schema` is resolved.
+    ///
+    /// # Safety
+    /// As for `read`.
+    unsafe fn read_step(w: &mut ReadWalk, schema: &Schema, data: *const u8, idx: usize) {
+        let _ = (w, schema, data, idx);
+        morloc_infra_abort("read_step reached a type that has no walk step")
+    }
+    /// Build the value: leaf fields are read here, compound children come
+    /// from `w.child_read` (popped in a framed walk, read on the spot in a
+    /// direct one, in the order the step pushed them).
+    ///
+    /// # Safety
+    /// As for `read`.
+    unsafe fn read_finish(w: &mut ReadWalk, schema: &Schema, data: *const u8) -> Self {
+        let _ = (w, schema, data);
+        morloc_infra_abort("read_finish reached a type that has no walk step")
+    }
     /// A table builds itself from an imported Arrow C Data Interface pair;
     /// every other type has no Arrow form.
     ///
@@ -597,11 +681,519 @@ pub trait FromVoidstar: Sized {
     }
 }
 
+// ---- walks ----------------------------------------------------------------
+
+/// True iff a back-reference occurs anywhere under `schema`.
+pub fn schema_has_recur(schema: &Schema) -> bool {
+    schema.serial_type == SerialType::Recur || schema.parameters.iter().any(schema_has_recur)
+}
+
+/// Unwinds the recur env to its depth at the walk's start, so a panic
+/// (`morloc_throw`) mid-walk leaves no entries behind.
+struct EnvMark(usize);
+impl EnvMark {
+    fn new() -> EnvMark {
+        EnvMark(recur_env_depth())
+    }
+}
+impl Drop for EnvMark {
+    fn drop(&mut self) {
+        recur_env_truncate(self.0);
+    }
+}
+
+type SizeStep = unsafe fn(&mut SizeWalk, &Schema, *const u8, usize);
+
+#[derive(Clone, Copy)]
+struct SizeFrame {
+    step: Option<SizeStep>, // None: pop the recur env
+    schema: *const Schema,
+    obj: *const u8,
+    idx: usize,
+    inline_slot: bool, // the parent already counted this node's width
+    env_pushed: bool,
+}
+
+pub struct SizeWalk {
+    stack: Vec<SizeFrame>,
+    cur: SizeFrame,
+    keep: Vec<Box<dyn std::any::Any>>,
+    pub total: isize,
+    /// The root has no back-reference: nothing needs a frame.
+    pub direct: bool,
+}
+
+unsafe fn size_thunk<T: ToVoidstar>(w: &mut SizeWalk, s: &Schema, obj: *const u8, idx: usize) {
+    (*(obj as *const T)).size_step(w, s, idx)
+}
+
+impl SizeWalk {
+    pub fn new(root: &Schema) -> SizeWalk {
+        SizeWalk {
+            stack: Vec::new(),
+            cur: SizeFrame { step: None, schema: std::ptr::null(), obj: std::ptr::null(), idx: 0, inline_slot: false, env_pushed: false },
+            keep: Vec::new(),
+            total: 0,
+            direct: !schema_has_recur(root),
+        }
+    }
+
+    /// A child of a schema that cannot describe unbounded depth is stepped
+    /// by call.
+    pub fn flat(&self, schema: &Schema) -> bool {
+        self.direct || !schema_has_recur(schema)
+    }
+
+    /// Account for a child. A leaf is summed here; a compound child is
+    /// stepped by call or by frame. `inline_slot` says the child's fixed
+    /// width lies inside the parent's (tuple and record fields), so only its
+    /// tail is added.
+    pub fn child<T: ToVoidstar>(&mut self, v: &T, schema: &Schema, inline_slot: bool) {
+        if T::IS_LEAF {
+            let s = resolve_recur(schema);
+            self.total += v.shm_size(s) as isize;
+            if inline_slot {
+                self.total -= s.width as isize;
+            }
+        } else if self.flat(schema) {
+            if inline_slot {
+                self.total -= schema.width as isize;
+            }
+            v.size_step(self, schema, 0);
+        } else {
+            self.stack.push(SizeFrame {
+                step: Some(size_thunk::<T>),
+                schema,
+                obj: v as *const T as *const u8,
+                idx: 0,
+                inline_slot,
+                env_pushed: false,
+            });
+        }
+    }
+
+    /// A child the step itself produced (a reified closure origin): the walk
+    /// keeps it alive until it is reached.
+    pub fn child_owned<T: ToVoidstar + 'static>(&mut self, v: T, schema: &Schema, inline_slot: bool) {
+        self.keep.push(Box::new(v));
+        let r: *const T = self.keep.last().and_then(|b| b.downcast_ref::<T>()).unwrap();
+        // SAFETY: the box lives in `keep` for the rest of the walk.
+        self.child(unsafe { &*r }, schema, inline_slot);
+    }
+
+    /// Visit the current node again for element `idx`.
+    pub fn resume(&mut self, idx: usize) {
+        let mut f = self.cur;
+        f.idx = idx;
+        f.inline_slot = false;
+        f.env_pushed = true;
+        self.stack.push(f);
+    }
+
+    /// A variant slot plus the out-of-line payload of one arm.
+    pub fn variant_payload<T: ToVoidstar>(&mut self, schema: &Schema, arm: &Schema, payload: &T) {
+        let a = resolve_recur(arm);
+        self.total += (schema.width + (a.alignment().max(1) - 1)) as isize;
+        self.child(payload, a, false);
+    }
+
+    pub fn run(&mut self) -> usize {
+        let _mark = EnvMark::new();
+        while let Some(mut f) = self.stack.pop() {
+            let step = match f.step {
+                None => {
+                    recur_env_pop();
+                    continue;
+                }
+                Some(step) => step,
+            };
+            // SAFETY: frames only hold schemas of the tree the walk was
+            // started on, which outlives the walk.
+            let s = resolve_recur(unsafe { &*f.schema });
+            if !f.env_pushed && recur_env_push(s) {
+                self.stack.push(SizeFrame { step: None, ..f });
+                f.env_pushed = true;
+            }
+            if f.inline_slot {
+                self.total -= s.width as isize;
+            }
+            self.cur = f;
+            unsafe { step(self, s, f.obj, f.idx) };
+        }
+        self.total.max(0) as usize
+    }
+}
+
+type WriteStep = unsafe fn(&mut WriteWalk, &Schema, *mut u8, *const u8, usize);
+
+#[derive(Clone, Copy)]
+struct WriteFrame {
+    step: Option<WriteStep>,
+    schema: *const Schema,
+    dest: *mut u8,
+    obj: *const u8,
+    idx: usize,
+    aux: *mut u8, // a sequence's element region, carried across its visits
+    env_pushed: bool,
+}
+
+pub struct WriteWalk<'a> {
+    stack: Vec<WriteFrame>,
+    cur: WriteFrame,
+    keep: Vec<Box<dyn std::any::Any>>,
+    pub cursor: &'a mut *mut u8,
+    pub direct: bool,
+}
+
+unsafe fn write_thunk<T: ToVoidstar>(w: &mut WriteWalk, s: &Schema, dest: *mut u8, obj: *const u8, idx: usize) {
+    (*(obj as *const T)).write_step(w, dest, s, idx)
+}
+
+impl<'a> WriteWalk<'a> {
+    pub fn new(root: &Schema, cursor: &'a mut *mut u8) -> WriteWalk<'a> {
+        WriteWalk {
+            stack: Vec::new(),
+            cur: WriteFrame { step: None, schema: std::ptr::null(), dest: std::ptr::null_mut(), obj: std::ptr::null(), idx: 0, aux: std::ptr::null_mut(), env_pushed: false },
+            keep: Vec::new(),
+            cursor,
+            direct: !schema_has_recur(root),
+        }
+    }
+
+    pub fn flat(&self, schema: &Schema) -> bool {
+        self.direct || !schema_has_recur(schema)
+    }
+
+    /// Write a child into its slot: a leaf now, a compound node by call or
+    /// by frame.
+    ///
+    /// # Safety
+    /// `dest` must be the child's slot in a buffer sized by `shm_size`.
+    pub unsafe fn child<T: ToVoidstar>(&mut self, v: &T, dest: *mut u8, schema: &Schema) {
+        if T::IS_LEAF {
+            v.write(dest, self.cursor, resolve_recur(schema));
+        } else if self.flat(schema) {
+            v.write_step(self, dest, schema, 0);
+        } else {
+            self.stack.push(WriteFrame {
+                step: Some(write_thunk::<T>),
+                schema,
+                dest,
+                obj: v as *const T as *const u8,
+                idx: 0,
+                aux: std::ptr::null_mut(),
+                env_pushed: false,
+            });
+        }
+    }
+
+    /// A child the step itself produced (a reified closure origin): the walk
+    /// keeps it alive until it is reached.
+    ///
+    /// # Safety
+    /// As for `child`.
+    pub unsafe fn child_owned<T: ToVoidstar + 'static>(&mut self, v: T, dest: *mut u8, schema: &Schema) {
+        self.keep.push(Box::new(v));
+        let r: *const T = self.keep.last().and_then(|b| b.downcast_ref::<T>()).unwrap();
+        self.child(&*r, dest, schema);
+    }
+
+    /// Visit the current node again for element `idx`, carrying `aux`.
+    pub fn resume(&mut self, idx: usize, aux: *mut u8) {
+        let mut f = self.cur;
+        f.idx = idx;
+        f.aux = aux;
+        f.env_pushed = true;
+        self.stack.push(f);
+    }
+
+    /// The pointer the current node carried over from its previous visit.
+    pub fn aux(&self) -> *mut u8 {
+        self.cur.aux
+    }
+
+    /// Take an aligned slot of `inner`'s width from the cursor.
+    ///
+    /// # Safety
+    /// The buffer must have room for it (see `shm_size`).
+    pub unsafe fn alloc(&mut self, inner: &Schema) -> *mut u8 {
+        let align = inner.alignment().max(1);
+        *self.cursor = align_up(*self.cursor as usize, align) as *mut u8;
+        let slot = *self.cursor;
+        *self.cursor = slot.add(inner.width);
+        slot
+    }
+
+    /// A variant slot for an arm with fields: the tag, determined padding,
+    /// and a pointer to the payload written at the cursor.
+    ///
+    /// # Safety
+    /// `dest` must point at a writable slot of at least the schema's width,
+    /// and the buffer must have room for the payload (see `shm_size`).
+    pub unsafe fn variant_payload<T: ToVoidstar>(&mut self, dest: *mut u8, arm: &Schema, tag: u8, payload: &T) {
+        *dest = tag;
+        core::ptr::write_bytes(dest.add(1), 0, VARIANT_PAYLOAD - 1);
+        let a = resolve_recur(arm);
+        let slot = self.alloc(a);
+        core::ptr::write_unaligned(dest.add(VARIANT_PAYLOAD) as *mut RelPtr, to_rel(slot));
+        self.child(payload, slot, a);
+    }
+
+    pub fn run(&mut self) {
+        let _mark = EnvMark::new();
+        while let Some(mut f) = self.stack.pop() {
+            let step = match f.step {
+                None => {
+                    recur_env_pop();
+                    continue;
+                }
+                Some(step) => step,
+            };
+            let s = resolve_recur(unsafe { &*f.schema });
+            if !f.env_pushed && recur_env_push(s) {
+                self.stack.push(WriteFrame { step: None, ..f });
+                f.env_pushed = true;
+            }
+            self.cur = f;
+            unsafe { step(self, s, f.dest, f.obj, f.idx) };
+        }
+    }
+}
+
+/// Finished values of a framed read, each written in place at an aligned
+/// offset with its destructor on record, so a panic mid-walk drops exactly
+/// the values still on the stack.
+pub struct ValueStack {
+    buf: *mut u8,
+    cap: usize,
+    len: usize,
+    ledger: Vec<ValueEntry>,
+}
+
+struct ValueEntry {
+    off: usize,
+    size: usize,
+    drop: unsafe fn(*mut u8),
+}
+
+const VALUE_STACK_ALIGN: usize = 16;
+
+unsafe fn drop_thunk<T>(p: *mut u8) {
+    core::ptr::drop_in_place(p as *mut T)
+}
+
+impl ValueStack {
+    fn new() -> ValueStack {
+        ValueStack { buf: std::ptr::null_mut(), cap: 0, len: 0, ledger: Vec::new() }
+    }
+
+    fn reserve(&mut self, end: usize) {
+        if end <= self.cap {
+            return;
+        }
+        let new_cap = end.max(self.cap * 2).max(256);
+        let new_layout = std::alloc::Layout::from_size_align(new_cap, VALUE_STACK_ALIGN).unwrap();
+        // SAFETY: the buffer is always allocated with this alignment, so a
+        // realloc keeps every offset aligned as it was.
+        let p = unsafe {
+            if self.cap == 0 {
+                std::alloc::alloc(new_layout)
+            } else {
+                let old = std::alloc::Layout::from_size_align(self.cap, VALUE_STACK_ALIGN).unwrap();
+                std::alloc::realloc(self.buf, old, new_cap)
+            }
+        };
+        if p.is_null() {
+            std::alloc::handle_alloc_error(new_layout);
+        }
+        self.buf = p;
+        self.cap = new_cap;
+    }
+
+    pub fn push<T>(&mut self, v: T) {
+        let align = std::mem::align_of::<T>();
+        if align > VALUE_STACK_ALIGN {
+            morloc_infra_abort("value stack: over-aligned type");
+        }
+        let off = align_up(self.len, align);
+        let end = off + std::mem::size_of::<T>();
+        self.reserve(end.max(1));
+        // SAFETY: [off, end) is inside the buffer and aligned for T.
+        unsafe { core::ptr::write(self.buf.add(off) as *mut T, v) };
+        self.ledger.push(ValueEntry { off, size: std::mem::size_of::<T>(), drop: drop_thunk::<T> });
+        self.len = end;
+    }
+
+    pub fn pop<T>(&mut self) -> T {
+        let e = match self.ledger.pop() {
+            Some(e) => e,
+            None => morloc_infra_abort("value stack: pop on an empty stack"),
+        };
+        if e.size != std::mem::size_of::<T>() {
+            morloc_infra_abort("value stack: popped a value of another type");
+        }
+        // SAFETY: the entry records a live T written at `off`.
+        let v = unsafe { core::ptr::read(self.buf.add(e.off) as *const T) };
+        self.len = e.off;
+        v
+    }
+
+    /// The value on top, in place.
+    pub fn top_mut<T>(&mut self) -> &mut T {
+        let e = match self.ledger.last() {
+            Some(e) => e,
+            None => morloc_infra_abort("value stack: top of an empty stack"),
+        };
+        if e.size != std::mem::size_of::<T>() {
+            morloc_infra_abort("value stack: top is a value of another type");
+        }
+        unsafe { &mut *(self.buf.add(e.off) as *mut T) }
+    }
+}
+
+impl Drop for ValueStack {
+    fn drop(&mut self) {
+        for e in self.ledger.drain(..).rev() {
+            unsafe { (e.drop)(self.buf.add(e.off)) };
+        }
+        if self.cap > 0 {
+            let layout = std::alloc::Layout::from_size_align(self.cap, VALUE_STACK_ALIGN).unwrap();
+            unsafe { std::alloc::dealloc(self.buf, layout) };
+        }
+    }
+}
+
+type ReadStep = unsafe fn(&mut ReadWalk, &Schema, *const u8, usize);
+type ReadFinish = unsafe fn(&mut ReadWalk, &Schema, *const u8);
+
+#[derive(Clone, Copy)]
+enum ReadFrame {
+    Step { step: ReadStep, schema: *const Schema, data: *const u8, idx: usize, env_pushed: bool },
+    Finish { finish: ReadFinish, schema: *const Schema, data: *const u8 },
+    PopEnv,
+}
+
+pub struct ReadWalk {
+    stack: Vec<ReadFrame>,
+    cur: ReadFrame,
+    pub values: ValueStack,
+    pub base: *const u8,
+    pub direct: bool,
+}
+
+unsafe fn read_step_thunk<T: FromVoidstar>(w: &mut ReadWalk, s: &Schema, data: *const u8, idx: usize) {
+    T::read_step(w, s, data, idx)
+}
+
+unsafe fn read_finish_thunk<T: FromVoidstar>(w: &mut ReadWalk, s: &Schema, data: *const u8) {
+    let v = T::read_finish(w, s, data);
+    w.values.push(v);
+}
+
+impl ReadWalk {
+    pub fn new(root: &Schema, base: *const u8) -> ReadWalk {
+        ReadWalk {
+            stack: Vec::new(),
+            cur: ReadFrame::PopEnv,
+            values: ValueStack::new(),
+            base,
+            direct: !schema_has_recur(root),
+        }
+    }
+
+    pub fn flat(&self, schema: &Schema) -> bool {
+        self.direct || !schema_has_recur(schema)
+    }
+
+    /// # Safety
+    /// As for `FromVoidstar::read`.
+    pub unsafe fn read_root<T: FromVoidstar>(&mut self, schema: &Schema, data: *const u8) -> T {
+        if self.flat(schema) {
+            T::read_finish(self, resolve_recur(schema), data)
+        } else {
+            self.child_step::<T>(schema, data);
+            self.run();
+            self.values.pop::<T>()
+        }
+    }
+
+    /// Push this node's finish frame; the step then pushes the children the
+    /// finish will pop.
+    pub fn push_finish<T: FromVoidstar>(&mut self, schema: &Schema, data: *const u8) {
+        self.stack.push(ReadFrame::Finish { finish: read_finish_thunk::<T>, schema, data });
+    }
+
+    /// Give a child a frame when its schema can describe unbounded depth.
+    /// A leaf, or a child whose schema has no back-reference, needs none:
+    /// the parent's finish reads it on the spot.
+    pub fn child_step<T: FromVoidstar>(&mut self, schema: &Schema, data: *const u8) {
+        if T::IS_LEAF || self.flat(schema) {
+            return;
+        }
+        self.stack.push(ReadFrame::Step { step: read_step_thunk::<T>, schema, data, idx: 0, env_pushed: false });
+    }
+
+    /// A child's value: a leaf is read now, a child with no back-reference
+    /// in its schema is read on the spot, and a framed child is popped --
+    /// children framed first come off first, so a finish takes them in the
+    /// order its step framed them.
+    ///
+    /// # Safety
+    /// As for `FromVoidstar::read`.
+    pub unsafe fn child_read<T: FromVoidstar>(&mut self, schema: &Schema, data: *const u8) -> T {
+        if T::IS_LEAF {
+            T::read(resolve_recur(schema), data, self.base)
+        } else if self.flat(schema) {
+            T::read_finish(self, resolve_recur(schema), data)
+        } else {
+            self.values.pop::<T>()
+        }
+    }
+
+    pub fn resume(&mut self, idx: usize) {
+        if let ReadFrame::Step { step, schema, data, .. } = self.cur {
+            self.stack.push(ReadFrame::Step { step, schema, data, idx, env_pushed: true });
+        }
+    }
+
+    /// The out-of-line payload of a variant slot.
+    ///
+    /// # Safety
+    /// `data` must point at a variant slot whose payload pointer is live.
+    pub unsafe fn payload_ptr(&self, data: *const u8) -> *const u8 {
+        let rel = core::ptr::read_unaligned(data.add(VARIANT_PAYLOAD) as *const RelPtr);
+        resolve(rel, self.base)
+    }
+
+    pub fn run(&mut self) {
+        let _mark = EnvMark::new();
+        while let Some(f) = self.stack.pop() {
+            match f {
+                ReadFrame::PopEnv => recur_env_pop(),
+                ReadFrame::Finish { finish, schema, data } => {
+                    unsafe { finish(self, &*schema, data) };
+                }
+                ReadFrame::Step { step, schema, data, idx, env_pushed } => {
+                    let s = resolve_recur(unsafe { &*schema });
+                    let mut pushed = env_pushed;
+                    if !pushed && recur_env_push(s) {
+                        self.stack.push(ReadFrame::PopEnv);
+                        pushed = true;
+                    }
+                    self.cur = ReadFrame::Step { step, schema, data, idx, env_pushed: pushed };
+                    unsafe { step(self, s, data, idx) };
+                }
+            }
+        }
+    }
+}
+
 // ---- tables ---------------------------------------------------------------
 // A table never takes the voidstar path: `put_value` and `get_value` route a
 // Table-typed schema through the Arrow C Data Interface, so the walk methods
 // are unreachable for it.
 impl ToVoidstar for RecordBatch {
+    const IS_LEAF: bool = true;
     fn shm_size(&self, _schema: &Schema) -> usize {
         morloc_infra_abort("a table cannot be written through the voidstar path")
     }
@@ -617,6 +1209,7 @@ impl ToVoidstar for RecordBatch {
     }
 }
 impl FromVoidstar for RecordBatch {
+    const IS_LEAF: bool = true;
     unsafe fn read(_schema: &Schema, _data: *const u8, _base: *const u8) -> Self {
         morloc_infra_abort("a table cannot be read through the voidstar path")
     }
@@ -650,6 +1243,7 @@ unsafe fn handle_err(err: *mut c_char, fallback: &str) -> String {
 macro_rules! int_impl {
     ($t:ty) => {
         impl ToVoidstar for $t {
+            const IS_LEAF: bool = true;
             #[inline]
             fn shm_size(&self, schema: &Schema) -> usize { schema.width }
             #[inline]
@@ -682,6 +1276,7 @@ macro_rules! int_impl {
             }
         }
         impl FromVoidstar for $t {
+            const IS_LEAF: bool = true;
             #[inline]
             unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self {
                 match schema.serial_type {
@@ -738,6 +1333,7 @@ unsafe fn read_int(schema: &Schema, data: *const u8) -> i128 {
 macro_rules! float_impl {
     ($t:ty) => {
         impl ToVoidstar for $t {
+            const IS_LEAF: bool = true;
             #[inline]
             fn shm_size(&self, schema: &Schema) -> usize { schema.width }
             #[inline]
@@ -746,6 +1342,7 @@ macro_rules! float_impl {
             }
         }
         impl FromVoidstar for $t {
+            const IS_LEAF: bool = true;
             #[inline]
             unsafe fn read(schema: &Schema, data: *const u8, _base: *const u8) -> Self {
                 match schema.serial_type {
@@ -760,6 +1357,7 @@ macro_rules! float_impl {
 float_impl!(f32); float_impl!(f64);
 
 impl ToVoidstar for bool {
+    const IS_LEAF: bool = true;
     #[inline]
     fn shm_size(&self, schema: &Schema) -> usize { schema.width }
     #[inline]
@@ -768,6 +1366,7 @@ impl ToVoidstar for bool {
     }
 }
 impl FromVoidstar for bool {
+    const IS_LEAF: bool = true;
     #[inline]
     unsafe fn read(_schema: &Schema, data: *const u8, _base: *const u8) -> Self {
         core::ptr::read_unaligned(data) == 1
@@ -778,18 +1377,21 @@ impl FromVoidstar for bool {
 // NIL occupies a 1-byte inline slot (schema.width) with no variable region;
 // nothing meaningful is written or read.
 impl ToVoidstar for () {
+    const IS_LEAF: bool = true;
     #[inline]
     fn shm_size(&self, _schema: &Schema) -> usize { 0 }
     #[inline]
     unsafe fn write(&self, _dest: *mut u8, _cursor: &mut *mut u8, _schema: &Schema) {}
 }
 impl FromVoidstar for () {
+    const IS_LEAF: bool = true;
     #[inline]
     unsafe fn read(_schema: &Schema, _data: *const u8, _base: *const u8) -> Self {}
 }
 
 // ---- String (Str, I5: UTF-8 text by contract) -----------------------------
 impl ToVoidstar for String {
+    const IS_LEAF: bool = true;
     fn shm_size(&self, schema: &Schema) -> usize { schema.width + self.len() }
     unsafe fn write(&self, dest: *mut u8, cursor: &mut *mut u8, _schema: &Schema) {
         // String bytes are placed UNALIGNED (unlike Vec, which aligns) --
@@ -807,6 +1409,7 @@ impl ToVoidstar for String {
     }
 }
 impl FromVoidstar for String {
+    const IS_LEAF: bool = true;
     unsafe fn read(_schema: &Schema, data: *const u8, base: *const u8) -> Self {
         let a = core::ptr::read_unaligned(data as *const Array);
         if a.size == 0 {
@@ -826,53 +1429,100 @@ impl FromVoidstar for String {
 // one at a time (no bulk memcpy, so a VecDeque's ring buffer is fine); they
 // differ only in the container constructor and back-insert method. `$push` is
 // amortized O(1) for both, so neither adds a copy over the other.
+//
+// In a framed walk a sequence is visited once per element: the step handles
+// element `idx` and re-pushes its own frame beneath the element's, so the
+// frame stack stays proportional to depth rather than to element count. A
+// framed read keeps the growing container on the value stack and moves each
+// finished element into it on the next visit.
 macro_rules! seq_impl {
     ($container:ident, $push:ident) => {
 impl<T: ToVoidstar> ToVoidstar for $container<T> {
-    fn shm_size(&self, schema: &Schema) -> usize {
+    fn size_step(&self, w: &mut SizeWalk, schema: &Schema, idx: usize) {
         let elem = resolve_recur(&schema.parameters[0]);
-        // width slot + worst-case cursor alignment padding + element data
-        let mut total = schema.width + (elem.array_data_alignment() - 1);
-        if elem.is_primitive_numeric() {
-            total += self.len() * elem.width;
-        } else {
-            for x in self {
-                total += x.shm_size(elem);
+        if idx == 0 {
+            // width slot + worst-case cursor alignment padding + element data
+            w.total += (schema.width + (elem.array_data_alignment() - 1)) as isize;
+            if elem.is_primitive_numeric() {
+                w.total += (self.len() * elem.width) as isize;
+                return;
+            }
+            if T::IS_LEAF || w.flat(elem) {
+                for x in self {
+                    w.child(x, elem, false);
+                }
+                return;
             }
         }
-        total
+        if idx < self.len() {
+            if idx + 1 < self.len() {
+                w.resume(idx + 1);
+            }
+            w.child(&self[idx], elem, false);
+        }
     }
-    unsafe fn write(&self, dest: *mut u8, cursor: &mut *mut u8, schema: &Schema) {
+    unsafe fn write_step(&self, w: &mut WriteWalk, dest: *mut u8, schema: &Schema, idx: usize) {
         let n = self.len();
-        if n == 0 {
-            core::ptr::write_unaligned(dest as *mut Array, Array { size: 0, data: RELNULL });
-            return;
-        }
         let elem = resolve_recur(&schema.parameters[0]);
-        // align cursor for element data (bumps to 64 for primitive numerics)
-        *cursor = align_up(*cursor as usize, elem.array_data_alignment()) as *mut u8;
-        let data_rel = to_rel(*cursor);
-        let start = *cursor;
         let width = elem.width;
-        *cursor = start.add(n * width);
-        for (i, x) in self.iter().enumerate() {
-            x.write(start.add(i * width), cursor, elem);
+        let start = if idx == 0 {
+            if n == 0 {
+                core::ptr::write_unaligned(dest as *mut Array, Array { size: 0, data: RELNULL });
+                return;
+            }
+            // align cursor for element data (bumps to 64 for primitive numerics)
+            *w.cursor = align_up(*w.cursor as usize, elem.array_data_alignment()) as *mut u8;
+            let start = *w.cursor;
+            *w.cursor = start.add(n * width);
+            core::ptr::write_unaligned(dest as *mut Array, Array { size: n, data: to_rel(start) });
+            if T::IS_LEAF || w.flat(elem) {
+                for (i, x) in self.iter().enumerate() {
+                    w.child(x, start.add(i * width), elem);
+                }
+                return;
+            }
+            start
+        } else {
+            w.aux()
+        };
+        if idx + 1 < n {
+            w.resume(idx + 1, start);
         }
-        core::ptr::write_unaligned(dest as *mut Array, Array { size: n, data: data_rel });
+        w.child(&self[idx], start.add(idx * width), elem);
     }
 }
 impl<T: FromVoidstar> FromVoidstar for $container<T> {
-    unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self {
+    unsafe fn read_step(w: &mut ReadWalk, schema: &Schema, data: *const u8, idx: usize) {
+        let a = core::ptr::read_unaligned(data as *const Array);
+        let elem = resolve_recur(&schema.parameters[0]);
+        if idx == 0 {
+            if T::IS_LEAF || a.size == 0 || w.flat(elem) {
+                let v = Self::read_finish(w, schema, data);
+                w.values.push(v);
+                return;
+            }
+            w.values.push($container::<T>::with_capacity(a.size));
+        } else {
+            let x = w.values.pop::<T>();
+            w.values.top_mut::<$container<T>>().$push(x);
+        }
+        if idx < a.size {
+            let start = resolve(a.data, w.base);
+            w.resume(idx + 1);
+            w.child_step::<T>(elem, start.add(idx * elem.width));
+        }
+    }
+    unsafe fn read_finish(w: &mut ReadWalk, schema: &Schema, data: *const u8) -> Self {
         let a = core::ptr::read_unaligned(data as *const Array);
         if a.size == 0 {
             return $container::new();
         }
         let elem = resolve_recur(&schema.parameters[0]);
-        let start = resolve(a.data, base);
+        let start = resolve(a.data, w.base);
         let width = elem.width;
         let mut out = $container::with_capacity(a.size);
         for i in 0..a.size {
-            out.$push(<T as FromVoidstar>::read(elem, start.add(i * width), base));
+            out.$push(w.child_read::<T>(elem, start.add(i * width)));
         }
         out
     }
@@ -883,41 +1533,45 @@ seq_impl!(Vec, push);
 seq_impl!(VecDeque, push_back);
 
 // ---- Option (?T) ----------------------------------------------------------
+// The slot is a relptr. Absent -> RELNULL. Present -> an aligned slot for the
+// inner T at the cursor, its relptr in this slot, then T's body.
 impl<T: ToVoidstar> ToVoidstar for Option<T> {
-    fn shm_size(&self, schema: &Schema) -> usize {
+    fn size_step(&self, w: &mut SizeWalk, schema: &Schema, _idx: usize) {
         match self {
-            None => schema.width,
+            None => w.total += schema.width as isize,
             Some(v) => {
                 let inner = resolve_recur(&schema.parameters[0]);
-                schema.width + (inner.alignment().max(1) - 1) + v.shm_size(inner)
+                w.total += (schema.width + (inner.alignment().max(1) - 1)) as isize;
+                w.child(v, inner, false);
             }
         }
     }
-    unsafe fn write(&self, dest: *mut u8, cursor: &mut *mut u8, schema: &Schema) {
+    unsafe fn write_step(&self, w: &mut WriteWalk, dest: *mut u8, schema: &Schema, _idx: usize) {
         match self {
             None => core::ptr::write_unaligned(dest as *mut RelPtr, RELNULL),
             Some(v) => {
                 let inner = resolve_recur(&schema.parameters[0]);
-                let align = inner.alignment().max(1);
-                *cursor = align_up(*cursor as usize, align) as *mut u8;
-                let slot = *cursor;
-                let data_rel = to_rel(slot);
-                *cursor = slot.add(inner.width);
-                v.write(slot, cursor, inner);
-                core::ptr::write_unaligned(dest as *mut RelPtr, data_rel);
+                let slot = w.alloc(inner);
+                core::ptr::write_unaligned(dest as *mut RelPtr, to_rel(slot));
+                w.child(v, slot, inner);
             }
         }
     }
 }
 impl<T: FromVoidstar> FromVoidstar for Option<T> {
-    unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self {
+    unsafe fn read_step(w: &mut ReadWalk, schema: &Schema, data: *const u8, _idx: usize) {
+        w.push_finish::<Self>(schema, data);
+        let rel = core::ptr::read_unaligned(data as *const RelPtr);
+        if rel != RELNULL {
+            w.child_step::<T>(&schema.parameters[0], resolve(rel, w.base));
+        }
+    }
+    unsafe fn read_finish(w: &mut ReadWalk, schema: &Schema, data: *const u8) -> Self {
         let rel = core::ptr::read_unaligned(data as *const RelPtr);
         if rel == RELNULL {
             return None;
         }
-        let inner = resolve_recur(&schema.parameters[0]);
-        let p = resolve(rel, base);
-        Some(<T as FromVoidstar>::read(inner, p, base))
+        Some(w.child_read::<T>(&schema.parameters[0], resolve(rel, w.base)))
     }
 }
 
@@ -925,30 +1579,15 @@ impl<T: FromVoidstar> FromVoidstar for Option<T> {
 //
 // A variant is a tag byte, seven bytes of padding, and a relative pointer to
 // the arm's fields -- the same slot shape as Optional, with a tag in front.
-// These helpers keep that layout here rather than in generated pool code:
-// the offsets, the alignment of the out-of-line payload and the relative-
-// pointer encoding are the runtime's business, and a pool cannot reach them
-// anyway (RelPtr and its helpers are not part of this crate's public API).
+// The walks carry the payload (`variant_payload` on each); these cover the
+// nullary arm and the tag, so that layout stays here rather than in generated
+// pool code: the offsets, the alignment of the out-of-line payload and the
+// relative-pointer encoding are the runtime's business, and a pool cannot
+// reach them anyway (RelPtr and its helpers are not part of this crate's
+// public API).
 
 /// Byte offset of a variant's payload pointer within its slot.
 const VARIANT_PAYLOAD: usize = 8;
-
-/// Size of a variant slot whose arm carries no fields.
-pub fn variant_size_nullary(schema: &Schema) -> usize {
-    resolve_recur(schema).width
-}
-
-/// Size of a variant slot plus the out-of-line payload of one arm, including
-/// any padding needed to align that payload.
-pub fn variant_size_payload<T: ToVoidstar>(
-    schema: &Schema,
-    arm: &Schema,
-    payload: &T,
-) -> usize {
-    let s = resolve_recur(schema);
-    let a = resolve_recur(arm);
-    s.width + (a.alignment().max(1) - 1) + payload.shm_size(a)
-}
 
 /// Write a variant slot for an arm with no fields: the tag, determined
 /// padding, and a null payload pointer.
@@ -961,31 +1600,6 @@ pub unsafe fn write_variant_nullary(dest: *mut u8, tag: u8) {
     core::ptr::write_unaligned(dest.add(VARIANT_PAYLOAD) as *mut RelPtr, RELNULL);
 }
 
-/// Write a variant slot for an arm that carries fields: the tag, determined
-/// padding, and a pointer to the payload written at the cursor.
-///
-/// # Safety
-/// `dest` must point at a writable slot of at least the schema's width, and
-/// `cursor` must have room for the payload reported by `variant_size_payload`.
-pub unsafe fn write_variant_payload<T: ToVoidstar>(
-    dest: *mut u8,
-    cursor: &mut *mut u8,
-    arm: &Schema,
-    tag: u8,
-    payload: &T,
-) {
-    *dest = tag;
-    core::ptr::write_bytes(dest.add(1), 0, VARIANT_PAYLOAD - 1);
-    let a = resolve_recur(arm);
-    let align = a.alignment().max(1);
-    *cursor = align_up(*cursor as usize, align) as *mut u8;
-    let slot = *cursor;
-    let rel = to_rel(slot);
-    *cursor = slot.add(a.width);
-    payload.write(slot, cursor, a);
-    core::ptr::write_unaligned(dest.add(VARIANT_PAYLOAD) as *mut RelPtr, rel);
-}
-
 /// The tag a variant slot carries.
 ///
 /// # Safety
@@ -994,32 +1608,35 @@ pub unsafe fn read_variant_tag(data: *const u8) -> u8 {
     *data
 }
 
-/// Read the payload of a variant slot, given the schema of the arm its tag
-/// selected.
-///
-/// # Safety
-/// `data` must point at a variant slot whose payload pointer is live, and
-/// `arm` must be the schema of the arm named by its tag.
-pub unsafe fn read_variant_payload<T: FromVoidstar>(
-    arm: &Schema,
-    data: *const u8,
-    base: *const u8,
-) -> T {
-    let rel = core::ptr::read_unaligned(data.add(VARIANT_PAYLOAD) as *const RelPtr);
-    let a = resolve_recur(arm);
-    <T as FromVoidstar>::read(a, resolve(rel, base), base)
-}
-
 // ---- Box (cycle-break indirection, I7) ------------------------------------
+// Transparent on the wire: the box's step is its pointee's, so a sequence
+// stepped one element per visit through a Box resumes correctly.
 impl<T: ToVoidstar> ToVoidstar for Box<T> {
-    fn shm_size(&self, schema: &Schema) -> usize { (**self).shm_size(schema) }
+    const IS_LEAF: bool = T::IS_LEAF;
+    fn shm_size(&self, schema: &Schema) -> usize {
+        (**self).shm_size(schema)
+    }
     unsafe fn write(&self, dest: *mut u8, cursor: &mut *mut u8, schema: &Schema) {
         (**self).write(dest, cursor, schema)
     }
+    fn size_step(&self, w: &mut SizeWalk, schema: &Schema, idx: usize) {
+        (**self).size_step(w, schema, idx)
+    }
+    unsafe fn write_step(&self, w: &mut WriteWalk, dest: *mut u8, schema: &Schema, idx: usize) {
+        (**self).write_step(w, dest, schema, idx)
+    }
 }
 impl<T: FromVoidstar> FromVoidstar for Box<T> {
+    const IS_LEAF: bool = T::IS_LEAF;
     unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self {
-        Box::new(<T as FromVoidstar>::read(schema, data, base))
+        Box::new(T::read(schema, data, base))
+    }
+    unsafe fn read_step(w: &mut ReadWalk, schema: &Schema, data: *const u8, _idx: usize) {
+        w.push_finish::<Self>(schema, data);
+        w.child_step::<T>(schema, data);
+    }
+    unsafe fn read_finish(w: &mut ReadWalk, schema: &Schema, data: *const u8) -> Self {
+        Box::new(w.child_read::<T>(schema, data))
     }
 }
 
@@ -1027,33 +1644,34 @@ impl<T: FromVoidstar> FromVoidstar for Box<T> {
 macro_rules! tuple_impl {
     ($($T:ident $idx:tt),+) => {
         impl<$($T: ToVoidstar),+> ToVoidstar for ($($T,)+) {
-            fn shm_size(&self, schema: &Schema) -> usize {
-                let mut total = schema.width;
+            fn size_step(&self, w: &mut SizeWalk, schema: &Schema, _idx: usize) {
+                w.total += schema.width as isize;
                 $(
-                    let fs = resolve_recur(&schema.parameters[$idx]);
-                    let e = self.$idx.shm_size(fs);
-                    if e > fs.width { total += e - fs.width; }
+                    w.child(&self.$idx, &schema.parameters[$idx], true);
                 )+
-                total
             }
-            unsafe fn write(&self, dest: *mut u8, cursor: &mut *mut u8, schema: &Schema) {
+            unsafe fn write_step(&self, w: &mut WriteWalk, dest: *mut u8, schema: &Schema, _idx: usize) {
                 $(
-                    let fs = resolve_recur(&schema.parameters[$idx]);
-                    self.$idx.write(dest.add(schema.offsets[$idx]), cursor, fs);
+                    w.child(&self.$idx, dest.add(schema.offsets[$idx]), &schema.parameters[$idx]);
                 )+
             }
         }
         impl<$($T: FromVoidstar),+> FromVoidstar for ($($T,)+) {
-            unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self {
+            unsafe fn read_step(w: &mut ReadWalk, schema: &Schema, data: *const u8, _idx: usize) {
+                w.push_finish::<Self>(schema, data);
+                $(
+                    w.child_step::<$T>(&schema.parameters[$idx], data.add(schema.offsets[$idx]));
+                )+
+            }
+            unsafe fn read_finish(w: &mut ReadWalk, schema: &Schema, data: *const u8) -> Self {
                 ($(
-                    <$T as FromVoidstar>::read(
-                        resolve_recur(&schema.parameters[$idx]),
-                        data.add(schema.offsets[$idx]), base),
+                    w.child_read::<$T>(&schema.parameters[$idx], data.add(schema.offsets[$idx])),
                 )+)
             }
         }
     };
 }
+
 // A one-element tuple. Unused while tuples came only from morloc's `(a, b)`
 // syntax, which has no one-element form -- but a `data` arm carrying a
 // single field is boxed as `(T,)`, so the impl is needed.
@@ -2274,42 +2892,42 @@ mod tests {
     }
 
     // A recursive record `LL { head: Int, tail: ?LL }` -- exactly the shape the
-    // translator emits (resolve_recur + RecurScope::enter at the top; Box at the
-    // cycle-break optional). Schema: &2LL m2 4head j 4tail ?^2LL.
+    // translator emits. Schema: &2LL m2 4head j 4tail ?^2LL. The Drop is
+    // iterative so a deep chain tests the walk, not the destructor.
     #[derive(Debug, PartialEq, Clone)]
     struct LL {
         head: i64,
         tail: Option<Box<LL>>,
     }
-    impl ToVoidstar for LL {
-        fn shm_size(&self, schema: &Schema) -> usize {
-            let schema = resolve_recur(schema);
-            let _g = RecurScope::enter(schema);
-            let mut total = schema.width;
-            let fs0 = resolve_recur(&schema.parameters[0]);
-            let e0 = self.head.shm_size(fs0);
-            if e0 > fs0.width { total += e0 - fs0.width; }
-            let fs1 = resolve_recur(&schema.parameters[1]);
-            let e1 = self.tail.shm_size(fs1);
-            if e1 > fs1.width { total += e1 - fs1.width; }
-            total
+    impl Drop for LL {
+        fn drop(&mut self) {
+            let mut next = self.tail.take();
+            while let Some(mut b) = next {
+                next = b.tail.take();
+            }
         }
-        unsafe fn write(&self, dest: *mut u8, cursor: &mut *mut u8, schema: &Schema) {
-            let schema = resolve_recur(schema);
-            let _g = RecurScope::enter(schema);
-            self.head.write(dest.add(schema.offsets[0]), cursor, resolve_recur(&schema.parameters[0]));
-            self.tail.write(dest.add(schema.offsets[1]), cursor, resolve_recur(&schema.parameters[1]));
+    }
+    impl ToVoidstar for LL {
+        fn size_step(&self, w: &mut SizeWalk, schema: &Schema, _idx: usize) {
+            w.total += schema.width as isize;
+            w.child(&self.head, &schema.parameters[0], true);
+            w.child(&self.tail, &schema.parameters[1], true);
+        }
+        unsafe fn write_step(&self, w: &mut WriteWalk, dest: *mut u8, schema: &Schema, _idx: usize) {
+            w.child(&self.head, dest.add(schema.offsets[0]), &schema.parameters[0]);
+            w.child(&self.tail, dest.add(schema.offsets[1]), &schema.parameters[1]);
         }
     }
     impl FromVoidstar for LL {
-        unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self {
-            let schema = resolve_recur(schema);
-            let _g = RecurScope::enter(schema);
+        unsafe fn read_step(w: &mut ReadWalk, schema: &Schema, data: *const u8, _idx: usize) {
+            w.push_finish::<Self>(schema, data);
+            w.child_step::<i64>(&schema.parameters[0], data.add(schema.offsets[0]));
+            w.child_step::<Option<Box<LL>>>(&schema.parameters[1], data.add(schema.offsets[1]));
+        }
+        unsafe fn read_finish(w: &mut ReadWalk, schema: &Schema, data: *const u8) -> Self {
             LL {
-                head: <i64 as FromVoidstar>::read(
-                    resolve_recur(&schema.parameters[0]), data.add(schema.offsets[0]), base),
-                tail: <Option<Box<LL>> as FromVoidstar>::read(
-                    resolve_recur(&schema.parameters[1]), data.add(schema.offsets[1]), base),
+                head: w.child_read::<i64>(&schema.parameters[0], data.add(schema.offsets[0])),
+                tail: w.child_read::<Option<Box<LL>>>(&schema.parameters[1], data.add(schema.offsets[1])),
             }
         }
     }
@@ -2339,6 +2957,92 @@ mod tests {
                 LL { head: 20, tail: Some(Box::new(LL { head: 21, tail: None })) },
             ];
             assert_eq!(roundtrip::<Vec<LL>>(&format!("a{SCHEMA}"), &list), list);
+        }
+    }
+
+    // A chain far deeper than a 2 MiB test thread's stack could walk one
+    // frame per level: the size, write and read passes must stay flat.
+    #[test]
+    fn deep_recursive_record() {
+        unsafe {
+            const SCHEMA: &str = "&2LLm24headj4tail?^2LL";
+            const DEPTH: i64 = 200_000;
+            let mut chain = LL { head: 0, tail: None };
+            for i in 1..=DEPTH {
+                chain = LL { head: i, tail: Some(Box::new(chain)) };
+            }
+            let got = roundtrip::<LL>(SCHEMA, &chain);
+            let mut n = 0;
+            let mut cur = &got;
+            while let Some(next) = &cur.tail {
+                n += 1;
+                cur = next;
+            }
+            assert_eq!(n, DEPTH);
+            assert_eq!(got.head, DEPTH);
+            assert_eq!(cur.head, 0);
+        }
+    }
+
+    // A recursive record whose compound fields have no back-reference of
+    // their own on either side of the one that does: the finish must pop
+    // each child's value in field order whichever way it was read.
+    #[derive(Debug, PartialEq, Clone)]
+    struct Doc {
+        items: Vec<(i64, String)>,
+        next: Option<Box<Doc>>,
+        tag: (i64, i64),
+    }
+    impl Drop for Doc {
+        fn drop(&mut self) {
+            let mut next = self.next.take();
+            while let Some(mut b) = next {
+                next = b.next.take();
+            }
+        }
+    }
+    impl ToVoidstar for Doc {
+        fn size_step(&self, w: &mut SizeWalk, schema: &Schema, _idx: usize) {
+            w.total += schema.width as isize;
+            w.child(&self.items, &schema.parameters[0], true);
+            w.child(&self.next, &schema.parameters[1], true);
+            w.child(&self.tag, &schema.parameters[2], true);
+        }
+        unsafe fn write_step(&self, w: &mut WriteWalk, dest: *mut u8, schema: &Schema, _idx: usize) {
+            w.child(&self.items, dest.add(schema.offsets[0]), &schema.parameters[0]);
+            w.child(&self.next, dest.add(schema.offsets[1]), &schema.parameters[1]);
+            w.child(&self.tag, dest.add(schema.offsets[2]), &schema.parameters[2]);
+        }
+    }
+    impl FromVoidstar for Doc {
+        unsafe fn read_step(w: &mut ReadWalk, schema: &Schema, data: *const u8, _idx: usize) {
+            w.push_finish::<Self>(schema, data);
+            w.child_step::<Vec<(i64, String)>>(&schema.parameters[0], data.add(schema.offsets[0]));
+            w.child_step::<Option<Box<Doc>>>(&schema.parameters[1], data.add(schema.offsets[1]));
+            w.child_step::<(i64, i64)>(&schema.parameters[2], data.add(schema.offsets[2]));
+        }
+        unsafe fn read_finish(w: &mut ReadWalk, schema: &Schema, data: *const u8) -> Self {
+            Doc {
+                items: w.child_read::<Vec<(i64, String)>>(&schema.parameters[0], data.add(schema.offsets[0])),
+                next: w.child_read::<Option<Box<Doc>>>(&schema.parameters[1], data.add(schema.offsets[1])),
+                tag: w.child_read::<(i64, i64)>(&schema.parameters[2], data.add(schema.offsets[2])),
+            }
+        }
+    }
+
+    #[test]
+    fn flat_fields_beside_a_recursive_one() {
+        unsafe {
+            const SCHEMA: &str = "&3Docm35itemsat2i8s4next?^3Doc3tagt2i8i8";
+            let mut doc = Doc { items: vec![(0, "z".to_string())], next: None, tag: (0, 0) };
+            for i in 1..=3 {
+                doc = Doc {
+                    items: vec![(i, format!("a{i}")), (i + 10, format!("b{i}"))],
+                    next: Some(Box::new(doc)),
+                    tag: (i, -i),
+                };
+            }
+            assert_eq!(roundtrip::<Doc>(SCHEMA, &doc), doc);
         }
     }
 

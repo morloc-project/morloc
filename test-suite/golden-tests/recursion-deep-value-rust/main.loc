@@ -1,0 +1,25 @@
+-- A recursive `data` value of depth 30000 crosses a manifold boundary
+-- (put_value / get_value) in the Rust pool. The chain is built by a
+-- tail-recursive morloc function (a native loop) and counted by a sourced
+-- Rust function that walks it by reference: morloc-level projection on a Rust
+-- value clones the projected subtree, which is a separate cost (issue 91) and
+-- would dominate at this depth. What this pins is that the pool's
+-- (de)serializer walks the value without one machine-stack frame per level.
+-- The depth is kept under the recursive Box destructor limit.
+module main (chainCount)
+
+import root-rust
+
+data Tree = Leaf | Node Int Tree Tree
+
+source Rust from "spine.rs" ("spine_count" as spineCount)
+
+spineCount :: Tree -> Int
+
+chainHelp :: Int -> Tree -> Tree
+chainHelp n acc
+  ? n == 0 = acc
+  : chainHelp (n - 1) (Node 1 Leaf acc)
+
+chainCount :: Int -> Int
+chainCount n = spineCount (chainHelp n Leaf)

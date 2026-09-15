@@ -1,0 +1,22 @@
+-- Lists whose R spelling is not the element-by-element list the wire has:
+--   * a list of optionals with an absent element in the middle. R spells an
+--     absent value as NULL, which is also what the reader hands back for a
+--     nil; a reader that takes a NULL element for a failure drops the list.
+--   * a one-element list of strings, which R spells as a character vector of
+--     length 1, the same shape as a single string. Sized as a string it is
+--     nine bytes short of the array the writer produces.
+-- Each must come back as sent.
+module main (roundtrip, roundtripStrs)
+
+import root-r
+
+source R from "keep.R" ("keep", "keep" as keepStrs)
+
+keep :: [?Int] -> [?Int]
+keepStrs :: [Str] -> [Str]
+
+roundtrip :: [?Int] -> [?Int]
+roundtrip xs = keep xs
+
+roundtripStrs :: [Str] -> [Str]
+roundtripStrs xs = keepStrs xs

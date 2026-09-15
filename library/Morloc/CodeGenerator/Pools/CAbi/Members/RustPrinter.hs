@@ -468,7 +468,7 @@ tupled1 ts = tupled ts
 --
 -- The slot layout -- a tag, padding, and a relative pointer to the arm's
 -- fields written out of line -- lives in the runtime, not here. Generated
--- code names an arm and hands over its payload; the runtime does the
+-- code names an arm and hands its payload to the walk; the runtime does the
 -- allocation, alignment and pointer encoding. That is the same division the
 -- other impls keep, and it is forced anyway: the relative-pointer helpers
 -- are not part of the runtime crate's public surface.
@@ -483,39 +483,38 @@ printVariantImpls name arms = vsep [toImpl, "", fromImpl]
     -- in expression and pattern position alike, for a plain name and for a
     -- generic instantiation the impl is written for.
     armPat c ts = "Self::" <> pretty c <> (if null ts then "" else "(mlc_b)")
+    -- The payload's native type, as the enum declares it.
+    armTy ts = "::std::boxed::Box<" <> tupled1 ts <> ">"
+    -- The runtime range-checks a tag at the wire boundary, so reaching this
+    -- arm means the value and its schema disagree: a bug, not bad input.
+    -- Here the tag would otherwise index the arm list.
+    badTag = "t => panic!(\"" <> name <> ": no constructor for tag {}\", t),"
 
     toImpl =
       vsep
         [ "impl ToVoidstar for" <+> name <+> "{"
         , indent 4 $ vsep
-            [ "fn shm_size(&self, schema: &Schema) -> usize {"
+            [ "fn size_step(&self, w: &mut SizeWalk, schema: &Schema, _idx: usize) {"
             , indent 4 $ vsep
-                -- The declaration must be in scope for any `^name`
-                -- back-reference inside an arm to resolve. Without this a
-                -- recursive variant works only when it is the call's
-                -- top-level schema -- reached through a list, a tuple, an
-                -- optional or a record field, it aborts.
-                [ "let _mlc_g = RecurScope::enter(resolve_recur(schema));"
-                , "match self {"
+                [ "match self {"
                 , indent 4 $ vsep
                     [ armPat c ts <+> "=>" <+>
                         (if null ts
-                           then "variant_size_nullary(schema),"
-                           else "variant_size_payload(schema, &resolve_recur(schema).parameters["
+                           then "w.total += schema.width as isize,"
+                           else "w.variant_payload(schema, &schema.parameters["
                                   <> pretty i <> "], mlc_b),")
                     | (i, (c, ts)) <- idxArms ]
                 , "}"
                 ]
             , "}"
-            , "unsafe fn write(&self, dest: *mut u8, cursor: &mut *mut u8, schema: &Schema) {"
+            , "unsafe fn write_step(&self, w: &mut WriteWalk, dest: *mut u8, schema: &Schema, _idx: usize) {"
             , indent 4 $ vsep
-                [ "let _mlc_g = RecurScope::enter(resolve_recur(schema));"
-                , "match self {"
+                [ "match self {"
                 , indent 4 $ vsep
                     [ armPat c ts <+> "=>" <+>
                         (if null ts
                            then "write_variant_nullary(dest, " <> pretty i <> "u8),"
-                           else "write_variant_payload(dest, cursor, &resolve_recur(schema).parameters["
+                           else "w.variant_payload(dest, &schema.parameters["
                                   <> pretty i <> "], " <> pretty i <> "u8, mlc_b),")
                     | (i, (c, ts)) <- idxArms ]
                 , "}"
@@ -529,24 +528,34 @@ printVariantImpls name arms = vsep [toImpl, "", fromImpl]
       vsep
         [ "impl FromVoidstar for" <+> name <+> "{"
         , indent 4 $ vsep
-            [ "unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self {"
+            [ "unsafe fn read_step(w: &mut ReadWalk, schema: &Schema, data: *const u8, _idx: usize) {"
             , indent 4 $ vsep
-                [ "let mlc_s = resolve_recur(schema);"
-                , "let _mlc_g = RecurScope::enter(mlc_s);"
+                [ "w.push_finish::<Self>(schema, data);"
                 , "match read_variant_tag(data) {"
                 , indent 4 $ vsep
                     ( [ pretty i <+> "=>" <+>
                           (if null ts
+                             then "{}"
+                             else "{ let p = w.payload_ptr(data); w.child_step::<"
+                                    <> armTy ts <> ">(&schema.parameters[" <> pretty i <> "], p); }")
+                      | (i, (_, ts)) <- idxArms ]
+                      <> [badTag]
+                    )
+                , "}"
+                ]
+            , "}"
+            , "unsafe fn read_finish(w: &mut ReadWalk, schema: &Schema, data: *const u8) -> Self {"
+            , indent 4 $ vsep
+                [ "match read_variant_tag(data) {"
+                , indent 4 $ vsep
+                    ( [ pretty i <+> "=>" <+>
+                          (if null ts
                              then "Self::" <> pretty c <> ","
-                             else "Self::" <> pretty c
-                                    <> parens ("read_variant_payload(&mlc_s.parameters["
-                                                 <> pretty i <> "], data, base)") <> ",")
+                             else "{ let p = w.payload_ptr(data); Self::" <> pretty c
+                                    <> parens ("w.child_read::<" <> armTy ts <> ">(&schema.parameters["
+                                                 <> pretty i <> "], p)") <> " }")
                       | (i, (c, ts)) <- idxArms ]
-                      -- The runtime range-checks a tag at the wire boundary,
-                      -- so reaching this arm means the value and its schema
-                      -- disagree: a bug, not bad input. Here the tag would
-                      -- otherwise index the arm list.
-                      <> ["t => panic!(\"" <> name <> ": no constructor for tag {}\", t),"]
+                      <> [badTag]
                     )
                 , "}"
                 ]
@@ -567,7 +576,8 @@ printEnumImpls name ctors = vsep [toImpl, "", fromImpl]
       vsep
         [ "impl ToVoidstar for" <+> name <+> "{"
         , indent 4 $ vsep
-            [ "fn shm_size(&self, schema: &Schema) -> usize {"
+            [ "const IS_LEAF: bool = true;"
+            , "fn shm_size(&self, schema: &Schema) -> usize {"
             , indent 4 "resolve_recur(schema).width"
             , "}"
             , "unsafe fn write(&self, dest: *mut u8, _cursor: &mut *mut u8, _schema: &Schema) {"
@@ -580,7 +590,8 @@ printEnumImpls name ctors = vsep [toImpl, "", fromImpl]
       vsep
         [ "impl FromVoidstar for" <+> name <+> "{"
         , indent 4 $ vsep
-            [ "unsafe fn read(_schema: &Schema, data: *const u8, _base: *const u8) -> Self {"
+            [ "const IS_LEAF: bool = true;"
+            , "unsafe fn read(_schema: &Schema, data: *const u8, _base: *const u8) -> Self {"
             , indent 4 $ vsep
                 [ "match *data {"
                 , indent 4 $ vsep
@@ -610,16 +621,15 @@ data ClosureMarshal = ClosureMarshal
 -- place at its schema offset (mirrors the hand-written LL template). Fields are
 -- (escaped-name, rendered-type, is-variable-width, closure-marshal). @params@ are
 -- the generic type parameters; each is bounded by the marshalling trait the impl
--- needs (`impl<T1: ToVoidstar> ToVoidstar for S<T1>`). Recur scope is entered so a
--- back-reference resolves at any depth; fully fixed-width records short-circuit
--- @shm_size@ to @schema.width@. A function field carries a 'ClosureMarshal' and is
--- reified/reflected instead of marshalled directly.
+-- needs (`impl<T1: ToVoidstar> ToVoidstar for S<T1>`). Fully fixed-width records
+-- short-circuit the size step to @schema.width@. A function field carries a
+-- 'ClosureMarshal' and is reified/reflected instead of marshalled directly.
 printRecordImpls :: MDoc -> [MDoc] -> [(MDoc, MDoc, Bool, Maybe ClosureMarshal)] -> MDoc
 printRecordImpls name params fields = vsep [toImpl, "", fromImpl]
   where
     idx = zip [0 :: Int ..] fields
     -- A closure field's wire form (ClosureOrigin) is variable-width, so a record
-    -- with any closure field cannot short-circuit shm_size to schema.width.
+    -- with any closure field cannot short-circuit the size to schema.width.
     allFixed = all (\(_, _, v, cm) -> not v && isPlain cm) fields
     isPlain Nothing = True
     isPlain (Just _) = False
@@ -627,62 +637,54 @@ printRecordImpls name params fields = vsep [toImpl, "", fromImpl]
     -- Bound every generic param by `bound` for the impl's `impl<..>` header.
     boundedParams bound = paramList [p <> ":" <+> bound | p <- params]
 
-    -- The writable value for field `f`: a closure field reifies to its
-    -- ClosureOrigin wire tuple (which IS ToVoidstar) first; a plain field is
-    -- marshalled directly. `reifyN` BORROWS the origin (`Option<&ClosureOrigin>`),
-    -- so the two callers (shm_size, write) share it without cloning the captured
-    -- packets twice.
-    fieldVal f Nothing = "self." <> f
-    fieldVal f (Just cm) =
-      "rustmorloc::require_origin(self." <> f <> "." <> cmReify cm <> "())"
+    fieldSchema i = "&schema.parameters[" <> pretty i <> "]"
+    fieldSlot i = "dest.add(schema.offsets[" <> pretty i <> "])"
+    fieldData i = "data.add(schema.offsets[" <> pretty i <> "])"
+
+    -- Hand a field to the walk: a plain field by reference; a closure field
+    -- reifies to its ClosureOrigin wire tuple (which IS ToVoidstar), owned by
+    -- the walk since the step's own frame does not outlive the call.
+    -- `reifyN` BORROWS the origin (`Option<&ClosureOrigin>`), so the two
+    -- callers (size, write) share it without cloning the captured packets
+    -- twice.
+    sizeField (i, (f, _, _, Nothing)) =
+      "w.child(&self." <> f <> ", " <> fieldSchema i <> ", true);"
+    sizeField (i, (f, _, _, Just cm)) =
+      "w.child_owned(rustmorloc::require_origin(self." <> f <> "." <> cmReify cm <> "()), "
+        <> fieldSchema i <> ", true);"
+    writeField (i, (f, _, _, Nothing)) =
+      "w.child(&self." <> f <> ", " <> fieldSlot i <> ", " <> fieldSchema i <> ");"
+    writeField (i, (f, _, _, Just cm)) =
+      "w.child_owned(rustmorloc::require_origin(self." <> f <> "." <> cmReify cm <> "()), "
+        <> fieldSlot i <> ", " <> fieldSchema i <> ");"
 
     toImpl =
       vsep
         [ "impl" <> boundedParams "ToVoidstar" <+> "ToVoidstar for" <+> ty <+> "{"
         , indent 4 $ vsep
-            [ "fn shm_size(&self, schema: &Schema) -> usize {"
-            , indent 4 shmBody
+            [ "fn size_step(&self, w: &mut SizeWalk, schema: &Schema, _idx: usize) {"
+            , indent 4 sizeBody
             , "}"
-            , "unsafe fn write(&self, dest: *mut u8, cursor: &mut *mut u8, schema: &Schema) {"
-            , indent 4 writeBody
+            , "unsafe fn write_step(&self, w: &mut WriteWalk, dest: *mut u8, schema: &Schema, _idx: usize) {"
+            , indent 4 (vsep (map writeField idx))
             , "}"
             ]
         , "}"
         ]
-    shmBody
-      | allFixed = vsep ["let schema = resolve_recur(schema);", "schema.width"]
-      | otherwise =
-          vsep $
-            [ "let schema = resolve_recur(schema);"
-            , "let _g = RecurScope::enter(schema);"
-            , "let mut total = schema.width;"
-            ]
-              ++ concat
-                [ [ "let fs" <> pretty i <+> "= resolve_recur(&schema.parameters[" <> pretty i <> "]);"
-                  , "let e" <> pretty i <+> "= " <> fieldVal f cm <> ".shm_size(fs" <> pretty i <> ");"
-                  , "if e" <> pretty i <+> "> fs" <> pretty i <> ".width { total += e" <> pretty i <+> "- fs" <> pretty i <> ".width; }"
-                  ]
-                | (i, (f, _, _, cm)) <- idx
-                ]
-              ++ ["total"]
-    writeBody =
-      vsep $
-        [ "let schema = resolve_recur(schema);"
-        , "let _g = RecurScope::enter(schema);"
-        ]
-          ++ [ fieldVal f cm <> ".write(dest.add(schema.offsets[" <> pretty i <> "]), cursor, resolve_recur(&schema.parameters[" <> pretty i <> "]));"
-             | (i, (f, _, _, cm)) <- idx
-             ]
+    sizeBody
+      | allFixed = "w.total += schema.width as isize;"
+      | otherwise = vsep ("w.total += schema.width as isize;" : map sizeField idx)
 
     fromImpl =
       vsep
         [ "impl" <> boundedParams "FromVoidstar" <+> "FromVoidstar for" <+> ty <+> "{"
         , indent 4 $ vsep
-            [ "unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self {"
+            [ "unsafe fn read_step(w: &mut ReadWalk, schema: &Schema, data: *const u8, _idx: usize) {"
+            , indent 4 $ vsep ("w.push_finish::<Self>(schema, data);" : map stepField idx)
+            , "}"
+            , "unsafe fn read_finish(w: &mut ReadWalk, schema: &Schema, data: *const u8) -> Self {"
             , indent 4 $ vsep
-                [ "let schema = resolve_recur(schema);"
-                , "let _g = RecurScope::enter(schema);"
-                , "Self {"
+                [ "Self {"
                 , indent 4 $ vsep (map readField idx)
                 , "}"
                 ]
@@ -690,12 +692,17 @@ printRecordImpls name params fields = vsep [toImpl, "", fromImpl]
             ]
         , "}"
         ]
-    -- A plain field reads via FromVoidstar directly; a closure field reads its
+    -- A plain field's frame is for its own type; a closure field's is for the
+    -- ClosureOrigin wire tuple its slot holds.
+    stepField (i, (_, t, _, Nothing)) =
+      "w.child_step::<" <> t <> ">(" <> fieldSchema i <> ", " <> fieldData i <> ");"
+    stepField (i, (_, _, _, Just _)) =
+      "w.child_step::<rustmorloc::ClosureOrigin>(" <> fieldSchema i <> ", " <> fieldData i <> ");"
+    -- A plain field reads via the walk directly; a closure field reads its
     -- ClosureOrigin wire tuple off the slot and reflects it into a callable.
     readField (i, (f, t, _, Nothing)) =
-      f <> ": <" <> t <> " as FromVoidstar>::read(resolve_recur(&schema.parameters[" <> pretty i <> "]), data.add(schema.offsets[" <> pretty i <> "]), base),"
+      f <> ": w.child_read::<" <> t <> ">(" <> fieldSchema i <> ", " <> fieldData i <> "),"
     readField (i, (f, _, _, Just cm)) =
       let slotRead =
-            "<rustmorloc::ClosureOrigin as FromVoidstar>::read(resolve_recur(&schema.parameters["
-              <> pretty i <> "]), data.add(schema.offsets[" <> pretty i <> "]), base)"
+            "w.child_read::<rustmorloc::ClosureOrigin>(" <> fieldSchema i <> ", " <> fieldData i <> ")"
        in f <> ": " <> cmReflect cm slotRead <> ","
