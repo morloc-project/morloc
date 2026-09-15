@@ -1,5 +1,5 @@
-Unreleased
-----------
+0.106.0 [2026-09-15]
+--------------------
 
  * tier generated-program help by repeating -h (-h, -hh, -hhh)
  * harden the bare `Table`
