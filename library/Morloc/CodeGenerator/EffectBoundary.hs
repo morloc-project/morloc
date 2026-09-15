@@ -52,7 +52,6 @@ module Morloc.CodeGenerator.EffectBoundary
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Data.GMap as GMap
 import Morloc.Data.Doc
-import Control.Monad (foldM)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Map as Map
 import qualified Data.Set as Set
@@ -500,15 +499,13 @@ lazyAdaptHostValue lang gidx t e = do
     _ -> return ()
   return adapted
 
--- | The other direction: a morloc function value handed to a host. The
--- host calls it and takes the result, so the wrapper runs the suspension
--- ("a morloc function handed to a host at an @A -> \<E\> C@ slot is passed
--- as @\a -> force (g a)@", the law, rule 8). Used for a value that is not
--- a lambda whose return could be forced in place -- a variable, say -- and
+-- | Which way a function value crosses the boundary. Inbound is a host
+-- function handed to morloc. Outbound is the other direction, a morloc
+-- function value handed to a host: the host calls it and takes the
+-- result, so the wrapper runs the suspension ("a morloc function handed
+-- to a host at an @A -> \<E\> C@ slot is passed as @\a -> force (g a)@",
+-- the law, rule 8). Outbound is reached from Inbound through 'flipDir',
 -- for the arguments an inbound wrapper hands on to the host.
-eagerAdaptValue :: Lang -> Int -> Type -> PolyExpr -> MorlocMonad (Maybe (Type, PolyExpr))
-eagerAdaptValue = adaptValue Outbound
-
 data AdaptDir = Inbound | Outbound
 
 -- | Adapt one function value across the morloc/host boundary.

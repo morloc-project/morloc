@@ -880,8 +880,6 @@ collectSerialObjects = concatMap serialObjectsOfAST . allSerialASTs
               DeserializeN_ _ s child -> s : child
               _ -> foldlNE (<>) mempty folded
         }
-    serialObjectsOf :: SerialAST -> [(FVar, [(Key, SerialAST)])]
-    serialObjectsOf = serialObjectsOfAST
 
 -- | Every record node in a wire form, with its fields. A record reached only
 -- through a closure's captured or bound arguments -- one that no manifold

@@ -393,6 +393,6 @@ describeWriteFailure _ = return "Failed to write generated files."
 runSysCommand :: SysCommand -> MorlocMonad ()
 runSysCommand (SysExe path) = liftIO $ callProcess "chmod" ["755", path]
 runSysCommand (SysRun (Code cmd)) = MM.runCommand "runSysCommand" cmd
-runSysCommand (SysMergeCargoLock base env pool) = liftIO $ CL.mergeLockFiles base env pool
+runSysCommand (SysMergeCargoLock base envLock pool) = liftIO $ CL.mergeLockFiles base envLock pool
 runSysCommand other =
   MM.throwSystemError $ "Unsupported SysCommand: " <> pretty (show other)
