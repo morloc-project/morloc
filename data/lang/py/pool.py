@@ -625,10 +625,14 @@ def run_thread_pool(socket_path, tmpdir, shm_basename):
                 try:
                     client_fd = job_q.get(timeout=0.1)
                 except queue.Empty:
-                    # Reap a surplus idle worker (always keep at least one) so a
-                    # re-entrancy burst does not leave threads around forever.
+                    # Reap a surplus idle worker so a re-entrancy burst does not
+                    # leave threads around forever, but always keep one idle:
+                    # a busy worker may be blocked in a foreign call whose
+                    # callee calls back into this pool, and that callback can
+                    # arrive long after the pre-spawn above. With no idle
+                    # worker it would sit in the queue forever (deadlock).
                     with sched:
-                        if counts["total"] > 1:
+                        if counts["total"] - counts["busy"] > 1:
                             counts["total"] -= 1
                             released = True
                             # shm_tracker is __thread and its SHM is freed lazily
