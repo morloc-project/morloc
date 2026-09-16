@@ -1,3 +1,9 @@
+Unreleased
+----------
+
+ * `morloc make --install` and `morloc install --build` provision declared
+   dependencies and languages inside a managed environment, as `morloc make` does
+
 0.106.0 [2026-09-15]
 --------------------
 

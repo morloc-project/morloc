@@ -221,10 +221,17 @@ buildProgram (manifest, wrappers, pools) = do
 -- @projectRoot@ is the absolute directory the hook resolves local (filesystem
 -- path) dependencies against; the caller resolves it before the build changes
 -- directory, since this runs from inside the staging tree. Runs only when BUILDING
--- (not eval, not install -- the manager provisions those) INSIDE a managed
--- environment (@MORLOC_ENV@ set) a program that actually DECLARES dependencies;
--- every other case is a silent no-op. CWD is the staging build dir, so the
--- freshly written @envspec.json@ is at a relative path.
+-- (not eval -- the manager provisions that) INSIDE a managed environment
+-- (@MORLOC_ENV@ set) a program that declares dependencies or has a pool; every
+-- other case is a silent no-op. CWD is the staging build dir, so the freshly
+-- written @envspec.json@ is at a relative path.
+--
+-- An install build (@morloc make --install@, @morloc install --build@) syncs
+-- too, with @--installed@ so the hook records the program as part of the
+-- environment's installed baseline rather than as a transient scratch build.
+-- When the manager drives the install it has already provisioned the module
+-- closure, and the hook's cached solve is a near-no-op; when a user runs the
+-- install directly inside the environment, this is the only provisioning step.
 --
 -- The compiler's own path is passed to the hook as @MORLOC_BIN@ so the hook's
 -- reverse @morloc lang-support@ call resolves the exact driving compiler without
@@ -251,8 +258,8 @@ syncEnvDeps projectRoot = do
       needsSync = declaresDeps || not (null usesLangs)
   case (mEnv, mKey) of
     (Just envVal, Just key)
-      | not (null envVal) && needsSync && not isEval && not isInstall ->
-          runSync declaresDeps key projectRoot
+      | not (null envVal) && needsSync && not isEval ->
+          runSync declaresDeps isInstall key projectRoot
     _ -> return ()
   where
     packageHasDeps pm =
@@ -268,13 +275,13 @@ syncEnvDeps projectRoot = do
     -- provisioner is a hard error. A language-only trigger degrades to a warning
     -- instead -- the languages may already be provisioned (by `mim new`/init), so
     -- a missing hook must not brick a build that would otherwise succeed.
-    runSync requireHook key root = do
+    runSync requireHook installed key root = do
       mhook <- liftIO $ lookupEnv "MORLOC_BUILD_HOOK"
       case mhook of
         Just hook | not (null hook) -> do
           MM.say $ "Provisioning environment dependencies (" <> pretty hook <> " sync)..."
           self <- liftIO getExecutablePath
-          result <- liftIO (runHook hook self key root)
+          result <- liftIO (runHook hook self installed key root)
           case result of
             Left e ->
               MM.throwSystemError $ "could not run " <> pretty hook <> ": " <> pretty (show e)
@@ -305,15 +312,16 @@ syncEnvDeps projectRoot = do
     -- compiler's path so the hook's reverse `morloc lang-support` call resolves
     -- the driving compiler without relying on PATH. `try` keeps a spawn failure
     -- (e.g. a non-executable hook) inside the error monad.
-    runHook :: FilePath -> FilePath -> String -> FilePath -> IO (Either IOException ExitCode)
-    runHook hook self key root = try $ do
+    runHook :: FilePath -> FilePath -> Bool -> String -> FilePath -> IO (Either IOException ExitCode)
+    runHook hook self installed key root = try $ do
       baseEnv <- getEnvironment
       let childEnv = ("MORLOC_BIN", self) : filter ((/= "MORLOC_BIN") . fst) baseEnv
           -- --root is the project root (the entry module's directory), against
           -- which local (filesystem-path) dependency paths are resolved.
-          spec =
-            (proc hook ["sync", "--name", key, "--spec", "envspec.json", "--root", root])
-              { env = Just childEnv }
+          args =
+            ["sync", "--name", key, "--spec", "envspec.json", "--root", root]
+              ++ ["--installed" | installed]
+          spec = (proc hook args) { env = Just childEnv }
       (_, _, _, ph) <- createProcess spec
       waitForProcess ph
 

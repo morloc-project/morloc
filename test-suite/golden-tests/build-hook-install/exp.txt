@@ -1,0 +1,7 @@
+--- make ---
+3
+--- make --install ---
+7
+--- hook.log ---
+sync --name hookprog --spec envspec.json --root <dir>
+sync --name hookprog --spec envspec.json --root <dir> --installed

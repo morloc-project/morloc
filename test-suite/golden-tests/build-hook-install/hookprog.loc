@@ -1,0 +1,11 @@
+-- The environment build hook (MORLOC_BUILD_HOOK, run when MORLOC_ENV is set)
+-- must fire for every build that compiles pools: a plain `morloc make` and a
+-- `morloc make --install` alike. An install build additionally passes
+-- `--installed` so the hook records the program as installed rather than as a
+-- transient scratch build.
+module hookprog (add)
+
+import root-py
+
+add :: Int -> Int -> Int
+add x y = x + y
