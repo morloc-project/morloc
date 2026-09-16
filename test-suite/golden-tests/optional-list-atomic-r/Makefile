@@ -5,8 +5,8 @@ all:
 	./nexus ints 3 >> obs.txt 2>> obs.err
 	./nexus reals 3 >> obs.txt 2>> obs.err
 	./nexus bools 3 >> obs.txt 2>> obs.err
-	./nexus ints 20000 2>> obs.err | tr -d '[]' | tr ',' ' ' | wc -w >> obs.txt
-	./nexus reals 20000 2>> obs.err | tr -d '[]' | tr ',' ' ' | wc -w >> obs.txt
+	./nexus ints 20000 2>> obs.err | tr -d '[]' | tr ',' ' ' | wc -w | tr -d ' ' >> obs.txt
+	./nexus reals 20000 2>> obs.err | tr -d '[]' | tr ',' ' ' | wc -w | tr -d ' ' >> obs.txt
 
 clean:
 	rm -rf nexus pools __pycache__ *.err
