@@ -372,7 +372,7 @@ makeAndInstall path outfile code extraIncludes verbosity config buildConfig forc
               Just pats -> do
                 Install.validateIncludeCoverage packageRoot pats directSourcePaths
               Nothing -> return ()
-            Install.installProgram (Config.configHome config) installDir installName mergedIncludes force
+            Install.installProgram (Config.configHome config) installDir installName packageRoot mergedIncludes force
             ) :: IO (Either SomeException ())
           case installResult of
             Right () -> return True
@@ -536,7 +536,7 @@ cmdEval args verbosity config buildConfig = do
                   return False
                 Just installDir -> do
                   evalInstallResult <- try (do
-                    Install.installProgram (Config.configHome config) installDir saveName mergedIncludes True
+                    Install.installProgram (Config.configHome config) installDir saveName tmpDir mergedIncludes True
                     writeEvalMeta (Config.fdbDir config) saveName rawExpr
                     ) :: IO (Either SomeException ())
                   case evalInstallResult of
