@@ -1,0 +1,56 @@
+-- A sourced Python file is the module its path names, and only that module.
+--
+-- The pool resolves a `source`d file under the program's source roots and
+-- loads it by location. It used to register the result only under a reserved
+-- key, never under the path's own dotted name, so user code that later said
+-- `import plain` or `from app.main import state` reached a second copy of the
+-- same file: two module objects with separate globals, one holding the state
+-- morloc wrote and the other empty. The reserved spec name also left
+-- `__package__` blank, so a relative import inside a sourced package file
+-- (`from .util import tag`) failed with "no known parent package".
+--
+-- Each pair below writes through the function morloc sourced and reads
+-- through an ordinary import; both must land on one object, and `__name__`
+-- must be the dotted path. app/ is a regular package (with __init__.py) and
+-- ns/ a namespace package (without); a sourced file in each imports a sibling
+-- that is not itself sourced, both relatively and by full name. app/copy.py
+-- is a stdlib-named leaf inside a package: it is registered as `app.copy`,
+-- and its own `import copy` still reaches the standard library. The top-level
+-- stdlib-name collision (a sourced copy.py, json.py) is pinned by
+-- python-source-name-collision; a file that must not take a real module's
+-- name keeps the reserved key.
+
+module main (plainState, appState, appCopy, rel, nsLeaf)
+
+import root-py
+
+source Py from "plain.py" ("set_plain")
+source Py from "app/main.py" ("set_state")
+source Py from "app/rel.py" ("rel_kind")
+source Py from "app/copy.py" ("app_copy_kind")
+source Py from "ns/leaf.py" ("ns_kind")
+source Py from "reader.py" ("read_plain", "read_app", "read_app_copy")
+
+set_plain     :: Str -> Str
+set_state     :: Str -> Str
+rel_kind      :: Str -> Str
+app_copy_kind :: Str -> Str
+ns_kind       :: Str -> Str
+read_plain    :: Str -> Str
+read_app      :: Str -> Str
+read_app_copy :: Str -> Str
+
+plainState :: Str -> Str
+plainState x = read_plain (set_plain x)
+
+appState :: Str -> Str
+appState x = read_app (set_state x)
+
+appCopy :: Str -> Str
+appCopy = read_app_copy
+
+rel :: Str -> Str
+rel = rel_kind
+
+nsLeaf :: Str -> Str
+nsLeaf = ns_kind

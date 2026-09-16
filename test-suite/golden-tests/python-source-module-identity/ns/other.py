@@ -1,0 +1,2 @@
+def tag():
+    return "other"

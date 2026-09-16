@@ -1,0 +1,10 @@
+--- plainState ---
+"plain:hi:plain:True"
+--- appState ---
+"app.main:hi:app.main:True:util"
+--- appCopy ---
+"app.copy:hi:app.copy"
+--- rel ---
+"rel:util:util:app.rel"
+--- nsLeaf ---
+"ns:other:other:ns.leaf"

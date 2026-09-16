@@ -65,6 +65,22 @@ _mlc_user_sources = r'''
 _mlc_sources_loaded = False
 _mlc_source_error = None
 
+def _mlc_import_resolves_under(top, root):
+    # True when a plain `import top` from user code reaches the file or package
+    # directory under root. The standard machinery and the source-root search
+    # then agree on the file, so the module can carry its real name.
+    try:
+        spec = importlib.util.find_spec(top)
+    except (ImportError, ValueError):
+        return False
+    if spec is None:
+        return False
+    want = os.path.realpath(os.path.join(root, top))
+    if spec.submodule_search_locations:
+        return any(os.path.realpath(p) == want for p in spec.submodule_search_locations)
+    return bool(spec.origin) and os.path.realpath(spec.origin) == want + ".py"
+
+
 def _mlc_import_source(module_path):
     # Load a `source`d file by location rather than by module name.
     #
@@ -76,13 +92,26 @@ def _mlc_import_source(module_path):
     # roots (the program's own, the working directory, the morloc module plane)
     # and load it from there.
     #
-    # The module is registered under a reserved key, so it neither reads nor
-    # replaces a real module of the same name: a plain `import copy` from inside
-    # a user file still reaches the standard library.
+    # Whenever an ordinary import of the path's top-level name would land on
+    # the same tree, the file is imported under its real dotted name through
+    # the standard machinery: parent packages get their `__init__.py` and
+    # `__path__`, relative imports inside the file work, and user code that
+    # later says `from app.main import x` gets this module rather than a
+    # second copy with its own globals.
+    #
+    # Otherwise the name belongs to something else -- the standard library, an
+    # installed package, the runtime -- and the module is registered under a
+    # reserved key, so it neither reads nor replaces that module: a plain
+    # `import copy` from inside a user file still reaches the standard library.
     rel = module_path.replace(".", os.sep) + ".py"
     for root in _mlc_source_roots:
         candidate = os.path.join(root, rel)
         if os.path.isfile(candidate):
+            if _mlc_import_resolves_under(module_path.split(".")[0], root):
+                module = importlib.import_module(module_path)
+                found = getattr(module, "__file__", None)
+                if found and os.path.realpath(found) == os.path.realpath(candidate):
+                    return module
             key = "_mlc_src_" + module_path.replace(".", "_")
             spec = importlib.util.spec_from_file_location(key, candidate)
             module = importlib.util.module_from_spec(spec)
