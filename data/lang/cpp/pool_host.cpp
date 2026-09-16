@@ -60,11 +60,20 @@ int main(int argc, char* argv[]) {
     }
 
     // Print a backtrace to stderr on a fatal signal (see mlc_pool_crash_handler).
-    std::signal(SIGSEGV, mlc_pool_crash_handler);
-    std::signal(SIGABRT, mlc_pool_crash_handler);
-    std::signal(SIGBUS,  mlc_pool_crash_handler);
-    std::signal(SIGILL,  mlc_pool_crash_handler);
-    std::signal(SIGFPE,  mlc_pool_crash_handler);
+    // SA_ONSTACK runs the handler on the thread's alternate signal stack (each
+    // pool worker installs one) so it still runs when the fault is a stack
+    // overflow; without that the kernel cannot deliver the signal at all and
+    // the pool dies with no output (SIGILL on macOS).
+    {
+        struct sigaction sa;
+        std::memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = mlc_pool_crash_handler;
+        sa.sa_flags = SA_ONSTACK;
+        sigemptyset(&sa.sa_mask);
+        for (int sig : {SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE}) {
+            sigaction(sig, &sa, nullptr);
+        }
+    }
 
     // Request SIGTERM when the parent (nexus) dies. Without this,
     // SIGKILL on the nexus leaves pool processes orphaned with

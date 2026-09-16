@@ -227,6 +227,67 @@ const WORKER_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 
 // ── Worker thread ────────────────────────────────────────────────────────────
 
+// Stack of a worker thread. A recursive `data` or record value still costs
+// one machine frame per level in a few places: the bounded size walk in
+// ffi.rs (about 1.2 MiB at the 64 KiB inline threshold on x86_64) and the
+// C++ shared_ptr / Rust Box destructor chains (32-65 B per level on x86_64
+// glibc, more on arm64 and under libc++, which do not inline the release
+// path). All three overflow the 2 MiB std default on macOS at depths that
+// pass on Linux. Matching the 8 MiB main-thread default gives a worker the
+// depth an ordinary program gets; only address space is reserved, pages are
+// committed as touched. RUST_MIN_STACK, when set, is honoured unchanged
+// (std applies it when no size is given).
+const WORKER_STACK_SIZE: usize = 8 << 20;
+
+// Alternate signal stack of a worker thread. Without one, a stack overflow in
+// the worker cannot run the process's SIGSEGV handler at all: the kernel has
+// nowhere to push the signal frame and kills the process silently (Linux) or
+// with SIGILL (macOS), hiding the backtrace the handler would have printed.
+const WORKER_ALTSTACK_SIZE: usize = 256 << 10;
+
+// A worker's alternate signal stack, released when the worker exits.
+struct AltStack { base: *mut c_void }
+
+impl AltStack {
+    unsafe fn install() -> Option<AltStack> {
+        let base = libc::mmap(
+            ptr::null_mut(), WORKER_ALTSTACK_SIZE,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANON, -1, 0,
+        );
+        if base == libc::MAP_FAILED { return None; }
+        let ss = libc::stack_t { ss_sp: base, ss_size: WORKER_ALTSTACK_SIZE, ss_flags: 0 };
+        if libc::sigaltstack(&ss, ptr::null_mut()) != 0 {
+            libc::munmap(base, WORKER_ALTSTACK_SIZE);
+            return None;
+        }
+        Some(AltStack { base })
+    }
+}
+
+impl Drop for AltStack {
+    fn drop(&mut self) {
+        unsafe {
+            let ss = libc::stack_t { ss_sp: ptr::null_mut(), ss_size: 0, ss_flags: libc::SS_DISABLE };
+            libc::sigaltstack(&ss, ptr::null_mut());
+            libc::munmap(self.base, WORKER_ALTSTACK_SIZE);
+        }
+    }
+}
+
+unsafe fn spawn_worker(queue: &Arc<JobQueue>, config: &PoolConfig) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let q = Arc::clone(queue);
+    let cfg = ptr::read(config); // Copy config for thread
+    let mut builder = std::thread::Builder::new();
+    if std::env::var_os("RUST_MIN_STACK").is_none() {
+        builder = builder.stack_size(WORKER_STACK_SIZE);
+    }
+    builder.spawn(move || {
+        let _altstack = AltStack::install();
+        worker_loop(&q, &cfg);
+    })
+}
+
 unsafe fn worker_loop(queue: &JobQueue, config: &PoolConfig) {
     extern "C" {
         fn stream_from_client(fd: i32, errmsg: *mut *mut c_char) -> *mut u8;
@@ -337,11 +398,7 @@ unsafe fn pool_main_threads(config: &PoolConfig, socket_path: *const c_char, tmp
 
     let mut handles = Vec::with_capacity(nthreads);
     for _ in 0..nthreads {
-        let q = Arc::clone(&queue);
-        let cfg = ptr::read(config); // Copy config for thread
-        handles.push(std::thread::spawn(move || {
-            worker_loop(&q, &cfg);
-        }));
+        handles.push(spawn_worker(&queue, config).expect("failed to spawn pool worker thread"));
     }
 
     while !SHUTTING_DOWN.load(Ordering::Relaxed) {
@@ -363,12 +420,14 @@ unsafe fn pool_main_threads(config: &PoolConfig, socket_path: *const c_char, tmp
             let busy = BUSY_COUNT.load(Ordering::Relaxed);
             let total = TOTAL_WORKERS.load(Ordering::Relaxed);
             if busy >= total {
-                let q = Arc::clone(&queue);
-                let cfg = ptr::read(config);
-                handles.push(std::thread::spawn(move || {
-                    worker_loop(&q, &cfg);
-                }));
-                TOTAL_WORKERS.fetch_add(1, Ordering::Relaxed);
+                match spawn_worker(&queue, config) {
+                    Ok(h) => {
+                        handles.push(h);
+                        TOTAL_WORKERS.fetch_add(1, Ordering::Relaxed);
+                    }
+                    // The existing workers keep serving the queue.
+                    Err(e) => eprintln!("morloc pool: failed to spawn worker thread: {}", e),
+                }
             }
         }
 
