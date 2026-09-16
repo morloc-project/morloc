@@ -1,0 +1,10 @@
+-- `morloc make --install <file>` mirrors the PACKAGE (the entry file's
+-- directory) into exe/<key>/, whatever the current directory is. Installing
+-- mirrorprog/main.loc from its parent must place main.loc and data/ at the
+-- mirror's top level, leave the sibling other/ out, and must not nest the
+-- package under exe/<key>/mirrorprog/ -- where it would collide with the
+-- launcher of the same name.
+module mirrorprog (same)
+
+same :: Int -> Int
+same x = x

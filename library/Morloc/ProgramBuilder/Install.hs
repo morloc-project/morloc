@@ -48,9 +48,9 @@ import System.IO (hPutStrLn, stderr)
 
 -- | Finalize an installed program. The build step has already written
 -- @manifest.json@, the pools, and the launcher wrapper(s) into installDir.
--- This function copies the CLI wrapper to bin/ and copies include files.
--- Program discovery reads @exe/<name>/manifest.json@ in place, so no
--- separate manifest copy is made.
+-- This function mirrors the package's files from its root into installDir
+-- and copies the CLI wrapper to bin/. Program discovery reads
+-- @exe/<name>/manifest.json@ in place, so no separate manifest copy is made.
 installProgram ::
   -- | configHome (e.g. ~/.local/share/morloc)
   String ->
@@ -58,12 +58,14 @@ installProgram ::
   String ->
   -- | installName
   String ->
+  -- | package root: the entry module's directory, whose contents are mirrored
+  FilePath ->
   -- | include patterns (Nothing = copy everything, Just [] = copy nothing)
   Maybe [Text] ->
   -- | force overwrite
   Bool ->
   IO ()
-installProgram configHome installDir installName includes force = do
+installProgram configHome installDir installName packageRoot includes force = do
   let binDir = configHome </> "bin"
       binPath = binDir </> installName
       installedWrapper = installDir </> installName
@@ -75,10 +77,10 @@ installProgram configHome installDir installName includes force = do
   when (binExists && force) $
     removeFile binPath
 
-  -- Copy files from CWD to installDir
+  -- Mirror the package into installDir
   case includes of
-    Nothing -> copyAllFiltered "." installDir
-    Just pats -> mapM_ (\pat -> copyIncludePattern (T.unpack pat) "." installDir) pats
+    Nothing -> copyAllFiltered packageRoot installDir
+    Just pats -> mapM_ (\pat -> copyIncludePattern (T.unpack pat) packageRoot installDir) pats
 
   -- Copy the CLI wrapper from installDir to bin/. When the build emitted no
   -- CLI wrapper named after the install (e.g. --no-cli), there is nothing to

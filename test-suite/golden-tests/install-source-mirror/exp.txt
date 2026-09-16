@@ -1,0 +1,5 @@
+5
+mirrored
+main.loc at mirror root
+sibling not mirrored
+package not nested
