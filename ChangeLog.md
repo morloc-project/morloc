@@ -1,3 +1,12 @@
+0.107.0 [2026-09-16]
+--------------------
+
+ * `morloc make --install` and `morloc install --build` provision declared
+   dependencies and languages inside a managed environment, as `morloc make` does
+ * a sourced Python file is one module under its own dotted name: user code
+   importing it (`from app.main import x`) shares its globals, and relative
+   imports inside a sourced package file work
+
 0.106.1 [2026-09-15]
 --------------------
 
