@@ -124,9 +124,15 @@ pub(crate) fn render_schema_type(
         // Recursive back-reference. Wire schemas carry only the bare
         // constructor name here (parameter applications are not
         // encoded), so substitute the outer record's full parameterized
-        // display name when the reference points back at it.
+        // display name when the reference points back at it. A nested
+        // instantiation of the same type is declared as `Name#k` on the
+        // wire; the suffix only tells declarations apart and is not shown.
         Recur => {
             let raw = s.name.clone().unwrap_or_else(|| "?".into());
+            let raw = match raw.rfind('#') {
+                Some(i) if raw[i + 1..].bytes().all(|b| b.is_ascii_digit()) && i > 0 => raw[..i].to_string(),
+                _ => raw,
+            };
             match self_ref {
                 Some((short, full)) if raw == short => full.into(),
                 _ => raw,

@@ -20,6 +20,12 @@ all:
 	./nexus termViaRust '{"Twice":[{"Wrap":[{"Add":[{"Lit":[3.0]},{"Neg":[{"At":[{"x":1.0,"y":2.0}]}]}]}]}]}' >> obs.txt 2>> obs.err
 	echo "--- builtRust ---" >> obs.txt
 	./nexus builtRust 5.0 >> obs.txt 2>> obs.err
+	echo "--- nested ---" >> obs.txt
+	./nexus nested '{"Up":[{"Down":[{"Cons":["s",{"Up":[{"Cons":[1,"Nil"]}]}]}]}]}' >> obs.txt 2>> obs.err
+	echo "--- nestedViaPy ---" >> obs.txt
+	./nexus nestedViaPy '{"Up":[{"Down":[{"Cons":["s",{"Up":[{"Cons":[1,"Nil"]}]}]}]}]}' >> obs.txt 2>> obs.err
+	echo "--- schema of L Str ---" >> obs.txt
+	python3 -c 'import json; m = json.load(open("nexus-build/manifest.json")); c = [c for c in m["commands"] if c["name"] == "nested"][0]; print(c["args"][0]["general_schema"])' >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus pools __pycache__ *.err *.manifest

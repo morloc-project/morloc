@@ -301,8 +301,8 @@ impl Schema {
 /// - `<hint>i4` -> Sint32 with hint annotation
 pub fn parse_schema(input: &str) -> Result<Schema, MorlocError> {
     let bytes = input.as_bytes();
-    let mut declared: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let (schema, consumed) = parse_schema_r(bytes, 0, &mut declared)?;
+    let mut declared: Vec<String> = Vec::new();
+    let (schema, consumed) = parse_schema_r(bytes, 0, &mut declared, 0)?;
     if consumed != bytes.len() {
         return Err(MorlocError::Schema(format!(
             "trailing characters after schema at position {consumed}"
@@ -311,308 +311,376 @@ pub fn parse_schema(input: &str) -> Result<Schema, MorlocError> {
     Ok(schema)
 }
 
+/// Deepest nesting a schema string may have. Every walk over a schema
+/// (parsing, width calculation, conversion to the C form, dropping) uses one
+/// machine frame per level, so the wire form is bounded here, once, on the
+/// way in. The parser's own frame is several kilobytes in a debug build, so
+/// the cap is sized for a 512 KiB thread; generated schemas are a few levels
+/// deep.
+pub const MAX_SCHEMA_DEPTH: usize = 128;
+
 /// Recursive schema parser matching the C `parse_schema_r` format exactly.
 ///
-/// `declared` carries the set of names declared via `&<klen><name>` up to
-/// this point in the walk. The set is threaded by mutable reference because
-/// parsing is depth-first and a back-reference must see every declaration
-/// from its enclosing path. Names go in when their declaration is
-/// encountered; nothing is removed (the wire form does not nest scopes).
+/// `declared` is the stack of names declared via `&<klen><name>` on the
+/// path from the root to this point: a name is pushed when its declaration
+/// is entered and popped when the body ends, so a back-reference can only
+/// name an enclosing declaration, never a sibling. `depth` counts nesting
+/// levels against `MAX_SCHEMA_DEPTH`.
+///
+/// The container arms live in their own non-inlined functions so that one
+/// nesting level costs this dispatcher's frame plus the frame of the single
+/// arm being parsed, rather than the sum of every arm's temporaries.
 fn parse_schema_r(
     bytes: &[u8],
     pos: usize,
-    declared: &mut std::collections::HashSet<String>,
+    declared: &mut Vec<String>,
+    depth: usize,
 ) -> Result<(Schema, usize), MorlocError> {
     if pos >= bytes.len() {
         return Err(MorlocError::Schema("unexpected end of schema".into()));
     }
+    if depth > MAX_SCHEMA_DEPTH {
+        return Err(MorlocError::Schema(format!(
+            "schema nesting exceeds {MAX_SCHEMA_DEPTH} levels"
+        )));
+    }
 
     let c = bytes[pos];
-    let mut cur = pos + 1;
+    let cur = pos + 1;
 
     match c {
-        b'<' => {
-            // Hint: <...> with nesting support, then parse the actual type
-            let (hint, after_hint) = parse_hint(bytes, cur)?;
-            let (mut schema, end) = parse_schema_r(bytes, after_hint, declared)?;
-            schema.hint = Some(hint);
-            Ok((schema, end))
-        }
-        b'&' => {
-            // Named-schema declaration: `&<klen><name>X`. Reads the name,
-            // marks it as declared, then parses the body and tags the body's
-            // outer schema with the name. The body itself may contain
-            // `^<klen><name>` back-references to the same name.
-            //
-            // After parsing, every Recur(name) node inside the body is
-            // patched so its `width` matches the declaration's width. The
-            // placeholder width set in `make_recur_schema` is correct for
-            // schema-tree shape but wrong for runtime layout: the wire
-            // form lays out an `Array<Recur(T)>` element as a full
-            // `T`-shaped record, so iterators must step by the named
-            // schema's width, not by a fixed pointer size.
-            let (name, after_name) = parse_named_key(bytes, cur)?;
-            declared.insert(name.clone());
-            let (mut body, end) = parse_schema_r(bytes, after_name, declared)?;
-            // Patch Recur widths and re-flow Tuple/Map widths bottom-up.
-            // A Tuple/Map enclosing a Recur (e.g. `[(Str, X)]`) computed its
-            // width using the placeholder Recur width; after patching, those
-            // widths must be recalculated or Array iteration strides over
-            // partial elements and corrupts inner relptr fields. Fixed-point
-            // iterate: well-formed schemas (Recur behind Array/Optional or
-            // directly as a Map field guarded by `classifyRecursion`) converge
-            // in one round.
-            for _ in 0..16 {
-                let prev = body.width;
-                patch_recur_widths_in(&mut body, &name, prev);
-                recalculate_container_widths(&mut body);
-                if body.width == prev { break; }
-            }
-            body.name = Some(name);
-            Ok((body, end))
-        }
-        b'^' => {
-            // Back-reference: `^<klen><name>`. The name must have been
-            // declared by an enclosing `&<klen><name>` on this walk; a
-            // dangling back-ref is a clean schema error.
-            let (name, after_name) = parse_named_key(bytes, cur)?;
-            if !declared.contains(&name) {
-                return Err(MorlocError::Schema(format!(
-                    "back-reference to undeclared name '{name}'"
-                )));
-            }
-            Ok((make_recur_schema(name), after_name))
-        }
+        b'<' => parse_hint_arm(bytes, cur, declared, depth),
+        b'&' => parse_declaration_arm(bytes, cur, declared, depth),
+        b'^' => parse_back_reference_arm(bytes, cur, declared),
         SCHEMA_NIL => Ok((Schema::primitive(SerialType::Nil), cur)),
         SCHEMA_BOOL => Ok((Schema::primitive(SerialType::Bool), cur)),
-        SCHEMA_STRING => {
-            // String schema has one parameter (uint8) for array compatibility,
-            // matching the C string_schema() constructor.
-            Ok((Schema {
-                serial_type: SerialType::String,
-                size: 1,
-                width: std::mem::size_of::<crate::shm_types::Array>(),
-                offsets: Vec::new(),
-                hint: None,
-                parameters: vec![Schema::primitive(SerialType::Uint8)],
-                keys: Vec::new(),
-                name: None,
-            }, cur))
-        }
-        SCHEMA_IFILE | SCHEMA_OSTREAM | SCHEMA_ISTREAM => {
-            // F/O/I share one wire layout: a 16-byte tagged union (tag in
-            // low byte of the first 8 bytes, payload u64 in the second 8).
-            // `parameters[0]` carries `Uint8` so walkers that descend into
-            // String-shaped fields keep working without special-casing the
-            // outer schema.
-            let st = match c {
-                SCHEMA_IFILE => SerialType::IFile,
-                SCHEMA_OSTREAM => SerialType::OStream,
-                _ => SerialType::IStream,
-            };
-            Ok((Schema {
-                serial_type: st,
-                size: 1,
-                width: std::mem::size_of::<crate::shm_types::Array>(),
-                offsets: Vec::new(),
-                hint: None,
-                parameters: vec![Schema::primitive(SerialType::Uint8)],
-                keys: Vec::new(),
-                name: None,
-            }, cur))
-        }
+        SCHEMA_STRING => Ok((make_string_schema(), cur)),
+        SCHEMA_IFILE => Ok((make_stream_handle_schema(SerialType::IFile), cur)),
+        SCHEMA_OSTREAM => Ok((make_stream_handle_schema(SerialType::OStream), cur)),
+        SCHEMA_ISTREAM => Ok((make_stream_handle_schema(SerialType::IStream), cur)),
         SCHEMA_SINT => parse_sized_int(bytes, cur, true),
         SCHEMA_UINT => parse_sized_int(bytes, cur, false),
         SCHEMA_FLOAT => parse_sized_float(bytes, cur),
-        SCHEMA_ARRAY => {
-            // Array: optional dimension constraint (:N in decimal), then child schema
-            let expected_len = if cur < bytes.len() && bytes[cur] == b':' {
-                cur += 1;
-                let (n, after) = parse_decimal(bytes, cur)?;
-                cur = after;
-                n
-            } else {
-                0 // unconstrained
-            };
-            let (child, end) = parse_schema_r(bytes, cur, declared)?;
-            Ok((make_array_schema_with_dim(expected_len, child), end))
-        }
-        SCHEMA_INT => {
-            // Variable-width integer: no parameters, uses Array layout
-            Ok((Schema::primitive(SerialType::Int), cur))
-        }
-        SCHEMA_OPTIONAL => {
-            // Optional: one child schema follows immediately
-            let (child, end) = parse_schema_r(bytes, cur, declared)?;
-            Ok((make_optional_schema(child), end))
-        }
-        SCHEMA_TUPLE => {
-            // Tuple: base-62 size char, then N child schemas
-            if cur >= bytes.len() {
-                return Err(MorlocError::Schema("expected tuple size".into()));
-            }
-            let (n, mut p) = read_count(bytes, cur)?;
-            let mut params = Vec::with_capacity(n);
-            for _ in 0..n {
-                let (child, end) = parse_schema_r(bytes, p, declared)?;
-                params.push(child);
-                p = end;
-            }
-            Ok((make_tuple_schema(params), p))
-        }
-        SCHEMA_MAP => {
-            // Map/record: base-62 size char, then N (key_len_char + key_bytes + value_schema)
-            if cur >= bytes.len() {
-                return Err(MorlocError::Schema("expected map size".into()));
-            }
-            let (n, mut p) = read_count(bytes, cur)?;
-            let mut params = Vec::with_capacity(n);
-            let mut keys = Vec::with_capacity(n);
-            for _ in 0..n {
-                // Read key: length (base-62, escaped past 63) + that many bytes
-                if p >= bytes.len() {
-                    return Err(MorlocError::Schema("expected map key length".into()));
-                }
-                let (key_len, kp) = read_count(bytes, p)?;
-                p = kp;
-                if p + key_len > bytes.len() {
-                    return Err(MorlocError::Schema("map key extends past end".into()));
-                }
-                let key = std::str::from_utf8(&bytes[p..p + key_len])
-                    .map_err(|_| MorlocError::Schema("invalid UTF-8 in map key".into()))?
-                    .to_string();
-                p += key_len;
-                keys.push(key);
-                // Read value schema
-                let (child, end) = parse_schema_r(bytes, p, declared)?;
-                params.push(child);
-                p = end;
-            }
-            Ok((make_map_schema(params, keys), p))
-        }
-        SCHEMA_ENUM => {
-            // Enum: count, then N (key_len + constructor name). No child
-            // schemas -- an argument-free constructor carries no payload.
-            let (n, mut p) = read_count(bytes, cur)?;
-            let mut keys = Vec::with_capacity(n);
-            for _ in 0..n {
-                if p >= bytes.len() {
-                    return Err(MorlocError::Schema("expected enum constructor length".into()));
-                }
-                let (klen, kp) = read_count(bytes, p)?;
-                p = kp;
-                if p + klen > bytes.len() {
-                    return Err(MorlocError::Schema(
-                        "enum constructor name extends past end".into(),
-                    ));
-                }
-                let key = std::str::from_utf8(&bytes[p..p + klen])
-                    .map_err(|_| {
-                        MorlocError::Schema("invalid UTF-8 in enum constructor name".into())
-                    })?
-                    .to_string();
-                p += klen;
-                keys.push(key);
-            }
-            if keys.len() > 256 {
-                return Err(MorlocError::Schema(format!(
-                    "enum has {} constructors; the limit is 256 so a tag fits in one byte",
-                    keys.len()
-                )));
-            }
-            Ok((make_enum_schema(keys), p))
-        }
-        SCHEMA_VARIANT => {
-            // Variant: count, then N (key_len + name + arity + arity schemas).
-            // Each arm becomes a Tuple of its field schemas, so an
-            // argument-free arm is the empty tuple.
-            let (n, mut p) = read_count(bytes, cur)?;
-            let mut keys = Vec::with_capacity(n);
-            let mut params = Vec::with_capacity(n);
-            for _ in 0..n {
-                if p >= bytes.len() {
-                    return Err(MorlocError::Schema("expected variant arm name length".into()));
-                }
-                let (klen, kp) = read_count(bytes, p)?;
-                p = kp;
-                if p + klen > bytes.len() {
-                    return Err(MorlocError::Schema("variant arm name extends past end".into()));
-                }
-                let key = std::str::from_utf8(&bytes[p..p + klen])
-                    .map_err(|_| MorlocError::Schema("invalid UTF-8 in variant arm name".into()))?
-                    .to_string();
-                p += klen;
-                let (arity, ap) = read_count(bytes, p)?;
-                p = ap;
-                let mut fields = Vec::with_capacity(arity);
-                for _ in 0..arity {
-                    let (child, end) = parse_schema_r(bytes, p, declared)?;
-                    fields.push(child);
-                    p = end;
-                }
-                keys.push(key);
-                params.push(make_tuple_schema(fields));
-            }
-            if keys.len() > 256 {
-                return Err(MorlocError::Schema(format!(
-                    "variant has {} arms; the limit is 256 so a tag fits in one byte",
-                    keys.len()
-                )));
-            }
-            Ok((make_variant_schema(params, keys), p))
-        }
-        SCHEMA_TABLE => {
-            // Table primitive (Arrow IPC).
-            //
-            // Two surface forms:
-            //   `T`           -- bare token; no declared columns. The
-            //                   buffer's Arrow schema is opaque to morloc;
-            //                   any value is accepted.
-            //   `T:K<entries>` -- K declared columns of declared types,
-            //                    parsed identically to `m`'s entries
-            //                    (one base-62 length char + key bytes
-            //                    + child schema). Open semantics: these
-            //                    are *minimum* constraints -- the buffer
-            //                    may carry extra columns.
-            //
-            // The colon disambiguates bare `T` from `T:0` (zero declared
-            // columns). Bare `T` means "schema unspecified"; `T:0` means
-            // "exactly zero columns required" (rare but legal).
-            if cur < bytes.len() && bytes[cur] == b':' {
-                cur += 1;
-                if cur >= bytes.len() {
-                    return Err(MorlocError::Schema("expected table column count after ':'".into()));
-                }
-                let (n, mut p) = read_count(bytes, cur)?;
-                let mut params = Vec::with_capacity(n);
-                let mut keys = Vec::with_capacity(n);
-                for _ in 0..n {
-                    if p >= bytes.len() {
-                        return Err(MorlocError::Schema("expected table column key length".into()));
-                    }
-                    let (key_len, kp) = read_count(bytes, p)?;
-                    p = kp;
-                    if p + key_len > bytes.len() {
-                        return Err(MorlocError::Schema("table column key extends past end".into()));
-                    }
-                    let key = std::str::from_utf8(&bytes[p..p + key_len])
-                        .map_err(|_| MorlocError::Schema("invalid UTF-8 in table key".into()))?
-                        .to_string();
-                    p += key_len;
-                    keys.push(key);
-                    let (child, end) = parse_schema_r(bytes, p, declared)?;
-                    params.push(child);
-                    p = end;
-                }
-                Ok((make_table_schema(params, keys), p))
-            } else {
-                Ok((make_table_schema(Vec::new(), Vec::new()), cur))
-            }
-        }
+        SCHEMA_ARRAY => parse_array_arm(bytes, cur, declared, depth),
+        SCHEMA_INT => Ok((Schema::primitive(SerialType::Int), cur)),
+        SCHEMA_OPTIONAL => parse_optional_arm(bytes, cur, declared, depth),
+        SCHEMA_TUPLE => parse_tuple_arm(bytes, cur, declared, depth),
+        SCHEMA_MAP => parse_map_arm(bytes, cur, declared, depth),
+        SCHEMA_ENUM => parse_enum_arm(bytes, cur),
+        SCHEMA_VARIANT => parse_variant_arm(bytes, cur, declared, depth),
+        SCHEMA_TABLE => parse_table_arm(bytes, cur, declared, depth),
         _ => Err(MorlocError::Schema(format!(
             "unknown schema character '{}' at position {pos}",
             c as char
         ))),
+    }
+}
+
+/// String schema has one parameter (uint8) for array compatibility,
+/// matching the C string_schema() constructor.
+fn make_string_schema() -> Schema {
+    Schema {
+        serial_type: SerialType::String,
+        size: 1,
+        width: std::mem::size_of::<crate::shm_types::Array>(),
+        offsets: Vec::new(),
+        hint: None,
+        parameters: vec![Schema::primitive(SerialType::Uint8)],
+        keys: Vec::new(),
+        name: None,
+    }
+}
+
+/// F/O/I share one wire layout: a 16-byte tagged union (tag in the low byte
+/// of the first 8 bytes, payload u64 in the second 8). `parameters[0]`
+/// carries `Uint8` so walkers that descend into String-shaped fields keep
+/// working without special-casing the outer schema.
+fn make_stream_handle_schema(st: SerialType) -> Schema {
+    Schema {
+        serial_type: st,
+        size: 1,
+        width: std::mem::size_of::<crate::shm_types::Array>(),
+        offsets: Vec::new(),
+        hint: None,
+        parameters: vec![Schema::primitive(SerialType::Uint8)],
+        keys: Vec::new(),
+        name: None,
+    }
+}
+
+/// Hint: `<...>` with nesting support, then the actual type.
+#[inline(never)]
+fn parse_hint_arm(
+    bytes: &[u8],
+    cur: usize,
+    declared: &mut Vec<String>,
+    depth: usize,
+) -> Result<(Schema, usize), MorlocError> {
+    let (hint, after_hint) = parse_hint(bytes, cur)?;
+    let (mut schema, end) = parse_schema_r(bytes, after_hint, declared, depth + 1)?;
+    schema.hint = Some(hint);
+    Ok((schema, end))
+}
+
+/// Named-schema declaration: `&<klen><name>X`. Reads the name, pushes it
+/// on the declaration stack, parses the body and tags the body's outer
+/// schema with the name. The body may contain `^<klen><name>`
+/// back-references to the name.
+///
+/// After parsing, every Recur(name) node inside the body is patched so its
+/// `width` matches the declaration's width. The placeholder width set in
+/// `make_recur_schema` is correct for schema-tree shape but wrong for
+/// runtime layout: the wire form lays out an `Array<Recur(T)>` element as
+/// a full `T`-shaped record, so iterators must step by the named schema's
+/// width, not by a fixed pointer size.
+#[inline(never)]
+fn parse_declaration_arm(
+    bytes: &[u8],
+    cur: usize,
+    declared: &mut Vec<String>,
+    depth: usize,
+) -> Result<(Schema, usize), MorlocError> {
+    let (name, after_name) = parse_named_key(bytes, cur)?;
+    declared.push(name.clone());
+    let parsed = parse_schema_r(bytes, after_name, declared, depth + 1);
+    declared.pop();
+    let (mut body, end) = parsed?;
+    // A back-reference reachable from the declaration through
+    // tuple/record fields alone would put the value inside itself:
+    // no finite layout exists and a walker over such a value would
+    // never terminate. Arrays, optionals and variant payloads sit
+    // behind a pointer and are fine.
+    if reaches_inline_recur(&body, &name) {
+        return Err(MorlocError::Schema(format!(
+            "declaration '{name}' contains itself inline (a back-reference \
+             reachable through tuple or record fields only)"
+        )));
+    }
+    // Patch Recur widths and re-flow Tuple/Map widths bottom-up.
+    // A Tuple/Map enclosing a Recur (e.g. `[(Str, X)]`) computed its
+    // width using the placeholder Recur width; after patching, those
+    // widths must be recalculated or Array iteration strides over
+    // partial elements and corrupts inner relptr fields. The
+    // declaration's own width never depends on its back-references
+    // (they are all behind a pointer), so one round patches and a
+    // second confirms.
+    for _ in 0..16 {
+        let prev = body.width;
+        patch_recur_widths_in(&mut body, &name, prev);
+        recalculate_container_widths(&mut body);
+        if body.width == prev { break; }
+    }
+    body.name = Some(name);
+    Ok((body, end))
+}
+
+/// Back-reference: `^<klen><name>`. The name must have been declared by an
+/// enclosing `&<klen><name>` on this walk; a dangling back-reference is a
+/// clean schema error.
+#[inline(never)]
+fn parse_back_reference_arm(
+    bytes: &[u8],
+    cur: usize,
+    declared: &mut Vec<String>,
+) -> Result<(Schema, usize), MorlocError> {
+    let (name, after_name) = parse_named_key(bytes, cur)?;
+    if !declared.iter().any(|n| *n == name) {
+        return Err(MorlocError::Schema(format!(
+            "back-reference to undeclared name '{name}'"
+        )));
+    }
+    Ok((make_recur_schema(name), after_name))
+}
+
+/// Array: optional dimension constraint (`:N` in decimal), then the child
+/// schema.
+#[inline(never)]
+fn parse_array_arm(
+    bytes: &[u8],
+    mut cur: usize,
+    declared: &mut Vec<String>,
+    depth: usize,
+) -> Result<(Schema, usize), MorlocError> {
+    let expected_len = if cur < bytes.len() && bytes[cur] == b':' {
+        cur += 1;
+        let (n, after) = parse_decimal(bytes, cur)?;
+        cur = after;
+        n
+    } else {
+        0 // unconstrained
+    };
+    let (child, end) = parse_schema_r(bytes, cur, declared, depth + 1)?;
+    Ok((make_array_schema_with_dim(expected_len, child), end))
+}
+
+/// Optional: one child schema follows immediately.
+#[inline(never)]
+fn parse_optional_arm(
+    bytes: &[u8],
+    cur: usize,
+    declared: &mut Vec<String>,
+    depth: usize,
+) -> Result<(Schema, usize), MorlocError> {
+    let (child, end) = parse_schema_r(bytes, cur, declared, depth + 1)?;
+    Ok((make_optional_schema(child), end))
+}
+
+/// Tuple: base-62 size char, then N child schemas.
+#[inline(never)]
+fn parse_tuple_arm(
+    bytes: &[u8],
+    cur: usize,
+    declared: &mut Vec<String>,
+    depth: usize,
+) -> Result<(Schema, usize), MorlocError> {
+    if cur >= bytes.len() {
+        return Err(MorlocError::Schema("expected tuple size".into()));
+    }
+    let (n, mut p) = read_count(bytes, cur)?;
+    let mut params = Vec::with_capacity(n);
+    for _ in 0..n {
+        let (child, end) = parse_schema_r(bytes, p, declared, depth + 1)?;
+        params.push(child);
+        p = end;
+    }
+    Ok((make_tuple_schema(params), p))
+}
+
+/// Read a base-62 length-prefixed key at `p`, returning it and the
+/// position just past it. `what` names the key kind in error messages.
+fn read_prefixed_key(bytes: &[u8], p: usize, what: &str) -> Result<(String, usize), MorlocError> {
+    if p >= bytes.len() {
+        return Err(MorlocError::Schema(format!("expected {what} length")));
+    }
+    let (klen, kp) = read_count(bytes, p)?;
+    if kp + klen > bytes.len() {
+        return Err(MorlocError::Schema(format!("{what} extends past end")));
+    }
+    let key = std::str::from_utf8(&bytes[kp..kp + klen])
+        .map_err(|_| MorlocError::Schema(format!("invalid UTF-8 in {what}")))?
+        .to_string();
+    Ok((key, kp + klen))
+}
+
+/// Map/record: base-62 size char, then N (key_len_char + key_bytes +
+/// value_schema).
+#[inline(never)]
+fn parse_map_arm(
+    bytes: &[u8],
+    cur: usize,
+    declared: &mut Vec<String>,
+    depth: usize,
+) -> Result<(Schema, usize), MorlocError> {
+    if cur >= bytes.len() {
+        return Err(MorlocError::Schema("expected map size".into()));
+    }
+    let (n, mut p) = read_count(bytes, cur)?;
+    let mut params = Vec::with_capacity(n);
+    let mut keys = Vec::with_capacity(n);
+    for _ in 0..n {
+        let (key, kp) = read_prefixed_key(bytes, p, "map key")?;
+        keys.push(key);
+        let (child, end) = parse_schema_r(bytes, kp, declared, depth + 1)?;
+        params.push(child);
+        p = end;
+    }
+    Ok((make_map_schema(params, keys), p))
+}
+
+/// Enum: count, then N (key_len + constructor name). No child schemas: an
+/// argument-free constructor carries no payload.
+#[inline(never)]
+fn parse_enum_arm(bytes: &[u8], cur: usize) -> Result<(Schema, usize), MorlocError> {
+    let (n, mut p) = read_count(bytes, cur)?;
+    let mut keys = Vec::with_capacity(n);
+    for _ in 0..n {
+        let (key, kp) = read_prefixed_key(bytes, p, "enum constructor name")?;
+        keys.push(key);
+        p = kp;
+    }
+    if keys.len() > 256 {
+        return Err(MorlocError::Schema(format!(
+            "enum has {} constructors; the limit is 256 so a tag fits in one byte",
+            keys.len()
+        )));
+    }
+    Ok((make_enum_schema(keys), p))
+}
+
+/// Variant: count, then N (key_len + name + arity + arity schemas). Each
+/// arm becomes a Tuple of its field schemas, so an argument-free arm is the
+/// empty tuple.
+#[inline(never)]
+fn parse_variant_arm(
+    bytes: &[u8],
+    cur: usize,
+    declared: &mut Vec<String>,
+    depth: usize,
+) -> Result<(Schema, usize), MorlocError> {
+    let (n, mut p) = read_count(bytes, cur)?;
+    let mut keys = Vec::with_capacity(n);
+    let mut params = Vec::with_capacity(n);
+    for _ in 0..n {
+        let (key, kp) = read_prefixed_key(bytes, p, "variant arm name")?;
+        let (arity, ap) = read_count(bytes, kp)?;
+        p = ap;
+        let mut fields = Vec::with_capacity(arity);
+        for _ in 0..arity {
+            let (child, end) = parse_schema_r(bytes, p, declared, depth + 1)?;
+            fields.push(child);
+            p = end;
+        }
+        keys.push(key);
+        params.push(make_tuple_schema(fields));
+    }
+    if keys.len() > 256 {
+        return Err(MorlocError::Schema(format!(
+            "variant has {} arms; the limit is 256 so a tag fits in one byte",
+            keys.len()
+        )));
+    }
+    Ok((make_variant_schema(params, keys), p))
+}
+
+/// Table primitive (Arrow IPC).
+///
+/// Two surface forms:
+///   `T`            -- bare token; no declared columns. The buffer's Arrow
+///                     schema is opaque to morloc; any value is accepted.
+///   `T:K<entries>` -- K declared columns of declared types, parsed
+///                     identically to `m`'s entries (one base-62 length
+///                     char + key bytes + child schema). Open semantics:
+///                     these are minimum constraints; the buffer may carry
+///                     extra columns.
+///
+/// The colon disambiguates bare `T` from `T:0` (zero declared columns).
+/// Bare `T` means "schema unspecified"; `T:0` means "exactly zero columns
+/// required" (rare but legal).
+#[inline(never)]
+fn parse_table_arm(
+    bytes: &[u8],
+    mut cur: usize,
+    declared: &mut Vec<String>,
+    depth: usize,
+) -> Result<(Schema, usize), MorlocError> {
+    if cur < bytes.len() && bytes[cur] == b':' {
+        cur += 1;
+        if cur >= bytes.len() {
+            return Err(MorlocError::Schema("expected table column count after ':'".into()));
+        }
+        let (n, mut p) = read_count(bytes, cur)?;
+        let mut params = Vec::with_capacity(n);
+        let mut keys = Vec::with_capacity(n);
+        for _ in 0..n {
+            let (key, kp) = read_prefixed_key(bytes, p, "table column key")?;
+            keys.push(key);
+            let (child, end) = parse_schema_r(bytes, kp, declared, depth + 1)?;
+            params.push(child);
+            p = end;
+        }
+        Ok((make_table_schema(params, keys), p))
+    } else {
+        Ok((make_table_schema(Vec::new(), Vec::new()), cur))
     }
 }
 
@@ -954,21 +1022,40 @@ fn make_recur_schema(name: String) -> Schema {
     }
 }
 
+/// True when a `Recur(name)` node is reachable from `schema` through
+/// Tuple/Map fields alone. A nested declaration of the same name shadows
+/// the outer one, so the walk stops there; its own body was checked when
+/// it was parsed.
+fn reaches_inline_recur(schema: &Schema, name: &str) -> bool {
+    match schema.serial_type {
+        SerialType::Recur => schema.name.as_deref() == Some(name),
+        SerialType::Tuple | SerialType::Map => schema.parameters.iter().any(|p| match p.serial_type {
+            SerialType::Recur => p.name.as_deref() == Some(name),
+            _ if p.name.as_deref() == Some(name) => false,
+            _ => reaches_inline_recur(p, name),
+        }),
+        _ => false,
+    }
+}
+
 /// Walk a parsed schema sub-tree and patch every `Recur(name)` node's
 /// `width` to the supplied value. Called once per `&<name>X`
 /// declaration so the back-reference's runtime layout (used by Array
 /// iteration, Optional indirection, and the C++ allocator) matches the
-/// declaration's own width.
+/// declaration's own width. A nested declaration of the same name owns
+/// the back-references under it (they resolve to the nearest enclosing
+/// declaration), so the walk does not descend into it.
 fn patch_recur_widths_in(schema: &mut Schema, name: &str, width: usize) {
     for p in &mut schema.parameters {
-        if matches!(p.serial_type, SerialType::Recur) {
-            if let Some(ref n) = p.name {
-                if n == name {
+        match p.serial_type {
+            SerialType::Recur => {
+                if p.name.as_deref() == Some(name) {
                     p.width = width;
                 }
             }
+            _ if p.name.as_deref() == Some(name) => {}
+            _ => patch_recur_widths_in(p, name, width),
         }
-        patch_recur_widths_in(p, name, width);
     }
 }
 
@@ -1783,6 +1870,63 @@ mod tests {
         // A truncated escape must be an error, never a silent zero.
         assert!(parse_schema("t=").is_err(), "bare '=' count");
         assert!(parse_schema("t=0").is_err(), "escape missing high digit");
+    }
+
+    #[test]
+    fn test_inline_self_reference_is_rejected() {
+        // A record whose field holds the record itself with no pointer in
+        // between has no finite layout; a walker over such a value would
+        // never terminate.
+        let err = parse_schema("&1Am11a^1A").unwrap_err().to_string();
+        assert!(err.contains("inline"), "{err}");
+        // The same through a tuple field.
+        let err = parse_schema("&1Am11at2j^1A").unwrap_err().to_string();
+        assert!(err.contains("inline"), "{err}");
+    }
+
+    #[test]
+    fn test_guarded_self_references_parse() {
+        // Array elements, Optional and Variant payloads all sit behind a
+        // relative pointer, so the recursion is finite.
+        assert!(parse_schema("&1Am11aa^1A").is_ok());
+        assert!(parse_schema("&1Am11a?^1A").is_ok());
+        assert!(parse_schema("&1Av21N01C1^1A").is_ok());
+        // A back-reference inside an array of tuples is behind the array.
+        assert!(parse_schema("&1Am11aat2s^1A").is_ok());
+    }
+
+    #[test]
+    fn test_sibling_back_reference_is_rejected() {
+        // The declaration's scope ends with its body; a later sibling
+        // cannot refer to it.
+        let err = parse_schema("t2&1Am11x?^1A^1A").unwrap_err().to_string();
+        assert!(err.contains("undeclared"), "{err}");
+    }
+
+    #[test]
+    fn test_nesting_depth_is_capped() {
+        let deep = format!("{}i4", "a".repeat(100_000));
+        let err = parse_schema(&deep).unwrap_err().to_string();
+        assert!(err.contains("nest"), "{err}");
+        let ok = format!("{}i4", "a".repeat(MAX_SCHEMA_DEPTH - 1));
+        assert!(parse_schema(&ok).is_ok());
+        let just_over = format!("{}i4", "a".repeat(MAX_SCHEMA_DEPTH + 1));
+        assert!(parse_schema(&just_over).is_err());
+    }
+
+    #[test]
+    fn test_nested_same_name_declaration_keeps_its_own_width() {
+        // An inner declaration reusing an outer name shadows it: the inner
+        // back-reference resolves to the inner body, so its width must be
+        // the inner width (24, a Str plus a pointer), not the outer (16).
+        let s = parse_schema("&2T7m21vi44next?&2T7m21vs4next?^2T7").unwrap();
+        let inner_decl = &s.parameters[1].parameters[0];
+        assert_eq!(inner_decl.name.as_deref(), Some("T7"));
+        assert_eq!(inner_decl.width, 24);
+        let inner_recur = &inner_decl.parameters[1].parameters[0];
+        assert_eq!(inner_recur.serial_type, SerialType::Recur);
+        assert_eq!(inner_recur.width, 24);
+        assert_eq!(s.width, 16);
     }
 }
 

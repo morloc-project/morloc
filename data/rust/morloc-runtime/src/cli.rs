@@ -2515,6 +2515,20 @@ pub unsafe extern "C" fn load_morloc_data_file(
                     set_errmsg(errmsg, &MorlocError::Other(format!("Expected data packet in '{}'", path_str)));
                     return ptr::null_mut();
                 }
+                // Only a self-contained payload can come from a file. A
+                // shared-memory reference (RPTR) or a file reference names
+                // memory of the process that wrote the packet; every
+                // on-disk writer rewrites those to MESG first.
+                let source = { header.command.data.source };
+                if source != packet::PACKET_SOURCE_MESG {
+                    libc::free(data as *mut c_void);
+                    set_errmsg(errmsg, &MorlocError::Other(format!(
+                        "Packet in '{}' carries a shared-memory reference (source 0x{:02x}) \
+                         instead of its data; only self-contained packets can be loaded from a file",
+                        path_str, source
+                    )));
+                    return ptr::null_mut();
+                }
                 let offset = { header.offset } as usize;
                 let length = { header.length } as usize;
                 // Compare the packet's stored schema descriptor to the
@@ -2604,141 +2618,6 @@ pub unsafe extern "C" fn load_morloc_data_file(
     libc::free(data as *mut c_void);
     if !err.is_null() { *errmsg = err; return ptr::null_mut(); }
     result
-}
-
-// ── upload_packet (static helper) ────────────────────────────────────────────
-
-/// Copy a voidstar packet into SHM, adjusting relptrs.
-///
-/// # Safety
-/// `dest` must point to schema.width writable bytes in SHM.
-/// `data` must point to a valid voidstar blob within [data, data_end].
-unsafe fn upload_packet(
-    dest: *mut u8,
-    data: *const u8,
-    data_end: usize,
-    schema: *const CSchema,
-    errmsg: *mut *mut c_char,
-) -> i32 {
-    clear_errmsg(errmsg);
-    let rs = CSchema::to_rust(schema);
-
-    match upload_packet_inner(dest, data, data_end, schema, &rs) {
-        Ok(_) => 0,
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            1
-        }
-    }
-}
-
-unsafe fn upload_packet_inner(
-    dest: *mut u8,
-    data: *const u8,
-    data_end: usize,
-    schema: *const CSchema,
-    rs: &crate::schema::Schema,
-) -> Result<(), MorlocError> {
-    use crate::schema::SerialType;
-
-    match rs.serial_type {
-        SerialType::String | SerialType::Array => {
-            if (data as usize + rs.width - 1) <= data_end {
-                return Err(MorlocError::Packet("Data is too small to store an array header".into()));
-            }
-            ptr::copy_nonoverlapping(data, dest, rs.width);
-            let arr = &mut *(dest as *mut shm::Array);
-            let arr_data_offset = arr.data as usize;
-            let arr_data = data.add(arr_data_offset);
-            let elem_width = rs.parameters[0].width;
-            let arr_size = arr.size * elem_width;
-
-            if (arr_data as usize + arr_size - 1) > data_end {
-                return Err(MorlocError::Packet("Data is too small to contain array values".into()));
-            }
-
-            let data_ptr = shm::shmemcpy(arr_data, arr_size)?;
-
-            if !rs.is_fixed_width() {
-                let elem_schema = &rs.parameters[0];
-                // Need the C schema for each element
-                let elem_c_schema = (*schema).parameters;
-                if !elem_c_schema.is_null() {
-                    let elem_cs = *elem_c_schema;
-                    for i in 0..arr.size {
-                        upload_packet_inner(
-                            data_ptr.add(i * elem_width),
-                            arr_data.add(i * elem_width),
-                            data_end,
-                            elem_cs,
-                            elem_schema,
-                        )?;
-                    }
-                }
-            }
-
-            arr.data = shm::abs2rel(data_ptr)?;
-        }
-        SerialType::IFile | SerialType::OStream | SerialType::IStream => {
-            // Tagged stream-handle field: copy the 16-byte inline, then
-            // for TAG_PATH copy the `{size, bytes}` suballoc and rebase
-            // the payload relptr. TAG_HANDLE has no suballoc.
-            use morloc_runtime_types::stream_handle as sh;
-            if (data as usize + rs.width - 1) <= data_end {
-                return Err(MorlocError::Packet(
-                    "Data is too small to store a stream-handle field".into(),
-                ));
-            }
-            ptr::copy_nonoverlapping(data, dest, rs.width);
-            let dest_field = dest;
-            let tag = sh::read_tag(dest_field);
-            let payload = sh::read_payload(dest_field);
-            if tag == sh::TAG_PATH && payload != shm::RELNULL as u64 {
-                let src_suballoc = data.add(payload as usize);
-                if (src_suballoc as usize + 7) > data_end {
-                    return Err(MorlocError::Packet(
-                        "Data is too small to contain stream-handle path header".into(),
-                    ));
-                }
-                let path_len = sh::read_path_size(src_suballoc) as usize;
-                let total = sh::path_suballoc_size(path_len);
-                if (src_suballoc as usize + total - 1) > data_end {
-                    return Err(MorlocError::Packet(
-                        "Data is too small to contain stream-handle path bytes".into(),
-                    ));
-                }
-                let new_block = shm::shmemcpy(src_suballoc, total)?;
-                sh::write_field(
-                    dest_field,
-                    sh::TAG_PATH,
-                    shm::abs2rel(new_block)? as u64,
-                );
-            }
-        }
-        SerialType::Tuple | SerialType::Map => {
-            for i in 0..rs.parameters.len() {
-                let elem_cs = if (*schema).parameters.is_null() {
-                    return Err(MorlocError::Packet("NULL parameters in schema".into()));
-                } else {
-                    *(*schema).parameters.add(i)
-                };
-                upload_packet_inner(
-                    dest.add(rs.offsets[i]),
-                    data.add(rs.offsets[i]),
-                    data_end,
-                    elem_cs,
-                    &rs.parameters[i],
-                )?;
-            }
-        }
-        _ => {
-            if (data as usize + rs.width - 1) > data_end {
-                return Err(MorlocError::Packet("Given data packet is too small".into()));
-            }
-            ptr::copy_nonoverlapping(data, dest, rs.width);
-        }
-    }
-    Ok(())
 }
 
 // ── parse_cli_data_argument_singular ─────────────────────────────────────────
@@ -2882,52 +2761,8 @@ unsafe fn parse_cli_data_argument_classified(
         return ptr::null_mut();
     }
 
-    // Decompression is handled inside `load_morloc_data_file` (the
-    // single choke point all packet-load paths go through). The RPTR
-    // special case below runs before that, so a compressed RPTR
-    // packet (rare -- the producer normalizes RPTR to MESG before
-    // writing) falls through to `load_morloc_data_file` and is
-    // decompressed there. The branch below fires only for plain
-    // uncompressed RPTR bytes.
-
-    // Special case: RPTR packets (uncompressed only; a compressed RPTR
-    // packet would have garbage bytes where the relptr is supposed to
-    // sit. In practice the on-disk normalize step rewrites RPTR to
-    // MESG before any compression, so this branch is the live path for
-    // RPTR-on-disk; the compression guard is defense in depth.)
-    if data_size >= 32 {
-        let magic = *(data as *const u32);
-        if magic == packet::PACKET_MAGIC {
-            let header = &*(data as *const packet::PacketHeader);
-            let source = header.command.data.source;
-            let format = header.command.data.format;
-            let compression = header.command.data.compression;
-            if source == packet::PACKET_SOURCE_RPTR
-                && format == packet::PACKET_FORMAT_VOIDSTAR
-                && compression == 0 {
-                if dest.is_null() {
-                    match shm::shcalloc(1, rs.width) {
-                        Ok(p) => dest = p,
-                        Err(e) => {
-                            libc::free(data as *mut c_void);
-                            set_errmsg(errmsg, &e);
-                            return ptr::null_mut();
-                        }
-                    }
-                }
-                let voidstar_ptr = data.add(32 + header.offset as usize);
-                if upload_packet(dest, voidstar_ptr, voidstar_ptr as usize + data_size - 1, schema, &mut err) != 0 {
-                    libc::free(data as *mut c_void);
-                    wrap_and_set_errmsg(err, &source_label, errmsg);
-                    return ptr::null_mut();
-                }
-                libc::free(data as *mut c_void);
-                return dest;
-            }
-        }
-    }
-
-    // All other formats: canonical file loader (takes ownership of data)
+    // Every packet format, decompression included, goes through the one
+    // file loader; it takes ownership of `data`.
     dest = load_morloc_data_file(effective, data, data_size, schema, &mut err) as *mut u8;
     if !err.is_null() {
         wrap_and_set_errmsg(err, &source_label, errmsg);
@@ -4164,6 +3999,33 @@ pub unsafe extern "C" fn make_call_packet_from_cli(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A data file whose header says its payload is a shared-memory
+    /// reference cannot be loaded: the reference meant something only in
+    /// the producing process. The loader must say so instead of reading
+    /// the 8-byte relptr as a voidstar body.
+    #[test]
+    fn rptr_data_file_is_rejected() {
+        let _shm = crate::init_test_shm();
+        let header = packet::PacketHeader::data_rptr(packet::PACKET_FORMAT_VOIDSTAR, 8);
+        let mut bytes = header.to_bytes().to_vec();
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        let schema = crate::schema::parse_schema("au1").unwrap();
+        let cschema = crate::cschema::CSchema::from_rust(&schema);
+        let mut err: *mut c_char = ptr::null_mut();
+        unsafe {
+            let data = libc::malloc(bytes.len()) as *mut u8;
+            ptr::copy_nonoverlapping(bytes.as_ptr(), data, bytes.len());
+            let path = std::ffi::CString::new("x.pkt").unwrap();
+            let got = load_morloc_data_file(path.as_ptr(), data, bytes.len(), cschema, &mut err);
+            assert!(got.is_null());
+            assert!(!err.is_null());
+            let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+            libc::free(err as *mut c_void);
+            assert!(msg.contains("shared-memory reference"), "{msg}");
+            crate::cschema::CSchema::free(cschema);
+        }
+    }
 
     #[test]
     fn path_predicate_extensions() {

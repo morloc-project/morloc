@@ -424,8 +424,9 @@ fn unpack_obj_inner(
                 }
             }
             SerialType::Tuple | SerialType::Map => {
-                let _n = decode::read_array_len(reader)
+                let n = decode::read_array_len(reader)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack tuple len: {}", e)))?;
+                check_field_count(schema, n as usize)?;
                 for (i, field_schema) in schema.parameters.iter().enumerate() {
                     let field_ptr = ptr.add(schema.offsets[i]);
                     unpack_obj(field_ptr, field_schema, cursor, reader, env)?;
@@ -717,7 +718,9 @@ fn calc_size_r_inner(
             Ok(total)
         }
         SerialType::Tuple | SerialType::Map => {
-            let _n = rmp::decode::read_array_len(reader).ok();
+            let n = rmp::decode::read_array_len(reader)
+                .map_err(|e| MorlocError::Serialization(format!("msgpack tuple len: {}", e)))?;
+            check_field_count(schema, n as usize)?;
             let mut total = schema.width;
             for field_schema in &schema.parameters {
                 if !field_schema.is_fixed_width() {
@@ -804,11 +807,38 @@ fn skip_int(reader: &mut &[u8]) -> Result<(), MorlocError> {
     Ok(())
 }
 
+/// A tuple or record arrives as a msgpack array whose length must be the
+/// field count; any other length would leave the stream misaligned and
+/// every later field read as garbage.
+fn check_field_count(schema: &Schema, n: usize) -> Result<(), MorlocError> {
+    if n != schema.parameters.len() {
+        return Err(MorlocError::Serialization(format!(
+            "msgpack {} has {} elements but the type has {} fields",
+            if schema.serial_type == SerialType::Map { "record" } else { "tuple" },
+            n,
+            schema.parameters.len()
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::schema::parse_schema;
     use crate::json;
+
+    #[test]
+    fn test_wrong_arity_tuple_is_rejected() {
+        let _shm = setup_shm();
+        // Three elements on the wire for a two-field tuple.
+        let wire = parse_schema("t3i4i4i4").unwrap();
+        let ptr = json::read_json_with_schema("[1,2,3]", &wire).unwrap();
+        let mpk = pack_with_schema(ptr, &wire).unwrap();
+        let two = parse_schema("t2i4i4").unwrap();
+        let err = unpack_with_schema(&mpk, &two).unwrap_err().to_string();
+        assert!(err.contains("3 elements but the type has 2 fields"), "{err}");
+    }
 
     #[must_use]
     fn setup_shm() -> std::sync::RwLockReadGuard<'static, ()> {

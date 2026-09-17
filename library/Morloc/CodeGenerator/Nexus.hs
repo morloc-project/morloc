@@ -472,7 +472,7 @@ generalTypeToSerialAST' i anc (VarT v)
   -- lowers to the bare @T@ wire token rather than the alias-expansion
   -- path below, which rejects terminals.
   | MBT.isTableVar v = return $ SerialObject NamTable (FV v (CV "")) [] []
-  | any ((== Just v) . typeHeadT) (Set.toList anc) = return $ SerialRec (FV v (CV ""))
+  | any ((== Just v) . typeHeadT) (Set.toList anc) = return $ SerialRec (FV v (CV "")) []
   | otherwise = do
       scope <- MM.gets stateUniversalGeneralTypedefs
       -- A `data` type is a leaf here: its scope body is a constructor-name
@@ -511,7 +511,7 @@ generalTypeToSerialAST' i anc (VarT v)
           "cannot serialize type" <+> pretty v
             <+> "-- unexpected scope shape" <+> pretty (show x)
 generalTypeToSerialAST' i anc t0@(AppT (VarT v) [t])
-  | Set.member t0 anc = return $ SerialRec (FV v (CV ""))
+  | Set.member t0 anc = return $ SerialRec (FV v (CV "")) [keyTypeF t]
   | v == MBT.list = SerialList (FV v (CV "")) Nothing <$> generalTypeToSerialAST' i anc t
   -- Stream-handle types share the 16-byte tagged-union wire form. The
   -- schema code (F/O/I) picks the receiver's open kind; the per-instance
@@ -521,7 +521,7 @@ generalTypeToSerialAST' i anc t0@(AppT (VarT v) [t])
   | v == MBT.istreamVar = return $ SerialIStream (FV v (CV ""))
   | otherwise = appliedTypeToSerialAST i anc t0 v [t]
 generalTypeToSerialAST' i anc t0@(AppT (VarT v) ts)
-  | Set.member t0 anc = return $ SerialRec (FV v (CV ""))
+  | Set.member t0 anc = return $ SerialRec (FV v (CV "")) (map keyTypeF ts)
   | v == (MBT.tuple (length ts)) =
       SerialTuple (FV v (CV "")) <$> mapM (generalTypeToSerialAST' i anc) ts
   -- A Table lowers to a SerialObject NamTable. The encoder emits the
@@ -539,20 +539,45 @@ generalTypeToSerialAST' i anc t0@(AppT (VarT v) ts)
 generalTypeToSerialAST' i anc (OptionalT t) = do
   inner <- generalTypeToSerialAST' i anc t
   return $ SerialOptional (FV (TV "Optional") (CV "")) inner
-generalTypeToSerialAST' i anc t0@(NamT o v _ rs)
-  | Set.member t0 anc = return $ SerialRec (FV v (CV ""))
+generalTypeToSerialAST' i anc t0@(NamT o v ps rs)
+  | Set.member t0 anc = return $ SerialRec (FV v (CV "")) (map keyTypeF ps)
   | otherwise = do
       -- Add the record to the ancestor set before recursing into its
       -- fields: a recursive record (e.g. @record Tree where children ::
       -- [Tree]@) has a field whose type mentions @Tree@ again, which would
       -- otherwise expand back into the same NamT and loop. Parameter types
-      -- are already substituted into the field types @rs@ by this point,
-      -- so they do not need to appear in the resulting SerialAST.
+      -- are already substituted into the field types @rs@ by this point;
+      -- they ride along so a back-reference can name this instantiation
+      -- apart from another of the same record.
       anc' <- descendT i t0 anc
-      SerialObject o (FV v (CV "")) []
+      SerialObject o (FV v (CV "")) (map keyTypeF ps)
         <$> mapM (secondM (generalTypeToSerialAST' i anc')) rs
 generalTypeToSerialAST' i _ t = MM.throwSourcedError i $
   "cannot serialize type:" <+> pretty t
+
+-- | A general type in the codegen-level form, with no concrete names.
+-- Used only to key a serial AST node's instantiation so a back-reference
+-- can be matched to the node it cuts against; two occurrences of one
+-- type map to equal keys, which is all the matching needs.
+keyTypeF :: Type -> TypeF
+keyTypeF (UnkT v) = UnkF (FV v (CV ""))
+keyTypeF (VarT v) = VarF (FV v (CV ""))
+keyTypeF (FunT ts t) = FunF (map keyTypeF ts) (keyTypeF t)
+keyTypeF (AppT t ts) = AppF (keyTypeF t) (map keyTypeF ts)
+keyTypeF (NamT o v ps rs) = NamF o (FV v (CV "")) (map keyTypeF ps) [(k, keyTypeF t) | (k, t) <- rs]
+keyTypeF (EffectT _ t) = keyTypeF t
+keyTypeF (OptionalT t) = OptionalF (keyTypeF t)
+keyTypeF (NatLitT n) = NatLitF n
+keyTypeF NatVoidT = NatVoidF
+keyTypeF (StrLitT t) = StrLitF t
+keyTypeF StrVoidT = StrVoidF
+-- Unevaluated kind arithmetic has no codegen form; it never reaches a
+-- serializable type, and as a key any fixed value keeps equal types equal.
+keyTypeF t@NatAddT{} = UnkF (FV (TV (MT.pack (show t))) (CV ""))
+keyTypeF t@NatMulT{} = UnkF (FV (TV (MT.pack (show t))) (CV ""))
+keyTypeF t@NatSubT{} = UnkF (FV (TV (MT.pack (show t))) (CV ""))
+keyTypeF t@NatDivT{} = UnkF (FV (TV (MT.pack (show t))) (CV ""))
+keyTypeF t@StrConcatT{} = UnkF (FV (TV (MT.pack (show t))) (CV ""))
 
 -- | The general name at a type's head, when it has one.
 typeHeadT :: Type -> Maybe TVar
@@ -651,7 +676,7 @@ appliedTypeToSerialAST i anc t0 v ts = do
                   (\(n, fts) ->
                      (,) n <$> mapM (generalTypeToSerialAST' i anc' . inst . typeOf) fts)
                   arms
-                return $ SerialVariant (FV v (CV "")) [] arms'
+                return $ SerialVariant (FV v (CV "")) (map keyTypeF ts) arms'
     Nothing -> resolveAliasApp i anc t0 v ts
 
 -- The self-recursion cut for an applied alias is made by the caller, which
@@ -1978,7 +2003,7 @@ validateValueAgainstAST loc env path ast value = case (ast, value) of
         ]
 
   -- Recursive back-reference: look up the binding, recurse.
-  (SerialRec (FV v _), _) -> case Map.lookup v env of
+  (SerialRec (FV v _) _, _) -> case Map.lookup v env of
     Just bound -> validateValueAgainstAST loc env path bound value
     Nothing -> MM.throwSystemError $
       loc <> ": compiler bug: unbound SerialRec `" <> pretty (unTVar v)
@@ -2098,7 +2123,7 @@ expectedJsonShape = go
       "(" <> MT.intercalate ", " (map go ss) <> ")"
     go (SerialObject _ _ _ fields)   =
       "{ " <> MT.intercalate ", " [unKey k <> ": " <> go v | (k, v) <- fields] <> " }"
-    go (SerialRec (FV (TV name) _))  = name <> " (recursive)"
+    go (SerialRec (FV (TV name) _) _) = name <> " (recursive)"
     go (SerialUnknown _)             = "Unknown"
 
 -- | Numeric range description, used ONLY by 'rangeMismatch' to spell

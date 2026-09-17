@@ -349,7 +349,12 @@ data SerialAST
     -- 'makeSerialAST''. Downstream wire-schema emission renders it as a
     -- back-ref token; the runtime resolves it back to the ancestor's
     -- Schema*.
-    SerialRec FVar
+    --
+    -- The type arguments identify WHICH instantiation of the name is
+    -- meant when several nest on the path (an @L Int@ inside an @L Str@
+    -- may refer back to either); they are the arguments the ancestor was
+    -- built with, and a bare name carries none.
+    SerialRec FVar [TypeF]
   | -- | A `data` type with argument-free constructors: one byte on the
     -- wire, tagged by the constructor's position in this list. The names
     -- travel in the schema so JSON renders the constructor rather than
@@ -408,7 +413,7 @@ instance Pretty SerialAST where
   pretty (SerialClosure ins out) = parens ("SerialClosure" <+> list (map pretty ins) <+> pretty out)
   pretty (SerialNull v) = parens ("SerialNull" <+> pretty v)
   pretty (SerialOptional v s) = parens ("SerialOptional" <+> pretty v <+> pretty s)
-  pretty (SerialRec v) = parens ("SerialRec" <+> pretty v)
+  pretty (SerialRec v _) = parens ("SerialRec" <+> pretty v)
   pretty (SerialEnum v _ ns) = parens ("SerialEnum" <+> pretty v <+> list (map pretty ns))
   pretty (SerialVariant v _ as) =
     parens ("SerialVariant" <+> pretty v <+> list [pretty n | (n, _) <- as])
