@@ -141,11 +141,13 @@ fn pack_data_inner(
             }
             SerialType::String => {
                 let arr = &*(ptr as *const Array);
-                let data = shm::rel2abs(arr.data)?;
-                let bytes = std::slice::from_raw_parts(data, arr.size);
                 rmp::encode::write_str_len(buf, arr.size as u32)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack str: {}", e)))?;
-                buf.extend_from_slice(bytes);
+                // An empty string carries no data block.
+                if arr.size > 0 && arr.data != RELNULL {
+                    let data = shm::rel2abs(arr.data)?;
+                    buf.extend_from_slice(std::slice::from_raw_parts(data, arr.size));
+                }
             }
             SerialType::IFile | SerialType::OStream | SerialType::IStream => {
                 // Persistence to msgpack uses path form regardless of the
@@ -640,7 +642,7 @@ fn read_be_u64(reader: &mut &[u8]) -> Result<u64, MorlocError> {
 
 // ── Size calculation for unpack ────────────────────────────────────────────
 
-fn calc_unpack_size(data: &[u8], schema: &Schema) -> Result<usize, MorlocError> {
+pub(crate) fn calc_unpack_size(data: &[u8], schema: &Schema) -> Result<usize, MorlocError> {
     let mut reader = data;
     let mut env: RecurEnv = Vec::new();
     calc_size_r(schema, &mut reader, &mut env)
@@ -827,6 +829,18 @@ mod tests {
     use super::*;
     use crate::schema::parse_schema;
     use crate::json;
+
+    #[test]
+    fn test_roundtrip_nested_empty_string_via_msgpack() {
+        let _shm = setup_shm();
+        // An empty string inside a container has no data block; the packer
+        // must write a zero-length string rather than follow the null.
+        let schema = parse_schema("as").unwrap();
+        let ptr1 = json::read_json_with_schema("[\"a\",\"\",\"ccc\"]", &schema).unwrap();
+        let mpk = pack_with_schema(ptr1, &schema).unwrap();
+        let ptr2 = unpack_with_schema(&mpk, &schema).unwrap();
+        assert_eq!(json::voidstar_to_json_string(ptr2, &schema).unwrap(), "[\"a\",\"\",\"ccc\"]");
+    }
 
     #[test]
     fn test_wrong_arity_tuple_is_rejected() {

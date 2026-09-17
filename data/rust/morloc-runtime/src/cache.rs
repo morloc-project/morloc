@@ -670,6 +670,13 @@ pub unsafe extern "C" fn hash_voidstar(
     }
 }
 
+/// The hash of a value under its schema, as `hash_voidstar` computes it.
+#[cfg(test)]
+pub(crate) fn hash_value(data: *const u8, schema: &crate::schema::Schema, seed: u64) -> Result<u64, MorlocError> {
+    let mut env: crate::recur::RecurEnv = Vec::new();
+    hash_voidstar_inner(data, schema, seed, &mut env)
+}
+
 /// Push `schema` onto the declaration stack when it names one, so a
 /// `Recur` back-reference below it resolves, then walk. `with_scope`
 /// pushes only for a named non-Recur node, which is exactly the

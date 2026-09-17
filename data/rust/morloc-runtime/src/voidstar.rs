@@ -5,9 +5,10 @@
 //! They are used by packet.rs, cli.rs, and json.rs.
 
 use crate::error::MorlocError;
-use crate::recur::{self, RecurEnv};
+use crate::recur::{self, RecurEnv, Resolver};
 use crate::schema::{Schema, SerialType};
 use crate::shm::{self, AbsPtr, Array, RelPtr};
+use crate::walk::{self, Frame, Stack, Visit, Walker};
 
 // ── adjust_voidstar_relptrs ────────────────────────────────────────────────
 
@@ -48,120 +49,10 @@ pub fn adjust_relptrs(
     schema: &Schema,
     base_rel: RelPtr,
 ) -> Result<(), MorlocError> {
-    let mut env: RecurEnv = Vec::new();
-    adjust_relptrs_with_env(data, schema, base_rel, &mut env)
-}
-
-fn adjust_relptrs_with_env(
-    data: AbsPtr,
-    schema: &Schema,
-    base_rel: RelPtr,
-    env: &mut RecurEnv,
-) -> Result<(), MorlocError> {
-    recur::with_scope(env, schema, |env| adjust_relptrs_inner(data, schema, base_rel, env))
-}
-
-fn adjust_relptrs_inner(
-    data: AbsPtr,
-    schema: &Schema,
-    base_rel: RelPtr,
-    env: &mut RecurEnv,
-) -> Result<(), MorlocError> {
-    // SAFETY: data points to a voidstar blob in SHM. We adjust relptrs in-place;
-    // all pointer arithmetic stays within the blob's bounds as defined by schema.
-    unsafe {
-        match schema.serial_type {
-            SerialType::Int => {
-                // Inline BigInt: [size, value_or_relptr]. Only adjust when size > 1.
-                let size = *(data as *const usize);
-                if size > 1 {
-                    let relptr = &mut *(data.add(std::mem::size_of::<usize>()) as *mut RelPtr);
-                    *relptr += base_rel;
-                }
-                Ok(())
-            }
-            SerialType::String | SerialType::Array => {
-                let arr = &mut *(data as *mut Array);
-                arr.data += base_rel;
-                if !schema.parameters.is_empty() && !schema.parameters[0].is_fixed_width() {
-                    let arr_data = shm::rel2abs(arr.data)?;
-                    let elem_schema = &schema.parameters[0];
-                    let w = elem_schema.width;
-                    for i in 0..arr.size {
-                        adjust_relptrs_with_env(arr_data.add(i * w), elem_schema, base_rel, env)?;
-                    }
-                }
-                Ok(())
-            }
-            SerialType::IFile | SerialType::OStream | SerialType::IStream => {
-                // Stream-handle tagged field. Only TAG_PATH payloads carry
-                // a relptr that needs rebasing; TAG_HANDLE's payload is an
-                // intra-nexus slot id with no offset semantics. RELNULL
-                // payloads (empty path) stay unchanged.
-                use morloc_runtime_types::stream_handle as sh;
-                let field = data as *mut u8;
-                let tag = sh::read_tag(field);
-                if tag == sh::TAG_PATH {
-                    let payload = sh::read_payload(field);
-                    if payload != sh::RELNULL_PAYLOAD {
-                        sh::write_field(field, sh::TAG_PATH, payload.wrapping_add(base_rel as u64));
-                    }
-                }
-                Ok(())
-            }
-            SerialType::Tuple | SerialType::Map => {
-                for i in 0..schema.parameters.len() {
-                    adjust_relptrs_with_env(
-                        data.add(schema.offsets[i]),
-                        &schema.parameters[i],
-                        base_rel,
-                        env,
-                    )?;
-                }
-                Ok(())
-            }
-            SerialType::Variant => {
-                // Tag byte, then a relptr to the arm's payload tuple.
-                // Rebase the pointer, then recurse so the payload's own
-                // pointers are rebased too.
-                let arm = variant_arm_schema(*data, schema)?;
-                let relptr_slot =
-                    &mut *(data.add(VARIANT_PAYLOAD_OFFSET) as *mut RelPtr);
-                if *relptr_slot != shm::RELNULL {
-                    *relptr_slot += base_rel;
-                    let inner_abs = shm::rel2abs(*relptr_slot)?;
-                    adjust_relptrs_with_env(inner_abs, arm, base_rel, env)?;
-                }
-                Ok(())
-            }
-            SerialType::Optional => {
-                // The Optional slot is a relptr: RELNULL = absent, else
-                // a buffer-relative offset that becomes SHM-relative
-                // after adding base_rel. Then resolve and recurse into
-                // the inner T to rebase any of its sub-relptrs too.
-                let relptr_slot = &mut *(data as *mut RelPtr);
-                if *relptr_slot != shm::RELNULL && !schema.parameters.is_empty() {
-                    *relptr_slot += base_rel;
-                    let inner_abs = shm::rel2abs(*relptr_slot)?;
-                    adjust_relptrs_with_env(inner_abs, &schema.parameters[0], base_rel, env)?;
-                }
-                Ok(())
-            }
-            SerialType::Recur => {
-                // Resolve to the named declaration on the env stack and
-                // adjust as if the data carried that schema. Without this
-                // branch, inner relptrs of recursive records (the
-                // children Array.data of nested Trees, the Optional
-                // relptrs of LL-style chains) are left unadjusted when
-                // voidstar gets copied between regions.
-                let name = schema.name.as_deref().unwrap_or("");
-                let target_ptr = recur::lookup(env, name)?;
-                let target = &*target_ptr;
-                adjust_relptrs_with_env(data, target, base_rel, env)
-            }
-            _ => Ok(()),
-        }
-    }
+    let mut w = RebaseWalk { res: Resolver::new(schema), mode: Rebase::Shm(base_rel) };
+    let mut st = Stack::new();
+    st.enter(schema, data, ());
+    walk::run(&mut w, &mut st)
 }
 
 // ── shift_buffer_relptrs ───────────────────────────────────────────────────
@@ -183,112 +74,163 @@ pub unsafe fn shift_buffer_relptrs(
     schema: &Schema,
     delta: isize,
 ) -> Result<(), MorlocError> {
-    let mut env: RecurEnv = Vec::new();
-    shift_buffer_relptrs_with_env(buf_base, field_offset, schema, delta, &mut env)
+    let mut w = RebaseWalk { res: Resolver::new(schema), mode: Rebase::Buffer { buf_base, delta } };
+    let mut st = Stack::new();
+    st.enter(schema, buf_base.add(field_offset), ());
+    walk::run(&mut w, &mut st)
 }
 
-unsafe fn shift_buffer_relptrs_with_env(
-    buf_base: *mut u8,
-    field_offset: usize,
-    schema: &Schema,
-    delta: isize,
-    env: &mut RecurEnv,
-) -> Result<(), MorlocError> {
-    recur::with_scope(env, schema, |env| {
-        shift_buffer_relptrs_inner(buf_base, field_offset, schema, delta, env)
-    })
+/// How a rebasing walk reaches the block a relptr names once it has been
+/// rebased: through the SHM volume table, or by offset from a buffer.
+enum Rebase {
+    Shm(RelPtr),
+    Buffer { buf_base: *mut u8, delta: isize },
 }
 
-unsafe fn shift_buffer_relptrs_inner(
-    buf_base: *mut u8,
-    field_offset: usize,
-    schema: &Schema,
-    delta: isize,
-    env: &mut RecurEnv,
-) -> Result<(), MorlocError> {
-    match schema.serial_type {
-        SerialType::Int => {
-            let size = *(buf_base.add(field_offset) as *const usize);
-            if size > 1 {
-                let relptr = &mut *(
-                    buf_base.add(field_offset + std::mem::size_of::<usize>())
-                        as *mut RelPtr
-                );
-                *relptr += delta;
-                // BigInt limbs are a fixed-width u64 array; no nested relptrs.
-            }
+/// Adds a constant to every relptr under a value, in place, descending
+/// through each rebased pointer so the blocks it names are rebased too.
+struct RebaseWalk<'r> {
+    res: Resolver<'r>,
+    mode: Rebase,
+}
+
+impl<'r> RebaseWalk<'r> {
+    #[inline]
+    fn shift(&self) -> RelPtr {
+        match self.mode {
+            Rebase::Shm(b) => b,
+            Rebase::Buffer { delta, .. } => delta,
         }
-        SerialType::String | SerialType::Array => {
-            let arr = &mut *(buf_base.add(field_offset) as *mut Array);
-            if arr.size == 0 || arr.data <= 0 {
-                return Ok(());
-            }
-            arr.data += delta;
-            if !schema.parameters.is_empty() && !schema.parameters[0].is_fixed_width() {
-                let elem_schema = &schema.parameters[0];
-                let w = elem_schema.width;
-                let base_off = arr.data as usize;
-                for i in 0..arr.size {
-                    shift_buffer_relptrs_with_env(
-                        buf_base, base_off + i * w, elem_schema, delta, env,
-                    )?;
-                }
-            }
-        }
-        SerialType::Variant => {
-            let tag = *buf_base.add(field_offset);
-            let arm = variant_arm_schema(tag, schema)?;
-            let relptr_slot = &mut *(buf_base
-                .add(field_offset + VARIANT_PAYLOAD_OFFSET)
-                as *mut RelPtr);
-            if *relptr_slot == shm::RELNULL {
-                return Ok(());
-            }
-            *relptr_slot += delta;
-            let inner_offset = *relptr_slot as usize;
-            shift_buffer_relptrs_with_env(buf_base, inner_offset, arm, delta, env)?;
-        }
-        SerialType::Optional => {
-            if schema.parameters.is_empty() { return Ok(()); }
-            let relptr_slot = &mut *(buf_base.add(field_offset) as *mut RelPtr);
-            if *relptr_slot == shm::RELNULL {
-                return Ok(());
-            }
-            *relptr_slot += delta;
-            let inner_offset = *relptr_slot as usize;
-            shift_buffer_relptrs_with_env(
-                buf_base, inner_offset, &schema.parameters[0], delta, env,
-            )?;
-        }
-        SerialType::Tuple | SerialType::Map => {
-            for i in 0..schema.parameters.len() {
-                let inner_offset = field_offset + schema.offsets[i];
-                shift_buffer_relptrs_with_env(
-                    buf_base, inner_offset, &schema.parameters[i], delta, env,
-                )?;
-            }
-        }
-        SerialType::IFile | SerialType::OStream | SerialType::IStream => {
-            use morloc_runtime_types::stream_handle as sh;
-            let field = buf_base.add(field_offset) as *mut u8;
-            if sh::read_tag(field) == sh::TAG_PATH {
-                let payload = sh::read_payload(field);
-                if payload != sh::RELNULL_PAYLOAD {
-                    sh::write_field(
-                        field, sh::TAG_PATH, payload.wrapping_add(delta as u64),
-                    );
-                }
-            }
-        }
-        SerialType::Recur => {
-            let name = schema.name.as_deref().unwrap_or("");
-            let target_ptr = recur::lookup(env, name)?;
-            let target = &*target_ptr;
-            shift_buffer_relptrs_inner(buf_base, field_offset, target, delta, env)?;
-        }
-        _ => {} // primitives have no relptrs
     }
-    Ok(())
+
+    /// The block a rebased relptr names.
+    #[inline]
+    fn target(&self, rel: RelPtr) -> Result<*mut u8, MorlocError> {
+        match self.mode {
+            Rebase::Shm(_) => shm::rel2abs(rel),
+            // SAFETY: a buffer-local relptr is an offset into the buffer.
+            Rebase::Buffer { buf_base, .. } => Ok(unsafe { buf_base.add(rel as usize) }),
+        }
+    }
+
+    fn child(
+        &mut self,
+        st: &mut Stack<()>,
+        f: &Frame<()>,
+        idx: usize,
+        s: &'r Schema,
+        data: *const u8,
+    ) -> Result<Visit, MorlocError> {
+        if self.res.flat(s) {
+            self.step(st, Frame::new(s, data, ()))?;
+            Ok(Visit::Done)
+        } else {
+            walk::defer(self, st, f, idx, s, data, ());
+            Ok(Visit::Deferred)
+        }
+    }
+}
+
+impl<'r> Walker<()> for RebaseWalk<'r> {
+    fn step(&mut self, st: &mut Stack<()>, f: Frame<()>) -> Result<(), MorlocError> {
+        // SAFETY: frames hold nodes of the tree the resolver was built from,
+        // and `data` points at a value laid out as that schema describes;
+        // every write stays inside the node's own slot.
+        let s: &'r Schema = self.res.resolve(unsafe { &*f.schema })?;
+        let data = f.data as *mut u8;
+        let shift = self.shift();
+        unsafe {
+            match s.serial_type {
+                SerialType::Int => {
+                    // Inline BigInt: [size, value_or_relptr]. Only a limb
+                    // pointer needs rebasing; the limbs themselves hold none.
+                    let size = *(data as *const usize);
+                    if size > 1 {
+                        let relptr = &mut *(data.add(std::mem::size_of::<usize>()) as *mut RelPtr);
+                        *relptr += shift;
+                    }
+                }
+                SerialType::String | SerialType::Array => {
+                    let arr = &mut *(data as *mut Array);
+                    if f.idx == 0 {
+                        // A buffer-local walk leaves an empty or null data
+                        // pointer alone; the SHM walk rebases it regardless.
+                        if matches!(self.mode, Rebase::Buffer { .. }) && (arr.size == 0 || arr.data <= 0) {
+                            return Ok(());
+                        }
+                        arr.data += shift;
+                    }
+                    if s.parameters.is_empty() || s.parameters[0].is_fixed_width() {
+                        return Ok(());
+                    }
+                    let elem_schema = &s.parameters[0];
+                    let w = elem_schema.width;
+                    let elems = self.target(arr.data)?;
+                    let flat_elem = self.res.flat(elem_schema);
+                    for i in f.idx..arr.size {
+                        let p = elems.add(i * w);
+                        if flat_elem {
+                            self.step(st, Frame::new(elem_schema, p, ()))?;
+                        } else if self.child(st, &f, i, elem_schema, p)? == Visit::Deferred {
+                            return Ok(());
+                        }
+                    }
+                }
+                SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+                    // Stream-handle tagged field. Only TAG_PATH payloads carry
+                    // a relptr that needs rebasing; TAG_HANDLE's payload is an
+                    // intra-nexus slot id with no offset semantics. RELNULL
+                    // payloads (empty path) stay unchanged.
+                    use morloc_runtime_types::stream_handle as sh;
+                    if sh::read_tag(data) == sh::TAG_PATH {
+                        let payload = sh::read_payload(data);
+                        if payload != sh::RELNULL_PAYLOAD {
+                            sh::write_field(data, sh::TAG_PATH, payload.wrapping_add(shift as u64));
+                        }
+                    }
+                }
+                SerialType::Tuple | SerialType::Map => {
+                    for i in f.idx..s.parameters.len() {
+                        let p = data.add(s.offsets[i]);
+                        if self.child(st, &f, i, &s.parameters[i], p)? == Visit::Deferred {
+                            return Ok(());
+                        }
+                    }
+                }
+                SerialType::Variant => {
+                    // Tag byte, then a relptr to the arm's payload tuple.
+                    // Rebase the pointer, then descend so the payload's own
+                    // pointers are rebased too.
+                    if f.idx > 0 {
+                        return Ok(());
+                    }
+                    let arm = variant_arm_schema(*data, s)?;
+                    let relptr_slot = &mut *(data.add(VARIANT_PAYLOAD_OFFSET) as *mut RelPtr);
+                    if *relptr_slot != shm::RELNULL {
+                        *relptr_slot += shift;
+                        let inner = self.target(*relptr_slot)?;
+                        self.child(st, &f, 0, arm, inner)?;
+                    }
+                }
+                SerialType::Optional => {
+                    // The Optional slot is a relptr: RELNULL = absent, else a
+                    // pointer that is rebased and followed so the inner T's
+                    // own pointers are rebased too.
+                    if f.idx > 0 || s.parameters.is_empty() {
+                        return Ok(());
+                    }
+                    let relptr_slot = &mut *(data as *mut RelPtr);
+                    if *relptr_slot != shm::RELNULL {
+                        *relptr_slot += shift;
+                        let inner = self.target(*relptr_slot)?;
+                        self.child(st, &f, 0, &s.parameters[0], inner)?;
+                    }
+                }
+                _ => {} // primitives have no relptrs
+            }
+        }
+        Ok(())
+    }
 }
 
 // ── read_voidstar_binary ───────────────────────────────────────────────────
@@ -595,220 +537,228 @@ pub fn flatten_into(
     unsafe { std::ptr::copy_nonoverlapping(data, buf.as_mut_ptr(), schema.width) };
 
     // Phase 2: fix up relptrs and copy variable-length data
-    let mut cursor = schema.width;
-    let mut env: RecurEnv = Vec::new();
-    flatten_fixup(&mut buf[..], 0, data, schema, &mut cursor, &mut env)?;
+    let mut w = FlattenWalk { res: Resolver::new(schema), buf: buf.as_mut_ptr(), len: buf.len(), cursor: schema.width };
+    let mut st = Stack::new();
+    st.enter(schema, data, 0);
+    walk::run(&mut w, &mut st)?;
 
     Ok(())
 }
 
-fn flatten_fixup(
-    buf: &mut [u8],
-    buf_offset: usize,
-    data: AbsPtr,
-    schema: &Schema,
-    cursor: &mut usize,
-    env: &mut RecurEnv,
-) -> Result<(), MorlocError> {
-    recur::with_scope(env, schema, |env| {
-        flatten_fixup_inner(buf, buf_offset, data, schema, cursor, env)
-    })
+/// Copies a value's variable-length blocks into a flat buffer behind the
+/// slots the parent already copied, rewriting each pointer to the
+/// buffer-relative offset of the block. A frame's `x` is the offset of the
+/// node's slot in the buffer.
+struct FlattenWalk<'r> {
+    res: Resolver<'r>,
+    buf: *mut u8,
+    len: usize,
+    cursor: usize,
 }
 
-fn flatten_fixup_inner(
-    buf: &mut [u8],
-    buf_offset: usize,
-    data: AbsPtr,
-    schema: &Schema,
-    cursor: &mut usize,
-    env: &mut RecurEnv,
-) -> Result<(), MorlocError> {
-    // SAFETY: buf is sized by calc_voidstar_size_inner to hold the entire flattened structure.
-    // data points to corresponding SHM data. cursor tracks write position within buf.
-    unsafe {
-        match schema.serial_type {
-            SerialType::Int => {
-                // Inline BigInt: [size, value_or_relptr]
-                // size ≤ 1: value is inline, nothing to fixup (already copied by parent)
-                // size > 1: second field is relptr to limb data, need to copy limbs
-                let size = *(data as *const usize);
-                if size > 1 {
-                    let relptr = *(data.add(std::mem::size_of::<usize>()) as *const RelPtr);
-                    let orig_data = shm::rel2abs(relptr)?;
-                    let align = std::mem::align_of::<u64>();
-                    *cursor = shm::align_up(*cursor, align);
-                    // Write new relptr into buffer
-                    let buf_relptr = &mut *(buf.as_mut_ptr().add(buf_offset + std::mem::size_of::<usize>()) as *mut RelPtr);
-                    *buf_relptr = *cursor as RelPtr;
-                    let total_bytes = size * std::mem::size_of::<u64>();
-                    buf[*cursor..*cursor + total_bytes].copy_from_slice(
-                        std::slice::from_raw_parts(orig_data, total_bytes)
-                    );
-                    *cursor += total_bytes;
-                }
-                // size ≤ 1: inline value, no fixup needed
-            }
-            SerialType::String | SerialType::Array => {
-                let orig_arr = &*(data as *const Array);
-                let buf_arr = &mut *(buf.as_mut_ptr().add(buf_offset) as *mut Array);
-                if orig_arr.size == 0 {
-                    buf_arr.data = 0;
-                    return Ok(());
-                }
-                let orig_data = shm::rel2abs(orig_arr.data)?;
-                let elem_schema = &schema.parameters[0];
-                // String stays at natural element alignment (1 byte for chars);
-                // Array bumps to 64 for primitive numeric elements (SIMD/BLAS).
-                let align = if matches!(schema.serial_type, SerialType::String) {
-                    elem_schema.alignment()
-                } else {
-                    elem_schema.array_data_alignment()
-                };
-                *cursor = shm::align_up(*cursor, align);
-                buf_arr.data = *cursor as RelPtr;
-                let elem_w = elem_schema.width;
-                // Checked: a corrupt/hostile arr.size must not wrap the product
-                // (an OOB from_raw_parts read / silent truncation); error out
-                // instead. calc_voidstar_size (saturating) normally fails the
-                // buffer alloc first, so this is a belt-and-suspenders guard.
-                let total_bytes = elem_w
-                    .checked_mul(orig_arr.size)
-                    .ok_or_else(|| MorlocError::Other("flatten: array data size overflow".into()))?;
-                buf[*cursor..*cursor + total_bytes].copy_from_slice(
-                    std::slice::from_raw_parts(orig_data, total_bytes)
-                );
-                let elem_start = *cursor;
-                *cursor += total_bytes;
-                if !elem_schema.is_fixed_width() {
-                    for i in 0..orig_arr.size {
-                        flatten_fixup(
-                            buf, elem_start + i * elem_w,
-                            orig_data.add(i * elem_w), elem_schema, cursor, env,
-                        )?;
-                    }
-                }
-            }
-            SerialType::IFile | SerialType::OStream | SerialType::IStream => {
-                // Tagged stream-handle field: TAG_PATH copies the
-                // `{size, bytes}` suballoc into the flatten buffer;
-                // TAG_HANDLE has no suballoc.
-                use morloc_runtime_types::stream_handle as sh;
-                let src_field = data as *const u8;
-                let tag = sh::read_tag(src_field);
-                let src_payload = sh::read_payload(src_field);
-                let dst_field = buf.as_mut_ptr().add(buf_offset);
-                match tag {
-                    t if t == sh::TAG_PATH => {
-                        if src_payload == sh::RELNULL_PAYLOAD {
-                            sh::write_field(dst_field, sh::TAG_PATH, sh::RELNULL_PAYLOAD);
-                        } else {
-                            let src_suballoc = shm::rel2abs(src_payload as RelPtr)?;
-                            let path_len = sh::read_path_size(src_suballoc) as usize;
-                            let total = sh::path_suballoc_size(path_len);
-                            *cursor = shm::align_up(*cursor, 8);
-                            let suballoc_offset = *cursor;
-                            buf[suballoc_offset..suballoc_offset + total]
-                                .copy_from_slice(
-                                    std::slice::from_raw_parts(src_suballoc, total)
-                                );
-                            *cursor += total;
-                            sh::write_field(
-                                dst_field,
-                                sh::TAG_PATH,
-                                suballoc_offset as u64,
-                            );
-                        }
-                    }
-                    t if t == sh::TAG_HANDLE => {
-                        sh::write_field(dst_field, sh::TAG_HANDLE, src_payload);
-                    }
-                    t => {
-                        return Err(MorlocError::Other(format!(
-                            "flatten_fixup: unsupported stream-handle tag {}", t,
-                        )));
-                    }
-                }
-            }
-            SerialType::Tuple | SerialType::Map => {
-                for i in 0..schema.parameters.len() {
-                    flatten_fixup(
-                        buf, buf_offset + schema.offsets[i],
-                        data.add(schema.offsets[i]), &schema.parameters[i], cursor, env,
-                    )?;
-                }
-            }
-            SerialType::Variant => {
-                // The tag is already in buf (the parent copied the slot's
-                // width). Follow the payload pointer, copy the arm's body
-                // in at the cursor, and rewrite the buf-side pointer to be
-                // buffer-relative.
-                let arm = variant_arm_schema(*data, schema)?;
-                let orig_relptr =
-                    *(data.add(VARIANT_PAYLOAD_OFFSET) as *const RelPtr);
-                let buf_relptr = &mut *(buf
-                    .as_mut_ptr()
-                    .add(buf_offset + VARIANT_PAYLOAD_OFFSET)
-                    as *mut RelPtr);
-                if orig_relptr == shm::RELNULL {
-                    *buf_relptr = shm::RELNULL;
-                } else {
-                    let inner_align = arm.alignment().max(1);
-                    *cursor = shm::align_up(*cursor, inner_align);
-                    let inner_buf_offset = *cursor;
-                    *buf_relptr = inner_buf_offset as RelPtr;
-                    let orig_inner = shm::rel2abs(orig_relptr)?;
-                    let inner_width = arm.width;
-                    buf[inner_buf_offset..inner_buf_offset + inner_width]
-                        .copy_from_slice(std::slice::from_raw_parts(
-                            orig_inner, inner_width,
-                        ));
-                    *cursor += inner_width;
-                    flatten_fixup(buf, inner_buf_offset, orig_inner, arm, cursor, env)?;
-                }
-            }
-            SerialType::Optional => {
-                // The Optional slot is a relptr. RELNULL = absent (already
-                // copied into buf as RELNULL). Otherwise follow the relptr
-                // in the source SHM to the inner T, copy T's body into buf
-                // at the cursor, rewrite the buf-side relptr to be
-                // buffer-relative, and recurse to copy any further
-                // variable-length data behind T.
-                let orig_relptr = *(data as *const RelPtr);
-                let buf_relptr = &mut *(buf.as_mut_ptr().add(buf_offset) as *mut RelPtr);
-                if orig_relptr == shm::RELNULL {
-                    *buf_relptr = shm::RELNULL;
-                } else {
-                    let inner_schema = &schema.parameters[0];
-                    let inner_align = inner_schema.alignment().max(1);
-                    *cursor = shm::align_up(*cursor, inner_align);
-                    let inner_buf_offset = *cursor;
-                    *buf_relptr = inner_buf_offset as RelPtr;
-                    let orig_inner = shm::rel2abs(orig_relptr)?;
-                    let inner_width = inner_schema.width;
-                    buf[inner_buf_offset..inner_buf_offset + inner_width]
-                        .copy_from_slice(std::slice::from_raw_parts(orig_inner, inner_width));
-                    *cursor += inner_width;
-                    flatten_fixup(
-                        buf, inner_buf_offset, orig_inner, inner_schema, cursor, env,
-                    )?;
-                }
-            }
-            SerialType::Recur => {
-                // Resolve and recurse as if the data carried the named
-                // target schema. Without this, the variable-length
-                // sub-data (children Array.data, optional inner relptrs)
-                // would not be copied into the flat buffer, and the
-                // resulting inline packet would still reference the
-                // original SHM region.
-                let name = schema.name.as_deref().unwrap_or("");
-                let target_ptr = recur::lookup(env, name)?;
-                let target = &*target_ptr;
-                flatten_fixup_inner(buf, buf_offset, data, target, cursor, env)?;
-            }
-            _ => {} // primitives already copied by parent
+impl<'r> FlattenWalk<'r> {
+    /// The buffer region `[at, at + n)`, checked against the buffer's size,
+    /// which the size walk chose to hold the whole value.
+    fn region(&mut self, at: usize, n: usize) -> Result<&mut [u8], MorlocError> {
+        if at.checked_add(n).map_or(true, |end| end > self.len) {
+            return Err(MorlocError::Other("flatten: value larger than its computed size".into()));
+        }
+        // SAFETY: the range is inside the buffer.
+        Ok(unsafe { std::slice::from_raw_parts_mut(self.buf.add(at), n) })
+    }
+
+    fn child(
+        &mut self,
+        st: &mut Stack<usize>,
+        f: &Frame<usize>,
+        idx: usize,
+        s: &'r Schema,
+        data: *const u8,
+        at: usize,
+    ) -> Result<Visit, MorlocError> {
+        if self.res.flat(s) {
+            self.step(st, Frame::new(s, data, at))?;
+            Ok(Visit::Done)
+        } else {
+            walk::defer(self, st, f, idx, s, data, at);
+            Ok(Visit::Deferred)
         }
     }
-    Ok(())
+}
+
+impl<'r> Walker<usize> for FlattenWalk<'r> {
+    fn step(&mut self, st: &mut Stack<usize>, f: Frame<usize>) -> Result<(), MorlocError> {
+        // SAFETY: frames hold nodes of the tree the resolver was built from;
+        // `data` points at the SHM value the schema describes, and every
+        // buffer write goes through `region`.
+        let s: &'r Schema = self.res.resolve(unsafe { &*f.schema })?;
+        let data = f.data;
+        let at = f.x;
+        unsafe {
+            match s.serial_type {
+                SerialType::Int => {
+                    // Inline BigInt: [size, value_or_relptr]. An inline
+                    // value was copied by the parent; limbs are copied here
+                    // and the pointer rewritten.
+                    let size = *(data as *const usize);
+                    if size > 1 {
+                        let relptr = *(data.add(std::mem::size_of::<usize>()) as *const RelPtr);
+                        let limbs = shm::rel2abs(relptr)?;
+                        self.cursor = shm::align_up(self.cursor, std::mem::align_of::<u64>());
+                        let total = size * std::mem::size_of::<u64>();
+                        let here = self.cursor;
+                        self.region(here, total)?.copy_from_slice(std::slice::from_raw_parts(limbs, total));
+                        self.region(at + std::mem::size_of::<usize>(), std::mem::size_of::<RelPtr>())?
+                            .copy_from_slice(&(here as RelPtr).to_ne_bytes());
+                        self.cursor += total;
+                    }
+                }
+                SerialType::String | SerialType::Array => {
+                    let orig = &*(data as *const Array);
+                    let elem_schema = &s.parameters[0];
+                    let elem_w = elem_schema.width;
+                    if f.idx == 0 {
+                        if orig.size == 0 {
+                            std::ptr::write_unaligned(
+                                self.region(at, std::mem::size_of::<Array>())?.as_mut_ptr() as *mut Array,
+                                Array { size: 0, data: 0 },
+                            );
+                            return Ok(());
+                        }
+                        let src = shm::rel2abs(orig.data)?;
+                        // A string stays at natural element alignment (1 byte
+                        // for chars); an array bumps to 64 for primitive
+                        // numeric elements (SIMD/BLAS).
+                        let align = if matches!(s.serial_type, SerialType::String) {
+                            elem_schema.alignment()
+                        } else {
+                            elem_schema.array_data_alignment()
+                        };
+                        self.cursor = shm::align_up(self.cursor, align);
+                        // Checked: a corrupt or hostile size must not wrap the
+                        // product into a short copy.
+                        let total = elem_w
+                            .checked_mul(orig.size)
+                            .ok_or_else(|| MorlocError::Other("flatten: array data size overflow".into()))?;
+                        let here = self.cursor;
+                        self.region(here, total)?.copy_from_slice(std::slice::from_raw_parts(src, total));
+                        std::ptr::write_unaligned(
+                            self.region(at, std::mem::size_of::<Array>())?.as_mut_ptr() as *mut Array,
+                            Array { size: orig.size, data: here as RelPtr },
+                        );
+                        self.cursor += total;
+                    }
+                    if elem_schema.is_fixed_width() {
+                        return Ok(());
+                    }
+                    // The element region's offset was written into the
+                    // buffer-side header above.
+                    let hdr = &*(self.buf.add(at) as *const Array);
+                    let elem_start = hdr.data as usize;
+                    let src = shm::rel2abs(orig.data)?;
+                    let flat_elem = self.res.flat(elem_schema);
+                    for i in f.idx..orig.size {
+                        let p = src.add(i * elem_w);
+                        let slot = elem_start + i * elem_w;
+                        if flat_elem {
+                            self.step(st, Frame::new(elem_schema, p, slot))?;
+                        } else if self.child(st, &f, i, elem_schema, p, slot)? == Visit::Deferred {
+                            return Ok(());
+                        }
+                    }
+                }
+                SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+                    // Tagged stream-handle field: TAG_PATH copies the
+                    // `{size, bytes}` suballoc into the buffer; TAG_HANDLE
+                    // has no suballoc.
+                    use morloc_runtime_types::stream_handle as sh;
+                    let tag = sh::read_tag(data);
+                    let src_payload = sh::read_payload(data);
+                    let dst_field = self.region(at, sh::STREAM_HANDLE_FIELD_SIZE)?.as_mut_ptr();
+                    match tag {
+                        t if t == sh::TAG_PATH => {
+                            if src_payload == sh::RELNULL_PAYLOAD {
+                                sh::write_field(dst_field, sh::TAG_PATH, sh::RELNULL_PAYLOAD);
+                            } else {
+                                let src_suballoc = shm::rel2abs(src_payload as RelPtr)?;
+                                let path_len = sh::read_path_size(src_suballoc) as usize;
+                                let total = sh::path_suballoc_size(path_len);
+                                self.cursor = shm::align_up(self.cursor, 8);
+                                let here = self.cursor;
+                                self.region(here, total)?
+                                    .copy_from_slice(std::slice::from_raw_parts(src_suballoc, total));
+                                self.cursor += total;
+                                sh::write_field(dst_field, sh::TAG_PATH, here as u64);
+                            }
+                        }
+                        t if t == sh::TAG_HANDLE => {
+                            sh::write_field(dst_field, sh::TAG_HANDLE, src_payload);
+                        }
+                        t => {
+                            return Err(MorlocError::Other(format!(
+                                "flatten_fixup: unsupported stream-handle tag {}", t,
+                            )));
+                        }
+                    }
+                }
+                SerialType::Tuple | SerialType::Map => {
+                    for i in f.idx..s.parameters.len() {
+                        let off = s.offsets[i];
+                        if self.child(st, &f, i, &s.parameters[i], data.add(off), at + off)? == Visit::Deferred {
+                            return Ok(());
+                        }
+                    }
+                }
+                SerialType::Variant => {
+                    // The tag is already in the buffer (the parent copied the
+                    // slot). Follow the payload pointer, copy the arm's body
+                    // in at the cursor, and point the buffer-side slot at it.
+                    if f.idx > 0 {
+                        return Ok(());
+                    }
+                    let arm = variant_arm_schema(*data, s)?;
+                    let orig_relptr = *(data.add(VARIANT_PAYLOAD_OFFSET) as *const RelPtr);
+                    let slot = at + VARIANT_PAYLOAD_OFFSET;
+                    if orig_relptr == shm::RELNULL {
+                        self.region(slot, std::mem::size_of::<RelPtr>())?.copy_from_slice(&shm::RELNULL.to_ne_bytes());
+                    } else {
+                        self.cursor = shm::align_up(self.cursor, arm.alignment().max(1));
+                        let here = self.cursor;
+                        let inner = shm::rel2abs(orig_relptr)?;
+                        self.region(here, arm.width)?.copy_from_slice(std::slice::from_raw_parts(inner, arm.width));
+                        self.region(slot, std::mem::size_of::<RelPtr>())?.copy_from_slice(&(here as RelPtr).to_ne_bytes());
+                        self.cursor += arm.width;
+                        self.child(st, &f, 0, arm, inner, here)?;
+                    }
+                }
+                SerialType::Optional => {
+                    // The Optional slot is a relptr. RELNULL = absent;
+                    // otherwise copy the inner T's body in at the cursor,
+                    // point the buffer-side slot at it, and descend for any
+                    // further blocks behind T.
+                    if f.idx > 0 {
+                        return Ok(());
+                    }
+                    let orig_relptr = *(data as *const RelPtr);
+                    if orig_relptr == shm::RELNULL {
+                        self.region(at, std::mem::size_of::<RelPtr>())?.copy_from_slice(&shm::RELNULL.to_ne_bytes());
+                    } else {
+                        let inner_schema = &s.parameters[0];
+                        self.cursor = shm::align_up(self.cursor, inner_schema.alignment().max(1));
+                        let here = self.cursor;
+                        let inner = shm::rel2abs(orig_relptr)?;
+                        self.region(here, inner_schema.width)?
+                            .copy_from_slice(std::slice::from_raw_parts(inner, inner_schema.width));
+                        self.region(at, std::mem::size_of::<RelPtr>())?.copy_from_slice(&(here as RelPtr).to_ne_bytes());
+                        self.cursor += inner_schema.width;
+                        self.child(st, &f, 0, inner_schema, inner, here)?;
+                    }
+                }
+                _ => {} // primitives already copied by parent
+            }
+        }
+        Ok(())
+    }
 }
 
 // ── write_flat_to_writer (forward-only flatten) ───────────────────────────

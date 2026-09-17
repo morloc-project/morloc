@@ -8,6 +8,11 @@
 pub mod error;
 pub mod schema;
 pub mod recur;
+pub mod walk;
+#[cfg(test)]
+pub mod deep_tests;
+#[cfg(test)]
+mod pins;
 pub mod packet;
 pub mod shm;
 pub mod shm_companion;
