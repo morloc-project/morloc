@@ -597,7 +597,10 @@ struct JsonRequest {
     id: Option<String>,
     method: Option<String>,
     command: Option<String>,
-    args: Option<serde_json::Value>,
+    /// Kept as the text the client sent: it goes to the pool verbatim,
+    /// so an integer wider than a double keeps its digits and a value of
+    /// any depth passes, neither of which a tree-shaped parse allows.
+    args: Option<Box<serde_json::value::RawValue>>,
     expr: Option<String>,
     name: Option<String>,
     #[serde(default)]
@@ -673,8 +676,7 @@ pub unsafe extern "C" fn daemon_parse_request(
     }
 
     if let Some(args) = &parsed.args {
-        let args_str = serde_json::to_string(args).unwrap_or_default();
-        let c = CString::new(args_str).unwrap_or_default();
+        let c = CString::new(args.get()).unwrap_or_default();
         (*req).args_json = libc::strdup(c.as_ptr());
     }
 
@@ -699,12 +701,31 @@ pub unsafe extern "C" fn daemon_parse_request(
 struct JsonResponse {
     id: Option<String>,
     status: Option<String>,
-    result: Option<serde_json::Value>,
+    /// The value as text: it is user data of any depth and width, and
+    /// passes through untouched.
+    result: Option<Box<serde_json::value::RawValue>>,
     error: Option<String>,
     /// Media (`@mime`) return: base64 content + media type (see
     /// daemon_serialize_response). Reconstructed onto result_bytes/mime.
     result_b64: Option<String>,
     mime: Option<String>,
+}
+
+/// The response as written to the socket. The member order is the wire
+/// order.
+#[derive(serde::Serialize)]
+struct WireResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result_b64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mime: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<Box<serde_json::value::RawValue>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 #[no_mangle]
@@ -796,8 +817,7 @@ pub unsafe extern "C" fn daemon_parse_response(
             (*resp).error = libc::strdup(c.as_ptr());
         }
     } else if let Some(result) = &parsed.result {
-        let s = serde_json::to_string(result).unwrap_or_default();
-        let c = CString::new(s).unwrap_or_default();
+        let c = CString::new(result.get()).unwrap_or_default();
         (*resp).result_json = libc::strdup(c.as_ptr());
     }
 
@@ -867,19 +887,16 @@ pub unsafe extern "C" fn daemon_serialize_response(
     response: *mut DaemonResponse,
     out_len: *mut usize,
 ) -> *mut c_char {
-    let mut map = serde_json::Map::new();
-
-    if !(*response).id.is_null() {
-        let id = CStr::from_ptr((*response).id).to_string_lossy();
-        map.insert("id".into(), serde_json::Value::String(id.into_owned()));
-    }
-
-    map.insert(
-        "status".into(),
-        serde_json::Value::String(
-            if (*response).success { "ok" } else { "error" }.into(),
-        ),
-    );
+    use serde_json::value::RawValue;
+    let owned = |p: *const c_char| (!p.is_null()).then(|| CStr::from_ptr(p).to_string_lossy().into_owned());
+    let mut wire = WireResponse {
+        id: owned((*response).id),
+        status: if (*response).success { "ok" } else { "error" },
+        result_b64: None,
+        mime: None,
+        result: None,
+        error: None,
+    };
 
     // A media-typed (`@mime`) return carries raw bytes + a media type instead of
     // a JSON value. Convey them across the socket wire as base64 + mime so the
@@ -888,31 +905,23 @@ pub unsafe extern "C" fn daemon_serialize_response(
     if (*response).success && !(*response).mime.is_null() && !(*response).result_bytes.is_null() {
         use base64::Engine;
         let bytes = std::slice::from_raw_parts((*response).result_bytes, (*response).result_len);
-        let mime = CStr::from_ptr((*response).mime).to_string_lossy();
-        map.insert(
-            "result_b64".into(),
-            serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(bytes)),
-        );
-        map.insert("mime".into(), serde_json::Value::String(mime.into_owned()));
+        wire.result_b64 = Some(base64::engine::general_purpose::STANDARD.encode(bytes));
+        wire.mime = owned((*response).mime);
     } else if (*response).success && !(*response).result_json.is_null() {
+        // The value goes out as the text it is; text that is not JSON is
+        // carried as a JSON string.
         let raw = CStr::from_ptr((*response).result_json).to_string_lossy();
-        // Try to parse as JSON value; if it fails, store as raw string
-        match serde_json::from_str::<serde_json::Value>(&raw) {
-            Ok(v) => {
-                map.insert("result".into(), v);
-            }
-            Err(_) => {
-                map.insert("result".into(), serde_json::Value::String(raw.into_owned()));
-            }
-        }
+        wire.result = match serde_json::from_str::<&RawValue>(&raw) {
+            Ok(_) => RawValue::from_string(raw.into_owned()).ok(),
+            Err(_) => serde_json::to_string(raw.as_ref()).ok().and_then(|s| RawValue::from_string(s).ok()),
+        };
     }
 
-    if !(*response).success && !(*response).error.is_null() {
-        let err = CStr::from_ptr((*response).error).to_string_lossy();
-        map.insert("error".into(), serde_json::Value::String(err.into_owned()));
+    if !(*response).success {
+        wire.error = owned((*response).error);
     }
 
-    let json_str = serde_json::to_string(&map).unwrap_or_else(|_| "{}".into());
+    let json_str = serde_json::to_string(&wire).unwrap_or_else(|_| "{}".into());
     if !out_len.is_null() {
         *out_len = json_str.len();
     }
@@ -1750,7 +1759,7 @@ pub unsafe extern "C" fn daemon_dispatch(
     if !(*request).args_json.is_null() {
         // Parse the JSON array
         let args_str = CStr::from_ptr((*request).args_json).to_string_lossy();
-        let parsed_args: Vec<serde_json::Value> = match serde_json::from_str(&args_str) {
+        let parsed_args: Vec<&serde_json::value::RawValue> = match serde_json::from_str(&args_str) {
             Ok(v) => v,
             Err(e) => {
                 (*resp).success = false;
@@ -1774,18 +1783,14 @@ pub unsafe extern "C" fn daemon_dispatch(
             return resp;
         }
 
-        // Re-encode each argument as JSON text for the pool. This has to go
-        // through the serializer, as the CLI path does in `dispatch::quoted`:
-        // wrapping a string's raw contents in quotes yields invalid JSON as
-        // soon as it holds a quote or a backslash, and a NUL would truncate
-        // the C string. Encoding escapes both, so the CString cannot fail.
-        // Done before the allocation below so an encoding failure returns
-        // without leaking the argument array.
+        // Each argument goes to the pool as the JSON text it arrived in. A
+        // NUL inside a JSON string is the escape `\u0000`, and a raw NUL
+        // anywhere is a syntax error the parse above rejects, so the
+        // CString cannot fail. Done before the allocation below so a
+        // failure returns without leaking the argument array.
         let mut arg_texts: Vec<CString> = Vec::with_capacity(expected_nargs);
         for val in parsed_args.iter() {
-            let encoded = serde_json::to_string(val)
-                .map_err(|e| e.to_string())
-                .and_then(|s| CString::new(s).map_err(|e| e.to_string()));
+            let encoded = CString::new(val.get()).map_err(|e| e.to_string());
             match encoded {
                 Ok(c) => arg_texts.push(c),
                 Err(e) => {
@@ -2028,10 +2033,9 @@ pub unsafe extern "C" fn daemon_dispatch(
 
         // NUL-in-Str guard. If the target pool's language does not
         // support embedded NULs (e.g. R), reject the call cleanly here
-        // before any pool I/O. We scan the JSON args because at this
-        // point that's the most accessible representation; serde_json
-        // has already decoded ` ` escapes into actual NUL bytes in
-        // any Rust String values, so a contains(&0) check is sufficient.
+        // before any pool I/O. The JSON args text is scanned as it
+        // stands; text the scanner cannot read is rejected too, since a
+        // guard that lets an unreadable argument through is no guard.
         // The check is bypassed when the env var or the program-wide
         // --unsafe-skip-null-check flag is set.
         let target_pool = &*(*mv).pools.add(cmd.pool_index);
@@ -2040,34 +2044,34 @@ pub unsafe extern "C" fn daemon_dispatch(
         if !skip && !target_pool.allow_string_null {
             if !(*request).args_json.is_null() {
                 let args_str = CStr::from_ptr((*request).args_json).to_string_lossy();
-                if let Ok(parsed) =
-                    serde_json::from_str::<serde_json::Value>(&args_str)
-                {
-                    if let Some(p) = crate::null_check::first_null_in_json(&parsed) {
-                        let lang = CStr::from_ptr(target_pool.lang).to_string_lossy();
-                        let msg = format!(
-                            "{} does not support embedded NUL bytes in strings (at {})",
-                            lang, p
-                        );
-                        (*resp).success = false;
-                        (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
-                        let c = CString::new(msg).unwrap_or_default();
-                        (*resp).error = libc::strdup(c.as_ptr());
-                        // Cleanup the args array allocated above.
-                        if !args.is_null() {
-                            let mut i = 0;
-                            loop {
-                                let p = *args.add(i);
-                                if p.is_null() {
-                                    break;
-                                }
-                                free_argument_t(p);
-                                i += 1;
+                let lang = CStr::from_ptr(target_pool.lang).to_string_lossy();
+                let rejection = match crate::null_check::first_null_in_json_text(&args_str) {
+                    Ok(None) => None,
+                    Ok(Some(p)) => Some(format!(
+                        "{} does not support embedded NUL bytes in strings (at {})",
+                        lang, p
+                    )),
+                    Err(e) => Some(format!("Failed to scan args for NUL bytes: {}", e)),
+                };
+                if let Some(msg) = rejection {
+                    (*resp).success = false;
+                    (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
+                    let c = CString::new(msg).unwrap_or_default();
+                    (*resp).error = libc::strdup(c.as_ptr());
+                    // Cleanup the args array allocated above.
+                    if !args.is_null() {
+                        let mut i = 0;
+                        loop {
+                            let p = *args.add(i);
+                            if p.is_null() {
+                                break;
                             }
-                            libc::free(args as *mut c_void);
+                            free_argument_t(p);
+                            i += 1;
                         }
-                        return resp;
+                        libc::free(args as *mut c_void);
                     }
+                    return resp;
                 }
             }
         }
@@ -3053,8 +3057,75 @@ extern "C" fn daemon_signal_handler_fn(_sig: i32) {
 }
 
 #[cfg(test)]
+mod request_parse_tests {
+    use super::*;
+
+    fn parse(text: &str) -> (*mut DaemonRequest, Option<String>) {
+        let mut err: *mut c_char = ptr::null_mut();
+        let req = unsafe { daemon_parse_request(text.as_ptr() as *const c_char, text.len(), &mut err) };
+        let msg = if err.is_null() {
+            None
+        } else {
+            let m = unsafe { CStr::from_ptr(err) }.to_string_lossy().into_owned();
+            unsafe { libc::free(err as *mut c_void) };
+            Some(m)
+        };
+        (req, msg)
+    }
+
+    // The args travel to the pool as the text the client sent: an integer
+    // past the range of a double keeps every digit, and a value nested
+    // deeper than a tree-shaped JSON parser allows still parses.
+    #[test]
+    fn args_pass_through_as_text() {
+        let deep = format!("{}1{}", "[".repeat(400), "]".repeat(400));
+        let text = format!(
+            "{{\"method\":\"call\",\"command\":\"f\",\"args\":[18446744073709551617, {deep}, \"s\"]}}"
+        );
+        let (req, err) = parse(&text);
+        assert_eq!(err, None);
+        assert!(!req.is_null());
+        let args = unsafe { CStr::from_ptr((*req).args_json) }.to_string_lossy().into_owned();
+        assert_eq!(args, format!("[18446744073709551617, {deep}, \"s\"]"));
+        unsafe { daemon_free_request(req) };
+    }
+
+    #[test]
+    fn malformed_args_are_rejected() {
+        let (req, err) = parse("{\"method\":\"call\",\"args\":[1,}");
+        assert!(req.is_null());
+        assert!(err.unwrap().contains("Failed to parse request JSON"));
+    }
+}
+
+#[cfg(test)]
 mod media_wire_tests {
     use super::*;
+
+    // A JSON result crosses the socket wire as the text the pool produced.
+    #[test]
+    fn json_result_round_trips_as_text() {
+        unsafe {
+            let deep = format!("{}1{}", "[".repeat(400), "]".repeat(400));
+            let value = format!("[18446744073709551617, {deep}]");
+            let mut resp: DaemonResponse = std::mem::zeroed();
+            resp.success = true;
+            let v = CString::new(value.as_str()).unwrap();
+            resp.result_json = libc::strdup(v.as_ptr());
+            let mut len: usize = 0;
+            let json = daemon_serialize_response(&mut resp, &mut len);
+            let text = CStr::from_ptr(json).to_str().unwrap();
+            assert_eq!(text, format!("{{\"status\":\"ok\",\"result\":{value}}}"));
+            let mut err: *mut c_char = ptr::null_mut();
+            let parsed = daemon_parse_response(json, len, &mut err);
+            assert!(err.is_null());
+            assert!((*parsed).success);
+            assert_eq!(CStr::from_ptr((*parsed).result_json).to_str().unwrap(), value);
+            libc::free(json as *mut c_void);
+            libc::free(resp.result_json as *mut c_void);
+            daemon_free_response(parsed);
+        }
+    }
 
     // A media (@mime) return must survive the daemon response wire: serialize
     // sets result_b64+mime; parse reconstructs the raw bytes + mime byte-for-byte.

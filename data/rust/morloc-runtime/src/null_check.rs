@@ -1,7 +1,7 @@
 //! NUL-in-Str guard for cross-pool dispatch.
 //!
 //! This module re-exports the stateless half (`env_skip_null_check` and
-//! `first_null_in_json`) from `morloc-runtime-types::null_check` and adds
+//! `first_null_in_json_text`) from `morloc-runtime-types::null_check` and adds
 //! the value-walking guard the pools call here because it calls
 //! `shm::rel2abs`, which reads the process-global `VOLUMES` of this
 //! crate's `shm` module.
@@ -414,8 +414,7 @@ mod tests {
 
     #[test]
     fn json_scan_clean_string() {
-        let v: serde_json::Value = serde_json::from_str(r#""hello""#).unwrap();
-        assert!(first_null_in_json(&v).is_none());
+        assert_eq!(first_null_in_json_text(r#""hello""#).unwrap(), None);
     }
 
     // Helper: build the 6-byte JSON escape sequence for U+0000 without
@@ -428,8 +427,7 @@ mod tests {
     #[test]
     fn json_scan_string_with_unicode_nul() {
         let json = format!("\"abc{}def\"", nul_escape());
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let r = first_null_in_json(&v);
+        let r = first_null_in_json_text(&json).unwrap();
         assert!(r.is_some());
         let path = r.unwrap();
         assert!(path.contains("byte 3"), "path={}", path);
@@ -441,8 +439,7 @@ mod tests {
             "{{\"a\":\"ok\",\"b\":[{{\"c\":\"ab{}c\"}}]}}",
             nul_escape()
         );
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let r = first_null_in_json(&v);
+        let r = first_null_in_json_text(&json).unwrap();
         assert!(r.is_some());
         let path = r.unwrap();
         // Path should walk through .b[0].c
@@ -457,15 +454,13 @@ mod tests {
             "[\"safe\",\"also safe\",\"x{}y\"]",
             nul_escape()
         );
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let r = first_null_in_json(&v);
+        let r = first_null_in_json_text(&json).unwrap();
         assert!(r.is_some());
         assert!(r.unwrap().contains("[2]"));
     }
 
     #[test]
     fn json_scan_skips_non_string_leaves() {
-        let v: serde_json::Value = serde_json::from_str(r#"{"n":42,"f":3.14,"b":true}"#).unwrap();
-        assert!(first_null_in_json(&v).is_none());
+        assert_eq!(first_null_in_json_text(r#"{"n":42,"f":3.14,"b":true}"#).unwrap(), None);
     }
 }

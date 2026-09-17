@@ -325,9 +325,34 @@ pub unsafe extern "C" fn http_write_response_ex(
 /// A real JSON parser, not a scan: the escape sequences matter here. An
 /// expression that imports a module spans lines, and a line break can only
 /// reach the daemon as `\n`.
-fn extract_json_string(body: &str, key: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
-    Some(v.get(key)?.as_str()?.to_string())
+///
+/// The body's other members are kept as text and never built into a
+/// tree, so their shape and depth cost nothing; a body that is not a JSON
+/// object is an error the route reports, not a missing field.
+fn extract_json_string(body: &str, key: &str) -> Result<Option<String>, String> {
+    let members: std::collections::HashMap<String, &serde_json::value::RawValue> =
+        serde_json::from_str(body.trim()).map_err(|e| e.to_string())?;
+    let Some(raw) = members.get(key) else { return Ok(None) };
+    Ok(serde_json::from_str::<String>(raw.get()).ok())
+}
+
+/// The string member `key` of a route's JSON body, or the request-level
+/// error for a body that is not JSON.
+unsafe fn body_string(
+    body: &str,
+    key: &str,
+    route: &str,
+    dreq: *mut DaemonRequest,
+    errmsg: *mut *mut c_char,
+) -> Result<Option<String>, ()> {
+    match extract_json_string(body, key) {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            libc::free(dreq as *mut c_void);
+            set_errmsg(errmsg, &MorlocError::Other(format!("Malformed JSON in {} body: {}", route, e)));
+            Err(())
+        }
+    }
 }
 
 /// Translate a parsed HTTP request into a daemon request. On failure,
@@ -390,7 +415,10 @@ pub unsafe extern "C" fn http_to_daemon_request(
     // POST /eval
     if method == HttpMethod::Post && path == "/eval" {
         (*dreq).method = DaemonMethod::Eval;
-        if let Some(expr) = extract_json_string(body_str, "expr") {
+        let Ok(expr) = body_string(body_str, "expr", "/eval", dreq, errmsg) else {
+            return ptr::null_mut();
+        };
+        if let Some(expr) = expr {
             let c = std::ffi::CString::new(expr).unwrap_or_default();
             (*dreq).expr = libc::strdup(c.as_ptr());
         }
@@ -405,7 +433,10 @@ pub unsafe extern "C" fn http_to_daemon_request(
     // POST /typecheck
     if method == HttpMethod::Post && path == "/typecheck" {
         (*dreq).method = DaemonMethod::Typecheck;
-        if let Some(expr) = extract_json_string(body_str, "expr") {
+        let Ok(expr) = body_string(body_str, "expr", "/typecheck", dreq, errmsg) else {
+            return ptr::null_mut();
+        };
+        if let Some(expr) = expr {
             let c = std::ffi::CString::new(expr).unwrap_or_default();
             (*dreq).expr = libc::strdup(c.as_ptr());
         }
@@ -420,11 +451,17 @@ pub unsafe extern "C" fn http_to_daemon_request(
     // POST /bind
     if method == HttpMethod::Post && path == "/bind" {
         (*dreq).method = DaemonMethod::Bind;
-        if let Some(expr) = extract_json_string(body_str, "expr") {
+        let Ok(expr) = body_string(body_str, "expr", "/bind", dreq, errmsg) else {
+            return ptr::null_mut();
+        };
+        if let Some(expr) = expr {
             let c = std::ffi::CString::new(expr).unwrap_or_default();
             (*dreq).expr = libc::strdup(c.as_ptr());
         }
-        if let Some(name) = extract_json_string(body_str, "name") {
+        let Ok(name) = body_string(body_str, "name", "/bind", dreq, errmsg) else {
+            return ptr::null_mut();
+        };
+        if let Some(name) = name {
             let c = std::ffi::CString::new(name).unwrap_or_default();
             (*dreq).name = libc::strdup(c.as_ptr());
         }
@@ -483,31 +520,37 @@ pub unsafe extern "C" fn http_to_daemon_request(
         // brackets, replacing the previous bracket-counting parser that
         // misclassified `]` characters inside string fields as array
         // terminators.
+        // The args stay the text they arrived as, so an integer wider
+        // than a double and a value of any depth reach the pool intact.
         let trimmed = body_str.trim();
         if !trimmed.is_empty() {
-            match serde_json::from_str::<serde_json::Value>(trimmed) {
-                Ok(serde_json::Value::Array(_)) => {
-                    // The whole body is the args array.
-                    let c = std::ffi::CString::new(trimmed).unwrap_or_default();
+            use serde_json::value::RawValue;
+            let args_text: Result<Option<String>, serde_json::Error> = if trimmed.starts_with('[') {
+                // The whole body is the args array.
+                serde_json::from_str::<&RawValue>(trimmed).map(|_| Some(trimmed.to_string()))
+            } else if trimmed.starts_with('{') {
+                serde_json::from_str::<std::collections::HashMap<String, &RawValue>>(trimmed).map(|map| {
+                    map.get("args")
+                        .map(|a| a.get().trim())
+                        .filter(|a| a.starts_with('['))
+                        .map(str::to_string)
+                })
+            } else {
+                // JSON that is neither an array nor an object carries no
+                // args; downstream reports them missing. Anything else is
+                // malformed.
+                serde_json::from_str::<&RawValue>(trimmed).map(|_| None)
+            };
+            match args_text {
+                Ok(Some(s)) => {
+                    let c = std::ffi::CString::new(s).unwrap_or_default();
                     (*dreq).args_json = libc::strdup(c.as_ptr());
                 }
-                Ok(serde_json::Value::Object(map)) => {
-                    if let Some(args) = map.get("args") {
-                        if args.is_array() {
-                            let s = args.to_string();
-                            let c = std::ffi::CString::new(s).unwrap_or_default();
-                            (*dreq).args_json = libc::strdup(c.as_ptr());
-                        }
-                    }
-                }
-                Ok(_) => {
-                    // JSON parsed but isn't an array or object; treat as
-                    // missing args (downstream will emit BAD_REQUEST).
-                }
+                Ok(None) => {}
                 Err(e) => {
                     // Malformed JSON. Fail fast with a clear message
                     // rather than letting it fall through as "missing
-                    // args" (which was the previous misleading default).
+                    // args".
                     libc::free(dreq as *mut c_void);
                     set_errmsg(
                         errmsg,
@@ -540,4 +583,63 @@ pub unsafe extern "C" fn http_to_daemon_request(
     }
     set_errmsg(errmsg, &MorlocError::Other(format!("Unknown HTTP endpoint: {} {}", method_str, path)));
     ptr::null_mut()
+}
+
+#[cfg(test)]
+mod body_tests {
+    use super::*;
+    use std::ffi::CStr;
+
+    fn to_daemon(method: HttpMethod, path: &str, body: &str) -> (*mut DaemonRequest, Option<String>) {
+        let mut req: HttpRequest = unsafe { std::mem::zeroed() };
+        req.method = method;
+        for (i, b) in path.bytes().enumerate() {
+            req.path[i] = b as c_char;
+        }
+        let mut body_bytes = body.as_bytes().to_vec();
+        req.body = body_bytes.as_mut_ptr() as *mut c_char;
+        req.body_len = body_bytes.len();
+        let mut err: *mut c_char = ptr::null_mut();
+        let dreq = unsafe { http_to_daemon_request(&mut req, &mut err, ptr::null_mut()) };
+        let msg = (!err.is_null()).then(|| {
+            let m = unsafe { CStr::from_ptr(err) }.to_string_lossy().into_owned();
+            unsafe { libc::free(err as *mut c_void) };
+            m
+        });
+        (dreq, msg)
+    }
+
+    fn args_of(dreq: *mut DaemonRequest) -> String {
+        let s = unsafe { CStr::from_ptr((*dreq).args_json) }.to_string_lossy().into_owned();
+        unsafe { crate::daemon_ffi::daemon_free_request(dreq) };
+        s
+    }
+
+    // The args of a /call body reach the daemon as the text they arrived
+    // in, whether the body is the bare array or wraps it in an object.
+    #[test]
+    fn call_args_pass_through_as_text() {
+        let deep = format!("{}1{}", "[".repeat(400), "]".repeat(400));
+        let bare = format!("[18446744073709551617, {deep}]");
+        let (d, e) = to_daemon(HttpMethod::Post, "/call/f", &bare);
+        assert_eq!(e, None);
+        assert_eq!(args_of(d), bare);
+        let (d, e) = to_daemon(HttpMethod::Post, "/call/f", &format!(" {{\"args\": {bare} , \"x\": null}} "));
+        assert_eq!(e, None);
+        assert_eq!(args_of(d), bare);
+        let (d, e) = to_daemon(HttpMethod::Post, "/call/f", "[1,");
+        assert!(d.is_null());
+        assert!(e.unwrap().contains("Malformed JSON in /call body"));
+    }
+
+    #[test]
+    fn eval_body_that_is_not_json_is_rejected() {
+        let (d, e) = to_daemon(HttpMethod::Post, "/eval", "{\"expr\": \"1 + 1\", \"other\": [[[[]]]]}");
+        assert_eq!(e, None);
+        assert_eq!(unsafe { CStr::from_ptr((*d).expr) }.to_str().unwrap(), "1 + 1");
+        unsafe { crate::daemon_ffi::daemon_free_request(d) };
+        let (d, e) = to_daemon(HttpMethod::Post, "/eval", "{\"expr\": ");
+        assert!(d.is_null());
+        assert!(e.unwrap().contains("Malformed JSON in /eval body"));
+    }
 }

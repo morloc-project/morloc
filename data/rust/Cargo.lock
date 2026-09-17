@@ -790,6 +790,7 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
+ "indexmap",
  "libc",
  "morloc-manifest",
  "morloc-runtime-types",

@@ -361,21 +361,16 @@ pub fn dispatch_command_parsed(
                     _ => None,
                 };
                 if let Some(s) = payload {
-                    // The CLI ArgValue contains JSON-quoted form for
-                    // strings (e.g. `"abc\u0000def"`). Decode via
-                    // serde_json so any \u0000 escapes become real
-                    // NUL bytes; non-JSON values just fail to parse
-                    // and are skipped.
-                    if let Ok(jv) = serde_json::from_str::<serde_json::Value>(s) {
-                        if let Some(p) =
-                            morloc_runtime_types::null_check::first_null_in_json(&jv)
-                        {
-                            eprintln!(
-                                "Error: {} does not support embedded NUL bytes in strings (at args[{}]{})",
-                                target_pool.lang, i, p
-                            );
-                            process::clean_exit(1);
-                        }
+                    // The CLI ArgValue holds JSON text (a string arrives
+                    // quoted, so a NUL is a `\u0000` escape). A value
+                    // that is not JSON is a bare word the shell handed
+                    // over, which cannot carry a NUL, and is skipped.
+                    if let Ok(Some(p)) = morloc_runtime_types::null_check::first_null_in_json_text(s) {
+                        eprintln!(
+                            "Error: {} does not support embedded NUL bytes in strings (at args[{}]{})",
+                            target_pool.lang, i, p
+                        );
+                        process::clean_exit(1);
                     }
                 }
             }
