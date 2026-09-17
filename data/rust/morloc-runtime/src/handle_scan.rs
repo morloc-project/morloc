@@ -12,8 +12,9 @@
 //! _buffer`: a contiguous `Vec<u8>` whose relptrs are payload-buffer-
 //! relative offsets. Descent is structural (Tuple / Map fields by
 //! offset, Array elements by index, Optional through the inhabited
-//! relptr, Recur by named-schema lookup) so a stream-handle field
-//! anywhere in the payload's shape is discovered.
+//! relptr, Variant through the arm the tag selects, Recur through its
+//! declaration) so a stream-handle field anywhere in the payload's shape
+//! is discovered.
 //!
 //! The rewrite step (`rewrite_handles_to_paths`) appends path
 //! suballocs at the tail of the buffer and switches each rewritten
@@ -65,109 +66,118 @@ pub fn collect_stream_fields(
     schema: &Schema,
 ) -> Result<Vec<StreamField>, MorlocError> {
     let mut fields = Vec::new();
+    let res = crate::recur::Resolver::new(schema);
+    // Pending nodes: schema, field offset, next child. A container leaves
+    // its own continuation beneath the child it steps into, so a value of
+    // any depth is scanned in bounded stack space.
+    let mut stack: Vec<(*const Schema, usize, usize)> = vec![(schema, 0, 0)];
     // SAFETY: read-only walk bounded by `payload.len()`. Relptr reads
     // are bounds-checked before dereferencing; misaligned reads are
     // avoided by using `read_unaligned` where the source alignment isn't
     // guaranteed by the buffer.
     unsafe {
-        walk(payload, 0, schema, &mut fields)?;
+        while let Some((sp, field_offset, idx)) = stack.pop() {
+            let s = res.resolve(&*sp)?;
+            match s.serial_type {
+                SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+                    let kind = StreamFieldKind::from_serial(s.serial_type)
+                        .expect("F/O/I match arm");
+                    check_bounds(payload, field_offset, sh::STREAM_HANDLE_FIELD_SIZE)?;
+                    fields.push(StreamField { offset: field_offset, kind });
+                }
+                SerialType::Tuple | SerialType::Map => {
+                    if idx < s.parameters.len() {
+                        let inner_offset = field_offset
+                            .checked_add(*s.offsets.get(idx).ok_or_else(|| {
+                                MorlocError::Other(format!(
+                                    "handle_scan: tuple/map field {} has no offset entry", idx,
+                                ))
+                            })?)
+                            .ok_or_else(|| {
+                                MorlocError::Other(
+                                    "handle_scan: tuple/map field offset overflow".into(),
+                                )
+                            })?;
+                        stack.push((s, field_offset, idx + 1));
+                        stack.push((&s.parameters[idx], inner_offset, 0));
+                    }
+                }
+                SerialType::Array => {
+                    if s.parameters.is_empty() {
+                        continue;
+                    }
+                    let elem_schema = &s.parameters[0];
+                    if !contains_stream_handles(elem_schema) {
+                        // Empty-element-type shortcut avoids scanning huge
+                        // homogeneous arrays with no handles inside.
+                        continue;
+                    }
+                    check_bounds(payload, field_offset, std::mem::size_of::<Array>())?;
+                    let arr = std::ptr::read_unaligned(payload.as_ptr().add(field_offset) as *const Array);
+                    if arr.size == 0 || arr.data < 0 {
+                        continue;
+                    }
+                    let elem_width = elem_schema.width;
+                    let base_off = arr.data as usize;
+                    let total = arr.size
+                        .checked_mul(elem_width)
+                        .ok_or_else(|| {
+                            MorlocError::Other("handle_scan: array size overflow".into())
+                        })?;
+                    check_bounds(payload, base_off, total)?;
+                    if idx < arr.size {
+                        stack.push((s, field_offset, idx + 1));
+                        stack.push((elem_schema, base_off + idx * elem_width, 0));
+                    }
+                }
+                SerialType::Optional => {
+                    if s.parameters.is_empty() {
+                        continue;
+                    }
+                    check_bounds(payload, field_offset, std::mem::size_of::<RelPtr>())?;
+                    let relptr = std::ptr::read_unaligned(
+                        payload.as_ptr().add(field_offset) as *const RelPtr,
+                    );
+                    if relptr == RELNULL {
+                        continue;
+                    }
+                    if relptr < 0 {
+                        return Err(MorlocError::Other(
+                            "handle_scan: Optional relptr is negative but not RELNULL".into(),
+                        ));
+                    }
+                    stack.push((&s.parameters[0], relptr as usize, 0));
+                }
+                SerialType::Variant => {
+                    // A tag byte, then a relptr to the arm's fields.
+                    check_bounds(payload, field_offset, s.width)?;
+                    let tag = payload[field_offset] as usize;
+                    let arm = s.parameters.get(tag).ok_or_else(|| {
+                        MorlocError::Other(format!(
+                            "handle_scan: variant tag {} is out of range; the type has {} arms",
+                            tag, s.size
+                        ))
+                    })?;
+                    let relptr = std::ptr::read_unaligned(
+                        payload.as_ptr().add(field_offset + 8) as *const RelPtr,
+                    );
+                    if relptr == RELNULL {
+                        continue;
+                    }
+                    if relptr < 0 {
+                        return Err(MorlocError::Other(
+                            "handle_scan: Variant relptr is negative but not RELNULL".into(),
+                        ));
+                    }
+                    stack.push((arm, relptr as usize, 0));
+                }
+                // Nil / Bool / integer / float / String / Int / Table:
+                // no stream-handle content.
+                _ => {}
+            }
+        }
     }
     Ok(fields)
-}
-
-unsafe fn walk(
-    payload: &[u8],
-    field_offset: usize,
-    schema: &Schema,
-    fields: &mut Vec<StreamField>,
-) -> Result<(), MorlocError> {
-    match schema.serial_type {
-        SerialType::IFile | SerialType::OStream | SerialType::IStream => {
-            let kind = StreamFieldKind::from_serial(schema.serial_type)
-                .expect("F/O/I match arm");
-            check_bounds(payload, field_offset, sh::STREAM_HANDLE_FIELD_SIZE)?;
-            fields.push(StreamField { offset: field_offset, kind });
-            Ok(())
-        }
-        SerialType::Tuple | SerialType::Map => {
-            for i in 0..schema.parameters.len() {
-                let inner_offset = field_offset
-                    .checked_add(*schema.offsets.get(i).ok_or_else(|| {
-                        MorlocError::Other(format!(
-                            "handle_scan: tuple/map field {} has no offset entry", i,
-                        ))
-                    })?)
-                    .ok_or_else(|| {
-                        MorlocError::Other(
-                            "handle_scan: tuple/map field offset overflow".into(),
-                        )
-                    })?;
-                walk(payload, inner_offset, &schema.parameters[i], fields)?;
-            }
-            Ok(())
-        }
-        SerialType::Array => {
-            if schema.parameters.is_empty() {
-                return Ok(());
-            }
-            let elem_schema = &schema.parameters[0];
-            if !contains_stream_handles(elem_schema) {
-                // Empty-element-type shortcut avoids scanning huge
-                // homogeneous arrays with no handles inside.
-                return Ok(());
-            }
-            check_bounds(payload, field_offset, std::mem::size_of::<Array>())?;
-            let arr_ptr = payload.as_ptr().add(field_offset) as *const Array;
-            let arr = *arr_ptr;
-            if arr.size == 0 || arr.data < 0 {
-                return Ok(());
-            }
-            let elem_width = elem_schema.width;
-            let base_off = arr.data as usize;
-            let total = arr.size
-                .checked_mul(elem_width)
-                .ok_or_else(|| {
-                    MorlocError::Other("handle_scan: array size overflow".into())
-                })?;
-            check_bounds(payload, base_off, total)?;
-            for i in 0..arr.size {
-                let inner_offset = base_off + i * elem_width;
-                walk(payload, inner_offset, elem_schema, fields)?;
-            }
-            Ok(())
-        }
-        SerialType::Optional => {
-            if schema.parameters.is_empty() {
-                return Ok(());
-            }
-            check_bounds(payload, field_offset, std::mem::size_of::<RelPtr>())?;
-            let relptr = std::ptr::read_unaligned(
-                payload.as_ptr().add(field_offset) as *const RelPtr,
-            );
-            if relptr == RELNULL {
-                return Ok(());
-            }
-            if relptr < 0 {
-                return Err(MorlocError::Other(
-                    "handle_scan: Optional relptr is negative but not RELNULL".into(),
-                ));
-            }
-            walk(payload, relptr as usize, &schema.parameters[0], fields)
-        }
-        SerialType::Recur => {
-            // A Recur back-reference terminates the walk. Descending
-            // into the referenced ancestor would loop for genuine self-
-            // recursive structures (`Tree` -> `[Tree]` -> ...), and the
-            // cross-nexus rewrite doesn't yet support stream-handle
-            // fields embedded inside recursive records. If such a field
-            // ever needs to be discovered here, extend this arm with
-            // visited-set bookkeeping.
-            Ok(())
-        }
-        // Nil / Bool / integer / float / String / Int / Table:
-        // no stream-handle content.
-        _ => Ok(()),
-    }
 }
 
 /// True if `schema` transitively contains any leaf whose morloc-level
@@ -185,7 +195,7 @@ pub fn schema_contains_kind(schema: &Schema, target: StreamFieldKind) -> bool {
         return true;
     }
     match schema.serial_type {
-        SerialType::Tuple | SerialType::Map => schema
+        SerialType::Tuple | SerialType::Map | SerialType::Variant => schema
             .parameters
             .iter()
             .any(|p| schema_contains_kind(p, target)),
@@ -194,9 +204,8 @@ pub fn schema_contains_kind(schema: &Schema, target: StreamFieldKind) -> bool {
             .first()
             .map(|p| schema_contains_kind(p, target))
             .unwrap_or(false),
-        // Conservative: don't recurse through Recur (matches the walker's
-        // treatment). If a recursive record ever needs to carry stream
-        // handles for cross-nexus, extend this together with the walker.
+        // A back-reference names a declaration on the path above, whose
+        // body is inspected where it appears.
         _ => false,
     }
 }
@@ -208,7 +217,7 @@ pub fn schema_contains_kind(schema: &Schema, target: StreamFieldKind) -> bool {
 fn contains_stream_handles(schema: &Schema) -> bool {
     match schema.serial_type {
         SerialType::IFile | SerialType::OStream | SerialType::IStream => true,
-        SerialType::Tuple | SerialType::Map => {
+        SerialType::Tuple | SerialType::Map | SerialType::Variant => {
             schema.parameters.iter().any(contains_stream_handles)
         }
         SerialType::Array | SerialType::Optional => schema
@@ -513,6 +522,39 @@ mod tests {
         let fields = collect_stream_fields(&payload, &schema).unwrap();
         assert_eq!(fields.len(), 1);
         assert!(matches!(fields[0].kind, StreamFieldKind::IStream));
+    }
+
+    /// A handle inside a variant payload, and one inside a recursive
+    /// record far down a chain, are both discovered; the schema predicates
+    /// agree.
+    #[test]
+    fn handles_behind_variant_and_back_reference_are_discovered() {
+        let _shm = crate::init_test_shm();
+        let schema = parse_schema("v21N01H1F").unwrap();
+        assert!(schema_contains_kind(&schema, StreamFieldKind::IFile));
+        let ptr = crate::json::read_json_with_schema("{\"H\":[\"/tmp/a.txt\"]}", &schema).unwrap();
+        let payload = crate::voidstar::flatten_to_buffer(ptr, &schema).unwrap();
+        let fields = collect_stream_fields(&payload, &schema).unwrap();
+        assert_eq!(fields.len(), 1);
+        assert!(matches!(fields[0].kind, StreamFieldKind::IFile));
+
+        let schema = parse_schema("&2LLm24headF4tail?^2LL").unwrap();
+        assert!(schema_contains_kind(&schema, StreamFieldKind::IFile));
+        crate::deep_tests::on_small_stack(|| {
+            let _shm = crate::init_test_shm();
+            let schema = parse_schema("&2LLm24headF4tail?^2LL").unwrap();
+            let depth = 20_000;
+            let mut text = String::new();
+            for i in 0..depth {
+                text.push_str(&format!("{{\"head\":\"/tmp/f{i}.txt\",\"tail\":"));
+            }
+            text.push_str("null");
+            text.push_str(&"}".repeat(depth));
+            let ptr = crate::json::read_json_with_schema(&text, &schema).unwrap();
+            let payload = crate::voidstar::flatten_to_buffer(ptr, &schema).unwrap();
+            let fields = collect_stream_fields(&payload, &schema).unwrap();
+            assert_eq!(fields.len(), depth);
+        });
     }
 
     #[test]

@@ -415,75 +415,86 @@ enum MsgpackProbeError {
     Invalid,
 }
 
-/// Recursively skip one msgpack value from `cur`. Translates EOF
-/// (probe-window boundary) into a distinct error so the caller can
-/// accept it as a positive signal.
+/// Skip one msgpack value from `cur`. Translates EOF (probe-window
+/// boundary) into a distinct error so the caller can accept it as a
+/// positive signal.
+///
+/// A container is skipped by counting the values it still owes on a stack
+/// rather than by recursion: the probe window is caller-sized, and a
+/// window of nested arrays is one nesting level per byte.
 fn skip_msgpack_value(cur: &mut Cursor<&[u8]>) -> Result<(), MsgpackProbeError> {
-    let marker = rmp::decode::read_marker(cur).map_err(|e| io_to_probe(e.0))?;
-    match marker {
-        Marker::FixPos(_) | Marker::FixNeg(_)
-        | Marker::Null | Marker::True | Marker::False => Ok(()),
-        Marker::U8 | Marker::I8 => skip_bytes(cur, 1),
-        Marker::U16 | Marker::I16 => skip_bytes(cur, 2),
-        Marker::U32 | Marker::I32 | Marker::F32 => skip_bytes(cur, 4),
-        Marker::U64 | Marker::I64 | Marker::F64 => skip_bytes(cur, 8),
-        Marker::FixStr(n) => skip_bytes(cur, n as usize),
-        Marker::Str8 | Marker::Bin8 => {
-            let n = read_be_uint(cur, 1)?;
-            skip_bytes(cur, n as usize)
+    // Values still owed by each open container, innermost last.
+    let mut owed: Vec<u64> = Vec::new();
+    loop {
+        let marker = rmp::decode::read_marker(cur).map_err(|e| io_to_probe(e.0))?;
+        let mut opened: Option<u64> = None;
+        match marker {
+            Marker::FixPos(_) | Marker::FixNeg(_)
+            | Marker::Null | Marker::True | Marker::False => {}
+            Marker::U8 | Marker::I8 => skip_bytes(cur, 1)?,
+            Marker::U16 | Marker::I16 => skip_bytes(cur, 2)?,
+            Marker::U32 | Marker::I32 | Marker::F32 => skip_bytes(cur, 4)?,
+            Marker::U64 | Marker::I64 | Marker::F64 => skip_bytes(cur, 8)?,
+            Marker::FixStr(n) => skip_bytes(cur, n as usize)?,
+            Marker::Str8 | Marker::Bin8 => {
+                let n = read_be_uint(cur, 1)?;
+                skip_bytes(cur, n as usize)?
+            }
+            Marker::Str16 | Marker::Bin16 => {
+                let n = read_be_uint(cur, 2)?;
+                skip_bytes(cur, n as usize)?
+            }
+            Marker::Str32 | Marker::Bin32 => {
+                let n = read_be_uint(cur, 4)?;
+                skip_bytes(cur, n as usize)?
+            }
+            Marker::FixArray(n) => opened = Some(n as u64),
+            Marker::Array16 => opened = Some(read_be_uint(cur, 2)?),
+            Marker::Array32 => opened = Some(read_be_uint(cur, 4)?),
+            Marker::FixMap(n) => opened = Some(2 * n as u64),
+            Marker::Map16 => opened = Some(2 * read_be_uint(cur, 2)?),
+            Marker::Map32 => opened = Some(2 * read_be_uint(cur, 4)?),
+            Marker::FixExt1 => skip_bytes(cur, 1 + 1)?,
+            Marker::FixExt2 => skip_bytes(cur, 1 + 2)?,
+            Marker::FixExt4 => skip_bytes(cur, 1 + 4)?,
+            Marker::FixExt8 => skip_bytes(cur, 1 + 8)?,
+            Marker::FixExt16 => skip_bytes(cur, 1 + 16)?,
+            Marker::Ext8 => {
+                let n = read_be_uint(cur, 1)?;
+                skip_bytes(cur, 1 + n as usize)?
+            }
+            Marker::Ext16 => {
+                let n = read_be_uint(cur, 2)?;
+                skip_bytes(cur, 1 + n as usize)?
+            }
+            Marker::Ext32 => {
+                let n = read_be_uint(cur, 4)?;
+                skip_bytes(cur, 1 + n as usize)?
+            }
+            Marker::Reserved => return Err(MsgpackProbeError::Invalid),
         }
-        Marker::Str16 | Marker::Bin16 => {
-            let n = read_be_uint(cur, 2)?;
-            skip_bytes(cur, n as usize)
+        // This value is complete: the innermost container owes one fewer.
+        // A container that owes nothing is complete too, and so on up.
+        if let Some(n) = opened {
+            if n > 0 {
+                owed.push(n);
+                continue;
+            }
         }
-        Marker::Str32 | Marker::Bin32 => {
-            let n = read_be_uint(cur, 4)?;
-            skip_bytes(cur, n as usize)
+        loop {
+            match owed.last_mut() {
+                None => return Ok(()),
+                Some(n) => {
+                    *n -= 1;
+                    if *n == 0 {
+                        owed.pop();
+                    } else {
+                        break;
+                    }
+                }
+            }
         }
-        Marker::FixArray(n) => skip_n_values(cur, n as usize),
-        Marker::Array16 => {
-            let n = read_be_uint(cur, 2)?;
-            skip_n_values(cur, n as usize)
-        }
-        Marker::Array32 => {
-            let n = read_be_uint(cur, 4)?;
-            skip_n_values(cur, n as usize)
-        }
-        Marker::FixMap(n) => skip_n_values(cur, 2 * n as usize),
-        Marker::Map16 => {
-            let n = read_be_uint(cur, 2)?;
-            skip_n_values(cur, 2 * n as usize)
-        }
-        Marker::Map32 => {
-            let n = read_be_uint(cur, 4)?;
-            skip_n_values(cur, 2 * n as usize)
-        }
-        Marker::FixExt1 => skip_bytes(cur, 1 + 1),
-        Marker::FixExt2 => skip_bytes(cur, 1 + 2),
-        Marker::FixExt4 => skip_bytes(cur, 1 + 4),
-        Marker::FixExt8 => skip_bytes(cur, 1 + 8),
-        Marker::FixExt16 => skip_bytes(cur, 1 + 16),
-        Marker::Ext8 => {
-            let n = read_be_uint(cur, 1)?;
-            skip_bytes(cur, 1 + n as usize)
-        }
-        Marker::Ext16 => {
-            let n = read_be_uint(cur, 2)?;
-            skip_bytes(cur, 1 + n as usize)
-        }
-        Marker::Ext32 => {
-            let n = read_be_uint(cur, 4)?;
-            skip_bytes(cur, 1 + n as usize)
-        }
-        Marker::Reserved => Err(MsgpackProbeError::Invalid),
     }
-}
-
-fn skip_n_values(cur: &mut Cursor<&[u8]>, n: usize) -> Result<(), MsgpackProbeError> {
-    for _ in 0..n {
-        skip_msgpack_value(cur)?;
-    }
-    Ok(())
 }
 
 fn skip_bytes(cur: &mut Cursor<&[u8]>, n: usize) -> Result<(), MsgpackProbeError> {
@@ -526,7 +537,10 @@ fn looks_like_json(bytes: &[u8]) -> bool {
     if bytes.is_empty() {
         return false;
     }
-    let mut iter = serde_json::Deserializer::from_slice(bytes).into_iter::<serde_json::Value>();
+    // `IgnoredAny` walks the document without building it, and without
+    // the nesting limit a `Value` carries, so a deeply nested file is still
+    // recognised.
+    let mut iter = serde_json::Deserializer::from_slice(bytes).into_iter::<serde::de::IgnoredAny>();
     match iter.next() {
         Some(Ok(_)) => true,
         Some(Err(e)) if e.is_eof() => true,

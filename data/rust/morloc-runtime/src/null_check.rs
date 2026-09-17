@@ -2,9 +2,9 @@
 //!
 //! This module re-exports the stateless half (`env_skip_null_check` and
 //! `first_null_in_json`) from `morloc-runtime-types::null_check` and adds
-//! the SHM-walking variant (`first_null_in_strings`) here because it
-//! calls `shm::rel2abs`, which reads the process-global `VOLUMES` of
-//! this crate's `shm` module.
+//! the value-walking guard the pools call here because it calls
+//! `shm::rel2abs`, which reads the process-global `VOLUMES` of this
+//! crate's `shm` module.
 //!
 //! The dispatch path uses these checks to reject NUL-bearing Strs at
 //! the boundary into languages whose lang.yaml sets
@@ -19,46 +19,10 @@
 
 pub use morloc_runtime_types::null_check::*;
 
-use crate::schema::{Schema, SerialType};
 use crate::shm::{self, AbsPtr, Array};
 use crate::cschema::CSchema;
 use morloc_runtime_types::shm_types::relptr_offset;
 use std::os::raw::{c_char, c_void};
-
-/// Walk a schema-typed value and return the access path to the first
-/// String slot containing an interior NUL byte, or None if every
-/// String in the value is NUL-free.
-///
-/// The path uses morloc-style accessors: `args[i]`, `.field`, `[i]` for
-/// list indexing, `(some)` for the inhabited Optional slot. The
-/// dispatch site prefixes a top-level `args[i]` segment based on which
-/// arg it is scanning.
-///
-/// Safety: `ptr` must point to a value laid out according to `schema`
-/// in shared memory accessible to this process; `schema` and `ptr`
-/// must remain valid for the duration of the call.
-pub unsafe fn first_null_in_strings(ptr: AbsPtr, schema: &Schema) -> Option<String> {
-    let mut path = String::new();
-    walk(ptr, schema, std::ptr::null(), &mut path)
-}
-
-/// As 'first_null_in_strings', but for a value whose relative pointers are
-/// based at `base` rather than at a shared-memory volume.
-///
-/// A voidstar arrives two ways. One is a pointer into shared memory, where a
-/// relptr carries a volume index and is resolved through the volume table.
-/// The other is a payload inlined in the packet itself, where a relptr is an
-/// offset from the start of that payload. The C side distinguishes them with
-/// the same nullable `base_ptr` argument that `resolve_relptr` takes, and this
-/// mirrors it: a null `base` means shared memory.
-pub unsafe fn first_null_in_strings_based(
-    ptr: AbsPtr,
-    schema: &Schema,
-    base: *const c_void,
-) -> Option<String> {
-    let mut path = String::new();
-    walk(ptr, schema, base, &mut path)
-}
 
 /// Resolve a relative pointer the way C's `resolve_relptr` does: against
 /// `base` when it is non-null, through the volume table otherwise.
@@ -113,193 +77,196 @@ const CT_ARRAY: u32 = 14;
 const CT_TUPLE: u32 = 15;
 const CT_MAP: u32 = 16;
 const CT_OPTIONAL: u32 = 17;
+const CT_VARIANT: u32 = 26;
+const CT_RECUR: u32 = 20;
+
+/// Where a node's name sits in the reported path.
+#[derive(Clone, Copy)]
+enum Seg {
+    Root,
+    Index(usize),
+    Field(usize),
+    Key(*const c_char),
+    Some,
+    Ctor(*const c_char),
+}
+
+/// One node still to scan: its schema and value, the next child to visit,
+/// the path length before this node's own segment, and that segment.
+#[derive(Clone, Copy)]
+struct Todo {
+    schema: *const CSchema,
+    data: AbsPtr,
+    idx: usize,
+    path_len: usize,
+    seg: Seg,
+}
+
+/// Every back-reference in a C schema tree with its declaration: the
+/// nearest enclosing node of the same name.
+unsafe fn index_recur(s: *const CSchema, decls: &mut Vec<*const CSchema>, out: &mut Vec<(*const CSchema, *const CSchema)>) {
+    if s.is_null() {
+        return;
+    }
+    let node = &*s;
+    if node.serial_type == CT_RECUR {
+        let name = if node.name.is_null() { None } else { Some(std::ffi::CStr::from_ptr(node.name)) };
+        let target = decls
+            .iter()
+            .rev()
+            .find(|d| !(***d).name.is_null() && Some(std::ffi::CStr::from_ptr((***d).name)) == name)
+            .copied()
+            .unwrap_or(std::ptr::null());
+        out.push((s, target));
+        return;
+    }
+    let declares = !node.name.is_null();
+    if declares {
+        decls.push(s);
+    }
+    if !node.parameters.is_null() {
+        for i in 0..node.size {
+            index_recur(*node.parameters.add(i), decls, out);
+        }
+    }
+    if declares {
+        decls.pop();
+    }
+}
 
 /// Walk a C-ABI schema-typed value looking for the first String slot with an
-/// interior NUL. Structurally identical to `walk` below, which does the same
-/// over the native `Schema`; the two are kept apart because the layouts differ
-/// and a shared traversal would need a trait indirection on a hot path.
+/// interior NUL. The pending nodes live on a heap stack, so a recursive
+/// value of any depth is scanned in bounded stack space; a container leaves
+/// a continuation for itself beneath the child it steps into.
 unsafe fn walk_c(
     ptr: AbsPtr,
     schema: *const CSchema,
     base: *const c_void,
     path: &mut String,
 ) -> Option<String> {
-    let s = &*schema;
-    match s.serial_type {
-        CT_STRING => check_string(ptr, base, path),
-        CT_ARRAY => {
-            let arr = &*(ptr as *const Array);
-            if arr.size == 0 || s.size == 0 || s.parameters.is_null() {
-                return None;
-            }
-            let elem = *s.parameters;
-            if elem.is_null() {
-                return None;
-            }
-            let elem_width = (*elem).width;
-            let abs = resolve(arr.data, base)?;
-            for i in 0..arr.size {
-                let saved = path.len();
+    let mut recur: Vec<(*const CSchema, *const CSchema)> = Vec::new();
+    let mut decls = Vec::new();
+    index_recur(schema, &mut decls, &mut recur);
+    let mut stack: Vec<Todo> = vec![Todo { schema, data: ptr, idx: 0, path_len: 0, seg: Seg::Root }];
+    while let Some(mut t) = stack.pop() {
+        path.truncate(t.path_len);
+        match t.seg {
+            Seg::Root => {}
+            Seg::Index(i) => {
                 path.push('[');
                 path.push_str(&i.to_string());
                 path.push(']');
-                if let Some(r) = walk_c(abs.add(i * elem_width), elem, base, path) {
-                    return Some(r);
-                }
-                path.truncate(saved);
             }
-            None
+            Seg::Field(i) => {
+                path.push('.');
+                path.push_str(&i.to_string());
+            }
+            Seg::Key(k) => {
+                path.push('.');
+                path.push_str(&std::ffi::CStr::from_ptr(k).to_string_lossy());
+            }
+            Seg::Some => path.push_str("(some)"),
+            Seg::Ctor(k) => {
+                path.push('.');
+                path.push_str(&std::ffi::CStr::from_ptr(k).to_string_lossy());
+            }
         }
-        CT_TUPLE | CT_MAP => {
-            if s.parameters.is_null() || s.offsets.is_null() {
+        // A back-reference is scanned as its declaration.
+        let mut s = &*t.schema;
+        if s.serial_type == CT_RECUR {
+            let target = recur.iter().find(|(r, _)| *r == t.schema).map_or(std::ptr::null(), |(_, d)| *d);
+            if target.is_null() {
                 return None;
             }
-            for i in 0..s.size {
-                let p = *s.parameters.add(i);
-                if p.is_null() {
+            t.schema = target;
+            s = &*target;
+        }
+        let here = path.len();
+        match s.serial_type {
+            CT_STRING => {
+                if let Some(r) = check_string(t.data, base, path) {
+                    return Some(r);
+                }
+            }
+            CT_ARRAY => {
+                let arr = &*(t.data as *const Array);
+                if arr.size == 0 || s.size == 0 || s.parameters.is_null() {
                     continue;
                 }
-                let off = *s.offsets.add(i);
-                let saved = path.len();
-                path.push('.');
-                if s.serial_type == CT_MAP && !s.keys.is_null() {
-                    let k = *s.keys.add(i);
-                    if !k.is_null() {
-                        path.push_str(&std::ffi::CStr::from_ptr(k).to_string_lossy());
-                    } else {
-                        path.push_str(&i.to_string());
+                let elem = *s.parameters;
+                if elem.is_null() {
+                    continue;
+                }
+                let elem_width = (*elem).width;
+                let Some(abs) = resolve(arr.data, base) else { continue };
+                if t.idx < arr.size {
+                    let i = t.idx;
+                    stack.push(Todo { idx: i + 1, ..t });
+                    stack.push(Todo { schema: elem, data: abs.add(i * elem_width), idx: 0, path_len: here, seg: Seg::Index(i) });
+                }
+            }
+            CT_TUPLE | CT_MAP => {
+                if s.parameters.is_null() || s.offsets.is_null() {
+                    continue;
+                }
+                if t.idx < s.size {
+                    let i = t.idx;
+                    stack.push(Todo { idx: i + 1, ..t });
+                    let p = *s.parameters.add(i);
+                    if p.is_null() {
+                        continue;
                     }
+                    let off = *s.offsets.add(i);
+                    let seg = if s.serial_type == CT_MAP && !s.keys.is_null() && !(*s.keys.add(i)).is_null() {
+                        Seg::Key(*s.keys.add(i))
+                    } else {
+                        Seg::Field(i)
+                    };
+                    stack.push(Todo { schema: p, data: t.data.add(off), idx: 0, path_len: here, seg });
+                }
+            }
+            CT_OPTIONAL => {
+                // The slot is one relative pointer; absent is RELNULL.
+                let rel = *(t.data as *const shm::RelPtr);
+                if rel == shm::RELNULL || s.parameters.is_null() {
+                    continue;
+                }
+                let inner = *s.parameters;
+                if inner.is_null() {
+                    continue;
+                }
+                let Some(abs) = resolve(rel, base) else { continue };
+                stack.push(Todo { schema: inner, data: abs, idx: 0, path_len: here, seg: Seg::Some });
+            }
+            CT_VARIANT => {
+                // A tag byte, then a relative pointer to the arm's fields.
+                let tag = *(t.data as *const u8) as usize;
+                if tag >= s.size || s.parameters.is_null() {
+                    continue;
+                }
+                let arm = *s.parameters.add(tag);
+                if arm.is_null() {
+                    continue;
+                }
+                let rel = *(t.data.add(8) as *const shm::RelPtr);
+                if rel == shm::RELNULL {
+                    continue;
+                }
+                let Some(abs) = resolve(rel, base) else { continue };
+                let seg = if !s.keys.is_null() && !(*s.keys.add(tag)).is_null() {
+                    Seg::Ctor(*s.keys.add(tag))
                 } else {
-                    path.push_str(&i.to_string());
-                }
-                if let Some(r) = walk_c(ptr.add(off), p, base, path) {
-                    return Some(r);
-                }
-                path.truncate(saved);
+                    Seg::Field(tag)
+                };
+                stack.push(Todo { schema: arm, data: abs, idx: 0, path_len: here, seg });
             }
-            None
+            // Stream handles carry a path or a slot id, neither of which can
+            // hold an interior NUL. Tables are Arrow buffers, not walked here.
+            // Everything else is numeric, boolean, or nil: no string bytes.
+            _ => {}
         }
-        CT_OPTIONAL => {
-            // Tag byte at offset 0; inner value at offsets[0] when set.
-            if *(ptr as *const u8) == 0 || s.parameters.is_null() || s.offsets.is_null() {
-                return None;
-            }
-            let inner = *s.parameters;
-            if inner.is_null() {
-                return None;
-            }
-            let off = *s.offsets;
-            let saved = path.len();
-            path.push_str("(some)");
-            if let Some(r) = walk_c(ptr.add(off), inner, base, path) {
-                return Some(r);
-            }
-            path.truncate(saved);
-            None
-        }
-        // Stream handles carry a path or a slot id, neither of which can hold
-        // an interior NUL. Tables are Arrow buffers, not walked here.
-        // Everything else is numeric, boolean, or nil: no string bytes.
-        _ => None,
     }
-}
-
-unsafe fn walk(
-    ptr: AbsPtr,
-    schema: &Schema,
-    base: *const c_void,
-    path: &mut String,
-) -> Option<String> {
-    match schema.serial_type {
-        SerialType::String => check_string(ptr, base, path),
-        SerialType::IFile | SerialType::OStream | SerialType::IStream => {
-            // Stream-handle fields are tagged unions: TAG_PATH carries a
-            // file path (no embedded NULs by POSIX rule), TAG_HANDLE
-            // carries a bare slot id (no string content). Neither can
-            // surface an interior NUL to the cross-pool boundary, so
-            // skip the walk entirely.
-            None
-        }
-        SerialType::Array => {
-            // schema.parameters[0] is the element schema; the slot at
-            // `ptr` is an Array { size, data: relptr }.
-            let arr = &*(ptr as *const Array);
-            if arr.size == 0 {
-                return None;
-            }
-            let elem = schema.parameters.get(0)?;
-            let elem_width = elem.width;
-            let abs = resolve(arr.data, base)?;
-            for i in 0..arr.size {
-                let saved_len = path.len();
-                path.push('[');
-                path.push_str(&i.to_string());
-                path.push(']');
-                let r = walk(abs.add(i * elem_width), elem, base, path);
-                if r.is_some() {
-                    return r;
-                }
-                path.truncate(saved_len);
-            }
-            None
-        }
-        SerialType::Tuple => {
-            for (i, p) in schema.parameters.iter().enumerate() {
-                let off = *schema.offsets.get(i)?;
-                let saved_len = path.len();
-                path.push('.');
-                path.push_str(&i.to_string());
-                let r = walk(ptr.add(off), p, base, path);
-                if r.is_some() {
-                    return r;
-                }
-                path.truncate(saved_len);
-            }
-            None
-        }
-        SerialType::Map => {
-            // Record-style: parallel arrays of keys and parameters.
-            for (i, p) in schema.parameters.iter().enumerate() {
-                let off = *schema.offsets.get(i)?;
-                let saved_len = path.len();
-                path.push('.');
-                if let Some(k) = schema.keys.get(i) {
-                    path.push_str(k);
-                } else {
-                    path.push_str(&i.to_string());
-                }
-                let r = walk(ptr.add(off), p, base, path);
-                if r.is_some() {
-                    return r;
-                }
-                path.truncate(saved_len);
-            }
-            None
-        }
-        SerialType::Optional => {
-            // Tag byte at offset 0; inner value at offsets[0] when tag != 0.
-            let tag = *(ptr as *const u8);
-            if tag == 0 {
-                return None;
-            }
-            let inner = schema.parameters.get(0)?;
-            let off = *schema.offsets.get(0)?;
-            let saved_len = path.len();
-            path.push_str("(some)");
-            let r = walk(ptr.add(off), inner, base, path);
-            if r.is_some() {
-                return r;
-            }
-            path.truncate(saved_len);
-            None
-        }
-        // Tables are Arrow buffers; we do not yet inspect their string columns
-        // for interior NULs. Skipped for now; a future pass can plumb the
-        // arrow_ffi machinery to do this if/when it becomes a concern.
-        SerialType::Table => None,
-        // Numeric / Bool / Nil / Int(BigInt) primitives carry no String bytes.
-        _ => None,
-    }
+    None
 }
 
 unsafe fn check_string(ptr: AbsPtr, base: *const c_void, path: &mut String) -> Option<String> {
@@ -321,6 +288,7 @@ unsafe fn check_string(ptr: AbsPtr, base: *const c_void, path: &mut String) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::{Schema, SerialType};
     use crate::shm;
 
     // The schema walker requires SHM to be initialised so that rel2abs
@@ -344,13 +312,27 @@ mod tests {
         Box::new(Array { size: bytes.len(), data })
     }
 
+    /// The guard as the pools call it: over the C schema, shared memory.
+    unsafe fn first_null(ptr: AbsPtr, s: &Schema) -> Option<String> {
+        let cs = CSchema::from_rust(s);
+        let r = morloc_first_null_in_value(ptr as *const c_void, cs, std::ptr::null());
+        CSchema::free(cs);
+        if r.is_null() {
+            None
+        } else {
+            let out = std::ffi::CStr::from_ptr(r).to_string_lossy().into_owned();
+            libc::free(r as *mut c_void);
+            Some(out)
+        }
+    }
+
     #[test]
     fn plain_string_no_nul() {
         let _shm = setup();
         let s = Schema::primitive(SerialType::String);
         unsafe {
             let arr = make_string_slot(b"hello");
-            let r = first_null_in_strings(&*arr as *const Array as AbsPtr, &s);
+            let r = first_null(&*arr as *const Array as AbsPtr, &s);
             assert!(r.is_none(), "expected no NUL hit, got {:?}", r);
         }
     }
@@ -361,7 +343,7 @@ mod tests {
         let s = Schema::primitive(SerialType::String);
         unsafe {
             let arr = make_string_slot(b"abc\0def");
-            let r = first_null_in_strings(&*arr as *const Array as AbsPtr, &s);
+            let r = first_null(&*arr as *const Array as AbsPtr, &s);
             assert!(r.is_some(), "expected NUL hit");
             let path = r.unwrap();
             assert!(path.contains("byte 3"), "path={}", path);
@@ -374,9 +356,53 @@ mod tests {
         let s = Schema::primitive(SerialType::String);
         unsafe {
             let arr = make_string_slot(b"");
-            let r = first_null_in_strings(&*arr as *const Array as AbsPtr, &s);
+            let r = first_null(&*arr as *const Array as AbsPtr, &s);
             assert!(r.is_none());
         }
+    }
+
+    /// A NUL reachable only through an optional, a variant payload, or a
+    /// recursive record is found, and reported at its path.
+    #[test]
+    fn nul_behind_optional_variant_and_back_reference() {
+        let _shm = setup();
+        let nul = format!("[\"a\", \"b{}c\"]", "\\u0000");
+        for (schema, json, want) in [
+            ("?s", "\"x\\u0000\"", "(some)"),
+            ("m11a?s", "{\"a\":\"x\\u0000\"}", ".a(some)"),
+            ("v23Nil04Cons2i4s", "{\"Cons\":[1,\"x\\u0000\"]}", ".Cons.1"),
+            ("&2LLm24heads4tail?^2LL", "{\"head\":\"ok\",\"tail\":{\"head\":\"o\\u0000k\",\"tail\":null}}", ".tail(some).head"),
+            ("a?s", &nul, "[1](some)"),
+        ] {
+            let s = crate::schema::parse_schema(schema).unwrap();
+            let ptr = crate::json::read_json_with_schema(json, &s).unwrap();
+            let r = unsafe { first_null(ptr, &s) };
+            let path = r.unwrap_or_else(|| panic!("{schema}: no NUL found"));
+            assert!(path.starts_with(want), "{schema}: path={path}, want prefix {want}");
+        }
+        // And a clean value of each shape is clean.
+        let s = crate::schema::parse_schema("&2LLm24heads4tail?^2LL").unwrap();
+        let ptr = crate::json::read_json_with_schema("{\"head\":\"ok\",\"tail\":{\"head\":\"ok\",\"tail\":null}}", &s).unwrap();
+        assert!(unsafe { first_null(ptr, &s) }.is_none());
+    }
+
+    /// The guard walks a chain far deeper than one frame per level could.
+    #[test]
+    fn nul_at_the_bottom_of_a_deep_chain() {
+        crate::deep_tests::on_small_stack(|| {
+            let _shm = setup();
+            let s = crate::schema::parse_schema("&2LLm24heads4tail?^2LL").unwrap();
+            let depth = crate::deep_tests::DEPTH;
+            let mut text = String::new();
+            for _ in 0..depth {
+                text.push_str("{\"head\":\"ok\",\"tail\":");
+            }
+            text.push_str("{\"head\":\"x\\u0000\",\"tail\":null}");
+            text.push_str(&"}".repeat(depth));
+            let ptr = crate::json::read_json_with_schema(&text, &s).unwrap();
+            let path = unsafe { first_null(ptr, &s) }.expect("NUL at the bottom");
+            assert!(path.ends_with(".head (byte 1 of 2)"), "{}", &path[path.len() - 40..]);
+        });
     }
 
     #[test]

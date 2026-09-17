@@ -785,6 +785,39 @@ inline bool mlc_schema_has_recur(const Schema* schema) {
     return false;
 }
 
+// Which nodes of a walk's schema tree a step may visit by direct call:
+// those with no back-reference below them. Computed once per walk so the
+// question costs a lookup per child rather than a scan of the child's
+// subtree.
+struct MlcFlatSet {
+    std::vector<const Schema*> shallow;   // sorted by address
+    bool trivial = true;                  // no back-reference anywhere
+
+    explicit MlcFlatSet(const Schema* root) {
+        index(root);
+        std::sort(shallow.begin(), shallow.end());
+    }
+
+    // A node the walk did not index counts as deep: a frame is cheap and a
+    // direct call could recurse without bound.
+    bool flat(const Schema* s) const {
+        if (trivial) return true;
+        return std::binary_search(shallow.begin(), shallow.end(), s);
+    }
+
+private:
+    bool index(const Schema* s) {
+        if (s == nullptr) return false;
+        if (s->type == MORLOC_RECUR) { trivial = false; return true; }
+        bool deep = false;
+        if (s->parameters != nullptr) {
+            for (size_t i = 0; i < s->size; i++) deep |= index(s->parameters[i]);
+        }
+        if (!deep) shallow.push_back(s);
+        return deep;
+    }
+};
+
 // ------------------------------------------------------------
 // Walk drivers
 // ------------------------------------------------------------
@@ -804,7 +837,8 @@ inline bool mlc_schema_has_recur(const Schema* schema) {
                 continue;                                                     \
             }                                                                 \
             const Schema* s = resolve_recur(f.schema);                        \
-            if (!f.env_pushed && s->name != nullptr) {                        \
+            if (!f.env_pushed && s->name != nullptr &&                        \
+                (recur_env().empty() || recur_env().back().schema != s)) {    \
                 recur_env().push_back({s->name, s});                          \
                 stack.push_back(Frame{});                                     \
                 f.env_pushed = true;                                          \
@@ -832,14 +866,14 @@ struct MlcSizeWalk {
     Frame cur;
     std::vector<std::shared_ptr<void>> keep;   // values a step made, alive until the walk ends
     int64_t total = 0;
-    bool direct;   // the root has no back-reference: nothing needs a frame
+    MlcFlatSet flats;   // which nodes a step may visit by direct call
 
-    explicit MlcSizeWalk(const Schema* root) : direct(!mlc_schema_has_recur(root)) {}
+    explicit MlcSizeWalk(const Schema* root) : flats(root) {}
 
     // A child of a schema that cannot describe unbounded depth is stepped
     // by call.
     bool flat(const Schema* schema) const {
-        return direct || !mlc_schema_has_recur(schema);
+        return flats.flat(schema);
     }
 
     template<typename T>
@@ -907,13 +941,13 @@ struct MlcWriteWalk {
     Frame cur;
     std::vector<std::shared_ptr<void>> keep;
     void** cursor;
-    bool direct;
+    MlcFlatSet flats;
 
     MlcWriteWalk(const Schema* root, void** cursor_)
-        : cursor(cursor_), direct(!mlc_schema_has_recur(root)) {}
+        : cursor(cursor_), flats(root) {}
 
     bool flat(const Schema* schema) const {
-        return direct || !mlc_schema_has_recur(schema);
+        return flats.flat(schema);
     }
 
     template<typename T>
@@ -985,13 +1019,13 @@ struct MlcReadWalk {
     Frame cur;
     std::vector<std::shared_ptr<void>> keep;
     const void* base_ptr;
-    bool direct;
+    MlcFlatSet flats;
 
     MlcReadWalk(const Schema* root, const void* base)
-        : base_ptr(base), direct(!mlc_schema_has_recur(root)) {}
+        : base_ptr(base), flats(root) {}
 
     bool flat(const Schema* schema) const {
-        return direct || !mlc_schema_has_recur(schema);
+        return flats.flat(schema);
     }
 
     // Run `step` on (data, out) once every frame above it is done: pushed
