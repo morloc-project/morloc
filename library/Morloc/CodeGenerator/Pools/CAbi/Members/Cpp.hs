@@ -1780,14 +1780,15 @@ collectCppVariants = concatMap (runIdentity . foldWithSerialManifoldM fm)
 -- phases rather than one block per type.
 generateCppVariants :: [SerialManifold] -> CppTranslator ([MDoc], [MDoc], [MDoc], [MDoc])
 generateCppVariants es = do
-  named <- mapM (\(v, ps, as) -> (\n -> (render n, (v, ps, as))) <$> cppTypeOf (VariantF v ps as))
-                (collectCppVariants es)
+  named <- mapM occurrence (collectCppVariants es)
   -- Merged by the RENDERED name, which is what the declaration is called: a
   -- template instantiated twice is two declarations, a generated type is
   -- one per instantiation, and keying by the general name would collapse
   -- `Try Str ()` and `Try Str (IFile a)` into one and leave the second use
-  -- naming a type that was never emitted.
-  parts <- mapM makeOne (Map.elems (Map.fromListWith wider named))
+  -- naming a type that was never emitted. Occurrences of one name that
+  -- disagree on an arm's field types fail the build here, since whichever
+  -- declaration came out could not serve both sites.
+  parts <- mapM (uncurry merged) (Map.toList (Map.fromListWith (flip (<>)) named))
   let decls = concatMap (\(d, _, _, _) -> d) parts
       bodies = concatMap (\(_, b, _, _) -> b) parts
       fwds = concatMap (\(_, _, f, _) -> f) parts
@@ -1797,21 +1798,17 @@ generateCppVariants es = do
   -- between the wrappers and the arm bodies.
   return (decls, bodies, fwds, serials)
   where
-    -- Merge arm-wise, but keep DECLARATION ORDER: an arm's position is its
-    -- wire tag, so sorting by name here would silently renumber every
-    -- constructor. The longer list is the more complete view of the type and
-    -- supplies the order; fields come from whichever occurrence has them,
-    -- since a constructor literal's type reports its own arm with none.
-    wider (v, ps, as) (_, _, bs) = (v, ps, [(n, pick n) | n <- order])
-      where
-        am = Map.fromList as
-        bm = Map.fromList bs
-        order = if length as >= length bs then map fst as else map fst bs
-        pick n = case (Map.lookup n am, Map.lookup n bm) of
-          (Just xs, Just ys) -> if null xs then ys else xs
-          (Just xs, Nothing) -> xs
-          (Nothing, Just ys) -> ys
-          _ -> []
+    -- One occurrence under its rendered name, with each arm's field types
+    -- as written and as rendered, so the merge can compare spellings.
+    occurrence (v, ps, as) = do
+      n <- cppTypeOf (VariantF v ps as)
+      as' <- mapM (\(c, ts) -> (\rs -> (c, (ts, map render rs))) <$> mapM cppTypeOf ts) as
+      return (render n, [(v, ps, as')])
+    merged name occs = case mergeVariantOccurrences name (map (\(_, _, as) -> as) occs) of
+      Right arms -> case occs of
+        ((v, ps, _) : _) -> makeOne (v, ps, arms)
+        [] -> return ([], [], [], [])
+      Left msg -> error $ "C++ pool: " ++ T.unpack msg
 
     makeOne (FV gv (CV cvText), ps, arms) = do
       userMapped <- variantIsUserMapped gv cvText

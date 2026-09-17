@@ -22,6 +22,7 @@ import RefutablePatternTests (refutablePatternTests)
 import RustPoolBuildTests (rustPoolBuildTests)
 import SchemaHintTests (schemaHintTests)
 import SizeParseTests (sizeParseTests)
+import VariantMergeTests (variantMergeTests)
 import SystemConfigTests (systemConfigTests)
 import UnitTypeTests
 import VersionConstraintTests (versionConstraintTests)
@@ -84,6 +85,7 @@ unitTests =
   , morlocDepsTests
   , versionConstraintTests
   , sizeParseTests
+  , variantMergeTests
   , patternChainTests
   , irrefutablePatternLexerTests
   , refutablePatternTests

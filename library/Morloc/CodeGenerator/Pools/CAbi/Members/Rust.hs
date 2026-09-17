@@ -1474,36 +1474,27 @@ collectRustVariants = concatMap (runIdentity . foldWithSerialManifoldM fm)
 -- sourced Rust and gets only the impls.
 generateRustVariants :: [SerialManifold] -> RustM [MDoc]
 generateRustVariants es = do
-  named <- mapM (\(v, ps, as) -> (\n -> (render n, (v, ps, as))) <$> rustTypeOf (VariantF v ps as))
-                (collectRustVariants es)
+  named <- mapM occurrence (collectRustVariants es)
   -- Merged by the RENDERED name, which is what the declaration is called: a
   -- template instantiated twice is two declarations, a generated type is
   -- one per instantiation, and keying by the general name would collapse
   -- `Try Str ()` and `Try Str (IFile a)` into one and leave the second use
-  -- naming a type that was never emitted.
-  concat <$> mapM makeOne (Map.elems (Map.fromListWith wider named))
+  -- naming a type that was never emitted. Occurrences of one name that
+  -- disagree on an arm's field types fail the build here, since whichever
+  -- declaration came out could not serve both sites.
+  concat <$> mapM (uncurry merged) (Map.toList (Map.fromListWith (flip (<>)) named))
   where
-    -- Merge ARM-WISE rather than by arm count. A constructor literal's type
-    -- reports only the arm being built, and reports it with no fields, so
-    -- comparing lengths cannot tell a complete one-arm type from a
-    -- truncated view of it -- and picking the truncated one would declare
-    -- an arm as nullary that the schema says carries a payload, which
-    -- writes RELNULL where the reader expects a pointer.
-    -- Merge arm-wise, but keep DECLARATION ORDER: an arm's position is its
-    -- wire tag, so sorting by name here would silently renumber every
-    -- constructor. The longer list is the more complete view of the type and
-    -- supplies the order; fields come from whichever occurrence has them,
-    -- since a constructor literal's type reports its own arm with none.
-    wider (v, ps, as) (_, _, bs) = (v, ps, [(n, pick n) | n <- order])
-      where
-        am = Map.fromList as
-        bm = Map.fromList bs
-        order = if length as >= length bs then map fst as else map fst bs
-        pick n = case (Map.lookup n am, Map.lookup n bm) of
-          (Just xs, Just ys) -> if null xs then ys else xs
-          (Just xs, Nothing) -> xs
-          (Nothing, Just ys) -> ys
-          _ -> []
+    -- One occurrence under its rendered name, with each arm's field types
+    -- as written and as rendered, so the merge can compare spellings.
+    occurrence (v, ps, as) = do
+      n <- rustTypeOf (VariantF v ps as)
+      as' <- mapM (\(c, ts) -> (\rs -> (c, (ts, map render rs))) <$> mapM rustFieldType ts) as
+      return (render n, [(v, ps, as')])
+    merged name occs = case mergeVariantOccurrences name (map (\(_, _, as) -> as) occs) of
+      Right arms -> case occs of
+        ((v, ps, _) : _) -> makeOne (v, ps, arms)
+        [] -> return []
+      Left msg -> error $ "Rust pool: " ++ T.unpack msg
 
     makeOne (FV gv (CV cvText), ps, arms) = do
       userMapped <- cscopeDeclaresVariant gv cvText
