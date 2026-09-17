@@ -4,8 +4,9 @@
 //! The voidstar binary format is morloc-specific (Array/Tensor structs with relptrs).
 
 use crate::error::MorlocError;
-use crate::recur::{self, RecurEnv};
+use crate::recur::Resolver;
 use crate::schema::{Schema, SerialType};
+use crate::walk::{self, Frame, Stack, Visit, Walker};
 use crate::shm::{self, AbsPtr, Array, RELNULL};
 
 // ── Voidstar -> MessagePack ────────────────────────────────────────────────
@@ -13,67 +14,61 @@ use crate::shm::{self, AbsPtr, Array, RELNULL};
 /// Serialize voidstar data to MessagePack bytes.
 pub fn pack_with_schema(ptr: AbsPtr, schema: &Schema) -> Result<Vec<u8>, MorlocError> {
     let mut buf = Vec::with_capacity(256);
-    let mut env: RecurEnv = Vec::new();
-    pack_data(ptr, schema, &mut buf, &mut env)?;
+    let mut w = PackWalk { res: Resolver::new(schema), buf: &mut buf };
+    let mut st = Stack::new();
+    st.enter(schema, ptr, ());
+    walk::run(&mut w, &mut st)?;
     Ok(buf)
 }
 
-fn pack_data(
-    ptr: AbsPtr,
-    schema: &Schema,
-    buf: &mut Vec<u8>,
-    env: &mut RecurEnv,
-) -> Result<(), MorlocError> {
-    recur::with_scope(env, schema, |env| pack_data_inner(ptr, schema, buf, env))
+/// Appends a value's msgpack encoding in one pre-order pass; msgpack has
+/// no closing tokens, so a container needs no post action.
+struct PackWalk<'r, 'b> {
+    res: Resolver<'r>,
+    buf: &'b mut Vec<u8>,
 }
 
-fn pack_data_inner(
-    ptr: AbsPtr,
-    schema: &Schema,
-    buf: &mut Vec<u8>,
-    env: &mut RecurEnv,
-) -> Result<(), MorlocError> {
-    // SAFETY: ptr points to voidstar data in SHM with layout described by schema.
-    // All reads are within bounds defined by schema.width, Array headers, etc.
-    unsafe {
-        match schema.serial_type {
+impl<'r, 'b> PackWalk<'r, 'b> {
+    fn child(
+        &mut self,
+        st: &mut Stack<()>,
+        f: &Frame<()>,
+        idx: usize,
+        s: &'r Schema,
+        data: *const u8,
+    ) -> Result<Visit, MorlocError> {
+        if self.res.flat(s) {
+            self.step(st, Frame::new(s, data, ()))?;
+            Ok(Visit::Done)
+        } else {
+            walk::defer(self, st, f, idx, s, data, ());
+            Ok(Visit::Deferred)
+        }
+    }
+}
+
+impl<'r, 'b> Walker<()> for PackWalk<'r, 'b> {
+    fn step(&mut self, st: &mut Stack<()>, f: Frame<()>) -> Result<(), MorlocError> {
+        // SAFETY: frames hold nodes of the tree the resolver was built from;
+        // `data` points at a value laid out as that schema describes, and
+        // every read is within the bounds the schema and headers give.
+        let s: &'r Schema = self.res.resolve(unsafe { &*f.schema })?;
+        let data = f.data;
+        let buf = &mut *self.buf;
+        unsafe {
+        match s.serial_type {
             SerialType::Nil => {
                 rmp::encode::write_nil(buf)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack nil: {}", e)))?;
             }
             SerialType::Bool => {
-                let v = *ptr != 0;
+                let v = *data != 0;
                 rmp::encode::write_bool(buf, v)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack bool: {}", e)))?;
             }
             SerialType::Uint8 => {
-                rmp::encode::write_uint(buf, *ptr as u64)
+                rmp::encode::write_uint(buf, *data as u64)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack uint: {}", e)))?;
-            }
-            // A variant travels as a two-element array [tag, payload],
-            // a direct transcription of the voidstar slot. The payload is
-            // the arm's field tuple, or nil for an arm with no fields.
-            SerialType::Variant => {
-                let tag = *ptr;
-                let arm = schema.parameters.get(tag as usize).ok_or_else(|| {
-                    MorlocError::Serialization(format!(
-                        "variant tag {} is out of range; the type has {} arms",
-                        tag, schema.size
-                    ))
-                })?;
-                rmp::encode::write_array_len(buf, 2)
-                    .map_err(|e| MorlocError::Serialization(format!("msgpack variant: {}", e)))?;
-                rmp::encode::write_uint(buf, tag as u64)
-                    .map_err(|e| MorlocError::Serialization(format!("msgpack variant tag: {}", e)))?;
-                let payload = *(ptr.add(8) as *const shm::RelPtr);
-                if arm.size == 0 || payload == shm::RELNULL {
-                    rmp::encode::write_nil(buf).map_err(|e| {
-                        MorlocError::Serialization(format!("msgpack variant payload: {}", e))
-                    })?;
-                } else {
-                    let inner = shm::rel2abs(payload)?;
-                    pack_data(inner, arm, buf, env)?;
-                }
             }
             // An enum travels msgpack as its ordinal, not its name.
             // msgpack is the machine format -- it carries packets and
@@ -82,56 +77,56 @@ fn pack_data_inner(
             // never lost: the schema string travels with the packet, and
             // JSON (the human- and LLM-facing format) does render them.
             SerialType::Enum => {
-                rmp::encode::write_uint(buf, *ptr as u64)
+                rmp::encode::write_uint(buf, *data as u64)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack enum: {}", e)))?;
             }
             SerialType::Uint16 => {
-                rmp::encode::write_uint(buf, *(ptr as *const u16) as u64)
+                rmp::encode::write_uint(buf, *(data as *const u16) as u64)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack uint: {}", e)))?;
             }
             SerialType::Uint32 => {
-                rmp::encode::write_uint(buf, *(ptr as *const u32) as u64)
+                rmp::encode::write_uint(buf, *(data as *const u32) as u64)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack uint: {}", e)))?;
             }
             SerialType::Uint64 => {
-                rmp::encode::write_uint(buf, *(ptr as *const u64))
+                rmp::encode::write_uint(buf, *(data as *const u64))
                     .map_err(|e| MorlocError::Serialization(format!("msgpack uint: {}", e)))?;
             }
             SerialType::Sint8 => {
-                rmp::encode::write_sint(buf, *(ptr as *const i8) as i64)
+                rmp::encode::write_sint(buf, *(data as *const i8) as i64)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack sint: {}", e)))?;
             }
             SerialType::Sint16 => {
-                rmp::encode::write_sint(buf, *(ptr as *const i16) as i64)
+                rmp::encode::write_sint(buf, *(data as *const i16) as i64)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack sint: {}", e)))?;
             }
             SerialType::Sint32 => {
-                rmp::encode::write_sint(buf, *(ptr as *const i32) as i64)
+                rmp::encode::write_sint(buf, *(data as *const i32) as i64)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack sint: {}", e)))?;
             }
             SerialType::Sint64 => {
-                rmp::encode::write_sint(buf, *(ptr as *const i64))
+                rmp::encode::write_sint(buf, *(data as *const i64))
                     .map_err(|e| MorlocError::Serialization(format!("msgpack sint: {}", e)))?;
             }
             SerialType::Float32 => {
-                let f = *(ptr as *const f32) as f64;
+                let f = *(data as *const f32) as f64;
                 rmp::encode::write_f64(buf, f)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack float: {}", e)))?;
             }
             SerialType::Float64 => {
-                let f = *(ptr as *const f64);
+                let f = *(data as *const f64);
                 rmp::encode::write_f64(buf, f)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack float: {}", e)))?;
             }
             SerialType::Int => {
                 // Inline BigInt: [size, value_or_relptr]
-                let size = *(ptr as *const usize);
+                let size = *(data as *const usize);
                 if size <= 1 {
-                    let val = *(ptr.add(8) as *const i64);
+                    let val = *(data.add(8) as *const i64);
                     rmp::encode::write_sint(buf, if size == 0 { 0 } else { val })
                         .map_err(|e| MorlocError::Serialization(format!("msgpack bigint: {}", e)))?;
                 } else {
-                    let relptr = *(ptr.add(std::mem::size_of::<usize>()) as *const shm::RelPtr);
+                    let relptr = *(data.add(std::mem::size_of::<usize>()) as *const shm::RelPtr);
                     let data = shm::rel2abs(relptr)?;
                     let bytes = std::slice::from_raw_parts(data, size * 8);
                     rmp::encode::write_bin_len(buf, bytes.len() as u32)
@@ -140,7 +135,7 @@ fn pack_data_inner(
                 }
             }
             SerialType::String => {
-                let arr = &*(ptr as *const Array);
+                let arr = &*(data as *const Array);
                 rmp::encode::write_str_len(buf, arr.size as u32)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack str: {}", e)))?;
                 // An empty string carries no data block.
@@ -155,7 +150,7 @@ fn pack_data_inner(
                 // the local SHM registry so a file on disk always carries
                 // a path the next reader can `mlc_open` against.
                 use morloc_runtime_types::stream_handle as sh;
-                let field = ptr as *const u8;
+                let field = data;
                 let tag = sh::read_tag(field);
                 let payload = sh::read_payload(field);
                 let path: String = if tag == sh::TAG_PATH {
@@ -183,42 +178,80 @@ fn pack_data_inner(
                     .map_err(|e| MorlocError::Serialization(format!("msgpack str: {}", e)))?;
                 buf.extend_from_slice(bytes);
             }
+            // A variant travels as a two-element array [tag, payload],
+            // a direct transcription of the voidstar slot. The payload is
+            // the arm's field tuple, or nil for an arm with no fields.
+            SerialType::Variant => {
+                if f.idx > 0 {
+                    return Ok(());
+                }
+                let tag = *data;
+                let arm = s.parameters.get(tag as usize).ok_or_else(|| {
+                    MorlocError::Serialization(format!(
+                        "variant tag {} is out of range; the type has {} arms",
+                        tag, s.size
+                    ))
+                })?;
+                rmp::encode::write_array_len(buf, 2)
+                    .map_err(|e| MorlocError::Serialization(format!("msgpack variant: {}", e)))?;
+                rmp::encode::write_uint(buf, tag as u64)
+                    .map_err(|e| MorlocError::Serialization(format!("msgpack variant tag: {}", e)))?;
+                let payload = *(data.add(8) as *const shm::RelPtr);
+                if arm.size == 0 || payload == shm::RELNULL {
+                    rmp::encode::write_nil(buf).map_err(|e| {
+                        MorlocError::Serialization(format!("msgpack variant payload: {}", e))
+                    })?;
+                } else {
+                    let inner = shm::rel2abs(payload)?;
+                    self.child(st, &f, 0, arm, inner)?;
+                }
+            }
             SerialType::Array => {
-                let arr = &*(ptr as *const Array);
-                let elem_schema = &schema.parameters[0];
+                let arr = &*(data as *const Array);
+                let elem_schema = &s.parameters[0];
                 let elem_width = elem_schema.width;
-
-                rmp::encode::write_array_len(buf, arr.size as u32)
-                    .map_err(|e| MorlocError::Serialization(format!("msgpack array: {}", e)))?;
-
-                if arr.size > 0 && arr.data != RELNULL {
-                    let data = shm::rel2abs(arr.data)?;
-                    for i in 0..arr.size {
-                        let elem_ptr = data.add(i * elem_width);
-                        pack_data(elem_ptr, elem_schema, buf, env)?;
+                if f.idx == 0 {
+                    rmp::encode::write_array_len(buf, arr.size as u32)
+                        .map_err(|e| MorlocError::Serialization(format!("msgpack array: {}", e)))?;
+                }
+                if arr.size == 0 || arr.data == RELNULL {
+                    return Ok(());
+                }
+                let elems = shm::rel2abs(arr.data)?;
+                let flat_elem = self.res.flat(elem_schema);
+                for i in f.idx..arr.size {
+                    let p = elems.add(i * elem_width);
+                    if flat_elem {
+                        self.step(st, Frame::new(elem_schema, p, ()))?;
+                    } else if self.child(st, &f, i, elem_schema, p)? == Visit::Deferred {
+                        return Ok(());
                     }
                 }
             }
             SerialType::Tuple | SerialType::Map => {
-                rmp::encode::write_array_len(buf, schema.parameters.len() as u32)
-                    .map_err(|e| MorlocError::Serialization(format!("msgpack tuple: {}", e)))?;
-
-                for (i, field_schema) in schema.parameters.iter().enumerate() {
-                    let field_ptr = ptr.add(schema.offsets[i]);
-                    pack_data(field_ptr, field_schema, buf, env)?;
+                if f.idx == 0 {
+                    rmp::encode::write_array_len(buf, s.parameters.len() as u32)
+                        .map_err(|e| MorlocError::Serialization(format!("msgpack tuple: {}", e)))?;
+                }
+                for i in f.idx..s.parameters.len() {
+                    if self.child(st, &f, i, &s.parameters[i], data.add(s.offsets[i]))? == Visit::Deferred {
+                        return Ok(());
+                    }
                 }
             }
             SerialType::Optional => {
+                if f.idx > 0 {
+                    return Ok(());
+                }
                 // The Optional slot is a single relptr: RELNULL for absent,
                 // otherwise the relptr to T's body elsewhere in the buffer.
-                let relptr = *(ptr as *const shm::RelPtr);
+                let relptr = *(data as *const shm::RelPtr);
                 if relptr == shm::RELNULL {
                     rmp::encode::write_nil(buf)
                         .map_err(|e| MorlocError::Serialization(format!("msgpack nil: {}", e)))?;
                 } else {
-                    let inner_schema = &schema.parameters[0];
-                    let inner_ptr = shm::rel2abs(relptr)?;
-                    pack_data(inner_ptr, inner_schema, buf, env)?;
+                    let inner = shm::rel2abs(relptr)?;
+                    self.child(st, &f, 0, &s.parameters[0], inner)?;
                 }
             }
             SerialType::Table => {
@@ -230,24 +263,11 @@ fn pack_data_inner(
                     "Cannot msgpack-encode a Table; Tables use the Arrow IPC SHM wire path".into(),
                 ));
             }
-            SerialType::Recur => {
-                // Resolve the back-reference to the declared named
-                // schema on the env stack and pack the data as if it
-                // were that schema. The data has finite depth in
-                // SHM (relptrs into smaller subtrees), so recursion
-                // terminates at the natural base cases (empty arrays
-                // or null optionals).
-                let name = schema.name.as_deref().unwrap_or("");
-                let target_ptr = recur::lookup(env, name)?;
-                // SAFETY: target_ptr came from the env stack which holds
-                // pointers derived from live `Schema` references in the
-                // outer call tree; the borrow is still valid here.
-                let target = &*target_ptr;
-                pack_data(ptr, target, buf, env)?;
-            }
+            SerialType::Recur => unreachable!("a back-reference resolves before it is stepped"),
         }
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 // ── MessagePack -> Voidstar ────────────────────────────────────────────────
@@ -264,117 +284,132 @@ pub fn unpack_with_schema(
     unsafe { std::ptr::write_bytes(base, 0, size) };
 
     // SAFETY: cursor starts at base + schema.width, within the allocated region.
-    let mut cursor = unsafe { base.add(schema.width) };
-    let mut reader = &data[..];
-    let mut env: RecurEnv = Vec::new();
-    unpack_obj(base, schema, &mut cursor, &mut reader, &mut env)?;
+    let mut w = UnpackWalk { res: Resolver::new(schema), cursor: unsafe { base.add(schema.width) }, reader: &data[..] };
+    let mut st = Stack::new();
+    st.enter(schema, base, ());
+    walk::run(&mut w, &mut st)?;
     Ok(base)
 }
 
-fn unpack_obj(
-    ptr: AbsPtr,
-    schema: &Schema,
-    cursor: &mut AbsPtr,
-    reader: &mut &[u8],
-    env: &mut RecurEnv,
-) -> Result<(), MorlocError> {
-    recur::with_scope(env, schema, |env| unpack_obj_inner(ptr, schema, cursor, reader, env))
+/// Decodes msgpack into a single block, laying each value's blocks down
+/// at a running cursor in one pre-order pass. A frame's `data` is the slot
+/// the node is written into.
+struct UnpackWalk<'r, 'd> {
+    res: Resolver<'r>,
+    cursor: AbsPtr,
+    reader: &'d [u8],
 }
 
-fn unpack_obj_inner(
-    ptr: AbsPtr,
-    schema: &Schema,
-    cursor: &mut AbsPtr,
-    reader: &mut &[u8],
-    env: &mut RecurEnv,
-) -> Result<(), MorlocError> {
-    use rmp::decode;
+impl<'r, 'd> UnpackWalk<'r, 'd> {
+    fn child(
+        &mut self,
+        st: &mut Stack<()>,
+        f: &Frame<()>,
+        idx: usize,
+        s: &'r Schema,
+        slot: AbsPtr,
+    ) -> Result<Visit, MorlocError> {
+        if self.res.flat(s) {
+            self.step(st, Frame::new(s, slot, ()))?;
+            Ok(Visit::Done)
+        } else {
+            walk::defer(self, st, f, idx, s, slot, ());
+            Ok(Visit::Deferred)
+        }
+    }
+}
 
-    // SAFETY: ptr and cursor point into a single contiguous SHM allocation
-    // sized by calc_unpack_size. Each write respects schema.width bounds.
-    unsafe {
-        match schema.serial_type {
+impl<'r, 'd> Walker<()> for UnpackWalk<'r, 'd> {
+    fn step(&mut self, st: &mut Stack<()>, f: Frame<()>) -> Result<(), MorlocError> {
+        use rmp::decode;
+        // SAFETY: frames hold nodes of the tree the resolver was built from;
+        // `data` and the cursor point into the one SHM allocation sized by
+        // calc_unpack_size, and each write respects the slot's width.
+        let s: &'r Schema = self.res.resolve(unsafe { &*f.schema })?;
+        let ptr = f.data as *mut u8;
+        unsafe {
+        match s.serial_type {
             SerialType::Nil => {
-                decode::read_nil(reader)
+                decode::read_nil(&mut self.reader)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack nil: {}", e)))?;
                 *ptr = 0;
             }
             SerialType::Bool => {
-                let v = decode::read_bool(reader)
+                let v = decode::read_bool(&mut self.reader)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack bool: {}", e)))?;
                 *ptr = v as u8;
             }
             SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64
             | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 => {
-                unpack_int(ptr, schema.serial_type, reader)?;
+                unpack_int(ptr, s.serial_type, &mut self.reader)?;
             }
             // Read the ordinal and reject a tag no constructor claims.
             // This is the boundary check: a pool built against a different
             // version of the type fails here, naming the legal set, rather
             // than yielding a value that matches no arm deep in a manifold.
             SerialType::Enum => {
-                let tag: i64 = decode::read_int(reader).map_err(|e| {
+                let tag: i64 = decode::read_int(&mut self.reader).map_err(|e| {
                     MorlocError::Serialization(format!("msgpack enum tag: {}", e))
                 })?;
-                if tag < 0 || tag as usize >= schema.size {
+                if tag < 0 || tag as usize >= s.size {
                     return Err(MorlocError::Serialization(format!(
                         "enum tag {} is out of range; the type has {} constructors ({})",
                         tag,
-                        schema.size,
-                        schema.keys.join(", ")
+                        s.size,
+                        s.keys.join(", ")
                     )));
                 }
                 *ptr = tag as u8;
             }
             SerialType::Float32 => {
-                let f = read_float(reader)?;
+                let f = read_float(&mut self.reader)?;
                 *(ptr as *mut f32) = f as f32;
             }
             SerialType::Float64 => {
-                let f = read_float(reader)?;
+                let f = read_float(&mut self.reader)?;
                 *(ptr as *mut f64) = f;
             }
             SerialType::Int => {
                 // Inline BigInt: [size, value_or_relptr]
                 let fields = ptr as *mut i64;
-                let saved = *reader;
-                if let Ok(len) = rmp::decode::read_bin_len(reader) {
+                let saved = self.reader;
+                if let Ok(len) = rmp::decode::read_bin_len(&mut self.reader) {
                     // Overflow: multi-limb
                     let len = len as usize;
                     let nlimbs = len / 8;
                     *fields = nlimbs as i64;
-                    *(fields.add(1)) = shm::abs2rel(*cursor)? as i64;
-                    if nlimbs > 0 && reader.len() >= len {
-                        std::ptr::copy_nonoverlapping(reader.as_ptr(), *cursor, len);
-                        *reader = &(*reader)[len..];
+                    *(fields.add(1)) = shm::abs2rel(self.cursor)? as i64;
+                    if nlimbs > 0 && self.reader.len() >= len {
+                        std::ptr::copy_nonoverlapping(self.reader.as_ptr(), self.cursor, len);
+                        self.reader = &self.reader[len..];
                     }
-                    *cursor = cursor.add(nlimbs * 8);
+                    self.cursor = self.cursor.add(nlimbs * 8);
                 } else {
                     // Inline: single integer value
-                    *reader = saved;
-                    let val: i64 = rmp::decode::read_int(reader)
+                    self.reader = saved;
+                    let val: i64 = rmp::decode::read_int(&mut self.reader)
                         .map_err(|e| MorlocError::Serialization(format!("msgpack bigint: {}", e)))?;
                     *fields = 1;
                     *(fields.add(1)) = val;
                 }
             }
             SerialType::String => {
-                let len = decode::read_str_len(reader)
+                let len = decode::read_str_len(&mut self.reader)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack str len: {}", e)))?
                     as usize;
                 let arr = &mut *(ptr as *mut Array);
                 arr.size = len;
-                arr.data = shm::abs2rel(*cursor)?;
+                arr.data = shm::abs2rel(self.cursor)?;
 
                 // Read string bytes directly
                 if len > 0 {
-                    if reader.len() < len {
+                    if self.reader.len() < len {
                         return Err(MorlocError::Serialization("msgpack str truncated".into()));
                     }
-                    std::ptr::copy_nonoverlapping(reader.as_ptr(), *cursor, len);
-                    *reader = &reader[len..];
+                    std::ptr::copy_nonoverlapping(self.reader.as_ptr(), self.cursor, len);
+                    self.reader = &self.reader[len..];
                 }
-                *cursor = cursor.add(len);
+                self.cursor = self.cursor.add(len);
             }
             SerialType::IFile | SerialType::OStream | SerialType::IStream => {
                 // msgpack carries the path as a string; we lay it down in
@@ -382,66 +417,73 @@ fn unpack_obj_inner(
                 // receiver's language bridge will see the schema's F/O/I
                 // code and re-open via `mlc_open` on first use.
                 use morloc_runtime_types::stream_handle as sh;
-                let len = decode::read_str_len(reader)
+                let len = decode::read_str_len(&mut self.reader)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack str len: {}", e)))?
                     as usize;
                 let field = ptr as *mut u8;
                 if len == 0 {
                     sh::write_field(field, sh::TAG_PATH, sh::RELNULL_PAYLOAD);
                 } else {
-                    if reader.len() < len {
+                    if self.reader.len() < len {
                         return Err(MorlocError::Serialization("msgpack str truncated".into()));
                     }
-                    let rel = shm::abs2rel(*cursor)?;
-                    let bytes = std::slice::from_raw_parts(reader.as_ptr(), len);
-                    sh::write_path_suballoc(*cursor, bytes);
+                    let rel = shm::abs2rel(self.cursor)?;
+                    let bytes = std::slice::from_raw_parts(self.reader.as_ptr(), len);
+                    sh::write_path_suballoc(self.cursor, bytes);
                     sh::write_field(field, sh::TAG_PATH, rel as u64);
-                    *reader = &reader[len..];
-                    *cursor = cursor.add(sh::path_suballoc_size(len));
+                    self.reader = &self.reader[len..];
+                    self.cursor = self.cursor.add(sh::path_suballoc_size(len));
                 }
             }
             SerialType::Array => {
-                let n = decode::read_array_len(reader)
-                    .map_err(|e| MorlocError::Serialization(format!("msgpack array len: {}", e)))?
-                    as usize;
-                let elem_schema = &schema.parameters[0];
+                let elem_schema = &s.parameters[0];
                 let elem_width = elem_schema.width;
-
                 let arr = &mut *(ptr as *mut Array);
-                arr.size = n;
-
-                // Align cursor for element data
-                // (bumps to 64 for primitive numerics for SIMD/BLAS)
-                let align = elem_schema.array_data_alignment();
-                let aligned = shm::align_up(*cursor as usize, align);
-                *cursor = aligned as AbsPtr;
-
-                arr.data = shm::abs2rel(*cursor)?;
-                let data_start = *cursor;
-                *cursor = cursor.add(n * elem_width);
-
-                for i in 0..n {
-                    let elem_ptr = data_start.add(i * elem_width);
-                    unpack_obj(elem_ptr, elem_schema, cursor, reader, env)?;
+                if f.idx == 0 {
+                    let n = decode::read_array_len(&mut self.reader)
+                        .map_err(|e| MorlocError::Serialization(format!("msgpack array len: {}", e)))?
+                        as usize;
+                    arr.size = n;
+                    // Align cursor for element data
+                    // (bumps to 64 for primitive numerics for SIMD/BLAS)
+                    let align = elem_schema.array_data_alignment();
+                    self.cursor = shm::align_up(self.cursor as usize, align) as AbsPtr;
+                    arr.data = shm::abs2rel(self.cursor)?;
+                    self.cursor = self.cursor.add(n * elem_width);
+                }
+                let data_start = shm::rel2abs(arr.data)?;
+                let flat_elem = self.res.flat(elem_schema);
+                for i in f.idx..arr.size {
+                    let p = data_start.add(i * elem_width);
+                    if flat_elem {
+                        self.step(st, Frame::new(elem_schema, p, ()))?;
+                    } else if self.child(st, &f, i, elem_schema, p)? == Visit::Deferred {
+                        return Ok(());
+                    }
                 }
             }
             SerialType::Tuple | SerialType::Map => {
-                let n = decode::read_array_len(reader)
-                    .map_err(|e| MorlocError::Serialization(format!("msgpack tuple len: {}", e)))?;
-                check_field_count(schema, n as usize)?;
-                for (i, field_schema) in schema.parameters.iter().enumerate() {
-                    let field_ptr = ptr.add(schema.offsets[i]);
-                    unpack_obj(field_ptr, field_schema, cursor, reader, env)?;
+                if f.idx == 0 {
+                    let n = decode::read_array_len(&mut self.reader)
+                        .map_err(|e| MorlocError::Serialization(format!("msgpack tuple len: {}", e)))?;
+                    check_field_count(s, n as usize)?;
+                }
+                for i in f.idx..s.parameters.len() {
+                    if self.child(st, &f, i, &s.parameters[i], ptr.add(s.offsets[i]))? == Visit::Deferred {
+                        return Ok(());
+                    }
                 }
             }
             SerialType::Optional => {
-                let inner_schema = &schema.parameters[0];
+                if f.idx > 0 {
+                    return Ok(());
+                }
+                let inner_schema = &s.parameters[0];
                 let relptr_slot = ptr as *mut shm::RelPtr;
-
                 // Peek at the next byte to detect nil
-                if !reader.is_empty() && reader[0] == 0xc0 {
+                if !self.reader.is_empty() && self.reader[0] == 0xc0 {
                     // Absent: write RELNULL, consume nil byte
-                    decode::read_nil(reader)
+                    decode::read_nil(&mut self.reader)
                         .map_err(|e| MorlocError::Serialization(format!("msgpack nil: {}", e)))?;
                     *relptr_slot = shm::RELNULL;
                 } else {
@@ -451,46 +493,47 @@ fn unpack_obj_inner(
                     // header width here; T's own walker advances it
                     // further for any sub-data it has.
                     let inner_align = inner_schema.alignment().max(1);
-                    let aligned = shm::align_up(*cursor as usize, inner_align);
-                    *cursor = aligned as AbsPtr;
-                    *relptr_slot = shm::abs2rel(*cursor)?;
-                    let inner_ptr = *cursor;
-                    *cursor = cursor.add(inner_schema.width);
-                    unpack_obj(inner_ptr, inner_schema, cursor, reader, env)?;
+                    self.cursor = shm::align_up(self.cursor as usize, inner_align) as AbsPtr;
+                    *relptr_slot = shm::abs2rel(self.cursor)?;
+                    let inner_ptr = self.cursor;
+                    self.cursor = self.cursor.add(inner_schema.width);
+                    self.child(st, &f, 0, inner_schema, inner_ptr)?;
                 }
             }
             SerialType::Variant => {
+                if f.idx > 0 {
+                    return Ok(());
+                }
                 // [tag, payload]. Read the tag, then unpack the arm the tag
                 // selects into the cursor region and point the slot at it.
-                decode::read_array_len(reader).map_err(|e| {
+                decode::read_array_len(&mut self.reader).map_err(|e| {
                     MorlocError::Serialization(format!("msgpack variant array: {}", e))
                 })?;
-                let tag: i64 = decode::read_int(reader).map_err(|e| {
+                let tag: i64 = decode::read_int(&mut self.reader).map_err(|e| {
                     MorlocError::Serialization(format!("msgpack variant tag: {}", e))
                 })?;
-                if tag < 0 || tag as usize >= schema.size {
+                if tag < 0 || tag as usize >= s.size {
                     return Err(MorlocError::Serialization(format!(
                         "variant tag {} is out of range; the type has {} arms",
-                        tag, schema.size
+                        tag, s.size
                     )));
                 }
-                let arm = &schema.parameters[tag as usize];
+                let arm = &s.parameters[tag as usize];
                 *ptr = tag as u8;
                 std::ptr::write_bytes(ptr.add(1), 0, 7);
                 let relptr_slot = &mut *(ptr.add(8) as *mut shm::RelPtr);
-                if !reader.is_empty() && reader[0] == 0xc0 {
-                    decode::read_nil(reader).map_err(|e| {
+                if !self.reader.is_empty() && self.reader[0] == 0xc0 {
+                    decode::read_nil(&mut self.reader).map_err(|e| {
                         MorlocError::Serialization(format!("msgpack nil: {}", e))
                     })?;
                     *relptr_slot = shm::RELNULL;
                 } else {
                     let inner_align = arm.alignment().max(1);
-                    let aligned = shm::align_up(*cursor as usize, inner_align);
-                    *cursor = aligned as AbsPtr;
-                    *relptr_slot = shm::abs2rel(*cursor)?;
-                    let inner_ptr = *cursor;
-                    *cursor = cursor.add(arm.width);
-                    unpack_obj(inner_ptr, arm, cursor, reader, env)?;
+                    self.cursor = shm::align_up(self.cursor as usize, inner_align) as AbsPtr;
+                    *relptr_slot = shm::abs2rel(self.cursor)?;
+                    let inner_ptr = self.cursor;
+                    self.cursor = self.cursor.add(arm.width);
+                    self.child(st, &f, 0, arm, inner_ptr)?;
                 }
             }
             SerialType::Table => {
@@ -500,19 +543,11 @@ fn unpack_obj_inner(
                     "Cannot msgpack-decode a Table; Tables use the Arrow IPC SHM wire path".into(),
                 ));
             }
-            SerialType::Recur => {
-                // Mirror of pack_data: resolve the back-reference and
-                // unpack as if the data carried the named schema.
-                let name = schema.name.as_deref().unwrap_or("");
-                let target_ptr = recur::lookup(env, name)?;
-                // SAFETY: see pack_data's Recur arm for the lifetime
-                // argument; the env-stored pointer is still live here.
-                let target = &*target_ptr;
-                unpack_obj(ptr, target, cursor, reader, env)?;
-            }
+            SerialType::Recur => unreachable!("a back-reference resolves before it is stepped"),
         }
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 fn unpack_int(ptr: AbsPtr, st: SerialType, reader: &mut &[u8]) -> Result<(), MorlocError> {
@@ -643,131 +678,166 @@ fn read_be_u64(reader: &mut &[u8]) -> Result<u64, MorlocError> {
 // ── Size calculation for unpack ────────────────────────────────────────────
 
 pub(crate) fn calc_unpack_size(data: &[u8], schema: &Schema) -> Result<usize, MorlocError> {
-    let mut reader = data;
-    let mut env: RecurEnv = Vec::new();
-    calc_size_r(schema, &mut reader, &mut env)
+    let mut w = SizeWalk { res: Resolver::new(schema), reader: data, total: 0 };
+    let mut st = Stack::new();
+    st.enter(schema, std::ptr::null(), true);
+    walk::run(&mut w, &mut st)?;
+    Ok(w.total)
 }
 
-fn calc_size_r(
-    schema: &Schema,
-    reader: &mut &[u8],
-    env: &mut RecurEnv,
-) -> Result<usize, MorlocError> {
-    recur::with_scope(env, schema, |env| calc_size_r_inner(schema, reader, env))
+/// Sizes the block `unpack_with_schema` will lay a msgpack value into,
+/// advancing through the stream as it goes. A frame's `x` says whether the
+/// node's bytes count: a fixed-width field of a tuple is inside the tuple's
+/// width already and only consumes its tokens.
+struct SizeWalk<'r, 'd> {
+    res: Resolver<'r>,
+    reader: &'d [u8],
+    total: usize,
 }
 
-fn calc_size_r_inner(
-    schema: &Schema,
-    reader: &mut &[u8],
-    env: &mut RecurEnv,
-) -> Result<usize, MorlocError> {
-    match schema.serial_type {
+impl<'r, 'd> SizeWalk<'r, 'd> {
+    #[inline]
+    fn add(&mut self, n: usize, counted: bool) {
+        if counted {
+            self.total += n;
+        }
+    }
+
+    fn child(
+        &mut self,
+        st: &mut Stack<bool>,
+        f: &Frame<bool>,
+        idx: usize,
+        s: &'r Schema,
+        counted: bool,
+    ) -> Result<Visit, MorlocError> {
+        if self.res.flat(s) {
+            self.step(st, Frame::new(s, std::ptr::null(), counted))?;
+            Ok(Visit::Done)
+        } else {
+            walk::defer(self, st, f, idx, s, std::ptr::null(), counted);
+            Ok(Visit::Deferred)
+        }
+    }
+}
+
+impl<'r, 'd> Walker<bool> for SizeWalk<'r, 'd> {
+    fn step(&mut self, st: &mut Stack<bool>, f: Frame<bool>) -> Result<(), MorlocError> {
+        // SAFETY: frames hold nodes of the tree the resolver was built from.
+        let s: &'r Schema = self.res.resolve(unsafe { &*f.schema })?;
+        match s.serial_type {
         SerialType::Nil => {
-            rmp::decode::read_nil(reader).ok();
-            Ok(1)
-        }
+            rmp::decode::read_nil(&mut self.reader).ok();
+            self.add(1, f.x) }
         SerialType::Bool => {
-            rmp::decode::read_bool(reader).ok();
-            Ok(1)
-        }
-        SerialType::Sint8 | SerialType::Uint8 | SerialType::Enum => { skip_int(reader)?; Ok(1) }
-        SerialType::Sint16 | SerialType::Uint16 => { skip_int(reader)?; Ok(2) }
-        SerialType::Sint32 | SerialType::Uint32 | SerialType::Float32 => { skip_int(reader)?; Ok(4) }
-        SerialType::Sint64 | SerialType::Uint64 | SerialType::Float64 => { skip_int(reader)?; Ok(8) }
+            rmp::decode::read_bool(&mut self.reader).ok();
+            self.add(1, f.x) }
+        SerialType::Sint8 | SerialType::Uint8 | SerialType::Enum => { skip_int(&mut self.reader)?; self.add(1, f.x) }
+        SerialType::Sint16 | SerialType::Uint16 => { skip_int(&mut self.reader)?; self.add(2, f.x) }
+        SerialType::Sint32 | SerialType::Uint32 | SerialType::Float32 => { skip_int(&mut self.reader)?; self.add(4, f.x) }
+        SerialType::Sint64 | SerialType::Uint64 | SerialType::Float64 => { skip_int(&mut self.reader)?; self.add(8, f.x) }
         SerialType::Int => {
             // Inline BigInt: 16 bytes for common case, more for overflow
-            let saved = *reader;
-            if let Ok(len) = rmp::decode::read_bin_len(reader) {
+            let saved = self.reader;
+            if let Ok(len) = rmp::decode::read_bin_len(&mut self.reader) {
                 let len = len as usize;
-                if reader.len() >= len { *reader = &reader[len..]; }
+                if self.reader.len() >= len { self.reader = &self.reader[len..]; }
                 // Overflow: 16-byte header + alignment + limb data
-                Ok(16 + std::mem::align_of::<u64>() - 1 + len)
+                self.add(16 + std::mem::align_of::<u64>() - 1 + len, f.x);
             } else {
-                *reader = saved;
-                skip_int(reader)?;
-                Ok(16) // Inline: just the [size, value] pair
+                self.reader = saved;
+                skip_int(&mut self.reader)?;
+                self.add(16, f.x); // Inline: just the [size, value] pair
             }
         }
         SerialType::String => {
-            let len = rmp::decode::read_str_len(reader)
+            let len = rmp::decode::read_str_len(&mut self.reader)
                 .map_err(|e| MorlocError::Serialization(format!("size calc str: {}", e)))?
                 as usize;
-            if reader.len() >= len { *reader = &reader[len..]; }
-            Ok(std::mem::size_of::<Array>() + len)
-        }
+            if self.reader.len() >= len { self.reader = &self.reader[len..]; }
+            self.add(std::mem::size_of::<Array>() + len, f.x) }
         SerialType::IFile | SerialType::OStream | SerialType::IStream => {
             // Tagged stream-handle field: 16-byte inline + path suballoc
             // (`8 + path_len`). msgpack carries the path as a string.
             use morloc_runtime_types::stream_handle as sh;
-            let len = rmp::decode::read_str_len(reader)
+            let len = rmp::decode::read_str_len(&mut self.reader)
                 .map_err(|e| MorlocError::Serialization(format!("size calc str: {}", e)))?
                 as usize;
-            if reader.len() >= len { *reader = &reader[len..]; }
+            if self.reader.len() >= len { self.reader = &self.reader[len..]; }
             let suballoc = if len == 0 { 0 } else { sh::path_suballoc_size(len) };
-            Ok(sh::STREAM_HANDLE_FIELD_SIZE + suballoc)
-        }
+            self.add(sh::STREAM_HANDLE_FIELD_SIZE + suballoc, f.x) }
         SerialType::Array => {
-            let n = rmp::decode::read_array_len(reader)
-                .map_err(|e| MorlocError::Serialization(format!("size calc array: {}", e)))?
-                as usize;
-            let elem_schema = &schema.parameters[0];
-            let mut total = std::mem::size_of::<Array>();
-            // Alignment padding (bumps to 64 for primitive numerics for SIMD/BLAS)
-            total = shm::align_up(total, elem_schema.array_data_alignment());
-            for _ in 0..n {
-                total += calc_size_r(elem_schema, reader, env)?;
+            if f.idx == 0 {
+                let n = rmp::decode::read_array_len(&mut self.reader)
+                    .map_err(|e| MorlocError::Serialization(format!("size calc array: {}", e)))?
+                    as usize;
+                let elem_schema = &s.parameters[0];
+                // Alignment padding (bumps to 64 for primitive numerics for SIMD/BLAS)
+                let head = shm::align_up(std::mem::size_of::<Array>(), elem_schema.array_data_alignment());
+                self.add(head, f.x);
+                // The element count is what the resumed loop needs.
+                let mut g = f;
+                g.idx = 0;
+                return self.elements(st, g, n);
             }
-            Ok(total)
+            let n = f.data as usize;
+            return self.elements(st, f, n);
         }
         SerialType::Tuple | SerialType::Map => {
-            let n = rmp::decode::read_array_len(reader)
-                .map_err(|e| MorlocError::Serialization(format!("msgpack tuple len: {}", e)))?;
-            check_field_count(schema, n as usize)?;
-            let mut total = schema.width;
-            for field_schema in &schema.parameters {
-                if !field_schema.is_fixed_width() {
-                    total += calc_size_r(field_schema, reader, env)?;
-                } else {
-                    calc_size_r(field_schema, reader, env)?;
+            if f.idx == 0 {
+                let n = rmp::decode::read_array_len(&mut self.reader)
+                    .map_err(|e| MorlocError::Serialization(format!("msgpack tuple len: {}", e)))?;
+                check_field_count(s, n as usize)?;
+                self.add(s.width, f.x);
+            }
+            for i in f.idx..s.parameters.len() {
+                let field = &s.parameters[i];
+                let counted = f.x && !field.is_fixed_width();
+                if self.child(st, &f, i, field, counted)? == Visit::Deferred {
+                    return Ok(());
                 }
             }
-            Ok(total)
         }
         SerialType::Variant => {
+            if f.idx > 0 {
+                return Ok(());
+            }
             // The slot is 16 bytes; the arm's own data lands at the cursor.
-            let saved = *reader;
-            let mut total = schema.width;
-            if rmp::decode::read_array_len(reader).is_ok() {
-                if let Ok(tag) = rmp::decode::read_int::<i64, _>(reader) {
-                    if tag >= 0 && (tag as usize) < schema.size {
-                        let arm = &schema.parameters[tag as usize];
-                        if !reader.is_empty() && reader[0] == 0xc0 {
-                            rmp::decode::read_nil(reader).ok();
+            let saved = self.reader;
+            self.add(s.width, f.x);
+            if rmp::decode::read_array_len(&mut self.reader).is_ok() {
+                if let Ok(tag) = rmp::decode::read_int::<i64, _>(&mut self.reader) {
+                    if tag >= 0 && (tag as usize) < s.size {
+                        let arm = &s.parameters[tag as usize];
+                        if !self.reader.is_empty() && self.reader[0] == 0xc0 {
+                            rmp::decode::read_nil(&mut self.reader).ok();
                         } else {
                             let inner_align = arm.alignment().max(1);
-                            total += inner_align - 1;
-                            total += calc_size_r_inner(arm, reader, env)?;
+                            self.add(inner_align - 1, f.x);
+                            self.child(st, &f, 0, arm, f.x)?;
                         }
-                        return Ok(total);
+                        return Ok(());
                     }
                 }
             }
-            *reader = saved;
-            Ok(total)
+            self.reader = saved;
         }
         SerialType::Optional => {
-            // The Optional slot is `schema.width` (= sizeof(RelPtr)) bytes.
-            // When present, the inner T's data lives at the cursor and
-            // needs `inner_align - 1` worst-case padding + sizeof(inner)
-            // + whatever the inner's own variable extras contribute.
-            let inner_schema = &schema.parameters[0];
-            if !reader.is_empty() && reader[0] == 0xc0 {
-                rmp::decode::read_nil(reader).ok();
-                Ok(schema.width)
+            if f.idx > 0 {
+                return Ok(());
+            }
+            // The Optional slot is `s.width` (= sizeof(RelPtr)) bytes. When
+            // present, the inner T's data lives at the cursor and needs
+            // `inner_align - 1` worst-case padding + sizeof(inner) +
+            // whatever the inner's own variable extras contribute.
+            let inner_schema = &s.parameters[0];
+            self.add(s.width, f.x);
+            if !self.reader.is_empty() && self.reader[0] == 0xc0 {
+                rmp::decode::read_nil(&mut self.reader).ok();
             } else {
-                let inner_size = calc_size_r(inner_schema, reader, env)?;
                 let align = inner_schema.alignment().max(1);
-                Ok(schema.width + (align - 1) + inner_size)
+                self.add(align - 1, f.x);
+                self.child(st, &f, 0, inner_schema, f.x)?;
             }
         }
         SerialType::Table => {
@@ -775,20 +845,37 @@ fn calc_size_r_inner(
             // of the msgpack decode pipeline and would only be invoked on
             // a Table by mistake. Return a serialisation error rather
             // than an arbitrary number.
-            Err(MorlocError::Serialization(
+            return Err(MorlocError::Serialization(
                 "Cannot compute msgpack size for a Table; Tables use the Arrow IPC SHM wire path".into(),
-            ))
+            ));
         }
-        SerialType::Recur => {
-            // Resolve to the named schema and account for its width
-            // (the data lives behind a relptr at this slot, so we add
-            // only schema.width plus whatever the body adds via reads).
-            let name = schema.name.as_deref().unwrap_or("");
-            let target_ptr = recur::lookup(env, name)?;
-            // SAFETY: env pointer is valid for the duration of the walk.
-            let target = unsafe { &*target_ptr };
-            calc_size_r(target, reader, env)
+        SerialType::Recur => unreachable!("a back-reference resolves before it is stepped"),
         }
+        Ok(())
+    }
+}
+
+impl<'r, 'd> SizeWalk<'r, 'd> {
+    /// Size the `n` elements of an array whose header has been read. The
+    /// count lives in the frame's `idx` high half while the low half is
+    /// the next element, since the stream cannot be re-read on resume.
+    fn elements(&mut self, st: &mut Stack<bool>, f: Frame<bool>, n: usize) -> Result<(), MorlocError> {
+        let s: &'r Schema = self.res.resolve(unsafe { &*f.schema })?;
+        let elem_schema = &s.parameters[0];
+        let flat_elem = self.res.flat(elem_schema);
+        for i in f.idx..n {
+            if flat_elem {
+                self.step(st, Frame::new(elem_schema, std::ptr::null(), f.x))?;
+            } else {
+                // The resume frame must know `n`: it is carried in `data`,
+                // which this walker has no other use for.
+                let mut g = f;
+                g.data = n as *const u8;
+                walk::defer(self, st, &g, i, elem_schema, std::ptr::null(), f.x);
+                return Ok(());
+            }
+        }
+        Ok(())
     }
 }
 

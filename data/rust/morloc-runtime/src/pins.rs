@@ -41,8 +41,8 @@ fn report(schema_str: &str, json: &str) -> String {
     crate::voidstar::write_flat_to_writer_with_vol_idx(&mut w0, ptr, &schema, 0).unwrap();
     let mut w7: Vec<u8> = Vec::new();
     crate::voidstar::write_flat_to_writer_with_vol_idx(&mut w7, ptr, &schema, 7).unwrap();
-    let h0 = crate::cache::hash_value(ptr, &schema, 0).unwrap();
-    let h17 = crate::cache::hash_value(ptr, &schema, 17).unwrap();
+    let h0 = crate::cache::hash_voidstar_value(ptr, &schema, 0).unwrap();
+    let h17 = crate::cache::hash_voidstar_value(ptr, &schema, 17).unwrap();
     let js = crate::json::voidstar_to_json_string(ptr, &schema).unwrap();
     let pretty = crate::json::pretty_json_string(ptr, &schema).unwrap();
     let mpk = crate::mpack::pack_with_schema(ptr, &schema).unwrap();

@@ -10,7 +10,10 @@ use std::sync::OnceLock;
 use crate::cschema::CSchema;
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 use crate::hash;
+use crate::recur::Resolver;
+use crate::schema::Schema;
 use crate::shm;
+use crate::walk::{self, Frame, Stack, Visit, Walker};
 
 extern "C" {
     fn parse_schema(schema_str: *const c_char, errmsg: *mut *mut c_char) -> *mut CSchema;
@@ -566,8 +569,7 @@ pub unsafe extern "C" fn morloc_cache_store(
     // Structural hash matches the caller-side lookup key semantics
     // (see slurm_ffi::remote_call using `hash_voidstar`) so store and
     // lookup agree. Seed 0 is the shared default across the runtime.
-    let mut env: crate::recur::RecurEnv = Vec::new();
-    let data_hash = match hash_voidstar_inner(voidstar as *const u8, &rs, 0, &mut env) {
+    let data_hash = match hash_voidstar_value(voidstar as *const u8, &rs, 0) {
         Ok(h) => h,
         Err(e) => {
             free_schema(schema);
@@ -660,8 +662,7 @@ pub unsafe extern "C" fn hash_voidstar(
 ) -> u64 {
     clear_errmsg(errmsg);
     let rs = CSchema::to_rust(schema);
-    let mut env: crate::recur::RecurEnv = Vec::new();
-    match hash_voidstar_inner(data as *const u8, &rs, seed, &mut env) {
+    match hash_voidstar_value(data as *const u8, &rs, seed) {
         Ok(h) => h,
         Err(e) => {
             set_errmsg(errmsg, &e);
@@ -671,225 +672,251 @@ pub unsafe extern "C" fn hash_voidstar(
 }
 
 /// The hash of a value under its schema, as `hash_voidstar` computes it.
-#[cfg(test)]
-pub(crate) fn hash_value(data: *const u8, schema: &crate::schema::Schema, seed: u64) -> Result<u64, MorlocError> {
-    let mut env: crate::recur::RecurEnv = Vec::new();
-    hash_voidstar_inner(data, schema, seed, &mut env)
-}
-
-/// Push `schema` onto the declaration stack when it names one, so a
-/// `Recur` back-reference below it resolves, then walk. `with_scope`
-/// pushes only for a named non-Recur node, which is exactly the
-/// declaration sites.
-fn hash_voidstar_inner(
+pub(crate) fn hash_voidstar_value(
     data: *const u8,
     schema: &crate::schema::Schema,
     seed: u64,
-    env: &mut crate::recur::RecurEnv,
 ) -> Result<u64, MorlocError> {
-    crate::recur::with_scope(env, schema, |env| hash_voidstar_walk(data, schema, seed, env))
+    let mut w = HashWalk { res: Resolver::new(schema), h: seed };
+    let mut st = Stack::new();
+    st.enter(schema, data, ());
+    walk::run(&mut w, &mut st)?;
+    Ok(w.h)
 }
 
-fn hash_voidstar_walk(
-    data: *const u8,
-    schema: &crate::schema::Schema,
-    seed: u64,
-    env: &mut crate::recur::RecurEnv,
-) -> Result<u64, MorlocError> {
-    use crate::schema::SerialType;
-    use crate::utility::mix;
+/// A left-to-right fold of the value into one register. Every node folds
+/// its SerialType tag into the register on its first visit, so structurally
+/// distinct schemas can never share a payload hash: without it,
+/// single-element wrappings collide -- `[[1.0, 2.0]]` as `[[Real]]` walks a
+/// 1-iteration outer loop into a fixed-width inner array of 16 bytes and
+/// returns `xxh64({1.0,2.0}, 0)`, exactly the hash `[Real]` produces for
+/// `[1.0, 2.0]`. Arrays additionally mix in their size so `[[a,b]]` and
+/// `[[a],[b]]` differ even when their flat element bytes and total counts
+/// match. A back-reference folds its own tag and then the declaration's,
+/// so the key of a recursive value depends on where the schema was cut.
+///
+/// The register threads through the children of a container in order, so
+/// a resumed visit continues from the register as the last child left it
+/// and folds nothing of its own.
+struct HashWalk<'r> {
+    res: Resolver<'r>,
+    h: u64,
+}
 
-    // Fold the SerialType tag into the seed at every recursion so
-    // structurally distinct schemas can never share a payload hash. Without
-    // this, single-element wrappings collide: `[[1.0, 2.0]]` as `[[Real]]`
-    // walks a 1-iteration outer loop into a fixed-width inner array of 16
-    // bytes and returns `xxh64({1.0,2.0}, 0)` -- exactly the hash `[Real]`
-    // produces for `[1.0, 2.0]`. Arrays additionally mix in `arr.size` so
-    // `[[a,b]]` and `[[a],[b]]` differ even when their flat element bytes
-    // and total counts match.
-    let seed = mix(seed, schema.serial_type as u64);
+impl<'r> HashWalk<'r> {
+    fn child(
+        &mut self,
+        st: &mut Stack<()>,
+        f: &Frame<()>,
+        idx: usize,
+        s: &'r Schema,
+        data: *const u8,
+    ) -> Result<Visit, MorlocError> {
+        if self.res.flat(s) {
+            self.step(st, Frame::new(s, data, ()))?;
+            Ok(Visit::Done)
+        } else {
+            walk::defer(self, st, f, idx, s, data, ());
+            Ok(Visit::Deferred)
+        }
+    }
 
-    // SAFETY: data points to voidstar data in SHM with layout described by schema.
-    // All reads (Array headers, element data) are within schema-defined bounds.
-    unsafe {
-        match schema.serial_type {
-            SerialType::Int => {
-                // Inline BigInt: hash the value directly for size <= 1
-                let size = *(data as *const usize);
-                if size <= 1 {
-                    let bytes = std::slice::from_raw_parts(data.add(8), 8);
-                    Ok(hash::xxh64_with_seed(bytes, seed))
-                } else {
-                    let relptr = *(data.add(std::mem::size_of::<usize>()) as *const shm::RelPtr);
-                    let limb_data = shm::rel2abs(relptr)?;
-                    let bytes = std::slice::from_raw_parts(limb_data, size * 8);
-                    Ok(hash::xxh64_with_seed(bytes, seed))
-                }
+    fn fold(&mut self, bytes: &[u8]) {
+        self.h = hash::xxh64_with_seed(bytes, self.h);
+    }
+}
+
+impl<'r> Walker<()> for HashWalk<'r> {
+    fn step(&mut self, st: &mut Stack<()>, f: Frame<()>) -> Result<(), MorlocError> {
+        use crate::schema::SerialType;
+        use crate::utility::mix;
+
+        // SAFETY: frames hold nodes of the tree the resolver was built from;
+        // `data` points at a value laid out as that schema describes, and
+        // every read is within the bounds the schema and headers give.
+        let written: &'r Schema = unsafe { &*f.schema };
+        let s = if written.serial_type == SerialType::Recur {
+            if f.idx == 0 {
+                self.h = mix(self.h, SerialType::Recur as u64);
             }
-            SerialType::IFile | SerialType::OStream | SerialType::IStream => {
-                // Cache key is content-derived. Resolve TAG_HANDLE to its
-                // path via the local SHM registry so two handles to the
-                // same file produce the same hash. TAG_PATH reads the
-                // path straight out of the suballoc.
-                use morloc_runtime_types::stream_handle as sh;
-                let field = data as *const u8;
-                let tag = sh::read_tag(field);
-                let payload = sh::read_payload(field);
-                let owned: Vec<u8>;
-                let borrowed: &[u8];
-                if tag == sh::TAG_PATH {
-                    if payload == sh::RELNULL_PAYLOAD {
-                        borrowed = &[];
+            self.res.resolve(written)?
+        } else {
+            written
+        };
+        if f.idx == 0 {
+            self.h = mix(self.h, s.serial_type as u64);
+        }
+        let data = f.data;
+        unsafe {
+            match s.serial_type {
+                SerialType::Int => {
+                    // Inline BigInt: hash the value directly for size <= 1
+                    let size = *(data as *const usize);
+                    if size <= 1 {
+                        self.fold(std::slice::from_raw_parts(data.add(8), 8));
                     } else {
-                        let suballoc = shm::rel2abs(payload as shm::RelPtr)?;
-                        let path_len = sh::read_path_size(suballoc) as usize;
-                        borrowed = std::slice::from_raw_parts(suballoc.add(8), path_len);
+                        let relptr = *(data.add(std::mem::size_of::<usize>()) as *const shm::RelPtr);
+                        let limb_data = shm::rel2abs(relptr)?;
+                        self.fold(std::slice::from_raw_parts(limb_data, size * 8));
                     }
-                } else if tag == sh::TAG_HANDLE {
-                    owned = crate::stream::handle_path(payload as i64)?.into_bytes();
-                    borrowed = &owned;
-                } else {
-                    return Err(MorlocError::Other(format!(
-                        "cache hash: unsupported stream-handle tag {}", tag,
-                    )));
                 }
-                Ok(hash::xxh64_with_seed(borrowed, seed))
-            }
-            SerialType::String | SerialType::Array => {
-                let arr = &*(data as *const shm::Array);
-                let seed = mix(seed, arr.size as u64);
-                let elem_width = if schema.parameters.is_empty() {
-                    1 // string bytes
-                } else {
-                    schema.parameters[0].width
-                };
-                // Empty collection: arr.data is RELNULL, so there is no data
-                // region to resolve; hash the size-mixed seed with no bytes.
-                // Mirrors the arr.size == 0 early-return in calc_voidstar_size.
-                if arr.size == 0 {
-                    return Ok(hash::xxh64_with_seed(&[], seed));
-                }
-                let elem_data = shm::rel2abs(arr.data)?;
-
-                // Bulk-hash the flat data region (String bytes, or an Array of
-                // fixed-width elements), else recurse per element. To preserve
-                // the structural-hash invariant (line 679), the bulk path still
-                // folds the element's SerialType tag -- the per-element walk it
-                // replaces mixed each element's tag, so without this `[U8]` and
-                // `[I8]` with identical bytes would collide. (Changes the hash
-                // VALUE for fixed-width-element arrays vs the old per-element form.)
-                if schema.array_data_is_flat() {
-                    let seed = schema
-                        .parameters
-                        .first()
-                        .map_or(seed, |e| mix(seed, e.serial_type as u64));
-                    let total = elem_width * arr.size;
-                    let bytes = std::slice::from_raw_parts(elem_data, total);
-                    Ok(hash::xxh64_with_seed(bytes, seed))
-                } else {
-                    let mut h = seed;
-                    for i in 0..arr.size {
-                        h = hash_voidstar_inner(
-                            elem_data.add(i * elem_width),
-                            &schema.parameters[0],
-                            h,
-                            env,
-                        )?;
+                SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+                    // Cache key is content-derived. Resolve TAG_HANDLE to its
+                    // path via the local SHM registry so two handles to the
+                    // same file produce the same hash. TAG_PATH reads the
+                    // path straight out of the suballoc.
+                    use morloc_runtime_types::stream_handle as sh;
+                    let tag = sh::read_tag(data);
+                    let payload = sh::read_payload(data);
+                    let owned: Vec<u8>;
+                    let borrowed: &[u8];
+                    if tag == sh::TAG_PATH {
+                        if payload == sh::RELNULL_PAYLOAD {
+                            borrowed = &[];
+                        } else {
+                            let suballoc = shm::rel2abs(payload as shm::RelPtr)?;
+                            let path_len = sh::read_path_size(suballoc) as usize;
+                            borrowed = std::slice::from_raw_parts(suballoc.add(8), path_len);
+                        }
+                    } else if tag == sh::TAG_HANDLE {
+                        owned = crate::stream::handle_path(payload as i64)?.into_bytes();
+                        borrowed = &owned;
+                    } else {
+                        return Err(MorlocError::Other(format!(
+                            "cache hash: unsupported stream-handle tag {}", tag,
+                        )));
                     }
-                    Ok(h)
+                    self.fold(borrowed);
                 }
-            }
-            SerialType::Tuple | SerialType::Map => {
-                if schema.is_fixed_width() {
-                    let bytes = std::slice::from_raw_parts(data, schema.width);
-                    Ok(hash::xxh64_with_seed(bytes, seed))
-                } else {
-                    let mut h = seed;
-                    for i in 0..schema.parameters.len() {
-                        h = hash_voidstar_inner(
-                            data.add(schema.offsets[i]),
-                            &schema.parameters[i],
-                            h,
-                            env,
-                        )?;
+                SerialType::String | SerialType::Array => {
+                    let arr = &*(data as *const shm::Array);
+                    let elem_width = if s.parameters.is_empty() {
+                        1 // string bytes
+                    } else {
+                        s.parameters[0].width
+                    };
+                    if f.idx == 0 {
+                        self.h = mix(self.h, arr.size as u64);
+                        // Empty collection: arr.data is RELNULL, so there is
+                        // no data region to resolve; hash the size-mixed
+                        // register with no bytes.
+                        if arr.size == 0 {
+                            self.fold(&[]);
+                            return Ok(());
+                        }
+                        // Bulk-hash the flat data region (String bytes, or an
+                        // Array of fixed-width elements), else fold per
+                        // element. The bulk path still folds the element's
+                        // SerialType tag, as the per-element walk it replaces
+                        // would, so `[U8]` and `[I8]` with identical bytes
+                        // do not collide.
+                        if s.array_data_is_flat() {
+                            if let Some(e) = s.parameters.first() {
+                                self.h = mix(self.h, e.serial_type as u64);
+                            }
+                            let elem_data = shm::rel2abs(arr.data)?;
+                            self.fold(std::slice::from_raw_parts(elem_data, elem_width * arr.size));
+                            return Ok(());
+                        }
                     }
-                    Ok(h)
+                    let elem_data = shm::rel2abs(arr.data)?;
+                    for i in f.idx..arr.size {
+                        let child = &s.parameters[0];
+                        if self.child(st, &f, i, child, elem_data.add(i * elem_width))? == Visit::Deferred {
+                            return Ok(());
+                        }
+                    }
                 }
-            }
-            SerialType::Optional => {
-                // The slot is a relative pointer, so its bytes are an
-                // ADDRESS. Hashing them makes equal values at different
-                // offsets differ, and -- far worse -- makes different values
-                // that land on the same recycled block agree. Hash presence,
-                // then the pointed-to value.
-                let relptr = *(data as *const shm::RelPtr);
-                if relptr == shm::RELNULL || schema.parameters.is_empty() {
-                    Ok(hash::xxh64_with_seed(&[0u8], seed))
-                } else {
-                    let inner = shm::rel2abs(relptr)?;
-                    hash_voidstar_inner(inner, &schema.parameters[0], mix(seed, 1), env)
+                SerialType::Tuple | SerialType::Map => {
+                    if s.is_fixed_width() {
+                        self.fold(std::slice::from_raw_parts(data, s.width));
+                    } else {
+                        for i in f.idx..s.parameters.len() {
+                            let child = &s.parameters[i];
+                            if self.child(st, &f, i, child, data.add(s.offsets[i]))? == Visit::Deferred {
+                                return Ok(());
+                            }
+                        }
+                    }
                 }
-            }
-            SerialType::Variant => {
-                // Tag then payload, for the same reason as Optional: bytes
-                // 8..16 are a pointer. The tag alone is not enough -- two
-                // values of one arm would collide -- and the 7 pad bytes
-                // between are never hashed, so they cannot perturb the key.
-                let tag = *data;
-                let arm = schema.parameters.get(tag as usize).ok_or_else(|| {
-                    MorlocError::Serialization(format!(
-                        "variant tag {} is out of range; the type has {} arms",
-                        tag, schema.size
-                    ))
-                })?;
-                let seed = mix(seed, tag as u64);
-                let relptr = *(data.add(8) as *const shm::RelPtr);
-                if relptr == shm::RELNULL {
-                    Ok(hash::xxh64_with_seed(&[], seed))
-                } else {
-                    let inner = shm::rel2abs(relptr)?;
-                    hash_voidstar_inner(inner, arm, seed, env)
+                SerialType::Optional => {
+                    // The slot is a relative pointer, so its bytes are an
+                    // ADDRESS. Hashing them makes equal values at different
+                    // offsets differ, and -- far worse -- makes different
+                    // values that land on the same recycled block agree.
+                    // Hash presence, then the pointed-to value.
+                    if f.idx > 0 {
+                        return Ok(());
+                    }
+                    let relptr = *(data as *const shm::RelPtr);
+                    if relptr == shm::RELNULL || s.parameters.is_empty() {
+                        self.fold(&[0u8]);
+                    } else {
+                        let inner = shm::rel2abs(relptr)?;
+                        self.h = mix(self.h, 1);
+                        self.child(st, &f, 0, &s.parameters[0], inner)?;
+                    }
                 }
-            }
-            SerialType::Recur => {
-                // Resolve the back-reference to its declaration and hash as
-                // though the data carried that schema, mirroring how the
-                // relptr-adjusting walker resolves one.
-                let name = schema.name.as_deref().unwrap_or("");
-                let target_ptr = crate::recur::lookup(env, name)?;
-                let target = &*target_ptr;
-                hash_voidstar_inner(data, target, seed, env)
-            }
-            SerialType::Table => {
-                // `data` is the table's block. Its bytes are its value:
-                // every offset is block-relative and the padding is
-                // zeroed, so equal tables produce equal blocks.
-                let n = crate::arrow_shm::block_size(data as *const crate::arrow_shm::ArrowShmHeader)?;
-                let bytes = std::slice::from_raw_parts(data, n);
-                Ok(hash::xxh64_with_seed(bytes, seed))
-            }
-            // Everything below is a fixed-width scalar holding no pointer,
-            // so its bytes ARE its value. Enumerated rather than left to a
-            // catch-all: a type whose slot holds a relative pointer must
-            // never reach a raw-byte hash, and a wildcard here is how one
-            // silently would.
-            SerialType::Nil
-            | SerialType::Bool
-            | SerialType::Sint8
-            | SerialType::Sint16
-            | SerialType::Sint32
-            | SerialType::Sint64
-            | SerialType::Uint8
-            | SerialType::Uint16
-            | SerialType::Uint32
-            | SerialType::Uint64
-            | SerialType::Float32
-            | SerialType::Float64
-            | SerialType::Enum => {
-                let bytes = std::slice::from_raw_parts(data, schema.width);
-                Ok(hash::xxh64_with_seed(bytes, seed))
+                SerialType::Variant => {
+                    // Tag then payload, for the same reason as Optional:
+                    // bytes 8..16 are a pointer. The tag alone is not enough
+                    // -- two values of one arm would collide -- and the 7
+                    // pad bytes between are never hashed, so they cannot
+                    // perturb the key.
+                    if f.idx > 0 {
+                        return Ok(());
+                    }
+                    let tag = *data;
+                    let arm = s.parameters.get(tag as usize).ok_or_else(|| {
+                        MorlocError::Serialization(format!(
+                            "variant tag {} is out of range; the type has {} arms",
+                            tag, s.size
+                        ))
+                    })?;
+                    self.h = mix(self.h, tag as u64);
+                    let relptr = *(data.add(8) as *const shm::RelPtr);
+                    if relptr == shm::RELNULL {
+                        self.fold(&[]);
+                    } else {
+                        let inner = shm::rel2abs(relptr)?;
+                        self.child(st, &f, 0, arm, inner)?;
+                    }
+                }
+                SerialType::Recur => {
+                    return Err(MorlocError::Schema(
+                        "back-reference resolves to a back-reference".to_string(),
+                    ));
+                }
+                SerialType::Table => {
+                    // `data` is the table's block. Its bytes are its value:
+                    // every offset is block-relative and the padding is
+                    // zeroed, so equal tables produce equal blocks.
+                    let n = crate::arrow_shm::block_size(data as *const crate::arrow_shm::ArrowShmHeader)?;
+                    self.fold(std::slice::from_raw_parts(data, n));
+                }
+                // Everything below is a fixed-width scalar holding no
+                // pointer, so its bytes ARE its value. Enumerated rather
+                // than left to a catch-all: a type whose slot holds a
+                // relative pointer must never reach a raw-byte hash, and a
+                // wildcard here is how one silently would.
+                SerialType::Nil
+                | SerialType::Bool
+                | SerialType::Sint8
+                | SerialType::Sint16
+                | SerialType::Sint32
+                | SerialType::Sint64
+                | SerialType::Uint8
+                | SerialType::Uint16
+                | SerialType::Uint32
+                | SerialType::Uint64
+                | SerialType::Float32
+                | SerialType::Float64
+                | SerialType::Enum => {
+                    self.fold(std::slice::from_raw_parts(data, s.width));
+                }
             }
         }
+        Ok(())
     }
 }
 
@@ -949,8 +976,7 @@ pub unsafe extern "C" fn hash_morloc_packet(
             return false;
         }
         let rs = CSchema::to_rust(schema);
-        let mut env: crate::recur::RecurEnv = Vec::new();
-        match hash_voidstar_inner(voidstar, &rs, seed, &mut env) {
+        match hash_voidstar_value(voidstar, &rs, seed) {
             Ok(h) => *hash_out = h,
             Err(e) => {
                 set_errmsg(errmsg, &e);
@@ -1250,8 +1276,7 @@ mod hash_pointer_tests {
     fn hash_of(json_text: &str, schema_str: &str) -> u64 {
         let schema = parse_schema(schema_str).unwrap();
         let ptr = json::read_json_with_schema(json_text, &schema).unwrap();
-        let mut env: crate::recur::RecurEnv = Vec::new();
-        hash_voidstar_inner(ptr as *const u8, &schema, 0, &mut env).unwrap()
+        hash_voidstar_value(ptr as *const u8, &schema, 0).unwrap()
     }
 
     #[test]
@@ -1285,8 +1310,7 @@ mod hash_pointer_tests {
             (b, shm::rel2abs(rel).unwrap())
         };
         let hash = |p: *mut u8| {
-            let mut env: crate::recur::RecurEnv = Vec::new();
-            hash_voidstar_inner(p as *const u8, &schema, 0, &mut env).unwrap()
+            hash_voidstar_value(p as *const u8, &schema, 0).unwrap()
         };
         let (b1, t1) = table(vec![1, 2, 3]);
         let (_, t2) = table(vec![1, 2, 3]);

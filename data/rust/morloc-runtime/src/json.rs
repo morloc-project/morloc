@@ -1803,112 +1803,13 @@ mod tests {
     // Record `{m :: i4, n :: i4}` -- schema encoding `m21mi41ni4`.
     fn rec2_schema() -> Schema { parse_schema("m21mi41ni4").unwrap() }
 
-    /// A small deterministic generator of JSON values for a schema.
-    struct Gen(u64);
-    impl Gen {
-        fn next(&mut self) -> u64 {
-            self.0 ^= self.0 << 13;
-            self.0 ^= self.0 >> 7;
-            self.0 ^= self.0 << 17;
-            self.0
-        }
-        fn below(&mut self, n: u64) -> u64 {
-            self.next() % n
-        }
-        fn value(&mut self, s: &Schema, root: &Schema, depth: usize) -> String {
-            match s.serial_type {
-                SerialType::Nil => "null".into(),
-                SerialType::Bool => if self.below(2) == 0 { "true" } else { "false" }.into(),
-                SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 =>
-                    format!("{}", self.below(200) as i64 - 100),
-                SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 =>
-                    format!("{}", self.below(200)),
-                SerialType::Float32 | SerialType::Float64 => format!("{}.5", self.below(50) as i64 - 25),
-                SerialType::Int => match self.below(3) {
-                    0 => format!("{}", self.below(1000) as i64 - 500),
-                    1 => "123456789012345678901234567890".into(),
-                    _ => "-98765432109876543210".into(),
-                },
-                SerialType::String => {
-                    let words = ["", "a", "hello world", r"tab\tnew\nline", r#"quote\"q"#, r"\u00e9t\u00e9", "[{,}]"];
-                    format!("\"{}\"", words[self.below(words.len() as u64) as usize])
-                }
-                SerialType::Enum => format!("\"{}\"", s.keys[self.below(s.keys.len() as u64) as usize]),
-                SerialType::Array => {
-                    let n = if depth > 6 { 0 } else { self.below(4) };
-                    let items: Vec<String> = (0..n).map(|_| self.value(&s.parameters[0], root, depth + 1)).collect();
-                    format!("[{}]", items.join(", "))
-                }
-                SerialType::Tuple => {
-                    let items: Vec<String> = s.parameters.iter().map(|p| self.value(p, root, depth + 1)).collect();
-                    format!("[{}]", items.join(","))
-                }
-                SerialType::Map => {
-                    if self.below(4) == 0 {
-                        let items: Vec<String> = s.parameters.iter().map(|p| self.value(p, root, depth + 1)).collect();
-                        format!("[{}]", items.join(","))
-                    } else {
-                        // Members in a shuffled order.
-                        let mut idx: Vec<usize> = (0..s.parameters.len()).collect();
-                        for i in (1..idx.len()).rev() {
-                            let j = self.below(i as u64 + 1) as usize;
-                            idx.swap(i, j);
-                        }
-                        let items: Vec<String> = idx
-                            .iter()
-                            .map(|&i| format!("\"{}\" : {}", s.keys[i], self.value(&s.parameters[i], root, depth + 1)))
-                            .collect();
-                        format!("{{ {} }}", items.join(" , "))
-                    }
-                }
-                SerialType::Optional => {
-                    if depth > 6 || self.below(3) == 0 {
-                        "null".into()
-                    } else {
-                        self.value(&s.parameters[0], root, depth + 1)
-                    }
-                }
-                SerialType::Variant => {
-                    let mut arms: Vec<usize> = if depth > 6 {
-                        (0..s.keys.len()).filter(|&i| s.parameters[i].size == 0).collect()
-                    } else {
-                        (0..s.keys.len()).collect()
-                    };
-                    // A type whose every arm carries fields ends through
-                    // the type it holds.
-                    if arms.is_empty() {
-                        arms = (0..s.keys.len()).collect();
-                    }
-                    let i = arms[self.below(arms.len() as u64) as usize];
-                    if s.parameters[i].size == 0 {
-                        format!("\"{}\"", s.keys[i])
-                    } else {
-                        format!("{{\"{}\":{}}}", s.keys[i], self.value(&s.parameters[i], root, depth + 1))
-                    }
-                }
-                SerialType::Recur => {
-                    let target = crate::recur::Resolver::new(root);
-                    let t = target.resolve(s).unwrap();
-                    // The declaration is a node of the root tree; walk it.
-                    self.value(t, root, depth + 1)
-                }
-                _ => "null".into(),
-            }
-        }
-    }
-
     /// Whatever the loader accepts, the writer prints back as the same
     /// JSON document, for random values over every schema shape.
     #[test]
     fn test_random_values_round_trip() {
         let _shm = setup();
-        let schemas = [
-            "i4", "s", "as", "t3si4s", "aai4", "t2?i4s", "m22idj4tagsas", "v23Nil04Cons2i4s", "e21A1B",
-            "&2LLm24headi84tail?^2LL", "&4Treev24Leaf04Node3i8^4Tree^4Tree",
-            "&1Av23Nil05ACons2i8&1Bv15BCons2i8^1A", "&4Rosem21vi84kidsa^4Rose", "a&2LLm24headi84tail?^2LL",
-            "m31af81b?s1cat2i4?i4", "?v23Nil04Cons2i4s",
-        ];
-        let mut g = Gen(0x9e3779b97f4a7c15);
+        let schemas = crate::deep_tests::SHAPES;
+        let mut g = crate::deep_tests::Gen(0x9e3779b97f4a7c15);
         for schema_str in schemas {
             let schema = parse_schema(schema_str).unwrap();
             for _ in 0..40 {

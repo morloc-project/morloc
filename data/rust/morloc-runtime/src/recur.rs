@@ -1,50 +1,11 @@
 //! Back-reference resolution for walkers that descend a Schema tree.
-//! `Resolver` binds every `Recur` node to its declaration once per walk;
-//! the env stack below is the older per-visit form, kept while walkers
-//! still use it.
-//!
-//! The stack stores raw `*const Schema` pointers rather than borrowed
-//! references because all walkers thread the same `&mut Vec<...>`
-//! while taking shared borrows of various sub-schemas during the
-//! traversal. The pointers are always derived from live `&Schema`
-//! values that outlive the walk (they come from the top-level Schema
-//! held on the caller's stack), so dereferencing them is safe as long
-//! as the walk doesn't mutate the Schema -- which it doesn't.
+//! `Resolver` binds every `Recur` node to its declaration once per walk,
+//! so a step resolves a back-reference by one binary search and never
+//! allocates; `reroot_under` makes a sub-schema self-contained for a
+//! reader that starts inside a declaration.
 
 use crate::error::MorlocError;
 use crate::schema::{Schema, SerialType};
-
-/// Stack of in-scope named-schema declarations.
-pub type RecurEnv = Vec<(String, *const Schema)>;
-
-/// Look up the most recent declaration of `name` on the env stack.
-///
-/// Returns a clear error rather than `Option` because every caller
-/// needs the error path -- a dangling back-reference is a wire-format
-/// or codegen bug, not a recoverable absence.
-pub fn lookup(env: &RecurEnv, name: &str) -> Result<*const Schema, MorlocError> {
-    env.iter()
-        .rev()
-        .find(|(n, _)| n == name)
-        .map(|(_, s)| *s)
-        .ok_or_else(|| {
-            MorlocError::Schema(format!(
-                "Recur back-reference to undeclared name '{name}'"
-            ))
-        })
-}
-
-/// An env holding only `schema`'s own declaration, for a walk that
-/// starts INSIDE a named schema rather than at it -- a record's fields
-/// taken one at a time, say -- so a back-reference to the schema itself
-/// still resolves.
-pub fn self_scope(schema: &Schema) -> RecurEnv {
-    match (schema.serial_type, schema.name.as_deref()) {
-        (SerialType::Recur, _) => Vec::new(),
-        (_, Some(n)) => vec![(n.to_string(), schema as *const Schema)],
-        _ => Vec::new(),
-    }
-}
 
 /// Make a sub-schema self-contained by replacing every back-reference to
 /// `parent`'s declaration with `parent` itself. A field schema handed to a
@@ -181,33 +142,6 @@ impl<'r> Resolver<'r> {
     }
 }
 
-/// Run `body` with `schema` pushed onto the env stack for the
-/// duration of the call. Recur nodes are not pushed (they carry the
-/// `name` field as a lookup key, not a binding site).
-///
-/// The closure body receives `&mut RecurEnv` so it can pass the env
-/// to recursive walker calls. The push/pop happens around the
-/// closure invocation; an early-return via `?` inside the closure
-/// still triggers the pop (Result is captured before pop runs).
-pub fn with_scope<F, R>(env: &mut RecurEnv, schema: &Schema, body: F) -> R
-where
-    F: FnOnce(&mut RecurEnv) -> R,
-{
-    let pushed = match (schema.serial_type, schema.name.as_deref()) {
-        (SerialType::Recur, _) => false,
-        (_, Some(n)) => {
-            env.push((n.to_string(), schema as *const Schema));
-            true
-        }
-        _ => false,
-    };
-    let result = body(env);
-    if pushed {
-        env.pop();
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,13 +210,5 @@ mod tests {
         assert_eq!(s, "?&4Nodem25labels4next?^4Node");
         let reparsed = parse_schema(&s).unwrap();
         assert_eq!(schema_to_string(&reparsed), s);
-    }
-
-    #[test]
-    fn a_walk_started_inside_a_record_sees_the_record() {
-        let node = parse_schema(CHAIN).unwrap();
-        let env = self_scope(&node);
-        assert!(lookup(&env, "Node").is_ok());
-        assert!(lookup(&Vec::new(), "Node").is_err());
     }
 }

@@ -159,6 +159,112 @@ pub fn count_ll(root: AbsPtr, schema: &Schema) -> usize {
     }
 }
 
+use crate::schema::SerialType;
+
+/// A small deterministic generator of JSON values for a schema.
+pub struct Gen(pub u64);
+impl Gen {
+    pub fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    pub fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+    pub fn value(&mut self, s: &Schema, root: &Schema, depth: usize) -> String {
+        match s.serial_type {
+            SerialType::Nil => "null".into(),
+            SerialType::Bool => if self.below(2) == 0 { "true" } else { "false" }.into(),
+            SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 =>
+                format!("{}", self.below(200) as i64 - 100),
+            SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 =>
+                format!("{}", self.below(200)),
+            SerialType::Float32 | SerialType::Float64 => format!("{}.5", self.below(50) as i64 - 25),
+            SerialType::Int => match self.below(3) {
+                0 => format!("{}", self.below(1000) as i64 - 500),
+                1 => "123456789012345678901234567890".into(),
+                _ => "-98765432109876543210".into(),
+            },
+            SerialType::String => {
+                let words = ["", "a", "hello world", r"tab\tnew\nline", r#"quote\"q"#, r"\u00e9t\u00e9", "[{,}]"];
+                format!("\"{}\"", words[self.below(words.len() as u64) as usize])
+            }
+            SerialType::Enum => format!("\"{}\"", s.keys[self.below(s.keys.len() as u64) as usize]),
+            SerialType::Array => {
+                let n = if depth > 6 { 0 } else { self.below(4) };
+                let items: Vec<String> = (0..n).map(|_| self.value(&s.parameters[0], root, depth + 1)).collect();
+                format!("[{}]", items.join(", "))
+            }
+            SerialType::Tuple => {
+                let items: Vec<String> = s.parameters.iter().map(|p| self.value(p, root, depth + 1)).collect();
+                format!("[{}]", items.join(","))
+            }
+            SerialType::Map => {
+                if self.below(4) == 0 {
+                    let items: Vec<String> = s.parameters.iter().map(|p| self.value(p, root, depth + 1)).collect();
+                    format!("[{}]", items.join(","))
+                } else {
+                    // Members in a shuffled order.
+                    let mut idx: Vec<usize> = (0..s.parameters.len()).collect();
+                    for i in (1..idx.len()).rev() {
+                        let j = self.below(i as u64 + 1) as usize;
+                        idx.swap(i, j);
+                    }
+                    let items: Vec<String> = idx
+                        .iter()
+                        .map(|&i| format!("\"{}\" : {}", s.keys[i], self.value(&s.parameters[i], root, depth + 1)))
+                        .collect();
+                    format!("{{ {} }}", items.join(" , "))
+                }
+            }
+            SerialType::Optional => {
+                if depth > 6 || self.below(3) == 0 {
+                    "null".into()
+                } else {
+                    self.value(&s.parameters[0], root, depth + 1)
+                }
+            }
+            SerialType::Variant => {
+                let mut arms: Vec<usize> = if depth > 6 {
+                    (0..s.keys.len()).filter(|&i| s.parameters[i].size == 0).collect()
+                } else {
+                    (0..s.keys.len()).collect()
+                };
+                // A type whose every arm carries fields ends through
+                // the type it holds.
+                if arms.is_empty() {
+                    arms = (0..s.keys.len()).collect();
+                }
+                let i = arms[self.below(arms.len() as u64) as usize];
+                if s.parameters[i].size == 0 {
+                    format!("\"{}\"", s.keys[i])
+                } else {
+                    format!("{{\"{}\":{}}}", s.keys[i], self.value(&s.parameters[i], root, depth + 1))
+                }
+            }
+            SerialType::Recur => {
+                let target = crate::recur::Resolver::new(root);
+                let t = target.resolve(s).unwrap();
+                // The declaration is a node of the root tree; walk it.
+                self.value(t, root, depth + 1)
+            }
+            _ => "null".into(),
+        }
+    }
+}
+
+
+/// The schema shapes the random tests cover: every leaf and container
+/// kind, records in both wire forms, and every recursive shape.
+pub const SHAPES: &[&str] = &[
+    "i4", "s", "as", "t3si4s", "aai4", "t2?i4s", "m22idj4tagsas", "v23Nil04Cons2i4s", "e21A1B",
+    "&2LLm24headi84tail?^2LL", "&4Treev24Leaf04Node3i8^4Tree^4Tree",
+    "&1Av23Nil05ACons2i8&1Bv15BCons2i8^1A", "&4Rosem21vi84kidsa^4Rose", "a&2LLm24headi84tail?^2LL",
+    "m31af81b?s1cat2i4?i4", "?v23Nil04Cons2i4s",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,6 +387,100 @@ mod tests {
             let small = time(20_000);
             let large = time(80_000);
             assert!(large < small * 8, "load time grew from {small:?} to {large:?} for 4x the depth");
+        });
+    }
+
+    #[test]
+    fn flat_writer_is_flat_and_linear_over_deep_chains() {
+        on_small_stack(|| {
+            let _shm = crate::init_test_shm();
+            for (root, schema) in [build_ll(DEPTH), build_tree(DEPTH), build_mutual(DEPTH), build_rose(DEPTH)] {
+                let flat = crate::voidstar::flatten_to_buffer(root, &schema).unwrap();
+                let mut w0: Vec<u8> = Vec::new();
+                let n = crate::voidstar::write_flat_to_writer_with_vol_idx(&mut w0, root, &schema, 0).unwrap();
+                assert_eq!(n, w0.len());
+                assert!(n <= flat.len());
+                assert_eq!(&flat[..n], &w0[..]);
+                assert!(flat[n..].iter().all(|&b| b == 0));
+                // With a volume index baked in, the stream reads back to
+                // the same value.
+                let mut w7: Vec<u8> = Vec::new();
+                crate::voidstar::write_flat_to_writer_with_vol_idx(&mut w7, root, &schema, 7).unwrap();
+                assert_eq!(w7.len(), n);
+                let back = crate::voidstar::read_binary_with_hint(&w7, &schema, 7).unwrap();
+                assert_eq!(crate::voidstar::flatten_to_buffer(back, &schema).unwrap(), flat);
+            }
+            // Four times the depth must not cost far more than four times
+            // the time.
+            let time = |d: usize| {
+                let (root, schema) = build_ll(d);
+                let t = std::time::Instant::now();
+                for _ in 0..3 {
+                    let mut w: Vec<u8> = Vec::new();
+                    crate::voidstar::write_flat_to_writer(&mut w, root, &schema).unwrap();
+                }
+                t.elapsed()
+            };
+            let small = time(20_000);
+            let large = time(80_000);
+            assert!(large < small * 8, "write time grew from {small:?} to {large:?} for 4x the depth");
+        });
+    }
+
+    /// Random values of every shape stream to the same bytes the in-memory
+    /// flatten produces and read back, at either volume index, to the same
+    /// value.
+    #[test]
+    fn flat_writer_matches_flatten_on_random_values() {
+        let _shm = crate::init_test_shm();
+        let mut g = Gen(0x2545f4914f6cdd1d);
+        for schema_str in SHAPES {
+            let schema = parse_schema(schema_str).unwrap();
+            for _ in 0..40 {
+                let text = g.value(&schema, &schema, 0);
+                let ptr = crate::json::read_json_with_schema(&text, &schema).unwrap();
+                let flat = crate::voidstar::flatten_to_buffer(ptr, &schema).unwrap();
+                let printed = crate::json::voidstar_to_json_string(ptr, &schema).unwrap();
+                for vol in [0u16, 7] {
+                    let mut w: Vec<u8> = Vec::new();
+                    let n = crate::voidstar::write_flat_to_writer_with_vol_idx(&mut w, ptr, &schema, vol).unwrap();
+                    assert_eq!(n, w.len());
+                    if vol == 0 {
+                        assert_eq!(&flat[..n], &w[..], "{schema_str}: {text}");
+                    }
+                    let back = crate::voidstar::read_binary_with_hint(&w, &schema, vol).unwrap();
+                    assert_eq!(crate::json::voidstar_to_json_string(back, &schema).unwrap(), printed, "{schema_str}: {text} at vol {vol}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn msgpack_hash_and_deep_copy_are_flat_over_deep_chains() {
+        on_small_stack(|| {
+            let _shm = crate::init_test_shm();
+            for (root, schema) in [build_ll(DEPTH), build_tree(DEPTH), build_mutual(DEPTH), build_rose(DEPTH)] {
+                let flat = crate::voidstar::flatten_to_buffer(root, &schema).unwrap();
+                // Through msgpack and back to the same bytes.
+                let packed = crate::mpack::pack_with_schema(root, &schema).unwrap();
+                let back = crate::mpack::unpack_with_schema(&packed, &schema).unwrap();
+                assert_eq!(crate::voidstar::flatten_to_buffer(back, &schema).unwrap(), flat);
+                // The hash is a function of the value, not of where it lies.
+                let h = crate::cache::hash_voidstar_value(root, &schema, 0).unwrap();
+                assert_eq!(crate::cache::hash_voidstar_value(back, &schema, 0).unwrap(), h);
+                assert_ne!(crate::cache::hash_voidstar_value(root, &schema, 1).unwrap(), h);
+                // A deep copy into a fresh slot reproduces the value.
+                let dst = shm::shmalloc(schema.width).unwrap();
+                unsafe { crate::voidstar::deep_copy(root, dst, &schema).unwrap() };
+                assert_eq!(crate::voidstar::flatten_to_buffer(dst, &schema).unwrap(), flat);
+            }
+            // The hash of a chain one link shorter differs.
+            let (a, s) = build_ll(DEPTH);
+            let (b, _) = build_ll(DEPTH - 1);
+            assert_ne!(
+                crate::cache::hash_voidstar_value(a, &s, 0).unwrap(),
+                crate::cache::hash_voidstar_value(b, &s, 0).unwrap()
+            );
         });
     }
 
