@@ -245,8 +245,17 @@ rustTypeOf = f
     f (NamF _ (FV _ (CV s)) ps _) = nominalTypeName s ps
     -- Back-reference to a recursive record: resolve the concrete struct name
     -- via the concrete scope (the CVar slot is unreliable after weave).
+    -- A record the compiler would generate cannot refer to itself: its
+    -- fields would name a struct that does not exist yet, and the cycle
+    -- needs a box the user's own struct must place. Users must map such a
+    -- record to a Rust struct of their own.
+    f (RecF (FV _ (CV "struct"))) =
+      error $
+        "Recursive record without an explicit Rust concrete type mapping " ++
+        "is not yet supported. Add `record Rust => <Name> = \"<struct-name>\"` " ++
+        "in the morloc source."
     f (RecF (FV gv@(TV gvText) (CV cv)))
-      | cv /= "struct" && cv /= gvText = return (pretty cv)
+      | cv /= gvText = return (pretty cv)
       | otherwise = do
           cscope <- CMS.gets rsCScope
           case Map.lookup gv cscope of
@@ -1500,10 +1509,9 @@ generateRustVariants es = do
       userMapped <- cscopeDeclaresVariant gv cvText
       arms' <- mapM (\(n, ts) -> (,) n <$> mapM rustFieldType ts) arms
       name <- rustTypeOf (VariantF (FV gv (CV cvText)) ps arms)
-      let impls = RP.printVariantImpls name arms'
       return $ if userMapped
-                 then [impls]
-                 else [RP.printRustVariant name arms', impls]
+                 then [RP.printVariantImpls RP.userBox name arms']
+                 else [RP.printRustVariant name arms', RP.printVariantImpls RP.recBox name arms']
 
     cscopeDeclaresVariant :: TVar -> Text -> RustM Bool
     cscopeDeclaresVariant gv cvText = do
@@ -1999,11 +2007,14 @@ rustLowerConfig mask =
     -- instantiation `MyBox<i64>` included, where `MyBox<i64>::Ctor` is not.
     -- In PATTERN position that path is not stable Rust, so a pattern names
     -- the bare head (`MyBox::Ctor`); the subject's type pins the arguments.
+    -- The fields are converted into whatever box the arm declares, so one
+    -- spelling serves an enum the pool generates (RecBox) and one the user
+    -- wrote (Box).
     , lcVariantLit = \ty n _ xs ->
         let arm = "<" <> ty <> ">::" <> pretty n
         in if null xs
              then arm
-             else arm <> parens ("::std::boxed::Box::new" <> parens (RP.tupled1 xs))
+             else arm <> parens (parens (RP.tupled1 xs) <> ".into()")
     , lcEnumLit = \ty _ n _ -> "<" <> ty <> ">::" <> pretty n
     , lcVariantTagTest = \ty n _ subj ->
         "matches!" <> tupled [subj, RP.typeHead ty <> "::" <> pretty n <> " { .. }"]
@@ -2015,8 +2026,10 @@ rustLowerConfig mask =
     -- one projection per field against the same subject, so matching by
     -- value would move the payload on the first and leave the rest with
     -- nothing. Borrowing makes each projection independent; the clone is
-    -- what hands an owned value on from a borrowed place.
-    , lcCtorField = \ty n i subj ->
+    -- what hands an owned value on from a borrowed place. A field that is
+    -- itself a `data` value clones as a shared box, so a loop that walks a
+    -- spine by projection stays linear.
+    , lcCtorField = \ty n _ i subj ->
         "match" <+> "&" <> parens subj <+> "{"
           <+> RP.typeHead ty <> "::" <> pretty n <> "(mlc_b)"
           <+> "=> mlc_b." <> pretty i <> ".clone(),"

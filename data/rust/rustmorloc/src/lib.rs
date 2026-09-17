@@ -1636,6 +1636,214 @@ impl<T: FromVoidstar> FromVoidstar for Box<T> {
     }
 }
 
+// ---- RecBox (deferred-release cycle-break indirection) --------------------
+//
+// A generated `data` type holds each constructor's fields behind a `RecBox`,
+// and a generated record holds any field that mentions the record behind
+// one, so a value may hold its own type again at any depth. Dropping the last
+// owner of a deep chain would otherwise run one drop frame per level and
+// overflow the stack at a depth the heap could easily hold. While one drop is
+// draining, every further last-owner drop on the thread hands its block to
+// the drain's worklist and returns; the outermost drop pops and frees until
+// the list is empty. Depth then costs heap.
+//
+// The box is reference counted: cloning shares the pointee, which keeps a
+// projection out of a value (which clones the projected field) at a constant
+// cost instead of a copy of the whole subtree. Values never cross threads,
+// so a non-atomic count is enough.
+pub mod rec_drain {
+    use std::cell::Cell;
+
+    /// A block waiting to be freed: the raw `Rc` pointer and the function
+    /// that reconstitutes and drops it with its real type.
+    pub type Entry = (*mut u8, unsafe fn(*mut u8));
+
+    thread_local! {
+        static ACTIVE: Cell<bool> = const { Cell::new(false) };
+        // Allocated on first use and never freed, so no destructor runs at
+        // thread exit and the queue is usable while other thread-locals are
+        // being torn down.
+        static QUEUE: Cell<*mut Vec<Entry>> = const { Cell::new(std::ptr::null_mut()) };
+    }
+
+    pub enum State {
+        /// A drain is running on this thread: hand it the block.
+        Active,
+        /// No drain: this drop starts one.
+        Inactive,
+        /// Thread-local storage is gone (thread teardown): drop directly.
+        Unavailable,
+    }
+
+    pub fn state() -> State {
+        match ACTIVE.try_with(|a| a.get()) {
+            Ok(true) => State::Active,
+            Ok(false) => State::Inactive,
+            Err(_) => State::Unavailable,
+        }
+    }
+
+    /// Queue a block for the running drain. Fails only when the worklist
+    /// cannot grow; the caller then drops synchronously.
+    pub fn push(e: Entry) -> Result<(), ()> {
+        QUEUE
+            .try_with(|q| {
+                let mut p = q.get();
+                if p.is_null() {
+                    p = Box::into_raw(Box::new(Vec::new()));
+                    q.set(p);
+                }
+                // SAFETY: the queue is only ever touched from this thread and
+                // no reference to it is held across a drop call.
+                unsafe { (*p).try_reserve(1).map_err(|_| ())?; (*p).push(e); }
+                Ok(())
+            })
+            .unwrap_or(Err(()))
+    }
+
+    /// Marks a drain as running for its lifetime and drains the queue when
+    /// it ends, including while unwinding from a panic inside a drop.
+    pub struct Guard;
+
+    impl Guard {
+        pub fn begin() -> Guard {
+            let _ = ACTIVE.try_with(|a| a.set(true));
+            Guard
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let _ = QUEUE.try_with(|q| {
+                let p = q.get();
+                if p.is_null() {
+                    return;
+                }
+                // SAFETY: as in `push`; the entry is popped before its drop
+                // runs, and that drop may push more entries.
+                while let Some((ptr, f)) = unsafe { (*p).pop() } {
+                    // A panic in one block's drop must not escape a drop that
+                    // may itself be running during unwinding.
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { f(ptr) }));
+                }
+            });
+            let _ = ACTIVE.try_with(|a| a.set(false));
+        }
+    }
+}
+
+pub struct RecBox<T>(std::mem::ManuallyDrop<std::rc::Rc<T>>);
+
+impl<T> RecBox<T> {
+    pub fn new(v: T) -> Self {
+        RecBox(std::mem::ManuallyDrop::new(std::rc::Rc::new(v)))
+    }
+
+    /// The value, moved out when this is the only owner and copied
+    /// otherwise.
+    pub fn into_inner(self) -> T
+    where
+        T: Clone,
+    {
+        let mut me = std::mem::ManuallyDrop::new(self);
+        // SAFETY: `me` is never dropped, so the Rc is taken exactly once.
+        let rc = unsafe { std::mem::ManuallyDrop::take(&mut me.0) };
+        std::rc::Rc::try_unwrap(rc).unwrap_or_else(|rc| (*rc).clone())
+    }
+}
+
+impl<T> From<T> for RecBox<T> {
+    fn from(v: T) -> Self {
+        RecBox::new(v)
+    }
+}
+
+impl<T> std::ops::Deref for RecBox<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T> Clone for RecBox<T> {
+    fn clone(&self) -> Self {
+        RecBox(std::mem::ManuallyDrop::new(std::rc::Rc::clone(&self.0)))
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for RecBox<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        (**self).fmt(f)
+    }
+}
+
+impl<T: PartialEq> PartialEq for RecBox<T> {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+unsafe fn rec_drop_thunk<T>(p: *mut u8) {
+    drop(std::rc::Rc::from_raw(p as *const T));
+}
+
+impl<T> Drop for RecBox<T> {
+    fn drop(&mut self) {
+        // SAFETY: the field is taken exactly once, here.
+        let rc = unsafe { std::mem::ManuallyDrop::take(&mut self.0) };
+        // A shared block only loses this owner's count; the last owner
+        // frees it, and only that drop can recurse.
+        if std::rc::Rc::strong_count(&rc) != 1 {
+            drop(rc);
+            return;
+        }
+        match rec_drain::state() {
+            rec_drain::State::Active => {
+                let raw = std::rc::Rc::into_raw(rc) as *mut u8;
+                if rec_drain::push((raw, rec_drop_thunk::<T>)).is_err() {
+                    // SAFETY: `raw` came from `into_raw` just above.
+                    unsafe { rec_drop_thunk::<T>(raw) };
+                }
+            }
+            rec_drain::State::Inactive => {
+                let _g = rec_drain::Guard::begin();
+                drop(rc); // the pointee's RecBoxes queue rather than recurse
+            }
+            rec_drain::State::Unavailable => drop(rc),
+        }
+    }
+}
+
+// Transparent on the wire, exactly as Box.
+impl<T: ToVoidstar> ToVoidstar for RecBox<T> {
+    const IS_LEAF: bool = T::IS_LEAF;
+    fn shm_size(&self, schema: &Schema) -> usize {
+        (**self).shm_size(schema)
+    }
+    unsafe fn write(&self, dest: *mut u8, cursor: &mut *mut u8, schema: &Schema) {
+        (**self).write(dest, cursor, schema)
+    }
+    fn size_step(&self, w: &mut SizeWalk, schema: &Schema, idx: usize) {
+        (**self).size_step(w, schema, idx)
+    }
+    unsafe fn write_step(&self, w: &mut WriteWalk, dest: *mut u8, schema: &Schema, idx: usize) {
+        (**self).write_step(w, dest, schema, idx)
+    }
+}
+impl<T: FromVoidstar> FromVoidstar for RecBox<T> {
+    const IS_LEAF: bool = T::IS_LEAF;
+    unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self {
+        RecBox::new(T::read(schema, data, base))
+    }
+    unsafe fn read_step(w: &mut ReadWalk, schema: &Schema, data: *const u8, _idx: usize) {
+        w.push_finish::<Self>(schema, data);
+        w.child_step::<T>(schema, data);
+    }
+    unsafe fn read_finish(w: &mut ReadWalk, schema: &Schema, data: *const u8) -> Self {
+        RecBox::new(w.child_read::<T>(schema, data))
+    }
+}
+
 // ---- tuples ---------------------------------------------------------------
 macro_rules! tuple_impl {
     ($($T:ident $idx:tt),+) => {
@@ -2926,20 +3134,13 @@ mod tests {
     }
 
     // A recursive record `LL { head: Int, tail: ?LL }` -- exactly the shape the
-    // translator emits. Schema: &2LL m2 4head j 4tail ?^2LL. The Drop is
-    // iterative so a deep chain tests the walk, not the destructor.
+    // translator emits, cycle-break box included. Schema:
+    // &2LL m2 4head j 4tail ?^2LL. The default drop is iterative through
+    // RecBox, so a deep chain tests the walk and the release together.
     #[derive(Debug, PartialEq, Clone)]
     struct LL {
         head: i64,
-        tail: Option<Box<LL>>,
-    }
-    impl Drop for LL {
-        fn drop(&mut self) {
-            let mut next = self.tail.take();
-            while let Some(mut b) = next {
-                next = b.tail.take();
-            }
-        }
+        tail: Option<RecBox<LL>>,
     }
     impl ToVoidstar for LL {
         fn size_step(&self, w: &mut SizeWalk, schema: &Schema, _idx: usize) {
@@ -2956,12 +3157,12 @@ mod tests {
         unsafe fn read_step(w: &mut ReadWalk, schema: &Schema, data: *const u8, _idx: usize) {
             w.push_finish::<Self>(schema, data);
             w.child_step::<i64>(&schema.parameters[0], data.add(schema.offsets[0]));
-            w.child_step::<Option<Box<LL>>>(&schema.parameters[1], data.add(schema.offsets[1]));
+            w.child_step::<Option<RecBox<LL>>>(&schema.parameters[1], data.add(schema.offsets[1]));
         }
         unsafe fn read_finish(w: &mut ReadWalk, schema: &Schema, data: *const u8) -> Self {
             LL {
                 head: w.child_read::<i64>(&schema.parameters[0], data.add(schema.offsets[0])),
-                tail: w.child_read::<Option<Box<LL>>>(&schema.parameters[1], data.add(schema.offsets[1])),
+                tail: w.child_read::<Option<RecBox<LL>>>(&schema.parameters[1], data.add(schema.offsets[1])),
             }
         }
     }
@@ -2977,9 +3178,9 @@ mod tests {
             // 1 -> 2 -> 3 chain through the recursive optional (Box at cycles, I7).
             let chain = LL {
                 head: 1,
-                tail: Some(Box::new(LL {
+                tail: Some(RecBox::new(LL {
                     head: 2,
-                    tail: Some(Box::new(LL { head: 3, tail: None })),
+                    tail: Some(RecBox::new(LL { head: 3, tail: None })),
                 })),
             };
             assert_eq!(roundtrip::<LL>(SCHEMA, &chain), chain);
@@ -2988,7 +3189,7 @@ mod tests {
             // here each element's RecurScope::enter makes the back-ref resolve.
             let list = vec![
                 LL { head: 10, tail: None },
-                LL { head: 20, tail: Some(Box::new(LL { head: 21, tail: None })) },
+                LL { head: 20, tail: Some(RecBox::new(LL { head: 21, tail: None })) },
             ];
             assert_eq!(roundtrip::<Vec<LL>>(&format!("a{SCHEMA}"), &list), list);
         }
@@ -2998,12 +3199,14 @@ mod tests {
     // frame per level: the size, write and read passes must stay flat.
     #[test]
     fn deep_recursive_record() {
-        unsafe {
+        // Built, walked, counted and dropped on a thread whose stack could
+        // not hold one frame per level.
+        on_small_stack(|| unsafe {
             const SCHEMA: &str = "&2LLm24headj4tail?^2LL";
-            const DEPTH: i64 = 200_000;
+            const DEPTH: i64 = 1_000_000;
             let mut chain = LL { head: 0, tail: None };
             for i in 1..=DEPTH {
-                chain = LL { head: i, tail: Some(Box::new(chain)) };
+                chain = LL { head: i, tail: Some(RecBox::new(chain)) };
             }
             let got = roundtrip::<LL>(SCHEMA, &chain);
             let mut n = 0;
@@ -3015,7 +3218,93 @@ mod tests {
             assert_eq!(n, DEPTH);
             assert_eq!(got.head, DEPTH);
             assert_eq!(cur.head, 0);
+            // A shared tail: the chain is released through both owners.
+            let shared = LL { head: -1, tail: got.tail.clone() };
+            drop(got);
+            drop(shared);
+            drop(chain);
+        });
+    }
+
+    /// Run on a thread far smaller than any pool worker's, so a walk or a
+    /// drop that spends a frame per level fails here first.
+    fn on_small_stack<F: FnOnce() + Send + 'static>(f: F) {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    // The enum shape the translator emits for a payload-bearing `data`:
+    // every arm's fields behind one RecBox holding a tuple.
+    #[derive(Debug, PartialEq, Clone)]
+    enum Tree {
+        Leaf,
+        Node(RecBox<(i64, Tree, Tree)>),
+    }
+    impl ToVoidstar for Tree {
+        fn size_step(&self, w: &mut SizeWalk, schema: &Schema, _idx: usize) {
+            match self {
+                Self::Leaf => w.total += schema.width as isize,
+                Self::Node(mlc_b) => w.variant_payload(schema, &schema.parameters[1], mlc_b),
+            }
         }
+        unsafe fn write_step(&self, w: &mut WriteWalk, dest: *mut u8, schema: &Schema, _idx: usize) {
+            match self {
+                Self::Leaf => write_variant_nullary(dest, 0),
+                Self::Node(mlc_b) => w.variant_payload(dest, &schema.parameters[1], 1, mlc_b),
+            }
+        }
+    }
+    impl FromVoidstar for Tree {
+        unsafe fn read_step(w: &mut ReadWalk, schema: &Schema, data: *const u8, _idx: usize) {
+            w.push_finish::<Self>(schema, data);
+            match read_variant_tag(data) {
+                0 => {}
+                1 => {
+                    let p = w.payload_ptr(data);
+                    w.child_step::<RecBox<(i64, Tree, Tree)>>(&schema.parameters[1], p);
+                }
+                t => panic!("Tree: no constructor for tag {}", t),
+            }
+        }
+        unsafe fn read_finish(w: &mut ReadWalk, schema: &Schema, data: *const u8) -> Self {
+            match read_variant_tag(data) {
+                0 => Self::Leaf,
+                1 => {
+                    let p = w.payload_ptr(data);
+                    Self::Node(w.child_read::<RecBox<(i64, Tree, Tree)>>(&schema.parameters[1], p))
+                }
+                t => panic!("Tree: no constructor for tag {}", t),
+            }
+        }
+    }
+
+    #[test]
+    fn deep_recursive_variant() {
+        on_small_stack(|| unsafe {
+            const SCHEMA: &str = "&4Treev24Leaf04Node3i8^4Tree^4Tree";
+            const DEPTH: i64 = 1_000_000;
+            let mut chain = Tree::Leaf;
+            for i in 1..=DEPTH {
+                chain = Tree::Node(RecBox::new((i, Tree::Leaf, chain)));
+            }
+            let got = roundtrip::<Tree>(SCHEMA, &chain);
+            let mut n = 0;
+            let mut cur = &got;
+            while let Tree::Node(b) = cur {
+                n += 1;
+                cur = &b.2;
+            }
+            assert_eq!(n, DEPTH);
+            // Projecting the spine clones the box, not the subtree.
+            let tail = match &got { Tree::Node(b) => b.2.clone(), Tree::Leaf => Tree::Leaf };
+            drop(got);
+            drop(tail);
+            drop(chain);
+        });
     }
 
     // A recursive record whose compound fields have no back-reference of

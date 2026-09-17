@@ -463,9 +463,10 @@ data LowerConfig m = LowerConfig
   -- equality would compare payloads where a pattern must test the
   -- discriminant alone. Every backend asks a different way (@matches!@,
   -- @holds_alternative@, @isinstance@, @inherits@).
-  , lcCtorField :: MDoc -> Text -> Int -> MDoc -> MDoc
+  , lcCtorField :: MDoc -> Text -> Int -> Int -> MDoc -> MDoc
   -- ^ Read one field out of a value whose arm is already established: the
-  -- type's rendered spelling, the arm's name, the field's index, the subject.
+  -- type's rendered spelling, the arm's name, its tag, the field's index,
+  -- the subject.
   --
   -- Only ever emitted under a passing tag test, and unreachable from
   -- surface syntax -- a getter aimed at a `data` type is rejected, because
@@ -1219,10 +1220,15 @@ lowerNativeExprRaw cfg _ (EnumN_ t n i)
       ty <- nominalTypeDoc cfg t cv
       return $ defaultValue {poolExpr = lcEnumLit cfg ty names n i}
   | otherwise = error $ "constructor literal carries a non-enum type: " <> show (pretty t)
-lowerNativeExprRaw cfg _ (VariantN_ t n i xs)
+-- A constructor's fields are stored positions exactly as a tuple's are: an
+-- argument a borrowed variable supplies is cloned into its slot, so one
+-- variable can fill two fields.
+lowerNativeExprRaw cfg origExpr (VariantN_ t n i xs)
   | VariantF (FV _ cv) _ _ <- t = do
       ty <- nominalTypeDoc cfg t cv
-      return $ mergePoolDocs (lcVariantLit cfg ty n i) xs
+      let fieldEs = case origExpr of VariantN _ _ _ es -> es; _ -> []
+      xs' <- adaptOwnedElems cfg fieldEs xs >>= storeElems cfg fieldEs
+      return $ mergePoolDocs (lcVariantLit cfg ty n i) xs'
   | otherwise = error $ "constructor literal carries a non-variant type: " <> show (pretty t)
 -- The unit value. @UniS@ and @NullS@ share this node -- the wire form is
 -- the same absent-value byte -- but the native literal is not: a language
@@ -1408,10 +1414,10 @@ lowerNativeExprRaw cfg (IntrinsicN _ _ _ [subjectE, StrN _ n]) (IntrinsicN_ _ In
 -- established. Emitted only under that guard, and with no surface spelling.
 lowerNativeExprRaw cfg (IntrinsicN _ _ _ [subjectE, StrN _ n, IntN _ i]) (IntrinsicN_ _ IntrCtorField _ [subjectDocs, _, _]) =
   case typeFof subjectE of
-    t@(VariantF (FV _ cv) _ _) -> do
+    t@(VariantF (FV _ cv) _ arms) -> do
       ty <- nominalTypeDoc cfg t cv
       return $ mergePoolDocs
-        (const (lcCtorField cfg ty n (fromIntegral i) (poolExpr subjectDocs)))
+        (const (lcCtorField cfg ty n (armIndex n (map fst arms)) (fromIntegral i) (poolExpr subjectDocs)))
         [subjectDocs]
     t -> error $ "constructor field projection on a non-variant: " <> show (pretty t)
 lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrFSchema _ [pathDocs]) =

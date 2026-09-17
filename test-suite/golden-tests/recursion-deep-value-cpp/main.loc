@@ -1,11 +1,13 @@
--- A recursive `data` value of depth 30000 crosses a manifold boundary
+-- A recursive `data` value of depth 300000 crosses a manifold boundary
 -- (put_value / get_value) in the cpp pool. Both morloc functions are
 -- tail-recursive and run as native loops; what this pins is that the pool's
 -- (de)serializer walks the value without one machine-stack frame per level,
--- so the depth is bounded by memory rather than by the worker thread's stack.
--- The depth is kept under the pool's recursive destructor limit (C++
--- shared_ptr and Rust Box chains still unwind recursively).
-module main (chainCount)
+-- and that releasing the value afterwards does not either: the arms sit
+-- behind a pointer that hands a deep chain to an iterative drain. The
+-- depth is far past what one frame per level could survive on any thread.
+-- `sharedCount` releases a spine held by two owners, so the drain also sees
+-- a block whose count has to reach zero through the second owner.
+module main (chainCount, sharedCount)
 
 import root-cpp
 
@@ -22,3 +24,9 @@ spineCount | acc (Node _ _ r) = spineCount (acc + 1) r
 
 chainCount :: Int -> Int
 chainCount n = spineCount 0 (chainHelp n Leaf)
+
+share :: Tree -> Tree
+share t = Node 0 t t
+
+sharedCount :: Int -> Int
+sharedCount n = spineCount 0 (share (chainHelp n Leaf))

@@ -21,6 +21,7 @@
 #include <type_traits>
 
 #include "morloc.h"
+#include "mlc_rec.hpp"
 
 // ============================================================
 // Type traits for container dispatch
@@ -59,6 +60,9 @@ template<typename T> struct is_std_optional<std::optional<T>> : std::true_type {
 // shape and handles the wire-format relptr at the field's slot.
 template<typename T> struct is_std_shared_ptr : std::false_type {};
 template<typename T> struct is_std_shared_ptr<std::shared_ptr<T>> : std::true_type {};
+// A rec_ptr slot has the same wire form and the same surface (null ==
+// absent, `*p`, `p.get()`, assignable from a fresh shared_ptr).
+template<typename T> struct is_std_shared_ptr<mlc::rec_ptr<T>> : std::true_type {};
 
 template<typename T>
 inline constexpr bool is_non_vector_container_v =
@@ -88,6 +92,7 @@ template<typename T> struct is_pointer_shape : std::false_type {};
 template<typename T> struct is_pointer_shape<std::shared_ptr<T>> : std::true_type {};
 template<typename T> struct is_pointer_shape<std::unique_ptr<T>> : std::true_type {};
 template<typename T> struct is_pointer_shape<T*>                 : std::true_type {};
+template<typename T> struct is_pointer_shape<rec_ptr<T>>         : std::true_type {};
 
 // Pointer-shape traits. Primary intentionally undefined; only
 // recognized pointer kinds get specializations.
@@ -101,6 +106,16 @@ struct pointer_traits<std::shared_ptr<T>> {
     static std::shared_ptr<T> absent()                 { return nullptr; }
     static const T& deref(const std::shared_ptr<T>& p) { return *p; }
     static bool has_value(const std::shared_ptr<T>& p) { return p != nullptr; }
+};
+
+template<typename T>
+struct pointer_traits<rec_ptr<T>> {
+    using inner = T;
+    static rec_ptr<T> wrap(T&& v)              { return std::make_shared<T>(std::move(v)); }
+    static rec_ptr<T> wrap(const T& v)         { return std::make_shared<T>(v); }
+    static rec_ptr<T> absent()                 { return rec_ptr<T>(); }
+    static const T& deref(const rec_ptr<T>& p) { return *p; }
+    static bool has_value(const rec_ptr<T>& p) { return static_cast<bool>(p); }
 };
 
 template<typename T>

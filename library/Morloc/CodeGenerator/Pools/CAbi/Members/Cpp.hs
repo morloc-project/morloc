@@ -840,21 +840,23 @@ cppLowerConfig reifyThunks =
     -- Each arm is its own struct (two arms with the same field types must
     -- stay distinguishable), so a value is that struct braced-initialised
     -- and implicitly converted into the variant.
-    -- Each arm lives behind a shared_ptr inside the variant. That gives a
-    -- recursive arm a finite size and lets an arm holding another `data`
-    -- type need only a forward declaration, so declaration order between
-    -- two variants stops mattering.
+    -- Each arm lives behind a pointer inside the variant (a generated
+    -- type's `mlc::rec_ptr`, which releases a deep chain iteratively; a
+    -- user-mapped type's own `std::shared_ptr`). That gives a recursive arm
+    -- a finite size and lets an arm holding another `data` type need only
+    -- a forward declaration, so declaration order between two variants
+    -- stops mattering. The variant is built from a fresh shared_ptr, which
+    -- converts to exactly one alternative, and is read by position, which
+    -- is the wire tag for generated and user-mapped types alike.
     , lcVariantLit = \ty n _ xs ->
         let arm = CP.armName ty n
         in ty <> "{std::make_shared<" <> arm <> ">"
              <> parens (arm <> encloseSep "{" "}" ", " xs) <> "}"
     , lcEnumLit = \ty _ n _ -> ty <> "::" <> pretty n
-    , lcVariantTagTest = \ty n _ subj ->
-        "std::holds_alternative<std::shared_ptr<" <> CP.armName ty n <> ">>"
-          <> parens (parens subj <> ".v")
-    , lcCtorField = \ty n i subj ->
-        "std::get<std::shared_ptr<" <> CP.armName ty n <> ">>"
-          <> parens (parens subj <> ".v") <> "->f" <> pretty i
+    , lcVariantTagTest = \_ _ tag subj ->
+        parens (parens subj <> ".v.index() ==" <+> pretty tag)
+    , lcCtorField = \_ _ tag i subj ->
+        "std::get<" <> pretty tag <> ">" <> parens (parens subj <> ".v") <> "->f" <> pretty i
     , lcEnumTagTest = \ty _ n _ subj ->
         parens (subj <+> "==" <+> ty <> "::" <> pretty n)
     , lcCoerceOptional = \x -> "std::make_optional(" <> x <> ")"

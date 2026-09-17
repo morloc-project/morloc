@@ -467,7 +467,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
             if ldEnumLitByName desc
               then parens (subj <> "[[1]]" <+> "==" <+> dquotes (pretty n))
               else parens (parens subj <> "[0]" <+> "==" <+> dquotes (pretty n))
-        , lcCtorField = \_ _ i subj ->
+        , lcCtorField = \_ _ _ i subj ->
             if ldEnumLitByName desc
               -- R indexes from one, so a field's position is its wire index
               -- plus one; the wire index is what the compiler carries.

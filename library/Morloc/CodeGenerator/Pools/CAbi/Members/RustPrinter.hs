@@ -30,6 +30,8 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter
   , printRustEnum
   , printRustVariant
   , printVariantImpls
+  , recBox
+  , userBox
   , printEnumImpls
   , tupled1
   , ClosureMarshal (..)
@@ -442,6 +444,12 @@ printRustEnum name ctors =
 -- and mutual recursion (@A@ through @B@ back to @A@) has no single-type
 -- test that would find it.
 --
+-- The box is the runtime's @RecBox@, a reference-counted box whose drop
+-- hands a deep chain of arms to an iterative drain, so releasing a value
+-- costs heap rather than one frame per level, and whose clone shares the
+-- arm, so projecting a field out of a value costs a count rather than a
+-- copy of the subtree.
+--
 -- Deliberately NOT @Copy@ and NOT @#[repr(u8)]@, both of which the
 -- argument-free form carries. A box is not @Copy@, so deriving it would
 -- fail to compile on the first payload arm, and it must stay non-@Copy@ to
@@ -457,7 +465,7 @@ printRustVariant name arms =
     ]
   where
     armDecl c [] = pretty c <> ","
-    armDecl c ts = pretty c <> parens ("::std::boxed::Box<" <> tupled1 ts <> ">") <> ","
+    armDecl c ts = pretty c <> parens (recBox <> "<" <> tupled1 ts <> ">") <> ","
 
 -- | A one-element tuple needs its trailing comma or it is just parentheses.
 tupled1 :: [MDoc] -> MDoc
@@ -474,8 +482,21 @@ tupled1 ts = tupled ts
 -- are not part of the runtime crate's public surface.
 --
 -- A boxed payload marshals as the tuple inside it, since @Box@ delegates.
-printVariantImpls :: MDoc -> [(T.Text, [MDoc])] -> MDoc
-printVariantImpls name arms = vsep [toImpl, "", fromImpl]
+-- | The path of the box a generated enum's arms sit behind.
+recBox :: MDoc
+recBox = "::rustmorloc::RecBox"
+
+-- | The path of the box a user-written enum's arms sit behind: the plain
+-- standard box the mapped-type contract names, whose release recursion is
+-- the user's.
+userBox :: MDoc
+userBox = "::std::boxed::Box"
+
+-- | The marshalling impls of a payload-bearing @data@ type, with the box
+-- type its arms use (@recBox@ for an enum the pool generates, @userBox@ for
+-- one the user wrote).
+printVariantImpls :: MDoc -> MDoc -> [(T.Text, [MDoc])] -> MDoc
+printVariantImpls box name arms = vsep [toImpl, "", fromImpl]
   where
     idxArms = zip [0 :: Int ..] arms
 
@@ -484,7 +505,7 @@ printVariantImpls name arms = vsep [toImpl, "", fromImpl]
     -- generic instantiation the impl is written for.
     armPat c ts = "Self::" <> pretty c <> (if null ts then "" else "(mlc_b)")
     -- The payload's native type, as the enum declares it.
-    armTy ts = "::std::boxed::Box<" <> tupled1 ts <> ">"
+    armTy ts = box <> "<" <> tupled1 ts <> ">"
     -- The runtime range-checks a tag at the wire boundary, so reaching this
     -- arm means the value and its schema disagree: a bug, not bad input.
     -- Here the tag would otherwise index the arm list.

@@ -335,9 +335,11 @@ printRecordTemplate ts = encloseSep "<" ">" "," ts
 -- @std::variant<double, double>@ could not tell @Circle@ from @Radius@.
 --
 -- The wrapper is a struct rather than a bare alias so the type can be
--- forward-declared: a recursive arm holds @std::shared_ptr<T>@, and an alias
--- to @std::variant<...>@ cannot be named before its alternatives are
--- complete.
+-- forward-declared: a recursive arm holds the wrapper by value behind the
+-- variant's @mlc::rec_ptr@, and an alias to @std::variant<...>@ cannot be
+-- named before its alternatives are complete. The pointer is a
+-- @rec_ptr@ rather than a bare @std::shared_ptr@ so that releasing a deep
+-- chain of arms runs iteratively instead of one destructor frame per level.
 -- | The marshalling node of a generated type: the @MlcNode@ specialization
 -- with its three walk steps declared.
 --
@@ -399,7 +401,7 @@ printCppVariantDecl name arms =
     [ vsep ["struct" <+> armName name c <> ";" | (c, _) <- arms]
     , "struct" <+> name <+> "{"
     , indent 4 ("std::variant<"
-                  <> hsep (punctuate "," ["std::shared_ptr<" <> armName name c <> ">" | (c, _) <- arms])
+                  <> hsep (punctuate "," ["mlc::rec_ptr<" <> armName name c <> ">" | (c, _) <- arms])
                   <> "> v;")
     , "};"
     ]
@@ -436,7 +438,7 @@ printCppVariantSerializers name arms =
   where
     idxArms = zip [(0 :: Int) ..] arms
 
-    armPayload c = "*std::get<std::shared_ptr<" <> armName name c <> ">>(obj.v)"
+    armPayload i = "*std::get<" <> pretty i <> ">(obj.v)"
 
     sizeFn =
       vsep
@@ -449,8 +451,8 @@ printCppVariantSerializers name arms =
                     (if null ts
                        then "w.total += schema->width; break;"
                        else "w.variant_payload(schema, schema->parameters["
-                              <> pretty i <> "], " <> armPayload c <> "); break;")
-                | (i, (c, ts)) <- idxArms ]
+                              <> pretty i <> "], " <> armPayload i <> "); break;")
+                | (i, (_, ts)) <- idxArms ]
             , "}"
             ]
         , "}"
@@ -467,8 +469,8 @@ printCppVariantSerializers name arms =
                     (if null ts
                        then "write_variant_nullary(dest," <+> pretty i <> "); break;"
                        else "w.variant_payload(dest, schema->parameters["
-                              <> pretty i <> "]," <+> pretty i <> ", " <> armPayload c <> "); break;")
-                | (i, (c, ts)) <- idxArms ]
+                              <> pretty i <> "]," <+> pretty i <> ", " <> armPayload i <> "); break;")
+                | (i, (_, ts)) <- idxArms ]
             , "}"
             ]
         , "}"
