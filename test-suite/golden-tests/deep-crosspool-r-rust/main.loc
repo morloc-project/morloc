@@ -1,0 +1,34 @@
+-- A deep recursive value (depth 100000) crossing between an R pool and a
+-- Rust pool in both directions. The chain is built by a tail-recursive
+-- loop in one pool and counted by one in the other, so what is pinned is
+-- each pool's (de)serializer and the released value on both sides.
+module main (rToRust, rustToR)
+
+import root-r
+import root-rust
+
+data Tree = Leaf | Node Int Tree Tree
+
+chainR :: Int -> Tree -> Tree
+chainR n acc
+  ? n == 0 = acc
+  : chainR (n - 1) (Node 1 Leaf (idr acc))
+
+chainRust :: Int -> Tree -> Tree
+chainRust n acc
+  ? n == 0 = acc
+  : chainRust (n - 1) (Node 1 Leaf (idrust acc))
+
+countR :: Int -> Tree -> Int
+countR | acc (Node _ _ r) = countR (acc + 1) (idr r)
+       | acc _ = acc
+
+countRust :: Int -> Tree -> Int
+countRust | acc (Node _ _ r) = countRust (acc + 1) (idrust r)
+          | acc _ = acc
+
+rToRust :: Int -> Int
+rToRust n = countRust 0 (chainR n Leaf)
+
+rustToR :: Int -> Int
+rustToR n = countR 0 (chainRust n Leaf)

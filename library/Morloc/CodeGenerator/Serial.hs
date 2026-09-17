@@ -224,7 +224,8 @@ containsFunF _ = False
 --
 -- Stream handles are excluded deliberately. Their wire form is a tagged union
 -- carrying either a filesystem path, which cannot hold a NUL by POSIX rule, or
--- a bare slot id, which holds no string bytes.
+-- a bare slot id, which holds no string bytes. A back-reference is excluded
+-- too: the declaration it refers to is walked where it stands.
 serialAstHasString :: SerialAST -> Bool
 serialAstHasString (SerialString _) = True
 serialAstHasString (SerialList _ _ s) = serialAstHasString s
@@ -232,6 +233,8 @@ serialAstHasString (SerialTuple _ ss) = any serialAstHasString ss
 serialAstHasString (SerialObject _ _ _ rs) = any (serialAstHasString . snd) rs
 serialAstHasString (SerialPack _ (_, s)) = serialAstHasString s
 serialAstHasString (SerialOptional _ s) = serialAstHasString s
+serialAstHasString (SerialVariant _ _ arms) = any (any serialAstHasString . snd) arms
+serialAstHasString (SerialClosure captured _) = any serialAstHasString captured
 serialAstHasString _ = False
 
 encode64 :: Int -> String

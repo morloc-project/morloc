@@ -27,6 +27,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter
   , stripTypeParams
   , printRustStruct
   , printRecordImpls
+  , RecordFieldTypes(..)
   , printRustEnum
   , printRustVariant
   , printVariantImpls
@@ -638,6 +639,12 @@ data ClosureMarshal = ClosureMarshal
   , cmReflect :: MDoc -> MDoc    -- ^ a @ClosureOrigin@ slot-read expression -> the reflected @Rc<dyn MorlocFnN>@
   }
 
+-- | Whose field types a record's reader names: a generated struct's are the
+-- rendered ones; a user-written struct's are whatever the user declared, so
+-- the reader takes each from the struct itself (a user may hold a recursive
+-- field in a plain 'Box' or in the runtime's deferred-release box).
+data RecordFieldTypes = RenderedFieldTypes | StructFieldTypes
+
 -- | Emit @impl ToVoidstar/FromVoidstar@ for a record, marshalling each field in
 -- place at its schema offset (mirrors the hand-written LL template). Fields are
 -- (escaped-name, rendered-type, is-variable-width, closure-marshal). @params@ are
@@ -645,8 +652,8 @@ data ClosureMarshal = ClosureMarshal
 -- needs (`impl<T1: ToVoidstar> ToVoidstar for S<T1>`). Fully fixed-width records
 -- short-circuit the size step to @schema.width@. A function field carries a
 -- 'ClosureMarshal' and is reified/reflected instead of marshalled directly.
-printRecordImpls :: MDoc -> [MDoc] -> [(MDoc, MDoc, Bool, Maybe ClosureMarshal)] -> MDoc
-printRecordImpls name params fields = vsep [toImpl, "", fromImpl]
+printRecordImpls :: RecordFieldTypes -> MDoc -> [MDoc] -> [(MDoc, MDoc, Bool, Maybe ClosureMarshal)] -> MDoc
+printRecordImpls fieldTypes name params fields = vsep [toImpl, "", fromImpl]
   where
     idx = zip [0 :: Int ..] fields
     -- A closure field's wire form (ClosureOrigin) is variable-width, so a record
@@ -715,14 +722,20 @@ printRecordImpls name params fields = vsep [toImpl, "", fromImpl]
         ]
     -- A plain field's frame is for its own type; a closure field's is for the
     -- ClosureOrigin wire tuple its slot holds.
-    stepField (i, (_, t, _, Nothing)) =
-      "w.child_step::<" <> t <> ">(" <> fieldSchema i <> ", " <> fieldData i <> ");"
+    stepField (i, (f, t, _, Nothing)) = case fieldTypes of
+      RenderedFieldTypes ->
+        "w.child_step::<" <> t <> ">(" <> fieldSchema i <> ", " <> fieldData i <> ");"
+      StructFieldTypes ->
+        "w.child_step_for(" <> fieldSchema i <> ", " <> fieldData i <> ", |x: &Self| &x." <> f <> ");"
     stepField (i, (_, _, _, Just _)) =
       "w.child_step::<rustmorloc::ClosureOrigin>(" <> fieldSchema i <> ", " <> fieldData i <> ");"
     -- A plain field reads via the walk directly; a closure field reads its
     -- ClosureOrigin wire tuple off the slot and reflects it into a callable.
-    readField (i, (f, t, _, Nothing)) =
-      f <> ": w.child_read::<" <> t <> ">(" <> fieldSchema i <> ", " <> fieldData i <> "),"
+    readField (i, (f, t, _, Nothing)) = case fieldTypes of
+      RenderedFieldTypes ->
+        f <> ": w.child_read::<" <> t <> ">(" <> fieldSchema i <> ", " <> fieldData i <> "),"
+      StructFieldTypes ->
+        f <> ": w.child_read_for(" <> fieldSchema i <> ", " <> fieldData i <> ", |x: &Self| &x." <> f <> "),"
     readField (i, (f, _, _, Just cm)) =
       let slotRead =
             "w.child_read::<rustmorloc::ClosureOrigin>(" <> fieldSchema i <> ", " <> fieldData i <> ")"

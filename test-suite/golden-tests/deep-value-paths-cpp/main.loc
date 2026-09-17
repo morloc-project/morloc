@@ -1,0 +1,79 @@
+-- Every path a deep recursive value can take through the runtime, at a
+-- depth (100000) no per-level machine frame survives: the nexus JSON
+-- printer and the JSON argument loader (from a file and from stdin), the
+-- on-disk packet writer at both compression settings and the packet
+-- argument loader (mapped uncompressed, decompressed otherwise), a chain
+-- of two mutually recursive types, and a parameterized type at two
+-- instantiations, whose back-references must resolve to their own
+-- instantiation. Every morloc function is tail recursive, so the values
+-- are built and consumed by native loops; what is pinned is the runtime.
+module main (chain, count, altCount, listIntLen, listStrLen)
+
+import root-cpp
+
+data Tree = Leaf | Node Int Tree Tree
+
+chainHelp :: Int -> Tree -> Tree
+chainHelp n acc
+  ? n == 0 = acc
+  : chainHelp (n - 1) (Node 1 Leaf acc)
+
+chain :: Int -> Tree
+chain n = chainHelp n Leaf
+
+spineCount :: Int -> Tree -> Int
+spineCount | acc (Node _ _ r) = spineCount (acc + 1) r
+           | acc _ = acc
+
+count :: Tree -> Int
+count t = spineCount 0 t
+
+data AltA = ALeaf | ANode Int AltB
+data AltB = BLeaf | BNode Int AltA
+
+buildA :: Int -> AltA -> AltA
+buildA n acc
+  ? n == 0 = acc
+  : buildB (n - 1) (BNode 1 acc)
+
+buildB :: Int -> AltB -> AltA
+buildB n acc
+  ? n == 0 = ANode 1 acc
+  : buildA (n - 1) (ANode 1 acc)
+
+countA :: Int -> AltA -> Int
+countA | acc (ANode v b) = countB (acc + v) b
+       | acc _ = acc
+
+countB :: Int -> AltB -> Int
+countB | acc (BNode v a) = countA (acc + v) a
+       | acc _ = acc
+
+altCount :: Int -> Int
+altCount n = countA 0 (buildA n ALeaf)
+
+data Seq a = Nil | Cons a (Seq a)
+
+buildInts :: Int -> Seq Int -> Seq Int
+buildInts n acc
+  ? n == 0 = acc
+  : buildInts (n - 1) (Cons n acc)
+
+buildStrs :: Int -> Seq Str -> Seq Str
+buildStrs n acc
+  ? n == 0 = acc
+  : buildStrs (n - 1) (Cons "s" acc)
+
+lenInts :: Int -> Seq Int -> Int
+lenInts | acc (Cons _ r) = lenInts (acc + 1) r
+        | acc _ = acc
+
+lenStrs :: Int -> Seq Str -> Int
+lenStrs | acc (Cons _ r) = lenStrs (acc + 1) r
+        | acc _ = acc
+
+listIntLen :: Int -> Int
+listIntLen n = lenInts 0 (buildInts n Nil)
+
+listStrLen :: Int -> Int
+listStrLen n = lenStrs 0 (buildStrs n Nil)

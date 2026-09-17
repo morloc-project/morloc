@@ -227,17 +227,9 @@ const WORKER_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 
 // ── Worker thread ────────────────────────────────────────────────────────────
 
-// Stack of a worker thread. A recursive `data` or record value still costs
-// one machine frame per level in a few places: the bounded size walk in
-// ffi.rs (about 1.2 MiB at the 64 KiB inline threshold on x86_64) and the
-// C++ shared_ptr / Rust Box destructor chains (32-65 B per level on x86_64
-// glibc, more on arm64 and under libc++, which do not inline the release
-// path). All three overflow the 2 MiB std default on macOS at depths that
-// pass on Linux. Matching the 8 MiB main-thread default gives a worker the
-// depth an ordinary program gets; only address space is reserved, pages are
-// committed as touched. RUST_MIN_STACK, when set, is honoured unchanged
-// (std applies it when no size is given).
-const WORKER_STACK_SIZE: usize = 8 << 20;
+// A worker runs on the std default stack (RUST_MIN_STACK overrides it). No
+// operation on a value spends a machine frame per level of the value, so
+// the stack bounds the recursion of user code only.
 
 // Alternate signal stack of a worker thread. Without one, a stack overflow in
 // the worker cannot run the process's SIGSEGV handler at all: the kernel has
@@ -278,11 +270,7 @@ impl Drop for AltStack {
 unsafe fn spawn_worker(queue: &Arc<JobQueue>, config: &PoolConfig) -> std::io::Result<std::thread::JoinHandle<()>> {
     let q = Arc::clone(queue);
     let cfg = ptr::read(config); // Copy config for thread
-    let mut builder = std::thread::Builder::new();
-    if std::env::var_os("RUST_MIN_STACK").is_none() {
-        builder = builder.stack_size(WORKER_STACK_SIZE);
-    }
-    builder.spawn(move || {
+    std::thread::Builder::new().spawn(move || {
         let _altstack = AltStack::install();
         worker_loop(&q, &cfg);
     })

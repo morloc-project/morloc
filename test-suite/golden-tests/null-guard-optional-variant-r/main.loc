@@ -1,0 +1,42 @@
+-- The NUL guard at the R boundary sees every string a value can hold: one
+-- behind an optional, one in a constructor's payload, and one at the
+-- bottom of a recursive chain, each located by a path. The values are
+-- built in Python, which is the path the nexus argument scanner never
+-- sees, and the chain is deep enough that a guard walking one frame per
+-- link would need more stack than a worker has. A NUL in a deep argument
+-- given on the command line is caught by the nexus scanner instead.
+module main (optR, tagR, chainR, deepArgR, cleanOptR, cleanTagR)
+
+import root-py
+import root-r
+
+data Tag = Plain | Named Str
+
+record Link = Link { label :: Str, next :: ?Link }
+record R => Link = "list"
+record Py => Link = "dict"
+
+source Py from "mk.py" ("in_opt", "in_tag", "in_chain", "clean_opt", "clean_tag")
+in_opt :: Str -> ?Str
+in_tag :: Str -> Tag
+in_chain :: Str -> Int -> Link
+clean_opt :: Str -> ?Str
+clean_tag :: Str -> Tag
+
+optR :: Str -> ?Str
+optR s = idr (in_opt s)
+
+tagR :: Str -> Tag
+tagR s = idr (in_tag s)
+
+chainR :: Str -> Int -> Link
+chainR s n = idr (in_chain s n)
+
+deepArgR :: Link -> Link
+deepArgR = idr
+
+cleanOptR :: Str -> ?Str
+cleanOptR s = idr (clean_opt s)
+
+cleanTagR :: Str -> Tag
+cleanTagR s = idr (clean_tag s)

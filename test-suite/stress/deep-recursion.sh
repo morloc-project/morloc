@@ -13,7 +13,7 @@
 # printed so a fix is visible as a change in this suite's output.
 #
 # Usage: ./deep-recursion.sh
-#   MORLOC_TEST_LEVEL=long        depth 100000 instead of 10000
+#   MORLOC_TEST_LEVEL=long        depth 1000000 instead of 10000
 #   MORLOC_STRESS_LANGS="py cpp"  restrict the single-pool instances
 #
 # Runs with the user's default limits: no RUST_MIN_STACK, no ulimit changes.
@@ -32,7 +32,7 @@ fi
 
 LANGS="${MORLOC_STRESS_LANGS:-py cpp r rust}"
 case "${MORLOC_TEST_LEVEL:-short}" in
-    long) DEPTH=100000 ;;
+    long) DEPTH=1000000 ;;
     *)    DEPTH=10000 ;;
 esac
 # Non-tail recursion is bounded by the host stack in every language (R's
@@ -40,7 +40,8 @@ esac
 NONTAIL=200
 ROSE=100
 # Each nested cross-pool call parks a worker; see issue 93. Kept shallow so
-# the case passes and stays quick.
+# the case passes and stays quick; the long level runs the depth at which
+# the parked workers deadlock, which costs its timeout.
 PINGPONG=50
 RUN_TIMEOUT=120
 
@@ -53,41 +54,15 @@ fi
 PASSED=0 FAILED=0 XFAILED=0 XPASSED=0
 PROBLEMS=()
 
-# The depth at which a pool's value can no longer be freed: a chain's
-# shared_ptr (C++) or Box (Rust) links unwind one destructor frame per level
-# on the 2 MiB worker stack. Python and R free deep values iteratively. The
-# (de)serializers themselves walk without recursion (issue 89), so up to this
-# depth a tail loop's value crosses a manifold boundary at any size.
-drop_limit() {
-    case "$1" in
-        cpp)  echo 65000 ;;
-        *)    echo 0 ;;
-    esac
-}
-# Projecting a field out of a Rust value clones the projected subtree, and
-# the derived Clone recurses one frame per level (issue 91); it gives out
-# before Rust's own destructor limit would.
-clone_limit() {
-    case "$1" in
-        rust) echo 30000 ;;
-        *)    echo 0 ;;
-    esac
-}
-
-# Print the issue that explains a failure of this case, or nothing.
+# Print the issue that explains a failure of this case, or nothing. A value
+# built by a tail loop crosses every boundary, is printed, parsed and freed
+# without one frame per level in any language, so only the nested
+# cross-pool call has a depth bound.
 expected_failure() {
     local module=$1 fn=$2 depth=$3
     case "$module:$fn" in
-        rust:chainCount|rust:chainReverse|rust:altCount)
-            (( depth >= $(clone_limit rust) )) && echo "#91" ;;
-        cpp:chainCount|cpp:chainReverse|cpp:altCount)
-            (( depth >= $(drop_limit cpp) )) && echo "recursive-destructor" ;;
-        py:roundtrip)
-            (( depth >= 6000 )) && echo "#92" ;;
-        cross:cppToPy|cross:pyToCpp)
-            (( depth >= $(drop_limit cpp) )) && echo "recursive-destructor" ;;
         cross:pingPong)
-            (( depth >= 300 )) && echo "#93" ;;
+            (( depth >= 2000 )) && echo "#93" ;;
     esac
     return 0
 }
@@ -171,7 +146,7 @@ if [[ " ${BUILT[*]} " == *" cross "* ]]; then
     run_case cross pingPongTree "$PINGPONG" "$PINGPONG"
     run_case cross pingPong     "$PINGPONG" "$PINGPONG"
     if [[ "${MORLOC_TEST_LEVEL:-short}" == long ]]; then
-        run_case cross pingPong 300 300
+        run_case cross pingPong 2000 2000
     fi
 fi
 

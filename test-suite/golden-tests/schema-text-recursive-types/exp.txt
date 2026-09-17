@@ -1,0 +1,10 @@
+ll &2LLm24headj4tail?^2LL
+tree &4Treem25valuej8childrena^4Tree
+node &4Nodev24Leaf06Branch3j^4Node^4Node
+alt &4AltAv25ALeaf05ANode2jv25BLeaf05BNode2j^4AltA
+rose &4Rosev14Rose2ja^4Rose
+ints &3Seqv23Nil04Cons2j^3Seq
+strs &3Seqv23Nil04Cons2s^3Seq
+nested &2T7m25value&4T7#1m25valuej8childrena^4T7#18childrena^2T7
+{"value":{"value":1,"children":[{"value":2,"children":[]}]},"children":[{"value":{"value":3,"children":[]},"children":[]}]}
+{"ANode":[1,{"BNode":[2,{"ANode":[3,"BLeaf"]}]}]}

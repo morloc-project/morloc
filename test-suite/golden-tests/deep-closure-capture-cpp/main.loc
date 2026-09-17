@@ -1,0 +1,29 @@
+-- A closure that captures a deep recursive value (depth 100000) crosses
+-- from the C++ pool that built it to a Python function that applies it.
+-- The capture travels with the closure, once inline in the packet and
+-- once through shared memory, so the walkers that size, flatten and read
+-- it back see the whole chain. The chain is built and counted by
+-- tail-recursive loops in C++.
+module main (capturedCount)
+
+import root-cpp
+import root-py
+
+source Py from "apply.py" ("apply_twice" as applyTwice)
+applyTwice :: (Int -> Int) -> Int -> Int
+
+data Tree = Leaf | Node Int Tree Tree
+
+chainHelp :: Int -> Tree -> Tree
+chainHelp n acc
+  ? n == 0 = acc
+  : chainHelp (n - 1) (Node 1 Leaf (idcpp acc))
+
+spineCount :: Int -> Tree -> Int
+spineCount | acc (Node _ _ r) = spineCount (acc + 1) (idcpp r)
+           | acc _ = acc
+
+capturedCount :: Int -> Int
+capturedCount n =
+  let t = chainHelp n Leaf
+  in applyTwice (\k -> spineCount k t) 0

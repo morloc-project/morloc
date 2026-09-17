@@ -1146,6 +1146,22 @@ impl ReadWalk {
         }
     }
 
+    /// As `child_step`, with the child's type taken from a field of the
+    /// parent struct rather than spelled out: a user-written struct chooses
+    /// its own field types, and its generated reader follows them.
+    pub fn child_step_for<S, T: FromVoidstar>(&mut self, schema: &Schema, data: *const u8, _field: fn(&S) -> &T) {
+        self.child_step::<T>(schema, data)
+    }
+
+    /// As `child_read`, with the child's type taken from a field of the
+    /// parent struct.
+    ///
+    /// # Safety
+    /// As for `FromVoidstar::read`.
+    pub unsafe fn child_read_for<S, T: FromVoidstar>(&mut self, schema: &Schema, data: *const u8, _field: fn(&S) -> &T) -> T {
+        self.child_read::<T>(schema, data)
+    }
+
     pub fn resume(&mut self, idx: usize) {
         if let ReadFrame::Step { step, schema, data, .. } = self.cur {
             self.stack.push(ReadFrame::Step { step, schema, data, idx, env_pushed: true });

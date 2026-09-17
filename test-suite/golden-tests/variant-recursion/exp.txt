@@ -16,5 +16,8 @@
 6
 --- totalViaRust ---
 6
+--- sameArmPayloads ---
+{"Up":[{"Node":[2,"Leaf","Leaf"]}]}
+{"Down":[{"Node":[2,"Leaf","Leaf"]}]}
 --- rejectsDanglingArity ---
 OK

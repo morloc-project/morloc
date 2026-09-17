@@ -281,8 +281,31 @@ unsafe fn check_string(ptr: AbsPtr, base: *const c_void, path: &mut String) -> O
         None
     } else {
         let offset = (hit as usize) - (abs as usize);
-        Some(format!("{} (byte {} of {})", path, offset, arr.size))
+        Some(format!("{} (byte {} of {})", abbreviate(path), offset, arr.size))
     }
+}
+
+/// A path with its middle elided when it is too long to read: a NUL at the
+/// bottom of a deep chain would otherwise be reported through a path as
+/// long as the chain, whose end, the part that names the slot, is the part
+/// a bounded message buffer cuts off.
+fn abbreviate(path: &str) -> String {
+    const KEEP: usize = 96;
+    if path.len() <= 3 * KEEP {
+        return path.to_string();
+    }
+    let starts_segment = |c: char| c == '.' || c == '[';
+    let floor = |mut i: usize| {
+        while !path.is_char_boundary(i) {
+            i -= 1;
+        }
+        i
+    };
+    let head_end = path[..floor(KEEP)].rfind(starts_segment).unwrap_or(floor(KEEP));
+    let tail_from = floor(path.len() - KEEP);
+    let tail_start = tail_from + path[tail_from..].find(starts_segment).unwrap_or(0);
+    let elided = path[head_end..tail_start].chars().filter(|&c| starts_segment(c)).count();
+    format!("{}[..{} segments..]{}", &path[..head_end], elided, &path[tail_start..])
 }
 
 #[cfg(test)]
@@ -401,7 +424,12 @@ mod tests {
             text.push_str(&"}".repeat(depth));
             let ptr = crate::json::read_json_with_schema(&text, &s).unwrap();
             let path = unsafe { first_null(ptr, &s) }.expect("NUL at the bottom");
-            assert!(path.ends_with(".head (byte 1 of 2)"), "{}", &path[path.len() - 40..]);
+            // The middle of the path is elided, so the slot's name and the
+            // NUL's position fit any message buffer.
+            assert!(path.len() < 400, "{}", path.len());
+            assert!(path.starts_with(".tail(some).tail(some)"), "{path}");
+            assert!(path.contains("(some)[..99984 segments..].tail(some)"), "{path}");
+            assert!(path.ends_with(".tail(some).head (byte 1 of 2)"), "{path}");
         });
     }
 
