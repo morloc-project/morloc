@@ -2081,6 +2081,7 @@ rustLowerConfig mask =
     , lcDebugWrap = \_ _ body -> return body
     , lcMakeLet = rustMakeLet
     , lcReleaseStmt = \_ -> ""
+    , lcReleaseBorrowedStmt = \_ -> ""
     , lcReturn = \e -> "return" <+> e <> ";"
     , lcMakeIf = rustMakeIf
     , lcMakeLoop = rustMakeLoop

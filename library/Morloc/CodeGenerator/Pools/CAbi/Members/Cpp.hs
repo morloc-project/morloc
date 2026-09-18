@@ -967,7 +967,8 @@ PROPAGATE_ERROR(errmsg)|]
           (Just t) -> cppTypeOf t
           Nothing -> return serialType
         return $ makeLet namer letIndex typestr (isUnitTypeF mt) borrowSafe e1 e2
-    , lcReleaseStmt = \v -> "_release_packet_shm(" <> pretty v <> ");"
+    , lcReleaseStmt = \v -> "_release_packet(" <> pretty v <> ", true);"
+    , lcReleaseBorrowedStmt = \v -> "_release_packet(" <> pretty v <> ", false);"
     , lcReturn = \e -> "return(" <> e <> ");"
     , lcMakeLoop = \ids body -> do
         -- Native tail-loop. Walk the 'LoopBody' tree into C++ control flow. The

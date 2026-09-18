@@ -205,7 +205,7 @@ static void _shm_tracker_flush() {
 }
 
 // Drop one tracker entry matching ptr (swap-with-last) and shfree the
-// block. Used by _release_packet_shm to free
+// block. Used by _release_packet to free
 // a _put_value-tracked packet's SHM as soon as its codegen-determined
 // scope ends, rather than waiting for the next dispatch flush.
 static bool _shm_tracker_release_one(absptr_t ptr) {
@@ -222,22 +222,33 @@ static bool _shm_tracker_release_one(absptr_t ptr) {
     return false;
 }
 
-// Release the SHM ref owned by a _put_value-produced packet. The codegen
-// inserts this call at the end of a serialize let's scope so the tracker
-// entry is dropped as soon as the packet is no longer needed. No-op for
-// inline (non-RPTR) packets, so callers can invoke unconditionally.
-static void _release_packet_shm(const uint8_t* packet) {
+// Finish with a packet: give back the shared memory it names, if it
+// names any, and free the packet itself when nothing built from it can
+// still be reading it. The codegen inserts this call where a packet's
+// scope ends, which is the last moment anything can know the packet is
+// done with -- a pool answering requests for as long as it is asked to
+// has no later one.
+//
+// `owned` is false where the value read out of the packet is a function
+// value. A function value that came from another pool carries the
+// packets of whatever it captured, so that it can be applied later or
+// handed on again; those bytes are the packet's. Every other value is
+// read out into storage of its own. Callers may invoke this
+// unconditionally.
+static void _release_packet(const uint8_t* packet, bool owned) {
     if (packet == nullptr) return;
     const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
-    if (hdr->command.data.source != PACKET_SOURCE_RPTR) return;
-    size_t relptr = *(size_t*)(packet
-        + sizeof(morloc_packet_header_t) + hdr->offset);
-    char* resolve_err = NULL;
-    void* voidstar = rel2abs(relptr, &resolve_err);
-    if (resolve_err) { free(resolve_err); resolve_err = NULL; }
-    if (voidstar) {
-        _shm_tracker_release_one((absptr_t)voidstar);
+    if (hdr->command.data.source == PACKET_SOURCE_RPTR) {
+        size_t relptr = *(size_t*)(packet
+            + sizeof(morloc_packet_header_t) + hdr->offset);
+        char* resolve_err = NULL;
+        void* voidstar = rel2abs(relptr, &resolve_err);
+        if (resolve_err) { free(resolve_err); resolve_err = NULL; }
+        if (voidstar) {
+            _shm_tracker_release_one((absptr_t)voidstar);
+        }
     }
+    if (owned) free((void*)packet);
 }
 
 // Transforms a serialized value into a message ready for the socket. A

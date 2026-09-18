@@ -1,0 +1,23 @@
+module main (steady)
+
+import root
+import root-cpp
+import root-py
+
+-- A pool that answers many calls must not grow with the number of them.
+-- Each step here fetches a batch of readings from python and reduces it
+-- in C++, so every step sends a packet and receives one; after thousands
+-- of steps the pool should be no larger than after a handful.
+--
+-- `peakMiB` takes the run's result as its argument: it is what makes the
+-- measurement happen after the run.
+
+source Py from "src.py" ("readings")
+source Cpp from "src.hpp" ("total" as totalCpp, "peakMiB")
+
+readings :: Int -> [Int]
+totalCpp :: [Int] -> Int
+peakMiB :: Int -> Int
+
+steady :: Int -> Int
+steady n = peakMiB (sum (map (\i -> totalCpp (readings i)) (range 0 n)))

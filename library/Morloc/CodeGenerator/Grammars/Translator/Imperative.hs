@@ -88,7 +88,7 @@ import Morloc.CodeGenerator.Grammars.Common
   )
 import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..))
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (isSerializable, serialAstHasString, serialAstToMsgpackSchema)
+import Morloc.CodeGenerator.Serial (containsFunF, isSerializable, serialAstHasString, serialAstToMsgpackSchema)
 import Morloc.Data.Doc
 import Morloc.Monad (IndexState)
 
@@ -571,12 +571,19 @@ data LowerConfig m = LowerConfig
   -- a RHS by reference to avoid copying the projected sub-value; members for
   -- which this is meaningless ignore it.
   , lcReleaseStmt :: Text -> MDoc
-  -- ^ Produce a statement releasing the SHM owned by a serialize-let-bound
-  -- packet variable. Called at the end of a serialize let's body so the
-  -- per-call SHM tracker entry can be dropped as soon as the body finishes
-  -- using the packet, rather than accumulating until the next dispatch flush.
-  -- For inline packets (no SHM), the runtime function this targets is a
-  -- no-op, so emitting the call unconditionally is safe.
+  -- ^ Produce a statement finishing with a let-bound packet variable:
+  -- releasing the shared memory it owns, and, for a member that manages
+  -- its own packet buffers, freeing the buffer too. Called at the end of
+  -- the let's body, so what the packet holds is given back as soon as the
+  -- body is done with it rather than accumulating until the next dispatch
+  -- flush. For inline packets (no SHM), the runtime function this targets
+  -- is a no-op on that half, so emitting the call unconditionally is safe.
+  , lcReleaseBorrowedStmt :: Text -> MDoc
+  -- ^ As 'lcReleaseStmt', for a packet whose bytes the value read out of
+  -- it still refers to. A function value from another pool is the case
+  -- that matters: it carries the packets of whatever it captured, so that
+  -- it can be applied later or passed on. Only the shared memory is given
+  -- back; the buffer stays.
   , lcReturn :: MDoc -> MDoc
   , lcMakeIf :: NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> m PoolDocs
   -- ^ origExpr, condDocs, thenDocs, elseDocs -> result PoolDocs
@@ -1041,6 +1048,15 @@ lowerNativeExpr cfg origExpr ne = lowerNativeExprRaw cfg origExpr ne
 -- back, so releasing it here would free what the caller is about to read.
 -- Ownership passes outward instead, and the dispatch boundary releases it
 -- with everything else it holds.
+-- | How to finish with a packet, given the type of the value read out of
+-- it. A function value keeps the packets of whatever it captured, so its
+-- packet's bytes are still in use; anything else has been read into
+-- storage of its own.
+releaseStmtFor :: LowerConfig m -> TypeF -> Text -> MDoc
+releaseStmtFor cfg t
+  | containsFunF t = lcReleaseBorrowedStmt cfg
+  | otherwise = lcReleaseStmt cfg
+
 bodyIsBoundVar :: Int -> PoolDocs -> Bool
 bodyIsBoundVar i body = render (poolExpr body) == render (svarNamer i)
 
@@ -1146,7 +1162,7 @@ lowerNativeExprRaw cfg (SerialLetN _ (SerializeS _ _) body) (SerialLetN_ i x1 x2
     else do
       tmpIdx <- lcNewIndex cfg
       let bodyT = typeFof body
-          releaseLine = lcReleaseStmt cfg (render (svarNamer i))
+          releaseLine = releaseStmtFor cfg bodyT (render (svarNamer i))
           releaseBody =
             defaultValue
               { poolExpr = helperNamer tmpIdx
@@ -1165,7 +1181,7 @@ lowerNativeExprRaw cfg (SerialLetN _ (AppPoolS _ _ _) body) (SerialLetN_ i x1 x2
   letResult <- lcMakeLet cfg svarNamer i Nothing False x1 x2
   tmpIdx <- lcNewIndex cfg
   let bodyT = typeFof body
-      releaseLine = lcReleaseStmt cfg (render (svarNamer i))
+      releaseLine = releaseStmtFor cfg bodyT (render (svarNamer i))
       releaseBody =
         defaultValue
           { poolExpr = helperNamer tmpIdx

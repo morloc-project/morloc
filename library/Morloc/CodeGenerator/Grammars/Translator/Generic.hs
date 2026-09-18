@@ -536,6 +536,9 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         , lcMakeLoop = genericMakeLoop desc cfg
         , lcMakeLet = \namer i _ _ e1 e2 -> return $ genericMakeLet desc namer i e1 e2
         , lcReleaseStmt = \v -> pretty (ldReleasePacketFn desc) <> "(" <> pretty v <> ")"
+        -- The packet buffer is the language's to manage, so there is
+        -- nothing to hold back.
+        , lcReleaseBorrowedStmt = \v -> pretty (ldReleasePacketFn desc) <> "(" <> pretty v <> ")"
         , lcReturn = \e -> pretty $ substituteT (ldReturnTemplate desc) [("expr", render e)]
         , lcMakeDoBlock = genericMakeDoBlock desc cfg
         , lcMakeTry = genericMakeTry desc
