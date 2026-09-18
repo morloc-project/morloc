@@ -415,6 +415,58 @@ fn track(ptr: *mut c_void) {
     });
 }
 
+/// Finish with a packet: give back the shared memory it names, if it
+/// names any, and free the packet itself when nothing built from it can
+/// still be reading it. The codegen inserts this call where a packet's
+/// scope ends, which is the last moment anything can know the packet is
+/// done with -- a pool answering requests for as long as it is asked to
+/// has no later one.
+///
+/// `owned` is false where the value read out of the packet is a function
+/// value, which carries the packets of whatever it captured so that it
+/// can be applied later or handed on again; those bytes are the packet's.
+/// Every other value is read out into storage of its own.
+///
+/// # Safety
+/// `packet` must be a packet this manifold owns and has finished reading.
+pub unsafe fn release_packet(packet: *const u8, owned: bool) {
+    if packet.is_null() {
+        return;
+    }
+    if *packet.add(PKT_SOURCE_OFF) == PKT_SOURCE_RPTR {
+        let offset = core::ptr::read_unaligned(packet.add(PKT_OFFSET_OFF) as *const u32) as usize;
+        let relptr = core::ptr::read_unaligned(packet.add(PKT_HEADER_SIZE + offset) as *const isize);
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let block = rel2abs(relptr, &mut err);
+        discard_err(err);
+        if !block.is_null() {
+            release_tracked(block);
+        }
+    }
+    if owned {
+        libc::free(packet as *mut c_void);
+    }
+}
+
+/// Drop one tracker entry for this block and give its reference back.
+/// Anything not tracked here belongs to someone else and is left alone.
+unsafe fn release_tracked(block: *mut c_void) {
+    let found = SHM_TRACKER.with(|t| {
+        let mut v = t.0.take();
+        let hit = v.iter().position(|p| *p == block);
+        if let Some(i) = hit {
+            v.swap_remove(i);
+        }
+        t.0.set(v);
+        hit.is_some()
+    });
+    if found {
+        let mut err: *mut c_char = std::ptr::null_mut();
+        shfree(block, &mut err);
+        discard_err(err);
+    }
+}
+
 /// Free all deferred SHM blocks from the previous dispatch. Generated
 /// `local_dispatch`/`remote_dispatch` call this at entry (cpp: pool.cpp:979).
 pub fn dispatch_flush() {

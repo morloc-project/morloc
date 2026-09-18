@@ -1,4 +1,4 @@
-module main (viaCpp, viaPy, viaR, viaRust)
+module main (viaCpp, viaPy, viaR, viaRust, rustHosted)
 
 import root
 import root-py
@@ -14,6 +14,12 @@ import root-rust
 -- Each pipeline sums the rows of every chunk and then reports the shared
 -- memory the run needed. The row total is what `highWaterMiB` takes as
 -- its argument: it is what makes the measurement happen after the run.
+--
+-- The first four vary the pool that receives the chunks, which is what
+-- has to let each one go. `rustHosted` varies the pool that drives the
+-- loop, which is what has to let go of the results it has been handed;
+-- it reports from Rust because the reporter has to be somewhere that has
+-- seen the blocks.
 
 type Table
 type Py => Table = "pyarrow.RecordBatch"
@@ -24,7 +30,7 @@ type Rust => Table = "rustmorloc::arrow_array::RecordBatch"
 source Py from "src.py" ("mkChunk" as mkChunkPy, "nRows" as nRowsPy)
 source Cpp from "src.hpp" ("mkChunk" as mkChunkCpp, "nRows" as nRowsCpp, "highWaterMiB")
 source R from "src.R" ("nRows" as nRowsR)
-source Rust from "src.rs" ("n_rows" as nRowsRust)
+source Rust from "src.rs" ("n_rows" as nRowsRust, "high_water_mib" as highWaterMiBRust)
 
 mkChunkPy :: Int -> Table
 mkChunkCpp :: Int -> Table
@@ -33,6 +39,7 @@ nRowsCpp :: Table -> Int
 nRowsR :: Table -> Int
 nRowsRust :: Table -> Int
 highWaterMiB :: Int -> Int
+highWaterMiBRust :: Int -> Int
 
 viaCpp :: Int -> Int
 viaCpp n = highWaterMiB (sum (map (\i -> nRowsCpp (mkChunkPy i)) (range 0 n)))
@@ -45,3 +52,6 @@ viaR n = highWaterMiB (sum (map (\i -> nRowsR (mkChunkCpp i)) (range 0 n)))
 
 viaRust :: Int -> Int
 viaRust n = highWaterMiB (sum (map (\i -> nRowsRust (mkChunkCpp i)) (range 0 n)))
+
+rustHosted :: Int -> Int
+rustHosted n = highWaterMiBRust (sum (map (\i -> nRowsRust (mkChunkPy i)) (range 0 n)))

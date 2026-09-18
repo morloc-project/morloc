@@ -1,6 +1,6 @@
 SHORT = 12
 LONG = 48
-CMDS = viaCpp viaPy viaR viaRust
+CMDS = viaCpp viaPy viaR viaRust rustHosted
 
 # A chunk-at-a-time run holds a chunk or two, so quadrupling its length
 # must not change what it needs at once. Comparing a run against a longer
