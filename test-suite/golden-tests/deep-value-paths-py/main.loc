@@ -1,0 +1,36 @@
+-- A deep recursive value (depth 100000) on the paths that read or write
+-- it as text or hash it in a Python pool: printed by the nexus and parsed
+-- back from stdin, hashed and persisted by a cached call and read back
+-- from the cache on the second run, and shown then read by the pool's own
+-- JSON codec. Every morloc function is tail recursive, so the values are
+-- built and consumed by native loops; what is pinned is the runtime.
+module main (chain, count, cachedCount, showRead)
+
+import root-py
+
+data Tree = Leaf | Node Int Tree Tree
+
+chainHelp :: Int -> Tree -> Tree
+chainHelp n acc
+  ? n == 0 = acc
+  : chainHelp (n - 1) (Node 1 Leaf acc)
+
+chain :: Int -> Tree
+chain n = chainHelp n Leaf
+
+spineCount :: Int -> Tree -> Int
+spineCount | acc (Node _ _ r) = spineCount (acc + 1) r
+           | acc _ = acc
+
+count :: Tree -> Int
+count t = spineCount 0 t
+
+-- The cached call takes and returns the deep value, so its argument is
+-- hashed for the key and its result is flattened to disk and read back.
+cachedCount :: Int -> Int
+cachedCount n = spineCount 0 (a@idpy (chain n))
+
+showRead :: Int -> Int
+showRead n = match (@read (@show (chain n)) :: Try Str Tree)
+  | (Ok t) = spineCount 0 t
+  | (Err _) = -1

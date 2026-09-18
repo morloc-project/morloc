@@ -33,7 +33,7 @@ memory leaks (>4KB) or file descriptor leaks (>3 extra). Requires valgrind.
 `tree.loc.tmpl`, plus a Python/C++ cross-pool module) and runs tail
 recursion over recursive `data` values, mutual recursion, non-tail recursion
 and a nexus print/parse round trip at depth 10000 (`MORLOC_TEST_LEVEL=long`:
-100000). Cases known to fail carry the issue that tracks them and report
+1000000). Cases known to fail carry the issue that tracks them and report
 XFAIL; the marking is strict, so a fixed case reports XPASS and fails the
 suite until its marking is removed. `MORLOC_STRESS_LANGS="py cpp"` restricts
 the single-pool instances (the Rust build is most of the run time).

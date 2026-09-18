@@ -434,6 +434,7 @@ translate srcs es = do
       universalScopeMap = Map.insert cppLang mergedCppScope universalScopeMap0
 
   effectMap <- MM.gets stateManifoldEffects
+  nativeEntries <- Set.fromList . Map.elems <$> MM.gets stateNativeRecEntries
 
   -- Canonicalize C++ source paths once up front so that the #include
   -- directives emitted by makeCppCode and the -I flags emitted by
@@ -457,7 +458,7 @@ translate srcs es = do
         , translatorDebugInfo = debugInfo
         , translatorDebugMode = debugMode
         }
-      code = CMS.evalState (makeCppCode labels srcs' es universalScopeMap scopeMap closureTable) translatorState
+      code = CMS.evalState (makeCppCode labels srcs' es universalScopeMap scopeMap closureTable nativeEntries) translatorState
 
   maker <- makeTheMaker cxxFlags includeDirs
 
@@ -485,8 +486,9 @@ makeCppCode ::
   Map.Map Lang Scope ->
   GMap Int MVar (Map.Map Lang Scope) ->
   Map.Map Int ([SerialAST], [SerialAST], SerialAST) ->
+  Set.Set Int ->
   CppTranslator MDoc
-makeCppCode labels srcs es univeralScopeMap scopeMap closureTable0 = do
+makeCppCode labels srcs es univeralScopeMap scopeMap closureTable0 nativeEntries = do
   -- Seeded before any type is rendered: 'cppTypeOf' consults it to tell a
   -- back-reference into a generated `data` type from an unmapped alias.
   CMS.modify $ \st -> st
@@ -497,7 +499,7 @@ makeCppCode labels srcs es univeralScopeMap scopeMap closureTable0 = do
   -- write include statements for sources
   let includeDocs = map translateSource (unique . mapMaybe srcPath $ srcs)
 
-  signatures <- concat <$> mapM makeSignature es
+  signatures <- concat <$> mapM (makeSignature nativeEntries) es
 
   (autoDecl, autoFwds, autoSerial) <- generateAnonymousStructs
   (varWrappers, varArms, varFwds, varSerial) <- generateCppVariants es
@@ -751,8 +753,13 @@ makeTheMaker flags includes = do
 
   return [cmd]
 
-makeSignature :: SerialManifold -> CppTranslator [MDoc]
-makeSignature = foldWithSerialManifoldM fm
+-- | Forward declarations. Every manifold of the pool is declared, plus the
+-- native entry of any recursive manifold: a nested manifold is otherwise
+-- defined before the one that holds it, which is enough for a call from
+-- inside, but a recursion's native entry is called from wherever the
+-- recursion is reached.
+makeSignature :: Set.Set Int -> SerialManifold -> CppTranslator [MDoc]
+makeSignature nativeEntries = foldWithSerialManifoldM fm
   where
     fm =
       defaultValue
@@ -760,11 +767,18 @@ makeSignature = foldWithSerialManifoldM fm
         , opFoldWithNativeManifoldM = nativeManifold
         }
 
-    serialManifold (SerialManifold m _ form _ _) _ = manifoldSignature m serialType form
+    serialManifold (SerialManifold m _ form _ _) folded = do
+      own <- manifoldSignature m serialType form
+      return (foldlSM (<>) own folded)
 
-    nativeManifold e@(NativeManifold m _ form _) _ = do
-      typestr <- cppTypeOf e
-      manifoldSignature m typestr form
+    -- The declared type is the body's, as the definition's is: a manifold
+    -- that takes all of its arguments returns a value, not a callable.
+    nativeManifold (NativeManifold m _ form body) folded
+      | Set.member m nativeEntries = do
+          typestr <- cppTypeOf (typeMof body)
+          own <- manifoldSignature m typestr form
+          return (foldlNM (<>) own folded)
+      | otherwise = return (foldlNM (<>) [] folded)
 
     manifoldSignature ::
       (HasTypeM t) => Int -> MDoc -> ManifoldForm (Or TypeS TypeF) t -> CppTranslator [MDoc]
@@ -840,21 +854,23 @@ cppLowerConfig reifyThunks =
     -- Each arm is its own struct (two arms with the same field types must
     -- stay distinguishable), so a value is that struct braced-initialised
     -- and implicitly converted into the variant.
-    -- Each arm lives behind a shared_ptr inside the variant. That gives a
-    -- recursive arm a finite size and lets an arm holding another `data`
-    -- type need only a forward declaration, so declaration order between
-    -- two variants stops mattering.
+    -- Each arm lives behind a pointer inside the variant (a generated
+    -- type's `mlc::rec_ptr`, which releases a deep chain iteratively; a
+    -- user-mapped type's own `std::shared_ptr`). That gives a recursive arm
+    -- a finite size and lets an arm holding another `data` type need only
+    -- a forward declaration, so declaration order between two variants
+    -- stops mattering. The variant is built from a fresh shared_ptr, which
+    -- converts to exactly one alternative, and is read by position, which
+    -- is the wire tag for generated and user-mapped types alike.
     , lcVariantLit = \ty n _ xs ->
         let arm = CP.armName ty n
         in ty <> "{std::make_shared<" <> arm <> ">"
              <> parens (arm <> encloseSep "{" "}" ", " xs) <> "}"
     , lcEnumLit = \ty _ n _ -> ty <> "::" <> pretty n
-    , lcVariantTagTest = \ty n _ subj ->
-        "std::holds_alternative<std::shared_ptr<" <> CP.armName ty n <> ">>"
-          <> parens (parens subj <> ".v")
-    , lcCtorField = \ty n i subj ->
-        "std::get<std::shared_ptr<" <> CP.armName ty n <> ">>"
-          <> parens (parens subj <> ".v") <> "->f" <> pretty i
+    , lcVariantTagTest = \_ _ tag subj ->
+        parens (parens subj <> ".v.index() ==" <+> pretty tag)
+    , lcCtorField = \_ _ tag i subj ->
+        "std::get<" <> pretty tag <> ">" <> parens (parens subj <> ".v") <> "->f" <> pretty i
     , lcEnumTagTest = \ty _ n _ subj ->
         parens (subj <+> "==" <+> ty <> "::" <> pretty n)
     , lcCoerceOptional = \x -> "std::make_optional(" <> x <> ")"
@@ -1089,14 +1105,18 @@ PROPAGATE_ERROR(errmsg)|]
                 -- Raw text with a literal newline; escapeCxxStringLit converts
                 -- '\n' -> "\\n" so the emitted C++ string literal contains the
                 -- escape, not an actual newline byte.
-                frameLine = "\n  at " <> nameOut
+                frameName = nameOut
                           <> " [cpp] (mid=" <> T.pack (show callIndex)
                           <> srclocSuffix <> ")"
+                frameLine = "\n  at " <> frameName
                 frameLit :: MDoc
                 frameLit = dquotes (pretty (escapeCxxStringLit frameLine))
+                -- Marks this manifold as the one executing on the thread,
+                -- so a fatal signal is reported against it.
+                frameScope = "mlc::frame_scope _mlc_frame(" <> dquotes (pretty (escapeCxxStringLit frameName)) <> ");"
                 fullName = mname <> mnameExt headForm
                 decl = returnTypeStr <+> fullName <> tupled typedArgs
-                tryBody = block 4 "try" (vsep $ priorLines <> [body])
+                tryBody = block 4 "try" (vsep $ frameScope : priorLines <> [body])
                 -- In --debug the drain owns the traceback; appending a
                 -- frame line here would duplicate every frame. The
                 -- normalize-to-std::runtime_error step remains so that
@@ -1778,14 +1798,15 @@ collectCppVariants = concatMap (runIdentity . foldWithSerialManifoldM fm)
 -- phases rather than one block per type.
 generateCppVariants :: [SerialManifold] -> CppTranslator ([MDoc], [MDoc], [MDoc], [MDoc])
 generateCppVariants es = do
-  named <- mapM (\(v, ps, as) -> (\n -> (render n, (v, ps, as))) <$> cppTypeOf (VariantF v ps as))
-                (collectCppVariants es)
+  named <- mapM occurrence (collectCppVariants es)
   -- Merged by the RENDERED name, which is what the declaration is called: a
   -- template instantiated twice is two declarations, a generated type is
   -- one per instantiation, and keying by the general name would collapse
   -- `Try Str ()` and `Try Str (IFile a)` into one and leave the second use
-  -- naming a type that was never emitted.
-  parts <- mapM makeOne (Map.elems (Map.fromListWith wider named))
+  -- naming a type that was never emitted. Occurrences of one name that
+  -- disagree on an arm's field types fail the build here, since whichever
+  -- declaration came out could not serve both sites.
+  parts <- mapM (uncurry merged) (Map.toList (Map.fromListWith (flip (<>)) named))
   let decls = concatMap (\(d, _, _, _) -> d) parts
       bodies = concatMap (\(_, b, _, _) -> b) parts
       fwds = concatMap (\(_, _, f, _) -> f) parts
@@ -1795,21 +1816,17 @@ generateCppVariants es = do
   -- between the wrappers and the arm bodies.
   return (decls, bodies, fwds, serials)
   where
-    -- Merge arm-wise, but keep DECLARATION ORDER: an arm's position is its
-    -- wire tag, so sorting by name here would silently renumber every
-    -- constructor. The longer list is the more complete view of the type and
-    -- supplies the order; fields come from whichever occurrence has them,
-    -- since a constructor literal's type reports its own arm with none.
-    wider (v, ps, as) (_, _, bs) = (v, ps, [(n, pick n) | n <- order])
-      where
-        am = Map.fromList as
-        bm = Map.fromList bs
-        order = if length as >= length bs then map fst as else map fst bs
-        pick n = case (Map.lookup n am, Map.lookup n bm) of
-          (Just xs, Just ys) -> if null xs then ys else xs
-          (Just xs, Nothing) -> xs
-          (Nothing, Just ys) -> ys
-          _ -> []
+    -- One occurrence under its rendered name, with each arm's field types
+    -- as written and as rendered, so the merge can compare spellings.
+    occurrence (v, ps, as) = do
+      n <- cppTypeOf (VariantF v ps as)
+      as' <- mapM (\(c, ts) -> (\rs -> (c, (ts, map render rs))) <$> mapM cppTypeOf ts) as
+      return (render n, [(v, ps, as')])
+    merged name occs = case mergeVariantOccurrences name (map (\(_, _, as) -> as) occs) of
+      Right arms -> case occs of
+        ((v, ps, _) : _) -> makeOne (v, ps, arms)
+        [] -> return ([], [], [], [])
+      Left msg -> error $ "C++ pool: " ++ T.unpack msg
 
     makeOne (FV gv (CV cvText), ps, arms) = do
       userMapped <- variantIsUserMapped gv cvText
@@ -2143,7 +2160,9 @@ handleFlagsAndPaths srcs = do
       -- state/modules/lib search dir covers a user library referenced by a
       -- `-l` from dependencies/cxx-flags; its runtime load is likewise handled
       -- by the nexus LD_LIBRARY_PATH export, not a baked rpath.
-      mlcLib = ["-L" <> home <> "/lib", "-L" <> stateDir <> "/modules/lib", "-lmorloc", "-lcppmorloc", "-lpthread"]
+      -- -rdynamic exports the pool's own symbols, so the crash handler's
+      -- backtrace names generated manifolds rather than printing offsets.
+      mlcLib = ["-L" <> home <> "/lib", "-L" <> stateDir <> "/modules/lib", "-lmorloc", "-lcppmorloc", "-lpthread", "-rdynamic"]
 
   return
     ( filter (isJust . srcPath) srcs'

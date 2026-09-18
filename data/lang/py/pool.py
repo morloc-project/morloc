@@ -1,4 +1,5 @@
 import signal
+import faulthandler
 import sys
 import select
 import os # required for setting path to morloc dependencies
@@ -471,6 +472,9 @@ def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, tota
     # to SIGKILL this worker mid-response. See the multiprocessing-py-1 bug.
     signal.signal(signal.SIGTERM, signal.SIG_DFL)
     signal.signal(signal.SIGINT, signal.SIG_DFL)
+    # A fatal signal in this worker prints its Python frames, which name the
+    # manifold (`mN`) that was executing; the parent reports the signal.
+    faulthandler.enable()
     morloc.set_fallback_dir(tmpdir)
     morloc.shinit(shm_basename, 0, 0xffff)
     # Load user sources HERE, post-fork, in the worker's own process (see the
@@ -565,6 +569,26 @@ def signal_handler(sig, frame):
         morloc.close_daemon(d)
 
 
+def _report_worker_death(w, shutting_down=False):
+    # A worker that died by a signal is the only sign a caller gets of what
+    # went wrong: the pool process itself lives on, so the nexus sees no
+    # exit status, only a closed socket. Read before close(), after which
+    # exitcode is unavailable. A SIGTERM is a request to stop, never a
+    # crash (the nexus terminates the whole process group at shutdown, and
+    # the worker may take it before this process does); a SIGKILL during
+    # shutdown is that same teardown escalating.
+    code = w.exitcode
+    if code is None:
+        return
+    if code < 0:
+        if -code == signal.SIGTERM or (shutting_down and -code == signal.SIGKILL):
+            return
+        print(f"morloc py pool: worker {w.pid} crashed with signal {-code}", file=sys.stderr)
+    elif code != 0:
+        print(f"morloc py pool: worker {w.pid} exited with status {code}", file=sys.stderr)
+    sys.stderr.flush()
+
+
 def client_listener(job_fd, socket_path, tmpdir, shm_basename, shutdown_flag):
     global daemon
     daemon = _hold_daemon(morloc.start_daemon(socket_path, tmpdir, shm_basename, 0xffff))
@@ -626,6 +650,7 @@ def run_thread_pool(socket_path, tmpdir, shm_basename):
     # the thread model -- the process-isolated fork model is not available on
     # macOS (forking a live interpreter aborts), and serializing dispatch would
     # forfeit the required in-pool parallelism.
+    faulthandler.enable()
     morloc.set_fallback_dir(tmpdir)
     morloc.shinit(shm_basename, 0, 0xffff)  # attach SHM once for the process
     _mlc_load_user_sources()  # no fork on this path -> safe to import in-thread
@@ -874,6 +899,7 @@ if __name__ == "__main__":
                 alive.append(w)
             else:
                 w.join(timeout=0)
+                _report_worker_death(w, shutting_down=bool(shutdown_flag.value))
                 w.close()
         workers = alive
         total_workers.value = max(1, len(workers))
@@ -899,10 +925,14 @@ if __name__ == "__main__":
     listener_process.join()  # Final blocking reap
     listener_process.close()
 
-    # 2. Terminate workers with escalating force
+    # 2. Terminate workers with escalating force. A worker that already died
+    # by a signal is reported here too, since the reap loop above may not
+    # have run again before shutdown.
     for p in workers:
         if p.is_alive():
             p.kill()
+        else:
+            _report_worker_death(p, shutting_down=True)
         p.join()  # Final blocking reap
         p.close()
 

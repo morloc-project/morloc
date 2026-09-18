@@ -27,9 +27,12 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter
   , stripTypeParams
   , printRustStruct
   , printRecordImpls
+  , RecordFieldTypes(..)
   , printRustEnum
   , printRustVariant
   , printVariantImpls
+  , recBox
+  , userBox
   , printEnumImpls
   , tupled1
   , ClosureMarshal (..)
@@ -442,6 +445,12 @@ printRustEnum name ctors =
 -- and mutual recursion (@A@ through @B@ back to @A@) has no single-type
 -- test that would find it.
 --
+-- The box is the runtime's @RecBox@, a reference-counted box whose drop
+-- hands a deep chain of arms to an iterative drain, so releasing a value
+-- costs heap rather than one frame per level, and whose clone shares the
+-- arm, so projecting a field out of a value costs a count rather than a
+-- copy of the subtree.
+--
 -- Deliberately NOT @Copy@ and NOT @#[repr(u8)]@, both of which the
 -- argument-free form carries. A box is not @Copy@, so deriving it would
 -- fail to compile on the first payload arm, and it must stay non-@Copy@ to
@@ -457,7 +466,7 @@ printRustVariant name arms =
     ]
   where
     armDecl c [] = pretty c <> ","
-    armDecl c ts = pretty c <> parens ("::std::boxed::Box<" <> tupled1 ts <> ">") <> ","
+    armDecl c ts = pretty c <> parens (recBox <> "<" <> tupled1 ts <> ">") <> ","
 
 -- | A one-element tuple needs its trailing comma or it is just parentheses.
 tupled1 :: [MDoc] -> MDoc
@@ -474,8 +483,21 @@ tupled1 ts = tupled ts
 -- are not part of the runtime crate's public surface.
 --
 -- A boxed payload marshals as the tuple inside it, since @Box@ delegates.
-printVariantImpls :: MDoc -> [(T.Text, [MDoc])] -> MDoc
-printVariantImpls name arms = vsep [toImpl, "", fromImpl]
+-- | The path of the box a generated enum's arms sit behind.
+recBox :: MDoc
+recBox = "::rustmorloc::RecBox"
+
+-- | The path of the box a user-written enum's arms sit behind: the plain
+-- standard box the mapped-type contract names, whose release recursion is
+-- the user's.
+userBox :: MDoc
+userBox = "::std::boxed::Box"
+
+-- | The marshalling impls of a payload-bearing @data@ type, with the box
+-- type its arms use (@recBox@ for an enum the pool generates, @userBox@ for
+-- one the user wrote).
+printVariantImpls :: MDoc -> MDoc -> [(T.Text, [MDoc])] -> MDoc
+printVariantImpls box name arms = vsep [toImpl, "", fromImpl]
   where
     idxArms = zip [0 :: Int ..] arms
 
@@ -484,7 +506,7 @@ printVariantImpls name arms = vsep [toImpl, "", fromImpl]
     -- generic instantiation the impl is written for.
     armPat c ts = "Self::" <> pretty c <> (if null ts then "" else "(mlc_b)")
     -- The payload's native type, as the enum declares it.
-    armTy ts = "::std::boxed::Box<" <> tupled1 ts <> ">"
+    armTy ts = box <> "<" <> tupled1 ts <> ">"
     -- The runtime range-checks a tag at the wire boundary, so reaching this
     -- arm means the value and its schema disagree: a bug, not bad input.
     -- Here the tag would otherwise index the arm list.
@@ -617,6 +639,12 @@ data ClosureMarshal = ClosureMarshal
   , cmReflect :: MDoc -> MDoc    -- ^ a @ClosureOrigin@ slot-read expression -> the reflected @Rc<dyn MorlocFnN>@
   }
 
+-- | Whose field types a record's reader names: a generated struct's are the
+-- rendered ones; a user-written struct's are whatever the user declared, so
+-- the reader takes each from the struct itself (a user may hold a recursive
+-- field in a plain 'Box' or in the runtime's deferred-release box).
+data RecordFieldTypes = RenderedFieldTypes | StructFieldTypes
+
 -- | Emit @impl ToVoidstar/FromVoidstar@ for a record, marshalling each field in
 -- place at its schema offset (mirrors the hand-written LL template). Fields are
 -- (escaped-name, rendered-type, is-variable-width, closure-marshal). @params@ are
@@ -624,8 +652,8 @@ data ClosureMarshal = ClosureMarshal
 -- needs (`impl<T1: ToVoidstar> ToVoidstar for S<T1>`). Fully fixed-width records
 -- short-circuit the size step to @schema.width@. A function field carries a
 -- 'ClosureMarshal' and is reified/reflected instead of marshalled directly.
-printRecordImpls :: MDoc -> [MDoc] -> [(MDoc, MDoc, Bool, Maybe ClosureMarshal)] -> MDoc
-printRecordImpls name params fields = vsep [toImpl, "", fromImpl]
+printRecordImpls :: RecordFieldTypes -> MDoc -> [MDoc] -> [(MDoc, MDoc, Bool, Maybe ClosureMarshal)] -> MDoc
+printRecordImpls fieldTypes name params fields = vsep [toImpl, "", fromImpl]
   where
     idx = zip [0 :: Int ..] fields
     -- A closure field's wire form (ClosureOrigin) is variable-width, so a record
@@ -694,14 +722,20 @@ printRecordImpls name params fields = vsep [toImpl, "", fromImpl]
         ]
     -- A plain field's frame is for its own type; a closure field's is for the
     -- ClosureOrigin wire tuple its slot holds.
-    stepField (i, (_, t, _, Nothing)) =
-      "w.child_step::<" <> t <> ">(" <> fieldSchema i <> ", " <> fieldData i <> ");"
+    stepField (i, (f, t, _, Nothing)) = case fieldTypes of
+      RenderedFieldTypes ->
+        "w.child_step::<" <> t <> ">(" <> fieldSchema i <> ", " <> fieldData i <> ");"
+      StructFieldTypes ->
+        "w.child_step_for(" <> fieldSchema i <> ", " <> fieldData i <> ", |x: &Self| &x." <> f <> ");"
     stepField (i, (_, _, _, Just _)) =
       "w.child_step::<rustmorloc::ClosureOrigin>(" <> fieldSchema i <> ", " <> fieldData i <> ");"
     -- A plain field reads via the walk directly; a closure field reads its
     -- ClosureOrigin wire tuple off the slot and reflects it into a callable.
-    readField (i, (f, t, _, Nothing)) =
-      f <> ": w.child_read::<" <> t <> ">(" <> fieldSchema i <> ", " <> fieldData i <> "),"
+    readField (i, (f, t, _, Nothing)) = case fieldTypes of
+      RenderedFieldTypes ->
+        f <> ": w.child_read::<" <> t <> ">(" <> fieldSchema i <> ", " <> fieldData i <> "),"
+      StructFieldTypes ->
+        f <> ": w.child_read_for(" <> fieldSchema i <> ", " <> fieldData i <> ", |x: &Self| &x." <> f <> "),"
     readField (i, (f, _, _, Just cm)) =
       let slotRead =
             "w.child_read::<rustmorloc::ClosureOrigin>(" <> fieldSchema i <> ", " <> fieldData i <> ")"

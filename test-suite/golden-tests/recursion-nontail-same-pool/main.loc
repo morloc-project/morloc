@@ -1,0 +1,77 @@
+-- Recursion that is not in tail position, inside one pool.
+--
+-- A tail-recursive function lowers to a loop, so its value never leaves
+-- the pool. A function that combines the results of its recursive calls
+-- cannot, and each call then returns to its caller. The call stays inside
+-- the pool, so nothing about it has to cross a wire; a walk down a spine
+-- of n nodes must therefore cost time and memory proportional to n, not to
+-- n squared, which is what copying each node's whole remaining subtree per
+-- level would cost.
+--
+-- Depth is still bounded by the machine stack, as non-tail recursion is in
+-- any language, so the deep cases here are sized to the cost of the walk
+-- rather than to memory.
+module main (total, totalRust, totalPy, mutual, carried)
+
+import root-cpp
+import root-rust
+import root-py
+
+data Tree = Leaf | Node Int Tree Tree
+
+chainHelp :: Int -> Tree -> Tree
+chainHelp n acc
+  ? n == 0 = acc
+  : chainHelp (n - 1) (Node 1 Leaf acc)
+
+-- The recursive calls are under `+`, so neither is in tail position.
+totalCpp :: Tree -> Int
+totalCpp | Leaf = 0
+         | (Node v l r) = v + totalCpp l + totalCpp r
+
+total :: Int -> Int
+total n = totalCpp (chainHelp n Leaf)
+
+totalR :: Tree -> Int
+totalR | Leaf = 0
+       | (Node v l r) = addRust v (addRust (totalR l) (totalR r))
+
+totalRust :: Int -> Int
+totalRust n = totalR (chainHelp n Leaf)
+
+totalP :: Tree -> Int
+totalP | Leaf = 0
+       | (Node v l r) = addPy v (addPy (totalP l) (totalP r))
+
+totalPy :: Int -> Int
+totalPy n = totalP (chainHelp n Leaf)
+
+-- An argument the recursion carries along AND hands to another pool: it is
+-- needed in both forms, and the native entry must still be callable with
+-- the one value the recursion passes.
+tally :: [Int] -> Tree -> Int
+tally | xs Leaf = sumPy xs
+      | xs (Node v l r) = addPy v (addPy (tally xs l) (tally xs r))
+
+carried :: Int -> Int
+carried n = tally [1, 2] (chainHelp n Leaf)
+
+source Py from "prim.py" ("total" as sumPy)
+sumPy :: [Int] -> Int
+
+source Rust from "prim.rs" ("add" as addRust)
+source Py from "prim.py" ("add" as addPy)
+addRust :: Int -> Int -> Int
+addPy :: Int -> Int -> Int
+
+-- Two functions calling each other, neither in tail position.
+sumEven :: Tree -> Int
+sumEven | Leaf = 0
+        | (Node v l r) = v + sumOdd l + sumOdd r
+
+sumOdd :: Tree -> Int
+sumOdd | Leaf = 0
+       | (Node v l r) = sumEven l + sumEven r
+
+mutual :: Int -> Int
+mutual n = sumEven (chainHelp n Leaf)

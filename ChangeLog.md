@@ -1,3 +1,14 @@
+0.108.0 [2026-09-18]
+--------------------
+
+Fix many issues with recursion
+
+   * schema recursive labels now are uniquely indexed
+   * recursive libmorloc functions are now iterative with recursive depth bound
+     only by memory
+   * fix quadratic case with unnecessary serialization
+   * partial solution to pure nexus recursion, still runs in a pool
+
 0.107.1 [2026-09-16]
 --------------------
 

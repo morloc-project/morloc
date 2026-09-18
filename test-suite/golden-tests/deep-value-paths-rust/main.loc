@@ -1,0 +1,56 @@
+-- A deep recursive value (depth 100000) on the paths that carry it
+-- through a Rust pool: saved as a data packet and loaded back, a rose
+-- tree whose recursion runs through a list arm, and a user record whose
+-- cycle field is the runtime's deferred-release holder, printed by the
+-- nexus and parsed back from stdin. Every morloc function is tail
+-- recursive, so the values are built and consumed by native loops; what
+-- is pinned is the runtime and the generated destructors.
+module main (saveLoad, caterpillar, buildLL, llLen)
+
+import root-rust
+
+data Tree = Leaf | Node Int Tree Tree
+
+chainHelp :: Int -> Tree -> Tree
+chainHelp n acc
+  ? n == 0 = acc
+  : chainHelp (n - 1) (Node 1 Leaf acc)
+
+spineCount :: Int -> Tree -> Int
+spineCount | acc (Node _ _ r) = spineCount (acc + 1) r
+           | acc _ = acc
+
+saveLoad :: Int -> Str -> <IO> Int
+saveLoad n path = do
+  @save 0 path (chainHelp n Leaf)
+  Ok t <- @load path :: <IO> (Try Str Tree)
+  spineCount 0 t
+
+data Rose = Rose Int [Rose]
+
+caterpillarHelp :: Int -> Rose -> Rose
+caterpillarHelp n acc
+  ? n == 0 = acc
+  : caterpillarHelp (n - 1) (Rose 1 [acc])
+
+roseSpine :: Int -> Rose -> Int
+roseSpine | acc (Rose _ kids) = kidsSpine (acc + 1) kids
+
+kidsSpine :: Int -> [Rose] -> Int
+kidsSpine acc kids
+  ? size kids == 0 = acc
+  : roseSpine acc (.[0] kids)
+
+caterpillar :: Int -> Int
+caterpillar n = roseSpine 0 (caterpillarHelp n (Rose 1 []))
+
+-- A user struct whose cycle field is `Option<RecBox<LL>>`.
+record LL where
+  head :: Int
+  tail :: ?LL
+record Rust => LL = "LL"
+
+source Rust from "ll.rs" ("build_ll" as buildLL, "ll_len" as llLen)
+
+buildLL :: Int -> LL
+llLen :: LL -> Int

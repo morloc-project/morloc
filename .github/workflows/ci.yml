@@ -202,6 +202,19 @@ jobs:
       #   run: ./test-suite/test.sh stress
       #   timeout-minutes: 20
 
+      # Recursion depth over recursive values in every pool language, with
+      # the one case that still has a depth bound marked by its issue. The
+      # markings are strict, so this is where a fixed bound shows up as an
+      # XPASS and where a regression shows up at all. Short depth (10000)
+      # keeps it near a minute; the long level is a manual run. Linux only,
+      # to keep the macOS leg short.
+      - name: Test recursion depth (Linux)
+        if: runner.os == 'Linux'
+        env:
+          MORLOC_STRESS_LANGS: "py cpp rust"
+        run: ./test-suite/stress/deep-recursion.sh
+        timeout-minutes: 15
+
       - name: Test morloc
         run: |
           stack test --system-ghc --no-install-ghc morloc:morloc-test

@@ -225,6 +225,12 @@ static int recur_env_push(const Schema* schema) {
     if (schema == NULL || schema->name == NULL || schema->type == MORLOC_RECUR) {
         return 0;
     }
+    // A declaration re-entered through its own back-reference is already
+    // the innermost entry; pushing it again would grow the stack by one
+    // per level of the value.
+    if (recur_env_depth > 0 && recur_env_stack[recur_env_depth - 1].schema == schema) {
+        return 0;
+    }
     if (recur_env_depth >= recur_env_cap) {
         size_t cap = recur_env_cap ? recur_env_cap * 2 : 64;
         recur_env_entry_t* grown = (recur_env_entry_t*)realloc(recur_env_stack, cap * sizeof(recur_env_entry_t));
@@ -346,6 +352,10 @@ typedef struct {
     size_t cap;
     py_frame_t cur;
     int direct;
+    // The last schema asked about by py_flat and its answer: a loop over
+    // an array asks about the same element schema once per element.
+    const Schema* flat_schema;
+    int flat_answer;
     size_t env_base;        // recur env depth at entry, restored on exit
     ssize_t total;          // size pass
     void** cursor;          // write pass
@@ -368,13 +378,20 @@ static int py_schema_has_recur(const Schema* schema) {
 
 // A child of a schema that cannot describe unbounded depth is stepped by
 // call; only a schema holding a back-reference needs a frame.
-static int py_flat(const py_walk_t* w, const Schema* schema) {
-    return w->direct || !py_schema_has_recur(schema);
+static int py_flat(py_walk_t* w, const Schema* schema) {
+    if (w->direct) return 1;
+    if (schema != w->flat_schema) {
+        w->flat_schema = schema;
+        w->flat_answer = !py_schema_has_recur(schema);
+    }
+    return w->flat_answer;
 }
 
 static void py_walk_init(py_walk_t* w, const Schema* root) {
     memset(w, 0, sizeof(*w));
     w->direct = !py_schema_has_recur(root);
+    w->flat_schema = NULL;
+    w->flat_answer = 0;
     w->env_base = recur_env_depth;
 }
 

@@ -245,8 +245,17 @@ rustTypeOf = f
     f (NamF _ (FV _ (CV s)) ps _) = nominalTypeName s ps
     -- Back-reference to a recursive record: resolve the concrete struct name
     -- via the concrete scope (the CVar slot is unreliable after weave).
+    -- A record the compiler would generate cannot refer to itself: its
+    -- fields would name a struct that does not exist yet, and the cycle
+    -- needs a box the user's own struct must place. Users must map such a
+    -- record to a Rust struct of their own.
+    f (RecF (FV _ (CV "struct"))) =
+      error $
+        "Recursive record without an explicit Rust concrete type mapping " ++
+        "is not yet supported. Add `record Rust => <Name> = \"<struct-name>\"` " ++
+        "in the morloc source."
     f (RecF (FV gv@(TV gvText) (CV cv)))
-      | cv /= "struct" && cv /= gvText = return (pretty cv)
+      | cv /= gvText = return (pretty cv)
       | otherwise = do
           cscope <- CMS.gets rsCScope
           case Map.lookup gv cscope of
@@ -1465,45 +1474,35 @@ collectRustVariants = concatMap (runIdentity . foldWithSerialManifoldM fm)
 -- sourced Rust and gets only the impls.
 generateRustVariants :: [SerialManifold] -> RustM [MDoc]
 generateRustVariants es = do
-  named <- mapM (\(v, ps, as) -> (\n -> (render n, (v, ps, as))) <$> rustTypeOf (VariantF v ps as))
-                (collectRustVariants es)
+  named <- mapM occurrence (collectRustVariants es)
   -- Merged by the RENDERED name, which is what the declaration is called: a
   -- template instantiated twice is two declarations, a generated type is
   -- one per instantiation, and keying by the general name would collapse
   -- `Try Str ()` and `Try Str (IFile a)` into one and leave the second use
-  -- naming a type that was never emitted.
-  concat <$> mapM makeOne (Map.elems (Map.fromListWith wider named))
+  -- naming a type that was never emitted. Occurrences of one name that
+  -- disagree on an arm's field types fail the build here, since whichever
+  -- declaration came out could not serve both sites.
+  concat <$> mapM (uncurry merged) (Map.toList (Map.fromListWith (flip (<>)) named))
   where
-    -- Merge ARM-WISE rather than by arm count. A constructor literal's type
-    -- reports only the arm being built, and reports it with no fields, so
-    -- comparing lengths cannot tell a complete one-arm type from a
-    -- truncated view of it -- and picking the truncated one would declare
-    -- an arm as nullary that the schema says carries a payload, which
-    -- writes RELNULL where the reader expects a pointer.
-    -- Merge arm-wise, but keep DECLARATION ORDER: an arm's position is its
-    -- wire tag, so sorting by name here would silently renumber every
-    -- constructor. The longer list is the more complete view of the type and
-    -- supplies the order; fields come from whichever occurrence has them,
-    -- since a constructor literal's type reports its own arm with none.
-    wider (v, ps, as) (_, _, bs) = (v, ps, [(n, pick n) | n <- order])
-      where
-        am = Map.fromList as
-        bm = Map.fromList bs
-        order = if length as >= length bs then map fst as else map fst bs
-        pick n = case (Map.lookup n am, Map.lookup n bm) of
-          (Just xs, Just ys) -> if null xs then ys else xs
-          (Just xs, Nothing) -> xs
-          (Nothing, Just ys) -> ys
-          _ -> []
+    -- One occurrence under its rendered name, with each arm's field types
+    -- as written and as rendered, so the merge can compare spellings.
+    occurrence (v, ps, as) = do
+      n <- rustTypeOf (VariantF v ps as)
+      as' <- mapM (\(c, ts) -> (\rs -> (c, (ts, map render rs))) <$> mapM rustFieldType ts) as
+      return (render n, [(v, ps, as')])
+    merged name occs = case mergeVariantOccurrences name (map (\(_, _, as) -> as) occs) of
+      Right arms -> case occs of
+        ((v, ps, _) : _) -> makeOne (v, ps, arms)
+        [] -> return []
+      Left msg -> error $ "Rust pool: " ++ T.unpack msg
 
     makeOne (FV gv (CV cvText), ps, arms) = do
       userMapped <- cscopeDeclaresVariant gv cvText
       arms' <- mapM (\(n, ts) -> (,) n <$> mapM rustFieldType ts) arms
       name <- rustTypeOf (VariantF (FV gv (CV cvText)) ps arms)
-      let impls = RP.printVariantImpls name arms'
       return $ if userMapped
-                 then [impls]
-                 else [RP.printRustVariant name arms', impls]
+                 then [RP.printVariantImpls RP.userBox name arms']
+                 else [RP.printRustVariant name arms', RP.printVariantImpls RP.recBox name arms']
 
     cscopeDeclaresVariant :: TVar -> Text -> RustM Bool
     cscopeDeclaresVariant gv cvText = do
@@ -1623,7 +1622,7 @@ generateRustStructs closureAsts es = concat <$> mapM makeOne (collectRustRecords
             fields <- mapM (oneField gv (recName rec)) assigned
             let hasFun = any (containsFunF . snd) rs
                 fields4 = [(fld, ty, w, Nothing) | (fld, ty, w) <- fields]
-                impls = [RP.printRecordImpls (recName rec) params fields4 | not hasFun]
+                impls = [RP.printRecordImpls RP.RenderedFieldTypes (recName rec) params fields4 | not hasFun]
             return $ RP.printRustStruct (recName rec) params [(fld, ty) | (fld, ty, _) <- fields] : impls
           Nothing -> error $ "Rust: autogenerated record missing from recmap: " <> show v
       -- User-mapped record: the user writes the (monomorphic) struct, so only the
@@ -1640,7 +1639,7 @@ generateRustStructs closureAsts es = concat <$> mapM makeOne (collectRustRecords
             -- Emit the impl only when EVERY function field has a harvested marshal
             -- (a non-function field imposes no requirement); else struct-only.
             emitImpl = and (zipWith (\(_, ty) m -> not (isFunF ty) || maybe False (const True) m) rs marshals)
-        return [RP.printRecordImpls name [] fields4 | emitImpl]
+        return [RP.printRecordImpls RP.StructFieldTypes name [] fields4 | emitImpl]
 
     -- Number the generic (native/=wire) fields `T1, T2, ...`; concrete fields
     -- keep their unified type.
@@ -1999,11 +1998,14 @@ rustLowerConfig mask =
     -- instantiation `MyBox<i64>` included, where `MyBox<i64>::Ctor` is not.
     -- In PATTERN position that path is not stable Rust, so a pattern names
     -- the bare head (`MyBox::Ctor`); the subject's type pins the arguments.
+    -- The fields are converted into whatever box the arm declares, so one
+    -- spelling serves an enum the pool generates (RecBox) and one the user
+    -- wrote (Box).
     , lcVariantLit = \ty n _ xs ->
         let arm = "<" <> ty <> ">::" <> pretty n
         in if null xs
              then arm
-             else arm <> parens ("::std::boxed::Box::new" <> parens (RP.tupled1 xs))
+             else arm <> parens (parens (RP.tupled1 xs) <> ".into()")
     , lcEnumLit = \ty _ n _ -> "<" <> ty <> ">::" <> pretty n
     , lcVariantTagTest = \ty n _ subj ->
         "matches!" <> tupled [subj, RP.typeHead ty <> "::" <> pretty n <> " { .. }"]
@@ -2015,8 +2017,10 @@ rustLowerConfig mask =
     -- one projection per field against the same subject, so matching by
     -- value would move the payload on the first and leave the rest with
     -- nothing. Borrowing makes each projection independent; the clone is
-    -- what hands an owned value on from a borrowed place.
-    , lcCtorField = \ty n i subj ->
+    -- what hands an owned value on from a borrowed place. A field that is
+    -- itself a `data` value clones as a shared box, so a loop that walks a
+    -- spine by projection stays linear.
+    , lcCtorField = \ty n _ i subj ->
         "match" <+> "&" <> parens subj <+> "{"
           <+> RP.typeHead ty <> "::" <> pretty n <> "(mlc_b)"
           <+> "=> mlc_b." <> pretty i <> ".clone(),"

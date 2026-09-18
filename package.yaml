@@ -1,5 +1,5 @@
 name:             morloc
-version:          0.107.1
+version:          0.108.0
 homepage:         https://github.com/morloc-project/morloc
 synopsis:         A multi-lingual, typed, workflow language
 description: |
@@ -38,6 +38,7 @@ extra-source-files:
   - data/lang/c/lang.yaml
   - data/lang/cpp/lang.yaml
   - data/lang/cpp/cppmorloc.hpp
+  - data/lang/cpp/mlc_rec.hpp
   - data/lang/cpp/cppmorloc.cpp
   - data/lang/cpp/morloc_pch.hpp
   - data/lang/cpp/pool.cpp

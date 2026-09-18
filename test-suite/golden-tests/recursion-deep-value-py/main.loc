@@ -3,8 +3,6 @@
 -- tail-recursive and run as native loops; what this pins is that the pool's
 -- (de)serializer walks the value without one machine-stack frame per level,
 -- so the depth is bounded by memory rather than by the worker thread's stack.
--- The depth is kept under the pool's recursive destructor limit (C++
--- shared_ptr and Rust Box chains still unwind recursively).
 module main (chainCount)
 
 import root-py

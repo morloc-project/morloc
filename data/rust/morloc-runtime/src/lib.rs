@@ -8,6 +8,11 @@
 pub mod error;
 pub mod schema;
 pub mod recur;
+pub mod walk;
+#[cfg(test)]
+pub mod deep_tests;
+#[cfg(test)]
+mod pins;
 pub mod packet;
 pub mod shm;
 pub mod shm_companion;
@@ -48,6 +53,7 @@ pub mod arrow_shm;
 pub mod arrow_ffi;
 pub mod arrow_ipc_reader;
 pub mod pool_ffi;
+pub mod crash;
 pub mod daemon_ffi;
 pub mod router_ffi;
 pub mod null_check;

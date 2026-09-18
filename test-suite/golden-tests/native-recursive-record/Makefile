@@ -8,6 +8,7 @@ all:
 	# 5-element linked list -> length 5 in every language
 	./nexus llPy 5             >> obs.txt 2>> obs.err
 	./nexus llCpp 5            >> obs.txt 2>> obs.err
+	./nexus llCpp 200000       >> obs.txt 2>> obs.err
 	./nexus llR 5              >> obs.txt 2>> obs.err
 	# Native morloc llLen over a Py-built LL: same length, exercises
 	# the record-form recursive-record consumer in morloc-native code.

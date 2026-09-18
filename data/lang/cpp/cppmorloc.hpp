@@ -21,6 +21,23 @@
 #include <type_traits>
 
 #include "morloc.h"
+#include "mlc_rec.hpp"
+
+extern "C" const char* mlc_frame_enter(const char* frame);
+extern "C" void mlc_frame_leave(const char* prev);
+extern "C" const char* mlc_current_frame(size_t* len);
+
+namespace mlc {
+// Marks the manifold this thread is executing for the duration of a scope,
+// so a fatal signal is reported against it. Two stores per manifold call.
+struct frame_scope {
+    const char* prev;
+    explicit frame_scope(const char* frame) noexcept : prev(mlc_frame_enter(frame)) {}
+    ~frame_scope() { mlc_frame_leave(prev); }
+    frame_scope(const frame_scope&) = delete;
+    frame_scope& operator=(const frame_scope&) = delete;
+};
+}
 
 // ============================================================
 // Type traits for container dispatch
@@ -59,6 +76,9 @@ template<typename T> struct is_std_optional<std::optional<T>> : std::true_type {
 // shape and handles the wire-format relptr at the field's slot.
 template<typename T> struct is_std_shared_ptr : std::false_type {};
 template<typename T> struct is_std_shared_ptr<std::shared_ptr<T>> : std::true_type {};
+// A rec_ptr slot has the same wire form and the same surface (null ==
+// absent, `*p`, `p.get()`, assignable from a fresh shared_ptr).
+template<typename T> struct is_std_shared_ptr<mlc::rec_ptr<T>> : std::true_type {};
 
 template<typename T>
 inline constexpr bool is_non_vector_container_v =
@@ -88,6 +108,7 @@ template<typename T> struct is_pointer_shape : std::false_type {};
 template<typename T> struct is_pointer_shape<std::shared_ptr<T>> : std::true_type {};
 template<typename T> struct is_pointer_shape<std::unique_ptr<T>> : std::true_type {};
 template<typename T> struct is_pointer_shape<T*>                 : std::true_type {};
+template<typename T> struct is_pointer_shape<rec_ptr<T>>         : std::true_type {};
 
 // Pointer-shape traits. Primary intentionally undefined; only
 // recognized pointer kinds get specializations.
@@ -101,6 +122,16 @@ struct pointer_traits<std::shared_ptr<T>> {
     static std::shared_ptr<T> absent()                 { return nullptr; }
     static const T& deref(const std::shared_ptr<T>& p) { return *p; }
     static bool has_value(const std::shared_ptr<T>& p) { return p != nullptr; }
+};
+
+template<typename T>
+struct pointer_traits<rec_ptr<T>> {
+    using inner = T;
+    static rec_ptr<T> wrap(T&& v)              { return std::make_shared<T>(std::move(v)); }
+    static rec_ptr<T> wrap(const T& v)         { return std::make_shared<T>(v); }
+    static rec_ptr<T> absent()                 { return rec_ptr<T>(); }
+    static const T& deref(const rec_ptr<T>& p) { return *p; }
+    static bool has_value(const rec_ptr<T>& p) { return static_cast<bool>(p); }
 };
 
 template<typename T>
@@ -770,6 +801,39 @@ inline bool mlc_schema_has_recur(const Schema* schema) {
     return false;
 }
 
+// Which nodes of a walk's schema tree a step may visit by direct call:
+// those with no back-reference below them. Computed once per walk so the
+// question costs a lookup per child rather than a scan of the child's
+// subtree.
+struct MlcFlatSet {
+    std::vector<const Schema*> shallow;   // sorted by address
+    bool trivial = true;                  // no back-reference anywhere
+
+    explicit MlcFlatSet(const Schema* root) {
+        index(root);
+        std::sort(shallow.begin(), shallow.end());
+    }
+
+    // A node the walk did not index counts as deep: a frame is cheap and a
+    // direct call could recurse without bound.
+    bool flat(const Schema* s) const {
+        if (trivial) return true;
+        return std::binary_search(shallow.begin(), shallow.end(), s);
+    }
+
+private:
+    bool index(const Schema* s) {
+        if (s == nullptr) return false;
+        if (s->type == MORLOC_RECUR) { trivial = false; return true; }
+        bool deep = false;
+        if (s->parameters != nullptr) {
+            for (size_t i = 0; i < s->size; i++) deep |= index(s->parameters[i]);
+        }
+        if (!deep) shallow.push_back(s);
+        return deep;
+    }
+};
+
 // ------------------------------------------------------------
 // Walk drivers
 // ------------------------------------------------------------
@@ -789,7 +853,8 @@ inline bool mlc_schema_has_recur(const Schema* schema) {
                 continue;                                                     \
             }                                                                 \
             const Schema* s = resolve_recur(f.schema);                        \
-            if (!f.env_pushed && s->name != nullptr) {                        \
+            if (!f.env_pushed && s->name != nullptr &&                        \
+                (recur_env().empty() || recur_env().back().schema != s)) {    \
                 recur_env().push_back({s->name, s});                          \
                 stack.push_back(Frame{});                                     \
                 f.env_pushed = true;                                          \
@@ -817,14 +882,14 @@ struct MlcSizeWalk {
     Frame cur;
     std::vector<std::shared_ptr<void>> keep;   // values a step made, alive until the walk ends
     int64_t total = 0;
-    bool direct;   // the root has no back-reference: nothing needs a frame
+    MlcFlatSet flats;   // which nodes a step may visit by direct call
 
-    explicit MlcSizeWalk(const Schema* root) : direct(!mlc_schema_has_recur(root)) {}
+    explicit MlcSizeWalk(const Schema* root) : flats(root) {}
 
     // A child of a schema that cannot describe unbounded depth is stepped
     // by call.
     bool flat(const Schema* schema) const {
-        return direct || !mlc_schema_has_recur(schema);
+        return flats.flat(schema);
     }
 
     template<typename T>
@@ -892,13 +957,13 @@ struct MlcWriteWalk {
     Frame cur;
     std::vector<std::shared_ptr<void>> keep;
     void** cursor;
-    bool direct;
+    MlcFlatSet flats;
 
     MlcWriteWalk(const Schema* root, void** cursor_)
-        : cursor(cursor_), direct(!mlc_schema_has_recur(root)) {}
+        : cursor(cursor_), flats(root) {}
 
     bool flat(const Schema* schema) const {
-        return direct || !mlc_schema_has_recur(schema);
+        return flats.flat(schema);
     }
 
     template<typename T>
@@ -970,13 +1035,13 @@ struct MlcReadWalk {
     Frame cur;
     std::vector<std::shared_ptr<void>> keep;
     const void* base_ptr;
-    bool direct;
+    MlcFlatSet flats;
 
     MlcReadWalk(const Schema* root, const void* base)
-        : base_ptr(base), direct(!mlc_schema_has_recur(root)) {}
+        : base_ptr(base), flats(root) {}
 
     bool flat(const Schema* schema) const {
-        return direct || !mlc_schema_has_recur(schema);
+        return flats.flat(schema);
     }
 
     // Run `step` on (data, out) once every frame above it is done: pushed

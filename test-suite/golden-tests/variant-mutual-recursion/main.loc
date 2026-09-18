@@ -19,6 +19,14 @@
 --
 -- Values are evaluated in the nexus, round-tripped through every pool, and
 -- built inside a pool and read back out.
+--
+-- `L a` recurses into two other instantiations of itself: `L Str` holds an
+-- `L Int`, whose body in turn refers back to `L Str`. Two declarations of
+-- the same type name nest on the wire, and a back-reference inside the
+-- inner one must reach the outer one, so the wire names of the two
+-- instantiations have to differ. `nested` is counted at the morloc level
+-- and round-tripped through the Python pool; the schema text is pinned from
+-- the manifest.
 
 module main
   ( eval
@@ -30,6 +38,8 @@ module main
   , termViaCpp
   , termViaRust
   , builtRust
+  , nested
+  , nestedViaPy
   )
 
 import root-py
@@ -47,6 +57,20 @@ data Expr = Lit Real | Neg Term | Add Expr Expr
 
 data Term = Wrap Expr | Zero | Twice Term | At Pt
 
+data L a = Nil | Cons a (L a) | Up (L Int) | Down (L Str)
+
+nested :: L Str -> Int
+nested | Nil = 0
+       | (Cons _ r) = 1 + nested r
+       | (Up r) = 1 + nestedI r
+       | (Down r) = 1 + nested r
+
+nestedI :: L Int -> Int
+nestedI | Nil = 0
+        | (Cons _ r) = 1 + nestedI r
+        | (Up r) = 1 + nestedI r
+        | (Down r) = 1 + nested r
+
 eval :: Expr -> Real
 eval | (Lit v) = v
      | (Neg t) = 0.0 - evalT t
@@ -58,12 +82,13 @@ evalT | (Wrap e) = eval e
       | (Twice t) = 2.0 * evalT t
       | (At p) = .x p + .y p
 
-source Py   from "ast.py"  ("ident" as idPy)
+source Py   from "ast.py"  ("ident" as idPy, "ident" as idPyL)
 source Cpp  from "ast.hpp" ("ident" as idCpp)
 source R    from "ast.R"   ("ident" as idR)
 source Rust from "ast.rs"  ("ident" as idRust, "ident_term" as idTermRust, "build" as buildRust)
 
 idPy   :: Expr -> Expr
+idPyL  :: L Str -> L Str
 idCpp  :: Expr -> Expr
 idR    :: Expr -> Expr
 idRust :: Expr -> Expr
@@ -95,3 +120,7 @@ termViaRust t = evalT (idTermRust t)
 -- built in a pool, read back through the nexus
 builtRust :: Real -> Term
 builtRust v = buildRust v
+
+-- crosses into a pool and back with both instantiations inside one value
+nestedViaPy :: L Str -> L Str
+nestedViaPy x = idPyL x

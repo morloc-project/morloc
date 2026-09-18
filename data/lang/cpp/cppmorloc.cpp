@@ -1,8 +1,30 @@
 #include <stdexcept>
 #include <string>
 #include <cstdlib>
+#include <cstring>
 
 #include "morloc.h"
+
+// The innermost manifold this thread is executing, for the crash handler's
+// report. The slot lives in the pool binary, so a handler on the faulting
+// thread reads it from the static thread-local block without allocating.
+static thread_local const char* mlc_frame_ = nullptr;
+
+extern "C" const char* mlc_frame_enter(const char* frame) {
+    const char* prev = mlc_frame_;
+    mlc_frame_ = frame;
+    return prev;
+}
+
+extern "C" void mlc_frame_leave(const char* prev) {
+    mlc_frame_ = prev;
+}
+
+extern "C" const char* mlc_current_frame(size_t* len) {
+    const char* f = mlc_frame_;
+    *len = f ? strlen(f) : 0;
+    return f;
+}
 
 absptr_t rel2abs_cpp(relptr_t ptr){
     char* errmsg = NULL;

@@ -4,13 +4,17 @@
 #include <memory>
 #include <vector>
 
+#include "mlc_rec.hpp"
+
 // Forward-declared recursive struct types.
 // - tree_t: cycle broken by std::vector<tree_t> (vector's internal
 //   indirection breaks the incomplete-type problem).
-// - ll_t: cycle broken by std::shared_ptr<ll_t> at the optional
-//   field. `nullptr == absent` matches the morloc-level ?LL
-//   semantics directly (the morloc encoding rule maps `?(recursive
-//   T)` to a single pointer-shape with null == absent).
+// - ll_t: cycle broken by mlc::rec_ptr<ll_t> at the optional field.
+//   `nullptr == absent` matches the morloc-level ?LL semantics directly
+//   (the morloc encoding rule maps `?(recursive T)` to a single
+//   pointer-shape with null == absent). A rec_ptr rather than a plain
+//   shared_ptr releases a deep list iteratively instead of one destructor
+//   frame per node.
 struct tree_t;
 struct ll_t;
 
@@ -30,7 +34,7 @@ struct tree_t {
 
 struct ll_t {
     int64_t head;
-    std::shared_ptr<ll_t> tail;
+    mlc::rec_ptr<ll_t> tail;
 };
 
 inline int64_t sum_tree(const tree_t& t) {

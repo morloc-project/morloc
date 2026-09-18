@@ -33,6 +33,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , RecMap
   , collectRecords
   , unifyRecords
+  , mergeVariantOccurrences
   , structName
 
     -- * Dispatch extraction
@@ -60,6 +61,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , makeManifoldDebugInfoLookup
   ) where
 
+import Control.Monad (foldM)
 import qualified Control.Monad.State as CMS
 import Data.Binary (Binary)
 import qualified Data.Map.Strict as Map
@@ -69,6 +71,7 @@ import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial (serialAstToType, makeSerialAST, serialAstToMsgpackSchema)
 import Morloc.Data.Doc
 import Morloc.Data.Text (Text)
+import qualified Morloc.Data.Text as MT
 import Morloc.Monad (Identity, Index, newIndex, runIdentity, runIndex)
 import qualified Morloc.Monad as MM
 
@@ -683,6 +686,41 @@ unifyRecords xs =
 structName :: Int -> FVar -> MDoc
 structName i (FV v (CV "struct")) = "mlc_" <> pretty v <> "_" <> pretty i
 structName _ (FV _ v) = pretty v
+
+-- | Merge every occurrence of one `data` type in a pool into the one
+-- declaration to emit. Each occurrence lists its arms with the field types
+-- as written and as the backend renders them. The merge is arm-wise and
+-- keeps declaration order: an arm's position is its wire tag, so sorting
+-- by name would silently renumber every constructor. The longer occurrence
+-- is the more complete view of the type and supplies the order; a
+-- constructor literal's type reports its own arm with no fields, so an
+-- occurrence with fields supplies them. Two occurrences that both carry an
+-- arm's fields must render them alike: the declaration they disagree on
+-- cannot serve both sites, and which one is emitted would otherwise be
+-- decided by traversal order.
+mergeVariantOccurrences ::
+  Text ->
+  [[(Text, ([a], [Text]))]] ->
+  Either Text [(Text, [a])]
+mergeVariantOccurrences _ [] = Right []
+mergeVariantOccurrences name (o : os) = map (\(c, (w, _)) -> (c, w)) <$> foldM merge o os
+  where
+    merge as bs = mapM (pick (Map.fromList as) (Map.fromList bs)) order
+      where
+        order = if length as >= length bs then map fst as else map fst bs
+    pick am bm c = case (Map.lookup c am, Map.lookup c bm) of
+      (Just (xs, rx), Just (ys, ry))
+        | null xs -> Right (c, (ys, ry))
+        | null ys -> Right (c, (xs, rx))
+        | rx == ry -> Right (c, (xs, rx))
+        | otherwise ->
+            Left $
+              "the `data` type " <> name <> " is used with two field types for its constructor "
+                <> c <> ": (" <> spell rx <> ") and (" <> spell ry <> ")"
+      (Just x, Nothing) -> Right (c, x)
+      (Nothing, Just y) -> Right (c, y)
+      _ -> Right (c, ([], []))
+    spell = MT.intercalate ", "
 
 unifyField :: [(Key, TypeF)] -> (Key, Maybe TypeF)
 unifyField [] = error "Empty field"

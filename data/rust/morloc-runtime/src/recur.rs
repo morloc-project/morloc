@@ -1,51 +1,11 @@
-//! Recursive-record env stack shared by every walker that descends a
-//! Schema tree. Each walker pushes a `&<name>` declaration onto the
-//! stack on entry and pops on exit; back-references (MORLOC_RECUR
-//! / `SerialType::Recur`) resolve their target by linear scan from
-//! the top of the stack.
-//!
-//! The stack stores raw `*const Schema` pointers rather than borrowed
-//! references because all walkers thread the same `&mut Vec<...>`
-//! while taking shared borrows of various sub-schemas during the
-//! traversal. The pointers are always derived from live `&Schema`
-//! values that outlive the walk (they come from the top-level Schema
-//! held on the caller's stack), so dereferencing them is safe as long
-//! as the walk doesn't mutate the Schema -- which it doesn't.
+//! Back-reference resolution for walkers that descend a Schema tree.
+//! `Resolver` binds every `Recur` node to its declaration once per walk,
+//! so a step resolves a back-reference by one binary search and never
+//! allocates; `reroot_under` makes a sub-schema self-contained for a
+//! reader that starts inside a declaration.
 
 use crate::error::MorlocError;
 use crate::schema::{Schema, SerialType};
-
-/// Stack of in-scope named-schema declarations.
-pub type RecurEnv = Vec<(String, *const Schema)>;
-
-/// Look up the most recent declaration of `name` on the env stack.
-///
-/// Returns a clear error rather than `Option` because every caller
-/// needs the error path -- a dangling back-reference is a wire-format
-/// or codegen bug, not a recoverable absence.
-pub fn lookup(env: &RecurEnv, name: &str) -> Result<*const Schema, MorlocError> {
-    env.iter()
-        .rev()
-        .find(|(n, _)| n == name)
-        .map(|(_, s)| *s)
-        .ok_or_else(|| {
-            MorlocError::Schema(format!(
-                "Recur back-reference to undeclared name '{name}'"
-            ))
-        })
-}
-
-/// An env holding only `schema`'s own declaration, for a walk that
-/// starts INSIDE a named schema rather than at it -- a record's fields
-/// taken one at a time, say -- so a back-reference to the schema itself
-/// still resolves.
-pub fn self_scope(schema: &Schema) -> RecurEnv {
-    match (schema.serial_type, schema.name.as_deref()) {
-        (SerialType::Recur, _) => Vec::new(),
-        (_, Some(n)) => vec![(n.to_string(), schema as *const Schema)],
-        _ => Vec::new(),
-    }
-}
 
 /// Make a sub-schema self-contained by replacing every back-reference to
 /// `parent`'s declaration with `parent` itself. A field schema handed to a
@@ -75,37 +35,163 @@ pub fn refers_to(s: &Schema, name: &str) -> bool {
         || s.parameters.iter().any(|c| refers_to(c, name))
 }
 
-/// Run `body` with `schema` pushed onto the env stack for the
-/// duration of the call. Recur nodes are not pushed (they carry the
-/// `name` field as a lookup key, not a binding site).
+/// Static resolution of the back-references in one schema tree.
 ///
-/// The closure body receives `&mut RecurEnv` so it can pass the env
-/// to recursive walker calls. The push/pop happens around the
-/// closure invocation; an early-return via `?` inside the closure
-/// still triggers the pop (Result is captured before pop runs).
-pub fn with_scope<F, R>(env: &mut RecurEnv, schema: &Schema, body: F) -> R
-where
-    F: FnOnce(&mut RecurEnv) -> R,
-{
-    let pushed = match (schema.serial_type, schema.name.as_deref()) {
-        (SerialType::Recur, _) => false,
-        (_, Some(n)) => {
-            env.push((n.to_string(), schema as *const Schema));
-            true
-        }
-        _ => false,
-    };
-    let result = body(env);
-    if pushed {
-        env.pop();
+/// A back-reference names the nearest enclosing declaration of its name,
+/// which is a property of the tree, so it is computed once per walk and
+/// looked up by node address instead of pushing declarations as the walk
+/// descends. The resolver also knows which nodes have no back-reference
+/// anywhere below them: a walker steps those by direct call, since the
+/// recursion is then bounded by the schema's height, and frames only the
+/// nodes under which a value can be arbitrarily deep.
+///
+/// Node addresses are the keys, so the resolver is bound to the tree it
+/// was built from and must not outlive it.
+pub struct Resolver<'r> {
+    /// Each `Recur` node with its declaration; a reference with no
+    /// enclosing declaration is kept with a null target and rejected only
+    /// when a walk reaches it.
+    targets: Vec<(*const Schema, *const Schema)>,
+    /// Every node of the tree whose subtree holds no `Recur`, sorted by
+    /// address.
+    shallow: Vec<*const Schema>,
+    /// Whether the tree holds any `Recur` at all.
+    recursive: bool,
+    _tree: std::marker::PhantomData<&'r Schema>,
+}
+
+impl<'r> Resolver<'r> {
+    pub fn new(root: &'r Schema) -> Resolver<'r> {
+        let mut r = Resolver {
+            targets: Vec::new(),
+            shallow: Vec::new(),
+            recursive: false,
+            _tree: std::marker::PhantomData,
+        };
+        let mut decls: Vec<&Schema> = Vec::new();
+        r.index(root, &mut decls);
+        r.shallow.sort_unstable();
+        r.targets.sort_unstable_by_key(|(k, _)| *k);
+        r
     }
-    result
+
+    /// Record `s` and its subtree; returns whether the subtree holds a
+    /// back-reference.
+    fn index(&mut self, s: &'r Schema, decls: &mut Vec<&'r Schema>) -> bool {
+        if s.serial_type == SerialType::Recur {
+            let target = decls
+                .iter()
+                .rev()
+                .find(|d| d.name == s.name)
+                .map_or(std::ptr::null(), |d| *d as *const Schema);
+            self.targets.push((s as *const Schema, target));
+            self.recursive = true;
+            return true;
+        }
+        let declares = s.name.is_some();
+        if declares {
+            decls.push(s);
+        }
+        let mut deep = false;
+        for p in &s.parameters {
+            deep |= self.index(p, decls);
+        }
+        if declares {
+            decls.pop();
+        }
+        if !deep {
+            self.shallow.push(s as *const Schema);
+        }
+        deep
+    }
+
+    /// The node a walk should treat `s` as: a `Recur` becomes its
+    /// declaration, anything else is itself.
+    #[inline]
+    pub fn resolve(&self, s: &'r Schema) -> Result<&'r Schema, MorlocError> {
+        if s.serial_type != SerialType::Recur {
+            return Ok(s);
+        }
+        let key = s as *const Schema;
+        match self.targets.binary_search_by_key(&key, |(k, _)| *k) {
+            Ok(i) if !self.targets[i].1.is_null() => {
+                // SAFETY: the target is a node of the tree this resolver was
+                // built from, which outlives the resolver.
+                Ok(unsafe { &*self.targets[i].1 })
+            }
+            _ => Err(MorlocError::Schema(format!(
+                "back-reference to '{}' has no enclosing declaration in this walk",
+                s.name.as_deref().unwrap_or("")
+            ))),
+        }
+    }
+
+    /// True when no back-reference occurs under `s`, so a walk may step it
+    /// by direct call. A node the resolver has not indexed is reported as
+    /// deep: framing it costs a heap frame, while stepping it by call could
+    /// recurse without bound.
+    #[inline]
+    pub fn flat(&self, s: &Schema) -> bool {
+        self.shallow.binary_search(&(s as *const Schema)).is_ok()
+    }
+
+    /// True when the tree holds no back-reference at all.
+    #[inline]
+    pub fn trivial(&self) -> bool {
+        !self.recursive
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::schema::{parse_schema, schema_to_string};
+
+    #[test]
+    fn resolver_binds_a_back_reference_to_the_nearest_declaration() {
+        let node = parse_schema(CHAIN).unwrap();
+        let r = Resolver::new(&node);
+        assert!(!r.trivial());
+        let recur = &node.parameters[1].parameters[0];
+        assert_eq!(recur.serial_type, SerialType::Recur);
+        assert!(std::ptr::eq(r.resolve(recur).unwrap(), &node));
+        assert!(std::ptr::eq(r.resolve(&node.parameters[0]).unwrap(), &node.parameters[0]));
+        // The label field has no back-reference below it; the record and
+        // its optional field do.
+        assert!(r.flat(&node.parameters[0]));
+        assert!(!r.flat(&node));
+        assert!(!r.flat(&node.parameters[1]));
+    }
+
+    #[test]
+    fn resolver_keeps_nested_declarations_apart() {
+        // An inner declaration reusing the outer name owns the references
+        // under it.
+        let s = parse_schema("&2T7m21vi44next?&2T7m21vs4next?^2T7").unwrap();
+        let r = Resolver::new(&s);
+        let inner = &s.parameters[1].parameters[0];
+        let inner_recur = &inner.parameters[1].parameters[0];
+        assert!(std::ptr::eq(r.resolve(inner_recur).unwrap(), inner));
+    }
+
+    #[test]
+    fn resolver_rejects_a_foreign_node_as_deep_and_an_unbound_reference_lazily() {
+        let s = parse_schema(CHAIN).unwrap();
+        let r = Resolver::new(&s);
+        let other = parse_schema("i4").unwrap();
+        assert!(!r.flat(&other));
+        // A field sliced out of its record has no declaration for its
+        // back-reference; the error comes when a walk reaches it.
+        let field = s.parameters[1].clone();
+        let r2 = Resolver::new(&field);
+        let recur = &field.parameters[0];
+        assert!(r2.resolve(recur).is_err());
+        let flat = parse_schema("at2si4").unwrap();
+        let r3 = Resolver::new(&flat);
+        assert!(r3.trivial());
+        assert!(r3.flat(&flat));
+        assert!(r3.flat(&flat.parameters[0]));
+    }
 
     // A linked chain: a record whose `next` field is an optional
     // back-reference to the record.
@@ -124,13 +210,5 @@ mod tests {
         assert_eq!(s, "?&4Nodem25labels4next?^4Node");
         let reparsed = parse_schema(&s).unwrap();
         assert_eq!(schema_to_string(&reparsed), s);
-    }
-
-    #[test]
-    fn a_walk_started_inside_a_record_sees_the_record() {
-        let node = parse_schema(CHAIN).unwrap();
-        let env = self_scope(&node);
-        assert!(lookup(&env, "Node").is_ok());
-        assert!(lookup(&Vec::new(), "Node").is_err());
     }
 }

@@ -29,9 +29,12 @@ def build_tree(depth):
 # Length 0 is represented by tail=None at the only node (head=0), so
 # tests start at n>=1 for sensible counts.
 def build_ll(n):
-    if n <= 0:
-        return {"head": 0, "tail": None}
-    return {"head": 1, "tail": build_ll(n - 1)}
+    # Built from the tail up so the depth is not bounded by Python's
+    # recursion limit.
+    node = {"head": 0, "tail": None}
+    for _ in range(n):
+        node = {"head": 1, "tail": node}
+    return node
 
 
 # Build a Container Int of length n with values 1, 2, ..., n. Same

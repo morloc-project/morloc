@@ -12,6 +12,7 @@
 // User code reads and builds columns with <nanoarrow/nanoarrow.h>.
 
 #include "morloc.h"
+#include "mlc_rec.hpp"
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -126,7 +127,9 @@ private:
     struct Impl {
         struct ArrowSchema schema;
         struct ArrowArray array;
-        std::shared_ptr<Impl> parent;
+        // A view keeps its source alive; a long chain of derived views is
+        // released through the drain rather than one frame per view.
+        mlc::rec_ptr<Impl> parent;
 
         Impl(struct ArrowSchema s, struct ArrowArray a, std::shared_ptr<Impl> p)
             : schema(s), array(a), parent(std::move(p)) {}

@@ -16,3 +16,9 @@
 0
 --- builtRust ---
 {"Twice":[{"Wrap":[{"Add":[{"Lit":[5]},{"Neg":["Zero"]}]}]}]}
+--- nested ---
+5
+--- nestedViaPy ---
+{"Up":[{"Down":[{"Cons":["s",{"Up":[{"Cons":[1,"Nil"]}]}]}]}]}
+--- schema of L Str ---
+&1Lv43Nil04Cons2s^1L2Up1&3L#1v43Nil04Cons2j^3L#12Up1^3L#14Down1^1L4Down1^1L

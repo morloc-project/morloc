@@ -20,6 +20,9 @@ all:
 	./nexus totalViaR '{"Node":[1.0,{"Node":[2.0,"Leaf","Leaf"]},{"Node":[3.0,"Leaf","Leaf"]}]}' >> obs.txt 2>> obs.err
 	echo "--- totalViaRust ---" >> obs.txt
 	./nexus totalViaRust '{"Node":[1.0,{"Node":[2.0,"Leaf","Leaf"]},{"Node":[3.0,"Leaf","Leaf"]}]}' >> obs.txt 2>> obs.err
+	echo "--- sameArmPayloads ---" >> obs.txt
+	./nexus stepUp '{"Node":[2.0,"Leaf","Leaf"]}' >> obs.txt 2>> obs.err
+	./nexus stepDown '{"Node":[2.0,"Leaf","Leaf"]}' >> obs.txt 2>> obs.err
 	echo "--- rejectsDanglingArity ---" >> obs.txt
 	if ./nexus total '{"Node":[1.0,"Leaf"]}' >> obs.err 2>&1; then echo UNEXPECTED >> obs.txt; else echo OK >> obs.txt; fi
 

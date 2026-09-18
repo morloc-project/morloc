@@ -1,12 +1,15 @@
--- A recursive `data` value of depth 30000 crosses a manifold boundary
+-- A recursive `data` value of depth 300000 crosses a manifold boundary
 -- (put_value / get_value) in the Rust pool. The chain is built by a
--- tail-recursive morloc function (a native loop) and counted by a sourced
--- Rust function that walks it by reference: morloc-level projection on a Rust
--- value clones the projected subtree, which is a separate cost (issue 91) and
--- would dominate at this depth. What this pins is that the pool's
--- (de)serializer walks the value without one machine-stack frame per level.
--- The depth is kept under the recursive Box destructor limit.
-module main (chainCount)
+-- tail-recursive morloc function (a native loop) and counted two ways: by a
+-- sourced Rust function that walks it by reference, and by a morloc-level
+-- tail loop that projects the tail out of each node. What this pins is that
+-- the pool's (de)serializer walks the value without one machine-stack frame
+-- per level, that releasing it afterwards does not either (the arms sit in
+-- a reference-counted box that hands a deep chain to an iterative drain),
+-- and that projecting a field shares the subtree instead of copying it, so
+-- the morloc-level count is linear. `sharedCount` releases a spine held by
+-- two owners.
+module main (chainCount, spineLoop, sharedCount)
 
 import root-rust
 
@@ -23,3 +26,16 @@ chainHelp n acc
 
 chainCount :: Int -> Int
 chainCount n = spineCount (chainHelp n Leaf)
+
+spineTail :: Int -> Tree -> Int
+spineTail | acc (Node _ _ r) = spineTail (acc + 1) r
+          | acc _ = acc
+
+spineLoop :: Int -> Int
+spineLoop n = spineTail 0 (chainHelp n Leaf)
+
+share :: Tree -> Tree
+share t = Node 0 t t
+
+sharedCount :: Int -> Int
+sharedCount n = spineTail 0 (share (chainHelp n Leaf))

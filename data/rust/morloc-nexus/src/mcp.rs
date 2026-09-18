@@ -32,7 +32,95 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use serde_json::value::RawValue;
 use serde_json::{json, Map, Value};
+
+/// A JSON value kept as the text it arrived in. A tool call's arguments and
+/// a call's result are user data of any depth and width; a tree-shaped
+/// parse would cap the depth and round a wide integer to a double.
+type Raw = Box<RawValue>;
+
+/// A tool call's named arguments, in the order the client wrote them.
+type Args = indexmap::IndexMap<String, Raw>;
+
+fn raw_of(v: &Value) -> Raw {
+    RawValue::from_string(v.to_string()).expect("a serialized value is JSON")
+}
+
+/// A JSON-RPC message. The envelope is protocol-shaped and small; `params`
+/// stays text until the method that reads it decides how.
+struct RpcMessage {
+    /// A request carries an `id` (echoed verbatim, null included); a
+    /// notification does not.
+    id: Option<Value>,
+    method: Option<String>,
+    params: Option<Raw>,
+}
+
+impl RpcMessage {
+    fn parse(text: &[u8]) -> Option<RpcMessage> {
+        let members: HashMap<String, Raw> = serde_json::from_slice(text).ok()?;
+        Some(RpcMessage {
+            id: members
+                .get("id")
+                .map(|r| serde_json::from_str::<Value>(r.get()).unwrap_or(Value::Null)),
+            method: members
+                .get("method")
+                .and_then(|r| serde_json::from_str::<String>(r.get()).ok()),
+            params: members.get("params").cloned(),
+        })
+    }
+
+    /// The string member `key` of the params object, when params is an
+    /// object holding one.
+    fn param_str(&self, key: &str) -> Option<String> {
+        let members: HashMap<String, Raw> = serde_json::from_str(self.params.as_ref()?.get()).ok()?;
+        serde_json::from_str::<String>(members.get(key)?.get()).ok()
+    }
+}
+
+/// The `params` of a `tools/call`.
+#[derive(serde::Deserialize)]
+struct ToolCallParams {
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<Raw>,
+}
+
+/// The tool name and named arguments of a `tools/call`, or the reason the
+/// params are unusable.
+fn tool_call_params(msg: &RpcMessage) -> Result<(String, Args), &'static str> {
+    let Some(params) = msg.params.as_ref() else { return Err("missing params") };
+    let Ok(p) = serde_json::from_str::<ToolCallParams>(params.get()) else { return Err("invalid params") };
+    let Some(name) = p.name else { return Err("missing tool 'name'") };
+    // `arguments` is optional; absence means an empty object.
+    let arguments = match p.arguments {
+        None => Args::new(),
+        Some(r) if r.get().trim_start().starts_with('{') => {
+            serde_json::from_str::<Args>(r.get()).map_err(|_| "invalid params")?
+        }
+        Some(_) => return Err("'arguments' must be an object"),
+    };
+    Ok((name, arguments))
+}
+
+/// The string argument `key`, when present and a string.
+fn arg_str(args: &Args, key: &str) -> Option<String> {
+    serde_json::from_str::<String>(args.get(key)?.get()).ok()
+}
+
+/// A daemon call request, with the args as the text they arrived in.
+#[derive(serde::Serialize)]
+struct CallRequest<'a> {
+    method: &'static str,
+    command: &'a str,
+    args: Vec<Raw>,
+}
+
+fn call_request(command: &str, args: Vec<Raw>) -> String {
+    serde_json::to_string(&CallRequest { method: "call", command, args })
+        .expect("a request of raw JSON members serializes")
+}
 
 use morloc_manifest::Manifest;
 use morloc_runtime_types::daemon_socket::MorlocSocket;
@@ -199,9 +287,9 @@ pub fn serve(
             continue;
         }
 
-        let msg: Value = match serde_json::from_str(trimmed) {
-            Ok(v) => v,
-            Err(_) => {
+        let msg = match RpcMessage::parse(trimmed.as_bytes()) {
+            Some(m) => m,
+            None => {
                 write_message(
                     protocol_fd,
                     &error_response(Value::Null, JSONRPC_PARSE_ERROR, "invalid JSON"),
@@ -241,7 +329,7 @@ impl Session {
 /// (messages carrying an `id`) and `None` for notifications (which never get a
 /// reply).
 fn handle_message(
-    msg: &Value,
+    msg: &RpcMessage,
     session: &mut Session,
     tools_list: &[Value],
     by_name: &HashMap<&str, &McpToolShape>,
@@ -249,13 +337,10 @@ fn handle_message(
     server_name: &str,
     server_version: &str,
 ) -> Option<Value> {
-    let method = msg.get("method").and_then(|m| m.as_str());
-    // A request carries an `id`; a notification does not. `id` may be a string,
-    // number, or null and is echoed verbatim.
-    let id = msg.get("id").cloned();
+    let id = msg.id.clone();
     let is_request = id.is_some();
 
-    let method = match method {
+    let method = match msg.method.as_deref() {
         Some(m) => m,
         None => {
             // A message with no method and an id is a malformed request.
@@ -272,12 +357,8 @@ fn handle_message(
             let Some(id) = id else { return None };
             // Version negotiation: echo the client's requested version when we
             // support it, else advertise ours.
-            let requested = msg
-                .get("params")
-                .and_then(|p| p.get("protocolVersion"))
-                .and_then(|v| v.as_str());
-            let version = match requested {
-                Some(v) if v == SERVER_PROTOCOL_VERSION => v.to_string(),
+            let version = match msg.param_str("protocolVersion") {
+                Some(v) if v == SERVER_PROTOCOL_VERSION => v,
                 _ => SERVER_PROTOCOL_VERSION.to_string(),
             };
             Some(result_response(
@@ -343,19 +424,15 @@ fn handle_message(
 /// errors; execution problems become a normal result with `isError: true`.
 fn handle_tools_call(
     id: Value,
-    msg: &Value,
+    msg: &RpcMessage,
     by_name: &HashMap<&str, &McpToolShape>,
     ctx: &DispatchCtx,
 ) -> Value {
-    let params = match msg.get("params") {
-        Some(p) => p,
-        None => return error_response(id, JSONRPC_INVALID_PARAMS, "missing params"),
+    let (name, arguments) = match tool_call_params(msg) {
+        Ok(p) => p,
+        Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, e),
     };
-    let name = match params.get("name").and_then(|n| n.as_str()) {
-        Some(n) => n,
-        None => return error_response(id, JSONRPC_INVALID_PARAMS, "missing tool 'name'"),
-    };
-    let shape = match by_name.get(name) {
+    let shape = match by_name.get(name.as_str()) {
         Some(s) => *s,
         None => {
             return error_response(
@@ -366,22 +443,8 @@ fn handle_tools_call(
         }
     };
 
-    // `arguments` is optional; absence means an empty object.
-    let empty = Map::new();
-    let arguments = match params.get("arguments") {
-        None | Some(Value::Null) => &empty,
-        Some(Value::Object(m)) => m,
-        Some(_) => {
-            return error_response(
-                id,
-                JSONRPC_INVALID_PARAMS,
-                "'arguments' must be an object",
-            )
-        }
-    };
-
     // Validate + invert named arguments into the exact-arity positional array.
-    let positional = match resolve_arguments(shape, arguments) {
+    let positional = match resolve_arguments(shape, &arguments) {
         Ok(p) => p,
         Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
     };
@@ -391,11 +454,8 @@ fn handle_tools_call(
     // dispatches that projection's entry command and packages its result by the
     // entry's media type. `_render` is not a pool argument, so `positional` is
     // identical for the command and any of its projections.
-    let render_sel = arguments
-        .get("_render")
-        .and_then(|v| v.as_str())
-        .unwrap_or("raw");
-    let (dispatch_command, ret_mime, returns_object) = match shape.dispatch_for(render_sel) {
+    let render_sel = arg_str(&arguments, "_render").unwrap_or_else(|| "raw".to_string());
+    let (dispatch_command, ret_mime, returns_object) = match shape.dispatch_for(&render_sel) {
         Ok(target) => target,
         Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
     };
@@ -403,13 +463,7 @@ fn handle_tools_call(
     // Dispatch through the shared execution backend. A media-typed projection is
     // fetched as raw bytes (no JSON int-array), then base64'd into an MCP block.
     let want_media = ret_mime.is_some();
-    let request_json = json!({
-        "method": "call",
-        "command": dispatch_command,
-        "args": Value::Array(positional),
-    });
-
-    match ctx.dispatch(&request_json, want_media) {
+    match ctx.dispatch(&call_request(&dispatch_command, positional), want_media) {
         Ok(DispatchOutcome::Media(content)) => {
             result_response(id, media_result_object(content))
         }
@@ -434,10 +488,7 @@ fn handle_tools_call(
 /// Validate the client's named `arguments` against a tool's inputSchema and
 /// invert them into the exact-arity positional array `daemon_dispatch` expects.
 /// Pure (no FFI): rejects unknown/missing arguments and resolves each slot.
-fn resolve_arguments(
-    shape: &McpToolShape,
-    arguments: &Map<String, Value>,
-) -> Result<Vec<Value>, String> {
+fn resolve_arguments(shape: &McpToolShape, arguments: &Args) -> Result<Vec<Raw>, String> {
     // Reject unknown argument names (inputSchema is additionalProperties:false).
     for key in arguments.keys() {
         if !shape.prop_names.contains(key) {
@@ -451,7 +502,7 @@ fn resolve_arguments(
         }
     }
     // One resolved value per declared arg slot, in order.
-    let mut positional: Vec<Value> = Vec::with_capacity(shape.slots.len());
+    let mut positional: Vec<Raw> = Vec::with_capacity(shape.slots.len());
     for slot in &shape.slots {
         positional.push(resolve_slot(slot, arguments)?);
     }
@@ -459,26 +510,30 @@ fn resolve_arguments(
 }
 
 /// Resolve one argument slot against the client's named `arguments`.
-fn resolve_slot(slot: &ArgSlot, args: &Map<String, Value>) -> Result<Value, String> {
+fn resolve_slot(slot: &ArgSlot, args: &Args) -> Result<Raw, String> {
     match slot {
         // Required-ness was already enforced in `resolve_arguments`, so an
         // absent key here is genuinely optional and falls back to `missing`.
         ArgSlot::Value { key, missing } => {
-            Ok(args.get(key).cloned().unwrap_or_else(|| missing.clone()))
+            Ok(args.get(key).cloned().unwrap_or_else(|| raw_of(missing)))
         }
         ArgSlot::Flag { key, default } => match args.get(key) {
-            Some(Value::Bool(b)) => Ok(Value::Bool(*b)),
-            Some(_) => Err(format!("argument '{}' must be a boolean", key)),
-            None => Ok(Value::Bool(*default)),
+            Some(r) => match serde_json::from_str::<bool>(r.get()) {
+                Ok(_) => Ok(r.clone()),
+                Err(_) => Err(format!("argument '{}' must be a boolean", key)),
+            },
+            None => Ok(raw_of(&Value::Bool(*default))),
         },
         ArgSlot::Record { group_key, fields } => {
             // Whole-object (group_opt) form: start from the object the client
             // passed under the group key, if any. A non-object value is
             // forwarded as-is for the pool to reject.
-            let mut obj = match group_key.as_ref().and_then(|gk| args.get(gk)) {
-                Some(Value::Object(m)) => m.clone(),
+            let mut obj: Args = match group_key.as_ref().and_then(|gk| args.get(gk)) {
+                Some(r) if r.get().trim_start().starts_with('{') => {
+                    serde_json::from_str(r.get()).map_err(|e| e.to_string())?
+                }
                 Some(other) => return Ok(other.clone()),
-                None => Map::new(),
+                None => Args::new(),
             };
             // Fill every field still absent -- from its own flat argument key
             // (the unrolled form) or its default. So BOTH record forms supply
@@ -489,11 +544,12 @@ fn resolve_slot(slot: &ArgSlot, args: &Map<String, Value>) -> Result<Value, Stri
                     let v = args
                         .get(&f.field)
                         .cloned()
-                        .unwrap_or_else(|| f.default.clone());
+                        .unwrap_or_else(|| raw_of(&f.default));
                     obj.insert(f.field.clone(), v);
                 }
             }
-            Ok(Value::Object(obj))
+            let text = serde_json::to_string(&obj).map_err(|e| e.to_string())?;
+            RawValue::from_string(text).map_err(|e| e.to_string())
         }
     }
 }
@@ -527,9 +583,8 @@ impl DispatchCtx {
     /// INTERNAL failure a pool may have died, so probe liveness and run crash
     /// recovery (a fast no-op when all pools are alive) before returning, so a
     /// subsequent call can succeed.
-    fn dispatch(&self, request_json: &Value, want_media: bool) -> Result<DispatchOutcome, String> {
-        let request_str = request_json.to_string();
-        let req_c = CString::new(request_str.as_str()).unwrap();
+    fn dispatch(&self, request_str: &str, want_media: bool) -> Result<DispatchOutcome, String> {
+        let req_c = CString::new(request_str).unwrap();
 
         let mut errmsg: *mut c_char = ptr::null_mut();
         let req = unsafe {
@@ -1150,16 +1205,16 @@ fn handle_http_post(
     state: &Arc<Mutex<HttpState>>,
     keep_alive: bool,
 ) -> Vec<u8> {
-    let msg: Value = match serde_json::from_slice(&req.body) {
-        Ok(v) => v,
-        Err(_) => {
+    let msg = match RpcMessage::parse(&req.body) {
+        Some(m) => m,
+        None => {
             let body = error_response(Value::Null, JSONRPC_PARSE_ERROR, "invalid JSON")
                 .to_string()
                 .into_bytes();
             return http_json(200, &body, keep_alive);
         }
     };
-    let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let method = msg.method.as_deref().unwrap_or("");
     let sid_hdr = header_get(&req.headers, "mcp-session-id").map(|s| s.to_string());
 
     // Recover a poisoned lock so one panicking request cannot wedge the server.
@@ -1511,7 +1566,7 @@ impl Frontend {
     /// Forward `request_json` to `module`'s child daemon. Holds the per-module
     /// lock across `router_forward` (whose crash-detect mutates the child's
     /// RouterProgram).
-    fn forward(&self, module: &str, request_json: &Value) -> Result<ForwardOk, String> {
+    fn forward(&self, module: &str, request_str: &str) -> Result<ForwardOk, String> {
         // Fail closed: every served module must have a per-module lock, since
         // router_forward mutates the child's RouterProgram (waitpid + restart).
         // Forwarding without the lock would be a silent unserialized race, so a
@@ -1519,8 +1574,7 @@ impl Frontend {
         let lock = self.locks.get(module).ok_or_else(|| {
             format!("internal error: no forward lock for module '{}'", module)
         })?;
-        let request_str = request_json.to_string();
-        let req_c = CString::new(request_str.as_str())
+        let req_c = CString::new(request_str)
             .map_err(|_| "request contains a NUL byte".to_string())?;
         let mut errmsg: *mut c_char = ptr::null_mut();
         let req =
@@ -2041,14 +2095,14 @@ fn frontend_eval_api(req: &HttpRequest, fe: &Frontend, keep_alive: bool) -> Vec<
     if !fe.eval_enabled {
         return http_json(404, br#"{"error":"eval is not exposed"}"#, keep_alive);
     }
-    let expr: Option<String> = match serde_json::from_slice::<Value>(&req.body) {
-        Ok(Value::Object(o)) => o
-            .get("expr")
-            .or_else(|| o.get("expression"))
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        Ok(Value::String(s)) => Some(s),
-        _ => None,
+    let body = String::from_utf8_lossy(&req.body);
+    let expr: Option<String> = if body.trim_start().starts_with('{') {
+        serde_json::from_str::<HashMap<String, Raw>>(&body).ok().and_then(|o| {
+            let r = o.get("expr").or_else(|| o.get("expression"))?;
+            serde_json::from_str::<String>(r.get()).ok()
+        })
+    } else {
+        serde_json::from_str::<String>(&body).ok()
     };
     let expr = match expr {
         Some(e) => e,
@@ -2069,16 +2123,16 @@ fn frontend_eval_api(req: &HttpRequest, fe: &Frontend, keep_alive: bool) -> Vec<
 /// `POST /mcp`: one JSON-RPC message. Session resolution locks briefly; the
 /// forward (dispatch) runs lock-free so modules execute in parallel.
 fn frontend_mcp_post(req: &HttpRequest, fe: &Arc<Frontend>, keep_alive: bool) -> Vec<u8> {
-    let msg: Value = match serde_json::from_slice(&req.body) {
-        Ok(v) => v,
-        Err(_) => {
+    let msg = match RpcMessage::parse(&req.body) {
+        Some(m) => m,
+        None => {
             let body = error_response(Value::Null, JSONRPC_PARSE_ERROR, "invalid JSON")
                 .to_string()
                 .into_bytes();
             return http_json(200, &body, keep_alive);
         }
     };
-    let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let method = msg.method.as_deref().unwrap_or("");
     let sid_hdr = header_get(&req.headers, "mcp-session-id").map(|s| s.to_string());
     let now = Instant::now();
 
@@ -2148,11 +2202,10 @@ fn frontend_mcp_delete(req: &HttpRequest, fe: &Arc<Frontend>, keep_alive: bool) 
 
 /// MCP message core for the front-end (mirrors `handle_message`, but tools/call
 /// forwards to a per-module child instead of dispatching in-process).
-fn frontend_handle_message(msg: &Value, session: &mut Session, fe: &Frontend) -> Option<Value> {
-    let method = msg.get("method").and_then(|m| m.as_str());
-    let id = msg.get("id").cloned();
+fn frontend_handle_message(msg: &RpcMessage, session: &mut Session, fe: &Frontend) -> Option<Value> {
+    let id = msg.id.clone();
     let is_request = id.is_some();
-    let method = match method {
+    let method = match msg.method.as_deref() {
         Some(m) => m,
         None => {
             return id.map(|id| error_response(id, JSONRPC_INVALID_REQUEST, "missing 'method'"))
@@ -2161,12 +2214,8 @@ fn frontend_handle_message(msg: &Value, session: &mut Session, fe: &Frontend) ->
     match method {
         "initialize" => {
             let Some(id) = id else { return None };
-            let requested = msg
-                .get("params")
-                .and_then(|p| p.get("protocolVersion"))
-                .and_then(|v| v.as_str());
-            let version = match requested {
-                Some(v) if v == SERVER_PROTOCOL_VERSION => v.to_string(),
+            let version = match msg.param_str("protocolVersion") {
+                Some(v) if v == SERVER_PROTOCOL_VERSION => v,
                 _ => SERVER_PROTOCOL_VERSION.to_string(),
             };
             Some(result_response(
@@ -2221,20 +2270,10 @@ fn frontend_handle_message(msg: &Value, session: &mut Session, fe: &Frontend) ->
 
 /// A front-end `tools/call`: resolve the namespaced tool to (module, command),
 /// validate + invert arguments, forward to the module's child, render the reply.
-fn frontend_tools_call(id: Value, msg: &Value, fe: &Frontend) -> Value {
-    let params = match msg.get("params") {
-        Some(p) => p,
-        None => return error_response(id, JSONRPC_INVALID_PARAMS, "missing params"),
-    };
-    let name = match params.get("name").and_then(|n| n.as_str()) {
-        Some(n) => n,
-        None => return error_response(id, JSONRPC_INVALID_PARAMS, "missing tool 'name'"),
-    };
-    let empty = Map::new();
-    let arguments = match params.get("arguments") {
-        None | Some(Value::Null) => &empty,
-        Some(Value::Object(m)) => m,
-        Some(_) => return error_response(id, JSONRPC_INVALID_PARAMS, "'arguments' must be an object"),
+fn frontend_tools_call(id: Value, msg: &RpcMessage, fe: &Frontend) -> Value {
+    let (name, arguments) = match tool_call_params(msg) {
+        Ok(p) => p,
+        Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, e),
     };
     // The synthetic eval capability (not a module): forks a sandboxed
     // `morloc eval`, keeping the front-end's no-in-process-compute invariant.
@@ -2247,11 +2286,11 @@ fn frontend_tools_call(id: Value, msg: &Value, fe: &Frontend) -> Value {
         if fe.eval_needs_token {
             return error_response(id, JSONRPC_INVALID_PARAMS, EVAL_NEEDS_TOKEN);
         }
-        let expr = match arguments.get("expression").and_then(|v| v.as_str()) {
+        let expr = match arg_str(&arguments, "expression") {
             Some(e) => e,
             None => return error_response(id, JSONRPC_INVALID_PARAMS, "missing 'expression'"),
         };
-        return match frontend_eval(expr, fe) {
+        return match frontend_eval(&expr, fe) {
             Ok(out) => result_response(id, json!({ "content": [ { "type": "text", "text": out } ] })),
             Err(message) => result_response(
                 id,
@@ -2259,30 +2298,25 @@ fn frontend_tools_call(id: Value, msg: &Value, fe: &Frontend) -> Value {
             ),
         };
     }
-    let (module, shape) = match fe.mcp_by_name.get(name) {
+    let (module, shape) = match fe.mcp_by_name.get(name.as_str()) {
         Some(t) => t,
         None => {
             return error_response(id, JSONRPC_INVALID_PARAMS, &format!("unknown tool '{}'", name))
         }
     };
-    let positional = match resolve_arguments(shape, arguments) {
+    let positional = match resolve_arguments(shape, &arguments) {
         Ok(p) => p,
         Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
     };
-    let render_sel = arguments.get("_render").and_then(|v| v.as_str()).unwrap_or("raw");
+    let render_sel = arg_str(&arguments, "_render").unwrap_or_else(|| "raw".to_string());
     // A media (`@mime`) projection comes back from the child as raw bytes+mime
     // (base64 over the wire) and is rendered as an MCP media block below; the
     // JSON projection becomes a text/structured result.
-    let (dispatch_command, _ret_mime, returns_object) = match shape.dispatch_for(render_sel) {
+    let (dispatch_command, _ret_mime, returns_object) = match shape.dispatch_for(&render_sel) {
         Ok(t) => t,
         Err(e) => return error_response(id, JSONRPC_INVALID_PARAMS, &e),
     };
-    let request_json = json!({
-        "method": "call",
-        "command": dispatch_command,
-        "args": Value::Array(positional),
-    });
-    match fe.forward(module, &request_json) {
+    match fe.forward(module, &call_request(&dispatch_command, positional)) {
         Ok(ForwardOk::Json(result_json)) => {
             result_response(id, tool_result_object(&result_json, returns_object))
         }
@@ -2313,24 +2347,36 @@ fn frontend_call_api(
     if !fe.api_modules.contains(module) {
         return http_json(404, br#"{"error":"module not exposed on the API"}"#, keep_alive);
     }
-    let args: Value = if req.body.is_empty() {
-        Value::Array(Vec::new())
-    } else {
-        match serde_json::from_slice::<Value>(&req.body) {
-            Ok(Value::Array(a)) => Value::Array(a),
-            Ok(Value::Object(o)) => o.get("args").cloned().unwrap_or(Value::Array(Vec::new())),
-            Ok(_) => {
-                return http_json(
-                    400,
-                    br#"{"error":"body must be a JSON array or {\"args\":[...]}"}"#,
-                    keep_alive,
-                )
-            }
+    // The args stay the text they arrived in.
+    let body = String::from_utf8_lossy(&req.body);
+    let trimmed = body.trim();
+    let args: Raw = if trimmed.is_empty() {
+        raw_of(&Value::Array(Vec::new()))
+    } else if trimmed.starts_with('[') {
+        match serde_json::from_str::<Raw>(trimmed) {
+            Ok(a) => a,
             Err(_) => return http_json(400, br#"{"error":"invalid JSON body"}"#, keep_alive),
         }
+    } else if trimmed.starts_with('{') {
+        match serde_json::from_str::<HashMap<String, Raw>>(trimmed) {
+            Ok(o) => o.get("args").cloned().unwrap_or_else(|| raw_of(&Value::Array(Vec::new()))),
+            Err(_) => return http_json(400, br#"{"error":"invalid JSON body"}"#, keep_alive),
+        }
+    } else if serde_json::from_str::<&RawValue>(trimmed).is_ok() {
+        return http_json(
+            400,
+            br#"{"error":"body must be a JSON array or {\"args\":[...]}"}"#,
+            keep_alive,
+        );
+    } else {
+        return http_json(400, br#"{"error":"invalid JSON body"}"#, keep_alive);
     };
-    let request_json = json!({ "method": "call", "command": command, "args": args });
-    match fe.forward(module, &request_json) {
+    let request_str = format!(
+        "{{\"method\":\"call\",\"command\":{},\"args\":{}}}",
+        Value::String(command.to_string()),
+        args.get()
+    );
+    match fe.forward(module, &request_str) {
         Ok(ForwardOk::Json(result_json)) => {
             let body = format!("{{\"status\":\"ok\",\"result\":{}}}", result_json);
             http_json(200, body.as_bytes(), keep_alive)
@@ -2377,11 +2423,16 @@ mod tests {
         }
     }
 
-    fn args(v: Value) -> Map<String, Value> {
+    fn args(v: Value) -> Args {
         match v {
-            Value::Object(m) => m,
+            Value::Object(m) => m.iter().map(|(k, v)| (k.clone(), raw_of(v))).collect(),
             _ => panic!("test args must be an object"),
         }
+    }
+
+    /// The resolved positional arguments as the JSON they would be sent as.
+    fn resolved(s: &McpToolShape, a: Value) -> Result<Vec<String>, String> {
+        resolve_arguments(s, &args(a)).map(|v| v.iter().map(|r| r.get().to_string()).collect())
     }
 
     /// A one-pool manifest written into a fresh directory, returned with the
@@ -2467,11 +2518,50 @@ mod tests {
             &[],
             false,
         );
-        assert_eq!(resolve_arguments(&s, &args(json!({}))).unwrap(), vec![json!(5)]);
+        assert_eq!(resolved(&s, json!({})).unwrap(), vec![json!(5).to_string()]);
         assert_eq!(
-            resolve_arguments(&s, &args(json!({ "count": 10 }))).unwrap(),
-            vec![json!(10)]
+            resolved(&s, json!({ "count": 10 })).unwrap(),
+            vec![json!(10).to_string()]
         );
+    }
+
+    // A tool call's arguments reach the pool as the text the client sent:
+    // a value nested past any tree parser's limit and an integer wider than
+    // a double both pass through unchanged.
+    #[test]
+    fn tool_arguments_pass_through_as_text() {
+        let deep = format!("{}1{}", "[".repeat(400), "]".repeat(400));
+        let text = format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{{\"name\":\"t\",\"arguments\":{{\"big\":18446744073709551617,\"deep\":{deep}}}}}}}"
+        );
+        let msg = RpcMessage::parse(text.as_bytes()).unwrap();
+        assert_eq!(msg.id, Some(json!(1)));
+        assert_eq!(msg.method.as_deref(), Some("tools/call"));
+        let (name, arguments) = tool_call_params(&msg).unwrap();
+        assert_eq!(name, "t");
+        let s = shape(
+            vec![
+                ArgSlot::Value { key: "big".into(), missing: Value::Null },
+                ArgSlot::Value { key: "deep".into(), missing: Value::Null },
+            ],
+            &["big", "deep"],
+            &["big", "deep"],
+            false,
+        );
+        let positional = resolve_arguments(&s, &arguments).unwrap();
+        assert_eq!(
+            call_request("t", positional),
+            format!("{{\"method\":\"call\",\"command\":\"t\",\"args\":[18446744073709551617,{deep}]}}")
+        );
+        // Arguments that are not an object are rejected, as is a message
+        // without params.
+        let bad = RpcMessage::parse(b"{\"method\":\"tools/call\",\"params\":{\"name\":\"t\",\"arguments\":[1]}}").unwrap();
+        assert_eq!(tool_call_params(&bad).unwrap_err(), "'arguments' must be an object");
+        let none = RpcMessage::parse(b"{\"method\":\"tools/call\"}").unwrap();
+        assert_eq!(tool_call_params(&none).unwrap_err(), "missing params");
+        // A null id still marks a request.
+        let nul = RpcMessage::parse(b"{\"id\":null,\"method\":\"ping\"}").unwrap();
+        assert_eq!(nul.id, Some(Value::Null));
     }
 
     #[test]
@@ -2482,8 +2572,8 @@ mod tests {
             &["n"],
             false,
         );
-        assert!(resolve_arguments(&s, &args(json!({}))).is_err());
-        assert_eq!(resolve_arguments(&s, &args(json!({ "n": 7 }))).unwrap(), vec![json!(7)]);
+        assert!(resolved(&s, json!({})).is_err());
+        assert_eq!(resolved(&s, json!({ "n": 7 })).unwrap(), vec![json!(7).to_string()]);
     }
 
     #[test]
@@ -2494,7 +2584,7 @@ mod tests {
             &[],
             false,
         );
-        assert!(resolve_arguments(&s, &args(json!({ "bogus": 1 }))).is_err());
+        assert!(resolved(&s, json!({ "bogus": 1 })).is_err());
     }
 
     #[test]
@@ -2505,10 +2595,10 @@ mod tests {
             &[],
             false,
         );
-        assert_eq!(resolve_arguments(&s, &args(json!({}))).unwrap(), vec![json!(false)]);
-        assert_eq!(resolve_arguments(&s, &args(json!({ "v": true }))).unwrap(), vec![json!(true)]);
+        assert_eq!(resolved(&s, json!({})).unwrap(), vec![json!(false).to_string()]);
+        assert_eq!(resolved(&s, json!({ "v": true })).unwrap(), vec![json!(true).to_string()]);
         // Non-boolean flag value is rejected.
-        assert!(resolve_arguments(&s, &args(json!({ "v": "yes" }))).is_err());
+        assert!(resolved(&s, json!({ "v": "yes" })).is_err());
     }
 
     #[test]
@@ -2527,8 +2617,8 @@ mod tests {
         );
         // Provided field overrides its default; omitted field uses it.
         assert_eq!(
-            resolve_arguments(&s, &args(json!({ "a": 10 }))).unwrap(),
-            vec![json!({ "a": 10, "b": "hi" })]
+            resolved(&s, json!({ "a": 10 })).unwrap(),
+            vec![json!({ "a": 10, "b": "hi" }).to_string()]
         );
     }
 
@@ -2545,14 +2635,27 @@ mod tests {
         );
         // Whole object passed under the group key is used verbatim.
         assert_eq!(
-            resolve_arguments(&s, &args(json!({ "cfg": { "a": 9 } }))).unwrap(),
-            vec![json!({ "a": 9 })]
+            resolved(&s, json!({ "cfg": { "a": 9 } })).unwrap(),
+            vec![json!({ "a": 9 }).to_string()]
         );
         // Omitted: assembled from field defaults.
         assert_eq!(
-            resolve_arguments(&s, &args(json!({}))).unwrap(),
-            vec![json!({ "a": 3 })]
+            resolved(&s, json!({})).unwrap(),
+            vec![json!({ "a": 3 }).to_string()]
         );
+    }
+
+    // A result keeps every digit of a wide integer in both the text and
+    // the structured mirror, and a result nested past the tree parser's
+    // limit is still delivered as text.
+    #[test]
+    fn result_text_is_exact() {
+        let r = tool_result_object("{\"n\":18446744073709551617}", true);
+        assert_eq!(r["content"][0]["text"], "{\"n\":18446744073709551617}");
+        assert_eq!(r["structuredContent"].to_string(), "{\"n\":18446744073709551617}");
+        let deep = format!("{}1{}", "[".repeat(400), "]".repeat(400));
+        let r = tool_result_object(&deep, false);
+        assert_eq!(r["content"][0]["text"], deep);
     }
 
     #[test]
@@ -2622,6 +2725,7 @@ mod tests {
     }
 
     fn call(msg: Value, session: &mut Session, tools: &[Value]) -> Option<Value> {
+        let msg = RpcMessage::parse(msg.to_string().as_bytes()).expect("test messages are objects");
         // These tests exercise only non-FFI methods (initialize / tools/list /
         // ping / unknown), which never call `ctx.dispatch`, so a null-pointer
         // context is never dereferenced.

@@ -1,0 +1,58 @@
+-- The wire schema text of every recursive shape, as the manifest publishes
+-- it: a record with an optional self-reference, a record recursive through
+-- a list, a `data` type, two mutually recursive `data` types, a rose tree,
+-- a parameterized type at two instantiations, and a parameterized type
+-- nested inside itself at a different instantiation, whose inner
+-- declaration must carry its own name so a back-reference inside it does
+-- not resolve to the outer one.
+module main (ll, tree, node, alt, rose, ints, strs, nested)
+
+import root-py
+
+record LL where
+  head :: Int
+  tail :: ?LL
+record Py => LL = "dict"
+
+record Tree where
+  value :: Int
+  children :: [Tree]
+record Py => Tree = "dict"
+
+data Node = Leaf | Branch Int Node Node
+
+data AltA = ALeaf | ANode Int AltB
+data AltB = BLeaf | BNode Int AltA
+
+data Rose = Rose Int [Rose]
+
+data Seq a = Nil | Cons a (Seq a)
+
+record T7 a where
+  value :: a
+  children :: [T7 a]
+record Py => T7 a = "dict"
+
+ll :: LL -> LL
+ll = idpy
+
+tree :: Tree -> Tree
+tree = idpy
+
+node :: Node -> Node
+node = idpy
+
+alt :: AltA -> AltA
+alt = idpy
+
+rose :: Rose -> Rose
+rose = idpy
+
+ints :: Seq Int -> Seq Int
+ints = idpy
+
+strs :: Seq Str -> Seq Str
+strs = idpy
+
+nested :: T7 (T7 Int) -> T7 (T7 Int)
+nested = idpy

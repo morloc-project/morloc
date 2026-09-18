@@ -1,0 +1,55 @@
+-- Mutual tail recursion whose two halves prefer different pools: `ping`
+-- tests and steps in Python, `pong` in C++. A back-edge that crossed pools
+-- would nest one foreign call per level, parking a worker in each pool
+-- per level, so the depth a program could reach would be set by how many
+-- workers the pools can spawn (and the spawning deadlocks well before
+-- memory runs out). Both halves are therefore realized in one pool and
+-- lowered to a single loop that makes a bounded number of foreign calls
+-- per step, so the recursion runs at any depth. A three-way cycle through
+-- a third function checks that every function on the cycle is pinned,
+-- not only the one holding the back-edge.
+module main (pingPong, threeWay)
+
+import root-py
+import root-cpp
+
+source Py from "prim.py" ("dec" as decPy, "inc" as incPy, "is_zero" as isZeroPy)
+decPy :: Int -> Int
+incPy :: Int -> Int
+isZeroPy :: Int -> Bool
+
+source Cpp from "prim.hpp" ("dec" as decCpp, "inc" as incCpp, "is_zero" as isZeroCpp)
+decCpp :: Int -> Int
+incCpp :: Int -> Int
+isZeroCpp :: Int -> Bool
+
+ping :: Int -> Int -> Int
+ping n acc
+  ? isZeroPy n = acc
+  : pong (decPy n) (incPy acc)
+
+pong :: Int -> Int -> Int
+pong n acc
+  ? isZeroCpp n = acc
+  : ping (decCpp n) (incCpp acc)
+
+pingPong :: Int -> Int
+pingPong n = ping n 0
+
+stepA :: Int -> Int -> Int
+stepA n acc
+  ? isZeroPy n = acc
+  : stepB (decPy n) (incPy acc)
+
+stepB :: Int -> Int -> Int
+stepB n acc
+  ? isZeroCpp n = acc
+  : stepC (decCpp n) (incCpp acc)
+
+stepC :: Int -> Int -> Int
+stepC n acc
+  ? isZeroPy n = acc
+  : stepA (decPy n) (incCpp acc)
+
+threeWay :: Int -> Int
+threeWay n = stepA n 0

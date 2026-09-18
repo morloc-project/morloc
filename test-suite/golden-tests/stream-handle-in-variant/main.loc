@@ -1,0 +1,24 @@
+-- A file handle inside a constructor's payload survives the cache: the
+-- persisted packet carries the file's path rather than the process-local
+-- slot id, so the second run, which reads the value back from the cache
+-- file, reopens the file instead of dereferencing a stale handle.
+module main (cachedFirst)
+
+import root-py
+
+data Src = NoSrc | Src (IFile [Int])
+
+openSrc :: Str -> <IO> Src
+openSrc path = do
+  Ok f <- @open path :: <IO> (Try Str (IFile [Int]))
+  Src f
+
+firstOf :: Src -> Int
+firstOf | (Src f) = .[0] f
+        | _ = -1
+
+cachedFirst :: Str -> <IO> Int
+cachedFirst path = do
+  @save 0 path [7, 8, 9]
+  s <- openSrc path
+  firstOf (a@idpy s)

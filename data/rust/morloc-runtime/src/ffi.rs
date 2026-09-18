@@ -426,206 +426,228 @@ pub fn calc_voidstar_size_bounded(
     schema: &crate::schema::Schema,
     upper_bound: usize,
 ) -> Result<usize, MorlocError> {
-    let mut env: crate::recur::RecurEnv = Vec::new();
-    calc_voidstar_size_with_env(data, schema, &mut env, upper_bound)
+    let mut w = SizeWalk { res: crate::recur::Resolver::new(schema), total: 0, bound: upper_bound };
+    let mut st = crate::walk::Stack::new();
+    st.enter(schema, data, false);
+    crate::walk::run(&mut w, &mut st)?;
+    Ok(w.total)
 }
 
-fn calc_voidstar_size_with_env(
-    data: *const u8,
-    schema: &crate::schema::Schema,
-    env: &mut crate::recur::RecurEnv,
-    upper_bound: usize,
-) -> Result<usize, MorlocError> {
-    crate::recur::with_scope(env, schema, |env| {
-        calc_voidstar_size_inner_walk(data, schema, env, upper_bound)
-    })
+use crate::walk::Walker as _;
+
+/// The size walk. A frame's `x` says whether the parent already counted
+/// this node's slot (a tuple or record counts its whole fixed layout up
+/// front), in which case only the bytes beyond the slot are added.
+struct SizeWalk<'r> {
+    res: crate::recur::Resolver<'r>,
+    total: usize,
+    bound: usize,
 }
 
-fn calc_voidstar_size_inner_walk(
-    data: *const u8,
-    schema: &crate::schema::Schema,
-    env: &mut crate::recur::RecurEnv,
-    upper_bound: usize,
-) -> Result<usize, MorlocError> {
-    use crate::schema::SerialType;
-    use crate::shm::{self, Array};
+impl<'r> SizeWalk<'r> {
+    #[inline]
+    fn add(&mut self, n: usize) {
+        self.total = self.total.saturating_add(n);
+    }
 
-    // SAFETY: data points to voidstar data in SHM with layout described by schema.
-    // We only read Array headers and follow relptrs to compute total size.
-    unsafe {
-        match schema.serial_type {
-            SerialType::Int => {
-                // Inline BigInt: 16 bytes for size ≤ 1, extra limbs for overflow
-                let size = *(data as *const usize);
-                if size <= 1 {
-                    Ok(16) // inline: [size, value]
-                } else {
-                    Ok(16 + std::mem::align_of::<u64>().saturating_sub(1)
-                       + size * std::mem::size_of::<u64>())
-                }
-            }
-            SerialType::String => {
-                let arr = &*(data as *const Array);
-                Ok(std::mem::size_of::<Array>() + arr.size)
-            }
-            SerialType::IFile | SerialType::OStream | SerialType::IStream => {
-                // Tagged stream-handle field: 16-byte inline + path
-                // suballoc (`8 + path_len`) for TAG_PATH; no suballoc for
-                // TAG_HANDLE.
-                use morloc_runtime_types::stream_handle as sh;
-                let field = data as *const u8;
-                let mut total = sh::STREAM_HANDLE_FIELD_SIZE;
-                if sh::read_tag(field) == sh::TAG_PATH {
-                    let payload = sh::read_payload(field);
-                    if payload != shm::RELNULL as u64 {
-                        let suballoc = shm::rel2abs(payload as shm::RelPtr)?;
-                        let path_len = sh::read_path_size(suballoc) as usize;
-                        total += sh::path_suballoc_size(path_len);
-                    }
-                }
-                Ok(total)
-            }
-            SerialType::Array => {
-                let arr = &*(data as *const Array);
-                let mut size = std::mem::size_of::<Array>();
-                if arr.size == 0 {
-                    return Ok(size);
-                }
-                let elem_schema = &schema.parameters[0];
-                let elem_width = elem_schema.width;
-                // bumps to 64 for primitive numerics for SIMD/BLAS
-                size += elem_schema.array_data_alignment().saturating_sub(1);
-
-                // A flat data region (fixed-width element) sizes to a single
-                // multiply; a variable element must be walked. See
-                // Schema::array_data_is_flat -- do NOT test schema.is_fixed_width()
-                // on the Array node, which silently forces the per-element path.
-                if schema.array_data_is_flat() {
-                    // Saturating: in bounded mode the per-element walk this
-                    // replaces early-exited once `size` passed `upper_bound`, so
-                    // it never overflowed. A corrupt/hostile `arr.size` must not
-                    // wrap the product to a small value and misroute a huge array
-                    // as inline; saturating to usize::MAX keeps it "oversized".
-                    size = size.saturating_add(elem_width.saturating_mul(arr.size));
-                } else {
-                    let elem_data = shm::rel2abs(arr.data)?;
-                    for i in 0..arr.size {
-                        if size > upper_bound {
-                            return Ok(size);
-                        }
-                        let child_bound = upper_bound.saturating_sub(size);
-                        size += calc_voidstar_size_with_env(
-                            elem_data.add(i * elem_width),
-                            elem_schema,
-                            env,
-                            child_bound,
-                        )?;
-                    }
-                }
-                Ok(size)
-            }
-            SerialType::Variant => {
-                // A variant slot is a tag plus a relptr to the arm's fields,
-                // so its flattened size is the slot, worst-case padding
-                // before the payload, and the payload's own total. A nullary
-                // arm has no payload and needs only the slot.
-                //
-                // Without this the walk would fall through to the slot width
-                // alone and the flatten buffer would be too small for any arm
-                // that carries fields.
-                let tag = *data;
-                let arm = schema.parameters.get(tag as usize).ok_or_else(|| {
-                    MorlocError::Serialization(format!(
-                        "variant tag {} is out of range; the type has {} arms",
-                        tag, schema.size
-                    ))
-                })?;
-                let relptr = *(data.add(8) as *const shm::RelPtr);
-                if relptr == shm::RELNULL {
-                    Ok(schema.width)
-                } else {
-                    let payload = shm::rel2abs(relptr)?;
-                    let align = arm.alignment().max(1);
-                    let prefix = schema.width.saturating_add(align - 1);
-                    let child_bound = upper_bound.saturating_sub(prefix);
-                    let inner = calc_voidstar_size_with_env(payload, arm, env, child_bound)?;
-                    Ok(prefix.saturating_add(inner))
-                }
-            }
-            SerialType::Optional => {
-                // Optional is now a single relptr (schema.width = sizeof(RelPtr)).
-                // RELNULL → no payload; otherwise reserve room for:
-                //   * the slot itself (schema.width)
-                //   * worst-case alignment padding before the inner T
-                //     (the flatten / packer aligns the cursor before
-                //     writing T at it)
-                //   * T's full size (its width plus any sub-data)
-                let relptr = *(data as *const shm::RelPtr);
-                if relptr == shm::RELNULL {
-                    Ok(schema.width)
-                } else {
-                    let inner_data = shm::rel2abs(relptr)?;
-                    let inner_schema = &schema.parameters[0];
-                    let inner_align = inner_schema.alignment().max(1);
-                    let prefix = schema.width.saturating_add(inner_align - 1);
-                    let child_bound = upper_bound.saturating_sub(prefix);
-                    let inner_total = calc_voidstar_size_with_env(
-                        inner_data,
-                        inner_schema,
-                        env,
-                        child_bound,
-                    )?;
-                    Ok(prefix + inner_total)
-                }
-            }
-            SerialType::Tuple | SerialType::Map => {
-                if schema.is_fixed_width() {
-                    Ok(schema.width)
-                } else {
-                    let mut size = schema.width;
-                    for i in 0..schema.parameters.len() {
-                        if size > upper_bound {
-                            return Ok(size);
-                        }
-                        // The child returns its full subtree size (incl.
-                        // its own slot width, which is already counted
-                        // in our `size`); only the tail beyond the slot
-                        // adds to our running total. Child's safe bound
-                        // is therefore `(upper_bound - size) + slot`.
-                        let slot = schema.parameters[i].width;
-                        let child_bound = upper_bound
-                            .saturating_sub(size)
-                            .saturating_add(slot);
-                        let elem_total = calc_voidstar_size_with_env(
-                            data.add(schema.offsets[i]),
-                            &schema.parameters[i],
-                            env,
-                            child_bound,
-                        )?;
-                        if elem_total > slot {
-                            size += elem_total - slot;
-                        }
-                    }
-                    Ok(size)
-                }
-            }
-            SerialType::Table => {
-                // A table's flat form is its block, header included.
-                crate::arrow_shm::block_size(data as *const crate::arrow_shm::ArrowShmHeader)
-            }
-            SerialType::Recur => {
-                // Resolve to the named declaration and recompute size
-                // using that schema. The variable-length data behind a
-                // Recur back-ref needs full accounting; without this,
-                // recursive voidstar buffers are undersized and inline
-                // packets truncate inner sub-trees.
-                let name = schema.name.as_deref().unwrap_or("");
-                let target_ptr = crate::recur::lookup(env, name)?;
-                let target = &*target_ptr;
-                calc_voidstar_size_with_env(data, target, env, upper_bound)
-            }
-            _ => Ok(schema.width),
+    /// Visit a child: in place when nothing below it can recurse, else on
+    /// the stack beneath the parent's continuation.
+    fn child(
+        &mut self,
+        st: &mut crate::walk::Stack<bool>,
+        f: &crate::walk::Frame<bool>,
+        idx: usize,
+        s: &'r crate::schema::Schema,
+        data: *const u8,
+        slot_counted: bool,
+    ) -> Result<crate::walk::Visit, MorlocError> {
+        if self.res.flat(s) {
+            self.step(st, crate::walk::Frame::new(s, data, slot_counted))?;
+            Ok(crate::walk::Visit::Done)
+        } else {
+            crate::walk::defer(self, st, f, idx, s, data, slot_counted);
+            Ok(crate::walk::Visit::Deferred)
         }
+    }
+}
+
+impl<'r> crate::walk::Walker<bool> for SizeWalk<'r> {
+    fn step(&mut self, st: &mut crate::walk::Stack<bool>, f: crate::walk::Frame<bool>) -> Result<(), MorlocError> {
+        use crate::schema::SerialType;
+        use crate::shm::{self, Array};
+        use crate::walk::Visit;
+
+        // In bounded mode the walk ends as soon as the running total is
+        // past the bound; the total stays above it, which is all a caller
+        // testing `size > bound` needs.
+        if self.total > self.bound {
+            st.clear();
+            return Ok(());
+        }
+        // SAFETY: frames hold nodes of the tree the resolver was built
+        // from, which outlives the walk; `data` points at a value laid out
+        // as that schema describes.
+        let s: &'r crate::schema::Schema = self.res.resolve(unsafe { &*f.schema })?;
+        let data = f.data;
+        let slot = if f.x { s.width } else { 0 };
+        unsafe {
+            match s.serial_type {
+                SerialType::Int => {
+                    // Inline BigInt: 16 bytes for size <= 1, extra limbs for overflow
+                    let size = *(data as *const usize);
+                    let own = if size <= 1 {
+                        16 // inline: [size, value]
+                    } else {
+                        16 + std::mem::align_of::<u64>().saturating_sub(1)
+                            + size * std::mem::size_of::<u64>()
+                    };
+                    self.add(own - slot);
+                }
+                SerialType::String => {
+                    let arr = &*(data as *const Array);
+                    self.add(std::mem::size_of::<Array>() + arr.size - slot);
+                }
+                SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+                    // Tagged stream-handle field: 16-byte inline + path
+                    // suballoc (`8 + path_len`) for TAG_PATH; no suballoc for
+                    // TAG_HANDLE.
+                    use morloc_runtime_types::stream_handle as sh;
+                    let field = data as *const u8;
+                    let mut own = sh::STREAM_HANDLE_FIELD_SIZE;
+                    if sh::read_tag(field) == sh::TAG_PATH {
+                        let payload = sh::read_payload(field);
+                        if payload != shm::RELNULL as u64 {
+                            let suballoc = shm::rel2abs(payload as shm::RelPtr)?;
+                            let path_len = sh::read_path_size(suballoc) as usize;
+                            own += sh::path_suballoc_size(path_len);
+                        }
+                    }
+                    self.add(own - slot);
+                }
+                SerialType::Array => {
+                    let arr = &*(data as *const Array);
+                    let elem_schema = &s.parameters[0];
+                    let elem_width = elem_schema.width;
+                    if f.idx == 0 {
+                        let mut own = std::mem::size_of::<Array>();
+                        if arr.size == 0 {
+                            self.add(own - slot);
+                            return Ok(());
+                        }
+                        // bumps to 64 for primitive numerics for SIMD/BLAS
+                        own += elem_schema.array_data_alignment().saturating_sub(1);
+                        // A flat data region (fixed-width element) sizes to a
+                        // single multiply; a variable element must be walked.
+                        // See Schema::array_data_is_flat -- do NOT test
+                        // schema.is_fixed_width() on the Array node, which
+                        // silently forces the per-element path.
+                        //
+                        // Saturating: a corrupt or hostile `arr.size` must not
+                        // wrap the product to a small value and misroute a huge
+                        // array as inline; saturating to usize::MAX keeps it
+                        // "oversized".
+                        if s.array_data_is_flat() {
+                            own = own.saturating_add(elem_width.saturating_mul(arr.size));
+                            self.add(own - slot);
+                            return Ok(());
+                        }
+                        self.add(own - slot);
+                    }
+                    if s.array_data_is_flat() {
+                        return Ok(());
+                    }
+                    let elem_data = shm::rel2abs(arr.data)?;
+                    let flat_elem = self.res.flat(elem_schema);
+                    for i in f.idx..arr.size {
+                        if self.total > self.bound {
+                            st.clear();
+                            return Ok(());
+                        }
+                        let p = elem_data.add(i * elem_width);
+                        if flat_elem {
+                            self.step(st, crate::walk::Frame::new(elem_schema, p, false))?;
+                        } else if self.child(st, &f, i, elem_schema, p, false)? == Visit::Deferred {
+                            return Ok(());
+                        }
+                    }
+                }
+                SerialType::Variant => {
+                    // A resumed visit of a one-child node has nothing left.
+                    if f.idx > 0 {
+                        return Ok(());
+                    }
+                    // A variant slot is a tag plus a relptr to the arm's
+                    // fields, so its flattened size is the slot, worst-case
+                    // padding before the payload, and the payload's own total.
+                    // A nullary arm has no payload and needs only the slot.
+                    let tag = *data;
+                    let arm = s.parameters.get(tag as usize).ok_or_else(|| {
+                        MorlocError::Serialization(format!(
+                            "variant tag {} is out of range; the type has {} arms",
+                            tag, s.size
+                        ))
+                    })?;
+                    let relptr = *(data.add(8) as *const shm::RelPtr);
+                    if relptr == shm::RELNULL {
+                        self.add(s.width - slot);
+                    } else {
+                        let payload = shm::rel2abs(relptr)?;
+                        let align = arm.alignment().max(1);
+                        self.add(s.width.saturating_add(align - 1) - slot);
+                        self.child(st, &f, 0, arm, payload, false)?;
+                    }
+                }
+                SerialType::Optional => {
+                    if f.idx > 0 {
+                        return Ok(());
+                    }
+                    // The slot is a single relptr. RELNULL: no payload;
+                    // otherwise the slot, worst-case alignment padding before
+                    // the inner T (the flatten / packer aligns the cursor
+                    // before writing T at it), and T's full size.
+                    let relptr = *(data as *const shm::RelPtr);
+                    if relptr == shm::RELNULL {
+                        self.add(s.width - slot);
+                    } else {
+                        let inner_data = shm::rel2abs(relptr)?;
+                        let inner = &s.parameters[0];
+                        let inner_align = inner.alignment().max(1);
+                        self.add(s.width.saturating_add(inner_align - 1) - slot);
+                        self.child(st, &f, 0, inner, inner_data, false)?;
+                    }
+                }
+                SerialType::Tuple | SerialType::Map => {
+                    if f.idx == 0 {
+                        self.add(s.width - slot);
+                    }
+                    if s.is_fixed_width() {
+                        return Ok(());
+                    }
+                    // Every field's slot is inside `s.width`; a fixed-width
+                    // field adds nothing beyond it.
+                    for i in f.idx..s.parameters.len() {
+                        if self.total > self.bound {
+                            st.clear();
+                            return Ok(());
+                        }
+                        let field = &s.parameters[i];
+                        if field.is_fixed_width() {
+                            continue;
+                        }
+                        if self.child(st, &f, i, field, data.add(s.offsets[i]), true)? == Visit::Deferred {
+                            return Ok(());
+                        }
+                    }
+                }
+                SerialType::Table => {
+                    // A table's flat form is its block, header included.
+                    let own = crate::arrow_shm::block_size(data as *const crate::arrow_shm::ArrowShmHeader)?;
+                    self.add(own - slot);
+                }
+                _ => self.add(s.width - slot),
+            }
+        }
+        Ok(())
     }
 }
 

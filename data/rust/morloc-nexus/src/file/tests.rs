@@ -562,6 +562,30 @@ fn msgpack_array_full_consume() {
 }
 
 #[test]
+fn msgpack_deeply_nested_probe() {
+    // A probe window of nested fixarrays, one level per byte, far past any
+    // stack depth: still MessagePack (EOF inside a value), and closed
+    // nesting of the same depth is a complete value.
+    let deep = vec![0x91u8; 200_000];
+    assert!(matches!(classify(&deep), Classification::MessagePack));
+    let mut closed = vec![0x91u8; 200_000];
+    closed.push(0x00);
+    assert!(matches!(classify(&closed), Classification::MessagePack));
+    // A map owing two values per entry, nested inside an array.
+    assert!(matches!(
+        classify(&[0x92, 0x81, 0xa1, 0x6b, 0x01, 0x02]),
+        Classification::MessagePack
+    ));
+}
+
+#[test]
+fn json_deeply_nested_probe() {
+    let mut deep = vec![b'['; 100_000];
+    deep.extend(std::iter::repeat(b']').take(100_000));
+    assert!(matches!(classify(&deep), Classification::Json));
+}
+
+#[test]
 fn msgpack_truncated_array_mid_value() {
     // 0x93 = fixarray of 3; 0xa1 0x61 = "a"; then EOF before the
     // remaining 2 elements. The walker reports Eof, which we accept

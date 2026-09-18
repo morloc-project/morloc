@@ -1,0 +1,7 @@
+{"Succ":[{"Succ":["Zero"]}]}
+"Red"
+"Blue"
+{"Succ":[{"Succ":["Zero"]}]}
+{"Succ":[{"Succ":[{"Succ":["Zero"]}]}]}
+{"Node":[1,{"Node":[2,"Leaf","Leaf"]},"Leaf"]}
+{"Succ":[{"Succ":["Zero"]}]}

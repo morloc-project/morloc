@@ -738,62 +738,56 @@ unsafe fn connect_to_daemon(
     sock
 }
 
-/// Serialize a DaemonRequest to JSON using serde_json.
+/// The daemon request on the wire. The args are forwarded as the text
+/// they arrived in, so a value of any depth and an integer of any width
+/// reach the far daemon exactly as the client sent them.
+#[derive(serde::Serialize)]
+struct ForwardRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    method: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    args: Option<&'a serde_json::value::RawValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    media: bool,
+}
+
+/// Serialize a DaemonRequest to JSON.
 unsafe fn serialize_request_to_json(request: *mut DaemonRequest) -> String {
-    let mut map = serde_json::Map::new();
-
-    if !(*request).id.is_null() {
-        let id = CStr::from_ptr((*request).id).to_string_lossy();
-        map.insert("id".into(), serde_json::Value::String(id.into_owned()));
-    }
-
-    let method_str = match (*request).method {
-        DaemonMethod::Call => "call",
-        DaemonMethod::Discover => "discover",
-        DaemonMethod::Health => "health",
-        DaemonMethod::Eval => "eval",
-        DaemonMethod::Typecheck => "typecheck",
-        DaemonMethod::Bind => "bind",
-        DaemonMethod::Bindings => "bindings",
-        DaemonMethod::Unbind => "unbind",
+    let owned = |p: *const c_char| (!p.is_null()).then(|| CStr::from_ptr(p).to_string_lossy().into_owned());
+    let args_str = owned((*request).args_json);
+    // Args text that is not JSON is dropped, as a request without args.
+    let args = args_str
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<&serde_json::value::RawValue>(s).ok());
+    let req = ForwardRequest {
+        id: owned((*request).id),
+        method: match (*request).method {
+            DaemonMethod::Call => "call",
+            DaemonMethod::Discover => "discover",
+            DaemonMethod::Health => "health",
+            DaemonMethod::Eval => "eval",
+            DaemonMethod::Typecheck => "typecheck",
+            DaemonMethod::Bind => "bind",
+            DaemonMethod::Bindings => "bindings",
+            DaemonMethod::Unbind => "unbind",
+        },
+        command: owned((*request).command),
+        args,
+        expr: owned((*request).expr),
+        name: owned((*request).name),
+        // A forward is always a serving front-end call: request the
+        // raw-media form so an `@mime` return arrives as bytes+mime.
+        // Direct length-prefixed clients (which don't go through
+        // router_forward) omit this and keep JSON `result`.
+        media: true,
     };
-    map.insert(
-        "method".into(),
-        serde_json::Value::String(method_str.into()),
-    );
-
-    if !(*request).command.is_null() {
-        let cmd = CStr::from_ptr((*request).command).to_string_lossy();
-        map.insert(
-            "command".into(),
-            serde_json::Value::String(cmd.into_owned()),
-        );
-    }
-
-    if !(*request).args_json.is_null() {
-        let args_str = CStr::from_ptr((*request).args_json).to_string_lossy();
-        // Try to parse as JSON value to embed directly
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&args_str) {
-            map.insert("args".into(), v);
-        }
-    }
-
-    if !(*request).expr.is_null() {
-        let expr = CStr::from_ptr((*request).expr).to_string_lossy();
-        map.insert("expr".into(), serde_json::Value::String(expr.into_owned()));
-    }
-
-    if !(*request).name.is_null() {
-        let name = CStr::from_ptr((*request).name).to_string_lossy();
-        map.insert("name".into(), serde_json::Value::String(name.into_owned()));
-    }
-
-    // A forward is always a serving front-end call: request the raw-media form
-    // so an `@mime` return arrives as bytes+mime. Direct length-prefixed clients
-    // (which don't go through router_forward) omit this and keep JSON `result`.
-    map.insert("media".into(), serde_json::Value::Bool(true));
-
-    serde_json::to_string(&map).unwrap_or_else(|_| "{}".into())
+    serde_json::to_string(&req).unwrap_or_else(|_| "{}".into())
 }
 
 // -- router_build_discovery ---------------------------------------------------
@@ -870,3 +864,23 @@ pub unsafe extern "C" fn router_build_discovery(router: *mut Router) -> *mut c_c
     libc::strdup(c.as_ptr())
 }
 
+
+#[cfg(test)]
+mod forward_tests {
+    use super::*;
+
+    // A forwarded call carries its args as the text they arrived in.
+    #[test]
+    fn forwarded_args_are_the_text_the_client_sent() {
+        let deep = format!("{}1{}", "[".repeat(400), "]".repeat(400));
+        let args = format!("[18446744073709551617, {deep}]");
+        let mut req: DaemonRequest = unsafe { std::mem::zeroed() };
+        req.method = DaemonMethod::Call;
+        let cmd = CString::new("f").unwrap();
+        let a = CString::new(args.as_str()).unwrap();
+        req.command = cmd.as_ptr() as *mut c_char;
+        req.args_json = a.as_ptr() as *mut c_char;
+        let json = unsafe { serialize_request_to_json(&mut req) };
+        assert_eq!(json, format!("{{\"method\":\"call\",\"command\":\"f\",\"args\":{args},\"media\":true}}"));
+    }
+}

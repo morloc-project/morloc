@@ -1539,6 +1539,11 @@ uint8_t* pool_dispatch_packet(
     void* ctx);
 void pool_mark_busy(void);
 void pool_mark_idle(void);
+// Report a fatal signal with the manifold the faulting thread was executing
+// (`current_frame` returns it as a pointer and byte length, or NULL), then
+// die of the signal. Installed once per pool process.
+void morloc_install_crash_handler(const char* lang,
+                                  const char* (*current_frame)(size_t* len));
 
 // ========================================================================
 // Section 20: Function declarations -- Arrow

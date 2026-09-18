@@ -25,6 +25,8 @@ module main
   , totalViaCpp
   , totalViaR
   , totalViaRust
+  , stepUp
+  , stepDown
   )
 
 import root-py
@@ -72,3 +74,15 @@ totalViaR t = total (idR t)
 
 totalViaRust :: Tree -> Real
 totalViaRust t = total (idRust t)
+
+-- Two constructors with the same payload type. In the C++ pool the arms
+-- of a `data` type are alternatives of one variant, so building either
+-- from its payload must pick the alternative by constructor, not by the
+-- payload's type, which here names both.
+data Step = Up Tree | Down Tree
+
+stepUp :: Tree -> Step
+stepUp t = Up (idCpp t)
+
+stepDown :: Tree -> Step
+stepDown t = Down (idRust t)

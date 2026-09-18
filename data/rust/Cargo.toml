@@ -5,7 +5,7 @@ resolver = "2"
 [workspace.dependencies]
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
+serde_json = { version = "1", features = ["preserve_order", "raw_value", "arbitrary_precision"] }
 indexmap = { version = "2", features = ["serde"] }
 # `xxhash64` is the only algorithm we use, always with an explicit seed,
 # so the `random` default feature (which pulls rand + getrandom) is

@@ -93,7 +93,7 @@ serialAstToTypeWith' onPack onClosure = go
     go (SerialList v Nothing s) = AppF (VarF v) [go s]
     go (SerialTuple v ss) = AppF (VarF v) (map go ss)
     go (SerialObject o n ps rs) = NamF o n ps (zip (map fst rs) (map (go . snd) rs))
-    go (SerialRec v) = RecF v
+    go (SerialRec v _) = RecF v
     go (SerialEnum v ps ns) = EnumF v ps ns
     go (SerialVariant v ps as) = VariantF v ps [(n, map go fs) | (n, fs) <- as]
     go (SerialReal x) = VarF x
@@ -224,7 +224,8 @@ containsFunF _ = False
 --
 -- Stream handles are excluded deliberately. Their wire form is a tagged union
 -- carrying either a filesystem path, which cannot hold a NUL by POSIX rule, or
--- a bare slot id, which holds no string bytes.
+-- a bare slot id, which holds no string bytes. A back-reference is excluded
+-- too: the declaration it refers to is walked where it stands.
 serialAstHasString :: SerialAST -> Bool
 serialAstHasString (SerialString _) = True
 serialAstHasString (SerialList _ _ s) = serialAstHasString s
@@ -232,6 +233,8 @@ serialAstHasString (SerialTuple _ ss) = any serialAstHasString ss
 serialAstHasString (SerialObject _ _ _ rs) = any (serialAstHasString . snd) rs
 serialAstHasString (SerialPack _ (_, s)) = serialAstHasString s
 serialAstHasString (SerialOptional _ s) = serialAstHasString s
+serialAstHasString (SerialVariant _ _ arms) = any (any serialAstHasString . snd) arms
+serialAstHasString (SerialClosure captured _) = any serialAstHasString captured
 serialAstHasString _ = False
 
 encode64 :: Int -> String
@@ -269,11 +272,11 @@ encode64D i = pretty (encode64 i)
 --     SerialRec; the runtime parser resolves the name to the previously
 --     declared Schema.
 --
--- Names use the general type variable string (the FVar's TVar). The
--- declaration prefix is only emitted for records that are actually
--- back-referenced somewhere in the SerialAST -- the pre-scan
--- 'collectRecursiveNames' computes that set so non-recursive records
--- keep their previous, unprefixed wire form (no regression).
+-- Names use the general type variable string (the FVar's TVar), with a
+-- @#k@ suffix when the same name is already declared k times on the path
+-- above ('pushDecl'). The declaration prefix is only emitted for nodes
+-- that are actually back-referenced somewhere below them ('refersTo'), so
+-- non-recursive records keep their unprefixed wire form.
 serialAstToMsgpackSchema :: SerialAST -> MDoc
 serialAstToMsgpackSchema = serialAstToSchemaWith addHint
 
@@ -293,64 +296,65 @@ serialAstToGeneralSchema = serialAstToSchemaWith (const "")
 -- thing that differs between the concrete and general forms, so it is the
 -- only parameter.
 serialAstToSchemaWith :: (FVar -> MDoc) -> SerialAST -> MDoc
-serialAstToSchemaWith renderHint ast = emit ast
+serialAstToSchemaWith renderHint ast = emit [] ast
   where
-    recNames :: Set.Set TVar
-    recNames = collectRecursiveNames ast
-
-    emit :: SerialAST -> MDoc
-    emit (SerialPack v (_, s)) = renderHint v <> emit s
-    emit (SerialList v@(FV (TV name) _) dim s) =
-      recDecl name <> renderHint v <> "a" <> encodeDim dim <> emit s
+    emit :: DeclPath -> SerialAST -> MDoc
+    emit path (SerialPack v (_, s)) = renderHint v <> emit path s
+    emit path node@(SerialList v@(FV name _) dim s) =
+      declare path node name [] $ \p ->
+        renderHint v <> "a" <> encodeDim dim <> emit p s
       where
         encodeDim (Just (NatLitF n)) = ":" <> pretty n
         encodeDim _                  = ""  -- no slot or void-valued slot
-    emit (SerialTuple v@(FV (TV name) _) ss) =
-      recDecl name <> renderHint v <> "t" <> encode64D (length ss) <> foldl (<>) "" (map emit ss)
+    emit path node@(SerialTuple v@(FV name _) ss) =
+      declare path node name [] $ \p ->
+        renderHint v <> "t" <> encode64D (length ss) <> foldl (<>) "" (map (emit p) ss)
     -- Table primitive (Arrow IPC buffer). Open semantics: declared columns
     -- are a *lower bound*; the runtime accepts any Arrow buffer whose schema
     -- contains at least these columns of at least these types.
-    emit (SerialObject NamTable _ _ []) = "T"
-    emit (SerialObject NamTable _ _ rs) =
-      "T:" <> encode64D (length rs) <> foldl (<>) "" (map keypair rs)
-    emit (SerialObject _ v@(FV (TV name) _) _ rs) =
-      recDecl name <> renderHint v <> "m" <> encode64D (length rs)
-        <> foldl (<>) "" (map keypair rs)
-    emit (SerialRec (FV (TV name) _)) = "^" <> encodeKey name
+    emit _ (SerialObject NamTable _ _ []) = "T"
+    emit path (SerialObject NamTable _ _ rs) =
+      "T:" <> encode64D (length rs) <> foldl (<>) "" (map (keypair path) rs)
+    emit path node@(SerialObject _ v@(FV name _) ps rs) =
+      declare path node name ps $ \p ->
+        renderHint v <> "m" <> encode64D (length rs)
+          <> foldl (<>) "" (map (keypair p) rs)
+    emit path (SerialRec (FV name _) ps) = "^" <> encodeKey (resolveWireName path name ps)
     -- A `data` type's occurrence inside itself: a back-reference like the
     -- record form above, carrying its arguments for the renderers' sake.
-    emit (SerialVariant (FV (TV name) _) _ []) = "^" <> encodeKey name
+    emit path (SerialVariant (FV name _) ps []) = "^" <> encodeKey (resolveWireName path name ps)
     -- `e <count> ( <klen><CtorName> )*`, with the type's own name carried
     -- by the concrete-type hint exactly as a record's is -- `m` does not
     -- spell out the record name either. Counts and key lengths use the
     -- same encoding as `t` and `m`, so the escape covers the full
     -- 256-constructor range.
-    emit (SerialEnum v _ ns) =
+    emit _ (SerialEnum v _ ns) =
       renderHint v <> "e" <> encode64D (length ns)
         <> foldl (<>) "" (map encodeKey ns)
     -- `v <count> ( <klen><ArmName> <arity> <schema>*arity )*`. The arity is
     -- written out rather than implied so a reader can skip an arm without
     -- understanding its field types.
-    emit (SerialVariant v@(FV (TV name) _) _ as) =
-      recDecl name <> renderHint v <> "v" <> encode64D (length as)
-        <> foldl (<>) "" [ encodeKey n <> encode64D (length fs)
-                             <> foldl (<>) "" (map emit fs)
-                         | (n, fs) <- as ]
-    emit (SerialReal v) = renderHint v <> "f8" -- 64 bit float
-    emit (SerialFloat32 v) = renderHint v <> "f4"
-    emit (SerialFloat64 v) = renderHint v <> "f8"
-    emit (SerialInt v) = renderHint v <> "j"
-    emit (SerialInt8 v) = renderHint v <> "i1"
-    emit (SerialInt16 v) = renderHint v <> "i2"
-    emit (SerialInt32 v) = renderHint v <> "i4"
-    emit (SerialInt64 v) = renderHint v <> "i8"
-    emit (SerialUInt v) = renderHint v <> "u8"
-    emit (SerialUInt8 v) = renderHint v <> "u1"
-    emit (SerialUInt16 v) = renderHint v <> "u2"
-    emit (SerialUInt32 v) = renderHint v <> "u4"
-    emit (SerialUInt64 v) = renderHint v <> "u8"
-    emit (SerialBool v) = renderHint v <> "b"
-    emit (SerialString v) = renderHint v <> "s"
+    emit path node@(SerialVariant v@(FV name _) ps as) =
+      declare path node name ps $ \p ->
+        renderHint v <> "v" <> encode64D (length as)
+          <> foldl (<>) "" [ encodeKey n <> encode64D (length fs)
+                               <> foldl (<>) "" (map (emit p) fs)
+                           | (n, fs) <- as ]
+    emit _ (SerialReal v) = renderHint v <> "f8" -- 64 bit float
+    emit _ (SerialFloat32 v) = renderHint v <> "f4"
+    emit _ (SerialFloat64 v) = renderHint v <> "f8"
+    emit _ (SerialInt v) = renderHint v <> "j"
+    emit _ (SerialInt8 v) = renderHint v <> "i1"
+    emit _ (SerialInt16 v) = renderHint v <> "i2"
+    emit _ (SerialInt32 v) = renderHint v <> "i4"
+    emit _ (SerialInt64 v) = renderHint v <> "i8"
+    emit _ (SerialUInt v) = renderHint v <> "u8"
+    emit _ (SerialUInt8 v) = renderHint v <> "u1"
+    emit _ (SerialUInt16 v) = renderHint v <> "u2"
+    emit _ (SerialUInt32 v) = renderHint v <> "u4"
+    emit _ (SerialUInt64 v) = renderHint v <> "u8"
+    emit _ (SerialBool v) = renderHint v <> "b"
+    emit _ (SerialString v) = renderHint v <> "s"
     -- F/O/I share a 16-byte tagged-union wire form (see
     -- morloc-runtime-types::stream_handle). The schema code selects the
     -- morloc-level type (IFile / OStream / IStream); the per-instance
@@ -358,9 +362,9 @@ serialAstToSchemaWith renderHint ast = emit ast
     -- handle). The hint preserves the user's per-language native
     -- (uint64_t, int, bit64) so generated foreign code keeps its typed
     -- surface.
-    emit (SerialIFile v) = renderHint v <> "F"
-    emit (SerialOStream v) = renderHint v <> "O"
-    emit (SerialIStream v) = renderHint v <> "I"
+    emit _ (SerialIFile v) = renderHint v <> "F"
+    emit _ (SerialOStream v) = renderHint v <> "O"
+    emit _ (SerialIStream v) = renderHint v <> "I"
     -- A defunctionalized closure travels as a fixed-shape tuple, independent of
     -- the closure's signature: (home_language:str, manifold_id:int,
     -- captured_arg_packets:[bytes]). The language is a string (its lang name)
@@ -377,31 +381,93 @@ serialAstToSchemaWith renderHint ast = emit ast
     -- The pool reifies a real such tuple through the generic codec, so this
     -- string and the runtime bytes must stay in lockstep; keep it in sync if
     -- any tuple/list/leaf code below changes.
-    emit (SerialClosure _ _) =
+    emit _ (SerialClosure _ _) =
       "t" <> encode64D (3 :: Int) <> "s" <> "j" <> "a" <> "a" <> "u1"
-    emit (SerialNull v) = renderHint v <> "z"
-    emit (SerialOptional v s) = renderHint v <> "?" <> emit s
-    emit (SerialUnknown v) = renderHint v <> "*"
+    emit _ (SerialNull v) = renderHint v <> "z"
+    emit path (SerialOptional v s) = renderHint v <> "?" <> emit path s
+    emit _ (SerialUnknown v) = renderHint v <> "*"
 
-    keypair :: (Key, SerialAST) -> MDoc
-    keypair (k, s) = encodeKey (unKey k) <> emit s
+    keypair :: DeclPath -> (Key, SerialAST) -> MDoc
+    keypair path (k, s) = encodeKey (unKey k) <> emit path s
 
-    encodeKey :: DT.Text -> MDoc
-    encodeKey k = (encode64D . DT.length $ k) <> pretty k
+    -- Emit a container node. It goes on the declaration path for its
+    -- subtree, and gets the @&<klen><name>@ prefix iff a back-reference
+    -- below resolves to it; otherwise the wire form is the unprefixed one.
+    declare :: DeclPath -> SerialAST -> TVar -> [TypeF] -> (DeclPath -> MDoc) -> MDoc
+    declare path node name ps body =
+      let path' = pushDecl path name ps
+          wire = declWireName path'
+      in (if refersTo path' wire node then "&" <> encodeKey wire else "") <> body path'
 
-    -- Emit @&<klen><name>@ iff this record name is the target of a
-    -- SerialRec elsewhere in the tree. Otherwise the prefix is empty
-    -- and the wire form is identical to the pre-recursion encoding.
-    recDecl :: DT.Text -> MDoc
-    recDecl name
-      | Set.member (TV name) recNames = "&" <> encodeKey name
-      | otherwise = ""
+encodeKey :: DT.Text -> MDoc
+encodeKey k = (encode64D . DT.length $ k) <> pretty k
 
--- | Walk the SerialAST and collect every FVar that appears as a
--- SerialRec. The result drives the @&@ prefix emission in 'emit': we
--- only declare a name on a SerialObject when something below it
--- references that name, which keeps non-recursive records on their
--- original (unprefixed) wire form.
+-- | The container nodes enclosing the node being emitted, innermost
+-- first: each entry is a node's type name, the arguments it was
+-- instantiated with, and the name it declares on the wire.
+type DeclPath = [(TVar, [TypeF], DT.Text)]
+
+-- | Enter a container node. Two instantiations of one type can nest --
+-- an @L Int@ inside an @L Str@ -- and a back-reference from inside the
+-- inner one may mean the outer one, so each nested same-named node gets
+-- its own wire name: the outermost keeps the type name, the next is
+-- @name#1@, and so on. The runtime resolves a back-reference to the
+-- nearest enclosing declaration with the same wire name, which is then
+-- exactly the node meant.
+pushDecl :: DeclPath -> TVar -> [TypeF] -> DeclPath
+pushDecl path name ps =
+  let k = length [() | (n, _, _) <- path, n == name]
+      wire = if k == 0 then unTVar name else unTVar name <> "#" <> DT.pack (show k)
+  in (name, ps, wire) : path
+
+declWireName :: DeclPath -> DT.Text
+declWireName ((_, _, wire) : _) = wire
+declWireName [] = ""
+
+-- | The wire name a back-reference resolves to: the nearest enclosing
+-- node of that name built with the same arguments, else the nearest of
+-- that name (a node that carries no arguments, such as a list-shaped
+-- alias, is matched by name alone). A reference with no enclosing node
+-- keeps its bare name; the runtime rejects it as undeclared.
+resolveWireName :: DeclPath -> TVar -> [TypeF] -> DT.Text
+resolveWireName path name ps =
+  case [w | (n, qs, w) <- path, n == name, qs == ps] of
+    (w : _) -> w
+    [] -> case [w | (n, _, w) <- path, n == name] of
+      (w : _) -> w
+      [] -> unTVar name
+
+-- | Whether a back-reference somewhere under @node@ resolves to the wire
+-- name @wire@, given that @node@'s own declaration is already the head of
+-- @path@. Container children are entered with their declarations pushed,
+-- as 'emit' pushes them, so nested declarations shadow exactly as they
+-- will on the wire.
+refersTo :: DeclPath -> DT.Text -> SerialAST -> Bool
+refersTo path wire node = any (refersFrom path wire) (serialKids node)
+
+refersFrom :: DeclPath -> DT.Text -> SerialAST -> Bool
+refersFrom path wire n = case n of
+  SerialRec (FV name _) ps -> resolveWireName path name ps == wire
+  SerialVariant (FV name _) ps [] -> resolveWireName path name ps == wire
+  SerialList (FV name _) _ _ -> refersTo (pushDecl path name []) wire n
+  SerialTuple (FV name _) _ -> refersTo (pushDecl path name []) wire n
+  SerialObject NamTable _ _ _ -> refersTo path wire n
+  SerialObject _ (FV name _) ps _ -> refersTo (pushDecl path name ps) wire n
+  SerialVariant (FV name _) ps _ -> refersTo (pushDecl path name ps) wire n
+  SerialPack _ _ -> refersTo path wire n
+  SerialOptional _ _ -> refersTo path wire n
+  _ -> False
+
+-- | The immediate sub-trees of a node.
+serialKids :: SerialAST -> [SerialAST]
+serialKids (SerialPack _ (_, s)) = [s]
+serialKids (SerialList _ _ s) = [s]
+serialKids (SerialTuple _ ss) = ss
+serialKids (SerialObject _ _ _ rs) = map snd rs
+serialKids (SerialOptional _ s) = [s]
+serialKids (SerialVariant _ _ as) = concatMap snd as
+serialKids _ = []
+
 -- | Make a sub-tree of a serial AST self-contained, so it can be emitted
 -- as a schema of its own.
 --
@@ -417,14 +483,24 @@ rerootUnder parent child = case serialOuterName parent of
   Nothing -> child
   Just v -> go v child
   where
-    go v (SerialRec (FV v' _)) | v' == v = parent
+    -- A nested declaration of the same name shadows the parent, so the
+    -- references under it are its own and stay.
+    go v (SerialRec (FV v' _) _) | v' == v = parent
     go v (SerialVariant (FV v' _) _ []) | v' == v = parent
     go v (SerialPack fv (p, s)) = SerialPack fv (p, go v s)
-    go v (SerialList fv d s) = SerialList fv d (go v s)
-    go v (SerialTuple fv ss) = SerialTuple fv (map (go v) ss)
-    go v (SerialObject nt fv ps rs) = SerialObject nt fv ps [(k, go v s) | (k, s) <- rs]
+    go v n@(SerialList fv@(FV v' _) d s)
+      | v' == v = n
+      | otherwise = SerialList fv d (go v s)
+    go v n@(SerialTuple fv@(FV v' _) ss)
+      | v' == v = n
+      | otherwise = SerialTuple fv (map (go v) ss)
+    go v n@(SerialObject nt fv@(FV v' _) ps rs)
+      | v' == v && nt /= NamTable = n
+      | otherwise = SerialObject nt fv ps [(k, go v s) | (k, s) <- rs]
     go v (SerialOptional fv s) = SerialOptional fv (go v s)
-    go v (SerialVariant fv ps as) = SerialVariant fv ps [(n, map (go v) fs) | (n, fs) <- as]
+    go v n@(SerialVariant fv@(FV v' _) ps as)
+      | v' == v = n
+      | otherwise = SerialVariant fv ps [(n', map (go v) fs) | (n', fs) <- as]
     go _ s = s
 
 -- | The name a serial AST's outermost node would declare, if it were the
@@ -437,19 +513,6 @@ serialOuterName (SerialObject _ (FV v _) _ _) = Just v
 serialOuterName (SerialVariant _ _ []) = Nothing
 serialOuterName (SerialVariant (FV v _) _ _) = Just v
 serialOuterName _ = Nothing
-
-collectRecursiveNames :: SerialAST -> Set.Set TVar
-collectRecursiveNames = go
-  where
-    go (SerialRec (FV v _)) = Set.singleton v
-    go (SerialVariant (FV v _) _ []) = Set.singleton v
-    go (SerialPack _ (_, s)) = go s
-    go (SerialList _ _ s) = go s
-    go (SerialTuple _ ss) = Set.unions (map go ss)
-    go (SerialObject _ _ _ rs) = Set.unions (map (go . snd) rs)
-    go (SerialOptional _ s) = go s
-    go (SerialVariant _ _ as) = Set.unions (map go (concatMap snd as))
-    go _ = Set.empty
 
 -- | Emit a schema hint for a newtype boundary. For a default primitive
 -- (gv is one of the built-in base types like Int, Real, Str, etc.) the
@@ -518,7 +581,7 @@ shallowType (SerialOptional _ s) = OptionalF (shallowType s)
 -- need the language-side name look it up in cscope (e.g. C++ does
 -- this in 'CppTranslator.hs' to distinguish legitimate user mappings
 -- from pairEval bnd-protect leaks).
-shallowType (SerialRec v) = RecF v
+shallowType (SerialRec v _) = RecF v
 shallowType (SerialEnum v ps ns) = EnumF v ps ns
 shallowType (SerialVariant v ps as) = VariantF v ps [(n, map shallowType fs) | (n, fs) <- as]
 shallowType (SerialUnknown v) = UnkF v
@@ -650,7 +713,7 @@ setSerialHead v s = case s of
   SerialObject o _ ps rs -> SerialObject o v ps rs
   SerialEnum _ ps ns -> SerialEnum v ps ns
   SerialVariant _ ps as -> SerialVariant v ps as
-  SerialRec _ -> SerialRec v
+  SerialRec _ ps -> SerialRec v ps
   SerialReal _ -> SerialReal v
   SerialFloat32 _ -> SerialFloat32 v
   SerialFloat64 _ -> SerialFloat64 v
@@ -793,7 +856,7 @@ makeSerialAST m lang t0 = do
     -- rather than a type, so it is matched by name against whatever
     -- instantiation is on the path above it.
     makeSerialAST' gscope typepackers anc ft@(VarF v@(FV gv cv))
-      | any ((== Just gv) . typeFHead) (Set.toList anc) = return $ SerialRec v
+      | any ((== Just gv) . typeFHead) (Set.toList anc) = return $ SerialRec v []
       | otherwise = dispatchVarF
       where
         -- Push this type onto the ancestor set for the scope of the body
@@ -994,7 +1057,7 @@ makeSerialAST m lang t0 = do
     -- is already lowering. @T7 (T7 Int)@ is NOT that: it is two types that
     -- share a name, and each gets its own expansion.
     makeSerialAST' gscope typepackers anc ft@(AppF (VarF fv@(FV generalTypeName _)) ts0)
-      | Set.member ft anc = return $ SerialRec fv
+      | Set.member ft anc = return $ SerialRec fv ts0
       | otherwise = dispatchAppF
       where
         -- Add the outer type to the ancestor set for the scope of the body
@@ -1286,7 +1349,7 @@ makeSerialAST m lang t0 = do
     -- branch; what arrives here as a whole record is a distinct type even
     -- when it shares a name, as the inner @P Int@ of a @P (P Int)@ does.
     makeSerialAST' gscope typepackers anc t@(NamF o n ps rs)
-      | Set.member t anc = return $ SerialRec n
+      | Set.member t anc = return $ SerialRec n ps
       | otherwise = do
           anc' <- descend t anc
           ts <- mapM (makeSerialAST' gscope typepackers anc' . snd) rs
@@ -1605,7 +1668,7 @@ isSerializable (SerialOptional _ x) = isSerializable x
 -- back-ref, but it is guaranteed by construction to be a
 -- SerialObject (which is serializable) -- otherwise no recursion
 -- would have been introduced. Return True.
-isSerializable (SerialRec _) = True
+isSerializable (SerialRec _ _) = True
 isSerializable (SerialEnum _ _ _) = True
 isSerializable (SerialVariant _ _ as) = all (all isSerializable . snd) as
 isSerializable (SerialUnknown _) = True -- are you feeling lucky?
@@ -1642,5 +1705,5 @@ prettySerialOne (SerialIStream _) = "SerialIStream"
 prettySerialOne (SerialClosure _ _) = "SerialClosure"
 prettySerialOne (SerialNull _) = "SerialNull"
 prettySerialOne (SerialOptional _ x) = "SerialOptional" <> parens (prettySerialOne x)
-prettySerialOne (SerialRec v) = "SerialRec" <> angles (pretty v)
+prettySerialOne (SerialRec v _) = "SerialRec" <> angles (pretty v)
 prettySerialOne (SerialUnknown _) = "SerialUnknown"

@@ -31,6 +31,7 @@ import qualified Data.List as List
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
+import qualified Morloc.LangRegistry as LR
 
 realityCheck ::
   -- | one AST forest for each command exported from main
@@ -181,21 +182,43 @@ realize ::
     )
 realize s0 = do
   registry <- MM.gets stateLangRegistry
-  realizeWithRegistry registry s0
+  -- A term that calls nothing sourced has no language of its own and is
+  -- evaluated by the nexus. That evaluator has no name to call a function
+  -- by -- it knows only the variables a lambda binds -- so a term that
+  -- calls itself cannot run there and must be given a pool. The languages
+  -- offered are those the program declares concrete types for, which are
+  -- the pools it can build; one of them is chosen by the ordinary scoring,
+  -- so the choice follows whatever else the term touches.
+  langs <-
+    if anyCallS (const True) s0
+      then do
+        scopes <- MM.gets stateUniversalConcreteTypedefs
+        case unique (map (LR.poolOf registry) (Map.keys scopes)) of
+          [] ->
+            let AnnoS (Idx i _) _ _ = s0
+             in MM.throwSourcedError i $
+                  "this function calls itself, and a function that calls itself needs a"
+                    <+> "language to run in: the nexus evaluates an expression but cannot"
+                    <+> "call a function by name. Import a language module (`import"
+                    <+> "root-py`, `root-cpp`, ...) to give the program a pool."
+          ls -> return ls
+      else return []
+  realizeWithRegistry registry langs s0
 
 realizeWithRegistry ::
   LangRegistry ->
+  [Lang] ->
   AnnoS (Indexed Type) Many Int ->
   MorlocMonad
     ( Either
         (AnnoS (Indexed Type) One ())
         (AnnoS (Indexed Type) One (Indexed Lang))
     )
-realizeWithRegistry registry s0 = do
+realizeWithRegistry registry seedLangs s0 = do
   -- Normalize language-invariant (literal-lambda-head) redexes before scoring so
   -- the scorer is not fed composition chains it would re-score exponentially.
   s0' <- normalizePop1 s0
-  e@(AnnoS _ li _) <- scoreAnnoS emptyRState s0' >>= collapseAnnoS Nothing
+  e@(AnnoS _ li _) <- scoreAnnoS emptyRState {rLangs = seedLangs} s0' >>= collapseAnnoS [] Nothing
   case li of
     (Idx _ Nothing) -> makeGAST e |>> Left
     (Idx _ _) -> propagateDown e |>> Right
@@ -431,12 +454,16 @@ realizeWithRegistry registry s0 = do
               | l1 <- langs'
               ]
 
+    -- The enclosing recursive heads, outermost first, each with the
+    -- language it was placed in. A node with a back-edge to one of them
+    -- beneath it is placed in that head's language (see 'pickLanguage').
     collapseAnnoS ::
+      [(EVar, Lang)] ->
       Maybe Lang ->
       AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
       MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
-    collapseAnnoS l1 (AnnoS gi@(Idx _ gt) ci e) = do
-      (e', ci') <- collapseExpr gt l1 (e, ci)
+    collapseAnnoS heads l1 (AnnoS gi@(Idx _ gt) ci e) = do
+      (e', ci') <- collapseExpr heads gt l1 (e, ci)
       -- Explainability: at high verbosity, record each node's language decision
       -- (its index, the parent/incoming language, and the language chosen). The
       -- exact tree-DP makes this a faithful, per-node account of "why this pool".
@@ -520,15 +547,16 @@ realizeWithRegistry registry s0 = do
     callCost src = languageCost (srcLang src)
 
     collapseExpr ::
+      [(EVar, Lang)] ->
       Type ->
       Maybe Lang -> -- the language of the parent expression (if Nothing, then this is a GAST)
       (ExprS (Indexed Type) Many (Indexed [(Lang, Score)]), Indexed [(Lang, Score)]) ->
       MorlocMonad (ExprS (Indexed Type) One (Indexed (Maybe Lang)), Indexed (Maybe Lang))
 
-    collapseExpr _ _ (VarS v (Many []), Idx i _) =
+    collapseExpr _ _ _ (VarS v (Many []), Idx i _) =
       MM.throwSourcedError i $ "No implementation found for" <+> squotes (pretty v)
     -- Select one implementation for the given term
-    collapseExpr gt l1 (VarS v (Many xs), Idx i _) = do
+    collapseExpr heads gt l1 (VarS v (Many xs), Idx i _) = do
       let minXs = minsBy (\(AnnoS _ (Idx _ ss) _) -> minimumMay [cost l1 l2 s | (l2, s) <- ss]) xs
       (x, lang) <- case minXs of
         [] -> MM.throwSourcedError i $ "No implementation found for" <+> squotes (pretty v)
@@ -540,11 +568,17 @@ realizeWithRegistry registry s0 = do
           AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
           MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)), Maybe Lang)
         handleOne x@(AnnoS _ (Idx _ ss) e) = do
-          let newLang =
-                if isFunctionalData e
-                  then l1
-                  else fmap fst (minBy (\(l2, s) -> cost l1 l2 s) ss)
-          x' <- collapseAnnoS newLang x
+          newLang <-
+            if isFunctionalData e
+              then return l1
+              else pickLanguage heads l1 [x] ss
+          -- A term whose expansion refers back to itself is a recursive
+          -- head: everything beneath it down to the back-edge follows its
+          -- language.
+          let heads' = case newLang of
+                Just l | containsCallS v x -> heads ++ [(v, l)]
+                _ -> heads
+          x' <- collapseAnnoS heads' newLang x
           return (x', newLang)
 
         handleMany ::
@@ -643,107 +677,75 @@ realizeWithRegistry registry s0 = do
     -- parent's language; only its body chooses, and a call the body makes
     -- elsewhere is an ordinary crossing there. The scores of a lambda are
     -- its body's, so the parent's choice already accounts for the body.
-    collapseExpr _ l1 (LamS vs x, Idx i ss) = do
+    collapseExpr heads _ l1 (LamS vs x, Idx i ss) = do
       lang <- case l1 of
         Just _ -> return l1
-        Nothing -> chooseLanguage l1 (subtreeHasRec [x]) ss
-      x' <- collapseAnnoS lang x
+        Nothing -> pickLanguage heads l1 [x] ss
+      x' <- collapseAnnoS heads lang x
       return (LamS vs x', Idx i lang)
-    collapseExpr _ l1 (AppS f xs, Idx i ss) = do
-      lang <- chooseLanguage l1 (subtreeHasRec (f : xs)) ss
-      f' <- collapseAnnoS lang f
-      xs' <- mapM (if isSourceHead f' then collapseCarried lang else collapseAnnoS lang) xs
+    collapseExpr heads _ l1 (AppS f xs, Idx i ss) = do
+      -- A sourced function runs where it is sourced; only a call whose
+      -- head is defined in morloc can follow a recursive head's language.
+      lang <- if isSourcedMany f then chooseLanguage l1 ss else pickLanguage heads l1 (f : xs) ss
+      f' <- collapseAnnoS heads lang f
+      xs' <- mapM (if isSourceHead f' then collapseCarried heads lang else collapseAnnoS heads lang) xs
       return (AppS f' xs', Idx i lang)
     -- Propagate data
-    collapseExpr _ l1 (e@(LstS xs), Idx i ss) = do
-      lang <- if isFunctionalData e then functionalDataLang i l1 else chooseLanguage l1 (subtreeHasRec xs) ss
-      xs' <- mapM (collapseElement e lang) xs
+    collapseExpr heads _ l1 (e@(LstS xs), Idx i ss) = do
+      lang <- if isFunctionalData e then functionalDataLang i l1 else pickLanguage heads l1 xs ss
+      xs' <- mapM (collapseElement heads e lang) xs
       return (LstS xs', Idx i lang)
-    collapseExpr _ l1 (e@(TupS xs), Idx i ss) = do
-      lang <- if isFunctionalData e then functionalDataLang i l1 else chooseLanguage l1 (subtreeHasRec xs) ss
-      xs' <- mapM (collapseElement e lang) xs
+    collapseExpr heads _ l1 (e@(TupS xs), Idx i ss) = do
+      lang <- if isFunctionalData e then functionalDataLang i l1 else pickLanguage heads l1 xs ss
+      xs' <- mapM (collapseElement heads e lang) xs
       return (TupS xs', Idx i lang)
-    collapseExpr _ l1 (e@(NamS rs), Idx i ss) = do
-      lang <- if isFunctionalData e then functionalDataLang i l1 else chooseLanguage l1 (subtreeHasRec (map snd rs)) ss
-      xs' <- mapM (collapseElement e lang . snd) rs
+    collapseExpr heads _ l1 (e@(NamS rs), Idx i ss) = do
+      lang <- if isFunctionalData e then functionalDataLang i l1 else pickLanguage heads l1 (map snd rs) ss
+      xs' <- mapM (collapseElement heads e lang . snd) rs
       return (NamS (zip (map fst rs) xs'), Idx i lang)
     -- collapse leaf expressions
-    collapseExpr _ _ (ExeS x@(SrcCall src), Idx i _) = return (ExeS x, Idx i (Just (srcLang src)))
-    collapseExpr _ lang (ExeS x@(PatCall _), Idx i _) = return (ExeS x, Idx i lang)
-    collapseExpr _ lang (BndS v, Idx i _) = return (BndS v, Idx i lang)
-    collapseExpr _ lang (UniS, Idx i _) = return (UniS, Idx i lang)
-    collapseExpr _ lang (NullS, Idx i _) = return (NullS, Idx i lang)
-    collapseExpr _ lang (RealS si x, Idx i _) = return (RealS si x, Idx i lang)
-    collapseExpr _ lang (IntS si x, Idx i _) = return (IntS si x, Idx i lang)
-    collapseExpr _ lang (LogS x, Idx i _) = return (LogS x, Idx i lang)
-    collapseExpr _ lang (StrS x, Idx i _) = return (StrS x, Idx i lang)
-    collapseExpr _ lang (ConS tv n j xs, Idx i _) = do
-      xs' <- mapM (collapseAnnoS lang) xs
+    collapseExpr _ _ _ (ExeS x@(SrcCall src), Idx i _) = return (ExeS x, Idx i (Just (srcLang src)))
+    collapseExpr _ _ lang (ExeS x@(PatCall _), Idx i _) = return (ExeS x, Idx i lang)
+    collapseExpr _ _ lang (BndS v, Idx i _) = return (BndS v, Idx i lang)
+    collapseExpr _ _ lang (UniS, Idx i _) = return (UniS, Idx i lang)
+    collapseExpr _ _ lang (NullS, Idx i _) = return (NullS, Idx i lang)
+    collapseExpr _ _ lang (RealS si x, Idx i _) = return (RealS si x, Idx i lang)
+    collapseExpr _ _ lang (IntS si x, Idx i _) = return (IntS si x, Idx i lang)
+    collapseExpr _ _ lang (LogS x, Idx i _) = return (LogS x, Idx i lang)
+    collapseExpr _ _ lang (StrS x, Idx i _) = return (StrS x, Idx i lang)
+    collapseExpr heads _ lang (ConS tv n j xs, Idx i _) = do
+      xs' <- mapM (collapseAnnoS heads lang) xs
       return (ConS tv n j xs', Idx i lang)
-    collapseExpr _ l1 (LetS v e1 e2, Idx i ss) = do
-      lang <- chooseLanguage l1 (subtreeHasRec [e1, e2]) ss
-      e1' <- collapseAnnoS lang e1
-      e2' <- collapseAnnoS lang e2
+    collapseExpr heads _ l1 (LetS v e1 e2, Idx i ss) = do
+      lang <- pickLanguage heads l1 [e1, e2] ss
+      e1' <- collapseAnnoS heads lang e1
+      e2' <- collapseAnnoS heads lang e2
       return (LetS v e1' e2', Idx i lang)
-    collapseExpr _ lang (LetBndS v, Idx i _) = return (LetBndS v, Idx i lang)
-    collapseExpr _ lang (CallS v, Idx i _) = return (CallS v, Idx i lang)
-    collapseExpr _ l1 (IfS c t e, Idx i ss) = do
-      lang <- chooseLanguage l1 (subtreeHasRec [c, t, e]) ss
-      c' <- collapseAnnoS lang c
-      t' <- collapseAnnoS lang t
-      e' <- collapseAnnoS lang e
+    collapseExpr _ _ lang (LetBndS v, Idx i _) = return (LetBndS v, Idx i lang)
+    collapseExpr _ _ lang (CallS v, Idx i _) = return (CallS v, Idx i lang)
+    collapseExpr heads _ l1 (IfS c t e, Idx i ss) = do
+      lang <- pickLanguage heads l1 [c, t, e] ss
+      c' <- collapseAnnoS heads lang c
+      t' <- collapseAnnoS heads lang t
+      e' <- collapseAnnoS heads lang e
       return (IfS c' t' e', Idx i lang)
-    collapseExpr _ l1 (DoBlockS x, Idx i ss) = do
-      lang <- chooseLanguage l1 (subtreeHasRec [x]) ss
-      x' <- collapseAnnoS lang x
+    collapseExpr heads _ l1 (DoBlockS x, Idx i ss) = do
+      lang <- pickLanguage heads l1 [x] ss
+      x' <- collapseAnnoS heads lang x
       return (DoBlockS x', Idx i lang)
-    collapseExpr _ l1 (EvalS x, Idx i ss) = do
-      lang <- chooseLanguage l1 (subtreeHasRec [x]) ss
-      x' <- collapseAnnoS lang x
+    collapseExpr heads _ l1 (EvalS x, Idx i ss) = do
+      lang <- pickLanguage heads l1 [x] ss
+      x' <- collapseAnnoS heads lang x
       return (EvalS x', Idx i lang)
-    collapseExpr _ l1 (CoerceS c x, Idx i ss) = do
-      lang <- chooseLanguage l1 (subtreeHasRec [x]) ss
-      x' <- collapseAnnoS lang x
+    collapseExpr heads _ l1 (CoerceS c x, Idx i ss) = do
+      lang <- pickLanguage heads l1 [x] ss
+      x' <- collapseAnnoS heads lang x
       return (CoerceS c x', Idx i lang)
-    collapseExpr _ l1 (IntrinsicS intr xs, Idx i ss) = do
-      lang <- chooseLanguage l1 (subtreeHasRec xs) ss
-      xs' <- mapM (collapseAnnoS lang) xs
+    collapseExpr heads _ l1 (IntrinsicS intr xs, Idx i ss) = do
+      lang <- pickLanguage heads l1 xs ss
+      xs' <- mapM (collapseAnnoS heads lang) xs
       return (IntrinsicS intr xs', Idx i lang)
 
-    -- True if the subtree carries a self-recursive back-edge. During realize
-    -- every 'CallS' is such a back-edge; they are introduced before this pass
-    -- and only renamed/lifted afterward by 'extractRecursiveHelpers'.
-    hasRecCall :: (Foldable f) => AnnoS g f c -> Bool
-    hasRecCall = anyCallS (const True)
-
-    -- Whether this whole rAST is recursive at all (computed once). Non-recursive
-    -- trees -- the common case -- then short-circuit 'subtreeHasRec' without any
-    -- per-node subtree walk (so they stay O(n)); only actually-recursive rASTs,
-    -- which are small extracted helpers, pay the per-node walk. Computed from the
-    -- pre-scoring tree 's0'; 'normalizePop1' only beta-reduces literal-lambda
-    -- redexes and never adds or removes a 'CallS', so this agrees with the scored
-    -- tree the collapse actually walks.
-    treeHasCall :: Bool
-    treeHasCall = hasRecCall s0
-
-    -- 'recSpine' for a container: only meaningful in a recursive rAST, so gate
-    -- the (short-circuiting) per-child walk on 'treeHasCall'.
-    subtreeHasRec :: (Foldable f) => [AnnoS g f c] -> Bool
-    subtreeHasRec xs = treeHasCall && any hasRecCall xs
-
-    -- 'recSpine' is True when the subtree being placed contains a recursive
-    -- back-edge. The back-edge must return to the enclosing recursive
-    -- manifold's language (the head); on the un-crossed recursive spine that
-    -- head language is the incoming parent 'l1'. Realizing the subtree in any
-    -- other language 'l2' therefore forces the back-edge to cross 'l2 -> head'
-    -- every iteration. That crossing is invisible to the scorer (a recursive
-    -- 'CallS' scores (0,0) in every language, via 'zipLang'), so without this
-    -- correction the scorer splits a mixed-language recursive body onto its
-    -- heavy leaf's pool, putting the back-edge across a pool boundary and
-    -- blocking native-loop lowering. Adding the back-edge crossing here keeps a
-    -- recursive body co-located with its head whenever that is cost-competitive,
-    -- WITHOUT hard-pinning: a genuinely cheaper cross-pool body (e.g. cross-pool
-    -- mutual recursion whose partner is another language entirely) still wins.
     -- An element of a container. A container holding function values sits
     -- in its parent's language, and so does each function value it holds:
     -- a closure is homed with the container that carries it and reaches
@@ -752,13 +754,14 @@ realizeWithRegistry registry s0 = do
     -- A function value handed straight to a sourced function is carried the
     -- same way: the host's pool holds the callable it is given.
     collapseElement ::
+      [(EVar, Lang)] ->
       ExprS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
       Maybe Lang ->
       AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
       MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
-    collapseElement container lang x
-      | isFunctionalData container = collapseCarried lang x
-      | otherwise = collapseAnnoS lang x
+    collapseElement heads container lang x
+      | isFunctionalData container = collapseCarried heads lang x
+      | otherwise = collapseAnnoS heads lang x
 
     -- A structure holding function values lives in the pool that holds
     -- it; with no pool around it (the root of a command) there is nowhere
@@ -770,14 +773,22 @@ realizeWithRegistry registry s0 = do
         "A record, list or tuple holding function values cannot be the result of a command: a function value has no form outside a pool"
 
     collapseCarried ::
+      [(EVar, Lang)] ->
       Maybe Lang ->
       AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
       MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
-    collapseCarried lang x@(AnnoS (Idx _ t) _ _)
+    collapseCarried heads lang x@(AnnoS (Idx _ t) _ _)
       | isClosureType t = do
-          AnnoS g (Idx i _) e' <- collapseAnnoS lang x
+          AnnoS g (Idx i _) e' <- collapseAnnoS heads lang x
           return (AnnoS g (Idx i lang) e')
-      | otherwise = collapseAnnoS lang x
+      | otherwise = collapseAnnoS heads lang x
+
+    -- The head of an application, before collapse, is a sourced function
+    -- however it is named: every alternative of the term is a source call.
+    isSourcedMany :: AnnoS (Indexed Type) Many c -> Bool
+    isSourcedMany (AnnoS _ _ (ExeS (SrcCall _))) = True
+    isSourcedMany (AnnoS _ _ (VarS _ (Many xs))) = not (null xs) && all isSourcedMany xs
+    isSourcedMany _ = False
 
     -- The head of an application is a sourced function, reached directly or
     -- through the term that names it.
@@ -791,14 +802,36 @@ realizeWithRegistry registry s0 = do
     isClosureType (EffectT _ _) = True
     isClosureType _ = False
 
-    chooseLanguage :: Maybe Lang -> Bool -> [(Lang, Score)] -> MorlocMonad (Maybe Lang)
-    chooseLanguage l1 recSpine ss = do
-      let recPenalty l2 = case l1 of
-            Just h | recSpine && l2 /= h -> transScore l2 h
-            _ -> (0, 0)
-      case minBy snd [(l2, cost l1 l2 s2 `addScore` recPenalty l2) | (l2, s2) <- ss] of
+    chooseLanguage :: Maybe Lang -> [(Lang, Score)] -> MorlocMonad (Maybe Lang)
+    chooseLanguage l1 ss =
+      case minBy snd [(l2, cost l1 l2 s2) | (l2, s2) <- ss] of
         Nothing -> return Nothing
         (Just (l3, _)) -> return (Just l3)
+
+    -- The language of a node, given the recursive heads enclosing it. A
+    -- node with a back-edge to one of them beneath it takes that head's
+    -- language: a recursion whose cycle crosses pools cannot lower to a
+    -- loop, and every level of it then nests a foreign call that parks a
+    -- worker in each pool, so its depth is bounded by workers rather than
+    -- memory. Kept in one pool, the cycle lowers to a loop whose foreign
+    -- primitives are a bounded number of calls per step. The outermost
+    -- head wins, so nested cycles agree; a candidate hosted in the head's
+    -- pool serves as well as the head's own language. A scorer cannot
+    -- decide this, since a back-edge scores nothing in every language.
+    pickLanguage ::
+      [(EVar, Lang)] ->
+      Maybe Lang ->
+      [AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])] ->
+      [(Lang, Score)] ->
+      MorlocMonad (Maybe Lang)
+    pickLanguage heads l1 xs ss =
+      case [l | (w, l) <- heads, any (containsCallS w) xs] of
+        (l : _) -> return (Just (hostedWith l))
+        [] -> chooseLanguage l1 ss
+      where
+        hostedWith l = case minBy snd [(l2, s) | (l2, s) <- ss, LR.coLocated registry l l2] of
+          Just (l2, _) -> l2
+          Nothing -> l
 
     minBy :: (Ord b) => (a -> b) -> [a] -> Maybe a
     minBy _ [] = Nothing
