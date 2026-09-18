@@ -2,6 +2,10 @@ py_failed
 py_signal
 py_command
 py_frames
+pythread_failed
+pythread_signal
+pythread_command
+pythread_frames
 cpp_failed
 cpp_signal
 cpp_manifold

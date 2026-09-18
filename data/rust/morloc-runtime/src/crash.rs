@@ -7,8 +7,8 @@
 //! the manifold the faulting thread was executing, then a native
 //! backtrace; then it lets the process die of the signal so the parent
 //! still sees it. Inside the handler only calls that are safe there are
-//! used: `write`, `backtrace_symbols_fd` (warmed at install), `alarm` and
-//! `raise`.
+//! used: `write`, `backtrace_symbols_fd` (warmed at install), `alarm`,
+//! `pthread_sigmask` and `raise`.
 
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
@@ -70,11 +70,17 @@ pub unsafe extern "C" fn morloc_install_crash_handler(lang: *const c_char, curre
 }
 
 /// A handler that has taken too long: end the process with the signal it
-/// was reporting.
+/// was reporting. That signal is masked while its handler runs, so it is
+/// unblocked first; a raise alone would leave it pending behind the
+/// wedged handler.
 extern "C" fn wedged(_sig: c_int) {
     let sig = PENDING.load(Ordering::Relaxed) as c_int;
     unsafe {
         libc::signal(sig, libc::SIG_DFL);
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, sig);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
         libc::raise(sig);
     }
 }
@@ -127,7 +133,7 @@ impl Line {
     }
 }
 
-extern "C" fn fatal(sig: c_int, info: *mut libc::siginfo_t, _ctx: *mut c_void) {
+extern "C" fn fatal(sig: c_int, _info: *mut libc::siginfo_t, _ctx: *mut c_void) {
     PENDING.store(sig as usize, Ordering::Relaxed);
     unsafe { libc::alarm(HANDLER_ALARM_SECS) };
 
@@ -174,12 +180,13 @@ extern "C" fn fatal(sig: c_int, info: *mut libc::siginfo_t, _ctx: *mut c_void) {
     let n = unsafe { libc::backtrace(frames.as_mut_ptr(), frames.len() as c_int) };
     unsafe { libc::backtrace_symbols_fd(frames.as_ptr(), n, 2) };
 
-    // A fault the kernel raised is re-executed on return and, with the
-    // default disposition restored, ends the process with its own context.
-    // A signal sent by a process (raise, kill, abort) would not recur, so
-    // it is raised again.
-    let kernel_raised = !info.is_null() && unsafe { (*info).si_code } > 0;
-    if !kernel_raised {
-        unsafe { libc::raise(sig) };
-    }
+    // The signal is masked while this handler runs and its disposition is
+    // already the default, so the copy raised here is delivered on return
+    // and ends the process, whether the original was a fault the kernel
+    // raised or a signal a process sent (raise, kill). The two cannot be
+    // told apart portably: Linux marks a sent signal with si_code <= 0,
+    // while macOS stamps a SIGSEGV SEGV_ACCERR however it arrived, and a
+    // handler that returned from a sent signal would resume the pool as
+    // if nothing had happened.
+    unsafe { libc::raise(sig) };
 }

@@ -3,9 +3,13 @@ all:
 	: > obs.txt
 	morloc make -o nexus main.loc 2> build.err
 	./nexus crashPy 1 > /dev/null 2> obs.py.err && echo UNEXPECTED_SUCCESS >> obs.txt || echo py_failed >> obs.txt
-	grep -qE "morloc py pool: worker [0-9]+ crashed with signal 11" obs.py.err && echo py_signal >> obs.txt || echo NO_PY_SIGNAL >> obs.txt
+	grep -qE "morloc py pool: worker [0-9]+ crashed with signal 11|Pool 'py' Pool process crashed with signal 11" obs.py.err && echo py_signal >> obs.txt || echo NO_PY_SIGNAL >> obs.txt
 	grep -qF "while running 'crashPy' (mid=" obs.py.err && echo py_command >> obs.txt || echo NO_PY_COMMAND >> obs.txt
 	grep -qF "in m" obs.py.err && echo py_frames >> obs.txt || echo NO_PY_FRAMES >> obs.txt
+	MORLOC_PY_POOL=thread ./nexus crashPy 1 > /dev/null 2> obs.pythread.err && echo UNEXPECTED_SUCCESS >> obs.txt || echo pythread_failed >> obs.txt
+	grep -qF "Pool 'py' Pool process crashed with signal 11" obs.pythread.err && echo pythread_signal >> obs.txt || echo NO_PYTHREAD_SIGNAL >> obs.txt
+	grep -qF "while running 'crashPy' (mid=" obs.pythread.err && echo pythread_command >> obs.txt || echo NO_PYTHREAD_COMMAND >> obs.txt
+	grep -qF "in m" obs.pythread.err && echo pythread_frames >> obs.txt || echo NO_PYTHREAD_FRAMES >> obs.txt
 	./nexus crashCpp 1 > /dev/null 2> obs.cpp.err && echo UNEXPECTED_SUCCESS >> obs.txt || echo cpp_failed >> obs.txt
 	grep -qF "Pool 'cpp' Pool process crashed with signal 11" obs.cpp.err && echo cpp_signal >> obs.txt || echo NO_CPP_SIGNAL >> obs.txt
 	grep -qF "while executing crashCpp [cpp] (mid=" obs.cpp.err && echo cpp_manifold >> obs.txt || echo NO_CPP_MANIFOLD >> obs.txt
