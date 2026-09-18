@@ -2455,9 +2455,6 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
     // `schema` to the `error:` label; freeing it here as well would free
     // it twice.
     if (schema->type == MORLOC_TABLE) {
-        if (format == PACKET_FORMAT_ARROW && source != PACKET_SOURCE_RPTR) {
-            PyRAISE("Arrow packet does not name a shared-memory block");
-        }
         bool materialized = (source != PACKET_SOURCE_RPTR);
         voidstar = PyTRY_INFRA(get_morloc_data_packet_value, (uint8_t*)packet, schema);
 

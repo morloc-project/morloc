@@ -343,6 +343,28 @@ pub unsafe extern "C" fn make_data_indirection_packet(
     )
 }
 
+/// A table argument that names its file. The receiving pool reads and
+/// decodes it, so the bytes are held once, by the process that will use
+/// the table, rather than being decoded in the nexus and shipped on.
+#[no_mangle]
+pub unsafe extern "C" fn make_table_file_packet(
+    path: *const c_char,
+    schema: *const CSchema,
+) -> *mut u8 {
+    if path.is_null() { return ptr::null_mut(); }
+    let bytes = CStr::from_ptr(path).to_bytes();
+    make_data_packet_with_schema(
+        bytes.as_ptr(),
+        bytes.len(),
+        schema,
+        PACKET_SOURCE_FILE,
+        PACKET_FORMAT_ARROW,
+        PACKET_COMPRESSION_NONE,
+        PACKET_ENCRYPTION_NONE,
+        PACKET_STATUS_PASS,
+    )
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn make_data_packet_from_mpk(
     mpk: *const c_char,
@@ -661,6 +683,29 @@ pub unsafe extern "C" fn get_morloc_data_packet_value(
                         set_errmsg(errmsg, &MorlocError::Io(e));
                         ptr::null_mut()
                     }
+                }
+            } else if format == PACKET_FORMAT_ARROW {
+                // A table argument names its file rather than carrying a
+                // decoded copy: the bytes are read here, in the process
+                // that will hold the table, and never in the nexus.
+                let path_cstr = match std::ffi::CString::new(filename) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        set_errmsg(errmsg, &MorlocError::Packet(
+                            "FILE+ARROW payload has embedded NUL".into()
+                        ));
+                        return ptr::null_mut();
+                    }
+                };
+                let rel = crate::arrow_ipc_reader::read_table_file_to_shm(
+                    path_cstr.as_ptr(), schema, errmsg,
+                );
+                if rel == shm::RELNULL {
+                    return ptr::null_mut();
+                }
+                match shm::rel2abs(rel) {
+                    Ok(abs) => abs,
+                    Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
                 }
             } else if format == PACKET_FORMAT_DATA {
                 // Indirection: the file at `filename` is a complete

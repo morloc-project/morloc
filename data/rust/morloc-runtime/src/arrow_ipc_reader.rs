@@ -269,6 +269,114 @@ unsafe fn read_arrow_ipc_to_shm_impl(
     }
 }
 
+/// The table format a file holds, decided by what the bytes say and, only
+/// where they say nothing, by the name. Arrow IPC and Parquet announce
+/// themselves; delimited text does not, so a reader that has only a pipe
+/// to go on has to try parsing it.
+pub enum TableFormat {
+    ArrowIpc,
+    Parquet,
+    Delimited(u8),
+    Json,
+}
+
+/// Recognise a table file from its leading bytes, its last four, and its
+/// name. `head` should hold at least a kibibyte where the file is that
+/// long: enough for the magic numbers and for a delimited-text parse to
+/// be worth trying.
+pub fn sniff_table_format(head: &[u8], tail4: &[u8], path: &str) -> Option<TableFormat> {
+    if is_arrow_file_magic(head) {
+        return Some(TableFormat::ArrowIpc);
+    }
+    if head.len() >= 4 && &head[..4] == b"PAR1" && tail4 == b"PAR1" {
+        return Some(TableFormat::Parquet);
+    }
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".tsv") {
+        return Some(TableFormat::Delimited(b'\t'));
+    }
+    if lower.ends_with(".csv") {
+        return Some(TableFormat::Delimited(b','));
+    }
+    if lower.ends_with(".json") {
+        return Some(TableFormat::Json);
+    }
+    // Nothing named it, so ask the bytes. A leading `[` or `{` is JSON;
+    // otherwise try each delimiter and take the first that parses as a
+    // table of more than one column, which is what tells a real delimited
+    // file from a column of plain text.
+    match head.iter().find(|b| !b.is_ascii_whitespace()) {
+        Some(b'[') | Some(b'{') => return Some(TableFormat::Json),
+        None => return None,
+        _ => {}
+    }
+    for delim in [b',', b'\t'] {
+        let format = arrow_csv::reader::Format::default().with_header(true).with_delimiter(delim);
+        if let Ok((schema, rows)) = format.infer_schema(&mut Cursor::new(head), csv_sniff_rows()) {
+            if rows > 0 && schema.fields().len() > 1 {
+                return Some(TableFormat::Delimited(delim));
+            }
+        }
+    }
+    None
+}
+
+/// Read a table file into a fresh block under the declared schema,
+/// recognising its format from its own bytes where it has a say. This is
+/// the pool-side entry: the nexus hands over a path rather than a decoded
+/// table, so the bytes are read once, in the process that will hold them.
+///
+/// # Safety
+/// `path` must be a valid null-terminated string and `schema` a valid
+/// CSchema pointer.
+#[no_mangle]
+pub unsafe extern "C" fn read_table_file_to_shm(
+    path: *const c_char,
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> RelPtr {
+    crate::error::guarded(errmsg, shm::RELNULL, || read_table_file_to_shm_impl(path, schema, errmsg))
+}
+
+unsafe fn read_table_file_to_shm_impl(
+    path: *const c_char,
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> RelPtr {
+    use std::io::Read;
+    if path.is_null() || schema.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other("NULL path or schema".into()));
+        return shm::RELNULL;
+    }
+    let path_str = match std::ffi::CStr::from_ptr(path).to_str() {
+        Ok(p) => p,
+        Err(_) => {
+            set_errmsg(errmsg, &MorlocError::Other("table path is not valid UTF-8".into()));
+            return shm::RELNULL;
+        }
+    };
+    let bad = |e: std::io::Error| MorlocError::Other(format!("reading table file '{}': {}", path_str, e));
+    let mut bytes = Vec::new();
+    if let Err(e) = std::fs::File::open(path_str).and_then(|mut f| f.read_to_end(&mut bytes)) {
+        set_errmsg(errmsg, &bad(e));
+        return shm::RELNULL;
+    }
+    let head = &bytes[..bytes.len().min(1024)];
+    let tail4 = if bytes.len() >= 4 { &bytes[bytes.len() - 4..] } else { &[][..] };
+    match sniff_table_format(head, tail4, path_str) {
+        Some(TableFormat::ArrowIpc) => read_arrow_ipc_to_shm(bytes.as_ptr(), bytes.len(), schema, errmsg),
+        Some(TableFormat::Parquet) => read_parquet_bytes_to_shm(bytes::Bytes::from(bytes), schema, errmsg),
+        Some(TableFormat::Delimited(d)) => read_csv_to_shm(bytes.as_ptr(), bytes.len(), d, schema, errmsg),
+        Some(TableFormat::Json) => crate::arrow_ffi::read_json_bytes_to_arrow_shm(&bytes, schema, errmsg),
+        None => {
+            set_errmsg(errmsg, &MorlocError::Other(format!(
+                "'{}' is not a table: it is not Arrow IPC or Parquet, and its text does not \
+                 parse as delimited or JSON", path_str)));
+            shm::RELNULL
+        }
+    }
+}
+
 /// Decode an Arrow IPC payload into a fresh block and return its absolute
 /// address, or NULL with `errmsg` set: the shape a packet reader wants.
 ///
@@ -706,7 +814,6 @@ unsafe fn read_parquet_to_shm_impl(
     errmsg: *mut *mut c_char,
 ) -> RelPtr {
     use bytes::Bytes;
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     if data.is_null() || schema.is_null() || data_len == 0 {
         set_errmsg(errmsg, &MorlocError::Other("NULL data or schema".into()));
@@ -719,8 +826,27 @@ unsafe fn read_parquet_to_shm_impl(
         return shm::RELNULL;
     }
 
-    let owned = Bytes::copy_from_slice(bytes);
-    let builder = match ParquetRecordBatchReaderBuilder::try_new(owned) {
+    read_parquet_bytes_to_shm(Bytes::copy_from_slice(bytes), schema, errmsg)
+}
+
+/// As `read_parquet_to_shm` for bytes the caller already owns, so a file
+/// read straight from disk is not copied a second time to be decoded.
+///
+/// # Safety
+/// `schema` must be a valid CSchema pointer.
+pub unsafe fn read_parquet_bytes_to_shm(
+    bytes: bytes::Bytes,
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> RelPtr {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    let rs = CSchema::to_rust(schema);
+    if !is_arrow_table_schema(&rs) {
+        set_errmsg(errmsg, &MorlocError::Other("Parquet reader requires a Table schema".into()));
+        return shm::RELNULL;
+    }
+    let builder = match ParquetRecordBatchReaderBuilder::try_new(bytes) {
         Ok(b) => b,
         Err(e) => {
             set_errmsg(errmsg, &MorlocError::Other(format!("Failed to open Parquet file: {}", e)));

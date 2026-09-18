@@ -318,13 +318,10 @@ T _get_value(const uint8_t* packet, Schema* schema){
     uint8_t format = header->command.data.format;
 
     if constexpr (std::is_same_v<T, mlc::ArrowTable>) {
-        // A table is a block. It arrives by reference (an Arrow packet) or
-        // in a form the runtime materializes into a block of this pool's
-        // own (a cached result read back from a file, a captured value
-        // carried inline).
-        if (format == PACKET_FORMAT_ARROW && source != PACKET_SOURCE_RPTR) {
-            MLC_INTERNAL_ABORT("Arrow packet does not name a shared-memory block");
-        }
+        // A table is a block. It arrives by reference, or in a form the
+        // runtime materializes into a block of this pool's own: the file
+        // an argument names, a cached result read back, or a captured
+        // value carried inline.
         bool materialized = (source != PACKET_SOURCE_RPTR);
         char* errmsg = nullptr;
         uint8_t* raw = get_morloc_data_packet_value(packet, schema, &errmsg);

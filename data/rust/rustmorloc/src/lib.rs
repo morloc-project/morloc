@@ -2243,13 +2243,10 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
     let format = *packet.add(PKT_FORMAT_OFF);
 
     if schema.serial_type == SerialType::Table {
-        // A table is a block. It arrives by reference (an Arrow packet) or
-        // in a form the runtime materializes into a block of this pool's
-        // own (a cached result read back from a file, a captured value
-        // carried inline).
-        if format == PKT_FORMAT_ARROW && source != PKT_SOURCE_RPTR {
-            morloc_infra_abort("Arrow packet does not name a shared-memory block");
-        }
+        // A table is a block. It arrives by reference, or in a form the
+        // runtime materializes into a block of this pool's own: the file
+        // an argument names, a cached result read back, or a captured
+        // value carried inline.
         let materialized = source != PKT_SOURCE_RPTR;
         let cs = cschema_of(schema);
         let mut err: *mut c_char = std::ptr::null_mut();

@@ -630,14 +630,25 @@ unsafe fn read_json_to_arrow_shm_impl(
         set_errmsg(errmsg, &MorlocError::Other("JSON-to-table requires a Table schema".into()));
         return shm::RELNULL;
     }
-    let json_str = match CStr::from_ptr(json).to_str() {
-        Ok(s) => s,
-        Err(_) => {
-            set_errmsg(errmsg, &MorlocError::Other("Invalid UTF-8 in JSON".into()));
-            return shm::RELNULL;
-        }
-    };
-    let value: serde_json::Value = match serde_json::from_str(json_str) {
+    read_json_bytes_to_arrow_shm(CStr::from_ptr(json).to_bytes(), schema, errmsg)
+}
+
+/// As `read_json_to_arrow_shm` for JSON that is not already a C string --
+/// a file read into memory, say.
+///
+/// # Safety
+/// `schema` must be a valid CSchema pointer.
+pub unsafe fn read_json_bytes_to_arrow_shm(
+    json: &[u8],
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> RelPtr {
+    let rs = CSchema::to_rust(schema);
+    if !is_arrow_table_schema(&rs) {
+        set_errmsg(errmsg, &MorlocError::Other("JSON-to-table requires a Table schema".into()));
+        return shm::RELNULL;
+    }
+    let value: serde_json::Value = match serde_json::from_slice(json) {
         Ok(v) => v,
         Err(e) => {
             set_errmsg(errmsg, &MorlocError::Other(format!("JSON parse error: {}", e)));

@@ -2,6 +2,9 @@ Unreleased
 ----------
 
  * a pipeline that handles many tables holds one at a time, not all of them
+ * a table argument is read by the pool that uses it, not copied through
+   the nexus first
+ * a table can be piped in: CSV and TSV on stdin are recognised by content
 
 0.108.1 [2026-09-18]
 --------------------

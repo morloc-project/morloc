@@ -3097,10 +3097,6 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
     // into a block of this pool's own (a cached result read back from a
     // file, a captured value carried inline).
     if (schema->type == MORLOC_TABLE) {
-        if (format == PACKET_FORMAT_ARROW && source != PACKET_SOURCE_RPTR) {
-            free_schema(schema);
-            MORLOC_ERROR("Arrow packet does not name a shared-memory block");
-        }
         bool materialized = (source != PACKET_SOURCE_RPTR);
         uint8_t* arrow_ptr = R_TRY_WITH_INFRA(free_schema(schema),
             get_morloc_data_packet_value, packet, schema);

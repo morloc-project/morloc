@@ -371,6 +371,101 @@ macro_rules! stream_fast_path_or_fallthrough {
     };
 }
 
+/// What to do with a table argument that names its data rather than
+/// spelling it out.
+pub(crate) enum TableArg {
+    /// Not a table, or inline JSON, which is small by construction and
+    /// stays where it is.
+    NotHandled,
+    /// Pass the file on by name; the pool reads it.
+    ByName(*mut u8),
+    /// The file is a morloc packet, which the ordinary loader knows how to
+    /// read. It is named here because the bytes may have come off a pipe
+    /// and been spooled, in which case reading stdin again would find
+    /// nothing.
+    Reclassified(Classified),
+}
+
+/// Nexus-side fast path for a table argument. A table's bytes belong in
+/// the pool that will hold the table, so a file -- or a pipe, spooled to
+/// one -- is passed on by name and the nexus never reads it.
+///
+/// # Safety
+/// `schema` must be a valid CSchema pointer.
+pub(crate) unsafe fn try_table_file_packet(
+    classified: &Classified,
+    schema: *const CSchema,
+) -> Result<TableArg, MorlocError> {
+    if schema.is_null() || !crate::arrow_ffi::is_arrow_table_schema(&CSchema::to_rust(schema)) {
+        return Ok(TableArg::NotHandled);
+    }
+    let effective: *const c_char = match classified.kind {
+        ArgSource::Inline => return Ok(TableArg::NotHandled),
+        ArgSource::File => classified.effective,
+        // A pipe cannot be handed on by name, and cannot be rewound once
+        // read, so it is spooled to a file the nexus removes at exit. The
+        // path outlives the call because the packet, or the loader that
+        // falls through to it, holds only a pointer.
+        ArgSource::Stdin => {
+            claim_stdin()?;
+            let path = std::ffi::CString::new(spool_stdin_to_temp()?)
+                .map_err(|_| MorlocError::Other("spooled table path has an embedded NUL".into()))?;
+            Box::leak(path.into_boxed_c_str()).as_ptr()
+        }
+    };
+    // A morloc packet carries its own schema and encoding; the ordinary
+    // loader reads it, and doing that here would lose the checks it makes.
+    if peek_packet_header_via_pread(effective).is_some() {
+        return Ok(TableArg::Reclassified(Classified { kind: ArgSource::File, effective }));
+    }
+    let packet = crate::packet_ffi::make_table_file_packet(effective, schema);
+    if packet.is_null() {
+        return Err(MorlocError::Packet("could not build the table argument packet".into()));
+    }
+    Ok(TableArg::ByName(packet))
+}
+
+/// Copy standard input to a temporary file and return its path. The file
+/// is unlinked when the process exits, so nothing survives the run.
+unsafe fn spool_stdin_to_temp() -> Result<String, MorlocError> {
+    use std::io::{Read, Write};
+    let dir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into());
+    let mut template: Vec<u8> = format!("{}/morloc-table-XXXXXX", dir.trim_end_matches('/')).into_bytes();
+    template.push(0);
+    let fd = libc::mkstemp(template.as_mut_ptr() as *mut c_char);
+    if fd < 0 {
+        return Err(MorlocError::Other("could not open a temporary file for the table on stdin".into()));
+    }
+    let path = String::from_utf8_lossy(&template[..template.len() - 1]).into_owned();
+    // Unlinking now would take the name the pool needs, so the file is
+    // removed at exit instead.
+    SPOOLED.lock().unwrap_or_else(|e| e.into_inner()).push(path.clone());
+    let mut out = {
+        use std::os::fd::FromRawFd;
+        std::fs::File::from_raw_fd(fd)
+    };
+    let mut buf = vec![0u8; 1 << 20];
+    let mut stdin = std::io::stdin().lock();
+    loop {
+        let n = stdin.read(&mut buf).map_err(MorlocError::Io)?;
+        if n == 0 { break; }
+        out.write_all(&buf[..n]).map_err(MorlocError::Io)?;
+    }
+    out.flush().map_err(MorlocError::Io)?;
+    Ok(path)
+}
+
+/// Temporary files holding input spooled off a pipe, removed at exit.
+static SPOOLED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Remove every file spooled off a pipe during this run.
+pub fn remove_spooled_inputs() {
+    let mut files = SPOOLED.lock().unwrap_or_else(|e| e.into_inner());
+    for path in files.drain(..) {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
 // ── try_load_stream_packet_file ───────────────────────────────────────────
 
 /// Nexus-side fast path for stream-packet CLI file arguments. Dispatches
@@ -3791,6 +3886,14 @@ pub unsafe extern "C" fn parse_cli_data_argument_shaped(
             if c.kind == ArgSource::File {
                 stream_fast_path_or_fallthrough!(c.effective, schema, errmsg);
             }
+            match try_table_file_packet(&c, schema) {
+                Ok(TableArg::ByName(pkt)) => return pkt,
+                // A packet read through the shape pipeline keeps its
+                // ordinary route; only the name may have changed.
+                Ok(TableArg::Reclassified(_)) => {}
+                Ok(TableArg::NotHandled) => {}
+                Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+            }
         }
     } else if form_code == 1 && source_code == 2 {
         stream_fast_path_or_fallthrough!((*arg).value, schema, errmsg);
@@ -3820,15 +3923,24 @@ pub unsafe extern "C" fn parse_cli_data_argument(
     // Stream-packet fast path (singular args only): a MORLOC_STREAM_PACKET
     // file short-circuits the voidstar-then-wrap chain below and returns
     // a purpose-built packet directly.
+    let mut table_spool: Option<Classified> = None;
     if (*arg).fields.is_null() && !(*arg).value.is_null() {
         if let Ok(classified) = classify_arg_source((*arg).value) {
             if classified.kind == ArgSource::File {
                 stream_fast_path_or_fallthrough!(classified.effective, schema, errmsg);
             }
+            match try_table_file_packet(&classified, schema) {
+                Ok(TableArg::ByName(pkt)) => return pkt,
+                Ok(TableArg::Reclassified(c)) => table_spool = Some(c),
+                Ok(TableArg::NotHandled) => {}
+                Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+            }
         }
     }
 
-    let result = if (*arg).fields.is_null() {
+    let result = if let Some(c) = table_spool {
+        parse_cli_data_argument_classified(dest, c, schema, &mut err)
+    } else if (*arg).fields.is_null() {
         parse_cli_data_argument_singular(dest, (*arg).value, schema, &mut err)
     } else {
         parse_cli_data_argument_unrolled(

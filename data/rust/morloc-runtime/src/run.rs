@@ -460,12 +460,14 @@ pub unsafe extern "C" fn morloc_hostname(buf: *mut libc::c_char, len: usize) -> 
     n
 }
 
-/// Write `summary.json` and flush all tee handles. Called from the
-/// nexus's `clean_exit` after pools have been torn down so any
-/// in-flight log lines they wrote also land in the per-label files.
+/// Write `summary.json`, drop any input spooled off a pipe, and flush all
+/// tee handles. Called from the nexus's `clean_exit` after pools have been
+/// torn down so any in-flight log lines they wrote also land in the
+/// per-label files.
 #[no_mangle]
 pub extern "C" fn morloc_run_finalize(exit_code: i32) {
     write_summary_json(exit_code);
+    crate::cli::remove_spooled_inputs();
     if let Some(m) = TEE_HANDLES.get() {
         if let Ok(mut g) = m.lock() {
             g.clear();
