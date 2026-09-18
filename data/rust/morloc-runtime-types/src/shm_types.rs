@@ -148,7 +148,10 @@ impl MorlocVolEntry {
 
 // ── Shared memory header (lives in mmap'd region) ──────────────────────────
 
-#[repr(C)]
+/// Aligned to sixteen, and sized to a multiple of it, because the
+/// volume's first block starts immediately after: a block's alignment is
+/// only as good as the data region's.
+#[repr(C, align(16))]
 pub struct ShmHeader {
     pub magic: u32,
     pub volume_name: [u8; MAX_FILENAME_SIZE],
@@ -159,7 +162,17 @@ pub struct ShmHeader {
     pub cursor: VolPtr,
 }
 
-#[repr(C)]
+const _: () = assert!(std::mem::size_of::<ShmHeader>() % std::mem::align_of::<BlockHeader>() == 0);
+
+/// Aligned to sixteen so that a block's data is too. A block holds
+/// whatever a value needs, and the widest thing any of them contains is
+/// a 128-bit word: an Arrow decimal, or the view descriptors of a
+/// string-view column. Those are read where they lie, by another
+/// language's Arrow library, which is entitled to assume its own types'
+/// alignment and will refuse a buffer that does not have it. The header
+/// is itself sixteen bytes, so data starts one header past a
+/// sixteen-aligned block and is sixteen-aligned in turn.
+#[repr(C, align(16))]
 pub struct BlockHeader {
     pub magic: u32,
     pub reference_count: AtomicU32,
@@ -171,6 +184,11 @@ const _: () = assert!(
         == std::mem::size_of::<u32>()
             + std::mem::size_of::<AtomicU32>()
             + std::mem::size_of::<usize>()
+);
+// Data sits one header past the block, so the header's own size has to
+// preserve the alignment the block was given.
+const _: () = assert!(
+    std::mem::size_of::<BlockHeader>() % std::mem::align_of::<BlockHeader>() == 0
 );
 
 // ── Voidstar data structures (used by serialization) ───────────────────────

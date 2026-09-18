@@ -14,7 +14,7 @@
 // (Morloc.Abi). Provisioning refuses to run a prebuilt libmorloc/nexus whose
 // version differs from the compiler's expected value (fail-closed), preventing
 // silent cross-pool struct/offset corruption.
-#define MORLOC_ABI_VERSION 4
+#define MORLOC_ABI_VERSION 5
 
 // Atomic includes must sit outside any `extern "C"` block because the
 // C++ <atomic> header pulls in <type_traits> et al., which use C++
@@ -1169,6 +1169,10 @@ struct ArrowArrayStream {
 
 #define ARROW_SHM_MAGIC    0xA770DA7A
 #define ARROW_SHM_VERSION  2
+// Buffers are laid out a cache line apart within a block, so no two share
+// one. What a consumer may rely on absolutely is the block's own
+// alignment, which is sixteen -- enough for the widest Arrow word, a
+// 128-bit decimal or string view.
 #define ARROW_BUFFER_ALIGN 64
 #define ARROW_ALIGN_UP(x)  (((x) + ARROW_BUFFER_ALIGN - 1) & ~((size_t)ARROW_BUFFER_ALIGN - 1))
 

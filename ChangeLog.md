@@ -5,6 +5,7 @@ Unreleased
  * a table argument is read by the pool that uses it, not copied through
    the nexus first
  * a table can be piped in: CSV and TSV on stdin are recognised by content
+ * a table with a decimal or string-view column crosses into any pool
 
 0.108.1 [2026-09-18]
 --------------------
