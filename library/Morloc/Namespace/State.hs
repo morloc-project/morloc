@@ -233,6 +233,12 @@ data MorlocState = MorlocState
   -- ^ Map from group name to (description lines, member export indices)
   , stateManifoldLang :: Map Int Lang
   -- ^ Map from export manifold ID to its pool language
+  , stateNativeRecEntries :: Map Int Int
+  -- ^ A recursive manifold that also has a native entry point, mapped to
+  -- that entry's ID. The manifold itself is the pool's serial entry: it
+  -- takes and returns packets, which a caller in another pool needs and a
+  -- caller in the same pool pays for on every level of the recursion. A
+  -- caller in the same pool calls the native entry instead.
   , stateHostOriginClosures :: Set.Set Int
   -- ^ Manifolds that wrap a function value a HOST created (the adapter at
   -- a sourced call's result). Such a value has no identity of its own, so
@@ -957,6 +963,7 @@ instance Defaultable MorlocState where
       , stateLangRegistry = LR.emptyRegistry
       , stateExportGroups = Map.empty
       , stateManifoldLang = Map.empty
+      , stateNativeRecEntries = Map.empty
       , stateHostOriginClosures = Set.empty
       , stateArgTypes = Map.empty
       , stateManifoldEffects = Map.empty

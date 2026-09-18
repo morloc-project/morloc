@@ -122,6 +122,7 @@ copyState oldIdx newIdx = do
       , stateLangRegistry = stateLangRegistry s
       , stateExportGroups = stateExportGroups s
       , stateManifoldLang = stateManifoldLang s
+      , stateNativeRecEntries = stateNativeRecEntries s
       , stateHostOriginClosures = stateHostOriginClosures s
       , stateArgTypes = stateArgTypes s
       , stateManifoldEffects = stateManifoldEffects s

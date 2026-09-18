@@ -18,6 +18,7 @@ module Morloc.CodeGenerator.Express
   , addCacheWraps
   , addDebugWraps
   , addLoopWraps
+  , addNativeRecEntries
   , polyFreeVars
   ) where
 
@@ -40,6 +41,7 @@ import Morloc.CodeGenerator.LanguageDescriptor (ldAllowStringNull, loadLangDescr
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.Language as ML
 import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.Serial (containsFunT)
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
@@ -195,6 +197,95 @@ addCacheWraps (PolyHead lang midx args body) = do
     hasCacheWrapAt m (PolyRemoteInterface _ _ _ _ inner) = hasCacheWrapAt m inner
     hasCacheWrapAt m (PolyDebugWrap _ _ inner) = hasCacheWrapAt m inner
     hasCacheWrapAt _ _ = False
+
+-- | Give every recursive manifold that a caller in its own pool reaches a
+-- native entry point, and record it.
+--
+-- A recursive function is lifted into a manifold of its own, which is the
+-- pool's serial entry: it takes and returns packets. A caller in another
+-- pool needs that, but a caller in the same pool pays for it on every
+-- level of the recursion -- each level writes its whole remaining argument
+-- to shared memory and reads it back, so a walk down a spine of n nodes
+-- copies on the order of n^2 nodes. Tail recursion escapes this by
+-- becoming a loop ('addLoopWraps'); a recursion that combines the results
+-- of its calls cannot.
+--
+-- The manifold's body moves to a new ID and is marked as one that survives
+-- lowering as a real function, which makes it a native function of the
+-- pool: native arguments in, a native value out. The original ID keeps the
+-- serial entry, now a wrapper around it, so a foreign caller and the
+-- dispatch table are unaffected. Which callers use which entry is settled
+-- during serialization, where a call's pool is finally known.
+--
+-- A manifold that carries observability hooks (a label, a cache, a debug
+-- wrap) is left alone: its hooks are keyed to its ID, and moving its body
+-- would move them with it.
+addNativeRecEntries :: [PolyHead] -> MorlocMonad [PolyHead]
+addNativeRecEntries phs = do
+  let targets = Set.fromList [mid | ph <- phs, (mid, Nothing) <- recTargets ph]
+  mapM (splitEntry targets) phs
+  where
+    -- Every manifold a back-edge in this head names, with the crossing the
+    -- expression records. The mark is provisional (segmentation can move a
+    -- call), so it is used only to skip a head no same-pool caller reaches.
+    recTargets :: PolyHead -> [(Int, Maybe Lang)]
+    recTargets (PolyHead _ _ _ body) = go body
+      where
+        go (PolyExe _ (RecCallP mid cl)) = [(mid, cl)]
+        go e = concatMap go (polySubExprs e)
+
+    splitEntry :: Set.Set Int -> PolyHead -> MorlocMonad PolyHead
+    splitEntry targets ph@(PolyHead lang midx args body) = do
+      argTypes <- MM.gets stateArgTypes
+      -- A function value is passed by a convention of its own in each
+      -- language, and a recursion that carries one is not the case this
+      -- entry exists for.
+      let carriesFunction =
+            or [ maybe False (containsFunT . val) (Map.lookup i argTypes) | Arg i _ <- args ]
+      if Set.member midx targets && splittable body && not carriesFunction
+        then split
+        else return ph
+      where
+       split = do
+          -- A manifold index, not an expression index: the two counters are
+          -- separate, and this also carries the source position over so the
+          -- frame that runs the body is the one diagnostics name.
+          midx' <- MM.freshManifoldIndex midx
+          config <- MM.gets stateManifoldConfig
+          name <- MM.gets stateName
+          MM.modify $ \s ->
+            s { stateNativeRecEntries = Map.insert midx midx' (stateNativeRecEntries s)
+              , stateManifoldConfig = maybe (stateManifoldConfig s)
+                  (\c -> Map.insert midx' c (stateManifoldConfig s)) (Map.lookup midx config)
+              , stateName = maybe (stateName s)
+                  (\n -> Map.insert midx' n (stateName s)) (Map.lookup midx name)
+              }
+          return $ PolyHead lang midx args (PolyManifold lang midx' (ManifoldFull args) Preserved body)
+
+    -- A body whose shape already commits the manifold to something else.
+    -- A loop carries its slots against the head's own form and has no
+    -- round trip left to remove; an observability hook (a label, a cache,
+    -- a debug wrap) is keyed to the manifold's own ID and would move with
+    -- the body.
+    splittable :: PolyExpr -> Bool
+    splittable e
+      | crosses e = False
+      | otherwise = go e
+      where
+        go (PolyLoop {}) = False
+        go (PolyCacheBody {}) = False
+        go (PolyDebugWrap {}) = False
+        go (PolyManifold _ _ _ Preserved _) = False
+        go (PolyManifold _ _ _ _ x) = go x
+        go (PolyReturn x) = go x
+        go _ = True
+
+    -- A body that reaches another pool serializes on that path, so at least
+    -- one of its arguments is wanted in both forms; the entry takes one
+    -- value per argument and could not supply both.
+    crosses :: PolyExpr -> Bool
+    crosses (PolyRemoteInterface {}) = True
+    crosses e = any crosses (polySubExprs e)
 
 -- | Whether a driver language can host a native tail-loop. Python/R lower via
 -- 'genericMakeLoop'; C++ via the member's 'lcMakeLoop' (non-const native locals

@@ -434,6 +434,7 @@ translate srcs es = do
       universalScopeMap = Map.insert cppLang mergedCppScope universalScopeMap0
 
   effectMap <- MM.gets stateManifoldEffects
+  nativeEntries <- Set.fromList . Map.elems <$> MM.gets stateNativeRecEntries
 
   -- Canonicalize C++ source paths once up front so that the #include
   -- directives emitted by makeCppCode and the -I flags emitted by
@@ -457,7 +458,7 @@ translate srcs es = do
         , translatorDebugInfo = debugInfo
         , translatorDebugMode = debugMode
         }
-      code = CMS.evalState (makeCppCode labels srcs' es universalScopeMap scopeMap closureTable) translatorState
+      code = CMS.evalState (makeCppCode labels srcs' es universalScopeMap scopeMap closureTable nativeEntries) translatorState
 
   maker <- makeTheMaker cxxFlags includeDirs
 
@@ -485,8 +486,9 @@ makeCppCode ::
   Map.Map Lang Scope ->
   GMap Int MVar (Map.Map Lang Scope) ->
   Map.Map Int ([SerialAST], [SerialAST], SerialAST) ->
+  Set.Set Int ->
   CppTranslator MDoc
-makeCppCode labels srcs es univeralScopeMap scopeMap closureTable0 = do
+makeCppCode labels srcs es univeralScopeMap scopeMap closureTable0 nativeEntries = do
   -- Seeded before any type is rendered: 'cppTypeOf' consults it to tell a
   -- back-reference into a generated `data` type from an unmapped alias.
   CMS.modify $ \st -> st
@@ -497,7 +499,7 @@ makeCppCode labels srcs es univeralScopeMap scopeMap closureTable0 = do
   -- write include statements for sources
   let includeDocs = map translateSource (unique . mapMaybe srcPath $ srcs)
 
-  signatures <- concat <$> mapM makeSignature es
+  signatures <- concat <$> mapM (makeSignature nativeEntries) es
 
   (autoDecl, autoFwds, autoSerial) <- generateAnonymousStructs
   (varWrappers, varArms, varFwds, varSerial) <- generateCppVariants es
@@ -751,8 +753,13 @@ makeTheMaker flags includes = do
 
   return [cmd]
 
-makeSignature :: SerialManifold -> CppTranslator [MDoc]
-makeSignature = foldWithSerialManifoldM fm
+-- | Forward declarations. Every manifold of the pool is declared, plus the
+-- native entry of any recursive manifold: a nested manifold is otherwise
+-- defined before the one that holds it, which is enough for a call from
+-- inside, but a recursion's native entry is called from wherever the
+-- recursion is reached.
+makeSignature :: Set.Set Int -> SerialManifold -> CppTranslator [MDoc]
+makeSignature nativeEntries = foldWithSerialManifoldM fm
   where
     fm =
       defaultValue
@@ -760,11 +767,18 @@ makeSignature = foldWithSerialManifoldM fm
         , opFoldWithNativeManifoldM = nativeManifold
         }
 
-    serialManifold (SerialManifold m _ form _ _) _ = manifoldSignature m serialType form
+    serialManifold (SerialManifold m _ form _ _) folded = do
+      own <- manifoldSignature m serialType form
+      return (foldlSM (<>) own folded)
 
-    nativeManifold e@(NativeManifold m _ form _) _ = do
-      typestr <- cppTypeOf e
-      manifoldSignature m typestr form
+    -- The declared type is the body's, as the definition's is: a manifold
+    -- that takes all of its arguments returns a value, not a callable.
+    nativeManifold (NativeManifold m _ form body) folded
+      | Set.member m nativeEntries = do
+          typestr <- cppTypeOf (typeMof body)
+          own <- manifoldSignature m typestr form
+          return (foldlNM (<>) own folded)
+      | otherwise = return (foldlNM (<>) [] folded)
 
     manifoldSignature ::
       (HasTypeM t) => Int -> MDoc -> ManifoldForm (Or TypeS TypeF) t -> CppTranslator [MDoc]

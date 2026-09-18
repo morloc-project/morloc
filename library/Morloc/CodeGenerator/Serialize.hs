@@ -309,16 +309,30 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       let (_, outputType) = case t0 of
             FunT its ot -> (its, ot)
             _ -> ([], t0)
-      nativeArgs <- mapM (nativeExpr m) es
-      serializedArgs <- mapM (serializeS "recArg" m) nativeArgs
       resultType <- inferType (Idx idx outputType)
       langMap <- MM.gets stateManifoldLang
-      serialCall <- case Map.lookup mid langMap of
-        Just targetLang | not (LR.coLocated reg lang targetLang) -> do
-          let socket = MC.setupServerAndSocket reg targetLang
-          return (AppForeignRecS resultType mid socket serializedArgs)
-        _ -> return (AppRecS resultType mid serializedArgs)
-      naturalizeN "recCall" m lang resultType serialCall
+      entries <- MM.gets stateNativeRecEntries
+      let foreign_ = case Map.lookup mid langMap of
+            Just targetLang -> not (LR.coLocated reg lang targetLang)
+            Nothing -> False
+      case (foreign_, Map.lookup mid entries) of
+        -- A call from the target's own pool takes the native entry: the
+        -- value stays where it is instead of being written to shared
+        -- memory and read back once per level of the recursion.
+        (False, Just mid') -> do
+          args <- mapM (nativeArg m) es
+          return $ AppExeN resultType (RecCallP mid' Nothing) args
+        _ -> do
+          nativeArgs <- mapM (nativeExpr m) es
+          serializedArgs <- mapM (serializeS "recArg" m) nativeArgs
+          serialCall <-
+            if foreign_
+              then do
+                let targetLang = fromJust (Map.lookup mid langMap)
+                    socket = MC.setupServerAndSocket reg targetLang
+                return (AppForeignRecS resultType mid socket serializedArgs)
+              else return (AppRecS resultType mid serializedArgs)
+          naturalizeN "recCall" m lang resultType serialCall
     nativeExpr m (MonoApp (MonoExe (Idx idx t0) exe) es) = do
       args <- mapM (nativeArg m) es
       let (inputTypes, outputType) = case t0 of
