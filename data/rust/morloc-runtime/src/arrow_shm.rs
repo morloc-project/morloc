@@ -1013,13 +1013,23 @@ fn child_types(dt: &DataType) -> Vec<DataType> {
 // -- Import: pointer fixup into one arena ------------------------------------
 
 /// Arena owned by an imported view. Both root structs point at it; the
-/// last root released frees it.
+/// last root released frees it and, when the view owns the block it reads,
+/// releases the block's reference too.
+///
+/// `live_roots` is atomic because the two roots are released wherever the
+/// importing language frees its objects, which need not be the thread that
+/// built the view. `owner_pid` is the process that took the reference: a
+/// child that inherited a live view across a fork must not decrement a
+/// count its parent still owns.
 #[repr(C)]
 struct ImportArena {
     magic: u32,
-    live_roots: u32,
+    live_roots: std::sync::atomic::AtomicU32,
     bytes: *mut u8,
     len: usize,
+    block: *mut u8,
+    block_bytes: usize,
+    owner_pid: libc::pid_t,
 }
 
 const IMPORT_MAGIC: u32 = 0x4D4C4341; // "MLCA"
@@ -1037,18 +1047,40 @@ unsafe extern "C" fn release_child_array(a: *mut FFI_ArrowArray) {
 }
 
 unsafe fn release_arena(private_data: *mut c_void) {
+    use std::sync::atomic::Ordering;
     let arena = private_data as *mut ImportArena;
     if arena.is_null() || (*arena).magic != IMPORT_MAGIC {
         return;
     }
-    (*arena).live_roots -= 1;
-    if (*arena).live_roots == 0 {
-        let len = (*arena).len;
-        let bytes = (*arena).bytes;
-        libc::free(bytes as *mut c_void);
-        let _ = len;
+    // A consumer that releases a struct it was told to consider consumed
+    // would otherwise wrap the count and take the block from whoever still
+    // holds it.
+    if (*arena).live_roots.load(Ordering::Acquire) == 0 {
+        return;
     }
+    if (*arena).live_roots.fetch_sub(1, Ordering::AcqRel) != 1 {
+        return;
+    }
+    let block = (*arena).block;
+    // The entry must go before the block does: a candidate in the registry
+    // is one some view still holds a reference on, which is what makes it
+    // safe for `try_borrow` to read.
+    if !block.is_null() {
+        borrow_forget(arena);
+        LIVE_VIEW_BYTES.fetch_sub((*arena).block_bytes, Ordering::Relaxed);
+        if libc::getpid() == (*arena).owner_pid {
+            let _ = shm::shfree(block);
+        }
+    }
+    libc::free((*arena).bytes as *mut c_void);
 }
+
+/// Bytes of shared memory held by the views this process has open over
+/// table blocks. A language that frees its objects on its own schedule
+/// uses this to tell a backlog of unreachable views from ordinary work:
+/// the count of views says nothing about what they cost, and a table's
+/// cost is the whole point.
+pub static LIVE_VIEW_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 unsafe extern "C" fn release_root_schema(s: *mut FFI_ArrowSchema) {
     if s.is_null() {
@@ -1114,6 +1146,36 @@ pub unsafe fn shm_to_ffi(
     out_schema: *mut FFI_ArrowSchema,
     out_array: *mut FFI_ArrowArray,
 ) -> Result<(), MorlocError> {
+    shm_to_ffi_inner(header, None, out_schema, out_array)
+}
+
+/// As `shm_to_ffi`, with the view owning one reference on the block, so
+/// the block outlives every language object built from it and no longer
+/// than that. `acquire` takes a reference of the view's own; otherwise the
+/// view adopts the caller's, which is what a block this pool materialised
+/// for itself wants. On failure nothing is taken and an adopted reference
+/// is left with the caller.
+///
+/// # Safety
+/// As `shm_to_ffi`, and the caller must hold a reference to adopt when
+/// `acquire` is false.
+pub unsafe fn shm_to_ffi_owned(
+    header: *const ArrowShmHeader,
+    acquire: bool,
+    out_schema: *mut FFI_ArrowSchema,
+    out_array: *mut FFI_ArrowArray,
+) -> Result<(), MorlocError> {
+    shm_to_ffi_inner(header, Some(acquire), out_schema, out_array)
+}
+
+/// `owns` is None for a view that only reads the block, Some(acquire) for
+/// one that owns a reference on it.
+unsafe fn shm_to_ffi_inner(
+    header: *const ArrowShmHeader,
+    owns: Option<bool>,
+    out_schema: *mut FFI_ArrowSchema,
+    out_array: *mut FFI_ArrowArray,
+) -> Result<(), MorlocError> {
     // On failure the caller finds released (all-zero) structs, never
     // whatever its stack held before.
     ptr::write_bytes(out_schema as *mut RawSchema, 0, 1);
@@ -1133,12 +1195,50 @@ pub unsafe fn shm_to_ffi(
     let off_buffers = align8(off_array_children + n_nodes * 8);
     let len = align8(off_buffers + n_bufs * 8);
 
+    // The reference comes before the allocation that could fail, so a
+    // failure has nothing to give back.
+    let block = match owns {
+        None => ptr::null_mut(),
+        Some(true) => {
+            // The sender donated a reference before the bytes left, so a
+            // refusal means the block is already gone and the view would
+            // read scrubbed memory.
+            shm::shincref(header as *mut u8)
+                .map_err(|e| err(format!("cannot hold the table's block: {}", e)))?;
+            header as *mut u8
+        }
+        Some(false) => header as *mut u8,
+    };
+
     let bytes = libc::calloc(1, len) as *mut u8;
     if bytes.is_null() {
+        if let Some(true) = owns {
+            let _ = shm::shfree(block);
+        }
         return Err(err("out of memory importing arrow table"));
     }
     let arena = bytes as *mut ImportArena;
-    ptr::write(arena, ImportArena { magic: IMPORT_MAGIC, live_roots: 2, bytes, len });
+    ptr::write(
+        arena,
+        ImportArena {
+            magic: IMPORT_MAGIC,
+            live_roots: std::sync::atomic::AtomicU32::new(2),
+            bytes,
+            len,
+            block,
+            block_bytes: if block.is_null() { 0 } else { h.total_size as usize },
+            owner_pid: libc::getpid(),
+        },
+    );
+    if !block.is_null() {
+        LIVE_VIEW_BYTES.fetch_add(h.total_size as usize, std::sync::atomic::Ordering::Relaxed);
+        match shm::abs2rel(block) {
+            Ok(rel) => borrow_register(block, rel, arena),
+            // A block outside every mapped volume cannot be passed
+            // through, but it can still be read.
+            Err(_) => {}
+        }
+    }
 
     let schemas = bytes.add(off_schemas) as *mut RawSchema;
     let arrays = bytes.add(off_arrays) as *mut RawArray;
@@ -1237,22 +1337,44 @@ pub unsafe fn shm_schema(header: *const ArrowShmHeader) -> Result<SchemaRef, Mor
 
 // -- Borrowing: returning a received table without copying it ----------------
 
-thread_local! {
-    /// Blocks this pool received during the current dispatch, by base and
-    /// relative pointer. A table returned unchanged is recognised against
-    /// them and passed through with a fresh reference instead of a copy.
-    static BORROWABLE: std::cell::RefCell<Vec<(*const u8, RelPtr)>> = const { std::cell::RefCell::new(Vec::new()) };
+/// A block some view in this process holds a reference on, and the arena
+/// that holds it. A table returned unchanged is recognised against these
+/// and passed through with a fresh reference instead of a copy.
+///
+/// The entry belongs to the view, not to the dispatch: a view may be
+/// released on any thread, and a language object may outlive the dispatch
+/// that built it. The invariant the readers depend on is that an entry
+/// exists only while some view holds a reference, so a candidate is never
+/// a block being scrubbed or rewritten under the reader.
+struct BorrowEntry {
+    base: *const u8,
+    rel: RelPtr,
+    arena: *const ImportArena,
 }
 
-/// Record a received block as a candidate for pass-through.
-pub fn borrow_register(base: *const u8, rel: RelPtr) {
-    BORROWABLE.with(|b| b.borrow_mut().push((base, rel)));
+// SAFETY: the pointers are only ever compared and dereferenced under the
+// registry lock, and an entry is removed before its block is released.
+unsafe impl Send for BorrowEntry {}
+
+static BORROWABLE: std::sync::Mutex<Vec<BorrowEntry>> = std::sync::Mutex::new(Vec::new());
+
+/// A poisoned registry is not a reason to abort: the lock is taken inside
+/// release callbacks, which are `extern "C"` and cannot unwind.
+fn borrowable() -> std::sync::MutexGuard<'static, Vec<BorrowEntry>> {
+    BORROWABLE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Forget every candidate; called where the pool releases its received
-/// blocks, since a candidate must be one this pool still holds.
-pub fn borrow_clear() {
-    BORROWABLE.with(|b| b.borrow_mut().clear());
+/// Record a block a new view holds a reference on.
+fn borrow_register(base: *const u8, rel: RelPtr, arena: *const ImportArena) {
+    borrowable().push(BorrowEntry { base, rel, arena });
+}
+
+/// Forget the entry of a view that is being released, before its block is.
+fn borrow_forget(arena: *const ImportArena) {
+    let mut reg = borrowable();
+    if let Some(i) = reg.iter().position(|e| std::ptr::eq(e.arena, arena)) {
+        reg.swap_remove(i);
+    }
 }
 
 fn borrowing_disabled() -> bool {
@@ -1334,12 +1456,14 @@ pub unsafe fn try_borrow(
     }
     let s = &*(schema as *const RawSchema);
     let a = &*(array as *const RawArray);
-    let candidates: Vec<(*const u8, RelPtr)> = BORROWABLE.with(|b| b.borrow().clone());
+    // Held across the whole check: an entry that vanished mid-read would
+    // leave the candidate free to be scrubbed or reallocated beneath it.
+    let reg = borrowable();
     let trace = std::env::var_os("MORLOC_ARROW_STATS").is_some();
     if trace {
-        eprintln!("try_borrow: {} candidate(s)", candidates.len());
+        eprintln!("try_borrow: {} candidate(s)", reg.len());
     }
-    for (base, rel) in candidates {
+    for &BorrowEntry { base, rel, .. } in reg.iter() {
         // The header alone rules out most candidates, before the block
         // is checked in full.
         let h = &*(base as *const ArrowShmHeader);
@@ -1640,12 +1764,10 @@ mod tests {
             let batch = fixture();
             let rel = write_batch(&batch, None).unwrap();
             let base = shm::rel2abs(rel).unwrap();
-            borrow_clear();
-            borrow_register(base as *const u8, rel);
 
             let mut s = FFI_ArrowSchema::empty();
             let mut a = FFI_ArrowArray::empty();
-            unsafe { shm_to_ffi(base as *const ArrowShmHeader, &mut s, &mut a) }.unwrap();
+            unsafe { shm_to_ffi_owned(base as *const ArrowShmHeader, true, &mut s, &mut a) }.unwrap();
             let got = unsafe { try_borrow(&a as *const _, &s as *const _, None) };
             assert_eq!(got, Some(rel));
             let _ = shm::shfree(base);
@@ -1668,7 +1790,7 @@ mod tests {
             assert_eq!(got, None);
             arr.offset = 0;
             arr.length += 1;
-            borrow_clear();
+            release_roots(&mut s, &mut a, false);
         });
     }
 
@@ -1693,11 +1815,9 @@ mod tests {
             let batch = fixture();
             let rel = write_batch(&batch, None).unwrap();
             let base = shm::rel2abs(rel).unwrap();
-            borrow_clear();
-            borrow_register(base as *const u8, rel);
             let mut s = FFI_ArrowSchema::empty();
             let mut a = FFI_ArrowArray::empty();
-            unsafe { shm_to_ffi(base as *const ArrowShmHeader, &mut s, &mut a) }.unwrap();
+            unsafe { shm_to_ffi_owned(base as *const ArrowShmHeader, true, &mut s, &mut a) }.unwrap();
             assert_eq!(unsafe { try_borrow(&a as *const _, &s as *const _, None) }, Some(rel));
             let _ = shm::shfree(base);
             // Attach one metadata pair to the first column: n=1, key "k", value "v".
@@ -1716,7 +1836,7 @@ mod tests {
             child.metadata = blob.as_ptr() as *const c_char;
             assert_eq!(unsafe { try_borrow(&a as *const _, &s as *const _, None) }, None);
             child.metadata = saved;
-            borrow_clear();
+            release_roots(&mut s, &mut a, false);
         });
     }
 
@@ -1728,6 +1848,142 @@ mod tests {
             let adopted = unsafe { ffi_to_batch(&mut a as *mut _, &s as *const _) }.unwrap();
             assert!(a.is_released());
             assert_eq!(adopted, batch);
+        });
+    }
+
+    /// Release both roots of a view, in the given order.
+    fn release_roots(s: &mut FFI_ArrowSchema, a: &mut FFI_ArrowArray, array_first: bool) {
+        unsafe {
+            let rs = s as *mut FFI_ArrowSchema as *mut RawSchema;
+            let ra = a as *mut FFI_ArrowArray as *mut RawArray;
+            let mut drop_s = || { if let Some(f) = (*rs).release { f(s as *mut FFI_ArrowSchema) } };
+            let mut drop_a = || { if let Some(f) = (*ra).release { f(a as *mut FFI_ArrowArray) } };
+            if array_first { drop_a(); drop_s(); } else { drop_s(); drop_a(); }
+        }
+    }
+
+    #[test]
+    fn an_acquiring_view_holds_one_reference_until_both_roots_release() {
+        with_shm(|| {
+            for array_first in [false, true] {
+                let rel = write_batch(&fixture(), None).unwrap();
+                let base = shm::rel2abs(rel).unwrap();
+                assert_eq!(shm::reference_count(base), Some(1));
+
+                let mut s = FFI_ArrowSchema::empty();
+                let mut a = FFI_ArrowArray::empty();
+                unsafe { shm_to_ffi_owned(base as *const ArrowShmHeader, true, &mut s, &mut a) }.unwrap();
+                assert_eq!(shm::reference_count(base), Some(2), "the view takes its own reference");
+
+                release_roots(&mut s, &mut a, array_first);
+                assert_eq!(shm::reference_count(base), Some(1), "releasing the view gives it back");
+                let _ = shm::shfree(base);
+            }
+        });
+    }
+
+    #[test]
+    fn a_view_released_on_another_thread_gives_its_reference_back() {
+        with_shm(|| {
+            let rel = write_batch(&fixture(), None).unwrap();
+            let base = shm::rel2abs(rel).unwrap();
+            let mut s = FFI_ArrowSchema::empty();
+            let mut a = FFI_ArrowArray::empty();
+            unsafe { shm_to_ffi_owned(base as *const ArrowShmHeader, true, &mut s, &mut a) }.unwrap();
+            assert_eq!(shm::reference_count(base), Some(2));
+
+            // A language that frees its objects on a finalizer thread
+            // releases the view from a thread that never imported it.
+            let moved = (s, a);
+            std::thread::spawn(move || {
+                let (mut s, mut a) = moved;
+                release_roots(&mut s, &mut a, true);
+            })
+            .join()
+            .unwrap();
+            assert_eq!(shm::reference_count(base), Some(1));
+            let _ = shm::shfree(base);
+        });
+    }
+
+    #[test]
+    fn an_adopting_view_frees_the_block_it_was_given() {
+        with_shm(|| {
+            let rel = write_batch(&fixture(), None).unwrap();
+            let base = shm::rel2abs(rel).unwrap();
+            let mut s = FFI_ArrowSchema::empty();
+            let mut a = FFI_ArrowArray::empty();
+            // The materialised case: the caller's only reference passes to
+            // the view.
+            unsafe { shm_to_ffi_owned(base as *const ArrowShmHeader, false, &mut s, &mut a) }.unwrap();
+            assert_eq!(shm::reference_count(base), Some(1));
+            release_roots(&mut s, &mut a, false);
+            assert_eq!(shm::reference_count(base), Some(0), "the last view frees the block");
+        });
+    }
+
+    #[test]
+    fn a_third_root_release_is_a_no_op() {
+        with_shm(|| {
+            let rel = write_batch(&fixture(), None).unwrap();
+            let base = shm::rel2abs(rel).unwrap();
+            let mut s = FFI_ArrowSchema::empty();
+            let mut a = FFI_ArrowArray::empty();
+            unsafe { shm_to_ffi_owned(base as *const ArrowShmHeader, true, &mut s, &mut a) }.unwrap();
+            let arena = unsafe { (*(&s as *const FFI_ArrowSchema as *const RawSchema)).private_data };
+            release_roots(&mut s, &mut a, false);
+            assert_eq!(shm::reference_count(base), Some(1));
+            // A consumer that releases a struct it was told to consider
+            // consumed must not take the block from whoever still holds it.
+            unsafe { release_arena(arena) };
+            assert_eq!(shm::reference_count(base), Some(1));
+            let _ = shm::shfree(base);
+        });
+    }
+
+    #[test]
+    fn a_borrow_candidate_lives_exactly_as_long_as_its_view() {
+        with_shm(|| {
+            let rel = write_batch(&fixture(), None).unwrap();
+            let base = shm::rel2abs(rel).unwrap();
+            let mut s = FFI_ArrowSchema::empty();
+            let mut a = FFI_ArrowArray::empty();
+            unsafe { shm_to_ffi_owned(base as *const ArrowShmHeader, true, &mut s, &mut a) }.unwrap();
+
+            // The view is what makes the block borrowable: returning it
+            // unchanged passes the block through instead of copying.
+            let got = unsafe { try_borrow(&a as *const _, &s as *const _, None) };
+            assert_eq!(got, Some(rel));
+            assert_eq!(shm::reference_count(base), Some(3), "a borrow takes a packet reference");
+            let _ = shm::shfree(base);
+
+            let view_copy = (unsafe { ptr::read(&s) }, unsafe { ptr::read(&a) });
+            release_roots(&mut s, &mut a, false);
+            // With no view left there is nothing to recognise the table
+            // against, so a table of the same shape is copied, not borrowed.
+            let (s2, a2) = view_copy;
+            assert_eq!(unsafe { try_borrow(&a2 as *const _, &s2 as *const _, None) }, None);
+            let _ = shm::shfree(base);
+        });
+    }
+
+    #[test]
+    fn a_forked_child_cannot_release_its_parent_s_reference() {
+        with_shm(|| {
+            let rel = write_batch(&fixture(), None).unwrap();
+            let base = shm::rel2abs(rel).unwrap();
+            let mut s = FFI_ArrowSchema::empty();
+            let mut a = FFI_ArrowArray::empty();
+            unsafe { shm_to_ffi_owned(base as *const ArrowShmHeader, true, &mut s, &mut a) }.unwrap();
+            let arena = unsafe { (*(&s as *const FFI_ArrowSchema as *const RawSchema)).private_data };
+            // User code that forks inside a worker inherits live views; a
+            // finalizer in the child must not decrement a count the parent
+            // still owns.
+            unsafe { (*(arena as *mut ImportArena)).owner_pid += 1 };
+            release_roots(&mut s, &mut a, false);
+            assert_eq!(shm::reference_count(base), Some(2));
+            let _ = shm::shfree(base);
+            let _ = shm::shfree(base);
         });
     }
 

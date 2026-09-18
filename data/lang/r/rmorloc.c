@@ -191,7 +191,6 @@ static void shm_tracker_flush(void) {
         }
     }
     shm_tracker_count = 0;
-    arrow_borrow_clear();
 }
 
 // Drop one tracker entry matching ptr (swap-with-last), shfree the
@@ -3118,33 +3117,20 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
             morloc_error_take("Arrow table failed validation: ", validate_err);
         }
 
-        // Hold the block for as long as R references the imported buffers,
-        // releasing it at the start of the next request. A table that
-        // arrived by reference needs one taken on this pool's behalf; the
-        // sender donated one before sending, so a refusal means the block
-        // is gone and the view would read scrubbed memory. A table
-        // materialized here is already this pool's own.
-        if (!materialized) {
-            char* incref_err = NULL;
-            bool acquired = shincref((absptr_t)arrow_ptr, &incref_err);
-            if (incref_err) { free(incref_err); }
-            if (!acquired) {
-                free_schema(schema);
-                MORLOC_INTERNAL_ABORT("received table's shared-memory block is no longer live");
-            }
-        }
-        shm_tracker_push((absptr_t)arrow_ptr, NULL);
-        {
-            char* rerr = NULL;
-            relptr_t rel = abs2rel(arrow_ptr, &rerr);
-            if (rerr) { free(rerr); } else { arrow_borrow_register((const uint8_t*)arrow_ptr, rel); }
-        }
-
+        // The batch holds the block for exactly as long as R reads it: a
+        // table that arrived by reference takes one of its own, while a
+        // block this pool materialized passes its only reference to the
+        // view.
         struct ArrowSchema arrow_schema;
         struct ArrowArray arrow_array;
         char* arrow_err = NULL;
-        arrow_from_shm(arrow_hdr, &arrow_schema, &arrow_array, &arrow_err);
-        if (arrow_err) {
+        if (arrow_from_shm_owned(arrow_hdr, materialized ? 0 : 1,
+                                 &arrow_schema, &arrow_array, &arrow_err) != 0) {
+            if (materialized) {
+                char* ferr = NULL;
+                shfree((absptr_t)arrow_ptr, &ferr);
+                if (ferr) { free(ferr); }
+            }
             free_schema(schema);
             morloc_error_take("Arrow import failed: ", arrow_err);
         }
@@ -4263,6 +4249,32 @@ static void run_job_c(int client_fd, int token, int ack_fd, SEXP dispatch, SEXP 
     // request, it is safe to reclaim. Without this every RPTR result would
     // leak per call and grow /dev/shm/morloc-* monotonically.
     shm_tracker_flush();
+
+    // A table's block is held by the R object that reads it, and R's
+    // collector sizes that object by its R heap footprint -- a few hundred
+    // bytes for a batch over megabytes of shared memory. Left alone, a run
+    // that receives a table per request holds every one of them.
+    //
+    // Collecting on every request would pay for a full sweep of the R heap
+    // per table, which for small tables costs far more than it reclaims;
+    // so the sweep waits until the views hold more than a budget's worth,
+    // which is the case it exists for. MORLOC_R_GC_BUDGET overrides the
+    // budget in bytes, and 0 turns the sweep off.
+    {
+        static size_t budget = 0;
+        static int budget_read = 0;
+        if (!budget_read) {
+            const char* env = getenv("MORLOC_R_GC_BUDGET");
+            char* end = NULL;
+            budget = env ? (size_t)strtoull(env, &end, 10) : (size_t)32 * 1024 * 1024;
+            if (env && (end == env || *end != '\0')) budget = (size_t)32 * 1024 * 1024;
+            budget_read = 1;
+        }
+        if (budget > 0 && arrow_live_view_bytes() > budget) {
+            R_gc();
+        }
+    }
+
     morloc_debug_flush_dispatch();
 
     mlc_trace("run_job ENTER client=%d\n", client_fd);

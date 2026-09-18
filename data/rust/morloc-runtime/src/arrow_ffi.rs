@@ -217,17 +217,39 @@ unsafe fn arrow_validate_impl(
     }
 }
 
-/// Record a block this pool received so a table returned unchanged can be
-/// passed through without a copy. Valid until `arrow_borrow_clear`.
+/// As `arrow_from_shm`, with the view holding the block for as long as the
+/// language object built from it lives, and no longer. `acquire` takes a
+/// reference of the view's own -- for a table that arrived by reference,
+/// whose sender still holds one; pass 0 for a block this pool materialised
+/// for itself, whose only reference the view adopts. Returns 0 on success;
+/// on failure nothing is taken and an adopted reference is still the
+/// caller's to release.
 #[no_mangle]
-pub unsafe extern "C" fn arrow_borrow_register(base: *const u8, rel: RelPtr) {
-    arrow_shm::borrow_register(base, rel)
+pub unsafe extern "C" fn arrow_from_shm_owned(
+    header: *const ArrowShmHeader,
+    acquire: i32,
+    out_schema: *mut FFI_ArrowSchema,
+    out_array: *mut FFI_ArrowArray,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    crate::error::guarded(errmsg, 1, || {
+        match arrow_shm::shm_to_ffi_owned(header, acquire != 0, out_schema, out_array) {
+            Ok(()) => 0,
+            Err(e) => {
+                set_errmsg(errmsg, &e);
+                1
+            }
+        }
+    })
 }
 
-/// Forget the blocks registered with `arrow_borrow_register`.
+/// Bytes of shared memory held by this process's open table views. A
+/// language whose garbage collector cannot see shared memory uses this to
+/// decide when a collection is worth running: its own heap accounting puts
+/// a batch at a few hundred bytes whatever the table behind it costs.
 #[no_mangle]
-pub extern "C" fn arrow_borrow_clear() {
-    arrow_shm::borrow_clear()
+pub extern "C" fn arrow_live_view_bytes() -> usize {
+    arrow_shm::LIVE_VIEW_BYTES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Bytes memcpy'd into SHM by table writes in this process so far.

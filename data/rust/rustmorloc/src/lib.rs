@@ -76,13 +76,13 @@ extern "C" {
     // Tables: Arrow C Data Interface <-> SHM table block (see arrow_ffi.rs).
     fn arrow_to_shm_typed(array: *mut FFI_ArrowArray, schema: *const FFI_ArrowSchema,
                           declared: *const CSchema, errmsg: *mut *mut c_char) -> isize;
-    fn arrow_from_shm(header: *const c_void, out_schema: *mut FFI_ArrowSchema,
-                      out_array: *mut FFI_ArrowArray, errmsg: *mut *mut c_char) -> i32;
+    fn arrow_from_shm_owned(header: *const c_void, acquire: i32,
+                            out_schema: *mut FFI_ArrowSchema,
+                            out_array: *mut FFI_ArrowArray,
+                            errmsg: *mut *mut c_char) -> i32;
     fn arrow_validate(header: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> i32;
     fn make_arrow_data_packet(relptr: isize, schema: *const CSchema) -> *mut u8;
     fn make_inline_data_packet(voidstar: *mut c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut u8;
-    fn arrow_borrow_register(base: *const u8, rel: isize);
-    fn arrow_borrow_clear();
     fn make_fail_packet(msg: *const c_char) -> *mut u8;
     // Cross-pool foreign call primitives (see `foreign_call`).
     fn make_morloc_local_call_packet(midx: u32, arg_packets: *const *const u8,
@@ -418,7 +418,6 @@ fn track(ptr: *mut c_void) {
 /// Free all deferred SHM blocks from the previous dispatch. Generated
 /// `local_dispatch`/`remote_dispatch` call this at entry (cpp: pool.cpp:979).
 pub fn dispatch_flush() {
-    unsafe { arrow_borrow_clear() };
     SHM_TRACKER.with(|t| {
         let v = t.0.take();
         for ptr in &v {
@@ -2264,32 +2263,17 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
         if arrow_validate(block as *const c_void, cs, &mut err) != 0 {
             morloc_throw(cstr_take(err));
         }
-        // Hold the block for as long as the batch references its buffers,
-        // releasing it at the next dispatch. A table that arrived by
-        // reference needs one taken on this pool's behalf; the sender
-        // donated one before sending, so a refusal means the block is gone
-        // and the view would read scrubbed memory.
-        if !materialized {
-            let acquired = shincref(block as *mut c_void, &mut err);
-            discard_err(err);
-            err = std::ptr::null_mut();
-            if !acquired {
-                morloc_infra_abort("received table's shared-memory block is no longer live");
-            }
-        }
-        guard.commit();
-        track(block as *mut c_void);
-        let rel = abs2rel(block as *mut c_void, &mut err);
-        if err.is_null() {
-            arrow_borrow_register(block, rel);
-        }
-        discard_err(err);
-        err = std::ptr::null_mut();
+        // The batch holds the block for exactly as long as it reads it: a
+        // table that arrived by reference takes one of its own, while a
+        // block this pool materialized passes its only reference to the
+        // view.
         let mut ffi_schema = FFI_ArrowSchema::empty();
         let mut array = FFI_ArrowArray::empty();
-        if arrow_from_shm(block as *const c_void, &mut ffi_schema, &mut array, &mut err) != 0 {
+        let acquire = if materialized { 0 } else { 1 };
+        if arrow_from_shm_owned(block as *const c_void, acquire, &mut ffi_schema, &mut array, &mut err) != 0 {
             morloc_throw(cstr_take(err));
         }
+        guard.commit();
         return match <T as FromVoidstar>::arrow_import(array, &ffi_schema) {
             Some(v) => v,
             None => morloc_infra_abort("Table-typed value requested as a non-Arrow type"),

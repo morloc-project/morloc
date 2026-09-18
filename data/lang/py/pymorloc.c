@@ -51,7 +51,6 @@ static void shm_tracker_flush(void) {
         }
     }
     shm_tracker_count = 0;
-    arrow_borrow_clear();
 }
 
 // Drop one tracker entry matching ptr (swap-with-last), shfree the
@@ -2476,33 +2475,21 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
             goto error;
         }
 
-        // Hold the block for as long as pyarrow references its buffers,
-        // releasing it at the next dispatch. A table that arrived by
-        // reference needs one taken on this pool's behalf; the sender
-        // donated one before sending, so a refusal means the block is
-        // gone and the view would read scrubbed memory. A table
-        // materialized here is already this pool's own.
-        if (!materialized) {
-            char* incref_err = NULL;
-            bool acquired = shincref((absptr_t)voidstar, &incref_err);
-            if (incref_err) { free(incref_err); }
-            if (!acquired) {
-                PyINTERNAL_ABORT("received table's shared-memory block is no longer live");
-            }
-        }
-        shm_tracker_push((absptr_t)voidstar, NULL);
-        {
-            char* rerr = NULL;
-            relptr_t rel = abs2rel(voidstar, &rerr);
-            if (rerr) { free(rerr); } else { arrow_borrow_register((const uint8_t*)voidstar, rel); }
-        }
-
+        // The batch holds the block for exactly as long as pyarrow reads
+        // it: a table that arrived by reference takes one of its own,
+        // while a block this pool materialized passes its only reference
+        // to the view.
         struct ArrowSchema arrow_schema;
         struct ArrowArray arrow_array;
         char* arrow_err = NULL;
-        arrow_from_shm(arrow_hdr, &arrow_schema, &arrow_array, &arrow_err);
-        if (arrow_err) {
-            PyErr_SetString(PyExc_RuntimeError, arrow_err);
+        if (arrow_from_shm_owned(arrow_hdr, materialized ? 0 : 1,
+                                 &arrow_schema, &arrow_array, &arrow_err) != 0) {
+            if (materialized) {
+                char* ferr = NULL;
+                shfree((absptr_t)voidstar, &ferr);
+                if (ferr) { free(ferr); }
+            }
+            PyErr_SetString(PyExc_RuntimeError, arrow_err ? arrow_err : "cannot view the table's block");
             free(arrow_err);
             goto error;
         }

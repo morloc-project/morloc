@@ -14,7 +14,7 @@
 // (Morloc.Abi). Provisioning refuses to run a prebuilt libmorloc/nexus whose
 // version differs from the compiler's expected value (fail-closed), preventing
 // silent cross-pool struct/offset corruption.
-#define MORLOC_ABI_VERSION 3
+#define MORLOC_ABI_VERSION 4
 
 // Atomic includes must sit outside any `extern "C"` block because the
 // C++ <atomic> header pulls in <type_traits> et al., which use C++
@@ -1569,8 +1569,10 @@ int arrow_validate(const arrow_shm_header_t* header, const Schema* schema, ERRMS
 // through with a fresh reference instead of a copy; forget them where the
 // pool releases its received blocks. MORLOC_ARROW_NO_BORROW=1 disables the
 // pass-through entirely.
-void arrow_borrow_register(const uint8_t* base, relptr_t rel);
-void arrow_borrow_clear(void);
+int arrow_from_shm_owned(const arrow_shm_header_t* header, int acquire,
+                         struct ArrowSchema* out_schema,
+                         struct ArrowArray* out_array, ERRMSG);
+size_t arrow_live_view_bytes(void);
 // Bytes memcpy'd into SHM by table writes in this process so far.
 uint64_t arrow_copied_bytes(void);
 int arrow_from_shm(const arrow_shm_header_t* header,

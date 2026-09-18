@@ -1153,6 +1153,25 @@ lowerNativeExprRaw cfg (SerialLetN _ (SerializeS _ _) body) (SerialLetN_ i x1 x2
               , poolPriorLines = [releaseLine]
               }
       lcMakeLet cfg helperNamer tmpIdx (Just bodyT) False letResult releaseBody
+lowerNativeExprRaw cfg (SerialLetN _ (AppPoolS _ _ _) body) (SerialLetN_ i x1 x2) = do
+  -- The let RHS is a call into another pool, so the bound variable owns
+  -- the shared-memory reference the callee donated before sending. The
+  -- body is native: it has read what it needs out of the packet and holds
+  -- it in its own right -- a table's view takes a reference of its own,
+  -- and every other value is copied out -- so the donated reference ends
+  -- at the body's last use rather than at the dispatch boundary. Without
+  -- this a loop that calls into another pool holds every result it has
+  -- ever received until the whole loop is done.
+  letResult <- lcMakeLet cfg svarNamer i Nothing False x1 x2
+  tmpIdx <- lcNewIndex cfg
+  let bodyT = typeFof body
+      releaseLine = lcReleaseStmt cfg (render (svarNamer i))
+      releaseBody =
+        defaultValue
+          { poolExpr = helperNamer tmpIdx
+          , poolPriorLines = [releaseLine]
+          }
+  lcMakeLet cfg helperNamer tmpIdx (Just bodyT) False letResult releaseBody
 lowerNativeExprRaw cfg _ (SerialLetN_ i x1 x2) = lcMakeLet cfg svarNamer i Nothing False x1 x2
 -- A native let binds an owned local, so its RHS is an owned sink: adapt the
 -- bound value (Rust clones a borrowed/place RHS -- e.g. a getter through a

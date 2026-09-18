@@ -202,7 +202,6 @@ struct ShmOwned {
 
 static void _shm_tracker_flush() {
     _shm_release_entries(_shm_tracker);
-    arrow_borrow_clear();
 }
 
 // Drop one tracker entry matching ptr (swap-with-last) and shfree the
@@ -342,32 +341,17 @@ T _get_value(const uint8_t* packet, Schema* schema){
             throw MorlocException(msg);
         }
 
-        // Hold the block for as long as the table references its buffers,
-        // releasing it at the next dispatch. A table that arrived by
-        // reference needs one taken on this pool's behalf; the sender
-        // donated one before sending, so a refusal means the block is gone
-        // and the view would read scrubbed memory.
-        if (!materialized) {
-            char* ierr = nullptr;
-            bool acquired = shincref((absptr_t)raw, &ierr);
-            if (ierr) { free(ierr); }
-            if (!acquired) {
-                MLC_INTERNAL_ABORT("received table's shared-memory block is no longer live");
-            }
-        }
-        _shm_tracker.push_back({(absptr_t)raw});
-        owned.ptr = nullptr;
-        {
-            char* rerr = nullptr;
-            relptr_t rel = abs2rel((absptr_t)raw, &rerr);
-            if (rerr) { free(rerr); } else { arrow_borrow_register(raw, rel); }
-        }
-
+        // The table holds the block for exactly as long as it reads it: a
+        // table that arrived by reference takes one of its own, while a
+        // block this pool materialized passes its only reference to the
+        // view.
         struct ArrowSchema as;
         struct ArrowArray aa;
         char* aerr = nullptr;
-        arrow_from_shm(hdr, &as, &aa, &aerr);
-        if (aerr) { PROPAGATE_INFRA_ERROR(aerr); }
+        if (arrow_from_shm_owned(hdr, materialized ? 0 : 1, &as, &aa, &aerr) != 0) {
+            PROPAGATE_INFRA_ERROR(aerr);
+        }
+        owned.ptr = nullptr;
         return mlc::ArrowTable(&as, &aa);
     } else {
         if (format == PACKET_FORMAT_ARROW) {

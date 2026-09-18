@@ -1,3 +1,8 @@
+Unreleased
+----------
+
+ * a pipeline that handles many tables holds one at a time, not all of them
+
 0.108.1 [2026-09-18]
 --------------------
 

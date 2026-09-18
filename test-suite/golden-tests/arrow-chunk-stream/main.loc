@@ -1,0 +1,47 @@
+module main (viaCpp, viaPy, viaR, viaRust)
+
+import root
+import root-py
+import root-cpp
+import root-r
+import root-rust
+
+-- Summarising a run of chunks one at a time. Each chunk is built,
+-- measured, and finished with before the next begins, so the shared
+-- memory a run needs is one chunk or two, whatever its length and
+-- whichever language drives it.
+--
+-- Each pipeline sums the rows of every chunk and then reports the shared
+-- memory the run needed. The row total is what `highWaterMiB` takes as
+-- its argument: it is what makes the measurement happen after the run.
+
+type Table
+type Py => Table = "pyarrow.RecordBatch"
+type Cpp => Table = "mlc::ArrowTable"
+type R => Table = "arrow::RecordBatch"
+type Rust => Table = "rustmorloc::arrow_array::RecordBatch"
+
+source Py from "src.py" ("mkChunk" as mkChunkPy, "nRows" as nRowsPy)
+source Cpp from "src.hpp" ("mkChunk" as mkChunkCpp, "nRows" as nRowsCpp, "highWaterMiB")
+source R from "src.R" ("nRows" as nRowsR)
+source Rust from "src.rs" ("n_rows" as nRowsRust)
+
+mkChunkPy :: Int -> Table
+mkChunkCpp :: Int -> Table
+nRowsPy :: Table -> Int
+nRowsCpp :: Table -> Int
+nRowsR :: Table -> Int
+nRowsRust :: Table -> Int
+highWaterMiB :: Int -> Int
+
+viaCpp :: Int -> Int
+viaCpp n = highWaterMiB (sum (map (\i -> nRowsCpp (mkChunkPy i)) (range 0 n)))
+
+viaPy :: Int -> Int
+viaPy n = highWaterMiB (sum (map (\i -> nRowsPy (mkChunkCpp i)) (range 0 n)))
+
+viaR :: Int -> Int
+viaR n = highWaterMiB (sum (map (\i -> nRowsR (mkChunkCpp i)) (range 0 n)))
+
+viaRust :: Int -> Int
+viaRust n = highWaterMiB (sum (map (\i -> nRowsRust (mkChunkCpp i)) (range 0 n)))
