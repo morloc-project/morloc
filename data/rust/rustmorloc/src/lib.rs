@@ -446,28 +446,58 @@ pub fn dispatch_flush() {
 // ---------------------------------------------------------------------------
 thread_local! {
     static TRACEBACK: RefCell<String> = RefCell::new(String::new());
+    // The innermost manifold this thread is executing, as the frame line
+    // without its "at" prefix, for the crash handler's report. Const-
+    // initialised and without a destructor, so it lives in the static
+    // thread-local block and a handler reads it without allocating.
+    static CURRENT_FRAME: Cell<(*const u8, usize)> = const { Cell::new((std::ptr::null(), 0)) };
 }
 
-/// RAII manifold-frame marker. A no-op on normal return and on the happy path;
-/// on a panic unwind it records its frame line to the thread-local traceback.
+/// RAII manifold-frame marker. Marks the manifold as the one executing on
+/// the thread for the crash report (two stores); on a panic unwind it also
+/// records its frame line to the thread-local traceback.
 pub struct FrameGuard {
     frame: &'static str,
+    prev: (*const u8, usize),
 }
+
+const FRAME_PREFIX: &str = "\n  at ";
 
 impl FrameGuard {
     #[inline]
     pub fn new(frame: &'static str) -> FrameGuard {
-        FrameGuard { frame }
+        let name = frame.strip_prefix(FRAME_PREFIX).unwrap_or(frame);
+        let prev = CURRENT_FRAME.with(|c| c.replace((name.as_ptr(), name.len())));
+        FrameGuard { frame, prev }
     }
 }
 
 impl Drop for FrameGuard {
     #[inline]
     fn drop(&mut self) {
+        CURRENT_FRAME.with(|c| c.set(self.prev));
         if std::thread::panicking() {
             TRACEBACK.with(|t| t.borrow_mut().push_str(self.frame));
         }
     }
+}
+
+/// The frame the calling thread is executing, for the crash handler.
+unsafe extern "C" fn current_frame(len: *mut usize) -> *const c_char {
+    let (p, n) = CURRENT_FRAME.with(|c| c.get());
+    *len = n;
+    p as *const c_char
+}
+
+/// Report a fatal signal with the executing manifold, then die of it.
+pub fn install_crash_handler() {
+    extern "C" {
+        fn morloc_install_crash_handler(
+            lang: *const c_char,
+            current_frame: Option<unsafe extern "C" fn(*mut usize) -> *const c_char>,
+        );
+    }
+    unsafe { morloc_install_crash_handler(b"rust\0".as_ptr() as *const c_char, Some(current_frame)) };
 }
 
 /// RAII wrapper for a labeled manifold: emits the start line on construction,

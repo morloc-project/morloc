@@ -23,6 +23,22 @@
 #include "morloc.h"
 #include "mlc_rec.hpp"
 
+extern "C" const char* mlc_frame_enter(const char* frame);
+extern "C" void mlc_frame_leave(const char* prev);
+extern "C" const char* mlc_current_frame(size_t* len);
+
+namespace mlc {
+// Marks the manifold this thread is executing for the duration of a scope,
+// so a fatal signal is reported against it. Two stores per manifold call.
+struct frame_scope {
+    const char* prev;
+    explicit frame_scope(const char* frame) noexcept : prev(mlc_frame_enter(frame)) {}
+    ~frame_scope() { mlc_frame_leave(prev); }
+    frame_scope(const frame_scope&) = delete;
+    frame_scope& operator=(const frame_scope&) = delete;
+};
+}
+
 // ============================================================
 // Type traits for container dispatch
 // ============================================================

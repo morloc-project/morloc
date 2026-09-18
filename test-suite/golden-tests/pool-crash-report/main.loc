@@ -1,0 +1,47 @@
+-- A pool that dies by a signal mid-call is reported as such: which pool,
+-- which signal, and which manifold was executing. The pools differ in how
+-- a signal reaches the user. A C++ or Rust pool is one process, so its
+-- own handler names the innermost manifold and the nexus reports the
+-- signal from the exit status. A Python worker on Linux is a forked
+-- process whose parent survives, so the parent reports the worker's
+-- signal and the worker's fault handler prints its Python frames; the
+-- nexus names the command it was running. An R worker's own segfault
+-- handler prints an R traceback naming the manifold.
+module main (crashPy, crashCpp, crashRust, crashR, viaCpp)
+
+import root-py
+import root-cpp
+import root-rust
+import root-r
+
+source Py from "crash.py" ("crash" as crashPyRaw)
+source Cpp from "crash.hpp" ("crash" as crashCppRaw, "crash_raised" as crashRaisedRaw)
+source Rust from "crash.rs" ("crash" as crashRustRaw)
+source R from "crash.R" ("crash" as crashRRaw)
+
+crashPyRaw :: Int -> Int
+crashCppRaw :: Int -> Int
+crashRaisedRaw :: Int -> Int
+crashRustRaw :: Int -> Int
+crashRRaw :: Int -> Int
+
+crashPy :: Int -> Int
+crashPy x = crashPyRaw x
+
+crashCpp :: Int -> Int
+crashCpp x = crashCppRaw x
+
+crashRust :: Int -> Int
+crashRust x = crashRustRaw x
+
+crashR :: Int -> Int
+crashR x = crashRRaw x
+
+-- A signal the process sends itself, two manifolds deep in the C++ pool:
+-- the innermost one is the one named (an inlined helper is named by the
+-- site it was inlined at).
+inner :: Int -> Int
+inner x = crashRaisedRaw (idcpp x)
+
+viaCpp :: Int -> Int
+viaCpp x = idcpp (inner x)

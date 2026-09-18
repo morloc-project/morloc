@@ -53,6 +53,7 @@ pub mod arrow_shm;
 pub mod arrow_ffi;
 pub mod arrow_ipc_reader;
 pub mod pool_ffi;
+pub mod crash;
 pub mod daemon_ffi;
 pub mod router_ffi;
 pub mod null_check;

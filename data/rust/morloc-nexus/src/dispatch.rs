@@ -1248,7 +1248,10 @@ fn run_remote_command(
         die_with_pool_error(
             socket,
             cmd.pool_index,
-            &format!("failed to read response header from pool '{}'", socket.lang),
+            &format!(
+                "failed to read response header from pool '{}' while running '{}' (mid={})",
+                socket.lang, cmd.name, cmd.mid
+            ),
             &e,
         );
     }

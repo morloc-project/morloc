@@ -1091,14 +1091,18 @@ PROPAGATE_ERROR(errmsg)|]
                 -- Raw text with a literal newline; escapeCxxStringLit converts
                 -- '\n' -> "\\n" so the emitted C++ string literal contains the
                 -- escape, not an actual newline byte.
-                frameLine = "\n  at " <> nameOut
+                frameName = nameOut
                           <> " [cpp] (mid=" <> T.pack (show callIndex)
                           <> srclocSuffix <> ")"
+                frameLine = "\n  at " <> frameName
                 frameLit :: MDoc
                 frameLit = dquotes (pretty (escapeCxxStringLit frameLine))
+                -- Marks this manifold as the one executing on the thread,
+                -- so a fatal signal is reported against it.
+                frameScope = "mlc::frame_scope _mlc_frame(" <> dquotes (pretty (escapeCxxStringLit frameName)) <> ");"
                 fullName = mname <> mnameExt headForm
                 decl = returnTypeStr <+> fullName <> tupled typedArgs
-                tryBody = block 4 "try" (vsep $ priorLines <> [body])
+                tryBody = block 4 "try" (vsep $ frameScope : priorLines <> [body])
                 -- In --debug the drain owns the traceback; appending a
                 -- frame line here would duplicate every frame. The
                 -- normalize-to-std::runtime_error step remains so that
@@ -2142,7 +2146,9 @@ handleFlagsAndPaths srcs = do
       -- state/modules/lib search dir covers a user library referenced by a
       -- `-l` from dependencies/cxx-flags; its runtime load is likewise handled
       -- by the nexus LD_LIBRARY_PATH export, not a baked rpath.
-      mlcLib = ["-L" <> home <> "/lib", "-L" <> stateDir <> "/modules/lib", "-lmorloc", "-lcppmorloc", "-lpthread"]
+      -- -rdynamic exports the pool's own symbols, so the crash handler's
+      -- backtrace names generated manifolds rather than printing offsets.
+      mlcLib = ["-L" <> home <> "/lib", "-L" <> stateDir <> "/modules/lib", "-lmorloc", "-lcppmorloc", "-lpthread", "-rdynamic"]
 
   return
     ( filter (isJust . srcPath) srcs'
