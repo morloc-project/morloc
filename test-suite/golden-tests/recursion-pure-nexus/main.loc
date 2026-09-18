@@ -1,0 +1,67 @@
+-- Recursion in a function the nexus evaluates itself.
+--
+-- A function whose body calls nothing sourced has no pool to run in, so the
+-- nexus evaluates it. Constructors and pattern matching need no sourced
+-- code, so a walk over a recursive `data` type is the ordinary way to write
+-- one -- and a recursive one has a back-edge to itself. A back-edge names
+-- the function rather than carrying a value, so nothing about it has to
+-- cross a wire; asking for its wire form asks for the wire form of an
+-- arrow type, which does not have one.
+--
+-- Covered here: direct self-recursion, mutual recursion, a `where`-bound
+-- helper (which is lifted to a function of its own before code is
+-- generated), and recursion over a type whose recursion runs through a
+-- list. The same walk with a sourced call in it is realized in a pool
+-- instead, which is why this went unnoticed.
+module main (copy, tag, twice, leaves, invert, viaPool)
+
+import root-py
+
+data Nat = Zero | Succ Nat
+data Color = Red | Blue
+data Rose = Tip | Fork Rose Rose
+data Tree = Leaf | Node Int Tree Tree
+
+-- Direct self-recursion: rebuild the argument.
+copy :: Nat -> Nat
+copy | Zero = Zero
+     | (Succ n) = Succ (copy n)
+
+-- Mutual recursion between two pure functions.
+evenTag :: Nat -> Color
+evenTag | Zero = Red
+        | (Succ n) = oddTag n
+
+oddTag :: Nat -> Color
+oddTag | Zero = Blue
+       | (Succ n) = evenTag n
+
+tag :: Nat -> Color
+tag n = evenTag n
+
+-- A `where`-bound recursive helper, lifted to its own function.
+twice :: Nat -> Nat
+twice x = go x where
+  go :: Nat -> Nat
+  go | Zero = Zero
+     | (Succ n) = Succ (Succ (go n))
+
+-- Recursion through a branching type: two back-edges in one clause.
+leaves :: Rose -> Nat
+leaves | Tip = Succ Zero
+       | (Fork l r) = plus (leaves l) (leaves r)
+
+plus :: Nat -> Nat -> Nat
+plus | Zero m = m
+     | (Succ n) m = Succ (plus n m)
+
+-- A payload the walk carries but does not touch, rebuilt into a new value
+-- of the same type.
+invert :: Tree -> Tree
+invert | Leaf = Leaf
+       | (Node v l r) = Node v (invert r) (invert l)
+
+-- The same walk with one sourced call in it is realized in a pool.
+viaPool :: Nat -> Nat
+viaPool | Zero = Zero
+        | (Succ n) = Succ (viaPool (idpy n))

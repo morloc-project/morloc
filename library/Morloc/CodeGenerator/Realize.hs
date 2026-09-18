@@ -182,21 +182,43 @@ realize ::
     )
 realize s0 = do
   registry <- MM.gets stateLangRegistry
-  realizeWithRegistry registry s0
+  -- A term that calls nothing sourced has no language of its own and is
+  -- evaluated by the nexus. That evaluator has no name to call a function
+  -- by -- it knows only the variables a lambda binds -- so a term that
+  -- calls itself cannot run there and must be given a pool. The languages
+  -- offered are those the program declares concrete types for, which are
+  -- the pools it can build; one of them is chosen by the ordinary scoring,
+  -- so the choice follows whatever else the term touches.
+  langs <-
+    if anyCallS (const True) s0
+      then do
+        scopes <- MM.gets stateUniversalConcreteTypedefs
+        case unique (map (LR.poolOf registry) (Map.keys scopes)) of
+          [] ->
+            let AnnoS (Idx i _) _ _ = s0
+             in MM.throwSourcedError i $
+                  "this function calls itself, and a function that calls itself needs a"
+                    <+> "language to run in: the nexus evaluates an expression but cannot"
+                    <+> "call a function by name. Import a language module (`import"
+                    <+> "root-py`, `root-cpp`, ...) to give the program a pool."
+          ls -> return ls
+      else return []
+  realizeWithRegistry registry langs s0
 
 realizeWithRegistry ::
   LangRegistry ->
+  [Lang] ->
   AnnoS (Indexed Type) Many Int ->
   MorlocMonad
     ( Either
         (AnnoS (Indexed Type) One ())
         (AnnoS (Indexed Type) One (Indexed Lang))
     )
-realizeWithRegistry registry s0 = do
+realizeWithRegistry registry seedLangs s0 = do
   -- Normalize language-invariant (literal-lambda-head) redexes before scoring so
   -- the scorer is not fed composition chains it would re-score exponentially.
   s0' <- normalizePop1 s0
-  e@(AnnoS _ li _) <- scoreAnnoS emptyRState s0' >>= collapseAnnoS [] Nothing
+  e@(AnnoS _ li _) <- scoreAnnoS emptyRState {rLangs = seedLangs} s0' >>= collapseAnnoS [] Nothing
   case li of
     (Idx _ Nothing) -> makeGAST e |>> Left
     (Idx _ _) -> propagateDown e |>> Right
