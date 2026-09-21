@@ -121,10 +121,15 @@ printExpr (IIntrinsicRead sid Nothing e) =
   [idoc|_mlc_read(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
 printExpr (IIntrinsicOpen kind path) =
   [idoc|_mlc_open(#{printExpr path}, #{pretty kind})|]
+-- @close and the temp-file unlink return void in the runtime, but their
+-- morloc type is `()`, and a call can land anywhere a value is consumed: a
+-- branch arm, a let, the tail of a manifold that returns `mlc::Unit`. Only
+-- the serialize boundary supplies the unit beside a void call, so the unit
+-- is supplied here instead and every consumer sees a value.
 printExpr (IIntrinsicClose h) =
-  [idoc|_mlc_close(#{printExpr h})|]
+  [idoc|([&](){ _mlc_close(#{printExpr h}); return mlc::Unit{}; }())|]
 printExpr (IIntrinsicUnlinkTemp path) =
-  [idoc|_mlc_unlink_tmp(#{printExpr path})|]
+  [idoc|([&](){ _mlc_unlink_tmp(#{printExpr path}); return mlc::Unit{}; }())|]
 printExpr (IIntrinsicFSchema path) =
   [idoc|_mlc_fschema(#{printExpr path})|]
 printExpr (IIntrinsicFLength h) =
