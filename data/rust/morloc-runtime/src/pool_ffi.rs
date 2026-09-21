@@ -710,11 +710,17 @@ unsafe fn recv_fd(sock: i32) -> i32 {
 /// clock, and it moved run to run, which made real changes unreadable.
 ///
 /// Keeping both thresholds above a batch turns those faults into free-list
-/// hits: the same pass drops to 176 thousand faults and stops varying. The
-/// cost is the arena the process keeps warm -- about 12% more resident on that
-/// pass -- which is why the glibc environment variables still win. They are
-/// read before the first allocation, so a value set there is already in force
-/// and this leaves it alone.
+/// hits: the same pass drops to 176 thousand faults and stops varying.
+///
+/// A dispatch runs on a worker thread, and a thread's arena is not trimmed by
+/// the threshold above -- glibc shrinks it by the padding it keeps past the
+/// top instead. Left at its 128 KiB default that gives back a page or so on
+/// nearly every free, which is a syscall each: 143 thousand of them on a
+/// 200 MB gather. Keeping a batch's worth of headroom removes them.
+///
+/// The glibc environment variables still win. They are read before the first
+/// allocation, so a value set there is already in force and this leaves it
+/// alone.
 #[cfg(target_env = "gnu")]
 unsafe fn tune_allocator() {
     if std::env::var_os("MORLOC_MALLOC_TUNING").as_deref() == Some(std::ffi::OsStr::new("off")) {
@@ -724,11 +730,15 @@ unsafe fn tune_allocator() {
     // built from it stay on the heap and are reused rather than remapped.
     const MMAP_THRESHOLD: libc::c_int = 32 * 1024 * 1024;
     const TRIM_THRESHOLD: libc::c_int = 64 * 1024 * 1024;
+    const TOP_PAD: libc::c_int = 64 * 1024 * 1024;
     if std::env::var_os("MALLOC_MMAP_THRESHOLD_").is_none() {
         libc::mallopt(libc::M_MMAP_THRESHOLD, MMAP_THRESHOLD);
     }
     if std::env::var_os("MALLOC_TRIM_THRESHOLD_").is_none() {
         libc::mallopt(libc::M_TRIM_THRESHOLD, TRIM_THRESHOLD);
+    }
+    if std::env::var_os("MALLOC_TOP_PAD_").is_none() {
+        libc::mallopt(libc::M_TOP_PAD, TOP_PAD);
     }
 }
 

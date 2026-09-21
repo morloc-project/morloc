@@ -2596,8 +2596,16 @@ pub fn shared_finalize_ostream_locked(
 // concurrent pools writing to or reading from the same handle stay
 // consistent.
 
-struct SubpacketBytes {
-    packet: Vec<u8>,
+/// A sub-packet ready to write: its header and metadata block, and its
+/// payload kept where it already is.
+///
+/// The payload is the whole sub-packet but for a few hundred bytes, and at
+/// level 0 it is the caller's buffer unchanged, so it is carried by
+/// reference. Assembling one contiguous `Vec` instead would copy it -- and
+/// the old shape copied it twice, once to own it and once to append it.
+struct SubpacketBytes<'a> {
+    head: Vec<u8>,
+    payload: std::borrow::Cow<'a, [u8]>,
     /// On-disk payload region size (post-compression if applicable).
     /// Tracked separately so diag counters see the true bytes written
     /// rather than the assembled packet length (which also carries
@@ -2605,16 +2613,22 @@ struct SubpacketBytes {
     compressed_payload_len: usize,
 }
 
+impl SubpacketBytes<'_> {
+    fn len(&self) -> usize {
+        self.head.len() + self.payload.len()
+    }
+}
+
 /// Assemble a `MORLOC_DATA_PACKET` from a raw voidstar payload:
 /// zstd-compress (if `level > 0`), build the SCHEMA_STRING (+ optional
 /// FRAME_INDEX) metadata block, prepend the 32-byte header. Returns
 /// the wire bytes ready to write to any transport (disk pwrite, RPC
 /// send-into-SHM). Format-only work -- no cursor, no diag, no I/O.
-fn build_subpacket_bytes(
+fn build_subpacket_bytes<'a>(
     value_schema: &morloc_runtime_types::schema::Schema,
-    payload_bytes: &[u8],
+    payload_bytes: &'a [u8],
     level: u8,
-) -> Result<SubpacketBytes, MorlocError> {
+) -> Result<SubpacketBytes<'a>, MorlocError> {
     use morloc_runtime_types::packet::{
         PacketHeader, METADATA_TYPE_SCHEMA_STRING, METADATA_TYPE_FRAME_INDEX,
         METADATA_BLOCK_ALIGNMENT, PACKET_COMPRESSION_NONE, PACKET_COMPRESSION_ZSTD,
@@ -2622,14 +2636,15 @@ fn build_subpacket_bytes(
     use morloc_runtime_types::schema::schema_to_string;
 
     let clvl = crate::compression::CompressionLevel::from_u8(level)?;
-    let (final_payload, compression_byte, frame_index_body): (Vec<u8>, u8, Option<Vec<u8>>) =
+    let (final_payload, compression_byte, frame_index_body):
+        (std::borrow::Cow<'a, [u8]>, u8, Option<Vec<u8>>) =
         if clvl.is_none() {
-            (payload_bytes.to_vec(), PACKET_COMPRESSION_NONE, None)
+            (std::borrow::Cow::Borrowed(payload_bytes), PACKET_COMPRESSION_NONE, None)
         } else {
             let (bytes, frames) =
                 crate::compression::compress_payload_zstd(payload_bytes, clvl)?;
             let body = crate::packet::encode_frame_index_entry(&frames);
-            (bytes, PACKET_COMPRESSION_ZSTD, Some(body))
+            (std::borrow::Cow::Owned(bytes), PACKET_COMPRESSION_ZSTD, Some(body))
         };
     let value_schema_str = schema_to_string(value_schema);
     let mut schema_body = value_schema_str.into_bytes();
@@ -2663,13 +2678,10 @@ fn build_subpacket_bytes(
     hdr_bytes[15] = compression_byte;
 
     let compressed_payload_len = final_payload.len();
-    let mut packet = Vec::with_capacity(
-        hdr_bytes.len() + meta.len() + final_payload.len(),
-    );
-    packet.extend_from_slice(&hdr_bytes);
-    packet.extend_from_slice(&meta);
-    packet.extend_from_slice(&final_payload);
-    Ok(SubpacketBytes { packet, compressed_payload_len })
+    let mut head = Vec::with_capacity(hdr_bytes.len() + meta.len());
+    head.extend_from_slice(&hdr_bytes);
+    head.extend_from_slice(&meta);
+    Ok(SubpacketBytes { head, payload: final_payload, compressed_payload_len })
 }
 
 /// Record a completed sub-packet flush into a slot's `StreamDiag`.
@@ -2743,12 +2755,16 @@ fn emit_subpacket_to_disk(
         }
     };
 
-    let SubpacketBytes { packet, compressed_payload_len } =
-        build_subpacket_bytes(&local.value_schema, &payload_bytes, level)?;
+    let sub = build_subpacket_bytes(&local.value_schema, &payload_bytes, level)?;
+    let compressed_payload_len = sub.compressed_payload_len;
 
     let cursor = slot.cursor;
-    pwrite_all_fd(local.fd, &packet, cursor)?;
-    let subpacket_end = cursor + packet.len() as u64;
+    // Head then payload, where the payload is still the buffer the caller
+    // filled. Copying the two together into one buffer first would move the
+    // whole payload for the sake of one `pwrite` instead of two.
+    pwrite_all_fd(local.fd, &sub.head, cursor)?;
+    pwrite_all_fd(local.fd, &sub.payload, cursor + sub.head.len() as u64)?;
+    let subpacket_end = cursor + sub.len() as u64;
 
     unsafe {
         let mp = slot as *const RegistrySlot as *mut RegistrySlot;
@@ -2794,13 +2810,19 @@ fn emit_subpacket_via_rpc(
     )?;
     crate::handle_scan::rewrite_handles_to_paths(&mut rewritten, &fields)?;
 
-    let SubpacketBytes { packet, compressed_payload_len } =
-        build_subpacket_bytes(&local.value_schema, &rewritten, level)?;
+    let sub = build_subpacket_bytes(&local.value_schema, &rewritten, level)?;
+    let compressed_payload_len = sub.compressed_payload_len;
 
-    let total = packet.len() as u64;
-    let dst_abs = crate::shm::shmalloc(packet.len())?;
+    let total = sub.len() as u64;
+    let dst_abs = crate::shm::shmalloc(sub.len())?;
+    // SAFETY: the block was sized as head + payload.
     unsafe {
-        std::ptr::copy_nonoverlapping(packet.as_ptr(), dst_abs as *mut u8, packet.len());
+        std::ptr::copy_nonoverlapping(sub.head.as_ptr(), dst_abs as *mut u8, sub.head.len());
+        std::ptr::copy_nonoverlapping(
+            sub.payload.as_ptr(),
+            (dst_abs as *mut u8).add(sub.head.len()),
+            sub.payload.len(),
+        );
     }
     let relptr = crate::shm::abs2rel(dst_abs)? as i64;
 
@@ -2822,7 +2844,7 @@ fn emit_subpacket_via_rpc(
     // seeded to the stream-header length so this cursor value is the
     // sub-packet's start offset in the emitted stream.
     let cursor = slot.cursor;
-    let subpacket_end = cursor + packet.len() as u64;
+    let subpacket_end = cursor + total;
     unsafe {
         let mp = slot as *const RegistrySlot as *mut RegistrySlot;
         (*mp).cursor = subpacket_end;
@@ -3628,7 +3650,7 @@ fn collect_sized(
                 return Err(finish(out, e.into()));
             }
         };
-        let used = unsafe { (records as usize) - (block as usize) } + sz * elem_width;
+        let used = (records as usize) - (block as usize) + sz * elem_width;
         // The tail is whatever the block holds past its records. Reading
         // that size is not optional: the records' relptrs are shifted to
         // wherever the tail lands, so a tail that is not copied leaves them
@@ -3828,7 +3850,7 @@ fn collect_istream_into_array(handle: i64, path: &str) -> Result<AbsPtr, MorlocE
         // rounding costs a few bytes in the destination and nothing else: the
         // relptrs are shifted per sub-packet, so where its bytes land relative
         // to another sub-packet's does not matter.
-        let used = unsafe { (records as usize) - (block as usize) } + sz * elem_width;
+        let used = (records as usize) - (block as usize) + sz * elem_width;
         let block_size = unsafe { shm::shm_block_size(block) }.unwrap_or(0);
         if block_size < used {
             free_chunks(&chunks);

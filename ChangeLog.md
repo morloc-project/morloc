@@ -1,6 +1,9 @@
 Unreleased
 ----------
 
+ * writing a stream copies its payload once instead of twice, and a pool
+   keeps a batch's worth of heap rather than returning it to the kernel
+   between batches
  * a program that reads a stream, loads a gathered list, slices an `IFile`
    or calls `@read` no longer leaks the value each time, and a whole-list
    gather holds its data once rather than twice
