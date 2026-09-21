@@ -278,6 +278,98 @@ pub fn read_binary_with_hint(
 /// inside an already-allocated parent block). Sub-block allocations are
 /// charged to the SHM allocator and the resulting relptrs are written into
 /// `dst`.
+/// Where a deep copy puts the blocks it needs for a value's
+/// variable-length parts.
+///
+/// The default takes one SHM block per part, which is what the name
+/// "deep copy" has always meant here. A copy that must hand its result to
+/// a pool cannot do that: a pool releases a value with one `shfree` of the
+/// root, so every block below the root would be lost. Such a caller sizes
+/// the value first and passes [`Bump`], which cuts the parts out of one
+/// block it already owns.
+pub enum CopyAlloc<'a> {
+    /// A fresh SHM block per part.
+    Blocks,
+    /// A fresh SHM block per part, each recorded so the caller can give
+    /// them all back. Used to build a value whose size is not known until
+    /// it exists, before [`consolidate`] copies it into one block.
+    Recording(&'a mut Vec<crate::shm::AbsPtr>),
+    /// Successive slices of a caller-owned region.
+    Bump(&'a mut Bump),
+}
+
+/// A cursor over a region the caller has already allocated and sized.
+pub struct Bump {
+    next: *mut u8,
+    end: *mut u8,
+}
+
+impl Bump {
+    /// # Safety
+    /// `start` must own `len` writable bytes for as long as this is used.
+    pub unsafe fn new(start: *mut u8, len: usize) -> Self {
+        Bump { next: start, end: start.add(len) }
+    }
+
+    fn take(&mut self, len: usize) -> Result<*mut u8, MorlocError> {
+        // Every part is at least pointer-aligned where it needs to be,
+        // because the sizes handed here are whole multiples of the widths
+        // the schema describes; rounding up keeps that true across parts.
+        let len = (len + 7) & !7;
+        if (self.end as usize) - (self.next as usize) < len {
+            return Err(MorlocError::Shm(
+                "deep copy ran past the region it was sized for".into(),
+            ));
+        }
+        let p = self.next;
+        // SAFETY: the bound above proves `len` bytes remain.
+        self.next = unsafe { p.add(len) };
+        Ok(p)
+    }
+}
+
+impl CopyAlloc<'_> {
+    /// A zeroed region of `len` bytes.
+    fn zeroed(&mut self, len: usize) -> Result<crate::shm::AbsPtr, MorlocError> {
+        match self {
+            CopyAlloc::Blocks => shm::shmalloc(len).map(|p| {
+                // SAFETY: p owns len bytes.
+                unsafe { std::ptr::write_bytes(p, 0, len) };
+                p
+            }),
+            CopyAlloc::Recording(seen) => shm::shmalloc(len).map(|p| {
+                seen.push(p);
+                // SAFETY: p owns len bytes.
+                unsafe { std::ptr::write_bytes(p, 0, len) };
+                p
+            }),
+            CopyAlloc::Bump(b) => b.take(len).map(|p| {
+                // SAFETY: take() proved len bytes remain.
+                unsafe { std::ptr::write_bytes(p, 0, len) };
+                p
+            }),
+        }
+    }
+
+    /// A region of `len` bytes holding a copy of `src`.
+    fn copy_of(
+        &mut self,
+        src: *const u8,
+        len: usize,
+    ) -> Result<crate::shm::AbsPtr, MorlocError> {
+        match self {
+            CopyAlloc::Blocks => shm::shmemcpy(src, len),
+            CopyAlloc::Recording(seen) => shm::shmemcpy(src, len).inspect(|&p| seen.push(p)),
+            CopyAlloc::Bump(b) => {
+                let p = b.take(len)?;
+                // SAFETY: take() proved len bytes remain; src owns len bytes.
+                unsafe { std::ptr::copy_nonoverlapping(src, p, len) };
+                Ok(p)
+            }
+        }
+    }
+}
+
 pub unsafe fn deep_copy(
     src: *const u8,
     dst: *mut u8,
@@ -287,6 +379,22 @@ pub unsafe fn deep_copy(
     // from file-backed regions instead use `deep_copy_with` with a
     // custom resolver that adds an offset to the file's payload base.
     deep_copy_with(src, dst, schema, &|p| shm::rel2abs(p))
+}
+
+/// Deep-copy `src` into `dst`, cutting every variable-length part out of
+/// `bump` rather than taking a block for each. The caller must have sized
+/// `bump` with [`crate::ffi::calc_voidstar_size_inner`]; running short is an
+/// error, not a silent overrun.
+///
+/// # Safety
+/// As [`deep_copy`], plus `bump` must own its region for the call.
+pub unsafe fn deep_copy_into(
+    src: *const u8,
+    dst: *mut u8,
+    schema: &Schema,
+    bump: &mut Bump,
+) -> Result<(), MorlocError> {
+    deep_copy_alloc(src, dst, schema, &|p| shm::rel2abs(p), CopyAlloc::Bump(bump))
 }
 
 /// Same as `deep_copy` but parameterised by the source-side relptr
@@ -313,7 +421,65 @@ pub unsafe fn deep_copy_with<R>(
 where
     R: Fn(RelPtr) -> Result<crate::shm::AbsPtr, MorlocError>,
 {
-    let mut w = CopyWalk { res: Resolver::new(schema), resolve };
+    deep_copy_alloc(src, dst, schema, resolve, CopyAlloc::Blocks)
+}
+
+/// Copy a value built as a graph of blocks into ONE block, and give the
+/// graph back.
+///
+/// This is for a builder that cannot know its result's size until it has
+/// parsed or walked its input: it builds with
+/// [`CopyAlloc::Recording`] (or records its own allocations), then hands
+/// the root and that list here. The value that comes back is a single
+/// block, which is what a pool can release.
+///
+/// `root_block` is freed too; the returned pointer replaces it.
+///
+/// # Safety
+/// `root` must point at a value laid out as `schema` describes, `parts`
+/// must list every block below it and nothing else, and nothing may still
+/// be pointing into any of them.
+pub unsafe fn consolidate(
+    root: crate::shm::AbsPtr,
+    schema: &Schema,
+    parts: &[crate::shm::AbsPtr],
+) -> Result<crate::shm::AbsPtr, MorlocError> {
+    // The flat size packs each part against the last; the cursor below
+    // rounds each one up to eight bytes so a part that must be aligned is,
+    // which can cost up to seven bytes per part. Budget that rather than
+    // discover it as a short region.
+    let total = crate::ffi::calc_voidstar_size_inner(root, schema)?
+        + 8 * (parts.len() + 1);
+    let dest = shm::shmalloc(total)?;
+    std::ptr::write_bytes(dest, 0, total);
+    let mut bump = Bump::new(dest.add(schema.width), total - schema.width);
+    let r = deep_copy_alloc(root, dest, schema, &|p| shm::rel2abs(p), CopyAlloc::Bump(&mut bump));
+    if let Err(e) = r {
+        let _ = shm::shfree(dest);
+        return Err(e);
+    }
+    for &p in parts {
+        let _ = shm::shfree(p);
+    }
+    let _ = shm::shfree(root);
+    Ok(dest)
+}
+
+/// [`deep_copy_with`] with the part allocator chosen by the caller.
+///
+/// # Safety
+/// As [`deep_copy_with`].
+pub unsafe fn deep_copy_alloc<R>(
+    src: *const u8,
+    dst: *mut u8,
+    schema: &Schema,
+    resolve: &R,
+    alloc: CopyAlloc<'_>,
+) -> Result<(), MorlocError>
+where
+    R: Fn(RelPtr) -> Result<crate::shm::AbsPtr, MorlocError>,
+{
+    let mut w = CopyWalk { res: Resolver::new(schema), resolve, alloc };
     let mut st = Stack::new();
     st.enter(schema, src, dst);
     walk::run(&mut w, &mut st)
@@ -326,6 +492,7 @@ where
 struct CopyWalk<'r, 'f, R> {
     res: Resolver<'r>,
     resolve: &'f R,
+    alloc: CopyAlloc<'f>,
 }
 
 impl<'r, 'f, R> CopyWalk<'r, 'f, R>
@@ -371,7 +538,7 @@ where
                     dst_arr.size = src_arr.size;
                     if src_arr.size > 0 && src_arr.data >= 0 {
                         let src_data = resolve(src_arr.data)?;
-                        let new_data = shm::shmemcpy(src_data, src_arr.size)?;
+                        let new_data = self.alloc.copy_of(src_data, src_arr.size)?;
                         dst_arr.data = shm::abs2rel(new_data)?;
                     } else {
                         dst_arr.data = shm::RELNULL;
@@ -391,7 +558,7 @@ where
                                 let src_suballoc = resolve(src_payload as RelPtr)?;
                                 let path_len = sh::read_path_size(src_suballoc) as usize;
                                 let total = sh::path_suballoc_size(path_len);
-                                let new_suballoc = shm::shmemcpy(src_suballoc, total)?;
+                                let new_suballoc = self.alloc.copy_of(src_suballoc, total)?;
                                 sh::write_field(dst, sh::TAG_PATH, shm::abs2rel(new_suballoc)? as u64);
                             }
                         }
@@ -417,7 +584,7 @@ where
                         let elem_schema = &schema.parameters[0];
                         let elem_width = elem_schema.width;
                         let src_data = resolve(src_arr.data)?;
-                        let new_data = shm::shcalloc(src_arr.size, elem_width)?;
+                        let new_data = self.alloc.zeroed(src_arr.size * elem_width)?;
                         dst_arr.data = shm::abs2rel(new_data)?;
                         if elem_schema.is_fixed_width() {
                             std::ptr::copy_nonoverlapping(src_data, new_data, src_arr.size * elem_width);
@@ -467,7 +634,7 @@ where
                         *dst_relptr_slot = shm::RELNULL;
                     } else {
                         let src_inner = resolve(src_relptr)?;
-                        let dst_inner = shm::shmalloc(arm.width)?;
+                        let dst_inner = self.alloc.zeroed(arm.width)?;
                         std::ptr::write_bytes(dst_inner, 0, arm.width);
                         *dst_relptr_slot = shm::abs2rel(dst_inner)?;
                         self.child(st, &f, 0, arm, src_inner, dst_inner)?;
@@ -486,7 +653,7 @@ where
                     } else {
                         let inner_schema = &schema.parameters[0];
                         let src_inner = resolve(src_relptr)?;
-                        let dst_inner = shm::shmalloc(inner_schema.width)?;
+                        let dst_inner = self.alloc.zeroed(inner_schema.width)?;
                         std::ptr::write_bytes(dst_inner, 0, inner_schema.width);
                         *dst_relptr_slot = shm::abs2rel(dst_inner)?;
                         self.child(st, &f, 0, inner_schema, src_inner, dst_inner)?;
@@ -501,7 +668,7 @@ where
                         let src_relptr = *(src.add(off) as *const RelPtr);
                         if src_relptr >= 0 {
                             let src_limbs = resolve(src_relptr)?;
-                            let new_limbs = shm::shmemcpy(src_limbs, size * std::mem::size_of::<u64>())?;
+                            let new_limbs = self.alloc.copy_of(src_limbs, size * std::mem::size_of::<u64>())?;
                             *(dst.add(off) as *mut RelPtr) = shm::abs2rel(new_limbs)?;
                         } else {
                             *(dst.add(off) as *mut RelPtr) = shm::RELNULL;

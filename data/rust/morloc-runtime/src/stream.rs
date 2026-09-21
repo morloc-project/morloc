@@ -3495,24 +3495,14 @@ fn materialize_and_finalise_subpacket(
         SubpacketSrc::File { payload_base, payload_len, vol_idx_hint, .. } => {
             let resolver = make_file_resolver(payload_base, payload_len);
             let arr_data = resolver(arr.data)?;
-            let arr_ptr = shm::shcalloc(1, std::mem::size_of::<shm_types_crate::Array>())?;
             if arr_size == 0 {
-                let a = unsafe { &mut *(arr_ptr as *mut shm_types_crate::Array) };
-                a.size = 0;
-                a.data = shm::RELNULL;
-                Ok(arr_ptr)
+                empty_shm_array()
             } else {
-                match slice_bulk_copy_contiguous(
+                slice_bulk_copy_contiguous(
                     0, arr_size as usize, arr_size, arr_data,
                     payload_base, payload_len, vol_idx_hint,
-                    &local.elem_schema, elem_width, arr_ptr,
-                ) {
-                    Ok(()) => Ok(arr_ptr),
-                    Err(e) => {
-                        let _ = shm::shfree(arr_ptr);
-                        Err(e)
-                    }
-                }
+                    &local.elem_schema, elem_width,
+                )
             }
         }
         SubpacketSrc::Shm { arr_base } => Ok(arr_base),
@@ -3550,6 +3540,204 @@ pub fn shared_load_stream_file_as_array(path: &str) -> Result<AbsPtr, MorlocErro
     result
 }
 
+/// What went wrong with the sized route.
+enum CollectSized {
+    /// The index did not describe this file. The caller may read it the
+    /// slow way instead; nothing has been allocated or consumed that it
+    /// needs to know about beyond the cursor.
+    Mismatch,
+    /// A real failure, to be reported as is.
+    Failed(MorlocError),
+}
+
+impl From<MorlocError> for CollectSized {
+    fn from(e: MorlocError) -> Self {
+        CollectSized::Failed(e)
+    }
+}
+
+/// Put an IStream back at its first sub-packet.
+fn reset_istream_cursor(handle: i64) -> Result<(), MorlocError> {
+    with_process_local_slot(handle, |_, slot| {
+        let _guard = SlotFutexGuard::lock(slot);
+        // SAFETY: the slot is this process's, held under its futex.
+        unsafe {
+            let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+            (*mp).cursor = (*mp).body_start;
+        }
+        Ok(())
+    })
+}
+
+/// Drain a stream into one block whose size the index already gave.
+///
+/// Each sub-packet is copied in and released before the next is read, so
+/// the payload is resident once rather than twice. Every write is checked
+/// against the regions the size bought: an index that describes more than
+/// the file holds is answered with `Mismatch`, never with a write past the
+/// block.
+fn collect_sized(
+    handle: i64,
+    elem_schema: &Schema,
+    elems: usize,
+    payload: usize,
+) -> Result<AbsPtr, CollectSized> {
+    let hdr_size = std::mem::size_of::<shm_types_crate::Array>();
+    let elem_width = elem_schema.width;
+    let records_size = elems.checked_mul(elem_width)
+        .ok_or(CollectSized::Mismatch)?;
+    // A sub-packet's payload is its own header, its records and their
+    // sub-allocations. The result drops the per-sub-packet headers, so the
+    // sum is an upper bound on what it needs, never a short one.
+    if payload < records_size {
+        return Err(CollectSized::Mismatch);
+    }
+    let tail_cap = payload - records_size;
+    if elems == 0 {
+        let out = shm::shcalloc(1, hdr_size)?;
+        let a = unsafe { &mut *(out as *mut shm_types_crate::Array) };
+        a.size = 0;
+        a.data = shm_types_crate::RELNULL;
+        return Ok(out);
+    }
+    let out = shm::shmalloc(hdr_size + records_size + tail_cap)?;
+    let out_records = unsafe { (out as *mut u8).add(hdr_size) };
+    let out_tails = unsafe { out_records.add(records_size) };
+
+    let mut rec_at = 0usize;
+    let mut tail_at = 0usize;
+    let finish = |out: AbsPtr, e: CollectSized| -> CollectSized {
+        let _ = shm::shfree(out);
+        e
+    };
+    loop {
+        let block = match shared_next_subpacket(handle) {
+            Ok(p) => p,
+            Err(e) => return Err(finish(out, e.into())),
+        };
+        let arr = unsafe { &*(block as *const shm_types_crate::Array) };
+        let sz = arr.size;
+        if sz == 0 {
+            let _ = shm::shfree(block);
+            break;
+        }
+        let records = match shm::rel2abs(arr.data) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = shm::shfree(block);
+                return Err(finish(out, e.into()));
+            }
+        };
+        let used = unsafe { (records as usize) - (block as usize) } + sz * elem_width;
+        // The tail is whatever the block holds past its records. Reading
+        // that size is not optional: the records' relptrs are shifted to
+        // wherever the tail lands, so a tail that is not copied leaves them
+        // addressing uninitialized bytes.
+        let block_size = match unsafe { shm::shm_block_size(block) } {
+            Some(n) if n >= used => n,
+            _ => {
+                let _ = shm::shfree(block);
+                return Err(finish(out, CollectSized::Mismatch));
+            }
+        };
+        let tail = block_size - used;
+        // The index promised room for this; if it did not, stop before
+        // writing rather than grow into whatever follows.
+        if rec_at + sz > elems || tail_at + tail > tail_cap {
+            let _ = shm::shfree(block);
+            return Err(finish(out, CollectSized::Mismatch));
+        }
+        let src_tail = unsafe { (records as *const u8).add(sz * elem_width) };
+        let dst_rec = unsafe { out_records.add(rec_at * elem_width) };
+        let dst_tail = unsafe { out_tails.add(tail_at) };
+        // SAFETY: the bound above proves both destinations have room, and
+        // each source range lies inside the sub-packet's own block.
+        unsafe {
+            std::ptr::copy_nonoverlapping(records as *const u8, dst_rec, sz * elem_width);
+            if tail > 0 {
+                std::ptr::copy_nonoverlapping(src_tail, dst_tail, tail);
+            }
+        }
+        let rel = (shm::abs2rel(src_tail as AbsPtr), shm::abs2rel(dst_tail as AbsPtr));
+        let (src_rel, dst_rel) = match rel {
+            (Ok(a), Ok(b)) => (a, b),
+            _ => {
+                let _ = shm::shfree(block);
+                return Err(finish(out, MorlocError::Shm(
+                    "@load: sub-packet is outside every volume".into()).into()));
+            }
+        };
+        let delta = (dst_rel as i64).wrapping_sub(src_rel as i64) as RelPtr;
+        for k in 0..sz {
+            let rec = unsafe { dst_rec.add(k * elem_width) as AbsPtr };
+            if let Err(e) = voidstar::adjust_relptrs(rec, elem_schema, delta) {
+                let _ = shm::shfree(block);
+                return Err(finish(out, e.into()));
+            }
+        }
+        rec_at += sz;
+        tail_at += tail;
+        // The sub-packet's bytes are in the result now.
+        let _ = shm::shfree(block);
+    }
+    if rec_at != elems {
+        return Err(finish(out, CollectSized::Mismatch));
+    }
+    let records_rel = match shm::abs2rel(out_records as AbsPtr) {
+        Ok(r) => r,
+        Err(e) => return Err(finish(out, e.into())),
+    };
+    let a = unsafe { &mut *(out as *mut shm_types_crate::Array) };
+    a.size = elems;
+    a.data = records_rel;
+    Ok(out)
+}
+
+/// How much a stream's sub-packets hold, read from the index alone.
+///
+/// Returns `(element count, payload bytes)`, where the payload of a
+/// sub-packet is its `Array` header plus its records plus their
+/// sub-allocations -- the number its own header carries, or, when it is
+/// compressed, the sum its frame index carries. Neither touches a payload
+/// byte, so this costs a header read per sub-packet.
+///
+/// This is a HINT. A footerless file's index was synthesized by a scan of a
+/// writer that may have crashed, and a file can be appended to between this
+/// and the read that follows, so a caller sizes from it and then bound-checks
+/// what it actually writes.
+fn stream_payload_hint(handle: i64) -> Option<(u64, u64)> {
+    with_process_local_slot(handle, |local, _| {
+        let mut elems = 0u64;
+        let mut payload = 0u64;
+        for i in 0..local.subpacket_entries_local.len() {
+            let off = local.subpacket_entries_local[i].offset;
+            elems += local.subpacket_entries_local[i].elem_count;
+            let (header, _, payload_len, _) = read_subpacket_header(local, off)?;
+            let data = unsafe { header.command.data };
+            payload += if data.compression == PACKET_COMPRESSION_NONE {
+                payload_len
+            } else {
+                let hdr_meta_len = 32 + header.offset as usize;
+                // SAFETY: read_subpacket_header validated the header and its
+                // metadata lie inside the mapping.
+                let hdr_meta = unsafe {
+                    std::slice::from_raw_parts(
+                        (local.mmap_ptr as *const u8).add(off as usize),
+                        hdr_meta_len,
+                    )
+                };
+                match morloc_runtime_types::packet::read_frame_index_from_meta(hdr_meta)? {
+                    Some(frames) => frames.iter().map(|f| f.uncompressed_size).sum(),
+                    None => return Err(MorlocError::Packet(
+                        "compressed sub-packet carries no frame index".into(),
+                    )),
+                }
+            };
+        }
+        Ok((elems, payload))
+    }).ok()
+}
+
 /// Drain every sub-packet of an open IStream `handle` into one combined
 /// SHM `Array<a>`. Split out from `shared_load_stream_file_as_array` so
 /// the handle cleanup runs on every exit path.
@@ -3569,109 +3757,171 @@ fn collect_istream_into_array(handle: i64, path: &str) -> Result<AbsPtr, MorlocE
     let (_value_schema, elem_schema) = derive_stream_schemas(&parsed);
     let elem_width = elem_schema.width;
 
-    // Drain every sub-packet, holding each chunk's SHM `Array` alive until
-    // its elements have been deep-copied into the combined buffer. Each
-    // tuple is (chunk Array header, resolved element-data base, count).
-    let mut chunks: Vec<(AbsPtr, AbsPtr, usize)> = Vec::new();
-    let mut total: usize = 0;
+    // Drain every sub-packet, holding each chunk alive until its bytes have
+    // been copied into the combined value.
+    //
+    // A sub-packet is one self-contained block laid out `[Array][records]
+    // [sub-allocations]`, with every relptr in the records pointing into its
+    // own sub-allocation region -- the DFS layout the voidstar writers keep.
+    // So combining K of them is two memcpys and one relptr shift per
+    // sub-packet, into a single destination block laid out the same way.
+    // That is the same move `slice_bulk_copy_contiguous` makes for one
+    // sub-packet, and it replaces an element-by-element deep copy that
+    // allocated a fresh block for every variable-length field -- blocks the
+    // caller's single `shfree` could never reach.
+    let hdr_size = std::mem::size_of::<shm_types_crate::Array>();
 
-    let free_chunks = |chunks: &Vec<(AbsPtr, AbsPtr, usize)>| {
-        // shfree is shallow (refcount decrement), so freeing a chunk's
-        // data block does not touch the fresh sub-allocations deep_copy
-        // has already made for the combined value.
-        for &(arr_ptr, data_abs, _) in chunks {
-            let _ = shm::shfree(data_abs);
-            let _ = shm::shfree(arr_ptr);
+    // Preferred route: the index says how many elements there are and how
+    // many bytes their sub-packets hold, so the result can be sized before
+    // anything is read. Each sub-packet is then copied in and released
+    // immediately, and the stream's whole payload is never resident twice.
+    if let Some((elems, payload)) = stream_payload_hint(handle) {
+        match collect_sized(handle, &elem_schema, elems as usize, payload as usize) {
+            Ok(p) => return Ok(p),
+            // The index described a stream this file does not contain --
+            // it was written by a process that did not finish, or the file
+            // grew after it was read. Fall through and measure by reading.
+            Err(CollectSized::Mismatch) => {
+                reset_istream_cursor(handle)?;
+            }
+            Err(CollectSized::Failed(e)) => return Err(e),
+        }
+    }
+
+    // (block, records base, element count, sub-allocation bytes)
+    let mut chunks: Vec<(AbsPtr, AbsPtr, usize, usize)> = Vec::new();
+    let mut total: usize = 0;
+    let mut tail_total: usize = 0;
+
+    let free_chunks = |chunks: &Vec<(AbsPtr, AbsPtr, usize, usize)>| {
+        for &(block, _, _, _) in chunks {
+            let _ = shm::shfree(block);
         }
     };
 
     loop {
-        let arr_ptr = match shared_next_subpacket(handle) {
+        let block = match shared_next_subpacket(handle) {
             Ok(p) => p,
             Err(e) => {
                 free_chunks(&chunks);
                 return Err(e);
             }
         };
-        let arr = unsafe { &*(arr_ptr as *const shm_types_crate::Array) };
+        let arr = unsafe { &*(block as *const shm_types_crate::Array) };
         let sz = arr.size;
         if sz == 0 {
             // Size-0 Array is the EOF sentinel (`shared_next_subpacket`
-            // returns it once the footer or file end is reached). Free the
-            // sentinel header and stop.
-            let _ = shm::shfree(arr_ptr);
+            // returns it once the footer or file end is reached).
+            let _ = shm::shfree(block);
             break;
         }
-        let data_abs = match shm::rel2abs(arr.data) {
+        let records = match shm::rel2abs(arr.data) {
             Ok(p) => p,
             Err(e) => {
-                let _ = shm::shfree(arr_ptr);
+                let _ = shm::shfree(block);
                 free_chunks(&chunks);
                 return Err(e);
             }
         };
-        chunks.push((arr_ptr, data_abs, sz));
+        // Everything in the block past the records is sub-allocation bytes,
+        // plus whatever the allocator rounded the request up by. Carrying the
+        // rounding costs a few bytes in the destination and nothing else: the
+        // relptrs are shifted per sub-packet, so where its bytes land relative
+        // to another sub-packet's does not matter.
+        let used = unsafe { (records as usize) - (block as usize) } + sz * elem_width;
+        let block_size = unsafe { shm::shm_block_size(block) }.unwrap_or(0);
+        if block_size < used {
+            free_chunks(&chunks);
+            let _ = shm::shfree(block);
+            return Err(MorlocError::Shm(format!(
+                "@load: sub-packet block of {} bytes is smaller than the {} \
+                 its own header describes", block_size, used,
+            )));
+        }
+        let tail = block_size - used;
+        chunks.push((block, records, sz, tail));
         total += sz;
+        tail_total += tail;
     }
 
-    // Allocate the combined Array header up front; its `data` relptr is
-    // filled in once the element buffer is populated.
-    let out_arr = match shm::shcalloc(1, std::mem::size_of::<shm_types_crate::Array>()) {
-        Ok(p) => p,
-        Err(e) => {
-            free_chunks(&chunks);
-            return Err(e);
-        }
-    };
     if total == 0 {
-        let a = unsafe { &mut *(out_arr as *mut shm_types_crate::Array) };
-        a.size = 0;
-        a.data = shm_types_crate::RELNULL;
-        free_chunks(&chunks);
-        return Ok(out_arr);
-    }
-
-    // One buffer for all elements; deep_copy fills each fixed-width slot
-    // and allocates fresh SHM sub-blocks for any variable-length fields.
-    let buf = match shm::shcalloc(total, elem_width) {
-        Ok(p) => p,
-        Err(e) => {
-            let _ = shm::shfree(out_arr);
-            free_chunks(&chunks);
-            return Err(e);
-        }
-    };
-
-    let mut out_i = 0usize;
-    for &(_, data_abs, sz) in &chunks {
-        for k in 0..sz {
-            let elem_src = unsafe { (data_abs as *const u8).add(k * elem_width) };
-            let dst = unsafe { (buf as *mut u8).add(out_i * elem_width) };
-            if let Err(e) = unsafe { voidstar::deep_copy(elem_src, dst, &elem_schema) } {
-                let _ = shm::shfree(buf);
-                let _ = shm::shfree(out_arr);
+        let out = match shm::shcalloc(1, hdr_size) {
+            Ok(p) => p,
+            Err(e) => {
                 free_chunks(&chunks);
                 return Err(e);
             }
-            out_i += 1;
-        }
+        };
+        let a = unsafe { &mut *(out as *mut shm_types_crate::Array) };
+        a.size = 0;
+        a.data = shm_types_crate::RELNULL;
+        free_chunks(&chunks);
+        return Ok(out);
     }
 
-    // The combined value is self-contained now; drop every chunk buffer.
-    free_chunks(&chunks);
-
-    let buf_rel = match shm::abs2rel(buf) {
-        Ok(r) => r,
+    let records_size = total * elem_width;
+    let out = match shm::shmalloc(hdr_size + records_size + tail_total) {
+        Ok(p) => p,
         Err(e) => {
-            let _ = shm::shfree(buf);
-            let _ = shm::shfree(out_arr);
+            free_chunks(&chunks);
             return Err(e);
         }
     };
-    let a = unsafe { &mut *(out_arr as *mut shm_types_crate::Array) };
+    let out_records = unsafe { (out as *mut u8).add(hdr_size) };
+    let out_tails = unsafe { out_records.add(records_size) };
+
+    let mut rec_at = 0usize;   // elements already placed
+    let mut tail_at = 0usize;  // sub-allocation bytes already placed
+    for &(_, records, sz, tail) in &chunks {
+        let src_tail = unsafe { (records as *const u8).add(sz * elem_width) };
+        let dst_rec = unsafe { out_records.add(rec_at * elem_width) };
+        let dst_tail = unsafe { out_tails.add(tail_at) };
+        // SAFETY: the destination was sized as the sum of these two regions
+        // over every sub-packet, and each source range lies inside its own
+        // block (checked above).
+        unsafe {
+            std::ptr::copy_nonoverlapping(records as *const u8, dst_rec, sz * elem_width);
+            if tail > 0 {
+                std::ptr::copy_nonoverlapping(src_tail, dst_tail, tail);
+            }
+        }
+        // Shift this sub-packet's relptrs by however far its sub-allocations
+        // moved. Every relptr in its records addressed that region and nothing
+        // else, so one delta covers them all.
+        let (src_rel, dst_rel) = match (shm::abs2rel(src_tail as AbsPtr), shm::abs2rel(dst_tail as AbsPtr)) {
+            (Ok(a), Ok(b)) => (a, b),
+            _ => {
+                let _ = shm::shfree(out);
+                free_chunks(&chunks);
+                return Err(MorlocError::Shm("@load: sub-packet is outside every volume".into()));
+            }
+        };
+        let delta = (dst_rel as i64).wrapping_sub(src_rel as i64) as RelPtr;
+        for k in 0..sz {
+            let rec = unsafe { dst_rec.add(k * elem_width) as AbsPtr };
+            if let Err(e) = voidstar::adjust_relptrs(rec, &elem_schema, delta) {
+                let _ = shm::shfree(out);
+                free_chunks(&chunks);
+                return Err(e);
+            }
+        }
+        rec_at += sz;
+        tail_at += tail;
+    }
+
+    free_chunks(&chunks);
+
+    let records_rel = match shm::abs2rel(out_records as AbsPtr) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = shm::shfree(out);
+            return Err(e);
+        }
+    };
+    let a = unsafe { &mut *(out as *mut shm_types_crate::Array) };
     a.size = total;
-    a.data = buf_rel;
-    Ok(out_arr)
+    a.data = records_rel;
+    Ok(out)
 }
 
 /// `@flen handle`: return the element_count from the slot. Works on
@@ -6447,15 +6697,14 @@ fn ifile_bracket_slice_against_slot(
             let r = slice_bulk_copy_contiguous(
                 i_local, j_local, arr_size, arr_data,
                 payload_base, payload_len, vol_idx_hint,
-                &elem_schema, work.elem_width, arr_ptr,
+                &elem_schema, work.elem_width,
             );
             // `src` is a File variant: release is a no-op.
             src.release();
-            if let Err(e) = r {
-                let _ = shm::shfree(arr_ptr);
-                return Err(e);
-            }
-            return Ok(arr_ptr);
+            // The header block allocated above is unused either way now:
+            // the copy builds the whole value, including its header.
+            let _ = shm::shfree(arr_ptr);
+            return r;
         }
         // Shm variant (compressed sub-packet): fall through to the
         // generic per-element path below. The decompressed bytes
@@ -6475,17 +6724,19 @@ fn ifile_bracket_slice_against_slot(
     if work.proj_schema.serial_type == SerialType::String {
         let r = slice_bulk_pack_str(
             local, &mut work.plan, &mut work.materialised,
-            work.elem_width, work.proj_offset, arr_ptr,
+            work.elem_width, work.proj_offset,
         );
         for (_, s) in std::mem::take(&mut work.materialised) {
             s.release();
         }
-        if let Err(e) = r {
-            let _ = shm::shfree(arr_ptr);
-            return Err(e);
-        }
-        return Ok(arr_ptr);
+        let _ = shm::shfree(arr_ptr);
+        return r;
     }
+    // The generic route copies element by element and cannot know the
+    // result's size until it has, so it builds with a recorded block per
+    // variable-length part and consolidates into one block at the end --
+    // the shape a pool can release.
+    let mut parts: Vec<AbsPtr> = Vec::new();
     let buf_ptr: AbsPtr = shm::shcalloc(n_out, out_elem_width)?;
 
     // For each output slot, ensure the source sub-packet is located, then
@@ -6502,8 +6753,11 @@ fn ifile_bracket_slice_against_slot(
         let arr_base = src.arr_base();
         let arr = unsafe { &*(arr_base as *const shm_types_crate::Array) };
         if local_idx >= arr.size as u64 {
-            // Defensive — should be unreachable given the
+            // Defensive -- should be unreachable given the
             // cum-element-count plan.
+            for p in parts {
+                let _ = shm::shfree(p);
+            }
             for (_, s) in std::mem::take(&mut work.materialised) {
                 s.release();
             }
@@ -6523,30 +6777,51 @@ fn ifile_bracket_slice_against_slot(
         // through the SHM-resident decompressed copy. The
         // `proj_offset` byte add hops over any record fields the
         // chain fusion is skipping.
-        match *src {
+        let copied = match *src {
             SubpacketSrc::File { payload_base, payload_len, .. } => {
                 let resolver = make_file_resolver(payload_base, payload_len);
-                let arr_data = resolver(arr.data)?;
-                let elem_src = unsafe {
-                    (arr_data as *const u8)
-                        .add(local_idx as usize * work.elem_width)
-                        .add(work.proj_offset)
-                };
-                unsafe {
-                    voidstar::deep_copy_with(elem_src, dst, &work.proj_schema, &resolver)?;
-                }
+                resolver(arr.data).and_then(|arr_data| {
+                    let elem_src = unsafe {
+                        (arr_data as *const u8)
+                            .add(local_idx as usize * work.elem_width)
+                            .add(work.proj_offset)
+                    };
+                    unsafe {
+                        voidstar::deep_copy_alloc(
+                            elem_src, dst, &work.proj_schema, &resolver,
+                            voidstar::CopyAlloc::Recording(&mut parts),
+                        )
+                    }
+                })
             }
             SubpacketSrc::Shm { .. } => {
-                let arr_data = shm::rel2abs(arr.data)?;
-                let elem_src = unsafe {
-                    (arr_data as *const u8)
-                        .add(local_idx as usize * work.elem_width)
-                        .add(work.proj_offset)
-                };
-                unsafe {
-                    voidstar::deep_copy(elem_src, dst, &work.proj_schema)?;
-                }
+                shm::rel2abs(arr.data).and_then(|arr_data| {
+                    let elem_src = unsafe {
+                        (arr_data as *const u8)
+                            .add(local_idx as usize * work.elem_width)
+                            .add(work.proj_offset)
+                    };
+                    unsafe {
+                        voidstar::deep_copy_alloc(
+                            elem_src, dst, &work.proj_schema, &|p| shm::rel2abs(p),
+                            voidstar::CopyAlloc::Recording(&mut parts),
+                        )
+                    }
+                })
             }
+        };
+        if let Err(e) = copied {
+            // Only `consolidate` gives the recorded blocks back, and it
+            // never runs now.
+            for p in parts {
+                let _ = shm::shfree(p);
+            }
+            for (_, s) in std::mem::take(&mut work.materialised) {
+                s.release();
+            }
+            let _ = shm::shfree(buf_ptr);
+            let _ = shm::shfree(arr_ptr);
+            return Err(e);
         }
     }
 
@@ -6560,7 +6835,11 @@ fn ifile_bracket_slice_against_slot(
     let arr = unsafe { &mut *(arr_ptr as *mut shm_types_crate::Array) };
     arr.size = n_out;
     arr.data = buf_relptr;
-    Ok(arr_ptr)
+    parts.push(buf_ptr);
+    let out_schema = array_schema(&work.proj_schema);
+    // SAFETY: `parts` lists every block the copies above took and the
+    // element bank they were written into; nothing else points into them.
+    unsafe { voidstar::consolidate(arr_ptr, &out_schema, &parts) }
 }
 
 /// Bulk-copy a contiguous slice on a single (uncompressed) sub-packet.
@@ -6579,6 +6858,29 @@ fn ifile_bracket_slice_against_slot(
 /// rewrite**, with no per-element allocator traffic. For 200 K records
 /// of `(Str, [u8], [u8])` this replaces ~600 K `shmemcpy` calls (each
 /// taking `ALLOC_MUTEX`) with three calls total.
+/// Allocate one block holding an `Array` header followed by `data_size`
+/// bytes of element data, and return `(block, data)`.
+///
+/// A value handed back to a pool is released by a single `shfree` of the
+/// pointer it was given -- that is the only release a pool performs, and it
+/// frees one block. So a value must BE one block. Giving the header a block
+/// of its own hands the pool a pointer to the header and no way ever to
+/// reach the data again, which loses the whole payload on every call.
+///
+/// The data keeps the alignment it had when it was a block of its own: an
+/// `Array` header is exactly one `BLOCK_ALIGN`, and every block begins on
+/// that boundary, so putting the header in front moves the data by a whole
+/// multiple of its old alignment.
+fn alloc_array_block(data_size: usize) -> Result<(AbsPtr, *mut u8), MorlocError> {
+    let hdr = std::mem::size_of::<shm_types_crate::Array>();
+    debug_assert_eq!(hdr % morloc_runtime_types::shm_types::BLOCK_ALIGN, 0);
+    let block = shm::shmalloc(hdr + data_size)?;
+    // SAFETY: the block owns `hdr + data_size` bytes, so the data region
+    // beginning one header in lies inside it.
+    let data = unsafe { (block as *mut u8).add(hdr) };
+    Ok((block, data))
+}
+
 fn slice_bulk_copy_contiguous(
     i: usize,
     j: usize,
@@ -6589,8 +6891,7 @@ fn slice_bulk_copy_contiguous(
     vol_idx_hint: u16,
     elem_schema: &Schema,
     elem_width: usize,
-    arr_ptr: AbsPtr,
-) -> Result<(), MorlocError> {
+) -> Result<AbsPtr, MorlocError> {
     let n_out = j - i;
     let records_src = unsafe { (arr_data as *const u8).add(i * elem_width) };
 
@@ -6598,15 +6899,15 @@ fn slice_bulk_copy_contiguous(
     let var_start_offset = match first_suballoc_offset(records_src as AbsPtr, elem_schema)? {
         Some(o) => o,
         None => {
-            let buf_ptr = shm::shmalloc(n_out * elem_width)?;
+            let (block, buf_ptr) = alloc_array_block(n_out * elem_width)?;
             unsafe {
                 std::ptr::copy_nonoverlapping(records_src, buf_ptr, n_out * elem_width);
             }
             let buf_relptr = shm::abs2rel(buf_ptr)?;
-            let arr_out = unsafe { &mut *(arr_ptr as *mut shm_types_crate::Array) };
+            let arr_out = unsafe { &mut *(block as *mut shm_types_crate::Array) };
             arr_out.size = n_out;
             arr_out.data = buf_relptr;
-            return Ok(());
+            return Ok(block);
         }
     };
 
@@ -6654,8 +6955,9 @@ fn slice_bulk_copy_contiguous(
         }
     }
 
-    // shmalloc (not shcalloc): the two memcpys below cover every byte.
-    let buf_ptr = shm::shmalloc(total_size)?;
+    // The two memcpys below cover every byte of the data region, so nothing
+    // here needs zeroing.
+    let (block, buf_ptr) = alloc_array_block(total_size)?;
     unsafe {
         std::ptr::copy_nonoverlapping(records_src, buf_ptr, records_size);
         let var_src = (payload_base as *const u8).add(var_start_offset);
@@ -6680,10 +6982,10 @@ fn slice_bulk_copy_contiguous(
     }
 
     let buf_relptr = shm::abs2rel(buf_ptr)?;
-    let arr_out = unsafe { &mut *(arr_ptr as *mut shm_types_crate::Array) };
+    let arr_out = unsafe { &mut *(block as *mut shm_types_crate::Array) };
     arr_out.size = n_out;
     arr_out.data = buf_relptr;
-    Ok(())
+    Ok(block)
 }
 
 /// Bulk-pack a String-valued slice into one SHM block.
@@ -6692,21 +6994,21 @@ fn slice_bulk_copy_contiguous(
 ///   [Array{size,data} * n_out] [concatenated u8 bytes]
 ///
 /// Each Array's `data` relptr addresses into the byte tail of the
-/// same buffer. One shmalloc for the whole slice, regardless of N.
-/// Replaces the per-element shmemcpy in `deep_copy_with`'s String
-/// arm under the ALLOC_MUTEX -- the dominant cost for record slices
-/// that the chain-fusion path projects down to a String field.
+/// same buffer. One shmalloc for the whole slice, regardless of N --
+/// the value's own `Array` header included, so the caller's single
+/// `shfree` gives all of it back. Replaces the per-element shmemcpy in
+/// `deep_copy_with`'s String arm under the ALLOC_MUTEX -- the dominant
+/// cost for record slices that the chain-fusion path projects down to a
+/// String field.
 ///
-/// Caller is responsible for releasing `work.materialised` and
-/// freeing `arr_ptr` on the error path.
+/// Caller is responsible for releasing `work.materialised`.
 fn slice_bulk_pack_str(
     local: &mut ProcessLocalSlot,
     plan: &mut Vec<(usize, u64)>,
     materialised: &mut std::collections::BTreeMap<usize, SubpacketSrc>,
     elem_width: usize,
     proj_offset: usize,
-    arr_ptr: AbsPtr,
-) -> Result<(), MorlocError> {
+) -> Result<AbsPtr, MorlocError> {
     let n_out = plan.len();
     let hdr_size = std::mem::size_of::<shm_types_crate::Array>();
 
@@ -6810,10 +7112,13 @@ fn slice_bulk_pack_str(
     // One bare shmalloc for the whole slice -- Pass 2 writes every
     // byte (headers in front, string tail behind), so a zero-fill
     // would be 100 % wasted work.
+    // The value's own Array header sits in front of the element headers, so
+    // the whole slice -- header, elements and bytes -- is one block.
     let buf_size = n_out * hdr_size + total_tail;
-    let buf_ptr = shm::shmalloc(buf_size)?;
+    let block = shm::shmalloc(hdr_size + buf_size)?;
+    let buf_ptr = unsafe { (block as *mut u8).add(hdr_size) };
     let hdr_start = buf_ptr;
-    let mut tail_cursor = unsafe { (buf_ptr as *mut u8).add(n_out * hdr_size) };
+    let mut tail_cursor = unsafe { buf_ptr.add(n_out * hdr_size) };
     // abs2rel adds a constant (volume index + base) to a pointer
     // offset; the offset between two same-buffer pointers is just
     // `ptr.offset_from`. Compute the cursor's relptr once via abs2rel
@@ -6838,10 +7143,10 @@ fn slice_bulk_pack_str(
         tail_rel += len as RelPtr;
     }
     let buf_relptr = shm::abs2rel(buf_ptr)?;
-    let arr = unsafe { &mut *(arr_ptr as *mut shm_types_crate::Array) };
+    let arr = unsafe { &mut *(block as *mut shm_types_crate::Array) };
     arr.size = n_out;
     arr.data = buf_relptr;
-    Ok(())
+    Ok(block)
 }
 
 /// Parse a `.<step>.<step>...` suffix consisting purely of Field/Key
@@ -9089,6 +9394,94 @@ mod tests {
         )).unwrap()
     }
 
+    /// A sub-packet whose elements are Strings, so every element carries a
+    /// sub-allocation below the list. The int builder above produces a value
+    /// with nothing below the root, which is exactly the shape that never
+    /// leaked; a leak test needs this one.
+    ///
+    /// Payload layout, all offsets buffer-relative:
+    ///   [outer Array] [n element Arrays] [concatenated bytes]
+    fn build_str_voidstar_subpacket(values: &[&str]) -> Vec<u8> {
+        let elem_inner = TSchema::primitive(TSerialType::String);
+        let array_schema = TSchema {
+            serial_type: TSerialType::Array,
+            size: 1,
+            width: std::mem::size_of::<ShmArray>(),
+            offsets: Vec::new(),
+            hint: None,
+            parameters: vec![elem_inner],
+            keys: Vec::new(),
+            name: None,
+        };
+        let schema_str = schema_to_string(&array_schema);
+        let schema_bytes = schema_str.as_bytes();
+        let schema_len = schema_bytes.len() + 1;
+        let padded_meta_len = (8 + schema_len + 31) / 32 * 32;
+
+        let n = values.len();
+        let hdr = std::mem::size_of::<ShmArray>();
+        let elems_at = hdr;
+        let bytes_at = elems_at + n * hdr;
+        let total_bytes: usize = values.iter().map(|v| v.len()).sum();
+        // Round the payload out so the sub-packet that follows starts on the
+        // same boundary the first one did. A real writer pads for the same
+        // reason; string bytes are the only part of this layout whose length
+        // is not already a multiple of the element width.
+        let payload_size = (bytes_at + total_bytes).div_ceil(32) * 32;
+        let mut payload = vec![0u8; payload_size];
+
+        payload[0..8].copy_from_slice(&(n as u64).to_le_bytes());
+        payload[8..16].copy_from_slice(&(encode_relptr(0, elems_at) as i64).to_le_bytes());
+
+        let mut cursor = bytes_at;
+        for (i, v) in values.iter().enumerate() {
+            let at = elems_at + i * hdr;
+            payload[at..at + 8].copy_from_slice(&(v.len() as u64).to_le_bytes());
+            payload[at + 8..at + 16]
+                .copy_from_slice(&(encode_relptr(0, cursor) as i64).to_le_bytes());
+            payload[cursor..cursor + v.len()].copy_from_slice(v.as_bytes());
+            cursor += v.len();
+        }
+
+        let mut h = PacketHeader::data_mesg(VOIDSTAR, payload_size as u64);
+        h.offset = padded_meta_len as u32;
+        let mut packet = h.to_bytes().to_vec();
+        let mut meta = vec![0u8; padded_meta_len];
+        meta[0..3].copy_from_slice(&METADATA_HEADER_MAGIC);
+        meta[3] = METADATA_TYPE_SCHEMA_STRING;
+        meta[4..8].copy_from_slice(&(schema_len as u32).to_le_bytes());
+        meta[8..8 + schema_bytes.len()].copy_from_slice(schema_bytes);
+        packet.extend_from_slice(&meta);
+        packet.extend_from_slice(&payload);
+        packet
+    }
+
+    /// Build a stream file from already-rendered sub-packets.
+    fn build_stream_file_from(
+        value_schema: &TSchema,
+        subs: Vec<Vec<u8>>,
+        counts: &[u64],
+    ) -> Vec<u8> {
+        let mut out = make_stream_header_block(value_schema);
+        let mut entries: Vec<morloc_runtime_types::packet::SubpacketEntry> = Vec::new();
+        let mut element_count = 0u64;
+        for (sub, &c) in subs.iter().zip(counts) {
+            entries.push(morloc_runtime_types::packet::SubpacketEntry {
+                offset: out.len() as u64,
+                elem_count: c,
+            });
+            out.extend_from_slice(sub);
+            element_count += c;
+        }
+        let mut diag = TStreamDiag::new();
+        diag.subpacket_count = subs.len() as u64;
+        diag.element_count = element_count;
+        out.extend_from_slice(&make_final_footer_packet(
+            &diag, &entries, morloc_runtime_types::packet::FOOTER_STATUS_CLOSED,
+        ));
+        out
+    }
+
     fn build_stream_file(
         elem_schema: &TSchema,
         sub_values: &[&[i64]],
@@ -9117,6 +9510,103 @@ mod tests {
         );
         out.extend_from_slice(&footer);
         out
+    }
+
+    /// Live SHM blocks right now.
+    fn live_blocks() -> usize {
+        let mut hist = [0usize; 40];
+        shm::live_block_stats(&mut hist).0
+    }
+
+    /// Every value the runtime hands a pool must be ONE self-contained block.
+    ///
+    /// A pool releases a value with a single `shfree` of the pointer it was
+    /// given. That is the only release it performs and there is no
+    /// schema-aware alternative anywhere on the pool side, so a value built
+    /// as a graph of blocks loses everything below its root on every call.
+    /// This runs each value-returning entry point in a loop, releases each
+    /// result the way a pool does, and fails if the live block count moved.
+    ///
+    /// The count, not the byte total, is the assertion: a leak of one block
+    /// per call is the failure, whatever its size.
+    #[test]
+    fn a_value_handed_to_a_pool_is_one_block() {
+        let _shm = crate::own_test_registry();
+        let dir = std::env::temp_dir()
+            .join(format!("morloc_oneblock_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+
+        let strs: &[&str] = &[
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot",
+        ];
+        let elem = TSchema::primitive(TSerialType::String);
+        let value_schema = list_schema(&elem);
+        let path = dir.join("strs.idx");
+        std::fs::write(&path, build_stream_file_from(
+            &value_schema,
+            vec![
+                build_str_voidstar_subpacket(&strs[..3]),
+                build_str_voidstar_subpacket(&strs[3..]),
+            ],
+            &[3, 3],
+        )).unwrap();
+        let p = path.to_str().unwrap();
+
+        // Each case runs once to settle whatever it allocates lazily, then
+        // the count is taken and the loop must not move it.
+        let mut failures: Vec<String> = Vec::new();
+        let mut check = |name: &str, mut f: Box<dyn FnMut()>| {
+            f();
+            let before = live_blocks();
+            for _ in 0..8 {
+                f();
+            }
+            let after = live_blocks();
+            if after != before {
+                failures.push(format!(
+                    "{}: {} live blocks -> {} over 8 calls", name, before, after
+                ));
+            }
+        };
+
+        check("@next", Box::new(|| {
+            let h = open_istream(p).unwrap();
+            loop {
+                let v = shared_next_subpacket(h).unwrap();
+                let empty = unsafe { (*(v as *const shm_types_crate::Array)).size } == 0;
+                shm::shfree(v).unwrap();
+                if empty { break; }
+            }
+            let _ = shared_discard_handle(h);
+        }));
+
+        check("@load", Box::new(|| {
+            let v = shared_load_stream_file_as_array(p).unwrap();
+            shm::shfree(v).unwrap();
+        }));
+
+        check("@ifile .[:]", Box::new(|| {
+            let h = open_ifile(p).unwrap();
+            let v = ifile_bracket_slice(h, None, None, None).unwrap();
+            shm::shfree(v).unwrap();
+            let _ = shared_discard_handle(h);
+        }));
+
+        let json_strs = "[\"alpha\",\"bravo\",\"charlie\",\"delta\"]";
+        let str_list = morloc_runtime_types::schema::parse_schema("as").unwrap();
+        check("@read list of Str", Box::new(move || {
+            let v = crate::json::read_json_with_schema(json_strs, &str_list).unwrap();
+            shm::shfree(v).unwrap();
+        }));
+
+        let int_list = morloc_runtime_types::schema::parse_schema("ai4").unwrap();
+        check("@read list of Int", Box::new(move || {
+            let v = crate::json::read_json_with_schema("[1,2,3,4]", &int_list).unwrap();
+            shm::shfree(v).unwrap();
+        }));
+
+        assert!(failures.is_empty(), "values that are not one block:\n  {}",
+                failures.join("\n  "));
     }
 
     #[test]
@@ -9208,9 +9698,6 @@ mod tests {
                     let p = unsafe { (data_abs as *const i64).add(i) };
                     v.push(unsafe { *p });
                 }
-                // Free the element-data block and the Array struct
-                // (both fresh allocations from ifile_bracket_slice).
-                shm::shfree(data_abs).unwrap();
                 v
             };
             shm::shfree(ptr).unwrap();
@@ -9348,7 +9835,7 @@ mod tests {
             let v = unsafe { *((data as *const i64).add(i)) };
             assert_eq!(v, 102 + i as i64);
         }
-        shm::shfree(data).unwrap();
+        // One free: a slice is one block, its element data included.
         shm::shfree(ptr).unwrap();
 
         // Out-of-bounds errors cleanly.

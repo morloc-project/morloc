@@ -1,6 +1,9 @@
 Unreleased
 ----------
 
+ * a program that reads a stream, loads a gathered list, slices an `IFile`
+   or calls `@read` no longer leaks the value each time, and a whole-list
+   gather holds its data once rather than twice
  * a C++ pool pulling a stream no longer copies each batch twice, and no
    longer hands its heap back to the kernel between batches
  * `@collect` and `@close` in a guard or match arm build in a C++ pool

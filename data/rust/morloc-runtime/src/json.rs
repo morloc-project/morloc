@@ -226,7 +226,7 @@ pub fn load_record_fields_from_json(
         let abs = shm::shmalloc(fs.width)?;
         // SAFETY: abs is freshly allocated with fs.width bytes.
         unsafe { std::ptr::write_bytes(abs, 0, fs.width) };
-        let mut w = LoadWalk { res: &res, lx, seen: Vec::new(), free: Vec::new() };
+        let mut w = LoadWalk { res: &res, lx, seen: Vec::new(), free: Vec::new(), parts: Vec::new() };
         let mut st = Stack::new();
         st.enter(fs, abs, 0);
         walk::run(&mut w, &mut st)?;
@@ -330,15 +330,35 @@ fn load_value(
         _ => {
             // A leaf takes the whole text.
             let span = lx.value_span()?;
-            return write_leaf(span, schema, dest);
+            return write_leaf(span, schema, dest, &mut Vec::new());
         }
     };
-    let mut w = LoadWalk { res, lx: &mut lx, seen: Vec::new(), free: Vec::new() };
+    let mut w = LoadWalk { res, lx: &mut lx, seen: Vec::new(), free: Vec::new(), parts: Vec::new() };
     let mut st = Stack::new();
     let single_block = dest.is_none() && schema.serial_type == SerialType::Array;
     st.enter(schema, root, if single_block { 1 } else { 0 });
-    walk::run(&mut w, &mut st)?;
-    Ok(root)
+    if let Err(e) = walk::run(&mut w, &mut st) {
+        // A load that gave up partway still took blocks; give them back
+        // rather than leave them for the process to end with.
+        for p in w.parts.drain(..) {
+            let _ = shm::shfree(p);
+        }
+        if dest.is_none() {
+            let _ = shm::shfree(root);
+        }
+        return Err(e);
+    }
+    if w.parts.is_empty() || dest.is_some() {
+        // Nothing below the root took a block of its own, or the caller
+        // owns the root slot and will release what it built.
+        return Ok(root);
+    }
+    // The value exists but as a graph. Its caller frees one pointer, so
+    // copy it into one block and give the graph back.
+    let parts = std::mem::take(&mut w.parts);
+    // SAFETY: `parts` is every block the walk took below `root`, `root`
+    // is laid out as `schema` describes, and nothing else points into them.
+    unsafe { crate::voidstar::consolidate(root, schema, &parts) }
 }
 
 /// The element or member count of every `[` and `{` in `text`, in text
@@ -521,7 +541,12 @@ impl<'t> Lexer<'t> {
 }
 
 /// Decode a leaf from its token text into `dest` (or a fresh block).
-fn write_leaf(text: &str, schema: &Schema, dest: Option<AbsPtr>) -> Result<AbsPtr, MorlocError> {
+fn write_leaf(
+    text: &str,
+    schema: &Schema,
+    dest: Option<AbsPtr>,
+    parts: &mut Vec<AbsPtr>,
+) -> Result<AbsPtr, MorlocError> {
     match schema.serial_type {
         SerialType::Nil => {
             if !is_null(text) { return Err(err(&format!("expected null, got {}", truncate_for_msg(text)))); }
@@ -586,6 +611,7 @@ fn write_leaf(text: &str, schema: &Schema, dest: Option<AbsPtr>) -> Result<AbsPt
             } else {
                 let limb_bytes = nlimbs * 8;
                 let abs = shm::shmemcpy(limbs.as_ptr() as *const u8, limb_bytes)?;
+                parts.push(abs);
                 w.write_val::<usize>(0, nlimbs);
                 w.write_val::<shm::RelPtr>(8, shm::abs2rel(abs)?);
             }
@@ -602,7 +628,9 @@ fn write_leaf(text: &str, schema: &Schema, dest: Option<AbsPtr>) -> Result<AbsPt
             let (w, data_rel) = if dest.is_some() {
                 let w = alloc(dest, hdr)?;
                 let data_rel = if bytes.is_empty() { RELNULL } else {
-                    shm::abs2rel(shm::shmemcpy(bytes.as_ptr(), bytes.len())?)?
+                    let abs = shm::shmemcpy(bytes.as_ptr(), bytes.len())?;
+                    parts.push(abs);
+                    shm::abs2rel(abs)?
                 };
                 (w, data_rel)
             } else {
@@ -631,6 +659,7 @@ fn write_leaf(text: &str, schema: &Schema, dest: Option<AbsPtr>) -> Result<AbsPt
                     RELNULL as u64
                 } else {
                     let block = shm::shmalloc(sh::path_suballoc_size(bytes.len()))?;
+                    parts.push(block);
                     unsafe { sh::write_path_suballoc(block, bytes); }
                     shm::abs2rel(block)? as u64
                 };
@@ -671,6 +700,12 @@ struct LoadWalk<'a, 'r, 't> {
     /// closes.
     seen: Vec<Vec<u64>>,
     free: Vec<usize>,
+    /// Every block taken for a part of the value below its root. The
+    /// loader cannot size its result before parsing it, so it builds the
+    /// value as a graph and `consolidate` copies it into the one block a
+    /// pool can release; this is the list that copy gives back. It also
+    /// makes the error path releasable, which it was not.
+    parts: Vec<AbsPtr>,
 }
 
 impl<'a, 'r, 't> LoadWalk<'a, 'r, 't> {
@@ -721,6 +756,7 @@ impl<'a, 'r, 't> LoadWalk<'a, 'r, 't> {
                 unsafe { (f.data as *mut u8).add(hdr) }
             } else if n > 0 {
                 let dp = shm::shmalloc(n * ew)?;
+                self.parts.push(dp);
                 // SAFETY: freshly allocated with n * ew bytes.
                 unsafe { std::ptr::write_bytes(dp, 0, n * ew) };
                 dp
@@ -920,6 +956,7 @@ impl<'a, 'r, 't> Walker<u64> for LoadWalk<'a, 'r, 't> {
                     return Ok(());
                 }
                 let inner_abs = shm::shmalloc(inner.width)?;
+                self.parts.push(inner_abs);
                 // SAFETY: inner_abs is freshly allocated with inner.width bytes.
                 unsafe { std::ptr::write_bytes(inner_abs, 0, inner.width) };
                 w.write_val::<RelPtr>(0, shm::abs2rel(inner_abs)?);
@@ -992,6 +1029,7 @@ impl<'a, 'r, 't> Walker<u64> for LoadWalk<'a, 'r, 't> {
                     )));
                 }
                 let payload = shm::shmalloc(arm.width)?;
+                self.parts.push(payload);
                 // SAFETY: freshly allocated with arm.width bytes.
                 unsafe { std::ptr::write_bytes(payload, 0, arm.width) };
                 w.write_val::<RelPtr>(8, shm::abs2rel(payload)?);
@@ -1012,7 +1050,7 @@ impl<'a, 'r, 't> Walker<u64> for LoadWalk<'a, 'r, 't> {
             SerialType::Recur => unreachable!("a back-reference resolves before it is stepped"),
             _ => {
                 let span = self.lx.value_span()?;
-                write_leaf(span, schema, Some(slot))?;
+                write_leaf(span, schema, Some(slot), &mut self.parts)?;
                 Ok(())
             }
         }
