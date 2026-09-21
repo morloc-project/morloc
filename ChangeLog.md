@@ -1,6 +1,8 @@
 Unreleased
 ----------
 
+ * a C++ pool pulling a stream no longer copies each batch twice, and no
+   longer hands its heap back to the kernel between batches
  * `@collect` and `@close` in a guard or match arm build in a C++ pool
  * a stream written to stdout is compressed at its `@write` level, `-z`
    overrides it, and the redirected file reads back as an `IFile`

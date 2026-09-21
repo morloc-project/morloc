@@ -34,7 +34,8 @@ import qualified Data.Text as T
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
-  ( containsClosure
+  ( consumableProjectionLets
+  , containsClosure
   , IType (..)
   , IOwnership (..)
   , LowerConfig (..)
@@ -88,6 +89,13 @@ serialType :: MDoc
 serialType = "uint8_t*"
 
 data CallSemantics = Copy | Reference | ConstPtr
+
+-- | How a let binds its right-hand side. A projection out of a live value can
+-- be aliased instead of copied ('isBorrowableProjection'), and a projection
+-- that is the last thing able to read a payload this frame built can take it
+-- ('consumableProjectionLets'); everything else copies.
+data LetBinding = BindCopy | BindBorrow | BindConsume
+  deriving (Eq)
 
 class HasCppType a where
   cppTypeOf :: a -> CppTranslator MDoc
@@ -365,6 +373,11 @@ data CppTranslatorState = CppTranslatorState
   -- ^ Snapshot of 'stateDebugTrace'. When True, DebugWrapS drains the
   -- traceback in 'cppDebugWrap'; the manifold-level catch in
   -- 'lcMakeFunction' skips its frame-line append to avoid duplicates.
+  , translatorConsumableLets :: Set.Set Int
+  -- ^ The payload projections whose let may take the payload instead of
+  -- copying it ('consumableProjectionLets'), decided over the whole pool at
+  -- once because a let index names a binding within a manifold and two
+  -- manifolds may share one.
   }
 
 instance Defaultable CppTranslatorState where
@@ -382,6 +395,7 @@ instance Defaultable CppTranslatorState where
       , translatorCScope = Map.empty
       , translatorDebugInfo = \_ -> ("", "")
       , translatorDebugMode = False
+      , translatorConsumableLets = Set.empty
       }
 
 type CppTranslator a = CMS.StateT CppTranslatorState Identity a
@@ -457,6 +471,7 @@ translate srcs es = do
         , translatorCScope = mergedCppScope
         , translatorDebugInfo = debugInfo
         , translatorDebugMode = debugMode
+        , translatorConsumableLets = consumableProjectionLets es
         }
       code = CMS.evalState (makeCppCode labels srcs' es universalScopeMap scopeMap closureTable nativeEntries) translatorState
 
@@ -966,7 +981,12 @@ PROPAGATE_ERROR(errmsg)|]
         typestr <- case mt of
           (Just t) -> cppTypeOf t
           Nothing -> return serialType
-        return $ makeLet namer letIndex typestr (isUnitTypeF mt) borrowSafe e1 e2
+        consumable <- CMS.gets translatorConsumableLets
+        let binding
+              | not borrowSafe = BindCopy
+              | Set.member letIndex consumable = BindConsume
+              | otherwise = BindBorrow
+        return $ makeLet namer letIndex typestr (isUnitTypeF mt) binding e1 e2
     , lcReleaseStmt = \v -> "_release_packet(" <> pretty v <> ", true);"
     , lcReleaseBorrowedStmt = \v -> "_release_packet(" <> pretty v <> ", false);"
     , lcReturn = \e -> "return(" <> e <> ");"
@@ -1048,11 +1068,19 @@ PROPAGATE_ERROR(errmsg)|]
     -- initializer, where narrowing is an error. The Err arm's is a
     -- std::string, and both arms must deduce the same Try type for
     -- _mlc_try's return.
+    -- The payload arrives as a prvalue -- '_mlc_try' calls the Ok arm with
+    -- the body's result and nothing else can observe it -- so the arm takes
+    -- it by rvalue reference and hands it on, rather than binding a const
+    -- reference and copy-constructing the arm from it. For a batch of
+    -- records that copy is the whole payload. 'std::forward' rather than
+    -- 'std::move' so the untyped fallback ('auto&&', a forwarding
+    -- reference) stays correct on its own terms.
     , lcMakeTry = \thunk okT okWrap errWrap ->
         "_mlc_try" <> tupled
           [ thunk
-          , "[](" <> maybe "auto&&" (<> " const&") okT <+> "mlcTryV) { return" <+> okWrap "mlcTryV" <> "; }"
-          , "[](const std::string& mlcTryM) { return" <+> errWrap "mlcTryM" <> "; }"
+          , "[](" <> maybe "auto&&" (<> "&&") okT <+> "mlcTryV) { return"
+              <+> okWrap "std::forward<decltype(mlcTryV)>(mlcTryV)" <> "; }"
+          , "[](std::string&& mlcTryM) { return" <+> errWrap "std::move(mlcTryM)" <> "; }"
           ]
     , lcSerialize = \v s -> serialize v s
     , lcDeserialize = \t v s -> do
@@ -1244,8 +1272,8 @@ PROPAGATE_ERROR(errmsg)|]
     -- 'mlc::Unit{}' whenever the let-var's type is 'Unit' -- the effect
     -- fires, the caller's 'Unit' variable is present, and any subsequent
     -- reference to @ni@ still type-checks.
-    makeLet :: (Int -> MDoc) -> Int -> MDoc -> Bool -> Bool -> PoolDocs -> PoolDocs -> PoolDocs
-    makeLet namer letIndex typestr isUnit borrowSafe p1 p2 =
+    makeLet :: (Int -> MDoc) -> Int -> MDoc -> Bool -> LetBinding -> PoolDocs -> PoolDocs -> PoolDocs
+    makeLet namer letIndex typestr isUnit binding p1 p2 =
       let letAssignment
             | isUnit =
                 [idoc|#{poolExpr p1};|]
@@ -1254,15 +1282,25 @@ PROPAGATE_ERROR(errmsg)|]
             -- const-reference so the projected sub-value is not copied out of
             -- its container (see 'isBorrowableProjection'). The referent (the
             -- root variable) outlives the alias because lets flatten in scope
-            -- order and codegen never moves a bound local. INVARIANT: anything
-            -- that escapes the frame must COPY this alias's referent, not hold a
-            -- reference to it -- today std::bind decay-copies bound args, '[=]'
-            -- captures copy the referent, and the sole '[&]' is an immediately
-            -- invoked IIFE. A future by-reference capture would dangle.
+            -- order. INVARIANT: anything that escapes the frame must COPY this
+            -- alias's referent, not hold a reference to it -- today std::bind
+            -- decay-copies bound args, '[=]' captures copy the referent, and
+            -- the sole '[&]' is an immediately invoked IIFE. A future
+            -- by-reference capture would dangle. A binding that takes its
+            -- referent is a separate decision and a far narrower one
+            -- ('consumableProjectionLets'): it requires the referent to have
+            -- no other use at all, so it cannot strand an alias.
             -- Scalars are excluded ('isScalarCppType'): borrowing an int/double
             -- saves nothing and a 'const T&' can't bind a 'source Cpp' non-const
             -- 'T&' parameter, so keep the cheap by-value copy for them.
-            | borrowSafe && not (isScalarCppType typestr) =
+            -- The projection is the last thing that can read the payload of a
+            -- value this frame built, so the payload moves into the binding
+            -- rather than being copied or aliased ('consumableProjectionLets').
+            -- Scalars are excluded for the same reason they are excluded from
+            -- the borrow: a move of an int is a copy of an int.
+            | binding == BindConsume && not (isScalarCppType typestr) =
+                [idoc|#{typestr} #{namer letIndex} = std::move(#{poolExpr p1});|]
+            | binding == BindBorrow && not (isScalarCppType typestr) =
                 [idoc|const #{typestr}& #{namer letIndex} = #{poolExpr p1};|]
             | otherwise =
                 [idoc|#{typestr} #{namer letIndex} = #{poolExpr p1};|]

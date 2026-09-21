@@ -52,6 +52,9 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
   , ArgSite (..)
   , IOwnership (..)
 
+    -- * Ownership of a projected value
+  , consumableProjectionLets
+
     -- * Default serialize/deserialize (for Python/R)
   , defaultSerialize
   , defaultDeserialize
@@ -941,6 +944,13 @@ lowerSerialExpr cfg _ (SerializeS_ s e) = do
 -- single-leaf selector qualifies. A receiver that is a call result (a
 -- temporary) is excluded -- a reference into it would dangle.
 --
+-- Reading one field out of a matched @data@ value (@IntrCtorField@) is the
+-- same shape and qualifies on the same terms: the field lives in a block the
+-- subject owns, the read materialises nothing, and the subject outlives the
+-- alias. It is by far the most common projection in a program that handles
+-- failure, since every fallible operation yields a @Try@ whose payload is
+-- reached this way.
+--
 -- NOTE for zero-copy Vector work: when the root variable is a zero-copy view
 -- into incoming-packet SHM, the const& alias holds a reference into that SHM.
 -- Safe today because the packet's SHM is released only at the dispatch
@@ -952,11 +962,210 @@ isBorrowableProjection (AppExeN _ (PatCallP (PatternStruct sel)) [NativeArgExpr 
   not (selectorHasBracket sel)
     && length (ungroup sel) == 1
     && borrowableRoot arg
-  where
-    borrowableRoot (LetVarN _ _) = True
-    borrowableRoot (BndVarN _ _) = True
-    borrowableRoot e = isBorrowableProjection e
+isBorrowableProjection (IntrinsicN _ IntrCtorField _ (arg : _)) = borrowableRoot arg
 isBorrowableProjection _ = False
+
+-- | A projection root that a reference may point into: a variable, or another
+-- projection of one.
+--
+-- INVARIANT, load-bearing rather than incidental: a member may bind an alias
+-- to such a root but must never take the root's storage. Every native
+-- manifold parameter is passed by const reference and a loop-carried local is
+-- a manifold parameter too, so a frame that moved out of a @BndVarN@ would
+-- empty its caller's value, or the next iteration's. The frame-local
+-- 'LetVarN' is the only root a member may consider consuming, and even then
+-- only under 'consumableLetRoot'.
+borrowableRoot :: NativeExpr -> Bool
+borrowableRoot (LetVarN _ _) = True
+borrowableRoot (BndVarN _ _) = True
+borrowableRoot e = isBorrowableProjection e
+
+-- | The let indices whose constructor-payload projection may TAKE the payload
+-- out of its subject rather than copy it or alias it.
+--
+-- Taking a payload is not, in general, an operation on a frame-local. A
+-- generated @data@ value holds its constructor's fields behind a shared
+-- pointer, so copying the value shares the fields; emptying one through a
+-- name that is dead can empty a value this frame never owned. Counting a
+-- name's uses therefore proves nothing. This pass fires only where uniqueness
+-- is a fact about how the subject was BUILT:
+--
+--   * the subject is a frame-local let, never a parameter -- see the
+--     invariant on 'borrowableRoot';
+--   * the subject's own right-hand side constructs a fresh value: a @\@try@
+--     result or a constructor literal, each of which allocates its payload on
+--     the spot and hands back the only reference to it;
+--   * the projection is the subject's only use that could read or share that
+--     payload. A tag test reads the discriminant and never the payload, and
+--     an arm that ends in a throw cannot be followed by anything, so neither
+--     is counted. Every other mention -- a second projection, a capture, a
+--     pass to a call, a @\@show@ on a path that continues -- disqualifies it.
+--
+-- A member consuming this set must render a bare-throw arm as non-returning,
+-- which is what makes the second exemption sound.
+-- A let index names one binding within a manifold, not within a pool: two
+-- manifolds routinely bind the same index to different values. So the whole
+-- pool is scanned as one body. That merges the uses of any index two
+-- manifolds share, which can only make a candidate look more used than it is
+-- -- costing a copy, never permitting a take. Deciding per manifold and
+-- unioning the answers would do the opposite.
+consumableProjectionLets :: [SerialManifold] -> Set.Set Int
+consumableProjectionLets sms =
+  Set.fromList
+    [ letIdx
+    | (letIdx, subjIdx) <- csProjections scan
+    , maybe False buildsFreshValue (Map.lookup subjIdx (csDefs scan))
+    , Map.findWithDefault 0 subjIdx (csUses scan) == 1
+    ]
+  where
+    scan = mconcat (map scanSM sms)
+
+-- | What 'consumableProjectionLets' gathers in one pass: every native let's
+-- right-hand side, every payload projection paired with the index it reads
+-- from, and the uses of each index that could observe a payload.
+data ConsumeScan = ConsumeScan
+  { csDefs :: Map.Map Int NativeExpr
+  , csProjections :: [(Int, Int)]
+  , csUses :: Map.Map Int Int
+  }
+
+instance Semigroup ConsumeScan where
+  a <> b =
+    ConsumeScan
+      -- Two bindings on one index cannot both be described, and whichever was
+      -- kept would describe the other. Drop both: an index with no definition
+      -- is never a candidate.
+      (dropColliding (csDefs a) (csDefs b))
+      (csProjections a <> csProjections b)
+      (Map.unionWith (+) (csUses a) (csUses b))
+
+instance Monoid ConsumeScan where
+  mempty = ConsumeScan mempty mempty mempty
+
+-- | The union of two definition maps with every key they share removed.
+dropColliding :: Map.Map Int NativeExpr -> Map.Map Int NativeExpr -> Map.Map Int NativeExpr
+dropColliding a b =
+  Map.union (Map.difference a b) (Map.difference b a)
+
+-- | A right-hand side that allocates its own payload and yields the only
+-- reference to it.
+buildsFreshValue :: NativeExpr -> Bool
+buildsFreshValue (IntrinsicN _ IntrTry _ _) = True
+buildsFreshValue (VariantN _ _ _ _) = True
+buildsFreshValue _ = False
+
+-- | A payload projection whose subject is named directly, as @(this let, the
+-- index it reads)@. A projection through another projection is not a
+-- candidate: its subject is an alias, and an alias says nothing about who
+-- else holds the payload.
+projectionOf :: Int -> NativeExpr -> [(Int, Int)]
+projectionOf letIdx (IntrinsicN _ IntrCtorField _ (LetVarN _ subjIdx : _)) =
+  [(letIdx, subjIdx)]
+projectionOf _ _ = []
+
+scanUse :: Int -> ConsumeScan
+scanUse i = mempty {csUses = Map.singleton i 1}
+
+scanDef :: Int -> NativeExpr -> ConsumeScan
+scanDef i rhs = mempty {csDefs = Map.singleton i rhs}
+
+scanLet :: Int -> NativeExpr -> ConsumeScan
+scanLet i rhs = scanDef i rhs <> mempty {csProjections = projectionOf i rhs}
+
+scanSM :: SerialManifold -> ConsumeScan
+scanSM (SerialManifold _ _ form _ e) = scanContext form <> scanSE e
+
+scanNM :: NativeManifold -> ConsumeScan
+scanNM (NativeManifold _ _ form e) = scanContext form <> scanNE e
+
+-- A nested manifold names its captures by the enclosing frame's indices, so
+-- each one is a use there.
+scanContext :: ManifoldForm (Or TypeS TypeF) a -> ConsumeScan
+scanContext form = mconcat [scanUse i | Arg i _ <- manifoldContext form]
+
+scanSE :: SerialExpr -> ConsumeScan
+scanSE (ManS sm) = scanSM sm
+scanSE (AppPoolS _ _ args) = mconcat (map scanSA args)
+scanSE (AppRecS _ _ es) = mconcat (map scanSE es)
+scanSE (AppForeignRecS _ _ _ es) = mconcat (map scanSE es)
+scanSE (CacheBodyS _ _ _ _ _ e) = scanSE e
+scanSE (DebugWrapS _ _ _ e) = scanSE e
+scanSE (ReturnS e) = scanSE e
+scanSE (SerialLetS _ e1 e2) = scanSE e1 <> scanSE e2
+scanSE (NativeLetS i rhs body) = scanLet i rhs <> scanNE rhs <> scanSE body
+scanSE (LetVarS _ _) = mempty
+scanSE (BndVarS _ _) = mempty
+scanSE (SerializeS _ e) = scanNE e
+-- The carried ids are reassigned on every back edge, which is a use of each
+-- on every iteration. They are manifold parameters and so never candidates,
+-- but counting them keeps that a consequence of the scan rather than of where
+-- the parameters happen to come from.
+scanSE (LoopS _ carried body) = mconcat (map scanUse carried) <> scanLoop body
+
+scanSA :: SerialArg -> ConsumeScan
+scanSA (SerialArgManifold sm) = scanSM sm
+scanSA (SerialArgExpr e) = scanSE e
+
+scanNA :: NativeArg -> ConsumeScan
+scanNA (NativeArgManifold nm) = scanNM nm
+scanNA (NativeArgExpr e) = scanNE e
+
+-- A loop-carried local is a manifold parameter, and a let inside a loop body
+-- is emitted without consulting the binding decision, so a projection there
+-- is recorded as a definition and a use but never as a candidate.
+scanLoop :: LoopBody NativeExpr SerialExpr -> ConsumeScan
+scanLoop (LoopIf e t f) = scanNE e <> scanLoop t <> scanLoop f
+scanLoop (LoopNLet i rhs body) = scanDef i rhs <> scanNE rhs <> scanLoop body
+scanLoop (LoopSLet _ e body) = scanSE e <> scanLoop body
+scanLoop (LoopBase e) = scanSE e
+scanLoop (LoopContinue es) = mconcat (map scanNE es)
+
+scanNE :: NativeExpr -> ConsumeScan
+scanNE (ManN nm) = scanNM nm
+scanNE (AppExeN _ _ args) = mconcat (map scanNA args)
+scanNE (ReturnN e) = scanNE e
+scanNE (SerialLetN _ e1 e2) = scanSE e1 <> scanNE e2
+scanNE (NativeLetN i rhs body) = scanLet i rhs <> scanNE rhs <> scanNE body
+scanNE (LetVarN _ i) = scanUse i
+scanNE (BndVarN _ i) = scanUse i
+scanNE (DeserializeN _ _ e) = scanSE e
+scanNE (ExeN _ _) = mempty
+scanNE (ListN _ _ es) = mconcat (map scanNE es)
+scanNE (TupleN _ es) = mconcat (map scanNE es)
+scanNE (RecordN _ _ _ kvs) = mconcat (map (scanNE . snd) kvs)
+scanNE (LogN _ _) = mempty
+scanNE (RealN _ _) = mempty
+scanNE (IntN _ _) = mempty
+scanNE (StrN _ _) = mempty
+scanNE (EnumN _ _ _) = mempty
+scanNE (VariantN _ _ _ es) = mconcat (map scanNE es)
+scanNE (NullN _) = mempty
+scanNE (DoBlockN _ e) = scanNE e
+scanNE (EvalN _ e) = scanNE e
+scanNE (CoerceN _ _ e) = scanNE e
+-- An arm that ends in a throw cannot be followed by anything, so what it
+-- mentions can never be read after the conditional.
+scanNE (IfN _ c t f) = scanNE c <> scanArm t <> scanArm f
+-- A tag test reads the discriminant, never the payload, so naming a variable
+-- here does not make its payload observable. The discriminant is the
+-- variant's own index and lives outside the pointer the fields hang off, so
+-- it still reads correctly after a field has been taken -- a tag test that
+-- runs after the projection answers the same as one that runs before it.
+scanNE (IntrinsicN _ IntrTagTest _ (LetVarN _ _ : rest)) = mconcat (map scanNE rest)
+scanNE (IntrinsicN _ IntrTagTest _ (BndVarN _ _ : rest)) = mconcat (map scanNE rest)
+scanNE (IntrinsicN _ _ _ es) = mconcat (map scanNE es)
+scanNE (MapOptionalN _ _ _ e) = scanNE e
+
+scanArm :: NativeExpr -> ConsumeScan
+scanArm e
+  | endsInThrow e = mempty
+  | otherwise = scanNE e
+  where
+    endsInThrow (IntrinsicN _ IntrThrow _ _) = True
+    endsInThrow (DoBlockN _ x) = endsInThrow x
+    endsInThrow (EvalN _ x) = endsInThrow x
+    endsInThrow (ReturnN x) = endsInThrow x
+    endsInThrow _ = False
 
 -- | The ownership of each argument of an @AppExeN@, taken from the original IR
 -- (a manifold-valued argument is always an owned call result).

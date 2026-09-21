@@ -698,12 +698,51 @@ unsafe fn recv_fd(sock: i32) -> i32 {
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
+/// Stop a streaming pool from handing its heap back to the kernel between
+/// batches.
+///
+/// A pass over a stream allocates a batch, works on it, and drops it, over and
+/// over at the same sizes. glibc answers that pattern badly out of the box: a
+/// batch large enough crosses the mmap threshold and is unmapped on free, and
+/// what does live on the heap crosses the trim threshold and is released with
+/// `MADV_DONTNEED`. Either way the next batch faults every page back in. On a
+/// 1.5 GB FASTA pass that was 2.4 million minor faults and about half the wall
+/// clock, and it moved run to run, which made real changes unreadable.
+///
+/// Keeping both thresholds above a batch turns those faults into free-list
+/// hits: the same pass drops to 176 thousand faults and stops varying. The
+/// cost is the arena the process keeps warm -- about 12% more resident on that
+/// pass -- which is why the glibc environment variables still win. They are
+/// read before the first allocation, so a value set there is already in force
+/// and this leaves it alone.
+#[cfg(target_env = "gnu")]
+unsafe fn tune_allocator() {
+    if std::env::var_os("MORLOC_MALLOC_TUNING").as_deref() == Some(std::ffi::OsStr::new("off")) {
+        return;
+    }
+    // Comfortably above a default 16 MiB sub-packet, so a batch and the values
+    // built from it stay on the heap and are reused rather than remapped.
+    const MMAP_THRESHOLD: libc::c_int = 32 * 1024 * 1024;
+    const TRIM_THRESHOLD: libc::c_int = 64 * 1024 * 1024;
+    if std::env::var_os("MALLOC_MMAP_THRESHOLD_").is_none() {
+        libc::mallopt(libc::M_MMAP_THRESHOLD, MMAP_THRESHOLD);
+    }
+    if std::env::var_os("MALLOC_TRIM_THRESHOLD_").is_none() {
+        libc::mallopt(libc::M_TRIM_THRESHOLD, TRIM_THRESHOLD);
+    }
+}
+
+/// Only glibc exposes these knobs; every other allocator keeps its own policy.
+#[cfg(not(target_env = "gnu"))]
+unsafe fn tune_allocator() {}
+
 #[no_mangle]
 pub unsafe extern "C" fn pool_main(
     argc: i32,
     argv: *mut *mut c_char,
     config: *mut PoolConfig,
 ) -> i32 {
+    tune_allocator();
     if argc != 4 {
         libc::fprintf(libc::fdopen(2, b"w\0".as_ptr() as *const c_char),
             b"Usage: %s <socket_path> <tmpdir> <shm_basename>\n\0".as_ptr() as *const c_char,

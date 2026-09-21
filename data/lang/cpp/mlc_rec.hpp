@@ -76,9 +76,20 @@ public:
         return *this;
     }
     ~rec_ptr() { release(); }
-    T& operator*() const noexcept { return *p_; }
-    T* operator->() const noexcept { return p_.get(); }
-    T* get() const noexcept { return p_.get(); }
+    // Const propagates to the pointee. A rec_ptr stands between a `data`
+    // value and its constructor's fields, so an accessor that returned a
+    // mutable pointer from a const member would hand out a writable
+    // reference into a value the holder had only borrowed -- and, since the
+    // copy constructor shares the control block, into every other value that
+    // copy came from. Taking a field out of a borrowed value would then
+    // compile and empty the owner's; with the pairs below it selects the
+    // copy, the way a plain record field already does.
+    T& operator*() noexcept { return *p_; }
+    const T& operator*() const noexcept { return *p_; }
+    T* operator->() noexcept { return p_.get(); }
+    const T* operator->() const noexcept { return p_.get(); }
+    T* get() noexcept { return p_.get(); }
+    const T* get() const noexcept { return p_.get(); }
     explicit operator bool() const noexcept { return static_cast<bool>(p_); }
     void reset() noexcept { release(); }
     long use_count() const noexcept { return p_.use_count(); }
