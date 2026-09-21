@@ -125,11 +125,12 @@ pub struct DispatchOptions {
     /// materialized to inline MESG form on disk regardless of this
     /// flag, so the on-disk packet is self-contained. When N > 0 the
     /// MESG payload is additionally zstd-compressed; the schema
-    /// metadata block stays in the clear. 0 = no compression
-    /// (default), 1 = fastest, 9 = maximum.
-    #[arg(short = 'z', long = "compression-level",
-          default_value_t = 0, value_name = "N")]
-    pub compression_level: u8,
+    /// metadata block stays in the clear. 0 = no compression,
+    /// 1 = fastest, 9 = maximum. A returned value defaults to 0; a
+    /// stream written to stdout defaults to its `@write` level, which
+    /// this flag overrides when given.
+    #[arg(short = 'z', long = "compression-level", value_name = "N")]
+    pub compression_level: Option<u8>,
 }
 
 /// One-shot CLI invocation of a compiled morloc program.
@@ -186,11 +187,12 @@ pub struct DaemonArgs {
     #[arg(short = 'f', long = "output-form", value_name = "FORM", value_enum)]
     pub output_form: Option<DaemonOutputForm>,
 
-    /// zstd compression preset (0..=9) for `-f packet` output. 0 = none
-    /// (default). Ignored for `-f json`.
-    #[arg(short = 'z', long = "compression-level",
-          default_value_t = 0, value_name = "N")]
-    pub compression_level: u8,
+    /// zstd compression preset (0..=9) for `-f packet` output. A returned
+    /// value defaults to 0; a stream written to stdout defaults to its
+    /// `@write` level, which this flag overrides when given. Ignored for
+    /// `-f json`.
+    #[arg(short = 'z', long = "compression-level", value_name = "N")]
+    pub compression_level: Option<u8>,
 
     /// Suppress morloc-emitted log lines on stderr.
     #[arg(short, long)]
@@ -547,7 +549,8 @@ fn apply_dispatch_options(cfg: &mut NexusConfig, opts: &DispatchOptions) {
     cfg.quiet = opts.quiet;
     cfg.log_dir = opts.log_dir.clone();
     cfg.summary_path = opts.summary.clone();
-    cfg.compression_level = opts.compression_level;
+    cfg.compression_level = opts.compression_level.unwrap_or(0);
+    cfg.stdout_compression = opts.compression_level;
 }
 
 // ============================================================
@@ -805,7 +808,8 @@ pub fn daemon_args_to_config(args: &DaemonArgs) -> (NexusConfig, String) {
     cfg.quiet = args.quiet;
     cfg.log_dir = args.log_dir.clone();
     cfg.summary_path = args.summary.clone();
-    cfg.compression_level = args.compression_level;
+    cfg.compression_level = args.compression_level.unwrap_or(0);
+    cfg.stdout_compression = args.compression_level;
     if let Some(form) = args.output_form {
         cfg.output_format = form.to_internal();
     }
@@ -2334,6 +2338,7 @@ mod tests {
                 let (cfg, _) = daemon_args_to_config(&d);
                 assert_eq!(cfg.output_format, OutputFormat::Packet);
                 assert_eq!(cfg.compression_level, 3);
+                assert_eq!(cfg.stdout_compression, Some(3));
             }
             _ => panic!("expected Daemon mode"),
         }

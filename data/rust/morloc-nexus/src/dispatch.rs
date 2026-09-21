@@ -110,6 +110,10 @@ pub struct NexusConfig {
     /// zstd compression preset for packets written to --output-file
     /// (output-form packet). 0 = no compression.
     pub compression_level: u8,
+    /// `-z` as given, or `None` when it was not. A stream written to
+    /// stdout is compressed by the pool at its `@write` level unless this
+    /// overrides it; published to pools as `MORLOC_STDOUT_COMPRESSION_LEVEL`.
+    pub stdout_compression: Option<u8>,
     /// Front-end serving: the UNION of all served modules (the supervisor spawns
     /// one child per entry). Empty + `serve_all` = serve everything under fdb;
     /// empty + !serve_all = error (which modules to serve is a decision).
@@ -152,6 +156,7 @@ impl Default for NexusConfig {
             debug_cache_max: None,
             debug_recursion_cap: None,
             compression_level: 0,
+            stdout_compression: None,
             programs: Vec::new(),
             mcp_programs: Vec::new(),
             api_programs: Vec::new(),

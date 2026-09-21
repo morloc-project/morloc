@@ -365,6 +365,9 @@ fn main() {
     if config.quiet {
         std::env::set_var("MORLOC_QUIET", "1");
     }
+    if let Some(z) = config.stdout_compression {
+        std::env::set_var("MORLOC_STDOUT_COMPRESSION_LEVEL", z.to_string());
+    }
     if let Some(n) = config.debug_cache_depth {
         std::env::set_var("MORLOC_DEBUG_CACHE_DEPTH", n.to_string());
     }
@@ -432,7 +435,7 @@ fn main() {
     // @stderr through this dedicated socket; the fork-side child fd
     // hygiene installed in start_language_server takes fd 0/1 away
     // from the pool so the nexus keeps its bytes clean.
-    stdio_server::start(&tmpdir, config.output_format, config.compression_level, config.daemon_flag);
+    stdio_server::start(&tmpdir, config.output_format, config.daemon_flag);
 
     // Become subreaper for orphaned grandchildren
     process::set_child_subreaper();

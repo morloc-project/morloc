@@ -1,0 +1,42 @@
+-- Compression of a stream written to standard output.
+--
+-- The `@write` level is the default for a stdout stream, exactly as it is
+-- for a file stream, and an explicit nexus `-z N` overrides it. Either way
+-- the sub-packets are compressed by the pool that writes them, so the
+-- footer's sub-packet index describes the bytes actually emitted, and the
+-- file the redirect leaves behind is a valid IFile: `@flen` and a slice
+-- that crosses the sub-packet boundary read it back. Two sub-packets at
+-- different levels are refused, as they are for a file.
+
+module main (big, mixed, slice, count)
+
+import root-cpp
+
+-- 100k elements in two sub-packets, written at level 3.
+big :: <IO> ()
+big = do
+  o <- @stdout :: <IO> (OStream Int)
+  @write 3 o (range 0 50000)
+  @flush o
+  @write 3 o (range 50000 100000)
+  @close o
+
+mixed :: <IO> ()
+mixed = do
+  o <- @stdout :: <IO> (OStream Int)
+  @write 3 o [1, 2, 3]
+  @flush o
+  @write 0 o [4, 5, 6]
+  @close o
+
+-- A slice that starts in the first sub-packet and ends in the second.
+slice :: Str -> <IO> [Int]
+slice path = do
+  Ok f <- @open path :: <IO> (Try Str (IFile [Int]))
+  .[49998:50002] f
+
+count :: Str -> <IO> Int
+count path = do
+  Ok f <- @open path :: <IO> (Try Str (IFile [Int]))
+  Ok n <- @flen f
+  n

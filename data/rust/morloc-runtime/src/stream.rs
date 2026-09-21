@@ -3346,27 +3346,30 @@ pub fn shared_write_subpacket(
 
         let _guard = SlotFutexGuard::lock(slot);
 
+        // The `@write` level is the default; on a stdio-bound stream the
+        // nexus's explicit `-z` overrides it. The pool compresses the
+        // sub-packet itself either way, so the footer's index describes the
+        // bytes the nexus actually forwards and the redirected file is a
+        // valid IFile.
+        let level = if slot.is_stdio != 0 {
+            stdio_compression_override().unwrap_or(level)
+        } else {
+            level
+        };
+
         // Pin compression level on first @write into this slot
         // (across all pools); subsequent writes must match.
-        //
-        // stdio-bound streams ignore the `@write` level entirely: the
-        // pool ships uncompressed sub-packets over the local RPC and the
-        // nexus applies `-z` when it re-encodes the terminal output. So
-        // the level stays pinned at 0 (from `open_stdio`) and no
-        // per-write mismatch check applies.
-        if slot.is_stdio == 0 {
-            if slot.element_count == 0 && slot.write_buffer_index_count == 0 {
-                unsafe {
-                    let mp = slot as *const RegistrySlot as *mut RegistrySlot;
-                    (*mp).compression_level = level;
-                }
-            } else if slot.compression_level != level {
-                return Err(MorlocError::Other(format!(
-                    "@write level mismatch: stream was opened/written at level {} \
-                     but this call passed {}. All sub-packets must share a level.",
-                    slot.compression_level, level,
-                )));
+        if slot.element_count == 0 && slot.write_buffer_index_count == 0 {
+            unsafe {
+                let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+                (*mp).compression_level = level;
             }
+        } else if slot.compression_level != level {
+            return Err(MorlocError::Other(format!(
+                "@write level mismatch: stream was opened/written at level {} \
+                 but this call passed {}. All sub-packets must share a level.",
+                slot.compression_level, level,
+            )));
         }
 
         // Walk the elements and append each. element_count updates
@@ -4623,6 +4626,16 @@ pub(crate) fn pool_reclaim_stdio_after_dispatch() {
 /// `WRITE_BUFFER_BYTES_DEFAULT` (16 MiB). Tests use this to lower
 /// the threshold and exercise flush logic without writing megabytes.
 /// Minimum is 4 KiB so the Array header + a few elements always fit.
+/// The nexus's explicit `-z N`, published to every pool as
+/// `MORLOC_STDOUT_COMPRESSION_LEVEL`. Unset means the `@write` level
+/// stands; an unparsable value is treated the same way rather than
+/// silently selecting some other level.
+pub fn stdio_compression_override() -> Option<u8> {
+    std::env::var("MORLOC_STDOUT_COMPRESSION_LEVEL")
+        .ok()
+        .and_then(|s| s.parse::<u8>().ok())
+}
+
 pub fn read_write_buffer_bytes_env() -> usize {
     const MIN: usize = 4096;
     if let Ok(s) = std::env::var("MORLOC_WRITE_BUFFER_BYTES") {

@@ -1,6 +1,9 @@
 Unreleased
 ----------
 
+ * `@collect` and `@close` in a guard or match arm build in a C++ pool
+ * a stream written to stdout is compressed at its `@write` level, `-z`
+   overrides it, and the redirected file reads back as an `IFile`
  * a pipeline that handles many tables holds one at a time, not all of them
  * a table argument is read by the pool that uses it, not copied through
    the nexus first

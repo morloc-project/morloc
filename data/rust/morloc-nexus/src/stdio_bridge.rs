@@ -50,17 +50,6 @@ extern "C" {
         errmsg: *mut *mut c_char,
     ) -> *mut c_char;
 
-    /// Re-emit a `MORLOC_DATA_PACKET`'s bytes to `fd`, recompressing the
-    /// payload at `compression_level`. Signature must match the extern
-    /// in `dispatch.rs` so the clashing-extern check stays quiet.
-    fn normalize_data_packet_to_fd(
-        packet: *const u8,
-        packet_size: usize,
-        compression_level: u8,
-        fd: libc::c_int,
-        errmsg: *mut *mut c_char,
-    ) -> i64;
-
     /// Free an SHM voidstar block. Signature matches `view.rs`'s extern.
     fn shfree(ptr: *mut c_void, errmsg: *mut *mut c_char) -> bool;
 
@@ -409,25 +398,3 @@ pub unsafe fn subpacket_json_inner(bytes: &[u8], value_schema_str: &str) -> Resu
     Ok(trimmed[1..trimmed.len() - 1].trim().to_string())
 }
 
-/// Re-emit one sub-packet's `MORLOC_DATA_PACKET` bytes to `fd`,
-/// recompressing at `level`. Used by `-f packet` / `-f voidstar` so the
-/// nexus `-z` governs the on-wire stream (the pool ships uncompressed).
-pub unsafe fn emit_subpacket_as_packet(fd: i32, bytes: &[u8], level: u8) -> Result<(), WriteError> {
-    let mut err: *mut c_char = std::ptr::null_mut();
-    let n = normalize_data_packet_to_fd(
-        bytes.as_ptr(),
-        bytes.len(),
-        level,
-        fd as libc::c_int,
-        &mut err,
-    );
-    // The writer returns PACKET_TO_FD_PIPE_CLOSED (no errmsg) on a broken
-    // pipe; surface it as BrokenPipe rather than a generic error.
-    if n == morloc_runtime_types::PACKET_TO_FD_PIPE_CLOSED {
-        return Err(WriteError::BrokenPipe);
-    }
-    if n < 0 {
-        return Err(WriteError::Other(format!("packet re-emit: {}", take_err(err))));
-    }
-    Ok(())
-}

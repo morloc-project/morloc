@@ -72,26 +72,28 @@ static DAEMON_MODE: std::sync::atomic::AtomicBool =
 
 /// Render configuration for streamed stdout, captured from the nexus
 /// `NexusConfig` at server start. Streamed `@stdout` output is
-/// re-encoded per `format` (and recompressed at `level` for the packet
-/// formats) so it honours `-f`/`-z` exactly like a returned value.
-/// stderr is unaffected (it stays raw stream-packet framing).
+/// re-encoded per `format` so it honours `-f` exactly like a returned
+/// value. Compression is not applied here: the pool compresses each
+/// sub-packet at the effective level (its `@write` level, or the nexus
+/// `-z` it reads from the environment), and the packet formats pass the
+/// bytes through so the footer's sub-packet index stays true. stderr is
+/// unaffected (it stays raw stream-packet framing).
 #[derive(Clone, Copy)]
 struct RenderCfg {
     format: OutputFormat,
-    level: u8,
 }
 
 // Mutable (not OnceLock) because a `render` terminal flag is resolved AFTER
 // `start` runs, and must retarget streamed stdout to the raw format before the
 // pool begins streaming (which happens later still, during dispatch).
 static RENDER_CFG: Mutex<RenderCfg> =
-    Mutex::new(RenderCfg { format: OutputFormat::Json, level: 0 });
+    Mutex::new(RenderCfg { format: OutputFormat::Json });
 
 fn render_cfg() -> RenderCfg {
     RENDER_CFG
         .lock()
         .map(|g| *g)
-        .unwrap_or(RenderCfg { format: OutputFormat::Json, level: 0 })
+        .unwrap_or(RenderCfg { format: OutputFormat::Json })
 }
 
 /// Retarget the streamed-stdout output format. Used by the dispatcher to
@@ -121,12 +123,12 @@ fn format_name(f: OutputFormat) -> &'static str {
 /// thread. Idempotent: subsequent calls no-op. SIGPIPE is set to
 /// `SIG_IGN` here so a downstream consumer closing the pipe surfaces
 /// as `EPIPE` on `write(2)` instead of a nexus signal death.
-pub fn start(tmpdir: &str, output_format: OutputFormat, compression_level: u8, daemon: bool) {
+pub fn start(tmpdir: &str, output_format: OutputFormat, daemon: bool) {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         if let Ok(mut g) = RENDER_CFG.lock() {
-            *g = RenderCfg { format: output_format, level: compression_level };
+            *g = RenderCfg { format: output_format };
         }
         NEXUS_PID.store(std::process::id() as i32, std::sync::atomic::Ordering::Release);
         DAEMON_MODE.store(daemon, std::sync::atomic::Ordering::Release);
@@ -498,17 +500,12 @@ fn do_write(slot_id: i64, relptr: i64, size: u64) -> Resp {
                     unsafe { br::write_stream_header_for_slot(slot.fd, slot_id) }?;
                     slot.header_done = true;
                 }
-                // At level 0 (the packet default) pass every frame through
-                // byte-for-byte: the stream -- and its footer's sub-packet
-                // index, which records the pool's exact offsets -- stays
-                // identical to what the pool emitted. Only recompress data
-                // frames when `-z > 0`; the footer always passes through.
-                if is_data && cfg.level > 0 {
-                    let bytes = unsafe { br::read_shm_bytes(relptr, size) }?;
-                    unsafe { br::emit_subpacket_as_packet(slot.fd, &bytes, cfg.level) }
-                } else {
-                    unsafe { br::write_shm_bytes_to_fd(slot.fd, relptr, size) }
-                }
+                // Every frame passes through byte-for-byte: the stream --
+                // and its footer's sub-packet index, which records the
+                // pool's exact offsets -- stays identical to what the pool
+                // emitted. The pool already compressed each data frame at
+                // the effective level.
+                unsafe { br::write_shm_bytes_to_fd(slot.fd, relptr, size) }
             }
             OutputFormat::Jsonl => {
                 if is_data {
