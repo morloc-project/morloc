@@ -15,21 +15,17 @@
 
 <div align="center">
 <h1>Morloc</h1>
-<h2>Making the function, not the application, the unit of composition</h2>
+<h2>Make the function, not the application, the unit of composition</h2>
 </div>
 
-Morloc is a typed language for composing functions written in other languages.
+Morloc composes functions across languages under a common type system
+and transforms modules into rich CLIs, APIs, and MCPs.
 
-You write ordinary code in an ordinary language and give it a type. From that
-one type the compiler derives the command line interface, the network API, the
-MCP tool description a model reads, the wire format, and the argument parser --
-and it checks every boundary those cross before anything runs. The interface is
-not a convention an author remembered to follow. It is a consequence of a
-declaration.
-
-Because Morloc types are language-agnostic, the implementation behind a type may
-come from any supported language, or from a composition of functions written in
-several. The compiler generates the code that carries data between them.
+Write ordinary code in ordinary languages, source it into a Morloc script, and
+provide a type. These functions are then first class citizens. They can be used
+freely within a rich functional language. The Morloc compiler generates the CLI,
+API, MCP model, and usage statements from the types and declarative docstring
+instructions. 
 
 ## Install
 
