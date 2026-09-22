@@ -112,10 +112,9 @@ $ ./sums sumOfSums '[[1,2],[3,4,5]]'
 A Python function called a C++ function across a process boundary, and you
 wrote no binding, no serializer, and no argument parser.
 
-### What that one type also bought you
+### Free stuff that the compiler generates based on the type
 
-The same build is a command line tool, with help written from your types and
-docstrings:
+Building the program creats a CLI tool from the given types and docstrings:
 
 ```console
 $ ./sums -h
@@ -132,60 +131,30 @@ General Options:
 
 `./sums sum -h` goes further and prints the argument types the compiler derived.
 
-It is also an MCP server (`./sums --mcp-tools` emits JSON Schema tool
+It can also serve as an MCP server (`./sums --mcp-tools` emits JSON Schema tool
 definitions), an HTTP, TCP, and Unix-socket service, and a module that another
-Morloc module can import and re-export. None of these is a separate build or a
-separate description, so none of them can drift from the functions: change a
-return type and every one of them moves on the next build.
-
-## Learn Morloc
-
-The [manual](https://morloc-project.github.io/docs) is written to be read front
-to back, and it is where I point everyone. Some places to jump in:
-
-- [Getting Started](https://morloc-project.github.io/docs/#_getting_started) --
-  install, first program, and the same example built up one step at a time
-- [Building CLIs](https://morloc-project.github.io/docs/#building-clis) --
-  arguments, stdin, output formats, streaming, and composing tools into toolboxes
-- [Building APIs](https://morloc-project.github.io/docs/#building-apis) --
-  the same library served over HTTP, sockets, and MCP
-- [Language Support](https://morloc-project.github.io/docs/#_language_support)
-  -- what each of Python, C++, R, Rust, and Futhark can do today
-- [Modules and Libraries](https://morloc-project.github.io/docs/#_modules_and_libraries)
-  -- writing and publishing your own
-
-The [paper](https://peerj.com/articles/cs-3435/) (PeerJ Computer Science) makes
-the case for Morloc against conventional scientific workflows.
+Morloc module can import and re-export. None of these are separate builds or a
+separate descriptions, so none of them can drift from the functions: changing
+a return type changes all interfaces.
 
 ## Where the project stands
 
 Morloc has been in development for about ten years and is in beta. I use it for
-my own work; it is not yet used widely by anyone else.
+my own work and am currently trying to build a community.
 
-Solid: the compiler and its type system, Python/C++/R as fully supported
-languages, the generated CLI, HTTP, socket and MCP interfaces, environment and
-dependency management through `mim`, and a standard library covering the common
-data structures, text, math, tables, and tensors.
-
-Thin or unfinished: library coverage far from complete, remote execution (the
-SLURM dispatch that makes Morloc usable as a cluster workflow language) is in
-development, editor support is current for vim and Pygments and stale for VS
-Code/Zed, some aspects of the type system are still experimental, and the module
-registry is unbuilt.
-
-Play with the cutting edge and you might bleed. Track your blood over here:
+The test suite is massive and growing, but many bugs remain. The core feature is
+slowly stabilizing, but I still make regular backwards incompatible changes. Play
+with the cutting edge and you might bleed. Track your blood over here:
 [issue tracker](https://github.com/morloc-project/morloc/issues).
 
 ## Getting involved
 
 The hard part is finished. The ongoing work is the long tail of bug fixes and
-ecosystem development. That is where I need people. Here's where you can help:
+ecosystem development. That is where I need people. Here's what I'm looking for:
 
-- **Report what breaks.** A bug report is worth more to me than a patch right
-  now. Unexpected behavior, a bad error message, a gap in the manual, and
-  anything harder than it should have been all count.
+- **Report what breaks.** Try it out, tell me what breaks
 - **Write a module.** Take something you already maintain, give it types, and
-  publish it.
+  share it. I would be happy to collaborate.
 - **Fix the editor tooling.** Add support for your favorite editor.
 - **Bring a language.** Every new language brings fun design questions, I would
   be happy to work with you in bringing your language into the Morloc ecosystem.
