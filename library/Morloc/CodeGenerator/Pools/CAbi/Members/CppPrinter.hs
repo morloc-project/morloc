@@ -115,6 +115,18 @@ printExpr (IIntrinsicLoad sid Nothing path) =
   [idoc|_mlc_load(mlc_schema_table[#{pretty sid}], #{printExpr path})|]
 printExpr (IIntrinsicShow sid e) =
   [idoc|_mlc_show(#{printExpr e}, mlc_schema_table[#{pretty sid}])|]
+printExpr (IIntrinsicCellNew sid e) =
+  [idoc|_mlc_cell_new(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
+printExpr (IIntrinsicCellGet sid (Just t) h) =
+  [idoc|_mlc_cell_get<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
+printExpr (IIntrinsicCellGet sid Nothing h) =
+  [idoc|_mlc_cell_get(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
+printExpr (IIntrinsicCellPut sid h e) =
+  [idoc|_mlc_cell_put(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr e})|]
+printExpr (IIntrinsicCellReduce sid (Just t) f h) =
+  [idoc|_mlc_cell_reduce<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr f}, #{printExpr h})|]
+printExpr (IIntrinsicCellReduce sid Nothing f h) =
+  [idoc|_mlc_cell_reduce(mlc_schema_table[#{pretty sid}], #{printExpr f}, #{printExpr h})|]
 printExpr (IIntrinsicRead sid (Just t) e) =
   [idoc|_mlc_read<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
 printExpr (IIntrinsicRead sid Nothing e) =

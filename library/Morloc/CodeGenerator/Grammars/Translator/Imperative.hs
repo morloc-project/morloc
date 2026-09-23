@@ -208,6 +208,19 @@ data IExpr
   | IIntrinsicTell
       -- ^ @tell :: <IO> U64: nullary. Number of elements written to the
       --   process's @stdout OStream so far (its element_count).
+  | IIntrinsicCellNew Int IExpr
+      -- ^ @cellnew: schemaId of the accumulator type, seed expression.
+  | IIntrinsicCellGet Int (Maybe IType) IExpr
+      -- ^ @cellget: schemaId, accumulator type, handle. The type appears
+      --   nowhere but the return, so a statically typed member needs it
+      --   given rather than deduced (as for @load).
+  | IIntrinsicCellPut Int IExpr IExpr
+      -- ^ @cellput: schemaId, handle, value.
+  | IIntrinsicCellReduce Int (Maybe IType) IExpr IExpr
+      -- ^ @cellreduce: schemaId, accumulator type, combine function,
+      --   handle. The combine is an ordinary native callable in the pool
+      --   the reduce was realized in; the per-language helper applies it
+      --   over the accumulators and releases the cell.
   | IIntrinsicTmpfile
       -- ^ @tmpfile :: <IO> Str: nullary. Create a fresh empty file in the
       --   morloc tmpdir, register it for removal at end-of-call, and return
@@ -1755,6 +1768,35 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrTell _ []) =
 -- @tmpfile: nullary; create + register a temp file, return its path.
 lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrTmpfile _ []) =
   return $ defaultValue { poolExpr = lcPrintExpr cfg IIntrinsicTmpfile }
+-- The fold accumulator. @cellnew and @cellput hand a value into the
+-- runtime, so their value argument crosses into a 'ToVoidstar' (&T) sink
+-- and is own-adapted like @write's.
+lowerNativeExprRaw cfg (IntrinsicN _ _ _ [initE]) (IntrinsicN_ _ IntrCellNew (Just schema) [initDocs]) = do
+  sid <- lcRegisterSchema cfg schema
+  initDocs' <- adaptOwnedElem cfg initE initDocs
+  return $ initDocs'
+    { poolExpr = lcPrintExpr cfg
+        (IIntrinsicCellNew sid (IRawExpr (render (poolExpr initDocs')))) }
+lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrCellGet (Just schema) [handleDocs]) = do
+  sid <- lcRegisterSchema cfg schema
+  innerType <- lcTypeOf cfg (typeFof origExpr)
+  return $ handleDocs
+    { poolExpr = lcPrintExpr cfg
+        (IIntrinsicCellGet sid innerType (IRawExpr (render (poolExpr handleDocs)))) }
+lowerNativeExprRaw cfg (IntrinsicN _ _ _ [_, valueE]) (IntrinsicN_ _ IntrCellPut (Just schema)
+                                  [handleDocs, valueDocs]) = do
+  sid <- lcRegisterSchema cfg schema
+  valueDocs' <- adaptOwnedElem cfg valueE valueDocs
+  let raw d = IRawExpr (render (poolExpr d))
+      putExpr = IIntrinsicCellPut sid (raw handleDocs) (raw valueDocs')
+  return $ mergePoolDocs (const $ lcPrintExpr cfg putExpr) [handleDocs, valueDocs']
+lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrCellReduce (Just schema)
+                                  [combineDocs, handleDocs]) = do
+  sid <- lcRegisterSchema cfg schema
+  innerType <- lcTypeOf cfg (typeFof origExpr)
+  let raw d = IRawExpr (render (poolExpr d))
+      reduceExpr = IIntrinsicCellReduce sid innerType (raw combineDocs) (raw handleDocs)
+  return $ mergePoolDocs (const $ lcPrintExpr cfg reduceExpr) [combineDocs, handleDocs]
 lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrThrow _ [msgDocs]) = do
   resultType <- lcTypeOf cfg (typeFof origExpr)
   return $ msgDocs

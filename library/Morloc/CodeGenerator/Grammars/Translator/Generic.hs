@@ -1240,6 +1240,22 @@ genericPrintExpr desc = go
     go IIntrinsicTmpfile =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_tmpfile()"
+    go (IIntrinsicCellNew sid initE) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_cell_new("
+            <> schemaRef sid <> ", " <> go initE <> ")"
+    go (IIntrinsicCellGet sid _ handle) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_cell_get("
+            <> go handle <> ", " <> schemaRef sid <> ")"
+    go (IIntrinsicCellPut sid handle value) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_cell_put("
+            <> go handle <> ", " <> schemaRef sid <> ", " <> go value <> ")"
+    go (IIntrinsicCellReduce sid _ combine handle) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_cell_reduce("
+            <> schemaRef sid <> ", " <> go combine <> ", " <> go handle <> ")"
     go (IIntrinsicStdin sid) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_open_stdin(" <> schemaRef sid <> ")"

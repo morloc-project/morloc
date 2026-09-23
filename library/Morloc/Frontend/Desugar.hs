@@ -397,8 +397,9 @@ parseFormAtom raw = case T.strip raw of
 -- | Parse a formatter directive value:
 -- @\<flag-spec\> = \<handler\>[(\<arg\>[, \<arg\>]*)] [\<\@modifier\>]*@.
 -- @\<flag-spec\>@ is @--long@ or @-x/--long@. Each @\<arg\>@ is a positional
--- @$N@ (1-based), @\@offset@, or @\@value@. Modifiers are @\@default@ and
--- @\@stream@; @\@offset@ implies @\@stream@. The 'render' flag selects verbatim
+-- @$N@ (1-based), @\@offset@, or @\@value@. Modifiers are @\@default@,
+-- @\@stream@, and the fold triple @\@fold=@ \/ @\@init=@ \/ @\@combine=@;
+-- @\@offset@ implies @\@stream@. The 'render' flag selects verbatim
 -- output (@\@render@) over @-f@-formatted output (@\@with@).
 parseWithSpec :: Bool -> Text -> Either Text WithSpec
 parseWithSpec render raw =
@@ -408,9 +409,17 @@ parseWithSpec render raw =
     (flagPart, eqRest) -> do
       (short, long) <- parseWithFlagSpec flagPart
       (handler, args, modToks) <- parseHandlerAndMods (T.strip (T.drop 1 eqRest))
-      (stream, def) <- parseWithMods modToks
-      return (WithSpec short long (EV handler) render
-                       (stream || ArgOffset `elem` args) def args)
+      (stream, def, foldMods) <- parseWithMods modToks
+      fold <- foldSpecOf foldMods
+      return WithSpec { wsShort = short
+                      , wsLong = long
+                      , wsTerm = EV handler
+                      , wsRender = render
+                      , wsStream = stream || ArgOffset `elem` args
+                      , wsDefault = def
+                      , wsArgs = args
+                      , wsFold = fold
+                      }
 
 -- | Split @\<handler\>[(args)] [mods]@ into the handler identifier, its parsed
 -- argument list (empty if no parens), and the raw modifier tokens.
@@ -454,16 +463,66 @@ parseWithArg raw =
          | otherwise -> Left ("unrecognized formatter argument `" <> t
                               <> "`; expected `$N` (N >= 1), `@offset`, or `@value`.")
 
--- | Fold the trailing modifier tokens into (stream, default) flags.
-parseWithMods :: [Text] -> Either Text (Bool, Bool)
-parseWithMods = go (False, False)
+-- | Fold the trailing modifier tokens into the @\@stream@ and @\@default@
+-- flags and the fold terms, the latter kept as an association list so that
+-- adding a modifier means extending 'foldModNames' and 'foldSpecOf' and
+-- nothing else. The terms stay out of 'WithSpec' until 'foldSpecOf' has
+-- checked the triple is complete, so a partial fold is reported against the
+-- text the user wrote.
+parseWithMods :: [Text] -> Either Text (Bool, Bool, [(Text, Text)])
+parseWithMods = go (False, False, [])
   where
     go acc [] = Right acc
-    go (s, d) (tok : rest) = case tok of
-      "@stream"  -> go (True, d) rest
-      "@default" -> go (s, True) rest
+    go (s, d, fs) (tok : rest) = case T.breakOn "=" tok of
+      ("@stream", "")  -> go (True, d, fs) rest
+      ("@default", "") -> go (s, True, fs) rest
+      (name, eqRest)
+        | name `elem` foldModNames ->
+            if T.null eqRest
+              -- `@fold = step` splits into three tokens, so the bare name
+              -- arrives here and would otherwise read as an unknown modifier.
+              then Left (name <> " takes a term, written `" <> name
+                         <> "=<term>` with no spaces around `=`.")
+              else do
+                term <- foldTerm name (T.drop 1 eqRest)
+                case lookup name fs of
+                  Just _ -> Left ("duplicate `" <> name <> "` modifier.")
+                  Nothing -> go (s, d, (name, term) : fs) rest
       _ -> Left ("unknown formatter modifier `" <> tok
-                 <> "`; expected `@default` or `@stream`.")
+                 <> "`; expected `@default`, `@stream`, `@fold=<term>`, "
+                 <> "`@init=<term>` or `@combine=<term>`.")
+
+foldModNames :: [Text]
+foldModNames = ["@fold", "@init", "@combine"]
+
+-- | Validate the right-hand side of a fold modifier as a bare term name.
+foldTerm :: Text -> Text -> Either Text Text
+foldTerm name raw
+  | T.null raw = Left (name <> " is missing a term name after `=`.")
+  | T.all isWithIdentChar raw = Right raw
+  | otherwise =
+      Left (name <> " expects a bare term name, but got `" <> raw
+            <> "`; a fold term takes no arguments here.")
+
+-- | Assemble the fold triple, requiring all three parts or none.
+--
+-- All three are required because none can be defaulted: there is no
+-- universal empty accumulator to seed a slot with, and no universal way
+-- to merge two of them.
+foldSpecOf :: [(Text, Text)] -> Either Text (Maybe FoldSpec)
+foldSpecOf fs = case (lookup "@fold" fs, lookup "@init" fs, lookup "@combine" fs) of
+  (Nothing, Nothing, Nothing) -> Right Nothing
+  (Nothing, _, _) ->
+    Left ("`@init`/`@combine` describe how a fold is seeded and merged, "
+          <> "but this formatter declares no `@fold=<term>`.")
+  (Just step, Just ini, Just comb) ->
+    Right (Just (FoldSpec (EV step) (EV ini) (EV comb)))
+  (Just _, ini, comb) ->
+    Left ("`@fold` needs " <> missing <> "; a fold seeds one accumulator "
+          <> "per worker and merges them at the end.")
+    where
+      missing = T.intercalate " and "
+        ([ "`@init=<term>`" | isNothing ini ] <> [ "`@combine=<term>`" | isNothing comb ])
 
 isWithIdentChar :: Char -> Bool
 isWithIdentChar c = isShortFlagChar c || isDigitChar c || c == '_' || c == '\''
@@ -977,12 +1036,16 @@ rejectWithHere pos ctx v = do
       <> "lines directly above `name ::`) or above `module`."
 
 renderWithSpec :: WithSpec -> Text
-renderWithSpec (WithSpec mShort l (EV t) _ _ _ _) =
-  flag <> "=" <> t
+renderWithSpec WithSpec{wsShort = mShort, wsLong = l, wsTerm = EV t, wsFold = mFold} =
+  flag <> "=" <> t <> foldMods
   where
     flag = case mShort of
       Just c -> "-" <> T.singleton c <> "/--" <> l
       Nothing -> "--" <> l
+    foldMods = case mFold of
+      Nothing -> ""
+      Just (FoldSpec (EV step) (EV ini) (EV comb)) ->
+        " @fold=" <> step <> " @init=" <> ini <> " @combine=" <> comb
 
 -- | D-monad wrapper: apply `source` docstring lines and accumulate warnings.
 applySourceDocsD :: Pos -> [Text] -> Source -> D Source
@@ -3626,10 +3689,13 @@ emitFor assMap sigMap (sigExprI, parentName, parentEt, specs) = do
 -- `@collect`). Runs before synthesis, while the user's original text is still
 -- recoverable from the spec (never surfaces as a namer-map error downstream).
 validateWithSpec :: Span -> EVar -> Int -> Bool -> WithSpec -> D ()
-validateWithSpec sp parentName arity isCollect (WithSpec _ long _ _ stream _ args) = do
+validateWithSpec sp parentName arity isCollect
+  WithSpec{wsLong = long, wsStream = stream, wsArgs = args, wsFold = mFold} = do
   mapM_ checkPos args
   -- `wsStream` already absorbs "@offset implies @stream" at parse time.
   when (stream && not isCollect) $ dfail (startPos sp) streamMsg
+  when (isJust mFold && not isCollect) $ dfail (startPos sp) foldNoCollectMsg
+  when (isJust mFold && stream) $ dfail (startPos sp) foldStreamMsg
   where
     parent = T.unpack (unEVar parentName)
     lg = T.unpack long
@@ -3644,6 +3710,14 @@ validateWithSpec sp parentName arity isCollect (WithSpec _ long _ _ stream _ arg
     streamMsg =
       "formatter `--" <> lg <> "` uses `@stream`/`@offset`, but `" <> parent
       <> "` does not stream its output (no reachable `@collect`)."
+    foldNoCollectMsg =
+      "formatter `--" <> lg <> "` declares `@fold`, but `" <> parent
+      <> "` does not stream its output (no reachable `@collect`); there "
+      <> "is nothing to fold over."
+    foldStreamMsg =
+      "formatter `--" <> lg <> "` combines `@fold` with `@stream`/`@offset`. "
+      <> "`@stream` emits one result per batch; `@fold` emits one result for "
+      <> "the whole stream. Pick one."
 
 -- | True iff the declared whole-form handler takes an @IFile [a]@ receiver
 -- (its first parameter's head is @IFile@). Selects random-access presentation
@@ -3695,12 +3769,7 @@ containsCollect (ExprI _ e) = case e of
 -- signature (an inline lambda, say). The caller must then report that
 -- it does not know rather than claim the function's `()`.
 collectStreamType :: Map.Map EVar TypeU -> ExprI -> Maybe TypeU
-collectStreamType sigs body = do
-  arg <- findCollectArg body
-  producer <- headVarOf arg
-  sig <- Map.lookup producer sigs
-  sink <- lastParamOf (peelForall sig)
-  firstParamOf (peelForall sink)
+collectStreamType sigs body = findCollectArg body >>= streamTypeOfProducer sigs
   where
     -- The expression `@collect` was applied to, if the body reaches one.
     findCollectArg :: ExprI -> Maybe ExprI
@@ -3724,6 +3793,22 @@ collectStreamType sigs body = do
       BopE l _ _ r -> firstSome [findCollectArg l, findCollectArg r]
       _ -> Nothing
 
+    firstSome = foldr (\x acc -> maybe acc Just x) Nothing
+
+-- | The batch type a @collect producer streams, read off the producer's
+-- declared signature. Takes the expression @\@collect@ was applied to,
+-- so a body with several @collect nodes resolves each against its own
+-- producer.
+--
+-- Nothing when the producer is not a named term with a signature (an
+-- inline lambda, say).
+streamTypeOfProducer :: Map.Map EVar TypeU -> ExprI -> Maybe TypeU
+streamTypeOfProducer sigs arg = do
+  producer <- headVarOf arg
+  sig <- Map.lookup producer sigs
+  sink <- lastParamOf (peelForall sig)
+  firstParamOf (peelForall sink)
+  where
     -- The term at the head of a (possibly partial) application.
     headVarOf :: ExprI -> Maybe EVar
     headVarOf (ExprI _ e) = case e of
@@ -3743,8 +3828,6 @@ collectStreamType sigs body = do
     firstParamOf (FunU (t : _) _) = Just t
     firstParamOf _ = Nothing
 
-    firstSome = foldr (\x acc -> maybe acc Just x) Nothing
-
 -- | Synthesize a `--' with:` flag command for a streaming (@collect) parent.
 -- Reuses the parent's body (re-indexed with fresh ids to avoid annotation
 -- collisions), rewriting every @collect node per flag:
@@ -3760,7 +3843,26 @@ collectStreamType sigs body = do
 --     a random-access IFile. The command returns the handler's result, which
 --     the nexus formats per `-f` (or emits verbatim for `render`).
 synthStreamingBinding :: Span -> EVar -> ExprI -> Map.Map EVar TypeU -> WithSpec -> D ExprI
-synthStreamingBinding sp parentName assI sigMap (WithSpec _ long tTerm render stream _ argSrcs)
+synthStreamingBinding sp parentName assI sigMap
+  WithSpec { wsLong = long
+           , wsTerm = tTerm
+           , wsRender = render
+           , wsStream = stream
+           , wsArgs = argSrcs
+           , wsFold = mFold
+           }
+  | Just fs <- mFold =
+      -- `@fold` : the stream is folded into one accumulator and the handler
+      -- is applied to it once. Unlike the gather below, nothing round-trips
+      -- through a file, so the element type stays pinned by the producer's
+      -- own sink and peak memory does not grow with the stream.
+      --
+      -- The entry emits once, like the gather, so no stream element type is
+      -- recorded for it: what a caller receives is the entry's own return.
+      withParentBody $ \bodyExpr wheres -> do
+        bodyExpr' <- composeFoldIntoCollect parentParams argSrcs fs tTerm bodyExpr
+        wheres' <- mapM (composeFoldIntoCollect parentParams argSrcs fs tTerm) wheres
+        return (bodyExpr', wheres')
   | stream =
       -- `@stream` : per-batch. `with`  handler `... [a] -> [b]` -> sink (handler .. c)
       --             (nexus formats `[b]`); `render` handler `... [a] -> Str` ->
@@ -3784,8 +3886,8 @@ synthStreamingBinding sp parentName assI sigMap (WithSpec _ long tTerm render st
       -- flag differs.
       let useIFile = maybe False firstParamIsIFile (Map.lookup tTerm sigMap)
       in withParentBody $ \bodyExpr wheres -> do
-          bodyExpr' <- composeWholeIntoCollect useIFile parentParams argSrcs tTerm bodyExpr
-          wheres' <- mapM (composeWholeIntoCollect useIFile parentParams argSrcs tTerm) wheres
+          bodyExpr' <- composeWholeIntoCollect useIFile sigMap parentParams argSrcs tTerm bodyExpr
+          wheres' <- mapM (composeWholeIntoCollect useIFile sigMap parentParams argSrcs tTerm) wheres
           return (bodyExpr', wheres')
   where
     -- The handler's declared return type is what reaches standard output
@@ -3910,13 +4012,88 @@ composeHandlerIntoCollect :: Bool -> [EVar] -> [ArgSource] -> EVar -> ExprI -> D
 composeHandlerIntoCollect singletonWrap params argSrcs handler =
   rewriteCollectWith $ \self arg' -> wrapPerBatchCollect singletonWrap params argSrcs handler self arg'
 
+-- | Rewrite every @collect in a body into the folding form.
+composeFoldIntoCollect :: [EVar] -> [ArgSource] -> FoldSpec -> EVar -> ExprI -> D ExprI
+composeFoldIntoCollect params argSrcs fs handler =
+  rewriteCollectWith $ \self arg' -> wrapFoldCollect params argSrcs fs handler self arg'
+
+-- | Build the fold do-block for one @collect arg@:
+--
+-- > do  h <- @cellnew init
+-- >     _ <- arg (\c -> do  acc <- @cellget h
+-- >                         @cellput h (step acc c))
+-- >     b <- @cellreduce combine h
+-- >     handler b
+--
+-- The sink still returns @()@, so the running accumulator lives behind the
+-- cell rather than flowing back out of the sink. @step@ and @combine@ are
+-- applied as ordinary morloc code, so the realizer places them like any
+-- other call and marshals across a language boundary if it has to.
+--
+-- The accumulator is per calling thread (see the runtime's cell module), so
+-- a producer that drives its sink from several threads loses no updates;
+-- @combine@ merges them. Every accumulator starts from @init@, so @init@
+-- must be an identity for @combine@ or the answer depends on how many
+-- threads the producer used -- the usual contract of a parallel fold, and
+-- not something that can be checked here.
+wrapFoldCollect :: [EVar] -> [ArgSource] -> FoldSpec -> EVar -> ExprI -> ExprI -> D ExprI
+wrapFoldCollect params argSrcs (FoldSpec step ini comb) handler ref collectArg = do
+  idx <- freshIdPos (Pos 0 0 "")
+  let nm base = EV (base <> T.pack (show idx))
+      hV   = nm "_fold_h_"
+      accV = nm "_fold_acc_"
+      bV   = nm "_fold_b_"
+      cV   = nm "_fold_c_"
+      gV   = nm "_fold_g_"
+  handlerRef <- freshExprFrom ref (VarE defaultValue handler)
+  -- h <- @cellnew init
+  newBind <- do
+    iniRef <- freshExprFrom ref (VarE defaultValue ini)
+    n <- freshExprFrom ref (IntrinsicE IntrCellNew [iniRef])
+    freshExprFrom ref (EvalE n)
+  -- \c -> do { acc <- @cellget h; @cellput h (step acc c) }
+  sink <- do
+    hGet <- freshExprFrom ref (VarE defaultValue hV)
+    getE <- freshExprFrom ref (IntrinsicE IntrCellGet [hGet])
+    getBind <- freshExprFrom ref (EvalE getE)
+    stepRef <- freshExprFrom ref (VarE defaultValue step)
+    accRef <- freshExprFrom ref (VarE defaultValue accV)
+    cRef <- freshExprFrom ref (VarE defaultValue cV)
+    stepApp <- freshExprFrom ref (AppE stepRef [accRef, cRef])
+    hPut <- freshExprFrom ref (VarE defaultValue hV)
+    putE <- freshExprFrom ref (IntrinsicE IntrCellPut [hPut, stepApp])
+    forcePut <- freshExprFrom ref (EvalE putE)
+    unitE <- freshExprFrom ref UniE
+    let dV = EV (BT.doDiscardPrefix <> "fold_p_" <> T.pack (show idx))
+    putBody <- freshExprFrom ref (LetE [(dV, forcePut)] unitE)
+    inner <- freshExprFrom ref (LetE [(accV, getBind)] putBody)
+    blk <- freshExprFrom ref (DoBlockE inner)
+    freshExprFrom ref (LamE [cV] blk)
+  -- _ <- arg (\c -> ...)
+  prodBare <- do
+    app <- freshExprFrom ref (AppE collectArg [sink])
+    freshExprFrom ref (EvalE app)
+  -- b <- @cellreduce combine h   (the cell is released here)
+  reduceBind <- do
+    combRef <- freshExprFrom ref (VarE defaultValue comb)
+    hRef <- freshExprFrom ref (VarE defaultValue hV)
+    r <- freshExprFrom ref (IntrinsicE IntrCellReduce [combRef, hRef])
+    freshExprFrom ref (EvalE r)
+  appArgs <- buildStreamArgs ref params Nothing bV argSrcs
+  handlerApp <- freshExprFrom ref (AppE handlerRef appArgs)
+  t1 <- freshExprFrom ref (LetE [(bV, reduceBind)] handlerApp)
+  t2 <- freshExprFrom ref (LetE [(gV, prodBare)] t1)
+  t3 <- freshExprFrom ref (LetE [(hV, newBind)] t2)
+  freshExprFrom ref (DoBlockE t3)
+
 -- | Rewrite every @collect node into a whole-list gather-then-apply: gather the
 -- producer's stream to a temp file, then apply the handler once to the complete
 -- data. When @useIFile@ the handler receives a random-access @IFile [a]@;
 -- otherwise it receives a materialized @[a]@ (via @load).
-composeWholeIntoCollect :: Bool -> [EVar] -> [ArgSource] -> EVar -> ExprI -> D ExprI
-composeWholeIntoCollect useIFile params argSrcs handler =
-  rewriteCollectWith $ \self arg' -> wrapWholeCollect useIFile params argSrcs self handler arg'
+composeWholeIntoCollect ::
+  Bool -> Map.Map EVar TypeU -> [EVar] -> [ArgSource] -> EVar -> ExprI -> D ExprI
+composeWholeIntoCollect useIFile sigs params argSrcs handler =
+  rewriteCollectWith $ \self arg' -> wrapWholeCollect useIFile sigs params argSrcs self handler arg'
 
 -- | Build the whole-list gather-and-apply do-block for one @collect arg@:
 --
@@ -3939,8 +4116,9 @@ composeWholeIntoCollect useIFile params argSrcs handler =
 -- >     xs <- @load path           -- materialize the whole list
 -- >     _  <- @close path          -- unlink the temp file
 -- >     handler xs
-wrapWholeCollect :: Bool -> [EVar] -> [ArgSource] -> ExprI -> EVar -> ExprI -> D ExprI
-wrapWholeCollect useIFile params argSrcs ref handler collectArg = do
+wrapWholeCollect ::
+  Bool -> Map.Map EVar TypeU -> [EVar] -> [ArgSource] -> ExprI -> EVar -> ExprI -> D ExprI
+wrapWholeCollect useIFile sigs params argSrcs ref handler collectArg = do
   idx <- freshIdPos (Pos 0 0 "")
   let nm base = EV (base <> T.pack (show idx))
       pathV = nm "_whole_path_"
@@ -3999,7 +4177,8 @@ wrapWholeCollect useIFile params argSrcs ref handler collectArg = do
         t1 <- freshExprFrom ref (LetE [(g4, unlink)] rRef)
         t2 <- freshExprFrom ref (LetE [(g3, closeFBare)] t1)
         t3 <- freshExprFrom ref (LetE [(rV, handlerBind)] t2)
-        bindOkFrom ref fV openFBind t3
+        t3' <- pinGathered fV (\a -> AppU (VarU BT.ifileVar) [a]) t3
+        bindOkFrom ref fV openFBind t3'
       else do
         loadBind <- do
           p <- freshExprFrom ref (VarE defaultValue pathV)
@@ -4009,12 +4188,51 @@ wrapWholeCollect useIFile params argSrcs ref handler collectArg = do
         appArgs <- buildStreamArgs ref params Nothing xsV argSrcs
         handlerApp <- freshExprFrom ref (AppE handlerRef appArgs)
         t1 <- freshExprFrom ref (LetE [(g3, unlink)] handlerApp)
-        bindOkFrom ref xsV loadBind t1
+        t1' <- pinGathered xsV id t1
+        bindOkFrom ref xsV loadBind t1'
   b1 <- freshExprFrom ref (LetE [(g2, closeOBare)] tailE)
   b2 <- freshExprFrom ref (LetE [(g1, gatherBare)] b1)
   b3 <- bindOkFrom ref oV openOBind b2
   b4 <- bindOkFrom ref pathV tmpBind b3
   freshExprFrom ref (DoBlockE b4)
+  where
+    -- Tie the gathered value to what the producer streams.
+    --
+    -- The stream leaves through a file and comes back through @load or
+    -- @open, and both are polymorphic: their element type is inferred from
+    -- whatever reads them, which is the handler. Nothing else relates the
+    -- two ends, so a handler whose receiver disagrees with the stream is
+    -- accepted and then reads the file's bytes as a type they do not hold.
+    -- The producer's declared signature is what closes the loop, and
+    -- `wrap` says how the handler sees the stream: as the list itself, or
+    -- behind an @IFile@.
+    --
+    -- A producer with no reachable signature, or one whose batch type is
+    -- generic, cannot be pinned: there is nothing to check against, and a
+    -- rigid annotation would over-constrain a legitimately generic handler.
+    -- That leaves the handler unchecked, so it is said out loud rather than
+    -- passed over.
+    pinGathered :: EVar -> (TypeU -> TypeU) -> ExprI -> D ExprI
+    pinGathered v wrap body =
+      case streamTypeOfProducer sigs collectArg of
+        Just t | isConcreteType t -> do
+          vRef <- freshExprFrom ref (VarE defaultValue v)
+          annV <- freshExprFrom ref (AnnE vRef (wrap t))
+          freshExprFrom ref (LetE [(v, annV)] body)
+        mt -> do
+          dwarn [unpinnedMsg mt]
+          return body
+
+    unpinnedMsg mt =
+      "the whole-list handler `" <> unEVar handler <> "` is not checked "
+        <> "against what this `@collect` streams, because " <> reason
+        <> ". A handler whose receiver type disagrees with the stream will "
+        <> "read the gathered data as a type it does not hold. Give the "
+        <> "producer a concrete signature to have the handler checked."
+      where
+        reason = case mt of
+          Nothing -> "its producer has no declared signature"
+          Just _ -> "its producer streams a generic batch type"
 
 -- | Build the per-batch streaming do-block that replaces a @collect arg@:
 --
@@ -4104,7 +4322,8 @@ mkEmitWrite singletonWrap ref oVar value = do
 -- 'CodeGenerator/Nexus.inheritParentArgDocs'. A @SigE@ here would
 -- need a return type not knowable at desugar time.
 synthWithBinding :: Span -> EVar -> Int -> Bool -> WithSpec -> D ExprI
-synthWithBinding sp parentName arity isEff (WithSpec _ long tTerm _ _ _ argSrcs) = do
+synthWithBinding sp parentName arity isEff
+  WithSpec{wsLong = long, wsTerm = tTerm, wsArgs = argSrcs} = do
   let mangled = mangleTerminalName parentName long
       lamVars = [EV ("mlcp_x_" <> T.pack (show idx)) | idx <- [1..arity]]
   fooRef <- freshExprSpan sp (VarE defaultValue parentName)

@@ -465,6 +465,42 @@ pub unsafe fn consolidate(
     Ok(dest)
 }
 
+/// Copy the value at `src` into one self-contained SHM block.
+///
+/// The single block is what a pool can release: it frees a value with one
+/// `shfree` of the root, so a value spread over several blocks would lose
+/// everything below it.
+///
+/// Sizes the region first and then copies once. The size walk is structural
+/// -- a flat array costs one multiply rather than a visit per element -- and
+/// it reports the bound on the part count that the bump's per-part rounding
+/// has to be budgeted against. [`consolidate`] is the route for a builder
+/// that cannot know its result's size until it exists; a caller copying a
+/// value that already exists can know it, and pays one pass instead of two.
+///
+/// # Safety
+/// `src` must point at a value laid out as `schema` describes.
+pub unsafe fn deep_copy_to_block(
+    src: *const u8,
+    schema: &Schema,
+) -> Result<crate::shm::AbsPtr, MorlocError> {
+    let (payload, parts) = crate::ffi::calc_voidstar_layout(src, schema)?;
+    // Each part is rounded up to eight bytes as it is cut from the bump, so
+    // the region carries up to seven bytes of padding per part, plus the
+    // root's own rounding.
+    let total = payload
+        .checked_add(8usize.saturating_mul(parts.saturating_add(1)))
+        .ok_or_else(|| MorlocError::Shm("value too large to copy into one block".into()))?;
+    let dest = shm::shmalloc(total)?;
+    std::ptr::write_bytes(dest, 0, total);
+    let mut bump = Bump::new(dest.add(schema.width), total - schema.width);
+    if let Err(e) = deep_copy_into(src, dest, schema, &mut bump) {
+        let _ = shm::shfree(dest);
+        return Err(e);
+    }
+    Ok(dest)
+}
+
 /// [`deep_copy_with`] with the part allocator chosen by the caller.
 ///
 /// # Safety
@@ -1658,3 +1694,87 @@ mod flat_writer_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod one_block_copy_tests {
+    use super::*;
+    use crate::json::{read_json_with_schema, voidstar_to_json_string};
+    use crate::schema::parse_schema;
+
+    /// Every value shape the deep copy can allocate for, so that the size
+    /// walk's bound on the part count is exercised against each of the
+    /// copier's allocation sites rather than only the string one.
+    const SHAPES: &[(&str, &str)] = &[
+        ("s", "\"plain\""),
+        ("s", "\"\""),
+        ("as", "[\"a\",\"bb\",\"ccc\"]"),
+        ("as", "[]"),
+        ("ai4", "[1,2,3,4,5]"),
+        ("ai4", "[]"),
+        // Array of variable-width elements: a part per element, plus one
+        // for the element region itself.
+        ("aas", "[[\"a\"],[\"bb\",\"ccc\"],[]]"),
+        ("at2si4", "[[\"a\",1],[\"bb\",2],[\"ccc\",3]]"),
+        ("t3sss", "[\"a\",\"bb\",\"ccc\"]"),
+        ("m21ai41cs", "{\"a\":7,\"c\":\"seven\"}"),
+        ("am21ai41cs", "[{\"a\":1,\"c\":\"x\"},{\"a\":2,\"c\":\"yy\"}]"),
+        // Optional: the inner value is its own sub-allocation.
+        ("?i4", "null"),
+        ("?i4", "5"),
+        ("a?s", "[\"a\",null,\"ccc\"]"),
+        // Arbitrary-precision Int: small enough to inline, and large
+        // enough to take a limb allocation.
+        ("j", "3"),
+        ("j", "123456789012345678901234567890123456789012345678901234567890"),
+        ("aj", "[1,123456789012345678901234567890123456789012345678901234567890]"),
+    ];
+
+    /// A copy into one block must reproduce the value exactly, whatever its
+    /// shape. The size walk bounds the parts the bump will cut, so a shape
+    /// whose bound came out short would fail here with "deep copy ran past
+    /// the region it was sized for" rather than silently truncating.
+    #[test]
+    fn a_one_block_copy_reproduces_every_shape() {
+        let _shm = crate::own_test_registry();
+        for (schema_str, json) in SHAPES {
+            let schema = parse_schema(schema_str).unwrap();
+            let src = read_json_with_schema(json, &schema).unwrap();
+            let before = voidstar_to_json_string(src, &schema).unwrap();
+
+            let copy = unsafe { deep_copy_to_block(src, &schema) }
+                .unwrap_or_else(|e| panic!("{} {}: {:?}", schema_str, json, e));
+            let after = voidstar_to_json_string(copy, &schema).unwrap();
+            assert_eq!(before, after, "shape {} {}", schema_str, json);
+
+            // One block: the pool releases a value with a single shfree, so
+            // everything below the root has to live inside it.
+            shm::shfree(copy).unwrap();
+            shm::shfree(src).unwrap();
+        }
+    }
+
+    /// The copy owns nothing outside the block it returns, so releasing
+    /// that block releases all of it.
+    #[test]
+    fn a_one_block_copy_leaves_no_blocks_behind() {
+        let _shm = crate::own_test_registry();
+        let mut hist = [0usize; 40];
+        let cycle = || {
+            for (schema_str, json) in SHAPES {
+                let schema = parse_schema(schema_str).unwrap();
+                let src = read_json_with_schema(json, &schema).unwrap();
+                let copy = unsafe { deep_copy_to_block(src, &schema) }.unwrap();
+                shm::shfree(copy).unwrap();
+                shm::shfree(src).unwrap();
+            }
+        };
+        cycle();
+        let before = shm::live_block_stats(&mut hist).0;
+        for _ in 0..4 {
+            cycle();
+        }
+        assert_eq!(shm::live_block_stats(&mut hist).0, before);
+    }
+}
+
+

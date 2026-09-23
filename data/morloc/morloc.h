@@ -14,7 +14,7 @@
 // (Morloc.Abi). Provisioning refuses to run a prebuilt libmorloc/nexus whose
 // version differs from the compiler's expected value (fail-closed), preventing
 // silent cross-pool struct/offset corruption.
-#define MORLOC_ABI_VERSION 5
+#define MORLOC_ABI_VERSION 6
 
 // Atomic includes must sit outside any `extern "C"` block because the
 // C++ <atomic> header pulls in <type_traits> et al., which use C++
@@ -1906,6 +1906,47 @@ char* mlc_tmpfile(ERRMSG);
 // if the path was not a registered temp file -- @close is not a general
 // file-removal tool.
 int32_t mlc_unlink_tmp(const char* path, ERRMSG);
+
+// ------------------------------------------------------------------------
+// Fold accumulators (the `@fold` stream-handler form)
+//
+// A folding handler turns a stream into one value. The sink cannot return
+// anything, so the running accumulator lives behind one of these handles
+// between batches.
+//
+// A cell holds one accumulator per thread that folds into it: a producer
+// may drive its sink from several threads, and the read-modify-write
+// around a morloc `step` cannot be made atomic from the runtime, since
+// applying `step` means running user code in a pool. Each thread therefore
+// folds without contention and the handler's `combine` merges the slots at
+// the end.
+//
+// Every value a cell is given is copied, and every value it hands back is
+// a fresh single block the caller releases with one shfree.
+
+// Create a cell seeded with `init`. Returns a handle, or -1 on error.
+int64_t mlc_cell_new(const Schema* schema, const void* init, ERRMSG);
+
+// This thread's accumulator; the seed if it has not folded yet.
+void* mlc_cell_get(int64_t handle, const Schema* schema, ERRMSG);
+
+// Replace this thread's accumulator. Returns 0 on success.
+int32_t mlc_cell_put(int64_t handle, const Schema* schema,
+                     const void* value, ERRMSG);
+
+// How many accumulators the final merge must fold. Never zero: an
+// untouched cell answers with its seed, which is what an empty stream
+// folds to.
+int64_t mlc_cell_count(int64_t handle, ERRMSG);
+
+// Accumulator `index`, for the merge. Returns -1-free NULL on error.
+void* mlc_cell_slot(int64_t handle, int64_t index, const Schema* schema,
+                    ERRMSG);
+
+// Release a cell and every accumulator in it. Returns 0 on success. A cell
+// still live when its dispatch ends is swept, so a handler that raises
+// before its merge cannot leak one.
+int32_t mlc_cell_free(int64_t handle, ERRMSG);
 
 // ========================================================================
 // Section 26: Function declarations -- Slurm

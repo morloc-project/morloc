@@ -2988,6 +2988,99 @@ SEXP morloc_mlc_write(SEXP schema_str_r, SEXP level_r, SEXP value_r, SEXP handle
     return R_NilValue;
 }
 
+// -- Fold accumulators (the `@fold` stream-handler form) ------------------
+// One accumulator per thread that folds into it; morloc_mlc_cell_reduce in
+// pool.R merges them with the handler's `combine`.
+
+SEXP morloc_mlc_cell_new(SEXP schema_str_r, SEXP init_r) { MAYFAIL
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        MORLOC_INTERNAL_ABORT("mlc_cell_new: schema must be a single string");
+    }
+    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
+    Schema* schema = R_TRY(parse_schema, schema_str);
+    size_t bytes = get_shm_size(schema, init_r);
+    void* voidstar = R_TRY_WITH(free_schema(schema), shmalloc, bytes);
+    void* cursor = (uint8_t*)voidstar + schema->width;
+    to_voidstar_inner(voidstar, &cursor, init_r, schema);
+    int64_t handle = R_TRY(mlc_cell_new, schema, voidstar);
+    {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return make_integer64_scalar(handle);
+}
+
+// Shared tail for the accumulator readers. R's from_voidstar copies into
+// R vectors rather than viewing the block, so the block is released here
+// rather than deferred to the end of the call -- a fold reads one of these
+// per batch, and deferring would hold one block per batch.
+static SEXP cell_value_to_r(void* voidstar, Schema* schema) {
+    SEXP obj = from_voidstar(voidstar, schema, NULL);
+    char* shfree_errmsg = NULL;
+    shfree(voidstar, &shfree_errmsg);
+    free(shfree_errmsg);
+    free_schema(schema);
+    return obj;
+}
+
+SEXP morloc_mlc_cell_get(SEXP handle_r, SEXP schema_str_r) { MAYFAIL
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        MORLOC_INTERNAL_ABORT("mlc_cell_get: schema must be a single string");
+    }
+    int64_t handle = i64_from_sexp(handle_r);
+    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
+    Schema* schema = R_TRY(parse_schema, schema_str);
+    void* voidstar = R_TRY_WITH(free_schema(schema), mlc_cell_get, handle, schema);
+    return cell_value_to_r(voidstar, schema);
+}
+
+SEXP morloc_mlc_cell_put(SEXP handle_r, SEXP schema_str_r, SEXP value_r) { MAYFAIL
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        MORLOC_INTERNAL_ABORT("mlc_cell_put: schema must be a single string");
+    }
+    int64_t handle = i64_from_sexp(handle_r);
+    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
+    Schema* schema = R_TRY(parse_schema, schema_str);
+    size_t bytes = get_shm_size(schema, value_r);
+    void* voidstar = R_TRY_WITH(free_schema(schema), shmalloc, bytes);
+    void* cursor = (uint8_t*)voidstar + schema->width;
+    to_voidstar_inner(voidstar, &cursor, value_r, schema);
+    R_TRY(mlc_cell_put, handle, schema, voidstar);
+    {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return R_NilValue;
+}
+
+SEXP morloc_mlc_cell_count(SEXP handle_r) { MAYFAIL
+    int64_t handle = i64_from_sexp(handle_r);
+    int64_t n = R_TRY(mlc_cell_count, handle);
+    return ScalarReal((double)n);
+}
+
+SEXP morloc_mlc_cell_slot(SEXP handle_r, SEXP index_r, SEXP schema_str_r) { MAYFAIL
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        MORLOC_INTERNAL_ABORT("mlc_cell_slot: schema must be a single string");
+    }
+    int64_t handle = i64_from_sexp(handle_r);
+    int64_t index = i64_from_sexp(index_r);
+    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
+    Schema* schema = R_TRY(parse_schema, schema_str);
+    void* voidstar = R_TRY_WITH(free_schema(schema), mlc_cell_slot, handle, index, schema);
+    return cell_value_to_r(voidstar, schema);
+}
+
+SEXP morloc_mlc_cell_free(SEXP handle_r) { MAYFAIL
+    int64_t handle = i64_from_sexp(handle_r);
+    R_TRY(mlc_cell_free, handle);
+    return R_NilValue;
+}
+
 SEXP morloc_mlc_append(SEXP schema_str_r, SEXP path_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
         MORLOC_INTERNAL_ABORT("mlc_append: schema must be a single string");
@@ -4576,6 +4669,12 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_get_value", (DL_FUNC) &morloc_get_value, 3},
         {"morloc_put_value", (DL_FUNC) &morloc_put_value, 3},
         {"morloc_mlc_show", (DL_FUNC) &morloc_mlc_show, 2},
+        {"morloc_mlc_cell_new", (DL_FUNC) &morloc_mlc_cell_new, 2},
+        {"morloc_mlc_cell_get", (DL_FUNC) &morloc_mlc_cell_get, 2},
+        {"morloc_mlc_cell_put", (DL_FUNC) &morloc_mlc_cell_put, 3},
+        {"morloc_mlc_cell_count", (DL_FUNC) &morloc_mlc_cell_count, 1},
+        {"morloc_mlc_cell_slot", (DL_FUNC) &morloc_mlc_cell_slot, 3},
+        {"morloc_mlc_cell_free", (DL_FUNC) &morloc_mlc_cell_free, 1},
         {"r_morloc_log_next_id", (DL_FUNC) &morloc_log_next_id_r, 0},
         {"r_morloc_log_emit", (DL_FUNC) &morloc_log_emit_r, 4},
         {"r_morloc_bench_record", (DL_FUNC) &morloc_bench_record_r, 2},

@@ -162,6 +162,18 @@ printExpr (IIntrinsicConcat paths dest) =
 printExpr (IIntrinsicFlush h) = "rustmorloc::flush(" <> printExpr h <> ")"
 printExpr IIntrinsicTell = "rustmorloc::tell()"
 printExpr IIntrinsicTmpfile = "rustmorloc::tmpfile()"
+printExpr (IIntrinsicCellNew sid e) =
+  "rustmorloc::cell_new(" <> schemaRef sid <> ", " <> refExpr e <> ")"
+printExpr (IIntrinsicCellGet sid mt h) =
+  "rustmorloc::cell_get" <> turbofish mt <> "(" <> schemaRef sid <> ", " <> printExpr h <> ")"
+printExpr (IIntrinsicCellPut sid h e) =
+  "rustmorloc::cell_put(" <> schemaRef sid <> ", " <> printExpr h <> ", " <> refExpr e <> ")"
+printExpr (IIntrinsicCellReduce sid mt f h) =
+  -- The accumulator type has to be given (it appears only in the return),
+  -- but the combine's type is an anonymous closure type, so it is left to
+  -- inference: a turbofish must name every parameter or none.
+  "rustmorloc::cell_reduce" <> reduceTurbofish mt <> "(" <> schemaRef sid <> ", "
+    <> printExpr f <> ", " <> printExpr h <> ")"
 printExpr (IIntrinsicStdin sid) = "rustmorloc::open_stdin(" <> schemaRef sid <> ")"
 printExpr (IIntrinsicStdout sid) = "rustmorloc::open_stdout(" <> schemaRef sid <> ")"
 printExpr (IIntrinsicStderr sid) = "rustmorloc::open_stderr(" <> schemaRef sid <> ")"
@@ -187,6 +199,11 @@ refExpr e = "&" <> parens (printExpr e)
 -- (`load`/`next`/`stream_layout`/`ifile_walk`) resolve its return type.
 turbofish :: Maybe IType -> MDoc
 turbofish = maybe "" (\t -> "::<" <> rustType t <> ">")
+
+-- | Turbofish for @cell_reduce@, whose second parameter is the combine's
+-- closure type and can only be inferred.
+reduceTurbofish :: Maybe IType -> MDoc
+reduceTurbofish = maybe "" (\t -> "::<" <> rustType t <> ", _>")
 
 -- Rust non-finite float literals.
 renderRealLit :: RealLit -> MDoc

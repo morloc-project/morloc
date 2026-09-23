@@ -511,6 +511,21 @@ data Intrinsic
                     -- call ends, and return its path. NOT user-facing;
                     -- synthesized by the whole-form `with:`/`render:` handler
                     -- to gather a stream to disk before applying the handler.
+  | IntrCellNew     -- ^ @cellnew :: b -> <IO> (Cell b)@ -- create a fold
+                    -- accumulator seeded with the given value. NOT
+                    -- user-facing; synthesized by the `@fold` handler form.
+  | IntrCellGet     -- ^ @cellget :: Cell b -> <IO> b@ -- read the calling
+                    -- thread's accumulator, or the seed if that thread has
+                    -- not folded yet.
+  | IntrCellPut     -- ^ @cellput :: Cell b -> b -> <IO> ()@ -- replace the
+                    -- calling thread's accumulator. Thread-local, so a
+                    -- producer driving its sink from several threads loses
+                    -- no updates and needs no lock.
+  | IntrCellReduce  -- ^ @cellreduce :: (b -> b -> b) -> Cell b -> <IO> b@ --
+                    -- merge every thread's accumulator with the handler's
+                    -- `combine` and release the cell. Never sees an empty
+                    -- cell: one that was never folded into answers with its
+                    -- seed, which is what an empty stream folds to.
   | IntrIFileWalk   -- ^ Unified IFile pattern walker. Synthesized by Express.hs
                     -- and Nexus.hs from any pattern application with an IFile
                     -- receiver (`.[i] f`, `.[s:e:p] f`, `.foo.bar f`, mixed
@@ -559,6 +574,10 @@ intrinsicName IntrTry = "try"
 intrinsicName IntrTell = "tell"
 intrinsicName IntrCollect = "collect"
 intrinsicName IntrTmpfile = "tmpfile"
+intrinsicName IntrCellNew = "cellnew"
+intrinsicName IntrCellGet = "cellget"
+intrinsicName IntrCellPut = "cellput"
+intrinsicName IntrCellReduce = "cellreduce"
 intrinsicName IntrIFileWalk = "ifile_walk"
 
 -- | Does this intrinsic perform IO? True iff its type carries an `IO` effect
@@ -593,6 +612,11 @@ intrinsicIsIO IntrTmpfile = True
 intrinsicIsIO IntrCollect = True
 -- Synthesized post-typecheck (never user-written); IO by nature.
 intrinsicIsIO IntrIFileWalk = True
+-- Synthesized by the `@fold` handler form; all touch runtime-owned state.
+intrinsicIsIO IntrCellNew = True
+intrinsicIsIO IntrCellGet = True
+intrinsicIsIO IntrCellPut = True
+intrinsicIsIO IntrCellReduce = True
 -- No IO: safe to write directly in a sandboxed eval.
 intrinsicIsIO IntrHash = False
 intrinsicIsIO IntrVersion = False
@@ -684,6 +708,10 @@ intrinsicArity IntrTry = 1
 intrinsicArity IntrTell = 0
 intrinsicArity IntrCollect = 1
 intrinsicArity IntrTmpfile = 0
+intrinsicArity IntrCellNew = 1
+intrinsicArity IntrCellGet = 1
+intrinsicArity IntrCellPut = 2
+intrinsicArity IntrCellReduce = 2
 intrinsicArity IntrIFileWalk =
   error "intrinsicArity: IntrIFileWalk has dynamic arity (path + handle + 0..n bracket bounds) and is never eta-expanded"
 

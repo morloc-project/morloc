@@ -41,6 +41,7 @@ module Morloc.BaseTypes
   , ifileVar
   , istreamVar
   , ostreamVar
+  , cellVar
   , tryVar
   , tryOkCtor
   , tryErrCtor
@@ -190,6 +191,15 @@ istreamVar = TV "IStream"
 
 ostreamVar :: TVar
 ostreamVar = TV "OStream"
+
+-- | @newtype Cell a = U64@, the handle a folding stream handler
+-- accumulates behind. Parameterised for the same reason the stream
+-- handles are: it is what forces a handler's init, step and combine to
+-- agree on what is being accumulated. Unlike the stream handles it names
+-- no on-disk storage, so it takes the identity branch of
+-- 'handleStorageType'.
+cellVar :: TVar
+cellVar = TV "Cell"
 
 -- | @data Try e a = Err e | Ok a@, declared in the @internal@ stdlib module
 -- and named here so the compiler can give fallible intrinsics a result type

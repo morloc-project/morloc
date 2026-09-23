@@ -116,6 +116,7 @@ module Morloc.Namespace.Type
   , Check (..)
   , ArgSource (..)
   , WithSpec (..)
+  , FoldSpec (..)
   , mangleTerminalName
   , isInternalTerminalName
   , ArgDoc (..)
@@ -673,6 +674,28 @@ data ArgSource
   | ArgValue     -- ^ `@value`, the formatted payload
   deriving (Show, Ord, Eq)
 
+-- | The three terms a folding formatter declares. Grouping them makes
+-- "an init with no step" unrepresentable: a formatter either folds and
+-- names all three, or does not fold at all.
+--
+-- The accumulator is threaded by the synthesized body, so nothing here
+-- fixes its type; that is settled when the synthesized body is
+-- typechecked and the three terms must agree with each other and with
+-- the handler that consumes the result.
+--
+-- The three must form a monoid: one accumulator exists per thread that
+-- folds, each starting from 'fsInit', so unless 'fsInit' is an identity
+-- for 'fsCombine' the answer depends on how many threads the producer
+-- used. Neither that law nor 'fsCombine's associativity is checkable
+-- here; both are the caller's to keep, as in every parallel fold.
+data FoldSpec = FoldSpec
+  { fsStep    :: EVar  -- ^ @b -> [a] -> b@, folds one batch into the accumulator
+  , fsInit    :: EVar  -- ^ @b@, the identity: starts every accumulator, and
+                       --   is the answer for an empty stream
+  , fsCombine :: EVar  -- ^ @b -> b -> b@, merges accumulators into the answer
+  }
+  deriving (Show, Ord, Eq)
+
 -- | One `@with`/`@render` formatter declaration on a signature preamble.
 -- Declares a command-scoped CLI flag that dispatches to a compile-time-
 -- synthesized entry composing the referenced term with the head manifold
@@ -689,6 +712,10 @@ data WithSpec = WithSpec
   , wsDefault :: Bool         -- ^ `@default`: fires when no formatter flag and no `-f`
   , wsArgs    :: [ArgSource]  -- ^ handler argument sources, in order; the payload
                               --   goes at 'ArgValue' or is appended last if absent
+  , wsFold    :: Maybe FoldSpec
+                              -- ^ `@fold`/`@init`/`@combine`: the stream is folded
+                              --   into one accumulator rather than gathered into a
+                              --   list, and the handler receives the accumulator
   }
   deriving (Show, Ord, Eq)
 

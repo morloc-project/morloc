@@ -120,6 +120,12 @@ extern "C" {
     fn mlc_flush(handle: i64, errmsg: *mut *mut c_char) -> i32;
     fn mlc_tell(errmsg: *mut *mut c_char) -> u64;
     fn mlc_tmpfile(errmsg: *mut *mut c_char) -> *mut c_char;
+    fn mlc_cell_new(schema: *const CSchema, init: *const c_void, errmsg: *mut *mut c_char) -> i64;
+    fn mlc_cell_get(handle: i64, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void;
+    fn mlc_cell_put(handle: i64, schema: *const CSchema, value: *const c_void, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_cell_count(handle: i64, errmsg: *mut *mut c_char) -> i64;
+    fn mlc_cell_slot(handle: i64, index: i64, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void;
+    fn mlc_cell_free(handle: i64, errmsg: *mut *mut c_char) -> i32;
     fn mlc_open_ostream(schema_str: *const c_char, path: *const c_char, errmsg: *mut *mut c_char) -> i64;
     fn mlc_open_istream(schema_str: *const c_char, path: *const c_char, errmsg: *mut *mut c_char) -> i64;
     fn mlc_open_stdin(schema_str: *const c_char, errmsg: *mut *mut c_char) -> i64;
@@ -2890,6 +2896,69 @@ pub unsafe fn tmpfile() -> String {
         morloc_throw("@tmpfile: runtime returned null");
     }
     cstr_take(s)
+}
+
+/// @cellnew: create a fold accumulator seeded with `init`.
+pub unsafe fn cell_new<T: ToVoidstar>(schema: &Schema, init: &T) -> u64 {
+    let mut handle: i64 = -1;
+    let rc = with_voidstar(init, schema, |vs, cs, err| {
+        handle = mlc_cell_new(cs, vs, err);
+        if handle < 0 { 1 } else { 0 }
+    });
+    if rc != 0 {
+        morloc_throw("@fold: could not create the accumulator");
+    }
+    handle as u64
+}
+
+/// @cellget: this thread's accumulator.
+pub unsafe fn cell_get<T: FromVoidstar>(schema: &Schema, handle: u64) -> T {
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let voidstar = mlc_cell_get(handle as i64, cschema_of(schema), &mut err);
+    read_voidstar(voidstar, err, schema, "@fold")
+}
+
+/// @cellput: replace this thread's accumulator.
+pub unsafe fn cell_put<T: ToVoidstar>(schema: &Schema, handle: u64, value: &T) {
+    let rc = with_voidstar(value, schema, |vs, cs, err| {
+        mlc_cell_put(handle as i64, cs, vs, err)
+    });
+    if rc != 0 {
+        morloc_throw("@fold: could not store the accumulator");
+    }
+}
+
+/// @cellreduce: merge every accumulator with `combine` and release the cell.
+///
+/// The count is never zero -- an untouched cell answers with its seed -- so
+/// this always has a value to return.
+/// The combine is bounded on `MorlocFn2` rather than `Fn`: a morloc function
+/// value in a Rust pool is a defunctionalized closure, and the blanket impl
+/// beside the trait covers a plain `Fn` as well.
+pub unsafe fn cell_reduce<T: FromVoidstar, F: MorlocFn2<T, T, T>>(
+    schema: &Schema,
+    combine: F,
+    handle: u64,
+) -> T {
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let n = mlc_cell_count(handle as i64, &mut err);
+    check_err(err);
+    if n < 1 {
+        morloc_throw("@fold: the accumulator holds nothing to merge");
+    }
+    let slot = |i: i64| -> T {
+        let mut serr: *mut c_char = std::ptr::null_mut();
+        let vs = mlc_cell_slot(handle as i64, i, cschema_of(schema), &mut serr);
+        read_voidstar(vs, serr, schema, "@fold")
+    };
+    let mut acc = slot(0);
+    for i in 1..n {
+        acc = combine.call2(&acc, &slot(i));
+    }
+    let mut ferr: *mut c_char = std::ptr::null_mut();
+    mlc_cell_free(handle as i64, &mut ferr);
+    check_err(ferr);
+    acc
 }
 
 /// @open (OStream): open a file for writing with the element schema.

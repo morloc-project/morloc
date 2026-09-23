@@ -930,6 +930,83 @@ inline void _mlc_unlink_tmp(const std::string& path) {
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
 }
 
+// -- Fold-accumulator wrappers ------------------------------------------
+// A folding stream handler carries one accumulator per thread that folds
+// into it; `_mlc_cell_reduce` merges them and releases the cell.
+
+// @cellnew: create an accumulator seeded with `init`.
+template <typename B>
+int64_t _mlc_cell_new(Schema* schema, const B& init) {
+    void* voidstar = to_voidstar(schema, init);
+    char* errmsg = NULL;
+    int64_t handle = mlc_cell_new(schema, voidstar, &errmsg);
+    shfree_cpp(voidstar);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    return handle;
+}
+
+// @cellget: this thread's accumulator, or the seed if it has not folded yet.
+template <typename B>
+B _mlc_cell_get(Schema* schema, int64_t handle) {
+    char* errmsg = NULL;
+    void* voidstar = mlc_cell_get(handle, schema, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    B* dummy = nullptr;
+    B result = from_voidstar(schema, voidstar, dummy);
+    shfree_cpp(voidstar);
+    return result;
+}
+
+// @cellput: replace this thread's accumulator.
+template <typename B>
+void _mlc_cell_put(Schema* schema, int64_t handle, const B& value) {
+    void* voidstar = to_voidstar(schema, value);
+    char* errmsg = NULL;
+    mlc_cell_put(handle, schema, voidstar, &errmsg);
+    shfree_cpp(voidstar);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+}
+
+// One accumulator, for the merge below.
+template <typename B>
+B _mlc_cell_slot(Schema* schema, int64_t handle, int64_t index) {
+    char* errmsg = NULL;
+    void* voidstar = mlc_cell_slot(handle, index, schema, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    B* dummy = nullptr;
+    B result = from_voidstar(schema, voidstar, dummy);
+    shfree_cpp(voidstar);
+    return result;
+}
+
+// @cellreduce: fold every accumulator into one with `combine`, then release
+// the cell. The count is never zero -- an untouched cell answers with its
+// seed -- so this always has a value to return.
+// Releases its cell however the reduce below leaves. The end-of-dispatch
+// sweep would reclaim an abandoned one, but a @try-wrapped fold that fails
+// and retries inside a single dispatch would strand a cell per attempt.
+struct MlcCellGuard {
+    int64_t handle;
+    ~MlcCellGuard() {
+        char* errmsg = NULL;
+        mlc_cell_free(handle, &errmsg);
+        free(errmsg);
+    }
+};
+
+template <typename B, typename F>
+B _mlc_cell_reduce(Schema* schema, F combine, int64_t handle) {
+    MlcCellGuard guard{handle};
+    char* errmsg = NULL;
+    int64_t n = mlc_cell_count(handle, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    B acc = _mlc_cell_slot<B>(schema, handle, 0);
+    for (int64_t i = 1; i < n; i++) {
+        acc = combine(acc, _mlc_cell_slot<B>(schema, handle, i));
+    }
+    return acc;
+}
+
 // Array-based foreign call: send a local-call packet carrying a runtime-sized
 // list of argument packets to the pool listening on `socket_filename`. Used by
 // the variadic `foreign_call` below and by defunctionalized-closure reflection,

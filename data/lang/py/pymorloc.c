@@ -3865,6 +3865,155 @@ error:
     return NULL;
 }
 
+// -- Fold accumulators (the `@fold` stream-handler form) ------------------
+// One accumulator per thread that folds into it; the pool-side
+// _mlc_cell_reduce merges them with the handler's `combine`.
+
+// mlc_cell_new(schema, init) -> handle
+static PyObject* pybinding__mlc_cell_new(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    PyObject* init_obj;
+    Schema* schema = NULL;
+    void* voidstar = NULL;
+    PARSE_ARGS_OR_ABORT(args, "sO", &schema_str, &init_obj);
+    schema = PyTRY(parse_schema, schema_str);
+    voidstar = to_voidstar(schema, init_obj);
+    PyTRACE(voidstar == NULL)
+    int64_t handle = PyTRY(mlc_cell_new, schema, voidstar);
+    {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return PyLong_FromLongLong((long long)handle);
+error:
+    if (voidstar) {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return NULL;
+}
+
+// Shared tail for the two accumulator readers: hand the block to
+// from_voidstar and defer its release, since a numpy view may still be
+// looking at it (see mlc_load).
+static PyObject* cell_value_to_py(Schema* schema, void* voidstar) {
+    PyObject* obj = from_voidstar(schema, voidstar, NULL);
+    if (obj == NULL) {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+        free_schema(schema);
+        return NULL;
+    }
+    shm_tracker_push((absptr_t)voidstar, schema);
+    return obj;
+}
+
+// mlc_cell_get(handle, schema) -> value
+static PyObject* pybinding__mlc_cell_get(PyObject* self, PyObject* args) { MAYFAIL
+    long long handle_ll;
+    const char* schema_str;
+    Schema* schema = NULL;
+    PARSE_ARGS_OR_ABORT(args, "Ls", &handle_ll, &schema_str);
+    schema = PyTRY(parse_schema, schema_str);
+    void* voidstar = PyTRY(mlc_cell_get, (int64_t)handle_ll, schema);
+    return cell_value_to_py(schema, voidstar);
+error:
+    free_schema(schema);
+    return NULL;
+}
+
+// mlc_cell_put(handle, schema, value) -> None
+static PyObject* pybinding__mlc_cell_put(PyObject* self, PyObject* args) { MAYFAIL
+    long long handle_ll;
+    const char* schema_str;
+    PyObject* value_obj;
+    Schema* schema = NULL;
+    void* voidstar = NULL;
+    PARSE_ARGS_OR_ABORT(args, "LsO", &handle_ll, &schema_str, &value_obj);
+    schema = PyTRY(parse_schema, schema_str);
+    voidstar = to_voidstar(schema, value_obj);
+    PyTRACE(voidstar == NULL)
+    PyTRY(mlc_cell_put, (int64_t)handle_ll, schema, voidstar);
+    {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    Py_RETURN_NONE;
+error:
+    if (voidstar) {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return NULL;
+}
+
+
+
+
+// mlc_cell_reduce(schema, combine, handle) -> value. Fold every accumulator
+// into one with `combine`, then release the cell. The count is never zero --
+// an untouched cell answers with its seed -- so there is always a value.
+static PyObject* pybinding__mlc_cell_reduce(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    PyObject* combine;
+    // Initialized because the argument parse below can jump to `error`,
+    // where the cell is released.
+    long long handle_ll = -1;
+    Schema* schema = NULL;
+    PyObject* acc = NULL;
+    PARSE_ARGS_OR_ABORT(args, "sOL", &schema_str, &combine, &handle_ll);
+    int64_t n = PyTRY(mlc_cell_count, (int64_t)handle_ll);
+    if (n < 1) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "mlc_cell_reduce: fold accumulator holds nothing to merge");
+        goto error;
+    }
+    for (int64_t i = 0; i < n; i++) {
+        // One schema per accumulator: from_voidstar may hand back a numpy
+        // view over the block, so its release is deferred to the tracker --
+        // and the tracker frees the schema of every entry it holds.
+        schema = PyTRY(parse_schema, schema_str);
+        void* voidstar = PyTRY(mlc_cell_slot, (int64_t)handle_ll, i, schema);
+        // Takes the schema either way: to the tracker on success, freed
+        // on failure.
+        PyObject* v = cell_value_to_py(schema, voidstar);
+        schema = NULL;
+        if (v == NULL) { goto error; }
+        if (acc == NULL) {
+            acc = v;
+        } else {
+            PyObject* merged = PyObject_CallFunctionObjArgs(combine, acc, v, NULL);
+            Py_DECREF(acc);
+            Py_DECREF(v);
+            acc = merged;
+            if (acc == NULL) { goto error; }
+        }
+    }
+    PyTRY(mlc_cell_free, (int64_t)handle_ll);
+    return acc;
+error:
+    {
+        // The sweep at end of dispatch would reclaim this, but a @try-wrapped
+        // fold that fails and retries inside one dispatch would strand a cell
+        // per attempt.
+        char* free_errmsg = NULL;
+        mlc_cell_free((int64_t)handle_ll, &free_errmsg);
+        free(free_errmsg);
+    }
+    Py_XDECREF(acc);
+    free_schema(schema);
+    return NULL;
+}
+
 static PyMethodDef Methods[] = {
     {"log_next_id", pybinding__log_next_id, METH_NOARGS, "Allocate a fresh log call id"},
     {"log_emit", pybinding__log_emit, METH_VARARGS, "Emit a formatted log line via libmorloc"},
@@ -3928,6 +4077,10 @@ static PyMethodDef Methods[] = {
     {"mlc_tell", pybinding__mlc_tell, METH_NOARGS, "Elements written to @stdout so far"},
     {"mlc_tmpfile", pybinding__mlc_tmpfile, METH_NOARGS, "Create a temp file for the whole-form gather"},
     {"mlc_unlink_tmp", pybinding__mlc_unlink_tmp, METH_VARARGS, "Unlink a registered temp file"},
+    {"mlc_cell_new", pybinding__mlc_cell_new, METH_VARARGS, "Create a fold accumulator"},
+    {"mlc_cell_get", pybinding__mlc_cell_get, METH_VARARGS, "Read this thread's fold accumulator"},
+    {"mlc_cell_put", pybinding__mlc_cell_put, METH_VARARGS, "Replace this thread's fold accumulator"},
+    {"mlc_cell_reduce", pybinding__mlc_cell_reduce, METH_VARARGS, "Merge the fold accumulators and release the cell"},
     {"mlc_throw", pybinding__mlc_throw, METH_VARARGS, "Raise a MorlocException with the given message"},
     {"mlc_try", pybinding__mlc_try, METH_VARARGS, "Evaluate body; wrap the value with ok, or a caught message with err"},
     {NULL, NULL, 0, NULL} // this is a sentinel value

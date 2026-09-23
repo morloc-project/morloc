@@ -33,3 +33,21 @@ sort_strs <- function(xs) {
 join_strs <- function(xs) {
   paste0(paste(xs, collapse = ";"), ";\n")
 }
+
+# Folding handlers: the stream is reduced to one running total instead of
+# gathered into a list.
+zero_acc <- function() {
+  0L
+}
+
+add_batch <- function(acc, batch) {
+  acc + sum(batch)
+}
+
+merge_acc <- function(a, b) {
+  a + b
+}
+
+show_acc <- function(acc) {
+  sprintf("total=%d\n", acc)
+}

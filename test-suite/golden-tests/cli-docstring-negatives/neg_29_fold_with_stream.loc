@@ -1,0 +1,24 @@
+module main (run)
+
+import root
+
+step :: Int -> [Int] -> Int
+step acc _ = acc
+
+zero :: Int
+zero = 0
+
+merge :: Int -> Int -> Int
+merge a _ = a
+
+showAcc :: Int -> Str
+showAcc _ = "acc"
+
+produce :: ([Int] -> <IO> ()) -> <IO> ()
+produce sink = sink [1,2,3]
+
+-- `@stream` emits one result per batch and `@fold` one for the whole
+-- stream; a formatter cannot do both.
+--' @render -t/--total=showAcc @fold=step @init=zero @combine=merge @stream
+run :: <IO> ()
+run = @collect produce

@@ -459,6 +459,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
                      IntrWrite, IntrAppend, IntrConcat, IntrFlush,
                      IntrStdin, IntrStdout, IntrStderr, IntrThrow,
                      IntrTell, IntrTmpfile,
+                     IntrCellNew, IntrCellGet, IntrCellPut, IntrCellReduce,
                      IntrTry] = do
           when (intr `elem` [IntrLoad, IntrRead, IntrNext, IntrOpen, IntrStdin]) $
             Serial.checkReadDataType tidx intr gt
@@ -472,6 +473,11 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
             (IntrSaveM, _ : d : _) -> writeCheck d
             (IntrSaveJ, _ : d : _) -> writeCheck d
             (IntrWrite, _ : _ : d : _) -> writeCheck d
+            -- An accumulator crosses into the runtime the same way a
+            -- written element does, so it is subject to the same rule: a
+            -- value carrying a function has no wire form.
+            (IntrCellNew, d : _) -> writeCheck d
+            (IntrCellPut, _ : d : _) -> writeCheck d
             _ -> return ()
           -- @try's body must reach mlc_try as a no-arg callable; see
           -- 'thunkifyForTry' below.
@@ -563,13 +569,14 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     unpackDataArgIfNeeded m IntrWrite (levelArg : handleArg : dataArg : rest) = do
       rest' <- packDataArg m dataArg
       return (levelArg : handleArg : rest' ++ rest)
-    -- @savem/@savej's args are [path, value]; the value is at index 1.
+    -- @savem/@savej/@cellput's args are [path-or-handle, value]; the value
+    -- is at index 1.
     unpackDataArgIfNeeded m intr (pathArg : dataArg : rest)
-      | intr `elem` [IntrSaveM, IntrSaveJ] = do
+      | intr `elem` [IntrSaveM, IntrSaveJ, IntrCellPut] = do
           rest' <- packDataArg m dataArg
           return (pathArg : rest' ++ rest)
     unpackDataArgIfNeeded m intr (dataArg : rest)
-      | intr `elem` [IntrShow, IntrHash] = do
+      | intr `elem` [IntrShow, IntrHash, IntrCellNew] = do
           rest' <- packDataArg m dataArg
           return (rest' ++ rest)
     unpackDataArgIfNeeded _ _ args = return args
@@ -597,7 +604,10 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     loadResultPacker ::
       Int -> Intrinsic -> TypeF -> MorlocMonad (Maybe (Source, TypeF))
     loadResultPacker m intr resultTf
-      | intr `elem` [IntrLoad, IntrRead] = do
+      -- The cell readers are the same shape: the runtime holds the wire
+      -- form and hands it back, so a Packable accumulator needs its packer
+      -- on the way out just as @load's result does.
+      | intr `elem` [IntrLoad, IntrRead, IntrCellGet, IntrCellReduce] = do
           ast <- Serial.makeSerialAST m lang resultTf
           case ast of
             SerialPack _ (packer, _) ->
@@ -611,13 +621,14 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     intrinsicSchema m IntrSave _ (_levelArg : _pathArg : dataArg : _) = do
       ast <- Serial.makeSerialAST m lang (typeFof dataArg)
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
-    -- @savem/@savej's data is the second positional arg (after the path).
+    -- @savem/@savej/@cellput's data is the second positional arg (after the
+    -- path or handle).
     intrinsicSchema m intr _ (_pathArg : dataArg : _)
-      | intr `elem` [IntrSaveM, IntrSaveJ] = do
+      | intr `elem` [IntrSaveM, IntrSaveJ, IntrCellPut] = do
           ast <- Serial.makeSerialAST m lang (typeFof dataArg)
           return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m intr _ (dataArg:_)
-      | intr `elem` [IntrHash, IntrShow, IntrSchema] = do
+      | intr `elem` [IntrHash, IntrShow, IntrSchema, IntrCellNew] = do
           ast <- Serial.makeSerialAST m lang (typeFof dataArg)
           return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema _ IntrTypeof _ (dataArg:_) =
@@ -663,6 +674,13 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     intrinsicSchema m IntrWrite _ (_levelArg : _handleArg : dataArg : _) = do
       ast <- Serial.makeSerialAST m lang (typeFof dataArg)
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
+    -- The accumulator's schema, from the result type. @cellnew and @cellput
+    -- take theirs from their value argument, above; both name the same type,
+    -- which is the point of parameterising the handle.
+    intrinsicSchema m intr tf _
+      | intr `elem` [IntrCellGet, IntrCellReduce] = do
+          ast <- Serial.makeSerialAST m lang tf
+          return . Just . render $ Serial.serialAstToMsgpackSchema ast
     -- @open on IFile reads its schema off disk; codegen routes through the
     -- generic `_mlc_open(path, kind)` entry so we return Nothing. @open on
     -- OStream/IStream needs the storage schema at open time (the typed

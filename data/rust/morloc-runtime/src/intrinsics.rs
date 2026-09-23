@@ -30,7 +30,7 @@ unsafe fn cstr_arg<'a>(
 /// error, and a caller-supplied error sentinel as the return value.
 /// The body uses `?` to short-circuit any `MorlocError`.
 #[inline]
-unsafe fn wrap_c_call<T, F>(errmsg: *mut *mut c_char, sentinel: T, f: F) -> T
+pub(crate) unsafe fn wrap_c_call<T, F>(errmsg: *mut *mut c_char, sentinel: T, f: F) -> T
 where
     F: FnOnce() -> Result<T, MorlocError>,
 {
@@ -341,14 +341,16 @@ static TEMP_OWNER_COUNTER: std::sync::atomic::AtomicU64 =
 
 /// The dispatch this thread is running, or 0 on a thread the runtime did not
 /// start (a thread a manifold spawned).
-const TEMP_OWNER_NONE: u64 = 0;
+pub(crate) const TEMP_OWNER_NONE: u64 = 0;
 
 thread_local! {
     static CURRENT_TEMP_OWNER: std::cell::Cell<u64> =
         const { std::cell::Cell::new(TEMP_OWNER_NONE) };
 }
 
-fn current_temp_owner() -> u64 {
+/// The dispatch this thread is running. Shared with the cell registry,
+/// which scopes its entries to a call the same way.
+pub(crate) fn current_temp_owner() -> u64 {
     CURRENT_TEMP_OWNER.with(|c| c.get())
 }
 
@@ -468,10 +470,12 @@ pub unsafe extern "C" fn mlc_unlink_tmp(
 /// moment the file is taken out of the registry.
 pub fn end_dispatch(call_id: u64, prev: u64) {
     CURRENT_TEMP_OWNER.with(|c| c.set(prev));
+    let mut last_dispatch = false;
     let doomed: Vec<std::path::PathBuf> = match TEMP_REGISTRY.lock() {
         Ok(mut reg) => {
             reg.active = reg.active.saturating_sub(1);
-            let last = reg.active == 0;
+            last_dispatch = reg.active == 0;
+            let last = last_dispatch;
             let mut out = Vec::new();
             reg.entries.retain(|e| {
                 let collect =
@@ -488,6 +492,7 @@ pub fn end_dispatch(call_id: u64, prev: u64) {
     for p in doomed {
         let _ = std::fs::remove_file(&p);
     }
+    crate::cell::sweep_dispatch(call_id, last_dispatch);
 }
 
 // ── mlc_save_voidstar: serialize to binary voidstar packet file ────────────

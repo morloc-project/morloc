@@ -1162,6 +1162,17 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
           <+> "command is not yet supported. Add the `@stream` modifier for"
           <+> "per-batch streaming, or involve a foreign function in the"
           <+> "command body."
+    -- The fold accumulator lives in the runtime and its step and combine
+    -- run in a pool. The nexus interpreter cannot call a morloc function
+    -- by name, so a pure (all-morloc) folding command is rejected here
+    -- rather than falling off the evaluator.
+    toNexusExpr (AnnoS (Idx iCell _) _ (IntrinsicS intr _))
+      | intr `elem` [IntrCellNew, IntrCellGet, IntrCellPut, IntrCellReduce] =
+          MM.throwSourcedError iCell $
+            "a folding `@render`/`@with` handler currently requires a command"
+              <+> "that dispatches to a foreign pool; a pure (all-morloc) fold"
+              <+> "is not yet supported. Involve a foreign function in the"
+              <+> "command body, or drop `@fold` for the whole-list form."
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS intr _)) = do
       v <- resolveCompileTimeIntrinsic intr
       StrX <$> type2schema t <*> pure v
@@ -3239,7 +3250,13 @@ buildManifest ManifestInputs{..} =
       jsonArr (map (oneTerminal parentName) specs)
 
     oneTerminal :: Text -> WithSpec -> Text
-    oneTerminal parentName (WithSpec mShort long (EV tName) isRender _ isDefault _) =
+    oneTerminal parentName
+      WithSpec { wsShort = mShort
+               , wsLong = long
+               , wsTerm = EV tName
+               , wsRender = isRender
+               , wsDefault = isDefault
+               } =
       let EV mangled = mangleTerminalName (EV parentName) long
           desc = case Map.lookup (EV tName) miTermDocs of
             Just (firstLine : _) -> firstLine

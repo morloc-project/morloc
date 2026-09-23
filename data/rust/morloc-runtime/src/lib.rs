@@ -35,6 +35,7 @@ pub mod cschema;
 pub mod ffi;
 pub mod utility;
 pub mod cache;
+pub mod cell;
 pub mod intrinsics;
 pub mod voidstar;
 pub mod json_ffi;

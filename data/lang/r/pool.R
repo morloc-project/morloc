@@ -82,6 +82,12 @@ morloc_mlc_close                     <- function(...){ .Call("morloc_mlc_close",
 morloc_mlc_tmpfile                   <- function(...){ .Call("morloc_mlc_tmpfile",                   ...) }
 morloc_mlc_unlink_tmp                <- function(...){ .Call("morloc_mlc_unlink_tmp",                ...) }
 morloc_mlc_tell                      <- function(...){ .Call("morloc_mlc_tell",                      ...) }
+morloc_mlc_cell_new                  <- function(...){ .Call("morloc_mlc_cell_new",                  ...) }
+morloc_mlc_cell_get                  <- function(...){ .Call("morloc_mlc_cell_get",                  ...) }
+morloc_mlc_cell_put                  <- function(...){ .Call("morloc_mlc_cell_put",                  ...) }
+morloc_mlc_cell_count                <- function(...){ .Call("morloc_mlc_cell_count",                ...) }
+morloc_mlc_cell_slot                 <- function(...){ .Call("morloc_mlc_cell_slot",                 ...) }
+morloc_mlc_cell_free                 <- function(...){ .Call("morloc_mlc_cell_free",                 ...) }
 morloc_mlc_fschema                   <- function(...){ .Call("morloc_mlc_fschema",                   ...) }
 morloc_mlc_ifile_walk                <- function(...){ .Call("morloc_mlc_ifile_walk",                ...) }
 morloc_mlc_ifile_length              <- function(...){ .Call("morloc_mlc_ifile_length",              ...) }
@@ -97,6 +103,19 @@ morloc_mlc_write                     <- function(...){ .Call("morloc_mlc_write",
 morloc_mlc_append                    <- function(...){ .Call("morloc_mlc_append",                    ...) }
 morloc_mlc_concat                    <- function(...){ .Call("morloc_mlc_concat",                    ...) }
 morloc_mlc_flush                     <- function(...){ .Call("morloc_mlc_flush",                     ...) }
+# Merge every fold accumulator with the handler's `combine`, then release
+# the cell. The count is never zero -- an untouched cell answers with its
+# seed -- so this always has a value to return.
+morloc_mlc_cell_reduce <- function(schema, combine, handle) {
+  on.exit(try(morloc_mlc_cell_free(handle), silent = TRUE), add = TRUE)
+  n <- morloc_mlc_cell_count(handle)
+  acc <- morloc_mlc_cell_slot(handle, 0, schema)
+  for (i in seq_len(n - 1)) {
+    acc <- combine(acc, morloc_mlc_cell_slot(handle, i, schema))
+  }
+  acc
+}
+
 # @throw: raise a classed condition. The pool's manifold-level tryCatch
 # (from ldErrorWrapOpen/Close in lang.yaml) catches all conditions and
 # appends the frame info to `conditionMessage`, so the class tag survives

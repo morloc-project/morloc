@@ -1,0 +1,26 @@
+module main (run)
+
+import root
+
+step :: Int -> [Int] -> Int
+step acc _ = acc
+
+other :: Int -> [Int] -> Int
+other acc _ = acc
+
+zero :: Int
+zero = 0
+
+merge :: Int -> Int -> Int
+merge a _ = a
+
+showAcc :: Int -> Str
+showAcc _ = "acc"
+
+produce :: ([Int] -> <IO> ()) -> <IO> ()
+produce sink = sink [1,2,3]
+
+-- A repeated modifier would otherwise let the last one silently win.
+--' @render -t/--total=showAcc @fold=step @fold=other @init=zero @combine=merge
+run :: <IO> ()
+run = @collect produce

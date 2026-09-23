@@ -8534,8 +8534,87 @@ withDocstringTests =
   localOption (mkTimeout 1000000) $ -- 1s
     testGroup
       "with: docstring validation"
-      [ -- Sanity: a legal single-atom `with:` composes cleanly.
-        expectPass
+      [ -- The whole-list gather materializes the stream and applies the
+        -- handler to it once. Only the producer says what the stream holds,
+        -- so a handler whose receiver disagrees has to be rejected here --
+        -- the gathered bytes would otherwise be read as the wrong type.
+        expectError
+          "whole-form handler receiver disagreeing with the stream element type"
+          [r|
+        module main (stream)
+        effect IO
+        data Try e a = Err e | Ok a
+        mk :: Int -> [Int]
+        mk _ = [1]
+        showStr :: Str -> Str
+        showStr s = s
+        produce :: ([Int] -> <IO> ()) -> <IO> ()
+        produce sink = sink (mk 0)
+        --' @render -p/--plain=showStr
+        stream :: <IO> ()
+        stream = @collect produce
+          |]
+
+        -- A structurally different disagreement: a tuple where the stream
+        -- is a list. This is the shape that reads six list elements as a
+        -- two-slot tuple instead of failing.
+      , expectError
+          "whole-form handler taking a tuple where the stream is a list"
+          [r|
+        module main (stream)
+        effect IO
+        data Try e a = Err e | Ok a
+        mk :: Int -> [Int]
+        mk _ = [1]
+        showPair :: (Int, [Int]) -> Str
+        showPair _ = "x"
+        produce :: ([Int] -> <IO> ()) -> <IO> ()
+        produce sink = sink (mk 0)
+        --' @render -p/--pair=showPair
+        stream :: <IO> ()
+        stream = @collect produce
+          |]
+
+        -- The agreeing handler must still be accepted: the check has to
+        -- constrain the gather, not reject it.
+      , expectPass
+          "whole-form handler agreeing with the stream element type"
+          [r|
+        module main (stream)
+        effect IO
+        data Try e a = Err e | Ok a
+        mk :: Int -> [Int]
+        mk _ = [1]
+        showInts :: [Int] -> Str
+        showInts _ = "x"
+        produce :: ([Int] -> <IO> ()) -> <IO> ()
+        produce sink = sink (mk 0)
+        --' @render -p/--plain=showInts
+        stream :: <IO> ()
+        stream = @collect produce
+          |]
+
+        -- A polymorphic handler is not a disagreement: it accepts the
+        -- stream's element type like any other polymorphic function.
+      , expectPass
+          "polymorphic whole-form handler"
+          [r|
+        module main (stream)
+        effect IO
+        data Try e a = Err e | Ok a
+        mk :: Int -> [Int]
+        mk _ = [1]
+        countAny :: [a] -> Int
+        countAny _ = 0
+        produce :: ([Int] -> <IO> ()) -> <IO> ()
+        produce sink = sink (mk 0)
+        --' @with -n/--count=countAny
+        stream :: <IO> ()
+        stream = @collect produce
+          |]
+
+        -- Sanity: a legal single-atom `with:` composes cleanly.
+      , expectPass
           "single with: on effectful command with matching formatter"
           [r|
         module main (foo)

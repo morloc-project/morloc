@@ -402,6 +402,31 @@ pub unsafe extern "C" fn calculate_voidstar_size(
     }
 }
 
+/// The size of the value at `data`, and an upper bound on the number of
+/// sub-allocations a deep copy of it takes.
+///
+/// For a caller that copies into ONE block with a [`crate::voidstar::Bump`]:
+/// the bump rounds every part up to eight bytes, so the region has to carry
+/// up to seven bytes of padding per part, and the part count is not known
+/// before the value is walked. This walks it once and reports both, which is
+/// what lets such a caller size exactly and then copy once rather than
+/// building the value in per-part blocks and consolidating them.
+pub fn calc_voidstar_layout(
+    data: *const u8,
+    schema: &crate::schema::Schema,
+) -> Result<(usize, usize), MorlocError> {
+    let mut w = SizeWalk {
+        res: crate::recur::Resolver::new(schema),
+        total: 0,
+        bound: usize::MAX,
+        steps: 0,
+    };
+    let mut st = crate::walk::Stack::new();
+    st.enter(schema, data, false);
+    crate::walk::run(&mut w, &mut st)?;
+    Ok((w.total, w.steps))
+}
+
 pub fn calc_voidstar_size_inner(
     data: *const u8,
     schema: &crate::schema::Schema,
@@ -426,7 +451,12 @@ pub fn calc_voidstar_size_bounded(
     schema: &crate::schema::Schema,
     upper_bound: usize,
 ) -> Result<usize, MorlocError> {
-    let mut w = SizeWalk { res: crate::recur::Resolver::new(schema), total: 0, bound: upper_bound };
+    let mut w = SizeWalk {
+        res: crate::recur::Resolver::new(schema),
+        total: 0,
+        bound: upper_bound,
+        steps: 0,
+    };
     let mut st = crate::walk::Stack::new();
     st.enter(schema, data, false);
     crate::walk::run(&mut w, &mut st)?;
@@ -442,6 +472,12 @@ struct SizeWalk<'r> {
     res: crate::recur::Resolver<'r>,
     total: usize,
     bound: usize,
+    /// Nodes stepped. An upper bound on the sub-allocations a deep copy of
+    /// this value takes: every allocation site in `deep_copy_alloc` sits in
+    /// a node's own arm and at most one of them fires per step. A caller
+    /// laying the value out in one block needs that bound to budget the
+    /// per-part alignment padding; see [`calc_voidstar_layout`].
+    steps: usize,
 }
 
 impl<'r> SizeWalk<'r> {
@@ -484,6 +520,7 @@ impl<'r> crate::walk::Walker<bool> for SizeWalk<'r> {
             st.clear();
             return Ok(());
         }
+        self.steps = self.steps.saturating_add(1);
         // SAFETY: frames hold nodes of the tree the resolver was built
         // from, which outlives the walk; `data` points at a value laid out
         // as that schema describes.

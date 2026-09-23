@@ -1419,6 +1419,52 @@ synthE _ g (IntrinsicS IntrWrite [levelE, handleE, listE]) = do
          )
 synthE _ _ (IntrinsicS IntrWrite args) =
   error $ "IntrWrite expects 3 args (level, handle, list), got " <> show (length args)
+-- The fold accumulator. `Cell b` carries the accumulated type, which is
+-- what forces a folding handler's init, step and combine to agree with
+-- each other and with the handler that consumes the result. A bare
+-- integer handle would leave those types floating free, so a formatter
+-- pairing `@init=zeroHist` with `@fold=addCounts` would typecheck and
+-- then misread the accumulator -- an unsound path, not a missed warning.
+--
+-- The handle is checked before the value for the reason @write's rule
+-- gives: it pins the fresh existential, so a literal in the value still
+-- has a chance to inhabit the accumulator's own type rather than freezing
+-- to its default first.
+synthE _ g (IntrinsicS IntrCellNew [initE]) = do
+  let (g1, b) = newvar "cell_acc_" g
+  (g2, _, initE') <- checkG g1 initE b
+  return ( g2
+         , EffectU ioEffectSet (AppU (VarU BT.cellVar) [apply g2 b])
+         , IntrinsicS IntrCellNew [initE']
+         )
+synthE _ _ (IntrinsicS IntrCellNew args) =
+  error $ "IntrCellNew expects 1 arg (init), got " <> show (length args)
+synthE _ g (IntrinsicS IntrCellGet [handleE]) = do
+  (g1, b, handleE') <- checkCellHandle g handleE
+  return ( g1
+         , EffectU ioEffectSet b
+         , IntrinsicS IntrCellGet [handleE']
+         )
+synthE _ _ (IntrinsicS IntrCellGet args) =
+  error $ "IntrCellGet expects 1 arg (handle), got " <> show (length args)
+synthE _ g (IntrinsicS IntrCellPut [handleE, valE]) = do
+  (g2, b, handleE') <- checkCellHandle g handleE
+  (g3, _, valE')    <- checkG g2 valE b
+  return ( g3
+         , EffectU ioEffectSet BT.unitU
+         , IntrinsicS IntrCellPut [handleE', valE']
+         )
+synthE _ _ (IntrinsicS IntrCellPut args) =
+  error $ "IntrCellPut expects 2 args (handle, value), got " <> show (length args)
+synthE _ g (IntrinsicS IntrCellReduce [combineE, handleE]) = do
+  (g2, bT, handleE') <- checkCellHandle g handleE
+  (g3, _, combineE') <- checkG g2 combineE (FunU [bT, bT] bT)
+  return ( g3
+         , EffectU ioEffectSet (apply g3 bT)
+         , IntrinsicS IntrCellReduce [combineE', handleE']
+         )
+synthE _ _ (IntrinsicS IntrCellReduce args) =
+  error $ "IntrCellReduce expects 2 args (combine, handle), got " <> show (length args)
 -- Bespoke rule for @try. Its argument may fail in any number of ways --
 -- an intrinsic Err arm auto-required into a throw, a foreign function
 -- raising natively, an explicit @throw -- and those failures have no
@@ -1544,6 +1590,21 @@ streamElemTypeU :: TypeU -> TypeU
 streamElemTypeU (AppU _ (a : _)) = a
 streamElemTypeU t = t
 
+-- | Check a @Cell b@ handle and return the accumulator type it carries.
+--
+-- Always the first check in a cell intrinsic's rule, for the reason
+-- @write's rule gives: it pins the fresh existential, so a literal in a
+-- later argument still has a chance to inhabit the accumulator's own type
+-- rather than freezing to its default first.
+checkCellHandle ::
+  Gamma ->
+  AnnoS Int ManyPoly Int ->
+  MorlocMonad (Gamma, TypeU, AnnoS (Indexed TypeU) ManyPoly Int)
+checkCellHandle g handleE = do
+  let (g1, b) = newvar "cell_acc_" g
+  (g2, _, handleE') <- checkG g1 handleE (AppU (VarU BT.cellVar) [b])
+  return (g2, apply g2 b, handleE')
+
 -- | Return type of a fully applied intrinsic (for intrinsics without fresh vars)
 intrinsicType :: Intrinsic -> TypeU
 intrinsicType IntrSave = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
@@ -1575,6 +1636,17 @@ intrinsicType IntrNext =
 intrinsicType IntrStream =
   error "intrinsicType: IntrStream must be typed via intrinsicTypeG (carries arg-derived element type)"
 intrinsicType IntrWrite = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
+-- One clause each, not a guard over a list: this match is exhaustive on
+-- purpose, so that a new Intrinsic constructor fails the build here rather
+-- than falling through to a runtime error.
+intrinsicType IntrCellNew =
+  error "intrinsicType: IntrCellNew must be typed via synthE's dedicated clause"
+intrinsicType IntrCellGet =
+  error "intrinsicType: IntrCellGet must be typed via synthE's dedicated clause"
+intrinsicType IntrCellPut =
+  error "intrinsicType: IntrCellPut must be typed via synthE's dedicated clause"
+intrinsicType IntrCellReduce =
+  error "intrinsicType: IntrCellReduce must be typed via synthE's dedicated clause"
 intrinsicType IntrAppend =
   error "intrinsicType: IntrAppend must be typed via intrinsicTypeG (polymorphic return)"
 intrinsicType IntrConcat = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
