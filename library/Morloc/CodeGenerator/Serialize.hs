@@ -1314,8 +1314,14 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
       Map.Map Int (Request, Maybe TypeF)
     manifoldToMap form = f form
       where
-        mapRequestFromXs xs = Map.fromList [(i, (requestOf t, mayHaveTypeF t)) | (Arg i t) <- typeMofRs xs]
-        mapRequestFromYs ys = Map.fromList [(i, (requestOf t, mayHaveTypeF t)) | (Arg i t) <- ys]
+        -- 'typeMofRs' splits an argument carried in both forms ('LR') into a
+        -- serial and a native entry under the same index. Combining them is
+        -- what tells a caller the manifold wants both: keeping only the last
+        -- reports one form, and the caller then passes one argument where the
+        -- callee's signature declares two.
+        combineRequest (r1, t1) (r2, t2) = (r1 <> r2, maybe t2 Just t1)
+        mapRequestFromXs xs = Map.fromListWith combineRequest [(i, (requestOf t, mayHaveTypeF t)) | (Arg i t) <- typeMofRs xs]
+        mapRequestFromYs ys = Map.fromListWith combineRequest [(i, (requestOf t, mayHaveTypeF t)) | (Arg i t) <- ys]
 
         f (ManifoldFull xs) = mapRequestFromXs xs
         f (ManifoldPass ys) = mapRequestFromYs ys

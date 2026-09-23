@@ -1,0 +1,41 @@
+module main (width, widthPlus, bothWidths, viaLet)
+
+import root-py
+import root-cpp
+import table-py
+import vector-py
+import vector-cpp
+
+-- A table handed to another pool, with a value derived there returning into
+-- a same-pool function that also takes the table. That call needs the table
+-- in both its wire and its native form at once, and the manifold that wraps
+-- it has to be given both.
+
+type Cpp => (Table (n :: Nat) (r :: Rec)) = "arrow" n r
+
+source Py from "src.py" ("mk")
+source Cpp from "src.hpp" ("dbl")
+
+mk :: Int -> Table n {x = Int}
+dbl :: Table n {x = Int} -> Vector n Real
+
+-- The crossing expression as the whole body.
+width :: Int -> Int
+width n = ncol (setCol "y" (dbl (mk n)) (mk n))
+
+-- The same expression inside a larger one.
+widthPlus :: Int -> Int
+widthPlus n = ncol (setCol "y" (dbl (mk n)) (mk n)) + 1
+
+-- Twice over, in a tuple.
+bothWidths :: Int -> (Int, Int)
+bothWidths n =
+  ( nrow (setCol "y" (dbl (mk n)) (mk n))
+  , ncol (setCol "y" (dbl (mk n)) (mk n))
+  )
+
+-- And over a shared binding rather than two separate calls.
+viaLet :: Int -> (Int, Int)
+viaLet n =
+  let t = mk n
+  in (ncol t, ncol (setCol "y" (dbl t) t))
