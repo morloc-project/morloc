@@ -328,9 +328,28 @@ fn load_value(
         }
         (SerialType::Array, Some(d)) => d,
         _ => {
-            // A leaf takes the whole text.
+            // A leaf takes the whole text. Every leaf that suballocates
+            // writes a root value into one block, so `parts` is normally
+            // empty here; it is collected and consolidated anyway, because
+            // the caller of a root read frees one pointer and a leaf that
+            // forgot would otherwise strand what it took.
             let span = lx.value_span()?;
-            return write_leaf(span, schema, dest, &mut Vec::new());
+            let mut parts: Vec<AbsPtr> = Vec::new();
+            let leaf = match write_leaf(span, schema, dest, &mut parts) {
+                Ok(p) => p,
+                Err(e) => {
+                    for p in parts {
+                        let _ = shm::shfree(p);
+                    }
+                    return Err(e);
+                }
+            };
+            if parts.is_empty() || dest.is_some() {
+                return Ok(leaf);
+            }
+            // SAFETY: `parts` is every block the leaf took below `leaf`,
+            // which is laid out as `schema` describes.
+            return unsafe { crate::voidstar::consolidate(leaf, schema, &parts) };
         }
     };
     let mut w = LoadWalk { res, lx: &mut lx, seen: Vec::new(), free: Vec::new(), parts: Vec::new() };
@@ -604,18 +623,37 @@ fn write_leaf(
             let limbs = crate::eval_ffi::decimal_to_limbs(digits)?;
             let nlimbs = limbs.len();
             // Inline layout: [size:i64, value_or_relptr:i64] = 16 bytes
-            let w = alloc(dest, 16)?;
             if nlimbs <= 1 {
+                let w = alloc(dest, 16)?;
                 w.write_val::<i64>(0, nlimbs as i64);
                 w.write_val::<i64>(8, if nlimbs == 1 { limbs[0] as i64 } else { 0 });
-            } else {
-                let limb_bytes = nlimbs * 8;
-                let abs = shm::shmemcpy(limbs.as_ptr() as *const u8, limb_bytes)?;
+                return Ok(w.as_ptr());
+            }
+            let limb_bytes = nlimbs * 8;
+            // SAFETY: `limbs` owns `nlimbs` u64s, so this is its byte view.
+            let limb_src = unsafe {
+                std::slice::from_raw_parts(limbs.as_ptr() as *const u8, limb_bytes)
+            };
+            if dest.is_some() {
+                let w = alloc(dest, 16)?;
+                let abs = shm::shmemcpy(limb_src.as_ptr(), limb_bytes)?;
                 parts.push(abs);
                 w.write_val::<usize>(0, nlimbs);
                 w.write_val::<shm::RelPtr>(8, shm::abs2rel(abs)?);
+                Ok(w.as_ptr())
+            } else {
+                // A root Int carries its limbs in the same block, the way a
+                // root String carries its bytes: the caller of a root read
+                // frees one pointer. The limbs land 16 bytes into an
+                // 8-aligned block, so they stay 8-aligned.
+                let w = alloc(None, 16 + limb_bytes)?;
+                w.write_bytes(16, limb_src);
+                // SAFETY: the limbs are 16 bytes into the same shmalloc block
+                let data_rel = shm::abs2rel(unsafe { w.as_ptr().add(16) })?;
+                w.write_val::<usize>(0, nlimbs);
+                w.write_val::<shm::RelPtr>(8, data_rel);
+                Ok(w.as_ptr())
             }
-            Ok(w.as_ptr())
         }
 
         SerialType::String => {
@@ -1830,6 +1868,82 @@ mod tests {
     use crate::schema::parse_schema;
     #[must_use]
     fn setup() -> std::sync::RwLockReadGuard<'static, ()> { crate::init_test_shm() }
+
+    /// An arbitrary-precision Int round-trips at every width.
+    ///
+    /// A root Int writes its limbs inside its own block while a nested one
+    /// suballocates, so the two layouts are separate code and the wide
+    /// cases only exercise the first through a bare `j` schema.
+    #[test]
+    fn a_bigint_round_trips_at_every_width() {
+        let _shm = crate::own_test_registry();
+        let root = parse_schema("j").unwrap();
+        let nested = parse_schema("aj").unwrap();
+        let cases = [
+            "0",
+            "7",
+            "18446744073709551615",
+            "18446744073709551616",
+            "123456789012345678901234567890123456789012345678901234567890",
+        ];
+        for text in cases {
+            let p = read_json_with_schema(text, &root).unwrap();
+            assert_eq!(voidstar_to_json_string(p, &root).unwrap(), text, "root {}", text);
+            crate::shm::shfree(p).unwrap();
+
+            let arr = format!("[{}]", text);
+            let q = read_json_with_schema(&arr, &nested).unwrap();
+            assert_eq!(voidstar_to_json_string(q, &nested).unwrap(), arr, "nested {}", text);
+            crate::shm::shfree(q).unwrap();
+        }
+    }
+
+    /// A value read from JSON is one self-contained block.
+    ///
+    /// Its caller frees one pointer -- that is the contract `load_value`
+    /// states and the reason it consolidates the walk path -- so anything
+    /// the read suballocates has to live inside the block it returns. A
+    /// root leaf is the easy case to get wrong, because it never reaches
+    /// the walk: it is written directly and returned.
+    #[test]
+    fn a_value_read_from_json_is_one_block() {
+        let _shm = crate::own_test_registry();
+        let mut hist = [0usize; 40];
+        let cases: &[(&str, &str)] = &[
+            ("i4", "42"),
+            ("s", "\"hello\""),
+            ("s", "\"\""),
+            ("b", "true"),
+            // Arbitrary-precision Int: inline when it fits in one limb,
+            // and suballocated when it does not.
+            ("j", "7"),
+            ("j", "123456789012345678901234567890123456789012345678901234567890"),
+            ("ai4", "[1,2,3]"),
+            ("as", "[\"a\",\"bb\"]"),
+            ("aj", "[1,123456789012345678901234567890123456789012345678901234567890]"),
+            ("?i4", "null"),
+            ("m21ai41cs", "{\"a\":1,\"c\":\"x\"}"),
+        ];
+        for (schema_str, json) in cases {
+            let schema = parse_schema(schema_str).unwrap();
+            // Settle whatever the first read allocates lazily.
+            let warm = read_json_with_schema(json, &schema).unwrap();
+            crate::shm::shfree(warm).unwrap();
+
+            let before = crate::shm::live_block_stats(&mut hist).0;
+            for _ in 0..4 {
+                let p = read_json_with_schema(json, &schema).unwrap();
+                crate::shm::shfree(p).unwrap();
+            }
+            assert_eq!(
+                crate::shm::live_block_stats(&mut hist).0,
+                before,
+                "{} {} did not come back as one block",
+                schema_str,
+                json
+            );
+        }
+    }
 
     #[test] fn test_int()     { let _shm = setup(); let s = parse_schema("i4").unwrap(); let p = read_json_with_schema("42", &s).unwrap(); assert_eq!(voidstar_to_json_string(p, &s).unwrap(), "42"); }
     #[test] fn test_string()  { let _shm = setup(); let s = parse_schema("s").unwrap(); let p = read_json_with_schema("\"hello\"", &s).unwrap(); assert_eq!(voidstar_to_json_string(p, &s).unwrap(), "\"hello\""); }
