@@ -1987,9 +1987,13 @@ defaultFoldRules cfg =
     , opFoldWithSerialArgM = \sr sa -> return $ case sa of
         SerialArgManifold_ x -> (typeSof sr, x)
         SerialArgExpr_ x -> (typeSof sr, x)
-    , opFoldWithNativeArgM = \nr na -> return $ case na of
-        NativeArgManifold_ x -> (typeMof nr, x)
-        NativeArgExpr_ x -> (typeMof nr, x)
+    -- An argument is typed by the value it passes: a saturated manifold is
+    -- called in place, so it passes its result; a closure passes a function
+    -- of its bound arguments only ('typeFof' of a 'NativeManifold').
+    , opFoldWithNativeArgM = \nr na -> return $ case (nr, na) of
+        (NativeArgManifold nm, NativeArgManifold_ x) -> (typeMof (typeFof nm), x)
+        (_, NativeArgManifold_ x) -> (typeMof nr, x)
+        (_, NativeArgExpr_ x) -> (typeMof nr, x)
     }
 
 -- | Default serialization for languages without custom PoolDocs logic (Python, R).

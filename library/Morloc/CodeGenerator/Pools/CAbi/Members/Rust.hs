@@ -101,9 +101,8 @@ data RustState = RustState
   -- parameter is a BARE type variable, so it is passed by reference (@&A@) even
   -- at a Copy instantiation (the sourced Rust fn is generic over @&A@).
   -- @isFunctionParam@: the parameter is itself function-typed (@F: Fn@), so a
-  -- function-valued argument is a genuine closure passed BY VALUE; when False,
-  -- a function-typed argument is a fully-applied sub-manifold VALUE, passed like
-  -- data (borrowed when non-'Copy').
+  -- function-valued argument is handed over through @ThinFn::thin@ rather than
+  -- borrowed.
   , rsReifyInfo :: Map.Map Text (Int, [(Int, SerialAST)])
   -- ^ Per crossing-closure body-manifold name: @(mid, capturedSchemaIds)@.
   -- Only closures that reach a serialize boundary appear here (the rest stay
@@ -1953,31 +1952,19 @@ rustLowerConfig mask =
             -- A value parameter: a Copy type is a by-value (owned) sink, a
             -- non-Copy type is a reference sink.
             byType tf = if rustIsCopy tf then rustOwn own tf x else rustRef own x
-            sourcedCallee = case site of SourcedArg _ _ -> True; _ -> False
          in case tm of
-              -- A function-TYPED argument at a SOURCED call is one of two things:
-              -- a GENUINE closure passed to an `F: Fn` parameter (`isFunParam`),
-              -- which goes BY VALUE (borrowing `&closure` breaks higher-ranked
-              -- inference); or a fully-applied sub-manifold VALUE, whose Function
-              -- type is a misnomer (it renders as a call, the callee wants its
-              -- RESULT) -- to a bare type-variable parameter (`isVar`) borrow it,
-              -- else pass it like a Native arg of its result. At a MANIFOLD-call
-              -- site the argument is always a function VALUE (a variable) going to
-              -- a morloc-defined `&(impl Fn)` parameter, so borrow it.
+              -- A function-typed argument is a function value (a saturated
+              -- sub-manifold is typed by its result, so it never lands here).
+              -- Host code may declare a higher-order parameter as
+              -- `F: Fn(&A..) -> R`, which a trait object cannot satisfy, so the
+              -- value is handed over through the runtime's one adapter; every
+              -- other function sink (a morloc-defined `&Rc<dyn MorlocFnN>`
+              -- parameter, a type-variable parameter, a closure application)
+              -- borrows it.
               Function _ _
-                | not sourcedCallee -> rustRef own x
-                -- Host code may declare a higher-order parameter as
-                -- `F: Fn(&A..) -> R`, which a trait object cannot satisfy, so
-                -- the value is handed over through the runtime's one adapter.
-                -- Its arity comes from the value's own type: the type at THIS
-                -- site counts a partially applied manifold's captured context
-                -- arguments too, so it cannot be read off here.
                 | isFunParam ->
                     "rustmorloc::ThinFn::thin" <> parens (rustRef own x)
-                | isVar -> rustRef own x
-                | otherwise -> case tm of
-                    Function _ (Native tf) -> byType tf
-                    _ -> rustRef own x
+                | otherwise -> rustRef own x
               -- A closure application and a sourced type-variable parameter are
               -- reference sinks; otherwise pass by the value type. (`isVar` is only
               -- ever True under 'SourcedArg'.)

@@ -1,0 +1,97 @@
+-- Arguments of a recursive call in a Rust pool. A back-edge that does not
+-- become a loop is emitted as a direct call to the recursive manifold, and
+-- each of its arguments must match how that manifold's parameter is written:
+-- a Copy value (Int, Real, Bool) by value, a non-Copy value or a function by
+-- reference. An argument computed at the call site (`n - 1`, `not b`, a call
+-- to another morloc function) is a fully applied manifold whose value is its
+-- result, so it passes by its result type. Covers non-tail self recursion
+-- over each Copy type, several computed arguments at once, a computed
+-- argument from a morloc-defined function, non-tail mutual recursion, a
+-- recursive call nested in another's argument, computed Str and List
+-- arguments, and function values -- carried through the recursion, built as
+-- a closure at the call, or returned by a call -- which stay borrowed.
+-- Analysis: /work/plans/rust-recursion-borrow-e0308/DESCRIPTION.md
+module main (sumTo, down, alt, grid, sumDec, countA, addTwos, ack, grow, build, compose, adds)
+
+import root-rust
+
+sumTo :: Int -> Int
+sumTo n
+  ? n == 0 = 0
+  : n + sumTo (n - 1)
+
+down :: Real -> Int
+down x
+  ? x <= 0.0 = 0
+  : 1 + down (x - 1.5)
+
+alt :: Bool -> Int -> Int
+alt b n
+  ? n == 0 = 0
+  : 1 + alt (not b) (n - 1)
+
+grid :: Int -> Int -> Int
+grid a b
+  ? a == 0 = b
+  : 1 + grid (a - 1) (b + 2)
+
+dec :: Int -> Int
+dec n = n - 1
+
+sumDec :: Int -> Int
+sumDec n
+  ? n == 0 = 0
+  : n + sumDec (dec n)
+
+countA :: Int -> Int
+countA n
+  ? n == 0 = 0
+  : 1 + countB (n - 1)
+
+countB :: Int -> Int
+countB n
+  ? n == 0 = 0
+  : 2 + countA (n - 1)
+
+applyN :: (Int -> Int) -> Int -> Int -> Int
+applyN f n x
+  ? n == 0 = x
+  : f (applyN f (n - 1) x)
+
+addTwos :: Int -> Int
+addTwos n = applyN (\y -> y + 2) n 0
+
+ack :: Int -> Int -> Int
+ack m n
+  ? m == 0 = n + 1
+  ? n == 0 = ack (m - 1) 1
+  : ack (m - 1) (ack m (n - 1))
+
+grow :: Str -> Int -> Str
+grow s n
+  ? n == 0 = s
+  : "b" <> grow (s <> "a") (n - 1)
+
+build :: [Int] -> Int -> [Int]
+build xs n
+  ? n == 0 = xs
+  : cons n (build (cons n xs) (n - 1))
+
+twiceAll :: (Int -> Int) -> Int -> Int -> Int
+twiceAll f n x
+  ? n == 0 = f x
+  : 1 + twiceAll (\y -> f (f y)) (n - 1) x
+
+compose :: Int -> Int
+compose n = twiceAll (\y -> y + 1) n 0
+
+adder :: Int -> Int -> Int
+adder k y = y + k
+
+addsFrom :: (Int -> Int) -> Int -> Int -> Int
+addsFrom f n x
+  ? n == 0 = f x
+  : 1 + addsFrom (adder n) (n - 1) x
+
+adds :: Int -> Int
+adds n = addsFrom (\y -> y) n 0
