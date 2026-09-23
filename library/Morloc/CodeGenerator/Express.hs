@@ -243,10 +243,10 @@ addNativeRecEntries phs = do
       let carriesFunction =
             or [ maybe False (containsFunT . val) (Map.lookup i argTypes) | Arg i _ <- args ]
       if Set.member midx targets && splittable body && not carriesFunction
-        then split
+        then splitHead
         else return ph
       where
-       split = do
+       splitHead = do
           -- A manifold index, not an expression index: the two counters are
           -- separate, and this also carries the source position over so the
           -- frame that runs the body is the one diagnostics name.

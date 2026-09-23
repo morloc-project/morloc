@@ -61,7 +61,6 @@ module Morloc.CodeGenerator.Grammars.Common
   , makeManifoldDebugInfoLookup
   ) where
 
-import Control.Monad (foldM)
 import qualified Control.Monad.State as CMS
 import Data.Binary (Binary)
 import qualified Data.Map.Strict as Map
@@ -703,9 +702,9 @@ mergeVariantOccurrences ::
   [[(Text, ([a], [Text]))]] ->
   Either Text [(Text, [a])]
 mergeVariantOccurrences _ [] = Right []
-mergeVariantOccurrences name (o : os) = map (\(c, (w, _)) -> (c, w)) <$> foldM merge o os
+mergeVariantOccurrences name (o : os) = map (\(c, (w, _)) -> (c, w)) <$> foldM mergeOccurrence o os
   where
-    merge as bs = mapM (pick (Map.fromList as) (Map.fromList bs)) order
+    mergeOccurrence as bs = mapM (pick (Map.fromList as) (Map.fromList bs)) order
       where
         order = if length as >= length bs then map fst as else map fst bs
     pick am bm c = case (Map.lookup c am, Map.lookup c bm) of
