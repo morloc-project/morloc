@@ -2551,7 +2551,54 @@ checkE i g0 (AppS f xs) t = do
   where
     isBareExistU (ExistU _ _ _) = True
     isBareExistU _ = False
+-- A name in argument position whose own type takes more arguments than the
+-- expected type accepts. `zipWith add3 xs ys` hands a three-argument
+-- function to a slot that wants a two-argument one, so each element of the
+-- result is a one-argument closure. Eta-expanding to the expected arity
+-- builds that closure explicitly. Without it the pool calls the
+-- three-argument manifold with two arguments and dies at run time.
+--
+-- Only a bare reference needs this. An application is already handled by
+-- 'etaExpandSynthE', and a lambda by the LamS rule above.
+checkE i g0 e0 t
+  | isBareFunctionRef e0
+  , FunU as _ <- normalizeType t = do
+      (g1, a1, e1) <- synthE' i g0 e0
+      case snd (stripForallU g1 (normalizeType (apply g1 a1))) of
+        FunU ts _
+          | length ts > length as -> do
+              (g2, e2) <- etaExpandToArity i (length as) g0 e0
+              checkE' i g2 e2 t
+        _ -> reconcileSynth i g1 a1 e1 t
+  where
+    isBareFunctionRef VarS{} = True
+    isBareFunctionRef BndS{} = True
+    isBareFunctionRef CallS{} = True
+    isBareFunctionRef _ = False
 checkE i g1 e1 b = checkEFallback i g1 e1 b
+
+-- | Wrap a function-valued expression in a lambda of the given arity, so a
+-- term that takes more arguments than its context supplies becomes an
+-- explicit closure rather than an under-applied call.
+etaExpandToArity ::
+  Int ->
+  Int ->
+  Gamma ->
+  ExprS Int ManyPoly Int ->
+  MorlocMonad (Gamma, ExprS Int ManyPoly Int)
+etaExpandToArity parentIdx arity g0 e0 = do
+  let (g1, vs) = statefulMap (\g _ -> evarname g "v") g0 ([1 .. arity] :: [Int])
+  argAnnos <- mapM
+    (\v -> do
+       idx <- MM.getCounterWithPos parentIdx
+       return (AnnoS idx idx (BndS v)))
+    vs
+  appIdx <- MM.getCounterWithPos parentIdx
+  -- The moved reference keeps the index it was checked at. A fresh index
+  -- carries only a source location, so the per-index typedef scope that
+  -- resolves a module-local alias in its type would be lost.
+  let appE = AppS (AnnoS parentIdx parentIdx e0) argAnnos
+  return (g1, LamS vs (AnnoS appIdx appIdx appE))
 
 checkEFallback ::
   Int ->
@@ -2565,6 +2612,24 @@ checkEFallback ::
     )
 checkEFallback i g1 e1 b = do
   (g2, a, e2) <- synthE' i g1 e1
+  reconcileSynth i g2 a e2 b
+
+-- | Reconcile an already-synthesized expression against an expected type:
+-- subtype, else coerce, else report. Split out of 'checkEFallback' so a
+-- caller that has synthesized for its own reasons can finish the check
+-- without synthesizing twice.
+reconcileSynth ::
+  Int ->
+  Gamma ->
+  TypeU ->
+  ExprS (Indexed TypeU) ManyPoly Int ->
+  TypeU ->
+  MorlocMonad
+    ( Gamma
+    , TypeU
+    , ExprS (Indexed TypeU) ManyPoly Int
+    )
+reconcileSynth i g2 a e2 b = do
   let a' = apply g2 a
       b' = apply g2 b
   scope <- MM.getGeneralScope i

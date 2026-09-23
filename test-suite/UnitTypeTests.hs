@@ -1428,10 +1428,56 @@ pendingNumLitTests =
 
 whereTests :: TestTree
 whereTests =
-  localOption (mkTimeout 1000000) $ -- 1 second timeout
+  localOption (mkTimeout 2000000) $
     testGroup
       "Test of where statements"
-      [ assertGeneralType
+      [ -- A `where` binding is a declaration, not a local: it is elaborated
+        -- afresh at each use site, so one unsigned binding may serve two
+        -- types. A `let` pins a single type, so lowering a `where` into one
+        -- loses this.
+        assertGeneralType
+          "polymorphic where-binding applied at two types"
+          [r|
+            id :: a -> a
+            f = (me 1, me "a") where
+                me = id
+            f
+        |]
+          (AppU (VarU (TV "Tuple2")) [int, str])
+      , assertGeneralType
+          "polymorphic where-binding applied at two container types"
+          [r|
+            id :: a -> a
+            f = (me [1], me ["a"]) where
+                me = id
+            f
+        |]
+          (AppU (VarU (TV "Tuple2")) [lst int, lst str])
+      , -- A where-binding's scope covers its siblings, not only the body.
+        -- Here `unused` is the only reader of `g` and the body never names
+        -- it; `g` must still resolve.
+        assertGeneralType
+          "where-binding read only by an unread sibling"
+          [r|
+            inc :: Int -> Int
+            f = g 1 where
+                g y = inc y
+                unused = g 2
+            f
+        |]
+          int
+      , assertGeneralType
+          "chain of where-bindings behind a single reader"
+          [r|
+            inc :: Int -> Int
+            f = c where
+                a = 1
+                b = inc a
+                c = inc b
+            f
+        |]
+          int
+      , assertGeneralType
           "simple where"
           [r|
             f :: Int

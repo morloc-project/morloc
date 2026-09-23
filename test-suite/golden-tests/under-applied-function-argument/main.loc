@@ -1,0 +1,40 @@
+module main (zip3, curried, crossLang, sectioned)
+
+import root
+import root-py
+import root-cpp
+
+-- A function used at a lower arity than it takes is a partial application,
+-- and the value it yields is a closure. `zipWith add3 xs ys` asks for a
+-- two-argument function and gets a three-argument one, so each element of
+-- the result is a one-argument closure that the next `zipWith` applies.
+--
+-- The same shape arises whenever a named function reaches a slot whose type
+-- has fewer parameters: through `map`, through a partially applied source
+-- from another language, and through an operator section.
+
+source Py from "src.py" ("add3", "scale2")
+source Cpp from "src.hpp" ("mul3")
+
+add3 :: Int -> Int -> Int -> Int
+scale2 :: Int -> Int -> Int
+mul3 :: Int -> Int -> Int -> Int
+
+apply1 :: [a -> b] -> [a] -> [b]
+apply1 = zipWith (\f x -> f x)
+
+-- root has no zipWith3; this is how one is written.
+zip3 :: [Int] -> [Int] -> [Int] -> [Int]
+zip3 xs ys zs = apply1 (zipWith add3 xs ys) zs
+
+-- map with a two-argument function gives a list of one-argument closures.
+curried :: [Int] -> [Int] -> [Int]
+curried xs ys = apply1 (map scale2 xs) ys
+
+-- The under-applied function is sourced from another language.
+crossLang :: [Int] -> [Int] -> [Int] -> [Int]
+crossLang xs ys zs = apply1 (zipWith mul3 xs ys) zs
+
+-- An operator is a function like any other.
+sectioned :: [Int] -> [Int] -> [Int]
+sectioned xs ys = apply1 (map (+) xs) ys
