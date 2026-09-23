@@ -338,12 +338,23 @@ inferConcreteTypeWeave lang i gscope generalType concreteType =
           -- 'generalTransformType' returns the same NamU as input, so a
           -- naive recursion here loops forever. Compare structurally
           -- before recursing.
+          --
+          -- The step is tried in the index's own module scope first and
+          -- then in the universal one. The index is not always the site
+          -- the type was written at: an eta-reduced definition such as
+          -- @countRows = nrow@ carries the index of the sourced
+          -- function's @source@ statement, which lives in the module
+          -- that supplies the implementation. An alias declared by the
+          -- caller is invisible from there, and reducing it needs the
+          -- program-wide scope.
           mayReducedGType <- evalGeneralStep i generalType
-          case mayReducedGType of
-            (Just reducedGType)
-              | reducedGType /= generalType ->
-                  inferConcreteType lang (Idx i (typeOf reducedGType))
-            _ ->
+          let progressed t = if t /= generalType then Just t else Nothing
+              reduced =
+                (mayReducedGType >>= progressed)
+                  <|> (T.evaluateStep gscopeUni generalType >>= progressed)
+          case reduced of
+            Just reducedGType -> inferConcreteType lang (Idx i (typeOf reducedGType))
+            Nothing ->
               MM.throwSourcedError i $
                 "Cannot infer concrete type for" <+> pretty generalType <> "\nCould not reduce type"
 

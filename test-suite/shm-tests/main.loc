@@ -1,8 +1,7 @@
 module main (stress, bigstress)
 
-import types (Int, Real, List)
-import pyfuncs (make_list)
-import cppfuncs (sum_list, alloc_hold_and_sum)
+import .pyfuncs (make_list)
+import .cppfuncs (sum_list, alloc_hold_and_sum)
 
 stress :: Int -> Real -> Int
 stress n delay = sum_list (make_list n delay)

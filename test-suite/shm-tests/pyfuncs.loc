@@ -1,6 +1,6 @@
 module pyfuncs (*)
 
-import types
+import root-py
 
 make_list :: Int -> Real -> [Int]
 
