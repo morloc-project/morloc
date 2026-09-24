@@ -93,6 +93,7 @@ module Morloc.CodeGenerator.Namespace
   , foldlSE
   , foldlNE
   , polySubExprs
+  , mapPolySubExprs
   , foldlSA
   , foldlNA
 
@@ -423,6 +424,10 @@ data ExecutableExpressionPool
   = SrcCallP Source -- source code
   | PatCallP Pattern -- pattern function
   | LocalCallP Int -- a locally defined function
+  | PapplyP Int
+  -- ^ A partial application of a local function value: applying it to
+  -- fewer arguments than it takes runs the work it does before the rest
+  -- (its stage entry), if it has one.
   | RecCallP Int (Maybe Lang)
   -- ^ Recursive call to manifold. Nothing = same pool, Just lang = foreign pool.
   deriving (Show, Ord, Eq)
@@ -431,6 +436,7 @@ instance Pretty ExecutableExpressionPool where
   pretty (SrcCallP src) = pretty src
   pretty (PatCallP pat) = pretty pat
   pretty (LocalCallP i) = "x" <> pretty i
+  pretty (PapplyP i) = "papply_x" <> pretty i
   pretty (RecCallP i Nothing) = "rec_m" <> pretty i
   pretty (RecCallP i (Just lang)) = "rec_foreign_m" <> pretty i <> "@" <> pretty lang
 
@@ -995,6 +1001,29 @@ foldlNE f b (MapOptionalN_ _ _ _ x) = f b x
 -- one place enumerating every constructor's sub-expressions -- keep it in sync
 -- when adding a 'PolyExpr' constructor or a structural walk will silently drop
 -- the new node's children.
+-- | Apply a function to each immediate subexpression.
+mapPolySubExprs :: (PolyExpr -> PolyExpr) -> PolyExpr -> PolyExpr
+mapPolySubExprs f e = case e of
+  PolyManifold l m form k x -> PolyManifold l m form k (f x)
+  PolyRemoteInterface l t is rf x -> PolyRemoteInterface l t is rf (f x)
+  PolyLet i a b -> PolyLet i (f a) (f b)
+  PolyReturn x -> PolyReturn (f x)
+  PolyApp h xs -> PolyApp (f h) (map f xs)
+  PolyCacheBody lbl m as x -> PolyCacheBody lbl m as (f x)
+  PolyDebugWrap m as x -> PolyDebugWrap m as (f x)
+  PolyList v ts xs -> PolyList v ts (map f xs)
+  PolyTuple v xs -> PolyTuple v [(t, f x) | (t, x) <- xs]
+  PolyRecord o v ps rs -> PolyRecord o v ps [(k, (t, f x)) | (k, (t, x)) <- rs]
+  PolyDoBlock t x -> PolyDoBlock t (f x)
+  PolyEval t x -> PolyEval t (f x)
+  PolyCoerce c t x -> PolyCoerce c t (f x)
+  PolyIf a b c -> PolyIf (f a) (f b) (f c)
+  PolyLoop t ids x -> PolyLoop t ids (f x)
+  PolyLoopContinue xs -> PolyLoopContinue (map f xs)
+  PolyIntrinsic t i xs -> PolyIntrinsic t i (map f xs)
+  PolyVariant t n i xs -> PolyVariant t n i (map f xs)
+  _ -> e
+
 polySubExprs :: PolyExpr -> [PolyExpr]
 polySubExprs (PolyManifold _ _ _ _ e) = [e]
 polySubExprs (PolyRemoteInterface _ _ _ _ e) = [e]
@@ -1774,6 +1803,7 @@ instance Pretty PolyExpr where
   pretty (PolyExe _ (SrcCallP src)) = "PolyExe<" <> pretty (srcAlias src) <> ">"
   pretty (PolyExe _ (PatCallP _)) = "PolyExe<pattern>"
   pretty (PolyExe _ (LocalCallP _)) = "PolyExe<local>"
+  pretty (PolyExe _ (PapplyP _)) = "PolyExe<papply>"
   pretty (PolyExe _ (RecCallP i _)) = "PolyExe<rec_m" <> pretty i <> ">"
   pretty (PolyList _ _ _) = "PolyList"
   pretty (PolyTuple _ xs) = "PolyTuple" <+> pretty (length xs)

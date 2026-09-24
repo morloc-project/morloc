@@ -465,7 +465,7 @@ concrete_rhs_args :: { [TypeU] }
   | concrete_rhs_args atom_type       { $1 ++ [$2] }
 
 non_string_type :: { TypeU }
-  : non_string_non_fun '->' type  { case $3 of { FunU args ret -> FunU ($1 : args) ret; t -> FunU [$1] t } }
+  : non_string_non_fun '->' arrow_rest   { mkArrow $1 $3 }
   | non_string_non_fun            { $1 }
 
 non_string_non_fun :: { TypeU }
@@ -557,10 +557,19 @@ signature :: { CstSigItem }
 --------------------------------------------------------------------
 
 instance_decl :: { [Loc CstExpr] }
-  : 'instance' instance_heads 'where' VLBRACE instance_items VRBRACE
-      { [at $1 (CIstE cn ts (concat $5)) | (cn, ts) <- $2] }
+  : 'instance' instance_context instance_heads 'where' VLBRACE instance_items VRBRACE
+      { [at $1 (CIstE $2 cn ts (concat $6)) | (cn, ts) <- $3] }
+  | 'instance' instance_context instance_heads
+      { [at $1 (CIstE $2 cn ts []) | (cn, ts) <- $3] }
+  | 'instance' instance_heads 'where' VLBRACE instance_items VRBRACE
+      { [at $1 (CIstE [] cn ts (concat $5)) | (cn, ts) <- $2] }
   | 'instance' instance_heads
-      { [at $1 (CIstE cn ts []) | (cn, ts) <- $2] }
+      { [at $1 (CIstE [] cn ts []) | (cn, ts) <- $2] }
+
+-- The constraints an instance's body may assume: @instance Eq a => Eq [a]@.
+instance_context :: { [Constraint] }
+  : single_constraint '=>'                       { [$1] }
+  | '(' class_constraints ')' '=>'               { $2 }
 
 instance_heads :: { [(ClassName, [TypeU])] }
   : UPPER types1                              { [(ClassName (getName $1), $2)] }
@@ -916,11 +925,19 @@ interp_body :: { ([Loc CstExpr], [Text]) }
 --------------------------------------------------------------------
 
 type :: { TypeU }
-  : fun_type                 { $1 }
-  | non_fun_type             { $1 }
+  : arrow_rest               { fst $1 }
 
+-- An arrow chain is one parameter list; a parenthesized arrow after it stays
+-- nested. Morloc does not distinguish the two, but a source's signature says
+-- with it how the source calls a function it is passed.
 fun_type :: { TypeU }
-  : non_fun_type '->' type   { case $3 of { FunU args ret -> FunU ($1 : args) ret; t -> FunU [$1] t } }
+  : non_fun_type '->' arrow_rest   { mkArrow $1 $3 }
+
+-- a type, and whether it is an unparenthesized arrow (after an arrow, one
+-- continues the chain)
+arrow_rest :: { (TypeU, Bool) }
+  : fun_type                 { ($1, True) }
+  | non_fun_type             { ($1, False) }
 
 non_fun_type :: { TypeU }
   : '<' effect_row '>' add_type  {% mkEffectRow $1 $2 >>= \es -> return (mkEffectU es $4) }
@@ -1586,6 +1603,12 @@ findExportSymbolPositions = findModule
     scanExports depth (Located pos (TokUpperName n) _ : rest) = (n, pos) : scanExports depth rest
     scanExports depth (_ : rest) = scanExports depth rest
     scanExports _ [] = []
+
+-- | An arrow from a parameter to what follows it: an unparenthesized arrow
+-- continues the parameter list, a parenthesized one is the result.
+mkArrow :: TypeU -> (TypeU, Bool) -> TypeU
+mkArrow a (FunU args ret, True) = FunU (a : args) ret
+mkArrow a (t, _) = FunU [a] t
 
 buildMembership :: [(T.Text, [T.Text], Pos)] -> [(T.Text, Pos)] -> Map.Map T.Text T.Text
 buildMembership groupHeaders exportSyms = Map.fromList

@@ -599,7 +599,7 @@ resolveImports d0 =
     -- The definition of an instance does not automatically imply export or make
     -- the values available. The instance is ALWAYS relative to the class
     -- definition (either local or imported).
-    findSymbols (ExprI _ (IstE cls _ _)) = Set.singleton $ ClassSymbol cls
+    findSymbols (ExprI _ (IstE cls _ _ _)) = Set.singleton $ ClassSymbol cls
     findSymbols _ = Set.empty
 
     unSymbol :: Symbol -> Text
@@ -694,7 +694,7 @@ handleBinops d0 = do
       where
         f e@(ExprI _ BopE {}) = resolveBinop m0 e >>= f
         f (ExprI i (ModE m es)) = ModE m <$> mapM f es |>> ExprI i
-        f (ExprI i (IstE cls ts es)) = IstE cls ts <$> mapM f es |>> ExprI i
+        f (ExprI i (IstE cls ctx ts es)) = IstE cls ctx ts <$> mapM f es |>> ExprI i
         f (ExprI i (AssE v e es)) = AssE v <$> f e <*> mapM f es |>> ExprI i
         f (ExprI i (LstE es)) = LstE <$> mapM f es |>> ExprI i
         f (ExprI i (TupE es)) = TupE <$> mapM f es |>> ExprI i
@@ -773,7 +773,7 @@ hoistEvals = DAG.mapNodeM hoistNode
   where
     hoistNode :: ExprI -> MorlocMonad ExprI
     hoistNode (ExprI i (ModE m es)) = ExprI i . ModE m <$> mapM hoistNode es
-    hoistNode (ExprI i (IstE cls ts es)) = ExprI i . IstE cls ts <$> mapM hoistNode es
+    hoistNode (ExprI i (IstE cls ctx ts es)) = ExprI i . IstE cls ctx ts <$> mapM hoistNode es
     hoistNode (ExprI i (AssE v rhs whereDecls)) = do
       rhs' <- hoistBoundary rhs
       whereDecls' <- mapM hoistNode whereDecls
@@ -948,7 +948,7 @@ collectTags fullDag = do
             Nothing -> config
       MM.modify (\s -> s {stateManifoldConfig = Map.insert i config' (stateManifoldConfig s)})
     f (ExprI _ (ModE _ es)) = mapM_ f es
-    f (ExprI _ (IstE _ _ es)) = mapM_ f es
+    f (ExprI _ (IstE _ _ _ es)) = mapM_ f es
     f (ExprI _ (AssE _ e es)) = mapM_ f (e : es)
     f (ExprI _ (LstE es)) = mapM_ f es
     f (ExprI _ (TupE es)) = mapM_ f es
@@ -1221,7 +1221,7 @@ checkInstanceOnRoot dag gscope =
     findInstanceTypes :: ExprI -> [(Int, [TypeU])]
     findInstanceTypes = go
       where
-        go (ExprI i (IstE _ ts _)) = [(i, ts)]
+        go (ExprI i (IstE _ _ ts _)) = [(i, ts)]
         go (ExprI _ (ModE _ es)) = concatMap go es
         go _ = []
 
@@ -1334,7 +1334,7 @@ refineKinds dag = do
     collectAllTypeDefParams (ExprI _ (ModE _ es)) = concatMap collectAllTypeDefParams es
     collectAllTypeDefParams (ExprI _ (TypE (ExprTypeE _ v ps _ _ _))) = [(v, ps)]
     collectAllTypeDefParams (ExprI _ (AssE _ e es)) = concatMap collectAllTypeDefParams (e:es)
-    collectAllTypeDefParams (ExprI _ (IstE _ _ es)) = concatMap collectAllTypeDefParams es
+    collectAllTypeDefParams (ExprI _ (IstE _ _ _ es)) = concatMap collectAllTypeDefParams es
     collectAllTypeDefParams _ = []
 
     refineExprKinds :: Map TVar [Kind] -> ExprI -> MorlocMonad ExprI
@@ -1361,8 +1361,8 @@ refineKinds dag = do
       in ExprI i (SigE (Signature v lng et { etype = newType, econs = newCons }))
     promoteLabelKindsExpr (ExprI i (AssE v e es)) =
       ExprI i (AssE v (promoteLabelKindsExpr e) (map promoteLabelKindsExpr es))
-    promoteLabelKindsExpr (ExprI i (IstE c ts es)) =
-      ExprI i (IstE c ts (map promoteLabelKindsExpr es))
+    promoteLabelKindsExpr (ExprI i (IstE c ctx ts es)) =
+      ExprI i (IstE c ctx ts (map promoteLabelKindsExpr es))
     promoteLabelKindsExpr e = e
 
     -- | Given the @enatLabels@ map (var -> arg index) and the function
@@ -1410,8 +1410,8 @@ refineKinds dag = do
       ExprI i (ModE m (map augmentImplicitConstraints es))
     augmentImplicitConstraints (ExprI i (AssE v e es)) =
       ExprI i (AssE v (augmentImplicitConstraints e) (map augmentImplicitConstraints es))
-    augmentImplicitConstraints (ExprI i (IstE c ts es)) =
-      ExprI i (IstE c ts (map augmentImplicitConstraints es))
+    augmentImplicitConstraints (ExprI i (IstE c ctx ts es)) =
+      ExprI i (IstE c ctx ts (map augmentImplicitConstraints es))
     augmentImplicitConstraints e = e
 
     -- Walk a TypeU and collect implicit constraints from the recognised

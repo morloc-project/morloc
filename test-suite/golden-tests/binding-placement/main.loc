@@ -1,0 +1,59 @@
+module main
+  ( letGuarded
+  , letInBranch
+  , whereInTry
+  , letInTry
+  , doLetAfterEffect
+  , barrierA
+  , barrierB
+  )
+
+import root-py
+
+effect IO
+
+-- Where a binding is evaluated is fixed by where it is used: a binding read
+-- only in one arm of a conditional, or only inside `@try`, is evaluated there,
+-- so a failure it raises is observed only on that path. A pure `let` in a
+-- do-block is never evaluated before an effect written above it.
+
+source Py from "helpers.py" ("note")
+note :: Str -> <IO> Unit
+
+-- The divisor is zero on the path that does not read `q`.
+letGuarded :: Int -> Int -> Int
+letGuarded a b = let q = a // b in (? b == 0 = 0 : q)
+
+letInBranch :: Int -> Int -> Int
+letInBranch a b = 100 + (let q = a // b in (? b == 0 = 0 : q))
+
+-- The division fails inside `@try`, so it is caught.
+whereInTry :: Int -> Int -> Int
+whereInTry a b = match (@try q) | (Ok v) = v | (Err _) = 0 - 1
+  where
+    q = a // b
+
+letInTry :: Int -> Int -> Int
+letInTry a b = let q = a // b in (match (@try q) | (Ok v) = v | (Err _) = 0 - 1)
+
+-- `note "before"` runs, and is recorded, before the division fails.
+doLetAfterEffect :: Int -> Int -> <IO> Int
+doLetAfterEffect a b = do
+  note "before"
+  let y = a // b
+  note "after"
+  y
+
+-- `b` is read only in the arm where the divisor is not zero, whichever order
+-- the bindings are declared in.
+barrierA :: Int -> Int -> Int
+barrierA n d = a + (? d == 0 = a : b)
+  where
+    b = n // d
+    a = n + 1
+
+barrierB :: Int -> Int -> Int
+barrierB n d = a + (? d == 0 = a : b)
+  where
+    a = n + 1
+    b = n // d

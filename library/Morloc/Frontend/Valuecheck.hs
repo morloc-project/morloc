@@ -179,6 +179,7 @@ check (IfP _ c t e) = mapM_ check [c, t, e]
 check (DoBlockP _ e) = check e
 check (EvalP _ e) = check e
 check (CoerceP _ _ e) = check e
+check (IntrinsicP _ _ es) = mapM_ check es
 check _ = return ()
 
 -- check for contradictions in one pair of expressions
@@ -384,6 +385,7 @@ substituteEVar oldVar newVar e0
     f used idx (DoBlockP g e) = DoBlockP g (f used idx e)
     f used idx (EvalP g e) = EvalP g (f used idx e)
     f used idx (CoerceP c g e) = CoerceP c g (f used idx e)
+    f used idx (IntrinsicP g intr es) = IntrinsicP g intr (map (f used idx) es)
     f _ _ e = e
 
     relabelLam :: Set.Set EVar -> Int -> [EVar] -> E -> (Set.Set EVar, Int, [EVar], E)
@@ -426,6 +428,7 @@ freeTerms = f Set.empty
     f boundterms (DoBlockP _ e) = f boundterms e
     f boundterms (EvalP _ e) = f boundterms e
     f boundterms (CoerceP _ _ e) = f boundterms e
+    f boundterms (IntrinsicP _ _ es) = Set.unions . map (f boundterms) $ es
     f _ _ = Set.empty
 
 substituteExpr :: EVar -> E -> E -> E

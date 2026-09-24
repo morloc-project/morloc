@@ -32,6 +32,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
     -- * Program construction
   , buildProgram
   , buildProgramM
+  , papplySteps
 
     -- * Lowering: serialize/deserialize expansion
   , expandSerialize
@@ -87,6 +88,7 @@ import Morloc.CodeGenerator.Grammars.Common
   , nvarNamer
   , provideClosure
   , serialClosuresOf
+  , StageEntry (..)
   , svarNamer
   )
 import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..))
@@ -325,6 +327,9 @@ data IProgram = IProgram
     -- result schema). Drives the home-pool serial dispatch wrapper and the reify
     -- path for defunctionalized closures that cross a language boundary. Empty
     -- for pools that produce no crossing closures.
+  , ipStageTable :: Map.Map Int StageEntry
+    -- ^ The program's stage table, the same in each pool, read by its
+    -- @mlc_papply@.
   }
   deriving (Generic)
 
@@ -363,9 +368,19 @@ buildProgram labels templates sources includes manifolds es schemas closureTable
         , ipSchemaTable = schemas
         , ipLogTemplates = templates'
         , ipClosureTable = closureTable
+        , ipStageTable = Map.empty
         }
 
 -- | Build an IProgram monadically (for C++ where translateSegment runs in a monad).
+-- | A partial application written one argument at a time: @step ts acc x@
+-- applies @acc@, a function of the argument types @ts@ (then the rest), to
+-- @x@, its first argument.
+papplySteps :: ([MDoc] -> MDoc -> MDoc -> MDoc) -> [MDoc] -> MDoc -> [MDoc] -> MDoc
+papplySteps step = go
+  where
+    go ts@(_ : rest) acc (x : xs) = go rest (step ts acc x) xs
+    go _ acc _ = acc
+
 buildProgramM ::
   (Monad m) =>
   Map.Map Int Text ->
@@ -556,6 +571,11 @@ data LowerConfig m = LowerConfig
   -- element type (a bare @impl Fn@ is illegal in a Vec/tuple/struct field, and
   -- the explicit cast is needed because a @vec![..]@ has no per-element declared
   -- type to drive the unsizing coercion). Monadic so the cast type can render.
+  , lcPapply :: TypeF -> [TypeM] -> MDoc -> [MDoc] -> m MDoc
+  -- ^ Partially apply a local function value (a 'PapplyP'): the result type
+  -- (the function of the remaining arguments), the applied arguments' types,
+  -- the function, and the arguments. The pool's runtime runs the function's
+  -- stage entry when it has one ('mlc_papply').
   , lcApplyClosure :: MDoc -> [MDoc] -> MDoc
   -- ^ Apply a local function value (a 'LocalCallP') to its arguments. Default is
   -- a direct call @f(args)@; the Rust member emits @f.callN(args)@ (the fat/thin
@@ -677,7 +697,7 @@ data LowerConfig m = LowerConfig
   -- Returns Nothing if dedup'd (C++), Just funcDef otherwise. The mid
   -- is threaded so the per-manifold error-wrap can look up user name
   -- and srcloc for the trace line.
-  , lcMakePass :: MDoc -> MDoc -> [Arg TypeM] -> m MDoc
+  , lcMakePass :: MDoc -> TypeM -> MDoc -> [Arg TypeM] -> m MDoc
   -- ^ Render a whole function/operator passed to a higher-order function
   -- (@ManifoldPass@), given the closure's own callable signature (from
   -- 'lcClosureSig'), the manifold name and its parameters. Most
@@ -685,7 +705,7 @@ data LowerConfig m = LowerConfig
   -- closure that adapts each argument to the manifold's parameter convention
   -- (deref a Copy scalar, forward a reference) since a bare @unsafe fn@ does
   -- not implement @Fn@.
-  , lcMakeLambda :: MDoc -> MDoc -> [Arg TypeM] -> [Arg TypeM] -> m MDoc
+  , lcMakeLambda :: MDoc -> TypeM -> MDoc -> [Arg TypeM] -> [Arg TypeM] -> m MDoc
   -- ^ closureSig, name, contextArgs, boundArgs - partial application
   -- expression. @closureSig@ is the language's rendering of the closure's own
   -- callable signature (from 'lcClosureSig'); languages that do not need it
@@ -1356,6 +1376,14 @@ lowerNativeExprRaw cfg origExpr (AppExeN_ _ (LocalCallP idx) xs) = do
   owns <- argOwnerships cfg origExpr
   let argTypes = map fst xs
   return $ mergePoolDocs (\es -> lcApplyClosure cfg (nvarNamer idx) (zipWith3 (\own t e -> lcSourcedArg cfg ClosureArg own t e) owns argTypes es)) (map snd xs)
+-- A partial application of a closure: the pool's runtime runs its stage
+-- entry, if it has one, and returns the closure of the remaining arguments.
+lowerNativeExprRaw cfg origExpr (AppExeN_ t (PapplyP idx) xs) = do
+  owns <- argOwnerships cfg origExpr
+  let argTypes = map fst xs
+      es = zipWith3 (\own at e -> lcSourcedArg cfg ClosureArg own at e) owns argTypes (map (poolExpr . snd) xs)
+  call <- lcPapply cfg t argTypes (nvarNamer idx) es
+  return $ mergePoolDocs (const call) (map snd xs)
 lowerNativeExprRaw cfg origExpr (AppExeN_ _ (RecCallP mid _) xs) = do
   owns <- argOwnerships cfg origExpr
   let argTypes = map fst xs
@@ -1430,6 +1458,7 @@ lowerNativeExprRaw cfg _ (DeserializeN_ t s x) = do
 lowerNativeExprRaw cfg _ (ExeN_ _ (SrcCallP src)) = return $ defaultValue {poolExpr = lcSrcName cfg src}
 lowerNativeExprRaw _ _ (ExeN_ _ (PatCallP _)) = error "Unreachable: patterns are always used in applications"
 lowerNativeExprRaw _ _ (ExeN_ _ (LocalCallP idx)) = return $ defaultValue {poolExpr = nvarNamer idx}
+lowerNativeExprRaw _ _ (ExeN_ _ (PapplyP idx)) = return $ defaultValue {poolExpr = nvarNamer idx}
 lowerNativeExprRaw _ _ (ExeN_ _ (RecCallP mid _)) = return $ defaultValue {poolExpr = manNamer mid}
 lowerNativeExprRaw cfg origExpr (ListN_ v t xs) = do
   let elemEs = case origExpr of ListN _ _ es -> es; _ -> []
@@ -1937,8 +1966,9 @@ lowerManifold cfg m form headForm bodyType bodyPool = do
         (ManifoldPass _) -> do
           -- An unapplied manifold's callable signature is its whole type:
           -- every parameter is still to come.
-          sig <- lcClosureSig cfg (Function [t | Arg _ t <- args] bodyType)
-          lcMakePass cfg sig mname args
+          let sigType = Function [t | Arg _ t <- args] bodyType
+          sig <- lcClosureSig cfg sigType
+          lcMakePass cfg sig sigType mname args
         -- Wrap each manifold-call argument through lcSourcedArg (identity for
         -- most languages; the Rust member adapts each native arg to the callee's
         -- convention by ownership, so an already-borrowed arg passes as `&T` and
@@ -1963,7 +1993,7 @@ lowerManifold cfg m form headForm bodyType bodyPool = do
           -- from the bound args and the body's type.
           let sigType = Function [typeMof t | Arg _ t <- vs] bodyType
           sig <- lcClosureSig cfg sigType
-          lcMakeLambda cfg sig mname (typeMofRs rs) [Arg i (typeMof t) | Arg i t <- vs]
+          lcMakeLambda cfg sig sigType mname (typeMofRs rs) [Arg i (typeMof t) | Arg i t <- vs]
   return $
     PoolDocs
       { poolCompleteManifolds = completeManifolds <> maybeToList maybeNewManifold

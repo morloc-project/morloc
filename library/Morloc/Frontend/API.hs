@@ -16,6 +16,7 @@ module Morloc.Frontend.API
   ( parse
   , Parser.readType
   , Typecheck.typecheck
+  , Typecheck.validate
   , Typecheck.resolveTypes
   , Valuecheck.valuecheck
   ) where

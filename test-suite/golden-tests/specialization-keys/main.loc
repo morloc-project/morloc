@@ -1,0 +1,80 @@
+module main
+  ( scaleThree
+  , halveInt
+  , twiceBoth
+  , optId
+  , countdownPlus
+  , labelReal
+  , labelCelsius
+  , doubleThree
+  )
+
+import root-py
+
+-- A definition is typechecked once per type it is used at, from its
+-- signature, and each use gets the elaboration at its own type. These cases
+-- pin what that elaboration must decide per use: a literal's type from the
+-- constraint on it, one definition at two types in one command, an optional
+-- instantiation, a recursive definition used from another, and instances
+-- chosen by alias.
+
+
+-- `3` must be a Real: the signature requires Numeric, which Int is not
+scale :: Numeric a => a -> a
+scale x = x * 0.5
+
+scaleThree :: Real
+scaleThree = scale 3
+
+halve :: Integral a => a -> a
+halve x = x // 2
+
+halveInt :: Int -> Int
+halveInt n = halve n
+
+twice :: (a -> a) -> a -> a
+twice f x = f (f x)
+
+twiceBoth :: Int -> Str -> (Int, Str)
+twiceBoth n s = (twice (\i -> i + 1) n, twice (\t -> t <> "!") s)
+
+idd :: a -> a
+idd x = x
+
+optId :: ?Int -> ?Int
+optId x = idd x
+
+countdown :: Int -> Int
+countdown n
+  ? n <= 0 = 0
+  : countdown (n - 1)
+
+countdownPlus :: Int -> Int
+countdownPlus n = countdown n + 1
+
+newtype Celsius = Real
+
+class Describe a where
+  describe :: a -> Str
+
+instance Describe Real where
+  source Py from "helpers.py" ("describe_real" as describe)
+
+instance Describe Celsius where
+  source Py from "helpers.py" ("describe_celsius" as describe)
+
+label :: Describe a => a -> Str
+label x = describe x
+
+labelReal :: Real -> Str
+labelReal x = label x
+
+labelCelsius :: Celsius -> Str
+labelCelsius x = label x
+
+-- `3` is a Real here too: Numeric is required even though only `+` is used
+doubleIt :: Numeric a => a -> a
+doubleIt x = x + x
+
+doubleThree :: Real
+doubleThree = doubleIt 3 / 4

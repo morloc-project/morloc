@@ -41,7 +41,6 @@ module Morloc.CodeGenerator.Serial
   ) where
 
 import qualified Data.Char as C
-import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Set as Set
 import qualified Data.Text as DT
 import qualified Morloc.BaseTypes as BT
@@ -51,7 +50,7 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
-import Morloc.Typecheck.Internal (apply, qualify, substitute, subtype, unqualify)
+import Morloc.Typecheck.Internal (apply, emptyGamma, qualify, substitute, subtype, unqualify)
 
 -- | Classification of how an aliased outer type maps onto the wire form.
 -- Computed by 'makeSerialAST'' from the gscope alias body's outer head.
@@ -1395,10 +1394,6 @@ typeFHead _ = Nothing
 --
 -- The table is filtered to the language before use, so a miss here means the
 -- filter and this lookup have gone out of step.
-emptyGamma :: Gamma
-emptyGamma =
-  Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty [] Nothing Map.empty [] Set.empty
-
 packerSources :: Lang -> Int -> PackerInstance -> MorlocMonad (Source, Source)
 packerSources lang m0 pin = case Map.lookup lang (piSources pin) of
   (Just srcs) -> return srcs

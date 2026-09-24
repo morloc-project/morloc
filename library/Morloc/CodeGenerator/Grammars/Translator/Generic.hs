@@ -119,7 +119,8 @@ translateBuiltin lang desc srcs es = do
   -- Keep the preamble (runtime bootstrap) at module top / parent load, and pass
   -- the user includes separately so interpreted pools can defer them past the
   -- worker fork (macOS fork-safety); see 'ipIncludes'.
-  let program = buildProgram labels templates preambleDocs includeDocs mDocs es schemas closureTable
+  stageTable <- stageTableEntries
+  let program = (buildProgram labels templates preambleDocs includeDocs mDocs es schemas closureTable) {ipStageTable = stageTable}
 
   let code = printProgram desc program
   let exefile = ML.makeExecutablePoolName lang
@@ -174,7 +175,8 @@ translateExternal cmd lang desc srcs es = do
   closureTable <- Map.map (renderClosureCodecs desc) <$> computeClosureSchemas lang es
   -- Out-of-process codegen path: includes stay at module top (no fork-defer),
   -- so pass them as sources and leave the deferred-includes slot empty.
-  let program = buildProgram labels templates includeDocs [] mDocs es schemas closureTable
+  stageTable <- stageTableEntries
+  let program = (buildProgram labels templates includeDocs [] mDocs es schemas closureTable) {ipStageTable = stageTable}
 
   -- find the lang.yaml path for the codegen tool
   let langYamlPath = home </> "lang" </> T.unpack (ML.langName lang) </> "lang.yaml"
@@ -522,6 +524,13 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
                 }
         , lcStoreField = \_ v -> return v
         , lcApplyClosure = \callee args -> callee <> tupled args
+        , lcPapply = \_ _ callee args ->
+            return $ "mlc_papply" <> tupled
+              [ callee
+              , case ldListStyle desc of
+                  BracketList -> list args
+                  _ -> pretty (ldGenericListFn desc) <> tupled args
+              ]
         , lcForeignCall = \socketFile mid args ->
             let midDoc = pretty mid <> pretty (ldForeignCallIntSuffix desc)
                 argsDoc = case ldListStyle desc of
@@ -615,11 +624,11 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
                     let endKw = ldBlockEnd desc
                      in vsep [header, indent 4 (vsep $ wrapError (priorLines <> [body])), pretty endKw]
         , lcClosureSig = \_ -> return ""
-        , lcMakePass = \_sig mname _ ->
+        , lcMakePass = \_sig _ mname _ ->
             return . pretty $
               substituteT (ldPassTemplate desc)
                 [("fn", render mname), ("mid", T.drop 1 (render mname))]
-        , lcMakeLambda = \_sig mname contextArgs boundArgs ->
+        , lcMakeLambda = \_sig _ mname contextArgs boundArgs ->
             let ctxNames = map argNamer contextArgs
                 bndNames = map argNamer boundArgs
                 tmpl = ldPartialTemplate desc
@@ -634,6 +643,13 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
                 -- introspect its closures (R) tag them with their manifold id and
                 -- captured values at construction, for later reification.
                 midText = T.drop 1 (render mname)
+                -- Each context value bound again in the closure's own scope,
+                -- for a language whose closures capture names rather than
+                -- values (R): a later rebinding of the name, as a loop
+                -- carrying it does, must not reach a closure already built.
+                bindContext = T.concat
+                  [ n <> " " <> ldAssignOp desc <> " " <> n <> "; "
+                  | n <- map render ctxNames ]
                 capturedList = render $ case ldListStyle desc of
                   BracketList -> list ctxNames
                   _ -> pretty (ldGenericListFn desc) <> tupled ctxNames
@@ -646,6 +662,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
                     , ("bound_args", boundArgsText)
                     , ("mid", midText)
                     , ("captured_list", capturedList)
+                    , ("bind_context", bindContext)
                     ]
         , lcRegisterSchema = registerSchemaIndex
         , lcTableImportFn = ldTableImportFn desc
@@ -1432,7 +1449,7 @@ printProgram desc prog =
     -- interpreted templates place inside a deferred post-fork loader, (3)
     -- manifolds, (4) dispatch.
     sections =
-      [ vsep (map pretty (ipSources prog) ++ [schemaTableInit, closureTableInit])
+      [ vsep (map pretty (ipSources prog) ++ [schemaTableInit, closureTableInit, stageTableInit])
       , vsep (map pretty (ipIncludes prog))
       , vsep (map pretty (ipManifolds prog) ++ logRebindings)
       , templateDispatch
@@ -1453,9 +1470,23 @@ printProgram desc prog =
                       (ldClosureTableEntry desc)
                       [ ("mid", T.pack (show mid))
                       , ("caps", render (closureLangList (map pretty caps)))
+                      , ("bnds", render (closureLangList (map pretty bnds)))
                       ]
-                | (mid, (caps, _, _)) <- Map.toAscList (ipClosureTable prog)
+                | (mid, (caps, bnds, _)) <- Map.toAscList (ipClosureTable prog)
                 ]
+
+    -- The stage table ('StageEntry'): flat mid -> (context size, stage
+    -- point, stage mid).
+    stageEntries = [(f, [n, k, st]) | (f, StageEntry n k st) <- Map.toAscList (ipStageTable prog)]
+    stageTableInit = case ldListStyle desc of
+      BracketList ->
+        "mlc_stage_table = {"
+          <> hsep (punctuate "," [pretty f <> ": " <> tupled (map pretty xs) | (f, xs) <- stageEntries])
+          <> "}"
+      _ ->
+        "mlc_stage_table <- list("
+          <> hsep (punctuate "," [dquotes (pretty f) <> " = c" <> tupled (map (\x -> pretty x <> "L") xs) | (f, xs) <- stageEntries])
+          <> ")"
 
     -- Render a list literal of schema strings in the language's own style
     -- (Python brackets vs the generic list function), for the closure table and
@@ -1719,3 +1750,4 @@ codecList desc xs = case ldListStyle desc of
 renderClosureCodecs :: LangDescriptor -> ([SerialAST], [SerialAST], SerialAST) -> ([Text], [Text], Text)
 renderClosureCodecs desc (caps, bnds, res) =
   (map (render . codecDoc desc) caps, map (render . codecDoc desc) bnds, render (codecDoc desc res))
+

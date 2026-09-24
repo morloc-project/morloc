@@ -1,0 +1,111 @@
+module main
+  ( onceDirect
+  , onceUnderLambda
+  , twice
+  , unusedRaises
+  , branchRaises
+  , twiceRaises
+  , thunkArgOnce
+  , nestedThunkArgOnce
+  , unusedFnRaises
+  , partialArgOnce
+  )
+
+import root-py
+
+-- An argument is evaluated once, at the application, however many times the
+-- parameter is referenced and wherever the references sit
+-- (spec/types/effects.md, law 5).
+--
+-- `tick` records each of its evaluations in `tick.log` and `ticks` reads the
+-- count after its argument is computed, so each count export prints how many
+-- times `tick` ran. A file, not process state, because pool workers are
+-- separate processes.
+
+effect IO
+
+source Py from "helpers.py" ("tick", "ticks", "say")
+
+tick :: Int -> Int
+ticks :: a -> Int
+say :: Int -> <IO> Int
+
+useOnce :: Int -> Int
+useOnce y = y + 1
+
+useUnderLambda :: Int -> [Int] -> [Int]
+useUnderLambda y xs = map (\i -> i + y) xs
+
+useTwice :: Int -> Int
+useTwice y = y + y
+
+onceDirect :: Int -> Int
+onceDirect n = ticks (useOnce (tick n))
+
+onceUnderLambda :: Int -> Int
+onceUnderLambda n = ticks (useUnderLambda (tick n) [1, 2, 3])
+
+twice :: Int -> Int
+twice n = ticks (useTwice (tick n))
+
+-- The divisor is zero, so evaluating the argument raises. All three raise,
+-- because the argument is evaluated at the application whether the parameter
+-- is read zero, one, or two times.
+ignore :: Int -> Int -> Int
+ignore x y = x
+
+pick :: Int -> Int -> Int
+pick x y
+  ? x == 0 = 0
+  : y
+
+pickTwice :: Int -> Int -> Int
+pickTwice x y
+  ? x == 0 = 0
+  : y + y
+
+unusedRaises :: Int -> Int
+unusedRaises a = ignore 0 (a // 0)
+
+branchRaises :: Int -> Int
+branchRaises a = pick 0 (a // 0)
+
+twiceRaises :: Int -> Int
+twiceRaises a = pickTwice 0 (a // 0)
+
+-- A suspension handed over as an argument is built at the application, and
+-- the pure arguments it is built from are evaluated then, once, however many
+-- times the suspension is forced.
+forceTwice :: <IO> Int -> <IO> Int
+forceTwice a = do
+  x <- a
+  y <- a
+  ticks (x + y)
+
+thunkArgOnce :: Int -> <IO> Int
+thunkArgOnce n = forceTwice (say (tick n))
+
+sayNext :: Int -> <IO> Int
+sayNext x = say (x + 1)
+
+nestedThunkArgOnce :: Int -> <IO> Int
+nestedThunkArgOnce n = forceTwice (sayNext (tick n))
+
+-- A function-valued argument computed by a conditional whose condition
+-- raises: the condition is evaluated at the application.
+ignoreFn :: (Int -> Int) -> Int -> Int
+ignoreFn f x = x
+
+unusedFnRaises :: Int -> Int
+unusedFnRaises a = ignoreFn (? (@throw "boom") = (\x -> x) : (\x -> x + 1)) a
+
+-- a computed argument of a partial application is evaluated when the
+-- function is applied, not at each call of the function that results
+plus :: Int -> Int -> Int
+plus a b = a + b
+
+callTwice :: (Int -> Int) -> Int
+callTwice h = h 2 + h 3
+
+partialArgOnce :: Int -> Int
+partialArgOnce n = ticks (callTwice (plus (tick n)))

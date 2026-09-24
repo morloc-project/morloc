@@ -24,6 +24,7 @@ module Morloc.Typecheck.Internal
   , evarname
   , qualify
   , unqualify
+  , emptyGamma
 
     -- * Typeclasses
   , Applicable (..)
@@ -41,6 +42,7 @@ module Morloc.Typecheck.Internal
   , substitute
   , rename
   , renameEType
+  , renameWithMap
   , cleanTypeName
   , prettyTypeU
   , prettyTypeUPair
@@ -119,6 +121,17 @@ import qualified Morloc.TypeEval as TE
 
 qualify :: [TVar] -> TypeU -> TypeU
 qualify vs t = foldr (\v -> ForallU v) t vs
+
+-- | A context with nothing in it, for ordinary inference.
+emptyGamma :: Gamma
+emptyGamma =
+  Gamma
+    { gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty
+    , gammaSolved = Map.empty, gammaDeferred = [], gammaKindSubs = Map.empty
+    , gammaEffSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing
+    , gammaIntVals = Map.empty, gammaPendingNumLits = [], gammaPositionalReceivers = Set.empty
+    , gammaRigid = Nothing, gammaScoped = Map.empty
+    }
 
 unqualify :: TypeU -> ([TVar], TypeU)
 unqualify (ForallU v (unqualify -> (vs, t))) = (v : vs, t)
@@ -577,7 +590,7 @@ slotSpacing = 256
 (++>) g xs = foldl' (+>) g xs
 
 isSubtypeOf2 :: Scope -> TypeU -> TypeU -> Bool
-isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty [] Nothing Map.empty [] Set.empty) of
+isSubtypeOf2 scope a b = case subtype scope a b emptyGamma of
   (Left _) -> False
   (Right _) -> True
 

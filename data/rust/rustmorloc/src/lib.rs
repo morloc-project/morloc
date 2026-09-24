@@ -2025,61 +2025,67 @@ pub fn require_origin(origin: Option<&ClosureOrigin>) -> ClosureOrigin {
 }
 
 macro_rules! morloc_fn {
-    ($trait:ident, $closure:ident, $fnptr:ident, $call:ident, $reify:ident, $( ($A:ident, $a:ident) ),+ ) => {
-        pub trait $trait<$($A,)+ R> {
-            fn $call(&self, $($a: &$A,)+) -> R;
+    ($trait:ident, $closure:ident, $fnptr:ident, $call:ident, $reify:ident,
+     $apply:ident, $prev:ident, $pcall:ident, $preify:ident, $pap:ident, $staged:ident, $apply1:ident,
+     ($H:ident, $h:ident) $(, ($T:ident, $t:ident))* ) => {
+        pub trait $trait<$H, $($T,)* R> {
+            fn $call(&self, $h: &$H, $($t: &$T,)*) -> R;
             fn $reify(&self) -> Option<&ClosureOrigin>;
+            /// Apply to the first argument the way morloc does, when this
+            /// value knows how (see '$apply1'); `None` otherwise.
+            fn $apply(&self, _x: &$H) -> Option<std::rc::Rc<dyn $prev<$($T,)* R>>> { None }
         }
         // A plain native closure. Host code declares a higher-order parameter
         // as either `F: Fn(&A..) -> R` or `impl MorlocFnN<A.., R>`; this impl
         // is what lets one generated form satisfy both. It has no origin, so a
         // value reaching morloc this way cannot be sent onward.
-        impl<$($A,)+ R, F: Fn($(&$A,)+) -> R> $trait<$($A,)+ R> for F {
+        impl<$H, $($T,)* R, F: Fn(&$H, $(&$T,)*) -> R> $trait<$H, $($T,)* R> for F {
             #[inline]
-            fn $call(&self, $($a: &$A,)+) -> R { self($($a,)+) }
+            fn $call(&self, $h: &$H, $($t: &$T,)*) -> R { self($h, $($t,)*) }
             fn $reify(&self) -> Option<&ClosureOrigin> { None }
         }
         // A function value is held as `Rc<dyn $trait>`, and that is itself a
         // function value, so it can be passed wherever one is taken.
-        impl<$($A,)+ R, T: $trait<$($A,)+ R> + ?Sized> $trait<$($A,)+ R> for std::rc::Rc<T> {
+        impl<$H, $($T,)* R, T: $trait<$H, $($T,)* R> + ?Sized> $trait<$H, $($T,)* R> for std::rc::Rc<T> {
             #[inline]
-            fn $call(&self, $($a: &$A,)+) -> R { (**self).$call($($a,)+) }
+            fn $call(&self, $h: &$H, $($t: &$T,)*) -> R { (**self).$call($h, $($t,)*) }
             fn $reify(&self) -> Option<&ClosureOrigin> { (**self).$reify() }
+            fn $apply(&self, x: &$H) -> Option<std::rc::Rc<dyn $prev<$($T,)* R>>> { (**self).$apply(x) }
         }
         /// A morloc-built function value: the environment it captured, the
         /// manifold call, and how to reify that environment. `call` and `mk`
         /// are non-capturing, so they are plain function pointers reading the
         /// one copy of the captures -- the whole value is a single allocation
         /// and the captures are copied once.
-        pub struct $closure<C, $($A,)+ R> {
+        pub struct $closure<C, $H, $($T,)* R> {
             caps: C,
-            call: fn(&C, $(&$A,)+) -> R,
+            call: fn(&C, &$H, $(&$T,)*) -> R,
             mk: Option<fn(&C) -> ClosureOrigin>,
             origin: std::cell::OnceCell<ClosureOrigin>,
         }
-        impl<C, $($A,)+ R> $closure<C, $($A,)+ R> {
+        impl<C, $H, $($T,)* R> $closure<C, $H, $($T,)* R> {
             /// A closure that can be reified: the origin is built on first
             /// use and cached, so one that never crosses pays nothing.
-            pub fn new(caps: C, call: fn(&C, $(&$A,)+) -> R, mk: fn(&C) -> ClosureOrigin) -> Self {
+            pub fn new(caps: C, call: fn(&C, &$H, $(&$T,)*) -> R, mk: fn(&C) -> ClosureOrigin) -> Self {
                 Self { caps, call, mk: Some(mk), origin: std::cell::OnceCell::new() }
             }
             /// A closure with no dispatch entry, so nothing can call back
             /// into it and it has no origin to offer.
-            pub fn local(caps: C, call: fn(&C, $(&$A,)+) -> R) -> Self {
+            pub fn local(caps: C, call: fn(&C, &$H, $(&$T,)*) -> R) -> Self {
                 Self { caps, call, mk: None, origin: std::cell::OnceCell::new() }
             }
             /// A closure reflected from another pool. It answers with the
             /// origin it ARRIVED with, so a value crossing A -> B -> C calls
             /// back to A rather than to B.
-            pub fn proxy(caps: C, call: fn(&C, $(&$A,)+) -> R, origin: ClosureOrigin) -> Self {
+            pub fn proxy(caps: C, call: fn(&C, &$H, $(&$T,)*) -> R, origin: ClosureOrigin) -> Self {
                 let cell = std::cell::OnceCell::new();
                 let _ = cell.set(origin);
                 Self { caps, call, mk: None, origin: cell }
             }
         }
-        impl<C, $($A,)+ R> $trait<$($A,)+ R> for $closure<C, $($A,)+ R> {
+        impl<C, $H, $($T,)* R> $trait<$H, $($T,)* R> for $closure<C, $H, $($T,)* R> {
             #[inline]
-            fn $call(&self, $($a: &$A,)+) -> R { (self.call)(&self.caps, $($a,)+) }
+            fn $call(&self, $h: &$H, $($t: &$T,)*) -> R { (self.call)(&self.caps, $h, $($t,)*) }
             fn $reify(&self) -> Option<&ClosureOrigin> {
                 if self.origin.get().is_none() {
                     let mk = self.mk?;
@@ -2092,14 +2098,14 @@ macro_rules! morloc_fn {
         /// at this call, so a caller never has to name the result type -- which
         /// it could not do anyway, since the arity of a partially applied
         /// manifold's morloc type counts its captured context arguments.
-        pub fn $fnptr<$($A,)+ R>(f: fn($(&$A,)+) -> R) -> fn($(&$A,)+) -> R { f }
+        pub fn $fnptr<$H, $($T,)* R>(f: fn(&$H, $(&$T,)*) -> R) -> fn(&$H, $(&$T,)*) -> R { f }
 
         /// A function pointer is already the thinnest form there is, so the
         /// adapter is the identity. Anchoring this on a CONCRETE self type is
         /// what lets it coexist with the trait-object impl: the two self types
         /// are disjoint, so there is no overlap to reason about, and both
         /// parameters appear in the self type, so neither is unconstrained.
-        impl<$($A,)+ R> ThinFn for fn($(&$A,)+) -> R {
+        impl<$H, $($T,)* R> ThinFn for fn(&$H, $(&$T,)*) -> R {
             type Out = Self;
             fn thin(&self) -> Self { *self }
         }
@@ -2114,11 +2120,75 @@ macro_rules! morloc_fn {
         /// applied manifold's type counts its captured context arguments
         /// too. The adapter has no origin, so a value that reaches morloc
         /// back through a host parameter cannot be sent onward.
-        impl<$($A: 'static,)+ R: 'static> ThinFn for std::rc::Rc<dyn $trait<$($A,)+ R>> {
-            type Out = Box<dyn Fn($(&$A,)+) -> R>;
+        impl<$H: 'static, $($T: 'static,)* R: 'static> ThinFn for std::rc::Rc<dyn $trait<$H, $($T,)* R>> {
+            type Out = Box<dyn Fn(&$H, $(&$T,)*) -> R>;
             fn thin(&self) -> Self::Out {
                 let v = self.clone();
-                Box::new(move |$($a,)+| v.$call($($a,)+))
+                Box::new(move |$h, $($t,)*| v.$call($h, $($t,)*))
+            }
+        }
+        /// A function value applied to its first argument, keeping the
+        /// argument: it calls the function with the rest. If the function
+        /// has an origin, so does this, with the argument appended to its
+        /// captured values (`wire` serializes it).
+        pub struct $pap<$H, $($T,)* R> {
+            f: std::rc::Rc<dyn $trait<$H, $($T,)* R>>,
+            x: $H,
+            wire: Option<fn(&$H) -> Vec<u8>>,
+            origin: std::cell::OnceCell<Option<ClosureOrigin>>,
+        }
+        impl<$H, $($T,)* R> $pap<$H, $($T,)* R> {
+            pub fn new(f: std::rc::Rc<dyn $trait<$H, $($T,)* R>>, x: $H, wire: Option<fn(&$H) -> Vec<u8>>) -> Self {
+                Self { f, x, wire, origin: std::cell::OnceCell::new() }
+            }
+        }
+        impl<$H, $($T,)* R> $prev<$($T,)* R> for $pap<$H, $($T,)* R> {
+            #[inline]
+            fn $pcall(&self, $($t: &$T,)*) -> R { self.f.$call(&self.x, $($t,)*) }
+            fn $preify(&self) -> Option<&ClosureOrigin> {
+                self.origin
+                    .get_or_init(|| {
+                        let (home, mid, mut caps) = self.f.$reify()?.clone();
+                        let wire = self.wire?;
+                        caps.push(wire(&self.x));
+                        Some((home, mid, caps))
+                    })
+                    .as_ref()
+            }
+        }
+
+        /// A function value that knows how morloc applies it to its first
+        /// argument: `step` does it (a staged function runs its stage when
+        /// it has the arguments before the stage point). Called with every
+        /// argument, it is `flat`.
+        pub struct $staged<$H, $($T,)* R> {
+            flat: std::rc::Rc<dyn $trait<$H, $($T,)* R>>,
+            step: std::rc::Rc<dyn Fn(&$H) -> std::rc::Rc<dyn $prev<$($T,)* R>>>,
+        }
+        impl<$H, $($T,)* R> $staged<$H, $($T,)* R> {
+            pub fn new(
+                flat: std::rc::Rc<dyn $trait<$H, $($T,)* R>>,
+                step: std::rc::Rc<dyn Fn(&$H) -> std::rc::Rc<dyn $prev<$($T,)* R>>>,
+            ) -> Self {
+                Self { flat, step }
+            }
+        }
+        impl<$H, $($T,)* R> $trait<$H, $($T,)* R> for $staged<$H, $($T,)* R> {
+            #[inline]
+            fn $call(&self, $h: &$H, $($t: &$T,)*) -> R { self.flat.$call($h, $($t,)*) }
+            fn $reify(&self) -> Option<&ClosureOrigin> { self.flat.$reify() }
+            fn $apply(&self, x: &$H) -> Option<std::rc::Rc<dyn $prev<$($T,)* R>>> { Some((self.step)(x)) }
+        }
+
+        /// Apply a function value to its first argument: a value morloc made
+        /// knows how; any other keeps the argument.
+        pub fn $apply1<$H: Clone + 'static, $($T: 'static,)* R: 'static>(
+            f: &std::rc::Rc<dyn $trait<$H, $($T,)* R>>,
+            x: &$H,
+        ) -> std::rc::Rc<dyn $prev<$($T,)* R>> {
+            match f.$apply(x) {
+                Some(g) => g,
+                None => std::rc::Rc::new($pap::new(f.clone(), x.clone(), None)),
             }
         }
     };
@@ -2190,14 +2260,14 @@ impl<R: 'static> ThinFn for std::rc::Rc<dyn MorlocFn0<R>> {
     }
 }
 
-morloc_fn!(MorlocFn1, Closure1, fn_ptr1, call1, reify1, (A1, a1));
-morloc_fn!(MorlocFn2, Closure2, fn_ptr2, call2, reify2, (A1, a1), (A2, a2));
-morloc_fn!(MorlocFn3, Closure3, fn_ptr3, call3, reify3, (A1, a1), (A2, a2), (A3, a3));
-morloc_fn!(MorlocFn4, Closure4, fn_ptr4, call4, reify4, (A1, a1), (A2, a2), (A3, a3), (A4, a4));
-morloc_fn!(MorlocFn5, Closure5, fn_ptr5, call5, reify5, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5));
-morloc_fn!(MorlocFn6, Closure6, fn_ptr6, call6, reify6, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6));
-morloc_fn!(MorlocFn7, Closure7, fn_ptr7, call7, reify7, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7));
-morloc_fn!(MorlocFn8, Closure8, fn_ptr8, call8, reify8, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7), (A8, a8));
+morloc_fn!(MorlocFn1, Closure1, fn_ptr1, call1, reify1, apply1, MorlocFn0, call0, reify0, Pap1, Staged1, apply1_1, (A1, a1));
+morloc_fn!(MorlocFn2, Closure2, fn_ptr2, call2, reify2, apply2, MorlocFn1, call1, reify1, Pap2, Staged2, apply1_2, (A1, a1), (A2, a2));
+morloc_fn!(MorlocFn3, Closure3, fn_ptr3, call3, reify3, apply3, MorlocFn2, call2, reify2, Pap3, Staged3, apply1_3, (A1, a1), (A2, a2), (A3, a3));
+morloc_fn!(MorlocFn4, Closure4, fn_ptr4, call4, reify4, apply4, MorlocFn3, call3, reify3, Pap4, Staged4, apply1_4, (A1, a1), (A2, a2), (A3, a3), (A4, a4));
+morloc_fn!(MorlocFn5, Closure5, fn_ptr5, call5, reify5, apply5, MorlocFn4, call4, reify4, Pap5, Staged5, apply1_5, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5));
+morloc_fn!(MorlocFn6, Closure6, fn_ptr6, call6, reify6, apply6, MorlocFn5, call5, reify5, Pap6, Staged6, apply1_6, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6));
+morloc_fn!(MorlocFn7, Closure7, fn_ptr7, call7, reify7, apply7, MorlocFn6, call6, reify6, Pap7, Staged7, apply1_7, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7));
+morloc_fn!(MorlocFn8, Closure8, fn_ptr8, call8, reify8, apply8, MorlocFn7, call7, reify7, Pap8, Staged8, apply1_8, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7), (A8, a8));
 
 // ---------------------------------------------------------------------------
 // Packet bridge (production). `put_value` serializes a native value into a

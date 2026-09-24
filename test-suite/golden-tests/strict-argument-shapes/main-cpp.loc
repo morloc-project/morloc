@@ -1,0 +1,44 @@
+module main (ifLambdaMapped, ifLambdaDirect, unusedRecord, unusedUnit, unusedForeign)
+
+import root-cpp
+import root-py
+
+-- Arguments that are not values are evaluated once, where they are passed,
+-- and the forms this produces compile and run: a function chosen by a
+-- conditional, handed to map or applied directly, and arguments that are
+-- never read (a record, a unit, the result of a call into another pool).
+
+source Cpp from "helpers.hpp" ("cpp_touch" as touch)
+touch :: Int -> Int
+
+source Py from "helpers.py" ("py_touch" as pyTouch)
+pyTouch :: Int -> Int
+
+record Pair = Pair { a :: Int, b :: Int }
+record Cpp => Pair = "struct"
+record Rust => Pair = "struct"
+record Py => Pair = "dict"
+
+pick :: Bool -> Int -> Int -> Int
+pick c k x = (? c = (\y -> touch y + k) : (\y -> y * 2)) x
+
+ifLambdaMapped :: Bool -> Int -> [Int] -> [Int]
+ifLambdaMapped c k xs = map (? c = (\y -> touch y + k) : (\y -> y * 2)) xs
+
+ifLambdaDirect :: Bool -> Int -> Int -> Int
+ifLambdaDirect c k x = pick c k x
+
+ignore :: a -> Int -> Int
+ignore u x = touch x
+
+mkPair :: Int -> Pair
+mkPair n = { a = touch n, b = touch (touch n) }
+
+unusedRecord :: Int -> Int
+unusedRecord n = ignore (mkPair n) n
+
+unusedUnit :: Int -> Int
+unusedUnit n = ignore () n
+
+unusedForeign :: Int -> Int
+unusedForeign n = ignore (pyTouch n) n

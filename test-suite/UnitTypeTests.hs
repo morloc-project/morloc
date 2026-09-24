@@ -18,6 +18,9 @@ module UnitTypeTests
   , pendingNumLitTests
   , whereTests
   , orderInvarianceTests
+  , signatureContractTests
+  , constraintContractTests
+  , definitionLadderTests
   , whitespaceTests
   , infixOperatorTests
   , recordLiteralOrderTests
@@ -403,6 +406,9 @@ listToGamma gs =
     , gammaConstraints = []
     , gammaAssumedConstraints = Nothing
     , gammaPendingNumLits = []
+    , gammaRigid = Nothing
+    , gammaScoped = Map.empty
+
     , gammaPositionalReceivers = Set.empty
     }
 
@@ -1506,6 +1512,33 @@ whereTests =
             f
         |]
           int
+      , -- Names bound by a parameter pattern are in scope in the where-block,
+        -- exactly as a plain parameter is.
+        assertGeneralType
+          "tuple-pattern parameters are visible in where"
+          [r|
+            add :: Int -> Int -> Int
+            f :: (Int, Int) -> Int
+            f (a, b) = g where
+                g = add a b
+            f
+        |]
+          (fun [tuple [int, int], int])
+      , -- A where-binding is a pure value: running an effect in it has no
+        -- do-block to sequence it in.
+        expectError
+          "where-binding right-hand side cannot force an effect"
+          [r|
+           module main (f)
+           effect IO
+           readIt :: Int -> <IO> Int
+           addInt :: Int -> Int -> Int
+           f :: Int -> <IO> Int
+           f n = do
+             addInt x 1
+             where
+               x = !(readIt n)
+        |]
       ]
 
 orderInvarianceTests :: TestTree
@@ -1526,6 +1559,417 @@ orderInvarianceTests =
           "z = 42\ny = z\nx = y\nx"
           int
       ]
+
+-- A signature is a contract on the definition: its type variables are rigid,
+-- so a body that only works at some instance of them is rejected, whether the
+-- term is used at that instance, used elsewhere, or not used at all.
+--
+signatureContractTests :: TestTree
+signatureContractTests =
+  localOption (mkTimeout 2000000) $
+    testGroup
+      "Signatures are contracts"
+      [ expectError
+          "a body cannot fix a length its signature leaves free"
+          [r|
+module main (f)
+sum3 :: Vector 3 Real -> Real
+f :: Vector n Real -> Real
+f v = sum3 v
+|]
+      , expectError
+          "a body cannot equate two lengths its signature keeps apart"
+          [r|
+module main (f)
+dot :: Vector n Real -> Vector n Real -> Real
+f :: Vector n Real -> Vector m Real -> Real
+f a b = dot a b
+|]
+      , expectPass
+          "a length-polymorphic body passes its length through"
+          [r|
+module main (f)
+inc :: Real -> Real
+vmap :: (a -> b) -> Vector n a -> Vector n b
+f :: Vector n Real -> Vector n Real
+f v = vmap inc v
+|]
+      , expectError
+          "a body cannot fix an effect its signature leaves free"
+          [r|
+module main (f)
+effect IO
+ioOp :: Int -> <IO> Int
+f :: Int -> <e> Int
+f x = ioOp x
+|]
+      , expectPass
+          "an effect-polymorphic body passes its effect through"
+          [r|
+module main (f)
+apply :: (Int -> <e> Int) -> Int -> <e> Int
+f :: (Int -> <e> Int) -> Int -> <e> Int
+f g x = apply g x
+|]
+      , expectError
+          "a local signature's own type variable is not the enclosing one"
+          [r|
+module main (f)
+pair :: a -> a -> [a]
+f :: a -> [a]
+f x = g x
+  where
+    g :: b -> [b]
+    g y = pair y x
+|]
+      , expectPass
+          "a local signature's type variable is the enclosing signature's"
+          [r|
+module main (f)
+pair :: a -> a -> [a]
+f :: a -> [a]
+f x = g x
+  where
+    g :: a -> [a]
+    g y = pair y x
+|]
+      , expectError
+          "body narrower than signature, used at the narrow type"
+          [r|
+           module main (f)
+           addInt :: Int -> Int -> Int
+           bad :: a -> a
+           bad x = addInt x 1
+           f :: Int
+           f = bad 5
+        |]
+      , expectError
+          "body narrower than signature, never used"
+          [r|
+           module main (f)
+           addInt :: Int -> Int -> Int
+           bad :: a -> a
+           bad x = addInt x 1
+           f :: Int
+           f = 5
+        |]
+      , expectError
+          "body narrower than signature, exported"
+          [r|
+           module main (bad)
+           addInt :: Int -> Int -> Int
+           bad :: a -> a
+           bad x = addInt x 1
+        |]
+      , expectError
+          "body returns the wrong type variable"
+          [r|
+           module main (f)
+           swapBad :: a -> b -> a
+           swapBad x y = y
+           f :: Int
+           f = swapBad 1 2
+        |]
+      , -- a recursive call instantiates the signature afresh
+        expectPass
+          "recursive definition checked against its polymorphic signature"
+          [r|
+           module main (f)
+           le :: Int -> Int -> Bool
+           sub :: Int -> Int -> Int
+           keep :: a -> Int -> a
+           keep x n
+             ? le n 0 = x
+             : keep x (sub n 1)
+           f :: Int -> Str
+           f n = keep "a" n
+        |]
+      , assertGeneralType
+          "body as general as its signature, used at two types"
+          [r|
+           good :: a -> a
+           good x = x
+           (good 1, good "a")
+        |]
+          (AppU (VarU (TV "Tuple2")) [int, str])
+      ]
+
+-- A signature's class constraints are part of its contract: each names the
+-- type it constrains, the body's method uses must follow from them (a
+-- superclass follows from its subclass), and an instance exists only where
+-- its superclass instances exist.
+constraintContractTests :: TestTree
+constraintContractTests =
+  localOption (mkTimeout 2000000) $
+    testGroup
+      "Constraints are contracts"
+      [ expectError
+          "an instance body using a method at a type its context does not cover"
+          [r|
+module main (f)
+class Sz a where
+  sz :: a -> Int
+add :: Int -> Int -> Int
+fold :: (b -> a -> b) -> b -> [a] -> b
+instance Sz Int where
+  sz x = 1
+instance Sz (List a) where
+  sz xs = fold (\acc x -> add acc (sz x)) 0 xs
+f :: [Int] -> Int
+f xs = sz xs
+|]
+      , expectPass
+          "an instance body using a method at a type its context covers"
+          [r|
+module main (f)
+class Sz a where
+  sz :: a -> Int
+add :: Int -> Int -> Int
+fold :: (b -> a -> b) -> b -> [a] -> b
+instance Sz Int where
+  sz x = 1
+instance Sz a => Sz (List a) where
+  sz xs = fold (\acc x -> add acc (sz x)) 0 xs
+f :: [Int] -> Int
+f xs = sz xs
+|]
+      , expectPass
+          "an instance context entails its superclasses"
+          [r|
+module main (f)
+class Eqq a where
+  eqq :: a -> a -> Bool
+class Eqq a => Ordd a where
+  lte :: a -> a -> Bool
+class Sm a where
+  same :: a -> a -> Bool
+instance Eqq Int where
+  eqq x y = True
+instance Ordd Int where
+  lte x y = True
+instance Sm Int where
+  same x y = True
+pick :: [a] -> a
+instance (Ordd a) => Sm (List a) where
+  same xs ys = eqq (pick xs) (pick ys)
+f :: [Int] -> Bool
+f xs = same xs xs
+|]
+      , expectError
+          "class constraint without a type argument"
+          [r|
+           module main (f)
+           class Ord a where
+             (<=) :: a -> a -> Bool
+           instance Ord Int where
+             (<=) x y = True
+           lt :: Ord => a -> a -> Bool
+           lt x y = x <= y
+           f :: Int -> Bool
+           f x = lt x x
+        |]
+      , expectError
+          "body uses a method its signature does not constrain"
+          [r|
+           module main (f)
+           class Eq a where
+             (==) :: a -> a -> Bool
+           instance Eq Int where
+             (==) x y = True
+           same :: a -> a -> Bool
+           same x y = x == y
+           f :: Int -> Bool
+           f x = same x x
+        |]
+      , expectError
+          "instance without an instance of its superclass"
+          [r|
+           module main (f)
+           class Sg a where
+             cat :: a -> a -> a
+           class Sg a => Mn a where
+             emp :: a
+           instance Sg Str where
+             cat x y = x
+           instance Mn Int where
+             emp = 0
+           f :: Int -> Int
+           f x = emp
+        |]
+      , -- each constraint of a parenthesized list is one given
+        expectPass
+          "method of the second of two declared constraints"
+          [r|
+           module main (f)
+           class Sz a where
+             size :: a -> Int
+           class Eq a where
+             (==) :: a -> a -> Bool
+           instance Sz Int where
+             size x = 1
+           instance Eq Int where
+             (==) x y = True
+           same :: (Sz a, Eq a) => a -> a -> Bool
+           same x y = x == y
+           f :: Int -> Bool
+           f x = same x x
+        |]
+      , -- a literal inhabits a rigid variable only under a numeric class
+        expectPass
+          "integer literal at a variable constrained by Integral"
+          [r|
+           module main (f)
+           class Integral a where
+             (+) :: a -> a -> a
+           instance Integral Int where
+             (+) x y = x
+           inc :: Integral a => a -> a
+           inc x = x + 1
+           f :: Int -> Int
+           f x = inc x
+        |]
+      , expectError
+          "integer literal at an unconstrained variable"
+          [r|
+           module main (f)
+           one :: a -> a
+           one x = 1
+           f :: Int -> Int
+           f x = one x
+        |]
+      , expectPass
+          "superclass method used under the subclass constraint"
+          [r|
+           module main (f)
+           class Sg a where
+             cat :: a -> a -> a
+           class Sg a => Mn a where
+             emp :: a
+           instance Sg Int where
+             cat x y = x
+           instance Mn Int where
+             emp = 0
+           padded :: Mn a => a -> a
+           padded x = cat x emp
+           f :: Int -> Int
+           f x = padded x
+        |]
+      ]
+
+-- A definition is checked once, however many times it is named. In the
+-- ladder every level names the one below it twice, so any per-use
+-- re-elaboration costs 2^depth; checking each definition once is linear.
+--
+definitionLadderTests :: TestTree
+definitionLadderTests =
+  localOption (mkTimeout 500000) $
+    testGroup
+      "Definitions are checked once"
+      [ expectPass "ladder of definitions each naming the one below twice" (definitionLadder 8)
+      , expectError "recursion through two definitions at a growing type is rejected"
+          [r|
+module main (start)
+f :: a -> Int
+g :: [a] -> Int
+f x = g [x]
+g xs = f xs
+start :: Int
+start = f 1
+|]
+      , expectPass "a record constraint passes through two layers of definitions"
+          [r|
+module main (outer)
+type TBox (r :: Rec)
+hasZ :: (Subset (ListToSet ['z]) (Keys r)) => TBox r -> TBox r
+mid :: (Subset (ListToSet ['z]) (Keys r)) => TBox r -> TBox r
+mid t = hasZ t
+outer :: (Subset (ListToSet ['z]) (Keys r)) => TBox r -> TBox r
+outer t = mid t
+|]
+      , expectPass "mutual recursion over a list of a type variable"
+          [r|
+module main (evenLen)
+isNil :: [a] -> Bool
+rest :: [a] -> [a]
+evenLen :: [a] -> Bool
+oddLen :: [a] -> Bool
+evenLen xs = ? isNil xs = True : oddLen (rest xs)
+oddLen xs = ? isNil xs = False : evenLen (rest xs)
+|]
+      , expectPass "mutual recursion over a vector of any length"
+          [r|
+module main (start)
+dec :: Int -> Int
+isZero :: Int -> Bool
+evenV :: Int -> Vector n Int -> Bool
+oddV :: Int -> Vector n Int -> Bool
+evenV k v = ? isZero k = True : oddV (dec k) v
+oddV k v = ? isZero k = False : evenV (dec k) v
+start :: Int -> Vector n Int -> Bool
+start k v = evenV k v
+|]
+      , expectError "two definitions fixing one length variable differently are rejected"
+          [r|
+module main (both)
+add :: Real -> Real -> Real
+sum3 :: Vector 3 Real -> Real
+sum4 :: Vector 4 Real -> Real
+f :: Vector n Real -> Real
+f v = sum3 v
+g :: Vector n Real -> Real
+g v = sum4 v
+both :: Vector n Real -> Real
+both v = add (f v) (g v)
+|]
+      , expectPass "a subclass of Numeric admits a real literal"
+          [r|
+module main (half)
+class Integral a where
+  add :: a -> a -> a
+  mul :: a -> a -> a
+class Integral a => Numeric a where
+  divide :: a -> a -> a
+class Numeric a => Fancy a where
+  fancy :: a -> a
+instance Integral Real
+instance Numeric Real
+instance Fancy Real
+half :: Fancy a => a -> a
+half x = mul x 0.5
+|]
+      , expectPass "recursion through two definitions at one type"
+          [r|
+module main (start)
+dec :: Int -> Int
+dec n = n
+isZero :: Int -> Bool
+isZero n = True
+f :: Int -> Int
+g :: Int -> Int
+f x = g (dec x)
+g x = f (dec x)
+start :: Int
+start = f 1
+|]
+      ]
+
+-- | @p_k n = add (p_{k-1} n) (p_{k-1} n)@, @k@ levels of signed definitions.
+definitionLadder :: Int -> MT.Text
+definitionLadder k =
+  MT.unlines $
+    [ "module main (p" <> num k <> ")"
+    , "add :: Int -> Int -> Int"
+    , "p0 :: Int -> Int"
+    , "p0 n = add n 1"
+    ]
+      <> concat
+        [ [ "p" <> num i <> " :: Int -> Int"
+          , "p" <> num i <> " n = add (p" <> num (i - 1) <> " n) (p" <> num (i - 1) <> " n)"
+          ]
+        | i <- [1 .. k]
+        ]
+  where
+    num = MT.pack . show
 
 typeOrderTests :: TestTree
 typeOrderTests =
@@ -2801,6 +3245,18 @@ unitValuecheckTests =
              show x = @show x
            f :: Int -> Str
            f = show
+      |]
+      , -- Two declarations that differ only in a parameter's name are the
+        -- same value, including where the parameter is read by an intrinsic.
+        valuecheckPass
+          "alpha-equivalent intrinsic bodies pass"
+          [r|
+         module foo (f)
+           g :: Int -> Str
+           g x = @show x
+           g y = @show y
+           f :: Int -> Str
+           f = g
       |]
       , valuecheckFail
           "distinct intrinsic bodies across instances fail"
@@ -7133,7 +7589,7 @@ aliasConstructorTests =
         instance Monoid (Deque a)
         instance Foldable List
         instance Foldable Deque
-        concat :: (Foldable f, Monoid a) => f (f a) -> f a
+        concat :: (Foldable f, Monoid (f a)) => f (f a) -> f a
         concat = fold append mempty
         f :: [[Int]] -> [Int]
         f = concat
@@ -7264,7 +7720,7 @@ aliasConstructorTests =
         instance Foldable List
         instance Foldable Deque
         instance Foldable Array
-        concat :: (Foldable f, Monoid a) => f (f a) -> f a
+        concat :: (Foldable f, Monoid (f a)) => f (f a) -> f a
         concat = fold append mempty
         f :: [[Int]] -> [Int]
         f = concat

@@ -1256,8 +1256,13 @@ getName' (Located _ _ t) = t
 --------------------------------------------------------------------
 
 extractConstraints :: TypeU -> D [Constraint]
-extractConstraints (AppU (VarU (TV name)) args) =
-  return [mkPrimOrClass name args]
+-- a parenthesized list of constraints is parsed as a tuple type
+extractConstraints (AppU (VarU (TV name)) args)
+  | T.isPrefixOf "Tuple" name =
+      case mapM typeToConstraint args of
+        Just cs -> return cs
+        Nothing -> dfail (Pos 0 0 "") "invalid constraint syntax"
+  | otherwise = return [mkPrimOrClass name args]
 extractConstraints (VarU (TV name)) =
   return [mkPrimOrClass name []]
 extractConstraints (NamU NamRecord _ _ _) =
@@ -1936,7 +1941,7 @@ freeVarsE (ExprI _ e) = case e of
   IntrinsicE _ es     -> Set.unions (map freeVarsE es)
   ParenE inner        -> freeVarsE inner
   AssE _ body wheres  -> Set.union (freeVarsE body) (Set.unions (map freeVarsE wheres))
-  IstE _ _ body       -> Set.unions (map freeVarsE body)
+  IstE _ _ _ body     -> Set.unions (map freeVarsE body)
   ModE _ body         -> Set.unions (map freeVarsE body)
   -- Leaf value expressions (no names bound or referenced)
   UniE                -> Set.empty
@@ -2635,7 +2640,8 @@ desugarDo sp (CstDoBind p e : rest) = do
       throwE <- freshExprSpan sp (IntrinsicE IntrThrow [shownE])
       trueE <- freshExprSpan sp (LogE True)
       guardE <- freshExprSpan sp (IfE cond trueE throwE)
-      guardVar <- freshIrrefLamParam sp
+      guardIdx <- freshIdSpan sp
+      let guardVar = EV (BT.doGuardPrefix <> T.pack (show guardIdx))
       -- Three links of the ordinary do-block LetE chain rather than a
       -- cascade: the bind, then a guard whose value nothing reads (its
       -- point is the throw), then the pattern's projections wrapping the
@@ -2870,7 +2876,7 @@ expandCollectE self@(ExprI i e) = case e of
     expandCollectBody self body'
   ModE v xs -> ExprI i . ModE v <$> mapM expandCollectE xs
   AssE v b ws -> (\b' ws' -> ExprI i (AssE v b' ws')) <$> expandCollectE b <*> mapM expandCollectE ws
-  IstE cn ts b -> ExprI i . IstE cn ts <$> mapM expandCollectE b
+  IstE cn ctx ts b -> ExprI i . IstE cn ctx ts <$> mapM expandCollectE b
   LstE es -> ExprI i . LstE <$> mapM expandCollectE es
   TupE es -> ExprI i . TupE <$> mapM expandCollectE es
   NamE kes -> ExprI i . NamE <$> mapM (\(k, x) -> (,) k <$> expandCollectE x) kes
@@ -3033,8 +3039,8 @@ desugarTopLevel (Loc sp (CAssE name params body whereDecls)) = do
   e <- case params' of
     [] -> freshExprSpan sp (AssE name body' whereDecls')
     ps -> do
-      lam <- buildLamWithIrrefPats sp ps body'
-      freshExprSpan sp (AssE name lam whereDecls')
+      (lam, whereDecls'') <- buildDefWithIrrefPats sp ps body' whereDecls'
+      freshExprSpan sp (AssE name lam whereDecls'')
   return [e]
 desugarTopLevel (Loc sp (CGuardedAssE name params guards defaultExpr whereDecls)) = do
   params' <- mapM exprToIrrefPat params
@@ -3045,8 +3051,8 @@ desugarTopLevel (Loc sp (CGuardedAssE name params guards defaultExpr whereDecls)
   e <- case params' of
     [] -> freshExprSpan sp (AssE name body' whereDecls')
     ps -> do
-      lam <- buildLamWithIrrefPats sp ps body'
-      freshExprSpan sp (AssE name lam whereDecls')
+      (lam, whereDecls'') <- buildDefWithIrrefPats sp ps body' whereDecls'
+      freshExprSpan sp (AssE name lam whereDecls'')
   return [e]
 desugarTopLevel (Loc sp (CRefutAssE name clauses whereDecls)) = do
   checkWhereScope [] whereDecls
@@ -3061,9 +3067,9 @@ desugarTopLevel (Loc sp (CClsE classHead sigs)) = do
   sigs' <- mapM desugarSigItem sigs
   e <- freshExprSpan sp (ClsE (Typeclass cs cn vs sigs'))
   return [e]
-desugarTopLevel (Loc sp (CIstE cn types body)) = do
+desugarTopLevel (Loc sp (CIstE ctx cn types body)) = do
   bodyExprs <- concatMapM desugarTopLevel body
-  e <- freshExprSpan sp (IstE cn (map quantifyType types) bodyExprs)
+  e <- freshExprSpan sp (IstE cn ctx (map quantifyType types) bodyExprs)
   return [e]
 desugarTopLevel (Loc sp (CEffE lbl esc)) = do
   e <- freshExprSpan sp (EffE lbl esc)
@@ -3092,6 +3098,24 @@ desugarTopLevel (Loc _ (CInlineE inner)) = do
 desugarTopLevel node = do
   e <- desugarExpr node
   return [e]
+
+-- | Build a definition's lambda and where-block from its pattern parameters.
+-- A name bound by a parameter pattern is in scope wherever a plain parameter
+-- would be, which includes the where-block. So when there is a where-block,
+-- the pattern's projections become where-bindings of the definition, visible
+-- to the body and to every sibling binding; otherwise they wrap the body as
+-- in 'buildLamWithIrrefPats'.
+buildDefWithIrrefPats :: Span -> [Loc CstIrrefPat] -> ExprI -> [ExprI] -> D (ExprI, [ExprI])
+buildDefWithIrrefPats sp ps body [] = do
+  lam <- buildLamWithIrrefPats sp ps body
+  return (lam, [])
+buildDefWithIrrefPats sp ps body wheres = do
+  let usedNames = Set.unions (freeVarsE body : map freeVarsE wheres)
+  paramResults <- mapM (desugarIrrefLamParam usedNames) ps
+  projections <-
+    mapM (\(v, rhs) -> freshExprSpan sp (AssE v rhs [])) (concatMap snd paramResults)
+  lam <- freshExprSpan sp (LamE (map fst paramResults) body)
+  return (lam, projections <> wheres)
 
 -- | Build a LamE from a list of irrefutable pattern parameters plus a
 -- desugared body. Each pattern becomes a fresh formal, with projection
@@ -3738,7 +3762,7 @@ containsCollect (ExprI _ e) = case e of
   IntrinsicE IntrCollect _ -> True
   ModE _ xs -> any containsCollect xs
   AssE _ b ws -> containsCollect b || any containsCollect ws
-  IstE _ _ b -> any containsCollect b
+  IstE _ _ _ b -> any containsCollect b
   LstE es -> any containsCollect es
   TupE es -> any containsCollect es
   NamE kes -> any (containsCollect . snd) kes
@@ -3777,7 +3801,7 @@ collectStreamType sigs body = findCollectArg body >>= streamTypeOfProducer sigs
       IntrinsicE IntrCollect (a : _) -> Just a
       ModE _ xs -> firstSome (map findCollectArg xs)
       AssE _ b ws -> firstSome (map findCollectArg (b : ws))
-      IstE _ _ b -> firstSome (map findCollectArg b)
+      IstE _ _ _ b -> firstSome (map findCollectArg b)
       LstE es -> firstSome (map findCollectArg es)
       TupE es -> firstSome (map findCollectArg es)
       NamE kes -> firstSome (map (findCollectArg . snd) kes)
@@ -3983,7 +4007,7 @@ rewriteCollectWith wrap = go
         wrap self arg'
       ModE v xs -> mapM go xs >>= freshExprFrom self . ModE v
       AssE v b ws -> do { b' <- go b; ws' <- mapM go ws; freshExprFrom self (AssE v b' ws') }
-      IstE cn ts b -> mapM go b >>= freshExprFrom self . IstE cn ts
+      IstE cn ctx ts b -> mapM go b >>= freshExprFrom self . IstE cn ctx ts
       LstE es -> mapM go es >>= freshExprFrom self . LstE
       TupE es -> mapM go es >>= freshExprFrom self . TupE
       NamE kes -> mapM (\(k, x) -> (,) k <$> go x) kes >>= freshExprFrom self . NamE

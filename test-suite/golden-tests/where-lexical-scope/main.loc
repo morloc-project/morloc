@@ -1,0 +1,113 @@
+module main
+  ( captureLambda
+  , captureNested
+  , shadowTopLevel
+  , shadowImport
+  , sameNameHelpers
+  , crossModuleHelper
+  , recursiveViaAlias
+  , recursiveExport
+  , recursiveExportUsed
+  , recursiveExportDropped
+  , lambdaShadowsWhere
+  , patternInRecursiveHelper
+  , shadowFromSibling
+  )
+
+import root-py
+import .helper (counted)
+import .fibm (fib as fibAlias)
+
+-- A name in a `where` binding means what it meant where the binding was
+-- written, whatever the site that reads it has in scope.
+
+-- The body of `x` names the parameter `n`. The lambda that reads `x` binds a
+-- different `n`; `x` must still see the parameter.
+captureLambda :: Int -> [Int]
+captureLambda n = map (\n -> x) [10, 20]
+  where
+    x = n + 1
+
+-- The same, with the reader two binders deep and the binding one `where` deep.
+captureNested :: Int -> [[Int]]
+captureNested n = map (\n -> map (\n -> y) [7]) [10, 20]
+  where
+    y = z * 2
+    z = n + 1
+
+-- A `where` binding shadows a top-level term of the same name.
+inc :: Int -> Int
+inc y = y + 1
+
+shadowTopLevel :: Int -> Int
+shadowTopLevel n = inc n
+  where
+    inc z = z + 100
+
+-- A `where` binding shadows an imported term of the same name.
+shadowImport :: Int -> Int
+shadowImport n = add n 1
+  where
+    add a b = a * b
+
+-- Two unrelated recursive `where` helpers share a name. Each call to `go`
+-- belongs to the definition that encloses it.
+scaled :: Int -> Int
+scaled k = go k
+  where
+    go m = m * 1000
+
+sameNameHelpers :: Int -> Int
+sameNameHelpers n = go n
+  where
+    go m
+      ? m <= 0 = 0
+      : scaled m + go (m - 1)
+
+-- A recursive `where` helper named like a recursive helper in another module:
+-- `counted` still recurses through its own module's `go`.
+crossModuleHelper :: Int -> Int
+crossModuleHelper n = go n
+  where
+    go m
+      ? m <= 0 = 0
+      : counted m + go (m - 1)
+
+-- A recursive term imported under another name still recurses into itself.
+recursiveViaAlias :: Int -> Int
+recursiveViaAlias n = fibAlias n
+
+-- A recursive export, and other exports that use it.
+recursiveExport :: Int -> Int
+recursiveExport n
+  ? n <= 1 = n
+  : recursiveExport (n - 1) + recursiveExport (n - 2)
+
+recursiveExportUsed :: Int -> Int
+recursiveExportUsed n = recursiveExport n + 1
+
+recursiveExportDropped :: Int -> Int
+recursiveExportDropped x = (\y -> x) (recursiveExport 3)
+
+-- A lambda's parameter shadows a where-binding of the same name.
+lambdaShadowsWhere :: Int -> Int
+lambdaShadowsWhere = \x -> x
+  where
+    x = 1
+
+-- A name bound by a parameter pattern is visible inside a recursive where
+-- helper.
+patternInRecursiveHelper :: (Int, Int) -> Int
+patternInRecursiveHelper (a, b) = go 3
+  where
+    go n
+      ? n <= 0 = a
+      : b + go (n - 1)
+
+-- A where-binding that shadows a top-level term is the one a sibling
+-- where-binding sees.
+shadowFromSibling :: Int -> Int
+shadowFromSibling n = g n
+  where
+    inc z = z + 100
+    g y = inc y

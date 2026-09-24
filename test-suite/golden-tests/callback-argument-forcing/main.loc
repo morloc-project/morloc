@@ -1,0 +1,43 @@
+module main (once, twiceUsed, composed, throughWrappers)
+
+import root-py
+
+effect IO
+
+-- An effectful function handed to a sourced higher-order function runs its
+-- effect on every call, including when the function is built by a partial
+-- application or a composition rather than written as a lambda, and when the
+-- parameter holding it is passed to the sourced function more than once.
+
+source Py from "helpers.py" ("note", "py_each" as pyEach)
+note :: Int -> <IO> Int
+pyEach :: (Int -> <IO> Int) -> [Int] -> <IO> [Int]
+
+adder :: Int -> Int -> <IO> Int
+adder k i = note (i + k)
+
+once :: Int -> <IO> [Int]
+once k = pyEach (adder k) [1, 2]
+
+eachTwice :: (Int -> <IO> Int) -> <IO> ([Int], [Int])
+eachTwice f = do
+  a <- pyEach f [1]
+  b <- pyEach f [2]
+  (a, b)
+
+twiceUsed :: Int -> <IO> ([Int], [Int])
+twiceUsed k = eachTwice (adder k)
+
+composed :: Int -> <IO> [Int]
+composed k = pyEach (adder k . (\i -> i * 10)) [1, 2]
+
+-- A computed callback handed down through two morloc functions to the
+-- sourced one.
+eachVia :: (Int -> <IO> Int) -> [Int] -> <IO> [Int]
+eachVia h ys = pyEach h ys
+
+wrapped :: (Int -> <IO> Int) -> [Int] -> <IO> [Int]
+wrapped g xs = eachVia g xs
+
+throughWrappers :: Int -> <IO> [Int]
+throughWrappers k = wrapped (? k > 0 = adder k : adder (0 - k)) [1, 2]

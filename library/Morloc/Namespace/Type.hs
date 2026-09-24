@@ -898,7 +898,14 @@ instance Typelike TypeU where
   typeOf (ExistU _ (ps, _) (rs@(_ : _), _)) = NamT NamRecord (TV "Record") (map typeOf ps) (map (second typeOf) rs)
   typeOf (ExistU v _ _) = typeOf (ForallU v (VarU v))
   typeOf (ForallU v t) = substituteTVar v (UnkT v) (typeOf t)
-  typeOf (FunU ts t) = FunT (map typeOf ts) (typeOf t)
+  -- One type, one spelling: `a -> (b -> c)` is `a -> b -> c`. How a function's
+  -- arguments are grouped is an implementation's choice (a source's @rsize@),
+  -- and a lambda that does work between its arguments is staged, so nothing a
+  -- morloc value is compiled to depends on how its type was parenthesized. An
+  -- effect or an empty argument list is a suspension, not a grouping.
+  typeOf (FunU ts t) = case typeOf t of
+    FunT us r | not (null ts), not (null us) -> FunT (map typeOf ts ++ us) r
+    t' -> FunT (map typeOf ts) t'
   typeOf (AppU t ts) = AppT (typeOf t) (map typeOf ts)
   typeOf (NamU n o ps rs) = NamT n o (map typeOf ps) (zip (map fst rs) (map (typeOf . snd) rs))
   typeOf (EffectU effs t) = mkEffectT (resolveEffectSet effs) (typeOf t)

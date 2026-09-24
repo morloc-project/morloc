@@ -44,6 +44,10 @@ _shutdown_wakeup_fd = -1
 def mlc_closure_codec(tuple_schema, arg_codecs, res_codec):
     return ("__mlc_closure__", tuple_schema, arg_codecs, res_codec)
 
+# The schema of every closure's wire tuple (home, manifold id, captured
+# packets); must equal the one Morloc.CodeGenerator.Serial emits.
+_MLC_CLOSURE_SCHEMA = "t3sjaau1"
+
 # AUTO include preamble start
 # <<<BREAK>>>
 # AUTO include preamble end
@@ -201,6 +205,8 @@ def __mlc_wrap_log(group, start_tmpl, pass_tmpl, fail_tmpl, bench_key, fn):
             if fail_tmpl is not None:
                 morloc.log_emit(fail_tmpl, group, time.monotonic() - t0, call_id)
             raise
+    # keep the manifold's name: a closure over it is identified by it
+    go.__name__ = getattr(fn, "__name__", "go")
     return go
 
 
@@ -282,11 +288,15 @@ def mlc_reify(f, home_lang):
         raise RuntimeError(
             f"morloc: no closure codecs for manifold {mid}; it was not "
             "registered as a crossing closure")
-    cap_codecs = mlc_closure_table[mid]
-    if len(captured) != len(cap_codecs):
+    cap_codecs, bnd_codecs = mlc_closure_table[mid]
+    # A partial application of the closure carries its applied arguments
+    # after its context ('mlc_papply'), so the captured values are the
+    # context and a prefix of the bound arguments.
+    if not (len(cap_codecs) <= len(captured) <= len(cap_codecs) + len(bnd_codecs)):
         raise RuntimeError(
             f"morloc: manifold {mid} captured {len(captured)} values but "
-            f"{len(cap_codecs)} codecs are registered")
+            f"{len(cap_codecs)} context codecs are registered")
+    cap_codecs = (cap_codecs + bnd_codecs)[:len(captured)]
     # A captured value is applied back after this dispatch has released
     # its blocks, so it must travel inside its packet.
     packets = [mlc_encode(c, s, True) for c, s in zip(captured, cap_codecs)]
@@ -321,6 +331,7 @@ def mlc_reflect_from_tuple(tup, arg_codecs, res_codec):
         packets = list(captured) + [mlc_encode(a, s) for a, s in zip(args, arg_codecs)]
         return mlc_decode(morloc.foreign_call(sock, mid, packets), res_codec)
     _call.__mlc_origin__ = (home_lang, mid, list(captured))
+    _call.__mlc_codecs__ = (arg_codecs, res_codec)
     return _call
 
 
@@ -329,6 +340,65 @@ def mlc_reflect(pkt, tuple_schema, arg_codecs, res_codec):
     # tuple, then reflect it. Used when the closure is the top-level crossing
     # value (the whole packet is the closure tuple).
     return mlc_reflect_from_tuple(morloc.get_value(pkt, tuple_schema), arg_codecs, res_codec)
+
+
+def mlc_papply(f, xs):
+    # Apply a function value to its first arguments. A staged function (one
+    # that does work after these arguments and before the rest) runs that
+    # work now, once, through its stage entry, and the closure it returns is
+    # the result; otherwise the arguments are kept with the function, which
+    # runs when it gets the rest. mlc_stage_table maps a flat entry's
+    # manifold id to (context size, first stage point, stage entry id).
+    xs = list(xs)
+    if not xs:
+        return f
+    origin = getattr(f, "__mlc_origin__", None)
+    if origin is not None:
+        return _mlc_papply_remote(f, origin, xs)
+    if isinstance(f, functools.partial):
+        fn = f.func
+        caps = list(f.args)
+    else:
+        fn = f
+        caps = []
+    name = getattr(fn, "__name__", None)
+    if not (name is not None and name.startswith("m") and name[1:].isdigit()):
+        # a function host code made: it has no stages morloc knows of
+        return functools.partial(f, *xs)
+    mid = int(name[1:])
+    take, smid = _mlc_stage_take(mid, len(caps))
+    if take is None or len(xs) < take:
+        return functools.partial(fn, *caps, *xs)
+    g = globals()["m" + str(smid)](*caps, *xs[:take])
+    return mlc_papply(g, xs[take:])
+
+
+def _mlc_stage_take(mid, ncaptured):
+    # How many more arguments closure `mid`, holding `ncaptured` captured
+    # values, takes before its stage point, and its stage entry; (None, None)
+    # when it has none.
+    entry = mlc_stage_table.get(mid)
+    if entry is None:
+        return None, None
+    nctx, k, smid = entry
+    return k - (ncaptured - nctx), smid
+
+
+def _mlc_papply_remote(f, origin, xs):
+    # The same, for a closure that lives in another pool: its stage entry
+    # runs there, and the closure it returns comes back as a reflected proxy.
+    home_lang, mid, packets = origin
+    arg_codecs, res_codec = f.__mlc_codecs__
+    take, smid = _mlc_stage_take(mid, len(packets))
+    if take is None or len(xs) < take:
+        more = [mlc_encode(x, c, True) for x, c in zip(xs, arg_codecs)]
+        return mlc_reflect_from_tuple(
+            (home_lang, mid, list(packets) + more), arg_codecs[len(xs):], res_codec)
+    sock = os.path.join(global_state["tmpdir"], "pipe-" + home_lang)
+    stage_pkts = list(packets) + [mlc_encode(x, c) for x, c in zip(xs[:take], arg_codecs)]
+    tup = morloc.get_value(morloc.foreign_call(sock, smid, stage_pkts), _MLC_CLOSURE_SCHEMA)
+    g = mlc_reflect_from_tuple(tup, arg_codecs[take:], res_codec)
+    return mlc_papply(g, xs[take:])
 
 
 def mlc_make_closure_dispatch(mid, arg_codecs, res_codec):

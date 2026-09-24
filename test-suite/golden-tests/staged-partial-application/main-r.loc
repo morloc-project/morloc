@@ -1,0 +1,245 @@
+module main
+  ( knownTwice
+  , userFormTwice
+  , unknownThroughRecursion
+  , unusedPartial
+  , twoStagesOuter
+  , twoStagesInner
+  , twoStagesFull
+  , conditionalStage
+  , hostPartial
+  , hostFull
+  , selfTwiceCount
+  , selfUnusedCount
+  , flatWhere
+  , wrapWhere
+  , tripleThroughRec
+  , whereFunctionShared
+  , cafFunctionShared
+  , partialUnderLambda
+  , stagedRecAsValue
+  , underArityUnknown
+  , overTwoStagesUnknown
+  , stagedInList
+  , capturedRecStaged
+  , partialBeforeStageRec
+  , capturedPartialRec
+  , prefixFailsOutsideTry
+  , partialIntoTry
+  )
+
+import root-r
+
+-- A function whose body computes something before the lambda it returns is
+-- staged: applying it to its first arguments runs that work once and stores
+-- the result in the closure it returns, and every call of that closure reuses
+-- it. The work runs when the partial application is evaluated, even if the
+-- closure is never called, and whether or not the function is known where it
+-- is applied; a failure in it is raised there. Parameters written on a
+-- definition's left side are one group and do not stage. Code written in
+-- another language calls a function in the grouping its source signature
+-- gives it.
+--
+-- `tick` records each of its evaluations in the file $TICK_LOG; `ticks`
+-- reads the count after its argument is computed, so each export prints how
+-- many times `tick` ran.
+
+source R from "helpers.R" ("tick", "ticks", "ticks_l" as ticksL, "host_map" as hostMap, "host_map2" as hostMap2)
+
+tick :: Int -> Int
+ticks :: Int -> Int
+ticksL :: [Int] -> Int
+hostMap :: (a -> b) -> [a] -> [b]
+hostMap2 :: (a -> b -> c) -> [a] -> [b] -> [c]
+
+adderFrom :: Int -> Int -> Int
+adderFrom x = let z = tick x in \y -> z + y
+
+addTo :: Int -> Int -> Int
+addTo y = let z = tick y in \x -> x + z
+
+callTwice :: (Int -> Int) -> Int
+callTwice h = h 2 + h 3
+
+-- the function is known where it is partially applied
+knownTwice :: Int -> Int
+knownTwice n = ticks ((\h -> h 2 + h 3) (adderFrom n))
+
+userFormTwice :: Int -> Int
+userFormTwice n = ticks (callTwice (addTo n))
+
+-- `f` is a parameter of a recursive function, unknown where `f 1` is built
+useTwiceRec :: (Int -> Int -> Int) -> Int -> Int
+useTwiceRec f k
+  ? k <= 0 = (\h -> h 2 + h 3) (f 1)
+  : useTwiceRec f (k - 1)
+
+unknownThroughRecursion :: Int -> Int
+unknownThroughRecursion n = ticks (useTwiceRec adderFrom n)
+
+-- the closure is never called, but building it runs the staged work
+unusedPartial :: Int -> Int
+unusedPartial n = ticks ((\h -> 0) (addTo n))
+
+-- two stage points: `p` when the first argument is applied, `q` when the
+-- second is
+triple :: Int -> Int -> Int -> Int
+triple a = let p = tick a in \b -> let q = tick b in \c -> p + q + c
+
+twoStagesOuter :: Int -> Int
+twoStagesOuter n = ticks (let g = triple n in g 1 2 + g 3 4)
+
+twoStagesInner :: Int -> Int
+twoStagesInner n = ticks (let k = triple n 1 in k 2 + k 3)
+
+twoStagesFull :: Int -> Int
+twoStagesFull n = ticks (triple n 1 2 + triple n 3 4)
+
+-- a partially applied staged function passed on keeps its later stage
+useInnerRec :: (Int -> Int -> Int) -> Int -> Int
+useInnerRec g k
+  ? k <= 0 = (\h -> h 5 + h 6) (g 1)
+  : useInnerRec g (k - 1)
+
+tripleThroughRec :: Int -> Int
+tripleThroughRec n = ticks (useInnerRec (triple n) 0)
+
+-- a conditional choosing between lambdas is work done before the lambda
+pick :: Int -> Int -> Int
+pick a = (? tick a > 0 = (\b -> b) : (\b -> 0 - b))
+
+conditionalStage :: Int -> Int
+conditionalStage n = ticks (callTwice (pick n))
+
+-- a host function calling a partially applied function reuses the staged
+-- work; calling a function with all of its arguments runs it at each call
+hostPartial :: Int -> Int
+hostPartial n = ticksL (hostMap (addTo n) [1, 2, 3])
+
+hostFull :: Int -> Int
+hostFull n = ticksL (hostMap2 addTo [1, 2, 3] [4, 5, 6])
+
+-- the staged closure is also reused when called under a lambda
+partialUnderLambda :: Int -> Int
+partialUnderLambda n = (\g -> ticksL (hostMap (\i -> g i) [1, 2, 3])) (addTo n)
+
+-- a staged recursive function partially applying itself: the partial
+-- application is work, not a value, whether it is used twice or not at all
+selfTwice :: Int -> Int -> Int
+selfTwice a = let p = tick a in \b -> (? b <= 0 = p : (\h -> h 0 + h 0) (selfTwice a))
+
+selfTwiceCount :: Int -> Int
+selfTwiceCount n = ticks (selfTwice n 1)
+
+selfUnused :: Int -> Int -> Int
+selfUnused a = let p = tick a in \b -> (? b <= 0 = p : (\h -> selfUnused a (b - 1)) (selfUnused a))
+
+selfUnusedCount :: Int -> Int
+selfUnusedCount n = ticks (selfUnused n 1)
+
+-- a where-block over a definition's parameters is not a stage point: both
+-- parameters belong to one call; an inner lambda is
+flat :: Int -> Int -> Int
+flat x y = z + y
+  where
+    z = tick x
+
+flatWhere :: Int -> Int
+flatWhere n = ticks (callTwice (flat n))
+
+wrap :: Int -> Int -> Int
+wrap x = \y -> z + y
+  where
+    z = tick x
+
+wrapWhere :: Int -> Int
+wrapWhere n = ticks (callTwice (wrap n))
+
+-- a named partial application is evaluated once however often it is used
+whereFunctionShared :: Int -> Int
+whereFunctionShared n = ticks (callTwice g + callTwice g)
+  where
+    g = adderFrom n
+
+addFive :: Int -> Int
+addFive = adderFrom 5
+
+cafFunctionShared :: Int -> Int
+cafFunctionShared n = ticks (callTwice addFive + callTwice addFive + n)
+
+-- a staged recursive function passed as a value: the partial application
+-- `f 1` runs its stage once, and each full recursive call runs it again
+countDown :: Int -> Int -> Int
+countDown a = let p = tick a in \b -> (? b <= 0 = p : countDown a (b - 1))
+
+stagedRecAsValue :: Int -> Int
+stagedRecAsValue n = ticks (useTwiceRec countDown n)
+
+-- the same, for a staged recursive function that captures a value
+capturedRecStaged :: Int -> Int
+capturedRecStaged n = ticks (useTwiceRec go n)
+  where
+    go :: Int -> Int -> Int
+    go a = let p = tick (a + n) in \b -> (? b <= 0 = p : go a (b - 1))
+
+-- a staged recursive function partially applied short of its stage point,
+-- then completed where it is unknown: the stage runs once
+go2 :: Int -> Int -> Int -> Int
+go2 a b = let z = tick (a + b) in \c -> (? c <= 0 = z : go2 a b (c - 1))
+
+useStagePast :: (Int -> Int -> Int) -> Int -> Int
+useStagePast h k
+  ? k <= 0 = (\g -> g 0 + g 0) (h 1)
+  : useStagePast h (k - 1)
+
+partialBeforeStageRec :: Int -> Int
+partialBeforeStageRec n = ticks (useStagePast (go2 n) 0)
+
+-- the same, for one that captures a value
+capturedPartialRec :: Int -> Int
+capturedPartialRec n = ticks (useStagePast (go3 1) 0)
+  where
+    go3 :: Int -> Int -> Int -> Int
+    go3 a b = let z = tick (a + b + n) in \c -> (? c <= 0 = z : go3 a b (c - 1))
+
+-- an unknown function applied to fewer arguments than its first stage
+-- needs, then to the rest: each full call of the closure runs the second
+-- stage
+useUnder :: (Int -> Int -> Int -> Int) -> Int -> Int
+useUnder f k
+  ? k <= 0 = (\h -> h 1 2 + h 3 4) (f 0)
+  : useUnder f (k - 1)
+
+underArityUnknown :: Int -> Int
+underArityUnknown n = ticks (useUnder triple n)
+
+-- an unknown function applied past two stage points at once runs both
+useOver :: (Int -> Int -> Int -> Int) -> Int -> Int
+useOver f k
+  ? k <= 0 = (\h -> h 5 + h 6) (f 0 1)
+  : useOver f (k - 1)
+
+overTwoStagesUnknown :: Int -> Int
+overTwoStagesUnknown n = ticks (useOver triple n)
+
+-- staged functions held in a list and partially applied where they are
+-- unknown
+useOne :: Int -> (Int -> Int -> Int) -> Int
+useOne x f = callTwice (f x)
+
+applyAll :: [Int -> Int -> Int] -> Int -> [Int]
+applyAll fs x = hostMap (useOne x) fs
+
+stagedInList :: Int -> Int
+stagedInList n = ticksL (applyAll [adderFrom, addTo] n)
+
+-- a failure in the staged work is raised where the partial application is
+-- evaluated, so a `@try` around a later call does not see it
+risky :: Int -> Int -> Int
+risky x = let z = 10 // x in \y -> z + y
+
+prefixFailsOutsideTry :: Int -> Int
+prefixFailsOutsideTry n = let g = risky n in (match (@try (g 5)) | (Ok v) = v | (Err _) = 0 - 1)
+
+partialIntoTry :: Int -> Int
+partialIntoTry n = (\g -> (match (@try (g 5)) | (Ok v) = v | (Err _) = 0 - 1)) (risky n)

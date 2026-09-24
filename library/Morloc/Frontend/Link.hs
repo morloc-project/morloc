@@ -284,6 +284,26 @@ toCondensedState s = Map.union terms classes
 linkLocalTerms :: MVar -> LinkState -> ExprI -> MorlocMonad ()
 linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
   where
+    -- link a definition's body @e@ and its where block @es@ in the scope the
+    -- where block opens, recording @ownerIdx@ as the owner of each where-bound
+    -- term
+    linkScoped bnds c ownerIdx e es = do
+      let (bnds', c') = case e of
+            (ExprI _ (LamE vs _)) ->
+              ( foldr Set.insert bnds vs
+              , c {linkTerms = foldr Map.delete (linkTerms c) vs}
+              )
+            _ -> (bnds, c)
+      c'' <- foldrM (addLocalState m0) c' (e : es)
+      let owned = [ w | ExprI _ (AssE w _ _) <- es ]
+      MM.modify $ \ms -> ms
+        { stateWhereOwner = foldr
+            (\w m -> maybe m (\wi -> Map.insert wi ownerIdx m) (Map.lookup w (linkTerms c'')))
+            (stateWhereOwner ms)
+            owned
+        }
+      mapM_ (linkLocal bnds' c'' (toCondensedState c'')) (e : es)
+
     -- link a new source statement to its type in morloc state
     linkLocal ::
       Set EVar -> LinkState -> Map EVar (Int, Maybe (Typeclass Signature)) -> ExprI -> MorlocMonad ()
@@ -336,22 +356,11 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
                   sigmap' = Map.insert termIdx (Monomorphic tt') sigmap
                   idmap' = Map.insert i termIdx idmap
               MM.modify (\ms -> ms {stateSignatures = GMap idmap' sigmap'})
-              (bnds', c', _) <- case e of
-                (ExprI _ (LamE vs _)) ->
-                  return
-                    ( foldr Set.insert bnds vs
-                    , c {linkTerms = foldr Map.delete (linkTerms c) vs}
-                    , foldr Map.delete cs vs
-                    )
-                _ -> return (bnds, c, cs)
-              -- link expressions in the where statement within a local scope
-              c'' <- foldrM (addLocalState m0) c' (e : es)
-
-              mapM_ (linkLocal bnds' c'' (toCondensedState c'')) (e : es)
+              linkScoped bnds c termIdx e es
             (Just (Polymorphic cls _ _ _)) ->
               MM.throwSourcedError i $
                 "Declared term" <+> squotes (pretty v) <+> " overlaps a term in typeclass" <+> squotes (pretty cls)
-    linkLocal bnds c cs (ExprI i (IstE cls ts es)) = do
+    linkLocal bnds c _ (ExprI i (IstE cls _ ts es)) = do
       case Map.lookup cls (linkClasses c) of
         Nothing ->
           MM.throwSourcedError i $
@@ -376,7 +385,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
                   -- This enables typechecking without requiring sources.
                   linkEmptyInstance m0 cls (zip vs ts) sigs emap
                 else
-                  mapM_ (linkInstance (linkLocal bnds c cs) m0 cls (zip vs ts) sigs emap) es
+                  mapM_ (linkInstance (linkScoped bnds c) m0 cls (zip vs ts) sigs emap) es
     linkLocal bnds _ cs (ExprI termIdx (VarE _ v))
       | Set.member v bnds = return ()
       | otherwise = case Map.lookup v cs of
@@ -417,7 +426,7 @@ linkLocalTerms m0 s0 e0 = linkLocal Set.empty s0 (toCondensedState s0) e0
           EVar ->
           MorlocMonad (LinkState, Map EVar (Int, Maybe (Typeclass Signature)))
         shadow (ls, cs') v = case Map.lookup v cs' of
-          Nothing -> return (ls, cs)
+          Nothing -> return (ls, cs')
           (Just (_, Nothing)) -> return (ls {linkTerms = Map.delete v (linkTerms ls)}, Map.delete v cs')
           (Just (_, Just _)) ->
             MM.throwSourcedError i $ "Illegal shadowing of typeclass term:" <+> pretty v
@@ -509,7 +518,7 @@ linkEmptyInstance _ cls0 params0 sigs emap = mapM_ go sigs
 --   SignatureSet in stateSignatures. This will be a polymorphic case.
 --     Polymorphic ClassName EVar EType [TermTypes]
 linkInstance ::
-  (ExprI -> MorlocMonad ()) ->
+  (Int -> ExprI -> [ExprI] -> MorlocMonad ()) ->
   MVar ->
   ClassName ->
   [(TVar, TypeU)] ->
@@ -527,8 +536,8 @@ linkInstance linker m0 cls0 params0 sigs0 emap0 e0 = linkExpr e0
       let tt = TermTypes (Just et') [(m0, Idx i src)] []
       linkTermTypes v et tt stateIdx
     linkExpr (ExprI _ (AssE v e es)) = do
-      mapM_ linker (e : es)
       (Signature _ _ et, stateIdx) <- lookupInfo v
+      linker stateIdx e es
       t <- substituteInstanceTypes params0 (etype et)
       let et' = et {etype = t}
       let tt = TermTypes (Just et') [] [e]

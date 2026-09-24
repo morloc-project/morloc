@@ -42,6 +42,9 @@ unitTests =
   , propertyTests
   , whereTests
   , orderInvarianceTests
+  , signatureContractTests
+  , constraintContractTests
+  , definitionLadderTests
   , whitespaceTests
   , infixOperatorTests
   , recordLiteralOrderTests

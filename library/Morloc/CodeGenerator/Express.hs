@@ -19,6 +19,7 @@ module Morloc.CodeGenerator.Express
   , addDebugWraps
   , addLoopWraps
   , addNativeRecEntries
+  , etaReduceForwarders
   , polyFreeVars
   ) where
 
@@ -63,6 +64,13 @@ mkPolyManifold ::
   Lang -> Int -> ManifoldForm None (Maybe Type) -> PolyExpr -> MorlocMonad PolyExpr
 mkPolyManifold lang midx form body = do
   observable <- hasManifoldLabel midx
+  -- the flat entry of a staged closure: its stage entry takes the same
+  -- context arguments, so the runtime can call it with the captured values
+  staged <- Map.member midx <$> MM.gets stateStageEntries
+  when staged $ case form of
+    ManifoldPart ctx _ -> MM.modify (\st -> st {stateStageContext = Map.insert midx (length ctx) (stateStageContext st)})
+    ManifoldPass _ -> MM.modify (\st -> st {stateStageContext = Map.insert midx 0 (stateStageContext st)})
+    _ -> return ()
   let kind = if observable then Preserved else Transparent
   return $ PolyManifold lang midx form kind body
 
@@ -197,6 +205,26 @@ addCacheWraps (PolyHead lang midx args body) = do
     hasCacheWrapAt m (PolyRemoteInterface _ _ _ _ inner) = hasCacheWrapAt m inner
     hasCacheWrapAt m (PolyDebugWrap _ _ inner) = hasCacheWrapAt m inner
     hasCacheWrapAt _ _ = False
+
+-- | Replace each closure that only forwards to a function value it captures
+-- (@\\xs -> f xs@, the eta-abstraction a function value in a function slot
+-- is given) by that function value. The wrapper carries no adaptation of its
+-- own (one that did would have a different body), and keeping it hides the
+-- value's identity: a function passed along a loop would gain one wrapper
+-- per iteration, and a staged closure would lose its stage entry.
+etaReduceForwarders :: PolyHead -> PolyHead
+etaReduceForwarders (PolyHead lang m args body) = PolyHead lang m args (go body)
+  where
+    go e = case mapPolySubExprs go e of
+      PolyManifold _ _ (ManifoldPart [Arg j _] bound) k
+        (PolyReturn (PolyApp (PolyExe t (LocalCallP j')) xs))
+          | j == j'
+          , k /= Preserved
+          , map bndId xs == map (Just . ann) bound ->
+              PolyBndVar (C t) j
+      e' -> e'
+    bndId (PolyBndVar _ i) = Just i
+    bndId _ = Nothing
 
 -- | Give every recursive manifold that a caller in its own pool reaches a
 -- native entry point, and record it.
@@ -741,6 +769,9 @@ expressDefault e0@(AnnoS (Idx midx t) (Idx cidx lang, args) _) =
     -- ensure the manifold body has PolyReturn at the return position
     ensurePolyReturn (PolyReturn x) = PolyReturn x
     ensurePolyReturn (PolyLet i e1 e2) = PolyLet i e1 (ensurePolyReturn e2)
+    -- a closure at the return position is the value returned, not a body
+    -- whose own return is this manifold's
+    ensurePolyReturn x@(PolyManifold _ _ f _ _) | isClosureForm f = PolyReturn x
     ensurePolyReturn (PolyManifold l m f k e) = PolyManifold l m f k (ensurePolyReturn e)
     ensurePolyReturn x = PolyReturn x
 
@@ -1523,8 +1554,11 @@ expressPolyExpr
     )
     | isLocal = do
         propagateScope gidxCall midx
-        let nContextArgs = length appArgs - length vs
-            contextArgs = map unvalue (take nContextArgs appArgs)
+        -- The lambda's arguments are its captures followed by its own
+        -- parameters; a body need not use every parameter, so the split is
+        -- taken from the lambda, not from the application inside it.
+        let nContextArgs = length lamArgs - length vs
+            contextArgs = map unvalue (take nContextArgs lamArgs)
 
             typedLambdaArgs =
               fromJust $
@@ -1548,7 +1582,7 @@ expressPolyExpr
             allParentArgs = args <> [i | (_, Just (i, _), _) <- xsInfo]
             lets = [PolyLet i e | (_, Just (i, e), _) <- xsInfo]
             passedParentArgs = unique (concat [[r | r <- allParentArgs, r == i] | i <- callArgs])
-            nContextArgs = length appArgs - length vs
+            nContextArgs = length lamArgs - length vs
 
             lambdaTypeMap = zip vs (map (Idx cidxLam) lamInputTypes)
             -- The values handed to the interface are exactly the indices the
@@ -1565,7 +1599,7 @@ expressPolyExpr
               Nothing -> case lookup i appArgVar of
                 Just v -> PolyBndVar (maybe (A parentLang) C (lookup v lambdaTypeMap)) i
                 Nothing -> error "unreachable: a called index is bound here or minted here"
-            untypedContextArgs = map unvalue $ take nContextArgs appArgs
+            untypedContextArgs = map unvalue $ take nContextArgs lamArgs
             typedPassedArgs = fromJust $ safeZipWith (\(Arg i _) t -> Arg i (Just t)) (drop nContextArgs lamArgs) lamInputTypes
 
             localForm = ManifoldPart untypedContextArgs typedPassedArgs
@@ -1797,7 +1831,7 @@ expressPolyExpr
   parentLang
   (val -> FunT pinputs poutput)
   e@(AnnoS (Idx midx (FunT callInputs _)) (Idx cidx callLang, _) inner)
-    | not (isComputedThunk inner), isLocal = do
+    | not (isComputedThunk inner), not (isLocalPartial inner), isLocal = do
         ids <- MM.takeFromCounter (length callInputs)
         let lambdaVals = bindVarIds ids (map (C . Idx cidx) callInputs)
             lambdaTypedArgs = fromJust $ safeZipWith annotate ids (map Just callInputs)
@@ -1814,7 +1848,7 @@ expressPolyExpr
               [] -> ManifoldPass lambdaTypedArgs
               _ -> ManifoldPart [Arg i None | i <- ctxIds] lambdaTypedArgs
         mkPolyManifold callLang midx form retapp
-    | not (isComputedThunk inner) = do
+    | not (isComputedThunk inner), not (isLocalPartial inner) = do
         ids <- MM.takeFromCounter (length callInputs)
         let lambdaArgs = [Arg i None | i <- ids]
             lambdaTypedArgs = map (`Arg` Nothing) ids
@@ -2249,7 +2283,7 @@ expressPolyApp lang f@(AnnoS g@(Idx i _) _ (AppS _ _)) es = do
     $ PolyApp (PolyLetVar g i) es
 expressPolyApp _ (AnnoS g (_, args) (BndS v)) xs = do
   case [j | (Arg j u) <- args, u == v] of
-    [j] -> return . PolyReturn $ PolyApp (PolyExe g (LocalCallP j)) xs
+    [j] -> return . PolyReturn $ PolyApp (PolyExe g (localApply g j xs)) xs
     _ -> error "Unreachable? BndS value should have been wired uniquely to args previously"
 -- A let-bound function value applied in head position. A multiply-referenced
 -- let lambda is kept shared (not inlined) by 'applyLambdas'; each use reaches
@@ -2257,7 +2291,7 @@ expressPolyApp _ (AnnoS g (_, args) (BndS v)) xs = do
 -- 'BndS' (lambda-argument) case above.
 expressPolyApp _ (AnnoS g (_, args) (LetBndS v)) xs = do
   case [j | (Arg j u) <- args, u == v] of
-    [j] -> return . PolyReturn $ PolyApp (PolyExe g (LocalCallP j)) xs
+    [j] -> return . PolyReturn $ PolyApp (PolyExe g (localApply g j xs)) xs
     _ -> error "Unreachable? LetBndS value should have been wired uniquely to args previously"
 -- A function value produced by a runtime effect and applied. A `<-` bind
 -- leaves a forced function value ('EvalS') -- or an inline effectful block
@@ -2455,6 +2489,7 @@ polyFreeVars = go
     -- the closure bound at index @j@ in the enclosing scope; other executable
     -- forms (source / pattern / recursive calls) name no enclosing variable.
     go (PolyExe _ (LocalCallP j)) = Set.singleton j
+    go (PolyExe _ (PapplyP j)) = Set.singleton j
     go (PolyApp e es) = Set.unions (map go (e : es))
     go (PolyReturn e) = go e
     go (PolyLet i e1 e2) = Set.union (go e1) (Set.delete i (go e2))
@@ -2497,8 +2532,12 @@ lookupRecursiveTarget parentLang v = do
   reg <- MM.gets stateLangRegistry
   -- Filter to concrete manifolds only (those in langMap) to avoid picking up
   -- general/polymorphic indices that don't have serial manifold definitions
+  recTargets <- MM.gets stateRecursionTargets
   let reverseMap = Map.fromList [(name, idx) | (idx, name) <- Map.toList nameMap, Map.member idx langMap]
-  case Map.lookup v reverseMap of
+      byToken = case Map.lookup v recTargets of
+        Just idx | Map.member idx langMap -> Just idx
+        _ -> Nothing
+  case maybe byToken Just (Map.lookup v reverseMap) of
     (Just mid) -> do
       -- A cross-language recursive call only when the target is NOT co-located
       -- with the caller; a co-located member (futhark in cpp) is an in-process call.
@@ -2513,6 +2552,24 @@ bindVarIds [] [] = []
 bindVarIds (i : args) (t : types) = PolyBndVar t i : bindVarIds args types
 bindVarIds [] ts = error $ "bindVarIds: too few arguments: " <> show ts
 bindVarIds _ [] = error "bindVarIds: too few types"
+
+-- | Applying the local function value @j@ (of the type in @g@) to @xs@: a
+-- call, or, with fewer arguments than it takes, a partial application.
+localApply :: Indexed Type -> Int -> [a] -> ExecutableExpressionPool
+localApply (Idx _ (FunT ins _)) j xs
+  | length xs < length ins = PapplyP j
+localApply _ j _ = LocalCallP j
+
+-- | A partial application of a local function value, which is built where
+-- it is written (never eta-abstracted: that would redo it at each call).
+isLocalPartial :: ExprS (Indexed Type) One c -> Bool
+isLocalPartial (AppS (AnnoS g _ h) xs)
+  | isLocalHead h, PapplyP _ <- localApply g 0 xs = True
+  where
+    isLocalHead (BndS _) = True
+    isLocalHead (LetBndS _) = True
+    isLocalHead _ = False
+isLocalPartial _ = False
 
 -- A computed function value that produces its result through evaluation rather
 -- than being a bare callable: a let, a forced thunk, or an inline effectful

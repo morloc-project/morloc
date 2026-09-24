@@ -91,6 +91,8 @@ prettyFoldManifold =
       return $ mergePoolDocs ((<>) (pretty pat) . tupled) xs
     makeNativeExpr _ (AppExeN_ _ (LocalCallP idx) xs) =
       return $ mergePoolDocs ((<>) (letNamerN idx) . tupled) xs
+    makeNativeExpr _ (AppExeN_ _ (PapplyP idx) xs) =
+      return $ mergePoolDocs ((<>) ("papply" <> letNamerN idx) . tupled) xs
     makeNativeExpr _ (AppExeN_ _ (RecCallP mid _) xs) =
       return $ mergePoolDocs ((<>) (manNamer mid) . tupled) xs
     makeNativeExpr _ (ManN_ call) = return call
@@ -104,6 +106,7 @@ prettyFoldManifold =
     makeNativeExpr _ (ExeN_ _ (SrcCallP src)) = return $ defaultValue {poolExpr = pretty (srcName src)}
     makeNativeExpr _ (ExeN_ _ (PatCallP pat)) = return $ defaultValue {poolExpr = pretty pat}
     makeNativeExpr _ (ExeN_ _ (LocalCallP idx)) = return $ defaultValue {poolExpr = letNamerN idx}
+    makeNativeExpr _ (ExeN_ _ (PapplyP idx)) = return $ defaultValue {poolExpr = letNamerN idx}
     makeNativeExpr _ (ExeN_ _ (RecCallP mid _)) = return $ defaultValue {poolExpr = manNamer mid}
     makeNativeExpr _ (ListN_ _ _ xs) = return $ mergePoolDocs list xs
     makeNativeExpr _ (TupleN_ _ xs) = return $ mergePoolDocs tupled xs

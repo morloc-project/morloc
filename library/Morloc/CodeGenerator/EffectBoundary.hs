@@ -117,6 +117,8 @@ polyOuterType (PolyEval (Idx _ t) _)                  = Just t
 polyOuterType (PolyCoerce _ (Idx _ t) _)              = Just t
 polyOuterType (PolyIntrinsic (Idx _ t) _ _)           = Just t
 polyOuterType (PolyNull (Idx _ t))                    = Just t
+-- a closure is a function value: what its body returns is not its type
+polyOuterType (PolyManifold _ _ f _ _) | isLambdaForm f = Nothing
 polyOuterType (PolyManifold _ _ _ _ body)             = polyOuterType body
 polyOuterType (PolyReturn body)                       = polyOuterType body
 polyOuterType (PolyLet _ _ body)                      = polyOuterType body
@@ -443,6 +445,7 @@ substBndVar i i' t = go
     go (PolyBndVar _ j) | j == i = PolyLetVar (Idx i' t) i'
     go (PolyManifold l m f k e) = PolyManifold l m (form f) k (go e)
     go (PolyExe ti (LocalCallP j)) | j == i = PolyExe ti (LocalCallP i')
+    go (PolyExe ti (PapplyP j)) | j == i = PolyExe ti (PapplyP i')
     go (PolyRemoteInterface l ti is rf e) =
       PolyRemoteInterface l ti (map idx is) rf (go e)
     go (PolyLet j a b) = PolyLet j (go a) (go b)
@@ -829,6 +832,17 @@ insertExportBoundaries isCommand cidx t (PolyHead lang midx args body) =
 -- 'forceLayers' peephole when they meet at a source call return.
 forceCalleeBody :: PolyExpr -> PolyExpr
 forceCalleeBody (PolyManifold l m f k body) =
-  PolyManifold l m f k (forceReturnPosition m body)
+  PolyManifold l m f k (forceValuePosition m body)
 forceCalleeBody e = e
+
+-- | 'forceReturnPosition' for the value a manifold returns: a closure there
+-- is the value itself (a function), and what its body returns is the
+-- closure's own business, forced where it is called.
+forceValuePosition :: Int -> PolyExpr -> PolyExpr
+forceValuePosition m (PolyReturn e) = PolyReturn (forceValuePosition m e)
+forceValuePosition m (PolyLet i v e) = PolyLet i v (forceValuePosition m e)
+forceValuePosition _ e@(PolyManifold _ _ f _ _) | isLambdaForm f = e
+forceValuePosition m (PolyManifold l m' f k e) =
+  PolyManifold l m' f k (forceValuePosition m e)
+forceValuePosition m e = forceReturnPosition m e
 

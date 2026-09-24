@@ -1,0 +1,40 @@
+module main (curriedDef, flatDef, stagedDef, threeGroups)
+
+import root-cpp
+
+-- The source calls the function it is passed with one argument and applies
+-- what that returns: its parameter is written `(Int -> (Int -> Int))`. Morloc
+-- does not distinguish that type from `Int -> Int -> Int`, so however a
+-- morloc function of that type is defined, it is handed over in the grouping
+-- the source's signature gives.
+
+source Cpp from "helpers.hpp" ("make_and_apply" as makeAndApply, "make_and_apply3" as makeAndApply3)
+makeAndApply :: (Int -> (Int -> Int)) -> Int -> Int
+makeAndApply3 :: (Int -> (Int -> (Int -> Int))) -> Int -> Int
+
+mulC :: Int -> (Int -> Int)
+mulC base = \y -> base * y
+
+mulF :: Int -> Int -> Int
+mulF a b = a * b
+
+-- the work before the lambda runs once, when the source applies it to one
+-- argument
+scaled :: Int -> Int -> Int
+scaled base = let z = base * 10 in \y -> z + y
+
+curriedDef :: Int -> Int
+curriedDef x = makeAndApply mulC x
+
+flatDef :: Int -> Int
+flatDef x = makeAndApply mulF x
+
+stagedDef :: Int -> Int
+stagedDef x = makeAndApply scaled x
+
+-- one argument at a time, three times
+mul3 :: Int -> Int -> Int -> Int
+mul3 a b c = a * b * c
+
+threeGroups :: Int -> Int
+threeGroups x = makeAndApply3 mul3 x

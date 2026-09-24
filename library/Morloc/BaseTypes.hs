@@ -13,7 +13,9 @@ to the types that are hardwired into the type system and have special
 serialization\/deserialization support.
 -}
 module Morloc.BaseTypes
-  ( unit
+  ( integralClass
+  , numericClass
+  , unit
   , real
   , f32
   , f64
@@ -48,6 +50,7 @@ module Morloc.BaseTypes
   , tryU
   , isTryHead
   , doDiscardPrefix
+  , doGuardPrefix
   , closeTmpUnlinkMarker
   , isIFileHead
   , mlcKindIFile
@@ -88,9 +91,18 @@ module Morloc.BaseTypes
 import Data.Word (Word8)
 import Morloc.Data.Text (Text, pretty)
 import Morloc.CodeGenerator.Namespace (TypeF (..), FVar (..), CVar (..))
-import Morloc.Namespace.Prim (TVar (..))
+import Morloc.Namespace.Prim (ClassName (..), TVar (..))
 import Morloc.Namespace.Type (Type (..), TypeU (..), emptyEffectSet)
 import Prelude hiding (log)
+
+-- | The classes whose rigid type variables admit literals when a signature is
+-- checked as a contract: an integer literal inhabits @a@ under @Integral a@,
+-- a real literal under @Numeric a@ (a subclass of @Integral@).
+integralClass :: ClassName
+integralClass = ClassName "Integral"
+
+numericClass :: ClassName
+numericClass = ClassName "Numeric"
 
 unit :: TVar
 unit = TV "Unit"
@@ -241,6 +253,12 @@ isTryHead _                 = False
 -- every bare statement in the language.
 doDiscardPrefix :: Text
 doDiscardPrefix = "_do_"
+
+-- | The name prefix of the binding a refutable do-bind's pattern check is
+-- evaluated for. Nothing reads it; it is evaluated for its throw, so it is
+-- never moved or dropped.
+doGuardPrefix :: Text
+doGuardPrefix = "_guard_"
 
 mlcKindIFile :: Word8
 mlcKindIFile = 0

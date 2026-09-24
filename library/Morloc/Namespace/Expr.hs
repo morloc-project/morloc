@@ -721,7 +721,9 @@ data ExprI = ExprI Int Expr
 data Expr
   = ModE MVar [ExprI]
   | ClsE (Typeclass Signature)
-  | IstE ClassName [TypeU] [ExprI]
+  | IstE ClassName [Constraint] [TypeU] [ExprI]
+  -- ^ class, the instance's context (constraints its body may assume),
+  -- instance types, body
   | EffE EffectLabel Bool  -- ^ effect declaration: label, isEscapable
   | TypE ExprTypeE
   | ImpE Import
@@ -1235,7 +1237,7 @@ instance Pretty Expr where
         [] -> ""
         [c] -> pretty c <+> "=> "
         _ -> tupled (map pretty constraints) <+> "=> "
-  pretty (IstE cls ts es) = "instance" <+> pretty cls <+> hsep (map (parens . pretty) ts) <> (align . vsep . map pretty) es
+  pretty (IstE cls _ ts es) = "instance" <+> pretty cls <+> hsep (map (parens . pretty) ts) <> (align . vsep . map pretty) es
   pretty (EffE lbl esc) = (if esc then "escapable effect" else "effect") <+> pretty lbl
   pretty (TypE (ExprTypeE lang v vs t _ kind)) = case kind of
     TypedefPrimitive ->

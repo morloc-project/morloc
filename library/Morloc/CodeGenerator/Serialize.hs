@@ -143,13 +143,11 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       | kind == Preserved && m /= currentM = do
           ne <- nativeExpr m orig
           se <- serializeS "preserved manifold" m ne
-          -- If the body was 'MonoReturn'-wrapped (standard shape from
-          -- 'ensurePolyReturn'), the inner 'ReturnN' lives inside the
+          -- If the body returns (the standard shape from 'ensurePolyReturn',
+          -- possibly under lets), the inner 'ReturnN' lives inside the
           -- NativeManifold function; surface 'ReturnS' here so the
           -- enclosing manifold emits its own 'return' statement.
-          case inner of
-            MonoReturn _ -> return (ReturnS se)
-            _ -> return se
+          return (if endsInReturn inner then ReturnS se else se)
       -- A function-valued manifold (a closure: a 'ManifoldPart'/'ManifoldPass'
       -- with remaining bound parameters) is a first-class VALUE, not a
       -- computation to inline. Stripping it ('serialExpr m inner') would splice
@@ -170,9 +168,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
               "a function value created by host code cannot cross a pool boundary; apply it in the pool that received it, or have the host return the data it would compute"
           ne <- nativeExpr m orig
           se <- serializeS "closure value" m ne
-          case inner of
-            MonoReturn _ -> return (ReturnS se)
-            _ -> return se
+          return (if endsInReturn inner then ReturnS se else se)
       | otherwise = serialExpr m inner
     serialExpr m (MonoLet i e1 e2) =
       let (m1, e1') = unwrapLetDef m e1
@@ -884,6 +880,8 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     -- wire form). The head's 'Idx' carries the function type 'FunT ins out'.
     makeTypemap _ (MonoApp (MonoExe hg@(Idx idx _) (LocalCallP j)) es) =
       Map.unionsWith mergeTypes (Map.singleton j (Right hg) : map (makeTypemap idx) es)
+    makeTypemap _ (MonoApp (MonoExe hg@(Idx idx _) (PapplyP j)) es) =
+      Map.unionsWith mergeTypes (Map.singleton j (Right hg) : map (makeTypemap idx) es)
     makeTypemap _ (MonoApp (MonoExe (ann -> idx) _) es) = Map.unionsWith mergeTypes (map (makeTypemap idx) es)
     makeTypemap parentIdx (MonoApp e es) = Map.unionsWith mergeTypes (map (makeTypemap parentIdx) (e : es))
     makeTypemap parentIdx (MonoCacheBody _ _ _ e) = makeTypemap parentIdx e
@@ -1247,6 +1245,8 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
     -- call, exactly as a variable read would have it.
     wireNativeExpr (AppExeN_ t exe@(LocalCallP i) (unzip -> (reqs, es))) =
       return (Map.unionsWith (<>) (Map.singleton i NativeContent : reqs), AppExeN t exe es)
+    wireNativeExpr (AppExeN_ t exe@(PapplyP i) (unzip -> (reqs, es))) =
+      return (Map.unionsWith (<>) (Map.singleton i NativeContent : reqs), AppExeN t exe es)
     wireNativeExpr (SerialLetN_ i (req1, se1) (req2, ne2)) = do
       let req' = Map.unionWith (<>) req1 req2
       e' <- case Map.lookup i req2 of
@@ -1369,3 +1369,8 @@ instance Semigroup Request where
 data SerializationState = Serialized | Unserialized
   deriving (Show, Eq, Ord)
 
+-- | A body whose value is returned, after any lets it binds first.
+endsInReturn :: MonoExpr -> Bool
+endsInReturn (MonoReturn _) = True
+endsInReturn (MonoLet _ _ e2) = endsInReturn e2
+endsInReturn _ = False

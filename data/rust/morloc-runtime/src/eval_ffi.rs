@@ -1168,17 +1168,21 @@ unsafe fn morloc_eval_r(
 
                 MorlocAppExpressionType::Lambda => {
                     let lam = (*app).function.lambda;
-                    // Bind arguments
+                    // Bind arguments, remembering any binding of the same name
+                    // they shadow so leaving the lambda restores it
+                    let mut shadowed = Vec::with_capacity(nargs);
                     for i in 0..nargs {
                         let var = CStr::from_ptr(*(*lam).args.add(i)).to_str().unwrap_or("");
-                        bndvars.insert(var, arg_results[i]);
+                        shadowed.push((var, bndvars.insert(var, arg_results[i])));
                     }
-                    morloc_eval_r((*lam).body, dest, width, bndvars)?;
-                    // Clean up bindings
-                    for i in 0..nargs {
-                        let var = CStr::from_ptr(*(*lam).args.add(i)).to_str().unwrap_or("");
-                        bndvars.remove(var);
+                    let result = morloc_eval_r((*lam).body, dest, width, bndvars);
+                    for (var, prev) in shadowed.into_iter().rev() {
+                        match prev {
+                            Some(p) => { bndvars.insert(var, p); }
+                            None => { bndvars.remove(var); }
+                        }
                     }
+                    result?;
                 }
 
                 MorlocAppExpressionType::Format => {
@@ -1498,13 +1502,22 @@ unsafe fn morloc_eval_r(
                 let param = CStr::from_ptr(*(*lam).args).to_str().unwrap_or("");
                 let body = (*lam).body;
 
+                let shadowed = bndvars.get(param).copied();
+                let mut result = Ok(());
                 for i in 0..n {
                     let in_elem = in_data.add(i * a_width);
                     let out_elem = out_data.add(i * b_width);
                     bndvars.insert(param, in_elem);
-                    morloc_eval_r(body, out_elem, b_width, bndvars)?;
-                    bndvars.remove(param);
+                    result = morloc_eval_r(body, out_elem, b_width, bndvars).map(|_| ());
+                    if result.is_err() {
+                        break;
+                    }
                 }
+                match shadowed {
+                    Some(p) => { bndvars.insert(param, p); }
+                    None => { bndvars.remove(param); }
+                }
+                result?;
                 shm::abs2rel(out_data)?
             };
 

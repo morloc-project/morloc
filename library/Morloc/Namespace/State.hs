@@ -234,6 +234,23 @@ data MorlocState = MorlocState
   , stateManifoldLang :: Map Int Lang
   -- ^ Map from export manifold ID to its pool language
   , stateNativeRecEntries :: Map Int Int
+  -- | The index of the term a recursion token names ('CallS' target).
+  -- Recursive exports keep their command name in 'stateName', so their
+  -- back-edges are resolved through this map.
+  , stateRecursionTargets :: Map EVar Int
+  -- | The term that owns each where-bound term (both by term identity, the
+  -- inner key of 'stateSignatures').
+  , stateWhereOwner :: Map Int Int
+  -- | Each staged closure value (by the index of its flat entry): its first
+  -- stage point and the index of its stage entry.
+  , stateStageEntries :: Map Int (Int, Int)
+  -- | The number of context arguments of each staged closure's flat entry,
+  -- once its manifold is built.
+  , stateStageContext :: Map Int Int
+  -- | Each staged recursive function (by the name its back-edges use): its
+  -- first stage point, the name of its stage entry, and the number of values
+  -- it captures (passed before its parameters, to both entries).
+  , stateRecStages :: Map EVar (Int, EVar, Int)
   -- ^ A recursive manifold that also has a native entry point, mapped to
   -- that entry's ID. The manifold itself is the pool's serial entry: it
   -- takes and returns packets, which a caller in another pool needs and a
@@ -862,6 +879,14 @@ data Gamma = Gamma
   -- positional constraint, pays only an O(log n) lookup. Mirrors the
   -- cheap own-entry pre-check that 'accumulatedRecords' uses for records.
   , gammaPositionalReceivers :: Set.Set TVar
+  -- | 'Just' when checking definitions against their signatures as
+  -- contracts: a signature's type variables are then rigid (skolems), and
+  -- the set holds those introduced so far. 'Nothing' in ordinary inference.
+  , gammaRigid :: Maybe (Set.Set TVar)
+  -- | The type variables of the signatures being checked around this point,
+  -- by the name the signature wrote to the name the check gave it. A local
+  -- signature or annotation writing one of these names means that variable.
+  , gammaScoped :: Map TVar TVar
   }
 
 -- | Compile-time constant values tracked during typechecking for nat / str
@@ -964,6 +989,11 @@ instance Defaultable MorlocState where
       , stateExportGroups = Map.empty
       , stateManifoldLang = Map.empty
       , stateNativeRecEntries = Map.empty
+      , stateRecursionTargets = Map.empty
+      , stateWhereOwner = Map.empty
+      , stateStageEntries = Map.empty
+      , stateStageContext = Map.empty
+      , stateRecStages = Map.empty
       , stateHostOriginClosures = Set.empty
       , stateArgTypes = Map.empty
       , stateManifoldEffects = Map.empty

@@ -1112,6 +1112,16 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
 // when it crosses a boundary, reify can recover (home_language, mid, captured).
 // A closure reflected from another pool is a MorlocClosure too, whose
 // `home` names that pool: reifying it hands back the origin it came with.
+//
+// `apply1`, when set, applies the closure to its first argument the way
+// morloc does ('mlc_apply1'): a staged closure runs its stage when it has
+// the arguments before the stage point, and any closure that can cross keeps
+// its origin, with the argument appended to its captured values.
+template <class R, class... A> struct mlc_apply1_slot { using type = bool; };
+template <class R, class A1, class... A> struct mlc_apply1_slot<R, A1, A...> {
+    using type = std::function<std::function<R(A...)>(const A1&)>;
+};
+
 template <class Sig> struct MorlocClosure;
 template <class R, class... A>
 struct MorlocClosure<R(A...)> {
@@ -1119,6 +1129,7 @@ struct MorlocClosure<R(A...)> {
     int64_t mid;
     std::function<std::vector<std::vector<uint8_t>>()> reify_captured;
     std::string home = "cpp";
+    typename mlc_apply1_slot<R, A...>::type apply1{};
     R operator()(A... args) const { return fn(args...); }
 };
 
@@ -1148,6 +1159,125 @@ _mlc_reify(const std::function<R(A...)>& f) {
         throw MorlocException("cannot reify a non-morloc C++ closure");
     }
     return std::make_tuple(clo->home, clo->mid, clo->reify_captured());
+}
+
+// Serialize an argument appended to a closure's captured values; a function
+// argument is reified first.
+template <typename T>
+std::vector<uint8_t> _mlc_reify_arg(const T& value, Schema* schema) {
+    return _mlc_reify_capture(value, schema);
+}
+template <class R, class... A>
+std::vector<uint8_t> _mlc_reify_arg(const std::function<R(A...)>& f, Schema* schema) {
+    return _mlc_reify_capture(_mlc_reify(f), schema);
+}
+
+typedef std::vector<std::vector<uint8_t>> mlc_captured_t;
+
+// A closure that can cross, applied to its first arguments one at a time,
+// stays a closure of the same manifold: the arguments join its captured
+// values. `schemas` are the wire schemas of its remaining arguments, used
+// only if it is reified.
+// A closure applied to its first argument `x`: the thunk that reifies it
+// (the argument appended to the captured values) and the schemas of the
+// arguments it still takes.
+template <class X>
+std::pair<std::function<mlc_captured_t()>, std::vector<Schema*>>
+mlc_pap_step(const std::function<mlc_captured_t()>& reify, const std::vector<Schema*>& schemas, const X& x) {
+    Schema* s = schemas.empty() ? nullptr : schemas.front();
+    std::vector<Schema*> rest;
+    if (!schemas.empty()) rest.assign(schemas.begin() + 1, schemas.end());
+    std::function<mlc_captured_t()> reify2 = [reify, x, s]() {
+        mlc_captured_t v = reify();
+        v.push_back(_mlc_reify_arg(x, s));
+        return v;
+    };
+    return {reify2, rest};
+}
+
+template <class R, class... A> struct mlc_pap;
+template <class R> struct mlc_pap<R> {
+    static MorlocClosure<R()> make(std::function<R()> fn, int64_t mid,
+                                   std::function<mlc_captured_t()> reify,
+                                   std::string home, std::vector<Schema*>) {
+        return MorlocClosure<R()>{fn, mid, reify, home};
+    }
+};
+template <class R, class A1, class... A> struct mlc_pap<R, A1, A...> {
+    static MorlocClosure<R(A1, A...)> make(std::function<R(A1, A...)> fn, int64_t mid,
+                                           std::function<mlc_captured_t()> reify,
+                                           std::string home, std::vector<Schema*> schemas) {
+        MorlocClosure<R(A1, A...)> c{fn, mid, reify, home};
+        c.apply1 = [fn, mid, reify, home, schemas](const A1& x) -> std::function<R(A...)> {
+            auto [reify2, rest] = mlc_pap_step(reify, schemas, x);
+            std::function<R(A...)> fn2 = [fn, x](A... r) { return fn(x, r...); };
+            return mlc_pap<R, A...>::make(fn2, mid, reify2, home, rest);
+        };
+        return c;
+    }
+};
+
+// A staged closure: after its arguments `First` it runs `stage` (its stage
+// entry, bound to its captured values), once, and the closure of `Rest`
+// that the stage returns is the result.
+template <class... T> struct mlc_types {};
+template <class R, class First, class Rest> struct mlc_staged;
+template <class R, class F1, class... F, class... Rest>
+struct mlc_staged<R, mlc_types<F1, F...>, mlc_types<Rest...>> {
+    typedef std::function<std::function<R(Rest...)>(F1, F...)> stage_t;
+    static MorlocClosure<R(F1, F..., Rest...)> make(std::function<R(F1, F..., Rest...)> fn, int64_t mid,
+                                                    std::function<mlc_captured_t()> reify,
+                                                    std::string home, std::vector<Schema*> schemas,
+                                                    stage_t stage) {
+        MorlocClosure<R(F1, F..., Rest...)> c{fn, mid, reify, home};
+        c.apply1 = [fn, mid, reify, home, schemas, stage](const F1& x) -> std::function<R(F..., Rest...)> {
+            if constexpr (sizeof...(F) == 0) {
+                return stage(x);
+            } else {
+                auto [reify2, rest] = mlc_pap_step(reify, schemas, x);
+                std::function<R(F..., Rest...)> fn2 = [fn, x](F... f, Rest... r) { return fn(x, f..., r...); };
+                std::function<std::function<R(Rest...)>(F...)> stage2 = [stage, x](F... f) { return stage(x, f...); };
+                return mlc_staged<R, mlc_types<F...>, mlc_types<Rest...>>::make(fn2, mid, reify2, home, rest, stage2);
+            }
+        };
+        return c;
+    }
+};
+
+// The closures of a function signature, by the number of arguments before
+// the stage point of a staged one.
+template <size_t K, class Done, class Todo, bool = (K == 0)> struct mlc_split;
+template <size_t K, class Done, class Todo> struct mlc_split<K, Done, Todo, true> {
+    typedef Done first;
+    typedef Todo rest;
+};
+template <size_t K, class... D, class T1, class... T>
+struct mlc_split<K, mlc_types<D...>, mlc_types<T1, T...>, false>
+    : mlc_split<K - 1, mlc_types<D..., T1>, mlc_types<T...>> {};
+
+template <class Sig> struct mlc_pap_sig;
+template <class R, class... A> struct mlc_pap_sig<R(A...)> : mlc_pap<R, A...> {};
+
+template <size_t K, class Sig> struct mlc_staged_sig;
+template <size_t K, class R, class... A>
+struct mlc_staged_sig<K, R(A...)>
+    : mlc_staged<R, typename mlc_split<K, mlc_types<>, mlc_types<A...>>::first,
+                 typename mlc_split<K, mlc_types<>, mlc_types<A...>>::rest> {};
+
+// Apply a function value to its first argument. A closure morloc made
+// knows how (its `apply1`); any other function keeps the argument.
+template <class R, class A1, class... A>
+std::function<R(A...)> mlc_apply1(const std::function<R(A1, A...)>& f, const A1& x) {
+    const auto* clo = f.template target<MorlocClosure<R(A1, A...)>>();
+    if (clo != nullptr && clo->apply1) {
+        return clo->apply1(x);
+    }
+    return [f, x](A... r) { return f(x, r...); };
+}
+
+// The reify thunk of a closure that never crosses.
+inline mlc_captured_t mlc_unreifiable() {
+    throw MorlocException("cannot reify a non-morloc C++ closure");
 }
 
 

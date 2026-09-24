@@ -252,6 +252,10 @@ morloc_foreign_call <- function(...) {
 
 MLC_HOME_LANG <- "r"
 
+# The schema of every closure's wire tuple (home, manifold id, captured
+# packets); must equal the one Morloc.CodeGenerator.Serial emits.
+MLC_CLOSURE_SCHEMA <- "t3sjaau1"
+
 mlc_is_closure_codec <- function(codec) inherits(codec, "mlc_closure_codec")
 
 # Serialize a native value by its codec: a closure is reified first.
@@ -296,8 +300,11 @@ mlc_reify <- function(f, home_lang) {
   mid <- attr(f, "morloc_mid")
   captured <- attr(f, "morloc_captured")
   if (is.null(captured)) captured <- list()
-  cap_codecs <- mlc_closure_table[[as.character(mid)]]
-  if (is.null(cap_codecs)) cap_codecs <- list()
+  entry <- mlc_closure_table[[as.character(mid)]]
+  # A partial application of the closure carries its applied arguments after
+  # its context ('mlc_papply'), so the captured values are the context and a
+  # prefix of the bound arguments.
+  cap_codecs <- if (is.null(entry)) list() else c(entry[[1]], entry[[2]])
   # A captured value is applied back after this dispatch has released its
   # blocks, so it must travel inside its packet.
   packets <- lapply(seq_along(captured), function(i) mlc_encode(captured[[i]], cap_codecs[[i]], TRUE))
@@ -321,7 +328,74 @@ mlc_reflect_from_tuple <- function(tup, arg_codecs, res_codec) {
     mlc_decode(morloc_foreign_call(sock, as.integer(mid), packets), res_codec)
   }
   attr(f, "morloc_origin") <- list(home_lang, as.integer(mid), captured)
+  attr(f, "morloc_codecs") <- list(arg_codecs, res_codec)
   f
+}
+
+# Apply a function value to its first arguments. A staged function (one that
+# does work after these arguments and before the rest) runs that work now,
+# once, through its stage entry, and the closure it returns is the result;
+# otherwise the arguments are kept with the function, which runs when it gets
+# the rest. mlc_stage_table maps a flat entry's manifold id to (context size,
+# first stage point, stage entry id).
+mlc_papply <- function(f, xs) {
+  if (length(xs) == 0) return(f)
+  origin <- attr(f, "morloc_origin")
+  if (!is.null(origin)) return(mlc_papply_remote(f, origin, xs))
+  mid <- attr(f, "morloc_mid")
+  if (is.null(mid)) {
+    # a function host code made: it has no stages morloc knows of
+    return(function(...) do.call(f, c(xs, list(...))))
+  }
+  caps <- attr(f, "morloc_captured")
+  if (is.null(caps)) caps <- list()
+  st <- mlc_stage_take(mid, length(caps))
+  if (is.null(st) || length(xs) < st$take) return(mlc_pap(mid, caps, xs))
+  take <- st$take
+  g <- do.call(get(paste0("m", st$stage)), c(caps, xs[seq_len(take)]))
+  mlc_papply(g, xs[seq_along(xs) > take])
+}
+
+# How many more arguments closure `mid`, holding `ncaptured` captured values,
+# takes before its stage point, and its stage entry; NULL when it has none.
+mlc_stage_take <- function(mid, ncaptured) {
+  entry <- mlc_stage_table[[as.character(mid)]]
+  if (is.null(entry)) return(NULL)
+  list(take = entry[[2]] - (ncaptured - entry[[1]]), stage = entry[[3]])
+}
+
+# A closure of manifold mid over captured values and applied arguments.
+mlc_pap <- function(mid, caps, xs) {
+  fn <- get(paste0("m", mid))
+  captured <- c(caps, xs)
+  g <- function(...) do.call(fn, c(captured, list(...)))
+  attr(g, "morloc_mid") <- mid
+  attr(g, "morloc_captured") <- captured
+  g
+}
+
+# The same, for a closure that lives in another pool: its stage entry runs
+# there, and the closure it returns comes back as a reflected proxy.
+mlc_papply_remote <- function(f, origin, xs) {
+  home_lang <- origin[[1]]
+  mid <- origin[[2]]
+  packets <- origin[[3]]
+  codecs <- attr(f, "morloc_codecs")
+  arg_codecs <- codecs[[1]]
+  res_codec <- codecs[[2]]
+  st <- mlc_stage_take(mid, length(packets))
+  if (is.null(st) || length(xs) < st$take) {
+    more <- lapply(seq_along(xs), function(i) mlc_encode(xs[[i]], arg_codecs[[i]], TRUE))
+    return(mlc_reflect_from_tuple(
+      list(home_lang, mid, c(packets, more)),
+      arg_codecs[seq_along(arg_codecs) > length(xs)], res_codec))
+  }
+  take <- st$take
+  sock <- paste0(global_state$tmpdir, "/pipe-", home_lang)
+  stage_pkts <- c(packets, lapply(seq_len(take), function(i) mlc_encode(xs[[i]], arg_codecs[[i]])))
+  tup <- morloc_get_value(morloc_foreign_call(sock, as.integer(st$stage), stage_pkts), MLC_CLOSURE_SCHEMA)
+  g <- mlc_reflect_from_tuple(tup, arg_codecs[seq_along(arg_codecs) > take], res_codec)
+  mlc_papply(g, xs[seq_along(xs) > take])
 }
 
 # Rebuild a callable from a raw incoming closure wire packet, used when the

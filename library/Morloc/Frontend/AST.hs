@@ -175,7 +175,7 @@ checkExprI :: (Monad m) => (ExprI -> m ()) -> ExprI -> m ()
 checkExprI f e@(ExprI _ (ModE _ es)) = f e >> mapM_ (checkExprI f) es
 checkExprI f e@(ExprI _ (AnnE e' _)) = f e >> checkExprI f e'
 checkExprI f e@(ExprI _ (AssE _ e' es')) = f e >> checkExprI f e' >> mapM_ (checkExprI f) es'
-checkExprI f e@(ExprI _ (IstE _ _ es)) = f e >> mapM_ (checkExprI f) es
+checkExprI f e@(ExprI _ (IstE _ _ _ es)) = f e >> mapM_ (checkExprI f) es
 checkExprI f e@(ExprI _ (LamE _ e')) = f e >> checkExprI f e'
 checkExprI f e@(ExprI _ (AppE e' es)) = f e >> checkExprI f e' >> mapM_ (checkExprI f) es
 checkExprI f e@(ExprI _ (LstE es)) = f e >> mapM_ (checkExprI f) es
@@ -194,7 +194,7 @@ checkExprI f e = f e
 maxIndex :: ExprI -> Int
 maxIndex (ExprI i (ModE _ es)) = maximum (i : map maxIndex es)
 maxIndex (ExprI i (AnnE e _)) = max i (maxIndex e)
-maxIndex (ExprI i (IstE _ _ es)) = maximum (i : map maxIndex es)
+maxIndex (ExprI i (IstE _ _ _ es)) = maximum (i : map maxIndex es)
 maxIndex (ExprI i (AssE _ e es)) = maximum (i : map maxIndex (e : es))
 maxIndex (ExprI i (LamE _ e)) = max i (maxIndex e)
 maxIndex (ExprI i (AppE e es)) = maximum (i : map maxIndex (e : es))
@@ -217,7 +217,7 @@ getIndices :: ExprI -> [Int]
 getIndices (ExprI i (ModE _ es)) = i : concatMap getIndices es
 getIndices (ExprI i (AnnE e _)) = i : getIndices e
 getIndices (ExprI i (AssE _ e es)) = i : concatMap getIndices (e : es)
-getIndices (ExprI i (IstE _ _ es)) = i : concatMap getIndices es
+getIndices (ExprI i (IstE _ _ _ es)) = i : concatMap getIndices es
 getIndices (ExprI i (LamE _ e)) = i : getIndices e
 getIndices (ExprI i (AppE e es)) = i : concatMap getIndices (e : es)
 getIndices (ExprI i (LstE es)) = i : concatMap getIndices es
@@ -269,7 +269,7 @@ mapTypeInExprI f = go
       return $ ExprI i (AnnE e' (f t))
     go (ExprI i (ModE m es)) = ExprI i . ModE m <$> mapM go es
     go (ExprI i (AssE v e es)) = ExprI i <$> (AssE v <$> go e <*> mapM go es)
-    go (ExprI i (IstE cls ts es)) = ExprI i <$> (IstE cls (map f ts) <$> mapM go es)
+    go (ExprI i (IstE cls ctx ts es)) = ExprI i <$> (IstE cls ctx (map f ts) <$> mapM go es)
     go (ExprI i (LamE vs e)) = ExprI i . LamE vs <$> go e
     go (ExprI i (AppE e es)) = ExprI i <$> (AppE <$> go e <*> mapM go es)
     go (ExprI i (LstE es)) = ExprI i . LstE <$> mapM go es

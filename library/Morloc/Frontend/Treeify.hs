@@ -13,7 +13,12 @@ per exported function by inlining declarations, resolving sources, and
 renaming lambda-bound variables for uniqueness. The resulting trees are the
 input to the typechecker and code generator.
 -}
-module Morloc.Frontend.Treeify (treeify) where
+module Morloc.Frontend.Treeify
+  ( treeify
+  , Validation (..)
+  , collectRoot
+  , recName
+  ) where
 
 import qualified Data.Set as Set
 import qualified Morloc.BaseTypes as BT
@@ -24,6 +29,7 @@ import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Frontend.Link as MFL
+import Morloc.Frontend.Rename (renameLocals)
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
 import Morloc.Typecheck.Internal (collectEffLabels, unqualify)
@@ -43,7 +49,12 @@ data BindKind = LambdaBound | LetBound
 data Namer = Namer
   { namerMap :: Map.Map EVar (EVar, BindKind)
   , namerIndex :: Int
-  , namerExpanding :: Set.Set EVar  -- functions currently being expanded (recursion detection)
+  , namerExpanding :: Map.Map Int EVar  -- terms currently being expanded, by term identity, with the name their back-edges use
+  , namerRecursive :: Set.Set Int  -- terms reached through a back-edge while being expanded
+  , namerShallow :: Maybe Int  -- when collecting a definition to check against its signature: its term id
+  , namerShallowOnly :: Maybe (Set.Set Int)
+  -- ^ with 'namerShallow': only these terms are referenced by signature;
+  -- every other term is expanded
   }
   deriving (Show)
 
@@ -60,11 +71,21 @@ data Namer = Namer
 -- All expressions are mapped to integer indices linking expressions to their
 -- ultimate type annotations. The indices also match terms to their signatures
 -- and locations in source code.
+-- | What 'Morloc.Frontend.Typecheck.validate' checks: each signed top-level
+-- definition of the root module as a tree of its own body, and the root
+-- module's instance declarations.
+data Validation = Validation
+  { validationTrees :: [AnnoS Int ManyPoly Int]
+  , validationInstances :: [(Int, ClassName, [TypeU])]
+  , validationDefs :: Map.Map Int (Int, EVar)
+  -- ^ each checked definition by term id: its declaration index and name
+  }
+
 treeify ::
   DAG MVar [AliasedSymbol] ExprI ->
-  MorlocMonad [AnnoS Int ManyPoly Int]
+  MorlocMonad (Validation, [(Int, EVar)])
 treeify d
-  | Map.size d == 0 = return []
+  | Map.size d == 0 = return (Validation [] [] Map.empty, [])
   | otherwise = case DAG.roots d of
       -- if no parentless element exists, then the graph must be empty or cyclic
       [] -> MM.throwSystemError "cyclic import dependency in treeify"
@@ -74,7 +95,7 @@ treeify d
           -- if the key is not in the DAG, then something is dreadfully wrong codewise
           Nothing -> MM.throwCompilerBug $ "module DAG is missing key" <+> pretty k
           (Just (AST.findExport -> ExportMany symbols groups)) -> do
-            d' <- DAG.mapNodeM linkAndRemoveAnnotations d
+            d' <- DAG.mapNodeM (linkAndRemoveAnnotations >=> renameLocals) d
 
             -- move all to state, after this the DAG will no longer be needed
             _ <- MFL.link d'
@@ -150,8 +171,13 @@ treeify d
                     }
               )
 
-            -- dissolve modules, imports, and sources, leaving behind only a tree for each term exported from main
-            statefulMapM collect (Namer Map.empty 0 Set.empty) exports' |>> snd
+            (checks, instances, defs) <- case DAG.lookupNode k d' of
+              Just node -> do
+                checkBareClassConstraints node
+                (cs, ds) <- contractRoots node
+                return (cs, rootInstances node, ds)
+              Nothing -> return ([], [], Map.empty)
+            return (Validation checks instances defs, exports')
           (Just _) ->
             error "This should not be possible, all ExportAll cases should have been removed in Restructure.hs"
 
@@ -429,6 +455,80 @@ linkAndRemoveAnnotations = f
     f (ExprI i (IntrinsicE intr es)) = ExprI i <$> (IntrinsicE intr <$> mapM f es)
     f e@(ExprI _ _) = return e
 
+-- | Collect the tree of the term at index @gi@ named @v@. With @Nothing@
+-- every term it reaches is expanded. With @Just ts@ a reference to a term in
+-- @ts@ other than the root is left as its signature alone, a
+-- @VarS v (MonomorphicExpr (Just sig) [])@.
+collectRoot :: Maybe (Set.Set Int) -> (Int, EVar) -> MorlocMonad (AnnoS Int ManyPoly Int)
+collectRoot only (gi, v) = do
+  GMap idmap _ <- MM.gets stateSignatures
+  let shallow = case only of
+        Nothing -> Nothing
+        Just _ -> Just (fromMaybe (-1) (Map.lookup gi idmap))
+  snd <$> collect (Namer Map.empty 0 Map.empty Set.empty shallow only) (gi, v)
+
+-- | One tree per signed top-level definition of the root module, collected
+-- in shallow mode (see 'namerShallow'), and each such definition's
+-- declaration index and name by term id.
+contractRoots :: ExprI -> MorlocMonad ([AnnoS Int ManyPoly Int], Map.Map Int (Int, EVar))
+contractRoots (ExprI _ (ModE _ es)) = do
+  GMap idmap sigmap <- MM.gets stateSignatures
+  let defs =
+          [ (termId, v, i)
+          | ExprI i (AssE v _ _) <- es
+          , Just termId <- [Map.lookup i idmap]
+          , Just (Monomorphic t) <- [Map.lookup termId sigmap]
+          , Just _ <- [termGeneral t]
+          ]
+      firstPerTerm = Map.elems (Map.fromListWith (\_ a -> a) [(tid, x) | x@(tid, _, _) <- defs])
+  trees <- mapM
+    (\(termId, v, i) -> snd <$> collect (Namer Map.empty 0 Map.empty Set.empty (Just termId) Nothing) (i, v))
+    firstPerTerm
+  -- each method an instance of the module defines, checked against the
+  -- method's type at the instance's types, its body assuming the instance's
+  -- context
+  let methodTypes =
+        [ (bodyIdx, (k, et))
+        | (k, Polymorphic _ _ _ tts) <- Map.toList sigmap
+        , tt <- tts
+        , Just et <- [termGeneral tt]
+        , ExprI bodyIdx _ <- termDecl tt
+        ]
+      bodyType = Map.fromList methodTypes
+  instanceTrees <- sequence
+    [ do
+        (_, body') <- collectAnnoS (Namer Map.empty 0 Map.empty Set.empty (Just k) Nothing) body
+        let et' = et {econs = Set.union (econs et) (Set.fromList ctx)}
+        return (AnnoS i i (VarS v (MonomorphicExpr (Just et') [body'])))
+    | ExprI _ (IstE _ ctx _ ies) <- es
+    , ExprI i (AssE v body@(ExprI bi _) _) <- ies
+    , Just (k, et) <- [Map.lookup bi bodyType]
+    ]
+  return (trees <> instanceTrees, Map.fromList [(termId, (i, v)) | (termId, v, i) <- firstPerTerm])
+contractRoots _ = return ([], Map.empty)
+
+-- | The root module's instance declarations: index, class, instance types.
+rootInstances :: ExprI -> [(Int, ClassName, [TypeU])]
+rootInstances (ExprI _ (ModE _ es)) = [(i, cls, ts) | ExprI i (IstE cls _ ts _) <- es]
+rootInstances _ = []
+
+-- | A class constraint names the type it constrains: @Ord a =>@, never a
+-- bare @Ord =>@. Checked on the root module's signatures.
+checkBareClassConstraints :: ExprI -> MorlocMonad ()
+checkBareClassConstraints = AST.checkExprI check
+  where
+    check :: ExprI -> MorlocMonad ()
+    check (ExprI i (SigE (Signature v _ et))) =
+      case [cls | Constraint cls [] <- Set.toList (econs et)] of
+        [] -> return ()
+        (cls : _) ->
+          MM.throwSourcedError i $
+            "The constraint" <+> squotes (pretty cls) <+> "in the signature of"
+              <+> squotes (pretty v)
+              <+> "names a class but not the type it constrains; write, for example,"
+              <+> squotes (pretty cls <+> "a =>") <> "."
+    check _ = return ()
+
 {- | Build the call tree for a single nexus command. The result is ambiguous,
 with 1 or more possible tree topologies, each with one or more possible
 implementations for each function.
@@ -462,49 +562,95 @@ collectAnnoS namer e@(ExprI gi _) = collectExprS namer e |>> second (AnnoS gi gi
 collectExprS :: Namer -> ExprI -> MorlocMonad (Namer, ExprS Int ManyPoly Int)
 collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
   where
-    f namer (VarE _ v)
-      | Set.member v (namerExpanding namer)
-      , Nothing <- Map.lookup v (namerMap namer) = do
-          -- Recursive reference detected (not shadowed by local binding)
-          MM.sayVVV $ "collectExprS: recursive call to" <+> pretty v
-          return (namer, CallS v)
-      | otherwise = do
+    f namer (VarE _ v) = do
+      MM.sayVVV $
+        "collectExprS VarE"
+          <> "\n  gi:" <+> pretty gi0
+          <> "\n  v:" <+> pretty v
+      sigs@(GMap idmap _) <- MM.gets stateSignatures
+      let termId = Map.lookup gi0 idmap
+      case (termId, GMap.lookup gi0 sigs) of
+        -- Collecting for specialization: a class method is used by its
+        -- instances' types alone, and the instance a use resolves to is
+        -- elaborated at the use's type. Within a method's own expansion a
+        -- use of it is not a back-edge: it may resolve to another instance.
+        (Just k, GMapJust (Polymorphic cls clsName t ts))
+          | Just _ <- namerShallowOnly namer
+          , Just r <- namerShallow namer
+          , Nothing <- Map.lookup v (namerMap namer)
+          , k /= r || Map.member k (namerExpanding namer) ->
+              return (namer, VarS v (PolymorphicExpr cls clsName t [(et, []) | Just et <- map termGeneral ts]))
+        -- A reference to a term that is being expanded is a recursive
+        -- back-edge. It is recognized by the term's identity, not its name:
+        -- two unrelated terms may share a name.
+        (Just k, _)
+          | Just token <- Map.lookup k (namerExpanding namer)
+          , Nothing <- Map.lookup v (namerMap namer) -> do
+              MM.sayVVV $ "collectExprS: recursive call to" <+> pretty v
+              return (namer {namerRecursive = Set.insert k (namerRecursive namer)}, CallS token)
+        -- Checking a definition against its signature: another signed
+        -- top-level term is referenced by its signature, not expanded (it is
+        -- checked against its signature on its own).
+        (Just k, GMapJust (Monomorphic t))
+          | Just r <- namerShallow namer
+          , r /= k
+          , maybe True (Set.member k) (namerShallowOnly namer)
+          , Just _ <- termGeneral t
+          , not (MT.isInfixOf "`" (unEVar v)) ->
+              return (namer, VarS v (MonomorphicExpr (termGeneral t) []))
+        -- A monomorphic term will have a type if it is linked to any source
+        -- since sources require signatures. But if it associated only with a
+        -- declaration, then it will have no type.
+        (Just k, GMapJust (Monomorphic t)) -> do
+          MM.sayVVV $ "  monomorphic term" <+> pretty v <> ":" <+> maybe "?" pretty (termGeneral t)
+          (namer', es) <- expanding k namer (\n -> termtypesToAnnoS gi0 n t)
+          v' <- nameIfRecursive namer' k
+          return (namer', VarS v' (MonomorphicExpr (termGeneral t) es))
+        -- A polymorphic term should always have a type.
+        (Just k, GMapJust (Polymorphic cls clsName t ts)) -> do
           MM.sayVVV $
-            "collectExprS VarE"
-              <> "\n  gi:" <+> pretty gi0
-              <> "\n  v:" <+> pretty v
-          sigs <- MM.gets stateSignatures
-
-          case GMap.lookup gi0 sigs of
-            -- A monomorphic term will have a type if it is linked to any source
-            -- since sources require signatures. But if it associated only with a
-            -- declaration, then it will have no type.
-            (GMapJust (Monomorphic t)) -> do
-              MM.sayVVV $ "  searchged gi " <+> pretty gi0 <+> "for" <+> pretty v
-
-              MM.sayVVV $ "  monomorphic term" <+> pretty v <> ":" <+> maybe "?" pretty (termGeneral t)
-              let namer' = namer { namerExpanding = Set.insert v (namerExpanding namer) }
-              (namer'', es) <- termtypesToAnnoS gi0 namer' t
-              return $ (namer'' { namerExpanding = namerExpanding namer }, VarS v (MonomorphicExpr (termGeneral t) es))
-
-            -- A polymorphic term should always have a type.
-            (GMapJust (Polymorphic cls clsName t ts)) -> do
-              MM.sayVVV $
-                "  polymorphic term" <+> pretty v <> ":" <+> list (map (maybe "?" pretty . termGeneral) ts)
-              let namer' = namer { namerExpanding = Set.insert v (namerExpanding namer) }
-              (namer'', ess) <- statefulMapM (termtypesToAnnoS gi0) namer' ts
-              let etypes = map (fromJust . termGeneral) ts
-              return $ (namer'' { namerExpanding = namerExpanding namer }, VarS v (PolymorphicExpr cls clsName t (zip etypes ess)))
-
-            -- Terms not associated with TermTypes objects must be lambda-bound or let-bound
-            -- These terms will be renamed for uniqueness
-            _ -> do
-              MM.sayVVV $ "bound term" <+> pretty v
-              case Map.lookup v (namerMap namer) of
-                (Just (v', LambdaBound)) -> return (namer, BndS v')
-                (Just (v', LetBound)) -> return (namer, LetBndS v')
-                Nothing -> MM.throwSourcedError gi0 $ "Undefined term in namer map:" <+> pretty v
+            "  polymorphic term" <+> pretty v <> ":" <+> list (map (maybe "?" pretty . termGeneral) ts)
+          (namer', ess) <- expanding k namer (\n -> statefulMapM (termtypesToAnnoS gi0) n ts)
+          let etypes = map (fromJust . termGeneral) ts
+          v' <- nameIfRecursive namer' k
+          return (namer', VarS v' (PolymorphicExpr cls clsName t (zip etypes ess)))
+        -- Terms not associated with TermTypes objects must be lambda-bound or let-bound
+        -- These terms will be renamed for uniqueness
+        _ -> do
+          MM.sayVVV $ "bound term" <+> pretty v
+          case Map.lookup v (namerMap namer) of
+            (Just (v', LambdaBound)) -> return (namer, BndS v')
+            (Just (v', LetBound)) -> return (namer, LetBndS v')
+            Nothing -> MM.throwSourcedError gi0 $ "Undefined term in namer map:" <+> pretty v
       where
+        -- Expand term k's alternatives with k marked as in progress, so a
+        -- reference back to it becomes a 'CallS'. On return, k's own mark
+        -- in 'namerRecursive' is kept only long enough to name its 'VarS'.
+        -- The back-edges' name is fixed here, from this reference, so it
+        -- matches the 'VarS' however the term is named at the back-edge (an
+        -- import alias, a namespace).
+        expanding k n0 act = do
+          let n1 = n0 { namerExpanding = Map.insert k (recName v k) (namerExpanding n0)
+                      , namerRecursive = Set.delete k (namerRecursive n0) }
+          (n2, x) <- act n1
+          let n3 = n2 { namerExpanding = namerExpanding n0 }
+          return (n3, x)
+        -- A recursive term and its back-edges share one name that is unique to
+        -- the term, so Typecheck and Realize can match them by name.
+        nameIfRecursive :: Namer -> Int -> MorlocMonad EVar
+        nameIfRecursive n k
+          | Set.member k (namerRecursive n) = do
+              let token = recName v k
+              -- Only an export keeps its own name in 'stateName' (it is the
+              -- command name), so only an export's back-edges are resolved
+              -- through this map; every other recursive term is hoisted and
+              -- renamed by Realize.
+              exports <- MM.gets stateExports
+              when (gi0 `elem` exports) $
+                MM.modify (\st -> st {stateRecursionTargets = Map.insert token gi0 (stateRecursionTargets st)})
+              return token
+          | otherwise = return v
+
         termtypesToAnnoS :: Int -> Namer -> TermTypes -> MorlocMonad (Namer, [AnnoS Int ManyPoly Int])
         termtypesToAnnoS gi n t = do
           let calls = [AnnoS gi ci (ExeS (SrcCall src)) | (_, Idx ci src) <- termConcrete t]
@@ -547,9 +693,11 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
     f namer (LamE vs e) = do
       let namer' = foldr (updateRenamer LambdaBound) namer vs
           vs' = map (fst . fromJust . (flip Map.lookup) (namerMap namer')) vs
-      (_, e') <- collectAnnoS namer' e
-      -- return the original name, the lambda bound terms are defined only below
-      return (namer, LamS vs' e')
+      (inner, e') <- collectAnnoS namer' e
+      -- return the original namer, the lambda bound terms are defined only
+      -- below; only the back-edges found inside and the renaming counter
+      -- escape the scope
+      return (namer {namerRecursive = namerRecursive inner, namerIndex = namerIndex inner}, LamS vs' e')
     f namer (LetE ((v, e1) : rest) body) = do
       (namer1, e1') <- collectAnnoS namer e1
       let namer2 = updateRenamer LetBound v namer1
@@ -557,8 +705,8 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
           innerBody = case rest of
             [] -> body
             _ -> ExprI (exprIIdx body) (LetE rest body)
-      (_, body') <- collectAnnoS namer2 innerBody
-      return (namer, LetS v' e1' body')
+      (inner, body') <- collectAnnoS namer2 innerBody
+      return (namer {namerRecursive = namerRecursive inner, namerIndex = namerIndex inner}, LetS v' e1' body')
     f _ (LetE [] _) = error "Bug in collectExprS: empty let bindings"
     f namer (AppE e es) = do
       (namer', e') <- collectAnnoS namer e
@@ -599,6 +747,11 @@ collectExprS namer0 (ExprI gi0 e0) = f namer0 e0
       return (namer3, IfS c' t' e')
     -- all other expressions are strictly illegal here and represent compiler bugs
     f _ e = error $ "Bug in collectExprS: " <> show (render (pretty e))
+
+-- | The name shared by a recursive term's 'VarS' and its 'CallS' back-edges.
+-- The @`t@ segment is removed by 'Morloc.Frontend.Rename.displayName'.
+recName :: EVar -> Int -> EVar
+recName v k = EV (unEVar v <> "`t" <> MT.show' k)
 
 updateRenamer :: BindKind -> EVar -> Namer -> Namer
 updateRenamer kind v namer =

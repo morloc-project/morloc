@@ -1,0 +1,29 @@
+module main (start, deepPass)
+
+import root-r
+
+-- A function argument passed along a tail-recursive loop is captured by the
+-- closures built from it at each step by its value at that step: when the
+-- loop rebinds the argument, a closure built before does not start calling
+-- the new binding (in R, which closes over names, that made it call itself).
+
+addFrom :: Int -> Int -> Int
+addFrom x y = x + y
+
+useTwiceRec :: (Int -> Int -> Int) -> Int -> Int
+useTwiceRec f k
+  ? k <= 0 = (\h -> h 2 + h 3) (f 1)
+  : useTwiceRec f (k - 1)
+
+start :: Int -> Int
+start n = useTwiceRec addFrom n
+
+-- the function argument is passed along each step unchanged: the value the
+-- loop ends with is the function it started with, not one wrapper per step
+passFn :: (Int -> Int -> Int) -> Int -> Int
+passFn f k
+  ? k <= 0 = f 1 2
+  : passFn f (k - 1)
+
+deepPass :: Int -> Int
+deepPass n = passFn addFrom n
