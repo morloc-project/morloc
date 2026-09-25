@@ -163,7 +163,10 @@ typecheckWith :: Maybe TypeU -> AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (In
 typecheckWith expected = run
   where
     run :: AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
-    run e0 = do
+    run e0@(AnnoS rootIdx _ _) = do
+      -- The general scope is needed to expand type aliases inside the
+      -- primitive constraints discharged below.
+      scope <- MM.getGeneralScope rootIdx
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
       let g0 = emptyGamma
       (g1raw, _, e1) <- case expected of
@@ -222,7 +225,7 @@ typecheckWith expected = run
       -- Typeclass-form constraints (@Constraint cls _@) are handled by
       -- the separate class-resolution machinery; we leave any leftover
       -- of that form in place rather than error.
-      case dischargeConstraints g3 of
+      case dischargeConstraints scope g3 of
         Left err -> MM.throwSystemError ("Constraint violation: " <> err)
         Right g3' ->
           case filter isPrimitiveConstraint (gammaConstraints g3') of

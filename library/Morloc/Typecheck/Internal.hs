@@ -392,8 +392,8 @@ normaliseSet t = t
 -- are exactly @==@. We do not attempt logical implication (e.g.,
 -- @CSubset a b /\ CSubset b c => CSubset a c@); subsumption is the
 -- conservative-but-decidable approximation.
-dischargeConstraints :: Gamma -> Either MDoc Gamma
-dischargeConstraints g = case go (gammaConstraints g) [] of
+dischargeConstraints :: Scope -> Gamma -> Either MDoc Gamma
+dischargeConstraints scope g = case go (gammaConstraints g) [] of
   Left msg -> Left (pretty msg)
   Right kept -> Right (g { gammaConstraints = kept })
   where
@@ -414,8 +414,21 @@ dischargeConstraints g = case go (gammaConstraints g) [] of
     subsumed :: Constraint -> Bool
     subsumed c = c `elem` assumed
 
+    -- A constraint can name a type alias -- `Subset {"b"} (Keys Cols)`
+    -- comes from `Restrict Cols ['b]`. The set reducers work on literals,
+    -- so the alias has to be expanded first or the constraint can never
+    -- discharge.
+    expandC c = case c of
+      Constraint n ts -> Constraint n (map expandT ts)
+      CMember a b -> CMember (expandT a) (expandT b)
+      CSubset a b -> CSubset (expandT a) (expandT b)
+      CDisjoint a b -> CDisjoint (expandT a) (expandT b)
+    expandT t = maybe t id (TE.reduceTypeLeaves scope t)
+
     go [] acc = Right (reverse acc)
-    go (c:cs) acc = case reduceConstraint (apply g c) of
+    -- apply, then expand aliases, then apply again: the second pass is
+    -- what lets `Keys` reduce now that its operand is a literal record.
+    go (c:cs) acc = case reduceConstraint (apply g (expandC (apply g c))) of
       Left msg -> Left msg
       Right Nothing -> go cs acc
       Right (Just c')
@@ -1310,7 +1323,16 @@ subtype scope t1 t2 g
                  subtypeError t1 t2 ("Rec malformed: " <> pretty msg)
                Left RS.RecDeferred ->
                  return g { gammaDeferred = (t1', t2') : gammaDeferred g }
-           _ -> subtypeError t1 t2 "Cannot compare Rec expressions"
+           -- A Rec operator whose operand is a type alias cannot be turned
+           -- into a RecExpr, because the alias is still a bare variable.
+           -- Expand aliases in place and retry; `reduceTypeLeaves` descends
+           -- into the operator's arguments, which `reduceType` (head-only)
+           -- does not. Each retry strictly reduces, so this terminates.
+           _ -> case (TE.reduceTypeLeaves scope t1', TE.reduceTypeLeaves scope t2') of
+                  (Nothing, Nothing) ->
+                    subtypeError t1 t2 "Cannot compare Rec expressions"
+                  (m1, m2) ->
+                    subtype scope (maybe t1' id m1) (maybe t2' id m2) g
 -- ListVoidU is the erased phantom List slot; compatible with any List
 -- expression. Mirrors RecVoidU / StrVoidU.
 subtype _ ListVoidU t g | isListExpr t = return g
@@ -1353,6 +1375,17 @@ subtype _ t1 t2 g
                Left SetS.SetDeferred ->
                  return g { gammaDeferred = (t1', t2') : gammaDeferred g }
            _ -> subtypeError t1 t2 "Cannot compare Set expressions"
+-- Two applications of the same type-level operator. A kind-specific operator
+-- (Nat, Str, Rec, List, Set) has already been routed to its solver above, so
+-- what reaches here is Type-kinded -- today that is ProjectField. The
+-- operator is a function on types, so equal arguments give equal results;
+-- without this rule even a reflexive `ProjectField r f <: ProjectField r f`
+-- falls through, and no function over "any table with a pop column" can be
+-- given a body in morloc.
+subtype scope t1@(OpU o1 as1) t2@(OpU o2 as2) g
+  | o1 == o2 && length as1 == length as2 =
+      foldM (\gAcc (a, b) -> subtype scope a b gAcc) g (zip as1 as2)
+  | otherwise = subtypeError t1 t2 "Type operator mismatch"
 -- note that these need to be evaluated AFTER all the existentials
 subtype scope t1@(VarU _) t2 g = subtypeEvaluated scope t1 t2 g
 subtype scope t1 t2@(VarU _) g = subtypeEvaluated scope t1 t2 g

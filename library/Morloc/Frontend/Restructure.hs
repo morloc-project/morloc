@@ -1606,13 +1606,22 @@ refineKinds dag = do
         -- constraint expressions like @Keys r@ commit @r@ to the Rec
         -- kind even when the surrounding context didn't already
         -- classify it.
-        asRec (VarU v) = RecVarU v
+        --
+        -- Only a type *variable* may be promoted. A capitalised name is a
+        -- concrete type or an alias, and turning it into a kind variable
+        -- would strip the name an alias needs to be expanded by later --
+        -- @Restrict Cols ['b]@ would become a row variable and generalize
+        -- away. Same lowercase convention that 'collectKindedVarsFromScope'
+        -- uses.
+        isKindVarName (TV n) = not (T.null n) && isLower (T.head n)
+
+        asRec (VarU v) | isKindVarName v = RecVarU v
         asRec t = t
 
-        asList (VarU v) = ListVarU v
+        asList (VarU v) | isKindVarName v = ListVarU v
         asList t = t
 
-        asStr (VarU v) = StrVarU v
+        asStr (VarU v) | isKindVarName v = StrVarU v
         asStr t = t
 
     -- Collect variables that appear in kinded positions according to typedef
@@ -1851,18 +1860,23 @@ refineKinds dag = do
         go (NatSubU a b) =
           let a' = go a; b' = go b
            in case b' of
-                StrLitU f | isRecLike a' -> RecDiffU a' [f]
+                -- Nothing but a record difference can have a Str or a
+                -- list on the right of `-`; you cannot subtract a name
+                -- from a number. So the left operand need not already
+                -- look Rec-kinded -- it may be a type alias, whose name
+                -- carries no kind until it is expanded.
+                StrLitU f -> RecDiffU a' [f]
                 -- `r - f` where f is a Str variable (introduced by an
                 -- f@Str signature label) drops the single key f from r.
                 -- Wrapped as a singleton list so RecDiffListU's reducer
                 -- handles the deferred-then-substituted lifecycle: when
                 -- f gets solved at the call site, the list goes ground
                 -- and reduceRecDiffList strips the key.
-                StrVarU _ | isRecLike a' -> RecDiffListU a' (ListLitU [b'])
+                StrVarU _ -> RecDiffListU a' (ListLitU [b'])
                 -- `r - l` where l is a List drops every key in l from r.
                 -- Routes to RecDiffListU; the new constructor's solver
                 -- reduces ground forms via reduceRecDiffList.
-                _ | isRecLike a' && isListLike b' -> RecDiffListU a' b'
+                _ | isListLike b' -> RecDiffListU a' b'
                 _ | isSetLike a' || isSetLike b' -> SetDiffU a' b'
                 _ -> NatSubU a' b'
         go (NatDivU a b) = NatDivU (go a) (go b)

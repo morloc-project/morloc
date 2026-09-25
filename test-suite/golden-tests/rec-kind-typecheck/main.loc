@@ -1,4 +1,4 @@
-module main (g, use, useUnion, useDiff, useRowPoly, useRestrict, useDropB)
+module main (g, use, useUnion, useDiff, useRowPoly, useRestrict, useDropB, useProj, aliasUnion, aliasDiff, aliasRestrict)
 
 import root
 
@@ -59,3 +59,31 @@ useRestrict = mkABC
 dropB :: Holder ({a=Int, b=Str, c=Real} - ['b]) Int -> Int
 
 useDropB = dropB
+
+-- A type-level operator over a row variable cannot reduce, so the two sides
+-- of this definition meet as the same unreduced `ProjectField`. Without a
+-- structural rule for operator applications even that reflexive case falls
+-- through, and no function over "any row that has an x field" can be given
+-- a body in morloc.
+proj :: Holder r a -> ProjectField r "x"
+
+useProj :: Holder r a -> ProjectField r "x"
+useProj = proj
+
+-- A Rec operator whose operand is a type ALIAS. The alias name carries no
+-- kind of its own, so it must survive kind promotion as a name (not become
+-- a row variable), be expanded inside the operator, and be expanded again
+-- in the implicit Subset/Disjoint constraints the operator emits.
+type Cols = {a = Int, b = Str}
+
+mkAU :: Holder (Cols + {d = Bool}) Int
+aliasUnion :: Holder {a=Int, b=Str, d=Bool} Int
+aliasUnion = mkAU
+
+mkAD :: Holder (Cols - ['b]) Int
+aliasDiff :: Holder {a=Int} Int
+aliasDiff = mkAD
+
+mkAR :: Holder (Restrict Cols ['b, 'a]) Int
+aliasRestrict :: Holder {b=Str, a=Int} Int
+aliasRestrict = mkAR
