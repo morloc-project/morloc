@@ -25,6 +25,7 @@ module UnitTypeTests
   , infixOperatorTests
   , recordLiteralOrderTests
   , accessorInWhereTests
+  , solvedKindCheckTests
   , complexityRegressionTests
   , definitionArityTests
   , effectSubtypeTests
@@ -3911,6 +3912,53 @@ top = mapL score counts
   where
     score p = bump (.1 p)
     bump c = c
+|]
+      ]
+
+-- Problems that only surface once every kind variable is solved. Each was
+-- previously invisible unless the user happened to annotate the result and
+-- force the solver to look.
+solvedKindCheckTests :: TestTree
+solvedKindCheckTests =
+  localOption (mkTimeout 2000000) $
+    testGroup
+      "Checks that run after every kind variable is solved"
+      [ exprTestBad
+          "a computed dimension that comes out negative"
+          [r|
+module main (bad)
+roll :: w@Int -> Vector n Real -> Vector (n - w + 1) Real
+src :: Vector 10 Real
+bad :: Vector m Real
+bad = roll 14 src
+|]
+      , expectPass
+          "the same arithmetic when it stays positive"
+          [r|
+module main (ok)
+roll :: w@Int -> Vector n Real -> Vector (n - w + 1) Real
+src :: Vector 10 Real
+ok = roll 3 src
+|]
+      , exprTestBad
+          "a column union whose sides share a name, with no annotation"
+          [r|
+module main (oops)
+type Holder (r :: Rec) a
+a :: Holder {x=Int} Int
+c :: Holder {x=Str} Int
+join2 :: Holder r1 z -> Holder r2 z -> Holder (r1 + r2) z
+oops = join2 a c
+|]
+      , expectPass
+          "a column union of disjoint sides"
+          [r|
+module main (fine)
+type Holder (r :: Rec) a
+a :: Holder {x=Int} Int
+d :: Holder {y=Str} Int
+join2 :: Holder r1 z -> Holder r2 z -> Holder (r1 + r2) z
+fine = join2 a d
 |]
       ]
 

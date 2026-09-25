@@ -265,17 +265,59 @@ typecheckWith expected = run
       -- neither the dimension nor the signature it came from. Every Nat is
       -- solved by now, so reject it here.
       let finalE = mapAnnoSG (fmap normalizeType) (applyGen g3 e3)
-      _ <- mapAnnoSGM checkNonNegativeNat finalE
+      _ <- mapAnnoSGM checkFinalType finalE
       return finalE
 
-    checkNonNegativeNat :: Indexed TypeU -> MorlocMonad (Indexed TypeU)
-    checkNonNegativeNat ix@(Idx i t) = case negativeNats t of
-      [] -> return ix
+    -- Problems that only become visible once every kind variable is solved.
+    -- Both are errors the user would otherwise meet at run time, or not at
+    -- all: an operator that could not reduce leaves no trace in a program
+    -- whose result type nobody wrote down.
+    checkFinalType :: Indexed TypeU -> MorlocMonad (Indexed TypeU)
+    checkFinalType ix@(Idx i t) = case negativeNats t of
       (n : _) ->
         MM.throwSourcedError i $
           "A dimension may not be negative, but this one is " <> pretty n
             <> ". Nat subtraction is not clamped, so check the arithmetic"
             <> " in the signature."
+      [] -> case collidingUnions t of
+        (ks : _) ->
+          MM.throwSourcedError i $
+            "Columns cannot be combined because both sides have: "
+              <> hcat (punctuate ", " (map pretty ks))
+        [] -> return ix
+
+    -- A union of two fully known rows that share a key. `reduceRecUnion`
+    -- leaves such a union symbolic rather than reducing it, so nothing
+    -- catches the collision unless the caller annotates the result and
+    -- forces the solver to look.
+    collidingUnions :: TypeU -> [[Text]]
+    collidingUnions = go
+      where
+        go (RecUnionU a b)
+          | Just ka <- groundRowKeys a
+          , Just kb <- groundRowKeys b
+          , shared <- [k | k <- ka, k `elem` kb]
+          , not (null shared) = [shared]
+        go (LitU (LRec fs)) = concatMap (go . snd) fs
+        go (LitU (LList es)) = concatMap go es
+        go (LitU (LSet es)) = concatMap go es
+        go (LitU _) = []
+        go (OpU _ ts) = concatMap go ts
+        go (FunU ts t') = concatMap go (t' : ts)
+        go (AppU t' ts) = concatMap go (t' : ts)
+        go (NamU _ _ ps rs) = concatMap go (ps <> map snd rs)
+        go (ForallU _ t') = go t'
+        go (EffectU _ t') = go t'
+        go (OptionalU t') = go t'
+        go (LabeledU _ t') = go t'
+        go (ExistU _ (ts, _) (rs, _)) = concatMap go (ts <> map snd rs)
+        go _ = []
+
+    -- The field names of a row, when every field is known.
+    groundRowKeys :: TypeU -> Maybe [Text]
+    groundRowKeys (LitU (LRec fs)) = Just (map fst fs)
+    groundRowKeys (RecExtendU k _ rest) = (k :) <$> groundRowKeys rest
+    groundRowKeys _ = Nothing
 
     -- Every negative Nat literal in a type, in no particular order.
     negativeNats :: TypeU -> [Integer]

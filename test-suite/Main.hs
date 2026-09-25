@@ -51,6 +51,7 @@ unitTests =
   , infixOperatorTests
   , recordLiteralOrderTests
   , accessorInWhereTests
+  , solvedKindCheckTests
   , substituteTVarTests
   , subtypeTests
   , complexityRegressionTests
