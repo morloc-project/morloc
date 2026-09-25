@@ -50,6 +50,7 @@ unitTests =
   , whitespaceTests
   , infixOperatorTests
   , recordLiteralOrderTests
+  , accessorInWhereTests
   , substituteTVarTests
   , subtypeTests
   , complexityRegressionTests

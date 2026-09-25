@@ -259,7 +259,49 @@ typecheckWith expected = run
       -- AppU shapes (@AppU (AppU H [n]) [a]@); downstream codegen
       -- (weave, evaluateStep, inferConcreteType) only understands the
       -- flat canonical shape.
-      return (mapAnnoSG (fmap normalizeType) (applyGen g3 e3))
+      -- A Nat is a natural number, but Nat subtraction is not clamped, so a
+      -- signature can compute a negative dimension. It typechecks, builds,
+      -- and then dies at run time as a malformed schema string naming
+      -- neither the dimension nor the signature it came from. Every Nat is
+      -- solved by now, so reject it here.
+      let finalE = mapAnnoSG (fmap normalizeType) (applyGen g3 e3)
+      _ <- mapAnnoSGM checkNonNegativeNat finalE
+      return finalE
+
+    checkNonNegativeNat :: Indexed TypeU -> MorlocMonad (Indexed TypeU)
+    checkNonNegativeNat ix@(Idx i t) = case negativeNats t of
+      [] -> return ix
+      (n : _) ->
+        MM.throwSourcedError i $
+          "A dimension may not be negative, but this one is " <> pretty n
+            <> ". Nat subtraction is not clamped, so check the arithmetic"
+            <> " in the signature."
+
+    -- Every negative Nat literal in a type, in no particular order.
+    negativeNats :: TypeU -> [Integer]
+    negativeNats = go
+      where
+        go (LitU (LNat n)) = [n | n < 0]
+        go (LitU (LRec fs)) = concatMap (go . snd) fs
+        go (LitU (LList es)) = concatMap go es
+        go (LitU (LSet es)) = concatMap go es
+        go (LitU _) = []
+        go (OpU _ ts) = concatMap go ts
+        go (FunU ts t) = concatMap go (t : ts)
+        go (AppU t ts) = concatMap go (t : ts)
+        go (NamU _ _ ps rs) = concatMap go (ps <> map snd rs)
+        go (ForallU _ t) = go t
+        go (EffectU _ t) = go t
+        go (OptionalU t) = go t
+        go (LabeledU _ t) = go t
+        go (ExistU _ (ts, _) (rs, _)) = concatMap go (ts <> map snd rs)
+        go VarU{} = []
+        go KVarU{} = []
+        go VoidU{} = []
+        go ListVarU{} = []
+        go ListVoidU = []
+        go SetVarU{} = []
+        go SetVoidU = []
 
 -- TypeU --> Type
 resolveTypes :: AnnoS (Indexed TypeU) Many Int -> AnnoS (Indexed Type) Many Int

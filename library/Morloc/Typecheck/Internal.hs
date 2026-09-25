@@ -1737,9 +1737,23 @@ accumulatedPositionalSets v g
   | otherwise =
       [ ps
       | (_, ExistU v' (ps, _) _) <- Map.toList (gammaSolved g)
-      , v' == v
+      , derefBare v' == v
       , any isStructuralSlot ps
       ]
+  where
+    -- The receiver an alias names is not always the one that goes ground.
+    -- A lambda parameter synthesized in a `where` binding is solved to the
+    -- call site's existential first, so the alias still points at the
+    -- original while the ground solve arrives at the far end of the chain.
+    -- Follow bare existentials -- never a structural one, which would
+    -- discard the very slots being harvested.
+    derefBare :: TVar -> TVar
+    derefBare = go (16 :: Int)
+      where
+        go 0 x = x
+        go fuel x = case Map.lookup x (gammaSolved g) of
+          Just (ExistU y ([], _) ([], _)) -> go (fuel - 1 :: Int) y
+          _ -> x
 
 -- | Whether a ground type is a tuple (@IsTuple args@), definitely not a
 -- tuple (@NotTuple@ -- a record, primitive, or non-tuple type constructor),
@@ -1894,8 +1908,13 @@ cacheSolved :: TVar -> TypeU -> Gamma -> Gamma
 cacheSolved v t g =
   let g' = g {gammaSolved = Map.insert v t (gammaSolved g)}
    in case t of
+        -- Either this solution carries structural slots, or it links a
+        -- receiver that already had some to a new existential. Both make
+        -- the target a receiver; without the second the marker is lost the
+        -- first time a parameter existential is solved to another one.
         ExistU rv (ps, _) _
-          | any isStructuralSlot ps ->
+          | any isStructuralSlot ps
+              || Set.member v (gammaPositionalReceivers g) ->
               g' {gammaPositionalReceivers = Set.insert rv (gammaPositionalReceivers g')}
         _ -> g'
 

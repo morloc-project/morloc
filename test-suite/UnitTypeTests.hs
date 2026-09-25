@@ -24,6 +24,7 @@ module UnitTypeTests
   , whitespaceTests
   , infixOperatorTests
   , recordLiteralOrderTests
+  , accessorInWhereTests
   , complexityRegressionTests
   , definitionArityTests
   , effectSubtypeTests
@@ -3855,6 +3856,64 @@ infixOperatorTests =
 typecheck against the declared record type, while literals with mismatched
 key sets (missing / unknown fields) must be rejected.
 -}
+-- A tuple accessor inside an unannotated `where` helper. The helper's
+-- parameter existential is solved to another existential before that one
+-- goes ground, and the slot constraints from the accessor have to survive
+-- the chain. When they did not, the slot type was never checked: a Str
+-- slot could be returned where a Real was declared, and the program only
+-- failed at run time inside the pool.
+accessorInWhereTests :: TestTree
+accessorInWhereTests =
+  localOption (mkTimeout 2000000) $
+    testGroup
+      "A tuple accessor in an unannotated where binding"
+      [ expectPass
+          "an accessor whose slot type matches the signature"
+          [r|
+module main (top)
+mapL :: (a -> b) -> [a] -> [b]
+counts :: [(Str, Int)]
+top :: [Int]
+top = mapL score counts
+  where
+    score p = .1 p
+|]
+      , exprTestBad
+          "an accessor whose slot type contradicts the signature"
+          [r|
+module main (top)
+mapL :: (a -> b) -> [a] -> [b]
+counts :: [(Str, Int)]
+top :: [Real]
+top = mapL score counts
+  where
+    score p = .0 p
+|]
+      , exprTestBad
+          "the other slot, contradicted the other way"
+          [r|
+module main (top)
+mapL :: (a -> b) -> [a] -> [b]
+counts :: [(Str, Int)]
+top :: [Str]
+top = mapL score counts
+  where
+    score p = .1 p
+|]
+      , expectPass
+          "an accessor result passed on to a second unannotated helper"
+          [r|
+module main (top)
+mapL :: (a -> b) -> [a] -> [b]
+counts :: [(Str, Int)]
+top :: [Int]
+top = mapL score counts
+  where
+    score p = bump (.1 p)
+    bump c = c
+|]
+      ]
+
 recordLiteralOrderTests :: TestTree
 recordLiteralOrderTests =
   localOption (mkTimeout 1000000) $ -- 1 second timeout
