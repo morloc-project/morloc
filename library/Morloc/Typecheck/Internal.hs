@@ -69,6 +69,7 @@ module Morloc.Typecheck.Internal
     -- * subtyping
   , subtype
   , isSubtypeOf2
+  , isSubtypeOfOpen
   , recheckDeferred
 
     -- * primitive constraint discharge (Stage 9 of the tables refactor)
@@ -626,6 +627,29 @@ isSubtypeOf2 :: Scope -> TypeU -> TypeU -> Bool
 isSubtypeOf2 scope a b = case subtype scope a b emptyGamma of
   (Left _) -> False
   (Right _) -> True
+
+-- | Like 'isSubtypeOf2', but with the existentials of both sides declared so
+-- the comparison may solve them. 'isSubtypeOf2' starts from an empty gamma,
+-- where an existential has no entry and so can never be instantiated: a type
+-- that is only partly determined fails against every candidate. That is the
+-- right answer for a test of "are these already compatible" and the wrong one
+-- for "could this candidate apply", which is what instance selection asks.
+isSubtypeOfOpen :: Scope -> TypeU -> TypeU -> Bool
+isSubtypeOfOpen scope a b =
+  let exists = [t | t@ExistU{} <- Set.toList (Set.union (free a) (free b))]
+      (g1, b') = openForalls b (emptyGamma ++> exists)
+   in case subtype scope a b' g1 of
+        (Left _) -> False
+        (Right _) -> True
+
+-- | Replace every leading universal with an existential. The ordinary
+-- subtype rule keeps a universal on the RIGHT rigid, which is correct for
+-- "is this as general as that" and wrong for "could this apply here": the
+-- occurrence type of a class method is its own most general form until
+-- something downstream pins it, and no instance is ever a subtype of that.
+openForalls :: TypeU -> Gamma -> (Gamma, TypeU)
+openForalls (ForallU v t) g = openForalls (substitute v t) (g +> v)
+openForalls t g = (g, t)
 
 -- | Subtype-compare two types after exhausting any 'type'-alias reduction.
 -- 'newtype' is opaque to 'reduceType' (returns Nothing), so two distinct

@@ -411,7 +411,12 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
       let gtEval = case TE.evaluateType scope gt of
             Right et -> et
             Left _ -> gt
-          isCompatible t = isSubtypeOf2 scope t gtEval
+          -- `isSubtypeOfOpen` rather than `isSubtypeOf2`: at this point the
+          -- occurrence type may still carry an unsolved existential -- the
+          -- result of `unpack x` that nothing downstream constrains -- and
+          -- an empty gamma cannot instantiate it, so every candidate would
+          -- be rejected and the user told no instance exists.
+          isCompatible t = isSubtypeOfOpen scope t gtEval
                         || isJust (tryCoerce scope t gtEval emptyGamma)
           rssCompat = [x | x@(EType t _ _ _, _) <- rss, isCompatible t]
           -- Filter by alias-chain reachability: only keep instances whose
