@@ -142,6 +142,21 @@ Vocabulary: `<E> T` is a *suspension*; `E` is its *row* of *effects*. A
 suspension is never "erased", "stripped" or "an annotation on `T`"; it is
 only ever run.
 
+## Named Values
+
+Laws 4 and 5 fix when suspensions and arguments run. A pure named value
+(`where`, `let`, a pure `let` in a do-block, a top-level constant) is
+computed at most once per evaluation of its scope, at the nearest point
+every use passes through (see [[../language/expressions.md]]). Two
+constructs bound that placement:
+
+- **`@try` is a region.** A value read only inside a `@try` argument is
+  computed inside it, so its failure becomes the `Err` of that `@try`.
+- **Effects are barriers.** A pure `let` in a do-block is never computed
+  before an effect statement that precedes it; it may only move later,
+  toward its uses. Effectful binds and bare statements keep their order and
+  are never dropped.
+
 ## Forcing Effects
 
 A suspended value is forced in one of two ways:

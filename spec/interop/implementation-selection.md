@@ -40,6 +40,51 @@ process imgs = map applyKernel (filter isValid imgs)
 
 Since `applyKernel` is C++ only, both `map` and `filter` collapse to C++, avoiding two serialization boundaries.
 
+## Specialization and Sharing
+
+A definition is compiled once per type it is used at, not once per use.
+Each such specialization is either copied into its uses or shared:
+
+- **Copied.** Small specializations are copied into each use and realized
+  there, so each copy may land in a different language.
+- **Shared.** A larger specialization (over 32 nodes) is compiled once and
+  called from each use. It is realized once per language its uses need,
+  and uses that land in the same language call the same copy. Nesting
+  definitions therefore costs build time and code size in proportion to
+  the source, not exponentially in depth.
+
+A use of a shared specialization keeps the definition's sourced
+implementations as alternatives, so choosing an implementation per use
+works as before; the shared copy is one more alternative, scored like the
+others.
+
+Sharing never changes what a program computes or how often. A
+specialization stays copied when it:
+
+- recurses back to itself (a recursion is compiled with the use it
+  belongs to);
+- does work before returning a function (a staged definition);
+- reads a top-level constant, which is computed once per command at its
+  use and would otherwise be computed on every call;
+- has a cache, log, benchmark, label or remote setting, on the use or the
+  definition, so that setting stays with its site.
+
+A command evaluated without a language pool calls a shared specialization
+as a named function in its manifest. One that takes a function as an
+argument is copied into each call instead, since that evaluator holds no
+function values.
+
+## Named Values Are Computed Once
+
+A function definition is code: it is realized separately wherever a use
+needs it. A named value that is data (its type holds no function and no
+suspension) is one value: it is computed once, in one language, and passed
+to every reader, whatever language each reader lands in.
+
+Because a named value is computed once, readers in different languages see
+the same value even where two implementations of the function computing it
+would differ.
+
 ## Explicit Language Control
 
 When the programmer wants to force a specific language, they can use distinct names:
