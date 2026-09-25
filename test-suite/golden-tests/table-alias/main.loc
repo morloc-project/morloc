@@ -15,8 +15,8 @@ type Schema = {chrom = Str, pos = Int, qual = Real}
 
 mk :: Vcf 3
 mk =
-  setCol "qual" ([1.5, 2.5, 3.5] :: Vector 3 Real)
-    (setCol "pos" ([10, 20, 30] :: Vector 3 Int)
+  addCol "qual" ([1.5, 2.5, 3.5] :: Vector 3 Real)
+    (addCol "pos" ([10, 20, 30] :: Vector 3 Int)
       (asCol "chrom" (["c1", "c1", "c2"] :: Vector 3 Str)))
 
 rows :: Int
@@ -31,7 +31,7 @@ cols = names mk
 
 -- The alias flows through an operation that widens the schema.
 wide :: Table 3 {chrom = Str, pos = Int, qual = Real, keep = Bool}
-wide = setCol "keep" ([True, False, True] :: Vector 3 Bool) mk
+wide = addCol "keep" ([True, False, True] :: Vector 3 Bool) mk
 
 -- and through one that narrows it.
 narrow :: Vcf 3 -> Table 3 {chrom = Str, qual = Real}

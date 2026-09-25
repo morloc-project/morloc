@@ -44,13 +44,13 @@ mkZVec :: Vector 5 Real
 mkXReal :: Vector 5 Real
 
 -- added :: Table 5 {x=Int, y=Str, z=Real}
-added = setCol "z" mkZVec mkXY
+added = addCol "z" mkZVec mkXY
 
--- replaced :: Table 5 {y=Str, x=Real}
+-- replaced :: Table 5 {x=Real, y=Str} -- x keeps its position
 replaced = setCol "x" mkXReal mkXY
 
 -- dropped :: Table 5 {y=Str}
 dropped = dropCols ["x"] mkXY
 
 -- chained :: Table 5 {y=Str, z=Real}
-chained = setCol "z" mkZVec (dropCols ["x"] mkXY)
+chained = addCol "z" mkZVec (dropCols ["x"] mkXY)

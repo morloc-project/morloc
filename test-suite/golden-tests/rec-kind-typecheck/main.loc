@@ -1,4 +1,4 @@
-module main (g, use, useUnion, useDiff, useRowPoly)
+module main (g, use, useUnion, useDiff, useRowPoly, useRestrict, useDropB)
 
 import root
 
@@ -43,3 +43,19 @@ mkY :: Holder {y=Str} Int
 
 useRowPoly :: Holder ({y=Str} + {x=Int}) Int
 useRowPoly = addX mkY
+
+-- Restrict keeps the columns in the order they were REQUESTED, not the
+-- order they appear in the row. This is what the runtime kernels do
+-- (pyarrow `t.select(names)`, and the C++ gather), so the type has to
+-- agree with them or a projected table's schema is a lie.
+mkABC :: Holder (Restrict {a=Int, b=Str, c=Real} ['c, 'a]) Int
+
+useRestrict :: Holder {c=Real, a=Int} Int
+useRestrict = mkABC
+
+-- A difference against a literal key list must REDUCE, not stay symbolic.
+-- The printed type of useDropB is inferred, so it shows whichever form
+-- survived `apply`.
+dropB :: Holder ({a=Int, b=Str, c=Real} - ['b]) Int -> Int
+
+useDropB = dropB

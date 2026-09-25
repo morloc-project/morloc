@@ -216,11 +216,27 @@ collectGroundStrList _ = Nothing
 
 -- | Reduce @r # l@ to a Rec containing only the fields of @r@ whose
 -- names appear in @l@. Both operands must be ground; otherwise leaves
--- the form symbolic. Order of result fields matches the original Rec.
+-- the form symbolic.
+--
+-- Result fields follow the order of @l@, not of @r@: a projection is
+-- also a reordering, and the runtime kernels behave that way already
+-- (pyarrow's @t.select(names)@ and the C++ column gather both emit the
+-- requested order). A key of @l@ absent from @r@ contributes nothing;
+-- the Subset constraint emitted alongside is what rejects it.
+-- Keep the first occurrence of each key. A Rec cannot hold a field twice, so
+-- a repeated key in a projection list must not build one.
+nubOrd' :: [Text] -> [Text]
+nubOrd' = go Set.empty
+  where
+    go _ [] = []
+    go seen (k : ks)
+      | Set.member k seen = go seen ks
+      | otherwise = k : go (Set.insert k seen) ks
+
 reduceRecRestrict :: TypeU -> TypeU -> TypeU
 reduceRecRestrict r l = case (collectGroundRec r, collectGroundStrList l) of
   (Just fs, Just keys) ->
-    let kept = [(k, t) | (k, t) <- fs, k `elem` keys]
+    let kept = [(k, t) | k <- nubOrd' keys, Just t <- [lookup k fs]]
     in foldr (\(k, t) rest -> RecExtendU k t rest) RecEmptyU kept
   _ -> RecRestrictU r l
 
@@ -487,7 +503,11 @@ instance Applicable TypeU where
   apply _ t@RecEmptyU = t
   apply g (RecExtendU k a b) = RecExtendU k (apply g a) (apply g b)
   apply g (RecUnionU a b) = reduceRecUnion (apply g a) (apply g b)
-  apply g (RecDiffU a ks) = RecDiffU (apply g a) ks
+  -- A literal key list matches 'RecDiffU', which is more specific than the
+  -- 'RecDiffListU' clause below, so the reduction has to happen here too.
+  -- Recursing without reducing would leave every ground @r - f@ symbolic.
+  apply g (RecDiffU a ks) =
+    reduceRecDiffList (apply g a) (LitU (LList (map (LitU . LStr) ks)))
   apply g (RecIntersectU a b) = RecIntersectU (apply g a) (apply g b)
   apply g (RecRestrictU a b) = reduceRecRestrict (apply g a) (apply g b)
   apply g (RecDiffListU a b) = reduceRecDiffList (apply g a) (apply g b)
@@ -919,6 +939,13 @@ recheckDeferred g = foldM check [] (gammaDeferred g)
              _ -> case (typeUToRecExpr t1', typeUToRecExpr t2') of
                (Just re1, Just re2) ->
                  case RS.solveRec re1 re2 of
+                   -- The rows align. Field types are Type-kinded, so they do
+                   -- not belong on this list: the caller reports anything left
+                   -- here as an undecidable *kind* constraint. They are
+                   -- reconciled by subtype where the equation first arose; a
+                   -- constraint only reaches the recheck because it deferred
+                   -- there, and this function has no Scope to re-run subtype
+                   -- with.
                    Right _ -> Right acc
                    Left (RS.RecContradiction msg) ->
                      Left $ "Rec constraint mismatch (deferred):" <+> pretty msg
@@ -1261,16 +1288,22 @@ subtype _ t RecVoidU g | isRecExpr t = return g
 -- Rec expressions: compare via the Rec solver, which canonicalizes
 -- structural ops (extend, union, diff, intersect) and aligns ground
 -- field maps. See plans/tables/10-rec-solver-decidability.md.
-subtype _ t1 t2 g
+subtype scope t1 t2 g
   | isRecExpr t1 && isRecExpr t2 =
       let t1' = apply g t1
           t2' = apply g t2
       in case (typeUToRecExpr t1', typeUToRecExpr t2') of
            (Just re1, Just re2) ->
              case RS.solveRec re1 re2 of
-               Right subs
-                 | Map.null subs -> return g
-                 | otherwise -> return (applyRecSolutions subs g)
+               Right sol ->
+                 -- The solver aligns the rows; the field types it matched
+                 -- may still need unifying (one side can be an existential),
+                 -- and only subtype can do that.
+                 let g' = if Map.null (RS.recSubs sol)
+                            then g
+                            else applyRecSolutions (RS.recSubs sol) g
+                  in foldM (\gAcc (a, b) -> subtype scope a b gAcc)
+                           g' (RS.recFieldEqs sol)
                Left (RS.RecContradiction msg) ->
                  subtypeError t1 t2 ("Rec constraint mismatch: " <> pretty msg)
                Left (RS.RecMalformed msg) ->

@@ -21,21 +21,21 @@ dbl :: Table n {x = Int} -> Vector n Real
 
 -- The crossing expression as the whole body.
 width :: Int -> Int
-width n = ncol (setCol "y" (dbl (mk n)) (mk n))
+width n = ncol (addCol "y" (dbl (mk n)) (mk n))
 
 -- The same expression inside a larger one.
 widthPlus :: Int -> Int
-widthPlus n = ncol (setCol "y" (dbl (mk n)) (mk n)) + 1
+widthPlus n = ncol (addCol "y" (dbl (mk n)) (mk n)) + 1
 
 -- Twice over, in a tuple.
 bothWidths :: Int -> (Int, Int)
 bothWidths n =
-  ( nrow (setCol "y" (dbl (mk n)) (mk n))
-  , ncol (setCol "y" (dbl (mk n)) (mk n))
+  ( nrow (addCol "y" (dbl (mk n)) (mk n))
+  , ncol (addCol "y" (dbl (mk n)) (mk n))
   )
 
 -- And over a shared binding rather than two separate calls.
 viaLet :: Int -> (Int, Int)
 viaLet n =
   let t = mk n
-  in (ncol t, ncol (setCol "y" (dbl t) t))
+  in (ncol t, ncol (addCol "y" (dbl t) t))

@@ -1649,9 +1649,15 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                     if(obj == NULL) {
                         PyRAISE("Failed to parse data");
                     }
+                    // The view aliases shared memory that other pools may be
+                    // reading, and morloc values are immutable, so the array
+                    // is read-only. A kernel that needs to modify it calls
+                    // .copy() and pays for its own buffer. Without this a
+                    // write through the view corrupts another pool's data
+                    // with no error and no way to trace it.
+                    PyArray_CLEARFLAGS((PyArrayObject*)obj, NPY_ARRAY_WRITEABLE);
                 }
                 // Note that we do not want to give ownership to Python.
-                // This is shared memory, which means python should not mutate it.
                 break;
             } else if (schema->hint != NULL && strcmp(schema->hint, "list") == 0) {
                 // Explicit "list" hint takes precedence over the UInt8 fast-path

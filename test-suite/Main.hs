@@ -18,6 +18,7 @@ import LangSupportTests (langSupportTests)
 import MorlocDepsTests (morlocDepsTests)
 import PatternChainTests (patternChainTests)
 import PropertyTests (propertyTests)
+import RecSolverTests (recSolverTests)
 import RefutablePatternTests (refutablePatternTests)
 import RustPoolBuildTests (rustPoolBuildTests)
 import SchemaHintTests (schemaHintTests)
@@ -30,6 +31,7 @@ import VersionConstraintTests (versionConstraintTests)
 unitTests :: [TestTree]
 unitTests =
   [ unitTypeTests
+  , recSolverTests
   , abiTests
   , buildParamsTests
   , envSpecTests
