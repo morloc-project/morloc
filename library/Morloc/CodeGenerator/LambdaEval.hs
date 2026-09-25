@@ -23,6 +23,7 @@ import qualified Morloc.Monad as MM
 import qualified Data.Map as Map
 import qualified Morloc.Data.GMap as GMap
 import Morloc.Data.Doc (pretty, squotes, (<+>))
+import Morloc.CodeGenerator.Serial (containsFunT)
 import Morloc.CodeGenerator.Value (etaParts, isValue)
 import qualified Morloc.Data.Text as MT
 import Data.IORef (modifyIORef, newIORef, readIORef, writeIORef)
@@ -164,9 +165,6 @@ saturateAt top ai (AnnoS g@(Idx gi t@(FunT ts r)) c (LamS vs body))
               stageLam = AnnoS (Idx sIdx stageT) c (LamS vs stageBody)
           recordStage gi (length vs) sIdx
           return (AnnoS (Idx letIdx t) c (LetS sName stageLam flatLam))
-  where
-    isLam (AnnoS _ _ (LamS _ _)) = True
-    isLam _ = False
 -- A staged recursive function used as a value is, like a staged lambda, its
 -- flat entry with its stage entry beside it. Realize writes one that captures
 -- values as a lambda over its parameters calling it with the captured values
@@ -490,6 +488,12 @@ reduce ai
             inner <- reduce ai (rebuild e2')
             letIx <- newPlainIndex i1n
             return (AnnoS (Idx letIx i1t) tb1 (LetS f e1n inner))
+        -- A container holding function values, on the nexus path: its
+        -- elements are bound once, in order, and the container of their
+        -- values is substituted, so no function value is ever held.
+        | ai && containsFunT tv -> splitFunctionArg e1n >>= \pieces -> case pieces of
+          Just (binds, x) -> substituteSplit binds x
+          Nothing -> share normalized v e1n e2
         | otherwise -> share normalized v e1n e2
   where
     nrefs = countRefs v e2
@@ -539,23 +543,38 @@ reduce ai (AnnoS g c (AppS headA es)) = do
     -- the eta path in 'express', which re-applies it and rejects the LetS head.
     AnnoS _ _ (EvalS (AnnoS gLet cLet (LetS v e1 body))) ->
       reduce ai $ AnnoS gLet cLet $ LetS v e1 (AnnoS g c (AppS body es))
-    _ -> AnnoS g c . AppS headA' <$> mapM (reduce ai) es
--- Inline let-bound lambdas, using the same inline-vs-share @countRefs@ guard as
--- the beta-redex clause above. A singly-used lambda is beta-reduced away; a
--- multiply-used one is kept shared (each reference a 'LetBndS' lowered to a
--- native closure call, 'LocalCallP'). On the nexus path (@ai@) it is always
--- inlined, since the pure evaluator has no native closure to share.
-reduce ai (AnnoS g c (LetS v e1@(AnnoS _ _ (LamS _ _)) e2))
-  | ai || countRefs v e2 <= 1 = do
-      e1' <- reduce ai e1
-      e2' <- substituteAnnoS v e1' e2
-      inner <- reduce ai e2'
+    _ -> do
+      es' <- mapM (reduce ai) es
+      return $ case (headA', es') of
+        (AnnoS _ _ (ExeS (PatCall (PatternStruct sel))), [x])
+          | ai, Just (AnnoS _ cy y) <- project sel x -> AnnoS g cy y
+        _ -> AnnoS g c (AppS headA' es')
+  where
+    -- on the nexus path, a field of a container literal that computes
+    -- nothing is the element itself, so a function it holds reaches its
+    -- uses as a lambda
+    project sel x
+      | isValue x = field sel x
+      | otherwise = Nothing
+    field SelectorEnd x = Just x
+    field (SelectorIdx (i, sub) []) (AnnoS _ _ (TupS xs))
+      | i >= 0, i < length xs = field sub (xs !! i)
+    field (SelectorKey (k, sub) []) (AnnoS _ _ (NamS rs)) = lookup (Key k) rs >>= field sub
+    field _ _ = Nothing
+-- Inline let-bound lambdas (a right-hand side that reduces to one included),
+-- using the same inline-vs-share @countRefs@ guard as the beta-redex clause
+-- above. A singly-used lambda is beta-reduced away; a multiply-used one is
+-- kept shared (each reference a 'LetBndS' lowered to a native closure call,
+-- 'LocalCallP'). On the nexus path (@ai@) it is always inlined, since the
+-- pure evaluator has no native closure to share.
+reduce ai (AnnoS g c (LetS v e1 e2)) = do
+  e1' <- reduce ai e1
+  if isLam e1' && (ai || countRefs v e2 <= 1)
+    then do
+      inner <- substituteAnnoS v e1' e2 >>= reduce ai
       let AnnoS _ _ innerExpr = inner
       return (AnnoS g c innerExpr)
-  | otherwise = do
-      e1' <- reduce ai e1
-      e2' <- reduce ai e2
-      return (AnnoS g c (LetS v e1' e2'))
+    else AnnoS g c . LetS v e1' <$> reduce ai e2
 -- Cancel force-suspend: !{e} --> e. Keep the OUTER general type (the
 -- EvalS already strips the effect wrapper) but the INNER concrete
 -- annotation, so the chain's chosen language survives fusion.
@@ -567,9 +586,10 @@ reduce ai (AnnoS g _ (EvalS (AnnoS _ cInner (DoBlockS e)))) = do
 reduce ai (AnnoS g c e) = AnnoS g c <$> mapExprSM (reduce ai) e
 
 -- | A computed function value, split into the data it must evaluate now (a
--- let's right-hand side, a conditional's condition) and a remainder that
--- computes nothing when substituted: a value, or a conditional choosing among
--- values. 'Nothing' when the computation has no such form.
+-- let's right-hand side, a conditional's condition, a container's elements)
+-- and a remainder that computes nothing when substituted: a value, a
+-- conditional choosing among values, or a container of values. 'Nothing'
+-- when the computation has no such form.
 splitFunctionArg ::
   AnnoS (Indexed Type) One a ->
   MorlocMonad (Maybe ([(EVar, AnnoS (Indexed Type) One a)], AnnoS (Indexed Type) One a))
@@ -582,8 +602,14 @@ splitFunctionArg x@(AnnoS (Idx gi t) c ex)
         , Just el' <- choice el -> do
             (bc, cond') <- bindData cond
             return (Just (bc, AnnoS (Idx gi t) c (IfS cond' th' el')))
+      TupS xs -> Just <$> bindAll xs (AnnoS (Idx gi t) c . TupS)
+      LstS xs -> Just <$> bindAll xs (AnnoS (Idx gi t) c . LstS)
+      NamS rs -> Just <$> bindAll (map snd rs) (AnnoS (Idx gi t) c . NamS . zip (map fst rs))
       _ -> return Nothing
   where
+    bindAll xs rebuildWith = do
+      pieces <- mapM bindData xs
+      return (concatMap fst pieces, rebuildWith (map snd pieces))
     choice y@(AnnoS g' c' ey)
       | isValue y = Just y
       | IfS cond th el <- ey, isValue cond = do
@@ -591,12 +617,22 @@ splitFunctionArg x@(AnnoS (Idx gi t) c ex)
           el' <- choice el
           return (AnnoS g' c' (IfS cond th' el'))
       | otherwise = Nothing
-    bindData y@(AnnoS (Idx gi' t') c' _)
-      | isValue y = return ([], y)
-      | otherwise = do
-          name <- freshClosureName (EV "arg")
-          refIx <- newPlainIndex gi'
-          return ([(name, y)], AnnoS (Idx refIx t') c' (LetBndS name))
+
+-- | A value as it is, or a fresh let-bound variable for anything else, with
+-- its binding.
+bindData ::
+  AnnoS (Indexed Type) One a ->
+  MorlocMonad ([(EVar, AnnoS (Indexed Type) One a)], AnnoS (Indexed Type) One a)
+bindData y@(AnnoS (Idx gi t) c _)
+  | isValue y = return ([], y)
+  | otherwise = do
+      name <- freshClosureName (EV "arg")
+      refIx <- newPlainIndex gi
+      return ([(name, y)], AnnoS (Idx refIx t) c (LetBndS name))
+
+isLam :: AnnoS g f c -> Bool
+isLam (AnnoS _ _ (LamS _ _)) = True
+isLam _ = False
 
 -- | Move the manifold configuration at index @from@ to the root of @e@, when
 -- the root is a different node.
@@ -632,17 +668,13 @@ hoistThunkArgs e@(AnnoS g@(Idx _ (EffectT _ _)) c (AppS f xs))
       return (concatMap fst pieces, AnnoS g c (AppS f (map snd pieces)))
   | otherwise = return ([], e)
   where
-    hoist x@(AnnoS (Idx gi t) cx _)
+    hoist x
       | isValue x = return ([], x)
       | otherwise = do
           -- a nested suspension builder: its own arguments first
           (inner, x') <- hoistThunkArgs x
-          if isValue x'
-            then return (inner, x')
-            else do
-              name <- freshClosureName (EV "arg")
-              refIx <- newPlainIndex gi
-              return (inner <> [(name, x')], AnnoS (Idx refIx t) cx (LetBndS name))
+          (bs, y) <- bindData x'
+          return (inner <> bs, y)
 hoistThunkArgs e = return ([], e)
 
 -- | @let v1 = e1 in ... let vn = en in body@, each let annotated like the

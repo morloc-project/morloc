@@ -29,6 +29,7 @@ import Data.Word (Word8)
 import qualified Data.Map as Map
 import qualified Data.Scientific as DS
 import Data.Set (Set)
+import qualified Data.List as List
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as MT
@@ -190,6 +191,11 @@ applyParentSlice slice ds =
 
 data NexusExpr
   = AppX Text NexusExpr [NexusExpr]
+  | CallX Text Text [NexusExpr]
+  -- ^ a call of a named function: result schema, name, arguments
+  | NamedX [(Text, NexusExpr)] NexusExpr
+  -- ^ the named functions an expression calls (callees first), and the
+  -- expression
   | LamX [Text] NexusExpr
   | BndX Text Text
   | PatX Text Pattern
@@ -552,6 +558,9 @@ generalTypeToSerialAST' i anc t0@(NamT o v ps rs)
       anc' <- descendT i t0 anc
       SerialObject o (FV v (CV "")) (map keyTypeF ps)
         <$> mapM (secondM (generalTypeToSerialAST' i anc')) rs
+generalTypeToSerialAST' i _ t@(FunT _ _) = MM.throwSourcedError i $
+  "A command evaluated without a language pool cannot hold a function value (here of type"
+    <+> pretty t <> "); import a language so the command runs in a pool"
 generalTypeToSerialAST' i _ t = MM.throwSourcedError i $
   "cannot serialize type:" <+> pretty t
 
@@ -897,6 +906,10 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
           emitIFileWalkX t rE steps []
       | otherwise =
           AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [rE]
+    -- a shared specialization the nexus calls by name
+    toNexusExpr (AnnoS (Idx _ t) _ (AppS (AnnoS _ _ (CallS v)) es)) = do
+      mapM_ (heldSuspension "passed as an argument") es
+      CallX <$> type2schema t <*> pure (render (pretty v)) <*> mapM toNexusExpr es
     toNexusExpr (AnnoS (Idx _ t) _ (AppS e es)) = do
       mapM_ (heldSuspension "passed as an argument") es
       AppX <$> type2schema t <*> toNexusExpr e <*> mapM toNexusExpr es
@@ -1176,8 +1189,18 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS intr _)) = do
       v <- resolveCompileTimeIntrinsic intr
       StrX <$> type2schema t <*> pure v
+    -- one used as a value is the lambda that calls it
+    toNexusExpr (AnnoS (Idx _ (FunT ts r)) _ (CallS v)) = do
+      vars <- mapM (const (MM.getCounter >>= \k -> return ("call`" <> MT.pack (show k)))) ts
+      argSchemas <- mapM type2schema ts
+      rs <- type2schema r
+      return $ LamX vars (CallX rs (render (pretty v)) (zipWith BndX argSchemas vars))
     toNexusExpr (AnnoS (Idx _ t) _ (CallS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
     toNexusExpr _ = error $ "Unreachable value of type reached"
+
+-- | The names a tree calls ('CallS').
+calledNames :: AnnoS g One c -> [EVar]
+calledNames t = [v | AnnoS _ _ (CallS v) <- annoNodes t]
 
 -- Resolve a numeric literal against the target type and map the shared
 -- resolver's decision to nexus LitType wire markers. F32X/F64X carry
@@ -2722,6 +2745,19 @@ exprToJson (AppX schema func args) =
     , ("func", exprToJson func)
     , ("args", jsonArr (map exprToJson args))
     ]
+exprToJson (CallX schema name args) =
+  jsonObj
+    [ ("tag", jsonStr "call")
+    , ("schema", jsonStr schema)
+    , ("name", jsonStr name)
+    , ("args", jsonArr (map exprToJson args))
+    ]
+exprToJson (NamedX fs body) =
+  jsonObj
+    [ ("tag", jsonStr "named")
+    , ("functions", jsonArr [jsonObj [("name", jsonStr n), ("expr", exprToJson e)] | (n, e) <- fs])
+    , ("body", exprToJson body)
+    ]
 exprToJson (LamX vars body) =
   jsonObj
     [ ("tag", jsonStr "lambda")
@@ -3376,8 +3412,27 @@ generate cs rASTs helperRASTs = do
   fdataRaw <- CM.mapM getFData xs
       |>> map (\fd -> fd { fdataSubSockets = mergeSockets (fdataSubSockets fd) helperSockets })
 
-  -- Extract data for pure commands
-  gastsRaw <- mapM annotateGasts cs
+  -- Extract data for pure commands. The copies of shared specializations a
+  -- pure command calls are not commands: each command carries the ones it
+  -- reaches, callees first.
+  namedMap <- MM.gets stateNamedGasts
+  let rootOf (AnnoS (Idx i _) _ _, _) = i
+      (namedCs0, exportCs) = List.partition ((`Map.member` namedMap) . rootOf) cs
+      named = [(n, c) | c <- namedCs0, Just n <- [Map.lookup (rootOf c) namedMap]]
+      callsOf t = [v | v <- calledNames t, Map.member v callees]
+      -- the named functions each named function calls, each found once
+      callees = Map.fromList [(n, callsOf (fst c)) | (n, c) <- named]
+      reach seen [] = seen
+      reach seen (v : vs)
+        | Set.member v seen = reach seen vs
+        | otherwise = reach (Set.insert v seen) (Map.findWithDefault [] v callees <> vs)
+  namedGasts <- mapM (annotateGasts . snd) named
+  let namedOrder = [(n, commandExpr g) | ((n, _), g) <- zip named namedGasts]
+      withNamed t g = case reach Set.empty (callsOf t) of
+        used
+          | Set.null used -> g
+          | otherwise -> g {commandExpr = NamedX [(unEVar n, e) | (n, e) <- namedOrder, Set.member n used] (commandExpr g)}
+  gastsRaw <- zipWith withNamed (map fst exportCs) <$> mapM annotateGasts exportCs
 
   -- Give each `mlcp_<parent>_<long>` internal command the parent's
   -- per-arg shape docs. Without this the dispatch loader sees the

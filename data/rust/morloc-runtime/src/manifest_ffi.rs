@@ -700,6 +700,64 @@ unsafe fn build_pattern(jp: &serde_json::Value) -> Result<*mut MorlocPattern, Mo
     Ok(pat)
 }
 
+thread_local! {
+    // The named functions of the command whose expression is being built
+    // (a "named" node is only ever a command's root).
+    static NAMED_FUNCTIONS: std::cell::RefCell<std::collections::HashMap<String, *mut MorlocLamExpression>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+// Empties the table when a "named" node is built, whether or not its body
+// built.
+struct NamedScope;
+
+impl Drop for NamedScope {
+    fn drop(&mut self) {
+        NAMED_FUNCTIONS.with(|n| n.borrow_mut().clear());
+    }
+}
+
+// An application node: its schema, its arguments, and a function slot filled
+// by `set_function`.
+unsafe fn build_app(
+    je: &serde_json::Value,
+    set_function: impl FnOnce(*mut MorlocAppExpression) -> Result<(), MorlocError>,
+) -> Result<*mut MorlocExpression, MorlocError> {
+    extern "C" {
+        fn parse_schema(s: *const c_char, errmsg: *mut *mut c_char) -> *mut CSchema;
+    }
+    let mut err: *mut c_char = ptr::null_mut();
+    let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+    let jargs = je.get("args").and_then(|v| v.as_array());
+    let n = jargs.map(|a| a.len()).unwrap_or(0);
+
+    let c_schema_str = CString::new(schema_str).unwrap_or_default();
+    let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+    if !err.is_null() {
+        let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+        libc::free(err as *mut c_void);
+        return Err(MorlocError::Other(msg));
+    }
+
+    let args = libc::calloc(n, std::mem::size_of::<*mut MorlocExpression>()) as *mut *mut MorlocExpression;
+    if let Some(jargs) = jargs {
+        for (i, a) in jargs.iter().enumerate() {
+            *args.add(i) = build_expr(a)?;
+        }
+    }
+
+    let app = libc::calloc(1, std::mem::size_of::<MorlocAppExpression>()) as *mut MorlocAppExpression;
+    set_function(app)?;
+    (*app).args = args;
+    (*app).nargs = n;
+
+    let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+    (*expr).etype = MorlocExpressionType::App;
+    (*expr).schema = schema;
+    (*expr).expr.app_expr = app;
+    Ok(expr)
+}
+
 unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, MorlocError> {
     let tag = je.get("tag").and_then(|v| v.as_str()).ok_or_else(|| MorlocError::Other("Expression missing 'tag' field".into()))?;
 
@@ -828,52 +886,66 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
         }
 
         "app" => {
-            let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
-            let jargs = je.get("args").and_then(|v| v.as_array());
-            let n = jargs.map(|a| a.len()).unwrap_or(0);
-
-            let c_schema_str = CString::new(schema_str).unwrap_or_default();
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
-
             let func = build_expr(je.get("func").unwrap_or(&serde_json::Value::Null))?;
-            let args = libc::calloc(n, std::mem::size_of::<*mut MorlocExpression>()) as *mut *mut MorlocExpression;
-            if let Some(jargs) = jargs {
-                for (i, a) in jargs.iter().enumerate() {
-                    *args.add(i) = build_expr(a)?;
+            build_app(je, |app| {
+                match (*func).etype {
+                    MorlocExpressionType::Pat => {
+                        (*app).atype = MorlocAppExpressionType::Pattern;
+                        (*app).function.pattern = (*func).expr.pattern_expr;
+                    }
+                    MorlocExpressionType::Lam => {
+                        (*app).atype = MorlocAppExpressionType::Lambda;
+                        (*app).function.lambda = (*func).expr.lam_expr;
+                    }
+                    MorlocExpressionType::Fmt => {
+                        (*app).atype = MorlocAppExpressionType::Format;
+                        (*app).function.fmt = (*func).expr.interpolation;
+                    }
+                    _ => {
+                        return Err(MorlocError::Other(format!("Invalid function in app expression (type={:?})", (*func).etype)));
+                    }
+                }
+                Ok(())
+            })
+        }
+
+        // A command's shared functions, then its body. Each function is a
+        // lambda built once; a "call" of it in the body (or in a later
+        // function) is an application of that one lambda.
+        "named" => {
+            NAMED_FUNCTIONS.with(|n| n.borrow_mut().clear());
+            let _scope = NamedScope;
+            if let Some(fs) = je.get("functions").and_then(|v| v.as_array()) {
+                for f in fs {
+                    let name = f.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let lam = build_expr(f.get("expr").unwrap_or(&serde_json::Value::Null))?;
+                    if (*lam).etype != MorlocExpressionType::Lam {
+                        return Err(MorlocError::Other(format!("Named function {} is not a lambda", name)));
+                    }
+                    let lam_ptr = (*lam).expr.lam_expr;
+                    NAMED_FUNCTIONS.with(|n| n.borrow_mut().insert(name, lam_ptr));
                 }
             }
+            build_expr(je.get("body").unwrap_or(&serde_json::Value::Null))
+        }
 
-            let app = libc::calloc(1, std::mem::size_of::<MorlocAppExpression>()) as *mut MorlocAppExpression;
-            match (*func).etype {
-                MorlocExpressionType::Pat => {
-                    (*app).atype = MorlocAppExpressionType::Pattern;
-                    (*app).function.pattern = (*func).expr.pattern_expr;
-                }
-                MorlocExpressionType::Lam => {
-                    (*app).atype = MorlocAppExpressionType::Lambda;
-                    (*app).function.lambda = (*func).expr.lam_expr;
-                }
-                MorlocExpressionType::Fmt => {
-                    (*app).atype = MorlocAppExpressionType::Format;
-                    (*app).function.fmt = (*func).expr.interpolation;
-                }
-                _ => {
-                    return Err(MorlocError::Other(format!("Invalid function in app expression (type={:?})", (*func).etype)));
-                }
+        "call" => {
+            let name = je.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let n = je.get("args").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            let lam = match NAMED_FUNCTIONS.with(|t| t.borrow().get(name).copied()) {
+                Some(p) => p,
+                None => return Err(MorlocError::Other(format!("Call of unknown named function {}", name))),
+            };
+            if n != (*lam).nargs {
+                return Err(MorlocError::Other(format!(
+                    "Named function {} takes {} arguments, called with {}", name, (*lam).nargs, n
+                )));
             }
-            (*app).args = args;
-            (*app).nargs = n;
-
-            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
-            (*expr).etype = MorlocExpressionType::App;
-            (*expr).schema = schema;
-            (*expr).expr.app_expr = app;
-            Ok(expr)
+            build_app(je, |app| {
+                (*app).atype = MorlocAppExpressionType::Lambda;
+                (*app).function.lambda = lam;
+                Ok(())
+            })
         }
 
         "lambda" => {

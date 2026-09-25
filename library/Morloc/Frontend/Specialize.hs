@@ -29,11 +29,14 @@ to it, and at a different key is polymorphic recursion, which is rejected.
 module Morloc.Frontend.Specialize (specialize) where
 
 import Data.IORef
+import qualified Data.List as List
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import Morloc.Frontend.Namespace
-import Morloc.Frontend.Rename (fresh)
+import Morloc.CodeGenerator.Value (etaParts)
+import Morloc.Frontend.Rename (displayName, fresh)
+import qualified Morloc.Frontend.Share as Share
 import Morloc.Frontend.Treeify (Validation (..), collectRoot, recName)
 import Morloc.Frontend.Typecheck (typecheckRoot, typecheckRootAt)
 import Morloc.Data.Doc
@@ -47,6 +50,10 @@ type SpecKey = (Int, TypeU)
 data Spec = Spec
   { specDefs :: Map.Map Int (Int, EVar)
   , specMemo :: IORef (Map.Map SpecKey Typed)
+  , specShared :: IORef (Map.Map SpecKey EVar)
+  -- ^ the keys shared as a root of their own, by the name uses call
+  , specInlined :: IORef (Set.Set SpecKey)
+  -- ^ the keys found not to be shareable wherever they are used
   }
 
 -- | The term an index refers to. Read at each use: collecting and copying
@@ -59,8 +66,8 @@ termOf i = do
 -- | Typecheck the tree of each export.
 specialize :: Validation -> [(Int, EVar)] -> MorlocMonad [Typed]
 specialize checks exports = do
-  memo <- liftIO (newIORef Map.empty)
-  mapM (specializeExport (Spec (validationDefs checks) memo)) exports
+  spec <- liftIO (Spec (validationDefs checks) <$> newIORef Map.empty <*> newIORef Map.empty <*> newIORef Set.empty)
+  mapM (specializeExport spec) exports
 
 specializeExport :: Spec -> (Int, EVar) -> MorlocMonad Typed
 specializeExport spec (gi, v) = do
@@ -148,23 +155,26 @@ isGround t = case t of
     closedEffects (EffectVar _) = False
     closedEffects (EffectUnion a b) = closedEffects a && closedEffects b
 
+-- | The variables the checker generated in a type, in order of appearance.
+generatedVars :: TypeU -> [TVar]
+generatedVars t = case t of
+  VarU (TV v) | T.any (== '@') v -> [TV v]
+  ForallU _ x -> generatedVars x
+  FunU ts x -> concatMap generatedVars ts <> generatedVars x
+  AppU x ts -> generatedVars x <> concatMap generatedVars ts
+  NamU _ _ ps rs -> concatMap generatedVars ps <> concatMap (generatedVars . snd) rs
+  EffectU _ x -> generatedVars x
+  OptionalU x -> generatedVars x
+  OpU _ ts -> concatMap generatedVars ts
+  _ -> []
+
 -- | A key's type with the variables the checker generated renamed by order
 -- of appearance, so equal instantiations compare equal.
 canonical :: TypeU -> TypeU
 canonical t0 = rename t0
   where
-    generated = nubOrd (collect t0)
+    generated = nubOrd (generatedVars t0)
     table = Map.fromList (zip generated [TV ("v@" <> T.pack (show k)) | k <- [(0 :: Int) ..]])
-    collect t = case t of
-      VarU (TV v) | T.any (== '@') v -> [TV v]
-      ForallU _ x -> collect x
-      FunU ts x -> concatMap collect ts <> collect x
-      AppU x ts -> collect x <> concatMap collect ts
-      NamU _ _ ps rs -> concatMap collect ps <> concatMap (collect . snd) rs
-      EffectU _ x -> collect x
-      OptionalU x -> collect x
-      OpU _ ts -> concatMap collect ts
-      _ -> []
     rename t = case t of
       VarU v | Just v' <- Map.lookup v table -> VarU v'
       ForallU v x -> ForallU v (rename x)
@@ -221,23 +231,156 @@ splice spec backs stack n@(AnnoS (Idx gi t) ci e) = refTerm spec n >>= \r -> let
             <+> "is at a different type than the use it recurses from"
     | otherwise -> do
         elab <- elaborate spec target (ci, refName e) (k, key)
-        copy <- instantiate elab
-        case copy of
-          AnnoS _ _ (VarS name (Many alts)) -> do
-            inner <- liftIO (newIORef Set.empty)
-            alts' <- mapM (splice spec inner ((k, key) : stack)) alts
-            innerBacks <- liftIO (readIORef inner)
-            liftIO (modifyIORef' backs (Set.union (Set.delete k innerBacks)))
-            let name' = if Set.member k innerBacks then token k else name
-            alts'' <- mapM (atUse ci) alts'
-            return (AnnoS (Idx gi t) ci (VarS name' (Many alts'')))
-          _ -> MM.throwCompilerBug "specialize: an elaboration is not a term"
+        labeledUse <- configured [gi, ci]
+        shared <- Map.lookup (k, key) <$> liftIO (readIORef (specShared spec))
+        case shared of
+          Just tok | not labeledUse -> sharedUse tok elab
+          _ -> do
+            copy <- instantiate elab
+            case copy of
+              AnnoS _ _ (VarS name (Many alts)) -> do
+                inner <- liftIO (newIORef Set.empty)
+                alts' <- mapM (splice spec inner ((k, key) : stack)) alts
+                innerBacks <- liftIO (readIORef inner)
+                liftIO (modifyIORef' backs (Set.union (Set.delete k innerBacks)))
+                let name' = if Set.member k innerBacks then token k else name
+                -- a body with no back-edge is closed: it means the same
+                -- wherever it is used, so whether it is shared is decided once
+                inlined <- Set.member (k, key) <$> liftIO (readIORef (specInlined spec))
+                let closed = target == Definition && Set.null innerBacks && not labeledUse
+                share <-
+                  if closed && not inlined
+                    then shareable key t alts'
+                    else return False
+                if share
+                  then do
+                    tok <- newSpecName name
+                    let (sourced, defined) = List.partition isSourced alts'
+                    root <- AnnoS <$> (Idx <$> plainIndex gi <*> pure t) <*> plainIndex ci <*> pure (VarS tok (Many defined))
+                    liftIO (modifyIORef' (specShared spec) (Map.insert (k, key) tok))
+                    MM.modify (\st -> let Specs xs = stateSpecs st in st {stateSpecs = Specs (xs <> [root]), stateSpecNames = Set.insert tok (stateSpecNames st)})
+                    callAt tok name sourced
+                  else do
+                    when closed $
+                      liftIO (modifyIORef' (specInlined spec) (Set.insert (k, key)))
+                    alts'' <- mapM (atUse ci) alts'
+                    return (AnnoS (Idx gi t) ci (VarS name' (Many alts'')))
+              _ -> MM.throwCompilerBug "specialize: an elaboration is not a term"
   Nothing -> AnnoS (Idx gi t) ci <$> mapExprSM (splice spec backs stack) e
   where
     token k = recName (maybe (refName e) snd (Map.lookup k (specDefs spec))) k
     refName (VarS v _) = v
     refName _ = EV "?"
     methodDepth = 64
+    -- a use of a shared specialization: its sourced implementations, each
+    -- chosen per use as before, and a call of the shared one
+    sharedUse tok (AnnoS _ _ (VarS name (Many alts))) = do
+      sourced <- mapM instantiate (filter isSourced alts)
+      callAt tok name sourced
+    sharedUse _ _ = MM.throwCompilerBug "specialize: an elaboration is not a term"
+    callAt tok name sourced = do
+      sourced' <- mapM (atUse ci) sourced
+      call <- AnnoS <$> (Idx <$> plainIndex gi <*> pure t) <*> plainIndex ci <*> pure (CallS tok)
+      return (AnnoS (Idx gi t) ci (VarS name (Many (sourced' <> [call]))))
+
+isSourced :: Typed -> Bool
+isSourced (AnnoS _ _ (ExeS (SrcCall _))) = True
+isSourced _ = False
+
+-- | Whether any of these indices carries manifold configuration (a label, a
+-- cache, a remote setting): such a use stays in place, so its configuration
+-- stays with it.
+configured :: [Int] -> MorlocMonad Bool
+configured is = do
+  cfg <- MM.gets stateManifoldConfig
+  return (any (maybe False Share.configured . (`Map.lookup` cfg)) is)
+
+-- | A name for a shared specialization, never a term's or a recursion
+-- token's.
+newSpecName :: EVar -> MorlocMonad EVar
+newSpecName name = do
+  k <- MM.getCounter
+  return (EV (unEVar (displayName name) <> "`p" <> T.pack (show k)))
+
+-- | Whether a specialization, its references already spliced, is shared as a
+-- root of its own rather than copied to each use. Sharing turns a use into a
+-- call; it must not change what the program computes or how often:
+--
+-- * a function of at least one argument whose result is not a suspension;
+-- * its key is fully solved, with no variable the checker invented;
+-- * each implementation defined here takes every argument at once (a lambda
+--   doing work before the function it returns is staged per use), and does
+--   not recurse (a recursion keeps its back-edges to the copy it is in; one
+--   defined inside it goes with it);
+-- * it reads no top-level constant (evaluated once per command at the use,
+--   it would be evaluated per call);
+-- * it is large enough that copies compound.
+shareable :: TypeU -> TypeU -> [Typed] -> MorlocMonad Bool
+shareable key t alts = do
+  names <- MM.gets stateSpecNames
+  GMap idmap sigmap <- MM.gets stateSignatures
+  let (params, result) = arrow (snd (unqualify t))
+      defined = filter (not . isSourced) alts
+      ns = concatMap annoNodes defined
+      inner = Set.fromList [v | AnnoS _ _ (VarS v _) <- ns]
+  labeled <- configured (concat [[gi, ci] | AnnoS (Idx gi _) ci _ <- defined])
+  return $
+    not (null (drop shareSize ns))
+      && not (null params)
+      && not (isSuspension result)
+      && isGround key
+      && null (generatedVars key)
+      && all (takesAll (length params)) defined
+      && not (any (readsConstant idmap sigmap) ns)
+      && not (any (\(AnnoS _ _ x) -> recurses names inner x) ns)
+      && not labeled
+  where
+    arrow (FunU ts r) = let (ts', r') = arrow r in (ts <> ts', r')
+    arrow x = ([], x)
+    isArrow (FunU _ _) = True
+    isArrow (ForallU _ x) = isArrow x
+    isArrow _ = False
+    isSuspension (EffectU _ _) = True
+    isSuspension _ = False
+    -- directly nested lambdas are one parameter list
+    takesAll n (AnnoS _ _ (LamS vs body)) = case body of
+      AnnoS _ _ (LamS _ _) -> takesAll (n - length vs) body
+      _ -> length vs == n
+    takesAll _ _ = False
+    -- a back-edge to the definition itself; one to a recursion defined
+    -- inside it is closed with it
+    recurses names defs (CallS v) = not (Set.member v names || Set.member v defs)
+    recurses _ _ _ = False
+    -- a top-level name, not a class method, whose value is computed once
+    -- per command: data, or a function built by a computation
+    readsConstant idmap sigmap (AnnoS (Idx _ ty) ci (VarS (EV v) (Many xs))) =
+      not (T.any (== '`') v)
+        && not (isMethod idmap sigmap ci)
+        && (not (isArrow ty) || not (all built xs))
+    readsConstant _ _ _ = False
+    -- a function that exists without computing anything
+    built n@(AnnoS _ _ e) = case e of
+      LamS _ _ | Just (f, pre) <- etaParts n -> all built (f : pre)
+      LamS _ _ -> True
+      ExeS _ -> True
+      BndS _ -> True
+      IntS _ _ -> True
+      RealS _ _ -> True
+      StrS _ -> True
+      LogS _ -> True
+      UniS -> True
+      NullS -> True
+      CallS _ -> True
+      VarS _ (Many xs) -> all built xs
+      _ -> False
+    isMethod idmap sigmap ci = case Map.lookup ci idmap >>= (`Map.lookup` sigmap) of
+      Just (Polymorphic {}) -> True
+      _ -> False
+
+
+-- | The node count above which a closed specialization is shared.
+shareSize :: Int
+shareSize = 32
 
 -- | An implementation spliced at a reference takes the reference's own index
 -- as its outer index, as a term expanded in place does, and a label on the

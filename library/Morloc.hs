@@ -83,6 +83,8 @@ typecheck ::
     )
 typecheck path code =
   typecheckFrontend path code
+    -- the shared specializations the exports call are trees of their own
+    >>= (\es -> MM.gets stateSpecs >>= \(Specs specs) -> return (es <> specs))
     -- lower guest-language sources (e.g. Futhark) into host glue
     >>= lowerGuests
     -- resolve all TypeU types to Type

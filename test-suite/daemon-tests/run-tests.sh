@@ -972,6 +972,11 @@ if should_run "http-pure"; then
     val=$(json_field "$result" "result")
     assert_test "POST /call/checkStr result=hello" "hello" "$val"
 
+    # a pure command calling shared (named) functions
+    result=$(curl -s -X POST "http://127.0.0.1:${HTTP_PORT}/call/swapLadder" \
+        -H "Content-Type: application/json" -d '[1, 2]')
+    assert_contains "POST /call/swapLadder [1,2] calls named functions" '[2,1]' "$result"
+
     stop_daemon "$LAST_DAEMON_PID"
     echo ""
 fi

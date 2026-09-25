@@ -42,7 +42,6 @@ import Morloc.CodeGenerator.LanguageDescriptor (ldAllowStringNull, loadLangDescr
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.Language as ML
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (containsFunT)
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
@@ -226,17 +225,17 @@ etaReduceForwarders (PolyHead lang m args body) = PolyHead lang m args (go body)
     bndId (PolyBndVar _ i) = Just i
     bndId _ = Nothing
 
--- | Give every recursive manifold that a caller in its own pool reaches a
--- native entry point, and record it.
+-- | Give every recursive manifold or shared specialization that a caller in
+-- its own pool reaches a native entry point, and record it.
 --
--- A recursive function is lifted into a manifold of its own, which is the
--- pool's serial entry: it takes and returns packets. A caller in another
--- pool needs that, but a caller in the same pool pays for it on every
--- level of the recursion -- each level writes its whole remaining argument
--- to shared memory and reads it back, so a walk down a spine of n nodes
--- copies on the order of n^2 nodes. Tail recursion escapes this by
--- becoming a loop ('addLoopWraps'); a recursion that combines the results
--- of its calls cannot.
+-- A recursive function (or a shared specialization) is lifted into a
+-- manifold of its own, which is the pool's serial entry: it takes and
+-- returns packets. A caller in another pool needs that, but a caller in the
+-- same pool pays for it on every level of the recursion -- each level
+-- writes its whole remaining argument to shared memory and reads it back,
+-- so a walk down a spine of n nodes copies on the order of n^2 nodes. Tail
+-- recursion escapes this by becoming a loop ('addLoopWraps'); a recursion
+-- that combines the results of its calls cannot.
 --
 -- The manifold's body moves to a new ID and is marked as one that survives
 -- lowering as a real function, which makes it a native function of the
@@ -264,13 +263,7 @@ addNativeRecEntries phs = do
 
     splitEntry :: Set.Set Int -> PolyHead -> MorlocMonad PolyHead
     splitEntry targets ph@(PolyHead lang midx args body) = do
-      argTypes <- MM.gets stateArgTypes
-      -- A function value is passed by a convention of its own in each
-      -- language, and a recursion that carries one is not the case this
-      -- entry exists for.
-      let carriesFunction =
-            or [ maybe False (containsFunT . val) (Map.lookup i argTypes) | Arg i _ <- args ]
-      if Set.member midx targets && splittable body && not carriesFunction
+      if Set.member midx targets && splittable body
         then splitHead
         else return ph
       where
@@ -288,7 +281,13 @@ addNativeRecEntries phs = do
               , stateName = maybe (stateName s)
                   (\n -> Map.insert midx' n (stateName s)) (Map.lookup midx name)
               }
-          return $ PolyHead lang midx args (PolyManifold lang midx' (ManifoldFull args) Preserved body)
+          -- a body that is this manifold's own (same id) is what the native
+          -- entry runs; left wrapped it would be emitted as a second
+          -- function of the same name
+          let native = case body of
+                PolyManifold _ m _ _ inner | m == midx -> inner
+                _ -> body
+          return $ PolyHead lang midx args (PolyManifold lang midx' (ManifoldFull args) Preserved native)
 
     -- A body whose shape already commits the manifold to something else.
     -- A loop carries its slots against the head's own form and has no
@@ -769,10 +768,10 @@ expressDefault e0@(AnnoS (Idx midx t) (Idx cidx lang, args) _) =
     -- ensure the manifold body has PolyReturn at the return position
     ensurePolyReturn (PolyReturn x) = PolyReturn x
     ensurePolyReturn (PolyLet i e1 e2) = PolyLet i e1 (ensurePolyReturn e2)
-    -- a closure at the return position is the value returned, not a body
-    -- whose own return is this manifold's
-    ensurePolyReturn x@(PolyManifold _ _ f _ _) | isClosureForm f = PolyReturn x
-    ensurePolyReturn (PolyManifold l m f k e) = PolyManifold l m f k (ensurePolyReturn e)
+    -- this manifold's own body returns; another manifold at the return
+    -- position (a call, or a closure) is the value returned
+    ensurePolyReturn (PolyManifold l m f k e)
+      | m == midx && not (isClosureForm f) = PolyManifold l m f k (ensurePolyReturn e)
     ensurePolyReturn x = PolyReturn x
 
 expressPolyExprWrap ::

@@ -1,0 +1,251 @@
+module main (intLadder, listLadder, recursiveLeafLadder, higherOrderLadder, swapLadder, curriedLadder)
+
+import root-cpp
+
+-- A definition named twice at each level of a ladder is compiled once per
+-- type and language and called from each use: the program a ladder of depth
+-- d builds is linear in d, where a copy per use would be 2^d.
+
+f0 :: Int -> Int
+f0 x = x + 1
+f1 :: Int -> Int
+f1 x = f0 (f0 x)
+f2 :: Int -> Int
+f2 x = f1 (f1 x)
+f3 :: Int -> Int
+f3 x = f2 (f2 x)
+f4 :: Int -> Int
+f4 x = f3 (f3 x)
+f5 :: Int -> Int
+f5 x = f4 (f4 x)
+f6 :: Int -> Int
+f6 x = f5 (f5 x)
+f7 :: Int -> Int
+f7 x = f6 (f6 x)
+f8 :: Int -> Int
+f8 x = f7 (f7 x)
+f9 :: Int -> Int
+f9 x = f8 (f8 x)
+f10 :: Int -> Int
+f10 x = f9 (f9 x)
+f11 :: Int -> Int
+f11 x = f10 (f10 x)
+f12 :: Int -> Int
+f12 x = f11 (f11 x)
+f13 :: Int -> Int
+f13 x = f12 (f12 x)
+f14 :: Int -> Int
+f14 x = f13 (f13 x)
+f15 :: Int -> Int
+f15 x = f14 (f14 x)
+f16 :: Int -> Int
+f16 x = f15 (f15 x)
+f17 :: Int -> Int
+f17 x = f16 (f16 x)
+f18 :: Int -> Int
+f18 x = f17 (f17 x)
+f19 :: Int -> Int
+f19 x = f18 (f18 x)
+f20 :: Int -> Int
+f20 x = f19 (f19 x)
+
+intLadder :: Int -> Int
+intLadder x = f20 x
+
+g0 :: [Int] -> [Int]
+g0 x = map (\y -> y + 1) x
+g1 :: [Int] -> [Int]
+g1 x = g0 (g0 x)
+g2 :: [Int] -> [Int]
+g2 x = g1 (g1 x)
+g3 :: [Int] -> [Int]
+g3 x = g2 (g2 x)
+g4 :: [Int] -> [Int]
+g4 x = g3 (g3 x)
+g5 :: [Int] -> [Int]
+g5 x = g4 (g4 x)
+g6 :: [Int] -> [Int]
+g6 x = g5 (g5 x)
+g7 :: [Int] -> [Int]
+g7 x = g6 (g6 x)
+g8 :: [Int] -> [Int]
+g8 x = g7 (g7 x)
+g9 :: [Int] -> [Int]
+g9 x = g8 (g8 x)
+g10 :: [Int] -> [Int]
+g10 x = g9 (g9 x)
+
+listLadder :: [Int] -> [Int]
+listLadder xs = g10 xs
+
+-- the same when each level calls a recursive definition: the recursion is
+-- copied into the level that uses it, and the levels are shared
+r0 :: Int -> Int -> Int
+r0 n x = ? n <= 0 = x : r0 (n - 1) (x + 1)
+r1 :: Int -> Int -> Int
+r1 n x = r0 n (r0 n x)
+r2 :: Int -> Int -> Int
+r2 n x = r1 n (r1 n x)
+r3 :: Int -> Int -> Int
+r3 n x = r2 n (r2 n x)
+r4 :: Int -> Int -> Int
+r4 n x = r3 n (r3 n x)
+r5 :: Int -> Int -> Int
+r5 n x = r4 n (r4 n x)
+r6 :: Int -> Int -> Int
+r6 n x = r5 n (r5 n x)
+r7 :: Int -> Int -> Int
+r7 n x = r6 n (r6 n x)
+r8 :: Int -> Int -> Int
+r8 n x = r7 n (r7 n x)
+r9 :: Int -> Int -> Int
+r9 n x = r8 n (r8 n x)
+r10 :: Int -> Int -> Int
+r10 n x = r9 n (r9 n x)
+r11 :: Int -> Int -> Int
+r11 n x = r10 n (r10 n x)
+r12 :: Int -> Int -> Int
+r12 n x = r11 n (r11 n x)
+r13 :: Int -> Int -> Int
+r13 n x = r12 n (r12 n x)
+r14 :: Int -> Int -> Int
+r14 n x = r13 n (r13 n x)
+r15 :: Int -> Int -> Int
+r15 n x = r14 n (r14 n x)
+r16 :: Int -> Int -> Int
+r16 n x = r15 n (r15 n x)
+
+recursiveLeafLadder :: Int -> Int
+recursiveLeafLadder x = r16 1 x
+
+-- a ladder of functions taking a function: shared the same way, the
+-- function passed to each call
+inc :: Int -> Int
+inc x = x + 1
+h0 :: (Int -> Int) -> Int -> Int
+h0 f x = f x
+h1 :: (Int -> Int) -> Int -> Int
+h1 f x = h0 f (h0 f x)
+h2 :: (Int -> Int) -> Int -> Int
+h2 f x = h1 f (h1 f x)
+h3 :: (Int -> Int) -> Int -> Int
+h3 f x = h2 f (h2 f x)
+h4 :: (Int -> Int) -> Int -> Int
+h4 f x = h3 f (h3 f x)
+h5 :: (Int -> Int) -> Int -> Int
+h5 f x = h4 f (h4 f x)
+h6 :: (Int -> Int) -> Int -> Int
+h6 f x = h5 f (h5 f x)
+h7 :: (Int -> Int) -> Int -> Int
+h7 f x = h6 f (h6 f x)
+h8 :: (Int -> Int) -> Int -> Int
+h8 f x = h7 f (h7 f x)
+h9 :: (Int -> Int) -> Int -> Int
+h9 f x = h8 f (h8 f x)
+h10 :: (Int -> Int) -> Int -> Int
+h10 f x = h9 f (h9 f x)
+h11 :: (Int -> Int) -> Int -> Int
+h11 f x = h10 f (h10 f x)
+h12 :: (Int -> Int) -> Int -> Int
+h12 f x = h11 f (h11 f x)
+h13 :: (Int -> Int) -> Int -> Int
+h13 f x = h12 f (h12 f x)
+h14 :: (Int -> Int) -> Int -> Int
+h14 f x = h13 f (h13 f x)
+h15 :: (Int -> Int) -> Int -> Int
+h15 f x = h14 f (h14 f x)
+h16 :: (Int -> Int) -> Int -> Int
+h16 f x = h15 f (h15 f x)
+
+higherOrderLadder :: Int -> Int
+higherOrderLadder x = h16 inc x
+
+-- a ladder that calls no source is evaluated by the nexus, which calls
+-- each shared level by name
+s0 :: (Int, Int) -> (Int, Int)
+s0 p = (.1 p, .0 p)
+s1 :: (Int, Int) -> (Int, Int)
+s1 p = s0 (s0 p)
+s2 :: (Int, Int) -> (Int, Int)
+s2 p = s1 (s1 p)
+s3 :: (Int, Int) -> (Int, Int)
+s3 p = s2 (s2 p)
+s4 :: (Int, Int) -> (Int, Int)
+s4 p = s3 (s3 p)
+s5 :: (Int, Int) -> (Int, Int)
+s5 p = s4 (s4 p)
+s6 :: (Int, Int) -> (Int, Int)
+s6 p = s5 (s5 p)
+s7 :: (Int, Int) -> (Int, Int)
+s7 p = s6 (s6 p)
+s8 :: (Int, Int) -> (Int, Int)
+s8 p = s7 (s7 p)
+s9 :: (Int, Int) -> (Int, Int)
+s9 p = s8 (s8 p)
+s10 :: (Int, Int) -> (Int, Int)
+s10 p = s9 (s9 p)
+s11 :: (Int, Int) -> (Int, Int)
+s11 p = s10 (s10 p)
+s12 :: (Int, Int) -> (Int, Int)
+s12 p = s11 (s11 p)
+s13 :: (Int, Int) -> (Int, Int)
+s13 p = s12 (s12 p)
+s14 :: (Int, Int) -> (Int, Int)
+s14 p = s13 (s13 p)
+s15 :: (Int, Int) -> (Int, Int)
+s15 p = s14 (s14 p)
+s16 :: (Int, Int) -> (Int, Int)
+s16 p = s15 (s15 p)
+s17 :: (Int, Int) -> (Int, Int)
+s17 p = s16 (s16 p)
+s18 :: (Int, Int) -> (Int, Int)
+s18 p = s17 (s17 p)
+s19 :: (Int, Int) -> (Int, Int)
+s19 p = s18 (s18 p)
+s20 :: (Int, Int) -> (Int, Int)
+s20 p = s19 (s19 p)
+s21 :: (Int, Int) -> (Int, Int)
+s21 p = s0 (s20 p)
+
+swapLadder :: Int -> Int -> (Int, Int)
+swapLadder a b = s21 (a, b)
+
+-- a definition written as a lambda returning a lambda, with nothing between
+-- them, takes both parameters at once and is shared the same way
+u0 :: Int -> Int -> Int
+u0 a = \b -> a + b
+u1 :: Int -> Int -> Int
+u1 a = \b -> u0 a (u0 a b)
+u2 :: Int -> Int -> Int
+u2 a = \b -> u1 a (u1 a b)
+u3 :: Int -> Int -> Int
+u3 a = \b -> u2 a (u2 a b)
+u4 :: Int -> Int -> Int
+u4 a = \b -> u3 a (u3 a b)
+u5 :: Int -> Int -> Int
+u5 a = \b -> u4 a (u4 a b)
+u6 :: Int -> Int -> Int
+u6 a = \b -> u5 a (u5 a b)
+u7 :: Int -> Int -> Int
+u7 a = \b -> u6 a (u6 a b)
+u8 :: Int -> Int -> Int
+u8 a = \b -> u7 a (u7 a b)
+u9 :: Int -> Int -> Int
+u9 a = \b -> u8 a (u8 a b)
+u10 :: Int -> Int -> Int
+u10 a = \b -> u9 a (u9 a b)
+u11 :: Int -> Int -> Int
+u11 a = \b -> u10 a (u10 a b)
+u12 :: Int -> Int -> Int
+u12 a = \b -> u11 a (u11 a b)
+u13 :: Int -> Int -> Int
+u13 a = \b -> u12 a (u12 a b)
+u14 :: Int -> Int -> Int
+u14 a = \b -> u13 a (u13 a b)
+u15 :: Int -> Int -> Int
+u15 a = \b -> u14 a (u14 a b)
+u16 :: Int -> Int -> Int
+u16 a = \b -> u15 a (u15 a b)
+
+curriedLadder :: Int -> Int
+curriedLadder x = u16 1 x

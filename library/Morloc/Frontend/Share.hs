@@ -36,6 +36,7 @@ check's guard are never moved.
 -}
 module Morloc.Frontend.Share
   ( shareBindings
+  , configured
   ) where
 
 import qualified Data.Map as Map

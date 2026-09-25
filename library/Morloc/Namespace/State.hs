@@ -28,6 +28,7 @@ module Morloc.Namespace.State
   , SignatureSet (..)
   , Instance (..)
   , TermTypes (..)
+  , Specs (..)
 
     -- * Error handling
   , MorlocError (..)
@@ -234,6 +235,11 @@ data MorlocState = MorlocState
   , stateManifoldLang :: Map Int Lang
   -- ^ Map from export manifold ID to its pool language
   , stateNativeRecEntries :: Map Int Int
+  -- ^ A recursive manifold that also has a native entry point, mapped to
+  -- that entry's ID. The manifold itself is the pool's serial entry: it
+  -- takes and returns packets, which a caller in another pool needs and a
+  -- caller in the same pool pays for on every level of the recursion. A
+  -- caller in the same pool calls the native entry instead.
   -- | The index of the term a recursion token names ('CallS' target).
   -- Recursive exports keep their command name in 'stateName', so their
   -- back-edges are resolved through this map.
@@ -251,11 +257,14 @@ data MorlocState = MorlocState
   -- first stage point, the name of its stage entry, and the number of values
   -- it captures (passed before its parameters, to both entries).
   , stateRecStages :: Map EVar (Int, EVar, Int)
-  -- ^ A recursive manifold that also has a native entry point, mapped to
-  -- that entry's ID. The manifold itself is the pool's serial entry: it
-  -- takes and returns packets, which a caller in another pool needs and a
-  -- caller in the same pool pays for on every level of the recursion. A
-  -- caller in the same pool calls the native entry instead.
+  -- | The shared specializations: a definition elaborated at one type and
+  -- used at several places, as a root of its own that each use calls.
+  , stateSpecs :: Specs
+  -- | The names the uses of shared specializations call them by.
+  , stateSpecNames :: Set.Set EVar
+  -- | The copies of shared specializations the nexus calls by name, by the
+  -- index of their root.
+  , stateNamedGasts :: Map Int EVar
   , stateHostOriginClosures :: Set.Set Int
   -- ^ Manifolds that wrap a function value a HOST created (the adapter at
   -- a sourced call's result). Such a value has no identity of its own, so
@@ -359,6 +368,12 @@ data Instance = Instance
   , instanceTerms :: [TermTypes]
   }
   deriving (Show, Ord, Eq)
+
+-- | The roots of the shared specializations ('stateSpecs').
+newtype Specs = Specs [AnnoS (Indexed TypeU) Many Int]
+
+instance Show Specs where
+  show (Specs xs) = "<" <> show (length xs) <> " shared specializations>"
 
 data TermTypes = TermTypes
   { termGeneral :: Maybe EType
@@ -994,6 +1009,9 @@ instance Defaultable MorlocState where
       , stateStageEntries = Map.empty
       , stateStageContext = Map.empty
       , stateRecStages = Map.empty
+      , stateSpecs = Specs []
+      , stateSpecNames = Set.empty
+      , stateNamedGasts = Map.empty
       , stateHostOriginClosures = Set.empty
       , stateArgTypes = Map.empty
       , stateManifoldEffects = Map.empty

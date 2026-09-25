@@ -19,6 +19,7 @@ module Morloc.CodeGenerator.Realize
   , removeVarS
   ) where
 
+import Morloc.CodeGenerator.Serial (containsFunT)
 import Morloc.CodeGenerator.Value (etaParts, isValueWith)
 import Morloc.Frontend.Namespace (newIndex)
 import Morloc.Frontend.Rename (displayName)
@@ -28,6 +29,7 @@ import qualified Morloc.CodeGenerator.SystemConfig as MCS
 import Morloc.Data.Doc
 import Morloc.Data.Map (Map)
 import qualified Morloc.Data.Map as Map
+import Data.IORef (modifyIORef, newIORef, readIORef)
 import qualified Data.Set as Set
 import qualified Data.List as List
 import qualified Morloc.Data.Text as MT
@@ -43,19 +45,28 @@ realityCheck ::
     , [AnnoS (Indexed Type) One (Indexed Lang)]
     )
 realityCheck es = do
-  -- translate modules into bitrees
-  (gASTs0, rASTs0) <-
-    -- select a single instance at each node in the tree
-    mapM realize es
-      -- separate unrealized (general) ASTs (uASTs) from realized ASTs (rASTs)
+  names <- MM.gets stateSpecNames
+  let isSpec (AnnoS _ _ (VarS v _)) = Set.member v names
+      isSpec _ = False
+      (specs, roots) = List.partition isSpec es
+  -- shared specializations first, each scored once, in the order their uses
+  -- need them (a specialization's own shared references come before it)
+  (tables, finishers) <- foldM scoreSpec (Map.empty, Map.empty) specs
+  -- select a single instance at each node of each exported tree, and
+  -- separate unrealized (general) trees from realized ones
+  (gASTs0, rASTs00) <-
+    mapM (\e -> realize tables e >>= \(_, finish) -> finish Nothing) roots
       |>> partitionEithers
+  rASTs0 <- realizeDemanded finishers rASTs00
+  let takesFunction = Set.fromList [v | AnnoS (Idx _ (FunT ts _)) _ (VarS v _) <- specs, any containsFunT ts]
+  gASTs1 <- nexusDemanded finishers takesFunction gASTs0
 
   -- Extract non-exported recursive helpers into their own rASTs.
   -- This must happen before removeVarS so we can find the VarS wrappers.
   rASTs1 <- extractRecursiveHelpers rASTs0
 
   -- Now dissolve remaining (non-recursive) VarS wrappers
-  let gASTs = map removeVarS gASTs0
+  let gASTs = map removeVarS gASTs1
       rASTs = map removeVarS rASTs1
 
   -- check and configure the system
@@ -63,6 +74,109 @@ realityCheck es = do
   MCS.configure rASTs
 
   return (gASTs, rASTs)
+
+type Scored = AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])
+
+-- | Finish realizing a scored tree, with the language of the context it is
+-- used in (or none, for a root).
+type Finisher =
+  Maybe Lang ->
+  MorlocMonad (Either (AnnoS (Indexed Type) One ()) (AnnoS (Indexed Type) One (Indexed Lang)))
+
+-- | Score a shared specialization once: its table serves every use.
+scoreSpec ::
+  (Map EVar [(Lang, Score)], Map EVar Finisher) ->
+  AnnoS (Indexed Type) Many Int ->
+  MorlocMonad (Map EVar [(Lang, Score)], Map EVar Finisher)
+scoreSpec (tables, finishers) spec@(AnnoS _ _ (VarS v _)) = do
+  (AnnoS _ (Idx _ scores) _, finish) <- realize tables spec
+  return (Map.insert v scores tables, Map.insert v finish finishers)
+scoreSpec acc _ = return acc
+
+-- | Realize each shared specialization once per language its uses demand,
+-- and point each use at its copy. A use's language is the one its call was
+-- given; the copy is named by the language its root lands in, so uses that
+-- land alike share one copy. Copies are realized as their own uses are
+-- found, until none is new (the specializations form no cycle).
+realizeDemanded ::
+  Map EVar Finisher ->
+  [AnnoS (Indexed Type) One (Indexed Lang)] ->
+  MorlocMonad [AnnoS (Indexed Type) One (Indexed Lang)]
+realizeDemanded finishers trees0
+  | Map.null finishers = return trees0
+  | otherwise = do
+      (named, copies) <- loop Map.empty Map.empty [] (concatMap demands trees0)
+      return (map (renameUses named) (trees0 <> copies))
+  where
+    demands t = [(v, l) | AnnoS _ (Idx _ l) (CallS v) <- annoNodes t, Map.member v finishers]
+    loop named _ copies [] = return (named, copies)
+    loop named landed copies (d@(v, l) : ds)
+      | Map.member d named = loop named landed copies ds
+      | otherwise = case Map.lookup v finishers of
+          Nothing -> loop named landed copies ds
+          Just finish -> finish (Just l) >>= \r -> case r of
+            Left _ -> MM.throwCompilerBug $ "a shared specialization has no language:" <+> pretty v
+            Right tree@(AnnoS _ (Idx _ l') _) -> case Map.lookup (v, l') landed of
+              Just name -> loop (Map.insert d name named) landed copies ds
+              Nothing -> do
+                let name = EV (unEVar v <> "@" <> langName l')
+                    firstCopy = not (any ((== v) . fst) (Map.keys landed))
+                copy@(AnnoS (Idx gi _) _ _) <- renameRoot name <$> if firstCopy then return tree else reindexOne tree
+                MM.modify (\st -> st {stateRecursionTargets = Map.insert name gi (stateRecursionTargets st)})
+                loop (Map.insert d name named) (Map.insert (v, l') name landed) (copies <> [copy]) (ds <> demands copy)
+    renameUses named = go
+      where
+        go (AnnoS g c@(Idx _ l) (CallS v))
+          | Just name <- Map.lookup (v, l) named = AnnoS g c (CallS name)
+        go (AnnoS g c e) = AnnoS g c (mapExprS go e)
+
+-- | The calls of shared specializations in trees the nexus evaluates. The
+-- nexus calls a first-order one by name: its copy with no language joins
+-- the trees as a named function ('stateNamedGasts'). The nexus holds no
+-- function values, so one that takes a function is copied into each call
+-- instead, as a term is expanded in place.
+nexusDemanded ::
+  Map EVar Finisher ->
+  Set.Set EVar ->
+  [AnnoS (Indexed Type) One ()] ->
+  MorlocMonad [AnnoS (Indexed Type) One ()]
+nexusDemanded finishers takesFunction trees0
+  | Map.null finishers = return trees0
+  | otherwise = do
+      namedRef <- MM.liftIO (newIORef Map.empty)
+      copiesRef <- MM.liftIO (newIORef [])
+      finishedRef <- MM.liftIO (newIORef Map.empty)
+      -- each specialization is finished once; every use takes a fresh copy
+      let pure' v = do
+            finished <- MM.liftIO (readIORef finishedRef)
+            tree <- case (Map.lookup v finished, Map.lookup v finishers) of
+              (Just g, _) -> return g
+              (_, Nothing) -> MM.throwCompilerBug $ "no shared specialization" <+> pretty v
+              (_, Just finish) -> finish Nothing >>= \r -> case r of
+                Left g -> MM.liftIO (modifyIORef finishedRef (Map.insert v g)) >> return g
+                Right _ -> MM.throwCompilerBug $ "a shared specialization called by the nexus has a language:" <+> pretty v
+            reindexWith return tree
+          rewrite (AnnoS g c e) = case e of
+            CallS v
+              | Map.member v finishers ->
+                  if Set.member v takesFunction
+                    then pure' v >>= rewrite . removeVarS
+                    else do
+                      done <- MM.liftIO (readIORef namedRef)
+                      case Map.lookup v done of
+                        Just name -> return (AnnoS g c (CallS name))
+                        Nothing -> do
+                          let name = EV (unEVar v <> "@nexus")
+                          MM.liftIO (modifyIORef namedRef (Map.insert v name))
+                          -- a copy of its own: a pool may hold another
+                          copy@(AnnoS (Idx ri _) _ _) <- renameRoot name <$> (pure' v >>= rewrite)
+                          MM.modify (\st -> st {stateNamedGasts = Map.insert ri name (stateNamedGasts st)})
+                          MM.liftIO (modifyIORef copiesRef (<> [copy]))
+                          return (AnnoS g c (CallS name))
+            _ -> AnnoS g c <$> mapExprSM rewrite e
+      trees <- mapM rewrite trees0
+      copies <- MM.liftIO (readIORef copiesRef)
+      return (trees <> copies)
 
 -- | The realize objective: @(accumulated cost, number of language switches)@,
 -- compared lexicographically. Cost dominates; switch-count is a PURE tiebreaker
@@ -205,13 +319,10 @@ also need benchmarking data from all the implementations and possibly
 statistical info describing inputs.
 -}
 realize ::
+  Map EVar [(Lang, Score)] ->
   AnnoS (Indexed Type) Many Int ->
-  MorlocMonad
-    ( Either
-        (AnnoS (Indexed Type) One ())
-        (AnnoS (Indexed Type) One (Indexed Lang))
-    )
-realize s0 = do
+  MorlocMonad (Scored, Finisher)
+realize tables s0 = do
   registry <- MM.gets stateLangRegistry
   -- A term that calls nothing sourced has no language of its own and is
   -- evaluated by the nexus. That evaluator has no name to call a function
@@ -220,8 +331,9 @@ realize s0 = do
   -- offered are those the program declares concrete types for, which are
   -- the pools it can build; one of them is chosen by the ordinary scoring,
   -- so the choice follows whatever else the term touches.
+  specNames <- MM.gets stateSpecNames
   langs <-
-    if anyCallS (const True) s0
+    if anyCallS (not . (`Set.member` specNames)) s0
       then do
         scopes <- MM.gets stateUniversalConcreteTypedefs
         case unique (map (LR.poolOf registry) (Map.keys scopes)) of
@@ -234,27 +346,34 @@ realize s0 = do
                     <+> "root-py`, `root-cpp`, ...) to give the program a pool."
           ls -> return ls
       else return []
-  realizeWithRegistry registry langs s0
+  realizeWithRegistry registry tables langs s0
 
+-- | Score a tree, returning the scored tree and how to finish it: a shared
+-- specialization is scored once and finished once per language it is used in.
+-- @tables@ holds the score of each shared specialization a call may name.
 realizeWithRegistry ::
   LangRegistry ->
+  Map EVar [(Lang, Score)] ->
   [Lang] ->
   AnnoS (Indexed Type) Many Int ->
-  MorlocMonad
-    ( Either
-        (AnnoS (Indexed Type) One ())
-        (AnnoS (Indexed Type) One (Indexed Lang))
-    )
-realizeWithRegistry registry seedLangs s0 = do
+  MorlocMonad (Scored, Finisher)
+realizeWithRegistry registry tables seedLangs s0 = do
   -- Normalize language-invariant (literal-lambda-head) redexes before scoring so
   -- the scorer is not fed composition chains it would re-score exponentially.
   let sp = stagePoints s0
   s0' <- normalizePop1 (`Map.lookup` sp) s0
-  e@(AnnoS _ li _) <- scoreAnnoS emptyRState {rLangs = seedLangs} s0' >>= collapseAnnoS [] Nothing
-  case li of
-    (Idx _ Nothing) -> makeGAST e |>> Left
-    (Idx _ _) -> propagateDown e |>> Right
+  scored <- scoreAnnoS emptyRState {rLangs = seedLangs} s0'
+  return (scored, finish scored)
   where
+    finish scored ctx = do
+      e@(AnnoS g li x) <- collapseAnnoS [] ctx scored
+      case (li, ctx) of
+        -- language-free code used from a pool runs in that pool, as it
+        -- would inlined there
+        (Idx i Nothing, Just l) -> propagateDown (AnnoS g (Idx i (Just l)) x) |>> Right
+        (Idx _ Nothing, Nothing) -> makeGAST e |>> Left
+        _ -> propagateDown e |>> Right
+
     pairwiseCost :: Lang -> Lang -> Int
     pairwiseCost l1 l2
       | l1 == l2 = case Map.lookup (langName l2) (lrSameLangCosts registry) of
@@ -377,7 +496,10 @@ realizeWithRegistry registry seedLangs s0 = do
       case Map.lookup v (rLetVars rstat) of
         Just scs@(_ : _) -> return (LetBndS v, Idx i scs)
         _ -> return (LetBndS v, zipLang i rstat)
-    scoreExpr rstat (CallS v, i) = return (CallS v, zipLang i rstat)
+    scoreExpr rstat (CallS v, i) = case Map.lookup v tables of
+      -- a shared specialization costs what it costs in each language
+      Just table -> return (CallS v, Idx i table)
+      Nothing -> return (CallS v, zipLang i rstat)
     scoreExpr rstat (IfS c t e, i) = do
       c' <- scoreAnnoS rstat c
       t' <- scoreAnnoS rstat t
@@ -735,15 +857,15 @@ realizeWithRegistry registry seedLangs s0 = do
       return (AppS f' xs', Idx i lang)
     -- Propagate data
     collapseExpr heads _ l1 (e@(LstS xs), Idx i ss) = do
-      lang <- if isFunctionalData e then functionalDataLang i l1 else pickLanguage heads l1 xs ss
+      lang <- if isFunctionalData e then return l1 else pickLanguage heads l1 xs ss
       xs' <- mapM (collapseElement heads e lang) xs
       return (LstS xs', Idx i lang)
     collapseExpr heads _ l1 (e@(TupS xs), Idx i ss) = do
-      lang <- if isFunctionalData e then functionalDataLang i l1 else pickLanguage heads l1 xs ss
+      lang <- if isFunctionalData e then return l1 else pickLanguage heads l1 xs ss
       xs' <- mapM (collapseElement heads e lang) xs
       return (TupS xs', Idx i lang)
     collapseExpr heads _ l1 (e@(NamS rs), Idx i ss) = do
-      lang <- if isFunctionalData e then functionalDataLang i l1 else pickLanguage heads l1 (map snd rs) ss
+      lang <- if isFunctionalData e then return l1 else pickLanguage heads l1 (map snd rs) ss
       xs' <- mapM (collapseElement heads e lang . snd) rs
       return (NamS (zip (map fst rs) xs'), Idx i lang)
     -- collapse leaf expressions
@@ -805,15 +927,6 @@ realizeWithRegistry registry seedLangs s0 = do
     collapseElement heads container lang x
       | isFunctionalData container = collapseCarried heads lang x
       | otherwise = collapseAnnoS heads lang x
-
-    -- A structure holding function values lives in the pool that holds
-    -- it; with no pool around it (the root of a command) there is nowhere
-    -- for the function values to live.
-    functionalDataLang :: Int -> Maybe Lang -> MorlocMonad (Maybe Lang)
-    functionalDataLang _ l@(Just _) = return l
-    functionalDataLang i Nothing =
-      MM.throwSourcedError i
-        "A record, list or tuple holding function values cannot be the result of a command: a function value has no form outside a pool"
 
     collapseCarried ::
       [(EVar, Lang)] ->
@@ -1089,10 +1202,20 @@ rewritePartialCalls v stageV k stageT = go
 reindexOne ::
   AnnoS (Indexed Type) One (Indexed Lang) ->
   MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
-reindexOne (AnnoS (Idx gi t) (Idx ci l) e) = do
+reindexOne = reindexWith (\(Idx ci l) -> (`Idx` l) <$> newIndex ci)
+
+-- | A copy with fresh general indices, and concrete annotations remade by
+-- the given function.
+reindexWith :: (c -> MorlocMonad c) -> AnnoS (Indexed Type) One c -> MorlocMonad (AnnoS (Indexed Type) One c)
+reindexWith f (AnnoS (Idx gi t) c e) = do
   gi' <- newIndex gi
-  ci' <- newIndex ci
-  AnnoS (Idx gi' t) (Idx ci' l) <$> mapExprSM reindexOne e
+  c' <- f c
+  AnnoS (Idx gi' t) c' <$> mapExprSM (reindexWith f) e
+
+-- | A tree whose root term is renamed.
+renameRoot :: EVar -> AnnoS g One c -> AnnoS g One c
+renameRoot name (AnnoS g c (VarS _ x)) = AnnoS g c (VarS name x)
+renameRoot _ t = t
 
 -- | Walk an rAST, replacing every self-recursive @VarS v (One child)@ with
 -- a bare @CallS v@ back-edge and returning the extracted body separately.

@@ -82,6 +82,7 @@ module Morloc.Namespace.Expr
   , mapExprSGM
   , foldExprS
   , foldAnnoS
+  , annoNodes
 
     -- * JSON helpers
   , stripPrefixAndKebabCase
@@ -1143,6 +1144,10 @@ foldExprS _ _                 = mempty
 -- | Fold a monoid over every 'AnnoS' node in a tree (including the root).
 foldAnnoS :: (Foldable f, Monoid m) => (AnnoS g f c -> m) -> AnnoS g f c -> m
 foldAnnoS f a@(AnnoS _ _ e) = f a <> foldExprS (foldAnnoS f) e
+
+-- | Every node of a tree, root first.
+annoNodes :: Foldable f => AnnoS g f c -> [AnnoS g f c]
+annoNodes t = appEndo (foldAnnoS (\n -> Endo (n :)) t) []
 
 ----- Pretty instances -------------------------------------------------------
 
