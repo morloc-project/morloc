@@ -2282,7 +2282,7 @@ renderCliType = render . pretty . cliDisplayType
 -- to 'pretty' and never escapes this function.
 cliDisplayType :: Type -> Type
 cliDisplayType t0 = case t0 of
-  NamT NamRecord (TV "Rec") [] fields ->
+  NamT NamRecord v [] fields | v == anonRecordVar ->
     VarT (TV ("{" <> MT.intercalate ", "
                      [unKey k <> " = " <> renderCliType ft | (k, ft) <- fields]
                  <> "}"))

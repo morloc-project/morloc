@@ -68,6 +68,9 @@ module Morloc.Typecheck.Internal
 
     -- * subtyping
   , subtype
+  , expandStructuralAliases
+  , expandTransparentAliases
+  , structuralAliasesIn
   , isSubtypeOf2
   , isSubtypeOfOpen
   , recheckDeferred
@@ -101,6 +104,8 @@ module Morloc.Typecheck.Internal
   , seeType
   ) where
 
+import Data.Functor.Const (Const (..))
+import Data.Functor.Identity (Identity (..))
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -496,7 +501,7 @@ instance Applicable TypeU where
       -- FIXME: this seems problematic - do I keep the previous parameters or the new ones?
       (Just t') -> apply g t' -- reduce an existential; strictly smaller term
       Nothing -> ExistU v (map (apply g) ts, tc) (map (second (apply g)) rs, rc)
-  apply g (NamU o n ps rs) = NamU o n ps [(k, apply g t) | (k, t) <- rs]
+  apply g (NamU o n ps rs) = NamU o n (map (apply g) ps) [(k, apply g t) | (k, t) <- rs]
   apply g (EffectU effs t) = mkEffectU (applyEff g effs) (apply g t)
   apply g (OptionalU t) = OptionalU (apply g t)
   apply _ t@(NatLitU _) = t
@@ -1023,10 +1028,9 @@ asClosedRec _                    = Nothing
 
 -- | A closed anonymous record rendered in the @NamU NamRecord@ form that
 -- record construction, field accessors, and nominal @record@/@object@ types
--- all use. Mirrors the ground-level @typeOf@ bridge (LRec -> NamT NamRecord
--- "Rec").
+-- all use. Mirrors the ground-level @typeOf@ bridge (LRec -> NamT NamRecord).
 closedRecToNamU :: [(Text, TypeU)] -> TypeU
-closedRecToNamU fs = NamU NamRecord (TV "Rec") [] [(Key k, t) | (k, t) <- fs]
+closedRecToNamU fs = NamU NamRecord anonRecordVar [] [(Key k, t) | (k, t) <- fs]
 
 -- | The two forms an anonymous closed record is bridged against: a nominal
 -- record (@NamU@) or a record-key existential (@ExistU@, from construction
@@ -1173,22 +1177,16 @@ subtype scope t1@(AppU v1 vs1) t2@(AppU v2 vs2) g
   , length vs1' == length vs2' && length vs1' /= length vs1
   = zipSubtype t1 t2 scope vs1' vs2' g
   | otherwise = subtypeEvaluated scope t1 t2 g
--- subtype unordered records
-subtype scope (NamU _ v1 _ []) (NamU _ v2 _ []) g
-  -- If one of the records is generic, allow promotion
-  | v1 == BT.record || v2 == BT.record = return g
-  -- Otherwise subtype the variable names
-  | otherwise = subtype scope (VarU v1) (VarU v2) g
-subtype _ t1@(NamU _ _ _ []) t2@(NamU _ _ _ _) _ =
-  subtypeError t1 t2 "NamU - Unequal number of fields"
-subtype _ t1@(NamU _ _ _ _) t2@(NamU _ _ _ []) _ =
-  subtypeError t1 t2 "NamU - Unequal number of fields"
-subtype scope t1@(NamU o1 v1 p1 ((k1, x1) : rs1)) t2@(NamU o2 v2 p2 es2) g0 =
-  case filterApart (\(k2, _) -> k2 == k1) es2 of
-    (Nothing, _) -> subtypeError t1 t2 "NamU - Unequal fields"
-    (Just (_, x2), rs2) ->
-      subtype scope x1 x2 g0
-        >>= subtype scope (NamU o1 v1 p1 rs1) (NamU o2 v2 p2 rs2)
+-- Records are nominal: a named record is its name and its parameters, so
+-- same-fielded records are distinct and a phantom parameter is compared. The
+-- anonymous forms (the generic Record and a closed row bridged to Rec) match
+-- any record with the same fields.
+subtype scope t1@(NamU _ v1 ps1 rs1) t2@(NamU _ v2 ps2 rs2) g
+  | v1 == BT.record || v2 == BT.record, null rs1, null rs2 = return g
+  | isAnonymousRecord v1 || isAnonymousRecord v2 = subtypeFields t1 t2 scope rs1 rs2 g
+  | v1 /= v2 = subtypeError t1 t2 "Record names differ"
+  | otherwise =
+      zipSubtype t1 t2 scope ps1 ps2 g >>= subtypeFields t1 t2 scope rs1 rs2
 --  Ea not in FV(a)
 --  g1[Ea] |- A <=: Ea -| g2
 -- ----------------------------------------- <:InstantiateR
@@ -1410,11 +1408,119 @@ subtype scope t1@(OpU o1 as1) t2@(OpU o2 as2) g
   | o1 == o2 && length as1 == length as2 =
       foldM (\gAcc (a, b) -> subtype scope a b gAcc) g (zip as1 as2)
   | otherwise = subtypeError t1 t2 "Type operator mismatch"
+-- An applied alias meeting a type of another shape, such as the record it
+-- names, is compared through its expansion.
+subtype scope t1 t2@(AppU _ _) g
+  | Just t2' <- reduceAliasHead scope t2 = subtype scope t1 t2' g
+subtype scope t1@(AppU _ _) t2 g
+  | Just t1' <- reduceAliasHead scope t1 = subtype scope t1' t2 g
 -- note that these need to be evaluated AFTER all the existentials
 subtype scope t1@(VarU _) t2 g = subtypeEvaluated scope t1 t2 g
 subtype scope t1 t2@(VarU _) g = subtypeEvaluated scope t1 t2 g
 -- fall through
 subtype _ a b _ = subtypeError a b "Type mismatch fall through"
+
+-- | The name heading a type, bare or applied.
+aliasHeadName :: TypeU -> Maybe TVar
+aliasHeadName (VarU v) = Just v
+aliasHeadName (AppU (VarU v) _) = Just v
+aliasHeadName _ = Nothing
+
+-- | One reduction step of a type whose head is an alias in scope. Nothing for
+-- anything else, including a rigid variable head.
+reduceAliasHead :: Scope -> TypeU -> Maybe TypeU
+reduceAliasHead scope t = case aliasHeadName t of
+  Just v | Map.member v scope -> TE.reduceType scope t
+  _ -> Nothing
+
+-- | Reduce a type's alias head until the head is not an alias. Each step is
+-- bounded by the scope size, so mutually recursive aliases cannot spin.
+expandAliasHead :: Scope -> TypeU -> TypeU
+expandAliasHead scope = go (Map.size scope + 1)
+  where
+    go 0 t = t
+    go n t = maybe t (go (n - 1 :: Int)) (reduceAliasHead scope t)
+
+-- | Expand, at any depth, every alias that @step@ expands at a type's head.
+-- Arguments are expanded before the alias they are passed to, so only the
+-- alias's own body can meet the alias again; there it is left in place.
+expandAliasesWith :: (TypeU -> Maybe (TVar, TypeU)) -> TypeU -> TypeU
+expandAliasesWith step = go Set.empty
+  where
+    go seen t =
+      let t' = mapTypeUChildren (go seen) t
+       in case step t' of
+            Just (v, body) | not (Set.member v seen) -> go (Set.insert v seen) body
+            _ -> t'
+
+-- | Arrow, effect and optional types have no per-language form: every
+-- stage after the typechecker reads them by their shape. An alias naming one is
+-- therefore expanded wherever it occurs. Other aliases keep their names. A
+-- recursive one is left in place and 'structuralAliasesIn' reports it.
+expandStructuralAliases :: Scope -> TypeU -> TypeU
+expandStructuralAliases = expandAliasesWith . structuralAliasHead
+
+-- | Expand every transparent alias in a type, stopping at newtypes, records
+-- and primitives. A type carried out of the module that declared it keeps its
+-- meaning even where that module's aliases are not in scope.
+expandTransparentAliases :: Scope -> TypeU -> TypeU
+expandTransparentAliases scope =
+  expandAliasesWith (\t -> (,) <$> aliasHeadName t <*> TE.expandHeadOnly scope t)
+
+-- | The aliases in a type that 'expandStructuralAliases' would expand.
+structuralAliasesIn :: Scope -> TypeU -> [TVar]
+structuralAliasesIn scope t = case structuralAliasHead scope t of
+  Just (v, _) -> [v]
+  Nothing -> concatMap (structuralAliasesIn scope) (typeUChildren t)
+
+-- | The alias heading a type, and the arrow, effect or optional type it
+-- names.
+structuralAliasHead :: Scope -> TypeU -> Maybe (TVar, TypeU)
+structuralAliasHead scope t = do
+  v <- aliasHeadName t
+  case expandAliasHead scope t of
+    t'@(FunU _ _) -> Just (v, t')
+    t'@(EffectU _ _) -> Just (v, t')
+    t'@(OptionalU _) -> Just (v, t')
+    _ -> Nothing
+
+-- | Apply an action to each immediate child type. An application's head is
+-- not a child: alone it names an unapplied alias.
+traverseTypeUChildren :: Applicative f => (TypeU -> f TypeU) -> TypeU -> f TypeU
+traverseTypeUChildren f t = case t of
+  ExistU v (ps, pc) (rs, rc) ->
+    (\ps' rs' -> ExistU v (ps', pc) (rs', rc)) <$> traverse f ps <*> traverse (traverse f) rs
+  ForallU v x -> ForallU v <$> f x
+  FunU ts r -> FunU <$> traverse f ts <*> f r
+  AppU h ts -> AppU h <$> traverse f ts
+  NamU o n ps rs -> NamU o n <$> traverse f ps <*> traverse (traverse f) rs
+  EffectU es x -> EffectU es <$> f x
+  OptionalU x -> OptionalU <$> f x
+  OpU op ts -> OpU op <$> traverse f ts
+  LitU (LRec fs) -> LitU . LRec <$> traverse (traverse f) fs
+  LitU (LList es) -> LitU . LList <$> traverse f es
+  LabeledU v x -> LabeledU v <$> f x
+  _ -> pure t
+
+mapTypeUChildren :: (TypeU -> TypeU) -> TypeU -> TypeU
+mapTypeUChildren f = runIdentity . traverseTypeUChildren (Identity . f)
+
+typeUChildren :: TypeU -> [TypeU]
+typeUChildren = getConst . traverseTypeUChildren (\x -> Const [x])
+
+isAnonymousRecord :: TVar -> Bool
+isAnonymousRecord v = v == BT.record || v == anonRecordVar
+
+-- | Subtype record fields by key, in any order.
+subtypeFields :: TypeU -> TypeU -> Scope -> [(Key, TypeU)] -> [(Key, TypeU)] -> Gamma -> Either MDoc Gamma
+subtypeFields _ _ _ [] [] g = return g
+subtypeFields t1 t2 scope ((k1, x1) : rs1) es2 g =
+  case filterApart (\(k2, _) -> k2 == k1) es2 of
+    (Nothing, _) -> subtypeError t1 t2 "NamU - Unequal fields"
+    (Just (_, x2), rs2) -> do
+      g' <- subtype scope (apply g x1) (apply g x2) g
+      subtypeFields t1 t2 scope rs1 rs2 g'
+subtypeFields t1 t2 _ _ _ _ = subtypeError t1 t2 "NamU - Unequal number of fields"
 
 zipSubtype :: TypeU -> TypeU -> Scope -> [TypeU] -> [TypeU] -> Gamma -> Either MDoc Gamma
 zipSubtype _ _ _ [] [] g' = return g'
@@ -2983,7 +3089,9 @@ prettyTypeU = renderClean . cleanTypeName
     f _ (ProjectFieldU r fld) = f False r <> "." <> f False fld
     f _ (RecSingletonU k v) = "Singleton" <+> f False k <+> f False v
     f _ (LabeledU (TV n) t) = pretty n <> "@" <> f False t
-    f _ (NamU _ n [] _) = pretty n
+    f _ (NamU _ n [] rs)
+      | n == anonRecordVar = braces (hsep (punctuate "," [pretty k <+> "::" <+> f True t | (k, t) <- rs]))
+      | otherwise = pretty n
     f False t = parens (f True t)
     f _ (ExistU v (ts, _) (rs, _)) =
       tv v

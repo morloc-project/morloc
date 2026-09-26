@@ -269,7 +269,7 @@ mapTypeInExprI f = go
       return $ ExprI i (AnnE e' (f t))
     go (ExprI i (ModE m es)) = ExprI i . ModE m <$> mapM go es
     go (ExprI i (AssE v e es)) = ExprI i <$> (AssE v <$> go e <*> mapM go es)
-    go (ExprI i (IstE cls ctx ts es)) = ExprI i <$> (IstE cls ctx (map f ts) <$> mapM go es)
+    go (ExprI i (IstE cls ctx ts es)) = ExprI i <$> (IstE cls (map (mapConstraint f) ctx) (map f ts) <$> mapM go es)
     go (ExprI i (LamE vs e)) = ExprI i . LamE vs <$> go e
     go (ExprI i (AppE e es)) = ExprI i <$> (AppE <$> go e <*> mapM go es)
     go (ExprI i (LstE es)) = ExprI i . LstE <$> mapM go es

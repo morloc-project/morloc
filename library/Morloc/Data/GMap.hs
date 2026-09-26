@@ -20,6 +20,7 @@ module Morloc.Data.GMap
   , change
   , insertMany
   , insertManyWith
+  , linkMany
   , keys
   , lookup
   , mapInnerKeys
@@ -103,12 +104,14 @@ change k1 v (GMap x y) = do
   k2 <- Map.lookup k1 x
   return $ GMap x (Map.insert k2 v y)
 
+-- | Point multiple outer keys at an inner key
+linkMany :: Ord a => [a] -> b -> GMap a b c -> GMap a b c
+linkMany ks k2 (GMap m1 m2) = GMap (Map.union (Map.fromList (zip ks (repeat k2))) m1) m2
+
 -- | Insert multiple outer keys that all map to the same inner key and value
 insertMany :: (Ord a, Ord b) => [a] -> b -> c -> GMap a b c -> GMap a b c
-insertMany ks k2 x (GMap m1 m2) = GMap m1' m2'
-  where
-    m1' = Map.union (Map.fromList (zip ks (repeat k2))) m1
-    m2' = Map.insert k2 x m2
+insertMany ks k2 x g = case linkMany ks k2 g of
+  GMap m1 m2 -> GMap m1 (Map.insert k2 x m2)
 
 -- | 'insertMany' with a combining function for colliding inner keys
 insertManyWith :: (Ord a, Ord b) => (c -> c -> c) -> [a] -> b -> c -> GMap a b c -> GMap a b c

@@ -62,8 +62,8 @@ topDecl (ExprI i (IstE cls ctx ts es)) = ExprI i . IstE cls ctx ts <$> mapM topD
 topDecl e = expr Map.empty e
 
 -- | A definition's body and where-block, which see the parameters and every
--- where-binding (the block is recursive). A parameter shadows a where-binding
--- of the same name for references; the binding keeps its own name via 'env1'.
+-- where-binding (the block is recursive). No where-binding shares a
+-- parameter's name ('Desugar.checkWhereScope').
 definition :: Env -> ExprI -> [ExprI] -> MorlocMonad (ExprI, [ExprI])
 definition env e es = do
   (_, env1) <- bindAll env (uniq (concatMap declName es))

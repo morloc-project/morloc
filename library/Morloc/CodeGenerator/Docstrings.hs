@@ -227,7 +227,9 @@ resolveNestedTypesIn scope = go []
 
 -- dispatch docstring info for each argument to `processArgDoc`
 processArgDoc :: Int -> Type -> ArgDoc -> MorlocMonad CmdDocSet
-processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs retdoc) = do
+processArgDoc i (FunT ts t) (ArgDocSig cmddoc argdocs0 retdoc) = do
+  -- one doc per argument of the type: missing ones default, extras are dropped
+  let argdocs = take (length ts) (argdocs0 <> repeat defaultValue)
   (ts0, argdocs') <- zipWithM (reduceArgDoc i) ts (map ArgDocAlias argdocs) |>> unzip
   ts' <- mapM (resolveNestedTypes i) ts0
   loc <- argLocPrefix i

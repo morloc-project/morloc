@@ -118,6 +118,7 @@ module Morloc.Namespace.Type
   , WithSpec (..)
   , FoldSpec (..)
   , mangleTerminalName
+  , anonRecordVar
   , isInternalTerminalName
   , ArgDoc (..)
   , ArgDocVars (..)
@@ -135,6 +136,7 @@ module Morloc.Namespace.Type
 
     -- * Typeclasses
   , Typelike (..)
+  , uncurryU
 
     -- * kludge
   , newVariable
@@ -734,6 +736,11 @@ mangleTerminalName (EV parent) long =
     hyphenToUnder '-' = '_'
     hyphenToUnder c = c
 
+-- | The name of every anonymous closed record. It is not a legal type name,
+-- so no declared record can share it.
+anonRecordVar :: TVar
+anonRecordVar = TV "@REC"
+
 -- | Recognizes the compiler-internal name prefix produced by
 -- 'mangleTerminalName'. The nexus filters these out of the top-level
 -- command menu but keeps them dispatchable via each parent command's
@@ -892,6 +899,17 @@ instance Typelike Type where
   normalizeType (StrConcatT a b) = StrConcatT (normalizeType a) (normalizeType b)
   normalizeType t = t
 
+-- | A function type's arguments and result, spelled flat by the rule
+-- 'typeOf' applies: @a -> (b -> c)@ is @a -> b -> c@, while an effect or an
+-- empty argument list is a suspension rather than a grouping.
+uncurryU :: TypeU -> ([TypeU], TypeU)
+uncurryU (ForallU _ t) = uncurryU t
+uncurryU t@(FunU [] _) = ([], t)
+uncurryU (FunU ts r) = case uncurryU r of
+  (us@(_ : _), r') -> (ts ++ us, r')
+  _ -> (ts, r)
+uncurryU t = ([], t)
+
 instance Typelike TypeU where
   typeOf (VarU v) = VarT v
   typeOf (NatVarU _) = NatVoidT
@@ -920,7 +938,7 @@ instance Typelike TypeU where
   -- nexus IO). See plans/tables/10-rec-solver-decidability.md.
   typeOf (RecVarU _) = NatVoidT
   typeOf r@(RecExtendU _ _ _) = case groundRecFields r of
-    Just fs -> NamT NamRecord (TV "Rec") [] [(Key k, typeOf t) | (k, t) <- fs]
+    Just fs -> NamT NamRecord anonRecordVar [] [(Key k, typeOf t) | (k, t) <- fs]
     Nothing -> NatVoidT
   typeOf RecVoidU = NatVoidT
   -- List- and Set-kinded constructs are entirely phantom at the ground
@@ -953,7 +971,7 @@ instance Typelike TypeU where
   typeOf (OpU _ _) = NatVoidT  -- Rec/List/Set/cross-kind ops erase to phantom
   typeOf (LitU (LNat n)) = NatLitT n
   typeOf (LitU (LStr s)) = StrLitT s
-  typeOf (LitU (LRec fs)) = NamT NamRecord (TV "Rec") [] [(Key k, typeOf t) | (k, t) <- fs]
+  typeOf (LitU (LRec fs)) = NamT NamRecord anonRecordVar [] [(Key k, typeOf t) | (k, t) <- fs]
   typeOf (LitU (LList _)) = NatVoidT
   typeOf (LitU (LSet _)) = NatVoidT
   typeOf (LabeledU _ t) = typeOf t
@@ -1496,7 +1514,7 @@ extractKey (VoidU KindType) = TV "Type"
 extractKey (OpU op _) = opKeyTag op
 extractKey (LitU (LNat _)) = TV "Nat"
 extractKey (LitU (LStr _)) = TV "Str"
-extractKey (LitU (LRec _)) = TV "Rec"
+extractKey (LitU (LRec _)) = anonRecordVar
 extractKey (LitU (LList _)) = TV "List"
 extractKey (LitU (LSet _)) = TV "Set"
 extractKey (LabeledU _ t) = extractKey t
@@ -1511,12 +1529,12 @@ opKeyTag OpNatSub = TV "Nat"
 opKeyTag OpNatMul = TV "Nat"
 opKeyTag OpNatDiv = TV "Nat"
 opKeyTag OpStrConcat = TV "Str"
-opKeyTag OpRecExtend = TV "Rec"
-opKeyTag OpRecUnion = TV "Rec"
-opKeyTag OpRecIntersect = TV "Rec"
-opKeyTag OpRecRestrict = TV "Rec"
-opKeyTag OpRecDiffList = TV "Rec"
-opKeyTag OpRecSingleton = TV "Rec"
+opKeyTag OpRecExtend = anonRecordVar
+opKeyTag OpRecUnion = anonRecordVar
+opKeyTag OpRecIntersect = anonRecordVar
+opKeyTag OpRecRestrict = anonRecordVar
+opKeyTag OpRecDiffList = anonRecordVar
+opKeyTag OpRecSingleton = anonRecordVar
 opKeyTag OpListApp = TV "List"
 opKeyTag OpSetUnion = TV "Set"
 opKeyTag OpSetInter = TV "Set"

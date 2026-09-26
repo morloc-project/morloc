@@ -9,7 +9,6 @@ module main
   , recursiveExport
   , recursiveExportUsed
   , recursiveExportDropped
-  , lambdaShadowsWhere
   , patternInRecursiveHelper
   , shadowFromSibling
   )
@@ -88,12 +87,6 @@ recursiveExportUsed n = recursiveExport n + 1
 
 recursiveExportDropped :: Int -> Int
 recursiveExportDropped x = (\y -> x) (recursiveExport 3)
-
--- A lambda's parameter shadows a where-binding of the same name.
-lambdaShadowsWhere :: Int -> Int
-lambdaShadowsWhere = \x -> x
-  where
-    x = 1
 
 -- A name bound by a parameter pattern is visible inside a recursive where
 -- helper.

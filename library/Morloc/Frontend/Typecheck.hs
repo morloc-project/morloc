@@ -148,7 +148,21 @@ resolvePendingNumLits g0 entries = do
 typecheck ::
   [AnnoS Int ManyPoly Int] ->
   MorlocMonad [AnnoS (Indexed TypeU) Many Int]
-typecheck = mapM typecheckRoot
+typecheck = mapM (typecheckRoot >=> assertStructuralTypesExpanded)
+
+-- | Every alias of an arrow, effect or optional type is expanded where it is
+-- declared (see 'expandStructuralAliases'), and later stages read those
+-- types by their shape, so none may remain on a typed node.
+assertStructuralTypesExpanded :: AnnoS (Indexed TypeU) Many Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
+assertStructuralTypesExpanded = mapAnnoSGM check
+  where
+    check g@(Idx i t) = do
+      scope <- MM.getGeneralScope i
+      case structuralAliasesIn scope t of
+        [] -> return g
+        (v : _) -> MM.throwCompilerBugAt i $
+          "the alias" <+> squotes (pretty v)
+          <+> "of a function, effect or optional type was not expanded:" <+> pretty t
 
 -- | Check one tree on its own: its outermost 'VarS' is the definition being
 -- checked, and nothing outside the tree constrains it.

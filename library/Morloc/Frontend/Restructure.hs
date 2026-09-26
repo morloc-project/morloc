@@ -31,6 +31,9 @@ import qualified Morloc.Data.Map as Map
 import qualified Morloc.Frontend.AST as AST
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
+import Morloc.Frontend.Rename (renameLocals)
+import Morloc.Frontend.TerminalActions (synthesizeTerminalActions)
+import Morloc.Typecheck.Internal (expandStructuralAliases, structuralAliasesIn)
 
 -- | Resolve type aliases, term aliases and import/exports
 restructure ::
@@ -49,13 +52,64 @@ restructure s = do
     >>= checkMutualRecursion -- typedef cycles no `data` cuts are rejected
     >>= resolveImports -- rewrite DAG edges to map imported terms to their aliases
     >>= handleBinops -- resolve binary operators
-    >>= hoistEvals -- hoist user '!' markers into do-block binds
     >>= refineKinds -- promote VarU to NatVarU based on typedef param kinds (before self-defs are removed)
       |>> handleTypeDeclarations
-    >>= doM collectTags
     >>= doM collectTypes
     >>= (\x -> collectUniversalTypes x >> return x)
+    >>= expandStructuralTypes
+    -- unique local names, so no name placed in a synthesized body is captured
+    >>= DAG.mapNodeM renameLocals
+    -- synthesized code is hoisted and tagged with the rest
+    >>= synthesizeTerminalActions
+    >>= hoistEvals -- hoist user '!' markers into do-block binds
+    >>= doM collectTags
     >>= doM collectSources
+
+-- | Expand every alias of an arrow, effect or optional type in the declared types
+-- (signatures, class method signatures, annotations, instance heads) and in
+-- the typedef bodies of each module, using the declaring module's scope. See
+-- 'expandStructuralAliases'.
+expandStructuralTypes :: DAG MVar e ExprI -> MorlocMonad (DAG MVar e ExprI)
+expandStructuralTypes d = do
+  GMap _ scopes <- MM.gets stateGeneralTypedefs
+  let expandEntry sc (ps, body, doc, terminal, kind) =
+        (map (fmap (expandStructuralAliases sc)) ps, expandStructuralAliases sc body, doc, terminal, kind)
+  MM.modify (\st -> st {stateGeneralTypedefs =
+    GMap.mapVals (\sc -> Map.map (map (expandEntry sc)) sc) (stateGeneralTypedefs st)})
+  _ <- storeUniversalScopes
+  DAG.mapNodeWithKeyM (\m e -> expandModule (Map.findWithDefault Map.empty m scopes) e) d
+  where
+    expandModule :: Scope -> ExprI -> MorlocMonad ExprI
+    expandModule sc e = do
+      e' <- AST.mapTypeInExprI (expandStructuralAliases sc) e
+      checkExpandable sc e'
+      return (expandClassSigs sc e')
+
+    expandClassSigs :: Scope -> ExprI -> ExprI
+    expandClassSigs sc (ExprI i (ModE m es)) = ExprI i (ModE m (map (expandClassSigs sc) es))
+    expandClassSigs sc (ExprI i (ClsE (Typeclass cs cls vs sigs))) =
+      ExprI i (ClsE (Typeclass cs cls vs [Signature v l (expandEType sc et) | Signature v l et <- sigs]))
+    expandClassSigs _ e = e
+
+    expandEType :: Scope -> EType -> EType
+    expandEType sc et =
+      et { etype = expandStructuralAliases sc (etype et)
+         , econs = Set.map (AST.mapConstraint (expandStructuralAliases sc)) (econs et)
+         }
+
+    -- An alias left in an expanded typedef names an arrow, effect or optional
+    -- type through itself, which has no finite expansion.
+    checkExpandable :: Scope -> ExprI -> MorlocMonad ()
+    checkExpandable sc = AST.checkExprI $ \e -> case e of
+      ExprI i (TypE (ExprTypeE _ v _ body _ _)) ->
+        case structuralAliasesIn sc body of
+          [] -> return ()
+          (w : _) -> MM.throwSourcedError i $
+            "The type" <+> squotes (pretty v) <+> "names a function, effect or optional type"
+            <+> "through the alias" <+> squotes (pretty w)
+            <+> "within its own expansion; a function, effect or optional type alias"
+            <+> "cannot be recursive"
+      _ -> return ()
 
 doM :: (Monad m) => (a -> m ()) -> a -> m a
 doM f x = f x >> return x
@@ -1022,8 +1076,7 @@ collectTypes fullDag = do
 -}
 collectUniversalTypes :: DAG MVar a ExprI -> MorlocMonad ()
 collectUniversalTypes dag = do
-  universalGeneralScope <- getUniversalGeneralScope
-  universalConcreteScope <- getUniversalConcreteScope universalGeneralScope
+  (universalGeneralScope, universalConcreteScope) <- storeUniversalScopes
 
   -- Invariant 1: a transparent `type` alias may not carry a per-language
   -- override. A `type` alias chain must resolve to a single concrete type
@@ -1039,13 +1092,16 @@ collectUniversalTypes dag = do
   -- root's instance.
   checkInstanceOnRoot dag universalGeneralScope
 
-  s <- MM.get
-  MM.put
-    ( s
-        { stateUniversalGeneralTypedefs = universalGeneralScope
-        , stateUniversalConcreteTypedefs = universalConcreteScope
-        }
-    )
+-- | Record the universal scopes, the union of every module's scopes.
+storeUniversalScopes :: MorlocMonad (Scope, Map Lang Scope)
+storeUniversalScopes = do
+  universalGeneralScope <- getUniversalGeneralScope
+  universalConcreteScope <- getUniversalConcreteScope universalGeneralScope
+  MM.modify $ \s -> s
+    { stateUniversalGeneralTypedefs = universalGeneralScope
+    , stateUniversalConcreteTypedefs = universalConcreteScope
+    }
+  return (universalGeneralScope, universalConcreteScope)
   where
     getUniversalGeneralScope :: MorlocMonad Scope
     getUniversalGeneralScope = do

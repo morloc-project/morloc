@@ -50,6 +50,8 @@ unitTests =
   , whitespaceTests
   , infixOperatorTests
   , recordLiteralOrderTests
+  , recordIdentityTests
+  , aliasExpansionTests
   , accessorInWhereTests
   , solvedKindCheckTests
   , substituteTVarTests

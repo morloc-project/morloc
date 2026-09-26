@@ -1,6 +1,17 @@
 Unreleased
 ----------
 
+ * an alias of a function, effect or optional type works anywhere, including
+   nested in its own argument (`Scorer (Scorer Str)`), and a command whose
+   signature is spelled through one takes every argument of the type
+ * records are nominal: two records with the same fields are different
+   types, and a phantom type parameter is checked
+ * terminal actions (`--' with:`, `@with`, `@render`) work when the command's
+   type groups its arrows or uses aliases, when its parameters are bound by
+   a lambda, when the producer or handler is imported, and when the
+   `@collect` sits in a `where` binding
+ * a `where` binding may not reuse the name of a parameter bound by a lambda
+   the definition begins with
  * a definition used many times is compiled once per type and language and
    called, so programs that nest definitions deeply build in time and
    memory proportional to their source rather than exponential in depth

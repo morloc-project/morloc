@@ -11,7 +11,6 @@ all:
 	-./nexus recursiveExport 10 >> obs.txt 2>> obs.err
 	-./nexus recursiveExportUsed 10 >> obs.txt 2>> obs.err
 	-./nexus recursiveExportDropped 7 >> obs.txt 2>> obs.err
-	-./nexus lambdaShadowsWhere 5 >> obs.txt 2>> obs.err
 	-./nexus patternInRecursiveHelper '[1,2]' >> obs.txt 2>> obs.err
 	-./nexus shadowFromSibling 1 >> obs.txt 2>> obs.err
 	-morloc make -o shadow shadow.loc 2> shadow-build.err

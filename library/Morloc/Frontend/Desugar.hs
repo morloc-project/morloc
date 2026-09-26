@@ -2864,7 +2864,7 @@ etaExpandIntrinsic sp intr args = do
 -- >    body (@write 0 o)
 -- >    @close o
 --
--- Runs AFTER 'injectTerminalActions' so the synthesis can rewrite the
+-- Runs AFTER 'injectTerminalActionsWithSigs' so the synthesis can rewrite the
 -- @collect argument (the producer) per `--' with:` flag before it is
 -- expanded. Fully recursive over 'Expr' so a @collect nested inside a
 -- guarded do-block (the mosm idiom) is still reached. The @stdout element
@@ -3032,7 +3032,8 @@ desugarTopLevel (Loc sp (CSigE name sigType)) = do
   return [e]
 desugarTopLevel (Loc sp (CAssE name params body whereDecls)) = do
   params' <- mapM exprToIrrefPat params
-  checkWhereScope params' whereDecls
+  lamParams <- bodyLambdaParams body
+  checkWhereScope (params' <> lamParams) whereDecls
   captureDeclDocs (startPos sp) name
   body' <- desugarExpr body
   whereDecls' <- concatMapM desugarTopLevel whereDecls
@@ -3131,6 +3132,13 @@ buildLamWithIrrefPats sp ps body = do
     [] -> return body
     bs -> freshExprSpan sp (LetE bs body)
   freshExprSpan sp (LamE paramNames wrapped)
+
+-- | The parameters of the lambdas a definition's body begins with. They are
+-- the definition's parameters as much as those before the `=`.
+bodyLambdaParams :: Loc CstExpr -> D [Loc CstIrrefPat]
+bodyLambdaParams (Loc _ (CLamE ps b)) = (<>) <$> mapM exprToIrrefPat ps <*> bodyLambdaParams b
+bodyLambdaParams (Loc _ (CParenE b)) = bodyLambdaParams b
+bodyLambdaParams _ = return []
 
 -- Reject where-clause bindings that shadow a function parameter or
 -- duplicate a sibling where-binding. Only inspects value bindings
@@ -3512,11 +3520,8 @@ desugarProgram isImplicitMain cstNodes = do
   exprIs' <- if isImplicitMain
                then mkImplicitMain exprIs
                else return exprIs
-  -- Terminal-action synthesis (`--' with:`) and @collect expansion are
-  -- deferred to a post-parse DAG pass ('Frontend.API.finalizeCollectActions').
-  -- The synthesis must detect offset (`U64 -> ...`) and IFile handlers from
-  -- the handler's SIGNATURE, which may be imported from another module; those
-  -- signatures are not available until the whole import DAG is parsed.
+  -- Terminal-action synthesis and @collect expansion run later, in
+  -- 'Morloc.Frontend.TerminalActions'.
   return exprIs'
 
 --------------------------------------------------------------------
@@ -3530,15 +3535,13 @@ desugarProgram isImplicitMain cstNodes = do
 -- codegen handle the composed binding as an ordinary export.
 --------------------------------------------------------------------
 
--- | Synthesize `--' with:` terminal-action commands for one module. The
--- @importedSigs@ map carries term signatures visible to this module through
--- its imports (built from the full DAG post-parse); it lets offset/IFile
--- handler detection see a handler defined in another module.
+-- | Synthesize `--' with:` terminal-action commands for one module, given
+-- every term signature visible to it.
 injectTerminalActionsWithSigs :: Map.Map EVar TypeU -> ExprI -> D ExprI
-injectTerminalActionsWithSigs importedSigs (ExprI i (ModE mv body)) = do
+injectTerminalActionsWithSigs visibleSigs (ExprI i (ModE mv body)) = do
   rejectReservedMlcpPrefix body
-  recordStreamElems importedSigs body
-  body' <- expandWithBindings importedSigs body
+  recordStreamElems visibleSigs body
+  body' <- expandWithBindings visibleSigs body
   return (ExprI i (ModE mv body'))
 injectTerminalActionsWithSigs _ e = return e
 
@@ -3586,39 +3589,31 @@ rejectReservedMlcpPrefix body =
 -- still has to be able to say what it writes. Commands whose producer
 -- has no reachable signature are simply absent from the map.
 recordStreamElems :: Map.Map EVar TypeU -> [ExprI] -> D ()
-recordStreamElems importedSigs body = do
-  let localSigs = Map.fromList
-        [ (n, etype et) | ExprI _ (SigE (Signature n _ et)) <- body ]
-      sigs = Map.union localSigs importedSigs
-      found = Map.fromList
+recordStreamElems visibleSigs body = do
+  let found = Map.fromList
         [ (n, t)
         | e@(ExprI _ (AssE n _ _)) <- body
         , containsCollect e
-        , Just t <- [collectStreamType sigs e]
+        , Just t <- [collectStreamType visibleSigs e]
         ]
   State.modify $ \st ->
     st { dsStreamElems = Map.union found (dsStreamElems st) }
 
 expandWithBindings :: Map.Map EVar TypeU -> [ExprI] -> D [ExprI]
-expandWithBindings importedSigs body =
+expandWithBindings visibleSigs body =
   case collectWithSpecs body of
     [] -> return body
     specs -> do
       let plan =
             [ (parent, w, mangleTerminalName parent (wsLong w), sigExprI)
-            | (sigExprI, parent, _, ws) <- specs
+            | (sigExprI, parent, ws) <- specs
             , w <- ws
             ]
       checkMangledCollisions body plan
       -- name -> its AssE node, so the synthesis can inspect/rewrite the
-      -- parent body (needed for @collect streaming commands); and
-      -- name -> declared type, so the synthesis can detect an offset-form
-      -- handler (`U64 -> [a] -> ...`) or an IFile handler. Local signatures
-      -- shadow imported ones (a handler defined here wins over an import).
+      -- parent body (needed for @collect streaming commands)
       let assMap = Map.fromList [ (n, e) | e@(ExprI _ (AssE n _ _)) <- body ]
-          localSigMap = Map.fromList [ (n, etype et) | ExprI _ (SigE (Signature n _ et)) <- body ]
-          sigMap = Map.union localSigMap importedSigs
-      synthesized <- concat <$> mapM (emitFor assMap sigMap) specs
+      synthesized <- concat <$> mapM (emitFor assMap visibleSigs) specs
       let mangleds = [ m | (_, _, m, _) <- plan ]
       body' <- mapM (addToExport mangleds) body
       return (body' ++ synthesized)
@@ -3678,7 +3673,7 @@ firstDuplicateBy proj = go Map.empty
             Nothing -> go (Map.insert k x seen) xs
 
 
-collectWithSpecs :: [ExprI] -> [(ExprI, EVar, EType, [WithSpec])]
+collectWithSpecs :: [ExprI] -> [(ExprI, EVar, [WithSpec])]
 collectWithSpecs = foldr pick []
   where
     pick e@(ExprI _ (SigE (Signature name _ et))) rest =
@@ -3686,20 +3681,19 @@ collectWithSpecs = foldr pick []
         ArgDocSig cmdDoc _ _ ->
           case docWith cmdDoc of
             [] -> rest
-            ws -> (e, name, et, ws) : rest
+            ws -> (e, name, ws) : rest
         _ -> rest
     pick _ rest = rest
 
-emitFor :: Map.Map EVar ExprI -> Map.Map EVar TypeU -> (ExprI, EVar, EType, [WithSpec]) -> D [ExprI]
-emitFor assMap sigMap (sigExprI, parentName, parentEt, specs) = do
+emitFor :: Map.Map EVar ExprI -> Map.Map EVar TypeU -> (ExprI, EVar, [WithSpec]) -> D [ExprI]
+emitFor assMap sigMap (sigExprI, parentName, specs) = do
   sp <- posOfExprI sigExprI
-  let pt = etype parentEt
-      arity = sigArity pt
+  pt <- maybe (dfail (startPos sp) "internal: a `--' with:` parent has no visible signature") return
+          (Map.lookup parentName sigMap)
+  let arity = sigArity pt
       isEff = returnIsEffectful pt
       mAss = Map.lookup parentName assMap
-      isCollect = case mAss of
-        Just (ExprI _ (AssE _ b _)) -> containsCollect b
-        _ -> False
+      isCollect = maybe False containsCollect mAss
   mapM_ (validateWithSpec sp parentName arity isCollect) specs
   case mAss of
     Just assI | isCollect ->
@@ -3883,10 +3877,7 @@ synthStreamingBinding sp parentName assI sigMap
       --
       -- The entry emits once, like the gather, so no stream element type is
       -- recorded for it: what a caller receives is the entry's own return.
-      withParentBody $ \bodyExpr wheres -> do
-        bodyExpr' <- composeFoldIntoCollect parentParams argSrcs fs tTerm bodyExpr
-        wheres' <- mapM (composeFoldIntoCollect parentParams argSrcs fs tTerm) wheres
-        return (bodyExpr', wheres')
+      withParentBody $ \ps -> composeFoldIntoCollect ps argSrcs fs tTerm
   | stream =
       -- `@stream` : per-batch. `with`  handler `... [a] -> [b]` -> sink (handler .. c)
       --             (nexus formats `[b]`); `render` handler `... [a] -> Str` ->
@@ -3898,10 +3889,7 @@ synthStreamingBinding sp parentName assI sigMap
         -- where the handler's signature is in scope, so the entry can
         -- report what a caller receives rather than the `()` it returns.
         recordHandlerStream (mangleTerminalName parentName long)
-        withParentBody $ \bodyExpr wheres -> do
-          bodyExpr' <- composeHandlerIntoCollect render parentParams argSrcs tTerm bodyExpr
-          wheres' <- mapM (composeHandlerIntoCollect render parentParams argSrcs tTerm) wheres
-          return (bodyExpr', wheres')
+        withParentBody $ \ps -> composeHandlerIntoCollect render ps argSrcs tTerm
   | otherwise =
       -- whole-list gather-then-apply. `IFile [a] -> b` handlers get random access;
       -- `[a] -> b` handlers get a materialized list. `with` returns a typed value
@@ -3909,10 +3897,7 @@ synthStreamingBinding sp parentName assI sigMap
       -- emitted verbatim. Synthesis is identical -- only the manifest `render`
       -- flag differs.
       let useIFile = maybe False firstParamIsIFile (Map.lookup tTerm sigMap)
-      in withParentBody $ \bodyExpr wheres -> do
-          bodyExpr' <- composeWholeIntoCollect useIFile sigMap parentParams argSrcs tTerm bodyExpr
-          wheres' <- mapM (composeWholeIntoCollect useIFile sigMap parentParams argSrcs tTerm) wheres
-          return (bodyExpr', wheres')
+      in withParentBody $ \ps -> composeWholeIntoCollect useIFile sigMap ps argSrcs tTerm
   where
     -- The handler's declared return type is what reaches standard output
     -- once per batch. Absent when the handler has no reachable
@@ -3931,17 +3916,32 @@ synthStreamingBinding sp parentName assI sigMap
         peel (EffectU _ t) = peel t
         peel t = t
 
-    -- the parent's top-level positional parameters (in scope at every @collect
-    -- site in the duplicated body); `$N` references index into these.
-    parentParams = case assI of
-      ExprI _ (AssE _ (ExprI _ (LamE ps _)) _) -> ps
-      _ -> []
-    withParentBody k = case assI of
+    -- Every local binder already has a unique name ('Rename.renameLocals'), so
+    -- nothing placed at a @collect site can be captured. `$N` names the Nth
+    -- parameter of the body's leading lambdas; where-bindings see only the
+    -- outermost lambda's.
+    withParentBody rewrite = case assI of
       ExprI _ (AssE _ bodyExpr wheres) -> do
-        (bodyExpr', wheres') <- k bodyExpr wheres
-        bodyExpr'' <- pinParentArgTypes bodyExpr'
-        freshExprSpan sp (AssE (mangleTerminalName parentName long) bodyExpr'' wheres')
+        let levels = lambdaSpine bodyExpr
+            spine = concat levels
+        mapM_ (checkArgRef (length spine) (length (concat (take 1 levels))) (any containsCollect wheres)) argSrcs
+        bodyExpr' <- rewrite spine bodyExpr >>= pinParentArgTypes
+        wheres' <- mapM (rewrite spine) wheres
+        freshExprSpan sp (AssE (mangleTerminalName parentName long) bodyExpr' wheres')
       _ -> dfail (startPos sp) "internal: streaming `@with` parent is not an AssE"
+
+    checkArgRef nSpine nOuter collectInWhere (ArgPos n)
+      | n > nSpine = argRefError n $
+          "its definition binds only " <> T.pack (show nSpine)
+          <> " parameter(s); name the parameter in the definition."
+      | n > nOuter && collectInWhere = argRefError n
+          "that parameter is bound by a lambda in the body, and a where-binding that \
+          \streams cannot see it; name the parameter before the `=`."
+    checkArgRef _ _ _ _ = return ()
+
+    argRefError n reason = dfail (startPos sp) . T.unpack $
+      "formatter `--" <> long <> "` on `" <> unEVar parentName
+      <> "` references `$" <> T.pack (show n) <> "`, but " <> reason
 
     -- The synthesized command duplicates the parent body rather than calling the
     -- parent (the @collect sink must be rewritten in place), so it carries no
@@ -3953,26 +3953,26 @@ synthStreamingBinding sp parentName assI sigMap
     -- type with an inline annotation (`let p = (p :: T) in ..`), supplying the
     -- type the parent signature would have. Polymorphic arguments are left
     -- unpinned (nothing to resolve, and a rigid annotation would over-constrain).
-    pinParentArgTypes (ExprI i (LamE params inner)) = do
-      let argTys = maybe [] funArgTypesU (Map.lookup parentName sigMap)
-          pins = [(p, t) | (p, t) <- zip params argTys, isConcreteType t]
-      inner' <- foldr pin (return inner) pins
-      return (ExprI i (LamE params inner'))
+    pinParentArgTypes = pinSpine (maybe [] (fst . uncurryU) (Map.lookup parentName sigMap))
       where
+        pinSpine argTys (ExprI i (LamE params inner)) = do
+          let (here, rest) = splitAt (length params) argTys
+              pins = [(p, t) | (p, t) <- zip params here, isConcreteType t]
+          inner' <- pinSpine rest inner
+          inner'' <- foldr pin (return inner') pins
+          return (ExprI i (LamE params inner''))
+        pinSpine _ other = return other
+
         pin (p, t) mBody = do
           body <- mBody
           pRef <- freshExprSpan sp (VarE defaultValue p)
           annP <- freshExprSpan sp (AnnE pRef t)
           freshExprSpan sp (LetE [(p, annP)] body)
-    pinParentArgTypes other = return other
 
--- | The argument types of a (possibly quantified) function type, in order.
--- Flattens nested arrows so a curried @A -> B -> C@ yields @[A, B]@ whether the
--- parser produced @FunU [A,B] C@ or @FunU [A] (FunU [B] C)@.
-funArgTypesU :: TypeU -> [TypeU]
-funArgTypesU (ForallU _ t) = funArgTypesU t
-funArgTypesU (FunU args ret) = args ++ funArgTypesU ret
-funArgTypesU _ = []
+-- | The parameter lists of a definition's leading lambdas, outermost first.
+lambdaSpine :: ExprI -> [[EVar]]
+lambdaSpine (ExprI _ (LamE ps b)) = ps : lambdaSpine b
+lambdaSpine _ = []
 
 -- | True iff a type mentions no generic (lowercase) type variable, i.e. it is a
 -- fully concrete monotype that can be pinned with an inline annotation. Used by
@@ -4410,7 +4410,9 @@ buildHandlerArgs sp lamVars valueExpr = buildArgs render
 buildStreamArgs :: ExprI -> [EVar] -> Maybe EVar -> EVar -> [ArgSource] -> D [ExprI]
 buildStreamArgs ref params mOffVar valueVar = buildArgs render
   where
-    render (ArgPos n) = freshExprFrom ref (VarE defaultValue (params !! (n - 1)))
+    render (ArgPos n) = case drop (n - 1) params of
+      (p : _) -> freshExprFrom ref (VarE defaultValue p)
+      [] -> dfail (Pos 0 0 "") "internal: `$N` beyond the parent's parameters"
     render ArgValue = freshExprFrom ref (VarE defaultValue valueVar)
     render ArgOffset = case mOffVar of
       Just off -> freshExprFrom ref (VarE defaultValue off)
@@ -4428,22 +4430,15 @@ addToExport mangleds (ExprI i (ExpE (ExportMany syms groups))) = do
   return (ExprI i (ExpE (ExportMany syms' groups)))
 addToExport _ e = return e
 
--- | Return position's effect: True iff the outermost result (after
--- stripping ForallU quantifiers) is an EffectU or the function's
--- return position is EffectU.
+-- | Whether a command's result, after all of its arguments, is a suspension.
 returnIsEffectful :: TypeU -> Bool
-returnIsEffectful (ForallU _ t) = returnIsEffectful t
-returnIsEffectful (FunU _ ret) = isEffectU ret
-returnIsEffectful t = isEffectU t
+returnIsEffectful t = case snd (uncurryU t) of
+  EffectU _ _ -> True
+  _ -> False
 
-isEffectU :: TypeU -> Bool
-isEffectU (EffectU _ _) = True
-isEffectU _ = False
-
+-- | The number of arguments a command takes, however its type groups them.
 sigArity :: TypeU -> Int
-sigArity (ForallU _ t) = sigArity t
-sigArity (FunU args _) = length args
-sigArity _ = 0
+sigArity = length . fst . uncurryU
 
 --------------------------------------------------------------------
 -- Utility

@@ -24,6 +24,8 @@ module UnitTypeTests
   , whitespaceTests
   , infixOperatorTests
   , recordLiteralOrderTests
+  , recordIdentityTests
+  , aliasExpansionTests
   , accessorInWhereTests
   , solvedKindCheckTests
   , complexityRegressionTests
@@ -955,6 +957,18 @@ typeAliasTests =
           map = undefined
         f :: MyList Int -> MyList Int
         f xs = map (\x -> x) xs
+        |]
+      , expectError
+          "instance on a transparent alias of an optional type is rejected"
+          [r|
+        module main (f)
+        type Opt a = ?a
+        class Size a where
+          size :: a -> Int
+        instance Size (Opt a) where
+          size x = 1
+        f :: Int -> Int
+        f x = x
         |]
       , expectError
           "instance on transparent alias is rejected (deep chain)"
@@ -3193,6 +3207,33 @@ unitValuecheckTests =
              x = 100
              y = x + 1
       |]
+      , -- the body's lambda binds a parameter too
+        expectError
+          "where-clause binding shadows a parameter of the body's lambda"
+          [r|
+         module foo (g)
+           g :: Int -> Int -> Int
+           g x = \y -> y where
+             y = x
+      |]
+      , expectError
+          "where-clause binding shadows a parameter of a definition that is a lambda"
+          [r|
+         module foo (g)
+           g :: Int -> Int
+           g = \x -> x where
+             x = 1
+      |]
+      , -- a lambda nested in an argument binds locally, not a parameter
+        valuecheckPass
+          "where-clause binding named like a nested lambda's parameter"
+          [r|
+         module foo (g)
+           g :: Int -> Int
+           g x = h (\y -> y) where
+             y = 1
+             h f = f x
+      |]
       , -- duplicate names in a single where-clause
         expectError
           "duplicate where-clause binding"
@@ -4027,6 +4068,240 @@ recordLiteralOrderTests =
           b = { name = "Alice", years = 30 }
         |]
       ]
+
+-- | Records are nominal: a record type is its name and its parameters, phantom
+-- parameters included. An alias of a record is that record. The timeout
+-- asserts termination of the negative cases.
+recordIdentityTests :: TestTree
+recordIdentityTests =
+  localOption (mkTimeout 1000000) $ -- 1 second timeout; divergence appears as failure
+    testGroup
+      "Record identity and applied aliases"
+      [ expectError
+          "distinct records with the same fields are distinct types"
+          [r|
+          module main (f)
+          record A where
+            x :: Int
+          record B where
+            x :: Int
+          f :: A -> B
+          f a = a
+        |]
+      , expectError
+          "a literal typed at one record does not inhabit a same-fielded record"
+          [r|
+          module main (f)
+          record A where
+            x :: Int
+          record B where
+            x :: Int
+          mkA :: Int -> A
+          mkA i = {x = i}
+          f :: Int -> B
+          f i = mkA i
+        |]
+      , expectError
+          "an alias of one record does not name a same-fielded record"
+          [r|
+          module main (f)
+          record A where
+            x :: Int
+          record B where
+            x :: Int
+          type C = A
+          f :: C -> B
+          f c = c
+        |]
+      , expectError
+          "distinct parameterized records with the same fields are distinct types"
+          [r|
+          module main (f)
+          record A a where
+            x :: a
+          record B a where
+            x :: a
+          f :: A Int -> B Int
+          f a = a
+        |]
+      , expectError
+          "a phantom parameter distinguishes two instantiations of a record"
+          [r|
+          module main (f)
+          record Tag a where
+            n :: Int
+          f :: Tag Int -> Tag Str
+          f t = t
+        |]
+      , expectError
+          "a phantom parameter survives a polymorphic identity"
+          [r|
+          module main (h)
+          record Tag a where
+            n :: Int
+          mk :: Int -> Tag Str
+          mk i = {n = i}
+          retag :: Tag a -> Tag a
+          retag t = t
+          h :: Int -> Tag Int
+          h i = retag (mk i)
+        |]
+      , expectError
+          "a phantom parameter is checked between guard branches"
+          [r|
+          module main (g)
+          record Tag a where
+            n :: Int
+          c :: Tag Int
+          c = {n = 1}
+          g :: Bool -> Tag Str
+          g b ? b = {n = 2}
+            : c
+        |]
+      , expectPass
+          "an alias of a record is that record"
+          [r|
+          module main (f)
+          record A where
+            x :: Int
+          type C = A
+          f :: C -> A
+          f c = c
+        |]
+      , expectPass
+          "a literal builds a record at a new phantom parameter"
+          [r|
+          module main (f)
+          record Tag a where
+            n :: Int
+          f :: Tag Int -> Tag Str
+          f t = {n = .n t}
+        |]
+      , expectPass
+          "a polymorphic identity keeps a phantom parameter"
+          [r|
+          module main (g)
+          record Tag a where
+            n :: Int
+          mk :: Int -> Tag Str
+          mk i = {n = i}
+          retag :: Tag a -> Tag a
+          retag t = t
+          g :: Int -> Tag Str
+          g i = retag (mk i)
+        |]
+      , expectPass
+          "an effect alias names the effect type it expands to"
+          [r|
+          module main (f)
+          effect IO
+          type Act a = <IO> a
+          source Py from "m.py" ("rd")
+          rd :: Int -> <IO> Int
+          f :: Int -> Act Int
+          f i = rd i
+        |]
+      , expectPass
+          "an effect type is the effect alias that names it"
+          [r|
+          module main (f)
+          effect IO
+          type Act a = <IO> a
+          source Py from "m.py" ("rd")
+          rd :: Int -> Act Int
+          f :: Int -> <IO> Int
+          f i = rd i
+        |]
+      , expectError
+          "a record named Rec is nominal like any other"
+          [r|
+          module main (f)
+          record Rec where
+            x :: Int
+          record Other where
+            x :: Int
+          f :: Rec -> Other
+          f a = a
+        |]
+      ]
+
+-- | Aliases of arrow, effect and optional types are expanded wherever they
+-- occur. Other transparent aliases are expanded when a type leaves the module
+-- that declared them.
+aliasExpansionTests :: TestTree
+aliasExpansionTests =
+  localOption (mkTimeout 1000000) $
+    testGroup
+      "Alias expansion"
+      [ testEqual "uncurryU flattens arrows grouped into the result"
+          ([int, str], int)
+          (uncurryU (FunU [int] (FunU [str] int)))
+      , testEqual "uncurryU stops at a suspension"
+          ([int], FunU [] int)
+          (uncurryU (FunU [int] (FunU [] int)))
+      , testEqual "uncurryU stops at an optional result"
+          ([int], OptionalU (FunU [str] int))
+          (uncurryU (FunU [int] (OptionalU (FunU [str] int))))
+      , testEqual "uncurryU of a thunk has no arguments"
+          ([], FunU [] int)
+          (uncurryU (FunU [] int))
+      , testEqual "uncurryU looks through quantifiers"
+          ([var "a", var "a"], var "a")
+          (uncurryU (forallu ["a"] (FunU [var "a"] (FunU [var "a"] (var "a")))))
+      , testEqual "a function alias nested in its own argument is expanded"
+          (FunU [FunU [str] int] int)
+          (MTI.expandStructuralAliases scorerScope (arr "Scorer" [arr "Scorer" [str]]))
+      , testEqual "a function alias used twice side by side is expanded twice"
+          (tuple [FunU [str] int, FunU [int] int])
+          (MTI.expandStructuralAliases scorerScope (tuple [arr "Scorer" [str], arr "Scorer" [int]]))
+      , testEqual "a nested function alias leaves no alias behind"
+          []
+          (MTI.structuralAliasesIn scorerScope
+            (MTI.expandStructuralAliases scorerScope (arr "Scorer" [arr "Scorer" [str]])))
+      , testEqual "an alias of a record is not structural"
+          (arr "Batch" [int])
+          (MTI.expandStructuralAliases (aliasScope [("Batch", ["a"], lst (var "a"))]) (arr "Batch" [int]))
+      , testEqual "a recursive function alias is left in place"
+          [TV "F"]
+          (let sc = aliasScope [("F", [], FunU [int] (var "F"))]
+            in MTI.structuralAliasesIn sc (MTI.expandStructuralAliases sc (var "F")))
+      , testEqual "a transparent alias nested in its own argument is expanded"
+          (arr "Map" [str, arr "Map" [str, int]])
+          (MTI.expandTransparentAliases
+            (aliasScope [("Dict", ["a"], arr "Map" [str, var "a"])])
+            (arr "Dict" [arr "Dict" [int]]))
+      , assertGeneralType
+          "a signature through a function alias nested in its own argument"
+          [r|
+          module main (apply2)
+          type Scorer a = a -> Int
+          apply2 :: Scorer (Scorer Str)
+          apply2 f = f "x"
+        |]
+          (FunU [FunU [str] int] int)
+      , expectPass
+          "a typedef naming a function alias nested in its own argument"
+          [r|
+          module main (f)
+          type Scorer a = a -> Int
+          type Meta = Scorer (Scorer Str)
+          f :: Meta
+          f g = g "x"
+        |]
+      , expectError
+          "a recursive function alias is rejected"
+          [r|
+          module main (f)
+          type F = Int -> F
+          f :: F
+          f x = f
+        |]
+      ]
+  where
+    aliasScope defs = Map.fromList
+      [ (TV n, [([Left (TV p, KindType) | p <- ps], body, ArgDocAlias defaultValue, False, TypedefAlias)])
+      | (n, ps, body) <- defs ]
+    scorerScope = aliasScope [("Scorer", ["a"], FunU [var "a"] int)]
 
 {- | Tests for typechecker complexity - these would timeout with O(2^n) behavior
 All tests have a 0.1-second timeout to catch exponential blowup
@@ -5323,6 +5598,16 @@ effectEscapabilityTests =
         escapable effect Error
         effect Cap
         mixed :: <Error, Cap> Int -> <Error> Int
+        ok :: Int
+        ok = 42
+          |]
+      , exprTestBad
+          "signature: inescapable Cap spelled through an alias still propagates"
+          [r|
+        module main (ok)
+        effect Cap
+        type Capped a = <Cap> a
+        consume :: Capped Int -> Int
         ok :: Int
         ok = 42
           |]
@@ -9503,6 +9788,93 @@ withDocstringTests =
           Int
         foo x = x
           |]
+
+        -- The streaming command duplicates the parent's body with its
+        -- parameters renamed. A multi-binding `let` is sequential, so `y`
+        -- names the `let`-bound `x` (a Str), never the Int parameter.
+      , expectPass
+          "with: a let binder shadowing a parameter stays in scope for later bindings"
+          [r|
+        module main (stream)
+        effect IO
+        data Try e a = Err e | Ok a
+        mk :: Str -> [Int]
+        mk _ = [1]
+        showInts :: [Int] -> Str
+        showInts _ = "x"
+        produce :: Str -> ([Int] -> <IO> ()) -> <IO> ()
+        produce s sink = sink (mk s)
+        --' @render -p/--plain=showInts
+        stream :: Int -> <IO> ()
+        stream x =
+          let x = "s"
+              y = x
+          in @collect (produce y)
+          |]
+
+        -- The streaming command names the handler inside the duplicated body,
+        -- where a local binder of the same name must not capture it.
+      , expectPass
+          "with: a local binder named like the handler does not capture it"
+          [r|
+        module main (stream)
+        effect IO
+        data Try e a = Err e | Ok a
+        mk :: Int -> [Int]
+        mk _ = [1]
+        showInts :: [Int] -> Str
+        showInts _ = "x"
+        produce :: Int -> ([Int] -> <IO> ()) -> <IO> ()
+        produce n sink = sink (mk n)
+        --' @render -p/--plain=showInts
+        stream :: Int -> <IO> ()
+        stream n = let showInts = 5 in @collect (produce showInts)
+          |]
+
+        -- A command streams when a @collect is reachable from its definition,
+        -- including from a where-binding.
+      , expectPass
+          "with: a command streaming from a where-binding"
+          [r|
+        module main (stream)
+        effect IO
+        data Try e a = Err e | Ok a
+        mk :: Int -> [Int]
+        mk _ = [1]
+        render2 :: Int -> [Int] -> Str
+        render2 _ _ = "x"
+        produce :: Int -> ([Int] -> <IO> ()) -> <IO> ()
+        produce n sink = sink (mk n)
+        --' @render -r/--text=render2($1)
+        stream :: Int -> Int -> <IO> ()
+        stream x y = go
+          where
+            go = @collect (produce x)
+          |]
+
+        -- A where-binding sees only the definition's own parameters, so a
+        -- `$N` naming a parameter bound by a lambda in the body cannot reach
+        -- a @collect inside a where-binding.
+      , testCase "with: `$N` naming a body lambda's parameter from a where-binding" $ do
+          result <- runFront [r|
+        module main (stream)
+        effect IO
+        data Try e a = Err e | Ok a
+        mk :: Int -> [Int]
+        mk _ = [1]
+        render2 :: Int -> [Int] -> Str
+        render2 _ _ = "x"
+        produce :: Int -> ([Int] -> <IO> ()) -> <IO> ()
+        produce n sink = sink (mk n)
+        --' @render -r/--text=render2($2)
+        stream :: Int -> Int -> <IO> ()
+        stream x = \y -> go
+          where
+            go = @collect (produce x)
+          |]
+          case result of
+            Right _ -> assertFailure "Expected failure"
+            Left e -> assertBool (show e) ("`$2`" `MT.isInfixOf` MT.pack (show e))
       ]
 
 -- Sum types: declaration syntax, constructor scoping, and typechecking.
