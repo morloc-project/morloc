@@ -71,9 +71,7 @@ specialize checks exports = do
 
 specializeExport :: Spec -> (Int, EVar) -> MorlocMonad Typed
 specializeExport spec (gi, v) = do
-  let only = Map.keysSet (specDefs spec)
-  typed <- collectRoot (Just only) (gi, v) >>= typecheckRoot
-  ground <- all (isGround . snd) <$> references spec typed
+  (ground, typed) <- collectElaborable spec typecheckRoot (gi, v)
   k0m <- termOf gi
   if ground
     then case (k0m, typed) of
@@ -93,7 +91,39 @@ specializeExport spec (gi, v) = do
       _ -> do
         backs <- liftIO (newIORef Set.empty)
         splice spec backs [] typed
-    else collectRoot Nothing (gi, v) >>= typecheckRoot
+    else return typed
+
+-- | Collect a tree and check it, expanding in place any term whose reference
+-- cannot be elaborated on its own, and leaving the rest to be shared. The
+-- 'Bool' says whether every remaining reference can be elaborated, so the
+-- caller knows whether the tree is ready to splice.
+--
+-- One such reference used to cost the whole tree its sharing. It need not:
+-- a definition whose element type nothing determines is expanded where it is
+-- used, and a deep chain beside it is still shared.
+--
+-- Each pass expands at least one more term than the last, so this ends after
+-- at most as many passes as there are terms to share; in practice the first
+-- answers. A reference that is not a term this pass can expand -- a class
+-- method, whose instances are held back whenever anything is -- leaves the
+-- set unchanged, and the last pass expands everything, as before.
+collectElaborable
+  :: Spec
+  -> (AnnoS Int ManyPoly Int -> MorlocMonad Typed)
+  -> (Int, EVar)
+  -> MorlocMonad (Bool, Typed)
+collectElaborable spec check root = go (Map.keysSet (specDefs spec))
+  where
+    go only = do
+      typed <- collectRoot (Just only) root >>= check
+      stuck <- map fst . filter (not . isElaborable . snd) <$> references spec typed
+      let only' = Set.difference only (Set.fromList stuck)
+      if null stuck
+        then return (True, typed)
+        else
+          if Set.size only' < Set.size only
+            then go only'
+            else (,) False <$> (collectRoot Nothing root >>= check)
 
 -- | The references to checked definitions in a tree, with the type each is
 -- solved at.
@@ -126,31 +156,44 @@ refTerm spec (AnnoS _ ci (VarS _ (Many []))) = do
 refTerm _ _ = return Nothing
 
 -- | A type a definition can be elaborated at on its own: no unsolved
--- existential, and no free kind or effect variable. A signature's kind and
--- effect variables are not rigid when it is checked, so a body may fix one;
--- only the use's own context would then see it.
-isGround :: TypeU -> Bool
-isGround t = case t of
-  ExistU {} -> False
-  KVarU _ -> False
-  ListVarU _ -> False
-  SetVarU _ -> False
-  VarU _ -> True
-  ForallU _ x -> isGround x
-  FunU ts x -> all isGround (x : ts)
-  AppU x ts -> all isGround (x : ts)
-  NamU _ _ ps rs -> all isGround ps && all (isGround . snd) rs
-  EffectU es x -> closedEffects es && isGround x
-  OptionalU x -> isGround x
-  OpU _ ts -> all isGround ts
-  LitU l -> case l of
-    LList ts -> all isGround ts
-    LSet ts -> all isGround ts
-    LRec rs -> all (isGround . snd) rs
-    _ -> True
-  LabeledU _ x -> isGround x
-  _ -> True
+-- existential, and no free effect variable.
+--
+-- A free kind variable is allowed, and a free 'ExistU' is not, because of
+-- what each one means downstream. A kind variable stands for a row count, a
+-- column set or a label that the program never determines; every one of them
+-- erases to the same thing before code generation ('typeOf'), and no pass
+-- after this one can solve it, so two uses that both leave it open compile
+-- identically and may share one elaboration. A use that does determine it
+-- has a key with the value in it and gets an elaboration of its own. An
+-- 'ExistU' is different: it is a variable the checker still intends to
+-- solve, and its solution is the enclosing gamma's to give.
+--
+-- An effect variable is excluded because a signature's effect variables are
+-- rigid when it is checked ('Morloc.Frontend.Typecheck.validate'), but the
+-- row a use supplies is part of what the use computes.
+isElaborable :: TypeU -> Bool
+isElaborable = go
   where
+    go t = case t of
+      ExistU {} -> False
+      KVarU _ -> True
+      ListVarU _ -> True
+      SetVarU _ -> True
+      VarU _ -> True
+      ForallU _ x -> go x
+      FunU ts x -> all go (x : ts)
+      AppU x ts -> all go (x : ts)
+      NamU _ _ ps rs -> all go ps && all (go . snd) rs
+      EffectU es x -> closedEffects es && go x
+      OptionalU x -> go x
+      OpU _ ts -> all go ts
+      LitU l -> case l of
+        LList ts -> all go ts
+        LSet ts -> all go ts
+        LRec rs -> all (go . snd) rs
+        _ -> True
+      LabeledU _ x -> go x
+      _ -> True
     closedEffects (EffectSet _) = True
     closedEffects (EffectVar _) = False
     closedEffects (EffectUnion a b) = closedEffects a && closedEffects b
@@ -158,7 +201,10 @@ isGround t = case t of
 -- | The variables the checker generated in a type, in order of appearance.
 generatedVars :: TypeU -> [TVar]
 generatedVars t = case t of
-  VarU (TV v) | T.any (== '@') v -> [TV v]
+  VarU v | invented v -> [v]
+  KVarU (v, _) | invented v -> [v]
+  ListVarU v | invented v -> [v]
+  SetVarU v | invented v -> [v]
   ForallU _ x -> generatedVars x
   FunU ts x -> concatMap generatedVars ts <> generatedVars x
   AppU x ts -> generatedVars x <> concatMap generatedVars ts
@@ -166,7 +212,33 @@ generatedVars t = case t of
   EffectU _ x -> generatedVars x
   OptionalU x -> generatedVars x
   OpU _ ts -> concatMap generatedVars ts
+  LitU l -> case l of
+    LList ts -> concatMap generatedVars ts
+    LSet ts -> concatMap generatedVars ts
+    LRec rs -> concatMap (generatedVars . snd) rs
+    _ -> []
+  LabeledU _ x -> generatedVars x
   _ -> []
+  where
+    invented (TV v) = T.any (== '@') v
+
+-- | The Type-kinded variables the checker generated in a type.
+--
+-- A kind-tagged variable is not one of these. The reason is not that it
+-- erases small: it is that a Type variable is a wildcard in implementation
+-- selection and a kind variable is not. An unsolved Type variable reaches
+-- 'Morloc.CodeGenerator.Realize' as @UnkT@, which matches any candidate, so
+-- which implementation a use gets can depend on the use. A free Nat reaches
+-- it as @NatVoidT@, compatible only with a Nat literal, and a free row as a
+-- phantom; neither can steer the choice. So a root shared under a kind
+-- variable means the same thing at every use, and one shared under an
+-- invented Type variable need not.
+--
+-- 'Morloc.Typecheck.Internal.renameWithMap' writes the kind into the name it
+-- invents -- @\@q@ for a Type variable, @\@n@, @\@s@, @\@r@, @\@l@,
+-- @\@e@ for the others -- so the tag answers this exactly.
+generatedTypeVars :: TypeU -> [TVar]
+generatedTypeVars t = [v | v@(TV n) <- generatedVars t, "@q" `T.isInfixOf` n]
 
 -- | A key's type with the variables the checker generated renamed by order
 -- of appearance, so equal instantiations compare equal.
@@ -177,6 +249,13 @@ canonical t0 = rename t0
     table = Map.fromList (zip generated [TV ("v@" <> T.pack (show k)) | k <- [(0 :: Int) ..]])
     rename t = case t of
       VarU v | Just v' <- Map.lookup v table -> VarU v'
+      KVarU (v, k) | Just v' <- Map.lookup v table -> KVarU (v', k)
+      ListVarU v | Just v' <- Map.lookup v table -> ListVarU v'
+      SetVarU v | Just v' <- Map.lookup v table -> SetVarU v'
+      -- The binder is deliberately not renamed. Renaming it would make two
+      -- instantiations of one quantified type into a single key, and a second
+      -- use of an unresolved class method would then reuse the first's
+      -- elaboration instead of being reported as ambiguous.
       ForallU v x -> ForallU v (rename x)
       FunU ts x -> FunU (map rename ts) (rename x)
       AppU x ts -> AppU (rename x) (map rename ts)
@@ -184,6 +263,10 @@ canonical t0 = rename t0
       EffectU es x -> EffectU es (rename x)
       OptionalU x -> OptionalU (rename x)
       OpU o ts -> OpU o (map rename ts)
+      LitU (LList ts) -> LitU (LList (map rename ts))
+      LitU (LSet ts) -> LitU (LSet (map rename ts))
+      LitU (LRec rs) -> LitU (LRec [(k, rename x) | (k, x) <- rs])
+      LabeledU v x -> LabeledU v (rename x)
       _ -> t
 
 -- | The term @k@ checked at type @t@, once per key. A definition is
@@ -199,18 +282,40 @@ elaborate spec target use key@(k, t) = do
         Definition -> case Map.lookup k (specDefs spec) of
           Just x -> return x
           Nothing -> MM.throwCompilerBug $ "specialize: no definition for term" <+> pretty k
-      let only = Map.keysSet (specDefs spec)
-          -- checked as a use at the key is: a definition against its
-          -- signature, a method by resolving its instances
-          check = typecheckRootAt t
-      typed <- collectRoot (Just only) root >>= check
-      ground <- all (isGround . snd) <$> references spec typed
-      e <-
-        if ground
-          then return typed
-          else collectRoot Nothing root >>= check
+      -- checked as a use at the key is: a definition against its signature,
+      -- a method by resolving its instances
+      let check = typecheckRootAt t
+      e <- snd <$> collectElaborable spec check root
+      -- A body may determine a kind-tagged slot that the key it is filed
+      -- under leaves open: a signature's kind variables are not rigid when it
+      -- is checked, so @q :: Int -> Table m r@ whose body has type
+      -- @Int -> Table n {x = Int}@ is accepted. Copied into the use it was
+      -- checked for, that is what the use asked for. Lifted into a root every
+      -- use of the key calls, the root's boundary would be built from the open
+      -- key and its interior from the fixed form, and the two would disagree.
+      -- Keep such a key out of the shared roots.
+      when (pinsKey key e) $
+        liftIO (modifyIORef' (specInlined spec) (Set.insert key))
       liftIO (modifyIORef' (specMemo spec) (Map.insert key e))
       return e
+
+-- | Whether an elaboration means something narrower than the key it was
+-- checked at. The check runs over the elaboration's own root type because
+-- 'Morloc.Frontend.Typecheck.typecheckRootAt' applies the final substitution
+-- to every annotation before returning, so a slot the body fixed is fixed
+-- there too. A slot solved to another variable is not narrower: both sides
+-- canonicalise to the same name.
+--
+-- This is also what keeps sharing independent of how much the typechecker
+-- writes back. 'Morloc.Typecheck.Internal.recheckDeferred' currently drops
+-- the substitutions it computes, so a slot determined only by a deferred
+-- constraint reaches here open. Either the elaboration shows the value, and
+-- the key is not shared, or the program really does leave it open. Teaching
+-- the recheck to write its solutions back would move such a key from the
+-- first case to a ground key of its own, and neither outcome shares an
+-- elaboration across two different values.
+pinsKey :: SpecKey -> Typed -> Bool
+pinsKey (_, t) (AnnoS (Idx _ t') _ _) = canonical t' /= t
 
 -- | Replace each reference by a copy of its elaboration. @stack@ holds the
 -- references being spliced around this point; @backs@ collects the terms a
@@ -328,8 +433,8 @@ shareable key t alts = do
     not (null (drop shareSize ns))
       && not (null params)
       && not (isSuspension result)
-      && isGround key
-      && null (generatedVars key)
+      && isElaborable key
+      && null (generatedTypeVars key)
       && all (takesAll (length params)) defined
       && not (any (readsConstant idmap sigmap) ns)
       && not (any (\(AnnoS _ _ x) -> recurses names inner x) ns)

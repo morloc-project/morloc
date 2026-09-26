@@ -1,0 +1,29 @@
+module nsw11 (top)
+
+top :: Int -> Int
+top n = q11 n
+  where
+    q0 :: Int -> Int
+    q0 x = x
+    q1 :: Int -> Int
+    q1 x = q0 x
+    q2 :: Int -> Int
+    q2 x = q1 x
+    q3 :: Int -> Int
+    q3 x = q2 x
+    q4 :: Int -> Int
+    q4 x = q3 x
+    q5 :: Int -> Int
+    q5 x = q4 x
+    q6 :: Int -> Int
+    q6 x = q5 x
+    q7 :: Int -> Int
+    q7 x = q6 x
+    q8 :: Int -> Int
+    q8 x = q7 x
+    q9 :: Int -> Int
+    q9 x = q8 x
+    q10 :: Int -> Int
+    q10 x = q9 x
+    q11 :: Int -> Int
+    q11 x = q10 x

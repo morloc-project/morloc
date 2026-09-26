@@ -2620,6 +2620,22 @@ checkE i g0 (AppS f xs) t = do
   (g1, funType0, funExpr0) <- synthG g0 f
   let g1' = resolveNatLabels f funType0 xs g1
       (g2, funType1) = stripForallU g1' (normalizeType funType0)
+      -- The head is synthesised above. Every path out of this rule other
+      -- than the one below still needs the application's own type, so
+      -- finish from the head already in hand instead of synthesising the
+      -- application from the start, which would synthesise the head a
+      -- second time. A head that is itself a definition carries that
+      -- definition's whole body, so the duplication compounds once per
+      -- level of nesting.
+      --
+      -- An application to no arguments has a synthesis rule of its own
+      -- that does not go through 'etaExpandSynthE', so it is left to the
+      -- fallback.
+      finish
+        | null xs = checkEFallback i g0 (AppS f xs) t
+        | otherwise = do
+            (g', a, e') <- etaExpandSynthE i g1' funType0 funExpr0 f xs
+            reconcileSynth i g' a e' t
   case funType1 of
     FunU paramTypes returnType
       | length xs == length paramTypes
@@ -2641,10 +2657,10 @@ checkE i g0 (AppS f xs) t = do
               -- pinnings back to the expected type.
               case subtype scope (apply g4 returnType) (apply g4 t) g4 of
                 Right g5 -> return (g5, apply g5 t, AppS funExpr0 xsAnn)
-                Left _ -> checkEFallback i g0 (AppS f xs) t
-            Left _ -> checkEFallback i g0 (AppS f xs) t
-      | otherwise -> checkEFallback i g0 (AppS f xs) t
-    _ -> checkEFallback i g0 (AppS f xs) t
+                Left _ -> finish
+            Left _ -> finish
+      | otherwise -> finish
+    _ -> finish
   where
     isBareExistU (ExistU _ _ _) = True
     isBareExistU _ = False

@@ -1,0 +1,34 @@
+module main (openTwice, pinnedTwice, crossed)
+import root
+import root-py
+import table-py
+
+source Py from "impl.py" ("mkOpen", "mkPinned", "step")
+
+-- Two signatures over one implementation: one that claims nothing about the
+-- columns, one that names them.
+mkOpen :: Int -> Table n r
+mkPinned :: Int -> Table n {x = Int, y = Str}
+step :: Table n r -> Table n r
+
+-- Nothing here determines the row, so every reference is solved at the same
+-- open row and one elaboration serves them all.
+openN :: Int -> Table m r
+openN k = step (step (step (step (step (step (step (step (step (step (step (step (step (step (step (step (step (step (step (step (mkOpen k))))))))))))))))))))
+
+openTwice :: Int -> Int
+openTwice k = nrow (openN k) + ncol (openN k)
+
+-- The signature leaves the row open but the body determines it. The
+-- elaboration means something narrower than the key, so it belongs at the
+-- use rather than in a root every use of the key calls.
+pinnedN :: Int -> Table m r
+pinnedN k = step (step (step (step (step (step (step (step (step (step (step (step (step (step (step (step (step (step (step (step (mkPinned k))))))))))))))))))))
+
+pinnedTwice :: Int -> Int
+pinnedTwice k = nrow (pinnedN k) + ncol (pinnedN k)
+
+-- An open row at a serialization boundary: the declared columns are a lower
+-- bound, so the value carries its own.
+crossed :: Int -> Table m r
+crossed k = openN k
