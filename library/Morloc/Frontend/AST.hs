@@ -28,6 +28,8 @@ module Morloc.Frontend.AST
   , getIndices
   , mapTypeInExprI
   , mapConstraint
+  , exprIChildren
+  , mapExprIChildrenM
   ) where
 
 import qualified Data.Set as Set
@@ -189,6 +191,44 @@ checkExprI f e@(ExprI _ (EvalE e')) = f e >> checkExprI f e'
 checkExprI f e@(ExprI _ (IntrinsicE _ es)) = f e >> mapM_ (checkExprI f) es
 checkExprI f e@(ExprI _ (ParenE e')) = f e >> checkExprI f e'
 checkExprI f e = f e
+
+-- | The expressions directly under an expression (declarations excluded).
+exprIChildren :: Expr -> [ExprI]
+exprIChildren e = case e of
+  AnnE x _ -> [x]
+  LamE _ x -> [x]
+  AppE f xs -> f : xs
+  LstE xs -> xs
+  TupE xs -> xs
+  NamE rs -> map snd rs
+  BopE a _ _ b -> [a, b]
+  LetE bs body -> map snd bs <> [body]
+  IfE c t el -> [c, t, el]
+  DoBlockE x -> [x]
+  EvalE x -> [x]
+  IntrinsicE _ xs -> xs
+  ConE _ _ _ xs -> xs
+  ParenE x -> [x]
+  _ -> []
+
+-- | Rebuild an expression with each direct sub-expression mapped.
+mapExprIChildrenM :: (Monad m) => (ExprI -> m ExprI) -> Expr -> m Expr
+mapExprIChildrenM f e = case e of
+  AnnE x t -> (`AnnE` t) <$> f x
+  LamE vs x -> LamE vs <$> f x
+  AppE g xs -> AppE <$> f g <*> mapM f xs
+  LstE xs -> LstE <$> mapM f xs
+  TupE xs -> TupE <$> mapM f xs
+  NamE rs -> NamE <$> mapM (\(k, x) -> (,) k <$> f x) rs
+  BopE a i v b -> (\a' b' -> BopE a' i v b') <$> f a <*> f b
+  LetE bs body -> LetE <$> mapM (\(v, x) -> (,) v <$> f x) bs <*> f body
+  IfE c t el -> IfE <$> f c <*> f t <*> f el
+  DoBlockE x -> DoBlockE <$> f x
+  EvalE x -> EvalE <$> f x
+  IntrinsicE intr xs -> IntrinsicE intr <$> mapM f xs
+  ConE t n k xs -> ConE t n k <$> mapM f xs
+  ParenE x -> ParenE <$> f x
+  _ -> return e
 
 -- | Find the largest index used in an 'ExprI' tree.
 maxIndex :: ExprI -> Int

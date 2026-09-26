@@ -1,0 +1,44 @@
+-- The shapes a value only C++ can hold (Opts) takes when it is computed by a
+-- language-free operation, bound by name, and used inside a function
+-- evaluated in Python: projected by a getter, carried in a tuple or a list,
+-- chosen by a conditional, shown as text, or passed through a generic Python
+-- function. Each is computed where it can exist.
+module shapes (getter, tuple, listed, conditional, shown, generic)
+
+import root-cpp
+
+record Opts where
+  n :: Int
+record Cpp => Opts = "Opts"
+source Cpp from "opts.hpp" ("nOf")
+nOf :: Opts -> Int
+
+base :: Opts
+base = { n = 2 }
+
+type Py => Int = "int"
+type Py => Str = "str"
+type Py => Tuple2 a b = "tuple" a b
+type Py => List a = "list" a
+source Py from "pyhof.py" ("py_apply" as pyApply, "py_id" as pyId, "py_show_len" as pyLen)
+pyApply :: (Int -> Int) -> Int -> Int
+pyId :: a -> a
+pyLen :: Str -> Int
+
+getter :: Int -> Int
+getter k = let o = .(.n = k) base in pyApply (\r -> r + .n o) k
+
+tuple :: Int -> Int
+tuple k = let p = (.(.n = k) base, k) in pyApply (\r -> r + nOf (.0 p)) k
+
+listed :: Int -> Int
+listed k = let os = [.(.n = k) base, base] in pyApply (\r -> r + nOf (.[0] os)) k
+
+conditional :: Int -> Int
+conditional k = let o = ? k > 3 = .(.n = k) base : base in pyApply (\r -> r + nOf o) k
+
+shown :: Int -> Int
+shown k = let o = .(.n = k) base in pyApply (\r -> r + pyLen (@show o)) k
+
+generic :: Int -> Int
+generic k = nOf (pyId (.(.n = k) base))

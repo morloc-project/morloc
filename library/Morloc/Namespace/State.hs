@@ -247,6 +247,13 @@ data MorlocState = MorlocState
   -- | The term that owns each where-bound term (both by term identity, the
   -- inner key of 'stateSignatures').
   , stateWhereOwner :: Map Int Int
+  -- | The constant each expression is a copy of, by index
+  -- ('Restructure.markConstants'): copies of one constant are bound once per
+  -- command ('Share').
+  , stateConstantOrigin :: Map Int Int
+  -- | Answers of 'Infer.canHoldType', by (records must be declared, language,
+  -- index, type).
+  , stateHoldCache :: Map (Bool, Text, Int, Type) Bool
   -- | Each staged closure value (by the index of its flat entry): its first
   -- stage point and the index of its stage entry.
   , stateStageEntries :: Map Int (Int, Int)
@@ -1006,6 +1013,8 @@ instance Defaultable MorlocState where
       , stateNativeRecEntries = Map.empty
       , stateRecursionTargets = Map.empty
       , stateWhereOwner = Map.empty
+      , stateConstantOrigin = Map.empty
+      , stateHoldCache = Map.empty
       , stateStageEntries = Map.empty
       , stateStageContext = Map.empty
       , stateRecStages = Map.empty

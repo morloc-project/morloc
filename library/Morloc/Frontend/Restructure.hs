@@ -62,8 +62,114 @@ restructure s = do
     -- synthesized code is hoisted and tagged with the rest
     >>= synthesizeTerminalActions
     >>= hoistEvals -- hoist user '!' markers into do-block binds
+    >>= DAG.mapNodeM markConstants
     >>= doM collectTags
     >>= doM collectSources
+
+-- | Mark each constant a definition computes: a value that reads no
+-- parameter and no other local value -- the right-hand side of a @let@ or of
+-- a parameterless @where@ binding, the argument a lambda is applied to, or a
+-- computation in the body of a definition that is not a function, outside any
+-- lambda. A constant is evaluated once per command, however many times, or
+-- however recursively, the function around it is called. The mark is the
+-- node's own index ('stateConstantOrigin'); every copy made of the node keeps
+-- it, and 'Morloc.Frontend.Share' binds the copies of one mark once per
+-- command. Nothing moves here: each copy is typed where it is used.
+--
+-- Not marked: a value (evaluating it computes nothing), anything that
+-- performs an effect or sits in a do-block (evaluation order is fixed there),
+-- a lambda, a @let@ or argument nothing reads (it is evaluated where it is
+-- written), and a @where@ binding with its own @where@ block.
+markConstants :: ExprI -> MorlocMonad ExprI
+markConstants e0@(ExprI _ (ModE _ es)) = do
+  mapM_ topLevel es
+  return e0
+  where
+    topLevel (ExprI _ (AssE _ e ws)) = do
+      definition Set.empty e ws
+      -- a definition that is not a lambda is evaluated once per command, so
+      -- what its body computes outside any lambda is a constant already
+      let whereNames = Set.fromList [w | ExprI _ (AssE w _ _) <- ws]
+      if isLambda e then return () else outer whereNames True e
+    topLevel _ = return ()
+
+    mark :: ExprI -> MorlocMonad ()
+    mark (ExprI k _) = MM.modify (\st -> st {stateConstantOrigin = Map.insert k k (stateConstantOrigin st)})
+
+    constant locals x = computes x && not (isLambda x) && not (effectful x) && Set.null (freeLocals locals x)
+
+    -- the body and where-block of a definition, whose parameters and
+    -- where-bound names are in scope for each other
+    definition locals e ws = do
+      let params = case e of
+            ExprI _ (LamE vs _) -> vs
+            _ -> []
+          names = [v | ExprI _ (AssE v _ _) <- ws]
+          scope = Set.union locals (Set.fromList (params <> names))
+      expr scope e
+      mapM_ (\w -> case w of
+        ExprI _ (AssE _ rhs [])
+          | constant scope rhs -> mark rhs >> expr scope rhs
+        ExprI _ (AssE _ rhs ws2) -> definition scope rhs ws2
+        _ -> return ()) ws
+
+    expr locals (ExprI _ e) = case e of
+      AppE (ExprI _ (LamE vs body)) args -> do
+        mapM_ (\(v, a) -> do
+                 if constant locals a && Set.member v (referenced body) then mark a else return ()
+                 expr locals a)
+          (zip vs args)
+        expr (Set.union locals (Set.fromList vs)) body
+      LamE vs body -> expr (Set.union locals (Set.fromList vs)) body
+      LetE binds body -> letChain locals binds body
+      -- evaluation order in a do-block is fixed: nothing in it is marked
+      DoBlockE _ -> return ()
+      _ -> mapM_ (expr locals) (AST.exprIChildren e)
+
+    letChain locals [] body = expr locals body
+    letChain locals ((v, rhs) : rest) body = do
+      if constant locals rhs && Set.member v (referenced (ExprI 0 (LetE rest body)))
+        then mark rhs
+        else return ()
+      expr locals rhs
+      letChain (Set.insert v locals) rest body
+
+    -- the part of a constant's body outside every lambda
+    outer locals isBody x@(ExprI _ e)
+      | not isBody && constant locals x = mark x >> expr locals x
+      | otherwise = case e of
+          AppE f args -> mapM_ (outer locals False) (f : args)
+          IfE c t el -> mapM_ (outer locals False) [c, t, el]
+          AnnE y _ -> outer locals isBody y
+          _ -> expr locals x
+
+    -- a computation calls a term
+    computes (ExprI _ e) = case e of
+      AppE (ExprI _ (VarE _ _)) _ -> True
+      _ -> any computes (AST.exprIChildren e)
+
+    isLambda (ExprI _ (LamE _ _)) = True
+    isLambda (ExprI _ (AnnE x _)) = isLambda x
+    isLambda _ = False
+
+    effectful (ExprI _ e) = case e of
+      DoBlockE _ -> True
+      EvalE _ -> True
+      _ -> any effectful (AST.exprIChildren e)
+
+    -- local names a tree reads that it does not bind itself
+    freeLocals locals (ExprI _ e) = case e of
+      VarE _ v | Set.member v locals -> Set.singleton v
+      LamE vs body -> freeLocals (locals `Set.difference` Set.fromList vs) body
+      LetE binds body ->
+        let bound = Set.fromList (map fst binds)
+         in Set.unions (freeLocals (locals `Set.difference` bound) body : map (freeLocals locals . snd) binds)
+      _ -> Set.unions (map (freeLocals locals) (AST.exprIChildren e))
+
+    referenced (ExprI _ e) = case e of
+      VarE _ v -> Set.singleton v
+      _ -> Set.unions (map referenced (AST.exprIChildren e))
+markConstants e = return e
 
 -- | Expand every alias of an arrow, effect or optional type in the declared types
 -- (signatures, class method signatures, annotations, instance heads) and in

@@ -22,6 +22,20 @@ Unreleased
  * a `where` or `let` value, and a top-level constant, is computed once per
    use of its scope instead of once per mention; an unused `where` binding is
    never computed, an unused `let` still runs
+ * a value a function computes without reading its parameters (a `let`,
+   `where` or applied-lambda argument, or the prefix of a function built by a
+   computation) is computed once per command, however many times or however
+   recursively the function is called
+ * a command defined point-free or by a computation (`f = add (g 1)`,
+   `f = let k = .. in \x -> ..`) takes its arguments in every language;
+   it no longer returned garbage in C++ and Rust or failed in Python and R
+ * a value built by a record update, literal or getter runs in a language
+   that has a type for it, and a pool passes on a value or function it
+   cannot represent without decoding it
+ * mutually recursive functions entered through one that is not exported
+   compile
+ * a file in a program's directory named like a C++ standard header no
+   longer replaces that header in a C++ pool
  * `where` bindings are lexically scoped: they no longer capture or get
    captured by same-named variables at the use site, and shadow top-level
    terms

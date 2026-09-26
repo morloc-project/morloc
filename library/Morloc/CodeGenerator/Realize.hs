@@ -36,6 +36,7 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 import qualified Morloc.LangRegistry as LR
+import qualified Morloc.CodeGenerator.Infer as Infer
 
 realityCheck ::
   -- | one AST forest for each command exported from main
@@ -394,9 +395,65 @@ realizeWithRegistry registry tables seedLangs s0 = do
       RState ->
       AnnoS (Indexed Type) Many Int ->
       MorlocMonad (AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]))
-    scoreAnnoS rstat (AnnoS gi ci e) = do
-      (e', ci') <- scoreExpr rstat (e, ci)
-      return $ AnnoS gi ci' e'
+    scoreAnnoS rstat (AnnoS gi@(Idx gidx t) ci e) = do
+      (e', Idx ci' table) <- scoreExpr rstat (e, ci)
+      -- An operation that belongs to no language runs where its context
+      -- puts it, but only in a language that can hold what it computes.
+      table' <- maybe (return table) (\ts -> holding gidx ts table) (heldTypes e t)
+      return $ AnnoS gi (Idx ci' table') e'
+
+    -- The languages of @table@ that can hold values of types @ts@ (codegen
+    -- finds each a concrete type there). When none of them can, the
+    -- program's other pool languages that can are offered instead, each at
+    -- the table's cost plus the crossing to it. A table with no language
+    -- (a tree the nexus evaluates) is left alone, and so is one where no
+    -- pool language can hold the value: its error is reported where the
+    -- value is written out.
+    holding :: Int -> [Type] -> [(Lang, Score)] -> MorlocMonad [(Lang, Score)]
+    holding _ _ [] = return []
+    holding i ts table = do
+      able <- ableLangs i ts (map fst table)
+      return $ case (able, [x | x@(l, _) <- table, l `elem` able]) of
+        ([], _) -> table
+        (_, []) -> [(l, minimum [addScore sc (transScore l0 l) | (l0, sc) <- table]) | l <- able]
+        (_, kept) -> kept
+
+    -- The language a language-free computation placed in context @l@ runs
+    -- in: @l@ if it can hold the values the computation works on, else the
+    -- pool language that can, cheapest to reach from @l@; @l@ if none can.
+    holdingLang :: Int -> [Type] -> Lang -> MorlocMonad Lang
+    holdingLang i ts l = do
+      able <- ableLangs i ts [l]
+      return $ case able of
+        _ | l `elem` able -> l
+        [] -> l
+        _ -> snd (minimum [(transScore l l', l') | l' <- able])
+
+    -- Of these languages and the program's pool languages, those in which
+    -- codegen finds a concrete type for each of @ts@.
+    ableLangs :: Int -> [Type] -> [Lang] -> MorlocMonad [Lang]
+    ableLangs i ts langs = do
+      scopes <- MM.gets stateUniversalConcreteTypedefs
+      let candidates = unique (langs <> map (LR.poolOf registry) (Map.keys scopes))
+      filterM (\l -> and <$> mapM (Infer.canHoldType True l i) ts) candidates
+
+    -- The types a language-free computation works on, for one that is.
+    heldTypes :: ExprS (Indexed Type) f c -> Type -> Maybe [Type]
+    heldTypes e t = case e of
+      ExeS (PatCall _) -> Just (componentTypes t)
+      AppS (AnnoS (Idx _ ft) _ (ExeS (PatCall _))) _ -> Just (componentTypes ft)
+      -- a call of a function value runs wherever it is placed
+      AppS (AnnoS (Idx _ ft) _ (BndS _)) _ -> Just (componentTypes ft)
+      AppS (AnnoS (Idx _ ft) _ (LetBndS _)) _ -> Just (componentTypes ft)
+      LstS _ -> Just [t]
+      TupS _ -> Just [t]
+      NamS _ -> Just [t]
+      _ -> Nothing
+
+    -- what an operation of this type computes on: its inputs and result
+    componentTypes :: Type -> [Type]
+    componentTypes (FunT ins out) = ins <> [out]
+    componentTypes ty = [ty]
 
     -- \| Alternates with scoresAnnoS, finds the best score for each language at
     -- application nodes.
@@ -627,8 +684,16 @@ realizeWithRegistry registry tables seedLangs s0 = do
       Maybe Lang ->
       AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
       MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
-    collapseAnnoS heads l1 (AnnoS gi@(Idx _ gt) ci e) = do
-      (e', ci') <- collapseExpr heads gt l1 (e, ci)
+    collapseAnnoS heads l1 (AnnoS gi@(Idx gidx gt) ci e) = do
+      l1' <- case (l1, heldTypes e gt) of
+        (Just l, Just ts) -> Just <$> holdingLang gidx ts l
+        _ -> return l1
+      (e', ci'') <- collapseExpr heads gt l1' (e, ci)
+      -- moved away from its context, a language-free computation keeps the
+      -- language it was moved to rather than inheriting its context's again
+      let ci' = case ci'' of
+            Idx i Nothing | l1' /= l1 -> Idx i l1'
+            _ -> ci''
       -- Explainability: at high verbosity, record each node's language decision
       -- (its index, the parent/incoming language, and the language chosen). The
       -- exact tree-DP makes this a faithful, per-node account of "why this pool".
@@ -1024,7 +1089,10 @@ realizeWithRegistry registry tables seedLangs s0 = do
           Lang ->
           AnnoS (Indexed Type) One (Indexed (Maybe Lang)) ->
           MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
-        f lang (AnnoS g (Idx i Nothing) e') = f lang (AnnoS g (Idx i (Just lang)) e')
+        -- an inherited language, for a computation that can run there
+        f lang (AnnoS g@(Idx gidx gt) (Idx i Nothing) e') = do
+          lang' <- maybe (return lang) (\ts -> holdingLang gidx ts lang) (heldTypes e' gt)
+          f lang' (AnnoS g (Idx i (Just lang')) e')
         f _ (AnnoS g (Idx i (Just lang)) e') = do
           e'' <- case e' of
             (AppS x xs) -> AppS <$> f lang x <*> mapM (f lang) xs
@@ -1268,9 +1336,12 @@ extractExpr exports (VarS v (One child@(AnnoS (Idx midx _) _ _)))
       -- when two exports share the same source name for their helpers.
       let newV = EV (unEVar v <> MT.pack ("@" <> show midx))
       (child', innerHelpers) <- extractFromTree exports child
+      -- a helper hoisted from inside this one may call back to it (mutual
+      -- recursion), so its back-edges are renamed with this one's
       let renamedChild = renameCallS v newV child'
+          innerHelpers' = [(w, renameCallS v newV h) | (w, h) <- innerHelpers]
       MM.modify (\s -> s { stateName = Map.insert midx newV (stateName s) })
-      return (CallS newV, (newV, renamedChild) : innerHelpers)
+      return (CallS newV, (newV, renamedChild) : innerHelpers')
 extractExpr exports (VarS v (One child)) = do
   (child', helpers) <- extractFromTree exports child
   return (VarS v (One child'), helpers)

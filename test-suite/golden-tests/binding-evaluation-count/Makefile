@@ -26,6 +26,10 @@ all:
 	rm -f tick.log; ./nexus nestedHelpers 2 >> obs.txt 2>> obs.err
 	rm -f tick.log; ./nexus recShare 3 >> obs.txt 2>> obs.err
 	rm -f tick.log; ./nexus wholeWhere >> obs.txt 2>> obs.err
+	rm -f tick.log; ./nexus closedLetTwice 3 >> obs.txt 2>> obs.err
+	rm -f tick.log; ./nexus closedWhereTwice 3 >> obs.txt 2>> obs.err
+	rm -f tick.log; ./nexus closedLetRecursive 3 >> obs.txt 2>> obs.err
+	rm -f tick.log; ./nexus closedLetUnused 3 >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus __pycache__ *.err tick.log

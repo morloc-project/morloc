@@ -1,0 +1,39 @@
+-- A function built by a computation -- a partial application whose supplied
+-- arguments are not values, or a let around a lambda -- is a staged function
+-- value. Exported directly, the command applies it to its arguments; called
+-- from another definition, it may be shared as a specialization. Every
+-- export here must compute the same value in every language.
+module main
+  ( plusH
+  , letLambda
+  , composed
+  , nestedHead
+  , conditional
+  , valuePrefix
+  )
+
+import root-r
+
+h :: Int -> Int -> Int
+h a b = (a + b) * (b + a) + a * a
+
+plusH :: Int -> Int
+plusH = (+) (h 1 2)
+
+letLambda :: Int -> Int
+letLambda = let k = h 1 2 in \x -> x + k
+
+composed :: Int -> Int
+composed = (+) 1 . (*) (h 2 3)
+
+nestedHead :: Int -> Int
+nestedHead = h (h 1 2)
+
+conditional :: Int -> Int
+conditional = ? h 1 2 > 0 = (\b -> b + 1) : (\b -> b - 1)
+
+twice :: (Int -> Int) -> Int -> Int
+twice f x = f (f x)
+
+valuePrefix :: Int -> Int
+valuePrefix = twice (h 1)

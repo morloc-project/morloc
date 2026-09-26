@@ -1,0 +1,50 @@
+--- py ---
+plusH 20
+letLambda 20
+composed 291
+nestedHead 500
+conditional 11
+valuePrefix 15130
+useShared 9459
+useSharedComposed 51966
+--- cpp ---
+plusH 20
+letLambda 20
+composed 291
+nestedHead 500
+conditional 11
+valuePrefix 15130
+useShared 9459
+useSharedComposed 51966
+--- r ---
+plusH 20
+letLambda 20
+composed 291
+nestedHead 500
+conditional 11
+valuePrefix 15130
+useShared 9459
+useSharedComposed 51966
+--- rust ---
+plusH 20
+letLambda 20
+composed 291
+nestedHead 500
+conditional 11
+valuePrefix 15130
+useShared 9459
+useSharedComposed 51966
+--- nexus ---
+letLambda 3
+partialPair [4,10]
+--- counts ---
+useStaged 1
+ladder 1
+fullyApplied 2
+recursive 1
+nonTail 1
+mutual 1
+selfAsValue 1
+cycleThroughSelfRecursive 1
+calledFromOutside 1
+partialConstant 1

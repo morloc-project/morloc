@@ -123,8 +123,46 @@ import Data.IORef (modifyIORef, newIORef, readIORef, writeIORef)
 -- type (see 'saturate').
 applyLambdas :: Bool -> AnnoS (Indexed Type) One a -> MorlocMonad (AnnoS (Indexed Type) One a)
 applyLambdas ai e = do
-  e' <- reduce ai e >>= saturateAt True ai
+  e' <- reduceRoot ai e >>= saturateAt True ai
   if ai then return e' else groupCallbacks e'
+
+-- | Reduce the root of a tree. A root of function type -- a command, a shared
+-- specialization, a recursive helper -- is called with every input of its
+-- type, so it is the lambda over those inputs, whatever its body computes
+-- first: @let k = e in \\x -> b@ is @\\w -> let k = e in b[w/x]@, and a
+-- partial application is applied to the rest. One call is one evaluation of
+-- the root, so work the body does before the function it returns runs once
+-- per call either way. The lambda keeps the root's index, by which the root
+-- is named, configured and called.
+reduceRoot :: Bool -> AnnoS (Indexed Type) One a -> MorlocMonad (AnnoS (Indexed Type) One a)
+reduceRoot ai n@(AnnoS g@(Idx gi (FunT ts r)) c e) = case e of
+  ExeS _ -> reduce ai n
+  CallS _ -> reduce ai n
+  LamS vs body -> case params vs body of
+    (ps, inner)
+      | length ps >= length ts -> AnnoS g c . LamS ps <$> reduce ai inner
+      | otherwise -> do
+          let extra = drop (length ps) ts
+          ws <- mapM (const (freshClosureName (EV "w"))) extra
+          app <- applyTo (FunT extra r) inner ws extra
+          AnnoS g c . LamS (ps <> ws) <$> reduce ai app
+  _ -> do
+    ws <- mapM (const (freshClosureName (EV "w"))) ts
+    gi' <- newPlainIndex gi
+    app <- applyTo (FunT ts r) (AnnoS (Idx gi' (FunT ts r)) c e) ws ts
+    AnnoS g c . LamS ws <$> reduce ai app
+  where
+    -- directly nested lambdas are one parameter list, up to the type's
+    params vs (AnnoS _ _ (LamS ws body))
+      | length vs < length ts = params (vs <> ws) body
+    params vs body = (vs, body)
+    applyTo ft f ws wts = do
+      argIdxs <- mapM (const (newPlainIndex gi)) ws
+      appIdx <- newPlainIndex gi
+      let args = [AnnoS (Idx ix wt) c (BndS w) | (ix, w, wt) <- zip3 argIdxs ws wts]
+          AnnoS (Idx fi _) fc fe = f
+      return (AnnoS (Idx appIdx r) c (AppS (AnnoS (Idx fi ft) fc fe) args))
+reduceRoot ai n = reduce ai n
 
 -- | A lambda left with fewer parameters than its type has arguments is a
 -- function value whose body computes the function it returns. Every use that
@@ -422,9 +460,9 @@ reduce ai n@(AnnoS g@(Idx gIdx _) c (LamS vs (AnnoS ga ca (AppS _ xs))))
 -- The new inner AppS keeps the outer application's index and contextual
 -- annotation (g1, c1) since it computes the same value as the original.
 -- The outer let keeps its own annotations.
-reduce ai (AnnoS g1 c1 (AppS (AnnoS gLet cLet (LetS v e1 body)) es)) =
+reduce ai (AnnoS g1@(Idx _ appT) c1 (AppS (AnnoS (Idx gLet _) cLet (LetS v e1 body)) es)) =
   reduce ai $
-    AnnoS gLet cLet $
+    AnnoS (Idx gLet appT) cLet $
       LetS v e1 (AnnoS g1 c1 (AppS body es))
 -- Beta-reduce an applied lambda. An argument is evaluated once, at the
 -- application (spec/types/effects.md, law 5), so only a value may be
@@ -541,8 +579,21 @@ reduce ai (AnnoS g c (AppS headA es)) = do
     -- lambda meets its arguments (and beta-reduces); the effect stays forced by
     -- the let's own bound @!eff@. Without this the function-typed let reaches
     -- the eta path in 'express', which re-applies it and rejects the LetS head.
-    AnnoS _ _ (EvalS (AnnoS gLet cLet (LetS v e1 body))) ->
-      reduce ai $ AnnoS gLet cLet $ LetS v e1 (AnnoS g c (AppS body es))
+    AnnoS _ _ (EvalS (AnnoS (Idx gLet _) cLet (LetS v e1 body))) ->
+      reduce ai $ AnnoS (Idx gLet (annT g)) cLet $ LetS v e1 (AnnoS g c (AppS body es))
+    -- A conditional choosing a function, applied: the condition is evaluated
+    -- once, then the chosen function is applied to the arguments, each
+    -- evaluated once before the choice.
+    AnnoS _ _ (IfS cond th el) -> do
+      (binds, es') <- unzip <$> mapM (bindArg ai) es
+      esCopy <- mapM reindexTree es'
+      let Idx _ appT = g
+          branch b@(AnnoS (Idx bi _) bc _) xs = do
+            ix <- newPlainIndex bi
+            reduce ai (AnnoS (Idx ix appT) bc (AppS b xs))
+      th' <- branch th es'
+      el' <- branch el esCopy
+      wrapLets g c (concat binds) (AnnoS g c (IfS cond th' el'))
     _ -> do
       es' <- mapM (reduce ai) es
       return $ case (headA', es') of
@@ -550,6 +601,7 @@ reduce ai (AnnoS g c (AppS headA es)) = do
           | ai, Just (AnnoS _ cy y) <- project sel x -> AnnoS g cy y
         _ -> AnnoS g c (AppS headA' es')
   where
+    annT (Idx _ t) = t
     -- on the nexus path, a field of a container literal that computes
     -- nothing is the element itself, so a function it holds reaches its
     -- uses as a lambda

@@ -18,10 +18,12 @@ module Morloc.CodeGenerator.Infer
   , inferConcreteTypeUniversal
   , inferConcreteTypeU
   , inferConcreteVar
+  , canHoldType
   , evalGeneralStep
   ) where
 
 import qualified Control.Monad.State as CMS
+import Control.Monad.Except (catchError)
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
@@ -557,6 +559,57 @@ weave gscope = w Set.empty
     dropNatHead :: [TypeU] -> [TypeU]
     dropNatHead (c : cs) | isKindTypeU c = cs
     dropNatHead cs = cs
+
+-- | Whether values of a general type have a representation in a language:
+-- the type resolves there, and, when @declaredRecords@, every record in it is
+-- declared for the language (a record with no declaration there resolves only
+-- to its morloc name, which names nothing in the pool). Building a record
+-- always needs its declaration; holding one does not in a language with a
+-- generic record form. A @data@ type is generated in each pool that uses it.
+canHoldType :: Bool -> Lang -> Int -> Type -> MorlocMonad Bool
+canHoldType declaredRecords lang i t = do
+  let key = (declaredRecords, langName lang, i, t)
+  cached <- CMS.gets (Map.lookup key . stateHoldCache)
+  case cached of
+    Just answer -> return answer
+    Nothing -> do
+      answer <- canHoldType' declaredRecords lang i t
+      CMS.modify (\st -> st {stateHoldCache = Map.insert key answer (stateHoldCache st)})
+      return answer
+
+canHoldType' :: Bool -> Lang -> Int -> Type -> MorlocMonad Bool
+canHoldType' declaredRecords lang i t = do
+  -- a failed inference is an answer here, not an error: whatever it changed
+  -- on the way (the `data` types being expanded) is undone
+  st0 <- CMS.get
+  ( do
+      _ <- inferConcreteType lang (Idx i t)
+      gLocal <- MM.getGeneralScope i
+      gGlobal <- MM.getGeneralUniversalScope
+      if declaredRecords
+        then and <$> mapM (declared gLocal gGlobal) (recordNames gLocal gGlobal t)
+        else return True
+    )
+    `catchError` (\_ -> CMS.put st0 >> return False)
+  where
+    declared gLocal gGlobal v = do
+      local <- MM.getConcreteScope i lang
+      global <- MM.getConcreteUniversalScope lang
+      let isData = isJust (scopeDataCtors gLocal v) || isJust (scopeDataCtors gGlobal v)
+      return (isData || Map.member v local || Map.member v global)
+    -- the records a type holds, whether written out or named
+    recordNames gl gg ty = case ty of
+      NamT NamTable _ ps rs -> concatMap (recordNames gl gg) (ps <> map snd rs)
+      NamT _ v ps rs -> v : concatMap (recordNames gl gg) (ps <> map snd rs)
+      VarT v -> [v | namesRecord gl gg v]
+      FunT ins out -> concatMap (recordNames gl gg) (out : ins)
+      AppT f xs -> concatMap (recordNames gl gg) (f : xs)
+      OptionalT x -> recordNames gl gg x
+      EffectT _ x -> recordNames gl gg x
+      _ -> []
+    namesRecord gl gg v = case Map.lookup v gl <> Map.lookup v gg of
+      Just ((_, NamU o _ _ _, _, _, _) : _) -> o /= NamTable
+      _ -> False
 
 inferConcreteVar :: Lang -> Indexed TVar -> MorlocMonad FVar
 inferConcreteVar lang t0@(Idx i v) = do

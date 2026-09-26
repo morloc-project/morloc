@@ -97,11 +97,36 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
           sf@(FunF {}) -> SerialS sf
           sf -> typeSof sf
 
+    -- The type of a value this pool keeps serialized. One it cannot hold is
+    -- known here only by its packet ('UnkF', a passthrough); a use that
+    -- needs it natively still fails where it infers the native type.
+    inferHeld :: Indexed Type -> MorlocMonad TypeF
+    inferHeld t@(Idx ti ty) = do
+      held <- holds ti ty
+      if held then inferType t else return (UnkF (FV (headName ty) (CV "")))
+      where
+        headName (VarT v) = v
+        headName (AppT h _) = headName h
+        headName (NamT _ v _ _) = v
+        headName _ = TV "passthrough"
+
+    -- Whether this pool can hold a value of a type. A function it cannot
+    -- hold (one taking or giving a value it cannot hold) arrived as a closure
+    -- from its home pool and is carried on as that packet; it is called
+    -- where it can be.
+    holds :: Int -> Type -> MorlocMonad Bool
+    holds ti ty = canHoldType (LR.registryIsCompiled reg (langName lang)) lang ti ty
+
     contextArg ::
       Int ->
       MorlocMonad (Or TypeS TypeF)
     contextArg i = case Map.lookup i typemap of
-      (Just (Right t)) -> funcAwareOr <$> inferType t
+      -- A value this pool cannot hold is carried as the packet it arrived in.
+      -- An interpreted language holds any record as its generic record; a
+      -- compiled one only a record declared for it.
+      (Just (Right t@(Idx ti ty))) -> do
+        held <- holds ti ty
+        if held then funcAwareOr <$> inferType t else return (L PassthroughS)
       Nothing -> return $ L PassthroughS
       (Just (Left t)) -> do
         MM.sayVVV "Warning: using universal inference at contextArg"
@@ -178,14 +203,14 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
               ne1 <- nativeExpr m1 e1'
               NativeLetS i ne1 <$> serialExpr m e2
     serialExpr _ (MonoLetVar t i) = do
-      t' <- inferType t
+      t' <- inferHeld t
       return $ LetVarS (Just t') i
     serialExpr m (MonoReturn e) = ReturnS <$> serialExpr m e
     serialExpr _ (MonoApp (MonoPoolCall t m docs remoteCall contextArgs) es) = do
       contextArgs' <- mapM (typeArg Serialized . ann) contextArgs
       let poolCall' = PoolCall m docs remoteCall contextArgs'
       es' <- mapM (serialArg m) es
-      t' <- inferType t
+      t' <- inferHeld t
       return $ AppPoolS t' poolCall' es'
     serialExpr m (MonoCacheBody lbl midx args body) =
       lowerCacheBody Serialized m lbl midx args body
@@ -841,8 +866,8 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       MorlocMonad (Arg TypeM)
     typeArg s i = case (s, Map.lookup i typemap) of
       (Serialized, Just (Right t)) -> do
-        t' <- inferType t
-        return $ Arg i (Serial t')
+        t' <- inferHeld t
+        return $ Arg i (case t' of UnkF _ -> Passthrough; _ -> Serial t')
       (Serialized, Nothing) -> return $ Arg i Passthrough
       (Serialized, Just (Left t)) -> do
         MM.sayVVV $ "typeArg universal inference of unindexed type " <> pretty t

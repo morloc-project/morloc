@@ -35,7 +35,7 @@ import Morloc.CodeGenerator.EffectBoundary (checkEffectBoundaries, insertEffectB
 import Morloc.CodeGenerator.Emit (TranslateFn, emit, pool)
 import Morloc.CodeGenerator.Express (express, addCacheWraps, addDebugWraps, addLoopWraps, addNativeRecEntries, etaReduceForwarders)
 import Morloc.CodeGenerator.LambdaEval (applyLambdas)
-import Morloc.CodeGenerator.Namespace (SerialManifold)
+import Morloc.CodeGenerator.Namespace (Arg, PolyHead (..), SerialManifold)
 import qualified Morloc.CodeGenerator.Nexus as Nexus
 import Morloc.CodeGenerator.Parameterize (parameterize)
 import Morloc.CodeGenerator.Guest.Pass (lowerGuests)
@@ -118,7 +118,7 @@ lowerPools rASTs = do
         [(midx, lang) | AnnoS (Idx midx _) (Idx _ lang, _) _ <- paramRASTs]
   MM.modify (\s -> s { stateManifoldLang = langMap })
   reg <- MM.gets stateLangRegistry
-  mapM express paramRASTs
+  mapM expressRoot paramRASTs
     -- Wrap each cache:true manifold's body in a 'PolyCacheBody'.
     >>= mapM addCacheWraps
     -- When 'stateDebugTrace' (--debug), wrap every foreign-call
@@ -141,6 +141,21 @@ lowerPools rASTs = do
     >>= mapM serialize
     >>= mapM reduce
       |>> pool reg
+
+-- | Express a root. A root of function type is called with every input of
+-- its type (the nexus sends a command's arguments by its type), so its
+-- manifold must take exactly those; anything else would read a closure as
+-- a result.
+expressRoot :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyHead
+expressRoot e@(AnnoS (Idx midx t) _ _) = do
+  h@(PolyHead _ _ args _) <- express e
+  case t of
+    FunT ts _
+      | length args /= length ts ->
+          MM.throwCompilerBug $
+            "the manifold of root" <+> pretty midx <+> "takes" <+> pretty (length args)
+              <+> "arguments, but its type" <+> squotes (pretty t) <+> "has" <+> pretty (length ts)
+    _ -> return h
 
 -- | Build a program as a local executable
 writeProgram ::

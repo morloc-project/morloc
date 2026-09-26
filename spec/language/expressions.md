@@ -108,7 +108,16 @@ scope that binds it, never once per mention:
   suspension twice reruns its effects, not the pure values it captured.
 - **Top-level constants:** a top-level value that is not a function (or is
   a function built by a computation, such as a partial application) is
-  computed at most once per command.
+  computed at most once per command. A recursive function built by a
+  computation, `f = (\k n -> .. f (n - 1)) (e)`, computes `e` once per
+  command, not once per recursive call.
+- **Constants inside functions:** a computation that reads no parameter and
+  no other local value -- a `where` or `let` binding, the argument a lambda is
+  applied to, or a computation in the body of a top-level value outside any
+  lambda -- is a constant: it is computed at most once per command, however
+  many times, or however recursively, the function around it is called. The
+  unused-`let` rule above still holds: one nothing reads is computed where it
+  is written.
 - **Languages:** a named value is one value in every language that reads it.
   It is computed once, in one language, and passed to its other readers.
 

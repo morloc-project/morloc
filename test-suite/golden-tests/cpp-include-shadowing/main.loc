@@ -1,0 +1,13 @@
+-- A file beside a program's sourced C++ header whose name is a standard
+-- header (here `tuple` and `vector`) must not replace that header in the
+-- pool, while a header the sourced one includes by angle brackets from the
+-- same directory (`<sibling.hpp>`) still resolves.
+module main (foo)
+
+import root-cpp
+
+source Cpp from "helpers.hpp" ("twice")
+twice :: Int -> Int
+
+foo :: Int -> (Int, [Int])
+foo x = (twice x, [x, x])

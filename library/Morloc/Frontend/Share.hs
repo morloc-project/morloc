@@ -20,6 +20,11 @@ at the nearest point every use passes through:
 * a @where@ binding or top-level constant nothing uses is never evaluated;
   a @let@ nothing uses is evaluated where it is written.
 
+A constant -- a value a definition computes without reading its parameters or
+other local values ('Morloc.Frontend.Restructure.markConstants') -- is
+evaluated once per command, like a top-level one: the copies of it in one
+command, whichever function or recursion they came from, are one group.
+
 Treeify expands a term at each place it is named, so the uses of one binding
 are several copies of it. Here the copies of a data-typed binding (a type with
 no function or suspension in it) within one evaluation of its scope are
@@ -54,8 +59,10 @@ shareBindings :: Node -> MorlocMonad Node
 shareBindings root = do
   env <- shareEnv
   root' <- bottomUp env root
-  -- top-level constants: one evaluation per command
-  mapRegions (placeGroups env (cafCandidate env)) root'
+  -- top-level constants, and constants inside definitions: one evaluation
+  -- per command
+  mapRegions (placeGroups env (termKey env (cafCandidate env))) root'
+    >>= mapRegions (placeGroups env (originKey env))
 
 data ShareEnv = ShareEnv
   { seTermOf :: Int -> Maybe Int
@@ -65,6 +72,8 @@ data ShareEnv = ShareEnv
   -- ^ the terms that own at least one where-binding
   , seLabeled :: Int -> Bool
   -- ^ an index carrying manifold configuration
+  , seOrigin :: Map.Map Int Int
+  -- ^ the constant an expression is a copy of, by index
   }
 
 shareEnv :: MorlocMonad ShareEnv
@@ -72,6 +81,7 @@ shareEnv = do
   GMap idmap sigmap <- MM.gets stateSignatures
   owners <- MM.gets stateWhereOwner
   config <- MM.gets stateManifoldConfig
+  origins <- MM.gets stateConstantOrigin
   let isMethod k = case Map.lookup k sigmap of
         Just (Polymorphic {}) -> True
         _ -> False
@@ -81,6 +91,7 @@ shareEnv = do
     , seMethod = isMethod
     , seOwners = Set.fromList (Map.elems owners)
     , seLabeled = \i -> maybe False configured (Map.lookup i config)
+    , seOrigin = origins
     }
 
 -- | A configuration that sets anything: a label, caching, logging, remote
@@ -100,7 +111,7 @@ bottomUp env n0 = do
     VarS v (Many alts)
       | Just d <- termOfNode env (AnnoS g c e)
       , Set.member d (seOwners env) -> do
-          alts' <- mapM (mapRegionOf (placeGroups env (ownedBy env d))) alts
+          alts' <- mapM (mapRegionOf (placeGroups env (termKey env (ownedBy env d)))) alts
           return (AnnoS g c (VarS v (Many alts')))
     LetS v e1 e2 -> sinkLet (AnnoS g c (LetS v e1 e2))
     _ -> return (AnnoS g c e)
@@ -139,31 +150,48 @@ cafCandidate env (EV v) k = not (T.any (== '`') v) && not (seMethod env k)
 nodeIndex :: Node -> Int
 nodeIndex (AnnoS (Idx gi _) _ _) = gi
 
--- | Share every eligible group of a region, users of a binding before the
--- binding they use, so a binding's uses inside another's right-hand side
--- are seen after that right-hand side has been reduced to one copy.
-placeGroups :: ShareEnv -> (EVar -> Int -> Bool) -> Node -> MorlocMonad Node
-placeGroups env eligible region
+-- | The group of a copy of an eligible term: the term and its type.
+termKey :: ShareEnv -> (EVar -> Int -> Bool) -> Node -> Maybe (Int, Type)
+termKey env eligible u@(AnnoS (Idx gi t) ci (VarS v (Many alts)))
+  | Just k <- termOfNode env u
+  , eligible v k
+  , isData t || (isFunctionValued t && any (not . isValue) alts)
+  , not (null alts)
+  , all (not . isLambda) alts
+  , not (seLabeled env gi || seLabeled env ci) =
+      Just (k, t)
+termKey _ _ _ = Nothing
+
+-- | The group of a copy of a constant a definition computes: the constant
+-- and its type (a definition used at two types computes two values).
+originKey :: ShareEnv -> Node -> Maybe (Int, Type)
+originKey env u@(AnnoS (Idx gi t) ci e)
+  | Just o <- Map.lookup ci (seOrigin env) <|> Map.lookup gi (seOrigin env)
+  , notTerm e
+  , isData t || (isFunctionValued t && not (isValue u))
+  , not (isLambda u)
+  , not (seLabeled env gi || seLabeled env ci) =
+      Just (o, t)
+  where
+    notTerm (VarS _ _) = False
+    notTerm _ = True
+originKey _ _ = Nothing
+
+-- | Share every group of a region, users of a binding before the binding
+-- they use, so a binding's uses inside another's right-hand side are seen
+-- after that right-hand side has been reduced to one copy.
+placeGroups :: ShareEnv -> (Node -> Maybe (Int, Type)) -> Node -> MorlocMonad Node
+placeGroups _ groupOf region
   | Map.null uses = return region
   | otherwise = foldM placeGroup region order
   where
     -- every copy in the region, by its index
     uses = Map.fromList [(nodeIndex u, k) | u <- allNodes region, Just k <- [groupOf u]]
-    groupOf u@(AnnoS (Idx gi t) ci (VarS v (Many alts)))
-      | Just k <- termOfNode env u
-      , eligible v k
-      , isData t || (isFunctionValued t && any (not . isValue) alts)
-      , not (null alts)
-      , all (not . isLambda) alts
-      , not (seLabeled env gi || seLabeled env ci) =
-          Just (k, t)
-    groupOf _ = Nothing
     isUse k u = lookupUse u == Just k
     -- the groups used inside a group's right-hand side (every copy of a group
     -- is the same expression)
     firstCopy = Map.fromListWith (\_ a -> a) [(k, u) | u <- allNodes region, Just k <- [lookupUse u]]
-    lookupUse u@(AnnoS _ _ (VarS _ _)) = Map.lookup (nodeIndex u) uses
-    lookupUse _ = Nothing
+    lookupUse u = Map.lookup (nodeIndex u) uses
     inner k = case Map.lookup k firstCopy of
       Just (AnnoS _ _ e) -> Set.fromList [k' | c <- childrenOf e, u <- allNodes c, Just k' <- [lookupUse u]]
       Nothing -> Set.empty

@@ -1,0 +1,32 @@
+-- A `data` type one of whose fields Python cannot represent (Real is not
+-- mapped for Python here), held in a list inside a function evaluated in
+-- Python. Asking whether Python can hold it must leave no trace on how the
+-- type is built in C++.
+module dataField (foo)
+
+import root-cpp
+
+record Opts where
+  n :: Int
+record Cpp => Opts = "Opts"
+source Cpp from "opts.hpp" ("nOf")
+nOf :: Opts -> Int
+
+data Shape = Sq Opts | Circle Real | Dot
+
+base :: Opts
+base = { n = 2 }
+
+side :: Shape -> Int
+side s = match s
+  | (Sq o) = nOf o
+  | Dot = 0
+  | (Circle _) = 1
+
+type Py => Int = "int"
+type Py => List a = "list" a
+source Py from "pyhof.py" ("py_apply" as pyApply)
+pyApply :: (Int -> Int) -> Int -> Int
+
+foo :: Int -> Int
+foo k = let xs = [Sq (.(.n = k) base), Dot] in pyApply (\r -> r + side (.[0] xs)) k

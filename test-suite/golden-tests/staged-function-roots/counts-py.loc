@@ -1,0 +1,89 @@
+-- A top-level function built by a computation is a constant: its prefix is
+-- evaluated once per command however many times the command calls it, and
+-- whether or not it is shared as a specialization. `tick` logs each of its
+-- evaluations; `ticks` reports the count.
+module main (useStaged, ladder, fullyApplied, recursive, nonTail, mutual, selfAsValue, cycleThroughSelfRecursive, calledFromOutside, partialConstant)
+
+import root-py
+
+source Py from "helpers.py" ("tick", "ticks")
+tick :: Int -> Int
+ticks :: Int -> Int
+
+h :: Int -> Int -> Int
+h a b = (a + b) * (b + a) + a * a
+
+adderFrom :: Int -> Int -> Int
+adderFrom x = let z = tick x in \y -> h (h z y) (h y (h z z)) + h (h y 2) (h z y)
+
+addFive :: Int -> Int
+addFive = adderFrom 5
+
+useStaged :: Int -> Int
+useStaged x = ticks (addFive x + addFive 1)
+
+e0 :: Int -> Int
+e0 x = addFive x - addFive x + x + 1
+e1 :: Int -> Int
+e1 x = e0 (e0 x)
+e2 :: Int -> Int
+e2 x = e1 (e1 x)
+e3 :: Int -> Int
+e3 x = e2 (e2 x)
+
+ladder :: Int -> Int
+ladder x = ticks (e3 x)
+
+fullyApplied :: Int -> Int
+fullyApplied x = ticks (adderFrom 5 x + adderFrom 5 1)
+
+countDown :: Int -> Int
+countDown = (\k n -> ? n <= 0 = k : countDown (n - 1)) (tick 1)
+
+recursive :: Int -> Int
+recursive n = ticks (countDown n)
+
+sumDown :: Int -> Int
+sumDown = (\k n -> ? n <= 0 = k : n + sumDown (n - 1)) (tick 10)
+
+nonTail :: Int -> Int
+nonTail n = ticks (sumDown n)
+
+f :: Int -> Int
+f = (\k n -> ? n <= 0 = k : g (n - 1)) (tick 1)
+
+g :: Int -> Int
+g n = f n
+
+mutual :: Int -> Int
+mutual n = ticks (f n)
+
+asValue :: Int -> Int
+asValue = (\k n -> ? n <= 0 = k : sum (map asValue [n - 1])) (tick 1)
+
+selfAsValue :: Int -> Int
+selfAsValue n = ticks (asValue n)
+
+cf :: Int -> Int
+cf = (\k n -> ? n <= 0 = k : cg (n - 1)) (tick 1)
+
+cg :: Int -> Int
+cg n = ? n <= 0 = 0 : (? n > 5 = cg (n - 1) : cf (n - 1))
+
+cycleThroughSelfRecursive :: Int -> Int
+cycleThroughSelfRecursive n = ticks (cf n + cg n)
+
+step :: Int -> Int -> Int
+step = (\k a b -> ? b <= 0 = k + a : step a (b - 1)) (tick 1)
+
+calledFromOutside :: Int -> Int
+calledFromOutside n = ticks (sum (map (step n) [1, 2, 3]))
+
+ph :: Int -> Int -> Int
+ph k n = ? n <= 0 = k : pf (n - 1)
+
+pf :: Int -> Int
+pf = ph (tick 1)
+
+partialConstant :: Int -> Int
+partialConstant n = ticks (pf n + pf (n + 1) + sum (map pf [1, 2]))

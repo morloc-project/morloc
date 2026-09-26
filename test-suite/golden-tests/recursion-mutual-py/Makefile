@@ -7,6 +7,8 @@ all:
 	./nexus isOdd 0 >> obs.txt 2>> obs.err
 	./nexus isOdd 3 >> obs.txt 2>> obs.err
 	./nexus isOdd 4 >> obs.txt 2>> obs.err
+	./nexus viaF 3 >> obs.txt 2>> obs.err
+	./nexus viaF 8 >> obs.txt 2>> obs.err
 
 clean:
 	rm -rf nexus pools *err

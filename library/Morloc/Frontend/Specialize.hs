@@ -34,7 +34,7 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import Morloc.Frontend.Namespace
-import Morloc.CodeGenerator.Value (etaParts)
+import Morloc.CodeGenerator.Value (isValue)
 import Morloc.Frontend.Rename (displayName, fresh)
 import qualified Morloc.Frontend.Share as Share
 import Morloc.Frontend.Treeify (Validation (..), collectRoot, recName)
@@ -413,10 +413,12 @@ newSpecName name = do
 --
 -- * a function of at least one argument whose result is not a suspension;
 -- * its key is fully solved, with no variable the checker invented;
--- * each implementation defined here takes every argument at once (a lambda
---   doing work before the function it returns is staged per use), and does
---   not recurse (a recursion keeps its back-edges to the copy it is in; one
---   defined inside it goes with it);
+-- * each implementation defined here is a value taking every argument at
+--   once: a function built by a computation (a lambda doing work before the
+--   function it returns, a partial application computing an argument or
+--   reaching a stage) is a constant, evaluated once per command, not once
+--   per call; and it does not recurse (a recursion keeps its back-edges to
+--   the copy it is in; one defined inside it goes with it);
 -- * it reads no top-level constant (evaluated once per command at the use,
 --   it would be evaluated per call);
 -- * it is large enough that copies compound.
@@ -436,6 +438,7 @@ shareable key t alts = do
       && isElaborable key
       && null (generatedTypeVars key)
       && all (takesAll (length params)) defined
+      && all isValue defined
       && not (any (readsConstant idmap sigmap) ns)
       && not (any (\(AnnoS _ _ x) -> recurses names inner x) ns)
       && not labeled
@@ -461,23 +464,8 @@ shareable key t alts = do
     readsConstant idmap sigmap (AnnoS (Idx _ ty) ci (VarS (EV v) (Many xs))) =
       not (T.any (== '`') v)
         && not (isMethod idmap sigmap ci)
-        && (not (isArrow ty) || not (all built xs))
+        && (not (isArrow ty) || not (all isValue xs))
     readsConstant _ _ _ = False
-    -- a function that exists without computing anything
-    built n@(AnnoS _ _ e) = case e of
-      LamS _ _ | Just (f, pre) <- etaParts n -> all built (f : pre)
-      LamS _ _ -> True
-      ExeS _ -> True
-      BndS _ -> True
-      IntS _ _ -> True
-      RealS _ _ -> True
-      StrS _ -> True
-      LogS _ -> True
-      UniS -> True
-      NullS -> True
-      CallS _ -> True
-      VarS _ (Many xs) -> all built xs
-      _ -> False
     isMethod idmap sigmap ci = case Map.lookup ci idmap >>= (`Map.lookup` sigmap) of
       Just (Polymorphic {}) -> True
       _ -> False

@@ -21,6 +21,10 @@ module main
   , nestedHelpers
   , recShare
   , wholeWhere
+  , closedLetTwice
+  , closedWhereTwice
+  , closedLetRecursive
+  , closedLetUnused
   )
 
 import root-py
@@ -33,7 +37,9 @@ effect IO
 -- it. A where-binding or top-level value nothing reads is never evaluated; a
 -- let nothing reads is evaluated where it is written, since the function it
 -- calls may act in ways no type records. A top-level value is evaluated at
--- most once per command.
+-- most once per command, and so is a named value inside a function that reads
+-- none of its parameters, however many times or however recursively the
+-- function is called; one nothing reads is still evaluated where it is written.
 --
 -- `tick` records each of its evaluations in `tick.log` and `ticks` reads the
 -- count after its argument is computed, so each export prints how many times
@@ -202,3 +208,30 @@ wholeWhere :: Int
 wholeWhere = ticks (w + w)
   where
     w = tick 7
+
+-- A named value that reads no parameter is evaluated once per command.
+closedLet :: Int -> Int
+closedLet n = let k = tick 1 in k + n
+
+closedLetTwice :: Int -> Int
+closedLetTwice n = ticks (closedLet n + closedLet (n + 1))
+
+closedWhere :: Int -> Int
+closedWhere n = k + n
+  where
+    k = tick 1
+
+closedWhereTwice :: Int -> Int
+closedWhereTwice n = ticks (closedWhere n + closedWhere (n + 1))
+
+closedLetDown :: Int -> Int
+closedLetDown n = let k = tick 1 in ? n <= 0 = k : closedLetDown (n - 1)
+
+closedLetRecursive :: Int -> Int
+closedLetRecursive n = ticks (closedLetDown n)
+
+unusedClosedLet :: Int -> Int
+unusedClosedLet n = let k = tick 1 in n
+
+closedLetUnused :: Int -> Int
+closedLetUnused n = ticks (unusedClosedLet n + unusedClosedLet n)

@@ -703,7 +703,11 @@ makeTheMaker flags includes = do
         Just True -> ["-fsanitize=alignment", "-fno-sanitize-recover=alignment"]
         _ -> []
 
-  let incs = "-I." : [pretty ("-I" <> i) | i <- includes]
+  -- A source's directory is searched first for quoted includes and, for
+  -- angle-bracket includes, only after the system directories: a header
+  -- there may include a sibling either way, but a file named like a system
+  -- header (a program called `tuple`) never replaces it.
+  let incs = concat [[pretty ("-iquote" <> i), pretty ("-idirafter" <> i)] | i <- "." : includes]
   let flags' = map pretty (flags ++ sanitizeFlags)
 
   let cmd =

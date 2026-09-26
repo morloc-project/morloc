@@ -17,6 +17,7 @@ module Morloc.CodeGenerator.Value
   , isValueWith
   , etaParts
   , isSuspension
+  , ValueType
   ) where
 
 import Data.Foldable (toList)
@@ -25,15 +26,37 @@ import Morloc.Namespace.Expr
 import Morloc.Namespace.Prim
 import Morloc.Namespace.Type
 
+-- | The facts about a type that decide whether an expression of it is a
+-- value, for the resolved types of code generation and the unresolved types
+-- of the frontend alike.
+class ValueType t where
+  -- | the number of inputs of a function type, zero for any other
+  typeArity :: t -> Int
+  -- | whether the type is a suspension
+  isSuspensionType :: t -> Bool
+
+instance ValueType Type where
+  typeArity (FunT ts _) = length ts
+  typeArity _ = 0
+  isSuspensionType = isSuspension
+
+instance ValueType TypeU where
+  typeArity (FunU ts _) = length ts
+  typeArity (ForallU _ t) = typeArity t
+  typeArity _ = 0
+  isSuspensionType (EffectU _ _) = True
+  isSuspensionType (ForallU _ t) = isSuspensionType t
+  isSuspensionType _ = False
+
 -- | A value: evaluating it computes nothing (see the cases of 'isValueWith').
-isValue :: Foldable f => AnnoS (Indexed Type) f c -> Bool
+isValue :: (Foldable f, ValueType t) => AnnoS (Indexed t) f c -> Bool
 isValue = isValueWith (const Nothing)
 
 -- | 'isValue', given the first stage point of each recursive function a
 -- 'CallS' may name (the number of arguments after which it does work
 -- before the function it returns); without one, a recursive call takes
 -- every input of its type.
-isValueWith :: Foldable f => (EVar -> Maybe Int) -> AnnoS (Indexed Type) f c -> Bool
+isValueWith :: (Foldable f, ValueType t) => (EVar -> Maybe Int) -> AnnoS (Indexed t) f c -> Bool
 isValueWith stage a@(AnnoS (Idx _ t) _ e) = case e of
   -- a partial application the typechecker wrote as a lambda is what the
   -- application is
@@ -58,7 +81,7 @@ isValueWith stage a@(AnnoS (Idx _ t) _ e) = case e of
   CoerceS _ x -> isValueWith stage x
   -- applying a function whose result is a suspension builds the suspension
   -- and runs nothing (spec/types/effects.md, law 5)
-  AppS f xs -> isValueWith stage f && all (isValueWith stage) xs && (length xs < arity stage f || isSuspension t)
+  AppS f xs -> isValueWith stage f && all (isValueWith stage) xs && (length xs < arity stage f || isSuspensionType t)
   _ -> False
 
 annC :: AnnoS g f c -> c
@@ -100,16 +123,12 @@ isSuspension _ = False
 -- recursive call take every input of their type. A function held in a
 -- variable, or computed, has an unknown arity: it may run as soon as it is
 -- applied to one argument, so it counts as zero.
-arity :: Foldable f => (EVar -> Maybe Int) -> AnnoS (Indexed Type) f c -> Int
+arity :: (Foldable f, ValueType t) => (EVar -> Maybe Int) -> AnnoS (Indexed t) f c -> Int
 arity stage (AnnoS (Idx _ t) _ e) = case e of
   LamS vs _ -> length vs
   VarS _ alts -> case map (arity stage) (toList alts) of
-    [] -> typeArity
+    [] -> typeArity t
     ns -> minimum ns
-  ExeS _ -> typeArity
-  CallS v -> fromMaybe typeArity (stage v)
+  ExeS _ -> typeArity t
+  CallS v -> fromMaybe (typeArity t) (stage v)
   _ -> 0
-  where
-    typeArity = case t of
-      FunT ts _ -> length ts
-      _ -> 0

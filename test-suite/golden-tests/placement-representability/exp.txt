@@ -1,0 +1,17 @@
+topConstant 26
+whereBinding 20
+letBinding 20
+pointFree 5
+getter 10
+tuple 20
+listed 20
+conditional 20
+shown 12
+generic 15
+sourced 10
+updated 10
+function 10
+rustFunction 10
+crossed 11
+rustCaptured 11
+dataField 20
