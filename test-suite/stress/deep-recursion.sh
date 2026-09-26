@@ -39,9 +39,8 @@ esac
 # C-stack check trips at 300 levels of `total`); these run shallow.
 NONTAIL=200
 ROSE=100
-# Each nested cross-pool call parks a worker; see issue 93. Kept shallow so
-# the case passes and stays quick; the long level runs the depth at which
-# the parked workers deadlock, which costs its timeout.
+# Each nested cross-pool call parks a worker (issue 93). Kept shallow so the
+# case stays quick; the long level runs it at depth 2000.
 PINGPONG=50
 RUN_TIMEOUT=120
 
@@ -61,8 +60,7 @@ PROBLEMS=()
 expected_failure() {
     local module=$1 fn=$2 depth=$3
     case "$module:$fn" in
-        cross:pingPong)
-            (( depth >= 2000 )) && echo "#93" ;;
+        *) ;;
     esac
     return 0
 }
