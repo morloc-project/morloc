@@ -796,7 +796,12 @@ fn schema_returns_object(p: &Schema) -> bool {
 /// stdout capture). Checked on every argument and the return type.
 fn schema_tree_excluded(s: &Schema) -> bool {
     use SerialType::*;
-    matches!(s.serial_type, Table | IFile | IStream | OStream)
+    // A stream handle or an IFile cannot be served: the handle means nothing
+    // to a client, and a streaming command writes to a stdout fd the MCP loop
+    // has aliased away. A Table is neither -- its row schema is known
+    // statically and `schema_to_json_schema` already renders it as an array
+    // of typed row objects, which is a shape a client understands.
+    matches!(s.serial_type, IFile | IStream | OStream)
         || s.parameters.iter().any(schema_tree_excluded)
 }
 

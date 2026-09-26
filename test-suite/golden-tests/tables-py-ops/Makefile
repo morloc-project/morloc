@@ -10,6 +10,9 @@ all:
 	  echo '--- cbound ---';        ./nexus cbound 3; \
 	  echo '--- added_dropped ---'; ./nexus added_dropped 3; \
 	  echo '--- lit_selected ---';  ./nexus lit_selected 3; \
+	  echo '--- jsonl ---';         ./nexus -f jsonl sliced 5; \
+	  echo '--- tsv ---';           ./nexus -f tsv sliced 5; \
+	  echo '--- csv ---';           ./nexus -f csv sliced 5; \
 	} > obs.txt 2> obs.err
 
 clean:

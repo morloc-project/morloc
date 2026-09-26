@@ -1688,6 +1688,10 @@ pub unsafe extern "C" fn daemon_dispatch(
             schema: *const CSchema,
             errmsg: *mut *mut c_char,
         ) -> *mut c_char;
+        fn arrow_to_json_string(
+            data: *const c_void,
+            errmsg: *mut *mut c_char,
+        ) -> *mut c_char;
         fn morloc_eval(
             expr: *mut c_void,  // actually *mut MorlocExpression
             return_schema: *mut CSchema,
@@ -1975,11 +1979,22 @@ pub unsafe extern "C" fn daemon_dispatch(
                         &mut err,
                     );
                 } else {
-                    let json = voidstar_to_json_string(
-                        result_abs as *const c_void,
-                        return_schema as *const CSchema,
-                        &mut err,
-                    );
+                    // A table is an Arrow block, which the generic voidstar
+                    // serializer refuses. Render it as the array of row
+                    // objects its JSON Schema already advertises, so a
+                    // served or MCP caller gets data rather than an error.
+                    // CSchema carries the discriminant as a raw u32.
+                    let returns_table = (*(return_schema as *const CSchema)).serial_type
+                        == morloc_runtime_types::schema::SerialType::Table as u32;
+                    let json = if returns_table {
+                        arrow_to_json_string(result_abs as *const c_void, &mut err)
+                    } else {
+                        voidstar_to_json_string(
+                            result_abs as *const c_void,
+                            return_schema as *const CSchema,
+                            &mut err,
+                        )
+                    };
                     if !err.is_null() {
                         (*resp).success = false;
                         (*resp).error_kind = DAEMON_ERROR_INTERNAL;
@@ -2174,11 +2189,20 @@ pub unsafe extern "C" fn daemon_dispatch(
                                 cmd.ret.mime,
                             );
                         } else {
-                            let json = voidstar_to_json_string(
-                                packet_value as *const c_void,
-                                return_schema as *const CSchema,
-                                &mut err,
-                            );
+                            // Same reason as the eval path above: a table is
+                            // an Arrow block, not a generic voidstar.
+                            let returns_table =
+                                (*(return_schema as *const CSchema)).serial_type
+                                    == morloc_runtime_types::schema::SerialType::Table as u32;
+                            let json = if returns_table {
+                                arrow_to_json_string(packet_value as *const c_void, &mut err)
+                            } else {
+                                voidstar_to_json_string(
+                                    packet_value as *const c_void,
+                                    return_schema as *const CSchema,
+                                    &mut err,
+                                )
+                            };
                             if !err.is_null() {
                                 (*resp).success = false;
                                 (*resp).error_kind = DAEMON_ERROR_INTERNAL;

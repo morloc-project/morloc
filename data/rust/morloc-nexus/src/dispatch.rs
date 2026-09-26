@@ -32,6 +32,9 @@ pub enum OutputFormat {
     /// Apache Parquet file. Only valid for commands whose return type is a
     /// Table.
     Parquet,
+    /// Tab-separated values. Same writer as Csv with a different
+    /// delimiter. Only valid for commands whose return type is a Table.
+    Tsv,
     /// CSV (comma-separated). Header row from the column schema. Only
     /// valid for commands whose return type is a Table.
     Csv,
@@ -1420,6 +1423,10 @@ pub(crate) fn print_result_c(
             data: *const std::ffi::c_void,
             errmsg: *mut *mut std::ffi::c_char,
         ) -> i32;
+        fn print_arrow_as_jsonl(
+            data: *const std::ffi::c_void,
+            errmsg: *mut *mut std::ffi::c_char,
+        ) -> i32;
         fn pack_with_schema(
             mlc: *const std::ffi::c_void,
             schema: *const morloc_runtime_types::cschema::CSchema,
@@ -1621,6 +1628,24 @@ pub(crate) fn print_result_c(
             }
         }
         OutputFormat::Jsonl => {
+            // A table is row-shaped, so JSON-lines is its natural form:
+            // one row object per line. Without this the generic voidstar
+            // printer is handed a table and reports that it cannot render
+            // one to JSON.
+            if is_arrow {
+                let rc = unsafe { print_arrow_as_jsonl(ptr as *const std::ffi::c_void, &mut errmsg) };
+                match rc {
+                    PRINT_RESULT_OK => {}
+                    PRINT_RESULT_PIPE_CLOSED => process::exit_broken_pipe(),
+                    _ => {
+                        let msg = process::take_c_errmsg(errmsg)
+                            .unwrap_or_else(|| "unknown error".into());
+                        eprintln!("Error: {}", msg);
+                        process::clean_exit(1);
+                    }
+                }
+                return;
+            }
             // A top-level Unit/None return carries no data. Suppress it
             // (as JSON and Packet already do) so a command that streams
             // its output through @stdout and returns () doesn't get a
@@ -1693,12 +1718,12 @@ pub(crate) fn print_result_c(
                 }
             }
         }
-        OutputFormat::Arrow | OutputFormat::Parquet | OutputFormat::Csv => {
+        OutputFormat::Arrow | OutputFormat::Parquet | OutputFormat::Csv | OutputFormat::Tsv => {
             // Table-only output formats: the result is a table block,
             // serialized from there.
             if !is_arrow {
                 eprintln!(
-                    "Error: --format=arrow|parquet|csv requires a Table return type"
+                    "Error: --format=arrow|parquet|csv|tsv requires a Table return type"
                 );
                 process::clean_exit(1);
             }
@@ -1733,6 +1758,9 @@ pub(crate) fn print_result_c(
                     ),
                     OutputFormat::Parquet => write_parquet_to_buffer(
                         ptr as *const std::ffi::c_void, &mut buf, &mut len, &mut err,
+                    ),
+                    OutputFormat::Tsv => write_csv_to_buffer(
+                        ptr as *const std::ffi::c_void, b'\t', &mut buf, &mut len, &mut err,
                     ),
                     OutputFormat::Csv => write_csv_to_buffer(
                         ptr as *const std::ffi::c_void, b',', &mut buf, &mut len, &mut err,

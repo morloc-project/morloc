@@ -420,6 +420,94 @@ unsafe fn print_arrow_as_json_impl(data: *const c_void, errmsg: *mut *mut c_char
     write_stdout(&out, errmsg)
 }
 
+/// Render a block as a JSON array of row objects, returned as a
+/// libc-allocated C string. Same shape `print_arrow_as_json` writes, but
+/// handed back to the caller rather than printed: the served paths
+/// (daemon, MCP) build a response body instead of writing to stdout, and
+/// the generic voidstar serializer refuses a Table.
+///
+/// Returns null and sets `errmsg` on failure. The caller owns the string.
+#[no_mangle]
+pub unsafe extern "C" fn arrow_to_json_string(
+    data: *const c_void,
+    errmsg: *mut *mut c_char,
+) -> *mut c_char {
+    let batch = match arrow_shm::shm_to_batch(data as *const ArrowShmHeader) {
+        Ok(b) => b,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            return std::ptr::null_mut();
+        }
+    };
+    let mut out = String::new();
+    out.push('[');
+    for r in 0..batch.num_rows() {
+        if r > 0 {
+            out.push(',');
+        }
+        out.push('{');
+        for (c, field) in batch.schema().fields().iter().enumerate() {
+            if c > 0 {
+                out.push(',');
+            }
+            json_escape(field.name(), &mut out);
+            out.push(':');
+            json_cell(batch.column(c).as_ref(), r, &mut out);
+        }
+        out.push('}');
+    }
+    out.push(']');
+    // libc-allocated so the caller can free it the same way it frees the
+    // string voidstar_to_json_string returns.
+    let bytes = out.as_bytes();
+    let buf = libc::malloc(bytes.len() + 1) as *mut c_char;
+    if buf.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other("out of memory rendering table to JSON".into()));
+        return std::ptr::null_mut();
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr() as *const c_char, buf, bytes.len());
+    *buf.add(bytes.len()) = 0;
+    buf
+}
+
+/// Print a block as JSON-lines: one row object per line. Each row is
+/// written as it is built, so peak memory is one row's JSON body rather
+/// than the whole table -- the same reason `print_voidstar_jsonl` streams.
+#[no_mangle]
+pub unsafe extern "C" fn print_arrow_as_jsonl(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
+    crate::error::guarded(errmsg, PRINT_RESULT_ERR, || print_arrow_as_jsonl_impl(data, errmsg))
+}
+
+unsafe fn print_arrow_as_jsonl_impl(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
+    let batch = match arrow_shm::shm_to_batch(data as *const ArrowShmHeader) {
+        Ok(b) => b,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            return PRINT_RESULT_ERR;
+        }
+    };
+    let fields = batch.schema();
+    let mut out = String::new();
+    for r in 0..batch.num_rows() {
+        out.clear();
+        out.push('{');
+        for (c, field) in fields.fields().iter().enumerate() {
+            if c > 0 {
+                out.push(',');
+            }
+            json_escape(field.name(), &mut out);
+            out.push(':');
+            json_cell(batch.column(c).as_ref(), r, &mut out);
+        }
+        out.push_str("}\n");
+        let rc = write_stdout(&out, errmsg);
+        if rc != PRINT_RESULT_OK {
+            return rc;
+        }
+    }
+    PRINT_RESULT_OK
+}
+
 /// Print a block as a tab-separated table: a header line of column names,
 /// then one line per row with cells rendered as in the JSON form.
 #[no_mangle]

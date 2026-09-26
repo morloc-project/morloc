@@ -497,6 +497,10 @@ pub enum OutputForm {
     Arrow,
     Parquet,
     Csv,
+    /// Tab-separated values. Same writer as `csv` with a tab delimiter;
+    /// only valid where the return type is a Table. TSV is already
+    /// recognised on stdin, so this makes the two directions symmetric.
+    Tsv,
 }
 
 impl OutputForm {
@@ -510,6 +514,7 @@ impl OutputForm {
             OutputForm::Arrow => OutputFormat::Arrow,
             OutputForm::Parquet => OutputFormat::Parquet,
             OutputForm::Csv => OutputFormat::Csv,
+            OutputForm::Tsv => OutputFormat::Tsv,
         }
     }
 }

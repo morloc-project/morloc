@@ -114,6 +114,7 @@ fn format_name(f: OutputFormat) -> &'static str {
         OutputFormat::Arrow => "arrow",
         OutputFormat::Parquet => "parquet",
         OutputFormat::Csv => "csv",
+        OutputFormat::Tsv => "tsv",
         OutputFormat::Raw => "raw",
     }
 }
@@ -555,7 +556,8 @@ fn do_write(slot_id: i64, relptr: i64, size: u64) -> Resp {
             OutputFormat::MessagePack
             | OutputFormat::Arrow
             | OutputFormat::Parquet
-            | OutputFormat::Csv => Err(br::WriteError::Other(format!(
+            | OutputFormat::Csv
+            | OutputFormat::Tsv => Err(br::WriteError::Other(format!(
                 "streamed stdout output does not support -f {}; \
                  use -f json, -f jsonl, or -f packet",
                 format_name(cfg.format),

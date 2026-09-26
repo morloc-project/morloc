@@ -199,6 +199,7 @@ fn output_form_name(f: OutputForm) -> &'static str {
         OutputForm::Arrow => "arrow",
         OutputForm::Parquet => "parquet",
         OutputForm::Csv => "csv",
+        OutputForm::Tsv => "tsv",
     }
 }
 
