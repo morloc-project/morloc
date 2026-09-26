@@ -1,6 +1,37 @@
 Unreleased
 ----------
 
+ * a definition used many times is compiled once per type and language and
+   called, so programs that nest definitions deeply build in time and
+   memory proportional to their source rather than exponential in depth
+ * a function passed inside a tuple or record to a morloc function works in
+   a command that runs without a language pool
+ * every argument is evaluated once, where it is applied, whether its
+   parameter is used many times or not at all
+ * a `where` or `let` value, and a top-level constant, is computed once per
+   use of its scope instead of once per mention; an unused `where` binding is
+   never computed, an unused `let` still runs
+ * `where` bindings are lexically scoped: they no longer capture or get
+   captured by same-named variables at the use site, and shadow top-level
+   terms
+ * signatures are contracts: a definition more specific than its signature,
+   or using a class method its constraints do not provide, is rejected
+ * instances may declare contexts (`instance Eq a => Eq (Pair a)`), and
+   signature type variables scope over the definition's local signatures
+ * a polymorphic definition is typechecked once per type it is used at, so
+   typecheck time no longer grows exponentially with nesting
+ * a function that does work before the function it returns runs that work
+   once per partial application, in every language, even where the function
+   is unknown or lives in another pool
+ * `a -> b -> c` and `a -> (b -> c)` are one type; a source's signature says
+   how it calls a function it is passed (a parenthesized parameter is called
+   one group at a time)
+ * a table's schema can be given a name: a type alias now survives into the
+   generated pool instead of failing the build
+ * a cross-language table call can sit inside a larger expression rather than
+   having to be the whole body of a function
+ * a function can be passed where one taking fewer arguments is wanted, and
+   the results are the closures you asked for
  * writing a stream copies its payload once instead of twice, and a pool
    keeps a batch's worth of heap rather than returning it to the kernel
    between batches
@@ -18,6 +49,53 @@ Unreleased
  * a table can be piped in: CSV and TSV on stdin are recognised by content
  * a table with a decimal or string-view column crosses into any pool
  * a C++ or Rust pool no longer grows with the number of cross-language calls it makes
+ * a numpy array a Python kernel receives over shared memory is read-only, so
+   a kernel that writes into its argument raises instead of silently corrupting
+   data another pool is reading
+ * a record's field order is part of its type: a table keeps the column order
+   its schema declares, and an operation that would reorder columns is a
+   compile-time error naming both orders rather than a silent permutation
+ * a row variable may stand for columns anywhere in a schema, not only at the
+   end, so a signature can say that one named column changed and the rest
+   stayed where they were
+ * `selectCols` returns columns in the order you asked for, and its type says
+   the same; previously the type claimed the table's own order while the
+   kernel produced the requested one
+ * dropping a named column from a schema reduces to the remaining columns
+   instead of staying an unevaluated difference
+ * `setCol` replaces a column where it sits and requires it to exist; the new
+   `addCol` appends one and requires that it does not
+ * a function over "any table that has a given column" can be written in
+   morloc: a signature mentioning `Restrict`, `+`, `-` or `ProjectField` can
+   now be given a body, not only sourced from another language
+ * a type alias naming a schema works inside a row operator, so
+   `Restrict Callset ['chrom, 'pos]` no longer has to be spelled out
+ * a tuple accessor inside an unannotated `where` helper is type-checked
+   against the slot it selects. Returning the wrong slot used to compile
+   and fail inside the pool at run time; a helper that needed no signature
+   could also fail the build with "Cannot infer concrete type for UnkT"
+ * a negative dimension is rejected when it is computed, naming the value,
+   instead of building and dying as a malformed schema string
+ * combining two tables that share a column name is rejected even when the
+   result type is not written down; the collision used to be reported only
+   if an annotation forced the schema to reduce
+ * a class method is resolved from its argument's type, so `unpack v` works
+   without a signature pinning the result. The occurrence type of a method
+   is its own most general form until something downstream constrains it,
+   and no instance could match that
+ * `++` on a Vector concatenates in a Python pool. It was mapped onto
+   Python's `+`, which on a numpy array adds elementwise, so the lengths
+   were not added and the result contradicted its own type
+ * vectors support elementwise arithmetic, so a column derived from two
+   others is written as the formula: `realOf (getCol "ac" t) / realOf
+   (getCol "an" t)` rather than a round trip through a list
+ * `(|>)` pipes a value into a function, so building a table column by
+   column reads top to bottom instead of nesting inside out
+ * `-f jsonl` renders a table as one row object per line, streamed, and
+   `-f tsv` writes one; TSV was already accepted on stdin
+ * a command that takes or returns a table is served over MCP instead of
+   being dropped from the tool surface, so a table-shaped program has a
+   model-facing interface
 
 0.108.1 [2026-09-18]
 --------------------
