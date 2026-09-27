@@ -1,0 +1,82 @@
+-- Constants shared inside other shared constants, used under a suspension.
+--
+-- A value that reads none of a function's parameters is computed once per
+-- command and bound where its copies meet. When one such constant is used
+-- inside another (`inc n` reads `n`), the inner binding must be placed around
+-- every copy of it, including the one inside the outer constant's
+-- definition; placed below the outer binding, the outer definition reads a
+-- name that is out of scope. A root that is a suspension is where both are
+-- placed, so each export runs its constants under one.
+
+module main (nested, twoLevels, recordConstant, termHoldsConstant, bothArms, whereBound)
+
+import root-py
+
+source Py from "lib.py" ("add", "inc", "scale")
+add :: Int -> Int -> Int
+inc :: Int -> Int
+
+record Opts = Opts { k :: Int, name :: Str }
+record Py => Opts = "dict"
+scale :: Opts -> Int -> Int
+
+n :: Int
+n = 5
+
+f :: Int -> Int
+f = add (inc n)
+
+g :: Int -> Int
+g = add (inc (inc n))
+
+h :: Int -> Int
+h = add (f n)
+
+base :: Opts
+base = { k = 2, name = "base" }
+
+tripled :: Opts
+tripled = .(.k = 3) base
+
+scaled :: Int -> Int
+scaled = add (scale tripled n)
+
+nested :: <IO> Int
+nested = do
+  f 1
+
+twoLevels :: <IO> Int
+twoLevels = do
+  x <- nested
+  g x + h 1
+
+recordConstant :: <IO> Int
+recordConstant = do
+  scaled 1
+
+-- a named constant whose own definition computes a constant
+m :: Int
+m = add (inc 5) 1
+
+k :: Int -> Int
+k = add (inc m)
+
+termHoldsConstant :: <IO> Int
+termHoldsConstant = do
+  x <- nested
+  k x + m
+
+-- a use of the inner constant in both branches
+bothArms :: Bool -> <IO> Int
+bothArms b = do
+  ? b = f n : f (inc n)
+
+-- a where-bound value reading a named constant
+withWhere :: Int -> Int
+withWhere x = add x y
+  where
+    y = inc n
+
+whereBound :: <IO> Int
+whereBound = do
+  withWhere 1

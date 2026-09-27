@@ -51,6 +51,7 @@ import qualified Morloc.BaseTypes as BT
 import Morloc.CodeGenerator.Value (etaParts, isSuspension, isValue)
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
+import Morloc.Data.Doc (pretty, (<+>))
 
 type Node = AnnoS (Indexed Type) Many Int
 
@@ -60,9 +61,30 @@ shareBindings root = do
   env <- shareEnv
   root' <- bottomUp env root
   -- top-level constants, and constants inside definitions: one evaluation
-  -- per command
-  mapRegions (placeGroups env (termKey env (cafCandidate env))) root'
-    >>= mapRegions (placeGroups env (originKey env))
+  -- per command. Both kinds are placed in one pass, so a group is placed
+  -- before any group it uses, whichever kind each is: placed in two passes,
+  -- a constant whose definition reads a named constant could be bound above
+  -- that constant's binder.
+  let key u = case termKey env (cafCandidate env) u of
+        Just (k, t) -> Just (Left k, t)
+        Nothing -> fmap (\(o, t) -> (Right o, t)) (originKey env u)
+  shared <- mapRegions (placeGroups env key) root'
+  checkScope shared
+  return shared
+
+-- | Every lambda-bound variable is read under its binder: a lambda that binds
+-- it, or a let (a let-bound name may be read as a parameter by then).
+checkScope :: Node -> MorlocMonad ()
+checkScope root = case unbound Set.empty root of
+  [] -> return ()
+  (EV v : _) -> MM.throwCompilerBug $
+    "sharing left" <+> pretty v <+> "outside the lambda that binds it"
+  where
+    unbound bs (AnnoS _ _ e) = case e of
+      BndS v | not (Set.member v bs) -> [v]
+      LamS vs b -> unbound (Set.union bs (Set.fromList vs)) b
+      LetS v e1 e2 -> unbound bs e1 <> unbound (Set.insert v bs) e2
+      _ -> concat (foldExprS (\x -> [unbound bs x]) e)
 
 data ShareEnv = ShareEnv
   { seTermOf :: Int -> Maybe Int
@@ -179,14 +201,21 @@ originKey _ _ = Nothing
 
 -- | Share every group of a region, users of a binding before the binding
 -- they use, so a binding's uses inside another's right-hand side are seen
--- after that right-hand side has been reduced to one copy.
-placeGroups :: ShareEnv -> (Node -> Maybe (Int, Type)) -> Node -> MorlocMonad Node
+-- after that right-hand side has been reduced to one copy. The groups may be
+-- of several kinds (named constants and the constants definitions compute),
+-- told apart by their keys.
+placeGroups :: Ord k => ShareEnv -> (Node -> Maybe k) -> Node -> MorlocMonad Node
 placeGroups _ groupOf region
+  | not (null clashes) =
+      MM.throwCompilerBug "two sharing groups claim one expression index"
   | Map.null uses = return region
   | otherwise = foldM placeGroup region order
   where
-    -- every copy in the region, by its index
-    uses = Map.fromList [(nodeIndex u, k) | u <- allNodes region, Just k <- [groupOf u]]
+    -- every copy in the region, by its index; an index is one expression, so
+    -- it belongs to at most one group
+    claims = Map.fromListWith (<>) [(nodeIndex u, [k]) | u <- allNodes region, Just k <- [groupOf u]]
+    clashes = [i | (i, ks) <- Map.toList claims, length (nubOrd ks) > 1]
+    uses = Map.mapMaybe listToMaybe claims
     isUse k u = lookupUse u == Just k
     -- the groups used inside a group's right-hand side (every copy of a group
     -- is the same expression)
@@ -198,10 +227,12 @@ placeGroups _ groupOf region
     keys = Set.toList (Set.fromList (Map.elems uses))
     innerOf = Map.fromList [(k, inner k) | k <- keys]
     order = topo keys
-    -- a group is placed once no unplaced group uses it
+    -- a group is placed once no unplaced group uses it; groups that use
+    -- each other (copies that differ, as a recursive constant's can) have no
+    -- order that scopes both, so they are left unshared
     topo [] = []
     topo ks = case [k | k <- ks, not (any (\k' -> k' /= k && Set.member k (Map.findWithDefault Set.empty k' innerOf)) ks)] of
-      [] -> ks
+      [] -> []
       ready -> ready ++ topo (filter (`notElem` ready) ks)
     placeGroup r k = placeAt sequenced (isUse k) (bindCopies k) r
     -- bind the copies under @node@ to one fresh variable
