@@ -1,0 +1,24 @@
+-- A function value chosen at run time cannot be specialized away, and a
+-- closure value cannot be shared between threads in Rust, so passing it to
+-- a sourced function that needs `Sync` is rejected at build time.
+
+module dynamic (pick)
+
+import root-rust
+
+source Rust from "lib.rs" ("par_map" as parMap)
+parMap :: (Int -> Int) -> [Int] -> [Int]
+
+double :: Int -> Int
+double x = x * 2
+
+triple :: Int -> Int
+triple x = x * 3
+
+loopF :: (Int -> Int) -> Int -> [Int] -> <IO> [Int]
+loopF f k xs = ? k == 0 = do
+    xs
+  : loopF f (k - 1) (parMap f xs)
+
+pick :: Bool -> [Int] -> <IO> [Int]
+pick b xs = loopF (? b = double : triple) 1 xs

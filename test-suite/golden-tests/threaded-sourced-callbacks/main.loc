@@ -1,0 +1,40 @@
+-- Manifolds called from threads a sourced function spawns.
+--
+-- A sourced higher-order function may run its function argument on threads
+-- it starts and joins itself, as a parallel map does. Those threads are
+-- short-lived, unlike pool workers, and each call from them may serialize
+-- (here, a call into the Python pool). Every round starts eight threads, in
+-- Rust and in C++, calling a local function and a foreign one, and the sums
+-- must be exact. The per-thread runtime state such calls build (the Rust
+-- schema conversion cache) is freed with each thread; that is covered by
+-- the rustmorloc unit test `cschema_cache_is_freed_when_its_thread_ends`.
+
+module main (rustLocal, rustForeign, cppLocal, cppForeign)
+
+import root-rust
+import root-cpp
+import root-py
+
+source Rust from "lib.rs" ("rounds" as rustRounds)
+rustRounds :: (Int -> Int) -> Int -> Int
+
+source Cpp from "lib.hpp" ("rounds" as cppRounds)
+cppRounds :: (Int -> Int) -> Int -> I64
+
+source Py from "lib.py" ("incr")
+incr :: Int -> Int
+
+bump :: Int -> Int
+bump x = x + 1
+
+rustLocal :: Int -> Int
+rustLocal k = rustRounds bump k
+
+rustForeign :: Int -> Int
+rustForeign k = rustRounds incr k
+
+cppLocal :: Int -> I64
+cppLocal k = cppRounds bump k
+
+cppForeign :: Int -> I64
+cppForeign k = cppRounds incr k

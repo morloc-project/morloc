@@ -58,6 +58,7 @@ module UnitTypeTests
   , tuplePatternLambdaTests
   , withDocstringTests
   , epilogueDocstringTests
+  , streamIntrinsicTests
   , patternSelectorTests
   , sumTypeTests
   , variantTests
@@ -9375,6 +9376,115 @@ patternSelectorTests =
         record R = R { a :: Int, b :: Str }
         foo :: IFile R -> R
         foo f = .(.a = 1) f
+          |]
+      ]
+
+-- | `IFile a` names the whole value stored in the file, while `IStream a`
+-- names the element of a list file. `@stream` turns the one into the other,
+-- so it takes an `IFile [a]` and gives an `IStream a`, and `@next` on that
+-- stream gives `[a]`. A file whose value is not a list has no elements to
+-- stream.
+streamIntrinsicTests :: TestTree
+streamIntrinsicTests =
+  localOption (mkTimeout 1000000) $ -- 1s
+    testGroup
+      "@stream element type"
+      [ expectPass
+          "@stream on IFile [Int] then @next gives [Int]"
+          [r|
+        module main (foo)
+        effect IO
+        foo :: IFile [Int] -> <IO> (Try Str [Int])
+        foo f = do
+          s <- @stream f
+          @next s
+          |]
+      , expectPass
+          "@stream strips one list layer from IFile [[Int]]"
+          [r|
+        module main (foo)
+        effect IO
+        foo :: IFile [[Int]] -> <IO> (Try Str [[Int]])
+        foo f = do
+          s <- @stream f
+          @next s
+          |]
+      , expectError
+          "@stream on IFile [Int] does not give [[Int]]"
+          [r|
+        module main (foo)
+        effect IO
+        foo :: IFile [Int] -> <IO> (Try Str [[Int]])
+        foo f = do
+          s <- @stream f
+          @next s
+          |]
+      , expectPass
+          "@stream through an alias of the element list"
+          [r|
+        module main (foo)
+        effect IO
+        type Rows = [Int]
+        foo :: IFile Rows -> <IO> (Try Str [Int])
+        foo f = do
+          s <- @stream f
+          @next s
+          |]
+      , expectPass
+          "@stream through an alias of the whole handle"
+          [r|
+        module main (foo)
+        effect IO
+        type Rows = IFile [Int]
+        foo :: Rows -> <IO> (Try Str [Int])
+        foo f = do
+          s <- @stream f
+          @next s
+          |]
+      , expectPass
+          "@stream in a polymorphic helper"
+          [r|
+        module main (foo)
+        effect IO
+        streamOf :: IFile [a] -> <IO> IStream a
+        streamOf f = @stream f
+        foo :: IFile [Int] -> <IO> (Try Str [Int])
+        foo f = do
+          s <- streamOf f
+          @next s
+          |]
+      , expectPass
+          "@stream and @next on receivers typed by inference"
+          [r|
+        module main (foo)
+        effect IO
+        foo :: IFile [Int] -> <IO> (Try Str [Int])
+        foo f = do
+          let open = \h -> @stream h
+          let pull = \s -> @next s
+          s <- open f
+          pull s
+          |]
+      , expectError
+          "@stream on a receiver inferred as a non-list file is rejected"
+          [r|
+        module main (foo)
+        effect IO
+        foo :: IFile Int -> <IO> (Try Str [Int])
+        foo f = do
+          let open = \h -> @stream h
+          s <- open f
+          @next s
+          |]
+      , expectError
+          "@stream on a file whose value is not a list is rejected"
+          [r|
+        module main (foo)
+        effect IO
+        foo :: IFile Int -> <IO> (Try Str [Int])
+        foo f = do
+          s <- @stream f
+          @next s
           |]
       ]
 

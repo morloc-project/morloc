@@ -391,6 +391,11 @@ maybeSuspendSourceCall lang fn@(PolyExe (Idx gidx exeT0) (SrcCallP src)) xs = do
     isAtom (PolyLog _ _) = True
     isAtom (PolyNull _) = True
     isAtom (PolyEnum _ _ _) = True
+    -- A function that captures nothing is built at no cost and with no
+    -- effect, so building it inside the suspension is the same as outside;
+    -- bound outside, it would be a value the suspension has to capture.
+    isAtom (PolyManifold _ _ (ManifoldPass _) _ _) = True
+    isAtom (PolyManifold _ _ (ManifoldPart [] _) _ _) = True
     isAtom _ = False
 
     appReturn (FunT ins ret) n | n == length ins = Just ret

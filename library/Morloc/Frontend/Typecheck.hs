@@ -1613,6 +1613,31 @@ synthE _ g (IntrinsicS IntrTry [bodyE]) = do
   return (g1, resultT, IntrinsicS IntrTry [bodyE'])
 synthE i _ (IntrinsicS IntrTry args) =
   MM.throwCompilerBugAt i $ "IntrTry expects 1 arg (body), got " <> pretty (length args)
+-- @stream :: IFile [a] -> <IO> IStream a. An IFile carries the type of the
+-- whole value in its file and an IStream the type of one element, so the
+-- receiver is checked against a list-valued IFile and the element read from
+-- the solved variable. Checking (rather than reading the receiver's type
+-- syntactically) sees through aliases and solves an inferred receiver.
+synthE _ g (IntrinsicS IntrStream [handleE]) = do
+  let (g1, a) = newvar "stream_a_" g
+  (g2, _, handleE') <- checkG g1 handleE (AppU (VarU BT.ifileVar) [BT.listU a])
+  return ( g2
+         , EffectU ioEffectSet (AppU (VarU BT.istreamVar) [apply g2 a])
+         , IntrinsicS IntrStream [handleE']
+         )
+synthE i _ (IntrinsicS IntrStream args) =
+  throwTypeError i $ "@stream expects 1 arguments but got" <+> pretty (length args)
+-- @next :: IStream a -> <IO> (Try Str [a]). A mid-stream decode failure is
+-- an Err arm. Typed like @stream, by checking the receiver.
+synthE _ g (IntrinsicS IntrNext [handleE]) = do
+  let (g1, a) = newvar "next_a_" g
+  (g2, _, handleE') <- checkG g1 handleE (AppU (VarU BT.istreamVar) [a])
+  return ( g2
+         , EffectU ioEffectSet (BT.tryU BT.strU (BT.listU (apply g2 a)))
+         , IntrinsicS IntrNext [handleE']
+         )
+synthE i _ (IntrinsicS IntrNext args) =
+  throwTypeError i $ "@next expects 1 arguments but got" <+> pretty (length args)
 synthE i g (IntrinsicS intr args) = do
   (g', argTypes, args') <- synthArgs g args
   g'' <- checkIntrinsicArgs i g' intr argTypes
@@ -1672,17 +1697,6 @@ intrinsicTypeG g IntrOpen _ =
 -- always has the handle bound to a known type, so this resolves
 -- without needing ascription.
 intrinsicTypeG g IntrClose _ = (g, EffectU ioEffectSet BT.unitU)
--- @next :: IStream a -> <IO> (Try Str [a]). Mid-stream decode failures
--- come back as an Err arm.
-intrinsicTypeG g IntrNext [argT] =
-  let a = streamElemTypeU argT in
-  (g, EffectU ioEffectSet (BT.tryU BT.strU (BT.listU a)))
--- @stream :: IFile a -> <IO> IStream a. Same trick, with the IStream
--- head on the result side. The IFile was already validated at @open,
--- so this handle-setup step does not itself fail with Err.
-intrinsicTypeG g IntrStream [argT] =
-  let a = streamElemTypeU argT in
-  (g, EffectU ioEffectSet (AppU (VarU BT.istreamVar) [a]))
 -- @append: polymorphic return like @open; the user ascription resolves
 -- to the concrete OStream/IStream/IFile shape.
 intrinsicTypeG g IntrAppend _ =
@@ -1717,10 +1731,6 @@ intrinsicTypeG g intr _ = (g, intrinsicType intr)
 -- expected subtype constraint failed silently -- that branch is
 -- unreachable on a well-typed program but defends codegen against
 -- a missing-arg-type assertion.
-streamElemTypeU :: TypeU -> TypeU
-streamElemTypeU (AppU _ (a : _)) = a
-streamElemTypeU t = t
-
 -- | Check a @Cell b@ handle and return the accumulator type it carries.
 --
 -- Always the first check in a cell intrinsic's rule, for the reason
@@ -1763,9 +1773,9 @@ intrinsicType IntrStreamLayout =
 intrinsicType IntrTell = EffectU ioEffectSet BT.u64U
 intrinsicType IntrTmpfile = EffectU ioEffectSet (BT.tryU BT.strU BT.strU)
 intrinsicType IntrNext =
-  error "intrinsicType: IntrNext must be typed via intrinsicTypeG (carries arg-derived element type)"
+  error "intrinsicType: IntrNext is typed in synthE (its element type comes from the receiver)"
 intrinsicType IntrStream =
-  error "intrinsicType: IntrStream must be typed via intrinsicTypeG (carries arg-derived element type)"
+  error "intrinsicType: IntrStream is typed in synthE (its element type comes from the receiver)"
 intrinsicType IntrWrite = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
 -- One clause each, not a guard over a list: this match is exhaustive on
 -- purpose, so that a new Intrinsic constructor fails the build here rather
@@ -1873,18 +1883,9 @@ checkIntrinsicArgs i g intr argTypes = do
           let (g'a, a) = newvar "streamlayout_a_" g
               expectedT = AppU (VarU BT.ifileVar) [BT.listU a]
            in subtype' i argT expectedT g'a
-        -- @next: IStream a -> <IO> [a]. Pin the receiver shape so the
-        -- result type's [a] is constrained to the same `a`. Runtime
-        -- enforces kind == ISTREAM.
-        (IntrNext, [argT]) ->
-          let (g'a, a) = newvar "next_a_" g
-              expectedT = AppU (VarU BT.istreamVar) [a]
-           in subtype' i argT expectedT g'a
-        -- @stream: IFile a -> <IO> IStream a. Same trick.
-        (IntrStream, [argT]) ->
-          let (g'a, a) = newvar "stream_a_" g
-              expectedT = AppU (VarU BT.ifileVar) [a]
-           in subtype' i argT expectedT g'a
+        -- @next and @stream have their own synthE clauses.
+        (IntrNext, _) -> MM.throwCompilerBugAt i "IntrNext is typed in synthE"
+        (IntrStream, _) -> MM.throwCompilerBugAt i "IntrStream is typed in synthE"
         -- @write is special-cased in synthE so the OStream's element
         -- type can pin the list literals' element type via check-mode
         -- propagation; see the synthE branch above.

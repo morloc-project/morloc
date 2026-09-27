@@ -1,0 +1,71 @@
+-- Recursive helpers passed function arguments.
+--
+-- A recursive helper that passes a function parameter unchanged to every
+-- recursive call is copied for each closed function it is given (a named
+-- function or a lambda with no free variables), with the function written in
+-- place of the parameter. Every export must give the answer the unspecialized
+-- helper gives: two different functions passed to one helper, a function
+-- passed through a wrapper, a closed lambda, and the cases the copy must
+-- decline -- a function the recursion does not pass unchanged, a partial
+-- application, and a lambda that captures a value. Mutually recursive
+-- helpers that pass each other closed lambdas must not be copied without
+-- end, and a helper typed through a function alias must still work.
+
+module main (twoFunctions, throughWrapper, closedLambda, swapped, partial, captured, mutual, aliased)
+
+import root-cpp
+import root
+
+source Cpp from "lib.hpp" ("cmap", "add")
+cmap :: (Int -> Int) -> [Int] -> [Int]
+add :: Int -> Int -> Int
+
+double :: Int -> Int
+double x = x * 2
+
+triple :: Int -> Int
+triple x = x * 3
+
+loopF :: (Int -> Int) -> Int -> [Int] -> [Int]
+loopF f k xs = ? k == 0 = xs : loopF f (k - 1) (cmap f xs)
+
+wrap :: (Int -> Int) -> [Int] -> [Int]
+wrap g xs = loopF g 2 xs
+
+alternate :: (Int -> Int) -> (Int -> Int) -> Int -> [Int] -> [Int]
+alternate f g k xs = ? k == 0 = xs : alternate g f (k - 1) (cmap f xs)
+
+twoFunctions :: [Int] -> [Int]
+twoFunctions xs = loopF double 2 (loopF triple 2 xs)
+
+throughWrapper :: [Int] -> [Int]
+throughWrapper xs = wrap double xs
+
+closedLambda :: [Int] -> [Int]
+closedLambda xs = loopF (\x -> x + 1) 3 xs
+
+swapped :: [Int] -> [Int]
+swapped xs = alternate double (\x -> x + 1) 3 xs
+
+partial :: [Int] -> [Int]
+partial xs = loopF (add 5) 2 xs
+
+captured :: Int -> [Int] -> [Int]
+captured k xs = loopF (\x -> x + k) 2 xs
+
+walkA :: (Int -> Int) -> Int -> Int -> Int
+walkA f n acc = ? n <= 0 = acc : ? n % 2 == 0 = walkA f (n - 1) (f acc) : walkB (\x -> x + 1) (n - 1) acc
+
+walkB :: (Int -> Int) -> Int -> Int -> Int
+walkB g n acc = ? n <= 0 = acc : ? n % 3 == 0 = walkB g (n - 1) (g acc) : walkA (\x -> x * 2) (n - 1) acc
+
+mutual :: Int -> Int
+mutual n = walkA double n 1
+
+type Step = Int -> Int
+
+loopStep :: Step -> Int -> [Int] -> [Int]
+loopStep f k xs = ? k == 0 = xs : loopStep f (k - 1) (cmap f xs)
+
+aliased :: [Int] -> [Int]
+aliased xs = loopStep triple 2 xs

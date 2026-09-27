@@ -5,7 +5,7 @@
 -- list once, then returns an empty list at EOF. The cursor is part of
 -- the registry slot, so subsequent @next calls keep returning empty.
 --
--- @stream :: IFile a -> <IO> IStream a derives a forward-only IStream
+-- @stream :: IFile [a] -> <IO> IStream a derives a forward-only IStream
 -- from an open IFile, bound to the same path with an independent fd
 -- and cursor. The two handles read independently.
 --
@@ -42,7 +42,7 @@ testNextEofTwice path = do
 testStreamFromIFile :: Str -> <IO> [Int]
 testStreamFromIFile path = do
   @save 0 path [11, 22, 33]
-  Ok f <- @open path :: <IO> (Try Str (IFile Int))
+  Ok f <- @open path :: <IO> (Try Str (IFile [Int]))
   s <- @stream f
   Ok _tailv35 <- @next s
   _tailv35

@@ -14,6 +14,7 @@ unapplied lambdas, never @(\\x -> body) arg@.
 -}
 module Morloc.CodeGenerator.LambdaEval
   ( applyLambdas
+  , reindexTree
   ) where
 
 import Morloc.CodeGenerator.Namespace

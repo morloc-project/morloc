@@ -94,8 +94,8 @@ data RustState = RustState
   , rsCScope :: Scope
   -- ^ The merged Rust concrete typedef scope; resolves a recursive back-ref
   -- (@RecF@) to its concrete struct name (as C++'s translatorCScope does).
-  , rsThinSinks :: Set.Set Text
-  -- ^ Closure manifolds that need no trait object: see 'thinSinkNames'.
+  , rsThinClosures :: Set.Set Text
+  -- ^ Closure manifolds emitted as a plain function pointer: see 'thinClosures'.
   , rsSrcTypeVarMask :: Map.Map SrcName [(Bool, Bool)]
   -- ^ Per sourced function, per parameter position: @(isBareTypeVar,
   -- isFunctionParam)@ from the declared morloc signature. @isBareTypeVar@: the
@@ -292,6 +292,11 @@ rustIsCopy (OptionalF t) = rustIsCopy t
 rustIsCopy (EnumF _ _ _) = True
 rustIsCopy (AppF (VarF (FV (TV gv) _)) ts)
   | T.isPrefixOf "Tuple" gv = all rustIsCopy (fst (partitionKindArgsF ts))
+-- An applied type whose Rust spelling is a Copy scalar: its arguments are
+-- phantom (no `$n` in the mapping), so it is that scalar. The stream and
+-- cell handles (`IFile a`, `IStream a`, `OStream a`, `Cell a`) are all `u64`
+-- this way, and every handle intrinsic takes the handle by value.
+rustIsCopy (AppF (VarF (FV _ (CV cv))) _) = cv `elem` copyScalars
 rustIsCopy (VarF (FV _ (CV cv))) = cv `elem` copyScalars
 rustIsCopy (UnkF (FV _ (CV cv))) = cv `elem` copyScalars
 rustIsCopy _ = False
@@ -651,6 +656,34 @@ thinSinkNames mask es = Set.filter occursOnlyHere sites
       Just bs | k < length bs -> snd (bs !! k)
       _ -> False
 
+-- | The closure manifolds emitted as a plain function pointer ('thinDoc'):
+-- those in @sinks@ ('thinSinkNames') that capture nothing, have no stage
+-- entry, and are not the function a partial application applies (both of
+-- those take the staged form). One predicate decides the form and keeps the
+-- closure out of the crossing table, so the two cannot disagree.
+thinClosures ::
+  Set.Set Text ->
+  Map.Map Int StageEntry ->
+  Set.Set Text ->
+  [SerialManifold] ->
+  RustM (Set.Set Text)
+thinClosures sinks stageTable heads es =
+  Set.fromList . catMaybes <$> mapM one (concatMap collectClosureManifolds es)
+  where
+    one nm@(NativeManifold i _ form _)
+      | Set.member name sinks
+      , null (manifoldContext form)
+      , not (Map.member i stageTable) = do
+          let bnds = [t | Arg _ t <- manifoldBound form]
+              out = case typeFof nm of
+                FunF _ o -> o
+                o -> o
+          sig <- render <$> rustStoredType (typeMof (FunF bnds out))
+          return (if Set.member sig heads then Nothing else Just name)
+      | otherwise = return Nothing
+      where
+        name = render (manNamer i)
+
 -- | The shared indices of a serial manifold: variables used at more than one
 -- point in its body (see 'varUseCountOps').
 sharedIndicesSM :: SerialManifold -> Set.Set Int
@@ -831,7 +864,7 @@ rustClosureWrapper sig sigType mname ctxArgs boundArgs = do
         "rustmorloc::fn_ptr" <> pretty n
           <> parens ("|" <> hcat (punctuate ", " boundTyped) <> "|"
                        <+> "unsafe {" <+> mname <> tupled callArgs <+> "}")
-  thinSinks <- CMS.gets rsThinSinks
+  thin <- CMS.gets rsThinClosures
   stageTable <- CMS.gets rsStageTable
   heads <- CMS.gets rsPapplyHeads
   let stage = manifoldIdOf mname >>= (`Map.lookup` stageTable)
@@ -847,9 +880,7 @@ rustClosureWrapper sig sigType mname ctxArgs boundArgs = do
     Nothing
       | isJust bndWire && Set.member (render sig) heads ->
           stagedDoc Nothing bndWire capsT capInits ctorArgs ctor
-      | null ctxArgs
-          && not (Map.member (render mname) reifyInfo)
-          && Set.member (render mname) thinSinks -> return thinDoc
+      | Set.member (render mname) thin -> return thinDoc
       | otherwise -> return boxedDoc
   where
     -- The function value, wrapped so that each application to its first
@@ -1353,17 +1384,23 @@ makeRustCode includeDocs closureAsts closureTable0 es = do
   structDocs <- generateRustStructs closureAsts es
   enumDocs <- generateRustEnums es
   variantDocs <- generateRustVariants es
-  -- Keep the closures that can cross, closed over what they capture.
   stageTable <- CMS.gets rsStageTable
-  closureTable <- crossingClosures closureRustSig stageTable es closureTable0
+  heads <- papplyHeadSigs (\ins out -> render <$> rustStoredType (typeMof (FunF ins out))) es
+  mask <- CMS.gets rsSrcTypeVarMask
+  thin <- thinClosures (thinSinkNames mask es) stageTable heads es
+  -- Keep the closures that can cross, closed over what they capture. The
+  -- crossing set matches by signature, so it can name a closure that never
+  -- crosses; a thin closure cannot cross, so it is kept out rather than given
+  -- a dispatch entry (and with it the boxed form).
+  closureTable <-
+    Map.filterWithKey (\i _ -> not (Set.member (render (manNamer i)) thin))
+      <$> crossingClosures closureRustSig stageTable es closureTable0
   -- Per crossing closure: a home-pool serial dispatch wrapper (so a foreign pool
   -- can apply it) and the reify info (mid + captured schema ids) that
   -- 'rustClosureWrapper' uses to build the closure's origin builder.
   (closureWrappers0, reifyInfo) <- makeClosureDispatch closureAsts closureTable es
   let closureWrappers = stageLookupDoc stageTable : closureWrappers0
-  heads <- papplyHeadSigs (\ins out -> render <$> rustStoredType (typeMof (FunF ins out))) es
-  mask <- CMS.gets rsSrcTypeVarMask
-  CMS.modify $ \s -> s {rsReifyInfo = reifyInfo, rsThinSinks = thinSinkNames mask es, rsPapplyHeads = heads}
+  CMS.modify $ \s -> s {rsReifyInfo = reifyInfo, rsThinClosures = thin, rsPapplyHeads = heads}
   program <- buildProgramM Map.empty Map.empty includeDocs [] es translateSegment getRustSchemaTable closureTable
   -- structDocs go in the schema-table section; the closure dispatch wrappers are
   -- free functions spliced into the signatures section.

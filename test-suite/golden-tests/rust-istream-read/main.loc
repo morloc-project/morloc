@@ -3,7 +3,7 @@
 -- Covers the stream-reader intrinsic family in a Rust pool:
 --   * @open path :: IStream T  -- forward-only reader
 --   * @next handle             -- materialise the current sub-packet as [a]
---   * @open path :: IFile T    -- random-access view
+--   * @open path :: IFile [T]  -- random-access view
 --   * @stream ifile            -- derive an IStream from an IFile
 --   * @flen handle             -- element count of an IFile
 --   * @fschema path            -- element schema string, without opening
@@ -45,7 +45,7 @@ testNextEofTwice path = do
 testStreamFromIFile :: Str -> <IO> [Int]
 testStreamFromIFile path = do
   @save 0 path [11, 22, 33]
-  Ok f <- @open path :: <IO> (Try Str (IFile Int))
+  Ok f <- @open path :: <IO> (Try Str (IFile [Int]))
   s <- @stream f
   Ok _tailv93 <- @next s
   _tailv93
@@ -62,7 +62,7 @@ testIntList path = do
 testLength :: Str -> <IO> Int
 testLength path = do
   @save 0 path [1, 2, 3, 4, 5, 6, 7]
-  Ok f <- @open path :: <IO> (Try Str (IFile Int))
+  Ok f <- @open path :: <IO> (Try Str (IFile [Int]))
   Ok _tailv95 <- @flen f
   _tailv95
 

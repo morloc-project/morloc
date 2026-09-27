@@ -1429,7 +1429,7 @@ pub unsafe extern "C" fn mlc_concat(
     }
 }
 
-/// `@stream :: IFile a -> <IO> IStream a`: open a fresh IStream slot
+/// `@stream :: IFile [a] -> <IO> IStream a`: open a fresh IStream slot
 /// bound to the same path as the source IFile.
 #[no_mangle]
 pub unsafe extern "C" fn mlc_stream(

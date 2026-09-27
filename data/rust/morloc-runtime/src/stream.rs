@@ -4229,7 +4229,7 @@ pub const STDIO_SENTINEL_STD: &str = "-";
 /// Sentinel path for STDERR (OStream).
 pub const STDIO_SENTINEL_ERR: &str = "-2";
 
-/// `@stream :: IFile a -> <IO> IStream a`: open a fresh IStream slot
+/// `@stream :: IFile [a] -> <IO> IStream a`: open a fresh IStream slot
 /// at the same path as the given IFile handle. The two handles have
 /// independent cursors (the new IStream walks from `body_start`).
 pub fn shared_derive_istream(ifile_handle: i64) -> Result<i64, MorlocError> {
@@ -6372,7 +6372,7 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
 /// and the FOOTER_FINAL marker. fdatasync before returning so the
 /// on-disk file is consistent before the fd is closed.
 ///
-/// `@stream :: IFile a -> <IO> IStream a`: open a fresh ISTREAM handle
+/// `@stream :: IFile [a] -> <IO> IStream a`: open a fresh ISTREAM handle
 /// bound to the same path as the source IFile. Independent fd + mmap +
 /// cursor so the two handles can be walked concurrently.
 pub fn derive_istream(ifile_handle: i64) -> Result<i64, MorlocError> {

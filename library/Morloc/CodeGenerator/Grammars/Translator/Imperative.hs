@@ -185,7 +185,7 @@ data IExpr
       --   (for C++ template), handle expression. Per-language wrappers
       --   call mlc_next and deserialise via from_voidstar<List<T>>.
   | IIntrinsicStream IExpr
-      -- ^ @stream :: IFile a -> <IO> IStream a: derive an IStream
+      -- ^ @stream :: IFile [a] -> <IO> IStream a: derive an IStream
       --   handle from an open IFile handle (independent fd/mmap/cursor).
   | IIntrinsicOpenOStream Int IExpr
       -- ^ @open :: <IO> (OStream a): schemaId of the list-of-element

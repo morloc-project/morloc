@@ -448,7 +448,7 @@ data Intrinsic
                     -- current sub-packet and advance the cursor. Returns an
                     -- empty list at EOF (further calls keep returning empty).
                     -- A mid-stream decode failure is an Err arm.
-  | IntrStream      -- ^ @stream :: IFile a -> <IO> IStream a@ -- derive a
+  | IntrStream      -- ^ @stream :: IFile [a] -> <IO> IStream a@ -- derive a
                     -- forward-only IStream from an open IFile, bound to the
                     -- same path with an independent fd, mmap, and cursor.
   | IntrWrite       -- ^ @write :: Int -> OStream a -> [a] -> <IO> (Try Str ())@ --

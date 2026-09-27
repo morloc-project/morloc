@@ -192,21 +192,49 @@ struct IFileWalkArg {
 // schema is fixed for the process lifetime (parsed once into the pool's schema
 // table), so its CSchema conversion is cached per schema -- keyed by the stable
 // &'static Schema address -- instead of being rebuilt and freed on every
-// dispatch. Built once per thread per schema and intentionally never freed
-// (bounded: one entry per distinct schema). This removes a full CSchema-tree
-// allocate + free from the per-manifold-call hot path (put_value always; the
-// get_value SHM path).
-thread_local! {
-    static CSCHEMA_CACHE: RefCell<HashMap<usize, *mut CSchema>> = RefCell::new(HashMap::new());
+// dispatch. Built once per thread per schema and freed when the thread ends
+// (bounded per thread: one entry per distinct schema). A pool worker lives as
+// long as the pool, but a sourced function may spawn short-lived threads that
+// call manifolds, and a cache outliving those would grow with every call. This
+// removes a full CSchema-tree allocate + free from the per-manifold-call hot
+// path (put_value always; the get_value SHM path).
+struct CSchemaCache(RefCell<HashMap<usize, *mut CSchema>>);
+
+impl Drop for CSchemaCache {
+    fn drop(&mut self) {
+        for (_key, cs) in self.0.borrow_mut().drain() {
+            #[cfg(test)]
+            {
+                let mut live = LIVE_CSCHEMAS.lock().unwrap();
+                if let Some(i) = live.iter().position(|k| *k == _key) {
+                    live.swap_remove(i);
+                }
+            }
+            unsafe { CSchema::free(cs) };
+        }
+    }
 }
+
+thread_local! {
+    static CSCHEMA_CACHE: CSchemaCache = CSchemaCache(RefCell::new(HashMap::new()));
+}
+
+// Schemas whose conversion a thread has cached and not yet freed, one entry
+// per cached conversion. Test-only bookkeeping for the cache's lifetime.
+#[cfg(test)]
+static LIVE_CSCHEMAS: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
 
 #[inline]
 fn cschema_of(schema: &Schema) -> *mut CSchema {
     let key = schema as *const Schema as usize;
     CSCHEMA_CACHE.with(|c| {
-        *c.borrow_mut()
+        *c.0.borrow_mut()
             .entry(key)
-            .or_insert_with(|| CSchema::from_rust(schema))
+            .or_insert_with(|| {
+                #[cfg(test)]
+                LIVE_CSCHEMAS.lock().unwrap().push(key);
+                CSchema::from_rust(schema)
+            })
     })
 }
 
@@ -3202,6 +3230,29 @@ pub fn install_panic_hook() {
 mod tests {
     use super::*;
     use morloc_runtime_types::schema::parse_schema;
+
+    /// A thread that ends frees the schema conversions it cached. A sourced
+    /// function may spawn short-lived threads that call manifolds, so a cache
+    /// outliving its thread would grow with every such call.
+    #[test]
+    fn cschema_cache_is_freed_when_its_thread_ends() {
+        let schema: &'static Schema = Box::leak(Box::new(parse_schema("i4").expect("parse schema")));
+        let key = schema as *const Schema as usize;
+        // Joined explicitly: a scope may end before its threads' locals are
+        // destroyed, and the assertion is about what those locals free.
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    cschema_of(schema);
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("thread");
+        }
+        let live = LIVE_CSCHEMAS.lock().unwrap().iter().filter(|k| **k == key).count();
+        assert_eq!(live, 0, "cached schema conversions outlived their threads");
+    }
 
     /// Serialize `value` into a fresh buffer and read it back, exercising the
     /// same shm_size/write/read the production pool uses.
