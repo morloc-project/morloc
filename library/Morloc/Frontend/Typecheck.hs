@@ -1693,6 +1693,10 @@ intrinsicTypeG g IntrRead _ =
 intrinsicTypeG g IntrOpen _ =
   let (g', openType) = newvar "open_" g
   in (g', EffectU ioEffectSet (BT.tryU BT.strU openType))
+-- @unpack: the decoded type is resolved by the synthesized ascription.
+intrinsicTypeG g IntrUnpack _ =
+  let (g', unpackType) = newvar "unpack_" g
+  in (g', EffectU ioEffectSet unpackType)
 -- @close: arg is any handle type (a fresh existential); user-side use
 -- always has the handle bound to a known type, so this resolves
 -- without needing ascription.
@@ -1761,6 +1765,8 @@ intrinsicType IntrTypeof = BT.strU
 intrinsicType IntrShow = BT.strU
 intrinsicType IntrRead = BT.tryU BT.strU (ExistU (TV "read_a") ([], Open) ([], Open))
 intrinsicType IntrDatafile = BT.strU
+intrinsicType IntrUnpack =
+  error "intrinsicType: IntrUnpack must be typed via intrinsicTypeG"
 -- IntrOpen and IntrClose flow through intrinsicTypeG (fresh existentials).
 intrinsicType IntrOpen =
   error "intrinsicType: IntrOpen must be typed via intrinsicTypeG"
@@ -1867,6 +1873,8 @@ checkIntrinsicArgs i g intr argTypes = do
         (IntrRead, [strT]) -> subtype' i strT BT.strU g
         -- @datafile: Str -> Str (path must be string literal)
         (IntrDatafile, [pathT]) -> subtype' i pathT BT.strU g
+        -- @unpack: [U8] -> <IO> a
+        (IntrUnpack, [bytesT]) -> subtype' i bytesT (BT.listU BT.u8U) g
         -- @open: Str -> <IO> a (return type resolved by user ascription)
         (IntrOpen, [pathT]) -> subtype' i pathT BT.strU g
         -- @close: any handle type -> <IO> ()

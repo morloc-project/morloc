@@ -360,6 +360,34 @@ pub struct Command {
     /// `--' with:` atoms.
     #[serde(default)]
     pub terminals: Vec<Terminal>,
+
+    /// The compiler-synthesized entry that reads `@parse` arguments before
+    /// running this command. Present when any argument has formats.
+    #[serde(default)]
+    pub parse_entry: Option<String>,
+}
+
+/// The `@parse` formats of one argument.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ArgParse {
+    /// Declared formats, in declaration order. A format's position is the
+    /// index of its selector slot in the command's `parse_entry`.
+    pub formats: Vec<ParseFormat>,
+    /// True for an `IStream`/`IFile` argument: the parser writes the stream
+    /// to a path the nexus supplies, and the entry reads it back.
+    #[serde(default)]
+    pub stage: bool,
+}
+
+/// One `@parse` format of an argument.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ParseFormat {
+    /// The name a value's `<name>:` prefix selects the format by.
+    pub name: String,
+    /// Lowercase extensions, each with its leading `.`, that select the
+    /// format when the value has no prefix.
+    #[serde(default)]
+    pub exts: Vec<String>,
 }
 
 /// One terminal-action flag registered on a parent command.
@@ -394,6 +422,16 @@ pub struct Terminal {
 impl Command {
     pub fn is_pure(&self) -> bool {
         self.cmd_type == CmdType::Pure
+    }
+}
+
+impl Arg {
+    /// The argument's `@parse` formats, if it declares any.
+    pub fn parse(&self) -> Option<&ArgParse> {
+        match self {
+            Arg::Positional { parse, .. } | Arg::Optional { parse, .. } => parse.as_ref(),
+            _ => None,
+        }
     }
 }
 
@@ -760,6 +798,11 @@ pub enum Arg {
         /// `check.*:` / `list.*:` configuration.
         #[serde(default)]
         format: Option<String>,
+        /// `@parse` formats. A value with a format prefix or a declared
+        /// extension is a path, read by that format's handler in the
+        /// command's `parse_entry`.
+        #[serde(default)]
+        parse: Option<ArgParse>,
     },
     /// An optional CLI argument with a long/short option name.
     #[serde(rename = "opt")]
@@ -836,6 +879,9 @@ pub enum Arg {
         /// User-facing one-line "Format:" hint.
         #[serde(default)]
         format: Option<String>,
+        /// `@parse` formats. See the corresponding [`Arg::Positional`] field.
+        #[serde(default)]
+        parse: Option<ArgParse>,
     },
     /// A pure boolean flag toggle. Carries no type, schema, or
     /// constraints because it has no payload -- flipping the flag

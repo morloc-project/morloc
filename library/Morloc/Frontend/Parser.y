@@ -1354,6 +1354,7 @@ toDState ps = DState
   , dsNamespaces = Set.empty
   , dsDataCtors = Map.empty
   , dsStreamElems = psStreamElems ps
+  , dsErrorNotes = Map.empty
   }
 
 fromDState :: PState -> DState -> PState

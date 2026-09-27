@@ -220,13 +220,14 @@ terminalActionRoots d rootCmds =
   where
     ns = DAG.nodes d
     mangledNames =
-      Set.fromList
-        [ mangleTerminalName name (wsLong w)
+      Set.fromList $ concat
+        [ terminals ++ parseEntries
         | node <- ns
         , (name, _, et) <- AST.findSignatures node
         , Set.member name rootCmds
-        , ArgDocSig cmdDoc _ _ <- [edocs et]
-        , w <- docWith cmdDoc
+        , ArgDocSig cmdDoc argDocs _ <- [edocs et]
+        , let terminals = [ mangleTerminalName name (wsLong w) | w <- docWith cmdDoc ]
+              parseEntries = map parseEntryName (parseEntryTargets name cmdDoc argDocs)
         ]
     exportIndex =
       Map.fromList

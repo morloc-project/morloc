@@ -163,6 +163,9 @@ data MorlocState = MorlocState
   , stateTermDocs :: Map.Map EVar [Text]
   -- ^ Declaration-level docstrings keyed by term name. Takes precedence over
   -- signature docstrings for the command-level description.
+  , stateErrorNotes :: Map Int MDoc
+  -- ^ A line prefixed to an error raised at the indexed expression: for a
+  -- synthesized expression, the directive it was synthesized from.
   , stateStreamElems :: Map.Map EVar TypeU
   -- ^ For each command that streams its output through @collect, the batch
   -- type it writes to standard output. Such a command returns @()@, so the
@@ -987,6 +990,7 @@ instance Defaultable MorlocState where
       , stateName = Map.empty
       , stateTermDocs = Map.empty
       , stateStreamElems = Map.empty
+      , stateErrorNotes = Map.empty
       , stateManifoldConfig = Map.empty
       , stateLogTemplate = Nothing
       , stateBenchTemplate = Nothing

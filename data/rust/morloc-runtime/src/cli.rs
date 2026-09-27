@@ -55,14 +55,13 @@ fn arg_looks_like_file_path(arg: &str) -> bool {
 /// errors clearly instead of silently reading zero bytes after the
 /// first reader drained it.
 ///
-/// The flag is reset by the dispatch entry point so a long-running
-/// nexus that handles multiple commands in sequence (currently not a
-/// thing, but cheap insurance) doesn't carry state across commands.
+/// A CLI run parses its arguments once per process, so nothing resets
+/// the flag there. A process that parses several commands' arguments
+/// must call [`reset_stdin_claim`] before each.
 static STDIN_CLAIMED: AtomicBool = AtomicBool::new(false);
 
-/// Reset the stdin-claim flag. Called at the start of each top-level
-/// dispatch so per-command isolation holds even if the runtime is
-/// reused across commands in one process.
+/// Reset the stdin-claim flag before parsing another command's
+/// arguments in the same process.
 pub fn reset_stdin_claim() {
     STDIN_CLAIMED.store(false, Ordering::Relaxed);
 }

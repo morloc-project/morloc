@@ -415,9 +415,6 @@ const PARK_LIMIT: Duration = Duration::from_secs(60);
 /// hit the same EPIPE again.
 static BROKEN_PIPE: AtomicBool = AtomicBool::new(false);
 
-/// Global tmpdir path (set once in main, read during cleanup).
-static TMPDIR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
 /// Async-signal-safe view of the SHM basename prefix (`"<basename>-\0"`)
 /// so `signal_exit_handler` can build `<basename>-<idx>` names without
 /// allocating or locking. `Mutex`-guarded `COMMON_BASENAME` in shm.rs
@@ -510,6 +507,7 @@ extern "C" fn signal_exit_handler(sig: libc::c_int) {
         }
     }
     unsafe { sweep_shm_segments() };
+    unsafe { crate::sigrm::remove_registered() };
     unsafe { libc::_exit(128 + sig) };
 }
 
@@ -632,9 +630,9 @@ pub fn install_signal_handlers() {
     }
 }
 
-/// Set the global tmpdir for cleanup.
+/// Remove the run tmpdir when the run ends.
 pub fn set_tmpdir(path: String) {
-    let _ = TMPDIR.set(path);
+    crate::sigrm::register(&path);
 }
 
 /// Publish the current basename with its trailing `-` so the signal
@@ -797,10 +795,6 @@ pub fn path_to_cstring(p: &Path) -> Result<CString, String> {
     CString::new(s).map_err(|_| format!("path '{}' contains NUL", p.display()))
 }
 
-/// Get the tmpdir path.
-pub fn get_tmpdir() -> Option<&'static str> {
-    TMPDIR.get().map(|s| s.as_str())
-}
 
 // ── Clean exit ─────────────────────────────────────────────────────────────
 
@@ -911,10 +905,8 @@ pub fn clean_exit(exit_code: i32) -> ! {
     // reaped, so every completed call has been written.
     crate::runlog::emit_benchmark_summary();
 
-    // Clean up tmpdir
-    if let Some(dir) = get_tmpdir() {
-        let _ = std::fs::remove_dir_all(dir);
-    }
+    // Remove the tmpdir and every other directory the run registered.
+    unsafe { crate::sigrm::remove_registered() };
 
     // Render and emit the run-scope epilogue BEFORE finalize writes
     // summary.json. The epilogue line lands on stderr (and the rundir

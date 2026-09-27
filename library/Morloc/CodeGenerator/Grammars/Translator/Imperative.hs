@@ -157,6 +157,7 @@ data IExpr
   | IIntrinsicHash Int IExpr -- schemaId, data -> hex string
   | IIntrinsicShow Int IExpr -- schemaId, data -> JSON string
   | IIntrinsicRead Int (Maybe IType) IExpr -- schemaId, returnType, json_string -> typed data (nullable)
+  | IIntrinsicUnpack Int (Maybe IType) IExpr -- schemaId, returnType, packet bytes -> typed data
   | IIntrinsicOpen Word8 IExpr -- kind byte (IFile=0, IStream=1, OStream=2), path -> handle
   | IIntrinsicClose IExpr -- handle -> ()
   | IIntrinsicUnlinkTemp IExpr
@@ -1629,6 +1630,10 @@ lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrRead (Just schema) [strDocs])
   -- pass the resolved type so `_mlc_read<T>` gets its template arg.
   innerType <- lcTypeOf cfg (typeFof origExpr)
   return $ strDocs {poolExpr = lcPrintExpr cfg (IIntrinsicRead sid innerType (IRawExpr (render (poolExpr strDocs))))}
+lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrUnpack (Just schema) [bytesDocs]) = do
+  sid <- lcRegisterSchema cfg schema
+  innerType <- lcTypeOf cfg (typeFof origExpr)
+  return $ bytesDocs {poolExpr = lcPrintExpr cfg (IIntrinsicUnpack sid innerType (IRawExpr (render (poolExpr bytesDocs))))}
 -- @schema and @typeof erase their argument: the result is a compile-time
 -- constant string (the schema or user-facing type name), already resolved
 -- into the Intrinsic node's schema slot by Serialize.hs. Emit it as a

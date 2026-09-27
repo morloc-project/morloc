@@ -115,6 +115,7 @@ pub fn parse_run(
         let values = extract_values(cmd, &matches);
         let (cmd_index, render) =
             redirect_via_terminal(manifest, cmd_index0, cmd, &matches, format_explicit);
+        let (cmd_index, values) = crate::parse_arg::redirect(manifest, cmd_index, values);
         return ParsedCommand { cmd_index, values, render };
     }
 
@@ -142,6 +143,7 @@ pub fn parse_run(
     let values = extract_values(cmd, chosen_matches);
     let (cmd_index, render) =
         redirect_via_terminal(manifest, cmd_index, cmd, chosen_matches, format_explicit);
+    let (cmd_index, values) = crate::parse_arg::redirect(manifest, cmd_index, values);
     ParsedCommand { cmd_index, values, render }
 }
 
@@ -580,13 +582,20 @@ fn build_command_args(
                     // passed after a single occurrence (`--xs 1 2 3`).
                     a = a.num_args(1..).action(ArgAction::Append);
                 }
-                a = a.help(leak(&render_arg_help(
+                let mut help = render_arg_help(
                     desc,
                     type_desc.as_deref(),
                     None,
                     format.as_deref(),
                     crate::json_help::schema_constructor_line(schema.as_deref()),
-                )));
+                );
+                if let Some(l) = formats_line(marg.parse()) {
+                    if !help.is_empty() {
+                        help.push('\n');
+                    }
+                    help.push_str(&l);
+                }
+                a = a.help(leak(&help));
                 cmd = cmd.arg(a);
             }
             ManifestArg::Flag {
@@ -885,6 +894,34 @@ fn add_group_entry_arg(
 /// Project an [`ArgMatches`] for the chosen command back onto the
 /// manifest arg list, producing one [`ArgValue`] per manifest slot in
 /// declaration order.
+/// Read one argv token of argument `i`. An argument with `@parse` formats is
+/// first checked for a format prefix or extension; a token that selects a
+/// format is a path its handler reads, so none of the value's shape applies.
+fn token_value(
+    raw: String,
+    marg: &ManifestArg,
+    checks: &[crate::manifest::Check],
+    source: crate::manifest::SourceAtom,
+    quoted: bool,
+    i: usize,
+) -> ArgValue {
+    use crate::parse_arg::{select, Selection};
+    let label = format!("argument #{}", i);
+    let raw = match marg.parse().map(|p| select(&raw, p)) {
+        Some(Selection::Format { index, path }) => {
+            if path.is_empty() {
+                crate::runlog::die_with_error(&format!("{}: no path after the format prefix in '{}'", label, raw));
+            }
+            let handed = if path == "-" { "/dev/stdin" } else { path };
+            return ArgValue::Parsed { format: index, path: handed.to_string(), shown: path.to_string() };
+        }
+        Some(Selection::Morloc(rest)) => rest.to_string(),
+        Some(Selection::Unselected) | None => raw,
+    };
+    crate::parse_arg::note_unparsed_token(&raw);
+    ArgValue::Value(preprocess_cli_value(raw, checks, source, quoted, &label))
+}
+
 fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> {
     let mut out = Vec::with_capacity(cmd.args.len());
     for (i, marg) in cmd.args.iter().enumerate() {
@@ -902,6 +939,7 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                         .get_many::<String>(&id)
                         .map(|it| it.cloned().collect())
                         .unwrap_or_default();
+                    toks.iter().for_each(|t| crate::parse_arg::note_unparsed_token(t));
                     out.push(ArgValue::Many { tokens: toks, literal: *q });
                 } else if *stdin {
                     // Optional stdin positional. A supplied value (a path or
@@ -923,18 +961,14 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                             "/dev/stdin".to_string()
                         }
                     };
-                    let v = preprocess_cli_value(raw, checks, *source, *q, &format!("argument #{}", i));
-                    out.push(ArgValue::Value(v));
+                    out.push(token_value(raw, marg, checks, *source, *q, i));
                 } else {
                     // A value is guaranteed for a required positional; an
                     // optional one may be absent, and absent means null. The
                     // null is pushed bare: with no argv token there is nothing
                     // for the checks or the source/form shape to act on.
                     match matches.get_one::<String>(&id).cloned() {
-                        Some(val) => {
-                            let v = preprocess_cli_value(val, checks, *source, *q, &format!("argument #{}", i));
-                            out.push(ArgValue::Value(v));
-                        }
+                        Some(val) => out.push(token_value(val, marg, checks, *source, *q, i)),
                         None => out.push(ArgValue::Null),
                     }
                 }
@@ -969,6 +1003,7 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                             .get_many::<String>(&id)
                             .map(|it| it.cloned().collect())
                             .unwrap_or_default();
+                        toks.iter().for_each(|t| crate::parse_arg::note_unparsed_token(t));
                         out.push(ArgValue::Many { tokens: toks, literal: *q });
                     } else if let Some(def) = default_val {
                         out.push(ArgValue::Value(def.clone()));
@@ -980,8 +1015,7 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                         .get_one::<String>(&id)
                         .cloned()
                         .expect("CLI source guarantees a value");
-                    let v = preprocess_cli_value(v, checks, *source, *q, &format!("argument #{}", i));
-                    out.push(ArgValue::Value(v));
+                    out.push(token_value(v, marg, checks, *source, *q, i));
                 } else if let Some(def) = default_val {
                     out.push(ArgValue::Value(def.clone()));
                 } else {
@@ -1328,6 +1362,26 @@ fn render_arg_help(
     lines.join("\n")
 }
 
+/// The help line listing an argument's `@parse` formats, each with the
+/// extensions that select it, e.g.
+/// `formats: fastq (.fq .fastq), fasta (.fa), morloc (the default)`.
+fn formats_line(parse: Option<&crate::manifest::ArgParse>) -> Option<String> {
+    let p = parse?;
+    let mut items: Vec<String> = p
+        .formats
+        .iter()
+        .map(|f| {
+            if f.exts.is_empty() {
+                f.name.clone()
+            } else {
+                format!("{} ({})", f.name, f.exts.join(" "))
+            }
+        })
+        .collect();
+    items.push("morloc (the default)".to_string());
+    Some(format!("formats: {}", items.join(", ")))
+}
+
 /// Render the "Positional arguments:" block for a command's
 /// positional args, replacing clap's `<argN>` bracketed default with
 /// a numbered list (`1:`, `2:`, ...). Indices are right-aligned and
@@ -1407,6 +1461,9 @@ fn render_positional_block(mcmd: &ManifestCommand) -> String {
             if !f.trim().is_empty() {
                 lines.push(format!("format: {}", f));
             }
+        }
+        if let Some(l) = formats_line(marg.parse()) {
+            lines.push(l);
         }
         // Say that a slot may be left out. The type line shows `?T`, which
         // states that the value may be null but not that the argument may be

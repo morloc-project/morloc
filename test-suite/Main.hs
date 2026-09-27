@@ -85,6 +85,7 @@ unitTests =
   , postArgPropagationTests
   , tuplePatternLambdaTests
   , withDocstringTests
+  , parseDocstringTests
   , epilogueDocstringTests
   , streamIntrinsicTests
   , patternSelectorTests

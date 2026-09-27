@@ -610,6 +610,16 @@ T _mlc_read(Schema* schema, const std::string& json_str) {
     return result;
 }
 
+// Decode a morloc packet held as bytes, exactly as an argument packet is
+// decoded. @unpack is synthesized for `@parse` commands only.
+template <typename T>
+T _mlc_unpack(Schema* schema, const std::vector<uint8_t>& packet) {
+    if (packet.size() < sizeof(morloc_packet_header_t)) {
+        throw MorlocException("@unpack: packet is shorter than its header");
+    }
+    return _get_value<T>(packet.data(), schema);
+}
+
 // Load a value from file, auto-detecting format.
 // @load :: Str -> <IO, Err> a. Missing file / decode failure throws
 // MorlocException so _mlc_catch can intercept.
@@ -656,6 +666,12 @@ struct _MlcThrowHelper {
     template<typename T> operator T() const { std::terminate(); }
 };
 inline _MlcThrowHelper _mlc_throw(const std::string& msg) {
+    throw MorlocException(msg);
+}
+// A raise whose result type is known, for a position the catch-all
+// conversion above cannot fill unambiguously.
+template <typename T>
+T _mlc_throw_as(const std::string& msg) {
     throw MorlocException(msg);
 }
 // @catch: run `fallible()`; on a recoverable error, run `fallback()` and

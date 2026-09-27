@@ -405,6 +405,15 @@ fn command_to_json(cmd: &Command, manifest: &Manifest) -> Value {
 /// Render one manifest [`Arg`] to its lossless JSON object. `pos_index` is the
 /// zero-based position among positional args (ignored for non-positionals).
 fn arg_to_json(arg: &Arg, pos_index: usize) -> Value {
+    let mut v = arg_fields_json(arg, pos_index);
+    // Present only on an argument with `@parse` formats.
+    if let (Some(p), Value::Object(obj)) = (arg.parse(), &mut v) {
+        obj.insert("parse".into(), parse_json(p));
+    }
+    v
+}
+
+fn arg_fields_json(arg: &Arg, pos_index: usize) -> Value {
     match arg {
         Arg::Positional {
             schema,
@@ -617,6 +626,17 @@ fn type_object(
         obj.insert("structure".into(), schema_to_json_schema(p));
     }
     Value::Object(obj)
+}
+
+/// An argument's `@parse` formats as JSON: each format's name and the
+/// extensions that select it. The CLI reads formats; daemon, MCP and
+/// call-packet callers pass values.
+fn parse_json(p: &morloc_manifest::ArgParse) -> Value {
+    json!({
+        "formats": p.formats.iter()
+            .map(|f| json!({ "name": f.name, "exts": f.exts }))
+            .collect::<Vec<_>>(),
+    })
 }
 
 /// The `source:`/`form:`/`check.*`/`list.*` CLI-shape grammar as JSON.

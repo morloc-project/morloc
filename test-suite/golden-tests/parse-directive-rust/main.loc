@@ -1,0 +1,33 @@
+-- `@parse` with Rust commands: a Rust value parser, and a Rust consumer of a
+-- stream staged by a Python producer (batches of three) and by a Rust
+-- producer (batches of two).
+module main (total, sizes)
+
+import root-rust
+import root-py
+
+source Rust from "parsers.rs" ("read_csv" as readCsvRs, "produce" as produceRs, "sum_ints" as sumRs, "size" as sizeRs)
+source Py from "parsers.py" ("producePy")
+
+readCsvRs :: Str -> <IO> [Int]
+produceRs :: Str -> ([Int] -> <IO> ()) -> <IO> ()
+sumRs :: [Int] -> Int
+sizeRs :: [Int] -> Int
+producePy :: Str -> ([Int] -> <IO> ()) -> <IO> ()
+
+total ::
+  --' @parse csv=readCsvRs .csv
+  [Int] ->
+  Int
+total xs = sumRs xs
+
+sizes ::
+  --' @parse pylines=producePy .ptxt
+  --' @parse lines=produceRs .txt
+  IStream Int ->
+  <IO> (Int, Int, Int, Int)
+sizes s = do
+  Ok xs <- @next s
+  Ok ys <- @next s
+  Ok zs <- @next s
+  (sizeRs xs, sizeRs ys, sizeRs zs, sumRs xs + sumRs ys + sumRs zs)

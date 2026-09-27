@@ -180,6 +180,16 @@ function get_value(packet::Ptr{UInt8}, schema_str::String)
     return from_msgpack(raw, schema)
 end
 
+"""
+    mlc_unpack(schema_str, packet_bytes) -> Julia value
+
+Decode a morloc packet held as bytes, as an argument packet is decoded.
+"""
+function mlc_unpack(schema_str::String, packet_bytes)
+    bytes = Vector{UInt8}(packet_bytes)
+    GC.@preserve bytes get_value(pointer(bytes), schema_str)
+end
+
 # -- Error packet --
 
 function make_fail_packet(msg::String)

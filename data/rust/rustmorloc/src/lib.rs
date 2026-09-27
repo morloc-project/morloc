@@ -2719,6 +2719,15 @@ pub unsafe fn show<T: ToVoidstar>(value: &T, schema: &Schema) -> String {
     s
 }
 
+/// Decode a morloc packet held as bytes, as an argument packet is decoded.
+/// `@unpack` is synthesized for `@parse` commands only.
+pub unsafe fn unpack<T: FromVoidstar>(packet: &[u8], schema: &Schema) -> T {
+    if packet.len() < PKT_HEADER_SIZE {
+        morloc_throw("@unpack: packet is shorter than its header");
+    }
+    get_value::<T>(packet.as_ptr(), schema)
+}
+
 /// @read: parse JSON text into a typed value; a parse failure is a catchable
 /// morloc error (so `@catch` can recover it).
 pub unsafe fn read<T: FromVoidstar>(s: &str, schema: &Schema) -> T {

@@ -1,0 +1,145 @@
+-- `@parse`: an argument given as a file in a declared format, selected by a
+-- `<name>:` prefix or by extension, is read by that format's handler before
+-- the command runs. Handlers and commands are split across C++ and Python in
+-- both directions; the stream consumers record batch sizes, which must be
+-- exactly the batches the producer emitted (C++ emits pairs, Python
+-- triples).
+module main
+  ( total
+  , sizes
+  , sizesPy
+  , pair
+  , shown
+  , extra
+  , firstOf
+  , recorded
+  , writeStream
+  , shaped
+  , twoStdin
+  )
+
+import root-cpp
+import root-py
+
+source Cpp from "parsers.hpp"
+  ( "readCsvCpp", "produceCpp", "sumCpp", "sizeCpp" )
+
+source Py from "parsers.py"
+  ( "readCsvPy", "producePy", "sumPy", "sizePy", "sumOpt", "showTotal", "mark"
+  , "countStrs", "strLen" )
+
+readCsvCpp :: Str -> <IO> [Int]
+produceCpp :: Str -> ([Int] -> <IO> ()) -> <IO> ()
+sumCpp :: [Int] -> Int
+sizeCpp :: [Int] -> Int
+readCsvPy :: Str -> <IO> [Int]
+producePy :: Str -> ([Int] -> <IO> ()) -> <IO> ()
+sumPy :: [Int] -> Int
+sizePy :: [Int] -> Int
+sumOpt :: ?[Int] -> Int -> Int
+showTotal :: Int -> Str
+mark :: Str -> <IO> ()
+countStrs :: [Str] -> Int
+strLen :: Str -> Int
+
+total ::
+  --' numbers to add
+  --' @metavar NUMS
+  --' @parse csv=readCsvCpp .csv
+  --' @parse pycsv=readCsvPy .pcsv
+  [Int] ->
+  Int
+total xs = sumCpp xs
+
+sizes ::
+  --' @parse lines=produceCpp .txt
+  --' @parse pylines=producePy .txt.gz .ptxt
+  IStream Int ->
+  <IO> (Int, Int, Int, Int)
+sizes s = do
+  Ok xs <- @next s
+  Ok ys <- @next s
+  Ok zs <- @next s
+  (sizeCpp xs, sizeCpp ys, sizeCpp zs, sumCpp xs + sumCpp ys + sumCpp zs)
+
+sizesPy ::
+  --' @parse lines=produceCpp .txt
+  IStream Int ->
+  <IO> (Int, Int, Int, Int)
+sizesPy s = do
+  Ok xs <- @next s
+  Ok ys <- @next s
+  Ok zs <- @next s
+  (sizePy xs, sizePy ys, sizePy zs, sumPy xs + sumPy ys + sumPy zs)
+
+pair ::
+  --' @parse csv=readCsvPy .csv
+  [Int] ->
+  --' @parse lines=produceCpp .txt
+  IStream Int ->
+  <IO> Int
+pair xs s = do
+  Ok ys <- @next s
+  sumPy xs + sumPy ys
+
+--' @render -p/--plain=showTotal @default
+shown ::
+  --' @parse csv=readCsvCpp .csv
+  [Int] ->
+  Int
+shown xs = sumPy xs
+
+extra ::
+  --' @arg -x/--extra
+  --' @default null
+  --' @parse csv=readCsvPy .csv
+  ?[Int] ->
+  Int ->
+  Int
+extra xs n = sumOpt xs n
+
+firstOf ::
+  --' @parse lines=producePy .txt
+  IFile [Int] ->
+  Int
+firstOf f = .[2] f
+
+recorded ::
+  Str ->
+  --' @parse csv=readCsvCpp .csv
+  [Int] ->
+  <IO> Int
+recorded path xs = do
+  mark path
+  sumCpp xs
+
+writeStream :: Str -> <IO> ()
+writeStream path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
+  @write 0 o [100, 200]
+  @flush o
+  @write 0 o [300]
+  @close o
+
+-- Arguments without formats keep their declared shape when another argument
+-- selects one.
+shaped ::
+  --' @parse csv=readCsvPy .csv
+  [Int] ->
+  --' @form list
+  [Str] ->
+  --' @source file
+  Str ->
+  Int
+shaped xs names title = sumPy xs + countStrs names + strLen title
+
+-- A parser and another argument cannot both read stdin.
+twoStdin ::
+  --' @parse lines=produceCpp .txt
+  IStream Int ->
+  --' @many
+  [Str] ->
+  <IO> Int
+twoStdin s names = do
+  Ok xs <- @next s
+  sumPy xs + countStrs names

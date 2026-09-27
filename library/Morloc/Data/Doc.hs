@@ -32,6 +32,7 @@ import qualified Data.Text as DT
 import qualified Data.Text.Encoding as DTE
 import Prettyprinter hiding (annotate, (<>))
 import Prettyprinter.Render.Text
+import Text.Printf (printf)
 
 -- | Render a 'Doc' to strict 'DT.Text' using default layout options
 render :: Doc ann -> DT.Text
@@ -79,7 +80,11 @@ escapeStringLit = DT.concatMap escapeChar
     -- placeholders ({c:red} etc.) were resolved to ANSI CSI sequences.
     -- Octal \033 is interpreted identically by C, C++, Python, and R.
     escapeChar '\ESC' = "\\033"
-    escapeChar c = DT.singleton c
+    -- Every other control character is written as a 3-digit octal escape,
+    -- so generated source never holds a raw control byte.
+    escapeChar c
+      | c < ' ' || c == '\DEL' = DT.pack (printf "\\%03o" (fromEnum c))
+      | otherwise = DT.singleton c
 
 -- | Replace occurrences of a quote terminator with its escaped form.
 escapeQuotes :: DT.Text -> DT.Text -> DT.Text -> DT.Text

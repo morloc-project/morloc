@@ -116,6 +116,10 @@ module Morloc.Namespace.Type
   , Check (..)
   , ArgSource (..)
   , WithSpec (..)
+  , ParseSpec (..)
+  , parseEntryName
+  , parseEntryPrefix
+  , parseEntryTargets
   , FoldSpec (..)
   , mangleTerminalName
   , anonRecordVar
@@ -721,6 +725,17 @@ data WithSpec = WithSpec
   }
   deriving (Show, Ord, Eq)
 
+-- | One `@parse` declaration on a command argument. At the command line,
+-- a value prefixed with `<name>:`, or ending in one of 'psExts', is a path
+-- to a file in that format, and 'psHandler' reads it into the argument's
+-- value.
+data ParseSpec = ParseSpec
+  { psName    :: Text
+  , psHandler :: EVar
+  , psExts    :: [Text]  -- ^ lowercase, each starting with `.`
+  }
+  deriving (Show, Ord, Eq)
+
 -- | Compose a mangled entry-point name from an export's name and one
 -- of its `--' with:` long flags. Shared between the frontend (which
 -- synthesizes the AssE) and the nexus manifest emitter (which reads
@@ -746,7 +761,26 @@ anonRecordVar = TV "@REC"
 -- command menu but keeps them dispatchable via each parent command's
 -- terminal flags.
 isInternalTerminalName :: Text -> Bool
-isInternalTerminalName = DT.isPrefixOf "mlcp_"
+isInternalTerminalName t = DT.isPrefixOf "mlcp_" t || DT.isPrefixOf parseEntryPrefix t
+
+-- | The compiler-owned prefix of every name synthesized for `@parse`.
+parseEntryPrefix :: Text
+parseEntryPrefix = "mlcq_"
+
+-- | The name of the entry synthesized for a target command whose arguments
+-- declare `@parse` formats. The target is the command itself or one of its
+-- 'mangleTerminalName' commands.
+parseEntryName :: EVar -> EVar
+parseEntryName (EV t) = EV (parseEntryPrefix <> t)
+
+-- | The targets of a command's `@parse` entries, given its preamble and
+-- argument docstrings: the command and each of its `@with`/`@render`
+-- commands, or none when no argument declares a format.
+parseEntryTargets :: EVar -> ArgDocVars -> [ArgDocVars] -> [EVar]
+parseEntryTargets name cmdDoc argDocs
+  | any (not . null . docParse) argDocs =
+      name : [ mangleTerminalName name (wsLong w) | w <- docWith cmdDoc ]
+  | otherwise = []
 
 data ArgDocVars = ArgDocVars
   { docLines :: [Text]
@@ -768,6 +802,7 @@ data ArgDocVars = ArgDocVars
   , docListForm :: Maybe FormAtom
   , docListChecks :: [Check]
   , docWith :: [WithSpec]
+  , docParse :: [ParseSpec]
   , docMime :: Maybe Text
   , docEpilogues :: [[Text]]
     -- ^ `@epilogue` blocks: verbatim lines printed at the foot of the
@@ -837,6 +872,7 @@ instance Defaultable ArgDocVars where
       , docListForm = Nothing
       , docListChecks = []
       , docWith = []
+      , docParse = []
       , docMime = Nothing
       , docEpilogues = []
       }

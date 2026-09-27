@@ -474,7 +474,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     -- here as the body of the closure manifold that suspends it
     -- ('Suspension.lowerSuspensions'), typed by its result.
     nativeExpr m (MonoIntrinsic t@(Idx tidx gt) intr es)
-      | intr `elem` [IntrSave, IntrSaveM, IntrSaveJ, IntrLoad, IntrRead,
+      | intr `elem` [IntrSave, IntrSaveM, IntrSaveJ, IntrLoad, IntrRead, IntrUnpack,
                      IntrOpen, IntrClose, IntrFSchema,
                      IntrFLength, IntrStreamLayout, IntrNext, IntrStream,
                      IntrWrite, IntrAppend, IntrConcat, IntrFlush,
@@ -482,7 +482,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
                      IntrTell, IntrTmpfile,
                      IntrCellNew, IntrCellGet, IntrCellPut, IntrCellReduce,
                      IntrTry] = do
-          when (intr `elem` [IntrLoad, IntrRead, IntrNext, IntrOpen, IntrStdin]) $
+          when (intr `elem` [IntrLoad, IntrRead, IntrUnpack, IntrNext, IntrOpen, IntrStdin]) $
             Serial.checkReadDataType tidx intr gt
           tf <- inferType t
           esBase <- mapM (nativeExpr m) es
@@ -628,7 +628,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       -- The cell readers are the same shape: the runtime holds the wire
       -- form and hands it back, so a Packable accumulator needs its packer
       -- on the way out just as @load's result does.
-      | intr `elem` [IntrLoad, IntrRead, IntrCellGet, IntrCellReduce] = do
+      | intr `elem` [IntrLoad, IntrRead, IntrUnpack, IntrCellGet, IntrCellReduce] = do
           ast <- Serial.makeSerialAST m lang resultTf
           case ast of
             SerialPack _ (packer, _) ->
@@ -666,6 +666,11 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       -- For @read, the result type is Try Str a; the schema is for a.
       let dataType = stripTryF tf
       ast <- Serial.makeSerialAST m lang dataType
+      return . Just . render $ Serial.serialAstToMsgpackSchema ast
+    -- @unpack's result is the decoded value itself, which may be any type,
+    -- a user Try included, so nothing is stripped.
+    intrinsicSchema m IntrUnpack tf _ = do
+      ast <- Serial.makeSerialAST m lang tf
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m IntrIFileWalk tf _ = do
       -- The schema describes the result type the walker materializes

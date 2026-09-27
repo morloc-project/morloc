@@ -3322,6 +3322,33 @@ error:
     return NULL;
 }
 
+// @unpack: decode a morloc packet held as bytes (or as a list of ints), as
+// an argument packet is decoded.
+static PyObject* pybinding__mlc_unpack(PyObject* self, PyObject* args) {
+    const char* schema_str;
+    PyObject* data;
+    if (!PyArg_ParseTuple(args, "sO", &schema_str, &data)) {
+        return NULL;
+    }
+    PyObject* packet = PyBytes_FromObject(data);
+    if (packet == NULL) {
+        return NULL;
+    }
+    if ((size_t)PyBytes_GET_SIZE(packet) < sizeof(morloc_packet_header_t)) {
+        Py_DECREF(packet);
+        PyErr_SetString(PyExc_RuntimeError, "@unpack: packet is shorter than its header");
+        return NULL;
+    }
+    PyObject* inner = Py_BuildValue("(Os)", packet, schema_str);
+    Py_DECREF(packet);
+    if (inner == NULL) {
+        return NULL;
+    }
+    PyObject* result = pybinding__get_value(self, inner);
+    Py_DECREF(inner);
+    return result;
+}
+
 static PyObject* pybinding__mlc_read(PyObject* self, PyObject* args) { MAYFAIL
     const char* schema_str;
     const char* json_str;
@@ -4063,6 +4090,7 @@ static PyMethodDef Methods[] = {
     {"mlc_load", pybinding__mlc_load, METH_VARARGS, "Load a value from file"},
     {"mlc_show", pybinding__mlc_show, METH_VARARGS, "Serialize a value to JSON string"},
     {"mlc_read", pybinding__mlc_read, METH_VARARGS, "Deserialize a JSON string to a value"},
+    {"mlc_unpack", pybinding__mlc_unpack, METH_VARARGS, "Decode a packet held as bytes"},
     {"mlc_open", pybinding__mlc_open, METH_VARARGS, "Open a stream/file as IFile/IStream/OStream handle"},
     {"mlc_close", pybinding__mlc_close, METH_VARARGS, "Close any stream/file handle"},
     {"mlc_fschema", pybinding__mlc_fschema, METH_VARARGS, "Read a file's element schema without typed open"},

@@ -29,7 +29,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Char (isAlpha)
+import Data.Char (isAlpha, isAsciiLower, isAsciiUpper)
 import qualified Morloc.BaseTypes as BT
 import Morloc.Frontend.CST
 import Morloc.Frontend.Token hiding (startPos)
@@ -120,6 +120,9 @@ data DState = DState
     -- declared in THIS module. Exhaustiveness needs the whole set, and
     -- this is the only place it is available: by the time imports are
     -- merged the clause structure has already become an IfE cascade.
+  , dsErrorNotes :: !(Map.Map Int Text)
+    -- ^ A line prefixed to an error raised at a synthesized expression,
+    -- saying which directive it was synthesized from.
   , dsStreamElems :: !(Map.Map EVar TypeU)
     -- ^ For each command whose body reaches `@collect`, the batch type
     -- it writes to standard output. Such a command returns `()` at the
@@ -340,7 +343,7 @@ argDocDirectiveKeys =
   , "arg", "true", "false", "return"
   , "source", "form", "check.<kind>"
   , "list.source", "list.form", "list.check.<kind>"
-  , "with", "render", "mime", "epilogue"
+  , "with", "render", "parse", "mime", "epilogue"
   ]
 
 -- | Parse and lightly validate a media type (RFC 6838 `type/subtype`, e.g.
@@ -420,6 +423,51 @@ parseWithSpec render raw =
                       , wsArgs = args
                       , wsFold = fold
                       }
+
+-- | Parse a `@parse` directive value: @\<name\>=\<handler\> [.ext ...]@.
+parseParseSpec :: Text -> Either Text ParseSpec
+parseParseSpec raw =
+  case T.breakOn "=" (T.strip raw) of
+    (_, "") -> Left "expected `<name>=<handler> [.ext ...]` (missing `=`)."
+    (namePart, eqRest) -> do
+      let name = T.strip namePart
+      checkParseName name
+      case T.words (T.drop 1 eqRest) of
+        [] -> Left "handler name is empty after `=`."
+        (handler : exts) -> do
+          unless (T.all isWithIdentChar handler) $
+            Left ("`" <> handler <> "` is not a term name.")
+          mapM_ checkParseExt exts
+          return ParseSpec {psName = name, psHandler = EV handler, psExts = exts}
+  where
+    checkParseName n
+      | T.null n = Left "format name is empty before `=`."
+      | n == "morloc" =
+          Left "`morloc` is reserved: `morloc:<path>` loads a morloc value."
+      | not (T.all (\c -> isAsciiLower c || isDigitChar c || c == '-') n) =
+          Left ("format name `" <> n <> "` may use only lowercase letters, digits and `-`.")
+      | otherwise = Right ()
+    checkParseExt e
+      | T.length e < 2 || T.head e /= '.' =
+          Left ("`" <> e <> "` is not a file extension; write it with a leading `.`, e.g. `.fq`.")
+      | T.any isAsciiUpper e =
+          Left ("extension `" <> e <> "` must be lowercase; extensions match regardless of case.")
+      | T.any (\c -> c == '/' || c == ':') e =
+          Left ("extension `" <> e <> "` may not contain `/` or `:`.")
+      | otherwise = Right ()
+
+-- | Append a `@parse` spec to an argument's earlier ones, rejecting a
+-- repeated format name or an extension another format already claims.
+addParseSpec :: [ParseSpec] -> ParseSpec -> Either Text [ParseSpec]
+addParseSpec prior spec
+  | psName spec `elem` map psName prior =
+      Left ("format `" <> psName spec <> "` is declared twice on this argument.")
+  | otherwise = case [ (e, psName p) | e <- psExts spec, p <- prior, e `elem` psExts p ] ++ dupWithin (psExts spec) of
+      ((e, owner) : _) ->
+        Left ("extension `" <> e <> "` is already claimed by format `" <> owner <> "` on this argument.")
+      [] -> Right (prior ++ [spec])
+  where
+    dupWithin es = [ (e, psName spec) | (i, e) <- zip [0 :: Int ..] es, e `elem` take i es ]
 
 -- | Split @\<handler\>[(args)] [mods]@ into the handler identifier, its parsed
 -- argument list (empty if no parens), and the raw modifier tokens.
@@ -751,6 +799,9 @@ processArgDocLines = finalize . foldl step ([], [], defaultValue, Nothing)
         ["render"] -> withCase errs ws d True "render" v
         ["with", "buffer"] -> (errs <> [retiredBufferMsg "with"], ws, d)
         ["render", "buffer"] -> (errs <> [retiredBufferMsg "render"], ws, d)
+        ["parse"] -> case parseParseSpec v >>= addParseSpec (docParse d) of
+          Right ps -> (errs, ws, d {docParse = ps})
+          Left e   -> (errs <> ["in `@parse " <> v <> "`: " <> e], ws, d)
         ["mime"] -> case parseMediaType v of
           Right mt -> (errs, ws, d {docMime = Just mt})
           Left e   -> (errs <> ["in `@mime " <> v <> "`: " <> e], ws, d)
@@ -949,14 +1000,14 @@ namTypeDocs :: Pos -> [(Located, Key, TypeU)] -> D ArgDoc
 namTypeDocs declPos locEntries = do
   recDocs <- lookupDocsAt declPos
   recDocVars <- processArgDocLinesD declPos recDocs
-  rejectWithHere declPos "a record declaration" recDocVars
+  rejectDeclDirectivesHere declPos "a record declaration" recDocVars
   fieldDocs <-
     mapM
       (\(loc, _, _) -> do
           let p = locPos loc
           dl <- lookupDocsAt p
           fieldDoc <- processArgDocLinesD p dl
-          rejectWithHere p "a record field" fieldDoc
+          rejectDeclDirectivesHere p "a record field" fieldDoc
           return fieldDoc)
       locEntries
   return (ArgDocRec recDocVars (zip [k | (_, k, _) <- locEntries] fieldDocs))
@@ -969,7 +1020,7 @@ dataTypeDocs :: Pos -> [(Located, Located, Text, [TypeU])] -> D ArgDoc
 dataTypeDocs declPos ctors = do
   typeDocs <- lookupDocsAt declPos
   typeVars <- processArgDocLinesD declPos typeDocs
-  rejectWithHere declPos "a data declaration" typeVars
+  rejectDeclDirectivesHere declPos "a data declaration" typeVars
   ctorDocs <-
     mapM
       (\(lead, tok, name, _) -> do
@@ -1015,6 +1066,7 @@ rejectDirectivesOnCtor pos name v =
       , ("list.form", isJust (docListForm v))
       , ("list.check", not (null (docListChecks v)))
       , ("with", not (null (docWith v)))
+      , ("parse", not (null (docParse v)))
       , ("mime", isJust (docMime v))
       , ("epilogue", not (null (docEpilogues v)))
       ]
@@ -1034,6 +1086,21 @@ rejectWithHere pos ctx v = do
       "`@epilogue` is not allowed on " <> ctx
       <> "; it may only appear in a signature preamble (the `--'` "
       <> "lines directly above `name ::`) or above `module`."
+
+-- | Reject the directives that belong to a command's signature (`@with`,
+-- `@epilogue`, `@parse`) in a docstring that is not part of one.
+rejectDeclDirectivesHere :: Pos -> Text -> ArgDocVars -> D ()
+rejectDeclDirectivesHere pos ctx v = rejectWithHere pos ctx v >> rejectParseHere pos ctx v
+
+-- | `@parse` describes how one command argument is read at the command line,
+-- so it belongs only in that argument's docstring.
+rejectParseHere :: Pos -> Text -> ArgDocVars -> D ()
+rejectParseHere pos ctx v = case docParse v of
+  [] -> return ()
+  (p : _) -> dfail pos . T.unpack $
+    "`@parse` is not allowed on " <> ctx
+    <> "; it may only appear in the docstring of a command argument. "
+    <> "Offending atom: `@parse " <> psName p <> "=" <> unEVar (psHandler p) <> "`."
 
 renderWithSpec :: WithSpec -> Text
 renderWithSpec WithSpec{wsShort = mShort, wsLong = l, wsTerm = EV t, wsFold = mFold} =
@@ -2907,7 +2974,7 @@ expandCollectBody ref body = do
   -- the sink: @write 0 o  (eta-expanded to \v -> @write 0 o v :: [a] -> <IO> ())
   oRef1 <- freshExprFrom ref (VarE defaultValue oVar)
   zeroE <- freshExprFrom ref (IntE 0)
-  sinkE <- mkWriteSink ref zeroE oRef1
+  sinkE <- mkWriteSink False ref zeroE oRef1
   -- body (@write 0 o)  -- bare statement, forced
   bodyApp <- freshExprFrom ref (AppE body [sinkE])
   forceBody <- freshExprFrom ref (EvalE bodyApp)
@@ -2926,7 +2993,11 @@ expandCollectBody ref body = do
 -- lowers to -- bind the Try, guard its tag, bind the payload -- keeping
 -- the ordinary do-block LetE chain shape the bang-hoisting pass walks.
 bindOkFrom :: ExprI -> EVar -> ExprI -> ExprI -> D ExprI
-bindOkFrom ref v forcedTry body = do
+bindOkFrom ref = bindOkWith ref (\tryE -> freshExprFrom ref (IntrinsicE IntrShow [tryE]))
+
+-- | 'bindOkFrom' with the thrown message built from the failed Try.
+bindOkWith :: ExprI -> (ExprI -> D ExprI) -> EVar -> ExprI -> ExprI -> D ExprI
+bindOkWith ref mkMsg v forcedTry body = do
   idx <- freshIdPos (Pos 0 0 "")
   let tmp = EV ("_ok_try_" <> T.pack (show idx))
       gVar = EV (BT.doDiscardPrefix <> "ok_g_" <> T.pack (show idx))
@@ -2934,9 +3005,8 @@ bindOkFrom ref v forcedTry body = do
   s1 <- subject
   okName <- freshExprFrom ref (StrE BT.tryOkCtor)
   cond <- freshExprFrom ref (IntrinsicE IntrTagTest [s1, okName])
-  s2 <- subject
-  shown <- freshExprFrom ref (IntrinsicE IntrShow [s2])
-  throwE <- freshExprFrom ref (IntrinsicE IntrThrow [shown])
+  msg <- subject >>= mkMsg
+  throwE <- freshExprFrom ref (IntrinsicE IntrThrow [msg])
   trueE <- freshExprFrom ref (LogE True)
   guardE <- freshExprFrom ref (IfE cond trueE throwE)
   s3 <- subject
@@ -2954,19 +3024,31 @@ bindOkFrom ref v forcedTry body = do
 -- never asked for. Without the wrap the sink's type would be
 -- @[a] -> \<IO\> (Try Str ())@ and every user-written producer signature
 -- would have to name the Try.
-mkWriteSink :: ExprI -> ExprI -> ExprI -> D ExprI
-mkWriteSink ref zeroE oRef = do
+--
+-- With @flush@, each write is followed by @flush o@, so every batch is its
+-- own sub-packet; @write buffers, and a reader would otherwise see batches
+-- merged.
+mkWriteSink :: Bool -> ExprI -> ExprI -> ExprI -> D ExprI
+mkWriteSink flush ref zeroE oRef = do
   idx <- freshIdPos (Pos 0 0 "")
   let vVar = EV ("_collect_v_" <> T.pack (show idx))
       dVar = EV (BT.doDiscardPrefix <> "collect_w_" <> T.pack (show idx))
+      fVar = EV (BT.doDiscardPrefix <> "collect_f_" <> T.pack (show idx))
   vRef <- freshExprFrom ref (VarE defaultValue vVar)
   writeE <- freshExprFrom ref (IntrinsicE IntrWrite [zeroE, oRef, vRef])
   forceWrite <- freshExprFrom ref (EvalE writeE)
   unitE <- freshExprFrom ref UniE
-  bodyE <- freshExprFrom ref (LetE [(dVar, forceWrite)] unitE)
+  afterWrite <-
+    if flush
+      then do
+        oRef2 <- freshExprFrom ref (let ExprI _ e = oRef in e)
+        flushE <- freshExprFrom ref (IntrinsicE IntrFlush [oRef2])
+        forceFlush <- freshExprFrom ref (EvalE flushE)
+        freshExprFrom ref (LetE [(fVar, forceFlush)] unitE)
+      else return unitE
+  bodyE <- freshExprFrom ref (LetE [(dVar, forceWrite)] afterWrite)
   doE <- freshExprFrom ref (DoBlockE bodyE)
   freshExprFrom ref (LamE [vVar] doE)
-
 
 --------------------------------------------------------------------
 -- Top-level declaration desugaring
@@ -3024,6 +3106,8 @@ desugarTopLevel (Loc sp (CSigE name sigType)) = do
   (cs, argDocs, t) <- desugarSigType (startPos sp) sigType
   validateSigWith (startPos sp) (docWith cmdDoc) argDocs
   mapM_ (rejectWithHere (startPos sp) "an argument-level docstring") argDocs
+  rejectParseHere (startPos sp) "a signature preamble" cmdDoc
+  rejectParseHere (startPos sp) "a return value" (last argDocs)
   let t' = quantifyType t
       doc = ArgDocSig cmdDoc (init argDocs) (last argDocs)
       (labels, t'') = extractLabels t'
@@ -3295,7 +3379,7 @@ desugarTypeDef sp (CstTypeAlias maybeLangTok (v, vs) (t, isTerminal)) = do
       return (Just (l, isTerminal))
   docs <- lookupDocsAt (startPos sp)
   docVars <- if null docs then return defaultValue else processArgDocLinesD (startPos sp) docs
-  rejectWithHere (startPos sp) "a type alias" docVars
+  rejectDeclDirectivesHere (startPos sp) "a type alias" docVars
   e <- freshExprSpan sp (TypE (ExprTypeE lang v vs t (ArgDocAlias docVars) TypedefAlias))
   return [e]
 desugarTypeDef sp (CstNewtype (v, vs) t) = do
@@ -3305,7 +3389,7 @@ desugarTypeDef sp (CstNewtype (v, vs) t) = do
       "' has a vacuous body: it reduces to a self-reference with no payload"
   docs <- lookupDocsAt (startPos sp)
   docVars <- if null docs then return defaultValue else processArgDocLinesD (startPos sp) docs
-  rejectWithHere (startPos sp) "a newtype declaration" docVars
+  rejectDeclDirectivesHere (startPos sp) "a newtype declaration" docVars
   e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t (ArgDocAlias docVars) TypedefNewtype))
   return [e]
 desugarTypeDef sp (CstTypeAliasForward (v, vs)) = do
@@ -3317,7 +3401,7 @@ desugarTypeDef sp (CstTypeAliasForward (v, vs)) = do
   let t = if null vs then VarU v else AppU (VarU v) (map (either (VarU . fst) id) vs)
   docs <- lookupDocsAt (startPos sp)
   docVars <- if null docs then return defaultValue else processArgDocLinesD (startPos sp) docs
-  rejectWithHere (startPos sp) "a primitive type declaration" docVars
+  rejectDeclDirectivesHere (startPos sp) "a primitive type declaration" docVars
   e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t (ArgDocAlias docVars) TypedefPrimitive))
   return [e]
 desugarTypeDef sp (CstDataDef (v, vs) ctors) = do
@@ -3451,7 +3535,7 @@ desugarClassHead (CCHMultiConstrained cs headType) = do
 desugarSigItem :: CstSigItem -> D Signature
 desugarSigItem (CstSigItem name sigType) = do
   (cs, argDocs, t) <- desugarSigType (Pos 0 0 "") sigType
-  mapM_ (rejectWithHere (Pos 0 0 "") "a class method signature") argDocs
+  mapM_ (rejectDeclDirectivesHere (Pos 0 0 "") "a class method signature") argDocs
   let wrappedT = quantifyType t
       (labels, wrappedT') = extractLabels wrappedT
       doc = ArgDocSig defaultValue (init argDocs) (last argDocs)
@@ -3541,7 +3625,7 @@ injectTerminalActionsWithSigs :: Map.Map EVar TypeU -> ExprI -> D ExprI
 injectTerminalActionsWithSigs visibleSigs (ExprI i (ModE mv body)) = do
   rejectReservedMlcpPrefix body
   recordStreamElems visibleSigs body
-  body' <- expandWithBindings visibleSigs body
+  body' <- expandWithBindings visibleSigs body >>= expandParseEntries visibleSigs
   return (ExprI i (ModE mv body'))
 injectTerminalActionsWithSigs _ e = return e
 
@@ -3561,16 +3645,16 @@ injectTerminalActionsWithSigs _ e = return e
 -- synthesized entry.
 rejectReservedMlcpPrefix :: [ExprI] -> D ()
 rejectReservedMlcpPrefix body =
-  case find (\(_, ev) -> T.isPrefixOf "mlcp_" (unEVar ev)) binders of
-    Just (spanI, ev) -> do
+  case [ (spanI, ev, p) | (spanI, ev) <- binders, p <- ["mlcp_", parseEntryPrefix], p `T.isPrefixOf` unEVar ev ] of
+    ((spanI, ev, p) : _) -> do
       sp <- posOfExprI spanI
       dfail (startPos sp) . T.unpack $
         "identifier `" <> unEVar ev
-        <> "` uses the reserved `mlcp_` prefix. That prefix is "
-        <> "compiler-owned -- it names the internal entry points "
-        <> "synthesized from `--' @with` docstring atoms. Rename "
-        <> "the identifier so it does not start with `mlcp_`."
-    Nothing -> return ()
+        <> "` uses the reserved `" <> p <> "` prefix. The prefixes `mlcp_` and "
+        <> "`mlcq_` are compiler-owned -- they name the internal entry points "
+        <> "synthesized from `@with`, `@render` and `@parse` docstring "
+        <> "atoms. Rename the identifier so it does not start with either."
+    [] -> return ()
   where
     binders :: [(ExprI, EVar)]
     binders = concatMap pick body
@@ -4168,7 +4252,7 @@ wrapWholeCollect useIFile sigs params argSrcs ref handler collectArg = do
   gatherBare <- do
     oref <- freshExprFrom ref (VarE defaultValue oV)
     zeroE <- freshExprFrom ref (IntE 0)
-    sinkE <- mkWriteSink ref zeroE oref
+    sinkE <- mkWriteSink False ref zeroE oref
     app <- freshExprFrom ref (AppE collectArg [sinkE])
     freshExprFrom ref (EvalE app)
   -- _ <- @close o
@@ -4375,6 +4459,217 @@ synthWithBinding sp parentName arity isEff
       then return body
       else freshExprSpan sp (LamE lamVars body)
   freshExprSpan sp (AssE mangled wrapped [])
+
+--------------------------------------------------------------------
+-- `@parse` entry synthesis
+--
+-- A command whose arguments declare `@parse` formats gets one internal entry
+-- per target: the command itself and each of its `@with`/`@render` commands.
+-- The entry takes, in place of each parseable argument, one Bool per format
+-- (which format the nexus selected, at most one true), the path it was
+-- given, the argument as the nexus loaded it when no format was selected (a
+-- packet held as bytes), and for a stream argument the path to stage the
+-- stream at. It reads each parseable argument, in argument order, then
+-- calls the target:
+--
+-- > mlcq_<target> = \... -> do
+-- >   v_i <- ? sel_i_1 = <read tok_i with the first format's handler>
+-- >          ...
+-- >          : @unpack pkt_i
+-- >   <target> a_1 .. a_n
+--------------------------------------------------------------------
+
+-- | How a parseable argument's value is produced by its handlers.
+data ParseArgKind
+  = ParseValue TypeU        -- ^ handler @Str -> <IO> T@, the argument's type
+  | ParseOptional TypeU     -- ^ an optional argument @?T@: handler @Str -> <IO> T@
+  | ParseStream Bool TypeU  -- ^ @IStream a@ (False) or @IFile [a]@ (True):
+                            --   handler @Str -> ([a] -> <IO> ()) -> <IO> ()@
+
+expandParseEntries :: Map.Map EVar TypeU -> [ExprI] -> D [ExprI]
+expandParseEntries visibleSigs body =
+  case [ (e, name, cmdDoc, argDocs) | e@(ExprI _ (SigE (Signature name _ et))) <- body
+                                    , ArgDocSig cmdDoc argDocs _ <- [edocs et]
+                                    , any (not . null . docParse) argDocs ] of
+    [] -> return body
+    cmds -> do
+      entries <- concat <$> mapM synthCmd cmds
+      let names = [ n | ExprI _ (AssE n _ _) <- entries ]
+      body' <- mapM (addToExport names) body
+      return (body' ++ entries)
+  where
+    userNames = collectTopLevelBinders body
+
+    synthCmd (sigE, name, cmdDoc, argDocs) = do
+      sp <- posOfExprI sigE
+      let pos = startPos sp
+      pt <- maybe (dfail pos "internal: a `@parse` command has no visible signature") return
+              (Map.lookup name visibleSigs)
+      let (params, _) = uncurryU pt
+          quantified = forallVars pt
+      when (length params /= length argDocs) $
+        dfail pos "internal: a `@parse` command's argument docstrings do not match its arguments"
+      kinds <- zipWithM (classifyParseArg pos name quantified) params argDocs
+      let targets = parseEntryTargets name cmdDoc argDocs
+      case find ((`Set.member` userNames) . parseEntryName) targets of
+        Just t -> dfail pos . T.unpack $
+          "synthesized internal name `" <> unEVar (parseEntryName t)
+          <> "` collides with a top-level identifier."
+        Nothing -> return ()
+      mapM (synthParseEntry sp name (zip argDocs kinds)) targets
+
+    forallVars (ForallU v t) = v : forallVars t
+    forallVars _ = []
+
+-- | Classify one argument of a `@parse` command. Nothing for an argument
+-- without formats.
+classifyParseArg :: Pos -> EVar -> [TVar] -> TypeU -> ArgDocVars -> D (Maybe ParseArgKind)
+classifyParseArg pos (EV cmd) quantified t d
+  | null (docParse d) = return Nothing
+  | otherwise = do
+      when (any (\v -> Set.member (VarU v) (free t)) quantified) $
+        reject "its type has a type variable, so no handler can produce it"
+      when (docMany d == Just True) $ reject "`@many` arguments cannot be parsed"
+      when (docUnroll d == Just True) $ reject "`@unroll` arguments cannot be parsed"
+      when (docForm d == Just FormList) $ reject "`@form list` arguments cannot be parsed"
+      when (isJust (docTrue d) || isJust (docFalse d)) $ reject "flags cannot be parsed"
+      Just <$> case t of
+        OptionalU inner
+          | isStr inner -> reject strMsg
+          | isJust (streamOf inner) -> reject "an optional stream cannot be parsed"
+          | otherwise -> return (ParseOptional inner)
+        _ | isStr t -> reject strMsg
+          | Just k <- streamOf t -> k
+          | otherwise -> return (ParseValue t)
+  where
+    reject :: Text -> D a
+    reject msg = dfail pos . T.unpack $
+      "`@parse` on an argument of `" <> cmd <> "`: " <> msg <> "."
+    strMsg = "the argument is a `Str`, so a handler would receive the string it produces"
+    isStr (VarU v) = v == BT.str
+    isStr _ = False
+    streamOf (AppU (VarU v) [a])
+      | v == BT.istreamVar = Just (return (ParseStream False a))
+      | v == BT.ifileVar = Just $ case a of
+          AppU (VarU l) [e] | l == BT.list -> return (ParseStream True e)
+          _ -> reject "an `IFile` argument must be `IFile [a]` to be parsed"
+      | v == BT.ostreamVar = Just (reject "an `OStream` argument cannot be parsed")
+    streamOf _ = Nothing
+
+-- | Synthesize the `@parse` entry for one target.
+synthParseEntry :: Span -> EVar -> [(ArgDocVars, Maybe ParseArgKind)] -> EVar -> D ExprI
+synthParseEntry sp cmd args target = do
+  let groups = zipWith paramGroup [0 :: Int ..] args
+  targetRef <- varE target
+  argRefs <- mapM (varE . snd) groups
+  call <- if null argRefs then return targetRef else expr (AppE targetRef argRefs)
+  bodyE <- foldM bindParsed call (reverse (zip [0 :: Int ..] args))
+  doE <- expr (DoBlockE bodyE)
+  let lamVars = concatMap fst groups
+  lamE <- if null lamVars then return doE else expr (LamE lamVars doE)
+  expr (AssE (parseEntryName target) lamE [])
+  where
+    expr = freshExprSpan sp
+    varE v = expr (VarE defaultValue v)
+    var :: Int -> Text -> EVar
+    var i part = EV (parseEntryPrefix <> part <> "_" <> T.pack (show i))
+
+    -- the entry's parameters standing for argument i, and the variable
+    -- holding its value when the target is called
+    paramGroup i (_, Nothing) = ([var i "x"], var i "x")
+    paramGroup i (d, Just kind) =
+      let sels = [ var i ("s" <> T.pack (show k)) | k <- [0 .. length (docParse d) - 1] ]
+          stage = case kind of
+            ParseStream _ _ -> [var i "g"]
+            _ -> []
+       in (sels ++ [var i "t", var i "p"] ++ stage, var i "v")
+
+    bindParsed rest (_, (_, Nothing)) = return rest
+    bindParsed rest (i, (d, Just kind)) = do
+      unpackE <- varE (var i "p") >>= \p -> expr (IntrinsicE IntrUnpack [p])
+      chain <- foldM
+        (\elseE (k, ps) -> do
+            c <- varE (var i ("s" <> T.pack (show k)))
+            readE <- readWith i kind k ps
+            expr (IfE c readE elseE))
+        unpackE
+        (reverse (zip [0 :: Int ..] (docParse d)))
+      forced <- expr (EvalE chain)
+      expr (LetE [(var i "v", forced)] rest)
+
+    -- read argument i with format k: a do-block of type <IO> T
+    readWith i kind k ps = do
+      let note = "in `@parse " <> psName ps <> "=" <> unEVar (psHandler ps)
+                 <> "` on argument " <> T.pack (show (i + 1)) <> " of `" <> unEVar cmd <> "`:"
+          fresh e = do
+            x@(ExprI ix _) <- expr e
+            State.modify (\st -> st { dsErrorNotes = Map.insert ix note (dsErrorNotes st) })
+            return x
+          nm part = EV (parseEntryPrefix <> part <> "_" <> T.pack (show i) <> "_" <> T.pack (show k))
+          lets bs e = foldrM (\b acc -> fresh (LetE [b] acc)) e bs
+          -- the handler failure frame, from the Err of a failed Try
+          failMsg tryE = do
+            errName <- fresh (StrE BT.tryErrCtor)
+            zeroIdx <- fresh (IntE 0)
+            errMsg <- fresh (IntrinsicE IntrCtorField [tryE, errName, zeroIdx])
+            pat <- fresh (PatE (PatternText (parseFailurePrefix i) [parseFailureSuffix]))
+            fresh (AppE pat [errMsg])
+          openStage = do
+            g <- varE (var i "g")
+            o <- fresh (IntrinsicE IntrOpen [g])
+            fresh (EvalE o)
+      hRef <- fresh (VarE defaultValue (psHandler ps))
+      tok <- fresh (VarE defaultValue (var i "t"))
+      case kind of
+        ParseStream isFile a -> do
+          let (oV, rV, sV) = (nm "o", nm "r", nm "h")
+              closeV = EV (BT.doDiscardPrefix <> unEVar (nm "c"))
+              okV = EV (BT.doDiscardPrefix <> unEVar (nm "e"))
+              handlerT = FunU [BT.strU, FunU [BT.listU a] (EffectU ioEffectSet BT.unitU)]
+                              (EffectU ioEffectSet BT.unitU)
+              openedT = if isFile then AppU (VarU BT.ifileVar) [BT.listU a]
+                                  else AppU (VarU BT.istreamVar) [a]
+          hAnn <- fresh (AnnE hRef handlerT)
+          oRef <- fresh (VarE defaultValue oV)
+          zeroE <- fresh (IntE 0)
+          sink <- mkWriteSink True hRef zeroE oRef
+          tryBind <- fresh (AppE hAnn [tok, sink]) >>= fresh . IntrinsicE IntrTry . (: []) >>= fresh . EvalE
+          closeO <- fresh (VarE defaultValue oV) >>= fresh . IntrinsicE IntrClose . (: []) >>= fresh . EvalE
+          -- the stream is read back from the stage once the producer succeeded
+          sPinned <- do
+            sRef <- fresh (VarE defaultValue sV)
+            pinned <- fresh (VarE defaultValue sV) >>= \s1 -> fresh (AnnE s1 openedT)
+            fresh (LetE [(sV, pinned)] sRef)
+          readBack <- openStage >>= \o -> bindOkFrom hRef sV o sPinned
+          rRef <- fresh (VarE defaultValue rV)
+          checked <- bindOkWith hRef failMsg okV rRef readBack
+          body <- lets [(rV, tryBind), (closeV, closeO)] checked
+          openO <- openStage
+          fresh . DoBlockE =<< bindOkFrom hRef oV openO body
+        _ -> do
+          let rV = nm "r"
+              vV = nm "v"
+              (resultT, wrapOpt) = case kind of
+                ParseOptional t -> (t, True)
+                ParseValue t -> (t, False)
+          hAnn <- fresh (AnnE hRef (FunU [BT.strU] (EffectU ioEffectSet resultT)))
+          tryBind <- fresh (AppE hAnn [tok]) >>= fresh . IntrinsicE IntrTry . (: []) >>= fresh . EvalE
+          result <- do
+            v <- fresh (VarE defaultValue vV)
+            if wrapOpt then fresh (AnnE v (OptionalU resultT)) else return v
+          rRef <- fresh (VarE defaultValue rV)
+          checked <- bindOkWith hRef failMsg vV rRef result
+          fresh . DoBlockE =<< lets [(rV, tryBind)] checked
+
+-- | A handler failure travels to the nexus as a thrown message framed by
+-- these markers: @\x01<argument index>\x1f<message>\x02@. The nexus finds the
+-- frame anywhere in the error text a pool returns, since each pool wraps a
+-- message in its own context.
+parseFailurePrefix :: Int -> Text
+parseFailurePrefix i = "\x01" <> T.pack (show i) <> "\x1f"
+
+parseFailureSuffix :: Text
+parseFailureSuffix = "\x02"
 
 -- | Order a formatter handler's argument sources for application: the payload
 -- ('ArgValue') is appended last unless the user placed it explicitly, so an

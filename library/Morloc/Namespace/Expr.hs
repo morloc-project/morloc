@@ -397,6 +397,11 @@ data Intrinsic
   | IntrShow      -- ^ @show   :: a -> Str           -- serialize to JSON string
   | IntrRead      -- ^ @read   :: Str -> Try Str a   -- deserialize from JSON string; pure, so it composes in `map`
   | IntrDatafile  -- ^ @datafile :: Str -> Str       -- resolve installed data file path
+  | IntrUnpack    -- ^ @unpack :: [U8] -> <IO> a     -- decode a morloc packet held as
+                  -- bytes, as the pool decodes an argument. NOT user-facing: the
+                  -- entries synthesized for `@parse` receive an argument that no
+                  -- parser read as the packet the nexus loaded, and decode it here.
+                  -- `a` is resolved by ascription.
   | IntrOpen      -- ^ @open  :: Str -> <IO> (Try Str a)  -- open a stream/file; `a` resolved via inline ascription to IFile/IStream/OStream
   | IntrClose     -- ^ @close :: a -> <IO> ()        -- close any stream/file handle
   | IntrFSchema   -- ^ @fschema :: Str -> <IO> (Try Str Str) -- read a file's element schema without typed open
@@ -553,6 +558,7 @@ intrinsicName IntrTypeof = "typeof"
 intrinsicName IntrShow = "show"
 intrinsicName IntrRead = "read"
 intrinsicName IntrDatafile = "datafile"
+intrinsicName IntrUnpack = "unpack"
 intrinsicName IntrOpen = "open"
 intrinsicName IntrClose = "close"
 intrinsicName IntrFSchema = "fschema"
@@ -628,6 +634,7 @@ intrinsicIsIO IntrTypeof = False
 intrinsicIsIO IntrShow = False
 intrinsicIsIO IntrRead = False
 intrinsicIsIO IntrDatafile = False
+intrinsicIsIO IntrUnpack = True
 intrinsicIsIO IntrMap = False
 intrinsicIsIO IntrTagTest = False
 intrinsicIsIO IntrCtorField = False
@@ -689,6 +696,7 @@ intrinsicArity IntrTypeof = 1
 intrinsicArity IntrShow = 1
 intrinsicArity IntrRead = 1
 intrinsicArity IntrDatafile = 1
+intrinsicArity IntrUnpack = 1
 intrinsicArity IntrOpen = 1
 intrinsicArity IntrClose = 1
 intrinsicArity IntrFSchema = 1

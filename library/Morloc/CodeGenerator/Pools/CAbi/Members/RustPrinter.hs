@@ -40,6 +40,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter
 
 import qualified Data.Map as Map
 import qualified Data.Text as T
+import Text.Printf (printf)
 import Morloc.CodeGenerator.Grammars.Common (DispatchEntry (..), manNamer)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
 import Morloc.CodeGenerator.Namespace (MDoc, RealLit (..), Key (..))
@@ -114,6 +115,10 @@ printExpr (IIntrinsicRead sid (Just t) e) =
   "rustmorloc::read::<" <> rustType t <> ">(&(" <> printExpr e <> "), schema(" <> pretty sid <> "))"
 printExpr (IIntrinsicRead sid Nothing e) =
   "rustmorloc::read(&(" <> printExpr e <> "), schema(" <> pretty sid <> "))"
+printExpr (IIntrinsicUnpack sid (Just t) e) =
+  "rustmorloc::unpack::<" <> rustType t <> ">(&(" <> printExpr e <> "), schema(" <> pretty sid <> "))"
+printExpr (IIntrinsicUnpack sid Nothing e) =
+  "rustmorloc::unpack(&(" <> printExpr e <> "), schema(" <> pretty sid <> "))"
 -- A raise in a value position is typed as that value so the surrounding
 -- expression keeps its type: `!` would leave the statements after a
 -- throwing arm unreachable and give a serialized throw no `ToVoidstar`.
@@ -226,7 +231,9 @@ rustEscape = T.concatMap esc
     esc '\r' = "\\r"
     esc '\t' = "\\t"
     esc '\0' = "\\0"
-    esc c    = T.singleton c
+    esc c
+      | c < ' ' || c == '\DEL' = T.pack (printf "\\x%02x" (fromEnum c))
+      | otherwise = T.singleton c
 
 -- | Render a Rust named-field list `f0: v0, f1: v1` (no braces) from
 -- (field-name, rendered-value) pairs, escaping each name to a valid identifier.

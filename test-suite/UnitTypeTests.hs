@@ -57,6 +57,7 @@ module UnitTypeTests
   , postArgPropagationTests
   , tuplePatternLambdaTests
   , withDocstringTests
+  , parseDocstringTests
   , epilogueDocstringTests
   , streamIntrinsicTests
   , patternSelectorTests
@@ -9526,6 +9527,116 @@ epilogueDocstringTests =
         --' Examples:
         foo = 42
           |]
+      ]
+
+-- | Frontend validation of `@parse` on command arguments. Each case varies
+-- one part of a small command whose argument is read by `readInts`.
+parseDocstringTests :: TestTree
+parseDocstringTests =
+  localOption (mkTimeout 2000000) $ -- 2s
+    testGroup
+      "parse: docstring validation"
+      [ expectPass "a format with extensions" (parseProg "@parse ints=readInts .ints .ints.gz")
+      , expectPass "two formats" (parseProg "@parse ints=readInts .ints\n  --' @parse csv=readInts .csv")
+      , expectPass "a format with no extensions" (parseProg "@parse ints=readInts")
+      , expectError "missing `=`" (parseProg "@parse ints readInts")
+      , expectError "missing handler" (parseProg "@parse ints=")
+      , expectError "uppercase format name" (parseProg "@parse Ints=readInts")
+      , expectError "format name with `_`" (parseProg "@parse my_ints=readInts")
+      , expectError "reserved format name `morloc`" (parseProg "@parse morloc=readInts")
+      , expectError "duplicate format name" (parseProg "@parse ints=readInts\n  --' @parse ints=readInts .x")
+      , expectError "extension without a leading dot" (parseProg "@parse ints=readInts ints")
+      , expectError "uppercase extension" (parseProg "@parse ints=readInts .INTS")
+      , expectError "extension claimed by two formats" (parseProg "@parse ints=readInts .txt\n  --' @parse csv=readInts .txt")
+      , expectError "extension repeated in one format" (parseProg "@parse ints=readInts .txt .txt")
+      , expectError "`@parse` in a signature preamble"
+          [r|
+        module main (count)
+        effect IO
+        source Py from "m.py" ("readInts", "size")
+        readInts :: Str -> <IO> [Int]
+        size :: [Int] -> Int
+        --' @parse ints=readInts
+        count :: [Int] -> Int
+        count xs = size xs
+          |]
+      , expectError "`@parse` on a `Str` argument" (parseProgT "Str" "@parse s=readStr" "x")
+      , expectError "`@parse` on an alias of `Str`" (parseProgT "Path" "@parse s=readStr" "x")
+      , expectError "`@parse` on an argument whose type has a type variable"
+          [r|
+        module main (count)
+        effect IO
+        data Try e a = Err e | Ok a
+        source Py from "m.py" ("readAny", "size")
+        readAny :: Str -> <IO> [a]
+        size :: [a] -> Int
+        count a ::
+          --' @parse any=readAny
+          [a] ->
+          Int
+        count xs = size xs
+          |]
+      , expectError "a handler of the wrong type" (parseProg "@parse ints=size")
+      , expectError "an unbound handler" (parseProg "@parse ints=noSuchReader")
+      , expectError "`@parse` with `@many`" (parseProg "@parse ints=readInts\n  --' @many")
+      , expectError "`@parse` with `@unroll`" (parseProg "@parse ints=readInts\n  --' @unroll")
+      , expectError "`@parse` on an `OStream` argument" (parseProgT "OStream Int" "@parse s=readInts" "0")
+      , expectError "`@parse` on an `IFile` that is not a list" (parseProgT "IFile Int" "@parse s=readInts" "0")
+      , expectError "a stream handler that is not a producer" (parseProgT "IStream Int" "@parse s=readInts" "0")
+      , expectPass "a stream producer on an `IStream` argument" (parseProgT "IStream Int" "@parse s=produceInts .txt" "0")
+      , expectPass "a stream producer on an `IFile` list argument" (parseProgT "IFile [Int]" "@parse s=produceInts .txt" "0")
+      , expectPass "an optional argument" (parseProgT "?[Int]" "@parse ints=readInts .csv" "0")
+      , expectError "a user identifier with the reserved `mlcq_` prefix"
+          [r|
+        module main (mlcq_count)
+        mlcq_count :: Int -> Int
+        mlcq_count x = x
+          |]
+      , expectError "`@parse` on a type alias"
+          [r|
+        module main (count)
+        effect IO
+        source Py from "m.py" ("readInts", "size")
+        readInts :: Str -> <IO> [Int]
+        size :: [Int] -> Int
+        --' @parse ints=readInts
+        type Ints = [Int]
+        count :: Ints -> Int
+        count xs = size xs
+          |]
+      ]
+  where
+    -- one argument of type `t`, read with `directive`; the body returns `body`
+    parseProgT :: MT.Text -> MT.Text -> MT.Text -> MT.Text
+    parseProgT t directive body = MT.unlines
+      [ "module main (cmd)"
+      , "effect IO"
+      , "data Try e a = Err e | Ok a"
+      , "type Path = Str"
+      , "source Py from \"m.py\" (\"readInts\", \"readStr\", \"produceInts\")"
+      , "readInts :: Str -> <IO> [Int]"
+      , "readStr :: Str -> <IO> Str"
+      , "produceInts :: Str -> ([Int] -> <IO> ()) -> <IO> ()"
+      , "cmd ::"
+      , "  --' " <> directive
+      , "  " <> t <> " ->"
+      , "  " <> (if body == "x" then t else "Int")
+      , "cmd x = " <> body
+      ]
+
+    parseProg :: MT.Text -> MT.Text
+    parseProg directive = MT.unlines
+      [ "module main (count)"
+      , "effect IO"
+      , "data Try e a = Err e | Ok a"
+      , "source Py from \"m.py\" (\"readInts\", \"size\")"
+      , "readInts :: Str -> <IO> [Int]"
+      , "size :: [Int] -> Int"
+      , "count ::"
+      , "  --' " <> directive
+      , "  [Int] ->"
+      , "  Int"
+      , "count xs = size xs"
       ]
 
 -- | Frontend validation of `--' with:` docstring atoms (terminal

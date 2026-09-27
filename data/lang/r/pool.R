@@ -77,6 +77,7 @@ morloc_mlc_save_json                 <- function(...){ .Call("morloc_mlc_save_js
 morloc_mlc_load                      <- function(...){ .Call("morloc_mlc_load",                      ...) }
 morloc_mlc_hash                      <- function(...){ .Call("morloc_mlc_hash",                      ...) }
 morloc_mlc_read                      <- function(...){ .Call("morloc_mlc_read",                      ...) }
+morloc_mlc_unpack                    <- function(schema, packet){ morloc_get_value(as.raw(packet), schema) }
 morloc_mlc_open                      <- function(...){ .Call("morloc_mlc_open",                      ...) }
 morloc_mlc_close                     <- function(...){ .Call("morloc_mlc_close",                     ...) }
 morloc_mlc_tmpfile                   <- function(...){ .Call("morloc_mlc_tmpfile",                   ...) }

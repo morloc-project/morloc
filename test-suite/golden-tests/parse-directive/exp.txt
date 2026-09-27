@@ -1,0 +1,49 @@
+6
+30
+6
+30
+6
+9
+15
+7
+[2,2,2,21]
+[3,3,2,36]
+[3,3,2,36]
+[2,2,2,21]
+[2,1,0,600]
+[2,2,2,21]
+9
+4
+306
+301
+total is 6
+total is 6
+6
+1
+7
+6
+3
+error: argument #2 (format csv, path bad.csv): not a number: x
+exit 1
+body not run
+14
+9
+Error: stdin can only be read by a single argument per command
+exit 1
+[2,2,2,21]
+missing file rejected
+0
+
+Usage: ./nexus <nexus_options> total <command_options>
+
+General Options:
+  -h, --help  Print help; -hh adds details and examples, -hhh adds schemas
+              (nexus options: -h @)
+
+Positional arguments:
+  1: NUMS  numbers to add
+           type: [Int]
+           formats: csv (.csv), pycsv (.pcsv), morloc (the default)
+
+Return: Int
+build_rejected

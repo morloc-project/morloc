@@ -1168,6 +1168,14 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- pure (all-morloc) whole-form command is rejected with a clear message.
     -- Foreign-dispatched whole-form commands go through the pool path and are
     -- unaffected.
+    -- @unpack appears only in the entries synthesized for `@parse`, where
+    -- it decodes an argument handed over as packet bytes. The nexus
+    -- interpreter holds no packets, so such an entry must run in a pool.
+    toNexusExpr (AnnoS (Idx iUnpack _) _ (IntrinsicS IntrUnpack _)) =
+      MM.throwSourcedError iUnpack $
+        "a command with `@parse` arguments must dispatch to a foreign pool;"
+          <+> "here the command and its parsers are all morloc code. Call a"
+          <+> "foreign function in the command or in its parsers."
     toNexusExpr (AnnoS (Idx iTmp _) _ (IntrinsicS IntrTmpfile _)) =
       MM.throwSourcedError iTmp $
         "the whole-list `@with`/`@render` handler currently requires a command"
@@ -1290,6 +1298,9 @@ resolvedSourceJson mLit Nothing mschema
   | otherwise = case fmap classifySchema mschema of
       Just CatScalarPrim    -> sourceAtomJson SourceInline
       Just CatStr           -> sourceAtomJson SourceInline
+      -- An IFile's command-line form is the path the pool opens, never
+      -- the file's contents.
+      Just CatIFile         -> sourceAtomJson SourceInline
       -- A constructor is always written literally on the command line;
       -- there is no reading under which `A` names a file.
       Just CatEnum          -> sourceAtomJson SourceInline
@@ -1360,6 +1371,7 @@ renderFormatHint mschema many mSrc mForm cks mLSrc mLForm lcks
         -- help text, so a format hint would only repeat them.
         CatEnum          -> Nothing
         CatStr           -> strFormatHint mSrc cks
+        CatIFile         -> Just "path to a morloc data or stream file"
         CatList elemS    -> listFormatHint elemS mSrc mForm cks mLSrc mLForm lcks
         CatOtherCompound -> Nothing
 
@@ -1459,6 +1471,7 @@ formListHint elemSchema mLSrc mLForm lcks =
 
     defaultPerLine es = case classifySchema es of
       CatStr           -> "path to text file with one string per line"
+      CatIFile         -> "path to text file with one file path per line"
       CatEnum          -> "path to text file with one constructor name per line"
       CatScalarPrim    -> "path to text file with one value per line"
       CatList _        -> "path to text file with one JSON array per line"
@@ -1486,6 +1499,24 @@ groupEntryWireSchemas ast0 = case peelPack ast0 of
   where
     peelPack (SerialPack _ (_, inner)) = peelPack inner
     peelPack x                          = x
+
+-- | The `parse` field of an argument with `@parse` formats: each format's
+-- name and extensions, and whether the nexus supplies a path at which the
+-- parsed stream is staged (for an @IStream@ or @IFile@ argument).
+parseFields :: [ParseSpec] -> Type -> [(Text, Text)]
+parseFields [] _ = []
+parseFields ps t =
+  [ ( "parse"
+    , jsonObj
+        [ ("formats", jsonArr [ jsonObj [("name", jsonStr (psName p)), ("exts", jsonStrArr (psExts p))] | p <- ps ])
+        , ("stage", jsonBool (isStream t))
+        ]
+    )
+  ]
+  where
+    isStream (OptionalT x) = isStream x
+    isStream (AppT (VarT v) _) = v == MBT.istreamVar || v == MBT.ifileVar
+    isStream _ = False
 
 -- | Serialize a 'CmdArg' to JSON.
 --
@@ -1519,6 +1550,7 @@ argToJson key mEmit mGeneral mShape _ (CmdArgPos r) =
          (argPosDocLiteral r)
          (argPosDocSource r) (argPosDocForm r) (argPosDocChecks r)
          (argPosDocListSource r) (argPosDocListForm r) (argPosDocListChecks r)
+    ++ parseFields (argPosDocParse r) (argPosDocType r)
 argToJson key mEmit mGeneral mShape _ (CmdArgOpt r) =
   jsonObj $
     [ ("kind", jsonStr "opt"), ("key", jsonStr key) ]
@@ -1538,6 +1570,7 @@ argToJson key mEmit mGeneral mShape _ (CmdArgOpt r) =
          (argOptDocLiteral r)
          (argOptDocSource r) (argOptDocForm r) (argOptDocChecks r)
          (argOptDocListSource r) (argOptDocListForm r) (argOptDocListChecks r)
+    ++ parseFields (argOptDocParse r) (argOptDocType r)
 argToJson key _ _ _ _ (CmdArgFlag r) =
   jsonObj
     [ ("kind", jsonStr "flag")
@@ -1629,15 +1662,16 @@ schemaField (Just s) mGen =
 -- the JSON parser. The flag fires only when the wire schema reduces
 -- to the Str primitive `s` AND the argv is going to be interpreted as
 -- an inline literal: with `source: file` the argv is a path and the
--- runtime's File branch must see it unquoted.
+-- runtime's File branch must see it unquoted. An IFile's argv is the
+-- path its handle names, so it is quoted the same way.
 isQuotedArg :: Maybe Bool -> Maybe SourceAtom -> Bool -> Maybe Text -> Bool
 isQuotedArg _literal mSource many mschema =
   case mschema of
     Nothing -> False
     Just s
       | mSource == Just SourceFile -> False
-      | many -> isListOfStrWireSchema s
-      | otherwise -> isStrOrOptStrWireSchema s
+      | many -> isListOfStrWireSchema s || fmap classifySchema (listElementSchema s) == Just CatIFile
+      | otherwise -> isStrOrOptStrWireSchema s || classifySchema s == CatIFile
 
 
 -- | Strip a leading addHint decoration `<...>` if present. Hints
@@ -1775,6 +1809,7 @@ validateArgSpecs i cmdargs asts schemas = do
 data SchemaCat
   = CatScalarPrim       -- Bool, Int, Real, UInt*, Float*, Null, etc.
   | CatStr              -- Str (`s`)
+  | CatIFile            -- IFile (`F`)
   | CatEnum             -- a `data` type with argument-free constructors (`e`)
   | CatList Text        -- `a<elem>` for any elem schema
   | CatOtherCompound    -- tuples, records, maps, tables
@@ -1791,6 +1826,8 @@ classifySchema s0 =
         _ -> peeled
   in if core == "s"
        then CatStr
+       else if core == "F"
+       then CatIFile
        else if isScalarPrimCore core
               then CatScalarPrim
               else case MT.uncons core of
@@ -3221,6 +3258,19 @@ buildManifest ManifestInputs{..} =
             ])
         ]
 
+    -- The entry the nexus dispatches to when an argument is read by one of
+    -- its `@parse` formats (see 'Desugar.synthParseEntry'). A `@with`
+    -- command inherits its parent's arguments, formats included, and has
+    -- its own entry.
+    parseEntryField :: Text -> [CmdArg] -> [(Text, Text)]
+    parseEntryField termName cmdArgs
+      | any hasParse cmdArgs = [("parse_entry", jsonStr (unEVar (parseEntryName (EV termName))))]
+      | otherwise = []
+      where
+        hasParse (CmdArgPos r) = not (null (argPosDocParse r))
+        hasParse (CmdArgOpt r) = not (null (argOptDocParse r))
+        hasParse _ = False
+
     remoteCmdJson :: FData -> Text
     remoteCmdJson fd =
       jsonObj $
@@ -3251,6 +3301,7 @@ buildManifest ManifestInputs{..} =
         , cmdGroupField (fdataMid fd)
         ]
         <> streamField (fdataTermName fd)
+        <> parseEntryField (fdataTermName fd) (cmdDocArgs (fdataCmdDocSet fd))
 
     pureCmdJson :: GastData -> Text
     pureCmdJson g =
@@ -3276,6 +3327,7 @@ buildManifest ManifestInputs{..} =
         , cmdGroupField (commandMid g)
         ]
         <> streamField (commandTermName g)
+        <> parseEntryField (commandTermName g) (cmdDocArgs (commandDocs g))
 
     -- Emit the `terminals` array for one command. The description
     -- comes from the referenced term's own top-level docstring; the

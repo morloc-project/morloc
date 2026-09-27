@@ -468,6 +468,7 @@ reduceArgDocFrom seen i t@(VarT v) arg
         , docListForm = docListForm r1 <|> docListForm r2
         , docListChecks = if null (docListChecks r1) then docListChecks r2 else docListChecks r1
         , docWith = if null (docWith r1) then docWith r2 else docWith r1
+        , docParse = docParse r1
         , docMime = docMime r1 <|> docMime r2
         , docEpilogues = if null (docEpilogues r1) then docEpilogues r2 else docEpilogues r1
         }
@@ -501,12 +502,20 @@ makeCmdArg loc recType@(NamT _ _ _ rs) (ArgDocRec arg entries) = do
 makeCmdArg loc t (ArgDocRec r _) = resolveArgDocVars loc [] t r
 makeCmdArg loc t (ArgDocAlias r) = resolveArgDocVars loc [] t r
 makeCmdArg loc t (ArgDocData r ctors)
+  | docUnroll r == Just True && not (null (docParse r)) =
+      MM.throwSystemError $ loc <> " has `@parse`, but an `@unroll` argument cannot be parsed."
   | docUnroll r == Just True = resolveAlt loc t r ctors
   | otherwise = resolveArgDocVars loc [] t r
 makeCmdArg _ _ (ArgDocSig _ _ _) = MM.throwSystemError "Illegal functional CLI parameter"
 
 resolveArgDocVars :: MDoc -> [(Key, (Type, ArgDocVars))] -> Type -> ArgDocVars -> MorlocMonad CmdArg
 resolveArgDocVars loc rs t r
+  -- `@parse` reads one value from one path; an argument spread over several
+  -- options, or a Bool flag, has no single token to read.
+  | not (null (docParse r)) && not (null rs) && docUnroll r == Just True =
+      MM.throwSystemError $ loc <> " has `@parse`, but an `@unroll` argument cannot be parsed."
+  | not (null (docParse r)) && t == VarT MBT.bool =
+      MM.throwSystemError $ loc <> " has `@parse`, but a Bool argument cannot be parsed."
   -- `stdin: true` marks an optional positional that reads stdin when
   -- omitted. It is positional-only and cannot double as an option/flag
   -- or carry a default; those combinations are rejected here so the
@@ -718,6 +727,7 @@ resolveFlag loc r = do
           , argPosDocListSource = docListSource r
           , argPosDocListForm = docListForm r
           , argPosDocListChecks = docListChecks r
+          , argPosDocParse = []
           }
   where
     -- "any flag-like directive" -- true/false/default. If none is set
@@ -788,6 +798,7 @@ resolveOpt loc t r = do
         , argOptDocListSource = docListSource r
         , argOptDocListForm = docListForm r
         , argOptDocListChecks = docListChecks r
+        , argOptDocParse = docParse r
         }
 
 -- | The long spellings the command line keeps for itself; an arm may not
@@ -871,6 +882,7 @@ resolvePos t r = do
       , argPosDocListSource = docListSource r
       , argPosDocListForm = docListForm r
       , argPosDocListChecks = docListChecks r
+      , argPosDocParse = docParse r
       }
   where
     isPathCheck (CheckPath _) = True

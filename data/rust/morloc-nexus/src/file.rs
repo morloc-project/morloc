@@ -1400,7 +1400,7 @@ fn format_validated_field(v: &ValidationOutcome) -> String {
 
 /// JSON-quote a string for use as a key=value field. Handles quotes,
 /// backslashes, and control chars so the output stays awk-parseable.
-fn json_quote(s: &str) -> String {
+pub(crate) fn json_quote(s: &str) -> String {
     serde_json::Value::String(s.to_string()).to_string()
 }
 

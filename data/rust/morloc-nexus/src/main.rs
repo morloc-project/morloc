@@ -18,6 +18,8 @@ mod process;
 mod runlog;
 mod schemas;
 mod serve_help;
+mod parse_arg;
+mod sigrm;
 mod stdio_bridge;
 mod stdio_server;
 mod view;

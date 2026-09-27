@@ -131,6 +131,10 @@ printExpr (IIntrinsicRead sid (Just t) e) =
   [idoc|_mlc_read<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
 printExpr (IIntrinsicRead sid Nothing e) =
   [idoc|_mlc_read(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
+printExpr (IIntrinsicUnpack sid (Just t) e) =
+  [idoc|_mlc_unpack<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
+printExpr (IIntrinsicUnpack sid Nothing e) =
+  [idoc|_mlc_unpack(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
 printExpr (IIntrinsicOpen kind path) =
   [idoc|_mlc_open(#{printExpr path}, #{pretty kind})|]
 -- @close and the temp-file unlink return void in the runtime, but their
@@ -184,7 +188,12 @@ printExpr (IIntrinsicStdout sid) =
   [idoc|_mlc_open_stdout(mlc_schema_table[#{pretty sid}])|]
 printExpr (IIntrinsicStderr sid) =
   [idoc|_mlc_open_stderr(mlc_schema_table[#{pretty sid}])|]
-printExpr (IIntrinsicThrow _ msg) =
+-- With its result type known, a raise converts to exactly that type: the
+-- catch-all conversion of an untyped raise is ambiguous wherever the type has
+-- several assignment operators (std::vector, std::string).
+printExpr (IIntrinsicThrow (Just t) msg) =
+  [idoc|_mlc_throw_as<#{renderIType t}>(#{printExpr msg})|]
+printExpr (IIntrinsicThrow Nothing msg) =
   [idoc|_mlc_throw(#{printExpr msg})|]
 
 -- C++ non-finite literals: rely on the C99 macros INFINITY and NAN. They are

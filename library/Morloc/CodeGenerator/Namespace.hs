@@ -1999,6 +1999,9 @@ data ArgOptDocSet = ArgOptDocSet
   , argOptDocListSource :: Maybe SourceAtom
   , argOptDocListForm :: Maybe FormAtom
   , argOptDocListChecks :: [Check]
+  , argOptDocParse :: [ParseSpec]
+    -- `@parse` formats: a value given with a format prefix or extension is a
+    -- path, read by that format's handler
   }
   deriving (Show, Ord, Eq)
 
@@ -2040,6 +2043,8 @@ data ArgPosDocSet = ArgPosDocSet
   , argPosDocListSource :: Maybe SourceAtom
   , argPosDocListForm :: Maybe FormAtom
   , argPosDocListChecks :: [Check]
+  , argPosDocParse :: [ParseSpec]
+    -- `@parse` formats, as for 'argOptDocParse'
   }
   deriving (Show, Ord, Eq)
 
