@@ -1354,6 +1354,7 @@ toDState ps = DState
   , dsNamespaces = Set.empty
   , dsDataCtors = Map.empty
   , dsStreamElems = psStreamElems ps
+  , dsReplayPlans = Map.empty
   , dsErrorNotes = Map.empty
   }
 

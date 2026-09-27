@@ -125,11 +125,29 @@ pub struct NexusConfig {
     pub mcp_programs: Vec<String>,
     /// Modules exposed over the JSON API adapter (/call). Subset of `programs`.
     pub api_programs: Vec<String>,
+    /// The part this process plays in a multi-output run, if any.
+    pub child: ChildMode,
+}
+
+/// The part a nexus process plays in a multi-output run (see
+/// `orchestrate`). A child writes where its parent pointed it and ignores
+/// `-o`, whose file it already holds as fd 1.
+#[derive(Clone, Debug, Default)]
+pub enum ChildMode {
+    #[default]
+    None,
+    /// Run the parent command once, saving its output (and the arguments
+    /// the actions refer to) under `dir`; with `tee`, also write the output
+    /// to stdout as an ordinary run would.
+    Stage { dir: String, args: Vec<usize>, tee: bool },
+    /// Run one internal command on packet files.
+    Replay { cmd: String, inputs: Vec<String> },
 }
 
 impl Default for NexusConfig {
     fn default() -> Self {
         NexusConfig {
+            child: ChildMode::None,
             print_flag: false,
             keep_null: false,
             packet_path: None,
@@ -1034,6 +1052,7 @@ fn run_remote_command(
         let c_pkt = build_arg_packet(i, arg_val, arg_def, manifest);
         let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
         let pkt_size = unsafe { morloc_packet_size(c_pkt, &mut errmsg) };
+        crate::stage::save_arg(i, c_pkt, pkt_size);
         arg_packets.push((c_pkt, pkt_size));
     }
 
@@ -1546,6 +1565,17 @@ pub(crate) fn print_result_c(
     }
 
     use morloc_runtime_types::{PRINT_RESULT_OK, PRINT_RESULT_PIPE_CLOSED};
+
+    // A command that streamed to stdout and then returns a value prints the
+    // completed stream first.
+    crate::stdio_server::finish_stdout();
+
+    // A stage saves the result for the actions, and prints it only when
+    // stdout wants the command's own output.
+    crate::stage::save_value(full_packet, ptr, schema);
+    if !crate::stage::stdout_on() {
+        process::clean_exit(0);
+    }
 
     let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
 
@@ -2102,6 +2132,13 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
             crate::runlog::die_with_error(&format!("failed to parse argument #{}: {}", i, msg));
         }
 
+        if crate::stage::active() {
+            extern "C" {
+                fn morloc_packet_size(packet: *const u8, errmsg: *mut *mut std::ffi::c_char) -> usize;
+            }
+            let size = unsafe { morloc_packet_size(c_pkt, &mut errmsg) };
+            crate::stage::save_arg(i, c_pkt, size);
+        }
         let voidstar = unsafe { get_morloc_data_packet_value(c_pkt, c_schema, &mut errmsg) };
         unsafe { libc::free(c_pkt as *mut std::ffi::c_void) };
         if voidstar.is_null() {

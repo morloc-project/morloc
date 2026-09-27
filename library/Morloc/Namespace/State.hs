@@ -166,6 +166,10 @@ data MorlocState = MorlocState
   , stateErrorNotes :: Map Int MDoc
   -- ^ A line prefixed to an error raised at the indexed expression: for a
   -- synthesized expression, the directive it was synthesized from.
+  , stateReplayPlans :: Map.Map EVar ReplayPlan
+  -- ^ For each terminal action, keyed by its replay entry's name
+  -- ('mangleReplayName'): the kind of entry synthesized to run it on its
+  -- command's saved output, or why there is none.
   , stateStreamElems :: Map.Map EVar TypeU
   -- ^ For each command that streams its output through @collect, the batch
   -- type it writes to standard output. Such a command returns @()@, so the
@@ -990,6 +994,7 @@ instance Defaultable MorlocState where
       , stateName = Map.empty
       , stateTermDocs = Map.empty
       , stateStreamElems = Map.empty
+      , stateReplayPlans = Map.empty
       , stateErrorNotes = Map.empty
       , stateManifoldConfig = Map.empty
       , stateLogTemplate = Nothing

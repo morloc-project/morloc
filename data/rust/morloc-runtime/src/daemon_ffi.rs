@@ -124,65 +124,60 @@ unsafe fn resolve_render_target<'a>(
     cmd: &'a crate::manifest_ffi::ManifestCommand,
     render: *const c_char,
 ) -> Result<&'a crate::manifest_ffi::ManifestCommand, String> {
-    // The entry-command name to redirect to (borrowed from the manifest, which
-    // outlives this dispatch), or None for the command's own typed value
-    // (`raw` / no default).
-    let entry: Option<*const c_char> = if render.is_null() {
-        terminal_entry(cmd, None) // fire the @default terminal, if any
+    // The terminal the request names, or the `@default` one when it names
+    // none; no terminal at all means the command's own typed value.
+    let (terminal, named) = if render.is_null() {
+        (find_terminal(cmd, None), None)
     } else {
         let r = CStr::from_ptr(render).to_str().unwrap_or("");
         if r == "raw" {
-            None
-        } else {
-            match terminal_entry(cmd, Some(r)) {
-                Some(e) => Some(e),
-                None => {
-                    return Err(format!(
-                        "unknown render '{}' for command '{}'",
-                        r,
-                        CStr::from_ptr(cmd.name).to_string_lossy()
-                    ))
-                }
+            return Ok(cmd);
+        }
+        match find_terminal(cmd, Some(r)) {
+            Some(t) => (Some(t), Some(r)),
+            None => {
+                return Err(format!(
+                    "unknown render '{}' for command '{}'",
+                    r,
+                    CStr::from_ptr(cmd.name).to_string_lossy()
+                ))
             }
         }
     };
-    match entry {
-        None => Ok(cmd),
-        Some(name) => {
-            let m: &'a crate::manifest_ffi::Manifest = &*mv;
-            m.command_by_name(CStr::from_ptr(name)).ok_or_else(|| {
-                format!(
-                    "render entry '{}' not found",
-                    CStr::from_ptr(name).to_string_lossy()
-                )
-            })
-        }
+    let Some(t) = terminal else { return Ok(cmd) };
+    // An action with no entry applies to the command's whole streamed output,
+    // which only the command line saves and replays.
+    if t.entry.is_null() {
+        let which = match named {
+            Some(r) => format!("render '{}'", r),
+            None => "the default render".to_string(),
+        };
+        return Err(format!(
+            "{} of command '{}' runs only from the command line; request render=raw \
+             for the command's own output",
+            which,
+            CStr::from_ptr(cmd.name).to_string_lossy()
+        ));
     }
+    let m: &'a crate::manifest_ffi::Manifest = &*mv;
+    m.command_by_name(CStr::from_ptr(t.entry)).ok_or_else(|| {
+        format!(
+            "render entry '{}' not found",
+            CStr::from_ptr(t.entry).to_string_lossy()
+        )
+    })
 }
 
-/// The entry-command name (`t.entry`, borrowed from the manifest) of the first
-/// matching terminal, or None. `match_long = Some(l)` picks the terminal whose
-/// long flag is `l`; `None` picks the `@default` terminal.
-unsafe fn terminal_entry(
-    cmd: &crate::manifest_ffi::ManifestCommand,
+/// The first terminal whose long flag is `match_long`, or with `None` the
+/// `@default` terminal.
+unsafe fn find_terminal<'a>(
+    cmd: &'a crate::manifest_ffi::ManifestCommand,
     match_long: Option<&str>,
-) -> Option<*const c_char> {
-    for i in 0..cmd.n_terminals {
-        let t = &*cmd.terminals.add(i);
-        if t.entry.is_null() {
-            continue;
-        }
-        let matched = match match_long {
-            Some(l) => {
-                !t.long.is_null() && CStr::from_ptr(t.long).to_str().map_or(false, |x| x == l)
-            }
-            None => t.default,
-        };
-        if matched {
-            return Some(t.entry);
-        }
-    }
-    None
+) -> Option<&'a crate::manifest_ffi::ManifestTerminal> {
+    (0..cmd.n_terminals).map(|i| &*cmd.terminals.add(i)).find(|t| match match_long {
+        Some(l) => !t.long.is_null() && CStr::from_ptr(t.long).to_str().map_or(false, |x| x == l),
+        None => t.default,
+    })
 }
 // Eval sandbox policy for served eval/bind. When G_EVAL_SANDBOX is set, the
 // forked `morloc eval` runs with `--eval-sandbox` (+ the allow-list), so it

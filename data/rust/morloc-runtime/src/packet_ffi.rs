@@ -732,6 +732,14 @@ pub unsafe extern "C" fn get_morloc_data_packet_value(
                         return ptr::null_mut();
                     }
                 };
+                // A stream file is read whole, every sub-packet in order, into
+                // the list its elements make: the `[a]` receiver of a stream.
+                if crate::cli::file_is_stream_packet(filename_cstr.as_ptr()) == 1 {
+                    return match crate::stream::shared_load_stream_file_as_array(filename) {
+                        Ok(p) => p as *mut u8,
+                        Err(e) => { set_errmsg(errmsg, &e); ptr::null_mut() }
+                    };
+                }
                 // Fast path: uncompressed voidstar mmap'd straight into SHM.
                 match crate::cli::try_load_voidstar_packet_via_mmap(
                     filename_cstr.as_ptr(), schema,

@@ -23,6 +23,8 @@ mod sigrm;
 mod stdio_bridge;
 mod stdio_server;
 mod view;
+mod stage;
+mod orchestrate;
 
 use dispatch::NexusConfig;
 
@@ -526,7 +528,46 @@ fn main() {
         // Scoped to normal CLI dispatch only: call-packet mode already
         // honors output_path internally (writes a sibling .mpk file
         // via write_atomic) and must not have its stdout hijacked.
-        process::redirect_stdout_to(config.output_path.as_deref());
+        // A child of a multi-output run already holds the `-o` file (if
+        // any) as fd 1, or was pointed elsewhere by its parent.
+        if matches!(config.child, dispatch::ChildMode::None) {
+            process::redirect_stdout_to(config.output_path.as_deref());
+        }
+
+        if let dispatch::ChildMode::Replay { cmd, inputs } = config.child.clone() {
+            // One action on a staged output: the inputs are packet files,
+            // in the entry's argument order.
+            let idx = manifest.command_index(&cmd).unwrap_or_else(|| {
+                eprintln!("Error: no internal command `{}`", cmd);
+                process::clean_exit(1);
+            });
+            let term = manifest.commands.iter()
+                .flat_map(|c| c.terminals.iter())
+                .find(|t| t.replay.as_deref() == Some(cmd.as_str()));
+            if let Some(t) = term.filter(|t| t.render) {
+                set_render_output(&mut config, t.kind);
+            }
+            // Each input is a file the stage wrote, read as the manifest
+            // says its argument is read (see `stageReplayArgs` in the
+            // compiler), exactly as a command-line argument would be.
+            let values = manifest.commands[idx].args.iter().zip(inputs).map(|(arg, input)| {
+                let value = match arg {
+                    manifest::Arg::Positional { checks, source, quoted, .. } => {
+                        dispatch::preprocess_cli_value(input, checks, *source, *quoted, &cmd)
+                    }
+                    _ => input,
+                };
+                dispatch::ArgValue::Value(value)
+            }).collect();
+            dispatch::dispatch_command_parsed(
+                values,
+                &config,
+                &manifest,
+                &manifest.commands[idx],
+                &mut sockets,
+            );
+            process::clean_exit(0);
+        }
 
         // Route through the manifest-driven parser. `user_zone`
         // is the command zone from the pre-scan split -- everything
@@ -536,20 +577,61 @@ fn main() {
         // manifest's command surface. Nexus flags placed in the
         // command zone are rejected here as unknown; users must
         // place them left of `@` or left of the subcommand.
-        let parsed =
-            phase2::parse_run(&manifest, &user_zone, &prog_name, format_explicit);
-        // A `render` terminal emits its handler's bytes verbatim. Force raw for
-        // BOTH output paths: the streamed-stdout path (`render.buffer`, whose
-        // () return is suppressed by the Raw arm's top-null guard) and the
-        // return path (whole-list `render`, which returns a Str/Vector U8 value
-        // formatted by `print_result_c`).
-        if parsed.render {
-            stdio_server::set_output_format(dispatch::OutputFormat::Raw);
-            config.output_format = dispatch::OutputFormat::Raw;
+        let parsed = phase2::parse_run(
+            &manifest,
+            &user_zone,
+            &prog_name,
+            format_explicit,
+            config.output_path.as_deref(),
+        );
+
+        if let dispatch::ChildMode::Stage { dir, args, tee } = config.child.clone() {
+            // The stage of a multi-output run: the parent command, once.
+            stage::init(&dir, &args, tee);
+            let parent = &manifest.commands[parsed.parent_index];
+            // A streaming command's stream is its output: saved for the
+            // actions when its type is known, and on stdout only with tee.
+            if parent.terminals.iter().any(|t| t.kind.of_streaming_command()) {
+                let (fd, schema) = match &parent.stream {
+                    Some(stream) => {
+                        let path = stage::stream_path(&dir);
+                        let file = std::fs::File::create(&path).unwrap_or_else(|e| {
+                            eprintln!("Error: {}: {}", path, e);
+                            process::clean_exit(1);
+                        });
+                        use std::os::unix::io::IntoRawFd;
+                        (file.into_raw_fd(), Some(stream.schema.clone()))
+                    }
+                    None => (-1, None),
+                };
+                stdio_server::save_stdout_stream(fd, schema);
+            }
+            let (idx, values) =
+                parse_arg::redirect(&manifest, parsed.parent_index, parsed.values);
+            dispatch::dispatch_command_parsed(
+                values,
+                &config,
+                &manifest,
+                &manifest.commands[idx],
+                &mut sockets,
+            );
+            process::clean_exit(0);
         }
-        let cmd = &manifest.commands[parsed.cmd_index];
+
+        if parsed.staged {
+            orchestrate::run(&manifest, &config, &parsed, format_explicit);
+        }
+
+        if parsed.render {
+            let kind = parsed.stdout_terminal
+                .map(|t| manifest.commands[parsed.parent_index].terminals[t].kind)
+                .unwrap_or_default();
+            set_render_output(&mut config, kind);
+        }
+        let (cmd_index, values) = parse_arg::redirect(&manifest, parsed.cmd_index, parsed.values);
+        let cmd = &manifest.commands[cmd_index];
         dispatch::dispatch_command_parsed(
-            parsed.values,
+            values,
             &config,
             &manifest,
             cmd,
@@ -578,6 +660,16 @@ fn main() {
     }
 
     process::clean_exit(0);
+}
+
+/// A `@render` action's output is its handler's bytes, written verbatim.
+/// That output is the returned value, or for a per-batch action the stream
+/// it writes; anything else the command streams keeps the run's format.
+fn set_render_output(config: &mut dispatch::NexusConfig, kind: manifest::ActionKind) {
+    config.output_format = dispatch::OutputFormat::Raw;
+    if kind == manifest::ActionKind::Stream {
+        stdio_server::set_output_format(dispatch::OutputFormat::Raw);
+    }
 }
 
 /// C `daemon_config_t` mirror (matches `daemon_ffi::DaemonConfig` layout).

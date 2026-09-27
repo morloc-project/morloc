@@ -327,8 +327,13 @@ rewrite lang m (PolyTuple v xs)    =
 rewrite lang m (PolyRecord o v ps rs) =
   PolyRecord o v ps <$>
     mapM (\(k,(t,x)) -> (,) k . (,) t <$> rewrite lang m x) rs
-rewrite lang m (PolyIntrinsic t intr xs) =
-  PolyIntrinsic t intr <$> mapM (rewrite lang m) xs
+rewrite lang m (PolyIntrinsic t intr xs) = do
+  xs' <- mapM (rewrite lang m) xs
+  -- @replay's pool helper calls its function as @f(x)@, exactly as a
+  -- foreign source calls a callback, so the same force applies.
+  PolyIntrinsic t intr <$> case (intr, xs') of
+    (IntrReplay, [h, f]) -> (\f' -> [h, f']) <$> maybeForceCallbackArg f
+    _ -> return xs'
 rewrite lang m (PolyVariant t n i xs) = PolyVariant t n i <$> mapM (rewrite lang m) xs
 rewrite _ _ leaf = return leaf
 

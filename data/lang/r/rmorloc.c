@@ -2862,6 +2862,33 @@ SEXP morloc_mlc_next(SEXP schema_str_r, SEXP handle_r) { MAYFAIL
     return result;
 }
 
+// Read the next frame (sub-packet) of a file-backed IStream as an R list;
+// NULL at the end of the stream. An empty frame is an empty list.
+SEXP morloc_mlc_next_frame(SEXP schema_str_r, SEXP handle_r) { MAYFAIL
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        MORLOC_INTERNAL_ABORT("mlc_next_frame: schema must be a single string");
+    }
+    if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
+        MORLOC_INTERNAL_ABORT("mlc_next_frame: handle must be a single number");
+    }
+    const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
+    int64_t handle = i64_from_sexp(handle_r);
+    int32_t eof = 0;
+    void* voidstar = R_TRY(mlc_next_frame, handle, &eof);
+    if (eof) {
+        return R_NilValue;
+    }
+    Schema* schema = R_TRY(parse_schema, schema_str);
+    SEXP result = from_voidstar(voidstar, schema, NULL);
+    {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return result;
+}
+
 SEXP morloc_mlc_stream_layout(SEXP schema_str_r, SEXP handle_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
         MORLOC_INTERNAL_ABORT("mlc_stream_layout: schema must be a single string");
@@ -3317,11 +3344,17 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
                 MORLOC_ERROR("stream ingest: mlc_ifile_length returned %lld",
                              (long long)total_i64);
             }
-            SEXP result = PROTECT(allocVector(VECSXP, (R_xlen_t)total_i64));
+            // The list is built as the vector type the chunks decode to: an
+            // atomic vector for `[Int]`, `[Str]` and the like, a generic list
+            // for anything else. The first chunk, empty or not, sets it.
+            SEXP result = R_NilValue;
+            PROTECT_INDEX result_ix;
+            PROTECT_WITH_INDEX(result, &result_ix);
             R_xlen_t off = 0;
             while (1) {
                 char* nerr = NULL;
-                void* chunk = mlc_next(handle, &nerr);
+                int32_t eof = 0;
+                void* chunk = mlc_next_frame(handle, &eof, &nerr);
                 if (nerr) {
                     UNPROTECT(1);
                     char msg[512];
@@ -3332,31 +3365,42 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
                     free_schema(schema);
                     MORLOC_ERROR("%s", msg);
                 }
-                if (chunk == NULL) break;
-                Array* arr = (Array*)chunk;
-                if (arr->size == 0) {
-                    char* ferr = NULL; shfree(chunk, &ferr);
-                    if (ferr) free(ferr);
-                    break;
-                }
+                if (eof || chunk == NULL) break;
                 SEXP chunk_r = PROTECT(from_voidstar(chunk, schema, NULL));
                 char* ferr = NULL; shfree(chunk, &ferr);
                 if (ferr) free(ferr);
-                if (chunk_r == NULL) {
+                if (result == R_NilValue) {
+                    result = allocVector(TYPEOF(chunk_r), (R_xlen_t)total_i64);
+                    REPROTECT(result, result_ix);
+                }
+                if (TYPEOF(chunk_r) != TYPEOF(result)) {
                     UNPROTECT(2);
                     char* cerr = NULL; mlc_close(handle, &cerr);
                     if (cerr) free(cerr);
                     free_schema(schema);
-                    MORLOC_ERROR("stream ingest: from_voidstar failed on chunk");
+                    MORLOC_ERROR("stream ingest: sub-packets decode to different R types");
                 }
                 R_xlen_t sz = XLENGTH(chunk_r);
-                for (R_xlen_t j = 0; j < sz && off < (R_xlen_t)total_i64; j++) {
-                    SET_VECTOR_ELT(result, off++, VECTOR_ELT(chunk_r, j));
+                for (R_xlen_t j = 0; j < sz && off < (R_xlen_t)total_i64; j++, off++) {
+                    switch (TYPEOF(result)) {
+                        case INTSXP:  INTEGER(result)[off] = INTEGER(chunk_r)[j]; break;
+                        case REALSXP: REAL(result)[off] = REAL(chunk_r)[j]; break;
+                        case LGLSXP:  LOGICAL(result)[off] = LOGICAL(chunk_r)[j]; break;
+                        case RAWSXP:  RAW(result)[off] = RAW(chunk_r)[j]; break;
+                        case STRSXP:  SET_STRING_ELT(result, off, STRING_ELT(chunk_r, j)); break;
+                        default:      SET_VECTOR_ELT(result, off, VECTOR_ELT(chunk_r, j)); break;
+                    }
                 }
                 UNPROTECT(1);
             }
             char* cerr = NULL; mlc_close(handle, &cerr);
             if (cerr) free(cerr);
+            if (result == R_NilValue) {
+                // A stream with no sub-packets decodes as an empty one would.
+                Array empty = { 0, RELNULL };
+                result = from_voidstar(&empty, schema, NULL);
+                REPROTECT(result, result_ix);
+            }
             UNPROTECT(1);
             free_schema(schema);
             return result;
@@ -4727,6 +4771,7 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_mlc_ifile_walk", (DL_FUNC) &morloc_mlc_ifile_walk, 4},
         {"morloc_mlc_ifile_length", (DL_FUNC) &morloc_mlc_ifile_length, 1},
         {"morloc_mlc_next", (DL_FUNC) &morloc_mlc_next, 2},
+        {"morloc_mlc_next_frame", (DL_FUNC) &morloc_mlc_next_frame, 2},
         {"morloc_mlc_stream_layout", (DL_FUNC) &morloc_mlc_stream_layout, 2},
         {"morloc_mlc_stream", (DL_FUNC) &morloc_mlc_stream, 1},
         {"morloc_mlc_open_ostream", (DL_FUNC) &morloc_mlc_open_ostream, 2},

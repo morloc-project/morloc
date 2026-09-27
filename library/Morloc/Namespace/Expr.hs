@@ -532,6 +532,11 @@ data Intrinsic
                     -- `combine` and release the cell. Never sees an empty
                     -- cell: one that was never folded into answers with its
                     -- seed, which is what an empty stream folds to.
+  | IntrReplay      -- ^ @replay :: IStream a -> ([a] -> <IO> ()) -> <IO> ()@ --
+                    -- call the function on every frame (sub-packet) of the
+                    -- stream, in order, empty frames included. Synthesized
+                    -- only (a replayed terminal action's producer), never
+                    -- written by users.
   | IntrIFileWalk   -- ^ Unified IFile pattern walker. Synthesized by Express.hs
                     -- and Nexus.hs from any pattern application with an IFile
                     -- receiver (`.[i] f`, `.[s:e:p] f`, `.foo.bar f`, mixed
@@ -585,6 +590,7 @@ intrinsicName IntrCellNew = "cellnew"
 intrinsicName IntrCellGet = "cellget"
 intrinsicName IntrCellPut = "cellput"
 intrinsicName IntrCellReduce = "cellreduce"
+intrinsicName IntrReplay = "replay"
 intrinsicName IntrIFileWalk = "ifile_walk"
 
 -- | Does this intrinsic perform IO? True iff its type carries an `IO` effect
@@ -624,6 +630,7 @@ intrinsicIsIO IntrCellNew = True
 intrinsicIsIO IntrCellGet = True
 intrinsicIsIO IntrCellPut = True
 intrinsicIsIO IntrCellReduce = True
+intrinsicIsIO IntrReplay = True
 -- No IO: safe to write directly in a sandboxed eval.
 intrinsicIsIO IntrHash = False
 intrinsicIsIO IntrVersion = False
@@ -721,6 +728,7 @@ intrinsicArity IntrCellNew = 1
 intrinsicArity IntrCellGet = 1
 intrinsicArity IntrCellPut = 2
 intrinsicArity IntrCellReduce = 2
+intrinsicArity IntrReplay = 2
 intrinsicArity IntrIFileWalk =
   error "intrinsicArity: IntrIFileWalk has dynamic arity (path + handle + 0..n bracket bounds) and is never eta-expanded"
 

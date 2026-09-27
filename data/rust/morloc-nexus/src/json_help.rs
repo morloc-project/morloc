@@ -360,7 +360,7 @@ fn command_to_json(cmd: &Command, manifest: &Manifest) -> Value {
         .terminals
         .iter()
         .map(|t| {
-            let entry = t.resolve_entry(manifest);
+            let entry = t.output_command(manifest);
             let ty = entry.map(|c| stream_or_return_type_object(c));
             json!({
                 "short": t.short.map(|c| c.to_string()),
@@ -1147,11 +1147,14 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
     let mut renders: Vec<RenderTarget> = Vec::new();
     if !cmd.terminals.is_empty() {
         let mut enum_vals: Vec<Value> = vec![Value::String("raw".into())];
+        // A tool call runs one action on a fresh run of its command; an
+        // action with no such entry runs only on saved output, from the CLI.
         for t in &cmd.terminals {
+            let Some(entry) = &t.entry else { continue };
             enum_vals.push(Value::String(t.long.clone()));
             renders.push(RenderTarget {
                 value: t.long.clone(),
-                command: t.entry.clone(),
+                command: entry.clone(),
                 mime: None,
                 returns_object: false,
             });

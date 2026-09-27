@@ -1,0 +1,37 @@
+-- The command line of a run that names terminal actions with paths.
+--
+-- Stdout gets what it would get with no path actions: the `@default`
+-- action, or the plain value under `-f`, or nothing under `--no-stdout`
+-- (also accepted beside `-o`, and alone). `--act FILE` with a space stays a
+-- flag and a positional. Requests that contradict each other are refused
+-- before anything runs: two claims on stdout, one path for two actions, a
+-- path that is also `-o`'s, an empty `=`. A failing action leaves no file:
+-- a new path is not created, an existing one keeps its content, and no
+-- temporary file is left beside it. A file that is replaced keeps its
+-- permissions, a path through a symlink writes the file it names and keeps
+-- the link, two paths that reach one file are one path, and a device such
+-- as /dev/null is written in place.
+
+module main (nums)
+
+import root-py
+
+source Py from "impl.py" ("build", "as_csv" as asCsv, "as_table" as asTable, "boom")
+
+build :: Int -> <IO> [Int]
+
+--' Comma-separated
+asCsv :: [Int] -> Str
+
+--' One per line
+asTable :: [Int] -> Str
+
+--' Fails after writing part of its output
+boom :: [Int] -> Str
+
+--' Numbers
+--' @render -c/--csv=asCsv
+--' @render -t/--table=asTable @default
+--' @render -b/--boom=boom
+nums :: Int -> <IO> [Int]
+nums n = build n

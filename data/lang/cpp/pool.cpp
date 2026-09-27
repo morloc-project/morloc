@@ -399,20 +399,22 @@ T _get_value(const uint8_t* packet, Schema* schema){
                     try {
                         while (true) {
                             char* nerr = nullptr;
-                            void* chunk = mlc_next(handle, &nerr);
+                            int32_t eof = 0;
+                            void* chunk = mlc_next_frame(handle, &eof, &nerr);
                             if (nerr) {
                                 char* cerr = nullptr;
                                 mlc_close(handle, &cerr);
                                 if (cerr) free(cerr);
                                 PROPAGATE_ERROR(nerr);
                             }
-                            if (chunk == nullptr) break;
+                            if (eof || chunk == nullptr) break;
+                            // An empty sub-packet is an empty batch, not the end.
                             Array* arr = (Array*)chunk;
                             if (arr->size == 0) {
                                 char* ferr = nullptr;
                                 shfree((absptr_t)chunk, &ferr);
                                 if (ferr) free(ferr);
-                                break;
+                                continue;
                             }
                             T* dummy = nullptr;
                             T chunk_vec = from_voidstar(schema, chunk, dummy);
@@ -1021,6 +1023,25 @@ B _mlc_cell_reduce(Schema* schema, F combine, int64_t handle) {
         acc = combine(acc, _mlc_cell_slot<B>(schema, handle, i));
     }
     return acc;
+}
+
+// @replay: call `fn` on every frame (sub-packet) of the stream, in order,
+// each as the list it holds. An empty frame is an empty list; only the end
+// of the stream stops the loop.
+template <typename E, typename F>
+mlc::Unit _mlc_replay(Schema* schema, int64_t handle, F fn) {
+    while (true) {
+        char* errmsg = NULL;
+        int32_t eof = 0;
+        void* voidstar = mlc_next_frame(handle, &eof, &errmsg);
+        if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+        if (eof) break;
+        std::vector<E>* dummy = nullptr;
+        std::vector<E> frame = from_voidstar(schema, voidstar, dummy);
+        shfree_cpp(voidstar);
+        fn(frame);
+    }
+    return mlc::Unit{};
 }
 
 // Array-based foreign call: send a local-call packet carrying a runtime-sized

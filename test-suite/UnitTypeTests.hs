@@ -9994,6 +9994,73 @@ withDocstringTests =
         foo x = do x
           |]
 
+        -- The replay entries synthesized for terminal actions own the
+        -- `mlcr_` prefix.
+      , expectError
+          "with: an identifier may not use the reserved mlcr_ prefix"
+          [r|
+        module main (foo, mlcr_bar)
+        mlcr_bar :: Int -> Int
+        mlcr_bar n = n
+        foo :: Int -> Int
+        foo x = x
+          |]
+
+        -- Every command with terminal actions takes `--no-stdout`, so
+        -- neither an action nor an argument may use the name.
+      , expectError
+          "with: --no-stdout is a reserved action name"
+          [r|
+        module main (foo)
+        fmt :: Int -> Str
+        --' @render --no-stdout=fmt
+        foo :: Int -> Int
+        foo x = x
+          |]
+      , expectError
+          "with: --no-stdout is a reserved argument name on a command with actions"
+          [r|
+        module main (foo)
+        fmt :: Int -> Str
+        --' @render -F/--fmt=fmt
+        foo ::
+          --' @arg --no-stdout
+          Int ->
+          Int
+        foo x = x
+          |]
+
+        -- A terminal action applies to what a streaming command streams,
+        -- so the command may not also return a value.
+      , expectError
+          "with: an action on a streaming command that also returns a value"
+          [r|
+        module main (foo)
+        effect IO
+        produce :: ([Int] -> <IO> ()) -> <IO> ()
+        fmt :: [Int] -> Str
+        --' @render -a/--all=fmt
+        foo :: Int -> <IO> Int
+        foo n = do
+          @collect produce
+          n
+          |]
+
+        -- An action applies to the whole output, whatever the shape of the
+        -- body: a `@collect` in one branch of a guard builds.
+      , expectPass
+          "with: a gathering action on a @collect in one branch"
+          [r|
+        module main (foo)
+        effect IO
+        produce :: ([Int] -> <IO> ()) -> <IO> ()
+        nop :: <IO> ()
+        fmt :: [Int] -> Str
+        --' @render -a/--all=fmt
+        foo :: Bool -> <IO> ()
+        foo b = ? b = @collect produce : nop
+          |]
+
         -- A leading-underscore long flag name is rejected: those names are
         -- reserved for compiler-generated argument identifiers (the MCP
         -- backend names positionals `_1`, `_2`, ...), so a flag must not be
@@ -10076,6 +10143,8 @@ withDocstringTests =
         -- A where-binding sees only the definition's own parameters, so a
         -- `$N` naming a parameter bound by a lambda in the body cannot reach
         -- a @collect inside a where-binding.
+      -- A command that streams from a where-binding runs its actions on its
+      -- staged output, where `$2` is the second argument the stage saved.
       , testCase "with: `$N` naming a body lambda's parameter from a where-binding" $ do
           result <- runFront [r|
         module main (stream)
@@ -10094,8 +10163,8 @@ withDocstringTests =
             go = @collect (produce x)
           |]
           case result of
-            Right _ -> assertFailure "Expected failure"
-            Left e -> assertBool (show e) ("`$2`" `MT.isInfixOf` MT.pack (show e))
+            Right _ -> return ()
+            Left e -> assertFailure (show e)
       ]
 
 -- Sum types: declaration syntax, constructor scoping, and typechecking.

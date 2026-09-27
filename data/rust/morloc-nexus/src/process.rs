@@ -632,7 +632,10 @@ pub fn install_signal_handlers() {
 
 /// Remove the run tmpdir when the run ends.
 pub fn set_tmpdir(path: String) {
-    crate::sigrm::register(&path);
+    if let Err(e) = crate::sigrm::register(&path) {
+        eprintln!("Error: {}", e);
+        clean_exit(1);
+    }
 }
 
 /// Publish the current basename with its trailing `-` so the signal
@@ -817,6 +820,25 @@ pub fn clean_exit(exit_code: i32) -> ! {
         park_until_exit();
     }
     EXIT_CODE.store(exit_code, Ordering::SeqCst);
+
+    // A successful run completes its streamed stdout (a no-op when the
+    // result printer already did). A failed run leaves it unterminated so
+    // a reader cannot mistake a partial stream for a whole one.
+    let mut exit_code = exit_code;
+    if exit_code == 0 && !BROKEN_PIPE.load(Ordering::Relaxed) {
+        crate::stdio_server::finish_stdout();
+    }
+    // A stage completes the stream it saved even when stdout broke; the
+    // run then reports the broken pipe.
+    if exit_code == 0 && crate::stage::active() {
+        if let Err(e) = crate::stdio_server::finish_stage() {
+            eprintln!("Error: saving the stdout stream: {}", e);
+            exit_code = 1;
+        } else if crate::stdio_server::stage_stdout_broken() {
+            exit_code = 141;
+        }
+        EXIT_CODE.store(exit_code, Ordering::SeqCst);
+    }
 
     // Flush stdout. Critical when -o redirected fd 1 to a file: Rust
     // and libc both buffer when stdout is not a TTY, and std::process::exit

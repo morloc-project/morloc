@@ -1217,6 +1217,34 @@ pub unsafe extern "C" fn mlc_next(
     }
 }
 
+/// Read the next frame (sub-packet) of a file-backed IStream as a fresh SHM
+/// Array<a>. At the end of the stream returns null and sets `*eof` to 1; an
+/// empty frame is an empty Array with `*eof` 0. Used by `@replay`.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_next_frame(
+    handle: i64,
+    eof: *mut i32,
+    errmsg: *mut *mut c_char,
+) -> *mut c_void {
+    clear_errmsg(errmsg);
+    if !eof.is_null() {
+        *eof = 0;
+    }
+    match crate::stream::shared_next_frame(handle) {
+        Ok(Some(p)) => p as *mut c_void,
+        Ok(None) => {
+            if !eof.is_null() {
+                *eof = 1;
+            }
+            ptr::null_mut()
+        }
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            ptr::null_mut()
+        }
+    }
+}
+
 /// `@streamLayout` on an IFile handle: return an AbsPtr to a freshly
 /// allocated SHM voidstar `Array<Tuple3<U64,U64,U64>>` holding one
 /// `(element_offset, element_count, uncompressed_size)` triple per

@@ -426,6 +426,13 @@ pub fn stdout_element_count() -> u64 {
     with_process_local_slot(handle, |_local, slot| Ok(slot.element_count)).unwrap_or(0)
 }
 
+/// True when this process runs under a staging nexus, which captures the
+/// run's stdout stream batch by batch for replay (`MORLOC_STDOUT_STAGE`).
+fn stdout_staged() -> bool {
+    static STAGED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *STAGED.get_or_init(|| std::env::var_os("MORLOC_STDOUT_STAGE").is_some())
+}
+
 /// Return the registry's per-nexus generation-increment salt. The salt
 /// is set by the bootstrap winner and is the same value seen by every
 /// attached process. Used by the slot-close path to bump the generation
@@ -618,7 +625,12 @@ pub struct RegistrySlot {
     /// When `is_stdio` is set, the specific stdio kind: 0=stdin,
     /// 1=stdout, 2=stderr. Immutable after publication.
     pub stdio_kind:           u8,                              // off 329
-    _stdio_pad:               [u8; 6],                         // off 330..336
+    /// Non-zero on a staged stdout (see `stdout_staged`): each `@write`
+    /// is emitted as exactly one sub-packet, never split or merged, an
+    /// empty batch included, so the stream keeps the producer's batch
+    /// boundaries. Immutable after publication.
+    pub staged:               u8,                              // off 330
+    _stdio_pad:               [u8; 5],                         // off 331..336
 
     /// Padding to round the slot up to STREAM_ENTRY_SIZE so the next
     /// slot starts on a fresh cache-line-aligned boundary.
@@ -1307,6 +1319,7 @@ fn release_slot_locked(slot: &RegistrySlot) {
         (*mp).kind = 0;
         (*mp).is_stdio = 0;
         (*mp).stdio_kind = 0;
+        (*mp).staged = 0;
         (*mp).write_buffer = shm_types_crate::RELNULL;
         (*mp).write_buffer_index_cap = 0;
         (*mp).write_buffer_index_count = 0;
@@ -1751,6 +1764,9 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
     // so store the canonical form.
     let schema_owned =
         morloc_runtime_types::schema::canonicalize_schema_str(schema_str);
+    let staged = kind == MLC_KIND_OSTREAM
+        && stdio_kind == STDIO_KIND_STDOUT
+        && stdout_staged();
     let schema_str: &str = &schema_owned;
 
     // Pool processes attach lazily; without this, the first stdio open
@@ -1864,6 +1880,7 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
             (*mp).kind = kind;
             (*mp).is_stdio = 1;
             (*mp).stdio_kind = stdio_kind;
+            (*mp).staged = staged as u8;
             (*mp).file_path = slot_owns(path_rel);
             (*mp).file_path_len = sentinel.len() as u32;
             (*mp).schema_str = slot_owns(schema_rel);
@@ -3402,6 +3419,22 @@ pub fn shared_write_subpacket(
         // env lookup, no per-element heap allocation).
         let buf_size = read_write_buffer_bytes_env();
         let mut scratch: Vec<u8> = Vec::new();
+        if slot.staged != 0 {
+            // One batch, one sub-packet: the whole `[a]` is flattened and
+            // emitted as it is, so a batch is never split across frames or
+            // merged with another, and an empty batch is an empty frame.
+            flush_write_buffer(slot, local)?;
+            crate::voidstar::flatten_into(&mut scratch, payload_voidstar, &local.value_schema)?;
+            let level = slot.compression_level;
+            emit_subpacket_via_rpc(slot, local, &scratch, level, n_elements)?;
+            unsafe {
+                let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+                (*mp).element_count += n_elements;
+                let d = &mut (*mp).diag;
+                d.element_count += n_elements;
+            }
+            return Ok(());
+        }
         for i in 0..n_elements {
             let elem_src = unsafe { elem_data_base.add((i as usize) * w) };
             append_one_element(slot, local, elem_src, buf_size, &mut scratch)?;
@@ -3448,6 +3481,32 @@ pub fn shared_next_subpacket(handle: i64) -> Result<AbsPtr, MorlocError> {
         verify_stdio_opener_pid(handle)?;
         return stdio_next_via_rpc(handle, stdio_kind);
     }
+    match next_file_subpacket(handle)? {
+        Some(p) => Ok(p),
+        None => empty_shm_array(),
+    }
+}
+
+/// Read the next sub-packet of a file-backed IStream as one frame, telling
+/// the end of the stream (`None`) apart from an empty frame. `@next`
+/// cannot: it answers both with an empty list.
+///
+/// Standard input carries no footer to tell them apart by, so there an
+/// empty sub-packet still ends the stream, as with `@next`.
+pub fn shared_next_frame(handle: i64) -> Result<Option<AbsPtr>, MorlocError> {
+    if let Some(stdio_kind) = shared_handle_stdio_kind(handle)? {
+        verify_stdio_opener_pid(handle)?;
+        let p = stdio_next_via_rpc(handle, stdio_kind)?;
+        if unsafe { (*(p as *const shm_types_crate::Array)).size } == 0 {
+            let _ = crate::shm::shfree(p);
+            return Ok(None);
+        }
+        return Ok(Some(p));
+    }
+    next_file_subpacket(handle)
+}
+
+fn next_file_subpacket(handle: i64) -> Result<Option<AbsPtr>, MorlocError> {
     with_process_local_slot(handle, |local, slot| {
         if slot.kind != MLC_KIND_ISTREAM {
             return Err(MorlocError::Other(format!(
@@ -3463,8 +3522,8 @@ pub fn shared_next_subpacket(handle: i64) -> Result<AbsPtr, MorlocError> {
             let _guard = SlotFutexGuard::lock(slot);
             let cursor = slot.cursor;
             if cursor >= local.mmap_size || cursor + 32 > local.mmap_size {
-                // EOF: leave cursor where it is, return empty Array.
-                return empty_shm_array();
+                // EOF: leave cursor where it is.
+                return Ok(None);
             }
             let hdr_bytes = unsafe {
                 std::slice::from_raw_parts(
@@ -3476,8 +3535,8 @@ pub fn shared_next_subpacket(handle: i64) -> Result<AbsPtr, MorlocError> {
                 hdr_bytes.try_into().unwrap(),
             )?;
             if !header.is_data() {
-                // Footer encountered: end-of-stream. Return empty.
-                return empty_shm_array();
+                // Footer encountered: end-of-stream.
+                return Ok(None);
             }
             let size = 32 + header.offset as u64 + header.length;
             // Advance the cursor BEFORE we drop the futex so concurrent
@@ -3494,7 +3553,7 @@ pub fn shared_next_subpacket(handle: i64) -> Result<AbsPtr, MorlocError> {
         // Materialise the claimed sub-packet without holding the
         // futex. Other pools can advance through subsequent
         // sub-packets in parallel.
-        materialize_and_finalise_subpacket(local, slot, claim_cursor)
+        materialize_and_finalise_subpacket(local, slot, claim_cursor).map(Some)
     })
 }
 
@@ -3560,6 +3619,41 @@ pub fn shared_load_stream_file_as_array(path: &str) -> Result<AbsPtr, MorlocErro
     // backing file regardless of success so the handle never leaks.
     let _ = shared_discard_handle(handle);
     result
+}
+
+/// Copy one sub-packet's `sz` records and the `tail` bytes of
+/// sub-allocations after them to `dst_rec` and `dst_tail`, then shift the
+/// records' relptrs by however far the tail moved. Every relptr in the
+/// records addresses that tail and nothing else, so one delta covers them.
+///
+/// # Safety
+/// Both destinations must have room, and `records` must be followed by
+/// its `tail` bytes within one block.
+unsafe fn place_subpacket(
+    records: AbsPtr,
+    sz: usize,
+    tail: usize,
+    dst_rec: *mut u8,
+    dst_tail: *mut u8,
+    elem_schema: &Schema,
+) -> Result<(), MorlocError> {
+    let elem_width = elem_schema.width;
+    let src_tail = (records as *const u8).add(sz * elem_width);
+    std::ptr::copy_nonoverlapping(records as *const u8, dst_rec, sz * elem_width);
+    // With no tail there is nothing to shift into, and the tail's address,
+    // one past the block, may lie past the end of its volume.
+    if tail == 0 {
+        return Ok(());
+    }
+    std::ptr::copy_nonoverlapping(src_tail, dst_tail, tail);
+    let delta = match (shm::abs2rel(src_tail as AbsPtr), shm::abs2rel(dst_tail as AbsPtr)) {
+        (Ok(a), Ok(b)) => (b as i64).wrapping_sub(a as i64) as RelPtr,
+        _ => return Err(MorlocError::Shm("@load: sub-packet is outside every volume".into())),
+    };
+    for k in 0..sz {
+        voidstar::adjust_relptrs(dst_rec.add(k * elem_width) as AbsPtr, elem_schema, delta)?;
+    }
+    Ok(())
 }
 
 /// What went wrong with the sized route.
@@ -3633,15 +3727,17 @@ fn collect_sized(
         e
     };
     loop {
-        let block = match shared_next_subpacket(handle) {
-            Ok(p) => p,
+        let block = match shared_next_frame(handle) {
+            Ok(Some(p)) => p,
+            Ok(None) => break,
             Err(e) => return Err(finish(out, e.into())),
         };
         let arr = unsafe { &*(block as *const shm_types_crate::Array) };
         let sz = arr.size;
+        // An empty sub-packet is an empty batch, not the end of the stream.
         if sz == 0 {
             let _ = shm::shfree(block);
-            break;
+            continue;
         }
         let records = match shm::rel2abs(arr.data) {
             Ok(p) => p,
@@ -3669,33 +3765,18 @@ fn collect_sized(
             let _ = shm::shfree(block);
             return Err(finish(out, CollectSized::Mismatch));
         }
-        let src_tail = unsafe { (records as *const u8).add(sz * elem_width) };
-        let dst_rec = unsafe { out_records.add(rec_at * elem_width) };
-        let dst_tail = unsafe { out_tails.add(tail_at) };
         // SAFETY: the bound above proves both destinations have room, and
         // each source range lies inside the sub-packet's own block.
-        unsafe {
-            std::ptr::copy_nonoverlapping(records as *const u8, dst_rec, sz * elem_width);
-            if tail > 0 {
-                std::ptr::copy_nonoverlapping(src_tail, dst_tail, tail);
-            }
-        }
-        let rel = (shm::abs2rel(src_tail as AbsPtr), shm::abs2rel(dst_tail as AbsPtr));
-        let (src_rel, dst_rel) = match rel {
-            (Ok(a), Ok(b)) => (a, b),
-            _ => {
-                let _ = shm::shfree(block);
-                return Err(finish(out, MorlocError::Shm(
-                    "@load: sub-packet is outside every volume".into()).into()));
-            }
+        let moved = unsafe {
+            place_subpacket(
+                records, sz, tail,
+                out_records.add(rec_at * elem_width), out_tails.add(tail_at),
+                elem_schema,
+            )
         };
-        let delta = (dst_rel as i64).wrapping_sub(src_rel as i64) as RelPtr;
-        for k in 0..sz {
-            let rec = unsafe { dst_rec.add(k * elem_width) as AbsPtr };
-            if let Err(e) = voidstar::adjust_relptrs(rec, elem_schema, delta) {
-                let _ = shm::shfree(block);
-                return Err(finish(out, e.into()));
-            }
+        if let Err(e) = moved {
+            let _ = shm::shfree(block);
+            return Err(finish(out, e.into()));
         }
         rec_at += sz;
         tail_at += tail;
@@ -3822,8 +3903,9 @@ fn collect_istream_into_array(handle: i64, path: &str) -> Result<AbsPtr, MorlocE
     };
 
     loop {
-        let block = match shared_next_subpacket(handle) {
-            Ok(p) => p,
+        let block = match shared_next_frame(handle) {
+            Ok(Some(p)) => p,
+            Ok(None) => break,
             Err(e) => {
                 free_chunks(&chunks);
                 return Err(e);
@@ -3831,11 +3913,10 @@ fn collect_istream_into_array(handle: i64, path: &str) -> Result<AbsPtr, MorlocE
         };
         let arr = unsafe { &*(block as *const shm_types_crate::Array) };
         let sz = arr.size;
+        // An empty sub-packet is an empty batch, not the end of the stream.
         if sz == 0 {
-            // Size-0 Array is the EOF sentinel (`shared_next_subpacket`
-            // returns it once the footer or file end is reached).
             let _ = shm::shfree(block);
-            break;
+            continue;
         }
         let records = match shm::rel2abs(arr.data) {
             Ok(p) => p,
@@ -3895,37 +3976,20 @@ fn collect_istream_into_array(handle: i64, path: &str) -> Result<AbsPtr, MorlocE
     let mut rec_at = 0usize;   // elements already placed
     let mut tail_at = 0usize;  // sub-allocation bytes already placed
     for &(_, records, sz, tail) in &chunks {
-        let src_tail = unsafe { (records as *const u8).add(sz * elem_width) };
-        let dst_rec = unsafe { out_records.add(rec_at * elem_width) };
-        let dst_tail = unsafe { out_tails.add(tail_at) };
         // SAFETY: the destination was sized as the sum of these two regions
         // over every sub-packet, and each source range lies inside its own
         // block (checked above).
-        unsafe {
-            std::ptr::copy_nonoverlapping(records as *const u8, dst_rec, sz * elem_width);
-            if tail > 0 {
-                std::ptr::copy_nonoverlapping(src_tail, dst_tail, tail);
-            }
-        }
-        // Shift this sub-packet's relptrs by however far its sub-allocations
-        // moved. Every relptr in its records addressed that region and nothing
-        // else, so one delta covers them all.
-        let (src_rel, dst_rel) = match (shm::abs2rel(src_tail as AbsPtr), shm::abs2rel(dst_tail as AbsPtr)) {
-            (Ok(a), Ok(b)) => (a, b),
-            _ => {
-                let _ = shm::shfree(out);
-                free_chunks(&chunks);
-                return Err(MorlocError::Shm("@load: sub-packet is outside every volume".into()));
-            }
+        let moved = unsafe {
+            place_subpacket(
+                records, sz, tail,
+                out_records.add(rec_at * elem_width), out_tails.add(tail_at),
+                &elem_schema,
+            )
         };
-        let delta = (dst_rel as i64).wrapping_sub(src_rel as i64) as RelPtr;
-        for k in 0..sz {
-            let rec = unsafe { dst_rec.add(k * elem_width) as AbsPtr };
-            if let Err(e) = voidstar::adjust_relptrs(rec, &elem_schema, delta) {
-                let _ = shm::shfree(out);
-                free_chunks(&chunks);
-                return Err(e);
-            }
+        if let Err(e) = moved {
+            let _ = shm::shfree(out);
+            free_chunks(&chunks);
+            return Err(e);
         }
         rec_at += sz;
         tail_at += tail;
@@ -8611,16 +8675,18 @@ pub fn shared_view_stream_to_stream(
     };
 
     // Drain: pull one sub-packet from the IStream and hand it to
-    // the OStream. `@next` returns an empty Array on EOF; that signals
-    // us to stop.
+    // the OStream, until the end of the stream. An empty sub-packet is
+    // an empty frame and is dropped, as `@write` of an empty list is.
     let mut n_written: u64 = 0;
     loop {
-        let sub_ptr = shared_next_subpacket(in_handle).map_err(cleanup)?;
-        // Empty Array (size == 0) => EOF.
+        let sub_ptr = match shared_next_frame(in_handle).map_err(cleanup)? {
+            Some(p) => p,
+            None => break,
+        };
         let size = unsafe { *(sub_ptr as *const u64) };
         if size == 0 {
             let _ = crate::shm::shfree(sub_ptr);
-            break;
+            continue;
         }
         if let Err(e) = shared_write_subpacket(out_handle, compression_level, sub_ptr) {
             let _ = crate::shm::shfree(sub_ptr);

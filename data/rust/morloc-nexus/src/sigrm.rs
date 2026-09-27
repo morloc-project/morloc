@@ -12,41 +12,67 @@ use std::ffi::CString;
 use std::os::raw::c_char;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-const MAX_DIRS: usize = 8;
+/// Paths a run removes: its tmpdir, at most one stage directory, and in a
+/// multi-output run one temporary file per action.
+const MAX_PATHS: usize = 256;
 
-static DIRS: [AtomicPtr<c_char>; MAX_DIRS] = {
-    const NULL: AtomicPtr<c_char> = AtomicPtr::new(std::ptr::null_mut());
-    [NULL; MAX_DIRS]
-};
-
-/// Register a directory for removal when the run ends: by `clean_exit`, or
-/// by the signal handler. The path is leaked so the handler can read it
-/// without allocating. A run registers its tmpdir and at most one stage
-/// directory, well under the slot count.
-pub fn register(path: &str) {
-    let raw = match CString::new(path) {
-        Ok(c) => c.into_raw(),
-        Err(_) => return,
-    };
-    let taken = DIRS.iter().any(|slot| {
-        slot.compare_exchange(std::ptr::null_mut(), raw, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-    });
-    debug_assert!(taken, "sigrm: every directory slot is taken");
+/// A fixed table of paths, readable from a signal handler. Registration
+/// fails, rather than dropping the path, when the table is full.
+struct Registry<const N: usize> {
+    slots: [AtomicPtr<c_char>; N],
 }
 
-/// Remove every registered directory tree, most recently registered first.
+impl<const N: usize> Registry<N> {
+    const fn new() -> Self {
+        Registry { slots: [const { AtomicPtr::new(std::ptr::null_mut()) }; N] }
+    }
+
+    fn register(&self, path: &str) -> Result<(), String> {
+        let raw = CString::new(path)
+            .map_err(|_| format!("path contains a NUL byte: {:?}", path))?
+            .into_raw();
+        let taken = self.slots.iter().any(|slot| {
+            slot.compare_exchange(std::ptr::null_mut(), raw, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        });
+        if taken {
+            Ok(())
+        } else {
+            drop(unsafe { CString::from_raw(raw) });
+            Err(format!("more than {} paths to remove at the end of the run", N))
+        }
+    }
+
+    /// # Safety
+    /// Async-signal-safe: reads the fixed slot array and makes only
+    /// async-signal-safe system calls.
+    unsafe fn remove_all(&self) {
+        for slot in self.slots.iter().rev() {
+            let p = slot.load(Ordering::Acquire);
+            if !p.is_null() {
+                remove_tree(p);
+            }
+        }
+    }
+}
+
+static PATHS: Registry<MAX_PATHS> = Registry::new();
+
+/// Register a file or directory for removal when the run ends: by
+/// `clean_exit`, or by the signal handler. The path is leaked so the handler
+/// can read it without allocating. Fails when the table is full, so a caller
+/// never goes on believing a path will be cleaned up when it will not.
+pub fn register(path: &str) -> Result<(), String> {
+    PATHS.register(path)
+}
+
+/// Remove every registered path, most recently registered first.
 ///
 /// # Safety
 /// Async-signal-safe: reads the fixed slot array and makes only
 /// async-signal-safe system calls.
 pub unsafe fn remove_registered() {
-    for slot in DIRS.iter().rev() {
-        let p = slot.load(Ordering::Acquire);
-        if !p.is_null() {
-            remove_tree(p);
-        }
-    }
+    PATHS.remove_all();
 }
 
 /// Nesting limit for the walk. The run's directories are flat or nearly so;
@@ -150,6 +176,14 @@ unsafe fn remove_tree(path: *const c_char) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_full_table_refuses_a_path() {
+        let table: Registry<2> = Registry::new();
+        assert!(table.register("/nonexistent/a").is_ok());
+        assert!(table.register("/nonexistent/b").is_ok());
+        assert!(table.register("/nonexistent/c").is_err());
+    }
 
     #[test]
     fn removes_nested_tree() {

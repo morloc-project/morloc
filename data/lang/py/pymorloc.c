@@ -2571,14 +2571,16 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
             result = PyList_New(0);
             if (!result) goto stream_error;
             while (1) {
-                void* chunk = mlc_next(handle, &stream_err);
+                int32_t eof = 0;
+                void* chunk = mlc_next_frame(handle, &eof, &stream_err);
                 if (stream_err) goto stream_error;
-                if (chunk == NULL) break;
+                if (eof || chunk == NULL) break;
+                // An empty sub-packet is an empty batch, not the end.
                 Array* arr = (Array*)chunk;
                 if (arr->size == 0) {
                     char* ferr = NULL; shfree(chunk, &ferr);
                     if (ferr) free(ferr);
-                    break;
+                    continue;
                 }
                 PyObject* chunk_py = from_voidstar(schema, chunk, NULL);
                 char* ferr = NULL; shfree(chunk, &ferr);
@@ -3992,6 +3994,40 @@ error:
 
 
 
+// mlc_replay(schema, handle, fn) -> None. Call `fn` on every frame
+// (sub-packet) of the stream, in order, each as the list it holds. An empty
+// frame is an empty list; only the end of the stream stops the loop.
+static PyObject* pybinding__mlc_replay(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    long long handle_ll;
+    PyObject* fn;
+    PARSE_ARGS_OR_ABORT(args, "sLO", &schema_str, &handle_ll, &fn);
+    while (1) {
+        int32_t eof = 0;
+        void* voidstar = PyTRY(mlc_next_frame, (int64_t)handle_ll, &eof);
+        if (eof) break;
+        // The schema goes to the tracker with the block, as for @next, so a
+        // numpy view over the frame outlives this iteration.
+        Schema* schema = PyTRY(parse_schema, schema_str);
+        PyObject* frame = from_voidstar(schema, voidstar, NULL);
+        if (frame == NULL) {
+            char* shfree_errmsg = NULL;
+            shfree(voidstar, &shfree_errmsg);
+            free(shfree_errmsg);
+            free_schema(schema);
+            return NULL;
+        }
+        shm_tracker_push((absptr_t)voidstar, schema);
+        PyObject* r = PyObject_CallFunctionObjArgs(fn, frame, NULL);
+        Py_DECREF(frame);
+        if (r == NULL) return NULL;
+        Py_DECREF(r);
+    }
+    Py_RETURN_NONE;
+error:
+    return NULL;
+}
+
 // mlc_cell_reduce(schema, combine, handle) -> value. Fold every accumulator
 // into one with `combine`, then release the cell. The count is never zero --
 // an untouched cell answers with its seed -- so there is always a value.
@@ -4115,6 +4151,7 @@ static PyMethodDef Methods[] = {
     {"mlc_cell_get", pybinding__mlc_cell_get, METH_VARARGS, "Read this thread's fold accumulator"},
     {"mlc_cell_put", pybinding__mlc_cell_put, METH_VARARGS, "Replace this thread's fold accumulator"},
     {"mlc_cell_reduce", pybinding__mlc_cell_reduce, METH_VARARGS, "Merge the fold accumulators and release the cell"},
+    {"mlc_replay", pybinding__mlc_replay, METH_VARARGS, "Call a function on every element of an IStream"},
     {"mlc_throw", pybinding__mlc_throw, METH_VARARGS, "Raise a MorlocException with the given message"},
     {"mlc_try", pybinding__mlc_try, METH_VARARGS, "Evaluate body; wrap the value with ok, or a caught message with err"},
     {NULL, NULL, 0, NULL} // this is a sentinel value

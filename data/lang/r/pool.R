@@ -93,6 +93,7 @@ morloc_mlc_fschema                   <- function(...){ .Call("morloc_mlc_fschema
 morloc_mlc_ifile_walk                <- function(...){ .Call("morloc_mlc_ifile_walk",                ...) }
 morloc_mlc_ifile_length              <- function(...){ .Call("morloc_mlc_ifile_length",              ...) }
 morloc_mlc_next                      <- function(...){ .Call("morloc_mlc_next",                      ...) }
+morloc_mlc_next_frame                <- function(...){ .Call("morloc_mlc_next_frame",                ...) }
 morloc_mlc_stream_layout             <- function(...){ .Call("morloc_mlc_stream_layout",             ...) }
 morloc_mlc_stream                    <- function(...){ .Call("morloc_mlc_stream",                    ...) }
 morloc_mlc_open_ostream              <- function(...){ .Call("morloc_mlc_open_ostream",              ...) }
@@ -115,6 +116,17 @@ morloc_mlc_cell_reduce <- function(schema, combine, handle) {
     acc <- combine(acc, morloc_mlc_cell_slot(handle, i, schema))
   }
   acc
+}
+
+# @replay: call `fn` on every frame (sub-packet) of the stream, in order,
+# each as the list it holds. Only the end of the stream (NULL) stops it.
+morloc_mlc_replay <- function(schema, handle, fn) {
+  repeat {
+    frame <- morloc_mlc_next_frame(schema, handle)
+    if (is.null(frame)) break
+    fn(frame)
+  }
+  NULL
 }
 
 # @throw: raise a classed condition. The pool's manifold-level tryCatch

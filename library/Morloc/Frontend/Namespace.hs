@@ -99,6 +99,7 @@ copyState oldIdx newIdx = do
       , stateName = updateMap (stateName s)
       , stateTermDocs = stateTermDocs s
       , stateStreamElems = stateStreamElems s
+      , stateReplayPlans = stateReplayPlans s
       , stateErrorNotes = updateMap (stateErrorNotes s)
       , stateManifoldConfig = updateMap (stateManifoldConfig s)
       , stateLogTemplate = stateLogTemplate s

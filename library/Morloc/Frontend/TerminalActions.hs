@@ -58,6 +58,7 @@ synthesizeTerminalActions dag = do
       MM.modify (\st -> st
         { stateSourceMap = Desugar.dsSourceMap dsFinal
         , stateStreamElems = Desugar.dsStreamElems dsFinal <> stateStreamElems st
+        , stateReplayPlans = Desugar.dsReplayPlans dsFinal <> stateReplayPlans st
         , stateErrorNotes = Map.map pretty (Desugar.dsErrorNotes dsFinal) <> stateErrorNotes st
         })
       case Desugar.dsWarnings dsFinal of
@@ -119,5 +120,6 @@ mkDState idx srcMap = Desugar.DState
   , Desugar.dsNamespaces = Set.empty
   , Desugar.dsDataCtors = Map.empty
   , Desugar.dsStreamElems = Map.empty
+  , Desugar.dsReplayPlans = Map.empty
   , Desugar.dsErrorNotes = Map.empty
   }

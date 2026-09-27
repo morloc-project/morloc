@@ -220,6 +220,10 @@ data IExpr
   | IIntrinsicCellPut Int IExpr IExpr
       -- ^ @cellput: schemaId, handle, value.
   | IIntrinsicCellReduce Int (Maybe IType) IExpr IExpr
+  | IIntrinsicReplay Int (Maybe IType) IExpr IExpr
+      -- ^ @replay: schemaId of one frame (the list `[a]`), element type
+      --   `a`, stream handle, function. The per-language helper reads the
+      --   stream to its end and calls the function on each frame.
       -- ^ @cellreduce: schemaId, accumulator type, combine function,
       --   handle. The combine is an ordinary native callable in the pool
       --   the reduce was realized in; the per-language helper applies it
@@ -1831,6 +1835,15 @@ lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrCellReduce (Just schema)
   let raw d = IRawExpr (render (poolExpr d))
       reduceExpr = IIntrinsicCellReduce sid innerType (raw combineDocs) (raw handleDocs)
   return $ mergePoolDocs (const $ lcPrintExpr cfg reduceExpr) [combineDocs, handleDocs]
+lowerNativeExprRaw cfg (IntrinsicN _ _ _ [handleE, _]) (IntrinsicN_ _ IntrReplay (Just schema)
+                                  [handleDocs, fnDocs]) = do
+  sid <- lcRegisterSchema cfg schema
+  elemType <- case typeFof handleE of
+    AppF _ (e : _) -> lcTypeOf cfg e
+    _ -> return Nothing
+  let raw d = IRawExpr (render (poolExpr d))
+      replayExpr = IIntrinsicReplay sid elemType (raw handleDocs) (raw fnDocs)
+  return $ mergePoolDocs (const $ lcPrintExpr cfg replayExpr) [handleDocs, fnDocs]
 lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrThrow _ [msgDocs]) = do
   resultType <- lcTypeOf cfg (typeFof origExpr)
   return $ msgDocs

@@ -111,6 +111,7 @@ extern "C" {
     fn mlc_fschema(path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char;
     fn mlc_ifile_length(handle: i64, errmsg: *mut *mut c_char) -> i64;
     fn mlc_next(handle: i64, errmsg: *mut *mut c_char) -> *mut c_void;
+    fn mlc_next_frame(handle: i64, eof: *mut i32, errmsg: *mut *mut c_char) -> *mut c_void;
     fn mlc_stream_layout(handle: i64, errmsg: *mut *mut c_char) -> *mut c_void;
     fn mlc_stream(ifile_handle: i64, errmsg: *mut *mut c_char) -> i64;
     fn mlc_ifile_walk(handle: i64, path: *const c_char, args_ptr: *const IFileWalkArg, n_args: u64, errmsg: *mut *mut c_char) -> *mut c_void;
@@ -2928,6 +2929,25 @@ pub unsafe fn next<T: FromVoidstar>(schema: &Schema, handle: u64) -> T {
     let mut err: *mut c_char = std::ptr::null_mut();
     let voidstar = mlc_next(handle as i64, &mut err);
     read_voidstar(voidstar, err, schema, "@next")
+}
+
+/// @replay: call `f` on every frame (sub-packet) of the stream, in order,
+/// each as the list it holds. An empty frame is an empty list; only the end
+/// of the stream stops the loop.
+pub unsafe fn replay<E, F: MorlocFn1<Vec<E>, ()>>(schema: &Schema, handle: u64, f: F)
+where
+    Vec<E>: FromVoidstar,
+{
+    loop {
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let mut eof: i32 = 0;
+        let voidstar = mlc_next_frame(handle as i64, &mut eof, &mut err);
+        if eof != 0 && err.is_null() {
+            break;
+        }
+        let frame: Vec<E> = read_voidstar(voidstar, err, schema, "@replay");
+        f.call1(&frame);
+    }
 }
 
 /// @streamLayout: per-sub-packet layout of an IFile as `[(U64,U64,U64)]`.

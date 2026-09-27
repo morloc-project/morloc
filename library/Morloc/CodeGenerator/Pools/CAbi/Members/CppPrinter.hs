@@ -127,6 +127,10 @@ printExpr (IIntrinsicCellReduce sid (Just t) f h) =
   [idoc|_mlc_cell_reduce<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr f}, #{printExpr h})|]
 printExpr (IIntrinsicCellReduce sid Nothing f h) =
   [idoc|_mlc_cell_reduce(mlc_schema_table[#{pretty sid}], #{printExpr f}, #{printExpr h})|]
+printExpr (IIntrinsicReplay sid (Just t) h f) =
+  [idoc|_mlc_replay<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr f})|]
+printExpr (IIntrinsicReplay sid Nothing h f) =
+  [idoc|_mlc_replay(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr f})|]
 printExpr (IIntrinsicRead sid (Just t) e) =
   [idoc|_mlc_read<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
 printExpr (IIntrinsicRead sid Nothing e) =

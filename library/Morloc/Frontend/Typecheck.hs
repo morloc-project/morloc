@@ -1596,6 +1596,18 @@ synthE _ g (IntrinsicS IntrCellReduce [combineE, handleE]) = do
          )
 synthE _ _ (IntrinsicS IntrCellReduce args) =
   error $ "IntrCellReduce expects 2 args (combine, handle), got " <> show (length args)
+-- @replay :: IStream a -> ([a] -> <IO> ()) -> <IO> (). The function receives
+-- each frame of the stream as a list; the element type comes from the stream.
+synthE _ g (IntrinsicS IntrReplay [handleE, fnE]) = do
+  let (g1, a) = newvar "replay_a_" g
+  (g2, _, handleE') <- checkG g1 handleE (AppU (VarU BT.istreamVar) [a])
+  (g3, _, fnE') <- checkG g2 fnE (FunU [BT.listU (apply g2 a)] (EffectU ioEffectSet BT.unitU))
+  return ( g3
+         , EffectU ioEffectSet BT.unitU
+         , IntrinsicS IntrReplay [handleE', fnE']
+         )
+synthE i _ (IntrinsicS IntrReplay args) =
+  MM.throwCompilerBugAt i $ "IntrReplay expects 2 args (stream, function), got " <> pretty (length args)
 -- Bespoke rule for @try. Its argument may fail in any number of ways --
 -- an intrinsic Err arm auto-required into a throw, a foreign function
 -- raising natively, an explicit @throw -- and those failures have no
@@ -1794,6 +1806,8 @@ intrinsicType IntrCellPut =
   error "intrinsicType: IntrCellPut must be typed via synthE's dedicated clause"
 intrinsicType IntrCellReduce =
   error "intrinsicType: IntrCellReduce must be typed via synthE's dedicated clause"
+intrinsicType IntrReplay =
+  error "intrinsicType: IntrReplay must be typed via synthE's dedicated clause"
 intrinsicType IntrAppend =
   error "intrinsicType: IntrAppend must be typed via intrinsicTypeG (polymorphic return)"
 intrinsicType IntrConcat = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
@@ -1893,6 +1907,7 @@ checkIntrinsicArgs i g intr argTypes = do
            in subtype' i argT expectedT g'a
         -- @next and @stream have their own synthE clauses.
         (IntrNext, _) -> MM.throwCompilerBugAt i "IntrNext is typed in synthE"
+        (IntrReplay, _) -> MM.throwCompilerBugAt i "IntrReplay is typed in synthE"
         (IntrStream, _) -> MM.throwCompilerBugAt i "IntrStream is typed in synthE"
         -- @write is special-cased in synthE so the OStream's element
         -- type can pin the list literals' element type via check-mode

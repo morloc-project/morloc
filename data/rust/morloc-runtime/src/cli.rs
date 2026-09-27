@@ -536,14 +536,17 @@ pub(crate) unsafe fn try_load_stream_packet_file(
             }
             Ok(Some(pkt))
         }
+        // An IFile names its file: the ordinary path loader hands the path
+        // on, and the pool opens it for random access.
+        SerialType::IFile => Ok(None),
         other => {
             // Look up the file's schema string for a targeted error.
             let file_schema = crate::stream::read_schema_from_file(&path_str)
                 .unwrap_or_else(|_| "<unknown>".to_string());
             Err(MorlocError::Other(format!(
                 "'{}' is a stream-packet file (schema \"{}\"). The receiver's \
-                 type has serial_type {:?}; only `[a]` (Array) and \
-                 `IStream a` can accept a stream-packet file.",
+                 type has serial_type {:?}; only `[a]` (Array), \
+                 `IStream a` and `IFile [a]` can accept a stream-packet file.",
                 path_str, file_schema, other,
             )))
         }

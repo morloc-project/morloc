@@ -147,7 +147,7 @@ pub unsafe fn stdio_slot_schema(handle: i64) -> Result<String, String> {
 
 /// Emit the `MORLOC_STREAM_PACKET` prefix for the given stdio slot to
 /// `fd`. Used lazily on the first `WRITE_STDIO` per slot.
-pub unsafe fn write_stream_header_for_slot(fd: i32, handle: i64) -> Result<(), WriteError> {
+pub unsafe fn write_stream_header_for_slot(fd: i32, handle: i64) -> Result<u64, WriteError> {
     let mut buf: *mut u8 = std::ptr::null_mut();
     let mut len: usize = 0;
     let mut err: *mut c_char = std::ptr::null_mut();
@@ -158,7 +158,7 @@ pub unsafe fn write_stream_header_for_slot(fd: i32, handle: i64) -> Result<(), W
     let slice = std::slice::from_raw_parts(buf, len);
     let r = write_all_fd(fd, slice);
     libc::free(buf as *mut c_void);
-    r
+    r.map(|()| len as u64)
 }
 
 /// Read `size` bytes from the SHM block at `relptr` and write them to

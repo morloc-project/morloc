@@ -136,19 +136,37 @@ data ParentDocSlice = ParentDocSlice
 -- | Uniform accessor over 'FData' / 'GastData' so terminal-action
 -- inheritance doesn't repeat itself for the two shapes.
 class HasCmdDocSet a where
-  termNameOf :: a -> EVar
-  docSetOf   :: a -> CmdDocSet
-  setDocSet  :: CmdDocSet -> a -> a
+  termNameOf   :: a -> EVar
+  docSetOf     :: a -> CmdDocSet
+  setDocSet    :: CmdDocSet -> a -> a
+  argSchemasOf :: a -> [Text]
 
 instance HasCmdDocSet FData where
   termNameOf = EV . fdataTermName
   docSetOf = fdataCmdDocSet
   setDocSet ds fd = fd { fdataCmdDocSet = ds }
+  argSchemasOf = fdataArgSchemas
 
 instance HasCmdDocSet GastData where
   termNameOf = EV . commandTermName
   docSetOf = commandDocs
   setDocSet ds g = g { commandDocs = ds }
+  argSchemasOf = commandArgSchemas
+
+-- | A replay entry ('mangleReplayName') reads files the stage of a
+-- multi-output run wrote: every argument is a packet file to load, except
+-- an @IFile@, which is the file itself and is handed on by its path.
+stageReplayArgs :: HasCmdDocSet a => Set.Set EVar -> a -> a
+stageReplayArgs replayEntries x
+  | Set.member (termNameOf x) replayEntries =
+      let ds = docSetOf x
+          args' = zipWith stage (cmdDocArgs ds) (map Just (argSchemasOf x) ++ repeat Nothing)
+       in setDocSet ds { cmdDocArgs = args' } x
+  | otherwise = x
+  where
+    stage (CmdArgPos r) (Just schema)
+      | classifySchema schema /= CatIFile = CmdArgPos r { argPosDocSource = Just SourceFile }
+    stage a _ = a
 
 -- | Map from each compiler-synthesized `--' with:` internal command
 -- name (the mangled `mlcp_<parent>_<long>`) to the parent's inherit
@@ -1194,6 +1212,12 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
               <+> "that dispatches to a foreign pool; a pure (all-morloc) fold"
               <+> "is not yet supported. Involve a foreign function in the"
               <+> "command body, or drop `@fold` for the whole-list form."
+    -- @replay appears only in replay entries that drive a saved stream frame
+    -- by frame, and 'generate' leaves out every such entry that would be
+    -- evaluated here (see 'kindReplaysFrames').
+    toNexusExpr (AnnoS (Idx iReplay _) _ (IntrinsicS IntrReplay _)) =
+      MM.throwCompilerBugAt iReplay
+        "@replay reached the nexus evaluator; a frame-driven replay entry must run in a pool"
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS intr _)) = do
       v <- resolveCompileTimeIntrinsic intr
       StrX <$> type2schema t <*> pure v
@@ -3132,6 +3156,9 @@ data ManifestInputs = ManifestInputs
     -- description shown against a `--' with:` flag in `--help`
     -- (the referenced term's own docstring becomes the flag's help
     -- text).
+  , miReplayPlans         :: !(Map.Map EVar ReplayPlan)
+    -- ^ Each terminal action's replay entry, by name: its kind, or why it
+    -- has none.
   , miStreamElems         :: !(Map.Map EVar (Text, Text))
   , miStreamTypes         :: !(Map.Map EVar Type)
     -- ^ The batch a streaming command writes. Its help shows this in place of
@@ -3344,25 +3371,54 @@ buildManifest ManifestInputs{..} =
                , wsTerm = EV tName
                , wsRender = isRender
                , wsDefault = isDefault
+               , wsArgs = argSrcs
                } =
       let EV mangled = mangleTerminalName (EV parentName) long
+          EV replay = mangleReplayName (EV parentName) long
           desc = case Map.lookup (EV tName) miTermDocs of
             Just (firstLine : _) -> firstLine
             _ -> ""
+          plan = Map.lookup (EV replay) miReplayPlans
+          kind = case fmap replayPlanKind plan of
+            Just KindGather -> "gather"
+            Just KindStream -> "stream"
+            Just KindFold -> "fold"
+            _ -> "value" :: Text
+          -- Why the action cannot run on its command's saved output.
+          noReplay = case plan of
+            Just (NotReplayed _ why) -> Just why
+            Just (Replayed k)
+              | Set.member replay emittedNames -> Nothing
+              | kindReplaysFrames k -> Just
+                  "its handler is all-morloc code that reads the stream batch by batch, which needs a pool"
+            _ -> Just "it has no replay entry"
        in jsonObj
             [ ("short", case mShort of
                 Just c -> jsonStr (MT.singleton c)
                 Nothing -> jsonNull)
             , ("long", jsonStr long)
-            , ("entry", jsonStr mangled)
+            -- The command that runs the action on a fresh run of its parent;
+            -- null when the action runs only on the parent's saved output
+            -- (see `replay`).
+            , ("entry", if Set.member mangled emittedNames then jsonStr mangled else jsonNull)
             , ("description", jsonStr desc)
             -- `render` terminals emit their handler's bytes verbatim, so the
             -- nexus defaults their output format to `raw` (see phase2.rs).
             , ("render", jsonBool isRender)
             -- a `@default` terminal fires when no formatter flag and no `-f`
-            -- is given (see phase2.rs redirect_via_terminal).
+            -- is given (see phase2.rs finish_parse).
             , ("default", jsonBool isDefault)
+            -- The entry that applies the handler to the parent's staged
+            -- output, reading the referenced parent arguments (`args`,
+            -- 1-based) and then the staged value or stream.
+            , ("replay", if Set.member replay emittedNames then jsonStr replay else jsonNull)
+            , ("no_replay", maybe jsonNull jsonStr noReplay)
+            , ("args", jsonArr [jsonInt n | n <- Set.toList (Set.fromList [n | ArgPos n <- argSrcs])])
+            , ("kind", jsonStr kind)
             ]
+
+    emittedNames :: Set.Set Text
+    emittedNames = Set.fromList (map fdataTermName miFData ++ map commandTermName miGasts)
 
     -- Render the @args@ JSON array. 'makeSerialASTs' produces one
     -- SerialAST per arg position in the original function signature,
@@ -3469,7 +3525,17 @@ generate cs rASTs helperRASTs = do
   -- reaches, callees first.
   namedMap <- MM.gets stateNamedGasts
   let rootOf (AnnoS (Idx i _) _ _, _) = i
-      (namedCs0, exportCs) = List.partition ((`Map.member` namedMap) . rootOf) cs
+      (namedCs0, exportCs0) = List.partition ((`Map.member` namedMap) . rootOf) cs
+  -- A per-batch or folding replay entry drives a staged stream with
+  -- @replay, which only a pool can run. One that realized as all-morloc code
+  -- is left out, so its action runs only on a fresh run of its command (the
+  -- manifest then names no replay entry for it).
+  exportNames <- mapM (MM.metaName . rootOf) exportCs0
+  replayPlans <- MM.gets stateReplayPlans
+  let framesReplay n = case Map.lookup n replayPlans of
+        Just (Replayed k) -> kindReplaysFrames k
+        _ -> False
+      exportCs = [c | (c, n) <- zip exportCs0 exportNames, not (maybe False framesReplay n)]
       named = [(n, c) | c <- namedCs0, Just n <- [Map.lookup (rootOf c) namedMap]]
       callsOf t = [v | v <- calledNames t, Map.member v callees]
       -- the named functions each named function calls, each found once
@@ -3491,8 +3557,9 @@ generate cs rASTs helperRASTs = do
   -- internal's default @cmdDocArgs@ and loads positional files in
   -- the wrong wire format.
   let parentArgMap = buildTerminalParentArgMap fdataRaw gastsRaw
-      fdata = map (inheritParentArgDocs parentArgMap) fdataRaw
-      gasts = map (inheritParentArgDocs parentArgMap) gastsRaw
+      replayEntries = Map.keysSet replayPlans
+      fdata = map (stageReplayArgs replayEntries . inheritParentArgDocs parentArgMap) fdataRaw
+      gasts = map (stageReplayArgs replayEntries . inheritParentArgDocs parentArgMap) gastsRaw
 
   -- Get build time and the build directory (shared with the program builder
   -- and any pre-build pass, see 'Morloc.ProgramBuilder.Build.resolveBuildDirs')
@@ -3602,6 +3669,7 @@ generate cs rASTs helperRASTs = do
             , miTermDocs            = termDocs
             , miStreamElems         = streamElems
             , miStreamTypes         = streamTypes
+            , miReplayPlans         = stateReplayPlans st
             }
 
   -- Launcher wrappers. Each is a pure-shell script that execs

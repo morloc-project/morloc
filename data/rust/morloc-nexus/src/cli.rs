@@ -159,6 +159,29 @@ pub struct RunArgs {
     /// the local pool listener.
     #[arg(short = 's', long = "socket-base", value_name = "NAME", hide = true)]
     pub socket_base: Option<String>,
+
+    // ---- Multi-output plumbing (internal; see orchestrate.rs) ----
+    /// Internal: run the parent command once as the stage of a multi-output
+    /// run, saving its output under DIR for the actions to replay.
+    #[arg(long = "mlc-stage", value_name = "DIR", hide = true)]
+    pub mlc_stage: Option<String>,
+
+    /// Internal: the 1-based parent arguments the actions refer to, saved
+    /// under the stage directory.
+    #[arg(long = "mlc-stage-args", value_name = "N", value_delimiter = ',', hide = true)]
+    pub mlc_stage_args: Vec<usize>,
+
+    /// Internal: the stage also writes the command's output to stdout.
+    #[arg(long = "mlc-stage-tee", hide = true)]
+    pub mlc_stage_tee: bool,
+
+    /// Internal: run this internal command on the given inputs.
+    #[arg(long = "mlc-internal", value_name = "CMD", hide = true)]
+    pub mlc_internal: Option<String>,
+
+    /// Internal: one positional input of `--mlc-internal`, in order.
+    #[arg(long = "mlc-input", value_name = "PATH", hide = true)]
+    pub mlc_input: Vec<String>,
 }
 
 /// Serve a compiled morloc program as a long-lived daemon.
@@ -801,6 +824,17 @@ pub fn run_args_to_config(args: &RunArgs) -> (NexusConfig, String) {
     apply_dispatch_options(&mut cfg, &args.common);
     cfg.packet_path = args.call_packet.clone();
     cfg.socket_base = args.socket_base.clone();
+    cfg.child = if let Some(dir) = &args.mlc_stage {
+        crate::dispatch::ChildMode::Stage {
+            dir: dir.clone(),
+            args: args.mlc_stage_args.clone(),
+            tee: args.mlc_stage_tee,
+        }
+    } else if let Some(cmd) = &args.mlc_internal {
+        crate::dispatch::ChildMode::Replay { cmd: cmd.clone(), inputs: args.mlc_input.clone() }
+    } else {
+        crate::dispatch::ChildMode::None
+    };
     (cfg, args.target.clone())
 }
 

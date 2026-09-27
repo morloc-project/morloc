@@ -1,0 +1,52 @@
+-- One run of a command can write several terminal actions, each to its own
+-- file (`--act=PATH`), while stdout gets the one bare action. The command
+-- body runs once: it appends to a log per run and prints a line, and the
+-- log shows one run. Each file holds exactly what the action writes when
+-- run alone: a rendered text, one that takes the command's third argument
+-- (`$3`), and a sink that prints its output itself. The body's own print
+-- goes to stdout, never into a file.
+--
+-- `noisy` also writes a stream to `@stdout` before returning its value.
+-- That stream is the body's own output, so it reaches stdout whatever the
+-- actions are: formatted as usual beside a `@render` action, and still
+-- there under `--no-stdout`.
+
+module mainr (squares, noisy)
+
+import root-r
+
+source R from "impl.R"
+  ( "build", "as_lines" as asLines, "pad"
+  , "sink_lines" as sinkLines, "summary" )
+
+build :: Str -> Int -> <IO> [Int]
+
+--' One number per line
+asLines :: [Int] -> Str
+
+--' Numbers right-aligned to a width
+pad :: Int -> [Int] -> Str
+
+--' Print each number
+sinkLines :: [Int] -> <IO> ()
+
+--' How many numbers
+summary :: [Int] -> Int
+
+--' Squares
+--' @render -l/--lines=asLines
+--' @render -p/--pad=pad($3)
+--' @with   -s/--sink=sinkLines
+--' @with   -m/--summary=summary
+squares :: Str -> Int -> Int -> <IO> [Int]
+squares log n _ = build log n
+
+--' Squares, after writing a stream of its own
+--' @render -l/--lines=asLines
+--' @with   -m/--summary=summary
+noisy :: Str -> Int -> <IO> [Int]
+noisy log n = do
+  o <- @stdout
+  @write 0 o [7, 8]
+  @close o
+  build log n

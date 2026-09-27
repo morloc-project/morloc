@@ -1829,6 +1829,11 @@ int32_t mlc_write_handles_voidstar(const int64_t* handles, size_t n,
 void* mlc_next(int64_t handle, ERRMSG);
 int64_t mlc_stream(int64_t ifile_handle, ERRMSG);
 
+// `mlc_next_frame(handle, eof)` reads the next sub-packet of a file-backed
+// IStream like `mlc_next`, but tells the end of the stream apart from an
+// empty sub-packet: at the end it returns NULL and sets `*eof` to 1.
+void* mlc_next_frame(int64_t handle, int32_t* eof, ERRMSG);
+
 // `mlc_stream_layout(handle)` returns the per-sub-packet layout of an IFile
 // as a fresh SHM voidstar `Array<Tuple3<U64,U64,U64>>`: one
 // (element_offset, element_count, uncompressed_size) triple per sub-packet.

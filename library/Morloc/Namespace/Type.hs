@@ -122,6 +122,12 @@ module Morloc.Namespace.Type
   , parseEntryTargets
   , FoldSpec (..)
   , mangleTerminalName
+  , mangleReplayName
+  , replayEntryPrefix
+  , ActionKind (..)
+  , kindReplaysFrames
+  , ReplayPlan (..)
+  , replayPlanKind
   , anonRecordVar
   , isInternalTerminalName
   , ArgDoc (..)
@@ -745,8 +751,45 @@ data ParseSpec = ParseSpec
 -- grammar and never contains `__`, which C++ reserves per lex.name.
 -- Hyphens in the long flag become underscores.
 mangleTerminalName :: EVar -> Text -> EVar
-mangleTerminalName (EV parent) long =
-  EV (DT.concat ["mlcp_", parent, "_", DT.map hyphenToUnder long])
+mangleTerminalName = mangleWithPrefix "mlcp_"
+
+-- | The name of the replay entry of a terminal action: the handler applied
+-- to the parent's staged output rather than to a fresh run of the parent.
+mangleReplayName :: EVar -> Text -> EVar
+mangleReplayName = mangleWithPrefix replayEntryPrefix
+
+-- | The compiler-owned prefix of every replay entry.
+replayEntryPrefix :: Text
+replayEntryPrefix = "mlcr_"
+
+-- | How a terminal action's handler consumes its command's output.
+data ActionKind
+  = KindValue   -- ^ the value a non-streaming command returns
+  | KindGather  -- ^ everything a streaming command streams, at once
+  | KindStream  -- ^ each batch, as the command streams it (@stream)
+  | KindFold    -- ^ each batch, into one accumulator (@fold)
+  deriving (Show, Ord, Eq)
+
+-- | Whether a replay entry of this kind drives the saved stream frame by
+-- frame (@replay), which only a pool can do.
+kindReplaysFrames :: ActionKind -> Bool
+kindReplaysFrames k = k == KindStream || k == KindFold
+
+-- | The replay entry of one terminal action (see 'mangleReplayName'): the
+-- kind it was synthesized for, or why the action has none and runs only on
+-- a fresh run of its command.
+data ReplayPlan
+  = Replayed ActionKind
+  | NotReplayed ActionKind Text
+  deriving (Show, Ord, Eq)
+
+replayPlanKind :: ReplayPlan -> ActionKind
+replayPlanKind (Replayed k) = k
+replayPlanKind (NotReplayed k _) = k
+
+mangleWithPrefix :: Text -> EVar -> Text -> EVar
+mangleWithPrefix prefix (EV parent) long =
+  EV (DT.concat [prefix, parent, "_", DT.map hyphenToUnder long])
   where
     hyphenToUnder '-' = '_'
     hyphenToUnder c = c
@@ -761,7 +804,8 @@ anonRecordVar = TV "@REC"
 -- command menu but keeps them dispatchable via each parent command's
 -- terminal flags.
 isInternalTerminalName :: Text -> Bool
-isInternalTerminalName t = DT.isPrefixOf "mlcp_" t || DT.isPrefixOf parseEntryPrefix t
+isInternalTerminalName t =
+  DT.isPrefixOf "mlcp_" t || DT.isPrefixOf parseEntryPrefix t || DT.isPrefixOf replayEntryPrefix t
 
 -- | The compiler-owned prefix of every name synthesized for `@parse`.
 parseEntryPrefix :: Text

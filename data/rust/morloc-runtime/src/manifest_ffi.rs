@@ -1828,7 +1828,11 @@ unsafe fn populate_terminal(dst: *mut ManifestTerminal, src: &morloc_manifest::T
         None => 0,
     };
     (*dst).long = c_strdup(&src.long);
-    (*dst).entry = c_strdup(&src.entry);
+    // Null when the action runs only on its command's saved output.
+    (*dst).entry = match &src.entry {
+        Some(e) => c_strdup(e),
+        None => std::ptr::null_mut(),
+    };
     (*dst).description = c_strdup(&src.description);
     (*dst).render = src.render;
     (*dst).default = src.default;
@@ -2447,6 +2451,10 @@ pub unsafe extern "C" fn manifest_to_discovery_json(manifest: *const Manifest) -
             json_write_arr_start(jb);
             for j in 0..cmd.n_terminals {
                 let t = &*cmd.terminals.add(j);
+                // An action with no entry runs only from the command line.
+                if t.entry.is_null() {
+                    continue;
+                }
                 json_write_obj_start(jb);
                 if !t.long.is_null() {
                     json_write_key(jb, flag_key);

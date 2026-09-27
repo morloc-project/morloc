@@ -399,25 +399,67 @@ pub struct Terminal {
     /// Long-form flag name in lowercase-kebab (e.g. `"lines"` for
     /// `--lines`). Always present.
     pub long: String,
-    /// Compiler-mangled name of the synthesized internal command that
-    /// carries out this terminal action. Resolved to a cmd_index at
-    /// manifest-load time.
-    pub entry: String,
+    /// The synthesized internal command that carries out this action on a
+    /// fresh run of the parent. Absent when the action runs only on the
+    /// parent's saved output (`replay`): an action on a streaming command
+    /// whose output is not one tail-position `@collect`.
+    #[serde(default)]
+    pub entry: Option<String>,
     /// Help-text description for this flag. Sourced from the
     /// referenced term's own docstring; empty when the term has no
     /// docstring.
     #[serde(default)]
     pub description: String,
     /// True for `@render` terminals: the handler emits the final bytes, so the
-    /// nexus defaults this flag's output format to `raw` (verbatim) instead of
-    /// `-f`-rendered. `-f` still overrides.
+    /// nexus writes this flag's output `raw` (verbatim) whatever `-f` says.
     #[serde(default)]
     pub render: bool,
     /// True for a `@default` terminal: it fires when the user gives no formatter
     /// flag and no `-f`. At most one terminal per command is the default.
     #[serde(default)]
     pub default: bool,
+    /// The internal command that applies the handler to the parent's staged
+    /// output. It takes the parent arguments listed in `args`, then the staged
+    /// value (a data packet) or stream (a stream packet of batches). Absent
+    /// when the action cannot run on staged output.
+    #[serde(default)]
+    pub replay: Option<String>,
+    /// When `replay` is absent: why the action cannot run on the saved
+    /// output, phrased to follow "it cannot run on the saved output because".
+    #[serde(default)]
+    pub no_replay: Option<String>,
+    /// The 1-based parent argument positions the handler refers to with `$N`,
+    /// ascending: the leading arguments of `replay`.
+    #[serde(default)]
+    pub args: Vec<usize>,
+    /// How the handler consumes the parent's output.
+    #[serde(default)]
+    pub kind: ActionKind,
 }
+
+/// How a terminal action's handler consumes its command's output.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ActionKind {
+    /// The value a non-streaming command returns.
+    #[default]
+    Value,
+    /// Everything a streaming command streams, at once.
+    Gather,
+    /// Each batch, as the command streams it; the handler's own output is
+    /// a stream.
+    Stream,
+    /// Each batch, into one accumulator.
+    Fold,
+}
+
+impl ActionKind {
+    /// Whether the command this action belongs to streams its output.
+    pub fn of_streaming_command(self) -> bool {
+        self != ActionKind::Value
+    }
+}
+
 
 impl Command {
     pub fn is_pure(&self) -> bool {
@@ -449,12 +491,11 @@ impl Manifest {
 }
 
 impl Terminal {
-    /// The synthesized internal command that carries out this terminal action
-    /// (`@render`/`@with`), resolved against the manifest. Single source for the
-    /// terminal -> entry-command lookup shared by CLI help / dispatch and the
-    /// MCP tool surface.
-    pub fn resolve_entry<'a>(&self, m: &'a Manifest) -> Option<&'a Command> {
-        m.command_by_name(&self.entry)
+    /// The command whose result is what this action writes: its entry, or
+    /// else its replay entry, which writes the same thing from saved output.
+    pub fn output_command<'a>(&self, m: &'a Manifest) -> Option<&'a Command> {
+        self.entry.as_deref().and_then(|e| m.command_by_name(e))
+            .or_else(|| self.replay.as_deref().and_then(|e| m.command_by_name(e)))
     }
 }
 

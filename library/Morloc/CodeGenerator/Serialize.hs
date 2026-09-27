@@ -481,7 +481,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
                      IntrStdin, IntrStdout, IntrStderr, IntrThrow,
                      IntrTell, IntrTmpfile,
                      IntrCellNew, IntrCellGet, IntrCellPut, IntrCellReduce,
-                     IntrTry] = do
+                     IntrReplay, IntrTry] = do
           when (intr `elem` [IntrLoad, IntrRead, IntrUnpack, IntrNext, IntrOpen, IntrStdin]) $
             Serial.checkReadDataType tidx intr gt
           tf <- inferType t
@@ -687,6 +687,11 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       let dataType = stripTryF tf
       ast <- Serial.makeSerialAST m lang dataType
       return . Just . render $ Serial.serialAstToMsgpackSchema ast
+    -- @replay reads the stream a sub-packet at a time, each as the list its
+    -- storage schema describes.
+    intrinsicSchema m IntrReplay _ (handleArg : _)
+      | Just (v, a) <- unwrapHandleHead (typeFof handleArg) =
+          Just <$> renderStorageSchema m v a
     intrinsicSchema m IntrStreamLayout tf _ = do
       -- @streamLayout yields `[(U64,U64,U64)]`; the list-of-triple type is
       -- serialised so the per-language from_voidstar call materialises it

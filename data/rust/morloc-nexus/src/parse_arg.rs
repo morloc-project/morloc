@@ -199,7 +199,9 @@ fn stage_dir() -> &'static str {
             ));
         }
         let dir = unsafe { std::ffi::CStr::from_ptr(made) }.to_string_lossy().into_owned();
-        crate::sigrm::register(&dir);
+        if let Err(e) = crate::sigrm::register(&dir) {
+            crate::runlog::die_with_error(&e);
+        }
         dir
     })
 }
