@@ -1,0 +1,20 @@
+-- A pool narrowing a double into an F32 slot: a value beyond the F32 range
+-- is an error, never infinity (and in C, never the undefined behavior of
+-- an out-of-range conversion). Rounding to the nearest F32 is expected.
+
+module main (pyF32, rF32, cliF32)
+
+import root-py
+import root-r
+
+pyF32 :: Real -> F32
+source Py from "f.py" ("to_f32" as pyF32)
+
+rF32 :: Real -> F32
+source R from "f.R" ("to_f32" as rF32)
+
+cliIdent :: F32 -> F32
+source Py from "f.py" ("to_f32" as cliIdent)
+
+cliF32 :: F32 -> F32
+cliF32 x = cliIdent x

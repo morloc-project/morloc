@@ -624,7 +624,11 @@ void mlc_leaf_write(void* dest, void** cursor, const Schema* schema, const T& da
             case MORLOC_UINT16:  *(uint16_t*)dest = check_range_narrow<uint16_t>(data, "U16"); break;
             case MORLOC_UINT32:  *(uint32_t*)dest = check_range_narrow<uint32_t>(data, "U32"); break;
             case MORLOC_UINT64:  *(uint64_t*)dest = check_range_narrow<uint64_t>(data, "U64"); break;
-            case MORLOC_FLOAT32: *(float*)dest    = static_cast<float>(data);    break;
+            case MORLOC_FLOAT32:
+                if (morloc_f32_from_f64(static_cast<double>(data), (float*)dest) != 0) {
+                    throw std::overflow_error("value out of range for F32");
+                }
+                break;
             case MORLOC_FLOAT64: *(double*)dest   = static_cast<double>(data);   break;
             case MORLOC_INT: {
                 // Inline BigInt: [size=1, value] -- no allocation, no relptr

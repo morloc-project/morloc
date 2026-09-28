@@ -1505,7 +1505,11 @@ macro_rules! float_impl {
             unsafe fn write(&self, dest: *mut u8, _cursor: &mut *mut u8, schema: &Schema) {
                 // At the schema's own width, which may differ from `$t`'s.
                 match schema.serial_type {
-                    SerialType::Float32 => core::ptr::write_unaligned(dest as *mut f32, *self as f32),
+                    SerialType::Float32 => core::ptr::write_unaligned(
+                        dest as *mut f32,
+                        morloc_runtime_types::width::f32_nearest(f64::from(*self))
+                            .unwrap_or_else(|e| morloc_throw(e.to_string())),
+                    ),
                     SerialType::Float64 => core::ptr::write_unaligned(dest as *mut f64, *self as f64),
                     SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16
                     | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16

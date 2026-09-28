@@ -276,6 +276,19 @@ pub unsafe extern "C" fn free_schema(schema: *mut CSchema) {
     CSchema::free(schema);
 }
 
+/// Narrow `v` to the nearest `f32` at `out`, for the pool marshallers: 0 on
+/// success, -1 when a finite `v` lies beyond the `f32` range.
+#[no_mangle]
+pub unsafe extern "C" fn morloc_f32_from_f64(v: f64, out: *mut f32) -> i32 {
+    match morloc_runtime_types::width::f32_nearest(v) {
+        Ok(f) => {
+            *out = f;
+            0
+        }
+        Err(_) => -1,
+    }
+}
+
 // Hash: morloc_xxh64 is provided by utility.c (via xxhash.h inline)
 
 // ── Serialization ──────────────────────────────────────────────────────────

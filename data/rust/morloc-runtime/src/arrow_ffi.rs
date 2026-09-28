@@ -881,14 +881,9 @@ fn json_column(
             .enumerate()
             .map(|(i, o)| match o {
                 None => Ok(None),
-                Some(x) => {
-                    let y = x as f32;
-                    if x.is_finite() && !y.is_finite() {
-                        Err(overflow(name, i, values[i], SerialType::Float32))
-                    } else {
-                        Ok(Some(y))
-                    }
-                }
+                Some(x) => morloc_runtime_types::width::f32_nearest(x)
+                    .map(Some)
+                    .map_err(|_| overflow(name, i, values[i], SerialType::Float32)),
             })
             .collect()
     }

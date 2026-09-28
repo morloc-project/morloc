@@ -2568,7 +2568,7 @@ pub unsafe extern "C" fn load_morloc_data_file(
                     return ptr::null_mut();
                 }
                 let offset = { header.offset } as usize;
-                let length = width::usize_from_u64({ header.length });
+                let length = width::usize_from_u64(header.length);
                 // Compare the packet's stored schema descriptor to the
                 // caller's requested schema. Mismatch is user-attributable
                 // (loading the wrong type from a file) so surface as

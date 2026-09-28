@@ -1117,7 +1117,12 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
             if (!(isReal(obj) || isInteger(obj))) {
                 MORLOC_ERROR("Expected numeric for MORLOC_FLOAT32, but got %s", type2char(TYPEOF(obj)));
             }
-            *((float*)dest) = (float)asReal(obj);
+            {
+                double d = asReal(obj);
+                if (morloc_f32_from_f64(d, (float*)dest) != 0) {
+                    MORLOC_ERROR("value %g out of range for F32", d);
+                }
+            }
             break;
 
         case MORLOC_FLOAT64:

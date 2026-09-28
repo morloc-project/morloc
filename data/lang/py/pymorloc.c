@@ -1009,7 +1009,15 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
             if (!PyFloat_Check(obj)) {
                 PyRAISE("Expected float for MORLOC_FLOAT32, but got %s", Py_TYPE(obj)->tp_name);
             }
-            *((float*)dest) = (float)PyFloat_AsDouble(obj);
+            {
+                double d = PyFloat_AsDouble(obj);
+                if (morloc_f32_from_f64(d, (float*)dest) != 0) {
+                    // Python's error formatter has no float conversion.
+                    char shown[32];
+                    snprintf(shown, sizeof shown, "%g", d);
+                    PyRAISE("value %s out of range for F32", shown);
+                }
+            }
             break;
 
         case MORLOC_FLOAT64:

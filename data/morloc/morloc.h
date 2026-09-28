@@ -1347,6 +1347,9 @@ char* schema_to_string(const Schema* schema);
 void* get_ptr(const Schema* schema, ERRMSG);
 void free_schema(Schema* schema);
 size_t calculate_voidstar_size(const void* data, const Schema* schema, ERRMSG);
+// Narrow a double to the nearest float: 0 on success, -1 when a finite value
+// lies beyond the float range (a plain C conversion is then undefined).
+int morloc_f32_from_f64(double v, float* out);
 
 // Inline helpers used by language extensions (pymorloc.c, rmorloc.c)
 #define ALIGN_UP(x, align) (((x) + (align) - 1) & ~((size_t)(align) - 1))
