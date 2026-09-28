@@ -754,6 +754,7 @@ pub unsafe extern "C" fn pool_main(
     let socket_path = *argv.add(1);
     let tmpdir = *argv.add(2);
     let shm_basename = *argv.add(3);
+    crate::ipc_ffi::mlc_set_self_socket(socket_path);
 
     match cfg.concurrency {
         PoolConcurrency::Threads => pool_main_threads(cfg, socket_path, tmpdir, shm_basename),

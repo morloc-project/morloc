@@ -526,6 +526,27 @@ pub unsafe fn release_packet(packet: *const u8, owned: bool) {
     }
 }
 
+/// A packet built for one call's argument list. Dropping it releases it; a
+/// temporary lives to the end of its statement, so one passed to a call is
+/// released once the call has returned, or when a panic unwinds past it.
+pub struct Packet(*mut u8);
+
+impl Packet {
+    pub fn new(packet: *mut u8) -> Packet {
+        Packet(packet)
+    }
+
+    pub fn as_ptr(&self) -> *const u8 {
+        self.0
+    }
+}
+
+impl Drop for Packet {
+    fn drop(&mut self) {
+        unsafe { release_packet(self.0, true) }
+    }
+}
+
 /// Drop one tracker entry for this block and give its reference back.
 /// Anything not tracked here belongs to someone else and is left alone.
 unsafe fn release_tracked(block: *mut c_void) {
@@ -2430,7 +2451,11 @@ pub unsafe fn put_value_as<T: ToVoidstar>(value: &T, schema: &Schema, self_conta
                     if block.is_null() {
                         return fail_packet_from_c(err, "rel2abs failed in put_value");
                     }
-                    make_inline_data_packet(block, cs, &mut err)
+                    // The packet carries a copy of the table, so the block
+                    // is not needed past this call.
+                    let packet = make_inline_data_packet(block, cs, &mut err);
+                    release_tracked(block);
+                    packet
                 } else {
                     make_arrow_data_packet(relptr, cs)
                 };
@@ -2461,11 +2486,13 @@ pub unsafe fn put_value_as<T: ToVoidstar>(value: &T, schema: &Schema, self_conta
     if packet.is_null() {
         return fail_packet_from_c(err, "packet construction failed in put_value"); // guard shfree
     }
-    // Defer the root's free to the next dispatch (I3). Safe for both RPTR
-    // packets (data still referenced) and inline packets (data already copied
-    // into the C-allocated packet; freeing later is harmless).
-    guard.commit();
-    track(root as *mut c_void);
+    // A packet that references the block keeps it until this dispatch ends;
+    // one that carries its data inline no longer needs it, and the guard
+    // frees it now.
+    if *packet.add(PKT_SOURCE_OFF) == PKT_SOURCE_RPTR {
+        guard.commit();
+        track(root as *mut c_void);
+    }
     packet
 }
 
@@ -2586,24 +2613,22 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
         morloc_throw(msg);
     }
     if source == PKT_SOURCE_RPTR {
-        // A value that arrived by reference needs a reference of this
-        // pool's own so the sender's flush cannot reclaim it while it is
-        // read or forwarded. The sender donated one before sending, so a
-        // refusal means the block is already gone.
+        // A value that arrived by reference is read under a reference of
+        // this pool's own. Whoever handed over the packet keeps it alive
+        // meanwhile -- a caller blocked in its call, or the donated
+        // reference a foreign call's result carries -- so a refusal means
+        // the block is already gone.
         let acquired = shincref(voidstar as *mut c_void, &mut err);
         discard_err(err);
         if !acquired {
             morloc_infra_abort("received value's shared-memory block is no longer live");
         }
-        track(voidstar as *mut c_void);
-    } else {
-        // A payload that did not arrive by reference was materialized into a
-        // block of this pool's own, and nothing else will free it. Hand it to
-        // the tracker, which is also panic-safe: the read below can throw and
-        // a throwing dispatch answers with a fail packet rather than ending
-        // the pool, so a block dropped there would be lost once per request.
-        track(voidstar as *mut c_void);
     }
+    // The reference taken above, or the block this pool materialized for a
+    // payload that did not arrive by reference, is dropped once the value is
+    // read out: every read copies (a table, read in place, is handled above).
+    // The guard also drops it when the read throws.
+    let _held = ShmGuard::new(voidstar as *mut c_void);
     <T as FromVoidstar>::read(schema, voidstar, MorlocSpace::SHM)
 }
 

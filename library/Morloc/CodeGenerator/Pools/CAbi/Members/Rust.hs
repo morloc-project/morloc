@@ -560,9 +560,12 @@ prepareRustCacheArg wrapIdx (j, (a@(Arg i tm), sa)) = do
       -- own-adapt so a borrowed non-Copy native arg is cloned rather than
       -- double-borrowed ('&(&Vec)').
       own <- rustOwnership (BndVarN tf i)
+      -- The packet exists only to key and store the cache entry, so its
+      -- owner releases it when the manifold's scope ends.
       let argVar = "__mlc_ca_" <> pretty wrapIdx <> "_" <> pretty j
-          decl = "let" <+> argVar <> ": *const u8 = rustmorloc::put_value(&("
-                   <> rustOwn own tf (argNamer a) <> "), " <> sch sid <> ");"
+          decl = "let" <+> argVar <> "_own = rustmorloc::Packet::new(rustmorloc::put_value(&("
+                   <> rustOwn own tf (argNamer a) <> "), " <> sch sid <> "));"
+                   <+> "let" <+> argVar <> ": *const u8 =" <+> argVar <> "_own.as_ptr();"
       return (argVar, schemaStr, [decl])
     _ -> return (argNamer a, schemaStr, [])
 
@@ -980,7 +983,10 @@ closureArgPush i ast sid = do
   toWire <- reifyInPlace ast
   let a = "__a" <> pretty i
       v = maybe a (\f -> "&" <> parens (f a)) toWire
-  return $ "__pkts.push(rustmorloc::put_value(" <> v <> ", " <> sch sid <> "));"
+  -- The packet belongs to this application alone: its owner releases it
+  -- when the proxy body ends, after the result has been read.
+  return $ "let __own" <> pretty i <> " = rustmorloc::Packet::new(rustmorloc::put_value(" <> v <> ", " <> sch sid <> "));"
+    <+> "__pkts.push(__own" <> pretty i <> ".as_ptr());"
 
 -- | How a proxy reads the result of its call off the wire: a value is got
 -- as it is; a closure arrives as its origin tuple and is reflected into a
@@ -1153,7 +1159,7 @@ rustReflectClosureAssembler (SerialClosure ins out) = do
                   [ "if __o.2.len() == __n + __k {"
                   , indent 4 $ vsep
                       [ "let __pkts: Vec<*const u8> = __o.2.iter().map(|__p| __p.as_ptr()).collect();"
-                      , "__o = unsafe { rustmorloc::get_value(rustmorloc::foreign_call(&format!(\"pipe-{}\", __o.0), __s as u32, &__pkts), " <> sch restSid <> ") };"
+                      , "__o = unsafe { rustmorloc::get_value(rustmorloc::Packet::new(rustmorloc::foreign_call(&format!(\"pipe-{}\", __o.0), __s as u32, &__pkts)).as_ptr(), " <> sch restSid <> ") };"
                       ]
                   , "}"
                   ]
@@ -1166,7 +1172,7 @@ rustReflectClosureAssembler (SerialClosure ins out) = do
   resT <- rustTypeOf (serialAstToNativeType out)
   argSids <- mapM (rustRegisterSchema . render . serialAstToMsgpackSchema) ins
   resSid <- rustRegisterSchema (render (serialAstToMsgpackSchema out))
-  resultDoc <- closureResultRead out "rustmorloc::foreign_call(__sock, __c.1.1 as u32, &__pkts)" resSid
+  resultDoc <- closureResultRead out "rustmorloc::Packet::new(rustmorloc::foreign_call(__sock, __c.1.1 as u32, &__pkts)).as_ptr()" resSid
   pushes <- sequence [closureArgPush i ast sid | (i, ast, sid) <- zip3 [(0 :: Int) ..] ins argSids]
   let n = length ins
       params = ["__a" <> pretty i <> ": &" <> t | (i, t) <- zip [(0 :: Int) ..] argTs]
@@ -2211,6 +2217,8 @@ rustLowerConfig mask =
     , lcReleaseBorrowedStmt = \v -> "unsafe { rustmorloc::release_packet(" <> pretty v <> ", false) };"
     , lcReturn = \e -> "return" <+> e <> ";"
     , lcDupPacket = \e -> "rustmorloc::dup_packet(" <> e <> ")"
+    , lcOwnedArg = \e -> "rustmorloc::Packet::new(" <> e <> ").as_ptr()"
+    , lcOwnPacketDecl = \v e -> Just ("let" <+> v <+> "= rustmorloc::Packet::new(" <> e <> ");", v <> ".as_ptr()")
     , lcMakeIf = rustMakeIf
     , lcMakeLoop = rustMakeLoop
     -- An effect thunk captures by value only when it can outlive the frame that

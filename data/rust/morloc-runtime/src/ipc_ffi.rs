@@ -600,6 +600,60 @@ pub unsafe extern "C" fn stream_from_client(
     stream_from_client_wait(client_fd, 0, 0, errmsg)
 }
 
+// ── Self-call guard ──────────────────────────────────────────────────────────
+
+/// The socket this process serves, when it is a pool. Set before any worker
+/// is forked, so forked workers inherit it.
+static SELF_SOCKET: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+/// `MORLOC_FORBID_SELF_CALL`: a test guard. A pool sending a call to its own
+/// socket is a call between co-located code taking the serial path; with the
+/// guard set that call fails instead.
+fn forbid_self_call() -> bool {
+    static FORBID: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FORBID.get_or_init(|| std::env::var_os("MORLOC_FORBID_SELF_CALL").is_some())
+}
+
+/// Record the socket this pool serves. Called from pool startup.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_set_self_socket(socket_path: *const c_char) {
+    if socket_path.is_null() {
+        return;
+    }
+    let path = std::path::PathBuf::from(CStr::from_ptr(socket_path).to_string_lossy().into_owned());
+    if let Ok(mut s) = SELF_SOCKET.lock() {
+        *s = Some(path);
+    }
+}
+
+/// Compared component by component, so `dir/x` and `dir//x` or a trailing
+/// separator on the directory still match.
+fn is_self_socket(socket_path: *const c_char) -> bool {
+    let target = std::path::PathBuf::from(unsafe { CStr::from_ptr(socket_path) }.to_string_lossy().into_owned());
+    match SELF_SOCKET.lock() {
+        Ok(s) => s.as_ref().is_some_and(|own| own.components().eq(target.components())),
+        Err(_) => false,
+    }
+}
+
+unsafe fn self_call_error(socket_path: *const c_char, packet: *const u8) -> MorlocError {
+    let mut err: *mut c_char = ptr::null_mut();
+    let header = crate::packet_ffi::read_morloc_packet_header(packet, &mut err);
+    let mid = if !header.is_null() && (*header).command_type() == crate::packet::PACKET_TYPE_CALL {
+        format!("{}", { (*header).command.call.midx })
+    } else {
+        "?".into()
+    };
+    if !err.is_null() {
+        libc::free(err as *mut c_void);
+    }
+    MorlocError::Ipc(format!(
+        "MORLOC_FORBID_SELF_CALL: pool called its own socket '{}' (mid {})",
+        CStr::from_ptr(socket_path).to_string_lossy(),
+        mid
+    ))
+}
+
 // ── send_and_receive_over_socket ─────────────────────────────────────────────
 
 #[no_mangle]
@@ -611,6 +665,11 @@ pub unsafe extern "C" fn send_and_receive_over_socket_wait(
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
     clear_errmsg(errmsg);
+
+    if forbid_self_call() && is_self_socket(socket_path) {
+        set_errmsg(errmsg, &self_call_error(socket_path, packet));
+        return ptr::null_mut();
+    }
 
     let mut err: *mut c_char = ptr::null_mut();
     let client_fd = new_socket(&mut err);

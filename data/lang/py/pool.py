@@ -318,6 +318,41 @@ def _mlc_manifold_id(f):
         "to send across a pool boundary")
 
 
+def _mlc_call_released(sock, mid, packets, own, res_codec):
+    # Call a manifold in another pool and read its result. The packets in
+    # `own` were made for this call alone, and the result is read into a value
+    # of this pool's own, so each is released here rather than held until the
+    # dispatch ends. A None codec reads a closure wire tuple.
+    try:
+        res = morloc.foreign_call(sock, mid, packets)
+    finally:
+        for p in own:
+            morloc.release_packet_shm(p)
+    try:
+        if res_codec is None:
+            return morloc.get_value(res, _MLC_CLOSURE_SCHEMA)
+        return mlc_decode(res, res_codec)
+    finally:
+        morloc.release_packet_shm(res)
+
+
+class _MlcOwnedPacket(bytes):
+    # A packet made for one call's argument list. CPython drops it as soon as
+    # the call has returned and the argument list is gone, and dropping it
+    # releases the shared memory it names.
+    __slots__ = ()
+
+    def __del__(self):
+        try:
+            morloc.release_packet_shm(self)
+        except Exception:
+            pass
+
+
+def _mlc_owned(packet):
+    return _MlcOwnedPacket(packet)
+
+
 def mlc_reflect_from_tuple(tup, arg_codecs, res_codec):
     # Rebuild a callable from an already-deserialized closure wire tuple
     # (home_lang, mid, captured_packets). On application it serializes its
@@ -328,8 +363,8 @@ def mlc_reflect_from_tuple(tup, arg_codecs, res_codec):
     home_lang, mid, captured = tup
     sock = os.path.join(global_state["tmpdir"], "pipe-" + home_lang)
     def _call(*args):
-        packets = list(captured) + [mlc_encode(a, s) for a, s in zip(args, arg_codecs)]
-        return mlc_decode(morloc.foreign_call(sock, mid, packets), res_codec)
+        own = [mlc_encode(a, s) for a, s in zip(args, arg_codecs)]
+        return _mlc_call_released(sock, mid, list(captured) + own, own, res_codec)
     _call.__mlc_origin__ = (home_lang, mid, list(captured))
     _call.__mlc_codecs__ = (arg_codecs, res_codec)
     return _call
@@ -395,8 +430,8 @@ def _mlc_papply_remote(f, origin, xs):
         return mlc_reflect_from_tuple(
             (home_lang, mid, list(packets) + more), arg_codecs[len(xs):], res_codec)
     sock = os.path.join(global_state["tmpdir"], "pipe-" + home_lang)
-    stage_pkts = list(packets) + [mlc_encode(x, c) for x, c in zip(xs[:take], arg_codecs)]
-    tup = morloc.get_value(morloc.foreign_call(sock, smid, stage_pkts), _MLC_CLOSURE_SCHEMA)
+    own = [mlc_encode(x, c) for x, c in zip(xs[:take], arg_codecs)]
+    tup = _mlc_call_released(sock, smid, list(packets) + own, own, None)
     g = mlc_reflect_from_tuple(tup, arg_codecs[take:], res_codec)
     return mlc_papply(g, xs[take:])
 
@@ -905,6 +940,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     global_state["tmpdir"] = tmpdir
+    morloc.set_self_socket(socket_path)
 
     # Thread-based pool (macOS default; forced anywhere via MORLOC_PY_POOL=thread).
     # Avoids forking a live CPython interpreter. Everything below this branch is

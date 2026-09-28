@@ -11,6 +11,82 @@
 #define PY_ARRAY_UNIQUE_SYMBOL MORLOC_ARRAY_API
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include <numpy/arrayobject.h>
+#include <unistd.h>
+
+// {{{ shm view owners
+//
+// A numpy array read out of shared memory can be a view onto the block
+// rather than a copy. The view must keep the block alive for as long as it
+// lives, which may be past the call that read it (a module global, a cell,
+// the next batch of a loop), so it holds a reference of its own: its numpy
+// base is an owner object that took one reference on the block and drops it
+// when the last view goes. Every other value read from the block is a copy,
+// so the reader releases its own reference as soon as the read returns.
+//
+// from_voidstar_owned names the block being read in a thread-local context
+// and the view branch of the walker attaches the owner, created on first
+// use and shared by every view of the block.
+
+typedef struct {
+    absptr_t block;
+    pid_t pid;
+} shm_view_owner_t;
+
+typedef struct {
+    absptr_t block;
+    PyObject* owner;
+} shm_view_ctx_t;
+
+static __thread shm_view_ctx_t shm_view_ctx = { NULL, NULL };
+
+static void shm_view_owner_release(PyObject* capsule) {
+    shm_view_owner_t* o = (shm_view_owner_t*)PyCapsule_GetPointer(capsule, "morloc.shm_view");
+    if (o == NULL) {
+        PyErr_Clear();
+        return;
+    }
+    // A forked child inherits the object but not the reference: the
+    // reference belongs to the process that took it.
+    if (o->pid == getpid()) {
+        char* err = NULL;
+        shfree(o->block, &err);
+        if (err) { free(err); }
+    }
+    free(o);
+}
+
+// The owner for the block being read, creating it (and its reference) on
+// first use. Returns a borrowed reference, or NULL with a Python error set.
+static PyObject* shm_view_owner(void) {
+    if (shm_view_ctx.owner != NULL) {
+        return shm_view_ctx.owner;
+    }
+    shm_view_owner_t* o = (shm_view_owner_t*)malloc(sizeof(shm_view_owner_t));
+    if (o == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    char* err = NULL;
+    bool acquired = shincref(shm_view_ctx.block, &err);
+    if (err) { free(err); }
+    if (!acquired) {
+        free(o);
+        PyErr_SetString(PyExc_RuntimeError, "shared-memory block of a view is no longer live");
+        return NULL;
+    }
+    o->block = shm_view_ctx.block;
+    o->pid = getpid();
+    PyObject* capsule = PyCapsule_New(o, "morloc.shm_view", shm_view_owner_release);
+    if (capsule == NULL) {
+        shfree(o->block, &err);
+        if (err) { free(err); }
+        free(o);
+        return NULL;
+    }
+    shm_view_ctx.owner = capsule;
+    return capsule;
+}
+// }}}
 
 // SHM tracker for _put_value allocations (deferred cleanup)
 #define SHM_TRACKER_INIT_CAP 16
@@ -30,7 +106,12 @@ static void shm_tracker_push(absptr_t ptr, Schema* schema) {
     if (shm_tracker_count >= shm_tracker_cap) {
         size_t new_cap = shm_tracker_cap ? shm_tracker_cap * 2 : SHM_TRACKER_INIT_CAP;
         shm_entry_t* new_buf = (shm_entry_t*)realloc(shm_tracker, new_cap * sizeof(shm_entry_t));
-        if (!new_buf) return;
+        if (!new_buf) {
+            // Dropping the entry would leak the reference it holds and let a
+            // later release miss it; there is no way to continue correctly.
+            fprintf(stderr, "morloc internal error (Py pool): out of memory growing the SHM tracker\n");
+            abort();
+        }
         shm_tracker = new_buf;
         shm_tracker_cap = new_cap;
     }
@@ -1723,8 +1804,8 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                 // Own the buffer when the source is inline (packet buffer is
                 // freed shortly after get_value returns; a view would see
                 // recycled memory) or empty (no data to view). Otherwise take
-                // a zero-copy view over SHM, which outlives this array via
-                // the deferred shm_tracker decref.
+                // a zero-copy view over SHM, which holds the block through
+                // its owner (see shm view owners).
                 if (space.base != NULL || array->size == 0) {
                     obj = PyArray_SimpleNew(1, dims, numpy_type_num);
                     if (obj == NULL) {
@@ -1739,6 +1820,20 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                     obj = PyArray_SimpleNewFromData(1, dims, numpy_type_num, absptr);
                     if(obj == NULL) {
                         PyRAISE("Failed to parse data");
+                    }
+                    // A view outside from_voidstar_owned has no block to
+                    // own; every SHM read goes through it.
+                    if (shm_view_ctx.block == NULL) {
+                        PyRAISE("numpy view of shared memory read without an owner");
+                    }
+                    PyObject* owner = shm_view_owner();
+                    if (owner == NULL) {
+                        goto error;
+                    }
+                    Py_INCREF(owner);
+                    if (PyArray_SetBaseObject((PyArrayObject*)obj, owner) < 0) {
+                        Py_DECREF(owner);
+                        goto error;
                     }
                     // The view aliases shared memory that other pools may be
                     // reading, and morloc values are immutable, so the array
@@ -1931,6 +2026,19 @@ error:
     Py_CLEAR(w.result);
     py_walk_free(&w);
     return NULL;
+}
+
+// Read the value in shared-memory block `block`. Any view the value holds
+// onto the block owns a reference of its own, so the caller's reference can
+// be released as soon as this returns.
+static PyObject* from_voidstar_owned(const Schema* schema, void* block) {
+    shm_view_ctx_t saved = shm_view_ctx;
+    shm_view_ctx.block = (absptr_t)block;
+    shm_view_ctx.owner = NULL;
+    PyObject* obj = from_voidstar(schema, block, morloc_shm_space());
+    Py_XDECREF(shm_view_ctx.owner);
+    shm_view_ctx = saved;
+    return obj;
 }
 
 
@@ -2206,6 +2314,16 @@ error:
 }
 
 
+// Record the socket this pool serves; see mlc_set_self_socket.
+static PyObject* pybinding__set_self_socket(PyObject* self, PyObject* args) {
+    const char* socket_path;
+    if (!PyArg_ParseTuple(args, "s", &socket_path)) {
+        return NULL;
+    }
+    mlc_set_self_socket(socket_path);
+    Py_RETURN_NONE;
+}
+
 static PyObject* pybinding__close_daemon(PyObject* self, PyObject* args) {
     PyObject* daemon_capsule;
 
@@ -2463,6 +2581,9 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
 
         if (self_contained) {
             packet = PyTRY_INFRA(make_inline_data_packet, shm_ptr, schema);
+            // The packet carries a copy of the table, so the block is not
+            // needed past this call.
+            shm_tracker_release_one((absptr_t)shm_ptr);
         } else {
             packet = make_arrow_data_packet(relptr, schema);
         }
@@ -2686,7 +2807,7 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
                     if (ferr) free(ferr);
                     continue;
                 }
-                PyObject* chunk_py = from_voidstar(schema, chunk, morloc_shm_space());
+                PyObject* chunk_py = from_voidstar_owned(schema, chunk);
                 char* ferr = NULL; shfree(chunk, &ferr);
                 if (ferr) free(ferr);
                 if (chunk_py == NULL) goto stream_error;
@@ -2725,10 +2846,13 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
 
     voidstar = PyTRY_INFRA(get_morloc_data_packet_value, (uint8_t*)packet, schema);
 
-    // A value that arrived by reference needs a reference of this pool's
-    // own so the sender's flush cannot reclaim it while it is read or
-    // forwarded. The sender donated one before sending, so a refusal
-    // means the block is already gone.
+    // A value that arrived by reference is read under a reference of this
+    // pool's own. Whoever handed over the packet keeps it alive meanwhile --
+    // a caller blocked in its call, or the donated reference a foreign
+    // call's result carries -- so a refusal means the block is already gone.
+    // A payload that did not arrive by reference was materialized into a
+    // block of this pool's own. Either way the reference is released once
+    // the value is read: a view onto the block holds one of its own.
     if (is_rptr) {
         char* incref_err = NULL;
         bool acquired = shincref((absptr_t)voidstar, &incref_err);
@@ -2736,20 +2860,14 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         if (!acquired) {
             PyINTERNAL_ABORT("received value's shared-memory block is no longer live");
         }
-        // Track for deferred decref (tracker takes schema ownership)
-        shm_tracker_push((absptr_t)voidstar, schema);
-        tracked = true;
-    } else {
-        // A payload that did not arrive by reference was materialized into a
-        // block of this pool's own, and nothing else will free it. It is
-        // handed to the tracker rather than released here because a result
-        // can be a view onto these bytes rather than a copy of them, so the
-        // block has to outlive this call exactly as a referenced one does.
-        shm_tracker_push((absptr_t)voidstar, schema);
-        tracked = true;
     }
 
-    obj = from_voidstar(schema, voidstar, morloc_shm_space());
+    obj = from_voidstar_owned(schema, voidstar);
+    {
+        char* free_err = NULL;
+        shfree((absptr_t)voidstar, &free_err);
+        if (free_err) { free(free_err); }
+    }
     PyTRACE(obj == NULL)
 
     if (!tracked) {
@@ -3483,19 +3601,18 @@ static PyObject* pybinding__mlc_read(PyObject* self, PyObject* args) { MAYFAIL
 
     {
         // The numpy fast-path in from_voidstar (shared-memory space) returns a
-        // PyArray view of the SHM block via PyArray_SimpleNewFromData -- the
-        // backing memory must outlive the view. Defer the shfree via
-        // shm_tracker so the dispatch's flush releases the block (and the
-        // schema) once the view is no longer in scope.
-        PyObject* obj = from_voidstar(schema, voidstar, morloc_shm_space());
-        if (obj == NULL) {
+        // Any view of the block holds it through its owner; the block's own
+        // reference is released as soon as the value is read.
+        PyObject* obj = from_voidstar_owned(schema, voidstar);
+        {
             char* shfree_errmsg = NULL;
             shfree(voidstar, &shfree_errmsg);
             free(shfree_errmsg);
-            free_schema(schema);
+        }
+        free_schema(schema);
+        if (obj == NULL) {
             return NULL;
         }
-        shm_tracker_push((absptr_t)voidstar, schema);
         return obj;
     }
 
@@ -3540,19 +3657,18 @@ static PyObject* pybinding__mlc_load(PyObject* self, PyObject* args) { MAYFAIL
 
     {
         // The numpy fast-path in from_voidstar (shared-memory space) returns a
-        // PyArray view of the SHM block via PyArray_SimpleNewFromData -- the
-        // backing memory must outlive the view. Defer the shfree via
-        // shm_tracker so the dispatch's flush releases the block (and the
-        // schema) once the view is no longer in scope.
-        PyObject* obj = from_voidstar(schema, voidstar, morloc_shm_space());
-        if (obj == NULL) {
+        // Any view of the block holds it through its owner; the block's own
+        // reference is released as soon as the value is read.
+        PyObject* obj = from_voidstar_owned(schema, voidstar);
+        {
             char* shfree_errmsg = NULL;
             shfree(voidstar, &shfree_errmsg);
             free(shfree_errmsg);
-            free_schema(schema);
+        }
+        free_schema(schema);
+        if (obj == NULL) {
             return NULL;
         }
-        shm_tracker_push((absptr_t)voidstar, schema);
         return obj;
     }
 
@@ -3697,18 +3813,18 @@ static PyObject* pybinding__mlc_ifile_walk(PyObject* self, PyObject* args) { MAY
         Py_RETURN_NONE;
     }
     {
-        // Mirrors mlc_load's deferred-shfree pattern: from_voidstar may
-        // produce a numpy view backed by the SHM block, so defer freeing
-        // until the dispatch flushes.
-        PyObject* obj = from_voidstar(schema, voidstar, morloc_shm_space());
-        if (obj == NULL) {
+        // Any view of the block holds it through its owner; the block's own
+        // reference is released as soon as the value is read.
+        PyObject* obj = from_voidstar_owned(schema, voidstar);
+        {
             char* shfree_errmsg = NULL;
             shfree(voidstar, &shfree_errmsg);
             free(shfree_errmsg);
-            free_schema(schema);
+        }
+        free_schema(schema);
+        if (obj == NULL) {
             return NULL;
         }
-        shm_tracker_push((absptr_t)voidstar, schema);
         return obj;
     }
 error:
@@ -3747,15 +3863,18 @@ static PyObject* pybinding__mlc_next(PyObject* self, PyObject* args) { MAYFAIL
         Py_RETURN_NONE;
     }
     {
-        PyObject* obj = from_voidstar(schema, voidstar, morloc_shm_space());
-        if (obj == NULL) {
+        // Any view of the block holds it through its owner; the block's own
+        // reference is released as soon as the value is read.
+        PyObject* obj = from_voidstar_owned(schema, voidstar);
+        {
             char* shfree_errmsg = NULL;
             shfree(voidstar, &shfree_errmsg);
             free(shfree_errmsg);
-            free_schema(schema);
+        }
+        free_schema(schema);
+        if (obj == NULL) {
             return NULL;
         }
-        shm_tracker_push((absptr_t)voidstar, schema);
         return obj;
     }
 error:
@@ -3784,15 +3903,18 @@ static PyObject* pybinding__mlc_stream_layout(PyObject* self, PyObject* args) { 
         Py_RETURN_NONE;
     }
     {
-        PyObject* obj = from_voidstar(schema, voidstar, morloc_shm_space());
-        if (obj == NULL) {
+        // Any view of the block holds it through its owner; the block's own
+        // reference is released as soon as the value is read.
+        PyObject* obj = from_voidstar_owned(schema, voidstar);
+        {
             char* shfree_errmsg = NULL;
             shfree(voidstar, &shfree_errmsg);
             free(shfree_errmsg);
-            free_schema(schema);
+        }
+        free_schema(schema);
+        if (obj == NULL) {
             return NULL;
         }
-        shm_tracker_push((absptr_t)voidstar, schema);
         return obj;
     }
 error:
@@ -4033,19 +4155,20 @@ error:
     return NULL;
 }
 
-// Shared tail for the two accumulator readers: hand the block to
-// from_voidstar and defer its release, since a numpy view may still be
-// looking at it (see mlc_load).
+// Shared tail for the two accumulator readers.
 static PyObject* cell_value_to_py(Schema* schema, void* voidstar) {
-    PyObject* obj = from_voidstar(schema, voidstar, morloc_shm_space());
-    if (obj == NULL) {
+    // Any view of the block holds it through its owner; the block's own
+    // reference is released as soon as the value is read.
+    PyObject* obj = from_voidstar_owned(schema, voidstar);
+    {
         char* shfree_errmsg = NULL;
         shfree(voidstar, &shfree_errmsg);
         free(shfree_errmsg);
-        free_schema(schema);
+    }
+    free_schema(schema);
+    if (obj == NULL) {
         return NULL;
     }
-    shm_tracker_push((absptr_t)voidstar, schema);
     return obj;
 }
 
@@ -4102,30 +4225,33 @@ static PyObject* pybinding__mlc_replay(PyObject* self, PyObject* args) { MAYFAIL
     const char* schema_str;
     long long handle_ll;
     PyObject* fn;
+    Schema* schema = NULL;
     PARSE_ARGS_OR_ABORT(args, "sLO", &schema_str, &handle_ll, &fn);
+    schema = PyTRY(parse_schema, schema_str);
     while (1) {
         int32_t eof = 0;
         void* voidstar = PyTRY(mlc_next_frame, (int64_t)handle_ll, &eof);
         if (eof) break;
-        // The schema goes to the tracker with the block, as for @next, so a
-        // numpy view over the frame outlives this iteration.
-        Schema* schema = PyTRY(parse_schema, schema_str);
-        PyObject* frame = from_voidstar(schema, voidstar, morloc_shm_space());
-        if (frame == NULL) {
+        // Any view of the block holds it through its owner; the block's own
+        // reference is released as soon as the value is read.
+        PyObject* frame = from_voidstar_owned(schema, voidstar);
+        {
             char* shfree_errmsg = NULL;
             shfree(voidstar, &shfree_errmsg);
             free(shfree_errmsg);
-            free_schema(schema);
-            return NULL;
         }
-        shm_tracker_push((absptr_t)voidstar, schema);
+        if (frame == NULL) {
+            goto error;
+        }
         PyObject* r = PyObject_CallFunctionObjArgs(fn, frame, NULL);
         Py_DECREF(frame);
-        if (r == NULL) return NULL;
+        if (r == NULL) goto error;
         Py_DECREF(r);
     }
+    free_schema(schema);
     Py_RETURN_NONE;
 error:
+    if (schema) free_schema(schema);
     return NULL;
 }
 
@@ -4199,6 +4325,7 @@ static PyMethodDef Methods[] = {
     {"set_fallback_dir", pybinding__set_fallback_dir, METH_VARARGS, "Set fallback directory for file-backed shared memory"},
     {"shinit", pybinding__shinit, METH_VARARGS, "Open the shared memory pool"},
     {"start_daemon", pybinding__start_daemon, METH_VARARGS, "Initialize the shared memory and socket for the python daemon"},
+    {"set_self_socket", pybinding__set_self_socket, METH_VARARGS, "Record the socket this pool serves"},
     {"close_daemon", pybinding__close_daemon, METH_VARARGS, "Banish the daemon back to the abyss from whence it came"},
     {"wait_for_client", pybinding__wait_for_client, METH_VARARGS, "Listen over a pipe until a client packet arrives"},
     {"read_morloc_call_packet", pybinding__read_morloc_call_packet, METH_VARARGS, "Parse a morloc call packet"},

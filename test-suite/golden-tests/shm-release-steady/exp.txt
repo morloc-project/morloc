@@ -1,0 +1,6 @@
+cpp-py steady=yes
+py-cpp steady=yes
+cpp-r steady=yes
+r-cpp steady=yes
+cpp-rust steady=yes
+rust-cpp steady=yes

@@ -954,6 +954,8 @@ PROPAGATE_ERROR(errmsg)|]
     , lcReleaseBorrowedStmt = \v -> "_release_packet(" <> pretty v <> ", false);"
     , lcReturn = \e -> "return(" <> e <> ");"
     , lcDupPacket = \e -> "_dup_packet(" <> e <> ")"
+    , lcOwnedArg = \e -> "mlc::Packet(" <> e <> ").get()"
+    , lcOwnPacketDecl = \v e -> Just ("mlc::Packet" <+> v <> "(" <> e <> ");", v <> ".get()")
     , lcMakeLoop = \ids body -> do
         -- Native tail-loop. Walk the 'LoopBody' tree into C++ control flow. The
         -- loop-carried vars are the manifold's deserialized native locals
@@ -1563,9 +1565,12 @@ prepareCppCacheArg wrapIdx (j, (a@(Arg _ tm), sa)) = do
   case tm of
     Native _ -> do
       sid <- cppRegisterSchema schemaStr
+      -- The packet exists only to key and store the cache entry, so its
+      -- owner releases it when the manifold's scope ends.
       let argVar = "__morloc_ca_" <> pretty wrapIdx <> "_" <> pretty j
-          decl = "uint8_t*" <+> argVar <+> "= _put_value("
-            <> argNamer a <> ", mlc_schema_table[" <> pretty sid <> "]);"
+          decl = "mlc::Packet" <+> argVar <> "_own(_put_value("
+            <> argNamer a <> ", mlc_schema_table[" <> pretty sid <> "]));"
+            <+> "const uint8_t*" <+> argVar <+> "=" <+> argVar <> "_own.get();"
       return (argVar, schemaStr, [decl])
     _ -> return (argNamer a, schemaStr, [])
 
@@ -1614,19 +1619,26 @@ cppClosureProxyLambda cloInit ins out = do
   argTypes <- mapM (cppTypeOf . serialAstToType) ins
   resType <- cppTypeOf (serialAstToType out)
   sig <- closureCppSig (map serialAstToType ins) (serialAstToType out)
+  -- The argument packets and the result packet belong to this application
+  -- alone, so each is held by an mlc::Packet and released once the result
+  -- has been read, or when a throw unwinds past it. The captured packets
+  -- belong to the closure.
   pushes <- mapM
     (\(i, ast) -> do
         enc <- cppEncode ("__a" <> pretty i) ast
-        return ("__pkts.push_back(" <> enc <> ");"))
+        return ("__owned.emplace_back(" <> enc <> "); __pkts.push_back(__owned.back().get());"))
     (zip [(0 :: Int) ..] ins)
-  resDoc <- cppDecode "foreign_call_v(__sock.c_str(), (size_t)std::get<1>(__clo), __pkts.data(), __pkts.size())" resType out
+  resDoc <- cppDecode "__res.get()" resType out
   let paramDocs = [t <+> ("__a" <> pretty i) | (i, t) <- zip [(0 :: Int) ..] argTypes]
       bodyDocs =
         [ "std::vector<const uint8_t*> __pkts;"
+        , "std::vector<mlc::Packet> __owned;"
+        , "__owned.reserve(" <> pretty (length ins) <> ");"
         , "for (const auto& __c : std::get<2>(__clo)) { __pkts.push_back(__c.data()); }"
         ]
           <> pushes
           <> [ "std::string __sock = std::string(\"pipe-\") + std::get<0>(__clo);"
+             , "mlc::Packet __res(foreign_call_v(__sock.c_str(), (size_t)std::get<1>(__clo), __pkts.data(), __pkts.size()));"
              , "return " <> resDoc <> ";"
              ]
       proxy =
@@ -1659,7 +1671,8 @@ cppClosureProxyLambda cloInit ins out = do
                 [ "std::vector<const uint8_t*> __pkts;"
                 , "for (const auto& __p : std::get<2>(__o)) { __pkts.push_back(__p.data()); }"
                 , "std::string __sock = std::string(\"pipe-\") + std::get<0>(__o);"
-                , "__o = _get_value<" <> pretty cppClosureWireTupleName <> ">(foreign_call_v(__sock.c_str(), (size_t)__s, __pkts.data(), __pkts.size()), mlc_schema_table[" <> pretty restSid <> "]);"
+                , "mlc::Packet __res(foreign_call_v(__sock.c_str(), (size_t)__s, __pkts.data(), __pkts.size()));"
+                , "__o = _get_value<" <> pretty cppClosureWireTupleName <> ">(__res.get(), mlc_schema_table[" <> pretty restSid <> "]);"
                 ])
             , "}"
             , "return " <> restProxy <> ";"

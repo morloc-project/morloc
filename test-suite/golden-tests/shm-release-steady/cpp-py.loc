@@ -1,0 +1,34 @@
+module main (steady)
+
+import root
+import root-cpp
+import root-py
+import root-r
+import root-rust
+
+-- Each step calls a function in another pool that returns a list large enough
+-- to travel by reference, then totals it here. The program-wide peak of live
+-- shared memory must not grow with the number of steps, and every total must
+-- be exact (a block freed while still read reads as zeros).
+--
+-- Peak live SHM (MORLOC_SHM_STATS) at N1 and N2 steps; each step moves a
+-- 24 KB list by reference (MORLOC_INLINE_SIZE=0). Steady means the peak grows
+-- by less than 4 lists. Each run's total is checked against its closed form.
+
+source Cpp from "src.hpp" ("readingsCpp", "totalCpp")
+source Py from "src.py" ("readingsPy", "totalPy")
+source R from "src.R" ("readingsR", "totalR")
+source Rust from "src.rs" ("readings_rust" as readingsRust, "total_rust" as totalRust)
+
+readingsCpp :: Int -> [Int]
+readingsPy :: Int -> [Int]
+readingsR :: Int -> [Int]
+readingsRust :: Int -> [Int]
+totalCpp :: [Int] -> Int
+totalPy :: [Int] -> Int
+totalR :: [Int] -> Int
+totalRust :: [Int] -> Int
+
+--' Sum of the totals of n batches read from another pool
+steady :: Int -> Int
+steady n = sum (map (\i -> totalCpp (readingsPy i)) (range 0 n))

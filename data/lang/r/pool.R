@@ -324,6 +324,24 @@ mlc_reify <- function(f, home_lang) {
   list(home_lang, as.integer(mid), packets)
 }
 
+# Call a manifold in another pool and read its result. The packets in `own`
+# were made for this call alone, and the result is read into a value of this
+# pool's own, so each is released here, on error too, rather than held until
+# the dispatch ends. A NULL codec reads a closure wire tuple.
+mlc_call_released <- function(sock, mid, packets, own, res_codec) {
+  res <- NULL
+  on.exit({
+    for (p in own) morloc_release_packet_shm(p)
+    if (!is.null(res)) morloc_release_packet_shm(res)
+  })
+  res <- morloc_foreign_call(sock, as.integer(mid), packets)
+  if (is.null(res_codec)) {
+    morloc_get_value(res, MLC_CLOSURE_SCHEMA)
+  } else {
+    mlc_decode(res, res_codec)
+  }
+}
+
 # Rebuild a callable from an already-deserialized closure wire tuple
 # (home_lang, mid, captured_packets), used when the closure is nested in an
 # aggregate whose enclosing get_value has already parsed the tuple. On
@@ -337,8 +355,7 @@ mlc_reflect_from_tuple <- function(tup, arg_codecs, res_codec) {
   f <- function(...) {
     args <- list(...)
     arg_packets <- lapply(seq_along(args), function(i) mlc_encode(args[[i]], arg_codecs[[i]]))
-    packets <- c(captured, arg_packets)
-    mlc_decode(morloc_foreign_call(sock, as.integer(mid), packets), res_codec)
+    mlc_call_released(sock, mid, c(captured, arg_packets), arg_packets, res_codec)
   }
   attr(f, "morloc_origin") <- list(home_lang, as.integer(mid), captured)
   attr(f, "morloc_codecs") <- list(arg_codecs, res_codec)
@@ -405,8 +422,8 @@ mlc_papply_remote <- function(f, origin, xs) {
   }
   take <- st$take
   sock <- paste0(global_state$tmpdir, "/pipe-", home_lang)
-  stage_pkts <- c(packets, lapply(seq_len(take), function(i) mlc_encode(xs[[i]], arg_codecs[[i]])))
-  tup <- morloc_get_value(morloc_foreign_call(sock, as.integer(st$stage), stage_pkts), MLC_CLOSURE_SCHEMA)
+  own <- lapply(seq_len(take), function(i) mlc_encode(xs[[i]], arg_codecs[[i]]))
+  tup <- mlc_call_released(sock, st$stage, c(packets, own), own, NULL)
   g <- mlc_reflect_from_tuple(tup, arg_codecs[seq_along(arg_codecs) > take], res_codec)
   mlc_papply(g, xs[seq_along(xs) > take])
 }

@@ -171,7 +171,11 @@ static void shm_tracker_push(absptr_t ptr, Schema* schema) {
     if (shm_tracker_count >= shm_tracker_cap) {
         size_t new_cap = shm_tracker_cap ? shm_tracker_cap * 2 : SHM_TRACKER_INIT_CAP;
         shm_entry_t* new_buf = (shm_entry_t*)realloc(shm_tracker, new_cap * sizeof(shm_entry_t));
-        if (!new_buf) return;  // best-effort: drop the tracking entry on OOM
+        if (!new_buf) {
+            // Dropping the entry would leak the reference it holds and let a
+            // later release miss it; there is no way to continue correctly.
+            MORLOC_INTERNAL_ABORT("out of memory growing the SHM tracker");
+        }
         shm_tracker = new_buf;
         shm_tracker_cap = new_cap;
     }
@@ -2081,6 +2085,9 @@ SEXP morloc_start_daemon(
     const char* shm_basename = CHAR(STRING_ELT(shm_basename_r, 0));
     size_t shm_default_size = (size_t)asInteger(shm_default_size_r);
 
+    // Workers are forked from this process afterwards and inherit it.
+    mlc_set_self_socket(socket_path);
+
     language_daemon_t* daemon = R_TRY(
         start_daemon,
         socket_path,
@@ -2694,14 +2701,12 @@ SEXP morloc_mlc_load(SEXP schema_str_r, SEXP path_r) { MAYFAIL
         MORLOC_ERROR("@load: failed to load '%s'", path);
     }
 
-    SEXP obj = from_voidstar(voidstar, schema, morloc_shm_space());
-    // shm_tracker matches the pymorloc / cppmorloc deferred-cleanup
-    // pattern: defer the shfree until the next request so any
-    // R-side view that points at the SHM block stays valid for the
-    // current call's lifetime.
+    // Tracked while it is read, so an R error on the way still releases
+    // it; from_voidstar deep-copies, so it is released as soon as that
+    // returns. The tracker owns `schema` from here.
     shm_tracker_push((absptr_t)voidstar, schema);
-    // ownership of `schema` is transferred to shm_tracker; do NOT
-    // free_schema here.
+    SEXP obj = from_voidstar(voidstar, schema, morloc_shm_space());
+    shm_tracker_release_one((absptr_t)voidstar);
     return obj;
 }
 
@@ -2736,8 +2741,9 @@ SEXP morloc_mlc_read(SEXP schema_str_r, SEXP json_str_r) { MAYFAIL
     }
     if (errmsg != NULL) { free(errmsg); }
 
-    SEXP obj = from_voidstar(voidstar, schema, morloc_shm_space());
     shm_tracker_push((absptr_t)voidstar, schema);
+    SEXP obj = from_voidstar(voidstar, schema, morloc_shm_space());
+    shm_tracker_release_one((absptr_t)voidstar);
     return obj;
 }
 
@@ -3435,13 +3441,13 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
     uint8_t* voidstar = R_TRY_WITH_INFRA(free_schema(schema), get_morloc_data_packet_value, packet, schema);
 
     if (is_rptr) {
-        // Sender (daemon or peer pool) holds the original ref and will
-        // release it at their next dispatch. We add our own ref and stash
-        // it in the tracker so shm_tracker_flush() releases it at the
-        // start of our next request -- after R has finished consuming
-        // the deserialized form.
-        // The sender donated a reference before sending, so a refused
-        // acquire means the block is already gone.
+        // The value is read under a reference of this pool's own. Whoever
+        // handed over the packet keeps it alive meanwhile -- a caller
+        // blocked in its call, or the donated reference a foreign call's
+        // result carries -- so a refused acquire means the block is already
+        // gone. The reference is tracked so an R error while reading still
+        // releases it, at the next flush; a successful read releases it
+        // below, since from_voidstar deep-copies.
         char* incref_err = NULL;
         bool acquired = shincref((absptr_t)voidstar, &incref_err);
         if (incref_err) { free(incref_err); }
@@ -3470,7 +3476,9 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         MORLOC_ERROR("Failed to convert internal representation to R object");
     }
 
-    if (!is_rptr) {
+    if (is_rptr) {
+        shm_tracker_release_one((absptr_t)voidstar);
+    } else {
         // We allocated this voidstar (via unpack_with_schema for MESG
         // msgpack args). from_voidstar deep-copied into R-managed memory,
         // so the SHM block is no longer needed.

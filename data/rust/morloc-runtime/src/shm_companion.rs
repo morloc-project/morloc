@@ -123,18 +123,31 @@ impl CompanionSegment {
         self.base = std::ptr::null_mut();
 
         if shm::owns_program() {
-            unsafe { libc::shm_unlink(self.name.as_ptr()) };
-            if let Some(dir) = shm::get_fallback_dir() {
-                let mut path = PathBuf::from(dir);
-                path.push(self.name.to_string_lossy().trim_start_matches('/'));
-                let _ = std::fs::remove_file(path);
-            }
+            self.remove_name();
         }
-
         if self.policy == SweepPolicy::SweepOnCrash {
             deregister_companion(&self.name);
         }
         COMPANION_TOTAL_BYTES.fetch_sub(self.size, Ordering::Relaxed);
+    }
+
+    /// Remove the segment's name, leaving this process's mapping in place,
+    /// for a segment that threads of this process may still touch while it
+    /// exits. Only the program's owner should call this.
+    pub fn unlink(&self) {
+        self.remove_name();
+        if self.policy == SweepPolicy::SweepOnCrash {
+            deregister_companion(&self.name);
+        }
+    }
+
+    fn remove_name(&self) {
+        unsafe { libc::shm_unlink(self.name.as_ptr()) };
+        if let Some(dir) = shm::get_fallback_dir() {
+            let mut path = PathBuf::from(dir);
+            path.push(self.name.to_string_lossy().trim_start_matches('/'));
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     /// Full on-disk name (`<basename>.<suffix>`, including any `/` prefix

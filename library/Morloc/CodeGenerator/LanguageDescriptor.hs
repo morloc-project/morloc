@@ -118,6 +118,7 @@ data LangDescriptor = LangDescriptor
     ldSerializeFn :: !Text -- "morloc.put_value" or "morloc_put_value"
   , ldDeserializeFn :: !Text -- "morloc.get_value" or "morloc_get_value"
   , ldReleasePacketFn :: !Text -- "morloc.release_packet_shm" or equivalent
+  , ldOwnedArgFn :: !Text -- wraps a packet made for one call's argument list so it is released once the call returns; "" where the language cannot scope it
   , -- Intrinsic function prefix (for mlc_show, mlc_hash, etc.)
     ldIntrinsicPrefix :: !Text -- "morloc." or "morloc_" or "MorlocRuntime."
   , -- Prefix for codegen-emitted helper variable names. Used to keep
@@ -316,6 +317,7 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldHelperVarPrefix" (Y.String "__morloc_")
             . ins "ldRemoteCallFn" (Y.String "")
             . ins "ldReleasePacketFn" (Y.String "morloc.release_packet_shm")
+            . ins "ldOwnedArgFn" (Y.String "")
             . ins "ldDictStyleRecords" (Y.Bool False)
             . ins "ldEnumLitByName" (Y.Bool False)
             . ins "ldQuoteRecordKeys" (Y.Bool True)
@@ -402,6 +404,7 @@ defaultLangDescriptor name ext =
     , ldSerializeFn = "morloc.put_value"
     , ldDeserializeFn = "morloc.get_value"
     , ldReleasePacketFn = "morloc.release_packet_shm"
+    , ldOwnedArgFn = ""
     , ldIntrinsicPrefix = ""
     , ldHelperVarPrefix = "__morloc_"
     , ldForeignCallFn = "morloc.foreign_call"

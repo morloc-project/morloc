@@ -77,7 +77,9 @@ def pySumMatF32(m):
 # was allocated (a copy happened).
 # ---------------------------------------------------------------------------
 def _ownroot(arr):
-    while hasattr(arr, 'base') and arr.base is not None:
+    # The chain ends at the last ndarray: a view over shared memory has an
+    # owner object (not an array) as its base, which holds the block alive.
+    while isinstance(getattr(arr, 'base', None), np.ndarray):
         arr = arr.base
     if hasattr(arr, 'flags'):
         return bool(arr.flags['OWNDATA'])

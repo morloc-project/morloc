@@ -1480,6 +1480,7 @@ uint8_t* send_and_receive_over_socket_wait(
     const char* socket_path, const uint8_t* packet,
     int poll_timeout_us, int recv_timeout_us, ERRMSG);
 uint8_t* send_and_receive_over_socket(const char* socket_path, const uint8_t* packet, ERRMSG);
+void mlc_set_self_socket(const char* socket_path);
 size_t send_packet_to_foreign_server(int client_fd, uint8_t* packet, ERRMSG);
 int wait_for_client_with_timeout(language_daemon_t* daemon, int timeout_us, ERRMSG);
 int wait_for_client(language_daemon_t* daemon, ERRMSG);

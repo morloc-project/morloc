@@ -584,10 +584,14 @@ pub fn shinit(
         if volume_index == PRIMARY_VOLUME {
             OWNER_PID.store(std::process::id(), Ordering::SeqCst);
         }
+        crate::shm_stats::init()?;
         return Ok(shm);
     }
     match open_and_register(&shm_name, volume_index)? {
-        Ok(shm) => Ok(shm),
+        Ok(shm) => {
+            crate::shm_stats::init()?;
+            Ok(shm)
+        }
         Err(miss) => Err(MorlocError::Shm(format!(
             "volume '{}' exists but cannot be opened: {:?}",
             shm_name, miss
@@ -1740,6 +1744,7 @@ fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
             unsafe {
                 std::ptr::write_bytes(ptr, 0, blk.size);
             }
+            crate::shm_stats::on_release(blk.size);
             blk.reference_count.store(0, Ordering::Release);
         }
         return Ok(());
@@ -1855,7 +1860,10 @@ unsafe fn claim(_held: &ShmGuard<'_>, blk: *mut BlockHeader) -> Result<*mut Bloc
     (*blk)
         .reference_count
         .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Relaxed)
-        .map(|_| blk)
+        .map(|_| {
+            crate::shm_stats::on_claim((*blk).size);
+            blk
+        })
         .map_err(|n| {
             MorlocError::Shm(format!("the allocator chose a block already in use (count {n})"))
         })

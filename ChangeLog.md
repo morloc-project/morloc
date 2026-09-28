@@ -1,6 +1,13 @@
 Unreleased
 ----------
 
+ * shared memory is released as soon as a value is read, so a loop that
+   calls another pool, drains a stream through a function, or applies a
+   function from another pool holds only what it is using rather than
+   everything since the command began
+ * a numpy array read from shared memory in a Python pool stays valid for
+   as long as the array lives, including in a global, across calls, and as
+   an element of a list read from a stream file
  * an alias of a function, effect or optional type works anywhere, including
    nested in its own argument (`Scorer (Scorer Str)`), and a command whose
    signature is spelled through one takes every argument of the type

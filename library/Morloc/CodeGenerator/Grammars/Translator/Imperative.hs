@@ -70,6 +70,7 @@ import Data.Binary (Binary)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
+import Data.Char (isAlphaNum)
 import qualified Data.Text as T
 import Data.Word (Word8)
 import GHC.Generics (Generic)
@@ -631,6 +632,16 @@ data LowerConfig m = LowerConfig
     -- result is sent, so a language that frees packets by hand must return
     -- a copy holding its own reference; a collected language returns it.
     lcDupPacket :: MDoc -> MDoc
+  , lcOwnPacketDecl :: MDoc -> MDoc -> Maybe (MDoc, MDoc)
+  -- ^ Given an owner variable and a fresh packet expression, a statement
+  -- declaring the owner (which releases the packet when its scope ends) and
+  -- the expression reading the packet out of it. Nothing for a language
+  -- that cannot scope a packet; the dispatch flush then releases it.
+  , lcOwnedArg :: MDoc -> MDoc
+  -- ^ A packet serialized for one call's argument list and used by nothing
+  -- else, wrapped so it is released once the call has returned (and when an
+  -- exception unwinds past the call). Identity for a language that cannot
+  -- scope it; the dispatch flush then releases it.
   , lcMakeIf :: NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> m PoolDocs
   -- ^ origExpr, condDocs, thenDocs, elseDocs -> result PoolDocs
   -- Produces language-specific if/else structure using a temp result variable
@@ -920,6 +931,10 @@ lowerSerialExpr cfg _ (AppPoolS_ _ (PoolCall mid (Socket _ socketFile) ForeignCa
   return $ defaultValue {poolExpr = lcForeignCall cfg socketFile mid (map argNamer args)}
 lowerSerialExpr cfg _ (AppPoolS_ _ (PoolCall mid (Socket _ socketFile) (RemoteCall res) args) _) =
   lcRemoteCall cfg socketFile mid res (map argNamer args)
+lowerSerialExpr cfg (AppRecS _ _ origEs) (AppRecS_ _ mid es) = do
+  return $ mergePoolDocs ((<>) (manNamer mid) . tupled) (ownFreshArgs cfg origEs es)
+lowerSerialExpr cfg (AppForeignRecS _ _ _ origEs) (AppForeignRecS_ _ mid (Socket _ socketFile) es) = do
+  return $ mergePoolDocs (\args -> lcForeignCall cfg socketFile mid args) (ownFreshArgs cfg origEs es)
 lowerSerialExpr _ _ (AppRecS_ _ mid es) = do
   return $ mergePoolDocs ((<>) (manNamer mid) . tupled) es
 lowerSerialExpr cfg _ (AppForeignRecS_ _ mid (Socket _ socketFile) es) = do
@@ -1262,14 +1277,42 @@ adaptLoopBodyOwned ::
   LoopBody NativeExpr SerialExpr ->
   LoopBody PoolDocs PoolDocs ->
   m (LoopBody PoolDocs PoolDocs)
-adaptLoopBodyOwned cfg = go
+adaptLoopBodyOwned cfg origBody body = go origBody body
   where
     go (LoopIf _ ot oe) (LoopIf c t e) = LoopIf c <$> go ot t <*> go oe e
     go (LoopNLet _ orhs ob) (LoopNLet i rhs b) =
       LoopNLet i <$> adaptOwnedElem cfg orhs rhs <*> go ob b
-    go (LoopSLet _ _ ob) (LoopSLet i rhs b) = LoopSLet i rhs <$> go ob b
+    go (LoopSLet _ orhs ob) (LoopSLet i rhs b) = do
+      rhs' <- ownLoopPacket i orhs rhs
+      LoopSLet i rhs' <$> go ob b
     go (LoopContinue ones) (LoopContinue pds) = LoopContinue <$> adaptOwnedElems cfg ones pds
     go _ lowered = return lowered
+
+    -- A packet a serial let makes each iteration is released when the
+    -- iteration ends, rather than when the dispatch does. Only a fresh packet
+    -- (made here, or sent back by another pool) is owned, and never one a
+    -- base leaf names: that one may be the loop's result.
+    ownLoopPacket i orhs rhs
+      | isFreshPacket orhs && not (any (mentionsVar (render (svarNamer i))) (loopBases body)) = do
+          ownerIdx <- lcNewIndex cfg
+          case lcOwnPacketDecl cfg (helperNamer ownerIdx) (poolExpr rhs) of
+            Just (decl, ptr) ->
+              return rhs {poolPriorLines = poolPriorLines rhs <> [decl], poolExpr = ptr}
+            Nothing -> return rhs
+      | otherwise = return rhs
+
+    isFreshPacket SerializeS {} = True
+    isFreshPacket e = isCallResult e
+
+    loopBases (LoopIf _ t e) = loopBases t <> loopBases e
+    loopBases (LoopNLet _ _ b) = loopBases b
+    loopBases (LoopSLet _ _ b) = loopBases b
+    loopBases (LoopBase d) = [d]
+    loopBases (LoopContinue _) = []
+
+    -- Whether the rendered leaf uses the variable as a whole word.
+    mentionsVar v d = any (== v) (T.split (not . isIdentChar) (render (vsep (poolPriorLines d <> [poolExpr d]))))
+    isIdentChar c = isAlphaNum c || c == '_'
 
 -- | Adapt each aggregate element/field to its stored representation via
 -- 'lcStoreField' (e.g. Rust boxes a function value into its @Rc<dyn MorlocFnN>@
@@ -1310,6 +1353,25 @@ releaseStmtFor :: LowerConfig m -> TypeF -> Text -> MDoc
 releaseStmtFor cfg t
   | containsFunF t = lcReleaseBorrowedStmt cfg
   | otherwise = lcReleaseStmt cfg
+
+-- | A serial expression whose value is a packet another pool sent back: a
+-- fresh packet carrying a reference of its own. A same-pool serial call
+-- ('AppRecS') is not one: in a language that returns an argument packet
+-- as it is (see 'lcDupPacket') its result may be a packet something else
+-- still holds.
+isCallResult :: SerialExpr -> Bool
+isCallResult AppPoolS {} = True
+isCallResult AppForeignRecS {} = True
+isCallResult _ = False
+
+-- | A call's argument serialized in place is made for that call alone, so it
+-- is handed to the call as an owned argument; a packet bound to a variable
+-- is released by its binding.
+ownFreshArgs :: LowerConfig m -> [SerialExpr] -> [PoolDocs] -> [PoolDocs]
+ownFreshArgs cfg = zipWith own
+  where
+    own (SerializeS _ _) d = d {poolExpr = lcOwnedArg cfg (poolExpr d)}
+    own _ d = d
 
 bodyIsBoundVar :: Int -> PoolDocs -> Bool
 bodyIsBoundVar i body = render (poolExpr body) == render (svarNamer i)
@@ -1431,7 +1493,8 @@ lowerNativeExprRaw cfg (SerialLetN _ (SerializeS _ _) body) (SerialLetN_ i x1 x2
               , poolPriorLines = [releaseLine]
               }
       lcMakeLet cfg helperNamer tmpIdx (Just bodyT) False letResult releaseBody
-lowerNativeExprRaw cfg (SerialLetN _ (AppPoolS _ _ _) body) (SerialLetN_ i x1 x2) = do
+lowerNativeExprRaw cfg (SerialLetN _ rhs body) (SerialLetN_ i x1 x2)
+  | isCallResult rhs = do
   -- The let RHS is a call into another pool, so the bound variable owns
   -- the shared-memory reference the callee donated before sending. The
   -- body is native: it has read what it needs out of the packet and holds

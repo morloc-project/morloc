@@ -153,9 +153,12 @@ std::string interweave_strings(const std::vector<std::string>& first, const std:
     return result;
 }
 
-// Thread-local list of SHM pointers allocated by _put_value.
-// Freed after foreign_call returns (args consumed) or at next dispatch start
-// (result consumed by caller in the synchronous call that returned it).
+// Thread-local list of the shared-memory references this thread holds for
+// packets it built (_put_value, _dup_packet) or received as call results
+// (foreign_call_v). An entry ends when its packet is released
+// (_release_packet, mlc::Packet), and whatever remains at the start of the
+// thread's next dispatch is released then: by that time the result this
+// thread sent has been read by its caller.
 struct ShmEntry { absptr_t ptr; };
 // Releasing the entries is shared by the ordinary flush and by thread
 // teardown, so it is written once and takes the container explicitly.
@@ -271,6 +274,25 @@ static void _release_packet(const uint8_t* packet, bool owned) {
     if (owned) free((void*)packet);
 }
 
+namespace mlc {
+// A packet this pool built, or received as a call's result, for one use:
+// going out of scope frees it and drops the shared-memory reference it
+// names, including when an exception unwinds past it. A temporary lives to
+// the end of the full expression that made it, so `Packet(x).get()` passed
+// to a call is released once the call has returned.
+class Packet {
+    uint8_t* p_;
+public:
+    explicit Packet(uint8_t* p) : p_(p) {}
+    Packet(const Packet&) = delete;
+    Packet& operator=(const Packet&) = delete;
+    Packet(Packet&& o) noexcept : p_(o.p_) { o.p_ = nullptr; }
+    Packet& operator=(Packet&&) = delete;
+    ~Packet() { _release_packet(p_, true); }
+    const uint8_t* get() const { return p_; }
+};
+}
+
 // Transforms a serialized value into a message ready for the socket. A
 // self-contained packet carries the value inside it rather than a
 // reference to a shared-memory block, for a value that must outlive this
@@ -285,17 +307,21 @@ uint8_t* _put_value(const T& value, Schema* schema, bool self_contained = false)
         mlc::ArrowTable& tbl = const_cast<mlc::ArrowTable&>(value);
         relptr_t relptr = tbl.move_to_shm(schema);
 
-        // The block is this pool's own until the next dispatch releases it.
         char* err = nullptr;
         void* shm_ptr = rel2abs(relptr, &err);
         if (err) { free(err); }
-        if (shm_ptr) { _shm_tracker.push_back({(absptr_t)shm_ptr}); }
 
         uint8_t* packet = nullptr;
         if (self_contained) {
+            // The packet carries a copy of the table, so the block is not
+            // needed past this call.
+            ShmOwned owned(shm_ptr);
             packet = make_inline_data_packet(shm_ptr, schema, &err);
             if (err) { PROPAGATE_INFRA_ERROR(err); }
         } else {
+            // The packet names the block, which is this pool's own until the
+            // packet is released or the next dispatch begins.
+            if (shm_ptr) { _shm_tracker.push_back({(absptr_t)shm_ptr}); }
             packet = make_arrow_data_packet(relptr, schema);
         }
         if (!packet) { MLC_INTERNAL_ABORT("failed to create arrow data packet"); }
@@ -485,17 +511,15 @@ T _get_value(const uint8_t* packet, Schema* schema){
             PROPAGATE_INFRA_ERROR(errmsg)
         }
 
-        // A payload that did not arrive by reference was materialized into a
-        // block of this pool's own -- one contiguous allocation covering the
-        // whole value, so a single release covers it -- and nothing else will
-        // ever free it. A payload that did arrive by reference belongs to its
-        // sender.
-        ShmOwned owned(is_rptr ? nullptr : (void*)voidstar);
-
-        // A value that arrived by reference needs a reference of this
-        // pool's own so the sender's flush cannot reclaim it while it is
-        // read or forwarded. The sender donated one before sending, so a
-        // refusal means the block is already gone.
+        // A value that arrived by reference is read under a reference of this
+        // pool's own, taken here and dropped once the value is copied out:
+        // from_voidstar copies (a table, the one type read in place, takes a
+        // reference of its own above). Whoever handed over the packet keeps
+        // it alive meanwhile -- a caller blocked in its call, or the donated
+        // reference a foreign call's result carries -- so a refusal means the
+        // block is already gone. A payload that did not arrive by reference
+        // was materialized into a block of this pool's own, one allocation
+        // covering the whole value, and nothing else will ever free it.
         if (is_rptr) {
             char* incref_err = NULL;
             bool acquired = shincref((absptr_t)voidstar, &incref_err);
@@ -503,8 +527,8 @@ T _get_value(const uint8_t* packet, Schema* schema){
             if (!acquired) {
                 MLC_INTERNAL_ABORT("received value's shared-memory block is no longer live");
             }
-            _shm_tracker.push_back({(absptr_t)voidstar});
         }
+        ShmOwned owned((void*)voidstar);
 
         T* dummy = nullptr;
         return from_voidstar(schema, (void*)voidstar, dummy);

@@ -550,6 +550,11 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         , lcReleaseBorrowedStmt = \v -> pretty (ldReleasePacketFn desc) <> "(" <> pretty v <> ")"
         , lcReturn = \e -> pretty $ substituteT (ldReturnTemplate desc) [("expr", render e)]
         , lcDupPacket = id
+        , lcOwnedArg = \e -> if T.null (ldOwnedArgFn desc) then e else pretty (ldOwnedArgFn desc) <> "(" <> e <> ")"
+        , lcOwnPacketDecl = \v e ->
+            if T.null (ldOwnedArgFn desc)
+              then Nothing
+              else Just (v <+> pretty (ldAssignOp desc) <+> pretty (ldOwnedArgFn desc) <> "(" <> e <> ")", v)
         , lcMakeDoBlock = genericMakeDoBlock desc cfg
         , lcMakeTry = genericMakeTry desc
         , lcSerialize = defaultSerialize cfg
@@ -888,8 +893,9 @@ prepareCacheArg desc cfg (a@(Arg _ tm), sa) = do
   let schemaRef = genericSchemaRef desc schemaId
   case tm of
     Native _ -> do
+      -- The packet exists only to key and store the cache entry.
       pd <- lcSerialize cfg (argNamer a) sa
-      return (poolExpr pd, schemaRef, poolPriorLines pd)
+      return (lcOwnedArg cfg (poolExpr pd), schemaRef, poolPriorLines pd)
     _ -> return (argNamer a, schemaRef, [])
 
 -- | Remote call with template-driven resource packing
