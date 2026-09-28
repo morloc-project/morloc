@@ -1,0 +1,44 @@
+module main (run)
+
+import root
+import root-cpp
+
+-- Counts the whole-batch copies a C++ pool makes when a tail loop hands each
+-- batch through @try and a capturing sink, as a stream drain does. A copy of
+-- a batch allocates it anew and a move does not, so the count of large heap
+-- allocations per batch is the number of times a batch is built or copied.
+-- The sink also captures a large list, so copying the sink shows up too.
+--
+-- Four per batch: the batch is built once, then copied into the sink's
+-- by-value parameter, into the suspension the sink returns, and the sink's
+-- captured list is copied into that suspension. Taking a parameter used once
+-- by value (and moving the caller's last use into it) would remove the two
+-- batch copies; holding captures in shared storage would remove the third.
+--
+-- Large allocations per batch, as the difference between runs of N1 and N2
+-- batches (fixed setup cancels). One is the batch being built; every further
+-- one is a copy.
+
+source Cpp from "count.hpp" ("makeBatch", "recordBatch", "bigAllocs", "makeExtra")
+
+makeBatch :: Int -> <IO> [Int]
+recordBatch :: [Int] -> [Int] -> <IO> ()
+makeExtra :: Int -> [Int]
+bigAllocs :: Int -> <IO> Int
+
+drainT :: ([Int] -> <IO> ()) -> Int -> <IO> ()
+drainT sink n = do
+  Ok xs <- @try (makeBatch n)
+  ? n == 0 = do
+      ()
+  : do
+    sink xs
+    drainT sink (n - 1)
+
+--' Drain n batches; return the count of large allocations
+run :: Int -> Int -> <IO> Int
+run k n = do
+  drainT (\xs -> recordBatch extra xs) n
+  bigAllocs n
+  where
+    extra = makeExtra k

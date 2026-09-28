@@ -36,6 +36,7 @@ import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
   ( LoopResult (..)
   , consumableProjectionLets
+  , isBorrowableProjection
   , papplySteps
   , containsClosure
   , IType (..)
@@ -129,7 +130,9 @@ chooseCallSemantics :: TypeM -> CallSemantics
 chooseCallSemantics Passthrough = ConstPtr -- const uint8_t* packet
 chooseCallSemantics (Serial _) = ConstPtr -- const uint8_t* packet
 chooseCallSemantics (Native _) = Reference -- for now, primitives should be pass by copy
-chooseCallSemantics (Function _ _) = Copy -- currently not used
+-- A function value is only called ('std::function::operator()' is const) or
+-- copied into something that keeps it, so a reference never costs a copy.
+chooseCallSemantics (Function _ _) = Reference
 
 instance HasCppType TypeM where
   cppTypeOf (Serial _) = return serialType
@@ -374,11 +377,13 @@ data CppTranslatorState = CppTranslatorState
   -- ^ Snapshot of 'stateDebugTrace'. When True, DebugWrapS drains the
   -- traceback in 'cppDebugWrap'; the manifold-level catch in
   -- 'lcMakeFunction' skips its frame-line append to avoid duplicates.
-  , translatorConsumableLets :: Set.Set Int
+  , translatorConsumableLets :: Set.Set (Int, Int)
   -- ^ The payload projections whose let may take the payload instead of
-  -- copying it ('consumableProjectionLets'), decided over the whole pool at
-  -- once because a let index names a binding within a manifold and two
-  -- manifolds may share one.
+  -- copying it ('consumableProjectionLets'), keyed by the top-level manifold
+  -- they sit in and the let's index, because a let index names a binding
+  -- within a manifold and two manifolds may share one.
+  , translatorCurrentRoot :: Int
+  -- ^ The top-level manifold being lowered (see 'translatorConsumableLets').
   }
 
 instance Defaultable CppTranslatorState where
@@ -397,6 +402,7 @@ instance Defaultable CppTranslatorState where
       , translatorDebugInfo = \_ -> ("", "")
       , translatorDebugMode = False
       , translatorConsumableLets = Set.empty
+      , translatorCurrentRoot = 0
       }
 
 type CppTranslator a = CMS.StateT CppTranslatorState Identity a
@@ -767,16 +773,23 @@ recordAccess record field = record <> "." <> field
 -- Guards -> if/else; native/serial lets -> @auto@ locals; a base leaf ->
 -- @resultVar = <base>; break;@; a continue leaf -> compute each new value into
 -- an @auto@ temp, then move it into the loop-carried local.
+-- | Whether a continue value is the carried local itself, unchanged.
+isSameLocal :: Int -> PoolDocs -> Bool
+isSameLocal i d = null (poolPriorLines d) && render (poolExpr d) == render (nvarNamer i)
+
 cppWalkLoopBody :: (MDoc -> MDoc) -> [Int] -> LoopBody PoolDocs PoolDocs PoolDocs -> CppTranslatorM [MDoc]
 cppWalkLoopBody setResult ids = go
   where
     go (LoopBase seDocs) =
       return $ poolPriorLines seDocs <> [setResult (poolExpr seDocs), "break;"]
+    -- A slot whose new value is itself is left alone: copying it into a temp
+    -- and back would copy the whole value every iteration.
     go (LoopContinue contDocs) = do
-      tmpVars <- map helperNamer <$> mapM (const getCounter) contDocs
+      let changed = [(i, cd) | (i, cd) <- zip ids contDocs, not (isSameLocal i cd)]
+      tmpVars <- map helperNamer <$> mapM (const getCounter) changed
       let priors = concatMap poolPriorLines contDocs
-          tmpAssigns = zipWith (\tv cd -> "auto" <+> tv <+> "=" <+> poolExpr cd <> ";") tmpVars contDocs
-          reassigns = zipWith (\i tv -> nvarNamer i <+> "= std::move(" <> tv <> ");") ids tmpVars
+          tmpAssigns = zipWith (\tv (_, cd) -> "auto" <+> tv <+> "=" <+> poolExpr cd <> ";") tmpVars changed
+          reassigns = zipWith (\(i, _) tv -> nvarNamer i <+> "= std::move(" <> tv <> ");") changed tmpVars
       return $ priors <> tmpAssigns <> reassigns
     go (LoopNLet i neDocs b) = do
       rest <- go b
@@ -946,9 +959,10 @@ PROPAGATE_ERROR(errmsg)|]
           (Just t) -> cppTypeOf t
           Nothing -> return serialType
         consumable <- CMS.gets translatorConsumableLets
+        root <- CMS.gets translatorCurrentRoot
         let binding
               | not borrowSafe = BindCopy
-              | Set.member letIndex consumable = BindConsume
+              | Set.member (root, letIndex) consumable = BindConsume
               | otherwise = BindBorrow
         return $ makeLet namer letIndex typestr (isUnitTypeF mt) binding e1 e2
     , lcReleaseStmt = \v -> "_release_packet(" <> pretty v <> ", true);"
@@ -956,6 +970,16 @@ PROPAGATE_ERROR(errmsg)|]
     , lcReturn = \e -> "return(" <> e <> ");"
     , lcDupPacket = \e -> "_dup_packet(" <> e <> ")"
     , lcOwnedArg = \e -> "mlc::Packet(" <> e <> ").get()"
+    -- A consumable projection takes its payload, as 'makeLet' does for a
+    -- let outside a loop.
+    , lcLoopLetRhs = \i orhs d -> do
+        consumable <- CMS.gets translatorConsumableLets
+        root <- CMS.gets translatorCurrentRoot
+        typestr <- cppTypeOf (typeFof orhs)
+        return $
+          if Set.member (root, i) consumable && isBorrowableProjection orhs && not (isScalarCppType typestr)
+            then d {poolExpr = "std::move(" <> poolExpr d <> ")"}
+            else d
     , lcOwnPacketDecl = \v e -> Just ("mlc::Packet" <+> v <> "(" <> e <> ");", v <> ".get()")
     , lcMakeLoop = \res carried body -> do
         -- Tail-loop. Walk the 'LoopBody' tree into C++ control flow. The
@@ -1743,8 +1767,9 @@ recordToCppTuple ts = do
   return $ "std::tuple" <> encloseSep "<" ">" "," tsDocs
 
 translateSegment :: ClosureGen -> SerialManifold -> CppTranslator MDoc
-translateSegment closureGen m0 = do
+translateSegment closureGen m0@(SerialManifold root _ _ _ _) = do
   resetCounter
+  CMS.modify (\st -> st {translatorCurrentRoot = root})
   e <- foldWithSerialManifoldM (defaultFoldRules (cppLowerConfig closureGen)) m0
   return $ renderPoolDocs e
 

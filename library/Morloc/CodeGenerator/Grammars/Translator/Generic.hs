@@ -552,6 +552,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         , lcReturn = \e -> pretty $ substituteT (ldReturnTemplate desc) [("expr", render e)]
         , lcDupPacket = id
         , lcOwnedArg = \e -> if T.null (ldOwnedArgFn desc) then e else pretty (ldOwnedArgFn desc) <> "(" <> e <> ")"
+        , lcLoopLetRhs = \_ _ d -> return d
         , lcOwnPacketDecl = \v e ->
             if T.null (ldOwnedArgFn desc)
               then Nothing
@@ -1022,11 +1023,13 @@ genericMakeLoop desc cfg _ carried body = do
       where
         go (LoopBase seDocs) =
           return $ poolPriorLines seDocs <> [resultVar <+> assign <+> poolExpr seDocs, "break"]
+        -- A slot whose new value is itself is left alone.
         go (LoopContinue contDocs) = do
-          tmpVars <- map helperNamer <$> mapM (const (lcNewIndex cfg)) contDocs
+          let changed = [(i, cd) | (i, cd) <- zip ids contDocs, not (sameLocal i cd)]
+          tmpVars <- map helperNamer <$> mapM (const (lcNewIndex cfg)) changed
           let priors = concatMap poolPriorLines contDocs
-              tmpAssigns = zipWith (\tv cd -> tv <+> assign <+> poolExpr cd) tmpVars contDocs
-              reassigns = zipWith (\i tv -> nvarNamer i <+> assign <+> tv) ids tmpVars
+              tmpAssigns = zipWith (\tv (_, cd) -> tv <+> assign <+> poolExpr cd) tmpVars changed
+              reassigns = zipWith (\(i, _) tv -> nvarNamer i <+> assign <+> tv) changed tmpVars
           return $ priors <> tmpAssigns <> reassigns
         go (LoopNLet i neDocs b) = do
           rest <- go b
@@ -1038,6 +1041,7 @@ genericMakeLoop desc cfg _ carried body = do
           tLines <- go t
           eLines <- go e
           return $ poolPriorLines guardDocs <> [renderIf (poolExpr guardDocs) tLines eLines]
+        sameLocal i d = null (poolPriorLines d) && render (poolExpr d) == render (nvarNamer i)
     -- Block-style rendering (IndentBlock=py, BraceBlock=r, EndKeywordBlock=julia
     -- kept for consistency with sibling emitters though gated out today).
     renderIf g tLines eLines = case ldBlockStyle desc of

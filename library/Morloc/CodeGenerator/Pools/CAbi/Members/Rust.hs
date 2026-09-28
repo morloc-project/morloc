@@ -2219,6 +2219,7 @@ rustLowerConfig mask =
     , lcReturn = \e -> "return" <+> e <> ";"
     , lcDupPacket = \e -> "rustmorloc::dup_packet(" <> e <> ")"
     , lcOwnedArg = \e -> "rustmorloc::Packet::new(" <> e <> ").as_ptr()"
+    , lcLoopLetRhs = \_ _ d -> return d
     , lcOwnPacketDecl = \v e -> Just ("let" <+> v <+> "= rustmorloc::Packet::new(" <> e <> ");", v <> ".as_ptr()")
     , lcMakeIf = rustMakeIf
     , lcMakeLoop = rustMakeLoop

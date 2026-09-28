@@ -56,6 +56,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
 
     -- * Ownership of a projected value
   , consumableProjectionLets
+  , isBorrowableProjection
 
     -- * Default serialize/deserialize (for Python/R)
   , defaultSerialize
@@ -633,6 +634,11 @@ data LowerConfig m = LowerConfig
     -- result is sent, so a language that frees packets by hand must return
     -- a copy holding its own reference; a collected language returns it.
     lcDupPacket :: MDoc -> MDoc
+  , lcLoopLetRhs :: Int -> NativeExpr -> PoolDocs -> m PoolDocs
+  -- ^ The right-hand side of a native let in a loop body, given the let's
+  -- index and original expression. A loop let is emitted by the member's
+  -- loop walker rather than 'lcMakeLet', so a member that binds some lets by
+  -- taking their value (see 'consumableProjectionLets') applies it here.
   , lcOwnPacketDecl :: MDoc -> MDoc -> Maybe (MDoc, MDoc)
   -- ^ Given an owner variable and a fresh packet expression, a statement
   -- declaring the owner (which releases the packet when its scope ends) and
@@ -1072,21 +1078,23 @@ borrowableRoot e = isBorrowableProjection e
 -- A member consuming this set must render a bare-throw arm as non-returning,
 -- which is what makes the second exemption sound.
 -- A let index names one binding within a manifold, not within a pool: two
--- manifolds routinely bind the same index to different values. So the whole
--- pool is scanned as one body. That merges the uses of any index two
--- manifolds share, which can only make a candidate look more used than it is
--- -- costing a copy, never permitting a take. Deciding per manifold and
--- unioning the answers would do the opposite.
-consumableProjectionLets :: [SerialManifold] -> Set.Set Int
+-- manifolds routinely bind the same index to different values. So each
+-- top-level manifold -- with every manifold nested in it -- is scanned as one
+-- body, and a decision is keyed by that manifold's id as well as the let's
+-- index; the translator asks with the id of the manifold it is lowering. A
+-- scan merges the uses of any index two of its nested manifolds share, which
+-- can only make a candidate look more used than it is -- costing a copy,
+-- never permitting a take.
+consumableProjectionLets :: [SerialManifold] -> Set.Set (Int, Int)
 consumableProjectionLets sms =
   Set.fromList
-    [ letIdx
-    | (letIdx, subjIdx) <- csProjections scan
+    [ (root, letIdx)
+    | sm@(SerialManifold root _ _ _ _) <- sms
+    , let scan = scanSM sm
+    , (letIdx, subjIdx) <- csProjections scan
     , maybe False buildsFreshValue (Map.lookup subjIdx (csDefs scan))
     , Map.findWithDefault 0 subjIdx (csUses scan) == 1
     ]
-  where
-    scan = mconcat (map scanSM sms)
 
 -- | What 'consumableProjectionLets' gathers in one pass: every native let's
 -- right-hand side, every payload projection paired with the index it reads
@@ -1120,6 +1128,10 @@ dropColliding a b =
 buildsFreshValue :: NativeExpr -> Bool
 buildsFreshValue (IntrinsicN _ IntrTry _ _) = True
 buildsFreshValue (VariantN _ _ _ _) = True
+-- A loop body keeps a right-hand side's own lets inside it (see the loop
+-- seal in 'invertSerialManifold'); the value is the let's body.
+buildsFreshValue (NativeLetN _ _ body) = buildsFreshValue body
+buildsFreshValue (SerialLetN _ _ body) = buildsFreshValue body
 buildsFreshValue _ = False
 
 -- | A payload projection whose subject is named directly, as @(this let, the
@@ -1181,11 +1193,17 @@ scanNA (NativeArgExpr e) = scanNE e
 -- A loop-carried local is a manifold parameter, and a let inside a loop body
 -- is emitted without consulting the binding decision, so a projection there
 -- is recorded as a definition and a use but never as a candidate.
+-- A loop let's projection is a candidate only when its subject is bound in
+-- the same loop body: a subject bound before the loop is projected once per
+-- iteration from one syntactic use, and taking its payload would leave the
+-- next iteration an empty value.
 scanLoop :: (b -> ConsumeScan) -> LoopBody NativeExpr SerialExpr b -> ConsumeScan
-scanLoop scanB = go
+scanLoop scanB lbody =
+  let inner = go lbody
+   in inner {csProjections = [p | p@(_, subj) <- csProjections inner, Map.member subj (csDefs inner)]}
   where
     go (LoopIf e t f) = scanNE e <> go t <> go f
-    go (LoopNLet i rhs body) = scanDef i rhs <> scanNE rhs <> go body
+    go (LoopNLet i rhs body) = scanLet i rhs <> scanNE rhs <> go body
     go (LoopSLet _ e body) = scanSE e <> go body
     go (LoopBase e) = scanB e
     go (LoopContinue es) = mconcat (map scanNE es)
@@ -1292,8 +1310,9 @@ adaptLoopBodyOwned ::
 adaptLoopBodyOwned cfg adaptBase origBody body = go origBody body
   where
     go (LoopIf _ ot oe) (LoopIf c t e) = LoopIf c <$> go ot t <*> go oe e
-    go (LoopNLet _ orhs ob) (LoopNLet i rhs b) =
-      LoopNLet i <$> adaptOwnedElem cfg orhs rhs <*> go ob b
+    go (LoopNLet _ orhs ob) (LoopNLet i rhs b) = do
+      rhs' <- adaptOwnedElem cfg orhs rhs >>= lcLoopLetRhs cfg i orhs
+      LoopNLet i rhs' <$> go ob b
     go (LoopSLet _ orhs ob) (LoopSLet i rhs b) = do
       rhs' <- ownLoopPacket i orhs rhs
       LoopSLet i rhs' <$> go ob b

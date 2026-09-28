@@ -1209,7 +1209,8 @@ struct MorlocClosure<R(A...)> {
     std::function<std::vector<std::vector<uint8_t>>()> reify_captured;
     std::string home = "cpp";
     typename mlc_apply1_slot<R, A...>::type apply1{};
-    R operator()(A... args) const { return fn(args...); }
+    // Each argument is this call's own copy, so it is handed on, not copied.
+    R operator()(A... args) const { return fn(std::forward<A>(args)...); }
 };
 
 // Serialize one captured native value into a SELF-CONTAINED packet for the
@@ -1289,7 +1290,7 @@ template <class R, class A1, class... A> struct mlc_pap<R, A1, A...> {
         MorlocClosure<R(A1, A...)> c{fn, mid, reify, home};
         c.apply1 = [fn, mid, reify, home, schemas](const A1& x) -> std::function<R(A...)> {
             auto [reify2, rest] = mlc_pap_step(reify, schemas, x);
-            std::function<R(A...)> fn2 = [fn, x](A... r) { return fn(x, r...); };
+            std::function<R(A...)> fn2 = [fn, x](A... r) { return fn(x, std::forward<A>(r)...); };
             return mlc_pap<R, A...>::make(fn2, mid, reify2, home, rest);
         };
         return c;
@@ -1351,7 +1352,7 @@ std::function<R(A...)> mlc_apply1(const std::function<R(A1, A...)>& f, const A1&
     if (clo != nullptr && clo->apply1) {
         return clo->apply1(x);
     }
-    return [f, x](A... r) { return f(x, r...); };
+    return [f, x](A... r) { return f(x, std::forward<A>(r)...); };
 }
 
 // The reify thunk of a closure that never crosses.
