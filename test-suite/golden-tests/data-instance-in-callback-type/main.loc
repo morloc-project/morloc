@@ -1,0 +1,93 @@
+-- A parameterized `data` type nested in a function type or a record must
+-- reach the pool under its instance name. A callback whose type mentions
+-- `Box Int` or `Try Str Int` is passed through a manifold parameter typed by
+-- that function type, and a record named on the morloc side is spelled out
+-- field by field on the pool side; the bare morloc name compiles in neither.
+
+module main
+  ( cppMono
+  , cppPolyRet
+  , cppTryRet
+  , cppPolyArg
+  , rustPolyRet
+  , cppRecord
+  , cppRecordEmpty
+  , cppRecordCallback
+  , cppTupleAlias
+  )
+
+import root-cpp
+import root-rust
+
+effect IO
+
+data Shape = Circle Real | Sq Real
+data Box a = Empty | Full a
+
+-- An alias whose expansion has a different arity from the alias itself.
+type Pair a = (a, Box a)
+
+record Cpp => Rec = "struct"
+record Rec where
+  tag :: Int
+  box :: Box Int
+
+note :: Int -> <IO> Int
+identRec :: Rec -> Rec
+callRec :: (Int -> <IO> Rec) -> Int -> <IO> Int
+identPair :: Pair Int -> Pair Int
+source Cpp from "h.hpp" ("note", "ident" as identRec, "callOn" as callRec, "ident" as identPair)
+
+callMono :: (Int -> <IO> Shape) -> Int -> <IO> Int
+callPoly :: (Int -> <IO> (Box Int)) -> Int -> <IO> Int
+callTry :: (Int -> <IO> (Try Str Int)) -> Int -> <IO> Int
+callArg :: (Box Int -> <IO> Int) -> Box Int -> <IO> Int
+source Cpp from "h.hpp"
+  ( "callOn" as callMono
+  , "callOn" as callPoly
+  , "callOn" as callTry
+  , "callWith" as callArg
+  )
+
+noteRs :: Int -> <IO> Int
+callPolyRs :: (Int -> <IO> (Box Int)) -> Int -> <IO> Int
+source Rust from "h.rs" ("note" as noteRs, "call_on" as callPolyRs)
+
+cppMono :: Int -> <IO> Int
+cppMono n = callMono (\x -> do
+  y <- note (x + n)
+  Sq 1.0) 5
+
+cppPolyRet :: Int -> <IO> Int
+cppPolyRet n = callPoly (\x -> do
+  y <- note (x + n)
+  Full y) 5
+
+cppTryRet :: Int -> <IO> Int
+cppTryRet n = callTry (\x -> do
+  y <- note (x + n)
+  Ok y) 5
+
+cppPolyArg :: Int -> <IO> Int
+cppPolyArg n = callArg (\b -> do
+  y <- note n
+  match b | Empty = 0 | (Full v) = v + y) (Full 5)
+
+rustPolyRet :: Int -> <IO> Int
+rustPolyRet n = callPolyRs (\x -> do
+  y <- noteRs (x + n)
+  Full y) 5
+
+cppRecord :: Int -> Rec
+cppRecord n = identRec {tag = n, box = Full n}
+
+cppRecordEmpty :: Int -> Rec
+cppRecordEmpty n = identRec {tag = n, box = Empty}
+
+cppRecordCallback :: Int -> <IO> Int
+cppRecordCallback n = callRec (\x -> do
+  y <- note x
+  {tag = y, box = Full y}) n
+
+cppTupleAlias :: Int -> Pair Int
+cppTupleAlias n = identPair (n, Full n)
