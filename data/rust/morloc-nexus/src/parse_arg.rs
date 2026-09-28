@@ -130,6 +130,7 @@ pub fn redirect(
         }
     }
 
+    let selected_at: Vec<bool> = values.iter().map(|v| matches!(v, ArgValue::Parsed { .. })).collect();
     let mut out = Vec::new();
     for (j, (v, arg)) in values.into_iter().zip(target.args.iter()).enumerate() {
         // An argument without formats is read as the target reads it: the
@@ -172,8 +173,26 @@ pub fn redirect(
                 Some(_) => format!("{}/arg-{}", stage_dir(), j),
                 None => String::new(),
             };
+            // A parsed `IFile` is the file its parser writes.
+            if selected.is_some() {
+                crate::stage::link_arg_to(j + 1, &stage);
+            }
             out.push(ArgValue::Json(json_quote(&stage)));
         }
+    }
+    // In a stage, the entry saves each parsed argument an action refers to;
+    // an argument no format read is saved as it is loaded (see `dispatch`).
+    for &n in &target.parse_save_slots {
+        let path = crate::stage::arg_target(n).filter(|_| selected_at.get(n - 1) == Some(&true));
+        out.push(ArgValue::Json(path.is_some().to_string()));
+        out.push(ArgValue::Json(json_quote(path.as_deref().unwrap_or(""))));
+    }
+    let arity = manifest.commands[entry].args.len();
+    if out.len() != arity {
+        crate::runlog::die_with_error(&format!(
+            "internal: `{}` takes {} arguments, but {} were built for it",
+            manifest.commands[entry].name, arity, out.len()
+        ));
     }
     (entry, out)
 }
@@ -184,6 +203,15 @@ static STAGE_DIR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// `MORLOC_TMPDIR`, else `TMPDIR`, else `/tmp`, and removed when the run ends.
 fn stage_dir() -> &'static str {
     STAGE_DIR.get_or_init(|| {
+        // In the stage of a multi-output run, staged input lives in the run's
+        // stage directory, which outlives this process for the actions and
+        // is removed by the run.
+        if let Some(dir) = crate::stage::parse_dir() {
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                crate::runlog::die_with_error(&format!("cannot create {}: {}", dir, e));
+            }
+            return dir;
+        }
         let base = std::env::var("MORLOC_TMPDIR")
             .or_else(|_| std::env::var("TMPDIR"))
             .unwrap_or_else(|_| "/tmp".to_string());

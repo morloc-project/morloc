@@ -51,7 +51,8 @@ pub struct ParsedCommand {
     /// Every terminal action named, in the order of `cmd.terminals`.
     pub actions: Vec<Action>,
     /// The terminal that writes standard output, if any: a bare action, or
-    /// else the `@default` one when no `-f` and no `--no-stdout` was given.
+    /// else the `@default` one when no `-f` and no `--no-stdout` was given
+    /// and it was not given a path.
     pub stdout_terminal: Option<usize>,
     /// `--no-stdout` was given.
     pub no_stdout: bool,
@@ -220,14 +221,16 @@ fn finish_parse(
 ) -> ParsedCommand {
     let (actions, no_stdout) = collect_actions(cmd, matches, output_path);
     let bare = actions.iter().find(|a| a.dest == Dest::Stdout).map(|a| a.terminal);
-    // Path actions never change what stdout gets: a bare action, else the
-    // `@default` action unless `-f` asks for the typed value.
+    // Stdout gets a bare action, else the `@default` action unless `-f` asks
+    // for the typed value or that action writes to a file: no output goes
+    // to both a file and stdout.
+    let has_path_to = |t: usize| actions.iter().any(|a| a.terminal == t && a.dest != Dest::Stdout);
     let stdout_terminal = if no_stdout {
         None
     } else if bare.is_some() {
         bare
     } else if !format_explicit {
-        cmd.terminals.iter().position(|t| t.default)
+        cmd.terminals.iter().position(|t| t.default).filter(|&t| !has_path_to(t))
     } else {
         None
     };

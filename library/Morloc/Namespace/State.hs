@@ -22,6 +22,7 @@ module Morloc.Namespace.State
   , MorlocMonad
   , MorlocReturn
   , MorlocState (..)
+  , ModuleCommands (..)
   , WrapperSpec (..)
   , WrapperMode (..)
   , WrapperFile (..)
@@ -166,10 +167,18 @@ data MorlocState = MorlocState
   , stateErrorNotes :: Map Int MDoc
   -- ^ A line prefixed to an error raised at the indexed expression: for a
   -- synthesized expression, the directive it was synthesized from.
+  , stateModuleCommands :: Map.Map MVar ModuleCommands
+  -- ^ What terminal-action synthesis made in each module, under the names
+  -- of that module's definitions. Treeify moves it to the names the root
+  -- module exports ('stateReplayPlans', 'stateStreamElems').
   , stateReplayPlans :: Map.Map EVar ReplayPlan
-  -- ^ For each terminal action, keyed by its replay entry's name
-  -- ('mangleReplayName'): the kind of entry synthesized to run it on its
-  -- command's saved output, or why there is none.
+  -- ^ For each terminal action of a program command, keyed by its replay
+  -- entry's name ('mangleReplayName'): the kind of entry synthesized to run
+  -- it on its command's saved output, or why there is none.
+  , stateParseSlots :: Map.Map EVar [Int]
+  -- ^ For each program command whose parse entry saves arguments in a run
+  -- that saves the command's output: their positions (1-based), in the
+  -- order of the entry's trailing (flag, path) slots.
   , stateStreamElems :: Map.Map EVar TypeU
   -- ^ For each command that streams its output through @collect, the batch
   -- type it writes to standard output. Such a command returns @()@, so the
@@ -363,6 +372,21 @@ data MorlocState = MorlocState
   -- identify a type: the inner @Box Int@ of a @Box (Box Int)@ is not the
   -- outer one, and leaving it opaque would say the value contains
   -- itself.
+  }
+  deriving (Show)
+
+-- | What terminal-action synthesis made in one module, keyed by the
+-- names of that module's own definitions.
+data ModuleCommands = ModuleCommands
+  { mcCompanions :: Map.Map EVar [CompanionRole]
+  -- ^ each command's synthesized companions
+  , mcReplayPlans :: Map.Map (EVar, Text) ReplayPlan
+  -- ^ keyed by command and action long flag
+  , mcStreamElems :: Map.Map EVar TypeU
+  -- ^ keyed by command or companion name: the batch type it streams
+  , mcParseSlots :: Map.Map EVar [Int]
+  -- ^ keyed by command: the arguments its parse entry saves (see
+  -- 'stateParseSlots')
   }
   deriving (Show)
 
@@ -994,6 +1018,8 @@ instance Defaultable MorlocState where
       , stateName = Map.empty
       , stateTermDocs = Map.empty
       , stateStreamElems = Map.empty
+      , stateModuleCommands = Map.empty
+      , stateParseSlots = Map.empty
       , stateReplayPlans = Map.empty
       , stateErrorNotes = Map.empty
       , stateManifoldConfig = Map.empty

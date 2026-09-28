@@ -121,21 +121,15 @@ treeify d
             -- find all term exports (ungrouped + grouped)
             let allSymbols = Set.unions (symbols : [exportGroupMembers g | g <- groups])
                 exports = [(i, v) | (i, TermSymbol v) <- Set.toList allSymbols]
-                -- Root the terminal-action handlers of every command the root
-                -- exports. When a formatter command is defined in a submodule
-                -- and imported by name, its handlers are exported by that
-                -- submodule, not the root, so they must be rooted explicitly or
-                -- codegen prunes them (see the collect-cross-module golden). A
-                -- name already in `exports` (the self-contained case, where
-                -- `addToExport` put the handler in the root's own exports) is
-                -- skipped to avoid a duplicate root.
                 exportedNames = Set.fromList [v | (_, v) <- exports]
-                terminalExports =
-                  [ e
-                  | e@(_, m) <- terminalActionRoots d exportedNames
-                  , not (Set.member m exportedNames)
-                  ]
-                exports' = exports ++ terminalExports
+
+            -- Root the companions of every command the root exports. A
+            -- companion already among the root's exports (a command the
+            -- root defines itself) is rooted there.
+            (companions, replayPlans, streamElems, parseSlots) <- rootCompanions d k exports
+            let companionExports =
+                  [ e | e@(_, m) <- companions, not (Set.member m exportedNames) ]
+                exports' = exports ++ companionExports
 
             -- Build export group info for the state
             let exportGroupInfo =
@@ -166,8 +160,13 @@ treeify d
               ( \s ->
                   s
                     { stateExports = map fst exports'
-                    , stateName = Map.union (stateName s) (Map.fromList exports')
+                    , stateName =
+                        Map.union (Map.fromList companionExports)
+                          (Map.union (stateName s) (Map.fromList exports))
                     , stateExportGroups = exportGroupInfo
+                    , stateReplayPlans = replayPlans
+                    , stateParseSlots = parseSlots
+                    , stateStreamElems = Map.union streamElems (stateStreamElems s)
                     }
               )
 
@@ -191,52 +190,86 @@ treeify d
           "unsupported multi-rooted module DAG:"
             <+> tupled (map pretty roots)
 
--- | The terminal-action handler bindings (`--' with:`/`render:` synthesis, e.g.
--- @mlcp_cut_fasta@) for every command the root module exports.
+-- | The companions (terminal-action, replay and `@parse` entries) of every
+-- command the root module exports, each with the name the program knows it
+-- by, and the facts synthesis recorded about them under those names.
 --
 -- Program roots come only from the root module's export list, but a
--- terminal-action binding is exported by the module that DEFINES its parent
--- command (via 'Desugar.addToExport'), not by the root. So when a formatter
--- command is imported by name from a submodule, its handlers are not among the
--- root's exports and codegen prunes them -- the flag still appears in the nexus
--- (its terminal record rides the command's docstring across the import) but
--- dispatches to a manifold that was never lowered. Rooting these entries here
--- makes the imported case behave exactly like a self-contained root module.
---
--- The mangled names are re-derived from each root command's @with@/@render@
--- docstrings (the same source 'Desugar.collectWithSpecs' and the nexus use) and
--- resolved against every module's export symbols to recover the linked index
--- ('MFL.link' links all modules' exports, so a submodule's terminal-action
--- export index is a valid root). A command re-exported under an alias is not
--- handled (its submodule signature name would not match the root export name);
--- that matches the nexus, which also keys the terminal entry off the command's
--- own name.
-terminalActionRoots :: DAG MVar e ExprI -> Set.Set EVar -> [(Int, EVar)]
-terminalActionRoots d rootCmds =
-  [ (i, m)
-  | m <- Set.toList mangledNames
-  , Just i <- [Map.lookup m exportIndex]
-  ]
+-- companion is exported by the module that defines its command (see
+-- 'Desugar.addToExport'). Each root export is followed through the imports
+-- to its definition; the companions synthesis recorded there
+-- ('stateModuleCommands') are found in that module's own exports and
+-- renamed after the root's export name. Root export names are unique, so a
+-- command imported under an alias, or two same-named commands from
+-- different modules, keep distinct companions.
+rootCompanions ::
+  DAG MVar [AliasedSymbol] ExprI ->
+  MVar ->
+  [(Int, EVar)] ->
+  MorlocMonad
+    ( [(Int, EVar)]
+    , Map.Map EVar ReplayPlan
+    , Map.Map EVar TypeU
+    , Map.Map EVar [Int]
+    )
+rootCompanions d root exports = do
+  made <- MM.gets stateModuleCommands
+  found <- mapM (forExport made) exports
+  return
+    ( concat [cs | (cs, _, _, _) <- found]
+    , Map.unions [ps | (_, ps, _, _) <- found]
+    , Map.unions [ss | (_, _, ss, _) <- found]
+    , Map.unions [ws | (_, _, _, ws) <- found]
+    )
   where
-    ns = DAG.nodes d
-    mangledNames =
-      Set.fromList $ concat
-        [ terminals ++ parseEntries
-        | node <- ns
-        , (name, _, et) <- AST.findSignatures node
-        , Set.member name rootCmds
-        , ArgDocSig cmdDoc argDocs _ <- [edocs et]
-        , let terminals = [ mangleTerminalName name (wsLong w) | w <- docWith cmdDoc ]
-              parseEntries = map parseEntryName (parseEntryTargets name cmdDoc argDocs)
-        ]
-    exportIndex =
-      Map.fromList
-        [ (v, i)
-        | node <- ns
-        , (i, v) <- moduleExportTerms node
-        ]
-    moduleExportTerms node = case AST.findExport node of
-      ExportMany symbols groups ->
+    forExport made (_, v) = case definitionOf root v of
+      Nothing -> return ([], Map.empty, Map.empty, Map.empty)
+      Just (m, orig) -> do
+        let mc = Map.lookup m made
+            roles = maybe [] (Map.findWithDefault [] orig . mcCompanions) mc
+            plans = maybe Map.empty mcReplayPlans mc
+            streams = maybe Map.empty mcStreamElems mc
+            exported = Map.fromList [(n, i) | (i, n) <- moduleExportTerms m]
+        cs <- mapM (rootOne m orig v exported) roles
+        let renamed = (orig, v) : [(companionName orig r, companionName v r) | r <- roles]
+        return
+          ( cs
+          , Map.fromList
+              [ (mangleReplayName v long, p)
+              | ((parent, long), p) <- Map.toList plans
+              , parent == orig
+              ]
+          , Map.fromList
+              [ (new, t) | (old, new) <- renamed, Just t <- [Map.lookup old streams] ]
+          , maybe Map.empty (Map.singleton v) (Map.lookup orig . mcParseSlots =<< mc)
+          )
+
+    rootOne :: MVar -> EVar -> EVar -> Map.Map EVar Int -> CompanionRole -> MorlocMonad (Int, EVar)
+    rootOne m orig v exported role =
+      let n = companionName orig role
+       in case Map.lookup n exported of
+            Just i -> return (i, companionName v role)
+            Nothing ->
+              MM.throwCompilerBug $
+                "the companion" <+> pretty n <+> "of" <+> pretty orig
+                  <+> "is not exported by module" <+> pretty m
+
+    -- the module that defines what module m exports as v, and its name there
+    definitionOf m v = case Map.lookup m d of
+      Nothing -> Nothing
+      Just (node, edges)
+        | v `elem` [n | (n, _, _) <- AST.findSignatures node] -> Just (m, v)
+        | otherwise ->
+            listToMaybe
+              [ def
+              | (child, syms) <- edges
+              , AliasedTerm orig alias <- syms
+              , alias == v
+              , Just def <- [definitionOf child orig]
+              ]
+
+    moduleExportTerms m = case AST.findExport <$> DAG.lookupNode m d of
+      Just (ExportMany symbols groups) ->
         let allSs = Set.toList symbols ++ concatMap (Set.toList . exportGroupMembers) groups
          in [(i, v) | (i, TermSymbol v) <- allSs]
       _ -> []

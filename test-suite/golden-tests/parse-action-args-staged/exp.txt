@@ -1,0 +1,30 @@
+--- total lines:n.txt x= --tagged=a.out ---
+6
+x=6
+--- total lines:n.txt x= --listed=b.out --no-stdout ---
+[1,2,3] sums to 6
+--- total [4,5] x= --listed=c.out ---
+9
+[4,5] sums to 9
+--- stdin ---
+6
+[1,2,3] sums to 6
+--- trio lines:n.txt y= lines:m.txt --first=e1.out --mid=e2.out --third=e3.out --no-stdout ---
+[1,2,3] sums to 6
+y=6
+[10,20] sums to 6
+--- sizeOf lines:n.txt --where=f.out ---
+3
+3 elements, total 3
+--- plainSize d.out --where=h.out ---
+4
+4 elements, total 4
+--- emit lines:n.txt ---
+input [1,2,3] batch [1,2,3]
+input [1,2,3] batch [100]
+--- emit lines:n.txt --show=g.out ---
+[1,2,3]
+[100]
+input [1,2,3] batch [1,2,3]
+input [1,2,3] batch [100]
+input unchanged

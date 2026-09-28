@@ -8,12 +8,14 @@ define run_lang
 	$(W) ./$(1) stream log.txt --batches >> obs.txt 2>> obs.err
 	$(W) ./$(1) stream log.txt --folded >> obs.txt 2>> obs.err
 	$(W) ./$(1) stream log.txt --marks >> obs.txt 2>> obs.err
-	if $(W) ./$(1) stream log.txt --marks=k.out 2>> obs.err ; then echo UNEXPECTED >> obs.txt ; else echo OK >> obs.txt ; fi
+	$(W) ./$(1) stream log.txt --marks=k.out --no-stdout >> obs.txt 2>> obs.err
+	cat k.out >> obs.txt
 	: > log.txt
 	$(W) ./$(1) stream log.txt --all=a.out --count=n.out --batches=b.out --folded=f.out --no-stdout >> obs.txt 2>> obs.err
 	cat log.txt a.out n.out b.out f.out >> obs.txt
 	$(W) ./$(1) twoSites log.txt --all >> obs.txt 2>> obs.err
 	$(W) ./$(1) twoSites log.txt --batches >> obs.txt 2>> obs.err
+	$(W) ./$(1) twoSites log.txt --marks >> obs.txt 2>> obs.err
 	$(W) ./$(1) twoSites log.txt --all=t.out --no-stdout >> obs.txt 2>> obs.err
 	cat t.out >> obs.txt
 	$(W) ./$(1) branch log.txt true --all >> obs.txt 2>> obs.err

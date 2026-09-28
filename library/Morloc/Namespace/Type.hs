@@ -124,8 +124,9 @@ module Morloc.Namespace.Type
   , mangleTerminalName
   , mangleReplayName
   , replayEntryPrefix
+  , CompanionRole (..)
+  , companionName
   , ActionKind (..)
-  , kindReplaysFrames
   , ReplayPlan (..)
   , replayPlanKind
   , anonRecordVar
@@ -758,6 +759,23 @@ mangleTerminalName = mangleWithPrefix "mlcp_"
 mangleReplayName :: EVar -> Text -> EVar
 mangleReplayName = mangleWithPrefix replayEntryPrefix
 
+-- | A command synthesized for a parent command, by what it does for it.
+data CompanionRole
+  = RoleAction Text
+  -- ^ the action with this long flag, on a fresh run of the parent
+  | RoleReplay Text
+  -- ^ the action with this long flag, on the parent's saved output
+  | RoleParse (Maybe Text)
+  -- ^ the `@parse` entry of the parent, or of its action with this long flag
+  deriving (Show, Ord, Eq)
+
+-- | The name of a parent's companion. Every companion name is made here.
+companionName :: EVar -> CompanionRole -> EVar
+companionName p (RoleAction long) = mangleTerminalName p long
+companionName p (RoleReplay long) = mangleReplayName p long
+companionName p (RoleParse Nothing) = parseEntryName p
+companionName p (RoleParse (Just long)) = parseEntryName (mangleTerminalName p long)
+
 -- | The compiler-owned prefix of every replay entry.
 replayEntryPrefix :: Text
 replayEntryPrefix = "mlcr_"
@@ -769,11 +787,6 @@ data ActionKind
   | KindStream  -- ^ each batch, as the command streams it (@stream)
   | KindFold    -- ^ each batch, into one accumulator (@fold)
   deriving (Show, Ord, Eq)
-
--- | Whether a replay entry of this kind drives the saved stream frame by
--- frame (@replay), which only a pool can do.
-kindReplaysFrames :: ActionKind -> Bool
-kindReplaysFrames k = k == KindStream || k == KindFold
 
 -- | The replay entry of one terminal action (see 'mangleReplayName'): the
 -- kind it was synthesized for, or why the action has none and runs only on

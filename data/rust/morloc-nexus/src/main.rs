@@ -587,8 +587,8 @@ fn main() {
 
         if let dispatch::ChildMode::Stage { dir, args, tee } = config.child.clone() {
             // The stage of a multi-output run: the parent command, once.
-            stage::init(&dir, &args, tee);
             let parent = &manifest.commands[parsed.parent_index];
+            stage::init(&dir, &args, tee, &parent.name);
             // A streaming command's stream is its output: saved for the
             // actions when its type is known, and on stdout only with tee.
             if parent.terminals.iter().any(|t| t.kind.of_streaming_command()) {

@@ -1213,8 +1213,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
               <+> "is not yet supported. Involve a foreign function in the"
               <+> "command body, or drop `@fold` for the whole-list form."
     -- @replay appears only in replay entries that drive a saved stream frame
-    -- by frame, and 'generate' leaves out every such entry that would be
-    -- evaluated here (see 'kindReplaysFrames').
+    -- by frame, and realization always gives those a pool.
     toNexusExpr (AnnoS (Idx iReplay _) _ (IntrinsicS IntrReplay _)) =
       MM.throwCompilerBugAt iReplay
         "@replay reached the nexus evaluator; a frame-driven replay entry must run in a pool"
@@ -3174,6 +3173,7 @@ data ManifestInputs = ManifestInputs
     -- (the referenced term's own docstring becomes the flag's help
     -- text).
   , miReplayPlans         :: !(Map.Map EVar ReplayPlan)
+  , miParseSlots          :: !(Map.Map EVar [Int])
     -- ^ Each terminal action's replay entry, by name: its kind, or why it
     -- has none.
   , miStreamElems         :: !(Map.Map EVar (Text, Text))
@@ -3308,7 +3308,10 @@ buildManifest ManifestInputs{..} =
     -- its own entry.
     parseEntryField :: Text -> [CmdArg] -> [(Text, Text)]
     parseEntryField termName cmdArgs
-      | any hasParse cmdArgs = [("parse_entry", jsonStr (unEVar (parseEntryName (EV termName))))]
+      | any hasParse cmdArgs =
+          ("parse_entry", jsonStr (unEVar (parseEntryName (EV termName))))
+            : [ ("parse_save_slots", jsonArr (map jsonInt slots))
+              | Just slots <- [Map.lookup (EV termName) miParseSlots] ]
       | otherwise = []
       where
         hasParse (CmdArgPos r) = not (null (argPosDocParse r))
@@ -3404,11 +3407,7 @@ buildManifest ManifestInputs{..} =
           -- Why the action cannot run on its command's saved output.
           noReplay = case plan of
             Just (NotReplayed _ why) -> Just why
-            Just (Replayed k)
-              | Set.member replay emittedNames -> Nothing
-              | kindReplaysFrames k -> Just
-                  "its handler is all-morloc code that reads the stream batch by batch, which needs a pool"
-            _ -> Just "it has no replay entry"
+            _ -> Nothing
        in jsonObj
             [ ("short", case mShort of
                 Just c -> jsonStr (MT.singleton c)
@@ -3542,18 +3541,9 @@ generate cs rASTs helperRASTs = do
   -- reaches, callees first.
   namedMap <- MM.gets stateNamedGasts
   let rootOf (AnnoS (Idx i _) _ _, _) = i
-      (namedCs0, exportCs0) = List.partition ((`Map.member` namedMap) . rootOf) cs
-  -- A per-batch or folding replay entry drives a staged stream with
-  -- @replay, which only a pool can run. One that realized as all-morloc code
-  -- is left out, so its action runs only on a fresh run of its command (the
-  -- manifest then names no replay entry for it).
-  exportNames <- mapM (MM.metaName . rootOf) exportCs0
+      (namedCs0, exportCs) = List.partition ((`Map.member` namedMap) . rootOf) cs
   replayPlans <- MM.gets stateReplayPlans
-  let framesReplay n = case Map.lookup n replayPlans of
-        Just (Replayed k) -> kindReplaysFrames k
-        _ -> False
-      exportCs = [c | (c, n) <- zip exportCs0 exportNames, not (maybe False framesReplay n)]
-      named = [(n, c) | c <- namedCs0, Just n <- [Map.lookup (rootOf c) namedMap]]
+  let named = [(n, c) | c <- namedCs0, Just n <- [Map.lookup (rootOf c) namedMap]]
       callsOf t = [v | v <- calledNames t, Map.member v callees]
       -- the named functions each named function calls, each found once
       callees = Map.fromList [(n, callsOf (fst c)) | (n, c) <- named]
@@ -3577,6 +3567,23 @@ generate cs rASTs helperRASTs = do
       replayEntries = Map.keysSet replayPlans
       fdata = map (stageReplayArgs replayEntries . inheritParentArgDocs parentArgMap) fdataRaw
       gasts = map (stageReplayArgs replayEntries . inheritParentArgDocs parentArgMap) gastsRaw
+
+  -- Every action has a replay plan, and every planned replay entry was
+  -- emitted.
+  let emittedEntries = Set.fromList (map (EV . fdataTermName) fdata ++ map (EV . commandTermName) gasts)
+      actionsOf = [ (EV (fdataTermName fd), cmdDocTerminals (fdataCmdDocSet fd)) | fd <- fdata ]
+               <> [ (EV (commandTermName g), cmdDocTerminals (commandDocs g)) | g <- gasts ]
+  CM.forM_ actionsOf $ \(parent, ws) -> CM.forM_ ws $ \w -> do
+    let replay = mangleReplayName parent (wsLong w)
+        missing :: MDoc -> MorlocMonad ()
+        missing why = MM.throwCompilerBug $
+          "the action --" <> pretty (wsLong w) <+> "of" <+> pretty parent <+> why
+    case Map.lookup replay replayPlans of
+      Nothing -> missing "has no replay plan"
+      Just (Replayed _)
+        | not (Set.member replay emittedEntries) ->
+            missing "has a replay plan, but its replay entry was not generated"
+      _ -> return ()
 
   -- Get build time and the build directory (shared with the program builder
   -- and any pre-build pass, see 'Morloc.ProgramBuilder.Build.resolveBuildDirs')
@@ -3687,6 +3694,7 @@ generate cs rASTs helperRASTs = do
             , miStreamElems         = streamElems
             , miStreamTypes         = streamTypes
             , miReplayPlans         = stateReplayPlans st
+            , miParseSlots          = stateParseSlots st
             }
 
   -- Launcher wrappers. Each is a pure-shell script that execs

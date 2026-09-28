@@ -332,19 +332,28 @@ realize tables s0 = do
   -- offered are those the program declares concrete types for, which are
   -- the pools it can build; one of them is chosen by the ordinary scoring,
   -- so the choice follows whatever else the term touches.
+  --
+  -- A replay entry that drives a saved stream frame by frame (@replay) needs
+  -- a pool for the same reason: only a pool can call its sink per frame. Its
+  -- command streams from a sourced producer, so the program has a pool.
   specNames <- MM.gets stateSpecNames
+  let AnnoS (Idx i0 _) _ _ = s0
+      selfCalling = anyCallS (not . (`Set.member` specNames)) s0
+      replays = anyIntrinsicS IntrReplay s0
   langs <-
-    if anyCallS (not . (`Set.member` specNames)) s0
+    if selfCalling || replays
       then do
         scopes <- MM.gets stateUniversalConcreteTypedefs
         case unique (map (LR.poolOf registry) (Map.keys scopes)) of
-          [] ->
-            let AnnoS (Idx i _) _ _ = s0
-             in MM.throwSourcedError i $
+          []
+            | selfCalling ->
+                MM.throwSourcedError i0 $
                   "this function calls itself, and a function that calls itself needs a"
                     <+> "language to run in: the nexus evaluates an expression but cannot"
                     <+> "call a function by name. Import a language module (`import"
                     <+> "root-py`, `root-cpp`, ...) to give the program a pool."
+            | otherwise ->
+                MM.throwCompilerBugAt i0 "a replay entry in a program with no pool language"
           ls -> return ls
       else return []
   realizeWithRegistry registry tables langs s0
@@ -1615,6 +1624,12 @@ anyCallS p = getAny . foldAnnoS check
   where
     check (AnnoS _ _ (CallS v)) = Any (p v)
     check _                     = Any False
+
+anyIntrinsicS :: (Foldable f) => Intrinsic -> AnnoS g f c -> Bool
+anyIntrinsicS intr = getAny . foldAnnoS check
+  where
+    check (AnnoS _ _ (IntrinsicS i _)) = Any (i == intr)
+    check _                            = Any False
 
 containsCallS :: (Foldable f) => EVar -> AnnoS g f c -> Bool
 containsCallS target = anyCallS (== target)

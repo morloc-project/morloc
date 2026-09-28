@@ -1,8 +1,9 @@
 -- The command line of a run that names terminal actions with paths.
 --
--- Stdout gets what it would get with no path actions: the `@default`
--- action, or the plain value under `-f`, or nothing under `--no-stdout`
--- (also accepted beside `-o`, and alone). `--act FILE` with a space stays a
+-- Stdout gets the `@default` action, or the plain value under `-f` or when
+-- the `@default` action itself is given a path (no output goes to both a
+-- file and stdout), or nothing under `--no-stdout` (also accepted beside
+-- `-o`, and alone). `--act FILE` with a space stays a
 -- flag and a positional. Requests that contradict each other are refused
 -- before anything runs: two claims on stdout, one path for two actions, a
 -- path that is also `-o`'s, an empty `=`. A failing action leaves no file:

@@ -1,0 +1,50 @@
+-- A streaming command whose guard and match arms each end in `@collect`
+-- streams from exactly one site per run, so its actions compose into each
+-- arm's sink and run on a fresh run of the command, with no saved output.
+-- `partial` has an arm that streams nothing: an action there cannot compose
+-- into every way the command can end, so it runs on the saved output.
+
+module main (branchy, partial)
+
+import root-cpp
+
+source Cpp from "impl.hpp"
+  ( "produce", "produceTail", "produceUpTo", "nothing"
+  , "joinAll", "showBatch"
+  , "zero", "addBatch", "merge", "showAcc" )
+
+type Acc = (Int, Int)
+
+produce :: ([Int] -> <IO> ()) -> <IO> ()
+produceTail :: ([Int] -> <IO> ()) -> <IO> ()
+produceUpTo :: Int -> ([Int] -> <IO> ()) -> <IO> ()
+nothing :: <IO> ()
+
+--' All elements
+joinAll :: [Int] -> Str
+
+--' One line per batch
+showBatch :: [Int] -> Str
+
+zero :: Acc
+addBatch :: Acc -> [Int] -> Acc
+merge :: Acc -> Acc -> Acc
+
+--' The sum and the number of batches
+showAcc :: Acc -> Str
+
+--' Stream from one of three arms
+--' @render -a/--all=joinAll
+--' @render -b/--batches=showBatch @stream @default
+--' @render -f/--folded=showAcc @fold=addBatch @init=zero @combine=merge
+branchy :: Str -> <IO> ()
+branchy s =
+  ? s == "a" = @collect produce
+  : match (@read s :: Try Str Int)
+      | (Ok n) = @collect (produceUpTo n)
+      | (Err _) = @collect produceTail
+
+--' Stream from one arm, or not at all
+--' @render -a/--all=joinAll
+partial :: Bool -> <IO> ()
+partial b = ? b = @collect produce : nothing

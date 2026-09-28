@@ -11,6 +11,8 @@ all:
 	wc -c < o.out >> obs.txt
 	./nexus 3 --no-stdout >> obs.txt 2>> obs.err
 	./nexus --csv 3 >> obs.txt 2>> obs.err
+	./nexus 3 --table=t.out >> obs.txt 2>> obs.err
+	cat t.out >> obs.txt
 	if ./nexus 3 --csv --table 2>> obs.err ; then echo UNEXPECTED >> obs.txt ; else echo OK >> obs.txt ; fi
 	if ./nexus 3 --csv --no-stdout 2>> obs.err ; then echo UNEXPECTED >> obs.txt ; else echo OK >> obs.txt ; fi
 	if ./nexus 3 --csv=x.out --table=./x.out 2>> obs.err ; then echo UNEXPECTED >> obs.txt ; else echo OK >> obs.txt ; fi

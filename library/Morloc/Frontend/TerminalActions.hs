@@ -42,13 +42,27 @@ synthesizeTerminalActions dag = do
   srcMap0 <- MM.gets stateSourceMap
   idx0 <- MM.gets stateCounter
   let ds0 = mkDState idx0 srcMap0
+      -- What a module synthesizes is kept under its own definitions'
+      -- names, which other modules may reuse.
       finalizeModule (m, (node, edges)) = do
+        State.modify (\st -> st
+          { Desugar.dsStreamElems = Map.empty
+          , Desugar.dsReplayPlans = Map.empty
+          , Desugar.dsCompanions = Map.empty
+          , Desugar.dsParseSlots = Map.empty
+          })
         start <- State.gets Desugar.dsExpIndex
         let sigs = Map.findWithDefault Map.empty m visible
         node' <- Desugar.injectTerminalActionsWithSigs sigs node
                    >>= Desugar.expandCollectE
         end <- State.gets Desugar.dsExpIndex
-        return ((m, (node', edges)), (m, [start .. end - 1]))
+        made <- State.gets (\st -> ModuleCommands
+          { mcCompanions = Desugar.dsCompanions st
+          , mcReplayPlans = Desugar.dsReplayPlans st
+          , mcStreamElems = Desugar.dsStreamElems st
+          , mcParseSlots = Desugar.dsParseSlots st
+          })
+        return ((m, (node', edges)), (m, [start .. end - 1]), (m, made))
   case State.runStateT (mapM finalizeModule (Map.toList dag)) ds0 of
     Left err ->
       MM.throwSystemError . pretty $
@@ -57,15 +71,14 @@ synthesizeTerminalActions dag = do
       MM.setCounter (Desugar.dsExpIndex dsFinal)
       MM.modify (\st -> st
         { stateSourceMap = Desugar.dsSourceMap dsFinal
-        , stateStreamElems = Desugar.dsStreamElems dsFinal <> stateStreamElems st
-        , stateReplayPlans = Desugar.dsReplayPlans dsFinal <> stateReplayPlans st
+        , stateModuleCommands = Map.fromList [made | (_, _, made) <- results]
         , stateErrorNotes = Map.map pretty (Desugar.dsErrorNotes dsFinal) <> stateErrorNotes st
         })
       case Desugar.dsWarnings dsFinal of
         [] -> return ()
         ws -> MM.tell ws
-      mapM_ (uncurry linkScopes . snd) results
-      return (Map.fromList (map fst results))
+      mapM_ (\(_, scope, _) -> uncurry linkScopes scope) results
+      return (Map.fromList [node | (node, _, _) <- results])
 
 -- | Link indices to a module's general and concrete type scopes.
 linkScopes :: MVar -> [Int] -> MorlocMonad ()
@@ -121,5 +134,7 @@ mkDState idx srcMap = Desugar.DState
   , Desugar.dsDataCtors = Map.empty
   , Desugar.dsStreamElems = Map.empty
   , Desugar.dsReplayPlans = Map.empty
+  , Desugar.dsCompanions = Map.empty
+  , Desugar.dsParseSlots = Map.empty
   , Desugar.dsErrorNotes = Map.empty
   }

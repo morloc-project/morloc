@@ -18,15 +18,28 @@ struct Stage {
     dir: String,
     args: Vec<usize>,
     tee: bool,
+    parent: String,
 }
 
 static STAGE: OnceLock<Stage> = OnceLock::new();
 
 /// Enter stage mode. Must run before any pool starts, since the pools read
 /// `MORLOC_STDOUT_STAGE` from their environment.
-pub fn init(dir: &str, args: &[usize], tee: bool) {
+pub fn init(dir: &str, args: &[usize], tee: bool, parent: &str) {
     std::env::set_var("MORLOC_STDOUT_STAGE", "1");
-    let _ = STAGE.set(Stage { dir: dir.to_string(), args: args.to_vec(), tee });
+    let _ = STAGE.set(Stage { dir: dir.to_string(), args: args.to_vec(), tee, parent: parent.to_string() });
+}
+
+/// Where argument `n` (1-based) of the parent is saved, when an action
+/// refers to it. None outside a stage.
+pub fn arg_target(n: usize) -> Option<String> {
+    STAGE.get().filter(|s| s.args.contains(&n)).map(|s| arg_path(&s.dir, n))
+}
+
+/// The directory that holds files a parse entry stages in this run, which
+/// the actions may read after the stage exits. None outside a stage.
+pub fn parse_dir() -> Option<String> {
+    STAGE.get().map(|s| format!("{}/parse", s.dir))
 }
 
 pub fn active() -> bool {
@@ -130,9 +143,45 @@ pub fn save_value(
     }
 }
 
+/// Save argument `i` (0-based) of the parent, an `IFile` read from `path`,
+/// when an action refers to it. An action reads an `IFile` argument as the
+/// path of its data, so the saved argument is a link to that file.
+pub fn link_parent_arg(i: usize, path: &str) {
+    let Some(target) = arg_target(i + 1) else { return };
+    let file = std::fs::canonicalize(path).unwrap_or_else(|e| {
+        eprintln!("Error: saving argument {}: {}: {}", i + 1, path, e);
+        crate::process::clean_exit(1);
+    });
+    link(&file.to_string_lossy(), &target);
+}
+
+/// Save argument `n` (1-based) of the parent as a link to `file`, which need
+/// not exist yet, when an action refers to it.
+pub fn link_arg_to(n: usize, file: &str) {
+    if let Some(target) = arg_target(n) {
+        link(file, &target);
+    }
+}
+
+fn link(file: &str, target: &str) {
+    if let Err(e) = std::os::unix::fs::symlink(file, target) {
+        eprintln!("Error: saving an argument: {}: {}", target, e);
+        crate::process::clean_exit(1);
+    }
+}
+
+/// Save argument `i` (0-based) of the parent when an action refers to it
+/// and `cmd` is the parent (a parse entry's arguments are laid out
+/// differently; see `save_parent_arg`). No-op outside a stage.
+pub fn save_arg(cmd: &str, i: usize, packet: *const u8, packet_len: usize) {
+    if STAGE.get().map(|s| s.parent == cmd) == Some(true) {
+        save_parent_arg(i, packet, packet_len);
+    }
+}
+
 /// Save argument `i` (0-based) of the parent when an action refers to it.
 /// No-op outside a stage.
-pub fn save_arg(i: usize, packet: *const u8, packet_len: usize) {
+pub fn save_parent_arg(i: usize, packet: *const u8, packet_len: usize) {
     let Some(s) = STAGE.get() else { return };
     if !s.args.contains(&(i + 1)) {
         return;

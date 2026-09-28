@@ -1355,6 +1355,8 @@ toDState ps = DState
   , dsDataCtors = Map.empty
   , dsStreamElems = psStreamElems ps
   , dsReplayPlans = Map.empty
+  , dsCompanions = Map.empty
+  , dsParseSlots = Map.empty
   , dsErrorNotes = Map.empty
   }
 

@@ -365,6 +365,12 @@ pub struct Command {
     /// running this command. Present when any argument has formats.
     #[serde(default)]
     pub parse_entry: Option<String>,
+
+    /// The arguments (1-based) the parse entry saves in a run that saves
+    /// this command's output, in the order of the entry's trailing
+    /// (flag, path) slots.
+    #[serde(default)]
+    pub parse_save_slots: Vec<usize>,
 }
 
 /// The `@parse` formats of one argument.

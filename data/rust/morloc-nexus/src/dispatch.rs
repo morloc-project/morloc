@@ -1052,7 +1052,9 @@ fn run_remote_command(
         let c_pkt = build_arg_packet(i, arg_val, arg_def, manifest);
         let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
         let pkt_size = unsafe { morloc_packet_size(c_pkt, &mut errmsg) };
-        crate::stage::save_arg(i, c_pkt, pkt_size);
+        if !link_ifile_arg(i, arg_val, arg_def) {
+            crate::stage::save_arg(&cmd.name, i, c_pkt, pkt_size);
+        }
         arg_packets.push((c_pkt, pkt_size));
     }
 
@@ -1209,6 +1211,38 @@ fn run_remote_command(
 
 /// Build argument `i`'s packet from its CLI value, reading the value as
 /// `arg_def` describes. Exits with a diagnostic when the value cannot be read.
+/// Save parent argument `i` (0-based) when it is an `IFile` given by path,
+/// as a link to the file (see `stage::link_parent_arg`). Returns whether it
+/// was one.
+fn link_ifile_arg(i: usize, arg_val: &ArgValue, arg_def: &crate::manifest::Arg) -> bool {
+    match (arg_val, arg_def.general_schema_str()) {
+        (ArgValue::Value(token), Some("F")) => {
+            // A quoted argument holds its path as a JSON string.
+            let path = serde_json::from_str::<String>(token).unwrap_or_else(|_| token.clone());
+            crate::stage::link_parent_arg(i, &path);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Save a parent-layout argument packet at the parent's position `arg`
+/// (0-based) in a stage. No-op outside one.
+fn save_parent_packet(arg: usize, pkt: *mut u8) {
+    extern "C" {
+        fn morloc_packet_size(packet: *const u8, errmsg: *mut *mut std::ffi::c_char) -> usize;
+    }
+    if pkt.is_null() || crate::stage::arg_target(arg + 1).is_none() {
+        return;
+    }
+    let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
+    let size = unsafe { morloc_packet_size(pkt, &mut errmsg) };
+    if let Some(msg) = process::take_c_errmsg(errmsg) {
+        crate::runlog::die_with_error(&format!("saving argument {}: {}", arg + 1, msg));
+    }
+    crate::stage::save_parent_arg(arg, pkt, size);
+}
+
 fn build_arg_packet(
     i: usize,
     arg_val: &ArgValue,
@@ -1235,8 +1269,15 @@ fn build_arg_packet(
     }
     // Read as the parent command's argument, whose definition carries the
     // shape; the entry's own slot names the same type.
+    // Either way the parent's own packet is built, and saved at the parent's
+    // position for an action that refers to it.
     if let ArgValue::AsParent { value, parent, arg } = arg_val {
-        return build_arg_packet(i, value, &manifest.commands[*parent].args[*arg], manifest);
+        let parent_def = &manifest.commands[*parent].args[*arg];
+        let pkt = build_arg_packet(i, value, parent_def, manifest);
+        if !link_ifile_arg(*arg, value, parent_def) {
+            save_parent_packet(*arg, pkt);
+        }
+        return pkt;
     }
         let schema_str = arg_def.schema_str().unwrap_or("b");
         let schema = match parse_schema(schema_str) {
@@ -1276,6 +1317,9 @@ fn build_arg_packet(
                 // it, and its packet travels as a `[U8]` for the entry to decode.
                 let parent_def = &manifest.commands[*parent].args[*arg];
                 let inner = build_arg_packet(i, value, parent_def, manifest);
+                if !link_ifile_arg(*arg, value, parent_def) {
+                    save_parent_packet(*arg, inner);
+                }
                 let mut size_err: *mut std::ffi::c_char = std::ptr::null_mut();
                 let size = unsafe { morloc_packet_size(inner, &mut size_err) };
                 if let Some(msg) = process::take_c_errmsg(size_err) {
@@ -2137,7 +2181,9 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
                 fn morloc_packet_size(packet: *const u8, errmsg: *mut *mut std::ffi::c_char) -> usize;
             }
             let size = unsafe { morloc_packet_size(c_pkt, &mut errmsg) };
-            crate::stage::save_arg(i, c_pkt, size);
+            if !link_ifile_arg(i, arg_val, arg_def) {
+                crate::stage::save_arg(&cmd.name, i, c_pkt, size);
+            }
         }
         let voidstar = unsafe { get_morloc_data_packet_value(c_pkt, c_schema, &mut errmsg) };
         unsafe { libc::free(c_pkt as *mut std::ffi::c_void) };

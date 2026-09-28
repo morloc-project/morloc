@@ -1,0 +1,32 @@
+module (twoSites, one, value)
+
+import root-cpp
+
+source Cpp from "impl.hpp" ("produce", "showBatch", "range", "showList")
+
+produce :: ([Int] -> <IO> ()) -> <IO> ()
+
+--' One line per batch
+showBatch :: [Int] -> Str
+
+range :: Int -> [Int]
+
+--' The list on one line
+showList :: [Int] -> Str
+
+--' Stream from two sites
+--' @render -b/--batches=showBatch @stream @default
+twoSites :: <IO> ()
+twoSites = do
+  @collect produce
+  @collect produce
+
+--' Stream from one site
+--' @render -b/--batches=showBatch @stream @default
+one :: <IO> ()
+one = @collect produce
+
+--' A value
+--' @render -s/--show=showList
+value :: Int -> [Int]
+value n = range n

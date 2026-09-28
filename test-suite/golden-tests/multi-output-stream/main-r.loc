@@ -9,9 +9,9 @@
 -- action there sees the whole output (issues #115, #116). Each command
 -- appends to a log per run, so a combined run is seen to run it once.
 --
--- `--marks` is a per-batch action whose handler is morloc code. It runs on
--- a fresh run of the command; on the saved output it would need a pool, so
--- combining it with a path is refused, and the program still builds.
+-- `--marks` is a per-batch action whose handler is morloc code. Its replay
+-- entry is given a pool, so it runs on the saved output too, on `stream`
+-- (with a path) and on `twoSites` (which has no fresh-run entry).
 
 module mainrr (stream, twoSites, branch)
 
@@ -62,6 +62,7 @@ stream log = @collect (produce log)
 --' Stream from two sites
 --' @render -a/--all=joinAll
 --' @render -b/--batches=showBatch @stream
+--' @render -k/--marks=markBatch @stream
 twoSites :: Str -> <IO> ()
 twoSites log = do
   @collect (produce log)

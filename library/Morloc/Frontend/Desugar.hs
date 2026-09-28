@@ -128,9 +128,15 @@ data DState = DState
     -- it writes to standard output. Such a command returns `()` at the
     -- morloc level, so nothing downstream can recover what a caller
     -- actually receives from the signature alone.
-  , dsReplayPlans :: !(Map.Map EVar ReplayPlan)
-    -- ^ For each terminal action, keyed by its replay entry's name: the
+  , dsReplayPlans :: !(Map.Map (EVar, Text) ReplayPlan)
+    -- ^ For each terminal action, keyed by its command and long flag: the
     -- kind of replay entry synthesized, or why there is none.
+  , dsCompanions :: !(Map.Map EVar [CompanionRole])
+    -- ^ The companions synthesized for each command of the module.
+  , dsParseSlots :: !(Map.Map EVar [Int])
+    -- ^ For each command whose parse entry saves arguments in a run that
+    -- saves its output: those arguments' positions (1-based), in the order
+    -- of the entry's trailing slots.
   }
   deriving (Show)
 
@@ -3644,6 +3650,11 @@ injectTerminalActionsWithSigs visibleSigs (ExprI i (ModE mv body)) = do
   return (ExprI i (ModE mv body'))
 injectTerminalActionsWithSigs _ e = return e
 
+-- | Add to the companions synthesized for a command.
+recordCompanions :: (EVar, [CompanionRole]) -> D ()
+recordCompanions (parent, roles) = State.modify $ \st -> st
+  { dsCompanions = Map.insertWith (flip (<>)) parent roles (dsCompanions st) }
+
 -- | Reject any user-declared top-level identifier whose name starts
 -- with the reserved `mlcp_` prefix. That prefix is compiler-owned
 -- (see 'mangleTerminalName'): 'Frontend/Desugar.synthWithBinding'
@@ -3716,6 +3727,12 @@ expandWithBindings visibleSigs body =
       let assMap = Map.fromList [ (n, e) | e@(ExprI _ (AssE n _ _)) <- body ]
       synthesized <- concat <$> mapM (emitFor assMap visibleSigs) specs
       let mangleds = [ n | ExprI _ (AssE n _ _) <- synthesized ]
+          made = Set.fromList mangleds
+      mapM_ recordCompanions
+        [ (parent, filter ((`Set.member` made) . companionName parent) roles)
+        | (_, parent, ws) <- specs
+        , let roles = concat [[RoleAction (wsLong w), RoleReplay (wsLong w)] | w <- ws]
+        ]
       body' <- mapM (addToExport mangleds) body
       return (body' ++ synthesized)
 
@@ -3832,7 +3849,7 @@ emitFor assMap sigMap (sigExprI, parentName, specs) = do
   where
     recordPlan :: WithSpec -> ReplayPlan -> D ()
     recordPlan w plan = State.modify $ \st -> st
-      { dsReplayPlans = Map.insert (mangleReplayName parentName (wsLong w)) plan (dsReplayPlans st) }
+      { dsReplayPlans = Map.insert (parentName, wsLong w) plan (dsReplayPlans st) }
     collectKind w
       | isJust (wsFold w) = KindFold
       | wsStream w = KindStream
@@ -3883,19 +3900,36 @@ unstageableStreamMsg parentName =
   <> "`@collect` producer has no signature with a concrete batch type. Give the "
   <> "producer a signature."
 
--- | True iff a streaming definition has exactly one @collect and it is in
--- tail position of the body, so the value of that @collect is the value of
--- the command. Composing an action into that one sink then applies it to
--- everything the command streams, exactly once. Tail positions are the body
--- under its leading lambdas, a let or do body, and the body of an
--- immediately applied lambda.
+-- | True iff every @collect of a streaming definition is in tail position
+-- of the body and every way the body can end is one of them, so each run
+-- streams from exactly one @collect and its value is the command's value.
+-- Composing an action into every sink then applies it to everything the
+-- command streams, exactly once. Tail positions are the body under its
+-- leading lambdas, a let or do body, the body of an immediately applied
+-- lambda, and both branches of an if (a match lowers to nested ifs).
 directCollect :: ExprI -> Bool
 directCollect (ExprI _ (AssE _ body wheres)) =
-  not (any containsCollect wheres) && collectSites True (stripSpine body) == [True]
+  not (any containsCollect wheres) && and (collectSites True b) && endsInCollect b
   where
-    stripSpine (ExprI _ (LamE _ b)) = stripSpine b
+    b = stripSpine body
+    stripSpine (ExprI _ (LamE _ x)) = stripSpine x
     stripSpine e = e
 directCollect _ = False
+
+-- | Whether every way out of an expression ends in a @collect, or abandons
+-- the run with @throw (which streams nothing on any path).
+endsInCollect :: ExprI -> Bool
+endsInCollect (ExprI _ e) = case e of
+  IntrinsicE IntrCollect _ -> True
+  IntrinsicE IntrThrow _ -> True
+  LetE _ b -> endsInCollect b
+  DoBlockE b -> endsInCollect b
+  EvalE b -> endsInCollect b
+  ParenE b -> endsInCollect b
+  AnnE b _ -> endsInCollect b
+  AppE f _ | Just b <- appliedLambdaBody f -> endsInCollect b
+  IfE _ t f -> endsInCollect t && endsInCollect f
+  _ -> False
 
 -- | One flag per @collect site in an expression: whether it is in tail
 -- position, given whether the expression itself is.
@@ -3907,13 +3941,16 @@ collectSites d (ExprI _ e) = case e of
   EvalE b -> collectSites d b
   ParenE b -> collectSites d b
   AnnE b _ -> collectSites d b
-  AppE f xs | Just b <- lambdaBody f ->
+  AppE f xs | Just b <- appliedLambdaBody f ->
     collectSites d b ++ concatMap (collectSites False) xs
+  IfE c t f -> collectSites False c ++ collectSites d t ++ collectSites d f
   _ -> concatMap (collectSites False) (subExprs e)
-  where
-    lambdaBody (ExprI _ (LamE _ b)) = Just b
-    lambdaBody (ExprI _ (ParenE f)) = lambdaBody f
-    lambdaBody _ = Nothing
+
+-- | The body of the function in an application, when it is a lambda.
+appliedLambdaBody :: ExprI -> Maybe ExprI
+appliedLambdaBody (ExprI _ (LamE _ b)) = Just b
+appliedLambdaBody (ExprI _ (ParenE f)) = appliedLambdaBody f
+appliedLambdaBody _ = Nothing
 
 -- | The immediate subexpressions of an expression.
 subExprs :: Expr -> [ExprI]
@@ -4746,6 +4783,20 @@ expandParseEntries visibleSigs body =
       when (length params /= length argDocs) $
         dfail pos "internal: a `@parse` command's argument docstrings do not match its arguments"
       kinds <- zipWithM (classifyParseArg pos name quantified) params argDocs
+      -- The command consumes a streamed argument as it reads it, so an
+      -- action cannot be handed the same stream.
+      case [ (w, n)
+           | w <- docWith cmdDoc
+           , ArgPos n <- wsArgs w
+           , (i, Just (ParseStream False _)) <- zip [1 ..] kinds
+           , i == n
+           ] of
+        ((w, n) : _) -> dfail pos . T.unpack $
+          "the action `--" <> wsLong w <> "` of `" <> unEVar name
+          <> "` refers with `$" <> T.pack (show n) <> "` to a streamed `@parse` argument,"
+          <> " which the command consumes as it reads it. An action cannot refer to"
+          <> " a streamed `@parse` argument."
+        [] -> return ()
       -- A streamed argument's channel is released when the command
       -- returns, so no stream may leave in its result.
       when (any (== Just True) [isStreamed <$> k | k <- kinds] && mentionsIStream result) $
@@ -4762,13 +4813,34 @@ expandParseEntries visibleSigs body =
           "synthesized internal name `" <> unEVar (parseEntryName t)
           <> "` collides with a top-level identifier."
         Nothing -> return ()
-      mapM (synthParseEntry sp name (zip argDocs kinds)) targets
+      recordCompanions
+        (name, [RoleParse Nothing | name `elem` targets]
+               <> [ RoleParse (Just (wsLong w))
+                  | w <- docWith cmdDoc
+                  , mangleTerminalName name (wsLong w) `elem` targets ])
+      -- In a run that saves the command's output, the command's own entry
+      -- saves each parsed value an action refers to (see 'saveSlot'). A
+      -- parsed `IFile` is the file its parser writes, which the nexus saves.
+      let slots = Set.toList (Set.fromList
+            [ n - 1
+            | w <- docWith cmdDoc
+            , ArgPos n <- wsArgs w
+            , (i, Just k) <- zip [1 ..] kinds
+            , i == n
+            , not (isStagedFile k)
+            ])
+      unless (null slots) $ State.modify $ \st -> st
+        { dsParseSlots = Map.insert name (map (+ 1) slots) (dsParseSlots st) }
+      mapM (\t -> synthParseEntry sp name (zip argDocs kinds) (if t == name then slots else []) t) targets
 
     forallVars (ForallU v t) = v : forallVars t
     forallVars _ = []
 
     isStreamed (ParseStream False _) = True
     isStreamed _ = False
+
+    isStagedFile (ParseStream True _) = True
+    isStagedFile _ = False
 
     mentionsIStream (AppU (VarU v) ts) = v == BT.istreamVar || any mentionsIStream ts
     mentionsIStream (AppU t ts) = any mentionsIStream (t : ts)
@@ -4815,12 +4887,14 @@ classifyParseArg pos (EV cmd) quantified t d
     streamOf _ = Nothing
 
 -- | Synthesize the `@parse` entry for one target.
-synthParseEntry :: Span -> EVar -> [(ArgDocVars, Maybe ParseArgKind)] -> EVar -> D ExprI
-synthParseEntry sp cmd args target = do
+synthParseEntry :: Span -> EVar -> [(ArgDocVars, Maybe ParseArgKind)] -> [Int] -> EVar -> D ExprI
+synthParseEntry sp cmd args slots target = do
   let groups = zipWith paramGroup [0 :: Int ..] args
   targetRef <- varE target
   argRefs <- mapM (varE . snd) groups
-  call <- if null argRefs then return targetRef else expr (AppE targetRef argRefs)
+  call0 <- if null argRefs then return targetRef else expr (AppE targetRef argRefs)
+  saves <- mapM saveSlot slots
+  call <- foldrM (\b acc -> expr (LetE [b] acc)) call0 saves
   let indexed = zip [0 :: Int ..] args
       (streams, values) = partition (isChannel . snd) indexed
   -- Value arguments are parsed first, so a failure among them starts no
@@ -4833,7 +4907,7 @@ synthParseEntry sp cmd args target = do
       withStreams <- foldM bindParsed settled (reverse streams)
       foldM bindParsed withStreams (reverse values)
   doE <- expr (DoBlockE bodyE)
-  let lamVars = concatMap fst groups
+  let lamVars = concatMap fst groups ++ concat [[var i "ws", var i "wp"] | i <- slots]
   lamE <- if null lamVars then return doE else expr (LamE lamVars doE)
   expr (AssE (parseEntryName target) lamE [])
   where
@@ -4854,6 +4928,26 @@ synthParseEntry sp cmd args target = do
 
     isChannel (_, Just (ParseStream False _)) = True
     isChannel _ = False
+
+    -- Save parsed argument i to the path in its slot when the slot's flag is
+    -- set, before the target runs. A failed save fails the run.
+    saveSlot i = do
+      flag <- varE (var i "ws")
+      path <- varE (var i "wp")
+      value <- varE (var i "v")
+      level <- expr (IntE 0)
+      saveE <- expr (IntrinsicE IntrSave [level, path, value]) >>= expr . EvalE
+      unitE <- expr UniE
+      let errOf tryE = do
+            errName <- expr (StrE BT.tryErrCtor)
+            zeroIdx <- expr (IntE 0)
+            expr (IntrinsicE IntrCtorField [tryE, errName, zeroIdx])
+          okV = EV (BT.doDiscardPrefix <> parseEntryPrefix <> "wok_" <> T.pack (show i))
+      checked <- bindOkWith saveE errOf okV saveE unitE
+      thenE <- expr (DoBlockE checked)
+      elseE <- expr UniE >>= expr . DoBlockE
+      forced <- expr (IfE flag thenE elseE) >>= expr . EvalE
+      return (EV (BT.doDiscardPrefix <> parseEntryPrefix <> "w_" <> T.pack (show i)), forced)
 
     -- Run the target, then settle every streamed argument in argument
     -- order (each settle releases its channel, so all run before any

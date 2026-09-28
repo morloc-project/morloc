@@ -1,0 +1,43 @@
+--- twoSites ---
+batch of 2
+batch of 3
+batch of 2
+batch of 3
+--- twoSites --batches=b.out ---
+[1,2,3,4,5]
+[1,2,3,4,5]
+batch of 2
+batch of 3
+batch of 2
+batch of 3
+--- twoSites --no-stdout --batches=n.out ---
+batch of 2
+batch of 3
+batch of 2
+batch of 3
+--- value 3 ---
+[1,2,3]
+--- value 3 --show ---
+list: 1 2 3
+--- value 3 --show=v.out ---
+[1,2,3]
+list: 1 2 3
+--- ts ---
+batch of 2
+batch of 3
+--- ts --batches=t.out ---
+[1,2,3,4,5]
+batch of 2
+batch of 3
+--- other ---
+other batch of 2
+other batch of 3
+other batch of 2
+other batch of 3
+--- other --batches=o.out ---
+[1,2,3,4,5]
+[1,2,3,4,5]
+other batch of 2
+other batch of 3
+other batch of 2
+other batch of 3

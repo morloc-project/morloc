@@ -1,0 +1,23 @@
+-- An action may not refer with `$N` to a streamed `@parse` argument: the
+-- command consumes that stream as it reads it.
+module bad (total)
+
+import root-cpp
+
+source Cpp from "p.hpp" ("produceC", "sumC", "showWith")
+
+produceC :: Str -> ([Int] -> <IO> ()) -> <IO> ()
+sumC :: [Int] -> Int
+
+--' Tag the result
+showWith :: IStream Int -> Int -> Str
+
+--' Sum the first batch
+--' @render -t/--tagged=showWith($1)
+total ::
+  --' @parse c=produceC
+  IStream Int ->
+  <IO> Int
+total s = do
+  Ok xs <- @next s
+  sumC xs

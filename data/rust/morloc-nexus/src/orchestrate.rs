@@ -10,9 +10,10 @@
 //! single-command path, so formatting, sinks and pool output behave exactly
 //! as in a run with that one action.
 //!
-//! Stdout gets what it would get without the path actions: the stage writes
-//! the command's own output to it as it runs, or a replay child writes the
-//! stdout action last. Each file is written to a temporary name beside it
+//! Stdout gets the bare action, or the `@default` action unless it was given
+//! a path, or else the command's own output: a replay child writes the
+//! stdout action last, or the stage writes the command's output as it runs.
+//! No output goes to both a file and stdout. Each file is written to a temporary name beside it
 //! and renamed into place once every child has succeeded; on any failure,
 //! or a signal, the temporary files and the stage directory are removed.
 
@@ -67,14 +68,6 @@ pub fn run(
     let mut stage_args: Vec<usize> = outputs.iter().flat_map(|o| o.args.iter().copied()).collect();
     stage_args.sort_unstable();
     stage_args.dedup();
-    if !stage_args.is_empty() && parent.parse_entry.is_some() {
-        die(format!(
-            "`{}` reads arguments with `@parse`, and an action given with a path \
-             refers to its arguments with `$N`; that combination cannot yet run \
-             in one pass. Run the action on its own.",
-            parent.name,
-        ));
-    }
 
     // Every output takes the run's `-f` (a `@render` action writes raw bytes
     // instead). One that cannot take it is refused before anything runs,
@@ -247,12 +240,18 @@ fn output_for(
     let term = &parent.terminals[t];
     let entry = match &term.replay {
         Some(e) if manifest.command_index(e).is_some() => e.clone(),
-        _ => die(format!(
-            "--{} cannot be combined with other outputs or written to a file, because \
-             {}. Run it on its own, writing to standard output.",
-            term.long,
-            term.no_replay.as_deref().unwrap_or("it has no replay entry"),
-        )),
+        _ => {
+            let why = term.no_replay.as_deref().unwrap_or("it has no replay entry");
+            if term.entry.is_some() {
+                die(format!(
+                    "--{} cannot be combined with other outputs or written to a file, \
+                     because {}. Run it on its own, writing to standard output.",
+                    term.long, why,
+                ))
+            } else {
+                die(format!("--{} cannot run, because {}.", term.long, why))
+            }
+        }
     };
     let target = target.map(|t| plan_write(t).unwrap_or_else(|e| die(format!("--{}: {}", term.long, e))));
     Output { long: term.long.clone(), entry, args: term.args.clone(), target }
