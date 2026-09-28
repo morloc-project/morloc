@@ -2,3 +2,5 @@
 []
 [11,22,33]
 [100,200,300,400]
+"packet error: file too short for a packet header\nexpected a morloc voidstar packet, but the data is in another format"
+"packet error: invalid magic: 0x7c70733e\nexpected a morloc voidstar packet, but the data is in another format"

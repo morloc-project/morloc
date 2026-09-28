@@ -5437,9 +5437,10 @@ fn parse_stream_file(
     mmap_size: u64,
 ) -> Result<ParsedStreamFile, MorlocError> {
     if mmap_size < 32 {
-        return Err(MorlocError::Packet(
-            "file too short for a packet header".into(),
-        ));
+        return Err(MorlocError::Packet(format!(
+            "file too short for a packet header\n{}",
+            morloc_runtime_types::packet::NOT_A_PACKET,
+        )));
     }
     let hdr_bytes = unsafe {
         std::slice::from_raw_parts(mmap_ptr as *const u8, 32)

@@ -17,6 +17,7 @@ module main
   , testNextEofTwice
   , testStreamFromIFile
   , testIntList
+  , testOpenText
   )
 
 import root
@@ -54,3 +55,12 @@ testIntList path = do
   Ok s <- @open path :: <IO> (Try Str (IStream Int))
   Ok _tailv36 <- @next s
   _tailv36
+
+-- 5. A file that is not a packet, shorter or longer than a header: the
+-- error names the expected format.
+testOpenText :: Str -> <IO> Str
+testOpenText path = do
+  r <- @open path :: <IO> (Try Str (IStream Str))
+  match r
+    | (Ok _) = "opened"
+    | (Err e) = e
