@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, Condvar};
 // ── C-compatible types matching pool.h ───────────────────────────────────────
 
 pub type PoolDispatchFn = unsafe extern "C" fn(
-    mid: u32, args: *const *const u8, nargs: usize, ctx: *mut c_void,
+    mid: u32, args: *mut *const u8, nargs: usize, ctx: *mut c_void,
 ) -> *mut u8;
 
 #[repr(C)]
@@ -90,15 +90,13 @@ pub unsafe extern "C" fn pool_dispatch_packet(
     remote_dispatch: PoolDispatchFn,
     ctx: *mut c_void,
 ) -> *mut u8 {
-    extern "C" {
-        fn make_fail_packet(msg: *const c_char) -> *mut u8;
-        fn packet_is_ping(packet: *const u8, errmsg: *mut *mut c_char) -> bool;
-        fn return_ping(packet: *const u8, errmsg: *mut *mut c_char) -> *mut u8;
-        fn packet_is_local_call(packet: *const u8, errmsg: *mut *mut c_char) -> bool;
-        fn packet_is_remote_call(packet: *const u8, errmsg: *mut *mut c_char) -> bool;
-        fn read_morloc_call_packet(packet: *const u8, errmsg: *mut *mut c_char) -> *mut crate::packet_ffi::MorlocCall;
-        fn free_morloc_call(call: *mut crate::packet_ffi::MorlocCall);
-    }
+    use crate::packet_ffi::make_fail_packet;
+    use crate::packet_ffi::packet_is_ping;
+    use crate::packet_ffi::return_ping;
+    use crate::packet_ffi::packet_is_local_call;
+    use crate::packet_ffi::packet_is_remote_call;
+    use crate::packet_ffi::read_morloc_call_packet;
+    use crate::packet_ffi::free_morloc_call;
 
     if packet.is_null() {
         return make_fail_packet(b"NULL packet in pool dispatch\0".as_ptr() as *const c_char);
@@ -133,7 +131,7 @@ pub unsafe extern "C" fn pool_dispatch_packet(
         let (temp_owner, prev_temp_owner) = crate::intrinsics::begin_dispatch();
 
         let dispatch_fn = if is_local { local_dispatch } else { remote_dispatch };
-        let result = dispatch_fn(mid, args, nargs, ctx);
+        let result = dispatch_fn(mid, args.cast_mut(), nargs, ctx);
 
         free_morloc_call(call);
 
@@ -160,7 +158,7 @@ pub unsafe extern "C" fn pool_dispatch_packet(
 }
 
 unsafe fn fail_from_errmsg(errmsg: *mut c_char) -> *mut u8 {
-    extern "C" { fn make_fail_packet(msg: *const c_char) -> *mut u8; }
+    use crate::packet_ffi::make_fail_packet;
     let pkt = make_fail_packet(errmsg);
     libc::free(errmsg as *mut c_void);
     pkt
@@ -169,10 +167,8 @@ unsafe fn fail_from_errmsg(errmsg: *mut c_char) -> *mut u8 {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 unsafe fn try_send_fail(client_fd: i32, msg: *const c_char) {
-    extern "C" {
-        fn make_fail_packet(msg: *const c_char) -> *mut u8;
-        fn send_packet_to_foreign_server(fd: i32, packet: *mut u8, errmsg: *mut *mut c_char) -> usize;
-    }
+    use crate::packet_ffi::make_fail_packet;
+    use crate::ipc_ffi::send_packet_to_foreign_server;
     let fail = make_fail_packet(if msg.is_null() { b"Unknown error\0".as_ptr() as *const c_char } else { msg });
     if !fail.is_null() {
         let mut err: *mut c_char = ptr::null_mut();
@@ -279,11 +275,9 @@ unsafe fn spawn_worker(queue: &Arc<JobQueue>, config: &PoolConfig) -> std::io::R
 }
 
 unsafe fn worker_loop(queue: &JobQueue, config: &PoolConfig) {
-    extern "C" {
-        fn stream_from_client(fd: i32, errmsg: *mut *mut c_char) -> *mut u8;
-        fn send_packet_to_foreign_server(fd: i32, packet: *mut u8, errmsg: *mut *mut c_char) -> usize;
-        fn close_socket(fd: i32);
-    }
+    use crate::ipc_ffi::stream_from_client;
+    use crate::ipc_ffi::send_packet_to_foreign_server;
+    use crate::ipc_ffi::close_socket;
 
     let min_workers = config.initial_workers.max(1);
     let mut last_activity = std::time::Instant::now();
@@ -367,11 +361,9 @@ unsafe fn worker_loop(queue: &JobQueue, config: &PoolConfig) {
 // ── Pool main: threads mode ──────────────────────────────────────────────────
 
 unsafe fn pool_main_threads(config: &PoolConfig, socket_path: *const c_char, tmpdir: *const c_char, shm_basename: *const c_char) -> i32 {
-    extern "C" {
-        fn start_daemon(socket_path: *const c_char, tmpdir: *const c_char, shm_basename: *const c_char, size: usize, errmsg: *mut *mut c_char) -> *mut c_void;
-        fn close_daemon(daemon: *mut *mut c_void);
-        fn wait_for_client_with_timeout(daemon: *mut c_void, timeout_us: i32, errmsg: *mut *mut c_char) -> i32;
-    }
+    use crate::ipc_ffi::start_daemon;
+    use crate::ipc_ffi::close_daemon;
+    use crate::ipc_ffi::wait_for_client_with_timeout;
 
     let mut errmsg: *mut c_char = ptr::null_mut();
     let mut daemon = start_daemon(socket_path, tmpdir, shm_basename, 0xffff, &mut errmsg);
@@ -438,14 +430,12 @@ unsafe fn pool_main_threads(config: &PoolConfig, socket_path: *const c_char, tmp
 // ── Pool main: single mode ───────────────────────────────────────────────────
 
 unsafe fn pool_main_single(config: &PoolConfig, socket_path: *const c_char, tmpdir: *const c_char, shm_basename: *const c_char) -> i32 {
-    extern "C" {
-        fn start_daemon(socket_path: *const c_char, tmpdir: *const c_char, shm_basename: *const c_char, size: usize, errmsg: *mut *mut c_char) -> *mut c_void;
-        fn close_daemon(daemon: *mut *mut c_void);
-        fn wait_for_client_with_timeout(daemon: *mut c_void, timeout_us: i32, errmsg: *mut *mut c_char) -> i32;
-        fn stream_from_client(fd: i32, errmsg: *mut *mut c_char) -> *mut u8;
-        fn send_packet_to_foreign_server(fd: i32, packet: *mut u8, errmsg: *mut *mut c_char) -> usize;
-        fn close_socket(fd: i32);
-    }
+    use crate::ipc_ffi::start_daemon;
+    use crate::ipc_ffi::close_daemon;
+    use crate::ipc_ffi::wait_for_client_with_timeout;
+    use crate::ipc_ffi::stream_from_client;
+    use crate::ipc_ffi::send_packet_to_foreign_server;
+    use crate::ipc_ffi::close_socket;
 
     let mut errmsg: *mut c_char = ptr::null_mut();
     let mut daemon = start_daemon(socket_path, tmpdir, shm_basename, 0xffff, &mut errmsg);
@@ -489,15 +479,13 @@ unsafe fn pool_main_single(config: &PoolConfig, socket_path: *const c_char, tmpd
 // ── Pool main: fork mode ─────────────────────────────────────────────────────
 
 unsafe fn pool_main_fork(config: &PoolConfig, socket_path: *const c_char, tmpdir: *const c_char, shm_basename: *const c_char) -> i32 {
-    extern "C" {
-        fn start_daemon(socket_path: *const c_char, tmpdir: *const c_char, shm_basename: *const c_char, size: usize, errmsg: *mut *mut c_char) -> *mut c_void;
-        fn close_daemon(daemon: *mut *mut c_void);
-        fn wait_for_client_with_timeout(daemon: *mut c_void, timeout_us: i32, errmsg: *mut *mut c_char) -> i32;
-        fn stream_from_client(fd: i32, errmsg: *mut *mut c_char) -> *mut u8;
-        fn send_packet_to_foreign_server(fd: i32, packet: *mut u8, errmsg: *mut *mut c_char) -> usize;
-        fn close_socket(fd: i32);
-        fn shinit(basename: *const c_char, volume: usize, size: usize, errmsg: *mut *mut c_char) -> *mut c_void;
-    }
+    use crate::ipc_ffi::start_daemon;
+    use crate::ipc_ffi::close_daemon;
+    use crate::ipc_ffi::wait_for_client_with_timeout;
+    use crate::ipc_ffi::stream_from_client;
+    use crate::ipc_ffi::send_packet_to_foreign_server;
+    use crate::ipc_ffi::close_socket;
+    use crate::ffi::shinit;
 
     let mut errmsg: *mut c_char = ptr::null_mut();
     let mut daemon = start_daemon(socket_path, tmpdir, shm_basename, 0xffff, &mut errmsg);

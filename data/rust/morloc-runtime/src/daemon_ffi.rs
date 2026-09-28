@@ -11,7 +11,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use crate::cschema::CSchema;
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 use crate::hash;
-use crate::http_ffi::{DaemonMethod, DaemonRequest, HttpMethod, HttpRequest};
+use crate::http_ffi::{DaemonMethod, DaemonRequest, HttpMethod};
 
 // -- Constants ----------------------------------------------------------------
 
@@ -356,7 +356,7 @@ struct BindingEntry {
     names: Vec<String>,
 }
 
-struct BindingStore {
+pub struct BindingStore {
     entries: HashMap<u64, BindingEntry>,
     /// Index from name -> hash for name-based lookup
     name_index: HashMap<String, u64>,
@@ -572,16 +572,15 @@ impl BindingStore {
 // -- C-exported binding store functions ---------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn binding_store_init(base_dir: *const c_char) -> *mut c_void {
+pub unsafe extern "C" fn binding_store_init(base_dir: *const c_char) -> *mut BindingStore {
     let dir = CStr::from_ptr(base_dir).to_string_lossy().into_owned();
-    let store = Box::new(BindingStore::new(&dir));
-    Box::into_raw(store) as *mut c_void
+    Box::into_raw(Box::new(BindingStore::new(&dir)))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn binding_store_free(store: *mut c_void) {
+pub unsafe extern "C" fn binding_store_free(store: *mut BindingStore) {
     if !store.is_null() {
-        drop(Box::from_raw(store as *mut BindingStore));
+        drop(Box::from_raw(store));
     }
 }
 
@@ -927,10 +926,8 @@ pub unsafe extern "C" fn daemon_serialize_response(
 // -- Discovery ----------------------------------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn daemon_build_discovery(manifest: *mut c_void) -> *mut c_char {
-    extern "C" {
-        fn manifest_to_discovery_json(manifest: *const c_void) -> *mut c_char;
-    }
+pub unsafe extern "C" fn daemon_build_discovery(manifest: *mut crate::manifest_ffi::Manifest) -> *mut c_char {
+    use crate::manifest_ffi::manifest_to_discovery_json;
     manifest_to_discovery_json(manifest)
 }
 
@@ -1439,7 +1436,7 @@ unsafe fn adopt_rptr_result(packet: *const u8) {
 
 #[no_mangle]
 pub unsafe extern "C" fn daemon_dispatch(
-    manifest: *mut c_void,
+    manifest: *mut crate::manifest_ffi::Manifest,
     request: *mut DaemonRequest,
     sockets: *mut MorlocSocket,
     _shm_basename: *const c_char,
@@ -1650,56 +1647,18 @@ pub unsafe extern "C" fn daemon_dispatch(
     // Delegate to the C functions that handle manifest lookup, arg parsing,
     // schema handling, and pool communication. These are all already ported
     // to Rust in other _ffi modules, so we declare them as extern "C".
-    extern "C" {
-        fn parse_schema(schema: *const c_char, errmsg: *mut *mut c_char) -> *mut CSchema;
-        fn free_schema(schema: *mut CSchema);
-        fn initialize_positional(value: *mut c_char) -> *mut c_void;
-        fn free_argument_t(arg: *mut c_void);
-        fn parse_cli_data_argument(
-            dest: *mut u8,
-            arg: *const c_void,
-            schema: *const CSchema,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
-        fn make_call_packet_from_cli(
-            dest: *mut u8,
-            mid: u32,
-            args: *mut *mut c_void,
-            arg_schema_strs: *mut *mut c_char,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
-        fn send_and_receive_over_socket(
-            socket_path: *const c_char,
-            packet: *const u8,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
-        fn get_morloc_data_packet_error_message(
-            data: *const u8,
-            errmsg: *mut *mut c_char,
-        ) -> *mut c_char;
-        fn get_morloc_data_packet_value(
-            data: *const u8,
-            schema: *const CSchema,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
-        fn voidstar_to_json_string(
-            data: *const c_void,
-            schema: *const CSchema,
-            errmsg: *mut *mut c_char,
-        ) -> *mut c_char;
-        fn arrow_to_json_string(
-            data: *const c_void,
-            errmsg: *mut *mut c_char,
-        ) -> *mut c_char;
-        fn morloc_eval(
-            expr: *mut c_void,  // actually *mut MorlocExpression
-            return_schema: *mut CSchema,
-            arg_voidstar: *mut *mut u8,
-            arg_schemas: *mut *mut CSchema,
-            nargs: usize,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
-    }
+    use crate::ffi::parse_schema;
+    use crate::ffi::free_schema;
+    use crate::cli::initialize_positional;
+    use crate::cli::free_argument_t;
+    use crate::cli::parse_cli_data_argument;
+    use crate::cli::make_call_packet_from_cli;
+    use crate::ipc_ffi::send_and_receive_over_socket;
+    use crate::packet_ffi::get_morloc_data_packet_error_message;
+    use crate::packet_ffi::get_morloc_data_packet_value;
+    use crate::json_ffi::voidstar_to_json_string;
+    use crate::arrow_ffi::arrow_to_json_string;
+    use crate::eval_ffi::morloc_eval;
 
     // The manifest is the canonical v2 C struct from manifest_ffi.rs.
     // No local mirror needed -- import the real type and walk it.
@@ -1757,7 +1716,7 @@ pub unsafe extern "C" fn daemon_dispatch(
 
     // Parse JSON args into argument_t** array
     let mut err: *mut c_char = ptr::null_mut();
-    let args: *mut *mut c_void;
+    let args: *mut *mut crate::cli::ArgumentT;
 
     if !(*request).args_json.is_null() {
         // Parse the JSON array
@@ -1812,7 +1771,7 @@ pub unsafe extern "C" fn daemon_dispatch(
         }
 
         args = libc::calloc(expected_nargs + 1, std::mem::size_of::<*mut c_void>())
-            as *mut *mut c_void;
+            as *mut *mut crate::cli::ArgumentT;
         for (i, c) in arg_texts.iter().enumerate() {
             let dup = libc::strdup(c.as_ptr());
             *args.add(i) = initialize_positional(dup);
@@ -1830,7 +1789,7 @@ pub unsafe extern "C" fn daemon_dispatch(
             return resp;
         }
         args =
-            libc::calloc(1, std::mem::size_of::<*mut c_void>()) as *mut *mut c_void;
+            libc::calloc(1, std::mem::size_of::<*mut c_void>()) as *mut *mut crate::cli::ArgumentT;
         *args = ptr::null_mut();
     }
 
@@ -1945,7 +1904,7 @@ pub unsafe extern "C" fn daemon_dispatch(
                 (*resp).error = err;
             } else {
                 let result_abs = morloc_eval(
-                    cmd.expr as *mut c_void,
+                    cmd.expr,
                     return_schema,
                     arg_voidstars,
                     arg_schemas_arr,
@@ -2404,7 +2363,7 @@ unsafe fn handle_lp_connection(
     // it off and keep the JSON `result`. Packet mode already returns raw bytes.
     let want_media = (*req).media && !want_packet;
     let prev_media = set_current_output_media_bytes(want_media);
-    let resp = daemon_dispatch(manifest, req, sockets, shm_basename);
+    let resp = daemon_dispatch(manifest as *mut crate::manifest_ffi::Manifest, req, sockets, shm_basename);
     set_current_output_media_bytes(prev_media);
     set_current_output_packet(prev);
 
@@ -2455,30 +2414,11 @@ unsafe fn handle_http_connection(
     sockets: *mut MorlocSocket,
     shm_basename: *const c_char,
 ) {
-    extern "C" {
-        fn http_parse_request(fd: i32, errmsg: *mut *mut c_char) -> *mut HttpRequest;
-        fn http_free_request(req: *mut HttpRequest);
-        fn http_write_response(
-            fd: i32,
-            status: i32,
-            content_type: *const c_char,
-            body: *const c_char,
-            body_len: usize,
-        ) -> bool;
-        fn http_write_response_ex(
-            fd: i32,
-            status: i32,
-            content_type: *const c_char,
-            body: *const c_char,
-            body_len: usize,
-            extra_headers: *const c_char,
-        ) -> bool;
-        fn http_to_daemon_request(
-            req: *mut HttpRequest,
-            errmsg: *mut *mut c_char,
-            error_kind: *mut i32,
-        ) -> *mut DaemonRequest;
-    }
+    use crate::http_ffi::http_parse_request;
+    use crate::http_ffi::http_free_request;
+    use crate::http_ffi::http_write_response;
+    use crate::http_ffi::http_write_response_ex;
+    use crate::http_ffi::http_to_daemon_request;
 
     let mut errmsg: *mut c_char = ptr::null_mut();
     let http_req = http_parse_request(client_fd, &mut errmsg);
@@ -2550,7 +2490,7 @@ unsafe fn handle_http_connection(
     // `Content-Type` below.
     let prev_http = set_current_output_http(true);
     let prev_media = set_current_output_media_bytes(true);
-    let resp = daemon_dispatch(manifest, req, sockets, shm_basename);
+    let resp = daemon_dispatch(manifest as *mut crate::manifest_ffi::Manifest, req, sockets, shm_basename);
     set_current_output_media_bytes(prev_media);
     set_current_output_http(prev_http);
 
@@ -2738,7 +2678,7 @@ fn write_port_file_atomic(
 #[no_mangle]
 pub unsafe extern "C" fn daemon_run(
     config: *mut DaemonConfig,
-    manifest: *mut c_void,
+    manifest: *mut crate::manifest_ffi::Manifest,
     sockets: *mut MorlocSocket,
     n_pools: usize,
     shm_basename: *const c_char,
@@ -2940,7 +2880,7 @@ pub unsafe extern "C" fn daemon_run(
             jobs: VecDeque::new(),
         }),
         cond: Condvar::new(),
-        manifest,
+        manifest: manifest as *mut c_void,
         sockets,
         shm_basename,
     });

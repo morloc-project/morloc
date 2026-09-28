@@ -2576,7 +2576,7 @@ SEXP morloc_mlc_tell(void) { MAYFAIL
 // hand off to the corresponding libmorloc save function, free the SHM
 // block. Each wrapper passes the libmorloc function pointer for the
 // format-specific write.
-typedef int (*morloc_save_fn)(const absptr_t, const Schema*, int64_t,
+typedef int (*morloc_save_fn)(const void*, const Schema*, int64_t,
                               const char*, char**);
 
 static SEXP morloc_mlc_save_dispatch(SEXP obj_r, SEXP schema_str_r,

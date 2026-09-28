@@ -54,7 +54,6 @@
 //! NameError -- so the frame is recorded as "(serialize failed)"
 //! and the original exception still propagates.
 
-use crate::cschema::CSchema;
 use libc::{c_char, c_void};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -187,21 +186,10 @@ unsafe fn serialize_and_hash(
     packet: *const u8,
     schema_cstr: *const c_char,
 ) -> Option<(u64, Vec<u8>)> {
-    extern "C" {
-        fn parse_schema(schema_str: *const c_char, errmsg: *mut *mut c_char) -> *mut CSchema;
-        fn free_schema(schema: *mut CSchema);
-        fn get_morloc_data_packet_value(
-            data: *const u8,
-            schema: *const CSchema,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
-        fn hash_voidstar(
-            data: *const c_void,
-            schema: *const CSchema,
-            seed: u64,
-            errmsg: *mut *mut c_char,
-        ) -> u64;
-    }
+    use crate::ffi::parse_schema;
+    use crate::ffi::free_schema;
+    use crate::packet_ffi::get_morloc_data_packet_value;
+    use crate::cache::hash_voidstar;
 
     if packet.is_null() || schema_cstr.is_null() {
         return None;

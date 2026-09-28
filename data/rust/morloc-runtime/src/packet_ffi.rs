@@ -113,7 +113,7 @@ pub unsafe extern "C" fn morloc_packet_size(
 #[no_mangle]
 pub unsafe extern "C" fn morloc_dup_packet(
     packet: *const u8,
-    block_out: *mut AbsPtr,
+    block_out: *mut *mut c_void,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
     clear_errmsg(errmsg);
@@ -152,7 +152,7 @@ pub unsafe extern "C" fn morloc_dup_packet(
     }
     ptr::copy_nonoverlapping(packet, copy, size);
     if !block_out.is_null() {
-        *block_out = block;
+        *block_out = block as *mut c_void;
     }
     copy
 }
@@ -775,11 +775,8 @@ pub unsafe extern "C" fn get_morloc_data_packet_value(
                 // paths but with strict error propagation -- a missing
                 // sidecar or corrupt payload surfaces to the caller
                 // rather than being consumed as an @load-style miss.
+                use crate::utility::read_binary_file;
                 extern "C" {
-                    fn read_binary_file(
-                        filename: *const c_char, file_size: *mut usize,
-                        errmsg: *mut *mut c_char,
-                    ) -> *mut u8;
                     fn load_morloc_data_file(
                         path: *const c_char, data: *mut u8, data_size: usize,
                         schema: *const CSchema, errmsg: *mut *mut c_char,

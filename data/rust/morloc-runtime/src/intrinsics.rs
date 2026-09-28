@@ -75,17 +75,8 @@ pub unsafe extern "C" fn mlc_save(
         return 1;
     }
 
-    extern "C" {
-        fn pack_with_schema(
-            mlc: *const c_void, schema: *const CSchema,
-            mpk: *mut *mut c_char, mpk_size: *mut usize,
-            errmsg: *mut *mut c_char,
-        ) -> i32;
-        fn write_atomic(
-            filename: *const c_char, data: *const u8, size: usize,
-            errmsg: *mut *mut c_char,
-        ) -> i32;
-    }
+    use crate::ffi::pack_with_schema;
+    use crate::utility::write_atomic;
 
     let mut err: *mut c_char = ptr::null_mut();
     let mut mpk: *mut c_char = ptr::null_mut();
@@ -122,16 +113,8 @@ pub unsafe extern "C" fn mlc_save_json(
         return 1;
     }
 
-    extern "C" {
-        fn voidstar_to_json_string(
-            data: *const c_void, schema: *const CSchema,
-            errmsg: *mut *mut c_char,
-        ) -> *mut c_char;
-        fn write_atomic(
-            filename: *const c_char, data: *const u8, size: usize,
-            errmsg: *mut *mut c_char,
-        ) -> i32;
-    }
+    use crate::json_ffi::voidstar_to_json_string;
+    use crate::utility::write_atomic;
 
     let mut err: *mut c_char = ptr::null_mut();
     let json = voidstar_to_json_string(data, schema, &mut err);
@@ -202,13 +185,7 @@ unsafe fn build_voidstar_data_packet_parts(
     clvl: crate::compression::CompressionLevel,
     errmsg: *mut *mut c_char,
 ) -> Option<VoidstarDataPacketParts> {
-    extern "C" {
-        fn flatten_voidstar_to_buffer(
-            data: *const c_void, schema: *const CSchema,
-            out_buf: *mut *mut u8, out_size: *mut usize,
-            errmsg: *mut *mut c_char,
-        ) -> i32;
-    }
+    use crate::packet_ffi::flatten_voidstar_to_buffer;
 
 
     let mut blob: *mut u8 = ptr::null_mut();
@@ -270,12 +247,7 @@ unsafe fn write_data_packet_parts_to_fd(
     fd: libc::c_int,
     parts: &VoidstarDataPacketParts,
 ) -> Result<(), *mut c_char> {
-    extern "C" {
-        fn write_binary_fd(
-            fd: i32, buf: *const c_char, count: usize,
-            errmsg: *mut *mut c_char,
-        ) -> i32;
-    }
+    use crate::utility::write_binary_fd;
     let mut err: *mut c_char = ptr::null_mut();
     if write_binary_fd(fd, parts.hdr_bytes.as_ptr() as *const c_char, parts.hdr_bytes.len(), &mut err) != 0 {
         return Err(err);
@@ -603,12 +575,9 @@ pub unsafe extern "C" fn mlc_load(
 ) -> *mut c_void {
     clear_errmsg(errmsg);
 
+    use crate::utility::file_exists;
+    use crate::utility::read_binary_file;
     extern "C" {
-        fn file_exists(filename: *const c_char) -> bool;
-        fn read_binary_file(
-            filename: *const c_char, file_size: *mut usize,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
         fn load_morloc_data_file(
             path: *const c_char, data: *mut u8, data_size: usize,
             schema: *const CSchema, errmsg: *mut *mut c_char,
@@ -727,12 +696,7 @@ pub unsafe extern "C" fn mlc_show(
 ) -> *mut c_char {
     clear_errmsg(errmsg);
 
-    extern "C" {
-        fn voidstar_to_json_string(
-            data: *const c_void, schema: *const CSchema,
-            errmsg: *mut *mut c_char,
-        ) -> *mut c_char;
-    }
+    use crate::json_ffi::voidstar_to_json_string;
 
     voidstar_to_json_string(data, schema, errmsg)
 }
@@ -747,12 +711,7 @@ pub unsafe extern "C" fn mlc_read(
 ) -> *mut c_void {
     clear_errmsg(errmsg);
 
-    extern "C" {
-        fn read_json_with_schema(
-            dest: *mut u8, json: *mut c_char, schema: *const CSchema,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
-    }
+    use crate::json_ffi::read_json_with_schema;
 
     let json_copy = libc::strdup(json_str);
     if json_copy.is_null() {
@@ -784,17 +743,8 @@ unsafe fn _write_voidstar_binary_rust(
 ) -> isize {
     clear_errmsg(errmsg);
 
-    extern "C" {
-        fn flatten_voidstar_to_buffer(
-            data: *const c_void, schema: *const CSchema,
-            out_buf: *mut *mut u8, out_size: *mut usize,
-            errmsg: *mut *mut c_char,
-        ) -> i32;
-        fn write_binary_fd(
-            fd: i32, buf: *const c_char, count: usize,
-            errmsg: *mut *mut c_char,
-        ) -> i32;
-    }
+    use crate::packet_ffi::flatten_voidstar_to_buffer;
+    use crate::utility::write_binary_fd;
 
     let mut err: *mut c_char = ptr::null_mut();
     let mut blob: *mut u8 = ptr::null_mut();

@@ -1171,9 +1171,7 @@ unsafe fn morloc_eval_r(
             let child_schema = (*child).schema;
             let child_result = morloc_eval_r(child, ptr::null_mut(), 0, bndvars)?;
 
-            extern "C" {
-                fn voidstar_to_json_string(data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_char;
-            }
+            use crate::json_ffi::voidstar_to_json_string;
             let mut err: *mut c_char = ptr::null_mut();
             let json = voidstar_to_json_string(child_result as *const c_void, child_schema, &mut err);
             if !err.is_null() {
@@ -1217,9 +1215,7 @@ unsafe fn morloc_eval_r(
             ptr::copy_nonoverlapping(str_abs, json_str as *mut u8, str_arr.size);
             *json_str.add(str_arr.size) = 0;
 
-            extern "C" {
-                fn read_json_with_schema(dest: *mut u8, json: *mut c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut u8;
-            }
+            use crate::json_ffi::read_json_with_schema;
 
             let inner_abs = shm::shmalloc(width)?;
             ptr::write_bytes(inner_abs, 0, width);
@@ -1256,9 +1252,7 @@ unsafe fn morloc_eval_r(
             let child_schema = (*child).schema;
             let child_result = morloc_eval_r(child, ptr::null_mut(), 0, bndvars)?;
 
-            extern "C" {
-                fn mlc_hash(data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_char;
-            }
+            use crate::intrinsics::mlc_hash;
             let mut err: *mut c_char = ptr::null_mut();
             let hex = mlc_hash(child_result as *const c_void, child_schema, &mut err);
             if !err.is_null() {
@@ -1337,9 +1331,7 @@ unsafe fn morloc_eval_r(
             ptr::copy_nonoverlapping(path_abs, path_cstr as *mut u8, path_arr.size);
             *path_cstr.add(path_arr.size) = 0;
 
-            extern "C" {
-                fn mlc_load(path: *const c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void;
-            }
+            use crate::intrinsics::mlc_load;
             let mut err: *mut c_char = ptr::null_mut();
             let loaded = mlc_load(path_cstr, schema, &mut err);
 
@@ -1460,9 +1452,7 @@ unsafe fn morloc_eval_r(
 
             match kind {
                 0 => {
-                    extern "C" {
-                        fn mlc_probe_packet(path: *const c_char, errmsg: *mut *mut c_char) -> i32;
-                    }
+                    use crate::intrinsics::mlc_probe_packet;
                     use morloc_runtime_types::stream_handle as sh;
                     let mut err: *mut c_char = ptr::null_mut();
                     let probe_rc = mlc_probe_packet(path_cstr, &mut err);
@@ -1489,9 +1479,7 @@ unsafe fn morloc_eval_r(
                     libc::free(path_cstr as *mut c_void);
                 }
                 1 => {
-                    extern "C" {
-                        fn mlc_open(path: *const c_char, kind: u8, errmsg: *mut *mut c_char) -> i64;
-                    }
+                    use crate::intrinsics::mlc_open;
                     use morloc_runtime_types::stream_handle as sh;
                     let mut err: *mut c_char = ptr::null_mut();
                     let handle = mlc_open(path_cstr, kind, &mut err);
@@ -1511,10 +1499,8 @@ unsafe fn morloc_eval_r(
         }
 
         MorlocExpressionType::Close => {
-            extern "C" {
-                fn mlc_close(handle: i64, errmsg: *mut *mut c_char) -> i32;
-                fn mlc_unlink_tmp(path: *const c_char, errmsg: *mut *mut c_char) -> i32;
-            }
+            use crate::intrinsics::mlc_close;
+            use crate::intrinsics::mlc_unlink_tmp;
             let handle_expr = (*expr).expr.unary_expr;
             let handle_schema = (*handle_expr).schema;
             let handle_ptr = morloc_eval_r(handle_expr, ptr::null_mut(), 0, bndvars)?;
@@ -1542,9 +1528,7 @@ unsafe fn morloc_eval_r(
         }
 
         MorlocExpressionType::FSchema => {
-            extern "C" {
-                fn mlc_fschema(path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char;
-            }
+            use crate::intrinsics::mlc_fschema;
             let path_expr = (*expr).expr.unary_expr;
             let path_result = morloc_eval_r(path_expr, ptr::null_mut(), 0, bndvars)?;
             let path_cstr = path_voidstar_to_cstr(path_result, "@fschema")?;
@@ -1569,9 +1553,7 @@ unsafe fn morloc_eval_r(
         }
 
         MorlocExpressionType::FLength => {
-            extern "C" {
-                fn mlc_ifile_length(handle: i64, errmsg: *mut *mut c_char) -> i64;
-            }
+            use crate::intrinsics::mlc_ifile_length;
             let handle_expr = (*expr).expr.unary_expr;
             let handle_schema = (*handle_expr).schema;
             let handle_ptr = morloc_eval_r(handle_expr, ptr::null_mut(), 0, bndvars)?;
@@ -1586,9 +1568,7 @@ unsafe fn morloc_eval_r(
         }
 
         MorlocExpressionType::Next => {
-            extern "C" {
-                fn mlc_next(handle: i64, errmsg: *mut *mut c_char) -> *mut c_void;
-            }
+            use crate::intrinsics::mlc_next;
             let handle_expr = (*expr).expr.unary_expr;
             let handle_schema = (*handle_expr).schema;
             let handle_ptr = morloc_eval_r(handle_expr, ptr::null_mut(), 0, bndvars)?;
@@ -1605,9 +1585,7 @@ unsafe fn morloc_eval_r(
         }
 
         MorlocExpressionType::StreamLayout => {
-            extern "C" {
-                fn mlc_stream_layout(handle: i64, errmsg: *mut *mut c_char) -> *mut c_void;
-            }
+            use crate::intrinsics::mlc_stream_layout;
             let handle_expr = (*expr).expr.unary_expr;
             let handle_schema = (*handle_expr).schema;
             let handle_ptr = morloc_eval_r(handle_expr, ptr::null_mut(), 0, bndvars)?;
@@ -1624,9 +1602,7 @@ unsafe fn morloc_eval_r(
         }
 
         MorlocExpressionType::Stream => {
-            extern "C" {
-                fn mlc_stream(ifile_handle: i64, errmsg: *mut *mut c_char) -> i64;
-            }
+            use crate::intrinsics::mlc_stream;
             use morloc_runtime_types::stream_handle as sh;
             let handle_expr = (*expr).expr.unary_expr;
             let handle_schema = (*handle_expr).schema;
@@ -1642,15 +1618,7 @@ unsafe fn morloc_eval_r(
         }
 
         MorlocExpressionType::IFileWalk => {
-            extern "C" {
-                fn mlc_ifile_walk(
-                    handle: i64,
-                    path: *const c_char,
-                    args_ptr: *const crate::intrinsics::IFileWalkArg,
-                    n_args: u64,
-                    errmsg: *mut *mut c_char,
-                ) -> *mut c_void;
-            }
+            use crate::intrinsics::mlc_ifile_walk;
             let w = (*expr).expr.ifile_walk_expr;
             let handle_expr = (*w).handle;
             let path_cstr = (*w).path;
@@ -1710,14 +1678,8 @@ unsafe fn morloc_eval_r(
             // TAG_HANDLE stream-handle field so downstream reads go
             // through mlc_read_stream_field uniformly with the IFile
             // TAG_PATH / IStream TAG_HANDLE cases.
-            extern "C" {
-                fn mlc_open_ostream(
-                    schema_str: *const c_char,
-                    path: *const c_char,
-                    errmsg: *mut *mut c_char,
-                ) -> i64;
-                fn schema_to_string(schema: *const crate::cschema::CSchema) -> *mut c_char;
-            }
+            use crate::intrinsics::mlc_open_ostream;
+            use crate::ffi::schema_to_string;
             use morloc_runtime_types::stream_handle as sh;
             let open = (*expr).expr.open_expr;
             let path_expr = (*open).path;
@@ -1772,14 +1734,8 @@ unsafe fn morloc_eval_r(
         }
 
         MorlocExpressionType::Append => {
-            extern "C" {
-                fn mlc_append(
-                    schema_str: *const c_char,
-                    path: *const c_char,
-                    errmsg: *mut *mut c_char,
-                ) -> i64;
-                fn schema_to_string(schema: *const crate::cschema::CSchema) -> *mut c_char;
-            }
+            use crate::intrinsics::mlc_append;
+            use crate::ffi::schema_to_string;
             let open = (*expr).expr.open_expr;
             let path_expr = (*open).path;
             let path_result = morloc_eval_r(path_expr, ptr::null_mut(), 0, bndvars)?;
@@ -1806,14 +1762,7 @@ unsafe fn morloc_eval_r(
         MorlocExpressionType::Concat => {
             // @concat: ifile_walk_expr layout -- handle = paths
             // (a `[Str]` voidstar Array<Array<u8>>), args[0] = dest path.
-            extern "C" {
-                fn mlc_concat(
-                    paths: *const *const c_char,
-                    n_paths: usize,
-                    dest: *const c_char,
-                    errmsg: *mut *mut c_char,
-                ) -> i32;
-            }
+            use crate::intrinsics::mlc_concat;
             let w = (*expr).expr.ifile_walk_expr;
             let paths_expr = (*w).handle;
             if (*w).n_args < 1 || (*w).args.is_null() {
@@ -1869,12 +1818,10 @@ unsafe fn morloc_eval_r(
         MorlocExpressionType::Stdin
         | MorlocExpressionType::Stdout
         | MorlocExpressionType::Stderr => {
-            extern "C" {
-                fn mlc_open_stdin(schema_str: *const c_char, errmsg: *mut *mut c_char) -> i64;
-                fn mlc_open_stdout(schema_str: *const c_char, errmsg: *mut *mut c_char) -> i64;
-                fn mlc_open_stderr(schema_str: *const c_char, errmsg: *mut *mut c_char) -> i64;
-                fn schema_to_string(schema: *const crate::cschema::CSchema) -> *mut c_char;
-            }
+            use crate::intrinsics::mlc_open_stdin;
+            use crate::intrinsics::mlc_open_stdout;
+            use crate::intrinsics::mlc_open_stderr;
+            use crate::ffi::schema_to_string;
             use morloc_runtime_types::stream_handle as sh;
             // No isatty gate on @stdin: programs may want the handle
             // before any read (e.g. to test the CAS uniqueness guard).
@@ -1900,9 +1847,7 @@ unsafe fn morloc_eval_r(
         }
 
         MorlocExpressionType::Flush => {
-            extern "C" {
-                fn mlc_flush(handle: i64, errmsg: *mut *mut c_char) -> i32;
-            }
+            use crate::intrinsics::mlc_flush;
             let handle_expr = (*expr).expr.unary_expr;
             let handle_schema = (*handle_expr).schema;
             let handle_ptr = morloc_eval_r(handle_expr, ptr::null_mut(), 0, bndvars)?;
@@ -2193,7 +2138,7 @@ pub unsafe extern "C" fn morloc_eval(
     arg_schemas: *mut *mut CSchema,
     nargs: usize,
     errmsg: *mut *mut c_char,
-) -> AbsPtr {
+) -> *mut c_void {
     clear_errmsg(errmsg);
 
     let mut bndvars: BndVars = HashMap::new();
@@ -2250,7 +2195,7 @@ pub unsafe extern "C" fn morloc_eval(
     }
 
     match result {
-        Ok(ptr) => ptr,
+        Ok(ptr) => ptr as *mut c_void,
         Err(e) => {
             set_errmsg(errmsg, &e);
             ptr::null_mut()

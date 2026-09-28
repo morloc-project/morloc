@@ -2160,16 +2160,9 @@ fn stdio_decode_packet(handle: i64, packet_abs: crate::shm::AbsPtr)
         .map_err(|_| MorlocError::Other(
             "@next: schema string contains NUL".into(),
         ))?;
-    extern "C" {
-        fn parse_schema(schema_str: *const std::os::raw::c_char,
-                        errmsg: *mut *mut std::os::raw::c_char) -> *mut crate::cschema::CSchema;
-        fn free_schema(schema: *mut crate::cschema::CSchema);
-        fn get_morloc_data_packet_value(
-            data: *const u8,
-            schema: *const crate::cschema::CSchema,
-            errmsg: *mut *mut std::os::raw::c_char,
-        ) -> *mut u8;
-    }
+    use crate::ffi::parse_schema;
+    use crate::ffi::free_schema;
+    use crate::packet_ffi::get_morloc_data_packet_value;
     unsafe {
         let mut err: *mut std::os::raw::c_char = std::ptr::null_mut();
         let schema = parse_schema(c_schema.as_ptr(), &mut err);

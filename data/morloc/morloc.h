@@ -1337,8 +1337,8 @@ static inline void* resolve_relptr(relptr_t relptr, const void* base_ptr, ERRMSG
     }
     return rel2abs(relptr, errmsg_);
 }
-relptr_t vol2rel(volptr_t ptr, shm_t* shm);
-absptr_t vol2abs(volptr_t ptr, shm_t* shm);
+relptr_t vol2rel(volptr_t ptr, const shm_t* shm);
+absptr_t vol2abs(volptr_t ptr, const shm_t* shm);
 relptr_t abs2rel(absptr_t ptr, ERRMSG);
 shm_t* abs2shm(absptr_t ptr, ERRMSG);
 block_header_t* abs2blk(void* ptr, ERRMSG);
@@ -1415,8 +1415,8 @@ char* morloc_first_null_in_value(
     const Schema* schema,
     const void* base_ptr);
 
-uint8_t* make_morloc_local_call_packet(uint32_t midx, const uint8_t** arg_packets, size_t nargs, ERRMSG);
-uint8_t* make_morloc_remote_call_packet(uint32_t midx, const uint8_t** arg_packets, size_t nargs, ERRMSG);
+uint8_t* make_morloc_local_call_packet(uint32_t midx, const uint8_t* const* arg_packets, size_t nargs, ERRMSG);
+uint8_t* make_morloc_remote_call_packet(uint32_t midx, const uint8_t* const* arg_packets, size_t nargs, ERRMSG);
 morloc_call_t* read_morloc_call_packet(const uint8_t* packet, ERRMSG);
 void free_morloc_call(morloc_call_t* call);
 int print_morloc_data_packet(const uint8_t* packet, const Schema* schema, ERRMSG);
@@ -1686,15 +1686,15 @@ char* manifest_to_discovery_json(const manifest_t* manifest);
 // Section 25: Function declarations -- Intrinsics
 // ========================================================================
 
-int mlc_save(const absptr_t data, const Schema* schema, int64_t level, const char* path, ERRMSG);
-int mlc_save_json(const absptr_t data, const Schema* schema, int64_t level, const char* path, ERRMSG);
+int mlc_save(const void* data, const Schema* schema, int64_t level, const char* path, ERRMSG);
+int mlc_save_json(const void* data, const Schema* schema, int64_t level, const char* path, ERRMSG);
 // @save voidstar: produces a morloc data packet. When level > 0 the
 // packet's payload is zstd-compressed and the header carries
 // PACKET_COMPRESSION_ZSTD; level == 0 writes uncompressed (legacy shape).
-int mlc_save_voidstar(const absptr_t data, const Schema* schema, int64_t level, const char* path, ERRMSG);
+int mlc_save_voidstar(const void* data, const Schema* schema, int64_t level, const char* path, ERRMSG);
 void* mlc_load(const char* path, const Schema* schema, ERRMSG);
-char* mlc_hash(const absptr_t data, const Schema* schema, ERRMSG);
-char* mlc_show(const absptr_t data, const Schema* schema, ERRMSG);
+char* mlc_hash(const void* data, const Schema* schema, ERRMSG);
+char* mlc_show(const void* data, const Schema* schema, ERRMSG);
 void* mlc_read(const char* json_str, const Schema* schema, ERRMSG);
 relptr_t write_voidstar_binary(int fd, const void* data, const Schema* schema, ERRMSG);
 
@@ -1956,7 +1956,7 @@ uint8_t* remote_call(
     const char* socket_basename,
     const char* cache_path,
     const resources_t* resources,
-    const uint8_t** arg_packets,
+    const uint8_t* const* arg_packets,
     size_t nargs,
     ERRMSG);
 

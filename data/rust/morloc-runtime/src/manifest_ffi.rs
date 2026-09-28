@@ -623,9 +623,7 @@ unsafe fn build_pattern(jp: &serde_json::Value) -> Result<*mut MorlocPattern, Mo
 
     if ptype == "end" {
         // make_morloc_pattern_end - call C function
-        extern "C" {
-            fn make_morloc_pattern_end() -> *mut MorlocPattern;
-        }
+        use crate::eval_ffi::make_morloc_pattern_end;
         return Ok(make_morloc_pattern_end());
     }
 
@@ -723,9 +721,7 @@ unsafe fn build_app(
     je: &serde_json::Value,
     set_function: impl FnOnce(*mut MorlocAppExpression) -> Result<(), MorlocError>,
 ) -> Result<*mut MorlocExpression, MorlocError> {
-    extern "C" {
-        fn parse_schema(s: *const c_char, errmsg: *mut *mut c_char) -> *mut CSchema;
-    }
+    use crate::ffi::parse_schema;
     let mut err: *mut c_char = ptr::null_mut();
     let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
     let jargs = je.get("args").and_then(|v| v.as_array());
@@ -761,12 +757,10 @@ unsafe fn build_app(
 unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, MorlocError> {
     let tag = je.get("tag").and_then(|v| v.as_str()).ok_or_else(|| MorlocError::Other("Expression missing 'tag' field".into()))?;
 
-    extern "C" {
-        fn parse_schema(s: *const c_char, errmsg: *mut *mut c_char) -> *mut CSchema;
-        fn make_morloc_literal(schema: *const c_char, prim: Primitive, errmsg: *mut *mut c_char) -> *mut MorlocExpression;
-        fn make_morloc_bound_var(schema: *const c_char, var: *mut c_char, errmsg: *mut *mut c_char) -> *mut MorlocExpression;
-        fn make_morloc_pattern(schema: *const c_char, pat: *mut MorlocPattern, errmsg: *mut *mut c_char) -> *mut MorlocExpression;
-    }
+    use crate::ffi::parse_schema;
+    use crate::eval_ffi::make_morloc_literal;
+    use crate::eval_ffi::make_morloc_bound_var;
+    use crate::eval_ffi::make_morloc_pattern;
 
     let mut err: *mut c_char = ptr::null_mut();
 
@@ -2316,17 +2310,15 @@ pub unsafe extern "C" fn manifest_to_discovery_json(manifest: *const Manifest) -
     }
     let m = &*manifest;
 
-    extern "C" {
-        fn json_buf_new() -> *mut c_void;
-        fn json_buf_finish(jb: *mut c_void) -> *mut c_char;
-        fn json_write_obj_start(jb: *mut c_void);
-        fn json_write_obj_end(jb: *mut c_void);
-        fn json_write_arr_start(jb: *mut c_void);
-        fn json_write_arr_end(jb: *mut c_void);
-        fn json_write_key(jb: *mut c_void, key: *const c_char);
-        fn json_write_string(jb: *mut c_void, val: *const c_char);
-        fn json_write_bool(jb: *mut c_void, val: bool);
-    }
+    use crate::json_ffi::json_buf_new;
+    use crate::json_ffi::json_buf_finish;
+    use crate::json_ffi::json_write_obj_start;
+    use crate::json_ffi::json_write_obj_end;
+    use crate::json_ffi::json_write_arr_start;
+    use crate::json_ffi::json_write_arr_end;
+    use crate::json_ffi::json_write_key;
+    use crate::json_ffi::json_write_string;
+    use crate::json_ffi::json_write_bool;
 
     let jb = json_buf_new();
     json_write_obj_start(jb);

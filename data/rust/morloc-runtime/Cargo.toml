@@ -49,3 +49,7 @@ anstream = "1"
 [build-dependencies]
 cbindgen = "0.28"
 # cc crate no longer needed -- all C files ported to Rust
+
+[dev-dependencies]
+# Generates prototypes the C-header agreement test compiles against morloc.h.
+cbindgen = "0.28"

@@ -16,27 +16,12 @@ use crate::schema::Schema;
 use crate::shm;
 use crate::walk::{self, Frame, Stack, Visit, Walker};
 
-extern "C" {
-    fn parse_schema(schema_str: *const c_char, errmsg: *mut *mut c_char) -> *mut CSchema;
-    fn free_schema(schema: *mut CSchema);
-    fn write_atomic(
-        filename: *const c_char,
-        data: *const u8,
-        size: usize,
-        errmsg: *mut *mut c_char,
-    ) -> i32;
-    fn read_binary_file(
-        filename: *const c_char,
-        file_size: *mut usize,
-        errmsg: *mut *mut c_char,
-    ) -> *mut u8;
-    fn morloc_packet_size(packet: *const u8, errmsg: *mut *mut c_char) -> usize;
-    fn get_morloc_data_packet_value(
-        data: *const u8,
-        schema: *const CSchema,
-        errmsg: *mut *mut c_char,
-    ) -> *mut u8;
-}
+use crate::ffi::parse_schema;
+use crate::ffi::free_schema;
+use crate::utility::write_atomic;
+use crate::utility::read_binary_file;
+use crate::packet_ffi::morloc_packet_size;
+use crate::packet_ffi::get_morloc_data_packet_value;
 
 /// Resolve the on-disk path `<cache_dir>/<label>/<key:016x>.dat`,
 /// creating the label directory if needed. Returns a heap C-string the
@@ -938,12 +923,7 @@ pub unsafe extern "C" fn hash_morloc_packet(
     clear_errmsg(errmsg);
     *hash_out = 0;
 
-    extern "C" {
-        fn read_morloc_packet_header(
-            msg: *const u8,
-            errmsg: *mut *mut c_char,
-        ) -> *const crate::packet::PacketHeader;
-    }
+    use crate::packet_ffi::read_morloc_packet_header;
 
     let mut err: *mut c_char = ptr::null_mut();
     let header = read_morloc_packet_header(packet, &mut err);

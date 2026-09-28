@@ -78,7 +78,7 @@ fn startup_death_msg(prog_name: &str, status: i32, stderr_log: &str) -> String {
 pub struct RouterProgram {
     pub name: *mut c_char,
     pub manifest_path: *mut c_char,
-    pub manifest: *mut c_void, // manifest_t*
+    pub manifest: *mut crate::manifest_ffi::Manifest,
     pub daemon_pid: libc::pid_t,
     pub daemon_socket: [c_char; SUN_PATH_LEN],
 }
@@ -102,9 +102,7 @@ unsafe fn router_build(
     names: &[String],
     errmsg: *mut *mut c_char,
 ) -> *mut Router {
-    extern "C" {
-        fn read_manifest(path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_void;
-    }
+    use crate::manifest_ffi::read_manifest;
 
     let router = libc::calloc(1, std::mem::size_of::<Router>()) as *mut Router;
     (*router).fdb_path = libc::strdup(fdb_path);
@@ -219,9 +217,7 @@ pub unsafe extern "C" fn router_free(router: *mut Router) {
         return;
     }
 
-    extern "C" {
-        fn free_manifest(manifest: *mut c_void);
-    }
+    use crate::manifest_ffi::free_manifest;
 
     for i in 0..(*router).n_programs {
         let prog = &mut *(*router).programs.add(i);
@@ -485,13 +481,7 @@ pub unsafe extern "C" fn router_forward(
 ) -> *mut DaemonResponse {
     clear_errmsg(errmsg);
 
-    extern "C" {
-        fn daemon_parse_response(
-            json: *const c_char,
-            len: usize,
-            errmsg: *mut *mut c_char,
-        ) -> *mut DaemonResponse;
-    }
+    use crate::daemon_ffi::daemon_parse_response;
 
     // Find program
     let program_name = CStr::from_ptr(program);

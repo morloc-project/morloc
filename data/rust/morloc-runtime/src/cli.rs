@@ -165,7 +165,7 @@ fn is_json_literal_shape(s: &str) -> bool {
 ///   5. Anything else -> error pointing the user at `source: file` in
 ///      the argument's docstring.
 pub unsafe fn classify_arg_source(arg: *const c_char) -> Result<Classified, MorlocError> {
-    extern "C" { fn file_exists(filename: *const c_char) -> bool; }
+    use crate::utility::file_exists;
 
     let stdin_path = b"/dev/stdin\0";
     let dash_path = b"-\0";
@@ -1433,14 +1433,7 @@ unsafe fn try_list_with_config(
 ) -> *mut c_void {
     use crate::schema::SerialType;
 
-    extern "C" {
-        fn read_json_with_schema(
-            dest: *mut u8,
-            json: *mut c_char,
-            schema: *const CSchema,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
-    }
+    use crate::json_ffi::read_json_with_schema;
 
     // RAII guard: `data` is owned by this function (per the contract);
     // every return path frees it via the drop. Subsequent `&[u8]` /
@@ -2136,16 +2129,8 @@ pub unsafe extern "C" fn load_morloc_data_file(
 ) -> *mut c_void {
     clear_errmsg(errmsg);
 
-    extern "C" {
-        fn read_json_with_schema(
-            dest: *mut u8, json: *mut c_char, schema: *const CSchema,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
-        fn unpack_with_schema(
-            mpk: *const c_char, mpk_size: usize, schema: *const CSchema,
-            mlcptr: *mut *mut c_void, errmsg: *mut *mut c_char,
-        ) -> i32;
-    }
+    use crate::json_ffi::read_json_with_schema;
+    use crate::ffi::unpack_with_schema;
 
     if data_size == 0 {
         set_errmsg(errmsg, &MorlocError::Other("Cannot parse 0-length data".into()));
@@ -2630,13 +2615,8 @@ unsafe fn parse_cli_data_argument_classified(
 ) -> *mut u8 {
     clear_errmsg(errmsg);
 
-    extern "C" {
-        fn read_json_with_schema(
-            dest: *mut u8, json: *mut c_char, schema: *const CSchema,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
-        fn read_binary_fd(file: *mut libc::FILE, file_size: *mut usize, errmsg: *mut *mut c_char) -> *mut u8;
-    }
+    use crate::json_ffi::read_json_with_schema;
+    use crate::utility::read_binary_fd;
 
     let rs = CSchema::to_rust(schema);
     let mut err: *mut c_char = ptr::null_mut();
@@ -3287,13 +3267,7 @@ pub unsafe extern "C" fn parse_cli_data_argument_list(
 /// formatted but without any caller-specific prefix). The buffer must
 /// be `libc::free`'d by the caller on success.
 unsafe fn read_path_into_libc(path: *const c_char) -> Result<(*mut u8, usize), String> {
-    extern "C" {
-        fn read_binary_fd(
-            file: *mut libc::FILE,
-            file_size: *mut usize,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
-    }
+    use crate::utility::read_binary_fd;
     if path.is_null() {
         return Err("null path".into());
     }
@@ -3325,13 +3299,7 @@ unsafe fn read_argv_bytes(
     arg: *mut c_char,
     errmsg: *mut *mut c_char,
 ) -> Option<(*mut u8, usize, ArgSource)> {
-    extern "C" {
-        fn read_binary_fd(
-            file: *mut libc::FILE,
-            file_size: *mut usize,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
-    }
+    use crate::utility::read_binary_fd;
 
     let classified = match classify_arg_source(arg) {
         Ok(c) => c,
@@ -3586,14 +3554,7 @@ unsafe fn dispatch_shape_core(
             *data
         };
         if first_byte == b'[' {
-            extern "C" {
-                fn read_json_with_schema(
-                    dest: *mut u8,
-                    json: *mut c_char,
-                    schema: *const CSchema,
-                    errmsg: *mut *mut c_char,
-                ) -> *mut u8;
-            }
+            use crate::json_ffi::read_json_with_schema;
             // Ensure NUL-termination for the C parser. `read_argv_bytes`
             // returned an exact-length libc allocation without a
             // sentinel; grow by one and write `\0` at the end.
