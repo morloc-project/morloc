@@ -50,6 +50,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Imperative
 
     -- * Full lowering config
   , LowerConfig (..)
+  , LoopResult (..)
   , ArgSite (..)
   , IOwnership (..)
 
@@ -645,15 +646,18 @@ data LowerConfig m = LowerConfig
   , lcMakeIf :: NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> m PoolDocs
   -- ^ origExpr, condDocs, thenDocs, elseDocs -> result PoolDocs
   -- Produces language-specific if/else structure using a temp result variable
-  , lcMakeLoop :: [Int] -> LoopBody PoolDocs PoolDocs -> m PoolDocs
-  -- ^ Native tail-loop assembly. Args: loop-carried native local ids, and the
-  -- loop body as a 'LoopBody' tree whose leaves are already lowered to
-  -- 'PoolDocs'. Emits @while(1){ <walk the tree: guards -> if/else, lets ->
-  -- assignments, LoopBase -> result = base; break, LoopContinue -> reassign the
-  -- loop-locals via temps> }@. The result 'PoolDocs' carries the loop as prior
-  -- lines with the return flag set (a base value is the manifold's return).
-  -- Loop-carried locals are the manifold's native param vars (@nvarNamer id@),
-  -- deserialized once by the manifold prologue and reassigned each iteration.
+  , lcMakeLoop :: LoopResult -> [(Int, Maybe PoolDocs)] -> LoopBody PoolDocs PoolDocs PoolDocs -> m PoolDocs
+  -- ^ Tail-loop assembly. Args: what a base leaf yields; each loop-carried
+  -- native local id, with the value it starts from when the loop declares
+  -- it; and the loop body as a 'LoopBody' tree whose leaves are already
+  -- lowered to 'PoolDocs'. Emits @while(1){ <walk the tree: guards -> if/else,
+  -- lets -> assignments, LoopBase -> result = base; break, LoopContinue ->
+  -- reassign the loop-locals via temps> }@. The result 'PoolDocs' carries the
+  -- loop as prior lines with the return flag set (a base value is the
+  -- manifold's return). In a serial loop the locals are the manifold's
+  -- native param vars (@nvarNamer id@), deserialized once by the manifold
+  -- prologue; in a native loop they are declared from their initializers,
+  -- since the parameters are read-only.
   , lcMakeDoBlock :: TypeF -> [MDoc] -> MDoc -> m ([MDoc], MDoc)
   -- ^ type -> prior statements -> return expression -> (hoisted lines,
   -- suspended-thunk expression). Monadic so a language whose thunk form
@@ -919,6 +923,10 @@ expandDeserialize cfg v0 s0
         )
     construct _ _ = error "Unreachable in expandDeserialize"
 
+-- | What a tail loop's base leaves yield: a packet (a loop that is a pool's
+-- serial entry) or a native value of the given type (a loop's native entry).
+data LoopResult = LoopResultSerial | LoopResultNative TypeF
+
 -- | Lower a serial expression to PoolDocs via the IR.
 lowerSerialExpr ::
   (Monad m) =>
@@ -947,10 +955,10 @@ lowerSerialExpr cfg (ReturnS (BndVarS _ _)) (ReturnS_ x) =
   return $ x {poolExpr = lcDupPacket cfg (poolExpr x), poolReturnFlag = True}
 lowerSerialExpr _ _ (ReturnS_ x) = return $ x {poolReturnFlag = True}
 lowerSerialExpr cfg (LoopS _ _ origBody) (LoopS_ _ ids body) = do
-  body' <- adaptLoopBodyOwned cfg origBody body
-  lcMakeLoop cfg ids body'
+  body' <- adaptLoopBodyOwned cfg (\_ d -> return d) origBody body
+  lcMakeLoop cfg LoopResultSerial [(i, Nothing) | i <- ids] body'
 lowerSerialExpr cfg _ (LoopS_ _ ids body) =
-  lcMakeLoop cfg ids body
+  lcMakeLoop cfg LoopResultSerial [(i, Nothing) | i <- ids] body
 lowerSerialExpr cfg (SerialLetS _ (SerializeS _ _) _) (SerialLetS_ i e1 e2) = do
   -- The let RHS is a SerializeS, so the bound variable owns a put_value
   -- tracker entry. Wrap the body to bind its result to a temp helper var,
@@ -1160,7 +1168,7 @@ scanSE (SerializeS _ e) = scanNE e
 -- on every iteration. They are manifold parameters and so never candidates,
 -- but counting them keeps that a consequence of the scan rather than of where
 -- the parameters happen to come from.
-scanSE (LoopS _ carried body) = mconcat (map scanUse carried) <> scanLoop body
+scanSE (LoopS _ carried body) = mconcat (map scanUse carried) <> scanLoop scanSE body
 
 scanSA :: SerialArg -> ConsumeScan
 scanSA (SerialArgManifold sm) = scanSM sm
@@ -1173,12 +1181,14 @@ scanNA (NativeArgExpr e) = scanNE e
 -- A loop-carried local is a manifold parameter, and a let inside a loop body
 -- is emitted without consulting the binding decision, so a projection there
 -- is recorded as a definition and a use but never as a candidate.
-scanLoop :: LoopBody NativeExpr SerialExpr -> ConsumeScan
-scanLoop (LoopIf e t f) = scanNE e <> scanLoop t <> scanLoop f
-scanLoop (LoopNLet i rhs body) = scanDef i rhs <> scanNE rhs <> scanLoop body
-scanLoop (LoopSLet _ e body) = scanSE e <> scanLoop body
-scanLoop (LoopBase e) = scanSE e
-scanLoop (LoopContinue es) = mconcat (map scanNE es)
+scanLoop :: (b -> ConsumeScan) -> LoopBody NativeExpr SerialExpr b -> ConsumeScan
+scanLoop scanB = go
+  where
+    go (LoopIf e t f) = scanNE e <> go t <> go f
+    go (LoopNLet i rhs body) = scanDef i rhs <> scanNE rhs <> go body
+    go (LoopSLet _ e body) = scanSE e <> go body
+    go (LoopBase e) = scanB e
+    go (LoopContinue es) = mconcat (map scanNE es)
 
 scanNE :: NativeExpr -> ConsumeScan
 scanNE (ManN nm) = scanNM nm
@@ -1189,6 +1199,7 @@ scanNE (NativeLetN i rhs body) = scanLet i rhs <> scanNE rhs <> scanNE body
 scanNE (LetVarN _ i) = scanUse i
 scanNE (BndVarN _ i) = scanUse i
 scanNE (DeserializeN _ _ e) = scanSE e
+scanNE (LoopN _ starts lbody) = mconcat (map (scanUse . fst) starts) <> mconcat (map (scanNE . snd) starts) <> scanLoop scanNE lbody
 scanNE (ExeN _ _) = mempty
 scanNE (ListN _ _ es) = mconcat (map scanNE es)
 scanNE (TupleN _ es) = mconcat (map scanNE es)
@@ -1274,10 +1285,11 @@ adaptOwnedElems cfg origEs xs
 adaptLoopBodyOwned ::
   (Monad m) =>
   LowerConfig m ->
-  LoopBody NativeExpr SerialExpr ->
-  LoopBody PoolDocs PoolDocs ->
-  m (LoopBody PoolDocs PoolDocs)
-adaptLoopBodyOwned cfg origBody body = go origBody body
+  (b -> PoolDocs -> m PoolDocs) ->
+  LoopBody NativeExpr SerialExpr b ->
+  LoopBody PoolDocs PoolDocs PoolDocs ->
+  m (LoopBody PoolDocs PoolDocs PoolDocs)
+adaptLoopBodyOwned cfg adaptBase origBody body = go origBody body
   where
     go (LoopIf _ ot oe) (LoopIf c t e) = LoopIf c <$> go ot t <*> go oe e
     go (LoopNLet _ orhs ob) (LoopNLet i rhs b) =
@@ -1286,6 +1298,7 @@ adaptLoopBodyOwned cfg origBody body = go origBody body
       rhs' <- ownLoopPacket i orhs rhs
       LoopSLet i rhs' <$> go ob b
     go (LoopContinue ones) (LoopContinue pds) = LoopContinue <$> adaptOwnedElems cfg ones pds
+    go (LoopBase ob) (LoopBase d) = LoopBase <$> adaptBase ob d
     go _ lowered = return lowered
 
     -- A packet a serial let makes each iteration is released when the
@@ -1985,6 +1998,15 @@ lowerNativeExprRaw _ _ (IntrinsicN_ _ intr _ _) =
 -- expression evaluates to optional<wireT> (e.g. the wire form returned
 -- by @load), and we produce optional<userT> by applying `src` to the
 -- inner value when present.
+-- A native tail loop: its locals start from their initializers (owned
+-- copies of the manifold's read-only parameters) and a base leaf is the
+-- loop's native value, an owned sink like any returned value.
+lowerNativeExprRaw cfg (LoopN t origInits origBody) (LoopN_ _ starts body) = do
+  starts' <- zipWithM (\(_, oe) (i, d) -> (,) i . Just <$> adaptOwnedElem cfg oe d) origInits starts
+  body' <- adaptLoopBodyOwned cfg (adaptOwnedElem cfg) origBody body
+  lcMakeLoop cfg (LoopResultNative t) starts' body'
+lowerNativeExprRaw _ _ (LoopN_ {}) =
+  error "morloc bug: a native loop lowered without its original expression"
 lowerNativeExprRaw cfg origExpr (MapOptionalN_ _ wireTf src innerDocs) = do
   idx <- lcNewIndex cfg
   -- Result type: optional<userT>. origExpr's TypeF is the outer

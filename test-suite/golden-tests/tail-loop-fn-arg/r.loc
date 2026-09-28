@@ -1,0 +1,19 @@
+module main (goF)
+
+import root
+import root-r
+
+-- A tail loop that takes a function argument, called from its own pool with
+-- a lambda that captures a value. The loop and the lambda live in one pool,
+-- so applying the lambda must not leave the pool's process.
+--
+-- MORLOC_FORBID_SELF_CALL makes a pool calling its own socket fail. The loop
+-- must pass under it in every language; the guard itself is unit-tested in
+-- the runtime (self_call_tests).
+
+sumF :: (Int -> Int) -> Int -> Int -> Int
+sumF f acc n = ? n == 0 = acc : sumF f (acc + f n) (n - 1)
+
+--' Sum of (i + k) for i in 1..n, plus one
+goF :: Int -> Int -> Int
+goF k n = 1 + sumF (\x -> x + k) 0 n

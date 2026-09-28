@@ -289,17 +289,17 @@ addNativeRecEntries phs = do
                 _ -> body
           return $ PolyHead lang midx args (PolyManifold lang midx' (ManifoldFull args) Preserved native)
 
-    -- A body whose shape already commits the manifold to something else.
-    -- A loop carries its slots against the head's own form and has no
-    -- round trip left to remove; an observability hook (a label, a cache,
-    -- a debug wrap) is keyed to the manifold's own ID and would move with
-    -- the body.
+    -- A body whose shape already commits the manifold to something else: an
+    -- observability hook (a label, a cache, a debug wrap) is keyed to the
+    -- manifold's own ID and would move with the body. A loop is split like
+    -- any other body: its serial entry serializes every argument, and a
+    -- function argument would then be applied through this pool's own
+    -- socket on every iteration.
     splittable :: PolyExpr -> Bool
     splittable e
-      | crosses e = False
+      | crosses e && not (isLoop e) = False
       | otherwise = go e
       where
-        go (PolyLoop {}) = False
         go (PolyCacheBody {}) = False
         go (PolyDebugWrap {}) = False
         go (PolyManifold _ _ _ Preserved _) = False
@@ -309,17 +309,23 @@ addNativeRecEntries phs = do
 
     -- A body that reaches another pool serializes on that path, so at least
     -- one of its arguments is wanted in both forms; the entry takes one
-    -- value per argument and could not supply both.
+    -- value per argument and could not supply both. A loop is exempt: its
+    -- native entry copies every argument into a native local and serializes
+    -- a local for a crossing where it is used, on every iteration.
     crosses :: PolyExpr -> Bool
     crosses (PolyRemoteInterface {}) = True
     crosses e = any crosses (polySubExprs e)
 
+    -- A body that is a tail loop, under structural wrappers.
+    isLoop :: PolyExpr -> Bool
+    isLoop (PolyLoop {}) = True
+    isLoop (PolyManifold _ _ _ _ x) = isLoop x
+    isLoop (PolyReturn x) = isLoop x
+    isLoop _ = False
+
 -- | Whether a driver language can host a native tail-loop. Python/R lower via
--- 'genericMakeLoop'; C++ via the member's 'lcMakeLoop' (non-const native locals
--- reassigned in place). Rust is excluded: its borrow checker + single-assignment
--- last-use pass reject in-place reassignment of a loop-carried local (its
--- 'lcMakeLoop' is a matching fail-loud stub). Single source of truth for the
--- gate.
+-- 'genericMakeLoop'; C++ and Rust via the member's 'lcMakeLoop' (non-const
+-- native locals reassigned in place). Single source of truth for the gate.
 langSupportsNativeLoop :: Lang -> Bool
 langSupportsNativeLoop lang = langName lang `elem` ["py", "r", "cpp", "rust"]
 

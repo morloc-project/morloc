@@ -29,6 +29,7 @@ import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Monad as MM
 import qualified Data.Set as Set
 import qualified Control.Monad as CM
+import Morloc.CodeGenerator.Grammars.Common (renameNE, renameSE)
 
 {- | This step is performed after segmentation, so all terms are in the same
 language. Here we need to determine where inputs are (de)serialized and the
@@ -235,35 +236,50 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     -- a value/base position is a compiler bug -- 'nativeExpr' rejects it loud.
     serialExpr m (MonoLoop t ids body) = do
       t' <- inferType t
-      LoopS t' ids <$> buildLoopBody body
-      where
-        buildLoopBody :: MonoExpr -> MorlocMonad (LoopBody NativeExpr SerialExpr)
-        buildLoopBody (MonoIf cond thenB elseB) = do
-          condNe <- nativeExpr m cond
-          LoopIf condNe <$> buildLoopBody thenB <*> buildLoopBody elseB
-        buildLoopBody (MonoReturn e) = buildLoopBody e
-        -- Descend a do-block on the continue path: its inner binds (per-iteration
-        -- effects) become loop-body lets emitted before the continue reassignment.
-        buildLoopBody (MonoLoopContinue args)
-          | length args == length ids = LoopContinue <$> mapM (nativeExpr m) args
-          | otherwise = error $
-              "morloc bug: MonoLoopContinue arity " <> show (length args)
-                <> " does not match loop-carried ids " <> show (length ids)
-        buildLoopBody (MonoLet i e1 e2) =
-          let (m1, e1') = unwrapLetDef m e1
-           in case inferState e1 of
-                Serialized -> LoopSLet i <$> serialExpr m1 e1' <*> buildLoopBody e2
-                Unserialized -> do
-                  ne1 <- nativeExpr m1 e1'
-                  LoopNLet i ne1 <$> buildLoopBody e2
-        -- Any other leaf is a base case: serialize the CURRENT native value.
-        buildLoopBody base =
-          LoopBase <$> (nativeExpr m base >>= serializeS "loop base" m)
+      LoopS t' ids <$> buildLoopBody m ids (\base -> nativeExpr m base >>= serializeS "loop base" m) body
     serialExpr _ (MonoLoopContinue {}) = error "morloc: MonoLoopContinue reached serialExpr outside MonoLoop extraction"
     serialExpr _ (MonoExe _ _) = error "Can represent MonoSrc as SerialExpr"
     serialExpr _ MonoPoolCall {} = error "MonoPoolCall does not map to a SerialExpr"
     serialExpr _ (MonoApp MonoManifold {} _) = error "Illegal?"
     serialExpr m e = nativeExpr m e >>= serializeS "serialE e" m
+
+    -- Walk a loop body -- a decision tree of guards ('MonoIf') and lets over
+    -- base and continue leaves -- into a 'LoopBody'. Guards, continue values
+    -- and let right-hand sides are lowered through 'nativeExpr' over the
+    -- loop-carried native locals ('ids') so they read their current
+    -- (reassigned) values; a base leaf is built by @base@ from the current
+    -- native value (serialized for a 'LoopS', kept native for a 'LoopN').
+    -- 'addLoopWraps' has gated to a well-formed loop body (every
+    -- 'MonoLoopContinue' reachable in a tail position), so a continue in a
+    -- value/base position is a compiler bug -- 'nativeExpr' rejects it loud.
+    buildLoopBody ::
+      Int ->
+      [Int] ->
+      (MonoExpr -> MorlocMonad b) ->
+      MonoExpr ->
+      MorlocMonad (LoopBody NativeExpr SerialExpr b)
+    buildLoopBody m ids base = go
+      where
+        go (MonoIf cond thenB elseB) = do
+          condNe <- nativeExpr m cond
+          LoopIf condNe <$> go thenB <*> go elseB
+        go (MonoReturn e) = go e
+        -- Descend a do-block on the continue path: its inner binds (per-iteration
+        -- effects) become loop-body lets emitted before the continue reassignment.
+        go (MonoLoopContinue args)
+          | length args == length ids = LoopContinue <$> mapM (nativeExpr m) args
+          | otherwise = error $
+              "morloc bug: MonoLoopContinue arity " <> show (length args)
+                <> " does not match loop-carried ids " <> show (length ids)
+        go (MonoLet i e1 e2) =
+          let (m1, e1') = unwrapLetDef m e1
+           in case inferState e1 of
+                Serialized -> LoopSLet i <$> serialExpr m1 e1' <*> go e2
+                Unserialized -> do
+                  ne1 <- nativeExpr m1 e1'
+                  LoopNLet i ne1 <$> go e2
+        -- Any other leaf is a base case.
+        go e = LoopBase <$> base e
 
     serialArg ::
       Int ->
@@ -302,7 +318,21 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
       form' <- abimapM (\i _ -> contextArg i) (\i _ -> boundArg i) form
       return . ManN $ NativeManifold m lang form' ne
     nativeExpr _ MonoPoolCall {} = error "MonoPoolCall does not map to NativeExpr"
-    nativeExpr _ (MonoLoop {}) = error "morloc bug: MonoLoop in native position (loops are serial-only)"
+    -- The native entry of a loop called from its own pool: native arguments
+    -- in, a native value out. The manifold's parameters are read-only, so the
+    -- loop reassigns fresh locals initialized from them; the body is renamed
+    -- to those locals.
+    nativeExpr m (MonoLoop t ids body) = do
+      t' <- inferType t
+      body0 <- buildLoopBody m ids (nativeExpr m) body
+      carried <- case firstContinue body0 of
+        Just nes | length nes == length ids -> return (map typeFof nes)
+        _ -> MM.throwCompilerBug "a native loop has no back-edge to type its locals"
+      fresh <- mapM (const MM.getCounter) ids
+      let rename b (i, i') = trimap (renameNE i i') (renameSE i i') (renameNE i i') b
+          body1 = foldl rename body0 (zip ids fresh)
+          starts = [(i', BndVarN tf i) | (i, i', tf) <- zip3 ids fresh carried]
+      return (LoopN t' starts body1)
     nativeExpr _ (MonoLoopContinue {}) = error "morloc bug: MonoLoopContinue in native position"
     nativeExpr m (MonoLet i e1 e2) =
       let (m1, e1') = unwrapLetDef m e1
@@ -1074,21 +1104,9 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
           e' <- letWrap m form' reqForced e
           return (req', SerialManifold m lang form' headForm e')
 
-    -- First 'LoopContinue' leaf on the body spine (the back-edge reachable
-    -- without descending into a base). Shared by 'carriedTypes' below and the
-    -- 'LoopS_' handler.
-    firstContinue :: LoopBody ne se -> Maybe [ne]
-    firstContinue (LoopContinue nes) = Just nes
-    firstContinue (LoopIf _ a b) = case firstContinue a of
-      (Just x) -> Just x
-      Nothing -> firstContinue b
-    firstContinue (LoopNLet _ _ b) = firstContinue b
-    firstContinue (LoopSLet _ _ b) = firstContinue b
-    firstContinue (LoopBase _) = Nothing
-
     -- Native types of loop-carried slots, read positionally from the continue
     -- value that reassigns each slot. Requires the wired body (native leaves).
-    carriedTypes :: [Int] -> LoopBody NativeExpr se -> Maybe (Map.Map Int TypeF)
+    carriedTypes :: [Int] -> LoopBody NativeExpr se b -> Maybe (Map.Map Int TypeF)
     carriedTypes ids body = Map.fromList . zip ids . map typeFof <$> firstContinue body
 
     -- 'carriedTypes' resolved on a manifold body spine; 'Nothing' if the body has
@@ -1193,6 +1211,31 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
     --   (a) force every carried slot 'NativeContent' so 'letWrap' deserializes
     --       each entry packet into that native local.
     wireSerialExpr (LoopS_ t ids body) = do
+      (mergedReq, body') <- wireLoop ids body
+      -- (a) force every carried slot 'NativeContent' so 'letWrap' deserializes
+      -- each entry packet into the native local the continue reassigns.
+      let req' = Map.union (Map.fromList [(i, NativeContent) | i <- ids]) mergedReq
+      return (req', LoopS t ids body')
+    wireSerialExpr e = monoidSerialExpr defs e
+
+    -- Wire a loop body (serial 'LoopS' or native 'LoopN'), returning the
+    -- merged request map of its leaves and the rewired body. The default
+    -- 'monoidSerialExpr' would rebuild a loop body verbatim, skipping the
+    -- serial<->native wiring the other cases get. Two fixes:
+    --   (c) an internal 'LoopSLet' consumed natively downstream (a foreign-call
+    --       result destructured by a '.0'/'.1' projection) is naturalized,
+    --       mirroring the non-loop 'SerialLetS_' reconciliation.
+    --   (b) a carried slot used serially (a foreign-call argument, read by index
+    --       's<i>') is stale after the first iteration. Re-serialize the CURRENT
+    --       native value at the top of every iteration ('LoopSLet i (serialize
+    --       (BndVarN i))'). The carried native type comes from the continue
+    --       value that reassigns the slot.
+    -- The caller forces the carried slots native where they are bound.
+    wireLoop ::
+      [Int] ->
+      LoopBody (D NativeExpr) (D SerialExpr) (D b) ->
+      MorlocMonad (Map.Map Int Request, LoopBody NativeExpr SerialExpr b)
+    wireLoop ids body = do
       (mergedReq, body') <- wireLoopBody body
       let carriedTM = maybe Map.empty id (carriedTypes ids body')
           serialUsed = [i | i <- Map.keys carriedTM, serialish (Map.lookup i mergedReq)]
@@ -1209,10 +1252,7 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
           )
           body'
           serialUsed
-      -- (a) force every carried slot 'NativeContent' so 'letWrap' deserializes
-      -- each entry packet into the native local the continue reassigns.
-      let req' = Map.union (Map.fromList [(i, NativeContent) | i <- ids]) mergedReq
-      return (req', LoopS t ids body'')
+      return (mergedReq, body'')
       where
         serialish (Just SerialContent) = True
         serialish (Just NativeAndSerialContent) = True
@@ -1264,10 +1304,9 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
               return (LoopSLet i se (LoopNLet i ne1 b'))
             _ -> return (LoopSLet i se b')
           return (Map.unionWith (<>) rs rb, leaf)
-        wireLoopBody (LoopBase (rb, se)) = return (rb, LoopBase se)
+        wireLoopBody (LoopBase (rb, x)) = return (rb, LoopBase x)
         wireLoopBody (LoopContinue nes) =
           return (Map.unionsWith (<>) (map fst nes), LoopContinue (map snd nes))
-    wireSerialExpr e = monoidSerialExpr defs e
 
     wireNativeExpr ::
       NativeExpr_ (D NativeManifold) (D SerialExpr) (D NativeExpr) (D SerialArg) (D NativeArg) ->
@@ -1309,6 +1348,15 @@ wireSerial lang sm0@(SerialManifold m0 _ _ _ _) = foldSerialManifoldM fm sm0 |>>
           return $ NativeLetN i ne1 (SerialLetN i sv ne2)
         _ -> return $ NativeLetN i ne1 ne2
       return (req', e')
+    -- A native loop's carried locals are bound by the loop itself, so they
+    -- leave the request map here; what the loop asks of the enclosing scope
+    -- is what its initializers read.
+    wireNativeExpr (LoopN_ t starts body) = do
+      let fresh = map fst starts
+      (mergedReq, body') <- wireLoop fresh body
+      let initReq = Map.unionsWith (<>) (map (fst . snd) starts)
+          req' = Map.unionWith (<>) initReq (foldr Map.delete mergedReq fresh)
+      return (req', LoopN t (map (second snd) starts) body')
     wireNativeExpr e = monoidNativeExpr defs e
 
     specialize :: Map.Map Int Request -> Int -> Or TypeS TypeF -> Or TypeS TypeF
@@ -1408,4 +1456,6 @@ data SerializationState = Serialized | Unserialized
 endsInReturn :: MonoExpr -> Bool
 endsInReturn (MonoReturn _) = True
 endsInReturn (MonoLet _ _ e2) = endsInReturn e2
+-- A loop's value is the manifold's result: every base leaf breaks out with it.
+endsInReturn (MonoLoop {}) = True
 endsInReturn _ = False

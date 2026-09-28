@@ -626,13 +626,39 @@ pub unsafe extern "C" fn mlc_set_self_socket(socket_path: *const c_char) {
     }
 }
 
-/// Compared component by component, so `dir/x` and `dir//x` or a trailing
-/// separator on the directory still match.
 fn is_self_socket(socket_path: *const c_char) -> bool {
     let target = std::path::PathBuf::from(unsafe { CStr::from_ptr(socket_path) }.to_string_lossy().into_owned());
     match SELF_SOCKET.lock() {
-        Ok(s) => s.as_ref().is_some_and(|own| own.components().eq(target.components())),
+        Ok(s) => same_socket(s.as_deref(), &target),
         Err(_) => false,
+    }
+}
+
+/// Compared component by component, so `dir/x` and `dir//x` or a trailing
+/// separator on the directory still match.
+fn same_socket(own: Option<&std::path::Path>, target: &std::path::Path) -> bool {
+    own.is_some_and(|own| own.components().eq(target.components()))
+}
+
+#[cfg(test)]
+mod self_call_tests {
+    use super::same_socket;
+    use std::path::Path;
+
+    #[test]
+    fn a_pool_recognizes_its_own_socket_however_it_is_spelled() {
+        let own = Path::new("/tmp/morloc.abc/pipe-cpp");
+        assert!(same_socket(Some(own), Path::new("/tmp/morloc.abc/pipe-cpp")));
+        assert!(same_socket(Some(own), Path::new("/tmp/morloc.abc//pipe-cpp")));
+        assert!(same_socket(Some(own), Path::new("/tmp/morloc.abc/./pipe-cpp")));
+    }
+
+    #[test]
+    fn another_pool_or_no_registration_is_not_a_self_call() {
+        let own = Path::new("/tmp/morloc.abc/pipe-cpp");
+        assert!(!same_socket(Some(own), Path::new("/tmp/morloc.abc/pipe-py")));
+        assert!(!same_socket(Some(own), Path::new("/tmp/morloc.xyz/pipe-cpp")));
+        assert!(!same_socket(None, Path::new("/tmp/morloc.abc/pipe-cpp")));
     }
 }
 

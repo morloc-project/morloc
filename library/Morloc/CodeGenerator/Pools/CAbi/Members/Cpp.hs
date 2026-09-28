@@ -34,7 +34,8 @@ import qualified Data.Text as T
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
-  ( consumableProjectionLets
+  ( LoopResult (..)
+  , consumableProjectionLets
   , papplySteps
   , containsClosure
   , IType (..)
@@ -766,11 +767,11 @@ recordAccess record field = record <> "." <> field
 -- Guards -> if/else; native/serial lets -> @auto@ locals; a base leaf ->
 -- @resultVar = <base>; break;@; a continue leaf -> compute each new value into
 -- an @auto@ temp, then move it into the loop-carried local.
-cppWalkLoopBody :: MDoc -> [Int] -> LoopBody PoolDocs PoolDocs -> CppTranslatorM [MDoc]
-cppWalkLoopBody resultVar ids = go
+cppWalkLoopBody :: (MDoc -> MDoc) -> [Int] -> LoopBody PoolDocs PoolDocs PoolDocs -> CppTranslatorM [MDoc]
+cppWalkLoopBody setResult ids = go
   where
     go (LoopBase seDocs) =
-      return $ poolPriorLines seDocs <> [resultVar <+> "=" <+> poolExpr seDocs <> ";", "break;"]
+      return $ poolPriorLines seDocs <> [setResult (poolExpr seDocs), "break;"]
     go (LoopContinue contDocs) = do
       tmpVars <- map helperNamer <$> mapM (const getCounter) contDocs
       let priors = concatMap poolPriorLines contDocs
@@ -956,24 +957,36 @@ PROPAGATE_ERROR(errmsg)|]
     , lcDupPacket = \e -> "_dup_packet(" <> e <> ")"
     , lcOwnedArg = \e -> "mlc::Packet(" <> e <> ").get()"
     , lcOwnPacketDecl = \v e -> Just ("mlc::Packet" <+> v <> "(" <> e <> ");", v <> ".get()")
-    , lcMakeLoop = \ids body -> do
-        -- Native tail-loop. Walk the 'LoopBody' tree into C++ control flow. The
-        -- loop-carried vars are the manifold's deserialized native locals
-        -- ('nvarNamer id'), non-const, reassigned in place; each continue value
-        -- goes into an 'auto' temp before any loop-local is reassigned (parallel-
-        -- assignment hazard), then MOVED in to avoid a per-iteration deep copy.
-        -- 'resultVar' inits to nullptr so a control path reaching the trailing
-        -- return without a break is defined (and to silence -Wmaybe-uninitialized).
+    , lcMakeLoop = \res carried body -> do
+        -- Tail-loop. Walk the 'LoopBody' tree into C++ control flow. The
+        -- loop-carried vars are native locals ('nvarNamer id'), non-const,
+        -- reassigned in place: the manifold's deserialized parameters in a
+        -- serial loop, copies of its read-only parameters in a native one.
+        -- Each continue value goes into an 'auto' temp before any loop-local
+        -- is reassigned (parallel-assignment hazard), then MOVED in to avoid a
+        -- per-iteration deep copy. A serial result inits to nullptr so a
+        -- control path reaching the trailing return without a break is
+        -- defined; a native one is an optional, since the value's type need
+        -- not be default-constructible.
         resultIdx <- getCounter
         let resultVar = helperNamer resultIdx
-        bodyLines <- cppWalkLoopBody resultVar ids body
-        let resultDecl = "uint8_t*" <+> resultVar <+> "= nullptr;"
-            whileDoc = vsep ["while (true) {", indent 4 (vsep bodyLines), "}"]
-            leaves = loopBodyLeaves body
+            ids = map fst carried
+            initLines = concat [poolPriorLines d <> ["auto" <+> nvarNamer i <+> "=" <+> poolExpr d <> ";"] | (i, Just d) <- carried]
+        (resultDecl, setResult, resultExpr) <- case res of
+          LoopResultSerial ->
+            return ("uint8_t*" <+> resultVar <+> "= nullptr;", \e -> resultVar <+> "=" <+> e <> ";", resultVar)
+          LoopResultNative t -> do
+            tStr <- cppTypeOf t
+            return ( "std::optional<" <> tStr <> ">" <+> resultVar <> ";"
+                   , \e -> resultVar <> ".emplace(" <> e <> ");"
+                   , "std::move(*" <> resultVar <> ")" )
+        bodyLines <- cppWalkLoopBody setResult ids body
+        let whileDoc = vsep ["while (true) {", indent 4 (vsep bodyLines), "}"]
+            leaves = loopBodyLeaves body <> [d | (_, Just d) <- carried]
         return $ PoolDocs
           { poolCompleteManifolds = concatMap poolCompleteManifolds leaves
-          , poolExpr = resultVar
-          , poolPriorLines = [resultDecl, whileDoc]
+          , poolExpr = resultExpr
+          , poolPriorLines = initLines <> [resultDecl, whileDoc]
           , poolPriorExprs = concatMap poolPriorExprs leaves
           , poolReturnFlag = True
           }

@@ -29,7 +29,8 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
-  ( containsClosure
+  ( LoopResult (..)
+  , containsClosure
   , IAccessor (..)
   , IExpr (..)
   , IOwnership (..)
@@ -991,21 +992,25 @@ genericMakeIf desc cfg _ condDocs thenDocs elseDocs = do
 genericMakeLoop ::
   LangDescriptor ->
   LowerConfig IndexM ->
-  [Int] ->
-  LoopBody PoolDocs PoolDocs ->
+  LoopResult ->
+  [(Int, Maybe PoolDocs)] ->
+  LoopBody PoolDocs PoolDocs PoolDocs ->
   IndexM PoolDocs
-genericMakeLoop desc cfg ids body = do
+genericMakeLoop desc cfg _ carried body = do
   resultIdx <- lcNewIndex cfg
   let resultVar = helperNamer resultIdx
-  bodyLines <- walkLB resultVar body
-  let resultDecl = resultVar <+> assign <+> pretty (ldNullLiteral desc)
+      ids = map fst carried
+  bodyLines <- walkLB ids resultVar body
+  -- A native loop's locals start from their initializers.
+  let initLines = concat [poolPriorLines d <> [nvarNamer i <+> assign <+> poolExpr d] | (i, Just d) <- carried]
+      resultDecl = resultVar <+> assign <+> pretty (ldNullLiteral desc)
       whileDoc = renderWhile bodyLines
-      leaves = loopBodyLeaves body
+      leaves = loopBodyLeaves body <> [d | (_, Just d) <- carried]
   return $
     PoolDocs
       { poolCompleteManifolds = concatMap poolCompleteManifolds leaves
       , poolExpr = resultVar
-      , poolPriorLines = [resultDecl, whileDoc]
+      , poolPriorLines = initLines <> [resultDecl, whileDoc]
       , poolPriorExprs = concatMap poolPriorExprs leaves
       , poolReturnFlag = True
       }
@@ -1013,7 +1018,7 @@ genericMakeLoop desc cfg ids body = do
     assign = pretty (ldAssignOp desc)
     trueLit = pretty (ldBoolTrue desc)
     -- Emit the statements for one loop-body subtree.
-    walkLB resultVar = go
+    walkLB ids resultVar = go
       where
         go (LoopBase seDocs) =
           return $ poolPriorLines seDocs <> [resultVar <+> assign <+> poolExpr seDocs, "break"]

@@ -16,6 +16,8 @@ helpers, and the fold framework ('FoldRules', 'foldWithSerialManifoldM').
 -}
 module Morloc.CodeGenerator.Grammars.Common
   ( invertSerialManifold
+  , renameNE
+  , renameSE
   , PoolDocs (..)
   , mergePoolDocs
 
@@ -390,6 +392,7 @@ renameNE old new = go where
   go (IfN t c th el) = IfN t (go c) (go th) (go el)
   go (IntrinsicN t intr msch nes) = IntrinsicN t intr msch (map go nes)
   go (MapOptionalN t wt src ne) = MapOptionalN t wt src (go ne)
+  go (LoopN t starts body) = LoopN t (map (\(i, e) -> (ri i, go e)) starts) (trimap go (renameSE old new) go body)
   goA (NativeArgManifold nm) = NativeArgManifold (renameNM old new nm)
   goA (NativeArgExpr ne) = NativeArgExpr (go ne)
 
@@ -409,7 +412,7 @@ renameSE old new = go where
   go (LetVarS mt i) = LetVarS mt (ri i)
   go (BndVarS mt i) = BndVarS mt (ri i)
   go (SerializeS s ne) = SerializeS s (renameNE old new ne)
-  go (LoopS t ids body) = LoopS t (map ri ids) (bimap (renameNE old new) go body)
+  go (LoopS t ids body) = LoopS t (map ri ids) (trimap (renameNE old new) go go body)
   goA (SerialArgManifold sm) = SerialArgManifold (renameSM old new sm)
   goA (SerialArgExpr se) = SerialArgExpr (go se)
 
@@ -520,7 +523,7 @@ invertSerialManifold sm0 =
     -- atomized/hoisted above the loop, where it would run once on a stale
     -- first-iteration value. No loop-invariant hoisting here by design.
     invertSerialExprM (LoopS_ t ids bodyD) =
-      return $ D (LoopS t ids (bimap weave weave bodyD)) []
+      return $ D (LoopS t ids (trimap weave weave weave bodyD)) []
 
     invertNativeExprM ::
       NativeExpr_ (D NativeManifold) (D SerialExpr) (D NativeExpr) (D SerialArg) (D NativeArg) ->
@@ -571,6 +574,13 @@ invertSerialManifold sm0 =
       atomize (IntrinsicN t intr msch (map unD nes)) (concatMap getDeps nes)
     invertNativeExprM (MapOptionalN_ t wt src (D ne lets)) =
       atomize (MapOptionalN t wt src ne) lets
+    -- A native loop is sealed like a serial one (see 'LoopS_'): per-iteration
+    -- work stays inside its leaves. Its initializers run once, before the
+    -- loop, so their dependencies go outward.
+    invertNativeExprM (LoopN_ t starts bodyD) =
+      atomize
+        (LoopN t (map (second unD) starts) (trimap weave weave weave bodyD))
+        (concatMap (getDeps . snd) starts)
 
     invertSerialArgM :: SerialArg_ (D SerialManifold) (D SerialExpr) -> Index (D SerialArg)
     invertSerialArgM (SerialArgManifold_ (D sm deps)) = return $ D (SerialArgManifold sm) deps

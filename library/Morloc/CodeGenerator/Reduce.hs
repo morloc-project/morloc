@@ -58,7 +58,7 @@ reduceSerialExpr ver ts lang (DebugWrapS t mid args body) =
 -- guard/let/base/continue work) but the loop is a scope barrier.
 reduceSerialExpr ver ts lang (LoopS t ids body) =
   LoopS t ids
-    <$> bimapM (reduceNativeExpr ver ts lang) (reduceSerialExpr ver ts lang) body
+    <$> trimapM (reduceNativeExpr ver ts lang) (reduceSerialExpr ver ts lang) (reduceSerialExpr ver ts lang) body
 reduceSerialExpr _ _ _ e = return e
 
 reduceSerialArg :: Text -> Text -> Lang -> SerialArg -> MorlocMonad SerialArg
@@ -112,6 +112,10 @@ reduceNativeExpr ver ts lang (IfN t c th el) =
   IfN t <$> reduceNativeExpr ver ts lang c <*> reduceNativeExpr ver ts lang th <*> reduceNativeExpr ver ts lang el
 reduceNativeExpr ver ts lang (MapOptionalN t wt src ne) =
   MapOptionalN t wt src <$> reduceNativeExpr ver ts lang ne
+reduceNativeExpr ver ts lang (LoopN t starts body) =
+  LoopN t
+    <$> mapM (\(i, e) -> (,) i <$> reduceNativeExpr ver ts lang e) starts
+    <*> trimapM (reduceNativeExpr ver ts lang) (reduceSerialExpr ver ts lang) (reduceNativeExpr ver ts lang) body
 -- leaf nodes
 reduceNativeExpr _ _ _ e = return e
 

@@ -44,7 +44,8 @@ import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.LogTemplate (RenderedTemplate (..), collectRenderedTemplates)
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
-  ( ArgSite (..)
+  ( LoopResult (..)
+  , ArgSite (..)
   , IOwnership (..)
   , LowerConfig (..)
   , buildProgramM
@@ -2336,22 +2337,28 @@ rustMakeLet namer letIndex mt _ p1 p2 = do
 -- computing all temps before any reassignment is safe against the
 -- parallel-assignment hazard (a temp reads a carried var by borrow/clone, never
 -- moving it out from under a later temp).
-rustMakeLoop :: [Int] -> LoopBody PoolDocs PoolDocs -> RustM PoolDocs
-rustMakeLoop ids body = do
+rustMakeLoop :: LoopResult -> [(Int, Maybe PoolDocs)] -> LoopBody PoolDocs PoolDocs PoolDocs -> RustM PoolDocs
+rustMakeLoop res carried body = do
   resultIdx <- getCounter
+  resT <- case res of
+    LoopResultSerial -> return "*mut u8"
+    LoopResultNative t -> rustTypeOf t
   let resultVar = helperNamer resultIdx
   bodyLines <- walk body
-  let loopExpr = vsep ["loop {", indent 4 (vsep bodyLines), "}"]
-      resultDecl = "let" <+> resultVar <> ": *mut u8 =" <+> loopExpr <> ";"
-      leaves = loopBodyLeaves body
+  -- A native loop's locals are its own, started from their initializers.
+  let initLines = concat [poolPriorLines d <> ["let mut" <+> nvarNamer i <+> "=" <+> poolExpr d <> ";"] | (i, Just d) <- carried]
+      loopExpr = vsep ["loop {", indent 4 (vsep bodyLines), "}"]
+      resultDecl = "let" <+> resultVar <> ":" <+> resT <+> "=" <+> loopExpr <> ";"
+      leaves = loopBodyLeaves body <> [d | (_, Just d) <- carried]
   return $ PoolDocs
     { poolCompleteManifolds = concatMap poolCompleteManifolds leaves
     , poolExpr = resultVar
-    , poolPriorLines = [resultDecl]
+    , poolPriorLines = initLines <> [resultDecl]
     , poolPriorExprs = concatMap poolPriorExprs leaves
     , poolReturnFlag = True
     }
   where
+    ids = map fst carried
     walk (LoopBase seDocs) =
       return $ poolPriorLines seDocs <> ["break" <+> poolExpr seDocs <> ";"]
     walk (LoopContinue contDocs) = do

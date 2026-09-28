@@ -1,0 +1,50 @@
+module main (nested, effects, count)
+
+import root
+import root-cpp
+
+-- Shapes a tail loop's native entry must handle, each called from the loop's
+-- own pool: a loop whose body calls another tail loop with the same
+-- function, and an effectful function argument applied on every one of many
+-- iterations (a closure that nested once per iteration would grow without
+-- bound). A loop returning one of its function arguments is not covered: it
+-- fails before this change too (the helper is emitted twice under one id).
+
+inner :: (Int -> Int) -> Int -> Int -> Int
+inner f acc n = ? n == 0 = acc : inner f (acc + f n) (n - 1)
+
+outer :: (Int -> Int) -> Int -> Int -> Int
+outer f acc n = ? n == 0 = acc : outer f (acc + inner f 0 n) (n - 1)
+
+--' Sum over i in 1..n of the sum over j in 1..i of (j + k)
+nested :: Int -> Int -> Int
+nested k n = outer (\x -> x + k) 0 n
+
+emitN :: ([Int] -> <IO> ()) -> Int -> <IO> ()
+emitN sink n = ? n == 0 = do
+    ()
+  : do
+    sink [n]
+    emitN sink (n - 1)
+
+--' Write n one-element batches to a stream file through a sink
+effects :: Str -> Int -> <IO> ()
+effects path n = do
+  Ok o <- @open path
+  emitN (\xs -> do
+    Ok _ <- @try (@write 0 o xs)
+    ()) n
+  @close o
+  ()
+
+countFrom :: IStream Int -> Int -> <IO> Int
+countFrom s acc = do
+  Ok xs <- @next s
+  ? length xs == 0 = do
+      acc
+  : do
+    countFrom s (acc + length xs)
+
+--' Count the elements of a stream file
+count :: IStream Int -> <IO> Int
+count s = countFrom s 0

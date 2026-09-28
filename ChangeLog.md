@@ -1,6 +1,11 @@
 Unreleased
 ----------
 
+ * a tail-recursive function called from its own pool takes its arguments
+   directly: a function passed to it is called in place rather than through
+   the pool's own socket on every iteration (100k iterations: 5 s to 0.2 s),
+   a C++ callback may be passed to such a loop, and draining a stream
+   through a sink works in Python and R pools
  * shared memory is released as soon as a value is read, so a loop that
    calls another pool, drains a stream through a function, or applies a
    function from another pool holds only what it is using rather than
