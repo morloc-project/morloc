@@ -7,33 +7,7 @@
 use crate::error::MorlocError;
 use crate::schema::{Schema, SerialType};
 
-/// Make a sub-schema self-contained by replacing every back-reference to
-/// `parent`'s declaration with `parent` itself. A field schema handed to a
-/// reader on its own has no enclosing declaration to resolve against; with
-/// the parent spliced in, the parent's own back-references then sit under
-/// the declaration they need. The parent's widths are already patched, so
-/// the clone is complete as it stands.
-pub fn reroot_under(parent: &Schema, child: &Schema) -> Schema {
-    match (parent.serial_type, parent.name.as_deref()) {
-        (SerialType::Recur, _) | (_, None) => child.clone(),
-        (_, Some(name)) => splice(name, parent, child),
-    }
-}
-
-fn splice(name: &str, parent: &Schema, s: &Schema) -> Schema {
-    if s.serial_type == SerialType::Recur && s.name.as_deref() == Some(name) {
-        return parent.clone();
-    }
-    let mut out = s.clone();
-    out.parameters = s.parameters.iter().map(|c| splice(name, parent, c)).collect();
-    out
-}
-
-/// True when a back-reference to `name` occurs anywhere in `s`.
-pub fn refers_to(s: &Schema, name: &str) -> bool {
-    (s.serial_type == SerialType::Recur && s.name.as_deref() == Some(name))
-        || s.parameters.iter().any(|c| refers_to(c, name))
-}
+pub use morloc_runtime_types::schema::{refers_to, reroot_under};
 
 /// Static resolution of the back-references in one schema tree.
 ///

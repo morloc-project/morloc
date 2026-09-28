@@ -43,7 +43,7 @@ impl StreamFieldKind {
             SerialType::IFile => Some(StreamFieldKind::IFile),
             SerialType::OStream => Some(StreamFieldKind::OStream),
             SerialType::IStream => Some(StreamFieldKind::IStream),
-            _ => None,
+            SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::Variant | SerialType::Enum => None,
         }
     }
 }
@@ -173,7 +173,7 @@ pub fn collect_stream_fields(
                 }
                 // Nil / Bool / integer / float / String / Int / Table:
                 // no stream-handle content.
-                _ => {}
+                SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::Enum => {}
             }
         }
     }
@@ -206,7 +206,7 @@ pub fn schema_contains_kind(schema: &Schema, target: StreamFieldKind) -> bool {
             .unwrap_or(false),
         // A back-reference names a declaration on the path above, whose
         // body is inspected where it appears.
-        _ => false,
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Enum => false,
     }
 }
 
@@ -228,7 +228,7 @@ fn contains_stream_handles(schema: &Schema) -> bool {
         // Assume yes; the outer walker will resolve the back-ref
         // properly. False-positives here just cost an extra descent.
         SerialType::Recur => true,
-        _ => false,
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Int | SerialType::Table | SerialType::Enum => false,
     }
 }
 
@@ -245,6 +245,24 @@ fn check_bounds(payload: &[u8], offset: usize, len: usize) -> Result<(), MorlocE
         )));
     }
     Ok(())
+}
+
+/// The path a handle-form stream field is written as when its value leaves
+/// the local registry: the file the handle has open. A handle bound to
+/// stdio is process-scoped and has no path another process could open, so
+/// it is refused.
+pub fn portable_path(handle: i64) -> Result<String, MorlocError> {
+    let path = crate::stream::shared_handle_path(handle)
+        .map_err(|e| MorlocError::Other(format!("handle_scan: rewrite handle: {e}")))?;
+    if path == crate::stream::STDIO_SENTINEL_STD || path == crate::stream::STDIO_SENTINEL_ERR {
+        return Err(MorlocError::Other(
+            "stream handle is bound to stdio (stdin/stdout/stderr); a stream \
+             handle bound to stdio cannot cross a persistence boundary; \
+             materialize with `@save` first"
+                .into(),
+        ));
+    }
+    Ok(path)
 }
 
 /// Rewrite every `TAG_HANDLE` field in `fields` to `TAG_PATH` form by
@@ -277,25 +295,9 @@ pub fn rewrite_handles_to_paths(
             )));
         }
         let handle = unsafe { sh::read_payload(payload.as_ptr().add(field_start)) } as i64;
-        let path = crate::stream::shared_handle_path(handle).map_err(|e| {
-            MorlocError::Other(format!(
-                "handle_scan: rewrite handle at offset {}: {}",
-                field_start, e,
-            ))
+        let path = portable_path(handle).map_err(|e| {
+            MorlocError::Other(format!("handle at offset {}: {}", field_start, e))
         })?;
-        // Stdio-bound handles are process-scoped; refuse to serialize
-        // them so a receiver never tries to "reopen stdout" in a
-        // different process where the semantics don't apply.
-        if path == crate::stream::STDIO_SENTINEL_STD
-            || path == crate::stream::STDIO_SENTINEL_ERR
-        {
-            return Err(MorlocError::Other(format!(
-                "handle at offset {} is bound to stdio (stdin/stdout/stderr); \
-                 stream handle bound to stdio cannot cross a persistence \
-                 boundary; materialize with `@save` first",
-                field_start,
-            )));
-        }
         let path_bytes = path.as_bytes();
         if path_bytes.is_empty() {
             unsafe {

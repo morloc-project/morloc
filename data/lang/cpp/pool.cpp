@@ -222,6 +222,26 @@ static bool _shm_tracker_release_one(absptr_t ptr) {
     return false;
 }
 
+// A copy of an argument packet for a manifold to return as its result.
+// The argument itself lives in the call the dispatcher frees before it
+// sends and frees the result, so it cannot be returned; the copy holds its
+// own reference to any shared memory the packet names, tracked like every
+// other packet this pool returns.
+static uint8_t* _dup_packet(const uint8_t* packet) {
+    absptr_t block = NULL;
+    char* err = NULL;
+    uint8_t* copy = morloc_dup_packet(packet, &block, &err);
+    if (err != NULL) {
+        std::string msg(err);
+        free(err);
+        MLC_INTERNAL_ABORT(msg.c_str());
+    }
+    if (block != NULL) {
+        _shm_tracker.push_back({block});
+    }
+    return copy;
+}
+
 // Finish with a packet: give back the shared memory it names, if it
 // names any, and free the packet itself when nothing built from it can
 // still be reading it. The codegen inserts this call where a packet's

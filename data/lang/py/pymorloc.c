@@ -281,6 +281,84 @@ static int schema_to_npy_type(morloc_serial_type type) {
     }
 }
 
+// How a numpy array becomes the data of a list of `elem`.
+//   NPY_ROUTE_BULK: its bytes already are the wire layout; copy them.
+//   NPY_ROUTE_CAST: numpy widens it to that layout without loss; cast, copy.
+//   NPY_ROUTE_EACH: convert and range-check element by element.
+// The size and write passes both route through here, so they agree.
+typedef enum { NPY_ROUTE_BULK, NPY_ROUTE_CAST, NPY_ROUTE_EACH } npy_route_t;
+
+// True when every value of numpy kind `from_kind` (itemsize `from_size`)
+// is exactly representable in kind `to_kind` of itemsize `to_size`.
+static bool npy_widens_exactly(char from_kind, int from_size, char to_kind, int to_size) {
+    if (from_size >= to_size) return false;
+    if (from_kind == 'f') return to_kind == 'f';
+    if (from_kind == 'i') return to_kind == 'i';
+    if (from_kind == 'u') return to_kind == 'u' || to_kind == 'i';
+    return false;
+}
+
+static int numpy_route(PyArrayObject* arr, const Schema* elem, npy_route_t* route) {
+    if (PyArray_NDIM(arr) != 1) {
+        PyErr_Format(PyExc_TypeError,
+            "a numpy array passed as a list must be one-dimensional; got %d dimensions",
+            PyArray_NDIM(arr));
+        return -1;
+    }
+    int t = schema_to_npy_type(elem->type);
+    if (PyArray_TYPE(arr) == NPY_OBJECT || t < 0) {
+        *route = NPY_ROUTE_EACH;
+        return 0;
+    }
+    if (PyArray_EquivTypenums(PyArray_TYPE(arr), t)
+        && PyArray_ITEMSIZE(arr) == (npy_intp)elem->width
+        && PyArray_ISNOTSWAPPED(arr)
+        && PyArray_IS_C_CONTIGUOUS(arr)
+        && PyArray_ISALIGNED(arr)) {
+        *route = NPY_ROUTE_BULK;
+        return 0;
+    }
+    // The target dtype is the element's own, so its width is the schema
+    // width. Bool and enum take only their own dtype: widening a number into
+    // them would skip their value checks.
+    PyArray_Descr* want = PyArray_DescrFromType(t);
+    char want_kind = want->kind;
+    Py_DECREF(want);
+    bool widen = elem->type != MORLOC_BOOL && elem->type != MORLOC_ENUM
+        && npy_widens_exactly(PyArray_DESCR(arr)->kind, (int)PyArray_ITEMSIZE(arr),
+                              want_kind, (int)elem->width);
+    *route = widen ? NPY_ROUTE_CAST : NPY_ROUTE_EACH;
+    return 0;
+}
+
+// Reject bytes that are not valid values of a one-byte element type: a
+// bool must be 0 or 1, an enum tag must name one of its constructors.
+static int check_byte_elements(const Schema* elem, const unsigned char* bytes, size_t n) {
+    // Every byte is a valid U8 or I8, so only Bool and enum need a pass.
+    if (elem->type != MORLOC_BOOL && elem->type != MORLOC_ENUM) {
+        return 0;
+    }
+    size_t limit = elem->type == MORLOC_BOOL ? 2 : elem->size;
+    for (size_t i = 0; i < n; i++) {
+        if (bytes[i] >= limit) {
+            PyErr_Format(PyExc_ValueError,
+                "element %zu has byte value %u, which is not a valid %s",
+                i, (unsigned)bytes[i],
+                elem->type == MORLOC_BOOL ? "bool (0 or 1)" : "constructor tag");
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// Whether bytes / bytearray can stand for a list of `elem`: only when each
+// element is one byte, so the byte count is the element count.
+static bool bytes_fit_elements(const Schema* elem) {
+    return elem->width == 1
+        && (elem->type == MORLOC_UINT8 || elem->type == MORLOC_SINT8
+            || elem->type == MORLOC_BOOL || elem->type == MORLOC_ENUM);
+}
+
 // Resolve a constructor name against a variant schema's key list, yielding
 // its tag. The tag is the constructor's position in the declaration, which
 // is what the wire carries; the keys arrive in that same order.
@@ -656,20 +734,12 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
                 } else if (PyObject_HasAttrString(obj, "__array_interface__")) {
                     import_numpy();
                     PyArrayObject *arr = (PyArrayObject *)obj;
-                    npy_intp *dims = PyArray_DIMS(arr);
-                    int ndim = PyArray_NDIM(arr);
-                    size_t total_elements = 1;
-                    for (int i = 0; i < ndim; i++) {
-                        total_elements *= dims[i];
-                    }
-                    // Per-element sizing required when (a) dtype=object
-                    // (slots are PyObject*) or (b) the morloc element
-                    // schema is variable-width -- numpy's flat inline
-                    // storage does not match morloc's wire layout (e.g.
-                    // numpy int64 is 8 bytes per slot but morloc Int is
-                    // a 16-byte BigInt header plus optional limb tail).
-                    if (PyArray_TYPE(arr) == NPY_OBJECT
-                        || !schema_is_fixed_width((Schema*)element_schema)) {
+                    // A bulk or widening route copies `width` bytes per
+                    // element; any other array is sized element by element.
+                    npy_route_t route;
+                    if (numpy_route(arr, element_schema, &route) != 0) return -1;
+                    size_t total_elements = (size_t)PyArray_SIZE(arr);
+                    if (route == NPY_ROUTE_EACH) {
                         if (!per_element) {
                             for (size_t i = 0; i < total_elements; i++) {
                                 PyObject* item = PyArray_GETITEM(arr, PyArray_GETPTR1(arr, i));
@@ -687,11 +757,13 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
                         w->total += (ssize_t)(total_elements * element_schema->width);
                         return 0;
                     }
-                } else if (PyBytes_Check(obj)) {
-                    w->total += (ssize_t)PyBytes_GET_SIZE(obj);
-                    return 0;
-                } else if (PyByteArray_Check(obj)) {
-                    w->total += (ssize_t)PyByteArray_GET_SIZE(obj);
+                } else if (PyBytes_Check(obj) || PyByteArray_Check(obj)) {
+                    if (schema->type == MORLOC_ARRAY && !bytes_fit_elements(element_schema)) {
+                        PyRAISE("bytes can stand for a list only of one-byte elements "
+                                "(U8, I8, Bool or an enum)");
+                    }
+                    w->total += (ssize_t)(PyBytes_Check(obj) ? PyBytes_GET_SIZE(obj)
+                                                             : PyByteArray_GET_SIZE(obj));
                     return 0;
                 } else if (PyUnicode_Check(obj)) {
                     Py_ssize_t len = 0;
@@ -1071,37 +1143,41 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                 // header / sub-data that numpy's flat dtype storage
                 // does not provide).
                 bool numpy_per_element = false;
+                npy_route_t np_route = NPY_ROUTE_BULK;
                 if (PyList_Check(obj)) {
                     size = PyList_Size(obj);
-                } else if (PyBytes_Check(obj)) {
-                    // This needs non-const data
-                    PyBytes_AsStringAndSize(obj, &mutable_data, &size);
-                } else if (PyByteArray_Check(obj)) {
-                    mutable_data = PyByteArray_AS_STRING(obj);
-                    size = PyByteArray_GET_SIZE(obj);
+                } else if (PyBytes_Check(obj) || PyByteArray_Check(obj)) {
+                    if (PyBytes_Check(obj)) {
+                        // This needs non-const data
+                        PyBytes_AsStringAndSize(obj, &mutable_data, &size);
+                    } else {
+                        mutable_data = PyByteArray_AS_STRING(obj);
+                        size = PyByteArray_GET_SIZE(obj);
+                    }
+                    if (schema->type == MORLOC_ARRAY) {
+                        if (!bytes_fit_elements(element_schema)) {
+                            PyRAISE("bytes can stand for a list only of one-byte elements "
+                                    "(U8, I8, Bool or an enum)");
+                        }
+                        if (check_byte_elements(element_schema, (const unsigned char*)mutable_data, (size_t)size) != 0) {
+                            goto error;
+                        }
+                    }
                 } else if (schema->type == MORLOC_ARRAY && PyObject_HasAttrString(obj, "__array_interface__")) { // check if it is a numpy array
                     import_numpy();
                     PyArrayObject* arr = (PyArrayObject*)obj;
                     size = PyArray_SIZE(arr);
-
-                    // Force per-element path when the morloc element
-                    // schema is variable-width. The memcpy fast-path
-                    // assumes numpy's flat element storage matches the
-                    // wire layout; for Int (16-byte BigInt vs 8-byte
-                    // int64) and other variable-width schemas it does
-                    // not, and memcpy would read past numpy's buffer
-                    // and write corrupt headers into SHM.
-                    if (PyArray_TYPE(arr) == NPY_OBJECT
-                        || !schema_is_fixed_width((Schema*)element_schema)) {
-                        // Boxed numpy array OR variable-width element
-                        // schema: leave immutable_data NULL and dispatch
-                        // to the per-element path below.
+                    if (numpy_route(arr, element_schema, &np_route) != 0) goto error;
+                    if (np_route == NPY_ROUTE_EACH) {
+                        // Leave immutable_data NULL and dispatch to the
+                        // per-element path below, which converts and
+                        // range-checks each value.
                         numpy_per_element = true;
-                    } else {
-                        // Fixed-width primitive numpy array.
+                    } else if (np_route == NPY_ROUTE_BULK) {
                         immutable_data = PyArray_DATA(arr);
-                        if (!PyArray_ISCONTIGUOUS(arr)) {
-                            PyRAISE("NumPy array must be contiguous");
+                        if (element_schema->width == 1
+                            && check_byte_elements(element_schema, (const unsigned char*)immutable_data, (size_t)size) != 0) {
+                            goto error;
                         }
                     }
                 } else {
@@ -1208,6 +1284,17 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                     memcpy(tmp_ptr, mutable_data, size);
                     // move cursor to the location after the copied data
                     *cursor = (void*)(*(char**)cursor + size);
+                }
+                else if (np_route == NPY_ROUTE_CAST) {
+                    absptr_t tmp_ptr = PyTRY(rel2abs, result->data);
+                    PyArrayObject* cast = (PyArrayObject*)PyArray_FromArray(
+                        (PyArrayObject*)obj,
+                        PyArray_DescrFromType(schema_to_npy_type(element_schema->type)),
+                        NPY_ARRAY_CARRAY);
+                    if (!cast) goto error;
+                    memcpy(tmp_ptr, PyArray_DATA(cast), size * width);
+                    Py_DECREF(cast);
+                    *cursor = (void*)(*(char**)cursor + size * width);
                 }
                 else{
                     absptr_t tmp_ptr = PyTRY(rel2abs, result->data);
@@ -1671,6 +1758,12 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                     PyINTERNAL_ABORT("Failed to allocate list");
                 }
             } else if (schema->hint != NULL && strcmp(schema->hint, "bytearray") == 0) {
+                if (!bytes_fit_elements(element_schema)) {
+                    PyErr_SetString(PyExc_TypeError,
+                        "a list mapped to bytearray must have one-byte elements "
+                        "(U8, I8, Bool or an enum)");
+                    goto error;
+                }
                 obj = PyByteArray_FromStringAndSize((const char*)absptr, array->size);
                 if (!obj) {
                     PyErr_SetString(PyExc_TypeError, "Failed to create bytearray");

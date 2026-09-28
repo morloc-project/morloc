@@ -9,15 +9,19 @@ import root-py
 -- in C++, so every step sends a packet and receives one; after thousands
 -- of steps the pool should be no larger than after a handful.
 --
--- `peakMiB` takes the run's result as its argument: it is what makes the
--- measurement happen after the run.
+-- `peakKiB` takes the run's result as its argument: it is what makes the
+-- measurement happen after the run. The two peaks are compared with a
+-- 1 MiB margin rather than rounded to whole MiB: a pool's peak wanders by
+-- about a hundred KiB between runs, and one sitting near a MiB boundary
+-- rounds to different values run to run. Growth of 256 bytes a call
+-- over the long run's extra calls exceeds the margin.
 
 source Py from "src.py" ("readings")
-source Cpp from "src.hpp" ("total" as totalCpp, "peakMiB")
+source Cpp from "src.hpp" ("total" as totalCpp, "peakKiB")
 
 readings :: Int -> [Int]
 totalCpp :: [Int] -> Int
-peakMiB :: Int -> Int
+peakKiB :: Int -> Int
 
 steady :: Int -> Int
-steady n = peakMiB (sum (map (\i -> totalCpp (readings i)) (range 0 n)))
+steady n = peakKiB (sum (map (\i -> totalCpp (readings i)) (range 0 n)))

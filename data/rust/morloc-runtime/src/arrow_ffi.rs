@@ -930,7 +930,7 @@ fn json_column(
                 .collect::<Result<_, _>>()?;
             Arc::new(StringArray::from(v))
         }
-        other => {
+        other @ (SerialType::Nil | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum) => {
             return Err(MorlocError::Other(format!(
                 "Unsupported column type {:?} for '{}' when building a table from JSON",
                 other, name

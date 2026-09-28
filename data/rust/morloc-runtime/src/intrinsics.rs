@@ -1144,6 +1144,13 @@ pub struct IFileWalkArg {
     pub value: i64,
 }
 
+impl IFileWalkArg {
+    /// A present or absent argument.
+    pub fn opt(v: Option<i64>) -> IFileWalkArg {
+        IFileWalkArg { has: v.is_some() as u8, _pad: [0u8; 7], value: v.unwrap_or(0) }
+    }
+}
+
 /// Unified IFile pattern walker. The `path` string encodes a single
 /// walk-step chain consumed by `crate::stream::ifile_walk`:
 ///

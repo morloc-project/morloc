@@ -386,14 +386,17 @@ T mpk_unpack(const std::vector<char>& packed_data, const std::string& schema_str
 // ============================================================
 
 inline size_t schema_alignment_cpp(const Schema* schema) {
+    // Must equal the runtime's `Schema::alignment` for every kind; the
+    // cpp-layout-parity golden test checks it. Every kind is listed so a new
+    // one is a compile error here (-Wswitch) rather than a silent default.
     switch (schema->type) {
-        case MORLOC_NIL: case MORLOC_BOOL: case MORLOC_SINT8: case MORLOC_UINT8: return 1;
+        case MORLOC_NIL: case MORLOC_BOOL: case MORLOC_SINT8: case MORLOC_UINT8:
+        case MORLOC_ENUM:
+            return 1;
         case MORLOC_SINT16: case MORLOC_UINT16: return 2;
         case MORLOC_SINT32: case MORLOC_UINT32: case MORLOC_FLOAT32: return 4;
-        case MORLOC_SINT64: case MORLOC_UINT64: case MORLOC_FLOAT64:
-        case MORLOC_STRING: case MORLOC_ARRAY:
-        case MORLOC_INT: return alignof(size_t);
-        case MORLOC_TUPLE: case MORLOC_MAP: {
+        case MORLOC_SINT64: case MORLOC_UINT64: case MORLOC_FLOAT64: return 8;
+        case MORLOC_TUPLE: {
             size_t max_align = 1;
             for (size_t i = 0; i < schema->size; i++) {
                 size_t a = schema_alignment_cpp(schema->parameters[i]);
@@ -401,9 +404,15 @@ inline size_t schema_alignment_cpp(const Schema* schema) {
             }
             return max_align;
         }
-        case MORLOC_OPTIONAL: return schema_alignment_cpp(schema->parameters[0]);
-        default: return alignof(size_t);
+        // Slots holding a relptr, an array or string header, a limb pointer,
+        // a tagged handle or a closure are pointer-aligned. A record is too,
+        // as the runtime lays it out.
+        case MORLOC_STRING: case MORLOC_ARRAY: case MORLOC_MAP: case MORLOC_INT:
+        case MORLOC_TABLE: case MORLOC_RECUR: case MORLOC_OPTIONAL: case MORLOC_VARIANT:
+        case MORLOC_IFILE: case MORLOC_OSTREAM: case MORLOC_ISTREAM: case MORLOC_CLOSURE:
+            return alignof(size_t);
     }
+    return alignof(size_t);
 }
 
 // SIMD/BLAS-friendly alignment for Array data buffers when the element type
@@ -647,7 +656,11 @@ void mlc_leaf_write(void* dest, void** cursor, const Schema* schema, const T& da
         // A morloc enum is its one-byte wire tag; a host enum standing in
         // for an integer is written at the integer's width.
         if (schema->type == MORLOC_ENUM) {
-            *((uint8_t*)dest) = static_cast<uint8_t>(data);
+            auto tag = static_cast<std::underlying_type_t<T>>(data);
+            if (!(tag >= 0 && static_cast<size_t>(tag) < schema->size)) {
+                throw std::runtime_error("an enum tag names no constructor of its type");
+            }
+            *((uint8_t*)dest) = static_cast<uint8_t>(tag);
         } else {
             mlc_leaf_write(dest, cursor, schema, static_cast<std::underlying_type_t<T>>(data));
         }
@@ -683,7 +696,24 @@ void mlc_leaf_write(void* dest, void** cursor, const Schema* schema, const T& da
                 fields[1] = check_range_narrow<int64_t>(data, "Int");
                 break;
             }
-            default: *(T*)dest = data; break;
+            // A bool or an enum tag is one byte, whatever the width of the
+            // number standing in for it, and only its valid values fit.
+            case MORLOC_BOOL:
+                if (!(data == 0 || data == 1)) {
+                    throw std::runtime_error("a Bool must be 0 or 1");
+                }
+                *(uint8_t*)dest = static_cast<uint8_t>(data);
+                break;
+            case MORLOC_ENUM:
+                if (!(data >= 0 && static_cast<size_t>(data) < schema->size)) {
+                    throw std::runtime_error("an enum tag names no constructor of its type");
+                }
+                *(uint8_t*)dest = static_cast<uint8_t>(data);
+                break;
+            case MORLOC_NIL: case MORLOC_STRING: case MORLOC_ARRAY: case MORLOC_TUPLE:
+            case MORLOC_MAP: case MORLOC_OPTIONAL: case MORLOC_TABLE: case MORLOC_RECUR:
+            case MORLOC_CLOSURE: case MORLOC_VARIANT:
+                throw std::runtime_error("cannot write a number where the schema holds a non-numeric type");
         }
     }
 }
@@ -779,8 +809,14 @@ T mlc_leaf_read(const Schema* schema, const void* data, const void* base_ptr) {
                     throw std::overflow_error(oss.str());
                 }
             }
-            default: return *(const T*)data;
+            case MORLOC_BOOL: return static_cast<T>(*(const uint8_t*)data == 1);
+            case MORLOC_ENUM: return static_cast<T>(*(const uint8_t*)data);
+            case MORLOC_NIL: case MORLOC_STRING: case MORLOC_ARRAY: case MORLOC_TUPLE:
+            case MORLOC_MAP: case MORLOC_OPTIONAL: case MORLOC_TABLE: case MORLOC_RECUR:
+            case MORLOC_CLOSURE: case MORLOC_VARIANT:
+                break;
         }
+        throw std::runtime_error("cannot read a number where the schema holds a non-numeric type");
     }
 }
 

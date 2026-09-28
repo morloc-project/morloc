@@ -420,11 +420,32 @@ pub fn calc_voidstar_layout(
         total: 0,
         bound: usize::MAX,
         steps: 0,
+        portable: false,
     };
     let mut st = crate::walk::Stack::new();
     st.enter(schema, data, false);
     crate::walk::run(&mut w, &mut st)?;
     Ok((w.total, w.steps))
+}
+
+/// The size of the value's portable flat form, in which each handle-form
+/// stream field is written as its path; see
+/// [`crate::voidstar::flatten_into_portable`].
+pub fn calc_voidstar_size_portable(
+    data: *const u8,
+    schema: &crate::schema::Schema,
+) -> Result<usize, MorlocError> {
+    let mut w = SizeWalk {
+        res: crate::recur::Resolver::new(schema),
+        total: 0,
+        bound: usize::MAX,
+        steps: 0,
+        portable: true,
+    };
+    let mut st = crate::walk::Stack::new();
+    st.enter(schema, data, false);
+    crate::walk::run(&mut w, &mut st)?;
+    Ok(w.total)
 }
 
 pub fn calc_voidstar_size_inner(
@@ -456,6 +477,7 @@ pub fn calc_voidstar_size_bounded(
         total: 0,
         bound: upper_bound,
         steps: 0,
+        portable: false,
     };
     let mut st = crate::walk::Stack::new();
     st.enter(schema, data, false);
@@ -478,6 +500,9 @@ struct SizeWalk<'r> {
     /// laying the value out in one block needs that bound to budget the
     /// per-part alignment padding; see [`calc_voidstar_layout`].
     steps: usize,
+    /// Count each handle-form stream field as the path it will be written
+    /// as, for the portable flat form.
+    portable: bool,
 }
 
 impl<'r> SizeWalk<'r> {
@@ -546,17 +571,25 @@ impl<'r> crate::walk::Walker<bool> for SizeWalk<'r> {
                 }
                 SerialType::IFile | SerialType::OStream | SerialType::IStream => {
                     // Tagged stream-handle field: 16-byte inline + path
-                    // suballoc (`8 + path_len`) for TAG_PATH; no suballoc for
-                    // TAG_HANDLE.
+                    // suballoc (`8 + path_len`) for TAG_PATH, plus the
+                    // worst-case padding the flatten inserts to 8-align it;
+                    // no suballoc for TAG_HANDLE.
                     use morloc_runtime_types::stream_handle as sh;
                     let field = data as *const u8;
                     let mut own = sh::STREAM_HANDLE_FIELD_SIZE;
-                    if sh::read_tag(field) == sh::TAG_PATH {
+                    if self.portable && sh::read_tag(field) == sh::TAG_HANDLE {
+                        let path = crate::handle_scan::portable_path(sh::read_payload(field) as i64)?;
+                        if !path.is_empty() {
+                            own += sh::path_suballoc_size(path.len())
+                                + std::mem::align_of::<u64>() - 1;
+                        }
+                    } else if sh::read_tag(field) == sh::TAG_PATH {
                         let payload = sh::read_payload(field);
                         if payload != shm::RELNULL as u64 {
                             let suballoc = shm::rel2abs(payload as shm::RelPtr)?;
                             let path_len = sh::read_path_size(suballoc) as usize;
-                            own += sh::path_suballoc_size(path_len);
+                            own += sh::path_suballoc_size(path_len)
+                                + std::mem::align_of::<u64>() - 1;
                         }
                     }
                     self.add(own - slot);
@@ -681,7 +714,7 @@ impl<'r> crate::walk::Walker<bool> for SizeWalk<'r> {
                     let own = crate::arrow_shm::block_size(data as *const crate::arrow_shm::ArrowShmHeader)?;
                     self.add(own - slot);
                 }
-                _ => self.add(s.width - slot),
+                SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Recur | SerialType::Enum => self.add(s.width - slot),
             }
         }
         Ok(())

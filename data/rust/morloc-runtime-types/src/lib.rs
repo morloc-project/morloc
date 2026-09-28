@@ -24,6 +24,8 @@ pub mod compression;
 pub mod daemon_socket;
 pub mod stream_handle;
 pub mod stdio_proto;
+#[cfg(test)]
+mod dispatch_guard;
 
 pub use cschema::is_top_null;
 

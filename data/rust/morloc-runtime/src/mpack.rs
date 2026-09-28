@@ -601,7 +601,7 @@ fn unpack_int(ptr: AbsPtr, st: SerialType, reader: &mut &[u8]) -> Result<(), Mor
             SerialType::Uint16 => *(ptr as *mut u16) = u16v,
             SerialType::Uint32 => *(ptr as *mut u32) = u32v,
             SerialType::Uint64 => *(ptr as *mut u64) = u64v,
-            _ => {}
+            SerialType::Nil | SerialType::Bool | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => {}
         }
     }
     Ok(())

@@ -245,7 +245,7 @@ fn constructor_line_of(s: &Schema) -> Option<String> {
         SerialType::Optional | SerialType::Array => {
             s.parameters.first().and_then(constructor_line_of)
         }
-        _ => None,
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Tuple | SerialType::Map | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream => None,
     }
 }
 
@@ -868,17 +868,24 @@ fn cli_default_to_json(default_val: Option<&str>, st: Option<&Schema>) -> Value 
             "false" => json!(false),
             _ => Value::String(raw.to_string()),
         },
+        // Parsed as a JSON number so a value beyond i64 keeps every digit;
+        // a float fallback would round it.
         Some(Sint8 | Sint16 | Sint32 | Sint64 | Uint8 | Uint16 | Uint32 | Uint64 | Int) => raw
-            .parse::<i64>()
-            .map(|n| json!(n))
-            .or_else(|_| raw.parse::<f64>().map(|f| json!(f)))
-            .unwrap_or_else(|_| Value::String(raw.to_string())),
+            .parse::<serde_json::Number>()
+            .ok()
+            .filter(|n| !n.to_string().contains(['.', 'e', 'E']))
+            .map(Value::Number)
+            .unwrap_or_else(|| Value::String(raw.to_string())),
         Some(Float32 | Float64) => raw
             .parse::<f64>()
             .map(|f| json!(f))
             .unwrap_or_else(|_| Value::String(raw.to_string())),
         Some(String) => Value::String(strip_cli_quotes(raw)),
-        _ => serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string())),
+        Some(
+            Nil | Array | Tuple | Map | Optional | Table | Recur | IFile | OStream | IStream
+            | Variant | Enum,
+        )
+        | None => serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string())),
     }
 }
 
@@ -1316,6 +1323,16 @@ mod tests {
 
     fn js(schema: &str) -> Value {
         schema_to_json_schema(&parse_schema(schema).unwrap())
+    }
+
+    /// An integer default beyond i64 keeps every digit; it is not rounded
+    /// through a float.
+    #[test]
+    fn wide_integer_defaults_are_exact() {
+        for (raw, schema) in [("123456789012345678901234567890", "j"), ("18446744073709551615", "u8")] {
+            let v = cli_default_to_json(Some(raw), Some(&parse_schema(schema).unwrap()));
+            assert_eq!(v.to_string(), raw, "schema {schema}");
+        }
     }
 
     #[test]

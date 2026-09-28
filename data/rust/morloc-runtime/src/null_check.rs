@@ -21,6 +21,7 @@ pub use morloc_runtime_types::null_check::*;
 
 use crate::shm::{self, AbsPtr, Array};
 use crate::cschema::CSchema;
+use crate::schema::SerialType;
 use morloc_runtime_types::shm_types::relptr_offset;
 use std::os::raw::{c_char, c_void};
 
@@ -69,16 +70,11 @@ pub unsafe extern "C" fn morloc_first_null_in_value(
     }
 }
 
-// SerialType discriminants as they cross the C ABI. Mirrors
-// morloc_runtime_types::schema::SerialType; only the variants this walk cares
-// about are named.
-const CT_STRING: u32 = 13;
-const CT_ARRAY: u32 = 14;
-const CT_TUPLE: u32 = 15;
-const CT_MAP: u32 = 16;
-const CT_OPTIONAL: u32 = 17;
-const CT_VARIANT: u32 = 26;
-const CT_RECUR: u32 = 20;
+/// The kind a C schema node names.
+#[inline]
+fn kind(s: &CSchema) -> Option<SerialType> {
+    SerialType::from_u32(s.serial_type)
+}
 
 /// Where a node's name sits in the reported path.
 #[derive(Clone, Copy)]
@@ -109,7 +105,7 @@ unsafe fn index_recur(s: *const CSchema, decls: &mut Vec<*const CSchema>, out: &
         return;
     }
     let node = &*s;
-    if node.serial_type == CT_RECUR {
+    if kind(node) == Some(SerialType::Recur) {
         let name = if node.name.is_null() { None } else { Some(std::ffi::CStr::from_ptr(node.name)) };
         let target = decls
             .iter()
@@ -173,7 +169,7 @@ unsafe fn walk_c(
         }
         // A back-reference is scanned as its declaration.
         let mut s = &*t.schema;
-        if s.serial_type == CT_RECUR {
+        if kind(s) == Some(SerialType::Recur) {
             let target = recur.iter().find(|(r, _)| *r == t.schema).map_or(std::ptr::null(), |(_, d)| *d);
             if target.is_null() {
                 return None;
@@ -182,13 +178,14 @@ unsafe fn walk_c(
             s = &*target;
         }
         let here = path.len();
-        match s.serial_type {
-            CT_STRING => {
+        let k = kind(s);
+        match k {
+            Some(SerialType::String) => {
                 if let Some(r) = check_string(t.data, base, path) {
                     return Some(r);
                 }
             }
-            CT_ARRAY => {
+            Some(SerialType::Array) => {
                 let arr = &*(t.data as *const Array);
                 if arr.size == 0 || s.size == 0 || s.parameters.is_null() {
                     continue;
@@ -205,7 +202,7 @@ unsafe fn walk_c(
                     stack.push(Todo { schema: elem, data: abs.add(i * elem_width), idx: 0, path_len: here, seg: Seg::Index(i) });
                 }
             }
-            CT_TUPLE | CT_MAP => {
+            Some(SerialType::Tuple | SerialType::Map) => {
                 if s.parameters.is_null() || s.offsets.is_null() {
                     continue;
                 }
@@ -217,7 +214,7 @@ unsafe fn walk_c(
                         continue;
                     }
                     let off = *s.offsets.add(i);
-                    let seg = if s.serial_type == CT_MAP && !s.keys.is_null() && !(*s.keys.add(i)).is_null() {
+                    let seg = if k == Some(SerialType::Map) && !s.keys.is_null() && !(*s.keys.add(i)).is_null() {
                         Seg::Key(*s.keys.add(i))
                     } else {
                         Seg::Field(i)
@@ -225,7 +222,7 @@ unsafe fn walk_c(
                     stack.push(Todo { schema: p, data: t.data.add(off), idx: 0, path_len: here, seg });
                 }
             }
-            CT_OPTIONAL => {
+            Some(SerialType::Optional) => {
                 // The slot is one relative pointer; absent is RELNULL.
                 let rel = *(t.data as *const shm::RelPtr);
                 if rel == shm::RELNULL || s.parameters.is_null() {
@@ -238,7 +235,7 @@ unsafe fn walk_c(
                 let Some(abs) = resolve(rel, base) else { continue };
                 stack.push(Todo { schema: inner, data: abs, idx: 0, path_len: here, seg: Seg::Some });
             }
-            CT_VARIANT => {
+            Some(SerialType::Variant) => {
                 // A tag byte, then a relative pointer to the arm's fields.
                 let tag = *(t.data as *const u8) as usize;
                 if tag >= s.size || s.parameters.is_null() {
@@ -262,8 +259,17 @@ unsafe fn walk_c(
             }
             // Stream handles carry a path or a slot id, neither of which can
             // hold an interior NUL. Tables are Arrow buffers, not walked here.
-            // Everything else is numeric, boolean, or nil: no string bytes.
-            _ => {}
+            // Everything else is numeric, boolean, or nil: no string bytes. A
+            // back-reference was resolved above. A tag naming no kind cannot
+            // come from a schema the runtime parsed.
+            Some(
+                SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16
+                | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16
+                | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64
+                | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile
+                | SerialType::OStream | SerialType::IStream | SerialType::Enum,
+            )
+            | None => {}
         }
     }
     None

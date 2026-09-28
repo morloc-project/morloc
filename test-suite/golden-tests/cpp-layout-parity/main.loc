@@ -1,0 +1,16 @@
+-- The C++ pool lays out values by its own copy of the runtime's alignment
+-- rules. Where the two disagree, C++ writes pointer slots the runtime
+-- expects 8-aligned at smaller alignments (an optional's slot inside an
+-- array or a variant arm), or pads differently from every other writer.
+-- This lists every schema kind on which they differ; it must be empty.
+
+module main (mismatches)
+
+import root-cpp
+
+source Cpp from "src.hpp" ("layoutMismatches" as layoutMismatchesCpp)
+
+layoutMismatchesCpp :: Int -> [Str]
+
+mismatches :: Int -> [Str]
+mismatches n = layoutMismatchesCpp n

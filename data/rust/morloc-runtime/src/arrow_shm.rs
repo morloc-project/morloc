@@ -195,7 +195,7 @@ fn declared_target(st: SerialType) -> Option<DataType> {
         SerialType::Uint64 => DataType::UInt64,
         SerialType::Float32 => DataType::Float32,
         SerialType::Float64 => DataType::Float64,
-        _ => return None,
+        SerialType::Nil | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => return None,
     })
 }
 
@@ -204,7 +204,7 @@ fn declared_target(st: SerialType) -> Option<DataType> {
 fn declared_accepts(st: SerialType, dt: &DataType) -> bool {
     match st {
         SerialType::String => matches!(dt, DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View),
-        other => declared_target(other).map_or(false, |t| &t == dt),
+        other @ (SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum) => declared_target(other).map_or(false, |t| &t == dt),
     }
 }
 

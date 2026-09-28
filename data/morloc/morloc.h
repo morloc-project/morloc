@@ -1395,6 +1395,7 @@ bool packet_is_local_call(const uint8_t* packet, ERRMSG);
 bool packet_is_remote_call(const uint8_t* packet, ERRMSG);
 size_t morloc_packet_size_from_header(const morloc_packet_header_t* header);
 size_t morloc_packet_size(const uint8_t* packet, ERRMSG);
+uint8_t* morloc_dup_packet(const uint8_t* packet, absptr_t* block_out, ERRMSG);
 uint8_t* return_ping(const uint8_t* packet, ERRMSG);
 uint8_t* make_ping_packet(void);
 uint8_t* make_standard_data_packet(relptr_t ptr, const Schema* schema);

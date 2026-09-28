@@ -2210,6 +2210,7 @@ rustLowerConfig mask =
     , lcReleaseStmt = \v -> "unsafe { rustmorloc::release_packet(" <> pretty v <> ", true) };"
     , lcReleaseBorrowedStmt = \v -> "unsafe { rustmorloc::release_packet(" <> pretty v <> ", false) };"
     , lcReturn = \e -> "return" <+> e <> ";"
+    , lcDupPacket = \e -> "rustmorloc::dup_packet(" <> e <> ")"
     , lcMakeIf = rustMakeIf
     , lcMakeLoop = rustMakeLoop
     -- An effect thunk captures by value only when it can outlive the frame that

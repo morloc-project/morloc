@@ -1,0 +1,42 @@
+-- A Python function returning a list may return it as a numpy array or as
+-- bytes. The array's bytes are copied as they stand only when they already
+-- are the list's wire layout: the element's own dtype, width and byte
+-- order, one dimension, contiguous. An array numpy widens exactly
+-- (float32 to Real) is cast first; any other is converted element by
+-- element with the usual range checks; an array of more than one
+-- dimension is refused. Bytes stand only for one-byte elements, and a
+-- byte that is not a valid Bool or constructor tag is refused.
+
+module main
+  ( int64ForReal, float32ForReal, uint8ForEnum, badUint8ForEnum
+  , matrixForPairs, bytesForInt32, bytesForUInt8, badBytesForBool
+  , stridedForReal, swappedForReal
+  )
+
+import root-py
+
+data Dir = North | South
+
+source Py from "src.py"
+  ( "int64_for_real" as int64ForReal
+  , "float32_for_real" as float32ForReal
+  , "uint8_for_enum" as uint8ForEnum
+  , "bad_uint8_for_enum" as badUint8ForEnum
+  , "matrix_for_pairs" as matrixForPairs
+  , "bytes_for_int32" as bytesForInt32
+  , "bytes_for_uint8" as bytesForUInt8
+  , "bad_bytes_for_bool" as badBytesForBool
+  , "strided_for_real" as stridedForReal
+  , "swapped_for_real" as swappedForReal
+  )
+
+int64ForReal :: Int -> [Real]
+float32ForReal :: Int -> [Real]
+uint8ForEnum :: Int -> [Dir]
+badUint8ForEnum :: Int -> [Dir]
+matrixForPairs :: Int -> [(I32, I32)]
+bytesForInt32 :: Int -> [I32]
+bytesForUInt8 :: Int -> [U8]
+badBytesForBool :: Int -> [Bool]
+stridedForReal :: Int -> [Real]
+swappedForReal :: Int -> [Real]

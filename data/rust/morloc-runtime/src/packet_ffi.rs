@@ -95,6 +95,68 @@ pub unsafe extern "C" fn morloc_packet_size(
     morloc_packet_size_from_header(header)
 }
 
+// ── Duplicate ────────────────────────────────────────────────────────────────
+
+/// A copy of `packet` a pool can return as its own result when the result
+/// is one of its arguments, unchanged.
+///
+/// A pool's result must be a fresh `malloc` block that it holds a reference
+/// to: the dispatcher sends it and frees it, and frees the call the
+/// arguments point into before that. So the argument cannot be returned
+/// itself. A packet naming a shared-memory block holds it by reference, so
+/// the copy takes a reference of its own, and `block_out` receives the
+/// block for the pool's tracker (null when the packet names none). A
+/// file-backed packet's file belongs to the evaluation that wrote it and is
+/// removed when that evaluation ends, not when a packet naming it is freed;
+/// the caller waiting on this call is inside that evaluation, so a copy of
+/// the packet is as valid as the argument itself.
+#[no_mangle]
+pub unsafe extern "C" fn morloc_dup_packet(
+    packet: *const u8,
+    block_out: *mut AbsPtr,
+    errmsg: *mut *mut c_char,
+) -> *mut u8 {
+    clear_errmsg(errmsg);
+    if !block_out.is_null() {
+        *block_out = ptr::null_mut();
+    }
+    let header = read_morloc_packet_header(packet, errmsg);
+    if header.is_null() {
+        return ptr::null_mut();
+    }
+    let size = morloc_packet_size_from_header(header);
+    let source = (*header).command.data.source;
+    if source != PACKET_SOURCE_MESG && source != PACKET_SOURCE_FILE && source != PACKET_SOURCE_RPTR {
+        set_errmsg(errmsg, &MorlocError::Packet(format!(
+            "cannot return an argument packet of unknown source 0x{source:02x} unchanged"
+        )));
+        return ptr::null_mut();
+    }
+    // A refused reference means the block is already gone.
+    let block = match packet_rptr_block(packet)
+        .and_then(|b| b.map_or(Ok(ptr::null_mut()), |b| shm::shincref(b).map(|()| b)))
+    {
+        Ok(b) => b,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            return ptr::null_mut();
+        }
+    };
+    let copy = libc::malloc(size) as *mut u8;
+    if copy.is_null() {
+        if !block.is_null() {
+            let _ = shm::shfree(block);
+        }
+        set_errmsg(errmsg, &MorlocError::Other("morloc_dup_packet: out of memory".into()));
+        return ptr::null_mut();
+    }
+    ptr::copy_nonoverlapping(packet, copy, size);
+    if !block_out.is_null() {
+        *block_out = block;
+    }
+    copy
+}
+
 // ── Ping ─────────────────────────────────────────────────────────────────────
 
 #[no_mangle]
@@ -816,45 +878,35 @@ pub unsafe extern "C" fn get_morloc_data_packet_value(
 pub(crate) unsafe fn donate_packet_reference(
     packet: *const u8,
 ) -> Result<(), MorlocError> {
-    use crate::shm::RelPtr;
-    if packet.is_null() {
-        return Ok(());
+    match packet_rptr_block(packet)? {
+        Some(abs) => crate::shm::shincref(abs),
+        None => Ok(()),
     }
-    let header = packet as *const PacketHeader;
-    if (*header).command_type() != PACKET_TYPE_DATA {
-        return Ok(());
-    }
-    if (*header).command.data.source != PACKET_SOURCE_RPTR {
-        return Ok(());
-    }
-    let payload_start = 32 + (*header).offset as usize;
-    if ((*header).length as usize) < std::mem::size_of::<RelPtr>() {
-        return Ok(());
-    }
-    let relptr = *(packet.add(payload_start) as *const RelPtr);
-    let abs = crate::shm::rel2abs(relptr)?;
-    crate::shm::shincref(abs)
 }
 
 /// Give back a reference taken by `donate_packet_reference` when the packet
 /// it was taken for never reached anyone.
 pub(crate) unsafe fn revoke_packet_reference(packet: *const u8) {
-    use crate::shm::RelPtr;
+    if let Ok(Some(abs)) = packet_rptr_block(packet) {
+        let _ = crate::shm::shfree(abs);
+    }
+}
+
+/// The shared-memory block a data packet names by reference, or `None` for
+/// a packet whose payload travels inside it.
+unsafe fn packet_rptr_block(packet: *const u8) -> Result<Option<AbsPtr>, MorlocError> {
     if packet.is_null() {
-        return;
+        return Ok(None);
     }
     let header = packet as *const PacketHeader;
     if (*header).command_type() != PACKET_TYPE_DATA
         || (*header).command.data.source != PACKET_SOURCE_RPTR
         || ((*header).length as usize) < std::mem::size_of::<RelPtr>()
     {
-        return;
+        return Ok(None);
     }
-    let payload_start = 32 + (*header).offset as usize;
-    let relptr = *(packet.add(payload_start) as *const RelPtr);
-    if let Ok(abs) = crate::shm::rel2abs(relptr) {
-        let _ = crate::shm::shfree(abs);
-    }
+    let relptr = *(packet.add(32 + (*header).offset as usize) as *const RelPtr);
+    crate::shm::rel2abs(relptr).map(Some)
 }
 
 unsafe fn make_call_packet_gen(

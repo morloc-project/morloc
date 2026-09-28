@@ -250,7 +250,7 @@ impl Gen {
                 // The declaration is a node of the root tree; walk it.
                 self.value(t, root, depth + 1)
             }
-            _ => "null".into(),
+            SerialType::Table | SerialType::IFile | SerialType::OStream | SerialType::IStream => "null".into(),
         }
     }
 }
@@ -303,7 +303,7 @@ mod tests {
                 // Moved 64 bytes down inside a buffer: every pointer shifted.
                 let mut moved = vec![0u8; 64];
                 moved.extend_from_slice(&flat);
-                unsafe { crate::voidstar::shift_buffer_relptrs(moved.as_mut_ptr(), 64, &schema, 64).unwrap() };
+                unsafe { crate::voidstar::shift_buffer_relptrs(moved.as_mut_ptr(), moved.len(), 64, &schema, 64).unwrap() };
                 assert_eq!(count_ll_in_buffer(&moved, 64, &schema), count);
             }
             // The other shapes flatten and come back with the same size.

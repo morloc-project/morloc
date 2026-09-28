@@ -88,7 +88,8 @@ impl CSchema {
         }
         let cs = &*cs;
         // SAFETY: SerialType is #[repr(u32)] and cs.serial_type was set from a valid SerialType.
-        let serial_type = std::mem::transmute::<u32, SerialType>(cs.serial_type);
+        let serial_type = SerialType::from_u32(cs.serial_type)
+            .unwrap_or_else(|| panic!("C schema has unknown kind tag {}", cs.serial_type));
 
         let offsets = if cs.offsets.is_null() || cs.size == 0 {
             Vec::new()
@@ -99,7 +100,7 @@ impl CSchema {
                 // is a single relptr). Array keeps one dim-constraint
                 // entry in offsets[0].
                 SerialType::Array => 1,
-                _ => 0,
+                SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => 0,
             };
             if n > 0 {
                 std::slice::from_raw_parts(cs.offsets, n).to_vec()
@@ -160,7 +161,8 @@ impl CSchema {
         if schema.is_null() { return; }
         let cs = Box::from_raw(schema);
         // SAFETY: cs.serial_type was set from a valid SerialType in from_rust.
-        let st = std::mem::transmute::<u32, SerialType>(cs.serial_type);
+        let st = SerialType::from_u32(cs.serial_type)
+            .unwrap_or_else(|| panic!("C schema has unknown kind tag {}", cs.serial_type));
         if !cs.offsets.is_null() {
             let n = match st {
                 SerialType::Tuple | SerialType::Map => cs.size,
@@ -168,7 +170,7 @@ impl CSchema {
                 // is a single relptr). Array keeps one dim-constraint
                 // entry in offsets[0].
                 SerialType::Array => 1,
-                _ => 0,
+                SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => 0,
             };
             if n > 0 { let _ = Vec::from_raw_parts(cs.offsets, n, n); }
         }
@@ -198,12 +200,20 @@ pub unsafe fn is_top_null(schema: *const CSchema, ptr: *const u8) -> bool {
     if schema.is_null() {
         return false;
     }
-    match (*schema).serial_type {
-        x if x == SerialType::Nil as u32 => true,
-        x if x == SerialType::Optional as u32 => {
+    match SerialType::from_u32((*schema).serial_type) {
+        Some(SerialType::Nil) => true,
+        Some(SerialType::Optional) => {
             let relptr = *(ptr as *const crate::shm_types::RelPtr);
             relptr == crate::shm_types::RELNULL
         }
-        _ => false,
+        Some(
+            SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32
+            | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32
+            | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String
+            | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Int
+            | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream
+            | SerialType::IStream | SerialType::Enum | SerialType::Variant,
+        )
+        | None => false,
     }
 }

@@ -549,6 +549,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         -- nothing to hold back.
         , lcReleaseBorrowedStmt = \v -> pretty (ldReleasePacketFn desc) <> "(" <> pretty v <> ")"
         , lcReturn = \e -> pretty $ substituteT (ldReturnTemplate desc) [("expr", render e)]
+        , lcDupPacket = id
         , lcMakeDoBlock = genericMakeDoBlock desc cfg
         , lcMakeTry = genericMakeTry desc
         , lcSerialize = defaultSerialize cfg

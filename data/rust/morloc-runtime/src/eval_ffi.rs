@@ -631,69 +631,55 @@ unsafe fn read_int_as_i64(
     schema: *const CSchema,
 ) -> Result<i64, MorlocError> {
     use crate::schema::SerialType;
+    use morloc_runtime_types::packet::{MLC_KIND_IFILE, MLC_KIND_ISTREAM, MLC_KIND_OSTREAM};
     let stype = (*schema).serial_type;
-    if stype == SerialType::Sint8 as u32 {
-        Ok(*(ptr as *const i8) as i64)
-    } else if stype == SerialType::Sint16 as u32 {
-        Ok(*(ptr as *const i16) as i64)
-    } else if stype == SerialType::Sint32 as u32 {
-        Ok(*(ptr as *const i32) as i64)
-    } else if stype == SerialType::Sint64 as u32 {
-        Ok(*(ptr as *const i64))
-    } else if stype == SerialType::Uint8 as u32 {
-        Ok(*(ptr as *const u8) as i64)
-    } else if stype == SerialType::Uint16 as u32 {
-        Ok(*(ptr as *const u16) as i64)
-    } else if stype == SerialType::Uint32 as u32 {
-        Ok(*(ptr as *const u32) as i64)
-    } else if stype == SerialType::Uint64 as u32 {
-        Ok(*(ptr as *const u64) as i64)
-    } else if stype == SerialType::Int as u32 {
-        // Inline BigInt: [size, value_or_relptr]. Sizes 0 and 1 fit i64.
-        let size = *(ptr as *const usize);
-        if size == 0 {
-            Ok(0)
-        } else if size == 1 {
-            let off = std::mem::size_of::<usize>();
-            Ok(*(ptr.add(off) as *const i64))
-        } else {
-            Err(MorlocError::Other(
-                "Bracket bound: BigInt with more than 1 limb does not fit in i64".into()
-            ))
+    let not_integer = || MorlocError::Other(format!("Bracket bound has non-integer serial type {stype}"));
+    // A stream handle's field decodes to a local handle; `kind` tells a
+    // path-form field which morloc-level type to open it as.
+    let handle_kind = match SerialType::from_u32(stype).ok_or_else(not_integer)? {
+        SerialType::Sint8 => return Ok(*(ptr as *const i8) as i64),
+        SerialType::Sint16 => return Ok(*(ptr as *const i16) as i64),
+        SerialType::Sint32 => return Ok(*(ptr as *const i32) as i64),
+        SerialType::Sint64 => return Ok(*(ptr as *const i64)),
+        SerialType::Uint8 => return Ok(*(ptr as *const u8) as i64),
+        SerialType::Uint16 => return Ok(*(ptr as *const u16) as i64),
+        SerialType::Uint32 => return Ok(*(ptr as *const u32) as i64),
+        SerialType::Uint64 => {
+            let u = *(ptr as *const u64);
+            return i64::try_from(u).map_err(|_| {
+                MorlocError::Other(format!("Bracket bound: UInt64 {u} does not fit in i64"))
+            });
         }
-    } else if stype == SerialType::IFile as u32
-        || stype == SerialType::OStream as u32
-        || stype == SerialType::IStream as u32
-    {
-        // Stream-handle field: the codec branches on the tag byte
-        // (TAG_PATH -> open the path locally, TAG_HANDLE -> use the
-        // slot id directly). `kind` maps the schema code back to the
-        // runtime's MLC_KIND_* so a TAG_PATH decode opens with the
-        // right morloc-level type.
-        let kind = if stype == SerialType::IFile as u32 {
-            morloc_runtime_types::packet::MLC_KIND_IFILE
-        } else if stype == SerialType::OStream as u32 {
-            morloc_runtime_types::packet::MLC_KIND_OSTREAM
-        } else {
-            morloc_runtime_types::packet::MLC_KIND_ISTREAM
-        };
-        let mut err: *mut c_char = ptr::null_mut();
-        let handle = crate::intrinsics::mlc_read_stream_field(
-            ptr as *const std::ffi::c_void,
-            ptr::null(),
-            kind,
-            &mut err,
-        );
-        if handle < 0 {
-            let msg = take_c_errmsg_or(err, "mlc_read_stream_field returned -1");
-            return Err(MorlocError::Other(msg));
+        SerialType::Int => {
+            // Inline BigInt: [size, value_or_relptr]. Sizes 0 and 1 fit i64.
+            return match *(ptr as *const usize) {
+                0 => Ok(0),
+                1 => Ok(*(ptr.add(std::mem::size_of::<usize>()) as *const i64)),
+                _ => Err(MorlocError::Other(
+                    "Bracket bound: BigInt with more than 1 limb does not fit in i64".into(),
+                )),
+            };
         }
-        Ok(handle)
-    } else {
-        Err(MorlocError::Other(format!(
-            "Bracket bound has non-integer serial type {}", stype
-        )))
+        SerialType::IFile => MLC_KIND_IFILE,
+        SerialType::OStream => MLC_KIND_OSTREAM,
+        SerialType::IStream => MLC_KIND_ISTREAM,
+        SerialType::Nil | SerialType::Bool | SerialType::Float32 | SerialType::Float64
+        | SerialType::String | SerialType::Array | SerialType::Tuple | SerialType::Map
+        | SerialType::Optional | SerialType::Table | SerialType::Recur | SerialType::Variant
+        | SerialType::Enum => return Err(not_integer()),
+    };
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = crate::intrinsics::mlc_read_stream_field(
+        ptr as *const std::ffi::c_void,
+        ptr::null(),
+        handle_kind,
+        &mut err,
+    );
+    if handle < 0 {
+        let msg = take_c_errmsg_or(err, "mlc_read_stream_field returned -1");
+        return Err(MorlocError::Other(msg));
     }
+    Ok(handle)
 }
 
 /// Write an i64 into a destination slot whose schema is one of the
@@ -2339,6 +2325,27 @@ pub unsafe extern "C" fn morloc_eval(
         Err(e) => {
             set_errmsg(errmsg, &e);
             ptr::null_mut()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cschema::CSchema;
+    use morloc_runtime_types::schema::parse_schema;
+
+    /// A UInt64 above i64::MAX is an error, not a negative number that a
+    /// bracket would read as counting from the end.
+    #[test]
+    fn wide_uint64_does_not_wrap_negative() {
+        let schema = CSchema::from_rust(&parse_schema("u8").unwrap());
+        let mut big: u64 = u64::MAX;
+        let mut small: u64 = 7;
+        unsafe {
+            assert!(read_int_as_i64(&mut big as *mut u64 as AbsPtr, schema).is_err());
+            assert_eq!(read_int_as_i64(&mut small as *mut u64 as AbsPtr, schema).unwrap(), 7);
+            CSchema::free(schema);
         }
     }
 }

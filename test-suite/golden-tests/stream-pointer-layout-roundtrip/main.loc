@@ -1,0 +1,1935 @@
+-- Values whose voidstar layout holds relative pointers, carried through
+-- every stream-file and data-file path, must read back unchanged.
+--
+-- Report: "Sum-type values written with @write read back as garbage".
+--
+-- Each shape is written with the paths below and compared against its
+-- in-memory rendering (the *Echo command):
+--   Stream     @write level 0, @next             (uncompressed sub-packet)
+--   StreamZ    @write level 3, @next             (compressed sub-packet)
+--   Coalesce   two @write, no @flush, @load      (write-buffer compaction)
+--   Flush      two @write with @flush, @load     (multi sub-packet @load)
+--   Idx/Slice  stream file opened as IFile [T], .[2] / .[0:3]
+--   Save*      @save data packet, @load / .[2] / .[0:3]
+--   Append     @write, @close, @append, @write, @load
+--   Concat     two stream files, @concat, @load
+--
+-- Shapes cover every place a pointer can sit relative to the start of a
+-- record: a variant slot (bare, nested, recursive, in a tuple, a record,
+-- an optional, a list, before and after a string field, with a nullary
+-- arm first) and records whose first element owns no sub-allocation
+-- ("", [], Null) with no variant anywhere. Enum, ?Real and (Int, Str)
+-- are pointer-layout controls.
+
+module main (shapeEcho, shapeStream, shapeStreamZ, shapeCoalesce, shapeFlush, shapeIdx, shapeSlice, shapeSave, shapeSaveIdx, shapeSaveSlice, shapeAppend, shapeConcat, tokEcho, tokStream, tokStreamZ, tokCoalesce, tokFlush, tokIdx, tokSlice, tokSave, tokSaveIdx, tokSaveSlice, tokAppend, tokConcat, bagEcho, bagStream, bagStreamZ, bagCoalesce, bagFlush, bagIdx, bagSlice, bagSave, bagSaveIdx, bagSaveSlice, bagAppend, bagConcat, treeEcho, treeStream, treeStreamZ, treeCoalesce, treeFlush, treeIdx, treeSlice, treeSave, treeSaveIdx, treeSaveSlice, treeAppend, treeConcat, wrapEcho, wrapStream, wrapStreamZ, wrapCoalesce, wrapFlush, wrapIdx, wrapSlice, wrapSave, wrapSaveIdx, wrapSaveSlice, wrapAppend, wrapConcat, tupEcho, tupStream, tupStreamZ, tupCoalesce, tupFlush, tupIdx, tupSlice, tupSave, tupSaveIdx, tupSaveSlice, tupAppend, tupConcat, recEcho, recStream, recStreamZ, recCoalesce, recFlush, recIdx, recSlice, recSave, recSaveIdx, recSaveSlice, recAppend, recConcat, optEcho, optStream, optStreamZ, optCoalesce, optFlush, optIdx, optSlice, optSave, optSaveIdx, optSaveSlice, optAppend, optConcat, lstEcho, lstStream, lstStreamZ, lstCoalesce, lstFlush, lstIdx, lstSlice, lstSave, lstSaveIdx, lstSaveSlice, lstAppend, lstConcat, strvEcho, strvStream, strvStreamZ, strvCoalesce, strvFlush, strvIdx, strvSlice, strvSave, strvSaveIdx, strvSaveSlice, strvAppend, strvConcat, enumEcho, enumStream, enumStreamZ, enumCoalesce, enumFlush, enumIdx, enumSlice, enumSave, enumSaveIdx, enumSaveSlice, enumAppend, enumConcat, optrEcho, optrStream, optrStreamZ, optrCoalesce, optrFlush, optrIdx, optrSlice, optrSave, optrSaveIdx, optrSaveSlice, optrAppend, optrConcat, tstrEcho, tstrStream, tstrStreamZ, tstrCoalesce, tstrFlush, tstrIdx, tstrSlice, tstrSave, tstrSaveIdx, tstrSaveSlice, tstrAppend, tstrConcat, estrEcho, estrStream, estrStreamZ, estrCoalesce, estrFlush, estrIdx, estrSlice, estrSave, estrSaveIdx, estrSaveSlice, estrAppend, estrConcat, elstEcho, elstStream, elstStreamZ, elstCoalesce, elstFlush, elstIdx, elstSlice, elstSave, elstSaveIdx, elstSaveSlice, elstAppend, elstConcat, eoptEcho, eoptStream, eoptStreamZ, eoptCoalesce, eoptFlush, eoptIdx, eoptSlice, eoptSave, eoptSaveIdx, eoptSaveSlice, eoptAppend, eoptConcat, etupEcho, etupStream, etupStreamZ, etupCoalesce, etupFlush, etupIdx, etupSlice, etupSave, etupSaveIdx, etupSaveSlice, etupAppend, etupConcat, enulEcho, enulStream, enulStreamZ, enulCoalesce, enulFlush, enulIdx, enulSlice, enulSave, enulSaveIdx, enulSaveSlice, enulAppend, enulConcat, vfstEcho, vfstStream, vfstStreamZ, vfstCoalesce, vfstFlush, vfstIdx, vfstSlice, vfstSave, vfstSaveIdx, vfstSaveSlice, vfstAppend, vfstConcat)
+import root
+
+data Shape = Circle Real | Rect Real Real
+data Tok = Eof | Num Int | Word Str
+data Bag = Bag [Int] | Empty
+data Tree = Leaf | Node Int Tree Tree
+data Wrap = W Shape | Nope
+data Color = Red | Green | Blue
+record Item where
+  iid :: Int
+  shape :: Shape
+
+shapeVals :: [Shape]
+shapeVals = [Circle 1.5, Rect 2.0 3.0, Circle 4.25]
+
+shapeEcho :: Int -> [Shape]
+shapeEcho n = shapeVals
+
+shapeStream :: Str -> <IO> [Shape]
+shapeStream p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Shape)))
+  @write 0 o shapeVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Shape)))
+  Ok xs <- @next s
+  xs
+
+shapeStreamZ :: Str -> <IO> [Shape]
+shapeStreamZ p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Shape)))
+  @write 3 o shapeVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Shape)))
+  Ok xs <- @next s
+  xs
+
+shapeCoalesce :: Str -> <IO> [Shape]
+shapeCoalesce p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Shape)))
+  @write 0 o shapeVals
+  @write 0 o shapeVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [Shape])
+  xs
+
+shapeFlush :: Str -> <IO> [Shape]
+shapeFlush p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Shape)))
+  @write 0 o shapeVals
+  @flush o
+  @write 0 o shapeVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [Shape])
+  xs
+
+shapeIdx :: Str -> <IO> Shape
+shapeIdx p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Shape)))
+  @write 0 o shapeVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [Shape]))
+  .[2] f
+
+shapeSlice :: Str -> <IO> [Shape]
+shapeSlice p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Shape)))
+  @write 0 o shapeVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [Shape]))
+  .[0:3] f
+
+shapeSave :: Str -> <IO> [Shape]
+shapeSave p = do
+  @save 0 p shapeVals
+  Ok xs <- @load p :: <IO> (Try Str [Shape])
+  xs
+
+shapeSaveIdx :: Str -> <IO> Shape
+shapeSaveIdx p = do
+  @save 0 p shapeVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [Shape]))
+  .[2] f
+
+shapeSaveSlice :: Str -> <IO> [Shape]
+shapeSaveSlice p = do
+  @save 0 p shapeVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [Shape]))
+  .[0:3] f
+
+shapeAppend :: Str -> <IO> [Shape]
+shapeAppend p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Shape)))
+  @write 0 o shapeVals
+  @close o
+  Ok o2 <- @append p :: <IO> (Try Str (OStream (Shape)))
+  @write 0 o2 shapeVals
+  @close o2
+  Ok xs <- @load p :: <IO> (Try Str [Shape])
+  xs
+
+shapeConcat :: Str -> <IO> [Shape]
+shapeConcat p = do
+  Ok a <- @open "#{p}.a" :: <IO> (Try Str (OStream (Shape)))
+  @write 0 a shapeVals
+  @close a
+  Ok b <- @open "#{p}.b" :: <IO> (Try Str (OStream (Shape)))
+  @write 0 b shapeVals
+  @close b
+  @concat ["#{p}.a", "#{p}.b"] p
+  Ok xs <- @load p :: <IO> (Try Str [Shape])
+  xs
+
+tokVals :: [Tok]
+tokVals = [Num 7, Eof, Word "hi", Num 9]
+
+tokEcho :: Int -> [Tok]
+tokEcho n = tokVals
+
+tokStream :: Str -> <IO> [Tok]
+tokStream p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Tok)))
+  @write 0 o tokVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Tok)))
+  Ok xs <- @next s
+  xs
+
+tokStreamZ :: Str -> <IO> [Tok]
+tokStreamZ p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Tok)))
+  @write 3 o tokVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Tok)))
+  Ok xs <- @next s
+  xs
+
+tokCoalesce :: Str -> <IO> [Tok]
+tokCoalesce p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Tok)))
+  @write 0 o tokVals
+  @write 0 o tokVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [Tok])
+  xs
+
+tokFlush :: Str -> <IO> [Tok]
+tokFlush p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Tok)))
+  @write 0 o tokVals
+  @flush o
+  @write 0 o tokVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [Tok])
+  xs
+
+tokIdx :: Str -> <IO> Tok
+tokIdx p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Tok)))
+  @write 0 o tokVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [Tok]))
+  .[2] f
+
+tokSlice :: Str -> <IO> [Tok]
+tokSlice p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Tok)))
+  @write 0 o tokVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [Tok]))
+  .[0:3] f
+
+tokSave :: Str -> <IO> [Tok]
+tokSave p = do
+  @save 0 p tokVals
+  Ok xs <- @load p :: <IO> (Try Str [Tok])
+  xs
+
+tokSaveIdx :: Str -> <IO> Tok
+tokSaveIdx p = do
+  @save 0 p tokVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [Tok]))
+  .[2] f
+
+tokSaveSlice :: Str -> <IO> [Tok]
+tokSaveSlice p = do
+  @save 0 p tokVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [Tok]))
+  .[0:3] f
+
+tokAppend :: Str -> <IO> [Tok]
+tokAppend p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Tok)))
+  @write 0 o tokVals
+  @close o
+  Ok o2 <- @append p :: <IO> (Try Str (OStream (Tok)))
+  @write 0 o2 tokVals
+  @close o2
+  Ok xs <- @load p :: <IO> (Try Str [Tok])
+  xs
+
+tokConcat :: Str -> <IO> [Tok]
+tokConcat p = do
+  Ok a <- @open "#{p}.a" :: <IO> (Try Str (OStream (Tok)))
+  @write 0 a tokVals
+  @close a
+  Ok b <- @open "#{p}.b" :: <IO> (Try Str (OStream (Tok)))
+  @write 0 b tokVals
+  @close b
+  @concat ["#{p}.a", "#{p}.b"] p
+  Ok xs <- @load p :: <IO> (Try Str [Tok])
+  xs
+
+bagVals :: [Bag]
+bagVals = [Bag [1,2,3], Empty, Bag [4]]
+
+bagEcho :: Int -> [Bag]
+bagEcho n = bagVals
+
+bagStream :: Str -> <IO> [Bag]
+bagStream p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Bag)))
+  @write 0 o bagVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Bag)))
+  Ok xs <- @next s
+  xs
+
+bagStreamZ :: Str -> <IO> [Bag]
+bagStreamZ p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Bag)))
+  @write 3 o bagVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Bag)))
+  Ok xs <- @next s
+  xs
+
+bagCoalesce :: Str -> <IO> [Bag]
+bagCoalesce p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Bag)))
+  @write 0 o bagVals
+  @write 0 o bagVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [Bag])
+  xs
+
+bagFlush :: Str -> <IO> [Bag]
+bagFlush p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Bag)))
+  @write 0 o bagVals
+  @flush o
+  @write 0 o bagVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [Bag])
+  xs
+
+bagIdx :: Str -> <IO> Bag
+bagIdx p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Bag)))
+  @write 0 o bagVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [Bag]))
+  .[2] f
+
+bagSlice :: Str -> <IO> [Bag]
+bagSlice p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Bag)))
+  @write 0 o bagVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [Bag]))
+  .[0:3] f
+
+bagSave :: Str -> <IO> [Bag]
+bagSave p = do
+  @save 0 p bagVals
+  Ok xs <- @load p :: <IO> (Try Str [Bag])
+  xs
+
+bagSaveIdx :: Str -> <IO> Bag
+bagSaveIdx p = do
+  @save 0 p bagVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [Bag]))
+  .[2] f
+
+bagSaveSlice :: Str -> <IO> [Bag]
+bagSaveSlice p = do
+  @save 0 p bagVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [Bag]))
+  .[0:3] f
+
+bagAppend :: Str -> <IO> [Bag]
+bagAppend p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Bag)))
+  @write 0 o bagVals
+  @close o
+  Ok o2 <- @append p :: <IO> (Try Str (OStream (Bag)))
+  @write 0 o2 bagVals
+  @close o2
+  Ok xs <- @load p :: <IO> (Try Str [Bag])
+  xs
+
+bagConcat :: Str -> <IO> [Bag]
+bagConcat p = do
+  Ok a <- @open "#{p}.a" :: <IO> (Try Str (OStream (Bag)))
+  @write 0 a bagVals
+  @close a
+  Ok b <- @open "#{p}.b" :: <IO> (Try Str (OStream (Bag)))
+  @write 0 b bagVals
+  @close b
+  @concat ["#{p}.a", "#{p}.b"] p
+  Ok xs <- @load p :: <IO> (Try Str [Bag])
+  xs
+
+treeVals :: [Tree]
+treeVals = [Node 1 Leaf (Node 2 Leaf Leaf), Leaf, Node 3 (Node 4 Leaf Leaf) Leaf]
+
+treeEcho :: Int -> [Tree]
+treeEcho n = treeVals
+
+treeStream :: Str -> <IO> [Tree]
+treeStream p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Tree)))
+  @write 0 o treeVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Tree)))
+  Ok xs <- @next s
+  xs
+
+treeStreamZ :: Str -> <IO> [Tree]
+treeStreamZ p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Tree)))
+  @write 3 o treeVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Tree)))
+  Ok xs <- @next s
+  xs
+
+treeCoalesce :: Str -> <IO> [Tree]
+treeCoalesce p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Tree)))
+  @write 0 o treeVals
+  @write 0 o treeVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [Tree])
+  xs
+
+treeFlush :: Str -> <IO> [Tree]
+treeFlush p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Tree)))
+  @write 0 o treeVals
+  @flush o
+  @write 0 o treeVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [Tree])
+  xs
+
+treeIdx :: Str -> <IO> Tree
+treeIdx p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Tree)))
+  @write 0 o treeVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [Tree]))
+  .[2] f
+
+treeSlice :: Str -> <IO> [Tree]
+treeSlice p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Tree)))
+  @write 0 o treeVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [Tree]))
+  .[0:3] f
+
+treeSave :: Str -> <IO> [Tree]
+treeSave p = do
+  @save 0 p treeVals
+  Ok xs <- @load p :: <IO> (Try Str [Tree])
+  xs
+
+treeSaveIdx :: Str -> <IO> Tree
+treeSaveIdx p = do
+  @save 0 p treeVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [Tree]))
+  .[2] f
+
+treeSaveSlice :: Str -> <IO> [Tree]
+treeSaveSlice p = do
+  @save 0 p treeVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [Tree]))
+  .[0:3] f
+
+treeAppend :: Str -> <IO> [Tree]
+treeAppend p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Tree)))
+  @write 0 o treeVals
+  @close o
+  Ok o2 <- @append p :: <IO> (Try Str (OStream (Tree)))
+  @write 0 o2 treeVals
+  @close o2
+  Ok xs <- @load p :: <IO> (Try Str [Tree])
+  xs
+
+treeConcat :: Str -> <IO> [Tree]
+treeConcat p = do
+  Ok a <- @open "#{p}.a" :: <IO> (Try Str (OStream (Tree)))
+  @write 0 a treeVals
+  @close a
+  Ok b <- @open "#{p}.b" :: <IO> (Try Str (OStream (Tree)))
+  @write 0 b treeVals
+  @close b
+  @concat ["#{p}.a", "#{p}.b"] p
+  Ok xs <- @load p :: <IO> (Try Str [Tree])
+  xs
+
+wrapVals :: [Wrap]
+wrapVals = [W (Circle 1.5), Nope, W (Rect 2.0 3.0)]
+
+wrapEcho :: Int -> [Wrap]
+wrapEcho n = wrapVals
+
+wrapStream :: Str -> <IO> [Wrap]
+wrapStream p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Wrap)))
+  @write 0 o wrapVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Wrap)))
+  Ok xs <- @next s
+  xs
+
+wrapStreamZ :: Str -> <IO> [Wrap]
+wrapStreamZ p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Wrap)))
+  @write 3 o wrapVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Wrap)))
+  Ok xs <- @next s
+  xs
+
+wrapCoalesce :: Str -> <IO> [Wrap]
+wrapCoalesce p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Wrap)))
+  @write 0 o wrapVals
+  @write 0 o wrapVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [Wrap])
+  xs
+
+wrapFlush :: Str -> <IO> [Wrap]
+wrapFlush p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Wrap)))
+  @write 0 o wrapVals
+  @flush o
+  @write 0 o wrapVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [Wrap])
+  xs
+
+wrapIdx :: Str -> <IO> Wrap
+wrapIdx p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Wrap)))
+  @write 0 o wrapVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [Wrap]))
+  .[2] f
+
+wrapSlice :: Str -> <IO> [Wrap]
+wrapSlice p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Wrap)))
+  @write 0 o wrapVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [Wrap]))
+  .[0:3] f
+
+wrapSave :: Str -> <IO> [Wrap]
+wrapSave p = do
+  @save 0 p wrapVals
+  Ok xs <- @load p :: <IO> (Try Str [Wrap])
+  xs
+
+wrapSaveIdx :: Str -> <IO> Wrap
+wrapSaveIdx p = do
+  @save 0 p wrapVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [Wrap]))
+  .[2] f
+
+wrapSaveSlice :: Str -> <IO> [Wrap]
+wrapSaveSlice p = do
+  @save 0 p wrapVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [Wrap]))
+  .[0:3] f
+
+wrapAppend :: Str -> <IO> [Wrap]
+wrapAppend p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Wrap)))
+  @write 0 o wrapVals
+  @close o
+  Ok o2 <- @append p :: <IO> (Try Str (OStream (Wrap)))
+  @write 0 o2 wrapVals
+  @close o2
+  Ok xs <- @load p :: <IO> (Try Str [Wrap])
+  xs
+
+wrapConcat :: Str -> <IO> [Wrap]
+wrapConcat p = do
+  Ok a <- @open "#{p}.a" :: <IO> (Try Str (OStream (Wrap)))
+  @write 0 a wrapVals
+  @close a
+  Ok b <- @open "#{p}.b" :: <IO> (Try Str (OStream (Wrap)))
+  @write 0 b wrapVals
+  @close b
+  @concat ["#{p}.a", "#{p}.b"] p
+  Ok xs <- @load p :: <IO> (Try Str [Wrap])
+  xs
+
+tupVals :: [(Int, Shape)]
+tupVals = [(1, Circle 1.5), (2, Rect 2.0 3.0), (3, Circle 4.25)]
+
+tupEcho :: Int -> [(Int, Shape)]
+tupEcho n = tupVals
+
+tupStream :: Str -> <IO> [(Int, Shape)]
+tupStream p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Int, Shape))))
+  @write 0 o tupVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream ((Int, Shape))))
+  Ok xs <- @next s
+  xs
+
+tupStreamZ :: Str -> <IO> [(Int, Shape)]
+tupStreamZ p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Int, Shape))))
+  @write 3 o tupVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream ((Int, Shape))))
+  Ok xs <- @next s
+  xs
+
+tupCoalesce :: Str -> <IO> [(Int, Shape)]
+tupCoalesce p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Int, Shape))))
+  @write 0 o tupVals
+  @write 0 o tupVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [(Int, Shape)])
+  xs
+
+tupFlush :: Str -> <IO> [(Int, Shape)]
+tupFlush p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Int, Shape))))
+  @write 0 o tupVals
+  @flush o
+  @write 0 o tupVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [(Int, Shape)])
+  xs
+
+tupIdx :: Str -> <IO> (Int, Shape)
+tupIdx p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Int, Shape))))
+  @write 0 o tupVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [(Int, Shape)]))
+  .[2] f
+
+tupSlice :: Str -> <IO> [(Int, Shape)]
+tupSlice p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Int, Shape))))
+  @write 0 o tupVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [(Int, Shape)]))
+  .[0:3] f
+
+tupSave :: Str -> <IO> [(Int, Shape)]
+tupSave p = do
+  @save 0 p tupVals
+  Ok xs <- @load p :: <IO> (Try Str [(Int, Shape)])
+  xs
+
+tupSaveIdx :: Str -> <IO> (Int, Shape)
+tupSaveIdx p = do
+  @save 0 p tupVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [(Int, Shape)]))
+  .[2] f
+
+tupSaveSlice :: Str -> <IO> [(Int, Shape)]
+tupSaveSlice p = do
+  @save 0 p tupVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [(Int, Shape)]))
+  .[0:3] f
+
+tupAppend :: Str -> <IO> [(Int, Shape)]
+tupAppend p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Int, Shape))))
+  @write 0 o tupVals
+  @close o
+  Ok o2 <- @append p :: <IO> (Try Str (OStream ((Int, Shape))))
+  @write 0 o2 tupVals
+  @close o2
+  Ok xs <- @load p :: <IO> (Try Str [(Int, Shape)])
+  xs
+
+tupConcat :: Str -> <IO> [(Int, Shape)]
+tupConcat p = do
+  Ok a <- @open "#{p}.a" :: <IO> (Try Str (OStream ((Int, Shape))))
+  @write 0 a tupVals
+  @close a
+  Ok b <- @open "#{p}.b" :: <IO> (Try Str (OStream ((Int, Shape))))
+  @write 0 b tupVals
+  @close b
+  @concat ["#{p}.a", "#{p}.b"] p
+  Ok xs <- @load p :: <IO> (Try Str [(Int, Shape)])
+  xs
+
+recVals :: [Item]
+recVals = [{iid = 1, shape = Circle 1.5}, {iid = 2, shape = Rect 2.0 3.0}, {iid = 3, shape = Circle 4.25}]
+
+recEcho :: Int -> [Item]
+recEcho n = recVals
+
+recStream :: Str -> <IO> [Item]
+recStream p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Item)))
+  @write 0 o recVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Item)))
+  Ok xs <- @next s
+  xs
+
+recStreamZ :: Str -> <IO> [Item]
+recStreamZ p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Item)))
+  @write 3 o recVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Item)))
+  Ok xs <- @next s
+  xs
+
+recCoalesce :: Str -> <IO> [Item]
+recCoalesce p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Item)))
+  @write 0 o recVals
+  @write 0 o recVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [Item])
+  xs
+
+recFlush :: Str -> <IO> [Item]
+recFlush p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Item)))
+  @write 0 o recVals
+  @flush o
+  @write 0 o recVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [Item])
+  xs
+
+recIdx :: Str -> <IO> Item
+recIdx p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Item)))
+  @write 0 o recVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [Item]))
+  .[2] f
+
+recSlice :: Str -> <IO> [Item]
+recSlice p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Item)))
+  @write 0 o recVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [Item]))
+  .[0:3] f
+
+recSave :: Str -> <IO> [Item]
+recSave p = do
+  @save 0 p recVals
+  Ok xs <- @load p :: <IO> (Try Str [Item])
+  xs
+
+recSaveIdx :: Str -> <IO> Item
+recSaveIdx p = do
+  @save 0 p recVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [Item]))
+  .[2] f
+
+recSaveSlice :: Str -> <IO> [Item]
+recSaveSlice p = do
+  @save 0 p recVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [Item]))
+  .[0:3] f
+
+recAppend :: Str -> <IO> [Item]
+recAppend p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Item)))
+  @write 0 o recVals
+  @close o
+  Ok o2 <- @append p :: <IO> (Try Str (OStream (Item)))
+  @write 0 o2 recVals
+  @close o2
+  Ok xs <- @load p :: <IO> (Try Str [Item])
+  xs
+
+recConcat :: Str -> <IO> [Item]
+recConcat p = do
+  Ok a <- @open "#{p}.a" :: <IO> (Try Str (OStream (Item)))
+  @write 0 a recVals
+  @close a
+  Ok b <- @open "#{p}.b" :: <IO> (Try Str (OStream (Item)))
+  @write 0 b recVals
+  @close b
+  @concat ["#{p}.a", "#{p}.b"] p
+  Ok xs <- @load p :: <IO> (Try Str [Item])
+  xs
+
+optVals :: [?Shape]
+optVals = [Circle 1.5, Null, Rect 2.0 3.0]
+
+optEcho :: Int -> [?Shape]
+optEcho n = optVals
+
+optStream :: Str -> <IO> [?Shape]
+optStream p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (?Shape)))
+  @write 0 o optVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (?Shape)))
+  Ok xs <- @next s
+  xs
+
+optStreamZ :: Str -> <IO> [?Shape]
+optStreamZ p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (?Shape)))
+  @write 3 o optVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (?Shape)))
+  Ok xs <- @next s
+  xs
+
+optCoalesce :: Str -> <IO> [?Shape]
+optCoalesce p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (?Shape)))
+  @write 0 o optVals
+  @write 0 o optVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [?Shape])
+  xs
+
+optFlush :: Str -> <IO> [?Shape]
+optFlush p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (?Shape)))
+  @write 0 o optVals
+  @flush o
+  @write 0 o optVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [?Shape])
+  xs
+
+optIdx :: Str -> <IO> ?Shape
+optIdx p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (?Shape)))
+  @write 0 o optVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [?Shape]))
+  .[2] f
+
+optSlice :: Str -> <IO> [?Shape]
+optSlice p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (?Shape)))
+  @write 0 o optVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [?Shape]))
+  .[0:3] f
+
+optSave :: Str -> <IO> [?Shape]
+optSave p = do
+  @save 0 p optVals
+  Ok xs <- @load p :: <IO> (Try Str [?Shape])
+  xs
+
+optSaveIdx :: Str -> <IO> ?Shape
+optSaveIdx p = do
+  @save 0 p optVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [?Shape]))
+  .[2] f
+
+optSaveSlice :: Str -> <IO> [?Shape]
+optSaveSlice p = do
+  @save 0 p optVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [?Shape]))
+  .[0:3] f
+
+optAppend :: Str -> <IO> [?Shape]
+optAppend p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (?Shape)))
+  @write 0 o optVals
+  @close o
+  Ok o2 <- @append p :: <IO> (Try Str (OStream (?Shape)))
+  @write 0 o2 optVals
+  @close o2
+  Ok xs <- @load p :: <IO> (Try Str [?Shape])
+  xs
+
+optConcat :: Str -> <IO> [?Shape]
+optConcat p = do
+  Ok a <- @open "#{p}.a" :: <IO> (Try Str (OStream (?Shape)))
+  @write 0 a optVals
+  @close a
+  Ok b <- @open "#{p}.b" :: <IO> (Try Str (OStream (?Shape)))
+  @write 0 b optVals
+  @close b
+  @concat ["#{p}.a", "#{p}.b"] p
+  Ok xs <- @load p :: <IO> (Try Str [?Shape])
+  xs
+
+lstVals :: [[Shape]]
+lstVals = [[Circle 1.5], [], [Rect 2.0 3.0, Circle 4.25]]
+
+lstEcho :: Int -> [[Shape]]
+lstEcho n = lstVals
+
+lstStream :: Str -> <IO> [[Shape]]
+lstStream p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ([Shape])))
+  @write 0 o lstVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream ([Shape])))
+  Ok xs <- @next s
+  xs
+
+lstStreamZ :: Str -> <IO> [[Shape]]
+lstStreamZ p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ([Shape])))
+  @write 3 o lstVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream ([Shape])))
+  Ok xs <- @next s
+  xs
+
+lstCoalesce :: Str -> <IO> [[Shape]]
+lstCoalesce p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ([Shape])))
+  @write 0 o lstVals
+  @write 0 o lstVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [[Shape]])
+  xs
+
+lstFlush :: Str -> <IO> [[Shape]]
+lstFlush p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ([Shape])))
+  @write 0 o lstVals
+  @flush o
+  @write 0 o lstVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [[Shape]])
+  xs
+
+lstIdx :: Str -> <IO> [Shape]
+lstIdx p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ([Shape])))
+  @write 0 o lstVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [[Shape]]))
+  .[2] f
+
+lstSlice :: Str -> <IO> [[Shape]]
+lstSlice p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ([Shape])))
+  @write 0 o lstVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [[Shape]]))
+  .[0:3] f
+
+lstSave :: Str -> <IO> [[Shape]]
+lstSave p = do
+  @save 0 p lstVals
+  Ok xs <- @load p :: <IO> (Try Str [[Shape]])
+  xs
+
+lstSaveIdx :: Str -> <IO> [Shape]
+lstSaveIdx p = do
+  @save 0 p lstVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [[Shape]]))
+  .[2] f
+
+lstSaveSlice :: Str -> <IO> [[Shape]]
+lstSaveSlice p = do
+  @save 0 p lstVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [[Shape]]))
+  .[0:3] f
+
+lstAppend :: Str -> <IO> [[Shape]]
+lstAppend p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ([Shape])))
+  @write 0 o lstVals
+  @close o
+  Ok o2 <- @append p :: <IO> (Try Str (OStream ([Shape])))
+  @write 0 o2 lstVals
+  @close o2
+  Ok xs <- @load p :: <IO> (Try Str [[Shape]])
+  xs
+
+lstConcat :: Str -> <IO> [[Shape]]
+lstConcat p = do
+  Ok a <- @open "#{p}.a" :: <IO> (Try Str (OStream ([Shape])))
+  @write 0 a lstVals
+  @close a
+  Ok b <- @open "#{p}.b" :: <IO> (Try Str (OStream ([Shape])))
+  @write 0 b lstVals
+  @close b
+  @concat ["#{p}.a", "#{p}.b"] p
+  Ok xs <- @load p :: <IO> (Try Str [[Shape]])
+  xs
+
+strvVals :: [(Str, Tok)]
+strvVals = [("a", Word "xyz"), ("b", Eof), ("c", Num 3)]
+
+strvEcho :: Int -> [(Str, Tok)]
+strvEcho n = strvVals
+
+strvStream :: Str -> <IO> [(Str, Tok)]
+strvStream p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Str, Tok))))
+  @write 0 o strvVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream ((Str, Tok))))
+  Ok xs <- @next s
+  xs
+
+strvStreamZ :: Str -> <IO> [(Str, Tok)]
+strvStreamZ p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Str, Tok))))
+  @write 3 o strvVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream ((Str, Tok))))
+  Ok xs <- @next s
+  xs
+
+strvCoalesce :: Str -> <IO> [(Str, Tok)]
+strvCoalesce p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Str, Tok))))
+  @write 0 o strvVals
+  @write 0 o strvVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [(Str, Tok)])
+  xs
+
+strvFlush :: Str -> <IO> [(Str, Tok)]
+strvFlush p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Str, Tok))))
+  @write 0 o strvVals
+  @flush o
+  @write 0 o strvVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [(Str, Tok)])
+  xs
+
+strvIdx :: Str -> <IO> (Str, Tok)
+strvIdx p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Str, Tok))))
+  @write 0 o strvVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [(Str, Tok)]))
+  .[2] f
+
+strvSlice :: Str -> <IO> [(Str, Tok)]
+strvSlice p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Str, Tok))))
+  @write 0 o strvVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [(Str, Tok)]))
+  .[0:3] f
+
+strvSave :: Str -> <IO> [(Str, Tok)]
+strvSave p = do
+  @save 0 p strvVals
+  Ok xs <- @load p :: <IO> (Try Str [(Str, Tok)])
+  xs
+
+strvSaveIdx :: Str -> <IO> (Str, Tok)
+strvSaveIdx p = do
+  @save 0 p strvVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [(Str, Tok)]))
+  .[2] f
+
+strvSaveSlice :: Str -> <IO> [(Str, Tok)]
+strvSaveSlice p = do
+  @save 0 p strvVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [(Str, Tok)]))
+  .[0:3] f
+
+strvAppend :: Str -> <IO> [(Str, Tok)]
+strvAppend p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Str, Tok))))
+  @write 0 o strvVals
+  @close o
+  Ok o2 <- @append p :: <IO> (Try Str (OStream ((Str, Tok))))
+  @write 0 o2 strvVals
+  @close o2
+  Ok xs <- @load p :: <IO> (Try Str [(Str, Tok)])
+  xs
+
+strvConcat :: Str -> <IO> [(Str, Tok)]
+strvConcat p = do
+  Ok a <- @open "#{p}.a" :: <IO> (Try Str (OStream ((Str, Tok))))
+  @write 0 a strvVals
+  @close a
+  Ok b <- @open "#{p}.b" :: <IO> (Try Str (OStream ((Str, Tok))))
+  @write 0 b strvVals
+  @close b
+  @concat ["#{p}.a", "#{p}.b"] p
+  Ok xs <- @load p :: <IO> (Try Str [(Str, Tok)])
+  xs
+
+enumVals :: [Color]
+enumVals = [Red, Blue, Green]
+
+enumEcho :: Int -> [Color]
+enumEcho n = enumVals
+
+enumStream :: Str -> <IO> [Color]
+enumStream p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Color)))
+  @write 0 o enumVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Color)))
+  Ok xs <- @next s
+  xs
+
+enumStreamZ :: Str -> <IO> [Color]
+enumStreamZ p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Color)))
+  @write 3 o enumVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Color)))
+  Ok xs <- @next s
+  xs
+
+enumCoalesce :: Str -> <IO> [Color]
+enumCoalesce p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Color)))
+  @write 0 o enumVals
+  @write 0 o enumVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [Color])
+  xs
+
+enumFlush :: Str -> <IO> [Color]
+enumFlush p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Color)))
+  @write 0 o enumVals
+  @flush o
+  @write 0 o enumVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [Color])
+  xs
+
+enumIdx :: Str -> <IO> Color
+enumIdx p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Color)))
+  @write 0 o enumVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [Color]))
+  .[2] f
+
+enumSlice :: Str -> <IO> [Color]
+enumSlice p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Color)))
+  @write 0 o enumVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [Color]))
+  .[0:3] f
+
+enumSave :: Str -> <IO> [Color]
+enumSave p = do
+  @save 0 p enumVals
+  Ok xs <- @load p :: <IO> (Try Str [Color])
+  xs
+
+enumSaveIdx :: Str -> <IO> Color
+enumSaveIdx p = do
+  @save 0 p enumVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [Color]))
+  .[2] f
+
+enumSaveSlice :: Str -> <IO> [Color]
+enumSaveSlice p = do
+  @save 0 p enumVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [Color]))
+  .[0:3] f
+
+enumAppend :: Str -> <IO> [Color]
+enumAppend p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Color)))
+  @write 0 o enumVals
+  @close o
+  Ok o2 <- @append p :: <IO> (Try Str (OStream (Color)))
+  @write 0 o2 enumVals
+  @close o2
+  Ok xs <- @load p :: <IO> (Try Str [Color])
+  xs
+
+enumConcat :: Str -> <IO> [Color]
+enumConcat p = do
+  Ok a <- @open "#{p}.a" :: <IO> (Try Str (OStream (Color)))
+  @write 0 a enumVals
+  @close a
+  Ok b <- @open "#{p}.b" :: <IO> (Try Str (OStream (Color)))
+  @write 0 b enumVals
+  @close b
+  @concat ["#{p}.a", "#{p}.b"] p
+  Ok xs <- @load p :: <IO> (Try Str [Color])
+  xs
+
+optrVals :: [?Real]
+optrVals = [1.5, Null, 3.0]
+
+optrEcho :: Int -> [?Real]
+optrEcho n = optrVals
+
+optrStream :: Str -> <IO> [?Real]
+optrStream p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (?Real)))
+  @write 0 o optrVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (?Real)))
+  Ok xs <- @next s
+  xs
+
+optrStreamZ :: Str -> <IO> [?Real]
+optrStreamZ p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (?Real)))
+  @write 3 o optrVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (?Real)))
+  Ok xs <- @next s
+  xs
+
+optrCoalesce :: Str -> <IO> [?Real]
+optrCoalesce p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (?Real)))
+  @write 0 o optrVals
+  @write 0 o optrVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [?Real])
+  xs
+
+optrFlush :: Str -> <IO> [?Real]
+optrFlush p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (?Real)))
+  @write 0 o optrVals
+  @flush o
+  @write 0 o optrVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [?Real])
+  xs
+
+optrIdx :: Str -> <IO> ?Real
+optrIdx p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (?Real)))
+  @write 0 o optrVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [?Real]))
+  .[2] f
+
+optrSlice :: Str -> <IO> [?Real]
+optrSlice p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (?Real)))
+  @write 0 o optrVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [?Real]))
+  .[0:3] f
+
+optrSave :: Str -> <IO> [?Real]
+optrSave p = do
+  @save 0 p optrVals
+  Ok xs <- @load p :: <IO> (Try Str [?Real])
+  xs
+
+optrSaveIdx :: Str -> <IO> ?Real
+optrSaveIdx p = do
+  @save 0 p optrVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [?Real]))
+  .[2] f
+
+optrSaveSlice :: Str -> <IO> [?Real]
+optrSaveSlice p = do
+  @save 0 p optrVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [?Real]))
+  .[0:3] f
+
+optrAppend :: Str -> <IO> [?Real]
+optrAppend p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (?Real)))
+  @write 0 o optrVals
+  @close o
+  Ok o2 <- @append p :: <IO> (Try Str (OStream (?Real)))
+  @write 0 o2 optrVals
+  @close o2
+  Ok xs <- @load p :: <IO> (Try Str [?Real])
+  xs
+
+optrConcat :: Str -> <IO> [?Real]
+optrConcat p = do
+  Ok a <- @open "#{p}.a" :: <IO> (Try Str (OStream (?Real)))
+  @write 0 a optrVals
+  @close a
+  Ok b <- @open "#{p}.b" :: <IO> (Try Str (OStream (?Real)))
+  @write 0 b optrVals
+  @close b
+  @concat ["#{p}.a", "#{p}.b"] p
+  Ok xs <- @load p :: <IO> (Try Str [?Real])
+  xs
+
+tstrVals :: [(Int, Str)]
+tstrVals = [(1, "one"), (2, "two"), (3, "three")]
+
+tstrEcho :: Int -> [(Int, Str)]
+tstrEcho n = tstrVals
+
+tstrStream :: Str -> <IO> [(Int, Str)]
+tstrStream p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Int, Str))))
+  @write 0 o tstrVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream ((Int, Str))))
+  Ok xs <- @next s
+  xs
+
+tstrStreamZ :: Str -> <IO> [(Int, Str)]
+tstrStreamZ p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Int, Str))))
+  @write 3 o tstrVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream ((Int, Str))))
+  Ok xs <- @next s
+  xs
+
+tstrCoalesce :: Str -> <IO> [(Int, Str)]
+tstrCoalesce p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Int, Str))))
+  @write 0 o tstrVals
+  @write 0 o tstrVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [(Int, Str)])
+  xs
+
+tstrFlush :: Str -> <IO> [(Int, Str)]
+tstrFlush p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Int, Str))))
+  @write 0 o tstrVals
+  @flush o
+  @write 0 o tstrVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [(Int, Str)])
+  xs
+
+tstrIdx :: Str -> <IO> (Int, Str)
+tstrIdx p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Int, Str))))
+  @write 0 o tstrVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [(Int, Str)]))
+  .[2] f
+
+tstrSlice :: Str -> <IO> [(Int, Str)]
+tstrSlice p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Int, Str))))
+  @write 0 o tstrVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [(Int, Str)]))
+  .[0:3] f
+
+tstrSave :: Str -> <IO> [(Int, Str)]
+tstrSave p = do
+  @save 0 p tstrVals
+  Ok xs <- @load p :: <IO> (Try Str [(Int, Str)])
+  xs
+
+tstrSaveIdx :: Str -> <IO> (Int, Str)
+tstrSaveIdx p = do
+  @save 0 p tstrVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [(Int, Str)]))
+  .[2] f
+
+tstrSaveSlice :: Str -> <IO> [(Int, Str)]
+tstrSaveSlice p = do
+  @save 0 p tstrVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [(Int, Str)]))
+  .[0:3] f
+
+tstrAppend :: Str -> <IO> [(Int, Str)]
+tstrAppend p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Int, Str))))
+  @write 0 o tstrVals
+  @close o
+  Ok o2 <- @append p :: <IO> (Try Str (OStream ((Int, Str))))
+  @write 0 o2 tstrVals
+  @close o2
+  Ok xs <- @load p :: <IO> (Try Str [(Int, Str)])
+  xs
+
+tstrConcat :: Str -> <IO> [(Int, Str)]
+tstrConcat p = do
+  Ok a <- @open "#{p}.a" :: <IO> (Try Str (OStream ((Int, Str))))
+  @write 0 a tstrVals
+  @close a
+  Ok b <- @open "#{p}.b" :: <IO> (Try Str (OStream ((Int, Str))))
+  @write 0 b tstrVals
+  @close b
+  @concat ["#{p}.a", "#{p}.b"] p
+  Ok xs <- @load p :: <IO> (Try Str [(Int, Str)])
+  xs
+
+estrVals :: [Str]
+estrVals = ["", "ab", "cd"]
+
+estrEcho :: Int -> [Str]
+estrEcho n = estrVals
+
+estrStream :: Str -> <IO> [Str]
+estrStream p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Str)))
+  @write 0 o estrVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Str)))
+  Ok xs <- @next s
+  xs
+
+estrStreamZ :: Str -> <IO> [Str]
+estrStreamZ p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Str)))
+  @write 3 o estrVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Str)))
+  Ok xs <- @next s
+  xs
+
+estrCoalesce :: Str -> <IO> [Str]
+estrCoalesce p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Str)))
+  @write 0 o estrVals
+  @write 0 o estrVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [Str])
+  xs
+
+estrFlush :: Str -> <IO> [Str]
+estrFlush p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Str)))
+  @write 0 o estrVals
+  @flush o
+  @write 0 o estrVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [Str])
+  xs
+
+estrIdx :: Str -> <IO> Str
+estrIdx p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Str)))
+  @write 0 o estrVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [Str]))
+  .[2] f
+
+estrSlice :: Str -> <IO> [Str]
+estrSlice p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Str)))
+  @write 0 o estrVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [Str]))
+  .[0:3] f
+
+estrSave :: Str -> <IO> [Str]
+estrSave p = do
+  @save 0 p estrVals
+  Ok xs <- @load p :: <IO> (Try Str [Str])
+  xs
+
+estrSaveIdx :: Str -> <IO> Str
+estrSaveIdx p = do
+  @save 0 p estrVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [Str]))
+  .[2] f
+
+estrSaveSlice :: Str -> <IO> [Str]
+estrSaveSlice p = do
+  @save 0 p estrVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [Str]))
+  .[0:3] f
+
+estrAppend :: Str -> <IO> [Str]
+estrAppend p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Str)))
+  @write 0 o estrVals
+  @close o
+  Ok o2 <- @append p :: <IO> (Try Str (OStream (Str)))
+  @write 0 o2 estrVals
+  @close o2
+  Ok xs <- @load p :: <IO> (Try Str [Str])
+  xs
+
+estrConcat :: Str -> <IO> [Str]
+estrConcat p = do
+  Ok a <- @open "#{p}.a" :: <IO> (Try Str (OStream (Str)))
+  @write 0 a estrVals
+  @close a
+  Ok b <- @open "#{p}.b" :: <IO> (Try Str (OStream (Str)))
+  @write 0 b estrVals
+  @close b
+  @concat ["#{p}.a", "#{p}.b"] p
+  Ok xs <- @load p :: <IO> (Try Str [Str])
+  xs
+
+elstVals :: [[Int]]
+elstVals = [[], [1,2], [3]]
+
+elstEcho :: Int -> [[Int]]
+elstEcho n = elstVals
+
+elstStream :: Str -> <IO> [[Int]]
+elstStream p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ([Int])))
+  @write 0 o elstVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream ([Int])))
+  Ok xs <- @next s
+  xs
+
+elstStreamZ :: Str -> <IO> [[Int]]
+elstStreamZ p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ([Int])))
+  @write 3 o elstVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream ([Int])))
+  Ok xs <- @next s
+  xs
+
+elstCoalesce :: Str -> <IO> [[Int]]
+elstCoalesce p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ([Int])))
+  @write 0 o elstVals
+  @write 0 o elstVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [[Int]])
+  xs
+
+elstFlush :: Str -> <IO> [[Int]]
+elstFlush p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ([Int])))
+  @write 0 o elstVals
+  @flush o
+  @write 0 o elstVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [[Int]])
+  xs
+
+elstIdx :: Str -> <IO> [Int]
+elstIdx p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ([Int])))
+  @write 0 o elstVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [[Int]]))
+  .[2] f
+
+elstSlice :: Str -> <IO> [[Int]]
+elstSlice p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ([Int])))
+  @write 0 o elstVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [[Int]]))
+  .[0:3] f
+
+elstSave :: Str -> <IO> [[Int]]
+elstSave p = do
+  @save 0 p elstVals
+  Ok xs <- @load p :: <IO> (Try Str [[Int]])
+  xs
+
+elstSaveIdx :: Str -> <IO> [Int]
+elstSaveIdx p = do
+  @save 0 p elstVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [[Int]]))
+  .[2] f
+
+elstSaveSlice :: Str -> <IO> [[Int]]
+elstSaveSlice p = do
+  @save 0 p elstVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [[Int]]))
+  .[0:3] f
+
+elstAppend :: Str -> <IO> [[Int]]
+elstAppend p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ([Int])))
+  @write 0 o elstVals
+  @close o
+  Ok o2 <- @append p :: <IO> (Try Str (OStream ([Int])))
+  @write 0 o2 elstVals
+  @close o2
+  Ok xs <- @load p :: <IO> (Try Str [[Int]])
+  xs
+
+elstConcat :: Str -> <IO> [[Int]]
+elstConcat p = do
+  Ok a <- @open "#{p}.a" :: <IO> (Try Str (OStream ([Int])))
+  @write 0 a elstVals
+  @close a
+  Ok b <- @open "#{p}.b" :: <IO> (Try Str (OStream ([Int])))
+  @write 0 b elstVals
+  @close b
+  @concat ["#{p}.a", "#{p}.b"] p
+  Ok xs <- @load p :: <IO> (Try Str [[Int]])
+  xs
+
+eoptVals :: [?Str]
+eoptVals = [Null, "ab", "cd"]
+
+eoptEcho :: Int -> [?Str]
+eoptEcho n = eoptVals
+
+eoptStream :: Str -> <IO> [?Str]
+eoptStream p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (?Str)))
+  @write 0 o eoptVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (?Str)))
+  Ok xs <- @next s
+  xs
+
+eoptStreamZ :: Str -> <IO> [?Str]
+eoptStreamZ p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (?Str)))
+  @write 3 o eoptVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (?Str)))
+  Ok xs <- @next s
+  xs
+
+eoptCoalesce :: Str -> <IO> [?Str]
+eoptCoalesce p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (?Str)))
+  @write 0 o eoptVals
+  @write 0 o eoptVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [?Str])
+  xs
+
+eoptFlush :: Str -> <IO> [?Str]
+eoptFlush p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (?Str)))
+  @write 0 o eoptVals
+  @flush o
+  @write 0 o eoptVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [?Str])
+  xs
+
+eoptIdx :: Str -> <IO> ?Str
+eoptIdx p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (?Str)))
+  @write 0 o eoptVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [?Str]))
+  .[2] f
+
+eoptSlice :: Str -> <IO> [?Str]
+eoptSlice p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (?Str)))
+  @write 0 o eoptVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [?Str]))
+  .[0:3] f
+
+eoptSave :: Str -> <IO> [?Str]
+eoptSave p = do
+  @save 0 p eoptVals
+  Ok xs <- @load p :: <IO> (Try Str [?Str])
+  xs
+
+eoptSaveIdx :: Str -> <IO> ?Str
+eoptSaveIdx p = do
+  @save 0 p eoptVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [?Str]))
+  .[2] f
+
+eoptSaveSlice :: Str -> <IO> [?Str]
+eoptSaveSlice p = do
+  @save 0 p eoptVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [?Str]))
+  .[0:3] f
+
+eoptAppend :: Str -> <IO> [?Str]
+eoptAppend p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (?Str)))
+  @write 0 o eoptVals
+  @close o
+  Ok o2 <- @append p :: <IO> (Try Str (OStream (?Str)))
+  @write 0 o2 eoptVals
+  @close o2
+  Ok xs <- @load p :: <IO> (Try Str [?Str])
+  xs
+
+eoptConcat :: Str -> <IO> [?Str]
+eoptConcat p = do
+  Ok a <- @open "#{p}.a" :: <IO> (Try Str (OStream (?Str)))
+  @write 0 a eoptVals
+  @close a
+  Ok b <- @open "#{p}.b" :: <IO> (Try Str (OStream (?Str)))
+  @write 0 b eoptVals
+  @close b
+  @concat ["#{p}.a", "#{p}.b"] p
+  Ok xs <- @load p :: <IO> (Try Str [?Str])
+  xs
+
+etupVals :: [(Int, Str)]
+etupVals = [(1, ""), (2, "ab"), (3, "cd")]
+
+etupEcho :: Int -> [(Int, Str)]
+etupEcho n = etupVals
+
+etupStream :: Str -> <IO> [(Int, Str)]
+etupStream p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Int, Str))))
+  @write 0 o etupVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream ((Int, Str))))
+  Ok xs <- @next s
+  xs
+
+etupStreamZ :: Str -> <IO> [(Int, Str)]
+etupStreamZ p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Int, Str))))
+  @write 3 o etupVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream ((Int, Str))))
+  Ok xs <- @next s
+  xs
+
+etupCoalesce :: Str -> <IO> [(Int, Str)]
+etupCoalesce p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Int, Str))))
+  @write 0 o etupVals
+  @write 0 o etupVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [(Int, Str)])
+  xs
+
+etupFlush :: Str -> <IO> [(Int, Str)]
+etupFlush p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Int, Str))))
+  @write 0 o etupVals
+  @flush o
+  @write 0 o etupVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [(Int, Str)])
+  xs
+
+etupIdx :: Str -> <IO> (Int, Str)
+etupIdx p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Int, Str))))
+  @write 0 o etupVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [(Int, Str)]))
+  .[2] f
+
+etupSlice :: Str -> <IO> [(Int, Str)]
+etupSlice p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Int, Str))))
+  @write 0 o etupVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [(Int, Str)]))
+  .[0:3] f
+
+etupSave :: Str -> <IO> [(Int, Str)]
+etupSave p = do
+  @save 0 p etupVals
+  Ok xs <- @load p :: <IO> (Try Str [(Int, Str)])
+  xs
+
+etupSaveIdx :: Str -> <IO> (Int, Str)
+etupSaveIdx p = do
+  @save 0 p etupVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [(Int, Str)]))
+  .[2] f
+
+etupSaveSlice :: Str -> <IO> [(Int, Str)]
+etupSaveSlice p = do
+  @save 0 p etupVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [(Int, Str)]))
+  .[0:3] f
+
+etupAppend :: Str -> <IO> [(Int, Str)]
+etupAppend p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Int, Str))))
+  @write 0 o etupVals
+  @close o
+  Ok o2 <- @append p :: <IO> (Try Str (OStream ((Int, Str))))
+  @write 0 o2 etupVals
+  @close o2
+  Ok xs <- @load p :: <IO> (Try Str [(Int, Str)])
+  xs
+
+etupConcat :: Str -> <IO> [(Int, Str)]
+etupConcat p = do
+  Ok a <- @open "#{p}.a" :: <IO> (Try Str (OStream ((Int, Str))))
+  @write 0 a etupVals
+  @close a
+  Ok b <- @open "#{p}.b" :: <IO> (Try Str (OStream ((Int, Str))))
+  @write 0 b etupVals
+  @close b
+  @concat ["#{p}.a", "#{p}.b"] p
+  Ok xs <- @load p :: <IO> (Try Str [(Int, Str)])
+  xs
+
+enulVals :: [Tok]
+enulVals = [Eof, Word "a", Num 1]
+
+enulEcho :: Int -> [Tok]
+enulEcho n = enulVals
+
+enulStream :: Str -> <IO> [Tok]
+enulStream p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Tok)))
+  @write 0 o enulVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Tok)))
+  Ok xs <- @next s
+  xs
+
+enulStreamZ :: Str -> <IO> [Tok]
+enulStreamZ p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Tok)))
+  @write 3 o enulVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Tok)))
+  Ok xs <- @next s
+  xs
+
+enulCoalesce :: Str -> <IO> [Tok]
+enulCoalesce p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Tok)))
+  @write 0 o enulVals
+  @write 0 o enulVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [Tok])
+  xs
+
+enulFlush :: Str -> <IO> [Tok]
+enulFlush p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Tok)))
+  @write 0 o enulVals
+  @flush o
+  @write 0 o enulVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [Tok])
+  xs
+
+enulIdx :: Str -> <IO> Tok
+enulIdx p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Tok)))
+  @write 0 o enulVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [Tok]))
+  .[2] f
+
+enulSlice :: Str -> <IO> [Tok]
+enulSlice p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Tok)))
+  @write 0 o enulVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [Tok]))
+  .[0:3] f
+
+enulSave :: Str -> <IO> [Tok]
+enulSave p = do
+  @save 0 p enulVals
+  Ok xs <- @load p :: <IO> (Try Str [Tok])
+  xs
+
+enulSaveIdx :: Str -> <IO> Tok
+enulSaveIdx p = do
+  @save 0 p enulVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [Tok]))
+  .[2] f
+
+enulSaveSlice :: Str -> <IO> [Tok]
+enulSaveSlice p = do
+  @save 0 p enulVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [Tok]))
+  .[0:3] f
+
+enulAppend :: Str -> <IO> [Tok]
+enulAppend p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Tok)))
+  @write 0 o enulVals
+  @close o
+  Ok o2 <- @append p :: <IO> (Try Str (OStream (Tok)))
+  @write 0 o2 enulVals
+  @close o2
+  Ok xs <- @load p :: <IO> (Try Str [Tok])
+  xs
+
+enulConcat :: Str -> <IO> [Tok]
+enulConcat p = do
+  Ok a <- @open "#{p}.a" :: <IO> (Try Str (OStream (Tok)))
+  @write 0 a enulVals
+  @close a
+  Ok b <- @open "#{p}.b" :: <IO> (Try Str (OStream (Tok)))
+  @write 0 b enulVals
+  @close b
+  @concat ["#{p}.a", "#{p}.b"] p
+  Ok xs <- @load p :: <IO> (Try Str [Tok])
+  xs
+
+vfstVals :: [(Shape, Str)]
+vfstVals = [(Circle 1.5, "a"), (Rect 2.0 3.0, "bc"), (Circle 4.25, "d")]
+
+vfstEcho :: Int -> [(Shape, Str)]
+vfstEcho n = vfstVals
+
+vfstStream :: Str -> <IO> [(Shape, Str)]
+vfstStream p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Shape, Str))))
+  @write 0 o vfstVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream ((Shape, Str))))
+  Ok xs <- @next s
+  xs
+
+vfstStreamZ :: Str -> <IO> [(Shape, Str)]
+vfstStreamZ p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Shape, Str))))
+  @write 3 o vfstVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream ((Shape, Str))))
+  Ok xs <- @next s
+  xs
+
+vfstCoalesce :: Str -> <IO> [(Shape, Str)]
+vfstCoalesce p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Shape, Str))))
+  @write 0 o vfstVals
+  @write 0 o vfstVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [(Shape, Str)])
+  xs
+
+vfstFlush :: Str -> <IO> [(Shape, Str)]
+vfstFlush p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Shape, Str))))
+  @write 0 o vfstVals
+  @flush o
+  @write 0 o vfstVals
+  @close o
+  Ok xs <- @load p :: <IO> (Try Str [(Shape, Str)])
+  xs
+
+vfstIdx :: Str -> <IO> (Shape, Str)
+vfstIdx p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Shape, Str))))
+  @write 0 o vfstVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [(Shape, Str)]))
+  .[2] f
+
+vfstSlice :: Str -> <IO> [(Shape, Str)]
+vfstSlice p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Shape, Str))))
+  @write 0 o vfstVals
+  @close o
+  Ok f <- @open p :: <IO> (Try Str (IFile [(Shape, Str)]))
+  .[0:3] f
+
+vfstSave :: Str -> <IO> [(Shape, Str)]
+vfstSave p = do
+  @save 0 p vfstVals
+  Ok xs <- @load p :: <IO> (Try Str [(Shape, Str)])
+  xs
+
+vfstSaveIdx :: Str -> <IO> (Shape, Str)
+vfstSaveIdx p = do
+  @save 0 p vfstVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [(Shape, Str)]))
+  .[2] f
+
+vfstSaveSlice :: Str -> <IO> [(Shape, Str)]
+vfstSaveSlice p = do
+  @save 0 p vfstVals
+  Ok f <- @open p :: <IO> (Try Str (IFile [(Shape, Str)]))
+  .[0:3] f
+
+vfstAppend :: Str -> <IO> [(Shape, Str)]
+vfstAppend p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Shape, Str))))
+  @write 0 o vfstVals
+  @close o
+  Ok o2 <- @append p :: <IO> (Try Str (OStream ((Shape, Str))))
+  @write 0 o2 vfstVals
+  @close o2
+  Ok xs <- @load p :: <IO> (Try Str [(Shape, Str)])
+  xs
+
+vfstConcat :: Str -> <IO> [(Shape, Str)]
+vfstConcat p = do
+  Ok a <- @open "#{p}.a" :: <IO> (Try Str (OStream ((Shape, Str))))
+  @write 0 a vfstVals
+  @close a
+  Ok b <- @open "#{p}.b" :: <IO> (Try Str (OStream ((Shape, Str))))
+  @write 0 b vfstVals
+  @close b
+  @concat ["#{p}.a", "#{p}.b"] p
+  Ok xs <- @load p :: <IO> (Try Str [(Shape, Str)])
+  xs

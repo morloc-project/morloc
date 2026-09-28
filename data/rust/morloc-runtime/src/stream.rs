@@ -2623,6 +2623,11 @@ pub fn shared_finalize_ostream_locked(
 struct SubpacketBytes<'a> {
     head: Vec<u8>,
     payload: std::borrow::Cow<'a, [u8]>,
+    /// Zero bytes written after an uncompressed payload, counted in the
+    /// header's length, so the next sub-packet -- and so its payload,
+    /// whose metadata block is padded too -- starts 8-byte aligned and
+    /// a reader can use the mapped bytes in place.
+    pad: usize,
     /// On-disk payload region size (post-compression if applicable).
     /// Tracked separately so diag counters see the true bytes written
     /// rather than the assembled packet length (which also carries
@@ -2632,7 +2637,7 @@ struct SubpacketBytes<'a> {
 
 impl SubpacketBytes<'_> {
     fn len(&self) -> usize {
-        self.head.len() + self.payload.len()
+        self.head.len() + self.payload.len() + self.pad
     }
 }
 
@@ -2686,9 +2691,14 @@ fn build_subpacket_bytes<'a>(
     // generic `get_morloc_data_packet_value`, which reads a leading
     // relptr on SOURCE_RPTR -- catastrophic when the payload is raw
     // voidstar bytes rather than an SHM pointer.
+    let pad = if compression_byte == PACKET_COMPRESSION_NONE {
+        final_payload.len().next_multiple_of(8) - final_payload.len()
+    } else {
+        0
+    };
     let mut hdr = PacketHeader::data_mesg(
         morloc_runtime_types::packet::PACKET_FORMAT_VOIDSTAR,
-        final_payload.len() as u64,
+        (final_payload.len() + pad) as u64,
     );
     hdr.offset = padded_meta_len as u32;
     let mut hdr_bytes = hdr.to_bytes();
@@ -2698,7 +2708,7 @@ fn build_subpacket_bytes<'a>(
     let mut head = Vec::with_capacity(hdr_bytes.len() + meta.len());
     head.extend_from_slice(&hdr_bytes);
     head.extend_from_slice(&meta);
-    Ok(SubpacketBytes { head, payload: final_payload, compressed_payload_len })
+    Ok(SubpacketBytes { head, payload: final_payload, pad, compressed_payload_len })
 }
 
 /// Record a completed sub-packet flush into a slot's `StreamDiag`.
@@ -2781,6 +2791,7 @@ fn emit_subpacket_to_disk(
     // whole payload for the sake of one `pwrite` instead of two.
     pwrite_all_fd(local.fd, &sub.head, cursor)?;
     pwrite_all_fd(local.fd, &sub.payload, cursor + sub.head.len() as u64)?;
+    pwrite_all_fd(local.fd, &[0u8; 8][..sub.pad], cursor + (sub.head.len() + sub.payload.len()) as u64)?;
     let subpacket_end = cursor + sub.len() as u64;
 
     unsafe {
@@ -2832,7 +2843,7 @@ fn emit_subpacket_via_rpc(
 
     let total = sub.len() as u64;
     let dst_abs = crate::shm::shmalloc(sub.len())?;
-    // SAFETY: the block was sized as head + payload.
+    // SAFETY: the block was sized as head + payload + pad.
     unsafe {
         std::ptr::copy_nonoverlapping(sub.head.as_ptr(), dst_abs as *mut u8, sub.head.len());
         std::ptr::copy_nonoverlapping(
@@ -2840,6 +2851,7 @@ fn emit_subpacket_via_rpc(
             (dst_abs as *mut u8).add(sub.head.len()),
             sub.payload.len(),
         );
+        std::ptr::write_bytes((dst_abs as *mut u8).add(sub.head.len() + sub.payload.len()), 0, sub.pad);
     }
     let relptr = crate::shm::abs2rel(dst_abs)? as i64;
 
@@ -3093,7 +3105,8 @@ fn grow_index_capacity(
             let inline_off = 16 + (i as usize) * w;
             unsafe {
                 crate::voidstar::shift_buffer_relptrs(
-                    buf_abs, inline_off, &local.elem_schema, shift,
+                    buf_abs, new_data_offset + data_used, inline_off,
+                    &local.elem_schema, shift,
                 )?;
             }
         }
@@ -3141,7 +3154,8 @@ fn flush_write_buffer(
             let inline_off = 16 + (i as usize) * w;
             unsafe {
                 crate::voidstar::shift_buffer_relptrs(
-                    buf_abs, inline_off, &local.elem_schema, -(wasted as isize),
+                    buf_abs, new_data_offset + data_used, inline_off,
+                    &local.elem_schema, -(wasted as isize),
                 )?;
             }
         }
@@ -3174,6 +3188,61 @@ fn flush_write_buffer(
     Ok(())
 }
 
+/// The index capacity a write buffer starts at: the default, clamped to what
+/// a buffer of `buf_size` can hold at `w` bytes an element. Capacity then
+/// doubles while the buffer has room.
+fn initial_index_cap(buf_size: usize, w: usize) -> u64 {
+    let max_index_cap = buf_size.saturating_sub(16) / w.max(1);
+    (WRITE_BUFFER_INDEX_INITIAL_CAP as usize).min(max_index_cap).max(1) as u64
+}
+
+/// Append `n` elements of a fixed-width type, laid out contiguously at
+/// `src`, to the write buffer: one memcpy per buffer-full, flushing a
+/// sub-packet whenever the buffer's record region fills. A fixed-width
+/// element holds no pointer and its padding is zero, so its bytes are
+/// already its flattened form and no per-element walk is needed. The
+/// record region grows to the capacity `append_one_element` reaches --
+/// the initial capacity doubled while it fits -- so sub-packets are cut
+/// where they always were. Caller MUST hold the slot futex.
+fn append_flat_run(
+    slot: &RegistrySlot,
+    local: &mut ProcessLocalSlot,
+    src: AbsPtr,
+    n: usize,
+    buf_size: usize,
+) -> Result<(), MorlocError> {
+    let w = local.elem_schema.width;
+    let max_cap = ((buf_size - 16) / w) as u64;
+    let mut cap = initial_index_cap(buf_size, w);
+    while cap.saturating_mul(2) <= max_cap {
+        cap *= 2;
+    }
+    let mut done = 0usize;
+    while done < n {
+        if slot.write_buffer_index_cap < cap {
+            grow_index_capacity(slot, local, cap)?;
+        }
+        let space = (slot.write_buffer_index_cap - slot.write_buffer_index_count) as usize;
+        if space == 0 {
+            flush_write_buffer(slot, local)?;
+            continue;
+        }
+        let k = space.min(n - done);
+        let buf_abs = crate::shm::rel2abs(slot.write_buffer)?;
+        let at = 16 + (slot.write_buffer_index_count as usize) * w;
+        // SAFETY: the record region holds `write_buffer_index_cap` slots of
+        // `w` bytes after the 16-byte header, all within the buffer, and
+        // `src` holds `n` elements.
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.add(done * w), buf_abs.add(at), k * w);
+            let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+            (*mp).write_buffer_index_count += k as u64;
+        }
+        done += k;
+    }
+    Ok(())
+}
+
 /// Try to append one element from `elem_src` into the write buffer.
 /// Returns Ok(()) on success (whether the element went into the
 /// buffer or was emitted directly as an oversize sub-packet). Caller
@@ -3193,7 +3262,7 @@ fn append_one_element(
     // `scratch` reuses its allocation across the whole @write batch, so this
     // hot loop pays no per-element heap allocation. `buf_size` is read once by
     // the caller rather than re-querying the environment per element.
-    crate::voidstar::flatten_into(scratch, elem_src, &local.elem_schema)?;
+    crate::voidstar::flatten_into_portable(scratch, elem_src, &local.elem_schema)?;
     let elem_blob: &[u8] = scratch.as_slice();
     // Round the variable region up to 8-byte alignment. Successive
     // elements' variable regions concatenate in the write buffer at
@@ -3215,13 +3284,9 @@ fn append_one_element(
     // be 8 KiB on its own and the buffer would have no room left for
     // a single element.
     if slot.write_buffer_index_cap == 0 {
-        let max_index_cap = (buf_size.saturating_sub(16)) / w.max(1);
-        let initial_cap = (WRITE_BUFFER_INDEX_INITIAL_CAP as usize)
-            .min(max_index_cap)
-            .max(1) as u64;
         unsafe {
             let mp = slot as *const RegistrySlot as *mut RegistrySlot;
-            (*mp).write_buffer_index_cap = initial_cap;
+            (*mp).write_buffer_index_cap = initial_index_cap(buf_size, w);
         }
     }
 
@@ -3254,7 +3319,7 @@ fn append_one_element(
         let payload_base = oversize_payload.as_mut_ptr();
         unsafe {
             crate::voidstar::shift_buffer_relptrs(
-                payload_base, 16, &local.elem_schema, 16isize,
+                payload_base, oversize_len, 16, &local.elem_schema, 16isize,
             )?;
         }
         let level = slot.compression_level;
@@ -3287,14 +3352,19 @@ fn append_one_element(
             }
             break;
         }
-        // Doesn't fit. If buffer is empty we've already established
-        // the element doesn't fit even minimally (handled above);
-        // anything else here is an unexpected edge case.
+        // Doesn't fit. On an empty buffer the element fits once the index
+        // stops claiming the room its variable bytes need: a flush keeps the
+        // capacity the previous sub-packet grew to, which a run of elements
+        // with no variable bytes can grow to fill the whole buffer. With
+        // nothing buffered, shrinking it moves nothing, and the oversize
+        // check above guarantees one slot fits.
         if slot.write_buffer_index_count == 0 {
-            return Err(MorlocError::Other(
-                "@write: internal error -- empty buffer can't fit element \
-                 that passed the oversize check".into(),
-            ));
+            let fit = ((buf_size - 16 - variable_size) / w.max(1)).max(1) as u64;
+            unsafe {
+                let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+                (*mp).write_buffer_index_cap = fit.min(slot.write_buffer_index_cap);
+            }
+            continue;
         }
         flush_write_buffer(slot, local)?;
         // Loop: buffer is empty now, try again.
@@ -3332,7 +3402,8 @@ fn append_one_element(
     if shift != 0 {
         unsafe {
             crate::voidstar::shift_buffer_relptrs(
-                buf_abs, index_offset, &local.elem_schema, shift,
+                buf_abs, data_offset + raw_variable_size, index_offset,
+                &local.elem_schema, shift,
             )?;
         }
     }
@@ -3424,9 +3495,19 @@ pub fn shared_write_subpacket(
             // emitted as it is, so a batch is never split across frames or
             // merged with another, and an empty batch is an empty frame.
             flush_write_buffer(slot, local)?;
-            crate::voidstar::flatten_into(&mut scratch, payload_voidstar, &local.value_schema)?;
+            crate::voidstar::flatten_into_portable(&mut scratch, payload_voidstar, &local.value_schema)?;
             let level = slot.compression_level;
             emit_subpacket_via_rpc(slot, local, &scratch, level, n_elements)?;
+            unsafe {
+                let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+                (*mp).element_count += n_elements;
+                let d = &mut (*mp).diag;
+                d.element_count += n_elements;
+            }
+            return Ok(());
+        }
+        if local.elem_schema.is_fixed_width() && w > 0 && 16 + w <= buf_size {
+            append_flat_run(slot, local, elem_data_base, n_elements as usize, buf_size)?;
             unsafe {
                 let mp = slot as *const RegistrySlot as *mut RegistrySlot;
                 (*mp).element_count += n_elements;
@@ -3570,24 +3651,35 @@ fn materialize_and_finalise_subpacket(
     let arr_base = src.arr_base();
     let arr = unsafe { &*(arr_base as *const shm_types_crate::Array) };
     let arr_size = arr.size as u64;
-    let elem_width = local.elem_schema.width;
 
     match src {
         SubpacketSrc::File { payload_base, payload_len, vol_idx_hint, .. } => {
-            let resolver = make_file_resolver(payload_base, payload_len);
-            let arr_data = resolver(arr.data)?;
             if arr_size == 0 {
-                empty_shm_array()
-            } else {
-                slice_bulk_copy_contiguous(
-                    0, arr_size as usize, arr_size, arr_data,
-                    payload_base, payload_len, vol_idx_hint,
-                    &local.elem_schema, elem_width,
-                )
+                return empty_shm_array();
             }
+            // SAFETY: the payload lies inside this pool's mmap of the file.
+            let bytes = unsafe {
+                std::slice::from_raw_parts(payload_base as *const u8, payload_len as usize)
+            };
+            payload_into_shm(bytes, &local.elem_schema, vol_idx_hint)
         }
         SubpacketSrc::Shm { arr_base } => Ok(arr_base),
     }
+}
+
+/// Copy a sub-packet payload -- its `Array` header, records and every
+/// sub-allocation -- into one fresh SHM block and relocate it there. The
+/// whole payload moves as one piece, so no relptr can be left pointing
+/// into the source and no assumption about where sub-allocations sit is
+/// needed; the rebase is bounded by the new block, so a relptr that
+/// leaves the payload is an error. For a flat element type the rebase
+/// touches only the header's data pointer.
+fn payload_into_shm(
+    bytes: &[u8],
+    elem_schema: &Schema,
+    vol_idx_hint: u16,
+) -> Result<AbsPtr, MorlocError> {
+    voidstar::read_binary_with_hint(bytes, &array_schema(elem_schema), vol_idx_hint)
 }
 
 /// Allocate and return a SHM `Array` of size 0, the EOF return value
@@ -3650,10 +3742,8 @@ unsafe fn place_subpacket(
         (Ok(a), Ok(b)) => (b as i64).wrapping_sub(a as i64) as RelPtr,
         _ => return Err(MorlocError::Shm("@load: sub-packet is outside every volume".into())),
     };
-    for k in 0..sz {
-        voidstar::adjust_relptrs(dst_rec.add(k * elem_width) as AbsPtr, elem_schema, delta)?;
-    }
-    Ok(())
+    let window = voidstar::RelWindow::of_block(dst_tail, tail)?;
+    voidstar::adjust_records_within(dst_rec as AbsPtr, sz, elem_schema, delta, window)
 }
 
 /// What went wrong with the sized route.
@@ -3865,11 +3955,10 @@ fn collect_istream_into_array(handle: i64, path: &str) -> Result<AbsPtr, MorlocE
     //
     // A sub-packet is one self-contained block laid out `[Array][records]
     // [sub-allocations]`, with every relptr in the records pointing into its
-    // own sub-allocation region -- the DFS layout the voidstar writers keep.
-    // So combining K of them is two memcpys and one relptr shift per
-    // sub-packet, into a single destination block laid out the same way.
-    // That is the same move `slice_bulk_copy_contiguous` makes for one
-    // sub-packet, and it replaces an element-by-element deep copy that
+    // own sub-allocation region. So combining K of them is two memcpys and
+    // one bounded relptr shift per sub-packet, into a single destination
+    // block laid out the same way. It replaces an element-by-element deep
+    // copy that
     // allocated a fresh block for every variable-length field -- blocks the
     // caller's single `shfree` could never reach.
     let hdr_size = std::mem::size_of::<shm_types_crate::Array>();
@@ -5061,10 +5150,9 @@ enum SubpacketSrc {
         payload_base: AbsPtr,
         payload_len: u64,
         /// Producer's Layer-3 `vol_idx` hint (high 15 bits of every
-        /// emitted relptr). The file resolver ignores these for live
-        /// dereferences, but the bulk-copy slice path needs the hint
-        /// to compute a single `delta` for `voidstar::adjust_relptrs`
-        /// rather than walking the schema itself.
+        /// emitted relptr). The file resolver ignores it for live
+        /// dereferences; a copy out of the file (`copy_runs`) relocates
+        /// by it.
         vol_idx_hint: u16,
     },
     Shm {
@@ -6056,29 +6144,47 @@ fn materialize_subpacket_at_offset(
     let on_disk_size = 32 + header.offset as u64 + header.length;
     let data = unsafe { header.command.data };
 
-    // Fast path: uncompressed. The walker reads directly from the
-    // mmap'd region; no SHM allocation, no copy. The kernel page-
-    // cache shares pages across pools opening the same path.
+    // The producer's Layer-3 vol_idx hint, from the header + metadata
+    // bytes. Every copy out of the file relocates by it; walks that read
+    // the mmap in place ignore it via the file resolver.
+    let vol_idx_hint = {
+        // SAFETY: bounds verified by read_subpacket_header.
+        let hint_bytes = unsafe {
+            std::slice::from_raw_parts(
+                (local.mmap_ptr as *const u8).add(subpacket_off as usize),
+                32 + header.offset as usize,
+            )
+        };
+        morloc_runtime_types::packet::read_vol_index_from_meta(hint_bytes)
+            .ok()
+            .flatten()
+            .unwrap_or(0)
+    };
+
+    // Uncompressed and aligned: walks read directly from the mmap'd
+    // region; no SHM allocation, no copy. The kernel page cache shares
+    // pages across pools opening the same path. A payload that does not
+    // start 8-aligned (a file written before sub-packets were padded, or
+    // one joined by @concat after an unpadded one) holds relptrs and
+    // numbers no reader may load in place, so it is copied into SHM like
+    // a decompressed payload.
+    let payload_aligned =
+        (local.mmap_ptr as usize).wrapping_add(payload_off as usize) % 8 == 0;
+    if data.compression == PACKET_COMPRESSION_NONE && !payload_aligned {
+        // SAFETY: bounds verified by read_subpacket_header.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                (local.mmap_ptr as *const u8).add(payload_off as usize),
+                payload_len as usize,
+            )
+        };
+        let base = payload_into_shm(bytes, &local.elem_schema, vol_idx_hint)?;
+        return Ok((SubpacketSrc::Shm { arr_base: base }, on_disk_size));
+    }
     if data.compression == PACKET_COMPRESSION_NONE {
         let arr_base = unsafe {
             (local.mmap_ptr as *const u8).add(payload_off as usize) as AbsPtr
         };
-        // Parse the producer's Layer-3 vol_idx hint from the header +
-        // metadata bytes (zero-allocation; the slices view directly
-        // into the mmap). Hint is only used by the contiguous-slice
-        // bulk-copy path; other walks ignore it via the file resolver.
-        let hint_bytes_len = 32 + header.offset as usize;
-        let mut hint_buf = Vec::with_capacity(hint_bytes_len);
-        unsafe {
-            hint_buf.extend_from_slice(std::slice::from_raw_parts(
-                (local.mmap_ptr as *const u8).add(subpacket_off as usize),
-                hint_bytes_len,
-            ));
-        }
-        let vol_idx_hint = morloc_runtime_types::packet::read_vol_index_from_meta(&hint_buf)
-            .ok()
-            .flatten()
-            .unwrap_or(0);
         return Ok((SubpacketSrc::File {
             arr_base,
             payload_base: arr_base,
@@ -6129,30 +6235,7 @@ fn materialize_subpacket_at_offset(
     let dec_payload_start = 32 + dec_hdr.offset as usize;
     let dec_payload_end = dec_payload_start + dec_hdr.length as usize;
     let dec_payload = &decompressed[dec_payload_start..dec_payload_end];
-
-    let base = shm::shmalloc(dec_payload.len())?;
-    // SAFETY: base owns dec_payload.len() bytes.
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            dec_payload.as_ptr(),
-            base,
-            dec_payload.len(),
-        );
-    }
-    // From here on, every error path must shfree(base) -- the block has
-    // been allocated but its refcount is held only by the local `base`
-    // until we return Ok. abs2rel or adjust_relptrs failures (e.g. a
-    // corrupt relptr in the decompressed payload) would otherwise leak
-    // the SHM block.
-    let base_rel = match shm::abs2rel(base) {
-        Ok(r) => r,
-        Err(e) => { let _ = shm::shfree(base); return Err(e); }
-    };
-    let arr_schema = array_schema(&local.elem_schema);
-    if let Err(e) = voidstar::adjust_relptrs(base, &arr_schema, base_rel) {
-        let _ = shm::shfree(base);
-        return Err(e);
-    }
+    let base = payload_into_shm(dec_payload, &local.elem_schema, vol_idx_hint)?;
     Ok((SubpacketSrc::Shm { arr_base: base }, on_disk_size))
 }
 
@@ -6661,14 +6744,14 @@ fn ifile_bracket_slice_against_slot(
         materialised: std::collections::BTreeMap<usize, SubpacketSrc>,
     }
 
-    let mut work: SliceWork = {
-        if slot.kind != MLC_KIND_IFILE {
-            return Err(MorlocError::Other(format!(
-                "bracket slice on non-IFile handle (kind = {})",
-                handle_kind_name(slot.kind),
-            )));
-        }
-        ensure_elem_cum(local)?;
+    if slot.kind != MLC_KIND_IFILE {
+        return Err(MorlocError::Other(format!(
+            "bracket slice on non-IFile handle (kind = {})",
+            handle_kind_name(slot.kind),
+        )));
+    }
+    ensure_elem_cum(local)?;
+    let (start_norm, stop_norm, runs) = {
         let cum = local
             .subpacket_elem_cum
             .as_ref()
@@ -6692,7 +6775,34 @@ fn ifile_bracket_slice_against_slot(
             Some(v) => clamp(normalize(v)),
             None => if step_val > 0 { n } else { -1 },
         };
+        // A forward, unit-step slice with no field tail is one contiguous
+        // run in each sub-packet it touches. The runs follow from the cumulative
+        // counts by two binary searches, whatever the slice's length.
+        let runs = if tail_steps.is_empty() && step_val == 1 && start_norm < stop_norm {
+            let (lo, hi) = (start_norm as u64, stop_norm as u64);
+            let sub_of = |i: u64| cum.partition_point(|&c| c <= i) - 1;
+            let runs: Vec<(usize, usize, usize)> = (sub_of(lo)..=sub_of(hi - 1))
+                .map(|k| {
+                    let first = lo.max(cum[k]) - cum[k];
+                    let end = hi.min(cum[k + 1]) - cum[k];
+                    (k, first as usize, (end - first) as usize)
+                })
+                .collect();
+            Some(runs)
+        } else {
+            None
+        };
+        (start_norm, stop_norm, runs)
+    };
+    if let Some(runs) = runs {
+        return slice_runs(local, &runs);
+    }
 
+    let mut work: SliceWork = {
+        let cum = local
+            .subpacket_elem_cum
+            .as_ref()
+            .expect("ensure_elem_cum populates subpacket_elem_cum");
         let mut plan: Vec<(usize, u64)> = Vec::new();
         let mut i = start_norm;
         if step_val > 0 {
@@ -6744,61 +6854,6 @@ fn ifile_bracket_slice_against_slot(
         arr.data = morloc_runtime_types::shm_types::RELNULL;
         return Ok(arr_ptr);
     }
-    // Contiguous bulk-copy fast path for the empty-tail case (`.[i:j]`).
-    // When the slice is one contiguous run (step=1), lives entirely in
-    // one File-variant sub-packet, and there is no per-element
-    // projection, the slice collapses to three operations:
-    //
-    //   1) one shmalloc for the whole output
-    //   2) one memcpy for the records range
-    //   3) one memcpy for the sub-allocation range, with one
-    //      `adjust_relptrs` pass to rebase the relptrs in the copied
-    //      records.
-    //
-    // The structural invariant (voidstar emits sub-allocations in
-    // element-DFS order, so the variable bytes for `records[i..j]` are
-    // themselves contiguous) is what lets us replace the per-element
-    // `deep_copy_with` loop -- and its N * sub-fields shmalloc traffic
-    // -- with bulk byte copies.
-    if tail_steps.is_empty()
-        && work.plan.len() >= 2
-        && step_val == 1
-        && work.plan.iter().enumerate().all(|(k, &(sk, li))| {
-            sk == work.plan[0].0 && li == (work.plan[0].1 + k as u64)
-        })
-    {
-        let sub_k = work.plan[0].0;
-        let i_local = work.plan[0].1 as usize;
-        let j_local = i_local + n_out;
-
-        // Materialise the sub-packet source once for the bulk copy.
-        let src = cache_get_or_materialize(local, sub_k)?;
-        let arr_base = src.arr_base();
-        let arr = unsafe { &*(arr_base as *const shm_types_crate::Array) };
-        let arr_size = arr.size as u64;
-        if let SubpacketSrc::File { payload_base, payload_len, vol_idx_hint, .. } = src {
-            let resolver = make_file_resolver(payload_base, payload_len);
-            let arr_data = resolver(arr.data)?;
-            let elem_schema = local.elem_schema.clone();
-            let r = slice_bulk_copy_contiguous(
-                i_local, j_local, arr_size, arr_data,
-                payload_base, payload_len, vol_idx_hint,
-                &elem_schema, work.elem_width,
-            );
-            // `src` is a File variant: release is a no-op.
-            src.release();
-            // The header block allocated above is unused either way now:
-            // the copy builds the whole value, including its header.
-            let _ = shm::shfree(arr_ptr);
-            return r;
-        }
-        // Shm variant (compressed sub-packet): fall through to the
-        // generic per-element path below. The decompressed bytes
-        // already live in SHM so per-element deep_copy is cheap
-        // relative to the decompression we already paid for.
-        src.release();
-    }
-
     // Fast path: when the projected element is a String, do ONE
     // shmalloc for the whole output (n element headers + concatenated
     // string bytes) and cursor-pack each element. Replaces N
@@ -6928,22 +6983,6 @@ fn ifile_bracket_slice_against_slot(
     unsafe { voidstar::consolidate(arr_ptr, &out_schema, &parts) }
 }
 
-/// Bulk-copy a contiguous slice on a single (uncompressed) sub-packet.
-///
-/// The voidstar layout of `[T]` places `N` fixed-stride records first,
-/// followed by their sub-allocations in element-DFS order. For a
-/// contiguous slice `[i, j)` that means:
-///
-///   * the records we keep are one contiguous block
-///     `records[i..j] = arr_data + i*elem_width .. arr_data + j*elem_width`;
-///   * the sub-allocations they reference are also one contiguous block
-///     `[first_suballoc(records[i]) .. first_suballoc(records[j]))`
-///     (or `.. payload_len` when `j == arr.size`).
-///
-/// So the slice is **one shmalloc + two memcpys + one linear relptr
-/// rewrite**, with no per-element allocator traffic. For 200 K records
-/// of `(Str, [u8], [u8])` this replaces ~600 K `shmemcpy` calls (each
-/// taking `ALLOC_MUTEX`) with three calls total.
 /// Allocate one block holding an `Array` header followed by `data_size`
 /// bytes of element data, and return `(block, data)`.
 ///
@@ -6957,7 +6996,7 @@ fn ifile_bracket_slice_against_slot(
 /// `Array` header is exactly one `BLOCK_ALIGN`, and every block begins on
 /// that boundary, so putting the header in front moves the data by a whole
 /// multiple of its old alignment.
-fn alloc_array_block(data_size: usize) -> Result<(AbsPtr, *mut u8), MorlocError> {
+pub(crate) fn alloc_array_block(data_size: usize) -> Result<(AbsPtr, *mut u8), MorlocError> {
     let hdr = std::mem::size_of::<shm_types_crate::Array>();
     debug_assert_eq!(hdr % morloc_runtime_types::shm_types::BLOCK_ALIGN, 0);
     let block = shm::shmalloc(hdr + data_size)?;
@@ -6967,110 +7006,174 @@ fn alloc_array_block(data_size: usize) -> Result<(AbsPtr, *mut u8), MorlocError>
     Ok((block, data))
 }
 
-fn slice_bulk_copy_contiguous(
-    i: usize,
-    j: usize,
-    arr_size: u64,
-    arr_data: AbsPtr,
-    payload_base: AbsPtr,
-    payload_len: u64,
-    vol_idx_hint: u16,
-    elem_schema: &Schema,
-    elem_width: usize,
+/// The contiguous runs `(sub_k, first, count)` of a unit-step slice,
+/// concatenated into one self-contained SHM `Array` block laid out
+/// `[records of every run][variable bytes of run 1][run 2]...`.
+///
+/// A flat element type is one memcpy of records per run. Otherwise each
+/// run's records are copied together with the byte range their live
+/// pointers address -- found by walking those pointers, never assumed from
+/// where the writer usually places sub-allocations -- and relocated by one
+/// rebase bounded by that run's own region.
+fn slice_runs(
+    local: &mut ProcessLocalSlot,
+    runs: &[(usize, usize, usize)],
 ) -> Result<AbsPtr, MorlocError> {
-    let n_out = j - i;
-    let records_src = unsafe { (arr_data as *const u8).add(i * elem_width) };
-
-    // Fixed-width records (no relptrs anywhere): one memcpy, no rebase.
-    let var_start_offset = match first_suballoc_offset(records_src as AbsPtr, elem_schema)? {
-        Some(o) => o,
-        None => {
-            let (block, buf_ptr) = alloc_array_block(n_out * elem_width)?;
-            unsafe {
-                std::ptr::copy_nonoverlapping(records_src, buf_ptr, n_out * elem_width);
+    let elem_schema = local.elem_schema.clone();
+    if voidstar::schema_holds(&elem_schema, SerialType::Table) {
+        return Err(MorlocError::Other(
+            "IFile slice over elements holding an Arrow table is not supported".into(),
+        ));
+    }
+    let mut sources: Vec<SubpacketSrc> = Vec::with_capacity(runs.len());
+    let mut located = Ok(());
+    for &(sub_k, _, _) in runs {
+        match cache_get_or_materialize(local, sub_k) {
+            Ok(src) => sources.push(src),
+            Err(e) => {
+                located = Err(e);
+                break;
             }
-            let buf_relptr = shm::abs2rel(buf_ptr)?;
-            let arr_out = unsafe { &mut *(block as *mut shm_types_crate::Array) };
-            arr_out.size = n_out;
-            arr_out.data = buf_relptr;
-            return Ok(block);
         }
-    };
+    }
+    let r = located.and_then(|()| {
+        let plans = runs
+            .iter()
+            .zip(&sources)
+            .map(|(&(_, first, count), src)| plan_run(src, &elem_schema, first, count))
+            .collect::<Result<Vec<_>, _>>()?;
+        copy_runs(&plans, &elem_schema)
+    });
+    for src in sources {
+        src.release();
+    }
+    r
+}
 
-    // Variable range end: records[j]'s first sub-allocation if present,
-    // else the payload end. Voidstar DFS layout guarantees records[i..j]'s
-    // sub-allocations all lie in [var_start_offset, var_end_offset).
-    let var_end_offset = if (j as u64) < arr_size {
-        let records_j = unsafe { (arr_data as *const u8).add(j * elem_width) };
-        match first_suballoc_offset(records_j as AbsPtr, elem_schema)? {
-            Some(o) => o,
-            None => payload_len as usize,
+/// Where one run's bytes are in its sub-packet, and how its relptrs map
+/// back to payload offsets.
+struct RunPlan<'s> {
+    src: &'s SubpacketSrc,
+    records: *const u8,
+    count: usize,
+    /// `(offset, len)` in the payload of the bytes the run's live pointers
+    /// address, starting 8-aligned; `None` when none is live.
+    var: Option<(usize, usize)>,
+}
+
+/// The byte length of a sub-packet source's payload.
+fn src_payload_len(src: &SubpacketSrc) -> Result<usize, MorlocError> {
+    match *src {
+        SubpacketSrc::File { payload_len, .. } => Ok(payload_len as usize),
+        SubpacketSrc::Shm { arr_base } => unsafe { shm::shm_block_size(arr_base) }
+            .ok_or_else(|| MorlocError::Shm("sub-packet block has no size".into())),
+    }
+}
+
+fn run_resolver(src: &SubpacketSrc) -> impl Fn(RelPtr) -> Result<AbsPtr, MorlocError> + '_ {
+    let file = match *src {
+        SubpacketSrc::File { payload_base, payload_len, .. } => {
+            Some(make_file_resolver(payload_base, payload_len))
         }
-    } else {
-        payload_len as usize
+        SubpacketSrc::Shm { .. } => None,
     };
-    if var_end_offset < var_start_offset {
+    move |rel: RelPtr| match &file {
+        Some(f) => f(rel),
+        None => shm::rel2abs(rel),
+    }
+}
+
+fn plan_run<'s>(
+    src: &'s SubpacketSrc,
+    elem_schema: &Schema,
+    first: usize,
+    count: usize,
+) -> Result<RunPlan<'s>, MorlocError> {
+    let payload = src.arr_base() as *const u8;
+    let arr = unsafe { &*(payload as *const shm_types_crate::Array) };
+    if first.checked_add(count).map_or(true, |end| end > arr.size) {
         return Err(MorlocError::Other(format!(
-            "slice bulk copy: var_end_offset {} < var_start_offset {} \
-             (voidstar DFS invariant broken or schema mismatch)",
-            var_end_offset, var_start_offset,
+            "IFile slice [{first}, +{count}) exceeds the sub-packet's {} elements",
+            arr.size
         )));
     }
-    let var_size = var_end_offset - var_start_offset;
-    let records_size = n_out * elem_width;
-    let total_size = records_size + var_size;
+    // Every byte the run copies must lie inside its payload: counts and
+    // relptrs come from the file, so a truncated or corrupt one must fail
+    // here rather than copy whatever follows the payload.
+    let payload_end = payload as usize + src_payload_len(src)?;
+    let resolve = run_resolver(src);
+    let records = resolve(arr.data)? as *const u8;
+    let records_end = (count + first)
+        .checked_mul(elem_schema.width)
+        .and_then(|n| (records as usize).checked_add(n));
+    if records_end.map_or(true, |end| end > payload_end) {
+        return Err(MorlocError::Other(
+            "IFile slice: the sub-packet's records extend past its payload".into(),
+        ));
+    }
+    let records = unsafe { records.add(first * elem_schema.width) };
+    let span = if elem_schema.is_fixed_width() {
+        None
+    } else {
+        let bound = (payload as usize, payload_end);
+        unsafe { voidstar::pointer_span(records, count, elem_schema, &resolve, bound)? }
+    };
+    // Starting on an 8-byte boundary of the payload keeps every value's
+    // alignment in the destination, whose variable regions also start
+    // 8-aligned (records of a pointer-bearing type are a multiple of 8
+    // wide, and each region is rounded up to 8).
+    let var = span.map(|(lo, hi)| {
+        let lo_off = (lo - payload as usize) & !7;
+        (lo_off, hi - payload as usize - lo_off)
+    });
+    Ok(RunPlan { src, records, count, var })
+}
 
-    // Only hint the kernel on slices larger than a few pages -- madvise
-    // is a syscall and rounds to page boundaries, so it's net-negative
-    // on tiny slices.
-    const MADV_THRESHOLD: usize = 64 * 1024;
-    unsafe {
-        if records_size >= MADV_THRESHOLD {
-            libc::madvise(
-                records_src as *mut libc::c_void,
-                records_size,
-                libc::MADV_WILLNEED,
-            );
+fn copy_runs(plans: &[RunPlan<'_>], elem_schema: &Schema) -> Result<AbsPtr, MorlocError> {
+    let w = elem_schema.width;
+    let total: usize = plans.iter().map(|p| p.count).sum();
+    let records_size = total * w;
+    let var_total: usize = plans.iter().map(|p| p.var.map_or(0, |(_, n)| n.next_multiple_of(8))).sum();
+
+    let (block, buf) = alloc_array_block(records_size + var_total)?;
+    let built = (|| -> Result<(), MorlocError> {
+        let whole = voidstar::RelWindow::of_block(buf, records_size + var_total)?;
+        let mut rec_at = 0usize;
+        let mut var_at = records_size;
+        for p in plans {
+            let payload = p.src.arr_base() as *const u8;
+            unsafe {
+                std::ptr::copy_nonoverlapping(p.records, buf.add(rec_at), p.count * w);
+                if let Some((lo_off, n)) = p.var {
+                    std::ptr::copy_nonoverlapping(payload.add(lo_off), buf.add(var_at), n);
+                    let producer = match *p.src {
+                        SubpacketSrc::File { vol_idx_hint, .. } => {
+                            morloc_runtime_types::shm_types::encode_relptr(vol_idx_hint as usize, lo_off)
+                        }
+                        SubpacketSrc::Shm { .. } => shm::abs2rel(payload.add(lo_off) as AbsPtr)?,
+                    };
+                    let dst = shm::abs2rel(buf.add(var_at) as AbsPtr)?;
+                    let delta = (dst as i64).wrapping_sub(producer as i64) as RelPtr;
+                    voidstar::adjust_records_within(
+                        buf.add(rec_at) as AbsPtr, p.count, elem_schema, delta,
+                        whole.narrow(var_at, n)?,
+                    )?;
+                    var_at += n.next_multiple_of(8);
+                }
+            }
+            rec_at += p.count * w;
         }
-        if var_size >= MADV_THRESHOLD {
-            libc::madvise(
-                (payload_base as *mut u8).add(var_start_offset) as *mut libc::c_void,
-                var_size,
-                libc::MADV_WILLNEED,
-            );
+        unsafe {
+            let out = &mut *(block as *mut shm_types_crate::Array);
+            out.size = total;
+            out.data = shm::abs2rel(buf as AbsPtr)?;
         }
+        Ok(())
+    })();
+    if let Err(e) = built {
+        let _ = shm::shfree(block);
+        return Err(e);
     }
-
-    // The two memcpys below cover every byte of the data region, so nothing
-    // here needs zeroing.
-    let (block, buf_ptr) = alloc_array_block(total_size)?;
-    unsafe {
-        std::ptr::copy_nonoverlapping(records_src, buf_ptr, records_size);
-        let var_src = (payload_base as *const u8).add(var_start_offset);
-        let var_dst = (buf_ptr as *mut u8).add(records_size);
-        std::ptr::copy_nonoverlapping(var_src, var_dst, var_size);
-    }
-
-    // Producer wrote relptrs as `(vol_idx_hint << 48) | payload_offset`.
-    // The same delta trick the load path uses (cli.rs:rebase_voidstar_in_shm)
-    // cancels the hint and rebases the offset in one `adjust_relptrs` walk.
-    let target_var_start_rel = shm::abs2rel(
-        unsafe { (buf_ptr as *mut u8).add(records_size) } as AbsPtr,
-    )?;
-    let producer_base = morloc_runtime_types::shm_types::encode_relptr(
-        vol_idx_hint as usize,
-        var_start_offset,
-    );
-    let delta = (target_var_start_rel as i64).wrapping_sub(producer_base as i64) as RelPtr;
-    for k in 0..n_out {
-        let rec_ptr = unsafe { (buf_ptr as *mut u8).add(k * elem_width) as AbsPtr };
-        voidstar::adjust_relptrs(rec_ptr, elem_schema, delta)?;
-    }
-
-    let buf_relptr = shm::abs2rel(buf_ptr)?;
-    let arr_out = unsafe { &mut *(block as *mut shm_types_crate::Array) };
-    arr_out.size = n_out;
-    arr_out.data = buf_relptr;
     Ok(block)
 }
 
@@ -7291,89 +7394,6 @@ fn parse_field_only_tail(suffix: &str) -> Result<Option<Vec<WalkStep>>, MorlocEr
         }
     }
     Ok(Some(out))
-}
-
-/// Find the offset of the first sub-allocation referenced by a single
-/// element, in the source payload's relptr coordinate space. Walks
-/// the element's schema in DFS order and returns the first
-/// variable-length leaf's `data` relptr offset. Returns `None` when
-/// the element has no sub-allocations (pure fixed-width primitive).
-///
-/// Used by the contiguous-slice bulk copy to identify the start of
-/// the variable-bytes region that the slice's records reference.
-/// Voidstar layout guarantees that sub-allocations are written in
-/// element-DFS order, so the first relptr of `records[i]` is also
-/// the lowest offset touched by `records[i]`.
-fn first_suballoc_offset(
-    elem_ptr: AbsPtr,
-    elem_schema: &Schema,
-) -> Result<Option<usize>, MorlocError> {
-    use morloc_runtime_types::stream_handle as sh;
-    unsafe {
-        match elem_schema.serial_type {
-            SerialType::String | SerialType::Array => {
-                let arr = &*(elem_ptr as *const shm_types_crate::Array);
-                if arr.size == 0 || arr.data == shm::RELNULL {
-                    return Ok(None);
-                }
-                Ok(Some(relptr_offset(arr.data)))
-            }
-            SerialType::IFile | SerialType::OStream | SerialType::IStream => {
-                // Stream-handle fields are 16-byte tagged unions, not
-                // Array-shaped: only TAG_PATH form points at a suballoc
-                // (the path bytes at `payload`). TAG_HANDLE encodes a
-                // bare slot id -- no suballoc to rebase.
-                let field = elem_ptr as *const u8;
-                if sh::read_tag(field) != sh::TAG_PATH {
-                    return Ok(None);
-                }
-                let payload = sh::read_payload(field);
-                if payload == sh::RELNULL_PAYLOAD {
-                    return Ok(None);
-                }
-                Ok(Some(relptr_offset(payload as RelPtr)))
-            }
-            SerialType::Tuple | SerialType::Map => {
-                for i in 0..elem_schema.parameters.len() {
-                    let field_ptr = (elem_ptr as *const u8).add(elem_schema.offsets[i]) as AbsPtr;
-                    if let Some(o) = first_suballoc_offset(field_ptr, &elem_schema.parameters[i])? {
-                        return Ok(Some(o));
-                    }
-                }
-                Ok(None)
-            }
-            SerialType::Optional => {
-                let relptr = *(elem_ptr as *const RelPtr);
-                if relptr == shm::RELNULL || schema_is_absent_optional(elem_schema) {
-                    Ok(None)
-                } else {
-                    Ok(Some(relptr_offset(relptr)))
-                }
-            }
-            SerialType::Int => {
-                // Inline BigInt: [size, value_or_relptr]. Only > 1 limb
-                // makes the second field a relptr.
-                let size = *(elem_ptr as *const usize);
-                if size > 1 {
-                    let relptr = *(elem_ptr.add(std::mem::size_of::<usize>()) as *const RelPtr);
-                    Ok(Some(relptr_offset(relptr)))
-                } else {
-                    Ok(None)
-                }
-            }
-            // Fixed-width primitives, Nil, Recur (treated as absent
-            // for this estimator), Table (not slice-relevant): no
-            // sub-allocations to chase.
-            _ => Ok(None),
-        }
-    }
-}
-
-#[inline]
-fn schema_is_absent_optional(_s: &Schema) -> bool {
-    // Placeholder for any future "phantom Optional" marker. Currently
-    // Optional schemas always carry an inner parameter.
-    false
 }
 
 /// Walk a sequence of Field/Key steps statically on the schema and
@@ -8585,20 +8605,17 @@ pub fn shared_materialize_subpacket_from_bytes(
         )));
     }
 
-    // Decompress once (if needed) and copy the payload straight into
-    // SHM. Uncompressed branch reads from the caller's slice; ZSTD
-    // branch reads from the decompressed Vec. Either way, one memcpy
-    // into shmalloc'd memory -- no intermediate owned Vec.
-    fn copy_into_shm(src: &[u8]) -> Result<AbsPtr, MorlocError> {
-        let base = shm::shmalloc(src.len())?;
-        unsafe {
-            std::ptr::copy_nonoverlapping(src.as_ptr(), base, src.len());
-        }
-        Ok(base)
-    }
-    let base = match data.compression {
+    // Decompress (if needed), then copy the payload into one SHM block and
+    // relocate it there, by the producer's vol_idx hint.
+    let vol_idx_hint = morloc_runtime_types::packet::read_vol_index_from_meta(
+        &subpacket_bytes[..32 + meta_len],
+    )
+    .ok()
+    .flatten()
+    .unwrap_or(0);
+    match data.compression {
         PACKET_COMPRESSION_NONE => {
-            copy_into_shm(&subpacket_bytes[32 + meta_len..total])?
+            payload_into_shm(&subpacket_bytes[32 + meta_len..total], elem_schema, vol_idx_hint)
         }
         PACKET_COMPRESSION_ZSTD => {
             let decompressed =
@@ -8610,25 +8627,13 @@ pub fn shared_materialize_subpacket_from_bytes(
             )?;
             let dec_start = 32 + dec_hdr.offset as usize;
             let dec_end = dec_start + dec_hdr.length as usize;
-            copy_into_shm(&decompressed[dec_start..dec_end])?
+            payload_into_shm(&decompressed[dec_start..dec_end], elem_schema, vol_idx_hint)
         }
-        other => {
-            return Err(MorlocError::Packet(format!(
-                "materialise sub-packet: unknown compression byte {}",
-                other,
-            )));
-        }
-    };
-    let base_rel = match shm::abs2rel(base) {
-        Ok(r) => r,
-        Err(e) => { let _ = shm::shfree(base); return Err(e); }
-    };
-    let arr_schema = array_schema(elem_schema);
-    if let Err(e) = voidstar::adjust_relptrs(base, &arr_schema, base_rel) {
-        let _ = shm::shfree(base);
-        return Err(e);
+        other => Err(MorlocError::Packet(format!(
+            "materialise sub-packet: unknown compression byte {}",
+            other,
+        ))),
     }
-    Ok(base)
 }
 
 /// Convert a MORLOC_STREAM_PACKET file to another MORLOC_STREAM_PACKET
@@ -10060,5 +10065,103 @@ mod tests {
         let h2 = open_stdio(MLC_KIND_ISTREAM, STDIO_KIND_STDIN, "")
             .expect("dead-owner @stdin claim should be reclaimed");
         close_handle(h2).unwrap();
+    }
+
+    /// Trim a sub-packet's payload to its first `keep` bytes, as a writer
+    /// that does not pad payloads would have emitted it.
+    fn unpadded(mut packet: Vec<u8>, keep: usize) -> Vec<u8> {
+        let mut h = PacketHeader::from_bytes(packet[..32].try_into().unwrap()).unwrap();
+        packet.truncate(32 + h.offset as usize + keep);
+        h.length = keep as u64;
+        packet[..32].copy_from_slice(&h.to_bytes());
+        packet
+    }
+
+    /// A sub-packet whose payload is not 8-aligned in the file -- written
+    /// before payloads were padded, or joined by @concat after one that
+    /// was not -- reads back through every reader.
+    #[test]
+    fn unaligned_subpacket_reads_back() {
+        let _shm = crate::own_test_registry();
+        let dir = std::env::temp_dir().join(format!("morloc_stream_test_{}_unaligned", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("unaligned.stream");
+        let path = path.to_str().unwrap();
+
+        // One element: a 16-byte header, one 16-byte string slot, 3 bytes.
+        let first = unpadded(build_str_voidstar_subpacket(&["abc"]), 16 + 16 + 3);
+        let second = build_str_voidstar_subpacket(&["de", "", "fghij"]);
+        let list = parse_schema("as").unwrap();
+        let bytes = build_stream_file_from(&list, vec![first.clone(), second], &[1, 3]);
+        let second_at = make_stream_header_block(&list).len() + first.len();
+        let second_meta = PacketHeader::from_bytes(
+            bytes[second_at..second_at + 32].try_into().unwrap(),
+        ).unwrap().offset as usize;
+        assert_ne!((second_at + 32 + second_meta) % 8, 0, "fixture must be misaligned");
+        std::fs::write(path, &bytes).unwrap();
+
+        let render = |p: AbsPtr| {
+            let s = crate::json::voidstar_to_json_string(p, &list).unwrap();
+            shm::shfree(p).unwrap();
+            s
+        };
+        let r = shared_open_istream(path).unwrap();
+        let mut frames = Vec::new();
+        while let Some(p) = shared_next_frame(r).unwrap() {
+            frames.push(render(p));
+        }
+        let _ = shared_discard_handle(r);
+        assert_eq!(frames, vec![r#"["abc"]"#, r#"["de","","fghij"]"#]);
+
+        assert_eq!(render(shared_load_stream_file_as_array(path).unwrap()), r#"["abc","de","","fghij"]"#);
+
+        let f = open_ifile(path).unwrap();
+        let arg = crate::intrinsics::IFileWalkArg::opt;
+        let one = shared_ifile_walk(f, ".[]", &[arg(Some(3))]).unwrap();
+        let elem = parse_schema("s").unwrap();
+        assert_eq!(crate::json::voidstar_to_json_string(one, &elem).unwrap(), r#""fghij""#);
+        shm::shfree(one).unwrap();
+        let run = shared_ifile_walk(f, ".[:]", &[arg(Some(1)), arg(Some(4)), arg(None)]).unwrap();
+        assert_eq!(render(run), r#"["de","","fghij"]"#);
+        close_handle(f).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A string whose length claims more bytes than its sub-packet holds is
+    /// rejected by every reader rather than read past the payload.
+    #[test]
+    fn overlong_string_in_file_is_rejected() {
+        let _shm = crate::own_test_registry();
+        let dir = std::env::temp_dir().join(format!("morloc_stream_test_{}_overlong", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("overlong.stream");
+        let path = path.to_str().unwrap();
+
+        let mut sub = build_str_voidstar_subpacket(&["ab", "cd", "ef"]);
+        let meta = PacketHeader::from_bytes(sub[..32].try_into().unwrap()).unwrap().offset as usize;
+        // The third string's slot is the third 16-byte header after the
+        // list's own; its first 8 bytes are the length.
+        let at = 32 + meta + 16 + 2 * 16;
+        sub[at..at + 8].copy_from_slice(&(1u64 << 20).to_le_bytes());
+        let list = parse_schema("as").unwrap();
+        std::fs::write(path, build_stream_file_from(&list, vec![sub], &[3])).unwrap();
+
+        let r = shared_open_istream(path).unwrap();
+        assert!(shared_next_frame(r).is_err(), "@next accepted an overlong string");
+        let _ = shared_discard_handle(r);
+        assert!(shared_load_stream_file_as_array(path).is_err(), "@load accepted it");
+
+        let f = open_ifile(path).unwrap();
+        let arg = crate::intrinsics::IFileWalkArg::opt;
+        for (i, j) in [(0, 3), (2, 3), (1, 3)] {
+            let r = shared_ifile_walk(f, ".[:]", &[arg(Some(i)), arg(Some(j)), arg(None)]);
+            assert!(r.is_err(), "slice .[{i}:{j}] accepted an overlong string");
+        }
+        // Slices that do not reach the bad element are unaffected.
+        let ok = shared_ifile_walk(f, ".[:]", &[arg(Some(0)), arg(Some(2)), arg(None)]).unwrap();
+        assert_eq!(crate::json::voidstar_to_json_string(ok, &list).unwrap(), r#"["ab","cd"]"#);
+        shm::shfree(ok).unwrap();
+        close_handle(f).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

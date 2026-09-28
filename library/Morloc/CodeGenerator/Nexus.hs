@@ -1967,9 +1967,10 @@ validateGroup loc r ast = case peelGroupAst ast of
 -- Default-value validation
 -- ----------------------------------------------------------------------
 
--- | Recursive-type env: each entry binds a TVar (the record's name) to
--- the SerialAST that declared it, so SerialRec back-references can
--- resolve. Bound at SerialObject; consulted at SerialRec.
+-- | Recursive-type env: each entry binds a TVar (a declared type's name)
+-- to the SerialAST that declared it, so back-references can resolve.
+-- Bound at every named node on entry; consulted at SerialRec and at a
+-- variant back-reference.
 type RecEnv = Map.Map TVar SerialAST
 
 -- | The "JSON path" within the default value at which validation is
@@ -1982,7 +1983,7 @@ type JsonPath = MDoc
 -- the expected wire shape, and a (truncated) snippet of the offending
 -- value.
 validateValueAgainstAST :: MDoc -> RecEnv -> JsonPath -> SerialAST -> Aeson.Value -> MorlocMonad ()
-validateValueAgainstAST loc env path ast value = case (ast, value) of
+validateValueAgainstAST loc env0 path ast value = case (ast, value) of
   -- SerialPack: newtype/alias is transparent for default validation;
   -- the user writes the JSON shape of the underlying packed type.
   (SerialPack _ (_, inner), _) ->
@@ -2025,6 +2026,9 @@ validateValueAgainstAST loc env path ast value = case (ast, value) of
   -- whose value lists the arm's fields; an arm taking no arguments is
   -- still spelled bare. An unlisted name falls through to the mismatch
   -- reporter, which names the whole legal set.
+  -- A variant with no arms is a back-reference to the enclosing
+  -- declaration of its name.
+  (SerialVariant (FV v _) _ [], _) -> backRef v
   (SerialEnum _ _ ctors, Aeson.String name)
     | name `elem` ctors -> return ()
   (SerialVariant _ _ arms, Aeson.String name)
@@ -2076,14 +2080,13 @@ validateValueAgainstAST loc env path ast value = case (ast, value) of
   -- front so the diagnostic lists all of them at once (for a large
   -- record, a one-by-one report would force the user through many
   -- recompiles to discover the full set).
-  (SerialObject _ (FV v _) _ fields, Aeson.Object obj) -> do
-    let env' = Map.insert v ast env
-        missing = [k | (k, _) <- fields
+  (SerialObject _ _ _ fields, Aeson.Object obj) -> do
+    let missing = [k | (k, _) <- fields
                      , not (KM.member (AesonKey.fromText (unKey k)) obj)]
     case missing of
       []  -> CM.forM_ fields $ \(k, fieldAst) ->
         case KM.lookup (AesonKey.fromText (unKey k)) obj of
-          Just fv -> validateValueAgainstAST loc env'
+          Just fv -> validateValueAgainstAST loc env
                        (path <> "." <> pretty (unKey k)) fieldAst fv
           Nothing -> return ()
       ks  -> MM.throwSystemError $ formatBlock
@@ -2098,17 +2101,23 @@ validateValueAgainstAST loc env path ast value = case (ast, value) of
         ]
 
   -- Recursive back-reference: look up the binding, recurse.
-  (SerialRec (FV v _) _, _) -> case Map.lookup v env of
-    Just bound -> validateValueAgainstAST loc env path bound value
-    Nothing -> MM.throwSystemError $
-      loc <> ": compiler bug: unbound SerialRec `" <> pretty (unTVar v)
-        <> "` reached default-value validator" <> pathAt path
+  (SerialRec (FV v _) _, _) -> backRef v
 
   -- SerialUnknown: opaque type, cannot validate; allow anything.
   (SerialUnknown _, _) -> return ()
 
   -- Anything else is a type mismatch.
   _ -> typeMismatch loc path ast value
+  where
+    -- Every named node binds its name for the values beneath it, whatever
+    -- kind of declaration it is.
+    env = maybe env0 (\v -> Map.insert v ast env0) (Serial.serialOuterName ast)
+
+    backRef v = case Map.lookup v env of
+      Just bound -> validateValueAgainstAST loc env path bound value
+      Nothing -> MM.throwSystemError $
+        loc <> ": compiler bug: unbound back-reference `" <> pretty (unTVar v)
+          <> "` reached default-value validator" <> pathAt path
 
 -- | Mismatch reporter. Describes the offending JSON value's kind
 -- (Object / Array / String / Number / Bool / Null) AND the full

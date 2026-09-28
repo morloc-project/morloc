@@ -28,7 +28,7 @@
 //! into `IFileWalkArg[]` with a matching `has` byte).
 
 use crate::error::MorlocError;
-use crate::schema::{Schema, SerialType};
+use crate::schema::{reroot_under, Schema, SerialType};
 
 // ── AST ──────────────────────────────────────────────────────────────────
 
@@ -471,7 +471,7 @@ pub fn check_pattern_against_schema(
                 && mid.serial_type == SerialType::Array
                 && !mid.parameters.is_empty()
             {
-                let elem = mid.parameters[0].clone();
+                let elem = reroot_under(&mid, &mid.parameters[0]);
                 let child_schemas: Result<Vec<Schema>, _> = children
                     .iter()
                     .map(|c| check_pattern_against_schema(c, &elem))
@@ -489,6 +489,11 @@ pub fn check_pattern_against_schema(
     }
 }
 
+// Each step hands on a self-contained schema: a child is rerooted under the
+// node it came from, so a back-reference to that node's declaration is
+// replaced by the declaration itself. The input is self-contained, and a
+// child of a self-contained node can only refer to that node, so every
+// schema the walk reaches is too.
 fn walk_steps(input: &Schema, steps: &[LinearStep]) -> Result<Schema, WalkError> {
     let mut cur = input.clone();
     let mut i = 0;
@@ -503,7 +508,7 @@ fn walk_steps(input: &Schema, steps: &[LinearStep]) -> Result<Schema, WalkError>
             && cur.serial_type == SerialType::Array
             && !cur.parameters.is_empty()
         {
-            let elem = cur.parameters[0].clone();
+            let elem = reroot_under(&cur, &cur.parameters[0]);
             let inner = walk_steps(&elem, &steps[i + 1..])?;
             return Ok(array_of(inner));
         }
@@ -519,7 +524,7 @@ fn walk_step(schema: &Schema, step: &LinearStep) -> Result<Schema, WalkError> {
                 let idx = schema.keys.iter().position(|kk| kk == k);
                 match idx {
                     Some(i) if i < schema.parameters.len() => {
-                        Ok(schema.parameters[i].clone())
+                        Ok(reroot_under(schema, &schema.parameters[i]))
                     }
                     _ => Err(WalkError::FieldNotFound {
                         field: k.clone(),
@@ -527,12 +532,12 @@ fn walk_step(schema: &Schema, step: &LinearStep) -> Result<Schema, WalkError> {
                     }),
                 }
             }
-            other => Err(WalkError::ExpectedRecord { got: other }),
+            other @ (SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Tuple | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum) => Err(WalkError::ExpectedRecord { got: other }),
         },
         LinearStep::TupleIdx(i) => match schema.serial_type {
             SerialType::Tuple => {
                 if (*i as usize) < schema.parameters.len() {
-                    Ok(schema.parameters[*i as usize].clone())
+                    Ok(reroot_under(schema, &schema.parameters[*i as usize]))
                 } else {
                     Err(WalkError::TupleIdxOutOfRange {
                         idx: *i,
@@ -540,7 +545,7 @@ fn walk_step(schema: &Schema, step: &LinearStep) -> Result<Schema, WalkError> {
                     })
                 }
             }
-            other => Err(WalkError::ExpectedTuple { got: other }),
+            other @ (SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum) => Err(WalkError::ExpectedTuple { got: other }),
         },
         LinearStep::BracketIndex { .. } => match schema.serial_type {
             SerialType::Array => {
@@ -550,15 +555,15 @@ fn walk_step(schema: &Schema, step: &LinearStep) -> Result<Schema, WalkError> {
                         reason: "Array with no element schema",
                     })
                 } else {
-                    Ok(schema.parameters[0].clone())
+                    Ok(reroot_under(schema, &schema.parameters[0]))
                 }
             }
             SerialType::String => Ok(schema.clone()),
-            other => Err(WalkError::ExpectedIndexable { got: other }),
+            other @ (SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum) => Err(WalkError::ExpectedIndexable { got: other }),
         },
         LinearStep::BracketSlice { .. } => match schema.serial_type {
             SerialType::Array | SerialType::String => Ok(schema.clone()),
-            other => Err(WalkError::ExpectedSliceable { got: other }),
+            other @ (SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum) => Err(WalkError::ExpectedSliceable { got: other }),
         },
     }
 }
@@ -1105,4 +1110,18 @@ mod tests {
         let e = check_pattern_against_schema(&p, &s).unwrap_err();
         assert!(matches!(e, WalkError::TupleIdxOutOfRange { .. }));
     }
+
+    /// A pattern that descends through a recursive record reaches the
+    /// fields of the nested records.
+    #[test]
+    fn pattern_descends_through_recursive_record() {
+        let s = crate::schema::parse_schema("a&4Treem23vali84kidsa^4Tree").unwrap();
+        for pat in [".[0].val", ".[0].kids.[0].val", ".[0].kids.[1].kids.[0].val"] {
+            let p = parse_pattern(pat).unwrap();
+            let r = check_pattern_against_schema(&p, &s)
+                .unwrap_or_else(|e| panic!("{pat}: {e:?}"));
+            assert_eq!(r.serial_type, SerialType::Sint64, "{pat}");
+        }
+    }
+
 }

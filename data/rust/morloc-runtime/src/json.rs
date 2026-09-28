@@ -116,7 +116,7 @@ pub fn bare_ctor_names(schema: &Schema) -> Option<Vec<&str>> {
                 .collect(),
         ),
         SerialType::Optional => schema.parameters.first().and_then(bare_ctor_names),
-        _ => None,
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream => None,
     }
 }
 
@@ -720,7 +720,7 @@ fn write_leaf(
             Ok(w.as_ptr())
         }
 
-        other => Err(err(&format!("{other:?} is not a leaf type"))),
+        other @ (SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Table | SerialType::Recur | SerialType::Variant) => Err(err(&format!("{other:?} is not a leaf type"))),
     }
 }
 
@@ -1086,7 +1086,7 @@ impl<'a, 'r, 't> Walker<u64> for LoadWalk<'a, 'r, 't> {
                 Err(err("Cannot load a Table from generic JSON; use the Arrow CSV/JSON reader path"))
             }
             SerialType::Recur => unreachable!("a back-reference resolves before it is stepped"),
-            _ => {
+            SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Int | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Enum => {
                 let span = self.lx.value_span()?;
                 write_leaf(span, schema, Some(slot), &mut self.parts)?;
                 Ok(())
@@ -1139,7 +1139,7 @@ pub fn is_top_null(ptr: AbsPtr, schema: &Schema) -> bool {
             let r = unsafe { ShmReader::new(ptr) };
             r.read_val::<RelPtr>(0) == RELNULL
         }
-        _ => false,
+        SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => false,
     }
 }
 
@@ -1174,7 +1174,7 @@ pub fn print_voidstar_jsonl(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocEr
             }
             map_io(w.flush())
         }
-        _ => {
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => {
             to_json(ptr, schema, &mut w, None)?;
             map_io(w.write_all(b"\n"))?;
             map_io(w.flush())
@@ -1255,7 +1255,7 @@ fn write_voidstar_raw<W: io::Write>(
             }
             Ok(())
         }
-        _ => Err(err(
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => Err(err(
             "-f raw requires Str, [Str], Vector U8, or [Vector U8] output \
              (a `render` handler's bytes)",
         )),
@@ -1415,7 +1415,7 @@ impl<'a, 'r> Walker<Pretty> for JsonWalk<'a, 'r> {
                 let tag = r.read_u8(0) as usize;
                 s.parameters.get(tag).map_or(false, |arm| arm.size != 0)
             }
-            _ => false,
+            SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Enum => false,
         }
     }
 
@@ -1425,7 +1425,7 @@ impl<'a, 'r> Walker<Pretty> for JsonWalk<'a, 'r> {
             SerialType::Array | SerialType::Tuple => self.close(b']', f.x),
             SerialType::Map => self.close(b'}', f.x),
             SerialType::Variant => map_io(self.w.write_all(b"}")),
-            _ => Ok(()),
+            SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Enum => Ok(()),
         }
     }
 

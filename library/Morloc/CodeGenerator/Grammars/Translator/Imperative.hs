@@ -626,6 +626,11 @@ data LowerConfig m = LowerConfig
   -- it can be applied later or passed on. Only the shared memory is given
   -- back; the buffer stays.
   , lcReturn :: MDoc -> MDoc
+  , -- | A copy of an argument packet the manifold returns as its result.
+    -- The argument lives in the incoming call, which is released before the
+    -- result is sent, so a language that frees packets by hand must return
+    -- a copy holding its own reference; a collected language returns it.
+    lcDupPacket :: MDoc -> MDoc
   , lcMakeIf :: NativeExpr -> PoolDocs -> PoolDocs -> PoolDocs -> m PoolDocs
   -- ^ origExpr, condDocs, thenDocs, elseDocs -> result PoolDocs
   -- Produces language-specific if/else structure using a temp result variable
@@ -923,6 +928,8 @@ lowerSerialExpr cfg _ (CacheBodyS_ _ resSa lbl mid args body) =
   lcCacheBody cfg resSa lbl mid args body
 lowerSerialExpr cfg _ (DebugWrapS_ _ mid args body) =
   lcDebugWrap cfg mid args body
+lowerSerialExpr cfg (ReturnS (BndVarS _ _)) (ReturnS_ x) =
+  return $ x {poolExpr = lcDupPacket cfg (poolExpr x), poolReturnFlag = True}
 lowerSerialExpr _ _ (ReturnS_ x) = return $ x {poolReturnFlag = True}
 lowerSerialExpr cfg (LoopS _ _ origBody) (LoopS_ _ ids body) = do
   body' <- adaptLoopBodyOwned cfg origBody body

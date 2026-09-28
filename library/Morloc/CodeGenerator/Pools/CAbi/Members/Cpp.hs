@@ -953,6 +953,7 @@ PROPAGATE_ERROR(errmsg)|]
     , lcReleaseStmt = \v -> "_release_packet(" <> pretty v <> ", true);"
     , lcReleaseBorrowedStmt = \v -> "_release_packet(" <> pretty v <> ", false);"
     , lcReturn = \e -> "return(" <> e <> ");"
+    , lcDupPacket = \e -> "_dup_packet(" <> e <> ")"
     , lcMakeLoop = \ids body -> do
         -- Native tail-loop. Walk the 'LoopBody' tree into C++ control flow. The
         -- loop-carried vars are the manifold's deserialized native locals

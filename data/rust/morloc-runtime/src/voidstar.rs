@@ -49,10 +49,87 @@ pub fn adjust_relptrs(
     schema: &Schema,
     base_rel: RelPtr,
 ) -> Result<(), MorlocError> {
-    let mut w = RebaseWalk { res: Resolver::new(schema), mode: Rebase::Shm(base_rel) };
+    let mut w = RebaseWalk { res: Resolver::new(schema), mode: Rebase::Shm(base_rel), window: None };
     let mut st = Stack::new();
     st.enter(schema, data, ());
     walk::run(&mut w, &mut st)
+}
+
+/// The relptr range `[lo, hi)` of one block. A block lies inside one
+/// volume, so its relptrs are contiguous, and bounds are checked on relptrs
+/// directly without resolving each one to an address. Computed once per
+/// block, not per value.
+#[derive(Clone, Copy)]
+pub struct RelWindow {
+    lo: RelPtr,
+    hi: RelPtr,
+}
+
+impl RelWindow {
+    pub fn of_block(block: *const u8, len: usize) -> Result<RelWindow, MorlocError> {
+        window_of(shm::abs2rel(block as AbsPtr)?, len)
+    }
+
+    /// The `len` bytes starting `offset` bytes into this window. Derived
+    /// arithmetically, so an empty region at the block's end needs no
+    /// address that lies past it.
+    pub fn narrow(self, offset: usize, len: usize) -> Result<RelWindow, MorlocError> {
+        let lo = isize::try_from(offset).ok().and_then(|o| self.lo.checked_add(o));
+        match lo {
+            Some(lo) => {
+                let w = window_of(lo, len)?;
+                if w.hi <= self.hi { Ok(w) } else {
+                    Err(MorlocError::Shm("narrowed rebase window leaves its block".into()))
+                }
+            }
+            None => Err(MorlocError::Shm("narrowed rebase window overflows".into())),
+        }
+    }
+}
+
+/// `adjust_relptrs` for a value that lies wholly inside one block: every
+/// rebased pointer, together with the bytes it addresses, must land inside
+/// `window`, or the walk fails. A value copied into a fresh block can only
+/// be valid if it is self-contained, so a pointer that leaves the block
+/// means the copy or the rebase was wrong.
+pub fn adjust_relptrs_within(
+    data: AbsPtr,
+    schema: &Schema,
+    base_rel: RelPtr,
+    window: RelWindow,
+) -> Result<(), MorlocError> {
+    adjust_records_within(data, 1, schema, base_rel, window)
+}
+
+/// `adjust_relptrs_within` over `n` consecutive records of `schema`,
+/// sharing one resolver and one stack across them.
+pub fn adjust_records_within(
+    first: AbsPtr,
+    n: usize,
+    schema: &Schema,
+    base_rel: RelPtr,
+    window: RelWindow,
+) -> Result<(), MorlocError> {
+    let mut w = RebaseWalk {
+        res: Resolver::new(schema),
+        mode: Rebase::Shm(base_rel),
+        window: Some(window),
+    };
+    let mut st = Stack::new();
+    for k in 0..n {
+        // SAFETY: the caller's records are `n` consecutive slots of
+        // `schema.width` bytes.
+        st.enter(schema, unsafe { first.add(k * schema.width) }, ());
+        walk::run(&mut w, &mut st)?;
+    }
+    Ok(())
+}
+
+fn window_of(lo: RelPtr, len: usize) -> Result<RelWindow, MorlocError> {
+    let hi = isize::try_from(len).ok().and_then(|n| lo.checked_add(n)).ok_or_else(|| {
+        MorlocError::Shm(format!("rebase window at relptr {lo:#x} of {len} bytes overflows"))
+    })?;
+    Ok(RelWindow { lo, hi })
 }
 
 // ── shift_buffer_relptrs ───────────────────────────────────────────────────
@@ -68,13 +145,18 @@ pub fn adjust_relptrs(
 /// is not a fresh SHM allocation but an in-place move within a Vec /
 /// per-slot write buffer -- e.g. the write-buffer compaction step and
 /// the per-element blob relocation inside `append_one_element`.
+///
+/// Every shifted pointer must address bytes inside `[buf_base, buf_base +
+/// buf_len)`.
 pub unsafe fn shift_buffer_relptrs(
     buf_base: *mut u8,
+    buf_len: usize,
     field_offset: usize,
     schema: &Schema,
     delta: isize,
 ) -> Result<(), MorlocError> {
-    let mut w = RebaseWalk { res: Resolver::new(schema), mode: Rebase::Buffer { buf_base, delta } };
+    let window = Some(window_of(0, buf_len)?);
+    let mut w = RebaseWalk { res: Resolver::new(schema), mode: Rebase::Buffer { buf_base, delta }, window };
     let mut st = Stack::new();
     st.enter(schema, buf_base.add(field_offset), ());
     walk::run(&mut w, &mut st)
@@ -92,6 +174,9 @@ enum Rebase {
 struct RebaseWalk<'r> {
     res: Resolver<'r>,
     mode: Rebase,
+    /// When set, the relptr range every rebased pointer and the bytes it
+    /// addresses must fall inside.
+    window: Option<RelWindow>,
 }
 
 impl<'r> RebaseWalk<'r> {
@@ -110,6 +195,20 @@ impl<'r> RebaseWalk<'r> {
             Rebase::Shm(_) => shm::rel2abs(rel),
             // SAFETY: a buffer-local relptr is an offset into the buffer.
             Rebase::Buffer { buf_base, .. } => Ok(unsafe { buf_base.add(rel as usize) }),
+        }
+    }
+
+    /// Reject a rebased relptr that, with the `extent` bytes it addresses,
+    /// leaves the window.
+    #[inline]
+    fn check(&self, rel: RelPtr, extent: Option<usize>) -> Result<(), MorlocError> {
+        let Some(RelWindow { lo, hi }) = self.window else { return Ok(()) };
+        let end = extent.and_then(|e| isize::try_from(e).ok()).and_then(|e| rel.checked_add(e));
+        match end {
+            Some(end) if rel >= lo && end <= hi => Ok(()),
+            _ => Err(MorlocError::Shm(format!(
+                "rebased relptr {rel:#x} (+{extent:?} bytes) leaves its block [{lo:#x}, {hi:#x})"
+            ))),
         }
     }
 
@@ -148,6 +247,7 @@ impl<'r> Walker<()> for RebaseWalk<'r> {
                     if size > 1 {
                         let relptr = &mut *(data.add(std::mem::size_of::<usize>()) as *mut RelPtr);
                         *relptr += shift;
+                        self.check(*relptr, size.checked_mul(std::mem::size_of::<u64>()))?;
                     }
                 }
                 SerialType::String | SerialType::Array => {
@@ -158,7 +258,19 @@ impl<'r> Walker<()> for RebaseWalk<'r> {
                         if matches!(self.mode, Rebase::Buffer { .. }) && (arr.size == 0 || arr.data <= 0) {
                             return Ok(());
                         }
+                        // An empty array's pointer is never followed, but a
+                        // rebased one could name an address before the
+                        // block, even outside its volume; inside a window it
+                        // is pinned to the block's start instead.
+                        if let (0, Some(RelWindow { lo, .. })) = (arr.size, self.window) {
+                            arr.data = lo;
+                            return Ok(());
+                        }
                         arr.data += shift;
+                        if arr.size > 0 {
+                            let w = s.parameters.first().map_or(1, |e| e.width);
+                            self.check(arr.data, arr.size.checked_mul(w))?;
+                        }
                     }
                     // An empty array points nowhere (its rebased sentinel is
                     // never read); a flat element region holds no pointers.
@@ -187,7 +299,15 @@ impl<'r> Walker<()> for RebaseWalk<'r> {
                     if sh::read_tag(data) == sh::TAG_PATH {
                         let payload = sh::read_payload(data);
                         if payload != sh::RELNULL_PAYLOAD {
-                            sh::write_field(data, sh::TAG_PATH, payload.wrapping_add(shift as u64));
+                            let moved = payload.wrapping_add(shift as u64);
+                            sh::write_field(data, sh::TAG_PATH, moved);
+                            if self.window.is_some() {
+                                // A path is an 8-byte length, then its bytes.
+                                let rel = moved as RelPtr;
+                                self.check(rel, Some(8))?;
+                                let len = usize::try_from(*(self.target(rel)? as *const u64)).ok();
+                                self.check(rel, len.and_then(|n| n.checked_add(8)))?;
+                            }
                         }
                     }
                 }
@@ -210,6 +330,7 @@ impl<'r> Walker<()> for RebaseWalk<'r> {
                     let relptr_slot = &mut *(data.add(VARIANT_PAYLOAD_OFFSET) as *mut RelPtr);
                     if *relptr_slot != shm::RELNULL {
                         *relptr_slot += shift;
+                        self.check(*relptr_slot, Some(arm.width))?;
                         let inner = self.target(*relptr_slot)?;
                         self.child(st, &f, 0, arm, inner)?;
                     }
@@ -224,11 +345,12 @@ impl<'r> Walker<()> for RebaseWalk<'r> {
                     let relptr_slot = &mut *(data as *mut RelPtr);
                     if *relptr_slot != shm::RELNULL {
                         *relptr_slot += shift;
+                        self.check(*relptr_slot, Some(s.parameters[0].width))?;
                         let inner = self.target(*relptr_slot)?;
                         self.child(st, &f, 0, &s.parameters[0], inner)?;
                     }
                 }
-                _ => {} // primitives have no relptrs
+                SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Table | SerialType::Recur | SerialType::Enum => {} // primitives have no relptrs
             }
         }
         Ok(())
@@ -255,11 +377,30 @@ pub fn read_binary_with_hint(
     let base = shm::shmalloc(blob.len())?;
     // SAFETY: base is freshly allocated with blob.len() bytes.
     unsafe { std::ptr::copy_nonoverlapping(blob.as_ptr(), base, blob.len()) };
-    let base_rel = shm::abs2rel(base)?;
-    let producer_base = shm::encode_relptr(vol_idx_hint as usize, 0);
-    let delta = (base_rel as i64).wrapping_sub(producer_base as i64) as shm::RelPtr;
-    adjust_relptrs(base, schema, delta)?;
+    rebase_copied_block(base, blob.len(), schema, vol_idx_hint)?;
     Ok(base)
+}
+
+/// Relocate a value copied into the `len`-byte block `block` from a
+/// producer whose relptrs are offsets from the value's start under the
+/// Layer-3 `vol_idx_hint` (0 for plain buffer-relative offsets). Every
+/// rebased pointer must stay inside the block. On failure the block is
+/// freed, so the caller has no cleanup path of its own.
+pub fn rebase_copied_block(
+    block: AbsPtr,
+    len: usize,
+    schema: &Schema,
+    vol_idx_hint: u16,
+) -> Result<(), MorlocError> {
+    let rebased = shm::abs2rel(block).and_then(|block_rel| {
+        let producer_base = shm::encode_relptr(vol_idx_hint as usize, 0);
+        let delta = (block_rel as i64).wrapping_sub(producer_base as i64) as RelPtr;
+        adjust_relptrs_within(block, schema, delta, RelWindow::of_block(block, len)?)
+    });
+    if rebased.is_err() {
+        let _ = shm::shfree(block);
+    }
+    rebased
 }
 
 // ── deep_copy ──────────────────────────────────────────────────────────────
@@ -720,7 +861,7 @@ where
                         "voidstar::deep_copy: a table cannot be copied into a slot".into(),
                     ));
                 }
-                _ => {
+                SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Recur | SerialType::Enum => {
                     // Fixed-size primitives (Bool/Sint*/Uint*/Float*/Nil): bit-copy
                     std::ptr::copy_nonoverlapping(src, dst, schema.width);
                 }
@@ -750,7 +891,33 @@ pub fn flatten_into(
     data: AbsPtr,
     schema: &Schema,
 ) -> Result<(), MorlocError> {
-    let total = crate::ffi::calc_voidstar_size_inner(data, schema)?;
+    flatten_into_mode(buf, data, schema, false)
+}
+
+/// [`flatten_into`] for a value leaving the local registry: each
+/// handle-form stream field is written in path form, its path laid out in
+/// place among the value's other variable bytes, as a path-form field's
+/// already is. A value flattened this way is self-contained: every byte
+/// it points at follows its own slot in depth-first order.
+pub fn flatten_into_portable(
+    buf: &mut Vec<u8>,
+    data: AbsPtr,
+    schema: &Schema,
+) -> Result<(), MorlocError> {
+    flatten_into_mode(buf, data, schema, true)
+}
+
+fn flatten_into_mode(
+    buf: &mut Vec<u8>,
+    data: AbsPtr,
+    schema: &Schema,
+    portable: bool,
+) -> Result<(), MorlocError> {
+    let total = if portable {
+        crate::ffi::calc_voidstar_size_portable(data, schema)?
+    } else {
+        crate::ffi::calc_voidstar_size_inner(data, schema)?
+    };
     buf.clear();
     buf.resize(total, 0);
 
@@ -766,7 +933,13 @@ pub fn flatten_into(
     unsafe { std::ptr::copy_nonoverlapping(data, buf.as_mut_ptr(), schema.width) };
 
     // Phase 2: fix up relptrs and copy variable-length data
-    let mut w = FlattenWalk { res: Resolver::new(schema), buf: buf.as_mut_ptr(), len: buf.len(), cursor: schema.width };
+    let mut w = FlattenWalk {
+        res: Resolver::new(schema),
+        buf: buf.as_mut_ptr(),
+        len: buf.len(),
+        cursor: schema.width,
+        portable,
+    };
     let mut st = Stack::new();
     st.enter(schema, data, 0);
     walk::run(&mut w, &mut st)?;
@@ -783,6 +956,8 @@ struct FlattenWalk<'r> {
     buf: *mut u8,
     len: usize,
     cursor: usize,
+    /// Write handle-form stream fields as their paths.
+    portable: bool,
 }
 
 impl<'r> FlattenWalk<'r> {
@@ -920,6 +1095,23 @@ impl<'r> Walker<usize> for FlattenWalk<'r> {
                                 sh::write_field(dst_field, sh::TAG_PATH, here as u64);
                             }
                         }
+                        t if t == sh::TAG_HANDLE && self.portable => {
+                            let path = crate::handle_scan::portable_path(src_payload as i64)?;
+                            if path.is_empty() {
+                                sh::write_field(dst_field, sh::TAG_PATH, sh::RELNULL_PAYLOAD);
+                            } else {
+                                let total = sh::path_suballoc_size(path.len());
+                                self.cursor = shm::align_up(self.cursor, 8);
+                                let here = self.cursor;
+                                sh::write_path_suballoc(self.region(here, total)?.as_mut_ptr(), path.as_bytes());
+                                self.cursor += total;
+                                sh::write_field(
+                                    self.region(at, sh::STREAM_HANDLE_FIELD_SIZE)?.as_mut_ptr(),
+                                    sh::TAG_PATH,
+                                    here as u64,
+                                );
+                            }
+                        }
                         t if t == sh::TAG_HANDLE => {
                             sh::write_field(dst_field, sh::TAG_HANDLE, src_payload);
                         }
@@ -983,7 +1175,7 @@ impl<'r> Walker<usize> for FlattenWalk<'r> {
                         self.child(st, &f, 0, inner_schema, inner, here)?;
                     }
                 }
-                _ => {} // primitives already copied by parent
+                SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Table | SerialType::Recur | SerialType::Enum => {} // primitives already copied by parent
             }
         }
         Ok(())
@@ -1155,7 +1347,7 @@ impl<'a, 'r> FlatEmit<'a, 'r> {
                 }
                 total
             }
-            _ => 0,
+            SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Table | SerialType::Recur | SerialType::Enum => 0,
         };
         self.pcount.insert(key, n);
         Ok(n)
@@ -1227,7 +1419,7 @@ impl<'a, 'r> FlatEmit<'a, 'r> {
                         self.patch(&s.parameters[i], data.add(fo), buf, off + fo, j)?;
                     }
                 }
-                _ => {}
+                SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Table | SerialType::Recur | SerialType::Enum => {}
             }
         }
         Ok(())
@@ -1400,7 +1592,7 @@ impl<'a, 'r> Walker<usize> for FlatEmit<'a, 'r> {
                         self.child(st, &f, 0, inner_schema, inner, ibase)?;
                     }
                 }
-                _ => {}
+                SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Table | SerialType::Recur | SerialType::Enum => {}
             }
         }
         Ok(())
@@ -1778,3 +1970,302 @@ mod one_block_copy_tests {
 }
 
 
+
+#[cfg(test)]
+mod bounded_rebase_tests {
+    use super::*;
+    use morloc_runtime_types::schema::parse_schema;
+
+    /// A 64-byte block holding one 16-byte slot at offset 0 whose pointer
+    /// field (at `ptr_at`) holds the block-relative offset `rel`.
+    fn block_with(ptr_at: usize, rel: i64, size: usize) -> AbsPtr {
+        let block = shm::shcalloc(1, 64).unwrap();
+        unsafe {
+            *(block as *mut usize) = size;
+            *(block.add(ptr_at) as *mut i64) = rel;
+        }
+        block
+    }
+
+    fn rebase(block: AbsPtr, schema: &str) -> Result<(), MorlocError> {
+        let schema = parse_schema(schema).unwrap();
+        let base = shm::abs2rel(block).unwrap();
+        adjust_relptrs_within(block, &schema, base, RelWindow::of_block(block, 64)?)
+    }
+
+    #[test]
+    fn string_inside_block_is_rebased() {
+        let _g = crate::init_test_shm();
+        let block = block_with(8, 16, 5);
+        rebase(block, "s").unwrap();
+        let arr = unsafe { &*(block as *const Array) };
+        assert_eq!(shm::rel2abs(arr.data).unwrap(), unsafe { block.add(16) });
+        shm::shfree(block).unwrap();
+    }
+
+    #[test]
+    fn string_leaving_block_is_rejected() {
+        let _g = crate::init_test_shm();
+        let block = block_with(8, 1000, 5);
+        assert!(rebase(block, "s").is_err());
+        shm::shfree(block).unwrap();
+    }
+
+    #[test]
+    fn string_running_past_block_end_is_rejected() {
+        let _g = crate::init_test_shm();
+        // Starts inside the block, but 60 bytes from offset 16 overrun it.
+        let block = block_with(8, 16, 60);
+        assert!(rebase(block, "s").is_err());
+        shm::shfree(block).unwrap();
+    }
+
+    #[test]
+    fn variant_payload_leaving_block_is_rejected() {
+        let _g = crate::init_test_shm();
+        // Tag 0 (arm with one f8 field), payload pointer far outside.
+        let block = block_with(VARIANT_PAYLOAD_OFFSET, 4096, 0);
+        assert!(rebase(block, "v11A1f8").is_err());
+        shm::shfree(block).unwrap();
+    }
+
+    #[test]
+    fn unbounded_rebase_accepts_what_bounded_rejects() {
+        let _g = crate::init_test_shm();
+        let schema = parse_schema("s").unwrap();
+        let block = block_with(8, 1000, 5);
+        let base = shm::abs2rel(block).unwrap();
+        adjust_relptrs(block, &schema, base).unwrap();
+        shm::shfree(block).unwrap();
+    }
+}
+
+// ── pointer_span ───────────────────────────────────────────────────────────
+
+/// The address range `[lo, hi)` covering every byte addressed by a live
+/// pointer reachable from `n` consecutive records of `schema` at `first`,
+/// or `None` when no record holds a live pointer. `resolve` turns a relptr
+/// found in the records into the address of its target, in whatever space
+/// the records live (a mapped file, an SHM block).
+///
+/// A flat array contributes its whole data range without its elements
+/// being visited, so the cost is one step per pointer slot, not per byte.
+///
+/// Every addressed range must lie inside `bound`, the `[lo, hi)` addresses
+/// of the memory the records belong to; a pointer or extent reaching past
+/// it is an error, checked before anything it addresses is read.
+///
+/// # Safety
+/// `first` must address `n` records laid out as `schema` describes, inside
+/// `bound`, which must be readable.
+pub unsafe fn pointer_span<R>(
+    first: *const u8,
+    n: usize,
+    schema: &Schema,
+    resolve: &R,
+    bound: (usize, usize),
+) -> Result<Option<(usize, usize)>, MorlocError>
+where
+    R: Fn(RelPtr) -> Result<AbsPtr, MorlocError>,
+{
+    let mut w = SpanWalk { res: Resolver::new(schema), resolve, bound, span: None };
+    let mut st = Stack::new();
+    for k in 0..n {
+        st.enter(schema, first.add(k * schema.width), ());
+        walk::run(&mut w, &mut st)?;
+    }
+    Ok(w.span)
+}
+
+/// True when `kind` occurs anywhere in `schema`.
+pub fn schema_holds(schema: &Schema, kind: SerialType) -> bool {
+    schema.serial_type == kind || schema.parameters.iter().any(|p| schema_holds(p, kind))
+}
+
+struct SpanWalk<'r, R> {
+    res: Resolver<'r>,
+    resolve: &'r R,
+    bound: (usize, usize),
+    span: Option<(usize, usize)>,
+}
+
+impl<'r, R> SpanWalk<'r, R>
+where
+    R: Fn(RelPtr) -> Result<AbsPtr, MorlocError>,
+{
+    /// Resolve `rel` and widen the span by the `extent` bytes it addresses.
+    fn cover(&mut self, rel: RelPtr, extent: Option<usize>) -> Result<*const u8, MorlocError> {
+        let at = (self.resolve)(rel)?;
+        let lo = at as usize;
+        let hi = extent.and_then(|e| lo.checked_add(e)).ok_or_else(|| {
+            MorlocError::Serialization(format!("pointer extent at {lo:#x} overflows"))
+        })?;
+        if lo < self.bound.0 || hi > self.bound.1 {
+            return Err(MorlocError::Serialization(format!(
+                "pointer to [{lo:#x}, {hi:#x}) leaves its sub-packet [{:#x}, {:#x})",
+                self.bound.0, self.bound.1
+            )));
+        }
+        self.span = Some(match self.span {
+            Some((a, b)) => (a.min(lo), b.max(hi)),
+            None => (lo, hi),
+        });
+        Ok(at)
+    }
+
+    fn child(
+        &mut self,
+        st: &mut Stack<()>,
+        f: &Frame<()>,
+        idx: usize,
+        s: &'r Schema,
+        data: *const u8,
+    ) -> Result<Visit, MorlocError> {
+        if self.res.flat(s) {
+            self.step(st, Frame::new(s, data, ()))?;
+            Ok(Visit::Done)
+        } else {
+            walk::defer(self, st, f, idx, s, data, ());
+            Ok(Visit::Deferred)
+        }
+    }
+}
+
+impl<'r, R> Walker<()> for SpanWalk<'r, R>
+where
+    R: Fn(RelPtr) -> Result<AbsPtr, MorlocError>,
+{
+    fn step(&mut self, st: &mut Stack<()>, f: Frame<()>) -> Result<(), MorlocError> {
+        // SAFETY: frames hold nodes of the tree the resolver was built from,
+        // and `data` points at a value laid out as that schema describes.
+        let s: &'r Schema = self.res.resolve(unsafe { &*f.schema })?;
+        let data = f.data;
+        unsafe {
+            match s.serial_type {
+                SerialType::Nil
+                | SerialType::Bool
+                | SerialType::Sint8
+                | SerialType::Sint16
+                | SerialType::Sint32
+                | SerialType::Sint64
+                | SerialType::Uint8
+                | SerialType::Uint16
+                | SerialType::Uint32
+                | SerialType::Uint64
+                | SerialType::Float32
+                | SerialType::Float64
+                | SerialType::Enum => {}
+                SerialType::Int => {
+                    // Inline BigInt: [size, value_or_relptr]; more than one
+                    // limb lives behind the pointer.
+                    let size = *(data as *const usize);
+                    if size > 1 {
+                        let rel = *(data.add(std::mem::size_of::<usize>()) as *const RelPtr);
+                        self.cover(rel, size.checked_mul(std::mem::size_of::<u64>()))?;
+                    }
+                }
+                SerialType::String | SerialType::Array => {
+                    let arr = &*(data as *const Array);
+                    if arr.size == 0 {
+                        return Ok(());
+                    }
+                    let elem = s.parameters.first();
+                    let w = elem.map_or(1, |e| e.width);
+                    let elems = if f.idx == 0 {
+                        self.cover(arr.data, arr.size.checked_mul(w))?
+                    } else {
+                        (self.resolve)(arr.data)? as *const u8
+                    };
+                    let Some(elem) = elem else { return Ok(()) };
+                    if elem.is_fixed_width() {
+                        return Ok(());
+                    }
+                    for i in f.idx..arr.size {
+                        if self.child(st, &f, i, elem, elems.add(i * w))? == Visit::Deferred {
+                            return Ok(());
+                        }
+                    }
+                }
+                SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+                    // Only a path-form handle points anywhere: at an 8-byte
+                    // length followed by the path's bytes.
+                    use morloc_runtime_types::stream_handle as sh;
+                    if sh::read_tag(data) == sh::TAG_PATH {
+                        let payload = sh::read_payload(data);
+                        if payload != sh::RELNULL_PAYLOAD {
+                            let at = self.cover(payload as RelPtr, Some(8))?;
+                            let len = usize::try_from(*(at as *const u64)).ok();
+                            self.cover(payload as RelPtr, len.and_then(|n| n.checked_add(8)))?;
+                        }
+                    }
+                }
+                SerialType::Tuple | SerialType::Map => {
+                    for i in f.idx..s.parameters.len() {
+                        let p = data.add(s.offsets[i]);
+                        if self.child(st, &f, i, &s.parameters[i], p)? == Visit::Deferred {
+                            return Ok(());
+                        }
+                    }
+                }
+                SerialType::Variant => {
+                    if f.idx > 0 {
+                        return Ok(());
+                    }
+                    let arm = variant_arm_schema(*data, s)?;
+                    let rel = *(data.add(VARIANT_PAYLOAD_OFFSET) as *const RelPtr);
+                    if rel != shm::RELNULL {
+                        let inner = self.cover(rel, Some(arm.width))?;
+                        self.child(st, &f, 0, arm, inner)?;
+                    }
+                }
+                SerialType::Optional => {
+                    if f.idx > 0 || s.parameters.is_empty() {
+                        return Ok(());
+                    }
+                    let rel = *(data as *const RelPtr);
+                    if rel != shm::RELNULL {
+                        let inner = self.cover(rel, Some(s.parameters[0].width))?;
+                        self.child(st, &f, 0, &s.parameters[0], inner)?;
+                    }
+                }
+                SerialType::Table => {
+                    return Err(MorlocError::Serialization(
+                        "pointer_span: an Arrow table has no voidstar pointer layout".into(),
+                    ));
+                }
+                SerialType::Recur => {
+                    return Err(MorlocError::Schema(
+                        "pointer_span: unresolved back-reference".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod flatten_size_tests {
+    use super::*;
+    use crate::json::read_json_with_schema;
+    use morloc_runtime_types::schema::parse_schema;
+
+    /// A path-form stream handle after a field that leaves the cursor
+    /// unaligned: flatten pads the path to 8 bytes, so the size it was
+    /// given must have budgeted that padding.
+    #[test]
+    fn handle_path_after_odd_string_flattens() {
+        let _g = crate::init_test_shm();
+        for s in ["x", "abc", "abcdefg", "abcdefgh"] {
+            let schema = parse_schema("t2sF").unwrap();
+            let v = read_json_with_schema(&format!(r#"["{s}", "/tmp/some/path.stream"]"#), &schema).unwrap();
+            let flat = flatten_to_buffer(v, &schema)
+                .unwrap_or_else(|e| panic!("string {s:?}: {e}"));
+            let back = read_binary(&flat, &schema).unwrap();
+            assert_eq!(
+                crate::json::voidstar_to_json_string(back, &schema).unwrap(),
+                crate::json::voidstar_to_json_string(v, &schema).unwrap(),
+            );
+        }
+    }
+}

@@ -1,0 +1,215 @@
+-- Stream files carrying pointer-bearing values, crossing into and out of
+-- each language pool.
+--
+-- Report: "Sum-type values written with @write read back as garbage".
+--
+-- *Read*: the nexus writes and reads the stream, then hands the list to a
+-- pool identity; the pool must receive the values that were written.
+-- *Write*: a pool produces the list that is written, and the nexus reads
+-- it back. Shapes: a bare variant, strings whose first element is "",
+-- and a variant ahead of a string field in each record.
+
+module main
+  ( shapeReadCpp
+  , shapeWriteCpp
+  , shapeReadPy
+  , shapeWritePy
+  , shapeReadR
+  , shapeWriteR
+  , estrReadCpp
+  , estrWriteCpp
+  , estrReadPy
+  , estrWritePy
+  , estrReadR
+  , estrWriteR
+  , vfstReadCpp
+  , vfstWriteCpp
+  , vfstReadPy
+  , vfstWritePy
+  , vfstReadR
+  , vfstWriteR
+  )
+
+import root-cpp
+import root-py
+import root-r
+
+data Shape = Circle Real | Rect Real Real
+
+idCpp :: a -> a
+source Cpp from "id.hpp" ("ident" as idCpp)
+idPy :: a -> a
+source Py from "id.py" ("ident" as idPy)
+idR :: a -> a
+source R from "id.R" ("ident" as idR)
+
+shapeVals :: [Shape]
+shapeVals = [Circle 1.5, Rect 2.0 3.0, Circle 4.25]
+
+shapeReadCpp :: Str -> <IO> [Shape]
+shapeReadCpp p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Shape)))
+  @write 0 o shapeVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Shape)))
+  Ok xs <- @next s
+  idCpp xs
+
+shapeWriteCpp :: Str -> <IO> [Shape]
+shapeWriteCpp p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Shape)))
+  @write 0 o (idCpp shapeVals)
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Shape)))
+  Ok xs <- @next s
+  xs
+
+shapeReadPy :: Str -> <IO> [Shape]
+shapeReadPy p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Shape)))
+  @write 0 o shapeVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Shape)))
+  Ok xs <- @next s
+  idPy xs
+
+shapeWritePy :: Str -> <IO> [Shape]
+shapeWritePy p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Shape)))
+  @write 0 o (idPy shapeVals)
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Shape)))
+  Ok xs <- @next s
+  xs
+
+shapeReadR :: Str -> <IO> [Shape]
+shapeReadR p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Shape)))
+  @write 0 o shapeVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Shape)))
+  Ok xs <- @next s
+  idR xs
+
+shapeWriteR :: Str -> <IO> [Shape]
+shapeWriteR p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Shape)))
+  @write 0 o (idR shapeVals)
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Shape)))
+  Ok xs <- @next s
+  xs
+
+estrVals :: [Str]
+estrVals = ["", "ab", "cd"]
+
+estrReadCpp :: Str -> <IO> [Str]
+estrReadCpp p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Str)))
+  @write 0 o estrVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Str)))
+  Ok xs <- @next s
+  idCpp xs
+
+estrWriteCpp :: Str -> <IO> [Str]
+estrWriteCpp p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Str)))
+  @write 0 o (idCpp estrVals)
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Str)))
+  Ok xs <- @next s
+  xs
+
+estrReadPy :: Str -> <IO> [Str]
+estrReadPy p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Str)))
+  @write 0 o estrVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Str)))
+  Ok xs <- @next s
+  idPy xs
+
+estrWritePy :: Str -> <IO> [Str]
+estrWritePy p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Str)))
+  @write 0 o (idPy estrVals)
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Str)))
+  Ok xs <- @next s
+  xs
+
+estrReadR :: Str -> <IO> [Str]
+estrReadR p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Str)))
+  @write 0 o estrVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Str)))
+  Ok xs <- @next s
+  idR xs
+
+estrWriteR :: Str -> <IO> [Str]
+estrWriteR p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream (Str)))
+  @write 0 o (idR estrVals)
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream (Str)))
+  Ok xs <- @next s
+  xs
+
+vfstVals :: [(Shape, Str)]
+vfstVals = [(Circle 1.5, "a"), (Rect 2.0 3.0, "bc"), (Circle 4.25, "d")]
+
+vfstReadCpp :: Str -> <IO> [(Shape, Str)]
+vfstReadCpp p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Shape, Str))))
+  @write 0 o vfstVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream ((Shape, Str))))
+  Ok xs <- @next s
+  idCpp xs
+
+vfstWriteCpp :: Str -> <IO> [(Shape, Str)]
+vfstWriteCpp p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Shape, Str))))
+  @write 0 o (idCpp vfstVals)
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream ((Shape, Str))))
+  Ok xs <- @next s
+  xs
+
+vfstReadPy :: Str -> <IO> [(Shape, Str)]
+vfstReadPy p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Shape, Str))))
+  @write 0 o vfstVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream ((Shape, Str))))
+  Ok xs <- @next s
+  idPy xs
+
+vfstWritePy :: Str -> <IO> [(Shape, Str)]
+vfstWritePy p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Shape, Str))))
+  @write 0 o (idPy vfstVals)
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream ((Shape, Str))))
+  Ok xs <- @next s
+  xs
+
+vfstReadR :: Str -> <IO> [(Shape, Str)]
+vfstReadR p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Shape, Str))))
+  @write 0 o vfstVals
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream ((Shape, Str))))
+  Ok xs <- @next s
+  idR xs
+
+vfstWriteR :: Str -> <IO> [(Shape, Str)]
+vfstWriteR p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Shape, Str))))
+  @write 0 o (idR vfstVals)
+  @close o
+  Ok s <- @open p :: <IO> (Try Str (IStream ((Shape, Str))))
+  Ok xs <- @next s
+  xs

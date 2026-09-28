@@ -575,7 +575,7 @@ fn declared_field(key: &str, p: &Schema) -> Result<Field, MorlocError> {
         SerialType::Float32 => DataType::Float32,
         SerialType::Float64 => DataType::Float64,
         SerialType::String => DataType::Utf8,
-        other => {
+        other @ (SerialType::Nil | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum) => {
             return Err(MorlocError::Other(format!(
                 "Unsupported column type for '{}': {:?}",
                 key, other

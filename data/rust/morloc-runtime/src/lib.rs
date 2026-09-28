@@ -12,6 +12,10 @@ pub mod walk;
 #[cfg(test)]
 pub mod deep_tests;
 #[cfg(test)]
+mod layout_bench;
+#[cfg(test)]
+mod layout_props;
+#[cfg(test)]
 mod pins;
 pub mod packet;
 pub mod shm;
@@ -114,7 +118,7 @@ fn ensure_test_arena() {
         let test_dir = tmpdir.join(format!("morloc_test_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&test_dir);
         shm::shm_set_fallback_dir(test_dir.to_str().unwrap());
-        let basename = format!("morloc-{}-test-arena", std::process::id());
+        let basename = format!("/morloc-{}-test-arena", std::process::id());
         shm::shinit(&basename, 0, 0x100000).unwrap(); // 1MB
     }
 }

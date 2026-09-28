@@ -67,6 +67,8 @@ extern "C" {
     fn shmalloc(size: usize, errmsg: *mut *mut c_char) -> *mut c_void;
     fn shfree(ptr: *mut c_void, errmsg: *mut *mut c_char) -> bool;
     fn shincref(ptr: *mut c_void, errmsg: *mut *mut c_char) -> bool;
+    fn morloc_dup_packet(packet: *const u8, block_out: *mut *mut c_void,
+                         errmsg: *mut *mut c_char) -> *mut u8;
     fn abs2rel(ptr: *mut c_void, errmsg: *mut *mut c_char) -> isize;
     fn rel2abs(ptr: isize, errmsg: *mut *mut c_char) -> *mut c_void;
     fn make_data_packet_auto(voidstar: *mut c_void, relptr: isize,
@@ -1358,7 +1360,7 @@ fn handle_kind(t: SerialType) -> u8 {
         SerialType::IFile => 0,
         SerialType::IStream => 1,
         SerialType::OStream => 2,
-        _ => 0,
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::Variant | SerialType::Enum => 0,
     }
 }
 
@@ -1399,7 +1401,12 @@ macro_rules! int_impl {
                         core::ptr::write_unaligned(dest as *mut i64, 1);
                         core::ptr::write_unaligned((dest as *mut i64).add(1), *self as i64);
                     }
-                    _ => core::ptr::write_unaligned(dest as *mut $t, *self), // I8 unaligned
+                    SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16
+                    | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16
+                    | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64
+                    | SerialType::String | SerialType::Array | SerialType::Tuple | SerialType::Map
+                    | SerialType::Optional | SerialType::Table | SerialType::Recur | SerialType::Variant
+                    | SerialType::Enum => write_int(schema, dest, *self as i128),
                 }
             }
         }
@@ -1424,7 +1431,7 @@ macro_rules! int_impl {
                         }
                         handle as $t
                     }
-                    _ => read_int(schema, data) as $t,
+                    SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::Variant | SerialType::Enum => read_int(schema, data) as $t,
                 }
             }
         }
@@ -1432,6 +1439,37 @@ macro_rules! int_impl {
 }
 int_impl!(i8); int_impl!(i16); int_impl!(i32); int_impl!(i64);
 int_impl!(u8); int_impl!(u16); int_impl!(u32); int_impl!(u64);
+
+// Write `v` at the schema's own width, which may be narrower or wider than
+// the Rust integer it came from; a value the slot cannot hold is an error,
+// never a truncation or a write past the slot.
+#[inline]
+unsafe fn write_int(schema: &Schema, dest: *mut u8, v: i128) {
+    fn fit<T: TryFrom<i128>>(v: i128, name: &str) -> T {
+        T::try_from(v).unwrap_or_else(|_| morloc_throw(format!("Integer overflow: {v} does not fit in {name}")))
+    }
+    match schema.serial_type {
+        SerialType::Sint8 => core::ptr::write_unaligned(dest as *mut i8, fit(v, "I8")),
+        SerialType::Sint16 => core::ptr::write_unaligned(dest as *mut i16, fit(v, "I16")),
+        SerialType::Sint32 => core::ptr::write_unaligned(dest as *mut i32, fit(v, "I32")),
+        SerialType::Sint64 => core::ptr::write_unaligned(dest as *mut i64, fit(v, "I64")),
+        SerialType::Uint8 => core::ptr::write_unaligned(dest, fit::<u8>(v, "U8")),
+        SerialType::Uint16 => core::ptr::write_unaligned(dest as *mut u16, fit(v, "U16")),
+        SerialType::Uint32 => core::ptr::write_unaligned(dest as *mut u32, fit(v, "U32")),
+        SerialType::Uint64 => core::ptr::write_unaligned(dest as *mut u64, fit(v, "U64")),
+        SerialType::Bool if v == 0 || v == 1 => core::ptr::write_unaligned(dest, v as u8),
+        SerialType::Enum if v >= 0 && (v as usize) < schema.size => core::ptr::write_unaligned(dest, v as u8),
+        other @ (SerialType::Bool | SerialType::Enum) => {
+            morloc_throw(format!("{v} is not a valid {other:?} value"))
+        }
+        other @ (SerialType::Nil | SerialType::Float32 | SerialType::Float64 | SerialType::String
+        | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional
+        | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile
+        | SerialType::OStream | SerialType::IStream | SerialType::Variant) => {
+            morloc_throw(format!("cannot write an integer where the schema holds {other:?}"))
+        }
+    }
+}
 
 // Read an integer at schema width, widening to i128 (the common carrier);
 // rejects multi-limb Int (I6). Mirrors cppmorloc.hpp:1128-1168.
@@ -1454,7 +1492,10 @@ unsafe fn read_int(schema: &Schema, data: *const u8) -> i128 {
             }
             if size == 0 { 0 } else { core::ptr::read_unaligned((data as *const i64).add(1)) as i128 }
         }
-        _ => core::ptr::read_unaligned(data as *const i64) as i128,
+        SerialType::Enum => core::ptr::read_unaligned(data) as i128,
+        SerialType::Nil | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant => {
+            morloc_throw(format!("cannot read an integer where the schema holds {:?}", schema.serial_type))
+        }
     }
 }
 
@@ -1465,8 +1506,20 @@ macro_rules! float_impl {
             #[inline]
             fn shm_size(&self, schema: &Schema) -> usize { schema.width }
             #[inline]
-            unsafe fn write(&self, dest: *mut u8, _cursor: &mut *mut u8, _schema: &Schema) {
-                core::ptr::write_unaligned(dest as *mut $t, *self); // I8
+            unsafe fn write(&self, dest: *mut u8, _cursor: &mut *mut u8, schema: &Schema) {
+                // At the schema's own width, which may differ from `$t`'s.
+                match schema.serial_type {
+                    SerialType::Float32 => core::ptr::write_unaligned(dest as *mut f32, *self as f32),
+                    SerialType::Float64 => core::ptr::write_unaligned(dest as *mut f64, *self as f64),
+                    SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16
+                    | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16
+                    | SerialType::Uint32 | SerialType::Uint64 | SerialType::String | SerialType::Array
+                    | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int
+                    | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream
+                    | SerialType::IStream | SerialType::Variant | SerialType::Enum => morloc_throw(format!(
+                        "cannot write a float where the schema holds {:?}", schema.serial_type
+                    )),
+                }
             }
         }
         impl FromVoidstar for $t {
@@ -1476,7 +1529,14 @@ macro_rules! float_impl {
                 match schema.serial_type {
                     SerialType::Float32 => core::ptr::read_unaligned(data as *const f32) as $t,
                     SerialType::Float64 => core::ptr::read_unaligned(data as *const f64) as $t,
-                    _ => core::ptr::read_unaligned(data as *const $t),
+                    SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16
+                    | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16
+                    | SerialType::Uint32 | SerialType::Uint64 | SerialType::String | SerialType::Array
+                    | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int
+                    | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream
+                    | SerialType::IStream | SerialType::Variant | SerialType::Enum => morloc_throw(format!(
+                        "cannot read a float where the schema holds {:?}", schema.serial_type
+                    )),
                 }
             }
         }
@@ -2392,6 +2452,24 @@ unsafe fn arrow_put<T: ToVoidstar>(value: &T, schema: &Schema) -> Result<isize, 
     Ok(relptr)
 }
 
+/// A copy of an argument packet for a manifold to return as its result.
+/// The argument itself lives in the call the dispatcher frees before it
+/// sends and frees the result, so it cannot be returned; the copy holds its
+/// own reference to any shared memory the packet names, tracked here like
+/// every other packet this pool returns.
+pub unsafe fn dup_packet(packet: *const u8) -> *mut u8 {
+    let mut block: *mut c_void = std::ptr::null_mut();
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let copy = morloc_dup_packet(packet, &mut block, &mut err);
+    if !err.is_null() {
+        morloc_infra_abort(cstr_take(err));
+    }
+    if !block.is_null() {
+        track(block);
+    }
+    copy
+}
+
 /// # Safety
 /// `packet` must be a valid data packet whose schema matches `schema`.
 pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> T {
@@ -3281,6 +3359,71 @@ mod tests {
         }
         let live = LIVE_CSCHEMAS.lock().unwrap().iter().filter(|k| **k == key).count();
         assert_eq!(live, 0, "cached schema conversions outlived their threads");
+    }
+
+    /// Write `value` as `schema_str` into a zeroed 16-byte slot guarded by
+    /// sentinel bytes; returns the slot or the thrown message.
+    unsafe fn write_slot<T: ToVoidstar>(schema_str: &str, value: T) -> Result<[u8; 32], String> {
+        let schema = parse_schema(schema_str).expect("parse schema");
+        let mut buf = [0xAAu8; 32];
+        let dest = buf.as_mut_ptr().add(8);
+        std::ptr::write_bytes(dest, 0, schema.width);
+        let mut cursor = dest.add(schema.width);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            value.write(dest, &mut cursor, &schema);
+        }));
+        match r {
+            Ok(()) => Ok(buf),
+            Err(e) => Err(e.downcast_ref::<MorlocThrow>().map(|t| t.0.clone()).unwrap_or_default()),
+        }
+    }
+
+    /// An integer written at a narrower schema writes exactly that width,
+    /// and a value that does not fit is an error, not a truncation or an
+    /// overwrite of the next slot.
+    #[test]
+    fn integer_writes_respect_schema_width() {
+        unsafe {
+            // -2 has every high byte set, so a write wider than the slot shows.
+            let buf = write_slot("i1", -2i64).unwrap();
+            assert_eq!(buf[8], 0xFE);
+            assert!(buf[9..].iter().all(|&b| b == 0xAA), "wrote past a 1-byte slot");
+            assert!(write_slot("u1", 300i64).is_err(), "300 fit in a u8");
+            assert!(write_slot("u2", -1i32).is_err(), "-1 fit in a u16");
+            assert!(write_slot("f8", 3i64).is_err(), "an int wrote a float's bits");
+            let buf = write_slot("u8", 7u8).unwrap();
+            assert_eq!(u64::from_le_bytes(buf[8..16].try_into().unwrap()), 7);
+        }
+    }
+
+    /// A float is written at the schema's own width, and not at all into a
+    /// slot that does not hold a float.
+    #[test]
+    fn float_writes_respect_schema_width() {
+        unsafe {
+            let buf = write_slot("f4", 1.5f64).unwrap();
+            assert_eq!(f32::from_le_bytes(buf[8..12].try_into().unwrap()), 1.5);
+            assert!(buf[12..].iter().all(|&b| b == 0xAA), "wrote past a 4-byte slot");
+            let buf = write_slot("f8", 2.25f32).unwrap();
+            assert_eq!(f64::from_le_bytes(buf[8..16].try_into().unwrap()), 2.25);
+            assert!(write_slot("i8", 1.0f64).is_err(), "a float wrote an int's bits");
+        }
+        let s = parse_schema("i8").unwrap();
+        let bytes = 7i64.to_le_bytes();
+        let r = std::panic::catch_unwind(|| unsafe { <f64 as FromVoidstar>::read(&s, bytes.as_ptr(), std::ptr::null()) });
+        assert!(r.is_err(), "an f64 read an int's bits");
+    }
+
+    /// Reading an integer from a slot that does not hold one is an error.
+    #[test]
+    fn integer_reads_reject_non_integer_slots() {
+        let f = parse_schema("f8").unwrap();
+        let bytes = 1.5f64.to_le_bytes();
+        let r = std::panic::catch_unwind(|| unsafe { <i64 as FromVoidstar>::read(&f, bytes.as_ptr(), std::ptr::null()) });
+        assert!(r.is_err(), "an i64 read a float's bits");
+        let s = parse_schema("i1").unwrap();
+        let v = unsafe { <i64 as FromVoidstar>::read(&s, [0xFFu8].as_ptr(), std::ptr::null()) };
+        assert_eq!(v, -1);
     }
 
     /// Serialize `value` into a fresh buffer and read it back, exercising the

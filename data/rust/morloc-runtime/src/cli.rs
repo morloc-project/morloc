@@ -539,7 +539,7 @@ pub(crate) unsafe fn try_load_stream_packet_file(
         // An IFile names its file: the ordinary path loader hands the path
         // on, and the pool opens it for random access.
         SerialType::IFile => Ok(None),
-        other => {
+        other @ (SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::OStream | SerialType::Variant | SerialType::Enum) => {
             // Look up the file's schema string for a targeted error.
             let file_schema = crate::stream::read_schema_from_file(&path_str)
                 .unwrap_or_else(|_| "<unknown>".to_string());
@@ -734,26 +734,7 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
     }
     libc::close(fd);
 
-    // Compute the delta that transforms each producer relptr P =
-    // (hint << 48) | p_o into the consumer-side relptr T = (dest_slot
-    // << 48) | (dest_offset + p_o). Single pass works for both Layer 3
-    // (hint > 0) and the legacy buffer-relative (hint = 0) cases.
-    let dest_rel = match shm::abs2rel(dest) {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = shm::shfree(dest);
-            return Err(e);
-        }
-    };
-    let producer_base = shm::encode_relptr(vol_idx_hint as usize, 0);
-    let delta = (dest_rel as i64).wrapping_sub(producer_base as i64) as shm::RelPtr;
-
-    let rs = CSchema::to_rust(schema);
-    if let Err(e) = crate::voidstar::adjust_relptrs(dest, &rs, delta) {
-        let _ = shm::shfree(dest);
-        return Err(e);
-    }
-
+    rebase_voidstar_in_shm(dest, payload_size, schema, vol_idx_hint)?;
     Ok(Some(dest))
 }
 
@@ -763,27 +744,15 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
 /// in-place. Computes `delta = abs2rel(dest) - encode_relptr(hint, 0)`
 /// and walks the structure adjusting each relptr by `delta`. On any
 /// failure, frees `dest` before returning the error so callers do not
-/// need a separate cleanup path.
+/// need a separate cleanup path. Every pointer must stay inside the
+/// `dest_len` bytes of `dest`.
 unsafe fn rebase_voidstar_in_shm(
     dest: *mut u8,
+    dest_len: usize,
     schema: *const CSchema,
     vol_idx_hint: u16,
 ) -> Result<(), MorlocError> {
-    let dest_rel = match shm::abs2rel(dest) {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = shm::shfree(dest);
-            return Err(e);
-        }
-    };
-    let producer_base = shm::encode_relptr(vol_idx_hint as usize, 0);
-    let delta = (dest_rel as i64).wrapping_sub(producer_base as i64) as shm::RelPtr;
-    let rs = CSchema::to_rust(schema);
-    if let Err(e) = crate::voidstar::adjust_relptrs(dest, &rs, delta) {
-        let _ = shm::shfree(dest);
-        return Err(e);
-    }
-    Ok(())
+    crate::voidstar::rebase_copied_block(dest, dest_len, &CSchema::to_rust(schema), vol_idx_hint)
 }
 
 // ── try_load_compressed_voidstar_via_shm ──────────────────────────────────
@@ -1015,7 +984,7 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
     );
 
     let t_relptr = std::time::Instant::now();
-    rebase_voidstar_in_shm(dest, schema, vol_idx_hint)?;
+    rebase_voidstar_in_shm(dest, total_uncompressed, schema, vol_idx_hint)?;
     crate::morloc_trace!("[fastpath] adjust_relptrs took {:.2?}", t_relptr.elapsed());
     crate::morloc_trace!("[fastpath] total ingest: {:.2?}", t0.elapsed());
 
@@ -1117,7 +1086,7 @@ unsafe fn try_decompress_voidstar_bytes_to_shm(
         return Err(e);
     }
 
-    rebase_voidstar_in_shm(dest, schema, hint)?;
+    rebase_voidstar_in_shm(dest, total_uncompressed, schema, hint)?;
     Ok(Some(dest as *mut c_void))
 }
 
@@ -1161,35 +1130,14 @@ pub unsafe extern "C" fn read_voidstar_binary_with_hint(
     errmsg: *mut *mut c_char,
 ) -> *mut c_void {
     clear_errmsg(errmsg);
-    let rs = CSchema::to_rust(schema);
-
-    let base = match shm::shmalloc(blob_size) {
-        Ok(p) => p,
+    let blob = std::slice::from_raw_parts(blob, blob_size);
+    match crate::voidstar::read_binary_with_hint(blob, &CSchema::to_rust(schema), vol_idx_hint) {
+        Ok(base) => base as *mut c_void,
         Err(e) => {
             set_errmsg(errmsg, &e);
-            return ptr::null_mut();
+            ptr::null_mut()
         }
-    };
-    std::ptr::copy_nonoverlapping(blob, base, blob_size);
-
-    let base_rel = match shm::abs2rel(base) {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = shm::shfree(base);
-            set_errmsg(errmsg, &e);
-            return ptr::null_mut();
-        }
-    };
-    let producer_base = shm::encode_relptr(vol_idx_hint as usize, 0);
-    let delta = (base_rel as i64).wrapping_sub(producer_base as i64) as shm::RelPtr;
-
-    if let Err(e) = crate::voidstar::adjust_relptrs(base, &rs, delta) {
-        let _ = shm::shfree(base);
-        set_errmsg(errmsg, &e);
-        return ptr::null_mut();
     }
-
-    base as *mut c_void
 }
 
 // ── Form decoders ──────────────────────────────────────────────────────────
@@ -1252,7 +1200,7 @@ fn format_field_as_json(field: &str, st: crate::schema::SerialType) -> String {
             // IFile's CLI string view is a file path; escape like a String.
             serde_json::to_string(field).unwrap_or_else(|_| "\"\"".to_string())
         }
-        _ => field.to_string(),
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::Variant | SerialType::Enum => field.to_string(),
     }
 }
 
@@ -1380,7 +1328,7 @@ fn assemble_row_json(
                 .collect();
             Ok(format!("{{{}}}", parts.join(",")))
         }
-        other => Err(MorlocError::Other(format!(
+        other @ (SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum) => Err(MorlocError::Other(format!(
             "form: list table fallback: row schema must be tuple or record; got {:?}",
             other
         ))),
@@ -1694,7 +1642,7 @@ unsafe fn try_list_with_config(
                     SerialType::String | SerialType::IFile
         | SerialType::OStream | SerialType::IStream =>
                         format_field_as_json(line, elem_serial),
-                    _ => line.to_string(),
+                    SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::Variant | SerialType::Enum => line.to_string(),
                 }
             };
             p.push(v);
@@ -2358,7 +2306,7 @@ pub unsafe extern "C" fn load_morloc_data_file(
                 .map(|p| matches!(p.serial_type, SerialType::String | SerialType::IFile
                     | SerialType::OStream | SerialType::IStream | SerialType::Enum))
                 .unwrap_or(false),
-            _ => false,
+            SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::Variant => false,
         };
         if bare_str {
             let bytes = std::slice::from_raw_parts(data, data_size);
@@ -2443,7 +2391,7 @@ pub unsafe extern "C" fn load_morloc_data_file(
                         || p.serial_type == SerialType::Float64
                 })
                 .unwrap_or(false),
-            _ => false,
+            SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::String | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => false,
         };
         if bare_float {
             let bytes = std::slice::from_raw_parts(data, data_size);
@@ -3094,7 +3042,7 @@ unsafe fn parse_cli_data_argument_unrolled(
     use crate::schema::SerialType;
     match rs.serial_type {
         SerialType::Tuple | SerialType::Map => {}
-        _ => {
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => {
             set_errmsg(errmsg, &MorlocError::Other(
                 "Only record and tuple types may be unrolled".into()));
             return ptr::null_mut();

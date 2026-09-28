@@ -774,21 +774,34 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
         "lit" => {
             let schema = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
             let lt = je.get("lit_type").and_then(|v| v.as_str()).unwrap_or("");
-            let val = je.get("value").and_then(|v| v.as_str()).unwrap_or("0");
+            let val = je.get("value").and_then(|v| v.as_str()).ok_or_else(|| {
+                MorlocError::Other(format!("manifest literal of type '{lt}' has no value"))
+            })?;
+            // A literal that does not parse as its declared type is a malformed
+            // manifest, never a zero.
+            fn num<T: std::str::FromStr>(lt: &str, val: &str) -> Result<T, MorlocError> {
+                val.parse::<T>().map_err(|_| {
+                    MorlocError::Other(format!("manifest literal '{val}' is not a valid '{lt}'"))
+                })
+            }
             let mut prim: Primitive = std::mem::zeroed();
 
             match lt {
-                "f4" => prim.f4 = val.parse::<f32>().unwrap_or(0.0),
-                "f8" => prim.f8 = val.parse::<f64>().unwrap_or(0.0),
-                "i1" => prim.i1 = val.parse::<i8>().unwrap_or(0),
-                "i2" => prim.i2 = val.parse::<i16>().unwrap_or(0),
-                "i4" => prim.i4 = val.parse::<i32>().unwrap_or(0),
-                "i8" => prim.i8_ = val.parse::<i64>().unwrap_or(0),
-                "u1" => prim.u1 = val.parse::<u8>().unwrap_or(0),
-                "u2" => prim.u2 = val.parse::<u16>().unwrap_or(0),
-                "u4" => prim.u4 = val.parse::<u32>().unwrap_or(0),
-                "u8" => prim.u8_ = val.parse::<u64>().unwrap_or(0),
-                "j" => prim.s = CString::new(val).unwrap_or_default().into_raw(),
+                "f4" => prim.f4 = num(lt, val)?,
+                "f8" => prim.f8 = num(lt, val)?,
+                "i1" => prim.i1 = num(lt, val)?,
+                "i2" => prim.i2 = num(lt, val)?,
+                "i4" => prim.i4 = num(lt, val)?,
+                "i8" => prim.i8_ = num(lt, val)?,
+                "u1" => prim.u1 = num(lt, val)?,
+                "u2" => prim.u2 = num(lt, val)?,
+                "u4" => prim.u4 = num(lt, val)?,
+                "u8" => prim.u8_ = num(lt, val)?,
+                "j" => {
+                    prim.s = CString::new(val)
+                        .map_err(|_| MorlocError::Other("manifest bignum literal holds a NUL byte".into()))?
+                        .into_raw()
+                }
                 "b" => prim.b = val != "0",
                 "z" => prim.z = 0,
                 _ => return Err(MorlocError::Other(format!("Unknown lit_type: {}", lt))),
@@ -2514,4 +2527,25 @@ pub unsafe extern "C" fn manifest_to_discovery_json(manifest: *const Manifest) -
 
     json_write_obj_end(jb);
     json_buf_finish(jb)
+}
+
+#[cfg(test)]
+mod literal_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_literals_are_errors() {
+        let _shm = crate::init_test_shm();
+        let lit = |lt: &str, v: Option<&str>| {
+            let mut j = serde_json::json!({"tag": "lit", "schema": lt, "lit_type": lt});
+            if let Some(v) = v {
+                j["value"] = serde_json::json!(v);
+            }
+            unsafe { build_expr(&j) }
+        };
+        assert!(lit("u1", Some("300")).is_err(), "out-of-range u1 became a value");
+        assert!(lit("i4", Some("twelve")).is_err());
+        assert!(lit("f8", None).is_err(), "a missing value became a value");
+        assert!(lit("u1", Some("200")).is_ok());
+    }
 }

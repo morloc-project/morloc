@@ -1489,7 +1489,7 @@ fn arm_field_token(tok: &str, schema: &str) -> String {
             .parameters
             .first()
             .map_or(false, |p| p.serial_type == SerialType::String),
-        _ => false,
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => false,
     });
     if is_str {
         crate::dispatch::quoted(tok)

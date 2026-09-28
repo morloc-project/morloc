@@ -1,0 +1,26 @@
+-- A default value for an argument of a recursive type is validated through
+-- the type's back-references and accepted: a `data` type whose constructors
+-- hold the type itself, and an alias defined in terms of itself.
+
+module main (depth, pats)
+import root
+
+data Tree = Leaf | Node Int Tree Tree
+
+type Pat = [Pat]
+
+depth ::
+  --' a tree
+  --' arg: --tree
+  --' default: {"Node": [1, "Leaf", {"Node": [2, "Leaf", "Leaf"]}]}
+  Tree ->
+  Tree
+depth t = t
+
+pats ::
+  --' patterns
+  --' arg: --pat
+  --' default: [[], [[]]]
+  Pat ->
+  Pat
+pats p = p
