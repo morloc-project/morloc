@@ -70,9 +70,7 @@ impl Space for Local {
     #[inline]
     fn resolve(&self, rel: RelPtr, extent: usize) -> Result<AbsPtr, MorlocError> {
         if shm::relptr_is_sentinel(rel) || rel < 0 {
-            return Err(MorlocError::Other(format!(
-                "relptr {} in a local payload is a sentinel (corrupt payload?)", rel
-            )));
+            return Err(payload_region_error(rel, extent, self.len));
         }
         let off = shm::relptr_offset(rel);
         match off.checked_add(extent) {
@@ -80,9 +78,47 @@ impl Space for Local {
                 // SAFETY: [off, end) lies inside the payload `new` vouched for.
                 Ok(unsafe { self.base.add(off) } as AbsPtr)
             }
-            _ => Err(MorlocError::Other(format!(
-                "a {}-byte region at offset {} runs past the {}-byte payload", extent, off, self.len
-            ))),
+            _ => Err(payload_region_error(rel, extent, self.len)),
+        }
+    }
+}
+
+/// Why `extent` bytes at `rel` are not inside a `len`-byte payload.
+pub fn payload_region_error(rel: RelPtr, extent: usize, len: usize) -> MorlocError {
+    if shm::relptr_is_sentinel(rel) || rel < 0 {
+        MorlocError::Other(format!("relptr {} in a local payload is a sentinel (corrupt payload?)", rel))
+    } else {
+        MorlocError::Other(format!(
+            "a {}-byte region at offset {} runs past the {}-byte payload",
+            extent,
+            shm::relptr_offset(rel),
+            len
+        ))
+    }
+}
+
+/// The C `morloc_space_t`: shared memory when `base` is null, else an inline
+/// payload of `len` bytes at `base`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MorlocSpace {
+    pub base: *const u8,
+    pub len: usize,
+}
+
+impl MorlocSpace {
+    pub const SHM: MorlocSpace = MorlocSpace { base: std::ptr::null(), len: 0 };
+}
+
+impl Space for MorlocSpace {
+    #[inline]
+    fn resolve(&self, rel: RelPtr, extent: usize) -> Result<AbsPtr, MorlocError> {
+        if self.base.is_null() {
+            Arena.resolve(rel, extent)
+        } else {
+            // SAFETY: whoever built the space vouches that `base..base + len`
+            // is readable while it is used.
+            unsafe { Local::new(self.base, self.len) }.resolve(rel, extent)
         }
     }
 }

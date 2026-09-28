@@ -436,7 +436,7 @@ typedef struct {
     size_t env_base;        // recur env depth at entry, restored on exit
     ssize_t total;          // size pass
     void** cursor;          // write pass
-    const void* base_ptr;   // read pass
+    morloc_space_t space;   // read pass: where relptrs lead
     PyObject* result;       // read pass: the root, owned until returned
     PyObject* keep;         // references the walk holds until it ends
 } py_walk_t;
@@ -1529,7 +1529,7 @@ static int py_read_child(py_walk_t* w, const Schema* schema, const void* data, u
 }
 
 static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, size_t idx, unsigned char slot_kind, PyObject* parent, Py_ssize_t slot, const char* key) { MAYFAIL
-    const void* base_ptr = w->base_ptr;
+    const morloc_space_t space = w->space;
     PyObject* obj = NULL;
 
     if (idx > 0) {
@@ -1598,7 +1598,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                 obj = PyLong_FromLongLong(val);
             } else {
                 // Overflow: second field is relptr to limb array
-                void* limb_ptr = PyTRY(resolve_relptr, *(relptr_t*)&fields[1], base_ptr);
+                void* limb_ptr = PyTRY(resolve_array, *(relptr_t*)&fields[1], (size_t)bigint_size, sizeof(uint64_t), space);
                 obj = _PyLong_FromByteArray(
                     (const unsigned char*)limb_ptr,
                     bigint_size * sizeof(uint64_t),
@@ -1614,7 +1614,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                          : (schema->type == MORLOC_OSTREAM) ? MLC_KIND_OSTREAM
                          :                                    MLC_KIND_ISTREAM;
             int64_t handle = PyTRY(mlc_read_handle_voidstar,
-                                   data, base_ptr, kind);
+                                   data, space, kind);
             obj = PyLong_FromLongLong((long long)handle);
             if (!obj) {
                 PyINTERNAL_ABORT("Failed to wrap stream handle as PyLong");
@@ -1626,7 +1626,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
             void* tmp_ptr = NULL;
 
             if (str_array->size != 0) {
-                tmp_ptr = PyTRY(resolve_relptr, str_array->data, base_ptr);
+                tmp_ptr = PyTRY(resolve_array, str_array->data, str_array->size, 1, space);
             }
 
             if (schema->hint != NULL && strcmp(schema->hint, "bytes") == 0) {
@@ -1666,13 +1666,13 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
             Array* array = (Array*)data;
             // Producer writes RELNULL into array->data for empty arrays
             // (see cppmorloc to_voidstar), so resolve only when non-empty.
-            void* absptr = NULL;
-            if (array->size != 0) {
-                absptr = PyTRY(resolve_relptr, array->data, base_ptr);
-            }
             const Schema* element_schema = py_resolve(schema->parameters[0]);
             if (element_schema == NULL) goto error;
             size_t width = element_schema->width;
+            void* absptr = NULL;
+            if (array->size != 0) {
+                absptr = PyTRY(resolve_array, array->data, array->size, width, space);
+            }
             // The "numpy.ndarray" hint is authoritative: the user wants a
             // NumPy array, regardless of element type. For fixed-width
             // primitive elements we use the natural dtype (zero-copy / fast
@@ -1725,7 +1725,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                 // recycled memory) or empty (no data to view). Otherwise take
                 // a zero-copy view over SHM, which outlives this array via
                 // the deferred shm_tracker decref.
-                if (base_ptr != NULL || array->size == 0) {
+                if (space.base != NULL || array->size == 0) {
                     obj = PyArray_SimpleNew(1, dims, numpy_type_num);
                     if (obj == NULL) {
                         PyINTERNAL_ABORT("Failed to allocate numpy array");
@@ -1877,7 +1877,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                 PyTuple_SET_ITEM(pair, 1, fields);
                 return 0;
             }
-            const void* payload = PyTRY(resolve_relptr, vrelptr, base_ptr);
+            const void* payload = PyTRY(resolve_region, vrelptr, arm->width, space);
             // The arm's schema describes its fields as a tuple, so the walk
             // over that shape builds the field sequence.
             return py_read_child(w, arm, payload, PY_SLOT_TUPLE, pair, 1, NULL);
@@ -1885,15 +1885,15 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
         case MORLOC_OPTIONAL: {
             // The Optional slot is a relptr (RELNULL = absent). Resolve and
             // read the inner T's body into this same slot when present.
-            // base_ptr is set when the data lives inline in a packet payload
-            // (relptrs are payload-relative); otherwise we go through SHM.
             relptr_t relptr = *(const relptr_t*)data;
             if (relptr == RELNULL) {
                 Py_INCREF(Py_None);
                 obj = Py_None;
                 break;
             }
-            const void* inner_abs = PyTRY(resolve_relptr, relptr, base_ptr);
+            const Schema* inner = py_resolve(schema->parameters[0]);
+            if (inner == NULL) goto error;
+            const void* inner_abs = PyTRY(resolve_region, relptr, inner->width, space);
             return py_read_child(w, schema->parameters[0], inner_abs, slot_kind, parent, slot, key);
         }
         default:
@@ -1909,10 +1909,10 @@ error:
 }
 
 // Build the Python value at `data`, or NULL with a Python error set.
-PyObject* from_voidstar(const Schema* schema, const void* data, const void* base_ptr){
+PyObject* from_voidstar(const Schema* schema, const void* data, morloc_space_t space){
     py_walk_t w;
     py_walk_init(&w, schema);
-    w.base_ptr = base_ptr;
+    w.space = space;
     if (py_read_child(&w, schema, data, PY_SLOT_ROOT, NULL, 0, NULL) != 0) goto error;
     for (;;) {
         int r = py_next(&w);
@@ -2544,6 +2544,9 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
     const char* schema_str;
 
     PARSE_ARGS_OR_ABORT(args, "y#s", &packet, &packet_size, &schema_str);
+    if (!morloc_packet_fits((const uint8_t*)packet, packet_size)) {
+        PyRAISE("a %zu-byte packet is shorter than its header claims", packet_size);
+    }
 
     const morloc_packet_header_t* header = (const morloc_packet_header_t*)packet;
     uint8_t source = header->command.data.source;
@@ -2637,7 +2640,11 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         && header->command.data.compression == PACKET_COMPRESSION_NONE
         && header->command.data.encryption == PACKET_ENCRYPTION_NONE) {
         const uint8_t* payload = (const uint8_t*)packet + sizeof(morloc_packet_header_t) + header->offset;
-        obj = from_voidstar(schema, (const void*)payload, (const void*)payload);
+        if (header->length < schema->width) {
+            free_schema(schema);
+            PyRAISE("a %zu-byte inline payload cannot hold its %zu-byte value", (size_t)header->length, schema->width);
+        }
+        obj = from_voidstar(schema, (const void*)payload, morloc_payload_space(payload, (size_t)header->length));
         PyTRACE(obj == NULL)
         free_schema(schema);
         return obj;
@@ -2679,7 +2686,7 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
                     if (ferr) free(ferr);
                     continue;
                 }
-                PyObject* chunk_py = from_voidstar(schema, chunk, NULL);
+                PyObject* chunk_py = from_voidstar(schema, chunk, morloc_shm_space());
                 char* ferr = NULL; shfree(chunk, &ferr);
                 if (ferr) free(ferr);
                 if (chunk_py == NULL) goto stream_error;
@@ -2742,7 +2749,7 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         tracked = true;
     }
 
-    obj = from_voidstar(schema, voidstar, NULL);
+    obj = from_voidstar(schema, voidstar, morloc_shm_space());
     PyTRACE(obj == NULL)
 
     if (!tracked) {
@@ -3475,12 +3482,12 @@ static PyObject* pybinding__mlc_read(PyObject* self, PyObject* args) { MAYFAIL
     if (read_err != NULL) { free(read_err); read_err = NULL; }
 
     {
-        // The numpy fast-path in from_voidstar (base_ptr == NULL) returns a
+        // The numpy fast-path in from_voidstar (shared-memory space) returns a
         // PyArray view of the SHM block via PyArray_SimpleNewFromData -- the
         // backing memory must outlive the view. Defer the shfree via
         // shm_tracker so the dispatch's flush releases the block (and the
         // schema) once the view is no longer in scope.
-        PyObject* obj = from_voidstar(schema, voidstar, NULL);
+        PyObject* obj = from_voidstar(schema, voidstar, morloc_shm_space());
         if (obj == NULL) {
             char* shfree_errmsg = NULL;
             shfree(voidstar, &shfree_errmsg);
@@ -3532,12 +3539,12 @@ static PyObject* pybinding__mlc_load(PyObject* self, PyObject* args) { MAYFAIL
     if (load_err != NULL) { free(load_err); load_err = NULL; }
 
     {
-        // The numpy fast-path in from_voidstar (base_ptr == NULL) returns a
+        // The numpy fast-path in from_voidstar (shared-memory space) returns a
         // PyArray view of the SHM block via PyArray_SimpleNewFromData -- the
         // backing memory must outlive the view. Defer the shfree via
         // shm_tracker so the dispatch's flush releases the block (and the
         // schema) once the view is no longer in scope.
-        PyObject* obj = from_voidstar(schema, voidstar, NULL);
+        PyObject* obj = from_voidstar(schema, voidstar, morloc_shm_space());
         if (obj == NULL) {
             char* shfree_errmsg = NULL;
             shfree(voidstar, &shfree_errmsg);
@@ -3693,7 +3700,7 @@ static PyObject* pybinding__mlc_ifile_walk(PyObject* self, PyObject* args) { MAY
         // Mirrors mlc_load's deferred-shfree pattern: from_voidstar may
         // produce a numpy view backed by the SHM block, so defer freeing
         // until the dispatch flushes.
-        PyObject* obj = from_voidstar(schema, voidstar, NULL);
+        PyObject* obj = from_voidstar(schema, voidstar, morloc_shm_space());
         if (obj == NULL) {
             char* shfree_errmsg = NULL;
             shfree(voidstar, &shfree_errmsg);
@@ -3740,7 +3747,7 @@ static PyObject* pybinding__mlc_next(PyObject* self, PyObject* args) { MAYFAIL
         Py_RETURN_NONE;
     }
     {
-        PyObject* obj = from_voidstar(schema, voidstar, NULL);
+        PyObject* obj = from_voidstar(schema, voidstar, morloc_shm_space());
         if (obj == NULL) {
             char* shfree_errmsg = NULL;
             shfree(voidstar, &shfree_errmsg);
@@ -3777,7 +3784,7 @@ static PyObject* pybinding__mlc_stream_layout(PyObject* self, PyObject* args) { 
         Py_RETURN_NONE;
     }
     {
-        PyObject* obj = from_voidstar(schema, voidstar, NULL);
+        PyObject* obj = from_voidstar(schema, voidstar, morloc_shm_space());
         if (obj == NULL) {
             char* shfree_errmsg = NULL;
             shfree(voidstar, &shfree_errmsg);
@@ -4030,7 +4037,7 @@ error:
 // from_voidstar and defer its release, since a numpy view may still be
 // looking at it (see mlc_load).
 static PyObject* cell_value_to_py(Schema* schema, void* voidstar) {
-    PyObject* obj = from_voidstar(schema, voidstar, NULL);
+    PyObject* obj = from_voidstar(schema, voidstar, morloc_shm_space());
     if (obj == NULL) {
         char* shfree_errmsg = NULL;
         shfree(voidstar, &shfree_errmsg);
@@ -4103,7 +4110,7 @@ static PyObject* pybinding__mlc_replay(PyObject* self, PyObject* args) { MAYFAIL
         // The schema goes to the tracker with the block, as for @next, so a
         // numpy view over the frame outlives this iteration.
         Schema* schema = PyTRY(parse_schema, schema_str);
-        PyObject* frame = from_voidstar(schema, voidstar, NULL);
+        PyObject* frame = from_voidstar(schema, voidstar, morloc_shm_space());
         if (frame == NULL) {
             char* shfree_errmsg = NULL;
             shfree(voidstar, &shfree_errmsg);

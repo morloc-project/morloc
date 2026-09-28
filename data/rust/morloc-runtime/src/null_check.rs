@@ -22,18 +22,8 @@ pub use morloc_runtime_types::null_check::*;
 use crate::shm::{self, AbsPtr, Array};
 use crate::cschema::CSchema;
 use crate::schema::SerialType;
-use morloc_runtime_types::shm_types::relptr_offset;
+use crate::voidstar::{MorlocSpace, Space};
 use std::os::raw::{c_char, c_void};
-
-/// Resolve a relative pointer the way C's `resolve_relptr` does: against
-/// `base` when it is non-null, through the volume table otherwise.
-unsafe fn resolve(data: crate::shm::RelPtr, base: *const c_void) -> Option<AbsPtr> {
-    if base.is_null() {
-        shm::rel2abs(data).ok()
-    } else {
-        Some((base as *mut u8).add(relptr_offset(data)))
-    }
-}
 
 /// C entry point for the cross-pool NUL guard.
 ///
@@ -55,13 +45,13 @@ unsafe fn resolve(data: crate::shm::RelPtr, base: *const c_void) -> Option<AbsPt
 pub unsafe extern "C" fn morloc_first_null_in_value(
     voidstar: *const c_void,
     schema: *const CSchema,
-    base: *const c_void,
+    space: MorlocSpace,
 ) -> *mut c_char {
     if voidstar.is_null() || schema.is_null() || env_skip_null_check() {
         return std::ptr::null_mut();
     }
     let mut path = String::new();
-    match walk_c(voidstar as AbsPtr, schema, base, &mut path) {
+    match walk_c(voidstar as AbsPtr, schema, &space, &mut path) {
         None => std::ptr::null_mut(),
         Some(p) => match std::ffi::CString::new(p) {
             Ok(c) => libc::strdup(c.as_ptr()),
@@ -137,7 +127,7 @@ unsafe fn index_recur(s: *const CSchema, decls: &mut Vec<*const CSchema>, out: &
 unsafe fn walk_c(
     ptr: AbsPtr,
     schema: *const CSchema,
-    base: *const c_void,
+    space: &MorlocSpace,
     path: &mut String,
 ) -> Option<String> {
     let mut recur: Vec<(*const CSchema, *const CSchema)> = Vec::new();
@@ -181,7 +171,7 @@ unsafe fn walk_c(
         let k = kind(s);
         match k {
             Some(SerialType::String) => {
-                if let Some(r) = check_string(t.data, base, path) {
+                if let Some(r) = check_string(t.data, space, path) {
                     return Some(r);
                 }
             }
@@ -195,7 +185,8 @@ unsafe fn walk_c(
                     continue;
                 }
                 let elem_width = (*elem).width;
-                let Some(abs) = resolve(arr.data, base) else { continue };
+                let Some(n) = arr.size.checked_mul(elem_width) else { continue };
+                let Ok(abs) = space.resolve(arr.data, n) else { continue };
                 if t.idx < arr.size {
                     let i = t.idx;
                     stack.push(Todo { idx: i + 1, ..t });
@@ -232,7 +223,7 @@ unsafe fn walk_c(
                 if inner.is_null() {
                     continue;
                 }
-                let Some(abs) = resolve(rel, base) else { continue };
+                let Ok(abs) = space.resolve(rel, (*inner).width) else { continue };
                 stack.push(Todo { schema: inner, data: abs, idx: 0, path_len: here, seg: Seg::Some });
             }
             Some(SerialType::Variant) => {
@@ -249,7 +240,7 @@ unsafe fn walk_c(
                 if rel == shm::RELNULL {
                     continue;
                 }
-                let Some(abs) = resolve(rel, base) else { continue };
+                let Ok(abs) = space.resolve(rel, (*arm).width) else { continue };
                 let seg = if !s.keys.is_null() && !(*s.keys.add(tag)).is_null() {
                     Seg::Ctor(*s.keys.add(tag))
                 } else {
@@ -275,12 +266,12 @@ unsafe fn walk_c(
     None
 }
 
-unsafe fn check_string(ptr: AbsPtr, base: *const c_void, path: &mut String) -> Option<String> {
+unsafe fn check_string(ptr: AbsPtr, space: &MorlocSpace, path: &mut String) -> Option<String> {
     let arr = &*(ptr as *const Array);
     if arr.size == 0 {
         return None;
     }
-    let abs = resolve(arr.data, base)?;
+    let abs = space.resolve(arr.data, arr.size).ok()?;
     // memchr returns non-null on hit. libc is already a runtime dep.
     let hit = libc::memchr(abs as *const libc::c_void, 0, arr.size);
     if hit.is_null() {
@@ -344,7 +335,7 @@ mod tests {
     /// The guard as the pools call it: over the C schema, shared memory.
     unsafe fn first_null(ptr: AbsPtr, s: &Schema) -> Option<String> {
         let cs = CSchema::from_rust(s);
-        let r = morloc_first_null_in_value(ptr as *const c_void, cs, std::ptr::null());
+        let r = morloc_first_null_in_value(ptr as *const c_void, cs, MorlocSpace::SHM);
         CSchema::free(cs);
         if r.is_null() {
             None

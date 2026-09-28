@@ -3,7 +3,6 @@
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
-use morloc_runtime_types::width;
 
 use crate::cschema::CSchema;
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
@@ -1777,11 +1776,10 @@ pub unsafe extern "C" fn mlc_write_handles_voidstar(
 #[no_mangle]
 pub unsafe extern "C" fn mlc_read_stream_field(
     field_ptr: *const c_void,
-    base_ptr: *const c_void,
+    space: crate::voidstar::MorlocSpace,
     kind: u8,
     errmsg: *mut *mut c_char,
 ) -> i64 {
-    use crate::shm;
     use morloc_runtime_types::stream_handle as sh;
     clear_errmsg(errmsg);
     if field_ptr.is_null() {
@@ -1795,45 +1793,35 @@ pub unsafe extern "C" fn mlc_read_stream_field(
     let payload = sh::read_payload(field_bytes);
     match tag {
         sh::TAG_PATH => {
-            if payload == sh::RELNULL_PAYLOAD {
-                set_errmsg(errmsg, &MorlocError::Other(
-                    "mlc_read_stream_field: path-form field has RELNULL payload".into(),
-                ));
-                return -1;
-            }
-            // Resolve the suballoc {size: u64, bytes...}. With a non-NULL
-            // base_ptr the payload is a payload-relative offset (used
-            // when reading from mmap'd file regions); otherwise it's an
-            // SHM-relative relptr.
-            let suballoc_abs: *const u8 = if base_ptr.is_null() {
-                match shm::rel2abs(sh::payload_relptr(payload)) {
-                    Ok(p) => p as *const u8,
-                    Err(e) => {
-                        set_errmsg(errmsg, &e);
-                        return -1;
-                    }
+            // The suballoc {size: u64, bytes...}, checked against `space`.
+            let block = match crate::voidstar::path_suballoc(&space, payload) {
+                Ok(Some(block)) => block,
+                Ok(None) => {
+                    set_errmsg(errmsg, &MorlocError::Other(
+                        "mlc_read_stream_field: path-form field has RELNULL payload".into(),
+                    ));
+                    return -1;
                 }
-            } else {
-                (base_ptr as *const u8).add(width::usize_from_u64(payload))
+                Err(e) => {
+                    set_errmsg(errmsg, &e);
+                    return -1;
+                }
             };
-            let path_len = sh::read_path_size(suballoc_abs);
-            const PATH_MAX: u64 = 4096;
-            if path_len == 0 {
+            let path_bytes = &block[8..];
+            const PATH_MAX: usize = 4096;
+            if path_bytes.is_empty() {
                 set_errmsg(errmsg, &MorlocError::Other(
                     "mlc_read_stream_field: empty path".into(),
                 ));
                 return -1;
             }
-            if path_len >= PATH_MAX {
+            if path_bytes.len() >= PATH_MAX {
                 set_errmsg(errmsg, &MorlocError::Other(format!(
                     "mlc_read_stream_field: path too long ({} bytes, max {})",
-                    path_len, PATH_MAX - 1,
+                    path_bytes.len(), PATH_MAX - 1,
                 )));
                 return -1;
             }
-            let path_bytes = std::slice::from_raw_parts(
-                suballoc_abs.add(8), path_len as usize,
-            );
             let path_str = match std::str::from_utf8(path_bytes) {
                 Ok(s) => s,
                 Err(_) => {
@@ -1903,11 +1891,11 @@ pub unsafe extern "C" fn mlc_read_stream_field(
 #[no_mangle]
 pub unsafe extern "C" fn mlc_read_handle_voidstar(
     arr: *const c_void,
-    base_ptr: *const c_void,
+    space: crate::voidstar::MorlocSpace,
     kind: u8,
     errmsg: *mut *mut c_char,
 ) -> i64 {
-    mlc_read_stream_field(arr, base_ptr, kind, errmsg)
+    mlc_read_stream_field(arr, space, kind, errmsg)
 }
 
 // ── stdio-server bridge FFI ────────────────────────────────────────────────

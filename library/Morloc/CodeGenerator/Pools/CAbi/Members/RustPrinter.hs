@@ -587,7 +587,7 @@ printVariantImpls box name arms = vsep [toImpl, "", fromImpl]
                     ( [ pretty i <+> "=>" <+>
                           (if null ts
                              then "{}"
-                             else "{ let p = w.payload_ptr(data); w.child_step::<"
+                             else "{ let p = w.payload_ptr(data, &schema.parameters[" <> pretty i <> "]); w.child_step::<"
                                     <> armTy ts <> ">(&schema.parameters[" <> pretty i <> "], p); }")
                       | (i, (_, ts)) <- idxArms ]
                       <> [badTag]
@@ -602,7 +602,7 @@ printVariantImpls box name arms = vsep [toImpl, "", fromImpl]
                     ( [ pretty i <+> "=>" <+>
                           (if null ts
                              then "Self::" <> pretty c <> ","
-                             else "{ let p = w.payload_ptr(data); Self::" <> pretty c
+                             else "{ let p = w.payload_ptr(data, &schema.parameters[" <> pretty i <> "]); Self::" <> pretty c
                                     <> parens ("w.child_read::<" <> armTy ts <> ">(&schema.parameters["
                                                  <> pretty i <> "], p)") <> " }")
                       | (i, (c, ts)) <- idxArms ]
@@ -642,7 +642,7 @@ printEnumImpls name ctors = vsep [toImpl, "", fromImpl]
         [ "impl FromVoidstar for" <+> name <+> "{"
         , indent 4 $ vsep
             [ "const IS_LEAF: bool = true;"
-            , "unsafe fn read(_schema: &Schema, data: *const u8, _base: *const u8) -> Self {"
+            , "unsafe fn read(_schema: &Schema, data: *const u8, _space: rustmorloc::MorlocSpace) -> Self {"
             , indent 4 $ vsep
                 [ "match *data {"
                 , indent 4 $ vsep

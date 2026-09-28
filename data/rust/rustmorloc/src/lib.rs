@@ -71,6 +71,7 @@ extern "C" {
                          errmsg: *mut *mut c_char) -> *mut u8;
     fn abs2rel(ptr: *mut c_void, errmsg: *mut *mut c_char) -> isize;
     fn rel2abs(ptr: isize, errmsg: *mut *mut c_char) -> *mut c_void;
+    fn rel2abs_extent(ptr: isize, extent: usize, errmsg: *mut *mut c_char) -> *mut c_void;
     fn make_data_packet_auto(voidstar: *mut c_void, relptr: isize,
                              schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut u8;
     fn get_morloc_data_packet_value(data: *const u8, schema: *const CSchema,
@@ -141,9 +142,9 @@ extern "C" {
     // bare u64 slot id in-pool, but crosses a boundary as a 16-byte tagged field
     // (TAG_HANDLE inline, or TAG_PATH + a path suballoc) so the receiving pool
     // can re-resolve the slot. These marshal that field; `cursor` advances past
-    // any path suballoc, `base_ptr` resolves a relptr (null for in-SHM reads).
+    // any path suballoc; `space` is where a read's relptrs lead.
     fn mlc_write_handle_voidstar(handle: i64, dest: *mut c_void, cursor: *mut *mut c_void, errmsg: *mut *mut c_char) -> i32;
-    fn mlc_read_handle_voidstar(field: *const c_void, base_ptr: *const c_void, kind: u8, errmsg: *mut *mut c_char) -> i64;
+    fn mlc_read_handle_voidstar(field: *const c_void, space: MorlocSpace, kind: u8, errmsg: *mut *mut c_char) -> i64;
     // Remote (SLURM/nexus-dispatched) call. Builds the remote packet, resolves
     // the `_remote` cache dir, rewrites args to self-contained form, and
     // dispatches to the nexus. Renamed via link_name so the wrapper below can
@@ -327,19 +328,51 @@ unsafe fn to_rel(ptr: *mut u8) -> RelPtr {
     }
 }
 
-/// Resolve a relptr to an absolute pointer. `base` non-null => offset
-/// arithmetic (inline MESG packet / test buffer); null => SHM volume table.
+/// Where a value's relptrs lead: shared memory when `base` is null, else an
+/// inline payload of `len` bytes (a packet body or a test buffer). The C
+/// `morloc_space_t`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MorlocSpace {
+    pub base: *const u8,
+    pub len: usize,
+}
+
+impl MorlocSpace {
+    pub const SHM: MorlocSpace = MorlocSpace { base: std::ptr::null(), len: 0 };
+
+    pub fn payload(base: *const u8, len: usize) -> MorlocSpace {
+        MorlocSpace { base, len }
+    }
+}
+
+/// Resolve `rel` to `extent` readable bytes in `space`, or throw.
 #[inline]
-unsafe fn resolve(rel: RelPtr, base: *const u8) -> *const u8 {
-    if !base.is_null() {
-        base.add(relptr_offset(rel))
-    } else {
-        let mut err: *mut c_char = std::ptr::null_mut();
-        let p = rel2abs(rel, &mut err) as *const u8;
-        if !err.is_null() || p.is_null() {
-            morloc_throw(if err.is_null() { format!("relptr {rel} did not resolve") } else { cstr_take(err) });
+unsafe fn resolve(rel: RelPtr, extent: usize, space: MorlocSpace) -> *const u8 {
+    if !space.base.is_null() {
+        let off = relptr_offset(rel);
+        if rel >= 0 && off <= space.len && extent <= space.len - off {
+            return space.base.add(off);
         }
-        p
+        morloc_throw(format!(
+            "a {extent}-byte region at offset {off} runs past the {}-byte payload",
+            space.len
+        ));
+    }
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let p = rel2abs_extent(rel, extent, &mut err) as *const u8;
+    if !err.is_null() || p.is_null() {
+        morloc_throw(if err.is_null() { format!("relptr {rel} did not resolve") } else { cstr_take(err) });
+    }
+    p
+}
+
+/// Resolve the data of `n` elements of `width` bytes.
+#[inline]
+unsafe fn resolve_array(rel: RelPtr, n: usize, width: usize, space: MorlocSpace) -> *const u8 {
+    match n.checked_mul(width) {
+        Some(extent) => resolve(rel, extent, space),
+        None => morloc_throw(format!("an array of {n} {width}-byte elements overflows")),
     }
 }
 
@@ -769,8 +802,8 @@ pub trait FromVoidstar: Sized {
     /// # Safety
     /// `data` must point at a valid `schema`-shaped inline slot; `base` is the
     /// relptr resolution base (see `resolve`).
-    unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self {
-        let mut w = ReadWalk::new(schema, base);
+    unsafe fn read(schema: &Schema, data: *const u8, space: MorlocSpace) -> Self {
+        let mut w = ReadWalk::new(schema, space);
         w.read_root::<Self>(schema, data)
     }
     /// Framed read, first half: push this node's finish frame, then its
@@ -1199,7 +1232,7 @@ pub struct ReadWalk {
     stack: Vec<ReadFrame>,
     cur: ReadFrame,
     pub values: ValueStack,
-    pub base: *const u8,
+    pub space: MorlocSpace,
     pub direct: bool,
 }
 
@@ -1213,12 +1246,12 @@ unsafe fn read_finish_thunk<T: FromVoidstar>(w: &mut ReadWalk, s: &Schema, data:
 }
 
 impl ReadWalk {
-    pub fn new(root: &Schema, base: *const u8) -> ReadWalk {
+    pub fn new(root: &Schema, space: MorlocSpace) -> ReadWalk {
         ReadWalk {
             stack: Vec::new(),
             cur: ReadFrame::PopEnv,
             values: ValueStack::new(),
-            base,
+            space,
             direct: !schema_has_recur(root),
         }
     }
@@ -1264,7 +1297,7 @@ impl ReadWalk {
     /// As for `FromVoidstar::read`.
     pub unsafe fn child_read<T: FromVoidstar>(&mut self, schema: &Schema, data: *const u8) -> T {
         if T::IS_LEAF {
-            T::read(resolve_recur(schema), data, self.base)
+            T::read(resolve_recur(schema), data, self.space)
         } else if self.flat(schema) {
             T::read_finish(self, resolve_recur(schema), data)
         } else {
@@ -1298,9 +1331,9 @@ impl ReadWalk {
     ///
     /// # Safety
     /// `data` must point at a variant slot whose payload pointer is live.
-    pub unsafe fn payload_ptr(&self, data: *const u8) -> *const u8 {
+    pub unsafe fn payload_ptr(&self, data: *const u8, arm: &Schema) -> *const u8 {
         let rel = core::ptr::read_unaligned(data.add(VARIANT_PAYLOAD) as *const RelPtr);
-        resolve(rel, self.base)
+        resolve(rel, resolve_recur(arm).width, self.space)
     }
 
     pub fn run(&mut self) {
@@ -1348,7 +1381,7 @@ impl ToVoidstar for RecordBatch {
 }
 impl FromVoidstar for RecordBatch {
     const IS_LEAF: bool = true;
-    unsafe fn read(_schema: &Schema, _data: *const u8, _base: *const u8) -> Self {
+    unsafe fn read(_schema: &Schema, _data: *const u8, _space: MorlocSpace) -> Self {
         morloc_infra_abort("a table cannot be read through the voidstar path")
     }
     unsafe fn arrow_import(array: FFI_ArrowArray, schema: &FFI_ArrowSchema) -> Option<Self> {
@@ -1421,7 +1454,7 @@ macro_rules! int_impl {
         impl FromVoidstar for $t {
             const IS_LEAF: bool = true;
             #[inline]
-            unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self {
+            unsafe fn read(schema: &Schema, data: *const u8, space: MorlocSpace) -> Self {
                 match schema.serial_type {
                     // Read the 16-byte tagged field (payload at offset 8) and
                     // re-resolve it to a local handle -- NOT the plain-int path,
@@ -1430,7 +1463,7 @@ macro_rules! int_impl {
                         let mut err: *mut c_char = std::ptr::null_mut();
                         let handle = mlc_read_handle_voidstar(
                             data as *const c_void,
-                            base as *const c_void,
+                            space,
                             handle_kind(schema.serial_type),
                             &mut err,
                         );
@@ -1533,7 +1566,7 @@ macro_rules! float_impl {
         impl FromVoidstar for $t {
             const IS_LEAF: bool = true;
             #[inline]
-            unsafe fn read(schema: &Schema, data: *const u8, _base: *const u8) -> Self {
+            unsafe fn read(schema: &Schema, data: *const u8, _space: MorlocSpace) -> Self {
                 match schema.serial_type {
                     SerialType::Float32 => core::ptr::read_unaligned(data as *const f32) as $t,
                     SerialType::Float64 => core::ptr::read_unaligned(data as *const f64) as $t,
@@ -1564,7 +1597,7 @@ impl ToVoidstar for bool {
 impl FromVoidstar for bool {
     const IS_LEAF: bool = true;
     #[inline]
-    unsafe fn read(_schema: &Schema, data: *const u8, _base: *const u8) -> Self {
+    unsafe fn read(_schema: &Schema, data: *const u8, _space: MorlocSpace) -> Self {
         core::ptr::read_unaligned(data) == 1
     }
 }
@@ -1582,7 +1615,7 @@ impl ToVoidstar for () {
 impl FromVoidstar for () {
     const IS_LEAF: bool = true;
     #[inline]
-    unsafe fn read(_schema: &Schema, _data: *const u8, _base: *const u8) -> Self {}
+    unsafe fn read(_schema: &Schema, _data: *const u8, _space: MorlocSpace) -> Self {}
 }
 
 // ---- String (Str, I5: UTF-8 text by contract) -----------------------------
@@ -1606,12 +1639,12 @@ impl ToVoidstar for String {
 }
 impl FromVoidstar for String {
     const IS_LEAF: bool = true;
-    unsafe fn read(_schema: &Schema, data: *const u8, base: *const u8) -> Self {
+    unsafe fn read(_schema: &Schema, data: *const u8, space: MorlocSpace) -> Self {
         let a = core::ptr::read_unaligned(data as *const Array);
         if a.size == 0 {
             return String::new();
         }
-        let p = resolve(a.data, base);
+        let p = resolve(a.data, a.size, space);
         let bytes = core::slice::from_raw_parts(p, a.size).to_vec();
         match String::from_utf8(bytes) {
             Ok(s) => s,
@@ -1703,7 +1736,7 @@ impl<T: FromVoidstar> FromVoidstar for $container<T> {
             w.values.top_mut::<$container<T>>().$push(x);
         }
         if idx < a.size {
-            let start = resolve(a.data, w.base);
+            let start = resolve_array(a.data, a.size, elem.width, w.space);
             w.resume(idx + 1);
             w.child_step::<T>(elem, start.add(idx * elem.width));
         }
@@ -1714,7 +1747,7 @@ impl<T: FromVoidstar> FromVoidstar for $container<T> {
             return $container::new();
         }
         let elem = resolve_recur(&schema.parameters[0]);
-        let start = resolve(a.data, w.base);
+        let start = resolve_array(a.data, a.size, elem.width, w.space);
         let width = elem.width;
         let mut out = $container::with_capacity(a.size);
         for i in 0..a.size {
@@ -1759,7 +1792,7 @@ impl<T: FromVoidstar> FromVoidstar for Option<T> {
         w.push_finish::<Self>(schema, data);
         let rel = core::ptr::read_unaligned(data as *const RelPtr);
         if rel != RELNULL {
-            w.child_step::<T>(&schema.parameters[0], resolve(rel, w.base));
+            w.child_step::<T>(&schema.parameters[0], resolve(rel, resolve_recur(&schema.parameters[0]).width, w.space));
         }
     }
     unsafe fn read_finish(w: &mut ReadWalk, schema: &Schema, data: *const u8) -> Self {
@@ -1767,7 +1800,7 @@ impl<T: FromVoidstar> FromVoidstar for Option<T> {
         if rel == RELNULL {
             return None;
         }
-        Some(w.child_read::<T>(&schema.parameters[0], resolve(rel, w.base)))
+        Some(w.child_read::<T>(&schema.parameters[0], resolve(rel, resolve_recur(&schema.parameters[0]).width, w.space)))
     }
 }
 
@@ -1824,8 +1857,8 @@ impl<T: ToVoidstar> ToVoidstar for Box<T> {
 }
 impl<T: FromVoidstar> FromVoidstar for Box<T> {
     const IS_LEAF: bool = T::IS_LEAF;
-    unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self {
-        Box::new(T::read(schema, data, base))
+    unsafe fn read(schema: &Schema, data: *const u8, space: MorlocSpace) -> Self {
+        Box::new(T::read(schema, data, space))
     }
     unsafe fn read_step(w: &mut ReadWalk, schema: &Schema, data: *const u8, _idx: usize) {
         w.push_finish::<Self>(schema, data);
@@ -2032,8 +2065,8 @@ impl<T: ToVoidstar> ToVoidstar for RecBox<T> {
 }
 impl<T: FromVoidstar> FromVoidstar for RecBox<T> {
     const IS_LEAF: bool = T::IS_LEAF;
-    unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self {
-        RecBox::new(T::read(schema, data, base))
+    unsafe fn read(schema: &Schema, data: *const u8, space: MorlocSpace) -> Self {
+        RecBox::new(T::read(schema, data, space))
     }
     unsafe fn read_step(w: &mut ReadWalk, schema: &Schema, data: *const u8, _idx: usize) {
         w.push_finish::<Self>(schema, data);
@@ -2537,7 +2570,11 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
         // Inline: voidstar lives in the packet buffer; relptrs are buffer-relative.
         let meta = core::ptr::read_unaligned(packet.add(PKT_OFFSET_OFF) as *const u32) as usize;
         let payload = packet.add(PKT_HEADER_SIZE + meta);
-        return <T as FromVoidstar>::read(schema, payload, payload);
+        let length = core::ptr::read_unaligned(packet.add(PKT_LENGTH_OFF) as *const u64) as usize;
+        if length < schema.width {
+            morloc_throw(format!("a {length}-byte inline payload cannot hold its {}-byte value", schema.width));
+        }
+        return <T as FromVoidstar>::read(schema, payload, MorlocSpace::payload(payload, length));
     }
 
     // SHM path (RPTR, or MESG+MSGPACK): resolve via the C ABI, base = null.
@@ -2567,7 +2604,7 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
         // the pool, so a block dropped there would be lost once per request.
         track(voidstar as *mut c_void);
     }
-    <T as FromVoidstar>::read(schema, voidstar, std::ptr::null())
+    <T as FromVoidstar>::read(schema, voidstar, MorlocSpace::SHM)
 }
 
 /// Serialize a captured value into a SELF-CONTAINED wire packet: the packet
@@ -2831,7 +2868,7 @@ pub unsafe fn read<T: FromVoidstar>(s: &str, schema: &Schema) -> T {
     if voidstar.is_null() {
         morloc_throw(format!("@read: could not parse \"{}\"", s));
     }
-    let result = <T as FromVoidstar>::read(schema, voidstar as *const u8, std::ptr::null());
+    let result = <T as FromVoidstar>::read(schema, voidstar as *const u8, MorlocSpace::SHM);
     let mut e2: *mut c_char = std::ptr::null_mut();
     shfree(voidstar, &mut e2);
     discard_err(e2);
@@ -2895,7 +2932,7 @@ unsafe fn read_voidstar<T: FromVoidstar>(
         morloc_throw(format!("{}: runtime returned a null value", what));
     }
     let _recur = RecurScope::enter(schema);
-    let result = <T as FromVoidstar>::read(schema, voidstar as *const u8, std::ptr::null());
+    let result = <T as FromVoidstar>::read(schema, voidstar as *const u8, MorlocSpace::SHM);
     let mut e2: *mut c_char = std::ptr::null_mut();
     shfree(voidstar, &mut e2);
     discard_err(e2);
@@ -3418,7 +3455,7 @@ mod tests {
         }
         let s = parse_schema("i8").unwrap();
         let bytes = 7i64.to_le_bytes();
-        let r = std::panic::catch_unwind(|| unsafe { <f64 as FromVoidstar>::read(&s, bytes.as_ptr(), std::ptr::null()) });
+        let r = std::panic::catch_unwind(|| unsafe { <f64 as FromVoidstar>::read(&s, bytes.as_ptr(), MorlocSpace::SHM) });
         assert!(r.is_err(), "an f64 read an int's bits");
     }
 
@@ -3427,10 +3464,10 @@ mod tests {
     fn integer_reads_reject_non_integer_slots() {
         let f = parse_schema("f8").unwrap();
         let bytes = 1.5f64.to_le_bytes();
-        let r = std::panic::catch_unwind(|| unsafe { <i64 as FromVoidstar>::read(&f, bytes.as_ptr(), std::ptr::null()) });
+        let r = std::panic::catch_unwind(|| unsafe { <i64 as FromVoidstar>::read(&f, bytes.as_ptr(), MorlocSpace::SHM) });
         assert!(r.is_err(), "an i64 read a float's bits");
         let s = parse_schema("i1").unwrap();
-        let v = unsafe { <i64 as FromVoidstar>::read(&s, [0xFFu8].as_ptr(), std::ptr::null()) };
+        let v = unsafe { <i64 as FromVoidstar>::read(&s, [0xFFu8].as_ptr(), MorlocSpace::SHM) };
         assert_eq!(v, -1);
     }
 
@@ -3445,7 +3482,7 @@ mod tests {
         TEST_BASE.with(|b| b.set(Some(base as usize)));
         let mut cursor = base.add(schema.width);
         value.write(base, &mut cursor, &schema);
-        let out = <T as FromVoidstar>::read(&schema, base, base);
+        let out = <T as FromVoidstar>::read(&schema, base, MorlocSpace::payload(base, buf.len()));
         TEST_BASE.with(|b| b.set(None));
         out
     }
@@ -3713,7 +3750,7 @@ mod tests {
             match read_variant_tag(data) {
                 0 => {}
                 1 => {
-                    let p = w.payload_ptr(data);
+                    let p = w.payload_ptr(data, &schema.parameters[1]);
                     w.child_step::<RecBox<(i64, Tree, Tree)>>(&schema.parameters[1], p);
                 }
                 t => panic!("Tree: no constructor for tag {}", t),
@@ -3723,7 +3760,7 @@ mod tests {
             match read_variant_tag(data) {
                 0 => Self::Leaf,
                 1 => {
-                    let p = w.payload_ptr(data);
+                    let p = w.payload_ptr(data, &schema.parameters[1]);
                     Self::Node(w.child_read::<RecBox<(i64, Tree, Tree)>>(&schema.parameters[1], p))
                 }
                 t => panic!("Tree: no constructor for tag {}", t),

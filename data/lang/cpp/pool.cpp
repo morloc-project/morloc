@@ -473,9 +473,7 @@ T _get_value(const uint8_t* packet, Schema* schema){
         if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR
             && header->command.data.compression == PACKET_COMPRESSION_NONE
             && header->command.data.encryption == PACKET_ENCRYPTION_NONE) {
-            const uint8_t* payload = packet + sizeof(morloc_packet_header_t) + header->offset;
-            T* dummy = nullptr;
-            return from_voidstar(schema, (const void*)payload, dummy, (const void*)payload);
+            return mlc_read_inline_packet<T>(packet, schema);
         }
 
         // SHM paths (RPTR or MESG+MSGPACK): existing logic

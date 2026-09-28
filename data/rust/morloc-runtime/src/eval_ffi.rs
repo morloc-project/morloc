@@ -686,7 +686,7 @@ unsafe fn read_int_as_i64(
     let mut err: *mut c_char = ptr::null_mut();
     let handle = crate::intrinsics::mlc_read_stream_field(
         ptr as *const std::ffi::c_void,
-        ptr::null(),
+        crate::voidstar::MorlocSpace::SHM,
         handle_kind,
         &mut err,
     );

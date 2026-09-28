@@ -308,7 +308,11 @@ mod tests {
         // The hand-written declarations in the crates that link libmorloc.
         // Only libmorloc's own exports are checked; other foreign functions
         // (libc, zstd) have no definition here to agree with.
-        let rename = |name: &str| name.to_string();
+        // A struct passed by value is compared under its C name, as the
+        // definitions spell it.
+        let rename = |name: &str| {
+            RENAMES.iter().find(|(r, _)| *r == name).map_or_else(|| c_name(name), |(_, c)| c.to_string())
+        };
         let definitions = abi_signatures(&prototypes);
         let mut checked = 0;
         let mut disagreements = Vec::new();

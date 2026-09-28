@@ -1,0 +1,25 @@
+-- A value carried inline in a packet is read where it lies, and every
+-- relative pointer in it is an offset into the payload. A malformed packet
+-- -- a length or offset that runs past the payload -- must be refused, not
+-- read past the payload's end. Each language builds a small inline packet
+-- for [1, 2, 3], optionally overwrites the array's length (first argument)
+-- or data offset (second argument; -1 leaves a field alone), and reads it
+-- back through its own binding's inline path. The reply is "ok <length>"
+-- or "refused".
+
+module main (probePy, probeR, probeCpp, probeRust)
+
+import root-py
+import root-r
+import root-cpp
+import root-rust
+
+source Py from "probe.py" ("probe" as probePy)
+source R from "probe.R" ("probe" as probeR)
+source Cpp from "probe.hpp" ("probe" as probeCpp)
+source Rust from "probe.rs" ("probe" as probeRust)
+
+probePy :: I64 -> I64 -> Str
+probeR :: I64 -> I64 -> Str
+probeCpp :: I64 -> I64 -> Str
+probeRust :: I64 -> I64 -> Str

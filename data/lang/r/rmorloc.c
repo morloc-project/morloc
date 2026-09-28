@@ -76,9 +76,9 @@ static void morloc_error_take(const char* prefix, char* heap_msg) {
 // before the longjmp out of error(). The path returned by the runtime names
 // the offending slot (e.g. ".field[3] (byte 2 of 7)") so a NUL buried in a
 // container is locatable without a debugger.
-#define MORLOC_REJECT_NUL(guard, ptr, schema, base, cleanup) \
+#define MORLOC_REJECT_NUL(guard, ptr, schema, space, cleanup) \
     if (guard) { \
-        char* nul_path_ = morloc_first_null_in_value((ptr), (schema), (base)); \
+        char* nul_path_ = morloc_first_null_in_value((ptr), (schema), (space)); \
         if (nul_path_ != NULL) { \
             char nul_buf_[512]; \
             snprintf(nul_buf_, sizeof(nul_buf_), \
@@ -398,7 +398,7 @@ typedef struct {
     int flat_answer;
     ssize_t total;          // size pass
     void** cursor;          // write pass
-    const void* base_ptr;   // read pass
+    morloc_space_t space;   // read pass: where relptrs lead
     SEXP result;            // read pass: the root, PROTECTed until returned
 } r_walk_t;
 
@@ -1521,7 +1521,7 @@ static void r_read_child(r_walk_t* w, const Schema* schema, const void* data, un
 
 static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, size_t idx, unsigned char slot_kind, SEXP parent, R_xlen_t slot) {
     MAYFAIL
-    const void* base_ptr = w->base_ptr;
+    const morloc_space_t space = w->space;
 
     if(data == NULL){
         MORLOC_ERROR("NULL data (%s:%d in %s)", __FILE__, __LINE__, __func__);
@@ -1636,15 +1636,6 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                     "Integer overflow: %lld-limb integer (%lld bits)"
                     " does not fit in R's numeric type (max 2^53 for integer precision).",
                     (long long)bigint_size, (long long)(bigint_size * 64));
-                // unreachable, but satisfy compiler
-                const uint64_t* limbs = (const uint64_t*)resolve_relptr(
-                    *(const relptr_t*)&fields[1], base_ptr, NULL);
-                int64_t val = (int64_t)limbs[0];
-                if (val >= INT32_MIN && val <= INT32_MAX) {
-                    obj = ScalarInteger((int)val);
-                } else {
-                    obj = ScalarReal((double)val);
-                }
             }
             break;
         }
@@ -1655,7 +1646,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                          : (schema->type == MORLOC_OSTREAM) ? MLC_KIND_OSTREAM
                          :                                    MLC_KIND_ISTREAM;
             int64_t handle = R_TRY(mlc_read_handle_voidstar,
-                                   data, base_ptr, kind);
+                                   data, space, kind);
             obj = make_integer64_scalar(handle);
             break;
         }
@@ -1663,7 +1654,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                 if (schema->hint != NULL && strcmp(schema->hint, "raw") == 0){
                     Array* raw_array = (Array*)data;
                     if(raw_array->size > 0){
-                        void* tmp_ptr = R_TRY(resolve_relptr, raw_array->data, base_ptr);
+                        void* tmp_ptr = R_TRY(resolve_array, raw_array->data, raw_array->size, 1, space);
                         obj = PROTECT(allocVector(RAWSXP, raw_array->size));
                         memcpy(RAW(obj), tmp_ptr, raw_array->size);
                     } else {
@@ -1673,7 +1664,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                 } else {
                     Array* str_array = (Array*)data;
                     if(str_array->size > 0){
-                        void* tmp_ptr = R_TRY(resolve_relptr, str_array->data, base_ptr);
+                        void* tmp_ptr = R_TRY(resolve_array, str_array->data, str_array->size, 1, space);
                         SEXP chr = PROTECT(mkCharLen(tmp_ptr, str_array->size));
                         obj = PROTECT(ScalarString(chr));
                     } else {
@@ -1697,7 +1688,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
+                        start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
                         for (size_t i = 0; i < array->size; i++) {
                             LOGICAL(obj)[i] = (bool)*(uint8_t*)(start + i) ? TRUE : FALSE;
                         }
@@ -1709,7 +1700,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
+                        start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
                         for (size_t i = 0; i < array->size; i++) {
                             INTEGER(obj)[i] = (int)(*(int8_t*)(start + i * sizeof(int8_t)));
                         }
@@ -1721,7 +1712,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
+                        start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
                         for (size_t i = 0; i < array->size; i++) {
                             INTEGER(obj)[i] = (int)(*(int16_t*)(start + i * sizeof(int16_t)));
                         }
@@ -1736,7 +1727,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
+                        start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
                         for (size_t i = 0; i < array->size; i++) {
                             REAL(obj)[i] = (double)(*(int32_t*)(start + i * sizeof(int32_t)));
                         }
@@ -1751,7 +1742,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
+                        start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
                         memcpy(REAL(obj), start, array->size * sizeof(int64_t));
                         UNPROTECT(1);
                         break;
@@ -1762,7 +1753,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
+                        start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
                         memcpy(RAW(obj), start, array->size * sizeof(uint8_t));
                         UNPROTECT(1);
                         break;
@@ -1777,7 +1768,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
+                        start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
                         for (size_t i = 0; i < array->size; i++) {
                             INTEGER(obj)[i] = (int)(*(uint8_t*)(start + i)) + 1;
                         }
@@ -1790,7 +1781,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
+                        start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
                         for (size_t i = 0; i < array->size; i++) {
                             INTEGER(obj)[i] = (int)(*(uint16_t*)(start + i * sizeof(uint16_t)));
                         }
@@ -1802,7 +1793,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
+                        start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
                         for (size_t i = 0; i < array->size; i++) {
                             REAL(obj)[i] = (double)(*(uint32_t*)(start + i * sizeof(uint32_t)));
                         }
@@ -1818,7 +1809,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
+                        start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
                         memcpy(REAL(obj), start, array->size * sizeof(uint64_t));
                         UNPROTECT(1);
                         break;
@@ -1828,7 +1819,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
+                        start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
                         for (size_t i = 0; i < array->size; i++) {
                             REAL(obj)[i] = (double)(*(float*)(start + i * sizeof(float)));
                         }
@@ -1840,7 +1831,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                             UNPROTECT(1);
                             break;
                         }
-                        start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
+                        start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
                         memcpy(REAL(obj), start, array->size * sizeof(double));
                         UNPROTECT(1);
                         break;
@@ -1851,7 +1842,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                                 UNPROTECT(1);
                                 break;
                             }
-                            start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
+                            start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
                             size_t width = schema->width;
                             for (size_t i = 0; i < array->size; i++) {
                                 Array* str_array = (Array*)(start + i * width);
@@ -1859,7 +1850,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                                 if(str_array->size == 0){
                                     item = PROTECT(mkCharLen("", 0));
                                 } else {
-                                    void* str_ptr = R_TRY_WITH(UNPROTECT(1), resolve_relptr, str_array->data, base_ptr);
+                                    void* str_ptr = R_TRY_WITH(UNPROTECT(1), resolve_array, str_array->data, str_array->size, 1, space);
                                     item = PROTECT(mkCharLen(str_ptr, str_array->size));
                                 }
                                 UNPROTECT(1);
@@ -1877,7 +1868,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                             int all_fit_int32 = 1;
                             size_t elem_w = element_schema->width; // 16
                             if (array->size > 0) {
-                                start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
+                                start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
                                 for (size_t i = 0; i < array->size; i++) {
                                     const int64_t* f = (const int64_t*)(start + i * elem_w);
                                     int64_t bigint_size = f[0];
@@ -1929,7 +1920,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                             if(array->size == 0) {
                                 return;
                             }
-                            start = (char*)R_TRY(resolve_relptr, array->data, base_ptr);
+                            start = (char*)R_TRY(resolve_array, array->data, array->size, element_schema->width, space);
                             size_t width = element_schema->width;
                             if (r_flat(w, element_schema)) {
                                 for (size_t i = 0; i < array->size; i++) {
@@ -1996,7 +1987,7 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                 SET_VECTOR_ELT(pair, 1, allocVector(VECSXP, 0));
                 return;
             }
-            const void* payload = R_TRY(resolve_relptr, vrel, base_ptr);
+            const void* payload = R_TRY(resolve_region, vrel, varm->width, space);
             r_read_child(w, varm, payload, R_SLOT_LIST, pair, 1);
             return;
         }
@@ -2008,7 +1999,8 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
                 obj = R_NilValue;
                 break;
             }
-            const void* inner_abs = R_TRY(resolve_relptr, relptr, base_ptr);
+            const Schema* inner = r_resolve(schema->parameters[0]);
+            const void* inner_abs = R_TRY(resolve_region, relptr, inner->width, space);
             r_read_child(w, schema->parameters[0], inner_abs, slot_kind, parent, slot);
             return;
         }
@@ -2020,10 +2012,10 @@ static void r_read_step(r_walk_t* w, const Schema* schema, const void* data, siz
 }
 
 // Build the R value at `data`. The result is unprotected on return.
-static SEXP from_voidstar(const void* data, const Schema* schema, const void* base_ptr) {
+static SEXP from_voidstar(const void* data, const Schema* schema, morloc_space_t space) {
     r_walk_t w;
     r_walk_init(&w, schema);
-    w.base_ptr = base_ptr;
+    w.space = space;
     r_read_child(&w, schema, data, R_SLOT_ROOT, R_NilValue, 0);
     while (r_next(&w)) {
         r_read_step(&w, w.cur.schema, w.cur.dest, w.cur.idx, w.cur.slot_kind, w.cur.obj, w.cur.slot);
@@ -2304,6 +2296,9 @@ SEXP morloc_send_packet_to_foreign_server(SEXP client_fd_r, SEXP packet_r) { MAY
     int client_fd = INTEGER(client_fd_r)[0];
     uint8_t* packet = RAW(packet_r);
     size_t packet_size = (size_t)LENGTH(packet_r);
+    if (!morloc_packet_fits(packet, packet_size)) {
+        MORLOC_ERROR("a %zu-byte packet is shorter than its header claims", packet_size);
+    }
 
     // Call underlying implementation
     size_t bytes_sent = R_TRY(send_packet_to_foreign_server, client_fd, packet);
@@ -2699,7 +2694,7 @@ SEXP morloc_mlc_load(SEXP schema_str_r, SEXP path_r) { MAYFAIL
         MORLOC_ERROR("@load: failed to load '%s'", path);
     }
 
-    SEXP obj = from_voidstar(voidstar, schema, NULL);
+    SEXP obj = from_voidstar(voidstar, schema, morloc_shm_space());
     // shm_tracker matches the pymorloc / cppmorloc deferred-cleanup
     // pattern: defer the shfree until the next request so any
     // R-side view that points at the SHM block stays valid for the
@@ -2741,7 +2736,7 @@ SEXP morloc_mlc_read(SEXP schema_str_r, SEXP json_str_r) { MAYFAIL
     }
     if (errmsg != NULL) { free(errmsg); }
 
-    SEXP obj = from_voidstar(voidstar, schema, NULL);
+    SEXP obj = from_voidstar(voidstar, schema, morloc_shm_space());
     shm_tracker_push((absptr_t)voidstar, schema);
     return obj;
 }
@@ -2822,7 +2817,7 @@ SEXP morloc_mlc_ifile_walk(SEXP schema_str_r, SEXP handle_r,
         free_schema(schema);
         return R_NilValue;
     }
-    SEXP result = from_voidstar(voidstar, schema, NULL);
+    SEXP result = from_voidstar(voidstar, schema, morloc_shm_space());
     {
         char* shfree_errmsg = NULL;
         shfree(voidstar, &shfree_errmsg);
@@ -2868,7 +2863,7 @@ SEXP morloc_mlc_next(SEXP schema_str_r, SEXP handle_r) { MAYFAIL
         free_schema(schema);
         return R_NilValue;
     }
-    SEXP result = from_voidstar(voidstar, schema, NULL);
+    SEXP result = from_voidstar(voidstar, schema, morloc_shm_space());
     {
         char* shfree_errmsg = NULL;
         shfree(voidstar, &shfree_errmsg);
@@ -2895,7 +2890,7 @@ SEXP morloc_mlc_next_frame(SEXP schema_str_r, SEXP handle_r) { MAYFAIL
         return R_NilValue;
     }
     Schema* schema = R_TRY(parse_schema, schema_str);
-    SEXP result = from_voidstar(voidstar, schema, NULL);
+    SEXP result = from_voidstar(voidstar, schema, morloc_shm_space());
     {
         char* shfree_errmsg = NULL;
         shfree(voidstar, &shfree_errmsg);
@@ -2920,7 +2915,7 @@ SEXP morloc_mlc_stream_layout(SEXP schema_str_r, SEXP handle_r) { MAYFAIL
         free_schema(schema);
         return R_NilValue;
     }
-    SEXP result = from_voidstar(voidstar, schema, NULL);
+    SEXP result = from_voidstar(voidstar, schema, morloc_shm_space());
     {
         char* shfree_errmsg = NULL;
         shfree(voidstar, &shfree_errmsg);
@@ -3060,7 +3055,7 @@ SEXP morloc_mlc_cell_new(SEXP schema_str_r, SEXP init_r) { MAYFAIL
 // rather than deferred to the end of the call -- a fold reads one of these
 // per batch, and deferring would hold one block per batch.
 static SEXP cell_value_to_r(void* voidstar, Schema* schema) {
-    SEXP obj = from_voidstar(voidstar, schema, NULL);
+    SEXP obj = from_voidstar(voidstar, schema, morloc_shm_space());
     char* shfree_errmsg = NULL;
     shfree(voidstar, &shfree_errmsg);
     free(shfree_errmsg);
@@ -3217,6 +3212,9 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
     // Extract arguments
     uint8_t* packet = RAW(packet_r);
     size_t packet_size = (size_t)LENGTH(packet_r);
+    if (!morloc_packet_fits(packet, packet_size)) {
+        MORLOC_ERROR("a %zu-byte packet is shorter than its header claims", packet_size);
+    }
 
     const morloc_packet_header_t* header = (const morloc_packet_header_t*)packet;
     uint8_t source = header->command.data.source;
@@ -3309,9 +3307,15 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         && header->command.data.compression == PACKET_COMPRESSION_NONE
         && header->command.data.encryption == PACKET_ENCRYPTION_NONE) {
         const uint8_t* payload = packet + sizeof(morloc_packet_header_t) + header->offset;
-        MORLOC_REJECT_NUL(check_nul, (const void*)payload, schema, (const void*)payload,
+        morloc_space_t space = morloc_payload_space(payload, (size_t)header->length);
+        if ((size_t)header->length < schema->width) {
+            free_schema(schema);
+            MORLOC_ERROR("a %zu-byte inline payload cannot hold its %zu-byte value",
+                         (size_t)header->length, schema->width);
+        }
+        MORLOC_REJECT_NUL(check_nul, (const void*)payload, schema, space,
                           free_schema(schema));
-        SEXP obj_r = from_voidstar((const void*)payload, schema, (const void*)payload);
+        SEXP obj_r = from_voidstar((const void*)payload, schema, space);
         free_schema(schema);
         if (obj_r == NULL) {
             MORLOC_ERROR("Failed to convert internal representation to R object");
@@ -3382,7 +3386,7 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
                     MORLOC_ERROR("%s", msg);
                 }
                 if (eof || chunk == NULL) break;
-                SEXP chunk_r = PROTECT(from_voidstar(chunk, schema, NULL));
+                SEXP chunk_r = PROTECT(from_voidstar(chunk, schema, morloc_shm_space()));
                 char* ferr = NULL; shfree(chunk, &ferr);
                 if (ferr) free(ferr);
                 if (result == R_NilValue) {
@@ -3414,7 +3418,7 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
             if (result == R_NilValue) {
                 // A stream with no sub-packets decodes as an empty one would.
                 Array empty = { 0, RELNULL };
-                result = from_voidstar(&empty, schema, NULL);
+                result = from_voidstar(&empty, schema, morloc_shm_space());
                 REPROTECT(result, result_ix);
             }
             UNPROTECT(1);
@@ -3449,9 +3453,9 @@ SEXP morloc_get_value(SEXP packet_r, SEXP schema_str_r, SEXP check_nul_r) { MAYF
         tracked = true;
     }
 
-    MORLOC_REJECT_NUL(check_nul, voidstar, schema, NULL, { if (!tracked) free_schema(schema); });
+    MORLOC_REJECT_NUL(check_nul, voidstar, schema, morloc_shm_space(), { if (!tracked) free_schema(schema); });
 
-    SEXP obj_r = from_voidstar(voidstar, schema, NULL);
+    SEXP obj_r = from_voidstar(voidstar, schema, morloc_shm_space());
     if (obj_r == NULL) {
         if (!is_rptr) {
             char* free_err = NULL;

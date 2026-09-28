@@ -1274,11 +1274,11 @@ absptr_t rel2abs(relptr_t ptr, ERRMSG);
 // -- Lock-free per-process volume base table ---------------------------------
 //
 // libmorloc.so publishes a base+size entry for every SHM volume it has
-// mapped into this process. `resolve_relptr` below reads from the
+// mapped into this process. `resolve_region` below reads from the
 // table inline, replacing what used to be a mutex-guarded FFI call
 // (~100 ns) with an Acquire-load + branch + add (~5 ns). On a miss --
 // volume not yet mapped in this process -- it falls through to the
-// FFI `rel2abs` which lazily opens the segment and publishes the
+// FFI `rel2abs_extent` which lazily opens the segment and publishes the
 // entry. Publication and withdrawal happen inside libmorloc.so's
 // `shinit` / `shopen_diag` / `shclose`.
 //
@@ -1298,35 +1298,62 @@ _Static_assert(sizeof(struct morloc_vol_entry)   == 2 * sizeof(void*),
                "morloc_vol_entry layout mismatch");
 #endif
 
-// Resolve a relptr. Three paths, in priority order:
-//
-//   1. `base_ptr` is non-null  -- inline MESG+VOIDSTAR data: the relptr
-//      is a buffer-relative offset; strip the vol_idx bits (they are
-//      zero in practice for inline producers, but masking is harmless
-//      either way) and add to base_ptr.
-//
-//   2. Lock-free table hit     -- the volume the relptr targets is
-//      mapped in this process. Acquire-load the entry, bounds-check
-//      the offset, return data_base + offset. No FFI, no mutex.
-//
-//   3. Lock-free table miss    -- volume not yet mapped here. Fall
-//      through to the FFI `rel2abs`, which lazily opens the segment
-//      and publishes the entry. Subsequent calls hit path (2).
-static inline void* resolve_relptr(relptr_t relptr, const void* base_ptr, ERRMSG) {
-    if (base_ptr) {
-        return (char*)base_ptr + relptr_offset_bits(relptr);
+// Where a value's relative pointers lead: shared memory when `base` is NULL,
+// else an inline packet payload of `len` bytes at `base`, whose relptrs are
+// offsets into it. Every resolve names the space and the number of bytes it
+// will read, so a malformed value is refused instead of read past its end.
+typedef struct morloc_space_s {
+    const void* base;
+    size_t len;
+} morloc_space_t;
+
+static inline morloc_space_t morloc_shm_space(void) {
+    morloc_space_t s = { NULL, 0 };
+    return s;
+}
+
+static inline morloc_space_t morloc_payload_space(const void* base, size_t len) {
+    morloc_space_t s = { base, len };
+    return s;
+}
+
+// Resolve `relptr` in shared memory to `extent` readable bytes.
+absptr_t rel2abs_extent(relptr_t ptr, size_t extent, ERRMSG);
+// The error a payload resolve reports; always returns NULL.
+void* morloc_payload_region_error(relptr_t relptr, size_t extent, size_t len, ERRMSG);
+
+// Resolve `relptr` to `extent` readable bytes in `space`. A shared-memory
+// resolve reads the lock-free volume table inline and falls through to the
+// FFI `rel2abs_extent` when the volume is not yet mapped in this process.
+static inline void* resolve_region(relptr_t relptr, size_t extent, morloc_space_t space, ERRMSG) {
+    size_t off = relptr_offset_bits(relptr);
+    if (space.base) {
+        if (relptr >= 0 && off <= space.len && extent <= space.len - off) {
+            return (char*)space.base + off;
+        }
+        return morloc_payload_region_error(relptr, extent, space.len, errmsg_);
     }
     size_t vol = relptr_vol_idx(relptr);
     void* data_base = MORLOC_ATOMIC_LOAD_ACQ(MORLOC_VOL_TABLE[vol].data_base);
-    if (data_base) {
-        size_t off = relptr_offset_bits(relptr);
+    if (relptr >= 0 && data_base) {
         size_t data_size = MORLOC_ATOMIC_LOAD_RLX(MORLOC_VOL_TABLE[vol].data_size);
-        if (off < data_size) {
+        if (off <= data_size && extent <= data_size - off) {
             return (char*)data_base + off;
         }
     }
-    return rel2abs(relptr, errmsg_);
+    return rel2abs_extent(relptr, extent, errmsg_);
 }
+
+// Resolve the data of an array of `n` elements of `width` bytes.
+static inline void* resolve_array(relptr_t relptr, size_t n, size_t width, morloc_space_t space, ERRMSG) {
+    size_t extent;
+    // An overflowing length fits nowhere, which the resolve reports.
+    if (__builtin_mul_overflow(n, width, &extent)) {
+        extent = SIZE_MAX;
+    }
+    return resolve_region(relptr, extent, space, errmsg_);
+}
+
 relptr_t vol2rel(volptr_t ptr, const shm_t* shm);
 absptr_t vol2abs(volptr_t ptr, const shm_t* shm);
 relptr_t abs2rel(absptr_t ptr, ERRMSG);
@@ -1362,6 +1389,13 @@ int unpack_with_schema(const char* mpk, size_t mpk_size, const Schema* schema, v
 // ========================================================================
 
 morloc_packet_header_t* read_morloc_packet_header(const uint8_t* msg, ERRMSG);
+// True iff `n` bytes hold a packet header and the payload that header claims.
+static inline bool morloc_packet_fits(const uint8_t* packet, size_t n) {
+    if (n < sizeof(morloc_packet_header_t)) return false;
+    const morloc_packet_header_t* h = (const morloc_packet_header_t*)packet;
+    size_t room = n - sizeof(morloc_packet_header_t);
+    return (size_t)h->offset <= room && h->length <= room - (size_t)h->offset;
+}
 bool packet_is_ping(const uint8_t* packet, ERRMSG);
 bool packet_is_local_call(const uint8_t* packet, ERRMSG);
 bool packet_is_remote_call(const uint8_t* packet, ERRMSG);
@@ -1392,8 +1426,7 @@ uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema,
 // heap description of the first String slot holding an interior NUL, or NULL
 // when there is none. The caller frees the result.
 //
-// `base_ptr` follows the same convention as resolve_relptr: non-NULL for a
-// payload inlined in a packet, NULL for a value in shared memory.
+// `space` is where the value's relative pointers lead (see morloc_space_t).
 //
 // Only called where the compiler emitted a check -- codegen knows the
 // receiving language and whether the type carries a Str, so a language that
@@ -1403,7 +1436,7 @@ uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema,
 char* morloc_first_null_in_value(
     const void* voidstar,
     const Schema* schema,
-    const void* base_ptr);
+    morloc_space_t space);
 
 uint8_t* make_morloc_local_call_packet(uint32_t midx, const uint8_t* const* arg_packets, size_t nargs, ERRMSG);
 uint8_t* make_morloc_remote_call_packet(uint32_t midx, const uint8_t* const* arg_packets, size_t nargs, ERRMSG);
@@ -1758,13 +1791,10 @@ int64_t mlc_handle_path_len(int64_t handle, ERRMSG);
 // Voidstar wire-layout helpers. `dest` is the Array slot in the
 // voidstar buffer; `cursor` is the bridge's outer to_voidstar cursor
 // (advanced past the path bytes on success). Returns 0 on success.
-// On the read side, `base_ptr` is the relptr base: NULL means the
-// Array's `data` field is an SHM-relative relptr (the common
-// in-process case); non-NULL means it's a payload-relative offset
-// (used when reading from mmap'd file regions).
+// On the read side, `space` is where the field's path lives.
 int32_t mlc_write_handle_voidstar(int64_t handle, void* dest,
                                   void** cursor, ERRMSG);
-int64_t mlc_read_handle_voidstar(const void* arr, const void* base_ptr,
+int64_t mlc_read_handle_voidstar(const void* arr, morloc_space_t space,
                                  uint8_t kind, ERRMSG);
 
 // Batched IFile-array helpers. Each acquires the stream registry mutex

@@ -201,6 +201,23 @@ pub unsafe extern "C" fn rel2abs(ptr: RelPtr, errmsg: *mut *mut c_char) -> *mut 
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn rel2abs_extent(ptr: RelPtr, extent: usize, errmsg: *mut *mut c_char) -> *mut c_void {
+    ffi_try!(errmsg, ptr::null_mut(), shm::rel2abs_extent(ptr, extent).map(|p| p as *mut c_void))
+}
+
+/// The error C's inline payload resolve reports. Always returns null.
+#[no_mangle]
+pub unsafe extern "C" fn morloc_payload_region_error(
+    relptr: RelPtr,
+    extent: usize,
+    len: usize,
+    errmsg: *mut *mut c_char,
+) -> *mut c_void {
+    set_errmsg(errmsg, &crate::voidstar::payload_region_error(relptr, extent, len));
+    ptr::null_mut()
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn abs2rel(ptr: *mut c_void, errmsg: *mut *mut c_char) -> RelPtr {
     ffi_try!(errmsg, shm::RELNULL, shm::abs2rel(ptr as AbsPtr))
 }

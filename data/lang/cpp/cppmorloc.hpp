@@ -297,21 +297,23 @@ auto to_vector(const Container& c) {
 absptr_t rel2abs_cpp(relptr_t ptr);
 relptr_t abs2rel_cpp(absptr_t ptr);
 
-// Resolve a relative pointer.
-//
-// When `base_ptr` is non-null the relptr is a buffer-relative offset
-// into a malloc'd inline packet payload (the inline MESG+VOIDSTAR
-// path); resolution is a single add. Otherwise we route through the
-// inline `resolve_relptr` in morloc.h which consults the per-process
-// exposed volume table for a lock-free fast path, falling through to
-// the SHM FFI only when the slot has not yet been populated in this
-// process.
-static inline void* resolve_relptr_cpp(relptr_t relptr, const void* base_ptr) {
-    if (base_ptr) {
-        return (char*)base_ptr + relptr_offset_bits(relptr);
-    }
+// Resolve `relptr` to `extent` readable bytes in `space`, throwing when the
+// region is not there (see resolve_region in morloc.h).
+static inline void* resolve_region_cpp(relptr_t relptr, size_t extent, morloc_space_t space) {
     char* err = NULL;
-    void* p = resolve_relptr(relptr, NULL, &err);
+    void* p = resolve_region(relptr, extent, space, &err);
+    if (p == NULL) {
+        std::string msg = err ? err : "relptr did not resolve";
+        free(err);
+        throw std::runtime_error(msg);
+    }
+    return p;
+}
+
+// Resolve the data of an array of `n` elements of `width` bytes.
+static inline void* resolve_array_cpp(relptr_t relptr, size_t n, size_t width, morloc_space_t space) {
+    char* err = NULL;
+    void* p = resolve_array(relptr, n, width, space, &err);
     if (p == NULL) {
         std::string msg = err ? err : "relptr did not resolve";
         free(err);
@@ -669,7 +671,7 @@ void mlc_leaf_write(void* dest, void** cursor, const Schema* schema, const T& da
 // Read a leaf at schema width and convert to the C++ type, so a narrow
 // concrete type (e.g. `int` for Int) works with a wider schema.
 template<typename T>
-T mlc_leaf_read(const Schema* schema, const void* data, const void* base_ptr) {
+T mlc_leaf_read(const Schema* schema, const void* data, morloc_space_t space) {
     if (schema->type == MORLOC_NIL) {
         return T{};
     }
@@ -679,7 +681,7 @@ T mlc_leaf_read(const Schema* schema, const void* data, const void* base_ptr) {
     } else if constexpr (std::is_same_v<T, std::string>) {
         const Array* array = (const Array*)data;
         if(array->size > 0){
-            return std::string((char*)resolve_relptr_cpp(array->data, base_ptr), array->size);
+            return std::string((char*)resolve_array_cpp(array->data, array->size, 1, space), array->size);
         }
         return std::string("");
     } else if constexpr (std::is_same_v<T, std::nullptr_t>) {
@@ -688,7 +690,7 @@ T mlc_leaf_read(const Schema* schema, const void* data, const void* base_ptr) {
         if (schema->type == MORLOC_ENUM) {
             return static_cast<T>(*(const uint8_t*)data);
         }
-        return static_cast<T>(mlc_leaf_read<std::underlying_type_t<T>>(schema, data, base_ptr));
+        return static_cast<T>(mlc_leaf_read<std::underlying_type_t<T>>(schema, data, space));
     } else {
         switch(schema->type) {
             case MORLOC_IFILE:
@@ -699,7 +701,7 @@ T mlc_leaf_read(const Schema* schema, const void* data, const void* base_ptr) {
                              : (schema->type == MORLOC_OSTREAM) ? MLC_KIND_OSTREAM
                              :                                    MLC_KIND_ISTREAM;
                 int64_t handle = mlc_read_handle_voidstar(
-                    data, base_ptr, kind, &err);
+                    data, space, kind, &err);
                 if (err || handle < 0) {
                     std::string msg = err ? err : "mlc_read_handle_voidstar failed";
                     free(err);
@@ -1016,11 +1018,11 @@ struct MlcReadWalk {
     std::vector<Frame> stack;
     Frame cur;
     std::vector<std::shared_ptr<void>> keep;
-    const void* base_ptr;
+    morloc_space_t space;
     MlcFlatSet flats;
 
-    MlcReadWalk(const Schema* root, const void* base)
-        : base_ptr(base), flats(root) {}
+    MlcReadWalk(const Schema* root, morloc_space_t sp)
+        : space(sp), flats(root) {}
 
     bool flat(const Schema* schema) const {
         return flats.flat(schema);
@@ -1042,7 +1044,7 @@ struct MlcReadWalk {
     template<typename T>
     void child(const Schema* schema, const void* data, T* out) {
         if constexpr (mlc_is_leaf_v<T>) {
-            *out = mlc_leaf_read<T>(resolve_recur(schema), data, base_ptr);
+            *out = mlc_leaf_read<T>(resolve_recur(schema), data, space);
         } else if (flat(schema)) {
             MlcNode<T>::read_step(*this, schema, data, out, 0);
         } else {
@@ -1061,7 +1063,7 @@ struct MlcReadWalk {
     template<typename T>
     void variant_payload(const Schema* arm, const void* data, T* out) {
         relptr_t rel = *(const relptr_t*)((const char*)data + MORLOC_VARIANT_PAYLOAD);
-        child(arm, resolve_relptr_cpp(rel, base_ptr), out);
+        child(arm, resolve_region_cpp(rel, arm->width, space), out);
     }
 
     void run() {
@@ -1125,15 +1127,28 @@ void* to_voidstar(const Schema* schema, const T& data){
 }
 
 template<typename T>
-T from_voidstar(const Schema* schema, const void* data, T* = nullptr, const void* base_ptr = nullptr) {
+T from_voidstar(const Schema* schema, const void* data, T* = nullptr, morloc_space_t space = morloc_shm_space()) {
     if(data == NULL){
         throw std::runtime_error("Void error in from_voidstar");
     }
     T out{};
-    MlcReadWalk w(schema, base_ptr);
+    MlcReadWalk w(schema, space);
     w.child(schema, data, &out);
     w.run();
     return out;
+}
+
+// Read the value an uncompressed inline (MESG+VOIDSTAR) packet carries,
+// where it lies in the packet; every relptr is checked against the payload.
+template<typename T>
+T mlc_read_inline_packet(const uint8_t* packet, const Schema* schema) {
+    const morloc_packet_header_t* header = (const morloc_packet_header_t*)packet;
+    const uint8_t* payload = packet + sizeof(morloc_packet_header_t) + header->offset;
+    if ((size_t)header->length < schema->width) {
+        throw std::runtime_error("an inline payload is smaller than the value it carries");
+    }
+    return from_voidstar(schema, (const void*)payload, (T*)nullptr,
+                         morloc_payload_space(payload, (size_t)header->length));
 }
 
 // ------------------------------------------------------------
@@ -1362,7 +1377,7 @@ struct MlcNode {
                     out->clear();
                     return;
                 }
-                const char* start = (const char*)resolve_relptr_cpp(array->data, w.base_ptr);
+                const char* start = (const char*)resolve_array_cpp(array->data, array->size, elem->width, w.space);
                 if constexpr (std::is_arithmetic_v<ElemT> && !std::is_same_v<ElemT, bool>) {
                     // Fixed-width primitives whose C++ width matches the
                     // wire width are one bulk copy; bool is excluded
@@ -1376,13 +1391,13 @@ struct MlcNode {
                 out->resize(array->size);
                 if constexpr (mlc_is_leaf_v<ElemT>) {
                     for (size_t i = 0; i < array->size; i++) {
-                        (*out)[i] = mlc_leaf_read<ElemT>(elem, start + i * elem->width, w.base_ptr);
+                        (*out)[i] = mlc_leaf_read<ElemT>(elem, start + i * elem->width, w.space);
                     }
                     return;
                 }
             }
             if constexpr (!mlc_is_leaf_v<ElemT>) {
-                const char* start = (const char*)resolve_relptr_cpp(array->data, w.base_ptr);
+                const char* start = (const char*)resolve_array_cpp(array->data, array->size, elem->width, w.space);
                 if (w.flat(elem)) {
                     for (size_t i = 0; i < array->size; ++i) w.child(elem, start + i * elem->width, &(*out)[i]);
                 } else {
@@ -1408,7 +1423,7 @@ struct MlcNode {
                 out->reset();
             } else {
                 out->emplace();
-                w.child(schema->parameters[0], resolve_relptr_cpp(relptr, w.base_ptr), &**out);
+                w.child(schema->parameters[0], resolve_region_cpp(relptr, resolve_recur(schema->parameters[0])->width, w.space), &**out);
             }
         } else if constexpr (is_std_shared_ptr<T>::value) {
             // shared_ptr<T> is the C++ surface form for `?T` at a recursive
@@ -1419,7 +1434,7 @@ struct MlcNode {
                 out->reset();
             } else {
                 *out = std::make_shared<PointeeT>();
-                w.child(schema->parameters[0], resolve_relptr_cpp(relptr, w.base_ptr), out->get());
+                w.child(schema->parameters[0], resolve_region_cpp(relptr, resolve_recur(schema->parameters[0])->width, w.space), out->get());
             }
         } else {
             mlc_no_marshaller(schema);
