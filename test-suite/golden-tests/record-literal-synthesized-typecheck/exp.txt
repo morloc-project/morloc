@@ -1,0 +1,2 @@
+polyUser :: Int -> <IO> R
+effLet :: Int -> <Err,IO> Int

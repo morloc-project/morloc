@@ -1531,8 +1531,11 @@ zipSubtype a b _ _ _ _ = subtypeError a b "Parameter type mismatch"
 
 -- | Dunfield Figure 10 -- type-level structural recursion
 instantiate :: Scope -> TypeU -> TypeU -> Gamma -> Either MDoc Gamma
-instantiate scope ta@(ExistU _ _ (_ : _, _)) tb@(NamU _ _ _ _) g1 = instantiate scope tb ta g1
-instantiate scope ta@(ExistU _ _ (_ : _, _)) tb@(VarU _) g1 = instantiate scope tb ta g1
+instantiate scope ta@(ExistU _ _ (_ : _, _)) tb@(NamU _ _ _ _) g1 = instantiateRecord scope False tb ta g1
+instantiate scope ta@(ExistU _ _ (_ : _, _)) tb@(VarU _) g1 =
+  case TE.reduceType scope tb of
+    (Just tb') -> instantiate scope ta tb' g1
+    Nothing -> subtypeError ta tb "Error in NamU versus VarU with existential keys"
 instantiate scope ta@(VarU _) tb@(ExistU _ _ (_ : _, _)) g1 = do
   case TE.reduceType scope ta of
     (Just ta') -> instantiate scope ta' tb g1
@@ -1549,46 +1552,7 @@ instantiate scope ta@(AppU (VarU v) _) tb@(ExistU _ _ ((_:_), _)) g1
 instantiate scope ta@(ExistU _ _ ((_:_), _)) tb@(AppU (VarU v) _) g1
   | Map.member v scope, Just tb' <- TE.reduceType scope tb =
       instantiate scope ta tb' g1
-instantiate scope ta@(NamU _ _ _ rs1) tb@(ExistU v _ (rs2@(_ : _), rc)) g1 = do
-  let keyset1 = Set.fromList $ map fst rs1
-      keyset2 = Set.fromList $ map fst rs2
-  _ <- case rc of
-    -- if the existential keys are closed, the the ta and tb keys must be identical
-    Closed ->
-      if keyset1 == keyset2
-        then return ()
-        else subtypeError ta tb "Error in NamU with conflicting closed keysets"
-    -- if the existential keys are open, then all existential keys muts be in
-    -- ta, but not vice versa
-    Open ->
-      if Set.isSubsetOf keyset2 keyset1
-        then return ()
-        else subtypeError ta tb "Error in NamU with conflicting open keysets"
-
-  g2 <-
-    foldM
-      (\g' (t1, t2) -> subtype scope t1 t2 g')
-      g1
-      [(t1, t2) | (k1, t1) <- rs1, (k2, t2) <- rs2, k1 == k2]
-  -- Also process record-key constraints accumulated on @v@ via earlier
-  -- merges (its own ExistG entry, plus any solved alias of @v@ shaped
-  -- @ExistU v _ rs@) that are NOT in the expression's @rs2@. Without
-  -- this, merged constraints contributed to @v@ via a sibling existential
-  -- get dropped when @v@ is pinned to a concrete @NamU@.
-  let rs2Keys = Set.fromList (map fst rs2)
-      extraRecs =
-        [ r
-        | r@(k, _) <- accumulatedRecords v g2
-        , Set.notMember k rs2Keys
-        ]
-  g3 <-
-    foldM
-      (\g' (k, vt) -> case lookup k rs1 of
-                        Just tat -> subtype scope tat vt g'
-                        Nothing -> Right g')
-      g2
-      extraRecs
-  solveExist v ta g3 >>= maybe (subtypeError ta tb "Error in NamU with existential keys") return
+instantiate scope ta@(NamU _ _ _ _) tb@(ExistU _ _ (_ : _, _)) g1 = instantiateRecord scope True ta tb g1
 -- ExistU vs EffectU: solve ?a = <effs> ?b, then ?b <: inner
 instantiate scope (ExistU v ([], _) _) (EffectU effs inner) g1 = do
   let (g2, veb) = tvarname g1 "eff"
@@ -1778,6 +1742,63 @@ instantiate scope (ExistU v ([], _) ([], _)) tb g1 = do
     Nothing -> solveExist v tb g1'' >>= maybe (return g1'') return
 
 instantiate _ ta tb _ = subtypeError ta tb "Unexpected types"
+
+-- | A named record against a record-shaped existential, in either order.
+-- Fields are compared in the direction of the enclosing relation: with the
+-- named record on the left of @<:@ its fields are on the left, and with the
+-- existential on the left its fields are. Swapping the arguments to share
+-- one rule would compare every field backwards, which is right only for
+-- invariant fields -- @Int@ fills a @?Int@ field, not the reverse, and a
+-- polymorphic field value must meet the declared type on the right.
+instantiateRecord :: Scope -> Bool -> TypeU -> TypeU -> Gamma -> Either MDoc Gamma
+instantiateRecord scope namedOnLeft ta@(NamU _ _ _ rs1) tb@(ExistU v _ (rs2@(_ : _), rc)) g1 = do
+  let keyset1 = Set.fromList $ map fst rs1
+      keyset2 = Set.fromList $ map fst rs2
+  _ <- case rc of
+    -- if the existential keys are closed, the the ta and tb keys must be identical
+    Closed ->
+      if keyset1 == keyset2
+        then return ()
+        else subtypeError ta tb "Error in NamU with conflicting closed keysets"
+    -- if the existential keys are open, then all existential keys muts be in
+    -- ta, but not vice versa
+    Open ->
+      if Set.isSubsetOf keyset2 keyset1
+        then return ()
+        else subtypeError ta tb "Error in NamU with conflicting open keysets"
+
+  g2 <-
+    foldM
+      (\g' (t1, t2) -> fieldSub t1 t2 g')
+      g1
+      [(t1, t2) | (k1, t1) <- rs1, (k2, t2) <- rs2, k1 == k2]
+  -- Also process record-key constraints accumulated on @v@ via earlier
+  -- merges (its own ExistG entry, plus any solved alias of @v@ shaped
+  -- @ExistU v _ rs@) that are NOT in the expression's @rs2@. Without
+  -- this, merged constraints contributed to @v@ via a sibling existential
+  -- get dropped when @v@ is pinned to a concrete @NamU@.
+  let rs2Keys = Set.fromList (map fst rs2)
+      extraRecs =
+        [ r
+        | r@(k, _) <- accumulatedRecords v g2
+        , Set.notMember k rs2Keys
+        ]
+  g3 <-
+    foldM
+      (\g' (k, vt) -> case lookup k rs1 of
+                        Just tat -> fieldSub tat vt g'
+                        Nothing -> Right g')
+      g2
+      extraRecs
+  solveExist v ta g3 >>= maybe (subtypeError ta tb "Error in NamU with existential keys") return
+  where
+    -- a named field against the existential's field, in the relation's
+    -- own direction
+    fieldSub nt et
+      | namedOnLeft = subtype scope nt et
+      | otherwise = subtype scope et nt
+instantiateRecord _ _ ta tb _ = subtypeError ta tb "Expected a record against a record existential"
+
 
 -- | When a bare existential @v@ (no records on the expression form) is about
 -- to be solved to a type @t@, gather every record-key constraint that has

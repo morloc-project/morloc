@@ -1195,12 +1195,13 @@ synthE _ g0 (NamS rs) = do
 
 -- Any morloc variables should have been expanded by treeify. Any bound
 -- variables should be checked against. I think (this needs formalization).
--- Checking a definition against its signature: another signed term it names
--- (referenced by its signature alone) is instantiated here, its constraints
--- becoming obligations over the instantiating variables.
+-- Another signed term a definition names, referenced by its signature alone,
+-- is instantiated here, its constraints becoming obligations over the
+-- instantiating variables. A reference's type never keeps its quantifier:
+-- one left in place travels into a synthesized record or tuple and meets the
+-- expected type there as a rigid variable.
 synthE _ g0 (VarS v (MonomorphicExpr (Just t0) []))
-  | Just _ <- gammaRigid g0
-  , Just _ <- gammaAssumedConstraints g0 = do
+  | Just _ <- gammaAssumedConstraints g0 = do
       let (g1, t0') = renameEType g0 t0
           (g2, t2) = instantiateObligations g1 (etype t0') (Set.toList (econs t0'))
       return (g2, t2, VarS v (MonomorphicExpr (Just t0) []))
@@ -1618,8 +1619,9 @@ synthE i _ (IntrinsicS IntrReplay args) =
 -- discharge the IO the body performed on its way there. A pure body
 -- stays pure.
 synthE _ g (IntrinsicS IntrTry [bodyE]) = do
-  (g1, bodyT, bodyE') <- synthG g bodyE
-  let resultT = case peelForallU (apply g1 bodyT) of
+  (g0, bodyT, bodyE') <- synthG g bodyE
+  let (g1, openT) = stripForallU g0 (apply g0 bodyT)
+      resultT = case openT of
         EffectU e t -> mkEffectU e (BT.tryU BT.strU t)
         t           -> BT.tryU BT.strU t
   return (g1, resultT, IntrinsicS IntrTry [bodyE'])
