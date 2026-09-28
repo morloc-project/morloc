@@ -37,11 +37,9 @@ unsafe fn preallocate_fd(fd: i32, size: i64) -> i32 {
 
 /// System page size, cached on first use. Used to align the per-worker
 /// sub-ranges in `parallel_madvise_populate_write` -- `madvise`
-/// requires page-aligned offsets and lengths. Only the Linux
-/// page-reservation path (and a test) use it; on a macOS release build it
-/// would otherwise be dead code.
-#[cfg(any(target_os = "linux", test))]
-fn page_size() -> usize {
+/// requires page-aligned offsets and lengths, and by the stream reader to
+/// hand back pages it has read.
+pub(crate) fn page_size() -> usize {
     static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
         let v = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };

@@ -778,6 +778,10 @@ pub struct ProcessLocalSlot {
     pub mmap_ptr:  AbsPtr,
     pub mmap_size: u64,
 
+    /// How much of the start of the mapping has been handed back to the
+    /// kernel ('drop_read_pages'): an IStream reads its file forward, once.
+    pub pages_dropped: u64,
+
     /// Underlying file descriptor. For OStream this is the fd that
     /// holds the flock (only the OPENER pool acquires the flock;
     /// non-opener writers use their own non-flock'd fd). For
@@ -1138,6 +1142,7 @@ fn attach_process_local_slot(
         cached_generation,
         mmap_ptr,
         mmap_size,
+        pages_dropped: 0,
         fd,
         cache,
         value_schema,
@@ -1549,6 +1554,7 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
         cached_generation: new_gen,
         mmap_ptr,
         mmap_size,
+        pages_dropped: 0,
         fd: -1,
         cache: Box::new(StreamCache::new(cap_bytes)),
         value_schema: parsed.value_schema.clone(),
@@ -1655,6 +1661,7 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
         cached_generation: new_gen,
         mmap_ptr,
         mmap_size,
+        pages_dropped: 0,
         fd: -1,
         cache: Box::new(StreamCache::new(cap_bytes)),
         value_schema: parsed.value_schema.clone(),
@@ -1959,6 +1966,7 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
         cached_generation: new_gen,
         mmap_ptr: std::ptr::null_mut(),
         mmap_size: 0,
+        pages_dropped: 0,
         fd: -1,                    // stdio writes go through RPC, not fd
         cache: Box::new(StreamCache::new(0)),
         value_schema: value_schema_cached,
@@ -2386,6 +2394,7 @@ fn init_ostream_on_locked_fd(
         cached_generation: new_gen,
         mmap_ptr: std::ptr::null_mut(),
         mmap_size: 0,
+        pages_dropped: 0,
         fd,                       // opener holds flock for slot lifetime
         cache: Box::new(StreamCache::new(0)),
         value_schema: value_schema_cached,
@@ -3620,13 +3629,38 @@ fn next_file_subpacket(handle: i64) -> Result<Option<AbsPtr>, MorlocError> {
             }
             (cursor, size, true)
         };
-        let _ = (on_disk_size, header_is_data); // (currently only on_disk_size feeds cursor advance)
+        let _ = header_is_data;
 
         // Materialise the claimed sub-packet without holding the
         // futex. Other pools can advance through subsequent
         // sub-packets in parallel.
-        materialize_and_finalise_subpacket(local, slot, claim_cursor).map(Some)
+        let arr = materialize_and_finalise_subpacket(local, slot, claim_cursor)?;
+        drop_read_pages(local, claim_cursor + on_disk_size);
+        Ok(Some(arr))
     })
+}
+
+/// Hand back to the kernel the pages of an IStream's mapping that lie wholly
+/// before `read_end`. A stream is read forward and each sub-packet is copied
+/// out once, so nothing reads those bytes again; left mapped they are counted
+/// against this process until the stream closes. The mapping is a clean,
+/// read-only file mapping, so a page dropped here would only fault back in
+/// from the file. Only this process's mapping is touched: the page cache,
+/// which other pools reading the stream share, is left alone.
+fn drop_read_pages(local: &mut ProcessLocalSlot, read_end: u64) {
+    let page = crate::shm::page_size() as u64;
+    let end = (read_end.min(local.mmap_size) / page) * page;
+    if local.mmap_ptr.is_null() || end <= local.pages_dropped {
+        return;
+    }
+    unsafe {
+        libc::madvise(
+            (local.mmap_ptr as *mut u8).add(local.pages_dropped as usize) as *mut libc::c_void,
+            (end - local.pages_dropped) as usize,
+            libc::MADV_DONTNEED,
+        );
+    }
+    local.pages_dropped = end;
 }
 
 /// Read the sub-packet at the given byte offset in this pool's mmap
@@ -4764,6 +4798,7 @@ pub fn shared_append_to_path(
         cached_generation: new_gen,
         mmap_ptr: std::ptr::null_mut(),
         mmap_size: 0,
+        pages_dropped: 0,
         fd,
         cache: Box::new(StreamCache::new(0)),
         value_schema: value_schema_clone,
@@ -8778,6 +8813,7 @@ pub fn shared_open_ifile_recovered(
         cached_generation: new_gen,
         mmap_ptr,
         mmap_size,
+        pages_dropped: 0,
         fd: -1,
         cache: Box::new(StreamCache::new(cap_bytes)),
         value_schema: parsed.value_schema.clone(),
