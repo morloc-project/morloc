@@ -159,12 +159,14 @@ impl MorlocVolEntry {
 /// only as good as the data region's.
 #[repr(C, align(16))]
 pub struct ShmHeader {
-    pub magic: u32,
+    /// `SHM_MAGIC`, stored last by the volume's creator: a volume whose
+    /// magic reads otherwise is not yet, or never was, initialised.
+    pub magic: AtomicU32,
     pub volume_name: [u8; MAX_FILENAME_SIZE],
     pub volume_index: i32,
     pub volume_size: usize,
     pub relative_offset: usize,
-    pub lock: AtomicU32,
+    pub lock: crate::shm_lock::ShmLock,
     pub cursor: VolPtr,
 }
 

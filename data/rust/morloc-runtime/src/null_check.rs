@@ -323,7 +323,7 @@ mod tests {
     // The schema walker requires SHM to be initialised so that rel2abs
     // succeeds. Tests use the crate-wide helper and hold its guard.
     #[must_use]
-    fn setup() -> std::sync::RwLockReadGuard<'static, ()> {
+    fn setup() -> crate::ArenaShared {
         crate::init_test_shm()
     }
 

@@ -41,14 +41,6 @@ pub enum SweepPolicy {
     Persist,
 }
 
-/// Which backing store the companion was opened against. Populated on
-/// open, consulted on teardown so we issue exactly one unlink syscall.
-#[derive(Debug, Clone)]
-enum Backing {
-    Tmpfs,
-    File(PathBuf),
-}
-
 /// A shared memory segment held outside the general allocator's
 /// `-<idx>` namespace. RAII: `Drop` runs `teardown`.
 ///
@@ -59,7 +51,6 @@ pub struct CompanionSegment {
     pub base:  *mut u8,
     pub size:  usize,
     name:      CString,
-    backing:   Backing,
     policy:    SweepPolicy,
 }
 
@@ -72,16 +63,15 @@ unsafe impl Send for CompanionSegment {}
 unsafe impl Sync for CompanionSegment {}
 
 impl CompanionSegment {
-    /// Open (or attach to) `<basename>.<suffix>`. First caller in a
-    /// session creates the file; later callers attach. Cross-process
-    /// arbitration of the "who initialises the header" question is the
-    /// caller's job (typically a CAS on a magic word in the mapped
-    /// region); this function does not report first-vs-attach because
-    /// on a concurrent `shm_open(O_CREAT)` race both peers can observe
-    /// `created = true` locally and only the CAS resolves.
+    /// Open (or attach to) `<basename>.<suffix>`. The first caller in a
+    /// session creates it, exclusively; later callers attach. An attacher
+    /// may arrive before the creator has sized the segment, so a missing
+    /// or short segment is retried for a bounded time. Whoever initialises
+    /// the contents is still arbitrated by the caller (typically a CAS on
+    /// a magic word in the mapped region).
     ///
     /// `size` is the desired byte count; the mapped region may be
-    /// larger (mmap page-rounds silently) but never smaller.
+    /// larger but never smaller.
     pub fn open(
         suffix: &str,
         size:   usize,
@@ -95,22 +85,10 @@ impl CompanionSegment {
             )));
         }
         let name_str = format!("{}.{}", basename, suffix);
-
-        let (base, actual_size, backing) =
-            match shm::try_open_tmpfs(&name_str, size)? {
-                Some(opened) => {
-                    let base = opened.ptr;
-                    unsafe { libc::close(opened.fd); }
-                    (base, opened.actual_size, Backing::Tmpfs)
-                }
-                None => {
-                    let opened = shm::try_open_file_backed(&name_str, size)?;
-                    let base = opened.ptr;
-                    unsafe { libc::close(opened.fd); }
-                    (base, opened.actual_size,
-                     Backing::File(PathBuf::from(&opened.label)))
-                }
-            };
+        let (base, actual_size) = match shm::create_segment(&name_str, size)? {
+            Some(seg) => (seg.ptr, seg.len),
+            None => attach(&name_str, size)?,
+        };
 
         let name = CString::new(name_str.as_str()).map_err(|e| {
             MorlocError::Other(format!("companion name contains NUL: {}", e))
@@ -125,15 +103,16 @@ impl CompanionSegment {
             base,
             size: actual_size,
             name,
-            backing,
             policy,
         })
     }
 
-    /// Unlink the backing file (tmpfs OR file, depending on how it
-    /// was opened), `munmap` the region, and deregister from the
-    /// crash-sweep list. Idempotent: subsequent calls short-circuit
-    /// on the null base.
+    /// Unmap the segment and deregister it from the crash-sweep list. The
+    /// segment is removed only by the program's owner (see
+    /// `shm::shinit`): other processes may still be using it, and a
+    /// removed name would be created afresh, empty, by the next process
+    /// to open it. Idempotent: subsequent calls short-circuit on the null
+    /// base.
     pub fn teardown(&mut self) {
         if self.base.is_null() {
             return;
@@ -143,11 +122,11 @@ impl CompanionSegment {
         }
         self.base = std::ptr::null_mut();
 
-        match &self.backing {
-            Backing::Tmpfs => unsafe {
-                libc::shm_unlink(self.name.as_ptr());
-            },
-            Backing::File(path) => {
+        if shm::owns_program() {
+            unsafe { libc::shm_unlink(self.name.as_ptr()) };
+            if let Some(dir) = shm::get_fallback_dir() {
+                let mut path = PathBuf::from(dir);
+                path.push(self.name.to_string_lossy().trim_start_matches('/'));
                 let _ = std::fs::remove_file(path);
             }
         }
@@ -164,6 +143,28 @@ impl CompanionSegment {
     pub fn name(&self) -> &CStr {
         &self.name
     }
+}
+
+/// Map the existing segment `name`, waiting up to about five seconds for
+/// its creator to give it at least `size` bytes.
+fn attach(name: &str, size: usize) -> Result<(*mut u8, usize), MorlocError> {
+    const WAIT_MS: u32 = 5000;
+    let mut seen = 0;
+    for _ in 0..WAIT_MS {
+        if let Ok((fd, len)) = shm::open_segment(name)? {
+            if len >= size {
+                return shm::map_shared(&fd, len)
+                    .map(|p| (p, len))
+                    .ok_or_else(|| MorlocError::Shm(format!("Cannot mmap companion '{}'", name)));
+            }
+            seen = len;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    Err(MorlocError::Shm(format!(
+        "companion '{}' holds {} bytes after {} ms; {} are needed",
+        name, seen, WAIT_MS, size
+    )))
 }
 
 impl Drop for CompanionSegment {

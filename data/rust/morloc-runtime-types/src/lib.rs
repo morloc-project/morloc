@@ -15,6 +15,7 @@
 pub mod error;
 pub mod hash;
 pub mod shm_types;
+pub mod shm_lock;
 pub mod schema;
 pub mod cschema;
 pub mod null_check;
@@ -39,7 +40,7 @@ pub use cschema::is_top_null;
 /// provisioning can refuse a prebuilt binary whose version differs from the
 /// compiler's expected value. Bump it (and the header) whenever the C ABI or
 /// wire packet format changes.
-pub const MORLOC_ABI_VERSION: u32 = 7;
+pub const MORLOC_ABI_VERSION: u32 = 8;
 
 #[cfg(test)]
 mod abi_version_tests {

@@ -14,7 +14,7 @@
 // (Morloc.Abi). Provisioning refuses to run a prebuilt libmorloc/nexus whose
 // version differs from the compiler's expected value (fail-closed), preventing
 // silent cross-pool struct/offset corruption.
-#define MORLOC_ABI_VERSION 7
+#define MORLOC_ABI_VERSION 8
 
 // Atomic includes must sit outside any `extern "C"` block because the
 // C++ <atomic> header pulls in <type_traits> et al., which use C++
@@ -123,18 +123,8 @@ static inline size_t relptr_offset_bits(relptr_t p) {
 }
 
 // Shared memory volume header (lives at the start of each mmap'd region).
-typedef struct shm_s {
-    unsigned int magic;
-    char volume_name[MAX_FILENAME_SIZE];
-    int volume_index;
-    size_t volume_size;
-    size_t relative_offset;
-    // Note: pthread_rwlock_t is opaque; consumers should not access it directly.
-    // It is included here so that sizeof(shm_t) is correct for mmap calculations.
-    // On Linux x86_64 this is typically 56 bytes.
-    char _rwlock_storage[56]; // placeholder for pthread_rwlock_t
-    volptr_t cursor;
-} shm_t;
+// Opaque: only the runtime reads or writes its fields.
+typedef struct shm_s shm_t;
 
 // Block header preceding every allocation inside a shared memory volume.
 // Atomic reference count for thread safety. Layout is stable (no padding).

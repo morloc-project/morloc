@@ -915,7 +915,7 @@ mod tests {
     }
 
     #[must_use]
-    fn setup_shm() -> std::sync::RwLockReadGuard<'static, ()> {
+    fn setup_shm() -> crate::ArenaShared {
         crate::init_test_shm()
     }
 

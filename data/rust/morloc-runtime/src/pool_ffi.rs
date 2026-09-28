@@ -4,7 +4,6 @@
 use std::ffi::{c_char, c_void};
 use std::ptr;
 
-use morloc_runtime_types::shm_types::PRIMARY_VOLUME;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, Condvar};
 
@@ -485,7 +484,6 @@ unsafe fn pool_main_fork(config: &PoolConfig, socket_path: *const c_char, tmpdir
     use crate::ipc_ffi::stream_from_client;
     use crate::ipc_ffi::send_packet_to_foreign_server;
     use crate::ipc_ffi::close_socket;
-    use crate::ffi::shinit;
 
     let mut errmsg: *mut c_char = ptr::null_mut();
     let mut daemon = start_daemon(socket_path, tmpdir, shm_basename, 0xffff, &mut errmsg);
@@ -535,22 +533,6 @@ unsafe fn pool_main_fork(config: &PoolConfig, socket_path: *const c_char, tmpdir
             //  but the child doesn't need to accept connections)
             if let Some(pfk) = config.post_fork_child {
                 pfk(config.dispatch_ctx);
-            }
-
-            shinit(shm_basename, PRIMARY_VOLUME + 1 + i as usize, 0xffff, &mut errmsg);
-            if !errmsg.is_null() {
-                // Print the error to stderr before exiting so the nexus can
-                // capture it via the pool's redirected stderr file. Without
-                // this, a failed shinit in a forked worker child leaves no
-                // diagnostic trace anywhere.
-                libc::fprintf(
-                    libc::fdopen(2, b"w\0".as_ptr() as *const c_char),
-                    b"Worker %d shinit failed: %s\n\0".as_ptr() as *const c_char,
-                    i as i32,
-                    errmsg,
-                );
-                libc::free(errmsg as *mut c_void);
-                libc::_exit(1);
             }
 
             // Attach the worker to the shared stream registry. Idempotent

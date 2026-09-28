@@ -2452,7 +2452,7 @@ mod auto_routing_tests {
     use morloc_runtime_types::packet::PKT_SOURCE_OFF as SOURCE_OFFSET;
 
     #[must_use]
-    fn ensure_shm() -> std::sync::RwLockReadGuard<'static, ()> {
+    fn ensure_shm() -> crate::ArenaShared {
         crate::init_test_shm()
     }
 

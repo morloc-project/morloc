@@ -1700,7 +1700,7 @@ mod flat_writer_tests {
     use crate::json::read_json_with_schema;
 
     #[must_use]
-    fn setup() -> std::sync::RwLockReadGuard<'static, ()> { crate::init_test_shm() }
+    fn setup() -> crate::ArenaShared { crate::init_test_shm() }
 
     // Build a voidstar from JSON, then verify both flatteners produce
     // equivalent output:

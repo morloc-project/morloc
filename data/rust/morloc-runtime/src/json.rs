@@ -1836,7 +1836,7 @@ mod tests {
     use super::*;
     use crate::schema::parse_schema;
     #[must_use]
-    fn setup() -> std::sync::RwLockReadGuard<'static, ()> { crate::init_test_shm() }
+    fn setup() -> crate::ArenaShared { crate::init_test_shm() }
 
     /// An arbitrary-precision Int round-trips at every width.
     ///
