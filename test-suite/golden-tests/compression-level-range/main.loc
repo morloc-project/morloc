@@ -1,0 +1,115 @@
+-- A compression level is a user `Int`. Every language must reject a level
+-- outside 0..=9 as given, whether the stream write or the save runs in the
+-- nexus or inside a pool; a level must never be narrowed to a byte first,
+-- which turns 256 into 0 and -1 into 255.
+
+module main
+  ( writeNexus, saveNexus
+  , writeCpp, saveCpp
+  , writePy, savePy
+  , writeR, saveR
+  , writeRust, saveRust
+  )
+
+import root-cpp
+import root-py
+import root-r
+import root-rust
+
+effect IO
+
+applyCpp :: (Int -> <IO> Int) -> Int -> <IO> Int
+source Cpp from "h.hpp" ("applyOnce" as applyCpp)
+applyPy :: (Int -> <IO> Int) -> Int -> <IO> Int
+source Py from "h.py" ("apply_once" as applyPy)
+applyR :: (Int -> <IO> Int) -> Int -> <IO> Int
+source R from "h.R" ("apply_once" as applyR)
+applyRust :: (Int -> <IO> Int) -> Int -> <IO> Int
+source Rust from "h.rs" ("apply_once" as applyRust)
+
+readBack :: Str -> <IO> [Int]
+readBack p = do
+  Ok s <- @open p :: <IO> (Try Str (IStream Int))
+  Ok xs <- @next s
+  xs
+
+loadBack :: Str -> <IO> Int
+loadBack p = do
+  Ok x <- @load p :: <IO> (Try Str Int)
+  x
+
+writeNexus :: Int -> Str -> <IO> [Int]
+writeNexus lvl p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream Int))
+  @write lvl o [5, 5]
+  @close o
+  readBack p
+
+saveNexus :: Int -> Str -> <IO> Int
+saveNexus lvl p = do
+  @save lvl p 5
+  loadBack p
+
+writeCpp :: Int -> Str -> <IO> [Int]
+writeCpp lvl p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream Int))
+  _ <- applyCpp (\x -> do
+    @write lvl o [x, x]
+    x) 5
+  @close o
+  readBack p
+
+saveCpp :: Int -> Str -> <IO> Int
+saveCpp lvl p = do
+  _ <- applyCpp (\x -> do
+    @save lvl p x
+    x) 5
+  loadBack p
+
+writePy :: Int -> Str -> <IO> [Int]
+writePy lvl p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream Int))
+  _ <- applyPy (\x -> do
+    @write lvl o [x, x]
+    x) 5
+  @close o
+  readBack p
+
+savePy :: Int -> Str -> <IO> Int
+savePy lvl p = do
+  _ <- applyPy (\x -> do
+    @save lvl p x
+    x) 5
+  loadBack p
+
+writeR :: Int -> Str -> <IO> [Int]
+writeR lvl p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream Int))
+  _ <- applyR (\x -> do
+    @write lvl o [x, x]
+    x) 5
+  @close o
+  readBack p
+
+saveR :: Int -> Str -> <IO> Int
+saveR lvl p = do
+  _ <- applyR (\x -> do
+    @save lvl p x
+    x) 5
+  loadBack p
+
+writeRust :: Int -> Str -> <IO> [Int]
+writeRust lvl p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream Int))
+  _ <- applyRust (\x -> do
+    @write lvl o [x, x]
+    x) 5
+  @close o
+  readBack p
+
+saveRust :: Int -> Str -> <IO> Int
+saveRust lvl p = do
+  _ <- applyRust (\x -> do
+    @save lvl p x
+    x) 5
+  loadBack p

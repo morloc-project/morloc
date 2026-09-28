@@ -536,7 +536,7 @@ template <typename T>
 void _mlc_save(const T& value, Schema* schema, int64_t level, const std::string& path) {
     void* voidstar = to_voidstar(schema, value);
     char* errmsg = NULL;
-    mlc_save(voidstar, schema, (uint8_t)level, path.c_str(), &errmsg);
+    mlc_save(voidstar, schema, level, path.c_str(), &errmsg);
     shfree_cpp(voidstar);
     if (errmsg != NULL) {
         PROPAGATE_ERROR(errmsg)
@@ -550,7 +550,7 @@ template <typename T>
 void _mlc_save_voidstar(const T& value, Schema* schema, int64_t level, const std::string& path) {
     void* voidstar = to_voidstar(schema, value);
     char* errmsg = NULL;
-    mlc_save_voidstar(voidstar, schema, (uint8_t)level, path.c_str(), &errmsg);
+    mlc_save_voidstar(voidstar, schema, level, path.c_str(), &errmsg);
     shfree_cpp(voidstar);
     if (errmsg != NULL) {
         PROPAGATE_ERROR(errmsg)
@@ -562,7 +562,7 @@ template <typename T>
 void _mlc_save_json(const T& value, Schema* schema, int64_t level, const std::string& path) {
     void* voidstar = to_voidstar(schema, value);
     char* errmsg = NULL;
-    mlc_save_json(voidstar, schema, (uint8_t)level, path.c_str(), &errmsg);
+    mlc_save_json(voidstar, schema, level, path.c_str(), &errmsg);
     shfree_cpp(voidstar);
     if (errmsg != NULL) {
         PROPAGATE_ERROR(errmsg)
@@ -889,7 +889,7 @@ inline void _mlc_write(Schema* schema, int64_t level, const T& value, int64_t ha
     void* voidstar = shmalloc_cpp(bytes);
     void* cursor = (uint8_t*)voidstar + schema->width;
     to_voidstar(voidstar, &cursor, schema, value);
-    int rc = mlc_write(static_cast<uint8_t>(level), handle, voidstar, &errmsg);
+    int rc = mlc_write(level, handle, voidstar, &errmsg);
     shfree_cpp(voidstar);
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
     _mlc_throw_if_pipe_closed(rc);

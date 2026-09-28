@@ -1,6 +1,10 @@
 //! Expression evaluator and constructor functions.
 //! Replaces eval.c. Uses HashMap instead of linked-list dict_t.
 
+// A value crossing this module is user data: a narrowing or sign change
+// goes through a checked conversion or a named helper, never `as`.
+#![deny(clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
@@ -9,6 +13,7 @@ use crate::cschema::CSchema;
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 use crate::manifest_ffi::*;
 use crate::shm::{self, AbsPtr, RelPtr};
+use morloc_runtime_types::{slice, width};
 
 /// Consume a C errmsg pointer, return its text (freeing the C string)
 /// or a fallback if it's null. Used by every intrinsic handler that
@@ -161,9 +166,8 @@ pub fn decimal_to_limbs(s: &str) -> Result<Vec<u64>, MorlocError> {
         let d = (b - b'0') as u64;
         let mut carry = d;
         for limb in limbs.iter_mut() {
-            let wide = (*limb as u128) * 10 + carry as u128;
-            *limb = wide as u64;
-            carry = (wide >> 64) as u64;
+            let wide = u128::from(*limb) * 10 + u128::from(carry);
+            (*limb, carry) = width::split_u128(wide);
         }
         if carry > 0 {
             limbs.push(carry);
@@ -191,6 +195,23 @@ pub fn decimal_to_limbs(s: &str) -> Result<Vec<u64>, MorlocError> {
     }
 
     Ok(limbs)
+}
+
+/// The inline `[size, value]` pair of an `Int` whose two's-complement limbs
+/// are `limbs`, or `None` when it needs more than one limb. A single limb is
+/// the value's own two's-complement bits.
+pub fn inline_bigint(limbs: &[u64]) -> Option<[i64; 2]> {
+    match limbs {
+        [] => Some(inline_i64(0)),
+        [v] => Some(inline_i64(v.cast_signed())),
+        _ => None,
+    }
+}
+
+/// The inline `[size, value]` pair of an `Int` holding `n`: one limb, even
+/// for zero, so every value has one encoding.
+pub fn inline_i64(n: i64) -> [i64; 2] {
+    [1, n]
 }
 
 /// Convert BigInt limbs (little-endian, two's complement) back to decimal string.
@@ -228,14 +249,16 @@ pub fn limbs_to_decimal(limbs: &[u64]) -> String {
         if work.len() == 1 && work[0] == 0 {
             break;
         }
-        // Divide work by 10, collect remainder
-        let mut remainder: u128 = 0;
+        // Long division by 10: each step's remainder is below 10, so each
+        // quotient `(remainder * 2^64 + limb) / 10` fits in 64 bits.
+        let mut remainder: u64 = 0;
         for limb in work.iter_mut().rev() {
-            let val = (remainder << 64) | (*limb as u128);
-            *limb = (val / 10) as u64;
-            remainder = val % 10;
+            let val = (u128::from(remainder) << 64) | u128::from(*limb);
+            let (q, _) = width::split_u128(val / 10);
+            *limb = q;
+            (remainder, _) = width::split_u128(val % 10);
         }
-        digits.push(remainder as u8 + b'0');
+        digits.push(b"0123456789"[width::usize_from_u64(remainder)]);
     }
 
     if digits.is_empty() {
@@ -460,21 +483,13 @@ unsafe fn apply_getter(
             let elem_schema = *(*value_schema).parameters as *const CSchema;
             let elem_width = (*elem_schema).width;
             let arr = &*(value as *const shm::Array);
-            let n = arr.size as i64;
-
             let idx_raw = read_optional_int(idx_ptr, idx_schema)?
                 .ok_or_else(|| MorlocError::Other(
                     "Bracket index cannot be Null".into()
                 ))?;
-            let idx = if idx_raw < 0 { idx_raw + n } else { idx_raw };
-            if idx < 0 || idx >= n {
-                return Err(MorlocError::Other(format!(
-                    "Bracket index {} out of bounds for array of size {}",
-                    idx_raw, n
-                )));
-            }
+            let idx = bracket_index(idx_raw, arr.size)?;
             let arr_data = shm::rel2abs(arr.data)?;
-            let src_elem = arr_data.add(idx as usize * elem_width);
+            let src_elem = arr_data.add(idx * elem_width);
 
             return apply_getter(
                 dest, return_index, return_schema, multi_terminal,
@@ -699,53 +714,19 @@ unsafe fn write_int_to_dest(
 ) -> Result<(), MorlocError> {
     use crate::schema::SerialType;
     let stype = (*schema).serial_type;
-    if stype == SerialType::Int as u32 {
-        let size: usize = if n == 0 { 0 } else { 1 };
-        ptr::copy_nonoverlapping(
-            &size as *const usize as *const u8,
-            dest,
-            std::mem::size_of::<usize>(),
-        );
-        ptr::copy_nonoverlapping(
-            &n as *const i64 as *const u8,
-            dest.add(std::mem::size_of::<usize>()),
-            std::mem::size_of::<i64>(),
-        );
-        Ok(())
-    } else if stype == SerialType::Sint64 as u32 || stype == SerialType::Uint64 as u32 {
-        ptr::copy_nonoverlapping(
-            &n as *const i64 as *const u8,
-            dest,
-            std::mem::size_of::<i64>(),
-        );
-        Ok(())
-    } else if stype == SerialType::Sint32 as u32 {
-        let v = n as i32;
-        ptr::copy_nonoverlapping(&v as *const i32 as *const u8, dest, 4);
-        Ok(())
-    } else if stype == SerialType::Uint32 as u32 {
-        let v = n as u32;
-        ptr::copy_nonoverlapping(&v as *const u32 as *const u8, dest, 4);
-        Ok(())
-    } else if stype == SerialType::Sint16 as u32 {
-        let v = n as i16;
-        ptr::copy_nonoverlapping(&v as *const i16 as *const u8, dest, 2);
-        Ok(())
-    } else if stype == SerialType::Uint16 as u32 {
-        let v = n as u16;
-        ptr::copy_nonoverlapping(&v as *const u16 as *const u8, dest, 2);
-        Ok(())
-    } else if stype == SerialType::Sint8 as u32 {
-        *(dest as *mut i8) = n as i8;
-        Ok(())
-    } else if stype == SerialType::Uint8 as u32 {
-        *(dest as *mut u8) = n as u8;
-        Ok(())
-    } else {
+    match SerialType::from_u32(stype) {
+        Some(SerialType::Int) => {
+            *(dest as *mut [i64; 2]) = inline_i64(n);
+            Some(Ok(()))
+        }
+        Some(kind) => width::write_int_slot(kind, dest, i128::from(n)),
+        None => None,
+    }
+    .unwrap_or_else(|| {
         Err(MorlocError::Other(format!(
             "write_int_to_dest: schema type {} is not an integer", stype,
         )))
-    }
+    })
 }
 
 /// Read an optional integer slot. RELNULL (or empty Optional schema)
@@ -769,6 +750,15 @@ unsafe fn read_optional_int(
     }
 }
 
+/// The element `idx` names in an array of `n`, counting from the end when
+/// negative.
+fn bracket_index(idx: i64, n: usize) -> Result<usize, MorlocError> {
+    slice::resolve_array_index(idx, n)
+        .ok_or_else(|| MorlocError::Other(format!(
+            "Bracket index {} out of bounds for array of size {}", idx, n
+        )))
+}
+
 /// Bracket-index evaluator: `arr[i]`. Reads `i` as an integer (any
 /// integer wire type; negative wraps from the end), bounds-checks, and
 /// deep-copies the selected element into `dest`. The receiver must be
@@ -784,20 +774,12 @@ unsafe fn apply_bracket_index(
     let elem_schema = *(*arr_schema).parameters as *const CSchema;
     let elem_width = (*elem_schema).width;
     let arr = &*(arr_ptr as *const shm::Array);
-    let n = arr.size as i64;
-
     let idx_raw = read_optional_int(idx_ptr, idx_schema)?
         .ok_or_else(|| MorlocError::Other("Bracket index cannot be Null".into()))?;
-    let idx = if idx_raw < 0 { idx_raw + n } else { idx_raw };
-    if idx < 0 || idx >= n {
-        return Err(MorlocError::Other(format!(
-            "Bracket index {} out of bounds for array of size {}",
-            idx_raw, n
-        )));
-    }
+    let idx = bracket_index(idx_raw, arr.size)?;
 
     let arr_data = shm::rel2abs(arr.data)?;
-    let src_elem = arr_data.add(idx as usize * elem_width);
+    let src_elem = arr_data.add(idx * elem_width);
     let elem_rs = crate::cschema::CSchema::to_rust(elem_schema);
     crate::voidstar::deep_copy(src_elem, dest, &elem_rs)?;
     Ok(())
@@ -825,53 +807,13 @@ unsafe fn apply_bracket_slice(
     let elem_schema = *(*arr_schema).parameters as *const CSchema;
     let elem_width = (*elem_schema).width;
     let arr = &*(arr_ptr as *const shm::Array);
-    let n = arr.size as i64;
-
-    let start_raw = read_optional_int(start_ptr, start_schema)?;
-    let stop_raw  = read_optional_int(stop_ptr,  stop_schema)?;
-    let step_raw  = read_optional_int(step_ptr,  step_schema)?;
-
-    let step: i64 = step_raw.unwrap_or(1);
-    if step == 0 {
-        return Err(MorlocError::Other("Bracket slice step cannot be 0".into()));
-    }
-
-    // Python-style normalization: negative values wrap from the end.
-    // Defaults depend on step direction; explicit user values are
-    // normalized and clamped, so the in-band sentinel -1 (default
-    // exclusive lower bound for negative step) is distinguishable
-    // from an explicit -1 (which wraps to n-1).
-    let normalize = |v: i64| if v < 0 { v + n } else { v };
-    let clamp = |v: i64| -> i64 {
-        if step > 0 {
-            v.max(0).min(n)
-        } else {
-            v.max(-1).min(n - 1)
-        }
-    };
-    let start_norm: i64 = match start_raw {
-        Some(v) => clamp(normalize(v)),
-        None    => if step > 0 { 0 } else { n - 1 },
-    };
-    let stop_norm: i64 = match stop_raw {
-        Some(v) => clamp(normalize(v)),
-        None    => if step > 0 { n } else { -1 },
-    };
-
-    let mut indices: Vec<i64> = Vec::new();
-    let mut i = start_norm;
-    if step > 0 {
-        while i < stop_norm {
-            indices.push(i);
-            i += step;
-        }
-    } else {
-        while i > stop_norm {
-            indices.push(i);
-            i += step;
-        }
-    }
-    let out_size = indices.len();
+    let slice = slice::Slice::over_array(
+        arr.size,
+        read_optional_int(start_ptr, start_schema)?,
+        read_optional_int(stop_ptr, stop_schema)?,
+        read_optional_int(step_ptr, step_schema)?,
+    )?;
+    let out_size = width::usize_from_u64(slice.len());
 
     let out_relptr: shm::RelPtr = if out_size == 0 {
         shm::RELNULL
@@ -879,8 +821,8 @@ unsafe fn apply_bracket_slice(
         let arr_data = shm::rel2abs(arr.data)?;
         let buf = shm::shcalloc(out_size, elem_width)?;
         let elem_rs = crate::cschema::CSchema::to_rust(elem_schema);
-        for (out_i, &src_idx) in indices.iter().enumerate() {
-            let src_elem = arr_data.add(src_idx as usize * elem_width);
+        for (out_i, src_idx) in slice.positions().enumerate() {
+            let src_elem = arr_data.add(src_idx * elem_width);
             let dst_elem = buf.add(out_i * elem_width);
             crate::voidstar::deep_copy(src_elem, dst_elem, &elem_rs)?;
         }
@@ -1013,15 +955,14 @@ unsafe fn morloc_eval_r(
                 // Variable-width integer: parse decimal string into inline BigInt
                 let s = std::mem::ManuallyDrop::into_inner(ptr::read(&(*data).data.lit_val)).s;
                 let decimal = if s.is_null() { "0" } else {
-                    std::ffi::CStr::from_ptr(s).to_str().unwrap_or("0")
+                    std::ffi::CStr::from_ptr(s).to_str().map_err(|_| {
+                        MorlocError::Other("Int literal is not valid UTF-8".into())
+                    })?
                 };
                 let limbs = decimal_to_limbs(decimal)?;
                 let nlimbs = limbs.len();
-                let fields = dest as *mut i64;
-                if nlimbs <= 1 {
-                    // Inline: [size=nlimbs, value]
-                    *fields = nlimbs as i64;
-                    *fields.add(1) = if nlimbs == 1 { limbs[0] as i64 } else { 0 };
+                if let Some(inline) = inline_bigint(&limbs) {
+                    *(dest as *mut [i64; 2]) = inline;
                 } else {
                     // Overflow: [size=nlimbs, relptr to limb array]
                     let abs = shm::shmemcpy(
@@ -1348,17 +1289,10 @@ unsafe fn morloc_eval_r(
             let fmt = CStr::from_ptr((*save).format).to_str().unwrap_or("voidstar");
 
             let value_schema = (*value_expr).schema;
-            // Evaluate the compression level. The level expression is
-            // typechecked as Int; clamp into u8 with a 0-9 range check.
+            // The level is a user Int; the save entry points range-check it.
             let level_schema = (*level_expr).schema;
             let level_result = morloc_eval_r(level_expr, ptr::null_mut(), 0, bndvars)?;
-            let level_i64 = read_int_as_i64(level_result, level_schema)?;
-            if !(0..=9).contains(&level_i64) {
-                return Err(MorlocError::Other(format!(
-                    "@save compression level must be in 0..=9, got {level_i64}"
-                )));
-            }
-            let level: u8 = level_i64 as u8;
+            let level = read_int_as_i64(level_result, level_schema)?;
 
             let value_result = morloc_eval_r(value_expr, ptr::null_mut(), 0, bndvars)?;
             let path_result = morloc_eval_r(path_expr, ptr::null_mut(), 0, bndvars)?;
@@ -1373,11 +1307,7 @@ unsafe fn morloc_eval_r(
             ptr::copy_nonoverlapping(path_abs, path_cstr as *mut u8, path_arr.size);
             *path_cstr.add(path_arr.size) = 0;
 
-            extern "C" {
-                fn mlc_save(data: *const c_void, schema: *const CSchema, level: u8, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
-                fn mlc_save_json(data: *const c_void, schema: *const CSchema, level: u8, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
-                fn mlc_save_voidstar(data: *const c_void, schema: *const CSchema, level: u8, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
-            }
+            use crate::intrinsics::{mlc_save, mlc_save_json, mlc_save_voidstar};
             let mut err: *mut c_char = ptr::null_mut();
             let rc = match fmt {
                 "json" => mlc_save_json(value_result as *const c_void, value_schema, level, path_cstr, &mut err),
@@ -1553,7 +1483,7 @@ unsafe fn morloc_eval_r(
                             block,
                             std::slice::from_raw_parts(path_cstr as *const u8, path_len),
                         );
-                        shm::abs2rel(block)? as u64
+                        sh::path_payload(shm::abs2rel(block)?)
                     };
                     sh::write_field(dest, sh::TAG_PATH, payload);
                     libc::free(path_cstr as *mut c_void);
@@ -1570,7 +1500,7 @@ unsafe fn morloc_eval_r(
                         let msg = take_c_errmsg_or(err, "@open IStream: mlc_open returned -1 without errmsg");
                         return Err(MorlocError::UserThrow(msg));
                     }
-                    sh::write_field(dest, sh::TAG_HANDLE, handle as u64);
+                    sh::write_field(dest, sh::TAG_HANDLE, sh::handle_payload(handle));
                 }
                 other => {
                     libc::free(path_cstr as *mut c_void);
@@ -1708,7 +1638,7 @@ unsafe fn morloc_eval_r(
                 let msg = take_c_errmsg_or(err, "mlc_stream returned -1");
                 return Err(MorlocError::Other(msg));
             }
-            sh::write_field(dest, sh::TAG_HANDLE, new_h as u64);
+            sh::write_field(dest, sh::TAG_HANDLE, sh::handle_payload(new_h));
         }
 
         MorlocExpressionType::IFileWalk => {
@@ -1724,7 +1654,7 @@ unsafe fn morloc_eval_r(
             let w = (*expr).expr.ifile_walk_expr;
             let handle_expr = (*w).handle;
             let path_cstr = (*w).path;
-            let n_args = (*w).n_args as usize;
+            let n_args = width::usize_from_u64((*w).n_args);
 
             let handle_schema = (*handle_expr).schema;
             let handle_ptr = morloc_eval_r(handle_expr, ptr::null_mut(), 0, bndvars)?;
@@ -1808,19 +1738,13 @@ unsafe fn morloc_eval_r(
                 let msg = take_c_errmsg_or(err, "@open OStream: mlc_open_ostream returned -1 without errmsg");
                 return Err(MorlocError::UserThrow(msg));
             }
-            sh::write_field(dest, sh::TAG_HANDLE, handle as u64);
+            sh::write_field(dest, sh::TAG_HANDLE, sh::handle_payload(handle));
         }
 
         MorlocExpressionType::Write => {
             // @write: layout via ifile_walk_expr -- handle in .handle,
             // args[0] = level, args[1] = value (a `[a]` voidstar).
-            extern "C" {
-                fn mlc_write(
-                    level: u8, handle: i64,
-                    payload_voidstar: *const c_void,
-                    errmsg: *mut *mut c_char,
-                ) -> i32;
-            }
+            use crate::intrinsics::mlc_write;
             let w = (*expr).expr.ifile_walk_expr;
             let handle_expr = (*w).handle;
             let handle_schema = (*handle_expr).schema;
@@ -1838,7 +1762,7 @@ unsafe fn morloc_eval_r(
             let level_i = read_int_as_i64(level_ptr, level_schema)?;
             let value_voidstar = morloc_eval_r(value_expr, ptr::null_mut(), 0, bndvars)?;
             let mut err: *mut c_char = ptr::null_mut();
-            let rc = mlc_write(level_i as u8, handle_i, value_voidstar as *const c_void, &mut err);
+            let rc = mlc_write(level_i, handle_i, value_voidstar as *const c_void, &mut err);
             if rc != 0 {
                 let msg = take_c_errmsg_or(err, "@write: mlc_write returned non-zero without errmsg");
                 return Err(MorlocError::UserThrow(msg));
@@ -1876,7 +1800,7 @@ unsafe fn morloc_eval_r(
                 return Err(MorlocError::UserThrow(msg));
             }
             use morloc_runtime_types::stream_handle as sh;
-            sh::write_field(dest, sh::TAG_HANDLE, handle as u64);
+            sh::write_field(dest, sh::TAG_HANDLE, sh::handle_payload(handle));
         }
 
         MorlocExpressionType::Concat => {
@@ -1972,7 +1896,7 @@ unsafe fn morloc_eval_r(
                 let msg = take_c_errmsg_or(err, "mlc_open_std* returned -1 without errmsg");
                 return Err(MorlocError::UserThrow(msg));
             }
-            sh::write_field(dest, sh::TAG_HANDLE, handle as u64);
+            sh::write_field(dest, sh::TAG_HANDLE, sh::handle_payload(handle));
         }
 
         MorlocExpressionType::Flush => {
@@ -2033,6 +1957,11 @@ unsafe fn morloc_eval_r(
                     ))
                 }
             };
+            let n_arms = (*vschema).size;
+            let tag_byte = |t: usize| width::arm_tag(t, n_arms).ok_or_else(|| {
+                MorlocError::Other(format!("@try: arm {} has no one-byte tag", t))
+            });
+            let (ok_byte, err_byte) = (tag_byte(ok_tag)?, tag_byte(err_tag)?);
             let ok_arm = *(*vschema).parameters.add(ok_tag);
             let err_arm = *(*vschema).parameters.add(err_tag);
             // Both arms are indexed at field 0 below. A type named Try whose
@@ -2055,7 +1984,7 @@ unsafe fn morloc_eval_r(
             let ok_width = (*(*(*ok_arm).parameters.add(0))).width;
             match morloc_eval_r(body, ok_payload.add(ok_off), ok_width, bndvars) {
                 Ok(_) => {
-                    *dest = ok_tag as u8;
+                    *dest = ok_byte;
                     ptr::write_bytes(dest.add(1), 0, 7);
                     *(dest.add(8) as *mut shm::RelPtr) = shm::abs2rel(ok_payload)?;
                 }
@@ -2077,7 +2006,7 @@ unsafe fn morloc_eval_r(
                         err_payload.add(err_off),
                         std::mem::size_of::<shm::Array>(),
                     );
-                    *dest = err_tag as u8;
+                    *dest = err_byte;
                     ptr::write_bytes(dest.add(1), 0, 7);
                     *(dest.add(8) as *mut shm::RelPtr) = shm::abs2rel(err_payload)?;
                 }

@@ -8,6 +8,10 @@
 //! The only remaining `unsafe` blocks are `libc::snprintf` for float
 //! formatting and constructing readers/writers at known-valid offsets.
 
+// A value crossing this module is user data: a narrowing or sign change
+// goes through a checked conversion or a named helper, never `as`.
+#![deny(clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+
 use crate::error::MorlocError;
 use crate::schema::{Schema, SerialType};
 use crate::shm::{self, AbsPtr, Array, RelPtr, RELNULL};
@@ -15,6 +19,7 @@ use crate::walk::{self, Frame, Stack, Visit, Walker};
 use serde_json::value::RawValue;
 use std::io::{self, Write};
 use std::str::FromStr;
+use morloc_runtime_types::width::{self, out_of_range, IntSlot};
 
 // ── Safe SHM abstractions ────────────────────────────────────────────────────
 
@@ -579,11 +584,11 @@ fn write_leaf(
             };
             let w = alloc(dest, 1)?; w.write_val::<u8>(0, b); Ok(w.as_ptr())
         }
-        SerialType::Sint8  => { let w = alloc(dest, 1)?; w.write_val::<i8>(0,  parse_sint(text, i8::MIN  as i64, i8::MAX  as i64, "I8")?  as i8);  Ok(w.as_ptr()) }
-        SerialType::Sint16 => { let w = alloc(dest, 2)?; w.write_val::<i16>(0, parse_sint(text, i16::MIN as i64, i16::MAX as i64, "I16")? as i16); Ok(w.as_ptr()) }
-        SerialType::Sint32 => { let w = alloc(dest, 4)?; w.write_val::<i32>(0, parse_sint(text, i32::MIN as i64, i32::MAX as i64, "I32")? as i32); Ok(w.as_ptr()) }
-        SerialType::Sint64 => { let w = alloc(dest, 8)?; w.write_val::<i64>(0, parse_sint(text, i64::MIN,        i64::MAX,        "I64")?);        Ok(w.as_ptr()) }
-        SerialType::Uint8  => { let w = alloc(dest, 1)?; w.write_val::<u8>(0,  parse_uint(text, u8::MAX  as u64, "U8")?  as u8);  Ok(w.as_ptr()) }
+        SerialType::Sint8  => { let w = alloc(dest, 1)?; w.write_val::<i8>(0,  parse_int::<i8>(text)?);  Ok(w.as_ptr()) }
+        SerialType::Sint16 => { let w = alloc(dest, 2)?; w.write_val::<i16>(0, parse_int::<i16>(text)?); Ok(w.as_ptr()) }
+        SerialType::Sint32 => { let w = alloc(dest, 4)?; w.write_val::<i32>(0, parse_int::<i32>(text)?); Ok(w.as_ptr()) }
+        SerialType::Sint64 => { let w = alloc(dest, 8)?; w.write_val::<i64>(0, parse_int::<i64>(text)?); Ok(w.as_ptr()) }
+        SerialType::Uint8  => { let w = alloc(dest, 1)?; w.write_val::<u8>(0,  parse_int::<u8>(text)?);  Ok(w.as_ptr()) }
         // JSON is the human- and LLM-facing format, so an enum reads and
         // writes as its constructor NAME. Only a declared name is accepted,
         // and a rejection names the whole legal set -- which is possible
@@ -605,13 +610,17 @@ fn write_leaf(
                 ))
             })?;
             let w = alloc(dest, 1)?;
-            w.write_val::<u8>(0, tag as u8);
+            w.write_val::<u8>(0, width::arm_tag(tag, schema.size).ok_or_else(|| err("enum tag out of range"))?);
             Ok(w.as_ptr())
         }
-        SerialType::Uint16 => { let w = alloc(dest, 2)?; w.write_val::<u16>(0, parse_uint(text, u16::MAX as u64, "U16")? as u16); Ok(w.as_ptr()) }
-        SerialType::Uint32 => { let w = alloc(dest, 4)?; w.write_val::<u32>(0, parse_uint(text, u32::MAX as u64, "U32")? as u32); Ok(w.as_ptr()) }
-        SerialType::Uint64 => { let w = alloc(dest, 8)?; w.write_val::<u64>(0, parse_uint(text, u64::MAX,        "U64")?);        Ok(w.as_ptr()) }
-        SerialType::Float32 => { let w = alloc(dest, 4)?; w.write_val::<f32>(0, parse_float(text, "F32")? as f32); Ok(w.as_ptr()) }
+        SerialType::Uint16 => { let w = alloc(dest, 2)?; w.write_val::<u16>(0, parse_int::<u16>(text)?); Ok(w.as_ptr()) }
+        SerialType::Uint32 => { let w = alloc(dest, 4)?; w.write_val::<u32>(0, parse_int::<u32>(text)?); Ok(w.as_ptr()) }
+        SerialType::Uint64 => { let w = alloc(dest, 8)?; w.write_val::<u64>(0, parse_int::<u64>(text)?); Ok(w.as_ptr()) }
+        SerialType::Float32 => {
+            let v = parse_float(text, "F32")?;
+            let f = width::f32_nearest(v)?;
+            let w = alloc(dest, 4)?; w.write_val::<f32>(0, f); Ok(w.as_ptr())
+        }
         SerialType::Float64 => { let w = alloc(dest, 8)?; w.write_val::<f64>(0, parse_float(text, "F64")?);        Ok(w.as_ptr()) }
 
         SerialType::Int => {
@@ -623,10 +632,10 @@ fn write_leaf(
             let limbs = crate::eval_ffi::decimal_to_limbs(digits)?;
             let nlimbs = limbs.len();
             // Inline layout: [size:i64, value_or_relptr:i64] = 16 bytes
-            if nlimbs <= 1 {
+            if let Some([size, value]) = crate::eval_ffi::inline_bigint(&limbs) {
                 let w = alloc(dest, 16)?;
-                w.write_val::<i64>(0, nlimbs as i64);
-                w.write_val::<i64>(8, if nlimbs == 1 { limbs[0] as i64 } else { 0 });
+                w.write_val::<i64>(0, size);
+                w.write_val::<i64>(8, value);
                 return Ok(w.as_ptr());
             }
             let limb_bytes = nlimbs * 8;
@@ -694,25 +703,25 @@ fn write_leaf(
             let (w, payload) = if dest.is_some() {
                 let w = alloc(dest, sh::STREAM_HANDLE_FIELD_SIZE)?;
                 let payload = if bytes.is_empty() {
-                    RELNULL as u64
+                    sh::RELNULL_PAYLOAD
                 } else {
                     let block = shm::shmalloc(sh::path_suballoc_size(bytes.len()))?;
                     parts.push(block);
                     unsafe { sh::write_path_suballoc(block, bytes); }
-                    shm::abs2rel(block)? as u64
+                    sh::path_payload(shm::abs2rel(block)?)
                 };
                 (w, payload)
             } else {
                 let suballoc = sh::path_suballoc_size(bytes.len());
                 let w = alloc(None, sh::STREAM_HANDLE_FIELD_SIZE + suballoc)?;
                 let payload = if bytes.is_empty() {
-                    RELNULL as u64
+                    sh::RELNULL_PAYLOAD
                 } else {
                     let body_ptr = unsafe {
                         w.as_ptr().add(sh::STREAM_HANDLE_FIELD_SIZE)
                     };
                     unsafe { sh::write_path_suballoc(body_ptr, bytes); }
-                    shm::abs2rel(body_ptr)? as u64
+                    sh::path_payload(shm::abs2rel(body_ptr)?)
                 };
                 (w, payload)
             };
@@ -936,7 +945,7 @@ impl<'a, 'r, 't> Walker<u64> for LoadWalk<'a, 'r, 't> {
                     }
                     return self.lx.expect(b']');
                 }
-                let id = x as usize;
+                let id = width::usize_from_u64(x);
                 let mut members = f.idx;
                 loop {
                     if self.lx.peek() == Some(b'}') {
@@ -1042,7 +1051,7 @@ impl<'a, 'r, 't> Walker<u64> for LoadWalk<'a, 'r, 't> {
                     ))
                 })?;
                 let arm = &schema.parameters[tag];
-                w.write_val::<u8>(0, tag as u8);
+                w.write_val::<u8>(0, width::arm_tag(tag, schema.size).ok_or_else(|| err("variant tag out of range"))?);
                 // The seven bytes between the tag and the payload pointer
                 // are written explicitly so a variant's bytes are fully
                 // determined by its value, rather than by whatever the
@@ -1532,11 +1541,11 @@ impl<'a, 'r> Walker<Pretty> for JsonWalk<'a, 'r> {
                 let tag = unsafe { sh::read_tag(field_ptr) };
                 let payload = unsafe { sh::read_payload(field_ptr) };
                 if tag == sh::TAG_PATH {
-                    if payload == RELNULL as u64 {
+                    if payload == sh::RELNULL_PAYLOAD {
                         map_io(w.write_all(b"\"\""))?;
                     } else {
-                        let suballoc = shm::rel2abs(payload as shm::RelPtr)?;
-                        let path_len = unsafe { sh::read_path_size(suballoc) } as usize;
+                        let suballoc = shm::rel2abs(sh::payload_relptr(payload))?;
+                        let path_len = width::usize_from_u64(unsafe { sh::read_path_size(suballoc) });
                         if path_len == 0 {
                             map_io(w.write_all(b"\"\""))?;
                         } else {
@@ -1552,7 +1561,7 @@ impl<'a, 'r> Walker<Pretty> for JsonWalk<'a, 'r> {
                         }
                     }
                 } else if tag == sh::TAG_HANDLE {
-                    let path = crate::stream::handle_path(payload as i64)?;
+                    let path = crate::stream::handle_path(sh::payload_handle(payload))?;
                     json_escape(&path, w)?;
                 } else {
                     return Err(MorlocError::Serialization(format!(
@@ -1736,74 +1745,29 @@ fn extract_bigint_digits(text: &str) -> Result<&str, MorlocError> {
     Ok(body)
 }
 
-/// Parse a fixed-width signed integer leaf. Operates directly on the raw
-/// JSON text (preserves precision for diagnostics), rejects float syntax,
-/// and reports out-of-range values with the original magnitude verbatim.
-fn parse_sint(text: &str, lo: i64, hi: i64, name: &str) -> Result<i64, MorlocError> {
+/// Parse a fixed-width integer leaf with the slot type's own parser.
+/// Operates directly on the raw JSON text, so a rejected value is reported
+/// with its original magnitude verbatim.
+fn parse_int<T: IntSlot>(text: &str) -> Result<T, MorlocError> {
+    use std::num::IntErrorKind;
     let t = text.trim();
-    if t.bytes().any(|b| b == b'.' || b == b'e' || b == b'E') {
-        return Err(MorlocError::Serialization(format!(
-            "expected integer for {}, got {}", name, truncate_for_msg(t)
-        )));
-    }
-    match i64::from_str(t) {
-        Ok(v) if v >= lo && v <= hi => Ok(v),
-        Ok(v) => Err(MorlocError::Serialization(format!(
-            "value {} out of range for {} (range {} to {})", v, name, lo, hi
-        ))),
-        Err(_) => {
-            // i64::from_str failed: the value is either malformed or exceeds
-            // i64. If the body is a valid decimal-digit run (with optional
-            // leading '-'), it must be out of range; otherwise it's invalid.
-            let body = t.strip_prefix('-').unwrap_or(t);
-            if !body.is_empty() && body.bytes().all(|b| b.is_ascii_digit()) {
-                Err(MorlocError::Serialization(format!(
-                    "value {} out of range for {} (range {} to {})", t, name, lo, hi
-                )))
-            } else {
-                Err(MorlocError::Serialization(format!(
-                    "invalid integer for {}: {}", name, truncate_for_msg(t)
-                )))
-            }
-        }
-    }
-}
-
-fn parse_uint(text: &str, hi: u64, name: &str) -> Result<u64, MorlocError> {
-    let t = text.trim();
-    if t.bytes().any(|b| b == b'.' || b == b'e' || b == b'E') {
-        return Err(MorlocError::Serialization(format!(
-            "expected unsigned integer for {}, got {}", name, truncate_for_msg(t)
-        )));
-    }
-    if let Some(rest) = t.strip_prefix('-') {
-        // Negative is necessarily out of range for unsigned; report so.
-        if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(MorlocError::Serialization(format!(
-                "value {} out of range for {} (range 0 to {})", t, name, hi
-            )));
-        }
-        return Err(MorlocError::Serialization(format!(
-            "invalid unsigned integer for {}: {}", name, truncate_for_msg(t)
-        )));
-    }
-    match u64::from_str(t) {
-        Ok(v) if v <= hi => Ok(v),
-        Ok(v) => Err(MorlocError::Serialization(format!(
-            "value {} out of range for {} (range 0 to {})", v, name, hi
-        ))),
-        Err(_) => {
-            if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) {
-                Err(MorlocError::Serialization(format!(
-                    "value {} out of range for {} (range 0 to {})", t, name, hi
-                )))
-            } else {
-                Err(MorlocError::Serialization(format!(
-                    "invalid unsigned integer for {}: {}", name, truncate_for_msg(t)
-                )))
-            }
-        }
-    }
+    let e = match T::from_str(t) {
+        Ok(v) => return Ok(v),
+        Err(e) => e,
+    };
+    let kind = if T::LO == 0 { "unsigned integer" } else { "integer" };
+    let is_digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    Err(match e.kind() {
+        IntErrorKind::PosOverflow | IntErrorKind::NegOverflow => out_of_range::<T>(&t),
+        // A negative is out of range for an unsigned slot, including "-0".
+        _ if T::LO == 0 && t.strip_prefix('-').is_some_and(is_digits) => out_of_range::<T>(&t),
+        _ if t.bytes().any(|b| b == b'.' || b == b'e' || b == b'E') => MorlocError::Serialization(
+            format!("expected {} for {}, got {}", kind, T::NAME, truncate_for_msg(t)),
+        ),
+        _ => MorlocError::Serialization(
+            format!("invalid {} for {}: {}", kind, T::NAME, truncate_for_msg(t)),
+        ),
+    })
 }
 
 // Non-finite IEEE-754 values cannot appear as numeric literals in RFC 8259
@@ -1854,11 +1818,10 @@ fn write_float(w: &mut dyn Write, f: f64, fmt: &[u8]) -> Result<(), MorlocError>
     let mut cbuf = [0u8; 64];
     // SAFETY: snprintf writes to stack-local buffer with explicit size limit
     let n = unsafe { libc::snprintf(cbuf.as_mut_ptr() as *mut libc::c_char, cbuf.len(), fmt.as_ptr() as *const libc::c_char, f) };
-    if n > 0 && (n as usize) < cbuf.len() {
+    match usize::try_from(n) {
         // snprintf produces ASCII digits/sign/exponent -- no UTF-8 check needed.
-        map_io(w.write_all(&cbuf[..n as usize]))
-    } else {
-        map_io(w.write_all(b"0"))
+        Ok(k) if k > 0 && k < cbuf.len() => map_io(w.write_all(&cbuf[..k])),
+        _ => Err(MorlocError::Serialization(format!("could not format the float {}", f))),
     }
 }
 

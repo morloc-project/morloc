@@ -4,6 +4,7 @@
 #include <R_ext/Arith.h>
 #include <Rversion.h>
 
+#include <math.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdarg.h>
@@ -305,23 +306,37 @@ static SEXP make_integer64_scalar(int64_t v) {
     return s;
 }
 
-// Read an int64_t from an R SEXP. Accepts:
-//   * INTSXP            -- widen from int32
-//   * REALSXP integer64 -- bit-reinterpret 8 bytes as int64
-//   * REALSXP plain     -- truncate the double (range-checked by callers)
-// Returns 0 on type error so callers handle it via their own guards.
+// The first element of an integer, double or integer64 vector as an exact
+// int64. NA, a fraction, or a double outside int64 is an error, never a
+// rounded or wrapped value.
 static int64_t i64_from_sexp(SEXP obj) {
+    if (XLENGTH(obj) < 1) {
+        MORLOC_ERROR("expected an integer, got an empty %s", type2char(TYPEOF(obj)));
+    }
     if (TYPEOF(obj) == INTSXP) {
-        return (int64_t)INTEGER(obj)[0];
+        int v = INTEGER(obj)[0];
+        if (v == NA_INTEGER) {
+            MORLOC_ERROR("expected an integer, got NA");
+        }
+        return (int64_t)v;
     }
     if (TYPEOF(obj) == REALSXP) {
         if (is_integer64(obj)) {
             int64_t v;
             memcpy(&v, &REAL(obj)[0], sizeof(int64_t));
+            if (v == INT64_MIN) {
+                MORLOC_ERROR("expected an integer, got NA");
+            }
             return v;
         }
-        return (int64_t)REAL(obj)[0];
+        double d = REAL(obj)[0];
+        // [-2^63, 2^63) is exactly the doubles that convert without overflow.
+        if (!(d >= -9223372036854775808.0 && d < 9223372036854775808.0) || d != trunc(d)) {
+            MORLOC_ERROR("expected an integer, got %g", d);
+        }
+        return (int64_t)d;
     }
+    MORLOC_ERROR("expected an integer, got %s", type2char(TYPEOF(obj)));
     return 0;
 }
 
@@ -557,8 +572,8 @@ static void r_size_step(r_walk_t* w, const Schema* schema, SEXP obj, size_t idx)
                 // String stays at natural element alignment (1 byte for chars);
                 // Array bumps to 64 for primitive numeric elements (SIMD/BLAS).
                 size_t buf_align = (schema->type == MORLOC_STRING)
-                    ? schema_alignment(schema->parameters[0])
-                    : array_data_alignment(schema->parameters[0]);
+                    ? schema->parameters[0]->alignment
+                    : schema->parameters[0]->data_alignment;
                 size += buf_align - 1;
                 // Array of IFile handles: each element is wire-encoded as
                 // Array<u8>(path). The REALSXP fast-path below would treat
@@ -734,8 +749,7 @@ static void r_size_step(r_walk_t* w, const Schema* schema, SEXP obj, size_t idx)
             }
             {
                 SEXP vfields = VECTOR_ELT(obj, 1);
-                size_t varm_align = schema_alignment(varm);
-                if (varm_align == 0) varm_align = 1;
+                size_t varm_align = varm->alignment;
                 w->total += (ssize_t)(schema->width + (varm_align - 1));
                 r_size_child(w, varm, vfields, 0);
                 return;
@@ -752,8 +766,7 @@ static void r_size_step(r_walk_t* w, const Schema* schema, SEXP obj, size_t idx)
             }
             {
                 const Schema* inner = r_resolve(schema->parameters[0]);
-                size_t inner_align = schema_alignment(inner);
-                if (inner_align == 0) inner_align = 1;
+                size_t inner_align = inner->alignment;
                 w->total += (ssize_t)(schema->width + (inner_align - 1));
                 r_size_child(w, inner, obj, 0);
                 return;
@@ -1152,7 +1165,7 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                 array->size = length;  // Do not include null terminator
                 if(length > 0){
                     // String character data: natural alignment (1 byte for chars)
-                    *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, schema_alignment(schema->parameters[0]));
+                    *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, schema->parameters[0]->alignment);
                     array->data = R_TRY(abs2rel, *cursor);
                     absptr_t tmp_ptr = R_TRY(rel2abs, array->data);
                     memcpy(tmp_ptr, str, array->size);
@@ -1187,7 +1200,7 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
 
             // align cursor for element data placement
             // (bumps to 64 for primitive numerics for SIMD/BLAS)
-            *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, array_data_alignment(schema->parameters[0]));
+            *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, schema->parameters[0]->data_alignment);
             array->data = R_TRY(abs2rel, *cursor);
             const Schema* element_schema = r_resolve(schema->parameters[0]);
             char* start;
@@ -1395,8 +1408,7 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                 *(relptr_t*)((char*)dest + 8) = RELNULL;
             } else {
                 SEXP wfields = VECTOR_ELT(obj, 1);
-                size_t warm_align = schema_alignment(warm);
-                if (warm_align == 0) warm_align = 1;
+                size_t warm_align = warm->alignment;
                 *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, warm_align);
                 {
                     char* rel_err = NULL;
@@ -1419,8 +1431,7 @@ static void r_write_step(r_walk_t* w, const Schema* schema, void* dest, SEXP obj
                 *((relptr_t*)dest) = RELNULL;
             } else {
                 const Schema* inner_schema = r_resolve(schema->parameters[0]);
-                size_t inner_align = schema_alignment(inner_schema);
-                if (inner_align == 0) inner_align = 1;
+                size_t inner_align = inner_schema->alignment;
                 *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, inner_align);
                 {
                     char* rel_err = NULL;
@@ -2560,7 +2571,7 @@ SEXP morloc_mlc_tell(void) { MAYFAIL
 // hand off to the corresponding libmorloc save function, free the SHM
 // block. Each wrapper passes the libmorloc function pointer for the
 // format-specific write.
-typedef int (*morloc_save_fn)(const absptr_t, const Schema*, uint8_t,
+typedef int (*morloc_save_fn)(const absptr_t, const Schema*, int64_t,
                               const char*, char**);
 
 static SEXP morloc_mlc_save_dispatch(SEXP obj_r, SEXP schema_str_r,
@@ -2577,7 +2588,7 @@ static SEXP morloc_mlc_save_dispatch(SEXP obj_r, SEXP schema_str_r,
     if (TYPEOF(path_r) != STRSXP || LENGTH(path_r) != 1) {
         MORLOC_ERROR("%s: path must be a single string", fn_name);
     }
-    uint8_t level = (uint8_t)asInteger(level_r);
+    int64_t level = i64_from_sexp(level_r);
     const char* path = CHAR(STRING_ELT(path_r, 0));
 
     char* schema_str = strdup(CHAR(STRING_ELT(schema_str_r, 0)));
@@ -2755,7 +2766,7 @@ static inline void r_optint_to_pair(SEXP x, uint8_t* has_out, int64_t* val_out) 
             return;
         }
         if (ISNA(REAL(x)[0])) { *has_out = 0; return; }
-        *val_out = (int64_t)REAL(x)[0];
+        *val_out = i64_from_sexp(x);
         return;
     }
     *has_out = 0;
@@ -2999,7 +3010,7 @@ SEXP morloc_mlc_write(SEXP schema_str_r, SEXP level_r, SEXP value_r, SEXP handle
     }
     const char* schema_str = CHAR(STRING_ELT(schema_str_r, 0));
     int64_t handle = i64_from_sexp(handle_r);
-    uint8_t level = (uint8_t)i64_from_sexp(level_r);
+    int64_t level = i64_from_sexp(level_r);
     Schema* schema = R_TRY(parse_schema, schema_str);
     size_t bytes = get_shm_size(schema, value_r);
     void* voidstar = R_TRY(shmalloc, bytes);

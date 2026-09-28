@@ -322,7 +322,7 @@ fn check_case(
             serde_json::Value::Array(xs) => expected.extend(xs),
             other => panic!("list rendered as {other}"),
         }
-        shared_write_subpacket(out, level, ptr)?;
+        shared_write_subpacket(out, crate::compression::CompressionLevel::from_u8(level)?, ptr)?;
         let _ = shm::shfree(ptr);
         if matches!(mode, Write::Flushed) && i == 0 {
             shared_flush_buffer(out)?;
@@ -543,7 +543,7 @@ fn many_subpacket_round_trips() {
                 serde_json::Value::Array(xs) => expected.extend(xs),
                 v => panic!("list rendered as {v}"),
             }
-            shared_write_subpacket(out, 0, ptr).unwrap();
+            shared_write_subpacket(out, crate::compression::CompressionLevel::NONE, ptr).unwrap();
             let _ = shm::shfree(ptr);
         }
         shared_close_handle(out).unwrap();
@@ -610,7 +610,7 @@ fn handle_paths_are_written_in_place() {
         let ints = parse_schema("ai8").unwrap();
         let v = read_json_with_schema("[1,2,3]", &ints).unwrap();
         let h = shared_open_ostream_with_schema(t, "ai8").unwrap();
-        shared_write_subpacket(h, 0, v).unwrap();
+        shared_write_subpacket(h, crate::compression::CompressionLevel::NONE, v).unwrap();
         shared_close_handle(h).unwrap();
         let _ = shm::shfree(v);
     }
@@ -626,13 +626,13 @@ fn handle_paths_are_written_in_place() {
         let arr = &*(value as *const crate::shm_types::Array);
         let data = shm::rel2abs(arr.data).unwrap();
         for k in 0..n {
-            sh::write_field(data.add(k * elem.width + elem.offsets[1]), sh::TAG_HANDLE, handles[k % 2] as u64);
+            sh::write_field(data.add(k * elem.width + elem.offsets[1]), sh::TAG_HANDLE, sh::handle_payload(handles[k % 2]));
         }
     }
     let path = dir.join("records.stream");
     let path = path.to_str().unwrap();
     let out = shared_open_ostream_with_schema(path, "at2sF").unwrap();
-    shared_write_subpacket(out, 0, value).unwrap();
+    shared_write_subpacket(out, crate::compression::CompressionLevel::NONE, value).unwrap();
     shared_close_handle(out).unwrap();
     let _ = shm::shfree(value);
 

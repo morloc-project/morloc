@@ -29,7 +29,7 @@
 //! - `2..=255`: reserved (future content-hash / URI / inline-blob
 //!   encodings). Decoders return a clean "unsupported encoding" error.
 
-use crate::shm_types::Array;
+use crate::shm_types::{Array, RelPtr, RELNULL};
 
 /// Total inline width of a stream-handle field in voidstar.
 pub const STREAM_HANDLE_FIELD_SIZE: usize = 16;
@@ -45,18 +45,40 @@ pub const TAG_PATH: u8 = 0;
 /// `TAG_HANDLE`: payload is a bare slot-id handle.
 pub const TAG_HANDLE: u8 = 1;
 
-/// The RELNULL sentinel expressed as the `u64` payload bit pattern used
-/// in `TAG_PATH` fields whose path is empty. Matches
-/// `shm::RELNULL as u64` (`0xFFFF_FFFF_FFFF_FFFF`) so codec sites can
-/// compare payloads to it directly without casting `isize` to `u64` at
-/// every use.
+/// The payload of a `TAG_PATH` field whose path is empty:
+/// `path_payload(RELNULL)`.
 pub const RELNULL_PAYLOAD: u64 = !0u64;
+
+/// The payload of a `TAG_PATH` field whose path block is at `rel`.
+#[inline]
+pub const fn path_payload(rel: RelPtr) -> u64 {
+    crate::width::i64_from_isize(rel).cast_unsigned()
+}
+
+/// The relative pointer a `TAG_PATH` payload holds.
+#[inline]
+pub const fn payload_relptr(payload: u64) -> RelPtr {
+    crate::width::isize_from_i64(payload.cast_signed())
+}
+
+/// The payload of a `TAG_HANDLE` field for registry handle `handle`.
+#[inline]
+pub const fn handle_payload(handle: i64) -> u64 {
+    handle.cast_unsigned()
+}
+
+/// The registry handle a `TAG_HANDLE` payload holds.
+#[inline]
+pub const fn payload_handle(payload: u64) -> i64 {
+    payload.cast_signed()
+}
 
 /// Field-size invariant: the inline layout must match `Array<u8>`'s 16
 /// bytes so the schema width and alignment we report for F/O/I match the
 /// inline-size invariant the voidstar walker assumes.
 const _: () = {
     assert!(STREAM_HANDLE_FIELD_SIZE == std::mem::size_of::<Array>());
+    assert!(path_payload(RELNULL) == RELNULL_PAYLOAD);
 };
 
 /// Read the tag byte of a stream-handle field.
@@ -123,7 +145,7 @@ pub unsafe fn read_path_size(suballoc_ptr: *const u8) -> u64 {
 /// `suballoc_ptr..+8+path.len()` must be writable.
 #[inline]
 pub unsafe fn write_path_suballoc(suballoc_ptr: *mut u8, path: &[u8]) {
-    std::ptr::write_unaligned(suballoc_ptr as *mut u64, path.len() as u64);
+    std::ptr::write_unaligned(suballoc_ptr as *mut u64, crate::width::u64_from_usize(path.len()));
     std::ptr::copy_nonoverlapping(
         path.as_ptr(),
         suballoc_ptr.add(8),

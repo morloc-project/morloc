@@ -120,7 +120,27 @@ fn ensure_test_arena() {
         shm::shm_set_fallback_dir(test_dir.to_str().unwrap());
         let basename = format!("/morloc-{}-test-arena", std::process::id());
         shm::shinit(&basename, 0, 0x100000).unwrap(); // 1MB
+        static AT_EXIT: std::sync::Once = std::sync::Once::new();
+        AT_EXIT.call_once(|| unsafe {
+            libc::atexit(remove_test_arena);
+        });
     }
+}
+
+/// Remove this process's test arena at exit: statics are never dropped, so
+/// without this every test run leaves its arena in /dev/shm. Only names are
+/// removed, taking no lock a stuck test thread might hold; the kernel
+/// releases the mappings.
+#[cfg(test)]
+extern "C" fn remove_test_arena() {
+    let pid = std::process::id();
+    for vol in 0u32.. {
+        let Ok(name) = std::ffi::CString::new(format!("/morloc-{pid}-test-arena-{vol:04x}")) else { break };
+        if unsafe { libc::shm_unlink(name.as_ptr()) } != 0 {
+            break;
+        }
+    }
+    let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("morloc_test_{pid}")));
 }
 
 // Re-export core types at crate root

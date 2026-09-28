@@ -54,6 +54,7 @@ use morloc_runtime_types::shm_types::{
 use crate::error::MorlocError;
 use crate::shm::{self, AbsPtr};
 use crate::voidstar;
+use morloc_runtime_types::{slice, width};
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
@@ -3006,12 +3007,9 @@ fn read_shared_subpacket_entries(
     }
     let idx_abs = crate::shm::rel2abs(idx_rel)?
         as *const morloc_runtime_types::packet::SubpacketEntry;
-    let mut out = Vec::with_capacity(len);
-    unsafe {
-        out.set_len(len);
-        std::ptr::copy_nonoverlapping(idx_abs, out.as_mut_ptr(), len);
-    }
-    Ok(out)
+    // SAFETY: the caller holds the slot futex, and the entry array holds
+    // `len` initialized entries.
+    Ok(unsafe { std::slice::from_raw_parts(idx_abs, len) }.to_vec())
 }
 
 /// Append a sub-packet's `(offset, elem_count)` entry to the
@@ -3428,14 +3426,13 @@ fn append_one_element(
 /// elements continue accumulating in the fresh buffer.
 pub fn shared_write_subpacket(
     handle: i64,
-    level: u8,
+    level: crate::compression::CompressionLevel,
     payload_voidstar: AbsPtr,
 ) -> Result<(), MorlocError> {
     if payload_voidstar.is_null() {
         return Err(MorlocError::Other("@write: null payload".into()));
     }
-    // Validate the level before any I/O.
-    let _ = crate::compression::CompressionLevel::from_u8(level)?;
+    let level = level.raw();
 
     with_process_local_slot(handle, |local, slot| {
         if slot.kind != MLC_KIND_OSTREAM {
@@ -3920,7 +3917,7 @@ fn stream_payload_hint(handle: i64) -> Option<(u64, u64)> {
                     )
                 };
                 match morloc_runtime_types::packet::read_frame_index_from_meta(hdr_meta)? {
-                    Some(frames) => frames.iter().map(|f| f.uncompressed_size).sum(),
+                    Some(frames) => width::u64_from_usize(morloc_runtime_types::packet::frame_totals(&frames)?.0),
                     None => return Err(MorlocError::Packet(
                         "compressed sub-packet carries no frame index".into(),
                     )),
@@ -4237,7 +4234,7 @@ pub fn shared_stream_layout(handle: i64) -> Result<Vec<(u64, u64, u64)>, MorlocE
                     )
                 };
                 match morloc_runtime_types::packet::read_frame_index_from_meta(hdr_meta)? {
-                    Some(frames) => frames.iter().map(|f| f.uncompressed_size).sum(),
+                    Some(frames) => width::u64_from_usize(morloc_runtime_types::packet::frame_totals(&frames)?.0),
                     // Every compressed sub-packet carries a FRAME_INDEX by
                     // construction; its absence is a corrupt/foreign packet.
                     None => return Err(MorlocError::Packet(format!(
@@ -4429,7 +4426,7 @@ pub fn shared_write_handles_voidstar(
     use morloc_runtime_types::stream_handle as sh;
     for (i, &h) in handles.iter().enumerate() {
         let slot = unsafe { dest_base.add(i * elem_stride) };
-        unsafe { sh::write_field(slot, sh::TAG_HANDLE, h as u64); }
+        unsafe { sh::write_field(slot, sh::TAG_HANDLE, sh::handle_payload(h)); }
     }
     Ok(())
 }
@@ -6250,15 +6247,13 @@ fn resolve_global_index(
         .subpacket_elem_cum
         .as_ref()
         .expect("ensure_elem_cum just populated subpacket_elem_cum");
-    let total = *cum.last().unwrap_or(&0u64) as i64;
-    let idx = if requested < 0 { requested + total } else { requested };
-    if idx < 0 || idx >= total {
-        return Err(MorlocError::Other(format!(
+    let total = *cum.last().unwrap_or(&0u64);
+    let idx_u = slice::resolve_index(requested, total).ok_or_else(|| {
+        MorlocError::Other(format!(
             "IFile bracket index {} out of bounds (have {} elements)",
             requested, total,
-        )));
-    }
-    let idx_u = idx as u64;
+        ))
+    })?;
     // partition_point returns the index of the first cum[k] > idx_u;
     // sub-packet K contains elements [cum[K], cum[K+1]).
     let upper = cum.partition_point(|&c| c <= idx_u);
@@ -6286,7 +6281,7 @@ pub fn next_subpacket(handle: i64) -> Result<AbsPtr, MorlocError> {
 /// levels on subsequent writes are an error.
 pub fn write_subpacket(
     handle: i64,
-    level: u8,
+    level: crate::compression::CompressionLevel,
     payload_voidstar: AbsPtr,
 ) -> Result<(), MorlocError> {
     shared_write_subpacket(handle, level, payload_voidstar)
@@ -6719,11 +6714,6 @@ fn ifile_bracket_slice_against_slot(
     step: Option<i64>,
     tail_steps: &[WalkStep],
 ) -> Result<AbsPtr, MorlocError> {
-    let step_val = step.unwrap_or(1);
-    if step_val == 0 {
-        return Err(MorlocError::Other("Bracket slice step cannot be 0".into()));
-    }
-
     struct SliceWork {
         // The static projection inside each element. (0, elem_schema)
         // when the tail is empty; (offset, target_schema) when a tail
@@ -6751,48 +6741,31 @@ fn ifile_bracket_slice_against_slot(
         )));
     }
     ensure_elem_cum(local)?;
-    let (start_norm, stop_norm, runs) = {
+    let (slice, runs) = {
         let cum = local
             .subpacket_elem_cum
             .as_ref()
             .expect("ensure_elem_cum populates subpacket_elem_cum");
-        let n: i64 = *cum.last().unwrap_or(&0u64) as i64;
-
-        // Normalise bounds Python-style.
-        let normalize = |v: i64| if v < 0 { v + n } else { v };
-        let clamp = |v: i64| -> i64 {
-            if step_val > 0 {
-                v.max(0).min(n)
-            } else {
-                v.max(-1).min(n - 1)
-            }
-        };
-        let start_norm: i64 = match start {
-            Some(v) => clamp(normalize(v)),
-            None => if step_val > 0 { 0 } else { n - 1 },
-        };
-        let stop_norm: i64 = match stop {
-            Some(v) => clamp(normalize(v)),
-            None => if step_val > 0 { n } else { -1 },
-        };
+        let slice = slice::Slice::new(
+            *cum.last().unwrap_or(&0u64), start, stop, step,
+        )?;
         // A forward, unit-step slice with no field tail is one contiguous
         // run in each sub-packet it touches. The runs follow from the cumulative
         // counts by two binary searches, whatever the slice's length.
-        let runs = if tail_steps.is_empty() && step_val == 1 && start_norm < stop_norm {
-            let (lo, hi) = (start_norm as u64, stop_norm as u64);
-            let sub_of = |i: u64| cum.partition_point(|&c| c <= i) - 1;
-            let runs: Vec<(usize, usize, usize)> = (sub_of(lo)..=sub_of(hi - 1))
-                .map(|k| {
-                    let first = lo.max(cum[k]) - cum[k];
-                    let end = hi.min(cum[k + 1]) - cum[k];
-                    (k, first as usize, (end - first) as usize)
-                })
-                .collect();
-            Some(runs)
-        } else {
-            None
+        let runs = match slice.unit_range() {
+            Some((lo, hi)) if tail_steps.is_empty() => {
+                let sub_of = |i: u64| cum.partition_point(|&c| c <= i) - 1;
+                Some((sub_of(lo)..=sub_of(hi - 1))
+                    .map(|k| {
+                        let first = lo.max(cum[k]) - cum[k];
+                        let end = hi.min(cum[k + 1]) - cum[k];
+                        (k, width::usize_from_u64(first), width::usize_from_u64(end - first))
+                    })
+                    .collect::<Vec<(usize, usize, usize)>>())
+            }
+            _ => None,
         };
-        (start_norm, stop_norm, runs)
+        (slice, runs)
     };
     if let Some(runs) = runs {
         return slice_runs(local, &runs);
@@ -6803,27 +6776,13 @@ fn ifile_bracket_slice_against_slot(
             .subpacket_elem_cum
             .as_ref()
             .expect("ensure_elem_cum populates subpacket_elem_cum");
-        let mut plan: Vec<(usize, u64)> = Vec::new();
-        let mut i = start_norm;
-        if step_val > 0 {
-            while i < stop_norm {
-                let idx_u = i as u64;
-                let upper = cum.partition_point(|&c| c <= idx_u);
-                let sub_k = upper - 1;
-                let local = idx_u - cum[sub_k];
-                plan.push((sub_k, local));
-                i += step_val;
-            }
-        } else {
-            while i > stop_norm {
-                let idx_u = i as u64;
-                let upper = cum.partition_point(|&c| c <= idx_u);
-                let sub_k = upper - 1;
-                let local = idx_u - cum[sub_k];
-                plan.push((sub_k, local));
-                i += step_val;
-            }
-        }
+        let plan: Vec<(usize, u64)> = slice
+            .indices()
+            .map(|idx_u| {
+                let sub_k = cum.partition_point(|&c| c <= idx_u) - 1;
+                (sub_k, idx_u - cum[sub_k])
+            })
+            .collect();
         let (proj_offset, proj_schema) =
             navigate_static_field_offset(&local.elem_schema, tail_steps)?;
         SliceWork {
@@ -7888,13 +7847,10 @@ fn locate_array_element<'a>(
         return Err(MorlocError::Other("walk: Array schema missing element type".into()));
     }
     let arr = unsafe { &*(arr_ptr as *const shm_types_crate::Array) };
-    let n = arr.size as i64;
-    let actual = if idx < 0 { idx + n } else { idx };
-    if actual < 0 || actual >= n {
-        return Err(MorlocError::Other(format!(
-            "walk: bracket-index {} out of bounds (size {})", idx, n
-        )));
-    }
+    let actual = slice::resolve_array_index(idx, arr.size)
+        .ok_or_else(|| MorlocError::Other(format!(
+            "walk: bracket-index {} out of bounds (size {})", idx, arr.size
+        )))?;
     let elem_schema = &arr_schema.parameters[0];
     let data_abs = match src {
         SubpacketSrc::File { payload_base, payload_len, .. } => {
@@ -7904,7 +7860,7 @@ fn locate_array_element<'a>(
         SubpacketSrc::Shm { .. } => shm::rel2abs(arr.data)?,
     };
     let elem_ptr = unsafe {
-        (data_abs as *const u8).add(actual as usize * elem_schema.width) as AbsPtr
+        (data_abs as *const u8).add(actual * elem_schema.width) as AbsPtr
     };
     Ok((elem_ptr, elem_schema))
 }
@@ -7930,11 +7886,10 @@ fn inline_bracket_slice(
         return Err(MorlocError::Other("walk: Array schema missing element type".into()));
     }
     let arr = unsafe { &*(arr_ptr as *const shm_types_crate::Array) };
-    let n = arr.size as i64;
     let elem_schema = &arr_schema.parameters[0];
     let elem_w = elem_schema.width;
-    let indices = python_slice_indices(n, start, stop, step)?;
-    let n_out = indices.len();
+    let slice = slice::Slice::over_array(arr.size, start, stop, step)?;
+    let n_out = width::usize_from_u64(slice.len());
     // Allocate the element bank. shcalloc handles n_out == 0 by
     // returning a sentinel; we still need to size the output header.
     let buf_ptr = if n_out == 0 {
@@ -7949,8 +7904,8 @@ fn inline_bracket_slice(
         }
         SubpacketSrc::Shm { .. } => shm::rel2abs(arr.data)?,
     };
-    for (k, &i) in indices.iter().enumerate() {
-        let elem_src = unsafe { (data_abs as *const u8).add(i as usize * elem_w) as AbsPtr };
+    for (k, i) in slice.positions().enumerate() {
+        let elem_src = unsafe { (data_abs as *const u8).add(i * elem_w) as AbsPtr };
         let elem_dst = unsafe { (buf_ptr as *mut u8).add(k * elem_w) as AbsPtr };
         if let Err(e) = deep_copy_one(src, elem_src, elem_schema, elem_dst) {
             if !buf_ptr.is_null() { let _ = shm::shfree(buf_ptr); }
@@ -8016,13 +7971,12 @@ fn broadcast_slice_tail(
         ));
     }
     let arr = unsafe { &*(arr_ptr as *const shm_types_crate::Array) };
-    let n = arr.size as i64;
     let elem_schema = &arr_schema.parameters[0];
     let elem_w = elem_schema.width;
     let out_elem_schema = &out_schema.parameters[0];
     let out_elem_w = out_elem_schema.width;
-    let indices = python_slice_indices(n, start, stop, step)?;
-    let n_out = indices.len();
+    let slice = slice::Slice::over_array(arr.size, start, stop, step)?;
+    let n_out = width::usize_from_u64(slice.len());
     let buf_ptr = if n_out == 0 {
         std::ptr::null::<u8>() as AbsPtr
     } else {
@@ -8042,9 +7996,9 @@ fn broadcast_slice_tail(
     // outer caller sees a single consumption of the tail's args.
     let snapshot_pos = args.pos;
     let mut per_iter_consumed: Option<usize> = None;
-    for (k, &i) in indices.iter().enumerate() {
+    for (k, i) in slice.positions().enumerate() {
         let elem_src_ptr = unsafe {
-            (data_abs as *const u8).add(i as usize * elem_w) as AbsPtr
+            (data_abs as *const u8).add(i * elem_w) as AbsPtr
         };
         let elem_dst_ptr = unsafe {
             (buf_ptr as *mut u8).add(k * out_elem_w) as AbsPtr
@@ -8115,50 +8069,6 @@ fn count_walk_args(steps: &[WalkStep]) -> usize {
         }
     }
     n
-}
-
-/// Python slice index expansion: produces the actual list of source
-/// indices for a (start, stop, step) triple against length n.
-/// Mirrors the semantics used by `ifile_bracket_slice` so element
-/// selection is consistent between root-level and inline bracket
-/// slices.
-fn python_slice_indices(
-    n: i64,
-    start: Option<i64>,
-    stop: Option<i64>,
-    step: Option<i64>,
-) -> Result<Vec<i64>, MorlocError> {
-    let step = step.unwrap_or(1);
-    if step == 0 {
-        return Err(MorlocError::Other("walk: slice step must be non-zero".into()));
-    }
-    let (lo_default, hi_default) =
-        if step > 0 { (0, n) } else { (n - 1, -1) };
-    let clamp = |v: i64| -> i64 {
-        let v = if v < 0 { v + n } else { v };
-        if step > 0 {
-            v.clamp(0, n)
-        } else {
-            v.clamp(-1, n - 1)
-        }
-    };
-    let lo = match start { Some(s) => clamp(s), None => lo_default };
-    let hi = match stop  { Some(s) => clamp(s), None => hi_default };
-    let mut out = Vec::new();
-    if step > 0 {
-        let mut i = lo;
-        while i < hi {
-            out.push(i);
-            i += step;
-        }
-    } else {
-        let mut i = lo;
-        while i > hi {
-            out.push(i);
-            i += step;
-        }
-    }
-    Ok(out)
 }
 
 /// Materialise a group of sibling sub-walks into a tuple at `out`.
@@ -8655,6 +8565,7 @@ pub fn shared_view_stream_to_stream(
     compression_level: u8,
     schema_override: Option<&str>,
 ) -> Result<u64, MorlocError> {
+    let compression_level = crate::compression::CompressionLevel::from_u8(compression_level)?;
     // Determine the OStream's element schema. Prefer the caller's
     // override; otherwise pull the stored element schema from the
     // input file's stream header.
@@ -8729,6 +8640,7 @@ pub fn shared_view_data_to_stream(
     out_path: &str,
     compression_level: u8,
 ) -> Result<u64, MorlocError> {
+    let compression_level = crate::compression::CompressionLevel::from_u8(compression_level)?;
     use morloc_runtime_types::schema::schema_to_string;
 
     let in_handle = shared_open_ifile(in_path)?;
@@ -9012,27 +8924,6 @@ mod tests {
             assert!(parse_walk_path(path).is_err(),
                     "expected parse failure for {:?}", path);
         }
-    }
-
-    #[test]
-    fn python_slice_indices_basic() {
-        // start=None, stop=None, step=None -> full sequence
-        assert_eq!(python_slice_indices(5, None, None, None).unwrap(),
-                   vec![0,1,2,3,4]);
-        // explicit forward slice
-        assert_eq!(python_slice_indices(5, Some(1), Some(4), None).unwrap(),
-                   vec![1,2,3]);
-        // step > 1
-        assert_eq!(python_slice_indices(10, Some(0), Some(10), Some(2)).unwrap(),
-                   vec![0,2,4,6,8]);
-        // negative step (reverse)
-        assert_eq!(python_slice_indices(5, None, None, Some(-1)).unwrap(),
-                   vec![4,3,2,1,0]);
-        // step 0 is an error
-        assert!(python_slice_indices(5, None, None, Some(0)).is_err());
-        // negative start clamped
-        assert_eq!(python_slice_indices(5, Some(-2), None, None).unwrap(),
-                   vec![3,4]);
     }
 
     /// Build a minimal valid STREAM_PACKET file (no sub-packets) and

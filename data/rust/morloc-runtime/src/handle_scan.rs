@@ -26,6 +26,7 @@ use morloc_runtime_types::error::MorlocError;
 use morloc_runtime_types::schema::{Schema, SerialType};
 use morloc_runtime_types::shm_types::{Array, RelPtr, RELNULL};
 use morloc_runtime_types::stream_handle as sh;
+use morloc_runtime_types::width;
 
 /// Which morloc stream-handle type a discovered field carries.
 /// Determines the receiver-side `mlc_open` kind if the field is
@@ -294,7 +295,7 @@ pub fn rewrite_handles_to_paths(
                 tag, field_start,
             )));
         }
-        let handle = unsafe { sh::read_payload(payload.as_ptr().add(field_start)) } as i64;
+        let handle = sh::payload_handle(unsafe { sh::read_payload(payload.as_ptr().add(field_start)) });
         let path = portable_path(handle).map_err(|e| {
             MorlocError::Other(format!("handle at offset {}: {}", field_start, e))
         })?;
@@ -314,13 +315,13 @@ pub fn rewrite_handles_to_paths(
             payload.push(0);
         }
         let suballoc_offset = payload.len();
-        payload.extend_from_slice(&(path_bytes.len() as u64).to_le_bytes());
+        payload.extend_from_slice(&width::u64_from_usize(path_bytes.len()).to_le_bytes());
         payload.extend_from_slice(path_bytes);
         unsafe {
             sh::write_field(
                 payload.as_mut_ptr().add(field_start),
                 sh::TAG_PATH,
-                suballoc_offset as u64,
+                width::u64_from_usize(suballoc_offset),
             );
         }
     }

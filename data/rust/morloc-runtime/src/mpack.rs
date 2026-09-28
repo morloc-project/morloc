@@ -3,11 +3,16 @@
 //! Replaces serialize.c + mpack.c. Uses the `rmp` crate for MessagePack I/O.
 //! The voidstar binary format is morloc-specific (Array/Tensor structs with relptrs).
 
+// A value crossing this module is user data: a narrowing or sign change
+// goes through a checked conversion or a named helper, never `as`.
+#![deny(clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+
 use crate::error::MorlocError;
 use crate::recur::Resolver;
 use crate::schema::{Schema, SerialType};
 use crate::walk::{self, Frame, Stack, Visit, Walker};
 use crate::shm::{self, AbsPtr, Array, RELNULL};
+use morloc_runtime_types::width::{self, arm_tag};
 
 // ── Voidstar -> MessagePack ────────────────────────────────────────────────
 
@@ -129,14 +134,14 @@ impl<'r, 'b> Walker<()> for PackWalk<'r, 'b> {
                     let relptr = *(data.add(std::mem::size_of::<usize>()) as *const shm::RelPtr);
                     let data = shm::rel2abs(relptr)?;
                     let bytes = std::slice::from_raw_parts(data, size * 8);
-                    rmp::encode::write_bin_len(buf, bytes.len() as u32)
+                    rmp::encode::write_bin_len(buf, msgpack_len(bytes.len())?)
                         .map_err(|e| MorlocError::Serialization(format!("msgpack bigint: {}", e)))?;
                     buf.extend_from_slice(bytes);
                 }
             }
             SerialType::String => {
                 let arr = &*(data as *const Array);
-                rmp::encode::write_str_len(buf, arr.size as u32)
+                rmp::encode::write_str_len(buf, msgpack_len(arr.size)?)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack str: {}", e)))?;
                 // An empty string carries no data block.
                 if arr.size > 0 && arr.data != RELNULL {
@@ -157,8 +162,8 @@ impl<'r, 'b> Walker<()> for PackWalk<'r, 'b> {
                     if payload == sh::RELNULL_PAYLOAD {
                         String::new()
                     } else {
-                        let suballoc = shm::rel2abs(payload as shm::RelPtr)?;
-                        let path_len = sh::read_path_size(suballoc) as usize;
+                        let suballoc = shm::rel2abs(sh::payload_relptr(payload))?;
+                        let path_len = width::usize_from_u64(sh::read_path_size(suballoc));
                         let bytes = std::slice::from_raw_parts(suballoc.add(8), path_len);
                         std::str::from_utf8(bytes)
                             .map_err(|_| MorlocError::Serialization(
@@ -167,14 +172,14 @@ impl<'r, 'b> Walker<()> for PackWalk<'r, 'b> {
                             .to_string()
                     }
                 } else if tag == sh::TAG_HANDLE {
-                    crate::stream::handle_path(payload as i64)?
+                    crate::stream::handle_path(sh::payload_handle(payload))?
                 } else {
                     return Err(MorlocError::Serialization(format!(
                         "msgpack stream-handle: unsupported tag {}", tag,
                     )));
                 };
                 let bytes = path.as_bytes();
-                rmp::encode::write_str_len(buf, bytes.len() as u32)
+                rmp::encode::write_str_len(buf, msgpack_len(bytes.len())?)
                     .map_err(|e| MorlocError::Serialization(format!("msgpack str: {}", e)))?;
                 buf.extend_from_slice(bytes);
             }
@@ -211,7 +216,7 @@ impl<'r, 'b> Walker<()> for PackWalk<'r, 'b> {
                 let elem_schema = &s.parameters[0];
                 let elem_width = elem_schema.width;
                 if f.idx == 0 {
-                    rmp::encode::write_array_len(buf, arr.size as u32)
+                    rmp::encode::write_array_len(buf, msgpack_len(arr.size)?)
                         .map_err(|e| MorlocError::Serialization(format!("msgpack array: {}", e)))?;
                 }
                 if arr.size == 0 || arr.data == RELNULL {
@@ -230,7 +235,7 @@ impl<'r, 'b> Walker<()> for PackWalk<'r, 'b> {
             }
             SerialType::Tuple | SerialType::Map => {
                 if f.idx == 0 {
-                    rmp::encode::write_array_len(buf, s.parameters.len() as u32)
+                    rmp::encode::write_array_len(buf, msgpack_len(s.parameters.len())?)
                         .map_err(|e| MorlocError::Serialization(format!("msgpack tuple: {}", e)))?;
                 }
                 for i in f.idx..s.parameters.len() {
@@ -351,19 +356,18 @@ impl<'r, 'd> Walker<()> for UnpackWalk<'r, 'd> {
                 let tag: i64 = decode::read_int(&mut self.reader).map_err(|e| {
                     MorlocError::Serialization(format!("msgpack enum tag: {}", e))
                 })?;
-                if tag < 0 || tag as usize >= s.size {
-                    return Err(MorlocError::Serialization(format!(
+                *ptr = arm_tag(tag, s.size).ok_or_else(|| {
+                    MorlocError::Serialization(format!(
                         "enum tag {} is out of range; the type has {} constructors ({})",
                         tag,
                         s.size,
                         s.keys.join(", ")
-                    )));
-                }
-                *ptr = tag as u8;
+                    ))
+                })?;
             }
             SerialType::Float32 => {
                 let f = read_float(&mut self.reader)?;
-                *(ptr as *mut f32) = f as f32;
+                *(ptr as *mut f32) = width::f32_nearest(f)?;
             }
             SerialType::Float64 => {
                 let f = read_float(&mut self.reader)?;
@@ -375,15 +379,22 @@ impl<'r, 'd> Walker<()> for UnpackWalk<'r, 'd> {
                 let saved = self.reader;
                 if let Ok(len) = rmp::decode::read_bin_len(&mut self.reader) {
                     // Overflow: multi-limb
-                    let len = len as usize;
-                    let nlimbs = len / 8;
-                    *fields = nlimbs as i64;
-                    *(fields.add(1)) = shm::abs2rel(self.cursor)? as i64;
-                    if nlimbs > 0 && self.reader.len() >= len {
-                        std::ptr::copy_nonoverlapping(self.reader.as_ptr(), self.cursor, len);
-                        self.reader = &self.reader[len..];
+                    if len % 8 != 0 {
+                        return Err(MorlocError::Serialization(format!(
+                            "msgpack bigint: {} bytes is not a whole number of 64-bit limbs", len
+                        )));
                     }
-                    self.cursor = self.cursor.add(nlimbs * 8);
+                    *fields = i64::from(len / 8);
+                    let len = len as usize;
+                    if self.reader.len() < len {
+                        return Err(MorlocError::Serialization(format!(
+                            "msgpack bigint: {} limb bytes declared, {} remain", len, self.reader.len()
+                        )));
+                    }
+                    *(fields.add(1)) = width::i64_from_isize(shm::abs2rel(self.cursor)?);
+                    std::ptr::copy_nonoverlapping(self.reader.as_ptr(), self.cursor, len);
+                    self.reader = &self.reader[len..];
+                    self.cursor = self.cursor.add(len);
                 } else {
                     // Inline: single integer value
                     self.reader = saved;
@@ -430,7 +441,7 @@ impl<'r, 'd> Walker<()> for UnpackWalk<'r, 'd> {
                     let rel = shm::abs2rel(self.cursor)?;
                     let bytes = std::slice::from_raw_parts(self.reader.as_ptr(), len);
                     sh::write_path_suballoc(self.cursor, bytes);
-                    sh::write_field(field, sh::TAG_PATH, rel as u64);
+                    sh::write_field(field, sh::TAG_PATH, sh::path_payload(rel));
                     self.reader = &self.reader[len..];
                     self.cursor = self.cursor.add(sh::path_suballoc_size(len));
                 }
@@ -512,14 +523,14 @@ impl<'r, 'd> Walker<()> for UnpackWalk<'r, 'd> {
                 let tag: i64 = decode::read_int(&mut self.reader).map_err(|e| {
                     MorlocError::Serialization(format!("msgpack variant tag: {}", e))
                 })?;
-                if tag < 0 || tag as usize >= s.size {
-                    return Err(MorlocError::Serialization(format!(
+                let tag8 = arm_tag(tag, s.size).ok_or_else(|| {
+                    MorlocError::Serialization(format!(
                         "variant tag {} is out of range; the type has {} arms",
                         tag, s.size
-                    )));
-                }
-                let arm = &s.parameters[tag as usize];
-                *ptr = tag as u8;
+                    ))
+                })?;
+                let arm = &s.parameters[usize::from(tag8)];
+                *ptr = tag8;
                 std::ptr::write_bytes(ptr.add(1), 0, 7);
                 let relptr_slot = &mut *(ptr.add(8) as *mut shm::RelPtr);
                 if !self.reader.is_empty() && self.reader[0] == 0xc0 {
@@ -550,61 +561,26 @@ impl<'r, 'd> Walker<()> for UnpackWalk<'r, 'd> {
     }
 }
 
+/// A length as msgpack writes it. msgpack has no length wider than 32 bits,
+/// so a longer string, binary or array is an error, never a wrapped header.
+fn msgpack_len(n: usize) -> Result<u32, MorlocError> {
+    u32::try_from(n).map_err(|_| {
+        MorlocError::Serialization(format!(
+            "value of length {} exceeds msgpack's 32-bit length limit", n
+        ))
+    })
+}
+
 fn unpack_int(ptr: AbsPtr, st: SerialType, reader: &mut &[u8]) -> Result<(), MorlocError> {
-    // Use rmp's generic read_int which handles all integer markers
-    let val: i64 = rmp::decode::read_int(reader)
+    // i128 holds every msgpack integer, signed or unsigned 64-bit. The value
+    // is then narrowed to the slot: the stream may carry a wider integer than
+    // the receiving type, and that is an error, never a truncation.
+    let val: i128 = rmp::decode::read_int(reader)
         .map_err(|e| MorlocError::Serialization(format!("msgpack int: {}", e)))?;
-
-    // Range-check before narrowing. The msgpack stream may carry a wider
-    // integer than the receiving schema slot (e.g. a producer that wrote
-    // an i64-tagged value that fits in the wire width but not the target
-    // type). Silent truncation here would defeat the json.rs check.
-    let check_s = |lo: i64, hi: i64, name: &str| -> Result<i64, MorlocError> {
-        if val < lo || val > hi {
-            Err(MorlocError::Serialization(format!(
-                "value {} out of range for {} (range {} to {})", val, name, lo, hi
-            )))
-        } else { Ok(val) }
-    };
-    let check_u = |hi: u64, name: &str| -> Result<u64, MorlocError> {
-        if val < 0 || (val as u64) > hi {
-            Err(MorlocError::Serialization(format!(
-                "value {} out of range for {} (range 0 to {})", val, name, hi
-            )))
-        } else { Ok(val as u64) }
-    };
-
-    // Compute the narrowed values (with checks) outside the unsafe block.
-    let i8v = if matches!(st, SerialType::Sint8)  { check_s(i8::MIN  as i64, i8::MAX  as i64, "I8" )? as i8  } else { 0 };
-    let i16v = if matches!(st, SerialType::Sint16) { check_s(i16::MIN as i64, i16::MAX as i64, "I16")? as i16 } else { 0 };
-    let i32v = if matches!(st, SerialType::Sint32) { check_s(i32::MIN as i64, i32::MAX as i64, "I32")? as i32 } else { 0 };
-    let u8v  = if matches!(st, SerialType::Uint8)  { check_u(u8::MAX  as u64, "U8" )? as u8  } else { 0 };
-    let u16v = if matches!(st, SerialType::Uint16) { check_u(u16::MAX as u64, "U16")? as u16 } else { 0 };
-    let u32v = if matches!(st, SerialType::Uint32) { check_u(u32::MAX as u64, "U32")? as u32 } else { 0 };
-    let u64v: u64 = if matches!(st, SerialType::Uint64) {
-        if val < 0 {
-            return Err(MorlocError::Serialization(format!(
-                "value {} out of range for UInt64 (range 0 to {})", val, u64::MAX
-            )));
-        }
-        val as u64
-    } else { 0 };
-
-    // SAFETY: ptr points to schema.width bytes in SHM; each cast writes exactly that width.
-    unsafe {
-        match st {
-            SerialType::Sint8  => *(ptr as *mut i8)  = i8v,
-            SerialType::Sint16 => *(ptr as *mut i16) = i16v,
-            SerialType::Sint32 => *(ptr as *mut i32) = i32v,
-            SerialType::Sint64 => *(ptr as *mut i64) = val,
-            SerialType::Uint8  => *ptr               = u8v,
-            SerialType::Uint16 => *(ptr as *mut u16) = u16v,
-            SerialType::Uint32 => *(ptr as *mut u32) = u32v,
-            SerialType::Uint64 => *(ptr as *mut u64) = u64v,
-            SerialType::Nil | SerialType::Bool | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => {}
-        }
-    }
-    Ok(())
+    // SAFETY: ptr points to the slot's width bytes in SHM.
+    unsafe { width::write_int_slot(st, ptr, val) }.unwrap_or_else(|| {
+        Err(MorlocError::Serialization(format!("msgpack int: {:?} is not an integer slot", st)))
+    })
 }
 
 fn read_float(reader: &mut &[u8]) -> Result<f64, MorlocError> {
@@ -629,10 +605,10 @@ fn read_float(reader: &mut &[u8]) -> Result<f64, MorlocError> {
                 rmp::Marker::U16 => { read_be_u16(reader)? as f64 }
                 rmp::Marker::U32 => { read_be_u32(reader)? as f64 }
                 rmp::Marker::U64 => { read_be_u64(reader)? as f64 }
-                rmp::Marker::I8 => { read_byte(reader)? as i8 as f64 }
-                rmp::Marker::I16 => { read_be_u16(reader)? as i16 as f64 }
-                rmp::Marker::I32 => { read_be_u32(reader)? as i32 as f64 }
-                rmp::Marker::I64 => { read_be_u64(reader)? as i64 as f64 }
+                rmp::Marker::I8 => { f64::from(read_byte(reader)?.cast_signed()) }
+                rmp::Marker::I16 => { f64::from(read_be_u16(reader)?.cast_signed()) }
+                rmp::Marker::I32 => { f64::from(read_be_u32(reader)?.cast_signed()) }
+                rmp::Marker::I64 => { read_be_u64(reader)?.cast_signed() as f64 }
                 _ => {
                     return Err(MorlocError::Serialization(format!(
                         "unexpected msgpack marker {:?} for float", marker
@@ -807,8 +783,8 @@ impl<'r, 'd> Walker<bool> for SizeWalk<'r, 'd> {
             self.add(s.width, f.x);
             if rmp::decode::read_array_len(&mut self.reader).is_ok() {
                 if let Ok(tag) = rmp::decode::read_int::<i64, _>(&mut self.reader) {
-                    if tag >= 0 && (tag as usize) < s.size {
-                        let arm = &s.parameters[tag as usize];
+                    if let Some(tag8) = arm_tag(tag, s.size) {
+                        let arm = &s.parameters[usize::from(tag8)];
                         if !self.reader.is_empty() && self.reader[0] == 0xc0 {
                             rmp::decode::read_nil(&mut self.reader).ok();
                         } else {
@@ -944,6 +920,64 @@ mod tests {
     #[must_use]
     fn setup_shm() -> std::sync::RwLockReadGuard<'static, ()> {
         crate::init_test_shm()
+    }
+
+    #[test]
+    fn fixed_width_ints_round_trip_at_their_extremes() {
+        let _shm = setup_shm();
+        let cases = [
+            ("i1", "-128", "127"),
+            ("i2", "-32768", "32767"),
+            ("i4", "-2147483648", "2147483647"),
+            ("i8", "-9223372036854775808", "9223372036854775807"),
+            ("u1", "0", "255"),
+            ("u2", "0", "65535"),
+            ("u4", "0", "4294967295"),
+            ("u8", "0", "18446744073709551615"),
+        ];
+        for (code, lo, hi) in cases {
+            let schema = parse_schema(code).unwrap();
+            for v in [lo, hi] {
+                let p = json::read_json_with_schema(v, &schema).unwrap();
+                let mpk = pack_with_schema(p, &schema).unwrap();
+                let back = unpack_with_schema(&mpk, &schema)
+                    .unwrap_or_else(|e| panic!("{code} {v}: {e}"));
+                assert_eq!(json::voidstar_to_json_string(back, &schema).unwrap(), v, "{code}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_wider_int_is_rejected_by_the_narrower_slot() {
+        let _shm = setup_shm();
+        let wide = parse_schema("u8").unwrap();
+        let p = json::read_json_with_schema("18446744073709551615", &wide).unwrap();
+        let mpk = pack_with_schema(p, &wide).unwrap();
+        for code in ["i8", "u4", "i1"] {
+            let err = unpack_with_schema(&mpk, &parse_schema(code).unwrap()).unwrap_err().to_string();
+            assert!(err.contains("out of range"), "{code}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_truncated_or_ragged_bigint_is_rejected() {
+        let _shm = setup_shm();
+        let schema = parse_schema("j").unwrap();
+        // bin8 declaring 16 limb bytes, with only 3 present.
+        let truncated = [0xc4u8, 16, 1, 2, 3];
+        let err = unpack_with_schema(&truncated, &schema).unwrap_err().to_string();
+        assert!(err.contains("16 limb bytes declared, 3 remain"), "{err}");
+        // 12 bytes is not a whole number of 64-bit limbs.
+        let mut ragged = vec![0xc4u8, 12];
+        ragged.extend_from_slice(&[0u8; 12]);
+        let err = unpack_with_schema(&ragged, &schema).unwrap_err().to_string();
+        assert!(err.contains("not a whole number of 64-bit limbs"), "{err}");
+    }
+
+    #[test]
+    fn msgpack_len_rejects_lengths_beyond_32_bits() {
+        assert_eq!(msgpack_len(u32::MAX as usize).unwrap(), u32::MAX);
+        assert!(msgpack_len(u32::MAX as usize + 1).is_err());
     }
 
     #[test]

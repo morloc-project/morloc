@@ -25,6 +25,10 @@ pub struct CSchema {
     /// `&<klen><name>X` form) or back-reference target name (set on
     /// every Recur node). NULL on all other schemas.
     pub name: *mut c_char,
+    /// Layout facts, computed here once so no language recomputes them.
+    pub alignment: usize,
+    pub data_alignment: usize,
+    pub fixed_width: bool,
 }
 
 impl CSchema {
@@ -73,6 +77,9 @@ impl CSchema {
                 Some(s) => CString::new(s.as_str()).unwrap_or_default().into_raw(),
                 None => ptr::null_mut(),
             },
+            alignment: schema.alignment(),
+            data_alignment: schema.array_data_alignment(),
+            fixed_width: schema.is_fixed_width(),
         });
         Box::into_raw(cs)
     }
@@ -215,5 +222,37 @@ pub unsafe fn is_top_null(schema: *const CSchema, ptr: *const u8) -> bool {
             | SerialType::IStream | SerialType::Enum | SerialType::Variant,
         )
         | None => false,
+    }
+}
+
+#[cfg(test)]
+mod layout_field_tests {
+    use super::*;
+    use crate::schema::parse_schema;
+
+    /// The layout facts a C schema carries are the runtime's own, at every
+    /// node, so no language needs rules of its own to lay values out.
+    #[test]
+    fn layout_fields_match_the_runtime_at_every_node() {
+        fn check(cs: *const CSchema, rs: &Schema, s: &str) {
+            unsafe {
+                assert_eq!((*cs).alignment, rs.alignment(), "{s}: alignment");
+                assert_eq!((*cs).data_alignment, rs.array_data_alignment(), "{s}: data alignment");
+                assert_eq!((*cs).fixed_width, rs.is_fixed_width(), "{s}: fixed width");
+                for (i, p) in rs.parameters.iter().enumerate() {
+                    check(*(*cs).parameters.add(i), p, s);
+                }
+            }
+        }
+        for s in [
+            "b", "u1", "i2", "i4", "f4", "i8", "f8", "j", "s", "z", "?b", "?i4", "e22E02E1",
+            "m11ab", "m21ab1bu1", "t2bb", "t2b?b", "t2si4", "v21A1b1B0", "v21A2b?b1B0",
+            "ab", "a?i4", "at2b?b", "F", "at2u1f8", "&4Treev24Leaf04Node3i8^4Tree^4Tree",
+        ] {
+            let rs = parse_schema(s).unwrap();
+            let cs = CSchema::from_rust(&rs);
+            check(cs, &rs, s);
+            unsafe { CSchema::free(cs) };
+        }
     }
 }

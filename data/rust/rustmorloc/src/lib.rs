@@ -103,9 +103,9 @@ extern "C" {
     // RPC to the nexus) lives behind these symbols in libmorloc, so each Rust
     // shim below is a thin wrapper, mirroring the C++ pool's `_mlc_*` helpers.
     fn mlc_hash(data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_char;
-    fn mlc_save(data: *const c_void, schema: *const CSchema, level: u8, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
-    fn mlc_save_json(data: *const c_void, schema: *const CSchema, level: u8, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
-    fn mlc_save_voidstar(data: *const c_void, schema: *const CSchema, level: u8, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_save(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_save_json(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_save_voidstar(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
     fn mlc_load(path: *const c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void;
     fn mlc_open(path: *const c_char, kind: u8, errmsg: *mut *mut c_char) -> i64;
     fn mlc_close(handle: i64, errmsg: *mut *mut c_char) -> i32;
@@ -117,7 +117,7 @@ extern "C" {
     fn mlc_stream_layout(handle: i64, errmsg: *mut *mut c_char) -> *mut c_void;
     fn mlc_stream(ifile_handle: i64, errmsg: *mut *mut c_char) -> i64;
     fn mlc_ifile_walk(handle: i64, path: *const c_char, args_ptr: *const IFileWalkArg, n_args: u64, errmsg: *mut *mut c_char) -> *mut c_void;
-    fn mlc_write(level: u8, handle: i64, payload_voidstar: *const c_void, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_write(level: i64, handle: i64, payload_voidstar: *const c_void, errmsg: *mut *mut c_char) -> i32;
     fn mlc_append(schema_str: *const c_char, path: *const c_char, errmsg: *mut *mut c_char) -> i64;
     fn mlc_concat(paths: *const *const c_char, n_paths: usize, dest: *const c_char, errmsg: *mut *mut c_char) -> i32;
     fn mlc_flush(handle: i64, errmsg: *mut *mut c_char) -> i32;
@@ -1445,23 +1445,19 @@ int_impl!(u8); int_impl!(u16); int_impl!(u32); int_impl!(u64);
 // never a truncation or a write past the slot.
 #[inline]
 unsafe fn write_int(schema: &Schema, dest: *mut u8, v: i128) {
-    fn fit<T: TryFrom<i128>>(v: i128, name: &str) -> T {
-        T::try_from(v).unwrap_or_else(|_| morloc_throw(format!("Integer overflow: {v} does not fit in {name}")))
-    }
     match schema.serial_type {
-        SerialType::Sint8 => core::ptr::write_unaligned(dest as *mut i8, fit(v, "I8")),
-        SerialType::Sint16 => core::ptr::write_unaligned(dest as *mut i16, fit(v, "I16")),
-        SerialType::Sint32 => core::ptr::write_unaligned(dest as *mut i32, fit(v, "I32")),
-        SerialType::Sint64 => core::ptr::write_unaligned(dest as *mut i64, fit(v, "I64")),
-        SerialType::Uint8 => core::ptr::write_unaligned(dest, fit::<u8>(v, "U8")),
-        SerialType::Uint16 => core::ptr::write_unaligned(dest as *mut u16, fit(v, "U16")),
-        SerialType::Uint32 => core::ptr::write_unaligned(dest as *mut u32, fit(v, "U32")),
-        SerialType::Uint64 => core::ptr::write_unaligned(dest as *mut u64, fit(v, "U64")),
-        SerialType::Bool if v == 0 || v == 1 => core::ptr::write_unaligned(dest, v as u8),
-        SerialType::Enum if v >= 0 && (v as usize) < schema.size => core::ptr::write_unaligned(dest, v as u8),
-        other @ (SerialType::Bool | SerialType::Enum) => {
-            morloc_throw(format!("{v} is not a valid {other:?} value"))
+        SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64
+        | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 => {
+            if let Some(Err(e)) = morloc_runtime_types::width::write_int_slot(schema.serial_type, dest, v) {
+                morloc_throw(format!("Integer overflow: {e}"))
+            }
         }
+        SerialType::Bool if v == 0 || v == 1 => core::ptr::write_unaligned(dest, u8::from(v == 1)),
+        SerialType::Enum => match morloc_runtime_types::width::arm_tag(v, schema.size) {
+            Some(tag) => core::ptr::write_unaligned(dest, tag),
+            None => morloc_throw(format!("{v} is not a valid Enum value")),
+        },
+        SerialType::Bool => morloc_throw(format!("{v} is not a valid Bool value")),
         other @ (SerialType::Nil | SerialType::Float32 | SerialType::Float64 | SerialType::String
         | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional
         | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile
@@ -2919,11 +2915,11 @@ pub unsafe fn hash<T: ToVoidstar>(value: &T, schema: &Schema) -> String {
 }
 
 /// @save: write a value to disk in the voidstar packet format. `level` is the
-/// compression level (the runtime narrows it to a byte). Returns unit.
+/// compression level, range-checked by the runtime. Returns unit.
 pub unsafe fn save<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, path: &str) {
     let path_c = cstr_arg(path, "@save");
     let rc = with_voidstar(value, schema, |vs, cs, err| {
-        mlc_save(vs, cs, level as u8, path_c.as_ptr(), err)
+        mlc_save(vs, cs, level, path_c.as_ptr(), err)
     });
     if rc != 0 {
         morloc_throw("@save: runtime write failed");
@@ -2934,7 +2930,7 @@ pub unsafe fn save<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, path: 
 pub unsafe fn save_json<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, path: &str) {
     let path_c = cstr_arg(path, "@savej");
     let rc = with_voidstar(value, schema, |vs, cs, err| {
-        mlc_save_json(vs, cs, level as u8, path_c.as_ptr(), err)
+        mlc_save_json(vs, cs, level, path_c.as_ptr(), err)
     });
     if rc != 0 {
         morloc_throw("@savej: runtime write failed");
@@ -2945,7 +2941,7 @@ pub unsafe fn save_json<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, p
 pub unsafe fn save_voidstar<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, path: &str) {
     let path_c = cstr_arg(path, "@savem");
     let rc = with_voidstar(value, schema, |vs, cs, err| {
-        mlc_save_voidstar(vs, cs, level as u8, path_c.as_ptr(), err)
+        mlc_save_voidstar(vs, cs, level, path_c.as_ptr(), err)
     });
     if rc != 0 {
         morloc_throw("@savem: runtime write failed");
@@ -3047,7 +3043,7 @@ pub unsafe fn stream(ifile_handle: u64) -> u64 {
 /// `with_voidstar` closure ignores its CSchema argument.
 pub unsafe fn write<T: ToVoidstar>(schema: &Schema, level: i64, value: &T, handle: u64) {
     let rc = with_voidstar(value, schema, |vs, _cs, err| {
-        mlc_write(level as u8, handle as i64, vs, err)
+        mlc_write(level, handle as i64, vs, err)
     });
     if rc != 0 {
         morloc_throw("@write: runtime write failed");

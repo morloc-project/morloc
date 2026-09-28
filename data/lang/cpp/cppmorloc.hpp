@@ -380,58 +380,6 @@ std::vector<char> mpk_pack(const T& data, const std::string& schema_str);
 template<typename T>
 T mpk_unpack(const std::vector<char>& packed_data, const std::string& schema_str);
 
-
-// ============================================================
-// schema_alignment (C++ mirror of the C function in schema.c)
-// ============================================================
-
-inline size_t schema_alignment_cpp(const Schema* schema) {
-    // Must equal the runtime's `Schema::alignment` for every kind; the
-    // cpp-layout-parity golden test checks it. Every kind is listed so a new
-    // one is a compile error here (-Wswitch) rather than a silent default.
-    switch (schema->type) {
-        case MORLOC_NIL: case MORLOC_BOOL: case MORLOC_SINT8: case MORLOC_UINT8:
-        case MORLOC_ENUM:
-            return 1;
-        case MORLOC_SINT16: case MORLOC_UINT16: return 2;
-        case MORLOC_SINT32: case MORLOC_UINT32: case MORLOC_FLOAT32: return 4;
-        case MORLOC_SINT64: case MORLOC_UINT64: case MORLOC_FLOAT64: return 8;
-        case MORLOC_TUPLE: {
-            size_t max_align = 1;
-            for (size_t i = 0; i < schema->size; i++) {
-                size_t a = schema_alignment_cpp(schema->parameters[i]);
-                if (a > max_align) max_align = a;
-            }
-            return max_align;
-        }
-        // Slots holding a relptr, an array or string header, a limb pointer,
-        // a tagged handle or a closure are pointer-aligned. A record is too,
-        // as the runtime lays it out.
-        case MORLOC_STRING: case MORLOC_ARRAY: case MORLOC_MAP: case MORLOC_INT:
-        case MORLOC_TABLE: case MORLOC_RECUR: case MORLOC_OPTIONAL: case MORLOC_VARIANT:
-        case MORLOC_IFILE: case MORLOC_OSTREAM: case MORLOC_ISTREAM: case MORLOC_CLOSURE:
-            return alignof(size_t);
-    }
-    return alignof(size_t);
-}
-
-// SIMD/BLAS-friendly alignment for Array data buffers when the element type
-// is a primitive numeric. Fixed 64-byte constant in the wire format spec --
-// covers SSE/AVX/AVX-512 + cache lines on every common architecture, and the
-// per-array slack overhead (<= 63 bytes) is negligible for large arrays.
-#define MORLOC_ARRAY_DATA_ALIGN 64
-
-inline bool is_primitive_numeric_cpp(const Schema* schema) {
-    switch (schema->type) {
-        case MORLOC_SINT8:  case MORLOC_SINT16: case MORLOC_SINT32: case MORLOC_SINT64:
-        case MORLOC_UINT8:  case MORLOC_UINT16: case MORLOC_UINT32: case MORLOC_UINT64:
-        case MORLOC_FLOAT32: case MORLOC_FLOAT64:
-            return true;
-        default:
-            return false;
-    }
-}
-
 // True iff a std::vector<T> with this element schema is byte-identical to the
 // voidstar element layout, so the whole data region can be bulk-copied. Both
 // T's numeric KIND (float / signed-int / unsigned-int) AND width must match the
@@ -454,17 +402,6 @@ inline bool vector_is_bulk_copyable(const Schema* elem) {
         return false;
     }
 }
-
-// Alignment for an Array's element data buffer in SHM. For primitive numerics
-// we bump to MORLOC_ARRAY_DATA_ALIGN (SIMD/BLAS); otherwise use the element's
-// natural alignment.
-inline size_t array_data_alignment_cpp(const Schema* elem) {
-    size_t natural = schema_alignment_cpp(elem);
-    return is_primitive_numeric_cpp(elem)
-        ? (MORLOC_ARRAY_DATA_ALIGN > natural ? MORLOC_ARRAY_DATA_ALIGN : natural)
-        : natural;
-}
-
 
 #define MORLOC_VARIANT_PAYLOAD 8
 
@@ -964,8 +901,7 @@ struct MlcSizeWalk {
     template<typename T>
     void variant_payload(const Schema* schema, const Schema* arm, const T& payload) {
         const Schema* a = resolve_recur(arm);
-        size_t align = schema_alignment_cpp(a);
-        if (align == 0) align = 1;
+        size_t align = a->alignment;
         total += static_cast<int64_t>(schema->width + (align - 1));
         child(a, payload, false);
     }
@@ -1029,8 +965,7 @@ struct MlcWriteWalk {
 
     // Take an aligned slot of `inner`'s width from the cursor.
     void* alloc(const Schema* inner) {
-        size_t align = schema_alignment_cpp(inner);
-        if (align == 0) align = 1;
+        size_t align = inner->alignment;
         *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), align));
         void* slot = *cursor;
         *cursor = static_cast<char*>(slot) + inner->width;
@@ -1195,18 +1130,6 @@ T from_voidstar(const Schema* schema, const void* data, T* = nullptr, const void
 // ------------------------------------------------------------
 
 // Fixed-width element schema: the array's data region is n * width bytes.
-inline bool mlc_elem_fixed_width(const Schema* elem) {
-    switch (elem->type) {
-        case MORLOC_NIL: case MORLOC_BOOL: case MORLOC_ENUM:
-        case MORLOC_SINT8: case MORLOC_SINT16: case MORLOC_SINT32: case MORLOC_SINT64:
-        case MORLOC_UINT8: case MORLOC_UINT16: case MORLOC_UINT32: case MORLOC_UINT64:
-        case MORLOC_FLOAT32: case MORLOC_FLOAT64:
-            return true;
-        default:
-            return false;
-    }
-}
-
 inline bool mlc_elem_is_handle(const Schema* elem) {
     return elem->type == MORLOC_IFILE
         || elem->type == MORLOC_OSTREAM
@@ -1271,8 +1194,8 @@ struct MlcNode {
             if (idx == 0) {
                 // The header, worst-case cursor alignment for the data
                 // region, and the fixed part of every element.
-                w.total += static_cast<int64_t>(schema->width + array_data_alignment_cpp(elem) - 1);
-                if (mlc_elem_fixed_width(elem)) {
+                w.total += static_cast<int64_t>(schema->width + elem->data_alignment - 1);
+                if (elem->fixed_width) {
                     w.total += static_cast<int64_t>(data.size() * elem->width);
                     return;
                 }
@@ -1325,8 +1248,7 @@ struct MlcNode {
                 w.total += static_cast<int64_t>(schema->width);
             } else {
                 const Schema* inner = resolve_recur(schema->parameters[0]);
-                size_t align = schema_alignment_cpp(inner);
-                if (align == 0) align = 1;
+                size_t align = inner->alignment;
                 w.total += static_cast<int64_t>(schema->width + (align - 1));
                 w.child(inner, *data, false);
             }
@@ -1349,7 +1271,7 @@ struct MlcNode {
                 }
                 // The data region: aligned (64 for primitive numerics), one
                 // fixed slot per element; tails follow at the cursor.
-                *w.cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*w.cursor), array_data_alignment_cpp(elem)));
+                *w.cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*w.cursor), elem->data_alignment));
                 result->data = abs2rel_cpp(static_cast<absptr_t>(*w.cursor));
                 *w.cursor = static_cast<char*>(*w.cursor) + data.size() * width;
                 char* start = (char*)rel2abs_cpp(result->data);
@@ -1434,7 +1356,7 @@ struct MlcNode {
                     // Fixed-width primitives whose C++ width matches the
                     // wire width are one bulk copy; bool is excluded
                     // because a wire byte outside {0,1} must be normalised.
-                    if (mlc_elem_fixed_width(elem) && sizeof(ElemT) == elem->width) {
+                    if (elem->fixed_width && sizeof(ElemT) == elem->width) {
                         const ElemT* first = (const ElemT*)start;
                         out->assign(first, first + array->size);
                         return;

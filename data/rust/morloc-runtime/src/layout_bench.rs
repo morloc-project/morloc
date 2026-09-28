@@ -70,7 +70,7 @@ fn bench_case(case: &str, list_schema_str: &str, value: AbsPtr, n: usize, dir: &
     report(case, "write", time(|| {
         let _ = std::fs::remove_file(path);
         let h = shared_open_ostream_with_schema(path, list_schema_str).unwrap();
-        shared_write_subpacket(h, 0, value).unwrap();
+        shared_write_subpacket(h, crate::compression::CompressionLevel::NONE, value).unwrap();
         shared_close_handle(h).unwrap();
     }));
 

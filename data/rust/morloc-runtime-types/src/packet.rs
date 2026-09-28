@@ -307,6 +307,20 @@ pub struct FrameEntry {
     pub compressed_size: u64,
 }
 
+/// The total uncompressed and compressed sizes of `frames`, or an error when
+/// a corrupt index sums past the address space.
+pub fn frame_totals(frames: &[FrameEntry]) -> Result<(usize, usize), MorlocError> {
+    frames.iter().try_fold((0usize, 0usize), |(u, c), f| {
+        match (
+            u.checked_add(crate::width::usize_from_u64(f.uncompressed_size)),
+            c.checked_add(crate::width::usize_from_u64(f.compressed_size)),
+        ) {
+            (Some(u), Some(c)) => Ok((u, c)),
+            _ => Err(MorlocError::Packet("frame index sizes overflow".into())),
+        }
+    })
+}
+
 /// Bytes per frame slot inside the frame-index entry payload
 /// (`u64` uncompressed_size + `u64` compressed_size). Encoders use
 /// this to size the worst-case reservation: an entry covering

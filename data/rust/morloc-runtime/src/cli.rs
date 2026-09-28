@@ -1,6 +1,10 @@
 //! CLI argument handling and voidstar utility functions.
 //! Replaces cli.c.
 
+// A value crossing this module is user data: a narrowing or sign change
+// goes through a checked conversion or a named helper, never `as`.
+#![deny(clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::cschema::CSchema;
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 use crate::packet;
+use morloc_runtime_types::width;
 use crate::shm;
 
 /// Extensions that mark an argument as path-shaped for the
@@ -515,7 +520,7 @@ pub(crate) unsafe fn try_load_stream_packet_file(
                     return Err(e);
                 }
             };
-            sh::write_field(field_ptr, sh::TAG_HANDLE, handle as u64);
+            sh::write_field(field_ptr, sh::TAG_HANDLE, sh::handle_payload(handle));
             let mut inner_err: *mut c_char = ptr::null_mut();
             let pkt = wrap_voidstar_as_packet(
                 field_ptr as *mut c_void,
@@ -609,7 +614,10 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
         libc::close(fd);
         return Ok(None);
     }
-    let file_size = sb.st_size as usize;
+    let Ok(file_size) = usize::try_from(sb.st_size) else {
+        libc::close(fd);
+        return Ok(None);
+    };
     if file_size < 32 || file_size < FAST_PATH_THRESHOLD {
         libc::close(fd);
         return Ok(None);
@@ -653,7 +661,7 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
     }
     let metadata_size = header.offset as usize;
     let payload_offset = 32 + metadata_size;
-    let payload_size = header.length as usize;
+    let payload_size = width::usize_from_u64(header.length);
     if payload_offset.saturating_add(payload_size) > file_size {
         libc::close(fd);
         return Ok(None);
@@ -673,7 +681,7 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
             metadata_size,
             32,
         );
-        if nm as usize != metadata_size {
+        if usize::try_from(nm).ok() != Some(metadata_size) {
             libc::close(fd);
             return Ok(None);
         }
@@ -702,40 +710,34 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
         }
     };
 
-    // pread in a loop until payload_size bytes have been read, in case
-    // short reads occur on large files.
-    let mut total: usize = 0;
-    while total < payload_size {
-        let n = libc::pread(
-            fd,
-            dest.add(total) as *mut libc::c_void,
-            payload_size - total,
-            (payload_offset + total) as libc::off_t,
-        );
-        if n < 0 {
-            let e = std::io::Error::last_os_error();
-            if e.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            libc::close(fd);
-            let _ = shm::shfree(dest);
-            return Err(MorlocError::Io(e));
-        }
-        if n == 0 {
-            // Unexpected EOF mid-payload.
-            libc::close(fd);
-            let _ = shm::shfree(dest);
-            return Err(MorlocError::Other(format!(
-                "short read on packet payload: got {} of {} bytes",
-                total, payload_size
-            )));
-        }
-        total += n as usize;
-    }
+    let read = pread_exact(fd, dest, payload_size, payload_offset);
     libc::close(fd);
+    if let Err(e) = read {
+        let _ = shm::shfree(dest);
+        return Err(e);
+    }
 
     rebase_voidstar_in_shm(dest, payload_size, schema, vol_idx_hint)?;
     Ok(Some(dest))
+}
+
+/// Read exactly `len` bytes of `fd` at `offset` into `dst`.
+///
+/// # Safety
+///
+/// `dst..dst + len` must be initialized and writable, and `fd` open.
+unsafe fn pread_exact(fd: libc::c_int, dst: *mut u8, len: usize, offset: usize) -> Result<(), MorlocError> {
+    use std::os::unix::fs::FileExt;
+    use std::os::unix::io::FromRawFd;
+    // Borrow the descriptor as a File without taking ownership of it.
+    let file = std::mem::ManuallyDrop::new(std::fs::File::from_raw_fd(fd));
+    let buf = std::slice::from_raw_parts_mut(dst, len);
+    file.read_exact_at(buf, width::u64_from_usize(offset)).map_err(|e| match e.kind() {
+        std::io::ErrorKind::UnexpectedEof => {
+            MorlocError::Other(format!("short read on packet payload: expected {} bytes", len))
+        }
+        _ => MorlocError::Io(e),
+    })
 }
 
 // ── rebase_voidstar_in_shm (shared by the compressed ingest fast paths) ───
@@ -801,7 +803,10 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
         libc::close(fd);
         return Ok(None);
     }
-    let file_size = sb.st_size as usize;
+    let Ok(file_size) = usize::try_from(sb.st_size) else {
+        libc::close(fd);
+        return Ok(None);
+    };
     if file_size < 32 || file_size < FAST_PATH_THRESHOLD {
         libc::close(fd);
         return Ok(None);
@@ -842,7 +847,7 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
     }
     let metadata_size = header.offset as usize;
     let payload_offset = 32 + metadata_size;
-    let payload_size = header.length as usize; // compressed-frame length on disk
+    let payload_size = width::usize_from_u64(header.length); // compressed-frame length on disk
     if payload_offset.saturating_add(payload_size) > file_size {
         libc::close(fd);
         return Ok(None);
@@ -859,7 +864,7 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
             metadata_size,
             32,
         );
-        if nm as usize != metadata_size {
+        if usize::try_from(nm).ok() != Some(metadata_size) {
             libc::close(fd);
             return Ok(None);
         }
@@ -906,10 +911,13 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
     // eligible; a downstream failure is a real error, not "try the
     // legacy path".
 
-    let total_uncompressed: usize =
-        frames.iter().map(|f| f.uncompressed_size as usize).sum();
-    let total_compressed: usize =
-        frames.iter().map(|f| f.compressed_size as usize).sum();
+    let (total_uncompressed, total_compressed) = match packet::frame_totals(&frames) {
+        Ok(t) => t,
+        Err(e) => {
+            libc::close(fd);
+            return Err(e);
+        }
+    };
     if total_compressed != payload_size {
         libc::close(fd);
         return Err(MorlocError::Packet(format!(
@@ -935,21 +943,9 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
     // during the slow shmalloc fault-in phase).
     let t_decomp = std::time::Instant::now();
     let mut compressed_buf = vec![0u8; payload_size];
-    let mut total_read = 0usize;
-    while total_read < payload_size {
-        let n = libc::pread(
-            fd,
-            compressed_buf.as_mut_ptr().add(total_read) as *mut libc::c_void,
-            payload_size - total_read,
-            (payload_offset + total_read) as libc::off_t,
-        );
-        if n <= 0 {
-            libc::close(fd);
-            return Err(MorlocError::Io(std::io::Error::last_os_error()));
-        }
-        total_read += n as usize;
-    }
+    let read = pread_exact(fd, compressed_buf.as_mut_ptr(), payload_size, payload_offset);
     libc::close(fd);
+    read?;
 
     let dest = match shm::shmalloc(total_uncompressed) {
         Ok(p) => p,
@@ -1044,7 +1040,7 @@ unsafe fn try_decompress_voidstar_bytes_to_shm(
 
     let metadata_size = header.offset as usize;
     let payload_offset = 32 + metadata_size;
-    let payload_size = header.length as usize;
+    let payload_size = width::usize_from_u64(header.length);
     if payload_offset.saturating_add(payload_size) > data_size {
         return Ok(None);
     }
@@ -1064,10 +1060,7 @@ unsafe fn try_decompress_voidstar_bytes_to_shm(
         Ok(Some(f)) if !f.is_empty() => f,
         _ => return Ok(None),
     };
-    let total_uncompressed: usize =
-        frames.iter().map(|f| f.uncompressed_size as usize).sum();
-    let total_compressed: usize =
-        frames.iter().map(|f| f.compressed_size as usize).sum();
+    let (total_uncompressed, total_compressed) = packet::frame_totals(&frames)?;
     if total_compressed != payload_size {
         return Err(MorlocError::Packet(format!(
             "frame index sums to {} compressed bytes but header.length = {}",
@@ -2575,7 +2568,7 @@ pub unsafe extern "C" fn load_morloc_data_file(
                     return ptr::null_mut();
                 }
                 let offset = { header.offset } as usize;
-                let length = { header.length } as usize;
+                let length = width::usize_from_u64({ header.length });
                 // Compare the packet's stored schema descriptor to the
                 // caller's requested schema. Mismatch is user-attributable
                 // (loading the wrong type from a file) so surface as

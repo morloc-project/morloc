@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use morloc_runtime_types::width;
 
 use crate::cschema::CSchema;
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
@@ -774,12 +775,12 @@ impl<'r> Walker<()> for HashWalk<'r> {
                         if payload == sh::RELNULL_PAYLOAD {
                             borrowed = &[];
                         } else {
-                            let suballoc = shm::rel2abs(payload as shm::RelPtr)?;
-                            let path_len = sh::read_path_size(suballoc) as usize;
+                            let suballoc = shm::rel2abs(sh::payload_relptr(payload))?;
+                            let path_len = width::usize_from_u64(sh::read_path_size(suballoc));
                             borrowed = std::slice::from_raw_parts(suballoc.add(8), path_len);
                         }
                     } else if tag == sh::TAG_HANDLE {
-                        owned = crate::stream::handle_path(payload as i64)?.into_bytes();
+                        owned = crate::stream::handle_path(sh::payload_handle(payload))?.into_bytes();
                         borrowed = &owned;
                     } else {
                         return Err(MorlocError::Other(format!(
@@ -1033,15 +1034,23 @@ pub unsafe extern "C" fn make_cache_filename(
 /// is 0 (uncompressed) so `morloc dump` renders cache entries without
 /// paying decompression cost. Users opt into higher levels via env for
 /// large-payload workloads where disk footprint matters. Cached once on
-/// first read like `pool_hash` and `cache_base`.
-fn read_cache_compression_level() -> u8 {
-    static CACHED: OnceLock<u8> = OnceLock::new();
-    *CACHED.get_or_init(|| {
-        std::env::var("MORLOC_CACHE_COMPRESSION_LEVEL")
-            .ok()
-            .and_then(|s| s.trim().parse::<u8>().ok())
-            .unwrap_or(0)
-    })
+/// first read like `pool_hash` and `cache_base`. A value that is not a
+/// level is an error, never a silent 0.
+fn read_cache_compression_level() -> Result<crate::compression::CompressionLevel, MorlocError> {
+    use crate::compression::CompressionLevel;
+    static CACHED: OnceLock<Result<CompressionLevel, String>> = OnceLock::new();
+    CACHED
+        .get_or_init(|| match std::env::var("MORLOC_CACHE_COMPRESSION_LEVEL") {
+            Err(_) => Ok(CompressionLevel::NONE),
+            Ok(s) => s
+                .trim()
+                .parse::<i64>()
+                .map_err(|_| format!("got {:?}", s))
+                .and_then(|n| CompressionLevel::from_int(n).map_err(|e| e.to_string()))
+                .map_err(|e| format!("MORLOC_CACHE_COMPRESSION_LEVEL: {}", e)),
+        })
+        .clone()
+        .map_err(MorlocError::Other)
 }
 
 /// Serialize an SHM voidstar as a self-contained MORLOC_DATA_PACKET
@@ -1083,9 +1092,7 @@ pub(crate) unsafe fn build_persistence_data_packet(
         return None;
     }
 
-    let clvl = match crate::compression::CompressionLevel::from_u8(
-        read_cache_compression_level(),
-    ) {
+    let clvl = match read_cache_compression_level() {
         Ok(l) => l,
         Err(e) => { set_errmsg(errmsg, &e); return None; }
     };

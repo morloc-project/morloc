@@ -9,6 +9,7 @@ use crate::recur::Resolver;
 use crate::schema::{Schema, SerialType};
 use crate::shm::{self, AbsPtr, Array, RelPtr};
 use crate::walk::{self, Frame, Stack, Visit, Walker};
+use morloc_runtime_types::width;
 
 // ── adjust_voidstar_relptrs ────────────────────────────────────────────────
 
@@ -299,11 +300,11 @@ impl<'r> Walker<()> for RebaseWalk<'r> {
                     if sh::read_tag(data) == sh::TAG_PATH {
                         let payload = sh::read_payload(data);
                         if payload != sh::RELNULL_PAYLOAD {
-                            let moved = payload.wrapping_add(shift as u64);
+                            let moved = payload.wrapping_add(width::i64_from_isize(shift).cast_unsigned());
                             sh::write_field(data, sh::TAG_PATH, moved);
                             if self.window.is_some() {
                                 // A path is an 8-byte length, then its bytes.
-                                let rel = moved as RelPtr;
+                                let rel = sh::payload_relptr(moved);
                                 self.check(rel, Some(8))?;
                                 let len = usize::try_from(*(self.target(rel)? as *const u64)).ok();
                                 self.check(rel, len.and_then(|n| n.checked_add(8)))?;
@@ -732,11 +733,11 @@ where
                             if src_payload == sh::RELNULL_PAYLOAD {
                                 sh::write_field(dst, sh::TAG_PATH, sh::RELNULL_PAYLOAD);
                             } else {
-                                let src_suballoc = resolve(src_payload as RelPtr)?;
-                                let path_len = sh::read_path_size(src_suballoc) as usize;
+                                let src_suballoc = resolve(sh::payload_relptr(src_payload))?;
+                                let path_len = width::usize_from_u64(sh::read_path_size(src_suballoc));
                                 let total = sh::path_suballoc_size(path_len);
                                 let new_suballoc = self.alloc.copy_of(src_suballoc, total)?;
-                                sh::write_field(dst, sh::TAG_PATH, shm::abs2rel(new_suballoc)? as u64);
+                                sh::write_field(dst, sh::TAG_PATH, sh::path_payload(shm::abs2rel(new_suballoc)?));
                             }
                         }
                         t if t == sh::TAG_HANDLE => {
@@ -1084,19 +1085,19 @@ impl<'r> Walker<usize> for FlattenWalk<'r> {
                             if src_payload == sh::RELNULL_PAYLOAD {
                                 sh::write_field(dst_field, sh::TAG_PATH, sh::RELNULL_PAYLOAD);
                             } else {
-                                let src_suballoc = shm::rel2abs(src_payload as RelPtr)?;
-                                let path_len = sh::read_path_size(src_suballoc) as usize;
+                                let src_suballoc = shm::rel2abs(sh::payload_relptr(src_payload))?;
+                                let path_len = width::usize_from_u64(sh::read_path_size(src_suballoc));
                                 let total = sh::path_suballoc_size(path_len);
                                 self.cursor = shm::align_up(self.cursor, 8);
                                 let here = self.cursor;
                                 self.region(here, total)?
                                     .copy_from_slice(std::slice::from_raw_parts(src_suballoc, total));
                                 self.cursor += total;
-                                sh::write_field(dst_field, sh::TAG_PATH, here as u64);
+                                sh::write_field(dst_field, sh::TAG_PATH, width::u64_from_usize(here));
                             }
                         }
                         t if t == sh::TAG_HANDLE && self.portable => {
-                            let path = crate::handle_scan::portable_path(src_payload as i64)?;
+                            let path = crate::handle_scan::portable_path(sh::payload_handle(src_payload))?;
                             if path.is_empty() {
                                 sh::write_field(dst_field, sh::TAG_PATH, sh::RELNULL_PAYLOAD);
                             } else {
@@ -1541,8 +1542,8 @@ impl<'a, 'r> Walker<usize> for FlatEmit<'a, 'r> {
                         let pos = shm::align_up(self.cursor, 8);
                         self.set(base, pos as u64 | self.vol_mask);
                         self.pad_to(pos)?;
-                        let suballoc = shm::rel2abs(payload as RelPtr)?;
-                        let total = sh::path_suballoc_size(sh::read_path_size(suballoc) as usize);
+                        let suballoc = shm::rel2abs(sh::payload_relptr(payload))?;
+                        let total = sh::path_suballoc_size(width::usize_from_u64(sh::read_path_size(suballoc)));
                         self.write_bytes(std::slice::from_raw_parts(suballoc, total))?;
                     }
                 }
@@ -1561,7 +1562,7 @@ impl<'a, 'r> Walker<usize> for FlatEmit<'a, 'r> {
                     let arm = variant_arm_schema(*data, s)?;
                     let relptr = *(data.add(VARIANT_PAYLOAD_OFFSET) as *const RelPtr);
                     if relptr == shm::RELNULL {
-                        self.set(base, shm::RELNULL as u64);
+                        self.set(base, width::i64_from_isize(shm::RELNULL).cast_unsigned());
                     } else {
                         let pos = shm::align_up(self.cursor, arm.alignment().max(1));
                         self.set(base, pos as u64 | self.vol_mask);
@@ -1579,7 +1580,7 @@ impl<'a, 'r> Walker<usize> for FlatEmit<'a, 'r> {
                     }
                     let relptr = *(data as *const RelPtr);
                     if relptr == shm::RELNULL {
-                        self.set(base, shm::RELNULL as u64);
+                        self.set(base, width::i64_from_isize(shm::RELNULL).cast_unsigned());
                     } else {
                         let inner_schema = &s.parameters[0];
                         let pos = shm::align_up(self.cursor, inner_schema.alignment().max(1));
@@ -2193,9 +2194,9 @@ where
                     if sh::read_tag(data) == sh::TAG_PATH {
                         let payload = sh::read_payload(data);
                         if payload != sh::RELNULL_PAYLOAD {
-                            let at = self.cover(payload as RelPtr, Some(8))?;
+                            let at = self.cover(sh::payload_relptr(payload), Some(8))?;
                             let len = usize::try_from(*(at as *const u64)).ok();
-                            self.cover(payload as RelPtr, len.and_then(|n| n.checked_add(8)))?;
+                            self.cover(sh::payload_relptr(payload), len.and_then(|n| n.checked_add(8)))?;
                         }
                     }
                 }

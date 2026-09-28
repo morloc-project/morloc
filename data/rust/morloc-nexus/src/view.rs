@@ -55,7 +55,7 @@ extern "C" {
     fn mlc_save_voidstar(
         data: *const c_void,
         schema: *const CSchema,
-        level: u8,
+        level: i64,
         path: *const c_char,
         errmsg: *mut *mut c_char,
     ) -> i32;
@@ -71,7 +71,7 @@ extern "C" {
         errmsg: *mut *mut c_char,
     ) -> i64;
     fn mlc_write(
-        level: u8,
+        level: i64,
         handle: i64,
         payload_voidstar: *const c_void,
         errmsg: *mut *mut c_char,
@@ -501,7 +501,7 @@ fn stream_stdin_dispatch(
             }
             (OutputForm::Packet, Some(h)) => {
                 let rc = unsafe {
-                    mlc_write(args.compression_level, h, sub_vs.ptr(), &mut errmsg)
+                    mlc_write(i64::from(args.compression_level), h, sub_vs.ptr(), &mut errmsg)
                 };
                 if rc != 0 {
                     let msg = take_c_errmsg(errmsg)
@@ -1237,7 +1237,7 @@ fn stream_to_data_via_walker(
         mlc_save_voidstar(
             loaded.voidstar as *const c_void,
             loaded.c_schema,
-            args.compression_level,
+            i64::from(args.compression_level),
             out_c.as_ptr(),
             &mut errmsg,
         )

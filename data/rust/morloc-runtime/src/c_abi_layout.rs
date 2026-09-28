@@ -154,6 +154,7 @@ mod tests {
             // Every enum in the header uses the default underlying type,
             // which is what `#[repr(C)]` gives a fieldless Rust enum.
             "manifest_arg_kind_t"
+            | "morloc_serial_type"
             | "morloc_expression_type"
             | "morloc_app_expression_type"
             | "morloc_pattern_type" => (4, 4),
@@ -328,6 +329,26 @@ mod tests {
                 $c, layout.align, align_of::<$rust>()
             );
         }};
+    }
+
+    /// Every pool reads a schema through this struct, including the layout
+    /// facts the runtime fills in for it.
+    #[test]
+    fn schema_struct_matches_the_header() {
+        use crate::cschema::CSchema;
+        assert_same_layout!(CSchema, "Schema", [
+            serial_type => "type",
+            size => "size",
+            width => "width",
+            offsets => "offsets",
+            hint => "hint",
+            parameters => "parameters",
+            keys => "keys",
+            name => "name",
+            alignment => "alignment",
+            data_alignment => "data_alignment",
+            fixed_width => "fixed_width",
+        ]);
     }
 
     #[test]

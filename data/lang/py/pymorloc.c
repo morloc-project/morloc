@@ -672,8 +672,8 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
                 // byte for chars); Array bumps to 64 for primitive numeric
                 // elements (SIMD/BLAS).
                 size_t buf_align = (schema->type == MORLOC_STRING)
-                    ? schema_alignment(schema->parameters[0])
-                    : array_data_alignment(element_schema);
+                    ? schema->parameters[0]->alignment
+                    : element_schema->data_alignment;
                 w->total += (ssize_t)(sizeof(Array) + buf_align - 1);
 
                 if (PyList_Check(obj)) {
@@ -844,8 +844,7 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
                 w->total += (ssize_t)schema->width;
                 return 0;
             }
-            size_t varm_align = schema_alignment((Schema*)varm);
-            if (varm_align == 0) varm_align = 1;
+            size_t varm_align = varm->alignment;
             w->total += (ssize_t)schema->width + (ssize_t)(varm_align - 1);
             return py_size_child(w, varm, vfields, 0);
         }
@@ -861,8 +860,7 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
             }
             const Schema* inner = py_resolve(schema->parameters[0]);
             if (inner == NULL) return -1;
-            size_t inner_align = schema_alignment((Schema*)inner);
-            if (inner_align == 0) inner_align = 1;
+            size_t inner_align = inner->alignment;
             w->total += (ssize_t)schema->width + (ssize_t)(inner_align - 1);
             return py_size_child(w, inner, obj, 0);
         }
@@ -1197,8 +1195,8 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                 // Array bumps to 64 for primitive numeric elements (SIMD/BLAS).
                 {
                     size_t buf_align = (schema->type == MORLOC_STRING)
-                        ? schema_alignment(schema->parameters[0])
-                        : array_data_alignment(element_schema);
+                        ? schema->parameters[0]->alignment
+                        : element_schema->data_alignment;
                     *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, buf_align);
                 }
 
@@ -1364,8 +1362,7 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
             if (warm->size == 0) {
                 *(relptr_t*)((char*)dest + 8) = RELNULL;
             } else {
-                size_t warm_align = schema_alignment((Schema*)warm);
-                if (warm_align == 0) warm_align = 1;
+                size_t warm_align = warm->alignment;
                 *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, warm_align);
                 {
                     char* rel_err = NULL;
@@ -1392,8 +1389,7 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
             } else {
                 const Schema* inner_schema = py_resolve(schema->parameters[0]);
                 if (inner_schema == NULL) goto error;
-                size_t inner_align = schema_alignment((Schema*)inner_schema);
-                if (inner_align == 0) inner_align = 1;
+                size_t inner_align = inner_schema->alignment;
                 *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, inner_align);
                 {
                     char* rel_err = NULL;
@@ -3271,18 +3267,17 @@ static PyObject* pybinding__mlc_save(PyObject* self, PyObject* args) { MAYFAIL
     Schema* schema = NULL;
     void* voidstar = NULL;
 
-    // Args: (value, schema, level, path). The level is accepted here
-    // for ABI uniformity with mlc_save_voidstar; the runtime ignores it
-    // for the msgpack format (not a packet file).
+    // Args: (value, schema, level, path). The level is accepted for ABI
+    // uniformity with mlc_save_voidstar; the runtime range-checks it, but
+    // a msgpack file has no header to record it in.
     PARSE_ARGS_OR_ABORT(args, "OsLs", &obj, &schema_str, &level_ll, &path);
-    uint8_t level = (uint8_t)level_ll;
 
     schema = PyTRY(parse_schema, schema_str);
 
     voidstar = to_voidstar(schema, obj);
     PyTRACE(voidstar == NULL)
 
-    PyTRY(mlc_save, voidstar, schema, level, path);
+    PyTRY(mlc_save, voidstar, schema, level_ll, path);
 
     {
         char* shfree_errmsg = NULL;
@@ -3313,14 +3308,13 @@ static PyObject* pybinding__mlc_save_voidstar(PyObject* self, PyObject* args) { 
     // Args: (value, schema, level, path). level is the zstd preset
     // (0 = uncompressed, 1-9 = increasing ratio).
     PARSE_ARGS_OR_ABORT(args, "OsLs", &obj, &schema_str, &level_ll, &path);
-    uint8_t level = (uint8_t)level_ll;
 
     schema = PyTRY(parse_schema, schema_str);
 
     voidstar = to_voidstar(schema, obj);
     PyTRACE(voidstar == NULL)
 
-    PyTRY(mlc_save_voidstar, voidstar, schema, level, path);
+    PyTRY(mlc_save_voidstar, voidstar, schema, level_ll, path);
 
     {
         char* shfree_errmsg = NULL;
@@ -3350,14 +3344,13 @@ static PyObject* pybinding__mlc_save_json(PyObject* self, PyObject* args) { MAYF
 
     // Args: (value, schema, level, path). level accepted for ABI uniformity.
     PARSE_ARGS_OR_ABORT(args, "OsLs", &obj, &schema_str, &level_ll, &path);
-    uint8_t level = (uint8_t)level_ll;
 
     schema = PyTRY(parse_schema, schema_str);
 
     voidstar = to_voidstar(schema, obj);
     PyTRACE(voidstar == NULL)
 
-    PyTRY(mlc_save_json, voidstar, schema, level, path);
+    PyTRY(mlc_save_json, voidstar, schema, level_ll, path);
 
     {
         char* shfree_errmsg = NULL;
@@ -3879,7 +3872,7 @@ static PyObject* pybinding__mlc_write(PyObject* self, PyObject* args) { MAYFAIL
     if (to_voidstar_inner(voidstar, &cursor, schema, value_obj) != 0) {
         goto error;
     }
-    PyTRY(mlc_write, (uint8_t)level_ll, (int64_t)handle_ll, voidstar);
+    PyTRY(mlc_write, level_ll, (int64_t)handle_ll, voidstar);
     {
         char* shfree_errmsg = NULL;
         shfree(voidstar, &shfree_errmsg);
