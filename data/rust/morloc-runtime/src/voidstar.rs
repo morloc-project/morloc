@@ -215,8 +215,9 @@ pub unsafe fn adjust_records_within(
     base_rel: RelPtr,
     window: RelWindow,
 ) -> Result<(), MorlocError> {
+    let res = Resolver::new(schema);
     let mut w = RebaseWalk {
-        res: Resolver::new(schema),
+        res: &res,
         mode: Rebase::Shm(base_rel),
         window: Some(window),
     };
@@ -260,8 +261,25 @@ pub unsafe fn shift_buffer_relptrs(
     schema: &Schema,
     delta: isize,
 ) -> Result<(), MorlocError> {
+    shift_buffer_relptrs_with(buf_base, buf_len, field_offset, schema, delta, &Resolver::new(schema))
+}
+
+/// [`shift_buffer_relptrs`] with a resolver of `schema` the caller built,
+/// for a caller shifting many values of one schema.
+///
+/// # Safety
+///
+/// As [`shift_buffer_relptrs`].
+pub unsafe fn shift_buffer_relptrs_with(
+    buf_base: *mut u8,
+    buf_len: usize,
+    field_offset: usize,
+    schema: &Schema,
+    delta: isize,
+    res: &Resolver<'_>,
+) -> Result<(), MorlocError> {
     let window = Some(window_of(0, buf_len)?);
-    let mut w = RebaseWalk { res: Resolver::new(schema), mode: Rebase::Buffer { buf_base, delta }, window };
+    let mut w = RebaseWalk { res, mode: Rebase::Buffer { buf_base, delta }, window };
     let mut st = Stack::new();
     st.enter(schema, buf_base.add(field_offset), ());
     walk::run(&mut w, &mut st)
@@ -276,15 +294,15 @@ enum Rebase {
 
 /// Adds a constant to every relptr under a value, in place, descending
 /// through each rebased pointer so the blocks it names are rebased too.
-struct RebaseWalk<'r> {
-    res: Resolver<'r>,
+struct RebaseWalk<'a, 'r> {
+    res: &'a Resolver<'r>,
     mode: Rebase,
     /// When set, the relptr range every rebased pointer and the bytes it
     /// addresses must fall inside.
     window: Option<RelWindow>,
 }
 
-impl<'r> RebaseWalk<'r> {
+impl<'a, 'r> RebaseWalk<'a, 'r> {
     #[inline]
     fn shift(&self) -> RelPtr {
         match self.mode {
@@ -335,7 +353,7 @@ impl<'r> RebaseWalk<'r> {
     }
 }
 
-impl<'r> Walker<()> for RebaseWalk<'r> {
+impl<'a, 'r> Walker<()> for RebaseWalk<'a, 'r> {
     fn step(&mut self, st: &mut Stack<()>, f: Frame<()>) -> Result<(), MorlocError> {
         // SAFETY: frames hold nodes of the tree the resolver was built from,
         // and `data` points at a value laid out as that schema describes;
@@ -1009,7 +1027,7 @@ pub fn flatten_into(
     data: AbsPtr,
     schema: &Schema,
 ) -> Result<(), MorlocError> {
-    flatten_into_mode(buf, data, schema, false)
+    flatten_into_mode(buf, data, schema, false, &Resolver::new(schema))
 }
 
 /// [`flatten_into`] for a value leaving the local registry: each
@@ -1022,7 +1040,18 @@ pub fn flatten_into_portable(
     data: AbsPtr,
     schema: &Schema,
 ) -> Result<(), MorlocError> {
-    flatten_into_mode(buf, data, schema, true)
+    flatten_into_mode(buf, data, schema, true, &Resolver::new(schema))
+}
+
+/// [`flatten_into_portable`] with a resolver of `schema` the caller built,
+/// for a caller flattening many values of one schema.
+pub fn flatten_into_portable_with(
+    buf: &mut Vec<u8>,
+    data: AbsPtr,
+    schema: &Schema,
+    res: &Resolver<'_>,
+) -> Result<(), MorlocError> {
+    flatten_into_mode(buf, data, schema, true, res)
 }
 
 fn flatten_into_mode(
@@ -1030,9 +1059,10 @@ fn flatten_into_mode(
     data: AbsPtr,
     schema: &Schema,
     portable: bool,
+    res: &Resolver<'_>,
 ) -> Result<(), MorlocError> {
     let total = if portable {
-        crate::ffi::calc_voidstar_size_portable(data, schema)?
+        crate::ffi::calc_voidstar_size_portable_with(data, schema, res)?
     } else {
         crate::ffi::calc_voidstar_size_inner(data, schema)?
     };
@@ -1052,7 +1082,7 @@ fn flatten_into_mode(
 
     // Phase 2: fix up relptrs and copy variable-length data
     let mut w = FlattenWalk {
-        res: Resolver::new(schema),
+        res,
         buf: buf.as_mut_ptr(),
         len: buf.len(),
         cursor: schema.width,
@@ -1069,8 +1099,8 @@ fn flatten_into_mode(
 /// slots the parent already copied, rewriting each pointer to the
 /// buffer-relative offset of the block. A frame's `x` is the offset of the
 /// node's slot in the buffer.
-struct FlattenWalk<'r> {
-    res: Resolver<'r>,
+struct FlattenWalk<'a, 'r> {
+    res: &'a Resolver<'r>,
     buf: *mut u8,
     len: usize,
     cursor: usize,
@@ -1078,7 +1108,7 @@ struct FlattenWalk<'r> {
     portable: bool,
 }
 
-impl<'r> FlattenWalk<'r> {
+impl<'a, 'r> FlattenWalk<'a, 'r> {
     /// The buffer region `[at, at + n)`, checked against the buffer's size,
     /// which the size walk chose to hold the whole value.
     fn region(&mut self, at: usize, n: usize) -> Result<&mut [u8], MorlocError> {
@@ -1108,7 +1138,7 @@ impl<'r> FlattenWalk<'r> {
     }
 }
 
-impl<'r> Walker<usize> for FlattenWalk<'r> {
+impl<'a, 'r> Walker<usize> for FlattenWalk<'a, 'r> {
     fn step(&mut self, st: &mut Stack<usize>, f: Frame<usize>) -> Result<(), MorlocError> {
         // SAFETY: frames hold nodes of the tree the resolver was built from;
         // `data` points at the SHM value the schema describes, and every

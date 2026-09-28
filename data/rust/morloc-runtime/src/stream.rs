@@ -2752,41 +2752,43 @@ unsafe fn record_subpacket_flush(
 /// `payload_bytes` is the uncompressed `[a]` voidstar payload (Array
 /// header + inline + variable). If `level > 0` it gets zstd-compressed
 /// here and the FRAME_INDEX metadata entry is added.
+/// A sub-packet payload in portable form: every stream-handle field already
+/// names its file by path (`TAG_PATH`), never by a slot of this nexus's
+/// registry. Every payload the writer builds is portable -- elements are
+/// flattened with [`crate::voidstar::flatten_into_portable`], and a
+/// fixed-width run cannot hold a stream field -- so emitting one needs no
+/// scan or rewrite. Constructed only where such a payload is built.
+struct PortablePayload<'a>(&'a [u8]);
+
+impl<'a> PortablePayload<'a> {
+    fn new(bytes: &'a [u8], schema: &Schema) -> Result<Self, MorlocError> {
+        if cfg!(debug_assertions) {
+            let fields = crate::handle_scan::collect_stream_fields(bytes, schema)?;
+            assert!(
+                fields.iter().all(|f| unsafe {
+                    morloc_runtime_types::stream_handle::read_tag(bytes.as_ptr().add(f.offset))
+                        != morloc_runtime_types::stream_handle::TAG_HANDLE
+                }),
+                "a sub-packet payload holds a registry handle",
+            );
+        }
+        Ok(PortablePayload(bytes))
+    }
+}
+
 fn emit_subpacket_to_disk(
     slot: &RegistrySlot,
     local: &mut ProcessLocalSlot,
-    payload_bytes: &[u8],
+    payload: PortablePayload<'_>,
     level: u8,
     elem_count: u64,
 ) -> Result<(), MorlocError> {
     use morloc_runtime_types::packet::make_temp_footer_packet;
 
+    let payload_bytes = payload.0;
     debug_assert_payload_elem_count(elem_count, payload_bytes, "emit_subpacket_to_disk");
 
-    // Rewrite handle-carrying leaves from TAG_HANDLE (bare slot id,
-    // valid only in the writer's SHM registry) to TAG_PATH so any
-    // downstream reader -- same nexus (persistent state) or a
-    // different nexus (cross-invocation open) -- can reconstitute a
-    // local handle from the on-disk path. Zero-cost when the payload
-    // contains no stream fields.
-    let payload_bytes: std::borrow::Cow<'_, [u8]> = {
-        let fields = crate::handle_scan::collect_stream_fields(
-            payload_bytes, &local.value_schema,
-        )?;
-        if fields.iter().any(|f| unsafe {
-            morloc_runtime_types::stream_handle::read_tag(
-                payload_bytes.as_ptr().add(f.offset),
-            ) == morloc_runtime_types::stream_handle::TAG_HANDLE
-        }) {
-            let mut owned = payload_bytes.to_vec();
-            crate::handle_scan::rewrite_handles_to_paths(&mut owned, &fields)?;
-            std::borrow::Cow::Owned(owned)
-        } else {
-            std::borrow::Cow::Borrowed(payload_bytes)
-        }
-    };
-
-    let sub = build_subpacket_bytes(&local.value_schema, &payload_bytes, level)?;
+    let sub = build_subpacket_bytes(&local.value_schema, payload_bytes, level)?;
     let compressed_payload_len = sub.compressed_payload_len;
 
     let cursor = slot.cursor;
@@ -2823,26 +2825,20 @@ fn emit_subpacket_to_disk(
 /// which writes the bytes to fd 1 (stdout) or fd 2 (stderr). Caller
 /// MUST hold the slot futex.
 ///
-/// Handle fields in the payload are rewritten to path form before the
-/// packet is assembled: a receiver reading this stream through a
-/// different nexus has no view of the sender's SHM registry, so any
-/// in-band handle would be a dangling pointer at the far end. The
-/// rewrite is zero-cost when the payload contains no stream fields.
+/// The payload is portable ([`PortablePayload`]): a receiver reading this
+/// stream through a different nexus has no view of the sender's SHM
+/// registry, so a handle field must already name its file by path.
 fn emit_subpacket_via_rpc(
     slot: &RegistrySlot,
     local: &mut ProcessLocalSlot,
-    payload_bytes: &[u8],
+    payload: PortablePayload<'_>,
     level: u8,
     elem_count: u64,
 ) -> Result<(), MorlocError> {
+    let payload_bytes = payload.0;
     debug_assert_payload_elem_count(elem_count, payload_bytes, "emit_subpacket_via_rpc");
-    let mut rewritten = payload_bytes.to_vec();
-    let fields = crate::handle_scan::collect_stream_fields(
-        &rewritten, &local.value_schema,
-    )?;
-    crate::handle_scan::rewrite_handles_to_paths(&mut rewritten, &fields)?;
 
-    let sub = build_subpacket_bytes(&local.value_schema, &rewritten, level)?;
+    let sub = build_subpacket_bytes(&local.value_schema, payload_bytes, level)?;
     let compressed_payload_len = sub.compressed_payload_len;
 
     let total = sub.len() as u64;
@@ -2883,7 +2879,7 @@ fn emit_subpacket_via_rpc(
         (*mp).cursor = subpacket_end;
         record_subpacket_flush(
             std::ptr::addr_of_mut!((*mp).diag),
-            rewritten.len() as u64,
+            payload_bytes.len() as u64,
             compressed_payload_len as u64,
             Some(cursor),
         );
@@ -3102,12 +3098,13 @@ fn grow_index_capacity(
                 data_used,
             );
         }
+        let res = crate::recur::Resolver::new(&local.elem_schema);
         for i in 0..n {
             let inline_off = 16 + (i as usize) * w;
             unsafe {
-                crate::voidstar::shift_buffer_relptrs(
+                crate::voidstar::shift_buffer_relptrs_with(
                     buf_abs, new_data_offset + data_used, inline_off,
-                    &local.elem_schema, shift,
+                    &local.elem_schema, shift, &res,
                 )?;
             }
         }
@@ -3151,12 +3148,13 @@ fn flush_write_buffer(
                 data_used,
             );
         }
+        let res = crate::recur::Resolver::new(&local.elem_schema);
         for i in 0..n {
             let inline_off = 16 + (i as usize) * w;
             unsafe {
-                crate::voidstar::shift_buffer_relptrs(
+                crate::voidstar::shift_buffer_relptrs_with(
                     buf_abs, new_data_offset + data_used, inline_off,
-                    &local.elem_schema, -(wasted as isize),
+                    &local.elem_schema, -(wasted as isize), &res,
                 )?;
             }
         }
@@ -3173,10 +3171,11 @@ fn flush_write_buffer(
     let payload_slice = unsafe { std::slice::from_raw_parts(buf_abs, payload_len) };
 
     let level = slot.compression_level;
+    let payload = PortablePayload::new(payload_slice, &local.value_schema)?;
     if slot.is_stdio != 0 {
-        emit_subpacket_via_rpc(slot, local, payload_slice, level, n)?;
+        emit_subpacket_via_rpc(slot, local, payload, level, n)?;
     } else {
-        emit_subpacket_to_disk(slot, local, payload_slice, level, n)?;
+        emit_subpacket_to_disk(slot, local, payload, level, n)?;
     }
 
     // Reset buffer counters. The buffer bytes don't need to be cleared;
@@ -3248,14 +3247,18 @@ fn append_flat_run(
 /// Returns Ok(()) on success (whether the element went into the
 /// buffer or was emitted directly as an oversize sub-packet). Caller
 /// MUST hold the slot futex.
+/// `elem` is the element schema, with `res` its resolver: built once per
+/// batch by the caller rather than once per element and walk.
 fn append_one_element(
     slot: &RegistrySlot,
     local: &mut ProcessLocalSlot,
     elem_src: AbsPtr,
     buf_size: usize,
     scratch: &mut Vec<u8>,
+    elem: &Schema,
+    res: &crate::recur::Resolver<'_>,
 ) -> Result<(), MorlocError> {
-    let w = local.elem_schema.width;
+    let w = elem.width;
 
     // Flatten the single element to a self-contained blob:
     //   blob[0..w]: inline (with buffer-relative relptrs into blob[w..])
@@ -3263,7 +3266,7 @@ fn append_one_element(
     // `scratch` reuses its allocation across the whole @write batch, so this
     // hot loop pays no per-element heap allocation. `buf_size` is read once by
     // the caller rather than re-querying the environment per element.
-    crate::voidstar::flatten_into_portable(scratch, elem_src, &local.elem_schema)?;
+    crate::voidstar::flatten_into_portable_with(scratch, elem_src, elem, res)?;
     let elem_blob: &[u8] = scratch.as_slice();
     // Round the variable region up to 8-byte alignment. Successive
     // elements' variable regions concatenate in the write buffer at
@@ -3324,10 +3327,11 @@ fn append_one_element(
             )?;
         }
         let level = slot.compression_level;
+        let payload = PortablePayload::new(&oversize_payload, &local.value_schema)?;
         if slot.is_stdio != 0 {
-            emit_subpacket_via_rpc(slot, local, &oversize_payload, level, 1)?;
+            emit_subpacket_via_rpc(slot, local, payload, level, 1)?;
         } else {
-            emit_subpacket_to_disk(slot, local, &oversize_payload, level, 1)?;
+            emit_subpacket_to_disk(slot, local, payload, level, 1)?;
         }
         return Ok(());
     }
@@ -3402,9 +3406,9 @@ fn append_one_element(
     let shift: isize = (data_offset as isize) - (w as isize);
     if shift != 0 {
         unsafe {
-            crate::voidstar::shift_buffer_relptrs(
+            crate::voidstar::shift_buffer_relptrs_with(
                 buf_abs, data_offset + raw_variable_size, index_offset,
-                &local.elem_schema, shift,
+                elem, shift, res,
             )?;
         }
     }
@@ -3497,7 +3501,8 @@ pub fn shared_write_subpacket(
             flush_write_buffer(slot, local)?;
             crate::voidstar::flatten_into_portable(&mut scratch, payload_voidstar, &local.value_schema)?;
             let level = slot.compression_level;
-            emit_subpacket_via_rpc(slot, local, &scratch, level, n_elements)?;
+            let payload = PortablePayload::new(&scratch, &local.value_schema)?;
+            emit_subpacket_via_rpc(slot, local, payload, level, n_elements)?;
             unsafe {
                 let mp = slot as *const RegistrySlot as *mut RegistrySlot;
                 (*mp).element_count += n_elements;
@@ -3516,9 +3521,13 @@ pub fn shared_write_subpacket(
             }
             return Ok(());
         }
+        // One copy of the element schema for the batch: its resolver
+        // borrows it while the slot itself is updated per element.
+        let elem = local.elem_schema.clone();
+        let res = crate::recur::Resolver::new(&elem);
         for i in 0..n_elements {
             let elem_src = unsafe { elem_data_base.add((i as usize) * w) };
-            append_one_element(slot, local, elem_src, buf_size, &mut scratch)?;
+            append_one_element(slot, local, elem_src, buf_size, &mut scratch, &elem, &res)?;
             unsafe {
                 let mp = slot as *const RegistrySlot as *mut RegistrySlot;
                 (*mp).element_count += 1;

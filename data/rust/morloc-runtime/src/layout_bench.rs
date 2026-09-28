@@ -175,5 +175,35 @@ fn layout_bench() {
     }
     json_case("tree", "&4Treev24Leaf04Node3i8^4Tree^4Tree", 50_000 / s, |k| tree(4, k), &dir);
 
+    // A real stream file: every frame read once, then all of them written
+    // to a new file. `MORLOC_BENCH_STREAM` names the file and
+    // `MORLOC_BENCH_SCHEMA` its list schema.
+    if let (Ok(src), Ok(schema)) = (std::env::var("MORLOC_BENCH_STREAM"), std::env::var("MORLOC_BENCH_SCHEMA")) {
+        let mut frames = Vec::new();
+        report("stream-file", "@next", time(|| {
+            for p in frames.drain(..) {
+                shm::shfree(p).unwrap();
+            }
+            let h = shared_open_istream(&src).unwrap();
+            while let Some(p) = shared_next_frame(h).unwrap() {
+                frames.push(p);
+            }
+            shared_discard_handle(h).unwrap();
+        }));
+        let out = dir.join("stream-file.stream");
+        let out = out.to_str().unwrap();
+        report("stream-file", "write", time(|| {
+            let _ = std::fs::remove_file(out);
+            let h = shared_open_ostream_with_schema(out, &schema).unwrap();
+            for &p in &frames {
+                shared_write_subpacket(h, crate::compression::CompressionLevel::NONE, p).unwrap();
+            }
+            shared_close_handle(h).unwrap();
+        }));
+        for p in frames {
+            shm::shfree(p).unwrap();
+        }
+    }
+
     let _ = std::fs::remove_dir_all(&dir);
 }

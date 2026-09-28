@@ -427,8 +427,9 @@ pub fn calc_voidstar_layout(
     data: *const u8,
     schema: &crate::schema::Schema,
 ) -> Result<(usize, usize), MorlocError> {
+    let res = crate::recur::Resolver::new(schema);
     let mut w = SizeWalk {
-        res: crate::recur::Resolver::new(schema),
+        res: &res,
         total: 0,
         bound: usize::MAX,
         steps: 0,
@@ -447,8 +448,18 @@ pub fn calc_voidstar_size_portable(
     data: *const u8,
     schema: &crate::schema::Schema,
 ) -> Result<usize, MorlocError> {
+    calc_voidstar_size_portable_with(data, schema, &crate::recur::Resolver::new(schema))
+}
+
+/// [`calc_voidstar_size_portable`] with a resolver of `schema` the caller
+/// built, for a caller sizing many values of one schema.
+pub fn calc_voidstar_size_portable_with(
+    data: *const u8,
+    schema: &crate::schema::Schema,
+    res: &crate::recur::Resolver<'_>,
+) -> Result<usize, MorlocError> {
     let mut w = SizeWalk {
-        res: crate::recur::Resolver::new(schema),
+        res,
         total: 0,
         bound: usize::MAX,
         steps: 0,
@@ -484,8 +495,9 @@ pub fn calc_voidstar_size_bounded(
     schema: &crate::schema::Schema,
     upper_bound: usize,
 ) -> Result<usize, MorlocError> {
+    let res = crate::recur::Resolver::new(schema);
     let mut w = SizeWalk {
-        res: crate::recur::Resolver::new(schema),
+        res: &res,
         total: 0,
         bound: upper_bound,
         steps: 0,
@@ -502,8 +514,8 @@ use crate::walk::Walker as _;
 /// The size walk. A frame's `x` says whether the parent already counted
 /// this node's slot (a tuple or record counts its whole fixed layout up
 /// front), in which case only the bytes beyond the slot are added.
-struct SizeWalk<'r> {
-    res: crate::recur::Resolver<'r>,
+struct SizeWalk<'a, 'r> {
+    res: &'a crate::recur::Resolver<'r>,
     total: usize,
     bound: usize,
     /// Nodes stepped. An upper bound on the sub-allocations a deep copy of
@@ -517,7 +529,7 @@ struct SizeWalk<'r> {
     portable: bool,
 }
 
-impl<'r> SizeWalk<'r> {
+impl<'a, 'r> SizeWalk<'a, 'r> {
     #[inline]
     fn add(&mut self, n: usize) {
         self.total = self.total.saturating_add(n);
@@ -544,7 +556,7 @@ impl<'r> SizeWalk<'r> {
     }
 }
 
-impl<'r> crate::walk::Walker<bool> for SizeWalk<'r> {
+impl<'a, 'r> crate::walk::Walker<bool> for SizeWalk<'a, 'r> {
     fn step(&mut self, st: &mut crate::walk::Stack<bool>, f: crate::walk::Frame<bool>) -> Result<(), MorlocError> {
         use crate::schema::SerialType;
         use crate::shm::{self, Array};
