@@ -537,6 +537,16 @@ data Intrinsic
                     -- stream, in order, empty frames included. Synthesized
                     -- only (a replayed terminal action's producer), never
                     -- written by users.
+  | IntrChannel     -- ^ internal @channel :: <IO> (IStream a), synthesized by
+                    -- `@parse`: a stream whose producer and readers run at
+                    -- once through shared memory. The one handle is the
+                    -- producer's OStream too (see IntrSpawn).
+  | IntrSpawn       -- ^ internal @spawn :: IStream a -> (OStream a -> <IO> ())
+                    -- -> <IO> (): start the producer on the channel as a call
+                    -- of its own, without waiting for it.
+  | IntrSettle      -- ^ internal @settle :: IStream a -> <IO> (): end a
+                    -- channel once its readers are done; a producer failure
+                    -- a reader was handed is raised again here.
   | IntrIFileWalk   -- ^ Unified IFile pattern walker. Synthesized by Express.hs
                     -- and Nexus.hs from any pattern application with an IFile
                     -- receiver (`.[i] f`, `.[s:e:p] f`, `.foo.bar f`, mixed
@@ -591,6 +601,9 @@ intrinsicName IntrCellGet = "cellget"
 intrinsicName IntrCellPut = "cellput"
 intrinsicName IntrCellReduce = "cellreduce"
 intrinsicName IntrReplay = "replay"
+intrinsicName IntrChannel = "channel"
+intrinsicName IntrSpawn = "spawn"
+intrinsicName IntrSettle = "settle"
 intrinsicName IntrIFileWalk = "ifile_walk"
 
 -- | Does this intrinsic perform IO? True iff its type carries an `IO` effect
@@ -631,6 +644,9 @@ intrinsicIsIO IntrCellGet = True
 intrinsicIsIO IntrCellPut = True
 intrinsicIsIO IntrCellReduce = True
 intrinsicIsIO IntrReplay = True
+intrinsicIsIO IntrChannel = True
+intrinsicIsIO IntrSpawn = True
+intrinsicIsIO IntrSettle = True
 -- No IO: safe to write directly in a sandboxed eval.
 intrinsicIsIO IntrHash = False
 intrinsicIsIO IntrVersion = False
@@ -729,6 +745,9 @@ intrinsicArity IntrCellGet = 1
 intrinsicArity IntrCellPut = 2
 intrinsicArity IntrCellReduce = 2
 intrinsicArity IntrReplay = 2
+intrinsicArity IntrChannel = 0
+intrinsicArity IntrSpawn = 2
+intrinsicArity IntrSettle = 1
 intrinsicArity IntrIFileWalk =
   error "intrinsicArity: IntrIFileWalk has dynamic arity (path + handle + 0..n bracket bounds) and is never eta-expanded"
 

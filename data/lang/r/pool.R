@@ -105,6 +105,10 @@ morloc_mlc_write                     <- function(...){ .Call("morloc_mlc_write",
 morloc_mlc_append                    <- function(...){ .Call("morloc_mlc_append",                    ...) }
 morloc_mlc_concat                    <- function(...){ .Call("morloc_mlc_concat",                    ...) }
 morloc_mlc_flush                     <- function(...){ .Call("morloc_mlc_flush",                     ...) }
+morloc_mlc_open_channel              <- function(...){ .Call("morloc_mlc_open_channel",              ...) }
+morloc_mlc_is_channel                <- function(...){ .Call("morloc_mlc_is_channel",                ...) }
+morloc_mlc_settle                    <- function(...){ .Call("morloc_mlc_settle",                    ...) }
+morloc_mlc_spawn                     <- function(...){ .Call("morloc_mlc_spawn",                     ...) }
 # Merge every fold accumulator with the handler's `combine`, then release
 # the cell. The count is never zero -- an untouched cell answers with its
 # seed -- so this always has a value to return.
@@ -223,6 +227,26 @@ morloc_foreign_call <- function(...) {
   .orig_foreign_call(...)
 }
 
+# A channel read or write waits on another worker, which may need a free
+# worker of this pool to make progress, so it counts as busy.
+.mlc_tracked_on_channel <- function(f, handle_pos) {
+  force(f)
+  function(...) {
+    if (morloc_mlc_is_channel(list(...)[[handle_pos]])) {
+      val <- morloc_shared_counter_inc(.busy_counter)
+      if (val >= .n_workers_total && !is.null(.wakeup_fd)) {
+        tryCatch(morloc_write_byte(.wakeup_fd, as.raw(0x21)), error = function(e) NULL)
+      }
+      on.exit(morloc_shared_counter_dec(.busy_counter))
+    }
+    f(...)
+  }
+}
+morloc_mlc_next  <- .mlc_tracked_on_channel(morloc_mlc_next, 2)
+morloc_mlc_write <- .mlc_tracked_on_channel(morloc_mlc_write, 4)
+morloc_mlc_flush <- .mlc_tracked_on_channel(morloc_mlc_flush, 1)
+morloc_mlc_close <- .mlc_tracked_on_channel(morloc_mlc_close, 1)
+
 .mlc_wrap_log <- function(group, start_tmpl, pass_tmpl, fail_tmpl, bench_key, fn) {
   # Eagerly resolve `fn` so the closure captures the ORIGINAL function. The
   # rebinding pattern `mN <- .mlc_wrap_log(..., mN)` reassigns the global
@@ -322,6 +346,17 @@ mlc_reify <- function(f, home_lang) {
   # blocks, so it must travel inside its packet.
   packets <- lapply(seq_along(captured), function(i) mlc_encode(captured[[i]], cap_codecs[[i]], TRUE))
   list(home_lang, as.integer(mid), packets)
+}
+
+# Start the producer `f` on the channel as a separate dispatch in its home
+# pool, without waiting for it. The channel travels as the producer's
+# OStream argument, after its captured values.
+mlc_spawn <- function(f, handle, schema) {
+  r <- mlc_reify(f, MLC_HOME_LANG)
+  packets <- c(r[[3]], list(morloc_put_value(handle, schema, TRUE)))
+  sock <- paste0(global_state$tmpdir, "/pipe-", r[[1]])
+  morloc_mlc_spawn(sock, as.integer(r[[2]]), packets, handle)
+  invisible(NULL)
 }
 
 # Call a manifold in another pool and read its result. The packets in `own`

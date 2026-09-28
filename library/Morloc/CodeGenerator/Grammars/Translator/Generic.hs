@@ -1267,6 +1267,15 @@ genericPrintExpr desc = go
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_concat("
             <> go paths <> ", " <> go dest <> ")"
+    go (IIntrinsicChannel sid) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_open_channel(" <> schemaRef sid <> ")"
+    -- The producer is reified by the pool, which alone knows its closures.
+    go (IIntrinsicSpawn sid handle fn) =
+      "mlc_spawn(" <> go fn <> ", " <> go handle <> ", " <> schemaRef sid <> ")"
+    go (IIntrinsicSettle handle) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_settle(" <> go handle <> ")"
     go (IIntrinsicFlush handle) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_flush(" <> go handle <> ")"

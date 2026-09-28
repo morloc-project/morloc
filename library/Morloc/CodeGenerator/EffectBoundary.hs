@@ -333,6 +333,9 @@ rewrite lang m (PolyIntrinsic t intr xs) = do
   -- foreign source calls a callback, so the same force applies.
   PolyIntrinsic t intr <$> case (intr, xs') of
     (IntrReplay, [h, f]) -> (\f' -> [h, f']) <$> maybeForceCallbackArg f
+    -- @spawn's producer is called by its home pool's dispatch like any
+    -- function value that crossed, so the same force applies.
+    (IntrSpawn, [h, f]) -> (\f' -> [h, f']) <$> maybeForceCallbackArg f
     _ -> return xs'
 rewrite lang m (PolyVariant t n i xs) = PolyVariant t n i <$> mapM (rewrite lang m) xs
 rewrite _ _ leaf = return leaf

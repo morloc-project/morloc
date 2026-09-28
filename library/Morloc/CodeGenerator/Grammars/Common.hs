@@ -989,6 +989,8 @@ crossingClosures sigOf stageTable es closureTable = do
   seeds <- Set.fromList <$> sequence
     [ sigOf (map serialAstToNativeType ins) (serialAstToNativeType out)
     | SerialClosure ins out <- concatMap collectSerializedClosures es ]
+  spawned <- sequence
+    [ sigOf ins out | FunF ins out <- concatMap collectSpawnedProducers es ]
   papplies <- sequence
     [ (,) <$> sigOf rins out <*> sigOf (as ++ rins) out
     | (as, FunF rins out) <- concatMap collectPapplySites es ]
@@ -1002,7 +1004,7 @@ crossingClosures sigOf stageTable es closureTable = do
               , Set.fromList [h | (res, h) <- papplies, Set.member res sigs]
               ]
          in if Set.size sigs' == Set.size sigs then sigs else close sigs'
-      crossingSigs = close seeds
+      crossingSigs = close (seeds <> Set.fromList spawned)
       crossing = Set.fromList [i | (i, sig, _) <- entries, Set.member sig crossingSigs]
   return $ Map.filterWithKey (\i _ -> Set.member i crossing) closureTable
   where
@@ -1021,6 +1023,21 @@ crossingClosures sigOf stageTable es closureTable = do
            in sequence [sigOf (take k bnds) (FunF (drop k bnds) out), sigOf (drop k bnds) out]
         Nothing -> return []
       return (i, sig, capSigs <> stageSigs)
+
+-- | The types of the producers handed to @spawn, which reifies them so
+-- their home pool's dispatch can run them.
+collectSpawnedProducers :: SerialManifold -> [TypeF]
+collectSpawnedProducers = runIdentity . surroundFoldSerialManifoldM defaultValue fw
+  where
+    fw :: FoldWithManifoldM Identity [TypeF] [TypeF] [TypeF] [TypeF] [TypeF] [TypeF]
+    fw =
+      defaultValue
+        { opFoldWithNativeExprM = \orig folded ->
+            let here = case orig of
+                  IntrinsicN _ IntrSpawn _ [_, f] -> [typeFof f]
+                  _ -> []
+             in return (here <> foldlNE (<>) mempty folded)
+        }
 
 -- | Every partial application of a local function value ('PapplyP') in the
 -- manifold, as the applied arguments' types and the result type (the

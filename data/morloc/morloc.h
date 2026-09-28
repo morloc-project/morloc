@@ -505,6 +505,7 @@ typedef struct __attribute__((packed)) morloc_metadata_header_s {
 #define MLC_KIND_IFILE   0
 #define MLC_KIND_ISTREAM 1
 #define MLC_KIND_OSTREAM 2
+#define MLC_KIND_CHANNEL 3
 
 // Upper bound on the file-path payload carried by a single IFile
 // handle in voidstar wire form. POSIX PATH_MAX on Linux is 4096; we
@@ -1877,6 +1878,10 @@ int64_t mlc_open_ostream(const char* schema_str, const char* path, ERRMSG);
 // declaring the schema so the nexus guards the incoming stream, and
 // rejecting an IFile open of stdin (a pipe is not seekable).
 int64_t mlc_open_istream(const char* schema_str, const char* path, ERRMSG);
+int64_t mlc_open_channel(const char* schema_str, ERRMSG);
+bool mlc_settle(int64_t handle, ERRMSG);
+bool mlc_is_channel(int64_t handle);
+bool mlc_spawn(const char* socket_path, uint32_t mid, const uint8_t* const* args, size_t nargs, int64_t handle, ERRMSG);
 // @stdin / @stdout / @stderr intrinsics -- open implied. The nexus is the
 // sole owner of fd 0/1/2; these register slots that route mlc_next /
 // mlc_write through the pool-nexus RPC socket. At most one open per

@@ -1218,6 +1218,13 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     toNexusExpr (AnnoS (Idx iReplay _) _ (IntrinsicS IntrReplay _)) =
       MM.throwCompilerBugAt iReplay
         "@replay reached the nexus evaluator; a frame-driven replay entry must run in a pool"
+    -- A streaming @parse argument's producer runs concurrently in a pool.
+    toNexusExpr (AnnoS (Idx iSpawn _) _ (IntrinsicS intr _))
+      | intr `elem` [IntrChannel, IntrSpawn, IntrSettle] =
+          MM.throwSourcedError iSpawn $
+            "a command with a streamed `@parse` argument currently requires"
+              <+> "a command or parser that dispatches to a foreign pool;"
+              <+> "involve a foreign function in either."
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS intr _)) = do
       v <- resolveCompileTimeIntrinsic intr
       StrX <$> type2schema t <*> pure v
@@ -1526,7 +1533,8 @@ groupEntryWireSchemas ast0 = case peelPack ast0 of
 
 -- | The `parse` field of an argument with `@parse` formats: each format's
 -- name and extensions, and whether the nexus supplies a path at which the
--- parsed stream is staged (for an @IStream@ or @IFile@ argument).
+-- parsed value is staged (for an @IFile@ argument; an @IStream@ is read
+-- while its parser runs).
 parseFields :: [ParseSpec] -> Type -> [(Text, Text)]
 parseFields [] _ = []
 parseFields ps t =
@@ -1539,7 +1547,7 @@ parseFields ps t =
   ]
   where
     isStream (OptionalT x) = isStream x
-    isStream (AppT (VarT v) _) = v == MBT.istreamVar || v == MBT.ifileVar
+    isStream (AppT (VarT v) _) = v == MBT.ifileVar
     isStream _ = False
 
 -- | Serialize a 'CmdArg' to JSON.

@@ -1254,6 +1254,46 @@ std::vector<uint8_t> _mlc_reify_arg(const std::function<R(A...)>& f, Schema* sch
 
 typedef std::vector<std::vector<uint8_t>> mlc_captured_t;
 
+// Streamed @parse argument: a channel is one handle for both ends. The
+// producer writes it as its OStream and the reader reads it as an IStream.
+inline int64_t _mlc_open_channel(Schema* schema) {
+    char* errmsg = NULL;
+    char* s = schema_to_string(schema);
+    if (s == NULL) MLC_INTERNAL_ABORT("_mlc_open_channel: schema_to_string returned NULL");
+    int64_t h = mlc_open_channel(s, &errmsg);
+    free(s);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    return h;
+}
+
+// Start the producer `f` on the channel as a separate dispatch in its home
+// pool, without waiting for it. `schema` encodes the handle as the
+// producer's OStream argument.
+template <class R, class H>
+mlc::Unit _mlc_spawn(const std::function<R(H)>& f, int64_t handle, Schema* schema) {
+    auto [home, mid, captured] = _mlc_reify(f);
+    captured.push_back(_mlc_reify_capture(handle, schema));
+    std::vector<const uint8_t*> args;
+    for (const auto& c : captured) args.push_back(c.data());
+    std::string sock = std::string(g_tmpdir) + "/pipe-" + home;
+    char* errmsg = NULL;
+    mlc_spawn(sock.c_str(), (uint32_t)mid, args.data(), args.size(), handle, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    return mlc::Unit{};
+}
+
+// Release the channel. Raises the producer's failure if the reader saw it.
+inline mlc::Unit _mlc_settle(int64_t handle) {
+    char* errmsg = NULL;
+    mlc_settle(handle, &errmsg);
+    if (errmsg != NULL) {
+        std::string msg(errmsg);
+        free(errmsg);
+        throw MorlocException(msg);
+    }
+    return mlc::Unit{};
+}
+
 // A closure that can cross, applied to its first arguments one at a time,
 // stays a closure of the same manifold: the arguments join its captured
 // values. `schemas` are the wire schemas of its remaining arguments, used

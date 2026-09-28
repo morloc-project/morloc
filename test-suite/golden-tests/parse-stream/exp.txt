@@ -1,0 +1,38 @@
+[3,false]
+[3,false]
+[3,false]
+[3,false]
+[3,false]
+[3,false]
+[3,false]
+[3,false]
+[3,false]
+[3,false]
+[3,false]
+[3,false]
+15
+error: argument #1 (format c, path bad4.txt): bad line in bad4.txt
+exit 1
+21
+error: argument #1 (format p, path bad4.txt): bad line in bad4.txt
+exit 1
+21
+error: argument #1 (format r, path bad4.txt): bad line in bad4.txt
+exit 1
+21
+error: argument #1 (format rs, path bad4.txt): bad line in bad4.txt
+exit 1
+21
+15
+error: argument #1 (format c, path bad4.txt): bad line in bad4.txt
+exit 1
+error: argument #1 (format p, path bad4.txt): bad line in bad4.txt
+exit 1
+3
+3
+3
+3
+exit 1
+exit 1
+13
+13

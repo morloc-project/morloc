@@ -179,6 +179,12 @@ printExpr (IIntrinsicCellReduce sid mt f h) =
   -- inference: a turbofish must name every parameter or none.
   "rustmorloc::cell_reduce" <> reduceTurbofish mt <> "(" <> schemaRef sid <> ", "
     <> printExpr f <> ", " <> printExpr h <> ")"
+printExpr (IIntrinsicChannel sid) =
+  "rustmorloc::open_channel(" <> schemaRef sid <> ")"
+printExpr (IIntrinsicSpawn sid h f) =
+  "rustmorloc::spawn(&" <> printExpr f <> ", " <> printExpr h <> ", " <> schemaRef sid <> ")"
+printExpr (IIntrinsicSettle h) =
+  "rustmorloc::settle(" <> printExpr h <> ")"
 printExpr (IIntrinsicReplay sid mt h f) =
   -- As for cell_reduce: the element type is given, the function's closure
   -- type is left to inference.

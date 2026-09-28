@@ -11,6 +11,12 @@ pub const OP_NEXT_STDIO:  u8 = 1;
 /// stdout / stderr.
 pub const OP_WRITE_STDIO: u8 = 2;
 
+/// `@spawn`: start a channel's producer and watch it from the nexus, the one
+/// process that outlives every pool worker. Request after the opcode:
+/// `[handle: i64][mid: u32][path_len: u32][path][nargs: u32]` then per
+/// argument packet `[len: u64][bytes]`. Response: ok, or err with a message.
+pub const OP_SPAWN: u8 = 4;
+
 pub const STATUS_OK:  u8 = 0;
 pub const STATUS_ERR: u8 = 1;
 pub const STATUS_EOF: u8 = 2;

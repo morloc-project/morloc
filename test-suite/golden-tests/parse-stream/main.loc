@@ -1,0 +1,133 @@
+-- A streamed `@parse` argument is read while its parser runs: the command
+-- starts on the parser's first batch. Producers and readers in C++, Python, R
+-- and Rust, in both directions across languages.
+--
+-- `first*` read one batch at channel depth 1 and report whether the parser
+-- has already finished (it cannot have: 10 batches do not fit). `three`
+-- reads three batches: a parse error in them is reported, one past them is
+-- not (the reader never reached it). `caught` catches the error its read
+-- raised, which still fails the command. `early` reads one batch of a large
+-- input, so its parser is cancelled rather than drained. A parser whose
+-- process dies is an error, not the end of the input.
+module main (firstC, firstP, firstR, firstRs, three, caught, early, two)
+
+import root
+import root-cpp
+import root-py
+import root-r
+import root-rust
+
+source Cpp from "p.hpp" ("produceC", "doneC", "sumC")
+source Py from "p.py" ("produceP", "doneP", "sumP")
+source R from "p.R" ("produceR", "doneR", "sumR")
+source Rust from "p.rs" ("produce" as produceRs, "done" as doneRs, "sum_ints" as sumRs)
+
+produceC :: Str -> ([Int] -> <IO> ()) -> <IO> ()
+produceP :: Str -> ([Int] -> <IO> ()) -> <IO> ()
+produceR :: Str -> ([Int] -> <IO> ()) -> <IO> ()
+produceRs :: Str -> ([Int] -> <IO> ()) -> <IO> ()
+doneC :: Str -> <IO> Bool
+doneP :: Str -> <IO> Bool
+doneR :: Str -> <IO> Bool
+doneRs :: Str -> <IO> Bool
+sumC :: [Int] -> Int
+sumP :: [Int] -> Int
+sumR :: [Int] -> Int
+sumRs :: [Int] -> Int
+
+firstC ::
+  --' @parse c=produceC
+  --' @parse p=produceP
+  --' @parse r=produceR
+  --' @parse rs=produceRs
+  IStream Int ->
+  Str ->
+  <IO> (Int, Bool)
+firstC s path = do
+  Ok xs <- @next s
+  d <- doneC path
+  (sumC xs, d)
+
+firstP ::
+  --' @parse c=produceC
+  --' @parse p=produceP
+  --' @parse rs=produceRs
+  IStream Int ->
+  Str ->
+  <IO> (Int, Bool)
+firstP s path = do
+  Ok xs <- @next s
+  d <- doneP path
+  (sumP xs, d)
+
+firstR ::
+  --' @parse c=produceC
+  --' @parse r=produceR
+  IStream Int ->
+  Str ->
+  <IO> (Int, Bool)
+firstR s path = do
+  Ok xs <- @next s
+  d <- doneR path
+  (sumR xs, d)
+
+firstRs ::
+  --' @parse c=produceC
+  --' @parse p=produceP
+  --' @parse rs=produceRs
+  IStream Int ->
+  Str ->
+  <IO> (Int, Bool)
+firstRs s path = do
+  Ok xs <- @next s
+  d <- doneRs path
+  (sumRs xs, d)
+
+three ::
+  --' @parse c=produceC
+  --' @parse p=produceP
+  --' @parse r=produceR
+  --' @parse rs=produceRs
+  IStream Int ->
+  <IO> Int
+three s = do
+  Ok xs <- @next s
+  Ok ys <- @next s
+  Ok zs <- @next s
+  sumC xs + sumC ys + sumC zs
+
+caught ::
+  --' @parse c=produceC
+  --' @parse p=produceP
+  IStream Int ->
+  <IO> Int
+caught s = do
+  r <- @next s
+  r <- @next s
+  r <- @next s
+  0
+
+early ::
+  --' @parse c=produceC
+  --' @parse p=produceP
+  --' @parse r=produceR
+  --' @parse rs=produceRs
+  IStream Int ->
+  <IO> Int
+early s = do
+  Ok xs <- @next s
+  sumC xs
+
+two ::
+  --' @parse c=produceC
+  --' @parse p=produceP
+  IStream Int ->
+  --' @parse c=produceC
+  --' @parse p=produceP
+  IStream Int ->
+  <IO> Int
+two a b = do
+  Ok xs <- @next a
+  Ok ys <- @next b
+  Ok zs <- @next a
+  sumC xs + sumC ys + sumC zs

@@ -122,6 +122,9 @@ extern "C" {
     fn mlc_append(schema_str: *const c_char, path: *const c_char, errmsg: *mut *mut c_char) -> i64;
     fn mlc_concat(paths: *const *const c_char, n_paths: usize, dest: *const c_char, errmsg: *mut *mut c_char) -> i32;
     fn mlc_flush(handle: i64, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_open_channel(schema_str: *const c_char, errmsg: *mut *mut c_char) -> i64;
+    fn mlc_settle(handle: i64, errmsg: *mut *mut c_char) -> bool;
+    fn mlc_spawn(socket_path: *const c_char, mid: u32, args: *const *const u8, nargs: usize, handle: i64, errmsg: *mut *mut c_char) -> bool;
     fn mlc_tell(errmsg: *mut *mut c_char) -> u64;
     fn mlc_tmpfile(errmsg: *mut *mut c_char) -> *mut c_char;
     fn mlc_cell_new(schema: *const CSchema, init: *const c_void, errmsg: *mut *mut c_char) -> i64;
@@ -3250,6 +3253,43 @@ pub unsafe fn open_istream(schema: &Schema, path: &str) -> u64 {
     let mut err: *mut c_char = std::ptr::null_mut();
     let h = with_schema_str(schema, |s| mlc_open_istream(s, path_c.as_ptr(), &mut err));
     handle_or_throw(h, err, "@open")
+}
+
+/// A channel for a streamed @parse argument: one handle, written by its
+/// producer and read by any pool.
+pub unsafe fn open_channel(schema: &Schema) -> u64 {
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = with_schema_str(schema, |s| mlc_open_channel(s, &mut err));
+    handle_or_throw(h, err, "@channel")
+}
+
+/// Start the producer `f` on the channel as a separate dispatch in its home
+/// pool, without waiting for it. The channel travels as the producer's
+/// OStream argument, after its captured values.
+pub unsafe fn spawn<R, F: MorlocFn1<u64, R>>(f: &F, handle: u64, schema: &Schema) {
+    let (home, mid, mut captured) = require_origin(f.reify1());
+    captured.push(reify_capture(&handle, schema));
+    let ptrs: Vec<*const u8> = captured.iter().map(|c| c.as_ptr()).collect();
+    let tmpdir = TMPDIR
+        .get()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let sock = cstr_arg(&format!("{}/pipe-{}", tmpdir, home), "@spawn");
+    let mut err: *mut c_char = std::ptr::null_mut();
+    mlc_spawn(sock.as_ptr(), mid as u32, ptrs.as_ptr(), ptrs.len(), handle as i64, &mut err);
+    if !err.is_null() {
+        morloc_infra_abort(cstr_take(err));
+    }
+}
+
+/// Release a channel; raises the producer's failure, unchanged, if a reader
+/// was handed it.
+pub unsafe fn settle(handle: u64) {
+    let mut err: *mut c_char = std::ptr::null_mut();
+    mlc_settle(handle as i64, &mut err);
+    if !err.is_null() {
+        morloc_throw(cstr_take(err));
+    }
 }
 
 /// @stdin: open the process stdin as an IStream of the element schema.

@@ -228,6 +228,24 @@ static PyObject* PyMorlocInternalError = NULL;
 // they raise PyMorlocInternalError -- which derives from BaseException and
 // so passes straight through `_mlc_catch`'s `except Exception:` -- rather
 // than the catchable RuntimeError that PyTRY raises.
+// PyTRY with the GIL released around the call, for a libmorloc call that
+// may wait on another worker (a channel read or write). `out` receives the
+// result.
+#define PyTRY_NOGIL(out, fun, ...) \
+    Py_BEGIN_ALLOW_THREADS \
+    out = fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
+    Py_END_ALLOW_THREADS \
+    if(child_errmsg_ != NULL){ \
+        char* prior_err = get_prior_err(); \
+        if(prior_err == NULL){ \
+            PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_); \
+        } else { \
+            PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_); \
+            free(prior_err); \
+        } \
+        goto error; \
+    }
+
 #define PyTRY_INFRA(fun, ...) \
     fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
     if(child_errmsg_ != NULL){ \
@@ -3697,7 +3715,9 @@ error:
 static PyObject* pybinding__mlc_close(PyObject* self, PyObject* args) { MAYFAIL
     long long handle_ll;
     PARSE_ARGS_OR_ABORT(args, "L", &handle_ll);
-    PyTRY(mlc_close, (int64_t)handle_ll);
+    int32_t rc_ = 0;
+    PyTRY_NOGIL(rc_, mlc_close, (int64_t)handle_ll);
+    (void)rc_;
     Py_RETURN_NONE;
 error:
     return NULL;
@@ -3857,7 +3877,7 @@ static PyObject* pybinding__mlc_next(PyObject* self, PyObject* args) { MAYFAIL
     void* voidstar = NULL;
     PARSE_ARGS_OR_ABORT(args, "sL", &schema_str, &handle_ll);
     schema = PyTRY(parse_schema, schema_str);
-    voidstar = PyTRY(mlc_next, (int64_t)handle_ll);
+    PyTRY_NOGIL(voidstar, mlc_next, (int64_t)handle_ll);
     if (voidstar == NULL) {
         free_schema(schema);
         Py_RETURN_NONE;
@@ -4009,7 +4029,11 @@ static PyObject* pybinding__mlc_write(PyObject* self, PyObject* args) { MAYFAIL
     if (to_voidstar_inner(voidstar, &cursor, schema, value_obj) != 0) {
         goto error;
     }
-    PyTRY(mlc_write, level_ll, (int64_t)handle_ll, voidstar);
+    {
+        int32_t rc_ = 0;
+        PyTRY_NOGIL(rc_, mlc_write, level_ll, (int64_t)handle_ll, voidstar);
+        (void)rc_;
+    }
     {
         char* shfree_errmsg = NULL;
         shfree(voidstar, &shfree_errmsg);
@@ -4080,12 +4104,89 @@ error:
     return NULL;
 }
 
+// mlc_open_channel(schema_str) -> handle. A channel is one handle for both
+// ends: a streamed @parse argument's producer writes it, its reader reads it.
+static PyObject* pybinding__mlc_open_channel(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    PARSE_ARGS_OR_ABORT(args, "s", &schema_str);
+    int64_t h = PyTRY(mlc_open_channel, schema_str);
+    return PyLong_FromLongLong((long long)h);
+error:
+    return NULL;
+}
+
+// mlc_is_channel(handle) -> bool. A channel read or write may wait.
+static PyObject* pybinding__mlc_is_channel(PyObject* self, PyObject* args) {
+    long long handle_ll;
+    if (!PyArg_ParseTuple(args, "L", &handle_ll)) return NULL;
+    return PyBool_FromLong(mlc_is_channel((int64_t)handle_ll));
+}
+
+// mlc_settle(handle) -> None. Release the channel; raises the producer's
+// failure, unchanged, if a reader was handed it.
+static PyObject* pybinding__mlc_settle(PyObject* self, PyObject* args) { MAYFAIL
+    long long handle_ll;
+    PARSE_ARGS_OR_ABORT(args, "L", &handle_ll);
+    mlc_settle((int64_t)handle_ll, &child_errmsg_);
+    if (child_errmsg_ != NULL) {
+        PyErr_SetString(PyMorlocException, child_errmsg_);
+        free(child_errmsg_);
+        return NULL;
+    }
+    Py_RETURN_NONE;
+error:
+    return NULL;
+}
+
+// mlc_spawn(socket_path, mid, packets, handle) -> None. Send the call
+// without waiting for it; its outcome is recorded on the channel.
+static PyObject* pybinding__mlc_spawn(PyObject* self, PyObject* args) { MAYFAIL
+    const char* socket_path;
+    int mid;
+    PyObject* py_args;
+    long long handle_ll;
+    const uint8_t** arg_packets = NULL;
+    PARSE_ARGS_OR_ABORT(args, "siOL", &socket_path, &mid, &py_args, &handle_ll);
+    if (!PyList_Check(py_args)) {
+        PyRAISE("mlc_spawn: packets must be a list");
+    }
+    Py_ssize_t nargs = PyList_GET_SIZE(py_args);
+    arg_packets = (const uint8_t**)calloc(nargs > 0 ? nargs : 1, sizeof(uint8_t*));
+    if (!arg_packets) PyINTERNAL_ABORT("mlc_spawn: out of memory");
+    for (Py_ssize_t i = 0; i < nargs; i++) {
+        PyObject* item = PyList_GET_ITEM(py_args, i);
+        if (!PyBytes_Check(item)) {
+            free(arg_packets);
+            PyRAISE("mlc_spawn: every packet must be bytes");
+        }
+        arg_packets[i] = (const uint8_t*)PyBytes_AS_STRING(item);
+    }
+    {
+        bool ok_ = false;
+        Py_BEGIN_ALLOW_THREADS
+        ok_ = mlc_spawn(socket_path, (uint32_t)mid, arg_packets, (size_t)nargs, (int64_t)handle_ll, &child_errmsg_);
+        Py_END_ALLOW_THREADS
+        (void)ok_;
+    }
+    free(arg_packets);
+    if (child_errmsg_ != NULL) {
+        PyErr_Format(PyMorlocInternalError, "morloc internal error (Py pool, %s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_);
+        free(child_errmsg_);
+        return NULL;
+    }
+    Py_RETURN_NONE;
+error:
+    return NULL;
+}
+
 // _mlc_flush(handle) -> None. Force the OStream's SHM buffer to
 // flush as a sub-packet now (instead of waiting for full / @close).
 static PyObject* pybinding__mlc_flush(PyObject* self, PyObject* args) { MAYFAIL
     long long handle_ll;
     PARSE_ARGS_OR_ABORT(args, "L", &handle_ll);
-    PyTRY(mlc_flush, (int64_t)handle_ll);
+    int32_t rc_ = 0;
+    PyTRY_NOGIL(rc_, mlc_flush, (int64_t)handle_ll);
+    (void)rc_;
     Py_RETURN_NONE;
 error:
     return NULL;
@@ -4372,6 +4473,10 @@ static PyMethodDef Methods[] = {
     {"mlc_append", pybinding__mlc_append, METH_VARARGS, "Open an existing stream file for append"},
     {"mlc_concat", pybinding__mlc_concat, METH_VARARGS, "Concatenate stream files"},
     {"mlc_flush", pybinding__mlc_flush, METH_VARARGS, "Force OStream buffer to flush as a sub-packet"},
+    {"mlc_open_channel", pybinding__mlc_open_channel, METH_VARARGS, "Open a channel for a streamed @parse argument"},
+    {"mlc_is_channel", pybinding__mlc_is_channel, METH_VARARGS, "Whether a handle is an open channel"},
+    {"mlc_settle", pybinding__mlc_settle, METH_VARARGS, "Release a channel, raising the failure its reader saw"},
+    {"mlc_spawn", pybinding__mlc_spawn, METH_VARARGS, "Start a producer on a channel without waiting for it"},
     {"mlc_tell", pybinding__mlc_tell, METH_NOARGS, "Elements written to @stdout so far"},
     {"mlc_tmpfile", pybinding__mlc_tmpfile, METH_NOARGS, "Create a temp file for the whole-form gather"},
     {"mlc_unlink_tmp", pybinding__mlc_unlink_tmp, METH_VARARGS, "Unlink a registered temp file"},

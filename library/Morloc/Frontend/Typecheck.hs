@@ -1609,6 +1609,29 @@ synthE _ g (IntrinsicS IntrReplay [handleE, fnE]) = do
          )
 synthE i _ (IntrinsicS IntrReplay args) =
   MM.throwCompilerBugAt i $ "IntrReplay expects 2 args (stream, function), got " <> pretty (length args)
+-- @channel :: <IO> (IStream a); the element type comes from where the
+-- stream is used.
+synthE _ g (IntrinsicS IntrChannel []) =
+  let (g1, a) = newvar "channel_a_" g
+   in return (g1, EffectU ioEffectSet (AppU (VarU BT.istreamVar) [a]), IntrinsicS IntrChannel [])
+synthE i _ (IntrinsicS IntrChannel args) =
+  MM.throwCompilerBugAt i $ "IntrChannel expects no args, got " <> pretty (length args)
+-- @spawn :: IStream a -> (OStream a -> <IO> ()) -> <IO> (). The producer
+-- writes the channel the stream reads.
+synthE _ g (IntrinsicS IntrSpawn [handleE, fnE]) = do
+  let (g1, a) = newvar "spawn_a_" g
+  (g2, _, handleE') <- checkG g1 handleE (AppU (VarU BT.istreamVar) [a])
+  (g3, _, fnE') <- checkG g2 fnE (FunU [AppU (VarU BT.ostreamVar) [apply g2 a]] (EffectU ioEffectSet BT.unitU))
+  return (g3, EffectU ioEffectSet BT.unitU, IntrinsicS IntrSpawn [handleE', fnE'])
+synthE i _ (IntrinsicS IntrSpawn args) =
+  MM.throwCompilerBugAt i $ "IntrSpawn expects 2 args (stream, producer), got " <> pretty (length args)
+-- @settle :: IStream a -> <IO> ().
+synthE _ g (IntrinsicS IntrSettle [handleE]) = do
+  let (g1, a) = newvar "settle_a_" g
+  (g2, _, handleE') <- checkG g1 handleE (AppU (VarU BT.istreamVar) [a])
+  return (g2, EffectU ioEffectSet BT.unitU, IntrinsicS IntrSettle [handleE'])
+synthE i _ (IntrinsicS IntrSettle args) =
+  MM.throwCompilerBugAt i $ "IntrSettle expects 1 arg (stream), got " <> pretty (length args)
 -- Bespoke rule for @try. Its argument may fail in any number of ways --
 -- an intrinsic Err arm auto-required into a throw, a foreign function
 -- raising natively, an explicit @throw -- and those failures have no
@@ -1810,6 +1833,12 @@ intrinsicType IntrCellReduce =
   error "intrinsicType: IntrCellReduce must be typed via synthE's dedicated clause"
 intrinsicType IntrReplay =
   error "intrinsicType: IntrReplay must be typed via synthE's dedicated clause"
+intrinsicType IntrChannel =
+  error "intrinsicType: IntrChannel must be typed via synthE's dedicated clause"
+intrinsicType IntrSpawn =
+  error "intrinsicType: IntrSpawn must be typed via synthE's dedicated clause"
+intrinsicType IntrSettle =
+  error "intrinsicType: IntrSettle must be typed via synthE's dedicated clause"
 intrinsicType IntrAppend =
   error "intrinsicType: IntrAppend must be typed via intrinsicTypeG (polymorphic return)"
 intrinsicType IntrConcat = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)

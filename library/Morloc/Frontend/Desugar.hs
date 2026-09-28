@@ -4741,11 +4741,18 @@ expandParseEntries visibleSigs body =
       let pos = startPos sp
       pt <- maybe (dfail pos "internal: a `@parse` command has no visible signature") return
               (Map.lookup name visibleSigs)
-      let (params, _) = uncurryU pt
+      let (params, result) = uncurryU pt
           quantified = forallVars pt
       when (length params /= length argDocs) $
         dfail pos "internal: a `@parse` command's argument docstrings do not match its arguments"
       kinds <- zipWithM (classifyParseArg pos name quantified) params argDocs
+      -- A streamed argument's channel is released when the command
+      -- returns, so no stream may leave in its result.
+      when (any (== Just True) [isStreamed <$> k | k <- kinds] && mentionsIStream result) $
+        dfail pos . T.unpack $
+          "`" <> unEVar name <> "` reads a stream with `@parse` and returns a stream;"
+          <> " a parsed stream cannot leave the command. Save it to a file with"
+          <> " `@write` and return the path instead."
       -- A streaming command whose actions run only on its staged output
       -- has no fresh-run action entries to parse arguments for.
       let targets = filter (\t -> t == name || Set.member t userNames)
@@ -4759,6 +4766,18 @@ expandParseEntries visibleSigs body =
 
     forallVars (ForallU v t) = v : forallVars t
     forallVars _ = []
+
+    isStreamed (ParseStream False _) = True
+    isStreamed _ = False
+
+    mentionsIStream (AppU (VarU v) ts) = v == BT.istreamVar || any mentionsIStream ts
+    mentionsIStream (AppU t ts) = any mentionsIStream (t : ts)
+    mentionsIStream (FunU ts t) = any mentionsIStream (t : ts)
+    mentionsIStream (NamU _ _ ts rs) = any mentionsIStream (ts ++ map snd rs)
+    mentionsIStream (EffectU _ t) = mentionsIStream t
+    mentionsIStream (OptionalU t) = mentionsIStream t
+    mentionsIStream (ForallU _ t) = mentionsIStream t
+    mentionsIStream _ = False
 
 -- | Classify one argument of a `@parse` command. Nothing for an argument
 -- without formats.
@@ -4802,7 +4821,17 @@ synthParseEntry sp cmd args target = do
   targetRef <- varE target
   argRefs <- mapM (varE . snd) groups
   call <- if null argRefs then return targetRef else expr (AppE targetRef argRefs)
-  bodyE <- foldM bindParsed call (reverse (zip [0 :: Int ..] args))
+  let indexed = zip [0 :: Int ..] args
+      (streams, values) = partition (isChannel . snd) indexed
+  -- Value arguments are parsed first, so a failure among them starts no
+  -- producer. Each streamed argument's producer then runs concurrently with
+  -- the target.
+  bodyE <- if null streams
+    then foldM bindParsed call (reverse indexed)
+    else do
+      settled <- settleStreams (map fst streams) call
+      withStreams <- foldM bindParsed settled (reverse streams)
+      foldM bindParsed withStreams (reverse values)
   doE <- expr (DoBlockE bodyE)
   let lamVars = concatMap fst groups
   lamE <- if null lamVars then return doE else expr (LamE lamVars doE)
@@ -4819,9 +4848,40 @@ synthParseEntry sp cmd args target = do
     paramGroup i (d, Just kind) =
       let sels = [ var i ("s" <> T.pack (show k)) | k <- [0 .. length (docParse d) - 1] ]
           stage = case kind of
-            ParseStream _ _ -> [var i "g"]
+            ParseStream True _ -> [var i "g"]
             _ -> []
        in (sels ++ [var i "t", var i "p"] ++ stage, var i "v")
+
+    isChannel (_, Just (ParseStream False _)) = True
+    isChannel _ = False
+
+    -- Run the target, then settle every streamed argument in argument
+    -- order (each settle releases its channel, so all run before any
+    -- failure is raised). A parse failure the target read wins; otherwise
+    -- the target's own failure is re-raised as it was caught.
+    settleStreams is call = do
+      let rV = EV (parseEntryPrefix <> "r")
+          okV = EV (parseEntryPrefix <> "ok")
+          zV i = EV (parseEntryPrefix <> "z_" <> T.pack (show i))
+          okZ i = EV (BT.doDiscardPrefix <> parseEntryPrefix <> "zok_" <> T.pack (show i))
+          rawMsg tryE = do
+            errName <- expr (StrE BT.tryErrCtor)
+            zeroIdx <- expr (IntE 0)
+            expr (IntrinsicE IntrCtorField [tryE, errName, zeroIdx])
+      ref <- varE rV
+      callDo <- expr (DoBlockE call)
+      tryCall <- expr (IntrinsicE IntrTry [callDo]) >>= expr . EvalE
+      settles <- forM is $ \i -> do
+        s <- varE (var i "v") >>= \h -> expr (IntrinsicE IntrSettle [h])
+        e <- expr (DoBlockE s)
+        t <- expr (IntrinsicE IntrTry [e]) >>= expr . EvalE
+        return (zV i, t)
+      result <- varE okV
+      checkedR <- varE rV >>= \r -> bindOkWith ref rawMsg okV r result
+      checked <- foldrM
+        (\i acc -> varE (zV i) >>= \z -> bindOkWith ref rawMsg (okZ i) z acc)
+        checkedR is
+      foldrM (\b acc -> expr (LetE [b] acc)) checked ((rV, tryCall) : settles)
 
     bindParsed rest (_, (_, Nothing)) = return rest
     bindParsed rest (i, (d, Just kind)) = do
@@ -4860,6 +4920,38 @@ synthParseEntry sp cmd args target = do
       hRef <- fresh (VarE defaultValue (psHandler ps))
       tok <- fresh (VarE defaultValue (var i "t"))
       case kind of
+        ParseStream False a -> do
+          -- A channel, and its producer started on it: the handler run on
+          -- the channel's writing end, which it closes once the handler
+          -- succeeds.
+          let (oV, rV, cV) = (nm "o", nm "r", nm "h")
+              closeV = EV (BT.doDiscardPrefix <> unEVar (nm "c"))
+              okV = EV (BT.doDiscardPrefix <> unEVar (nm "e"))
+              spawnV = EV (BT.doDiscardPrefix <> unEVar (nm "w"))
+              handlerT = FunU [BT.strU, FunU [BT.listU a] (EffectU ioEffectSet BT.unitU)]
+                              (EffectU ioEffectSet BT.unitU)
+              streamT = AppU (VarU BT.istreamVar) [a]
+          hAnn <- fresh (AnnE hRef handlerT)
+          oRef <- fresh (VarE defaultValue oV)
+          zeroE <- fresh (IntE 0)
+          sink <- mkWriteSink True hRef zeroE oRef
+          tryBind <- fresh (AppE hAnn [tok, sink]) >>= fresh . IntrinsicE IntrTry . (: []) >>= fresh . EvalE
+          closeO <- fresh (VarE defaultValue oV) >>= fresh . IntrinsicE IntrClose . (: []) >>= fresh . EvalE
+          unitE <- fresh UniE
+          rRef <- fresh (VarE defaultValue rV)
+          producer <- lets [(closeV, closeO)] unitE
+            >>= bindOkWith hRef failMsg okV rRef
+            >>= lets [(rV, tryBind)]
+            >>= fresh . DoBlockE
+            >>= fresh . LamE [oV]
+          chan <- fresh (IntrinsicE IntrChannel [])
+            >>= \c -> fresh (AnnE c (EffectU ioEffectSet streamT))
+            >>= fresh . EvalE
+          spawnE <- fresh (VarE defaultValue cV)
+            >>= \c -> fresh (IntrinsicE IntrSpawn [c, producer])
+            >>= fresh . EvalE
+          cRet <- fresh (VarE defaultValue cV) >>= \c -> fresh (AnnE c streamT)
+          fresh . DoBlockE =<< lets [(cV, chan), (spawnV, spawnE)] cRet
         ParseStream isFile a -> do
           let (oV, rV, sV) = (nm "o", nm "r", nm "h")
               closeV = EV (BT.doDiscardPrefix <> unEVar (nm "c"))

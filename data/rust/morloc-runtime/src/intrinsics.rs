@@ -899,6 +899,64 @@ pub unsafe extern "C" fn mlc_open_ostream(
         }
     }
 }
+/// Open a channel for values of the list schema `schema_str`: one handle,
+/// written by its producer as an OStream and read by any pool as an
+/// IStream. Returns the handle, or -1 with `errmsg` set.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_open_channel(
+    schema_str: *const c_char,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    clear_errmsg(errmsg);
+    if schema_str.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other("mlc_open_channel: null schema".into()));
+        return -1;
+    }
+    let s = match CStr::from_ptr(schema_str).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_errmsg(errmsg, &MorlocError::Other("mlc_open_channel: schema is not valid UTF-8".into()));
+            return -1;
+        }
+    };
+    match crate::stream::shared_open_channel(s) {
+        Ok(h) => h,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            -1
+        }
+    }
+}
+
+/// Whether `handle` is an open channel. A pool that sizes its workers by
+/// how many are blocked counts a channel read or write as blocking.
+#[no_mangle]
+pub extern "C" fn mlc_is_channel(handle: i64) -> bool {
+    crate::stream::shared_is_channel(handle)
+}
+
+/// Settle a channel whose readers are done with it; see
+/// `shared_settle_channel`. On a failure a reader was handed, returns false
+/// with the producer's message, unchanged, in `errmsg`.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_settle(handle: i64, errmsg: *mut *mut c_char) -> bool {
+    clear_errmsg(errmsg);
+    match crate::stream::shared_settle_channel(handle) {
+        Ok(()) => true,
+        Err(MorlocError::Other(msg)) => {
+            match std::ffi::CString::new(msg.replace('\0', " ")) {
+                Ok(c) => *errmsg = libc::strdup(c.as_ptr()),
+                Err(_) => set_errmsg(errmsg, &MorlocError::Other("the stream's producer failed".into())),
+            }
+            false
+        }
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            false
+        }
+    }
+}
+
 
 /// `@open path :: <IO> (IStream T)` -- typed open. Like `mlc_open_ostream`
 /// the codegen threads the element schema string for `T`. For a real file

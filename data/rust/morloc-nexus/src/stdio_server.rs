@@ -29,7 +29,7 @@ use std::sync::Mutex;
 
 use morloc_runtime_types::packet::{PacketHeader, StreamDiag, SubpacketEntry};
 use morloc_runtime_types::stdio_proto::{
-    OP_NEXT_STDIO, OP_WRITE_STDIO,
+    OP_NEXT_STDIO, OP_WRITE_STDIO, OP_SPAWN,
     STATUS_OK, STATUS_ERR, STATUS_EOF, STATUS_PIPE_CLOSED,
     STDIO_KIND_STDOUT, STDIO_KIND_STDERR,
 };
@@ -275,6 +275,10 @@ fn handle_connection(mut stream: UnixStream) -> std::io::Result<()> {
                 let resp = do_write(slot_id, relptr, size);
                 write_response(&mut stream, resp)?;
             }
+            OP_SPAWN => {
+                let resp = do_spawn(&mut stream)?;
+                write_response(&mut stream, resp)?;
+            }
             other => {
                 write_response(
                     &mut stream,
@@ -344,6 +348,50 @@ fn write_response(stream: &mut UnixStream, resp: Resp) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Handle a `SPAWN` request: start a channel's producer and watch it here,
+/// in the process that outlives every pool worker.
+fn do_spawn(stream: &mut UnixStream) -> std::io::Result<Resp> {
+    extern "C" {
+        fn mlc_spawn_watched(
+            socket_path: *const std::ffi::c_char, mid: u32, args: *const *const u8,
+            nargs: usize, handle: i64, errmsg: *mut *mut std::ffi::c_char,
+        ) -> bool;
+    }
+    let mut head = [0u8; 16];
+    stream.read_exact(&mut head)?;
+    let handle = i64::from_le_bytes(head[0..8].try_into().unwrap());
+    let mid = u32::from_le_bytes(head[8..12].try_into().unwrap());
+    let path_len = u32::from_le_bytes(head[12..16].try_into().unwrap()) as usize;
+    let mut path = vec![0u8; path_len];
+    stream.read_exact(&mut path)?;
+    let mut n = [0u8; 4];
+    stream.read_exact(&mut n)?;
+    let nargs = u32::from_le_bytes(n) as usize;
+    let mut packets: Vec<Vec<u8>> = Vec::with_capacity(nargs);
+    for _ in 0..nargs {
+        let mut len = [0u8; 8];
+        stream.read_exact(&mut len)?;
+        let mut p = vec![0u8; u64::from_le_bytes(len) as usize];
+        stream.read_exact(&mut p)?;
+        packets.push(p);
+    }
+    let path = match std::ffi::CString::new(path) {
+        Ok(p) => p,
+        Err(_) => return Ok(Resp::Err("SPAWN: socket path contains NUL".into())),
+    };
+    let ptrs: Vec<*const u8> = packets.iter().map(|p| p.as_ptr()).collect();
+    let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
+    unsafe {
+        mlc_spawn_watched(path.as_ptr(), mid, ptrs.as_ptr(), ptrs.len(), handle, &mut err);
+        if !err.is_null() {
+            let msg = std::ffi::CStr::from_ptr(err).to_string_lossy().into_owned();
+            libc::free(err as *mut std::ffi::c_void);
+            return Ok(Resp::Err(msg));
+        }
+    }
+    Ok(Resp::Ack)
 }
 
 fn assert_nexus_pid() {

@@ -253,8 +253,10 @@ fn check_bounds(payload: &[u8], offset: usize, len: usize) -> Result<(), MorlocE
 /// stdio is process-scoped and has no path another process could open, so
 /// it is refused.
 pub fn portable_path(handle: i64) -> Result<String, MorlocError> {
-    let path = crate::stream::shared_handle_path(handle)
-        .map_err(|e| MorlocError::Other(format!("handle_scan: rewrite handle: {e}")))?;
+    let path = crate::stream::shared_handle_path(handle).map_err(|e| match e {
+        MorlocError::Other(m) if m == crate::stream::CHANNEL_HAS_NO_PATH => MorlocError::Other(m),
+        e => MorlocError::Other(format!("handle_scan: rewrite handle: {e}")),
+    })?;
     if path == crate::stream::STDIO_SENTINEL_STD || path == crate::stream::STDIO_SENTINEL_ERR {
         return Err(MorlocError::Other(
             "stream handle is bound to stdio (stdin/stdout/stderr); a stream \

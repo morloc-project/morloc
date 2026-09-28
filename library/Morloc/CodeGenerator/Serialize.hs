@@ -511,7 +511,7 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
                      IntrStdin, IntrStdout, IntrStderr, IntrThrow,
                      IntrTell, IntrTmpfile,
                      IntrCellNew, IntrCellGet, IntrCellPut, IntrCellReduce,
-                     IntrReplay, IntrTry] = do
+                     IntrReplay, IntrTry, IntrChannel, IntrSpawn, IntrSettle] = do
           when (intr `elem` [IntrLoad, IntrRead, IntrUnpack, IntrNext, IntrOpen, IntrStdin]) $
             Serial.checkReadDataType tidx intr gt
           tf <- inferType t
@@ -722,6 +722,16 @@ serializeHosted' reg argTypes (MonoHead lang0 m0 args0 headForm0 e0) = do
     intrinsicSchema m IntrReplay _ (handleArg : _)
       | Just (v, a) <- unwrapHandleHead (typeFof handleArg) =
           Just <$> renderStorageSchema m v a
+    -- @channel carries the storage schema of the stream it returns.
+    intrinsicSchema m IntrChannel tf _
+      | Just (v, a) <- unwrapHandleHead (stripTryF tf) =
+          Just <$> renderStorageSchema m v a
+    -- @spawn hands its producer the channel as that producer's OStream
+    -- argument, encoded with the schema the producer decodes it by.
+    intrinsicSchema m IntrSpawn _ [_, fnArg]
+      | FunF [ostreamT] _ <- typeFof fnArg = do
+          ast <- Serial.makeSerialAST m lang ostreamT
+          return . Just . render $ Serial.serialAstToMsgpackSchema ast
     intrinsicSchema m IntrStreamLayout tf _ = do
       -- @streamLayout yields `[(U64,U64,U64)]`; the list-of-triple type is
       -- serialised so the per-language from_voidstar call materialises it

@@ -44,12 +44,16 @@ pub const STREAM_LENGTH_SENTINEL: u64 = u64::MAX;
 pub const MLC_KIND_IFILE: u8 = 0;
 pub const MLC_KIND_ISTREAM: u8 = 1;
 pub const MLC_KIND_OSTREAM: u8 = 2;
+/// A stream whose producer and readers run at once: batches pass through
+/// shared memory, never a file.
+pub const MLC_KIND_CHANNEL: u8 = 3;
 
 pub const fn handle_kind_name(k: u8) -> &'static str {
     match k {
         MLC_KIND_IFILE => "IFile",
         MLC_KIND_ISTREAM => "IStream",
         MLC_KIND_OSTREAM => "OStream",
+        MLC_KIND_CHANNEL => "channel",
         _ => "unknown",
     }
 }

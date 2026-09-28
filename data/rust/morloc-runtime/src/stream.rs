@@ -39,7 +39,7 @@ use morloc_runtime_types::packet::{
     PacketHeader,
     METADATA_TYPE_FOOTER_FINAL, METADATA_TYPE_FOOTER_STATUS,
     METADATA_TYPE_STREAM_DIAG, METADATA_TYPE_SUBPACKET_INDEX,
-    MLC_KIND_IFILE, MLC_KIND_ISTREAM, MLC_KIND_OSTREAM,
+    MLC_KIND_CHANNEL, MLC_KIND_IFILE, MLC_KIND_ISTREAM, MLC_KIND_OSTREAM,
     PACKET_COMPRESSION_NONE, PACKET_COMPRESSION_ZSTD,
     PACKET_FORMAT_VOIDSTAR,
     StreamDiag, STREAM_TAIL_SIZE,
@@ -1021,6 +1021,18 @@ fn attach_process_local_slot(
         )));
     }
     let kind = slot.kind;
+    // A channel has no file: this process needs only its schemas.
+    if kind == MLC_KIND_CHANNEL {
+        let schema_abs = crate::shm::rel2abs(slot.schema_str)?;
+        let schema_bytes = unsafe { std::slice::from_raw_parts(schema_abs, slot.schema_str_len as usize) };
+        let schema_str = std::str::from_utf8(schema_bytes).map_err(|e| MorlocError::Other(format!(
+            "stream handle {:#x}: channel schema is not valid UTF-8: {}", handle, e,
+        )))?;
+        let schema = parse_schema(schema_str).map_err(|e| MorlocError::Schema(format!(
+            "stream handle {:#x}: channel schema '{}': {}", handle, schema_str, e,
+        )))?;
+        return Ok(channel_local(cached_generation, &schema));
+    }
     let path_rel = slot.file_path;
     let path_len = slot.file_path_len as usize;
 
@@ -1283,6 +1295,9 @@ fn release_slot_locked(slot: &RegistrySlot) {
         if let Ok(abs) = crate::shm::rel2abs(schema) {
             let _ = crate::shm::shfree(abs);
         }
+    }
+    if slot.kind == MLC_KIND_CHANNEL {
+        channel_free_queue(slot);
     }
     let idx = slot.subpacket_entries;
     if idx != shm_types_crate::RELNULL {
@@ -2100,6 +2115,37 @@ fn read_error_message(stream: &mut std::os::unix::net::UnixStream) -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
 
+/// Ask the nexus to start and watch a channel's producer; see `mlc_spawn`.
+pub fn nexus_spawn(handle: i64, mid: u32, socket_path: &[u8], packets: &[&[u8]])
+    -> Result<(), MorlocError>
+{
+    use std::io::{Read, Write};
+    use morloc_runtime_types::stdio_proto::OP_SPAWN;
+    let mut req: Vec<u8> = Vec::new();
+    req.push(OP_SPAWN);
+    req.extend_from_slice(&handle.to_le_bytes());
+    req.extend_from_slice(&mid.to_le_bytes());
+    req.extend_from_slice(&(socket_path.len() as u32).to_le_bytes());
+    req.extend_from_slice(socket_path);
+    req.extend_from_slice(&(packets.len() as u32).to_le_bytes());
+    for p in packets {
+        req.extend_from_slice(&(p.len() as u64).to_le_bytes());
+        req.extend_from_slice(p);
+    }
+    with_stdio_sock(|s| {
+        s.write_all(&req).map_err(|e| MorlocError::Other(format!("@spawn: send: {}", e)))?;
+        let mut status = [0u8; 1];
+        s.read_exact(&mut status).map_err(|e| MorlocError::Other(
+            format!("@spawn: recv status: {}", e),
+        ))?;
+        match status[0] {
+            STATUS_OK => Ok(()),
+            STATUS_ERR => Err(MorlocError::Other(format!("@spawn: {}", read_error_message(s)))),
+            other => Err(MorlocError::Other(format!("@spawn: unknown status byte {}", other))),
+        }
+    })
+}
+
 /// `@next` on a stdio-bound IStream. Round-trips one sub-packet
 /// through the nexus. The returned pointer is a fresh SHM block
 /// holding the sub-packet's `MORLOC_DATA_PACKET` bytes; the caller's
@@ -2450,6 +2496,21 @@ pub fn shared_close_handle_with_status(
         ));
     }
     let kind = slot.kind;
+
+    // Closing a channel finishes it: what is buffered is queued and readers
+    // see the end after it. The slot stays until the channel is settled.
+    if kind == MLC_KIND_CHANNEL {
+        with_process_local_slot(handle, |local, slot| {
+            let _guard = SlotFutexGuard::lock(slot);
+            if !slot_generation_is(slot, gen_claim) {
+                return Err(MorlocError::Other("the reader of this stream has stopped".into()));
+            }
+            flush_write_buffer(slot, local)?;
+            channel_finish(slot)
+        })?;
+        invalidate_process_local_slot(handle);
+        return Ok(());
+    }
 
     if kind == MLC_KIND_OSTREAM {
         // OStream close uses with_process_local_slot so the buffer
@@ -3172,7 +3233,9 @@ fn flush_write_buffer(
 
     let level = slot.compression_level;
     let payload = PortablePayload::new(payload_slice, &local.value_schema)?;
-    if slot.is_stdio != 0 {
+    if slot.kind == MLC_KIND_CHANNEL {
+        channel_enqueue(slot, local, payload)?;
+    } else if slot.is_stdio != 0 {
         emit_subpacket_via_rpc(slot, local, payload, level, n)?;
     } else {
         emit_subpacket_to_disk(slot, local, payload, level, n)?;
@@ -3328,7 +3391,9 @@ fn append_one_element(
         }
         let level = slot.compression_level;
         let payload = PortablePayload::new(&oversize_payload, &local.value_schema)?;
-        if slot.is_stdio != 0 {
+        if slot.kind == MLC_KIND_CHANNEL {
+            channel_enqueue(slot, local, payload)?;
+        } else if slot.is_stdio != 0 {
             emit_subpacket_via_rpc(slot, local, payload, level, 1)?;
         } else {
             emit_subpacket_to_disk(slot, local, payload, level, 1)?;
@@ -3441,8 +3506,12 @@ pub fn shared_write_subpacket(
     }
     let level = level.raw();
 
+    if channel_slot(handle)?.is_some() {
+        channel_wait_room(handle)?;
+    }
+    let (gen_claim, _) = unpack_handle(handle);
     with_process_local_slot(handle, |local, slot| {
-        if slot.kind != MLC_KIND_OSTREAM {
+        if slot.kind != MLC_KIND_OSTREAM && slot.kind != MLC_KIND_CHANNEL {
             return Err(MorlocError::Other(format!(
                 "@write on non-OStream handle (kind = {})",
                 handle_kind_name(slot.kind),
@@ -3459,6 +3528,11 @@ pub fn shared_write_subpacket(
         };
 
         let _guard = SlotFutexGuard::lock(slot);
+        // A channel can be released by its readers at any moment; a slot
+        // reused since the handle was checked must not be written.
+        if !slot_generation_is(slot, gen_claim) {
+            return Err(MorlocError::Other("the reader of this stream has stopped".into()));
+        }
 
         // The `@write` level is the default; on a stdio-bound stream the
         // nexus's explicit `-z` overrides it. The pool compresses the
@@ -3544,14 +3618,18 @@ pub fn shared_write_subpacket(
 /// tests that need predictable packet boundaries and for user code
 /// that wants to commit progress visibly to readers.
 pub fn shared_flush_buffer(handle: i64) -> Result<(), MorlocError> {
+    let (gen_claim, _) = unpack_handle(handle);
     with_process_local_slot(handle, |local, slot| {
-        if slot.kind != MLC_KIND_OSTREAM {
+        if slot.kind != MLC_KIND_OSTREAM && slot.kind != MLC_KIND_CHANNEL {
             return Err(MorlocError::Other(format!(
                 "@flush on non-OStream handle (kind = {})",
                 handle_kind_name(slot.kind),
             )));
         }
         let _guard = SlotFutexGuard::lock(slot);
+        if !slot_generation_is(slot, gen_claim) {
+            return Err(MorlocError::Other("the reader of this stream has stopped".into()));
+        }
         flush_write_buffer(slot, local)
     })
 }
@@ -3567,6 +3645,12 @@ pub fn shared_flush_buffer(handle: i64) -> Result<(), MorlocError> {
 /// at or past the file's footer / end-of-data) returns an empty
 /// `Array<a>`.
 pub fn shared_next_subpacket(handle: i64) -> Result<AbsPtr, MorlocError> {
+    if channel_slot(handle)?.is_some() {
+        return match channel_pop(handle)? {
+            Some(p) => Ok(p),
+            None => empty_shm_array(),
+        };
+    }
     if let Some(stdio_kind) = shared_handle_stdio_kind(handle)? {
         verify_stdio_opener_pid(handle)?;
         return stdio_next_via_rpc(handle, stdio_kind);
@@ -3584,6 +3668,9 @@ pub fn shared_next_subpacket(handle: i64) -> Result<AbsPtr, MorlocError> {
 /// Standard input carries no footer to tell them apart by, so there an
 /// empty sub-packet still ends the stream, as with `@next`.
 pub fn shared_next_frame(handle: i64) -> Result<Option<AbsPtr>, MorlocError> {
+    if channel_slot(handle)?.is_some() {
+        return channel_pop(handle);
+    }
     if let Some(stdio_kind) = shared_handle_stdio_kind(handle)? {
         verify_stdio_opener_pid(handle)?;
         let p = stdio_next_via_rpc(handle, stdio_kind)?;
@@ -4333,6 +4420,9 @@ pub fn shared_handle_path(handle: i64) -> Result<String, MorlocError> {
             return Err(MorlocError::Other(
                 "shared_handle_path: slot is not OPEN".into(),
             ));
+        }
+        if slot.kind == MLC_KIND_CHANNEL {
+            return Err(MorlocError::Other(CHANNEL_HAS_NO_PATH.into()));
         }
         let path_rel = slot.file_path;
         let path_len = slot.file_path_len as usize;
@@ -10063,5 +10153,526 @@ mod tests {
         shm::shfree(ok).unwrap();
         close_handle(f).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+
+// -- Channels -------------------------------------------------------------
+//
+// A channel is a stream whose producer and readers run at the same time: a
+// producer writes it as an OStream (`@write`, `@flush`, `@close`) and any
+// pool reads it as an IStream (`@next`), with every batch passing through
+// shared memory. Each flushed sub-packet is copied into one SHM block and
+// relocated in place there ('payload_into_shm'), so a reader takes a ready
+// array without a further copy. The queue is a linked list; a writer waits
+// before a `@write` while the queue holds `channel_depth()` batches or more,
+// so memory stays bounded by that depth plus the batch being written.
+//
+// The slot's `subpacket_entries` field (IFile/OStream bookkeeping, unused by
+// a channel) holds the channel block. Every mutation of the block is made
+// under the slot futex; waits happen outside it.
+
+/// Why a channel cannot be named by a path: it exists only in this
+/// program's shared memory, so it cannot be sent to a remote pool, stored
+/// in a stream file, used as a cache key or returned as a result.
+pub const CHANNEL_HAS_NO_PATH: &str =
+    "a stream read from a @parse argument exists only while this command runs \
+     and cannot leave it (sent to a remote pool, stored, cached or returned); \
+     save it to a file first";
+
+const CHANNEL_RUNNING: u32 = 0;
+const CHANNEL_DONE: u32 = 1;
+const CHANNEL_FAILED: u32 = 2;
+
+#[repr(C)]
+struct ChannelBlock {
+    status: u32,
+    /// Set when a reader was handed the failure: the error then belongs to
+    /// the command, not only to the part of the input nobody read.
+    delivered: u32,
+    count: u64,
+    head: RelPtr,
+    tail: RelPtr,
+    fail_msg: RelPtr,
+    fail_len: u64,
+}
+
+#[repr(C)]
+struct ChannelNode {
+    next: RelPtr,
+    arr: RelPtr,
+}
+
+fn channel_depth() -> u64 {
+    static DEPTH: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *DEPTH.get_or_init(|| {
+        std::env::var("MORLOC_CHANNEL_DEPTH")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&d| d > 0)
+            .unwrap_or(4)
+    })
+}
+
+/// Back off between polls of a channel: a short spin, then sleeps growing
+/// to a millisecond.
+fn channel_backoff(round: &mut u32) {
+    *round += 1;
+    if *round < 64 {
+        std::thread::yield_now();
+    } else {
+        let us = (50u64 << ((*round - 64).min(5))).min(1000);
+        std::thread::sleep(std::time::Duration::from_micros(us));
+    }
+}
+
+/// The channel block of a slot. Caller holds the slot futex and has checked
+/// the slot is a channel.
+fn channel_block(slot: &RegistrySlot) -> Result<*mut ChannelBlock, MorlocError> {
+    Ok(crate::shm::rel2abs(slot.subpacket_entries)? as *mut ChannelBlock)
+}
+
+/// The slot a handle names, if it is still that channel.
+/// Whether `handle` names an open channel, whose reads and writes may wait.
+pub fn shared_is_channel(handle: i64) -> bool {
+    matches!(channel_slot(handle), Ok(Some(_)))
+}
+
+fn channel_slot(handle: i64) -> Result<Option<(&'static RegistrySlot, u64)>, MorlocError> {
+    use std::sync::atomic::Ordering;
+    let (gen_claim, slot_idx) = unpack_handle(handle);
+    let slot = slot_ref(slot_idx).ok_or_else(|| MorlocError::Other(format!(
+        "stream handle {:#x}: slot index {} out of range", handle, slot_idx,
+    )))?;
+    let gen_now = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
+    if gen_now != gen_claim || slot.state.load(Ordering::Acquire) != SLOT_STATE_OPEN_SHARED {
+        return Ok(None);
+    }
+    if slot.kind != MLC_KIND_CHANNEL {
+        return Ok(None);
+    }
+    Ok(Some((slot, gen_claim)))
+}
+
+fn slot_generation_is(slot: &RegistrySlot, gen_claim: u64) -> bool {
+    use std::sync::atomic::Ordering;
+    slot.generation.load(Ordering::Acquire) & GENERATION_MASK == gen_claim
+}
+
+/// Open a channel carrying values of the list schema `schema_str` (`[a]`).
+/// The one handle serves as both the producer's OStream and the readers'
+/// IStream.
+pub fn shared_open_channel(schema_str: &str) -> Result<i64, MorlocError> {
+    use std::sync::atomic::Ordering;
+    let parsed_schema = parse_schema(schema_str).map_err(|e| MorlocError::Schema(format!(
+        "channel open: unparseable schema '{}': {}", schema_str, e,
+    )))?;
+    reject_non_list_stream_schema(&parsed_schema, "channel open", "<channel>")?;
+
+    let (slot_idx, slot) = allocate_slot_cas()?;
+    let guard = SlotFutexGuard::lock(slot);
+    let publish = (|| -> Result<u64, MorlocError> {
+        let schema_rel = shm_copy_bytes(schema_str.as_bytes())?;
+        let buf_abs = crate::shm::shcalloc(1, read_write_buffer_bytes_env())?;
+        let buf_rel = crate::shm::abs2rel(buf_abs)?;
+        let block_abs = crate::shm::shcalloc(1, std::mem::size_of::<ChannelBlock>())?;
+        unsafe {
+            let b = block_abs as *mut ChannelBlock;
+            (*b).status = CHANNEL_RUNNING;
+            (*b).head = shm_types_crate::RELNULL;
+            (*b).tail = shm_types_crate::RELNULL;
+            (*b).fail_msg = shm_types_crate::RELNULL;
+        }
+        let block_rel = crate::shm::abs2rel(block_abs)?;
+        unsafe {
+            let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+            (*mp).kind = MLC_KIND_CHANNEL;
+            (*mp).file_path = shm_types_crate::RELNULL;
+            (*mp).file_path_len = 0;
+            (*mp).schema_str = slot_owns(schema_rel);
+            (*mp).schema_str_len = schema_str.len() as u32;
+            (*mp).subpacket_entries = slot_owns(block_rel);
+            (*mp).subpacket_entries_len = 0;
+            (*mp).subpacket_entries_cap = 0;
+            (*mp).body_start = 0;
+            (*mp).final_footer = 0;
+            (*mp).cursor = 0;
+            (*mp).element_count = 0;
+            (*mp).compression_level = 0;
+            (*mp).opener_pid = std::process::id();
+            (*mp).opener_pid_start_time = read_pid_start_time();
+            (*mp).diag = StreamDiag::new();
+            (*mp).write_buffer = slot_owns(buf_rel);
+            (*mp).write_buffer_index_cap = 0;
+            (*mp).write_buffer_index_count = 0;
+            (*mp).write_buffer_data_used = 0;
+        }
+        slot.call_id.store(current_call_id(), Ordering::Release);
+        let bump = registry_gen_salt() | 1;
+        Ok(slot.generation.fetch_add(bump, Ordering::AcqRel).wrapping_add(bump) & GENERATION_MASK)
+    })();
+    let new_gen = match publish {
+        Ok(g) => g,
+        Err(e) => {
+            release_slot_locked(slot);
+            return Err(e);
+        }
+    };
+    drop(guard);
+    let handle = pack_handle(new_gen, slot_idx);
+    install_process_local_slot(handle, channel_local(new_gen, &parsed_schema));
+    Ok(handle)
+}
+
+/// A channel's process-local state: its schemas; no file.
+fn channel_local(generation: u64, value_schema: &Schema) -> ProcessLocalSlot {
+    ProcessLocalSlot {
+        cached_generation: generation,
+        mmap_ptr: std::ptr::null_mut(),
+        mmap_size: 0,
+        pages_dropped: 0,
+        fd: -1,
+        cache: Box::new(StreamCache::new(0)),
+        value_schema: value_schema.clone(),
+        elem_schema: value_schema.parameters[0].clone(),
+        subpacket_entries_local: Vec::new(),
+        subpacket_elem_cum: None,
+        is_data_packet: false,
+    }
+}
+
+/// Before a `@write` to a channel: wait, outside the slot lock, until the
+/// queue has room. A channel no longer running refuses the write -- its
+/// readers are gone (the slot was released) or it was already finished --
+/// which is what stops a producer nobody reads any more.
+fn channel_wait_room(handle: i64) -> Result<(), MorlocError> {
+    let mut round = 0u32;
+    loop {
+        let Some((slot, gen_claim)) = channel_slot(handle)? else {
+            return Err(MorlocError::Other("the reader of this stream has stopped".into()));
+        };
+        {
+            let _g = SlotFutexGuard::lock(slot);
+            if !slot_generation_is(slot, gen_claim) {
+                return Err(MorlocError::Other("the reader of this stream has stopped".into()));
+            }
+            let b = channel_block(slot)?;
+            let (status, count) = unsafe { ((*b).status, (*b).count) };
+            if status != CHANNEL_RUNNING {
+                return Err(MorlocError::Other("this stream was already finished".into()));
+            }
+            if count < channel_depth() {
+                return Ok(());
+            }
+        }
+        channel_backoff(&mut round);
+    }
+}
+
+/// Queue one flushed sub-packet. Caller holds the slot futex.
+fn channel_enqueue(
+    slot: &RegistrySlot,
+    local: &ProcessLocalSlot,
+    payload: PortablePayload<'_>,
+) -> Result<(), MorlocError> {
+    let arr = payload_into_shm(payload.0, &local.elem_schema, 0)?;
+    let node_abs = match crate::shm::shmalloc(std::mem::size_of::<ChannelNode>()) {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = crate::shm::shfree(arr);
+            return Err(e);
+        }
+    };
+    let node_rel = crate::shm::abs2rel(node_abs)?;
+    unsafe {
+        let node = node_abs as *mut ChannelNode;
+        (*node).next = shm_types_crate::RELNULL;
+        (*node).arr = crate::shm::abs2rel(arr)?;
+        let b = channel_block(slot)?;
+        if (*b).tail == shm_types_crate::RELNULL {
+            (*b).head = node_rel;
+        } else {
+            let tail = crate::shm::rel2abs((*b).tail)? as *mut ChannelNode;
+            (*tail).next = node_rel;
+        }
+        (*b).tail = node_rel;
+        (*b).count += 1;
+    }
+    Ok(())
+}
+
+/// Take the next batch of a channel, waiting for the producer: `Some` array,
+/// `None` at the end, or the producer's failure (which is then marked
+/// delivered).
+fn channel_pop(handle: i64) -> Result<Option<AbsPtr>, MorlocError> {
+    let mut round = 0u32;
+    loop {
+        let Some((slot, gen_claim)) = channel_slot(handle)? else {
+            return Err(MorlocError::Other(format!(
+                "stream handle {:#x}: the stream was closed", handle,
+            )));
+        };
+        {
+            let _g = SlotFutexGuard::lock(slot);
+            if !slot_generation_is(slot, gen_claim) {
+                continue;
+            }
+            let b = channel_block(slot)?;
+            unsafe {
+                if (*b).count > 0 {
+                    let node_abs = crate::shm::rel2abs((*b).head)?;
+                    let node = node_abs as *mut ChannelNode;
+                    let arr = crate::shm::rel2abs((*node).arr)?;
+                    (*b).head = (*node).next;
+                    if (*b).head == shm_types_crate::RELNULL {
+                        (*b).tail = shm_types_crate::RELNULL;
+                    }
+                    (*b).count -= 1;
+                    let _ = crate::shm::shfree(node_abs);
+                    return Ok(Some(arr));
+                }
+                match (*b).status {
+                    CHANNEL_DONE => return Ok(None),
+                    CHANNEL_FAILED => {
+                        (*b).delivered = 1;
+                        return Err(MorlocError::Other(channel_fail_message(b)));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        channel_backoff(&mut round);
+    }
+}
+
+fn channel_fail_message(b: *mut ChannelBlock) -> String {
+    unsafe {
+        if (*b).fail_msg == shm_types_crate::RELNULL {
+            return "the stream's producer failed".into();
+        }
+        match crate::shm::rel2abs((*b).fail_msg) {
+            Ok(p) => String::from_utf8_lossy(std::slice::from_raw_parts(p, (*b).fail_len as usize)).into_owned(),
+            Err(_) => "the stream's producer failed".into(),
+        }
+    }
+}
+
+/// The producer finished: every batch it wrote has been queued. Caller
+/// holds the slot futex.
+fn channel_finish(slot: &RegistrySlot) -> Result<(), MorlocError> {
+    let b = channel_block(slot)?;
+    unsafe {
+        if (*b).status == CHANNEL_RUNNING {
+            (*b).status = CHANNEL_DONE;
+        }
+    }
+    Ok(())
+}
+
+/// The producer stopped without finishing: its readers see `msg` after the
+/// batches already queued. No effect on a channel already finished or
+/// released.
+pub fn shared_channel_fail(handle: i64, msg: &str) -> Result<(), MorlocError> {
+    let Some((slot, gen_claim)) = channel_slot(handle)? else {
+        return Ok(());
+    };
+    let _g = SlotFutexGuard::lock(slot);
+    if !slot_generation_is(slot, gen_claim) {
+        return Ok(());
+    }
+    let b = channel_block(slot)?;
+    unsafe {
+        if (*b).status != CHANNEL_RUNNING {
+            return Ok(());
+        }
+        let rel = shm_copy_bytes(msg.as_bytes())?;
+        (*b).fail_msg = rel;
+        (*b).fail_len = msg.len() as u64;
+        (*b).status = CHANNEL_FAILED;
+    }
+    Ok(())
+}
+
+/// The producer's call returned. It closes the channel when it finishes, so
+/// this only matters for one that returned without closing it: its readers
+/// see the end after what it queued.
+pub fn shared_channel_ended(handle: i64) -> Result<(), MorlocError> {
+    let Some((slot, gen_claim)) = channel_slot(handle)? else {
+        return Ok(());
+    };
+    let _g = SlotFutexGuard::lock(slot);
+    if !slot_generation_is(slot, gen_claim) {
+        return Ok(());
+    }
+    channel_finish(slot)
+}
+
+/// Settle a channel once its readers are done with it, releasing the slot.
+/// A failure a reader was handed is returned as the error; a failure in
+/// input nobody read, and a producer still running (its readers stopped
+/// early), are not errors: the producer's next write is refused. Never
+/// waits for the producer.
+pub fn shared_settle_channel(handle: i64) -> Result<(), MorlocError> {
+    let Some((slot, gen_claim)) = channel_slot(handle)? else {
+        return Ok(());
+    };
+    let failure = {
+        let _g = SlotFutexGuard::lock(slot);
+        if !slot_generation_is(slot, gen_claim) {
+            return Ok(());
+        }
+        let b = channel_block(slot)?;
+        let failure = unsafe {
+            if (*b).status == CHANNEL_FAILED && (*b).delivered != 0 {
+                Some(channel_fail_message(b))
+            } else {
+                None
+            }
+        };
+        release_slot_locked(slot);
+        failure
+    };
+    invalidate_process_local_slot(handle);
+    match failure {
+        Some(msg) => Err(MorlocError::Other(msg)),
+        None => Ok(()),
+    }
+}
+
+/// Free a channel's queued batches and its failure message. Caller holds
+/// the slot futex; the block itself is freed with the slot's other blocks.
+fn channel_free_queue(slot: &RegistrySlot) {
+    let Ok(b) = channel_block(slot) else { return };
+    unsafe {
+        let mut node_rel = (*b).head;
+        while node_rel != shm_types_crate::RELNULL {
+            let Ok(node_abs) = crate::shm::rel2abs(node_rel) else { break };
+            let node = node_abs as *mut ChannelNode;
+            if let Ok(arr) = crate::shm::rel2abs((*node).arr) {
+                let _ = crate::shm::shfree(arr);
+            }
+            node_rel = (*node).next;
+            let _ = crate::shm::shfree(node_abs);
+        }
+        (*b).head = shm_types_crate::RELNULL;
+        (*b).tail = shm_types_crate::RELNULL;
+        (*b).count = 0;
+        if (*b).fail_msg != shm_types_crate::RELNULL {
+            if let Ok(p) = crate::shm::rel2abs((*b).fail_msg) {
+                let _ = crate::shm::shfree(p);
+            }
+            (*b).fail_msg = shm_types_crate::RELNULL;
+        }
+    }
+}
+
+#[cfg(test)]
+mod channel_tests {
+    use super::*;
+    use crate::json::{read_json_with_schema, voidstar_to_json_string};
+
+    fn batch(json: &str) -> AbsPtr {
+        read_json_with_schema(json, &parse_schema("as").unwrap()).unwrap()
+    }
+
+    fn write(h: i64, json: &str) -> Result<(), MorlocError> {
+        let v = batch(json);
+        let r = shared_write_subpacket(h, crate::compression::CompressionLevel::NONE, v)
+            .and_then(|()| shared_flush_buffer(h));
+        crate::shm::shfree(v).unwrap();
+        r
+    }
+
+    fn read(h: i64) -> Result<Option<String>, MorlocError> {
+        match shared_next_frame(h)? {
+            None => Ok(None),
+            Some(p) => {
+                let s = voidstar_to_json_string(p, &parse_schema("as").unwrap()).unwrap();
+                crate::shm::shfree(p).unwrap();
+                Ok(Some(s))
+            }
+        }
+    }
+
+    #[test]
+    fn a_channel_delivers_batches_in_order_then_ends() {
+        let _shm = crate::own_test_registry();
+        let h = shared_open_channel("as").unwrap();
+        write(h, r#"["a","bc"]"#).unwrap();
+        write(h, r#"["","d"]"#).unwrap();
+        shared_close_handle(h).unwrap();
+        assert_eq!(read(h).unwrap().as_deref(), Some(r#"["a","bc"]"#));
+        assert_eq!(read(h).unwrap().as_deref(), Some(r#"["","d"]"#));
+        assert_eq!(read(h).unwrap(), None);
+        shared_settle_channel(h).unwrap();
+    }
+
+    #[test]
+    fn a_failure_follows_the_queued_batches_and_settles_as_an_error_once_read() {
+        let _shm = crate::own_test_registry();
+        let h = shared_open_channel("as").unwrap();
+        write(h, r#"["x"]"#).unwrap();
+        shared_channel_fail(h, "\u{1}0\u{1f}bad line 7\u{2}").unwrap();
+        assert_eq!(read(h).unwrap().as_deref(), Some(r#"["x"]"#));
+        let e = read(h).unwrap_err().to_string();
+        assert!(e.contains("\u{1}0\u{1f}bad line 7\u{2}"), "{e}");
+        let e = shared_settle_channel(h).unwrap_err().to_string();
+        assert!(e.contains("bad line 7"), "{e}");
+    }
+
+    #[test]
+    fn a_failure_nobody_read_is_not_an_error() {
+        let _shm = crate::own_test_registry();
+        let h = shared_open_channel("as").unwrap();
+        write(h, r#"["x"]"#).unwrap();
+        shared_channel_fail(h, "bad line 9").unwrap();
+        assert_eq!(read(h).unwrap().as_deref(), Some(r#"["x"]"#));
+        shared_settle_channel(h).unwrap();
+    }
+
+    #[test]
+    fn settling_early_stops_the_producer_at_its_next_write() {
+        let _shm = crate::own_test_registry();
+        let h = shared_open_channel("as").unwrap();
+        write(h, r#"["x"]"#).unwrap();
+        shared_settle_channel(h).unwrap();
+        assert!(write(h, r#"["y"]"#).is_err());
+        // Settling again, or the producer's call ending, is harmless.
+        shared_settle_channel(h).unwrap();
+        shared_channel_ended(h).unwrap();
+    }
+
+    #[test]
+    fn a_full_channel_holds_its_producer_until_a_reader_takes_a_batch() {
+        let _shm = crate::own_test_registry();
+        let h = shared_open_channel("as").unwrap();
+        for _ in 0..channel_depth() {
+            write(h, r#"["x"]"#).unwrap();
+        }
+        let produced = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let p2 = produced.clone();
+        let producer = std::thread::spawn(move || {
+            write(h, r#"["last"]"#).unwrap();
+            p2.store(true, std::sync::atomic::Ordering::SeqCst);
+            shared_close_handle(h).unwrap();
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!produced.load(std::sync::atomic::Ordering::SeqCst));
+        let mut n = 0;
+        while let Some(_) = read(h).unwrap() {
+            n += 1;
+        }
+        producer.join().unwrap();
+        assert_eq!(n, channel_depth() + 1);
+        shared_settle_channel(h).unwrap();
+    }
+
+    #[test]
+    fn a_channel_has_no_path() {
+        let _shm = crate::own_test_registry();
+        let h = shared_open_channel("as").unwrap();
+        let e = crate::handle_scan::portable_path(h).unwrap_err().to_string();
+        assert!(e.contains("cannot leave it"), "{e}");
+        shared_settle_channel(h).unwrap();
     }
 }

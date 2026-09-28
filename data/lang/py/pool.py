@@ -170,8 +170,24 @@ def _init_worker_tracking(busy, total, wakeup_fd):
     _total_ref = total
     _wakeup_fd = wakeup_fd
     morloc.foreign_call = _tracked_foreign_call
+    # A channel read or write waits on another worker, which may need a
+    # free worker of this pool to make progress.
+    morloc.mlc_next = _tracked_on_channel(morloc.mlc_next, 1)
+    morloc.mlc_write = _tracked_on_channel(morloc.mlc_write, 3)
+    morloc.mlc_flush = _tracked_on_channel(morloc.mlc_flush, 0)
+    morloc.mlc_close = _tracked_on_channel(morloc.mlc_close, 0)
+
+def _tracked_on_channel(f, handle_pos):
+    def g(*args):
+        if morloc.mlc_is_channel(args[handle_pos]):
+            return _tracked_call(f, *args)
+        return f(*args)
+    return g
 
 def _tracked_foreign_call(*args):
+    return _tracked_call(_original_foreign_call, *args)
+
+def _tracked_call(f, *args):
     prev = _busy_ref.value
     _busy_ref.value = prev + 1
     if prev + 1 >= _total_ref.value and _wakeup_fd >= 0:
@@ -180,7 +196,7 @@ def _tracked_foreign_call(*args):
         except OSError:
             pass
     try:
-        return _original_foreign_call(*args)
+        return f(*args)
     finally:
         _busy_ref.value -= 1
 
@@ -301,6 +317,16 @@ def mlc_reify(f, home_lang):
     # its blocks, so it must travel inside its packet.
     packets = [mlc_encode(c, s, True) for c, s in zip(captured, cap_codecs)]
     return (home_lang, mid, packets)
+
+
+def mlc_spawn(f, handle, schema):
+    # Start the producer `f` on the channel as a separate dispatch in its
+    # home pool, without waiting for it. The channel travels as the
+    # producer's OStream argument, after its captured values.
+    home, mid, packets = mlc_reify(f, MLC_HOME_LANG)
+    packets = list(packets) + [morloc.put_value(handle, schema, True)]
+    sock = os.path.join(global_state["tmpdir"], "pipe-" + home)
+    morloc.mlc_spawn(sock, mid, packets, handle)
 
 
 def _mlc_manifold_id(f):

@@ -208,6 +208,13 @@ data IExpr
       -- ^ @append :: Str -> <IO> (OStream a): schemaId of `[a]`, path.
   | IIntrinsicConcat IExpr IExpr
       -- ^ @concat :: [Str] -> Str -> <IO> (): paths expr, dest expr.
+  | IIntrinsicChannel Int
+      -- ^ internal @channel: schemaId of the stream's `[a]`.
+  | IIntrinsicSpawn Int IExpr IExpr
+      -- ^ internal @spawn: schemaId of the producer's OStream argument,
+      --   the channel handle, the producer.
+  | IIntrinsicSettle IExpr
+      -- ^ internal @settle: the channel handle.
   | IIntrinsicFlush IExpr
       -- ^ @flush :: OStream a -> <IO> (): force any buffered elements
       --   to be emitted as a sub-packet. Single-argument: handle expr.
@@ -1896,6 +1903,15 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrConcat _ [pathsDocs, destDocs]) =
         , poolPriorLines = concatMap poolPriorLines allDocs
         , poolCompleteManifolds = concatMap poolCompleteManifolds allDocs
         }
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrChannel (Just schema) []) = do
+  sid <- lcRegisterSchema cfg schema
+  return $ defaultValue {poolExpr = lcPrintExpr cfg (IIntrinsicChannel sid)}
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrSpawn (Just schema) [handleDocs, fnDocs]) = do
+  sid <- lcRegisterSchema cfg schema
+  let raw d = IRawExpr (render (poolExpr d))
+  return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicSpawn sid (raw handleDocs) (raw fnDocs))) [handleDocs, fnDocs]
+lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrSettle _ [handleDocs]) =
+  return $ handleDocs {poolExpr = lcPrintExpr cfg (IIntrinsicSettle (IRawExpr (render (poolExpr handleDocs))))}
 -- @flush: force any buffered elements out as a sub-packet.
 lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrFlush _ [handleDocs]) =
   return $ handleDocs

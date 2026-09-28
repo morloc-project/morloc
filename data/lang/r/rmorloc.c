@@ -3167,6 +3167,70 @@ SEXP morloc_mlc_flush(SEXP handle_r) { MAYFAIL
 }
 
 
+// mlc_open_channel(schema) -> handle. A channel is one handle for both ends:
+// a streamed @parse argument's producer writes it, its reader reads it.
+SEXP morloc_mlc_open_channel(SEXP schema_str_r) { MAYFAIL
+    if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
+        MORLOC_INTERNAL_ABORT("mlc_open_channel: schema must be a single string");
+    }
+    int64_t h = R_TRY(mlc_open_channel, CHAR(STRING_ELT(schema_str_r, 0)));
+    return make_integer64_scalar(h);
+}
+
+// mlc_is_channel(handle) -> logical. A channel read or write may wait.
+SEXP morloc_mlc_is_channel(SEXP handle_r) {
+    if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
+        return ScalarLogical(0);
+    }
+    return ScalarLogical(mlc_is_channel(i64_from_sexp(handle_r)) ? 1 : 0);
+}
+
+// mlc_settle(handle) -> NULL. Release the channel; raises the producer's
+// failure, unchanged, if a reader was handed it.
+SEXP morloc_mlc_settle(SEXP handle_r) { MAYFAIL
+    if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
+        MORLOC_INTERNAL_ABORT("mlc_settle: handle must be a single number");
+    }
+    mlc_settle(i64_from_sexp(handle_r), &child_errmsg_);
+    if (child_errmsg_ != NULL) {
+        // R frees an R_alloc'd copy when error() unwinds.
+        char* msg = R_alloc(strlen(child_errmsg_) + 1, 1);
+        strcpy(msg, child_errmsg_);
+        free(child_errmsg_);
+        error("%s", msg);
+    }
+    return R_NilValue;
+}
+
+// mlc_spawn(socket_path, mid, packets, handle) -> NULL. Send the call
+// without waiting for it; its outcome is recorded on the channel.
+SEXP morloc_mlc_spawn(SEXP socket_path_r, SEXP mid_r, SEXP args_r, SEXP handle_r) { MAYFAIL
+    if (TYPEOF(socket_path_r) != STRSXP || LENGTH(socket_path_r) != 1) {
+        MORLOC_INTERNAL_ABORT("mlc_spawn: socket_path must be a single string");
+    }
+    if (TYPEOF(mid_r) != INTSXP || LENGTH(mid_r) != 1) {
+        MORLOC_INTERNAL_ABORT("mlc_spawn: mid must be a single integer");
+    }
+    if (TYPEOF(args_r) != VECSXP) {
+        MORLOC_INTERNAL_ABORT("mlc_spawn: args must be a list of raw vectors");
+    }
+    if ((TYPEOF(handle_r) != INTSXP && TYPEOF(handle_r) != REALSXP) || LENGTH(handle_r) != 1) {
+        MORLOC_INTERNAL_ABORT("mlc_spawn: handle must be a single number");
+    }
+    size_t nargs = (size_t)LENGTH(args_r);
+    const uint8_t** arg_packets = (const uint8_t**)R_alloc(nargs > 0 ? nargs : 1, sizeof(uint8_t*));
+    for (size_t i = 0; i < nargs; i++) {
+        SEXP arg = VECTOR_ELT(args_r, i);
+        if (TYPEOF(arg) != RAWSXP) {
+            MORLOC_ERROR("mlc_spawn: every packet must be a raw vector (argument %zu)", i + 1);
+        }
+        arg_packets[i] = RAW(arg);
+    }
+    R_TRY_INFRA(mlc_spawn, CHAR(STRING_ELT(socket_path_r, 0)), (uint32_t)INTEGER(mid_r)[0],
+                arg_packets, nargs, i64_from_sexp(handle_r));
+    return R_NilValue;
+}
+
 // mlc_show: serialize a value to a JSON string
 SEXP morloc_mlc_show(SEXP obj_r, SEXP schema_str_r) { MAYFAIL
     if (TYPEOF(schema_str_r) != STRSXP || LENGTH(schema_str_r) != 1) {
@@ -4804,6 +4868,10 @@ static void _r_init_impl(DllInfo *info) {
         {"morloc_mlc_stream", (DL_FUNC) &morloc_mlc_stream, 1},
         {"morloc_mlc_open_ostream", (DL_FUNC) &morloc_mlc_open_ostream, 2},
         {"morloc_mlc_open_istream", (DL_FUNC) &morloc_mlc_open_istream, 2},
+        {"morloc_mlc_open_channel", (DL_FUNC) &morloc_mlc_open_channel, 1},
+        {"morloc_mlc_is_channel", (DL_FUNC) &morloc_mlc_is_channel, 1},
+        {"morloc_mlc_settle", (DL_FUNC) &morloc_mlc_settle, 1},
+        {"morloc_mlc_spawn", (DL_FUNC) &morloc_mlc_spawn, 4},
         {"morloc_mlc_open_stdin",   (DL_FUNC) &morloc_mlc_open_stdin,   1},
         {"morloc_mlc_open_stdout",  (DL_FUNC) &morloc_mlc_open_stdout,  1},
         {"morloc_mlc_open_stderr",  (DL_FUNC) &morloc_mlc_open_stderr,  1},

@@ -9585,6 +9585,7 @@ parseDocstringTests =
       , expectError "a stream handler that is not a producer" (parseProgT "IStream Int" "@parse s=readInts" "0")
       , expectPass "a stream producer on an `IStream` argument" (parseProgT "IStream Int" "@parse s=produceInts .txt" "0")
       , expectPass "a stream producer on an `IFile` list argument" (parseProgT "IFile [Int]" "@parse s=produceInts .txt" "0")
+      , expectError "a command returning the stream it parses" (parseProgT "IStream Int" "@parse s=produceInts .txt" "x")
       , expectPass "an optional argument" (parseProgT "?[Int]" "@parse ints=readInts .csv" "0")
       , expectError "a user identifier with the reserved `mlcq_` prefix"
           [r|
