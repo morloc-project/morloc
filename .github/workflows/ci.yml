@@ -3,6 +3,11 @@ name: CI
 # Build morloc and run the standard test target on every push to master or dev,
 # on both Linux and macOS (Apple Silicon). fail-fast is off so a red macOS leg
 # never cancels the (authoritative) Linux leg.
+#
+# Each platform runs as three jobs. Every job builds morloc and runs a third of
+# the golden tests (MORLOC_TEST_SHARD, see test-suite/GoldenShard.hs); shard 1
+# also runs the unit tests and the runtime suites. The shard count appears in
+# the matrix and in the "Test morloc" step; change both together.
 on:
   push:
     branches: [master, dev]
@@ -13,6 +18,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-14]
+        shard: [1, 2, 3]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
 
@@ -173,6 +179,7 @@ jobs:
           morloc install stdlib
 
       - name: Test rust runtime and nexus
+        if: matrix.shard == 1
         run: cargo test --workspace --manifest-path data/rust/Cargo.toml
         timeout-minutes: 20
 
@@ -184,6 +191,7 @@ jobs:
       # 90s, and run before the long golden sweep so a broken runtime is
       # reported in the first two minutes rather than the tenth.
       - name: Test the runtime suites
+        if: matrix.shard == 1
         run: ./test-suite/test.sh typecheck-benchmark concurrency daemon packet-io expose
         timeout-minutes: 20
 
@@ -209,13 +217,15 @@ jobs:
       # keeps it near a minute; the long level is a manual run. Linux only,
       # to keep the macOS leg short.
       - name: Test recursion depth (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.shard == 1
         env:
           MORLOC_STRESS_LANGS: "py cpp rust"
         run: ./test-suite/stress/deep-recursion.sh
         timeout-minutes: 15
 
       - name: Test morloc
+        env:
+          MORLOC_TEST_SHARD: "${{ matrix.shard }}/3"
         run: |
           stack test --system-ghc --no-install-ghc morloc:morloc-test
         timeout-minutes: 60
@@ -261,7 +271,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: golden-test-errs-${{ matrix.os }}
+          name: golden-test-errs-${{ matrix.os }}-shard${{ matrix.shard }}
           path: |
             test-suite/golden-tests/**/build.err
             test-suite/golden-tests/**/obs.err

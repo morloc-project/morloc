@@ -7,6 +7,9 @@ A golden test is a directory under @test-suite/golden-tests@ holding a
 @obs.txt@) and an @exp.txt@ holding the expected output. Every such directory
 is discovered and run; none has to be registered anywhere.
 
+With @MORLOC_TEST_SHARD@ set, only this run's share of the directories is
+considered (see "GoldenShard").
+
 A directory containing a @SKIP@ file is not run. The file's contents are the
 reason, listed once before the suite starts, so that a disabled test stays
 visible and its justification lives next to the test rather than in a source
@@ -20,6 +23,7 @@ module GoldenMakefileTests
 import Control.Monad (filterM, unless)
 import qualified Data.ByteString as BS
 import Data.List (isPrefixOf, sort)
+import GoldenShard (Shard, selectShard)
 import System.Directory
   ( doesDirectoryExist
   , doesFileExist
@@ -41,12 +45,13 @@ import Test.Tasty.HUnit (assertFailure, testCase)
 -- Skip reasons are printed once, up front, rather than folded into the test
 -- names: tasty pads every line of its report to the longest name in the tree,
 -- so a sentence-long name indents the whole suite off the screen.
-discoverGoldenTests :: FilePath -> IO [TestTree]
-discoverGoldenTests root = do
+discoverGoldenTests :: Maybe Shard -> FilePath -> IO [TestTree]
+discoverGoldenTests shard root = do
   absRoot <- makeAbsolute root
   -- Hidden directories hold tooling (.claude), never tests.
   entries <- sort . filter (not . ("." `isPrefixOf`)) <$> listDirectory absRoot
-  dirs <- filterM (doesDirectoryExist . (absRoot </>)) entries
+  allDirs <- filterM (doesDirectoryExist . (absRoot </>)) entries
+  let dirs = maybe allDirs (`selectShard` allDirs) shard
   classified <- mapM (classify absRoot) dirs
   let skipped = [(name, reason) | Skipped name reason <- classified]
   unless (null skipped) $ do
