@@ -48,12 +48,12 @@ use morloc_runtime_types::packet::{
 };
 use morloc_runtime_types::schema::{parse_schema, Schema, SerialType};
 use morloc_runtime_types::shm_types::{
-    self as shm_types_crate, relptr_is_sentinel, relptr_offset, RelPtr,
+    self as shm_types_crate, RelPtr,
 };
 
 use crate::error::MorlocError;
 use crate::shm::{self, AbsPtr};
-use crate::voidstar;
+use crate::voidstar::{self, Space};
 use morloc_runtime_types::{slice, width};
 
 // ── Constants ─────────────────────────────────────────────────────────────
@@ -1411,7 +1411,8 @@ pub fn set_current_call_id(new: u64) -> u64 {
 /// Used to publish path / schema strings into the slot's RelPtr
 /// fields. The caller frees via `shfree(rel2abs(rel))` at slot close.
 fn shm_copy_bytes(bytes: &[u8]) -> Result<RelPtr, MorlocError> {
-    let abs = crate::shm::shmemcpy(bytes.as_ptr(), bytes.len())?;
+    // SAFETY: bytes is a live slice.
+    let abs = unsafe { crate::shm::shmemcpy(bytes.as_ptr(), bytes.len()) }?;
     crate::shm::abs2rel(abs)
 }
 
@@ -3392,7 +3393,7 @@ fn append_one_element(
     // Shift the copied element's relptrs from "blob-relative" (where
     // sub-allocations start at offset w) to "buffer-relative" (where
     // they now start at `data_offset`). We shift in place using pure
-    // buffer arithmetic -- `adjust_relptrs` would take a `rel2abs`
+    // buffer arithmetic -- an SHM rebase would take a `rel2abs`
     // step on each Optional/Array descent that lands in the primary
     // SHM volume rather than in the write buffer (the relptrs are
     // pure offsets with `vol_idx == 0`), corrupting arbitrary bytes.
@@ -4417,7 +4418,11 @@ pub fn shared_handles_path_lens(
 /// Batched voidstar write for a `[stream-handle a]` pack pass. Every
 /// handle is written in TAG_HANDLE form (bare slot id in the inline
 /// 16-byte field). Cursor is not advanced -- there are no suballocs.
-pub fn shared_write_handles_voidstar(
+///
+/// # Safety
+///
+/// `dest_base` must be writable for `handles.len()` slots of `elem_stride` bytes.
+pub unsafe fn shared_write_handles_voidstar(
     handles: &[i64],
     dest_base: *mut u8,
     elem_stride: usize,
@@ -5175,37 +5180,56 @@ impl SubpacketSrc {
             let _ = shm::shfree(arr_base);
         }
     }
+
+    /// The space the sub-packet's relptrs resolve in.
+    fn space(&self) -> SrcSpace {
+        match *self {
+            // SAFETY: a File source's payload stays mapped as long as its
+            // slot, which outlives every use of the source.
+            SubpacketSrc::File { payload_base, payload_len, .. } => SrcSpace::File(unsafe {
+                voidstar::Local::new(payload_base, width::usize_from_u64(payload_len))
+            }),
+            SubpacketSrc::Shm { .. } => SrcSpace::Shm(voidstar::Arena),
+        }
+    }
+
+    /// The sub-packet's root array: its length and the address of its
+    /// records of `width` bytes each, the whole region checked to lie in
+    /// the source. Null for an empty array.
+    fn records(&self, width: usize) -> Result<(usize, AbsPtr), MorlocError> {
+        // SAFETY: a source's root is an Array header, checked to fit its
+        // payload when the source was made.
+        let arr = unsafe { &*(self.arr_base() as *const shm_types_crate::Array) };
+        if arr.size == 0 {
+            return Ok((0, std::ptr::null_mut()));
+        }
+        let bytes = voidstar::region_len(arr.size, width)?;
+        Ok((arr.size, self.space().resolve(arr.data, bytes)?))
+    }
+
+    /// The records of the array `arr` inside this sub-packet, `width` bytes
+    /// each, the whole region checked to lie in the source. Null when empty.
+    fn array_data(&self, arr: &shm_types_crate::Array, width: usize) -> Result<AbsPtr, MorlocError> {
+        if arr.size == 0 {
+            return Ok(std::ptr::null_mut());
+        }
+        self.space().resolve(arr.data, voidstar::region_len(arr.size, width)?)
+    }
 }
 
-/// Bounds-checked resolver for relptrs embedded in a file-backed
-/// sub-packet's payload. The producer may have encoded a vol_idx
-/// hint in the high bits (writers sometimes pre-bias relptrs toward
-/// the volume they expect the reader to allocate); the resolver
-/// IGNORES the vol_idx and extracts only the 48-bit offset, since
-/// for file-backed reads we don't go through the SHM volume table.
-///
-/// Rejects sentinel relptrs (RELNULL or future reserved values) and
-/// offsets past the payload end.
-fn make_file_resolver(
-    payload_base: AbsPtr,
-    payload_len: u64,
-) -> impl Fn(RelPtr) -> Result<AbsPtr, MorlocError> {
-    move |relptr: RelPtr| {
-        if relptr_is_sentinel(relptr) || relptr < 0 {
-            return Err(MorlocError::Other(
-                "file-resident relptr is a sentinel value (corrupt payload?)".into(),
-            ));
+/// Where a sub-packet's relptrs point: its mapped file payload, or SHM.
+enum SrcSpace {
+    File(voidstar::Local),
+    Shm(voidstar::Arena),
+}
+
+impl voidstar::Space for SrcSpace {
+    #[inline]
+    fn resolve(&self, rel: RelPtr, extent: usize) -> Result<AbsPtr, MorlocError> {
+        match self {
+            SrcSpace::File(l) => l.resolve(rel, extent),
+            SrcSpace::Shm(a) => a.resolve(rel, extent),
         }
-        let offset = relptr_offset(relptr) as u64;
-        if offset > payload_len {
-            return Err(MorlocError::Other(format!(
-                "file-resident relptr offset {} exceeds payload length {}",
-                offset, payload_len,
-            )));
-        }
-        // SAFETY: bounds-checked offset within the payload region the
-        // caller passed; payload_base is a stable mmap'd pointer.
-        Ok(unsafe { (payload_base as *const u8).add(offset as usize) as AbsPtr })
     }
 }
 
@@ -5916,13 +5940,18 @@ pub fn handles_path_lens(
 /// in the destination buffer; successive slots are `elem_stride` bytes
 /// apart (= sizeof(Array) for a packed array). `cursor` is advanced
 /// past the concatenated path bytes.
-pub fn write_handles_voidstar(
+///
+/// # Safety
+///
+/// `dest_base` must be writable for `handles.len()` slots of `elem_stride` bytes.
+pub unsafe fn write_handles_voidstar(
     handles: &[i64],
     dest_base: *mut u8,
     elem_stride: usize,
     cursor: &mut *mut u8,
 ) -> Result<(), MorlocError> {
-    shared_write_handles_voidstar(handles, dest_base, elem_stride, cursor)
+    // SAFETY: forwarded from this function's own contract.
+    unsafe { shared_write_handles_voidstar(handles, dest_base, elem_stride, cursor) }
 }
 
 /// Read the total element count for an IFile handle.
@@ -5980,7 +6009,7 @@ pub fn ifile_walk(
 //      pair. The cumulative element-count index supports a binary
 //      search; it is built lazily on first random-access query.
 //   2. Materializing the sub-packet's payload into SHM. Today this is
-//      a fresh shmemcpy + adjust_relptrs per access; the per-handle
+//      a fresh copy and relocation per access; the per-handle
 //      LRU cache hook is in place but not yet populated.
 //   3. Walking to the local element and `deep_copy`ing it (or each
 //      slice element) into a fresh result SHM block. The result has
@@ -5988,7 +6017,7 @@ pub fn ifile_walk(
 //      `n_out * elem_width + sub_block_allocs` for a slice.
 
 /// Container schema = Array(elem_schema). Used to build per-subpacket
-/// payload schemas from a cached element schema (e.g. adjust_relptrs).
+/// payload schemas from a cached element schema.
 fn array_schema(elem: &Schema) -> Schema {
     Schema {
         serial_type: SerialType::Array,
@@ -6179,6 +6208,11 @@ fn materialize_subpacket_at_offset(
         return Ok((SubpacketSrc::Shm { arr_base: base }, on_disk_size));
     }
     if data.compression == PACKET_COMPRESSION_NONE {
+        if payload_len < width::u64_from_usize(std::mem::size_of::<shm_types_crate::Array>()) {
+            return Err(MorlocError::Other(format!(
+                "sub-packet payload of {} bytes cannot hold its root array", payload_len
+            )));
+        }
         let arr_base = unsafe {
             (local.mmap_ptr as *const u8).add(payload_off as usize) as AbsPtr
         };
@@ -6566,7 +6600,8 @@ fn cache_get_or_materialize(
     for ce in local.cache.entries.iter_mut() {
         if ce.subpacket_idx == sub_k as u64 {
             ce.clock_bit = 1;
-            shm::shincref(ce.shm_packet)?;
+            // SAFETY: a cached entry holds a live SHM packet.
+            unsafe { shm::shincref(ce.shm_packet) }?;
             return Ok(SubpacketSrc::Shm { arr_base: ce.shm_packet });
         }
     }
@@ -6582,7 +6617,8 @@ fn cache_get_or_materialize(
         cache_make_room_for(&mut local.cache, size_bytes);
         // Install: shincref so the cache owns one ref and the caller
         // owns the other. Both decrement independently on shfree.
-        shm::shincref(arr_base)?;
+        // SAFETY: arr_base is the live SHM block of the materialised array.
+        unsafe { shm::shincref(arr_base) }?;
         local.cache.entries.push(CacheEntry {
             subpacket_idx: sub_k as u64,
             shm_packet: arr_base,
@@ -6642,43 +6678,21 @@ fn ifile_extract_element(
     src: &SubpacketSrc,
     local_idx: u64,
 ) -> Result<AbsPtr, MorlocError> {
-    // The arr_base points at a `morloc::Array { size, data }` struct.
-    // For File variant this points into the mmap'd region; for Shm
-    // variant it points into the decompressed SHM copy.
-    let arr_base = src.arr_base();
-    let arr = unsafe { &*(arr_base as *const shm_types_crate::Array) };
-    if local_idx >= arr.size as u64 {
+    let elem_width = elem_schema.width;
+    let (n, records) = src.records(elem_width)?;
+    let idx = width::usize_from_u64(local_idx);
+    if idx >= n {
         return Err(MorlocError::Other(format!(
             "local element index {} out of bounds for sub-packet of size {}",
-            local_idx, arr.size,
+            local_idx, n,
         )));
     }
-    let elem_width = elem_schema.width;
     let dst = shm::shcalloc(1, elem_width)?;
-    // SAFETY: dst is a freshly-allocated SHM block of `elem_width`
-    // bytes. The source-side resolver dispatches on the variant:
-    // file-resident relptrs are plain payload-relative offsets;
-    // SHM-resident relptrs go through shm::rel2abs.
-    match *src {
-        SubpacketSrc::File { payload_base, payload_len, .. } => {
-            let resolver = make_file_resolver(payload_base, payload_len);
-            let arr_data = resolver(arr.data)?;
-            let elem_src = unsafe {
-                (arr_data as *const u8).add(local_idx as usize * elem_width)
-            };
-            unsafe {
-                voidstar::deep_copy_with(elem_src, dst, elem_schema, &resolver)?;
-            }
-        }
-        SubpacketSrc::Shm { .. } => {
-            let arr_data = shm::rel2abs(arr.data)?;
-            let elem_src = unsafe {
-                (arr_data as *const u8).add(local_idx as usize * elem_width)
-            };
-            unsafe {
-                voidstar::deep_copy(elem_src, dst, elem_schema)?;
-            }
-        }
+    // SAFETY: the records were resolved as one region of `n` elements, and
+    // dst is a fresh block of one element's width.
+    unsafe {
+        let elem_src = (records as *const u8).add(idx * elem_width);
+        voidstar::deep_copy_with(elem_src, dst, elem_schema, &src.space())?;
     }
     Ok(dst)
 }
@@ -6871,45 +6885,23 @@ fn ifile_bracket_slice_against_slot(
         let dst = unsafe {
             (buf_ptr as *mut u8).add(out_i * out_elem_width)
         };
-        // Dispatch on the source variant so the deep_copy uses the
-        // right resolver. The hot path (uncompressed) reads source
-        // bytes directly from the mmap; the compressed path goes
-        // through the SHM-resident decompressed copy. The
-        // `proj_offset` byte add hops over any record fields the
+        // The source's space resolves every relptr the copy follows: the
+        // mapped payload for an uncompressed sub-packet, SHM for a
+        // decompressed one. `proj_offset` hops over any record fields the
         // chain fusion is skipping.
-        let copied = match *src {
-            SubpacketSrc::File { payload_base, payload_len, .. } => {
-                let resolver = make_file_resolver(payload_base, payload_len);
-                resolver(arr.data).and_then(|arr_data| {
-                    let elem_src = unsafe {
-                        (arr_data as *const u8)
-                            .add(local_idx as usize * work.elem_width)
-                            .add(work.proj_offset)
-                    };
-                    unsafe {
-                        voidstar::deep_copy_alloc(
-                            elem_src, dst, &work.proj_schema, &resolver,
-                            voidstar::CopyAlloc::Recording(&mut parts),
-                        )
-                    }
-                })
+        let space = src.space();
+        let copied = src.records(work.elem_width).and_then(|(_, records)| {
+            // SAFETY: local_idx is inside the records region just resolved.
+            unsafe {
+                let elem_src = (records as *const u8)
+                    .add(local_idx as usize * work.elem_width)
+                    .add(work.proj_offset);
+                voidstar::deep_copy_alloc(
+                    elem_src, dst, &work.proj_schema, &space,
+                    voidstar::CopyAlloc::Recording(&mut parts),
+                )
             }
-            SubpacketSrc::Shm { .. } => {
-                shm::rel2abs(arr.data).and_then(|arr_data| {
-                    let elem_src = unsafe {
-                        (arr_data as *const u8)
-                            .add(local_idx as usize * work.elem_width)
-                            .add(work.proj_offset)
-                    };
-                    unsafe {
-                        voidstar::deep_copy_alloc(
-                            elem_src, dst, &work.proj_schema, &|p| shm::rel2abs(p),
-                            voidstar::CopyAlloc::Recording(&mut parts),
-                        )
-                    }
-                })
-            }
-        };
+        });
         if let Err(e) = copied {
             // Only `consolidate` gives the recorded blocks back, and it
             // never runs now.
@@ -7029,19 +7021,6 @@ fn src_payload_len(src: &SubpacketSrc) -> Result<usize, MorlocError> {
     }
 }
 
-fn run_resolver(src: &SubpacketSrc) -> impl Fn(RelPtr) -> Result<AbsPtr, MorlocError> + '_ {
-    let file = match *src {
-        SubpacketSrc::File { payload_base, payload_len, .. } => {
-            Some(make_file_resolver(payload_base, payload_len))
-        }
-        SubpacketSrc::Shm { .. } => None,
-    };
-    move |rel: RelPtr| match &file {
-        Some(f) => f(rel),
-        None => shm::rel2abs(rel),
-    }
-}
-
 fn plan_run<'s>(
     src: &'s SubpacketSrc,
     elem_schema: &Schema,
@@ -7060,8 +7039,8 @@ fn plan_run<'s>(
     // relptrs come from the file, so a truncated or corrupt one must fail
     // here rather than copy whatever follows the payload.
     let payload_end = payload as usize + src_payload_len(src)?;
-    let resolve = run_resolver(src);
-    let records = resolve(arr.data)? as *const u8;
+    let space = src.space();
+    let records = space.resolve(arr.data, voidstar::region_len(first + count, elem_schema.width)?)? as *const u8;
     let records_end = (count + first)
         .checked_mul(elem_schema.width)
         .and_then(|n| (records as usize).checked_add(n));
@@ -7075,7 +7054,7 @@ fn plan_run<'s>(
         None
     } else {
         let bound = (payload as usize, payload_end);
-        unsafe { voidstar::pointer_span(records, count, elem_schema, &resolve, bound)? }
+        unsafe { voidstar::pointer_span(records, count, elem_schema, &space, bound)? }
     };
     // Starting on an 8-byte boundary of the payload keeps every value's
     // alignment in the destination, whose variable regions also start
@@ -7168,20 +7147,17 @@ fn slice_bulk_pack_str(
     // recompute path.
     struct SrcCtx {
         sub_k: Option<usize>,
-        // For File: payload_base of the sub-packet's mmap region and
-        // pre-resolved pointer to the sub-packet's element-data array.
-        // For Shm: just the pre-resolved arr_data pointer.
+        // The sub-packet's records, resolved once, and the space its
+        // per-element string relptrs resolve in.
         arr_data: AbsPtr,
         arr_size: u64,
-        // File-only: payload_base + payload_len for relptr resolution
-        // on the per-element string-data lookups.
-        file_payload: Option<(AbsPtr, u64)>,
+        space: SrcSpace,
     }
     let mut ctx = SrcCtx {
         sub_k: None,
         arr_data: std::ptr::null::<u8>() as AbsPtr,
         arr_size: 0,
-        file_payload: None,
+        space: SrcSpace::Shm(voidstar::Arena),
     };
     // Pass 1: walk the plan, resolve every source Array<u8> (the Str
     // wire form), record (src_data_ptr, len) for each element, and
@@ -7195,37 +7171,26 @@ fn slice_bulk_pack_str(
                 materialised.insert(sub_k, src);
             }
             let src = materialised.get(&sub_k).unwrap();
-            let arr_base = src.arr_base();
-            let arr = unsafe { &*(arr_base as *const shm_types_crate::Array) };
-            let (arr_data, file_payload) = match *src {
-                SubpacketSrc::File { payload_base, payload_len, .. } => {
-                    let resolver = make_file_resolver(payload_base, payload_len);
-                    let arr_data = resolver(arr.data)?;
-                    // Tell the kernel to prefault this sub-packet's
-                    // payload range. For a single-pass walk that
-                    // touches the records section + the string tail,
-                    // turning on bulk readahead here cuts the cost
-                    // from N synchronous single-page faults to
-                    // payload_len / readahead-window pages.
-                    unsafe {
-                        libc::madvise(
-                            payload_base as *mut libc::c_void,
-                            payload_len as usize,
-                            libc::MADV_WILLNEED,
-                        );
-                    }
-                    (arr_data, Some((payload_base, payload_len)))
+            if let SubpacketSrc::File { payload_base, payload_len, .. } = *src {
+                // Tell the kernel to prefault this sub-packet's payload
+                // range. For a single-pass walk that touches the records
+                // section + the string tail, bulk readahead cuts the cost
+                // from N synchronous single-page faults to payload_len /
+                // readahead-window pages.
+                unsafe {
+                    libc::madvise(
+                        payload_base as *mut libc::c_void,
+                        payload_len as usize,
+                        libc::MADV_WILLNEED,
+                    );
                 }
-                SubpacketSrc::Shm { .. } => {
-                    let arr_data = shm::rel2abs(arr.data)?;
-                    (arr_data, None)
-                }
-            };
+            }
+            let (n, arr_data) = src.records(elem_width)?;
             ctx = SrcCtx {
                 sub_k: Some(sub_k),
                 arr_data,
-                arr_size: arr.size as u64,
-                file_payload,
+                arr_size: width::u64_from_usize(n),
+                space: src.space(),
             };
         }
         if local_idx >= ctx.arr_size {
@@ -7245,13 +7210,7 @@ fn slice_bulk_pack_str(
         let src_str_data: AbsPtr = if str_len == 0 {
             std::ptr::null::<u8>() as AbsPtr
         } else {
-            match ctx.file_payload {
-                Some((payload_base, payload_len)) => {
-                    let resolver = make_file_resolver(payload_base, payload_len);
-                    resolver(str_arr.data)?
-                }
-                None => shm::rel2abs(str_arr.data)?,
-            }
+            ctx.space.resolve(str_arr.data, str_len)?
         };
         srcs.push((src_str_data, str_len));
         total_tail += str_len;
@@ -7852,13 +7811,7 @@ fn locate_array_element<'a>(
             "walk: bracket-index {} out of bounds (size {})", idx, arr.size
         )))?;
     let elem_schema = &arr_schema.parameters[0];
-    let data_abs = match src {
-        SubpacketSrc::File { payload_base, payload_len, .. } => {
-            let resolver = make_file_resolver(*payload_base, *payload_len);
-            resolver(arr.data)?
-        }
-        SubpacketSrc::Shm { .. } => shm::rel2abs(arr.data)?,
-    };
+    let data_abs = src.array_data(arr, elem_schema.width)?;
     let elem_ptr = unsafe {
         (data_abs as *const u8).add(actual * elem_schema.width) as AbsPtr
     };
@@ -7897,13 +7850,7 @@ fn inline_bracket_slice(
     } else {
         shm::shcalloc(n_out, elem_w)?
     };
-    let data_abs = match src {
-        SubpacketSrc::File { payload_base, payload_len, .. } => {
-            let resolver = make_file_resolver(*payload_base, *payload_len);
-            resolver(arr.data)?
-        }
-        SubpacketSrc::Shm { .. } => shm::rel2abs(arr.data)?,
-    };
+    let data_abs = src.array_data(arr, elem_w)?;
     for (k, i) in slice.positions().enumerate() {
         let elem_src = unsafe { (data_abs as *const u8).add(i * elem_w) as AbsPtr };
         let elem_dst = unsafe { (buf_ptr as *mut u8).add(k * elem_w) as AbsPtr };
@@ -7982,13 +7929,7 @@ fn broadcast_slice_tail(
     } else {
         shm::shcalloc(n_out, out_elem_w)?
     };
-    let data_abs = match src {
-        SubpacketSrc::File { payload_base, payload_len, .. } => {
-            let resolver = make_file_resolver(*payload_base, *payload_len);
-            resolver(arr.data)?
-        }
-        SubpacketSrc::Shm { .. } => shm::rel2abs(arr.data)?,
-    };
+    let data_abs = src.array_data(arr, elem_w)?;
     // The tail's runtime args (any BracketIndex/BracketSlice in the
     // tail) apply uniformly to every element of the slice, matching
     // `map (\e -> e.[i]) slice`. Snapshot the arg cursor, rewind
@@ -8210,23 +8151,14 @@ fn tuple_layout(params: &[Schema]) -> (usize, Vec<usize>) {
     (width, offsets)
 }
 
-/// Run `deep_copy_with` (or the SHM-resolver `deep_copy` for cached
-/// Shm sources) with the right resolver for the source variant.
+/// Deep-copy a value of the sub-packet, resolving through its space.
 fn deep_copy_one(
     src: &SubpacketSrc,
     cur_ptr: AbsPtr,
     cur_schema: &Schema,
     dst: AbsPtr,
 ) -> Result<(), MorlocError> {
-    match *src {
-        SubpacketSrc::File { payload_base, payload_len, .. } => {
-            let resolver = make_file_resolver(payload_base, payload_len);
-            unsafe { voidstar::deep_copy_with(cur_ptr, dst, cur_schema, &resolver) }
-        }
-        SubpacketSrc::Shm { .. } => {
-            unsafe { voidstar::deep_copy(cur_ptr, dst, cur_schema) }
-        }
-    }
+    unsafe { voidstar::deep_copy_with(cur_ptr, dst, cur_schema, &src.space()) }
 }
 
 /// `write_all` for a raw fd: loops past EINTR / partial writes.
@@ -8969,7 +8901,7 @@ mod tests {
                 continue;
             }
             let abs = crate::shm::rel2abs(rel).expect("slot relptr resolves");
-            let rc = crate::shm::reference_count(abs);
+            let rc = unsafe { crate::shm::reference_count(abs) };
             assert!(
                 matches!(rc, Some(c) if c > 0),
                 "slot {} block was released while the slot still owns it (refcount {:?})",
@@ -9513,6 +9445,45 @@ mod tests {
     ///
     /// The count, not the byte total, is the assertion: a leak of one block
     /// per call is the failure, whatever its size.
+    /// A stream file is outside data. A string whose recorded length runs
+    /// past the end of its sub-packet must be refused by every reader, never
+    /// read beyond the payload.
+    #[test]
+    fn a_string_longer_than_its_payload_is_refused() {
+        let _shm = crate::own_test_registry();
+        let dir = std::env::temp_dir()
+            .join(format!("morloc_overlong_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let elem = TSchema::primitive(TSerialType::String);
+        let value_schema = list_schema(&elem);
+
+        let mut sub = build_str_voidstar_subpacket(&["ab", "cd"]);
+        let mut hdr_bytes = [0u8; 32];
+        hdr_bytes.copy_from_slice(&sub[..32]);
+        let hdr = PacketHeader::from_bytes(&hdr_bytes).unwrap();
+        // The first element's size field follows the 16-byte outer Array.
+        let size_at = 32 + hdr.offset as usize + 16;
+        sub[size_at..size_at + 8].copy_from_slice(&(1u64 << 30).to_le_bytes());
+
+        let path = dir.join("overlong.idx");
+        std::fs::write(&path, build_stream_file_from(&value_schema, vec![sub], &[2])).unwrap();
+        let p = path.to_str().unwrap();
+
+        let f = open_ifile(p).unwrap();
+        assert!(ifile_bracket_index(f, 0).is_err(), "bracket index");
+        assert!(ifile_bracket_slice(f, Some(0), Some(1), None).is_err(), "bracket slice");
+        assert!(
+            shared_ifile_walk(f, ".[]", &[crate::intrinsics::IFileWalkArg::opt(Some(0))]).is_err(),
+            "pattern walk"
+        );
+        close_handle(f).unwrap();
+
+        let s = open_istream(p).unwrap();
+        assert!(shared_next_frame(s).is_err(), "@next");
+        let _ = shared_discard_handle(s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_value_handed_to_a_pool_is_one_block() {
         let _shm = crate::own_test_registry();

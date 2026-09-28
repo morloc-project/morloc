@@ -119,7 +119,7 @@ fn ensure_test_arena() {
         let _ = std::fs::create_dir_all(&test_dir);
         shm::shm_set_fallback_dir(test_dir.to_str().unwrap());
         let basename = format!("/morloc-{}-test-arena", std::process::id());
-        shm::shinit(&basename, 0, 0x100000).unwrap(); // 1MB
+        shm::shinit(&basename, shm::PRIMARY_VOLUME, 0x100000).unwrap(); // 1MB
         static AT_EXIT: std::sync::Once = std::sync::Once::new();
         AT_EXIT.call_once(|| unsafe {
             libc::atexit(remove_test_arena);
@@ -130,17 +130,22 @@ fn ensure_test_arena() {
 /// Remove this process's test arena at exit: statics are never dropped, so
 /// without this every test run leaves its arena in /dev/shm. Only names are
 /// removed, taking no lock a stuck test thread might hold; the kernel
-/// releases the mappings.
+/// releases the mappings. Volumes are found by name, since growth volumes
+/// take random indices.
 #[cfg(test)]
 extern "C" fn remove_test_arena() {
-    let pid = std::process::id();
-    for vol in 0u32.. {
-        let Ok(name) = std::ffi::CString::new(format!("/morloc-{pid}-test-arena-{vol:04x}")) else { break };
-        if unsafe { libc::shm_unlink(name.as_ptr()) } != 0 {
-            break;
+    let prefix = format!("morloc-{}-test-arena", std::process::id());
+    if let Ok(entries) = std::fs::read_dir("/dev/shm") {
+        for e in entries.flatten() {
+            let name = e.file_name();
+            if name.to_string_lossy().starts_with(&prefix) {
+                if let Ok(c) = std::ffi::CString::new(format!("/{}", name.to_string_lossy())) {
+                    unsafe { libc::shm_unlink(c.as_ptr()) };
+                }
+            }
         }
     }
-    let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("morloc_test_{pid}")));
+    let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("morloc_test_{}", std::process::id())));
 }
 
 // Re-export core types at crate root

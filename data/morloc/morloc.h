@@ -14,7 +14,7 @@
 // (Morloc.Abi). Provisioning refuses to run a prebuilt libmorloc/nexus whose
 // version differs from the compiler's expected value (fail-closed), preventing
 // silent cross-pool struct/offset corruption.
-#define MORLOC_ABI_VERSION 6
+#define MORLOC_ABI_VERSION 7
 
 // Atomic includes must sit outside any `extern "C"` block because the
 // C++ <atomic> header pulls in <type_traits> et al., which use C++
@@ -99,6 +99,11 @@ typedef void*   absptr_t;
 #define BLK_ABSORBED 0x0CB1DEAD
 
 #define MAX_VOLUME_NUMBER 32768
+
+// The volume every process of a program shares. Volume 0 is never mapped, so
+// a buffer- or file-relative offset that reaches SHM unrebased fails to
+// resolve. Mirrors morloc-runtime-types::shm_types::PRIMARY_VOLUME.
+#define MORLOC_PRIMARY_VOLUME 1
 
 // Indexed relptr encoding: bit 63 = sentinel, bits 62..48 = 15-bit
 // volume index, bits 47..0 = 48-bit offset within the volume's data
@@ -1418,7 +1423,6 @@ int print_morloc_data_packet(const uint8_t* packet, const Schema* schema, ERRMSG
 int flatten_voidstar_to_buffer(const void* data, const Schema* schema, uint8_t** out_buf, size_t* out_size, ERRMSG);
 uint8_t* make_data_packet_auto(void* voidstar, relptr_t relptr, const Schema* schema, ERRMSG);
 uint8_t* make_inline_data_packet(void* voidstar, const Schema* schema, ERRMSG);
-int adjust_voidstar_relptrs(void* data, const Schema* schema, relptr_t base_rel, ERRMSG);
 void* read_voidstar_binary(const uint8_t* blob, size_t blob_size, const Schema* schema, ERRMSG);
 bool parse_morloc_call_arguments(uint8_t* packet, uint8_t** args, size_t* nargs, ERRMSG);
 bool hash_morloc_packet(const uint8_t* packet, const Schema* schema, uint64_t seed, uint64_t* hash, ERRMSG);

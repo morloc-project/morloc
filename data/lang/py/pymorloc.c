@@ -1598,7 +1598,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                 obj = PyLong_FromLongLong(val);
             } else {
                 // Overflow: second field is relptr to limb array
-                void* limb_ptr = resolve_relptr(*(relptr_t*)&fields[1], base_ptr, NULL);
+                void* limb_ptr = PyTRY(resolve_relptr, *(relptr_t*)&fields[1], base_ptr);
                 obj = _PyLong_FromByteArray(
                     (const unsigned char*)limb_ptr,
                     bigint_size * sizeof(uint64_t),
@@ -4262,6 +4262,11 @@ static struct PyModuleDef pymorloc = {
 PyMODINIT_FUNC PyInit_pymorloc(void) {
     PyObject* m = PyModule_Create(&pymorloc);
     if (m == NULL) return NULL;
+    if (PyModule_AddIntConstant(m, "PRIMARY_VOLUME", MORLOC_PRIMARY_VOLUME) < 0) {
+        Py_DECREF(m);
+        return NULL;
+    }
+
     PyMorlocException = PyErr_NewException("pymorloc.MorlocException", PyExc_RuntimeError, NULL);
     if (PyMorlocException == NULL) {
         Py_DECREF(m);

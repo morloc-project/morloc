@@ -269,10 +269,10 @@ extern "C" fn pool_check_and_recover(
         ctx.sockets = new_sockets;
 
         // Bootstrap the daemon's allocator with the new basename. This
-        // both sets COMMON_BASENAME and creates volume 0 ready for use.
+        // both sets COMMON_BASENAME and creates the primary volume.
         let basename_c = CString::new(new_basename.as_str()).unwrap();
         let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
-        let shm = unsafe { shinit(basename_c.as_ptr(), 0, 0xffff, &mut err) };
+        let shm = unsafe { shinit(basename_c.as_ptr(), morloc_runtime_types::shm_types::PRIMARY_VOLUME, 0xffff, &mut err) };
         if shm.is_null() {
             let msg = if !err.is_null() {
                 let s = unsafe { std::ffi::CStr::from_ptr(err) }.to_string_lossy().into_owned();
@@ -709,7 +709,7 @@ pub fn init_shm() -> (String, String) {
     let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
     unsafe {
         shm_set_fallback_dir(tmpdir_c.as_ptr());
-        let shm = shinit(basename_c.as_ptr(), 0, 0xffff, &mut errmsg);
+        let shm = shinit(basename_c.as_ptr(), morloc_runtime_types::shm_types::PRIMARY_VOLUME, 0xffff, &mut errmsg);
         if shm.is_null() {
             let msg = if !errmsg.is_null() {
                 let s = std::ffi::CStr::from_ptr(errmsg).to_string_lossy().into_owned();

@@ -23,6 +23,12 @@ pub const BLK_MAGIC: u32 = 0x0CB1_0DF0;
 /// away" apart from uninitialised or scrubbed memory, which are both zero.
 pub const BLK_ABSORBED: u32 = 0x0CB1_DEAD;
 pub const MAX_VOLUME_NUMBER: usize = 32768;
+
+/// The volume every process of a program shares, created by the first to
+/// start. Volume 0 is never mapped: a buffer- or file-relative offset reads
+/// as volume 0, so an offset that reaches SHM unrebased fails to resolve
+/// instead of landing in live memory.
+pub const PRIMARY_VOLUME: usize = 1;
 pub const MAX_FILENAME_SIZE: usize = 128;
 pub const MAX_PATH_SIZE: usize = 512;
 
@@ -229,12 +235,22 @@ mod encoding_tests {
     }
 
     #[test]
+    fn primary_volume_matches_header() {
+        let header = include_str!("../../../morloc/morloc.h");
+        let from_header = header
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("#define MORLOC_PRIMARY_VOLUME"))
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .expect("morloc.h must define MORLOC_PRIMARY_VOLUME as an integer");
+        assert_eq!(from_header, PRIMARY_VOLUME);
+        assert_ne!(PRIMARY_VOLUME, 0, "volume 0 is never mapped");
+    }
+
+    #[test]
     fn small_values_decode_as_vol0() {
-        // Compatibility check for staged migration: a "small positive
-        // integer" relptr (the kind the old flat-offset encoding produced
-        // for offsets into volume 0) decodes as (volume 0, offset = ptr)
-        // under the new encoding. Call sites that haven't yet been
-        // updated and happen to operate inside volume 0 keep working.
+        // A buffer- or file-relative offset decodes as (volume 0, offset).
+        // Volume 0 is never mapped, so such an offset fails to resolve if
+        // it reaches SHM without a rebase.
         for &p in &[0i64, 1, 16, 1024, 0xFFFF] {
             let rp = p as RelPtr;
             assert!(!relptr_is_sentinel(rp));

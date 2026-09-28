@@ -947,8 +947,12 @@ pub extern "C" fn daemon_set_eval_timeout(timeout_sec: i32) {
 /// separated module allow-list (may be null/empty). The nexus calls this
 /// once before serving; the global is process-wide, so every serve path
 /// (daemon, router, future MCP eval) is covered.
+///
+/// # Safety
+///
+/// `allowed` must be null or a NUL-terminated string.
 #[no_mangle]
-pub extern "C" fn daemon_set_eval_policy(sandbox: bool, allowed: *const c_char) {
+pub unsafe extern "C" fn daemon_set_eval_policy(sandbox: bool, allowed: *const c_char) {
     G_EVAL_SANDBOX.store(sandbox, Ordering::Relaxed);
     let list = if allowed.is_null() {
         None

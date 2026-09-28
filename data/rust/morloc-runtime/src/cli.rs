@@ -292,26 +292,6 @@ pub unsafe extern "C" fn free_argument_t(arg: *mut ArgumentT) {
     libc::free(arg as *mut c_void);
 }
 
-// ── adjust_voidstar_relptrs ────────────────────────────────────────────────
-
-#[no_mangle]
-pub unsafe extern "C" fn adjust_voidstar_relptrs(
-    data: *mut c_void,
-    schema: *const CSchema,
-    base_rel: shm::RelPtr,
-    errmsg: *mut *mut c_char,
-) -> i32 {
-    clear_errmsg(errmsg);
-    let rs = CSchema::to_rust(schema);
-    match crate::voidstar::adjust_relptrs(data as *mut u8, &rs, base_rel) {
-        Ok(_) => 0,
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            1
-        }
-    }
-}
-
 // ── Stream-packet peek helpers ────────────────────────────────────────────
 
 /// Cheap file-shape sniff: returns the packet header if `path` names a
@@ -698,27 +678,18 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
         0
     };
 
-    // Allocate the SHM destination for the payload and pread the file's
-    // payload region straight into it. The shmalloc-tracking arena
-    // hooks in automatically; the caller's normal "shfree on drop"
-    // semantics apply.
-    let dest = match shm::shmalloc(payload_size) {
-        Ok(p) => p,
+    // Land the file's payload region straight in SHM, then relocate it.
+    let landing = match crate::voidstar::Landing::new(payload_size) {
+        Ok(l) => l,
         Err(e) => {
             libc::close(fd);
             return Err(e);
         }
     };
-
-    let read = pread_exact(fd, dest, payload_size, payload_offset);
+    let read = pread_exact(fd, landing.as_mut_ptr(), payload_size, payload_offset);
     libc::close(fd);
-    if let Err(e) = read {
-        let _ = shm::shfree(dest);
-        return Err(e);
-    }
-
-    rebase_voidstar_in_shm(dest, payload_size, schema, vol_idx_hint)?;
-    Ok(Some(dest))
+    read?;
+    Ok(Some(landing.relocate(&CSchema::to_rust(schema), vol_idx_hint)?))
 }
 
 /// Read exactly `len` bytes of `fd` at `offset` into `dst`.
@@ -738,23 +709,6 @@ unsafe fn pread_exact(fd: libc::c_int, dst: *mut u8, len: usize, offset: usize) 
         }
         _ => MorlocError::Io(e),
     })
-}
-
-// ── rebase_voidstar_in_shm (shared by the compressed ingest fast paths) ───
-
-/// Apply the producer->consumer relptr rebase to the voidstar in `dest`
-/// in-place. Computes `delta = abs2rel(dest) - encode_relptr(hint, 0)`
-/// and walks the structure adjusting each relptr by `delta`. On any
-/// failure, frees `dest` before returning the error so callers do not
-/// need a separate cleanup path. Every pointer must stay inside the
-/// `dest_len` bytes of `dest`.
-unsafe fn rebase_voidstar_in_shm(
-    dest: *mut u8,
-    dest_len: usize,
-    schema: *const CSchema,
-    vol_idx_hint: u16,
-) -> Result<(), MorlocError> {
-    crate::voidstar::rebase_copied_block(dest, dest_len, &CSchema::to_rust(schema), vol_idx_hint)
 }
 
 // ── try_load_compressed_voidstar_via_shm ──────────────────────────────────
@@ -947,10 +901,7 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
     libc::close(fd);
     read?;
 
-    let dest = match shm::shmalloc(total_uncompressed) {
-        Ok(p) => p,
-        Err(e) => return Err(e),
-    };
+    let landing = crate::voidstar::Landing::new(total_uncompressed)?;
     crate::morloc_trace!(
         "[fastpath] read compressed + shmalloc {} MiB took {:.2?}",
         total_uncompressed / (1 << 20),
@@ -960,15 +911,8 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
     // Decompress all frames in parallel into disjoint slices of the
     // SHM destination. Workers each own a non-overlapping subrange by
     // construction; no inter-worker synchronization on dest.
-    let dst_slice = std::slice::from_raw_parts_mut(dest, total_uncompressed);
-    if let Err(e) = crate::compression::parallel_decompress_frames(
-        &frames,
-        &compressed_buf,
-        dst_slice,
-    ) {
-        let _ = shm::shfree(dest);
-        return Err(e);
-    }
+    let dst_slice = std::slice::from_raw_parts_mut(landing.as_mut_ptr(), total_uncompressed);
+    crate::compression::parallel_decompress_frames(&frames, &compressed_buf, dst_slice)?;
     drop(compressed_buf);
     crate::morloc_trace!(
         "[fastpath] zstd decompress ({} frames, {} workers): wrote {} MiB in {:.2?} ({:.0} MB/s)",
@@ -980,8 +924,8 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
     );
 
     let t_relptr = std::time::Instant::now();
-    rebase_voidstar_in_shm(dest, total_uncompressed, schema, vol_idx_hint)?;
-    crate::morloc_trace!("[fastpath] adjust_relptrs took {:.2?}", t_relptr.elapsed());
+    let dest = landing.relocate(&CSchema::to_rust(schema), vol_idx_hint)?;
+    crate::morloc_trace!("[fastpath] relocation took {:.2?}", t_relptr.elapsed());
     crate::morloc_trace!("[fastpath] total ingest: {:.2?}", t0.elapsed());
 
     Ok(Some(dest))
@@ -1068,19 +1012,10 @@ unsafe fn try_decompress_voidstar_bytes_to_shm(
         )));
     }
 
-    let dest = shm::shmalloc(total_uncompressed)?;
-    let dst_slice = std::slice::from_raw_parts_mut(dest, total_uncompressed);
-    if let Err(e) = crate::compression::parallel_decompress_frames(
-        &frames,
-        compressed,
-        dst_slice,
-    ) {
-        let _ = shm::shfree(dest);
-        return Err(e);
-    }
-
-    rebase_voidstar_in_shm(dest, total_uncompressed, schema, hint)?;
-    Ok(Some(dest as *mut c_void))
+    let landing = crate::voidstar::Landing::new(total_uncompressed)?;
+    let dst_slice = std::slice::from_raw_parts_mut(landing.as_mut_ptr(), total_uncompressed);
+    crate::compression::parallel_decompress_frames(&frames, compressed, dst_slice)?;
+    Ok(Some(landing.relocate(&CSchema::to_rust(schema), hint)? as *mut c_void))
 }
 
 // ── read_voidstar_binary ───────────────────────────────────────────────────

@@ -189,11 +189,12 @@ unsafe fn print_dispatch(
     schema: *const CSchema,
     keep_null: bool,
     errmsg: *mut *mut c_char,
-    write: fn(*mut u8, &crate::schema::Schema, bool) -> Result<(), MorlocError>,
+    write: unsafe fn(*mut u8, &crate::schema::Schema, bool) -> Result<(), MorlocError>,
 ) -> i32 {
     clear_errmsg(errmsg);
     let rs = CSchema::to_rust(schema);
-    match write(data as *mut u8, &rs, keep_null) {
+    // SAFETY: the C caller passes a live value of `schema`.
+    match unsafe { write(data as *mut u8, &rs, keep_null) } {
         Ok(()) => PRINT_RESULT_OK,
         Err(MorlocError::PipeClosed) => PRINT_RESULT_PIPE_CLOSED,
         Err(e) => { set_errmsg(errmsg, &e); PRINT_RESULT_ERR }

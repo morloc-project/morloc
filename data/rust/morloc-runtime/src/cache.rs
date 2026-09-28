@@ -238,8 +238,12 @@ pub extern "C" fn morloc_cache_record_store() {
 
 /// Read the (hits, misses, stores) counter triple. Consumed by the
 /// nexus at exit to print the run summary.
+///
+/// # Safety
+///
+/// Each out pointer must be null or writable for a `u64`.
 #[no_mangle]
-pub extern "C" fn morloc_cache_stats(
+pub unsafe extern "C" fn morloc_cache_stats(
     hits_out: *mut u64,
     misses_out: *mut u64,
     stores_out: *mut u64,

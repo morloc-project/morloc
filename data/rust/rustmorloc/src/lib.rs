@@ -319,7 +319,11 @@ unsafe fn to_rel(ptr: *mut u8) -> RelPtr {
         encode_relptr(0, (ptr as usize) - base)
     } else {
         let mut err: *mut c_char = std::ptr::null_mut();
-        abs2rel(ptr as *mut c_void, &mut err)
+        let rel = abs2rel(ptr as *mut c_void, &mut err);
+        if !err.is_null() {
+            morloc_throw(cstr_take(err));
+        }
+        rel
     }
 }
 
@@ -331,7 +335,11 @@ unsafe fn resolve(rel: RelPtr, base: *const u8) -> *const u8 {
         base.add(relptr_offset(rel))
     } else {
         let mut err: *mut c_char = std::ptr::null_mut();
-        rel2abs(rel, &mut err) as *const u8
+        let p = rel2abs(rel, &mut err) as *const u8;
+        if !err.is_null() || p.is_null() {
+            morloc_throw(if err.is_null() { format!("relptr {rel} did not resolve") } else { cstr_take(err) });
+        }
+        p
     }
 }
 

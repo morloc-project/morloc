@@ -279,7 +279,8 @@ fn copy_out(
 ) -> Result<AbsPtr, MorlocError> {
     let abs = shm::rel2abs(src)?;
     // A failed acquire owns nothing, so there is nothing to release.
-    shm::shincref(abs)?;
+    // SAFETY: abs was just resolved from a live cell relptr.
+    unsafe { shm::shincref(abs) }?;
     drop(reg);
     let out = unsafe { voidstar::deep_copy_to_block(abs, rs) };
     let _ = shm::shfree(abs);

@@ -1081,8 +1081,6 @@ pub unsafe extern "C" fn free_morloc_call(call: *mut MorlocCall) {
     libc::free(call as *mut c_void);
 }
 
-// adjust_voidstar_relptrs: still provided by cli.c (will move to Rust when cli.c is ported)
-// read_voidstar_binary: still provided by cli.c (will move to Rust when cli.c is ported)
 
 // ── write_voidstar_binary (for intrinsics.c) ─────────────────────────────────
 
@@ -1139,7 +1137,6 @@ pub unsafe extern "C" fn flatten_voidstar_to_buffer(
     }
 }
 
-// read_voidstar_binary: still provided by cli.c (will move to Rust when cli.c is ported)
 
 // ── make_data_packet_auto ────────────────────────────────────────────────────
 
@@ -1791,45 +1788,11 @@ unsafe fn stream_packet_to_fd(
         PACKET_COMPRESSION_NONE
     };
 
-    // Layer 3: bake a vol_idx hint into the relptrs we're about to emit,
-    // and record that hint in a fresh metadata block. Only meaningful
-    // for RPTR+VOIDSTAR -- other sources don't carry relptrs we can
-    // re-encode.
-    //
-    // The hint we pick is the producer's actual SHM slot, decoded from
-    // the input relptr. If the eventual reader has that slot free, it
-    // can mmap the file, register the payload at that slot, and skip
-    // the rebase walk entirely (the relptrs already address the right
-    // index). If the slot is taken, the reader picks a different slot
-    // and calls `remap_volume_indices` -- still O(N relptrs) but a
-    // single XOR per relptr, not a full re-add.
-    let (out_vol_idx, vol_meta_size): (u16, usize) =
-        if source == PACKET_SOURCE_RPTR
-            && format == PACKET_FORMAT_VOIDSTAR
-            // Compression would smear the vol_idx-baked relptrs through
-            // a zstd frame; the consumer that decompresses doesn't go
-            // through the mmap path and would mis-process the high bits.
-            // Keep Layer 3's wire-format change scoped to uncompressed
-            // packets.
-            && lvl_opt.is_none()
-        {
-            let relptr = *(packet.add(payload_start) as *const RelPtr);
-            // Reject sentinel relptrs early -- they have no vol_idx.
-            if shm::relptr_is_sentinel(relptr) {
-                (0, 0)
-            } else {
-                let v = shm::relptr_volume_index(relptr) as u16;
-                // Vol_idx 0 would clash with the "no hint" sentinel
-                // readers use to decide whether to bother with Layer 3
-                // semantics. Skip the block for slot-0 producers; the
-                // reader falls back to the Layer 2 path which still
-                // works.
-                if v == 0 { (0, 0) } else { (v, 10) }
-            }
-        } else {
-            (0, 0)
-        };
-
+    // The payload's relptrs are written buffer-relative (volume 0), never
+    // with the producer's volume index: a file whose offsets matched live
+    // SHM relptrs would resolve silently if a reader forgot to rebase it,
+    // where a buffer-relative offset fails to resolve. Readers still accept
+    // a volume-index hint in files written before this.
     // When compressing, reserve worst-case bytes in the metadata
     // block for the frame-index entry, sized from
     // `estimated_payload_bytes` (an upper bound). The entry's
@@ -1847,13 +1810,6 @@ unsafe fn stream_packet_to_fd(
     // -- the frame index for the user's 2.4 GiB payload is ~2400
     // bytes -- so the Vec allocation is negligible vs the payload.
     let original_meta = std::slice::from_raw_parts(packet.add(32), metadata_size);
-    let mut vol_meta_entry = Vec::with_capacity(10);
-    if vol_meta_size > 0 {
-        vol_meta_entry.extend_from_slice(&crate::packet::METADATA_HEADER_MAGIC);
-        vol_meta_entry.push(METADATA_TYPE_VOL_INDEX);
-        vol_meta_entry.extend_from_slice(&2u32.to_le_bytes());
-        vol_meta_entry.extend_from_slice(&out_vol_idx.to_le_bytes());
-    }
     let frame_index_reserved_body: usize = if lvl_opt.is_some() {
         let max_frames =
             crate::compression::max_frames_for(estimated_payload_bytes as usize);
@@ -1861,11 +1817,7 @@ unsafe fn stream_packet_to_fd(
     } else {
         0
     };
-    let with_vol = if vol_meta_size > 0 {
-        crate::packet::prepend_metadata_entries(&vol_meta_entry, original_meta)
-    } else {
-        original_meta.to_vec()
-    };
+    let original = original_meta.to_vec();
     let new_meta: Vec<u8> = if frame_index_reserved_body > 0 {
         // Reserve worst-case body bytes -- zero-filled -- so the
         // entry header records `size = max_frames * FRAME_ENTRY_BYTES
@@ -1874,12 +1826,12 @@ unsafe fn stream_packet_to_fd(
         // tells decoders how many entries are populated.
         let zeros = vec![0u8; frame_index_reserved_body];
         crate::packet::append_metadata_entry(
-            &with_vol,
+            &original,
             METADATA_TYPE_FRAME_INDEX,
             &zeros,
         )
     } else {
-        with_vol
+        original
     };
 
     let extended_offset = new_meta.len();
@@ -1900,7 +1852,7 @@ unsafe fn stream_packet_to_fd(
         // Find where the frame-index entry starts: walk `new_meta`
         // until we hit our frame-index entry. Since
         // `append_metadata_entry` placed it immediately after the
-        // last pre-existing entry (vol_meta + original), the entry
+        // last pre-existing entry, the entry
         // header begins at `metadata_entries_end(&new_meta) - (8 +
         // reserved_body)`. The body offset is +8 past that.
         let entry_total = 8 + frame_index_reserved_body;
@@ -1920,7 +1872,7 @@ unsafe fn stream_packet_to_fd(
     let t_walk = std::time::Instant::now();
     let stream_result = match source {
         PACKET_SOURCE_RPTR => stream_rptr_payload(
-            packet, payload_start, format, fd, lvl_opt, out_vol_idx, errmsg,
+            packet, payload_start, format, fd, lvl_opt, errmsg,
         ),
         PACKET_SOURCE_FILE => stream_file_payload(
             packet, payload_start, payload_len, format, fd, lvl_opt, errmsg,
@@ -2037,7 +1989,6 @@ unsafe fn stream_rptr_payload(
     format: u8,
     fd: libc::c_int,
     lvl: Option<crate::compression::CompressionLevel>,
-    vol_idx_hint: u16,
     errmsg: *mut *mut c_char,
 ) -> Result<Vec<crate::packet::FrameEntry>, ()> {
     if format != PACKET_FORMAT_VOIDSTAR {
@@ -2094,7 +2045,7 @@ unsafe fn stream_rptr_payload(
         lvl,
         |sink| {
             let r = crate::voidstar::write_flat_to_writer_with_vol_idx(
-                sink, abs_ptr, &rs, vol_idx_hint,
+                sink, abs_ptr, &rs, 0,
             ).map(|_| ());
             *walker_ref = Some(t_total.elapsed());
             r
@@ -2420,7 +2371,7 @@ mod donation_tests {
         unsafe {
             std::ptr::copy_nonoverlapping(payload.as_ptr(), abs as *mut u8, payload.len());
         }
-        assert_eq!(crate::shm::reference_count(abs), Some(1));
+        assert_eq!(unsafe { crate::shm::reference_count(abs) }, Some(1));
 
         let rel = crate::shm::abs2rel(abs).expect("relptr");
         let schema = crate::schema::Schema::primitive(crate::schema::SerialType::Uint8);
@@ -2430,14 +2381,14 @@ mod donation_tests {
 
         // The sender takes the recipient's reference before the packet goes.
         unsafe { donate_packet_reference(packet) }.expect("donate");
-        assert_eq!(crate::shm::reference_count(abs), Some(2));
+        assert_eq!(unsafe { crate::shm::reference_count(abs) }, Some(2));
 
         // The sender now releases its own, as it does at its next dispatch.
         crate::shm::shfree(abs).expect("sender release");
 
         // The block must still be alive and unscrubbed for the recipient.
         assert_eq!(
-            crate::shm::reference_count(abs), Some(1),
+            unsafe { crate::shm::reference_count(abs) }, Some(1),
             "the donated reference did not survive the sender's release",
         );
         let seen = unsafe { std::slice::from_raw_parts(abs as *const u8, payload.len()) };
@@ -2445,7 +2396,7 @@ mod donation_tests {
 
         // The recipient releases exactly once, and the block is then free.
         crate::shm::shfree(abs).expect("recipient release");
-        assert_eq!(crate::shm::reference_count(abs), Some(0));
+        assert_eq!(unsafe { crate::shm::reference_count(abs) }, Some(0));
 
         unsafe { libc::free(packet as *mut libc::c_void) };
         unsafe { CSchema::free(cs) };
@@ -2461,10 +2412,10 @@ mod donation_tests {
         let packet = unsafe { make_standard_data_packet(rel, cs) };
 
         unsafe { donate_packet_reference(packet) }.expect("donate");
-        assert_eq!(crate::shm::reference_count(abs), Some(2));
+        assert_eq!(unsafe { crate::shm::reference_count(abs) }, Some(2));
         unsafe { revoke_packet_reference(packet) };
         assert_eq!(
-            crate::shm::reference_count(abs), Some(1),
+            unsafe { crate::shm::reference_count(abs) }, Some(1),
             "a packet that reached nobody left its reference behind",
         );
 
@@ -2516,7 +2467,7 @@ mod auto_routing_tests {
         let total = std::mem::size_of::<Array>() + n;
         let mut blob = vec![0u8; total];
         // Wrapper: size = n, data = relative offset 16 within the blob
-        // (read_binary's adjust_relptrs adds the global base so it
+        // (read_binary's relocation adds the global base so it
         // resolves to the byte-array region after copy).
         let arr = Array {
             size: n,

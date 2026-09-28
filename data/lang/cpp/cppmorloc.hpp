@@ -310,7 +310,14 @@ static inline void* resolve_relptr_cpp(relptr_t relptr, const void* base_ptr) {
     if (base_ptr) {
         return (char*)base_ptr + relptr_offset_bits(relptr);
     }
-    return resolve_relptr(relptr, NULL, NULL);
+    char* err = NULL;
+    void* p = resolve_relptr(relptr, NULL, &err);
+    if (p == NULL) {
+        std::string msg = err ? err : "relptr did not resolve";
+        free(err);
+        throw std::runtime_error(msg);
+    }
+    return p;
 }
 bool shfree_cpp(absptr_t ptr);
 Schema* parse_schema_cpp(const char* schema_ptr);

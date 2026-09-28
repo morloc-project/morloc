@@ -1868,15 +1868,15 @@ mod tests {
             for array_first in [false, true] {
                 let rel = write_batch(&fixture(), None).unwrap();
                 let base = shm::rel2abs(rel).unwrap();
-                assert_eq!(shm::reference_count(base), Some(1));
+                assert_eq!(unsafe { shm::reference_count(base) }, Some(1));
 
                 let mut s = FFI_ArrowSchema::empty();
                 let mut a = FFI_ArrowArray::empty();
                 unsafe { shm_to_ffi_owned(base as *const ArrowShmHeader, true, &mut s, &mut a) }.unwrap();
-                assert_eq!(shm::reference_count(base), Some(2), "the view takes its own reference");
+                assert_eq!(unsafe { shm::reference_count(base) }, Some(2), "the view takes its own reference");
 
                 release_roots(&mut s, &mut a, array_first);
-                assert_eq!(shm::reference_count(base), Some(1), "releasing the view gives it back");
+                assert_eq!(unsafe { shm::reference_count(base) }, Some(1), "releasing the view gives it back");
                 let _ = shm::shfree(base);
             }
         });
@@ -1890,7 +1890,7 @@ mod tests {
             let mut s = FFI_ArrowSchema::empty();
             let mut a = FFI_ArrowArray::empty();
             unsafe { shm_to_ffi_owned(base as *const ArrowShmHeader, true, &mut s, &mut a) }.unwrap();
-            assert_eq!(shm::reference_count(base), Some(2));
+            assert_eq!(unsafe { shm::reference_count(base) }, Some(2));
 
             // A language that frees its objects on a finalizer thread
             // releases the view from a thread that never imported it.
@@ -1901,7 +1901,7 @@ mod tests {
             })
             .join()
             .unwrap();
-            assert_eq!(shm::reference_count(base), Some(1));
+            assert_eq!(unsafe { shm::reference_count(base) }, Some(1));
             let _ = shm::shfree(base);
         });
     }
@@ -1916,9 +1916,9 @@ mod tests {
             // The materialised case: the caller's only reference passes to
             // the view.
             unsafe { shm_to_ffi_owned(base as *const ArrowShmHeader, false, &mut s, &mut a) }.unwrap();
-            assert_eq!(shm::reference_count(base), Some(1));
+            assert_eq!(unsafe { shm::reference_count(base) }, Some(1));
             release_roots(&mut s, &mut a, false);
-            assert_eq!(shm::reference_count(base), Some(0), "the last view frees the block");
+            assert_eq!(unsafe { shm::reference_count(base) }, Some(0), "the last view frees the block");
         });
     }
 
@@ -1932,11 +1932,11 @@ mod tests {
             unsafe { shm_to_ffi_owned(base as *const ArrowShmHeader, true, &mut s, &mut a) }.unwrap();
             let arena = unsafe { (*(&s as *const FFI_ArrowSchema as *const RawSchema)).private_data };
             release_roots(&mut s, &mut a, false);
-            assert_eq!(shm::reference_count(base), Some(1));
+            assert_eq!(unsafe { shm::reference_count(base) }, Some(1));
             // A consumer that releases a struct it was told to consider
             // consumed must not take the block from whoever still holds it.
             unsafe { release_arena(arena) };
-            assert_eq!(shm::reference_count(base), Some(1));
+            assert_eq!(unsafe { shm::reference_count(base) }, Some(1));
             let _ = shm::shfree(base);
         });
     }
@@ -1954,7 +1954,7 @@ mod tests {
             // unchanged passes the block through instead of copying.
             let got = unsafe { try_borrow(&a as *const _, &s as *const _, None) };
             assert_eq!(got, Some(rel));
-            assert_eq!(shm::reference_count(base), Some(3), "a borrow takes a packet reference");
+            assert_eq!(unsafe { shm::reference_count(base) }, Some(3), "a borrow takes a packet reference");
             let _ = shm::shfree(base);
 
             let view_copy = (unsafe { ptr::read(&s) }, unsafe { ptr::read(&a) });
@@ -1981,7 +1981,7 @@ mod tests {
             // still owns.
             unsafe { (*(arena as *mut ImportArena)).owner_pid += 1 };
             release_roots(&mut s, &mut a, false);
-            assert_eq!(shm::reference_count(base), Some(2));
+            assert_eq!(unsafe { shm::reference_count(base) }, Some(2));
             let _ = shm::shfree(base);
             let _ = shm::shfree(base);
         });

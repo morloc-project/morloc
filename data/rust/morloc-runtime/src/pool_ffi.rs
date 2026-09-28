@@ -3,6 +3,8 @@
 
 use std::ffi::{c_char, c_void};
 use std::ptr;
+
+use morloc_runtime_types::shm_types::PRIMARY_VOLUME;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, Condvar};
 
@@ -547,7 +549,7 @@ unsafe fn pool_main_fork(config: &PoolConfig, socket_path: *const c_char, tmpdir
                 pfk(config.dispatch_ctx);
             }
 
-            shinit(shm_basename, (i + 1) as usize, 0xffff, &mut errmsg);
+            shinit(shm_basename, PRIMARY_VOLUME + 1 + i as usize, 0xffff, &mut errmsg);
             if !errmsg.is_null() {
                 // Print the error to stderr before exiting so the nexus can
                 // capture it via the pool's redirected stderr file. Without

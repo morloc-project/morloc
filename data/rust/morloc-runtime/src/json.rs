@@ -645,7 +645,8 @@ fn write_leaf(
             };
             if dest.is_some() {
                 let w = alloc(dest, 16)?;
-                let abs = shm::shmemcpy(limb_src.as_ptr(), limb_bytes)?;
+                // SAFETY: limb_src is a live slice of limb_bytes bytes.
+                let abs = unsafe { shm::shmemcpy(limb_src.as_ptr(), limb_bytes) }?;
                 parts.push(abs);
                 w.write_val::<usize>(0, nlimbs);
                 w.write_val::<shm::RelPtr>(8, shm::abs2rel(abs)?);
@@ -675,7 +676,8 @@ fn write_leaf(
             let (w, data_rel) = if dest.is_some() {
                 let w = alloc(dest, hdr)?;
                 let data_rel = if bytes.is_empty() { RELNULL } else {
-                    let abs = shm::shmemcpy(bytes.as_ptr(), bytes.len())?;
+                    // SAFETY: bytes is a live slice.
+                    let abs = unsafe { shm::shmemcpy(bytes.as_ptr(), bytes.len()) }?;
                     parts.push(abs);
                     shm::abs2rel(abs)?
                 };
@@ -1141,7 +1143,11 @@ pub fn voidstar_to_json_string(ptr: AbsPtr, schema: &Schema) -> Result<String, M
 /// True when the top-level wire value is "null-ish": either Unit (Nil) or
 /// an Optional whose relptr is RELNULL. Nested null inside a container
 /// is not detected -- that would lose structural information.
-pub fn is_top_null(ptr: AbsPtr, schema: &Schema) -> bool {
+///
+/// # Safety
+///
+/// `ptr` must point to a live voidstar value of `schema`.
+pub unsafe fn is_top_null(ptr: AbsPtr, schema: &Schema) -> bool {
     match schema.serial_type {
         SerialType::Nil => true,
         SerialType::Optional => {
@@ -1152,7 +1158,11 @@ pub fn is_top_null(ptr: AbsPtr, schema: &Schema) -> bool {
     }
 }
 
-pub fn print_voidstar(ptr: AbsPtr, schema: &Schema, keep_null: bool) -> Result<(), MorlocError> {
+///
+/// # Safety
+///
+/// `ptr` must point to a live voidstar value of `schema`.
+pub unsafe fn print_voidstar(ptr: AbsPtr, schema: &Schema, keep_null: bool) -> Result<(), MorlocError> {
     write_to_stdout(ptr, schema, keep_null, None)
 }
 
@@ -1163,7 +1173,11 @@ pub fn print_voidstar(ptr: AbsPtr, schema: &Schema, keep_null: bool) -> Result<(
 /// * Non-list schemas: emit the whole value on one line (equivalent
 ///   to `-f json` with a trailing newline). `-f jsonl` on a scalar
 ///   still parses as valid JSON-lines (one line, one value).
-pub fn print_voidstar_jsonl(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
+///
+/// # Safety
+///
+/// `ptr` must point to a live voidstar value of `schema`.
+pub unsafe fn print_voidstar_jsonl(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
     let mut w = io::BufWriter::with_capacity(BUFWRITER_CAPACITY, io::stdout().lock());
     match schema.serial_type {
         SerialType::Array => {
@@ -1287,7 +1301,10 @@ pub fn voidstar_raw_to_bytes(ptr: AbsPtr, schema: &Schema) -> Result<Vec<u8>, Mo
     Ok(buf)
 }
 
-pub fn pretty_print_voidstar(ptr: AbsPtr, schema: &Schema, keep_null: bool) -> Result<(), MorlocError> {
+/// # Safety
+///
+/// `ptr` must point to a live voidstar value of `schema`.
+pub unsafe fn pretty_print_voidstar(ptr: AbsPtr, schema: &Schema, keep_null: bool) -> Result<(), MorlocError> {
     // Top-level String renders as the unescaped body (terminal convenience
     // for `--print`). Other single-scalar returns fall through to the
     // streaming walker.
@@ -1309,7 +1326,8 @@ pub fn pretty_print_voidstar(ptr: AbsPtr, schema: &Schema, keep_null: bool) -> R
 fn write_to_stdout(ptr: AbsPtr, schema: &Schema, keep_null: bool, pretty: Pretty)
     -> Result<(), MorlocError>
 {
-    if !keep_null && is_top_null(ptr, schema) { return Ok(()); }
+    // SAFETY: forwarded from this function's own contract.
+    if !keep_null && unsafe { is_top_null(ptr, schema) } { return Ok(()); }
     let mut w = io::BufWriter::with_capacity(BUFWRITER_CAPACITY, io::stdout().lock());
     to_json(ptr, schema, &mut w, pretty)?;
     map_io(w.write_all(b"\n"))?;

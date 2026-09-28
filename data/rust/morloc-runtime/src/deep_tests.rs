@@ -8,6 +8,10 @@
 //! `schema.offsets`, an optional is one relative pointer, a variant is a tag
 //! byte and a relative pointer to the arm's tuple, an array is a header
 //! pointing at its inline elements.
+//!
+//! The tests hold the arena exclusively: they time how each walker scales
+//! with depth, and allocating concurrently with other tests measures lock
+//! contention instead.
 
 use crate::schema::{parse_schema, Schema};
 use crate::shm::{self, AbsPtr, Array, RelPtr, RELNULL};
@@ -288,7 +292,7 @@ mod tests {
     #[test]
     fn flatten_rebase_and_shift_are_flat_over_deep_chains() {
         on_small_stack(|| {
-            let _shm = crate::init_test_shm();
+            let _shm = crate::own_test_registry();
             for (root, schema, count) in [
                 {
                     let (r, s) = build_ll(DEPTH);
@@ -322,7 +326,7 @@ mod tests {
     #[test]
     fn json_writer_is_flat_over_deep_chains() {
         on_small_stack(|| {
-            let _shm = crate::init_test_shm();
+            let _shm = crate::own_test_registry();
             let (ll, lls) = build_ll(DEPTH);
             let text = crate::json::voidstar_to_json_string(ll, &lls).unwrap();
             // {"head":N,"tail":  per level, then null and the closing braces.
@@ -360,7 +364,7 @@ mod tests {
     #[test]
     fn json_loader_is_flat_and_linear_over_deep_chains() {
         on_small_stack(|| {
-            let _shm = crate::init_test_shm();
+            let _shm = crate::own_test_registry();
             let schema = parse_schema(LL_SCHEMA).unwrap();
             let root = crate::json::read_json_with_schema(&ll_json(DEPTH), &schema).unwrap();
             assert_eq!(count_ll(root, &schema), DEPTH);
@@ -393,7 +397,7 @@ mod tests {
     #[test]
     fn flat_writer_is_flat_and_linear_over_deep_chains() {
         on_small_stack(|| {
-            let _shm = crate::init_test_shm();
+            let _shm = crate::own_test_registry();
             for (root, schema) in [build_ll(DEPTH), build_tree(DEPTH), build_mutual(DEPTH), build_rose(DEPTH)] {
                 let flat = crate::voidstar::flatten_to_buffer(root, &schema).unwrap();
                 let mut w0: Vec<u8> = Vec::new();
@@ -432,7 +436,7 @@ mod tests {
     /// value.
     #[test]
     fn flat_writer_matches_flatten_on_random_values() {
-        let _shm = crate::init_test_shm();
+        let _shm = crate::own_test_registry();
         let mut g = Gen(0x2545f4914f6cdd1d);
         for schema_str in SHAPES {
             let schema = parse_schema(schema_str).unwrap();
@@ -458,7 +462,7 @@ mod tests {
     #[test]
     fn msgpack_hash_and_deep_copy_are_flat_over_deep_chains() {
         on_small_stack(|| {
-            let _shm = crate::init_test_shm();
+            let _shm = crate::own_test_registry();
             for (root, schema) in [build_ll(DEPTH), build_tree(DEPTH), build_mutual(DEPTH), build_rose(DEPTH)] {
                 let flat = crate::voidstar::flatten_to_buffer(root, &schema).unwrap();
                 // Through msgpack and back to the same bytes.
@@ -487,7 +491,7 @@ mod tests {
     #[test]
     fn size_walk_is_flat_over_deep_chains() {
         on_small_stack(|| {
-            let _shm = crate::init_test_shm();
+            let _shm = crate::own_test_registry();
             let (ll, lls) = build_ll(DEPTH);
             // Root record (16), then per link the pointer's alignment slack
             // beyond the slot (7) and the next record (16).
@@ -513,7 +517,7 @@ mod tests {
 
     #[test]
     fn builders_produce_chains_of_the_requested_depth() {
-        let _shm = crate::init_test_shm();
+        let _shm = crate::own_test_registry();
         let (root, schema) = build_ll(1000);
         assert_eq!(count_ll(root, &schema), 1000);
         let (tree, ts) = build_tree(50);

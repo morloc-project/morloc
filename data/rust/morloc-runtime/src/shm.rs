@@ -14,7 +14,7 @@ use std::sync::Mutex;
 pub use morloc_runtime_types::shm_types::{
     align_up, encode_relptr, relptr_is_sentinel, relptr_offset, relptr_volume_index,
     AbsPtr, Array, BlockHeader, MorlocVolEntry, RelPtr, ShmHeader, VolPtr,
-    BLK_ABSORBED, BLK_MAGIC, BLOCK_ALIGN, MAX_FILENAME_SIZE, MAX_PATH_SIZE, MAX_VOLUME_NUMBER,
+    BLK_ABSORBED, BLK_MAGIC, BLOCK_ALIGN, MAX_FILENAME_SIZE, MAX_PATH_SIZE, MAX_VOLUME_NUMBER, PRIMARY_VOLUME,
     OFFSET_MASK, RELNULL, SHM_MAGIC, VOLNULL,
 };
 
@@ -192,7 +192,7 @@ unsafe fn parallel_reserve_pages(fd: i32, ptr: *mut u8, size: usize) -> i32 {
     //     cache-line bouncing on huge pages shared between adjacent
     //     workers whose 16 MiB frames straddle 2 MiB boundaries when
     //     the SHM data region is not 2 MiB-aligned).
-    // The read-only phases (adjust_relptrs, output walk+encode) saw
+    // The read-only phases (relocation, output walk+encode) saw
     // no benefit either -- single-threaded TLB pressure on the SHM
     // region is small enough that the savings get lost in noise.
     // If revisited, a hugetlbfs-backed mapping with explicit
@@ -438,16 +438,17 @@ fn pick_free_slot(table: &VolumeTable) -> Option<usize> {
     if table.used.len() >= MAX_VOLUME_NUMBER {
         return None;
     }
+    // Volume 0 is never mapped; see PRIMARY_VOLUME.
     for _ in 0..8 {
         let idx = (next_random_u64() as usize) & (MAX_VOLUME_NUMBER - 1);
-        if table.slots[idx].is_null() {
+        if idx != 0 && table.slots[idx].is_null() {
             return Some(idx);
         }
     }
     let start = (next_random_u64() as usize) & (MAX_VOLUME_NUMBER - 1);
     for off in 0..MAX_VOLUME_NUMBER {
         let idx = (start + off) & (MAX_VOLUME_NUMBER - 1);
-        if table.slots[idx].is_null() {
+        if idx != 0 && table.slots[idx].is_null() {
             return Some(idx);
         }
     }
@@ -592,6 +593,11 @@ pub fn shinit(
     volume_index: usize,
     shm_size: usize,
 ) -> Result<*mut ShmHeader, MorlocError> {
+    if volume_index == 0 || volume_index >= MAX_VOLUME_NUMBER {
+        return Err(MorlocError::Shm(format!(
+            "shinit: volume index {} is not usable (1..{})", volume_index, MAX_VOLUME_NUMBER
+        )));
+    }
     // Register atexit handler on first call (once per process).
     // This ensures SHM is unlinked on any normal exit path, even if
     // clean_exit() is not called (e.g., pool processes calling sys.exit()).
@@ -989,7 +995,11 @@ pub fn shmalloc(size: usize) -> Result<AbsPtr, MorlocError> {
 }
 
 /// Copy data into a new SHM allocation.
-pub fn shmemcpy(src: *const u8, size: usize) -> Result<AbsPtr, MorlocError> {
+///
+/// # Safety
+///
+/// `src` must be readable for `size` bytes.
+pub unsafe fn shmemcpy(src: *const u8, size: usize) -> Result<AbsPtr, MorlocError> {
     let dest = shmalloc(size)?;
     // SAFETY: dest is a freshly allocated SHM block of `size` bytes.
     // Caller guarantees src points to `size` readable bytes.
@@ -1026,7 +1036,11 @@ pub fn shfree(ptr: AbsPtr) -> Result<(), MorlocError> {
 }
 
 /// Increment reference count on a shared memory block.
-pub fn shincref(ptr: AbsPtr) -> Result<(), MorlocError> {
+///
+/// # Safety
+///
+/// `ptr` must be null or a block returned by the SHM allocator.
+pub unsafe fn shincref(ptr: AbsPtr) -> Result<(), MorlocError> {
     if ptr.is_null() {
         return Err(MorlocError::Shm("Cannot incref NULL pointer".into()));
     }
@@ -1080,7 +1094,11 @@ pub fn shincref(ptr: AbsPtr) -> Result<(), MorlocError> {
 /// Current reference count of a shared memory block, or `None` when
 /// `ptr` is null or the header magic does not validate. A count of 0
 /// means the block is free and its bytes have been scrubbed.
-pub fn reference_count(ptr: AbsPtr) -> Option<u32> {
+///
+/// # Safety
+///
+/// `ptr` must be null or a block returned by the SHM allocator.
+pub unsafe fn reference_count(ptr: AbsPtr) -> Option<u32> {
     if ptr.is_null() {
         return None;
     }
@@ -1137,6 +1155,12 @@ pub unsafe fn shm_block_size(ptr: AbsPtr) -> Option<usize> {
 /// reader), `shopen_diag(idx)` lazily mmaps `<basename>-<idx>` and
 /// records it.
 pub fn rel2abs(ptr: RelPtr) -> Result<AbsPtr, MorlocError> {
+    rel2abs_extent(ptr, 0)
+}
+
+/// `rel2abs` for a region of `extent` bytes: the whole region, not only its
+/// first byte, must lie inside the volume.
+pub fn rel2abs_extent(ptr: RelPtr, extent: usize) -> Result<AbsPtr, MorlocError> {
     if relptr_is_sentinel(ptr) {
         // RELNULL and any future reserved sentinel are not addressable.
         return Err(MorlocError::Shm(format!(
@@ -1146,6 +1170,13 @@ pub fn rel2abs(ptr: RelPtr) -> Result<AbsPtr, MorlocError> {
     }
     let vol_idx = relptr_volume_index(ptr);
     let offset = relptr_offset(ptr);
+    if vol_idx == 0 {
+        return Err(MorlocError::Shm(format!(
+            "rel2abs: relptr {} is in volume 0, which is never mapped: a buffer- or \
+             file-relative offset reached shared memory without being rebased",
+            ptr
+        )));
+    }
 
     // Fast path: volume already mapped in this process. Read the slot
     // record (header pointer + cached data_size, both in the same
@@ -1156,7 +1187,7 @@ pub fn rel2abs(ptr: RelPtr) -> Result<AbsPtr, MorlocError> {
         vols.slots[vol_idx]
     };
     if !slot.is_null() {
-        if offset >= slot.data_size() {
+        if !region_fits(offset, extent, slot.data_size()) {
             return Err(MorlocError::Shm(format!(
                 "rel2abs offset {} exceeds volume {}'s size {}",
                 offset, vol_idx, slot.data_size()
@@ -1189,7 +1220,7 @@ pub fn rel2abs(ptr: RelPtr) -> Result<AbsPtr, MorlocError> {
             vol_idx
         )));
     }
-    if offset >= slot.data_size() {
+    if !region_fits(offset, extent, slot.data_size()) {
         return Err(MorlocError::Shm(format!(
             "rel2abs offset {} exceeds volume {}'s size {}",
             offset, vol_idx, slot.data_size()
@@ -1201,6 +1232,12 @@ pub fn rel2abs(ptr: RelPtr) -> Result<AbsPtr, MorlocError> {
             .add(std::mem::size_of::<ShmHeader>());
         Ok(base.add(offset) as AbsPtr)
     }
+}
+
+/// A region of `extent` bytes at `offset` lies inside `size` bytes. An empty
+/// region still needs a valid start.
+fn region_fits(offset: usize, extent: usize, size: usize) -> bool {
+    offset < size && offset.checked_add(extent).is_some_and(|end| end <= size)
 }
 
 /// Build a user-facing error for an `shopen` miss inside `rel2abs`. Each
@@ -2054,6 +2091,21 @@ pub unsafe fn vol2abs(ptr: VolPtr, shm: *const ShmHeader) -> AbsPtr {
 mod tests {
     use super::*;
 
+    // A buffer- or file-relative offset reads as volume 0. Copying such a
+    // value into SHM without rebasing it must fail at the first dereference,
+    // not resolve into whatever this process mapped at volume 0.
+    #[test]
+    fn an_unrebased_offset_does_not_resolve() {
+        let _shm = crate::init_test_shm();
+        let block = shmalloc(64).unwrap();
+        assert_ne!(relptr_volume_index(abs2rel(block).unwrap()), 0, "SHM never uses volume 0");
+        for off in [0isize, 8, 16] {
+            let err = rel2abs(off).unwrap_err().to_string();
+            assert!(err.contains("volume 0"), "{err}");
+        }
+        shfree(block).unwrap();
+    }
+
     // Merging a free block into its predecessor turns the absorbed block's
     // header into interior bytes of the survivor. A pointer to the absorbed
     // block must stop validating at that moment: if its header still reads
@@ -2148,8 +2200,8 @@ mod tests {
             blk.reference_count.store(u32::MAX, Ordering::Release);
         }
 
-        let res = shincref(p);
-        let rc = reference_count(p);
+        let res = unsafe { shincref(p) };
+        let rc = unsafe { reference_count(p) };
         assert!(
             res.is_err(),
             "incref accepted a block that was being released (refcount now {:?})",
@@ -2177,9 +2229,9 @@ mod tests {
         let _shm = crate::own_test_registry();
         let p = shmalloc(64).expect("allocate");
         shfree(p).expect("free");
-        assert_eq!(reference_count(p), Some(0), "block should read as free");
+        assert_eq!(unsafe { reference_count(p) }, Some(0), "block should read as free");
         assert!(
-            shincref(p).is_err(),
+            unsafe { shincref(p) }.is_err(),
             "incref accepted a block that was already free",
         );
     }
@@ -2223,16 +2275,16 @@ mod tests {
         shm_set_fallback_dir(test_dir.to_str().unwrap());
 
         let basename = format!("morloc-{}-test-vt", std::process::id());
-        let shm = shinit(&basename, 0, 4096).unwrap();
+        let shm = shinit(&basename, PRIMARY_VOLUME, 4096).unwrap();
 
-        // shinit should have populated slot 0.
-        let entry = &MORLOC_VOL_TABLE[0];
+        // shinit should have populated the primary volume's slot.
+        let entry = &MORLOC_VOL_TABLE[PRIMARY_VOLUME];
         let base = entry.data_base.load(Ordering::Acquire);
         let size = entry.data_size.load(Ordering::Relaxed);
         assert!(!base.is_null(),
-            "expected publish_vol to populate slot 0's data_base");
+            "expected publish_vol to populate the primary slot's data_base");
         assert!(size > 0,
-            "expected publish_vol to populate slot 0's data_size");
+            "expected publish_vol to populate the primary slot's data_size");
         // data_base must point to the data region right after the header.
         let expected_base = unsafe {
             (shm as *mut u8).add(std::mem::size_of::<ShmHeader>())
@@ -2243,7 +2295,7 @@ mod tests {
         shclose().unwrap();
 
         // shclose drops the slot back to null.
-        let base_after = MORLOC_VOL_TABLE[0].data_base.load(Ordering::Acquire);
+        let base_after = MORLOC_VOL_TABLE[PRIMARY_VOLUME].data_base.load(Ordering::Acquire);
         assert!(base_after.is_null(),
             "expected shclose to publish a null data_base");
 
@@ -2285,7 +2337,7 @@ mod tests {
         shm_set_fallback_dir(test_dir.to_str().unwrap());
 
         let basename = format!("morloc-{}-test-idx", std::process::id());
-        shinit(&basename, 0, 4096).unwrap();
+        shinit(&basename, PRIMARY_VOLUME, 4096).unwrap();
 
         // Force grow into several randomly-allocated volumes by
         // allocating much more than the initial 4 KiB volume can hold.
@@ -2341,7 +2393,7 @@ mod tests {
         shm_set_fallback_dir(test_dir.to_str().unwrap());
 
         let basename = format!("morloc-{}-test-shm", std::process::id());
-        let shm = shinit(&basename, 0, 4096).unwrap();
+        let shm = shinit(&basename, PRIMARY_VOLUME, 4096).unwrap();
         assert!(!shm.is_null());
         assert_eq!(unsafe { (*shm).magic }, SHM_MAGIC);
 
@@ -2391,7 +2443,7 @@ mod tests {
         // returns >= 1 worker, and on Linux 5.14+ this exercises
         // `parallel_madvise_populate_write`.
         let alloc_size = 128 * 1024 * 1024;
-        shinit(&basename, 0, alloc_size).unwrap();
+        shinit(&basename, PRIMARY_VOLUME, alloc_size).unwrap();
         let p = shmalloc(alloc_size).unwrap();
         let ps = page_size();
         let n_pages = alloc_size / ps;

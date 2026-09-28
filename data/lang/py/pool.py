@@ -546,7 +546,7 @@ def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, tota
     # manifold (`mN`) that was executing; the parent reports the signal.
     faulthandler.enable()
     morloc.set_fallback_dir(tmpdir)
-    morloc.shinit(shm_basename, 0, 0xffff)
+    morloc.shinit(shm_basename, morloc.PRIMARY_VOLUME, 0xffff)
     # Load user sources HERE, post-fork, in the worker's own process (see the
     # _mlc_user_sources note). A failure is recorded, not raised: run_job turns
     # it into a fail packet so the caller gets the real import error.
@@ -722,7 +722,7 @@ def run_thread_pool(socket_path, tmpdir, shm_basename):
     # forfeit the required in-pool parallelism.
     faulthandler.enable()
     morloc.set_fallback_dir(tmpdir)
-    morloc.shinit(shm_basename, 0, 0xffff)  # attach SHM once for the process
+    morloc.shinit(shm_basename, morloc.PRIMARY_VOLUME, 0xffff)  # attach SHM once for the process
     _mlc_load_user_sources()  # no fork on this path -> safe to import in-thread
 
     daemon = _hold_daemon(morloc.start_daemon(socket_path, tmpdir, shm_basename, 0xffff))
