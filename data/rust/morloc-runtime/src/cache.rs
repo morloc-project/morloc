@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
-use morloc_runtime_types::width;
 
 use crate::cschema::CSchema;
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
@@ -761,13 +760,10 @@ impl<'r> Walker<()> for HashWalk<'r> {
                     let owned: Vec<u8>;
                     let borrowed: &[u8];
                     if tag == sh::TAG_PATH {
-                        if payload == sh::RELNULL_PAYLOAD {
-                            borrowed = &[];
-                        } else {
-                            let suballoc = shm::rel2abs(sh::payload_relptr(payload))?;
-                            let path_len = width::usize_from_u64(sh::read_path_size(suballoc));
-                            borrowed = std::slice::from_raw_parts(suballoc.add(8), path_len);
-                        }
+                        borrowed = match crate::voidstar::path_suballoc(&crate::voidstar::Arena, payload)? {
+                            Some(block) => &block[8..],
+                            None => &[],
+                        };
                     } else if tag == sh::TAG_HANDLE {
                         owned = crate::stream::handle_path(sh::payload_handle(payload))?.into_bytes();
                         borrowed = &owned;

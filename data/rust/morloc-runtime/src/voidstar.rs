@@ -87,6 +87,26 @@ impl Space for Local {
     }
 }
 
+/// The path block a `TAG_PATH` stream-handle payload points at -- its 8-byte
+/// length, then that many bytes -- with both regions checked against
+/// `space`, or `None` for the empty-path payload. The path's bytes are the
+/// block from offset 8.
+///
+/// # Safety
+///
+/// The space must stay mapped for the returned lifetime.
+pub unsafe fn path_suballoc<'a, S: Space>(space: &S, payload: u64) -> Result<Option<&'a [u8]>, MorlocError> {
+    use morloc_runtime_types::stream_handle as sh;
+    if payload == sh::RELNULL_PAYLOAD {
+        return Ok(None);
+    }
+    let rel = sh::payload_relptr(payload);
+    let len_at = space.resolve(rel, 8)?;
+    let total = sh::path_suballoc_size(width::usize_from_u64(sh::read_path_size(len_at)));
+    let block = space.resolve(rel, total)?;
+    Ok(Some(std::slice::from_raw_parts(block, total)))
+}
+
 /// `n` elements of `width` bytes, or an error when a size read from a value
 /// overflows the address space.
 pub(crate) fn region_len(n: usize, width: usize) -> Result<usize, MorlocError> {
@@ -792,16 +812,11 @@ impl<'r, 'f, S: Space> Walker<*mut u8> for CopyWalk<'r, 'f, S> {
                     let src_payload = sh::read_payload(src);
                     match tag {
                         t if t == sh::TAG_PATH => {
-                            if src_payload == sh::RELNULL_PAYLOAD {
-                                sh::write_field(dst, sh::TAG_PATH, sh::RELNULL_PAYLOAD);
-                            } else {
-                                let rel = sh::payload_relptr(src_payload);
-                                let len_at = space.resolve(rel, 8)?;
-                                let path_len = width::usize_from_u64(sh::read_path_size(len_at));
-                                let total = sh::path_suballoc_size(path_len);
-                                let src_suballoc = space.resolve(rel, total)?;
-                                let new_suballoc = self.alloc.copy_of(src_suballoc, total)?;
+                            if let Some(block) = path_suballoc(space, src_payload)? {
+                                let new_suballoc = self.alloc.copy_of(block.as_ptr(), block.len())?;
                                 sh::write_field(dst, sh::TAG_PATH, sh::path_payload(shm::abs2rel(new_suballoc)?));
+                            } else {
+                                sh::write_field(dst, sh::TAG_PATH, sh::RELNULL_PAYLOAD);
                             }
                         }
                         t if t == sh::TAG_HANDLE => {
@@ -1148,18 +1163,14 @@ impl<'r> Walker<usize> for FlattenWalk<'r> {
                     let dst_field = self.region(at, sh::STREAM_HANDLE_FIELD_SIZE)?.as_mut_ptr();
                     match tag {
                         t if t == sh::TAG_PATH => {
-                            if src_payload == sh::RELNULL_PAYLOAD {
-                                sh::write_field(dst_field, sh::TAG_PATH, sh::RELNULL_PAYLOAD);
-                            } else {
-                                let src_suballoc = shm::rel2abs(sh::payload_relptr(src_payload))?;
-                                let path_len = width::usize_from_u64(sh::read_path_size(src_suballoc));
-                                let total = sh::path_suballoc_size(path_len);
+                            if let Some(block) = path_suballoc(&Arena, src_payload)? {
                                 self.cursor = shm::align_up(self.cursor, 8);
                                 let here = self.cursor;
-                                self.region(here, total)?
-                                    .copy_from_slice(std::slice::from_raw_parts(src_suballoc, total));
-                                self.cursor += total;
+                                self.region(here, block.len())?.copy_from_slice(block);
+                                self.cursor += block.len();
                                 sh::write_field(dst_field, sh::TAG_PATH, width::u64_from_usize(here));
+                            } else {
+                                sh::write_field(dst_field, sh::TAG_PATH, sh::RELNULL_PAYLOAD);
                             }
                         }
                         t if t == sh::TAG_HANDLE && self.portable => {
@@ -1608,9 +1619,8 @@ impl<'a, 'r> Walker<usize> for FlatEmit<'a, 'r> {
                         let pos = shm::align_up(self.cursor, 8);
                         self.set(base, pos as u64 | self.vol_mask);
                         self.pad_to(pos)?;
-                        let suballoc = shm::rel2abs(sh::payload_relptr(payload))?;
-                        let total = sh::path_suballoc_size(width::usize_from_u64(sh::read_path_size(suballoc)));
-                        self.write_bytes(std::slice::from_raw_parts(suballoc, total))?;
+                        let block = path_suballoc(&Arena, payload)?.unwrap_or(&[]);
+                        self.write_bytes(block)?;
                     }
                 }
                 SerialType::Tuple | SerialType::Map => {

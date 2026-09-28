@@ -1559,25 +1559,13 @@ impl<'a, 'r> Walker<Pretty> for JsonWalk<'a, 'r> {
                 let tag = unsafe { sh::read_tag(field_ptr) };
                 let payload = unsafe { sh::read_payload(field_ptr) };
                 if tag == sh::TAG_PATH {
-                    if payload == sh::RELNULL_PAYLOAD {
-                        map_io(w.write_all(b"\"\""))?;
-                    } else {
-                        let suballoc = shm::rel2abs(sh::payload_relptr(payload))?;
-                        let path_len = width::usize_from_u64(unsafe { sh::read_path_size(suballoc) });
-                        if path_len == 0 {
-                            map_io(w.write_all(b"\"\""))?;
-                        } else {
-                            let bytes = unsafe {
-                                std::slice::from_raw_parts(suballoc.add(8), path_len)
-                            };
-                            let s = std::str::from_utf8(bytes).map_err(|_| {
-                                MorlocError::Serialization(
-                                    "json stream-handle: path is not valid UTF-8".into(),
-                                )
-                            })?;
-                            json_escape(s, w)?;
-                        }
-                    }
+                    // SAFETY: the value being written is live SHM.
+                    let block = unsafe { crate::voidstar::path_suballoc(&crate::voidstar::Arena, payload) }?;
+                    let bytes = block.map_or(&[][..], |b| &b[8..]);
+                    let s = std::str::from_utf8(bytes).map_err(|_| {
+                        MorlocError::Serialization("json stream-handle: path is not valid UTF-8".into())
+                    })?;
+                    json_escape(s, w)?;
                 } else if tag == sh::TAG_HANDLE {
                     let path = crate::stream::handle_path(sh::payload_handle(payload))?;
                     json_escape(&path, w)?;

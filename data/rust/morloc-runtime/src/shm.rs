@@ -1178,10 +1178,25 @@ pub fn rel2abs_extent(ptr: RelPtr, extent: usize) -> Result<AbsPtr, MorlocError>
         )));
     }
 
-    // Fast path: volume already mapped in this process. Read the slot
-    // record (header pointer + cached data_size, both in the same
-    // SendPtr cache line) under the lock, then drop the lock before
-    // computing the address.
+    // Fast path: the volume is mapped in this process and published to the
+    // lock-free table, as the C resolver reads it. No lock is taken.
+    let entry = &MORLOC_VOL_TABLE[vol_idx];
+    let data_base = entry.data_base.load(Ordering::Acquire);
+    if !data_base.is_null() {
+        let data_size = entry.data_size.load(Ordering::Relaxed);
+        if !region_fits(offset, extent, data_size) {
+            return Err(MorlocError::Shm(format!(
+                "rel2abs offset {} exceeds volume {}'s size {}",
+                offset, vol_idx, data_size
+            )));
+        }
+        // SAFETY: the published base is the mapped data region and the
+        // region check keeps the add inside it.
+        return Ok(unsafe { data_base.add(offset) });
+    }
+
+    // Not published: look the slot up under the lock (it may be mapped but
+    // not yet published), then drop the lock before computing the address.
     let slot = {
         let vols = VOLUMES.lock().unwrap();
         vols.slots[vol_idx]

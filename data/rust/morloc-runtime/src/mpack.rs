@@ -159,17 +159,14 @@ impl<'r, 'b> Walker<()> for PackWalk<'r, 'b> {
                 let tag = sh::read_tag(field);
                 let payload = sh::read_payload(field);
                 let path: String = if tag == sh::TAG_PATH {
-                    if payload == sh::RELNULL_PAYLOAD {
-                        String::new()
-                    } else {
-                        let suballoc = shm::rel2abs(sh::payload_relptr(payload))?;
-                        let path_len = width::usize_from_u64(sh::read_path_size(suballoc));
-                        let bytes = std::slice::from_raw_parts(suballoc.add(8), path_len);
-                        std::str::from_utf8(bytes)
+                    if let Some(block) = crate::voidstar::path_suballoc(&crate::voidstar::Arena, payload)? {
+                        std::str::from_utf8(&block[8..])
                             .map_err(|_| MorlocError::Serialization(
                                 "msgpack stream-handle: path is not valid UTF-8".into(),
                             ))?
                             .to_string()
+                    } else {
+                        String::new()
                     }
                 } else if tag == sh::TAG_HANDLE {
                     crate::stream::handle_path(sh::payload_handle(payload))?

@@ -6,7 +6,6 @@
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
-use morloc_runtime_types::width;
 
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 use crate::schema::{self};
@@ -580,12 +579,8 @@ impl<'r> crate::walk::Walker<bool> for SizeWalk<'r> {
                                 + std::mem::align_of::<u64>() - 1;
                         }
                     } else if sh::read_tag(field) == sh::TAG_PATH {
-                        let payload = sh::read_payload(field);
-                        if payload != sh::RELNULL_PAYLOAD {
-                            let suballoc = shm::rel2abs(sh::payload_relptr(payload))?;
-                            let path_len = width::usize_from_u64(sh::read_path_size(suballoc));
-                            own += sh::path_suballoc_size(path_len)
-                                + std::mem::align_of::<u64>() - 1;
+                        if let Some(block) = crate::voidstar::path_suballoc(&crate::voidstar::Arena, sh::read_payload(field))? {
+                            own += block.len() + std::mem::align_of::<u64>() - 1;
                         }
                     }
                     self.add(own - slot);
