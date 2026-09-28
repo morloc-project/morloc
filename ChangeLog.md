@@ -133,6 +133,11 @@ Unreleased
  * a command that takes or returns a table is served over MCP instead of
    being dropped from the tool surface, so a table-shaped program has a
    model-facing interface
+ * a command imported from another module, or imported under an alias, keeps all its terminal actions
+ * an action given a path writes only to that file; a `@default` action given a path leaves the typed value on stdout
+ * a streaming command whose branches each end in `@collect` runs its actions directly, without staging its output
+ * actions can refer to `@parse` arguments with `$N` when combined with other outputs; `$N` on a streamed `@parse` argument is rejected when the program is built
+ * reading a file that is not a morloc packet says a packet was expected
 
 0.108.1 [2026-09-18]
 --------------------
