@@ -2114,6 +2114,48 @@ mod tests {
         }
     }
 
+    // Threads of one process allocating at once must never be handed the
+    // same block.
+    #[test]
+    fn threads_allocating_together_never_share_a_block() {
+        const THREADS: usize = 8;
+        const ROUNDS: usize = 100_000;
+        const HELD: usize = 8;
+        let _shm = crate::own_test_registry();
+        let handles: Vec<_> = (0..THREADS)
+            .map(|k| {
+                std::thread::spawn(move || {
+                    let stamp = k as u8 + 1;
+                    let mut rng: u64 = 0x9E37_79B9_7F4A_7C15 ^ (k as u64 + 1);
+                    let mut held: Vec<(usize, usize)> = Vec::new();
+                    for _ in 0..ROUNDS {
+                        rng ^= rng << 13;
+                        rng ^= rng >> 7;
+                        rng ^= rng << 17;
+                        if held.len() == HELD || (rng & 1 == 1 && !held.is_empty()) {
+                            let (p, n) = held.swap_remove((rng as usize >> 1) % held.len());
+                            let p = p as AbsPtr;
+                            let bytes = unsafe { std::slice::from_raw_parts(p, n) };
+                            assert!(bytes.iter().all(|&b| b == stamp), "a held block was overwritten");
+                            shfree(p).unwrap();
+                        } else {
+                            let n = 16 + (rng as usize >> 8) % 2048;
+                            let p = shmalloc(n).unwrap();
+                            unsafe { std::ptr::write_bytes(p, stamp, n) };
+                            held.push((p as usize, n));
+                        }
+                    }
+                    for (p, _) in held {
+                        shfree(p as AbsPtr).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+    }
+
     // Creating a volume claims its name: of several processes creating one
     // name at once, exactly one succeeds and the rest are told it is taken.
     #[test]

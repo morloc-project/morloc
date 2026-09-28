@@ -12,6 +12,8 @@ pub mod walk;
 #[cfg(test)]
 pub mod deep_tests;
 #[cfg(test)]
+mod alloc_bench;
+#[cfg(test)]
 mod layout_bench;
 #[cfg(test)]
 mod layout_props;
