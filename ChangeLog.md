@@ -138,6 +138,7 @@ Unreleased
  * a streaming command whose branches each end in `@collect` runs its actions directly, without staging its output
  * actions can refer to `@parse` arguments with `$N` when combined with other outputs; `$N` on a streamed `@parse` argument is rejected when the program is built
  * reading a file that is not a morloc packet says a packet was expected
+ * allow parallelization of compression during streaming
 
 0.108.1 [2026-09-18]
 --------------------

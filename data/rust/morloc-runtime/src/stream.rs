@@ -633,9 +633,25 @@ pub struct RegistrySlot {
     pub staged:               u8,                              // off 330
     _stdio_pad:               [u8; 5],                         // off 331..336
 
+    /// The process holding sealed, uncommitted batches of this OStream
+    /// (see `write_behind`), or 0. Guarded by the futex.
+    pub wb_owner_pid:         u32,                             // off 336
+    /// How many sealed batches `wb_owner_pid` has not yet committed.
+    pub wb_outstanding:       u32,                             // off 340
+    /// Non-zero once a second process has written this OStream: from then
+    /// on every writer commits synchronously, so no process holds batches
+    /// another cannot see.
+    pub wb_sync_only:         u8,                              // off 344
+    /// Non-zero once a sealed batch failed to compress or to be written.
+    /// The stream is incomplete; every later write, flush or close fails.
+    pub write_failed:         u8,                              // off 345
+    _wb_pad:                  [u8; 6],                         // off 346..352
+    /// Start time of `wb_owner_pid`, so a reused PID is not taken for it.
+    pub wb_owner_start:       u64,                             // off 352
+
     /// Padding to round the slot up to STREAM_ENTRY_SIZE so the next
     /// slot starts on a fresh cache-line-aligned boundary.
-    _tail_pad:                [u8; 176],                       // off 336..512
+    _tail_pad:                [u8; 152],                       // off 360..512
 }
 
 const _: () = {
@@ -820,6 +836,10 @@ pub struct ProcessLocalSlot {
     /// entry (offset=0, elem_count=<Array size>). The walker handles
     /// this flag to skip the stream-header / footer parsing paths.
     pub is_data_packet: bool,
+
+    /// OStream only: sealed batches compressing behind the writer, in
+    /// seal order, and spare write buffers.
+    pub(crate) write_behind: crate::write_behind::WriteBehind,
 }
 
 impl Drop for ProcessLocalSlot {
@@ -1162,6 +1182,7 @@ fn attach_process_local_slot(
         subpacket_entries_local,
         subpacket_elem_cum: None,
         is_data_packet,
+        write_behind: Default::default(),
     })
 }
 
@@ -1345,6 +1366,11 @@ fn release_slot_locked(slot: &RegistrySlot) {
         (*mp).write_buffer_index_cap = 0;
         (*mp).write_buffer_index_count = 0;
         (*mp).write_buffer_data_used = 0;
+        (*mp).wb_owner_pid = 0;
+        (*mp).wb_outstanding = 0;
+        (*mp).wb_sync_only = 0;
+        (*mp).write_failed = 0;
+        (*mp).wb_owner_start = 0;
     }
 
     // Bump generation by the salted random increment. Use fetch_add
@@ -1577,6 +1603,7 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
         subpacket_entries_local: parsed.subpacket_entries.clone(),
         subpacket_elem_cum: None,
         is_data_packet: parsed.is_data_packet,
+        write_behind: Default::default(),
     };
     let handle = pack_handle(new_gen, slot_idx);
     install_process_local_slot(handle, local);
@@ -1684,6 +1711,7 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
         subpacket_entries_local: parsed.subpacket_entries.clone(),
         subpacket_elem_cum: None,
         is_data_packet: parsed.is_data_packet,
+        write_behind: Default::default(),
     };
     let handle = pack_handle(new_gen, slot_idx);
     install_process_local_slot(handle, local);
@@ -1989,6 +2017,7 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
         subpacket_entries_local: Vec::new(),
         subpacket_elem_cum: None,
         is_data_packet: false,
+        write_behind: Default::default(),
     };
     install_process_local_slot(handle, local);
     Ok(handle)
@@ -2448,6 +2477,7 @@ fn init_ostream_on_locked_fd(
         subpacket_entries_local: Vec::new(),
         subpacket_elem_cum: None,
         is_data_packet: false,
+        write_behind: Default::default(),
     };
     let handle = pack_handle(new_gen, slot_idx);
     install_process_local_slot(handle, local);
@@ -2526,7 +2556,7 @@ pub fn shared_close_handle_with_status(
         // RPC, so `program > out.packet` produces a complete
         // stream-packet file.
         with_process_local_slot(handle, |local, slot| {
-            let _guard = SlotFutexGuard::lock(slot);
+            let _guard = lock_for_write(slot)?;
             let gen_now = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
             if gen_now != gen_claim {
                 return Err(MorlocError::Other(
@@ -2647,6 +2677,13 @@ pub fn shared_finalize_ostream_locked(
         }
     };
     let is_stdio = slot.is_stdio != 0;
+    let owner = slot.wb_owner_pid;
+    if slot.write_failed != 0 || (owner != 0 && owner != std::process::id()) {
+        // Elements are missing from the file, or held by another process
+        // this one cannot wait for under the futex: leave the temp footer,
+        // the honest "writer didn't finish" signal.
+        return Ok(());
+    }
     let result = (|| -> Result<(), MorlocError> {
         flush_write_buffer(slot, &mut local)?;
         let diag = slot.diag;
@@ -2698,6 +2735,8 @@ struct SubpacketBytes<'a> {
     /// rather than the assembled packet length (which also carries
     /// the header + metadata block).
     compressed_payload_len: usize,
+    /// The payload's size before compression.
+    uncompressed_len: usize,
 }
 
 impl SubpacketBytes<'_> {
@@ -2706,15 +2745,40 @@ impl SubpacketBytes<'_> {
     }
 }
 
-/// Assemble a `MORLOC_DATA_PACKET` from a raw voidstar payload:
-/// zstd-compress (if `level > 0`), build the SCHEMA_STRING (+ optional
-/// FRAME_INDEX) metadata block, prepend the 32-byte header. Returns
-/// the wire bytes ready to write to any transport (disk pwrite, RPC
-/// send-into-SHM). Format-only work -- no cursor, no diag, no I/O.
+/// A sub-packet payload ready to frame: the bytes to write and, when they
+/// are zstd frames, their index.
+struct PreparedPayload<'a> {
+    bytes: std::borrow::Cow<'a, [u8]>,
+    frames: Option<Vec<morloc_runtime_types::packet::FrameEntry>>,
+    uncompressed_len: usize,
+}
+
+/// Compress a raw voidstar payload at `level` (none at level 0).
+fn prepare_payload(payload_bytes: &[u8], level: u8) -> Result<PreparedPayload<'_>, MorlocError> {
+    let clvl = crate::compression::CompressionLevel::from_u8(level)?;
+    if clvl.is_none() {
+        return Ok(PreparedPayload {
+            bytes: std::borrow::Cow::Borrowed(payload_bytes),
+            frames: None,
+            uncompressed_len: payload_bytes.len(),
+        });
+    }
+    let (bytes, frames) = crate::compression::compress_payload_zstd(payload_bytes, clvl)?;
+    Ok(PreparedPayload {
+        bytes: std::borrow::Cow::Owned(bytes),
+        frames: Some(frames),
+        uncompressed_len: payload_bytes.len(),
+    })
+}
+
+/// Assemble a `MORLOC_DATA_PACKET` around a prepared payload: build the
+/// SCHEMA_STRING (+ FRAME_INDEX when compressed) metadata block and
+/// prepend the 32-byte header. Returns the wire bytes ready to write to
+/// any transport (disk pwrite, RPC send-into-SHM). Format-only work -- no
+/// cursor, no diag, no I/O.
 fn build_subpacket_bytes<'a>(
     value_schema: &morloc_runtime_types::schema::Schema,
-    payload_bytes: &'a [u8],
-    level: u8,
+    prepared: PreparedPayload<'a>,
 ) -> Result<SubpacketBytes<'a>, MorlocError> {
     use morloc_runtime_types::packet::{
         PacketHeader, METADATA_TYPE_SCHEMA_STRING, METADATA_TYPE_FRAME_INDEX,
@@ -2722,17 +2786,15 @@ fn build_subpacket_bytes<'a>(
     };
     use morloc_runtime_types::schema::schema_to_string;
 
-    let clvl = crate::compression::CompressionLevel::from_u8(level)?;
-    let (final_payload, compression_byte, frame_index_body):
-        (std::borrow::Cow<'a, [u8]>, u8, Option<Vec<u8>>) =
-        if clvl.is_none() {
-            (std::borrow::Cow::Borrowed(payload_bytes), PACKET_COMPRESSION_NONE, None)
-        } else {
-            let (bytes, frames) =
-                crate::compression::compress_payload_zstd(payload_bytes, clvl)?;
-            let body = crate::packet::encode_frame_index_entry(&frames);
-            (std::borrow::Cow::Owned(bytes), PACKET_COMPRESSION_ZSTD, Some(body))
-        };
+    let uncompressed_len = prepared.uncompressed_len;
+    let final_payload = prepared.bytes;
+    let (compression_byte, frame_index_body) = match &prepared.frames {
+        None => (PACKET_COMPRESSION_NONE, None),
+        Some(frames) => (
+            PACKET_COMPRESSION_ZSTD,
+            Some(crate::packet::encode_frame_index_entry(frames)),
+        ),
+    };
     let value_schema_str = schema_to_string(value_schema);
     let mut schema_body = value_schema_str.into_bytes();
     schema_body.push(0);
@@ -2773,7 +2835,7 @@ fn build_subpacket_bytes<'a>(
     let mut head = Vec::with_capacity(hdr_bytes.len() + meta.len());
     head.extend_from_slice(&hdr_bytes);
     head.extend_from_slice(&meta);
-    Ok(SubpacketBytes { head, payload: final_payload, pad, compressed_payload_len })
+    Ok(SubpacketBytes { head, payload: final_payload, pad, compressed_payload_len, uncompressed_len })
 }
 
 /// Record a completed sub-packet flush into a slot's `StreamDiag`.
@@ -2806,13 +2868,6 @@ unsafe fn record_subpacket_flush(
     std::ptr::write_unaligned(diag_ptr, d);
 }
 
-/// Emit one sub-packet from a payload byte slice, write it at the slot's
-/// current cursor, and update slot bookkeeping (cursor, diag, temp footer,
-/// shared sub-packet index). Caller MUST hold the slot futex.
-///
-/// `payload_bytes` is the uncompressed `[a]` voidstar payload (Array
-/// header + inline + variable). If `level > 0` it gets zstd-compressed
-/// here and the FRAME_INDEX metadata entry is added.
 /// A sub-packet payload in portable form: every stream-handle field already
 /// names its file by path (`TAG_PATH`), never by a slot of this nexus's
 /// registry. Every payload the writer builds is portable -- elements are
@@ -2837,19 +2892,45 @@ impl<'a> PortablePayload<'a> {
     }
 }
 
-fn emit_subpacket_to_disk(
+/// Emit one sub-packet of the OStream from its uncompressed `[a]` voidstar
+/// payload (Array header + inline + variable), compressed at `level`, at the
+/// slot's current cursor, and update slot bookkeeping (cursor, diag, temp
+/// footer, shared sub-packet index). Caller MUST hold the slot futex, and
+/// must have committed every batch sealed before this payload.
+fn emit_subpacket(
     slot: &RegistrySlot,
     local: &mut ProcessLocalSlot,
     payload: PortablePayload<'_>,
     level: u8,
     elem_count: u64,
 ) -> Result<(), MorlocError> {
+    debug_assert_payload_elem_count(elem_count, payload.0, "emit_subpacket");
+    let prepared = prepare_payload(payload.0, level)?;
+    emit_prepared(slot, local, prepared, elem_count)
+}
+
+fn emit_prepared(
+    slot: &RegistrySlot,
+    local: &mut ProcessLocalSlot,
+    prepared: PreparedPayload<'_>,
+    elem_count: u64,
+) -> Result<(), MorlocError> {
+    let sub = build_subpacket_bytes(&local.value_schema, prepared)?;
+    if slot.is_stdio != 0 {
+        emit_subpacket_via_rpc(slot, sub, elem_count)
+    } else {
+        emit_subpacket_to_disk(slot, local, sub, elem_count)
+    }
+}
+
+fn emit_subpacket_to_disk(
+    slot: &RegistrySlot,
+    local: &mut ProcessLocalSlot,
+    sub: SubpacketBytes<'_>,
+    elem_count: u64,
+) -> Result<(), MorlocError> {
     use morloc_runtime_types::packet::make_temp_footer_packet;
 
-    let payload_bytes = payload.0;
-    debug_assert_payload_elem_count(elem_count, payload_bytes, "emit_subpacket_to_disk");
-
-    let sub = build_subpacket_bytes(&local.value_schema, payload_bytes, level)?;
     let compressed_payload_len = sub.compressed_payload_len;
 
     let cursor = slot.cursor;
@@ -2866,7 +2947,7 @@ fn emit_subpacket_to_disk(
         (*mp).cursor = subpacket_end;
         record_subpacket_flush(
             std::ptr::addr_of_mut!((*mp).diag),
-            payload_bytes.len() as u64,
+            sub.uncompressed_len as u64,
             compressed_payload_len as u64,
             Some(cursor),
         );
@@ -2891,15 +2972,9 @@ fn emit_subpacket_to_disk(
 /// registry, so a handle field must already name its file by path.
 fn emit_subpacket_via_rpc(
     slot: &RegistrySlot,
-    local: &mut ProcessLocalSlot,
-    payload: PortablePayload<'_>,
-    level: u8,
+    sub: SubpacketBytes<'_>,
     elem_count: u64,
 ) -> Result<(), MorlocError> {
-    let payload_bytes = payload.0;
-    debug_assert_payload_elem_count(elem_count, payload_bytes, "emit_subpacket_via_rpc");
-
-    let sub = build_subpacket_bytes(&local.value_schema, payload_bytes, level)?;
     let compressed_payload_len = sub.compressed_payload_len;
 
     let total = sub.len() as u64;
@@ -2940,7 +3015,7 @@ fn emit_subpacket_via_rpc(
         (*mp).cursor = subpacket_end;
         record_subpacket_flush(
             std::ptr::addr_of_mut!((*mp).diag),
-            payload_bytes.len() as u64,
+            sub.uncompressed_len as u64,
             compressed_payload_len as u64,
             Some(cursor),
         );
@@ -3177,68 +3252,165 @@ fn grow_index_capacity(
     Ok(())
 }
 
+/// Take the futex of an OStream about to be written, flushed or closed.
+/// Batches another process has sealed must reach the file before anything
+/// this call writes: while it holds some, mark the stream synchronous and
+/// wait, unlocked, for that process to commit them. A stream with a batch
+/// that failed to be written is refused.
+fn lock_for_write(slot: &RegistrySlot) -> Result<SlotFutexGuard<'_>, MorlocError> {
+    let me = std::process::id();
+    loop {
+        let guard = SlotFutexGuard::lock(slot);
+        if slot.write_failed != 0 {
+            return Err(MorlocError::Other(
+                "an earlier write to this stream failed; the stream is incomplete".into(),
+            ));
+        }
+        let owner = slot.wb_owner_pid;
+        if owner == 0 || owner == me {
+            return Ok(guard);
+        }
+        let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+        unsafe { (*mp).wb_sync_only = 1; }
+        if !stdio_owner_is_alive(owner, slot.wb_owner_start) {
+            let lost = slot.wb_outstanding;
+            unsafe {
+                (*mp).write_failed = 1;
+                (*mp).wb_owner_pid = 0;
+                (*mp).wb_owner_start = 0;
+                (*mp).wb_outstanding = 0;
+            }
+            return Err(MorlocError::Other(format!(
+                "process {owner} exited before writing {lost} batches of this stream; \
+                 the stream is incomplete"
+            )));
+        }
+        drop(guard);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// What `with_idle_local_slot` found.
+enum IdleSlot<R> {
+    /// Another thread of this process is using the stream.
+    Busy,
+    /// The stream was closed or discarded.
+    Closed,
+    Ran(R),
+}
+
+/// Run `f` on this process's slot of `handle` unless a thread is using it
+/// now. Unlike `with_process_local_slot`, never attaches afresh.
+fn with_idle_local_slot<R>(
+    handle: i64,
+    f: impl FnOnce(&mut ProcessLocalSlot, &'static RegistrySlot) -> R,
+) -> IdleSlot<R> {
+    use std::sync::atomic::Ordering;
+    let (gen_claim, slot_idx) = unpack_handle(handle);
+    let slot = match slot_ref(slot_idx) {
+        Some(s) => s,
+        None => return IdleSlot::Closed,
+    };
+    if slot.generation.load(Ordering::Acquire) & GENERATION_MASK != gen_claim
+        || slot.state.load(Ordering::Acquire) != SLOT_STATE_OPEN_SHARED
+    {
+        return IdleSlot::Closed;
+    }
+    let mut local = match take_process_local_slot(handle) {
+        Some(l) => l,
+        None => return IdleSlot::Busy,
+    };
+    if local.cached_generation != gen_claim {
+        return IdleSlot::Closed;
+    }
+    let r = f(&mut local, slot);
+    install_process_local_slot(handle, local);
+    IdleSlot::Ran(r)
+}
+
+/// Commit the sealed batches of every stream this process holds batches
+/// of and no thread is using. A failure on a stream `mine` lists is
+/// returned; any other is reported, and the stream is marked failed so
+/// its next use reports it too.
+fn drain_idle_streams(mine: &[i64]) -> Result<(), MorlocError> {
+    let mut first_err = None;
+    for handle in crate::write_behind::sealed_handles() {
+        let (gen_claim, _) = unpack_handle(handle);
+        let r = with_idle_local_slot(handle, |local, slot| {
+            let _guard = SlotFutexGuard::lock(slot);
+            if !slot_generation_is(slot, gen_claim) {
+                return Ok(());
+            }
+            commit_sealed(slot, local, 0)
+        });
+        match r {
+            IdleSlot::Busy => {}
+            IdleSlot::Closed => {
+                crate::write_behind::forget_sealed(handle);
+                // Its batches were committed at close, or are dropped with
+                // this process's entry for it.
+                invalidate_process_local_slot(handle);
+            }
+            IdleSlot::Ran(res) => {
+                crate::write_behind::forget_sealed(handle);
+                if let Err(e) = res {
+                    if mine.contains(&handle) {
+                        first_err.get_or_insert(e);
+                    } else {
+                        eprintln!("morloc: a stream write failed: {e}");
+                    }
+                }
+            }
+        }
+    }
+    first_err.map_or(Ok(()), Err)
+}
+
+/// Commit the batches this process holds, when a dispatch ends: no batch
+/// outlives the call that wrote it, so the caller, or another process it
+/// hands a stream to, sees every element written.
+pub(crate) fn drain_sealed_batches() -> Result<(), MorlocError> {
+    let mine = crate::write_behind::take_thread_sealed();
+    drain_idle_streams(&mine)
+}
+
+/// Commit the batches this process holds before it hands control to
+/// another process that may write the same streams: a call to another
+/// pool, or a fork.
+pub(crate) fn drain_before_handoff() -> Result<(), MorlocError> {
+    let mine = crate::write_behind::thread_sealed();
+    drain_idle_streams(&mine)
+}
+
 /// Compact the write buffer (remove wasted index space) and emit its
-/// contents as one sub-packet at the slot's cursor. Caller MUST hold
-/// the slot futex. No-op when the buffer is empty. Resets buffer
+/// contents as one sub-packet at the slot's cursor, after every batch
+/// sealed before it. Caller MUST hold the slot futex. Resets buffer
 /// counters after a successful flush.
 fn flush_write_buffer(
     slot: &RegistrySlot,
     local: &mut ProcessLocalSlot,
 ) -> Result<(), MorlocError> {
+    commit_sealed(slot, local, 0)?;
     let n = slot.write_buffer_index_count;
     if n == 0 {
         return Ok(());
     }
-    let w = local.elem_schema.width;
-    let index_cap = slot.write_buffer_index_cap as usize;
-    let data_used = slot.write_buffer_data_used as usize;
-
     let buf_abs = crate::shm::rel2abs(slot.write_buffer)?;
-
-    // Compact: remove the wasted index space between the used inline
-    // elements and the data region. Shift data region left, adjust
-    // relptrs in inline elements by -wasted.
-    let wasted = (index_cap - n as usize) * w;
-    if wasted > 0 && data_used > 0 {
-        let old_data_offset = 16 + index_cap * w;
-        let new_data_offset = 16 + (n as usize) * w;
-        unsafe {
-            std::ptr::copy(
-                buf_abs.add(old_data_offset),
-                buf_abs.add(new_data_offset),
-                data_used,
-            );
-        }
-        let res = crate::recur::Resolver::new(&local.elem_schema);
-        for i in 0..n {
-            let inline_off = 16 + (i as usize) * w;
-            unsafe {
-                crate::voidstar::shift_buffer_relptrs_with(
-                    buf_abs, new_data_offset + data_used, inline_off,
-                    &local.elem_schema, -(wasted as isize), &res,
-                )?;
-            }
-        }
-    }
-
-    // Write the Array header at buffer[0..16]: {size: n, data: 16}.
-    unsafe {
-        let hdr_ptr = buf_abs as *mut shm_types_crate::Array;
-        (*hdr_ptr).size = n as usize;
-        (*hdr_ptr).data = 16 as RelPtr;
-    }
-
-    let payload_len = 16 + (n as usize) * w + data_used;
+    let payload_len = crate::write_behind::compact_sealed_buffer(
+        buf_abs,
+        n,
+        slot.write_buffer_index_cap,
+        slot.write_buffer_data_used,
+        &local.elem_schema,
+    )?;
     let payload_slice = unsafe { std::slice::from_raw_parts(buf_abs, payload_len) };
 
     let level = slot.compression_level;
     let payload = PortablePayload::new(payload_slice, &local.value_schema)?;
     if slot.kind == MLC_KIND_CHANNEL {
         channel_enqueue(slot, local, payload)?;
-    } else if slot.is_stdio != 0 {
-        emit_subpacket_via_rpc(slot, local, payload, level, n)?;
     } else {
-        emit_subpacket_to_disk(slot, local, payload, level, n)?;
+        emit_subpacket(slot, local, payload, level, n)?;
     }
 
     // Reset buffer counters. The buffer bytes don't need to be cleared;
@@ -3247,6 +3419,151 @@ fn flush_write_buffer(
         let mp = slot as *const RegistrySlot as *mut RegistrySlot;
         (*mp).write_buffer_index_count = 0;
         (*mp).write_buffer_data_used = 0;
+    }
+    Ok(())
+}
+
+/// How many batches this OStream may keep compressing behind its writer,
+/// or `None` when its sub-packets are compressed synchronously: at level 0,
+/// on a channel, once a second process has written it, or when
+/// `MORLOC_WRITE_BEHIND_DEPTH` is 0.
+fn write_behind_depth(slot: &RegistrySlot) -> Option<usize> {
+    if slot.kind != MLC_KIND_OSTREAM || slot.compression_level == 0 || slot.wb_sync_only != 0 {
+        return None;
+    }
+    match crate::write_behind::depth() {
+        0 => None,
+        d => Some(d),
+    }
+}
+
+/// Emit the full write buffer: sealed for background compression when the
+/// stream allows it (see `write_behind_depth`), flushed otherwise. Caller
+/// MUST hold the slot futex.
+fn flush_full_buffer(
+    slot: &RegistrySlot,
+    local: &mut ProcessLocalSlot,
+) -> Result<(), MorlocError> {
+    let depth = match write_behind_depth(slot) {
+        Some(d) => d,
+        None => return flush_write_buffer(slot, local),
+    };
+    let n = slot.write_buffer_index_count;
+    if n == 0 {
+        return Ok(());
+    }
+    let w = local.elem_schema.width;
+    let payload_len = 16 + n as usize * w + slot.write_buffer_data_used as usize;
+    if payload_len > morloc_runtime_types::compression::FRAME_CHUNK_SIZE {
+        // More than one frame: compressed in parallel frames by the flush.
+        return flush_write_buffer(slot, local);
+    }
+    let sealed = crate::shm::rel2abs(slot.write_buffer)?;
+    let buf_bytes = unsafe { crate::shm::shm_block_size(sealed) }.ok_or_else(|| {
+        MorlocError::Other("stream write buffer is not an SHM block".into())
+    })?;
+    let fresh = match local.write_behind.take_spare() {
+        Some(b) => b,
+        None => crate::shm::shcalloc(1, buf_bytes)?,
+    };
+    let level = crate::compression::CompressionLevel::from_u8(slot.compression_level)?;
+    local.write_behind.seal_buffer(
+        sealed,
+        n,
+        slot.write_buffer_index_cap,
+        slot.write_buffer_data_used,
+        &local.elem_schema,
+        level,
+    );
+    unsafe {
+        let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+        (*mp).write_buffer = slot_owns(crate::shm::abs2rel(fresh)?);
+        (*mp).write_buffer_index_count = 0;
+        (*mp).write_buffer_data_used = 0;
+    }
+    note_sealed(slot);
+    commit_sealed(slot, local, depth)
+}
+
+/// Queue a staged batch's payload for background compression, as its own
+/// sub-packet. Caller MUST hold the slot futex and have checked
+/// `write_behind_depth`.
+fn seal_staged_batch(
+    slot: &RegistrySlot,
+    local: &mut ProcessLocalSlot,
+    payload: Vec<u8>,
+    elem_count: u64,
+    depth: usize,
+) -> Result<(), MorlocError> {
+    let level = crate::compression::CompressionLevel::from_u8(slot.compression_level)?;
+    local.write_behind.seal_owned(payload, elem_count, level);
+    note_sealed(slot);
+    commit_sealed(slot, local, depth)
+}
+
+/// Record a new sealed batch in the slot and remember the handle, so this
+/// thread's dispatch end commits it.
+fn note_sealed(slot: &RegistrySlot) {
+    unsafe {
+        let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+        if (*mp).wb_owner_pid == 0 {
+            (*mp).wb_owner_pid = std::process::id();
+            (*mp).wb_owner_start = read_pid_start_time();
+        }
+        (*mp).wb_outstanding += 1;
+    }
+    crate::write_behind::note_sealed(slot_handle(slot));
+}
+
+/// Write the oldest sealed batches, in seal order, until at most `keep`
+/// remain, waiting for each to finish compressing. Caller MUST hold the
+/// slot futex. On the first failure every remaining batch is dropped and
+/// the stream is marked failed.
+fn commit_sealed(
+    slot: &RegistrySlot,
+    local: &mut ProcessLocalSlot,
+    keep: usize,
+) -> Result<(), MorlocError> {
+    local.write_behind.claim();
+    while local.write_behind.len() > keep {
+        let p = local.write_behind.pop_front().expect("pending is non-empty");
+        let res = p.wait().and_then(|c| {
+            if let Some(buf) = p.buffer {
+                // SAFETY: the job compacted the buffer to `uncompressed_len`
+                // bytes and is done with it.
+                let bytes = unsafe { std::slice::from_raw_parts(buf, c.uncompressed_len) };
+                debug_assert_payload_elem_count(p.elem_count, bytes, "commit_sealed");
+                PortablePayload::new(bytes, &local.value_schema)?;
+            }
+            let prepared = PreparedPayload {
+                bytes: std::borrow::Cow::Owned(c.bytes),
+                frames: Some(c.frames),
+                uncompressed_len: c.uncompressed_len,
+            };
+            emit_prepared(slot, local, prepared, p.elem_count)
+        });
+        let keep_spare = crate::write_behind::depth() + 1;
+        local.write_behind.recycle(p.buffer, keep_spare);
+        unsafe {
+            let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+            (*mp).wb_outstanding -= 1;
+            if (*mp).wb_outstanding == 0 {
+                (*mp).wb_owner_pid = 0;
+                (*mp).wb_owner_start = 0;
+            }
+        }
+        if let Err(e) = res {
+            let dropped = local.write_behind.len() as u32;
+            local.write_behind.abandon();
+            unsafe {
+                let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+                (*mp).wb_outstanding -= dropped;
+                (*mp).wb_owner_pid = 0;
+                (*mp).wb_owner_start = 0;
+                (*mp).write_failed = 1;
+            }
+            return Err(e);
+        }
     }
     Ok(())
 }
@@ -3287,7 +3604,7 @@ fn append_flat_run(
         }
         let space = (slot.write_buffer_index_cap - slot.write_buffer_index_count) as usize;
         if space == 0 {
-            flush_write_buffer(slot, local)?;
+            flush_full_buffer(slot, local)?;
             continue;
         }
         let k = space.min(n - done);
@@ -3338,9 +3655,8 @@ fn append_one_element(
     // variable data lands at a misaligned offset and its Array
     // headers can't be dereferenced without violating alignment
     // requirements (fatal in a debug-checked runtime; silent UB in
-    // release). Padding here fills the trailing bytes with zero
-    // (the buffer is zero-initialised via shcalloc); no relptr ever
-    // targets the padding.
+    // release). The trailing pad bytes are zeroed where the element is
+    // copied in; no relptr ever targets the padding.
     let raw_variable_size = elem_blob.len().saturating_sub(w);
     let variable_size = (raw_variable_size + 7) & !7;
 
@@ -3393,10 +3709,8 @@ fn append_one_element(
         let payload = PortablePayload::new(&oversize_payload, &local.value_schema)?;
         if slot.kind == MLC_KIND_CHANNEL {
             channel_enqueue(slot, local, payload)?;
-        } else if slot.is_stdio != 0 {
-            emit_subpacket_via_rpc(slot, local, payload, level, 1)?;
         } else {
-            emit_subpacket_to_disk(slot, local, payload, level, 1)?;
+            emit_subpacket(slot, local, payload, level, 1)?;
         }
         return Ok(());
     }
@@ -3436,7 +3750,7 @@ fn append_one_element(
             }
             continue;
         }
-        flush_write_buffer(slot, local)?;
+        flush_full_buffer(slot, local)?;
         // Loop: buffer is empty now, try again.
     }
 
@@ -3450,9 +3764,8 @@ fn append_one_element(
         std::ptr::copy_nonoverlapping(
             elem_blob.as_ptr(), buf_abs.add(index_offset), w,
         );
-        // Copy only the raw variable bytes; the trailing pad bytes
-        // (up to the 8-byte alignment) are already zero from
-        // shcalloc-init and no relptr references them.
+        // The buffer is reused across flushes, so the pad bytes up to
+        // the 8-byte alignment are zeroed here; no relptr references them.
         if raw_variable_size > 0 {
             std::ptr::copy_nonoverlapping(
                 elem_blob.as_ptr().add(w),
@@ -3460,6 +3773,11 @@ fn append_one_element(
                 raw_variable_size,
             );
         }
+        std::ptr::write_bytes(
+            buf_abs.add(data_offset + raw_variable_size),
+            0,
+            variable_size - raw_variable_size,
+        );
     }
     // Shift the copied element's relptrs from "blob-relative" (where
     // sub-allocations start at offset w) to "buffer-relative" (where
@@ -3527,11 +3845,15 @@ pub fn shared_write_subpacket(
             crate::shm::rel2abs(arr.data)?
         };
 
-        let _guard = SlotFutexGuard::lock(slot);
+        let _guard = lock_for_write(slot)?;
         // A channel can be released by its readers at any moment; a slot
         // reused since the handle was checked must not be written.
         if !slot_generation_is(slot, gen_claim) {
             return Err(MorlocError::Other("the reader of this stream has stopped".into()));
+        }
+        // Another process is waiting to write: hand it the stream.
+        if slot.wb_sync_only != 0 {
+            commit_sealed(slot, local, 0)?;
         }
 
         // The `@write` level is the default; on a stdio-bound stream the
@@ -3572,11 +3894,21 @@ pub fn shared_write_subpacket(
             // One batch, one sub-packet: the whole `[a]` is flattened and
             // emitted as it is, so a batch is never split across frames or
             // merged with another, and an empty batch is an empty frame.
-            flush_write_buffer(slot, local)?;
+            if slot.write_buffer_index_count > 0 {
+                flush_write_buffer(slot, local)?;
+            }
             crate::voidstar::flatten_into_portable(&mut scratch, payload_voidstar, &local.value_schema)?;
             let level = slot.compression_level;
             let payload = PortablePayload::new(&scratch, &local.value_schema)?;
-            emit_subpacket_via_rpc(slot, local, payload, level, n_elements)?;
+            match write_behind_depth(slot) {
+                Some(depth) if scratch.len() <= morloc_runtime_types::compression::FRAME_CHUNK_SIZE => {
+                    seal_staged_batch(slot, local, scratch, n_elements, depth)?;
+                }
+                _ => {
+                    commit_sealed(slot, local, 0)?;
+                    emit_subpacket(slot, local, payload, level, n_elements)?
+                }
+            }
             unsafe {
                 let mp = slot as *const RegistrySlot as *mut RegistrySlot;
                 (*mp).element_count += n_elements;
@@ -3626,7 +3958,7 @@ pub fn shared_flush_buffer(handle: i64) -> Result<(), MorlocError> {
                 handle_kind_name(slot.kind),
             )));
         }
-        let _guard = SlotFutexGuard::lock(slot);
+        let _guard = lock_for_write(slot)?;
         if !slot_generation_is(slot, gen_claim) {
             return Err(MorlocError::Other("the reader of this stream has stopped".into()));
         }
@@ -4905,6 +5237,7 @@ pub fn shared_append_to_path(
         subpacket_entries_local: subpacket_entries_clone,
         subpacket_elem_cum: None,
         is_data_packet: false,
+        write_behind: Default::default(),
     };
     let handle = pack_handle(new_gen, slot_idx);
     install_process_local_slot(handle, local);
@@ -5140,6 +5473,10 @@ fn sweep_per_pid(pid: u32, start_time: u64) {
 /// dispatch on this worker starts clean.
 pub(crate) fn pool_reclaim_stdio_after_dispatch() {
     use std::sync::atomic::Ordering;
+    if let Err(e) = drain_sealed_batches() {
+        // The stream is marked failed, so its next use reports it too.
+        eprintln!("morloc: a stream write failed after its call returned: {e}");
+    }
     let call_id = current_call_id();
     if call_id == CALL_ID_NO_SWEEP {
         return;
@@ -8921,6 +9258,7 @@ pub fn shared_open_ifile_recovered(
         subpacket_entries_local: subpacket_entries,
         subpacket_elem_cum: None,
         is_data_packet: parsed.is_data_packet,
+        write_behind: Default::default(),
     };
     let handle = pack_handle(new_gen, _slot_idx);
     install_process_local_slot(handle, local);
@@ -10339,6 +10677,7 @@ fn channel_local(generation: u64, value_schema: &Schema) -> ProcessLocalSlot {
         subpacket_entries_local: Vec::new(),
         subpacket_elem_cum: None,
         is_data_packet: false,
+        write_behind: Default::default(),
     }
 }
 
@@ -10675,5 +11014,320 @@ mod channel_tests {
         let e = crate::handle_scan::portable_path(h).unwrap_err().to_string();
         assert!(e.contains("cannot leave it"), "{e}");
         shared_settle_channel(h).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod write_behind_tests {
+    use super::*;
+    use crate::compression::CompressionLevel;
+
+    fn test_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "morloc_write_behind_{}_{}", tag, std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Write `batches` of strings to a file OStream through `@write`, with a
+    /// `buf_bytes` write buffer and `depth` batches compressed behind the
+    /// writer, flushing after the batches listed in `flush_after`.
+    fn write_strs(
+        path: &std::path::Path,
+        batches: &[Vec<String>],
+        level: u8,
+        buf_bytes: usize,
+        depth: usize,
+        flush_after: &[usize],
+    ) {
+        std::env::set_var("MORLOC_WRITE_BUFFER_BYTES", buf_bytes.to_string());
+        std::env::set_var("MORLOC_WRITE_BEHIND_DEPTH", depth.to_string());
+        let list = parse_schema("as").unwrap();
+        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+        for (i, b) in batches.iter().enumerate() {
+            let json = serde_json::to_string(b).unwrap();
+            let v = crate::json::read_json_with_schema(&json, &list).unwrap();
+            shared_write_subpacket(h, CompressionLevel::from_u8(level).unwrap(), v).unwrap();
+            shm::shfree(v).unwrap();
+            if flush_after.contains(&i) {
+                shared_flush_buffer(h).unwrap();
+            }
+        }
+        shared_close_handle(h).unwrap();
+        std::env::remove_var("MORLOC_WRITE_BUFFER_BYTES");
+        std::env::remove_var("MORLOC_WRITE_BEHIND_DEPTH");
+    }
+
+    fn read_strs(path: &std::path::Path) -> Vec<String> {
+        let list = parse_schema("as").unwrap();
+        let h = shared_open_istream(path.to_str().unwrap()).unwrap();
+        let mut out = Vec::new();
+        loop {
+            let arr = shared_next_subpacket(h).unwrap();
+            let n = unsafe { (*(arr as *const shm_types_crate::Array)).size };
+            if n == 0 {
+                shm::shfree(arr).unwrap();
+                break;
+            }
+            let json = crate::json::voidstar_to_json_string(arr, &list).unwrap();
+            out.extend(serde_json::from_str::<Vec<String>>(&json).unwrap());
+            shm::shfree(arr).unwrap();
+        }
+        shared_close_handle(h).unwrap();
+        out
+    }
+
+    /// The sub-packets of a closed stream file, each as its on-disk bytes.
+    fn subpackets(path: &std::path::Path) -> Vec<Vec<u8>> {
+        let bytes = std::fs::read(path).unwrap();
+        let p = path.to_str().unwrap();
+        let (mp, sz) = mmap_file_readonly(p).unwrap();
+        let parsed = parse_stream_file(p, mp, sz).unwrap();
+        unsafe { libc::munmap(mp as *mut libc::c_void, sz as usize); }
+        parsed
+            .subpacket_entries
+            .iter()
+            .map(|e| {
+                let at = e.offset as usize;
+                let hdr = PacketHeader::from_bytes(bytes[at..at + 32].try_into().unwrap()).unwrap();
+                let len = 32 + hdr.offset as usize + hdr.length as usize;
+                bytes[at..at + len].to_vec()
+            })
+            .collect()
+    }
+
+    /// Strings of lengths 1..=13, so element data regions need padding to 8.
+    fn odd_batches(n_batches: usize, per_batch: usize, fill: char) -> Vec<Vec<String>> {
+        (0..n_batches)
+            .map(|b| {
+                (0..per_batch)
+                    .map(|i| {
+                        let k = b * per_batch + i;
+                        let mut s = format!("{k}:");
+                        while s.len() < 1 + (k % 13) + 2 {
+                            s.push(fill);
+                        }
+                        s
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    // A sub-packet's bytes depend only on its elements. The write buffer
+    // is reused across flushes, so alignment padding left unwritten would
+    // carry bytes of the batch before it.
+    #[test]
+    fn subpacket_bytes_do_not_depend_on_earlier_batches() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("padding");
+        let dirty = dir.join("dirty.idx");
+        let clean = dir.join("clean.idx");
+        let first = vec![(0..40).map(|i| "Z".repeat(9 + i % 7)).collect::<Vec<_>>()];
+        let second = odd_batches(1, 40, 'a');
+        let both: Vec<Vec<String>> = first.iter().chain(second.iter()).cloned().collect();
+        write_strs(&dirty, &both, 0, 1 << 20, 0, &[0]);
+        write_strs(&clean, &second, 0, 1 << 20, 0, &[]);
+        let d = subpackets(&dirty);
+        let c = subpackets(&clean);
+        assert_eq!(d.len(), 2);
+        assert_eq!(c.len(), 1);
+        assert_eq!(d[1], c[0], "the second sub-packet carries bytes of the first");
+    }
+
+    // Compressing behind the writer changes when a sub-packet is written,
+    // never what or where: the file is the one a synchronous writer makes.
+    #[test]
+    fn write_behind_writes_the_synchronous_sub_packets() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("same");
+        let sync = dir.join("sync.idx");
+        let behind = dir.join("behind.idx");
+        let batches = odd_batches(60, 37, 'q');
+        for depth in [1, 3, 8] {
+            write_strs(&sync, &batches, 3, 4096, 0, &[17, 41]);
+            write_strs(&behind, &batches, 3, 4096, depth, &[17, 41]);
+            let s = subpackets(&sync);
+            assert!(s.len() > 20, "the test must seal many buffers, got {}", s.len());
+            assert_eq!(s, subpackets(&behind), "depth {depth}");
+            let want: Vec<String> = batches.concat();
+            assert_eq!(read_strs(&behind), want, "depth {depth}");
+        }
+    }
+
+    // Full buffers are held back, at most `depth` of them, and the
+    // writer's process is recorded as their holder until they are written.
+    #[test]
+    fn sealed_batches_are_held_back_up_to_the_depth() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("depth");
+        let path = dir.join("depth.idx");
+        std::env::set_var("MORLOC_WRITE_BUFFER_BYTES", "4096");
+        std::env::set_var("MORLOC_WRITE_BEHIND_DEPTH", "5");
+        let list = parse_schema("as").unwrap();
+        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+        let (_gen, idx) = unpack_handle(h);
+        let slot = slot_ref(idx).unwrap();
+        let mut max_held = 0;
+        for b in odd_batches(40, 37, 's') {
+            let v = crate::json::read_json_with_schema(&serde_json::to_string(&b).unwrap(), &list).unwrap();
+            shared_write_subpacket(h, CompressionLevel::from_u8(3).unwrap(), v).unwrap();
+            shm::shfree(v).unwrap();
+            let held = slot.wb_outstanding;
+            assert!(held <= 5, "{held} batches held, depth is 5");
+            if held > 0 {
+                assert_eq!(slot.wb_owner_pid, std::process::id());
+            }
+            max_held = max_held.max(held);
+        }
+        assert_eq!(max_held, 5, "the writer must keep full buffers compressing behind it");
+        shared_flush_buffer(h).unwrap();
+        assert_eq!(slot.wb_outstanding, 0);
+        assert_eq!(slot.wb_owner_pid, 0);
+        shared_close_handle(h).unwrap();
+        std::env::remove_var("MORLOC_WRITE_BUFFER_BYTES");
+        std::env::remove_var("MORLOC_WRITE_BEHIND_DEPTH");
+        assert_eq!(read_strs(&path), odd_batches(40, 37, 's').concat());
+    }
+
+    // A dispatch leaves nothing compressing: its end writes every batch
+    // the thread sealed, on a stream the call left open.
+    #[test]
+    fn dispatch_end_writes_the_threads_sealed_batches() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("drain");
+        let path = dir.join("drain.idx");
+        std::env::set_var("MORLOC_WRITE_BUFFER_BYTES", "4096");
+        std::env::set_var("MORLOC_WRITE_BEHIND_DEPTH", "8");
+        let list = parse_schema("as").unwrap();
+        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+        let (_gen, idx) = unpack_handle(h);
+        let slot = slot_ref(idx).unwrap();
+        for b in odd_batches(12, 37, 't') {
+            let v = crate::json::read_json_with_schema(&serde_json::to_string(&b).unwrap(), &list).unwrap();
+            shared_write_subpacket(h, CompressionLevel::from_u8(2).unwrap(), v).unwrap();
+            shm::shfree(v).unwrap();
+        }
+        assert!(slot.wb_outstanding > 0);
+        let written = slot.subpacket_entries_len;
+        drain_sealed_batches().unwrap();
+        assert_eq!(slot.wb_outstanding, 0);
+        assert!(slot.subpacket_entries_len > written);
+        shared_close_handle(h).unwrap();
+        std::env::remove_var("MORLOC_WRITE_BUFFER_BYTES");
+        std::env::remove_var("MORLOC_WRITE_BEHIND_DEPTH");
+        assert_eq!(read_strs(&path), odd_batches(12, 37, 't').concat());
+    }
+
+    fn write_one(h: i64, batch: &[String], level: u8) {
+        let list = parse_schema("as").unwrap();
+        let v = crate::json::read_json_with_schema(&serde_json::to_string(batch).unwrap(), &list).unwrap();
+        shared_write_subpacket(h, CompressionLevel::from_u8(level).unwrap(), v).unwrap();
+        shm::shfree(v).unwrap();
+    }
+
+    // A staged stream writes each batch as its own sub-packet. One too large
+    // for a single frame is compressed on the spot, and must still land
+    // after the batches compressing behind the writer.
+    #[test]
+    fn staged_batch_of_many_frames_follows_queued_batches() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("staged");
+        let path = dir.join("staged.idx");
+        std::env::set_var("MORLOC_WRITE_BEHIND_DEPTH", "8");
+        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+        let (_gen, idx) = unpack_handle(h);
+        let slot = slot_ref(idx).unwrap();
+        unsafe { (*(slot as *const RegistrySlot as *mut RegistrySlot)).staged = 1; }
+        let small = odd_batches(4, 20, 'u');
+        let big: Vec<String> = (0..1100).map(|i| format!("{i}:{}", "B".repeat(16 * 1024))).collect();
+        let mut want = Vec::new();
+        for b in &small[..3] {
+            write_one(h, b, 3);
+            want.extend(b.iter().cloned());
+        }
+        write_one(h, &big, 3);
+        want.extend(big.iter().cloned());
+        write_one(h, &small[3], 3);
+        want.extend(small[3].iter().cloned());
+        shared_close_handle(h).unwrap();
+        std::env::remove_var("MORLOC_WRITE_BEHIND_DEPTH");
+        assert_eq!(read_strs(&path), want);
+    }
+
+    // A dispatch's end writes batches sealed by any thread of the pool, not
+    // only the dispatch thread: a producer may write from its own workers.
+    #[test]
+    fn dispatch_end_writes_batches_sealed_on_other_threads() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("threads");
+        let path = dir.join("threads.idx");
+        std::env::set_var("MORLOC_WRITE_BUFFER_BYTES", "4096");
+        std::env::set_var("MORLOC_WRITE_BEHIND_DEPTH", "8");
+        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+        let (_gen, idx) = unpack_handle(h);
+        let slot = slot_ref(idx).unwrap();
+        let batches = odd_batches(12, 37, 'v');
+        let b2 = batches.clone();
+        std::thread::spawn(move || {
+            for b in &b2 {
+                write_one(h, b, 3);
+            }
+        })
+        .join()
+        .unwrap();
+        assert!(slot.wb_outstanding > 0);
+        drain_sealed_batches().unwrap();
+        assert_eq!(slot.wb_outstanding, 0, "batches sealed on a worker thread were left queued");
+        assert_eq!(slot.wb_owner_pid, 0);
+        shared_close_handle(h).unwrap();
+        std::env::remove_var("MORLOC_WRITE_BUFFER_BYTES");
+        std::env::remove_var("MORLOC_WRITE_BEHIND_DEPTH");
+        assert_eq!(read_strs(&path), batches.concat());
+    }
+
+    // A forked child may write the stream too, so a fork first writes the
+    // batches this process holds; otherwise the child would wait for them.
+    #[test]
+    fn fork_writes_the_batches_this_process_holds() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("fork");
+        let path = dir.join("fork.idx");
+        std::env::set_var("MORLOC_WRITE_BUFFER_BYTES", "4096");
+        std::env::set_var("MORLOC_WRITE_BEHIND_DEPTH", "8");
+        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+        let (_gen, idx) = unpack_handle(h);
+        let slot = slot_ref(idx).unwrap();
+        let batches = odd_batches(12, 37, 'w');
+        for b in &batches {
+            write_one(h, b, 3);
+        }
+        assert!(slot.wb_outstanding > 0);
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            unsafe { libc::_exit(0) };
+        }
+        let mut status = 0;
+        unsafe { libc::waitpid(pid, &mut status, 0) };
+        assert_eq!(slot.wb_outstanding, 0, "a fork left sealed batches queued");
+        shared_close_handle(h).unwrap();
+        std::env::remove_var("MORLOC_WRITE_BUFFER_BYTES");
+        std::env::remove_var("MORLOC_WRITE_BEHIND_DEPTH");
+        assert_eq!(read_strs(&path), batches.concat());
+    }
+
+    // An element too large for the buffer is written on its own, between
+    // what came before and after it, with batches still compressing.
+    #[test]
+    fn oversize_element_keeps_its_place_behind_pending_batches() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("oversize");
+        let path = dir.join("oversize.idx");
+        let mut batches = odd_batches(20, 37, 'r');
+        batches.insert(12, vec!["big".to_string(), "x".repeat(20_000), "after".to_string()]);
+        write_strs(&path, &batches, 3, 4096, 8, &[]);
+        assert_eq!(read_strs(&path), batches.concat());
     }
 }

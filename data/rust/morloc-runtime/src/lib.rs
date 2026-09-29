@@ -57,6 +57,7 @@ mod c_abi_prototypes;
 pub mod eval_arena;
 pub mod eval_ffi;
 pub mod stream;
+mod write_behind;
 pub mod handle_scan;
 pub mod arrow_shm;
 pub mod arrow_ffi;

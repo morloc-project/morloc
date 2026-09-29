@@ -375,6 +375,12 @@ pub unsafe extern "C" fn remote_call(
 ) -> *mut u8 {
     clear_errmsg(errmsg);
 
+    // The remote job may write a stream this pool has batches of in flight.
+    if let Err(e) = crate::stream::drain_before_handoff() {
+        crate::error::set_errmsg(errmsg, &e);
+        return std::ptr::null_mut();
+    }
+
     // Use extern C declarations for functions from other modules
     use crate::packet_ffi::read_schema_from_packet_meta;
     use crate::ffi::parse_schema;

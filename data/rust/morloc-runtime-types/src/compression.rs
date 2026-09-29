@@ -22,13 +22,13 @@
 //! Compression is parallel across frames (one libzstd encoder per
 //! frame; the encoder buffers a frame's worth of uncompressed bytes,
 //! sets `pledgedSrcSize` exactly, then emits a self-contained frame).
-//! Decompression is per-frame and trivially parallelizable; the
-//! current implementation is single-threaded but the on-disk format
-//! is ready for a worker pool.
+//! Decompression is per-frame, on `frame_workers()` threads
+//! (`parallel_decompress_frames`). `FrameCompressor` compresses one
+//! frame with a context its thread reuses.
 //!
 //! Public surface:
 //! * `CompressionLevel::from_int` / `from_u8` / `zstd_level` / `use_long` / `is_none`
-//! * `FRAME_CHUNK_SIZE`, `MultiFrameEncoder`, `max_frames_for`,
+//! * `FRAME_CHUNK_SIZE`, `MultiFrameEncoder`, `FrameCompressor`, `max_frames_for`,
 //!   `frame_index_entry_max_bytes`
 //! * `compress_payload_zstd` / `decompress_payload_zstd_into` (raw bytes)
 //! * `compress_packet`       / `decompress_packet`           (full packets)
@@ -150,6 +150,36 @@ fn compress_one_frame(
     let mut out = Vec::new();
     compress_one_frame_into(&mut compressor, raw, &mut out)?;
     Ok(out)
+}
+
+/// A zstd context for one level, kept by a thread that compresses many
+/// payloads of at most `FRAME_CHUNK_SIZE` bytes, each into one frame. The
+/// output equals `compress_payload_zstd` on the same payload.
+pub struct FrameCompressor {
+    inner: zstd::bulk::Compressor<'static>,
+}
+
+impl FrameCompressor {
+    pub fn new(lvl: CompressionLevel) -> Result<Self, MorlocError> {
+        Ok(FrameCompressor { inner: make_bulk_compressor(lvl).map_err(MorlocError::Io)? })
+    }
+
+    /// Compress `raw` into one frame; returns the frame and its index.
+    pub fn compress(&mut self, raw: &[u8]) -> Result<(Vec<u8>, Vec<FrameEntry>), MorlocError> {
+        if raw.len() > FRAME_CHUNK_SIZE {
+            return Err(MorlocError::Other(format!(
+                "a single zstd frame holds at most {FRAME_CHUNK_SIZE} bytes, got {}",
+                raw.len()
+            )));
+        }
+        let mut out = Vec::new();
+        compress_one_frame_into(&mut self.inner, raw, &mut out)?;
+        let entry = FrameEntry {
+            uncompressed_size: raw.len() as u64,
+            compressed_size: out.len() as u64,
+        };
+        Ok((out, vec![entry]))
+    }
 }
 
 /// Streaming sink that splits writes into `chunk_size`-byte chunks

@@ -139,6 +139,18 @@ pub unsafe extern "C" fn pool_dispatch_packet(
         // temps are already gone via @close(path).
         crate::intrinsics::end_dispatch(temp_owner, prev_temp_owner);
 
+        // Write the stream batches this call left compressing, before the
+        // reply lets anyone read or extend those streams.
+        if let Err(e) = crate::stream::drain_sealed_batches() {
+            if !result.is_null() {
+                libc::free(result as *mut c_void);
+            }
+            let msg = std::ffi::CString::new(e.to_string().replace('\0', " "))
+                .unwrap_or_default();
+            crate::stream::pool_reclaim_stdio_after_dispatch();
+            return make_fail_packet(msg.as_ptr());
+        }
+
         // Reclaim any stdio singleton (@stdout/@stderr/@stdin) this dispatch
         // left open -- e.g. an exception unwound past @close on a broken
         // pipe. Without this, the claim persists in the nexus-scoped SHM
