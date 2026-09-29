@@ -557,6 +557,30 @@ impl Landing {
     }
 }
 
+/// Decompress the zstd `frames` of `compressed` into one fresh SHM block
+/// and relocate the value of `schema` there: the frames decode in parallel
+/// straight into the block, with no intermediate buffer.
+pub fn land_compressed_frames(
+    frames: &[morloc_runtime_types::packet::FrameEntry],
+    compressed: &[u8],
+    schema: &Schema,
+    vol_idx_hint: u16,
+) -> Result<AbsPtr, MorlocError> {
+    let (uncompressed, compressed_total) = morloc_runtime_types::packet::frame_totals(frames)?;
+    if compressed_total != compressed.len() {
+        return Err(MorlocError::Packet(format!(
+            "frame index sums to {} compressed bytes but header.length = {}",
+            compressed_total,
+            compressed.len()
+        )));
+    }
+    let landing = Landing::new(uncompressed)?;
+    // SAFETY: the landing's block is fresh and `uncompressed` bytes long.
+    let dest = unsafe { std::slice::from_raw_parts_mut(landing.as_mut_ptr(), uncompressed) };
+    crate::compression::parallel_decompress_frames(frames, compressed, dest)?;
+    landing.relocate(schema, vol_idx_hint)
+}
+
 impl Drop for Landing {
     fn drop(&mut self) {
         let _ = shm::shfree(self.block);

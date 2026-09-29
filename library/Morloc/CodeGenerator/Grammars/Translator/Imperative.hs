@@ -474,6 +474,11 @@ data LowerConfig m = LowerConfig
   -- element, a return, a let binding, a by-value parameter). Default is identity;
   -- Rust clones a borrowed non-'Copy' value and dereferences a borrowed 'Copy'
   -- reference.
+  , lcReadArg :: IOwnership -> MDoc -> MDoc
+  -- ^ Adapt an expression to a place a read-only sink takes the address of (a
+  -- value serialized, shown, hashed or saved). Default is identity; Rust
+  -- dereferences a borrowed reference, so the sink reborrows the value rather
+  -- than referencing the reference.
   , lcWithCallerScope :: forall a. m a -> m a
   -- ^ Run an action as if in the enclosing (caller) manifold's scope, so
   -- 'lcOwnership' of a manifold-call argument (named by index-aliasing after the
@@ -1000,14 +1005,21 @@ lowerSerialExpr cfg _ (NativeLetS_ i e1 e2) =
 lowerSerialExpr _ _ (LetVarS_ _ i) = return $ defaultValue {poolExpr = svarNamer i}
 lowerSerialExpr _ _ (BndVarS_ _ i) = return $ defaultValue {poolExpr = svarNamer i}
 lowerSerialExpr cfg (SerializeS _ origE) (SerializeS_ s e) = do
-  -- The serialized value crosses the wire (an owned sink), so own-adapt it: a
-  -- borrowed non-Copy Rust value (e.g. a '&Vec' parameter) must be cloned to an
-  -- owned value before serialization -- 'put_value' takes '&T', so a borrowed
-  -- '&Vec' would otherwise be double-referenced ('&&Vec', not 'ToVoidstar'). A
-  -- no-op where 'lcOwnArg' is identity (C++/py/r).
-  e' <- adaptOwnedElem cfg origE e
+  -- A leaf is serialized by reading it through 'put_value''s '&T', and a
+  -- packed value by an unpacker that borrows it, so a borrowed Rust value
+  -- (e.g. a '&Vec' parameter) is reborrowed rather than referenced ('&&Vec'
+  -- is not 'ToVoidstar') or cloned. Any other aggregate may hand its parts to
+  -- code that takes them by value, so it is owned first. Both are no-ops
+  -- where the adapters are identity (C++/py/r).
+  e' <- if readsInPlace s
+    then adaptReadElem cfg origE e
+    else adaptOwnedElem cfg origE e
   se <- lcSerialize cfg (poolExpr e') s
   return $ e' {poolExpr = poolExpr se, poolPriorLines = poolPriorLines e' <> poolPriorLines se}
+  where
+    readsInPlace s'@(SerialPack _ (p, _)) =
+      isMsgpackLeaf cfg s' || lcBorrowPackArg cfg (typePackerPacked p)
+    readsInPlace s' = isMsgpackLeaf cfg s'
 lowerSerialExpr cfg _ (SerializeS_ s e) = do
   se <- lcSerialize cfg (poolExpr e) s
   return $ e {poolExpr = poolExpr se, poolPriorLines = poolPriorLines e <> poolPriorLines se}
@@ -1291,6 +1303,12 @@ adaptOwnedElem :: (Monad m) => LowerConfig m -> NativeExpr -> PoolDocs -> m Pool
 adaptOwnedElem cfg origE pd = do
   own <- lcOwnership cfg origE
   return pd {poolExpr = lcOwnArg cfg own (typeFof origE) (poolExpr pd)}
+
+-- | Adapt a value a read-only sink takes the address of (see 'lcReadArg').
+adaptReadElem :: (Monad m) => LowerConfig m -> NativeExpr -> PoolDocs -> m PoolDocs
+adaptReadElem cfg origE pd = do
+  own <- lcOwnership cfg origE
+  return pd {poolExpr = lcReadArg cfg own (poolExpr pd)}
 
 -- | Adapt each element of a container (list/tuple/record) to an owned value,
 -- pairing the lowered elements with their originals; the elements pass through
@@ -1680,19 +1698,18 @@ lowerNativeExprRaw cfg origExpr (IfN_ _ condDocs thenDocs elseDocs) =
   lcMakeIf cfg origExpr condDocs thenDocs elseDocs
 lowerNativeExprRaw cfg (IntrinsicN _ _ _ [dataE]) (IntrinsicN_ _ IntrHash (Just schema) [dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
-  -- The hashed value crosses into a 'ToVoidstar' (&T) sink; own-adapt it so a
-  -- borrowed non-Copy Rust value is cloned rather than double-borrowed
-  -- ('&(&Vec)'). No-op where 'lcOwnArg' is identity (C++/py/r).
-  dataDocs' <- adaptOwnedElem cfg dataE dataDocs
+  -- The hashed value is only read, through a 'ToVoidstar' (&T) sink; see
+  -- 'lcReadArg'.
+  dataDocs' <- adaptReadElem cfg dataE dataDocs
   return $ dataDocs' {poolExpr = lcPrintExpr cfg (IIntrinsicHash sid (IRawExpr (render (poolExpr dataDocs'))))}
 -- @save takes source args in (level, path, value) order; path-first
 -- (after the level) mirrors @savem/@savej. The runtime ABI is unchanged:
 -- IIntrinsicSave keeps (level, data, path).
 lowerNativeExprRaw cfg (IntrinsicN _ _ _ [_, _, dataE]) (IntrinsicN_ _ IntrSave (Just schema) [levelDocs, pathDocs, dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
-  -- The saved value crosses into a 'ToVoidstar' (&T) sink; own-adapt it (see
+  -- The saved value is only read, through a 'ToVoidstar' (&T) sink (see
   -- @hash above). level and path are scalar/Str, not value sinks.
-  dataDocs' <- adaptOwnedElem cfg dataE dataDocs
+  dataDocs' <- adaptReadElem cfg dataE dataDocs
   let fmt = "voidstar"
       saveExpr = IIntrinsicSave fmt sid
                    (IRawExpr (render (poolExpr levelDocs)))
@@ -1706,7 +1723,7 @@ lowerNativeExprRaw cfg (IntrinsicN _ _ _ [_, _, dataE]) (IntrinsicN_ _ IntrSave 
 -- expression so the printed call shape is uniform with @save.
 lowerNativeExprRaw cfg (IntrinsicN _ _ _ [_, dataE]) (IntrinsicN_ _ IntrSaveM (Just schema) [pathDocs, dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
-  dataDocs' <- adaptOwnedElem cfg dataE dataDocs
+  dataDocs' <- adaptReadElem cfg dataE dataDocs
   let fmt = "msgpack"
       saveExpr = IIntrinsicSave fmt sid
                    (IRawExpr "0")
@@ -1715,7 +1732,7 @@ lowerNativeExprRaw cfg (IntrinsicN _ _ _ [_, dataE]) (IntrinsicN_ _ IntrSaveM (J
    in return $ mergePoolDocs (const $ lcPrintExpr cfg saveExpr) [pathDocs, dataDocs']
 lowerNativeExprRaw cfg (IntrinsicN _ _ _ [_, dataE]) (IntrinsicN_ _ IntrSaveJ (Just schema) [pathDocs, dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
-  dataDocs' <- adaptOwnedElem cfg dataE dataDocs
+  dataDocs' <- adaptReadElem cfg dataE dataDocs
   let fmt = "json"
       saveExpr = IIntrinsicSave fmt sid
                    (IRawExpr "0")
@@ -1733,9 +1750,9 @@ lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrLoad (Just schema) [pathDocs]
   return $ pathDocs {poolExpr = lcPrintExpr cfg (IIntrinsicLoad sid innerType (IRawExpr (render (poolExpr pathDocs))))}
 lowerNativeExprRaw cfg (IntrinsicN _ _ _ [dataE]) (IntrinsicN_ _ IntrShow (Just schema) [dataDocs]) = do
   sid <- lcRegisterSchema cfg schema
-  -- The shown value crosses into a 'ToVoidstar' (&T) sink; own-adapt it (see
-  -- @hash above) so a borrowed non-Copy Rust value is cloned, not double-borrowed.
-  dataDocs' <- adaptOwnedElem cfg dataE dataDocs
+  -- The shown value is only read, through a 'ToVoidstar' (&T) sink (see @hash
+  -- above).
+  dataDocs' <- adaptReadElem cfg dataE dataDocs
   return $ dataDocs' {poolExpr = lcPrintExpr cfg (IIntrinsicShow sid (IRawExpr (render (poolExpr dataDocs'))))}
 lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrRead (Just schema) [strDocs]) = do
   sid <- lcRegisterSchema cfg schema
@@ -1872,9 +1889,9 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrStream _ [handleDocs]) =
 lowerNativeExprRaw cfg (IntrinsicN _ _ _ [_, _, valueE]) (IntrinsicN_ _ IntrWrite (Just schema)
                                   [levelDocs, handleDocs, valueDocs]) = do
   sid <- lcRegisterSchema cfg schema
-  -- The written value crosses into a 'ToVoidstar' (&T) sink; own-adapt it (see
+  -- The written value is only read, through a 'ToVoidstar' (&T) sink (see
   -- @hash above). level and handle are not value sinks.
-  valueDocs' <- adaptOwnedElem cfg valueE valueDocs
+  valueDocs' <- adaptReadElem cfg valueE valueDocs
   let allDocs = [levelDocs, handleDocs, valueDocs']
       raw d = IRawExpr (render (poolExpr d))
   return $ handleDocs
@@ -1925,11 +1942,10 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrTell _ []) =
 lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrTmpfile _ []) =
   return $ defaultValue { poolExpr = lcPrintExpr cfg IIntrinsicTmpfile }
 -- The fold accumulator. @cellnew and @cellput hand a value into the
--- runtime, so their value argument crosses into a 'ToVoidstar' (&T) sink
--- and is own-adapted like @write's.
+-- runtime, which reads it through a 'ToVoidstar' (&T) sink, like @write's.
 lowerNativeExprRaw cfg (IntrinsicN _ _ _ [initE]) (IntrinsicN_ _ IntrCellNew (Just schema) [initDocs]) = do
   sid <- lcRegisterSchema cfg schema
-  initDocs' <- adaptOwnedElem cfg initE initDocs
+  initDocs' <- adaptReadElem cfg initE initDocs
   return $ initDocs'
     { poolExpr = lcPrintExpr cfg
         (IIntrinsicCellNew sid (IRawExpr (render (poolExpr initDocs')))) }
@@ -1942,7 +1958,7 @@ lowerNativeExprRaw cfg origExpr (IntrinsicN_ _ IntrCellGet (Just schema) [handle
 lowerNativeExprRaw cfg (IntrinsicN _ _ _ [_, valueE]) (IntrinsicN_ _ IntrCellPut (Just schema)
                                   [handleDocs, valueDocs]) = do
   sid <- lcRegisterSchema cfg schema
-  valueDocs' <- adaptOwnedElem cfg valueE valueDocs
+  valueDocs' <- adaptReadElem cfg valueE valueDocs
   let raw d = IRawExpr (render (poolExpr d))
       putExpr = IIntrinsicCellPut sid (raw handleDocs) (raw valueDocs')
   return $ mergePoolDocs (const $ lcPrintExpr cfg putExpr) [handleDocs, valueDocs']

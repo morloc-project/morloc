@@ -1004,18 +1004,8 @@ unsafe fn try_decompress_voidstar_bytes_to_shm(
         Ok(Some(f)) if !f.is_empty() => f,
         _ => return Ok(None),
     };
-    let (total_uncompressed, total_compressed) = packet::frame_totals(&frames)?;
-    if total_compressed != payload_size {
-        return Err(MorlocError::Packet(format!(
-            "frame index sums to {} compressed bytes but header.length = {}",
-            total_compressed, payload_size
-        )));
-    }
-
-    let landing = crate::voidstar::Landing::new(total_uncompressed)?;
-    let dst_slice = std::slice::from_raw_parts_mut(landing.as_mut_ptr(), total_uncompressed);
-    crate::compression::parallel_decompress_frames(&frames, compressed, dst_slice)?;
-    Ok(Some(landing.relocate(&CSchema::to_rust(schema), hint)? as *mut c_void))
+    let landed = crate::voidstar::land_compressed_frames(&frames, compressed, &CSchema::to_rust(schema), hint)?;
+    Ok(Some(landed as *mut c_void))
 }
 
 // ── read_voidstar_binary ───────────────────────────────────────────────────

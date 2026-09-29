@@ -4358,7 +4358,7 @@ fn stream_payload_hint(handle: i64) -> Option<(u64, u64)> {
         for i in 0..local.subpacket_entries_local.len() {
             let off = local.subpacket_entries_local[i].offset;
             elems += local.subpacket_entries_local[i].elem_count;
-            let (header, _, payload_len, _) = read_subpacket_header(local, off)?;
+            let (header, _, payload_len) = read_subpacket_header(local, off)?;
             let data = unsafe { header.command.data };
             payload += if data.compression == PACKET_COMPRESSION_NONE {
                 payload_len
@@ -4674,7 +4674,7 @@ pub fn shared_stream_layout(handle: i64) -> Result<Vec<(u64, u64, u64)>, MorlocE
             let entry_off = local.subpacket_entries_local[i].offset;
             let entry_cnt = local.subpacket_entries_local[i].elem_count;
             let element_offset = local.subpacket_elem_cum.as_ref().unwrap()[i];
-            let (header, _payload_off, payload_len, _meta_off) =
+            let (header, _, payload_len) =
                 read_subpacket_header(local, entry_off)?;
             let data = unsafe { header.command.data };
             let uncompressed_size = if data.compression == PACKET_COMPRESSION_NONE {
@@ -6547,14 +6547,13 @@ fn ensure_elem_cum(local: &mut ProcessLocalSlot) -> Result<(), MorlocError> {
     Ok(())
 }
 
-/// Parse a sub-packet's header at `subpacket_off` and return the
-/// payload byte-region offsets, the header struct, and the raw header
-/// bytes (the latter needed to reconstruct a full packet for the
-/// compressed-decompress path).
+/// Parse a sub-packet's header at `subpacket_off` and return it with the
+/// payload's offset and length, having checked that the header, metadata and
+/// payload all lie inside the mmap.
 fn read_subpacket_header(
     local: &ProcessLocalSlot,
     subpacket_off: u64,
-) -> Result<(PacketHeader, u64 /*payload_off*/, u64 /*payload_len*/, u64 /*meta_off*/), MorlocError> {
+) -> Result<(PacketHeader, u64 /*payload_off*/, u64 /*payload_len*/), MorlocError> {
     if subpacket_off + 32 > local.mmap_size {
         return Err(MorlocError::Packet(
             "sub-packet header past EOF".into(),
@@ -6588,15 +6587,14 @@ fn read_subpacket_header(
             subpacket_off, data.source,
         )));
     }
-    let meta_off = subpacket_off + 32;
-    let payload_off = meta_off + header.offset as u64;
+    let payload_off = subpacket_off + 32 + header.offset as u64;
     let payload_len = header.length as u64;
     if payload_off + payload_len > local.mmap_size {
         return Err(MorlocError::Packet(
             "sub-packet payload past EOF".into(),
         ));
     }
-    Ok((header, payload_off, payload_len, meta_off))
+    Ok((header, payload_off, payload_len))
 }
 
 /// Locate a sub-packet's source. For uncompressed sub-packets this is
@@ -6630,7 +6628,7 @@ fn materialize_subpacket_at_offset(
     local: &ProcessLocalSlot,
     subpacket_off: u64,
 ) -> Result<(SubpacketSrc, u64), MorlocError> {
-    let (header, payload_off, payload_len, meta_off) =
+    let (header, payload_off, payload_len) =
         read_subpacket_header(local, subpacket_off)?;
     let on_disk_size = 32 + header.offset as u64 + header.length;
     let data = unsafe { header.command.data };
@@ -6689,50 +6687,56 @@ fn materialize_subpacket_at_offset(
         }, on_disk_size));
     }
 
-    // Slow path: compressed. Decompress the sub-packet's full bytes
-    // (header + metadata + payload), then materialise just the
-    // decompressed payload region into SHM and rebase its relptrs.
+    // Slow path: compressed. Decompress the payload straight into SHM and
+    // rebase its relptrs there.
     if data.compression != PACKET_COMPRESSION_ZSTD {
         return Err(MorlocError::Packet(format!(
             "sub-packet at {} has unknown compression byte {}",
             subpacket_off, data.compression,
         )));
     }
-    // SAFETY: all bounds verified by read_subpacket_header.
-    let hdr_bytes = unsafe {
+    // SAFETY: read_subpacket_header verified the header, metadata and
+    // payload, which lie contiguously from `subpacket_off`, inside the mmap.
+    let packet = unsafe {
         std::slice::from_raw_parts(
             (local.mmap_ptr as *const u8).add(subpacket_off as usize),
-            32,
+            (payload_off + payload_len - subpacket_off) as usize,
         )
     };
-    let meta = unsafe {
-        std::slice::from_raw_parts(
-            (local.mmap_ptr as *const u8).add(meta_off as usize),
-            header.offset as usize,
-        )
-    };
-    let payload = unsafe {
-        std::slice::from_raw_parts(
-            (local.mmap_ptr as *const u8).add(payload_off as usize),
-            payload_len as usize,
-        )
-    };
-    let mut full = Vec::with_capacity(
-        32 + header.offset as usize + payload.len(),
-    );
-    full.extend_from_slice(hdr_bytes);
-    full.extend_from_slice(meta);
-    full.extend_from_slice(payload);
-    let decompressed =
-        morloc_runtime_types::compression::decompress_packet(&full)?;
-    let dec_hdr = PacketHeader::from_bytes(
-        decompressed[..32].try_into().unwrap(),
-    )?;
-    let dec_payload_start = 32 + dec_hdr.offset as usize;
-    let dec_payload_end = dec_payload_start + dec_hdr.length as usize;
-    let dec_payload = &decompressed[dec_payload_start..dec_payload_end];
-    let base = payload_into_shm(dec_payload, &local.elem_schema, vol_idx_hint)?;
+    let base = compressed_payload_into_shm(packet, &local.elem_schema, vol_idx_hint)?;
     Ok((SubpacketSrc::Shm { arr_base: base }, on_disk_size))
+}
+
+/// Decompress a zstd sub-packet's payload into one fresh SHM block and
+/// relocate it there. `packet` is the whole sub-packet -- header, metadata
+/// (which carries the frame index) and payload. The frames decode in
+/// parallel directly into the block: no intermediate buffer holds the
+/// packet or its decompressed payload.
+fn compressed_payload_into_shm(
+    packet: &[u8],
+    elem_schema: &Schema,
+    vol_idx_hint: u16,
+) -> Result<AbsPtr, MorlocError> {
+    let hdr: [u8; 32] = packet
+        .get(..32)
+        .and_then(|b| b.try_into().ok())
+        .ok_or_else(|| MorlocError::Packet("compressed sub-packet shorter than its header".into()))?;
+    let header = PacketHeader::from_bytes(&hdr)?;
+    let payload_start = 32 + header.offset as usize;
+    let payload_end = payload_start
+        .checked_add(header.length as usize)
+        .filter(|end| *end <= packet.len())
+        .ok_or_else(|| MorlocError::Packet("compressed payload extends past the sub-packet".into()))?;
+    let frames = morloc_runtime_types::packet::read_frame_index_from_meta(packet)?
+        .ok_or_else(|| MorlocError::Packet(
+            "compressed sub-packet missing METADATA_TYPE_FRAME_INDEX entry".into(),
+        ))?;
+    voidstar::land_compressed_frames(
+        &frames,
+        &packet[payload_start..payload_end],
+        &array_schema(elem_schema),
+        vol_idx_hint,
+    )
 }
 
 /// Resolve a global element index, normalising negatives Python-style.
@@ -8925,16 +8929,7 @@ pub fn shared_materialize_subpacket_from_bytes(
             payload_into_shm(&subpacket_bytes[32 + meta_len..total], elem_schema, vol_idx_hint)
         }
         PACKET_COMPRESSION_ZSTD => {
-            let decompressed =
-                morloc_runtime_types::compression::decompress_packet(
-                    &subpacket_bytes[..total],
-                )?;
-            let dec_hdr = PacketHeader::from_bytes(
-                decompressed[..32].try_into().unwrap(),
-            )?;
-            let dec_start = 32 + dec_hdr.offset as usize;
-            let dec_end = dec_start + dec_hdr.length as usize;
-            payload_into_shm(&decompressed[dec_start..dec_end], elem_schema, vol_idx_hint)
+            compressed_payload_into_shm(&subpacket_bytes[..total], elem_schema, vol_idx_hint)
         }
         other => Err(MorlocError::Packet(format!(
             "materialise sub-packet: unknown compression byte {}",

@@ -429,6 +429,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         , lcOwnership = \_ -> return Owned
         , lcArgManifoldOwnership = \_ -> return Owned
         , lcOwnArg = \_ _ x -> x
+        , lcReadArg = \_ x -> x
         , lcWithCallerScope = id
         -- Python calls the arm's generated dataclass; R builds a classed
         -- list, whose class carries the arm name the same way a factor's

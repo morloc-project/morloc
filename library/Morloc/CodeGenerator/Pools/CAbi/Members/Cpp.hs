@@ -87,6 +87,16 @@ isNativeThrow (IntrinsicN _ IntrThrow _ _) = True
 isNativeThrow (DoBlockN _ e) = isNativeThrow e
 isNativeThrow _ = False
 
+-- | True when a conditional arm's value is a let bound inside the arm. The
+-- arm's block ends at the assignment of that value, so it can be moved.
+armOwnsResult :: NativeExpr -> Bool
+armOwnsResult = go Set.empty
+  where
+    go bound (NativeLetN i _ body) = go (Set.insert i bound) body
+    go bound (SerialLetN _ _ body) = go bound body
+    go bound (LetVarN _ j) = Set.member j bound
+    go _ _ = False
+
 serialType :: MDoc
 serialType = "uint8_t*"
 
@@ -108,6 +118,23 @@ setCallSemantics :: CallSemantics -> MDoc -> MDoc
 setCallSemantics Copy typestr = typestr
 setCallSemantics Reference typestr = "const" <+> typestr <> "&"
 setCallSemantics ConstPtr typestr = "const" <+> typestr
+
+-- | The capture list of a do-block thunk ('lcMakeDoBlock'). By value: a
+-- thunk may outlive the frame that built it.
+thunkCapture :: Text
+thunkCapture = "[=]"
+
+-- | A thunk written inline as the body argument of '_mlc_try' captures by
+-- reference: '_mlc_try' calls it once, before it returns, and nothing else
+-- can hold the temporary, so a by-value capture only copies each captured
+-- value (a whole batch, for a @write). A thunk bound to a name may be
+-- stored or shared, so it keeps its by-value capture. The thunk arrives
+-- rendered; its lines are re-joined verbatim, which is sound because
+-- generated C++ never breaks a line inside a string literal.
+tryThunkByReference :: MDoc -> MDoc
+tryThunkByReference thunk = case T.stripPrefix (thunkCapture <> "(") (render thunk) of
+  Just rest -> concatWith (\a b -> a <> hardline <> b) (map pretty (T.splitOn "\n" ("[&](" <> rest)))
+  Nothing -> thunk
 
 -- Render a concrete type name with template arguments. If the name
 -- contains `$N` placeholders (positional macros, e.g. "container_t<$1>"),
@@ -823,6 +850,7 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
     , lcOwnership = \_ -> return Owned
     , lcArgManifoldOwnership = \_ -> return Owned
     , lcOwnArg = \_ _ x -> x
+    , lcReadArg = \_ x -> x
     , lcWithCallerScope = id
     -- `?T` is `std::optional<T>` at every value position where sizeof(T) is
     -- known (cppmorloc.hpp), which is exactly where a value-level
@@ -1030,9 +1058,21 @@ PROPAGATE_ERROR(errmsg)|]
             (thenThrow, elseThrow) = case origExpr of
               IfN _ _ tn en -> (isNativeThrow tn, isNativeThrow en)
               _ -> (False, False)
-            armStmt isThrow e = if isThrow then e <> ";" else v <+> "=" <+> e <> ";"
-            thenBlock = poolPriorLines thenDocs <> [armStmt thenThrow thenE]
-            elseBlock = poolPriorLines elseDocs <> [armStmt elseThrow elseE]
+            (thenOwned, elseOwned) = case origExpr of
+              IfN _ _ tn en -> (armOwnsResult tn, armOwnsResult en)
+              _ -> (False, False)
+            -- Every if is bound by a let ('atomize'), the only reader of this
+            -- result variable, so the result and an arm's own last let are
+            -- both dead once read, and are moved rather than copied. A Unit
+            -- result is emitted as a bare statement, where a discarded
+            -- std::move is a warning, so it is not moved.
+            isUnitResult = case typeFof origExpr of
+              VarF (FV tv _) -> tv == BT.unit
+              _ -> False
+            moved owned e = if owned && not isUnitResult then "std::move(" <> e <> ")" else e
+            armStmt isThrow owned e = if isThrow then e <> ";" else v <+> "=" <+> moved owned e <> ";"
+            thenBlock = poolPriorLines thenDocs <> [armStmt thenThrow thenOwned thenE]
+            elseBlock = poolPriorLines elseDocs <> [armStmt elseThrow elseOwned elseE]
             decl = typeStr <+> v <> ";"
             ifStmt = vsep
               [ decl
@@ -1044,7 +1084,7 @@ PROPAGATE_ERROR(errmsg)|]
               ]
         return $ PoolDocs
           { poolCompleteManifolds = poolCompleteManifolds condDocs <> poolCompleteManifolds thenDocs <> poolCompleteManifolds elseDocs
-          , poolExpr = v
+          , poolExpr = moved True v
           , poolPriorLines = poolPriorLines condDocs <> [ifStmt]
           , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs thenDocs <> poolPriorExprs elseDocs
           , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag thenDocs || poolReturnFlag elseDocs
@@ -1053,6 +1093,7 @@ PROPAGATE_ERROR(errmsg)|]
         let isUnit = case t of
               VarF (FV tv _) -> tv == TV "Unit"
               _ -> False
+            cap = pretty thunkCapture
         in return . (,) [] $ case (isUnit, stmts) of
           -- Capture by copy: cross-language RPC receiver-manifolds wrap
           -- their deserialized result in a DoBlockN thunk that outlives
@@ -1060,10 +1101,10 @@ PROPAGATE_ERROR(errmsg)|]
           -- dangle by the time the outer caller invokes the thunk;
           -- captures by value ([=]) copy the parameters (pointers, ints,
           -- copyable structs) and remain valid.
-          (True, []) -> "[=](){" <> expr <> "; return mlc::Unit{};}"
-          (True, _) -> "[=](){" <> nest 4 (line <> vsep (stmts <> [expr <> ";", "return mlc::Unit{};"])) <> line <> "}"
-          (False, []) -> "[=](){return " <> expr <> ";}"
-          (False, _) -> "[=](){" <> nest 4 (line <> vsep (stmts <> ["return " <> expr <> ";"])) <> line <> "}"
+          (True, []) -> cap <> "(){" <> expr <> "; return mlc::Unit{};}"
+          (True, _) -> cap <> "(){" <> nest 4 (line <> vsep (stmts <> [expr <> ";", "return mlc::Unit{};"])) <> line <> "}"
+          (False, []) -> cap <> "(){return " <> expr <> ";}"
+          (False, _) -> cap <> "(){" <> nest 4 (line <> vsep (stmts <> ["return " <> expr <> ";"])) <> line <> "}"
     -- The Ok arm's parameter is declared as the payload type, so a body
     -- whose native result merely converts to it (a handle intrinsic answers
     -- int64_t where the handle type is uint64_t) converts at the call, where
@@ -1080,7 +1121,7 @@ PROPAGATE_ERROR(errmsg)|]
     -- reference) stays correct on its own terms.
     , lcMakeTry = \thunk okT okWrap errWrap ->
         "_mlc_try" <> tupled
-          [ thunk
+          [ tryThunkByReference thunk
           , "[](" <> maybe "auto&&" (<> "&&") okT <+> "mlcTryV) { return"
               <+> okWrap "std::forward<decltype(mlcTryV)>(mlcTryV)" <> "; }"
           , "[](std::string&& mlcTryM) { return" <+> errWrap "std::move(mlcTryM)" <> "; }"
@@ -1312,8 +1353,10 @@ PROPAGATE_ERROR(errmsg)|]
             -- order. INVARIANT: anything that escapes the frame must COPY this
             -- alias's referent, not hold a reference to it -- today std::bind
             -- decay-copies bound args, '[=]' captures copy the referent, and
-            -- the sole '[&]' is an immediately invoked IIFE. A future
-            -- by-reference capture would dangle. A binding that takes its
+            -- a '[&]' capture is only ever an immediately invoked lambda: the
+            -- loop IIFE, and an inline @try thunk ('tryThunkByReference'),
+            -- which '_mlc_try' calls before returning. A by-reference
+            -- capture that escaped would dangle. A binding that takes its
             -- referent is a separate decision and a far narrower one
             -- ('consumableProjectionLets'): it requires the referent to have
             -- no other use at all, so it cannot strand an alias.

@@ -1,4 +1,4 @@
-module main (run)
+module main (run, runWrite, runParts)
 
 import root
 import root-cpp
@@ -14,6 +14,16 @@ import root-cpp
 -- captured list is copied into that suspension. Taking a parameter used once
 -- by value (and moving the caller's last use into it) would remove the two
 -- batch copies; holding captures in shared storage would remove the third.
+--
+-- `runWrite` writes each batch to a stream file. `@write` runs as a @try
+-- thunk that `_mlc_try` calls in place, so it reads the batch where it is:
+-- one per batch, the batch itself.
+--
+-- `runParts` turns each `Try` into a `(Bool, Str, [Int])` through a match,
+-- as the parallel library's `pullParts` does. The tuple moves out of the
+-- match's arms rather than being copied at each; four per batch remain: the
+-- batch, the tuple built from the `Try`'s payload (which may be shared, so is
+-- copied), and the projection and suspension copies the sink loop above has.
 --
 -- Large allocations per batch, as the difference between runs of N1 and N2
 -- batches (fixed setup cancels). One is the batch being built; every further
@@ -42,3 +52,42 @@ run k n = do
   bigAllocs n
   where
     extra = makeExtra k
+
+writeDrain :: OStream Int -> Int -> <IO> ()
+writeDrain o n = do
+  ? n == 0 = do
+      ()
+  : do
+    xs <- makeBatch n
+    Ok u <- @write 0 o xs
+    writeDrain o (n - 1)
+
+--' Write n batches to a stream file; return the large-allocation count
+runWrite :: Str -> Int -> <IO> Int
+runWrite path n = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
+  writeDrain o n
+  @close o
+  bigAllocs n
+
+parts :: <IO> (Try Str [Int]) -> <IO> (Bool, Str, [Int])
+parts pull = do
+  r <- pull
+  match r
+    | (Err e) = (False, e, [])
+    | (Ok xs) = (True, "", xs)
+
+partsDrain :: [Int] -> Int -> <IO> ()
+partsDrain extra n = do
+  ? n == 0 = do
+      ()
+  : do
+    p <- parts (@try (makeBatch n))
+    recordBatch extra (.2 p)
+    partsDrain extra (n - 1)
+
+--' Drain n batches through a Try-to-tuple match; return the large-allocation count
+runParts :: Int -> Int -> <IO> Int
+runParts k n = do
+  partsDrain (makeExtra k) n
+  bigAllocs n

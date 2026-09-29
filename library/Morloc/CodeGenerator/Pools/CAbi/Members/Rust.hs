@@ -557,15 +557,14 @@ prepareRustCacheArg wrapIdx (j, (a@(Arg i tm), sa)) = do
   case tm of
     Native tf -> do
       sid <- rustRegisterSchema schemaStr
-      -- The cache-key value crosses into a 'ToVoidstar' (&T) 'put_value' sink;
-      -- own-adapt so a borrowed non-Copy native arg is cloned rather than
-      -- double-borrowed ('&(&Vec)').
+      -- The cache-key value is only read, through a 'ToVoidstar' (&T)
+      -- 'put_value' sink, so a borrowed arg is reborrowed ('rustReadPlace').
       own <- rustOwnership (BndVarN tf i)
       -- The packet exists only to key and store the cache entry, so its
       -- owner releases it when the manifold's scope ends.
       let argVar = "__mlc_ca_" <> pretty wrapIdx <> "_" <> pretty j
           decl = "let" <+> argVar <> "_own = rustmorloc::Packet::new(rustmorloc::put_value(&("
-                   <> rustOwn own tf (argNamer a) <> "), " <> sch sid <> "));"
+                   <> rustReadPlace own (argNamer a) <> "), " <> sch sid <> "));"
                    <+> "let" <+> argVar <> ": *const u8 =" <+> argVar <> "_own.as_ptr();"
       return (argVar, schemaStr, [decl])
     _ -> return (argNamer a, schemaStr, [])
@@ -763,6 +762,13 @@ rustOwn BorrowedPlace tf x
 rustRef :: IOwnership -> MDoc -> MDoc
 rustRef BorrowedRef x = x
 rustRef _ x = "&(" <> x <> ")"
+
+-- | Adapt an expression to a place whose address a read-only sink takes
+-- (@&(x)@): a borrowed reference is dereferenced, so the sink reborrows the
+-- value instead of referencing the reference or cloning it.
+rustReadPlace :: IOwnership -> MDoc -> MDoc
+rustReadPlace BorrowedRef x = "(*" <> x <> ")"
+rustReadPlace _ x = x
 
 -- | Reference the pool's schema for a registered schema id via the crate-root
 -- @schema(<id>)@ accessor. Fully qualified (@crate::@) so it resolves even inside
@@ -2110,6 +2116,7 @@ rustLowerConfig mask =
     , lcOwnership = rustOwnership
     , lcArgManifoldOwnership = \_ -> return Owned
     , lcOwnArg = rustOwn
+    , lcReadArg = rustReadPlace
     , lcWithCallerScope = rustWithCallerScope
     -- `?T` is `Option<T>`, whose wire layout is type-driven; a widened value must
     -- be a real `Some(..)` (never a bare `T`) or put_value serializes the wrong
