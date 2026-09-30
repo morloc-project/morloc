@@ -412,6 +412,11 @@ data Intrinsic
                   -- The pure-runtime evaluator executes this as a direct
                   -- per-element loop over MORLOC_ARRAY; the pool path resolves
                   -- it to the language's @Functor.map@ instance.
+  | IntrMapOptional -- ^ internal @(a -> b) -> ?a -> ?b@: apply a function to
+                  -- an optional's value, if it has one. Emitted only by the
+                  -- host adapter ('Morloc.CodeGenerator.EffectBoundary'),
+                  -- which rebuilds an optional holding a function value in
+                  -- the convention of the side it crosses to. NOT user-facing.
   | IntrTagTest   -- ^ implicit @a -> a -> Bool@ tag test, emitted only by the
                   -- desugar's constructor-pattern lowering. NOT user-facing --
                   -- there is no entry in 'parseIntrinsic', as with 'IntrMap'.
@@ -578,6 +583,7 @@ intrinsicName IntrOpen = "open"
 intrinsicName IntrClose = "close"
 intrinsicName IntrFSchema = "fschema"
 intrinsicName IntrMap = "map"
+intrinsicName IntrMapOptional = "mapoptional"
 intrinsicName IntrTagTest = "tagtest"
 intrinsicName IntrCtorField = "ctorfield"
 intrinsicName IntrFLength = "flen"
@@ -659,6 +665,7 @@ intrinsicIsIO IntrRead = False
 intrinsicIsIO IntrDatafile = False
 intrinsicIsIO IntrUnpack = True
 intrinsicIsIO IntrMap = False
+intrinsicIsIO IntrMapOptional = False
 intrinsicIsIO IntrTagTest = False
 intrinsicIsIO IntrCtorField = False
 intrinsicIsIO IntrThrow = False
@@ -724,6 +731,7 @@ intrinsicArity IntrOpen = 1
 intrinsicArity IntrClose = 1
 intrinsicArity IntrFSchema = 1
 intrinsicArity IntrMap = 2
+intrinsicArity IntrMapOptional = 2
 intrinsicArity IntrFLength = 1
 intrinsicArity IntrStreamLayout = 1
 intrinsicArity IntrNext = 1

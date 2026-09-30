@@ -38,6 +38,7 @@ import Morloc.CodeGenerator.IFile
   , bracketSliceSteps
   )
 import Morloc.CodeGenerator.Infer
+import Morloc.CodeGenerator.Instance (findFunctorMap, findInstanceByArgHead, resolveInstanceForType)
 import Morloc.CodeGenerator.LanguageDescriptor (ldAllowStringNull, loadLangDescriptorFromText)
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.Language as ML
@@ -916,15 +917,6 @@ findSliceableDimGetSliceDim :: Lang -> TypeU -> MorlocMonad (Maybe Source)
 findSliceableDimGetSliceDim lang receiverType =
   findInstanceByArgHead 3 (EV "__get_slice_dim__") lang (extractKey receiverType)
 
--- | Look up the @Functor@ @map@ instance for a container type in
--- language @lang@. The instance method signature is @(a -> b) -> f a
--- -> f b@; the container head sits at argument index 1. Used by the
--- @IntrMap@ pool-path lowering to resolve the desugar's implicit map
--- over a bracket-accessor chain.
-findFunctorMap :: Lang -> TypeU -> MorlocMonad (Maybe Source)
-findFunctorMap lang receiverType =
-  findInstanceByArgHead 1 (EV "map") lang (extractKey receiverType)
-
 -- | Look up a user-declared @PatternAccessible.__extract_pattern__@
 -- instance for a receiver container type. The class method is
 -- @PatternChain (w a) b -> [?Int64] -> w a -> b@, so the receiver
@@ -935,28 +927,6 @@ findFunctorMap lang receiverType =
 findPatternAccessibleExtract :: Lang -> TypeU -> MorlocMonad (Maybe Source)
 findPatternAccessibleExtract lang receiverType =
   findInstanceByArgHead 2 (EV BT.extractPatternMethod) lang (extractKey receiverType)
-
--- | Shared helper: look up the per-language source binding of a
--- class method whose receiver type head occupies a known argument
--- position. Used by the @Sliceable@ / @Indexable@ / @SliceableDim@ /
--- @Functor@ helpers above.
-findInstanceByArgHead :: Int -> EVar -> Lang -> TVar -> MorlocMonad (Maybe Source)
-findInstanceByArgHead pos method lang containerTv = do
-  sigmap <- MM.gets stateTypeclasses
-  case Map.lookup method sigmap of
-    Nothing -> return Nothing
-    Just inst -> return $ listToMaybe
-      [ src
-      | TermTypes (Just et) cs _ <- instanceTerms inst
-      , receiverHead et == Just containerTv
-      , (_, Idx _ src) <- cs
-      , srcLang src == lang
-      ]
-  where
-    receiverHead :: EType -> Maybe TVar
-    receiverHead et = case snd (unqualify (etype et)) of
-      FunU args _ | length args > pos -> Just (extractKey (args !! pos))
-      _                               -> Nothing
 
 -- | The wire type for every slot the slicer / indexer expects: bounds
 -- always arrive as @?Int64@ (the return shape of @__to_index__@); a
@@ -1241,32 +1211,6 @@ dispatchPatCall callLang midx cidxCall pat inputs out xs fallback = case pat of
   PatternBracketIndex -> expressBracketIndex callLang midx inputs out xs
   PatternStruct sel   -> dispatchPatternStruct callLang midx cidxCall sel inputs out xs fallback
   _                   -> fallback
-
--- | Resolve a typeclass-method instance for a value's type by walking
--- the alias chain. Tests the type's outermost head TVar against the
--- per-TVar lookup; on miss, reduces the type one alias step
--- (via 'TE.reduceType') and retries. Returns the first hit, or
--- 'Nothing' if the chain is exhausted. This is the key mechanism by
--- which @type Array a = List a@ inherits @instance Indexable List@:
--- the call site type @Array Int@ misses on @Array@, reduces to
--- @List Int@, then hits.
-resolveInstanceForType
-  :: (Lang -> TypeU -> MorlocMonad (Maybe Source))
-  -> Lang
-  -> Int                  -- midx, used to recover the source scope
-  -> Type
-  -> MorlocMonad (Maybe Source)
-resolveInstanceForType perTypeLookup lang midx originalType = do
-  scope <- MM.getGeneralScope midx
-  go scope (type2typeu originalType)
-  where
-    go scope t = do
-      mSrc <- perTypeLookup lang t
-      case mSrc of
-        Just src -> return (Just src)
-        Nothing -> case TE.reduceType scope t of
-          Just t' | t' /= t -> go scope t'
-          _ -> return Nothing
 
 requireInstance
   :: Int

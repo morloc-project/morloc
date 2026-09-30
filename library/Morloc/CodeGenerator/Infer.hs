@@ -31,6 +31,8 @@ import qualified Morloc.Data.Map as Map
 import qualified Data.Set as Set
 import qualified Data.Text as MT
 import qualified Morloc.Monad as MM
+import qualified Morloc.LangRegistry as LR
+import qualified Morloc.Language as ML
 import qualified Morloc.TypeEval as T
 import Numeric (showHex)
 
@@ -99,7 +101,7 @@ inferConcreteType lang (Idx i (type2typeu -> generalType)) = do
 inferConcreteTypeStructural
   :: Lang -> Int -> Scope -> TypeU -> TypeU -> MorlocMonad TypeF
 inferConcreteTypeStructural lang i gscope g c
-  | Just r <- structuralCompound (inferConcreteTypeStructural lang i gscope) g c = r
+  | Just r <- structuralCompound (inferConcreteTypeStructural lang i gscope) g c = hostConvention lang r
   | otherwise = case (g, c) of
   -- A payload-bearing `data`. Its arms' field types have to be resolved to
   -- the target language here rather than in 'weave', which is pure and so
@@ -376,7 +378,7 @@ inferConcreteTypeUniversal lang i t@(type2typeu -> generalType) = do
 inferConcreteTypeUniversalStructural
   :: Lang -> Int -> Scope -> Type -> TypeU -> TypeU -> MorlocMonad TypeF
 inferConcreteTypeUniversalStructural lang i gscopeUni t g c
-  | Just r <- structuralCompound (inferConcreteTypeUniversalStructural lang i gscopeUni t) g c = r
+  | Just r <- structuralCompound (inferConcreteTypeUniversalStructural lang i gscopeUni t) g c = hostConvention lang r
   | otherwise = case (g, c) of
   -- A `data` type resolves to its arms here exactly as it does in the
   -- module-scoped walk. Without this, the wire form of a parameterized
@@ -424,6 +426,35 @@ inferConcreteTypeUniversalStructural lang i gscopeUni t g c
           MM.throwSystemError $
             "Failed to infer concrete type for" <+> pretty t
               <> ": Could not reduce type in broadest scope"
+
+-- | In a compiled language a record mapped to a type the program declares
+-- (@record Rust => Ops = "Ops"@) holds its fields as that declaration spells
+-- them, in the host's convention: a function of type @A -> \<E\> C@ there
+-- runs its effect when called and returns @C@. The record's concrete type
+-- says so, so its native declaration, accessors and marshalling agree with
+-- the value it holds; 'Morloc.CodeGenerator.EffectBoundary' adapts the
+-- fields where such a record is built and where one is read. A record the
+-- compiler generates (@"struct"@), and every record of a dynamic language,
+-- holds morloc values. Nested records are left to their own node.
+hostConvention :: Lang -> MorlocMonad TypeF -> MorlocMonad TypeF
+hostConvention lang built = do
+  t <- built
+  reg <- CMS.gets stateLangRegistry
+  return $ case t of
+    NamF o v@(FV _ (CV cv)) ps rs
+      | cv /= "struct" && LR.registryIsCompiled reg (ML.langName lang) ->
+          NamF o v ps [(k, eager f) | (k, f) <- rs]
+    _ -> t
+  where
+    -- a suspension is a closure of no arguments; a function whose result is
+    -- one returns the result instead
+    eager (FunF [] c) = FunF [] (eager c)
+    eager (FunF as r) = FunF (map eager as) (eager (runs r))
+    eager (AppF h ts) = AppF h (map eager ts)
+    eager (OptionalF x) = OptionalF (eager x)
+    eager x = x
+    runs (FunF [] c) = c
+    runs r = r
 
 -- | The compound shapes every walk descends through, given the walk to
 -- recurse with; the one list of them, shared by both structural walks and

@@ -128,3 +128,18 @@
 "ok 105"
 --- main-mixed rustToPy ---
 "ok 105"
+--- main-mixed sharedPyToPy ---
+"ok 105"
+--- main-mixed sharedPyToRust ---
+"ok 105"
+--- main-mixed sharedRsToRust ---
+"ok 105"
+--- main-mixed sharedRsToPy ---
+"ok 105"
+--- main-mixed pyArgToRust ---
+"ok 105"
+--- main-mixed rustArgToPy ---
+"ok 105"
+--- main-recursive chainDepth ---
+"ok 4"
+--- main-refuse --- OK

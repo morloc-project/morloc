@@ -74,3 +74,7 @@ pub fn h_cb_ret(mk: impl rustmorloc::MorlocFn1<i64, Ops>, n: i64) -> String {
 pub fn h_cb_param(cb: impl rustmorloc::MorlocFn1<Ops, i64>) -> String {
     ok_(cb.call1(&Ops { get: std::rc::Rc::new(|i: &i64| *i * 10) }))
 }
+
+pub fn rs_wrap(s: &String) -> String {
+    s.clone()
+}

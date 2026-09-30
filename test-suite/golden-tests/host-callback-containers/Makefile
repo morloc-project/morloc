@@ -136,7 +136,23 @@ all:
 	[ -x main-mixed ] && ./main-mixed pyToRust $$PWD/cnt-main-mixed-pyToRust >> obs.txt 2>> obs.err || true
 	echo "--- main-mixed rustToPy ---" >> obs.txt
 	[ -x main-mixed ] && ./main-mixed rustToPy $$PWD/cnt-main-mixed-rustToPy >> obs.txt 2>> obs.err || true
+	echo "--- main-mixed sharedPyToPy ---" >> obs.txt
+	[ -x main-mixed ] && ./main-mixed sharedPyToPy $$PWD/cnt-main-mixed-sharedPyToPy >> obs.txt 2>> obs.err || true
+	echo "--- main-mixed sharedPyToRust ---" >> obs.txt
+	[ -x main-mixed ] && ./main-mixed sharedPyToRust $$PWD/cnt-main-mixed-sharedPyToRust >> obs.txt 2>> obs.err || true
+	echo "--- main-mixed sharedRsToRust ---" >> obs.txt
+	[ -x main-mixed ] && ./main-mixed sharedRsToRust $$PWD/cnt-main-mixed-sharedRsToRust >> obs.txt 2>> obs.err || true
+	echo "--- main-mixed sharedRsToPy ---" >> obs.txt
+	[ -x main-mixed ] && ./main-mixed sharedRsToPy $$PWD/cnt-main-mixed-sharedRsToPy >> obs.txt 2>> obs.err || true
+	echo "--- main-mixed pyArgToRust ---" >> obs.txt
+	[ -x main-mixed ] && ./main-mixed pyArgToRust $$PWD/cnt-main-mixed-pyArgToRust >> obs.txt 2>> obs.err || true
+	echo "--- main-mixed rustArgToPy ---" >> obs.txt
+	[ -x main-mixed ] && ./main-mixed rustArgToPy $$PWD/cnt-main-mixed-rustArgToPy >> obs.txt 2>> obs.err || true
+	morloc make -o main-recursive main-recursive.loc 2>> build.err || echo "--- main-recursive --- BUILD FAILED" >> obs.txt
+	echo "--- main-recursive chainDepth ---" >> obs.txt
+	[ -x main-recursive ] && ./main-recursive chainDepth $$PWD/cnt-main-recursive-chainDepth >> obs.txt 2>> obs.err || true
+	if morloc make -o main-refuse main-refuse.loc 2>> build.err; then echo "--- main-refuse --- UNEXPECTED" >> obs.txt; else echo "--- main-refuse --- OK" >> obs.txt; fi
 
 clean:
-	rm -rf main-py main-cpp main-rust main-r main-mixed __pycache__ *.err cnt-*
+	rm -rf main-py main-cpp main-rust main-r main-mixed main-recursive main-refuse __pycache__ *.err cnt-*
 	rm -rf *-build *build.tmp*

@@ -1846,6 +1846,8 @@ intrinsicType IntrFlush = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
 -- IntrMap is handled by its own synthE clause and never reaches this fallback.
 intrinsicType IntrMap =
   error "intrinsicType: IntrMap must be typed via synthE's dedicated clause"
+intrinsicType IntrMapOptional =
+  error "intrinsicType: IntrMapOptional is emitted after typechecking"
 intrinsicType IntrTagTest =
   error "intrinsicType: IntrTagTest must be typed via synthE's dedicated clause"
 intrinsicType IntrCtorField =

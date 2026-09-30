@@ -471,10 +471,9 @@ reduce ai (AnnoS g1@(Idx _ appT) c1 (AppS (AnnoS (Idx gLet _) cLet (LetS v e1 bo
 -- each reference, or never if there is none. A value is substituted when its
 -- parameter is used at most once (a move: 'substituteAnnoS' reuses the
 -- argument for the first occurrence and clones only the extras, which keeps a
--- chain of reductions linear), on the nexus path (which holds no closures), or
--- when the parameter is handed to a foreign source call as a callback (see
--- 'usedAsForeignCallback'); otherwise it is bound once and shared. Any other
--- argument is bound once by a @let@, whatever the reference count.
+-- chain of reductions linear) or on the nexus path (which holds no closures);
+-- otherwise it is bound once and shared. Any other argument is bound once by
+-- a @let@, whatever the reference count.
 reduce ai
   ( AnnoS
       i1@(Idx i1n i1t)
@@ -499,7 +498,7 @@ reduce ai
     -- The reduction's result is what the labeled application computes, so
     -- a label, cache or log setting on the application moves to its root.
     moveConfig i1n =<< wrapLets i1 tb1 hoisted =<< case () of
-      _ | isValue e1n && (ai || nrefs <= 1 || callback) ->
+      _ | isValue e1n && (ai || nrefs <= 1) ->
             substituteAnnoS v e1n e2 >>= reduce ai . rebuild
         | isValue e1n -> share normalized v e1n e2
         -- A function built by a computation, on the nexus path. The pure
@@ -516,8 +515,7 @@ reduce ai
         -- A function built by a computation, in a pool: its strict parts are
         -- bound once and the remaining choice among values is substituted;
         -- failing that, it is computed once into a closure, and every use
-        -- receives a lambda that calls it, so a callback boundary anywhere
-        -- below still sees a lambda to force.
+        -- receives a lambda that calls it.
         | isFunctionType tv -> splitFunctionArg e1n >>= \pieces -> case pieces of
           Just (binds, fn) -> substituteSplit binds fn
           Nothing -> do
@@ -536,7 +534,6 @@ reduce ai
         | otherwise -> share normalized v e1n e2
   where
     nrefs = countRefs v e2
-    callback = usedAsForeignCallback v e2
     annIdx (AnnoS (Idx gi _) _ _) = gi
     substituteSplit binds fn = do
       e2' <- substituteAnnoS v fn e2
@@ -862,32 +859,6 @@ rebindBndToLet ::
   AnnoS (Indexed Type) One a ->
   MorlocMonad (AnnoS (Indexed Type) One a)
 rebindBndToLet v = onFreeRef v (\(AnnoS g c _) -> return (AnnoS g c (LetBndS v)))
-
--- | Is @v@ passed directly as a FUNCTION-typed argument to a foreign source
--- call anywhere in the body? Such a closure is invoked as @f(x)@ inside the
--- foreign source implementation, which discards the effect thunk, so its effect
--- must be forced eagerly at the callback boundary
--- ('EffectBoundary.maybeForceCallbackArg') -- which cannot be done at a shared
--- use site. So these stay on the clone path (each clone becomes a direct
--- callback argument); every other multiply-used parameter is shared.
--- Conservatively over-approximating among function-typed args (shadowing is not
--- tracked): a false positive merely clones, which is safe.
-usedAsForeignCallback :: EVar -> AnnoS (Indexed Type) One a -> Bool
-usedAsForeignCallback v = go
-  where
-    go (AnnoS _ _ (AppS (AnnoS _ _ (ExeS (SrcCall _))) args)) | any isRef args = True
-    go (AnnoS _ _ e) = getAny (foldExprS (Any . go) e)
-    -- a FUNCTION-typed ref only: a data argument to a source call is never
-    -- invoked, so it must not be diverted onto the clone path. Descend into a
-    -- structured argument (list/tuple/record of closures) too, so a callback
-    -- nested there is also kept inline -- 'EffectBoundary.maybeForceCallbackArg'
-    -- forces such nested closures at the same boundary.
-    isRef (AnnoS (Idx _ (FunT _ _)) _ (BndS v'))    = v == v'
-    isRef (AnnoS (Idx _ (FunT _ _)) _ (LetBndS v')) = v == v'
-    isRef (AnnoS _ _ (LstS es))                     = any isRef es
-    isRef (AnnoS _ _ (TupS es))                     = any isRef es
-    isRef (AnnoS _ _ (NamS rs))                     = any (isRef . snd) rs
-    isRef _ = False
 
 -- | Assign fresh indices to every node of an 'AnnoS' subtree, preserving each
 -- node's type annotation. Uses 'newIndex', which copies ALL index-keyed state

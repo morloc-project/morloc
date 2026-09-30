@@ -1927,6 +1927,22 @@ lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrSpawn (Just schema) [handleDocs, fnD
   sid <- lcRegisterSchema cfg schema
   let raw d = IRawExpr (render (poolExpr d))
   return $ mergePoolDocs (const $ lcPrintExpr cfg (IIntrinsicSpawn sid (raw handleDocs) (raw fnDocs))) [handleDocs, fnDocs]
+-- @mapoptional: the function applied to the optional's value, if it has one,
+-- in the same per-language null test that lifts a packer through an optional.
+lowerNativeExprRaw cfg origExpr@(IntrinsicN _ _ _ [_, optE]) (IntrinsicN_ _ IntrMapOptional _ [fnDocs, optDocs]) = do
+  idx <- lcNewIndex cfg
+  resultType <- lcTypeOf cfg (typeFof origExpr)
+  let innerTf = case typeFof optE of
+        OptionalF a -> a
+        t -> t
+  unwrapType <- lcTypeOf cfg innerTf
+  let v' = render $ helperNamer idx
+      uVar = "u" <> T.pack (show idx)
+      arg = lcSourcedArg cfg ClosureArg Owned (typeMof innerTf) (pretty uVar)
+      call = IRawExpr (render (lcApplyClosure cfg (poolExpr fnDocs) [arg]))
+      ifStmt = IIfNotNull v' resultType (IRawExpr (render (poolExpr optDocs))) uVar unwrapType [] call
+      merged = mergePoolDocs (const (pretty v')) [fnDocs, optDocs]
+  return $ merged {poolPriorLines = poolPriorLines merged ++ [lcPrintStmt cfg ifStmt]}
 lowerNativeExprRaw cfg _ (IntrinsicN_ _ IntrSettle _ [handleDocs]) =
   return $ handleDocs {poolExpr = lcPrintExpr cfg (IIntrinsicSettle (IRawExpr (render (poolExpr handleDocs))))}
 -- @flush: force any buffered elements out as a sub-packet.

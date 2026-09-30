@@ -57,3 +57,19 @@ def h_cb_ret(mk, n):
 
 def h_cb_param(cb):
     return _ok(cb({"get": lambda i: i * 10}))
+
+
+def h_chain(c):
+    depth = 0
+    while c is not None:
+        depth += 1
+        c = c["next"]
+    return "ok " + str(depth)
+
+
+def h_node(nd, n):
+    return _ok(nd["run"](n))
+
+
+def py_wrap(s):
+    return s
