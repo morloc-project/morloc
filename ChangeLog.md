@@ -1,144 +1,41 @@
-Unreleased
-----------
+0.109.0 [2026-09-30]
+--------------------
 
- * a tail-recursive function called from its own pool takes its arguments
-   directly: a function passed to it is called in place rather than through
-   the pool's own socket on every iteration (100k iterations: 5 s to 0.2 s),
-   a C++ callback may be passed to such a loop, and draining a stream
-   through a sink works in Python and R pools
- * shared memory is released as soon as a value is read, so a loop that
-   calls another pool, drains a stream through a function, or applies a
-   function from another pool holds only what it is using rather than
-   everything since the command began
- * a numpy array read from shared memory in a Python pool stays valid for
-   as long as the array lives, including in a global, across calls, and as
-   an element of a list read from a stream file
- * an alias of a function, effect or optional type works anywhere, including
-   nested in its own argument (`Scorer (Scorer Str)`), and a command whose
-   signature is spelled through one takes every argument of the type
- * records are nominal: two records with the same fields are different
-   types, and a phantom type parameter is checked
- * terminal actions (`--' with:`, `@with`, `@render`) work when the command's
-   type groups its arrows or uses aliases, when its parameters are bound by
-   a lambda, when the producer or handler is imported, and when the
-   `@collect` sits in a `where` binding
- * a `where` binding may not reuse the name of a parameter bound by a lambda
-   the definition begins with
- * a definition used many times is compiled once per type and language and
-   called, so programs that nest definitions deeply build in time and
-   memory proportional to their source rather than exponential in depth
- * a function passed inside a tuple or record to a morloc function works in
-   a command that runs without a language pool
- * every argument is evaluated once, where it is applied, whether its
-   parameter is used many times or not at all
- * a `where` or `let` value, and a top-level constant, is computed once per
-   use of its scope instead of once per mention; an unused `where` binding is
-   never computed, an unused `let` still runs
- * a value a function computes without reading its parameters (a `let`,
-   `where` or applied-lambda argument, or the prefix of a function built by a
-   computation) is computed once per command, however many times or however
-   recursively the function is called
- * a command defined point-free or by a computation (`f = add (g 1)`,
-   `f = let k = .. in \x -> ..`) takes its arguments in every language;
-   it no longer returned garbage in C++ and Rust or failed in Python and R
- * a value built by a record update, literal or getter runs in a language
-   that has a type for it, and a pool passes on a value or function it
-   cannot represent without decoding it
- * mutually recursive functions entered through one that is not exported
-   compile
- * a file in a program's directory named like a C++ standard header no
-   longer replaces that header in a C++ pool
- * `where` bindings are lexically scoped: they no longer capture or get
-   captured by same-named variables at the use site, and shadow top-level
-   terms
- * signatures are contracts: a definition more specific than its signature,
-   or using a class method its constraints do not provide, is rejected
- * instances may declare contexts (`instance Eq a => Eq (Pair a)`), and
-   signature type variables scope over the definition's local signatures
- * a polymorphic definition is typechecked once per type it is used at, so
-   typecheck time no longer grows exponentially with nesting
- * a function that does work before the function it returns runs that work
-   once per partial application, in every language, even where the function
-   is unknown or lives in another pool
- * `a -> b -> c` and `a -> (b -> c)` are one type; a source's signature says
-   how it calls a function it is passed (a parenthesized parameter is called
-   one group at a time)
- * a table's schema can be given a name: a type alias now survives into the
-   generated pool instead of failing the build
- * a cross-language table call can sit inside a larger expression rather than
-   having to be the whole body of a function
- * a function can be passed where one taking fewer arguments is wanted, and
-   the results are the closures you asked for
- * writing a stream copies its payload once instead of twice, and a pool
-   keeps a batch's worth of heap rather than returning it to the kernel
-   between batches
- * a program that reads a stream, loads a gathered list, slices an `IFile`
-   or calls `@read` no longer leaks the value each time, and a whole-list
-   gather holds its data once rather than twice
- * a C++ pool pulling a stream no longer copies each batch twice, and no
-   longer hands its heap back to the kernel between batches
- * `@collect` and `@close` in a guard or match arm build in a C++ pool
- * a stream written to stdout is compressed at its `@write` level, `-z`
-   overrides it, and the redirected file reads back as an `IFile`
- * a pipeline that handles many tables holds one at a time, not all of them
- * a table argument is read by the pool that uses it, not copied through
-   the nexus first
- * a table can be piped in: CSV and TSV on stdin are recognised by content
- * a table with a decimal or string-view column crosses into any pool
- * a C++ or Rust pool no longer grows with the number of cross-language calls it makes
- * a numpy array a Python kernel receives over shared memory is read-only, so
-   a kernel that writes into its argument raises instead of silently corrupting
-   data another pool is reading
- * a record's field order is part of its type: a table keeps the column order
-   its schema declares, and an operation that would reorder columns is a
-   compile-time error naming both orders rather than a silent permutation
- * a row variable may stand for columns anywhere in a schema, not only at the
-   end, so a signature can say that one named column changed and the rest
-   stayed where they were
- * `selectCols` returns columns in the order you asked for, and its type says
-   the same; previously the type claimed the table's own order while the
-   kernel produced the requested one
- * dropping a named column from a schema reduces to the remaining columns
-   instead of staying an unevaluated difference
- * `setCol` replaces a column where it sits and requires it to exist; the new
-   `addCol` appends one and requires that it does not
- * a function over "any table that has a given column" can be written in
-   morloc: a signature mentioning `Restrict`, `+`, `-` or `ProjectField` can
-   now be given a body, not only sourced from another language
- * a type alias naming a schema works inside a row operator, so
-   `Restrict Callset ['chrom, 'pos]` no longer has to be spelled out
- * a tuple accessor inside an unannotated `where` helper is type-checked
-   against the slot it selects. Returning the wrong slot used to compile
-   and fail inside the pool at run time; a helper that needed no signature
-   could also fail the build with "Cannot infer concrete type for UnkT"
- * a negative dimension is rejected when it is computed, naming the value,
-   instead of building and dying as a malformed schema string
- * combining two tables that share a column name is rejected even when the
-   result type is not written down; the collision used to be reported only
-   if an annotation forced the schema to reduce
- * a class method is resolved from its argument's type, so `unpack v` works
-   without a signature pinning the result. The occurrence type of a method
-   is its own most general form until something downstream constrains it,
-   and no instance could match that
- * `++` on a Vector concatenates in a Python pool. It was mapped onto
-   Python's `+`, which on a numpy array adds elementwise, so the lengths
-   were not added and the result contradicted its own type
- * vectors support elementwise arithmetic, so a column derived from two
-   others is written as the formula: `realOf (getCol "ac" t) / realOf
-   (getCol "an" t)` rather than a round trip through a list
- * `(|>)` pipes a value into a function, so building a table column by
-   column reads top to bottom instead of nesting inside out
- * `-f jsonl` renders a table as one row object per line, streamed, and
-   `-f tsv` writes one; TSV was already accepted on stdin
- * a command that takes or returns a table is served over MCP instead of
-   being dropped from the tool surface, so a table-shaped program has a
-   model-facing interface
- * a command imported from another module, or imported under an alias, keeps all its terminal actions
- * an action given a path writes only to that file; a `@default` action given a path leaves the typed value on stdout
- * a streaming command whose branches each end in `@collect` runs its actions directly, without staging its output
- * actions can refer to `@parse` arguments with `$N` when combined with other outputs; `$N` on a streamed `@parse` argument is rejected when the program is built
- * reading a file that is not a morloc packet says a packet was expected
- * allow parallelization of compression during streaming
+New features
+ * Add `@parse` docstring entry to specify a formatter 
+ * Output actions take a path (`--fasta=out.fa`) and there can be multiple
+ * `@collect` handlers can fold a stream
+ * Tables: `-f jsonl` and `-f tsv` output, CSV/TSV piped in on stdin, and table
+   commands served over MCP
+ * New table helpers: `addCol`, elementwise vector arithmetic, and a `|>` pipe operator
+
+Language and typing
+ * Instances can declare contexts
+ * Records are nominal, and field order is part of the type, so a column reorder
+   is caught when you compile
+ * Function, effect and optional type aliases work anywhere, including inside row operators
+ * Class methods are resolved from the argument's type, so `unpack v` no longer needs a signature
+ * Each argument and each `where`/`let` value is evaluated once, not once per mention
+
+Performance
+ * Deeply nested definitions build and typecheck in linear time and memory instead of exponential
+ * Shared memory is freed as soon as a value is read, so long loops and multi-table pipelines stay flat
+ * Tail-recursive loops call functions from their own pool directly (100k iterations: 5 s -> 0.2 s)
+ * Stream compression runs in parallel behind the writer, and streams copy each batch less often
+ * C++ and Rust pools no longer grow with the number of cross-language calls
+
+Fixes
+ * Point-free and computed commands now return correct results in C++, Rust, Python and R
+ * Values that would overflow on narrowing (e.g. F32, compression level, UInt64)
+   now raise an error instead of silently wrapping
+ * Stream reads no longer corrupt pointer-bearing values; stdout streams read back as `IFile`
+ * Terminal actions work on imported, aliased and branching commands
+ * Shared-memory allocation is now safe across processes; stray pointers fail
+   instead of reading memory
+ * Memory leaks fixed: BigInt JSON, stream/`IFile` reads, C++/Rust packet handling
+ * `where` bindings are lexically scoped and no longer capture names at the call site
+ * Sum-type naming fixed in C++ function types and records
+
 
 0.108.1 [2026-09-18]
 --------------------
