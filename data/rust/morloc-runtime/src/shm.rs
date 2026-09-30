@@ -2166,6 +2166,9 @@ mod tests {
     // name at once, exactly one succeeds and the rest are told it is taken.
     #[test]
     fn volume_creation_has_one_winner() {
+        // Forking runs the stream registry's fork handler, which must not
+        // race a test that owns the registry.
+        let _arena = crate::own_test_shm();
         const KIDS: usize = 4;
         const NAMES: usize = 40;
         let base = format!("/morloc-{}-test-excl", std::process::id());

@@ -861,6 +861,27 @@ impl Drop for ProcessLocalSlot {
     }
 }
 
+impl ProcessLocalSlot {
+    /// Release the stream's file lock, if this descriptor holds it, for
+    /// every process sharing the descriptor. Call only once the stream has
+    /// ended: a forked child holds the same lock through its copy, so
+    /// closing this one would leave the path locked while the child lives.
+    fn unlock_ended_stream(&self) {
+        if self.fd >= 0 {
+            unsafe { libc::flock(self.fd, libc::LOCK_UN); }
+        }
+    }
+}
+
+/// Close a descriptor this process locked for a stream that never
+/// opened, releasing the lock for any child forked in between.
+fn unlock_and_close(fd: libc::c_int) {
+    unsafe {
+        libc::flock(fd, libc::LOCK_UN);
+        libc::close(fd);
+    }
+}
+
 // SAFETY: ProcessLocalSlot's only !Send field is `mmap_ptr` (a raw
 // `*mut u8` returned by mmap) and the AbsPtr fields inside `cache`.
 // The mmap region is process-wide (kernel-resident, not thread-bound),
@@ -870,16 +891,138 @@ impl Drop for ProcessLocalSlot {
 // while the entry is detached from the map.
 unsafe impl Send for ProcessLocalSlot {}
 
+/// A process's entry for one handle.
+enum LocalEntry {
+    Idle(ProcessLocalSlot),
+    /// A thread has the slot out for an operation; others wait for it.
+    /// A forked child inherits the mark without the thread, so a mark
+    /// from another pid is disregarded.
+    InUse { pid: u32, thread: std::thread::ThreadId },
+}
+
 /// Per-process map from handle int to physical OS state. Lazily
 /// initialised on first access; cleared on `shclose_atexit`-style
 /// teardown.
 ///
-/// The Mutex protects the HashMap; per-handle work happens with the
-/// Mutex released (the lookup briefly takes the lock to find or
-/// install the entry, then operates on the entry via raw pointers
-/// to avoid holding the map lock across blocking I/O).
-static PROCESS_LOCAL_SLOTS: Mutex<Option<std::collections::HashMap<i64, ProcessLocalSlot>>> =
+/// A process has at most one slot per written handle. A second would hold
+/// its own descriptor and sealed batches: whichever was dropped would take
+/// the opener's file lock or unwritten elements with it. So an operation
+/// on a written handle takes the slot out of the map and leaves an `InUse`
+/// mark, and other threads wait for it rather than attaching another. A
+/// read handle's slot holds only a mapping and a cache, so threads reading
+/// at once each use their own. The map lock is never held across an
+/// operation's I/O.
+static PROCESS_LOCAL_SLOTS: Mutex<Option<std::collections::HashMap<i64, LocalEntry>>> =
     Mutex::new(None);
+
+/// Signalled whenever an `InUse` mark is replaced or removed.
+static PROCESS_LOCAL_RETURNED: std::sync::Condvar = std::sync::Condvar::new();
+
+/// This thread's use of a handle's slot. Dropping an exclusive claim
+/// without `give_back` removes the `InUse` mark, so waiting threads attach
+/// anew.
+struct LocalClaim {
+    handle: i64,
+    exclusive: bool,
+    returned: bool,
+}
+
+impl LocalClaim {
+    fn give_back(mut self, local: ProcessLocalSlot) {
+        self.returned = true;
+        if self.exclusive {
+            install_process_local_slot(self.handle, local);
+            return;
+        }
+        let mut guard = PROCESS_LOCAL_SLOTS.lock().unwrap();
+        let map = guard.get_or_insert_with(std::collections::HashMap::new);
+        let spare = match map.entry(self.handle) {
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(LocalEntry::Idle(local));
+                None
+            }
+            // Another reader returned first; keep one.
+            std::collections::hash_map::Entry::Occupied(_) => Some(local),
+        };
+        drop(guard);
+        drop(spare);
+    }
+}
+
+impl Drop for LocalClaim {
+    fn drop(&mut self) {
+        if self.returned || !self.exclusive {
+            return;
+        }
+        let mut guard = PROCESS_LOCAL_SLOTS.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(map) = guard.as_mut() {
+            if let Some(LocalEntry::InUse { pid, thread }) = map.get(&self.handle) {
+                if *pid == std::process::id() && *thread == std::thread::current().id() {
+                    map.remove(&self.handle);
+                }
+            }
+        }
+        drop(guard);
+        PROCESS_LOCAL_RETURNED.notify_all();
+    }
+}
+
+/// How an operation uses a handle's slot.
+#[derive(Clone, Copy, PartialEq)]
+enum ClaimMode {
+    /// Reads only: take the idle slot if there is one, else attach another.
+    Shared,
+    /// Exclusive, waiting while another thread of this process uses it.
+    Wait,
+    /// Exclusive, or `None` while another thread uses it.
+    NoWait,
+}
+
+/// Claim `handle`'s slot for one operation, taking its idle slot if there
+/// is one. An exclusive claim marks the handle in use by this thread.
+fn claim_process_local_slot(
+    handle: i64,
+    mode: ClaimMode,
+) -> Result<Option<(LocalClaim, Option<ProcessLocalSlot>)>, MorlocError> {
+    let pid = std::process::id();
+    let thread = std::thread::current().id();
+    let mut guard = PROCESS_LOCAL_SLOTS.lock().unwrap();
+    if mode == ClaimMode::Shared {
+        let map = guard.get_or_insert_with(std::collections::HashMap::new);
+        let local = match map.remove(&handle) {
+            Some(LocalEntry::Idle(l)) => Some(l),
+            Some(mark) => {
+                map.insert(handle, mark);
+                None
+            }
+            None => None,
+        };
+        return Ok(Some((LocalClaim { handle, exclusive: false, returned: false }, local)));
+    }
+    loop {
+        let map = guard.get_or_insert_with(std::collections::HashMap::new);
+        if let Some(LocalEntry::InUse { pid: p, thread: t }) = map.get(&handle) {
+            if *p == pid {
+                if *t == thread {
+                    return Err(MorlocError::Other(format!(
+                        "stream handle {:#x} used again by an operation already using it",
+                        handle,
+                    )));
+                }
+                if mode == ClaimMode::NoWait {
+                    return Ok(None);
+                }
+                guard = PROCESS_LOCAL_RETURNED.wait(guard).unwrap();
+                continue;
+            }
+        }
+        let local = match map.insert(handle, LocalEntry::InUse { pid, thread }) {
+            Some(LocalEntry::Idle(l)) => Some(l),
+            _ => None,
+        };
+        return Ok(Some((LocalClaim { handle, exclusive: true, returned: false }, local)));
+    }
+}
 
 /// Run `f` against the process-local slot for `handle`. On entry the
 /// function validates the SHM slot's generation against the cached
@@ -934,14 +1077,20 @@ pub fn with_process_local_slot<R>(
         )));
     }
 
-    // Take the entry out of the map for the duration of f, so we
-    // don't hold the map lock during file I/O.
-    let mut taken = take_process_local_slot(handle);
+    let mode = if slot.kind == MLC_KIND_IFILE || slot.kind == MLC_KIND_ISTREAM {
+        ClaimMode::Shared
+    } else {
+        ClaimMode::Wait
+    };
+    let (claim, mut taken) = claim_process_local_slot(handle, mode)?
+        .expect("a waiting claim always succeeds");
 
-    // Validate cached_generation; drop on mismatch.
+    // Validate cached_generation; drop on mismatch. The stream it belonged
+    // to has ended.
     if let Some(existing) = &taken {
         if existing.cached_generation != gen_now {
-            taken = None;  // drop triggers Drop::drop on the old entry
+            existing.unlock_ended_stream();
+            taken = None;
         }
     }
     let mut local = match taken {
@@ -972,18 +1121,9 @@ pub fn with_process_local_slot<R>(
     // Re-install the local slot in the map for future calls. We
     // always re-install, even on Err, so the cache isn't dropped
     // just because the operation failed.
-    install_process_local_slot(handle, local);
+    claim.give_back(local);
 
     result
-}
-
-/// Helper: remove and return the entry for `handle` from the
-/// process-local map, leaving the slot to be re-installed by the
-/// caller. Lazily creates the map on first use.
-fn take_process_local_slot(handle: i64) -> Option<ProcessLocalSlot> {
-    let mut guard = PROCESS_LOCAL_SLOTS.lock().unwrap();
-    let map = guard.get_or_insert_with(std::collections::HashMap::new);
-    map.remove(&handle)
 }
 
 /// Helper: insert an entry into the process-local map, replacing any
@@ -991,17 +1131,23 @@ fn take_process_local_slot(handle: i64) -> Option<ProcessLocalSlot> {
 fn install_process_local_slot(handle: i64, slot: ProcessLocalSlot) {
     let mut guard = PROCESS_LOCAL_SLOTS.lock().unwrap();
     let map = guard.get_or_insert_with(std::collections::HashMap::new);
-    map.insert(handle, slot);
+    map.insert(handle, LocalEntry::Idle(slot));
+    drop(guard);
+    PROCESS_LOCAL_RETURNED.notify_all();
 }
 
 /// Explicitly invalidate (drop) the process-local entry for `handle`
-/// without consulting the SHM slot. Used by `shared_close_handle`
-/// after it releases the SHM slot, so the next access reattaches
-/// (which will then fail the generation check cleanly).
+/// without consulting the SHM slot, once its stream has ended. Used by
+/// `shared_close_handle` after it releases the SHM slot, so the next
+/// access reattaches (which will then fail the generation check cleanly).
 pub fn invalidate_process_local_slot(handle: i64) {
     let mut guard = PROCESS_LOCAL_SLOTS.lock().unwrap();
-    if let Some(map) = guard.as_mut() {
-        map.remove(&handle);  // Drop::drop runs on the entry
+    let removed = guard.as_mut().and_then(|map| map.remove(&handle));
+    drop(guard);
+    match removed {
+        Some(LocalEntry::Idle(local)) => local.unlock_ended_stream(),
+        Some(LocalEntry::InUse { .. }) => PROCESS_LOCAL_RETURNED.notify_all(),
+        None => {}
     }
 }
 
@@ -2374,12 +2520,12 @@ fn init_ostream_on_locked_fd(
     use std::sync::atomic::Ordering;
     if unsafe { libc::ftruncate(fd, 0) } != 0 {
         let e = std::io::Error::last_os_error();
-        unsafe { libc::close(fd); }
+        unlock_and_close(fd);
         return Err(MorlocError::Io(e));
     }
 
     if let Err(e) = write_all_fd(fd, &header_bytes) {
-        unsafe { libc::close(fd); }
+        unlock_and_close(fd);
         return Err(e);
     }
     let body_start = header_bytes.len() as u64;
@@ -2387,7 +2533,7 @@ fn init_ostream_on_locked_fd(
     let (slot_idx, slot) = match allocate_slot_cas() {
         Ok(s) => s,
         Err(e) => {
-            unsafe { libc::close(fd); }
+            unlock_and_close(fd);
             return Err(e);
         }
     };
@@ -2449,7 +2595,7 @@ fn init_ostream_on_locked_fd(
         Ok(g) => g,
         Err(e) => {
             release_slot_locked(slot);
-            unsafe { libc::close(fd); }
+            unlock_and_close(fd);
             return Err(e);
         }
     };
@@ -2579,6 +2725,7 @@ pub fn shared_close_handle_with_status(
             } else {
                 emit_footer_via_rpc(slot, &footer)?;
             }
+            local.unlock_ended_stream();
             release_slot_locked(slot);
             drop(_guard);
             Ok(())
@@ -2664,9 +2811,9 @@ pub fn shared_finalize_ostream_locked(
     use std::sync::atomic::Ordering;
     let gen_now = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
     let handle = pack_handle(gen_now, slot_idx);
-    let mut local = match take_process_local_slot(handle) {
-        Some(l) => l,
-        None => {
+    let (_claim, mut local) = match claim_process_local_slot(handle, ClaimMode::NoWait) {
+        Ok(Some((claim, Some(l)))) => (claim, l),
+        _ => {
             // No process-local entry. This can happen if the slot was
             // opened in a different process (cross-pool sharing where the
             // opener is not the current sweep-runner). Without the fd we
@@ -2682,6 +2829,7 @@ pub fn shared_finalize_ostream_locked(
         // Elements are missing from the file, or held by another process
         // this one cannot wait for under the futex: leave the temp footer,
         // the honest "writer didn't finish" signal.
+        local.unlock_ended_stream();
         return Ok(());
     }
     let result = (|| -> Result<(), MorlocError> {
@@ -2706,6 +2854,7 @@ pub fn shared_finalize_ostream_locked(
     // Drop `local` here so its fd closes before the slot is released by
     // the caller's discard step. Re-installing it in the map would just
     // get torn down on the next access via the generation check.
+    local.unlock_ended_stream();
     drop(local);
     result
 }
@@ -3316,15 +3465,16 @@ fn with_idle_local_slot<R>(
     {
         return IdleSlot::Closed;
     }
-    let mut local = match take_process_local_slot(handle) {
-        Some(l) => l,
-        None => return IdleSlot::Busy,
+    let (claim, mut local) = match claim_process_local_slot(handle, ClaimMode::NoWait) {
+        Ok(Some((claim, Some(l)))) => (claim, l),
+        _ => return IdleSlot::Busy,
     };
     if local.cached_generation != gen_claim {
+        local.unlock_ended_stream();
         return IdleSlot::Closed;
     }
     let r = f(&mut local, slot);
-    install_process_local_slot(handle, local);
+    claim.give_back(local);
     IdleSlot::Ran(r)
 }
 
@@ -5046,7 +5196,7 @@ pub fn shared_append_to_path(
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     if unsafe { libc::fstat(fd, &mut st) } != 0 {
         let e = std::io::Error::last_os_error();
-        unsafe { libc::close(fd); }
+        unlock_and_close(fd);
         return Err(MorlocError::Io(e));
     }
     let file_size = st.st_size as u64;
@@ -5063,7 +5213,7 @@ pub fn shared_append_to_path(
             match parse_schema(&requested_schema_str) {
                 Ok(s) => s,
                 Err(e) => {
-                    unsafe { libc::close(fd); }
+                    unlock_and_close(fd);
                     return Err(MorlocError::Schema(format!(
                         "@append: unparseable schema '{}': {}",
                         requested_schema_str, e,
@@ -5074,7 +5224,7 @@ pub fn shared_append_to_path(
         if let Err(e) =
             reject_non_list_stream_schema(&parsed_schema, "@append", path)
         {
-            unsafe { libc::close(fd); }
+            unlock_and_close(fd);
             return Err(e);
         }
         let header_bytes =
@@ -5090,14 +5240,14 @@ pub fn shared_append_to_path(
     let (mmap_ptr, mmap_size) = match mmap_fd_readonly(fd, file_size, path) {
         Ok(t) => t,
         Err(e) => {
-            unsafe { libc::close(fd); }
+            unlock_and_close(fd);
             return Err(e);
         }
     };
     let unmap_and = |e: MorlocError| -> MorlocError {
         unsafe {
             libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize);
-            libc::close(fd);
+            unlock_and_close(fd);
         }
         e
     };
@@ -5136,7 +5286,7 @@ pub fn shared_append_to_path(
     let trunc_rc = unsafe { libc::ftruncate(fd, resume_off as libc::off_t) };
     if trunc_rc != 0 {
         let e = std::io::Error::last_os_error();
-        unsafe { libc::close(fd); }
+        unlock_and_close(fd);
         return Err(MorlocError::Io(e));
     }
 
@@ -5145,7 +5295,7 @@ pub fn shared_append_to_path(
     let (slot_idx, slot) = match allocate_slot_cas() {
         Ok(s) => s,
         Err(e) => {
-            unsafe { libc::close(fd); }
+            unlock_and_close(fd);
             return Err(e);
         }
     };
@@ -5216,7 +5366,7 @@ pub fn shared_append_to_path(
         Ok(g) => g,
         Err(e) => {
             release_slot_locked(slot);
-            unsafe { libc::close(fd); }
+            unlock_and_close(fd);
             return Err(e);
         }
     };
@@ -9571,6 +9721,224 @@ mod tests {
         shared_close_handle(h2).unwrap();
 
         let _ = std::fs::remove_file(f);
+    }
+
+    /// Fork a child that holds every descriptor it inherited until
+    /// `release_forked_holder`. Returns the child's pid and the pipe end
+    /// that releases it.
+    fn fork_holder() -> (libc::pid_t, libc::c_int) {
+        let mut fds = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            unsafe {
+                libc::close(fds[1]);
+                let mut b = 0u8;
+                libc::read(fds[0], &mut b as *mut u8 as *mut libc::c_void, 1);
+                libc::_exit(0);
+            }
+        }
+        unsafe { libc::close(fds[0]); }
+        (pid, fds[1])
+    }
+
+    fn release_forked_holder((pid, release): (libc::pid_t, libc::c_int)) {
+        let mut status = 0;
+        unsafe {
+            libc::close(release);
+            libc::waitpid(pid, &mut status, 0);
+        }
+    }
+
+    #[test]
+    fn a_forked_child_does_not_keep_a_finished_stream_locked() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("fork_lock");
+        let schema = "ai4";
+
+        // A child forked while a stream is open shares the descriptor that
+        // holds its lock. Ending the stream must free the path anyway, or
+        // a pool whose user code forked workers could never reopen it.
+        type End = fn(i64) -> Result<(), MorlocError>;
+        let ends: [(&str, End); 2] = [
+            ("close", shared_close_handle),
+            ("discard", shared_discard_handle),
+        ];
+        for (name, end) in ends {
+            let path = dir.join(format!("{name}.idx"));
+            let p = path.to_str().unwrap();
+            let h = shared_open_ostream_with_schema(p, schema).unwrap();
+            let holder = fork_holder();
+            end(h).unwrap();
+            let again = shared_append_to_path(p, schema);
+            release_forked_holder(holder);
+            let h2 = again.unwrap_or_else(|e| {
+                panic!("append after {name} while a forked child lives: {e:?}")
+            });
+            shared_close_handle(h2).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_stream_used_by_two_threads_stays_locked() {
+        use std::sync::mpsc::channel;
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("two_threads");
+        let path = dir.join("log.idx");
+        let p = path.to_str().unwrap().to_string();
+        let h = shared_open_ostream_with_schema(&p, "ai4").unwrap();
+
+        // One thread is inside an operation on the stream when a second
+        // starts one. However the two finish, this process must keep the
+        // descriptor that holds the lock while the stream is open.
+        let (inside_tx, inside_rx) = channel::<()>();
+        let (trying_tx, trying_rx) = channel::<()>();
+        let (done_tx, done_rx) = channel::<()>();
+        let first = std::thread::spawn(move || {
+            with_process_local_slot(h, |_, _| {
+                inside_tx.send(()).unwrap();
+                trying_rx.recv().unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                Ok(())
+            })
+            .unwrap();
+            done_tx.send(()).unwrap();
+        });
+        inside_rx.recv().unwrap();
+        trying_tx.send(()).unwrap();
+        with_process_local_slot(h, |_, _| {
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("the first operation never finished");
+            Ok(())
+        })
+        .unwrap();
+        first.join().unwrap();
+
+        let c_path = std::ffi::CString::new(p.as_str()).unwrap();
+        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+        assert!(fd >= 0);
+        let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+        unsafe { libc::close(fd); }
+        assert_ne!(rc, 0, "an open stream's path could be locked by another writer");
+        shared_close_handle(h).unwrap();
+    }
+
+    #[test]
+    fn threads_read_one_input_file_at_once() {
+        use std::sync::mpsc::channel;
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("parallel_read");
+        let path = dir.join("in.idx");
+        write_int_stream(&path, &[&[1, 2], &[3, 4]]);
+        let h = open_ifile(path.to_str().unwrap()).unwrap();
+
+        // Partitioning an input across threads reads one handle from all
+        // of them; each read must not wait for another to finish.
+        let (inside_tx, inside_rx) = channel::<()>();
+        let (second_tx, second_rx) = channel::<()>();
+        let first = std::thread::spawn(move || {
+            with_process_local_slot(h, |_, _| {
+                inside_tx.send(()).unwrap();
+                second_rx
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .map_err(|_| MorlocError::Other("reads of one file were serialized".into()))
+            })
+        });
+        inside_rx.recv().unwrap();
+        with_process_local_slot(h, |_, _| {
+            second_tx.send(()).unwrap();
+            Ok(())
+        })
+        .unwrap();
+        first.join().unwrap().unwrap();
+        shared_close_handle(h).unwrap();
+    }
+
+    /// Run `act` in a child process, which then reports one i64 and waits
+    /// until released. Returns the child's pid, the value, and the pipe end
+    /// that releases it.
+    fn child_reporting(act: impl FnOnce() -> i64) -> (libc::pid_t, i64, libc::c_int) {
+        let mut report = [0 as libc::c_int; 2];
+        let mut release = [0 as libc::c_int; 2];
+        unsafe {
+            assert_eq!(libc::pipe(report.as_mut_ptr()), 0);
+            assert_eq!(libc::pipe(release.as_mut_ptr()), 0);
+        }
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            unsafe {
+                libc::close(report[0]);
+                libc::close(release[1]);
+            }
+            let v = act().to_le_bytes();
+            unsafe {
+                libc::write(report[1], v.as_ptr() as *const libc::c_void, 8);
+                let mut b = 0u8;
+                libc::read(release[0], &mut b as *mut u8 as *mut libc::c_void, 1);
+                libc::_exit(0);
+            }
+        }
+        let mut v = [0u8; 8];
+        unsafe {
+            libc::close(report[1]);
+            libc::close(release[0]);
+            assert_eq!(libc::read(report[0], v.as_mut_ptr() as *mut libc::c_void, 8), 8);
+            libc::close(report[0]);
+        }
+        (pid, i64::from_le_bytes(v), release[1])
+    }
+
+    #[test]
+    fn a_stream_closed_by_another_process_frees_its_path() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("cross_close");
+        let path = dir.join("log.idx");
+        let p = path.to_str().unwrap().to_string();
+
+        // A handle opened in one pool may be closed in another. The opener
+        // is then idle; the path must still be free once the stream ends.
+        let q = p.clone();
+        let (pid, h, release) = child_reporting(move || {
+            shared_open_ostream_with_schema(&q, "ai4").unwrap()
+        });
+        let closed = shared_close_handle(h);
+        let again = shared_append_to_path(&p, "ai4");
+        release_forked_holder((pid, release));
+        closed.unwrap();
+        let h2 = again.unwrap_or_else(|e| {
+            panic!("append after another process closed the stream: {e:?}")
+        });
+        shared_close_handle(h2).unwrap();
+    }
+
+    #[test]
+    fn a_process_dying_inside_a_stream_does_not_hang_the_rest() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("dead_holder");
+        let path = dir.join("log.idx");
+        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "ai4").unwrap();
+
+        // A pool killed while it holds a stream's slot (a signal, the OOM
+        // killer) must not leave every other process spinning on it.
+        let (pid, _, release) = child_reporting(move || {
+            let (_, idx) = unpack_handle(h);
+            std::mem::forget(SlotFutexGuard::lock(slot_ref(idx).unwrap()));
+            0
+        });
+        unsafe { libc::kill(pid, libc::SIGKILL); }
+        release_forked_holder((pid, release));
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(shared_close_handle(h));
+        });
+        let closed = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("closing a stream whose holder died never returned");
+        assert!(closed.is_err(), "a stream a process died inside closed cleanly");
     }
 
     #[test]
