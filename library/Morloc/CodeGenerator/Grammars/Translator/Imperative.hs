@@ -998,8 +998,11 @@ lowerSerialExpr cfg (SerialLetS _ (SerializeS _ _) _) (SerialLetS_ i e1 e2) = do
       lcMakeLet cfg helperNamer tmpIdx Nothing False letResult releaseBody
 lowerSerialExpr cfg _ (SerialLetS_ i e1 e2) =
   lcMakeLet cfg svarNamer i Nothing False e1 e2
-lowerSerialExpr cfg (NativeLetS _ rhsE _) (NativeLetS_ i e1 e2) =
-  lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) (isBorrowableProjection rhsE) e1 e2
+-- As for a native let ('NativeLetN_'): the bound local is owned, so its RHS
+-- is an owned sink.
+lowerSerialExpr cfg (NativeLetS _ rhsE _) (NativeLetS_ i e1 e2) = do
+  e1' <- adaptOwnedElem cfg rhsE e1
+  lcMakeLet cfg nvarNamer i (Just (typeFof rhsE)) (isBorrowableProjection rhsE) e1' e2
 lowerSerialExpr cfg _ (NativeLetS_ i e1 e2) =
   lcMakeLet cfg nvarNamer i Nothing False e1 e2
 lowerSerialExpr _ _ (LetVarS_ _ i) = return $ defaultValue {poolExpr = svarNamer i}
