@@ -23,7 +23,7 @@ use crate::manifest::{Command as ManifestCommand, Manifest};
 use crate::phase2::{Dest, FileTarget, ParsedCommand};
 use crate::process;
 use std::ffi::CString;
-use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::os::unix::process::ExitStatusExt;
 
 /// One output of the run: the replay entry that produces it and where it
 /// goes.
@@ -299,7 +299,7 @@ fn plan_write(target: &FileTarget) -> Result<Write, String> {
             Existing::Regular(meta) => {
                 use std::os::unix::fs::MetadataExt;
                 libc::fchown(fd, meta.uid(), meta.gid());
-                libc::fchmod(fd, meta.mode() & 0o7777);
+                libc::fchmod(fd, (meta.mode() & 0o7777) as libc::mode_t);
             }
             Existing::Absent | Existing::Other => {
                 let mask = libc::umask(0);
@@ -362,7 +362,9 @@ fn run_child(exe: &str, argv: &[String], stdout: Option<std::fs::File>, stage: b
         }
     }
     // A child outlives nothing: when this process dies it is told to stop.
+    #[cfg(target_os = "linux")]
     unsafe {
+        use std::os::unix::process::CommandExt;
         cmd.pre_exec(|| {
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
             Ok(())
