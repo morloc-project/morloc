@@ -1,4 +1,4 @@
-0.109.0 [2026-09-30]
+0.109.0 [2026-10-01]
 --------------------
 
 New features
@@ -35,6 +35,7 @@ Fixes
  * Memory leaks fixed: BigInt JSON, stream/`IFile` reads, C++/Rust packet handling
  * `where` bindings are lexically scoped and no longer capture names at the call site
  * Sum-type naming fixed in C++ function types and records
+ * Bug in R codegen caused by R laziness
 
 
 0.108.1 [2026-09-18]

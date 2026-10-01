@@ -469,6 +469,11 @@ data LowerConfig m = LowerConfig
   -- 'NativeArgManifold'). Always 'Owned' -- a manifold call materializes an owned
   -- value (its return type is the owned @T@, and the return sink clones a borrowed
   -- body) -- so no member distinguishes on the manifold.
+  , lcBindCallArgs :: Bool
+  -- ^ Bind every computed call argument to a local before the call. Set for a
+  -- language that passes arguments unevaluated (R), where an argument nested
+  -- in a call would otherwise run inside the callee's frame, or not at all if
+  -- the callee never reads it.
   , lcOwnArg :: IOwnership -> TypeF -> MDoc -> MDoc
   -- ^ Adapt an expression to an owned value at an owned sink (a container
   -- element, a return, a let binding, a by-value parameter). Default is identity;
@@ -1466,6 +1471,43 @@ isUnitTypeF :: TypeF -> Bool
 isUnitTypeF (VarF (FV gv _)) = gv == BT.unit
 isUnitTypeF _ = False
 
+-- | Bind each computed argument of a call to a local ahead of the call when
+-- the language would otherwise pass it unevaluated ('lcBindCallArgs').
+-- Infix operators are left alone: R's arithmetic forces its operands, and
+-- its @&&@ and @||@ short-circuit as they do in every other language.
+bindCallArgs ::
+  (Monad m) => LowerConfig m -> NativeExpr -> [(TypeM, PoolDocs)] -> m [(TypeM, PoolDocs)]
+bindCallArgs cfg (AppExeN _ _ args) xs
+  | lcBindCallArgs cfg && length args == length xs = zipWithM bind args xs
+  where
+    bind a (t, x)
+      | isValueArg a = return (t, x)
+      | otherwise = do
+          v <- render . helperNamer <$> lcNewIndex cfg
+          return
+            ( t
+            , x
+                { poolExpr = pretty v
+                , poolPriorLines = poolPriorLines x <> [lcPrintStmt cfg (IAssign v Nothing (IRawExpr (render (poolExpr x))))]
+                }
+            )
+bindCallArgs _ _ xs = return xs
+
+-- | An argument that is already a value, so passing it evaluates nothing.
+isValueArg :: NativeArg -> Bool
+isValueArg (NativeArgExpr e) = case e of
+  BndVarN {} -> True
+  LetVarN {} -> True
+  ExeN {} -> True
+  LogN {} -> True
+  RealN {} -> True
+  IntN {} -> True
+  StrN {} -> True
+  NullN {} -> True
+  EnumN {} -> True
+  _ -> False
+isValueArg (NativeArgManifold _) = False
+
 lowerNativeExprRaw ::
   (Monad m) =>
   LowerConfig m ->
@@ -1476,7 +1518,8 @@ lowerNativeExprRaw ::
 lowerNativeExprRaw _ _ (AppExeN_ _ (SrcCallP src) (map snd -> [lhs, rhs]))
   | srcOperator src =
       return $ mergePoolDocs (\xs -> case xs of [l, r] -> parens (l <+> pretty (unSrcName (srcName src)) <+> r); _ -> error "binary operator requires exactly 2 args") [lhs, rhs]
-lowerNativeExprRaw cfg origExpr (AppExeN_ _ (SrcCallP src) es) = do
+lowerNativeExprRaw cfg origExpr (AppExeN_ _ (SrcCallP src) es0) = do
+  es <- bindCallArgs cfg origExpr es0
   owns <- argOwnerships cfg origExpr
   let argTypes = map fst es
       -- Only the FIRST group is passed to the source function; every later
@@ -1506,19 +1549,22 @@ lowerNativeExprRaw cfg _ (AppExeN_ t (PatCallP p) xs) = do
 -- Manifold-call arguments go through lcSourcedArg too (identity for most
 -- languages; the Rust member borrows every native arg so a value can fan out to
 -- several manifold calls as shared borrows instead of a move-after-move).
-lowerNativeExprRaw cfg origExpr (AppExeN_ _ (LocalCallP idx) xs) = do
+lowerNativeExprRaw cfg origExpr (AppExeN_ _ (LocalCallP idx) xs0) = do
+  xs <- bindCallArgs cfg origExpr xs0
   owns <- argOwnerships cfg origExpr
   let argTypes = map fst xs
   return $ mergePoolDocs (\es -> lcApplyClosure cfg (nvarNamer idx) (zipWith3 (\own t e -> lcSourcedArg cfg ClosureArg own t e) owns argTypes es)) (map snd xs)
 -- A partial application of a closure: the pool's runtime runs its stage
 -- entry, if it has one, and returns the closure of the remaining arguments.
-lowerNativeExprRaw cfg origExpr (AppExeN_ t (PapplyP idx) xs) = do
+lowerNativeExprRaw cfg origExpr (AppExeN_ t (PapplyP idx) xs0) = do
+  xs <- bindCallArgs cfg origExpr xs0
   owns <- argOwnerships cfg origExpr
   let argTypes = map fst xs
       es = zipWith3 (\own at e -> lcSourcedArg cfg ClosureArg own at e) owns argTypes (map (poolExpr . snd) xs)
   call <- lcPapply cfg t argTypes (nvarNamer idx) es
   return $ mergePoolDocs (const call) (map snd xs)
-lowerNativeExprRaw cfg origExpr (AppExeN_ _ (RecCallP mid _) xs) = do
+lowerNativeExprRaw cfg origExpr (AppExeN_ _ (RecCallP mid _) xs0) = do
+  xs <- bindCallArgs cfg origExpr xs0
   owns <- argOwnerships cfg origExpr
   let argTypes = map fst xs
   return $ mergePoolDocs (\es -> manNamer mid <> tupled (zipWith3 (\own t e -> lcSourcedArg cfg ManifoldArg own t e) owns argTypes es)) (map snd xs)

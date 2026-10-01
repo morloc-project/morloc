@@ -849,6 +849,7 @@ cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
     , lcSourcedArg = \_ _ _ x -> x
     , lcOwnership = \_ -> return Owned
     , lcArgManifoldOwnership = \_ -> return Owned
+    , lcBindCallArgs = False
     , lcOwnArg = \_ _ x -> x
     , lcReadArg = \_ x -> x
     , lcWithCallerScope = id

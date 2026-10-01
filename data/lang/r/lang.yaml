@@ -69,6 +69,9 @@ ldDictStyleRecords: false
 ldEnumLitByName: true
 ldQuoteRecordKeys: false
 
+# Arguments are promises, forced when the callee first reads them
+ldLazyArgs: true
+
 # Import syntax
 ldQualifiedImports: false
 ldIncludeRelToFile: false

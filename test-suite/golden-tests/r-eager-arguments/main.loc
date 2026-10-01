@@ -1,0 +1,63 @@
+module main (ladder, ignored)
+
+-- R passes arguments as promises that run only when the callee reads them.
+-- Morloc calls by value, so every argument is evaluated before its call: a
+-- ladder of nested calls runs at a call depth linear in its height, and an
+-- argument the callee ignores is still evaluated.
+
+import root-r
+
+source R from "helpers.R" ("leaf", "first", "boom")
+
+leaf :: Int -> Int
+first :: Int -> Int -> Int
+boom :: Int -> Int
+
+f0 :: Int -> Int
+f0 x = leaf x
+f1 :: Int -> Int
+f1 x = f0 (f0 x)
+f2 :: Int -> Int
+f2 x = f1 (f1 x)
+f3 :: Int -> Int
+f3 x = f2 (f2 x)
+f4 :: Int -> Int
+f4 x = f3 (f3 x)
+f5 :: Int -> Int
+f5 x = f4 (f4 x)
+f6 :: Int -> Int
+f6 x = f5 (f5 x)
+f7 :: Int -> Int
+f7 x = f6 (f6 x)
+f8 :: Int -> Int
+f8 x = f7 (f7 x)
+f9 :: Int -> Int
+f9 x = f8 (f8 x)
+f10 :: Int -> Int
+f10 x = f9 (f9 x)
+f11 :: Int -> Int
+f11 x = f10 (f10 x)
+f12 :: Int -> Int
+f12 x = f11 (f11 x)
+f13 :: Int -> Int
+f13 x = f12 (f12 x)
+f14 :: Int -> Int
+f14 x = f13 (f13 x)
+f15 :: Int -> Int
+f15 x = f14 (f14 x)
+f16 :: Int -> Int
+f16 x = f15 (f15 x)
+f17 :: Int -> Int
+f17 x = f16 (f16 x)
+f18 :: Int -> Int
+f18 x = f17 (f17 x)
+f19 :: Int -> Int
+f19 x = f18 (f18 x)
+f20 :: Int -> Int
+f20 x = f19 (f19 x)
+
+ladder :: Int -> Int
+ladder x = f20 x
+
+ignored :: Int -> Int
+ignored x = first x (boom x)

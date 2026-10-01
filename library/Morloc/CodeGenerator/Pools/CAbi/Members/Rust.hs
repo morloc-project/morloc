@@ -2115,6 +2115,7 @@ rustLowerConfig mask =
               _ -> x
     , lcOwnership = rustOwnership
     , lcArgManifoldOwnership = \_ -> return Owned
+    , lcBindCallArgs = False
     , lcOwnArg = rustOwn
     , lcReadArg = rustReadPlace
     , lcWithCallerScope = rustWithCallerScope

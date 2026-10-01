@@ -428,6 +428,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         , lcSourcedArg = \_ _ _ x -> x
         , lcOwnership = \_ -> return Owned
         , lcArgManifoldOwnership = \_ -> return Owned
+        , lcBindCallArgs = ldLazyArgs desc
         , lcOwnArg = \_ _ x -> x
         , lcReadArg = \_ x -> x
         , lcWithCallerScope = id

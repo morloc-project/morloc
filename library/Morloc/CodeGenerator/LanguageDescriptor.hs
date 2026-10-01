@@ -157,6 +157,10 @@ data LangDescriptor = LangDescriptor
     -- True; languages where strings are NUL-terminated by convention
     -- (C) or whose stdlib refuses NUL strings (R) set it to False.
     ldAllowStringNull :: !Bool
+  , -- True when the language passes an argument unevaluated and runs it only
+    -- when the callee first reads it (R's promises). Morloc calls by value,
+    -- so each computed argument is bound to a local before its call.
+    ldLazyArgs :: !Bool
   , -- External codegen (optional)
     ldCodegenCommand :: !(Maybe Text) -- e.g. "morloc-codegen-generic"
   , -- Converter from an Arrow record batch to a module's mapped table type
@@ -307,6 +311,7 @@ instance Y.FromJSON LangDescriptor where
             . maybe id (ins "ldIsCompiled") isCompiledVal
             . maybe id (setK "ldAllowStringNull") allowNullVal
             . ins "ldAllowStringNull" (Y.Bool True)
+            . ins "ldLazyArgs" (Y.Bool False)
             . ins "ldCodegenCommand" Y.Null
             . ins "ldTableImportFn" Y.Null
             . ins "ldRealPosInf" (Y.String "")
@@ -422,6 +427,7 @@ defaultLangDescriptor name ext =
     , ldRunCommand = []
     , ldIsCompiled = False
     , ldAllowStringNull = True
+    , ldLazyArgs = False
     , ldCodegenCommand = Nothing
     , ldTableImportFn = Nothing
     , -- Template fields
