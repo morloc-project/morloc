@@ -15,7 +15,7 @@
 //!   clean error.
 //! - **IFile / IStream / OStream** all implemented against the shared
 //!   registry; cross-pool writers/readers share the SHM-resident
-//!   sub-packet index under each slot's futex.
+//!   sub-packet index under each slot's lock.
 //! - **Voidstar-only sub-packets**: open paths reject a stream whose
 //!   first sub-packet's format byte is not `PACKET_FORMAT_VOIDSTAR`.
 //!
@@ -46,6 +46,7 @@ use morloc_runtime_types::packet::{
     handle_kind_name,
     packet_format_name,
 };
+use morloc_runtime_types::recoverable_lock::RecoverableLock;
 use morloc_runtime_types::schema::{parse_schema, Schema, SerialType};
 use morloc_runtime_types::shm_types::{
     self as shm_types_crate, RelPtr,
@@ -102,7 +103,7 @@ pub const WRITE_BUFFER_INDEX_INITIAL_CAP: u64 = 1024;
 
 /// Initial capacity (number of u64 entries) of an OStream slot's
 /// SHM-resident sub-packet index. Sub-packet boundaries from every
-/// writer pool append here under the slot futex; @close reads it to
+/// writer pool append here under the slot lock; @close reads it to
 /// build the file's final footer. Grows by doubling. 16 covers the
 /// common "open + a few flushes + close" shape without resize; larger
 /// workloads pay the doubling cost a handful of times.
@@ -165,8 +166,12 @@ struct RegistryHeader {
     stdio_slot_stdout:  std::sync::atomic::AtomicI64,
     stdio_slot_stderr:  std::sync::atomic::AtomicI64,
 
+    /// Bumped, with a wake, whenever a stream is left ENDING for its
+    /// opener to release; every process's release service waits on it.
+    release_doorbell:   std::sync::atomic::AtomicU32,
+
     /// Reserved for future use.
-    _reserved:    [u8; 16],
+    _reserved:    [u8; 12],
 }
 
 const _: () = {
@@ -343,13 +348,24 @@ pub fn registry_teardown() {
     use std::sync::atomic::Ordering;
 
     sweeper_shutdown();
+    let service_stopped = release_service_shutdown();
 
     if REGISTRY_BASE.swap(std::ptr::null_mut(), Ordering::AcqRel).is_null() {
         return;
     }
     REGISTRY_SLOT_COUNT.store(0, Ordering::Relaxed);
 
-    drop(REGISTRY_SEGMENT.lock().unwrap().take());
+    let segment = REGISTRY_SEGMENT.lock().unwrap().take();
+    match segment {
+        // A release service still blocked on a slot keeps the mapping.
+        Some(seg) if !service_stopped => {
+            if shm::owns_program() {
+                seg.unlink();
+            }
+            std::mem::forget(seg);
+        }
+        other => drop(other),
+    }
 }
 
 /// Attach to an already-initialised stream registry (the path pool
@@ -468,8 +484,8 @@ pub(crate) fn registry_gen_salt() -> u64 {
 //                      generation.load(Acquire) = g1;
 //                      if g0 != g1, retry from the top.
 //
-// Mutable-under-futex fields (cursor, element_count, diag) require
-// taking `futex` before read or write. Lockfree snapshot reads of
+// Mutable-under-lock fields (cursor, element_count, diag) require
+// taking `lock` before read or write. Lockfree snapshot reads of
 // these are explicitly NOT supported by this protocol.
 
 /// Per-slot state byte. Stored in the `state` AtomicU8. `FREE` is
@@ -479,6 +495,10 @@ pub(crate) fn registry_gen_salt() -> u64 {
 pub const SLOT_STATE_FREE: u8 = 0;
 pub const SLOT_STATE_OPEN_SHARED: u8 = 1;
 pub const SLOT_STATE_REMOTE_PAUSED: u8 = 2;
+/// An OStream ended by a process other than its opener: its footer is
+/// written and its handle is dead, but the file is still locked by the
+/// opener's descriptor, so the opener releases the slot.
+pub const SLOT_STATE_ENDING: u8 = 3;
 
 /// Sentinel `call_id` value: "this slot should NOT be swept at end of
 /// any call". Used by the cross-nexus return-serialization path to
@@ -506,9 +526,9 @@ pub use morloc_runtime_types::stdio_proto::{
 ///     `compression_level`, `subpacket_entries`, `subpacket_entries_len`,
 ///     `body_start`. Readers use the versioned-pointer pattern
 ///     described above.
-///   - **Mutated under `futex`**: `cursor`, `element_count`, `diag`.
+///   - **Mutated under `lock`**: `cursor`, `element_count`, `diag`.
 ///   - **Independently atomic**: `generation`, `call_id`, `state`,
-///     `futex`. These are accessed without holding any other lock.
+///     `lock`. These are accessed without holding any other lock.
 #[repr(C, align(64))]
 pub struct RegistrySlot {
     // ── Identity / lifecycle (atomically accessed) ──────────────────
@@ -542,12 +562,7 @@ pub struct RegistrySlot {
     pub opener_pid:           u32,                             // off 32..36
     _pad1:                    [u8; 4],                         // off 36..40
 
-    /// Per-slot mutation futex. Held for cursor / element_count / diag
-    /// updates. NOT held for lockfree reads of immutable-after-open
-    /// fields (those use the versioned-pointer pattern against
-    /// `generation`).
-    pub futex:                std::sync::atomic::AtomicU32,    // off 40..44
-    _pad2:                    [u8; 4],                         // off 44..48
+    _pad2:                    [u8; 8],                         // off 40..48
 
     // ── File identity (immutable after publication) ─────────────────
     /// SHM RelPtr to a UTF-8 path string. Allocated from the shared
@@ -562,7 +577,7 @@ pub struct RegistrySlot {
     pub schema_str_len:       u32,                             // off 72..76
     _pad4:                    [u8; 4],                         // off 76..80
 
-    // ── Mutable state under `futex` ─────────────────────────────────
+    // -- Mutable state under `lock` --
     /// IStream/OStream cursor (byte offset). IFile leaves at 0
     /// (random access goes through `subpacket_entries` instead).
     pub cursor:               u64,                             // off 80..88
@@ -586,7 +601,7 @@ pub struct RegistrySlot {
     pub body_start:           u64,                             // off 120..128
 
     /// Per-write diagnostic / running counters. Updated by OStream
-    /// writers under `futex`; readers either hold the futex or accept
+    /// writers under `lock`; readers either hold the lock or accept
     /// momentarily-stale values. ~160 bytes embedded inline.
     pub diag:                 StreamDiag,                      // off 128..288
 
@@ -597,7 +612,7 @@ pub struct RegistrySlot {
     /// reserved for the Array header (filled at flush); bytes 16..
     /// 16+`index_cap`*elem_width are the inline element index; the
     /// remainder is the variable-data section. Cross-pool writers
-    /// append to this same buffer under the slot futex.
+    /// append to this same buffer under the slot lock.
     pub write_buffer:           RelPtr,                        // off 288..296
 
     /// Current index-section capacity in ELEMENTS. Starts at
@@ -615,7 +630,7 @@ pub struct RegistrySlot {
 
     /// OStream-only: capacity in entries of the SHM-resident sub-packet
     /// entry array whose RelPtr lives in `subpacket_entries`. Grown by
-    /// doubling under the slot futex when `subpacket_entries_len` reaches
+    /// doubling under the slot lock when `subpacket_entries_len` reaches
     /// it. For IFile this field is 0 (the array is set once from the
     /// parsed final footer and never grows).
     pub subpacket_entries_cap:u64,                             // off 320..328
@@ -634,7 +649,7 @@ pub struct RegistrySlot {
     _stdio_pad:               [u8; 5],                         // off 331..336
 
     /// The process holding sealed, uncommitted batches of this OStream
-    /// (see `write_behind`), or 0. Guarded by the futex.
+    /// (see `write_behind`), or 0. Guarded by the lock.
     pub wb_owner_pid:         u32,                             // off 336
     /// How many sealed batches `wb_owner_pid` has not yet committed.
     pub wb_outstanding:       u32,                             // off 340
@@ -645,17 +660,35 @@ pub struct RegistrySlot {
     /// Non-zero once a sealed batch failed to compress or to be written.
     /// The stream is incomplete; every later write, flush or close fails.
     pub write_failed:         u8,                              // off 345
-    _wb_pad:                  [u8; 6],                         // off 346..352
+    /// Non-zero once a process died holding `lock`: what it protects may
+    /// be half-updated, so every operation but releasing the slot fails.
+    pub poisoned:             u8,                              // off 346
+    _wb_pad:                  [u8; 5],                         // off 347..352
     /// Start time of `wb_owner_pid`, so a reused PID is not taken for it.
     pub wb_owner_start:       u64,                             // off 352
 
+    /// Device and inode of an OStream's file, from its locked descriptor,
+    /// so a reopen blocked by the lock can find the stream holding it.
+    pub file_dev:             u64,                             // off 360
+    pub file_ino:             u64,                             // off 368
+    /// The generation an ENDING stream's handles carry; the opener's
+    /// entries for it are matched by it.
+    pub ended_gen:            std::sync::atomic::AtomicU64,    // off 376
+
+    /// Per-slot mutation lock. Held for cursor / element_count / diag
+    /// updates. NOT held for lockfree reads of immutable-after-open
+    /// fields (those use the versioned-pointer pattern against
+    /// `generation`). Survives a holder's death; see `SlotGuard`.
+    pub lock:                 RecoverableLock,                 // off 384
+
     /// Padding to round the slot up to STREAM_ENTRY_SIZE so the next
     /// slot starts on a fresh cache-line-aligned boundary.
-    _tail_pad:                [u8; 152],                       // off 360..512
+    _tail_pad:                [u8; 128 - std::mem::size_of::<RecoverableLock>()],
 }
 
 const _: () = {
     assert!(std::mem::size_of::<RegistrySlot>() == STREAM_ENTRY_SIZE);
+    assert!(std::mem::offset_of!(RegistrySlot, lock) == 384);
 };
 
 /// Resolve a slot index to a typed reference into the SHM-resident
@@ -708,63 +741,63 @@ pub(crate) fn unpack_handle(handle: i64) -> (u64, usize) {
 /// handle must never collide with that domain.
 pub(crate) const GENERATION_MASK: u64 = 0x0000_7FFF_FFFF_FFFF;
 
-// ── Slot futex helpers ────────────────────────────────────────────────────
+// -- Slot lock --
 //
-// Each `RegistrySlot` has its own `futex: AtomicU32` word that
-// serialises mutations to `cursor`, `element_count`, and `diag`.
-// Held briefly; never across mmap / file I/O. We use a simple
-// spin-then-yield protocol rather than a real futex syscall because
-// hold times are O(memcpy) and contention is rare. The `_yield`
-// import keeps us out of the kernel even under heavy contention.
+// Each `RegistrySlot` has its own `lock`, which serialises mutations to
+// `cursor`, `element_count`, `diag` and the write buffer. It is held across
+// sub-packet writes, fdatasync, synchronous compression and stdio RPCs, so
+// waiters block rather than spin. A process killed while holding it (a
+// signal, the OOM killer) poisons the slot: its state may be half-updated,
+// so operations on the stream fail from then on, and releasing the slot
+// leaks its SHM blocks rather than free pointers that may be mid-swap.
 
-const SLOT_FUTEX_UNLOCKED: u32 = 0;
-const SLOT_FUTEX_LOCKED:   u32 = 1;
-
-/// Acquire the slot's mutation lock. Spins with `spin_loop` hints
-/// until the CAS succeeds, then a `yield_now` if we've spun more
-/// than a few thousand iterations. No timeout (the lock should
-/// never be held across blocking I/O).
-fn slot_futex_lock(slot: &RegistrySlot) {
-    use std::sync::atomic::Ordering;
-    let mut spins: u32 = 0;
-    loop {
-        if slot.futex
-            .compare_exchange(
-                SLOT_FUTEX_UNLOCKED, SLOT_FUTEX_LOCKED,
-                Ordering::Acquire, Ordering::Relaxed,
-            )
-            .is_ok()
-        {
-            return;
-        }
-        spins = spins.wrapping_add(1);
-        if spins & 0x3FF == 0 {
-            std::thread::yield_now();
-        } else {
-            std::hint::spin_loop();
-        }
-    }
+fn died_inside() -> MorlocError {
+    MorlocError::Other(
+        "a process died while using this stream; it is incomplete and can \
+         no longer be read or written".into(),
+    )
 }
 
-fn slot_futex_unlock(slot: &RegistrySlot) {
-    use std::sync::atomic::Ordering;
-    slot.futex.store(SLOT_FUTEX_UNLOCKED, Ordering::Release);
-}
-
-/// RAII helper: locks the slot's futex on construction, unlocks on
-/// Drop. Use this in code that takes the futex on entry and may
-/// have multiple return paths.
-struct SlotFutexGuard<'a> {
+/// Holds a slot's lock until dropped. A panic while it is held poisons the
+/// slot, as a death would: unwinding releases the lock mid-update.
+pub(crate) struct SlotGuard<'a> {
     slot: &'a RegistrySlot,
+    _held: morloc_runtime_types::recoverable_lock::RecoverableGuard<'a>,
 }
-impl<'a> SlotFutexGuard<'a> {
-    fn lock(slot: &'a RegistrySlot) -> Self {
-        slot_futex_lock(slot);
-        SlotFutexGuard { slot }
+
+impl Drop for SlotGuard<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            unsafe {
+                let mp = self.slot as *const RegistrySlot as *mut RegistrySlot;
+                (*mp).poisoned = 1;
+            }
+        }
     }
 }
-impl<'a> Drop for SlotFutexGuard<'a> {
-    fn drop(&mut self) { slot_futex_unlock(self.slot); }
+
+impl<'a> SlotGuard<'a> {
+    /// Take the slot's lock to operate on its stream. Fails if a process
+    /// died inside the slot.
+    fn lock(slot: &'a RegistrySlot) -> Result<Self, MorlocError> {
+        let guard = Self::lock_any(slot)?;
+        if slot.poisoned != 0 {
+            return Err(died_inside());
+        }
+        Ok(guard)
+    }
+
+    /// Take the slot's lock whatever its state, to end or reclaim it.
+    fn lock_any(slot: &'a RegistrySlot) -> Result<Self, MorlocError> {
+        let acquired = slot.lock.lock()?;
+        if acquired.holder_died {
+            unsafe {
+                let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+                (*mp).poisoned = 1;
+            }
+        }
+        Ok(SlotGuard { slot, _held: acquired.guard })
+    }
 }
 
 // ── Process-local mmap cache ─────────────────────────────────────────────
@@ -840,6 +873,20 @@ pub struct ProcessLocalSlot {
     /// OStream only: sealed batches compressing behind the writer, in
     /// seal order, and spare write buffers.
     pub(crate) write_behind: crate::write_behind::WriteBehind,
+
+    /// `fd` holds the stream file's lock: this process opened the stream.
+    pub(crate) holds_lock: bool,
+
+    /// `FORK_EPOCH` when this slot was made. A slot from before a fork that
+    /// the child reaches is its parent's: its descriptor was closed.
+    pub(crate) fork_epoch: u64,
+}
+
+/// Bumped in every forked child.
+static FORK_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn fork_epoch() -> u64 {
+    FORK_EPOCH.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 impl Drop for ProcessLocalSlot {
@@ -856,6 +903,9 @@ impl Drop for ProcessLocalSlot {
             }
         }
         if self.fd >= 0 {
+            if self.holds_lock {
+                LOCKED_FDS.lock().unwrap_or_else(|p| p.into_inner()).retain(|&f| f != self.fd);
+            }
             unsafe { libc::close(self.fd); }
         }
     }
@@ -873,9 +923,19 @@ impl ProcessLocalSlot {
     }
 }
 
+/// The device and inode of an open file, or zeros if they cannot be read.
+fn file_identity(fd: libc::c_int) -> (u64, u64) {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        return (0, 0);
+    }
+    (st.st_dev as u64, st.st_ino as u64)
+}
+
 /// Close a descriptor this process locked for a stream that never
 /// opened, releasing the lock for any child forked in between.
 fn unlock_and_close(fd: libc::c_int) {
+    LOCKED_FDS.lock().unwrap_or_else(|p| p.into_inner()).retain(|&f| f != fd);
     unsafe {
         libc::flock(fd, libc::LOCK_UN);
         libc::close(fd);
@@ -934,7 +994,7 @@ impl LocalClaim {
             install_process_local_slot(self.handle, local);
             return;
         }
-        let mut guard = PROCESS_LOCAL_SLOTS.lock().unwrap();
+        let mut guard = PROCESS_LOCAL_SLOTS.lock().unwrap_or_else(|p| p.into_inner());
         let map = guard.get_or_insert_with(std::collections::HashMap::new);
         let spare = match map.entry(self.handle) {
             std::collections::hash_map::Entry::Vacant(v) => {
@@ -984,9 +1044,10 @@ fn claim_process_local_slot(
     handle: i64,
     mode: ClaimMode,
 ) -> Result<Option<(LocalClaim, Option<ProcessLocalSlot>)>, MorlocError> {
+    register_fork_handlers();
     let pid = std::process::id();
     let thread = std::thread::current().id();
-    let mut guard = PROCESS_LOCAL_SLOTS.lock().unwrap();
+    let mut guard = PROCESS_LOCAL_SLOTS.lock().unwrap_or_else(|p| p.into_inner());
     if mode == ClaimMode::Shared {
         let map = guard.get_or_insert_with(std::collections::HashMap::new);
         let local = match map.remove(&handle) {
@@ -1031,7 +1092,7 @@ fn claim_process_local_slot(
 ///
 /// The cached entry is removed from the map for the duration of `f`,
 /// then re-inserted on completion. This avoids holding the map lock
-/// across `f`'s body (which may do file I/O or hold the slot futex).
+/// across `f`'s body (which may do file I/O or hold the slot lock).
 pub fn with_process_local_slot<R>(
     handle: i64,
     f: impl FnOnce(&mut ProcessLocalSlot, &'static RegistrySlot) -> Result<R, MorlocError>,
@@ -1085,13 +1146,10 @@ pub fn with_process_local_slot<R>(
     let (claim, mut taken) = claim_process_local_slot(handle, mode)?
         .expect("a waiting claim always succeeds");
 
-    // Validate cached_generation; drop on mismatch. The stream it belonged
-    // to has ended.
-    if let Some(existing) = &taken {
-        if existing.cached_generation != gen_now {
-            existing.unlock_ended_stream();
-            taken = None;
-        }
+    // Validate cached_generation; dispose on mismatch. The stream it
+    // belonged to has ended.
+    if taken.as_ref().is_some_and(|l| l.cached_generation != gen_now) {
+        finish_ended(handle, taken.take().expect("checked above"));
     }
     let mut local = match taken {
         Some(s) => s,
@@ -1105,9 +1163,9 @@ pub fn with_process_local_slot<R>(
     // over the race.
     let gen_after = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
     if gen_after != gen_now {
-        // The freshly attached local slot is now stale; drop it
-        // (Drop::drop runs).
-        drop(local);
+        // The local slot is now stale; dispose of it.
+        drop(claim);
+        finish_ended(handle, local);
         return Err(MorlocError::Other(format!(
             "stream handle {:#x}: slot was closed mid-attach (generation \
              went from {} to {}); retry",
@@ -1115,13 +1173,39 @@ pub fn with_process_local_slot<R>(
         )));
     }
 
-    // Run f with the validated local slot.
-    let result = f(&mut local, slot);
+    // Run f with the validated local slot. A panic must not lose the slot:
+    // it may hold the file lock that only this process can release.
+    let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        f(&mut local, slot)
+    })) {
+        Ok(r) => r,
+        Err(panic) => {
+            if holds_ended_lock(handle, &local) {
+                drop(claim);
+                finish_ended(handle, local);
+            } else {
+                claim.give_back(local);
+            }
+            std::panic::resume_unwind(panic);
+        }
+    };
 
     // Re-install the local slot in the map for future calls. We
     // always re-install, even on Err, so the cache isn't dropped
-    // just because the operation failed.
-    claim.give_back(local);
+    // just because the operation failed -- unless another process ended
+    // the stream meanwhile and left its file locked here, or this is a
+    // forked child holding its parent's slot.
+    if local.fork_epoch != fork_epoch() {
+        local.fd = -1;
+        local.holds_lock = false;
+        drop(claim);
+        drop(local);
+    } else if holds_ended_lock(handle, &local) {
+        drop(claim);
+        finish_ended(handle, local);
+    } else {
+        claim.give_back(local);
+    }
 
     result
 }
@@ -1129,11 +1213,85 @@ pub fn with_process_local_slot<R>(
 /// Helper: insert an entry into the process-local map, replacing any
 /// existing entry (the caller already validated generation).
 fn install_process_local_slot(handle: i64, slot: ProcessLocalSlot) {
-    let mut guard = PROCESS_LOCAL_SLOTS.lock().unwrap();
+    register_fork_handlers();
+    let mut guard = PROCESS_LOCAL_SLOTS.lock().unwrap_or_else(|p| p.into_inner());
     let map = guard.get_or_insert_with(std::collections::HashMap::new);
-    map.insert(handle, LocalEntry::Idle(slot));
+    let replaced = map.insert(handle, LocalEntry::Idle(slot));
     drop(guard);
     PROCESS_LOCAL_RETURNED.notify_all();
+    if let Some(LocalEntry::Idle(old)) = replaced {
+        finish_ended(handle, old);
+    }
+}
+
+/// Descriptors of this process that hold a stream file's lock. A forked
+/// child closes its copies: the lock is the opener's, and a copy in a child
+/// would keep the file locked after the opener ended the stream or died.
+static LOCKED_FDS: Mutex<Vec<libc::c_int>> = Mutex::new(Vec::new());
+
+fn note_locked_fd(fd: libc::c_int) {
+    LOCKED_FDS.lock().unwrap_or_else(|p| p.into_inner()).push(fd);
+}
+
+/// Locks the forking thread holds across a fork, so the child never
+/// inherits one held by a thread it lacks.
+struct ForkHeld {
+    _pass: std::sync::MutexGuard<'static, ()>,
+    map: std::sync::MutexGuard<'static, Option<std::collections::HashMap<i64, LocalEntry>>>,
+    locked_fds: std::sync::MutexGuard<'static, Vec<libc::c_int>>,
+}
+
+thread_local! {
+    static FORK_HELD: std::cell::RefCell<Option<ForkHeld>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Install the fork handlers for this process's stream state, once.
+pub(crate) fn register_fork_handlers() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| unsafe {
+        libc::pthread_atfork(Some(prepare_fork), Some(after_fork_in_parent), Some(after_fork_in_child));
+    });
+}
+
+/// A forked child may write the parent's streams, and the parent may wait
+/// for it: write what this process holds first. Then hold the stream state's
+/// locks across the fork.
+extern "C" fn prepare_fork() {
+    let pass = RELEASE_PASS.lock().unwrap_or_else(|p| p.into_inner());
+    if let Err(e) = drain_before_handoff() {
+        eprintln!("morloc: a stream write failed before fork: {e}");
+    }
+    let map = PROCESS_LOCAL_SLOTS.lock().unwrap_or_else(|p| p.into_inner());
+    let locked_fds = LOCKED_FDS.lock().unwrap_or_else(|p| p.into_inner());
+    FORK_HELD.with(|h| *h.borrow_mut() = Some(ForkHeld { _pass: pass, map, locked_fds }));
+}
+
+extern "C" fn after_fork_in_parent() {
+    FORK_HELD.with(|h| drop(h.borrow_mut().take()));
+}
+
+/// The child closes its copies of the locked descriptors. Its slots for
+/// those streams become stale, so a later use attaches its own descriptor,
+/// as any other writing process does.
+extern "C" fn after_fork_in_child() {
+    FORK_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    FORK_HELD.with(|h| {
+        let Some(mut held) = h.borrow_mut().take() else { return };
+        for fd in held.locked_fds.drain(..) {
+            unsafe { libc::close(fd); }
+        }
+        if let Some(map) = held.map.as_mut() {
+            for entry in map.values_mut() {
+                if let LocalEntry::Idle(local) = entry {
+                    if local.holds_lock {
+                        local.fd = -1;
+                        local.holds_lock = false;
+                        local.cached_generation = u64::MAX;
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Explicitly invalidate (drop) the process-local entry for `handle`
@@ -1141,11 +1299,11 @@ fn install_process_local_slot(handle: i64, slot: ProcessLocalSlot) {
 /// `shared_close_handle` after it releases the SHM slot, so the next
 /// access reattaches (which will then fail the generation check cleanly).
 pub fn invalidate_process_local_slot(handle: i64) {
-    let mut guard = PROCESS_LOCAL_SLOTS.lock().unwrap();
+    let mut guard = PROCESS_LOCAL_SLOTS.lock().unwrap_or_else(|p| p.into_inner());
     let removed = guard.as_mut().and_then(|map| map.remove(&handle));
     drop(guard);
     match removed {
-        Some(LocalEntry::Idle(local)) => local.unlock_ended_stream(),
+        Some(LocalEntry::Idle(local)) => finish_ended(handle, local),
         Some(LocalEntry::InUse { .. }) => PROCESS_LOCAL_RETURNED.notify_all(),
         None => {}
     }
@@ -1329,6 +1487,8 @@ fn attach_process_local_slot(
         subpacket_elem_cum: None,
         is_data_packet,
         write_behind: Default::default(),
+        holds_lock: false,
+        fork_epoch: fork_epoch(),
     })
 }
 
@@ -1340,7 +1500,7 @@ fn attach_process_local_slot(
 // remaining fields (path, schema, kind, etc.) and Release-storing
 // the new generation last.
 //
-// `release_slot_locked`: caller already holds the slot futex; we
+// `release_slot_locked`: caller already holds the slot lock; we
 // just zero `state` and bump `generation`. Used by both
 // `shared_close_handle` (after finalisation) and the sweeper.
 
@@ -1368,12 +1528,13 @@ fn slot_probe_seed() -> usize {
 
 /// Allocate a free slot via random-probe CAS. On success returns the
 /// (slot_idx, slot_ref) pair with `state` set to `OPEN_SHARED` but
-/// `generation` NOT YET bumped. The caller must fill in the other
-/// fields and Release-store the new generation last to complete
-/// publication.
+/// `generation` NOT YET bumped, and the slot's lock held. The caller must
+/// fill in the other fields and Release-store the new generation last to
+/// complete publication.
 ///
 /// Returns `Err` if all slots are occupied.
-pub(crate) fn allocate_slot_cas() -> Result<(usize, &'static RegistrySlot), MorlocError> {
+pub(crate) fn allocate_slot_cas(
+) -> Result<(usize, &'static RegistrySlot, SlotGuard<'static>), MorlocError> {
     use std::sync::atomic::Ordering;
     // Lazily attach to the shared registry. Pool processes (py/r/cpp)
     // only call `shinit` on startup, not `stream_registry_init`; the
@@ -1388,21 +1549,47 @@ pub(crate) fn allocate_slot_cas() -> Result<(usize, &'static RegistrySlot), Morl
         ));
     }
     let start = slot_probe_seed() % slot_count;
-    for off in 0..slot_count {
-        let idx = (start + off) % slot_count;
-        // SAFETY: idx < slot_count and slots_base points to a valid
-        // region of slot_count * STREAM_ENTRY_SIZE bytes.
-        let slot = unsafe {
-            &*(slots_base.add(idx * STREAM_ENTRY_SIZE) as *const RegistrySlot)
-        };
-        if slot.state
-            .compare_exchange(
-                SLOT_STATE_FREE, SLOT_STATE_OPEN_SHARED,
-                Ordering::AcqRel, Ordering::Relaxed,
-            )
-            .is_ok()
-        {
-            return Ok((idx, slot));
+    // Slots left ENDING for openers that have died are reclaimed only when
+    // the registry is otherwise full.
+    for round in 0..2 {
+        if round == 1 && reclaim_dead_ending() == 0 {
+            break;
+        }
+        for off in 0..slot_count {
+            let idx = (start + off) % slot_count;
+            // SAFETY: idx < slot_count and slots_base points to a valid
+            // region of slot_count * STREAM_ENTRY_SIZE bytes.
+            let slot = unsafe {
+                &*(slots_base.add(idx * STREAM_ENTRY_SIZE) as *const RegistrySlot)
+            };
+            if slot.state
+                .compare_exchange(
+                    SLOT_STATE_FREE, SLOT_STATE_OPEN_SHARED,
+                    Ordering::AcqRel, Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                let guard = match SlotGuard::lock_any(slot) {
+                    Ok(g) => g,
+                    Err(e) => {
+                        slot.state.store(SLOT_STATE_FREE, Ordering::Release);
+                        return Err(e);
+                    }
+                };
+                // A process that died inside the slot before it was freed
+                // left the mark; the stream about to be published owns every
+                // field afresh. The opener is recorded first, so the crash
+                // sweeps can reclaim the slot if this process dies before
+                // publishing it.
+                unsafe {
+                    let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+                    (*mp).poisoned = 0;
+                    (*mp).opener_pid = std::process::id();
+                    (*mp).opener_pid_start_time = read_pid_start_time();
+                }
+                slot.call_id.store(current_call_id(), Ordering::Release);
+                return Ok((idx, slot, guard));
+            }
         }
     }
     Err(MorlocError::Other(format!(
@@ -1412,7 +1599,7 @@ pub(crate) fn allocate_slot_cas() -> Result<(usize, &'static RegistrySlot), Morl
     )))
 }
 
-/// Free a slot. Caller must hold the slot futex; the slot's state
+/// Free a slot. Caller must hold the slot lock; the slot's state
 /// transitions to FREE and the generation bumps by the salted-random
 /// increment. After this call, any handle that referenced this slot
 /// fails the generation check.
@@ -1437,20 +1624,54 @@ fn slot_owns(rel: RelPtr) -> RelPtr {
 fn release_slot_locked(slot: &RegistrySlot) {
     use std::sync::atomic::Ordering;
 
-    // Release the stdio claim slot if this slot held one. Must happen
-    // before the slot's fields are zeroed so the CAS-target field is
-    // still readable. Using `store` (not CAS) since we're the only
-    // holder — the winning open published the handle here.
+    // Release the stdio claim if it names this slot. Must happen before
+    // the slot's fields are zeroed so the claim kind is still readable. A
+    // slot that lost the race to claim its kind, or one released a second
+    // time after its holder died, must not clear another slot's claim.
     if slot.is_stdio != 0 {
         if let Some(claim) = stdio_claim_slot(slot.stdio_kind) {
-            claim.store(STDIO_UNCLAIMED, Ordering::Release);
+            let _ = claim.compare_exchange(
+                slot_handle(slot), STDIO_UNCLAIMED, Ordering::AcqRel, Ordering::Acquire,
+            );
         }
     }
 
     // Free path / schema / subpacket_entries / write_buffer SHM blocks.
     // Best-effort: a leaked block here is bounded by the registry's
     // lifetime (cleaned at nexus shclose), and erroring would obscure
-    // the primary `state = FREE` transition.
+    // the primary `state = FREE` transition. A poisoned slot's pointers
+    // may be mid-swap, so its blocks are leaked rather than freed.
+    if slot.poisoned == 0 {
+        free_slot_blocks(slot);
+    }
+
+    // Zero out the RelPtr fields so a future allocator sees a clean
+    // slot. The `state` and `generation` writes below close the
+    // publication window.
+    //
+    // SAFETY: we hold the slot lock AND `state` is about to become
+    // FREE (so no other thread is reading via the versioned-pointer
+    // pattern -- they'd fail the state check). The plain stores are
+    // visible to future allocators by happens-before via the Release
+    // store of `state` below.
+    clear_slot_fields(slot);
+
+    // Bump generation by the salted random increment. Use fetch_add
+    // so concurrent attaches that snapshot the old generation still
+    // detect the change.
+    let bump = registry_gen_salt() | 1;
+    slot.generation.fetch_add(bump, Ordering::AcqRel);
+
+    // Reset call_id to the no-sweep sentinel (which is also the
+    // logical "free slot" value -- the sweeper skips it anyway).
+    slot.call_id.store(CALL_ID_NO_SWEEP, Ordering::Release);
+
+    // Finally: release the slot. State = FREE is the publication
+    // gate that allows other allocators' CAS to succeed.
+    slot.state.store(SLOT_STATE_FREE, Ordering::Release);
+}
+
+fn free_slot_blocks(slot: &RegistrySlot) {
     let path = slot.file_path;
     if path != shm_types_crate::RELNULL {
         if let Ok(abs) = crate::shm::rel2abs(path) {
@@ -1478,16 +1699,9 @@ fn release_slot_locked(slot: &RegistrySlot) {
             let _ = crate::shm::shfree(abs);
         }
     }
+}
 
-    // Zero out the RelPtr fields so a future allocator sees a clean
-    // slot. The `state` and `generation` writes below close the
-    // publication window.
-    //
-    // SAFETY: we hold the slot futex AND `state` is about to become
-    // FREE (so no other thread is reading via the versioned-pointer
-    // pattern -- they'd fail the state check). The plain stores are
-    // visible to future allocators by happens-before via the Release
-    // store of `state` below.
+fn clear_slot_fields(slot: &RegistrySlot) {
     unsafe {
         let mp = slot as *const RegistrySlot as *mut RegistrySlot;
         (*mp).file_path = shm_types_crate::RELNULL;
@@ -1516,22 +1730,378 @@ fn release_slot_locked(slot: &RegistrySlot) {
         (*mp).wb_outstanding = 0;
         (*mp).wb_sync_only = 0;
         (*mp).write_failed = 0;
+        (*mp).poisoned = 0;
         (*mp).wb_owner_start = 0;
+        (*mp).file_dev = 0;
+        (*mp).file_ino = 0;
     }
+    slot.ended_gen.store(0, std::sync::atomic::Ordering::Relaxed);
+}
 
-    // Bump generation by the salted random increment. Use fetch_add
-    // so concurrent attaches that snapshot the old generation still
-    // detect the change.
-    let bump = registry_gen_salt() | 1;
-    slot.generation.fetch_add(bump, Ordering::AcqRel);
+/// End a stream whose slot lock the caller holds. The slot is released,
+/// unless the stream's file is still locked by its opener: a lock lives on
+/// the opener's descriptor, which only a process holding it can unlock. A
+/// live opener elsewhere is handed the slot, left ENDING with its handles
+/// already dead, and its release service frees both.
+fn end_slot_locked(slot: &RegistrySlot) {
+    use std::sync::atomic::Ordering;
+    if slot.kind == MLC_KIND_OSTREAM
+        && slot.is_stdio == 0
+        && slot.opener_pid != std::process::id()
+        && stdio_owner_is_alive(slot.opener_pid, slot.opener_pid_start_time)
+    {
+        // ENDING is published before the generation moves: a holder that
+        // sees its handle dead must also see who is to release the slot.
+        let gen = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
+        slot.ended_gen.store(gen, Ordering::Release);
+        slot.state.store(SLOT_STATE_ENDING, Ordering::Release);
+        let bump = registry_gen_salt() | 1;
+        slot.generation.fetch_add(bump, Ordering::AcqRel);
+        ring_release_doorbell();
+    } else {
+        release_slot_locked(slot);
+    }
+}
 
-    // Reset call_id to the no-sweep sentinel (which is also the
-    // logical "free slot" value -- the sweeper skips it anyway).
-    slot.call_id.store(CALL_ID_NO_SWEEP, Ordering::Release);
+/// Whether `local` holds the file lock of a stream that has since ended.
+fn holds_ended_lock(handle: i64, local: &ProcessLocalSlot) -> bool {
+    use std::sync::atomic::Ordering;
+    if !local.holds_lock {
+        return false;
+    }
+    let (_, idx) = unpack_handle(handle);
+    match slot_ref(idx) {
+        Some(slot) => {
+            slot.generation.load(Ordering::Acquire) & GENERATION_MASK != local.cached_generation
+        }
+        None => true,
+    }
+}
 
-    // Finally: release the slot. State = FREE is the publication
-    // gate that allows other allocators' CAS to succeed.
-    slot.state.store(SLOT_STATE_FREE, Ordering::Release);
+/// Dispose of this process's slot for a stream that has ended: unlock and
+/// close its descriptor, and release the slot if it was left ENDING for
+/// the holder of that lock.
+fn finish_ended(handle: i64, local: ProcessLocalSlot) {
+    use std::sync::atomic::Ordering;
+    local.unlock_ended_stream();
+    let (holds, gen) = (local.holds_lock, local.cached_generation);
+    drop(local);
+    if !holds {
+        return;
+    }
+    let (_, idx) = unpack_handle(handle);
+    let Some(slot) = slot_ref(idx) else { return };
+    if slot.state.load(Ordering::Acquire) != SLOT_STATE_ENDING {
+        return;
+    }
+    let Ok(guard) = SlotGuard::lock_any(slot) else { return };
+    if slot.state.load(Ordering::Acquire) == SLOT_STATE_ENDING
+        && slot.ended_gen.load(Ordering::Acquire) == gen
+    {
+        release_slot_locked(slot);
+    }
+    drop(guard);
+}
+
+/// Dispose of every slot of this process that holds the lock of an ended
+/// stream.
+/// Held across a release pass, which frees SHM blocks, so a fork never
+/// copies the allocator's lock mid-pass into a child without the thread.
+static RELEASE_PASS: Mutex<()> = Mutex::new(());
+
+fn release_ended_streams() {
+    let _pass = RELEASE_PASS.lock().unwrap_or_else(|p| p.into_inner());
+    let ended: Vec<(i64, ProcessLocalSlot)> = {
+        let mut guard = PROCESS_LOCAL_SLOTS.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(map) = guard.as_mut() else { return };
+        let handles: Vec<i64> = map
+            .iter()
+            .filter_map(|(h, e)| match e {
+                LocalEntry::Idle(l) if holds_ended_lock(*h, l) => Some(*h),
+                _ => None,
+            })
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|h| match map.remove(&h) {
+                Some(LocalEntry::Idle(l)) => Some((h, l)),
+                Some(mark) => {
+                    map.insert(h, mark);
+                    None
+                }
+                None => None,
+            })
+            .collect()
+    };
+    for (h, l) in ended {
+        finish_ended(h, l);
+    }
+}
+
+fn release_doorbell() -> Option<&'static std::sync::atomic::AtomicU32> {
+    use std::sync::atomic::Ordering;
+    let base = REGISTRY_BASE.load(Ordering::Acquire);
+    if base.is_null() {
+        return None;
+    }
+    // SAFETY: the registry stays mapped until `registry_teardown`, which
+    // stops the release service first.
+    Some(unsafe { &(*base).release_doorbell })
+}
+
+fn ring_release_doorbell() {
+    use std::sync::atomic::Ordering;
+    let Some(bell) = release_doorbell() else { return };
+    bell.fetch_add(1, Ordering::Release);
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::syscall(
+            libc::SYS_futex,
+            bell.as_ptr(),
+            libc::FUTEX_WAKE,
+            i32::MAX,
+            std::ptr::null::<libc::timespec>(),
+            std::ptr::null::<u32>(),
+            0,
+        );
+    }
+}
+
+/// Wait until the doorbell moves past `seen`, or a while passes.
+fn wait_release_doorbell(bell: &std::sync::atomic::AtomicU32, seen: u32) {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let timeout = libc::timespec { tv_sec: 1, tv_nsec: 0 };
+        libc::syscall(
+            libc::SYS_futex,
+            bell.as_ptr(),
+            libc::FUTEX_WAIT,
+            seen,
+            &timeout as *const libc::timespec,
+            std::ptr::null::<u32>(),
+            0,
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (bell, seen);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+struct ReleaseService {
+    pid: u32,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// The release service of the process that started it.
+static RELEASE_SERVICE: Mutex<Option<ReleaseService>> = Mutex::new(None);
+
+/// Start this process's release service, once, before it first holds a
+/// stream file's lock. A forked child starts its own.
+fn ensure_release_service() -> Result<(), MorlocError> {
+    // The service waits on the registry's doorbell, so the registry must be
+    // attached first; a pool's first stream operation may be this one.
+    registry_init()?;
+    let pid = std::process::id();
+    let mut service = RELEASE_SERVICE.lock().unwrap_or_else(|p| p.into_inner());
+    let running = |s: &ReleaseService| {
+        s.pid == pid && s.thread.as_ref().is_some_and(|t| !t.is_finished())
+    };
+    if service.as_ref().is_some_and(running) {
+        return Ok(());
+    }
+    if let Some(parent) = service.take() {
+        // The parent's thread does not exist in this process.
+        std::mem::forget(parent);
+    }
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped = stop.clone();
+    let thread = std::thread::Builder::new()
+        .name("morloc-release".into())
+        .stack_size(64 * 1024)
+        .spawn(move || release_service_main(&stopped))
+        .map_err(|e| MorlocError::Other(format!(
+            "cannot start the thread that releases ended streams' files: {e}"
+        )))?;
+    *service = Some(ReleaseService { pid, stop, thread: Some(thread) });
+    Ok(())
+}
+
+fn release_service_main(stop: &std::sync::atomic::AtomicBool) {
+    use std::sync::atomic::Ordering;
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(bell) = release_doorbell() else { return };
+        let seen = bell.load(Ordering::Acquire);
+        release_ended_streams();
+        wait_release_doorbell(bell, seen);
+    }
+}
+
+/// Stop the release service. Returns false if it was left running.
+fn release_service_shutdown() -> bool {
+    use std::sync::atomic::Ordering;
+    let taken = RELEASE_SERVICE.lock().unwrap_or_else(|p| p.into_inner()).take();
+    let Some(mut service) = taken else { return true };
+    if service.pid != std::process::id() {
+        std::mem::forget(service);
+        return true;
+    }
+    service.stop.store(true, Ordering::Release);
+    ring_release_doorbell();
+    // A pass may be blocked on a slot a stopped process holds; exit must
+    // not wait on it.
+    if let Some(t) = service.thread.take() {
+        let began = std::time::Instant::now();
+        while !t.is_finished() && began.elapsed() < std::time::Duration::from_secs(1) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        if !t.is_finished() {
+            return false;
+        }
+        let _ = t.join();
+    }
+    true
+}
+
+/// How long a reopen waits for a live opener to release a stream another
+/// process ended. The release takes microseconds; only a stopped or starved
+/// opener reaches this.
+const REOPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Take the exclusive lock on a stream file opened for writing. A stream
+/// another process ended may hold it until its opener releases it; that
+/// release is waited for, within `REOPEN_WAIT`, rather than reported as a
+/// conflict. Returns the reason the lock was refused.
+fn lock_stream_file(fd: libc::c_int) -> Result<(), String> {
+    release_ended_streams();
+    let try_lock = || {
+        let locked = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0;
+        if locked {
+            note_locked_fd(fd);
+        }
+        locked
+    };
+    if try_lock() {
+        return Ok(());
+    }
+    let refused = std::io::Error::last_os_error();
+    if refused.raw_os_error() != Some(libc::EWOULDBLOCK) {
+        return Err(refused.to_string());
+    }
+    let (dev, ino) = file_identity(fd);
+    let deadline = std::time::Instant::now() + REOPEN_WAIT;
+    loop {
+        let pending = if ino == 0 { None } else { ending_stream_of(dev, ino) };
+        let Some((idx, ended, opener, start)) = pending else {
+            // A release may have finished since the first attempt.
+            return if try_lock() {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error().to_string())
+            };
+        };
+        while still_ending(idx, ended) {
+            if !stdio_owner_is_alive(opener, start) {
+                reclaim_ending(idx, ended);
+            }
+            if try_lock() {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "the stream last writing it has ended, but process {opener}, which \
+                     opened it, has not released the file within {} s; is it stopped?",
+                    REOPEN_WAIT.as_secs(),
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        if try_lock() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+    }
+}
+
+fn still_ending(idx: usize, ended: u64) -> bool {
+    use std::sync::atomic::Ordering;
+    slot_ref(idx).is_some_and(|slot| {
+        slot.state.load(Ordering::Acquire) == SLOT_STATE_ENDING
+            && slot.ended_gen.load(Ordering::Acquire) == ended
+    })
+}
+
+/// An ENDING stream on the file `(dev, ino)`: its slot index, ended
+/// generation, and opener.
+fn ending_stream_of(dev: u64, ino: u64) -> Option<(usize, u64, u32, u64)> {
+    use std::sync::atomic::Ordering;
+    let (slots_base, slot_count) = registry_slot_array();
+    if slots_base.is_null() {
+        return None;
+    }
+    for idx in 0..slot_count {
+        let slot = unsafe { &*(slots_base.add(idx * STREAM_ENTRY_SIZE) as *const RegistrySlot) };
+        if slot.state.load(Ordering::Acquire) != SLOT_STATE_ENDING {
+            continue;
+        }
+        // Versioned read: an ENDING slot's fields change only when it is
+        // released, which bumps the generation.
+        let gen_before = slot.generation.load(Ordering::Acquire);
+        let seen = (slot.file_dev, slot.file_ino, slot.ended_gen.load(Ordering::Acquire),
+                    slot.opener_pid, slot.opener_pid_start_time);
+        if slot.generation.load(Ordering::Acquire) != gen_before
+            || slot.state.load(Ordering::Acquire) != SLOT_STATE_ENDING
+        {
+            continue;
+        }
+        if seen.0 == dev && seen.1 == ino {
+            return Some((idx, seen.2, seen.3, seen.4));
+        }
+    }
+    None
+}
+
+/// Release an ENDING slot whose opener died: the kernel dropped its lock.
+fn reclaim_ending(idx: usize, ended: u64) {
+    use std::sync::atomic::Ordering;
+    let Some(slot) = slot_ref(idx) else { return };
+    let Ok(guard) = SlotGuard::lock_any(slot) else { return };
+    if slot.state.load(Ordering::Acquire) == SLOT_STATE_ENDING
+        && slot.ended_gen.load(Ordering::Acquire) == ended
+        && !stdio_owner_is_alive(slot.opener_pid, slot.opener_pid_start_time)
+    {
+        release_slot_locked(slot);
+    }
+    drop(guard);
+}
+
+/// Release every ENDING slot whose opener has died. Returns how many it
+/// found, freed by this call or another.
+fn reclaim_dead_ending() -> usize {
+    use std::sync::atomic::Ordering;
+    let (slots_base, slot_count) = registry_slot_array();
+    if slots_base.is_null() {
+        return 0;
+    }
+    let mut freed = 0;
+    for idx in 0..slot_count {
+        let slot = unsafe { &*(slots_base.add(idx * STREAM_ENTRY_SIZE) as *const RegistrySlot) };
+        if slot.state.load(Ordering::Acquire) != SLOT_STATE_ENDING {
+            continue;
+        }
+        if !stdio_owner_is_alive(slot.opener_pid, slot.opener_pid_start_time) {
+            reclaim_ending(idx, slot.ended_gen.load(Ordering::Acquire));
+            freed += 1;
+        }
+    }
+    freed
 }
 
 /// Read this process's start time from `/proc/self/stat` (field 22,
@@ -1568,6 +2138,19 @@ pub fn read_pid_start_time_for(pid: u32) -> u64 {
     let rest = buf[close_paren + 1..].trim();
     let fields: Vec<&str> = rest.split_whitespace().collect();
     fields.get(19).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0)
+}
+
+/// Whether `pid` has exited and awaits its parent. Such a process holds no
+/// descriptors and runs nothing. False when unknown.
+fn pid_is_zombie(pid: u32) -> bool {
+    // A leader that exited while other threads run also reads as Z, so
+    // the process counts as gone only once it is down to that one thread.
+    let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else { return false };
+    let field = |name: &str| {
+        status.lines().find_map(|l| l.strip_prefix(name)).map(|v| v.trim().to_string())
+    };
+    field("State:").is_some_and(|v| v.starts_with('Z'))
+        && field("Threads:").is_some_and(|v| v == "1")
 }
 
 /// Pull the current dispatch's `call_id` from thread-local storage.
@@ -1656,14 +2239,13 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
     }
 
     // Allocate a slot.
-    let (slot_idx, slot) = match allocate_slot_cas() {
+    let (slot_idx, slot, _guard) = match allocate_slot_cas() {
         Ok(s) => s,
         Err(e) => {
             unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
             return Err(e);
         }
     };
-    let _guard = SlotFutexGuard::lock(slot);
 
     // Publish path + schema + subpacket_entries. On any error, release
     // the slot via `release_slot_locked` (which itself shfree's any
@@ -1676,7 +2258,7 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
         } else {
             shm_types_crate::RELNULL
         };
-        // SAFETY: we hold the slot's futex; state is OPEN_SHARED but
+        // SAFETY: we hold the slot's lock; state is OPEN_SHARED but
         // generation has NOT been bumped to the new value yet, so no
         // cross-pool reader can observe these field writes (the
         // versioned-pointer pattern gates on the new generation).
@@ -1699,8 +2281,6 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
             (*mp).cursor = 0;
             (*mp).element_count = parsed.element_count;
             (*mp).compression_level = 0;
-            (*mp).opener_pid = std::process::id();
-            (*mp).opener_pid_start_time = read_pid_start_time();
             // IFile/IStream don't write; clear buffer fields so
             // release_slot_locked doesn't attempt an spurious shfree
             // on a freshly-allocated never-released slot whose
@@ -1713,7 +2293,6 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
                 (*mp).diag = *d;
             }
         }
-        slot.call_id.store(current_call_id(), Ordering::Release);
         // Bump generation by the salted random increment. This is
         // the publication store: cross-pool readers Acquire-load
         // this and observe all prior writes happens-before.
@@ -1727,7 +2306,7 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
         Ok(g) => g,
         Err(e) => {
             // Roll back the slot. release_slot_locked shfree's any
-            // RelPtrs we've published; the futex guard releases on
+            // RelPtrs we've published; the lock guard releases on
             // drop.
             release_slot_locked(slot);
             unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
@@ -1750,6 +2329,8 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
         subpacket_elem_cum: None,
         is_data_packet: parsed.is_data_packet,
         write_behind: Default::default(),
+        holds_lock: false,
+        fork_epoch: fork_epoch(),
     };
     let handle = pack_handle(new_gen, slot_idx);
     install_process_local_slot(handle, local);
@@ -1790,14 +2371,13 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
         );
     }
 
-    let (slot_idx, slot) = match allocate_slot_cas() {
+    let (slot_idx, slot, _guard) = match allocate_slot_cas() {
         Ok(s) => s,
         Err(e) => {
             unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
             return Err(e);
         }
     };
-    let _guard = SlotFutexGuard::lock(slot);
 
     let publish_result = (|| -> Result<u64, MorlocError> {
         let path_rel = shm_copy_bytes(path.as_bytes())?;
@@ -1818,8 +2398,6 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
             (*mp).cursor = parsed.body_start;
             (*mp).element_count = parsed.element_count;
             (*mp).compression_level = 0;
-            (*mp).opener_pid = std::process::id();
-            (*mp).opener_pid_start_time = read_pid_start_time();
             (*mp).write_buffer = shm_types_crate::RELNULL;
             (*mp).write_buffer_index_cap = 0;
             (*mp).write_buffer_index_count = 0;
@@ -1828,7 +2406,6 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
                 (*mp).diag = *d;
             }
         }
-        slot.call_id.store(current_call_id(), Ordering::Release);
         let bump = registry_gen_salt() | 1;
         // wrapping_add: generation is a wrapping counter masked to
         // GENERATION_MASK; a large random salt overflows u64 (debug panic).
@@ -1858,6 +2435,8 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
         subpacket_elem_cum: None,
         is_data_packet: parsed.is_data_packet,
         write_behind: Default::default(),
+        holds_lock: false,
+        fork_epoch: fork_epoch(),
     };
     let handle = pack_handle(new_gen, slot_idx);
     install_process_local_slot(handle, local);
@@ -1886,6 +2465,9 @@ fn stdio_owner_is_alive(pid: u32, opener_start_time: u64) -> bool {
     if rc != 0 {
         // ESRCH => no such process; EPERM (or other) => exists, can't signal.
         return std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+    }
+    if pid_is_zombie(pid) {
+        return false;
     }
     // Alive by pid; check for pid reuse when both start times are known.
     let live_start = read_pid_start_time_for(pid);
@@ -1918,7 +2500,7 @@ fn try_reclaim_stale_stdio_claim(
                 .is_ok();
         }
     };
-    slot_futex_lock(slot);
+    let Ok(guard) = SlotGuard::lock_any(slot) else { return false };
     let cleared = if claim.load(Ordering::Acquire) != existing {
         // Someone else changed the claim under us; the caller re-loads.
         false
@@ -1943,7 +2525,7 @@ fn try_reclaim_stale_stdio_claim(
             true
         }
     };
-    slot_futex_unlock(slot);
+    drop(guard);
     cleared
 }
 
@@ -2034,8 +2616,7 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
         0
     };
 
-    let (slot_idx, slot) = allocate_slot_cas()?;
-    let _guard = SlotFutexGuard::lock(slot);
+    let (slot_idx, slot, _guard) = allocate_slot_cas()?;
 
     // OStream stdio slots buffer writes through the same pipeline as
     // file-backed OStreams; they need a real write_buffer. IStream
@@ -2091,8 +2672,6 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
             (*mp).cursor = stdio_body_start;
             (*mp).element_count = 0;
             (*mp).compression_level = 0;
-            (*mp).opener_pid = std::process::id();
-            (*mp).opener_pid_start_time = read_pid_start_time();
             (*mp).diag = StreamDiag::new();
             (*mp).write_buffer = slot_owns(buf_rel);
             (*mp).write_buffer_index_cap = 0;
@@ -2108,7 +2687,6 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
         if current_call_id() == CALL_ID_NO_SWEEP {
             set_current_call_id(generate_call_id());
         }
-        slot.call_id.store(current_call_id(), Ordering::Release);
         let bump = registry_gen_salt() | 1;
         // wrapping_add: the generation is a wrapping counter masked to
         // GENERATION_MASK; a large random salt can overflow u64, which
@@ -2164,6 +2742,8 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
         subpacket_elem_cum: None,
         is_data_packet: false,
         write_behind: Default::default(),
+        holds_lock: false,
+        fork_epoch: fork_epoch(),
     };
     install_process_local_slot(handle, local);
     Ok(handle)
@@ -2493,9 +3073,11 @@ pub fn shared_open_ostream_with_schema(
     if fd < 0 {
         return Err(MorlocError::Io(std::io::Error::last_os_error()));
     }
-    let lock_rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-    if lock_rc != 0 {
-        let e = std::io::Error::last_os_error();
+    if let Err(e) = ensure_release_service() {
+        unsafe { libc::close(fd); }
+        return Err(e);
+    }
+    if let Err(e) = lock_stream_file(fd) {
         unsafe { libc::close(fd); }
         return Err(MorlocError::Other(format!(
             "@open OStream '{}': could not acquire exclusive flock: {}",
@@ -2530,14 +3112,13 @@ fn init_ostream_on_locked_fd(
     }
     let body_start = header_bytes.len() as u64;
 
-    let (slot_idx, slot) = match allocate_slot_cas() {
+    let (slot_idx, slot, _guard) = match allocate_slot_cas() {
         Ok(s) => s,
         Err(e) => {
             unlock_and_close(fd);
             return Err(e);
         }
     };
-    let _guard = SlotFutexGuard::lock(slot);
 
     let publish_result = (|| -> Result<u64, MorlocError> {
         let path_rel = shm_copy_bytes(path.as_bytes())?;
@@ -2551,7 +3132,7 @@ fn init_ostream_on_locked_fd(
         // SHM-resident sub-packet entry array, shared across all writer
         // pools so the final footer at @close reflects every flush
         // regardless of which pool emitted it. Initial cap is small and
-        // grows exponentially under the slot futex in
+        // grows exponentially under the slot lock in
         // emit_subpacket_to_disk.
         let idx_cap_initial: u64 = OSTREAM_SUBPACKET_INDEX_INITIAL_CAP;
         let idx_buf_bytes = (idx_cap_initial as usize)
@@ -2561,6 +3142,9 @@ fn init_ostream_on_locked_fd(
         unsafe {
             let mp = slot as *const RegistrySlot as *mut RegistrySlot;
             (*mp).kind = MLC_KIND_OSTREAM;
+            let (dev, ino) = file_identity(fd);
+            (*mp).file_dev = dev;
+            (*mp).file_ino = ino;
             (*mp).file_path = slot_owns(path_rel);
             (*mp).file_path_len = path.len() as u32;
             (*mp).schema_str = slot_owns(schema_rel);
@@ -2573,8 +3157,6 @@ fn init_ostream_on_locked_fd(
             (*mp).cursor = body_start;
             (*mp).element_count = 0;
             (*mp).compression_level = 0;
-            (*mp).opener_pid = std::process::id();
-            (*mp).opener_pid_start_time = read_pid_start_time();
             (*mp).diag = StreamDiag::new();
             // Write buffer fields. index_cap is set lazily on first
             // @write -- elem_width isn't known until then since the
@@ -2584,7 +3166,6 @@ fn init_ostream_on_locked_fd(
             (*mp).write_buffer_index_count = 0;
             (*mp).write_buffer_data_used = 0;
         }
-        slot.call_id.store(current_call_id(), Ordering::Release);
         let bump = registry_gen_salt() | 1;
         // wrapping_add: generation is a wrapping counter masked to
         // GENERATION_MASK; a large random salt overflows u64 (debug panic).
@@ -2624,6 +3205,8 @@ fn init_ostream_on_locked_fd(
         subpacket_elem_cum: None,
         is_data_packet: false,
         write_behind: Default::default(),
+        holds_lock: true,
+        fork_epoch: fork_epoch(),
     };
     let handle = pack_handle(new_gen, slot_idx);
     install_process_local_slot(handle, local);
@@ -2671,13 +3254,44 @@ pub fn shared_close_handle_with_status(
             "shared_close_handle: slot is not OPEN".into(),
         ));
     }
+    match close_open_stream(handle, slot, gen_claim, status) {
+        Ok(()) => Ok(()),
+        Err(e) => Err(release_poisoned(handle, slot, gen_claim).unwrap_or(e)),
+    }
+}
+
+/// End a stream a process died inside: release its slot, leaking what the
+/// slot held, and the path's lock if this process holds it. Returns the
+/// error to report, or `None` if the stream was not poisoned.
+fn release_poisoned(handle: i64, slot: &RegistrySlot, gen_claim: u64) -> Option<MorlocError> {
+    use std::sync::atomic::Ordering;
+    let guard = SlotGuard::lock_any(slot).ok()?;
+    if slot.poisoned == 0
+        || !slot_generation_is(slot, gen_claim)
+        || slot.state.load(Ordering::Acquire) != SLOT_STATE_OPEN_SHARED
+    {
+        return None;
+    }
+    end_slot_locked(slot);
+    drop(guard);
+    invalidate_process_local_slot(handle);
+    Some(died_inside())
+}
+
+fn close_open_stream(
+    handle: i64,
+    slot: &RegistrySlot,
+    gen_claim: u64,
+    status: u8,
+) -> Result<(), MorlocError> {
+    use std::sync::atomic::Ordering;
     let kind = slot.kind;
 
     // Closing a channel finishes it: what is buffered is queued and readers
     // see the end after it. The slot stays until the channel is settled.
     if kind == MLC_KIND_CHANNEL {
         with_process_local_slot(handle, |local, slot| {
-            let _guard = SlotFutexGuard::lock(slot);
+            let _guard = SlotGuard::lock(slot)?;
             if !slot_generation_is(slot, gen_claim) {
                 return Err(MorlocError::Other("the reader of this stream has stopped".into()));
             }
@@ -2691,7 +3305,7 @@ pub fn shared_close_handle_with_status(
     if kind == MLC_KIND_OSTREAM {
         // OStream close uses with_process_local_slot so the buffer
         // flush (which appends to local.subpacket_entries_local) and
-        // the subsequent final-footer write share one futex-held
+        // the subsequent final-footer write share one locked
         // critical section. The flush + footer write together can
         // be sizable (one buffered sub-packet + a final footer)
         // but cross-pool contention during close is rare; the
@@ -2726,13 +3340,13 @@ pub fn shared_close_handle_with_status(
                 emit_footer_via_rpc(slot, &footer)?;
             }
             local.unlock_ended_stream();
-            release_slot_locked(slot);
+            end_slot_locked(slot);
             drop(_guard);
             Ok(())
         })?;
     } else {
         // IFile / IStream: no finalisation; just release.
-        let _guard = SlotFutexGuard::lock(slot);
+        let _guard = SlotGuard::lock(slot)?;
         let gen_now = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
         if gen_now != gen_claim {
             return Err(MorlocError::Other(
@@ -2759,7 +3373,7 @@ pub fn shared_discard_handle(handle: i64) -> Result<(), MorlocError> {
     let slot = slot_ref(slot_idx).ok_or_else(|| MorlocError::Other(format!(
         "shared_discard_handle: slot index {} out of range", slot_idx,
     )))?;
-    let _guard = SlotFutexGuard::lock(slot);
+    let _guard = SlotGuard::lock_any(slot)?;
     let gen_now = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
     if gen_now != gen_claim {
         return Err(MorlocError::Other(format!(
@@ -2767,15 +3381,15 @@ pub fn shared_discard_handle(handle: i64) -> Result<(), MorlocError> {
             gen_claim, gen_now,
         )));
     }
-    release_slot_locked(slot);
+    end_slot_locked(slot);
     drop(_guard);
     invalidate_process_local_slot(handle);
     Ok(())
 }
 
 /// Same as `shared_discard_handle` but assumes the caller already
-/// holds the slot's futex. Used by the per-call_id sweeper, which
-/// takes the futex to re-check `state` + `call_id` and then
+/// holds the slot's lock. Used by the per-call_id sweeper, which
+/// takes the lock to re-check `state` + `call_id` and then
 /// proceeds to the discard while still holding it.
 pub fn shared_discard_handle_locked(
     slot: &RegistrySlot,
@@ -2784,14 +3398,14 @@ pub fn shared_discard_handle_locked(
     use std::sync::atomic::Ordering;
     let gen_now = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
     let handle = pack_handle(gen_now, slot_idx);
-    release_slot_locked(slot);
+    end_slot_locked(slot);
     invalidate_process_local_slot(handle);
     Ok(())
 }
 
 /// Finalise an OPEN OStream slot in place: flush its write buffer, write
 /// the final footer with `status`, and fdatasync. Caller MUST hold the
-/// slot's futex and have confirmed `slot.kind == MLC_KIND_OSTREAM` and
+/// slot's lock and have confirmed `slot.kind == MLC_KIND_OSTREAM` and
 /// `slot.state == OPEN_SHARED`. The slot is left OPEN; the caller must
 /// follow up with `shared_discard_handle_locked` (or equivalent) to
 /// release it.
@@ -2827,7 +3441,7 @@ pub fn shared_finalize_ostream_locked(
     let owner = slot.wb_owner_pid;
     if slot.write_failed != 0 || (owner != 0 && owner != std::process::id()) {
         // Elements are missing from the file, or held by another process
-        // this one cannot wait for under the futex: leave the temp footer,
+        // this one cannot wait for under the lock: leave the temp footer,
         // the honest "writer didn't finish" signal.
         local.unlock_ended_stream();
         return Ok(());
@@ -2860,7 +3474,7 @@ pub fn shared_finalize_ostream_locked(
 }
 
 // Shared op functions run against the SHM slot + process-local mmap cache.
-// They coordinate cursor + sub-packet-index updates via the slot futex so
+// They coordinate cursor + sub-packet-index updates via the slot lock so
 // concurrent pools writing to or reading from the same handle stay
 // consistent.
 
@@ -3044,7 +3658,7 @@ impl<'a> PortablePayload<'a> {
 /// Emit one sub-packet of the OStream from its uncompressed `[a]` voidstar
 /// payload (Array header + inline + variable), compressed at `level`, at the
 /// slot's current cursor, and update slot bookkeeping (cursor, diag, temp
-/// footer, shared sub-packet index). Caller MUST hold the slot futex, and
+/// footer, shared sub-packet index). Caller MUST hold the slot lock, and
 /// must have committed every batch sealed before this payload.
 fn emit_subpacket(
     slot: &RegistrySlot,
@@ -3101,7 +3715,7 @@ fn emit_subpacket_to_disk(
             Some(cursor),
         );
     }
-    // Every pool's flushes append here under the slot futex; the
+    // Every pool's flushes append here under the slot lock; the
     // opener's @close reads this shared array to build the final footer.
     append_shared_subpacket_index(slot, morloc_runtime_types::packet::SubpacketEntry {
         offset: cursor, elem_count,
@@ -3114,7 +3728,7 @@ fn emit_subpacket_to_disk(
 
 /// Emit one sub-packet by sending it to the nexus stdio RPC server,
 /// which writes the bytes to fd 1 (stdout) or fd 2 (stderr). Caller
-/// MUST hold the slot futex.
+/// MUST hold the slot lock.
 ///
 /// The payload is portable ([`PortablePayload`]): a receiver reading this
 /// stream through a different nexus has no view of the sender's SHM
@@ -3177,7 +3791,7 @@ fn emit_subpacket_via_rpc(
 
 /// Emit a pre-built final-footer packet to the nexus stdio RPC server
 /// so it is appended to fd 1 / fd 2 after the last sub-packet. Caller
-/// MUST hold the slot futex. Unlike sub-packet emission, the footer
+/// MUST hold the slot lock. Unlike sub-packet emission, the footer
 /// carries no user-visible fields and needs no handle-to-path rewrite.
 fn emit_footer_via_rpc(
     slot: &RegistrySlot,
@@ -3201,7 +3815,7 @@ fn emit_footer_via_rpc(
     rc
 }
 
-/// Read the current handle for a slot under its futex. Both fields are
+/// Read the current handle for a slot under its lock. Both fields are
 /// derived from immutable-after-@open state, so this is a plain load.
 fn slot_handle(slot: &RegistrySlot) -> i64 {
     use std::sync::atomic::Ordering;
@@ -3275,7 +3889,7 @@ fn debug_assert_payload_elem_count(elem_count: u64, payload: &[u8], site: &str) 
 
 /// Snapshot the SHM-resident shared sub-packet entry array into a heap
 /// `Vec<SubpacketEntry>` suitable for `make_final_footer_packet`.
-/// Caller MUST hold the slot futex so the array can't grow underneath
+/// Caller MUST hold the slot lock so the array can't grow underneath
 /// us. Returns an empty vec when the slot has no entries allocated
 /// (IFile/IStream slots, or an OStream with no flushes yet).
 fn read_shared_subpacket_entries(
@@ -3291,17 +3905,17 @@ fn read_shared_subpacket_entries(
     }
     let idx_abs = crate::shm::rel2abs(idx_rel)?
         as *const morloc_runtime_types::packet::SubpacketEntry;
-    // SAFETY: the caller holds the slot futex, and the entry array holds
+    // SAFETY: the caller holds the slot lock, and the entry array holds
     // `len` initialized entries.
     Ok(unsafe { std::slice::from_raw_parts(idx_abs, len) }.to_vec())
 }
 
 /// Append a sub-packet's `(offset, elem_count)` entry to the
 /// SHM-resident shared sub-packet entry array. Caller MUST hold the
-/// slot futex. Doubles the capacity (and reallocates the SHM block)
+/// slot lock. Doubles the capacity (and reallocates the SHM block)
 /// when full. The relptr in `slot.subpacket_entries` is updated to the
 /// new block before the old one is freed -- readers under the same
-/// futex see a single publication step.
+/// lock see a single publication step.
 fn append_shared_subpacket_index(
     slot: &RegistrySlot,
     entry: morloc_runtime_types::packet::SubpacketEntry,
@@ -3349,14 +3963,14 @@ fn append_shared_subpacket_index(
         (*mp).subpacket_entries_cap = new_cap;
     }
     // Free the old block AFTER the publication. Readers under the
-    // futex see the new relptr; no one is holding a pointer to the
+    // lock see the new relptr; no one is holding a pointer to the
     // old block.
     let _ = crate::shm::shfree(idx_abs as *mut u8);
     Ok(())
 }
 
 /// Double the write buffer's index-section capacity. Caller MUST hold
-/// the slot futex and have already verified that the new capacity
+/// the slot lock and have already verified that the new capacity
 /// (plus current data_used) still fits in the buffer. Memmoves the
 /// data region right by `(new_cap - old_cap) * elem_width` and
 /// shifts every inline element's relptrs by the same amount.
@@ -3401,15 +4015,15 @@ fn grow_index_capacity(
     Ok(())
 }
 
-/// Take the futex of an OStream about to be written, flushed or closed.
+/// Take the lock of an OStream about to be written, flushed or closed.
 /// Batches another process has sealed must reach the file before anything
 /// this call writes: while it holds some, mark the stream synchronous and
 /// wait, unlocked, for that process to commit them. A stream with a batch
 /// that failed to be written is refused.
-fn lock_for_write(slot: &RegistrySlot) -> Result<SlotFutexGuard<'_>, MorlocError> {
+fn lock_for_write(slot: &RegistrySlot) -> Result<SlotGuard<'_>, MorlocError> {
     let me = std::process::id();
     loop {
-        let guard = SlotFutexGuard::lock(slot);
+        let guard = SlotGuard::lock(slot)?;
         if slot.write_failed != 0 {
             return Err(MorlocError::Other(
                 "an earlier write to this stream failed; the stream is incomplete".into(),
@@ -3470,11 +4084,17 @@ fn with_idle_local_slot<R>(
         _ => return IdleSlot::Busy,
     };
     if local.cached_generation != gen_claim {
-        local.unlock_ended_stream();
+        drop(claim);
+        finish_ended(handle, local);
         return IdleSlot::Closed;
     }
     let r = f(&mut local, slot);
-    claim.give_back(local);
+    if holds_ended_lock(handle, &local) {
+        drop(claim);
+        finish_ended(handle, local);
+    } else {
+        claim.give_back(local);
+    }
     IdleSlot::Ran(r)
 }
 
@@ -3487,7 +4107,7 @@ fn drain_idle_streams(mine: &[i64]) -> Result<(), MorlocError> {
     for handle in crate::write_behind::sealed_handles() {
         let (gen_claim, _) = unpack_handle(handle);
         let r = with_idle_local_slot(handle, |local, slot| {
-            let _guard = SlotFutexGuard::lock(slot);
+            let _guard = SlotGuard::lock(slot)?;
             if !slot_generation_is(slot, gen_claim) {
                 return Ok(());
             }
@@ -3534,7 +4154,7 @@ pub(crate) fn drain_before_handoff() -> Result<(), MorlocError> {
 
 /// Compact the write buffer (remove wasted index space) and emit its
 /// contents as one sub-packet at the slot's cursor, after every batch
-/// sealed before it. Caller MUST hold the slot futex. Resets buffer
+/// sealed before it. Caller MUST hold the slot lock. Resets buffer
 /// counters after a successful flush.
 fn flush_write_buffer(
     slot: &RegistrySlot,
@@ -3589,7 +4209,7 @@ fn write_behind_depth(slot: &RegistrySlot) -> Option<usize> {
 
 /// Emit the full write buffer: sealed for background compression when the
 /// stream allows it (see `write_behind_depth`), flushed otherwise. Caller
-/// MUST hold the slot futex.
+/// MUST hold the slot lock.
 fn flush_full_buffer(
     slot: &RegistrySlot,
     local: &mut ProcessLocalSlot,
@@ -3636,7 +4256,7 @@ fn flush_full_buffer(
 }
 
 /// Queue a staged batch's payload for background compression, as its own
-/// sub-packet. Caller MUST hold the slot futex and have checked
+/// sub-packet. Caller MUST hold the slot lock and have checked
 /// `write_behind_depth`.
 fn seal_staged_batch(
     slot: &RegistrySlot,
@@ -3667,7 +4287,7 @@ fn note_sealed(slot: &RegistrySlot) {
 
 /// Write the oldest sealed batches, in seal order, until at most `keep`
 /// remain, waiting for each to finish compressing. Caller MUST hold the
-/// slot futex. On the first failure every remaining batch is dropped and
+/// slot lock. On the first failure every remaining batch is dropped and
 /// the stream is marked failed.
 fn commit_sealed(
     slot: &RegistrySlot,
@@ -3733,7 +4353,7 @@ fn initial_index_cap(buf_size: usize, w: usize) -> u64 {
 /// already its flattened form and no per-element walk is needed. The
 /// record region grows to the capacity `append_one_element` reaches --
 /// the initial capacity doubled while it fits -- so sub-packets are cut
-/// where they always were. Caller MUST hold the slot futex.
+/// where they always were. Caller MUST hold the slot lock.
 fn append_flat_run(
     slot: &RegistrySlot,
     local: &mut ProcessLocalSlot,
@@ -3776,7 +4396,7 @@ fn append_flat_run(
 /// Try to append one element from `elem_src` into the write buffer.
 /// Returns Ok(()) on success (whether the element went into the
 /// buffer or was emitted directly as an oversize sub-packet). Caller
-/// MUST hold the slot futex.
+/// MUST hold the slot lock.
 /// `elem` is the element schema, with `res` its resolver: built once per
 /// batch by the caller rather than once per element and walk.
 fn append_one_element(
@@ -4121,7 +4741,7 @@ pub fn shared_flush_buffer(handle: i64) -> Result<(), MorlocError> {
 /// materialises it, advances the cursor, and returns an SHM
 /// `Array<a>` AbsPtr.
 ///
-/// The cursor advance is under the slot futex, so concurrent
+/// The cursor advance is under the slot lock, so concurrent
 /// readers from multiple pools each pull a distinct sub-packet
 /// (the multi-reader IStream work-queue pattern). On EOF (cursor
 /// at or past the file's footer / end-of-data) returns an empty
@@ -4174,11 +4794,16 @@ fn next_file_subpacket(handle: i64) -> Result<Option<AbsPtr>, MorlocError> {
             )));
         }
 
-        // Claim the next sub-packet under the futex. The lock window
+        // Claim the next sub-packet under the lock. The lock window
         // is just header-read + cursor-advance; the actual
         // decompression / deep-copy happens with the lock dropped.
         let (claim_cursor, on_disk_size, header_is_data) = {
-            let _guard = SlotFutexGuard::lock(slot);
+            let _guard = SlotGuard::lock(slot)?;
+            if !slot_generation_is(slot, local.cached_generation) {
+                return Err(MorlocError::Other(format!(
+                    "stream handle {:#x}: the stream was closed", handle,
+                )));
+            }
             let cursor = slot.cursor;
             if cursor >= local.mmap_size || cursor + 32 > local.mmap_size {
                 // EOF: leave cursor where it is.
@@ -4198,7 +4823,7 @@ fn next_file_subpacket(handle: i64) -> Result<Option<AbsPtr>, MorlocError> {
                 return Ok(None);
             }
             let size = 32 + header.offset as u64 + header.length;
-            // Advance the cursor BEFORE we drop the futex so concurrent
+            // Advance the cursor BEFORE we drop the lock so concurrent
             // @next on this slot from another pool reads from
             // cursor+size and claims a DIFFERENT sub-packet.
             unsafe {
@@ -4210,7 +4835,7 @@ fn next_file_subpacket(handle: i64) -> Result<Option<AbsPtr>, MorlocError> {
         let _ = header_is_data;
 
         // Materialise the claimed sub-packet without holding the
-        // futex. Other pools can advance through subsequent
+        // lock. Other pools can advance through subsequent
         // sub-packets in parallel.
         let arr = materialize_and_finalise_subpacket(local, slot, claim_cursor)?;
         drop_read_pages(local, claim_cursor + on_disk_size);
@@ -4367,9 +4992,14 @@ impl From<MorlocError> for CollectSized {
 
 /// Put an IStream back at its first sub-packet.
 fn reset_istream_cursor(handle: i64) -> Result<(), MorlocError> {
-    with_process_local_slot(handle, |_, slot| {
-        let _guard = SlotFutexGuard::lock(slot);
-        // SAFETY: the slot is this process's, held under its futex.
+    with_process_local_slot(handle, |local, slot| {
+        let _guard = SlotGuard::lock(slot)?;
+        if !slot_generation_is(slot, local.cached_generation) {
+            return Err(MorlocError::Other(format!(
+                "stream handle {:#x}: the stream was closed", handle,
+            )));
+        }
+        // SAFETY: the slot is this process's, held under its lock.
         unsafe {
             let mp = slot as *const RegistrySlot as *mut RegistrySlot;
             (*mp).cursor = (*mp).body_start;
@@ -4712,10 +5342,10 @@ pub fn shared_handle_length(handle: i64) -> Result<u64, MorlocError> {
     let slot = slot_ref(slot_idx).ok_or_else(|| MorlocError::Other(format!(
         "shared_handle_length: slot index {} out of range", slot_idx,
     )))?;
-    // Versioned-pointer read; element_count is futex-protected for
+    // Versioned-pointer read; element_count is lock-protected for
     // OStream writes but we accept a momentarily-stale snapshot
     // for IFile/IStream readers. For OStream callers (which would
-    // be unusual for @flen) take the futex.
+    // be unusual for @flen) take the lock.
     let gen_before = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
     if gen_before != gen_claim {
         return Err(MorlocError::Other(format!(
@@ -4735,7 +5365,7 @@ pub fn shared_handle_length(handle: i64) -> Result<u64, MorlocError> {
         )));
     }
     let count = if slot.kind == MLC_KIND_OSTREAM {
-        let _guard = SlotFutexGuard::lock(slot);
+        let _guard = SlotGuard::lock(slot)?;
         slot.element_count
     } else {
         slot.element_count
@@ -5184,9 +5814,11 @@ pub fn shared_append_to_path(
     if fd < 0 {
         return Err(MorlocError::Io(std::io::Error::last_os_error()));
     }
-    let lock_rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-    if lock_rc != 0 {
-        let e = std::io::Error::last_os_error();
+    if let Err(e) = ensure_release_service() {
+        unsafe { libc::close(fd); }
+        return Err(e);
+    }
+    if let Err(e) = lock_stream_file(fd) {
         unsafe { libc::close(fd); }
         return Err(MorlocError::Other(format!(
             "@append: failed to flock '{}': {}", path, e
@@ -5292,14 +5924,13 @@ pub fn shared_append_to_path(
 
     // Step 3: allocate a fresh OSTREAM slot in the shared registry,
     // pre-seeded with the resume cursor + element_count.
-    let (slot_idx, slot) = match allocate_slot_cas() {
+    let (slot_idx, slot, _guard) = match allocate_slot_cas() {
         Ok(s) => s,
         Err(e) => {
             unlock_and_close(fd);
             return Err(e);
         }
     };
-    let _guard = SlotFutexGuard::lock(slot);
     let publish_result = (|| -> Result<u64, MorlocError> {
         let path_rel = shm_copy_bytes(path.as_bytes())?;
         let schema_rel = shm_copy_bytes(schema_str_clone.as_bytes())?;
@@ -5312,7 +5943,7 @@ pub fn shared_append_to_path(
         // SHM-resident sub-packet entry array pre-seeded with the
         // on-disk (offset, elem_count) pairs discovered during
         // forward-scan recovery. Subsequent flushes from any pool append
-        // under the slot futex. Initial capacity is at least the current
+        // under the slot lock. Initial capacity is at least the current
         // length so we don't grow during the first append.
         let preseed_len = subpacket_entries_clone.len();
         let idx_cap_initial: u64 = std::cmp::max(
@@ -5335,6 +5966,9 @@ pub fn shared_append_to_path(
         unsafe {
             let mp = slot as *const RegistrySlot as *mut RegistrySlot;
             (*mp).kind = MLC_KIND_OSTREAM;
+            let (dev, ino) = file_identity(fd);
+            (*mp).file_dev = dev;
+            (*mp).file_ino = ino;
             (*mp).file_path = slot_owns(path_rel);
             (*mp).file_path_len = path.len() as u32;
             (*mp).schema_str = slot_owns(schema_rel);
@@ -5347,15 +5981,12 @@ pub fn shared_append_to_path(
             (*mp).cursor = resume_off;
             (*mp).element_count = element_count_at_resume;
             (*mp).compression_level = 0;
-            (*mp).opener_pid = std::process::id();
-            (*mp).opener_pid_start_time = read_pid_start_time();
             (*mp).diag = diag;
             (*mp).write_buffer = slot_owns(buf_rel);
             (*mp).write_buffer_index_cap = 0;
             (*mp).write_buffer_index_count = 0;
             (*mp).write_buffer_data_used = 0;
         }
-        slot.call_id.store(current_call_id(), Ordering::Release);
         let bump = registry_gen_salt() | 1;
         // wrapping_add: generation is a wrapping counter masked to
         // GENERATION_MASK; a large random salt overflows u64 (debug panic).
@@ -5388,6 +6019,8 @@ pub fn shared_append_to_path(
         subpacket_elem_cum: None,
         is_data_packet: false,
         write_behind: Default::default(),
+        holds_lock: true,
+        fork_epoch: fork_epoch(),
     };
     let handle = pack_handle(new_gen, slot_idx);
     install_process_local_slot(handle, local);
@@ -5404,7 +6037,7 @@ pub fn shared_append_to_path(
 //
 // The sweep is OFF the worker thread (so a slow sweep doesn't block the
 // next dispatch on the same worker) and confirms `state` + `call_id`
-// UNDER the slot futex before discarding (so a fresh allocation that
+// UNDER the slot lock before discarding (so a fresh allocation that
 // landed in the same slot index between pre-filter and discard isn't
 // accidentally swept).
 //
@@ -5508,7 +6141,7 @@ fn sweeper_main(rx: std::sync::mpsc::Receiver<SweepRequest>) {
 }
 
 /// Finalise an OStream slot's on-disk footer as PAUSED, then discard the
-/// handle. Caller MUST hold the slot futex. Shared by the per-call and
+/// handle. Caller MUST hold the slot lock. Shared by the per-call and
 /// per-pid sweeps and the pool-side stdio reclaim.
 ///
 /// The paused-status footer lets a downstream reader see a clean file
@@ -5516,7 +6149,7 @@ fn sweeper_main(rx: std::sync::mpsc::Receiver<SweepRequest>) {
 /// buffered data" from "crashed mid-flush"). Finalise errors are ignored
 /// so a single bad slot cannot strand a sweep across the registry.
 fn finalize_and_discard_slot_locked(slot: &RegistrySlot, idx: usize) {
-    if slot.kind == MLC_KIND_OSTREAM {
+    if slot.kind == MLC_KIND_OSTREAM && slot.poisoned == 0 {
         let _ = shared_finalize_ostream_locked(
             slot,
             idx,
@@ -5528,7 +6161,7 @@ fn finalize_and_discard_slot_locked(slot: &RegistrySlot, idx: usize) {
 
 /// Walk the registry and discard any OPEN slot whose `call_id`
 /// matches. Two-phase: lockfree pre-filter (`state` + `call_id`
-/// Acquire-loads), then take the slot futex and re-confirm before
+/// Acquire-loads), then take the slot lock and re-confirm before
 /// calling `shared_discard_handle_locked`.
 ///
 /// The re-confirm protects against the race where another dispatch
@@ -5551,14 +6184,14 @@ fn sweep_per_call(call_id: u64) {
         if slot.call_id.load(Ordering::Acquire) != call_id {
             continue;
         }
-        // Confirm under the slot futex.
-        slot_futex_lock(slot);
+        // Confirm under the slot lock.
+        let Ok(guard) = SlotGuard::lock_any(slot) else { continue };
         let still_open = slot.state.load(Ordering::Acquire) == SLOT_STATE_OPEN_SHARED;
         let still_matches = slot.call_id.load(Ordering::Acquire) == call_id;
         if still_open && still_matches {
             finalize_and_discard_slot_locked(slot, idx);
         }
-        slot_futex_unlock(slot);
+        drop(guard);
     }
 }
 
@@ -5578,7 +6211,8 @@ fn sweep_per_pid(pid: u32, start_time: u64) {
         let slot = unsafe {
             &*(slots_base.add(idx * STREAM_ENTRY_SIZE) as *const RegistrySlot)
         };
-        if slot.state.load(Ordering::Acquire) != SLOT_STATE_OPEN_SHARED {
+        let state = slot.state.load(Ordering::Acquire);
+        if state != SLOT_STATE_OPEN_SHARED && state != SLOT_STATE_ENDING {
             continue;
         }
         // `opener_pid` and `opener_pid_start_time` are immutable
@@ -5595,15 +6229,16 @@ fn sweep_per_pid(pid: u32, start_time: u64) {
         if read_pid != pid || read_start != start_time {
             continue;
         }
-        slot_futex_lock(slot);
-        // Re-confirm under the futex (state could have changed).
-        if slot.state.load(Ordering::Acquire) == SLOT_STATE_OPEN_SHARED
-            && slot.opener_pid == pid
-            && slot.opener_pid_start_time == start_time
-        {
-            finalize_and_discard_slot_locked(slot, idx);
+        let Ok(guard) = SlotGuard::lock_any(slot) else { continue };
+        // Re-confirm under the lock (state could have changed).
+        let opener_matches = slot.opener_pid == pid && slot.opener_pid_start_time == start_time;
+        match slot.state.load(Ordering::Acquire) {
+            SLOT_STATE_OPEN_SHARED if opener_matches => finalize_and_discard_slot_locked(slot, idx),
+            // Left for an opener that died: the kernel dropped its lock.
+            SLOT_STATE_ENDING if opener_matches => release_slot_locked(slot),
+            _ => {}
         }
-        slot_futex_unlock(slot);
+        drop(guard);
     }
 }
 
@@ -5645,8 +6280,8 @@ pub(crate) fn pool_reclaim_stdio_after_dispatch() {
             Some(s) => s,
             None => continue,
         };
-        slot_futex_lock(slot);
-        // Re-confirm under the futex: same claim, still open, still a
+        let Ok(guard) = SlotGuard::lock_any(slot) else { continue };
+        // Re-confirm under the lock: same claim, still open, still a
         // stdio slot, and tagged with THIS dispatch's call_id.
         let owned = claim.load(Ordering::Acquire) == existing
             && slot.state.load(Ordering::Acquire) == SLOT_STATE_OPEN_SHARED
@@ -5657,7 +6292,7 @@ pub(crate) fn pool_reclaim_stdio_after_dispatch() {
             // claim), landing any buffered OStream data as a paused footer.
             finalize_and_discard_slot_locked(slot, slot_idx);
         }
-        slot_futex_unlock(slot);
+        drop(guard);
     }
     set_current_call_id(CALL_ID_NO_SWEEP);
 }
@@ -5690,7 +6325,7 @@ pub fn read_write_buffer_bytes_env() -> usize {
 /// Generate a fresh `call_id`. Reads 8 bytes from `/dev/urandom` and
 /// ORs with 1 to ensure the value is never `CALL_ID_NO_SWEEP` (0).
 /// Reusing a `call_id` is statistically negligible (2^-63 per call)
-/// and would only matter for a stale sweep entry; the under-futex
+/// and would only matter for a stale sweep entry; the under-lock
 /// re-check rejects.
 pub fn generate_call_id() -> u64 {
     use std::io::Read;
@@ -9323,14 +9958,13 @@ pub fn shared_open_ifile_recovered(
         };
 
     // Allocate a slot and publish (mirrors shared_open_ifile).
-    let (_slot_idx, slot) = match allocate_slot_cas() {
+    let (_slot_idx, slot, _guard) = match allocate_slot_cas() {
         Ok(s) => s,
         Err(e) => {
             unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
             return Err(e);
         }
     };
-    let _guard = SlotFutexGuard::lock(slot);
 
     let publish_result = (|| -> Result<u64, MorlocError> {
         let path_rel = shm_copy_bytes(path.as_bytes())?;
@@ -9359,8 +9993,6 @@ pub fn shared_open_ifile_recovered(
             (*mp).cursor = 0;
             (*mp).element_count = element_count;
             (*mp).compression_level = 0;
-            (*mp).opener_pid = std::process::id();
-            (*mp).opener_pid_start_time = read_pid_start_time();
             (*mp).write_buffer = shm_types_crate::RELNULL;
             (*mp).write_buffer_index_cap = 0;
             (*mp).write_buffer_index_count = 0;
@@ -9369,7 +10001,6 @@ pub fn shared_open_ifile_recovered(
                 (*mp).diag = *d;
             }
         }
-        slot.call_id.store(current_call_id(), Ordering::Release);
         let bump = registry_gen_salt() | 1;
         // wrapping_add: the generation is a wrapping counter masked to
         // GENERATION_MASK; a large random salt can overflow u64, which
@@ -9404,6 +10035,8 @@ pub fn shared_open_ifile_recovered(
         subpacket_elem_cum: None,
         is_data_packet: parsed.is_data_packet,
         write_behind: Default::default(),
+        holds_lock: false,
+        fork_epoch: fork_epoch(),
     };
     let handle = pack_handle(new_gen, _slot_idx);
     install_process_local_slot(handle, local);
@@ -9905,13 +10538,229 @@ mod tests {
             shared_open_ostream_with_schema(&q, "ai4").unwrap()
         });
         let closed = shared_close_handle(h);
+        let began = std::time::Instant::now();
         let again = shared_append_to_path(&p, "ai4");
+        let waited = began.elapsed();
         release_forked_holder((pid, release));
         closed.unwrap();
+        // The opener is woken, not polled: well under its fallback period.
+        assert!(waited < std::time::Duration::from_millis(500), "reopen took {waited:?}");
         let h2 = again.unwrap_or_else(|e| {
             panic!("append after another process closed the stream: {e:?}")
         });
         shared_close_handle(h2).unwrap();
+    }
+
+    /// Open an OStream on `path` in a child process, which then stops, so
+    /// it can neither write nor release anything. Returns its pid, the
+    /// handle, and the pipe end that releases it once continued.
+    fn stopped_opener(path: &str) -> (libc::pid_t, i64, libc::c_int) {
+        let q = path.to_string();
+        let (pid, h, release) = child_reporting(move || {
+            shared_open_ostream_with_schema(&q, "ai4").unwrap()
+        });
+        unsafe { libc::kill(pid, libc::SIGSTOP); }
+        let mut status = 0;
+        unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED); }
+        (pid, h, release)
+    }
+
+    #[test]
+    fn a_stream_ended_elsewhere_refuses_writes_and_stays_valid() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("ended_writes");
+        let path = dir.join("log.idx");
+        let p = path.to_str().unwrap().to_string();
+        let (pid, h, release) = stopped_opener(&p);
+
+        // Ending the stream must kill its handle at once, even while the
+        // opener still holds the file: a write after the footer would
+        // report success and be missing from the index.
+        shared_close_handle(h).unwrap();
+        let list = parse_schema("ai4").unwrap();
+        let v = crate::json::read_json_with_schema("[1,2]", &list).unwrap();
+        let wrote = shared_write_subpacket(h, crate::compression::CompressionLevel::from_u8(0).unwrap(), v);
+        shm::shfree(v).unwrap();
+        assert!(wrote.is_err(), "a write after the stream ended succeeded");
+        let (mp, sz) = mmap_file_readonly(&p).unwrap();
+        let parsed = parse_stream_file(&p, mp, sz);
+        unsafe { libc::munmap(mp as *mut libc::c_void, sz as usize); }
+        assert_eq!(parsed.unwrap().element_count, 0);
+
+        unsafe { libc::kill(pid, libc::SIGCONT); }
+        release_forked_holder((pid, release));
+    }
+
+    #[test]
+    fn a_reopen_waits_a_bounded_time_for_a_stopped_opener() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("stopped_opener");
+        let path = dir.join("log.idx");
+        let p = path.to_str().unwrap().to_string();
+        let (pid, h, release) = stopped_opener(&p);
+        shared_close_handle(h).unwrap();
+
+        // The opener cannot release the file while stopped: the reopen must
+        // say so after a bounded wait instead of hanging or failing at once.
+        let began = std::time::Instant::now();
+        let q = p.clone();
+        let stuck = within_seconds("a reopen blocked by a stopped opener", move || {
+            shared_append_to_path(&q, "ai4")
+        });
+        let e = stuck.expect_err("a reopen succeeded while the opener held the file");
+        assert!(format!("{e:?}").contains("stopped"), "unexpected error: {e:?}");
+        assert!(began.elapsed() >= REOPEN_WAIT);
+
+        // Once it runs again it releases the file.
+        unsafe { libc::kill(pid, libc::SIGCONT); }
+        let q = p.clone();
+        let h2 = within_seconds("a reopen after the opener continued", move || {
+            shared_append_to_path(&q, "ai4")
+        })
+        .expect("append after the opener continued");
+        shared_close_handle(h2).unwrap();
+        release_forked_holder((pid, release));
+    }
+
+    #[test]
+    fn a_stream_left_for_an_opener_that_died_is_reclaimed() {
+        use std::sync::atomic::Ordering;
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("ended_dead_opener");
+        let path = dir.join("log.idx");
+        let p = path.to_str().unwrap().to_string();
+        let (pid, h, release) = stopped_opener(&p);
+        let start = read_pid_start_time_for(pid as u32);
+        shared_close_handle(h).unwrap();
+        unsafe { libc::kill(pid, libc::SIGKILL); }
+        release_forked_holder((pid, release));
+
+        // The kernel dropped the dead opener's lock, so the path is free; its
+        // slot, left for it to release, is reclaimed by the crash sweep.
+        let h2 = shared_append_to_path(&p, "ai4").expect("append after the opener died");
+        shared_close_handle(h2).unwrap();
+        within_seconds("the crash sweep", move || sweep_per_pid(pid as u32, start));
+        let (_, idx) = unpack_handle(h);
+        assert_eq!(slot_ref(idx).unwrap().state.load(Ordering::Acquire), SLOT_STATE_FREE);
+    }
+
+    #[test]
+    fn an_opener_reopens_a_stream_another_process_ended() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("opener_reopens");
+        let path = dir.join("log.idx");
+        let p = path.to_str().unwrap().to_string();
+        let h = shared_open_ostream_with_schema(&p, "ai4").unwrap();
+
+        // A pool hands its stream to another, which closes it; the pool
+        // then appends to the same file in the same call.
+        let (pid, _, release) = child_reporting(move || {
+            shared_close_handle(h).unwrap();
+            0
+        });
+        release_forked_holder((pid, release));
+        let h2 = shared_append_to_path(&p, "ai4").expect("append after another process closed");
+        shared_close_handle(h2).unwrap();
+    }
+
+    #[test]
+    fn a_child_of_a_dead_opener_does_not_hold_its_file() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("orphan_holder");
+        let path = dir.join("log.idx");
+        let p = path.to_str().unwrap().to_string();
+
+        // The opener forks a long-lived child (user code's worker pool)
+        // and then dies. The stream's lock must not outlive the opener in
+        // the child, which never asked for it.
+        let mut report = [0 as libc::c_int; 2];
+        unsafe { assert_eq!(libc::pipe(report.as_mut_ptr()), 0) };
+        let opener = unsafe { libc::fork() };
+        assert!(opener >= 0);
+        if opener == 0 {
+            let h = shared_open_ostream_with_schema(&p, "ai4").unwrap();
+            let worker = unsafe { libc::fork() };
+            if worker == 0 {
+                unsafe {
+                    libc::sleep(30);
+                    libc::_exit(0);
+                }
+            }
+            let mut msg = [0u8; 16];
+            msg[..8].copy_from_slice(&h.to_le_bytes());
+            msg[8..].copy_from_slice(&(worker as i64).to_le_bytes());
+            unsafe {
+                libc::write(report[1], msg.as_ptr() as *const libc::c_void, 16);
+                loop {
+                    libc::pause();
+                }
+            }
+        }
+        let mut msg = [0u8; 16];
+        unsafe {
+            libc::close(report[1]);
+            assert_eq!(libc::read(report[0], msg.as_mut_ptr() as *mut libc::c_void, 16), 16);
+        }
+        let h = i64::from_le_bytes(msg[..8].try_into().unwrap());
+        let worker = i64::from_le_bytes(msg[8..].try_into().unwrap()) as libc::pid_t;
+        unsafe {
+            libc::kill(opener, libc::SIGKILL);
+            let mut status = 0;
+            libc::waitpid(opener, &mut status, 0);
+        }
+        let closed = shared_close_handle(h);
+        let again = shared_append_to_path(&p, "ai4");
+        unsafe { libc::kill(worker, libc::SIGKILL); }
+        closed.unwrap();
+        let h2 = again.expect("append while the dead opener's child lives");
+        shared_close_handle(h2).unwrap();
+    }
+
+    #[test]
+    fn a_stream_whose_opener_awaits_reaping_is_released_at_once() {
+        use std::sync::atomic::Ordering;
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("zombie_opener");
+        let path = dir.join("log.idx");
+        let p = path.to_str().unwrap().to_string();
+        let q = p.clone();
+        let (pid, h, release) = child_reporting(move || {
+            shared_open_ostream_with_schema(&q, "ai4").unwrap()
+        });
+
+        // Dead but not yet reaped: nothing can release a slot left for it.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOWAIT);
+        }
+        shared_close_handle(h).unwrap();
+        let (_, idx) = unpack_handle(h);
+        let state = slot_ref(idx).unwrap().state.load(Ordering::Acquire);
+        release_forked_holder((pid, release));
+        assert_eq!(state, SLOT_STATE_FREE, "a slot was left for an opener that had exited");
+    }
+
+    /// Kill a child process while it holds the slot lock of `h`.
+    fn die_inside(h: i64) {
+        let (pid, _, release) = child_reporting(move || {
+            let (_, idx) = unpack_handle(h);
+            std::mem::forget(SlotGuard::lock_any(slot_ref(idx).unwrap()).unwrap());
+            0
+        });
+        unsafe { libc::kill(pid, libc::SIGKILL); }
+        release_forked_holder((pid, release));
+    }
+
+    /// Run `f` on another thread, failing the test if it has not returned
+    /// within ten seconds.
+    fn within_seconds<T: Send + 'static>(what: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap_or_else(|_| panic!("{what} never returned"))
     }
 
     #[test]
@@ -9919,26 +10768,136 @@ mod tests {
         let _shm = crate::own_test_registry();
         let dir = concat_test_dir("dead_holder");
         let path = dir.join("log.idx");
-        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "ai4").unwrap();
+        let p = path.to_str().unwrap().to_string();
+        let h = shared_open_ostream_with_schema(&p, "ai4").unwrap();
 
         // A pool killed while it holds a stream's slot (a signal, the OOM
         // killer) must not leave every other process spinning on it.
-        let (pid, _, release) = child_reporting(move || {
-            let (_, idx) = unpack_handle(h);
-            std::mem::forget(SlotFutexGuard::lock(slot_ref(idx).unwrap()));
-            0
+        die_inside(h);
+        let closed = within_seconds("closing a stream whose holder died", move || {
+            shared_close_handle(h)
         });
+        let e = closed.expect_err("a stream a process died inside closed cleanly");
+        assert!(format!("{e:?}").contains("died"), "unexpected error: {e:?}");
+
+        // The failed close still ends the stream: the handle is gone, and
+        // the path and the slot can be used again.
+        assert!(shared_close_handle(h).is_err());
+        let h2 = shared_append_to_path(&p, "ai4").expect("append after the failed close");
+        shared_close_handle(h2).unwrap();
+    }
+
+    #[test]
+    fn readers_of_a_stream_a_process_died_inside_are_refused() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("dead_reader");
+        let path = dir.join("in.idx");
+        write_int_stream(&path, &[&[1, 2], &[3, 4]]);
+        let h = open_istream(path.to_str().unwrap()).unwrap();
+
+        // A reader that died inside the lock may have left the cursor
+        // half-advanced; the stream is not read past that.
+        die_inside(h);
+        let next = within_seconds("reading a stream whose holder died", move || {
+            shared_next_subpacket(h).map(|_| ())
+        });
+        assert!(next.is_err(), "a stream a process died inside was read");
+        assert!(shared_close_handle(h).is_err());
+        let h2 = open_istream(path.to_str().unwrap()).unwrap();
+        shared_close_handle(h2).unwrap();
+    }
+
+    #[test]
+    fn the_crash_sweep_reclaims_a_stream_its_opener_died_inside() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("dead_opener");
+        let path = dir.join("log.idx");
+        let p = path.to_str().unwrap().to_string();
+
+        let q = p.clone();
+        let (pid, h, release) = child_reporting(move || {
+            let h = shared_open_ostream_with_schema(&q, "ai4").unwrap();
+            let (_, idx) = unpack_handle(h);
+            std::mem::forget(SlotGuard::lock_any(slot_ref(idx).unwrap()).unwrap());
+            h
+        });
+        let start = read_pid_start_time_for(pid as u32);
         unsafe { libc::kill(pid, libc::SIGKILL); }
         release_forked_holder((pid, release));
 
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(shared_close_handle(h));
+        within_seconds("the crash sweep", move || sweep_per_pid(pid as u32, start));
+        let (gen, idx) = unpack_handle(h);
+        assert!(!slot_generation_is(slot_ref(idx).unwrap(), gen), "the sweep left the slot open");
+        assert!(shared_close_handle(h).is_err(), "the swept stream is still open");
+        let h2 = shared_append_to_path(&p, "ai4").expect("append after the sweep");
+        shared_close_handle(h2).unwrap();
+    }
+
+    #[test]
+    fn the_crash_sweep_reclaims_a_slot_its_opener_died_in_before_publishing() {
+        use std::sync::atomic::Ordering;
+        let _shm = crate::own_test_registry();
+        registry_init().unwrap();
+
+        // An open that dies between taking a slot and publishing its stream
+        // must not leave the slot taken for the rest of the run.
+        let (pid, idx, release) = child_reporting(|| {
+            let (idx, _, guard) = allocate_slot_cas().unwrap();
+            std::mem::forget(guard);
+            idx as i64
         });
-        let closed = rx
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .expect("closing a stream whose holder died never returned");
-        assert!(closed.is_err(), "a stream a process died inside closed cleanly");
+        let start = read_pid_start_time_for(pid as u32);
+        unsafe { libc::kill(pid, libc::SIGKILL); }
+        release_forked_holder((pid, release));
+
+        within_seconds("the crash sweep", move || sweep_per_pid(pid as u32, start));
+        let slot = slot_ref(idx as usize).unwrap();
+        assert_eq!(slot.state.load(Ordering::Acquire), SLOT_STATE_FREE);
+    }
+
+    #[test]
+    fn a_panic_inside_a_stream_poisons_it() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("panic_inside");
+        let path = dir.join("log.idx");
+        let p = path.to_str().unwrap().to_string();
+        let h = shared_open_ostream_with_schema(&p, "ai4").unwrap();
+
+        // Unwinding releases the lock as a death would, mid-update.
+        let (_, idx) = unpack_handle(h);
+        let slot = slot_ref(idx).unwrap();
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = SlotGuard::lock(slot).unwrap();
+            panic!("inside the slot");
+        }));
+        assert!(caught.is_err());
+        let e = shared_close_handle(h).expect_err("a stream that panicked inside closed cleanly");
+        assert!(format!("{e:?}").contains("died"), "unexpected error: {e:?}");
+        let h2 = shared_append_to_path(&p, "ai4").unwrap();
+        shared_close_handle(h2).unwrap();
+    }
+
+    #[test]
+    fn a_released_slot_clears_only_its_own_stdio_claim() {
+        use std::sync::atomic::Ordering;
+        let _shm = crate::own_test_registry();
+        registry_init().unwrap();
+        let claim = stdio_claim_slot(STDIO_KIND_STDIN).expect("registry attached");
+        let h1 = open_stdio(MLC_KIND_ISTREAM, STDIO_KIND_STDIN, "").unwrap();
+
+        // A slot of the same kind that does not hold the claim, as an open
+        // that lost the race to claim it leaves behind.
+        let (_, slot, guard) = allocate_slot_cas().unwrap();
+        unsafe {
+            let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+            (*mp).is_stdio = 1;
+            (*mp).stdio_kind = STDIO_KIND_STDIN;
+        }
+        release_slot_locked(slot);
+        drop(guard);
+        assert_eq!(claim.load(Ordering::Acquire), h1, "another slot's release cleared the claim");
+        close_handle(h1).unwrap();
+        assert_eq!(claim.load(Ordering::Acquire), STDIO_UNCLAIMED);
     }
 
     #[test]
@@ -10872,7 +11831,7 @@ mod tests {
 //
 // The slot's `subpacket_entries` field (IFile/OStream bookkeeping, unused by
 // a channel) holds the channel block. Every mutation of the block is made
-// under the slot futex; waits happen outside it.
+// under the slot lock; waits happen outside it.
 
 /// Why a channel cannot be named by a path: it exists only in this
 /// program's shared memory, so it cannot be sent to a remote pool, stored
@@ -10928,7 +11887,7 @@ fn channel_backoff(round: &mut u32) {
     }
 }
 
-/// The channel block of a slot. Caller holds the slot futex and has checked
+/// The channel block of a slot. Caller holds the slot lock and has checked
 /// the slot is a channel.
 fn channel_block(slot: &RegistrySlot) -> Result<*mut ChannelBlock, MorlocError> {
     Ok(crate::shm::rel2abs(slot.subpacket_entries)? as *mut ChannelBlock)
@@ -10971,8 +11930,7 @@ pub fn shared_open_channel(schema_str: &str) -> Result<i64, MorlocError> {
     )))?;
     reject_non_list_stream_schema(&parsed_schema, "channel open", "<channel>")?;
 
-    let (slot_idx, slot) = allocate_slot_cas()?;
-    let guard = SlotFutexGuard::lock(slot);
+    let (slot_idx, slot, guard) = allocate_slot_cas()?;
     let publish = (|| -> Result<u64, MorlocError> {
         let schema_rel = shm_copy_bytes(schema_str.as_bytes())?;
         let buf_abs = crate::shm::shcalloc(1, read_write_buffer_bytes_env())?;
@@ -11001,15 +11959,12 @@ pub fn shared_open_channel(schema_str: &str) -> Result<i64, MorlocError> {
             (*mp).cursor = 0;
             (*mp).element_count = 0;
             (*mp).compression_level = 0;
-            (*mp).opener_pid = std::process::id();
-            (*mp).opener_pid_start_time = read_pid_start_time();
             (*mp).diag = StreamDiag::new();
             (*mp).write_buffer = slot_owns(buf_rel);
             (*mp).write_buffer_index_cap = 0;
             (*mp).write_buffer_index_count = 0;
             (*mp).write_buffer_data_used = 0;
         }
-        slot.call_id.store(current_call_id(), Ordering::Release);
         let bump = registry_gen_salt() | 1;
         Ok(slot.generation.fetch_add(bump, Ordering::AcqRel).wrapping_add(bump) & GENERATION_MASK)
     })();
@@ -11041,6 +11996,8 @@ fn channel_local(generation: u64, value_schema: &Schema) -> ProcessLocalSlot {
         subpacket_elem_cum: None,
         is_data_packet: false,
         write_behind: Default::default(),
+        holds_lock: false,
+        fork_epoch: fork_epoch(),
     }
 }
 
@@ -11055,7 +12012,7 @@ fn channel_wait_room(handle: i64) -> Result<(), MorlocError> {
             return Err(MorlocError::Other("the reader of this stream has stopped".into()));
         };
         {
-            let _g = SlotFutexGuard::lock(slot);
+            let _g = SlotGuard::lock(slot)?;
             if !slot_generation_is(slot, gen_claim) {
                 return Err(MorlocError::Other("the reader of this stream has stopped".into()));
             }
@@ -11072,7 +12029,7 @@ fn channel_wait_room(handle: i64) -> Result<(), MorlocError> {
     }
 }
 
-/// Queue one flushed sub-packet. Caller holds the slot futex.
+/// Queue one flushed sub-packet. Caller holds the slot lock.
 fn channel_enqueue(
     slot: &RegistrySlot,
     local: &ProcessLocalSlot,
@@ -11116,7 +12073,7 @@ fn channel_pop(handle: i64) -> Result<Option<AbsPtr>, MorlocError> {
             )));
         };
         {
-            let _g = SlotFutexGuard::lock(slot);
+            let _g = SlotGuard::lock(slot)?;
             if !slot_generation_is(slot, gen_claim) {
                 continue;
             }
@@ -11161,7 +12118,7 @@ fn channel_fail_message(b: *mut ChannelBlock) -> String {
 }
 
 /// The producer finished: every batch it wrote has been queued. Caller
-/// holds the slot futex.
+/// holds the slot lock.
 fn channel_finish(slot: &RegistrySlot) -> Result<(), MorlocError> {
     let b = channel_block(slot)?;
     unsafe {
@@ -11179,7 +12136,7 @@ pub fn shared_channel_fail(handle: i64, msg: &str) -> Result<(), MorlocError> {
     let Some((slot, gen_claim)) = channel_slot(handle)? else {
         return Ok(());
     };
-    let _g = SlotFutexGuard::lock(slot);
+    let _g = SlotGuard::lock(slot)?;
     if !slot_generation_is(slot, gen_claim) {
         return Ok(());
     }
@@ -11203,7 +12160,7 @@ pub fn shared_channel_ended(handle: i64) -> Result<(), MorlocError> {
     let Some((slot, gen_claim)) = channel_slot(handle)? else {
         return Ok(());
     };
-    let _g = SlotFutexGuard::lock(slot);
+    let _g = SlotGuard::lock(slot)?;
     if !slot_generation_is(slot, gen_claim) {
         return Ok(());
     }
@@ -11220,9 +12177,15 @@ pub fn shared_settle_channel(handle: i64) -> Result<(), MorlocError> {
         return Ok(());
     };
     let failure = {
-        let _g = SlotFutexGuard::lock(slot);
+        let _g = SlotGuard::lock_any(slot)?;
         if !slot_generation_is(slot, gen_claim) {
             return Ok(());
+        }
+        if slot.poisoned != 0 {
+            release_slot_locked(slot);
+            drop(_g);
+            invalidate_process_local_slot(handle);
+            return Err(died_inside());
         }
         let b = channel_block(slot)?;
         let failure = unsafe {
@@ -11243,7 +12206,7 @@ pub fn shared_settle_channel(handle: i64) -> Result<(), MorlocError> {
 }
 
 /// Free a channel's queued batches and its failure message. Caller holds
-/// the slot futex; the block itself is freed with the slot's other blocks.
+/// the slot lock; the block itself is freed with the slot's other blocks.
 fn channel_free_queue(slot: &RegistrySlot) {
     let Ok(b) = channel_block(slot) else { return };
     unsafe {

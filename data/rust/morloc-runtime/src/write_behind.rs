@@ -369,10 +369,7 @@ thread_local! {
 }
 
 pub(crate) fn note_sealed(handle: i64) {
-    static AT_FORK: std::sync::Once = std::sync::Once::new();
-    AT_FORK.call_once(|| unsafe {
-        libc::pthread_atfork(Some(before_fork), None, None);
-    });
+    crate::stream::register_fork_handlers();
     let mut all = SEALED.lock().unwrap();
     if !all.contains(&handle) {
         all.push(handle);
@@ -400,14 +397,6 @@ pub(crate) fn take_thread_sealed() -> Vec<i64> {
 
 pub(crate) fn thread_sealed() -> Vec<i64> {
     THREAD_SEALED.with(|h| h.borrow().clone())
-}
-
-/// A forked child may write the parent's streams, and the parent may wait
-/// for it: write what this process holds first.
-extern "C" fn before_fork() {
-    if let Err(e) = crate::stream::drain_before_handoff() {
-        eprintln!("morloc: a stream write failed before fork: {e}");
-    }
 }
 
 #[cfg(test)]

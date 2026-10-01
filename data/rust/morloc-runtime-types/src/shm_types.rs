@@ -37,7 +37,7 @@ pub const MAX_PATH_SIZE: usize = 512;
 /// attaches) spin-wait on an Acquire-load of this until it appears,
 /// so all subsequent reads of slot fields happen-after the winner's
 /// initialization writes.
-pub const STREAM_REGISTRY_MAGIC: u64 = 0x4D4C_5354_5245_4757; // "MLSTREGW"
+pub const STREAM_REGISTRY_MAGIC: u64 = 0x4D4C_5354_5245_4758; // "MLSTREGX"
 
 /// Sentinel value used during bootstrap. A process that CAS-swaps the
 /// magic from 0 to this value has won the bootstrap and is responsible
