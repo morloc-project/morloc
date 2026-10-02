@@ -205,6 +205,8 @@ fn ensure_test_arena() {
     let _init = INIT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // Deliberately not one-shot: an arena-owning test may have called shclose
     // since the last caller, resetting the allocator to its pre-shinit state.
+    static SWEPT: std::sync::Once = std::sync::Once::new();
+    SWEPT.call_once(sweep_dead_test_arenas);
     if shm::get_common_basename().is_empty() {
         let tmpdir = std::env::temp_dir();
         let test_dir = tmpdir.join(format!("morloc_test_{}", std::process::id()));
@@ -227,6 +229,25 @@ fn ensure_test_arena() {
 #[cfg(test)]
 extern "C" fn remove_test_arena() {
     remove_marked_dir(&std::env::temp_dir().join(format!("morloc_test_{}", std::process::id())));
+}
+
+/// Remove what earlier test processes that were killed (a timeout, an
+/// interrupted run) left behind: they never reach their exit cleanup, and
+/// their shared memory would otherwise stay until reboot, filling /dev/shm
+/// run after run. Their directories end in the dead process's pid.
+#[cfg(test)]
+fn sweep_dead_test_arenas() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !(name.starts_with("morloc_test_") || name.starts_with("morloc_layout_props_")) {
+            continue;
+        }
+        let Some(pid) = name.rsplit('_').next().and_then(|p| p.parse::<u32>().ok()) else { continue };
+        if !morloc_runtime_types::process::alive(pid, 0) {
+            remove_marked_dir(&e.path());
+        }
+    }
 }
 
 /// The shared-memory objects recorded by markers in `dir` (see

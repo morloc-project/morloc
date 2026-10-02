@@ -5,3 +5,7 @@ def wait(path):
         f.write("started")
     time.sleep(60)
     return 1
+
+
+def pong(x):
+    return x

@@ -2,18 +2,20 @@
 -- process group it started with it: each pool watches the nexus's lifeline
 -- pipe and ends its own group when the pipe reaches end of file. Checked for
 -- Python, R and C++ pools, with the Python pool in its default model (fork on
--- Linux, thread on macOS) and in the thread model.
-module main (nest)
+-- Linux, thread on macOS) and in the thread model. The next nexus to start
+-- then removes the dead runs' directories and shared memory.
+module main (nest, pong)
 
 import root-py
 import root-r
 import root-cpp
 
-source Py from "wait.py" ("wait" as pyWait)
+source Py from "wait.py" ("wait" as pyWait, "pong")
 source R from "wait.R" ("wait" as rWait)
 source Cpp from "wait.hpp" ("wait" as cppWait)
 
 pyWait :: Str -> Int
+pong :: Int -> Int
 rWait :: Int -> Int
 cppWait :: Int -> Int
 

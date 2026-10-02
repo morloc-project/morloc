@@ -114,10 +114,16 @@ fn main() {
 
     // `file` and `view` need no manifest, no pool spawning, no signal
     // handlers. Dispatch them before the manifest-mode plumbing below.
-    // `view` does need SHM because the loader may produce SHM-backed
-    // voidstar values.
+    // `view` and `file --validate` do need SHM because the loader may
+    // produce SHM-backed voidstar values.
     match invocation.nexus.cmd {
-        cli::Mode::File(ref fargs) => file::run(fargs),
+        cli::Mode::File(ref fargs) => {
+            // Validating loads each value, which takes shared memory.
+            if fargs.validate {
+                process::init_shm();
+            }
+            file::run(fargs)
+        }
         cli::Mode::View(ref vargs) => {
             process::init_shm();
             view::run(vargs);

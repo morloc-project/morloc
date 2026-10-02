@@ -226,6 +226,11 @@ pub fn run(args: &FileArgs) -> ! {
         println!("{}", out);
     }
     let code = if any_error || validation_failed { 1 } else { 0 };
+    // With shared memory set up (--validate), exit through the teardown
+    // that removes it.
+    if args.validate {
+        crate::process::clean_exit(code);
+    }
     std::process::exit(code);
 }
 

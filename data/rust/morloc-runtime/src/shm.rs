@@ -606,6 +606,13 @@ pub fn get_fallback_dir() -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
+/// The file-backed form of segment `name` in directory `dir`. Joined by
+/// path rules: a name need not start with '/', and pasting one that does not
+/// onto the directory would name a file beside it.
+fn fallback_file(dir: &str, name: &str) -> String {
+    format!("{}/{}", dir.trim_end_matches('/'), name.trim_start_matches('/'))
+}
+
 /// Suffix of the file that records a shared-memory object.
 pub const MARKER_SUFFIX: &str = ".shm";
 
@@ -873,8 +880,7 @@ pub(crate) fn open_segment(name: &str) -> Result<Result<(Fd, usize), ShopenMiss>
     if fallback.is_empty() {
         return Ok(Err(missing(fallback)));
     }
-    // `name` already carries a leading '/', so append directly.
-    let path = std::ffi::CString::new(format!("{}{}", fallback, name))
+    let path = std::ffi::CString::new(fallback_file(&fallback, name))
         .map_err(|_| MorlocError::Shm(format!("segment path for '{}' contains NUL", name)))?;
     let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR) };
     if fd == -1 {
@@ -969,12 +975,16 @@ fn split_volume_name(name: &str) -> (String, usize) {
 /// Unmap every SHM volume, and remove the program's volumes if this process
 /// owns them (see `OWNER_PID`). Runs registered `shclose` hooks
 /// first (companion segment teardowns) so callers of `shclose` don't
-/// have to know which subsystems are alive.
+/// have to know which subsystems are alive. The allocator is then back in
+/// its pre-`shinit` state: allocating fails until `shinit` runs again,
+/// rather than growing a volume that no owner would ever remove.
 pub fn shclose() -> Result<(), MorlocError> {
     run_shclose_hooks();
     let _lock = ALLOC_MUTEX.lock().unwrap();
     let mut vols = VOLUMES.lock().unwrap();
     shclose_locked(&mut vols);
+    CURRENT_VOLUME.store(0, Ordering::Release);
+    COMMON_BASENAME.lock().unwrap().fill(0);
     Ok(())
 }
 
@@ -1746,8 +1756,7 @@ fn create_file_segment(name: &str, full_size: usize, why: &str) -> Result<Option
             why
         ))
     })?;
-    // `name` already carries a leading '/', so append directly.
-    let file_path = format!("{}{}", fallback, name);
+    let file_path = fallback_file(&fallback, name);
     let path_cstr = std::ffi::CString::new(file_path.as_str())
         .map_err(|_| MorlocError::Shm(format!("volume path '{}' contains NUL", file_path)))?;
     let fd = unsafe {
@@ -1932,6 +1941,14 @@ fn find_free_block(size: usize) -> Result<*mut BlockHeader, MorlocError> {
         let cb = COMMON_BASENAME.lock().unwrap();
         get_cstr_buf(&cb).to_string()
     };
+    // No program to grow: shared memory is not initialised, or was closed.
+    // A volume made now would be named for nothing and outlive the process.
+    if basename.is_empty() {
+        return Err(MorlocError::Shm(format!(
+            "cannot allocate {} bytes: shared memory is not initialised",
+            size
+        )));
+    }
     // Another process may have created the index this process picks, since
     // the choice is made from this process's own table. Such an index is
     // mapped (a volume of the program like any other) and tried, and the
@@ -2426,6 +2443,41 @@ mod tests {
         assert_eq!(live_segments(&test_dir, &base[1..]), Vec::<String>::new(), "the owner left volumes behind");
     }
 
+    // A file-backed segment lands inside the fallback directory whether or
+    // not its name starts with '/'.
+    #[test]
+    fn a_file_backed_segment_lands_in_the_fallback_directory() {
+        let fallback = crate::ScopedFallback::new("fbjoin");
+        let dir = fallback.path().to_path_buf();
+        let name = format!("morloc-{}-fbjoin-0001", std::process::id());
+        let seg = create_file_segment(&name, 4096, "test").unwrap().expect("created");
+        unsafe { libc::munmap(seg.ptr as *mut libc::c_void, seg.len) };
+        let inside = dir.join(&name).exists();
+        let beside = std::path::PathBuf::from(format!("{}{}", dir.display(), name)).exists();
+        let _ = std::fs::remove_file(dir.join(&name));
+        assert!(inside && !beside, "the file was not written inside {}", dir.display());
+    }
+
+    // Allocating with no shared memory initialised fails: growing would
+    // otherwise make a volume named for no program, which nothing removes.
+    #[test]
+    fn allocating_after_close_fails_without_making_a_volume() {
+        let _arena = crate::own_test_shm();
+        shclose().unwrap();
+        let got = shmalloc(1 << 20);
+        if let Ok(p) = got {
+            let _ = shfree(p);
+        }
+        let stray: Vec<String> = std::fs::read_dir("/dev/shm")
+            .map(|d| d.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| n.starts_with('-')).collect())
+            .unwrap_or_default();
+        for n in &stray {
+            let c = std::ffi::CString::new(format!("/{n}")).unwrap();
+            unsafe { libc::shm_unlink(c.as_ptr()) };
+        }
+        assert!(got.is_err(), "an allocation with no shared memory initialised succeeded");
+    }
+
     // A fork while another thread is inside the allocator hands the child a
     // consistent allocator: the child, whose only thread is the forking one,
     // can allocate at once instead of waiting forever on a lock held by a
@@ -2441,6 +2493,12 @@ mod tests {
                     if let Ok(p) = shmalloc(64) {
                         let _ = shfree(p);
                     }
+                    // The allocator's mutex is not fair: a thread relocking
+                    // at once starves its waiters -- here the fork handler,
+                    // and every test queued behind it -- for as long as it
+                    // loops. Paused, it still holds the lock at some of the
+                    // forks, which is all the test needs.
+                    std::thread::sleep(std::time::Duration::from_micros(20));
                 }
             })
         };

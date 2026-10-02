@@ -13,9 +13,8 @@ while [ ! -s started.txt ] && [ $i -lt 400 ]; do
 done
 pools=$(pgrep -P "$nx")
 n=$(echo $pools | wc -w | tr -d ' ')
-dirs=""
 for p in $pools; do
-  dirs="$dirs $(ps -o args= -p "$p" | awk '{print $(NF-1)}')"
+  ps -o args= -p "$p" | awk '{print $(NF-1)}' >> killed-dirs.txt
 done
 kill -KILL "$nx"
 wait "$nx" 2> /dev/null
@@ -39,9 +38,6 @@ fi
 for g in $left; do
   kill -KILL -- "-$g" 2> /dev/null
 done
-for d in $dirs; do
-  case "$d" in
-    /tmp/morloc.*) rm -rf "$d" ;;
-  esac
-done
+# The killed nexus's run directory and shared memory are left behind, for
+# the next nexus to start to sweep (see swept.sh).
 rm -f started.txt

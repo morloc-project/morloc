@@ -120,10 +120,17 @@ pub struct Adopted {
 }
 
 /// Check `token` against this process. The descriptor must be the pipe the
-/// token describes, and the nexus it names must be a live ancestor of this
-/// process -- or be gone, with the pipe at end of file, as when a pool
-/// starts after its nexus died.
+/// token describes, and the nexus it names must be positively identified as
+/// an ancestor of this process -- the same pid with the same start stamp --
+/// or be gone, with the pipe at end of file, as when a pool starts after its
+/// nexus died. A process that cannot be inspected identifies nothing: on
+/// macOS that is every process of another user, launchd included, and every
+/// process descends from launchd.
 fn validate(token: &str) -> Option<Adopted> {
+    validate_with(token, process::snapshot)
+}
+
+fn validate_with(token: &str, snapshot: impl Fn(u32) -> Option<process::Snapshot>) -> Option<Adopted> {
     let f: Vec<&str> = token.split(':').collect();
     let [fd, dev, ino, pid, start, pgid] = f.as_slice() else { return None };
     let fd: i32 = fd.parse().ok()?;
@@ -134,8 +141,12 @@ fn validate(token: &str) -> Option<Adopted> {
     if fd < 0 || pid <= 0 || fifo_identity(fd)? != identity {
         return None;
     }
-    let nexus_live = process::alive(pid as u32, start);
-    let ours = if nexus_live { crate::run::descends_from(pid) } else { at_end(fd) };
+    let ours = match snapshot(pid as u32) {
+        Some(s) if s.start == start && !s.exited => crate::run::descends_from(pid),
+        // The pid has exited or now names another process.
+        Some(_) => at_end(fd),
+        None => !process::alive(pid as u32, 0) && at_end(fd),
+    };
     ours.then_some(Adopted { fd, nexus_pgid })
 }
 
@@ -361,6 +372,25 @@ mod tests {
                 with(4, "1".into()),                  // the nexus pid, reused by another process
             ];
             in_child(move || refused.iter().all(|t| validate(t).is_none()) && validate(&token).is_some())
+        }));
+    }
+
+    /// A nexus that cannot be inspected is not taken on trust: on macOS a
+    /// user cannot inspect launchd, the ancestor of every process.
+    #[test]
+    fn a_nexus_that_cannot_be_inspected_is_refused() {
+        assert!(in_child(|| {
+            let token = Lifeline::get().unwrap().token().to_string();
+            let mut f: Vec<String> = token.split(':').map(String::from).collect();
+            f[3] = "1".into();
+            let launchd = f.join(":");
+            in_child(move || {
+                let hidden = |p: u32| if p == 1 { None } else { process::snapshot(p) };
+                let blind = |_: u32| None;
+                validate_with(&launchd, hidden).is_none()
+                    && validate_with(&token, blind).is_none()
+                    && validate_with(&token, process::snapshot).is_some()
+            })
         }));
     }
 
