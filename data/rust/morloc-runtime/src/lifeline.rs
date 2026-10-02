@@ -423,7 +423,10 @@ mod tests {
                     }
                 }
                 libc::signal(libc::SIGTERM, on_term_report as *const () as libc::sighandler_t);
-                std::env::set_var(ENV, &token);
+                // Not std::env::set_var: its lock may have been held by
+                // another test thread when this process was forked.
+                let kv = std::ffi::CString::new(token.as_str()).unwrap();
+                libc::setenv(b"MORLOC_LIFELINE\0".as_ptr() as *const libc::c_char, kv.as_ptr(), 1);
                 guard();
                 send(ready[1], b"r");
                 loop {

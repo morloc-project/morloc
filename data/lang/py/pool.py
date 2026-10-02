@@ -35,6 +35,11 @@ _shutdown_wakeup_fd = -1
 _lifeline_fd = -1
 
 
+class _LocalFlag:
+    """The shutdown flag of a process that shares it with no other."""
+    value = False
+
+
 def _lifeline_ended():
     """After a poll reported the lifeline readable: whether the nexus is gone.
     Nothing is ever written to it, so readable means end of file."""
@@ -897,11 +902,17 @@ def run_thread_pool(socket_path, tmpdir, shm_basename):
         lifeline.register(_lifeline_fd, select.POLLIN)
     try:
         while not stop.is_set():
-            if _lifeline_fd < 0:
-                time.sleep(0.05)
-            elif lifeline.poll(50) and _lifeline_ended():
-                lifeline.unregister(_lifeline_fd)
-                morloc.lifeline_teardown()
+            # Signals reach Python handlers on this thread only, so a user's
+            # handler that raises (a SIGALRM timeout, say) raises here; that
+            # is the user's error, not a reason to stop serving.
+            try:
+                if _lifeline_fd < 0:
+                    time.sleep(0.05)
+                elif lifeline.poll(50) and _lifeline_ended():
+                    lifeline.unregister(_lifeline_fd)
+                    morloc.lifeline_teardown()
+            except Exception as e:
+                print(f"morloc pool: a signal handler raised: {e!r}", file=sys.stderr)
     finally:
         stop.set()
         # Join the listener so it is no longer inside wait_for_client(daemon)
@@ -948,11 +959,11 @@ if __name__ == "__main__":
     # watched from a thread, so a fork-model pool stays single-threaded.
     _lifeline_fd = morloc.lifeline_adopt()
 
-    # RawValue (no lock), not Value: the SIGTERM/SIGINT handler writes this flag,
-    # and a Value's semaphore lock is not async-signal-safe -- acquiring it in the
-    # handler while the interrupted code already holds it can deadlock/corrupt at
-    # teardown. A single-byte flag needs no lock (byte writes are atomic).
-    shutdown_flag = RawValue('b', False)  # Shared flag (lock-free)
+    # The SIGTERM/SIGINT handler sets this. A plain flag until the fork model
+    # needs one its workers share: a
+    # multiprocessing value is backed, off Linux, by a file in a pymp-*
+    # temporary directory that only an orderly exit removes.
+    shutdown_flag = _LocalFlag()
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -987,6 +998,12 @@ if __name__ == "__main__":
     if _select_pool_mode() == "thread":
         run_thread_pool(socket_path, tmpdir, shm_basename)
         sys.exit(0)
+
+    # Shared with the workers. RawValue (no lock), not Value: the signal
+    # handler writes it, and a Value's semaphore lock is not async-signal-safe
+    # -- acquiring it in the handler while the interrupted code holds it can
+    # deadlock at teardown. A single byte needs no lock.
+    shutdown_flag = RawValue('b', shutdown_flag.value)
 
     # Shared job queue: listener writes fds to write_sock, workers read from read_sock.
     # Only idle workers (blocked in recvmsg) pick up jobs, preventing the round-robin

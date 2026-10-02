@@ -17,8 +17,7 @@ pub type PoolDispatchFn = unsafe extern "C" fn(
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PoolConcurrency {
     Threads = 0,
-    Fork = 1,
-    Single = 2,
+    Single = 1,
 }
 
 #[repr(C)]
@@ -29,13 +28,12 @@ pub struct PoolConfig {
     pub concurrency: PoolConcurrency,
     pub initial_workers: i32,
     pub dynamic_scaling: bool,
-    pub post_fork_child: Option<unsafe extern "C" fn(*mut c_void)>,
 }
 
 // SAFETY: PoolConfig contains function pointers and a *mut c_void dispatch_ctx.
 // The function pointers are set once at startup and never mutated.
-// dispatch_ctx points to language-runtime state that is either thread-local
-// (fork mode) or protected by the runtime's own synchronization (thread mode).
+// dispatch_ctx points to language-runtime state protected by the runtime's
+// own synchronization.
 // The pool architecture guarantees dispatch_ctx is not concurrently mutated.
 unsafe impl Send for PoolConfig {}
 unsafe impl Sync for PoolConfig {}
@@ -46,34 +44,14 @@ static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 static BUSY_COUNT: AtomicI32 = AtomicI32::new(0);
 static TOTAL_WORKERS: AtomicI32 = AtomicI32::new(0);
 
-// SAFETY: SHARED_BUSY is set once in pool_main_fork (parent process) before
-// forking children. After fork, each process accesses the mmap'd AtomicI32
-// via atomic operations only. Reset to null during shutdown.
-static mut SHARED_BUSY: *mut AtomicI32 = ptr::null_mut();
-
 #[no_mangle]
 pub extern "C" fn pool_mark_busy() {
-    // SAFETY: SHARED_BUSY is either null (thread mode, use local atomic) or a valid
-    // mmap'd AtomicI32 pointer set during pool_main_fork initialization.
-    unsafe {
-        if !SHARED_BUSY.is_null() {
-            (*SHARED_BUSY).fetch_add(1, Ordering::Relaxed);
-        } else {
-            BUSY_COUNT.fetch_add(1, Ordering::Relaxed);
-        }
-    }
+    BUSY_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
 #[no_mangle]
 pub extern "C" fn pool_mark_idle() {
-    // SAFETY: Same as pool_mark_busy - SHARED_BUSY is null or a valid mmap'd pointer.
-    unsafe {
-        if !SHARED_BUSY.is_null() {
-            (*SHARED_BUSY).fetch_sub(1, Ordering::Relaxed);
-        } else {
-            BUSY_COUNT.fetch_sub(1, Ordering::Relaxed);
-        }
-    }
+    BUSY_COUNT.fetch_sub(1, Ordering::Relaxed);
 }
 
 extern "C" fn pool_sigterm_handler(_sig: i32) {
@@ -485,197 +463,6 @@ unsafe fn pool_main_single(config: &PoolConfig, socket_path: *const c_char, tmpd
     0
 }
 
-// ── Pool main: fork mode ─────────────────────────────────────────────────────
-
-unsafe fn pool_main_fork(config: &PoolConfig, socket_path: *const c_char, tmpdir: *const c_char, shm_basename: *const c_char) -> i32 {
-    use crate::ipc_ffi::start_daemon;
-    use crate::ipc_ffi::close_daemon;
-    use crate::ipc_ffi::wait_for_client_with_timeout;
-    use crate::ipc_ffi::stream_from_client;
-    use crate::ipc_ffi::send_packet_to_foreign_server;
-    use crate::ipc_ffi::close_socket;
-
-    let mut errmsg: *mut c_char = ptr::null_mut();
-    let mut daemon = start_daemon(socket_path, tmpdir, shm_basename, 0xffff, &mut errmsg);
-    if !errmsg.is_null() {
-        eprintln!("Failed to start language server:\n{}", CStr::from_ptr(errmsg).to_string_lossy());
-        libc::free(errmsg as *mut c_void);
-        return 1;
-    }
-
-    // Create socketpair for fd passing
-    let mut sv = [0i32; 2];
-    if libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sv.as_mut_ptr()) < 0 {
-        close_daemon(&mut daemon);
-        return 1;
-    }
-    // The fd-passing sendmsg on this pair uses flags=0 (no MSG_NOSIGNAL), so
-    // set SO_NOSIGPIPE on macOS in addition to the process-wide SIG_IGN.
-    crate::utility::set_nosigpipe(sv[0]);
-    crate::utility::set_nosigpipe(sv[1]);
-
-    // Shared busy counter via mmap
-    let shared_counter = libc::mmap(
-        ptr::null_mut(), std::mem::size_of::<AtomicI32>(),
-        libc::PROT_READ | libc::PROT_WRITE,
-        libc::MAP_SHARED | libc::MAP_ANONYMOUS, -1, 0,
-    ) as *mut AtomicI32;
-    if shared_counter == libc::MAP_FAILED as *mut AtomicI32 {
-        libc::close(sv[0]); libc::close(sv[1]);
-        close_daemon(&mut daemon);
-        return 1;
-    }
-    (*shared_counter).store(0, Ordering::Relaxed);
-    SHARED_BUSY = shared_counter;
-
-    let nworkers = config.initial_workers.max(1);
-    let mut child_pids: Vec<i32> = Vec::new();
-
-    for i in 0..nworkers {
-        let pid = libc::fork();
-        if pid < 0 { break; }
-        if pid == 0 {
-            // Child
-            libc::close(sv[1]); // close write end
-            // Get daemon server_fd from opaque pointer and close it
-            // (we can't access the struct fields directly since daemon is *mut c_void,
-            //  but the child doesn't need to accept connections)
-            if let Some(pfk) = config.post_fork_child {
-                pfk(config.dispatch_ctx);
-            }
-
-            // Attach the worker to the shared stream registry. Idempotent
-            // if the parent nexus already bootstrapped it.
-            let slot_count = crate::ffi::stream_registry_init(&mut errmsg);
-            if slot_count == usize::MAX {
-                eprintln!(
-                    "Worker {} stream_registry_init failed: {}",
-                    i,
-                    CStr::from_ptr(errmsg).to_string_lossy()
-                );
-                libc::free(errmsg as *mut c_void);
-                libc::_exit(1);
-            }
-
-            // Worker loop: receive fds and process
-            loop {
-                if SHUTTING_DOWN.load(Ordering::Relaxed) { break; }
-                let mut pfd = libc::pollfd { fd: sv[0], events: libc::POLLIN, revents: 0 };
-                let ready = libc::poll(&mut pfd, 1, 100);
-                if ready <= 0 { continue; }
-
-                let client_fd = recv_fd(sv[0]);
-                if client_fd < 0 { break; }
-
-                let data = stream_from_client(client_fd, &mut errmsg);
-                if data.is_null() || !errmsg.is_null() {
-                    if !errmsg.is_null() { try_send_fail(client_fd, errmsg); libc::free(errmsg as *mut c_void); errmsg = ptr::null_mut(); }
-                    libc::free(data as *mut c_void);
-                    close_socket(client_fd);
-                    continue;
-                }
-
-                let result = pool_dispatch_packet(data, config.local_dispatch, config.remote_dispatch, config.dispatch_ctx);
-                libc::free(data as *mut c_void);
-
-                if !result.is_null() {
-                    send_packet_to_foreign_server(client_fd, result, &mut errmsg);
-                    libc::free(result as *mut c_void);
-                    if !errmsg.is_null() { libc::free(errmsg as *mut c_void); errmsg = ptr::null_mut(); }
-                }
-                libc::fflush(ptr::null_mut());
-                close_socket(client_fd);
-            }
-            libc::close(sv[0]);
-            libc::_exit(0);
-        }
-        child_pids.push(pid);
-    }
-    TOTAL_WORKERS.store(child_pids.len() as i32, Ordering::Relaxed);
-
-    // Parent: accept loop
-    while !SHUTTING_DOWN.load(Ordering::Relaxed) {
-        let client_fd = wait_for_client_with_timeout(daemon, 10000, &mut errmsg);
-        if !errmsg.is_null() { libc::free(errmsg as *mut c_void); errmsg = ptr::null_mut(); }
-        if client_fd > 0 {
-            send_fd(sv[1], client_fd);
-            close_socket(client_fd);
-        }
-
-        // Reap dead children
-        for pid in child_pids.iter_mut() {
-            if *pid > 0 {
-                let mut wstatus: i32 = 0;
-                if libc::waitpid(*pid, &mut wstatus, libc::WNOHANG) > 0 {
-                    *pid = -1;
-                }
-            }
-        }
-    }
-
-    // Shutdown
-    for &pid in &child_pids {
-        if pid > 0 { libc::kill(pid, libc::SIGTERM); }
-    }
-    for &pid in &child_pids {
-        if pid > 0 { libc::waitpid(pid, ptr::null_mut(), 0); }
-    }
-
-    libc::close(sv[0]); libc::close(sv[1]);
-    libc::munmap(shared_counter as *mut c_void, std::mem::size_of::<AtomicI32>());
-    SHARED_BUSY = ptr::null_mut();
-
-    close_daemon(&mut daemon);
-    0
-}
-
-// fd-passing helpers
-unsafe fn send_fd(sock: i32, fd: i32) -> i32 {
-    let mut buf = [0u8; 1];
-    let mut iov = libc::iovec { iov_base: buf.as_mut_ptr() as *mut c_void, iov_len: 1 };
-    let cmsg_space = libc::CMSG_SPACE(std::mem::size_of::<i32>() as u32) as usize;
-    let mut cmsg_buf = vec![0u8; cmsg_space];
-
-    let mut msg: libc::msghdr = std::mem::zeroed();
-    msg.msg_iov = &mut iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = cmsg_buf.as_mut_ptr() as *mut c_void;
-    msg.msg_controllen = cmsg_space as _;
-
-    let cmsg = libc::CMSG_FIRSTHDR(&msg);
-    (*cmsg).cmsg_level = libc::SOL_SOCKET;
-    (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-    (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<i32>() as u32) as _;
-    ptr::copy_nonoverlapping(&fd as *const i32 as *const u8, libc::CMSG_DATA(cmsg), std::mem::size_of::<i32>());
-
-    if libc::sendmsg(sock, &msg, 0) >= 0 { 0 } else { -1 }
-}
-
-unsafe fn recv_fd(sock: i32) -> i32 {
-    let mut buf = [0u8; 1];
-    let mut iov = libc::iovec { iov_base: buf.as_mut_ptr() as *mut c_void, iov_len: 1 };
-    let cmsg_space = libc::CMSG_SPACE(std::mem::size_of::<i32>() as u32) as usize;
-    let mut cmsg_buf = vec![0u8; cmsg_space];
-
-    let mut msg: libc::msghdr = std::mem::zeroed();
-    msg.msg_iov = &mut iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = cmsg_buf.as_mut_ptr() as *mut c_void;
-    msg.msg_controllen = cmsg_space as _;
-
-    let n = libc::recvmsg(sock, &mut msg, 0);
-    if n <= 0 { return -1; }
-
-    let cmsg = libc::CMSG_FIRSTHDR(&msg);
-    if cmsg.is_null() || (*cmsg).cmsg_level != libc::SOL_SOCKET || (*cmsg).cmsg_type != libc::SCM_RIGHTS {
-        return -1;
-    }
-
-    let mut fd: i32 = 0;
-    ptr::copy_nonoverlapping(libc::CMSG_DATA(cmsg), &mut fd as *mut i32 as *mut u8, std::mem::size_of::<i32>());
-    fd
-}
-
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 /// Stop a streaming pool from handing its heap back to the kernel between
@@ -765,7 +552,6 @@ pub unsafe extern "C" fn pool_main(
 
     match cfg.concurrency {
         PoolConcurrency::Threads => pool_main_threads(cfg, socket_path, tmpdir, shm_basename),
-        PoolConcurrency::Fork => pool_main_fork(cfg, socket_path, tmpdir, shm_basename),
         PoolConcurrency::Single => pool_main_single(cfg, socket_path, tmpdir, shm_basename),
     }
 }

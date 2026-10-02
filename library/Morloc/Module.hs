@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE ViewPatterns #-}
 
 {- |
@@ -44,10 +45,13 @@ module Morloc.Module
   , hashEq
   , reconcileOverwrite
   , readInstalledHash
+
+    -- * Case-insensitive filesystems (exported for testing)
+  , caseClash
   ) where
 
 import Control.Applicative (optional)
-import Control.Exception (onException)
+import Control.Exception (IOException, catch, onException)
 import Control.Monad.Except (catchError, throwError)
 import GHC.IO.Handle.Lock (LockMode(ExclusiveLock), hLock, hTryLock)
 import Text.Parsec (Parsec, try, parse, many, many1)
@@ -677,13 +681,34 @@ splitModuleName :: MVar -> [String]
 splitModuleName (MV x) = map MT.unpack $ MT.splitOn "." x
 
 
+-- | An entry beside @path@ whose name differs from its name only in case.
+caseClash :: Path -> IO (Maybe String)
+caseClash path = do
+  let name = MS.takeFileName path
+      folded = map DC.toLower name
+  entries <- MS.listDirectory (MS.takeDirectory path) `catch` \(_ :: IOException) -> return []
+  return . listToMaybe $ [e | e <- entries, e /= name, map DC.toLower e == folded]
+
+-- | The path, if a file exists there spelled exactly so. A case-insensitive
+-- filesystem (the macOS default) also finds @Foo.loc@ for @foo.loc@; taking
+-- that would build a program there whose imports fail on Linux, and could
+-- load one file as two modules. The last three components, those a module
+-- name contributes, must match their directory entries.
 getFile :: Path -> IO (Maybe Path)
 getFile x = do
   exists <- MS.doesFileExist x
-  return $
-    if exists
-      then Just x
-      else Nothing
+  exact <- if exists then spelledExactly (3 :: Int) x else return False
+  return $ if exact then Just x else Nothing
+  where
+    spelledExactly 0 _ = return True
+    spelledExactly n p = do
+      let parent = MS.takeDirectory p
+          name = MS.takeFileName p
+      if null name || parent == p
+        then return True
+        else do
+          entries <- MS.listDirectory parent `catch` \(_ :: IOException) -> return [name]
+          if name `elem` entries then spelledExactly (n - 1) parent else return False
 
 -- {{{ definitions
 
@@ -858,6 +883,18 @@ installModule overwrite gitprot libpath coreorg mayTypecheck userSources inProgr
             <> "\nAll programs in an environment must share one hash per module."
             <> "\nReconcile deliberately with 'morloc install --force"
               <+> pretty name <> "' or 'mim update'."
+          -- A module whose name differs from an installed one's only in case
+          -- shares its directory, lock and exposed headers on a case-insensitive
+          -- filesystem (the macOS default), so installing one replaces the
+          -- other. Refused everywhere, so an environment means the same thing
+          -- on every machine.
+          clash <- liftIO $ caseClash targetDir
+          case clash of
+            Just other -> MM.throwSystemError $
+              "Module" <+> squotes (pretty name) <+> "cannot be installed beside"
+                <+> squotes (pretty other) <> ": their names differ only in case,"
+                <+> "which a case-insensitive filesystem does not distinguish"
+            Nothing -> return ()
           let effectiveOverwrite = reconcileOverwrite overwrite expectedHash installedHash
           targetExists <- liftIO $ doesDirectoryExist targetDir
           case (targetExists, effectiveOverwrite) of
@@ -1630,7 +1667,13 @@ installFromRegistry registryUrl owner name targetDir = do
   -- Verify SHA-256 if provided by the server
   case HTTP.getResponseHeader "X-Checksum-Sha256" tarResp of
     (expectedHash:_) -> do
-      output <- readProcess "sha256sum" [tarballPath] ""
+      -- macOS before 14 ships `shasum`, not `sha256sum`; both print the
+      -- digest first.
+      hasSha256sum <- isJust <$> findExecutable "sha256sum"
+      output <-
+        if hasSha256sum
+          then readProcess "sha256sum" [tarballPath] ""
+          else readProcess "shasum" ["-a", "256", tarballPath] ""
       let actualHash = takeWhile (/= ' ') output
           expected = BS8.unpack expectedHash
       when (actualHash /= expected) $ do

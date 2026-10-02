@@ -36,6 +36,7 @@ import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc (pretty, render)
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
+import qualified Morloc.System as MS
 import Morloc.ProgramBuilder.Build (ensureStagingDir)
 
 -- | Lower every guest source in the typed AST to host glue. A no-op when there
@@ -165,7 +166,7 @@ dedupSources futSrcs =
 -- pool build links them
 injectBuild :: BuildProducts -> MorlocMonad ()
 injectBuild products = do
-  let flags = map T.pack (bpObjects products) ++ bpLinkFlags products
+  let flags = map (T.pack . MS.shellQuote) (bpObjects products) ++ bpLinkFlags products
   MM.modify $ \s ->
     let pms' = case statePackageMeta s of
           [] -> [defaultValue {packageCxxFlags = flags}]

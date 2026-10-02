@@ -1248,6 +1248,8 @@ thread_local! {
 pub(crate) fn register_fork_handlers() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| unsafe {
+        // The allocator's handlers first: this prepare step allocates.
+        crate::shm::register_fork_handlers();
         libc::pthread_atfork(Some(prepare_fork), Some(after_fork_in_parent), Some(after_fork_in_child));
     });
 }

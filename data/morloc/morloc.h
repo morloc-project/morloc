@@ -1110,7 +1110,6 @@ typedef uint8_t* (*pool_dispatch_fn_t)(
 
 typedef enum {
     POOL_THREADS,
-    POOL_FORK,
     POOL_SINGLE
 } pool_concurrency_t;
 
@@ -1121,7 +1120,6 @@ typedef struct {
     pool_concurrency_t concurrency;
     int initial_workers;
     bool dynamic_scaling;
-    void (*post_fork_child)(void* ctx);
 } pool_config_t;
 
 typedef struct pool_state_s pool_state_t;

@@ -19,6 +19,7 @@ module Morloc.CodeGenerator.Nexus
   ) where
 
 import qualified Control.Monad as CM
+import Morloc.System (shellQuote)
 import qualified Control.Monad.State as CMS
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as AesonKey
@@ -3830,14 +3831,6 @@ dquoteEsc = concatMap esc
     esc '`' = "\\`"
     esc c = [c]
 
--- | POSIX single-quote a path so spaces and shell metacharacters in the
--- absolute manifest path survive. Embedded single quotes are escaped with
--- the standard @'\\''@ idiom.
-shellQuote :: FilePath -> String
-shellQuote p = "'" <> concatMap esc p <> "'"
-  where
-    esc '\'' = "'\\''"
-    esc c = [c]
 
 -- ======================================================================
 -- Utilities

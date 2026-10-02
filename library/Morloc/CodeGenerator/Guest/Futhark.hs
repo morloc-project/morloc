@@ -54,6 +54,8 @@ import Morloc.CodeGenerator.Guest
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc (pretty, render)
 import qualified Morloc.Monad as MM
+import qualified Morloc.CodeGenerator.Platform as P
+import qualified Morloc.System as MS
 
 -- ---------------------------------------------------------------------------
 -- Parsed manifest entry
@@ -250,9 +252,12 @@ buildOne backend outDir gs = do
       hFile = outStem <.> "h"
       jsonFile = outStem <.> "json"
       oFile = outStem <.> "o"
+      q = T.pack . MS.shellQuote
       futCmd =
-        T.unwords ["futhark", backend, "--library", "-o", T.pack outStem, T.pack (gsPath gs)]
-      gccCmd = T.unwords ["gcc", "-O2", "-c", T.pack cFile, "-o", T.pack oFile]
+        T.unwords ["futhark", backend, "--library", "-o", q outStem, q (gsPath gs)]
+      -- $CC when set: a conda/pixi toolchain names its own compiler, and on
+      -- macOS without the command-line tools /usr/bin/gcc is only a stub.
+      gccCmd = T.unwords ["${CC:-cc}", "-O2", "-c", q cFile, "-o", q oFile]
   MM.runCommand "Futhark.build" futCmd
   MM.runCommand "Futhark.build" gccCmd
   pure (oFile, hFile, jsonFile)
@@ -263,7 +268,11 @@ buildOne backend outDir gs = do
 -- @-X cpp:flags=-L/path@ etc.
 backendLinkFlags :: Text -> [Text]
 backendLinkFlags "multicore" = ["-lpthread", "-lm"]
-backendLinkFlags "opencl" = ["-lOpenCL", "-lm"]
+backendLinkFlags "opencl" = case P.hostPlatform of
+  -- macOS ships OpenCL only as a framework. One element, since the package
+  -- flags are deduplicated and a lone "-framework" could be merged away.
+  P.Darwin -> ["-framework OpenCL", "-lm"]
+  _ -> ["-lOpenCL", "-lm"]
 backendLinkFlags "cuda" = ["-lcuda", "-lnvrtc", "-lm"]
 backendLinkFlags "hip" = ["-lamdhip64", "-lhiprtc", "-lm"]
 backendLinkFlags _ = ["-lm"]

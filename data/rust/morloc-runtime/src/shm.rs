@@ -393,6 +393,47 @@ static VOLUMES: Mutex<VolumeTable> = Mutex::new(VolumeTable {
 
 static ALLOC_MUTEX: Mutex<()> = Mutex::new(());
 
+/// The allocator's process-local locks, held by the forking thread across a
+/// fork. A child has only that thread, so a lock another thread held at the
+/// fork would stay held in the child forever: its first allocation would
+/// hang. Taken in the order every other path takes them.
+struct AllocForkHeld {
+    _alloc: std::sync::MutexGuard<'static, ()>,
+    _volumes: std::sync::MutexGuard<'static, VolumeTable>,
+    _basename: std::sync::MutexGuard<'static, [u8; MAX_FILENAME_SIZE]>,
+    _fallback: std::sync::MutexGuard<'static, [u8; MAX_FILENAME_SIZE]>,
+}
+
+thread_local! {
+    static ALLOC_FORK_HELD: std::cell::RefCell<Option<AllocForkHeld>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Install the allocator's fork handlers, once. Prepare handlers run in the
+/// reverse of the order they were installed, so these must be installed no
+/// later than any handler whose prepare step allocates (the stream
+/// registry's): that one then runs while the allocator is still free.
+pub(crate) fn register_fork_handlers() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| unsafe {
+        libc::pthread_atfork(Some(alloc_prepare_fork), Some(alloc_after_fork), Some(alloc_after_fork));
+    });
+}
+
+extern "C" fn alloc_prepare_fork() {
+    let held = AllocForkHeld {
+        _alloc: ALLOC_MUTEX.lock().unwrap_or_else(|p| p.into_inner()),
+        _volumes: VOLUMES.lock().unwrap_or_else(|p| p.into_inner()),
+        _basename: COMMON_BASENAME.lock().unwrap_or_else(|p| p.into_inner()),
+        _fallback: FALLBACK_DIR.lock().unwrap_or_else(|p| p.into_inner()),
+    };
+    ALLOC_FORK_HELD.with(|h| *h.borrow_mut() = Some(held));
+}
+
+extern "C" fn alloc_after_fork() {
+    ALLOC_FORK_HELD.with(|h| drop(h.borrow_mut().take()));
+}
+
 /// Reference-count value marking a block whose last reference has been
 /// dropped and whose bytes are being scrubbed. It reads as in-use, so no
 /// allocator can claim the block until the scrub completes and publishes
@@ -602,6 +643,7 @@ pub fn shinit(
     volume_index: usize,
     shm_size: usize,
 ) -> Result<*mut ShmHeader, MorlocError> {
+    register_fork_handlers();
     if volume_index == 0 || volume_index >= MAX_VOLUME_NUMBER {
         return Err(MorlocError::Shm(format!(
             "shinit: volume index {} is not usable (1..{})", volume_index, MAX_VOLUME_NUMBER
@@ -2382,6 +2424,52 @@ mod tests {
         }
         shclose().unwrap();
         assert_eq!(live_segments(&test_dir, &base[1..]), Vec::<String>::new(), "the owner left volumes behind");
+    }
+
+    // A fork while another thread is inside the allocator hands the child a
+    // consistent allocator: the child, whose only thread is the forking one,
+    // can allocate at once instead of waiting forever on a lock held by a
+    // thread it does not have.
+    #[test]
+    fn a_child_forked_mid_allocation_can_allocate() {
+        let _shm = crate::init_test_shm();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let churn = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    if let Ok(p) = shmalloc(64) {
+                        let _ = shfree(p);
+                    }
+                }
+            })
+        };
+        let mut hung = 0;
+        for _ in 0..200 {
+            unsafe {
+                let pid = libc::fork();
+                assert!(pid >= 0);
+                if pid == 0 {
+                    let ok = shmalloc(64).and_then(shfree).is_ok();
+                    libc::_exit(if ok { 0 } else { 1 });
+                }
+                let mut status = 0;
+                let mut waited = 0;
+                while libc::waitpid(pid, &mut status, libc::WNOHANG) == 0 {
+                    if waited > 2000 {
+                        libc::kill(pid, libc::SIGKILL);
+                        libc::waitpid(pid, &mut status, 0);
+                        hung += 1;
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    waited += 1;
+                }
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        churn.join().unwrap();
+        assert_eq!(hung, 0, "{hung} children forked mid-allocation hung");
     }
 
     // A buffer- or file-relative offset reads as volume 0. Copying such a

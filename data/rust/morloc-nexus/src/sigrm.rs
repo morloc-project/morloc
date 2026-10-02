@@ -146,26 +146,35 @@ unsafe fn is_dot_entry(nm: *const c_char) -> bool {
     a == b'.' as c_char && (*nm.add(1) == 0 || (*nm.add(1) == b'.' as c_char && *nm.add(2) == 0))
 }
 
-/// macOS has no async-signal-safe directory reader, so fork and exec
-/// `rm -rf`; fork, execve and waitpid are async-signal-safe.
+/// macOS has no async-signal-safe directory reader, so run `rm -rf`. It is
+/// started with posix_spawn, not fork: libSystem's fork first takes the
+/// malloc and other library locks for its fork handlers, and a handler that
+/// interrupted a thread holding one of them would deadlock or trap there.
+/// On Darwin posix_spawn with no attributes or file actions is a system call
+/// that runs no fork handlers and allocates nothing.
 #[cfg(target_os = "macos")]
 unsafe fn remove_tree(path: *const c_char) {
     const RM: &[u8] = b"/bin/rm\0";
     const FLAGS: &[u8] = b"-rf\0";
     const DASHES: &[u8] = b"--\0";
-    let pid = libc::fork();
-    if pid == 0 {
-        let argv: [*const c_char; 5] = [
-            RM.as_ptr() as *const c_char,
-            FLAGS.as_ptr() as *const c_char,
-            DASHES.as_ptr() as *const c_char,
-            path,
-            std::ptr::null(),
-        ];
-        let envp: [*const c_char; 1] = [std::ptr::null()];
-        libc::execve(argv[0], argv.as_ptr(), envp.as_ptr());
-        libc::_exit(127);
-    } else if pid > 0 {
+    let argv: [*mut c_char; 5] = [
+        RM.as_ptr() as *mut c_char,
+        FLAGS.as_ptr() as *mut c_char,
+        DASHES.as_ptr() as *mut c_char,
+        path as *mut c_char,
+        std::ptr::null_mut(),
+    ];
+    let envp: [*mut c_char; 1] = [std::ptr::null_mut()];
+    let mut pid: libc::pid_t = 0;
+    let rc = libc::posix_spawn(
+        &mut pid,
+        argv[0],
+        std::ptr::null(),
+        std::ptr::null(),
+        argv.as_ptr(),
+        envp.as_ptr(),
+    );
+    if rc == 0 {
         let mut status: libc::c_int = 0;
         while libc::waitpid(pid, &mut status, 0) < 0
             && *libc::__error() == libc::EINTR

@@ -8,13 +8,15 @@ Maintainer  : z@morloc.io
 Re-exports "System.Directory", "System.Directory.Tree", and
 "System.FilePath.Posix" so that other modules can import a single module
 for all filesystem operations. Also provides 'loadYamlConfig' for loading
-YAML configuration with defaults.
+YAML configuration with defaults, and 'shellQuote' for paths placed in
+shell command lines.
 -}
 module Morloc.System
   ( module System.Directory.Tree
   , module System.Directory
   , module System.FilePath.Posix
   , loadYamlConfig
+  , shellQuote
   ) where
 
 import Morloc.Namespace.Prim
@@ -36,3 +38,12 @@ loadYamlConfig ::
   IO a
 loadYamlConfig (Just fs) e _ = YC.loadYamlSettings fs [] e
 loadYamlConfig Nothing _ d = d
+
+-- | POSIX single-quote a path so spaces and shell metacharacters survive a
+-- shell command line. Embedded single quotes are escaped with the standard
+-- @'\\''@ idiom.
+shellQuote :: FilePath -> String
+shellQuote p = "'" <> concatMap esc p <> "'"
+  where
+    esc '\'' = "'\\''"
+    esc c = [c]

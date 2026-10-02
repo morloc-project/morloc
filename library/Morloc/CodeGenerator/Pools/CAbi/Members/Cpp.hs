@@ -741,7 +741,9 @@ makeTheMaker flags includes = do
   -- angle-bracket includes, only after the system directories: a header
   -- there may include a sibling either way, but a file named like a system
   -- header (a program called `tuple`) never replaces it.
-  let incs = concat [[pretty ("-iquote" <> i), pretty ("-idirafter" <> i)] | i <- "." : includes]
+  -- Paths are quoted: the command runs through a shell, and a project under
+  -- a directory with spaces (iCloud Drive, Google Drive) is ordinary.
+  let incs = concat [[pretty ("-iquote" <> MS.shellQuote i), pretty ("-idirafter" <> MS.shellQuote i)] | i <- "." : includes]
   let flags' = map pretty (flags ++ sanitizeFlags)
 
   let cmd =
@@ -2329,7 +2331,7 @@ handleFlagsAndPaths srcs = do
   let -- Search the runtime include dir (home) and the environment's shared C++
       -- module prefix (state/modules/include), where a user-installed library's
       -- headers live.
-      mlcInclude = ["-I" <> home <> "/include", "-I" <> stateDir <> "/modules/include"]
+      mlcInclude = ["-I" <> MS.shellQuote (home <> "/include"), "-I" <> MS.shellQuote (stateDir <> "/modules/include")]
       mlcPch = ["-include", "morloc_pch.hpp"]
       -- No runtime rpath to home/lib: the pool is relocatable and finds
       -- libmorloc via LD_LIBRARY_PATH exported by the nexus at launch, which
@@ -2339,7 +2341,7 @@ handleFlagsAndPaths srcs = do
       -- by the nexus LD_LIBRARY_PATH export, not a baked rpath.
       -- -rdynamic exports the pool's own symbols, so the crash handler's
       -- backtrace names generated manifolds rather than printing offsets.
-      mlcLib = ["-L" <> home <> "/lib", "-L" <> stateDir <> "/modules/lib", "-lmorloc", "-lcppmorloc", "-lpthread", "-rdynamic"]
+      mlcLib = ["-L" <> MS.shellQuote (home <> "/lib"), "-L" <> MS.shellQuote (stateDir <> "/modules/lib"), "-lmorloc", "-lcppmorloc", "-lpthread", "-rdynamic"]
 
   return
     ( filter (isJust . srcPath) srcs'
@@ -2379,9 +2381,14 @@ cppModuleIncludeDirs reg = fmap catMaybes . mapM dirOf . filter isCpp
             else return Nothing
     dirOf _ = return Nothing
 
+-- | The provisional spelling of a standard newer than C++20 (c++2b for 23,
+-- c++2c for 26) is accepted by every compiler that implements it, while the
+-- final spelling arrived later: Apple clang 15 rejects -std=c++23.
 gccVersionFlag :: Int -> Text
 gccVersionFlag i
   | i <= 20 = "-std=c++20"
+  | i == 23 = "-std=c++2b"
+  | i == 26 = "-std=c++2c"
   | otherwise = "-std=c++" <> MT.show' i
 
 flagAndPath :: LR.LangRegistry -> Source -> MorlocMonad (Source, [String], Maybe Path)
@@ -2445,8 +2452,8 @@ flagAndPath reg src@(Source _ srcL (Just p) _ _ _ _ _ _ _) | LR.poolOf reg srcL 
           -- state/src tree) is not on that export, so it keeps the rpath.
           -- Comma form (`-Wl,-rpath,DIR`), accepted by both GNU ld and macOS ld64
           -- (which rejects the GNU `-Wl,-rpath=DIR` form).
-          let rpathFlags = ["-Wl,-rpath," <> libdir | libdir /= moduleLibDir]
-          return $ rpathFlags <> ["-L" <> libdir, "-l" <> libnamebase]
+          let rpathFlags = ["-Wl,-rpath," <> MS.shellQuote libdir | libdir /= moduleLibDir]
+          return $ rpathFlags <> ["-L" <> MS.shellQuote libdir, "-l" <> libnamebase]
         [] -> return []
 flagAndPath reg src@(Source _ srcL Nothing _ _ _ _ _ _ _) | LR.poolOf reg srcL == cppLang = return (src, [], Nothing)
 flagAndPath _ _ = MM.throwSystemError $ "flagAndPath should only be called for C++ functions"

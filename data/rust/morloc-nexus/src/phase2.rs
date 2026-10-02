@@ -87,6 +87,25 @@ impl PartialEq for FileTarget {
 impl Eq for FileTarget {}
 
 impl FileTarget {
+    /// Whether writing both could write one file: the same resolved path,
+    /// the same existing file under two names (a hard link), or names in one
+    /// directory that differ only in case. The last is refused everywhere,
+    /// not only where the filesystem folds case, so a command line means the
+    /// same thing on every machine.
+    pub fn may_name_same_file(&self, other: &Self) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        if self == other {
+            return true;
+        }
+        if let (Ok(a), Ok(b)) = (std::fs::metadata(&self.file), std::fs::metadata(&other.file)) {
+            if (a.dev(), a.ino()) == (b.dev(), b.ino()) {
+                return true;
+            }
+        }
+        let fold = |p: &std::path::Path| p.file_name().map(|n| n.to_string_lossy().to_lowercase());
+        self.file.parent() == other.file.parent() && fold(&self.file) == fold(&other.file)
+    }
+
     /// The path as the user wrote it.
     pub fn given(&self) -> &str {
         &self.given
@@ -334,9 +353,17 @@ fn collect_actions(
             if target.file().is_dir() {
                 fail(format!("--{}={}: the path is a directory", long, target.given()));
             }
-            if let Some((_, other)) = seen.iter().find(|(k, _)| k == target) {
+            if let Some((k, other)) = seen.iter().find(|(k, _)| k.may_name_same_file(target)) {
                 let other = if *other == "-o" { "-o".to_string() } else { format!("--{}", other) };
-                fail(format!("--{} and {} both write to {}", long, other, target.given()));
+                if k == target {
+                    fail(format!("--{} and {} both write to {}", long, other, target.given()));
+                }
+                fail(format!(
+                    "--{} and {} write to {} and {}, which may be one file: they are the \
+                     same existing file, or differ only in case, which a case-insensitive \
+                     filesystem (the macOS default) does not distinguish",
+                    long, other, target.given(), k.given()
+                ));
             }
             seen.push((target.clone(), long));
         }
@@ -1713,6 +1740,24 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn targets_that_may_be_one_file_are_caught() {
+        let dir = std::env::temp_dir().join(format!("phase2-alias-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let at = |n: &str| resolve_target(dir.join(n).to_str().unwrap());
+        // Case: one file on a case-insensitive filesystem.
+        assert!(at("Out.txt").may_name_same_file(&at("out.txt")));
+        // Different directories or names are different files.
+        assert!(!at("out.txt").may_name_same_file(&at("sub/out.txt")));
+        assert!(!at("a.txt").may_name_same_file(&at("b.txt")));
+        // A hard link is one file under two names.
+        std::fs::write(dir.join("a.txt"), "x").unwrap();
+        std::fs::hard_link(dir.join("a.txt"), dir.join("b.txt")).unwrap();
+        let linked = at("a.txt").may_name_same_file(&at("b.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(linked);
+    }
     use morloc_manifest::parse_manifest;
 
     /// Build a manifest JSON payload that wraps one or more

@@ -300,7 +300,10 @@ fn main() {
     // wrap a sbatch invocation of `<nexus> --call-packet ...`. Both
     // paths are also useful handles for any future per-program tooling
     // that needs to re-enter the same nexus from a worker.
-    if let Ok(exe) = std::env::current_exe() {
+    // Resolved through symlinks: macOS reports the path the binary was
+    // started by, which for a PATH lookup is often a link such as
+    // ~/.local/bin/morloc-nexus, whose directory is not this install's.
+    if let Ok(exe) = std::env::current_exe().map(|e| std::fs::canonicalize(&e).unwrap_or(e)) {
         std::env::set_var("MORLOC_NEXUS_PATH", &exe);
         // Point pools at this nexus's sibling lib dir so they load the SAME
         // libmorloc.so the nexus resolved, wherever the build tree lives (pools
