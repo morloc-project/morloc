@@ -594,10 +594,10 @@ fi
 # exceeded the kernel sends SIGXCPU; the daemon now classifies that
 # as DAEMON_ERROR_TIMEOUT and emits HTTP 408 (was 400).
 #
-# Note: this test is intrinsically environment-sensitive. It uses a
-# 1-second --eval-timeout and an expression that should comfortably
-# exceed it (50M-element list traversal). If /eval is not exercised
-# in the testing environment, the test is a no-op skip.
+# The test uses a 1-second --eval-timeout and an expression costing
+# about 30 CPU-seconds to compile, so a faster machine or compiler
+# still trips the budget. The rlimit kills the child at 1 second, so
+# the excess costs nothing.
 # ======================================================================
 
 if should_run "http-eval-timeout"; then
@@ -610,12 +610,13 @@ if should_run "http-eval-timeout"; then
 
     # An expression whose COMPILE cost exceeds the budget. The budget is a
     # CPU rlimit on the forked compiler, so the work has to land in the
-    # compiler and not in a pool: a long addition chain typechecks for
-    # several seconds while allocating almost nothing, where a huge list
-    # would spend a pool's memory instead and never touch the budget.
+    # compiler and not in a pool: a long addition chain is CPU-bound in
+    # the typechecker, where a huge list would spend a pool's memory
+    # instead and never touch the budget. Cost grows superlinearly with
+    # length: 800 terms is about 1.6 CPU-seconds, 4000 about 29.
     body=$(python3 -c "
 import json
-print(json.dumps({'expr': 'import root-py\n' + ' + '.join(['1'] * 800)}))
+print(json.dumps({'expr': 'import root-py\n' + ' + '.join(['1'] * 4000)}))
 ")
     status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
         -X POST "http://127.0.0.1:${HTTP_PORT}/eval" \
