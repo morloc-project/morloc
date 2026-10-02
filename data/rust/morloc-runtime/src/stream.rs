@@ -2142,6 +2142,12 @@ pub fn read_pid_start_time_for(pid: u32) -> u64 {
 
 /// Whether `pid` has exited and awaits its parent. Such a process holds no
 /// descriptors and runs nothing. False when unknown.
+#[cfg(not(target_os = "linux"))]
+fn pid_is_zombie(pid: u32) -> bool {
+    morloc_runtime_types::recoverable_lock::pid_is_zombie(pid)
+}
+
+#[cfg(target_os = "linux")]
 fn pid_is_zombie(pid: u32) -> bool {
     // A leader that exited while other threads run also reads as Z, so
     // the process counts as gone only once it is down to that one thread.

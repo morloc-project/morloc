@@ -321,18 +321,25 @@ fn token_alive(token: u64) -> bool {
     }
 }
 
+/// Whether `pid` has exited and awaits its parent. False when unknown.
+#[cfg(not(target_os = "linux"))]
+pub fn pid_is_zombie(pid: u32) -> bool {
+    process_state(pid).is_some_and(|(_, zombie)| zombie)
+}
+
 /// The low 32 bits of a process's start time in microseconds (0 when
 /// unknown), and whether it has exited and awaits its parent.
 #[cfg(target_vendor = "apple")]
 fn process_state(pid: u32) -> Option<(u32, bool)> {
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // A nonzero arg makes the lookup also find a process awaiting reaping.
     // SAFETY: `info` is a writable buffer of `size` bytes.
     let n = unsafe {
         libc::proc_pidinfo(
             pid as libc::c_int,
             libc::PROC_PIDTBSDINFO,
-            0,
+            1,
             &mut info as *mut libc::proc_bsdinfo as *mut libc::c_void,
             size,
         )
@@ -440,6 +447,34 @@ mod tests {
             drop(a);
             let b = sh.lock.lock().expect("lock after recovery");
             assert!(!b.holder_died, "a recovered lock reported a death twice");
+        }
+    }
+
+    // A holder that has exited but awaits reaping is gone: nothing it held
+    // can be released by it, so the lock passes on without the reap.
+    #[test]
+    fn a_holder_awaiting_reaping_hands_the_lock_on() {
+        unsafe {
+            let sh = &*shared_zeroed::<Shared>();
+            let holder = libc::fork();
+            assert!(holder >= 0);
+            if holder == 0 {
+                let Ok(a) = sh.lock.lock() else { libc::_exit(2) };
+                std::mem::forget(a);
+                libc::_exit(0);
+            }
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            libc::waitid(libc::P_PID, holder as libc::id_t, &mut info, libc::WEXITED | libc::WNOWAIT);
+            let lock = &sh.lock as *const RecoverableLock as usize;
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let lock = &*(lock as *const RecoverableLock);
+                let _ = tx.send(lock.lock().map(|a| a.holder_died));
+            });
+            let got = rx.recv_timeout(std::time::Duration::from_secs(10));
+            assert_eq!(exit_status(holder), 0);
+            let died = got.expect("lock never passed on from an unreaped holder");
+            assert!(died.expect("lock after the holder exited"), "the holder's death was not reported");
         }
     }
 
