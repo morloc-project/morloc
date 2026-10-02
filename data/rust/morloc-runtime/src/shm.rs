@@ -824,22 +824,24 @@ fn open_volume(name: &str) -> Result<Result<(*mut ShmHeader, usize), ShopenMiss>
             name, file_size
         )));
     }
-    let mut header = std::mem::MaybeUninit::<ShmHeader>::uninit();
-    // SAFETY: reads at most `hdr` bytes into the buffer.
-    let got = unsafe { libc::pread(fd.0, header.as_mut_ptr() as *mut libc::c_void, hdr, 0) };
-    if usize::try_from(got).ok() != Some(hdr) {
-        return Err(MorlocError::Shm(format!("Cannot read the header of SHM volume '{}'", name)));
-    }
-    // SAFETY: every field of the header is plain data for which any bit
-    // pattern is a value, and all of its bytes were read.
-    let header = unsafe { header.assume_init_ref() };
-    if header.magic.load(Ordering::Acquire) != SHM_MAGIC {
+    // The header is read through a mapping of its own: macOS shared-memory
+    // objects support mmap but not read.
+    let head = map_shared(&fd, hdr)
+        .ok_or_else(|| MorlocError::Shm(format!("Cannot read the header of SHM volume '{}'", name)))?;
+    // SAFETY: `head` maps `hdr` bytes of the file, which holds at least that
+    // many, and every bit pattern is a valid header.
+    let (magic, data_size) = unsafe {
+        let header = &*(head as *const ShmHeader);
+        let fields = (header.magic.load(Ordering::Acquire), header.volume_size);
+        libc::munmap(head as *mut libc::c_void, hdr);
+        fields
+    };
+    if magic != SHM_MAGIC {
         return Err(MorlocError::Shm(format!(
             "SHM volume '{}' is not initialised (its creator may have died)",
             name
         )));
     }
-    let data_size = header.volume_size;
     let full_size = match data_size.checked_add(hdr) {
         Some(n) if n <= file_size => n,
         _ => {
