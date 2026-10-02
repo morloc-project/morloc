@@ -36,19 +36,19 @@ fi
 # ======================================================================
 
 cleanup() {
-    for pid in "${DAEMON_PIDS[@]}"; do
+    for pid in ${DAEMON_PIDS[@]+"${DAEMON_PIDS[@]}"}; do
         kill "$pid" 2>/dev/null || true
     done
     # Wait briefly then force-kill
     sleep 0.5
-    for pid in "${DAEMON_PIDS[@]}"; do
+    for pid in ${DAEMON_PIDS[@]+"${DAEMON_PIDS[@]}"}; do
         kill -9 "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
     done
-    for sock in "${SOCKET_FILES[@]}"; do
+    for sock in ${SOCKET_FILES[@]+"${SOCKET_FILES[@]}"}; do
         rm -f "$sock"
     done
-    for d in "${WORK_DIRS[@]}"; do
+    for d in ${WORK_DIRS[@]+"${WORK_DIRS[@]}"}; do
         rm -rf "$d"
     done
 }
@@ -300,7 +300,7 @@ stop_daemon() {
     wait "$pid" 2>/dev/null || true
     # Remove from tracked list
     local new_pids=()
-    for p in "${DAEMON_PIDS[@]}"; do
+    for p in ${DAEMON_PIDS[@]+"${DAEMON_PIDS[@]}"}; do
         [[ "$p" != "$pid" ]] && new_pids+=("$p")
     done
     DAEMON_PIDS=("${new_pids[@]+"${new_pids[@]}"}")
@@ -317,34 +317,17 @@ s.close()
 "
 }
 
-# Sum sizes of all /dev/shm/mlc-<pid:6hex>-* segments belonging to a daemon.
-# The SHM name embeds the creator PID as 6 zero-padded hex digits.
+# Shared memory a daemon holds: its run's segments, found by the markers the
+# runtime records (macOS cannot list shared memory; on Linux the probe also
+# fails if /dev/shm shows a segment without one). See ../shm-probe.py.
+SHM_PROBE="$SCRIPT_DIR/../shm-probe.py"
+
 shm_size_for_pid() {
-    local pidhex
-    pidhex=$(printf '%06x' "$1")
-    local total=0
-    local sz
-    for f in /dev/shm/mlc-${pidhex}-*; do
-        [ -e "$f" ] || continue
-        sz=$(stat -c %s "$f" 2>/dev/null || echo 0)
-        total=$((total + sz))
-    done
-    echo "$total"
+    python3 "$SHM_PROBE" size "$1"
 }
 
-# Count /dev/shm/mlc-<pid:6hex>-* segments for a daemon.
 shm_count_for_pid() {
-    local pidhex
-    pidhex=$(printf '%06x' "$1")
-    # Counted by walking the glob rather than listing it. Under errexit a
-    # listing that matches nothing fails the pipeline and takes the whole
-    # suite with it -- and "nothing" is exactly the answer expected of a
-    # daemon that has shut down and released its segments.
-    local count=0 f
-    for f in /dev/shm/mlc-${pidhex}-*; do
-        [ -e "$f" ] && count=$((count + 1))
-    done
-    echo "$count"
+    python3 "$SHM_PROBE" count "$1"
 }
 
 # Resident set size of a process, in KB. `ps` rather than /proc so this also
@@ -357,8 +340,8 @@ rss_kb_for_pid() {
 # fallback; prints "na" when neither can answer, which callers read as "do not
 # assert" rather than as zero.
 fd_count_for_pid() {
-    if [ -d "/proc/$1/fd" ]; then
-        ls -1 "/proc/$1/fd" 2>/dev/null | wc -l | tr -d ' '
+    if [ -d "/proc/$1/fd" ]; then  # portable: lsof below answers elsewhere
+        ls -1 "/proc/$1/fd" 2>/dev/null | wc -l | tr -d ' '  # portable: lsof below answers elsewhere
     elif command -v lsof >/dev/null 2>&1; then
         lsof -p "$1" 2>/dev/null | wc -l | tr -d ' '
     else
@@ -380,7 +363,7 @@ MORLOC_TEST_LEVEL="${MORLOC_TEST_LEVEL:-short}"
 SELECTED=("$@")
 should_run() {
     if [ ${#SELECTED[@]} -eq 0 ]; then return 0; fi
-    for s in "${SELECTED[@]}"; do
+    for s in ${SELECTED[@]+"${SELECTED[@]}"}; do
         if [[ "$1" == *"$s"* ]]; then return 0; fi
     done
     return 1
@@ -1379,7 +1362,7 @@ if should_run "concurrent"; then
         CONC_PIDS+=($!)
     done
     # Wait for all with a per-process check
-    for pid in "${CONC_PIDS[@]}"; do
+    for pid in ${CONC_PIDS[@]+"${CONC_PIDS[@]}"}; do
         wait "$pid" 2>/dev/null || true
     done
 
@@ -1438,7 +1421,7 @@ if should_run "shutdown"; then
 
     # Remove from tracked list
     new_pids=()
-    for p in "${DAEMON_PIDS[@]}"; do
+    for p in ${DAEMON_PIDS[@]+"${DAEMON_PIDS[@]}"}; do
         [[ "$p" != "$local_pid" ]] && new_pids+=("$p")
     done
     DAEMON_PIDS=("${new_pids[@]+"${new_pids[@]}"}")
@@ -1892,14 +1875,21 @@ if should_run "soak"; then
             "http://127.0.0.1:${SOAK_PORT}/health")
         assert_test "still serving after the soak" "200" "$final_status"
 
+        soak_names=$(mktemp)
+        python3 "$SHM_PROBE" names "$SOAK_PID" > "$soak_names"
+        assert_test "the daemon's segments are found" "yes" \
+            "$([ -s "$soak_names" ] && echo yes || echo no)"
         stop_daemon "$SOAK_PID"
 
         # Shared memory outlives the process that made it, so a daemon that
         # exits without releasing its segments leaks at the machine level --
         # invisible to anything measured while it was running, and cumulative
         # across the restarts a long-lived service actually goes through.
+        # The names were taken while it ran: its run directory, which lists
+        # them, goes with it.
         sleep 1
-        leftover=$(shm_count_for_pid "$SOAK_PID")
+        leftover=$(python3 "$SHM_PROBE" live "$soak_names")
+        rm -f "$soak_names"
         assert_test "segments released when the daemon exits" "0" "$leftover"
 
         # Same load again against a daemon confined to two cores. Threads that
@@ -1981,8 +1971,8 @@ if should_run "soak"; then
             # one platform nobody else is testing.
             thr_pools=0
             for cp in $(pgrep -P "$THR_PID" 2>/dev/null); do
-                if tr '\0' '\n' < "/proc/$cp/environ" 2>/dev/null \
-                        | grep -q '^MORLOC_PY_POOL=thread$'; then
+                if tr '\0' '\n' < "/proc/$cp/environ" 2>/dev/null |  # portable: this phase runs off macOS only
+                        grep -q '^MORLOC_PY_POOL=thread$'; then
                     thr_pools=$((thr_pools + 1))
                 fi
             done
@@ -2029,9 +2019,9 @@ fi
 # Asserts that the daemon's per-call SHM allocations are released when
 # each request finishes (via the per-eval arena in eval_arena.rs). With
 # the leak in place, every call would accumulate ~500 bytes in the
-# daemon's /dev/shm/mlc-<pid>-* volumes; over 1000 calls the volume
+# daemon's shared-memory volumes; over 1000 calls the volume
 # would fill and additional 64 KB volumes would be created. With the
-# fix, blocks are reused and total /dev/shm bytes for the daemon stay
+# fix, blocks are reused and total shared-memory bytes for the daemon stay
 # essentially flat.
 
 if should_run "shm-leak"; then
@@ -2084,7 +2074,7 @@ if should_run "shm-leak"; then
         THRESHOLD_BYTES=$((200 * 1024))
 
         TOTAL=$((TOTAL + 1))
-        printf "  %-50s " "${N} calls grow daemon /dev/shm < 200 KB"
+        printf "  %-50s " "${N} calls grow daemon shared memory < 200 KB"
         if [ "$delta_size" -lt "$THRESHOLD_BYTES" ]; then
             printf "%sPASS%s\n" "$GREEN" "$RESET"
             PASSED=$((PASSED + 1))
@@ -2158,7 +2148,7 @@ if should_run "r-shm-leak"; then
         THRESHOLD_BYTES=$((200 * 1024))
 
         TOTAL=$((TOTAL + 1))
-        printf "  %-50s " "${N} R calls grow daemon /dev/shm < 200 KB"
+        printf "  %-50s " "${N} R calls grow daemon shared memory < 200 KB"
         if [ "$delta_size" -lt "$THRESHOLD_BYTES" ]; then
             printf "%sPASS%s\n" "$GREEN" "$RESET"
             PASSED=$((PASSED + 1))
@@ -2264,14 +2254,8 @@ if should_run "pool-crash-stress"; then
                 failed_calls=$((failed_calls + 1))
             fi
 
-            # Find pool processes by working-dir + command pattern. The
-            # shell wrapper script's PID (LAST_DAEMON_PID) often differs
-            # from the actual morloc-nexus PID (sh runs the wrapper,
-            # then execs morloc-nexus on systems where exec is
-            # implemented as fork+exec). The `R --file=<dir>/pools/...`
-            # pattern targets only this test's R pool processes, not
-            # the test harness or unrelated runs.
-            pool_pids=$(pgrep -f "${PCS_DIR}/pools/.*pool\.R" 2>/dev/null) || pool_pids=""
+            # The daemon's pools are its children.
+            pool_pids=$(pgrep -P "$PCS_DAEMON_PID" 2>/dev/null) || pool_pids=""
             for ppid in $pool_pids; do
                 if kill -9 "$ppid" 2>/dev/null; then
                     kills=$((kills + 1))
@@ -2314,7 +2298,7 @@ if should_run "pool-crash-stress"; then
         THRESHOLD_BYTES=$((256 * 1024))
 
         TOTAL=$((TOTAL + 1))
-        printf "  %-50s " "${N} pool kills, /dev/shm bounded < 256 KB"
+        printf "  %-50s " "${N} pool kills, shared memory bounded < 256 KB"
         if [ "$delta_size" -lt "$THRESHOLD_BYTES" ]; then
             printf "%sPASS%s\n" "$GREEN" "$RESET"
             PASSED=$((PASSED + 1))
@@ -2325,6 +2309,7 @@ if should_run "pool-crash-stress"; then
         fi
         echo "      delta=${delta_size} bytes  per-crash=${per_crash} bytes  new_volumes=${delta_count}"
         echo "      requests: ${successful_calls} ok / ${failed_calls} fail   pool kills: ${kills}"
+        assert_test "every round killed a pool" "yes" "$([ "$kills" -ge "$N" ] && echo yes || echo no)"
 
         stop_daemon "$PCS_DAEMON_PID"
     fi
@@ -2341,7 +2326,7 @@ fi
 # single ill-timed crash without proper SHM reclamation could OOM the
 # host. This test fires repeated requests that ship a ~250 KB payload
 # per call, kills the pool mid-stream each iteration, and asserts that
-# /dev/shm/mlc-<daemon-pid>-* total bytes stay bounded across many
+# the daemon's shared-memory total bytes stay bounded across many
 # crash/recover cycles. Without recovery's coordinated SHM teardown the
 # delta would grow by roughly the payload size per crash.
 
@@ -2377,7 +2362,7 @@ if should_run "pool-recovery-large"; then
             return 1
         }
 
-        # Warm-up: ensure the pool is fully spawned and /dev/shm
+        # Warm-up: ensure the pool is fully spawned and shared memory
         # baseline reflects steady-state lazy allocations.
         curl -s --max-time 30 -o /dev/null -X POST \
             "http://127.0.0.1:${LP_PORT}/call/bigList" \
@@ -2406,7 +2391,7 @@ if should_run "pool-recovery-large"; then
                 failed_calls=$((failed_calls + 1))
             fi
 
-            pool_pids=$(pgrep -f "${LP_DIR}/pools/.*pool\.R" 2>/dev/null) || pool_pids=""
+            pool_pids=$(pgrep -P "$LP_DAEMON_PID" 2>/dev/null) || pool_pids=""
             for ppid in $pool_pids; do
                 if kill -9 "$ppid" 2>/dev/null; then
                     kills=$((kills + 1))
@@ -2434,7 +2419,7 @@ if should_run "pool-recovery-large"; then
         THRESHOLD_BYTES=$((512 * 1024))
 
         TOTAL=$((TOTAL + 1))
-        printf "  %-50s " "${N} large-payload kills, /dev/shm < 512 KB"
+        printf "  %-50s " "${N} large-payload kills, shared memory < 512 KB"
         if [ "$delta_size" -lt "$THRESHOLD_BYTES" ]; then
             printf "%sPASS%s\n" "$GREEN" "$RESET"
             PASSED=$((PASSED + 1))
@@ -2445,6 +2430,7 @@ if should_run "pool-recovery-large"; then
         fi
         echo "      delta=${delta_size} bytes  per-crash=${per_crash} bytes  new_volumes=${delta_count}"
         echo "      requests: ${successful_calls} ok / ${failed_calls} fail   pool kills: ${kills}"
+        assert_test "every round killed a pool" "yes" "$([ "$kills" -ge "$N" ] && echo yes || echo no)"
 
         stop_daemon "$LP_DAEMON_PID"
     fi
@@ -2693,7 +2679,7 @@ echo "${GREEN}Passed: $PASSED${RESET}, ${RED}Failed: $FAILED${RESET}, Total: $TO
 if (( FAILED > 0 )); then
     echo ""
     echo "${RED}Failures:${RESET}"
-    for f in "${FAILURES[@]}"; do
+    for f in ${FAILURES[@]+"${FAILURES[@]}"}; do
         echo "  ${RED}-${RESET} $f"
     done
     exit 1

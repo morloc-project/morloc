@@ -109,16 +109,14 @@ pub unsafe extern "C" fn stream_sweep_pid(
     crate::stream::sweeper_enqueue_pid(pid, start_time);
 }
 
-/// Read this process's start time from `/proc/PID/stat` (field 22,
-/// clock ticks since boot). Used by the nexus to capture the
-/// start_time of each spawned pool, which it then pairs with the
-/// PID when enqueueing a PID sweep. Returns 0 on read failure (the
-/// sweep will then accept a PID-only match).
+/// The start stamp of `pid` (`process::start_time`), which the nexus pairs
+/// with a pool's pid when it enqueues a PID sweep. 0 when unreadable; the
+/// sweep then accepts a PID-only match.
 #[no_mangle]
 pub unsafe extern "C" fn stream_pid_start_time(
     pid: u32,
 ) -> u64 {
-    crate::stream::read_pid_start_time_for(pid)
+    morloc_runtime_types::process::start_time(pid)
 }
 
 #[no_mangle]

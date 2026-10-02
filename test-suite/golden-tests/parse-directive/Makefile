@@ -36,7 +36,7 @@ all:
 	cat n.txt | ./nexus twoStdin lines:- x - 2>> obs.txt || echo "exit $$?" >> obs.txt
 	env -u MORLOC_TMPDIR TMPDIR=$$PWD/tmp ./nexus sizes n.txt >> obs.txt 2>> obs.err
 	env -u MORLOC_TMPDIR TMPDIR=$$PWD/tmp ./nexus sizes missing.txt 2>> obs.err || echo "missing file rejected" >> obs.txt
-	ls tmp | wc -l >> obs.txt
+	ls tmp | wc -l | tr -d ' ' >> obs.txt
 	./nexus total -h >> obs.txt 2>> obs.err
 	morloc make -o purenexus pure.loc 2> pure.err && echo UNEXPECTED_SUCCESS >> obs.txt || echo build_rejected >> obs.txt
 

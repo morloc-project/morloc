@@ -4,7 +4,9 @@
 # signal, and report whether the directory survived.
 sig=$1
 rm -f started.txt
-./nexus hang started.txt > /dev/null 2>&1 &
+# Run with SIGHUP at its default even if this harness ignores it (nohup).
+python3 -c 'import os, signal, sys; signal.signal(signal.SIGHUP, signal.SIG_DFL); os.execv(sys.argv[1], sys.argv[1:])' \
+  ./nexus hang started.txt > /dev/null 2>&1 &
 nx=$!
 for _ in $(seq 1 200); do
   [ -s started.txt ] && break
@@ -12,7 +14,7 @@ for _ in $(seq 1 200); do
 done
 dir=""
 for pid in $(pgrep -P "$nx"); do
-  dir=$(tr '\0' '\n' < "/proc/$pid/cmdline" | grep -m1 -E '^/tmp/morloc\.[A-Za-z0-9]{6}$')
+  dir=$(ps -o args= -p "$pid" | tr ' ' '\n' | grep -m1 -E '^/tmp/morloc\.[A-Za-z0-9]{6}$')
   [ -n "$dir" ] && break
 done
 if [ -z "$dir" ] || [ ! -d "$dir" ]; then

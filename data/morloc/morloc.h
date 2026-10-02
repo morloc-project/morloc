@@ -1470,6 +1470,15 @@ char* voidstar_to_json_string(const void* voidstar, const Schema* schema, ERRMSG
 // Section 16: Function declarations -- Daemon / socket communication
 // ========================================================================
 
+// Parent death: a process the nexus starts ends its process group when the
+// nexus ends. `guard` watches from a thread; a process with a loop of its own
+// takes the descriptor from `adopt` (-1 if none), polls it, and calls
+// `teardown` at end of file.
+int morloc_lifeline_adopt(void);
+void morloc_lifeline_guard(void);
+void morloc_lifeline_teardown(void);
+const char* morloc_lifeline_child_env(int* read_fd);
+
 void close_socket(int socket_id);
 void close_daemon(language_daemon_t** daemon_ptr);
 language_daemon_t* start_daemon(

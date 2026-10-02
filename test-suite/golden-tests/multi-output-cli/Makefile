@@ -8,7 +8,7 @@ all:
 	./nexus 3 --csv=c.out --no-stdout >> obs.txt 2>> obs.err
 	cat c.out >> obs.txt
 	./nexus -o o.out @ 3 --csv=d.out --no-stdout >> obs.txt 2>> obs.err
-	wc -c < o.out >> obs.txt
+	wc -c < o.out | tr -d ' ' >> obs.txt
 	./nexus 3 --no-stdout >> obs.txt 2>> obs.err
 	./nexus --csv 3 >> obs.txt 2>> obs.err
 	./nexus 3 --table=t.out >> obs.txt 2>> obs.err
@@ -26,7 +26,7 @@ all:
 	echo old > g.out
 	chmod 600 g.out
 	./nexus 3 --csv=g.out --no-stdout 2>> obs.err
-	stat -c %a g.out >> obs.txt
+	python3 -c 'import os, sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777)[2:])' g.out >> obs.txt
 	cat g.out >> obs.txt
 	ln -sf h.out i.out
 	if ./nexus 3 --csv=h.out --table=i.out 2>> obs.err ; then echo UNEXPECTED >> obs.txt ; else echo OK >> obs.txt ; fi

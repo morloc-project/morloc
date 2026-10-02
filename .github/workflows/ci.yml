@@ -192,7 +192,7 @@ jobs:
       # reported in the first two minutes rather than the tenth.
       - name: Test the runtime suites
         if: matrix.shard == 1
-        run: ./test-suite/test.sh typecheck-benchmark concurrency daemon packet-io expose
+        run: ./test-suite/test.sh portability typecheck-benchmark concurrency daemon packet-io expose
         timeout-minutes: 20
 
       ##### TEMPORARY DISABLE

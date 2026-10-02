@@ -361,14 +361,25 @@ fn run_child(exe: &str, argv: &[String], stdout: Option<std::fs::File>, stage: b
             cmd.env_remove(v);
         }
     }
-    // A child outlives nothing: when this process dies it is told to stop.
-    #[cfg(target_os = "linux")]
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        cmd.pre_exec(|| {
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-            Ok(())
-        });
+    // A child outlives nothing: it watches this process's lifeline and ends
+    // itself when this process ends.
+    extern "C" {
+        fn morloc_lifeline_child_env(read_fd: *mut i32) -> *const libc::c_char;
+    }
+    let mut lifeline_fd: i32 = -1;
+    let lifeline = unsafe { morloc_lifeline_child_env(&mut lifeline_fd) };
+    if !lifeline.is_null() {
+        let entry = unsafe { std::ffi::CStr::from_ptr(lifeline) }.to_string_lossy();
+        if let Some((k, v)) = entry.split_once('=') {
+            cmd.env(k, v);
+        }
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            cmd.pre_exec(move || {
+                libc::fcntl(lifeline_fd, libc::F_SETFD, 0);
+                Ok(())
+            });
+        }
     }
     match cmd.status() {
         Ok(st) => st.code().unwrap_or_else(|| 128 + st.signal().unwrap_or(0)),

@@ -73,6 +73,7 @@ function main()
 
     global_state["tmpdir"] = tmpdir
 
+    MorlocRuntime.lifeline_guard()
     daemon = MorlocRuntime.start_daemon(socket_path, tmpdir, shm_basename, 0xffff)
 
     # Simple signal handling

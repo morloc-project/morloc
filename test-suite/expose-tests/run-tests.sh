@@ -66,7 +66,7 @@ cleanup_module() {
 }
 
 cleanup_all() {
-    for m in "${TOUCHED_MODULES[@]}"; do
+    for m in ${TOUCHED_MODULES[@]+"${TOUCHED_MODULES[@]}"}; do
         cleanup_module "$m"
     done
 }
@@ -126,7 +126,7 @@ assert_absent() {
 should_run() {
     local name="$1"
     if [[ ${#FILTERS[@]} -eq 0 ]]; then return 0; fi
-    for pat in "${FILTERS[@]}"; do
+    for pat in ${FILTERS[@]+"${FILTERS[@]}"}; do
         [[ "$name" == *"$pat"* ]] && return 0
     done
     return 1
@@ -264,7 +264,7 @@ echo "${GREEN}Passed: $PASSED${RESET}, ${RED}Failed: $FAILED${RESET}, Total: $TO
 if (( FAILED > 0 )); then
     echo ""
     echo "${RED}Failures:${RESET}"
-    for f in "${FAILURES[@]}"; do
+    for f in ${FAILURES[@]+"${FAILURES[@]}"}; do
         echo "  ${RED}-${RESET} $f"
     done
     exit 1

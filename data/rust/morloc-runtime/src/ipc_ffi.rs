@@ -291,17 +291,8 @@ unsafe fn new_socket(errmsg: *mut *mut c_char) -> i32 {
     fd
 }
 
-unsafe fn new_server_addr(socket_path: *const c_char) -> libc::sockaddr_un {
-    let mut addr: libc::sockaddr_un = std::mem::zeroed();
-    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
-    let path_bytes = CStr::from_ptr(socket_path).to_bytes();
-    let copy_len = path_bytes.len().min(addr.sun_path.len() - 1);
-    ptr::copy_nonoverlapping(
-        path_bytes.as_ptr() as *const c_char,
-        addr.sun_path.as_mut_ptr(),
-        copy_len,
-    );
-    addr
+unsafe fn new_server_addr(socket_path: *const c_char) -> Result<libc::sockaddr_un, MorlocError> {
+    crate::utility::unix_socket_addr(CStr::from_ptr(socket_path).to_bytes())
 }
 
 unsafe fn new_server(socket_path: *const c_char, errmsg: *mut *mut c_char) -> i32 {
@@ -310,7 +301,14 @@ unsafe fn new_server(socket_path: *const c_char, errmsg: *mut *mut c_char) -> i3
         return -1;
     }
 
-    let addr = new_server_addr(socket_path);
+    let addr = match new_server_addr(socket_path) {
+        Ok(a) => a,
+        Err(e) => {
+            close_socket(server_fd);
+            set_errmsg(errmsg, &e);
+            return -1;
+        }
+    };
 
     // Remove any existing socket file
     libc::unlink(socket_path);
@@ -710,7 +708,14 @@ pub unsafe extern "C" fn send_and_receive_over_socket_wait(
         return ptr::null_mut();
     }
 
-    let addr = new_server_addr(socket_path);
+    let addr = match new_server_addr(socket_path) {
+        Ok(a) => a,
+        Err(e) => {
+            close_socket(client_fd);
+            set_errmsg(errmsg, &e);
+            return ptr::null_mut();
+        }
+    };
 
     // Connect with retry (matching C WAIT macro behavior)
     let mut retcode;
@@ -840,7 +845,15 @@ pub unsafe extern "C" fn mlc_spawn_watched(
         *errmsg = err;
         return false;
     }
-    let addr = new_server_addr(socket_path);
+    let addr = match new_server_addr(socket_path) {
+        Ok(a) => a,
+        Err(e) => {
+            close_socket(fd);
+            libc::free(packet as *mut c_void);
+            set_errmsg(errmsg, &e);
+            return false;
+        }
+    };
     let mut attempts = 0;
     while libc::connect(fd, &addr as *const libc::sockaddr_un as *const libc::sockaddr,
                         std::mem::size_of::<libc::sockaddr_un>() as u32) != 0 {

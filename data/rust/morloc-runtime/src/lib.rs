@@ -71,6 +71,7 @@ pub mod cli;
 pub mod config_ffi;
 pub mod log;
 pub mod run;
+pub mod lifeline;
 pub mod debug;
 
 /// Serializes tests against the process-global SHM arena. There is one arena
@@ -219,24 +220,71 @@ fn ensure_test_arena() {
 }
 
 /// Remove this process's test arena at exit: statics are never dropped, so
-/// without this every test run leaves its arena in /dev/shm. Only names are
+/// without this every test run leaves its arena behind. Only names are
 /// removed, taking no lock a stuck test thread might hold; the kernel
-/// releases the mappings. Volumes are found by name, since growth volumes
-/// take random indices.
+/// releases the mappings. Volumes are found by their markers, since growth
+/// volumes take random indices.
 #[cfg(test)]
 extern "C" fn remove_test_arena() {
-    let prefix = format!("morloc-{}-test-arena", std::process::id());
-    if let Ok(entries) = std::fs::read_dir("/dev/shm") {
-        for e in entries.flatten() {
-            let name = e.file_name();
-            if name.to_string_lossy().starts_with(&prefix) {
-                if let Ok(c) = std::ffi::CString::new(format!("/{}", name.to_string_lossy())) {
-                    unsafe { libc::shm_unlink(c.as_ptr()) };
-                }
-            }
+    remove_marked_dir(&std::env::temp_dir().join(format!("morloc_test_{}", std::process::id())));
+}
+
+/// The shared-memory objects recorded by markers in `dir` (see
+/// `shm::marker_path`), by name with its leading `/`.
+#[cfg(test)]
+pub(crate) fn marked_segments(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .map(|d| {
+            d.flatten()
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter_map(|n| n.strip_suffix(shm::MARKER_SUFFIX).map(|s| format!("/{s}")))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A fallback directory of a test's own, set for the process while the
+/// value lives. Dropping it restores the previous one and removes the
+/// directory with every shared-memory object it records, so no later test
+/// is left pointing at a directory that is gone.
+#[cfg(test)]
+pub(crate) struct ScopedFallback {
+    dir: std::path::PathBuf,
+    prev: Option<String>,
+}
+
+#[cfg(test)]
+impl ScopedFallback {
+    pub(crate) fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("morloc_test_{tag}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let prev = shm::get_fallback_dir();
+        shm::shm_set_fallback_dir(dir.to_str().unwrap());
+        ScopedFallback { dir, prev }
+    }
+
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.dir
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScopedFallback {
+    fn drop(&mut self) {
+        shm::shm_set_fallback_dir(self.prev.as_deref().unwrap_or(""));
+        remove_marked_dir(&self.dir);
+    }
+}
+
+/// Remove every shared-memory object recorded in `dir`, then `dir`.
+#[cfg(test)]
+pub(crate) fn remove_marked_dir(dir: &std::path::Path) {
+    for name in marked_segments(dir) {
+        if let Ok(c) = std::ffi::CString::new(name) {
+            unsafe { libc::shm_unlink(c.as_ptr()) };
         }
     }
-    let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("morloc_test_{}", std::process::id())));
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 // Re-export core types at crate root

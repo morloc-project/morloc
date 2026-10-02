@@ -245,7 +245,7 @@ jobs:
         if: matrix.shard == 1
         env:
           MORLOC_STRESS_WORKLOADS: "cpp py-r"
-        run: ./test-suite/test.sh typecheck-benchmark concurrency daemon packet-io expose
+        run: ./test-suite/test.sh portability typecheck-benchmark concurrency daemon packet-io expose
         timeout-minutes: 30
 
       # And morloc-integration-test alongside the unit and golden suites. That

@@ -17,6 +17,8 @@ pub mod hash;
 pub mod shm_types;
 pub mod shm_lock;
 pub mod recoverable_lock;
+pub mod process;
+pub mod owner_word;
 pub mod schema;
 pub mod cschema;
 pub mod null_check;

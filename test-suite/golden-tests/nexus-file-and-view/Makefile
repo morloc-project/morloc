@@ -25,7 +25,7 @@ all:
 	# Truncate the on-disk packet by 16 bytes so the header's declared
 	# total disagrees with the file size; default `file` (no
 	# --validate) must catch this.
-	N=`wc -c < data.packet`; M=`expr $$N - 16`; dd if=data.packet of=truncated.packet bs=1 count=$$M status=none 2>> obs.err
+	N=`wc -c < data.packet`; M=`expr $$N - 16`; dd if=data.packet of=truncated.packet bs=1 count=$$M 2> /dev/null
 	# === `file` plain output (deterministic subset) ===
 	printf 'data.json kind: '             >> obs.txt
 	$(NEXUS) file data.json | sed 's/^[^:]*: //' >> obs.txt 2>> obs.err

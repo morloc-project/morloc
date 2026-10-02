@@ -551,8 +551,7 @@ pub struct RegistrySlot {
     pub kind:                 u8,                              // off 17
     _pad0:                    [u8; 6],                         // off 18..24
 
-    /// Opener-pool process start time, read from `/proc/PID/stat`
-    /// field 22 (clock ticks since boot). Defends against PID reuse
+    /// Opener-pool process start stamp (`process::start_time`). Defends against PID reuse
     /// across pool restarts in the §1.7 PID sweep. Plain u64;
     /// immutable after @open publication.
     pub opener_pid_start_time: u64,                            // off 24..32
@@ -2104,59 +2103,10 @@ fn reclaim_dead_ending() -> usize {
     freed
 }
 
-/// Read this process's start time from `/proc/self/stat` (field 22,
-/// clock ticks since boot). Used to populate the slot's
-/// `opener_pid_start_time` so the §1.7 PID sweep can distinguish a
-/// reused PID from the original opener. Falls back to 0 if the read
-/// fails (most likely on non-Linux); the PID sweep still works
-/// without it, just with a small false-negative window.
+/// This process's start stamp: with the pid, it names this process even
+/// after the pid is reused. 0 when unknown.
 fn read_pid_start_time() -> u64 {
-    read_pid_start_time_for(std::process::id())
-}
-
-/// Read the start time of an arbitrary PID from `/proc/PID/stat`
-/// (field 22, clock ticks since boot). Returns 0 if the process no
-/// longer exists or the read otherwise fails.
-///
-/// Used by the nexus to capture pool start times at spawn time so
-/// the PID sweep can match the right process even across PID reuse.
-pub fn read_pid_start_time_for(pid: u32) -> u64 {
-    use std::io::Read;
-    let path = format!("/proc/{}/stat", pid);
-    let mut f = match std::fs::File::open(&path) {
-        Ok(f) => f,
-        Err(_) => return 0,
-    };
-    let mut buf = String::with_capacity(512);
-    if f.read_to_string(&mut buf).is_err() {
-        return 0;
-    }
-    let close_paren = match buf.rfind(')') {
-        Some(p) => p,
-        None => return 0,
-    };
-    let rest = buf[close_paren + 1..].trim();
-    let fields: Vec<&str> = rest.split_whitespace().collect();
-    fields.get(19).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0)
-}
-
-/// Whether `pid` has exited and awaits its parent. Such a process holds no
-/// descriptors and runs nothing. False when unknown.
-#[cfg(not(target_os = "linux"))]
-fn pid_is_zombie(pid: u32) -> bool {
-    morloc_runtime_types::recoverable_lock::pid_is_zombie(pid)
-}
-
-#[cfg(target_os = "linux")]
-fn pid_is_zombie(pid: u32) -> bool {
-    // A leader that exited while other threads run also reads as Z, so
-    // the process counts as gone only once it is down to that one thread.
-    let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else { return false };
-    let field = |name: &str| {
-        status.lines().find_map(|l| l.strip_prefix(name)).map(|v| v.trim().to_string())
-    };
-    field("State:").is_some_and(|v| v.starts_with('Z'))
-        && field("Threads:").is_some_and(|v| v == "1")
+    morloc_runtime_types::process::start_time(std::process::id())
 }
 
 /// Pull the current dispatch's `call_id` from thread-local storage.
@@ -2449,35 +2399,11 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
     Ok(handle)
 }
 
-/// Open one of stdin/stdout/stderr as a stream handle. The nexus is
-/// the sole owner of fd 0/1/2; this call registers a slot that routes
-/// `mlc_next` / `mlc_write` through the pool-nexus socket rather than
-/// opening any fd of its own.
-///
-/// `kind` must be `MLC_KIND_ISTREAM` for `STDIO_KIND_STDIN`, or
-/// `MLC_KIND_OSTREAM` for `STDIO_KIND_STDOUT` / `STDIO_KIND_STDERR`.
-/// Any other pairing is a caller bug.
-///
-/// True if process `pid` is alive and (when both start times are known)
-/// is the same process instance that opened a claim. `kill(pid, 0)` is the
-/// portable primary gate (no `/proc` dependency); the start time
-/// disambiguates PID reuse. Errs toward "alive" when uncertain so a live
-/// owner is never wrongly reclaimed.
+/// Whether the process that opened a claim, `pid` with start stamp
+/// `opener_start_time` (0 when unknown), may still be running. Errs toward
+/// alive, so a live owner is never reclaimed.
 fn stdio_owner_is_alive(pid: u32, opener_start_time: u64) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    if rc != 0 {
-        // ESRCH => no such process; EPERM (or other) => exists, can't signal.
-        return std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
-    }
-    if pid_is_zombie(pid) {
-        return false;
-    }
-    // Alive by pid; check for pid reuse when both start times are known.
-    let live_start = read_pid_start_time_for(pid);
-    !(opener_start_time != 0 && live_start != 0 && live_start != opener_start_time)
+    morloc_runtime_types::process::alive(pid, opener_start_time)
 }
 
 /// The registry's online self-heal for a stale/corrupt stdio claim. If the
@@ -2535,6 +2461,15 @@ fn try_reclaim_stale_stdio_claim(
     cleared
 }
 
+/// Open one of stdin/stdout/stderr as a stream handle. The nexus is
+/// the sole owner of fd 0/1/2; this call registers a slot that routes
+/// `mlc_next` / `mlc_write` through the pool-nexus socket rather than
+/// opening any fd of its own.
+///
+/// `kind` must be `MLC_KIND_ISTREAM` for `STDIO_KIND_STDIN`, or
+/// `MLC_KIND_OSTREAM` for `STDIO_KIND_STDOUT` / `STDIO_KIND_STDERR`.
+/// Any other pairing is a caller bug.
+///
 /// Uniqueness across every pool attached to this nexus: the shared
 /// header carries three `AtomicI64` claim slots. Second open of the
 /// same stdio kind returns a generation-mismatch-shaped error
@@ -3338,7 +3273,7 @@ fn close_open_stream(
             if slot.is_stdio == 0 {
                 let cursor = slot.cursor;
                 pwrite_all_fd(local.fd, &footer, cursor)?;
-                let rc = unsafe { fdatasync_fd(local.fd) };
+                let rc = unsafe { crate::utility::sync_file_data(local.fd) };
                 if rc != 0 {
                     return Err(MorlocError::Io(std::io::Error::last_os_error()));
                 }
@@ -3465,7 +3400,7 @@ pub fn shared_finalize_ostream_locked(
         }
         let cursor = slot.cursor;
         pwrite_all_fd(local.fd, &footer, cursor)?;
-        let rc = unsafe { fdatasync_fd(local.fd) };
+        let rc = unsafe { crate::utility::sync_file_data(local.fd) };
         if rc != 0 {
             return Err(MorlocError::Io(std::io::Error::last_os_error()));
         }
@@ -6203,10 +6138,8 @@ fn sweep_per_call(call_id: u64) {
 
 /// Walk the registry and discard any OPEN slot whose
 /// (`opener_pid`, `opener_pid_start_time`) matches. The start-time
-/// disambiguates PID reuse: a slot owned by the original PID
-/// has the start time matching that process's `/proc/PID/stat`
-/// field 22; a new process inheriting the same PID after the
-/// original exits has a different start time.
+/// disambiguates PID reuse: a new process given the same PID after
+/// the original exits has a different start time.
 fn sweep_per_pid(pid: u32, start_time: u64) {
     use std::sync::atomic::Ordering;
     let (slots_base, slot_count) = registry_slot_array();
@@ -9465,19 +9398,6 @@ fn pwrite_all_fd(fd: i32, mut buf: &[u8], mut offset: u64) -> Result<(), MorlocE
     Ok(())
 }
 
-/// Portable equivalent of Linux `fdatasync()`. Falls back to `fsync()`
-/// on platforms without `fdatasync` (e.g. macOS/BSD). `fdatasync` is
-/// strictly an optimisation: it skips flushing metadata that isn't
-/// needed to recover the file contents, so `fsync` is a correct,
-/// slightly more conservative substitute.
-#[inline]
-unsafe fn fdatasync_fd(fd: i32) -> i32 {
-    #[cfg(target_os = "linux")]
-    { libc::fdatasync(fd) }
-    #[cfg(not(target_os = "linux"))]
-    { libc::fsync(fd) }
-}
-
 /// Copy `count` bytes from `src_fd[src_off..src_off+count]` to
 /// `dest_fd[dest_off..]` using `sendfile()` for zero-copy via the
 /// kernel pagecache. Loops past EINTR + partial transfers; advances
@@ -10636,7 +10556,7 @@ mod tests {
         let path = dir.join("log.idx");
         let p = path.to_str().unwrap().to_string();
         let (pid, h, release) = stopped_opener(&p);
-        let start = read_pid_start_time_for(pid as u32);
+        let start = morloc_runtime_types::process::start_time(pid as u32);
         shared_close_handle(h).unwrap();
         unsafe { libc::kill(pid, libc::SIGKILL); }
         release_forked_holder((pid, release));
@@ -10827,7 +10747,7 @@ mod tests {
             std::mem::forget(SlotGuard::lock_any(slot_ref(idx).unwrap()).unwrap());
             h
         });
-        let start = read_pid_start_time_for(pid as u32);
+        let start = morloc_runtime_types::process::start_time(pid as u32);
         unsafe { libc::kill(pid, libc::SIGKILL); }
         release_forked_holder((pid, release));
 
@@ -10852,7 +10772,7 @@ mod tests {
             std::mem::forget(guard);
             idx as i64
         });
-        let start = read_pid_start_time_for(pid as u32);
+        let start = morloc_runtime_types::process::start_time(pid as u32);
         unsafe { libc::kill(pid, libc::SIGKILL); }
         release_forked_holder((pid, release));
 

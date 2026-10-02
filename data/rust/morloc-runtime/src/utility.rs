@@ -22,6 +22,55 @@ pub unsafe fn errno_val() -> i32 {
     *libc::__error()
 }
 
+/// Make a file's data durable: on stable storage, not only handed to the
+/// drive. Returns 0, or -1 with errno set.
+///
+/// Linux: fdatasync. On macOS fsync stops at the drive's cache; only
+/// F_FULLFSYNC reaches the medium. A filesystem that does not support it
+/// (some network and FUSE mounts) gets fsync.
+pub unsafe fn sync_file_data(fd: i32) -> i32 {
+    #[cfg(target_os = "linux")]
+    {
+        libc::fdatasync(fd)
+    }
+    #[cfg(target_vendor = "apple")]
+    {
+        if libc::fcntl(fd, libc::F_FULLFSYNC) == 0 {
+            return 0;
+        }
+        libc::fsync(fd)
+    }
+    #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
+    {
+        libc::fsync(fd)
+    }
+}
+
+/// Bytes in `sockaddr_un.sun_path`: 108 on Linux, 104 on macOS.
+pub const SUN_PATH_LEN: usize =
+    std::mem::size_of::<libc::sockaddr_un>() - std::mem::offset_of!(libc::sockaddr_un, sun_path);
+
+/// The address of the unix socket at `path`. A path with no room for its
+/// terminating NUL is refused: the kernel would bind or connect to a
+/// truncated name instead.
+pub fn unix_socket_addr(path: &[u8]) -> Result<libc::sockaddr_un, crate::error::MorlocError> {
+    if path.len() >= SUN_PATH_LEN || path.contains(&0) {
+        return Err(crate::error::MorlocError::Ipc(format!(
+            "socket path '{}' is {} bytes; unix sockets on this platform allow at most {}",
+            String::from_utf8_lossy(path),
+            path.len(),
+            SUN_PATH_LEN - 1
+        )));
+    }
+    // SAFETY: zeroed is a valid sockaddr_un; the copy fits with a NUL to spare.
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    unsafe {
+        std::ptr::copy_nonoverlapping(path.as_ptr() as *const libc::c_char, addr.sun_path.as_mut_ptr(), path.len());
+    }
+    Ok(addr)
+}
+
 /// Suppress SIGPIPE on send(). Linux: per-call flag. macOS: use set_nosigpipe() on the socket.
 #[cfg(target_os = "linux")]
 pub const SEND_NOSIGNAL: i32 = libc::MSG_NOSIGNAL;
@@ -94,17 +143,28 @@ pub unsafe extern "C" fn has_suffix(x: *const c_char, suffix: *const c_char) -> 
     xs.ends_with(ss.as_ref())
 }
 
-/// Best-effort raise of the soft open-file limit (RLIMIT_NOFILE) to the hard
-/// limit, so a process holding many concurrent connections/fds is bounded by the
-/// (large) hard limit rather than the common 1024 soft cap. poll()-based
-/// readiness waits already tolerate fds >= 1024, so this only widens headroom.
-/// Process-global and idempotent; failures (e.g. sandboxes forbidding setrlimit)
-/// are ignored. Call once at each process entry point that accepts connections.
+/// Best-effort raise of the soft open-file limit (RLIMIT_NOFILE) toward the
+/// hard limit, so a process holding many concurrent connections/fds is bounded
+/// by the (large) hard limit rather than the common 1024 (Linux) or 256
+/// (macOS) soft cap. poll()-based readiness waits already tolerate fds >= 1024,
+/// so this only widens headroom. macOS refuses any soft limit above OPEN_MAX
+/// (10240) even when the hard limit is unlimited, so smaller targets are tried
+/// in turn. Process-global and idempotent; failures (e.g. sandboxes forbidding
+/// setrlimit) are ignored. Call once at each process entry point that accepts
+/// connections.
 pub unsafe fn raise_nofile_limit() {
     let mut rl: libc::rlimit = std::mem::zeroed();
-    if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) == 0 && rl.rlim_cur < rl.rlim_max {
-        rl.rlim_cur = rl.rlim_max;
-        let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &rl);
+    if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) != 0 {
+        return;
+    }
+    for target in [rl.rlim_max, 1 << 20, 65536, 10240] {
+        if target <= rl.rlim_cur || target > rl.rlim_max {
+            continue;
+        }
+        let want = libc::rlimit { rlim_cur: target, rlim_max: rl.rlim_max };
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &want) == 0 {
+            return;
+        }
     }
 }
 
@@ -462,3 +522,34 @@ pub unsafe extern "C" fn dirname(path: *mut c_char) -> *mut c_char {
     }
     path
 }
+
+#[cfg(test)]
+mod socket_addr_tests {
+    use super::*;
+
+    #[test]
+    fn a_socket_path_must_fit_with_its_terminator() {
+        let fits = vec![b'a'; SUN_PATH_LEN - 1];
+        let addr = unix_socket_addr(&fits).unwrap();
+        assert_eq!(addr.sun_path[SUN_PATH_LEN - 1], 0);
+        assert!(unix_socket_addr(&vec![b'a'; SUN_PATH_LEN]).is_err());
+        assert!(unix_socket_addr(b"/tmp/a\0b").is_err());
+    }
+
+    #[test]
+    fn the_open_file_limit_is_raised() {
+        unsafe {
+            raise_nofile_limit();
+            let mut rl: libc::rlimit = std::mem::zeroed();
+            assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl), 0);
+            assert!(rl.rlim_cur >= rl.rlim_max.min(10240), "soft limit stayed at {}", rl.rlim_cur);
+        }
+    }
+
+    #[test]
+    fn sun_path_len_matches_the_platform() {
+        let addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        assert_eq!(SUN_PATH_LEN, addr.sun_path.len());
+    }
+}
+

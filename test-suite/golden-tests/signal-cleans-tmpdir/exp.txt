@@ -1,2 +1,3 @@
 INT: tmpdir removed (exit 130)
 TERM: tmpdir removed (exit 143)
+HUP: tmpdir removed (exit 129)

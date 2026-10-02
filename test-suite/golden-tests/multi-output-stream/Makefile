@@ -41,7 +41,7 @@ all:
 	: > log.txt
 	if ./nexus-py -f mpk stream log.txt --all=m.out 2>> obs.err ; then echo UNEXPECTED >> obs.txt ; else echo OK >> obs.txt ; fi
 	if ./nexus-py -f csv stream log.txt --count=c.out --no-stdout 2>> obs.err ; then echo UNEXPECTED >> obs.txt ; else echo OK >> obs.txt ; fi
-	wc -l < log.txt >> obs.txt
+	wc -l < log.txt | tr -d ' ' >> obs.txt
 	./nexus-py -f jsonl stream log.txt --count=j.out --no-stdout 2>> obs.err
 	cat j.out >> obs.txt
 

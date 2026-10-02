@@ -93,9 +93,9 @@ if (( EXIT_CODE == 124 )); then
 fi
 
 # Extract definite leak count
-DEFINITELY_LOST=$(grep 'definitely lost:' "$VALGRIND_LOG" | grep -oP '\d+(?= bytes)' | head -1)
+DEFINITELY_LOST=$(grep 'definitely lost:' "$VALGRIND_LOG" | grep -oP '\d+(?= bytes)' | head -1)  # portable: valgrind runs on Linux only
 DEFINITELY_LOST=${DEFINITELY_LOST:-0}
-FD_LEAK=$(grep 'FILE DESCRIPTORS:' "$VALGRIND_LOG" | grep -oP '\d+(?= open)' | head -1)
+FD_LEAK=$(grep 'FILE DESCRIPTORS:' "$VALGRIND_LOG" | grep -oP '\d+(?= open)' | head -1)  # portable: valgrind runs on Linux only
 FD_LEAK=${FD_LEAK:-3}
 EXTRA_FDS=$((FD_LEAK - 3))  # subtract stdin/stdout/stderr
 

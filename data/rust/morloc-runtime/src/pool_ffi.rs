@@ -1,7 +1,7 @@
 //! Pool server lifecycle: accept connections, dispatch packets, manage workers.
 //! Replaces pool.c. Uses std::thread instead of raw pthreads for thread mode.
 
-use std::ffi::{c_char, c_void};
+use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
 
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -379,8 +379,7 @@ unsafe fn pool_main_threads(config: &PoolConfig, socket_path: *const c_char, tmp
     let mut errmsg: *mut c_char = ptr::null_mut();
     let mut daemon = start_daemon(socket_path, tmpdir, shm_basename, 0xffff, &mut errmsg);
     if !errmsg.is_null() {
-        libc::fprintf(libc::fdopen(2, b"w\0".as_ptr() as *const c_char),
-            b"Failed to start language server:\n%s\n\0".as_ptr() as *const c_char, errmsg);
+        eprintln!("Failed to start language server:\n{}", CStr::from_ptr(errmsg).to_string_lossy());
         libc::free(errmsg as *mut c_void);
         return 1;
     }
@@ -451,8 +450,7 @@ unsafe fn pool_main_single(config: &PoolConfig, socket_path: *const c_char, tmpd
     let mut errmsg: *mut c_char = ptr::null_mut();
     let mut daemon = start_daemon(socket_path, tmpdir, shm_basename, 0xffff, &mut errmsg);
     if !errmsg.is_null() {
-        libc::fprintf(libc::fdopen(2, b"w\0".as_ptr() as *const c_char),
-            b"Failed to start language server:\n%s\n\0".as_ptr() as *const c_char, errmsg);
+        eprintln!("Failed to start language server:\n{}", CStr::from_ptr(errmsg).to_string_lossy());
         libc::free(errmsg as *mut c_void);
         return 1;
     }
@@ -500,8 +498,7 @@ unsafe fn pool_main_fork(config: &PoolConfig, socket_path: *const c_char, tmpdir
     let mut errmsg: *mut c_char = ptr::null_mut();
     let mut daemon = start_daemon(socket_path, tmpdir, shm_basename, 0xffff, &mut errmsg);
     if !errmsg.is_null() {
-        libc::fprintf(libc::fdopen(2, b"w\0".as_ptr() as *const c_char),
-            b"Failed to start language server:\n%s\n\0".as_ptr() as *const c_char, errmsg);
+        eprintln!("Failed to start language server:\n{}", CStr::from_ptr(errmsg).to_string_lossy());
         libc::free(errmsg as *mut c_void);
         return 1;
     }
@@ -551,11 +548,10 @@ unsafe fn pool_main_fork(config: &PoolConfig, socket_path: *const c_char, tmpdir
             // if the parent nexus already bootstrapped it.
             let slot_count = crate::ffi::stream_registry_init(&mut errmsg);
             if slot_count == usize::MAX {
-                libc::fprintf(
-                    libc::fdopen(2, b"w\0".as_ptr() as *const c_char),
-                    b"Worker %d stream_registry_init failed: %s\n\0".as_ptr() as *const c_char,
-                    i as i32,
-                    errmsg,
+                eprintln!(
+                    "Worker {} stream_registry_init failed: {}",
+                    i,
+                    CStr::from_ptr(errmsg).to_string_lossy()
                 );
                 libc::free(errmsg as *mut c_void);
                 libc::_exit(1);
@@ -738,9 +734,8 @@ pub unsafe extern "C" fn pool_main(
 ) -> i32 {
     tune_allocator();
     if argc != 4 {
-        libc::fprintf(libc::fdopen(2, b"w\0".as_ptr() as *const c_char),
-            b"Usage: %s <socket_path> <tmpdir> <shm_basename>\n\0".as_ptr() as *const c_char,
-            if argc > 0 { *argv } else { b"pool\0".as_ptr() as *const c_char });
+        let prog = if argc > 0 { CStr::from_ptr(*argv).to_string_lossy() } else { "pool".into() };
+        eprintln!("Usage: {} <socket_path> <tmpdir> <shm_basename>", prog);
         return 1;
     }
 

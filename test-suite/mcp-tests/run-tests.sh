@@ -33,7 +33,7 @@ else
 fi
 
 cleanup() {
-    for d in "${WORK_DIRS[@]}"; do rm -rf "$d"; done
+    for d in ${WORK_DIRS[@]+"${WORK_DIRS[@]}"}; do rm -rf "$d"; done
     rm -f /tmp/mcp-stderr-*.log 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -85,7 +85,7 @@ compile_program() { # <loc> <work_dir>  -> 0 ok, 1 fail
 SELECTED=("$@")
 should_run() {
     [[ ${#SELECTED[@]} -eq 0 ]] && return 0
-    for s in "${SELECTED[@]}"; do [[ "$1" == *"$s"* ]] && return 0; done
+    for s in ${SELECTED[@]+"${SELECTED[@]}"}; do [[ "$1" == *"$s"* ]] && return 0; done
     return 1
 }
 
@@ -348,7 +348,7 @@ printf "Total: %d   %sPassed: %d%s   %sFailed: %d%s   %sSkipped: %d%s\n" \
 if [[ $FAILED -gt 0 ]]; then
     echo ""
     echo "${RED}Failures:${RESET}"
-    for f in "${FAILURES[@]}"; do echo "  - $f"; done
+    for f in ${FAILURES[@]+"${FAILURES[@]}"}; do echo "  - $f"; done
     exit 1
 fi
 echo "${GREEN}All MCP tests passed.${RESET}"

@@ -7,6 +7,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::time::Duration;
 
+use morloc_runtime_types::process as proc_info;
 use morloc_runtime_types::shm_types::MAX_VOLUME_NUMBER;
 
 use crate::manifest::Pool;
@@ -20,8 +21,8 @@ pub const MAX_DAEMONS: usize = 32;
 /// generation can never be confused for current-generation volumes -- if
 /// a generation 0 file somehow survives the recovery teardown,
 /// generation 1's `/mlc-<pid>-<hash>-0001-<vol>` will not collide. The
-/// next nexus startup sweep (`cleanup_stale_shm`) catches any stragglers
-/// because everything still starts with `mlc-<pid>`.
+/// final exit removes every segment its run directory's markers name,
+/// whatever the generation.
 pub static RECOVERY_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Compute the SHM basename for a given recovery generation. `base` is
@@ -210,7 +211,7 @@ extern "C" fn pool_check_and_recover(
                     RECOVERY_WINDOW
                 );
                 drop(guard);
-                std::process::exit(1);
+                clean_exit(1);
             }
         }
     }
@@ -374,9 +375,8 @@ static EXIT_STATUSES: [AtomicI32; MAX_DAEMONS] = {
     [INIT; MAX_DAEMONS]
 };
 
-/// Start-times of pool processes, captured at spawn time from
-/// `/proc/PID/stat` field 22. Paired with PIDs for the §1.7 PID
-/// sweep. Zero entries (unset, or non-Linux fallback) cause the
+/// Start stamps of pool processes, captured at spawn. Paired with PIDs
+/// for the §1.7 PID sweep. Zero entries (unset or unreadable) cause the
 /// sweeper to fall back to PID-only matching.
 static POOL_START_TIMES: [std::sync::atomic::AtomicU64; MAX_DAEMONS] = {
     const INIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -446,11 +446,10 @@ pub struct PoolSocket {
     pub socket_path: String,
     pub syscmd: Vec<CString>,
     pub pid: i32,
-    /// Process start-time of `pid`, read from `/proc/PID/stat` field
-    /// 22 right after the daemon was spawned. Paired with `pid` when
-    /// the nexus enqueues a PID sweep on pool death, so the sweeper
-    /// rejects PID-reuse false positives. 0 if start_time couldn't
-    /// be read (non-Linux fallback; sweep falls back to PID-only).
+    /// Process start stamp of `pid`, read right after the daemon was
+    /// spawned. Paired with `pid` when the nexus enqueues a PID sweep on
+    /// pool death, so the sweeper rejects PID-reuse false positives. 0 if
+    /// it couldn't be read (the sweep then falls back to PID-only).
     pub pid_start_time: u64,
     /// XXH64 fingerprint (16-char hex) of this pool's emitted source +
     /// any declared @hash-include@ files. Exported to the spawned pool
@@ -606,13 +605,21 @@ pub fn install_signal_handlers() {
         sa.sa_flags = libc::SA_RESTART | libc::SA_NOCLDSTOP;
         libc::sigaction(libc::SIGCHLD, &sa, std::ptr::null_mut());
 
-        // SIGTERM and SIGINT
+        // SIGTERM, SIGINT and SIGHUP
         let mut sa_exit: libc::sigaction = std::mem::zeroed();
         sa_exit.sa_sigaction = signal_exit_handler as *const () as usize;
         libc::sigemptyset(&mut sa_exit.sa_mask);
         sa_exit.sa_flags = 0;
         libc::sigaction(libc::SIGTERM, &sa_exit, std::ptr::null_mut());
         libc::sigaction(libc::SIGINT, &sa_exit, std::ptr::null_mut());
+        // A closed terminal or dropped ssh session ends the run as cleanly as
+        // SIGTERM does, unless the run was started with SIGHUP ignored
+        // (nohup), which it keeps.
+        let mut hup: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(libc::SIGHUP, std::ptr::null(), &mut hup);
+        if hup.sa_sigaction != libc::SIG_IGN {
+            libc::sigaction(libc::SIGHUP, &sa_exit, std::ptr::null_mut());
+        }
 
         // Fatal program-error signals: unlink SHM segments, then
         // re-raise for the default disposition. SA_RESETHAND ensures
@@ -631,6 +638,9 @@ pub fn install_signal_handlers() {
 }
 
 /// Remove the run tmpdir when the run ends.
+/// This run's temporary directory, once made.
+static RUN_TMPDIR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 pub fn set_tmpdir(path: String) {
     if let Err(e) = crate::sigrm::register(&path) {
         eprintln!("Error: {}", e);
@@ -659,6 +669,7 @@ pub fn init_shm() -> (String, String) {
         }
     };
     set_tmpdir(tmpdir.clone());
+    let _ = RUN_TMPDIR.set(tmpdir.clone());
 
     // Point every pool at this run's benchmark record file. An env var
     // rather than a per-language setter because pools inherit it for
@@ -921,6 +932,11 @@ pub fn clean_exit(exit_code: i32) -> ! {
             libc::free(err as *mut libc::c_void);
         }
     }
+    // Every segment the run recorded, including those of earlier recovery
+    // generations and companions whose own teardown did not run.
+    if let Some(dir) = RUN_TMPDIR.get() {
+        unlink_marked_segments(Path::new(dir));
+    }
 
     // Aggregate and emit the benchmark summary while the tmpdir still
     // exists -- the records live inside it -- and after the pools are
@@ -1029,55 +1045,105 @@ pub fn setup_sockets(pools: &[Pool], tmpdir: &str, shm_basename: &str) -> Vec<Po
 /// corrupted -- the runtime cannot police fd sharing across pools
 /// and the nexus. Documented, not enforced.
 fn start_language_server(socket: &PoolSocket) -> Result<i32, String> {
-    // Export this pool's source-fingerprint hash so the runtime cache wrap can
-    // mix it into every cache key. Set it in the PARENT before the fork so the
-    // child inherits it: `setenv` is NOT async-signal-safe (it mallocs the
-    // environ array) and calling it between fork and exec can deadlock on the
-    // allocator lock if the nexus is multithreaded (serve/daemon topologies).
-    // The value is per-pool; pools are spawned serially on the main thread, so
-    // each child inherits the hash set immediately before its own fork.
-    unsafe {
-        let key = b"MORLOC_POOL_HASH\0".as_ptr() as *const libc::c_char;
-        libc::setenv(key, socket.pool_hash.as_ptr(), 1);
+    extern "C" {
+        fn morloc_lifeline_child_env(read_fd: *mut i32) -> *const libc::c_char;
     }
+    // Everything the child needs is built here, before the fork: the nexus is
+    // multithreaded in serve and daemon modes, so between fork and exec the
+    // child may only make async-signal-safe calls.
+    let cmd = socket.syscmd.first().ok_or_else(|| format!("pool '{}' has no command", socket.lang))?;
+    let program = resolve_program(cmd)
+        .ok_or_else(|| format!("cannot start pool '{}': '{}' was not found on PATH", socket.lang, cmd.to_string_lossy()))?;
+    let argv: Vec<*const libc::c_char> = socket
+        .syscmd
+        .iter()
+        .map(|s| s.as_ptr())
+        .chain(std::iter::once(std::ptr::null()))
+        .collect();
+
+    let mut lifeline_fd: i32 = -1;
+    let lifeline = unsafe { morloc_lifeline_child_env(&mut lifeline_fd) };
+    // The pool's source fingerprint, mixed into its cache keys, and its
+    // lifeline go into its environment only.
+    let mut env: Vec<CString> = std::env::vars_os()
+        .filter(|(k, _)| k != "MORLOC_POOL_HASH" && k != "MORLOC_LIFELINE")
+        .filter_map(|(k, v)| {
+            let mut kv = k.into_encoded_bytes();
+            kv.push(b'=');
+            kv.extend(v.into_encoded_bytes());
+            CString::new(kv).ok()
+        })
+        .collect();
+    let mut hash = b"MORLOC_POOL_HASH=".to_vec();
+    hash.extend_from_slice(socket.pool_hash.as_bytes());
+    env.push(CString::new(hash).map_err(|e| e.to_string())?);
+    if !lifeline.is_null() {
+        env.push(unsafe { std::ffi::CStr::from_ptr(lifeline) }.to_owned());
+    }
+    let envp: Vec<*const libc::c_char> =
+        env.iter().map(|s| s.as_ptr()).chain(std::iter::once(std::ptr::null())).collect();
+    let exec_failed = format!(
+        "exec failed for pool '{}' running '{}': errno ",
+        socket.lang,
+        program.to_string_lossy()
+    );
 
     let pid = unsafe { libc::fork() };
 
     if pid == 0 {
-        // Child process
-        unsafe { libc::setpgid(0, 0) };
-
-        let argv: Vec<*const libc::c_char> = socket
-            .syscmd
-            .iter()
-            .map(|s| s.as_ptr())
-            .chain(std::iter::once(std::ptr::null()))
-            .collect();
-
         unsafe {
-            libc::execvp(argv[0], argv.as_ptr());
+            libc::setpgid(0, 0);
+            if lifeline_fd >= 0 {
+                libc::fcntl(lifeline_fd, libc::F_SETFD, 0);
+            }
+            libc::execve(program.as_ptr(), argv.as_ptr(), envp.as_ptr());
+            write_errno_line(exec_failed.as_bytes(), std::io::Error::last_os_error().raw_os_error().unwrap_or(0));
+            libc::_exit(127);
         }
-        // Only reached if exec fails. Report the actual command (argv[0]), not
-        // just the pool language, so a missing interpreter (e.g. Rscript not on
-        // PATH) is not mislabeled as the language name (e.g. "r").
-        let cmd = socket
-            .syscmd
-            .first()
-            .and_then(|c| c.to_str().ok())
-            .unwrap_or("<none>");
-        eprintln!(
-            "execvp failed for pool '{}' running '{}': {}",
-            socket.lang,
-            cmd,
-            std::io::Error::last_os_error()
-        );
-        unsafe { libc::_exit(127) };
     } else if pid > 0 {
         // Parent: ensure child is in its own process group
         unsafe { libc::setpgid(pid, pid) };
         Ok(pid)
     } else {
         Err(format!("fork failed: {}", std::io::Error::last_os_error()))
+    }
+}
+
+/// The file `cmd` names: itself when it holds a `/`, otherwise the first
+/// executable of that name on PATH, as `execvp` would find it.
+fn resolve_program(cmd: &CString) -> Option<CString> {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = cmd.as_bytes();
+    if bytes.contains(&b'/') {
+        return Some(cmd.clone());
+    }
+    let path = std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into());
+    std::env::split_paths(&path).find_map(|dir| {
+        let dir = if dir.as_os_str().is_empty() { std::path::PathBuf::from(".") } else { dir };
+        let candidate = CString::new(dir.join(std::ffi::OsStr::from_bytes(bytes)).into_os_string().into_encoded_bytes()).ok()?;
+        let is_file = std::fs::metadata(std::ffi::OsStr::from_bytes(candidate.as_bytes())).is_ok_and(|m| m.is_file());
+        (is_file && unsafe { libc::access(candidate.as_ptr(), libc::X_OK) } == 0).then_some(candidate)
+    })
+}
+
+/// Write `prefix`, the decimal `errno` and a newline to stderr, without
+/// allocating: for a child between fork and exec.
+fn write_errno_line(prefix: &[u8], errno: i32) {
+    let mut digits = [0u8; 12];
+    let mut n = errno.unsigned_abs();
+    let mut i = digits.len();
+    loop {
+        i -= 1;
+        digits[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    unsafe {
+        libc::write(2, prefix.as_ptr() as *const libc::c_void, prefix.len());
+        libc::write(2, digits[i..].as_ptr() as *const libc::c_void, digits.len() - i);
+        libc::write(2, b"\n".as_ptr() as *const libc::c_void, 1);
     }
 }
 
@@ -1089,10 +1155,9 @@ pub fn start_daemons(sockets: &mut [PoolSocket], indices: &[usize]) -> Result<()
     for &idx in indices {
         let pid = start_language_server(&sockets[idx])?;
         sockets[idx].pid = pid;
-        // Capture the pool's start_time at spawn so the PID-based crash
-        // sweep can detect PID reuse correctly. Best-effort: reads
-        // /proc/PID/stat. Zero on non-Linux or if the read races a fast
-        // exit; sweep falls back to PID-only match in that case.
+        // Capture the pool's start stamp at spawn so the PID-based crash
+        // sweep can detect PID reuse. Zero if the read races a fast exit;
+        // the sweep falls back to a PID-only match in that case.
         let start_time = unsafe { stream_pid_start_time(pid as u32) };
         sockets[idx].pid_start_time = start_time;
         POOL_START_TIMES[idx].store(start_time, Ordering::Release);
@@ -1361,8 +1426,23 @@ pub fn make_tmpdir() -> Result<String, String> {
             std::io::Error::last_os_error()
         ));
     }
-    let cstr = unsafe { std::ffi::CStr::from_ptr(result) };
-    Ok(cstr.to_string_lossy().into_owned())
+    let dir = unsafe { std::ffi::CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    // Record the owner before anything else lands in the directory, so the
+    // startup sweep of a later run can tell a dead run's directory from a
+    // live one; written whole by rename.
+    let pid = std::process::id();
+    let record = format!(
+        "{} {} {} {}\n",
+        pid,
+        proc_info::start_time(pid),
+        proc_info::boot_id().unwrap_or_else(|| "?".into()),
+        proc_info::pid_namespace().unwrap_or_else(|| "?".into()),
+    );
+    let path = std::path::Path::new(&dir);
+    std::fs::write(path.join(".owner.tmp"), record)
+        .and_then(|_| std::fs::rename(path.join(".owner.tmp"), path.join(OWNER_FILE)))
+        .map_err(|e| format!("Failed to record the owner of {}: {}", dir, e))?;
+    Ok(dir)
 }
 
 /// Generate a job hash from seed, pid, and timestamps.
@@ -1379,131 +1459,65 @@ pub fn make_job_hash(seed: u64) -> u64 {
     xxh64(data.as_bytes())
 }
 
-/// Sweep /dev/shm for orphaned morloc segments. Two detection strategies:
+/// The run directory of a nexus that died without cleaning up still holds
+/// what the run made: a marker for each shared-memory object (see the
+/// runtime's `shm::marker_path`) and its file-backed volumes. Remove every
+/// such directory under /tmp whose owner is gone, with the objects its
+/// markers name. Called once at nexus startup.
 ///
-/// 1. New-format basenames `morloc-<pid>-<...>`: parse the PID, check
-///    /proc/<pid>; if absent, the creator is gone -- unlink.
-/// 2. Old-format basenames `morloc-<hash>` (no embedded PID, predates
-///    PR-21) and any segment whose PID parse fails: scan /proc/*/maps
-///    once and check whether any live process has the segment mapped.
-///    If not mapped anywhere, unlink.
-///
-/// Called once at nexus startup. Concurrency: the sweep is safe even if
-/// other morloc processes are running -- a live PID's segments are
-/// skipped, and a segment mapped by any live process is skipped. Live
-/// segments owned by other users are skipped silently because shm_unlink
-/// returns EACCES; we ignore unlink failures.
+/// A directory is only removed when its `.owner` record proves the owner
+/// dead: written under another boot, or naming, in this PID namespace, a
+/// process that no longer runs. A directory without a record, of another
+/// user, or recorded in another PID namespace (a container sharing /tmp)
+/// is left alone.
 pub fn cleanup_stale_shm() {
-    let dir = match std::fs::read_dir("/dev/shm") {
-        Ok(d) => d,
-        Err(_) => return, // /dev/shm not present (e.g. macOS); nothing to do
-    };
-
-    // Collect candidate morloc-* names first so we don't read /proc twice.
-    let mut candidates: Vec<String> = Vec::new();
-    for entry in dir.flatten() {
-        let name = match entry.file_name().into_string() {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        if name.starts_with("mlc-") || name.starts_with("morloc-") {
-            candidates.push(name);
-        }
-    }
-    if candidates.is_empty() {
-        return;
-    }
-
-    // First pass: PID-in-name strategy. Move fallback candidates to a
-    // bucket for the /proc/maps strategy.
-    let mut needs_map_scan: Vec<String> = Vec::new();
-    for name in candidates {
-        let pid_parsed = parse_pid_from_shm_entry(&name);
-        match pid_parsed {
-            Some(pid) if std::path::Path::new(&format!("/proc/{}", pid)).exists() => {
-                continue; // creator alive; leave alone
-            }
-            Some(_) => unlink_shm(&name), // PID dead -> orphan
-            None => needs_map_scan.push(name), // old format; verify via /proc/*/maps
-        }
-    }
-
-    if needs_map_scan.is_empty() {
-        return;
-    }
-
-    // Second pass: build a set of every /dev/shm path mentioned in any
-    // live process's memory map, then unlink any candidate not in it.
-    let mapped: std::collections::HashSet<String> = collect_mapped_shm_paths();
-    for name in needs_map_scan {
-        let full = format!("/dev/shm/{}", name);
-        if !mapped.contains(&full) {
-            unlink_shm(&name);
-        }
-    }
-}
-
-/// Collect every `/dev/shm/...` path mentioned in any live process's
-/// `/proc/<pid>/maps`. Used as a fallback liveness check for SHM segments
-/// whose names don't embed a PID.
-fn collect_mapped_shm_paths() -> std::collections::HashSet<String> {
-    let mut out = std::collections::HashSet::new();
-    let proc = match std::fs::read_dir("/proc") {
-        Ok(d) => d,
-        Err(_) => return out,
-    };
-    for entry in proc.flatten() {
-        let pid_name = match entry.file_name().into_string() {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        if !pid_name.chars().all(|c| c.is_ascii_digit()) {
+    use std::os::unix::fs::MetadataExt;
+    let boot = proc_info::boot_id();
+    let ns = proc_info::pid_namespace();
+    let euid = unsafe { libc::geteuid() };
+    let Ok(entries) = std::fs::read_dir("/tmp") else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with("morloc.") && name.len() == "morloc.XXXXXX".len()) {
             continue;
         }
-        let maps_path = format!("/proc/{}/maps", pid_name);
-        let contents = match std::fs::read_to_string(&maps_path) {
-            Ok(s) => s,
-            Err(_) => continue, // process gone or no permission
-        };
-        for line in contents.lines() {
-            // /proc/<pid>/maps lines: "<addr> <perms> <off> <dev> <ino> <path>"
-            // We only care about the trailing path field.
-            if let Some(idx) = line.find("/dev/shm/") {
-                let path: String = line[idx..]
-                    .trim_end_matches([' ', '\t', '\n'])
-                    .to_string();
-                out.insert(path);
-            }
+        let dir = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&dir) else { continue };
+        if !meta.is_dir() || meta.uid() != euid || meta.mode() & 0o777 != 0o700 {
+            continue;
+        }
+        let Ok(record) = std::fs::read_to_string(dir.join(OWNER_FILE)) else { continue };
+        let f: Vec<&str> = record.split_whitespace().collect();
+        let [pid, start, owner_boot, owner_ns] = f.as_slice() else { continue };
+        let (Ok(pid), Ok(start)) = (pid.parse::<u32>(), start.parse::<u64>()) else { continue };
+        if ns.as_deref() != Some(*owner_ns) {
+            continue;
+        }
+        let other_boot = boot.as_deref().is_some_and(|b| b != *owner_boot);
+        if other_boot || !proc_info::alive(pid, start) {
+            unlink_marked_segments(&dir);
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
-    out
 }
 
-/// Recover the creator PID from an on-disk SHM segment name (a `/dev/shm`
-/// directory entry, which lacks the `shm_open` leading `/`). Handles the
-/// current `mlc-<pid:6hex>-<hash...>` format and the legacy
-/// `morloc-<pid>-<hash>` format (pre-upgrade stragglers). Returns `None`
-/// when no PID can be parsed, in which case the caller falls back to the
-/// `/proc/*/maps` liveness scan.
-fn parse_pid_from_shm_entry(name: &str) -> Option<u32> {
-    if let Some(body) = name.strip_prefix("mlc-") {
-        body.get(0..6).and_then(|h| u32::from_str_radix(h, 16).ok())
-    } else if let Some(body) = name.strip_prefix("morloc-") {
-        body.split(['-', '_']).next().and_then(|s| s.parse().ok())
-    } else {
-        None
-    }
-}
+/// The run directory's record of its owner: pid, start stamp, boot and PID
+/// namespace.
+const OWNER_FILE: &str = ".owner";
 
-fn unlink_shm(name: &str) {
-    // Best-effort: failures (EACCES from foreign user, ENOENT from race,
-    // etc.) are silent.
-    unsafe {
-        let cstr = match std::ffi::CString::new(format!("/{}", name)) {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        libc::shm_unlink(cstr.as_ptr());
+/// Remove every shared-memory object a marker in `dir` names. Only morloc's
+/// own names are touched.
+pub fn unlink_marked_segments(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let file = entry.file_name();
+        let file = file.to_string_lossy();
+        let Some(object) = file.strip_suffix(".shm").filter(|o| o.starts_with("mlc-")) else { continue };
+        if let Ok(c) = CString::new(format!("/{object}")) {
+            unsafe { libc::shm_unlink(c.as_ptr()) };
+        }
+        let _ = std::fs::remove_file(entry.path());
     }
 }
 
@@ -1540,16 +1554,60 @@ mod tests {
         assert_eq!(hex4((MAX_VOLUME_NUMBER - 1) as u16), "7fff");
     }
 
-    #[test]
-    fn shm_pid_round_trips_through_name() {
-        // The /dev/shm entry lacks the shm_open leading '/'.
-        for pid in [1u32, 99999, 0x3f_ffff, 0xff_ffff] {
-            let base = format!("/mlc-{:06x}-{:08x}-0000", pid, 0xdead_beefu64 & 0xffff_ffff);
-            let entry = base.trim_start_matches('/');
-            assert_eq!(parse_pid_from_shm_entry(entry), Some(pid), "entry {}", entry);
+    /// A run directory under /tmp, recording `owner` and one shared-memory
+    /// object, which is created. Returns the directory and the object name.
+    fn fake_run(owner: &str, tag: &str) -> (std::path::PathBuf, CString) {
+        let mut tmpl = *b"/tmp/morloc.XXXXXX\0";
+        let p = unsafe { libc::mkdtemp(tmpl.as_mut_ptr() as *mut libc::c_char) };
+        assert!(!p.is_null());
+        let dir = std::path::PathBuf::from(unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned());
+        std::fs::write(dir.join(OWNER_FILE), owner).unwrap();
+        let object = format!("mlc-{:06x}-{tag}-0000-0001", std::process::id() & 0xff_ffff);
+        std::fs::write(dir.join(format!("{object}.shm")), "").unwrap();
+        let name = CString::new(format!("/{object}")).unwrap();
+        let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDWR | libc::O_CREAT, 0o600) };
+        assert!(fd >= 0);
+        unsafe { libc::close(fd) };
+        (dir, name)
+    }
+
+    fn object_exists(name: &CString) -> bool {
+        let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDONLY, 0) };
+        if fd >= 0 {
+            unsafe { libc::close(fd) };
         }
-        // Legacy format is still recognised for pre-upgrade stragglers.
-        assert_eq!(parse_pid_from_shm_entry("morloc-4242-deadbeefcafef00d_3"), Some(4242));
+        fd >= 0
+    }
+
+    #[test]
+    fn the_startup_sweep_removes_only_dead_runs() {
+        let boot = proc_info::boot_id().unwrap();
+        let ns = proc_info::pid_namespace().unwrap();
+        let me = std::process::id();
+        let dead = unsafe {
+            let pid = libc::fork();
+            if pid == 0 {
+                libc::_exit(0);
+            }
+            libc::waitpid(pid, std::ptr::null_mut(), 0);
+            pid as u32
+        };
+        let live = fake_run(&format!("{me} {} {boot} {ns}", proc_info::start_time(me)), "aaaaaaa1");
+        let gone = fake_run(&format!("{dead} 0 {boot} {ns}"), "aaaaaaa2");
+        let rebooted = fake_run(&format!("{me} {} other-boot {ns}", proc_info::start_time(me)), "aaaaaaa3");
+        let foreign = fake_run(&format!("{dead} 0 {boot} other-ns"), "aaaaaaa4");
+        cleanup_stale_shm();
+        let kept = |(dir, name): &(std::path::PathBuf, CString)| dir.exists() && object_exists(name);
+        let removed = |(dir, name): &(std::path::PathBuf, CString)| !dir.exists() && !object_exists(name);
+        let (live_ok, gone_ok, reboot_ok, foreign_ok) = (kept(&live), removed(&gone), removed(&rebooted), kept(&foreign));
+        for (dir, name) in [&live, &gone, &rebooted, &foreign] {
+            unsafe { libc::shm_unlink(name.as_ptr()) };
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        assert!(live_ok, "a live run's directory was removed");
+        assert!(gone_ok, "a dead run's directory or object survived");
+        assert!(reboot_ok, "a run from another boot survived");
+        assert!(foreign_ok, "a run from another PID namespace was removed");
     }
 
     #[test]

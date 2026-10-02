@@ -18,7 +18,7 @@ set -euo pipefail
 if [ "$(date +%N 2>/dev/null)" = "N" ]; then
     now_ms() { python3 -c 'import time; print(int(time.time() * 1000))'; }
 else
-    now_ms() { echo $(( $(date +%s%N) / 1000000 )); }
+    now_ms() { echo $(( $(date +%s%N) / 1000000 )); }  # portable: used only where the %N probe above passed
 fi
 
 
@@ -120,7 +120,7 @@ compile_and_run() {
 SELECTED=("$@")
 should_run() {
     if [ ${#SELECTED[@]} -eq 0 ]; then return 0; fi
-    for s in "${SELECTED[@]}"; do
+    for s in ${SELECTED[@]+"${SELECTED[@]}"}; do
         if [[ "$1" == *"$s"* ]]; then return 0; fi
     done
     return 1
@@ -143,7 +143,7 @@ echo "${GREEN}Passed: $PASSED${RESET}, ${RED}Failed: $FAILED${RESET}, Total: $TO
 if (( FAILED > 0 )); then
     echo ""
     echo "${RED}Failures:${RESET}"
-    for f in "${FAILURES[@]}"; do
+    for f in ${FAILURES[@]+"${FAILURES[@]}"}; do
         echo "  ${RED}-${RESET} $f"
     done
     exit 1

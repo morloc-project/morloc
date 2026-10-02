@@ -31,6 +31,19 @@ _daemon_slot = []
 workers = []
 global_state = dict()
 _shutdown_wakeup_fd = -1
+# Read end of the nexus's lifeline pipe (see morloc_lifeline_adopt), or -1.
+_lifeline_fd = -1
+
+
+def _lifeline_ended():
+    """After a poll reported the lifeline readable: whether the nexus is gone.
+    Nothing is ever written to it, so readable means end of file."""
+    try:
+        return os.read(_lifeline_fd, 1) == b""
+    except BlockingIOError:
+        return False
+    except OSError:
+        return True
 
 # The language preamble (runtime bootstrap: `import pymorloc as morloc`, path
 # setup) and the generated schema/closure tables run at module top, in the
@@ -879,9 +892,16 @@ def run_thread_pool(socket_path, tmpdir, shm_basename):
     listener = threading.Thread(target=_listener_loop, daemon=True)
     listener.start()
 
+    lifeline = select.poll()
+    if _lifeline_fd >= 0:
+        lifeline.register(_lifeline_fd, select.POLLIN)
     try:
         while not stop.is_set():
-            time.sleep(0.05)
+            if _lifeline_fd < 0:
+                time.sleep(0.05)
+            elif lifeline.poll(50) and _lifeline_ended():
+                lifeline.unregister(_lifeline_fd)
+                morloc.lifeline_teardown()
     finally:
         stop.set()
         # Join the listener so it is no longer inside wait_for_client(daemon)
@@ -923,17 +943,10 @@ if __name__ == "__main__":
     except (RuntimeError, ValueError):
         pass
 
-    # Request SIGTERM when the parent process (nexus) dies (Linux only).
-    # Without this, SIGKILL on the nexus leaves pool processes orphaned and
-    # their SHM segments leak. macOS has no prctl/PR_SET_PDEATHSIG equivalent,
-    # so this is a known parity gap there: a SIGKILL'd nexus can orphan pools
-    # (normal shutdown is still clean via the nexus's process-group teardown).
-    try:
-        import ctypes
-        _PR_SET_PDEATHSIG = 1
-        ctypes.CDLL("libc.so.6", use_errno=True).prctl(_PR_SET_PDEATHSIG, signal.SIGTERM)
-    except Exception:
-        pass  # non-Linux (e.g. macOS): no PDEATHSIG -- see the note above
+    # The nexus's lifeline: the main loops below poll it and end this pool's
+    # process group when the nexus ends, however it ends. Polled rather than
+    # watched from a thread, so a fork-model pool stays single-threaded.
+    _lifeline_fd = morloc.lifeline_adopt()
 
     # RawValue (no lock), not Value: the SIGTERM/SIGINT handler writes this flag,
     # and a Value's semaphore lock is not async-signal-safe -- acquiring it in the
@@ -1016,9 +1029,16 @@ if __name__ == "__main__":
     # the FD_SETSIZE=1024 ceiling.
     wakeup_poller = select.poll()
     wakeup_poller.register(wakeup_r, select.POLLIN)
+    if _lifeline_fd >= 0:
+        wakeup_poller.register(_lifeline_fd, select.POLLIN)
     while not shutdown_flag.value:
         events = wakeup_poller.poll(10)  # milliseconds (was 0.01s)
-        if events:
+        for fd, _ in events:
+            if fd == _lifeline_fd:
+                if _lifeline_ended():
+                    wakeup_poller.unregister(_lifeline_fd)
+                    morloc.lifeline_teardown()
+                continue
             try:
                 os.read(wakeup_r, 4096)  # drain pipe
             except OSError:

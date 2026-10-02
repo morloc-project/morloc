@@ -18,7 +18,7 @@ while [ $# -gt 0 ]; do
     fi
     POSITIONAL+=("$1"); shift
 done
-parse_args "${POSITIONAL[@]}"
+parse_args ${POSITIONAL[@]+"${POSITIONAL[@]}"}
 
 MAX_WAIT_SECONDS=5
 
@@ -41,10 +41,11 @@ for i in $(seq 1 "$ITERATIONS"); do
     sleep 0.1
 
     # Find and kill a pool child process
-    POOL_PID=$(ps -o pid= --ppid "$NEXUS_PID" 2>/dev/null | head -1 | tr -d ' ') || true
+    POOL_PID=$(pgrep -P "$NEXUS_PID" 2>/dev/null | head -1) || true
 
-    if [ -n "$POOL_PID" ]; then
-        kill -9 "$POOL_PID" 2>/dev/null || true
+    KILLED=0
+    if [ -n "$POOL_PID" ] && kill -9 "$POOL_PID" 2>/dev/null; then
+        KILLED=1
     fi
 
     # Wait for nexus to exit (with timeout)
@@ -75,7 +76,10 @@ for i in $(seq 1 "$ITERATIONS"); do
     SHM=$(( $(count_shm) - INITIAL_SHM ))
     TMP=$(( $(count_tmp) - INITIAL_TMP ))
 
-    if (( HUNG )); then
+    if (( ! KILLED )); then
+        printf "Iteration %3d: NO POOL (nothing was crashed)\n" "$i"
+        FAILURES=$((FAILURES + 1))
+    elif (( HUNG )); then
         printf "Iteration %3d: HUNG (nexus did not exit within %ds)\n" "$i" "$MAX_WAIT_SECONDS"
         FAILURES=$((FAILURES + 1))
     elif (( SHM > 0 || TMP > 0 )); then

@@ -635,11 +635,7 @@ pub unsafe extern "C" fn remote_call(
 
         let failure = get_morloc_data_packet_error_message(return_packet, &mut err);
         if !failure.is_null() {
-            libc::fprintf(
-                libc::fdopen(libc::STDERR_FILENO, b"w\0".as_ptr() as *const c_char),
-                b"Failed, deleting result %s\n\0".as_ptr() as *const c_char,
-                result_cache_filename,
-            );
+            eprintln!("Failed, deleting result {}", CStr::from_ptr(result_cache_filename).to_string_lossy());
             libc::unlink(result_cache_filename);
             libc::free(failure as *mut c_void);
         }

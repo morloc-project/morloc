@@ -14,12 +14,12 @@ morloc make -o nexus main.loc > /dev/null
 best() {
   local b=999999999 s e ms
   for _ in $(seq 1 "$REPS"); do
-    s=$(date +%s%N)
+    s=$(python3 -c 'import time; print(time.time_ns())')
     if ! ./nexus "$@" > /dev/null 2> "$1.err"; then
       echo FAIL
       return
     fi
-    e=$(date +%s%N)
+    e=$(python3 -c 'import time; print(time.time_ns())')
     ms=$(( (e - s) / 1000000 )); [ "$ms" -lt "$b" ] && b=$ms
   done
   rm -f "$1.err"

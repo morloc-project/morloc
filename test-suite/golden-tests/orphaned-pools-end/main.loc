@@ -1,0 +1,21 @@
+-- A nexus that dies without cleaning up (SIGKILL) still takes every pool
+-- process group it started with it: each pool watches the nexus's lifeline
+-- pipe and ends its own group when the pipe reaches end of file. Checked for
+-- Python, R and C++ pools, with the Python pool in its default model (fork on
+-- Linux, thread on macOS) and in the thread model.
+module main (nest)
+
+import root-py
+import root-r
+import root-cpp
+
+source Py from "wait.py" ("wait" as pyWait)
+source R from "wait.R" ("wait" as rWait)
+source Cpp from "wait.hpp" ("wait" as cppWait)
+
+pyWait :: Str -> Int
+rWait :: Int -> Int
+cppWait :: Int -> Int
+
+nest :: Str -> Int
+nest x = cppWait (rWait (pyWait x))

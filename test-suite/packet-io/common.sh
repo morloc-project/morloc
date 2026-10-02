@@ -24,7 +24,7 @@ set -uo pipefail
 if [ "$(date +%N 2>/dev/null)" = "N" ]; then
     now_ms() { python3 -c 'import time; print(int(time.time() * 1000))'; }
 else
-    now_ms() { echo $(( $(date +%s%N) / 1000000 )); }
+    now_ms() { echo $(( $(date +%s%N) / 1000000 )); }  # portable: used only where the %N probe above passed
 fi
 
 
@@ -46,11 +46,9 @@ cleanup() {
 trap cleanup EXIT
 
 count_shm() {
-    local n=0
-    if ls /dev/shm/mlc-* &>/dev/null; then
-        n=$(ls -1 /dev/shm/mlc-* 2>/dev/null | wc -l)
-    fi
-    echo "$n"
+    # Shared memory held by morloc runs: markers on every platform, plus the
+    # /dev/shm listing on Linux. See ../shm-probe.py.
+    python3 "$(dirname "${BASH_SOURCE[0]}")/../shm-probe.py" count-all
 }
 
 count_tmp() {
@@ -81,7 +79,7 @@ time_call() {
     if [ "$outfile" = "-" ]; then
         size=0
     else
-        size=$(stat -c '%s' "$outfile" 2>/dev/null || echo 0)
+        size=$(wc -c < "$outfile" 2>/dev/null | tr -d ' ')
     fi
     printf "  %-40s  %6d ms  rc=%d  bytes=%d\n" "$label" "$wall_ms" "$rc" "$size"
     echo "$wall_ms" > "$WORK_DIR/.last_wall"

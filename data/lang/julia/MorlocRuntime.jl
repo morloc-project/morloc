@@ -46,6 +46,9 @@ end
 
 # -- Daemon lifecycle --
 
+# End this pool's process group when the nexus ends, however it ends.
+lifeline_guard() = ccall((:jlmorloc_lifeline_guard, lib()), Nothing, ())
+
 function start_daemon(socket_path::String, tmpdir::String,
                       shm_basename::String, shm_size::Integer)
     ptr = ccall((:jlmorloc_start_daemon, lib()), Ptr{Nothing},

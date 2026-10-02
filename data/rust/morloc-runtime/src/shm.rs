@@ -23,8 +23,12 @@ pub use morloc_runtime_types::shm_types::{
 /// `ftruncate` + `parallel_reserve_pages` so the slow page-allocate
 /// work can run across multiple CPUs.
 ///
-/// Linux: posix_fallocate (allocates disk blocks).
-/// macOS: ftruncate (extends file, may be sparse).
+/// Disk blocks are reserved up front, so a full disk fails here with an
+/// error rather than later with SIGBUS on a write into an unbacked page.
+/// Returns 0 or an errno value.
+///
+/// Linux: posix_fallocate. macOS has none: F_PREALLOCATE reserves the
+/// blocks, then ftruncate sets the length.
 #[cfg(target_os = "linux")]
 unsafe fn preallocate_fd(fd: i32, size: i64) -> i32 {
     libc::posix_fallocate(fd, 0, size)
@@ -32,7 +36,19 @@ unsafe fn preallocate_fd(fd: i32, size: i64) -> i32 {
 
 #[cfg(target_os = "macos")]
 unsafe fn preallocate_fd(fd: i32, size: i64) -> i32 {
-    if libc::ftruncate(fd, size) == -1 { -1 } else { 0 }
+    let mut store = libc::fstore_t {
+        fst_flags: libc::F_ALLOCATEALL,
+        fst_posmode: libc::F_PEOFPOSMODE,
+        fst_offset: 0,
+        fst_length: size,
+        fst_bytesalloc: 0,
+    };
+    if libc::fcntl(fd, libc::F_PREALLOCATE, &mut store) == -1
+        || libc::ftruncate(fd, size) == -1
+    {
+        return crate::utility::errno_val();
+    }
+    0
 }
 
 /// System page size, cached on first use. Used to align the per-worker
@@ -549,6 +565,35 @@ pub fn get_fallback_dir() -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
+/// Suffix of the file that records a shared-memory object.
+pub const MARKER_SUFFIX: &str = ".shm";
+
+/// The file that records the shared-memory object `name` (with its leading
+/// `/`): `<fallback dir>/<name>.shm`. Every process of a program shares the
+/// fallback directory, so listing it names every object the program made --
+/// macOS offers no other way to enumerate them. `None` when no fallback
+/// directory is set.
+pub(crate) fn marker_path(name: &str) -> Option<std::ffi::CString> {
+    let dir = get_fallback_dir()?;
+    std::ffi::CString::new(format!(
+        "{}/{}{}",
+        dir.trim_end_matches('/'),
+        name.trim_start_matches('/'),
+        MARKER_SUFFIX
+    ))
+    .ok()
+}
+
+/// Remove the shared-memory object `name`, then its marker. In this order a
+/// crash between the two leaves a marker naming nothing, which is harmless,
+/// never an object that no listing finds.
+pub(crate) fn unlink_segment(name: &std::ffi::CStr) {
+    unsafe { libc::shm_unlink(name.as_ptr()) };
+    if let Some(m) = marker_path(&name.to_string_lossy()) {
+        unsafe { libc::unlink(m.as_ptr()) };
+    }
+}
+
 /// Map volume `volume_index` of the program named `shm_basename`, creating
 /// it with `shm_size` data bytes when it does not exist yet. The process
 /// that creates the primary volume owns the program's volumes.
@@ -1023,8 +1068,9 @@ fn shclose_locked(vols: &mut VolumeTable) {
     }
 }
 
-/// Remove every volume named for `basename`, whichever process created it,
-/// from tmpfs and from the fallback directory.
+/// Remove every volume named for `basename`, whichever process created it:
+/// the shared-memory objects its markers record and the file-backed volumes,
+/// both found in the fallback directory.
 fn remove_program_volumes(basename: &str, fallback: &str) {
     let stem = basename.trim_start_matches('/');
     if stem.is_empty() {
@@ -1035,29 +1081,30 @@ fn remove_program_volumes(basename: &str, fallback: &str) {
             .and_then(|r| r.strip_prefix('-'))
             .map_or(false, |hex| hex.len() == 4 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
     };
-    let unlink_listed = |dir: &str, shm: bool| -> bool {
-        let Ok(entries) = std::fs::read_dir(dir) else { return false };
-        for file in entries.flatten().filter_map(|e| e.file_name().into_string().ok()) {
-            if is_volume(&file) {
-                if let Ok(c) = std::ffi::CString::new(if shm { format!("/{}", file) } else { format!("{}/{}", dir, file) }) {
-                    unsafe {
-                        if shm { libc::shm_unlink(c.as_ptr()) } else { libc::unlink(c.as_ptr()) };
-                    }
-                }
-            }
-        }
-        true
-    };
-    if !unlink_listed("/dev/shm", true) {
-        // No listable tmpfs (macOS): try every index.
+    if fallback.is_empty() {
+        // Nothing records this program's objects: try every index.
         for i in 1..MAX_VOLUME_NUMBER {
             if let Ok(c) = std::ffi::CString::new(volume_name(basename, i)) {
                 unsafe { libc::shm_unlink(c.as_ptr()) };
             }
         }
+        return;
     }
-    if !fallback.is_empty() {
-        unlink_listed(fallback.trim_end_matches('/'), false);
+    let dir = fallback.trim_end_matches('/');
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for file in entries.flatten().filter_map(|e| e.file_name().into_string().ok()) {
+        let (object, path) = match file.strip_suffix(MARKER_SUFFIX) {
+            Some(seg) if is_volume(seg) => (Some(format!("/{seg}")), format!("{dir}/{file}")),
+            None if is_volume(&file) => (None, format!("{dir}/{file}")),
+            _ => continue,
+        };
+        // The object goes before its marker; see `unlink_segment`.
+        if let Some(c) = object.and_then(|o| std::ffi::CString::new(o).ok()) {
+            unsafe { libc::shm_unlink(c.as_ptr()) };
+        }
+        if let Ok(c) = std::ffi::CString::new(path) {
+            unsafe { libc::unlink(c.as_ptr()) };
+        }
     }
 }
 
@@ -1408,10 +1455,10 @@ fn rel2abs_miss_error(
             };
             MorlocError::Shm(format!(
                 "cannot resolve relptr {} (decoded as vol_idx={}, offset={}) -- \
-                 SHM volume '/dev/shm{}-{:04x}' does not exist (shm_open: {}).{} {}. \
+                 SHM volume '{}-{:04x}' does not exist (shm_open: {}).{} {}. \
                  Likely causes: writer never created this volume, writer crashed \
                  before sending, basename mismatch between writer and reader, or \
-                 another process (or /dev/shm cleanup) unlinked it.",
+                 another process (or shared-memory cleanup) unlinked it.",
                 ptr, vi, offset, basename, vi, errno_msg, basename_note, fallback_note
             ))
         }
@@ -1547,22 +1594,50 @@ impl Drop for Fd {
 pub(crate) fn create_segment(name: &str, full_size: usize) -> Result<Option<Segment>, MorlocError> {
     let name_cstr = std::ffi::CString::new(name)
         .map_err(|_| MorlocError::Shm(format!("volume name '{}' contains NUL", name)))?;
+    // Record the object before making it, so no object exists unrecorded. A
+    // marker already present belongs to whoever is creating, or created, the
+    // object; the exclusive shm_open below settles who that is.
+    let marker = marker_path(name);
+    let mut own_marker = false;
+    if let Some(m) = &marker {
+        let fd = unsafe { libc::open(m.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC, 0o600) };
+        if fd >= 0 {
+            unsafe { libc::close(fd) };
+            own_marker = true;
+        } else {
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() != Some(libc::EEXIST) {
+                return Err(MorlocError::Shm(format!(
+                    "cannot record shared-memory object '{}' at '{}': {}",
+                    name,
+                    m.to_string_lossy(),
+                    e
+                )));
+            }
+        }
+    }
     let fd = unsafe {
         libc::shm_open(name_cstr.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_EXCL, 0o666)
     };
     if fd < 0 {
-        if unsafe { crate::utility::errno_val() } == libc::EEXIST {
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() == Some(libc::EEXIST) {
             return Ok(None);
         }
-        return create_file_segment(name, full_size);
+        // No object was made, so it needs no record.
+        if let (true, Some(m)) = (own_marker, &marker) {
+            unsafe { libc::unlink(m.as_ptr()) };
+        }
+        return create_file_segment(name, full_size, &format!("shm_open: {e}"));
     }
     let size = libc::off_t::try_from(full_size)
         .map_err(|_| MorlocError::Shm(format!("volume size {} overflows", full_size)))?;
     // SAFETY: fd is the tmpfs object just created; every path below closes it.
     unsafe {
         if libc::ftruncate(fd, size) != 0 {
+            let why = format!("ftruncate: {}", std::io::Error::last_os_error());
             libc::close(fd);
-            return create_file_segment_behind_stub(&name_cstr, name, full_size);
+            return create_file_segment_behind_stub(&name_cstr, name, full_size, &why);
         }
         let ptr = libc::mmap(
             std::ptr::null_mut(),
@@ -1573,11 +1648,12 @@ pub(crate) fn create_segment(name: &str, full_size: usize) -> Result<Option<Segm
             0,
         );
         if ptr == libc::MAP_FAILED {
+            let e = std::io::Error::last_os_error();
             libc::close(fd);
-            libc::shm_unlink(name_cstr.as_ptr());
+            unlink_segment(&name_cstr);
             return Err(MorlocError::Shm(format!(
-                "Failed to mmap tmpfs volume '{}' ({} bytes)",
-                name, full_size
+                "Failed to mmap shared-memory volume '{}' ({} bytes): {}",
+                name, full_size, e
             )));
         }
         // Reserve every page now, so a tmpfs too small for the volume is
@@ -1589,13 +1665,13 @@ pub(crate) fn create_segment(name: &str, full_size: usize) -> Result<Option<Segm
             let emptied = libc::ftruncate(fd, 0) == 0;
             libc::close(fd);
             if !emptied {
-                libc::shm_unlink(name_cstr.as_ptr());
+                unlink_segment(&name_cstr);
                 return Err(MorlocError::Shm(format!(
                     "tmpfs has no room for volume '{}' ({} bytes) and it could not be moved",
                     name, full_size
                 )));
             }
-            return create_file_segment_behind_stub(&name_cstr, name, full_size);
+            return create_file_segment_behind_stub(&name_cstr, name, full_size, "no room left in tmpfs");
         }
         libc::close(fd);
         Ok(Some(Segment { ptr: ptr as *mut u8, len: full_size, label: name.to_string() }))
@@ -1608,20 +1684,24 @@ fn create_file_segment_behind_stub(
     stub: &std::ffi::CStr,
     name: &str,
     full_size: usize,
+    why: &str,
 ) -> Result<Option<Segment>, MorlocError> {
-    let made = create_file_segment(name, full_size);
+    let made = create_file_segment(name, full_size, why);
     if !matches!(made, Ok(Some(_))) {
-        unsafe { libc::shm_unlink(stub.as_ptr()) };
+        unlink_segment(stub);
     }
     made
 }
 
-/// Create segment `name` in the fallback directory, exclusively.
-fn create_file_segment(name: &str, full_size: usize) -> Result<Option<Segment>, MorlocError> {
+/// Create segment `name` in the fallback directory, exclusively. `why` says
+/// why it could not be a shared-memory object.
+fn create_file_segment(name: &str, full_size: usize, why: &str) -> Result<Option<Segment>, MorlocError> {
     let fallback = get_fallback_dir().ok_or_else(|| {
         MorlocError::Shm(format!(
-            "Failed to allocate SHM '{}': /dev/shm is unusable or too small and no fallback directory is set",
-            name
+            "Failed to allocate SHM '{}' ({} bytes): no shared-memory object ({}) and no fallback directory is set",
+            name,
+            full_size,
+            why
         ))
     })?;
     // `name` already carries a leading '/', so append directly.
@@ -1632,21 +1712,28 @@ fn create_file_segment(name: &str, full_size: usize) -> Result<Option<Segment>, 
         libc::open(path_cstr.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_EXCL, 0o666)
     };
     if fd == -1 {
-        if unsafe { crate::utility::errno_val() } == libc::EEXIST {
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() == Some(libc::EEXIST) {
             return Ok(None);
         }
-        return Err(MorlocError::Shm(format!("Failed to create file-backed volume '{}'", file_path)));
+        return Err(MorlocError::Shm(format!(
+            "Failed to create file-backed volume '{}' (no shared-memory object: {}): {}",
+            file_path, why, e
+        )));
     }
     let size = libc::off_t::try_from(full_size)
         .map_err(|_| MorlocError::Shm(format!("volume size {} overflows", full_size)))?;
     // SAFETY: fd is the file just created; every path below closes it.
     unsafe {
-        if preallocate_fd(fd, size) != 0 {
+        let rc = preallocate_fd(fd, size);
+        if rc != 0 {
             libc::close(fd);
             libc::unlink(path_cstr.as_ptr());
             return Err(MorlocError::Shm(format!(
-                "Failed to allocate file-backed volume '{}' ({} bytes)",
-                file_path, full_size
+                "Failed to allocate file-backed volume '{}' ({} bytes): {}",
+                file_path,
+                full_size,
+                std::io::Error::from_raw_os_error(rc)
             )));
         }
         let ptr = libc::mmap(
@@ -1669,9 +1756,10 @@ fn create_file_segment(name: &str, full_size: usize) -> Result<Option<Segment>, 
         // fallback directory. The usual cause is a small /dev/shm in a
         // container.
         eprintln!(
-            "morloc warning: /dev/shm is too small for a {} allocation; \
+            "morloc warning: no shared-memory object for a {} allocation ({}); \
              falling back to file-backed '{}'.",
             human_bytes(full_size),
+            why,
             file_path,
         );
         libc::close(fd);
@@ -2218,15 +2306,38 @@ mod tests {
         }
     }
 
-    fn shm_names_with_prefix(prefix: &str) -> Vec<String> {
-        std::fs::read_dir("/dev/shm")
-            .map(|d| {
-                d.flatten()
-                    .filter_map(|e| e.file_name().into_string().ok())
-                    .filter(|n| n.starts_with(prefix))
-                    .collect()
+    /// The shared-memory objects named `<prefix>...` that exist. Markers
+    /// say which to look for; on Linux /dev/shm is listed too, so an object
+    /// made without a marker fails the comparison.
+    fn live_segments(dir: &std::path::Path, prefix: &str) -> Vec<String> {
+        let mut live: Vec<String> = crate::marked_segments(dir)
+            .into_iter()
+            .filter(|n| n[1..].starts_with(prefix))
+            .filter(|n| {
+                let c = std::ffi::CString::new(n.as_str()).unwrap();
+                let fd = unsafe { libc::shm_open(c.as_ptr(), libc::O_RDONLY, 0) };
+                if fd >= 0 {
+                    unsafe { libc::close(fd) };
+                }
+                fd >= 0
             })
-            .unwrap_or_default()
+            .collect();
+        live.sort();
+        #[cfg(target_os = "linux")]
+        {
+            let mut listed: Vec<String> = std::fs::read_dir("/dev/shm")
+                .map(|d| {
+                    d.flatten()
+                        .filter_map(|e| e.file_name().into_string().ok())
+                        .filter(|n| n.starts_with(prefix))
+                        .map(|n| format!("/{n}"))
+                        .collect()
+                })
+                .unwrap_or_default();
+            listed.sort();
+            assert_eq!(live, listed, "markers disagree with /dev/shm");
+        }
+        live
     }
 
     // Volumes live as long as the program, not as long as the process that
@@ -2234,13 +2345,11 @@ mod tests {
     // unlinks nothing, and the program's owner -- the creator of the primary
     // volume -- removes every volume of the program when it closes.
     #[test]
-    #[cfg(target_os = "linux")]
     fn only_the_owner_unlinks_volumes() {
         let _arena = crate::own_test_shm();
         shclose().unwrap();
-        let test_dir = std::env::temp_dir().join(format!("morloc_test_own_{}", std::process::id()));
-        std::fs::create_dir_all(&test_dir).unwrap();
-        shm_set_fallback_dir(test_dir.to_str().unwrap());
+        let fallback = crate::ScopedFallback::new("own");
+        let test_dir = fallback.path().to_path_buf();
         let base = format!("/morloc-{}-test-own", std::process::id());
         shinit(&base, PRIMARY_VOLUME, 4096).unwrap();
         unsafe {
@@ -2268,12 +2377,11 @@ mod tests {
             let r = std::ptr::read_volatile(slot);
             assert_ne!(relptr_volume_index(r), PRIMARY_VOLUME);
             let prefix = &base[1..];
-            assert_eq!(shm_names_with_prefix(prefix).len(), 2, "a closing non-owner unlinked a volume");
+            assert_eq!(live_segments(&test_dir, prefix).len(), 2, "a closing non-owner unlinked a volume");
             rel2abs(r).expect("the child's volume outlives the child");
         }
         shclose().unwrap();
-        assert_eq!(shm_names_with_prefix(&base[1..]), Vec::<String>::new(), "the owner left volumes behind");
-        let _ = std::fs::remove_dir_all(&test_dir);
+        assert_eq!(live_segments(&test_dir, &base[1..]), Vec::<String>::new(), "the owner left volumes behind");
     }
 
     // A buffer- or file-relative offset reads as volume 0. Copying such a
@@ -2454,10 +2562,7 @@ mod tests {
         // its lookup without crossing FFI. Verify the publish helpers
         // expose the right values to an Acquire reader, and that the
         // unpublish step clears the slot.
-        let tmpdir = std::env::temp_dir();
-        let test_dir = tmpdir.join(format!("morloc_test_vt_{}", std::process::id()));
-        std::fs::create_dir_all(&test_dir).unwrap();
-        shm_set_fallback_dir(test_dir.to_str().unwrap());
+        let _fallback = crate::ScopedFallback::new("vt");
 
         let basename = format!("morloc-{}-test-vt", std::process::id());
         let shm = shinit(&basename, PRIMARY_VOLUME, 4096).unwrap();
@@ -2484,7 +2589,6 @@ mod tests {
         assert!(base_after.is_null(),
             "expected shclose to publish a null data_base");
 
-        let _ = std::fs::remove_dir_all(&test_dir);
     }
 
     #[test]
@@ -2505,10 +2609,7 @@ mod tests {
         // be encoded to a relptr and decoded back to the same absolute
         // address. Stresses the multi-volume case where the old
         // flat-offset encoding required summing prior volume sizes.
-        let tmpdir = std::env::temp_dir();
-        let test_dir = tmpdir.join(format!("morloc_test_idx_{}", std::process::id()));
-        std::fs::create_dir_all(&test_dir).unwrap();
-        shm_set_fallback_dir(test_dir.to_str().unwrap());
+        let _fallback = crate::ScopedFallback::new("idx");
 
         let basename = format!("morloc-{}-test-idx", std::process::id());
         shinit(&basename, PRIMARY_VOLUME, 4096).unwrap();
@@ -2552,7 +2653,6 @@ mod tests {
             shfree(p).unwrap();
         }
         shclose().unwrap();
-        let _ = std::fs::remove_dir_all(&test_dir);
     }
 
     #[test]
@@ -2561,10 +2661,7 @@ mod tests {
         // down under any test allocating in the shared arena.
         let _arena = crate::own_test_shm();
         // Use file-backed SHM via tmpdir to avoid /dev/shm permission issues in test
-        let tmpdir = std::env::temp_dir();
-        let test_dir = tmpdir.join(format!("morloc_test_{}", std::process::id()));
-        std::fs::create_dir_all(&test_dir).unwrap();
-        shm_set_fallback_dir(test_dir.to_str().unwrap());
+        let _fallback = crate::ScopedFallback::new("plain");
 
         let basename = format!("morloc-{}-test-shm", std::process::id());
         let shm = shinit(&basename, PRIMARY_VOLUME, 4096).unwrap();
@@ -2592,7 +2689,6 @@ mod tests {
 
         // Cleanup
         shclose().unwrap();
-        let _ = std::fs::remove_dir_all(&test_dir);
     }
 
     #[test]
@@ -2607,10 +2703,7 @@ mod tests {
         // before our writes; if anything went wrong in `try_open_tmpfs`
         // we'd either crash on write (page-fault SIGBUS) or fall back
         // to the file-backed path (still correct, just slower).
-        let tmpdir = std::env::temp_dir();
-        let test_dir = tmpdir.join(format!("morloc_test_large_{}", std::process::id()));
-        std::fs::create_dir_all(&test_dir).unwrap();
-        shm_set_fallback_dir(test_dir.to_str().unwrap());
+        let _fallback = crate::ScopedFallback::new("large");
 
         let basename = format!("morloc-{}-test-large", std::process::id());
         // 128 MiB requested; that's > 64 MiB so `fallocate_workers`
@@ -2633,6 +2726,5 @@ mod tests {
         }
         shfree(p).unwrap();
         shclose().unwrap();
-        let _ = std::fs::remove_dir_all(&test_dir);
     }
 }

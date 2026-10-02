@@ -14,9 +14,6 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <csignal>
-#ifdef __linux__
-#include <sys/prctl.h>
-#endif
 
 // needed for foreign interface
 #include <cstdlib>

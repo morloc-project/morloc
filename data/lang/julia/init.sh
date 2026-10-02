@@ -18,6 +18,13 @@ cp "$BUILD_DIR/lang.yaml" "$LANG_DIR/"
 cp "$BUILD_DIR/pool.jl" "$LANG_DIR/"
 cp "$BUILD_DIR/MorlocRuntime.jl" "$LANG_DIR/"
 
+# The loader-origin token differs between ELF and Mach-O.
+if [ "$(uname -s)" = "Darwin" ]; then
+    RPATH_ORIGIN="@loader_path"
+else
+    RPATH_ORIGIN='$ORIGIN'
+fi
+
 # Compile juliabridge.c -> libjuliamorloc.so
 "$CC" -shared -fPIC -O2 $SANITIZE_FLAGS -I"$INCLUDE_DIR" -o "$LIB_DIR/libjuliamorloc.so" \
-    "$BUILD_DIR/juliabridge.c" -L"$LIB_DIR" -Wl,-rpath,"$LIB_DIR" -Wl,-rpath,'$ORIGIN' -lmorloc -lpthread
+    "$BUILD_DIR/juliabridge.c" -L"$LIB_DIR" -Wl,-rpath,"$LIB_DIR" -Wl,-rpath,"$RPATH_ORIGIN" -lmorloc -lpthread

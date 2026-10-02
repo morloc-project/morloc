@@ -7,7 +7,7 @@ all:
 	-./main-py higherOrderLadder 0 >> obs.txt 2>> obs.err
 	-./main-py swapLadder 1 2 >> obs.txt 2>> obs.err
 	-./main-py curriedLadder 0 >> obs.txt 2>> obs.err
-	-./main-py memptyLadder x | wc -c >> obs.txt 2>> obs.err
+	-./main-py memptyLadder x | wc -c | tr -d ' ' >> obs.txt 2>> obs.err
 	-rm -f tick.log; TICK_LOG=$(CURDIR)/tick.log ./main-py constantLadder 0 >> obs.txt 2>> obs.err
 	-rm -f tick.log; TICK_LOG=$(CURDIR)/tick.log ./main-py partialConstantLadder 0 >> obs.txt 2>> obs.err
 	-./main-py tupleLadder 3 >> obs.txt 2>> obs.err

@@ -71,6 +71,17 @@ fn main() {
         std::process::exit(0);
     }
 
+    // A nexus started by another nexus (a multi-output child, a served
+    // daemon) ends when that nexus ends. Its own children get its own
+    // lifeline, never this one.
+    {
+        extern "C" {
+            fn morloc_lifeline_guard();
+        }
+        unsafe { morloc_lifeline_guard() };
+        std::env::remove_var("MORLOC_LIFELINE");
+    }
+
     // Install a panic hook so a Rust panic still runs the run-scope
     // epilogue + summary.json + tee cleanup before the process dies.
     // Without this, panic-unwound exits skip clean_exit entirely and
@@ -647,8 +658,8 @@ fn main() {
         // process's own temporary directory, which is created fresh at
         // startup and inherited by nobody, so no pool of anyone else's is
         // ever reachable at these paths -- not even a parent that
-        // fork-exec'd this process. Pools started here die via
-        // PR_SET_PDEATHSIG when clean_exit drops this process.
+        // fork-exec'd this process. Pools started here end through their
+        // lifeline when this process ends.
         let to_start: Vec<usize> = (0..manifest.pools.len()).collect();
         if !to_start.is_empty() {
             if let Err(e) = process::start_daemons(&mut sockets, &to_start) {

@@ -10,7 +10,8 @@
 //!
 //! Linux uses a process-shared robust pthread mutex, whose death detection
 //! the kernel performs. macOS has no robust mutexes; there the lock word
-//! holds the owner's pid and a waiter poisons it once that pid is gone.
+//! holds the owner's `process::token` and a waiter poisons it once that
+//! process is gone.
 
 use crate::error::MorlocError;
 
@@ -24,7 +25,9 @@ pub struct ShmLock {
     #[cfg(target_os = "linux")]
     mutex: UnsafeCell<libc::pthread_mutex_t>,
     #[cfg(not(target_os = "linux"))]
-    holder: AtomicU32,
+    holder: crate::owner_word::OwnerWord,
+    #[cfg(not(target_os = "linux"))]
+    poisoned: AtomicU32,
 }
 
 // SAFETY: the lock exists to be shared; every access goes through
@@ -117,61 +120,33 @@ impl ShmLock {
 }
 
 #[cfg(not(target_os = "linux"))]
-const FREE: u32 = 0;
-#[cfg(not(target_os = "linux"))]
-const POISONED: u32 = u32::MAX;
-
-#[cfg(not(target_os = "linux"))]
 impl ShmLock {
     /// Initialise the lock in place.
     ///
     /// # Safety
     /// As on Linux: shared writable memory, and no user until this returns.
     pub unsafe fn init(this: *mut ShmLock) -> Result<(), MorlocError> {
-        std::ptr::addr_of_mut!((*this).holder).write(AtomicU32::new(FREE));
+        std::ptr::addr_of_mut!((*this).holder).write(crate::owner_word::OwnerWord::new());
+        std::ptr::addr_of_mut!((*this).poisoned).write(AtomicU32::new(0));
         Ok(())
     }
 
-    /// The pid word cannot tell apart two threads of one process; the
-    /// caller serialises its own threads before taking this lock.
     pub fn lock(&self) -> Result<ShmGuard<'_>, MorlocError> {
-        let me = std::process::id();
-        let mut waits: u32 = 0;
-        loop {
-            match self.holder.compare_exchange_weak(FREE, me, Ordering::Acquire, Ordering::Relaxed) {
-                Ok(_) => return Ok(ShmGuard { lock: self }),
-                Err(POISONED) => return Err(poisoned()),
-                Err(FREE) => continue,
-                Err(owner) => {
-                    waits = waits.wrapping_add(1);
-                    if waits % 1024 == 0 && !pid_alive(owner) {
-                        // Only the waiter that wins this exchange poisons;
-                        // any other sees POISONED on its next attempt.
-                        let _ = self.holder.compare_exchange(
-                            owner, POISONED, Ordering::AcqRel, Ordering::Relaxed,
-                        );
-                        return Err(poisoned());
-                    }
-                    if waits < 64 {
-                        std::hint::spin_loop();
-                    } else {
-                        std::thread::yield_now();
-                    }
-                }
-            }
+        let holder_died = self.holder.acquire()?;
+        if holder_died {
+            self.poisoned.store(1, Ordering::Release);
         }
+        if self.poisoned.load(Ordering::Acquire) != 0 {
+            // SAFETY: this thread took the word above.
+            unsafe { self.holder.release() };
+            return Err(poisoned());
+        }
+        Ok(ShmGuard { lock: self })
     }
 
     unsafe fn unlock(&self) {
-        self.holder.store(FREE, Ordering::Release);
+        self.holder.release()
     }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn pid_alive(pid: u32) -> bool {
-    let Ok(pid) = libc::pid_t::try_from(pid) else { return false };
-    // SAFETY: signal 0 performs only the existence and permission check.
-    unsafe { libc::kill(pid, 0) == 0 || *libc::__error() != libc::ESRCH }
 }
 
 #[cfg(test)]
@@ -306,6 +281,34 @@ mod tests {
                 let err = sh.lock.lock().err().expect("a poisoned lock was taken");
                 assert!(err.to_string().contains("died"), "{err}");
             }
+        }
+    }
+
+    // A holder that has exited but awaits reaping is dead: nothing can finish
+    // its section, so the lock is poisoned without waiting for the reap.
+    #[test]
+    fn an_unreaped_dead_holder_poisons_the_lock() {
+        unsafe {
+            let sh = shared_map::<Shared>();
+            ShmLock::init(std::ptr::addr_of_mut!((*sh).lock)).unwrap();
+            let holder = libc::fork();
+            assert!(holder >= 0);
+            if holder == 0 {
+                std::mem::forget((*sh).lock.lock());
+                libc::_exit(0);
+            }
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            libc::waitid(libc::P_PID, holder as libc::id_t, &mut info, libc::WEXITED | libc::WNOWAIT);
+            let addr = sh as usize;
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let sh = &*(addr as *const Shared);
+                let _ = tx.send(sh.lock.lock().err().map(|e| e.to_string()));
+            });
+            let got = rx.recv_timeout(std::time::Duration::from_secs(10));
+            wait_ok(holder);
+            let err = got.expect("the lock waited on an unreaped dead holder");
+            assert!(err.is_some_and(|e| e.contains("died")), "a dead holder's lock was taken");
         }
     }
 }

@@ -18,9 +18,6 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <unistd.h>
-#ifdef __linux__
-#include <sys/prctl.h>
-#endif
 
 #include "morloc.h"
 
@@ -2148,12 +2145,8 @@ SEXP morloc_install_sigterm_handler(void) {
        terminates the R pool and the caller sees "Connection closed by peer". */
     signal(SIGPIPE, SIG_IGN);
 
-    /* Request SIGTERM when the parent (nexus) dies. Without this,
-       SIGKILL on the nexus leaves pool processes orphaned with
-       leaked SHM segments in /dev/shm. */
-#ifdef __linux__
-    prctl(PR_SET_PDEATHSIG, SIGTERM);
-#endif
+    /* End this pool's process group when the nexus ends, however it ends. */
+    morloc_lifeline_guard();
 
     return R_NilValue;
 }

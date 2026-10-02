@@ -2342,6 +2342,17 @@ static PyObject* pybinding__set_self_socket(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
+// The lifeline descriptor this pool watches for its nexus's end, or -1.
+static PyObject* pybinding__lifeline_adopt(PyObject* self, PyObject* args) {
+    return PyLong_FromLong(morloc_lifeline_adopt());
+}
+
+// End this pool's process group once the watched lifeline reaches end of file.
+static PyObject* pybinding__lifeline_teardown(PyObject* self, PyObject* args) {
+    morloc_lifeline_teardown();
+    Py_RETURN_NONE;
+}
+
 static PyObject* pybinding__close_daemon(PyObject* self, PyObject* args) {
     PyObject* daemon_capsule;
 
@@ -4427,6 +4438,8 @@ static PyMethodDef Methods[] = {
     {"shinit", pybinding__shinit, METH_VARARGS, "Open the shared memory pool"},
     {"start_daemon", pybinding__start_daemon, METH_VARARGS, "Initialize the shared memory and socket for the python daemon"},
     {"set_self_socket", pybinding__set_self_socket, METH_VARARGS, "Record the socket this pool serves"},
+    {"lifeline_adopt", pybinding__lifeline_adopt, METH_NOARGS, "The lifeline descriptor to watch for the nexus's end, or -1"},
+    {"lifeline_teardown", pybinding__lifeline_teardown, METH_NOARGS, "End this pool's process group after the nexus ended"},
     {"close_daemon", pybinding__close_daemon, METH_VARARGS, "Banish the daemon back to the abyss from whence it came"},
     {"wait_for_client", pybinding__wait_for_client, METH_VARARGS, "Listen over a pipe until a client packet arrives"},
     {"read_morloc_call_packet", pybinding__read_morloc_call_packet, METH_VARARGS, "Parse a morloc call packet"},

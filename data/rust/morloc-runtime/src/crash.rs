@@ -172,7 +172,7 @@ extern "C" fn fatal(sig: c_int, _info: *mut libc::siginfo_t, _ctx: *mut c_void) 
     }
     line.str("\n");
     if sig == libc::SIGBUS {
-        line.str("  (SIGBUS often means the shared-memory filesystem is full; check /dev/shm)\n");
+        line.str("  (SIGBUS often means memory mapped from shared memory or a file could not be backed: a full /dev/shm or disk)\n");
     }
     line.flush();
 

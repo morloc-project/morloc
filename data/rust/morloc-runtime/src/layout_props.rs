@@ -426,17 +426,9 @@ const SEED_ENV: &str = "MORLOC_LAYOUT_PROP_SEED";
 /// A child that crashes never tears down its test arena, so the parent
 /// removes the child's SHM volumes and its file-backed fallback directory.
 fn remove_child_arena(pid: u32) {
-    let prefix = format!("morloc-{pid}-test-arena");
-    if let Ok(entries) = std::fs::read_dir("/dev/shm") {
-        for e in entries.flatten() {
-            if e.file_name().to_string_lossy().starts_with(&prefix) {
-                let _ = std::fs::remove_file(e.path());
-            }
-        }
-    }
     let tmp = std::env::temp_dir();
-    let _ = std::fs::remove_dir_all(tmp.join(format!("morloc_test_{pid}")));
-    let _ = std::fs::remove_dir_all(tmp.join(format!("morloc_layout_props_{pid}")));
+    crate::remove_marked_dir(&tmp.join(format!("morloc_test_{pid}")));
+    crate::remove_marked_dir(&tmp.join(format!("morloc_layout_props_{pid}")));
 }
 
 /// One seed, run in its own process by `stream_readers_preserve_pointer_layouts`.

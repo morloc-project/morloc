@@ -1561,7 +1561,7 @@ pub unsafe extern "C" fn normalize_data_packet_to_fd(
         && !is_fail
         && source != PACKET_SOURCE_MESG
         && !(source == PACKET_SOURCE_RPTR && format == PACKET_FORMAT_ARROW)
-        && is_regular_fd(fd);
+        && positionally_writable(fd);
 
     if stream_eligible {
         match estimate_payload_size(packet, source, format, errmsg) {
@@ -1646,15 +1646,18 @@ unsafe fn write_all_fd(
     written as i64
 }
 
-// fstat fd; return true iff S_ISREG. pwrite at the trailing length
-// patch step requires a regular file -- pipes and sockets do not
-// support random access.
-unsafe fn is_regular_fd(fd: libc::c_int) -> bool {
+// Whether a write at a chosen offset lands there: true for a regular file
+// not opened for appending. The streaming path patches the packet's length
+// and frame index in place once the payload is written; pipes and sockets
+// cannot seek, and an O_APPEND descriptor (a `>>` redirect) appends every
+// pwrite regardless of its offset.
+unsafe fn positionally_writable(fd: libc::c_int) -> bool {
     let mut st: libc::stat = std::mem::zeroed();
-    if libc::fstat(fd, &mut st) != 0 {
+    if libc::fstat(fd, &mut st) != 0 || (st.st_mode & libc::S_IFMT) != libc::S_IFREG {
         return false;
     }
-    (st.st_mode & libc::S_IFMT) == libc::S_IFREG
+    let flags = libc::fcntl(fd, libc::F_GETFL);
+    flags != -1 && flags & libc::O_APPEND == 0
 }
 
 // Estimate the eventual on-disk payload size for the streaming threshold

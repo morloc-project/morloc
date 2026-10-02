@@ -78,7 +78,7 @@ run_case() {
         out=$(cd "$WORK_DIR" && timeout "$RUN_TIMEOUT" ./"$module" chain "$depth" 2>/dev/null \
               | timeout "$RUN_TIMEOUT" ./"$module" treeCount - 2>/dev/null)
     else
-        out=$(cd "$WORK_DIR" && timeout "$RUN_TIMEOUT" ./"$module" "$fn" "${args[@]}" 2>/dev/null)
+        out=$(cd "$WORK_DIR" && timeout "$RUN_TIMEOUT" ./"$module" "$fn" ${args[@]+"${args[@]}"} 2>/dev/null)
     fi
     rc=$?
     if [[ $rc -eq 0 && "$out" == "$expected" ]]; then
@@ -126,7 +126,7 @@ cp "$SRC"/cross/main.loc "$WORK_DIR/cross.loc"
 cp "$SRC"/cross/prim.py "$SRC"/cross/prim.hpp "$WORK_DIR"/
 build cross cross.loc && BUILT+=(cross)
 
-for lang in "${BUILT[@]}"; do
+for lang in ${BUILT[@]+"${BUILT[@]}"}; do
     [[ "$lang" == cross ]] && continue
     run_case "$lang" chainCount      "$DEPTH"   "$DEPTH"
     run_case "$lang" chainReverse    "$DEPTH"   "$DEPTH"
@@ -150,7 +150,7 @@ fi
 
 echo "passed: $PASSED, failed: $FAILED, xfail: $XFAILED, xpass: $XPASSED"
 if (( ${#PROBLEMS[@]} > 0 )); then
-    for p in "${PROBLEMS[@]}"; do echo "  ${RED}-${RESET} $p"; done
+    for p in ${PROBLEMS[@]+"${PROBLEMS[@]}"}; do echo "  ${RED}-${RESET} $p"; done
     exit 1
 fi
 exit 0

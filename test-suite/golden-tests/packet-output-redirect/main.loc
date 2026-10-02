@@ -1,0 +1,15 @@
+-- A packet written to stdout must be byte-identical whether stdout is a
+-- fresh file (>) or a file opened for appending (>>), with or without
+-- prior content. A packet of 1 MiB or more is streamed and its length is
+-- patched in place afterwards; an appending descriptor ignores the patch
+-- offset, so that path must not be taken for one.
+module main (pyBig, cppBig)
+
+import root-py
+import root-cpp
+
+source Py from "big.py" ("big" as pyBig)
+source Cpp from "big.hpp" ("big" as cppBig)
+
+pyBig :: Int -> Str
+cppBig :: Int -> Str

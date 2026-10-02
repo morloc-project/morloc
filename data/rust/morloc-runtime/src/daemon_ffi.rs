@@ -489,27 +489,13 @@ impl BindingStore {
             libc::close(stdout_pipe[1]);
             libc::close(stderr_pipe[1]);
 
-            let mut stderr_buf = vec![0u8; 4096];
-            let mut stderr_len: usize = 0;
-            loop {
-                let n = libc::read(
-                    stderr_pipe[0],
-                    stderr_buf.as_mut_ptr().add(stderr_len) as *mut c_void,
-                    stderr_buf.len() - stderr_len - 1,
-                );
-                if n <= 0 {
-                    break;
-                }
-                stderr_len += n as usize;
-            }
+            let (_, stderr_buf) = drain_pair(stdout_pipe[0], stderr_pipe[0]);
             libc::close(stdout_pipe[0]);
             libc::close(stderr_pipe[0]);
 
-            let mut status: i32 = 0;
-            libc::waitpid(pid, &mut status, 0);
-
-            if !libc::WIFEXITED(status) || libc::WEXITSTATUS(status) != 0 {
-                stderr_buf.truncate(stderr_len);
+            let ok = wait_child(pid)
+                .is_some_and(|st| libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0);
+            if !ok {
                 let msg = String::from_utf8_lossy(&stderr_buf);
                 eprintln!("binding_store_bind: morloc eval --save failed: {}", msg);
                 return None;
@@ -1072,6 +1058,33 @@ fn take_noted_child_exit(pid: i32) -> Option<i32> {
     None
 }
 
+/// The exit status of child `pid`, whether this thread reaps it or the
+/// SIGCHLD handler already has; `None` if neither yields one.
+fn wait_child(pid: i32) -> Option<i32> {
+    let mut status: i32 = 0;
+    loop {
+        // SAFETY: waitpid writes only `status`.
+        let rc = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if rc == pid {
+            return Some(status);
+        }
+        if rc < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        break;
+    }
+    // The pipes the caller drained only reach EOF when the child exits, so
+    // the handler has usually reaped it already; give it a moment to record
+    // the status if the reap and the deposit straddle this point.
+    for _ in 0..NOTED_EXIT_POLLS {
+        if let Some(s) = take_noted_child_exit(pid) {
+            return Some(s);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    None
+}
+
 // -- Fork-based eval/typecheck ------------------------------------------------
 
 /// Fork `morloc <subcmd> <expr>`, capture stdout/stderr, return a DaemonResponse.
@@ -1159,42 +1172,25 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
     libc::close(stdout_pipe[1]);
     libc::close(stderr_pipe[1]);
 
-    let stdout_buf = read_fd_to_vec(stdout_pipe[0]);
+    let (stdout_buf, stderr_buf) = drain_pair(stdout_pipe[0], stderr_pipe[0]);
     libc::close(stdout_pipe[0]);
-    let stderr_buf = read_fd_to_vec(stderr_pipe[0]);
     libc::close(stderr_pipe[0]);
 
-    // The child's status may already have been consumed by the nexus's
-    // SIGCHLD handler: the pipes above only reach EOF when the child exits,
-    // so the handler has usually run by the time we get here. Fall back to
-    // what it recorded, and give it a moment to record it if the reap and
-    // the deposit straddle this point.
-    let mut status: i32 = 0;
-    if libc::waitpid(pid, &mut status, 0) != pid {
-        let mut noted = None;
-        for _ in 0..NOTED_EXIT_POLLS {
-            noted = take_noted_child_exit(pid);
-            if noted.is_some() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
+    let status = match wait_child(pid) {
+        Some(st) => st,
+        None => {
+            (*resp).success = false;
+            (*resp).error_kind = DAEMON_ERROR_INTERNAL;
+            let c = CString::new(format!(
+                "lost the exit status of the forked `morloc {}`; \
+                 its result cannot be trusted",
+                subcmd,
+            ))
+            .unwrap_or_default();
+            (*resp).error = libc::strdup(c.as_ptr());
+            return resp;
         }
-        match noted {
-            Some(s) => status = s,
-            None => {
-                (*resp).success = false;
-                (*resp).error_kind = DAEMON_ERROR_INTERNAL;
-                let c = CString::new(format!(
-                    "lost the exit status of the forked `morloc {}`; \
-                     its result cannot be trusted",
-                    subcmd,
-                ))
-                .unwrap_or_default();
-                (*resp).error = libc::strdup(c.as_ptr());
-                return resp;
-            }
-        }
-    }
+    };
 
     if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 {
         let mut out = String::from_utf8_lossy(&stdout_buf).into_owned();
@@ -1287,18 +1283,39 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
     resp
 }
 
-/// Read an fd to completion into a Vec<u8>.
-unsafe fn read_fd_to_vec(fd: i32) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(65536);
+/// Read two pipes to end of file at once, so a child that fills one while
+/// the other is being read cannot block forever. Returns both contents.
+unsafe fn drain_pair(a: i32, b: i32) -> (Vec<u8>, Vec<u8>) {
+    let mut out = (Vec::new(), Vec::new());
+    let mut open = [a >= 0, b >= 0];
     let mut tmp = [0u8; 8192];
-    loop {
-        let n = libc::read(fd, tmp.as_mut_ptr() as *mut c_void, tmp.len());
-        if n <= 0 {
+    while open[0] || open[1] {
+        let mut fds = [
+            libc::pollfd { fd: if open[0] { a } else { -1 }, events: libc::POLLIN, revents: 0 },
+            libc::pollfd { fd: if open[1] { b } else { -1 }, events: libc::POLLIN, revents: 0 },
+        ];
+        if libc::poll(fds.as_mut_ptr(), 2, -1) < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
             break;
         }
-        buf.extend_from_slice(&tmp[..n as usize]);
+        for k in 0..2 {
+            if !open[k] || fds[k].revents == 0 {
+                continue;
+            }
+            let n = libc::read(fds[k].fd, tmp.as_mut_ptr() as *mut c_void, tmp.len());
+            if n > 0 {
+                let dst = if k == 0 { &mut out.0 } else { &mut out.1 };
+                dst.extend_from_slice(&tmp[..n as usize]);
+            } else if n == 0
+                || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+            {
+                open[k] = false;
+            }
+        }
     }
-    buf
+    out
 }
 
 // -- Packet-mode result serialization -----------------------------------------
@@ -2735,15 +2752,14 @@ pub unsafe extern "C" fn daemon_run(
             eprintln!("morloc-daemon: failed to create unix socket");
             return;
         }
-        let mut addr: libc::sockaddr_un = std::mem::zeroed();
-        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
-        let path_bytes = CStr::from_ptr((*config).unix_socket_path).to_bytes();
-        let copy_len = path_bytes.len().min(addr.sun_path.len() - 1);
-        ptr::copy_nonoverlapping(
-            path_bytes.as_ptr() as *const c_char,
-            addr.sun_path.as_mut_ptr(),
-            copy_len,
-        );
+        let addr = match crate::utility::unix_socket_addr(CStr::from_ptr((*config).unix_socket_path).to_bytes()) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("morloc-daemon: {}", e);
+                libc::close(sock_fd);
+                return;
+            }
+        };
         libc::unlink((*config).unix_socket_path);
         if libc::bind(
             sock_fd,
@@ -3126,6 +3142,53 @@ mod media_wire_tests {
             libc::free(resp.result_bytes as *mut c_void);
             libc::free(resp.mime as *mut c_void);
             daemon_free_response(parsed);
+        }
+    }
+}
+
+#[cfg(test)]
+mod child_output_tests {
+    use super::*;
+
+    fn write_all(fd: i32, byte: u8, n: usize) -> bool {
+        let buf = vec![byte; n];
+        let mut off = 0;
+        while off < n {
+            let w = unsafe { libc::write(fd, buf.as_ptr().add(off) as *const c_void, n - off) };
+            if w <= 0 {
+                return false;
+            }
+            off += w as usize;
+        }
+        true
+    }
+
+    /// A child that writes more than a pipe holds to each of its two outputs
+    /// is drained to the end of both, whatever order it writes in.
+    #[test]
+    fn both_outputs_of_a_child_are_drained() {
+        const N: usize = 1 << 20;
+        unsafe {
+            let mut o = [0 as libc::c_int; 2];
+            let mut e = [0 as libc::c_int; 2];
+            assert_eq!(libc::pipe(o.as_mut_ptr()), 0);
+            assert_eq!(libc::pipe(e.as_mut_ptr()), 0);
+            let pid = libc::fork();
+            assert!(pid >= 0);
+            if pid == 0 {
+                libc::close(o[0]);
+                libc::close(e[0]);
+                let ok = write_all(e[1], b'e', N) && write_all(o[1], b'o', N);
+                libc::_exit(if ok { 0 } else { 1 });
+            }
+            libc::close(o[1]);
+            libc::close(e[1]);
+            let (out, err) = drain_pair(o[0], e[0]);
+            libc::close(o[0]);
+            libc::close(e[0]);
+            assert_eq!(wait_child(pid), Some(0));
+            assert_eq!((out.len(), err.len()), (N, N));
+            assert!(out.iter().all(|&b| b == b'o') && err.iter().all(|&b| b == b'e'));
         }
     }
 }

@@ -15,9 +15,6 @@
 #include <cstdlib>
 #include <cstdio>
 #include <unistd.h>
-#ifdef __linux__
-#include <sys/prctl.h>
-#endif
 
 #include "morloc.h"
 
@@ -38,12 +35,8 @@ int main(int argc, char* argv[]) {
     // backtrace, then die of the signal (see morloc_install_crash_handler).
     morloc_install_crash_handler("cpp", mlc_current_frame);
 
-    // Request SIGTERM when the parent (nexus) dies. Without this,
-    // SIGKILL on the nexus leaves pool processes orphaned with
-    // leaked SHM segments in /dev/shm.
-#ifdef __linux__
-    prctl(PR_SET_PDEATHSIG, SIGTERM);
-#endif
+    // End this pool's process group when the nexus ends, however it ends.
+    morloc_lifeline_guard();
 
     // Health check: confirm binary links and print version
     if (argc == 2 && std::string(argv[1]) == "--health") {

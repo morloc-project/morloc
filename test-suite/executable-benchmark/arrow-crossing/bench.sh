@@ -11,7 +11,7 @@ printf "%-8s %10s %14s\n" command best_ms bytes_copied
 for cmd in direct hop1 hop2 hop3; do
   best=999999999
   for _ in $(seq 1 "$REPS"); do
-    s=$(date +%s%N); ./nexus "$cmd" "$ROWS" > /dev/null 2>&1; e=$(date +%s%N)
+    s=$(python3 -c 'import time; print(time.time_ns())'); ./nexus "$cmd" "$ROWS" > /dev/null 2>&1; e=$(python3 -c 'import time; print(time.time_ns())')
     ms=$(( (e - s) / 1000000 )); [ "$ms" -lt "$best" ] && best=$ms
   done
   bytes=$(MORLOC_ARROW_STATS=1 ./nexus "$cmd" "$ROWS" 2>&1 >/dev/null | awk '/copied/ {s += $3} END {print s + 0}')

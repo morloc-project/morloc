@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""timeout(1) for systems without it (macOS ships none).
+
+    timeout [-s SIGNAL] [-k DURATION] DURATION COMMAND [ARG]...
+
+Runs COMMAND in a process group of its own; if it is still running after
+DURATION, sends SIGNAL (default TERM) to the group, and SIGKILL after the -k
+duration. Exits 124 on a timeout (137 if SIGKILL was needed), 125 on a usage
+error, 126/127 when COMMAND cannot run or is not found, and otherwise with
+COMMAND's status (128 + N when it died of signal N). The test harnesses put
+this directory on PATH only where no `timeout` exists.
+"""
+
+import os
+import signal
+import subprocess
+import sys
+
+
+def duration(text):
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    if text and text[-1] in units:
+        return float(text[:-1]) * units[text[-1]]
+    return float(text)
+
+
+def signum(text):
+    name = text.upper()
+    if name.isdigit():
+        return int(name)
+    return int(getattr(signal, name if name.startswith("SIG") else "SIG" + name))
+
+
+def main(argv):
+    sig, kill_after = signal.SIGTERM, None
+    try:
+        while argv and argv[0].startswith("-") and argv[0] != "--":
+            opt = argv.pop(0)
+            if opt in ("-s", "--signal"):
+                sig = signum(argv.pop(0))
+            elif opt.startswith("--signal="):
+                sig = signum(opt.split("=", 1)[1])
+            elif opt in ("-k", "--kill-after"):
+                kill_after = duration(argv.pop(0))
+            elif opt.startswith("--kill-after="):
+                kill_after = duration(opt.split("=", 1)[1])
+            elif opt == "--foreground" or opt == "--preserve-status":
+                pass
+            else:
+                raise ValueError(opt)
+        if argv and argv[0] == "--":
+            argv.pop(0)
+        limit = duration(argv.pop(0))
+        if not argv:
+            raise ValueError("no command")
+    except (ValueError, IndexError, AttributeError) as e:
+        print(f"timeout: {e}", file=sys.stderr)
+        return 125
+    try:
+        child = subprocess.Popen(argv, start_new_session=False, preexec_fn=os.setpgrp)
+    except FileNotFoundError:
+        return 127
+    except PermissionError:
+        return 126
+    try:
+        code = child.wait(timeout=limit)
+    except subprocess.TimeoutExpired:
+        os.killpg(child.pid, sig)
+        try:
+            child.wait(timeout=kill_after)
+            return 124
+        except subprocess.TimeoutExpired:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait()
+            return 137
+    return 128 - code if code < 0 else code
+
+
+sys.exit(main(sys.argv[1:]))

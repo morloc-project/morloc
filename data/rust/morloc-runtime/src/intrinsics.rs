@@ -519,7 +519,13 @@ pub unsafe extern "C" fn mlc_save_voidstar(
         return 1;
     }
 
-    libc::fsync(fd);
+    if crate::utility::sync_file_data(fd) != 0 {
+        let e = std::io::Error::last_os_error();
+        libc::close(fd);
+        libc::unlink(tmp_buf.as_ptr() as *const c_char);
+        set_errmsg(errmsg, &MorlocError::Io(e));
+        return 1;
+    }
     libc::close(fd);
 
     if libc::rename(tmp_buf.as_ptr() as *const c_char, path) != 0 {

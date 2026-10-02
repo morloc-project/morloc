@@ -15,7 +15,7 @@ while [ $# -gt 0 ]; do
     fi
     POSITIONAL+=("$1"); shift
 done
-parse_args "${POSITIONAL[@]}"
+parse_args ${POSITIONAL[@]+"${POSITIONAL[@]}"}
 
 echo "=== Concurrent Stress Test ==="
 echo "Concurrent: $CONCURRENT, Rounds: $ROUNDS"
@@ -34,7 +34,7 @@ for round in $(seq 1 "$ROUNDS"); do
     done
 
     EXEC_FAILURES=0
-    for pid in "${PIDS[@]}"; do
+    for pid in ${PIDS[@]+"${PIDS[@]}"}; do
         if ! wait "$pid" 2>/dev/null; then
             EXEC_FAILURES=$((EXEC_FAILURES + 1))
         fi

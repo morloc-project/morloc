@@ -32,11 +32,9 @@ count_zombies() {
 }
 
 count_shm() {
-    local n=0
-    if ls /dev/shm/mlc-* &>/dev/null; then
-        n=$(ls -1 /dev/shm/mlc-* 2>/dev/null | wc -l)
-    fi
-    echo "$n"
+    # Shared memory held by morloc runs: markers on every platform, plus the
+    # /dev/shm listing on Linux. See ../shm-probe.py.
+    python3 "$(dirname "${BASH_SOURCE[0]}")/../shm-probe.py" count-all
 }
 
 count_tmp() {

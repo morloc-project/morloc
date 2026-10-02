@@ -2593,6 +2593,20 @@ unsafe fn parse_cli_data_argument_singular(
     parse_cli_data_argument_classified(dest, classified, schema, errmsg)
 }
 
+/// A stream over this process's stdin that may be closed when done: it reads
+/// a duplicate of fd 0, so closing it leaves fd 0 open. Null on failure.
+unsafe fn open_stdin_stream() -> *mut libc::FILE {
+    let fd = libc::dup(libc::STDIN_FILENO);
+    if fd < 0 {
+        return ptr::null_mut();
+    }
+    let stream = libc::fdopen(fd, b"rb\0".as_ptr() as *const c_char);
+    if stream.is_null() {
+        libc::close(fd);
+    }
+    stream
+}
+
 /// Body of [`parse_cli_data_argument_singular`] for callers that already
 /// know the source classification (e.g. the `form: list` per-line
 /// dispatcher, which forces `File` mode without going through the auto
@@ -2619,7 +2633,11 @@ unsafe fn parse_cli_data_argument_classified(
                 set_errmsg(errmsg, &e);
                 return ptr::null_mut();
             }
-            fd = libc::fdopen(libc::STDIN_FILENO, b"rb\0".as_ptr() as *const c_char);
+            fd = open_stdin_stream();
+            if fd.is_null() {
+                set_errmsg(errmsg, &MorlocError::Io(std::io::Error::last_os_error()));
+                return ptr::null_mut();
+            }
         }
         ArgSource::File => {
             // Layer 2 fast path: if the file is a regular file holding
@@ -2694,10 +2712,7 @@ unsafe fn parse_cli_data_argument_classified(
     };
     let mut data_size: usize = 0;
     let data = read_binary_fd(fd, &mut data_size, &mut err);
-    // Don't close stdin
-    if fd != libc::fdopen(libc::STDIN_FILENO, b"rb\0".as_ptr() as *const c_char) {
-        libc::fclose(fd);
-    }
+    libc::fclose(fd);
     if !err.is_null() {
         if !data.is_null() { libc::free(data as *mut c_void); }
         wrap_and_set_errmsg(err, &source_label, errmsg);
@@ -3306,7 +3321,12 @@ unsafe fn read_argv_bytes(
                 set_errmsg(errmsg, &e);
                 return None;
             }
-            libc::fdopen(libc::STDIN_FILENO, b"rb\0".as_ptr() as *const c_char)
+            let fd = open_stdin_stream();
+            if fd.is_null() {
+                set_errmsg(errmsg, &MorlocError::Io(std::io::Error::last_os_error()));
+                return None;
+            }
+            fd
         }
         ArgSource::File => {
             let fd = libc::fopen(effective, b"rb\0".as_ptr() as *const c_char);
@@ -3340,10 +3360,7 @@ unsafe fn read_argv_bytes(
     let mut data_size: usize = 0;
     let mut err: *mut c_char = ptr::null_mut();
     let data = read_binary_fd(fd, &mut data_size, &mut err);
-    let stdin_fd = libc::fdopen(libc::STDIN_FILENO, b"rb\0".as_ptr() as *const c_char);
-    if fd != stdin_fd {
-        libc::fclose(fd);
-    }
+    libc::fclose(fd);
     if !err.is_null() {
         if !data.is_null() {
             libc::free(data as *mut c_void);
@@ -3965,6 +3982,39 @@ mod tests {
             libc::free(err as *mut c_void);
             assert!(msg.contains("shared-memory reference"), "{msg}");
             crate::cschema::CSchema::free(cschema);
+        }
+    }
+
+    /// Reading an argument from stdin consumes it but leaves fd 0 open:
+    /// closing it would hand fd 0 to the next file opened.
+    #[test]
+    fn reading_stdin_leaves_fd_0_open() {
+        unsafe {
+            let child = libc::fork();
+            assert!(child >= 0);
+            if child == 0 {
+                let mut p = [0 as libc::c_int; 2];
+                libc::pipe(p.as_mut_ptr());
+                libc::write(p[1], b"[1]".as_ptr() as *const c_void, 3);
+                libc::close(p[1]);
+                libc::dup2(p[0], 0);
+                libc::close(p[0]);
+                reset_stdin_claim();
+                let mut err: *mut c_char = ptr::null_mut();
+                let arg = std::ffi::CString::new("-").unwrap();
+                let got = read_argv_bytes(arg.as_ptr() as *mut c_char, &mut err);
+                let read_ok = matches!(got, Some((_, 3, ArgSource::Stdin)));
+                let fd0_open = libc::fcntl(0, libc::F_GETFD) != -1;
+                libc::_exit(if !read_ok { 2 } else if !fd0_open { 1 } else { 0 });
+            }
+            let mut status = 0;
+            libc::waitpid(child, &mut status, 0);
+            assert!(libc::WIFEXITED(status), "child died: {status}");
+            match libc::WEXITSTATUS(status) {
+                0 => {}
+                1 => panic!("reading stdin closed fd 0"),
+                c => panic!("stdin was not read (exit {c})"),
+            }
         }
     }
 

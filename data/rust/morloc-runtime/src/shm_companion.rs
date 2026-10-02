@@ -142,7 +142,7 @@ impl CompanionSegment {
     }
 
     fn remove_name(&self) {
-        unsafe { libc::shm_unlink(self.name.as_ptr()) };
+        shm::unlink_segment(&self.name);
         if let Some(dir) = shm::get_fallback_dir() {
             let mut path = PathBuf::from(dir);
             path.push(self.name.to_string_lossy().trim_start_matches('/'));
