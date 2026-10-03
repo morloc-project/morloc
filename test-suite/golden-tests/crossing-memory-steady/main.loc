@@ -6,22 +6,24 @@ import root-py
 
 -- A pool that answers many calls must not grow with the number of them.
 -- Each step here fetches a batch of readings from python and reduces it
--- in C++, so every step sends a packet and receives one; after thousands
--- of steps the pool should be no larger than after a handful.
+-- in C++, so every step sends a packet and receives one.
 --
--- `peakKiB` takes the run's result as its argument: it is what makes the
--- measurement happen after the run. The two peaks are compared with a
--- 1 MiB margin rather than rounded to whole MiB: a pool's peak wanders by
--- about a hundred KiB between runs, and one sitting near a MiB boundary
--- rounds to different values run to run. Growth of 256 bytes a call
--- over the long run's extra calls exceeds the margin.
+-- The C++ pool records the memory it holds at step 1000 (`mark`) and
+-- reports how much more it holds after the last step (`grownKiB`, which
+-- takes the run's result so that it runs after the run). Held memory is
+-- the allocator's live bytes plus the shared memory the pool has mapped
+-- in: unlike resident size, it does not move with the pool's worker
+-- threads, its allocator's spare capacity, the page size, or the
+-- libraries the toolchain links. Growth of 180 bytes a step over the
+-- 3000 steps after the mark exceeds the 512 KiB margin.
 
 source Py from "src.py" ("readings")
-source Cpp from "src.hpp" ("total" as totalCpp, "peakKiB")
+source Cpp from "src.hpp" ("total" as totalCpp, "mark", "grownKiB")
 
 readings :: Int -> [Int]
 totalCpp :: [Int] -> Int
-peakKiB :: Int -> Int
+mark :: Int -> Int -> Int
+grownKiB :: Int -> Int
 
 steady :: Int -> Int
-steady n = peakKiB (sum (map (\i -> totalCpp (readings i)) (range 0 n)))
+steady n = grownKiB (sum (map (\i -> mark i (totalCpp (readings i))) (range 0 n)))
