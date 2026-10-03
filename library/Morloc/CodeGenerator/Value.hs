@@ -6,7 +6,7 @@ License     : Apache-2.0
 Maintainer  : z@morloc.io
 
 Morloc evaluates an argument once, at the application
-(@spec/types/effects.md@, law 5). Beta-reduction may therefore substitute an
+(@model/effects.md@, law 5). Beta-reduction may therefore substitute an
 argument into the body only when evaluating it does nothing: when it is
 already a value. Any other argument is bound once by a @let@ at the
 application, whatever the number of references to its parameter, zero
@@ -80,7 +80,7 @@ isValueWith stage a@(AnnoS (Idx _ t) _ e) = case e of
   ConS _ _ _ xs -> all (isValueWith stage) xs
   CoerceS _ x -> isValueWith stage x
   -- applying a function whose result is a suspension builds the suspension
-  -- and runs nothing (spec/types/effects.md, law 5)
+  -- and runs nothing (model/effects.md, law 5)
   AppS f xs -> isValueWith stage f && all (isValueWith stage) xs && (length xs < arity stage f || isSuspensionType t)
   _ -> False
 

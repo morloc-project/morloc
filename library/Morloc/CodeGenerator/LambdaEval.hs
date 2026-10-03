@@ -466,7 +466,7 @@ reduce ai (AnnoS g1@(Idx _ appT) c1 (AppS (AnnoS (Idx gLet _) cLet (LetS v e1 bo
     AnnoS (Idx gLet appT) cLet $
       LetS v e1 (AnnoS g1 c1 (AppS body es))
 -- Beta-reduce an applied lambda. An argument is evaluated once, at the
--- application (spec/types/effects.md, law 5), so only a value may be
+-- application (model/effects.md, law 5), so only a value may be
 -- substituted into the body: substituting anything else would evaluate it at
 -- each reference, or never if there is none. A value is substituted when its
 -- parameter is used at most once (a move: 'substituteAnnoS' reuses the
