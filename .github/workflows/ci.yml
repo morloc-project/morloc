@@ -178,6 +178,54 @@ jobs:
           MORLOC_RUST_DIR=$(pwd)/data/rust morloc init -f
           morloc install stdlib
 
+      # The runner's kernel, memory, limits and toolchain, for diagnosing
+      # failures that depend on the machine rather than the code: memory
+      # measurements (page size, transparent huge pages), shared memory and
+      # descriptor limits, thread caps, and tool versions. Best effort; every
+      # probe may be missing on one platform or the other.
+      - name: Record system info
+        if: always()
+        shell: bash
+        run: |
+          {
+            p() { echo "--- $*"; "$@" 2>&1 || true; }
+            f() { echo "--- $1"; cat "$1" 2>&1 || true; }
+            p uname -a
+            p nproc
+            p getconf PAGESIZE
+            p ulimit -a
+            p df -h /dev/shm /tmp .
+            env | grep -E '^(MALLOC|GLIBC_TUNABLES|MORLOC|TMPDIR|RUST_MIN_STACK|PYTHON|R_LIBS)' | sort || true
+            if [ "$RUNNER_OS" = Linux ]; then
+              f /etc/os-release
+              p ldd --version
+              p lscpu
+              p free -m
+              for k in enabled defrag khugepaged/defrag shmem_enabled; do
+                f /sys/kernel/mm/transparent_hugepage/$k
+              done
+              p sysctl vm.overcommit_memory vm.max_map_count vm.swappiness \
+                kernel.threads-max kernel.pid_max fs.file-max kernel.shmmax kernel.shmall
+              f /sys/fs/cgroup/memory.max
+              f /sys/fs/cgroup/pids.max
+            else
+              p sw_vers
+              p sysctl hw.ncpu hw.memsize hw.pagesize machdep.cpu.brand_string \
+                kern.maxfiles kern.maxfilesperproc kern.maxproc kern.maxprocperuid \
+                kern.num_taskthreads kern.posix.shm kern.sysv.shmmax vm.swapusage
+            fi
+            p "${CXX:-g++}" --version
+            p "${CC:-cc}" --version
+            p python3 --version
+            p python3 -c 'import numpy, pyarrow; print("numpy", numpy.__version__, "pyarrow", pyarrow.__version__)'
+            p R --version
+            p rustc --version
+            p ghc --version
+            p stack --version
+            p futhark --version
+            p morloc --version
+          } 2>&1 | tee system-info.txt
+
       - name: Test rust runtime and nexus
         if: matrix.shard == 1
         run: cargo test --workspace --manifest-path data/rust/Cargo.toml
@@ -277,5 +325,6 @@ jobs:
             test-suite/golden-tests/**/obs.err
             test-suite/golden-tests/**/obs.txt
             crash-reports/**
+            system-info.txt
           if-no-files-found: ignore
           retention-days: 7
