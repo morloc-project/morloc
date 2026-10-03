@@ -189,6 +189,12 @@ pub unsafe extern "C" fn shincref(ptr: *mut c_void, errmsg: *mut *mut c_char) ->
 }
 
 #[no_mangle]
+pub extern "C" fn morloc_fork_generation() -> u64 {
+    crate::fork_local::register();
+    crate::fork_local::generation()
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn total_shm_size() -> usize {
     shm::total_shm_size()
 }

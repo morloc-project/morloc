@@ -46,6 +46,12 @@ impl Drop for ShmGuard<'_> {
     }
 }
 
+impl ShmLock {
+    pub fn lock(&self) -> Result<ShmGuard<'_>, MorlocError> {
+        self.lock_live()?.ok_or_else(poisoned)
+    }
+}
+
 fn poisoned() -> MorlocError {
     MorlocError::Shm(
         "a process died while allocating from this shared memory volume; \
@@ -96,18 +102,19 @@ impl ShmLock {
         result
     }
 
-    pub fn lock(&self) -> Result<ShmGuard<'_>, MorlocError> {
+    /// The lock, or `None` if a holder died inside it.
+    pub fn lock_live(&self) -> Result<Option<ShmGuard<'_>>, MorlocError> {
         // SAFETY: the mutex was initialised by `init` before the volume
         // became visible.
         match unsafe { libc::pthread_mutex_lock(self.mutex.get()) } {
-            0 => Ok(ShmGuard { lock: self }),
+            0 => Ok(Some(ShmGuard { lock: self })),
             libc::EOWNERDEAD => {
                 // Unlocking without marking the mutex consistent makes it
                 // permanently unrecoverable: every later lock fails.
                 unsafe { libc::pthread_mutex_unlock(self.mutex.get()) };
-                Err(poisoned())
+                Ok(None)
             }
-            libc::ENOTRECOVERABLE => Err(poisoned()),
+            libc::ENOTRECOVERABLE => Ok(None),
             rc => Err(MorlocError::Shm(format!(
                 "cannot take the volume lock: pthread_mutex_lock returned {rc}"
             ))),
@@ -131,7 +138,8 @@ impl ShmLock {
         Ok(())
     }
 
-    pub fn lock(&self) -> Result<ShmGuard<'_>, MorlocError> {
+    /// The lock, or `None` if a holder died inside it.
+    pub fn lock_live(&self) -> Result<Option<ShmGuard<'_>>, MorlocError> {
         let holder_died = self.holder.acquire()?;
         if holder_died {
             self.poisoned.store(1, Ordering::Release);
@@ -139,9 +147,9 @@ impl ShmLock {
         if self.poisoned.load(Ordering::Acquire) != 0 {
             // SAFETY: this thread took the word above.
             unsafe { self.holder.release() };
-            return Err(poisoned());
+            return Ok(None);
         }
-        Ok(ShmGuard { lock: self })
+        Ok(Some(ShmGuard { lock: self }))
     }
 
     unsafe fn unlock(&self) {

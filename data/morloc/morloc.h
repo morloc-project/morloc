@@ -1272,6 +1272,7 @@ void* shmalloc(size_t size, ERRMSG);
 void* shmemcpy(void* src, size_t size, ERRMSG);
 bool shfree(absptr_t ptr, ERRMSG);
 bool shincref(absptr_t ptr, ERRMSG);
+uint64_t morloc_fork_generation(void);
 void* shcalloc(size_t nmemb, size_t size, ERRMSG);
 size_t total_shm_size(void);
 volptr_t rel2vol(relptr_t ptr, ERRMSG);

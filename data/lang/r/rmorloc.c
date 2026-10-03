@@ -163,8 +163,24 @@ typedef struct {
 static shm_entry_t* shm_tracker = NULL;
 static size_t shm_tracker_count = 0;
 static size_t shm_tracker_cap = 0;
+static uint64_t shm_tracker_gen = 0;
+
+static void shm_tracker_forget_inherited(void) {
+    uint64_t g = morloc_fork_generation();
+    if (g == shm_tracker_gen) {
+        return;
+    }
+    for (size_t i = 0; i < shm_tracker_count; i++) {
+        if (shm_tracker[i].schema) {
+            free_schema(shm_tracker[i].schema);
+        }
+    }
+    shm_tracker_count = 0;
+    shm_tracker_gen = g;
+}
 
 static void shm_tracker_push(absptr_t ptr, Schema* schema) {
+    shm_tracker_forget_inherited();
     if (shm_tracker_count >= shm_tracker_cap) {
         size_t new_cap = shm_tracker_cap ? shm_tracker_cap * 2 : SHM_TRACKER_INIT_CAP;
         shm_entry_t* new_buf = (shm_entry_t*)realloc(shm_tracker, new_cap * sizeof(shm_entry_t));
@@ -182,6 +198,7 @@ static void shm_tracker_push(absptr_t ptr, Schema* schema) {
 }
 
 static void shm_tracker_flush(void) {
+    shm_tracker_forget_inherited();
     for (size_t i = 0; i < shm_tracker_count; i++) {
         char* err = NULL;
         // shfree decrements the refcount and zeros the block on final
@@ -201,6 +218,7 @@ static void shm_tracker_flush(void) {
 // codegen-determined scope ends, rather than waiting for the next
 // dispatch flush.
 static bool shm_tracker_release_one(absptr_t ptr) {
+    shm_tracker_forget_inherited();
     for (size_t i = 0; i < shm_tracker_count; i++) {
         if (shm_tracker[i].ptr == ptr) {
             Schema* schema = shm_tracker[i].schema;

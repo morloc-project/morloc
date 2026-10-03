@@ -92,6 +92,21 @@ mod tests {
     }
 
     #[test]
+    fn the_exported_generation_changes_in_a_forked_child() {
+        let parent = crate::ffi::morloc_fork_generation();
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            let changed = crate::ffi::morloc_fork_generation() != parent;
+            unsafe { libc::_exit(if changed { 0 } else { 1 }) }
+        }
+        let mut status = 0;
+        unsafe { libc::waitpid(pid, &mut status, 0) };
+        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0);
+        assert_eq!(crate::ffi::morloc_fork_generation(), parent);
+    }
+
+    #[test]
     fn a_forked_child_gets_nothing_back_from_into_inner() {
         let local = ForkLocal::new(7u32);
         let pid = unsafe { libc::fork() };

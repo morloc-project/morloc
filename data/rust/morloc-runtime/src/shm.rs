@@ -1204,7 +1204,9 @@ pub unsafe fn shmemcpy(src: *const u8, size: usize) -> Result<AbsPtr, MorlocErro
 
 /// Allocate and zero-fill.
 pub fn shcalloc(nmemb: usize, size: usize) -> Result<AbsPtr, MorlocError> {
-    let total = nmemb * size;
+    let total = nmemb.checked_mul(size).ok_or_else(|| {
+        MorlocError::Shm(format!("shcalloc: {nmemb} elements of {size} bytes overflows"))
+    })?;
     let ptr = shmalloc(total)?;
     // SAFETY: ptr is a freshly allocated SHM block of `total` bytes.
     unsafe { std::ptr::write_bytes(ptr, 0, total) };
@@ -2027,7 +2029,9 @@ fn find_free_block_in_volume(
             .add(std::mem::size_of::<ShmHeader>())
             .add((*shm).volume_size);
 
-        let held = (*shm).lock.lock()?;
+        let Some(held) = (*shm).lock.lock_live()? else {
+            return Ok(None);
+        };
 
         let cursor = (*shm).cursor;
         let found = 'found: {
@@ -2035,7 +2039,7 @@ fn find_free_block_in_volume(
             if cursor != VOLNULL {
                 let blk = vol2abs_raw(cursor, shm) as *mut BlockHeader;
                 if (*blk).magic == BLK_MAGIC
-                    && (*blk).reference_count.load(Ordering::Relaxed) == 0
+                    && (*blk).reference_count.load(Ordering::Acquire) == 0
                     && (*blk).size >= size
                 {
                     break 'found Some(blk);
@@ -2090,14 +2094,14 @@ unsafe fn scan_volume(
         }
 
         // Merge adjacent free blocks
-        while (*blk).reference_count.load(Ordering::Relaxed) == 0 {
+        while (*blk).reference_count.load(Ordering::Acquire) == 0 {
             let next = (blk as *mut u8).add(hdr_size + (*blk).size) as *mut BlockHeader;
             // The whole header must lie inside the region: starting inside it
             // is not enough, since the next thing done is a 16-byte read.
             if (next as *const u8) >= end
                 || (end as usize) - (next as usize) < hdr_size
                 || (*next).magic != BLK_MAGIC
-                || (*next).reference_count.load(Ordering::Relaxed) != 0
+                || (*next).reference_count.load(Ordering::Acquire) != 0
             {
                 break;
             }
@@ -2111,7 +2115,7 @@ unsafe fn scan_volume(
             (*blk).size += hdr_size + next_size;
         }
 
-        if (*blk).reference_count.load(Ordering::Relaxed) == 0 && (*blk).size >= size {
+        if (*blk).reference_count.load(Ordering::Acquire) == 0 && (*blk).size >= size {
             return Some(blk);
         }
 
@@ -2199,6 +2203,15 @@ pub unsafe fn vol2abs(ptr: VolPtr, shm: *const ShmHeader) -> AbsPtr {
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod calloc_tests {
+    #[test]
+    fn a_size_that_overflows_is_refused() {
+        let _shm = crate::init_test_shm();
+        assert!(super::shcalloc(usize::MAX / 2 + 1, 2).is_err());
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -2476,6 +2489,29 @@ mod tests {
             unsafe { libc::shm_unlink(c.as_ptr()) };
         }
         assert!(got.is_err(), "an allocation with no shared memory initialised succeeded");
+    }
+
+    #[test]
+    fn a_volume_whose_lock_holder_died_does_not_stop_allocation() {
+        let _arena = crate::own_test_shm();
+        shclose().unwrap();
+        let basename = format!("/morloc-{}-test-poison", std::process::id());
+        let shm = shinit(&basename, PRIMARY_VOLUME, 0x10000).unwrap();
+        unsafe {
+            let holder = libc::fork();
+            assert!(holder >= 0);
+            if holder == 0 {
+                std::mem::forget((*shm).lock.lock());
+                libc::_exit(0);
+            }
+            libc::waitpid(holder, std::ptr::null_mut(), 0);
+        }
+        let got = shmalloc(64);
+        if let Ok(p) = got {
+            let _ = shfree(p);
+        }
+        shclose().unwrap();
+        assert!(got.is_ok(), "one dead process stopped all allocation: {:?}", got.err());
     }
 
     // A fork while another thread is inside the allocator hands the child a

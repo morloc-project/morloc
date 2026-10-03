@@ -68,6 +68,7 @@ extern "C" {
     fn shmalloc(size: usize, errmsg: *mut *mut c_char) -> *mut c_void;
     fn shfree(ptr: *mut c_void, errmsg: *mut *mut c_char) -> bool;
     fn shincref(ptr: *mut c_void, errmsg: *mut *mut c_char) -> bool;
+    fn morloc_fork_generation() -> u64;
     fn morloc_dup_packet(packet: *const u8, block_out: *mut *mut c_void,
                          errmsg: *mut *mut c_char) -> *mut u8;
     fn abs2rel(ptr: *mut c_void, errmsg: *mut *mut c_char) -> isize;
@@ -467,11 +468,23 @@ pub fn resolve_recur(schema: &Schema) -> &Schema {
 /// Holds the deferred-release list so that the blocks are released when the
 /// thread ends as well as after each reply, for what a thread holds outside
 /// any dispatch.
-struct ShmTracker(Cell<Vec<*mut c_void>>);
+struct ShmTracker(Cell<Vec<*mut c_void>>, Cell<u64>);
+
+impl ShmTracker {
+    fn take_live(&self) -> Vec<*mut c_void> {
+        let g = unsafe { morloc_fork_generation() };
+        let v = self.0.take();
+        if self.1.get() == g {
+            return v;
+        }
+        self.1.set(g);
+        Vec::new()
+    }
+}
 
 impl Drop for ShmTracker {
     fn drop(&mut self) {
-        let v = self.0.take();
+        let v = self.take_live();
         for ptr in &v {
             let mut err: *mut c_char = std::ptr::null_mut();
             unsafe {
@@ -483,12 +496,12 @@ impl Drop for ShmTracker {
 }
 
 thread_local! {
-    static SHM_TRACKER: ShmTracker = const { ShmTracker(Cell::new(Vec::new())) };
+    static SHM_TRACKER: ShmTracker = const { ShmTracker(Cell::new(Vec::new()), Cell::new(0)) };
 }
 
 fn track(ptr: *mut c_void) {
     SHM_TRACKER.with(|t| {
-        let mut v = t.0.take();
+        let mut v = t.take_live();
         v.push(ptr);
         t.0.set(v);
     });
@@ -552,7 +565,7 @@ impl Drop for Packet {
 /// Anything not tracked here belongs to someone else and is left alone.
 unsafe fn release_tracked(block: *mut c_void) {
     let found = SHM_TRACKER.with(|t| {
-        let mut v = t.0.take();
+        let mut v = t.take_live();
         let hit = v.iter().position(|p| *p == block);
         if let Some(i) = hit {
             v.swap_remove(i);
@@ -572,7 +585,7 @@ unsafe fn release_tracked(block: *mut c_void) {
 /// entry, for anything the thread held outside a dispatch.
 pub fn dispatch_flush() {
     SHM_TRACKER.with(|t| {
-        let v = t.0.take();
+        let v = t.take_live();
         for ptr in &v {
             let mut err: *mut c_char = std::ptr::null_mut();
             unsafe {

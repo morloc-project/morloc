@@ -176,10 +176,24 @@ static void _shm_release_entries(std::vector<ShmEntry>& entries) {
 // the teardown avoids depending on the destruction order of two thread-local
 // objects.
 struct ShmTracker : std::vector<ShmEntry> {
-    ~ShmTracker() { _shm_release_entries(*this); }
+    uint64_t gen = 0;
+    ~ShmTracker() {
+        if (gen == morloc_fork_generation()) {
+            _shm_release_entries(*this);
+        }
+    }
 };
 
-thread_local ShmTracker _shm_tracker;
+thread_local ShmTracker _shm_tracker_store;
+
+static ShmTracker& _shm_tracker_live() {
+    uint64_t g = morloc_fork_generation();
+    if (_shm_tracker_store.gen != g) {
+        _shm_tracker_store.clear();
+        _shm_tracker_store.gen = g;
+    }
+    return _shm_tracker_store;
+}
 
 // Owns a block this pool materialized from a packet, releasing it unless
 // ownership is handed elsewhere. Deserialization can throw, and a throwing
@@ -200,7 +214,7 @@ struct ShmOwned {
 };
 
 static void _shm_tracker_flush() {
-    _shm_release_entries(_shm_tracker);
+    _shm_release_entries(_shm_tracker_live());
 }
 
 // Drop one tracker entry matching ptr (swap-with-last) and shfree the
@@ -208,10 +222,11 @@ static void _shm_tracker_flush() {
 // a _put_value-tracked packet's SHM as soon as its codegen-determined
 // scope ends, rather than waiting for the next dispatch flush.
 static bool _shm_tracker_release_one(absptr_t ptr) {
-    for (size_t i = 0; i < _shm_tracker.size(); i++) {
-        if (_shm_tracker[i].ptr == ptr) {
-            _shm_tracker[i] = _shm_tracker.back();
-            _shm_tracker.pop_back();
+    ShmTracker& tracker = _shm_tracker_live();
+    for (size_t i = 0; i < tracker.size(); i++) {
+        if (tracker[i].ptr == ptr) {
+            tracker[i] = tracker.back();
+            tracker.pop_back();
             char* err = NULL;
             shfree(ptr, &err);
             if (err) { free(err); }
@@ -236,7 +251,7 @@ static uint8_t* _dup_packet(const uint8_t* packet) {
         MLC_INTERNAL_ABORT(msg.c_str());
     }
     if (block != NULL) {
-        _shm_tracker.push_back({block});
+        _shm_tracker_live().push_back({block});
     }
     return copy;
 }
@@ -317,7 +332,7 @@ uint8_t* _put_value(const T& value, Schema* schema, bool self_contained = false)
         } else {
             // The packet names the block, which is this pool's own until the
             // packet is released or the next dispatch begins.
-            if (shm_ptr) { _shm_tracker.push_back({(absptr_t)shm_ptr}); }
+            if (shm_ptr) { _shm_tracker_live().push_back({(absptr_t)shm_ptr}); }
             packet = make_arrow_data_packet(relptr, schema);
         }
         if (!packet) { MLC_INTERNAL_ABORT("failed to create arrow data packet"); }
@@ -346,7 +361,7 @@ uint8_t* _put_value(const T& value, Schema* schema, bool self_contained = false)
             const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
             if (hdr->command.data.source == PACKET_SOURCE_RPTR) {
                 // SHM referenced by packet -- track for deferred cleanup
-                _shm_tracker.push_back({(absptr_t)voidstar});
+                _shm_tracker_live().push_back({(absptr_t)voidstar});
             } else {
                 // Data inlined in packet -- free SHM immediately. shfree
                 // zeros the block on final ref-drop.
@@ -1129,7 +1144,7 @@ uint8_t* foreign_call_v(const char* socket_filename, size_t mid, const uint8_t**
             if (res_voidstar) {
                 // The callee took a reference before sending; it is ours
                 // now. Inherit it rather than adding another.
-                _shm_tracker.push_back({(absptr_t)res_voidstar});
+                _shm_tracker_live().push_back({(absptr_t)res_voidstar});
             }
         }
     }
