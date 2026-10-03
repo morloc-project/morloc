@@ -11032,6 +11032,30 @@ mod tests {
         assert!(format!("{e:?}").contains("replaced"), "unexpected error: {e:?}");
     }
 
+    /// The pid of the process at the other end of a Unix socket.
+    #[cfg(target_os = "linux")]
+    fn peer_pid(fd: i32) -> Option<libc::pid_t> {
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_PEERCRED,
+                &mut cred as *mut libc::ucred as *mut libc::c_void, &mut len)
+        };
+        (rc == 0).then_some(cred.pid)
+    }
+
+    /// The pid of the process at the other end of a Unix socket.
+    #[cfg(target_os = "macos")]
+    fn peer_pid(fd: i32) -> Option<libc::pid_t> {
+        let mut pid: libc::pid_t = 0;
+        let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(fd, libc::SOL_LOCAL, libc::LOCAL_PEERPID,
+                &mut pid as *mut libc::pid_t as *mut libc::c_void, &mut len)
+        };
+        (rc == 0).then_some(pid)
+    }
+
     #[test]
     fn a_forked_child_does_not_share_its_parents_nexus_connection() {
         use std::os::unix::io::AsRawFd;
@@ -11055,15 +11079,7 @@ mod tests {
         let began = std::time::Instant::now();
         let peer = loop {
             match listener.accept() {
-                Ok((conn, _)) => {
-                    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
-                    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-                    unsafe {
-                        libc::getsockopt(conn.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED,
-                            &mut cred as *mut libc::ucred as *mut libc::c_void, &mut len);
-                    }
-                    break Some(cred.pid);
-                }
+                Ok((conn, _)) => break peer_pid(conn.as_raw_fd()),
                 Err(_) if began.elapsed() < std::time::Duration::from_secs(5) => {
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
