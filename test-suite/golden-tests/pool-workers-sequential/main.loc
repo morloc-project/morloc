@@ -1,0 +1,26 @@
+module main (fromCpp, fromPy)
+
+import root
+import root-cpp
+import root-py
+
+-- A pool starts a worker when a call arrives and no worker is free to take
+-- it, and no sooner. When C++ calls Python in a loop, no call ever arrives
+-- at the C++ pool, which keeps the one worker it started with. When C++
+-- waits on a Python loop that calls back into C++, the waiting worker is
+-- occupied, so the first callback starts a second worker, and calls made
+-- one after another never need a third.
+
+source Cpp from "workers.hpp" ("cppWorkers", "cppInc")
+source Py from "loop.py" ("pyInc", "pyLoop")
+
+cppWorkers :: Int -> Int
+cppInc :: Int -> Int
+pyInc :: Int -> Int
+pyLoop :: (Int -> Int) -> Int -> Int
+
+fromCpp :: Int -> Int
+fromCpp n = cppWorkers (sum (map pyInc (range 0 n)))
+
+fromPy :: Int -> Int
+fromPy n = cppWorkers (pyLoop cppInc n)

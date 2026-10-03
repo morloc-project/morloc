@@ -27,6 +27,9 @@ pub struct PoolConfig {
     pub dispatch_ctx: *mut c_void,
     pub concurrency: PoolConcurrency,
     pub initial_workers: i32,
+    /// Start workers as calls need them. Without it the pool keeps
+    /// `initial_workers`, which must exceed the depth of calls back into the
+    /// pool that can be waiting at once.
     pub dynamic_scaling: bool,
     /// Run on the worker thread once a dispatch's reply has been sent (or
     /// could not be). The reply carries the caller's own reference to its
@@ -45,8 +48,9 @@ unsafe impl Sync for PoolConfig {}
 // ── Global state ─────────────────────────────────────────────────────────────
 
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+// Threads blocked in a call to another pool. Starting workers does not depend
+// on it (see JobQueue); it is kept for inspection.
 static BUSY_COUNT: AtomicI32 = AtomicI32::new(0);
-static TOTAL_WORKERS: AtomicI32 = AtomicI32::new(0);
 
 #[no_mangle]
 pub extern "C" fn pool_mark_busy() {
@@ -173,48 +177,158 @@ unsafe fn try_send_fail(client_fd: i32, msg: *const c_char) {
 
 // ── Thread mode job queue ────────────────────────────────────────────────────
 
+// Every count that decides whether to start a worker, kept under one mutex so
+// that a job, a worker becoming free and a worker retiring are seen in a
+// single order. A job that finds no worker able to take it starts one: a
+// callback into a pool whose workers all wait on other pools therefore always
+// finds a worker, and calls that arrive one after another never start a
+// second.
+struct QueueState {
+    jobs: Vec<i32>,
+    total: usize,
+    // Waiting for a job.
+    idle: usize,
+    // Started, not yet waiting.
+    starting: usize,
+    // Replied, on the way back to wait: counted free from just before the
+    // reply is sent, since the caller may send its next call the moment the
+    // reply arrives.
+    finishing: usize,
+}
+
+impl QueueState {
+    fn free(&self) -> usize {
+        self.idle + self.starting + self.finishing
+    }
+}
+
 struct JobQueue {
-    jobs: Mutex<Vec<i32>>,
+    state: Mutex<QueueState>,
     cond: Condvar,
 }
 
-// Outcome of a bounded wait for work: a job to run, an idle timeout (the caller
-// decides whether to keep waiting or reap the worker), or shutdown.
+// What a worker was doing before it asks for a job; it stops being counted
+// as such once it is counted idle.
+#[derive(Clone, Copy)]
+enum Arriving {
+    Starting,
+    Finishing,
+    Other,
+}
+
 enum PopResult {
     Job(i32),
-    Timeout,
+    Retire,
     Shutdown,
 }
 
 impl JobQueue {
-    fn new() -> Self {
-        JobQueue { jobs: Mutex::new(Vec::new()), cond: Condvar::new() }
+    fn new(workers: usize) -> Self {
+        JobQueue {
+            state: Mutex::new(QueueState {
+                jobs: Vec::new(),
+                total: workers,
+                idle: 0,
+                starting: workers,
+                finishing: 0,
+            }),
+            cond: Condvar::new(),
+        }
     }
 
     fn push(&self, fd: i32) {
-        let mut jobs = self.jobs.lock().unwrap();
-        jobs.push(fd);
+        let mut st = self.state.lock().unwrap();
+        st.jobs.push(fd);
         self.cond.notify_one();
     }
 
-    // Wait up to `wait` for a job. Unlike an unbounded pop, a `Timeout` return
-    // lets the worker loop check its idle deadline and exit if it is a surplus
-    // (dynamically-spawned) worker.
-    fn pop_timeout(&self, wait: std::time::Duration) -> PopResult {
-        let mut jobs = self.jobs.lock().unwrap();
-        if SHUTTING_DOWN.load(Ordering::Relaxed) { return PopResult::Shutdown; }
-        if let Some(fd) = jobs.pop() { return PopResult::Job(fd); }
-        let (mut jobs, _) = self.cond.wait_timeout(jobs, wait).unwrap();
-        if SHUTTING_DOWN.load(Ordering::Relaxed) { return PopResult::Shutdown; }
-        if let Some(fd) = jobs.pop() { return PopResult::Job(fd); }
-        PopResult::Timeout
+    // When some queued job has no free worker to take it, count a worker as
+    // starting and return true: the caller must start it.
+    fn reserve_start(&self) -> bool {
+        let mut st = self.state.lock().unwrap();
+        if st.jobs.len() > st.free() {
+            st.total += 1;
+            st.starting += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    // A worker counted by `reserve_start` could not be started.
+    fn start_failed(&self) {
+        let mut st = self.state.lock().unwrap();
+        st.total -= 1;
+        st.starting -= 1;
+    }
+
+    // Take a queued job that no free worker can take, to fail it. Which job
+    // does not matter: any one leaves the rest covered.
+    fn take_uncovered(&self) -> Option<i32> {
+        let mut st = self.state.lock().unwrap();
+        if st.jobs.len() > st.free() {
+            st.jobs.pop()
+        } else {
+            None
+        }
+    }
+
+    // The worker is about to send its reply.
+    fn finishing(&self) {
+        self.state.lock().unwrap().finishing += 1;
+    }
+
+    // Wait for a job. A surplus worker idle past `retire_after` retires; the
+    // decision is taken under the lock, so no job can arrive unseen between
+    // it and the worker leaving.
+    fn pop(
+        &self,
+        arriving: Arriving,
+        idle_since: std::time::Instant,
+        retire_after: Option<std::time::Duration>,
+        min_workers: usize,
+    ) -> PopResult {
+        let mut st = self.state.lock().unwrap();
+        match arriving {
+            Arriving::Starting => st.starting -= 1,
+            Arriving::Finishing => st.finishing -= 1,
+            Arriving::Other => {}
+        }
+        loop {
+            if SHUTTING_DOWN.load(Ordering::Relaxed) {
+                return PopResult::Shutdown;
+            }
+            if let Some(fd) = st.jobs.pop() {
+                return PopResult::Job(fd);
+            }
+            if let Some(t) = retire_after {
+                if st.total > min_workers && idle_since.elapsed() >= t {
+                    st.total -= 1;
+                    return PopResult::Retire;
+                }
+            }
+            st.idle += 1;
+            st = self.cond.wait_timeout(st, std::time::Duration::from_millis(100)).unwrap().0;
+            st.idle -= 1;
+        }
     }
 }
 
-// Seconds a surplus worker stays idle before exiting. Mirrors the Python pool's
-// WORKER_IDLE_TIMEOUT so a burst of concurrency does not leave threads (and the
-// fds/stacks they hold) alive for the rest of the run.
-const WORKER_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+// How long a surplus worker stays idle before it exits, unless
+// MORLOC_POOL_IDLE_TIMEOUT_MS says otherwise. Mirrors the Python pool's
+// WORKER_IDLE_TIMEOUT so a burst of concurrency does not leave threads (and
+// the fds/stacks they hold) alive for the rest of the run.
+// Consecutive passes of the accept loop (about 10 ms apart) on which a worker
+// fails to start before the jobs waiting for one are failed.
+const START_ATTEMPTS: u32 = 50;
+
+fn worker_idle_timeout() -> std::time::Duration {
+    std::env::var("MORLOC_POOL_IDLE_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(std::time::Duration::from_secs(5))
+}
 
 // ── Worker thread ────────────────────────────────────────────────────────────
 
@@ -258,48 +372,37 @@ impl Drop for AltStack {
     }
 }
 
-unsafe fn spawn_worker(queue: &Arc<JobQueue>, config: &PoolConfig) -> std::io::Result<std::thread::JoinHandle<()>> {
+unsafe fn spawn_worker(
+    queue: &Arc<JobQueue>,
+    config: &PoolConfig,
+    retire_after: Option<std::time::Duration>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
     let q = Arc::clone(queue);
     let cfg = ptr::read(config); // Copy config for thread
     std::thread::Builder::new().spawn(move || {
         let _altstack = AltStack::install();
-        worker_loop(&q, &cfg);
+        worker_loop(&q, &cfg, retire_after);
     })
 }
 
-unsafe fn worker_loop(queue: &JobQueue, config: &PoolConfig) {
+// `retire_after` is how long a worker beyond the initial ones may stay idle
+// before it exits; None keeps every worker.
+unsafe fn worker_loop(queue: &JobQueue, config: &PoolConfig, retire_after: Option<std::time::Duration>) {
     use crate::ipc_ffi::stream_from_client;
     use crate::ipc_ffi::send_packet_to_foreign_server;
     use crate::ipc_ffi::close_socket;
 
-    let min_workers = config.initial_workers.max(1);
-    let mut last_activity = std::time::Instant::now();
+    let min_workers = config.initial_workers.max(1) as usize;
+    let mut idle_since = std::time::Instant::now();
+    let mut arriving = Arriving::Starting;
 
     while !SHUTTING_DOWN.load(Ordering::Relaxed) {
-        let client_fd = match queue.pop_timeout(std::time::Duration::from_millis(100)) {
+        let client_fd = match queue.pop(arriving, idle_since, retire_after, min_workers) {
             PopResult::Job(fd) => fd,
             PopResult::Shutdown => break,
-            PopResult::Timeout => {
-                // Reap this worker if it is surplus (beyond the initial core
-                // pool) and has been idle past the timeout. The floor check and
-                // the decrement are a single atomic CAS (fetch_update), so
-                // concurrent idle workers cannot race past min_workers down to
-                // zero; only the worker whose CAS succeeds exits. Keeping at
-                // least min_workers alive avoids churn under steady load, and the
-                // decrement lets the accept loop spawn again on the next burst.
-                if config.dynamic_scaling && last_activity.elapsed() > WORKER_IDLE_TIMEOUT {
-                    let reaped = TOTAL_WORKERS
-                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |t| {
-                            if t > min_workers { Some(t - 1) } else { None }
-                        })
-                        .is_ok();
-                    if reaped {
-                        return;
-                    }
-                }
-                continue;
-            }
+            PopResult::Retire => return,
         };
+        arriving = Arriving::Other;
 
         let mut errmsg: *mut c_char = ptr::null_mut();
         let data = stream_from_client(client_fd, &mut errmsg);
@@ -321,11 +424,15 @@ unsafe fn worker_loop(queue: &JobQueue, config: &PoolConfig) {
             continue;
         }
 
-        // Track busy state so the accept loop can spawn new workers if needed
-        pool_mark_busy();
         let result = pool_dispatch_packet(data, config.local_dispatch, config.remote_dispatch, config.dispatch_ctx);
-        pool_mark_idle();
         libc::free(data as *mut c_void);
+        libc::fflush(ptr::null_mut()); // flush stdout
+
+        // From here the worker counts as free, so nothing below may wait on
+        // another thread of the program: only the send (which waits on the
+        // caller, already reading), the after-reply release and the close.
+        queue.finishing();
+        arriving = Arriving::Finishing;
 
         if !result.is_null() {
             send_packet_to_foreign_server(client_fd, result, &mut errmsg);
@@ -346,9 +453,8 @@ unsafe fn worker_loop(queue: &JobQueue, config: &PoolConfig) {
         }
         if let Some(f) = config.after_reply { f(); }
 
-        libc::fflush(ptr::null_mut()); // flush stdout
         close_socket(client_fd);
-        last_activity = std::time::Instant::now();
+        idle_since = std::time::Instant::now();
     }
 }
 
@@ -367,14 +473,15 @@ unsafe fn pool_main_threads(config: &PoolConfig, socket_path: *const c_char, tmp
         return 1;
     }
 
-    let queue = Arc::new(JobQueue::new());
     let nthreads = config.initial_workers.max(1) as usize;
-    TOTAL_WORKERS.store(nthreads as i32, Ordering::Relaxed);
+    let queue = Arc::new(JobQueue::new(nthreads));
+    let retire_after = if config.dynamic_scaling { Some(worker_idle_timeout()) } else { None };
 
     let mut handles = Vec::with_capacity(nthreads);
     for _ in 0..nthreads {
-        handles.push(spawn_worker(&queue, config).expect("failed to spawn pool worker thread"));
+        handles.push(spawn_worker(&queue, config, retire_after).expect("failed to spawn pool worker thread"));
     }
+    let mut start_failures = 0u32;
 
     while !SHUTTING_DOWN.load(Ordering::Relaxed) {
         let client_fd = wait_for_client_with_timeout(daemon, 10000, &mut errmsg);
@@ -390,18 +497,35 @@ unsafe fn pool_main_threads(config: &PoolConfig, socket_path: *const c_char, tmp
             queue.push(client_fd);
         }
 
-        // Dynamic scaling: spawn a new worker if all are busy
-        if config.dynamic_scaling {
-            let busy = BUSY_COUNT.load(Ordering::Relaxed);
-            let total = TOTAL_WORKERS.load(Ordering::Relaxed);
-            if busy >= total {
-                match spawn_worker(&queue, config) {
-                    Ok(h) => {
-                        handles.push(h);
-                        TOTAL_WORKERS.fetch_add(1, Ordering::Relaxed);
+        // Start a worker for each queued job that no worker can take. A start
+        // that fails is retried on the next pass; once it has failed for
+        // START_ATTEMPTS passes in a row, the jobs no worker can take are
+        // failed, since left queued they could wait on workers that are
+        // themselves waiting on them.
+        while config.dynamic_scaling && queue.reserve_start() {
+            match spawn_worker(&queue, config, retire_after) {
+                Ok(h) => {
+                    handles.push(h);
+                    start_failures = 0;
+                }
+                Err(e) => {
+                    queue.start_failed();
+                    if start_failures == 0 {
+                        eprintln!("morloc pool: failed to spawn worker thread: {}", e);
                     }
-                    // The existing workers keep serving the queue.
-                    Err(e) => eprintln!("morloc pool: failed to spawn worker thread: {}", e),
+                    start_failures += 1;
+                    if start_failures >= START_ATTEMPTS {
+                        let msg = std::ffi::CString::new(format!(
+                            "morloc pool: could not start a worker thread for this call: {}", e
+                        ))
+                        .unwrap_or_default();
+                        while let Some(fd) = queue.take_uncovered() {
+                            try_send_fail(fd, msg.as_ptr());
+                            crate::ipc_ffi::close_socket(fd);
+                        }
+                        start_failures = 0;
+                    }
+                    break;
                 }
             }
         }
@@ -412,7 +536,10 @@ unsafe fn pool_main_threads(config: &PoolConfig, socket_path: *const c_char, tmp
     }
 
     SHUTTING_DOWN.store(true, Ordering::Relaxed);
-    queue.cond.notify_all();
+    {
+        let _st = queue.state.lock().unwrap();
+        queue.cond.notify_all();
+    }
 
     for h in handles { let _ = h.join(); }
 
@@ -559,5 +686,76 @@ pub unsafe extern "C" fn pool_main(
     match cfg.concurrency {
         PoolConcurrency::Threads => pool_main_threads(cfg, socket_path, tmpdir, shm_basename),
         PoolConcurrency::Single => pool_main_single(cfg, socket_path, tmpdir, shm_basename),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Every queued job has a free worker counted to take it.
+    fn covered(q: &JobQueue) -> bool {
+        let st = q.state.lock().unwrap();
+        st.jobs.len() <= st.free()
+    }
+
+    fn take(q: &JobQueue, arriving: Arriving) -> i32 {
+        match q.pop(arriving, std::time::Instant::now(), None, 1) {
+            PopResult::Job(fd) => fd,
+            _ => panic!("expected a job"),
+        }
+    }
+
+    // A worker fails to start for a new job while another worker, finishing,
+    // takes that job: the older job left behind must still be covered or
+    // be handed back to fail.
+    #[test]
+    fn failed_start_never_strands_an_older_job() {
+        let q = JobQueue::new(1);
+        q.push(10);
+        assert!(!q.reserve_start());
+        assert_eq!(take(&q, Arriving::Starting), 10);
+        q.finishing();
+        q.push(11);
+        assert!(!q.reserve_start());
+        q.push(12);
+        assert!(q.reserve_start());
+        assert_eq!(take(&q, Arriving::Finishing), 12);
+        q.start_failed();
+        // Job 11 now has no worker: the next pass starts one, or fails it.
+        assert!(q.reserve_start());
+        q.start_failed();
+        assert_eq!(q.take_uncovered(), Some(11));
+        assert!(covered(&q));
+        assert_eq!(q.take_uncovered(), None);
+    }
+
+    // Calls arriving one at a time, each answered before the next, never
+    // need a second worker.
+    #[test]
+    fn sequential_calls_keep_one_worker() {
+        let q = JobQueue::new(1);
+        let mut arriving = Arriving::Starting;
+        for fd in 0..100 {
+            q.push(fd);
+            assert!(!q.reserve_start());
+            assert_eq!(take(&q, arriving), fd);
+            q.finishing();
+            arriving = Arriving::Finishing;
+        }
+        assert_eq!(q.state.lock().unwrap().total, 1);
+    }
+
+    // A worker waiting on another pool leaves a callback with nobody to take
+    // it, so the callback starts a worker.
+    #[test]
+    fn callback_to_a_waiting_pool_starts_a_worker() {
+        let q = JobQueue::new(1);
+        q.push(1);
+        assert_eq!(take(&q, Arriving::Starting), 1);
+        q.push(2);
+        assert!(q.reserve_start());
+        assert!(!q.reserve_start());
+        assert!(covered(&q));
     }
 }
