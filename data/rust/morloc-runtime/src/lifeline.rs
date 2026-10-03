@@ -46,13 +46,10 @@ impl Lifeline {
 
     fn create() -> std::io::Result<Lifeline> {
         let mut fds = [0 as libc::c_int; 2];
-        // SAFETY: pipe and fcntl on descriptors this call owns.
+        // SAFETY: pipe into a local array.
         unsafe {
-            if libc::pipe(fds.as_mut_ptr()) != 0 {
+            if morloc_runtime_types::fd::pipe(fds.as_mut_ptr()) != 0 {
                 return Err(std::io::Error::last_os_error());
-            }
-            for fd in fds {
-                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
             }
         }
         let (dev, ino) = fifo_identity(fds[0])
@@ -313,7 +310,7 @@ mod tests {
 
     fn pipe() -> [libc::c_int; 2] {
         let mut p = [0 as libc::c_int; 2];
-        assert_eq!(unsafe { libc::pipe(p.as_mut_ptr()) }, 0);
+        assert_eq!(unsafe { morloc_runtime_types::fd::pipe(p.as_mut_ptr()) }, 0);
         p
     }
 
@@ -360,7 +357,7 @@ mod tests {
                 g.join(":")
             };
             let not_a_fifo = unsafe {
-                libc::open(b"/dev/null\0".as_ptr() as *const libc::c_char, libc::O_RDONLY)
+                libc::open(b"/dev/null\0".as_ptr() as *const libc::c_char, libc::O_RDONLY | libc::O_CLOEXEC)
             };
             let refused = [
                 String::new(),

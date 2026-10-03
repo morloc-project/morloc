@@ -213,7 +213,7 @@ mod tests {
         unsafe {
             let sh = shared();
             let mut ready = [0 as libc::c_int; 2];
-            assert_eq!(libc::pipe(ready.as_mut_ptr()), 0);
+            assert_eq!(crate::fd::pipe(ready.as_mut_ptr()), 0);
             let holder = libc::fork();
             assert!(holder >= 0);
             if holder == 0 {

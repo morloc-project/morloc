@@ -282,7 +282,7 @@ pub unsafe extern "C" fn close_daemon(daemon_ptr: *mut *mut LanguageDaemon) {
 
 unsafe fn new_socket(errmsg: *mut *mut c_char) -> i32 {
     clear_errmsg(errmsg);
-    let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+    let fd = morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
     if fd < 0 {
         set_errmsg(errmsg, &MorlocError::Ipc("Error creating socket".into()));
         return -1;
@@ -1010,7 +1010,7 @@ pub unsafe extern "C" fn wait_for_client_with_timeout(
 
     // Check for new connection
     if pfds[0].revents & libc::POLLIN != 0 {
-        let selected_fd = libc::accept((*daemon).server_fd, ptr::null_mut(), ptr::null_mut());
+        let selected_fd = morloc_runtime_types::fd::accept((*daemon).server_fd, ptr::null_mut(), ptr::null_mut());
         if selected_fd >= 0 {
             if trace_close_enabled() {
                 eprintln!("[MLC_IPC] pid={} accept fd={}", libc::getpid(), selected_fd);
@@ -1094,7 +1094,7 @@ mod tests {
         unsafe {
             let mut fds = [0i32; 2];
             assert_eq!(
-                libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()),
+                morloc_runtime_types::fd::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()),
                 0
             );
             let (send_fd, recv_fd) = (fds[0], fds[1]);
@@ -1164,7 +1164,7 @@ mod tests {
             // -- ping: answered in-loop, pong echoed back --
             let mut fds = [0i32; 2];
             assert_eq!(
-                libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()),
+                morloc_runtime_types::fd::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()),
                 0
             );
             let (peer, server) = (fds[0], fds[1]);
@@ -1190,7 +1190,7 @@ mod tests {
             // -- non-ping: not consumed, left for the worker --
             let mut fds2 = [0i32; 2];
             assert_eq!(
-                libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds2.as_mut_ptr()),
+                morloc_runtime_types::fd::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds2.as_mut_ptr()),
                 0
             );
             let (peer2, server2) = (fds2[0], fds2[1]);
@@ -1221,7 +1221,7 @@ mod tests {
         unsafe {
             let mut fds = [0i32; 2];
             assert_eq!(
-                libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()),
+                morloc_runtime_types::fd::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()),
                 0
             );
             let (peer, server) = (fds[0], fds[1]);
@@ -1302,7 +1302,7 @@ mod reply_tests {
             let abs = crate::shm::shmalloc(64).expect("allocate");
             let (packet, cs) = rptr_packet(abs);
             let mut fds = [0i32; 2];
-            assert_eq!(libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()), 0);
+            assert_eq!(morloc_runtime_types::fd::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()), 0);
             HELD.with(|h| h.set(abs));
             PEER.with(|p| p.set(fds[1]));
 
@@ -1332,7 +1332,7 @@ mod reply_tests {
             let abs = crate::shm::shmalloc(64).expect("allocate");
             let (packet, cs) = rptr_packet(abs);
             let mut fds = [0i32; 2];
-            assert_eq!(libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()), 0);
+            assert_eq!(morloc_runtime_types::fd::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()), 0);
             libc::close(fds[1]);
             crate::utility::set_nosigpipe(fds[0]);
             HELD.with(|h| h.set(abs));

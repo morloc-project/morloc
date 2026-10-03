@@ -882,7 +882,7 @@ pub(crate) fn open_segment(name: &str) -> Result<Result<(Fd, usize), ShopenMiss>
     }
     let path = std::ffi::CString::new(fallback_file(&fallback, name))
         .map_err(|_| MorlocError::Shm(format!("segment path for '{}' contains NUL", name)))?;
-    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR) };
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
     if fd == -1 {
         return Ok(Err(missing(fallback)));
     }
@@ -1760,7 +1760,7 @@ fn create_file_segment(name: &str, full_size: usize, why: &str) -> Result<Option
     let path_cstr = std::ffi::CString::new(file_path.as_str())
         .map_err(|_| MorlocError::Shm(format!("volume path '{}' contains NUL", file_path)))?;
     let fd = unsafe {
-        libc::open(path_cstr.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_EXCL, 0o666)
+        libc::open(path_cstr.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC, 0o666)
     };
     if fd == -1 {
         let e = std::io::Error::last_os_error();

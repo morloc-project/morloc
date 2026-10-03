@@ -2221,6 +2221,7 @@ SEXP morloc_wait_for_client(SEXP daemon_r){ MAYFAIL
     if (server_ready) {
         int fd = accept(daemon->server_fd, NULL, NULL);
         if (fd >= 0) {
+            fcntl(fd, F_SETFD, FD_CLOEXEC);
             fcntl(fd, F_SETFL, O_NONBLOCK);
             client_list_t* new_client = (client_list_t*)calloc(1, sizeof(client_list_t));
             if (new_client == NULL) {
@@ -4082,6 +4083,8 @@ SEXP morloc_pipe(void) {
     if (pipe(fds) != 0) {
         error("pipe failed: %s", strerror(errno));
     }
+    fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+    fcntl(fds[1], F_SETFD, FD_CLOEXEC);
     SEXP result = PROTECT(allocVector(INTSXP, 2));
     INTEGER(result)[0] = fds[0];  /* read end */
     INTEGER(result)[1] = fds[1];  /* write end */
@@ -4416,6 +4419,7 @@ SEXP morloc_worker_loop_c(SEXP listen_fd_r, SEXP life_fd_r, SEXP dispatch_r, SEX
         // Every idle worker wakes; one wins and the rest find nothing.
         int client_fd = accept(listen_fd, NULL, NULL);
         if (client_fd < 0) continue;
+        fcntl(client_fd, F_SETFD, FD_CLOEXEC);
         fcntl(client_fd, F_SETFL, O_NONBLOCK);
         mlc_trace("accept client=%d\n", client_fd);
         run_job_c(client_fd, dispatch_r, remote_dispatch_r);

@@ -570,7 +570,7 @@ fn drain_stdin_to_temp_with_prefix(
     let template = format!("{}/morloc-nexus-view-XXXXXX", tmpdir);
     let mut buf: Vec<u8> = template.into_bytes();
     buf.push(0);
-    let fd = unsafe { libc::mkstemp(buf.as_mut_ptr() as *mut c_char) };
+    let fd = unsafe { morloc_runtime_types::fd::mkstemp(buf.as_mut_ptr() as *mut c_char) };
     if fd < 0 {
         return Err(format!(
             "mkstemp failed: {}",

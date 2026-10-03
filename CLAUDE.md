@@ -54,8 +54,34 @@ If the required morloc libraries may have changed, you may run:
 
 $ morloc install --force <remote-model-name>
 
+## Thread and memory model
+
+`model/` holds the spec of threads, processes, locks and shared-memory
+ownership. It describes the system as it is; where code breaks it, the
+break is listed in its deviations section. Read the relevant section before
+changing that code, and change the spec in the same commit as any protocol
+change.
+
+In these files the only comments allowed are spec references:
+
+- morloc-runtime/src: stream.rs, write_behind.rs, handle_scan.rs, pins.rs,
+  cache.rs, shm.rs, shm_companion.rs, eval_arena.rs, cell.rs, crash.rs,
+  daemon_ffi.rs, pool_ffi.rs, ipc_ffi.rs, router_ffi.rs, arrow_shm.rs,
+  lifeline.rs, fork_local.rs
+- morloc-runtime-types/src: recoverable_lock.rs, shm_lock.rs,
+  owner_word.rs, stream_handle.rs, dispatch_guard.rs, fd.rs
+- morloc-nexus/src: process.rs
+
+The form is `// <ID>: <how this line applies it>`, with `// SAFETY: <ID>: ...`
+on unsafe blocks. The ID must name a spec item; the clause after it is
+optional and says only why this line is written as it is. Format, parsing
+and walk code in these files is exempt until it is split out. Each file
+moves to this form only once its spec sections exist; until then, do not add
+new comments to it that assert behaviour.
+
 ## Haskell Coding Style
-- comments should explain complex code and a rationale
+- comments explain complex code; they never assert threading or ownership
+  behaviour (see Thread and memory model)
 - avoid non-total functions when possible
 - an unused pattern binding becomes bare `_`, never `_oldname`; if it is truly
   unused, drop the name rather than leaving it visible

@@ -393,7 +393,7 @@ pub unsafe extern "C" fn router_start_program(
         if !c_stderr_log.as_bytes().is_empty() {
             let log_fd = libc::open(
                 c_stderr_log.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
+                libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND | libc::O_CLOEXEC,
                 0o644,
             );
             if log_fd >= 0 {
@@ -438,7 +438,7 @@ pub unsafe extern "C" fn router_start_program(
             }
 
             // Try connecting to the daemon socket
-            let test_sock = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+            let test_sock = morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
             if test_sock >= 0 {
                 // The path was checked to fit when the program was registered.
                 let addr = crate::utility::unix_socket_addr(
@@ -684,7 +684,7 @@ unsafe fn connect_to_daemon(
     prog: *mut RouterProgram,
     errmsg: *mut *mut c_char,
 ) -> i32 {
-    let sock = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+    let sock = morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
     if sock < 0 {
         set_errmsg(
             errmsg,

@@ -290,7 +290,7 @@ fn plan_write(target: &FileTarget) -> Result<Write, String> {
     let mut buf = CString::new(template.to_string_lossy().into_owned())
         .map_err(|e| e.to_string())?
         .into_bytes_with_nul();
-    let fd = unsafe { libc::mkstemp(buf.as_mut_ptr() as *mut libc::c_char) };
+    let fd = unsafe { morloc_runtime_types::fd::mkstemp(buf.as_mut_ptr() as *mut libc::c_char) };
     if fd < 0 {
         return Err(format!("cannot write in {}: {}", dir.display(), std::io::Error::last_os_error()));
     }

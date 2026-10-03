@@ -847,7 +847,7 @@ pub struct ProcessLocalSlot {
     /// Per-handle decompressed-sub-packet LRU. Lives on the heap so
     /// dropping the entry from the HashMap shfree's the SHM blocks
     /// referenced by the cache.
-    pub cache: Box<StreamCache>,
+    pub(crate) cache: crate::fork_local::ForkLocal<Box<StreamCache>>,
 
     /// Parsed value schema cached from the SHM slot's `schema_str`.
     /// Each pool parses on first attach; the cost is a microsecond-
@@ -889,11 +889,8 @@ pub struct ProcessLocalSlot {
     pub(crate) fork_epoch: u64,
 }
 
-/// Bumped in every forked child.
-static FORK_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 fn fork_epoch() -> u64 {
-    FORK_EPOCH.load(std::sync::atomic::Ordering::Relaxed)
+    crate::fork_local::generation()
 }
 
 impl Drop for ProcessLocalSlot {
@@ -901,8 +898,10 @@ impl Drop for ProcessLocalSlot {
         // Drop the decompression cache first; this shfree's any
         // SHM blocks the cache references. Then unmap the file
         // region. Then close the fd (which releases flock if held).
-        for entry in self.cache.entries.drain(..) {
-            let _ = crate::shm::shfree(entry.shm_packet);
+        if !self.cache.is_inherited() {
+            for entry in self.cache.entries.drain(..) {
+                let _ = crate::shm::shfree(entry.shm_packet);
+            }
         }
         if !self.mmap_ptr.is_null() && self.mmap_size > 0 {
             unsafe {
@@ -1203,6 +1202,10 @@ pub fn with_process_local_slot<R>(
         )));
     }
 
+    if local.cache.is_inherited() {
+        local.cache = crate::fork_local::ForkLocal::new(Box::new(StreamCache::new(read_cache_cap_env())));
+    }
+
     // Run f with the validated local slot. A panic must not lose the slot:
     // it may hold the file lock that only this process can release.
     let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1281,6 +1284,7 @@ pub(crate) fn register_fork_handlers() {
     ONCE.call_once(|| unsafe {
         // The allocator's handlers first: this prepare step allocates.
         crate::shm::register_fork_handlers();
+        crate::fork_local::register();
         libc::pthread_atfork(Some(prepare_fork), Some(after_fork_in_parent), Some(after_fork_in_child));
     });
 }
@@ -1306,7 +1310,6 @@ extern "C" fn after_fork_in_parent() {
 /// those streams become stale, so a later use attaches its own descriptor,
 /// as any other writing process does.
 extern "C" fn after_fork_in_child() {
-    FORK_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     FORK_HELD.with(|h| {
         let Some(mut held) = h.borrow_mut().take() else { return };
         for fd in held.locked_fds.drain(..) {
@@ -1514,7 +1517,7 @@ fn attach_process_local_slot(
     let (value_schema, elem_schema) = derive_stream_schemas(&parsed_schema);
 
     let cap_bytes = read_cache_cap_env();
-    let cache = Box::new(StreamCache::new(cap_bytes));
+    let cache = crate::fork_local::ForkLocal::new(Box::new(StreamCache::new(cap_bytes)));
     Ok(ProcessLocalSlot {
         cached_generation,
         mmap_ptr,
@@ -2486,7 +2489,7 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
         pages_dropped: 0,
         map_file: None,
         fd: -1,
-        cache: Box::new(StreamCache::new(cap_bytes)),
+        cache: crate::fork_local::ForkLocal::new(Box::new(StreamCache::new(cap_bytes))),
         value_schema: parsed.value_schema.clone(),
         elem_schema: parsed.elem_schema.clone(),
         subpacket_entries_local: parsed.subpacket_entries.clone(),
@@ -2597,7 +2600,7 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
         pages_dropped: 0,
         map_file: Some(map_file),
         fd: -1,
-        cache: Box::new(StreamCache::new(cap_bytes)),
+        cache: crate::fork_local::ForkLocal::new(Box::new(StreamCache::new(cap_bytes))),
         value_schema: parsed.value_schema.clone(),
         elem_schema: parsed.elem_schema.clone(),
         subpacket_entries_local: parsed.subpacket_entries.clone(),
@@ -2890,7 +2893,7 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
         pages_dropped: 0,
         map_file: None,
         fd: -1,                    // stdio writes go through RPC, not fd
-        cache: Box::new(StreamCache::new(0)),
+        cache: crate::fork_local::ForkLocal::new(Box::new(StreamCache::new(0))),
         value_schema: value_schema_cached,
         elem_schema: elem_schema_cached,
         subpacket_entries_local: Vec::new(),
@@ -3350,7 +3353,7 @@ fn init_ostream_on_locked_fd(
         pages_dropped: 0,
         map_file: None,
         fd,                       // opener holds flock for slot lifetime
-        cache: Box::new(StreamCache::new(0)),
+        cache: crate::fork_local::ForkLocal::new(Box::new(StreamCache::new(0))),
         value_schema: value_schema_cached,
         elem_schema: elem_schema_cached,
         subpacket_entries_local: Vec::new(),
@@ -3468,13 +3471,7 @@ fn close_open_stream(
         // RPC, so `program > out.packet` produces a complete
         // stream-packet file.
         with_process_local_slot(handle, |local, slot| {
-            let _guard = lock_for_write(slot)?;
-            let gen_now = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
-            if gen_now != gen_claim {
-                return Err(MorlocError::Other(
-                    "shared_close_handle: slot generation changed under us".into(),
-                ));
-            }
+            let _guard = lock_for_write(slot, gen_claim, "shared_close_handle: slot generation changed under us")?;
             flush_write_buffer(slot, local)?;
             let diag = slot.diag;
             let shared_entries = read_shared_subpacket_entries(slot)?;
@@ -4177,10 +4174,17 @@ fn grow_index_capacity(
 /// this call writes: while it holds some, mark the stream synchronous and
 /// wait, unlocked, for that process to commit them. A stream with a batch
 /// that failed to be written is refused.
-fn lock_for_write(slot: &RegistrySlot) -> Result<SlotGuard<'_>, MorlocError> {
+fn lock_for_write<'a>(
+    slot: &'a RegistrySlot,
+    gen_claim: u64,
+    stale: &str,
+) -> Result<SlotGuard<'a>, MorlocError> {
     let me = std::process::id();
     loop {
         let guard = SlotGuard::lock(slot)?;
+        if !slot_generation_is(slot, gen_claim) {
+            return Err(MorlocError::Other(stale.into()));
+        }
         if slot.write_failed != 0 {
             return Err(MorlocError::Other(
                 "an earlier write to this stream failed; the stream is incomplete".into(),
@@ -4259,17 +4263,31 @@ fn with_idle_local_slot<R>(
 /// of and no thread is using. A failure on a stream `mine` lists is
 /// returned; any other is reported, and the stream is marked failed so
 /// its next use reports it too.
+#[cfg(test)]
+static DRAIN_GAP_HOOK: Mutex<Option<fn(i64)>> = Mutex::new(None);
+
 fn drain_idle_streams(mine: &[i64]) -> Result<(), MorlocError> {
     let mut first_err = None;
     for handle in crate::write_behind::sealed_handles() {
         let (gen_claim, _) = unpack_handle(handle);
         let r = with_idle_local_slot(handle, |local, slot| {
-            let _guard = SlotGuard::lock(slot)?;
-            if !slot_generation_is(slot, gen_claim) {
-                return Ok(());
-            }
-            commit_sealed(slot, local, 0)
+            let committed = (|| {
+                let _guard = SlotGuard::lock(slot)?;
+                if !slot_generation_is(slot, gen_claim) {
+                    return Ok(());
+                }
+                commit_sealed(slot, local, 0)
+            })();
+            crate::write_behind::forget_sealed(handle);
+            committed
         });
+        #[cfg(test)]
+        {
+            let hook = *DRAIN_GAP_HOOK.lock().unwrap();
+            if let Some(hook) = hook {
+                hook(handle);
+            }
+        }
         match r {
             IdleSlot::Busy => {}
             IdleSlot::Closed => {
@@ -4279,7 +4297,6 @@ fn drain_idle_streams(mine: &[i64]) -> Result<(), MorlocError> {
                 invalidate_process_local_slot(handle);
             }
             IdleSlot::Ran(res) => {
-                crate::write_behind::forget_sealed(handle);
                 if let Err(e) = res {
                     if mine.contains(&handle) {
                         first_err.get_or_insert(e);
@@ -4772,12 +4789,7 @@ pub fn shared_write_subpacket(
             crate::shm::rel2abs(arr.data)?
         };
 
-        let _guard = lock_for_write(slot)?;
-        // A channel can be released by its readers at any moment; a slot
-        // reused since the handle was checked must not be written.
-        if !slot_generation_is(slot, gen_claim) {
-            return Err(MorlocError::Other("the reader of this stream has stopped".into()));
-        }
+        let _guard = lock_for_write(slot, gen_claim, "the reader of this stream has stopped")?;
         // Another process is waiting to write: hand it the stream.
         if slot.wb_sync_only != 0 {
             commit_sealed(slot, local, 0)?;
@@ -4885,10 +4897,7 @@ pub fn shared_flush_buffer(handle: i64) -> Result<(), MorlocError> {
                 handle_kind_name(slot.kind),
             )));
         }
-        let _guard = lock_for_write(slot)?;
-        if !slot_generation_is(slot, gen_claim) {
-            return Err(MorlocError::Other("the reader of this stream has stopped".into()));
-        }
+        let _guard = lock_for_write(slot, gen_claim, "the reader of this stream has stopped")?;
         flush_write_buffer(slot, local)
     })
 }
@@ -6196,7 +6205,7 @@ pub fn shared_append_to_path(
         pages_dropped: 0,
         map_file: None,
         fd,
-        cache: Box::new(StreamCache::new(0)),
+        cache: crate::fork_local::ForkLocal::new(Box::new(StreamCache::new(0))),
         value_schema: value_schema_clone,
         elem_schema: elem_schema_clone,
         subpacket_entries_local: subpacket_entries_clone,
@@ -6246,7 +6255,7 @@ static SWEEPER_TX: Mutex<Option<std::sync::mpsc::Sender<SweepRequest>>> =
     Mutex::new(None);
 
 /// Sweeper thread handle, retained so `sweeper_shutdown` can join it.
-static SWEEPER_HANDLE: Mutex<Option<std::thread::JoinHandle<()>>> =
+static SWEEPER_HANDLE: Mutex<Option<crate::fork_local::ForkLocal<std::thread::JoinHandle<()>>>> =
     Mutex::new(None);
 
 /// Spawn the dedicated sweeper thread and install its `Sender` in
@@ -6264,7 +6273,7 @@ pub fn sweeper_init() {
         .name("morloc-stream-sweeper".into())
         .spawn(move || sweeper_main(rx))
         .expect("morloc-stream-sweeper: thread spawn failed");
-    *SWEEPER_HANDLE.lock().unwrap() = Some(h);
+    *SWEEPER_HANDLE.lock().unwrap() = Some(crate::fork_local::ForkLocal::new(h));
 }
 
 /// Stop the sweeper thread. Called before `registry_teardown` unmaps
@@ -6277,7 +6286,7 @@ pub fn sweeper_init() {
 pub fn sweeper_shutdown() {
     // Drop the sender to unblock the sweeper's next recv().
     { *SWEEPER_TX.lock().unwrap() = None; }
-    if let Some(h) = SWEEPER_HANDLE.lock().unwrap().take() {
+    if let Some(h) = SWEEPER_HANDLE.lock().unwrap().take().and_then(|h| h.into_inner()) {
         let _ = h.join();
     }
 }
@@ -8077,7 +8086,8 @@ fn cache_get_or_materialize(
 
     // Cache compressed (Shm) sub-packets; uncompressed (File) ones
     // don't need our cache -- the kernel pagecache handles them.
-    if let SubpacketSrc::Shm { arr_base } = src {
+    if let (SubpacketSrc::Shm { arr_base }, true) = (&src, local.cache.capacity_bytes > 0) {
+        let arr_base = *arr_base;
         let size_bytes = unsafe { shm::shm_block_size(arr_base).unwrap_or(0) } as u64;
         cache_make_room_for(&mut local.cache, size_bytes);
         // Install: shincref so the cache owns one ref and the caller
@@ -8100,11 +8110,6 @@ fn cache_get_or_materialize(
 /// the hand sweeps and clears clock bits as it goes.
 fn cache_make_room_for(cache: &mut StreamCache, needed: u64) {
     if cache.capacity_bytes == 0 {
-        // Cache disabled (MORLOC_IFILE_CACHE_BYTES=0): refuse to keep
-        // anything. Caller still gets the materialised block but the
-        // cache vector stays empty.
-        // (Eviction loop is a no-op since we never insert when cap=0,
-        //  but bail early to avoid spinning over `entries`.)
         return;
     }
     // Bound the eviction loop to two full passes so the clock-hand
@@ -10231,7 +10236,7 @@ pub fn shared_open_ifile_recovered(
         pages_dropped: 0,
         map_file: None,
         fd: -1,
-        cache: Box::new(StreamCache::new(cap_bytes)),
+        cache: crate::fork_local::ForkLocal::new(Box::new(StreamCache::new(cap_bytes))),
         value_schema: parsed.value_schema.clone(),
         elem_schema: parsed.elem_schema.clone(),
         subpacket_entries_local: subpacket_entries,
@@ -10564,7 +10569,7 @@ mod tests {
     /// that releases it.
     fn fork_holder() -> (libc::pid_t, libc::c_int) {
         let mut fds = [0 as libc::c_int; 2];
-        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        assert_eq!(unsafe { morloc_runtime_types::fd::pipe(fds.as_mut_ptr()) }, 0);
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0);
         if pid == 0 {
@@ -10614,6 +10619,74 @@ mod tests {
             });
             shared_close_handle(h2).unwrap();
         }
+    }
+
+    fn run_in_forked_child(work: fn()) -> libc::c_int {
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            unsafe { libc::alarm(10); }
+            let ok = std::panic::catch_unwind(work).is_ok();
+            unsafe { libc::_exit(if ok { 0 } else { 2 }); }
+        }
+        let mut status = 0;
+        unsafe { libc::waitpid(pid, &mut status, 0); }
+        status
+    }
+
+    #[test]
+    fn a_forked_child_leaves_its_parents_cached_reads_alone() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("fork_cache");
+        let path = dir.join("z.idx");
+        let p = path.to_str().unwrap().to_string();
+        std::env::set_var("MORLOC_WRITE_BEHIND_DEPTH", "0");
+        let w = shared_open_ostream_with_schema(&p, "ai8").unwrap();
+        let list = parse_schema("ai8").unwrap();
+        let level = crate::compression::CompressionLevel::from_u8(3).unwrap();
+        for json in ["[1, 2, 3]", "[4, 5]"] {
+            let v = crate::json::read_json_with_schema(json, &list).unwrap();
+            shared_write_subpacket(w, level, v).unwrap();
+            shm::shfree(v).unwrap();
+            shared_flush_buffer(w).unwrap();
+        }
+        shared_close_handle(w).unwrap();
+        std::env::remove_var("MORLOC_WRITE_BEHIND_DEPTH");
+
+        static HANDLE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+        let f = open_ifile(&p).unwrap();
+        HANDLE.store(f, std::sync::atomic::Ordering::SeqCst);
+        let read = |i: i64| -> i64 {
+            let ptr = ifile_bracket_index(f, i).unwrap();
+            let v = unsafe { *(ptr as *const i64) };
+            shm::shfree(ptr).unwrap();
+            v
+        };
+        assert_eq!(read(0), 1);
+
+        let status = run_in_forked_child(|| {
+            let h = HANDLE.load(std::sync::atomic::Ordering::SeqCst);
+            let ptr = ifile_bracket_index(h, 3).unwrap();
+            shm::shfree(ptr).unwrap();
+        });
+        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+                "child failed: status {status}");
+
+        let ptr = ifile_bracket_index(f, 1)
+            .unwrap_or_else(|e| panic!("parent's cached read after the child ran: {e:?}"));
+        let v = unsafe { *(ptr as *const i64) };
+        shm::shfree(ptr).unwrap();
+        assert_eq!(v, 2);
+        shared_close_handle(f).unwrap();
+    }
+
+    #[test]
+    fn a_forked_child_can_shut_down_without_its_parents_sweeper() {
+        let _shm = crate::own_test_registry();
+        sweeper_init();
+        let status = run_in_forked_child(sweeper_shutdown);
+        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+                "child shutting down the sweeper did not exit cleanly: status {status}");
     }
 
     #[test]
@@ -10699,8 +10772,8 @@ mod tests {
         let mut report = [0 as libc::c_int; 2];
         let mut release = [0 as libc::c_int; 2];
         unsafe {
-            assert_eq!(libc::pipe(report.as_mut_ptr()), 0);
-            assert_eq!(libc::pipe(release.as_mut_ptr()), 0);
+            assert_eq!(morloc_runtime_types::fd::pipe(report.as_mut_ptr()), 0);
+            assert_eq!(morloc_runtime_types::fd::pipe(release.as_mut_ptr()), 0);
         }
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0);
@@ -10877,7 +10950,7 @@ mod tests {
         // and then dies. The stream's lock must not outlive the opener in
         // the child, which never asked for it.
         let mut report = [0 as libc::c_int; 2];
-        unsafe { assert_eq!(libc::pipe(report.as_mut_ptr()), 0) };
+        unsafe { assert_eq!(morloc_runtime_types::fd::pipe(report.as_mut_ptr()), 0) };
         let opener = unsafe { libc::fork() };
         assert!(opener >= 0);
         if opener == 0 {
@@ -12187,6 +12260,38 @@ mod tests {
         std::env::remove_var("MORLOC_IFILE_CACHE_BYTES");
     }
 
+    #[test]
+    fn a_cache_of_capacity_zero_holds_nothing() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("cache_zero");
+        let path = dir.join("z.idx");
+        let p = path.to_str().unwrap().to_string();
+        std::env::set_var("MORLOC_WRITE_BEHIND_DEPTH", "0");
+        let w = shared_open_ostream_with_schema(&p, "ai8").unwrap();
+        let list = parse_schema("ai8").unwrap();
+        let level = crate::compression::CompressionLevel::from_u8(3).unwrap();
+        for json in ["[1, 2]", "[3, 4]", "[5, 6]"] {
+            let v = crate::json::read_json_with_schema(json, &list).unwrap();
+            shared_write_subpacket(w, level, v).unwrap();
+            shm::shfree(v).unwrap();
+            shared_flush_buffer(w).unwrap();
+        }
+        shared_close_handle(w).unwrap();
+        std::env::remove_var("MORLOC_WRITE_BEHIND_DEPTH");
+
+        std::env::set_var("MORLOC_IFILE_CACHE_BYTES", "0");
+        let f = open_ifile(&p).unwrap();
+        std::env::remove_var("MORLOC_IFILE_CACHE_BYTES");
+        for i in 0..6 {
+            let ptr = ifile_bracket_index(f, i).unwrap();
+            assert_eq!(unsafe { *(ptr as *const i64) }, i + 1);
+            shm::shfree(ptr).unwrap();
+        }
+        let held = with_process_local_slot(f, |local, _| Ok(local.cache.entries.len())).unwrap();
+        shared_close_handle(f).unwrap();
+        assert_eq!(held, 0, "a cache of capacity 0 kept {held} sub-packets");
+    }
+
     /// DATA_PACKET file: a single voidstar packet (no STREAM header,
     /// no footer). The IFile dispatch treats the whole file as one
     /// sub-packet and exercises bracket index + slice + length over
@@ -12642,7 +12747,7 @@ fn channel_local(generation: u64, value_schema: &Schema) -> ProcessLocalSlot {
         pages_dropped: 0,
         map_file: None,
         fd: -1,
-        cache: Box::new(StreamCache::new(0)),
+        cache: crate::fork_local::ForkLocal::new(Box::new(StreamCache::new(0))),
         value_schema: value_schema.clone(),
         elem_schema: value_schema.parameters[0].clone(),
         subpacket_entries_local: Vec::new(),
@@ -13169,6 +13274,94 @@ mod write_behind_tests {
         std::env::remove_var("MORLOC_WRITE_BUFFER_BYTES");
         std::env::remove_var("MORLOC_WRITE_BEHIND_DEPTH");
         assert_eq!(read_strs(&path), odd_batches(40, 37, 's').concat());
+    }
+
+    #[test]
+    fn a_stale_handle_never_touches_the_slot_it_used_to_name() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("stale_write");
+        let path = dir.join("stale.idx");
+        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+        let (gen_claim, idx) = unpack_handle(h);
+        let slot = slot_ref(idx).unwrap();
+        let mut fds = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { morloc_runtime_types::fd::pipe(fds.as_mut_ptr()) }, 0);
+        let owner = unsafe { libc::fork() };
+        assert!(owner >= 0);
+        if owner == 0 {
+            let mut b = 0u8;
+            unsafe {
+                libc::close(fds[1]);
+                libc::read(fds[0], &mut b as *mut u8 as *mut libc::c_void, 1);
+                libc::_exit(0);
+            }
+        }
+        let mp = slot as *const RegistrySlot as *mut RegistrySlot;
+        unsafe {
+            (*mp).wb_owner_pid = owner as u32;
+            (*mp).wb_owner_start = morloc_runtime_types::process::start_time(owner as u32);
+        }
+        let stale = (gen_claim + 1) & GENERATION_MASK;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let slot = slot_ref(idx).unwrap();
+            let r = lock_for_write(slot, stale, "stale").map(|_| ());
+            let _ = tx.send(r.is_err());
+        });
+        let refused = rx.recv_timeout(std::time::Duration::from_secs(5));
+        let sync_only = slot.wb_sync_only;
+        unsafe {
+            (*mp).wb_owner_pid = 0;
+            (*mp).wb_owner_start = 0;
+            libc::close(fds[1]);
+            libc::close(fds[0]);
+            libc::waitpid(owner, std::ptr::null_mut(), 0);
+        }
+        shared_close_handle(h).unwrap();
+        assert_eq!(refused, Ok(true), "a stale generation was not refused promptly");
+        assert_eq!(sync_only, 0, "a stale handle changed the slot's write mode");
+    }
+
+    #[test]
+    fn a_batch_sealed_while_a_drain_finishes_is_still_drained() {
+        let _shm = crate::own_test_registry();
+        let dir = test_dir("drain_gap");
+        let path = dir.join("gap.idx");
+        std::env::set_var("MORLOC_WRITE_BUFFER_BYTES", "4096");
+        std::env::set_var("MORLOC_WRITE_BEHIND_DEPTH", "5");
+        fn write_some(h: i64) {
+            let list = parse_schema("as").unwrap();
+            for b in odd_batches(12, 37, 's') {
+                let v = crate::json::read_json_with_schema(&serde_json::to_string(&b).unwrap(), &list).unwrap();
+                shared_write_subpacket(h, CompressionLevel::from_u8(3).unwrap(), v).unwrap();
+                shm::shfree(v).unwrap();
+            }
+        }
+        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "as").unwrap();
+        let (_gen, idx) = unpack_handle(h);
+        let slot = slot_ref(idx).unwrap();
+        write_some(h);
+        assert!(crate::write_behind::sealed_handles().contains(&h));
+
+        static TARGET: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+        TARGET.store(h, std::sync::atomic::Ordering::SeqCst);
+        *DRAIN_GAP_HOOK.lock().unwrap() = Some(|h| {
+            if h == TARGET.load(std::sync::atomic::Ordering::SeqCst) {
+                *DRAIN_GAP_HOOK.lock().unwrap() = None;
+                write_some(h);
+            }
+        });
+        let drained = drain_before_handoff();
+        *DRAIN_GAP_HOOK.lock().unwrap() = None;
+        drained.unwrap();
+        let outstanding = slot.wb_outstanding;
+        let listed = crate::write_behind::sealed_handles().contains(&h);
+
+        shared_close_handle(h).unwrap();
+        std::env::remove_var("MORLOC_WRITE_BUFFER_BYTES");
+        std::env::remove_var("MORLOC_WRITE_BEHIND_DEPTH");
+        assert!(outstanding > 0, "the hook sealed nothing; the test does not exercise the gap");
+        assert!(listed, "{outstanding} sealed batches are held by a stream no drain will visit");
     }
 
     // A dispatch leaves nothing compressing: its end writes every batch

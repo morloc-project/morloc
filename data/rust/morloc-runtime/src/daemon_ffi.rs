@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::cschema::CSchema;
@@ -251,11 +251,44 @@ pub unsafe extern "C" fn morloc_daemon_end_recovery() {
     end_recovery()
 }
 
-// SAFETY: These globals are set once during daemon_run initialization (single-threaded)
-// and only read afterwards. The daemon is single-threaded for request dispatch.
-static mut G_POOL_ALIVE_FN: Option<unsafe extern "C" fn(usize) -> bool> = None;
-static mut G_N_POOLS: usize = 0;
-static mut G_BINDING_STORE: *mut BindingStore = ptr::null_mut();
+type PoolAliveFn = unsafe extern "C" fn(usize) -> bool;
+static POOL_STATUS: Mutex<(Option<PoolAliveFn>, usize)> = Mutex::new((None, 0));
+static BINDING_STORE: Mutex<Option<BindingStore>> = Mutex::new(None);
+static BINDING_FINISHED: Condvar = Condvar::new();
+
+fn binding_store() -> std::sync::MutexGuard<'static, Option<BindingStore>> {
+    BINDING_STORE.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+enum BindClaim {
+    NoStore,
+    Bound,
+    Compile(String),
+}
+
+fn claim_binding(hv: u64, name: Option<&str>) -> BindClaim {
+    let mut guard = binding_store();
+    loop {
+        let Some(store) = guard.as_mut() else { return BindClaim::NoStore };
+        if store.name_if_bound(hv, name) {
+            return BindClaim::Bound;
+        }
+        if store.compiling.insert(hv) {
+            return BindClaim::Compile(store.base_dir.clone());
+        }
+        guard = BINDING_FINISHED.wait(guard).unwrap_or_else(|p| p.into_inner());
+    }
+}
+
+fn finish_binding(hv: u64, expr: &str, name: Option<&str>, artifact_dir: Option<String>) {
+    if let Some(store) = binding_store().as_mut() {
+        store.compiling.remove(&hv);
+        if let Some(dir) = artifact_dir {
+            store.insert(hv, expr, dir, name);
+        }
+    }
+    BINDING_FINISHED.notify_all();
+}
 
 // -- C-compatible types -------------------------------------------------------
 
@@ -361,6 +394,7 @@ pub struct BindingStore {
     /// Index from name -> hash for name-based lookup
     name_index: HashMap<String, u64>,
     base_dir: String,
+    compiling: std::collections::HashSet<u64>,
 }
 
 impl BindingStore {
@@ -370,6 +404,7 @@ impl BindingStore {
             entries: HashMap::new(),
             name_index: HashMap::new(),
             base_dir: base_dir.to_string(),
+            compiling: std::collections::HashSet::new(),
         }
     }
 
@@ -391,130 +426,27 @@ impl BindingStore {
         self.name_index.insert(name.to_string(), hash);
     }
 
-    fn bind(&mut self, expr: &str, name: Option<&str>, eval_timeout: i32) -> Option<u64> {
-        let hv = hash::xxh64_with_seed(expr.as_bytes(), DEFAULT_XXHASH_SEED);
-
-        if self.entries.contains_key(&hv) {
-            if let Some(n) = name {
-                self.add_name(hv, n);
-            }
-            return Some(hv);
+    fn name_if_bound(&mut self, hv: u64, name: Option<&str>) -> bool {
+        if !self.entries.contains_key(&hv) {
+            return false;
         }
-
-        let hash_hex = format!("{:016x}", hv);
-        let artifact_dir = format!("{}/{}", self.base_dir, hash_hex);
-
-        // Fork morloc eval --save
-        unsafe {
-            let mut stdout_pipe = [0i32; 2];
-            let mut stderr_pipe = [0i32; 2];
-            if libc::pipe(stdout_pipe.as_mut_ptr()) != 0
-                || libc::pipe(stderr_pipe.as_mut_ptr()) != 0
-            {
-                return None;
-            }
-
-            // Build argv in the PARENT (the policy read locks a mutex, which
-            // is unsafe in the post-fork child). These outlive the fork.
-            let cmd = CString::new("morloc").unwrap();
-            let arg_eval = CString::new("eval").unwrap();
-            let arg_save = CString::new("--save").unwrap();
-            let arg_hex = CString::new(hash_hex.as_str()).unwrap();
-            // `morloc eval` takes a script file by default; the binding store
-            // supplies an inline expression.
-            let arg_dash_e = CString::new("-e").unwrap();
-            // `expr` is client-supplied; an interior NUL cannot be exec'd.
-            // Fail this bind cleanly rather than panicking the worker thread.
-            let arg_expr = match CString::new(expr) {
-                Ok(c) => c,
-                Err(_) => {
-                    libc::close(stdout_pipe[0]);
-                    libc::close(stdout_pipe[1]);
-                    libc::close(stderr_pipe[0]);
-                    libc::close(stderr_pipe[1]);
-                    return None;
-                }
-            };
-            let policy = eval_policy_args();
-            let rts = eval_rts_args();
-            // argv: morloc +RTS <heap> -RTS eval --save <hex> -e <policy...> <expr> NULL.
-            let mut argv: Vec<*const c_char> =
-                Vec::with_capacity(7 + rts.len() + policy.len());
-            argv.push(cmd.as_ptr());
-            for p in &rts {
-                argv.push(p.as_ptr());
-            }
-            argv.push(arg_eval.as_ptr());
-            argv.push(arg_save.as_ptr());
-            argv.push(arg_hex.as_ptr());
-            argv.push(arg_dash_e.as_ptr());
-            for p in &policy {
-                argv.push(p.as_ptr());
-            }
-            argv.push(arg_expr.as_ptr());
-            argv.push(ptr::null());
-
-            let pid = libc::fork();
-            if pid < 0 {
-                libc::close(stdout_pipe[0]);
-                libc::close(stdout_pipe[1]);
-                libc::close(stderr_pipe[0]);
-                libc::close(stderr_pipe[1]);
-                return None;
-            }
-
-            if pid == 0 {
-                // Child
-                libc::close(stdout_pipe[0]);
-                libc::close(stderr_pipe[0]);
-                libc::dup2(stdout_pipe[1], libc::STDOUT_FILENO);
-                libc::dup2(stderr_pipe[1], libc::STDERR_FILENO);
-                libc::close(stdout_pipe[1]);
-                libc::close(stderr_pipe[1]);
-
-                // Memory is bounded by EVAL_HEAP_LIMIT in argv, not here.
-                if eval_timeout > 0 {
-                    let cpu_limit = libc::rlimit {
-                        rlim_cur: eval_timeout as libc::rlim_t,
-                        rlim_max: (eval_timeout + 5) as libc::rlim_t,
-                    };
-                    libc::setrlimit(libc::RLIMIT_CPU, &cpu_limit);
-                }
-
-                libc::execvp(cmd.as_ptr(), argv.as_ptr());
-                libc::_exit(127);
-            }
-
-            // Parent
-            libc::close(stdout_pipe[1]);
-            libc::close(stderr_pipe[1]);
-
-            let (_, stderr_buf) = drain_pair(stdout_pipe[0], stderr_pipe[0]);
-            libc::close(stdout_pipe[0]);
-            libc::close(stderr_pipe[0]);
-
-            let ok = wait_child(pid)
-                .is_some_and(|st| libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0);
-            if !ok {
-                let msg = String::from_utf8_lossy(&stderr_buf);
-                eprintln!("binding_store_bind: morloc eval --save failed: {}", msg);
-                return None;
-            }
+        if let Some(n) = name {
+            self.add_name(hv, n);
         }
+        true
+    }
 
-        let entry = BindingEntry {
+    fn insert(&mut self, hv: u64, expr: &str, artifact_dir: String, name: Option<&str>) {
+        self.entries.entry(hv).or_insert_with(|| BindingEntry {
             hash: hv,
             expr: expr.to_string(),
             artifact_dir,
             type_sig: None,
             names: Vec::new(),
-        };
-        self.entries.insert(hv, entry);
+        });
         if let Some(n) = name {
             self.add_name(hv, n);
         }
-
-        Some(hv)
     }
 
     fn list_json(&self) -> String {
@@ -553,6 +485,120 @@ impl BindingStore {
         }
         true
     }
+}
+
+unsafe fn two_pipes(a: &mut [i32; 2], b: &mut [i32; 2]) -> bool {
+    if morloc_runtime_types::fd::pipe(a.as_mut_ptr()) != 0 {
+        return false;
+    }
+    if morloc_runtime_types::fd::pipe(b.as_mut_ptr()) != 0 {
+        libc::close(a[0]);
+        libc::close(a[1]);
+        return false;
+    }
+    true
+}
+
+fn compile_binding(base_dir: &str, hv: u64, expr: &str, eval_timeout: i32) -> Option<String> {
+    let hash_hex = format!("{:016x}", hv);
+    let artifact_dir = format!("{}/{}", base_dir, hash_hex);
+    // Fork morloc eval --save
+    unsafe {
+        let mut stdout_pipe = [0i32; 2];
+        let mut stderr_pipe = [0i32; 2];
+        if !two_pipes(&mut stdout_pipe, &mut stderr_pipe) {
+            return None;
+        }
+
+        // Build argv in the PARENT (the policy read locks a mutex, which
+        // is unsafe in the post-fork child). These outlive the fork.
+        let cmd = CString::new("morloc").unwrap();
+        let arg_eval = CString::new("eval").unwrap();
+        let arg_save = CString::new("--save").unwrap();
+        let arg_hex = CString::new(hash_hex.as_str()).unwrap();
+        // `morloc eval` takes a script file by default; the binding store
+        // supplies an inline expression.
+        let arg_dash_e = CString::new("-e").unwrap();
+        // `expr` is client-supplied; an interior NUL cannot be exec'd.
+        // Fail this bind cleanly rather than panicking the worker thread.
+        let arg_expr = match CString::new(expr) {
+            Ok(c) => c,
+            Err(_) => {
+                libc::close(stdout_pipe[0]);
+                libc::close(stdout_pipe[1]);
+                libc::close(stderr_pipe[0]);
+                libc::close(stderr_pipe[1]);
+                return None;
+            }
+        };
+        let policy = eval_policy_args();
+        let rts = eval_rts_args();
+        // argv: morloc +RTS <heap> -RTS eval --save <hex> -e <policy...> <expr> NULL.
+        let mut argv: Vec<*const c_char> =
+            Vec::with_capacity(7 + rts.len() + policy.len());
+        argv.push(cmd.as_ptr());
+        for p in &rts {
+            argv.push(p.as_ptr());
+        }
+        argv.push(arg_eval.as_ptr());
+        argv.push(arg_save.as_ptr());
+        argv.push(arg_hex.as_ptr());
+        argv.push(arg_dash_e.as_ptr());
+        for p in &policy {
+            argv.push(p.as_ptr());
+        }
+        argv.push(arg_expr.as_ptr());
+        argv.push(ptr::null());
+
+        let since = morloc_reaped_sequence();
+        let pid = libc::fork();
+        if pid < 0 {
+            libc::close(stdout_pipe[0]);
+            libc::close(stdout_pipe[1]);
+            libc::close(stderr_pipe[0]);
+            libc::close(stderr_pipe[1]);
+            return None;
+        }
+
+        if pid == 0 {
+            // Child
+            libc::close(stdout_pipe[0]);
+            libc::close(stderr_pipe[0]);
+            libc::dup2(stdout_pipe[1], libc::STDOUT_FILENO);
+            libc::dup2(stderr_pipe[1], libc::STDERR_FILENO);
+            libc::close(stdout_pipe[1]);
+            libc::close(stderr_pipe[1]);
+
+            // Memory is bounded by EVAL_HEAP_LIMIT in argv, not here.
+            if eval_timeout > 0 {
+                let cpu_limit = libc::rlimit {
+                    rlim_cur: eval_timeout as libc::rlim_t,
+                    rlim_max: (eval_timeout + 5) as libc::rlim_t,
+                };
+                libc::setrlimit(libc::RLIMIT_CPU, &cpu_limit);
+            }
+
+            libc::execvp(cmd.as_ptr(), argv.as_ptr());
+            libc::_exit(127);
+        }
+
+        // Parent
+        libc::close(stdout_pipe[1]);
+        libc::close(stderr_pipe[1]);
+
+        let (_, stderr_buf) = drain_pair(stdout_pipe[0], stderr_pipe[0]);
+        libc::close(stdout_pipe[0]);
+        libc::close(stderr_pipe[0]);
+
+        let ok = wait_child(pid, since)
+            .is_some_and(|st| libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0);
+        if !ok {
+            let msg = String::from_utf8_lossy(&stderr_buf);
+            eprintln!("binding_store_bind: morloc eval --save failed: {}", msg);
+            return None;
+        }
+    }
+    Some(artifact_dir)
 }
 
 // -- C-exported binding store functions ---------------------------------------
@@ -1025,7 +1071,11 @@ static REAPED_STATUS: [AtomicI32; REAPED_SLOTS] = {
     const INIT: AtomicI32 = AtomicI32::new(0);
     [INIT; REAPED_SLOTS]
 };
-static REAPED_NEXT: AtomicI32 = AtomicI32::new(0);
+static REAPED_SEQ: [AtomicU64; REAPED_SLOTS] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; REAPED_SLOTS]
+};
+static REAPED_NEXT: AtomicU64 = AtomicU64::new(1);
 
 /// Record a child the caller has already reaped, so whoever forked it can
 /// still learn how it ended.
@@ -1039,17 +1089,36 @@ pub extern "C" fn morloc_note_child_exit(pid: i32, status: i32) {
     if pid <= 0 {
         return; // PLT warm-up call, or nothing to record
     }
-    let n = REAPED_SLOTS as i32;
-    let slot = (REAPED_NEXT.fetch_add(1, Ordering::AcqRel).rem_euclid(n)) as usize;
+    let seq = REAPED_NEXT.fetch_add(1, Ordering::SeqCst);
+    let slot = (seq % REAPED_SLOTS as u64) as usize;
     REAPED_STATUS[slot].store(status, Ordering::Relaxed);
-    REAPED_PID[slot].store(pid, Ordering::Release);
+    REAPED_SEQ[slot].store(seq, Ordering::Relaxed);
+    REAPED_PID[slot].store(pid, Ordering::SeqCst);
+}
+
+#[no_mangle]
+pub extern "C" fn morloc_reaped_sequence() -> u64 {
+    REAPED_NEXT.load(Ordering::SeqCst)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn morloc_take_noted_child_exit(pid: i32, since: u64, status: *mut i32) -> i32 {
+    match take_noted_child_exit(pid, since) {
+        Some(s) => {
+            if !status.is_null() {
+                *status = s;
+            }
+            1
+        }
+        None => 0,
+    }
 }
 
 /// Collect the exit status of `pid` if the SIGCHLD handler reaped it.
 /// Consumes the entry so a recycled pid cannot be answered twice.
-fn take_noted_child_exit(pid: i32) -> Option<i32> {
+fn take_noted_child_exit(pid: i32, since: u64) -> Option<i32> {
     for i in 0..REAPED_SLOTS {
-        if REAPED_PID[i].load(Ordering::Acquire) == pid {
+        if REAPED_PID[i].load(Ordering::SeqCst) == pid && REAPED_SEQ[i].load(Ordering::Relaxed) >= since {
             let status = REAPED_STATUS[i].load(Ordering::Relaxed);
             REAPED_PID[i].store(0, Ordering::Release);
             return Some(status);
@@ -1060,7 +1129,7 @@ fn take_noted_child_exit(pid: i32) -> Option<i32> {
 
 /// The exit status of child `pid`, whether this thread reaps it or the
 /// SIGCHLD handler already has; `None` if neither yields one.
-fn wait_child(pid: i32) -> Option<i32> {
+fn wait_child(pid: i32, since: u64) -> Option<i32> {
     let mut status: i32 = 0;
     loop {
         // SAFETY: waitpid writes only `status`.
@@ -1077,7 +1146,7 @@ fn wait_child(pid: i32) -> Option<i32> {
     // the handler has usually reaped it already; give it a moment to record
     // the status if the reap and the deposit straddle this point.
     for _ in 0..NOTED_EXIT_POLLS {
-        if let Some(s) = take_noted_child_exit(pid) {
+        if let Some(s) = take_noted_child_exit(pid, since) {
             return Some(s);
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
@@ -1093,7 +1162,7 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
 
     let mut stdout_pipe = [0i32; 2];
     let mut stderr_pipe = [0i32; 2];
-    if libc::pipe(stdout_pipe.as_mut_ptr()) != 0 || libc::pipe(stderr_pipe.as_mut_ptr()) != 0 {
+    if !two_pipes(&mut stdout_pipe, &mut stderr_pipe) {
         (*resp).success = false;
         (*resp).error_kind = DAEMON_ERROR_INTERNAL;
         let c = CString::new(format!("Failed to create pipes for {}", subcmd)).unwrap_or_default();
@@ -1132,6 +1201,7 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
     argv.push(expr);
     argv.push(ptr::null());
 
+    let since = morloc_reaped_sequence();
     let pid = libc::fork();
     if pid < 0 {
         (*resp).success = false;
@@ -1176,7 +1246,7 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
     libc::close(stdout_pipe[0]);
     libc::close(stderr_pipe[0]);
 
-    let status = match wait_child(pid) {
+    let status = match wait_child(pid, since) {
         Some(st) => st,
         None => {
             (*resp).success = false;
@@ -1485,9 +1555,10 @@ pub unsafe extern "C" fn daemon_dispatch(
     match (*request).method {
         DaemonMethod::Health => {
             (*resp).success = true;
-            if let Some(alive_fn) = G_POOL_ALIVE_FN {
-                let mut arr = Vec::with_capacity(G_N_POOLS);
-                for i in 0..G_N_POOLS {
+            let (alive, n_pools) = *POOL_STATUS.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(alive_fn) = alive {
+                let mut arr = Vec::with_capacity(n_pools);
+                for i in 0..n_pools {
                     arr.push(serde_json::Value::Bool(alive_fn(i)));
                 }
                 // Named, not bare: a list of anonymous booleans tells a
@@ -1514,9 +1585,8 @@ pub unsafe extern "C" fn daemon_dispatch(
             }
 
             // Check binding store for cached expression
-            if !G_BINDING_STORE.is_null() {
+            if let Some(store) = binding_store().as_ref() {
                 let expr_str = CStr::from_ptr((*request).expr).to_string_lossy();
-                let store = &*G_BINDING_STORE;
                 let hv = hash::xxh64_with_seed(expr_str.as_bytes(), DEFAULT_XXHASH_SEED);
                 let _cached = store
                     .lookup_hash(hv)
@@ -1554,23 +1624,32 @@ pub unsafe extern "C" fn daemon_dispatch(
                 (*resp).error = libc::strdup(c.as_ptr());
                 return resp;
             }
-            if G_BINDING_STORE.is_null() {
-                (*resp).success = false;
-                (*resp).error_kind = DAEMON_ERROR_INTERNAL;
-                let c = CString::new("Binding store not initialized").unwrap();
-                (*resp).error = libc::strdup(c.as_ptr());
-                return resp;
-            }
-            let store = &mut *G_BINDING_STORE;
             let expr_str = CStr::from_ptr((*request).expr).to_string_lossy().into_owned();
             let name = if (*request).name.is_null() {
                 None
             } else {
                 Some(CStr::from_ptr((*request).name).to_string_lossy().into_owned())
             };
-            let timeout = G_EVAL_TIMEOUT.load(Ordering::Relaxed);
-            match store.bind(&expr_str, name.as_deref(), timeout) {
-                Some(hv) => {
+            let hv = hash::xxh64_with_seed(expr_str.as_bytes(), DEFAULT_XXHASH_SEED);
+            let bound = match claim_binding(hv, name.as_deref()) {
+                BindClaim::NoStore => {
+                    (*resp).success = false;
+                    (*resp).error_kind = DAEMON_ERROR_INTERNAL;
+                    let c = CString::new("Binding store not initialized").unwrap();
+                    (*resp).error = libc::strdup(c.as_ptr());
+                    return resp;
+                }
+                BindClaim::Bound => true,
+                BindClaim::Compile(dir) => {
+                    let timeout = G_EVAL_TIMEOUT.load(Ordering::Relaxed);
+                    let artifact_dir = compile_binding(&dir, hv, &expr_str, timeout);
+                    let ok = artifact_dir.is_some();
+                    finish_binding(hv, &expr_str, name.as_deref(), artifact_dir);
+                    ok
+                }
+            };
+            match bound {
+                true => {
                     let mut map = serde_json::Map::new();
                     map.insert(
                         "hash".into(),
@@ -1580,7 +1659,7 @@ pub unsafe extern "C" fn daemon_dispatch(
                     if let Some(n) = &name {
                         map.insert("name".into(), serde_json::Value::String(n.clone()));
                     }
-                    if let Some(entry) = store.lookup_hash(hv) {
+                    if let Some(entry) = binding_store().as_ref().and_then(|st| st.lookup_hash(hv)) {
                         if let Some(ref ts) = entry.type_sig {
                             map.insert("type".into(), serde_json::Value::String(ts.clone()));
                         }
@@ -1590,7 +1669,7 @@ pub unsafe extern "C" fn daemon_dispatch(
                     let c = CString::new(json).unwrap_or_default();
                     (*resp).result_json = libc::strdup(c.as_ptr());
                 }
-                None => {
+                false => {
                     (*resp).success = false;
                     (*resp).error_kind = DAEMON_ERROR_BAD_REQUEST;
                     let c =
@@ -1602,15 +1681,11 @@ pub unsafe extern "C" fn daemon_dispatch(
         }
         DaemonMethod::Bindings => {
             (*resp).success = true;
-            if G_BINDING_STORE.is_null() {
-                let c = CString::new("{\"bindings\":[]}").unwrap();
-                (*resp).result_json = libc::strdup(c.as_ptr());
-            } else {
-                let store = &*G_BINDING_STORE;
-                let json = store.list_json();
-                let c = CString::new(json).unwrap_or_default();
-                (*resp).result_json = libc::strdup(c.as_ptr());
-            }
+            let json = binding_store()
+                .as_ref()
+                .map_or_else(|| "{\"bindings\":[]}".to_string(), |st| st.list_json());
+            let c = CString::new(json).unwrap_or_default();
+            (*resp).result_json = libc::strdup(c.as_ptr());
             return resp;
         }
         DaemonMethod::Unbind => {
@@ -1626,16 +1701,18 @@ pub unsafe extern "C" fn daemon_dispatch(
                 (*resp).error = libc::strdup(c.as_ptr());
                 return resp;
             }
-            if G_BINDING_STORE.is_null() {
-                (*resp).success = false;
-                (*resp).error_kind = DAEMON_ERROR_INTERNAL;
-                let c = CString::new("Binding store not initialized").unwrap();
-                (*resp).error = libc::strdup(c.as_ptr());
-                return resp;
-            }
-            let store = &mut *G_BINDING_STORE;
             let name = CStr::from_ptr(name_ptr).to_string_lossy();
-            if store.unbind(&name) {
+            let removed = match binding_store().as_mut() {
+                Some(store) => store.unbind(&name),
+                None => {
+                    (*resp).success = false;
+                    (*resp).error_kind = DAEMON_ERROR_INTERNAL;
+                    let c = CString::new("Binding store not initialized").unwrap();
+                    (*resp).error = libc::strdup(c.as_ptr());
+                    return resp;
+                }
+            };
+            if removed {
                 (*resp).success = true;
                 let c = CString::new("{\"removed\":true}").unwrap();
                 (*resp).result_json = libc::strdup(c.as_ptr());
@@ -2208,6 +2285,21 @@ pub unsafe extern "C" fn daemon_dispatch(
 
 // -- Length-prefixed message protocol -----------------------------------------
 
+unsafe fn recv_exact(fd: i32, buf: *mut u8, len: usize) -> Result<(), usize> {
+    let mut total = 0;
+    while total < len {
+        let n = libc::recv(fd, buf.add(total) as *mut c_void, len - total, 0);
+        if n > 0 {
+            total += n as usize;
+        } else if n < 0 && crate::utility::errno_val() == libc::EINTR {
+            continue;
+        } else {
+            return Err(total);
+        }
+    }
+    Ok(())
+}
+
 unsafe fn read_lp_message(
     fd: i32,
     out_len: *mut usize,
@@ -2216,13 +2308,7 @@ unsafe fn read_lp_message(
     clear_errmsg(errmsg);
 
     let mut len_buf = [0u8; 4];
-    let n = libc::recv(
-        fd,
-        len_buf.as_mut_ptr() as *mut c_void,
-        4,
-        libc::MSG_WAITALL,
-    );
-    if n != 4 {
+    if recv_exact(fd, len_buf.as_mut_ptr(), 4).is_err() {
         set_errmsg(
             errmsg,
             &MorlocError::Other("Failed to read message length prefix".into()),
@@ -2252,26 +2338,16 @@ unsafe fn read_lp_message(
         return ptr::null_mut();
     }
 
-    let mut total: usize = 0;
-    while total < msg_len as usize {
-        let n = libc::recv(
-            fd,
-            msg.add(total) as *mut c_void,
-            msg_len as usize - total,
-            0,
+    if let Err(total) = recv_exact(fd, msg as *mut u8, msg_len as usize) {
+        libc::free(msg as *mut c_void);
+        set_errmsg(
+            errmsg,
+            &MorlocError::Other(format!(
+                "Failed to read message body (got {} of {} bytes)",
+                total, msg_len
+            )),
         );
-        if n <= 0 {
-            libc::free(msg as *mut c_void);
-            set_errmsg(
-                errmsg,
-                &MorlocError::Other(format!(
-                    "Failed to read message body (got {} of {} bytes)",
-                    total, msg_len
-                )),
-            );
-            return ptr::null_mut();
-        }
-        total += n as usize;
+        return ptr::null_mut();
     }
     *msg.add(msg_len as usize) = 0;
 
@@ -2706,8 +2782,7 @@ pub unsafe extern "C" fn daemon_run(
     crate::utility::raise_nofile_limit();
 
     // Set globals
-    G_POOL_ALIVE_FN = (*config).pool_alive_fn;
-    G_N_POOLS = n_pools;
+    *POOL_STATUS.lock().unwrap_or_else(|p| p.into_inner()) = ((*config).pool_alive_fn, n_pools);
     let timeout = if (*config).eval_timeout > 0 {
         (*config).eval_timeout
     } else {
@@ -2718,10 +2793,7 @@ pub unsafe extern "C" fn daemon_run(
     G_DAEMON_COMPRESSION.store((*config).compression_level, Ordering::Relaxed);
 
     // Initialize binding store
-    if G_BINDING_STORE.is_null() {
-        let store = Box::new(BindingStore::new("/tmp/morloc-bindings"));
-        G_BINDING_STORE = Box::into_raw(store);
-    }
+    binding_store().get_or_insert_with(|| BindingStore::new("/tmp/morloc-bindings"));
 
     // Install signal handlers
     SHUTDOWN_REQUESTED.store(false, Ordering::Relaxed);
@@ -2747,7 +2819,7 @@ pub unsafe extern "C" fn daemon_run(
 
     // Unix socket
     if !(*config).unix_socket_path.is_null() {
-        let sock_fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+        let sock_fd = morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
         if sock_fd < 0 {
             eprintln!("morloc-daemon: failed to create unix socket");
             return;
@@ -2787,7 +2859,7 @@ pub unsafe extern "C" fn daemon_run(
     // ephemeral; OS picks the port"; getsockname() reads it back.
     if (*config).tcp_port >= 0 {
         let requested = (*config).tcp_port as u16;
-        let tcp_fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+        let tcp_fd = morloc_runtime_types::fd::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
         if tcp_fd < 0 {
             eprintln!("morloc-daemon: failed to create tcp socket");
             return;
@@ -2827,7 +2899,7 @@ pub unsafe extern "C" fn daemon_run(
     // HTTP. Same sentinel convention as TCP.
     if (*config).http_port >= 0 {
         let requested = (*config).http_port as u16;
-        let http_fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+        let http_fd = morloc_runtime_types::fd::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
         if http_fd < 0 {
             eprintln!("morloc-daemon: failed to create http socket");
             return;
@@ -2934,7 +3006,7 @@ pub unsafe extern "C" fn daemon_run(
             if fds[i].revents & libc::POLLIN as i16 == 0 {
                 continue;
             }
-            let client_fd = libc::accept(fds[i].fd, ptr::null_mut(), ptr::null_mut());
+            let client_fd = morloc_runtime_types::fd::accept(fds[i].fd, ptr::null_mut(), ptr::null_mut());
             if client_fd < 0 {
                 if crate::utility::errno_val() == libc::EINTR
                     || crate::utility::errno_val() == libc::EAGAIN
@@ -3147,6 +3219,105 @@ mod media_wire_tests {
 }
 
 #[cfg(test)]
+mod reaped_ring_tests {
+    use super::*;
+
+    #[test]
+    fn an_exit_recorded_before_a_spawn_is_not_the_new_childs() {
+        let pid = 0x3fff_fff1;
+        morloc_note_child_exit(pid, 7);
+        let since = morloc_reaped_sequence();
+        assert_eq!(take_noted_child_exit(pid, since), None, "a recycled pid was answered with a stale exit");
+        morloc_note_child_exit(pid, 9);
+        assert_eq!(take_noted_child_exit(pid, since), Some(9));
+        let _ = take_noted_child_exit(pid, 0);
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+
+    #[test]
+    fn a_second_bind_of_one_expression_waits_for_the_first() {
+        let dir = std::env::temp_dir().join(format!("morloc_bind_test_{}", std::process::id()));
+        binding_store().get_or_insert_with(|| BindingStore::new(dir.to_str().unwrap()));
+        let hv = 0x5eed_0001;
+        assert!(matches!(claim_binding(hv, None), BindClaim::Compile(_)));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let second = std::thread::spawn(move || {
+            let bound = matches!(claim_binding(hv, Some("again")), BindClaim::Bound);
+            tx.send(bound).unwrap();
+        });
+        let early = rx.recv_timeout(std::time::Duration::from_millis(200));
+        finish_binding(hv, "expr", None, Some("artifact".into()));
+        let late = rx.recv_timeout(std::time::Duration::from_secs(5));
+        second.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(early.is_err(), "a second bind ran while the first was compiling");
+        assert_eq!(late, Ok(true), "the second bind did not see the first's result");
+    }
+}
+
+#[cfg(test)]
+mod lp_message_tests {
+    use super::*;
+
+    extern "C" fn ignore(_: i32) {}
+
+    #[test]
+    fn a_signal_during_a_read_does_not_drop_the_message() {
+        unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = ignore as *const () as usize;
+            sa.sa_flags = libc::SA_RESTART;
+            libc::sigemptyset(&mut sa.sa_mask);
+            libc::sigaction(libc::SIGUSR2, &sa, ptr::null_mut());
+
+            let mut fds = [0i32; 2];
+            assert_eq!(morloc_runtime_types::fd::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()), 0);
+            let (reader, writer) = (fds[0], fds[1]);
+            let tv = libc::timeval { tv_sec: 10, tv_usec: 0 };
+            libc::setsockopt(
+                reader,
+                libc::SOL_SOCKET,
+                libc::SO_RCVTIMEO,
+                &tv as *const _ as *const c_void,
+                std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+            );
+
+            let (tid_tx, tid_rx) = std::sync::mpsc::channel::<libc::pthread_t>();
+            let read = std::thread::spawn(move || {
+                tid_tx.send(libc::pthread_self()).unwrap();
+                let mut len = 0usize;
+                let mut err: *mut c_char = ptr::null_mut();
+                let msg = read_lp_message(reader, &mut len, &mut err);
+                let ok = !msg.is_null() && err.is_null() && len == 5
+                    && std::slice::from_raw_parts(msg as *const u8, 5) == b"hello";
+                if !msg.is_null() {
+                    libc::free(msg as *mut c_void);
+                }
+                ok
+            });
+            let tid = tid_rx.recv().unwrap();
+            libc::send(writer, [0u8, 0, 0].as_ptr() as *const c_void, 3, 0);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            libc::pthread_kill(tid, libc::SIGUSR2);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            libc::send(writer, [5u8, b'h', b'e'].as_ptr() as *const c_void, 3, 0);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            libc::pthread_kill(tid, libc::SIGUSR2);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            libc::send(writer, b"llo".as_ptr() as *const c_void, 3, 0);
+            let ok = read.join().unwrap();
+            libc::close(reader);
+            libc::close(writer);
+            assert!(ok, "a signal during the read dropped the message");
+        }
+    }
+}
+
+#[cfg(test)]
 mod child_output_tests {
     use super::*;
 
@@ -3171,8 +3342,9 @@ mod child_output_tests {
         unsafe {
             let mut o = [0 as libc::c_int; 2];
             let mut e = [0 as libc::c_int; 2];
-            assert_eq!(libc::pipe(o.as_mut_ptr()), 0);
-            assert_eq!(libc::pipe(e.as_mut_ptr()), 0);
+            assert_eq!(morloc_runtime_types::fd::pipe(o.as_mut_ptr()), 0);
+            assert_eq!(morloc_runtime_types::fd::pipe(e.as_mut_ptr()), 0);
+            let since = morloc_reaped_sequence();
             let pid = libc::fork();
             assert!(pid >= 0);
             if pid == 0 {
@@ -3186,7 +3358,7 @@ mod child_output_tests {
             let (out, err) = drain_pair(o[0], e[0]);
             libc::close(o[0]);
             libc::close(e[0]);
-            assert_eq!(wait_child(pid), Some(0));
+            assert_eq!(wait_child(pid, since), Some(0));
             assert_eq!((out.len(), err.len()), (N, N));
             assert!(out.iter().all(|&b| b == b'o') && err.iter().all(|&b| b == b'e'));
         }

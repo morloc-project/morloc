@@ -142,6 +142,8 @@ extern "C" {
     // drains below would otherwise consume the status first and leave that
     // wait with nothing to read.
     fn morloc_note_child_exit(pid: libc::c_int, status: libc::c_int);
+    fn morloc_reaped_sequence() -> u64;
+    fn morloc_take_noted_child_exit(pid: libc::c_int, since: u64, status: *mut libc::c_int) -> libc::c_int;
 }
 
 /// C-ABI callback wired into DaemonConfig.pool_check_fn.
@@ -477,7 +479,7 @@ extern "C" fn sigchld_handler(_sig: libc::c_int) {
         // thread that forked its own child and is blocked waiting for it.
         unsafe { morloc_note_child_exit(pid, status) };
         for i in 0..MAX_DAEMONS {
-            if PIDS[i].load(Ordering::Relaxed) == pid {
+            if PIDS[i].load(Ordering::SeqCst) == pid {
                 EXIT_STATUSES[i].store(status, Ordering::Relaxed);
                 PIDS[i].store(-1, Ordering::Relaxed);
                 break;
@@ -1147,13 +1149,19 @@ fn write_errno_line(prefix: &[u8], errno: i32) {
     }
 }
 
+#[cfg(test)]
+static SPAWN_TO_RECORD_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Start pool daemons for the given socket indices and wait for them to respond to pings.
 pub fn start_daemons(sockets: &mut [PoolSocket], indices: &[usize]) -> Result<(), String> {
     extern "C" {
         fn stream_pid_start_time(pid: u32) -> u64;
     }
     for &idx in indices {
+        let since = unsafe { morloc_reaped_sequence() };
         let pid = start_language_server(&sockets[idx])?;
+        #[cfg(test)]
+        std::thread::sleep(Duration::from_millis(SPAWN_TO_RECORD_DELAY_MS.load(Ordering::Relaxed)));
         sockets[idx].pid = pid;
         // Capture the pool's start stamp at spawn so the PID-based crash
         // sweep can detect PID reuse. Zero if the read races a fast exit;
@@ -1164,8 +1172,13 @@ pub fn start_daemons(sockets: &mut [PoolSocket], indices: &[usize]) -> Result<()
         // Fresh incarnation: clear the sweep-done flag so the next
         // death of this pool is detected.
         POOL_SWEPT[idx].store(false, Ordering::Relaxed);
-        PIDS[idx].store(pid, Ordering::Relaxed);
+        PIDS[idx].store(pid, Ordering::SeqCst);
         PGIDS[idx].store(pid, Ordering::Relaxed);
+        let mut status = 0;
+        if unsafe { morloc_take_noted_child_exit(pid, since, &mut status) } == 1 {
+            EXIT_STATUSES[idx].store(status, Ordering::Relaxed);
+            PIDS[idx].store(-1, Ordering::SeqCst);
+        }
         // Record the lang label for the post-mortem in report_dead_pools.
         {
             let mut langs = POOL_LANGS.lock().unwrap();
@@ -1349,7 +1362,7 @@ pub fn report_dead_pools() {
         }
         unsafe { morloc_note_child_exit(pid, status) };
         for i in 0..MAX_DAEMONS {
-            if PIDS[i].load(Ordering::Relaxed) == pid {
+            if PIDS[i].load(Ordering::SeqCst) == pid {
                 EXIT_STATUSES[i].store(status, Ordering::Relaxed);
                 PIDS[i].store(-1, Ordering::Relaxed);
                 break;
@@ -1625,6 +1638,48 @@ mod tests {
         let registry = format!("{}.reg", base);
         assert!(volume.len() <= PSHMNAMLEN, "volume '{}' is {} chars", volume, volume.len());
         assert!(registry.len() <= PSHMNAMLEN, "registry '{}' is {} chars", registry, registry.len());
+    }
+
+    #[test]
+    fn pool_death_scenario() {
+        if std::env::var_os("MORLOC_POOL_DEATH_SCENARIO").is_none() {
+            return;
+        }
+        SPAWN_TO_RECORD_DELAY_MS.store(300, Ordering::Relaxed);
+        install_signal_handlers();
+        let mut sockets = [PoolSocket {
+            lang: "test".into(),
+            socket_path: "/nonexistent/morloc-test.sock".into(),
+            syscmd: vec![CString::new("true").unwrap()],
+            pid: 0,
+            pid_start_time: 0,
+            pool_hash: CString::new("").unwrap(),
+        }];
+        let died = matches!(start_daemons(&mut sockets, &[0]), Err(e) if e.contains("died"));
+        std::process::exit(if died { 0 } else { 1 });
+    }
+
+    #[test]
+    fn a_pool_that_dies_before_its_pid_is_recorded_is_reported_promptly() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "process::tests::pool_death_scenario", "--test-threads=1"])
+            .env("MORLOC_POOL_DEATH_SCENARIO", "1")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("a pool that died before its pid was recorded was not reported within 20 s");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        assert!(status.success(), "{status}");
     }
 
     #[test]

@@ -1226,7 +1226,7 @@ pub unsafe extern "C" fn check_cache_packet(
     // exceeds a few hundred bytes, so 4 KiB is a safe upper bound
     // that covers the whole indirection while avoiding the full-file
     // read a stale/oversized entry would trigger.
-    let fd = libc::open(filename, libc::O_RDONLY);
+    let fd = libc::open(filename, libc::O_RDONLY | libc::O_CLOEXEC);
     if fd < 0 {
         libc::free(filename as *mut c_void);
         return ptr::null_mut(); // miss / unreadable

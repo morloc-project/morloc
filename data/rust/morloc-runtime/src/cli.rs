@@ -304,7 +304,7 @@ pub(crate) unsafe fn peek_packet_header_via_pread(
     if path.is_null() {
         return None;
     }
-    let fd = libc::open(path, libc::O_RDONLY);
+    let fd = libc::open(path, libc::O_RDONLY | libc::O_CLOEXEC);
     if fd < 0 {
         return None;
     }
@@ -416,7 +416,7 @@ unsafe fn spool_stdin_to_temp() -> Result<String, MorlocError> {
     let dir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into());
     let mut template: Vec<u8> = format!("{}/morloc-table-XXXXXX", dir.trim_end_matches('/')).into_bytes();
     template.push(0);
-    let fd = libc::mkstemp(template.as_mut_ptr() as *mut c_char);
+    let fd = morloc_runtime_types::fd::mkstemp(template.as_mut_ptr() as *mut c_char);
     if fd < 0 {
         return Err(MorlocError::Other("could not open a temporary file for the table on stdin".into()));
     }
@@ -580,7 +580,7 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
         return Ok(None);
     }
 
-    let fd = libc::open(path, libc::O_RDONLY);
+    let fd = libc::open(path, libc::O_RDONLY | libc::O_CLOEXEC);
     if fd < 0 {
         return Ok(None);
     }
@@ -741,7 +741,7 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
         return Ok(None);
     }
 
-    let fd = libc::open(path, libc::O_RDONLY);
+    let fd = libc::open(path, libc::O_RDONLY | libc::O_CLOEXEC);
     if fd < 0 {
         return Ok(None);
     }
@@ -2596,7 +2596,7 @@ unsafe fn parse_cli_data_argument_singular(
 /// A stream over this process's stdin that may be closed when done: it reads
 /// a duplicate of fd 0, so closing it leaves fd 0 open. Null on failure.
 unsafe fn open_stdin_stream() -> *mut libc::FILE {
-    let fd = libc::dup(libc::STDIN_FILENO);
+    let fd = morloc_runtime_types::fd::dup(libc::STDIN_FILENO);
     if fd < 0 {
         return ptr::null_mut();
     }
@@ -2665,7 +2665,7 @@ unsafe fn parse_cli_data_argument_classified(
                     return ptr::null_mut();
                 }
             }
-            fd = libc::fopen(effective, b"rb\0".as_ptr() as *const c_char);
+            fd = morloc_runtime_types::fd::fopen(effective, b"rb\0".as_ptr() as *const c_char);
             if fd.is_null() {
                 set_errmsg(errmsg, &MorlocError::Other(
                     format!("The argument '{}' is a filename, but it can't be read",
@@ -3276,7 +3276,7 @@ unsafe fn read_path_into_libc(path: *const c_char) -> Result<(*mut u8, usize), S
     if path.is_null() {
         return Err("null path".into());
     }
-    let fd = libc::fopen(path, b"rb\0".as_ptr() as *const c_char);
+    let fd = morloc_runtime_types::fd::fopen(path, b"rb\0".as_ptr() as *const c_char);
     if fd.is_null() {
         return Err(format!(
             "cannot open '{}'",
@@ -3329,7 +3329,7 @@ unsafe fn read_argv_bytes(
             fd
         }
         ArgSource::File => {
-            let fd = libc::fopen(effective, b"rb\0".as_ptr() as *const c_char);
+            let fd = morloc_runtime_types::fd::fopen(effective, b"rb\0".as_ptr() as *const c_char);
             if fd.is_null() {
                 set_errmsg(
                     errmsg,
@@ -3994,7 +3994,7 @@ mod tests {
             assert!(child >= 0);
             if child == 0 {
                 let mut p = [0 as libc::c_int; 2];
-                libc::pipe(p.as_mut_ptr());
+                morloc_runtime_types::fd::pipe(p.as_mut_ptr());
                 libc::write(p[1], b"[1]".as_ptr() as *const c_void, 3);
                 libc::close(p[1]);
                 libc::dup2(p[0], 0);

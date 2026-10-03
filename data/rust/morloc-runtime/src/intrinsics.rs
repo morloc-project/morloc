@@ -364,7 +364,7 @@ pub unsafe extern "C" fn mlc_tmpfile(errmsg: *mut *mut c_char) -> *mut c_char {
     let _ = std::fs::create_dir_all(&dir);
     let template = format!("{}/morloc-gather-XXXXXX\0", dir);
     let mut buf: Vec<u8> = template.into_bytes();
-    let fd = libc::mkstemp(buf.as_mut_ptr() as *mut c_char);
+    let fd = morloc_runtime_types::fd::mkstemp(buf.as_mut_ptr() as *mut c_char);
     if fd < 0 {
         set_errmsg(errmsg, &MorlocError::Io(std::io::Error::last_os_error()));
         return ptr::null_mut();
@@ -506,7 +506,7 @@ pub unsafe extern "C" fn mlc_save_voidstar(
     };
     let tmp_template = format!("{}/morloc-tmp_XXXXXX\0", dir);
     let mut tmp_buf: Vec<u8> = tmp_template.into_bytes();
-    let fd = libc::mkstemp(tmp_buf.as_mut_ptr() as *mut c_char);
+    let fd = morloc_runtime_types::fd::mkstemp(tmp_buf.as_mut_ptr() as *mut c_char);
     if fd < 0 {
         set_errmsg(errmsg, &MorlocError::Io(std::io::Error::last_os_error()));
         return 1;

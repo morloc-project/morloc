@@ -153,7 +153,7 @@ pub unsafe extern "C" fn slurm_job_is_complete(job_id: u32) -> bool {
     }
 
     let cmd = format!("sacct -j {} --format=State --noheader\0", job_id);
-    let sacct = libc::popen(cmd.as_ptr() as *const c_char, b"r\0".as_ptr() as *const c_char);
+    let sacct = morloc_runtime_types::fd::popen(cmd.as_ptr() as *const c_char, b"r\0".as_ptr() as *const c_char);
     if sacct.is_null() { return false; }
 
     let mut state = [0u8; 64];
@@ -288,7 +288,7 @@ pub unsafe extern "C" fn submit_morloc_slurm_job(
 
     // Fork/exec sbatch
     let mut pipefd = [0i32; 2];
-    if libc::pipe(pipefd.as_mut_ptr()) == -1 {
+    if morloc_runtime_types::fd::pipe(pipefd.as_mut_ptr()) == -1 {
         set_errmsg(errmsg, &MorlocError::Other("Failed to create pipe for sbatch".into()));
         return 0;
     }

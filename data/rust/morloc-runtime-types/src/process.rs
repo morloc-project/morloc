@@ -257,7 +257,7 @@ mod tests {
     fn a_child_inherits_no_cached_token() {
         let parent = token();
         let mut fds = [0 as libc::c_int; 2];
-        unsafe { assert_eq!(libc::pipe(fds.as_mut_ptr()), 0) };
+        unsafe { assert_eq!(crate::fd::pipe(fds.as_mut_ptr()), 0) };
         let child = exited_child(|| unsafe {
             let t = token().to_le_bytes();
             libc::write(fds[1], t.as_ptr() as *const libc::c_void, 8);

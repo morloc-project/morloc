@@ -72,6 +72,7 @@ pub mod config_ffi;
 pub mod log;
 pub mod run;
 pub mod lifeline;
+mod fork_local;
 pub mod debug;
 
 /// Serializes tests against the process-global SHM arena. There is one arena
@@ -139,6 +140,96 @@ impl Drop for ArenaOwned {
     fn drop(&mut self) {
         SHM_TEST_ARENA.state().writer = false;
         SHM_TEST_ARENA.turn.notify_all();
+    }
+}
+
+#[cfg(test)]
+mod source_rule_tests {
+    fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    fn workspace_sources() -> Vec<std::path::PathBuf> {
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let mut files = Vec::new();
+        for krate in ["morloc-runtime", "morloc-runtime-types", "morloc-nexus", "rustmorloc"] {
+            rust_sources(&workspace.join(krate).join("src"), &mut files);
+        }
+        files
+    }
+
+    fn call_text(text: &str, start: usize) -> &str {
+        let mut depth = 0usize;
+        for (i, c) in text[start..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &text[start..start + i + 1];
+                    }
+                }
+                _ => {}
+            }
+        }
+        &text[start..]
+    }
+
+    #[test]
+    fn every_descriptor_is_created_close_on_exec() {
+        let raw: Vec<String> = ["pipe", "socket", "socketpair", "accept", "dup", "mkstemp", "fopen", "popen"]
+            .iter()
+            .map(|f| format!("libc::{f}("))
+            .collect();
+        let opens: Vec<String> = ["open", "openat"].iter().map(|f| format!("libc::{f}(")).collect();
+        let mut found = Vec::new();
+        for file in workspace_sources() {
+            if file.ends_with("morloc-runtime-types/src/fd.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&file).unwrap();
+            let line_of = |at: usize| text[..at].lines().count();
+            for call in &raw {
+                for (at, _) in text.match_indices(call.as_str()) {
+                    found.push(format!("{}:{}: {}", file.display(), line_of(at), call));
+                }
+            }
+            for call in &opens {
+                for (at, _) in text.match_indices(call.as_str()) {
+                    if !call_text(&text, at).contains("O_CLOEXEC") {
+                        found.push(format!("{}:{}: {} without O_CLOEXEC", file.display(), line_of(at), call));
+                    }
+                }
+            }
+        }
+        assert!(found.is_empty(), "descriptors not created close-on-exec:\n{}", found.join("\n"));
+    }
+
+    #[test]
+    fn no_crate_declares_a_static_mut() {
+        let files = workspace_sources();
+        let mut found = Vec::new();
+        for file in &files {
+            let text = std::fs::read_to_string(file).unwrap();
+            for (i, line) in text.lines().enumerate() {
+                let code = line.trim_start();
+                let code = code
+                    .strip_prefix("pub(crate) ")
+                    .or_else(|| code.strip_prefix("pub "))
+                    .unwrap_or(code);
+                if code.starts_with("static mut ") {
+                    found.push(format!("{}:{}", file.display(), i + 1));
+                }
+            }
+        }
+        assert!(found.is_empty(), "static mut declared at:\n{}", found.join("\n"));
     }
 }
 
