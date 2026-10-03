@@ -153,9 +153,9 @@ std::string interweave_strings(const std::vector<std::string>& first, const std:
 // Thread-local list of the shared-memory references this thread holds for
 // packets it built (_put_value, _dup_packet) or received as call results
 // (foreign_call_v). An entry ends when its packet is released
-// (_release_packet, mlc::Packet), and whatever remains at the start of the
-// thread's next dispatch is released then: by that time the result this
-// thread sent has been read by its caller.
+// (_release_packet, mlc::Packet), and whatever remains is released once the
+// dispatch's reply is sent (after_reply): the reply carries the caller's own
+// reference to its value.
 struct ShmEntry { absptr_t ptr; };
 // Releasing the entries is shared by the ordinary flush and by thread
 // teardown, so it is written once and takes the container explicitly.
@@ -1461,7 +1461,8 @@ static uint8_t* make_fail_packet_with_trace(const char* msg) {
 uint8_t* cpp_local_dispatch(uint32_t mid, const uint8_t** args,
                                     size_t nargs, void* ctx) {
     (void)nargs; (void)ctx;
-    // Free SHM from previous dispatch (result packet consumed by caller)
+    // Anything a non-dispatch use of this thread left behind; a dispatch's
+    // own entries are released after its reply.
     _shm_tracker_flush();
     morloc_debug_flush_dispatch();
     try {
@@ -1538,5 +1539,6 @@ void cpp_register(pool_config_t* config, const char* tmpdir) {
     config->concurrency = POOL_THREADS;
     config->initial_workers = 1;
     config->dynamic_scaling = true;
+    config->after_reply = _shm_tracker_flush;
     _init_schemas();
 }

@@ -1,0 +1,27 @@
+module main (held, heldRust)
+
+import root-py
+import root-cpp
+import root-rust
+
+-- A pool that answers a call with a value in shared memory hands the
+-- caller its own reference along with the reply, so once the reply is sent
+-- the answering worker has no further use for the value. A worker that kept
+-- it until its next call would hold every large result it produced for as
+-- long as it sat idle. Here Python asks C++ (and, separately, Rust) for a
+-- large vector of integers, lets go of its own references, and reports how
+-- much shared memory the program still holds.
+
+source Cpp from "big.hpp" ("big")
+source Rust from "big.rs" ("big_rust" as bigRust)
+source Py from "probe.py" ("heldAfter")
+
+big :: Int -> [Int]
+bigRust :: Int -> [Int]
+heldAfter :: [Int] -> Int
+
+held :: Int -> Int
+held n = heldAfter (big n)
+
+heldRust :: Int -> Int
+heldRust n = heldAfter (bigRust n)

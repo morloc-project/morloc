@@ -17,7 +17,8 @@
 //!        `morloc-runtime-types::packet` Vec builders are never used for a
 //!        returned value.
 //!  * I3  SHM allocated for a result outlives the socket send; freeing is
-//!        deferred to the next dispatch via `dispatch_flush`. A per-alloc
+//!        deferred until the reply is sent, via `dispatch_flush` (the pool's
+//!        after-reply hook). A per-alloc
 //!        `ShmGuard` reclaims a half-built block if serialization panics.
 //!  * I4  The recur env is thread-local (THREAD concurrency runs manifolds in
 //!        one address space).
@@ -460,15 +461,12 @@ pub fn resolve_recur(schema: &Schema) -> &Schema {
 }
 
 // ---------------------------------------------------------------------------
-// SHM lifetime (I3): a deferred-free tracker flushed at dispatch entry, plus a
+// SHM lifetime (I3): a deferred-free tracker flushed after each reply, plus a
 // per-alloc RAII guard that reclaims a half-built block on panic.
 // ---------------------------------------------------------------------------
 /// Holds the deferred-release list so that the blocks are released when the
-/// thread ends as well as at the next dispatch. A worker is retired only
-/// after going idle for longer than the dispatch that would otherwise have
-/// flushed it, so releasing here is never earlier than the release it stands
-/// in for; it simply happens on a thread that has no next dispatch to do it.
-/// Without this a retired worker takes its last dispatch's blocks with it.
+/// thread ends as well as after each reply, for what a thread holds outside
+/// any dispatch.
 struct ShmTracker(Cell<Vec<*mut c_void>>);
 
 impl Drop for ShmTracker {
@@ -569,8 +567,9 @@ unsafe fn release_tracked(block: *mut c_void) {
     }
 }
 
-/// Free all deferred SHM blocks from the previous dispatch. Generated
-/// `local_dispatch`/`remote_dispatch` call this at entry (cpp: pool.cpp:979).
+/// Free all deferred SHM blocks. The pool runs this once a dispatch's reply
+/// is sent; generated `local_dispatch`/`remote_dispatch` also call it at
+/// entry, for anything the thread held outside a dispatch.
 pub fn dispatch_flush() {
     SHM_TRACKER.with(|t| {
         let v = t.0.take();

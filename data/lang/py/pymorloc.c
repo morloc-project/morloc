@@ -2915,6 +2915,11 @@ error:
 
 // Free tracked SHM allocations from put_value calls.
 // Called at dispatch start to free result SHM from previous dispatch.
+static PyObject* pybinding__shm_live_bytes(PyObject* self, PyObject* args) {
+    (void)self; (void)args;
+    return PyLong_FromLongLong((long long)morloc_shm_live_bytes());
+}
+
 static PyObject* pybinding__shm_tracker_flush(PyObject* self, PyObject* args) {
     (void)self; (void)args;
     shm_tracker_flush();
@@ -4460,6 +4465,7 @@ static PyMethodDef Methods[] = {
     {"send_packet_to_foreign_server", pybinding__send_packet_to_foreign_server, METH_VARARGS, "Send data to a foreign server"},
     {"stream_from_client", pybinding__stream_from_client, METH_VARARGS, "Stream data from the client"},
     {"close_socket", pybinding__close_socket, METH_VARARGS, "Close the socket"},
+    {"shm_live_bytes", pybinding__shm_live_bytes, METH_NOARGS, "Bytes of shared memory the program holds now (-1 unless MORLOC_SHM_STATS is set)"},
     {"shm_tracker_flush", pybinding__shm_tracker_flush, METH_NOARGS, "Free tracked SHM allocations from put_value calls"},
     {"release_packet_shm", pybinding__release_packet_shm, METH_VARARGS, "Release the SHM ref owned by a put_value-produced packet"},
     {"debug_record_frame", pybinding__debug_record_frame, METH_VARARGS, "Append a manifold's args to the debug-trace stack"},

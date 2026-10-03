@@ -50,6 +50,7 @@ struct PoolConfig {
     concurrency: PoolConcurrency,
     initial_workers: i32,
     dynamic_scaling: bool,
+    after_reply: Option<unsafe extern "C" fn()>,
 }
 
 // <<<BREAK>>>
@@ -80,6 +81,9 @@ fn main() {
         .iter()
         .map(|a| CString::new(a.as_str()).unwrap().into_raw())
         .collect();
+    unsafe extern "C" fn after_reply() {
+        rustmorloc::dispatch_flush();
+    }
     let mut cfg = PoolConfig {
         local_dispatch,
         remote_dispatch,
@@ -87,6 +91,7 @@ fn main() {
         concurrency: PoolConcurrency::Threads,
         initial_workers: 1,
         dynamic_scaling: true,
+        after_reply: Some(after_reply),
     };
     let rc = unsafe { pool_main(argv.len() as c_int, argv.as_mut_ptr(), &mut cfg) };
     std::process::exit(rc);

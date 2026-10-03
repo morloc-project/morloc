@@ -81,6 +81,13 @@ pub fn snapshot() -> Option<(i64, i64)> {
     counters().map(|c| (c.live.load(Ordering::Acquire), c.peak.load(Ordering::Acquire)))
 }
 
+/// Bytes of shared memory the whole program holds now, or -1 when
+/// `MORLOC_SHM_STATS` is unset.
+#[no_mangle]
+pub extern "C" fn morloc_shm_live_bytes() -> i64 {
+    snapshot().map_or(-1, |(live, _)| live)
+}
+
 /// Only the owner writes the report and removes the segment. Any other
 /// process keeps its mapping until it exits: its worker threads may still be
 /// allocating while exit hooks run.

@@ -392,6 +392,10 @@ void morloc_set_inline_threshold(int64_t bytes);
 // Read the live inline threshold (in bytes).
 uint64_t morloc_get_inline_threshold(void);
 
+// Bytes of shared memory the whole program holds now, or -1 when
+// MORLOC_SHM_STATS is unset.
+int64_t morloc_shm_live_bytes(void);
+
 // The ABI/wire-format contract version compiled into this libmorloc.so (the
 // value of MORLOC_ABI_VERSION at build time). Compared fail-closed against the
 // compiler's expected version at provisioning time so a mismatched prebuilt
@@ -1120,6 +1124,9 @@ typedef struct {
     pool_concurrency_t concurrency;
     int initial_workers;
     bool dynamic_scaling;
+    // Run on the worker thread once a dispatch's reply has been sent (or
+    // could not be); NULL for none.
+    void (*after_reply)(void);
 } pool_config_t;
 
 typedef struct pool_state_s pool_state_t;

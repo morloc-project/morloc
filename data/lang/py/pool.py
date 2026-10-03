@@ -515,7 +515,8 @@ def _with_debug_trace(msg: str) -> str:
 
 def run_job(client_fd: int) -> None:
     try:
-        # Free SHM from previous dispatch result (consumed by caller)
+        # Anything left on this thread outside a dispatch; a dispatch's own
+        # entries are released after its reply (see the finally below).
         morloc.shm_tracker_flush()
         morloc.debug_flush_dispatch()
         client_data = morloc.stream_from_client(client_fd)
@@ -585,6 +586,10 @@ def run_job(client_fd: int) -> None:
         # matches. Without this a leaked @stdout claim wedges every later
         # open with "@stdout already open in this nexus".
         morloc.reclaim_stdio_after_dispatch()
+        # The reply carried the caller's own reference to its value, so
+        # what this dispatch still holds is released now rather than when
+        # this worker next runs.
+        morloc.shm_tracker_flush()
         # Safety-net flush for any output from error handling paths
         sys.stdout.flush()
         # close child copy

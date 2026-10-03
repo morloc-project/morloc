@@ -28,6 +28,10 @@ pub struct PoolConfig {
     pub concurrency: PoolConcurrency,
     pub initial_workers: i32,
     pub dynamic_scaling: bool,
+    /// Run on the worker thread once a dispatch's reply has been sent (or
+    /// could not be). The reply carries the caller's own reference to its
+    /// value, so a pool releases what the dispatch still holds here.
+    pub after_reply: Option<unsafe extern "C" fn()>,
 }
 
 // SAFETY: PoolConfig contains function pointers and a *mut c_void dispatch_ctx.
@@ -340,6 +344,7 @@ unsafe fn worker_loop(queue: &JobQueue, config: &PoolConfig) {
             // at least a fail packet); log it to catch the case if it does.
             eprintln!("morloc pool: dispatch returned null result (no response sent)");
         }
+        if let Some(f) = config.after_reply { f(); }
 
         libc::fflush(ptr::null_mut()); // flush stdout
         close_socket(client_fd);
@@ -454,6 +459,7 @@ unsafe fn pool_main_single(config: &PoolConfig, socket_path: *const c_char, tmpd
             libc::free(result as *mut c_void);
             if !errmsg.is_null() { libc::free(errmsg as *mut c_void); errmsg = ptr::null_mut(); }
         }
+        if let Some(f) = config.after_reply { f(); }
 
         libc::fflush(ptr::null_mut());
         close_socket(client_fd);
