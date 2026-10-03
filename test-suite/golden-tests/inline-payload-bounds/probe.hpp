@@ -15,6 +15,7 @@ std::string probe(int64_t size, int64_t data) {
     const morloc_packet_header_t* h = (const morloc_packet_header_t*)made;
     std::vector<uint8_t> p(made, made + sizeof(morloc_packet_header_t) + h->offset + h->length);
     free(made);
+    h = (const morloc_packet_header_t*)p.data();
     if (p[13] != 0) return "not inline";
     size_t base = sizeof(morloc_packet_header_t) + h->offset;
     if (size >= 0) { uint64_t v = (uint64_t)size; std::memcpy(&p[base], &v, 8); }
