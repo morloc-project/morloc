@@ -192,27 +192,22 @@ impl AtomicFile {
     /// permissions are carried over, so replacing a file does not
     /// silently widen or narrow who can read it.
     pub fn create(dest: &std::path::Path) -> std::io::Result<Self> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = dest.parent().unwrap_or(std::path::Path::new("."));
-        let basename = dest
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| String::from("out"));
-        let tmp = dir.join(format!(
-            ".{}.tmp.{}.{}",
-            basename,
-            std::process::id(),
-            seq
-        ));
-        let file = std::fs::File::create(&tmp)?;
-        if let Ok(meta) = std::fs::metadata(dest) {
+        use std::os::unix::io::FromRawFd;
+        // A symbolic link stays a link: the file it names is replaced.
+        let dest = match std::fs::symlink_metadata(dest) {
+            Ok(m) if m.file_type().is_symlink() => {
+                std::fs::canonicalize(dest).unwrap_or_else(|_| dest.to_path_buf())
+            }
+            _ => dest.to_path_buf(),
+        };
+        let (tmp, fd) = create_beside(&dest, 0o666)?;
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        if let Ok(meta) = std::fs::metadata(&dest) {
             use std::os::unix::fs::PermissionsExt;
             let mode = meta.permissions().mode() & 0o7777;
             let _ = file.set_permissions(std::fs::Permissions::from_mode(mode));
         }
-        Ok(AtomicFile { tmp, dest: dest.to_path_buf(), file: Some(file) })
+        Ok(AtomicFile { tmp, dest, file: Some(file) })
     }
 
     /// The descriptor being built. Valid until `commit`.
@@ -251,6 +246,40 @@ impl Drop for AtomicFile {
     }
 }
 
+/// Create a new file beside `target`, named `.<basename>.tmp.<pid>.<seq>`,
+/// to be renamed onto it. Every staging file of the process draws from one
+/// counter and is created exclusively, so two never share a file, nor take
+/// over one a crashed process left behind under a reused pid.
+pub fn create_beside(
+    target: &std::path::Path,
+    mode: libc::mode_t,
+) -> std::io::Result<(std::path::PathBuf, libc::c_int)> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let dir = target.parent().unwrap_or(std::path::Path::new("."));
+    let basename = target
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| String::from("out"));
+    loop {
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = dir.join(format!(".{}.tmp.{}.{}", basename, std::process::id(), seq));
+        let c_tmp = std::ffi::CString::new(tmp.as_os_str().as_bytes())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        let fd = unsafe {
+            libc::open(c_tmp.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC, mode as libc::c_uint)
+        };
+        if fd >= 0 {
+            return Ok((tmp, fd));
+        }
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() != Some(libc::EEXIST) {
+            return Err(e);
+        }
+    }
+}
+
 /// The lock of a file about to be replaced, held across the rename. A
 /// stream writing the file holds that lock; replacing the file under it
 /// would leave the writer writing into a file nobody can reach.
@@ -263,20 +292,31 @@ impl ReplaceGuard {
         use std::os::unix::ffi::OsStrExt;
         let c_path = std::ffi::CString::new(dest.as_os_str().as_bytes())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
-        if fd < 0 {
-            // Nothing there yet, or nothing this process may open: no
-            // stream of this program can be writing it.
-            return Ok(ReplaceGuard { fd: None });
+        // Retry until the locked file is still the one `dest` names, so the
+        // lock covers the file the rename replaces.
+        for _ in 0..8 {
+            let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+            if fd < 0 {
+                // Nothing there yet, or nothing this process may open: no
+                // stream of this program can be writing it.
+                return Ok(ReplaceGuard { fd: None });
+            }
+            if let Err(why) = crate::stream::lock_stream_file(fd) {
+                unsafe { libc::close(fd); }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::ResourceBusy,
+                    format!("'{}' is open for writing as a stream: {}", dest.display(), why),
+                ));
+            }
+            if crate::stream::path_names(&c_path, fd) {
+                return Ok(ReplaceGuard { fd: Some(fd) });
+            }
+            crate::stream::unlock_and_close(fd);
         }
-        if let Err(why) = crate::stream::lock_stream_file(fd) {
-            unsafe { libc::close(fd); }
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::ResourceBusy,
-                format!("'{}' is open for writing as a stream: {}", dest.display(), why),
-            ));
-        }
-        Ok(ReplaceGuard { fd: Some(fd) })
+        Err(std::io::Error::new(
+            std::io::ErrorKind::ResourceBusy,
+            format!("'{}' kept being replaced while it was locked", dest.display()),
+        ))
     }
 }
 

@@ -561,7 +561,11 @@ pub struct RegistrySlot {
     pub opener_pid:           u32,                             // off 32..36
     _pad1:                    [u8; 4],                         // off 36..40
 
-    _pad2:                    [u8; 8],                         // off 40..48
+    /// IStream only: the end of the last sub-packet when the stream was
+    /// opened. A reader never reads at or past it: a later @append cuts
+    /// and rewrites the bytes beyond, and every process sharing the
+    /// stream must agree where it ends.
+    pub data_end:             u64,                             // off 40..48
 
     // ── File identity (immutable after publication) ─────────────────
     /// SHM RelPtr to a UTF-8 path string. Allocated from the shared
@@ -1769,6 +1773,7 @@ fn clear_slot_fields(slot: &RegistrySlot) {
         (*mp).wb_sync_only = 0;
         (*mp).write_failed = 0;
         (*mp).poisoned = 0;
+        (*mp).data_end = 0;
         (*mp).wb_owner_start = 0;
         (*mp).file_dev = 0;
         (*mp).file_ino = 0;
@@ -2005,6 +2010,165 @@ fn release_service_shutdown() -> bool {
     }
     true
 }
+
+/// The sub-packet index and element count of a stream with no final
+/// footer, from its complete sub-packets up to `data_end`.
+fn index_unclosed_stream(
+    mmap_ptr: AbsPtr,
+    mmap_size: u64,
+    body_start: u64,
+    data_end: u64,
+) -> Result<(Vec<morloc_runtime_types::packet::SubpacketEntry>, u64), MorlocError> {
+    let scan = forward_scan_subpackets(mmap_ptr, data_end.min(mmap_size), body_start)?;
+    // SAFETY: the mapping covers mmap_size bytes; reads stop at data_end.
+    let file = unsafe { std::slice::from_raw_parts(mmap_ptr as *const u8, data_end.min(mmap_size) as usize) };
+    let mut total = 0u64;
+    let mut entries = Vec::with_capacity(scan.subpacket_offsets.len());
+    for offset in scan.subpacket_offsets {
+        let elem_count = morloc_runtime_types::compression::subpacket_elem_count(file, offset)?;
+        total += elem_count;
+        entries.push(morloc_runtime_types::packet::SubpacketEntry { offset, elem_count });
+    }
+    Ok((entries, total))
+}
+
+/// Why a stream file could not be opened for writing.
+enum WriteOpenError {
+    Open(std::io::Error),
+    Lock(String),
+}
+
+/// Open `path` to write a stream and take the file's lock, retrying until
+/// the locked file is still the one the path names. A file renamed over the
+/// path between the open and the lock would otherwise be locked and written
+/// in its place, out of reach.
+fn open_locked_for_writing(path: &str) -> Result<libc::c_int, WriteOpenError> {
+    let c_path = std::ffi::CString::new(path.as_bytes()).map_err(|e| {
+        WriteOpenError::Open(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+    })?;
+    for _ in 0..8 {
+        let fd = unsafe {
+            libc::open(c_path.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC, 0o644)
+        };
+        if fd < 0 {
+            return Err(WriteOpenError::Open(std::io::Error::last_os_error()));
+        }
+        #[cfg(test)]
+        {
+            let mut armed = BEFORE_STREAM_LOCK.lock().unwrap();
+            if armed.as_ref().is_some_and(|(p, _)| p == path) {
+                let (_, hook) = armed.take().expect("checked above");
+                drop(armed);
+                hook();
+            }
+        }
+        if let Err(why) = lock_stream_file(fd) {
+            unsafe { libc::close(fd); }
+            return Err(WriteOpenError::Lock(why));
+        }
+        if path_names(&c_path, fd) {
+            return Ok(fd);
+        }
+        unlock_and_close(fd);
+    }
+    Err(WriteOpenError::Lock("the file kept being replaced while it was opened".into()))
+}
+
+/// Whether `path` still names the file open on `fd`.
+pub(crate) fn path_names(path: &std::ffi::CStr, fd: libc::c_int) -> bool {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::stat(path.as_ptr(), &mut st) } != 0 {
+        return false;
+    }
+    (st.st_dev as u64, st.st_ino as u64) == file_identity(fd)
+}
+
+/// Put a fresh, locked, empty file where `path` names the non-empty file
+/// locked on `old_fd`, and release the old one. A file being rewritten may
+/// be mapped by readers; truncating it in place would pull pages from
+/// under them (SIGBUS), while a new file leaves them the one they opened.
+/// A symbolic link stays a link: the file it names is the one replaced.
+fn replace_with_fresh_file(old_fd: libc::c_int, path: &str) -> Result<libc::c_int, MorlocError> {
+    use std::os::unix::ffi::OsStrExt;
+    let fail = |e: std::io::Error| {
+        unlock_and_close(old_fd);
+        MorlocError::Io(e)
+    };
+    let invalid = |e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e);
+    let target = std::fs::canonicalize(path).map_err(fail)?;
+    let c_target = std::ffi::CString::new(target.as_os_str().as_bytes()).map_err(|e| fail(invalid(e)))?;
+    // A link re-pointed since the lock was taken would name a file this
+    // process never locked.
+    if !path_names(&c_target, old_fd) {
+        unlock_and_close(old_fd);
+        return Err(MorlocError::Other(format!(
+            "@open OStream '{}': the file changed while it was being opened", path,
+        )));
+    }
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(old_fd, &mut st) } != 0 {
+        return Err(fail(std::io::Error::last_os_error()));
+    }
+    // The path cannot take a new file (a directory this process may not
+    // write, a file mounted on its own): rewrite in place if no stream of
+    // this program is reading the file.
+    let identity = (st.st_dev as u64, st.st_ino as u64);
+    let in_place = |e: &std::io::Error| {
+        matches!(e.raw_os_error(), Some(libc::EBUSY | libc::EXDEV | libc::EACCES | libc::EPERM | libc::EROFS))
+            && !file_is_being_read(identity)
+    };
+    let (tmp, fd) = match crate::utility::create_beside(&target, 0o600) {
+        Ok(created) => created,
+        Err(e) if in_place(&e) => return Ok(old_fd),
+        Err(e) => return Err(fail(e)),
+    };
+    let c_tmp = std::ffi::CString::new(tmp.as_os_str().as_bytes()).map_err(|e| fail(invalid(e)))?;
+    let locked = unsafe {
+        libc::fchmod(fd, (st.st_mode & 0o7777) as libc::mode_t) == 0
+            && libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) == 0
+    };
+    if !locked {
+        let e = std::io::Error::last_os_error();
+        unsafe {
+            libc::unlink(c_tmp.as_ptr());
+            libc::close(fd);
+        }
+        return Err(fail(e));
+    }
+    note_locked_fd(fd);
+    if unsafe { libc::rename(c_tmp.as_ptr(), c_target.as_ptr()) } != 0 {
+        let e = std::io::Error::last_os_error();
+        unsafe { libc::unlink(c_tmp.as_ptr()); }
+        unlock_and_close(fd);
+        return if in_place(&e) { Ok(old_fd) } else { Err(fail(e)) };
+    }
+    if let Some(dir) = target.parent() {
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    unlock_and_close(old_fd);
+    Ok(fd)
+}
+
+/// Whether an input stream of this program has the file `identity` open.
+fn file_is_being_read(identity: (u64, u64)) -> bool {
+    use std::sync::atomic::Ordering;
+    let (slots_base, slot_count) = registry_slot_array();
+    if slots_base.is_null() {
+        return false;
+    }
+    (0..slot_count).any(|idx| {
+        let slot = unsafe { &*(slots_base.add(idx * STREAM_ENTRY_SIZE) as *const RegistrySlot) };
+        slot.state.load(Ordering::Acquire) == SLOT_STATE_OPEN_SHARED
+            && (slot.kind == MLC_KIND_IFILE || slot.kind == MLC_KIND_ISTREAM)
+            && (slot.file_dev, slot.file_ino) == identity
+    })
+}
+
+/// Run between opening the named stream file for writing and locking it.
+#[cfg(test)]
+pub(crate) static BEFORE_STREAM_LOCK: Mutex<Option<(String, Box<dyn Fn() + Send>)>> = Mutex::new(None);
 
 /// How long a reopen waits for a live opener to release a stream another
 /// process ended. The release takes microseconds; only a stopped or starved
@@ -2399,6 +2563,7 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
             (*mp).final_footer = if parsed.final_footer { 1 } else { 0 };
             // IStream walks by cursor starting at body_start.
             (*mp).cursor = parsed.body_start;
+            (*mp).data_end = parsed.data_end;
             (*mp).element_count = parsed.element_count;
             (*mp).compression_level = 0;
             (*mp).write_buffer = shm_types_crate::RELNULL;
@@ -3033,15 +3198,10 @@ pub fn shared_open_ostream_with_schema(
     path: &str,
     schema_str: &str,
 ) -> Result<i64, MorlocError> {
-    use std::ffi::CString;
     use morloc_runtime_types::schema::SerialType;
     use morloc_runtime_types::packet::make_stream_header_block;
 
     reject_dev_stdio_path(path)?;
-
-    let c_path = CString::new(path.as_bytes()).map_err(|e| {
-        MorlocError::Other(format!("OStream open: path contains NUL: {}", e))
-    })?;
 
     // Parse schema first so a malformed spec never destroys prior
     // content. Empty is a placeholder for the bridge.
@@ -3058,27 +3218,23 @@ pub fn shared_open_ostream_with_schema(
     reject_non_list_stream_schema(&parsed_schema, "OStream open", path)?;
     let header_bytes = make_stream_header_block(&parsed_schema);
 
-    let fd = unsafe {
-        libc::open(
-            c_path.as_ptr(),
-            libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC,
-            0o644,
-        )
+    ensure_release_service()?;
+    let fd = match open_locked_for_writing(path) {
+        Ok(fd) => fd,
+        Err(WriteOpenError::Open(e)) => return Err(MorlocError::Io(e)),
+        Err(WriteOpenError::Lock(why)) => {
+            return Err(MorlocError::Other(format!(
+                "@open OStream '{}': could not acquire exclusive flock: {}",
+                path, why,
+            )));
+        }
     };
-    if fd < 0 {
-        return Err(MorlocError::Io(std::io::Error::last_os_error()));
-    }
-    if let Err(e) = ensure_release_service() {
-        unsafe { libc::close(fd); }
-        return Err(e);
-    }
-    if let Err(e) = lock_stream_file(fd) {
-        unsafe { libc::close(fd); }
-        return Err(MorlocError::Other(format!(
-            "@open OStream '{}': could not acquire exclusive flock: {}",
-            path, e,
-        )));
-    }
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let fd = if unsafe { libc::fstat(fd, &mut st) } == 0 && st.st_size == 0 {
+        fd
+    } else {
+        replace_with_fresh_file(fd, path)?
+    };
     init_ostream_on_locked_fd(fd, path, schema_str, parsed_schema, header_bytes)
 }
 
@@ -3693,12 +3849,17 @@ fn emit_subpacket_to_disk(
     let compressed_payload_len = sub.compressed_payload_len;
 
     let cursor = slot.cursor;
-    // Head then payload, where the payload is still the buffer the caller
-    // filled. Copying the two together into one buffer first would move the
-    // whole payload for the sake of one `pwrite` instead of two.
-    pwrite_all_fd(local.fd, &sub.head, cursor)?;
+    // Payload first, then the head over what was the temp footer: a reader
+    // opening meanwhile finds no sub-packet there and stops, instead of
+    // reading a head whose payload is half written. The payload
+    // is still the buffer the caller filled; copying the two together first
+    // would move the whole payload for the sake of one `pwrite`.
+    // The footer's header goes first, so no reader takes the payload landing
+    // over the footer's body for footer metadata.
+    pwrite_all_fd(local.fd, &[0u8; 32], cursor)?;
     pwrite_all_fd(local.fd, &sub.payload, cursor + sub.head.len() as u64)?;
     pwrite_all_fd(local.fd, &[0u8; 8][..sub.pad], cursor + (sub.head.len() + sub.payload.len()) as u64)?;
+    pwrite_all_fd(local.fd, &sub.head, cursor)?;
     let subpacket_end = cursor + sub.len() as u64;
 
     unsafe {
@@ -4801,7 +4962,8 @@ fn next_file_subpacket(handle: i64) -> Result<Option<AbsPtr>, MorlocError> {
                 )));
             }
             let cursor = slot.cursor;
-            if cursor >= local.mmap_size || cursor + 32 > local.mmap_size {
+            let end = if slot.data_end != 0 { slot.data_end.min(local.mmap_size) } else { local.mmap_size };
+            if cursor >= end || cursor + 32 > end {
                 // EOF: leave cursor where it is.
                 return Ok(None);
             }
@@ -4819,6 +4981,11 @@ fn next_file_subpacket(handle: i64) -> Result<Option<AbsPtr>, MorlocError> {
                 return Ok(None);
             }
             let size = 32 + header.offset as u64 + header.length;
+            if cursor + size > end {
+                return Err(MorlocError::Packet(format!(
+                    "stream handle {:#x}: a sub-packet runs past the end of the stream", handle,
+                )));
+            }
             // Advance the cursor BEFORE we drop the lock so concurrent
             // @next on this slot from another pool reads from
             // cursor+size and claims a DIFFERENT sub-packet.
@@ -5812,7 +5979,6 @@ pub fn shared_append_to_path(
     path: &str,
     expected_schema_str: &str,
 ) -> Result<i64, MorlocError> {
-    use std::ffi::CString;
     use std::sync::atomic::Ordering;
 
     reject_dev_stdio_path(path)?;
@@ -5824,35 +5990,21 @@ pub fn shared_append_to_path(
     let requested_schema_str =
         morloc_runtime_types::schema::canonicalize_schema_str(expected_schema_str);
 
-    let c_path = CString::new(path).map_err(|e| {
-        MorlocError::Other(format!("@append: path contains NUL: {}", e))
-    })?;
-
     // Lock before reading anything. The size, the choice between starting
     // the file and resuming it, and the truncation that acts on that choice
     // all happen under one lock, so a writer that finishes in between
     // cannot have its records cut away by an offset computed before they
     // existed.
-    let fd = unsafe {
-        libc::open(
-            c_path.as_ptr(),
-            libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC,
-            0o644,
-        )
+    ensure_release_service()?;
+    let fd = match open_locked_for_writing(path) {
+        Ok(fd) => fd,
+        Err(WriteOpenError::Open(e)) => return Err(MorlocError::Io(e)),
+        Err(WriteOpenError::Lock(why)) => {
+            return Err(MorlocError::Other(format!(
+                "@append: failed to flock '{}': {}", path, why
+            )));
+        }
     };
-    if fd < 0 {
-        return Err(MorlocError::Io(std::io::Error::last_os_error()));
-    }
-    if let Err(e) = ensure_release_service() {
-        unsafe { libc::close(fd); }
-        return Err(e);
-    }
-    if let Err(e) = lock_stream_file(fd) {
-        unsafe { libc::close(fd); }
-        return Err(MorlocError::Other(format!(
-            "@append: failed to flock '{}': {}", path, e
-        )));
-    }
 
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     if unsafe { libc::fstat(fd, &mut st) } != 0 {
@@ -5924,24 +6076,26 @@ pub fn shared_append_to_path(
             path, parsed.schema_str, requested_schema_str
         ))));
     }
-    let stream_hdr = match parse_stream_header(mmap_ptr, mmap_size) {
-        Ok(h) => h,
-        Err(e) => return Err(unmap_and(e)),
-    };
-    let resume_off = if let Some(last_entry) = parsed.subpacket_entries.last() {
-        let last_off = last_entry.offset;
-        match read_subpacket_size(mmap_ptr, mmap_size, last_off) {
-            Ok(sz) => last_off + sz,
+    if parsed.is_data_packet {
+        return Err(unmap_and(MorlocError::Other(format!(
+            "@append: '{}' holds a single value (written by @save), not a stream", path,
+        ))));
+    }
+    // Resume where every reader stops, so none of them is cut short. Only a
+    // final footer indexes the sub-packets; otherwise the index is rebuilt
+    // from the file, or the resumed stream's index would lose them.
+    let resume_off = parsed.data_end;
+    let (subpacket_entries_clone, element_count_at_resume) = if parsed.final_footer {
+        (parsed.subpacket_entries.clone(), parsed.element_count)
+    } else {
+        match index_unclosed_stream(mmap_ptr, mmap_size, parsed.body_start, resume_off) {
+            Ok(rebuilt) => rebuilt,
             Err(e) => return Err(unmap_and(e)),
         }
-    } else {
-        stream_hdr.body_start
     };
-    let element_count_at_resume = parsed.element_count;
+    let body_start = parsed.body_start;
     let value_schema_clone = parsed.value_schema.clone();
     let elem_schema_clone = parsed.elem_schema.clone();
-    let subpacket_entries_clone: Vec<morloc_runtime_types::packet::SubpacketEntry> =
-        parsed.subpacket_entries.clone();
     let schema_str_clone = parsed.schema_str.clone();
     unsafe { libc::munmap(mmap_ptr as *mut libc::c_void, mmap_size as usize); }
     let trunc_rc = unsafe { libc::ftruncate(fd, resume_off as libc::off_t) };
@@ -6005,7 +6159,7 @@ pub fn shared_append_to_path(
             (*mp).subpacket_entries = slot_owns(idx_buf_rel);
             (*mp).subpacket_entries_len = preseed_len as u64;
             (*mp).subpacket_entries_cap = idx_cap_initial;
-            (*mp).body_start = stream_hdr.body_start;
+            (*mp).body_start = body_start;
             (*mp).final_footer = 0;
             (*mp).cursor = resume_off;
             (*mp).element_count = element_count_at_resume;
@@ -6577,6 +6731,8 @@ struct ParsedStreamFile {
     /// is 0: the whole file IS the sub-packet. IStream uses this as the
     /// initial cursor position; IFile ignores it.
     body_start: u64,
+    /// End of the last complete sub-packet: where a reader stops.
+    data_end: u64,
 }
 
 /// Parse a mmap'd stream or data packet file into a `ParsedStreamFile`.
@@ -6598,6 +6754,8 @@ fn parse_stream_file(
     let outer_header = PacketHeader::from_bytes(hdr_bytes.try_into().unwrap())?;
 
     let is_data_packet = outer_header.is_data();
+    let mut footer_start: Option<u64> = None;
+    let mut scanned_end: Option<u64> = None;
     let (schema_str, subpacket_entries, element_count, diag, final_footer, body_start):
         (String, Vec<morloc_runtime_types::packet::SubpacketEntry>, u64, Option<StreamDiag>, bool, u64) = if is_data_packet {
         let (schema, entries, count) = open_data_packet(path, mmap_ptr, mmap_size)?;
@@ -6629,18 +6787,22 @@ fn parse_stream_file(
         // fine here; IFile's open path enforces final_footer separately.
         let (subpacket_entries, element_count, diag, final_footer) =
             match try_read_footer(mmap_ptr, mmap_size) {
-                Ok(Some(parsed)) => (
+                Ok(Some(parsed)) => {
+                    footer_start = Some(parsed.footer_start);
+                    (
                     parsed.subpacket_entries,
                     parsed.element_count,
                     parsed.diag,
                     parsed.final_footer,
-                ),
+                    )
+                }
                 Ok(None) | Err(_) => {
                     // Writer crashed before any footer. Forward-scan
                     // recovers offsets only; the file will resolve as
                     // IStream (IFile open refuses on !final_footer) so
                     // per-entry counts are never read.
                     let scanned = forward_scan_subpackets(mmap_ptr, mmap_size, body_start)?;
+                    scanned_end = Some(body_start + scanned.bytes_scanned);
                     let entries = scanned.subpacket_offsets.into_iter().map(|offset|
                         morloc_runtime_types::packet::SubpacketEntry { offset, elem_count: 0 }
                     ).collect();
@@ -6667,6 +6829,19 @@ fn parse_stream_file(
         reject_non_list_stream_schema(&parsed_schema, "STREAM_PACKET read", path)?;
     }
     let (value_schema, elem_schema) = derive_stream_schemas(&parsed_schema);
+    // Every footer, temp or final, follows the last complete sub-packet.
+    // A file without one (its writer died mid-flush) is scanned forward.
+    let data_end = if is_data_packet {
+        match subpacket_entries.last() {
+            Some(last) => read_subpacket_size(mmap_ptr, mmap_size, last.offset)
+                .map_or(mmap_size, |size| (last.offset + size).min(mmap_size)),
+            None => body_start,
+        }
+    } else if let Some(start) = footer_start {
+        start
+    } else {
+        scanned_end.unwrap_or(body_start)
+    };
 
     Ok(ParsedStreamFile {
         schema_str,
@@ -6678,6 +6853,7 @@ fn parse_stream_file(
         final_footer,
         is_data_packet,
         body_start,
+        data_end,
     })
 }
 
@@ -7058,6 +7234,8 @@ fn read_subpacket_format(
 
 #[derive(Debug)]
 struct ParsedFooter {
+    /// Offset of the footer packet: where the stream's data ends.
+    footer_start: u64,
     subpacket_entries: Vec<morloc_runtime_types::packet::SubpacketEntry>,
     element_count: u64,
     diag: Option<StreamDiag>,
@@ -7153,6 +7331,7 @@ fn try_read_footer(
         .unwrap_or(0);
 
     Ok(Some(ParsedFooter {
+        footer_start,
         subpacket_entries,
         element_count,
         diag,
@@ -10899,6 +11078,266 @@ mod tests {
         }
         STDIO_SOCK.with(|c| *c.borrow_mut() = None);
         assert_eq!(peer, Some(pid), "the child reused its parent's connection");
+    }
+
+    /// Run `act` in a forked child and return its exit code, or the signal
+    /// that killed it as a negative number, so a SIGBUS fails the test
+    /// instead of the test process.
+    fn in_child(act: impl FnOnce() -> bool) -> i32 {
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(act)).unwrap_or(false);
+            unsafe { libc::_exit(if ok { 0 } else { 1 }) };
+        }
+        let mut status = 0;
+        unsafe { libc::waitpid(pid, &mut status, 0) };
+        if libc::WIFSIGNALED(status) { -libc::WTERMSIG(status) } else { libc::WEXITSTATUS(status) }
+    }
+
+    fn drain_frames(h: i64) -> Result<usize, MorlocError> {
+        let mut n = 0;
+        while let Some(p) = shared_next_frame(h)? {
+            shm::shfree(p)?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    fn append_one(path: &str) {
+        let h = shared_append_to_path(path, "ai8").unwrap();
+        let list = parse_schema("ai8").unwrap();
+        let v = crate::json::read_json_with_schema("[7, 7]", &list).unwrap();
+        let level = crate::compression::CompressionLevel::from_u8(0).unwrap();
+        shared_write_subpacket(h, level, v).unwrap();
+        shm::shfree(v).unwrap();
+        shared_close_handle(h).unwrap();
+    }
+
+    #[test]
+    fn a_stream_being_read_survives_an_append() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("read_append");
+        let path = dir.join("log.idx");
+        let p = path.to_str().unwrap().to_string();
+        write_int_stream(&path, &[&[1, 2], &[3, 4]]);
+
+        // An append cuts the footer a reader stops at and writes over it;
+        // the reader must see the stream as it was when it opened it.
+        let code = in_child(move || {
+            let h = open_istream(&p).unwrap();
+            append_one(&p);
+            matches!(drain_frames(h), Ok(2))
+        });
+        assert_eq!(code, 0, "a reader of an appended stream failed (negative: a signal)");
+        assert_eq!(stream_len(&path), 6);
+    }
+
+    #[test]
+    fn a_reader_stops_where_a_live_writer_was_when_it_opened() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("read_live");
+        let path = dir.join("log.idx");
+        let p = path.to_str().unwrap().to_string();
+        let w = shared_open_ostream_with_schema(&p, "ai8").unwrap();
+        append_ints8(w, "[1, 2]");
+        shared_flush_buffer(w).unwrap();
+
+        // The writer's next sub-packet lands over the temp footer a reader
+        // opened against; the reader must not read the head of one and the
+        // half-written body of another.
+        let r = open_istream(&p).unwrap();
+        append_ints8(w, "[3]");
+        shared_flush_buffer(w).unwrap();
+        let read = drain_frames(r);
+        shared_close_handle(w).unwrap();
+        assert_eq!(read.unwrap(), 1);
+    }
+
+    fn append_ints8(h: i64, json: &str) {
+        let list = parse_schema("ai8").unwrap();
+        let v = crate::json::read_json_with_schema(json, &list).unwrap();
+        let level = crate::compression::CompressionLevel::from_u8(0).unwrap();
+        shared_write_subpacket(h, level, v).unwrap();
+        shm::shfree(v).unwrap();
+    }
+
+    #[test]
+    fn appending_to_an_unclosed_stream_keeps_what_it_holds() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("append_unclosed");
+        let path = dir.join("log.idx");
+        let p = path.to_str().unwrap().to_string();
+
+        // A writer that ended without @close leaves its sub-packets behind a
+        // temp footer; resuming must keep them.
+        let w = shared_open_ostream_with_schema(&p, "ai8").unwrap();
+        append_ints8(w, "[1, 2]");
+        shared_flush_buffer(w).unwrap();
+        append_ints8(w, "[3]");
+        shared_flush_buffer(w).unwrap();
+        shared_discard_handle(w).unwrap();
+        let a = shared_append_to_path(&p, "ai8").unwrap();
+        append_ints8(a, "[4, 5]");
+        shared_close_handle(a).unwrap();
+        let f = open_ifile(&p).unwrap();
+        let layout = shared_stream_layout(f).unwrap();
+        shared_close_handle(f).unwrap();
+        let held: Vec<u64> = layout.iter().map(|(_, n, _)| *n).collect();
+        assert_eq!(held, vec![2, 1, 2], "the sub-packets written before the append were lost");
+    }
+
+    #[test]
+    fn appending_to_an_unclosed_compressed_stream_keeps_its_counts() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("append_unclosed_z");
+        let path = dir.join("log.idx");
+        let p = path.to_str().unwrap().to_string();
+        std::env::set_var("MORLOC_WRITE_BEHIND_DEPTH", "0");
+        let w = shared_open_ostream_with_schema(&p, "ai8").unwrap();
+        let list = parse_schema("ai8").unwrap();
+        let level = crate::compression::CompressionLevel::from_u8(3).unwrap();
+        for json in ["[1, 2, 3]", "[4]"] {
+            let v = crate::json::read_json_with_schema(json, &list).unwrap();
+            shared_write_subpacket(w, level, v).unwrap();
+            shm::shfree(v).unwrap();
+            shared_flush_buffer(w).unwrap();
+        }
+        shared_discard_handle(w).unwrap();
+        std::env::remove_var("MORLOC_WRITE_BEHIND_DEPTH");
+        let a = shared_append_to_path(&p, "ai8").unwrap();
+        append_ints8(a, "[5, 6]");
+        shared_close_handle(a).unwrap();
+        let f = open_ifile(&p).unwrap();
+        let layout = shared_stream_layout(f).unwrap();
+        shared_close_handle(f).unwrap();
+        let held: Vec<u64> = layout.iter().map(|(_, n, _)| *n).collect();
+        assert_eq!(held, vec![3, 1, 2]);
+    }
+
+    #[test]
+    fn a_saved_value_is_not_appended_to() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("append_data_packet");
+        let path = dir.join("saved.dat");
+        let p = path.to_str().unwrap().to_string();
+        let bytes = build_int_voidstar_subpacket(&[1, 2]);
+        std::fs::write(&path, &bytes).unwrap();
+
+        // A file holding one value has no stream to resume: appending would
+        // leave elements after it that no reader sees.
+        let e = shared_append_to_path(&p, "ai8").expect_err("@append resumed a saved value");
+        assert!(format!("{e:?}").contains("single value"), "unexpected error: {e:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn readers_keep_the_file_they_opened_when_it_is_rewritten() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("read_rewrite");
+        let path = dir.join("data.idx");
+        let p = path.to_str().unwrap().to_string();
+        write_int_stream(&path, &[&[1, 2], &[3, 4], &[5, 6]]);
+
+        // Rewriting a file being read must not pull its pages from under
+        // the readers.
+        let code = in_child(move || {
+            let file = open_ifile(&p).unwrap();
+            let stream = open_istream(&p).unwrap();
+            let h = shared_open_ostream_with_schema(&p, "ai4").unwrap();
+            shared_close_handle(h).unwrap();
+            handle_length(file).ok() == Some(6) && matches!(drain_frames(stream), Ok(3))
+        });
+        assert_eq!(code, 0, "a reader of a rewritten file failed (negative: a signal)");
+        assert_eq!(stream_len(&path), 0, "the rewrite is not visible at the path");
+    }
+
+    #[test]
+    fn rewriting_through_a_symlink_keeps_the_link_and_the_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("rewrite_link");
+        let target = dir.join("target.idx");
+        let link = dir.join("link.idx");
+        write_int_stream(&target, &[&[1, 2]]);
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let h = shared_open_ostream_with_schema(link.to_str().unwrap(), "ai4").unwrap();
+        shared_close_handle(h).unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(stream_len(&target), 0);
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640);
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_replaced_is_rewritten_in_place_unless_read() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root writes any directory, so the rename never fails
+        }
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("rewrite_readonly_dir");
+        let path = dir.join("out.idx");
+        let p = path.to_str().unwrap().to_string();
+        write_int_stream(&path, &[&[1, 2]]);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        // A directory this process may not write cannot take a new file;
+        // the old one is rewritten where it is, but not while it is read.
+        let reader = open_ifile(&p).unwrap();
+        let refused = shared_open_ostream_with_schema(&p, "ai8");
+        shared_close_handle(reader).unwrap();
+        let rewritten = shared_open_ostream_with_schema(&p, "ai8");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(refused.is_err(), "a file being read was rewritten in place");
+        shared_close_handle(rewritten.expect("a file nobody reads was not rewritten")).unwrap();
+        assert_eq!(stream_len(&path), 0);
+    }
+
+    #[test]
+    fn an_empty_file_is_written_in_place() {
+        use std::os::unix::fs::MetadataExt;
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("empty_in_place");
+        let path = dir.join("out.idx");
+        std::fs::write(&path, b"").unwrap();
+        let ino = std::fs::metadata(&path).unwrap().ino();
+        let h = shared_open_ostream_with_schema(path.to_str().unwrap(), "ai4").unwrap();
+        shared_close_handle(h).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), ino);
+    }
+
+    #[test]
+    fn a_file_renamed_in_before_the_lock_is_the_one_written() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("rename_before_lock");
+        let path = dir.join("out.idx");
+        let p = path.to_str().unwrap().to_string();
+        std::fs::write(&path, b"").unwrap();
+
+        // A rename landing between the open and the lock would leave the
+        // writer writing a file the path no longer names.
+        let other = dir.join("other.bin");
+        let (o, q) = (other.clone(), path.clone());
+        *BEFORE_STREAM_LOCK.lock().unwrap() = Some((p.clone(), Box::new(move || {
+            std::fs::write(&o, b"").unwrap();
+            std::fs::rename(&o, &q).unwrap();
+        })));
+        let h = shared_open_ostream_with_schema(&p, "ai4");
+        *BEFORE_STREAM_LOCK.lock().unwrap() = None;
+        let h = h.unwrap();
+        append_ints(h, "[1,2]");
+        shared_close_handle(h).unwrap();
+        assert_eq!(stream_len(&path), 2, "the stream was written to a file the path no longer names");
+    }
+
+    fn append_ints(h: i64, json: &str) {
+        let list = parse_schema("ai4").unwrap();
+        let v = crate::json::read_json_with_schema(json, &list).unwrap();
+        let level = crate::compression::CompressionLevel::from_u8(0).unwrap();
+        shared_write_subpacket(h, level, v).unwrap();
+        shm::shfree(v).unwrap();
     }
 
     /// Kill a child process while it holds the slot lock of `h`.
