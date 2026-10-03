@@ -1342,10 +1342,13 @@ PROPAGATE_ERROR(errmsg)|]
     -- ought to be". Split into a statement plus a default-initialised
     -- 'mlc::Unit{}' whenever the let-var's type is 'Unit' -- the effect
     -- fires, the caller's 'Unit' variable is present, and any subsequent
-    -- reference to @ni@ still type-checks.
+    -- reference to @ni@ still type-checks. A bare variable has no effect,
+    -- so it is not emitted as a statement.
     makeLet :: (Int -> MDoc) -> Int -> MDoc -> Bool -> LetBinding -> PoolDocs -> PoolDocs -> PoolDocs
     makeLet namer letIndex typestr isUnit binding p1 p2 =
       let letAssignment
+            | isUnit && isIdentifierExpr (poolExpr p1) =
+                [idoc|#{typestr} #{namer letIndex}{};|]
             | isUnit =
                 [idoc|#{poolExpr p1};|]
                   <+> [idoc|#{typestr} #{namer letIndex}{};|]
@@ -1443,6 +1446,12 @@ isCallExpr :: MDoc -> Bool
 isCallExpr d =
   let t = render d
    in T.isSuffixOf ")" t && not (T.isPrefixOf "(" t) && not (T.isPrefixOf "mlc::Unit" t)
+
+-- | Whether a rendered expression is a bare C++ identifier.
+isIdentifierExpr :: MDoc -> Bool
+isIdentifierExpr d = case T.uncons (render d) of
+  Just (c, rest) -> (DC.isAlpha c || c == '_') && T.all (\x -> DC.isAlphaNum x || x == '_') rest
+  Nothing -> False
 
 -- | C++ cache wrap. Mirrors the Python/R generic version but emits
 -- C++ syntax and routes through the runtime's C ABI directly (the
