@@ -528,11 +528,22 @@ pub unsafe extern "C" fn mlc_save_voidstar(
     }
     libc::close(fd);
 
+    let guard = match crate::utility::ReplaceGuard::take(std::path::Path::new(path_str.as_ref())) {
+        Ok(g) => g,
+        Err(e) => {
+            libc::unlink(tmp_buf.as_ptr() as *const c_char);
+            set_errmsg(errmsg, &MorlocError::Io(e));
+            return 1;
+        }
+    };
     if libc::rename(tmp_buf.as_ptr() as *const c_char, path) != 0 {
+        let e = std::io::Error::last_os_error();
+        drop(guard);
         libc::unlink(tmp_buf.as_ptr() as *const c_char);
-        set_errmsg(errmsg, &MorlocError::Io(std::io::Error::last_os_error()));
+        set_errmsg(errmsg, &MorlocError::Io(e));
         return 1;
     }
+    drop(guard);
     0
 }
 

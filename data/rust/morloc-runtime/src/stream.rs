@@ -926,6 +926,29 @@ impl ProcessLocalSlot {
     }
 }
 
+fn file_identity_of(f: &std::fs::File) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    f.metadata().map_or((0, 0), |m| (m.dev(), m.ino()))
+}
+
+/// A process joining a stream opens its file by path; refuse it unless that
+/// is still the file the stream was opened on. Another file renamed over
+/// the path would be read through the original's index, or written instead.
+fn check_file_identity(
+    handle: i64,
+    slot: &RegistrySlot,
+    path: &str,
+    found: (u64, u64),
+) -> Result<(), MorlocError> {
+    if slot.file_ino != 0 && (slot.file_dev, slot.file_ino) != found {
+        return Err(MorlocError::Other(format!(
+            "stream handle {:#x}: the file '{}' was replaced after the stream was opened",
+            handle, path,
+        )));
+    }
+    Ok(())
+}
+
 /// The device and inode of an open file, or zeros if they cannot be read.
 fn file_identity(fd: libc::c_int) -> (u64, u64) {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
@@ -937,7 +960,7 @@ fn file_identity(fd: libc::c_int) -> (u64, u64) {
 
 /// Close a descriptor this process locked for a stream that never
 /// opened, releasing the lock for any child forked in between.
-fn unlock_and_close(fd: libc::c_int) {
+pub(crate) fn unlock_and_close(fd: libc::c_int) {
     LOCKED_FDS.lock().unwrap_or_else(|p| p.into_inner()).retain(|&f| f != fd);
     unsafe {
         libc::flock(fd, libc::LOCK_UN);
@@ -1385,13 +1408,14 @@ fn attach_process_local_slot(
 
     // Open + mmap depending on kind.
     let (fd, map_file, mmap_ptr, mmap_size) = match kind {
-        x if x == MLC_KIND_IFILE => {
-            let (mp, sz) = mmap_file_readonly(&path_str)?;
-            (-1i32, None, mp, sz)
-        }
-        x if x == MLC_KIND_ISTREAM => {
+        x if x == MLC_KIND_IFILE || x == MLC_KIND_ISTREAM => {
             let (f, mp, sz) = mmap_file_readonly_keep(&path_str)?;
-            (-1i32, Some(f), mp, sz)
+            if let Err(e) = check_file_identity(handle, slot, &path_str, file_identity_of(&f)) {
+                unsafe { libc::munmap(mp as *mut libc::c_void, sz as usize); }
+                return Err(e);
+            }
+            let keep = if x == MLC_KIND_ISTREAM { Some(f) } else { None };
+            (-1i32, keep, mp, sz)
         }
         x if x == MLC_KIND_OSTREAM => {
             // Non-opener pools open RDWR but DO NOT acquire flock
@@ -1408,6 +1432,10 @@ fn attach_process_local_slot(
             };
             if fd < 0 {
                 return Err(MorlocError::Io(std::io::Error::last_os_error()));
+            }
+            if let Err(e) = check_file_identity(handle, slot, &path_str, file_identity(fd)) {
+                unsafe { libc::close(fd); }
+                return Err(e);
             }
             (fd, None, std::ptr::null_mut(), 0)
         }
@@ -1987,7 +2015,7 @@ const REOPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 /// another process ended may hold it until its opener releases it; that
 /// release is waited for, within `REOPEN_WAIT`, rather than reported as a
 /// conflict. Returns the reason the lock was refused.
-fn lock_stream_file(fd: libc::c_int) -> Result<(), String> {
+pub(crate) fn lock_stream_file(fd: libc::c_int) -> Result<(), String> {
     release_ended_streams();
     let try_lock = || {
         let locked = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0;
@@ -2186,7 +2214,9 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
 
     // mmap + parse the file BEFORE we touch the registry, so a bad
     // file doesn't leave a half-initialised slot.
-    let (mmap_ptr, mmap_size) = mmap_file_readonly(path)?;
+    let (map_file, mmap_ptr, mmap_size) = mmap_file_readonly_keep(path)?;
+    let (file_dev, file_ino) = file_identity_of(&map_file);
+    drop(map_file);
     let parsed = match parse_stream_file(path, mmap_ptr, mmap_size) {
         Ok(p) => p,
         Err(e) => {
@@ -2232,6 +2262,8 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
         unsafe {
             let mp = slot as *const RegistrySlot as *mut RegistrySlot;
             (*mp).kind = MLC_KIND_IFILE;
+            (*mp).file_dev = file_dev;
+            (*mp).file_ino = file_ino;
             (*mp).file_path = slot_owns(path_rel);
             (*mp).file_path_len = path.len() as u32;
             (*mp).schema_str = slot_owns(schema_rel);
@@ -2314,6 +2346,7 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
     reject_dev_stdio_path(path)?;
 
     let (map_file, mmap_ptr, mmap_size) = mmap_file_readonly_keep(path)?;
+    let (file_dev, file_ino) = file_identity_of(&map_file);
     let parsed = match parse_stream_file(path, mmap_ptr, mmap_size) {
         Ok(p) => p,
         Err(e) => {
@@ -2353,6 +2386,8 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
         unsafe {
             let mp = slot as *const RegistrySlot as *mut RegistrySlot;
             (*mp).kind = MLC_KIND_ISTREAM;
+            (*mp).file_dev = file_dev;
+            (*mp).file_ino = file_ino;
             (*mp).file_path = slot_owns(path_rel);
             (*mp).file_path_len = path.len() as u32;
             (*mp).schema_str = slot_owns(schema_rel);
@@ -5594,7 +5629,32 @@ pub fn shared_derive_istream(ifile_handle: i64) -> Result<i64, MorlocError> {
         )));
     }
     let path = shared_handle_path(ifile_handle)?;
-    shared_open_istream(&path)
+    let opened_on = handle_file_identity(ifile_handle)?;
+    let h = shared_open_istream(&path)?;
+    let found = handle_file_identity(h)?;
+    if opened_on.1 != 0 && found != opened_on {
+        let _ = shared_close_handle(h);
+        return Err(MorlocError::Other(format!(
+            "@stream: the file '{}' was replaced after it was opened", path,
+        )));
+    }
+    Ok(h)
+}
+
+/// The device and inode a handle's file had when it was opened.
+fn handle_file_identity(handle: i64) -> Result<(u64, u64), MorlocError> {
+    use std::sync::atomic::Ordering;
+    let (gen_claim, slot_idx) = unpack_handle(handle);
+    let slot = slot_ref(slot_idx).ok_or_else(|| MorlocError::Other(format!(
+        "stream handle {:#x}: slot index {} out of range", handle, slot_idx,
+    )))?;
+    let identity = (slot.file_dev, slot.file_ino);
+    if slot.generation.load(Ordering::Acquire) & GENERATION_MASK != gen_claim {
+        return Err(MorlocError::Other(format!(
+            "stream handle {:#x}: the stream was closed", handle,
+        )));
+    }
+    Ok(identity)
 }
 
 /// Batched suballoc-size lookup over a slice of shared-registry handles.
@@ -7620,8 +7680,8 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
 
     // Built beside the destination and renamed onto it at the end, so a
     // source that is also the destination is read from its original bytes
-    // and a merge that fails leaves the destination as it was. No flock
-    // guard: this is a one-shot batch merge with no shared lock layer.
+    // and a merge that fails leaves the destination as it was. The rename
+    // refuses a destination a stream is writing.
     let staged = crate::utility::AtomicFile::create(std::path::Path::new(dest))
         .map_err(MorlocError::Io)?;
     let dest_fd = staged.as_raw_fd();
@@ -9870,7 +9930,9 @@ pub fn shared_open_ifile_recovered(
 
     reject_dev_stdio_path(path)?;
 
-    let (mmap_ptr, mmap_size) = mmap_file_readonly(path)?;
+    let (map_file, mmap_ptr, mmap_size) = mmap_file_readonly_keep(path)?;
+    let (file_dev, file_ino) = file_identity_of(&map_file);
+    drop(map_file);
     let parsed = match parse_stream_file(path, mmap_ptr, mmap_size) {
         Ok(p) => p,
         Err(e) => {
@@ -9931,6 +9993,8 @@ pub fn shared_open_ifile_recovered(
         unsafe {
             let mp = slot as *const RegistrySlot as *mut RegistrySlot;
             (*mp).kind = MLC_KIND_IFILE;
+            (*mp).file_dev = file_dev;
+            (*mp).file_ino = file_ino;
             (*mp).file_path = slot_owns(path_rel);
             (*mp).file_path_len = path.len() as u32;
             (*mp).schema_str = slot_owns(schema_rel);
@@ -10694,6 +10758,94 @@ mod tests {
         let state = slot_ref(idx).unwrap().state.load(Ordering::Acquire);
         release_forked_holder((pid, release));
         assert_eq!(state, SLOT_STATE_FREE, "a slot was left for an opener that had exited");
+    }
+
+    #[test]
+    fn a_replaced_input_file_is_not_read_through_its_old_index() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("replaced_input");
+        let path = dir.join("in.idx");
+        let p = path.to_str().unwrap().to_string();
+        write_int_stream(&path, &[&[1, 2], &[3, 4]]);
+        let q = p.clone();
+        let (pid, h, release) = child_reporting(move || open_ifile(&q).unwrap());
+
+        // Another file renamed over the path after the open: a pool that
+        // joins the stream now must not read it with the original's index.
+        let other = dir.join("other.idx");
+        write_int_stream(&other, &[&[9, 9, 9, 9, 9, 9, 9]]);
+        std::fs::rename(&other, &path).unwrap();
+        let read = handle_length(h).and_then(|_| shared_stream_layout(h).map(|_| ()));
+        release_forked_holder((pid, release));
+        let e = read.expect_err("a replaced file was read through the original's index");
+        assert!(format!("{e:?}").contains("replaced"), "unexpected error: {e:?}");
+    }
+
+    #[test]
+    fn a_stream_of_a_replaced_input_file_is_refused() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("replaced_derive");
+        let path = dir.join("in.idx");
+        write_int_stream(&path, &[&[1, 2]]);
+        let h = open_ifile(path.to_str().unwrap()).unwrap();
+        let other = dir.join("other.idx");
+        write_int_stream(&other, &[&[7]]);
+        std::fs::rename(&other, &path).unwrap();
+        let e = shared_derive_istream(h).expect_err("@stream read a file that replaced its input");
+        assert!(format!("{e:?}").contains("replaced"), "unexpected error: {e:?}");
+        shared_close_handle(h).unwrap();
+    }
+
+    #[test]
+    fn a_file_being_written_as_a_stream_is_not_replaced() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("replace_live");
+        let src = dir.join("src.idx");
+        write_int_stream(&src, &[&[1, 2]]);
+        let dest = dir.join("dest.idx");
+        let d = dest.to_str().unwrap().to_string();
+        let h = shared_open_ostream_with_schema(&d, "ai4").unwrap();
+
+        // Renaming another file over a stream's path would leave its
+        // writer writing into a file nobody can reach.
+        let merged = concat_files(&[src.to_str().unwrap()], &d);
+        let written = crate::utility::write_atomic_path(&dest, b"replacement");
+        assert!(merged.is_err(), "@concat replaced a file a stream was writing");
+        assert!(written.is_err(), "an atomic write replaced a file a stream was writing");
+        shared_close_handle(h).unwrap();
+        assert_eq!(stream_len(&dest), 0, "the stream's file was replaced");
+
+        // Once the stream is closed the path is an ordinary file again.
+        concat_files(&[src.to_str().unwrap()], &d).unwrap();
+        assert_eq!(stream_len(&dest), 2);
+    }
+
+    #[test]
+    fn a_replaced_output_file_is_not_written() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("replaced_output");
+        let path = dir.join("out.idx");
+        let p = path.to_str().unwrap().to_string();
+        let q = p.clone();
+        let (pid, h, release) = child_reporting(move || {
+            shared_open_ostream_with_schema(&q, "ai4").unwrap()
+        });
+
+        // A pool writing a stream another opened must write the opener's
+        // file, not whatever now has its name.
+        let other = dir.join("other.bin");
+        std::fs::write(&other, b"not a stream").unwrap();
+        std::fs::rename(&other, &path).unwrap();
+        let list = parse_schema("ai4").unwrap();
+        let v = crate::json::read_json_with_schema("[1,2]", &list).unwrap();
+        let level = crate::compression::CompressionLevel::from_u8(0).unwrap();
+        let wrote = shared_write_subpacket(h, level, v).and_then(|_| shared_flush_buffer(h));
+        shm::shfree(v).unwrap();
+        let after = std::fs::read(&path).unwrap();
+        release_forked_holder((pid, release));
+        assert_eq!(after, b"not a stream", "the replacing file was written");
+        let e = wrote.expect_err("a write to a replaced file succeeded");
+        assert!(format!("{e:?}").contains("replaced"), "unexpected error: {e:?}");
     }
 
     /// Kill a child process while it holds the slot lock of `h`.

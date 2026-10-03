@@ -230,7 +230,9 @@ impl AtomicFile {
         let file = self.file.take().expect("AtomicFile committed twice");
         file.sync_all()?;
         drop(file);
+        let guard = ReplaceGuard::take(&self.dest)?;
         std::fs::rename(&self.tmp, &self.dest)?;
+        drop(guard);
         let dir = self.dest.parent().unwrap_or(std::path::Path::new("."));
         if let Ok(dir_f) = std::fs::File::open(dir) {
             let _ = dir_f.sync_all();
@@ -245,6 +247,43 @@ impl Drop for AtomicFile {
         // was abandoned and the destination must keep what it had.
         if self.file.take().is_some() {
             let _ = std::fs::remove_file(&self.tmp);
+        }
+    }
+}
+
+/// The lock of a file about to be replaced, held across the rename. A
+/// stream writing the file holds that lock; replacing the file under it
+/// would leave the writer writing into a file nobody can reach.
+pub struct ReplaceGuard {
+    fd: Option<libc::c_int>,
+}
+
+impl ReplaceGuard {
+    pub fn take(dest: &std::path::Path) -> std::io::Result<Self> {
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = std::ffi::CString::new(dest.as_os_str().as_bytes())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+        if fd < 0 {
+            // Nothing there yet, or nothing this process may open: no
+            // stream of this program can be writing it.
+            return Ok(ReplaceGuard { fd: None });
+        }
+        if let Err(why) = crate::stream::lock_stream_file(fd) {
+            unsafe { libc::close(fd); }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ResourceBusy,
+                format!("'{}' is open for writing as a stream: {}", dest.display(), why),
+            ));
+        }
+        Ok(ReplaceGuard { fd: Some(fd) })
+    }
+}
+
+impl Drop for ReplaceGuard {
+    fn drop(&mut self) {
+        if let Some(fd) = self.fd.take() {
+            crate::stream::unlock_and_close(fd);
         }
     }
 }
