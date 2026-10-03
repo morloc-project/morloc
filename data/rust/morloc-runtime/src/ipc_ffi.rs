@@ -725,6 +725,14 @@ pub unsafe extern "C" fn send_and_receive_over_socket_wait(
                                 std::mem::size_of::<libc::sockaddr_un>() as u32);
         if retcode == 0 { break; }
         attempts += 1;
+        if crate::daemon_ffi::is_recovering() {
+            close_socket(client_fd);
+            set_errmsg(errmsg, &MorlocError::Ipc(format!(
+                "Failed to connect to pipe '{}': the daemon is recovering from a pool crash",
+                CStr::from_ptr(socket_path).to_string_lossy()
+            )));
+            return ptr::null_mut();
+        }
         if attempts > 300 { // ~30 seconds with 100ms sleep
             close_socket(client_fd);
             set_errmsg(errmsg, &MorlocError::Ipc(format!(

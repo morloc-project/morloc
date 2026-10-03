@@ -206,9 +206,46 @@ pub fn is_recovering() -> bool {
 /// progress (caller should treat that as "someone else got here first" and
 /// skip the recovery sequence).
 pub fn begin_recovery() -> bool {
+    let _requests = requests_in_flight();
     RECOVERY_IN_PROGRESS
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok()
+}
+
+static REQUESTS_IN_FLIGHT: Mutex<usize> = Mutex::new(0);
+static REQUESTS_DRAINED: Condvar = Condvar::new();
+
+fn requests_in_flight() -> std::sync::MutexGuard<'static, usize> {
+    REQUESTS_IN_FLIGHT.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+pub(crate) struct InFlight(());
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        let mut n = requests_in_flight();
+        *n -= 1;
+        if *n == 0 {
+            REQUESTS_DRAINED.notify_all();
+        }
+    }
+}
+
+pub(crate) fn enter_request() -> Option<InFlight> {
+    let mut n = requests_in_flight();
+    if RECOVERY_IN_PROGRESS.load(Ordering::SeqCst) {
+        return None;
+    }
+    *n += 1;
+    Some(InFlight(()))
+}
+
+pub fn wait_for_requests(timeout: std::time::Duration) -> bool {
+    let n = requests_in_flight();
+    let (n, _) = REQUESTS_DRAINED
+        .wait_timeout_while(n, timeout, |n| *n > 0)
+        .unwrap_or_else(|p| p.into_inner());
+    *n == 0
 }
 
 /// Mark recovery as complete. Workers will start accepting requests again.
@@ -244,6 +281,11 @@ pub unsafe extern "C" fn morloc_daemon_is_shutting_down() -> bool {
 #[no_mangle]
 pub unsafe extern "C" fn morloc_daemon_begin_recovery() -> bool {
     begin_recovery()
+}
+
+#[no_mangle]
+pub extern "C" fn morloc_daemon_wait_for_requests(timeout_ms: u64) -> bool {
+    wait_for_requests(std::time::Duration::from_millis(timeout_ms))
 }
 
 #[no_mangle]
@@ -1542,7 +1584,7 @@ pub unsafe extern "C" fn daemon_dispatch(
     // poller in pool-crash-stress) can distinguish the recovery window
     // from normal operation: the outer JSON wrapper turns success=false
     // into `"status":"error"`, which a polling loop can wait on.
-    if is_recovering() {
+    let Some(_in_flight) = enter_request() else {
         (*resp).success = false;
         (*resp).error_kind = DAEMON_ERROR_RECOVERING;
         let c = CString::new(
@@ -1550,7 +1592,7 @@ pub unsafe extern "C" fn daemon_dispatch(
         ).unwrap();
         (*resp).error = libc::strdup(c.as_ptr());
         return resp;
-    }
+    };
 
     match (*request).method {
         DaemonMethod::Health => {
@@ -3215,6 +3257,37 @@ mod media_wire_tests {
             libc::free(resp.mime as *mut c_void);
             daemon_free_response(parsed);
         }
+    }
+}
+
+#[cfg(test)]
+mod recovery_gate_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn recovery_waits_for_requests_already_running_and_admits_none() {
+        let (inside_tx, inside_rx) = std::sync::mpsc::channel();
+        let (leave_tx, leave_rx) = std::sync::mpsc::channel::<()>();
+        let request = std::thread::spawn(move || {
+            let guard = enter_request().expect("admitted before recovery");
+            inside_tx.send(()).unwrap();
+            leave_rx.recv().unwrap();
+            drop(guard);
+        });
+        inside_rx.recv().unwrap();
+        assert!(begin_recovery());
+        let admitted_during = enter_request().is_some();
+        let drained_while_running = wait_for_requests(Duration::from_millis(200));
+        leave_tx.send(()).unwrap();
+        let drained_after = wait_for_requests(Duration::from_secs(5));
+        request.join().unwrap();
+        end_recovery();
+        let admitted_after = enter_request().is_some();
+        assert!(!admitted_during, "a request was admitted during recovery");
+        assert!(!drained_while_running, "recovery saw no requests while one was running");
+        assert!(drained_after, "recovery never saw the running request finish");
+        assert!(admitted_after, "requests were refused after recovery ended");
     }
 }
 

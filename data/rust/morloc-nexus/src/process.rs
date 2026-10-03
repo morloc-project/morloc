@@ -112,10 +112,7 @@ pub fn pool_check_and_recover_ptr() -> *const std::ffi::c_void {
 /// pools rather than bursty user-driven crashes.
 const RECOVERY_MAX_ATTEMPTS: usize = 100;
 const RECOVERY_WINDOW: Duration = Duration::from_secs(60);
-/// Brief drain wait between marking recovery in progress and tearing
-/// down SHM, so any worker mid-request can fail back through its
-/// per-eval arena's Drop and release SHM before we munmap.
-const RECOVERY_DRAIN: Duration = Duration::from_millis(250);
+const RECOVERY_DRAIN_LIMIT: Duration = Duration::from_secs(60);
 /// Wait between SIGTERM and SIGKILL on remaining live pools.
 const RECOVERY_TERM_GRACE: Duration = Duration::from_millis(250);
 
@@ -137,6 +134,7 @@ extern "C" {
     fn morloc_daemon_is_shutting_down() -> bool;
     fn morloc_daemon_begin_recovery() -> bool;
     fn morloc_daemon_end_recovery();
+    fn morloc_daemon_wait_for_requests(timeout_ms: u64) -> bool;
     // Hands a reaped child's exit status to whoever forked it. The daemon
     // forks the compiler to serve an expression and then waits for it; the
     // drains below would otherwise consume the status first and leave that
@@ -151,9 +149,9 @@ extern "C" {
 /// Invoked once per daemon main-loop iteration (~1 s cadence).
 /// Detects dead pool processes via `pool_is_alive`. If any are dead,
 /// runs the coordinated recovery sequence:
-/// 1. Set `RECOVERY_IN_PROGRESS` so request handlers bail out.
-/// 2. Brief drain so in-flight workers' arenas release SHM.
-/// 3. SIGTERM -> SIGKILL all remaining live pools; reap each.
+/// 1. Close the request gate: no new request is admitted.
+/// 2. SIGTERM -> SIGKILL all remaining live pools; reap each.
+/// 3. Wait for every admitted request to finish; exit if they do not.
 /// 4. Drop the entire SHM namespace (shclose / reset_all).
 /// 5. Bump RECOVERY_GENERATION, compute new basename.
 /// 6. Re-shinit and respawn every pool with the new basename.
@@ -162,10 +160,17 @@ extern "C" {
 ///
 /// Loop guard: if more than RECOVERY_MAX_ATTEMPTS recoveries fire
 /// within RECOVERY_WINDOW, the daemon exits with a fatal error.
+static POOL_CHECK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 extern "C" fn pool_check_and_recover(
     _sockets: *mut morloc_runtime_types::daemon_socket::MorlocSocket,
     n_pools: usize,
 ) {
+    let _checking = match POOL_CHECK.try_lock() {
+        Ok(g) => g,
+        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
     // First, enqueue PID-sweep requests for any pool that has died
     // since our last visit. The sweeper thread releases the dead
     // pool's slots in the shared SHM registry off this latency path.
@@ -225,11 +230,6 @@ extern "C" fn pool_check_and_recover(
         }
     }
 
-    // Step 1: drain. Workers see RECOVERY_IN_PROGRESS at request entry
-    // and bail. In-flight workers' socket calls to dying pools fail
-    // with ECONNREFUSED; their per-eval arenas drop, releasing SHM.
-    std::thread::sleep(RECOVERY_DRAIN);
-
     // Step 2: SIGTERM remaining live pools; brief grace; SIGKILL the
     // holdouts; reap.
     for i in 0..n_pools {
@@ -245,7 +245,23 @@ extern "C" fn pool_check_and_recover(
             unsafe { libc::kill(-pgid, libc::SIGKILL); }
         }
     }
-    while unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) } > 0 {}
+    loop {
+        let mut status: libc::c_int = 0;
+        let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+        if pid <= 0 {
+            break;
+        }
+        unsafe { morloc_note_child_exit(pid, status) };
+    }
+
+    if !unsafe { morloc_daemon_wait_for_requests(RECOVERY_DRAIN_LIMIT.as_millis() as u64) } {
+        eprintln!(
+            "morloc daemon: requests still running {:?} into pool crash recovery; \
+             exiting rather than unmapping shared memory they may be reading",
+            RECOVERY_DRAIN_LIMIT
+        );
+        clean_exit(1);
+    }
 
     // Step 3: tear down all SHM.
     unsafe {
