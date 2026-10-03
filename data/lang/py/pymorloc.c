@@ -2414,7 +2414,9 @@ error:
     return NULL;
 }
 
-static PyObject*  pybinding__send_packet_to_foreign_server(PyObject* self, PyObject* args){ MAYFAIL
+// Send a dispatch's reply. What the dispatch still holds on this thread is
+// released once the reply holds the caller's reference, before it is sent.
+static PyObject*  pybinding__send_reply(PyObject* self, PyObject* args){ MAYFAIL
     int client_fd = 0;
     uint8_t* packet = NULL;
     size_t packet_size = 0;
@@ -2429,7 +2431,7 @@ static PyObject*  pybinding__send_packet_to_foreign_server(PyObject* self, PyObj
     // just the syscall, mirroring the stream_from_client binding.)
     size_t bytes_sent = 0;
     Py_BEGIN_ALLOW_THREADS
-    bytes_sent = send_packet_to_foreign_server(client_fd, packet, &child_errmsg_);
+    bytes_sent = send_reply_to_foreign_server(client_fd, packet, shm_tracker_flush, &child_errmsg_);
     Py_END_ALLOW_THREADS
     if (child_errmsg_ != NULL) {
         char* prior_err = get_prior_err();
@@ -4462,7 +4464,9 @@ static PyMethodDef Methods[] = {
     {"close_daemon", pybinding__close_daemon, METH_VARARGS, "Banish the daemon back to the abyss from whence it came"},
     {"wait_for_client", pybinding__wait_for_client, METH_VARARGS, "Listen over a pipe until a client packet arrives"},
     {"read_morloc_call_packet", pybinding__read_morloc_call_packet, METH_VARARGS, "Parse a morloc call packet"},
-    {"send_packet_to_foreign_server", pybinding__send_packet_to_foreign_server, METH_VARARGS, "Send data to a foreign server"},
+    {"send_reply", pybinding__send_reply, METH_VARARGS, "Send a dispatch's reply, releasing what the dispatch holds first"},
+    // The name pools built by earlier compilers call.
+    {"send_packet_to_foreign_server", pybinding__send_reply, METH_VARARGS, "Same as send_reply"},
     {"stream_from_client", pybinding__stream_from_client, METH_VARARGS, "Stream data from the client"},
     {"close_socket", pybinding__close_socket, METH_VARARGS, "Close the socket"},
     {"shm_live_bytes", pybinding__shm_live_bytes, METH_NOARGS, "Bytes of shared memory the program holds now (-1 unless MORLOC_SHM_STATS is set)"},

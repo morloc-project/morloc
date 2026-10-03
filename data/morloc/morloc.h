@@ -1124,9 +1124,9 @@ typedef struct {
     pool_concurrency_t concurrency;
     int initial_workers;
     bool dynamic_scaling;
-    // Run on the worker thread once a dispatch's reply has been sent (or
-    // could not be); NULL for none.
-    void (*after_reply)(void);
+    // Release what a dispatch still holds: run on the worker thread once the
+    // reply holds the caller's reference and before it is sent; NULL for none.
+    void (*release_dispatch)(void);
 } pool_config_t;
 
 typedef struct pool_state_s pool_state_t;
@@ -1497,6 +1497,7 @@ uint8_t* send_and_receive_over_socket_wait(
 uint8_t* send_and_receive_over_socket(const char* socket_path, const uint8_t* packet, ERRMSG);
 void mlc_set_self_socket(const char* socket_path);
 size_t send_packet_to_foreign_server(int client_fd, uint8_t* packet, ERRMSG);
+size_t send_reply_to_foreign_server(int client_fd, uint8_t* packet, void (*release)(void), ERRMSG);
 int wait_for_client_with_timeout(language_daemon_t* daemon, int timeout_us, ERRMSG);
 int wait_for_client(language_daemon_t* daemon, ERRMSG);
 

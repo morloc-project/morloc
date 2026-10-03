@@ -16,9 +16,9 @@
 //!        `make_*` call (the host frees it with `libc::free`). The
 //!        `morloc-runtime-types::packet` Vec builders are never used for a
 //!        returned value.
-//!  * I3  SHM allocated for a result outlives the socket send; freeing is
-//!        deferred until the reply is sent, via `dispatch_flush` (the pool's
-//!        after-reply hook). A per-alloc
+//!  * I3  SHM allocated for a result is released by `dispatch_flush` (the
+//!        pool's `release_dispatch`) only once the reply holds the caller's
+//!        own reference to it. A per-alloc
 //!        `ShmGuard` reclaims a half-built block if serialization panics.
 //!  * I4  The recur env is thread-local (THREAD concurrency runs manifolds in
 //!        one address space).
@@ -568,7 +568,7 @@ unsafe fn release_tracked(block: *mut c_void) {
 }
 
 /// Free all deferred SHM blocks. The pool runs this once a dispatch's reply
-/// is sent; generated `local_dispatch`/`remote_dispatch` also call it at
+/// holds the caller's reference, before sending it; generated `local_dispatch`/`remote_dispatch` also call it at
 /// entry, for anything the thread held outside a dispatch.
 pub fn dispatch_flush() {
     SHM_TRACKER.with(|t| {

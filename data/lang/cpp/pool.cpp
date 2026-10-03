@@ -154,8 +154,8 @@ std::string interweave_strings(const std::vector<std::string>& first, const std:
 // packets it built (_put_value, _dup_packet) or received as call results
 // (foreign_call_v). An entry ends when its packet is released
 // (_release_packet, mlc::Packet), and whatever remains is released once the
-// dispatch's reply is sent (after_reply): the reply carries the caller's own
-// reference to its value.
+// dispatch's reply holds the caller's own reference to its value, before the
+// reply is sent (release_dispatch).
 struct ShmEntry { absptr_t ptr; };
 // Releasing the entries is shared by the ordinary flush and by thread
 // teardown, so it is written once and takes the container explicitly.
@@ -170,12 +170,11 @@ static void _shm_release_entries(std::vector<ShmEntry>& entries) {
     entries.clear();
 }
 
-// The tracker releases what it still holds when its thread ends. A worker
-// is retired only after going idle for longer than the dispatch it would
-// otherwise have been flushed by, so this is never earlier than the flush
-// it stands in for -- it just happens on a thread that has no next
-// dispatch to do it. Making the container itself own the teardown avoids
-// depending on the destruction order of two thread-local objects.
+// The tracker releases what it still holds when its thread ends: entries
+// left by a non-dispatch use of the thread, which would otherwise wait for a
+// next dispatch the thread will never run. Making the container itself own
+// the teardown avoids depending on the destruction order of two thread-local
+// objects.
 struct ShmTracker : std::vector<ShmEntry> {
     ~ShmTracker() { _shm_release_entries(*this); }
 };
@@ -1462,7 +1461,7 @@ uint8_t* cpp_local_dispatch(uint32_t mid, const uint8_t** args,
                                     size_t nargs, void* ctx) {
     (void)nargs; (void)ctx;
     // Anything a non-dispatch use of this thread left behind; a dispatch's
-    // own entries are released after its reply.
+    // own entries are released as its reply is sent (release_dispatch).
     _shm_tracker_flush();
     morloc_debug_flush_dispatch();
     try {
@@ -1539,6 +1538,6 @@ void cpp_register(pool_config_t* config, const char* tmpdir) {
     config->concurrency = POOL_THREADS;
     config->initial_workers = 1;
     config->dynamic_scaling = true;
-    config->after_reply = _shm_tracker_flush;
+    config->release_dispatch = _shm_tracker_flush;
     _init_schemas();
 }

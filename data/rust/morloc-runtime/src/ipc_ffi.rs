@@ -916,18 +916,37 @@ pub unsafe extern "C" fn send_packet_to_foreign_server(
     packet: *mut u8,
     errmsg: *mut *mut c_char,
 ) -> usize {
+    send_reply_to_foreign_server(client_fd, packet, None, errmsg)
+}
+
+/// Send a dispatch's reply, running `release` once the reply holds the
+/// caller's own reference to its value and before any of it is sent. A pool
+/// passes the release of everything the dispatch still holds: a caller that
+/// has its value can ask for the next one at once, and if that request is
+/// answered while this dispatch still holds the previous value, both are in
+/// memory together. `release` runs whether or not the send succeeds.
+#[no_mangle]
+pub unsafe extern "C" fn send_reply_to_foreign_server(
+    client_fd: i32,
+    packet: *mut u8,
+    release: Option<unsafe extern "C" fn()>,
+    errmsg: *mut *mut c_char,
+) -> usize {
     clear_errmsg(errmsg);
 
     let mut err: *mut c_char = ptr::null_mut();
     let size = crate::packet_ffi::morloc_packet_size(packet, &mut err);
     if !err.is_null() {
+        if let Some(f) = release { f(); }
         *errmsg = err;
         return 0;
     }
 
     // The result carries its own reference from here, taken before the packet
     // leaves this process. See `donate_packet_reference`.
-    if let Err(e) = crate::packet_ffi::donate_packet_reference(packet) {
+    let donated = crate::packet_ffi::donate_packet_reference(packet);
+    if let Some(f) = release { f(); }
+    if let Err(e) = donated {
         set_errmsg(errmsg, &e);
         return 0;
     }
@@ -1233,6 +1252,104 @@ mod tests {
             }
             libc::close(peer);
             libc::close(server);
+        }
+    }
+}
+
+#[cfg(test)]
+mod reply_tests {
+    //! A pool's release of what a dispatch holds must be done before the
+    //! caller can see the reply: a caller that already has its value can ask
+    //! the same pool for the next one at once, and if that request is
+    //! answered while the previous value is still held, both are in memory
+    //! together.
+    use super::*;
+    use crate::cschema::CSchema;
+    use crate::shm::AbsPtr;
+    use std::cell::Cell;
+
+    thread_local! {
+        static HELD: Cell<AbsPtr> = const { Cell::new(ptr::null_mut()) };
+        static PEER: Cell<i32> = const { Cell::new(-1) };
+        static SEEN_COUNT: Cell<Option<u32>> = const { Cell::new(None) };
+        static PEER_HAD_DATA: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    unsafe extern "C" fn release_dispatch() {
+        let abs = HELD.with(|h| h.get());
+        SEEN_COUNT.with(|c| c.set(crate::shm::reference_count(abs)));
+        let peer = PEER.with(|p| p.get());
+        if peer >= 0 {
+            let mut pfd = libc::pollfd { fd: peer, events: libc::POLLIN, revents: 0 };
+            PEER_HAD_DATA.with(|d| d.set(Some(libc::poll(&mut pfd, 1, 0) > 0)));
+        }
+        crate::shm::shfree(abs).expect("dispatch release");
+    }
+
+    unsafe fn rptr_packet(abs: AbsPtr) -> (*mut u8, *mut CSchema) {
+        let rel = crate::shm::abs2rel(abs).expect("relptr");
+        let schema = crate::schema::Schema::primitive(crate::schema::SerialType::Uint8);
+        let cs = CSchema::from_rust(&schema);
+        let packet = crate::packet_ffi::make_standard_data_packet(rel, cs);
+        assert!(!packet.is_null(), "expected an RPTR packet");
+        (packet, cs)
+    }
+
+    #[test]
+    fn the_dispatch_lets_go_before_the_caller_sees_the_reply() {
+        let _shm = crate::own_test_registry();
+        unsafe {
+            let abs = crate::shm::shmalloc(64).expect("allocate");
+            let (packet, cs) = rptr_packet(abs);
+            let mut fds = [0i32; 2];
+            assert_eq!(libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()), 0);
+            HELD.with(|h| h.set(abs));
+            PEER.with(|p| p.set(fds[1]));
+
+            let mut err: *mut c_char = ptr::null_mut();
+            let sent = send_reply_to_foreign_server(fds[0], packet, Some(release_dispatch), &mut err);
+            assert!(err.is_null() && sent > 0, "the reply was not sent");
+
+            assert_eq!(SEEN_COUNT.with(|c| c.get()), Some(2),
+                "the release ran before the reply held the caller's reference");
+            assert_eq!(PEER_HAD_DATA.with(|d| d.get()), Some(false),
+                "the caller could see the reply before the dispatch let go");
+            assert_eq!(crate::shm::reference_count(abs), Some(1),
+                "the caller should hold the only reference");
+
+            crate::shm::shfree(abs).expect("caller release");
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+            libc::free(packet as *mut c_void);
+            CSchema::free(cs);
+        }
+    }
+
+    #[test]
+    fn a_reply_that_reaches_nobody_holds_nothing() {
+        let _shm = crate::own_test_registry();
+        unsafe {
+            let abs = crate::shm::shmalloc(64).expect("allocate");
+            let (packet, cs) = rptr_packet(abs);
+            let mut fds = [0i32; 2];
+            assert_eq!(libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()), 0);
+            libc::close(fds[1]);
+            crate::utility::set_nosigpipe(fds[0]);
+            HELD.with(|h| h.set(abs));
+            PEER.with(|p| p.set(-1));
+
+            let mut err: *mut c_char = ptr::null_mut();
+            let sent = send_reply_to_foreign_server(fds[0], packet, Some(release_dispatch), &mut err);
+            assert_eq!(sent, 0);
+            assert!(!err.is_null(), "a failed send must say so");
+            libc::free(err as *mut c_void);
+            assert_eq!(SEEN_COUNT.with(|c| c.get()), Some(2), "the release did not run");
+            assert_eq!(crate::shm::reference_count(abs), Some(0),
+                "a reply that reached nobody left a reference behind");
+
+            libc::close(fds[0]);
+            libc::free(packet as *mut c_void);
+            CSchema::free(cs);
         }
     }
 }

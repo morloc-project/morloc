@@ -516,7 +516,7 @@ def _with_debug_trace(msg: str) -> str:
 def run_job(client_fd: int) -> None:
     try:
         # Anything left on this thread outside a dispatch; a dispatch's own
-        # entries are released after its reply (see the finally below).
+        # entries are released as its reply is sent (send_reply).
         morloc.shm_tracker_flush()
         morloc.debug_flush_dispatch()
         client_data = morloc.stream_from_client(client_fd)
@@ -526,7 +526,7 @@ def run_job(client_fd: int) -> None:
         # fail packet rather than a cryptic dispatch error.
         if _mlc_source_error is not None and not morloc.is_ping(client_data):
             sys.stdout.flush()
-            morloc.send_packet_to_foreign_server(client_fd, morloc.make_fail_packet(_mlc_source_error))
+            morloc.send_reply(client_fd, morloc.make_fail_packet(_mlc_source_error))
             return
 
         if(morloc.is_local_call(client_data)):
@@ -554,7 +554,7 @@ def run_job(client_fd: int) -> None:
             # C++/Rust pools already ignore pong-send failures the same way).
             sys.stdout.flush()
             try:
-                morloc.send_packet_to_foreign_server(client_fd, morloc.pong(client_data))
+                morloc.send_reply(client_fd, morloc.pong(client_data))
             except Exception:
                 pass
             return
@@ -568,14 +568,14 @@ def run_job(client_fd: int) -> None:
         # the nexus can print first, causing out-of-order output.
         sys.stdout.flush()
 
-        morloc.send_packet_to_foreign_server(client_fd, result)
+        morloc.send_reply(client_fd, result)
 
     except Exception as e:
         # Try to send a fail packet back to the caller before giving up.
         # This may fail (e.g., broken pipe from a timed-out ping), which is OK.
         try:
             result = morloc.make_fail_packet(str(e))
-            morloc.send_packet_to_foreign_server(client_fd, result)
+            morloc.send_reply(client_fd, result)
         except Exception:
             pass
         print(f"job failed: {e!s}", file=sys.stderr)
@@ -586,9 +586,8 @@ def run_job(client_fd: int) -> None:
         # matches. Without this a leaked @stdout claim wedges every later
         # open with "@stdout already open in this nexus".
         morloc.reclaim_stdio_after_dispatch()
-        # The reply carried the caller's own reference to its value, so
-        # what this dispatch still holds is released now rather than when
-        # this worker next runs.
+        # send_reply has released what the dispatch held; this covers a
+        # dispatch that ended without sending one.
         morloc.shm_tracker_flush()
         # Safety-net flush for any output from error handling paths
         sys.stdout.flush()
@@ -843,10 +842,8 @@ def run_thread_pool(socket_path, tmpdir, shm_basename):
                         if counts["total"] - counts["busy"] > 1:
                             counts["total"] -= 1
                             released = True
-                            # shm_tracker is __thread and its SHM is freed lazily
-                            # on the NEXT dispatch; a reaped worker has none, so
-                            # flush its last job's SHM now rather than leak it
-                            # until pool shutdown.
+                            # shm_tracker is __thread; release anything this
+                            # thread holds before it goes.
                             morloc.shm_tracker_flush()
                             return
                     continue

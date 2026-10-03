@@ -31,10 +31,11 @@ pub struct PoolConfig {
     /// `initial_workers`, which must exceed the depth of calls back into the
     /// pool that can be waiting at once.
     pub dynamic_scaling: bool,
-    /// Run on the worker thread once a dispatch's reply has been sent (or
-    /// could not be). The reply carries the caller's own reference to its
-    /// value, so a pool releases what the dispatch still holds here.
-    pub after_reply: Option<unsafe extern "C" fn()>,
+    /// Release what a dispatch still holds. Runs on the worker thread once
+    /// the reply holds the caller's own reference to its value and before
+    /// the reply is sent (see `send_reply_to_foreign_server`), or after the
+    /// dispatch when there is no reply.
+    pub release_dispatch: Option<unsafe extern "C" fn()>,
 }
 
 // SAFETY: PoolConfig contains function pointers and a *mut c_void dispatch_ctx.
@@ -389,7 +390,7 @@ unsafe fn spawn_worker(
 // before it exits; None keeps every worker.
 unsafe fn worker_loop(queue: &JobQueue, config: &PoolConfig, retire_after: Option<std::time::Duration>) {
     use crate::ipc_ffi::stream_from_client;
-    use crate::ipc_ffi::send_packet_to_foreign_server;
+    use crate::ipc_ffi::send_reply_to_foreign_server;
     use crate::ipc_ffi::close_socket;
 
     let min_workers = config.initial_workers.max(1) as usize;
@@ -430,12 +431,12 @@ unsafe fn worker_loop(queue: &JobQueue, config: &PoolConfig, retire_after: Optio
 
         // From here the worker counts as free, so nothing below may wait on
         // another thread of the program: only the send (which waits on the
-        // caller, already reading), the after-reply release and the close.
+        // caller, already reading), the dispatch's release and the close.
         queue.finishing();
         arriving = Arriving::Finishing;
 
         if !result.is_null() {
-            send_packet_to_foreign_server(client_fd, result, &mut errmsg);
+            send_reply_to_foreign_server(client_fd, result, config.release_dispatch, &mut errmsg);
             libc::free(result as *mut c_void);
             // A failed response send was previously freed silently, leaving the
             // caller with an unexplained "Connection closed" -- log the cause.
@@ -450,8 +451,8 @@ unsafe fn worker_loop(queue: &JobQueue, config: &PoolConfig, retire_after: Optio
             // closed by peer". This should not happen (dispatch always returns
             // at least a fail packet); log it to catch the case if it does.
             eprintln!("morloc pool: dispatch returned null result (no response sent)");
+            if let Some(f) = config.release_dispatch { f(); }
         }
-        if let Some(f) = config.after_reply { f(); }
 
         close_socket(client_fd);
         idle_since = std::time::Instant::now();
@@ -554,7 +555,7 @@ unsafe fn pool_main_single(config: &PoolConfig, socket_path: *const c_char, tmpd
     use crate::ipc_ffi::close_daemon;
     use crate::ipc_ffi::wait_for_client_with_timeout;
     use crate::ipc_ffi::stream_from_client;
-    use crate::ipc_ffi::send_packet_to_foreign_server;
+    use crate::ipc_ffi::send_reply_to_foreign_server;
     use crate::ipc_ffi::close_socket;
 
     let mut errmsg: *mut c_char = ptr::null_mut();
@@ -582,11 +583,12 @@ unsafe fn pool_main_single(config: &PoolConfig, socket_path: *const c_char, tmpd
         libc::free(data as *mut c_void);
 
         if !result.is_null() {
-            send_packet_to_foreign_server(client_fd, result, &mut errmsg);
+            send_reply_to_foreign_server(client_fd, result, config.release_dispatch, &mut errmsg);
             libc::free(result as *mut c_void);
             if !errmsg.is_null() { libc::free(errmsg as *mut c_void); errmsg = ptr::null_mut(); }
+        } else if let Some(f) = config.release_dispatch {
+            f();
         }
-        if let Some(f) = config.after_reply { f(); }
 
         libc::fflush(ptr::null_mut());
         close_socket(client_fd);

@@ -2455,11 +2455,9 @@ SEXP morloc_put_value(SEXP obj_r, SEXP schema_str_r, SEXP self_contained_r) { MA
     const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
     bool tracked = false;
     if (hdr->command.data.source == PACKET_SOURCE_RPTR) {
-        // SHM is referenced by the result packet; the pool retains the only
-        // reference until the next request. Hand voidstar AND schema to the
-        // tracker -- they are freed by shm_tracker_flush at the start of the
-        // next dispatch in run_job_c. Without this, every RPTR-shipped
-        // value would leak its SHM block for the lifetime of the pool.
+        // SHM is referenced by the result packet. Hand voidstar AND schema to
+        // the tracker: they are released once the reply holds the caller's
+        // reference (send_reply_to_foreign_server in dispatch_manifold_c).
         shm_tracker_push((absptr_t)voidstar, schema);
         tracked = true;
     } else {
@@ -4222,7 +4220,7 @@ static void send_fail_to_client(int client_fd, const char* msg) {
         }
     }
     uint8_t* fail = make_fail_packet(full);
-    send_packet_to_foreign_server(client_fd, fail, &errmsg);
+    send_reply_to_foreign_server(client_fd, fail, shm_tracker_flush, &errmsg);
     free(fail);
     if (trace != NULL) {
         free(trace);
@@ -4295,7 +4293,9 @@ static void dispatch_manifold_c(int client_fd, const uint8_t* packet,
     PROTECT(result);
     nprotect++;
 
-    send_packet_to_foreign_server(client_fd, RAW(result), &errmsg);
+    // What the dispatch holds, the reply's own block included, is released
+    // once the reply holds the caller's reference and before it is sent.
+    send_reply_to_foreign_server(client_fd, RAW(result), shm_tracker_flush, &errmsg);
     if (errmsg) {
         // A failed response send was previously dropped silently, leaving the
         // caller with an unexplained "Connection closed" -- log the cause.
@@ -4311,11 +4311,8 @@ static void dispatch_manifold_c(int client_fd, const uint8_t* packet,
 static void run_job_c(int client_fd, SEXP dispatch, SEXP remote_dispatch) {
     char* errmsg = NULL;
 
-    // Release any SHM that the previous request's morloc_put_value handed
-    // off via PACKET_SOURCE_RPTR. The block stays alive until now so the
-    // calling daemon can dereference its relptr; once we're starting a new
-    // request, it is safe to reclaim. Without this every RPTR result would
-    // leak per call and grow /dev/shm/morloc-* monotonically.
+    // A reply releases what its dispatch held (send_reply_to_foreign_server);
+    // this covers a previous request that ended without sending one.
     shm_tracker_flush();
 
     // A table's block is held by the R object that reads it, and R's
@@ -4369,7 +4366,7 @@ static void run_job_c(int client_fd, SEXP dispatch, SEXP remote_dispatch) {
             if (!errmsg && is_ping_pkt) {
                 uint8_t* pong = return_ping(packet, &errmsg);
                 if (!errmsg) {
-                    send_packet_to_foreign_server(client_fd, pong, &errmsg);
+                    send_reply_to_foreign_server(client_fd, pong, shm_tracker_flush, &errmsg);
                     free(pong);
                 }
             } else if (!errmsg) {
