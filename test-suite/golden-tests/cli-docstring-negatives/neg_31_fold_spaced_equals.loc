@@ -1,0 +1,23 @@
+module main (run)
+
+import root
+
+step :: Int -> [Int] -> Int
+step acc _ = acc
+
+zero :: Int
+zero = 0
+
+merge :: Int -> Int -> Int
+merge a _ = a
+
+showAcc :: Int -> Str
+showAcc _ = "acc"
+
+produce :: ([Int] -> <IO> ()) -> <IO> ()
+produce sink = sink [1,2,3]
+
+-- Modifiers are split on whitespace, so spaces around `=` break the token.
+--' @render -t/--total=showAcc @fold = step @init=zero @combine=merge
+run :: <IO> ()
+run = @collect produce

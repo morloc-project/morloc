@@ -29,7 +29,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Char (isAlpha)
+import Data.Char (isAlpha, isAsciiLower, isAsciiUpper)
 import qualified Morloc.BaseTypes as BT
 import Morloc.Frontend.CST
 import Morloc.Frontend.Token hiding (startPos)
@@ -120,11 +120,23 @@ data DState = DState
     -- declared in THIS module. Exhaustiveness needs the whole set, and
     -- this is the only place it is available: by the time imports are
     -- merged the clause structure has already become an IfE cascade.
+  , dsErrorNotes :: !(Map.Map Int Text)
+    -- ^ A line prefixed to an error raised at a synthesized expression,
+    -- saying which directive it was synthesized from.
   , dsStreamElems :: !(Map.Map EVar TypeU)
     -- ^ For each command whose body reaches `@collect`, the batch type
     -- it writes to standard output. Such a command returns `()` at the
     -- morloc level, so nothing downstream can recover what a caller
     -- actually receives from the signature alone.
+  , dsReplayPlans :: !(Map.Map (EVar, Text) ReplayPlan)
+    -- ^ For each terminal action, keyed by its command and long flag: the
+    -- kind of replay entry synthesized, or why there is none.
+  , dsCompanions :: !(Map.Map EVar [CompanionRole])
+    -- ^ The companions synthesized for each command of the module.
+  , dsParseSlots :: !(Map.Map EVar [Int])
+    -- ^ For each command whose parse entry saves arguments in a run that
+    -- saves its output: those arguments' positions (1-based), in the order
+    -- of the entry's trailing slots.
   }
   deriving (Show)
 
@@ -340,7 +352,7 @@ argDocDirectiveKeys =
   , "arg", "true", "false", "return"
   , "source", "form", "check.<kind>"
   , "list.source", "list.form", "list.check.<kind>"
-  , "with", "render", "mime", "epilogue"
+  , "with", "render", "parse", "mime", "epilogue"
   ]
 
 -- | Parse and lightly validate a media type (RFC 6838 `type/subtype`, e.g.
@@ -397,8 +409,9 @@ parseFormAtom raw = case T.strip raw of
 -- | Parse a formatter directive value:
 -- @\<flag-spec\> = \<handler\>[(\<arg\>[, \<arg\>]*)] [\<\@modifier\>]*@.
 -- @\<flag-spec\>@ is @--long@ or @-x/--long@. Each @\<arg\>@ is a positional
--- @$N@ (1-based), @\@offset@, or @\@value@. Modifiers are @\@default@ and
--- @\@stream@; @\@offset@ implies @\@stream@. The 'render' flag selects verbatim
+-- @$N@ (1-based), @\@offset@, or @\@value@. Modifiers are @\@default@,
+-- @\@stream@, and the fold triple @\@fold=@ \/ @\@init=@ \/ @\@combine=@;
+-- @\@offset@ implies @\@stream@. The 'render' flag selects verbatim
 -- output (@\@render@) over @-f@-formatted output (@\@with@).
 parseWithSpec :: Bool -> Text -> Either Text WithSpec
 parseWithSpec render raw =
@@ -408,9 +421,62 @@ parseWithSpec render raw =
     (flagPart, eqRest) -> do
       (short, long) <- parseWithFlagSpec flagPart
       (handler, args, modToks) <- parseHandlerAndMods (T.strip (T.drop 1 eqRest))
-      (stream, def) <- parseWithMods modToks
-      return (WithSpec short long (EV handler) render
-                       (stream || ArgOffset `elem` args) def args)
+      (stream, def, foldMods) <- parseWithMods modToks
+      fold <- foldSpecOf foldMods
+      return WithSpec { wsShort = short
+                      , wsLong = long
+                      , wsTerm = EV handler
+                      , wsRender = render
+                      , wsStream = stream || ArgOffset `elem` args
+                      , wsDefault = def
+                      , wsArgs = args
+                      , wsFold = fold
+                      }
+
+-- | Parse a `@parse` directive value: @\<name\>=\<handler\> [.ext ...]@.
+parseParseSpec :: Text -> Either Text ParseSpec
+parseParseSpec raw =
+  case T.breakOn "=" (T.strip raw) of
+    (_, "") -> Left "expected `<name>=<handler> [.ext ...]` (missing `=`)."
+    (namePart, eqRest) -> do
+      let name = T.strip namePart
+      checkParseName name
+      case T.words (T.drop 1 eqRest) of
+        [] -> Left "handler name is empty after `=`."
+        (handler : exts) -> do
+          unless (T.all isWithIdentChar handler) $
+            Left ("`" <> handler <> "` is not a term name.")
+          mapM_ checkParseExt exts
+          return ParseSpec {psName = name, psHandler = EV handler, psExts = exts}
+  where
+    checkParseName n
+      | T.null n = Left "format name is empty before `=`."
+      | n == "morloc" =
+          Left "`morloc` is reserved: `morloc:<path>` loads a morloc value."
+      | not (T.all (\c -> isAsciiLower c || isDigitChar c || c == '-') n) =
+          Left ("format name `" <> n <> "` may use only lowercase letters, digits and `-`.")
+      | otherwise = Right ()
+    checkParseExt e
+      | T.length e < 2 || T.head e /= '.' =
+          Left ("`" <> e <> "` is not a file extension; write it with a leading `.`, e.g. `.fq`.")
+      | T.any isAsciiUpper e =
+          Left ("extension `" <> e <> "` must be lowercase; extensions match regardless of case.")
+      | T.any (\c -> c == '/' || c == ':') e =
+          Left ("extension `" <> e <> "` may not contain `/` or `:`.")
+      | otherwise = Right ()
+
+-- | Append a `@parse` spec to an argument's earlier ones, rejecting a
+-- repeated format name or an extension another format already claims.
+addParseSpec :: [ParseSpec] -> ParseSpec -> Either Text [ParseSpec]
+addParseSpec prior spec
+  | psName spec `elem` map psName prior =
+      Left ("format `" <> psName spec <> "` is declared twice on this argument.")
+  | otherwise = case [ (e, psName p) | e <- psExts spec, p <- prior, e `elem` psExts p ] ++ dupWithin (psExts spec) of
+      ((e, owner) : _) ->
+        Left ("extension `" <> e <> "` is already claimed by format `" <> owner <> "` on this argument.")
+      [] -> Right (prior ++ [spec])
+  where
+    dupWithin es = [ (e, psName spec) | (i, e) <- zip [0 :: Int ..] es, e `elem` take i es ]
 
 -- | Split @\<handler\>[(args)] [mods]@ into the handler identifier, its parsed
 -- argument list (empty if no parens), and the raw modifier tokens.
@@ -454,16 +520,66 @@ parseWithArg raw =
          | otherwise -> Left ("unrecognized formatter argument `" <> t
                               <> "`; expected `$N` (N >= 1), `@offset`, or `@value`.")
 
--- | Fold the trailing modifier tokens into (stream, default) flags.
-parseWithMods :: [Text] -> Either Text (Bool, Bool)
-parseWithMods = go (False, False)
+-- | Fold the trailing modifier tokens into the @\@stream@ and @\@default@
+-- flags and the fold terms, the latter kept as an association list so that
+-- adding a modifier means extending 'foldModNames' and 'foldSpecOf' and
+-- nothing else. The terms stay out of 'WithSpec' until 'foldSpecOf' has
+-- checked the triple is complete, so a partial fold is reported against the
+-- text the user wrote.
+parseWithMods :: [Text] -> Either Text (Bool, Bool, [(Text, Text)])
+parseWithMods = go (False, False, [])
   where
     go acc [] = Right acc
-    go (s, d) (tok : rest) = case tok of
-      "@stream"  -> go (True, d) rest
-      "@default" -> go (s, True) rest
+    go (s, d, fs) (tok : rest) = case T.breakOn "=" tok of
+      ("@stream", "")  -> go (True, d, fs) rest
+      ("@default", "") -> go (s, True, fs) rest
+      (name, eqRest)
+        | name `elem` foldModNames ->
+            if T.null eqRest
+              -- `@fold = step` splits into three tokens, so the bare name
+              -- arrives here and would otherwise read as an unknown modifier.
+              then Left (name <> " takes a term, written `" <> name
+                         <> "=<term>` with no spaces around `=`.")
+              else do
+                term <- foldTerm name (T.drop 1 eqRest)
+                case lookup name fs of
+                  Just _ -> Left ("duplicate `" <> name <> "` modifier.")
+                  Nothing -> go (s, d, (name, term) : fs) rest
       _ -> Left ("unknown formatter modifier `" <> tok
-                 <> "`; expected `@default` or `@stream`.")
+                 <> "`; expected `@default`, `@stream`, `@fold=<term>`, "
+                 <> "`@init=<term>` or `@combine=<term>`.")
+
+foldModNames :: [Text]
+foldModNames = ["@fold", "@init", "@combine"]
+
+-- | Validate the right-hand side of a fold modifier as a bare term name.
+foldTerm :: Text -> Text -> Either Text Text
+foldTerm name raw
+  | T.null raw = Left (name <> " is missing a term name after `=`.")
+  | T.all isWithIdentChar raw = Right raw
+  | otherwise =
+      Left (name <> " expects a bare term name, but got `" <> raw
+            <> "`; a fold term takes no arguments here.")
+
+-- | Assemble the fold triple, requiring all three parts or none.
+--
+-- All three are required because none can be defaulted: there is no
+-- universal empty accumulator to seed a slot with, and no universal way
+-- to merge two of them.
+foldSpecOf :: [(Text, Text)] -> Either Text (Maybe FoldSpec)
+foldSpecOf fs = case (lookup "@fold" fs, lookup "@init" fs, lookup "@combine" fs) of
+  (Nothing, Nothing, Nothing) -> Right Nothing
+  (Nothing, _, _) ->
+    Left ("`@init`/`@combine` describe how a fold is seeded and merged, "
+          <> "but this formatter declares no `@fold=<term>`.")
+  (Just step, Just ini, Just comb) ->
+    Right (Just (FoldSpec (EV step) (EV ini) (EV comb)))
+  (Just _, ini, comb) ->
+    Left ("`@fold` needs " <> missing <> "; a fold seeds one accumulator "
+          <> "per worker and merges them at the end.")
+    where
+      missing = T.intercalate " and "
+        ([ "`@init=<term>`" | isNothing ini ] <> [ "`@combine=<term>`" | isNothing comb ])
 
 isWithIdentChar :: Char -> Bool
 isWithIdentChar c = isShortFlagChar c || isDigitChar c || c == '_' || c == '\''
@@ -692,6 +808,9 @@ processArgDocLines = finalize . foldl step ([], [], defaultValue, Nothing)
         ["render"] -> withCase errs ws d True "render" v
         ["with", "buffer"] -> (errs <> [retiredBufferMsg "with"], ws, d)
         ["render", "buffer"] -> (errs <> [retiredBufferMsg "render"], ws, d)
+        ["parse"] -> case parseParseSpec v >>= addParseSpec (docParse d) of
+          Right ps -> (errs, ws, d {docParse = ps})
+          Left e   -> (errs <> ["in `@parse " <> v <> "`: " <> e], ws, d)
         ["mime"] -> case parseMediaType v of
           Right mt -> (errs, ws, d {docMime = Just mt})
           Left e   -> (errs <> ["in `@mime " <> v <> "`: " <> e], ws, d)
@@ -829,6 +948,18 @@ validateSigWith pos specs argDocs = do
     "`@with` long name `--" <> l
     <> "` collides with a reserved command-scope flag. `--help` is "
     <> "always available; pick a different long name."
+  -- A command with terminal actions also takes `--no-stdout`.
+  reportIfAny pos [l | l <- longs, l == "no-stdout"] $ \l ->
+    "`@with` long name `--" <> l
+    <> "` collides with a reserved command-scope flag. `--no-stdout` is "
+    <> "available on every command with terminal actions; pick a different "
+    <> "long name."
+  unless (null specs) $
+    reportIfAny pos [l | l <- argLongs, l == "no-stdout"] $ \l ->
+      "argument long name `--" <> l
+      <> "` collides with a reserved command-scope flag. `--no-stdout` is "
+      <> "available on every command with terminal actions; pick a different "
+      <> "long name."
   reportIfAny pos [c | c <- shorts, c == 'h'] $ \c ->
     "`@with` short name `-" <> T.singleton c
     <> "` collides with a reserved command-scope flag. `-h` is always "
@@ -890,14 +1021,14 @@ namTypeDocs :: Pos -> [(Located, Key, TypeU)] -> D ArgDoc
 namTypeDocs declPos locEntries = do
   recDocs <- lookupDocsAt declPos
   recDocVars <- processArgDocLinesD declPos recDocs
-  rejectWithHere declPos "a record declaration" recDocVars
+  rejectDeclDirectivesHere declPos "a record declaration" recDocVars
   fieldDocs <-
     mapM
       (\(loc, _, _) -> do
           let p = locPos loc
           dl <- lookupDocsAt p
           fieldDoc <- processArgDocLinesD p dl
-          rejectWithHere p "a record field" fieldDoc
+          rejectDeclDirectivesHere p "a record field" fieldDoc
           return fieldDoc)
       locEntries
   return (ArgDocRec recDocVars (zip [k | (_, k, _) <- locEntries] fieldDocs))
@@ -910,7 +1041,7 @@ dataTypeDocs :: Pos -> [(Located, Located, Text, [TypeU])] -> D ArgDoc
 dataTypeDocs declPos ctors = do
   typeDocs <- lookupDocsAt declPos
   typeVars <- processArgDocLinesD declPos typeDocs
-  rejectWithHere declPos "a data declaration" typeVars
+  rejectDeclDirectivesHere declPos "a data declaration" typeVars
   ctorDocs <-
     mapM
       (\(lead, tok, name, _) -> do
@@ -956,6 +1087,7 @@ rejectDirectivesOnCtor pos name v =
       , ("list.form", isJust (docListForm v))
       , ("list.check", not (null (docListChecks v)))
       , ("with", not (null (docWith v)))
+      , ("parse", not (null (docParse v)))
       , ("mime", isJust (docMime v))
       , ("epilogue", not (null (docEpilogues v)))
       ]
@@ -976,13 +1108,32 @@ rejectWithHere pos ctx v = do
       <> "; it may only appear in a signature preamble (the `--'` "
       <> "lines directly above `name ::`) or above `module`."
 
+-- | Reject the directives that belong to a command's signature (`@with`,
+-- `@epilogue`, `@parse`) in a docstring that is not part of one.
+rejectDeclDirectivesHere :: Pos -> Text -> ArgDocVars -> D ()
+rejectDeclDirectivesHere pos ctx v = rejectWithHere pos ctx v >> rejectParseHere pos ctx v
+
+-- | `@parse` describes how one command argument is read at the command line,
+-- so it belongs only in that argument's docstring.
+rejectParseHere :: Pos -> Text -> ArgDocVars -> D ()
+rejectParseHere pos ctx v = case docParse v of
+  [] -> return ()
+  (p : _) -> dfail pos . T.unpack $
+    "`@parse` is not allowed on " <> ctx
+    <> "; it may only appear in the docstring of a command argument. "
+    <> "Offending atom: `@parse " <> psName p <> "=" <> unEVar (psHandler p) <> "`."
+
 renderWithSpec :: WithSpec -> Text
-renderWithSpec (WithSpec mShort l (EV t) _ _ _ _) =
-  flag <> "=" <> t
+renderWithSpec WithSpec{wsShort = mShort, wsLong = l, wsTerm = EV t, wsFold = mFold} =
+  flag <> "=" <> t <> foldMods
   where
     flag = case mShort of
       Just c -> "-" <> T.singleton c <> "/--" <> l
       Nothing -> "--" <> l
+    foldMods = case mFold of
+      Nothing -> ""
+      Just (FoldSpec (EV step) (EV ini) (EV comb)) ->
+        " @fold=" <> step <> " @init=" <> ini <> " @combine=" <> comb
 
 -- | D-monad wrapper: apply `source` docstring lines and accumulate warnings.
 applySourceDocsD :: Pos -> [Text] -> Source -> D Source
@@ -1193,8 +1344,13 @@ getName' (Located _ _ t) = t
 --------------------------------------------------------------------
 
 extractConstraints :: TypeU -> D [Constraint]
-extractConstraints (AppU (VarU (TV name)) args) =
-  return [mkPrimOrClass name args]
+-- a parenthesized list of constraints is parsed as a tuple type
+extractConstraints (AppU (VarU (TV name)) args)
+  | T.isPrefixOf "Tuple" name =
+      case mapM typeToConstraint args of
+        Just cs -> return cs
+        Nothing -> dfail (Pos 0 0 "") "invalid constraint syntax"
+  | otherwise = return [mkPrimOrClass name args]
 extractConstraints (VarU (TV name)) =
   return [mkPrimOrClass name []]
 extractConstraints (NamU NamRecord _ _ _) =
@@ -1873,7 +2029,7 @@ freeVarsE (ExprI _ e) = case e of
   IntrinsicE _ es     -> Set.unions (map freeVarsE es)
   ParenE inner        -> freeVarsE inner
   AssE _ body wheres  -> Set.union (freeVarsE body) (Set.unions (map freeVarsE wheres))
-  IstE _ _ body       -> Set.unions (map freeVarsE body)
+  IstE _ _ _ body     -> Set.unions (map freeVarsE body)
   ModE _ body         -> Set.unions (map freeVarsE body)
   -- Leaf value expressions (no names bound or referenced)
   UniE                -> Set.empty
@@ -2572,7 +2728,8 @@ desugarDo sp (CstDoBind p e : rest) = do
       throwE <- freshExprSpan sp (IntrinsicE IntrThrow [shownE])
       trueE <- freshExprSpan sp (LogE True)
       guardE <- freshExprSpan sp (IfE cond trueE throwE)
-      guardVar <- freshIrrefLamParam sp
+      guardIdx <- freshIdSpan sp
+      let guardVar = EV (BT.doGuardPrefix <> T.pack (show guardIdx))
       -- Three links of the ordinary do-block LetE chain rather than a
       -- cascade: the bind, then a guard whose value nothing reads (its
       -- point is the throw), then the pattern's projections wrapping the
@@ -2795,7 +2952,7 @@ etaExpandIntrinsic sp intr args = do
 -- >    body (@write 0 o)
 -- >    @close o
 --
--- Runs AFTER 'injectTerminalActions' so the synthesis can rewrite the
+-- Runs AFTER 'injectTerminalActionsWithSigs' so the synthesis can rewrite the
 -- @collect argument (the producer) per `--' with:` flag before it is
 -- expanded. Fully recursive over 'Expr' so a @collect nested inside a
 -- guarded do-block (the mosm idiom) is still reached. The @stdout element
@@ -2807,7 +2964,7 @@ expandCollectE self@(ExprI i e) = case e of
     expandCollectBody self body'
   ModE v xs -> ExprI i . ModE v <$> mapM expandCollectE xs
   AssE v b ws -> (\b' ws' -> ExprI i (AssE v b' ws')) <$> expandCollectE b <*> mapM expandCollectE ws
-  IstE cn ts b -> ExprI i . IstE cn ts <$> mapM expandCollectE b
+  IstE cn ctx ts b -> ExprI i . IstE cn ctx ts <$> mapM expandCollectE b
   LstE es -> ExprI i . LstE <$> mapM expandCollectE es
   TupE es -> ExprI i . TupE <$> mapM expandCollectE es
   NamE kes -> ExprI i . NamE <$> mapM (\(k, x) -> (,) k <$> expandCollectE x) kes
@@ -2838,7 +2995,7 @@ expandCollectBody ref body = do
   -- the sink: @write 0 o  (eta-expanded to \v -> @write 0 o v :: [a] -> <IO> ())
   oRef1 <- freshExprFrom ref (VarE defaultValue oVar)
   zeroE <- freshExprFrom ref (IntE 0)
-  sinkE <- mkWriteSink ref zeroE oRef1
+  sinkE <- mkWriteSink False ref zeroE oRef1
   -- body (@write 0 o)  -- bare statement, forced
   bodyApp <- freshExprFrom ref (AppE body [sinkE])
   forceBody <- freshExprFrom ref (EvalE bodyApp)
@@ -2857,7 +3014,11 @@ expandCollectBody ref body = do
 -- lowers to -- bind the Try, guard its tag, bind the payload -- keeping
 -- the ordinary do-block LetE chain shape the bang-hoisting pass walks.
 bindOkFrom :: ExprI -> EVar -> ExprI -> ExprI -> D ExprI
-bindOkFrom ref v forcedTry body = do
+bindOkFrom ref = bindOkWith ref (\tryE -> freshExprFrom ref (IntrinsicE IntrShow [tryE]))
+
+-- | 'bindOkFrom' with the thrown message built from the failed Try.
+bindOkWith :: ExprI -> (ExprI -> D ExprI) -> EVar -> ExprI -> ExprI -> D ExprI
+bindOkWith ref mkMsg v forcedTry body = do
   idx <- freshIdPos (Pos 0 0 "")
   let tmp = EV ("_ok_try_" <> T.pack (show idx))
       gVar = EV (BT.doDiscardPrefix <> "ok_g_" <> T.pack (show idx))
@@ -2865,9 +3026,8 @@ bindOkFrom ref v forcedTry body = do
   s1 <- subject
   okName <- freshExprFrom ref (StrE BT.tryOkCtor)
   cond <- freshExprFrom ref (IntrinsicE IntrTagTest [s1, okName])
-  s2 <- subject
-  shown <- freshExprFrom ref (IntrinsicE IntrShow [s2])
-  throwE <- freshExprFrom ref (IntrinsicE IntrThrow [shown])
+  msg <- subject >>= mkMsg
+  throwE <- freshExprFrom ref (IntrinsicE IntrThrow [msg])
   trueE <- freshExprFrom ref (LogE True)
   guardE <- freshExprFrom ref (IfE cond trueE throwE)
   s3 <- subject
@@ -2885,19 +3045,31 @@ bindOkFrom ref v forcedTry body = do
 -- never asked for. Without the wrap the sink's type would be
 -- @[a] -> \<IO\> (Try Str ())@ and every user-written producer signature
 -- would have to name the Try.
-mkWriteSink :: ExprI -> ExprI -> ExprI -> D ExprI
-mkWriteSink ref zeroE oRef = do
+--
+-- With @flush@, each write is followed by @flush o@, so every batch is its
+-- own sub-packet; @write buffers, and a reader would otherwise see batches
+-- merged.
+mkWriteSink :: Bool -> ExprI -> ExprI -> ExprI -> D ExprI
+mkWriteSink flush ref zeroE oRef = do
   idx <- freshIdPos (Pos 0 0 "")
   let vVar = EV ("_collect_v_" <> T.pack (show idx))
       dVar = EV (BT.doDiscardPrefix <> "collect_w_" <> T.pack (show idx))
+      fVar = EV (BT.doDiscardPrefix <> "collect_f_" <> T.pack (show idx))
   vRef <- freshExprFrom ref (VarE defaultValue vVar)
   writeE <- freshExprFrom ref (IntrinsicE IntrWrite [zeroE, oRef, vRef])
   forceWrite <- freshExprFrom ref (EvalE writeE)
   unitE <- freshExprFrom ref UniE
-  bodyE <- freshExprFrom ref (LetE [(dVar, forceWrite)] unitE)
+  afterWrite <-
+    if flush
+      then do
+        oRef2 <- freshExprFrom ref (let ExprI _ e = oRef in e)
+        flushE <- freshExprFrom ref (IntrinsicE IntrFlush [oRef2])
+        forceFlush <- freshExprFrom ref (EvalE flushE)
+        freshExprFrom ref (LetE [(fVar, forceFlush)] unitE)
+      else return unitE
+  bodyE <- freshExprFrom ref (LetE [(dVar, forceWrite)] afterWrite)
   doE <- freshExprFrom ref (DoBlockE bodyE)
   freshExprFrom ref (LamE [vVar] doE)
-
 
 --------------------------------------------------------------------
 -- Top-level declaration desugaring
@@ -2955,6 +3127,8 @@ desugarTopLevel (Loc sp (CSigE name sigType)) = do
   (cs, argDocs, t) <- desugarSigType (startPos sp) sigType
   validateSigWith (startPos sp) (docWith cmdDoc) argDocs
   mapM_ (rejectWithHere (startPos sp) "an argument-level docstring") argDocs
+  rejectParseHere (startPos sp) "a signature preamble" cmdDoc
+  rejectParseHere (startPos sp) "a return value" (last argDocs)
   let t' = quantifyType t
       doc = ArgDocSig cmdDoc (init argDocs) (last argDocs)
       (labels, t'') = extractLabels t'
@@ -2963,15 +3137,16 @@ desugarTopLevel (Loc sp (CSigE name sigType)) = do
   return [e]
 desugarTopLevel (Loc sp (CAssE name params body whereDecls)) = do
   params' <- mapM exprToIrrefPat params
-  checkWhereScope params' whereDecls
+  lamParams <- bodyLambdaParams body
+  checkWhereScope (params' <> lamParams) whereDecls
   captureDeclDocs (startPos sp) name
   body' <- desugarExpr body
   whereDecls' <- concatMapM desugarTopLevel whereDecls
   e <- case params' of
     [] -> freshExprSpan sp (AssE name body' whereDecls')
     ps -> do
-      lam <- buildLamWithIrrefPats sp ps body'
-      freshExprSpan sp (AssE name lam whereDecls')
+      (lam, whereDecls'') <- buildDefWithIrrefPats sp ps body' whereDecls'
+      freshExprSpan sp (AssE name lam whereDecls'')
   return [e]
 desugarTopLevel (Loc sp (CGuardedAssE name params guards defaultExpr whereDecls)) = do
   params' <- mapM exprToIrrefPat params
@@ -2982,8 +3157,8 @@ desugarTopLevel (Loc sp (CGuardedAssE name params guards defaultExpr whereDecls)
   e <- case params' of
     [] -> freshExprSpan sp (AssE name body' whereDecls')
     ps -> do
-      lam <- buildLamWithIrrefPats sp ps body'
-      freshExprSpan sp (AssE name lam whereDecls')
+      (lam, whereDecls'') <- buildDefWithIrrefPats sp ps body' whereDecls'
+      freshExprSpan sp (AssE name lam whereDecls'')
   return [e]
 desugarTopLevel (Loc sp (CRefutAssE name clauses whereDecls)) = do
   checkWhereScope [] whereDecls
@@ -2998,9 +3173,9 @@ desugarTopLevel (Loc sp (CClsE classHead sigs)) = do
   sigs' <- mapM desugarSigItem sigs
   e <- freshExprSpan sp (ClsE (Typeclass cs cn vs sigs'))
   return [e]
-desugarTopLevel (Loc sp (CIstE cn types body)) = do
+desugarTopLevel (Loc sp (CIstE ctx cn types body)) = do
   bodyExprs <- concatMapM desugarTopLevel body
-  e <- freshExprSpan sp (IstE cn (map quantifyType types) bodyExprs)
+  e <- freshExprSpan sp (IstE cn ctx (map quantifyType types) bodyExprs)
   return [e]
 desugarTopLevel (Loc sp (CEffE lbl esc)) = do
   e <- freshExprSpan sp (EffE lbl esc)
@@ -3030,6 +3205,24 @@ desugarTopLevel node = do
   e <- desugarExpr node
   return [e]
 
+-- | Build a definition's lambda and where-block from its pattern parameters.
+-- A name bound by a parameter pattern is in scope wherever a plain parameter
+-- would be, which includes the where-block. So when there is a where-block,
+-- the pattern's projections become where-bindings of the definition, visible
+-- to the body and to every sibling binding; otherwise they wrap the body as
+-- in 'buildLamWithIrrefPats'.
+buildDefWithIrrefPats :: Span -> [Loc CstIrrefPat] -> ExprI -> [ExprI] -> D (ExprI, [ExprI])
+buildDefWithIrrefPats sp ps body [] = do
+  lam <- buildLamWithIrrefPats sp ps body
+  return (lam, [])
+buildDefWithIrrefPats sp ps body wheres = do
+  let usedNames = Set.unions (freeVarsE body : map freeVarsE wheres)
+  paramResults <- mapM (desugarIrrefLamParam usedNames) ps
+  projections <-
+    mapM (\(v, rhs) -> freshExprSpan sp (AssE v rhs [])) (concatMap snd paramResults)
+  lam <- freshExprSpan sp (LamE (map fst paramResults) body)
+  return (lam, projections <> wheres)
+
 -- | Build a LamE from a list of irrefutable pattern parameters plus a
 -- desugared body. Each pattern becomes a fresh formal, with projection
 -- bindings wrapped around the body in a LetE. Unused pattern binders
@@ -3044,6 +3237,13 @@ buildLamWithIrrefPats sp ps body = do
     [] -> return body
     bs -> freshExprSpan sp (LetE bs body)
   freshExprSpan sp (LamE paramNames wrapped)
+
+-- | The parameters of the lambdas a definition's body begins with. They are
+-- the definition's parameters as much as those before the `=`.
+bodyLambdaParams :: Loc CstExpr -> D [Loc CstIrrefPat]
+bodyLambdaParams (Loc _ (CLamE ps b)) = (<>) <$> mapM exprToIrrefPat ps <*> bodyLambdaParams b
+bodyLambdaParams (Loc _ (CParenE b)) = bodyLambdaParams b
+bodyLambdaParams _ = return []
 
 -- Reject where-clause bindings that shadow a function parameter or
 -- duplicate a sibling where-binding. Only inspects value bindings
@@ -3200,7 +3400,7 @@ desugarTypeDef sp (CstTypeAlias maybeLangTok (v, vs) (t, isTerminal)) = do
       return (Just (l, isTerminal))
   docs <- lookupDocsAt (startPos sp)
   docVars <- if null docs then return defaultValue else processArgDocLinesD (startPos sp) docs
-  rejectWithHere (startPos sp) "a type alias" docVars
+  rejectDeclDirectivesHere (startPos sp) "a type alias" docVars
   e <- freshExprSpan sp (TypE (ExprTypeE lang v vs t (ArgDocAlias docVars) TypedefAlias))
   return [e]
 desugarTypeDef sp (CstNewtype (v, vs) t) = do
@@ -3210,7 +3410,7 @@ desugarTypeDef sp (CstNewtype (v, vs) t) = do
       "' has a vacuous body: it reduces to a self-reference with no payload"
   docs <- lookupDocsAt (startPos sp)
   docVars <- if null docs then return defaultValue else processArgDocLinesD (startPos sp) docs
-  rejectWithHere (startPos sp) "a newtype declaration" docVars
+  rejectDeclDirectivesHere (startPos sp) "a newtype declaration" docVars
   e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t (ArgDocAlias docVars) TypedefNewtype))
   return [e]
 desugarTypeDef sp (CstTypeAliasForward (v, vs)) = do
@@ -3222,7 +3422,7 @@ desugarTypeDef sp (CstTypeAliasForward (v, vs)) = do
   let t = if null vs then VarU v else AppU (VarU v) (map (either (VarU . fst) id) vs)
   docs <- lookupDocsAt (startPos sp)
   docVars <- if null docs then return defaultValue else processArgDocLinesD (startPos sp) docs
-  rejectWithHere (startPos sp) "a primitive type declaration" docVars
+  rejectDeclDirectivesHere (startPos sp) "a primitive type declaration" docVars
   e <- freshExprSpan sp (TypE (ExprTypeE Nothing v vs t (ArgDocAlias docVars) TypedefPrimitive))
   return [e]
 desugarTypeDef sp (CstDataDef (v, vs) ctors) = do
@@ -3356,7 +3556,7 @@ desugarClassHead (CCHMultiConstrained cs headType) = do
 desugarSigItem :: CstSigItem -> D Signature
 desugarSigItem (CstSigItem name sigType) = do
   (cs, argDocs, t) <- desugarSigType (Pos 0 0 "") sigType
-  mapM_ (rejectWithHere (Pos 0 0 "") "a class method signature") argDocs
+  mapM_ (rejectDeclDirectivesHere (Pos 0 0 "") "a class method signature") argDocs
   let wrappedT = quantifyType t
       (labels, wrappedT') = extractLabels wrappedT
       doc = ArgDocSig defaultValue (init argDocs) (last argDocs)
@@ -3425,11 +3625,8 @@ desugarProgram isImplicitMain cstNodes = do
   exprIs' <- if isImplicitMain
                then mkImplicitMain exprIs
                else return exprIs
-  -- Terminal-action synthesis (`--' with:`) and @collect expansion are
-  -- deferred to a post-parse DAG pass ('Frontend.API.finalizeCollectActions').
-  -- The synthesis must detect offset (`U64 -> ...`) and IFile handlers from
-  -- the handler's SIGNATURE, which may be imported from another module; those
-  -- signatures are not available until the whole import DAG is parsed.
+  -- Terminal-action synthesis and @collect expansion run later, in
+  -- 'Morloc.Frontend.TerminalActions'.
   return exprIs'
 
 --------------------------------------------------------------------
@@ -3443,17 +3640,20 @@ desugarProgram isImplicitMain cstNodes = do
 -- codegen handle the composed binding as an ordinary export.
 --------------------------------------------------------------------
 
--- | Synthesize `--' with:` terminal-action commands for one module. The
--- @importedSigs@ map carries term signatures visible to this module through
--- its imports (built from the full DAG post-parse); it lets offset/IFile
--- handler detection see a handler defined in another module.
+-- | Synthesize `--' with:` terminal-action commands for one module, given
+-- every term signature visible to it.
 injectTerminalActionsWithSigs :: Map.Map EVar TypeU -> ExprI -> D ExprI
-injectTerminalActionsWithSigs importedSigs (ExprI i (ModE mv body)) = do
+injectTerminalActionsWithSigs visibleSigs (ExprI i (ModE mv body)) = do
   rejectReservedMlcpPrefix body
-  recordStreamElems importedSigs body
-  body' <- expandWithBindings importedSigs body
+  recordStreamElems visibleSigs body
+  body' <- expandWithBindings visibleSigs body >>= expandParseEntries visibleSigs
   return (ExprI i (ModE mv body'))
 injectTerminalActionsWithSigs _ e = return e
+
+-- | Add to the companions synthesized for a command.
+recordCompanions :: (EVar, [CompanionRole]) -> D ()
+recordCompanions (parent, roles) = State.modify $ \st -> st
+  { dsCompanions = Map.insertWith (flip (<>)) parent roles (dsCompanions st) }
 
 -- | Reject any user-declared top-level identifier whose name starts
 -- with the reserved `mlcp_` prefix. That prefix is compiler-owned
@@ -3471,16 +3671,17 @@ injectTerminalActionsWithSigs _ e = return e
 -- synthesized entry.
 rejectReservedMlcpPrefix :: [ExprI] -> D ()
 rejectReservedMlcpPrefix body =
-  case find (\(_, ev) -> T.isPrefixOf "mlcp_" (unEVar ev)) binders of
-    Just (spanI, ev) -> do
+  case [ (spanI, ev, p) | (spanI, ev) <- binders, p <- ["mlcp_", parseEntryPrefix, replayEntryPrefix], p `T.isPrefixOf` unEVar ev ] of
+    ((spanI, ev, p) : _) -> do
       sp <- posOfExprI spanI
       dfail (startPos sp) . T.unpack $
         "identifier `" <> unEVar ev
-        <> "` uses the reserved `mlcp_` prefix. That prefix is "
-        <> "compiler-owned -- it names the internal entry points "
-        <> "synthesized from `--' @with` docstring atoms. Rename "
-        <> "the identifier so it does not start with `mlcp_`."
-    Nothing -> return ()
+        <> "` uses the reserved `" <> p <> "` prefix. The prefixes `mlcp_`, "
+        <> "`mlcq_` and `mlcr_` are compiler-owned -- they name the internal "
+        <> "entry points synthesized from `@with`, `@render` and `@parse` "
+        <> "docstring atoms. Rename the identifier so it does not start with "
+        <> "any of them."
+    [] -> return ()
   where
     binders :: [(ExprI, EVar)]
     binders = concatMap pick body
@@ -3499,40 +3700,39 @@ rejectReservedMlcpPrefix body =
 -- still has to be able to say what it writes. Commands whose producer
 -- has no reachable signature are simply absent from the map.
 recordStreamElems :: Map.Map EVar TypeU -> [ExprI] -> D ()
-recordStreamElems importedSigs body = do
-  let localSigs = Map.fromList
-        [ (n, etype et) | ExprI _ (SigE (Signature n _ et)) <- body ]
-      sigs = Map.union localSigs importedSigs
-      found = Map.fromList
+recordStreamElems visibleSigs body = do
+  let found = Map.fromList
         [ (n, t)
         | e@(ExprI _ (AssE n _ _)) <- body
         , containsCollect e
-        , Just t <- [collectStreamType sigs e]
+        , Just t <- [collectStreamType visibleSigs e]
         ]
   State.modify $ \st ->
     st { dsStreamElems = Map.union found (dsStreamElems st) }
 
 expandWithBindings :: Map.Map EVar TypeU -> [ExprI] -> D [ExprI]
-expandWithBindings importedSigs body =
+expandWithBindings visibleSigs body =
   case collectWithSpecs body of
     [] -> return body
     specs -> do
       let plan =
-            [ (parent, w, mangleTerminalName parent (wsLong w), sigExprI)
-            | (sigExprI, parent, _, ws) <- specs
+            [ (parent, w, mangle parent (wsLong w), sigExprI)
+            | (sigExprI, parent, ws) <- specs
             , w <- ws
+            , mangle <- [mangleTerminalName, mangleReplayName]
             ]
       checkMangledCollisions body plan
       -- name -> its AssE node, so the synthesis can inspect/rewrite the
-      -- parent body (needed for @collect streaming commands); and
-      -- name -> declared type, so the synthesis can detect an offset-form
-      -- handler (`U64 -> [a] -> ...`) or an IFile handler. Local signatures
-      -- shadow imported ones (a handler defined here wins over an import).
+      -- parent body (needed for @collect streaming commands)
       let assMap = Map.fromList [ (n, e) | e@(ExprI _ (AssE n _ _)) <- body ]
-          localSigMap = Map.fromList [ (n, etype et) | ExprI _ (SigE (Signature n _ et)) <- body ]
-          sigMap = Map.union localSigMap importedSigs
-      synthesized <- concat <$> mapM (emitFor assMap sigMap) specs
-      let mangleds = [ m | (_, _, m, _) <- plan ]
+      synthesized <- concat <$> mapM (emitFor assMap visibleSigs) specs
+      let mangleds = [ n | ExprI _ (AssE n _ _) <- synthesized ]
+          made = Set.fromList mangleds
+      mapM_ recordCompanions
+        [ (parent, filter ((`Set.member` made) . companionName parent) roles)
+        | (_, parent, ws) <- specs
+        , let roles = concat [[RoleAction (wsLong w), RoleReplay (wsLong w)] | w <- ws]
+        ]
       body' <- mapM (addToExport mangleds) body
       return (body' ++ synthesized)
 
@@ -3591,7 +3791,7 @@ firstDuplicateBy proj = go Map.empty
             Nothing -> go (Map.insert k x seen) xs
 
 
-collectWithSpecs :: [ExprI] -> [(ExprI, EVar, EType, [WithSpec])]
+collectWithSpecs :: [ExprI] -> [(ExprI, EVar, [WithSpec])]
 collectWithSpecs = foldr pick []
   where
     pick e@(ExprI _ (SigE (Signature name _ et))) rest =
@@ -3599,37 +3799,283 @@ collectWithSpecs = foldr pick []
         ArgDocSig cmdDoc _ _ ->
           case docWith cmdDoc of
             [] -> rest
-            ws -> (e, name, et, ws) : rest
+            ws -> (e, name, ws) : rest
         _ -> rest
     pick _ rest = rest
 
-emitFor :: Map.Map EVar ExprI -> Map.Map EVar TypeU -> (ExprI, EVar, EType, [WithSpec]) -> D [ExprI]
-emitFor assMap sigMap (sigExprI, parentName, parentEt, specs) = do
+emitFor :: Map.Map EVar ExprI -> Map.Map EVar TypeU -> (ExprI, EVar, [WithSpec]) -> D [ExprI]
+emitFor assMap sigMap (sigExprI, parentName, specs) = do
   sp <- posOfExprI sigExprI
-  let pt = etype parentEt
-      arity = sigArity pt
+  pt <- maybe (dfail (startPos sp) "internal: a `--' with:` parent has no visible signature") return
+          (Map.lookup parentName sigMap)
+  let arity = sigArity pt
       isEff = returnIsEffectful pt
       mAss = Map.lookup parentName assMap
-      isCollect = case mAss of
-        Just (ExprI _ (AssE _ b _)) -> containsCollect b
-        _ -> False
+      isCollect = maybe False containsCollect mAss
   mapM_ (validateWithSpec sp parentName arity isCollect) specs
   case mAss of
-    Just assI | isCollect ->
-      -- Streaming command (body produces via @collect): compose the handler
-      -- into the @collect sink rather than onto a return value.
-      mapM (synthStreamingBinding sp parentName assI sigMap) specs
-    _ -> mapM (synthWithBinding sp parentName arity isEff) specs
+    Just assI | isCollect -> do
+      -- Streaming command (body produces via @collect). An action applies to
+      -- everything the command streams, so it runs on a fresh run of the
+      -- command only when that is what composing it into the one @collect
+      -- sink gives ('directCollect'); otherwise it runs on the staged stream.
+      unless (returnsUnit pt) $ dfail (startPos sp) (nonUnitStreamMsg parentName)
+      let direct = directCollect assI
+          batchT = mfilter isConcreteType (collectStreamType sigMap assI)
+      when (not direct && isNothing batchT) $
+        dfail (startPos sp) (unstageableStreamMsg parentName)
+      directs <- if direct
+        then mapM (synthStreamingBinding sp parentName assI sigMap) specs
+        else return []
+      replays <- case batchT of
+        Just t@(AppU (VarU v) [elemT]) | v == BT.list -> do
+          mapM_ (\w -> recordPlan w (Replayed (collectKind w))) specs
+          mapM (synthCollectReplay sp parentName pt t elemT sigMap) specs
+        _ -> do
+          mapM_ (\w -> recordPlan w (NotReplayed (collectKind w) noBatchTypeReason)) specs
+          return []
+      return (directs ++ replays)
+    _ -> do
+      directs <- mapM (synthWithBinding sp parentName arity isEff) specs
+      let valueT = valueTypeOf pt
+      if isStageableType valueT
+        then do
+          mapM_ (\w -> recordPlan w (Replayed KindValue)) specs
+          replays <- mapM (synthValueReplay sp parentName pt valueT) specs
+          return (directs ++ replays)
+        else do
+          mapM_ (\w -> recordPlan w (NotReplayed KindValue unstageableValueReason)) specs
+          return directs
+  where
+    recordPlan :: WithSpec -> ReplayPlan -> D ()
+    recordPlan w plan = State.modify $ \st -> st
+      { dsReplayPlans = Map.insert (parentName, wsLong w) plan (dsReplayPlans st) }
+    collectKind w
+      | isJust (wsFold w) = KindFold
+      | wsStream w = KindStream
+      | otherwise = KindGather
+    noBatchTypeReason =
+      "its command's `@collect` producer has no signature with a concrete batch type"
+    unstageableValueReason =
+      "its command returns a value that cannot be saved to a file (it holds a function or a stream handle)"
+
+-- | A streaming command's actions apply to what it streams, so its own
+-- return must carry nothing else.
+returnsUnit :: TypeU -> Bool
+returnsUnit = (== BT.unitU) . valueTypeOf
+
+-- | The value a command produces, after all its arguments and effects.
+valueTypeOf :: TypeU -> TypeU
+valueTypeOf = peel . snd . uncurryU . peel
+  where
+    peel (ForallU _ t) = peel t
+    peel (EffectU _ t) = peel t
+    peel t = t
+
+-- | Whether a value can be staged to a file and read back by another
+-- process: no functions, suspensions or handles anywhere in it.
+isStageableType :: TypeU -> Bool
+isStageableType t = case t of
+  FunU _ _ -> False
+  EffectU _ _ -> False
+  ForallU _ b -> isStageableType b
+  AppU (VarU v) ts -> v `notElem` handleVars && all isStageableType ts
+  AppU f ts -> isStageableType f && all isStageableType ts
+  VarU v -> v `notElem` handleVars
+  NamU _ _ ps rs -> all isStageableType ps && all (isStageableType . snd) rs
+  _ -> True
+  where
+    handleVars = [BT.ifileVar, BT.istreamVar, BT.ostreamVar]
+
+nonUnitStreamMsg :: EVar -> String
+nonUnitStreamMsg parentName =
+  "`" <> T.unpack (unEVar parentName) <> "` streams its output through `@collect` "
+  <> "and also returns a value. A terminal action applies to what the command "
+  <> "streams, so the command must return `()`."
+
+unstageableStreamMsg :: EVar -> String
+unstageableStreamMsg parentName =
+  "the terminal actions of `" <> T.unpack (unEVar parentName) <> "` run on its "
+  <> "whole streamed output, which needs the type of what it streams, but its "
+  <> "`@collect` producer has no signature with a concrete batch type. Give the "
+  <> "producer a signature."
+
+-- | True iff every @collect of a streaming definition is in tail position
+-- of the body and every way the body can end is one of them, so each run
+-- streams from exactly one @collect and its value is the command's value.
+-- Composing an action into every sink then applies it to everything the
+-- command streams, exactly once. Tail positions are the body under its
+-- leading lambdas, a let or do body, the body of an immediately applied
+-- lambda, and both branches of an if (a match lowers to nested ifs).
+directCollect :: ExprI -> Bool
+directCollect (ExprI _ (AssE _ body wheres)) =
+  not (any containsCollect wheres) && and (collectSites True b) && endsInCollect b
+  where
+    b = stripSpine body
+    stripSpine (ExprI _ (LamE _ x)) = stripSpine x
+    stripSpine e = e
+directCollect _ = False
+
+-- | Whether every way out of an expression ends in a @collect, or abandons
+-- the run with @throw (which streams nothing on any path).
+endsInCollect :: ExprI -> Bool
+endsInCollect (ExprI _ e) = case e of
+  IntrinsicE IntrCollect _ -> True
+  IntrinsicE IntrThrow _ -> True
+  LetE _ b -> endsInCollect b
+  DoBlockE b -> endsInCollect b
+  EvalE b -> endsInCollect b
+  ParenE b -> endsInCollect b
+  AnnE b _ -> endsInCollect b
+  AppE f _ | Just b <- appliedLambdaBody f -> endsInCollect b
+  IfE _ t f -> endsInCollect t && endsInCollect f
+  _ -> False
+
+-- | One flag per @collect site in an expression: whether it is in tail
+-- position, given whether the expression itself is.
+collectSites :: Bool -> ExprI -> [Bool]
+collectSites d (ExprI _ e) = case e of
+  IntrinsicE IntrCollect as -> d : concatMap (collectSites False) as
+  LetE bs b -> concatMap (collectSites False . snd) bs ++ collectSites d b
+  DoBlockE b -> collectSites d b
+  EvalE b -> collectSites d b
+  ParenE b -> collectSites d b
+  AnnE b _ -> collectSites d b
+  AppE f xs | Just b <- appliedLambdaBody f ->
+    collectSites d b ++ concatMap (collectSites False) xs
+  IfE c t f -> collectSites False c ++ collectSites d t ++ collectSites d f
+  _ -> concatMap (collectSites False) (subExprs e)
+
+-- | The body of the function in an application, when it is a lambda.
+appliedLambdaBody :: ExprI -> Maybe ExprI
+appliedLambdaBody (ExprI _ (LamE _ b)) = Just b
+appliedLambdaBody (ExprI _ (ParenE f)) = appliedLambdaBody f
+appliedLambdaBody _ = Nothing
+
+-- | The immediate subexpressions of an expression.
+subExprs :: Expr -> [ExprI]
+subExprs e = case e of
+  ModE _ xs -> xs
+  AssE _ b ws -> b : ws
+  IstE _ _ _ b -> b
+  LstE es -> es
+  TupE es -> es
+  NamE kes -> map snd kes
+  AppE f xs -> f : xs
+  LamE _ b -> [b]
+  AnnE b _ -> [b]
+  LetE bs b -> map snd bs ++ [b]
+  IfE c t f -> [c, t, f]
+  DoBlockE b -> [b]
+  EvalE b -> [b]
+  IntrinsicE _ es -> es
+  ParenE b -> [b]
+  BopE l _ _ r -> [l, r]
+  _ -> []
+
+-- | The replay entry of an action on a streaming command. The command's
+-- staged output is an ordinary stream file whose frames are its batches.
+-- A gathering action reads it whole, as the list or as an @IFile@; a
+-- per-batch or folding action replays it frame by frame.
+synthCollectReplay ::
+  Span -> EVar -> TypeU -> TypeU -> TypeU -> Map.Map EVar TypeU -> WithSpec -> D ExprI
+synthCollectReplay sp parentName pt batchT elemT sigMap spec
+  | wsStream spec || isJust (wsFold spec) =
+      synthStreamingReplay sp parentName pt batchT elemT sigMap spec
+  | otherwise =
+      let useIFile = maybe False firstParamIsIFile (Map.lookup (wsTerm spec) sigMap)
+          inputT = if useIFile then AppU (VarU BT.ifileVar) [batchT] else batchT
+      in synthValueReplay sp parentName pt inputT spec
+
+-- | The parent argument positions a handler refers to with `$N`, ascending.
+referencedPositions :: [ArgSource] -> [Int]
+referencedPositions srcs = Set.toList (Set.fromList [n | ArgPos n <- srcs])
+
+-- | Synthesize the replay entry that applies the handler once to the
+-- command's whole staged output, given as a value of @inputT@. It takes the
+-- parent arguments the handler refers to, then the output.
+--
+-- > mlcr_<parent>_<long> = \x_i .. v -> handler <args> v
+synthValueReplay :: Span -> EVar -> TypeU -> TypeU -> WithSpec -> D ExprI
+synthValueReplay sp parentName pt inputT WithSpec{wsLong = long, wsTerm = tTerm, wsArgs = argSrcs} = do
+  let lamVars = replayParams pt
+      v = EV "mlcr_v"
+  vRef <- freshExprSpan sp (VarE defaultValue v)
+  handlerArgs <- buildHandlerArgs sp lamVars vRef argSrcs
+  tRef <- freshExprSpan sp (VarE defaultValue tTerm)
+  body <- freshExprSpan sp (AppE tRef handlerArgs)
+  finishReplay sp parentName pt long argSrcs lamVars (v, inputT) body
+
+-- | Synthesize the replay entry of a per-batch or folding action on a
+-- streaming command: the action's usual @collect composition, with a
+-- producer that replays the staged stream. Each frame of the staged stream
+-- is one batch, so the handler sees the producer's batch boundaries.
+--
+-- > mlcr_<parent>_<long> = \x_i .. s -> <wrap> (@collect (\k -> @replay s k))
+synthStreamingReplay ::
+  Span -> EVar -> TypeU -> TypeU -> TypeU -> Map.Map EVar TypeU -> WithSpec -> D ExprI
+synthStreamingReplay sp parentName pt batchT elemT sigMap
+  WithSpec { wsLong = long
+           , wsTerm = tTerm
+           , wsRender = render
+           , wsArgs = argSrcs
+           , wsFold = mFold
+           } = do
+  let lamVars = replayParams pt
+      s = EV "mlcr_s"
+      k = EV "mlcr_k"
+      sinkT = FunU [batchT] (EffectU ioEffectSet BT.unitU)
+      producerT = FunU [sinkT] (EffectU ioEffectSet BT.unitU)
+  sRef <- freshExprSpan sp (VarE defaultValue s)
+  kRef <- freshExprSpan sp (VarE defaultValue k)
+  replayE <- freshExprSpan sp (IntrinsicE IntrReplay [sRef, kRef])
+  producer <- freshExprSpan sp (LamE [k] replayE)
+  producerAnn <- freshExprSpan sp (AnnE producer producerT)
+  collectE <- freshExprSpan sp (IntrinsicE IntrCollect [producerAnn])
+  body <- case mFold of
+    Just fs -> composeFoldIntoCollect lamVars argSrcs fs tTerm collectE
+    Nothing -> do
+      recordHandlerStreamOf sigMap tTerm (mangleReplayName parentName long)
+      composeHandlerIntoCollect render lamVars argSrcs tTerm collectE
+  finishReplay sp parentName pt long argSrcs lamVars
+    (s, AppU (VarU BT.istreamVar) [elemT]) body
+
+-- | One name per parent argument. A replay entry binds only those its
+-- handler refers to; the rest are never mentioned.
+replayParams :: TypeU -> [EVar]
+replayParams pt = [EV ("mlcr_x_" <> T.pack (show i)) | i <- [1 .. sigArity pt]]
+
+-- | Bind a replay entry's parameters (the referenced parent arguments, then
+-- the staged input), pin each to its declared type where that is concrete,
+-- and name the entry.
+finishReplay ::
+  Span -> EVar -> TypeU -> Text -> [ArgSource] -> [EVar] -> (EVar, TypeU) -> ExprI -> D ExprI
+finishReplay sp parentName pt long argSrcs lamVars (input, inputT) body = do
+  let argTys = fst (uncurryU pt)
+      refs = referencedPositions argSrcs
+      params = [(lamVars !! (n - 1), argTys !! (n - 1)) | n <- refs] ++ [(input, inputT)]
+  pinned <- foldr pin (return body) [(p, t) | (p, t) <- params, isConcreteType t]
+  lam <- freshExprSpan sp (LamE (map fst params) pinned)
+  freshExprSpan sp (AssE (mangleReplayName parentName long) lam [])
+  where
+    pin (p, t) mBody = do
+      b <- mBody
+      pRef <- freshExprSpan sp (VarE defaultValue p)
+      annP <- freshExprSpan sp (AnnE pRef t)
+      freshExprSpan sp (LetE [(p, annP)] b)
 
 -- | Reject a formatter spec whose positional `$N` is out of range, or whose
 -- `@stream`/`@offset` is used on a command that does not stream (no reachable
 -- `@collect`). Runs before synthesis, while the user's original text is still
 -- recoverable from the spec (never surfaces as a namer-map error downstream).
 validateWithSpec :: Span -> EVar -> Int -> Bool -> WithSpec -> D ()
-validateWithSpec sp parentName arity isCollect (WithSpec _ long _ _ stream _ args) = do
+validateWithSpec sp parentName arity isCollect
+  WithSpec{wsLong = long, wsStream = stream, wsArgs = args, wsFold = mFold} = do
   mapM_ checkPos args
   -- `wsStream` already absorbs "@offset implies @stream" at parse time.
   when (stream && not isCollect) $ dfail (startPos sp) streamMsg
+  when (isJust mFold && not isCollect) $ dfail (startPos sp) foldNoCollectMsg
+  when (isJust mFold && stream) $ dfail (startPos sp) foldStreamMsg
   where
     parent = T.unpack (unEVar parentName)
     lg = T.unpack long
@@ -3644,6 +4090,14 @@ validateWithSpec sp parentName arity isCollect (WithSpec _ long _ _ stream _ arg
     streamMsg =
       "formatter `--" <> lg <> "` uses `@stream`/`@offset`, but `" <> parent
       <> "` does not stream its output (no reachable `@collect`)."
+    foldNoCollectMsg =
+      "formatter `--" <> lg <> "` declares `@fold`, but `" <> parent
+      <> "` does not stream its output (no reachable `@collect`); there "
+      <> "is nothing to fold over."
+    foldStreamMsg =
+      "formatter `--" <> lg <> "` combines `@fold` with `@stream`/`@offset`. "
+      <> "`@stream` emits one result per batch; `@fold` emits one result for "
+      <> "the whole stream. Pick one."
 
 -- | True iff the declared whole-form handler takes an @IFile [a]@ receiver
 -- (its first parameter's head is @IFile@). Selects random-access presentation
@@ -3662,23 +4116,7 @@ firstParamIsIFile = go
 containsCollect :: ExprI -> Bool
 containsCollect (ExprI _ e) = case e of
   IntrinsicE IntrCollect _ -> True
-  ModE _ xs -> any containsCollect xs
-  AssE _ b ws -> containsCollect b || any containsCollect ws
-  IstE _ _ b -> any containsCollect b
-  LstE es -> any containsCollect es
-  TupE es -> any containsCollect es
-  NamE kes -> any (containsCollect . snd) kes
-  AppE f xs -> containsCollect f || any containsCollect xs
-  LamE _ b -> containsCollect b
-  AnnE b _ -> containsCollect b
-  LetE bs b -> any (containsCollect . snd) bs || containsCollect b
-  IfE c t f -> containsCollect c || containsCollect t || containsCollect f
-  DoBlockE b -> containsCollect b
-  EvalE b -> containsCollect b
-  IntrinsicE _ es -> any containsCollect es
-  ParenE b -> containsCollect b
-  BopE l _ _ r -> containsCollect l || containsCollect r
-  _ -> False
+  _ -> any containsCollect (subExprs e)
 
 -- | The batch type a `@collect` command writes to standard output.
 --
@@ -3695,12 +4133,7 @@ containsCollect (ExprI _ e) = case e of
 -- signature (an inline lambda, say). The caller must then report that
 -- it does not know rather than claim the function's `()`.
 collectStreamType :: Map.Map EVar TypeU -> ExprI -> Maybe TypeU
-collectStreamType sigs body = do
-  arg <- findCollectArg body
-  producer <- headVarOf arg
-  sig <- Map.lookup producer sigs
-  sink <- lastParamOf (peelForall sig)
-  firstParamOf (peelForall sink)
+collectStreamType sigs body = findCollectArg body >>= streamTypeOfProducer sigs
   where
     -- The expression `@collect` was applied to, if the body reaches one.
     findCollectArg :: ExprI -> Maybe ExprI
@@ -3708,7 +4141,7 @@ collectStreamType sigs body = do
       IntrinsicE IntrCollect (a : _) -> Just a
       ModE _ xs -> firstSome (map findCollectArg xs)
       AssE _ b ws -> firstSome (map findCollectArg (b : ws))
-      IstE _ _ b -> firstSome (map findCollectArg b)
+      IstE _ _ _ b -> firstSome (map findCollectArg b)
       LstE es -> firstSome (map findCollectArg es)
       TupE es -> firstSome (map findCollectArg es)
       NamE kes -> firstSome (map (findCollectArg . snd) kes)
@@ -3724,6 +4157,33 @@ collectStreamType sigs body = do
       BopE l _ _ r -> firstSome [findCollectArg l, findCollectArg r]
       _ -> Nothing
 
+    firstSome = foldr (\x acc -> maybe acc Just x) Nothing
+
+-- | The batch type a @collect producer streams, read off the producer's
+-- declared signature. Takes the expression @\@collect@ was applied to,
+-- so a body with several @collect nodes resolves each against its own
+-- producer.
+--
+-- Nothing when the producer is not a named term with a signature (an
+-- inline lambda, say).
+streamTypeOfProducer :: Map.Map EVar TypeU -> ExprI -> Maybe TypeU
+streamTypeOfProducer _ (ExprI _ (AnnE _ t)) = do
+  sink <- lastParamOf (peelForall t)
+  firstParamOf (peelForall sink)
+  where
+    peelForall (ForallU _ x) = peelForall x
+    peelForall (EffectU _ x) = peelForall x
+    peelForall x = x
+    lastParamOf (FunU ts _) | not (null ts) = Just (last ts)
+    lastParamOf _ = Nothing
+    firstParamOf (FunU (x : _) _) = Just x
+    firstParamOf _ = Nothing
+streamTypeOfProducer sigs arg = do
+  producer <- headVarOf arg
+  sig <- Map.lookup producer sigs
+  sink <- lastParamOf (peelForall sig)
+  firstParamOf (peelForall sink)
+  where
     -- The term at the head of a (possibly partial) application.
     headVarOf :: ExprI -> Maybe EVar
     headVarOf (ExprI _ e) = case e of
@@ -3743,8 +4203,6 @@ collectStreamType sigs body = do
     firstParamOf (FunU (t : _) _) = Just t
     firstParamOf _ = Nothing
 
-    firstSome = foldr (\x acc -> maybe acc Just x) Nothing
-
 -- | Synthesize a `--' with:` flag command for a streaming (@collect) parent.
 -- Reuses the parent's body (re-indexed with fresh ids to avoid annotation
 -- collisions), rewriting every @collect node per flag:
@@ -3760,7 +4218,23 @@ collectStreamType sigs body = do
 --     a random-access IFile. The command returns the handler's result, which
 --     the nexus formats per `-f` (or emits verbatim for `render`).
 synthStreamingBinding :: Span -> EVar -> ExprI -> Map.Map EVar TypeU -> WithSpec -> D ExprI
-synthStreamingBinding sp parentName assI sigMap (WithSpec _ long tTerm render stream _ argSrcs)
+synthStreamingBinding sp parentName assI sigMap
+  WithSpec { wsLong = long
+           , wsTerm = tTerm
+           , wsRender = render
+           , wsStream = stream
+           , wsArgs = argSrcs
+           , wsFold = mFold
+           }
+  | Just fs <- mFold =
+      -- `@fold` : the stream is folded into one accumulator and the handler
+      -- is applied to it once. Unlike the gather below, nothing round-trips
+      -- through a file, so the element type stays pinned by the producer's
+      -- own sink and peak memory does not grow with the stream.
+      --
+      -- The entry emits once, like the gather, so no stream element type is
+      -- recorded for it: what a caller receives is the entry's own return.
+      withParentBody $ \ps -> composeFoldIntoCollect ps argSrcs fs tTerm
   | stream =
       -- `@stream` : per-batch. `with`  handler `... [a] -> [b]` -> sink (handler .. c)
       --             (nexus formats `[b]`); `render` handler `... [a] -> Str` ->
@@ -3771,11 +4245,8 @@ synthStreamingBinding sp parentName assI sigMap (WithSpec _ long tTerm render st
         -- writes per batch is the handler's own result. Record it here,
         -- where the handler's signature is in scope, so the entry can
         -- report what a caller receives rather than the `()` it returns.
-        recordHandlerStream (mangleTerminalName parentName long)
-        withParentBody $ \bodyExpr wheres -> do
-          bodyExpr' <- composeHandlerIntoCollect render parentParams argSrcs tTerm bodyExpr
-          wheres' <- mapM (composeHandlerIntoCollect render parentParams argSrcs tTerm) wheres
-          return (bodyExpr', wheres')
+        recordHandlerStreamOf sigMap tTerm (mangleTerminalName parentName long)
+        withParentBody $ \ps -> composeHandlerIntoCollect render ps argSrcs tTerm
   | otherwise =
       -- whole-list gather-then-apply. `IFile [a] -> b` handlers get random access;
       -- `[a] -> b` handlers get a materialized list. `with` returns a typed value
@@ -3783,39 +4254,34 @@ synthStreamingBinding sp parentName assI sigMap (WithSpec _ long tTerm render st
       -- emitted verbatim. Synthesis is identical -- only the manifest `render`
       -- flag differs.
       let useIFile = maybe False firstParamIsIFile (Map.lookup tTerm sigMap)
-      in withParentBody $ \bodyExpr wheres -> do
-          bodyExpr' <- composeWholeIntoCollect useIFile parentParams argSrcs tTerm bodyExpr
-          wheres' <- mapM (composeWholeIntoCollect useIFile parentParams argSrcs tTerm) wheres
-          return (bodyExpr', wheres')
+      in withParentBody $ \ps -> composeWholeIntoCollect useIFile sigMap ps argSrcs tTerm
   where
-    -- The handler's declared return type is what reaches standard output
-    -- once per batch. Absent when the handler has no reachable
-    -- signature, in which case the entry says nothing rather than
-    -- claiming its `()`.
-    recordHandlerStream :: EVar -> D ()
-    recordHandlerStream name = case returnOf =<< Map.lookup tTerm sigMap of
-      Nothing -> return ()
-      Just rt -> State.modify $ \st ->
-        st { dsStreamElems = Map.insert name rt (dsStreamElems st) }
-      where
-        returnOf t = case peel t of
-          FunU _ r -> Just (peel r)
-          _ -> Nothing
-        peel (ForallU _ t) = peel t
-        peel (EffectU _ t) = peel t
-        peel t = t
-
-    -- the parent's top-level positional parameters (in scope at every @collect
-    -- site in the duplicated body); `$N` references index into these.
-    parentParams = case assI of
-      ExprI _ (AssE _ (ExprI _ (LamE ps _)) _) -> ps
-      _ -> []
-    withParentBody k = case assI of
+    -- Every local binder already has a unique name ('Rename.renameLocals'), so
+    -- nothing placed at a @collect site can be captured. `$N` names the Nth
+    -- parameter of the body's leading lambdas; where-bindings see only the
+    -- outermost lambda's.
+    withParentBody rewrite = case assI of
       ExprI _ (AssE _ bodyExpr wheres) -> do
-        (bodyExpr', wheres') <- k bodyExpr wheres
-        bodyExpr'' <- pinParentArgTypes bodyExpr'
-        freshExprSpan sp (AssE (mangleTerminalName parentName long) bodyExpr'' wheres')
+        let levels = lambdaSpine bodyExpr
+            spine = concat levels
+        mapM_ (checkArgRef (length spine) (length (concat (take 1 levels))) (any containsCollect wheres)) argSrcs
+        bodyExpr' <- rewrite spine bodyExpr >>= pinParentArgTypes
+        wheres' <- mapM (rewrite spine) wheres
+        freshExprSpan sp (AssE (mangleTerminalName parentName long) bodyExpr' wheres')
       _ -> dfail (startPos sp) "internal: streaming `@with` parent is not an AssE"
+
+    checkArgRef nSpine nOuter collectInWhere (ArgPos n)
+      | n > nSpine = argRefError n $
+          "its definition binds only " <> T.pack (show nSpine)
+          <> " parameter(s); name the parameter in the definition."
+      | n > nOuter && collectInWhere = argRefError n
+          "that parameter is bound by a lambda in the body, and a where-binding that \
+          \streams cannot see it; name the parameter before the `=`."
+    checkArgRef _ _ _ _ = return ()
+
+    argRefError n reason = dfail (startPos sp) . T.unpack $
+      "formatter `--" <> long <> "` on `" <> unEVar parentName
+      <> "` references `$" <> T.pack (show n) <> "`, but " <> reason
 
     -- The synthesized command duplicates the parent body rather than calling the
     -- parent (the @collect sink must be rewritten in place), so it carries no
@@ -3827,26 +4293,43 @@ synthStreamingBinding sp parentName assI sigMap (WithSpec _ long tTerm render st
     -- type with an inline annotation (`let p = (p :: T) in ..`), supplying the
     -- type the parent signature would have. Polymorphic arguments are left
     -- unpinned (nothing to resolve, and a rigid annotation would over-constrain).
-    pinParentArgTypes (ExprI i (LamE params inner)) = do
-      let argTys = maybe [] funArgTypesU (Map.lookup parentName sigMap)
-          pins = [(p, t) | (p, t) <- zip params argTys, isConcreteType t]
-      inner' <- foldr pin (return inner) pins
-      return (ExprI i (LamE params inner'))
+    pinParentArgTypes = pinSpine (maybe [] (fst . uncurryU) (Map.lookup parentName sigMap))
       where
+        pinSpine argTys (ExprI i (LamE params inner)) = do
+          let (here, rest) = splitAt (length params) argTys
+              pins = [(p, t) | (p, t) <- zip params here, isConcreteType t]
+          inner' <- pinSpine rest inner
+          inner'' <- foldr pin (return inner') pins
+          return (ExprI i (LamE params inner''))
+        pinSpine _ other = return other
+
         pin (p, t) mBody = do
           body <- mBody
           pRef <- freshExprSpan sp (VarE defaultValue p)
           annP <- freshExprSpan sp (AnnE pRef t)
           freshExprSpan sp (LetE [(p, annP)] body)
-    pinParentArgTypes other = return other
 
--- | The argument types of a (possibly quantified) function type, in order.
--- Flattens nested arrows so a curried @A -> B -> C@ yields @[A, B]@ whether the
--- parser produced @FunU [A,B] C@ or @FunU [A] (FunU [B] C)@.
-funArgTypesU :: TypeU -> [TypeU]
-funArgTypesU (ForallU _ t) = funArgTypesU t
-funArgTypesU (FunU args ret) = args ++ funArgTypesU ret
-funArgTypesU _ = []
+-- | Record what a per-batch entry writes to standard output: the handler's
+-- declared return, once per batch. Absent when the handler has no reachable
+-- signature, in which case the entry says nothing rather than claiming its
+-- `()`.
+recordHandlerStreamOf :: Map.Map EVar TypeU -> EVar -> EVar -> D ()
+recordHandlerStreamOf sigMap tTerm name = case returnOf =<< Map.lookup tTerm sigMap of
+  Nothing -> return ()
+  Just rt -> State.modify $ \st ->
+    st { dsStreamElems = Map.insert name rt (dsStreamElems st) }
+  where
+    returnOf t = case peel t of
+      FunU _ r -> Just (peel r)
+      _ -> Nothing
+    peel (ForallU _ t) = peel t
+    peel (EffectU _ t) = peel t
+    peel t = t
+
+-- | The parameter lists of a definition's leading lambdas, outermost first.
+lambdaSpine :: ExprI -> [[EVar]]
+lambdaSpine (ExprI _ (LamE ps b)) = ps : lambdaSpine b
+lambdaSpine _ = []
 
 -- | True iff a type mentions no generic (lowercase) type variable, i.e. it is a
 -- fully concrete monotype that can be pinned with an inline annotation. Used by
@@ -3881,7 +4364,7 @@ rewriteCollectWith wrap = go
         wrap self arg'
       ModE v xs -> mapM go xs >>= freshExprFrom self . ModE v
       AssE v b ws -> do { b' <- go b; ws' <- mapM go ws; freshExprFrom self (AssE v b' ws') }
-      IstE cn ts b -> mapM go b >>= freshExprFrom self . IstE cn ts
+      IstE cn ctx ts b -> mapM go b >>= freshExprFrom self . IstE cn ctx ts
       LstE es -> mapM go es >>= freshExprFrom self . LstE
       TupE es -> mapM go es >>= freshExprFrom self . TupE
       NamE kes -> mapM (\(k, x) -> (,) k <$> go x) kes >>= freshExprFrom self . NamE
@@ -3910,13 +4393,88 @@ composeHandlerIntoCollect :: Bool -> [EVar] -> [ArgSource] -> EVar -> ExprI -> D
 composeHandlerIntoCollect singletonWrap params argSrcs handler =
   rewriteCollectWith $ \self arg' -> wrapPerBatchCollect singletonWrap params argSrcs handler self arg'
 
+-- | Rewrite every @collect in a body into the folding form.
+composeFoldIntoCollect :: [EVar] -> [ArgSource] -> FoldSpec -> EVar -> ExprI -> D ExprI
+composeFoldIntoCollect params argSrcs fs handler =
+  rewriteCollectWith $ \self arg' -> wrapFoldCollect params argSrcs fs handler self arg'
+
+-- | Build the fold do-block for one @collect arg@:
+--
+-- > do  h <- @cellnew init
+-- >     _ <- arg (\c -> do  acc <- @cellget h
+-- >                         @cellput h (step acc c))
+-- >     b <- @cellreduce combine h
+-- >     handler b
+--
+-- The sink still returns @()@, so the running accumulator lives behind the
+-- cell rather than flowing back out of the sink. @step@ and @combine@ are
+-- applied as ordinary morloc code, so the realizer places them like any
+-- other call and marshals across a language boundary if it has to.
+--
+-- The accumulator is per calling thread (see the runtime's cell module), so
+-- a producer that drives its sink from several threads loses no updates;
+-- @combine@ merges them. Every accumulator starts from @init@, so @init@
+-- must be an identity for @combine@ or the answer depends on how many
+-- threads the producer used -- the usual contract of a parallel fold, and
+-- not something that can be checked here.
+wrapFoldCollect :: [EVar] -> [ArgSource] -> FoldSpec -> EVar -> ExprI -> ExprI -> D ExprI
+wrapFoldCollect params argSrcs (FoldSpec step ini comb) handler ref collectArg = do
+  idx <- freshIdPos (Pos 0 0 "")
+  let nm base = EV (base <> T.pack (show idx))
+      hV   = nm "_fold_h_"
+      accV = nm "_fold_acc_"
+      bV   = nm "_fold_b_"
+      cV   = nm "_fold_c_"
+      gV   = nm "_fold_g_"
+  handlerRef <- freshExprFrom ref (VarE defaultValue handler)
+  -- h <- @cellnew init
+  newBind <- do
+    iniRef <- freshExprFrom ref (VarE defaultValue ini)
+    n <- freshExprFrom ref (IntrinsicE IntrCellNew [iniRef])
+    freshExprFrom ref (EvalE n)
+  -- \c -> do { acc <- @cellget h; @cellput h (step acc c) }
+  sink <- do
+    hGet <- freshExprFrom ref (VarE defaultValue hV)
+    getE <- freshExprFrom ref (IntrinsicE IntrCellGet [hGet])
+    getBind <- freshExprFrom ref (EvalE getE)
+    stepRef <- freshExprFrom ref (VarE defaultValue step)
+    accRef <- freshExprFrom ref (VarE defaultValue accV)
+    cRef <- freshExprFrom ref (VarE defaultValue cV)
+    stepApp <- freshExprFrom ref (AppE stepRef [accRef, cRef])
+    hPut <- freshExprFrom ref (VarE defaultValue hV)
+    putE <- freshExprFrom ref (IntrinsicE IntrCellPut [hPut, stepApp])
+    forcePut <- freshExprFrom ref (EvalE putE)
+    unitE <- freshExprFrom ref UniE
+    let dV = EV (BT.doDiscardPrefix <> "fold_p_" <> T.pack (show idx))
+    putBody <- freshExprFrom ref (LetE [(dV, forcePut)] unitE)
+    inner <- freshExprFrom ref (LetE [(accV, getBind)] putBody)
+    blk <- freshExprFrom ref (DoBlockE inner)
+    freshExprFrom ref (LamE [cV] blk)
+  -- _ <- arg (\c -> ...)
+  prodBare <- do
+    app <- freshExprFrom ref (AppE collectArg [sink])
+    freshExprFrom ref (EvalE app)
+  -- b <- @cellreduce combine h   (the cell is released here)
+  reduceBind <- do
+    combRef <- freshExprFrom ref (VarE defaultValue comb)
+    hRef <- freshExprFrom ref (VarE defaultValue hV)
+    r <- freshExprFrom ref (IntrinsicE IntrCellReduce [combRef, hRef])
+    freshExprFrom ref (EvalE r)
+  appArgs <- buildStreamArgs ref params Nothing bV argSrcs
+  handlerApp <- freshExprFrom ref (AppE handlerRef appArgs)
+  t1 <- freshExprFrom ref (LetE [(bV, reduceBind)] handlerApp)
+  t2 <- freshExprFrom ref (LetE [(gV, prodBare)] t1)
+  t3 <- freshExprFrom ref (LetE [(hV, newBind)] t2)
+  freshExprFrom ref (DoBlockE t3)
+
 -- | Rewrite every @collect node into a whole-list gather-then-apply: gather the
 -- producer's stream to a temp file, then apply the handler once to the complete
 -- data. When @useIFile@ the handler receives a random-access @IFile [a]@;
 -- otherwise it receives a materialized @[a]@ (via @load).
-composeWholeIntoCollect :: Bool -> [EVar] -> [ArgSource] -> EVar -> ExprI -> D ExprI
-composeWholeIntoCollect useIFile params argSrcs handler =
-  rewriteCollectWith $ \self arg' -> wrapWholeCollect useIFile params argSrcs self handler arg'
+composeWholeIntoCollect ::
+  Bool -> Map.Map EVar TypeU -> [EVar] -> [ArgSource] -> EVar -> ExprI -> D ExprI
+composeWholeIntoCollect useIFile sigs params argSrcs handler =
+  rewriteCollectWith $ \self arg' -> wrapWholeCollect useIFile sigs params argSrcs self handler arg'
 
 -- | Build the whole-list gather-and-apply do-block for one @collect arg@:
 --
@@ -3939,8 +4497,9 @@ composeWholeIntoCollect useIFile params argSrcs handler =
 -- >     xs <- @load path           -- materialize the whole list
 -- >     _  <- @close path          -- unlink the temp file
 -- >     handler xs
-wrapWholeCollect :: Bool -> [EVar] -> [ArgSource] -> ExprI -> EVar -> ExprI -> D ExprI
-wrapWholeCollect useIFile params argSrcs ref handler collectArg = do
+wrapWholeCollect ::
+  Bool -> Map.Map EVar TypeU -> [EVar] -> [ArgSource] -> ExprI -> EVar -> ExprI -> D ExprI
+wrapWholeCollect useIFile sigs params argSrcs ref handler collectArg = do
   idx <- freshIdPos (Pos 0 0 "")
   let nm base = EV (base <> T.pack (show idx))
       pathV = nm "_whole_path_"
@@ -3966,7 +4525,7 @@ wrapWholeCollect useIFile params argSrcs ref handler collectArg = do
   gatherBare <- do
     oref <- freshExprFrom ref (VarE defaultValue oV)
     zeroE <- freshExprFrom ref (IntE 0)
-    sinkE <- mkWriteSink ref zeroE oref
+    sinkE <- mkWriteSink False ref zeroE oref
     app <- freshExprFrom ref (AppE collectArg [sinkE])
     freshExprFrom ref (EvalE app)
   -- _ <- @close o
@@ -3999,7 +4558,8 @@ wrapWholeCollect useIFile params argSrcs ref handler collectArg = do
         t1 <- freshExprFrom ref (LetE [(g4, unlink)] rRef)
         t2 <- freshExprFrom ref (LetE [(g3, closeFBare)] t1)
         t3 <- freshExprFrom ref (LetE [(rV, handlerBind)] t2)
-        bindOkFrom ref fV openFBind t3
+        t3' <- pinGathered fV (\a -> AppU (VarU BT.ifileVar) [a]) t3
+        bindOkFrom ref fV openFBind t3'
       else do
         loadBind <- do
           p <- freshExprFrom ref (VarE defaultValue pathV)
@@ -4009,12 +4569,51 @@ wrapWholeCollect useIFile params argSrcs ref handler collectArg = do
         appArgs <- buildStreamArgs ref params Nothing xsV argSrcs
         handlerApp <- freshExprFrom ref (AppE handlerRef appArgs)
         t1 <- freshExprFrom ref (LetE [(g3, unlink)] handlerApp)
-        bindOkFrom ref xsV loadBind t1
+        t1' <- pinGathered xsV id t1
+        bindOkFrom ref xsV loadBind t1'
   b1 <- freshExprFrom ref (LetE [(g2, closeOBare)] tailE)
   b2 <- freshExprFrom ref (LetE [(g1, gatherBare)] b1)
   b3 <- bindOkFrom ref oV openOBind b2
   b4 <- bindOkFrom ref pathV tmpBind b3
   freshExprFrom ref (DoBlockE b4)
+  where
+    -- Tie the gathered value to what the producer streams.
+    --
+    -- The stream leaves through a file and comes back through @load or
+    -- @open, and both are polymorphic: their element type is inferred from
+    -- whatever reads them, which is the handler. Nothing else relates the
+    -- two ends, so a handler whose receiver disagrees with the stream is
+    -- accepted and then reads the file's bytes as a type they do not hold.
+    -- The producer's declared signature is what closes the loop, and
+    -- `wrap` says how the handler sees the stream: as the list itself, or
+    -- behind an @IFile@.
+    --
+    -- A producer with no reachable signature, or one whose batch type is
+    -- generic, cannot be pinned: there is nothing to check against, and a
+    -- rigid annotation would over-constrain a legitimately generic handler.
+    -- That leaves the handler unchecked, so it is said out loud rather than
+    -- passed over.
+    pinGathered :: EVar -> (TypeU -> TypeU) -> ExprI -> D ExprI
+    pinGathered v wrap body =
+      case streamTypeOfProducer sigs collectArg of
+        Just t | isConcreteType t -> do
+          vRef <- freshExprFrom ref (VarE defaultValue v)
+          annV <- freshExprFrom ref (AnnE vRef (wrap t))
+          freshExprFrom ref (LetE [(v, annV)] body)
+        mt -> do
+          dwarn [unpinnedMsg mt]
+          return body
+
+    unpinnedMsg mt =
+      "the whole-list handler `" <> unEVar handler <> "` is not checked "
+        <> "against what this `@collect` streams, because " <> reason
+        <> ". A handler whose receiver type disagrees with the stream will "
+        <> "read the gathered data as a type it does not hold. Give the "
+        <> "producer a concrete signature to have the handler checked."
+      where
+        reason = case mt of
+          Nothing -> "its producer has no declared signature"
+          Just _ -> "its producer streams a generic batch type"
 
 -- | Build the per-batch streaming do-block that replaces a @collect arg@:
 --
@@ -4104,7 +4703,8 @@ mkEmitWrite singletonWrap ref oVar value = do
 -- 'CodeGenerator/Nexus.inheritParentArgDocs'. A @SigE@ here would
 -- need a return type not knowable at desugar time.
 synthWithBinding :: Span -> EVar -> Int -> Bool -> WithSpec -> D ExprI
-synthWithBinding sp parentName arity isEff (WithSpec _ long tTerm _ _ _ argSrcs) = do
+synthWithBinding sp parentName arity isEff
+  WithSpec{wsLong = long, wsTerm = tTerm, wsArgs = argSrcs} = do
   let mangled = mangleTerminalName parentName long
       lamVars = [EV ("mlcp_x_" <> T.pack (show idx)) | idx <- [1..arity]]
   fooRef <- freshExprSpan sp (VarE defaultValue parentName)
@@ -4132,6 +4732,369 @@ synthWithBinding sp parentName arity isEff (WithSpec _ long tTerm _ _ _ argSrcs)
       then return body
       else freshExprSpan sp (LamE lamVars body)
   freshExprSpan sp (AssE mangled wrapped [])
+
+--------------------------------------------------------------------
+-- `@parse` entry synthesis
+--
+-- A command whose arguments declare `@parse` formats gets one internal entry
+-- per target: the command itself and each of its `@with`/`@render` commands.
+-- The entry takes, in place of each parseable argument, one Bool per format
+-- (which format the nexus selected, at most one true), the path it was
+-- given, the argument as the nexus loaded it when no format was selected (a
+-- packet held as bytes), and for a stream argument the path to stage the
+-- stream at. It reads each parseable argument, in argument order, then
+-- calls the target:
+--
+-- > mlcq_<target> = \... -> do
+-- >   v_i <- ? sel_i_1 = <read tok_i with the first format's handler>
+-- >          ...
+-- >          : @unpack pkt_i
+-- >   <target> a_1 .. a_n
+--------------------------------------------------------------------
+
+-- | How a parseable argument's value is produced by its handlers.
+data ParseArgKind
+  = ParseValue TypeU        -- ^ handler @Str -> <IO> T@, the argument's type
+  | ParseOptional TypeU     -- ^ an optional argument @?T@: handler @Str -> <IO> T@
+  | ParseStream Bool TypeU  -- ^ @IStream a@ (False) or @IFile [a]@ (True):
+                            --   handler @Str -> ([a] -> <IO> ()) -> <IO> ()@
+
+expandParseEntries :: Map.Map EVar TypeU -> [ExprI] -> D [ExprI]
+expandParseEntries visibleSigs body =
+  case [ (e, name, cmdDoc, argDocs) | e@(ExprI _ (SigE (Signature name _ et))) <- body
+                                    , ArgDocSig cmdDoc argDocs _ <- [edocs et]
+                                    , any (not . null . docParse) argDocs ] of
+    [] -> return body
+    cmds -> do
+      entries <- concat <$> mapM synthCmd cmds
+      let names = [ n | ExprI _ (AssE n _ _) <- entries ]
+      body' <- mapM (addToExport names) body
+      return (body' ++ entries)
+  where
+    userNames = collectTopLevelBinders body
+
+    synthCmd (sigE, name, cmdDoc, argDocs) = do
+      sp <- posOfExprI sigE
+      let pos = startPos sp
+      pt <- maybe (dfail pos "internal: a `@parse` command has no visible signature") return
+              (Map.lookup name visibleSigs)
+      let (params, result) = uncurryU pt
+          quantified = forallVars pt
+      when (length params /= length argDocs) $
+        dfail pos "internal: a `@parse` command's argument docstrings do not match its arguments"
+      kinds <- zipWithM (classifyParseArg pos name quantified) params argDocs
+      -- The command consumes a streamed argument as it reads it, so an
+      -- action cannot be handed the same stream.
+      case [ (w, n)
+           | w <- docWith cmdDoc
+           , ArgPos n <- wsArgs w
+           , (i, Just (ParseStream False _)) <- zip [1 ..] kinds
+           , i == n
+           ] of
+        ((w, n) : _) -> dfail pos . T.unpack $
+          "the action `--" <> wsLong w <> "` of `" <> unEVar name
+          <> "` refers with `$" <> T.pack (show n) <> "` to a streamed `@parse` argument,"
+          <> " which the command consumes as it reads it. An action cannot refer to"
+          <> " a streamed `@parse` argument."
+        [] -> return ()
+      -- A streamed argument's channel is released when the command
+      -- returns, so no stream may leave in its result.
+      when (any (== Just True) [isStreamed <$> k | k <- kinds] && mentionsIStream result) $
+        dfail pos . T.unpack $
+          "`" <> unEVar name <> "` reads a stream with `@parse` and returns a stream;"
+          <> " a parsed stream cannot leave the command. Save it to a file with"
+          <> " `@write` and return the path instead."
+      -- A streaming command whose actions run only on its staged output
+      -- has no fresh-run action entries to parse arguments for.
+      let targets = filter (\t -> t == name || Set.member t userNames)
+                      (parseEntryTargets name cmdDoc argDocs)
+      case find ((`Set.member` userNames) . parseEntryName) targets of
+        Just t -> dfail pos . T.unpack $
+          "synthesized internal name `" <> unEVar (parseEntryName t)
+          <> "` collides with a top-level identifier."
+        Nothing -> return ()
+      recordCompanions
+        (name, [RoleParse Nothing | name `elem` targets]
+               <> [ RoleParse (Just (wsLong w))
+                  | w <- docWith cmdDoc
+                  , mangleTerminalName name (wsLong w) `elem` targets ])
+      -- In a run that saves the command's output, the command's own entry
+      -- saves each parsed value an action refers to (see 'saveSlot'). A
+      -- parsed `IFile` is the file its parser writes, which the nexus saves.
+      let slots = Set.toList (Set.fromList
+            [ n - 1
+            | w <- docWith cmdDoc
+            , ArgPos n <- wsArgs w
+            , (i, Just k) <- zip [1 ..] kinds
+            , i == n
+            , not (isStagedFile k)
+            ])
+      unless (null slots) $ State.modify $ \st -> st
+        { dsParseSlots = Map.insert name (map (+ 1) slots) (dsParseSlots st) }
+      mapM (\t -> synthParseEntry sp name (zip argDocs kinds) (if t == name then slots else []) t) targets
+
+    forallVars (ForallU v t) = v : forallVars t
+    forallVars _ = []
+
+    isStreamed (ParseStream False _) = True
+    isStreamed _ = False
+
+    isStagedFile (ParseStream True _) = True
+    isStagedFile _ = False
+
+    mentionsIStream (AppU (VarU v) ts) = v == BT.istreamVar || any mentionsIStream ts
+    mentionsIStream (AppU t ts) = any mentionsIStream (t : ts)
+    mentionsIStream (FunU ts t) = any mentionsIStream (t : ts)
+    mentionsIStream (NamU _ _ ts rs) = any mentionsIStream (ts ++ map snd rs)
+    mentionsIStream (EffectU _ t) = mentionsIStream t
+    mentionsIStream (OptionalU t) = mentionsIStream t
+    mentionsIStream (ForallU _ t) = mentionsIStream t
+    mentionsIStream _ = False
+
+-- | Classify one argument of a `@parse` command. Nothing for an argument
+-- without formats.
+classifyParseArg :: Pos -> EVar -> [TVar] -> TypeU -> ArgDocVars -> D (Maybe ParseArgKind)
+classifyParseArg pos (EV cmd) quantified t d
+  | null (docParse d) = return Nothing
+  | otherwise = do
+      when (any (\v -> Set.member (VarU v) (free t)) quantified) $
+        reject "its type has a type variable, so no handler can produce it"
+      when (docMany d == Just True) $ reject "`@many` arguments cannot be parsed"
+      when (docUnroll d == Just True) $ reject "`@unroll` arguments cannot be parsed"
+      when (docForm d == Just FormList) $ reject "`@form list` arguments cannot be parsed"
+      when (isJust (docTrue d) || isJust (docFalse d)) $ reject "flags cannot be parsed"
+      Just <$> case t of
+        OptionalU inner
+          | isStr inner -> reject strMsg
+          | isJust (streamOf inner) -> reject "an optional stream cannot be parsed"
+          | otherwise -> return (ParseOptional inner)
+        _ | isStr t -> reject strMsg
+          | Just k <- streamOf t -> k
+          | otherwise -> return (ParseValue t)
+  where
+    reject :: Text -> D a
+    reject msg = dfail pos . T.unpack $
+      "`@parse` on an argument of `" <> cmd <> "`: " <> msg <> "."
+    strMsg = "the argument is a `Str`, so a handler would receive the string it produces"
+    isStr (VarU v) = v == BT.str
+    isStr _ = False
+    streamOf (AppU (VarU v) [a])
+      | v == BT.istreamVar = Just (return (ParseStream False a))
+      | v == BT.ifileVar = Just $ case a of
+          AppU (VarU l) [e] | l == BT.list -> return (ParseStream True e)
+          _ -> reject "an `IFile` argument must be `IFile [a]` to be parsed"
+      | v == BT.ostreamVar = Just (reject "an `OStream` argument cannot be parsed")
+    streamOf _ = Nothing
+
+-- | Synthesize the `@parse` entry for one target.
+synthParseEntry :: Span -> EVar -> [(ArgDocVars, Maybe ParseArgKind)] -> [Int] -> EVar -> D ExprI
+synthParseEntry sp cmd args slots target = do
+  let groups = zipWith paramGroup [0 :: Int ..] args
+  targetRef <- varE target
+  argRefs <- mapM (varE . snd) groups
+  call0 <- if null argRefs then return targetRef else expr (AppE targetRef argRefs)
+  saves <- mapM saveSlot slots
+  call <- foldrM (\b acc -> expr (LetE [b] acc)) call0 saves
+  let indexed = zip [0 :: Int ..] args
+      (streams, values) = partition (isChannel . snd) indexed
+  -- Value arguments are parsed first, so a failure among them starts no
+  -- producer. Each streamed argument's producer then runs concurrently with
+  -- the target.
+  bodyE <- if null streams
+    then foldM bindParsed call (reverse indexed)
+    else do
+      settled <- settleStreams (map fst streams) call
+      withStreams <- foldM bindParsed settled (reverse streams)
+      foldM bindParsed withStreams (reverse values)
+  doE <- expr (DoBlockE bodyE)
+  let lamVars = concatMap fst groups ++ concat [[var i "ws", var i "wp"] | i <- slots]
+  lamE <- if null lamVars then return doE else expr (LamE lamVars doE)
+  expr (AssE (parseEntryName target) lamE [])
+  where
+    expr = freshExprSpan sp
+    varE v = expr (VarE defaultValue v)
+    var :: Int -> Text -> EVar
+    var i part = EV (parseEntryPrefix <> part <> "_" <> T.pack (show i))
+
+    -- the entry's parameters standing for argument i, and the variable
+    -- holding its value when the target is called
+    paramGroup i (_, Nothing) = ([var i "x"], var i "x")
+    paramGroup i (d, Just kind) =
+      let sels = [ var i ("s" <> T.pack (show k)) | k <- [0 .. length (docParse d) - 1] ]
+          stage = case kind of
+            ParseStream True _ -> [var i "g"]
+            _ -> []
+       in (sels ++ [var i "t", var i "p"] ++ stage, var i "v")
+
+    isChannel (_, Just (ParseStream False _)) = True
+    isChannel _ = False
+
+    -- Save parsed argument i to the path in its slot when the slot's flag is
+    -- set, before the target runs. A failed save fails the run.
+    saveSlot i = do
+      flag <- varE (var i "ws")
+      path <- varE (var i "wp")
+      value <- varE (var i "v")
+      level <- expr (IntE 0)
+      saveE <- expr (IntrinsicE IntrSave [level, path, value]) >>= expr . EvalE
+      unitE <- expr UniE
+      let errOf tryE = do
+            errName <- expr (StrE BT.tryErrCtor)
+            zeroIdx <- expr (IntE 0)
+            expr (IntrinsicE IntrCtorField [tryE, errName, zeroIdx])
+          okV = EV (BT.doDiscardPrefix <> parseEntryPrefix <> "wok_" <> T.pack (show i))
+      checked <- bindOkWith saveE errOf okV saveE unitE
+      thenE <- expr (DoBlockE checked)
+      elseE <- expr UniE >>= expr . DoBlockE
+      forced <- expr (IfE flag thenE elseE) >>= expr . EvalE
+      return (EV (BT.doDiscardPrefix <> parseEntryPrefix <> "w_" <> T.pack (show i)), forced)
+
+    -- Run the target, then settle every streamed argument in argument
+    -- order (each settle releases its channel, so all run before any
+    -- failure is raised). A parse failure the target read wins; otherwise
+    -- the target's own failure is re-raised as it was caught.
+    settleStreams is call = do
+      let rV = EV (parseEntryPrefix <> "r")
+          okV = EV (parseEntryPrefix <> "ok")
+          zV i = EV (parseEntryPrefix <> "z_" <> T.pack (show i))
+          okZ i = EV (BT.doDiscardPrefix <> parseEntryPrefix <> "zok_" <> T.pack (show i))
+          rawMsg tryE = do
+            errName <- expr (StrE BT.tryErrCtor)
+            zeroIdx <- expr (IntE 0)
+            expr (IntrinsicE IntrCtorField [tryE, errName, zeroIdx])
+      ref <- varE rV
+      callDo <- expr (DoBlockE call)
+      tryCall <- expr (IntrinsicE IntrTry [callDo]) >>= expr . EvalE
+      settles <- forM is $ \i -> do
+        s <- varE (var i "v") >>= \h -> expr (IntrinsicE IntrSettle [h])
+        e <- expr (DoBlockE s)
+        t <- expr (IntrinsicE IntrTry [e]) >>= expr . EvalE
+        return (zV i, t)
+      result <- varE okV
+      checkedR <- varE rV >>= \r -> bindOkWith ref rawMsg okV r result
+      checked <- foldrM
+        (\i acc -> varE (zV i) >>= \z -> bindOkWith ref rawMsg (okZ i) z acc)
+        checkedR is
+      foldrM (\b acc -> expr (LetE [b] acc)) checked ((rV, tryCall) : settles)
+
+    bindParsed rest (_, (_, Nothing)) = return rest
+    bindParsed rest (i, (d, Just kind)) = do
+      unpackE <- varE (var i "p") >>= \p -> expr (IntrinsicE IntrUnpack [p])
+      chain <- foldM
+        (\elseE (k, ps) -> do
+            c <- varE (var i ("s" <> T.pack (show k)))
+            readE <- readWith i kind k ps
+            expr (IfE c readE elseE))
+        unpackE
+        (reverse (zip [0 :: Int ..] (docParse d)))
+      forced <- expr (EvalE chain)
+      expr (LetE [(var i "v", forced)] rest)
+
+    -- read argument i with format k: a do-block of type <IO> T
+    readWith i kind k ps = do
+      let note = "in `@parse " <> psName ps <> "=" <> unEVar (psHandler ps)
+                 <> "` on argument " <> T.pack (show (i + 1)) <> " of `" <> unEVar cmd <> "`:"
+          fresh e = do
+            x@(ExprI ix _) <- expr e
+            State.modify (\st -> st { dsErrorNotes = Map.insert ix note (dsErrorNotes st) })
+            return x
+          nm part = EV (parseEntryPrefix <> part <> "_" <> T.pack (show i) <> "_" <> T.pack (show k))
+          lets bs e = foldrM (\b acc -> fresh (LetE [b] acc)) e bs
+          -- the handler failure frame, from the Err of a failed Try
+          failMsg tryE = do
+            errName <- fresh (StrE BT.tryErrCtor)
+            zeroIdx <- fresh (IntE 0)
+            errMsg <- fresh (IntrinsicE IntrCtorField [tryE, errName, zeroIdx])
+            pat <- fresh (PatE (PatternText (parseFailurePrefix i) [parseFailureSuffix]))
+            fresh (AppE pat [errMsg])
+          openStage = do
+            g <- varE (var i "g")
+            o <- fresh (IntrinsicE IntrOpen [g])
+            fresh (EvalE o)
+      hRef <- fresh (VarE defaultValue (psHandler ps))
+      tok <- fresh (VarE defaultValue (var i "t"))
+      case kind of
+        ParseStream False a -> do
+          -- A channel, and its producer started on it: the handler run on
+          -- the channel's writing end, which it closes once the handler
+          -- succeeds.
+          let (oV, rV, cV) = (nm "o", nm "r", nm "h")
+              closeV = EV (BT.doDiscardPrefix <> unEVar (nm "c"))
+              okV = EV (BT.doDiscardPrefix <> unEVar (nm "e"))
+              spawnV = EV (BT.doDiscardPrefix <> unEVar (nm "w"))
+              handlerT = FunU [BT.strU, FunU [BT.listU a] (EffectU ioEffectSet BT.unitU)]
+                              (EffectU ioEffectSet BT.unitU)
+              streamT = AppU (VarU BT.istreamVar) [a]
+          hAnn <- fresh (AnnE hRef handlerT)
+          oRef <- fresh (VarE defaultValue oV)
+          zeroE <- fresh (IntE 0)
+          sink <- mkWriteSink True hRef zeroE oRef
+          tryBind <- fresh (AppE hAnn [tok, sink]) >>= fresh . IntrinsicE IntrTry . (: []) >>= fresh . EvalE
+          closeO <- fresh (VarE defaultValue oV) >>= fresh . IntrinsicE IntrClose . (: []) >>= fresh . EvalE
+          unitE <- fresh UniE
+          rRef <- fresh (VarE defaultValue rV)
+          producer <- lets [(closeV, closeO)] unitE
+            >>= bindOkWith hRef failMsg okV rRef
+            >>= lets [(rV, tryBind)]
+            >>= fresh . DoBlockE
+            >>= fresh . LamE [oV]
+          chan <- fresh (IntrinsicE IntrChannel [])
+            >>= \c -> fresh (AnnE c (EffectU ioEffectSet streamT))
+            >>= fresh . EvalE
+          spawnE <- fresh (VarE defaultValue cV)
+            >>= \c -> fresh (IntrinsicE IntrSpawn [c, producer])
+            >>= fresh . EvalE
+          cRet <- fresh (VarE defaultValue cV) >>= \c -> fresh (AnnE c streamT)
+          fresh . DoBlockE =<< lets [(cV, chan), (spawnV, spawnE)] cRet
+        ParseStream isFile a -> do
+          let (oV, rV, sV) = (nm "o", nm "r", nm "h")
+              closeV = EV (BT.doDiscardPrefix <> unEVar (nm "c"))
+              okV = EV (BT.doDiscardPrefix <> unEVar (nm "e"))
+              handlerT = FunU [BT.strU, FunU [BT.listU a] (EffectU ioEffectSet BT.unitU)]
+                              (EffectU ioEffectSet BT.unitU)
+              openedT = if isFile then AppU (VarU BT.ifileVar) [BT.listU a]
+                                  else AppU (VarU BT.istreamVar) [a]
+          hAnn <- fresh (AnnE hRef handlerT)
+          oRef <- fresh (VarE defaultValue oV)
+          zeroE <- fresh (IntE 0)
+          sink <- mkWriteSink True hRef zeroE oRef
+          tryBind <- fresh (AppE hAnn [tok, sink]) >>= fresh . IntrinsicE IntrTry . (: []) >>= fresh . EvalE
+          closeO <- fresh (VarE defaultValue oV) >>= fresh . IntrinsicE IntrClose . (: []) >>= fresh . EvalE
+          -- the stream is read back from the stage once the producer succeeded
+          sPinned <- do
+            sRef <- fresh (VarE defaultValue sV)
+            pinned <- fresh (VarE defaultValue sV) >>= \s1 -> fresh (AnnE s1 openedT)
+            fresh (LetE [(sV, pinned)] sRef)
+          readBack <- openStage >>= \o -> bindOkFrom hRef sV o sPinned
+          rRef <- fresh (VarE defaultValue rV)
+          checked <- bindOkWith hRef failMsg okV rRef readBack
+          body <- lets [(rV, tryBind), (closeV, closeO)] checked
+          openO <- openStage
+          fresh . DoBlockE =<< bindOkFrom hRef oV openO body
+        _ -> do
+          let rV = nm "r"
+              vV = nm "v"
+              (resultT, wrapOpt) = case kind of
+                ParseOptional t -> (t, True)
+                ParseValue t -> (t, False)
+          hAnn <- fresh (AnnE hRef (FunU [BT.strU] (EffectU ioEffectSet resultT)))
+          tryBind <- fresh (AppE hAnn [tok]) >>= fresh . IntrinsicE IntrTry . (: []) >>= fresh . EvalE
+          result <- do
+            v <- fresh (VarE defaultValue vV)
+            if wrapOpt then fresh (AnnE v (OptionalU resultT)) else return v
+          rRef <- fresh (VarE defaultValue rV)
+          checked <- bindOkWith hRef failMsg vV rRef result
+          fresh . DoBlockE =<< lets [(rV, tryBind)] checked
+
+-- | A handler failure travels to the nexus as a thrown message framed by
+-- these markers: @\x01<argument index>\x1f<message>\x02@. The nexus finds the
+-- frame anywhere in the error text a pool returns, since each pool wraps a
+-- message in its own context.
+parseFailurePrefix :: Int -> Text
+parseFailurePrefix i = "\x01" <> T.pack (show i) <> "\x1f"
+
+parseFailureSuffix :: Text
+parseFailureSuffix = "\x02"
 
 -- | Order a formatter handler's argument sources for application: the payload
 -- ('ArgValue') is appended last unless the user placed it explicitly, so an
@@ -4167,7 +5130,9 @@ buildHandlerArgs sp lamVars valueExpr = buildArgs render
 buildStreamArgs :: ExprI -> [EVar] -> Maybe EVar -> EVar -> [ArgSource] -> D [ExprI]
 buildStreamArgs ref params mOffVar valueVar = buildArgs render
   where
-    render (ArgPos n) = freshExprFrom ref (VarE defaultValue (params !! (n - 1)))
+    render (ArgPos n) = case drop (n - 1) params of
+      (p : _) -> freshExprFrom ref (VarE defaultValue p)
+      [] -> dfail (Pos 0 0 "") "internal: `$N` beyond the parent's parameters"
     render ArgValue = freshExprFrom ref (VarE defaultValue valueVar)
     render ArgOffset = case mOffVar of
       Just off -> freshExprFrom ref (VarE defaultValue off)
@@ -4185,22 +5150,15 @@ addToExport mangleds (ExprI i (ExpE (ExportMany syms groups))) = do
   return (ExprI i (ExpE (ExportMany syms' groups)))
 addToExport _ e = return e
 
--- | Return position's effect: True iff the outermost result (after
--- stripping ForallU quantifiers) is an EffectU or the function's
--- return position is EffectU.
+-- | Whether a command's result, after all of its arguments, is a suspension.
 returnIsEffectful :: TypeU -> Bool
-returnIsEffectful (ForallU _ t) = returnIsEffectful t
-returnIsEffectful (FunU _ ret) = isEffectU ret
-returnIsEffectful t = isEffectU t
+returnIsEffectful t = case snd (uncurryU t) of
+  EffectU _ _ -> True
+  _ -> False
 
-isEffectU :: TypeU -> Bool
-isEffectU (EffectU _ _) = True
-isEffectU _ = False
-
+-- | The number of arguments a command takes, however its type groups them.
 sigArity :: TypeU -> Int
-sigArity (ForallU _ t) = sigArity t
-sigArity (FunU args _) = length args
-sigArity _ = 0
+sigArity = length . fst . uncurryU
 
 --------------------------------------------------------------------
 -- Utility

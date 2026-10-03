@@ -1,0 +1,17 @@
+module (twoSites)
+
+import root-cpp
+
+source Cpp from "impl.hpp" ("produce", "otherBatch")
+
+produce :: ([Int] -> <IO> ()) -> <IO> ()
+
+--' One line per batch, marked
+otherBatch :: [Int] -> Str
+
+--' A second command named twoSites
+--' @render -b/--batches=otherBatch @stream @default
+twoSites :: <IO> ()
+twoSites = do
+  @collect produce
+  @collect produce

@@ -1,0 +1,23 @@
+-- Nested tables are not supported yet. Until they are, a Table inside
+-- another value -- here a tuple sent from Python to R -- is refused at build
+-- time with one clear message, rather than left to fail later and
+-- differently in each language. Nested tables are meant to be legal: when
+-- support lands, this test becomes a round trip of the same program.
+
+module main (pairToR)
+
+import root-py
+import root-r
+
+type Table
+type Py => Table = "pyarrow.RecordBatch"
+type R => Table = "arrow::RecordBatch"
+
+source Py from "src.py" ("mk_pair" as mkPair)
+source R from "src.R" ("pair_rows" as pairRows)
+
+mkPair :: Int -> (Int, Table)
+pairRows :: (Int, Table) -> Int
+
+pairToR :: Int -> Int
+pairToR n = pairRows (mkPair n)

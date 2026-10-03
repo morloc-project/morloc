@@ -33,9 +33,10 @@ import qualified Data.Set as Set
 import Morloc.CodeGenerator.Docstrings (processDocstrings)
 import Morloc.CodeGenerator.EffectBoundary (checkEffectBoundaries, insertEffectBoundaries)
 import Morloc.CodeGenerator.Emit (TranslateFn, emit, pool)
-import Morloc.CodeGenerator.Express (express, addCacheWraps, addDebugWraps, addLoopWraps, addNativeRecEntries)
+import Morloc.CodeGenerator.StaticArgs (specializeStaticArgs)
+import Morloc.CodeGenerator.Express (express, addCacheWraps, addDebugWraps, addLoopWraps, addNativeRecEntries, etaReduceForwarders)
 import Morloc.CodeGenerator.LambdaEval (applyLambdas)
-import Morloc.CodeGenerator.Namespace (SerialManifold)
+import Morloc.CodeGenerator.Namespace (Arg, PolyHead (..), SerialManifold)
 import qualified Morloc.CodeGenerator.Nexus as Nexus
 import Morloc.CodeGenerator.Parameterize (parameterize)
 import Morloc.CodeGenerator.Guest.Pass (lowerGuests)
@@ -50,7 +51,9 @@ import qualified Morloc.Frontend.API as F
 import Morloc.Frontend.AutoRequire (autoRequire)
 import qualified Morloc.Frontend.AST as AST
 import Morloc.Frontend.Restructure (restructure)
-import Morloc.Frontend.Treeify (treeify)
+import Morloc.Frontend.Treeify (treeify, Validation (..))
+import Morloc.Frontend.Share (shareBindings)
+import Morloc.Frontend.Specialize (specialize)
 import qualified Morloc.Data.PoolHash as PoolHash
 import qualified Morloc.Monad as MM
 import Morloc.ProgramBuilder.Build (buildProgram, withStagingCleanup)
@@ -67,9 +70,9 @@ typecheckFrontend path code = do
   case DAG.roots dag of
     (r : _) -> MM.modify (\s -> s {stateModuleName = Just r})
     _ -> return ()
-  restructure dag
-    >>= treeify
-    >>= F.typecheck
+  (checks, exports) <- restructure dag >>= treeify
+  F.validate (validationTrees checks) (validationInstances checks)
+  specialize checks exports
 
 -- | Check general types and also resolve implementations
 typecheck ::
@@ -81,6 +84,8 @@ typecheck ::
     )
 typecheck path code =
   typecheckFrontend path code
+    -- the shared specializations the exports call are trees of their own
+    >>= (\es -> MM.gets stateSpecs >>= \(Specs specs) -> return (es <> specs))
     -- lower guest-language sources (e.g. Futhark) into host glue
     >>= lowerGuests
     -- resolve all TypeU types to Type
@@ -90,7 +95,8 @@ typecheck path code =
     >>= mapM autoRequire
     -- check for value contradictions between implementations
     >>= mapM F.valuecheck
-    -- check for value contradictions between implementations
+    -- evaluate each named value once, where its uses need it
+    >>= mapM shareBindings
     >>= realityCheck
 
 -- | Do everything except language specific code generation.
@@ -101,14 +107,28 @@ typecheck path code =
 -- LamS"). 'False' keeps a multiply-used lambda as a shared native closure
 -- (rASTs become pools, not the pure nexus evaluator).
 generatePools :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad [(Lang, [SerialManifold])]
-generatePools rASTs0 = do
-  reg <- MM.gets stateLangRegistry
-  rASTs <- mapM (applyLambdas False) rASTs0
+generatePools rASTs = mapM (applyLambdas False) rASTs >>= specializeStaticArgs >>= lowerPools
+
+-- | Lower realized pool trees to per-language serial manifolds. This is the
+-- whole path from parameterization to pool assembly, shared by 'writeProgram'
+-- and 'generatePools' so what @morloc dump@ shows is what gets built.
+lowerPools :: [AnnoS (Indexed Type) One (Indexed Lang)] -> MorlocMonad [(Lang, [SerialManifold])]
+lowerPools rASTs = do
   paramRASTs <- mapM parameterize rASTs
   let langMap = Map.fromList
         [(midx, lang) | AnnoS (Idx midx _) (Idx _ lang, _) _ <- paramRASTs]
   MM.modify (\s -> s { stateManifoldLang = langMap })
-  mapM express paramRASTs
+  reg <- MM.gets stateLangRegistry
+  mapM expressRoot paramRASTs
+    -- Wrap each cache:true manifold's body in a 'PolyCacheBody'.
+    >>= mapM addCacheWraps
+    -- When 'stateDebugTrace' (--debug), wrap every foreign-call
+    -- manifold body in 'PolyDebugWrap'. No-op when the flag is off.
+    >>= mapM addDebugWraps
+    -- Lower eligible tail-recursive helpers to native 'PolyLoop's.
+    >>= mapM addLoopWraps
+    -- Give a recursion its own pool reaches a native entry point.
+    >>= addNativeRecEntries
     -- Boundary reconciliation + invariant check. Insertion installs
     -- 'PolyEval' / 'PolyDoBlock' at every boundary whose declared type
     -- disagrees with its calling convention; the checker asserts the
@@ -117,11 +137,26 @@ generatePools rASTs0 = do
     >>= mapM (\ph -> do
                  ph' <- insertEffectBoundaries ph
                  checkEffectBoundaries ph'
-                 lowerSuspensions ph')
+                 lowerSuspensions (etaReduceForwarders ph'))
     >>= mapM segment |>> concat
     >>= mapM serialize
     >>= mapM reduce
       |>> pool reg
+
+-- | Express a root. A root of function type is called with every input of
+-- its type (the nexus sends a command's arguments by its type), so its
+-- manifold must take exactly those; anything else would read a closure as
+-- a result.
+expressRoot :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyHead
+expressRoot e@(AnnoS (Idx midx t) _ _) = do
+  h@(PolyHead _ _ args _) <- express e
+  case t of
+    FunT ts _
+      | length args /= length ts ->
+          MM.throwCompilerBug $
+            "the manifold of root" <+> pretty midx <+> "takes" <+> pretty (length args)
+              <+> "arguments, but its type" <+> squotes (pretty t) <+> "has" <+> pretty (length ts)
+    _ -> return h
 
 -- | Build a program as a local executable
 writeProgram ::
@@ -148,6 +183,12 @@ writeProgram translateFn path code =
     -- there (True); rASTs become pools, where a multiply-used lambda is kept
     -- as a shared native closure to avoid exponential inlining (False).
     >>= bimapM (mapM (applyLambdas True)) (mapM (applyLambdas False))
+    -- Give a recursive helper its own copy for each closed function it is
+    -- passed at a position every recursion passes through unchanged, so the
+    -- function is referenced directly rather than carried as a closure value.
+    -- It creates trees, so it runs before the nexus sees the pool trees and
+    -- before the counter is reused for code generation.
+    >>= (\(g, r) -> (,) g <$> specializeStaticArgs r)
     -- process docstrings to determine how to build CLI
     >>= bimapM (mapM processDocstrings) (mapM processDocstrings)
     -- generate nexus and pools
@@ -175,31 +216,8 @@ writeProgram translateFn path code =
             helperRASTs = map fst (filter (not . isExported) concreteRASTs)
         (nexus, envspec, wrappers) <- Nexus.generate concreteGASTs exportedRASTs helperRASTs
         MM.startCounter
-        paramRASTs <- mapM parameterize (map fst concreteRASTs)
-        let langMap = Map.fromList
-              [(midx, lang) | AnnoS (Idx midx _) (Idx _ lang, _) _ <- paramRASTs]
-        MM.modify (\s -> s { stateManifoldLang = langMap })
-        reg <- MM.gets stateLangRegistry
         pools <-
-          mapM express paramRASTs
-            -- Wrap each cache:true manifold's body in a 'PolyCacheBody'.
-            >>= mapM addCacheWraps
-            -- When 'stateDebugTrace' (--debug), wrap every foreign-call
-            -- manifold body in 'PolyDebugWrap'. No-op when the flag is off.
-            >>= mapM addDebugWraps
-            -- Lower eligible tail-recursive helpers to native 'PolyLoop's.
-            >>= mapM addLoopWraps
-            -- Give a recursion its own pool reaches a native entry point.
-            >>= addNativeRecEntries
-            -- Boundary reconciliation + invariant check; see 'generatePools'.
-            >>= mapM (\ph -> do
-                         ph' <- insertEffectBoundaries ph
-                         checkEffectBoundaries ph'
-                         lowerSuspensions ph')
-            >>= mapM segment |>> concat
-            >>= mapM serialize
-            >>= mapM reduce
-              |>> pool reg
+          lowerPools (map fst concreteRASTs)
             >>= mapM (uncurry (emit translateFn))
         -- Fingerprint each pool's emitted source and substitute the
         -- hex hashes into the @<MORLOC_POOL_HASH:lang>@ placeholders
@@ -266,7 +284,7 @@ checkEvalRestrictions dag = do
       MM.throwSourcedError i "source statements are not allowed in eval mode"
     checkExpr _ (ExprI i (ClsE _)) =
       MM.throwSourcedError i "class declarations are not allowed in eval mode"
-    checkExpr _ (ExprI i (IstE _ _ _)) =
+    checkExpr _ (ExprI i (IstE _ _ _ _)) =
       MM.throwSourcedError i "instance declarations are not allowed in eval mode"
     checkExpr _ (ExprI i (TypE _)) =
       MM.throwSourcedError i "type declarations are not allowed in eval mode"

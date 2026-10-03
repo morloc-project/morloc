@@ -1,0 +1,55 @@
+module main (viaCpp, viaPy, viaR, viaRust, viewViaCpp, viewViaPy, viewViaRust)
+
+import root
+import root-py
+import root-cpp
+import root-r
+import root-rust
+
+-- A bare `Table` carries whatever columns it was given, including types
+-- morloc itself has no name for. A decimal is how money and graded
+-- measurements are stored; it is not a morloc type, and it must still
+-- reach every pool intact. A string view is what a modern engine hands
+-- out, and is read here by the pools whose Arrow libraries know it --
+-- R's does not, and refuses the whole table rather than the one column.
+--
+-- The leading column is there to shift where the later columns land
+-- inside the block: a column whose values need wider alignment than the
+-- block start happens to give must still be readable.
+
+type Table
+type Py => Table = "pyarrow.RecordBatch"
+type Cpp => Table = "mlc::ArrowTable"
+type R => Table = "arrow::RecordBatch"
+type Rust => Table = "rustmorloc::arrow_array::RecordBatch"
+
+source Py from "src.py" ("mk", "mkViewed", "price" as pricePy, "label" as labelPy)
+source Cpp from "src.hpp" ("price" as priceCpp, "label" as labelCpp)
+source R from "src.R" ("price" as priceR)
+source Rust from "src.rs" ("price" as priceRust, "label" as labelRust)
+
+mk :: Int -> Table
+mkViewed :: Int -> Table
+pricePy :: Table -> Str
+priceCpp :: Table -> Str
+priceR :: Table -> Str
+priceRust :: Table -> Str
+labelPy :: Table -> Str
+labelCpp :: Table -> Str
+labelRust :: Table -> Str
+
+viaPy :: Int -> Str
+viaPy pad = pricePy (mk pad)
+viaCpp :: Int -> Str
+viaCpp pad = priceCpp (mk pad)
+viaR :: Int -> Str
+viaR pad = priceR (mk pad)
+viaRust :: Int -> Str
+viaRust pad = priceRust (mk pad)
+
+viewViaPy :: Int -> Str
+viewViaPy pad = labelPy (mkViewed pad)
+viewViaCpp :: Int -> Str
+viewViaCpp pad = labelCpp (mkViewed pad)
+viewViaRust :: Int -> Str
+viewViaRust pad = labelRust (mkViewed pad)

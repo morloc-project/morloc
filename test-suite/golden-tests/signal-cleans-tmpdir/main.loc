@@ -1,0 +1,8 @@
+-- An interrupted run removes its temporary directory.
+module main (hang)
+
+import root-py
+
+source Py from "helpers.py" ("hang" as hang)
+
+hang :: Str -> <IO> ()

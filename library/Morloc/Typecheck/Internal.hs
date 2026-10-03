@@ -24,6 +24,7 @@ module Morloc.Typecheck.Internal
   , evarname
   , qualify
   , unqualify
+  , emptyGamma
 
     -- * Typeclasses
   , Applicable (..)
@@ -41,6 +42,7 @@ module Morloc.Typecheck.Internal
   , substitute
   , rename
   , renameEType
+  , renameWithMap
   , cleanTypeName
   , prettyTypeU
   , prettyTypeUPair
@@ -66,7 +68,11 @@ module Morloc.Typecheck.Internal
 
     -- * subtyping
   , subtype
+  , expandStructuralAliases
+  , expandTransparentAliases
+  , structuralAliasesIn
   , isSubtypeOf2
+  , isSubtypeOfOpen
   , recheckDeferred
 
     -- * primitive constraint discharge (Stage 9 of the tables refactor)
@@ -98,6 +104,8 @@ module Morloc.Typecheck.Internal
   , seeType
   ) where
 
+import Data.Functor.Const (Const (..))
+import Data.Functor.Identity (Identity (..))
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -119,6 +127,17 @@ import qualified Morloc.TypeEval as TE
 
 qualify :: [TVar] -> TypeU -> TypeU
 qualify vs t = foldr (\v -> ForallU v) t vs
+
+-- | A context with nothing in it, for ordinary inference.
+emptyGamma :: Gamma
+emptyGamma =
+  Gamma
+    { gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty
+    , gammaSolved = Map.empty, gammaDeferred = [], gammaKindSubs = Map.empty
+    , gammaEffSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing
+    , gammaIntVals = Map.empty, gammaPendingNumLits = [], gammaPositionalReceivers = Set.empty
+    , gammaRigid = Nothing, gammaScoped = Map.empty
+    }
 
 unqualify :: TypeU -> ([TVar], TypeU)
 unqualify (ForallU v (unqualify -> (vs, t))) = (v : vs, t)
@@ -203,11 +222,27 @@ collectGroundStrList _ = Nothing
 
 -- | Reduce @r # l@ to a Rec containing only the fields of @r@ whose
 -- names appear in @l@. Both operands must be ground; otherwise leaves
--- the form symbolic. Order of result fields matches the original Rec.
+-- the form symbolic.
+--
+-- Result fields follow the order of @l@, not of @r@: a projection is
+-- also a reordering, and the runtime kernels behave that way already
+-- (pyarrow's @t.select(names)@ and the C++ column gather both emit the
+-- requested order). A key of @l@ absent from @r@ contributes nothing;
+-- the Subset constraint emitted alongside is what rejects it.
+-- Keep the first occurrence of each key. A Rec cannot hold a field twice, so
+-- a repeated key in a projection list must not build one.
+nubOrd' :: [Text] -> [Text]
+nubOrd' = go Set.empty
+  where
+    go _ [] = []
+    go seen (k : ks)
+      | Set.member k seen = go seen ks
+      | otherwise = k : go (Set.insert k seen) ks
+
 reduceRecRestrict :: TypeU -> TypeU -> TypeU
 reduceRecRestrict r l = case (collectGroundRec r, collectGroundStrList l) of
   (Just fs, Just keys) ->
-    let kept = [(k, t) | (k, t) <- fs, k `elem` keys]
+    let kept = [(k, t) | k <- nubOrd' keys, Just t <- [lookup k fs]]
     in foldr (\(k, t) rest -> RecExtendU k t rest) RecEmptyU kept
   _ -> RecRestrictU r l
 
@@ -363,8 +398,8 @@ normaliseSet t = t
 -- are exactly @==@. We do not attempt logical implication (e.g.,
 -- @CSubset a b /\ CSubset b c => CSubset a c@); subsumption is the
 -- conservative-but-decidable approximation.
-dischargeConstraints :: Gamma -> Either MDoc Gamma
-dischargeConstraints g = case go (gammaConstraints g) [] of
+dischargeConstraints :: Scope -> Gamma -> Either MDoc Gamma
+dischargeConstraints scope g = case go (gammaConstraints g) [] of
   Left msg -> Left (pretty msg)
   Right kept -> Right (g { gammaConstraints = kept })
   where
@@ -385,8 +420,21 @@ dischargeConstraints g = case go (gammaConstraints g) [] of
     subsumed :: Constraint -> Bool
     subsumed c = c `elem` assumed
 
+    -- A constraint can name a type alias -- `Subset {"b"} (Keys Cols)`
+    -- comes from `Restrict Cols ['b]`. The set reducers work on literals,
+    -- so the alias has to be expanded first or the constraint can never
+    -- discharge.
+    expandC c = case c of
+      Constraint n ts -> Constraint n (map expandT ts)
+      CMember a b -> CMember (expandT a) (expandT b)
+      CSubset a b -> CSubset (expandT a) (expandT b)
+      CDisjoint a b -> CDisjoint (expandT a) (expandT b)
+    expandT t = maybe t id (TE.reduceTypeLeaves scope t)
+
     go [] acc = Right (reverse acc)
-    go (c:cs) acc = case reduceConstraint (apply g c) of
+    -- apply, then expand aliases, then apply again: the second pass is
+    -- what lets `Keys` reduce now that its operand is a literal record.
+    go (c:cs) acc = case reduceConstraint (apply g (expandC (apply g c))) of
       Left msg -> Left msg
       Right Nothing -> go cs acc
       Right (Just c')
@@ -453,7 +501,7 @@ instance Applicable TypeU where
       -- FIXME: this seems problematic - do I keep the previous parameters or the new ones?
       (Just t') -> apply g t' -- reduce an existential; strictly smaller term
       Nothing -> ExistU v (map (apply g) ts, tc) (map (second (apply g)) rs, rc)
-  apply g (NamU o n ps rs) = NamU o n ps [(k, apply g t) | (k, t) <- rs]
+  apply g (NamU o n ps rs) = NamU o n (map (apply g) ps) [(k, apply g t) | (k, t) <- rs]
   apply g (EffectU effs t) = mkEffectU (applyEff g effs) (apply g t)
   apply g (OptionalU t) = OptionalU (apply g t)
   apply _ t@(NatLitU _) = t
@@ -474,7 +522,11 @@ instance Applicable TypeU where
   apply _ t@RecEmptyU = t
   apply g (RecExtendU k a b) = RecExtendU k (apply g a) (apply g b)
   apply g (RecUnionU a b) = reduceRecUnion (apply g a) (apply g b)
-  apply g (RecDiffU a ks) = RecDiffU (apply g a) ks
+  -- A literal key list matches 'RecDiffU', which is more specific than the
+  -- 'RecDiffListU' clause below, so the reduction has to happen here too.
+  -- Recursing without reducing would leave every ground @r - f@ symbolic.
+  apply g (RecDiffU a ks) =
+    reduceRecDiffList (apply g a) (LitU (LList (map (LitU . LStr) ks)))
   apply g (RecIntersectU a b) = RecIntersectU (apply g a) (apply g b)
   apply g (RecRestrictU a b) = reduceRecRestrict (apply g a) (apply g b)
   apply g (RecDiffListU a b) = reduceRecDiffList (apply g a) (apply g b)
@@ -577,9 +629,32 @@ slotSpacing = 256
 (++>) g xs = foldl' (+>) g xs
 
 isSubtypeOf2 :: Scope -> TypeU -> TypeU -> Bool
-isSubtypeOf2 scope a b = case subtype scope a b (Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty [] Nothing Map.empty [] Set.empty) of
+isSubtypeOf2 scope a b = case subtype scope a b emptyGamma of
   (Left _) -> False
   (Right _) -> True
+
+-- | Like 'isSubtypeOf2', but with the existentials of both sides declared so
+-- the comparison may solve them. 'isSubtypeOf2' starts from an empty gamma,
+-- where an existential has no entry and so can never be instantiated: a type
+-- that is only partly determined fails against every candidate. That is the
+-- right answer for a test of "are these already compatible" and the wrong one
+-- for "could this candidate apply", which is what instance selection asks.
+isSubtypeOfOpen :: Scope -> TypeU -> TypeU -> Bool
+isSubtypeOfOpen scope a b =
+  let exists = [t | t@ExistU{} <- Set.toList (Set.union (free a) (free b))]
+      (g1, b') = openForalls b (emptyGamma ++> exists)
+   in case subtype scope a b' g1 of
+        (Left _) -> False
+        (Right _) -> True
+
+-- | Replace every leading universal with an existential. The ordinary
+-- subtype rule keeps a universal on the RIGHT rigid, which is correct for
+-- "is this as general as that" and wrong for "could this apply here": the
+-- occurrence type of a class method is its own most general form until
+-- something downstream pins it, and no instance is ever a subtype of that.
+openForalls :: TypeU -> Gamma -> (Gamma, TypeU)
+openForalls (ForallU v t) g = openForalls (substitute v t) (g +> v)
+openForalls t g = (g, t)
 
 -- | Subtype-compare two types after exhausting any 'type'-alias reduction.
 -- 'newtype' is opaque to 'reduceType' (returns Nothing), so two distinct
@@ -906,6 +981,13 @@ recheckDeferred g = foldM check [] (gammaDeferred g)
              _ -> case (typeUToRecExpr t1', typeUToRecExpr t2') of
                (Just re1, Just re2) ->
                  case RS.solveRec re1 re2 of
+                   -- The rows align. Field types are Type-kinded, so they do
+                   -- not belong on this list: the caller reports anything left
+                   -- here as an undecidable *kind* constraint. They are
+                   -- reconciled by subtype where the equation first arose; a
+                   -- constraint only reaches the recheck because it deferred
+                   -- there, and this function has no Scope to re-run subtype
+                   -- with.
                    Right _ -> Right acc
                    Left (RS.RecContradiction msg) ->
                      Left $ "Rec constraint mismatch (deferred):" <+> pretty msg
@@ -946,10 +1028,9 @@ asClosedRec _                    = Nothing
 
 -- | A closed anonymous record rendered in the @NamU NamRecord@ form that
 -- record construction, field accessors, and nominal @record@/@object@ types
--- all use. Mirrors the ground-level @typeOf@ bridge (LRec -> NamT NamRecord
--- "Rec").
+-- all use. Mirrors the ground-level @typeOf@ bridge (LRec -> NamT NamRecord).
 closedRecToNamU :: [(Text, TypeU)] -> TypeU
-closedRecToNamU fs = NamU NamRecord (TV "Rec") [] [(Key k, t) | (k, t) <- fs]
+closedRecToNamU fs = NamU NamRecord anonRecordVar [] [(Key k, t) | (k, t) <- fs]
 
 -- | The two forms an anonymous closed record is bridged against: a nominal
 -- record (@NamU@) or a record-key existential (@ExistU@, from construction
@@ -1096,22 +1177,16 @@ subtype scope t1@(AppU v1 vs1) t2@(AppU v2 vs2) g
   , length vs1' == length vs2' && length vs1' /= length vs1
   = zipSubtype t1 t2 scope vs1' vs2' g
   | otherwise = subtypeEvaluated scope t1 t2 g
--- subtype unordered records
-subtype scope (NamU _ v1 _ []) (NamU _ v2 _ []) g
-  -- If one of the records is generic, allow promotion
-  | v1 == BT.record || v2 == BT.record = return g
-  -- Otherwise subtype the variable names
-  | otherwise = subtype scope (VarU v1) (VarU v2) g
-subtype _ t1@(NamU _ _ _ []) t2@(NamU _ _ _ _) _ =
-  subtypeError t1 t2 "NamU - Unequal number of fields"
-subtype _ t1@(NamU _ _ _ _) t2@(NamU _ _ _ []) _ =
-  subtypeError t1 t2 "NamU - Unequal number of fields"
-subtype scope t1@(NamU o1 v1 p1 ((k1, x1) : rs1)) t2@(NamU o2 v2 p2 es2) g0 =
-  case filterApart (\(k2, _) -> k2 == k1) es2 of
-    (Nothing, _) -> subtypeError t1 t2 "NamU - Unequal fields"
-    (Just (_, x2), rs2) ->
-      subtype scope x1 x2 g0
-        >>= subtype scope (NamU o1 v1 p1 rs1) (NamU o2 v2 p2 rs2)
+-- Records are nominal: a named record is its name and its parameters, so
+-- same-fielded records are distinct and a phantom parameter is compared. The
+-- anonymous forms (the generic Record and a closed row bridged to Rec) match
+-- any record with the same fields.
+subtype scope t1@(NamU _ v1 ps1 rs1) t2@(NamU _ v2 ps2 rs2) g
+  | v1 == BT.record || v2 == BT.record, null rs1, null rs2 = return g
+  | isAnonymousRecord v1 || isAnonymousRecord v2 = subtypeFields t1 t2 scope rs1 rs2 g
+  | v1 /= v2 = subtypeError t1 t2 "Record names differ"
+  | otherwise =
+      zipSubtype t1 t2 scope ps1 ps2 g >>= subtypeFields t1 t2 scope rs1 rs2
 --  Ea not in FV(a)
 --  g1[Ea] |- A <=: Ea -| g2
 -- ----------------------------------------- <:InstantiateR
@@ -1248,23 +1323,38 @@ subtype _ t RecVoidU g | isRecExpr t = return g
 -- Rec expressions: compare via the Rec solver, which canonicalizes
 -- structural ops (extend, union, diff, intersect) and aligns ground
 -- field maps. See plans/tables/10-rec-solver-decidability.md.
-subtype _ t1 t2 g
+subtype scope t1 t2 g
   | isRecExpr t1 && isRecExpr t2 =
       let t1' = apply g t1
           t2' = apply g t2
       in case (typeUToRecExpr t1', typeUToRecExpr t2') of
            (Just re1, Just re2) ->
              case RS.solveRec re1 re2 of
-               Right subs
-                 | Map.null subs -> return g
-                 | otherwise -> return (applyRecSolutions subs g)
+               Right sol ->
+                 -- The solver aligns the rows; the field types it matched
+                 -- may still need unifying (one side can be an existential),
+                 -- and only subtype can do that.
+                 let g' = if Map.null (RS.recSubs sol)
+                            then g
+                            else applyRecSolutions (RS.recSubs sol) g
+                  in foldM (\gAcc (a, b) -> subtype scope a b gAcc)
+                           g' (RS.recFieldEqs sol)
                Left (RS.RecContradiction msg) ->
                  subtypeError t1 t2 ("Rec constraint mismatch: " <> pretty msg)
                Left (RS.RecMalformed msg) ->
                  subtypeError t1 t2 ("Rec malformed: " <> pretty msg)
                Left RS.RecDeferred ->
                  return g { gammaDeferred = (t1', t2') : gammaDeferred g }
-           _ -> subtypeError t1 t2 "Cannot compare Rec expressions"
+           -- A Rec operator whose operand is a type alias cannot be turned
+           -- into a RecExpr, because the alias is still a bare variable.
+           -- Expand aliases in place and retry; `reduceTypeLeaves` descends
+           -- into the operator's arguments, which `reduceType` (head-only)
+           -- does not. Each retry strictly reduces, so this terminates.
+           _ -> case (TE.reduceTypeLeaves scope t1', TE.reduceTypeLeaves scope t2') of
+                  (Nothing, Nothing) ->
+                    subtypeError t1 t2 "Cannot compare Rec expressions"
+                  (m1, m2) ->
+                    subtype scope (maybe t1' id m1) (maybe t2' id m2) g
 -- ListVoidU is the erased phantom List slot; compatible with any List
 -- expression. Mirrors RecVoidU / StrVoidU.
 subtype _ ListVoidU t g | isListExpr t = return g
@@ -1307,11 +1397,130 @@ subtype _ t1 t2 g
                Left SetS.SetDeferred ->
                  return g { gammaDeferred = (t1', t2') : gammaDeferred g }
            _ -> subtypeError t1 t2 "Cannot compare Set expressions"
+-- Two applications of the same type-level operator. A kind-specific operator
+-- (Nat, Str, Rec, List, Set) has already been routed to its solver above, so
+-- what reaches here is Type-kinded -- today that is ProjectField. The
+-- operator is a function on types, so equal arguments give equal results;
+-- without this rule even a reflexive `ProjectField r f <: ProjectField r f`
+-- falls through, and no function over "any table with a pop column" can be
+-- given a body in morloc.
+subtype scope t1@(OpU o1 as1) t2@(OpU o2 as2) g
+  | o1 == o2 && length as1 == length as2 =
+      foldM (\gAcc (a, b) -> subtype scope a b gAcc) g (zip as1 as2)
+  | otherwise = subtypeError t1 t2 "Type operator mismatch"
+-- An applied alias meeting a type of another shape, such as the record it
+-- names, is compared through its expansion.
+subtype scope t1 t2@(AppU _ _) g
+  | Just t2' <- reduceAliasHead scope t2 = subtype scope t1 t2' g
+subtype scope t1@(AppU _ _) t2 g
+  | Just t1' <- reduceAliasHead scope t1 = subtype scope t1' t2 g
 -- note that these need to be evaluated AFTER all the existentials
 subtype scope t1@(VarU _) t2 g = subtypeEvaluated scope t1 t2 g
 subtype scope t1 t2@(VarU _) g = subtypeEvaluated scope t1 t2 g
 -- fall through
 subtype _ a b _ = subtypeError a b "Type mismatch fall through"
+
+-- | The name heading a type, bare or applied.
+aliasHeadName :: TypeU -> Maybe TVar
+aliasHeadName (VarU v) = Just v
+aliasHeadName (AppU (VarU v) _) = Just v
+aliasHeadName _ = Nothing
+
+-- | One reduction step of a type whose head is an alias in scope. Nothing for
+-- anything else, including a rigid variable head.
+reduceAliasHead :: Scope -> TypeU -> Maybe TypeU
+reduceAliasHead scope t = case aliasHeadName t of
+  Just v | Map.member v scope -> TE.reduceType scope t
+  _ -> Nothing
+
+-- | Reduce a type's alias head until the head is not an alias. Each step is
+-- bounded by the scope size, so mutually recursive aliases cannot spin.
+expandAliasHead :: Scope -> TypeU -> TypeU
+expandAliasHead scope = go (Map.size scope + 1)
+  where
+    go 0 t = t
+    go n t = maybe t (go (n - 1 :: Int)) (reduceAliasHead scope t)
+
+-- | Expand, at any depth, every alias that @step@ expands at a type's head.
+-- Arguments are expanded before the alias they are passed to, so only the
+-- alias's own body can meet the alias again; there it is left in place.
+expandAliasesWith :: (TypeU -> Maybe (TVar, TypeU)) -> TypeU -> TypeU
+expandAliasesWith step = go Set.empty
+  where
+    go seen t =
+      let t' = mapTypeUChildren (go seen) t
+       in case step t' of
+            Just (v, body) | not (Set.member v seen) -> go (Set.insert v seen) body
+            _ -> t'
+
+-- | Arrow, effect and optional types have no per-language form: every
+-- stage after the typechecker reads them by their shape. An alias naming one is
+-- therefore expanded wherever it occurs. Other aliases keep their names. A
+-- recursive one is left in place and 'structuralAliasesIn' reports it.
+expandStructuralAliases :: Scope -> TypeU -> TypeU
+expandStructuralAliases = expandAliasesWith . structuralAliasHead
+
+-- | Expand every transparent alias in a type, stopping at newtypes, records
+-- and primitives. A type carried out of the module that declared it keeps its
+-- meaning even where that module's aliases are not in scope.
+expandTransparentAliases :: Scope -> TypeU -> TypeU
+expandTransparentAliases scope =
+  expandAliasesWith (\t -> (,) <$> aliasHeadName t <*> TE.expandHeadOnly scope t)
+
+-- | The aliases in a type that 'expandStructuralAliases' would expand.
+structuralAliasesIn :: Scope -> TypeU -> [TVar]
+structuralAliasesIn scope t = case structuralAliasHead scope t of
+  Just (v, _) -> [v]
+  Nothing -> concatMap (structuralAliasesIn scope) (typeUChildren t)
+
+-- | The alias heading a type, and the arrow, effect or optional type it
+-- names.
+structuralAliasHead :: Scope -> TypeU -> Maybe (TVar, TypeU)
+structuralAliasHead scope t = do
+  v <- aliasHeadName t
+  case expandAliasHead scope t of
+    t'@(FunU _ _) -> Just (v, t')
+    t'@(EffectU _ _) -> Just (v, t')
+    t'@(OptionalU _) -> Just (v, t')
+    _ -> Nothing
+
+-- | Apply an action to each immediate child type. An application's head is
+-- not a child: alone it names an unapplied alias.
+traverseTypeUChildren :: Applicative f => (TypeU -> f TypeU) -> TypeU -> f TypeU
+traverseTypeUChildren f t = case t of
+  ExistU v (ps, pc) (rs, rc) ->
+    (\ps' rs' -> ExistU v (ps', pc) (rs', rc)) <$> traverse f ps <*> traverse (traverse f) rs
+  ForallU v x -> ForallU v <$> f x
+  FunU ts r -> FunU <$> traverse f ts <*> f r
+  AppU h ts -> AppU h <$> traverse f ts
+  NamU o n ps rs -> NamU o n <$> traverse f ps <*> traverse (traverse f) rs
+  EffectU es x -> EffectU es <$> f x
+  OptionalU x -> OptionalU <$> f x
+  OpU op ts -> OpU op <$> traverse f ts
+  LitU (LRec fs) -> LitU . LRec <$> traverse (traverse f) fs
+  LitU (LList es) -> LitU . LList <$> traverse f es
+  LabeledU v x -> LabeledU v <$> f x
+  _ -> pure t
+
+mapTypeUChildren :: (TypeU -> TypeU) -> TypeU -> TypeU
+mapTypeUChildren f = runIdentity . traverseTypeUChildren (Identity . f)
+
+typeUChildren :: TypeU -> [TypeU]
+typeUChildren = getConst . traverseTypeUChildren (\x -> Const [x])
+
+isAnonymousRecord :: TVar -> Bool
+isAnonymousRecord v = v == BT.record || v == anonRecordVar
+
+-- | Subtype record fields by key, in any order.
+subtypeFields :: TypeU -> TypeU -> Scope -> [(Key, TypeU)] -> [(Key, TypeU)] -> Gamma -> Either MDoc Gamma
+subtypeFields _ _ _ [] [] g = return g
+subtypeFields t1 t2 scope ((k1, x1) : rs1) es2 g =
+  case filterApart (\(k2, _) -> k2 == k1) es2 of
+    (Nothing, _) -> subtypeError t1 t2 "NamU - Unequal fields"
+    (Just (_, x2), rs2) -> do
+      g' <- subtype scope (apply g x1) (apply g x2) g
+      subtypeFields t1 t2 scope rs1 rs2 g'
+subtypeFields t1 t2 _ _ _ _ = subtypeError t1 t2 "NamU - Unequal number of fields"
 
 zipSubtype :: TypeU -> TypeU -> Scope -> [TypeU] -> [TypeU] -> Gamma -> Either MDoc Gamma
 zipSubtype _ _ _ [] [] g' = return g'
@@ -1322,8 +1531,11 @@ zipSubtype a b _ _ _ _ = subtypeError a b "Parameter type mismatch"
 
 -- | Dunfield Figure 10 -- type-level structural recursion
 instantiate :: Scope -> TypeU -> TypeU -> Gamma -> Either MDoc Gamma
-instantiate scope ta@(ExistU _ _ (_ : _, _)) tb@(NamU _ _ _ _) g1 = instantiate scope tb ta g1
-instantiate scope ta@(ExistU _ _ (_ : _, _)) tb@(VarU _) g1 = instantiate scope tb ta g1
+instantiate scope ta@(ExistU _ _ (_ : _, _)) tb@(NamU _ _ _ _) g1 = instantiateRecord scope False tb ta g1
+instantiate scope ta@(ExistU _ _ (_ : _, _)) tb@(VarU _) g1 =
+  case TE.reduceType scope tb of
+    (Just tb') -> instantiate scope ta tb' g1
+    Nothing -> subtypeError ta tb "Error in NamU versus VarU with existential keys"
 instantiate scope ta@(VarU _) tb@(ExistU _ _ (_ : _, _)) g1 = do
   case TE.reduceType scope ta of
     (Just ta') -> instantiate scope ta' tb g1
@@ -1340,46 +1552,7 @@ instantiate scope ta@(AppU (VarU v) _) tb@(ExistU _ _ ((_:_), _)) g1
 instantiate scope ta@(ExistU _ _ ((_:_), _)) tb@(AppU (VarU v) _) g1
   | Map.member v scope, Just tb' <- TE.reduceType scope tb =
       instantiate scope ta tb' g1
-instantiate scope ta@(NamU _ _ _ rs1) tb@(ExistU v _ (rs2@(_ : _), rc)) g1 = do
-  let keyset1 = Set.fromList $ map fst rs1
-      keyset2 = Set.fromList $ map fst rs2
-  _ <- case rc of
-    -- if the existential keys are closed, the the ta and tb keys must be identical
-    Closed ->
-      if keyset1 == keyset2
-        then return ()
-        else subtypeError ta tb "Error in NamU with conflicting closed keysets"
-    -- if the existential keys are open, then all existential keys muts be in
-    -- ta, but not vice versa
-    Open ->
-      if Set.isSubsetOf keyset2 keyset1
-        then return ()
-        else subtypeError ta tb "Error in NamU with conflicting open keysets"
-
-  g2 <-
-    foldM
-      (\g' (t1, t2) -> subtype scope t1 t2 g')
-      g1
-      [(t1, t2) | (k1, t1) <- rs1, (k2, t2) <- rs2, k1 == k2]
-  -- Also process record-key constraints accumulated on @v@ via earlier
-  -- merges (its own ExistG entry, plus any solved alias of @v@ shaped
-  -- @ExistU v _ rs@) that are NOT in the expression's @rs2@. Without
-  -- this, merged constraints contributed to @v@ via a sibling existential
-  -- get dropped when @v@ is pinned to a concrete @NamU@.
-  let rs2Keys = Set.fromList (map fst rs2)
-      extraRecs =
-        [ r
-        | r@(k, _) <- accumulatedRecords v g2
-        , Set.notMember k rs2Keys
-        ]
-  g3 <-
-    foldM
-      (\g' (k, vt) -> case lookup k rs1 of
-                        Just tat -> subtype scope tat vt g'
-                        Nothing -> Right g')
-      g2
-      extraRecs
-  solveExist v ta g3 >>= maybe (subtypeError ta tb "Error in NamU with existential keys") return
+instantiate scope ta@(NamU _ _ _ _) tb@(ExistU _ _ (_ : _, _)) g1 = instantiateRecord scope True ta tb g1
 -- ExistU vs EffectU: solve ?a = <effs> ?b, then ?b <: inner
 instantiate scope (ExistU v ([], _) _) (EffectU effs inner) g1 = do
   let (g2, veb) = tvarname g1 "eff"
@@ -1570,6 +1743,63 @@ instantiate scope (ExistU v ([], _) ([], _)) tb g1 = do
 
 instantiate _ ta tb _ = subtypeError ta tb "Unexpected types"
 
+-- | A named record against a record-shaped existential, in either order.
+-- Fields are compared in the direction of the enclosing relation: with the
+-- named record on the left of @<:@ its fields are on the left, and with the
+-- existential on the left its fields are. Swapping the arguments to share
+-- one rule would compare every field backwards, which is right only for
+-- invariant fields -- @Int@ fills a @?Int@ field, not the reverse, and a
+-- polymorphic field value must meet the declared type on the right.
+instantiateRecord :: Scope -> Bool -> TypeU -> TypeU -> Gamma -> Either MDoc Gamma
+instantiateRecord scope namedOnLeft ta@(NamU _ _ _ rs1) tb@(ExistU v _ (rs2@(_ : _), rc)) g1 = do
+  let keyset1 = Set.fromList $ map fst rs1
+      keyset2 = Set.fromList $ map fst rs2
+  _ <- case rc of
+    -- if the existential keys are closed, the the ta and tb keys must be identical
+    Closed ->
+      if keyset1 == keyset2
+        then return ()
+        else subtypeError ta tb "Error in NamU with conflicting closed keysets"
+    -- if the existential keys are open, then all existential keys muts be in
+    -- ta, but not vice versa
+    Open ->
+      if Set.isSubsetOf keyset2 keyset1
+        then return ()
+        else subtypeError ta tb "Error in NamU with conflicting open keysets"
+
+  g2 <-
+    foldM
+      (\g' (t1, t2) -> fieldSub t1 t2 g')
+      g1
+      [(t1, t2) | (k1, t1) <- rs1, (k2, t2) <- rs2, k1 == k2]
+  -- Also process record-key constraints accumulated on @v@ via earlier
+  -- merges (its own ExistG entry, plus any solved alias of @v@ shaped
+  -- @ExistU v _ rs@) that are NOT in the expression's @rs2@. Without
+  -- this, merged constraints contributed to @v@ via a sibling existential
+  -- get dropped when @v@ is pinned to a concrete @NamU@.
+  let rs2Keys = Set.fromList (map fst rs2)
+      extraRecs =
+        [ r
+        | r@(k, _) <- accumulatedRecords v g2
+        , Set.notMember k rs2Keys
+        ]
+  g3 <-
+    foldM
+      (\g' (k, vt) -> case lookup k rs1 of
+                        Just tat -> fieldSub tat vt g'
+                        Nothing -> Right g')
+      g2
+      extraRecs
+  solveExist v ta g3 >>= maybe (subtypeError ta tb "Error in NamU with existential keys") return
+  where
+    -- a named field against the existential's field, in the relation's
+    -- own direction
+    fieldSub nt et
+      | namedOnLeft = subtype scope nt et
+      | otherwise = subtype scope et nt
+instantiateRecord _ _ ta tb _ = subtypeError ta tb "Expected a record against a record existential"
+
+
 -- | When a bare existential @v@ (no records on the expression form) is about
 -- to be solved to a type @t@, gather every record-key constraint that has
 -- been associated with @v@ -- both from @v@'s own ExistG entry AND from
@@ -1658,9 +1888,23 @@ accumulatedPositionalSets v g
   | otherwise =
       [ ps
       | (_, ExistU v' (ps, _) _) <- Map.toList (gammaSolved g)
-      , v' == v
+      , derefBare v' == v
       , any isStructuralSlot ps
       ]
+  where
+    -- The receiver an alias names is not always the one that goes ground.
+    -- A lambda parameter synthesized in a `where` binding is solved to the
+    -- call site's existential first, so the alias still points at the
+    -- original while the ground solve arrives at the far end of the chain.
+    -- Follow bare existentials -- never a structural one, which would
+    -- discard the very slots being harvested.
+    derefBare :: TVar -> TVar
+    derefBare = go (16 :: Int)
+      where
+        go 0 x = x
+        go fuel x = case Map.lookup x (gammaSolved g) of
+          Just (ExistU y ([], _) ([], _)) -> go (fuel - 1 :: Int) y
+          _ -> x
 
 -- | Whether a ground type is a tuple (@IsTuple args@), definitely not a
 -- tuple (@NotTuple@ -- a record, primitive, or non-tuple type constructor),
@@ -1815,8 +2059,13 @@ cacheSolved :: TVar -> TypeU -> Gamma -> Gamma
 cacheSolved v t g =
   let g' = g {gammaSolved = Map.insert v t (gammaSolved g)}
    in case t of
+        -- Either this solution carries structural slots, or it links a
+        -- receiver that already had some to a new existential. Both make
+        -- the target a receiver; without the second the marker is lost the
+        -- first time a parameter existential is solved to another one.
         ExistU rv (ps, _) _
-          | any isStructuralSlot ps ->
+          | any isStructuralSlot ps
+              || Set.member v (gammaPositionalReceivers g) ->
               g' {gammaPositionalReceivers = Set.insert rv (gammaPositionalReceivers g')}
         _ -> g'
 
@@ -2861,7 +3110,9 @@ prettyTypeU = renderClean . cleanTypeName
     f _ (ProjectFieldU r fld) = f False r <> "." <> f False fld
     f _ (RecSingletonU k v) = "Singleton" <+> f False k <+> f False v
     f _ (LabeledU (TV n) t) = pretty n <> "@" <> f False t
-    f _ (NamU _ n [] _) = pretty n
+    f _ (NamU _ n [] rs)
+      | n == anonRecordVar = braces (hsep (punctuate "," [pretty k <+> "::" <+> f True t | (k, t) <- rs]))
+      | otherwise = pretty n
     f False t = parens (f True t)
     f _ (ExistU v (ts, _) (rs, _)) =
       tv v

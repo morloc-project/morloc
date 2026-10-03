@@ -1,0 +1,23 @@
+module main (recThroughRecursion, recToFunction)
+
+import root-rust
+
+-- A recursive function passed as a value: the reference names the
+-- function, which is compiled apart from the code that refers to it.
+
+countDown :: Int -> Int -> Int
+countDown a b = ? b <= 0 = a : countDown a (b - 1)
+
+useTwiceRec :: (Int -> Int -> Int) -> Int -> Int
+useTwiceRec f k
+  ? k <= 0 = f 1 2 + f 1 3
+  : useTwiceRec f (k - 1)
+
+recThroughRecursion :: Int -> Int
+recThroughRecursion n = useTwiceRec countDown n
+
+applyTwo :: (Int -> Int -> Int) -> Int
+applyTwo f = f 1 2 + f 5 3
+
+recToFunction :: Int -> Int
+recToFunction n = applyTwo countDown + n

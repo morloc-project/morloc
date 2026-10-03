@@ -24,3 +24,21 @@ def sort_strs(xs):
 
 def join_strs(xs):
     return ";".join(xs) + ";\n"
+
+
+# Folding handlers: the stream is reduced to one running total instead of
+# gathered into a list.
+def zero_acc():
+    return 0
+
+
+def add_batch(acc, batch):
+    return acc + sum(batch)
+
+
+def merge_acc(a, b):
+    return a + b
+
+
+def show_acc(acc):
+    return "total=%d\n" % acc

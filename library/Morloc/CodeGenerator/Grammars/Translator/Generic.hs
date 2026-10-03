@@ -29,7 +29,8 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
-  ( containsClosure
+  ( LoopResult (..)
+  , containsClosure
   , IAccessor (..)
   , IExpr (..)
   , IOwnership (..)
@@ -119,7 +120,8 @@ translateBuiltin lang desc srcs es = do
   -- Keep the preamble (runtime bootstrap) at module top / parent load, and pass
   -- the user includes separately so interpreted pools can defer them past the
   -- worker fork (macOS fork-safety); see 'ipIncludes'.
-  let program = buildProgram labels templates preambleDocs includeDocs mDocs es schemas closureTable
+  stageTable <- stageTableEntries
+  let program = (buildProgram labels templates preambleDocs includeDocs mDocs es schemas closureTable) {ipStageTable = stageTable}
 
   let code = printProgram desc program
   let exefile = ML.makeExecutablePoolName lang
@@ -174,7 +176,8 @@ translateExternal cmd lang desc srcs es = do
   closureTable <- Map.map (renderClosureCodecs desc) <$> computeClosureSchemas lang es
   -- Out-of-process codegen path: includes stay at module top (no fork-defer),
   -- so pass them as sources and leave the deferred-includes slot empty.
-  let program = buildProgram labels templates includeDocs [] mDocs es schemas closureTable
+  stageTable <- stageTableEntries
+  let program = (buildProgram labels templates includeDocs [] mDocs es schemas closureTable) {ipStageTable = stageTable}
 
   -- find the lang.yaml path for the codegen tool
   let langYamlPath = home </> "lang" </> T.unpack (ML.langName lang) </> "lang.yaml"
@@ -425,7 +428,9 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         , lcSourcedArg = \_ _ _ x -> x
         , lcOwnership = \_ -> return Owned
         , lcArgManifoldOwnership = \_ -> return Owned
+        , lcBindCallArgs = ldLazyArgs desc
         , lcOwnArg = \_ _ x -> x
+        , lcReadArg = \_ x -> x
         , lcWithCallerScope = id
         -- Python calls the arm's generated dataclass; R builds a classed
         -- list, whose class carries the arm name the same way a factor's
@@ -522,6 +527,13 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
                 }
         , lcStoreField = \_ v -> return v
         , lcApplyClosure = \callee args -> callee <> tupled args
+        , lcPapply = \_ _ callee args ->
+            return $ "mlc_papply" <> tupled
+              [ callee
+              , case ldListStyle desc of
+                  BracketList -> list args
+                  _ -> pretty (ldGenericListFn desc) <> tupled args
+              ]
         , lcForeignCall = \socketFile mid args ->
             let midDoc = pretty mid <> pretty (ldForeignCallIntSuffix desc)
                 argsDoc = case ldListStyle desc of
@@ -536,7 +548,17 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
         , lcMakeLoop = genericMakeLoop desc cfg
         , lcMakeLet = \namer i _ _ e1 e2 -> return $ genericMakeLet desc namer i e1 e2
         , lcReleaseStmt = \v -> pretty (ldReleasePacketFn desc) <> "(" <> pretty v <> ")"
+        -- The packet buffer is the language's to manage, so there is
+        -- nothing to hold back.
+        , lcReleaseBorrowedStmt = \v -> pretty (ldReleasePacketFn desc) <> "(" <> pretty v <> ")"
         , lcReturn = \e -> pretty $ substituteT (ldReturnTemplate desc) [("expr", render e)]
+        , lcDupPacket = id
+        , lcOwnedArg = \e -> if T.null (ldOwnedArgFn desc) then e else pretty (ldOwnedArgFn desc) <> "(" <> e <> ")"
+        , lcLoopLetRhs = \_ _ d -> return d
+        , lcOwnPacketDecl = \v e ->
+            if T.null (ldOwnedArgFn desc)
+              then Nothing
+              else Just (v <+> pretty (ldAssignOp desc) <+> pretty (ldOwnedArgFn desc) <> "(" <> e <> ")", v)
         , lcMakeDoBlock = genericMakeDoBlock desc cfg
         , lcMakeTry = genericMakeTry desc
         , lcSerialize = defaultSerialize cfg
@@ -612,11 +634,11 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
                     let endKw = ldBlockEnd desc
                      in vsep [header, indent 4 (vsep $ wrapError (priorLines <> [body])), pretty endKw]
         , lcClosureSig = \_ -> return ""
-        , lcMakePass = \_sig mname _ ->
+        , lcMakePass = \_sig _ mname _ ->
             return . pretty $
               substituteT (ldPassTemplate desc)
                 [("fn", render mname), ("mid", T.drop 1 (render mname))]
-        , lcMakeLambda = \_sig mname contextArgs boundArgs ->
+        , lcMakeLambda = \_sig _ mname contextArgs boundArgs ->
             let ctxNames = map argNamer contextArgs
                 bndNames = map argNamer boundArgs
                 tmpl = ldPartialTemplate desc
@@ -631,6 +653,13 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
                 -- introspect its closures (R) tag them with their manifold id and
                 -- captured values at construction, for later reification.
                 midText = T.drop 1 (render mname)
+                -- Each context value bound again in the closure's own scope,
+                -- for a language whose closures capture names rather than
+                -- values (R): a later rebinding of the name, as a loop
+                -- carrying it does, must not reach a closure already built.
+                bindContext = T.concat
+                  [ n <> " " <> ldAssignOp desc <> " " <> n <> "; "
+                  | n <- map render ctxNames ]
                 capturedList = render $ case ldListStyle desc of
                   BracketList -> list ctxNames
                   _ -> pretty (ldGenericListFn desc) <> tupled ctxNames
@@ -643,6 +672,7 @@ genericLowerConfig desc srcNamer debugInfo debugMode = cfg
                     , ("bound_args", boundArgsText)
                     , ("mid", midText)
                     , ("captured_list", capturedList)
+                    , ("bind_context", bindContext)
                     ]
         , lcRegisterSchema = registerSchemaIndex
         , lcTableImportFn = ldTableImportFn desc
@@ -867,8 +897,9 @@ prepareCacheArg desc cfg (a@(Arg _ tm), sa) = do
   let schemaRef = genericSchemaRef desc schemaId
   case tm of
     Native _ -> do
+      -- The packet exists only to key and store the cache entry.
       pd <- lcSerialize cfg (argNamer a) sa
-      return (poolExpr pd, schemaRef, poolPriorLines pd)
+      return (lcOwnedArg cfg (poolExpr pd), schemaRef, poolPriorLines pd)
     _ -> return (argNamer a, schemaRef, [])
 
 -- | Remote call with template-driven resource packing
@@ -964,21 +995,25 @@ genericMakeIf desc cfg _ condDocs thenDocs elseDocs = do
 genericMakeLoop ::
   LangDescriptor ->
   LowerConfig IndexM ->
-  [Int] ->
-  LoopBody PoolDocs PoolDocs ->
+  LoopResult ->
+  [(Int, Maybe PoolDocs)] ->
+  LoopBody PoolDocs PoolDocs PoolDocs ->
   IndexM PoolDocs
-genericMakeLoop desc cfg ids body = do
+genericMakeLoop desc cfg _ carried body = do
   resultIdx <- lcNewIndex cfg
   let resultVar = helperNamer resultIdx
-  bodyLines <- walkLB resultVar body
-  let resultDecl = resultVar <+> assign <+> pretty (ldNullLiteral desc)
+      ids = map fst carried
+  bodyLines <- walkLB ids resultVar body
+  -- A native loop's locals start from their initializers.
+  let initLines = concat [poolPriorLines d <> [nvarNamer i <+> assign <+> poolExpr d] | (i, Just d) <- carried]
+      resultDecl = resultVar <+> assign <+> pretty (ldNullLiteral desc)
       whileDoc = renderWhile bodyLines
-      leaves = loopBodyLeaves body
+      leaves = loopBodyLeaves body <> [d | (_, Just d) <- carried]
   return $
     PoolDocs
       { poolCompleteManifolds = concatMap poolCompleteManifolds leaves
       , poolExpr = resultVar
-      , poolPriorLines = [resultDecl, whileDoc]
+      , poolPriorLines = initLines <> [resultDecl, whileDoc]
       , poolPriorExprs = concatMap poolPriorExprs leaves
       , poolReturnFlag = True
       }
@@ -986,15 +1021,17 @@ genericMakeLoop desc cfg ids body = do
     assign = pretty (ldAssignOp desc)
     trueLit = pretty (ldBoolTrue desc)
     -- Emit the statements for one loop-body subtree.
-    walkLB resultVar = go
+    walkLB ids resultVar = go
       where
         go (LoopBase seDocs) =
           return $ poolPriorLines seDocs <> [resultVar <+> assign <+> poolExpr seDocs, "break"]
+        -- A slot whose new value is itself is left alone.
         go (LoopContinue contDocs) = do
-          tmpVars <- map helperNamer <$> mapM (const (lcNewIndex cfg)) contDocs
+          let changed = [(i, cd) | (i, cd) <- zip ids contDocs, not (sameLocal i cd)]
+          tmpVars <- map helperNamer <$> mapM (const (lcNewIndex cfg)) changed
           let priors = concatMap poolPriorLines contDocs
-              tmpAssigns = zipWith (\tv cd -> tv <+> assign <+> poolExpr cd) tmpVars contDocs
-              reassigns = zipWith (\i tv -> nvarNamer i <+> assign <+> tv) ids tmpVars
+              tmpAssigns = zipWith (\tv (_, cd) -> tv <+> assign <+> poolExpr cd) tmpVars changed
+              reassigns = zipWith (\(i, _) tv -> nvarNamer i <+> assign <+> tv) changed tmpVars
           return $ priors <> tmpAssigns <> reassigns
         go (LoopNLet i neDocs b) = do
           rest <- go b
@@ -1006,6 +1043,7 @@ genericMakeLoop desc cfg ids body = do
           tLines <- go t
           eLines <- go e
           return $ poolPriorLines guardDocs <> [renderIf (poolExpr guardDocs) tLines eLines]
+        sameLocal i d = null (poolPriorLines d) && render (poolExpr d) == render (nvarNamer i)
     -- Block-style rendering (IndentBlock=py, BraceBlock=r, EndKeywordBlock=julia
     -- kept for consistency with sibling emitters though gated out today).
     renderIf g tLines eLines = case ldBlockStyle desc of
@@ -1181,6 +1219,9 @@ genericPrintExpr desc = go
     go (IIntrinsicRead sid _ e) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_read(" <> schemaRef sid <> ", " <> go e <> ")"
+    go (IIntrinsicUnpack sid _ e) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_unpack(" <> schemaRef sid <> ", " <> go e <> ")"
     go (IIntrinsicOpen kind path) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_open(" <> go path <> ", " <> pretty kind <> ")"
@@ -1228,6 +1269,15 @@ genericPrintExpr desc = go
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_concat("
             <> go paths <> ", " <> go dest <> ")"
+    go (IIntrinsicChannel sid) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_open_channel(" <> schemaRef sid <> ")"
+    -- The producer is reified by the pool, which alone knows its closures.
+    go (IIntrinsicSpawn sid handle fn) =
+      "mlc_spawn(" <> go fn <> ", " <> go handle <> ", " <> schemaRef sid <> ")"
+    go (IIntrinsicSettle handle) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_settle(" <> go handle <> ")"
     go (IIntrinsicFlush handle) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_flush(" <> go handle <> ")"
@@ -1237,6 +1287,26 @@ genericPrintExpr desc = go
     go IIntrinsicTmpfile =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_tmpfile()"
+    go (IIntrinsicCellNew sid initE) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_cell_new("
+            <> schemaRef sid <> ", " <> go initE <> ")"
+    go (IIntrinsicCellGet sid _ handle) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_cell_get("
+            <> go handle <> ", " <> schemaRef sid <> ")"
+    go (IIntrinsicCellPut sid handle value) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_cell_put("
+            <> go handle <> ", " <> schemaRef sid <> ", " <> go value <> ")"
+    go (IIntrinsicCellReduce sid _ combine handle) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_cell_reduce("
+            <> schemaRef sid <> ", " <> go combine <> ", " <> go handle <> ")"
+    go (IIntrinsicReplay sid _ handle fn) =
+      let prefix = ldIntrinsicPrefix desc
+       in pretty prefix <> "mlc_replay("
+            <> schemaRef sid <> ", " <> go handle <> ", " <> go fn <> ")"
     go (IIntrinsicStdin sid) =
       let prefix = ldIntrinsicPrefix desc
        in pretty prefix <> "mlc_open_stdin(" <> schemaRef sid <> ")"
@@ -1413,7 +1483,7 @@ printProgram desc prog =
     -- interpreted templates place inside a deferred post-fork loader, (3)
     -- manifolds, (4) dispatch.
     sections =
-      [ vsep (map pretty (ipSources prog) ++ [schemaTableInit, closureTableInit])
+      [ vsep (map pretty (ipSources prog) ++ [schemaTableInit, closureTableInit, stageTableInit])
       , vsep (map pretty (ipIncludes prog))
       , vsep (map pretty (ipManifolds prog) ++ logRebindings)
       , templateDispatch
@@ -1434,9 +1504,23 @@ printProgram desc prog =
                       (ldClosureTableEntry desc)
                       [ ("mid", T.pack (show mid))
                       , ("caps", render (closureLangList (map pretty caps)))
+                      , ("bnds", render (closureLangList (map pretty bnds)))
                       ]
-                | (mid, (caps, _, _)) <- Map.toAscList (ipClosureTable prog)
+                | (mid, (caps, bnds, _)) <- Map.toAscList (ipClosureTable prog)
                 ]
+
+    -- The stage table ('StageEntry'): flat mid -> (context size, stage
+    -- point, stage mid).
+    stageEntries = [(f, [n, k, st]) | (f, StageEntry n k st) <- Map.toAscList (ipStageTable prog)]
+    stageTableInit = case ldListStyle desc of
+      BracketList ->
+        "mlc_stage_table = {"
+          <> hsep (punctuate "," [pretty f <> ": " <> tupled (map pretty xs) | (f, xs) <- stageEntries])
+          <> "}"
+      _ ->
+        "mlc_stage_table <- list("
+          <> hsep (punctuate "," [dquotes (pretty f) <> " = c" <> tupled (map (\x -> pretty x <> "L") xs) | (f, xs) <- stageEntries])
+          <> ")"
 
     -- Render a list literal of schema strings in the language's own style
     -- (Python brackets vs the generic list function), for the closure table and
@@ -1700,3 +1784,4 @@ codecList desc xs = case ldListStyle desc of
 renderClosureCodecs :: LangDescriptor -> ([SerialAST], [SerialAST], SerialAST) -> ([Text], [Text], Text)
 renderClosureCodecs desc (caps, bnds, res) =
   (map (render . codecDoc desc) caps, map (render . codecDoc desc) bnds, render (codecDoc desc res))
+

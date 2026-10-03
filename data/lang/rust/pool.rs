@@ -10,13 +10,13 @@
 //
 // The fixed scaffold below owns the C ABI declarations and main(), which
 // fills a PoolConfig and hands control to pool_main in libmorloc.so. main()
-// mirrors pool_host.cpp: --health probe, PDEATHSIG, panic hook, schema init.
+// mirrors pool_host.cpp: --health probe, lifeline, panic hook, schema init.
 // NOTE: the marker string must not appear anywhere above the first real
 // marker (the splicer splits on every occurrence).
 #![allow(dead_code, unused_variables, unused_unsafe, unused_mut, non_snake_case, non_camel_case_types, unused_imports, unused_parens)]
 
 use std::ffi::{CString};
-use std::os::raw::{c_char, c_int, c_ulong, c_void};
+use std::os::raw::{c_char, c_int, c_void};
 use std::sync::OnceLock;
 use rustmorloc::{parse_schema, Schema, ToVoidstar, FromVoidstar, RecurScope, resolve_recur};
 use rustmorloc::{SizeWalk, WriteWalk, ReadWalk, write_variant_nullary, read_variant_tag};
@@ -31,20 +31,13 @@ use rustmorloc::{MorlocFn0, MorlocFn1, MorlocFn2, MorlocFn3, MorlocFn4, MorlocFn
 // ambiguity across the many hashed rlibs staged in rust-deps.
 extern "C" {
     fn pool_main(argc: c_int, argv: *mut *mut c_char, config: *mut PoolConfig) -> c_int;
-    fn fdopen(fd: c_int, mode: *const c_char) -> *mut c_void;
-    fn setvbuf(stream: *mut c_void, buf: *mut c_char, mode: c_int, size: usize) -> c_int;
-    fn prctl(option: c_int, a2: c_ulong, a3: c_ulong, a4: c_ulong, a5: c_ulong) -> c_int;
+    fn morloc_lifeline_guard();
 }
 
-// glibc constants (stable on Linux): _IOLBF = 1, SIGTERM = 15,
-// PR_SET_PDEATHSIG = 1.
-const IOLBF: c_int = 1;
-const SIGTERM: c_ulong = 15;
-const PR_SET_PDEATHSIG: c_int = 1;
 
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq)]
-enum PoolConcurrency { Threads = 0, Fork = 1, Single = 2 }
+enum PoolConcurrency { Threads = 0, Single = 1 }
 
 type PoolDispatchFn =
     unsafe extern "C" fn(u32, *const *const u8, usize, *mut c_void) -> *mut u8;
@@ -57,7 +50,7 @@ struct PoolConfig {
     concurrency: PoolConcurrency,
     initial_workers: i32,
     dynamic_scaling: bool,
-    post_fork_child: Option<unsafe extern "C" fn(*mut c_void)>,
+    after_reply: Option<unsafe extern "C" fn()>,
 }
 
 // <<<BREAK>>>
@@ -65,15 +58,9 @@ struct PoolConfig {
 // <<<BREAK>>>
 // <<<BREAK>>>
 // <<<BREAK>>>
-
-fn cstdio_stderr() -> *mut c_void {
-    unsafe { fdopen(2, b"w\0".as_ptr() as *const c_char) }
-}
 
 fn main() {
-    unsafe { setvbuf(cstdio_stderr(), std::ptr::null_mut(), IOLBF, 0); }
-    #[cfg(target_os = "linux")]
-    unsafe { prctl(PR_SET_PDEATHSIG, SIGTERM, 0, 0, 0); }
+    unsafe { morloc_lifeline_guard(); }
 
     let raw: Vec<String> = std::env::args().collect();
     if raw.len() == 2 && raw[1] == "--health" {
@@ -94,6 +81,9 @@ fn main() {
         .iter()
         .map(|a| CString::new(a.as_str()).unwrap().into_raw())
         .collect();
+    unsafe extern "C" fn after_reply() {
+        rustmorloc::dispatch_flush();
+    }
     let mut cfg = PoolConfig {
         local_dispatch,
         remote_dispatch,
@@ -101,7 +91,7 @@ fn main() {
         concurrency: PoolConcurrency::Threads,
         initial_workers: 1,
         dynamic_scaling: true,
-        post_fork_child: None,
+        after_reply: Some(after_reply),
     };
     let rc = unsafe { pool_main(argv.len() as c_int, argv.as_mut_ptr(), &mut cfg) };
     std::process::exit(rc);

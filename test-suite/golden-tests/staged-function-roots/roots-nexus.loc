@@ -1,0 +1,12 @@
+-- The staged roots of roots-*.loc with no language imported: the nexus
+-- evaluates each command, applying the staged function to its argument.
+module main (letLambda, partialPair)
+
+pair :: a -> b -> (a, b)
+pair x y = (x, y)
+
+letLambda :: Int -> Int
+letLambda = let k = 3 in \x -> k
+
+partialPair :: Int -> (Int, Int)
+partialPair = pair (let z = 4 in z)

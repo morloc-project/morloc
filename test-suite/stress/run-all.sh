@@ -19,7 +19,7 @@ set -euo pipefail
 if [ "$(date +%N 2>/dev/null)" = "N" ]; then
     now_ms() { python3 -c 'import time; print(int(time.time() * 1000))'; }
 else
-    now_ms() { echo $(( $(date +%s%N) / 1000000 )); }
+    now_ms() { echo $(( $(date +%s%N) / 1000000 )); }  # portable: used only where the %N probe above passed
 fi
 
 
@@ -56,7 +56,7 @@ WORKLOAD_ORDER=(cpp py r cpp-py cpp-r py-r)
 # one cross-language combination can say so. Unset means all six.
 if [[ -n "${MORLOC_STRESS_WORKLOADS:-}" ]]; then
     read -r -a WORKLOAD_ORDER <<< "$MORLOC_STRESS_WORKLOADS"
-    for w in "${WORKLOAD_ORDER[@]}"; do
+    for w in ${WORKLOAD_ORDER[@]+"${WORKLOAD_ORDER[@]}"}; do
         if [[ -z "$(workload_dir "$w")" ]]; then
             echo "unknown workload: $w (known: cpp py r cpp-py cpp-r py-r)" >&2
             exit 2
@@ -144,7 +144,7 @@ run_suite() {
 SELECTED=("$@")
 should_run() {
     if [ ${#SELECTED[@]} -eq 0 ]; then return 0; fi
-    for s in "${SELECTED[@]}"; do
+    for s in ${SELECTED[@]+"${SELECTED[@]}"}; do
         if [[ "$1" == *"$s"* ]]; then return 0; fi
     done
     return 1
@@ -157,7 +157,7 @@ echo "=== Morloc Stress Test Suite ==="
 echo "Stderr log: $STDERR_LOG"
 echo ""
 
-for workload in "${WORKLOAD_ORDER[@]}"; do
+for workload in ${WORKLOAD_ORDER[@]+"${WORKLOAD_ORDER[@]}"}; do
     if should_run "zombie"; then
         run_test "zombie-stress.sh" "zombie" "$workload"
     fi
@@ -187,7 +187,7 @@ fi
 if (( FAILED > 0 )); then
     echo ""
     echo "${RED}Failures:${RESET}"
-    for f in "${FAILURES[@]}"; do
+    for f in ${FAILURES[@]+"${FAILURES[@]}"}; do
         echo "  ${RED}-${RESET} $f"
     done
     exit 1

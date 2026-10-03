@@ -117,6 +117,15 @@ jobs:
   # ---- Run tests using the Rust binaries ----
   test:
     needs: rust-binary
+    # Three jobs, each running a third of the golden tests (MORLOC_TEST_SHARD,
+    # see test-suite/GoldenShard.hs). Shard 1 also runs the unit tests, the
+    # runtime and integration suites, and uploads the release tables. The
+    # shard count appears in the matrix and in the "Run tests" step; change
+    # both together. The release job waits for every shard.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     runs-on: ubuntu-latest
     # Raised with the test step: this job now builds the compiler, runs the
     # live-daemon suites, and runs `stack test` with no target, and the sum
@@ -233,17 +242,24 @@ jobs:
       # machine, so a two-core runner is asked for two cores' worth rather
       # than a development box's worth.
       - name: Run the runtime suites
+        if: matrix.shard == 1
         env:
           MORLOC_STRESS_WORKLOADS: "cpp py-r"
-        run: ./test-suite/test.sh typecheck-benchmark concurrency daemon packet-io expose
+        run: ./test-suite/test.sh portability typecheck-benchmark concurrency daemon packet-io expose
         timeout-minutes: 30
 
-      # And `stack test` with no target, which adds morloc-integration-test
-      # to the unit and golden suites. That covers the daemon, MCP, shared
-      # memory, install and stress integration tests, none of which a push
-      # runs -- a release is the right place to pay for them.
+      # And morloc-integration-test alongside the unit and golden suites. That
+      # covers the daemon, MCP, shared memory, install and stress integration
+      # tests, none of which a push runs -- a release is the right place to pay
+      # for them.
       - name: Run tests
-        run: stack test --system-ghc --no-install-ghc
+        env:
+          MORLOC_TEST_SHARD: "${{ matrix.shard }}/3"
+        run: stack test --system-ghc --no-install-ghc morloc:morloc-test
+        timeout-minutes: 45
+      - name: Run integration tests
+        if: matrix.shard == 1
+        run: stack test --system-ghc --no-install-ghc morloc:morloc-integration-test
         timeout-minutes: 45
 
       # The shipped compiler comes from the rust-binary job's static-build image
@@ -257,8 +273,10 @@ jobs:
       # the compiler on the host -- essential for container builds on hosts where
       # the glibc compiler cannot execute natively (NixOS, musl, etc.).
       - name: Stage lang-support table for release
+        if: matrix.shard == 1
         run: morloc lang-support > morloc-lang-support.json
       - name: Upload lang-support table
+        if: matrix.shard == 1
         uses: actions/upload-artifact@v4
         with:
           name: morloc-lang-support
@@ -269,8 +287,10 @@ jobs:
       # asset) so the manager gets a pre-install compatibility gate from the fetch
       # it already makes.
       - name: Stage versions doc
+        if: matrix.shard == 1
         run: morloc versions > morloc-versions.json
       - name: Upload versions doc
+        if: matrix.shard == 1
         uses: actions/upload-artifact@v4
         with:
           name: morloc-versions

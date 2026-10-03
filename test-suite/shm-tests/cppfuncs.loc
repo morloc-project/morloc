@@ -1,6 +1,6 @@
 module cppfuncs (*)
 
-import types
+import root-cpp
 
 sum_list :: [Int] -> Int
 alloc_hold_and_sum :: Int -> Real -> Int

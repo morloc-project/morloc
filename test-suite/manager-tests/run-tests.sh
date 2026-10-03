@@ -109,7 +109,7 @@ cleanup() {
     [[ -n "$MANAGER" ]] && "$MANAGER" expose rm "$MODULE" >/dev/null 2>&1 || true
     # `install` builds in the mounted working directory; drop the artifacts.
     rm -rf "$SCRIPT_DIR/${MODULE}-build" 2>/dev/null || true
-    for d in "${WORK_DIRS[@]}"; do rm -rf "$d"; done
+    for d in ${WORK_DIRS[@]+"${WORK_DIRS[@]}"}; do rm -rf "$d"; done
 }
 trap cleanup EXIT
 
@@ -374,7 +374,7 @@ group_auth() {
 RUN_GROUPS=("$@")
 if [[ ${#RUN_GROUPS[@]} -eq 0 ]]; then RUN_GROUPS=(help expose serve auth); fi
 
-for g in "${RUN_GROUPS[@]}"; do
+for g in ${RUN_GROUPS[@]+"${RUN_GROUPS[@]}"}; do
     case "$g" in
         help)   group_help ;;
         expose) group_expose ;;
@@ -389,6 +389,6 @@ printf "%s%d passed, %d failed, %d skipped, %d total%s\n" \
     "$BOLD" "$PASSED" "$FAILED" "$SKIPPED" "$TOTAL" "$RESET"
 if [[ ${#FAILURES[@]} -gt 0 ]]; then
     echo "Failures:"
-    for f in "${FAILURES[@]}"; do echo "  - $f"; done
+    for f in ${FAILURES[@]+"${FAILURES[@]}"}; do echo "  - $f"; done
 fi
 [[ "$FAILED" -eq 0 ]]

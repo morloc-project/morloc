@@ -1,0 +1,38 @@
+-- A value bound once and read in several places, one of the reads taking a
+-- field that is not Copy. Each read must leave the value whole for the
+-- others: the field is copied out, never moved out, in the body of a command
+-- as in any other function.
+module main (test)
+import root-rust
+
+record St where
+  maze :: [Str]
+  level :: Int
+
+record Rust => St = "St"
+
+source Rust from "st.rs" ("st_new" as newSt, "st_maze" as makeMaze, "st_equal" as testEqual)
+newSt :: Int -> St
+makeMaze :: Int -> [Str]
+testEqual :: a -> a -> (Int, Int) -> (Int, Int)
+
+start :: St
+start = newSt 2
+
+cleared :: St
+cleared = .(.level = 5) start
+
+testA :: (Int, Int) -> (Int, Int)
+testA =
+  ( testEqual (makeMaze 2) (.maze start)
+  . testEqual (.level start) 1
+  )
+
+testB :: (Int, Int) -> (Int, Int)
+testB =
+  ( testEqual (.maze cleared) (.maze start)
+  . testEqual (.level cleared) 5
+  )
+
+test :: (Int, Int)
+test = testB (testA (0, 0))

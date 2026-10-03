@@ -1,0 +1,12 @@
+module helper (counted)
+
+import root-py
+
+-- A top-level recursive helper named `go`, private to this module.
+go :: Int -> Int
+go m
+  ? m <= 0 = 0
+  : 1 + go (m - 1)
+
+counted :: Int -> Int
+counted n = go n

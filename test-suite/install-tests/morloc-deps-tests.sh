@@ -97,7 +97,7 @@ EOF
     git add . && git commit -q -m "v1"
     FIXTURE_HASH1=$(git rev-parse HEAD)
 
-    sed -i 's/MARKER_VERSION: 1/MARKER_VERSION: 2/' main.loc
+    sed 's/MARKER_VERSION: 1/MARKER_VERSION: 2/' main.loc > main.loc.new && mv main.loc.new main.loc
     git add . && git commit -q -m "v2"
     FIXTURE_HASH2=$(git rev-parse HEAD)
 

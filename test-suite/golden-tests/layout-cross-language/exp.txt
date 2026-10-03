@@ -1,0 +1,5 @@
+[1,null,-3,null,5]
+[[true,null],[false,true],[true,false]]
+[{"a":1,"b":2},{"a":255,"b":0}]
+["South","North","East"]
+[{"A":[true]},{"B":[null]},{"B":[false]}]

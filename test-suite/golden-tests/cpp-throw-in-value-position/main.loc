@@ -1,0 +1,19 @@
+-- A branch that throws, in a position whose C++ type is a container: the
+-- throw must convert to exactly that type. `unwrap` lowers to a match whose
+-- Err arm throws, assigned to a helper of the value's type.
+module main (count, width, total)
+
+import root-cpp
+
+source Cpp from "width.hpp" ("width" as strWidth)
+
+strWidth :: Str -> Int
+
+count :: Str -> Int
+count s = length (unwrap (@read s) :: [Int])
+
+width :: Str -> Int
+width s = strWidth (unwrap (@read s) :: Str)
+
+total :: Str -> Real
+total s = sum (unwrap (@read s) :: [Real])

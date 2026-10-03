@@ -1,0 +1,25 @@
+module pure (unusedThrows, otherArmThrows, unusedFnThrows)
+
+-- The same law with no pool: the nexus evaluates these itself. An argument
+-- that throws is evaluated at the application, whether its parameter is never
+-- read or read only on the path not taken.
+
+ignore :: Int -> Int -> Int
+ignore x y = x
+
+choose :: Bool -> Int -> Int -> Int
+choose c x y
+  ? c = x
+  : y
+
+unusedThrows :: Int -> Int
+unusedThrows a = ignore a (@throw "boom")
+
+otherArmThrows :: Int -> Int
+otherArmThrows a = choose True a (@throw "boom")
+
+ignoreFn :: (Int -> Int) -> Int -> Int
+ignoreFn f x = x
+
+unusedFnThrows :: Int -> Int
+unusedFnThrows a = ignoreFn (? (@throw "boom") = (\x -> x) : (\x -> 2)) a

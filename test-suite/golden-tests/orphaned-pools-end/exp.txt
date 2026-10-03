@@ -1,0 +1,3 @@
+default: pools ended
+thread: pools ended
+dead runs swept

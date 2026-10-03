@@ -1,0 +1,26 @@
+-- A function built by a computation -- a partial application whose supplied
+-- arguments are not values, or a let around a lambda -- is a staged function
+-- value. Exported directly, the command applies it to its arguments; called
+-- from another definition, it may be shared as a specialization. Every
+-- export here must compute the same value in every language.
+module main
+  ( useShared
+  , useSharedComposed
+  )
+
+import root-r
+
+h :: Int -> Int -> Int
+h a b = (a + b) * (b + a) + a * a
+
+g :: Int -> Int
+g = (+) (h (h 1 2) (h 3 4))
+
+useShared :: Int -> Int
+useShared x = g x + g 1
+
+c :: Int -> Int
+c = (+) 1 . (*) (h (h 1 2) (h 3 4))
+
+useSharedComposed :: Int -> Int
+useSharedComposed x = c x + c 1

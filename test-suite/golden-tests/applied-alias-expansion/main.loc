@@ -1,0 +1,286 @@
+module main
+  ( boxX
+  , boxY
+  , bqBases
+  , bqQuals
+  , seqHeader
+  , seqQuals
+  , tagOf
+  , tagValues
+  , constY
+  , labeledY
+  , relabelY
+  , countOf
+  , scoreOf
+  , wrap
+  , optBox
+  , optLit
+  , pickY
+  , holderY
+  , sizeOf
+  , strScore
+  , plainScoreOf
+  , directY
+  , plainQ
+  , actOut
+  , actIn
+  , libOut
+  , scorePair
+  , countDown
+  , useScored
+  , applyGrouped
+  )
+
+-- An applied type alias or parameterized record, such as `Box Str`, must
+-- equal its own expansion wherever the two meet. Every export is well typed;
+-- the program builds and each export returns the value noted beside it.
+--
+-- A signed definition is checked again where it is referenced, so mkBox,
+-- mkBaseQual, mkTagged and boxConst must typecheck once something names them.
+--
+--   Box         a type parameter beside a fixed-type field
+--   BaseQual    a Nat parameter shared by two Vector fields
+--   Sequence    a type-parameterized record at a Nat-indexed one, with a
+--               nested literal
+--   Tagged      a Nat and a type parameter together
+--   Pair        two type parameters, through a polymorphic function
+
+import root-py
+import vector-py
+import .actlib (bumpLib)
+
+record Box a where
+  x :: a
+  y :: Int
+record Py => Box a = "dict"
+
+mkBox :: Str -> Box Str
+mkBox h = {x = h, y = 1}
+
+boxX :: Str -> Str
+boxX h = .x (mkBox h)
+
+boxY :: Str -> Int
+boxY h = .y (mkBox h)
+
+record BaseQual (n :: Nat) where
+  bases :: Vector n U8
+  quals :: Vector n U8
+record Py => BaseQual (n :: Nat) = "dict"
+
+mkBaseQual :: Vector n U8 -> Vector n U8 -> BaseQual n
+mkBaseQual b q = {bases = b, quals = q}
+
+bqBases :: Vector n U8 -> Vector n U8 -> Vector n U8
+bqBases b q = .bases (mkBaseQual b q)
+
+bqQuals :: Vector n U8 -> Vector n U8 -> Vector n U8
+bqQuals b q = .quals (mkBaseQual b q)
+
+record Sequence h s where
+  header :: h
+  seq :: s
+record Py => Sequence h s = "dict"
+
+mkRead :: Str -> Vector n U8 -> Vector n U8 -> Sequence Str (BaseQual n)
+mkRead h b q = {header = h, seq = mkBaseQual b q}
+
+seqHeader :: Str -> Vector n U8 -> Vector n U8 -> Str
+seqHeader h b q = .header (mkRead h b q)
+
+seqQuals :: Str -> Vector n U8 -> Vector n U8 -> Vector n U8
+seqQuals h b q = .quals (.seq (mkRead h b q))
+
+record Tagged (n :: Nat) a where
+  tag :: a
+  values :: Vector n U8
+record Py => Tagged (n :: Nat) a = "dict"
+
+mkTagged :: Str -> Vector n U8 -> Tagged n Str
+mkTagged t v = {tag = t, values = v}
+
+tagOf :: Str -> Vector n U8 -> Str
+tagOf t v = .tag (mkTagged t v)
+
+tagValues :: Str -> Vector n U8 -> Vector n U8
+tagValues t v = .values (mkTagged t v)
+
+-- a constant record literal, returned at its declared type: 2
+boxConst :: Box Str
+boxConst = {x = "c", y = 2}
+
+relay :: Str -> Box Str
+relay h = boxConst
+
+constY :: Str -> Int
+constY h = .y (relay h)
+
+-- an alias of an applied record, meeting a literal (3) and a value of the
+-- application it names (1)
+type Labeled = Box Str
+
+mkLabeled :: Str -> Labeled
+mkLabeled h = {x = h, y = 3}
+
+labeledY :: Str -> Int
+labeledY h = .y (mkLabeled h)
+
+relabel :: Box Str -> Labeled
+relabel b = b
+
+relabelY :: Str -> Int
+relabelY h = .y (relabel (mkBox h))
+
+-- a polymorphic function over a parameterized record, applied at
+-- `Pair Str Str`: 5
+record Pair h q where
+  left :: h
+  right :: q
+record Py => Pair h q = "dict"
+
+mkPair :: Str -> Str -> Pair Str Str
+mkPair a b = {left = a, right = b}
+
+withCount :: Pair h q -> Pair h Int
+withCount p = {left = .left p, right = 5}
+
+countOf :: Str -> Str -> Int
+countOf a b = .right (withCount (mkPair a b))
+
+-- a signature that is an alias of a function type: 7
+type Scorer a = a -> Int
+
+strScore :: Scorer Str
+strScore s = 7
+
+scoreOf :: Str -> Int
+scoreOf s = strScore s
+
+-- an unparameterized alias of a function type: 8
+type PlainScorer = Str -> Int
+
+plainScore :: PlainScorer
+plainScore s = 8
+
+plainScoreOf :: Str -> Int
+plainScoreOf s = plainScore s
+
+-- an alias of an optional type, accepting the value it wraps, a record
+-- from a sourced function ({"x":"o","y":9}) and a record literal
+-- ({"x":"o","y":1})
+type Opt a = ?a
+
+wrap :: Str -> Opt Str
+wrap s = s
+
+source Py from "helpers.py" ("sourcedBox", "sourcedY", "sourcedQ")
+
+sourcedBox :: Str -> Box Str
+sourcedY :: Box Str -> Int
+
+optBox :: Str -> Opt (Box Str)
+optBox h = sourcedBox h
+
+optLit :: Str -> Opt (Box Str)
+optLit h = {x = h, y = 1}
+
+-- guard branches, one a literal and one a sourced call: 8 when the guard
+-- holds, 9 otherwise
+pick :: Bool -> Str -> Box Str
+pick b h ? b = {x = h, y = 8}
+  : sourcedBox h
+
+pickY :: Bool -> Str -> Int
+pickY b h = .y (pick b h)
+
+-- a field whose declared type is an applied record, filled by a sourced
+-- call: 9
+record Holder where
+  inner :: Box Str
+record Py => Holder = "dict"
+
+hold :: Str -> Holder
+hold h = {inner = sourcedBox h}
+
+holderY :: Str -> Int
+holderY h = .y (.inner (hold h))
+
+-- an instance declared on a parameterized record: 10
+class Weighed a where
+  weight :: a -> Int
+
+instance Weighed (Box a) where
+  source Py from "helpers.py" ("boxSize" as weight)
+
+sizeOf :: Str -> Int
+sizeOf h = weight (mkBox h)
+
+-- a record literal passed directly to a sourced function: 4, and for an
+-- unparameterized record, 6
+directY :: Str -> Int
+directY h = sourcedY {x = h, y = 4}
+
+record Plain where
+  p :: Str
+  q :: Int
+record Py => Plain = "dict"
+
+sourcedQ :: Plain -> Int
+
+plainQ :: Str -> Int
+plainQ h = sourcedQ {p = h, q = 6}
+
+-- an alias of an effect type, in the signature of a definition (5) and of
+-- a sourced function (6)
+type Act a = <IO> a
+
+source Py from "helpers.py" ("bump", "bumpTwice")
+
+bump :: Int -> <IO> Int
+bumpTwice :: Int -> Act Int
+
+actOut :: Int -> Act Int
+actOut i = bump i
+
+actIn :: Int -> <IO> Int
+actIn i = bumpTwice i
+
+-- an effect alias declared in another module, whose name is not imported
+-- here: 7
+libOut :: Int -> <IO> Int
+libOut i = bumpLib i
+
+-- a function alias in the result position adds its arguments to the
+-- definition's own: 3
+scorePair :: Int -> Scorer Str
+scorePair i s = i
+
+-- recursion through a definition whose signature is a function alias: 0
+type CountDown = Int -> Int
+
+countDown :: CountDown
+countDown n ? n == 0 = 0
+  : countDown (n - 1)
+
+-- a function alias inside a tuple alias: 9
+type Scored = (Str, PlainScorer)
+
+scored :: Scored
+scored = ("a", \s -> 9)
+
+useScored :: Str -> Int
+useScored s = (.1 scored) s
+
+-- a sourced function whose callback parameter is a function alias, grouped
+-- as written: 6
+type Grouped = Int -> (Int -> Int)
+
+source Py from "helpers.py" ("applyGrouped" as applyTwice)
+
+applyTwice :: Grouped -> Int -> Int
+
+addInts :: Int -> Int -> Int
+addInts x y = x + y
+
+applyGrouped :: Int -> Int
+applyGrouped x = applyTwice addInts x

@@ -1,0 +1,31 @@
+writeNexus 9 ok [5,5]
+writeNexus 256 rejected
+writeNexus -1 rejected
+saveNexus 9 ok 5
+saveNexus 256 rejected
+saveNexus -1 rejected
+writeCpp 9 ok [5,5]
+writeCpp 256 rejected
+writeCpp -1 rejected
+saveCpp 9 ok 5
+saveCpp 256 rejected
+saveCpp -1 rejected
+writePy 9 ok [5,5]
+writePy 256 rejected
+writePy -1 rejected
+savePy 9 ok 5
+savePy 256 rejected
+savePy -1 rejected
+writeR 9 ok [5,5]
+writeR 256 rejected
+writeR -1 rejected
+saveR 9 ok 5
+saveR 256 rejected
+saveR -1 rejected
+writeRust 9 ok [5,5]
+writeRust 256 rejected
+writeRust -1 rejected
+saveRust 9 ok 5
+saveRust 256 rejected
+saveRust -1 rejected
+10

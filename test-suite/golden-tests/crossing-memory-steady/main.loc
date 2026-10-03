@@ -1,0 +1,29 @@
+module main (steady)
+
+import root
+import root-cpp
+import root-py
+
+-- A pool that answers many calls must not grow with the number of them.
+-- Each step here fetches a batch of readings from python and reduces it
+-- in C++, so every step sends a packet and receives one.
+--
+-- The C++ pool records the memory it holds at step 1000 (`mark`) and
+-- reports how much more it holds after the last step (`grownKiB`, which
+-- takes the run's result so that it runs after the run). Held memory is
+-- the allocator's live bytes plus the shared memory the pool has mapped
+-- in: unlike resident size, it does not move with the pool's worker
+-- threads, its allocator's spare capacity, the page size, or the
+-- libraries the toolchain links. Growth of 180 bytes a step over the
+-- 3000 steps after the mark exceeds the 512 KiB margin.
+
+source Py from "src.py" ("readings")
+source Cpp from "src.hpp" ("total" as totalCpp, "mark", "grownKiB")
+
+readings :: Int -> [Int]
+totalCpp :: [Int] -> Int
+mark :: Int -> Int -> Int
+grownKiB :: Int -> Int
+
+steady :: Int -> Int
+steady n = grownKiB (sum (map (\i -> mark i (totalCpp (readings i))) (range 0 n)))

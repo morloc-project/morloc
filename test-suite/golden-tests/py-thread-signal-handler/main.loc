@@ -1,0 +1,15 @@
+-- In the thread-model Python pool (the macOS default) a Python signal
+-- handler runs on the pool's main thread, whatever thread armed the signal.
+-- A handler that raises there must not take the pool down with calls still
+-- in flight.
+module main (both)
+
+import root-py
+
+source Py from "alarm.py" ("arm", "ping")
+
+arm :: Int -> Int
+ping :: Int -> Int
+
+both :: Int -> Int
+both x = ping (arm x)

@@ -1,3 +1,43 @@
+0.109.0 [2026-10-03]
+--------------------
+
+New features
+ * Add `@parse` docstring entry to specify a formatter 
+ * Output actions take a path (`--fasta=out.fa`) and there can be multiple
+ * `@collect` handlers can fold a stream
+ * Tables: `-f jsonl` and `-f tsv` output, CSV/TSV piped in on stdin, and table
+   commands served over MCP
+ * New table helpers: `addCol`, elementwise vector arithmetic, and a `|>` pipe operator
+
+Language and typing
+ * Instances can declare contexts
+ * Records are nominal, and field order is part of the type, so a column reorder
+   is caught when you compile
+ * Function, effect and optional type aliases work anywhere, including inside row operators
+ * Class methods are resolved from the argument's type, so `unpack v` no longer needs a signature
+ * Each argument and each `where`/`let` value is evaluated once, not once per mention
+
+Performance
+ * Deeply nested definitions build and typecheck in linear time and memory instead of exponential
+ * Shared memory is freed as soon as a value is read, so long loops and multi-table pipelines stay flat
+ * Tail-recursive loops call functions from their own pool directly (100k iterations: 5 s -> 0.2 s)
+ * Stream compression runs in parallel behind the writer, and streams copy each batch less often
+ * C++ and Rust pools no longer grow with the number of cross-language calls
+
+Fixes
+ * Point-free and computed commands now return correct results in C++, Rust, Python and R
+ * Values that would overflow on narrowing (e.g. F32, compression level, UInt64)
+   now raise an error instead of silently wrapping
+ * Stream reads no longer corrupt pointer-bearing values; stdout streams read back as `IFile`
+ * Terminal actions work on imported, aliased and branching commands
+ * Shared-memory allocation is now safe across processes; stray pointers fail
+   instead of reading memory
+ * Memory leaks fixed: BigInt JSON, stream/`IFile` reads, C++/Rust packet handling
+ * `where` bindings are lexically scoped and no longer capture names at the call site
+ * Sum-type naming fixed in C++ function types and records
+ * Bug in R codegen caused by R laziness
+
+
 0.108.1 [2026-09-18]
 --------------------
 

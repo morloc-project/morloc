@@ -77,15 +77,23 @@ morloc_mlc_save_json                 <- function(...){ .Call("morloc_mlc_save_js
 morloc_mlc_load                      <- function(...){ .Call("morloc_mlc_load",                      ...) }
 morloc_mlc_hash                      <- function(...){ .Call("morloc_mlc_hash",                      ...) }
 morloc_mlc_read                      <- function(...){ .Call("morloc_mlc_read",                      ...) }
+morloc_mlc_unpack                    <- function(schema, packet){ morloc_get_value(as.raw(packet), schema) }
 morloc_mlc_open                      <- function(...){ .Call("morloc_mlc_open",                      ...) }
 morloc_mlc_close                     <- function(...){ .Call("morloc_mlc_close",                     ...) }
 morloc_mlc_tmpfile                   <- function(...){ .Call("morloc_mlc_tmpfile",                   ...) }
 morloc_mlc_unlink_tmp                <- function(...){ .Call("morloc_mlc_unlink_tmp",                ...) }
 morloc_mlc_tell                      <- function(...){ .Call("morloc_mlc_tell",                      ...) }
+morloc_mlc_cell_new                  <- function(...){ .Call("morloc_mlc_cell_new",                  ...) }
+morloc_mlc_cell_get                  <- function(...){ .Call("morloc_mlc_cell_get",                  ...) }
+morloc_mlc_cell_put                  <- function(...){ .Call("morloc_mlc_cell_put",                  ...) }
+morloc_mlc_cell_count                <- function(...){ .Call("morloc_mlc_cell_count",                ...) }
+morloc_mlc_cell_slot                 <- function(...){ .Call("morloc_mlc_cell_slot",                 ...) }
+morloc_mlc_cell_free                 <- function(...){ .Call("morloc_mlc_cell_free",                 ...) }
 morloc_mlc_fschema                   <- function(...){ .Call("morloc_mlc_fschema",                   ...) }
 morloc_mlc_ifile_walk                <- function(...){ .Call("morloc_mlc_ifile_walk",                ...) }
 morloc_mlc_ifile_length              <- function(...){ .Call("morloc_mlc_ifile_length",              ...) }
 morloc_mlc_next                      <- function(...){ .Call("morloc_mlc_next",                      ...) }
+morloc_mlc_next_frame                <- function(...){ .Call("morloc_mlc_next_frame",                ...) }
 morloc_mlc_stream_layout             <- function(...){ .Call("morloc_mlc_stream_layout",             ...) }
 morloc_mlc_stream                    <- function(...){ .Call("morloc_mlc_stream",                    ...) }
 morloc_mlc_open_ostream              <- function(...){ .Call("morloc_mlc_open_ostream",              ...) }
@@ -97,6 +105,34 @@ morloc_mlc_write                     <- function(...){ .Call("morloc_mlc_write",
 morloc_mlc_append                    <- function(...){ .Call("morloc_mlc_append",                    ...) }
 morloc_mlc_concat                    <- function(...){ .Call("morloc_mlc_concat",                    ...) }
 morloc_mlc_flush                     <- function(...){ .Call("morloc_mlc_flush",                     ...) }
+morloc_mlc_open_channel              <- function(...){ .Call("morloc_mlc_open_channel",              ...) }
+morloc_mlc_is_channel                <- function(...){ .Call("morloc_mlc_is_channel",                ...) }
+morloc_mlc_settle                    <- function(...){ .Call("morloc_mlc_settle",                    ...) }
+morloc_mlc_spawn                     <- function(...){ .Call("morloc_mlc_spawn",                     ...) }
+# Merge every fold accumulator with the handler's `combine`, then release
+# the cell. The count is never zero -- an untouched cell answers with its
+# seed -- so this always has a value to return.
+morloc_mlc_cell_reduce <- function(schema, combine, handle) {
+  on.exit(try(morloc_mlc_cell_free(handle), silent = TRUE), add = TRUE)
+  n <- morloc_mlc_cell_count(handle)
+  acc <- morloc_mlc_cell_slot(handle, 0, schema)
+  for (i in seq_len(n - 1)) {
+    acc <- combine(acc, morloc_mlc_cell_slot(handle, i, schema))
+  }
+  acc
+}
+
+# @replay: call `fn` on every frame (sub-packet) of the stream, in order,
+# each as the list it holds. Only the end of the stream (NULL) stops it.
+morloc_mlc_replay <- function(schema, handle, fn) {
+  repeat {
+    frame <- morloc_mlc_next_frame(schema, handle)
+    if (is.null(frame)) break
+    fn(frame)
+  }
+  NULL
+}
+
 # @throw: raise a classed condition. The pool's manifold-level tryCatch
 # (from ldErrorWrapOpen/Close in lang.yaml) catches all conditions and
 # appends the frame info to `conditionMessage`, so the class tag survives
@@ -138,12 +174,7 @@ morloc_mlc_try <- function(body, ok, err) {
     }
   )
 }
-morloc_socketpair                    <- function(...){ .Call("morloc_socketpair",                    ...) }
 morloc_fork                          <- function(...){ .Call("morloc_fork",                          ...) }
-morloc_send_fd                       <- function(...){ .Call("morloc_send_fd",                       ...) }
-morloc_dispatch_fd                   <- function(...){ .Call("morloc_dispatch_fd",                   ...) }
-morloc_reap_closes                   <- function(...){ .Call("morloc_reap_closes",                   ...) }
-morloc_close_pending                 <- function( ){ .Call("morloc_close_pending"                 ) }
 morloc_recv_fd                       <- function(...){ .Call("morloc_recv_fd",                       ...) }
 morloc_kill                          <- function(...){ .Call("morloc_kill",                          ...) }
 morloc_waitpid                       <- function(...){ .Call("morloc_waitpid",                       ...) }
@@ -151,13 +182,16 @@ morloc_install_sigterm_handler       <- function(...){ .Call("morloc_install_sig
 morloc_is_shutting_down              <- function(...){ .Call("morloc_is_shutting_down",              ...) }
 morloc_waitpid_blocking              <- function(...){ .Call("morloc_waitpid_blocking",              ...) }
 morloc_reap_worker                   <- function(...){ .Call("morloc_reap_worker",                   ...) }
-morloc_detach_daemon                 <- function(...){ .Call("morloc_detach_daemon",                 ...) }
+morloc_worker_listener               <- function(...){ .Call("morloc_worker_listener",               ...) }
 morloc_shared_counter_create         <- function(...){ .Call("morloc_shared_counter_create",         ...) }
 morloc_shared_counter_inc            <- function(...){ .Call("morloc_shared_counter_inc",            ...) }
 morloc_shared_counter_dec            <- function(...){ .Call("morloc_shared_counter_dec",            ...) }
 morloc_shared_counter_read           <- function(...){ .Call("morloc_shared_counter_read",           ...) }
 morloc_pipe                          <- function(...){ .Call("morloc_pipe",                          ...) }
 morloc_write_byte                    <- function(...){ .Call("morloc_write_byte",                    ...) }
+morloc_set_nonblocking               <- function(...){ .Call("morloc_set_nonblocking",               ...) }
+morloc_wait_wakeup                   <- function(...){ .Call("morloc_wait_wakeup",                   ...) }
+morloc_shared_counter_set            <- function(...){ .Call("morloc_shared_counter_set",            ...) }
 morloc_close_fd                      <- function(...){ .Call("morloc_close_fd",                      ...) }
 morloc_worker_loop_c                 <- function(...){ .Call("morloc_worker_loop_c",                 ...) }
 morloc_set_line_buffered             <- function(...){ .Call("morloc_set_line_buffered",             ...) }
@@ -176,20 +210,45 @@ global_state <- list()
 # Dynamic worker spawning: monkey-patch morloc_foreign_call to track busy workers.
 # Workers atomically increment a shared counter before a foreign_call and
 # decrement after. When all workers are busy, a byte is written to a wake-up
-# pipe to tell the dispatcher to spawn a new worker.
+# pipe to tell the main process to spawn a new worker. The pipe never blocks a
+# writer, and the main process drains it.
 .orig_foreign_call <- morloc_foreign_call
 .busy_counter <- NULL
+.total_counter <- NULL
 .wakeup_fd <- NULL
-.n_workers_total <- 0L
+
+.all_workers_busy <- function(busy) {
+  !is.null(.total_counter) && busy >= morloc_shared_counter_read(.total_counter)
+}
 
 morloc_foreign_call <- function(...) {
   val <- morloc_shared_counter_inc(.busy_counter)
-  if (val >= .n_workers_total && !is.null(.wakeup_fd)) {
+  if (.all_workers_busy(val) && !is.null(.wakeup_fd)) {
     tryCatch(morloc_write_byte(.wakeup_fd, as.raw(0x21)), error = function(e) NULL)
   }
   on.exit(morloc_shared_counter_dec(.busy_counter))
   .orig_foreign_call(...)
 }
+
+# A channel read or write waits on another worker, which may need a free
+# worker of this pool to make progress, so it counts as busy.
+.mlc_tracked_on_channel <- function(f, handle_pos) {
+  force(f)
+  function(...) {
+    if (morloc_mlc_is_channel(list(...)[[handle_pos]])) {
+      val <- morloc_shared_counter_inc(.busy_counter)
+      if (.all_workers_busy(val) && !is.null(.wakeup_fd)) {
+        tryCatch(morloc_write_byte(.wakeup_fd, as.raw(0x21)), error = function(e) NULL)
+      }
+      on.exit(morloc_shared_counter_dec(.busy_counter))
+    }
+    f(...)
+  }
+}
+morloc_mlc_next  <- .mlc_tracked_on_channel(morloc_mlc_next, 2)
+morloc_mlc_write <- .mlc_tracked_on_channel(morloc_mlc_write, 4)
+morloc_mlc_flush <- .mlc_tracked_on_channel(morloc_mlc_flush, 1)
+morloc_mlc_close <- .mlc_tracked_on_channel(morloc_mlc_close, 1)
 
 .mlc_wrap_log <- function(group, start_tmpl, pass_tmpl, fail_tmpl, bench_key, fn) {
   # Eagerly resolve `fn` so the closure captures the ORIGINAL function. The
@@ -232,6 +291,10 @@ morloc_foreign_call <- function(...) {
 # by calling back to this pool.
 
 MLC_HOME_LANG <- "r"
+
+# The schema of every closure's wire tuple (home, manifold id, captured
+# packets); must equal the one Morloc.CodeGenerator.Serial emits.
+MLC_CLOSURE_SCHEMA <- "t3sjaau1"
 
 mlc_is_closure_codec <- function(codec) inherits(codec, "mlc_closure_codec")
 
@@ -277,12 +340,44 @@ mlc_reify <- function(f, home_lang) {
   mid <- attr(f, "morloc_mid")
   captured <- attr(f, "morloc_captured")
   if (is.null(captured)) captured <- list()
-  cap_codecs <- mlc_closure_table[[as.character(mid)]]
-  if (is.null(cap_codecs)) cap_codecs <- list()
+  entry <- mlc_closure_table[[as.character(mid)]]
+  # A partial application of the closure carries its applied arguments after
+  # its context ('mlc_papply'), so the captured values are the context and a
+  # prefix of the bound arguments.
+  cap_codecs <- if (is.null(entry)) list() else c(entry[[1]], entry[[2]])
   # A captured value is applied back after this dispatch has released its
   # blocks, so it must travel inside its packet.
   packets <- lapply(seq_along(captured), function(i) mlc_encode(captured[[i]], cap_codecs[[i]], TRUE))
   list(home_lang, as.integer(mid), packets)
+}
+
+# Start the producer `f` on the channel as a separate dispatch in its home
+# pool, without waiting for it. The channel travels as the producer's
+# OStream argument, after its captured values.
+mlc_spawn <- function(f, handle, schema) {
+  r <- mlc_reify(f, MLC_HOME_LANG)
+  packets <- c(r[[3]], list(morloc_put_value(handle, schema, TRUE)))
+  sock <- paste0(global_state$tmpdir, "/pipe-", r[[1]])
+  morloc_mlc_spawn(sock, as.integer(r[[2]]), packets, handle)
+  invisible(NULL)
+}
+
+# Call a manifold in another pool and read its result. The packets in `own`
+# were made for this call alone, and the result is read into a value of this
+# pool's own, so each is released here, on error too, rather than held until
+# the dispatch ends. A NULL codec reads a closure wire tuple.
+mlc_call_released <- function(sock, mid, packets, own, res_codec) {
+  res <- NULL
+  on.exit({
+    for (p in own) morloc_release_packet_shm(p)
+    if (!is.null(res)) morloc_release_packet_shm(res)
+  })
+  res <- morloc_foreign_call(sock, as.integer(mid), packets)
+  if (is.null(res_codec)) {
+    morloc_get_value(res, MLC_CLOSURE_SCHEMA)
+  } else {
+    mlc_decode(res, res_codec)
+  }
 }
 
 # Rebuild a callable from an already-deserialized closure wire tuple
@@ -298,11 +393,77 @@ mlc_reflect_from_tuple <- function(tup, arg_codecs, res_codec) {
   f <- function(...) {
     args <- list(...)
     arg_packets <- lapply(seq_along(args), function(i) mlc_encode(args[[i]], arg_codecs[[i]]))
-    packets <- c(captured, arg_packets)
-    mlc_decode(morloc_foreign_call(sock, as.integer(mid), packets), res_codec)
+    mlc_call_released(sock, mid, c(captured, arg_packets), arg_packets, res_codec)
   }
   attr(f, "morloc_origin") <- list(home_lang, as.integer(mid), captured)
+  attr(f, "morloc_codecs") <- list(arg_codecs, res_codec)
   f
+}
+
+# Apply a function value to its first arguments. A staged function (one that
+# does work after these arguments and before the rest) runs that work now,
+# once, through its stage entry, and the closure it returns is the result;
+# otherwise the arguments are kept with the function, which runs when it gets
+# the rest. mlc_stage_table maps a flat entry's manifold id to (context size,
+# first stage point, stage entry id).
+mlc_papply <- function(f, xs) {
+  if (length(xs) == 0) return(f)
+  origin <- attr(f, "morloc_origin")
+  if (!is.null(origin)) return(mlc_papply_remote(f, origin, xs))
+  mid <- attr(f, "morloc_mid")
+  if (is.null(mid)) {
+    # a function host code made: it has no stages morloc knows of
+    return(function(...) do.call(f, c(xs, list(...))))
+  }
+  caps <- attr(f, "morloc_captured")
+  if (is.null(caps)) caps <- list()
+  st <- mlc_stage_take(mid, length(caps))
+  if (is.null(st) || length(xs) < st$take) return(mlc_pap(mid, caps, xs))
+  take <- st$take
+  g <- do.call(get(paste0("m", st$stage)), c(caps, xs[seq_len(take)]))
+  mlc_papply(g, xs[seq_along(xs) > take])
+}
+
+# How many more arguments closure `mid`, holding `ncaptured` captured values,
+# takes before its stage point, and its stage entry; NULL when it has none.
+mlc_stage_take <- function(mid, ncaptured) {
+  entry <- mlc_stage_table[[as.character(mid)]]
+  if (is.null(entry)) return(NULL)
+  list(take = entry[[2]] - (ncaptured - entry[[1]]), stage = entry[[3]])
+}
+
+# A closure of manifold mid over captured values and applied arguments.
+mlc_pap <- function(mid, caps, xs) {
+  fn <- get(paste0("m", mid))
+  captured <- c(caps, xs)
+  g <- function(...) do.call(fn, c(captured, list(...)))
+  attr(g, "morloc_mid") <- mid
+  attr(g, "morloc_captured") <- captured
+  g
+}
+
+# The same, for a closure that lives in another pool: its stage entry runs
+# there, and the closure it returns comes back as a reflected proxy.
+mlc_papply_remote <- function(f, origin, xs) {
+  home_lang <- origin[[1]]
+  mid <- origin[[2]]
+  packets <- origin[[3]]
+  codecs <- attr(f, "morloc_codecs")
+  arg_codecs <- codecs[[1]]
+  res_codec <- codecs[[2]]
+  st <- mlc_stage_take(mid, length(packets))
+  if (is.null(st) || length(xs) < st$take) {
+    more <- lapply(seq_along(xs), function(i) mlc_encode(xs[[i]], arg_codecs[[i]], TRUE))
+    return(mlc_reflect_from_tuple(
+      list(home_lang, mid, c(packets, more)),
+      arg_codecs[seq_along(arg_codecs) > length(xs)], res_codec))
+  }
+  take <- st$take
+  sock <- paste0(global_state$tmpdir, "/pipe-", home_lang)
+  own <- lapply(seq_len(take), function(i) mlc_encode(xs[[i]], arg_codecs[[i]]))
+  tup <- mlc_call_released(sock, st$stage, c(packets, own), own, NULL)
+  g <- mlc_reflect_from_tuple(tup, arg_codecs[seq_along(arg_codecs) > take], res_codec)
+  mlc_papply(g, xs[seq_along(xs) > take])
 }
 
 # Rebuild a callable from a raw incoming closure wire packet, used when the
@@ -328,7 +489,7 @@ mlc_make_closure_dispatch <- function(mid, arg_codecs, res_codec) {
 # <<<BREAK>>>
 # AUTO include dispatch end
 
-worker_loop <- function(pipe_fd, ack_fd) {
+worker_loop <- function(listen_fd, life_fd) {
   # If deferred source loading failed in this worker, make every dispatch entry
   # report the real cause as a clean fail packet. The C loop evaluates the
   # manifold via R_tryEvalSilent and returns the error text, so a stop() here
@@ -340,7 +501,7 @@ worker_loop <- function(pipe_fd, ack_fd) {
     .dispatch <<- lapply(.dispatch, function(f) fail_fn)
     .remote_dispatch <<- lapply(.remote_dispatch, function(f) fail_fn)
   }
-  morloc_worker_loop_c(pipe_fd, ack_fd, .dispatch, .remote_dispatch)
+  morloc_worker_loop_c(listen_fd, life_fd, .dispatch, .remote_dispatch)
 }
 
 main <- function(socket_path, tmpdir, shm_basename) {
@@ -349,43 +510,39 @@ main <- function(socket_path, tmpdir, shm_basename) {
   morloc_set_line_buffered()
   morloc_install_sigterm_handler()
 
+  # The main process listens but never accepts: each idle worker accepts on
+  # the shared socket and serves the connection itself, so only idle workers
+  # take calls, and a re-entrant callback is never queued behind a busy one.
   daemon <- morloc_start_daemon(socket_path, tmpdir, shm_basename, 0xffff)
-  n_workers <- 1L
 
-  # Shared job queue: dispatcher writes fds to fd[1], workers read from fd[2].
-  # Only idle workers (blocked in recvmsg) pick up jobs, preventing the
-  # round-robin deadlock where a callback gets dispatched to a busy worker.
-  job_queue <- morloc_socketpair()
-
-  # Shared counter for dynamic worker spawning
+  # Shared counters for dynamic worker spawning: workers busy in a foreign
+  # call, and live workers.
   busy_counter <- morloc_shared_counter_create()
+  total_counter <- morloc_shared_counter_create()
   wakeup <- morloc_pipe()  # c(read_fd, write_fd)
-
-  # Drain-ack pipe: a worker writes back the fd token once it has drained a
-  # request off the socket, so the dispatcher can close its accepted copy
-  # WITHOUT flushing unread request bytes (the macOS close-flushes-unread race).
-  # Dispatcher reads ack_pipe[1L]; workers write ack_pipe[2L]. 4-byte tokens are
-  # atomic pipe writes, so concurrent workers' acks never interleave.
-  ack_pipe <- morloc_pipe()  # c(read_fd, write_fd)
+  morloc_set_nonblocking(wakeup[1L])
+  morloc_set_nonblocking(wakeup[2L])
+  # Only this process holds the write end; a worker sees end of file on the
+  # read end once this process is gone, and exits.
+  life <- morloc_pipe()
 
   # Set globals so the monkey-patched morloc_foreign_call can use them.
   # Forked children inherit these values.
   .busy_counter <<- busy_counter
+  .total_counter <<- total_counter
   .wakeup_fd <<- wakeup[2L]
-  .n_workers_total <<- n_workers
 
-  min_workers <- n_workers  # floor the pool never drops below (initial count)
+  min_workers <- 1L  # floor the pool never drops below
 
   # Fork one worker: clean state -> load user sources -> serve. Returns its pid.
   spawn_worker <- function() {
     pid <- morloc_fork()
     if (pid == 0L) {
-      morloc_detach_daemon(daemon)
-      morloc_close_socket(job_queue[1L])  # child doesn't write fds
-      morloc_close_fd(wakeup[1L])         # child doesn't read wakeup pipe
-      morloc_close_fd(ack_pipe[1L])       # child doesn't read acks
-      mlc_load_user_sources()             # load user sources post-fork
-      worker_loop(job_queue[2L], ack_pipe[2L])
+      listen_fd <- morloc_worker_listener(daemon)
+      morloc_close_fd(wakeup[1L])  # child doesn't read the wake-up pipe
+      morloc_close_fd(life[2L])    # nor hold the main process's lifeline
+      mlc_load_user_sources()      # load user sources post-fork
+      worker_loop(listen_fd, life[1L])
       morloc_exit(0L)
     }
     pid
@@ -393,11 +550,9 @@ main <- function(socket_path, tmpdir, shm_basename) {
 
   # Reap dead workers (logging crashes), prune them from `pids`, and respawn up
   # to `min_workers`. Without respawn a crashing pool decays toward zero live
-  # workers -- `send_fd` then black-holes every new client into a reader-less
-  # queue and callers hang / see "Connection closed by peer". Pruning also keeps
-  # the shutdown kill loop from SIGKILLing a reaped-and-reused pid. (The in-flight
-  # job a crashed worker was serving is already lost; this restores future
-  # service, not that job.)
+  # workers and nothing accepts. Pruning also keeps the shutdown kill loop from
+  # SIGKILLing a reaped-and-reused pid. (The in-flight job a crashed worker was
+  # serving fails: its connection closes with it.)
   reap_and_respawn <- function(pids) {
     alive <- integer(0)
     for (pid in pids) {
@@ -412,22 +567,15 @@ main <- function(socket_path, tmpdir, shm_basename) {
   }
 
   pids <- integer(0)
-  for (i in seq_len(n_workers)) {
+  for (i in seq_len(min_workers)) {
     pids <- c(pids, spawn_worker())
   }
-  # Keep job_queue[2L] open so dynamically spawned children can use it
+  morloc_shared_counter_set(total_counter, length(pids))
 
   on.exit({
-    # Close any accepted fds still awaiting a worker drain-ack (their workers
-    # are about to be killed; the receive-buffer-flush is moot once the job is
-    # abandoned).
-    tryCatch(morloc_close_pending(), error = function(e) NULL)
-    tryCatch(morloc_close_socket(job_queue[1L]), error = function(e) NULL)
-    tryCatch(morloc_close_socket(job_queue[2L]), error = function(e) NULL)
     tryCatch(morloc_close_fd(wakeup[1L]), error = function(e) NULL)
     tryCatch(morloc_close_fd(wakeup[2L]), error = function(e) NULL)
-    tryCatch(morloc_close_fd(ack_pipe[1L]), error = function(e) NULL)
-    tryCatch(morloc_close_fd(ack_pipe[2L]), error = function(e) NULL)
+    tryCatch(morloc_close_fd(life[2L]), error = function(e) NULL)
     # Reap-and-log any final crash, then kill+reap the (pruned) live workers.
     for (pid in pids) {
       tryCatch(morloc_reap_worker(pid), error = function(e) NULL)
@@ -440,44 +588,22 @@ main <- function(socket_path, tmpdir, shm_basename) {
     }
   })
 
-  # Dispatch loop - idle workers pull from shared queue.
-  # After each dispatch cycle, check if all workers are busy and spawn more.
   while (!morloc_is_shutting_down()) {
-    # Reap dead workers, respawn to the floor, and keep the worker count honest
-    # (a stale count would make the saturation gate below stop tripping).
+    # Reap dead workers, respawn to the floor, and keep the shared worker count
+    # honest (a stale count would make the saturation gate below stop tripping).
     pids <- reap_and_respawn(pids)
-    n_workers <- length(pids)
-    .n_workers_total <<- n_workers
+    morloc_shared_counter_set(total_counter, length(pids))
 
-    # Close the dispatcher's accepted copy of any fd whose request a worker has
-    # now drained (deferred from dispatch time to avoid the macOS
-    # close-flushes-unread-request-bytes race). Cheap and non-blocking.
-    morloc_reap_closes(ack_pipe[1L])
-
-    client_fd <- morloc_wait_for_client(daemon)
-    if (client_fd > 0L) {
-      tryCatch({
-        # Hand the fd to a worker and DEFER closing our copy: the worker acks
-        # (over ack_pipe) once it has drained the request, and the next
-        # reap_closes above releases the fd then.
-        morloc_dispatch_fd(job_queue[1L], client_fd)
-      }, error = function(e) {
-        # The fd was never handed off; close it now (nothing to defer).
-        cat(paste("Failed to dispatch job:", e$message, "\n"), file = stderr())
-        morloc_close_socket(client_fd)
-      })
-    }
+    morloc_wait_wakeup(wakeup[1L], 100L)
 
     # Dynamic worker spawning: if all workers are blocked in foreign_call,
     # spawn a new one so incoming callbacks can still be served. (A worker that
     # crashed mid-foreign-call leaves its busy increment un-decremented, so this
     # may over-count busy and over-spawn -- bounded and self-limiting, and far
-    # safer than the under-spawn deadlock the reap_and_respawn count fix closes.)
-    current_busy <- morloc_shared_counter_read(busy_counter)
-    if (current_busy >= n_workers) {
+    # safer than an under-spawn deadlock.)
+    if (morloc_shared_counter_read(busy_counter) >= length(pids)) {
       pids <- c(pids, spawn_worker())
-      n_workers <- n_workers + 1L
-      .n_workers_total <<- n_workers
+      morloc_shared_counter_set(total_counter, length(pids))
     }
   }
 }

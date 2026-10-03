@@ -1,0 +1,28 @@
+module main (viaLet, viaConsumer, viaSignature)
+
+import root-py
+import vector-py
+
+-- `unpack` comes from `Packable (List a) (Vector n a)`, whose class variable
+-- is determined by the ARGUMENT. Instance selection compares the occurrence
+-- type, which is the method's own most general form until something pins it.
+-- A universal on that side used to be treated as rigid, so no instance could
+-- match and the user was told none existed -- even with the argument's type
+-- written one token away.
+
+src :: Vector 4 Real
+src = [1.0, 2.0, 3.0, 4.0]
+
+total :: [Real] -> Real
+
+-- Nothing downstream constrains the result of `unpack`.
+viaLet :: Real
+viaLet = let p = unpack src in total p
+
+-- A consumer pins it.
+viaConsumer :: Real
+viaConsumer = total (unpack src)
+
+-- An annotation pins it.
+viaSignature :: Real
+viaSignature = total (unpack src :: [Real])

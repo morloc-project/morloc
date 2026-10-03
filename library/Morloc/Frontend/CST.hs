@@ -99,7 +99,7 @@ data CstExpr
   | CRefutAssE EVar [([Loc CstExpr], Loc CstExpr)] [Loc CstExpr]
   | CTypE CstTypeDef
   | CClsE CstClassHead [CstSigItem]
-  | CIstE ClassName [TypeU] [Loc CstExpr]
+  | CIstE [Constraint] ClassName [TypeU] [Loc CstExpr]
   | CEffE Text Bool  -- ^ effect declaration: label, isEscapable (True = escapable)
   | CFixE Associativity Int [EVar]
   -- Source-item tuple: (isBacktick, foreign-name, morloc-alias).

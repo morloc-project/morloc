@@ -1,0 +1,16 @@
+-- A command whose parsers and body are all morloc code has no pool to run
+-- the parse in, and is rejected.
+module main (count)
+
+import root-py
+
+readJson :: Str -> <IO> [Int]
+readJson p = do
+  Ok xs <- @load p
+  xs
+
+count ::
+  --' @parse j=readJson .j
+  [Int] ->
+  Int
+count xs = 1

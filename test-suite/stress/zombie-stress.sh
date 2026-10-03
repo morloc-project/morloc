@@ -15,7 +15,7 @@ while [ $# -gt 0 ]; do
     fi
     POSITIONAL+=("$1"); shift
 done
-parse_args "${POSITIONAL[@]}"
+parse_args ${POSITIONAL[@]+"${POSITIONAL[@]}"}
 
 echo "=== Zombie Stress Test ==="
 echo "Iterations: $ITERATIONS"

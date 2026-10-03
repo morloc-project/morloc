@@ -1,0 +1,20 @@
+-- A pool worker that dies in the middle of a request fails that request: the
+-- caller gets an error, never a hang. And an R worker making many foreign
+-- calls keeps going: each call it makes while the pool is saturated signals
+-- the pool to add a worker, and those signals must never fill a pipe and
+-- block the worker.
+module main (slow, chatty)
+
+import root-r
+import root-py
+
+source R from "slow.R" ("slow", "seqR", "sumR")
+source Py from "ident.py" ("ident")
+
+slow :: Str -> Int
+seqR :: Int -> [Int]
+sumR :: [Int] -> Int
+ident :: Int -> Int
+
+chatty :: Int -> Int
+chatty n = sumR (map ident (seqR n))

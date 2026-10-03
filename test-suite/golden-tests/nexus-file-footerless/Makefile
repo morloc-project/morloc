@@ -24,7 +24,7 @@ all:
 	# on disk but the classifier keys off the tail magic.
 	cp stream.packet notail.packet
 	N=`wc -c < notail.packet`; M=`expr $$N - 8`; \
-	  dd if=stream.packet of=notail.packet bs=1 count=$$M status=none 2>> obs.err
+	  dd if=stream.packet of=notail.packet bs=1 count=$$M 2> /dev/null
 	# `state=missing` (on-disk state unchanged), walk fields populated.
 	printf 'notail state: '  >> obs.txt
 	$(NEXUS) file notail.packet | grep -oE 'state=[a-z]+' >> obs.txt 2>> obs.err

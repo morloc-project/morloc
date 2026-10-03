@@ -1,0 +1,20 @@
+module batches (produceBatch, renderBatch, Batch, produceRows, Rows)
+
+import root-py
+
+type Batch = [Int]
+
+source Py from "helpers.py" ("twice", "renderBatch", "nestTwice")
+
+twice :: Int -> Batch
+renderBatch :: Batch -> Str
+
+produceBatch :: Int -> (Batch -> <IO> ()) -> <IO> ()
+produceBatch n sink = sink (twice n)
+
+type Rows a = [a]
+
+nestTwice :: Int -> Rows (Rows Int)
+
+produceRows :: Int -> (Rows (Rows Int) -> <IO> ()) -> <IO> ()
+produceRows n sink = sink (nestTwice n)

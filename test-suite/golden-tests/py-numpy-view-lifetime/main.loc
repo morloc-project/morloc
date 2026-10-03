@@ -1,0 +1,54 @@
+module main (kept, streamed, viewKind, makeTriples)
+
+import root
+import root-cpp
+import root-py
+import vector-cpp
+import vector-py
+
+-- A numpy array read out of shared memory is a view onto the block, and it
+-- may outlive the call that read it. `kept` stores each array a C++ pool
+-- sends in a Python global and sums them all in a later call; `streamed`
+-- reads a stream file of small vectors as a list, every element a view onto
+-- a stream chunk. A block released while a view still points at it reads as
+-- zeros, so both totals are checked exactly.
+--
+-- Thread-mode Python keeps the global in one process across calls.
+
+source Cpp from "src.hpp" ("bigVec", "triple")
+source Py from "src.py" ("pyKeep", "pyKeptTotal", "pyOwnsData", "pyTriplesTotal")
+
+bigVec :: Int -> Vector 20000 Real
+triple :: Int -> Vector 3 Real
+pyKeep :: Vector 20000 Real -> Int
+pyKeptTotal :: Int -> Real
+pyOwnsData :: Vector 20000 Real -> Str
+pyTriplesTotal :: [Vector 3 Real] -> Real
+
+--' Keep n views in Python, then total them in a later call
+kept :: Int -> Real
+kept n = pyKeptTotal (sum (map (\i -> pyKeep (bigVec i)) (range 0 n)))
+
+--' Whether a large array arrives as a view (OWNDATA False)
+viewKind :: Int -> Str
+viewKind i = pyOwnsData (bigVec i)
+
+--' Total a stream file of Vector 3 Real read as a list in Python
+streamed :: [Vector 3 Real] -> Real
+streamed vs = pyTriplesTotal vs
+
+writeN :: OStream (Vector 3 Real) -> Int -> <IO> ()
+writeN o n = ? n == 0 = do
+    ()
+  : do
+    Ok _ <- @try (@write 0 o [triple n])
+    @flush o
+    writeN o (n - 1)
+
+--' Write n one-element batches of Vector 3 Real to a stream file
+makeTriples :: Int -> Str -> <IO> ()
+makeTriples n path = do
+  Ok o <- @open path
+  writeN o n
+  @close o
+  ()

@@ -1,0 +1,44 @@
+module main (pureLet, effectLet, computedArg)
+
+import root-py
+
+effect IO
+
+-- A closure that crosses into another pool may capture a let-bound value that
+-- is also sent to that pool as a packet. The closure captures the value
+-- itself, so it can be carried with the closure and handed back to its body.
+
+source Cpp from "helpers.hpp" ("cpp_bump" as bump)
+bump :: Str -> Int -> Int
+
+type Cpp => Int = "int"
+type Cpp => Str = "std::string"
+
+applyN :: (Int -> Int) -> Int -> Int
+applyN f n
+  ? n <= 0 = 0
+  : f n + applyN f (n - 1)
+
+pureLet :: Str -> Int
+pureLet p = let q = p <> "-x" in applyN (bump q) 3
+
+applyE :: (Int -> <IO> Int) -> Int -> <IO> Int
+applyE f n
+  ? n <= 0 = (do 0)
+  : do
+      c <- f n
+      r <- applyE f (n - 1)
+      c + r
+
+bumpE :: Str -> Int -> <IO> Int
+bumpE s x = do (bump s x)
+
+effectLet :: Str -> <IO> Int
+effectLet p = let q = p <> "-x" in applyE (bumpE q) 3
+
+-- the same through an argument the call computes
+recurseWith :: Str -> Int
+recurseWith p = applyN (bump p) 3
+
+computedArg :: Str -> Int
+computedArg p = recurseWith (p <> "-x")

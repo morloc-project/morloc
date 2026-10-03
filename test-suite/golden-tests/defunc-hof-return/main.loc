@@ -1,11 +1,7 @@
--- RED (known limitation): a function that RETURNS a function is passed to a
--- higher-order function whose parameter is itself a curried function type,
--- `(Int -> (Int -> Int))`. This is a valid higher-order pattern -- makeAndApply
--- builds a closure from its argument (g x) and applies it -- but the frontend
--- arity checker currently normalizes `Int -> (Int -> Int)` to a two-argument
--- function and rejects the match against the one-argument-returning-one-argument
--- parameter shape with "function arity mismatch". Expected result once the
--- curried-function-argument case is handled: roundtrip 4 -> 16.
+-- A function that returns a function, defined in morloc, is passed to a
+-- higher-order source whose parameter is written `(Int -> (Int -> Int))`: the
+-- source calls it with one argument and applies the closure that returns.
+-- roundtrip 4 -> 16.
 
 module main (roundtrip)
 

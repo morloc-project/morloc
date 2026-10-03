@@ -35,7 +35,7 @@ OVERALL_FAIL=0
 INIT_SHM=$(count_shm)
 INIT_TMP=$(count_tmp)
 
-for spec in "${SIZES[@]}"; do
+for spec in ${SIZES[@]+"${SIZES[@]}"}; do
     read -r OUTER STRLEN <<< "$spec"
     echo ""
     echo "--- size: outer=$OUTER  str_len=$STRLEN ---"
@@ -79,7 +79,7 @@ FINAL_TMP=$(( $(count_tmp) - INIT_TMP ))
 
 echo ""
 echo "=== summary ==="
-echo "leaked /dev/shm segments:  $FINAL_SHM"
+echo "leaked shared-memory segments:  $FINAL_SHM"
 echo "leaked /tmp/morloc.* dirs: $FINAL_TMP"
 if (( OVERALL_FAIL == 0 && FINAL_SHM == 0 && FINAL_TMP == 0 )); then
     echo "PASS"

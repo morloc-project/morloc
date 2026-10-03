@@ -8,39 +8,68 @@ License     : Apache-2.0
 Maintainer  : z@morloc.io
 
 Solves equality and constraint problems on Rec-kinded type expressions
-(column maps for Tables in the Stage 3 tables refactor). The canonical
-form is a pair of:
+(column schemas for Tables, and record field sets).
 
-- a Map from field name to field type (the ground fields)
-- an optional row-tail variable (the polymorphic tail)
+A Rec is an /ordered row/: a sequence of (field, type) pairs with pairwise
+distinct labels, interleaved with row variables standing for unknown blocks.
+Order is part of type identity, so @{a = Int, b = Str}@ and
+@{b = Str, a = Int}@ are distinct rows. They remain isomorphic -- a
+permutation converts either to the other -- but the conversion is explicit,
+never inserted by the solver.
 
-Decidability follows the rules in plans/tables/10-rec-solver-decidability.md:
+The deliberate omission is the scoped-labels swap rule
+(@{l1 | {l2 | r}} == {l2 | {l1 | r}}@ when @l1 /= l2@). Admitting it would
+quotient rows by permutation and collapse this into an unordered theory;
+omitting it is what makes column order observable and lets a signature
+describe where a column moves.
 
-- Equations between two ground-tail Recs solve by alignment.
-- Equations with one ground tail and one row-var tail solve the row var.
-- Equations with two row-var tails defer.
-- Union (@+@) requires disjoint keys; conflicts raise an error. Disjointness
-  involving a row-var tail defers as a Lacks constraint.
-- Difference (@-@) is a no-op when the named key is not in the Rec; this
-  enables the @((r - f) + f=a)@ construction idiom (memo 12).
-- Intersection (@&@) defers when either side has a row-var tail.
+The canonical form is a /sequence of segments/, not a block of fields with a
+trailing variable. A row variable can sit anywhere, because the rows that
+actually occur put it anywhere:
+
+@
+  {a = Int, b = Str}              [Ground [a, b]]
+  {a = Int | r}                   [Ground [a], Tail r]
+  r + {z = Real}                  [Tail r, Ground [z]]
+  l + {f = a} + r                 [Tail l, Ground [f], Tail r]
+@
+
+The third and fourth shapes are the ones the stdlib uses -- @setCol@ and
+@renameCol@ replace a column in place -- and a (fields, tail) pair cannot
+express them. Representing them as a prefix would move the ground block
+across the variable, which breaks the property an ordered theory rests on:
+normalizing and substituting must commute.
+
+Decidability. Matching walks the two segment sequences left to right:
+
+- A ground segment must align with the same fields, in the same order.
+- A row variable followed by a known label is pinned: the label occurs at
+  most once, so the split point is unique and the variable takes everything
+  before it.
+- A row variable at the end takes the remainder.
+- Two adjacent row variables are ambiguous, and defer.
 
 Type-level field types are 'TypeU' values. Per-field type unification is the
-responsibility of the calling typechecker - this solver only checks structural
-equality of the field set.
+responsibility of the calling typechecker -- this solver only checks
+structural equality of the field sequence.
 -}
 module Morloc.Typecheck.RecSolver
   ( RecExpr (..)
+  , RecSeg (..)
   , RecCanon (..)
+  , RecSolution (..)
   , RecError (..)
   , normalize
-  , recEqual
   , solveRec
   , isGround
+  , groundFields
   , freeRecVars
-  , canonToTypeU
+  , canonToRecExpr
+  , mkCanon
   ) where
 
+import Control.Monad (foldM)
+import Data.List (foldl')
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -59,19 +88,44 @@ data RecExpr
   | RecIntersect RecExpr RecExpr
   deriving (Eq, Ord, Show)
 
--- | Canonical form: a sorted Map of field-type pairs plus an optional
--- row-tail variable. Two RecExprs that normalize to the same RecCanon
--- represent the same row-polymorphic Rec.
-data RecCanon = RecCanon
-  { recFields :: !(Map Text TypeU)
-  , recTail   :: !(Maybe TVar)
-  } deriving (Eq, Ord, Show)
+-- | One run of a canonical row: a block of known fields in written order, or
+-- a row variable standing for an unknown block.
+data RecSeg
+  = RecGround ![(Text, TypeU)]
+  | RecTail !TVar
+  deriving (Eq, Ord, Show)
+
+-- | Canonical form: the segments of the row, left to right. Two RecExprs
+-- represent the same row exactly when they normalize to the same RecCanon,
+-- which includes agreeing on field order.
+--
+-- Invariant, established by 'mkCanon': no empty ground segment, and no two
+-- adjacent ground segments. Without it a row would have several canonical
+-- forms and 'Eq' would be wrong.
+newtype RecCanon = RecCanon { recSegs :: [RecSeg] }
+  deriving (Eq, Ord, Show)
+
+-- | What solving an equation produced: row-variable bindings, plus the
+-- field types that must agree. Aligning two rows is a structural question
+-- and this module answers only that; whether @Int@ matches an existential
+-- is the calling typechecker's business, so matched fields whose types are
+-- not already identical come back as obligations for it to discharge.
+data RecSolution = RecSolution
+  { recSubs     :: Map TVar RecExpr
+  , recFieldEqs :: [(TypeU, TypeU)]
+  } deriving (Eq, Show)
+
+instance Semigroup RecSolution where
+  RecSolution a x <> RecSolution b y = RecSolution (Map.union a b) (x <> y)
+
+instance Monoid RecSolution where
+  mempty = RecSolution Map.empty []
 
 -- | Errors from rec-solver attempts.
 data RecError
-  = -- | Two grounds disagree on a key's type, OR a Lacks constraint is
-    -- violated, OR a key set conflict in a strict union. Carries a short
-    -- diagnostic message.
+  = -- | Two rows disagree on a key, a key order, or a key's type; OR a
+    -- Lacks constraint is violated; OR a key set conflict in a strict union.
+    -- Carries a short diagnostic message.
     RecContradiction Text
     -- | The equation cannot be decided without more information; caller
     -- should defer the constraint.
@@ -81,59 +135,83 @@ data RecError
   | RecMalformed Text
   deriving (Eq, Show)
 
--- | Reduce a RecExpr to its canonical (RecCanon, ground?) form. Returns
--- Left on type-level conflicts (e.g. union of overlapping ground keys).
--- Returns Right RecCanon on successful normalization.
+-- | Build a canonical segment sequence: drop empty ground runs and merge
+-- adjacent ones, so that each row has exactly one canonical form.
+mkCanon :: [RecSeg] -> RecCanon
+mkCanon = RecCanon . foldr step []
+  where
+    step (RecGround []) acc = acc
+    step (RecGround a) (RecGround b : rest) = RecGround (a <> b) : rest
+    step seg acc = seg : acc
+
+-- | Reduce a RecExpr to its canonical (ordered) form. Returns Left on
+-- type-level conflicts (e.g. union of overlapping ground keys).
 normalize :: RecExpr -> Either RecError RecCanon
-normalize RecEmpty = Right (RecCanon Map.empty Nothing)
-normalize (RecVar v) = Right (RecCanon Map.empty (Just v))
+normalize RecEmpty = Right (mkCanon [])
+normalize (RecVar v) = Right (mkCanon [RecTail v])
 normalize (RecExtend k t rest) = do
-  RecCanon fs tl <- normalize rest
-  case Map.lookup k fs of
-    Just _ -> Left (RecContradiction $ "Duplicate field in Rec extension: " <> k)
-    Nothing -> Right (RecCanon (Map.insert k t fs) tl)
+  RecCanon segs <- normalize rest
+  -- The extension is the head of the spine, so it leads the sequence.
+  -- Only the known fields can be checked here; a duplicate hidden inside a
+  -- row variable is a Lacks obligation for the caller.
+  if any ((== k) . fst) (concatMap segFields segs)
+    then Left (RecContradiction $ "Duplicate field in Rec extension: " <> k)
+    else Right (mkCanon (RecGround [(k, t)] : segs))
 normalize (RecUnion a b) = do
-  RecCanon fa tla <- normalize a
-  RecCanon fb tlb <- normalize b
-  let overlap = Set.intersection (Map.keysSet fa) (Map.keysSet fb)
-  case (Set.null overlap, tla, tlb) of
-    (True, Nothing, Nothing) -> Right (RecCanon (Map.union fa fb) Nothing)
-    (True, Just t, Nothing) -> Right (RecCanon (Map.union fa fb) (Just t))
-    (True, Nothing, Just t) -> Right (RecCanon (Map.union fa fb) (Just t))
-    (True, Just _, Just _) -> Left RecDeferred
-    (False, _, _) ->
-      Left (RecContradiction $ "Rec union has overlapping keys: " <>
-            commaSep (Set.toList overlap))
+  RecCanon sa <- normalize a
+  RecCanon sb <- normalize b
+  let ka = keySet (concatMap segFields sa)
+      kb = keySet (concatMap segFields sb)
+      overlap = Set.intersection ka kb
+  if Set.null overlap
+    -- Concatenation, not merging: the left operand's segments lead. Two row
+    -- variables meeting here is representable; whether the result can be
+    -- solved is 'solveCanon''s problem, not normalization's.
+    then Right (mkCanon (sa <> sb))
+    else Left (RecContradiction $ "Rec union has overlapping keys: " <>
+               commaSep (Set.toList overlap))
 normalize (RecDiff a ks) = do
-  RecCanon fa tla <- normalize a
-  -- Per memo 10: removing an absent key is a no-op.
-  let fa' = foldr Map.delete fa ks
-  case tla of
-    Nothing -> Right (RecCanon fa' Nothing)
-    -- A row-tail variable could in principle contain one of the dropped
-    -- keys; we cannot resolve until the tail is solved. For Stage 3 we
-    -- leave the diff symbolic by carrying the tail; downstream Lacks
-    -- constraints record the dropped key set against the tail var.
-    Just _ -> Right (RecCanon fa' tla)
+  RecCanon sa <- normalize a
+  -- Removing an absent key is a no-op; the survivors keep their order. A row
+  -- variable could in principle hold one of the dropped keys, so the diff
+  -- stays symbolic over the tail; downstream Lacks constraints record the
+  -- dropped key set against it.
+  let drop_ = Set.fromList ks
+      keep (RecGround fs) = RecGround (filter (\(k, _) -> not (Set.member k drop_)) fs)
+      keep s = s
+  Right (mkCanon (map keep sa))
 normalize (RecIntersect a b) = do
-  RecCanon fa tla <- normalize a
-  RecCanon fb tlb <- normalize b
-  case (tla, tlb) of
-    (Nothing, Nothing) -> do
-      -- Both ground: take fields present in both with matching types.
-      let common = Map.intersectionWith (,) fa fb
-          shared = Map.mapMaybe (\(t1, t2) -> if t1 == t2 then Just t1 else Nothing) common
-          mismatched = Map.filterWithKey (\k _ -> Map.member k common && not (Map.member k shared)) fa
-      if Map.null mismatched
-        then Right (RecCanon shared Nothing)
+  ca <- normalize a
+  cb <- normalize b
+  case (groundFields ca, groundFields cb) of
+    (Just fa, Just fb) -> do
+      -- Both ground: keep the left operand's fields that appear in the right
+      -- at the same type, in the left operand's order.
+      let rhs = Map.fromList fb
+          shared = [(k, t) | (k, t) <- fa, Map.lookup k rhs == Just t]
+          mismatched = [k | (k, t) <- fa, maybe False (/= t) (Map.lookup k rhs)]
+      if null mismatched
+        then Right (mkCanon [RecGround shared])
         else Left (RecContradiction $ "Rec intersection has type mismatch on: " <>
-                   commaSep (Map.keys mismatched))
+                   commaSep mismatched)
     _ -> Left RecDeferred
 
--- | True iff the canonical Rec has no row-tail variable.
+segFields :: RecSeg -> [(Text, TypeU)]
+segFields (RecGround fs) = fs
+segFields (RecTail _) = []
+
+-- | The whole field sequence, when the row has no row variable.
+groundFields :: RecCanon -> Maybe [(Text, TypeU)]
+groundFields (RecCanon segs) = concat <$> traverse only segs
+  where
+    only (RecGround fs) = Just fs
+    only (RecTail _) = Nothing
+
+-- | True iff the canonical Rec has no row variable.
 isGround :: RecCanon -> Bool
-isGround (RecCanon _ Nothing) = True
-isGround _ = False
+isGround c = case groundFields c of
+  Just _ -> True
+  Nothing -> False
 
 -- | The free row-variables in a RecExpr.
 freeRecVars :: RecExpr -> Set.Set TVar
@@ -144,94 +222,146 @@ freeRecVars (RecUnion a b) = Set.union (freeRecVars a) (freeRecVars b)
 freeRecVars (RecDiff a _) = freeRecVars a
 freeRecVars (RecIntersect a b) = Set.union (freeRecVars a) (freeRecVars b)
 
--- | Equality on Rec expressions, after normalization.
-recEqual :: RecExpr -> RecExpr -> Bool
-recEqual a b = case (normalize a, normalize b) of
-  (Right ca, Right cb) -> ca == cb
-  _ -> False
-
 -- | Attempt to solve an equation @a == b@. Outcomes:
 --
--- - 'Right Map.empty': equation already satisfied (both sides equal after
---   normalization).
--- - 'Right subs': a row-tail variable was solved; subs maps it to a
---   RecExpr.
--- - 'Left RecContradiction msg': structural conflict (overlapping keys
---   in strict union, type mismatch on shared key in intersection, etc.).
+-- - 'Right': the rows align. The solution carries any row-variable
+--   bindings and any field types the caller must still unify.
+-- - 'Left RecContradiction msg': structural conflict (differing key sets,
+--   differing key order, overlapping keys in a strict union).
 -- - 'Left RecDeferred': cannot decide without more info; caller defers.
-solveRec :: RecExpr -> RecExpr -> Either RecError (Map TVar RecExpr)
+solveRec :: RecExpr -> RecExpr -> Either RecError RecSolution
 solveRec lhs rhs = do
   l <- normalize lhs
   r <- normalize rhs
   solveCanon l r
 
-solveCanon :: RecCanon -> RecCanon -> Either RecError (Map TVar RecExpr)
-solveCanon (RecCanon fa Nothing) (RecCanon fb Nothing)
-  -- Both ground tails: must have identical field maps.
-  | fa == fb = Right Map.empty
-  | Map.keysSet fa /= Map.keysSet fb =
+solveCanon :: RecCanon -> RecCanon -> Either RecError RecSolution
+solveCanon ca cb = case (groundFields ca, groundFields cb) of
+  (Just fa, Just fb) -> groundEq fa fb
+  -- One side is fully known: pin the other side's variables against it.
+  -- 'matchAgainst' emits each obligation as (segment side, known side), so
+  -- when the known side is the left operand the pairs come back reversed.
+  -- subtype is directional, so they have to be put back.
+  (Nothing, Just fb) -> matchAgainst (recSegs ca) fb
+  (Just fa, Nothing) -> flipEqs <$> matchAgainst (recSegs cb) fa
+  -- Both sides carry row variables. Link them when the shapes already agree;
+  -- anything else needs more information. Without the linking case two fresh
+  -- row variables introduced at different call sites would never connect,
+  -- and an obligation carrying r2 would stay separate from an assumption
+  -- carrying r1 even after the call equates them.
+  (Nothing, Nothing) -> linkSegs (recSegs ca) (recSegs cb)
+
+groundEq :: [(Text, TypeU)] -> [(Text, TypeU)] -> Either RecError RecSolution
+groundEq fa fb
+  | fa == fb = Right mempty
+  | keySet fa /= keySet fb =
       Left (RecContradiction $ "Rec key sets differ: " <>
-            keyDelta (Map.keysSet fa) (Map.keysSet fb))
+            keyDelta (keySet fa) (keySet fb))
+  | map fst fa /= map fst fb =
+      -- Same fields in a different order. These rows are isomorphic but not
+      -- equal; the caller must reorder explicitly.
+      Left (RecContradiction $ "Rec field order differs: " <>
+            commaSep (map fst fa) <> " versus " <> commaSep (map fst fb))
   | otherwise =
-      -- Same keys but at least one type differs. Per-field type
-      -- equality is checked here; cross-type unification (e.g. existential
-      -- propagation) belongs to the calling typechecker.
-      Left (RecContradiction $ "Rec field types differ for key(s): " <>
-            commaSep [k | (k, ta) <- Map.toList fa
-                        , Just tb <- [Map.lookup k fb]
-                        , ta /= tb])
-solveCanon (RecCanon fa (Just v)) (RecCanon fb Nothing)
-  -- LHS row var, RHS ground. The LHS fields must be a subset of RHS, and
-  -- v is solved to (RHS minus LHS fields).
-  | Map.isSubmapOfBy (==) fa fb =
-      let resid = Map.difference fb fa
-       in Right (Map.singleton v (canonToRecExpr (RecCanon resid Nothing)))
-  | otherwise =
-      Left (RecContradiction $ "Rec LHS extension exceeds RHS or has type mismatch: " <>
-            keyDelta (Map.keysSet fa) (Map.keysSet fb))
-solveCanon ca@(RecCanon _ Nothing) cb@(RecCanon _ (Just _)) =
-  -- Symmetric case
-  case solveCanon cb ca of
-    Right subs -> Right subs
-    Left e -> Left e
--- Both sides are pure row variables (no fixed fields). Unify them by
--- binding the RHS variable to the LHS variable (or no-op if same).
--- Without this, two distinct fresh row variables introduced at
--- different call sites would never get linked even when subtype tries
--- to equate them, breaking constraint propagation: an obligation
--- carrying r2 stays separate from an assumption carrying r1 even
--- after the function call links them.
-solveCanon (RecCanon fa (Just va)) (RecCanon fb (Just vb))
-  | Map.null fa && Map.null fb =
-      if va == vb
-      then Right Map.empty
-      else Right (Map.singleton vb (RecVar va))
-  | fa == fb =
-      if va == vb
-      then Right Map.empty
-      else Right (Map.singleton vb (RecVar va))
-  | otherwise = Left RecDeferred
+      -- Same keys in the same order. Any field whose types are not already
+      -- identical becomes an obligation: one of them may be an existential
+      -- that only the typechecker can solve.
+      Right mempty { recFieldEqs = [(ta, tb) | ((_, ta), (_, tb)) <- zip fa fb, ta /= tb] }
+
+-- | Walk a segment sequence against a fully known field sequence, solving
+-- each row variable from the fields it must span.
+matchAgainst :: [RecSeg] -> [(Text, TypeU)] -> Either RecError RecSolution
+matchAgainst = go mempty
+  where
+    go acc [] [] = Right acc
+    go _ [] leftover =
+      Left (RecContradiction $ "Rec has unmatched field(s): " <>
+            commaSep (map fst leftover))
+    go acc (RecGround fs : segs) target = do
+      (rest, eqs) <- alignPrefix fs target
+      go acc { recFieldEqs = recFieldEqs acc <> eqs } segs rest
+    -- A trailing row variable absorbs everything that is left.
+    go acc [RecTail v] target = bind acc v target
+    -- A row variable delimited on the right by a known label: the label is
+    -- unique, so the split is determined.
+    go acc (RecTail v : segs@(RecGround ((k, _) : _) : _)) target =
+      case break ((== k) . fst) target of
+        (_, []) ->
+          Left (RecContradiction $ "Rec is missing the field that pins a row \
+                                   \variable: " <> k)
+        (before, rest) -> do
+          acc' <- bind acc v before
+          go acc' segs rest
+    -- Two row variables in a row: the split between them is unconstrained.
+    go _ (RecTail _ : RecTail _ : _) _ = Left RecDeferred
+    go _ (RecTail _ : RecGround [] : _) _ = Left RecDeferred
+
+    bind acc v fs =
+      let sol = canonToRecExpr (mkCanon [RecGround fs])
+       in case Map.lookup v (recSubs acc) of
+            Just prior
+              | prior /= sol ->
+                  Left (RecContradiction $ "Row variable " <> unTVar v <>
+                        " is solved two different ways in one equation")
+            _ -> Right acc { recSubs = Map.insert v sol (recSubs acc) }
+
+-- | A known block must align with the same fields, in the same order.
+alignPrefix :: [(Text, TypeU)] -> [(Text, TypeU)]
+            -> Either RecError ([(Text, TypeU)], [(TypeU, TypeU)])
+alignPrefix [] rest = Right (rest, [])
+alignPrefix ((k, _) : _) [] =
+  Left (RecContradiction $ "Rec has no field left to match key: " <> k)
+alignPrefix ((k1, t1) : as) ((k2, t2) : bs)
+  | k1 /= k2 =
+      Left (RecContradiction $ "Rec field order differs: expected " <> k1 <>
+            " at this position, found " <> k2)
+  | otherwise = do
+      (rest, eqs) <- alignPrefix as bs
+      return (rest, if t1 == t2 then eqs else (t1, t2) : eqs)
+
+-- | Both sides still hold row variables. Only a structural match is decided
+-- here; anything else waits for one side to ground out.
+linkSegs :: [RecSeg] -> [RecSeg] -> Either RecError RecSolution
+linkSegs sa sb
+  | length sa /= length sb = Left RecDeferred
+  | otherwise = foldM step mempty (zip sa sb)
+  where
+    step acc (RecGround fa, RecGround fb)
+      -- Differing known blocks are not a contradiction: a row variable
+      -- elsewhere in the sequence can still absorb the difference.
+      | map fst fa == map fst fb =
+          Right acc { recFieldEqs = recFieldEqs acc <>
+                        [(ta, tb) | ((_, ta), (_, tb)) <- zip fa fb, ta /= tb] }
+      | otherwise = Left RecDeferred
+    step acc (RecTail va, RecTail vb)
+      | va == vb = Right acc
+      | otherwise = Right acc { recSubs = Map.insert vb (RecVar va) (recSubs acc) }
+    step _ _ = Left RecDeferred
 
 -- | Lift a canonical Rec back to a RecExpr (for substitution into TypeU).
+-- The sequence is rebuilt as-is: this function must never sort.
 canonToRecExpr :: RecCanon -> RecExpr
-canonToRecExpr (RecCanon fs tail_) =
-  let tailExpr = maybe RecEmpty RecVar tail_
-   in Map.foldrWithKey RecExtend tailExpr fs
-
--- | Lift a canonical Rec back to a TypeU. Iterated extension on the
--- optional tail variable (or RecEmptyU for ground records).
-canonToTypeU :: RecCanon -> TypeU
-canonToTypeU (RecCanon fs tail_) =
-  let tailType = maybe RecEmptyU RecVarU tail_
-   in Map.foldrWithKey RecExtendU tailType fs
+canonToRecExpr (RecCanon segs) = case segs of
+  [] -> RecEmpty
+  _ -> foldr1 RecUnion (map fromSeg segs)
+  where
+    fromSeg (RecTail v) = RecVar v
+    fromSeg (RecGround fs) = foldr (\(k, t) rest -> RecExtend k t rest) RecEmpty fs
 
 ----------------------------------------------------------------------
 -- Helpers
 ----------------------------------------------------------------------
 
+-- | Put field obligations back into the caller's argument order.
+flipEqs :: RecSolution -> RecSolution
+flipEqs sol = sol { recFieldEqs = [(b, a) | (a, b) <- recFieldEqs sol] }
+
+keySet :: [(Text, TypeU)] -> Set.Set Text
+keySet = Set.fromList . map fst
+
 commaSep :: [Text] -> Text
-commaSep = Map.foldrWithKey (\_ b acc -> if acc == "" then b else b <> ", " <> acc) ""
-         . Map.fromList . zip [(0 :: Int) ..]
+commaSep [] = ""
+commaSep (x : xs) = foldl' (\acc b -> acc <> ", " <> b) x xs
 
 keyDelta :: Set.Set Text -> Set.Set Text -> Text
 keyDelta a b =

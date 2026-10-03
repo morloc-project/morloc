@@ -118,6 +118,7 @@ data LangDescriptor = LangDescriptor
     ldSerializeFn :: !Text -- "morloc.put_value" or "morloc_put_value"
   , ldDeserializeFn :: !Text -- "morloc.get_value" or "morloc_get_value"
   , ldReleasePacketFn :: !Text -- "morloc.release_packet_shm" or equivalent
+  , ldOwnedArgFn :: !Text -- wraps a packet made for one call's argument list so it is released once the call returns; "" where the language cannot scope it
   , -- Intrinsic function prefix (for mlc_show, mlc_hash, etc.)
     ldIntrinsicPrefix :: !Text -- "morloc." or "morloc_" or "MorlocRuntime."
   , -- Prefix for codegen-emitted helper variable names. Used to keep
@@ -156,6 +157,10 @@ data LangDescriptor = LangDescriptor
     -- True; languages where strings are NUL-terminated by convention
     -- (C) or whose stdlib refuses NUL strings (R) set it to False.
     ldAllowStringNull :: !Bool
+  , -- True when the language passes an argument unevaluated and runs it only
+    -- when the callee first reads it (R's promises). Morloc calls by value,
+    -- so each computed argument is bound to a local before its call.
+    ldLazyArgs :: !Bool
   , -- External codegen (optional)
     ldCodegenCommand :: !(Maybe Text) -- e.g. "morloc-codegen-generic"
   , -- Converter from an Arrow record batch to a module's mapped table type
@@ -306,6 +311,7 @@ instance Y.FromJSON LangDescriptor where
             . maybe id (ins "ldIsCompiled") isCompiledVal
             . maybe id (setK "ldAllowStringNull") allowNullVal
             . ins "ldAllowStringNull" (Y.Bool True)
+            . ins "ldLazyArgs" (Y.Bool False)
             . ins "ldCodegenCommand" Y.Null
             . ins "ldTableImportFn" Y.Null
             . ins "ldRealPosInf" (Y.String "")
@@ -316,6 +322,7 @@ instance Y.FromJSON LangDescriptor where
             . ins "ldHelperVarPrefix" (Y.String "__morloc_")
             . ins "ldRemoteCallFn" (Y.String "")
             . ins "ldReleasePacketFn" (Y.String "morloc.release_packet_shm")
+            . ins "ldOwnedArgFn" (Y.String "")
             . ins "ldDictStyleRecords" (Y.Bool False)
             . ins "ldEnumLitByName" (Y.Bool False)
             . ins "ldQuoteRecordKeys" (Y.Bool True)
@@ -402,6 +409,7 @@ defaultLangDescriptor name ext =
     , ldSerializeFn = "morloc.put_value"
     , ldDeserializeFn = "morloc.get_value"
     , ldReleasePacketFn = "morloc.release_packet_shm"
+    , ldOwnedArgFn = ""
     , ldIntrinsicPrefix = ""
     , ldHelperVarPrefix = "__morloc_"
     , ldForeignCallFn = "morloc.foreign_call"
@@ -419,6 +427,7 @@ defaultLangDescriptor name ext =
     , ldRunCommand = []
     , ldIsCompiled = False
     , ldAllowStringNull = True
+    , ldLazyArgs = False
     , ldCodegenCommand = Nothing
     , ldTableImportFn = Nothing
     , -- Template fields

@@ -4,3 +4,5 @@ true
 false
 true
 false
+0
+1

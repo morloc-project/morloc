@@ -32,6 +32,9 @@ pub enum OutputFormat {
     /// Apache Parquet file. Only valid for commands whose return type is a
     /// Table.
     Parquet,
+    /// Tab-separated values. Same writer as Csv with a different
+    /// delimiter. Only valid for commands whose return type is a Table.
+    Tsv,
     /// CSV (comma-separated). Header row from the column schema. Only
     /// valid for commands whose return type is a Table.
     Csv,
@@ -110,6 +113,10 @@ pub struct NexusConfig {
     /// zstd compression preset for packets written to --output-file
     /// (output-form packet). 0 = no compression.
     pub compression_level: u8,
+    /// `-z` as given, or `None` when it was not. A stream written to
+    /// stdout is compressed by the pool at its `@write` level unless this
+    /// overrides it; published to pools as `MORLOC_STDOUT_COMPRESSION_LEVEL`.
+    pub stdout_compression: Option<u8>,
     /// Front-end serving: the UNION of all served modules (the supervisor spawns
     /// one child per entry). Empty + `serve_all` = serve everything under fdb;
     /// empty + !serve_all = error (which modules to serve is a decision).
@@ -118,11 +125,29 @@ pub struct NexusConfig {
     pub mcp_programs: Vec<String>,
     /// Modules exposed over the JSON API adapter (/call). Subset of `programs`.
     pub api_programs: Vec<String>,
+    /// The part this process plays in a multi-output run, if any.
+    pub child: ChildMode,
+}
+
+/// The part a nexus process plays in a multi-output run (see
+/// `orchestrate`). A child writes where its parent pointed it and ignores
+/// `-o`, whose file it already holds as fd 1.
+#[derive(Clone, Debug, Default)]
+pub enum ChildMode {
+    #[default]
+    None,
+    /// Run the parent command once, saving its output (and the arguments
+    /// the actions refer to) under `dir`; with `tee`, also write the output
+    /// to stdout as an ordinary run would.
+    Stage { dir: String, args: Vec<usize>, tee: bool },
+    /// Run one internal command on packet files.
+    Replay { cmd: String, inputs: Vec<String> },
 }
 
 impl Default for NexusConfig {
     fn default() -> Self {
         NexusConfig {
+            child: ChildMode::None,
             print_flag: false,
             keep_null: false,
             packet_path: None,
@@ -152,6 +177,7 @@ impl Default for NexusConfig {
             debug_cache_max: None,
             debug_recursion_cap: None,
             compression_level: 0,
+            stdout_compression: None,
             programs: Vec::new(),
             mcp_programs: Vec::new(),
             api_programs: Vec::new(),
@@ -358,6 +384,10 @@ pub fn dispatch_command_parsed(
             for (i, av) in parsed_args.iter().enumerate() {
                 let payload = match av {
                     ArgValue::Value(s) => Some(s.as_str()),
+                    ArgValue::Embed { value, .. } | ArgValue::AsParent { value, .. } => match value.as_ref() {
+                        ArgValue::Value(s) => Some(s.as_str()),
+                        _ => None,
+                    },
                     _ => None,
                 };
                 if let Some(s) = payload {
@@ -375,7 +405,7 @@ pub fn dispatch_command_parsed(
                 }
             }
         }
-        run_remote_command(cmd, &parsed_args, sockets, config);
+        run_remote_command(cmd, &parsed_args, sockets, config, manifest);
     }
 }
 
@@ -863,6 +893,19 @@ pub enum ArgValue {
         fields: Vec<Option<String>>,
         defaults: Vec<Option<String>>,
     },
+    /// JSON text sent as is: no shape, check or quoting applies.
+    Json(String),
+    /// An argument read by one of its `@parse` formats: the format's index,
+    /// the path handed to the handler (`-` replaced by `/dev/stdin`), and the
+    /// path as the user wrote it. Rewritten into the parse entry's slots
+    /// before dispatch.
+    Parsed { format: usize, path: String, shown: String },
+    /// An argument of a `@parse` entry that no format read: `value` is loaded
+    /// as argument `arg` of command `parent` and sent as its packet's bytes.
+    Embed { value: Box<ArgValue>, parent: usize, arg: usize },
+    /// An argument of a `@parse` entry read as argument `arg` of command
+    /// `parent`, whose definition carries its source, form and checks.
+    AsParent { value: Box<ArgValue>, parent: usize, arg: usize },
     /// Variadic argument: the user supplied N tokens that the C-side
     /// `parse_cli_data_argument_list` will assemble into a single
     /// list packet. `literal` is the `literal: true` flag -- when
@@ -961,6 +1004,7 @@ fn run_remote_command(
     args: &[ArgValue],
     sockets: &[PoolSocket],
     config: &NexusConfig,
+    manifest: &Manifest,
 ) {
     use morloc_runtime_types::packet;
     use morloc_runtime_types::schema::parse_schema;
@@ -971,15 +1015,6 @@ fn run_remote_command(
     // (`parse_cli_data_argument` / `..._shaped`) is encapsulated in
     // `dispatch_one_arg`.
     extern "C" {
-        fn parse_cli_data_argument_list(
-            dest: *mut u8,
-            args: *const *const std::ffi::c_void,
-            n: usize,
-            list_schema: *const morloc_runtime_types::cschema::CSchema,
-            errmsg: *mut *mut std::ffi::c_char,
-        ) -> *mut u8;
-        fn initialize_positional(value: *mut std::ffi::c_char) -> *mut std::ffi::c_void;
-        fn free_argument_t(arg: *mut std::ffi::c_void);
         fn morloc_packet_size(packet: *const u8, errmsg: *mut *mut std::ffi::c_char) -> usize;
         fn make_morloc_local_call_packet(
             midx: u32, arg_packets: *const *const u8, nargs: usize,
@@ -1014,6 +1049,236 @@ fn run_remote_command(
     // schema, so we mirror that to keep the wire format consistent.
     let mut arg_packets: Vec<(*mut u8, usize)> = Vec::new();
     for (i, (arg_val, arg_def)) in args.iter().zip(cmd.args.iter()).enumerate() {
+        let c_pkt = build_arg_packet(i, arg_val, arg_def, manifest);
+        let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
+        let pkt_size = unsafe { morloc_packet_size(c_pkt, &mut errmsg) };
+        if !link_ifile_arg(i, arg_val, arg_def) {
+            crate::stage::save_arg(&cmd.name, i, c_pkt, pkt_size);
+        }
+        arg_packets.push((c_pkt, pkt_size));
+    }
+
+    // Build call packet via C library
+    let arg_ptrs: Vec<*const u8> = arg_packets.iter().map(|(p, _)| *p as *const u8).collect();
+    let mut errmsg_call: *mut std::ffi::c_char = std::ptr::null_mut();
+    let c_call = unsafe {
+        make_morloc_local_call_packet(cmd.mid, arg_ptrs.as_ptr(), arg_packets.len(), &mut errmsg_call)
+    };
+    for (p, _) in &arg_packets {
+        unsafe { libc::free(*p as *mut std::ffi::c_void) };
+    }
+    arg_packets.clear();
+    if c_call.is_null() {
+        eprintln!("Error: failed to create call packet");
+        process::clean_exit(1);
+    }
+
+    let call_size = unsafe {
+        let mut e: *mut std::ffi::c_char = std::ptr::null_mut();
+        morloc_packet_size(c_call, &mut e)
+    };
+    let call_slice: &[u8] = unsafe { std::slice::from_raw_parts(c_call, call_size) };
+
+    // Send to pool and receive response
+    let mut stream = match UnixStream::connect(&socket.socket_path) {
+        Ok(s) => s,
+        Err(e) => {
+            unsafe { libc::free(c_call as *mut std::ffi::c_void) };
+            die_with_pool_error(
+                socket,
+                cmd.pool_index,
+                &format!("failed to connect to pool '{}'", socket.lang),
+                &e,
+            );
+        }
+    };
+
+    if let Err(e) = stream.write_all(call_slice) {
+        unsafe { libc::free(c_call as *mut std::ffi::c_void) };
+        die_with_pool_error(
+            socket,
+            cmd.pool_index,
+            &format!("failed to send call packet to pool '{}'", socket.lang),
+            &e,
+        );
+    }
+    unsafe { libc::free(c_call as *mut std::ffi::c_void) };
+
+    // Read response header, then the rest directly into the final buffer.
+    let mut hdr = [0u8; 32];
+    if let Err(e) = stream.read_exact(&mut hdr) {
+        die_with_pool_error(
+            socket,
+            cmd.pool_index,
+            &format!(
+                "failed to read response header from pool '{}' while running '{}' (mid={})",
+                socket.lang, cmd.name, cmd.mid
+            ),
+            &e,
+        );
+    }
+
+    let resp_header = match packet::PacketHeader::from_bytes(&hdr) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("Error: invalid response packet: {}", e);
+            process::clean_exit(1);
+        }
+    };
+
+    let offset = { resp_header.offset } as usize;
+    let length = { resp_header.length } as usize;
+    let remaining = offset + length;
+    let mut full_packet = vec![0u8; 32 + remaining];
+    full_packet[..32].copy_from_slice(&hdr);
+    if remaining > 0 {
+        if let Err(e) = stream.read_exact(&mut full_packet[32..]) {
+            die_with_pool_error(
+                socket,
+                cmd.pool_index,
+                &format!("failed to read response body from pool '{}'", socket.lang),
+                &e,
+            );
+        }
+    }
+
+    // Check for error
+    match packet::get_error_message(&full_packet) {
+        Ok(Some(err_msg)) => {
+            if let Some(report) = crate::parse_arg::failure_report(&err_msg) {
+                crate::runlog::record_error(&report);
+                eprintln!("{}", report);
+                process::clean_exit(1);
+            }
+            // The "run failed\n" prefix is stripped from the recorded
+            // form -- consumers want the foreign traceback in summary
+            // .json's `error` field, not the morloc-level wrapper.
+            let collapsed = collapse_duplicate_lines(&err_msg);
+            crate::runlog::record_error(&collapsed);
+            eprintln!("Error: run failed\n{}", collapsed);
+            process::clean_exit(1);
+        }
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("Error: failed to parse response: {}", e);
+            process::clean_exit(1);
+        }
+    }
+
+    // Extract and print via C library for correct voidstar handling
+    let c_schema = morloc_runtime_types::cschema::CSchema::from_rust(&return_schema);
+    let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
+    let result_ptr = unsafe {
+        get_morloc_data_packet_value(full_packet.as_ptr(), c_schema, &mut errmsg)
+    };
+    if result_ptr.is_null() {
+        let msg = process::take_c_errmsg(errmsg)
+            .unwrap_or_else(|| "unknown error".into());
+        eprintln!("Error: failed to extract result: {}", msg);
+        unsafe { morloc_runtime_types::cschema::CSchema::free(c_schema) };
+        process::clean_exit(1);
+    }
+
+    die_on_top_level_err(result_ptr, &return_schema, c_schema);
+
+    // A table-typed result is a block whatever packet form carried it
+    // (a reference, or a file a cached result was read back from).
+    let is_arrow = return_schema.serial_type == morloc_runtime_types::schema::SerialType::Table;
+
+    // Print using the C library for correct output. Top-level null-ish
+    // suppression (Unit and Optional-None producing empty stdout) is
+    // applied uniformly: JSON drops the output; `-f packet` skips its
+    // trailing DATA_PACKET emission so a program that streams through
+    // `@stdout` and returns Unit doesn't get a phantom packet appended
+    // past its stream footer. `--keep-null` overrides in both cases.
+    print_result_c(result_ptr, c_schema, &full_packet, is_arrow, config);
+
+    // A result that arrived in shared memory came with a reference taken on
+    // this process's behalf, and one extracted from an inline packet was
+    // materialized here; either way the block is ours once it has been
+    // rendered. The process exits shortly after, so this reclaims little --
+    // but a receiver that keeps what it was handed is the contract every
+    // other consumer follows.
+    unsafe {
+        let mut ferr: *mut std::ffi::c_char = std::ptr::null_mut();
+        shfree(result_ptr as *mut std::ffi::c_void, &mut ferr);
+        if !ferr.is_null() {
+            libc::free(ferr as *mut std::ffi::c_void);
+        }
+    }
+    unsafe { morloc_runtime_types::cschema::CSchema::free(c_schema) };
+}
+
+/// Build argument `i`'s packet from its CLI value, reading the value as
+/// `arg_def` describes. Exits with a diagnostic when the value cannot be read.
+/// Save parent argument `i` (0-based) when it is an `IFile` given by path,
+/// as a link to the file (see `stage::link_parent_arg`). Returns whether it
+/// was one.
+fn link_ifile_arg(i: usize, arg_val: &ArgValue, arg_def: &crate::manifest::Arg) -> bool {
+    match (arg_val, arg_def.general_schema_str()) {
+        (ArgValue::Value(token), Some("F")) => {
+            // A quoted argument holds its path as a JSON string.
+            let path = serde_json::from_str::<String>(token).unwrap_or_else(|_| token.clone());
+            crate::stage::link_parent_arg(i, &path);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Save a parent-layout argument packet at the parent's position `arg`
+/// (0-based) in a stage. No-op outside one.
+fn save_parent_packet(arg: usize, pkt: *mut u8) {
+    extern "C" {
+        fn morloc_packet_size(packet: *const u8, errmsg: *mut *mut std::ffi::c_char) -> usize;
+    }
+    if pkt.is_null() || crate::stage::arg_target(arg + 1).is_none() {
+        return;
+    }
+    let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
+    let size = unsafe { morloc_packet_size(pkt, &mut errmsg) };
+    if let Some(msg) = process::take_c_errmsg(errmsg) {
+        crate::runlog::die_with_error(&format!("saving argument {}: {}", arg + 1, msg));
+    }
+    crate::stage::save_parent_arg(arg, pkt, size);
+}
+
+fn build_arg_packet(
+    i: usize,
+    arg_val: &ArgValue,
+    arg_def: &crate::manifest::Arg,
+    manifest: &Manifest,
+) -> *mut u8 {
+    use morloc_runtime_types::schema::parse_schema;
+    extern "C" {
+        fn parse_cli_data_argument_list(
+            dest: *mut u8,
+            args: *const *const std::ffi::c_void,
+            n: usize,
+            list_schema: *const morloc_runtime_types::cschema::CSchema,
+            errmsg: *mut *mut std::ffi::c_char,
+        ) -> *mut u8;
+        fn initialize_positional(value: *mut std::ffi::c_char) -> *mut std::ffi::c_void;
+        fn free_argument_t(arg: *mut std::ffi::c_void);
+        fn morloc_packet_size(packet: *const u8, errmsg: *mut *mut std::ffi::c_char) -> usize;
+        fn make_data_packet_from_mpk(
+            mpk: *const std::ffi::c_char,
+            mpk_size: usize,
+            schema: *const morloc_runtime_types::cschema::CSchema,
+        ) -> *mut u8;
+    }
+    // Read as the parent command's argument, whose definition carries the
+    // shape; the entry's own slot names the same type.
+    // Either way the parent's own packet is built, and saved at the parent's
+    // position for an action that refers to it.
+    if let ArgValue::AsParent { value, parent, arg } = arg_val {
+        let parent_def = &manifest.commands[*parent].args[*arg];
+        let pkt = build_arg_packet(i, value, parent_def, manifest);
+        if !link_ifile_arg(*arg, value, parent_def) {
+            save_parent_packet(*arg, pkt);
+        }
+        return pkt;
+    }
         let schema_str = arg_def.schema_str().unwrap_or("b");
         let schema = match parse_schema(schema_str) {
             Ok(s) => s,
@@ -1046,6 +1311,28 @@ fn run_remote_command(
             }
         }
         let c_pkt = match arg_val {
+            ArgValue::Json(text) => unsafe { json_arg_packet(text, c_schema, &mut errmsg) },
+            ArgValue::Embed { value, parent, arg } => {
+                // The argument is loaded exactly as the parent command loads
+                // it, and its packet travels as a `[U8]` for the entry to decode.
+                let parent_def = &manifest.commands[*parent].args[*arg];
+                let inner = build_arg_packet(i, value, parent_def, manifest);
+                if !link_ifile_arg(*arg, value, parent_def) {
+                    save_parent_packet(*arg, inner);
+                }
+                let mut size_err: *mut std::ffi::c_char = std::ptr::null_mut();
+                let size = unsafe { morloc_packet_size(inner, &mut size_err) };
+                if let Some(msg) = process::take_c_errmsg(size_err) {
+                    crate::runlog::die_with_error(&format!("failed to parse argument #{}: {}", i, msg));
+                }
+                let mpk = msgpack_u8_array(unsafe { std::slice::from_raw_parts(inner, size) });
+                unsafe { libc::free(inner as *mut std::ffi::c_void) };
+                unsafe { make_data_packet_from_mpk(mpk.as_ptr() as *const std::ffi::c_char, mpk.len(), c_schema) }
+            }
+            ArgValue::AsParent { .. } => unreachable!("handled before any schema work"),
+            ArgValue::Parsed { .. } => {
+                unreachable!("a parsed argument is rewritten for the parse entry before dispatch")
+            }
             ArgValue::Many { tokens, literal } => unsafe {
                 let (toks_ref, lit) = match &many_override {
                     Some((rt, lit)) => (rt.as_slice(), *lit),
@@ -1192,154 +1479,47 @@ fn run_remote_command(
             crate::runlog::die_with_error(&format!("failed to parse argument #{}: {}", i, msg));
         }
 
-        let pkt_size = unsafe { morloc_packet_size(c_pkt, &mut errmsg) };
-        arg_packets.push((c_pkt, pkt_size));
-    }
+    c_pkt
+}
 
-    // Build call packet via C library
-    let arg_ptrs: Vec<*const u8> = arg_packets.iter().map(|(p, _)| *p as *const u8).collect();
-    let mut errmsg_call: *mut std::ffi::c_char = std::ptr::null_mut();
-    let c_call = unsafe {
-        make_morloc_local_call_packet(cmd.mid, arg_ptrs.as_ptr(), arg_packets.len(), &mut errmsg_call)
-    };
-    for (p, _) in &arg_packets {
-        unsafe { libc::free(*p as *mut std::ffi::c_void) };
+/// `bytes` as a msgpack array of unsigned integers, the `[U8]` wire value.
+fn msgpack_u8_array(bytes: &[u8]) -> Vec<u8> {
+    let n = bytes.len();
+    let mut out = Vec::with_capacity(5 + 2 * n);
+    if n < 16 {
+        out.push(0x90 | n as u8);
+    } else if n <= u16::MAX as usize {
+        out.push(0xdc);
+        out.extend_from_slice(&(n as u16).to_be_bytes());
+    } else {
+        out.push(0xdd);
+        out.extend_from_slice(&(n as u32).to_be_bytes());
     }
-    arg_packets.clear();
-    if c_call.is_null() {
-        eprintln!("Error: failed to create call packet");
-        process::clean_exit(1);
-    }
-
-    let call_size = unsafe {
-        let mut e: *mut std::ffi::c_char = std::ptr::null_mut();
-        morloc_packet_size(c_call, &mut e)
-    };
-    let call_slice: &[u8] = unsafe { std::slice::from_raw_parts(c_call, call_size) };
-
-    // Send to pool and receive response
-    let mut stream = match UnixStream::connect(&socket.socket_path) {
-        Ok(s) => s,
-        Err(e) => {
-            unsafe { libc::free(c_call as *mut std::ffi::c_void) };
-            die_with_pool_error(
-                socket,
-                cmd.pool_index,
-                &format!("failed to connect to pool '{}'", socket.lang),
-                &e,
-            );
+    for &b in bytes {
+        if b >= 0x80 {
+            out.push(0xcc);
         }
-    };
-
-    if let Err(e) = stream.write_all(call_slice) {
-        unsafe { libc::free(c_call as *mut std::ffi::c_void) };
-        die_with_pool_error(
-            socket,
-            cmd.pool_index,
-            &format!("failed to send call packet to pool '{}'", socket.lang),
-            &e,
-        );
+        out.push(b);
     }
-    unsafe { libc::free(c_call as *mut std::ffi::c_void) };
+    out
+}
 
-    // Read response header, then the rest directly into the final buffer.
-    let mut hdr = [0u8; 32];
-    if let Err(e) = stream.read_exact(&mut hdr) {
-        die_with_pool_error(
-            socket,
-            cmd.pool_index,
-            &format!(
-                "failed to read response header from pool '{}' while running '{}' (mid={})",
-                socket.lang, cmd.name, cmd.mid
-            ),
-            &e,
-        );
+/// A packet for JSON text read with no shape: the value is already what the
+/// pool receives, so no check, quoting or source classification applies.
+unsafe fn json_arg_packet(
+    text: &str,
+    c_schema: *mut morloc_runtime_types::cschema::CSchema,
+    errmsg: &mut *mut std::ffi::c_char,
+) -> *mut u8 {
+    extern "C" {
+        fn initialize_positional(value: *mut std::ffi::c_char) -> *mut std::ffi::c_void;
+        fn free_argument_t(arg: *mut std::ffi::c_void);
     }
-
-    let resp_header = match packet::PacketHeader::from_bytes(&hdr) {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("Error: invalid response packet: {}", e);
-            process::clean_exit(1);
-        }
-    };
-
-    let offset = { resp_header.offset } as usize;
-    let length = { resp_header.length } as usize;
-    let remaining = offset + length;
-    let mut full_packet = vec![0u8; 32 + remaining];
-    full_packet[..32].copy_from_slice(&hdr);
-    if remaining > 0 {
-        if let Err(e) = stream.read_exact(&mut full_packet[32..]) {
-            die_with_pool_error(
-                socket,
-                cmd.pool_index,
-                &format!("failed to read response body from pool '{}'", socket.lang),
-                &e,
-            );
-        }
-    }
-
-    // Check for error
-    match packet::get_error_message(&full_packet) {
-        Ok(Some(err_msg)) => {
-            // The "run failed\n" prefix is stripped from the recorded
-            // form -- consumers want the foreign traceback in summary
-            // .json's `error` field, not the morloc-level wrapper.
-            let collapsed = collapse_duplicate_lines(&err_msg);
-            crate::runlog::record_error(&collapsed);
-            eprintln!("Error: run failed\n{}", collapsed);
-            process::clean_exit(1);
-        }
-        Ok(None) => {}
-        Err(e) => {
-            eprintln!("Error: failed to parse response: {}", e);
-            process::clean_exit(1);
-        }
-    }
-
-    // Extract and print via C library for correct voidstar handling
-    let c_schema = morloc_runtime_types::cschema::CSchema::from_rust(&return_schema);
-    let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
-    let result_ptr = unsafe {
-        get_morloc_data_packet_value(full_packet.as_ptr(), c_schema, &mut errmsg)
-    };
-    if result_ptr.is_null() {
-        let msg = process::take_c_errmsg(errmsg)
-            .unwrap_or_else(|| "unknown error".into());
-        eprintln!("Error: failed to extract result: {}", msg);
-        unsafe { morloc_runtime_types::cschema::CSchema::free(c_schema) };
-        process::clean_exit(1);
-    }
-
-    die_on_top_level_err(result_ptr, &return_schema, c_schema);
-
-    // A table-typed result is a block whatever packet form carried it
-    // (a reference, or a file a cached result was read back from).
-    let is_arrow = return_schema.serial_type == morloc_runtime_types::schema::SerialType::Table;
-
-    // Print using the C library for correct output. Top-level null-ish
-    // suppression (Unit and Optional-None producing empty stdout) is
-    // applied uniformly: JSON drops the output; `-f packet` skips its
-    // trailing DATA_PACKET emission so a program that streams through
-    // `@stdout` and returns Unit doesn't get a phantom packet appended
-    // past its stream footer. `--keep-null` overrides in both cases.
-    print_result_c(result_ptr, c_schema, &full_packet, is_arrow, config);
-
-    // A result that arrived in shared memory came with a reference taken on
-    // this process's behalf, and one extracted from an inline packet was
-    // materialized here; either way the block is ours once it has been
-    // rendered. The process exits shortly after, so this reclaims little --
-    // but a receiver that keeps what it was handed is the contract every
-    // other consumer follows.
-    unsafe {
-        let mut ferr: *mut std::ffi::c_char = std::ptr::null_mut();
-        shfree(result_ptr as *mut std::ffi::c_void, &mut ferr);
-        if !ferr.is_null() {
-            libc::free(ferr as *mut std::ffi::c_void);
-        }
-    }
-    unsafe { morloc_runtime_types::cschema::CSchema::free(c_schema) };
+    let json_c = std::ffi::CString::new(text).unwrap();
+    let c_arg = initialize_positional(json_c.as_ptr() as *mut std::ffi::c_char);
+    let pkt = dispatch_one_arg(None, c_arg, c_schema, errmsg);
+    free_argument_t(c_arg);
+    pkt
 }
 
 /// A top-level `Err` arm is a failed run, not a successful result that
@@ -1415,6 +1595,10 @@ pub(crate) fn print_result_c(
             data: *const std::ffi::c_void,
             errmsg: *mut *mut std::ffi::c_char,
         ) -> i32;
+        fn print_arrow_as_jsonl(
+            data: *const std::ffi::c_void,
+            errmsg: *mut *mut std::ffi::c_char,
+        ) -> i32;
         fn pack_with_schema(
             mlc: *const std::ffi::c_void,
             schema: *const morloc_runtime_types::cschema::CSchema,
@@ -1425,6 +1609,17 @@ pub(crate) fn print_result_c(
     }
 
     use morloc_runtime_types::{PRINT_RESULT_OK, PRINT_RESULT_PIPE_CLOSED};
+
+    // A command that streamed to stdout and then returns a value prints the
+    // completed stream first.
+    crate::stdio_server::finish_stdout();
+
+    // A stage saves the result for the actions, and prints it only when
+    // stdout wants the command's own output.
+    crate::stage::save_value(full_packet, ptr, schema);
+    if !crate::stage::stdout_on() {
+        process::clean_exit(0);
+    }
 
     let mut errmsg: *mut std::ffi::c_char = std::ptr::null_mut();
 
@@ -1616,6 +1811,24 @@ pub(crate) fn print_result_c(
             }
         }
         OutputFormat::Jsonl => {
+            // A table is row-shaped, so JSON-lines is its natural form:
+            // one row object per line. Without this the generic voidstar
+            // printer is handed a table and reports that it cannot render
+            // one to JSON.
+            if is_arrow {
+                let rc = unsafe { print_arrow_as_jsonl(ptr as *const std::ffi::c_void, &mut errmsg) };
+                match rc {
+                    PRINT_RESULT_OK => {}
+                    PRINT_RESULT_PIPE_CLOSED => process::exit_broken_pipe(),
+                    _ => {
+                        let msg = process::take_c_errmsg(errmsg)
+                            .unwrap_or_else(|| "unknown error".into());
+                        eprintln!("Error: {}", msg);
+                        process::clean_exit(1);
+                    }
+                }
+                return;
+            }
             // A top-level Unit/None return carries no data. Suppress it
             // (as JSON and Packet already do) so a command that streams
             // its output through @stdout and returns () doesn't get a
@@ -1688,12 +1901,12 @@ pub(crate) fn print_result_c(
                 }
             }
         }
-        OutputFormat::Arrow | OutputFormat::Parquet | OutputFormat::Csv => {
+        OutputFormat::Arrow | OutputFormat::Parquet | OutputFormat::Csv | OutputFormat::Tsv => {
             // Table-only output formats: the result is a table block,
             // serialized from there.
             if !is_arrow {
                 eprintln!(
-                    "Error: --format=arrow|parquet|csv requires a Table return type"
+                    "Error: --format=arrow|parquet|csv|tsv requires a Table return type"
                 );
                 process::clean_exit(1);
             }
@@ -1728,6 +1941,9 @@ pub(crate) fn print_result_c(
                     ),
                     OutputFormat::Parquet => write_parquet_to_buffer(
                         ptr as *const std::ffi::c_void, &mut buf, &mut len, &mut err,
+                    ),
+                    OutputFormat::Tsv => write_csv_to_buffer(
+                        ptr as *const std::ffi::c_void, b'\t', &mut buf, &mut len, &mut err,
                     ),
                     OutputFormat::Csv => write_csv_to_buffer(
                         ptr as *const std::ffi::c_void, b',', &mut buf, &mut len, &mut err,
@@ -1930,7 +2146,11 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
                     ArgValue::Value(s) => (s.clone(), ArgShape::from_arg(arg_def)),
                     ArgValue::Null => ("null".to_string(), None),
                     ArgValue::Group { .. } => ("null".to_string(), None),
+                    ArgValue::Json(text) => (text.clone(), None),
                     ArgValue::Many { .. } => unreachable!(),
+                    // A `@parse` entry always runs in a pool: the compiler
+                    // rejects one that would be evaluated here.
+                    ArgValue::Parsed { .. } | ArgValue::Embed { .. } | ArgValue::AsParent { .. } => unreachable!(),
                 };
                 let raw_str = if schema_is_float_scalar(schema_str) {
                     maybe_float_special_to_json(&raw_str).unwrap_or(raw_str)
@@ -1956,6 +2176,15 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
             crate::runlog::die_with_error(&format!("failed to parse argument #{}: {}", i, msg));
         }
 
+        if crate::stage::active() {
+            extern "C" {
+                fn morloc_packet_size(packet: *const u8, errmsg: *mut *mut std::ffi::c_char) -> usize;
+            }
+            let size = unsafe { morloc_packet_size(c_pkt, &mut errmsg) };
+            if !link_ifile_arg(i, arg_val, arg_def) {
+                crate::stage::save_arg(&cmd.name, i, c_pkt, size);
+            }
+        }
         let voidstar = unsafe { get_morloc_data_packet_value(c_pkt, c_schema, &mut errmsg) };
         unsafe { libc::free(c_pkt as *mut std::ffi::c_void) };
         if voidstar.is_null() {

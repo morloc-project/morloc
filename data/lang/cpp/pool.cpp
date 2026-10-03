@@ -14,9 +14,6 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <csignal>
-#ifdef __linux__
-#include <sys/prctl.h>
-#endif
 
 // needed for foreign interface
 #include <cstdlib>
@@ -153,9 +150,12 @@ std::string interweave_strings(const std::vector<std::string>& first, const std:
     return result;
 }
 
-// Thread-local list of SHM pointers allocated by _put_value.
-// Freed after foreign_call returns (args consumed) or at next dispatch start
-// (result consumed by caller in the synchronous call that returned it).
+// Thread-local list of the shared-memory references this thread holds for
+// packets it built (_put_value, _dup_packet) or received as call results
+// (foreign_call_v). An entry ends when its packet is released
+// (_release_packet, mlc::Packet), and whatever remains is released once the
+// dispatch's reply is sent (after_reply): the reply carries the caller's own
+// reference to its value.
 struct ShmEntry { absptr_t ptr; };
 // Releasing the entries is shared by the ordinary flush and by thread
 // teardown, so it is written once and takes the container explicitly.
@@ -202,11 +202,10 @@ struct ShmOwned {
 
 static void _shm_tracker_flush() {
     _shm_release_entries(_shm_tracker);
-    arrow_borrow_clear();
 }
 
 // Drop one tracker entry matching ptr (swap-with-last) and shfree the
-// block. Used by _release_packet_shm to free
+// block. Used by _release_packet to free
 // a _put_value-tracked packet's SHM as soon as its codegen-determined
 // scope ends, rather than waiting for the next dispatch flush.
 static bool _shm_tracker_release_one(absptr_t ptr) {
@@ -223,22 +222,72 @@ static bool _shm_tracker_release_one(absptr_t ptr) {
     return false;
 }
 
-// Release the SHM ref owned by a _put_value-produced packet. The codegen
-// inserts this call at the end of a serialize let's scope so the tracker
-// entry is dropped as soon as the packet is no longer needed. No-op for
-// inline (non-RPTR) packets, so callers can invoke unconditionally.
-static void _release_packet_shm(const uint8_t* packet) {
+// A copy of an argument packet for a manifold to return as its result.
+// The argument itself lives in the call the dispatcher frees before it
+// sends and frees the result, so it cannot be returned; the copy holds its
+// own reference to any shared memory the packet names, tracked like every
+// other packet this pool returns.
+static uint8_t* _dup_packet(const uint8_t* packet) {
+    absptr_t block = NULL;
+    char* err = NULL;
+    uint8_t* copy = morloc_dup_packet(packet, &block, &err);
+    if (err != NULL) {
+        std::string msg(err);
+        free(err);
+        MLC_INTERNAL_ABORT(msg.c_str());
+    }
+    if (block != NULL) {
+        _shm_tracker.push_back({block});
+    }
+    return copy;
+}
+
+// Finish with a packet: give back the shared memory it names, if it
+// names any, and free the packet itself when nothing built from it can
+// still be reading it. The codegen inserts this call where a packet's
+// scope ends, which is the last moment anything can know the packet is
+// done with -- a pool answering requests for as long as it is asked to
+// has no later one.
+//
+// `owned` is false where the value read out of the packet is a function
+// value. A function value that came from another pool carries the
+// packets of whatever it captured, so that it can be applied later or
+// handed on again; those bytes are the packet's. Every other value is
+// read out into storage of its own. Callers may invoke this
+// unconditionally.
+static void _release_packet(const uint8_t* packet, bool owned) {
     if (packet == nullptr) return;
     const morloc_packet_header_t* hdr = (const morloc_packet_header_t*)packet;
-    if (hdr->command.data.source != PACKET_SOURCE_RPTR) return;
-    size_t relptr = *(size_t*)(packet
-        + sizeof(morloc_packet_header_t) + hdr->offset);
-    char* resolve_err = NULL;
-    void* voidstar = rel2abs(relptr, &resolve_err);
-    if (resolve_err) { free(resolve_err); resolve_err = NULL; }
-    if (voidstar) {
-        _shm_tracker_release_one((absptr_t)voidstar);
+    if (hdr->command.data.source == PACKET_SOURCE_RPTR) {
+        size_t relptr = *(size_t*)(packet
+            + sizeof(morloc_packet_header_t) + hdr->offset);
+        char* resolve_err = NULL;
+        void* voidstar = rel2abs(relptr, &resolve_err);
+        if (resolve_err) { free(resolve_err); resolve_err = NULL; }
+        if (voidstar) {
+            _shm_tracker_release_one((absptr_t)voidstar);
+        }
     }
+    if (owned) free((void*)packet);
+}
+
+namespace mlc {
+// A packet this pool built, or received as a call's result, for one use:
+// going out of scope frees it and drops the shared-memory reference it
+// names, including when an exception unwinds past it. A temporary lives to
+// the end of the full expression that made it, so `Packet(x).get()` passed
+// to a call is released once the call has returned.
+class Packet {
+    uint8_t* p_;
+public:
+    explicit Packet(uint8_t* p) : p_(p) {}
+    Packet(const Packet&) = delete;
+    Packet& operator=(const Packet&) = delete;
+    Packet(Packet&& o) noexcept : p_(o.p_) { o.p_ = nullptr; }
+    Packet& operator=(Packet&&) = delete;
+    ~Packet() { _release_packet(p_, true); }
+    const uint8_t* get() const { return p_; }
+};
 }
 
 // Transforms a serialized value into a message ready for the socket. A
@@ -255,17 +304,21 @@ uint8_t* _put_value(const T& value, Schema* schema, bool self_contained = false)
         mlc::ArrowTable& tbl = const_cast<mlc::ArrowTable&>(value);
         relptr_t relptr = tbl.move_to_shm(schema);
 
-        // The block is this pool's own until the next dispatch releases it.
         char* err = nullptr;
         void* shm_ptr = rel2abs(relptr, &err);
         if (err) { free(err); }
-        if (shm_ptr) { _shm_tracker.push_back({(absptr_t)shm_ptr}); }
 
         uint8_t* packet = nullptr;
         if (self_contained) {
+            // The packet carries a copy of the table, so the block is not
+            // needed past this call.
+            ShmOwned owned(shm_ptr);
             packet = make_inline_data_packet(shm_ptr, schema, &err);
             if (err) { PROPAGATE_INFRA_ERROR(err); }
         } else {
+            // The packet names the block, which is this pool's own until the
+            // packet is released or the next dispatch begins.
+            if (shm_ptr) { _shm_tracker.push_back({(absptr_t)shm_ptr}); }
             packet = make_arrow_data_packet(relptr, schema);
         }
         if (!packet) { MLC_INTERNAL_ABORT("failed to create arrow data packet"); }
@@ -319,13 +372,10 @@ T _get_value(const uint8_t* packet, Schema* schema){
     uint8_t format = header->command.data.format;
 
     if constexpr (std::is_same_v<T, mlc::ArrowTable>) {
-        // A table is a block. It arrives by reference (an Arrow packet) or
-        // in a form the runtime materializes into a block of this pool's
-        // own (a cached result read back from a file, a captured value
-        // carried inline).
-        if (format == PACKET_FORMAT_ARROW && source != PACKET_SOURCE_RPTR) {
-            MLC_INTERNAL_ABORT("Arrow packet does not name a shared-memory block");
-        }
+        // A table is a block. It arrives by reference, or in a form the
+        // runtime materializes into a block of this pool's own: the file
+        // an argument names, a cached result read back, or a captured
+        // value carried inline.
         bool materialized = (source != PACKET_SOURCE_RPTR);
         char* errmsg = nullptr;
         uint8_t* raw = get_morloc_data_packet_value(packet, schema, &errmsg);
@@ -342,32 +392,17 @@ T _get_value(const uint8_t* packet, Schema* schema){
             throw MorlocException(msg);
         }
 
-        // Hold the block for as long as the table references its buffers,
-        // releasing it at the next dispatch. A table that arrived by
-        // reference needs one taken on this pool's behalf; the sender
-        // donated one before sending, so a refusal means the block is gone
-        // and the view would read scrubbed memory.
-        if (!materialized) {
-            char* ierr = nullptr;
-            bool acquired = shincref((absptr_t)raw, &ierr);
-            if (ierr) { free(ierr); }
-            if (!acquired) {
-                MLC_INTERNAL_ABORT("received table's shared-memory block is no longer live");
-            }
-        }
-        _shm_tracker.push_back({(absptr_t)raw});
-        owned.ptr = nullptr;
-        {
-            char* rerr = nullptr;
-            relptr_t rel = abs2rel((absptr_t)raw, &rerr);
-            if (rerr) { free(rerr); } else { arrow_borrow_register(raw, rel); }
-        }
-
+        // The table holds the block for exactly as long as it reads it: a
+        // table that arrived by reference takes one of its own, while a
+        // block this pool materialized passes its only reference to the
+        // view.
         struct ArrowSchema as;
         struct ArrowArray aa;
         char* aerr = nullptr;
-        arrow_from_shm(hdr, &as, &aa, &aerr);
-        if (aerr) { PROPAGATE_INFRA_ERROR(aerr); }
+        if (arrow_from_shm_owned(hdr, materialized ? 0 : 1, &as, &aa, &aerr) != 0) {
+            PROPAGATE_INFRA_ERROR(aerr);
+        }
+        owned.ptr = nullptr;
         return mlc::ArrowTable(&as, &aa);
     } else {
         if (format == PACKET_FORMAT_ARROW) {
@@ -407,20 +442,22 @@ T _get_value(const uint8_t* packet, Schema* schema){
                     try {
                         while (true) {
                             char* nerr = nullptr;
-                            void* chunk = mlc_next(handle, &nerr);
+                            int32_t eof = 0;
+                            void* chunk = mlc_next_frame(handle, &eof, &nerr);
                             if (nerr) {
                                 char* cerr = nullptr;
                                 mlc_close(handle, &cerr);
                                 if (cerr) free(cerr);
                                 PROPAGATE_ERROR(nerr);
                             }
-                            if (chunk == nullptr) break;
+                            if (eof || chunk == nullptr) break;
+                            // An empty sub-packet is an empty batch, not the end.
                             Array* arr = (Array*)chunk;
                             if (arr->size == 0) {
                                 char* ferr = nullptr;
                                 shfree((absptr_t)chunk, &ferr);
                                 if (ferr) free(ferr);
-                                break;
+                                continue;
                             }
                             T* dummy = nullptr;
                             T chunk_vec = from_voidstar(schema, chunk, dummy);
@@ -459,9 +496,7 @@ T _get_value(const uint8_t* packet, Schema* schema){
         if (source == PACKET_SOURCE_MESG && format == PACKET_FORMAT_VOIDSTAR
             && header->command.data.compression == PACKET_COMPRESSION_NONE
             && header->command.data.encryption == PACKET_ENCRYPTION_NONE) {
-            const uint8_t* payload = packet + sizeof(morloc_packet_header_t) + header->offset;
-            T* dummy = nullptr;
-            return from_voidstar(schema, (const void*)payload, dummy, (const void*)payload);
+            return mlc_read_inline_packet<T>(packet, schema);
         }
 
         // SHM paths (RPTR or MESG+MSGPACK): existing logic
@@ -473,17 +508,15 @@ T _get_value(const uint8_t* packet, Schema* schema){
             PROPAGATE_INFRA_ERROR(errmsg)
         }
 
-        // A payload that did not arrive by reference was materialized into a
-        // block of this pool's own -- one contiguous allocation covering the
-        // whole value, so a single release covers it -- and nothing else will
-        // ever free it. A payload that did arrive by reference belongs to its
-        // sender.
-        ShmOwned owned(is_rptr ? nullptr : (void*)voidstar);
-
-        // A value that arrived by reference needs a reference of this
-        // pool's own so the sender's flush cannot reclaim it while it is
-        // read or forwarded. The sender donated one before sending, so a
-        // refusal means the block is already gone.
+        // A value that arrived by reference is read under a reference of this
+        // pool's own, taken here and dropped once the value is copied out:
+        // from_voidstar copies (a table, the one type read in place, takes a
+        // reference of its own above). Whoever handed over the packet keeps
+        // it alive meanwhile -- a caller blocked in its call, or the donated
+        // reference a foreign call's result carries -- so a refusal means the
+        // block is already gone. A payload that did not arrive by reference
+        // was materialized into a block of this pool's own, one allocation
+        // covering the whole value, and nothing else will ever free it.
         if (is_rptr) {
             char* incref_err = NULL;
             bool acquired = shincref((absptr_t)voidstar, &incref_err);
@@ -491,8 +524,8 @@ T _get_value(const uint8_t* packet, Schema* schema){
             if (!acquired) {
                 MLC_INTERNAL_ABORT("received value's shared-memory block is no longer live");
             }
-            _shm_tracker.push_back({(absptr_t)voidstar});
         }
+        ShmOwned owned((void*)voidstar);
 
         T* dummy = nullptr;
         return from_voidstar(schema, (void*)voidstar, dummy);
@@ -522,7 +555,7 @@ template <typename T>
 void _mlc_save(const T& value, Schema* schema, int64_t level, const std::string& path) {
     void* voidstar = to_voidstar(schema, value);
     char* errmsg = NULL;
-    mlc_save(voidstar, schema, (uint8_t)level, path.c_str(), &errmsg);
+    mlc_save(voidstar, schema, level, path.c_str(), &errmsg);
     shfree_cpp(voidstar);
     if (errmsg != NULL) {
         PROPAGATE_ERROR(errmsg)
@@ -536,7 +569,7 @@ template <typename T>
 void _mlc_save_voidstar(const T& value, Schema* schema, int64_t level, const std::string& path) {
     void* voidstar = to_voidstar(schema, value);
     char* errmsg = NULL;
-    mlc_save_voidstar(voidstar, schema, (uint8_t)level, path.c_str(), &errmsg);
+    mlc_save_voidstar(voidstar, schema, level, path.c_str(), &errmsg);
     shfree_cpp(voidstar);
     if (errmsg != NULL) {
         PROPAGATE_ERROR(errmsg)
@@ -548,7 +581,7 @@ template <typename T>
 void _mlc_save_json(const T& value, Schema* schema, int64_t level, const std::string& path) {
     void* voidstar = to_voidstar(schema, value);
     char* errmsg = NULL;
-    mlc_save_json(voidstar, schema, (uint8_t)level, path.c_str(), &errmsg);
+    mlc_save_json(voidstar, schema, level, path.c_str(), &errmsg);
     shfree_cpp(voidstar);
     if (errmsg != NULL) {
         PROPAGATE_ERROR(errmsg)
@@ -618,6 +651,16 @@ T _mlc_read(Schema* schema, const std::string& json_str) {
     return result;
 }
 
+// Decode a morloc packet held as bytes, exactly as an argument packet is
+// decoded. @unpack is synthesized for `@parse` commands only.
+template <typename T>
+T _mlc_unpack(Schema* schema, const std::vector<uint8_t>& packet) {
+    if (packet.size() < sizeof(morloc_packet_header_t)) {
+        throw MorlocException("@unpack: packet is shorter than its header");
+    }
+    return _get_value<T>(packet.data(), schema);
+}
+
 // Load a value from file, auto-detecting format.
 // @load :: Str -> <IO, Err> a. Missing file / decode failure throws
 // MorlocException so _mlc_catch can intercept.
@@ -664,6 +707,12 @@ struct _MlcThrowHelper {
     template<typename T> operator T() const { std::terminate(); }
 };
 inline _MlcThrowHelper _mlc_throw(const std::string& msg) {
+    throw MorlocException(msg);
+}
+// A raise whose result type is known, for a position the catch-all
+// conversion above cannot fill unambiguously.
+template <typename T>
+T _mlc_throw_as(const std::string& msg) {
     throw MorlocException(msg);
 }
 // @catch: run `fallible()`; on a recoverable error, run `fallback()` and
@@ -859,7 +908,7 @@ inline void _mlc_write(Schema* schema, int64_t level, const T& value, int64_t ha
     void* voidstar = shmalloc_cpp(bytes);
     void* cursor = (uint8_t*)voidstar + schema->width;
     to_voidstar(voidstar, &cursor, schema, value);
-    int rc = mlc_write(static_cast<uint8_t>(level), handle, voidstar, &errmsg);
+    int rc = mlc_write(level, handle, voidstar, &errmsg);
     shfree_cpp(voidstar);
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
     _mlc_throw_if_pipe_closed(rc);
@@ -936,6 +985,102 @@ inline void _mlc_unlink_tmp(const std::string& path) {
     char* errmsg = NULL;
     mlc_unlink_tmp(path.c_str(), &errmsg);
     if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+}
+
+// -- Fold-accumulator wrappers ------------------------------------------
+// A folding stream handler carries one accumulator per thread that folds
+// into it; `_mlc_cell_reduce` merges them and releases the cell.
+
+// @cellnew: create an accumulator seeded with `init`.
+template <typename B>
+int64_t _mlc_cell_new(Schema* schema, const B& init) {
+    void* voidstar = to_voidstar(schema, init);
+    char* errmsg = NULL;
+    int64_t handle = mlc_cell_new(schema, voidstar, &errmsg);
+    shfree_cpp(voidstar);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    return handle;
+}
+
+// @cellget: this thread's accumulator, or the seed if it has not folded yet.
+template <typename B>
+B _mlc_cell_get(Schema* schema, int64_t handle) {
+    char* errmsg = NULL;
+    void* voidstar = mlc_cell_get(handle, schema, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    B* dummy = nullptr;
+    B result = from_voidstar(schema, voidstar, dummy);
+    shfree_cpp(voidstar);
+    return result;
+}
+
+// @cellput: replace this thread's accumulator.
+template <typename B>
+void _mlc_cell_put(Schema* schema, int64_t handle, const B& value) {
+    void* voidstar = to_voidstar(schema, value);
+    char* errmsg = NULL;
+    mlc_cell_put(handle, schema, voidstar, &errmsg);
+    shfree_cpp(voidstar);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+}
+
+// One accumulator, for the merge below.
+template <typename B>
+B _mlc_cell_slot(Schema* schema, int64_t handle, int64_t index) {
+    char* errmsg = NULL;
+    void* voidstar = mlc_cell_slot(handle, index, schema, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    B* dummy = nullptr;
+    B result = from_voidstar(schema, voidstar, dummy);
+    shfree_cpp(voidstar);
+    return result;
+}
+
+// @cellreduce: fold every accumulator into one with `combine`, then release
+// the cell. The count is never zero -- an untouched cell answers with its
+// seed -- so this always has a value to return.
+// Releases its cell however the reduce below leaves. The end-of-dispatch
+// sweep would reclaim an abandoned one, but a @try-wrapped fold that fails
+// and retries inside a single dispatch would strand a cell per attempt.
+struct MlcCellGuard {
+    int64_t handle;
+    ~MlcCellGuard() {
+        char* errmsg = NULL;
+        mlc_cell_free(handle, &errmsg);
+        free(errmsg);
+    }
+};
+
+template <typename B, typename F>
+B _mlc_cell_reduce(Schema* schema, F combine, int64_t handle) {
+    MlcCellGuard guard{handle};
+    char* errmsg = NULL;
+    int64_t n = mlc_cell_count(handle, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    B acc = _mlc_cell_slot<B>(schema, handle, 0);
+    for (int64_t i = 1; i < n; i++) {
+        acc = combine(acc, _mlc_cell_slot<B>(schema, handle, i));
+    }
+    return acc;
+}
+
+// @replay: call `fn` on every frame (sub-packet) of the stream, in order,
+// each as the list it holds. An empty frame is an empty list; only the end
+// of the stream stops the loop.
+template <typename E, typename F>
+mlc::Unit _mlc_replay(Schema* schema, int64_t handle, F fn) {
+    while (true) {
+        char* errmsg = NULL;
+        int32_t eof = 0;
+        void* voidstar = mlc_next_frame(handle, &eof, &errmsg);
+        if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+        if (eof) break;
+        std::vector<E>* dummy = nullptr;
+        std::vector<E> frame = from_voidstar(schema, voidstar, dummy);
+        shfree_cpp(voidstar);
+        fn(frame);
+    }
+    return mlc::Unit{};
 }
 
 // Array-based foreign call: send a local-call packet carrying a runtime-sized
@@ -1043,6 +1188,16 @@ uint8_t* foreign_call(const char* socket_filename, size_t mid, ...) {
 // when it crosses a boundary, reify can recover (home_language, mid, captured).
 // A closure reflected from another pool is a MorlocClosure too, whose
 // `home` names that pool: reifying it hands back the origin it came with.
+//
+// `apply1`, when set, applies the closure to its first argument the way
+// morloc does ('mlc_apply1'): a staged closure runs its stage when it has
+// the arguments before the stage point, and any closure that can cross keeps
+// its origin, with the argument appended to its captured values.
+template <class R, class... A> struct mlc_apply1_slot { using type = bool; };
+template <class R, class A1, class... A> struct mlc_apply1_slot<R, A1, A...> {
+    using type = std::function<std::function<R(A...)>(const A1&)>;
+};
+
 template <class Sig> struct MorlocClosure;
 template <class R, class... A>
 struct MorlocClosure<R(A...)> {
@@ -1050,7 +1205,9 @@ struct MorlocClosure<R(A...)> {
     int64_t mid;
     std::function<std::vector<std::vector<uint8_t>>()> reify_captured;
     std::string home = "cpp";
-    R operator()(A... args) const { return fn(args...); }
+    typename mlc_apply1_slot<R, A...>::type apply1{};
+    // Each argument is this call's own copy, so it is handed on, not copied.
+    R operator()(A... args) const { return fn(std::forward<A>(args)...); }
 };
 
 // Serialize one captured native value into a SELF-CONTAINED packet for the
@@ -1079,6 +1236,165 @@ _mlc_reify(const std::function<R(A...)>& f) {
         throw MorlocException("cannot reify a non-morloc C++ closure");
     }
     return std::make_tuple(clo->home, clo->mid, clo->reify_captured());
+}
+
+// Serialize an argument appended to a closure's captured values; a function
+// argument is reified first.
+template <typename T>
+std::vector<uint8_t> _mlc_reify_arg(const T& value, Schema* schema) {
+    return _mlc_reify_capture(value, schema);
+}
+template <class R, class... A>
+std::vector<uint8_t> _mlc_reify_arg(const std::function<R(A...)>& f, Schema* schema) {
+    return _mlc_reify_capture(_mlc_reify(f), schema);
+}
+
+typedef std::vector<std::vector<uint8_t>> mlc_captured_t;
+
+// Streamed @parse argument: a channel is one handle for both ends. The
+// producer writes it as its OStream and the reader reads it as an IStream.
+inline int64_t _mlc_open_channel(Schema* schema) {
+    char* errmsg = NULL;
+    char* s = schema_to_string(schema);
+    if (s == NULL) MLC_INTERNAL_ABORT("_mlc_open_channel: schema_to_string returned NULL");
+    int64_t h = mlc_open_channel(s, &errmsg);
+    free(s);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    return h;
+}
+
+// Start the producer `f` on the channel as a separate dispatch in its home
+// pool, without waiting for it. `schema` encodes the handle as the
+// producer's OStream argument.
+template <class R, class H>
+mlc::Unit _mlc_spawn(const std::function<R(H)>& f, int64_t handle, Schema* schema) {
+    auto [home, mid, captured] = _mlc_reify(f);
+    captured.push_back(_mlc_reify_capture(handle, schema));
+    std::vector<const uint8_t*> args;
+    for (const auto& c : captured) args.push_back(c.data());
+    std::string sock = std::string(g_tmpdir) + "/pipe-" + home;
+    char* errmsg = NULL;
+    mlc_spawn(sock.c_str(), (uint32_t)mid, args.data(), args.size(), handle, &errmsg);
+    if (errmsg != NULL) { PROPAGATE_ERROR(errmsg) }
+    return mlc::Unit{};
+}
+
+// Release the channel. Raises the producer's failure if the reader saw it.
+inline mlc::Unit _mlc_settle(int64_t handle) {
+    char* errmsg = NULL;
+    mlc_settle(handle, &errmsg);
+    if (errmsg != NULL) {
+        std::string msg(errmsg);
+        free(errmsg);
+        throw MorlocException(msg);
+    }
+    return mlc::Unit{};
+}
+
+// A closure that can cross, applied to its first arguments one at a time,
+// stays a closure of the same manifold: the arguments join its captured
+// values. `schemas` are the wire schemas of its remaining arguments, used
+// only if it is reified.
+// A closure applied to its first argument `x`: the thunk that reifies it
+// (the argument appended to the captured values) and the schemas of the
+// arguments it still takes.
+template <class X>
+std::pair<std::function<mlc_captured_t()>, std::vector<Schema*>>
+mlc_pap_step(const std::function<mlc_captured_t()>& reify, const std::vector<Schema*>& schemas, const X& x) {
+    Schema* s = schemas.empty() ? nullptr : schemas.front();
+    std::vector<Schema*> rest;
+    if (!schemas.empty()) rest.assign(schemas.begin() + 1, schemas.end());
+    std::function<mlc_captured_t()> reify2 = [reify, x, s]() {
+        mlc_captured_t v = reify();
+        v.push_back(_mlc_reify_arg(x, s));
+        return v;
+    };
+    return {reify2, rest};
+}
+
+template <class R, class... A> struct mlc_pap;
+template <class R> struct mlc_pap<R> {
+    static MorlocClosure<R()> make(std::function<R()> fn, int64_t mid,
+                                   std::function<mlc_captured_t()> reify,
+                                   std::string home, std::vector<Schema*>) {
+        return MorlocClosure<R()>{fn, mid, reify, home};
+    }
+};
+template <class R, class A1, class... A> struct mlc_pap<R, A1, A...> {
+    static MorlocClosure<R(A1, A...)> make(std::function<R(A1, A...)> fn, int64_t mid,
+                                           std::function<mlc_captured_t()> reify,
+                                           std::string home, std::vector<Schema*> schemas) {
+        MorlocClosure<R(A1, A...)> c{fn, mid, reify, home};
+        c.apply1 = [fn, mid, reify, home, schemas](const A1& x) -> std::function<R(A...)> {
+            auto [reify2, rest] = mlc_pap_step(reify, schemas, x);
+            std::function<R(A...)> fn2 = [fn, x](A... r) { return fn(x, std::forward<A>(r)...); };
+            return mlc_pap<R, A...>::make(fn2, mid, reify2, home, rest);
+        };
+        return c;
+    }
+};
+
+// A staged closure: after its arguments `First` it runs `stage` (its stage
+// entry, bound to its captured values), once, and the closure of `Rest`
+// that the stage returns is the result.
+template <class... T> struct mlc_types {};
+template <class R, class First, class Rest> struct mlc_staged;
+template <class R, class F1, class... F, class... Rest>
+struct mlc_staged<R, mlc_types<F1, F...>, mlc_types<Rest...>> {
+    typedef std::function<std::function<R(Rest...)>(F1, F...)> stage_t;
+    static MorlocClosure<R(F1, F..., Rest...)> make(std::function<R(F1, F..., Rest...)> fn, int64_t mid,
+                                                    std::function<mlc_captured_t()> reify,
+                                                    std::string home, std::vector<Schema*> schemas,
+                                                    stage_t stage) {
+        MorlocClosure<R(F1, F..., Rest...)> c{fn, mid, reify, home};
+        c.apply1 = [fn, mid, reify, home, schemas, stage](const F1& x) -> std::function<R(F..., Rest...)> {
+            if constexpr (sizeof...(F) == 0) {
+                return stage(x);
+            } else {
+                auto [reify2, rest] = mlc_pap_step(reify, schemas, x);
+                std::function<R(F..., Rest...)> fn2 = [fn, x](F... f, Rest... r) { return fn(x, f..., r...); };
+                std::function<std::function<R(Rest...)>(F...)> stage2 = [stage, x](F... f) { return stage(x, f...); };
+                return mlc_staged<R, mlc_types<F...>, mlc_types<Rest...>>::make(fn2, mid, reify2, home, rest, stage2);
+            }
+        };
+        return c;
+    }
+};
+
+// The closures of a function signature, by the number of arguments before
+// the stage point of a staged one.
+template <size_t K, class Done, class Todo, bool = (K == 0)> struct mlc_split;
+template <size_t K, class Done, class Todo> struct mlc_split<K, Done, Todo, true> {
+    typedef Done first;
+    typedef Todo rest;
+};
+template <size_t K, class... D, class T1, class... T>
+struct mlc_split<K, mlc_types<D...>, mlc_types<T1, T...>, false>
+    : mlc_split<K - 1, mlc_types<D..., T1>, mlc_types<T...>> {};
+
+template <class Sig> struct mlc_pap_sig;
+template <class R, class... A> struct mlc_pap_sig<R(A...)> : mlc_pap<R, A...> {};
+
+template <size_t K, class Sig> struct mlc_staged_sig;
+template <size_t K, class R, class... A>
+struct mlc_staged_sig<K, R(A...)>
+    : mlc_staged<R, typename mlc_split<K, mlc_types<>, mlc_types<A...>>::first,
+                 typename mlc_split<K, mlc_types<>, mlc_types<A...>>::rest> {};
+
+// Apply a function value to its first argument. A closure morloc made
+// knows how (its `apply1`); any other function keeps the argument.
+template <class R, class A1, class... A>
+std::function<R(A...)> mlc_apply1(const std::function<R(A1, A...)>& f, const A1& x) {
+    const auto* clo = f.template target<MorlocClosure<R(A1, A...)>>();
+    if (clo != nullptr && clo->apply1) {
+        return clo->apply1(x);
+    }
+    return [f, x](A... r) { return f(x, std::forward<A>(r)...); };
+}
+
+// The reify thunk of a closure that never crosses.
+inline mlc_captured_t mlc_unreifiable() {
+    throw MorlocException("cannot reify a non-morloc C++ closure");
 }
 
 
@@ -1145,7 +1461,8 @@ static uint8_t* make_fail_packet_with_trace(const char* msg) {
 uint8_t* cpp_local_dispatch(uint32_t mid, const uint8_t** args,
                                     size_t nargs, void* ctx) {
     (void)nargs; (void)ctx;
-    // Free SHM from previous dispatch (result packet consumed by caller)
+    // Anything a non-dispatch use of this thread left behind; a dispatch's
+    // own entries are released after its reply.
     _shm_tracker_flush();
     morloc_debug_flush_dispatch();
     try {
@@ -1222,5 +1539,6 @@ void cpp_register(pool_config_t* config, const char* tmpdir) {
     config->concurrency = POOL_THREADS;
     config->initial_workers = 1;
     config->dynamic_scaling = true;
+    config->after_reply = _shm_tracker_flush;
     _init_schemas();
 }

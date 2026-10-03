@@ -16,6 +16,8 @@ helpers, and the fold framework ('FoldRules', 'foldWithSerialManifoldM').
 -}
 module Morloc.CodeGenerator.Grammars.Common
   ( invertSerialManifold
+  , renameNE
+  , renameSE
   , PoolDocs (..)
   , mergePoolDocs
 
@@ -42,6 +44,12 @@ module Morloc.CodeGenerator.Grammars.Common
   , extractRemoteDispatch
   , collectClosureManifolds
   , collectSerializedClosures
+  , collectPapplySites
+  , StageEntry (..)
+  , stageTableEntries
+  , manifoldIdOf
+  , papplyHeadSigs
+  , crossingClosures
   , serialClosuresOf
   , collectSerialObjects
   , serialObjectsOfAST
@@ -61,14 +69,14 @@ module Morloc.CodeGenerator.Grammars.Common
   , makeManifoldDebugInfoLookup
   ) where
 
-import Control.Monad (foldM)
+import Morloc.Frontend.Rename (displayName)
 import qualified Control.Monad.State as CMS
 import Data.Binary (Binary)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import GHC.Generics (Generic)
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (serialAstToType, makeSerialAST, serialAstToMsgpackSchema)
+import Morloc.CodeGenerator.Serial (serialAstToNativeType, serialAstToType, makeSerialAST, serialAstToMsgpackSchema)
 import Morloc.Data.Doc
 import Morloc.Data.Text (Text)
 import qualified Morloc.Data.Text as MT
@@ -384,6 +392,7 @@ renameNE old new = go where
   go (IfN t c th el) = IfN t (go c) (go th) (go el)
   go (IntrinsicN t intr msch nes) = IntrinsicN t intr msch (map go nes)
   go (MapOptionalN t wt src ne) = MapOptionalN t wt src (go ne)
+  go (LoopN t starts body) = LoopN t (map (\(i, e) -> (ri i, go e)) starts) (trimap go (renameSE old new) go body)
   goA (NativeArgManifold nm) = NativeArgManifold (renameNM old new nm)
   goA (NativeArgExpr ne) = NativeArgExpr (go ne)
 
@@ -403,7 +412,7 @@ renameSE old new = go where
   go (LetVarS mt i) = LetVarS mt (ri i)
   go (BndVarS mt i) = BndVarS mt (ri i)
   go (SerializeS s ne) = SerializeS s (renameNE old new ne)
-  go (LoopS t ids body) = LoopS t (map ri ids) (bimap (renameNE old new) go body)
+  go (LoopS t ids body) = LoopS t (map ri ids) (trimap (renameNE old new) go go body)
   goA (SerialArgManifold sm) = SerialArgManifold (renameSM old new sm)
   goA (SerialArgExpr se) = SerialArgExpr (go se)
 
@@ -431,6 +440,7 @@ renamePoolCall old new (PoolCall mid sock rform args) =
 
 renameExe :: Int -> Int -> ExecutableExpressionPool -> ExecutableExpressionPool
 renameExe old new (LocalCallP i) = LocalCallP (if i == old then new else i)
+renameExe old new (PapplyP i) = PapplyP (if i == old then new else i)
 renameExe _ _ other = other
 
 renameDeps :: Int -> Int -> [(Int, Either SerialExpr NativeExpr)]
@@ -513,7 +523,7 @@ invertSerialManifold sm0 =
     -- atomized/hoisted above the loop, where it would run once on a stale
     -- first-iteration value. No loop-invariant hoisting here by design.
     invertSerialExprM (LoopS_ t ids bodyD) =
-      return $ D (LoopS t ids (bimap weave weave bodyD)) []
+      return $ D (LoopS t ids (trimap weave weave weave bodyD)) []
 
     invertNativeExprM ::
       NativeExpr_ (D NativeManifold) (D SerialExpr) (D NativeExpr) (D SerialArg) (D NativeArg) ->
@@ -564,6 +574,13 @@ invertSerialManifold sm0 =
       atomize (IntrinsicN t intr msch (map unD nes)) (concatMap getDeps nes)
     invertNativeExprM (MapOptionalN_ t wt src (D ne lets)) =
       atomize (MapOptionalN t wt src ne) lets
+    -- A native loop is sealed like a serial one (see 'LoopS_'): per-iteration
+    -- work stays inside its leaves. Its initializers run once, before the
+    -- loop, so their dependencies go outward.
+    invertNativeExprM (LoopN_ t starts bodyD) =
+      atomize
+        (LoopN t (map (second unD) starts) (trimap weave weave weave bodyD))
+        (concatMap (getDeps . snd) starts)
 
     invertSerialArgM :: SerialArg_ (D SerialManifold) (D SerialExpr) -> Index (D SerialArg)
     invertSerialArgM (SerialArgManifold_ (D sm deps)) = return $ D (SerialArgManifold sm) deps
@@ -703,9 +720,9 @@ mergeVariantOccurrences ::
   [[(Text, ([a], [Text]))]] ->
   Either Text [(Text, [a])]
 mergeVariantOccurrences _ [] = Right []
-mergeVariantOccurrences name (o : os) = map (\(c, (w, _)) -> (c, w)) <$> foldM merge o os
+mergeVariantOccurrences name (o : os) = map (\(c, (w, _)) -> (c, w)) <$> foldM mergeOccurrence o os
   where
-    merge as bs = mapM (pick (Map.fromList as) (Map.fromList bs)) order
+    mergeOccurrence as bs = mapM (pick (Map.fromList as) (Map.fromList bs)) order
       where
         order = if length as >= length bs then map fst as else map fst bs
     pick am bm c = case (Map.lookup c am, Map.lookup c bm) of
@@ -919,6 +936,127 @@ collectSerialObjects = concatMap serialObjectsOfAST . allSerialASTs
               _ -> foldlNE (<>) mempty folded
         }
 
+-- | A staged closure, keyed by its flat entry's manifold id in the stage
+-- table every pool carries.
+data StageEntry = StageEntry
+  { seContext :: Int
+  -- ^ the number of context arguments (the flat and stage entries share them)
+  , seSplit :: Int
+  -- ^ the first stage point: the arguments the stage entry takes
+  , seStage :: Int
+  -- ^ the stage entry's manifold id
+  }
+  deriving (Generic)
+
+instance Binary StageEntry
+
+-- | The program's stage table.
+stageTableEntries :: MorlocMonad (Map.Map Int StageEntry)
+stageTableEntries = do
+  entries <- MM.gets stateStageEntries
+  ctx <- MM.gets stateStageContext
+  return $ Map.fromList
+    [(f, StageEntry n k st) | (f, (k, st)) <- Map.toAscList entries, Just n <- [Map.lookup f ctx]]
+
+-- | The manifold id of a manifold's name ('manNamer').
+manifoldIdOf :: MDoc -> Maybe Int
+manifoldIdOf name = case MT.unpack (render name) of
+  'm' : ds | not (null ds), all (`elem` ['0' .. '9']) ds -> Just (read ds)
+  _ -> Nothing
+
+-- | The signatures of the function values the manifolds partially apply
+-- ('PapplyP'), rendered by @sigOf@ from argument and result types.
+papplyHeadSigs :: Monad m => ([TypeF] -> TypeF -> m Text) -> [SerialManifold] -> m (Set.Set Text)
+papplyHeadSigs sigOf es =
+  Set.fromList <$> sequence [sigOf (as ++ rins) out | (as, FunF rins out) <- concatMap collectPapplySites es]
+
+-- | Keep in the closure table only closures whose signature (rendered by
+-- @sigOf@, the backend's native callable type) can cross a boundary: it
+-- reaches a serialize site, or is closed over by a closure that crosses (its
+-- captures are reified with it), or is the function a crossing partial
+-- application applies, or is the stage entry or result of a crossing staged
+-- closure (another pool may partially apply it). The fixed point is over
+-- signatures, as serialize sites are matched, so it may keep a closure that
+-- never crosses but never drops one that does.
+crossingClosures ::
+  Monad m =>
+  ([TypeF] -> TypeF -> m Text) ->
+  Map.Map Int StageEntry ->
+  [SerialManifold] ->
+  Map.Map Int v ->
+  m (Map.Map Int v)
+crossingClosures sigOf stageTable es closureTable = do
+  seeds <- Set.fromList <$> sequence
+    [ sigOf (map serialAstToNativeType ins) (serialAstToNativeType out)
+    | SerialClosure ins out <- concatMap collectSerializedClosures es ]
+  spawned <- sequence
+    [ sigOf ins out | FunF ins out <- concatMap collectSpawnedProducers es ]
+  papplies <- sequence
+    [ (,) <$> sigOf rins out <*> sigOf (as ++ rins) out
+    | (as, FunF rins out) <- concatMap collectPapplySites es ]
+  entries <- mapM entry
+    [ nm | nm@(NativeManifold i _ _ _) <- concatMap collectClosureManifolds es
+         , Map.member i closureTable ]
+  let close sigs =
+        let sigs' = Set.unions
+              [ sigs
+              , Set.fromList (concat [cs | (_, sig, cs) <- entries, Set.member sig sigs])
+              , Set.fromList [h | (res, h) <- papplies, Set.member res sigs]
+              ]
+         in if Set.size sigs' == Set.size sigs then sigs else close sigs'
+      crossingSigs = close (seeds <> Set.fromList spawned)
+      crossing = Set.fromList [i | (i, sig, _) <- entries, Set.member sig crossingSigs]
+  return $ Map.filterWithKey (\i _ -> Set.member i crossing) closureTable
+  where
+    -- a closure manifold: its signature, and the signatures that cross with it
+    entry nm@(NativeManifold i _ form _) = do
+      let bnds = [t | Arg _ t <- manifoldBound form]
+          out = case typeFof nm of
+            FunF _ o -> o
+            o -> o
+      sig <- sigOf bnds out
+      capSigs <- sequence
+        [sigOf ins o | Arg _ c <- manifoldContext form, Just (FunF ins o) <- [orNativeType c]]
+      stageSigs <- case Map.lookup i stageTable of
+        Just se ->
+          let k = seSplit se
+           in sequence [sigOf (take k bnds) (FunF (drop k bnds) out), sigOf (drop k bnds) out]
+        Nothing -> return []
+      return (i, sig, capSigs <> stageSigs)
+
+-- | The types of the producers handed to @spawn, which reifies them so
+-- their home pool's dispatch can run them.
+collectSpawnedProducers :: SerialManifold -> [TypeF]
+collectSpawnedProducers = runIdentity . surroundFoldSerialManifoldM defaultValue fw
+  where
+    fw :: FoldWithManifoldM Identity [TypeF] [TypeF] [TypeF] [TypeF] [TypeF] [TypeF]
+    fw =
+      defaultValue
+        { opFoldWithNativeExprM = \orig folded ->
+            let here = case orig of
+                  IntrinsicN _ IntrSpawn _ [_, f] -> [typeFof f]
+                  _ -> []
+             in return (here <> foldlNE (<>) mempty folded)
+        }
+
+-- | Every partial application of a local function value ('PapplyP') in the
+-- manifold, as the applied arguments' types and the result type (the
+-- function of the remaining arguments).
+collectPapplySites :: SerialManifold -> [([TypeF], TypeF)]
+collectPapplySites = runIdentity . surroundFoldSerialManifoldM defaultValue fw
+  where
+    fw :: FoldWithManifoldM Identity [([TypeF], TypeF)] [([TypeF], TypeF)] [([TypeF], TypeF)] [([TypeF], TypeF)] [([TypeF], TypeF)] [([TypeF], TypeF)]
+    fw =
+      defaultValue
+        { opFoldWithNativeExprM = \orig folded ->
+            let here = case orig of
+                  AppExeN t (PapplyP _) xs -> [(map argType xs, t)]
+                  _ -> []
+             in return (here <> foldlNE (<>) mempty folded)
+        }
+    argType (NativeArgExpr e) = typeFof e
+    argType (NativeArgManifold nm) = typeFof nm
+
 -- | Every record node in a wire form, with its fields. A record reached only
 -- through a closure's captured or bound arguments -- one that no manifold
 -- serializes directly -- is found here too, which is what a backend needs to
@@ -1000,7 +1138,7 @@ makeManifoldDebugInfoLookup :: MorlocMonad (Int -> (Text, Text))
 makeManifoldDebugInfoLookup = do
   nameMap <- MM.gets stateName
   srcMap <- MM.gets stateSourceMap
-  let sanitized = Map.map (sanitizeManifoldName . unEVar) nameMap
+  let sanitized = Map.map (sanitizeManifoldName . unEVar . displayName) nameMap
       srclocs = Map.mapMaybe renderSrcLocForDebug srcMap
   return $ \i ->
     ( Map.findWithDefault "" i sanitized

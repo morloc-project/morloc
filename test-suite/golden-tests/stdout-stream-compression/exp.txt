@@ -1,0 +1,8 @@
+[49998,49999,50000,50001]
+[49998,49999,50000,50001]
+[49998,49999,50000,50001]
+100000
+OK write level compresses
+OK -z overrides
+OK mixed levels refused
+OK -z pins one level

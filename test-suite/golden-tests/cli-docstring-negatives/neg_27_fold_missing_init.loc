@@ -1,0 +1,18 @@
+module main (run)
+
+import root
+
+-- A fold cannot be seeded or merged by default: there is no universal empty
+-- accumulator and no universal way to join two. All three parts are required.
+step :: Int -> [Int] -> Int
+step acc _ = acc
+
+showAcc :: Int -> Str
+showAcc _ = "acc"
+
+produce :: ([Int] -> <IO> ()) -> <IO> ()
+produce sink = sink [1,2,3]
+
+--' @render -t/--total=showAcc @fold=step
+run :: <IO> ()
+run = @collect produce

@@ -16,12 +16,11 @@ module Morloc.Frontend.API
   ( parse
   , Parser.readType
   , Typecheck.typecheck
+  , Typecheck.validate
   , Typecheck.resolveTypes
   , Valuecheck.valuecheck
   ) where
 
-import qualified Control.Monad.State.Strict as State
-import Data.Functor.Identity (Identity, runIdentity)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -30,8 +29,6 @@ import qualified Morloc.Data.DAG as MDD
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.Frontend.AST as AST
-import qualified Morloc.Frontend.Desugar as Desugar
 import Morloc.Frontend.Namespace
 import Morloc.Frontend.Parser (PState (..), emptyPState)
 import qualified Morloc.Frontend.Parser as Parser
@@ -181,10 +178,7 @@ parse f (Code code) = do
         case psWarnings s of
           [] -> return ()
           ws -> MM.tell ws
-        -- Synthesize `--' with:` terminal-action commands and expand @collect
-        -- now that the whole import DAG is available, so offset/IFile handler
-        -- detection can see signatures imported from other modules.
-        finalizeCollectActions d
+        return d
       ((mainModule, importedModule) : _) -> do
         when (mainModule == importedModule) . MM.throwSystemError $
           "Module" <+> pretty importedModule <+> "imports itself"
@@ -230,125 +224,6 @@ parse f (Code code) = do
         _ -> dNew  -- zero or multiple new keys: nothing to reconcile
       where
         newKeys = filter (`Map.notMember` dOld) (Map.keys dNew)
-
--- | Post-parse pass over the full module DAG: for every module, synthesize
--- its `--' with:` terminal-action commands and expand @collect nodes. This
--- runs here (rather than in per-module desugar) because offset (@U64 -> ...@)
--- and IFile handler detection reads the handler's signature, which may be
--- imported from another module -- unavailable until the whole DAG is parsed.
---
--- A single 'Desugar.DState' is threaded across modules so synthesized nodes
--- get globally-unique indices (seeded past every existing index) and their
--- source locations accumulate into one map. Reserved-prefix / flag-collision
--- errors from the synthesis surface without a source caret (the rare cost of
--- deferring past the per-module parse context); their messages are explicit.
-finalizeCollectActions :: DAG MVar Import ExprI -> MorlocMonad (DAG MVar Import ExprI)
-finalizeCollectActions dag = do
-  srcMap0 <- MM.gets stateSourceMap
-  let visibleSigs = moduleVisibleSigs dag
-      idx0 = maximum (0 : map ((+ 1) . AST.maxIndex) (MDD.nodes dag))
-      ds0 = mkFinalizeDState idx0 srcMap0
-      -- 'D' threads the shared DState (fresh indices, accumulated source
-      -- locations) left-to-right through the module list, so a single
-      -- 'runStateT' over 'mapM' does the plumbing.
-      finalizeModule (m, (node, edges)) = do
-        let imported = Map.findWithDefault Map.empty m visibleSigs
-        node' <- Desugar.injectTerminalActionsWithSigs imported node
-                   >>= Desugar.expandCollectE
-        return (m, (node', edges))
-  case State.runStateT (mapM finalizeModule (Map.toList dag)) ds0 of
-    Left err ->
-      MM.throwSystemError . pretty $
-        Desugar.showParseError "<terminal-action synthesis>" err
-    Right (entries, dsFinal) -> do
-      -- The stream-batch types are discovered by this pass (it is the
-      -- first point where every module's signatures are visible), so
-      -- they are transferred from its final state rather than from the
-      -- parser's.
-      MM.modify (\st -> st
-        { stateSourceMap = Desugar.dsSourceMap dsFinal
-        , stateStreamElems = Desugar.dsStreamElems dsFinal <> stateStreamElems st
-        })
-      case Desugar.dsWarnings dsFinal of
-        [] -> return ()
-        ws -> MM.tell ws
-      return (Map.fromList entries)
-
--- | Construct a minimal 'Desugar.DState' for the post-parse synthesis pass.
--- Only the index counter, source map, and warning accumulator carry live
--- data; the remaining fields are unused by terminal-action / @collect
--- synthesis and are left empty.
-mkFinalizeDState :: Int -> Map.Map Int SrcLoc -> Desugar.DState
-mkFinalizeDState idx srcMap = Desugar.DState
-  { Desugar.dsExpIndex = idx
-  , Desugar.dsSourceMap = srcMap
-  , Desugar.dsDocMap = Map.empty
-  , Desugar.dsModulePath = Nothing
-  , Desugar.dsModuleConfig = defaultValue
-  , Desugar.dsSourceLines = []
-  , Desugar.dsLangMap = Map.empty
-  , Desugar.dsProjectRoot = Nothing
-  , Desugar.dsTermDocs = Map.empty
-  , Desugar.dsWarnings = []
-  , Desugar.dsModuleDoc = []
-  , Desugar.dsModuleEpilogues = []
-  , Desugar.dsNamespaces = Set.empty
-  , Desugar.dsDataCtors = Map.empty
-  , Desugar.dsStreamElems = Map.empty
-  }
-
--- | For each module, the term signatures visible to it: its own top-level
--- signatures plus, transitively through imports (honoring include / exclude /
--- alias, and skipping qualified imports whose terms are not in bare scope),
--- the exported signatures of imported modules.
---
--- Computed by the shared memoized bottom-up DAG fold 'DAG.synthesizeNodes'
--- (each module resolved once, not once-per-import-path). Each node yields a
--- @(visible, exported)@ pair; importers consume a child's @exported@ subset.
--- A module-import cycle stalls the fold ('Nothing'); such a program is
--- rejected by 'resolveImports' immediately after this pass, so degrading to
--- local-only visibility here is harmless.
-moduleVisibleSigs :: DAG MVar Import ExprI -> Map.Map MVar (Map.Map EVar TypeU)
-moduleVisibleSigs dag =
-  case runIdentity (MDD.synthesizeNodes resolve dag) of
-    Just resolved -> Map.map (fst . fst) resolved
-    Nothing -> Map.empty
-  where
-    resolve
-      :: MVar
-      -> ExprI
-      -> [(MVar, Import, (Map.Map EVar TypeU, Map.Map EVar TypeU))]
-      -> Identity (Map.Map EVar TypeU, Map.Map EVar TypeU)
-    resolve _ node children =
-      let visible = Map.union
-            (localSigs node)
-            (Map.unions [ applyImport imp childExported | (_, imp, (_, childExported)) <- children ])
-          exported = case AST.findExport node of
-            ExportAll -> visible
-            _ ->
-              let names = AST.findExportSet node
-               in Map.filterWithKey (\k _ -> Set.member (TermSymbol k) names) visible
-       in pure (visible, exported)
-
-    localSigs :: ExprI -> Map.Map EVar TypeU
-    localSigs node = Map.fromList [ (v, etype et) | (v, _, et) <- AST.findSignatures node ]
-
-    -- Apply an import edge to a child's exported sigs: rename by alias /
-    -- restrict by include list, drop excluded terms. Qualified imports
-    -- (namespace) bring no bare names.
-    applyImport :: Import -> Map.Map EVar TypeU -> Map.Map EVar TypeU
-    applyImport (Import _ include excludes namespace) srcExports
-      | isJust namespace = Map.empty
-      | otherwise =
-          let base = case include of
-                Nothing -> srcExports
-                Just syms -> Map.fromList
-                  [ (alias, sig)
-                  | AliasedTerm orig alias <- syms
-                  , Just sig <- [Map.lookup orig srcExports]
-                  ]
-              excluded = Set.fromList [ e | TermSymbol e <- excludes ]
-           in Map.filterWithKey (\k _ -> not (Set.member k excluded)) base
 
 -- | assume @t@ is a filename and open it, return file name and contents
 openLocalModule :: Path -> MorlocMonad (Maybe Path, Text)

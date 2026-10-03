@@ -1,0 +1,27 @@
+branchy all True
+branchy batches True
+branchy folded True
+partial all False
+--- branchy a ---
+batch of 2
+batch of 3
+--- branchy 3 ---
+batch of 3
+--- branchy x ---
+batch of 1
+--- branchy a --all ---
+5: 1 2 3 4 5
+--- branchy 3 --all ---
+3: 1 2 3
+--- branchy x --folded ---
+sum=7 batches=1
+--- branchy a --folded ---
+sum=15 batches=2
+--- branchy 3 --all=a.out --folded=f.out ---
+batch of 3
+3: 1 2 3
+sum=6 batches=1
+--- partial true --all ---
+5: 1 2 3 4 5
+--- partial false --all ---
+0:

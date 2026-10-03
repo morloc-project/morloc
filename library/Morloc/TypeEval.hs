@@ -186,6 +186,22 @@ reduceTypeLeaves scope t0 =
       let (t', c) = go bnd t in (EffectU effs t', c)
     descend bnd (OptionalU t) =
       let (t', c) = go bnd t in (OptionalU t', c)
+    -- A type-level operator holds ordinary types in its arguments, so an
+    -- alias can hide there: `Restrict Cols ['b]` has to expand `Cols`
+    -- before the operator can reduce. The head is a tag rather than a
+    -- type, so none of the AppU recursion hazards above apply.
+    descend bnd (OpU op ts) =
+      let (ts', cs) = unzip (map (go bnd) ts)
+      in (OpU op ts', or cs)
+    descend bnd (LitU (LRec fs)) =
+      let (vs', cs) = unzip (map (go bnd . snd) fs)
+      in (LitU (LRec (zip (map fst fs) vs')), or cs)
+    descend bnd (LitU (LList es)) =
+      let (es', cs) = unzip (map (go bnd) es)
+      in (LitU (LList es'), or cs)
+    descend bnd (LitU (LSet es)) =
+      let (es', cs) = unzip (map (go bnd) es)
+      in (LitU (LSet es'), or cs)
     descend _ t = (t, False)
 
 -- evaluate a type until terminal functions called, fail if termini are not reached
@@ -785,4 +801,20 @@ expandLeavesOnce scope t0 =
       let (t', c) = go bnd t in (EffectU effs t', c)
     descend bnd (OptionalU t) =
       let (t', c) = go bnd t in (OptionalU t', c)
+    -- A type-level operator holds ordinary types in its arguments, so an
+    -- alias can hide there: `Restrict Cols ['b]` has to expand `Cols`
+    -- before the operator can reduce. The head is a tag rather than a
+    -- type, so none of the AppU recursion hazards above apply.
+    descend bnd (OpU op ts) =
+      let (ts', cs) = unzip (map (go bnd) ts)
+      in (OpU op ts', or cs)
+    descend bnd (LitU (LRec fs)) =
+      let (vs', cs) = unzip (map (go bnd . snd) fs)
+      in (LitU (LRec (zip (map fst fs) vs')), or cs)
+    descend bnd (LitU (LList es)) =
+      let (es', cs) = unzip (map (go bnd) es)
+      in (LitU (LList es'), or cs)
+    descend bnd (LitU (LSet es)) =
+      let (es', cs) = unzip (map (go bnd) es)
+      in (LitU (LSet es'), or cs)
     descend _ t = (t, False)

@@ -1,0 +1,42 @@
+module main (rows, cols, wide, narrow, viaSchema, countRows)
+
+import root-py
+import table-py
+import vector-py
+
+-- A table's schema is written out in every signature that mentions it, so a
+-- type alias is the natural abbreviation. The alias has to survive into code
+-- generation: the operation applied to it is declared in an imported module,
+-- whose scope cannot see the alias.
+
+type Vcf (n :: Nat) = Table n {chrom = Str, pos = Int, qual = Real}
+
+type Schema = {chrom = Str, pos = Int, qual = Real}
+
+mk :: Vcf 3
+mk =
+  addCol "qual" ([1.5, 2.5, 3.5] :: Vector 3 Real)
+    (addCol "pos" ([10, 20, 30] :: Vector 3 Int)
+      (asCol "chrom" (["c1", "c1", "c2"] :: Vector 3 Str)))
+
+rows :: Int
+rows = nrow mk
+
+-- Point-free: the alias is the only thing that says what the argument is.
+countRows :: Vcf 3 -> Int
+countRows = nrow
+
+cols :: [Str]
+cols = names mk
+
+-- The alias flows through an operation that widens the schema.
+wide :: Table 3 {chrom = Str, pos = Int, qual = Real, keep = Bool}
+wide = addCol "keep" ([True, False, True] :: Vector 3 Bool) mk
+
+-- and through one that narrows it.
+narrow :: Vcf 3 -> Table 3 {chrom = Str, qual = Real}
+narrow = dropCols ["pos"]
+
+-- The Rec alone may also be named.
+viaSchema :: Table 3 Schema -> Vector 3 Int
+viaSchema = getCol "pos"

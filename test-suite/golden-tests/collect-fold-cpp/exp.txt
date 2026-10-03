@@ -1,0 +1,6 @@
+--- fold: batch boundaries preserved ---
+sum=15 batches=1,2,3
+--- gather: same producer, whole list ---
+0,1,2,3,4,5
+--- fold: four threads, one accumulator each ---
+sum=45 batches=4 merges=3

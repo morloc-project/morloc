@@ -623,9 +623,7 @@ unsafe fn build_pattern(jp: &serde_json::Value) -> Result<*mut MorlocPattern, Mo
 
     if ptype == "end" {
         // make_morloc_pattern_end - call C function
-        extern "C" {
-            fn make_morloc_pattern_end() -> *mut MorlocPattern;
-        }
+        use crate::eval_ffi::make_morloc_pattern_end;
         return Ok(make_morloc_pattern_end());
     }
 
@@ -700,15 +698,69 @@ unsafe fn build_pattern(jp: &serde_json::Value) -> Result<*mut MorlocPattern, Mo
     Ok(pat)
 }
 
+thread_local! {
+    // The named functions of the command whose expression is being built
+    // (a "named" node is only ever a command's root).
+    static NAMED_FUNCTIONS: std::cell::RefCell<std::collections::HashMap<String, *mut MorlocLamExpression>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+// Empties the table when a "named" node is built, whether or not its body
+// built.
+struct NamedScope;
+
+impl Drop for NamedScope {
+    fn drop(&mut self) {
+        NAMED_FUNCTIONS.with(|n| n.borrow_mut().clear());
+    }
+}
+
+// An application node: its schema, its arguments, and a function slot filled
+// by `set_function`.
+unsafe fn build_app(
+    je: &serde_json::Value,
+    set_function: impl FnOnce(*mut MorlocAppExpression) -> Result<(), MorlocError>,
+) -> Result<*mut MorlocExpression, MorlocError> {
+    use crate::ffi::parse_schema;
+    let mut err: *mut c_char = ptr::null_mut();
+    let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+    let jargs = je.get("args").and_then(|v| v.as_array());
+    let n = jargs.map(|a| a.len()).unwrap_or(0);
+
+    let c_schema_str = CString::new(schema_str).unwrap_or_default();
+    let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
+    if !err.is_null() {
+        let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
+        libc::free(err as *mut c_void);
+        return Err(MorlocError::Other(msg));
+    }
+
+    let args = libc::calloc(n, std::mem::size_of::<*mut MorlocExpression>()) as *mut *mut MorlocExpression;
+    if let Some(jargs) = jargs {
+        for (i, a) in jargs.iter().enumerate() {
+            *args.add(i) = build_expr(a)?;
+        }
+    }
+
+    let app = libc::calloc(1, std::mem::size_of::<MorlocAppExpression>()) as *mut MorlocAppExpression;
+    set_function(app)?;
+    (*app).args = args;
+    (*app).nargs = n;
+
+    let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
+    (*expr).etype = MorlocExpressionType::App;
+    (*expr).schema = schema;
+    (*expr).expr.app_expr = app;
+    Ok(expr)
+}
+
 unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, MorlocError> {
     let tag = je.get("tag").and_then(|v| v.as_str()).ok_or_else(|| MorlocError::Other("Expression missing 'tag' field".into()))?;
 
-    extern "C" {
-        fn parse_schema(s: *const c_char, errmsg: *mut *mut c_char) -> *mut CSchema;
-        fn make_morloc_literal(schema: *const c_char, prim: Primitive, errmsg: *mut *mut c_char) -> *mut MorlocExpression;
-        fn make_morloc_bound_var(schema: *const c_char, var: *mut c_char, errmsg: *mut *mut c_char) -> *mut MorlocExpression;
-        fn make_morloc_pattern(schema: *const c_char, pat: *mut MorlocPattern, errmsg: *mut *mut c_char) -> *mut MorlocExpression;
-    }
+    use crate::ffi::parse_schema;
+    use crate::eval_ffi::make_morloc_literal;
+    use crate::eval_ffi::make_morloc_bound_var;
+    use crate::eval_ffi::make_morloc_pattern;
 
     let mut err: *mut c_char = ptr::null_mut();
 
@@ -716,21 +768,34 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
         "lit" => {
             let schema = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
             let lt = je.get("lit_type").and_then(|v| v.as_str()).unwrap_or("");
-            let val = je.get("value").and_then(|v| v.as_str()).unwrap_or("0");
+            let val = je.get("value").and_then(|v| v.as_str()).ok_or_else(|| {
+                MorlocError::Other(format!("manifest literal of type '{lt}' has no value"))
+            })?;
+            // A literal that does not parse as its declared type is a malformed
+            // manifest, never a zero.
+            fn num<T: std::str::FromStr>(lt: &str, val: &str) -> Result<T, MorlocError> {
+                val.parse::<T>().map_err(|_| {
+                    MorlocError::Other(format!("manifest literal '{val}' is not a valid '{lt}'"))
+                })
+            }
             let mut prim: Primitive = std::mem::zeroed();
 
             match lt {
-                "f4" => prim.f4 = val.parse::<f32>().unwrap_or(0.0),
-                "f8" => prim.f8 = val.parse::<f64>().unwrap_or(0.0),
-                "i1" => prim.i1 = val.parse::<i8>().unwrap_or(0),
-                "i2" => prim.i2 = val.parse::<i16>().unwrap_or(0),
-                "i4" => prim.i4 = val.parse::<i32>().unwrap_or(0),
-                "i8" => prim.i8_ = val.parse::<i64>().unwrap_or(0),
-                "u1" => prim.u1 = val.parse::<u8>().unwrap_or(0),
-                "u2" => prim.u2 = val.parse::<u16>().unwrap_or(0),
-                "u4" => prim.u4 = val.parse::<u32>().unwrap_or(0),
-                "u8" => prim.u8_ = val.parse::<u64>().unwrap_or(0),
-                "j" => prim.s = CString::new(val).unwrap_or_default().into_raw(),
+                "f4" => prim.f4 = num(lt, val)?,
+                "f8" => prim.f8 = num(lt, val)?,
+                "i1" => prim.i1 = num(lt, val)?,
+                "i2" => prim.i2 = num(lt, val)?,
+                "i4" => prim.i4 = num(lt, val)?,
+                "i8" => prim.i8_ = num(lt, val)?,
+                "u1" => prim.u1 = num(lt, val)?,
+                "u2" => prim.u2 = num(lt, val)?,
+                "u4" => prim.u4 = num(lt, val)?,
+                "u8" => prim.u8_ = num(lt, val)?,
+                "j" => {
+                    prim.s = CString::new(val)
+                        .map_err(|_| MorlocError::Other("manifest bignum literal holds a NUL byte".into()))?
+                        .into_raw()
+                }
                 "b" => prim.b = val != "0",
                 "z" => prim.z = 0,
                 _ => return Err(MorlocError::Other(format!("Unknown lit_type: {}", lt))),
@@ -828,52 +893,66 @@ unsafe fn build_expr(je: &serde_json::Value) -> Result<*mut MorlocExpression, Mo
         }
 
         "app" => {
-            let schema_str = je.get("schema").and_then(|v| v.as_str()).unwrap_or("");
-            let jargs = je.get("args").and_then(|v| v.as_array());
-            let n = jargs.map(|a| a.len()).unwrap_or(0);
-
-            let c_schema_str = CString::new(schema_str).unwrap_or_default();
-            let schema = parse_schema(c_schema_str.as_ptr(), &mut err);
-            if !err.is_null() {
-                let msg = CStr::from_ptr(err).to_string_lossy().into_owned();
-                libc::free(err as *mut c_void);
-                return Err(MorlocError::Other(msg));
-            }
-
             let func = build_expr(je.get("func").unwrap_or(&serde_json::Value::Null))?;
-            let args = libc::calloc(n, std::mem::size_of::<*mut MorlocExpression>()) as *mut *mut MorlocExpression;
-            if let Some(jargs) = jargs {
-                for (i, a) in jargs.iter().enumerate() {
-                    *args.add(i) = build_expr(a)?;
+            build_app(je, |app| {
+                match (*func).etype {
+                    MorlocExpressionType::Pat => {
+                        (*app).atype = MorlocAppExpressionType::Pattern;
+                        (*app).function.pattern = (*func).expr.pattern_expr;
+                    }
+                    MorlocExpressionType::Lam => {
+                        (*app).atype = MorlocAppExpressionType::Lambda;
+                        (*app).function.lambda = (*func).expr.lam_expr;
+                    }
+                    MorlocExpressionType::Fmt => {
+                        (*app).atype = MorlocAppExpressionType::Format;
+                        (*app).function.fmt = (*func).expr.interpolation;
+                    }
+                    _ => {
+                        return Err(MorlocError::Other(format!("Invalid function in app expression (type={:?})", (*func).etype)));
+                    }
+                }
+                Ok(())
+            })
+        }
+
+        // A command's shared functions, then its body. Each function is a
+        // lambda built once; a "call" of it in the body (or in a later
+        // function) is an application of that one lambda.
+        "named" => {
+            NAMED_FUNCTIONS.with(|n| n.borrow_mut().clear());
+            let _scope = NamedScope;
+            if let Some(fs) = je.get("functions").and_then(|v| v.as_array()) {
+                for f in fs {
+                    let name = f.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let lam = build_expr(f.get("expr").unwrap_or(&serde_json::Value::Null))?;
+                    if (*lam).etype != MorlocExpressionType::Lam {
+                        return Err(MorlocError::Other(format!("Named function {} is not a lambda", name)));
+                    }
+                    let lam_ptr = (*lam).expr.lam_expr;
+                    NAMED_FUNCTIONS.with(|n| n.borrow_mut().insert(name, lam_ptr));
                 }
             }
+            build_expr(je.get("body").unwrap_or(&serde_json::Value::Null))
+        }
 
-            let app = libc::calloc(1, std::mem::size_of::<MorlocAppExpression>()) as *mut MorlocAppExpression;
-            match (*func).etype {
-                MorlocExpressionType::Pat => {
-                    (*app).atype = MorlocAppExpressionType::Pattern;
-                    (*app).function.pattern = (*func).expr.pattern_expr;
-                }
-                MorlocExpressionType::Lam => {
-                    (*app).atype = MorlocAppExpressionType::Lambda;
-                    (*app).function.lambda = (*func).expr.lam_expr;
-                }
-                MorlocExpressionType::Fmt => {
-                    (*app).atype = MorlocAppExpressionType::Format;
-                    (*app).function.fmt = (*func).expr.interpolation;
-                }
-                _ => {
-                    return Err(MorlocError::Other(format!("Invalid function in app expression (type={:?})", (*func).etype)));
-                }
+        "call" => {
+            let name = je.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let n = je.get("args").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            let lam = match NAMED_FUNCTIONS.with(|t| t.borrow().get(name).copied()) {
+                Some(p) => p,
+                None => return Err(MorlocError::Other(format!("Call of unknown named function {}", name))),
+            };
+            if n != (*lam).nargs {
+                return Err(MorlocError::Other(format!(
+                    "Named function {} takes {} arguments, called with {}", name, (*lam).nargs, n
+                )));
             }
-            (*app).args = args;
-            (*app).nargs = n;
-
-            let expr = libc::calloc(1, std::mem::size_of::<MorlocExpression>()) as *mut MorlocExpression;
-            (*expr).etype = MorlocExpressionType::App;
-            (*expr).schema = schema;
-            (*expr).expr.app_expr = app;
-            Ok(expr)
+            build_app(je, |app| {
+                (*app).atype = MorlocAppExpressionType::Lambda;
+                (*app).function.lambda = lam;
+                Ok(())
+            })
         }
 
         "lambda" => {
@@ -1756,7 +1835,11 @@ unsafe fn populate_terminal(dst: *mut ManifestTerminal, src: &morloc_manifest::T
         None => 0,
     };
     (*dst).long = c_strdup(&src.long);
-    (*dst).entry = c_strdup(&src.entry);
+    // Null when the action runs only on its command's saved output.
+    (*dst).entry = match &src.entry {
+        Some(e) => c_strdup(e),
+        None => std::ptr::null_mut(),
+    };
     (*dst).description = c_strdup(&src.description);
     (*dst).render = src.render;
     (*dst).default = src.default;
@@ -2227,17 +2310,15 @@ pub unsafe extern "C" fn manifest_to_discovery_json(manifest: *const Manifest) -
     }
     let m = &*manifest;
 
-    extern "C" {
-        fn json_buf_new() -> *mut c_void;
-        fn json_buf_finish(jb: *mut c_void) -> *mut c_char;
-        fn json_write_obj_start(jb: *mut c_void);
-        fn json_write_obj_end(jb: *mut c_void);
-        fn json_write_arr_start(jb: *mut c_void);
-        fn json_write_arr_end(jb: *mut c_void);
-        fn json_write_key(jb: *mut c_void, key: *const c_char);
-        fn json_write_string(jb: *mut c_void, val: *const c_char);
-        fn json_write_bool(jb: *mut c_void, val: bool);
-    }
+    use crate::json_ffi::json_buf_new;
+    use crate::json_ffi::json_buf_finish;
+    use crate::json_ffi::json_write_obj_start;
+    use crate::json_ffi::json_write_obj_end;
+    use crate::json_ffi::json_write_arr_start;
+    use crate::json_ffi::json_write_arr_end;
+    use crate::json_ffi::json_write_key;
+    use crate::json_ffi::json_write_string;
+    use crate::json_ffi::json_write_bool;
 
     let jb = json_buf_new();
     json_write_obj_start(jb);
@@ -2375,6 +2456,10 @@ pub unsafe extern "C" fn manifest_to_discovery_json(manifest: *const Manifest) -
             json_write_arr_start(jb);
             for j in 0..cmd.n_terminals {
                 let t = &*cmd.terminals.add(j);
+                // An action with no entry runs only from the command line.
+                if t.entry.is_null() {
+                    continue;
+                }
                 json_write_obj_start(jb);
                 if !t.long.is_null() {
                     json_write_key(jb, flag_key);
@@ -2434,4 +2519,25 @@ pub unsafe extern "C" fn manifest_to_discovery_json(manifest: *const Manifest) -
 
     json_write_obj_end(jb);
     json_buf_finish(jb)
+}
+
+#[cfg(test)]
+mod literal_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_literals_are_errors() {
+        let _shm = crate::init_test_shm();
+        let lit = |lt: &str, v: Option<&str>| {
+            let mut j = serde_json::json!({"tag": "lit", "schema": lt, "lit_type": lt});
+            if let Some(v) = v {
+                j["value"] = serde_json::json!(v);
+            }
+            unsafe { build_expr(&j) }
+        };
+        assert!(lit("u1", Some("300")).is_err(), "out-of-range u1 became a value");
+        assert!(lit("i4", Some("twelve")).is_err());
+        assert!(lit("f8", None).is_err(), "a missing value became a value");
+        assert!(lit("u1", Some("200")).is_ok());
+    }
 }

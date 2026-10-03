@@ -21,14 +21,14 @@ all:
 	MORLOC_LOG_DIR=$$PWD/runs ./nexus foo $(INPUT) >> obs.txt 2> obs.foo1.err
 	MORLOC_LOG_DIR=$$PWD/runs ./nexus foo $(INPUT) >> obs.txt 2> obs.foo2.err
 	@# Snapshot: 2 labeled runs -> 2 run dirs.
-	@echo "run_dirs_after_foo: $$(ls runs | wc -l)" >> obs.txt
+	@echo "run_dirs_after_foo: $$(ls runs | wc -l | tr -d ' ')" >> obs.txt
 	@# Each run dir must contain the same three artifacts.
 	@for d in runs/*; do \
 	  ls $$d | sort | xargs echo files: >> obs.txt; \
 	done
 	@# Each a/log must contain exactly 2 lines (1 start + 1 pass per call).
 	@for d in runs/*; do \
-	  echo "a_log_lines: $$(wc -l < $$d/a/log)" >> obs.txt; \
+	  echo "a_log_lines: $$(wc -l < $$d/a/log | tr -d ' ')" >> obs.txt; \
 	done
 	@# Sentinel content: start.json has run_id+pid; summary.json reports exit 0.
 	@for d in runs/*; do \
@@ -38,7 +38,7 @@ all:
 	done
 	@# Lazy path: an unlabeled call must NOT add a third directory.
 	MORLOC_LOG_DIR=$$PWD/runs ./nexus bar $(INPUT) >> obs.txt 2> obs.bar.err
-	@echo "run_dirs_after_bar: $$(ls runs | wc -l)" >> obs.txt
+	@echo "run_dirs_after_bar: $$(ls runs | wc -l | tr -d ' ')" >> obs.txt
 	cat obs.foo1.err obs.foo2.err obs.bar.err > obs.err
 
 clean:

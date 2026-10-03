@@ -1,4 +1,4 @@
-module main (isEven, isOdd)
+module main (isEven, isOdd, viaF)
 
 import root-py
 
@@ -11,3 +11,18 @@ isOdd :: Int -> Bool
 isOdd n
   ? n == 0 = False
   : isEven (n - 1)
+
+-- a pair entered through a term that is not exported, one of them also
+-- recursing on itself
+f :: Int -> Int
+f n
+  ? n <= 0 = 1
+  : g (n - 1)
+
+g :: Int -> Int
+g n
+  ? n <= 0 = 0
+  : (? n > 5 = g (n - 1) : f (n - 1))
+
+viaF :: Int -> Int
+viaF n = f n

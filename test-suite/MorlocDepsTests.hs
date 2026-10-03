@@ -22,6 +22,7 @@ import Morloc.Module
   ( OverwriteProtocol (..)
   , PinEntry (..)
   , addPin
+  , caseClash
   , hashEq
   , loadModuleMetadata
   , loadSnapshot
@@ -69,7 +70,25 @@ morlocDepsTests =
     , moduleVersionGateTests
     , snapshotLineTests
     , loadSnapshotTests
+    , caseClashTests
     ]
+
+-- | Installed modules whose names differ only in case would share one
+-- directory on a case-insensitive filesystem.
+caseClashTests :: TestTree
+caseClashTests =
+  testCase "a name differing from an installed one only in case clashes" $ do
+    tmp <- SD.getTemporaryDirectory
+    let lib = tmp </> "morloc-case-clash-test"
+    SD.createDirectoryIfMissing True (lib </> "foo")
+    SD.createDirectoryIfMissing True (lib </> "bar")
+    clash <- caseClash (lib </> "Foo")
+    none <- caseClash (lib </> "baz")
+    same <- caseClash (lib </> "foo")
+    SD.removeDirectoryRecursive lib
+    clash @?= Just "foo"
+    none @?= Nothing
+    same @?= Nothing
 
 -- ---------------------------------------------------------------------------
 -- loadSnapshot: directory merge, dotfile skipping, conflict detection

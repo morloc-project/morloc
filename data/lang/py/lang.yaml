@@ -51,6 +51,7 @@ ldSerializeFn: "morloc.put_value"
 ldTableImportFn: "mlc_table_import"
 ldDeserializeFn: "morloc.get_value"
 ldReleasePacketFn: "morloc.release_packet_shm"
+ldOwnedArgFn: "_mlc_owned"
 ldIntrinsicPrefix: "morloc."
 ldHelperVarPrefix: "__morloc_"
 
@@ -106,7 +107,7 @@ ldDispatchRemoteFooter: "}"
 ldLogWrap: "__mlc_wrap_log"
 ldClosureRegisterEntry: "dispatch[{{mid}}] = mlc_make_closure_dispatch({{mid}}, {{args}}, {{res}})"
 ldClosureTableHeader: "mlc_closure_table = {}"
-ldClosureTableEntry: "mlc_closure_table[{{mid}}] = {{caps}}"
+ldClosureTableEntry: "mlc_closure_table[{{mid}}] = ({{caps}}, {{bnds}})"
 
 # Pool template (loaded from pool.py, left empty here)
 ldPoolTemplate: ""

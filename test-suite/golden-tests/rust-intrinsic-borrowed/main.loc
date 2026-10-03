@@ -1,23 +1,34 @@
--- Regression guard for the Rust ToVoidstar double-borrow bug: a value-in
--- intrinsic (@show) applied to a BORROWED non-Copy value.
+-- A value-in intrinsic (@show) applied to a BORROWED non-Copy Rust value.
+-- `show(&(&Vec))` does not compile (`ToVoidstar` is not implemented for
+-- `&Vec<i64>`), and a clone would copy the whole value only to read it; the
+-- sink reborrows it instead, `show(&(*x))`.
 --
--- `showList` is called twice by `demo`, so the realizer keeps it a nested
--- manifold (not inlined into the owned dispatch entry); its non-Copy `[Int]`
--- parameter therefore arrives BORROWED (`&Vec<i64>`, the Rust asymmetric
--- convention). `@show xs` then serializes a borrowed non-Copy value. Before the
--- fix this emitted `rustmorloc::show(&(n_xs), ..)` = `show(&(&Vec))` -> the trait
--- `ToVoidstar` is not implemented for `&Vec<i64>` (E0277). The serialize sink now
--- own-adapts (clones) the borrowed value, so `&(clone)` is a valid `&Vec`.
+-- `showEach` maps over a list of lists, so each inner list reaches `@show` as
+-- a borrowed element; `lensEach` sends each one to Python, serializing it the
+-- same way. `demo` calls `showList` twice; whether it arrives
+-- borrowed depends on whether the realizer inlines it.
 
-module main (demo)
+module main (demo, showEach, lensEach)
 
 import root-rust
+import root-py
 
-source Rust from "helpers.rs" ("cat_str" as catStr)
+source Py from "helpers.py" ("py_len" as pyLen)
+pyLen :: [Int] -> Int
+
+source Rust from "helpers.rs" ("cat_str" as catStr, "rs_map" as rsMap)
 catStr :: Str -> Str -> Str
+rsMap :: (a -> b) -> [a] -> [b]
 
 showList :: [Int] -> Str
 showList xs = @show xs
 
 demo :: [Int] -> [Int] -> Str
 demo xs ys = catStr (showList xs) (showList ys)
+
+showEach :: [[Int]] -> [Str]
+showEach xss = map (\xs -> @show xs) xss
+
+
+lensEach :: [[Int]] -> [Int]
+lensEach xss = rsMap (\xs -> pyLen xs) xss

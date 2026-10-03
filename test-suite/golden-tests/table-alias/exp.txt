@@ -1,0 +1,6 @@
+3
+1
+["chrom","pos","qual"]
+[{"chrom":"c1","pos":10,"qual":1.5,"keep":true},{"chrom":"c1","pos":20,"qual":2.5,"keep":false},{"chrom":"c2","pos":30,"qual":3.5,"keep":true}]
+[{"chrom":"c1","qual":0.5}]
+[7]

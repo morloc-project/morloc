@@ -11,7 +11,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use crate::cschema::CSchema;
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 use crate::hash;
-use crate::http_ffi::{DaemonMethod, DaemonRequest, HttpMethod, HttpRequest};
+use crate::http_ffi::{DaemonMethod, DaemonRequest, HttpMethod};
 
 // -- Constants ----------------------------------------------------------------
 
@@ -124,65 +124,60 @@ unsafe fn resolve_render_target<'a>(
     cmd: &'a crate::manifest_ffi::ManifestCommand,
     render: *const c_char,
 ) -> Result<&'a crate::manifest_ffi::ManifestCommand, String> {
-    // The entry-command name to redirect to (borrowed from the manifest, which
-    // outlives this dispatch), or None for the command's own typed value
-    // (`raw` / no default).
-    let entry: Option<*const c_char> = if render.is_null() {
-        terminal_entry(cmd, None) // fire the @default terminal, if any
+    // The terminal the request names, or the `@default` one when it names
+    // none; no terminal at all means the command's own typed value.
+    let (terminal, named) = if render.is_null() {
+        (find_terminal(cmd, None), None)
     } else {
         let r = CStr::from_ptr(render).to_str().unwrap_or("");
         if r == "raw" {
-            None
-        } else {
-            match terminal_entry(cmd, Some(r)) {
-                Some(e) => Some(e),
-                None => {
-                    return Err(format!(
-                        "unknown render '{}' for command '{}'",
-                        r,
-                        CStr::from_ptr(cmd.name).to_string_lossy()
-                    ))
-                }
+            return Ok(cmd);
+        }
+        match find_terminal(cmd, Some(r)) {
+            Some(t) => (Some(t), Some(r)),
+            None => {
+                return Err(format!(
+                    "unknown render '{}' for command '{}'",
+                    r,
+                    CStr::from_ptr(cmd.name).to_string_lossy()
+                ))
             }
         }
     };
-    match entry {
-        None => Ok(cmd),
-        Some(name) => {
-            let m: &'a crate::manifest_ffi::Manifest = &*mv;
-            m.command_by_name(CStr::from_ptr(name)).ok_or_else(|| {
-                format!(
-                    "render entry '{}' not found",
-                    CStr::from_ptr(name).to_string_lossy()
-                )
-            })
-        }
+    let Some(t) = terminal else { return Ok(cmd) };
+    // An action with no entry applies to the command's whole streamed output,
+    // which only the command line saves and replays.
+    if t.entry.is_null() {
+        let which = match named {
+            Some(r) => format!("render '{}'", r),
+            None => "the default render".to_string(),
+        };
+        return Err(format!(
+            "{} of command '{}' runs only from the command line; request render=raw \
+             for the command's own output",
+            which,
+            CStr::from_ptr(cmd.name).to_string_lossy()
+        ));
     }
+    let m: &'a crate::manifest_ffi::Manifest = &*mv;
+    m.command_by_name(CStr::from_ptr(t.entry)).ok_or_else(|| {
+        format!(
+            "render entry '{}' not found",
+            CStr::from_ptr(t.entry).to_string_lossy()
+        )
+    })
 }
 
-/// The entry-command name (`t.entry`, borrowed from the manifest) of the first
-/// matching terminal, or None. `match_long = Some(l)` picks the terminal whose
-/// long flag is `l`; `None` picks the `@default` terminal.
-unsafe fn terminal_entry(
-    cmd: &crate::manifest_ffi::ManifestCommand,
+/// The first terminal whose long flag is `match_long`, or with `None` the
+/// `@default` terminal.
+unsafe fn find_terminal<'a>(
+    cmd: &'a crate::manifest_ffi::ManifestCommand,
     match_long: Option<&str>,
-) -> Option<*const c_char> {
-    for i in 0..cmd.n_terminals {
-        let t = &*cmd.terminals.add(i);
-        if t.entry.is_null() {
-            continue;
-        }
-        let matched = match match_long {
-            Some(l) => {
-                !t.long.is_null() && CStr::from_ptr(t.long).to_str().map_or(false, |x| x == l)
-            }
-            None => t.default,
-        };
-        if matched {
-            return Some(t.entry);
-        }
-    }
-    None
+) -> Option<&'a crate::manifest_ffi::ManifestTerminal> {
+    (0..cmd.n_terminals).map(|i| &*cmd.terminals.add(i)).find(|t| match match_long {
+        Some(l) => !t.long.is_null() && CStr::from_ptr(t.long).to_str().map_or(false, |x| x == l),
+        None => t.default,
+    })
 }
 // Eval sandbox policy for served eval/bind. When G_EVAL_SANDBOX is set, the
 // forked `morloc eval` runs with `--eval-sandbox` (+ the allow-list), so it
@@ -361,7 +356,7 @@ struct BindingEntry {
     names: Vec<String>,
 }
 
-struct BindingStore {
+pub struct BindingStore {
     entries: HashMap<u64, BindingEntry>,
     /// Index from name -> hash for name-based lookup
     name_index: HashMap<String, u64>,
@@ -494,27 +489,13 @@ impl BindingStore {
             libc::close(stdout_pipe[1]);
             libc::close(stderr_pipe[1]);
 
-            let mut stderr_buf = vec![0u8; 4096];
-            let mut stderr_len: usize = 0;
-            loop {
-                let n = libc::read(
-                    stderr_pipe[0],
-                    stderr_buf.as_mut_ptr().add(stderr_len) as *mut c_void,
-                    stderr_buf.len() - stderr_len - 1,
-                );
-                if n <= 0 {
-                    break;
-                }
-                stderr_len += n as usize;
-            }
+            let (_, stderr_buf) = drain_pair(stdout_pipe[0], stderr_pipe[0]);
             libc::close(stdout_pipe[0]);
             libc::close(stderr_pipe[0]);
 
-            let mut status: i32 = 0;
-            libc::waitpid(pid, &mut status, 0);
-
-            if !libc::WIFEXITED(status) || libc::WEXITSTATUS(status) != 0 {
-                stderr_buf.truncate(stderr_len);
+            let ok = wait_child(pid)
+                .is_some_and(|st| libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0);
+            if !ok {
                 let msg = String::from_utf8_lossy(&stderr_buf);
                 eprintln!("binding_store_bind: morloc eval --save failed: {}", msg);
                 return None;
@@ -577,16 +558,15 @@ impl BindingStore {
 // -- C-exported binding store functions ---------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn binding_store_init(base_dir: *const c_char) -> *mut c_void {
+pub unsafe extern "C" fn binding_store_init(base_dir: *const c_char) -> *mut BindingStore {
     let dir = CStr::from_ptr(base_dir).to_string_lossy().into_owned();
-    let store = Box::new(BindingStore::new(&dir));
-    Box::into_raw(store) as *mut c_void
+    Box::into_raw(Box::new(BindingStore::new(&dir)))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn binding_store_free(store: *mut c_void) {
+pub unsafe extern "C" fn binding_store_free(store: *mut BindingStore) {
     if !store.is_null() {
-        drop(Box::from_raw(store as *mut BindingStore));
+        drop(Box::from_raw(store));
     }
 }
 
@@ -932,10 +912,8 @@ pub unsafe extern "C" fn daemon_serialize_response(
 // -- Discovery ----------------------------------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn daemon_build_discovery(manifest: *mut c_void) -> *mut c_char {
-    extern "C" {
-        fn manifest_to_discovery_json(manifest: *const c_void) -> *mut c_char;
-    }
+pub unsafe extern "C" fn daemon_build_discovery(manifest: *mut crate::manifest_ffi::Manifest) -> *mut c_char {
+    use crate::manifest_ffi::manifest_to_discovery_json;
     manifest_to_discovery_json(manifest)
 }
 
@@ -952,8 +930,12 @@ pub extern "C" fn daemon_set_eval_timeout(timeout_sec: i32) {
 /// separated module allow-list (may be null/empty). The nexus calls this
 /// once before serving; the global is process-wide, so every serve path
 /// (daemon, router, future MCP eval) is covered.
+///
+/// # Safety
+///
+/// `allowed` must be null or a NUL-terminated string.
 #[no_mangle]
-pub extern "C" fn daemon_set_eval_policy(sandbox: bool, allowed: *const c_char) {
+pub unsafe extern "C" fn daemon_set_eval_policy(sandbox: bool, allowed: *const c_char) {
     G_EVAL_SANDBOX.store(sandbox, Ordering::Relaxed);
     let list = if allowed.is_null() {
         None
@@ -1076,6 +1058,33 @@ fn take_noted_child_exit(pid: i32) -> Option<i32> {
     None
 }
 
+/// The exit status of child `pid`, whether this thread reaps it or the
+/// SIGCHLD handler already has; `None` if neither yields one.
+fn wait_child(pid: i32) -> Option<i32> {
+    let mut status: i32 = 0;
+    loop {
+        // SAFETY: waitpid writes only `status`.
+        let rc = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if rc == pid {
+            return Some(status);
+        }
+        if rc < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        break;
+    }
+    // The pipes the caller drained only reach EOF when the child exits, so
+    // the handler has usually reaped it already; give it a moment to record
+    // the status if the reap and the deposit straddle this point.
+    for _ in 0..NOTED_EXIT_POLLS {
+        if let Some(s) = take_noted_child_exit(pid) {
+            return Some(s);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    None
+}
+
 // -- Fork-based eval/typecheck ------------------------------------------------
 
 /// Fork `morloc <subcmd> <expr>`, capture stdout/stderr, return a DaemonResponse.
@@ -1163,42 +1172,25 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
     libc::close(stdout_pipe[1]);
     libc::close(stderr_pipe[1]);
 
-    let stdout_buf = read_fd_to_vec(stdout_pipe[0]);
+    let (stdout_buf, stderr_buf) = drain_pair(stdout_pipe[0], stderr_pipe[0]);
     libc::close(stdout_pipe[0]);
-    let stderr_buf = read_fd_to_vec(stderr_pipe[0]);
     libc::close(stderr_pipe[0]);
 
-    // The child's status may already have been consumed by the nexus's
-    // SIGCHLD handler: the pipes above only reach EOF when the child exits,
-    // so the handler has usually run by the time we get here. Fall back to
-    // what it recorded, and give it a moment to record it if the reap and
-    // the deposit straddle this point.
-    let mut status: i32 = 0;
-    if libc::waitpid(pid, &mut status, 0) != pid {
-        let mut noted = None;
-        for _ in 0..NOTED_EXIT_POLLS {
-            noted = take_noted_child_exit(pid);
-            if noted.is_some() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
+    let status = match wait_child(pid) {
+        Some(st) => st,
+        None => {
+            (*resp).success = false;
+            (*resp).error_kind = DAEMON_ERROR_INTERNAL;
+            let c = CString::new(format!(
+                "lost the exit status of the forked `morloc {}`; \
+                 its result cannot be trusted",
+                subcmd,
+            ))
+            .unwrap_or_default();
+            (*resp).error = libc::strdup(c.as_ptr());
+            return resp;
         }
-        match noted {
-            Some(s) => status = s,
-            None => {
-                (*resp).success = false;
-                (*resp).error_kind = DAEMON_ERROR_INTERNAL;
-                let c = CString::new(format!(
-                    "lost the exit status of the forked `morloc {}`; \
-                     its result cannot be trusted",
-                    subcmd,
-                ))
-                .unwrap_or_default();
-                (*resp).error = libc::strdup(c.as_ptr());
-                return resp;
-            }
-        }
-    }
+    };
 
     if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 {
         let mut out = String::from_utf8_lossy(&stdout_buf).into_owned();
@@ -1291,18 +1283,39 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
     resp
 }
 
-/// Read an fd to completion into a Vec<u8>.
-unsafe fn read_fd_to_vec(fd: i32) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(65536);
+/// Read two pipes to end of file at once, so a child that fills one while
+/// the other is being read cannot block forever. Returns both contents.
+unsafe fn drain_pair(a: i32, b: i32) -> (Vec<u8>, Vec<u8>) {
+    let mut out = (Vec::new(), Vec::new());
+    let mut open = [a >= 0, b >= 0];
     let mut tmp = [0u8; 8192];
-    loop {
-        let n = libc::read(fd, tmp.as_mut_ptr() as *mut c_void, tmp.len());
-        if n <= 0 {
+    while open[0] || open[1] {
+        let mut fds = [
+            libc::pollfd { fd: if open[0] { a } else { -1 }, events: libc::POLLIN, revents: 0 },
+            libc::pollfd { fd: if open[1] { b } else { -1 }, events: libc::POLLIN, revents: 0 },
+        ];
+        if libc::poll(fds.as_mut_ptr(), 2, -1) < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
             break;
         }
-        buf.extend_from_slice(&tmp[..n as usize]);
+        for k in 0..2 {
+            if !open[k] || fds[k].revents == 0 {
+                continue;
+            }
+            let n = libc::read(fds[k].fd, tmp.as_mut_ptr() as *mut c_void, tmp.len());
+            if n > 0 {
+                let dst = if k == 0 { &mut out.0 } else { &mut out.1 };
+                dst.extend_from_slice(&tmp[..n as usize]);
+            } else if n == 0
+                || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+            {
+                open[k] = false;
+            }
+        }
     }
-    buf
+    out
 }
 
 // -- Packet-mode result serialization -----------------------------------------
@@ -1440,7 +1453,7 @@ unsafe fn adopt_rptr_result(packet: *const u8) {
 
 #[no_mangle]
 pub unsafe extern "C" fn daemon_dispatch(
-    manifest: *mut c_void,
+    manifest: *mut crate::manifest_ffi::Manifest,
     request: *mut DaemonRequest,
     sockets: *mut MorlocSocket,
     _shm_basename: *const c_char,
@@ -1651,52 +1664,18 @@ pub unsafe extern "C" fn daemon_dispatch(
     // Delegate to the C functions that handle manifest lookup, arg parsing,
     // schema handling, and pool communication. These are all already ported
     // to Rust in other _ffi modules, so we declare them as extern "C".
-    extern "C" {
-        fn parse_schema(schema: *const c_char, errmsg: *mut *mut c_char) -> *mut CSchema;
-        fn free_schema(schema: *mut CSchema);
-        fn initialize_positional(value: *mut c_char) -> *mut c_void;
-        fn free_argument_t(arg: *mut c_void);
-        fn parse_cli_data_argument(
-            dest: *mut u8,
-            arg: *const c_void,
-            schema: *const CSchema,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
-        fn make_call_packet_from_cli(
-            dest: *mut u8,
-            mid: u32,
-            args: *mut *mut c_void,
-            arg_schema_strs: *mut *mut c_char,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
-        fn send_and_receive_over_socket(
-            socket_path: *const c_char,
-            packet: *const u8,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
-        fn get_morloc_data_packet_error_message(
-            data: *const u8,
-            errmsg: *mut *mut c_char,
-        ) -> *mut c_char;
-        fn get_morloc_data_packet_value(
-            data: *const u8,
-            schema: *const CSchema,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
-        fn voidstar_to_json_string(
-            data: *const c_void,
-            schema: *const CSchema,
-            errmsg: *mut *mut c_char,
-        ) -> *mut c_char;
-        fn morloc_eval(
-            expr: *mut c_void,  // actually *mut MorlocExpression
-            return_schema: *mut CSchema,
-            arg_voidstar: *mut *mut u8,
-            arg_schemas: *mut *mut CSchema,
-            nargs: usize,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
-    }
+    use crate::ffi::parse_schema;
+    use crate::ffi::free_schema;
+    use crate::cli::initialize_positional;
+    use crate::cli::free_argument_t;
+    use crate::cli::parse_cli_data_argument;
+    use crate::cli::make_call_packet_from_cli;
+    use crate::ipc_ffi::send_and_receive_over_socket;
+    use crate::packet_ffi::get_morloc_data_packet_error_message;
+    use crate::packet_ffi::get_morloc_data_packet_value;
+    use crate::json_ffi::voidstar_to_json_string;
+    use crate::arrow_ffi::arrow_to_json_string;
+    use crate::eval_ffi::morloc_eval;
 
     // The manifest is the canonical v2 C struct from manifest_ffi.rs.
     // No local mirror needed -- import the real type and walk it.
@@ -1754,7 +1733,7 @@ pub unsafe extern "C" fn daemon_dispatch(
 
     // Parse JSON args into argument_t** array
     let mut err: *mut c_char = ptr::null_mut();
-    let args: *mut *mut c_void;
+    let args: *mut *mut crate::cli::ArgumentT;
 
     if !(*request).args_json.is_null() {
         // Parse the JSON array
@@ -1809,7 +1788,7 @@ pub unsafe extern "C" fn daemon_dispatch(
         }
 
         args = libc::calloc(expected_nargs + 1, std::mem::size_of::<*mut c_void>())
-            as *mut *mut c_void;
+            as *mut *mut crate::cli::ArgumentT;
         for (i, c) in arg_texts.iter().enumerate() {
             let dup = libc::strdup(c.as_ptr());
             *args.add(i) = initialize_positional(dup);
@@ -1827,7 +1806,7 @@ pub unsafe extern "C" fn daemon_dispatch(
             return resp;
         }
         args =
-            libc::calloc(1, std::mem::size_of::<*mut c_void>()) as *mut *mut c_void;
+            libc::calloc(1, std::mem::size_of::<*mut c_void>()) as *mut *mut crate::cli::ArgumentT;
         *args = ptr::null_mut();
     }
 
@@ -1942,7 +1921,7 @@ pub unsafe extern "C" fn daemon_dispatch(
                 (*resp).error = err;
             } else {
                 let result_abs = morloc_eval(
-                    cmd.expr as *mut c_void,
+                    cmd.expr,
                     return_schema,
                     arg_voidstars,
                     arg_schemas_arr,
@@ -1975,11 +1954,22 @@ pub unsafe extern "C" fn daemon_dispatch(
                         &mut err,
                     );
                 } else {
-                    let json = voidstar_to_json_string(
-                        result_abs as *const c_void,
-                        return_schema as *const CSchema,
-                        &mut err,
-                    );
+                    // A table is an Arrow block, which the generic voidstar
+                    // serializer refuses. Render it as the array of row
+                    // objects its JSON Schema already advertises, so a
+                    // served or MCP caller gets data rather than an error.
+                    // CSchema carries the discriminant as a raw u32.
+                    let returns_table = (*(return_schema as *const CSchema)).serial_type
+                        == morloc_runtime_types::schema::SerialType::Table as u32;
+                    let json = if returns_table {
+                        arrow_to_json_string(result_abs as *const c_void, &mut err)
+                    } else {
+                        voidstar_to_json_string(
+                            result_abs as *const c_void,
+                            return_schema as *const CSchema,
+                            &mut err,
+                        )
+                    };
                     if !err.is_null() {
                         (*resp).success = false;
                         (*resp).error_kind = DAEMON_ERROR_INTERNAL;
@@ -2174,11 +2164,20 @@ pub unsafe extern "C" fn daemon_dispatch(
                                 cmd.ret.mime,
                             );
                         } else {
-                            let json = voidstar_to_json_string(
-                                packet_value as *const c_void,
-                                return_schema as *const CSchema,
-                                &mut err,
-                            );
+                            // Same reason as the eval path above: a table is
+                            // an Arrow block, not a generic voidstar.
+                            let returns_table =
+                                (*(return_schema as *const CSchema)).serial_type
+                                    == morloc_runtime_types::schema::SerialType::Table as u32;
+                            let json = if returns_table {
+                                arrow_to_json_string(packet_value as *const c_void, &mut err)
+                            } else {
+                                voidstar_to_json_string(
+                                    packet_value as *const c_void,
+                                    return_schema as *const CSchema,
+                                    &mut err,
+                                )
+                            };
                             if !err.is_null() {
                                 (*resp).success = false;
                                 (*resp).error_kind = DAEMON_ERROR_INTERNAL;
@@ -2381,7 +2380,7 @@ unsafe fn handle_lp_connection(
     // it off and keep the JSON `result`. Packet mode already returns raw bytes.
     let want_media = (*req).media && !want_packet;
     let prev_media = set_current_output_media_bytes(want_media);
-    let resp = daemon_dispatch(manifest, req, sockets, shm_basename);
+    let resp = daemon_dispatch(manifest as *mut crate::manifest_ffi::Manifest, req, sockets, shm_basename);
     set_current_output_media_bytes(prev_media);
     set_current_output_packet(prev);
 
@@ -2432,30 +2431,11 @@ unsafe fn handle_http_connection(
     sockets: *mut MorlocSocket,
     shm_basename: *const c_char,
 ) {
-    extern "C" {
-        fn http_parse_request(fd: i32, errmsg: *mut *mut c_char) -> *mut HttpRequest;
-        fn http_free_request(req: *mut HttpRequest);
-        fn http_write_response(
-            fd: i32,
-            status: i32,
-            content_type: *const c_char,
-            body: *const c_char,
-            body_len: usize,
-        ) -> bool;
-        fn http_write_response_ex(
-            fd: i32,
-            status: i32,
-            content_type: *const c_char,
-            body: *const c_char,
-            body_len: usize,
-            extra_headers: *const c_char,
-        ) -> bool;
-        fn http_to_daemon_request(
-            req: *mut HttpRequest,
-            errmsg: *mut *mut c_char,
-            error_kind: *mut i32,
-        ) -> *mut DaemonRequest;
-    }
+    use crate::http_ffi::http_parse_request;
+    use crate::http_ffi::http_free_request;
+    use crate::http_ffi::http_write_response;
+    use crate::http_ffi::http_write_response_ex;
+    use crate::http_ffi::http_to_daemon_request;
 
     let mut errmsg: *mut c_char = ptr::null_mut();
     let http_req = http_parse_request(client_fd, &mut errmsg);
@@ -2527,7 +2507,7 @@ unsafe fn handle_http_connection(
     // `Content-Type` below.
     let prev_http = set_current_output_http(true);
     let prev_media = set_current_output_media_bytes(true);
-    let resp = daemon_dispatch(manifest, req, sockets, shm_basename);
+    let resp = daemon_dispatch(manifest as *mut crate::manifest_ffi::Manifest, req, sockets, shm_basename);
     set_current_output_media_bytes(prev_media);
     set_current_output_http(prev_http);
 
@@ -2715,7 +2695,7 @@ fn write_port_file_atomic(
 #[no_mangle]
 pub unsafe extern "C" fn daemon_run(
     config: *mut DaemonConfig,
-    manifest: *mut c_void,
+    manifest: *mut crate::manifest_ffi::Manifest,
     sockets: *mut MorlocSocket,
     n_pools: usize,
     shm_basename: *const c_char,
@@ -2772,15 +2752,14 @@ pub unsafe extern "C" fn daemon_run(
             eprintln!("morloc-daemon: failed to create unix socket");
             return;
         }
-        let mut addr: libc::sockaddr_un = std::mem::zeroed();
-        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
-        let path_bytes = CStr::from_ptr((*config).unix_socket_path).to_bytes();
-        let copy_len = path_bytes.len().min(addr.sun_path.len() - 1);
-        ptr::copy_nonoverlapping(
-            path_bytes.as_ptr() as *const c_char,
-            addr.sun_path.as_mut_ptr(),
-            copy_len,
-        );
+        let addr = match crate::utility::unix_socket_addr(CStr::from_ptr((*config).unix_socket_path).to_bytes()) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("morloc-daemon: {}", e);
+                libc::close(sock_fd);
+                return;
+            }
+        };
         libc::unlink((*config).unix_socket_path);
         if libc::bind(
             sock_fd,
@@ -2917,7 +2896,7 @@ pub unsafe extern "C" fn daemon_run(
             jobs: VecDeque::new(),
         }),
         cond: Condvar::new(),
-        manifest,
+        manifest: manifest as *mut c_void,
         sockets,
         shm_basename,
     });
@@ -3163,6 +3142,53 @@ mod media_wire_tests {
             libc::free(resp.result_bytes as *mut c_void);
             libc::free(resp.mime as *mut c_void);
             daemon_free_response(parsed);
+        }
+    }
+}
+
+#[cfg(test)]
+mod child_output_tests {
+    use super::*;
+
+    fn write_all(fd: i32, byte: u8, n: usize) -> bool {
+        let buf = vec![byte; n];
+        let mut off = 0;
+        while off < n {
+            let w = unsafe { libc::write(fd, buf.as_ptr().add(off) as *const c_void, n - off) };
+            if w <= 0 {
+                return false;
+            }
+            off += w as usize;
+        }
+        true
+    }
+
+    /// A child that writes more than a pipe holds to each of its two outputs
+    /// is drained to the end of both, whatever order it writes in.
+    #[test]
+    fn both_outputs_of_a_child_are_drained() {
+        const N: usize = 1 << 20;
+        unsafe {
+            let mut o = [0 as libc::c_int; 2];
+            let mut e = [0 as libc::c_int; 2];
+            assert_eq!(libc::pipe(o.as_mut_ptr()), 0);
+            assert_eq!(libc::pipe(e.as_mut_ptr()), 0);
+            let pid = libc::fork();
+            assert!(pid >= 0);
+            if pid == 0 {
+                libc::close(o[0]);
+                libc::close(e[0]);
+                let ok = write_all(e[1], b'e', N) && write_all(o[1], b'o', N);
+                libc::_exit(if ok { 0 } else { 1 });
+            }
+            libc::close(o[1]);
+            libc::close(e[1]);
+            let (out, err) = drain_pair(o[0], e[0]);
+            libc::close(o[0]);
+            libc::close(e[0]);
+            assert_eq!(wait_child(pid), Some(0));
+            assert_eq!((out.len(), err.len()), (N, N));
+            assert!(out.iter().all(|&b| b == b'o') && err.iter().all(|&b| b == b'e'));
         }
     }
 }

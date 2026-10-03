@@ -237,15 +237,18 @@ writeMorlocReturn ((result, msgs), st) = do
     Right _ -> return True
 
 makeMorlocError :: MorlocState -> MorlocError -> MDoc
-makeMorlocError st (SourcedError i msg) =
+makeMorlocError st (SourcedError i msg0) =
   case Map.lookup i (stateSourceMap st) of
     Just loc -> pretty loc <> ": error:" <> line <> msg <> snippet st loc
     Nothing -> "Compiler bug, broken index" <+> pretty i <+> "with attached error:" <+> msg
+  where
+    msg = maybe msg0 (\note -> note <> line <> msg0) (Map.lookup i (stateErrorNotes st))
 makeMorlocError _ (SystemError msg) = msg
 makeMorlocError st (UnificationError lhs rhs context msg) =
   case (Map.lookup lhs srcMap, Map.lookup rhs srcMap, Map.lookup context srcMap) of
     (Just lhsLoc, rhsLoc, contextLoc) ->
-      "Unification error:" <+> msg
+      maybe mempty (<> line) note
+        <> "Unification error:" <+> msg
         <> line
         <> "Found while unifying" <+> maybe mempty pretty contextLoc
         <> line
@@ -256,6 +259,7 @@ makeMorlocError st (UnificationError lhs rhs context msg) =
     _ -> "Compiler bug, broken indices" <+> pretty (lhs, rhs, context) <+> "with attached error:" <+> msg
   where
     srcMap = stateSourceMap st
+    note = listToMaybe (mapMaybe (`Map.lookup` stateErrorNotes st) [lhs, rhs, context])
 
 {- | Render a source code snippet with error location markers.
 For single-line spans: ^~~~^ underline from start to end column.

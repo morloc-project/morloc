@@ -19,6 +19,10 @@ source Cpp from "impl.hpp"
   , "make_strs"       as makeStrs
   , "sort_strs"       as sortStrs
   , "join_strs"       as joinStrs
+  , "zero_acc"        as zeroAcc
+  , "add_batch"       as addBatch
+  , "merge_acc"       as mergeAcc
+  , "show_acc"        as showAcc
   )
 
 makeInts :: Int -> [Int]
@@ -30,6 +34,10 @@ tagIntsOff :: U64 -> [Int] -> [Int]
 renderInts :: [Int] -> Str
 renderIntsOff :: U64 -> [Int] -> Str
 joinStrs :: [Str] -> Str
+zeroAcc :: Int
+addBatch :: Int -> [Int] -> Int
+mergeAcc :: Int -> Int -> Int
+showAcc :: Int -> Str
 
 -- morloc-native whole-list IFile handlers (need no per-language binding)
 sumIntsFile :: IFile [Int] -> <IO> Int
@@ -58,6 +66,7 @@ produceInts sink = do
 --' @with -T/--tag-off=tagIntsOff(@offset) @stream
 --' @render -r/--text=renderInts @stream
 --' @render -R/--text-off=renderIntsOff(@offset) @stream
+--' @render -F/--folded=showAcc @fold=addBatch @init=zeroAcc @combine=mergeAcc
 streamInts :: <IO> ()
 streamInts = @collect produceInts
 

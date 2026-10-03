@@ -1,0 +1,23 @@
+module main (run, runPartial)
+
+import root-cpp
+
+-- A native C++ function drives a morloc tail loop: it hands the loop a C++
+-- lambda as the loop's function argument. The loop runs in the same pool as
+-- its caller, so the lambda must be called directly; it has no serial form.
+
+source Cpp from "host.hpp" ("hostDrive")
+
+hostDrive :: (([Int] -> Int) -> Int) -> Int
+
+-- Feed [n], [n-1], ..., [1] to the sink, summing what it returns.
+feed :: Int -> Int -> ([Int] -> Int) -> Int
+feed acc n sink = ? n == 0 = acc : feed (acc + sink [n, n]) (n - 1) sink
+
+--' The host's sink doubles each element sum; expect n*(n+1)*2
+run :: Int -> Int
+run n = hostDrive (feed 0 n)
+
+--' The same loop, with an accumulator the caller chose
+runPartial :: Int -> Int -> Int
+runPartial start n = hostDrive (feed start n)

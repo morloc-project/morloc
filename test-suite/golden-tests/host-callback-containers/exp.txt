@@ -1,0 +1,145 @@
+--- main-py recHelper ---
+"ok 105"
+--- main-py recLoop ---
+"ok 105"
+--- main-py getter ---
+"ok 105"
+--- main-py nested ---
+"ok 105"
+--- main-py tupHelper ---
+"ok 105"
+--- main-py listHelper ---
+"ok 311"
+--- main-py optLiteral ---
+"ok 105"
+--- main-py optHelper ---
+"ok 105"
+--- main-py mapHelper ---
+"ok 105"
+--- main-py suspOps ---
+"ok 205"
+--- main-py hostRec ---
+6
+--- main-py listRoundTrip ---
+"ok 17"
+--- main-py roundTrip ---
+"ok 6"
+--- main-py aliased ---
+"ok 205 101"
+--- main-py cbRet ---
+"ok 110"
+--- main-py cbParam ---
+"ok 30"
+--- main-cpp recHelper ---
+"ok 105"
+--- main-cpp recLoop ---
+"ok 105"
+--- main-cpp getter ---
+"ok 105"
+--- main-cpp nested ---
+"ok 105"
+--- main-cpp tupHelper ---
+"ok 105"
+--- main-cpp listHelper ---
+"ok 311"
+--- main-cpp optLiteral ---
+"ok 105"
+--- main-cpp optHelper ---
+"ok 105"
+--- main-cpp mapHelper ---
+"ok 105"
+--- main-cpp suspOps ---
+"ok 205"
+--- main-cpp hostRec ---
+6
+--- main-cpp listRoundTrip ---
+"ok 17"
+--- main-cpp roundTrip ---
+"ok 6"
+--- main-cpp aliased ---
+"ok 205 101"
+--- main-cpp cbRet ---
+"ok 110"
+--- main-cpp cbParam ---
+"ok 30"
+--- main-rust recHelper ---
+"ok 105"
+--- main-rust recLoop ---
+"ok 105"
+--- main-rust getter ---
+"ok 105"
+--- main-rust nested ---
+"ok 105"
+--- main-rust tupHelper ---
+"ok 105"
+--- main-rust listHelper ---
+"ok 311"
+--- main-rust optLiteral ---
+"ok 105"
+--- main-rust optHelper ---
+"ok 105"
+--- main-rust suspOps ---
+"ok 205"
+--- main-rust hostRec ---
+6
+--- main-rust listRoundTrip ---
+"ok 17"
+--- main-rust roundTrip ---
+"ok 6"
+--- main-rust aliased ---
+"ok 205 101"
+--- main-rust cbRet ---
+"ok 110"
+--- main-rust cbParam ---
+"ok 30"
+--- main-r recHelper ---
+"ok 105"
+--- main-r recLoop ---
+"ok 105"
+--- main-r getter ---
+"ok 105"
+--- main-r nested ---
+"ok 105"
+--- main-r tupHelper ---
+"ok 105"
+--- main-r listHelper ---
+"ok 311"
+--- main-r optLiteral ---
+"ok 105"
+--- main-r optHelper ---
+"ok 105"
+--- main-r mapHelper ---
+"ok 105"
+--- main-r suspOps ---
+"ok 205"
+--- main-r hostRec ---
+6
+--- main-r listRoundTrip ---
+"ok 17"
+--- main-r roundTrip ---
+"ok 6"
+--- main-r aliased ---
+"ok 205 101"
+--- main-r cbRet ---
+"ok 110"
+--- main-r cbParam ---
+"ok 30"
+--- main-mixed pyToRust ---
+"ok 105"
+--- main-mixed rustToPy ---
+"ok 105"
+--- main-mixed sharedPyToPy ---
+"ok 105"
+--- main-mixed sharedPyToRust ---
+"ok 105"
+--- main-mixed sharedRsToRust ---
+"ok 105"
+--- main-mixed sharedRsToPy ---
+"ok 105"
+--- main-mixed pyArgToRust ---
+"ok 105"
+--- main-mixed rustArgToPy ---
+"ok 105"
+--- main-recursive chainDepth ---
+"ok 4"
+--- main-refuse --- OK

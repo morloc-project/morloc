@@ -1,0 +1,40 @@
+-- Compressed streams written while earlier batches compress behind the
+-- writer. Full write buffers are sealed and compressed on background
+-- threads; the writer commits them in order. The file must hold every
+-- element, in order, whatever the depth of that pipeline, for a stream on
+-- standard output and for a file stream, and whether the stream is closed
+-- by its call or left for the call's end to finish.
+
+module main (produce, produceFile, check)
+
+import root-cpp
+
+source Cpp from "impl.hpp" ("wbProduce", "wbDigest", "wbExpected")
+
+wbProduce :: Int -> Int -> ([Str] -> <IO> ()) -> <IO> ()
+wbDigest :: [Str] -> Int
+wbExpected :: Int -> Int -> Int
+
+--' Write n batches of per strings to standard output
+produce :: Int -> Int -> <IO> ()
+produce n per = @collect (wbProduce n per)
+
+writeLevel3 :: OStream Str -> [Str] -> <IO> ()
+writeLevel3 o xs = do
+  Ok u <- @write 3 o xs
+  u
+
+--' Write n batches of per strings to a file at level 3
+produceFile :: Str -> Int -> Int -> <IO> ()
+produceFile path n per = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Str))
+  _ <- wbProduce n per (writeLevel3 o)
+  @close o
+
+--' Whether a stream file holds exactly what produce n per writes, and its length
+check :: Str -> Int -> Int -> <IO> (Bool, Int)
+check path n per = do
+  Ok f <- @open path :: <IO> (Try Str (IFile [Str]))
+  Ok len <- @flen f
+  let xs = .[:] f
+  (wbDigest xs == wbExpected n per, len)

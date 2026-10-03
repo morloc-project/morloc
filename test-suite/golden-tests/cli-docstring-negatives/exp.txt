@@ -20,6 +20,12 @@ neg_23_list_form_packet_needs_file.loc 1
 neg_24_check_path_retired_letters.loc 1
 neg_25_check_path_unsatisfiable_combo.loc 1
 neg_26_two_default_actions.loc 1
+neg_27_fold_missing_init.loc 1
+neg_28_init_without_fold.loc 1
+neg_29_fold_with_stream.loc 1
+neg_30_fold_without_collect.loc 1
+neg_31_fold_spaced_equals.loc 1
+neg_32_fold_duplicate.loc 1
 pos_01_defaults.loc 0
 pos_02_source_file_str.loc 0
 pos_04_bytes_inline.loc 0

@@ -34,7 +34,11 @@ import qualified Data.Text as T
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
-  ( containsClosure
+  ( LoopResult (..)
+  , consumableProjectionLets
+  , isBorrowableProjection
+  , papplySteps
+  , containsClosure
   , IType (..)
   , IOwnership (..)
   , LowerConfig (..)
@@ -53,7 +57,6 @@ import Morloc.CodeGenerator.Namespace
 import qualified Morloc.CodeGenerator.Platform as P
 import Morloc.CodeGenerator.Serial
   ( serialAstToType
-  , serialAstToNativeType
   , wireSerialAstToType
   , containsFunT
   , containsEffectT
@@ -84,10 +87,27 @@ isNativeThrow (IntrinsicN _ IntrThrow _ _) = True
 isNativeThrow (DoBlockN _ e) = isNativeThrow e
 isNativeThrow _ = False
 
+-- | True when a conditional arm's value is a let bound inside the arm. The
+-- arm's block ends at the assignment of that value, so it can be moved.
+armOwnsResult :: NativeExpr -> Bool
+armOwnsResult = go Set.empty
+  where
+    go bound (NativeLetN i _ body) = go (Set.insert i bound) body
+    go bound (SerialLetN _ _ body) = go bound body
+    go bound (LetVarN _ j) = Set.member j bound
+    go _ _ = False
+
 serialType :: MDoc
 serialType = "uint8_t*"
 
 data CallSemantics = Copy | Reference | ConstPtr
+
+-- | How a let binds its right-hand side. A projection out of a live value can
+-- be aliased instead of copied ('isBorrowableProjection'), and a projection
+-- that is the last thing able to read a payload this frame built can take it
+-- ('consumableProjectionLets'); everything else copies.
+data LetBinding = BindCopy | BindBorrow | BindConsume
+  deriving (Eq)
 
 class HasCppType a where
   cppTypeOf :: a -> CppTranslator MDoc
@@ -98,6 +118,23 @@ setCallSemantics :: CallSemantics -> MDoc -> MDoc
 setCallSemantics Copy typestr = typestr
 setCallSemantics Reference typestr = "const" <+> typestr <> "&"
 setCallSemantics ConstPtr typestr = "const" <+> typestr
+
+-- | The capture list of a do-block thunk ('lcMakeDoBlock'). By value: a
+-- thunk may outlive the frame that built it.
+thunkCapture :: Text
+thunkCapture = "[=]"
+
+-- | A thunk written inline as the body argument of '_mlc_try' captures by
+-- reference: '_mlc_try' calls it once, before it returns, and nothing else
+-- can hold the temporary, so a by-value capture only copies each captured
+-- value (a whole batch, for a @write). A thunk bound to a name may be
+-- stored or shared, so it keeps its by-value capture. The thunk arrives
+-- rendered; its lines are re-joined verbatim, which is sound because
+-- generated C++ never breaks a line inside a string literal.
+tryThunkByReference :: MDoc -> MDoc
+tryThunkByReference thunk = case T.stripPrefix (thunkCapture <> "(") (render thunk) of
+  Just rest -> concatWith (\a b -> a <> hardline <> b) (map pretty (T.splitOn "\n" ("[&](" <> rest)))
+  Nothing -> thunk
 
 -- Render a concrete type name with template arguments. If the name
 -- contains `$N` placeholders (positional macros, e.g. "container_t<$1>"),
@@ -120,7 +157,9 @@ chooseCallSemantics :: TypeM -> CallSemantics
 chooseCallSemantics Passthrough = ConstPtr -- const uint8_t* packet
 chooseCallSemantics (Serial _) = ConstPtr -- const uint8_t* packet
 chooseCallSemantics (Native _) = Reference -- for now, primitives should be pass by copy
-chooseCallSemantics (Function _ _) = Copy -- currently not used
+-- A function value is only called ('std::function::operator()' is const) or
+-- copied into something that keeps it, so a reference never costs a copy.
+chooseCallSemantics (Function _ _) = Reference
 
 instance HasCppType TypeM where
   cppTypeOf (Serial _) = return serialType
@@ -365,6 +404,13 @@ data CppTranslatorState = CppTranslatorState
   -- ^ Snapshot of 'stateDebugTrace'. When True, DebugWrapS drains the
   -- traceback in 'cppDebugWrap'; the manifold-level catch in
   -- 'lcMakeFunction' skips its frame-line append to avoid duplicates.
+  , translatorConsumableLets :: Set.Set (Int, Int)
+  -- ^ The payload projections whose let may take the payload instead of
+  -- copying it ('consumableProjectionLets'), keyed by the top-level manifold
+  -- they sit in and the let's index, because a let index names a binding
+  -- within a manifold and two manifolds may share one.
+  , translatorCurrentRoot :: Int
+  -- ^ The top-level manifold being lowered (see 'translatorConsumableLets').
   }
 
 instance Defaultable CppTranslatorState where
@@ -382,6 +428,8 @@ instance Defaultable CppTranslatorState where
       , translatorCScope = Map.empty
       , translatorDebugInfo = \_ -> ("", "")
       , translatorDebugMode = False
+      , translatorConsumableLets = Set.empty
+      , translatorCurrentRoot = 0
       }
 
 type CppTranslator a = CMS.StateT CppTranslatorState Identity a
@@ -449,6 +497,7 @@ translate srcs es = do
   debugInfo <- makeManifoldDebugInfoLookup
   debugMode <- MM.gets stateDebugTrace
   closureTable <- computeClosureSchemas cppLang es
+  stageTable <- stageTableEntries
   let recmap = unifyRecords . concatMap collectRecords $ es
       translatorState = defaultValue
         { translatorRecmap = recmap
@@ -457,8 +506,9 @@ translate srcs es = do
         , translatorCScope = mergedCppScope
         , translatorDebugInfo = debugInfo
         , translatorDebugMode = debugMode
+        , translatorConsumableLets = consumableProjectionLets es
         }
-      code = CMS.evalState (makeCppCode labels srcs' es universalScopeMap scopeMap closureTable nativeEntries) translatorState
+      code = CMS.evalState (makeCppCode labels srcs' es universalScopeMap scopeMap closureTable stageTable nativeEntries) translatorState
 
   maker <- makeTheMaker cxxFlags includeDirs
 
@@ -486,9 +536,10 @@ makeCppCode ::
   Map.Map Lang Scope ->
   GMap Int MVar (Map.Map Lang Scope) ->
   Map.Map Int ([SerialAST], [SerialAST], SerialAST) ->
+  Map.Map Int StageEntry ->
   Set.Set Int ->
   CppTranslator MDoc
-makeCppCode labels srcs es univeralScopeMap scopeMap closureTable0 nativeEntries = do
+makeCppCode labels srcs es univeralScopeMap scopeMap closureTable0 stageTable nativeEntries = do
   -- Seeded before any type is rendered: 'cppTypeOf' consults it to tell a
   -- back-reference into a generated `data` type from an unmapped alias.
   CMS.modify $ \st -> st
@@ -499,7 +550,8 @@ makeCppCode labels srcs es univeralScopeMap scopeMap closureTable0 nativeEntries
   -- write include statements for sources
   let includeDocs = map translateSource (unique . mapMaybe srcPath $ srcs)
 
-  signatures <- concat <$> mapM (makeSignature nativeEntries) es
+  signatures0 <- concat <$> mapM (makeSignature nativeEntries) es
+  let signatures = stageLookupDoc stageTable : signatures0
 
   (autoDecl, autoFwds, autoSerial) <- generateAnonymousStructs
   (varWrappers, varArms, varFwds, varSerial) <- generateCppVariants es
@@ -521,15 +573,16 @@ makeCppCode labels srcs es univeralScopeMap scopeMap closureTable0 nativeEntries
   -- (their signature appears at a SerialClosure serialize site). Purely-local
   -- closures need no reify thunk or dispatch wrapper and are lowered as a plain
   -- native std::bind (no fat MorlocClosure, no second copy of the captures).
-  closureTable <- restrictToCrossingClosures es closureTable0
+  closureTable <- crossingClosures closureCppSig stageTable es closureTable0
 
   -- Serial dispatch wrappers for defunctionalized closures (registered BEFORE
   -- getCppSchemaTable so their schemas land in the table) plus the per-closure
   -- reify thunks spliced into each closure's constructor during lowering.
   (closureWrappers, reifyThunks) <- makeClosureDispatch closureTable es
+  papplyHeads <- papplyHeadSigs closureCppSig es
 
   -- build the program (translates each manifold tree)
-  program <- buildProgramM labels templates includeDocs [] es (translateSegment reifyThunks) getCppSchemaTable (Map.map closureSchemaTexts closureTable)
+  program <- buildProgramM labels templates includeDocs [] es (translateSegment (ClosureGen reifyThunks stageTable papplyHeads)) getCppSchemaTable (Map.map closureSchemaTexts closureTable)
 
   -- create and return complete pool script
   return $ CP.printProgram serializationCode signatures closureWrappers program
@@ -543,68 +596,6 @@ closureCppSig ins out = do
   ats <- mapM cppTypeOf ins
   return (render (rt <> tupled ats))
 
--- | The signature of a closure manifold's value, matching the signature seen at
--- a serialize site for the same closure.
-manifoldCppSig :: NativeManifold -> CppTranslator Text
-manifoldCppSig nm@(NativeManifold _ _ form _) =
-  closureCppSig [t | Arg _ t <- manifoldBound form] resultType
-  where
-    resultType = case typeFof nm of
-      FunF _ o -> o
-      o -> o
-
--- | Signatures of all closures that are reified (cross a boundary) anywhere in
--- these manifolds, i.e. that reach a 'SerialClosure' serialize site.
-crossingClosureSigs :: [SerialManifold] -> CppTranslator (Set.Set Text)
-crossingClosureSigs es = Set.fromList <$> mapM astSig (concatMap collectSerializedClosures es)
-  where
-    -- Rendered NATIVELY, because the other side of this join is a manifold's
-    -- native signature. The wire rendering discards a custom packer, so a
-    -- closure whose argument or result is packed would render two different
-    -- strings here and at 'manifoldCppSig', match nothing, and be dropped.
-    astSig (SerialClosure ins out) =
-      closureCppSig (map serialAstToNativeType ins) (serialAstToNativeType out)
-    astSig _ = return "" -- collectSerializedClosures returns only SerialClosure
-
--- | Keep in the closure table only closures that can cross a boundary.
--- Everything else is a purely-local closure that needs no reify or dispatch
--- machinery.
---
--- Crossing is TRANSITIVE over captures: reifying a closure serializes the
--- values it captured, so a function value captured by a crossing closure is
--- itself reified and needs the same machinery. Closing only over the
--- closures that reach a serialize site leaves such a capture emitted as a
--- bare @std::bind@, and reifying it throws "cannot reify a non-morloc C++
--- closure" at run time. The fixed point is taken over signatures, as the
--- serialize sites are matched, so it may keep a closure that never crosses
--- (an unused reify thunk) but can never drop one that does.
-restrictToCrossingClosures ::
-  [SerialManifold] ->
-  Map.Map Int ([SerialAST], [SerialAST], SerialAST) ->
-  CppTranslator (Map.Map Int ([SerialAST], [SerialAST], SerialAST))
-restrictToCrossingClosures es closureTable = do
-  seedSigs <- crossingClosureSigs es
-  let candidates =
-        [ nm | nm@(NativeManifold i _ _ _) <- concatMap collectClosureManifolds es
-             , Map.member i closureTable ]
-  -- each closure manifold: its own signature, and the signatures of the
-  -- function values it captures
-  entries <- mapM (\nm@(NativeManifold i _ form _) -> do
-                     sig <- manifoldCppSig nm
-                     capSigs <- sequence
-                                  [ closureCppSig ins out
-                                  | Arg _ o <- manifoldContext form
-                                  , Just (FunF ins out) <- [orNativeType o] ]
-                     return (i, sig, capSigs))
-                  candidates
-  let close sigs =
-        let sigs' = Set.union sigs
-              (Set.fromList (concat [cs | (_, sig, cs) <- entries, Set.member sig sigs]))
-         in if Set.size sigs' == Set.size sigs then sigs else close sigs'
-      crossingSigs = close seedSigs
-      crossing = Set.fromList [i | (i, sig, _) <- entries, Set.member sig crossingSigs]
-  return $ Map.filterWithKey (\i _ -> Set.member i crossing) closureTable
-
 -- | For each defunctionalized closure manifold, emit a serial dispatch wrapper
 -- so the home pool can apply the closure when a foreign pool calls back on its
 -- manifold id: deserialize the captured ++ bound argument packets, call the
@@ -616,7 +607,7 @@ restrictToCrossingClosures es closureTable = do
 -- closure wire form. The thunk is keyed by manifold name so 'lcMakeLambda' can
 -- splice it into that closure's 'MorlocClosure' constructor.
 makeClosureDispatch ::
-  Map.Map Int ([SerialAST], [SerialAST], SerialAST) -> [SerialManifold] -> CppTranslator ([MDoc], Map.Map Text MDoc)
+  Map.Map Int ([SerialAST], [SerialAST], SerialAST) -> [SerialManifold] -> CppTranslator ([MDoc], Map.Map Text (MDoc, MDoc))
 makeClosureDispatch closureTable es = do
   results <- mapM one (filter inTable (concatMap collectClosureManifolds es))
   return (map fst results, Map.fromList (map snd results))
@@ -637,11 +628,13 @@ makeClosureDispatch closureTable es = do
       let call = manNamer i <> tupled getVals
       putRes <- cppEncode call resAst
       reifier <- closureReifyThunk ctxNames capAsts
+      bndSids <- mapM (cppRegisterSchema . render . serialAstToMsgpackSchema) bndAsts
+      let bndSchemas = "std::vector<Schema*>" <> encloseSep "{" "}" ", " ["mlc_schema_table[" <> pretty j <> "]" | j <- bndSids]
       let dispatchDoc =
             [idoc|uint8_t* mlc_closure_dispatch_#{pretty i}(const uint8_t** args) {
     return #{putRes};
 }|]
-      return (dispatchDoc, (render (manNamer i), reifier))
+      return (dispatchDoc, (render (manNamer i), (reifier, bndSchemas)))
 
 -- The reify thunk stored inside a 'MorlocClosure'. When the closure crosses a
 -- language boundary it serializes each captured native value (by value, so the
@@ -744,7 +737,13 @@ makeTheMaker flags includes = do
         Just True -> ["-fsanitize=alignment", "-fno-sanitize-recover=alignment"]
         _ -> []
 
-  let incs = "-I." : [pretty ("-I" <> i) | i <- includes]
+  -- A source's directory is searched first for quoted includes and, for
+  -- angle-bracket includes, only after the system directories: a header
+  -- there may include a sibling either way, but a file named like a system
+  -- header (a program called `tuple`) never replaces it.
+  -- Paths are quoted: the command runs through a shell, and a project under
+  -- a directory with spaces (iCloud Drive, Google Drive) is ordinary.
+  let incs = concat [[pretty ("-iquote" <> MS.shellQuote i), pretty ("-idirafter" <> MS.shellQuote i)] | i <- "." : includes]
   let flags' = map pretty (flags ++ sanitizeFlags)
 
   let cmd =
@@ -803,16 +802,23 @@ recordAccess record field = record <> "." <> field
 -- Guards -> if/else; native/serial lets -> @auto@ locals; a base leaf ->
 -- @resultVar = <base>; break;@; a continue leaf -> compute each new value into
 -- an @auto@ temp, then move it into the loop-carried local.
-cppWalkLoopBody :: MDoc -> [Int] -> LoopBody PoolDocs PoolDocs -> CppTranslatorM [MDoc]
-cppWalkLoopBody resultVar ids = go
+-- | Whether a continue value is the carried local itself, unchanged.
+isSameLocal :: Int -> PoolDocs -> Bool
+isSameLocal i d = null (poolPriorLines d) && render (poolExpr d) == render (nvarNamer i)
+
+cppWalkLoopBody :: (MDoc -> MDoc) -> [Int] -> LoopBody PoolDocs PoolDocs PoolDocs -> CppTranslatorM [MDoc]
+cppWalkLoopBody setResult ids = go
   where
     go (LoopBase seDocs) =
-      return $ poolPriorLines seDocs <> [resultVar <+> "=" <+> poolExpr seDocs <> ";", "break;"]
+      return $ poolPriorLines seDocs <> [setResult (poolExpr seDocs), "break;"]
+    -- A slot whose new value is itself is left alone: copying it into a temp
+    -- and back would copy the whole value every iteration.
     go (LoopContinue contDocs) = do
-      tmpVars <- map helperNamer <$> mapM (const getCounter) contDocs
+      let changed = [(i, cd) | (i, cd) <- zip ids contDocs, not (isSameLocal i cd)]
+      tmpVars <- map helperNamer <$> mapM (const getCounter) changed
       let priors = concatMap poolPriorLines contDocs
-          tmpAssigns = zipWith (\tv cd -> "auto" <+> tv <+> "=" <+> poolExpr cd <> ";") tmpVars contDocs
-          reassigns = zipWith (\i tv -> nvarNamer i <+> "= std::move(" <> tv <> ");") ids tmpVars
+          tmpAssigns = zipWith (\tv (_, cd) -> "auto" <+> tv <+> "=" <+> poolExpr cd <> ";") tmpVars changed
+          reassigns = zipWith (\(i, _) tv -> nvarNamer i <+> "= std::move(" <> tv <> ");") changed tmpVars
       return $ priors <> tmpAssigns <> reassigns
     go (LoopNLet i neDocs b) = do
       rest <- go b
@@ -832,15 +838,22 @@ cppWalkLoopBody resultVar ids = go
             ]
       return $ poolPriorLines guardDocs <> [ifBlock]
 
-cppLowerConfig :: Map.Map Text MDoc -> LowerConfig CppTranslatorM
-cppLowerConfig reifyThunks =
+-- | What lowering a closure needs: per crossing closure manifold name, its
+-- reify thunk and its bound arguments' schemas; the stage table; and the
+-- signatures of the function values this pool partially applies.
+data ClosureGen = ClosureGen (Map.Map Text (MDoc, MDoc)) (Map.Map Int StageEntry) (Set.Set Text)
+
+cppLowerConfig :: ClosureGen -> LowerConfig CppTranslatorM
+cppLowerConfig (ClosureGen reifyThunks stageTable papplyHeads) =
   LowerConfig
     { lcSrcName = \src -> pretty (srcName src)
     , lcApplySrcGroup = \f as -> f <+> tupled as
     , lcSourcedArg = \_ _ _ x -> x
     , lcOwnership = \_ -> return Owned
     , lcArgManifoldOwnership = \_ -> return Owned
+    , lcBindCallArgs = False
     , lcOwnArg = \_ _ x -> x
+    , lcReadArg = \_ x -> x
     , lcWithCallerScope = id
     -- `?T` is `std::optional<T>` at every value position where sizeof(T) is
     -- known (cppmorloc.hpp), which is exactly where a value-level
@@ -936,6 +949,16 @@ cppLowerConfig reifyThunks =
         return $ defaultValue {poolExpr = v', poolPriorLines = [decl]}
     , lcStoreField = \_ v -> return v
     , lcApplyClosure = \callee args -> callee <> tupled args
+    , lcPapply = \t argTypes f xs -> case t of
+        FunF rins out -> do
+          argTs <- mapM (cppTypeOf . typeMToF) argTypes
+          restTs <- mapM cppTypeOf rins
+          resT <- cppTypeOf out
+          -- each application typed explicitly: the head may be a bind
+          -- expression, which deduction cannot see through
+          let step ts acc x = "mlc_apply1<" <> hsep (punctuate "," (resT : ts ++ restTs)) <> ">" <> tupled [acc, x]
+          return (papplySteps step argTs f xs)
+        _ -> return f
     , lcForeignCall = \socketFile mid args ->
         let argList = [dquotes socketFile, pretty mid] <> args <> ["NULL"]
          in [idoc|foreign_call#{tupled argList}|]
@@ -966,27 +989,59 @@ PROPAGATE_ERROR(errmsg)|]
         typestr <- case mt of
           (Just t) -> cppTypeOf t
           Nothing -> return serialType
-        return $ makeLet namer letIndex typestr (isUnitTypeF mt) borrowSafe e1 e2
-    , lcReleaseStmt = \v -> "_release_packet_shm(" <> pretty v <> ");"
+        consumable <- CMS.gets translatorConsumableLets
+        root <- CMS.gets translatorCurrentRoot
+        let binding
+              | not borrowSafe = BindCopy
+              | Set.member (root, letIndex) consumable = BindConsume
+              | otherwise = BindBorrow
+        return $ makeLet namer letIndex typestr (isUnitTypeF mt) binding e1 e2
+    , lcReleaseStmt = \v -> "_release_packet(" <> pretty v <> ", true);"
+    , lcReleaseBorrowedStmt = \v -> "_release_packet(" <> pretty v <> ", false);"
     , lcReturn = \e -> "return(" <> e <> ");"
-    , lcMakeLoop = \ids body -> do
-        -- Native tail-loop. Walk the 'LoopBody' tree into C++ control flow. The
-        -- loop-carried vars are the manifold's deserialized native locals
-        -- ('nvarNamer id'), non-const, reassigned in place; each continue value
-        -- goes into an 'auto' temp before any loop-local is reassigned (parallel-
-        -- assignment hazard), then MOVED in to avoid a per-iteration deep copy.
-        -- 'resultVar' inits to nullptr so a control path reaching the trailing
-        -- return without a break is defined (and to silence -Wmaybe-uninitialized).
+    , lcDupPacket = \e -> "_dup_packet(" <> e <> ")"
+    , lcOwnedArg = \e -> "mlc::Packet(" <> e <> ").get()"
+    -- A consumable projection takes its payload, as 'makeLet' does for a
+    -- let outside a loop.
+    , lcLoopLetRhs = \i orhs d -> do
+        consumable <- CMS.gets translatorConsumableLets
+        root <- CMS.gets translatorCurrentRoot
+        typestr <- cppTypeOf (typeFof orhs)
+        return $
+          if Set.member (root, i) consumable && isBorrowableProjection orhs && not (isScalarCppType typestr)
+            then d {poolExpr = "std::move(" <> poolExpr d <> ")"}
+            else d
+    , lcOwnPacketDecl = \v e -> Just ("mlc::Packet" <+> v <> "(" <> e <> ");", v <> ".get()")
+    , lcMakeLoop = \res carried body -> do
+        -- Tail-loop. Walk the 'LoopBody' tree into C++ control flow. The
+        -- loop-carried vars are native locals ('nvarNamer id'), non-const,
+        -- reassigned in place: the manifold's deserialized parameters in a
+        -- serial loop, copies of its read-only parameters in a native one.
+        -- Each continue value goes into an 'auto' temp before any loop-local
+        -- is reassigned (parallel-assignment hazard), then MOVED in to avoid a
+        -- per-iteration deep copy. A serial result inits to nullptr so a
+        -- control path reaching the trailing return without a break is
+        -- defined; a native one is an optional, since the value's type need
+        -- not be default-constructible.
         resultIdx <- getCounter
         let resultVar = helperNamer resultIdx
-        bodyLines <- cppWalkLoopBody resultVar ids body
-        let resultDecl = "uint8_t*" <+> resultVar <+> "= nullptr;"
-            whileDoc = vsep ["while (true) {", indent 4 (vsep bodyLines), "}"]
-            leaves = loopBodyLeaves body
+            ids = map fst carried
+            initLines = concat [poolPriorLines d <> ["auto" <+> nvarNamer i <+> "=" <+> poolExpr d <> ";"] | (i, Just d) <- carried]
+        (resultDecl, setResult, resultExpr) <- case res of
+          LoopResultSerial ->
+            return ("uint8_t*" <+> resultVar <+> "= nullptr;", \e -> resultVar <+> "=" <+> e <> ";", resultVar)
+          LoopResultNative t -> do
+            tStr <- cppTypeOf t
+            return ( "std::optional<" <> tStr <> ">" <+> resultVar <> ";"
+                   , \e -> resultVar <> ".emplace(" <> e <> ");"
+                   , "std::move(*" <> resultVar <> ")" )
+        bodyLines <- cppWalkLoopBody setResult ids body
+        let whileDoc = vsep ["while (true) {", indent 4 (vsep bodyLines), "}"]
+            leaves = loopBodyLeaves body <> [d | (_, Just d) <- carried]
         return $ PoolDocs
           { poolCompleteManifolds = concatMap poolCompleteManifolds leaves
-          , poolExpr = resultVar
-          , poolPriorLines = [resultDecl, whileDoc]
+          , poolExpr = resultExpr
+          , poolPriorLines = initLines <> [resultDecl, whileDoc]
           , poolPriorExprs = concatMap poolPriorExprs leaves
           , poolReturnFlag = True
           }
@@ -1006,9 +1061,21 @@ PROPAGATE_ERROR(errmsg)|]
             (thenThrow, elseThrow) = case origExpr of
               IfN _ _ tn en -> (isNativeThrow tn, isNativeThrow en)
               _ -> (False, False)
-            armStmt isThrow e = if isThrow then e <> ";" else v <+> "=" <+> e <> ";"
-            thenBlock = poolPriorLines thenDocs <> [armStmt thenThrow thenE]
-            elseBlock = poolPriorLines elseDocs <> [armStmt elseThrow elseE]
+            (thenOwned, elseOwned) = case origExpr of
+              IfN _ _ tn en -> (armOwnsResult tn, armOwnsResult en)
+              _ -> (False, False)
+            -- Every if is bound by a let ('atomize'), the only reader of this
+            -- result variable, so the result and an arm's own last let are
+            -- both dead once read, and are moved rather than copied. A Unit
+            -- result is emitted as a bare statement, where a discarded
+            -- std::move is a warning, so it is not moved.
+            isUnitResult = case typeFof origExpr of
+              VarF (FV tv _) -> tv == BT.unit
+              _ -> False
+            moved owned e = if owned && not isUnitResult then "std::move(" <> e <> ")" else e
+            armStmt isThrow owned e = if isThrow then e <> ";" else v <+> "=" <+> moved owned e <> ";"
+            thenBlock = poolPriorLines thenDocs <> [armStmt thenThrow thenOwned thenE]
+            elseBlock = poolPriorLines elseDocs <> [armStmt elseThrow elseOwned elseE]
             decl = typeStr <+> v <> ";"
             ifStmt = vsep
               [ decl
@@ -1020,7 +1087,7 @@ PROPAGATE_ERROR(errmsg)|]
               ]
         return $ PoolDocs
           { poolCompleteManifolds = poolCompleteManifolds condDocs <> poolCompleteManifolds thenDocs <> poolCompleteManifolds elseDocs
-          , poolExpr = v
+          , poolExpr = moved True v
           , poolPriorLines = poolPriorLines condDocs <> [ifStmt]
           , poolPriorExprs = poolPriorExprs condDocs <> poolPriorExprs thenDocs <> poolPriorExprs elseDocs
           , poolReturnFlag = poolReturnFlag condDocs || poolReturnFlag thenDocs || poolReturnFlag elseDocs
@@ -1029,6 +1096,7 @@ PROPAGATE_ERROR(errmsg)|]
         let isUnit = case t of
               VarF (FV tv _) -> tv == TV "Unit"
               _ -> False
+            cap = pretty thunkCapture
         in return . (,) [] $ case (isUnit, stmts) of
           -- Capture by copy: cross-language RPC receiver-manifolds wrap
           -- their deserialized result in a DoBlockN thunk that outlives
@@ -1036,10 +1104,10 @@ PROPAGATE_ERROR(errmsg)|]
           -- dangle by the time the outer caller invokes the thunk;
           -- captures by value ([=]) copy the parameters (pointers, ints,
           -- copyable structs) and remain valid.
-          (True, []) -> "[=](){" <> expr <> "; return mlc::Unit{};}"
-          (True, _) -> "[=](){" <> nest 4 (line <> vsep (stmts <> [expr <> ";", "return mlc::Unit{};"])) <> line <> "}"
-          (False, []) -> "[=](){return " <> expr <> ";}"
-          (False, _) -> "[=](){" <> nest 4 (line <> vsep (stmts <> ["return " <> expr <> ";"])) <> line <> "}"
+          (True, []) -> cap <> "(){" <> expr <> "; return mlc::Unit{};}"
+          (True, _) -> cap <> "(){" <> nest 4 (line <> vsep (stmts <> [expr <> ";", "return mlc::Unit{};"])) <> line <> "}"
+          (False, []) -> cap <> "(){return " <> expr <> ";}"
+          (False, _) -> cap <> "(){" <> nest 4 (line <> vsep (stmts <> ["return " <> expr <> ";"])) <> line <> "}"
     -- The Ok arm's parameter is declared as the payload type, so a body
     -- whose native result merely converts to it (a handle intrinsic answers
     -- int64_t where the handle type is uint64_t) converts at the call, where
@@ -1047,11 +1115,19 @@ PROPAGATE_ERROR(errmsg)|]
     -- initializer, where narrowing is an error. The Err arm's is a
     -- std::string, and both arms must deduce the same Try type for
     -- _mlc_try's return.
+    -- The payload arrives as a prvalue -- '_mlc_try' calls the Ok arm with
+    -- the body's result and nothing else can observe it -- so the arm takes
+    -- it by rvalue reference and hands it on, rather than binding a const
+    -- reference and copy-constructing the arm from it. For a batch of
+    -- records that copy is the whole payload. 'std::forward' rather than
+    -- 'std::move' so the untyped fallback ('auto&&', a forwarding
+    -- reference) stays correct on its own terms.
     , lcMakeTry = \thunk okT okWrap errWrap ->
         "_mlc_try" <> tupled
-          [ thunk
-          , "[](" <> maybe "auto&&" (<> " const&") okT <+> "mlcTryV) { return" <+> okWrap "mlcTryV" <> "; }"
-          , "[](const std::string& mlcTryM) { return" <+> errWrap "mlcTryM" <> "; }"
+          [ tryThunkByReference thunk
+          , "[](" <> maybe "auto&&" (<> "&&") okT <+> "mlcTryV) { return"
+              <+> okWrap "std::forward<decltype(mlcTryV)>(mlcTryV)" <> "; }"
+          , "[](std::string&& mlcTryM) { return" <+> errWrap "std::move(mlcTryM)" <> "; }"
           ]
     , lcSerialize = \v s -> serialize v s
     , lcDeserialize = \t v s -> do
@@ -1194,30 +1270,54 @@ PROPAGATE_ERROR(errmsg)|]
           resType <- cppTypeOf out
           return $ resType <> tupled argTypes
         _ -> return ""
-    , lcMakePass = \_sig mname _ -> return mname
-    , lcMakeLambda = \sig mname contextArgs boundArgs ->
-        let ctxNames = map argNamer contextArgs
-            vs' = take (length boundArgs) (map (\j -> "std::placeholders::_" <> viaShow j) ([1 ..] :: [Int]))
-            bindArgs = cat (punctuate "," (mname : (ctxNames ++ vs')))
-            -- manNamer is "m<mid>"; the closure's home-pool dispatch mid is the
-            -- name minus its leading "m".
-            midDoc = pretty (MT.drop 1 (render mname))
-         in return $ case Map.lookup (render mname) reifyThunks of
-              -- A closure that can cross a boundary: the fat MorlocClosure
-              -- carries its mid and a reify thunk so the far side can call back.
-              -- (Both are stored inside a std::function<Ret(Arg...)>, so this has
-              -- the same C++ type as the thin form below.)
-              Just reifyThunk ->
-                [idoc|MorlocClosure<#{sig}>{ std::bind(#{bindArgs}), #{midDoc}, #{reifyThunk} }|]
-              -- A purely-local closure: a plain std::bind (identical to the
-              -- pre-defunctionalization form), so captured values are copied
-              -- once -- no fat wrapper, no reify thunk, no second copy.
-              Nothing ->
-                [idoc|std::bind(#{bindArgs})|]
+    -- An unapplied manifold is its function, unless it is staged or can
+    -- cross, which takes the closure form
+    , lcMakePass = \sig _ mname args ->
+        if isJust (stageOf mname) || Map.member (render mname) reifyThunks
+          then makeLambda sig mname [] args
+          else return mname
+    , lcMakeLambda = \sig _ -> makeLambda sig
     , lcRegisterSchema = cppRegisterSchema
     , lcTableImportFn = Nothing
     }
   where
+    stageOf mname = manifoldIdOf mname >>= (`Map.lookup` stageTable)
+
+    makeLambda :: MDoc -> MDoc -> [Arg TypeM] -> [Arg TypeM] -> CppTranslatorM MDoc
+    makeLambda sig mname contextArgs boundArgs =
+      let ctxNames = map argNamer contextArgs
+          vs' = take (length boundArgs) (map (\j -> "std::placeholders::_" <> viaShow j) ([1 ..] :: [Int]))
+          bindArgs = cat (punctuate "," (mname : (ctxNames ++ vs')))
+          -- manNamer is "m<mid>"; the closure's home-pool dispatch mid is the
+          -- name minus its leading "m".
+          midDoc = pretty (MT.drop 1 (render mname))
+          stage = stageOf mname
+       in return $ case (Map.lookup (render mname) reifyThunks, stage) of
+            -- A staged closure: applied to the arguments before its stage
+            -- point, it runs its stage entry (bound to the same captured
+            -- values) once and becomes the closure the stage returns.
+            (thunk, Just (StageEntry nctx k smid))
+              | nctx == length contextArgs ->
+                  let (reifier, schemas) = fromMaybe ("mlc_unreifiable", "std::vector<Schema*>{}") thunk
+                      stageArgs = cat (punctuate "," (manNamer smid : (ctxNames ++ take k vs')))
+                   in [idoc|mlc_staged_sig<#{pretty k}, #{sig}>::make(std::bind(#{bindArgs}), #{midDoc}, #{reifier}, "cpp", #{schemas}, std::bind(#{stageArgs}))|]
+              | otherwise ->
+                  error $ "C++: staged closure " <> show (render midDoc) <> " captures " <> show (length contextArgs)
+                    <> " values but its stage entry takes " <> show nctx
+            -- A closure that can cross a boundary: the fat MorlocClosure
+            -- carries its mid and a reify thunk so the far side can call
+            -- back; one this pool partially applies also keeps both when
+            -- partially applied. (It is stored inside a std::function, so
+            -- this has the same C++ type as the thin form below.)
+            (Just (reifyThunk, schemas), Nothing)
+              | Set.member (render sig) papplyHeads ->
+                  [idoc|mlc_pap_sig<#{sig}>::make(std::bind(#{bindArgs}), #{midDoc}, #{reifyThunk}, "cpp", #{schemas})|]
+              | otherwise ->
+                  [idoc|MorlocClosure<#{sig}>{ std::bind(#{bindArgs}), #{midDoc}, #{reifyThunk} }|]
+            -- A closure that never crosses: a plain std::bind.
+            (Nothing, Nothing) ->
+              [idoc|std::bind(#{bindArgs})|]
+
     -- For serialization, records become tuples (that's what _put_value/to_voidstar expects)
     -- Serialize/raw-deserialize types use the WIRE form: a closure nested in an
     -- aggregate travels as its reified wire tuple, so the closure slot is typed
@@ -1242,10 +1342,13 @@ PROPAGATE_ERROR(errmsg)|]
     -- ought to be". Split into a statement plus a default-initialised
     -- 'mlc::Unit{}' whenever the let-var's type is 'Unit' -- the effect
     -- fires, the caller's 'Unit' variable is present, and any subsequent
-    -- reference to @ni@ still type-checks.
-    makeLet :: (Int -> MDoc) -> Int -> MDoc -> Bool -> Bool -> PoolDocs -> PoolDocs -> PoolDocs
-    makeLet namer letIndex typestr isUnit borrowSafe p1 p2 =
+    -- reference to @ni@ still type-checks. A bare variable has no effect,
+    -- so it is not emitted as a statement.
+    makeLet :: (Int -> MDoc) -> Int -> MDoc -> Bool -> LetBinding -> PoolDocs -> PoolDocs -> PoolDocs
+    makeLet namer letIndex typestr isUnit binding p1 p2 =
       let letAssignment
+            | isUnit && isIdentifierExpr (poolExpr p1) =
+                [idoc|#{typestr} #{namer letIndex}{};|]
             | isUnit =
                 [idoc|#{poolExpr p1};|]
                   <+> [idoc|#{typestr} #{namer letIndex}{};|]
@@ -1253,15 +1356,27 @@ PROPAGATE_ERROR(errmsg)|]
             -- const-reference so the projected sub-value is not copied out of
             -- its container (see 'isBorrowableProjection'). The referent (the
             -- root variable) outlives the alias because lets flatten in scope
-            -- order and codegen never moves a bound local. INVARIANT: anything
-            -- that escapes the frame must COPY this alias's referent, not hold a
-            -- reference to it -- today std::bind decay-copies bound args, '[=]'
-            -- captures copy the referent, and the sole '[&]' is an immediately
-            -- invoked IIFE. A future by-reference capture would dangle.
+            -- order. INVARIANT: anything that escapes the frame must COPY this
+            -- alias's referent, not hold a reference to it -- today std::bind
+            -- decay-copies bound args, '[=]' captures copy the referent, and
+            -- a '[&]' capture is only ever an immediately invoked lambda: the
+            -- loop IIFE, and an inline @try thunk ('tryThunkByReference'),
+            -- which '_mlc_try' calls before returning. A by-reference
+            -- capture that escaped would dangle. A binding that takes its
+            -- referent is a separate decision and a far narrower one
+            -- ('consumableProjectionLets'): it requires the referent to have
+            -- no other use at all, so it cannot strand an alias.
             -- Scalars are excluded ('isScalarCppType'): borrowing an int/double
             -- saves nothing and a 'const T&' can't bind a 'source Cpp' non-const
             -- 'T&' parameter, so keep the cheap by-value copy for them.
-            | borrowSafe && not (isScalarCppType typestr) =
+            -- The projection is the last thing that can read the payload of a
+            -- value this frame built, so the payload moves into the binding
+            -- rather than being copied or aliased ('consumableProjectionLets').
+            -- Scalars are excluded for the same reason they are excluded from
+            -- the borrow: a move of an int is a copy of an int.
+            | binding == BindConsume && not (isScalarCppType typestr) =
+                [idoc|#{typestr} #{namer letIndex} = std::move(#{poolExpr p1});|]
+            | binding == BindBorrow && not (isScalarCppType typestr) =
                 [idoc|const #{typestr}& #{namer letIndex} = #{poolExpr p1};|]
             | otherwise =
                 [idoc|#{typestr} #{namer letIndex} = #{poolExpr p1};|]
@@ -1315,7 +1430,7 @@ serialize v0 s = do
   let v = case s of
         SerialNull _ | isCallExpr v0 -> "([&](){" <+> v0 <> "; return mlc::Unit{}; }())"
         _ -> v0
-  (expr, stmts) <- expandSerialize (cppLowerConfig Map.empty) v s
+  (expr, stmts) <- expandSerialize (cppLowerConfig (ClosureGen Map.empty Map.empty Set.empty)) v s
   return $
     PoolDocs
       { poolCompleteManifolds = []
@@ -1331,6 +1446,12 @@ isCallExpr :: MDoc -> Bool
 isCallExpr d =
   let t = render d
    in T.isSuffixOf ")" t && not (T.isPrefixOf "(" t) && not (T.isPrefixOf "mlc::Unit" t)
+
+-- | Whether a rendered expression is a bare C++ identifier.
+isIdentifierExpr :: MDoc -> Bool
+isIdentifierExpr d = case T.uncons (render d) of
+  Just (c, rest) -> (DC.isAlpha c || c == '_') && T.all (\x -> DC.isAlphaNum x || x == '_') rest
+  Nothing -> False
 
 -- | C++ cache wrap. Mirrors the Python/R generic version but emits
 -- C++ syntax and routes through the runtime's C ABI directly (the
@@ -1536,9 +1657,12 @@ prepareCppCacheArg wrapIdx (j, (a@(Arg _ tm), sa)) = do
   case tm of
     Native _ -> do
       sid <- cppRegisterSchema schemaStr
+      -- The packet exists only to key and store the cache entry, so its
+      -- owner releases it when the manifold's scope ends.
       let argVar = "__morloc_ca_" <> pretty wrapIdx <> "_" <> pretty j
-          decl = "uint8_t*" <+> argVar <+> "= _put_value("
-            <> argNamer a <> ", mlc_schema_table[" <> pretty sid <> "]);"
+          decl = "mlc::Packet" <+> argVar <> "_own(_put_value("
+            <> argNamer a <> ", mlc_schema_table[" <> pretty sid <> "]));"
+            <+> "const uint8_t*" <+> argVar <+> "=" <+> argVar <> "_own.get();"
       return (argVar, schemaStr, [decl])
     _ -> return (argNamer a, schemaStr, [])
 
@@ -1556,7 +1680,7 @@ cppEscapeString = T.concatMap esc
 -- reverse of serialize, parameters are the same
 deserialize :: MDoc -> MDoc -> SerialAST -> CppTranslator (MDoc, [MDoc])
 deserialize varname0 typestr0 s0 = do
-  (expr, stmts) <- expandDeserialize (cppLowerConfig Map.empty) varname0 s0
+  (expr, stmts) <- expandDeserialize (cppLowerConfig (ClosureGen Map.empty Map.empty Set.empty)) varname0 s0
   let rendered = CP.printExpr expr
   if null stmts
     then return (rendered, [])
@@ -1587,19 +1711,26 @@ cppClosureProxyLambda cloInit ins out = do
   argTypes <- mapM (cppTypeOf . serialAstToType) ins
   resType <- cppTypeOf (serialAstToType out)
   sig <- closureCppSig (map serialAstToType ins) (serialAstToType out)
+  -- The argument packets and the result packet belong to this application
+  -- alone, so each is held by an mlc::Packet and released once the result
+  -- has been read, or when a throw unwinds past it. The captured packets
+  -- belong to the closure.
   pushes <- mapM
     (\(i, ast) -> do
         enc <- cppEncode ("__a" <> pretty i) ast
-        return ("__pkts.push_back(" <> enc <> ");"))
+        return ("__owned.emplace_back(" <> enc <> "); __pkts.push_back(__owned.back().get());"))
     (zip [(0 :: Int) ..] ins)
-  resDoc <- cppDecode "foreign_call_v(__sock.c_str(), (size_t)std::get<1>(__clo), __pkts.data(), __pkts.size())" resType out
+  resDoc <- cppDecode "__res.get()" resType out
   let paramDocs = [t <+> ("__a" <> pretty i) | (i, t) <- zip [(0 :: Int) ..] argTypes]
       bodyDocs =
         [ "std::vector<const uint8_t*> __pkts;"
+        , "std::vector<mlc::Packet> __owned;"
+        , "__owned.reserve(" <> pretty (length ins) <> ");"
         , "for (const auto& __c : std::get<2>(__clo)) { __pkts.push_back(__c.data()); }"
         ]
           <> pushes
           <> [ "std::string __sock = std::string(\"pipe-\") + std::get<0>(__clo);"
+             , "mlc::Packet __res(foreign_call_v(__sock.c_str(), (size_t)std::get<1>(__clo), __pkts.data(), __pkts.size()));"
              , "return " <> resDoc <> ";"
              ]
       proxy =
@@ -1609,6 +1740,37 @@ cppClosureProxyLambda cloInit ins out = do
           , indent 4 (vsep bodyDocs)
           , "}"
           ]
+  -- Applied to its first argument, the proxy is the proxy of the rest: the
+  -- argument joins the origin's captured values, and when that completes a
+  -- staged closure's arguments before its stage point, the stage entry runs
+  -- in the home pool and the closure it returns is the origin instead.
+  apply1 <- case ins of
+    [] -> return []
+    (a0 : rest) -> do
+      a0Type <- cppTypeOf (serialAstToType a0)
+      a0Sid <- cppRegisterSchema (render (serialAstToMsgpackSchema a0))
+      restSig <- closureCppSig (map serialAstToType rest) (serialAstToType out)
+      restSid <- cppRegisterSchema (render (serialAstToMsgpackSchema (SerialClosure rest out)))
+      restProxy <- cppClosureProxyLambda "__o" rest out
+      return
+        [ "__c.apply1 = [__origin](const" <+> a0Type <> "& __x) -> std::function<" <> pretty restSig <> "> {"
+        , indent 4 (vsep
+            [ "auto __o = __origin;"
+            , "std::get<2>(__o).push_back(_mlc_reify_arg(__x, mlc_schema_table[" <> pretty a0Sid <> "]));"
+            , "size_t __n, __k; int64_t __s;"
+            , "if (mlc_stage_lookup(std::get<1>(__o), &__n, &__k, &__s) && std::get<2>(__o).size() == __n + __k) {"
+            , indent 4 (vsep
+                [ "std::vector<const uint8_t*> __pkts;"
+                , "for (const auto& __p : std::get<2>(__o)) { __pkts.push_back(__p.data()); }"
+                , "std::string __sock = std::string(\"pipe-\") + std::get<0>(__o);"
+                , "mlc::Packet __res(foreign_call_v(__sock.c_str(), (size_t)__s, __pkts.data(), __pkts.size()));"
+                , "__o = _get_value<" <> pretty cppClosureWireTupleName <> ">(__res.get(), mlc_schema_table[" <> pretty restSid <> "]);"
+                ])
+            , "}"
+            , "return " <> restProxy <> ";"
+            ])
+        , "};"
+        ]
   -- The proxy is itself a MorlocClosure carrying the origin it was reflected
   -- from, so passing it on to a third pool (or back home) reifies to that
   -- origin rather than to this pool.
@@ -1616,28 +1778,54 @@ cppClosureProxyLambda cloInit ins out = do
     vsep
       [ "([&]() {"
       , indent 4 (vsep
-          [ "auto __origin = " <> cloInit <> ";"
-          , "return MorlocClosure<" <> pretty sig <> ">{"
-          , indent 4 (vsep
-              [ proxy <> ","
-              , "std::get<1>(__origin),"
-              , "[__origin]() { return std::get<2>(__origin); },"
-              , "std::get<0>(__origin)"
-              ])
-          , "};"
-          ])
+          ( [ "auto __origin = " <> cloInit <> ";"
+            , "auto __c = MorlocClosure<" <> pretty sig <> ">{"
+            , indent 4 (vsep
+                [ proxy <> ","
+                , "std::get<1>(__origin),"
+                , "[__origin]() { return std::get<2>(__origin); },"
+                , "std::get<0>(__origin)"
+                ])
+            , "};"
+            ]
+            ++ apply1
+            ++ ["return __c;"]
+          ))
       , "}())"
       ]
+
+-- | The stage table ('StageEntry'), for the reflect proxies of closures from
+-- other pools.
+stageLookupDoc :: Map.Map Int StageEntry -> MDoc
+stageLookupDoc tbl =
+  vsep
+    [ "[[maybe_unused]] static bool mlc_stage_lookup(int64_t mid, size_t* nctx, size_t* k, int64_t* smid) {"
+    , indent 4 (vsep
+        ( "switch (mid) {"
+            : [ "case" <+> pretty f <> ":" <+> "*nctx =" <+> pretty n <> "; *k =" <+> pretty k <> "; *smid =" <+> pretty st <> "; return true;"
+              | (f, StageEntry n k st) <- Map.toAscList tbl ]
+            ++ ["default: return false;", "}"]
+        ))
+    , "}"
+    ]
+
+-- | The type a value of a 'TypeM' has in the pool.
+typeMToF :: TypeM -> TypeF
+typeMToF (Native t) = t
+typeMToF (Serial t) = t
+typeMToF (Function ins out) = FunF (map typeMToF ins) (typeMToF out)
+typeMToF Passthrough = error "unreachable: a passthrough value is never a native argument"
 
 recordToCppTuple :: [SerialAST] -> CppTranslator MDoc
 recordToCppTuple ts = do
   tsDocs <- mapM (cppTypeOf . wireSerialAstToType cppClosureWireLeaf) ts
   return $ "std::tuple" <> encloseSep "<" ">" "," tsDocs
 
-translateSegment :: Map.Map Text MDoc -> SerialManifold -> CppTranslator MDoc
-translateSegment reifyThunks m0 = do
+translateSegment :: ClosureGen -> SerialManifold -> CppTranslator MDoc
+translateSegment closureGen m0@(SerialManifold root _ _ _ _) = do
   resetCounter
-  e <- foldWithSerialManifoldM (defaultFoldRules (cppLowerConfig reifyThunks)) m0
+  CMS.modify (\st -> st {translatorCurrentRoot = root})
+  e <- foldWithSerialManifoldM (defaultFoldRules (cppLowerConfig closureGen)) m0
   return $ renderPoolDocs e
 
 -- handle string interpolation
@@ -2152,7 +2340,7 @@ handleFlagsAndPaths srcs = do
   let -- Search the runtime include dir (home) and the environment's shared C++
       -- module prefix (state/modules/include), where a user-installed library's
       -- headers live.
-      mlcInclude = ["-I" <> home <> "/include", "-I" <> stateDir <> "/modules/include"]
+      mlcInclude = ["-I" <> MS.shellQuote (home <> "/include"), "-I" <> MS.shellQuote (stateDir <> "/modules/include")]
       mlcPch = ["-include", "morloc_pch.hpp"]
       -- No runtime rpath to home/lib: the pool is relocatable and finds
       -- libmorloc via LD_LIBRARY_PATH exported by the nexus at launch, which
@@ -2162,7 +2350,7 @@ handleFlagsAndPaths srcs = do
       -- by the nexus LD_LIBRARY_PATH export, not a baked rpath.
       -- -rdynamic exports the pool's own symbols, so the crash handler's
       -- backtrace names generated manifolds rather than printing offsets.
-      mlcLib = ["-L" <> home <> "/lib", "-L" <> stateDir <> "/modules/lib", "-lmorloc", "-lcppmorloc", "-lpthread", "-rdynamic"]
+      mlcLib = ["-L" <> MS.shellQuote (home <> "/lib"), "-L" <> MS.shellQuote (stateDir <> "/modules/lib"), "-lmorloc", "-lcppmorloc", "-lpthread", "-rdynamic"]
 
   return
     ( filter (isJust . srcPath) srcs'
@@ -2202,9 +2390,14 @@ cppModuleIncludeDirs reg = fmap catMaybes . mapM dirOf . filter isCpp
             else return Nothing
     dirOf _ = return Nothing
 
+-- | The provisional spelling of a standard newer than C++20 (c++2b for 23,
+-- c++2c for 26) is accepted by every compiler that implements it, while the
+-- final spelling arrived later: Apple clang 15 rejects -std=c++23.
 gccVersionFlag :: Int -> Text
 gccVersionFlag i
   | i <= 20 = "-std=c++20"
+  | i == 23 = "-std=c++2b"
+  | i == 26 = "-std=c++2c"
   | otherwise = "-std=c++" <> MT.show' i
 
 flagAndPath :: LR.LangRegistry -> Source -> MorlocMonad (Source, [String], Maybe Path)
@@ -2268,8 +2461,8 @@ flagAndPath reg src@(Source _ srcL (Just p) _ _ _ _ _ _ _) | LR.poolOf reg srcL 
           -- state/src tree) is not on that export, so it keeps the rpath.
           -- Comma form (`-Wl,-rpath,DIR`), accepted by both GNU ld and macOS ld64
           -- (which rejects the GNU `-Wl,-rpath=DIR` form).
-          let rpathFlags = ["-Wl,-rpath," <> libdir | libdir /= moduleLibDir]
-          return $ rpathFlags <> ["-L" <> libdir, "-l" <> libnamebase]
+          let rpathFlags = ["-Wl,-rpath," <> MS.shellQuote libdir | libdir /= moduleLibDir]
+          return $ rpathFlags <> ["-L" <> MS.shellQuote libdir, "-l" <> libnamebase]
         [] -> return []
 flagAndPath reg src@(Source _ srcL Nothing _ _ _ _ _ _ _) | LR.poolOf reg srcL == cppLang = return (src, [], Nothing)
 flagAndPath _ _ = MM.throwSystemError $ "flagAndPath should only be called for C++ functions"

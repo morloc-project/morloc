@@ -13,10 +13,9 @@ Implements bidirectional type inference over the 'AnnoS' trees produced by
 aliases. Concrete (language-specific) types are checked later after language
 segregation in the code generator.
 -}
-module Morloc.Frontend.Typecheck (typecheck, resolveTypes, evaluateAnnoSTypes, peakSExpr) where
+module Morloc.Frontend.Typecheck (typecheck, typecheckRoot, typecheckRootAt, validate, resolveTypes, evaluateAnnoSTypes, peakSExpr) where
 
 import qualified Data.List as List
-import qualified Data.IntMap.Strict as IntMap
 import Data.Text (Text)
 import qualified Data.Text as MT
 import qualified Morloc.BaseTypes as BT
@@ -67,10 +66,25 @@ isPrimitiveConstraint (CDisjoint _ _) = True
 -- a sourced error; if unsolved, solve with the phase's default.
 resolvePendingNumLits :: Gamma -> [(Int, TVar, NumLitKind)] -> MorlocMonad Gamma
 resolvePendingNumLits g0 entries = do
-  let (intLits, realLits) = partition (\(_, _, k) -> k == IntDefault) entries
+  -- the class obligations on existentials, closed under superclasses
+  closed <- superclassClosure [c | c@(Constraint _ [_]) <- gammaConstraints g0]
+  let numericVars = Set.fromList
+        [ v
+        | Constraint cls [t] <- closed
+        , cls == BT.numericClass
+        , ExistU v _ _ <- [apply g0 t]
+        ]
+  let (intLits0, realLits0) = partition (\(_, _, k) -> k == IntDefault) entries
+      -- an integer literal whose type must be Numeric defaults like a real one
+      (numericInts, intLits) = partition (\(_, v, _) -> Set.member (chainEnd v) numericVars) intLits0
+      realLits = realLits0 ++ numericInts
   g1 <- foldlM (resolveOne BT.isRealBaseType BT.realU) g0 realLits
   foldlM (resolveOne acceptableForInt BT.intU) g1 intLits
   where
+    chainEnd v = case apply g0 (ExistU v ([], Open) ([], Open)) of
+      ExistU v' _ _ -> v'
+      _ -> v
+
     -- An IntS literal can adopt any integer base type OR any real base
     -- type (via promotion). The check-mode rule for @IntS@ above mirrors
     -- this acceptance.
@@ -134,13 +148,44 @@ resolvePendingNumLits g0 entries = do
 typecheck ::
   [AnnoS Int ManyPoly Int] ->
   MorlocMonad [AnnoS (Indexed TypeU) Many Int]
-typecheck = mapM run
+typecheck = mapM (typecheckRoot >=> assertStructuralTypesExpanded)
+
+-- | Every alias of an arrow, effect or optional type is expanded where it is
+-- declared (see 'expandStructuralAliases'), and later stages read those
+-- types by their shape, so none may remain on a typed node.
+assertStructuralTypesExpanded :: AnnoS (Indexed TypeU) Many Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
+assertStructuralTypesExpanded = mapAnnoSGM check
+  where
+    check g@(Idx i t) = do
+      scope <- MM.getGeneralScope i
+      case structuralAliasesIn scope t of
+        [] -> return g
+        (v : _) -> MM.throwCompilerBugAt i $
+          "the alias" <+> squotes (pretty v)
+          <+> "of a function, effect or optional type was not expanded:" <+> pretty t
+
+-- | Check one tree on its own: its outermost 'VarS' is the definition being
+-- checked, and nothing outside the tree constrains it.
+typecheckRoot :: AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
+typecheckRoot = typecheckWith Nothing
+
+-- | Check one tree against a type, as a use of it at that type is checked.
+typecheckRootAt :: TypeU -> AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
+typecheckRootAt t = typecheckWith (Just t)
+
+typecheckWith :: Maybe TypeU -> AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
+typecheckWith expected = run
   where
     run :: AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
-    run e0 = do
+    run e0@(AnnoS rootIdx _ _) = do
+      -- The general scope is needed to expand type aliases inside the
+      -- primitive constraints discharged below.
+      scope <- MM.getGeneralScope rootIdx
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
-      let g0 = Gamma {gammaCounter = 0, gammaSlot = 0, gammaContext = IntMap.empty, gammaExist = Map.empty, gammaSolved = Map.empty, gammaDeferred = [], gammaKindSubs = Map.empty, gammaEffSubs = Map.empty, gammaConstraints = [], gammaAssumedConstraints = Nothing, gammaIntVals = Map.empty, gammaPendingNumLits = [], gammaPositionalReceivers = Set.empty}
-      (g1raw, _, e1) <- synthG g0 e0
+      let g0 = emptyGamma
+      (g1raw, _, e1) <- case expected of
+        Nothing -> synthG g0 e0
+        Just t -> checkG g0 e0 t
 
       -- Resolve numeric literals that were checked against unsolved
       -- existentials BEFORE instance resolution. Typeclass dispatch
@@ -194,7 +239,7 @@ typecheck = mapM run
       -- Typeclass-form constraints (@Constraint cls _@) are handled by
       -- the separate class-resolution machinery; we leave any leftover
       -- of that form in place rather than error.
-      case dischargeConstraints g3 of
+      case dischargeConstraints scope g3 of
         Left err -> MM.throwSystemError ("Constraint violation: " <> err)
         Right g3' ->
           case filter isPrimitiveConstraint (gammaConstraints g3') of
@@ -228,7 +273,91 @@ typecheck = mapM run
       -- AppU shapes (@AppU (AppU H [n]) [a]@); downstream codegen
       -- (weave, evaluateStep, inferConcreteType) only understands the
       -- flat canonical shape.
-      return (mapAnnoSG (fmap normalizeType) (applyGen g3 e3))
+      -- A Nat is a natural number, but Nat subtraction is not clamped, so a
+      -- signature can compute a negative dimension. It typechecks, builds,
+      -- and then dies at run time as a malformed schema string naming
+      -- neither the dimension nor the signature it came from. Every Nat is
+      -- solved by now, so reject it here.
+      let finalE = mapAnnoSG (fmap normalizeType) (applyGen g3 e3)
+      _ <- mapAnnoSGM checkFinalType finalE
+      return finalE
+
+    -- Problems that only become visible once every kind variable is solved.
+    -- Both are errors the user would otherwise meet at run time, or not at
+    -- all: an operator that could not reduce leaves no trace in a program
+    -- whose result type nobody wrote down.
+    checkFinalType :: Indexed TypeU -> MorlocMonad (Indexed TypeU)
+    checkFinalType ix@(Idx i t) = case negativeNats t of
+      (n : _) ->
+        MM.throwSourcedError i $
+          "A dimension may not be negative, but this one is " <> pretty n
+            <> ". Nat subtraction is not clamped, so check the arithmetic"
+            <> " in the signature."
+      [] -> case collidingUnions t of
+        (ks : _) ->
+          MM.throwSourcedError i $
+            "Columns cannot be combined because both sides have: "
+              <> hcat (punctuate ", " (map pretty ks))
+        [] -> return ix
+
+    -- A union of two fully known rows that share a key. `reduceRecUnion`
+    -- leaves such a union symbolic rather than reducing it, so nothing
+    -- catches the collision unless the caller annotates the result and
+    -- forces the solver to look.
+    collidingUnions :: TypeU -> [[Text]]
+    collidingUnions = go
+      where
+        go (RecUnionU a b)
+          | Just ka <- groundRowKeys a
+          , Just kb <- groundRowKeys b
+          , shared <- [k | k <- ka, k `elem` kb]
+          , not (null shared) = [shared]
+        go (LitU (LRec fs)) = concatMap (go . snd) fs
+        go (LitU (LList es)) = concatMap go es
+        go (LitU (LSet es)) = concatMap go es
+        go (LitU _) = []
+        go (OpU _ ts) = concatMap go ts
+        go (FunU ts t') = concatMap go (t' : ts)
+        go (AppU t' ts) = concatMap go (t' : ts)
+        go (NamU _ _ ps rs) = concatMap go (ps <> map snd rs)
+        go (ForallU _ t') = go t'
+        go (EffectU _ t') = go t'
+        go (OptionalU t') = go t'
+        go (LabeledU _ t') = go t'
+        go (ExistU _ (ts, _) (rs, _)) = concatMap go (ts <> map snd rs)
+        go _ = []
+
+    -- The field names of a row, when every field is known.
+    groundRowKeys :: TypeU -> Maybe [Text]
+    groundRowKeys (LitU (LRec fs)) = Just (map fst fs)
+    groundRowKeys (RecExtendU k _ rest) = (k :) <$> groundRowKeys rest
+    groundRowKeys _ = Nothing
+
+    -- Every negative Nat literal in a type, in no particular order.
+    negativeNats :: TypeU -> [Integer]
+    negativeNats = go
+      where
+        go (LitU (LNat n)) = [n | n < 0]
+        go (LitU (LRec fs)) = concatMap (go . snd) fs
+        go (LitU (LList es)) = concatMap go es
+        go (LitU (LSet es)) = concatMap go es
+        go (LitU _) = []
+        go (OpU _ ts) = concatMap go ts
+        go (FunU ts t) = concatMap go (t : ts)
+        go (AppU t ts) = concatMap go (t : ts)
+        go (NamU _ _ ps rs) = concatMap go (ps <> map snd rs)
+        go (ForallU _ t) = go t
+        go (EffectU _ t) = go t
+        go (OptionalU t) = go t
+        go (LabeledU _ t) = go t
+        go (ExistU _ (ts, _) (rs, _)) = concatMap go (ts <> map snd rs)
+        go VarU{} = []
+        go KVarU{} = []
+        go VoidU{} = []
+        go ListVarU{} = []
+        go ListVoidU = []
+        go SetVarU{} = []
+        go SetVoidU = []
 
 -- TypeU --> Type
 resolveTypes :: AnnoS (Indexed TypeU) Many Int -> AnnoS (Indexed Type) Many Int
@@ -296,8 +425,12 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
       let gtEval = case TE.evaluateType scope gt of
             Right et -> et
             Left _ -> gt
-          emptyGamma = Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty [] Nothing Map.empty [] Set.empty
-          isCompatible t = isSubtypeOf2 scope t gtEval
+          -- `isSubtypeOfOpen` rather than `isSubtypeOf2`: at this point the
+          -- occurrence type may still carry an unsolved existential -- the
+          -- result of `unpack x` that nothing downstream constrains -- and
+          -- an empty gamma cannot instantiate it, so every candidate would
+          -- be rejected and the user told no instance exists.
+          isCompatible t = isSubtypeOfOpen scope t gtEval
                         || isJust (tryCoerce scope t gtEval emptyGamma)
           rssCompat = [x | x@(EType t _ _ _, _) <- rss, isCompatible t]
           -- Filter by alias-chain reachability: only keep instances whose
@@ -601,11 +734,11 @@ checkG ::
     , AnnoS (Indexed TypeU) ManyPoly Int
     )
 checkG g (AnnoS i j e) t = do
-  annotation <- MM.gets stateAnnotations
+  annotation <- fmap (scopeType (isJust (gammaRigid g)) (gammaScoped g)) . Map.lookup j <$> MM.gets stateAnnotations
   -- Use the body's concrete index (j) for error caret positions: i is
   -- often the variable-reference / export-list site and would mis-locate
   -- body errors.
-  (g', t', e') <- case Map.lookup j annotation of
+  (g', t', e') <- case annotation of
     Nothing -> checkE' j g e t
     (Just annType) -> do
       gAnn <- subtype' j annType t g
@@ -616,7 +749,7 @@ checkG g (AnnoS i j e) t = do
   -- permits.  See spec/types/effects.md "Effect Checking".  Inner
   -- positions without an annotation flow through ordinary structural
   -- subtyping, which already rejects narrowing on EffectU types.
-  case Map.lookup j annotation of
+  case annotation of
     Just annType -> checkEffectCoverage j (apply g' annType) annotatedBody
     Nothing -> return ()
   return (g', t', annotatedBody)
@@ -1010,7 +1143,7 @@ synthE i g0 (AppS f xs0) = do
 -- Synthesize lambda expressions. The key optimization here is to avoid
 -- re-synthesizing after eta expansion - we synthesize the body once with
 -- proper context, then construct the expanded form directly.
-synthE parentIdx g0 (LamS vs x) = do
+synthE _ g0 (LamS vs x) = do
   -- Create existentials for lambda-bound variables and add to context
   let (g1, paramTypes) = statefulMap (\g' v -> newvar (unEVar v <> "_x") g') g0 vs
       g2 = g1 ++> zipWith AnnG vs paramTypes
@@ -1018,51 +1151,8 @@ synthE parentIdx g0 (LamS vs x) = do
   -- Synthesize body ONCE with bound variables in context
   (g3, bodyType, bodyExpr) <- synthG g2 x
 
-  -- Check if body returns a function (needs eta expansion)
-  let normalBody = normalizeType (apply g3 bodyType)
-  case normalBody of
-    FunU extraArgTypes retType -> do
-      -- Body returns a function: eta-expand WITHOUT re-synthesizing
-      -- Create new bound variables for the extra arguments
-      (g4, newVarsWithTypes) <-
-        statefulMapM
-          ( \g' t -> do
-              let (g'', v) = evarname g' "v"
-              return (g'', (v, t))
-          )
-          g3
-          extraArgTypes
-
-      let newVars = map fst newVarsWithTypes
-          appliedExtraTypes = map (apply g4 . snd) newVarsWithTypes
-
-      -- Add type annotations for new bound variables
-      let g5 = g4 ++> zipWith AnnG newVars appliedExtraTypes
-
-      -- Create typed variable references for the new parameters
-      newVarExprs <-
-        mapM
-          ( \(v, t) -> do
-              idx <- MM.getCounterWithPos parentIdx
-              return $ AnnoS (Idx idx t) idx (BndS v)
-          )
-          (zip newVars appliedExtraTypes)
-
-      -- Create the application of body to new variables
-      appIdx <- MM.getCounterWithPos parentIdx
-      let appliedRetType = apply g5 retType
-          appliedBodyExpr = AppS (applyGen g5 bodyExpr) newVarExprs
-          appliedBodyAnno = AnnoS (Idx appIdx appliedRetType) appIdx appliedBodyExpr
-
-      -- Construct the full function type
-      let allParamTypes = map (apply g5) paramTypes ++ appliedExtraTypes
-          fullType = FunU allParamTypes appliedRetType
-
-      return (g5, fullType, LamS (vs ++ newVars) appliedBodyAnno)
-    _ -> do
-      -- Body is not a function: just return the lambda as-is
-      let funType = apply g3 (FunU paramTypes bodyType)
-      return (g3, funType, LamS vs (applyGen g3 bodyExpr))
+  let funType = apply g3 (FunU paramTypes bodyType)
+  return (g3, funType, LamS vs (applyGen g3 bodyExpr))
 
 --   List
 synthE _ g (LstS []) =
@@ -1105,7 +1195,21 @@ synthE _ g0 (NamS rs) = do
 
 -- Any morloc variables should have been expanded by treeify. Any bound
 -- variables should be checked against. I think (this needs formalization).
-synthE _ g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
+-- Another signed term a definition names, referenced by its signature alone,
+-- is instantiated here, its constraints becoming obligations over the
+-- instantiating variables. A reference's type never keeps its quantifier:
+-- one left in place travels into a synthesized record or tuple and meets the
+-- expected type there as a rigid variable.
+synthE _ g0 (VarS v (MonomorphicExpr (Just t0) []))
+  | Just _ <- gammaAssumedConstraints g0 = do
+      let (g1, t0') = renameEType g0 t0
+          (g2, t2) = instantiateObligations g1 (etype t0') (Set.toList (econs t0'))
+      return (g2, t2, VarS v (MonomorphicExpr (Just t0) []))
+synthE _ g0 (VarS v (MonomorphicExpr (Just t0sig) xs0)) = do
+  -- a local signature's type variables named by an enclosing signature are
+  -- that signature's variables
+  let enclosing = if isLocalName v then gammaScoped g0 else Map.empty
+      t0 = scopeEType (isJust (gammaRigid g0)) enclosing t0sig
   -- Rename type AND constraints together so primitive constraints
   -- (CMember / CSubset / CDisjoint) reference the same fresh-name
   -- variables that the type uses. The renamed constraints are queued
@@ -1132,14 +1236,27 @@ synthE _ g0 (VarS v (MonomorphicExpr (Just t0) xs0)) = do
   let (g1, t0') = renameEType g0 t0
       t1 = etype t0'
       newCs = Set.toList (econs t0')
+      inScope = Map.union (Map.fromList (zip (fst (unqualify (etype t0))) (fst (unqualify t1)))) enclosing
+  -- checking a definition against its signature, the body may use what the
+  -- declared constraints entail, their superclasses included
+  given <- case gammaRigid g1 of
+    Just _ -> superclassClosure newCs
+    Nothing -> return newCs
+  let outermost = isNothing (gammaAssumedConstraints g1)
       g1Cs = g1
         { gammaConstraints = gammaConstraints g1 ++ newCs
         , gammaAssumedConstraints = case gammaAssumedConstraints g1 of
-            Nothing -> Just newCs
+            Nothing -> Just given
             Just _  -> gammaAssumedConstraints g1
+        -- checking a definition against its signature, the signature's
+        -- effect variables are as rigid as its type variables
+        , gammaRigid = case gammaRigid g1 of
+            Just rigid | outermost -> Just (Set.union rigid (Set.fromList (typeEffectVars t1)))
+            r -> r
         }
-      g1' = g1Cs ++> [AnnG v t1]
-  (g2, t2, xs1) <- foldCheck g1' xs0 t1
+      g1' = (g1Cs ++> [AnnG v t1]) {gammaScoped = inScope}
+  (g2scoped, t2, xs1) <- foldCheck g1' xs0 t1
+  let g2 = g2scoped {gammaScoped = gammaScoped g0}
   -- Verify the body's evaluation-time effects fit within the declared
   -- signature.  Catches forces outside do-blocks (e.g. `f = !rint`)
   -- that the structural subtype rule cannot see, because EvalS strips
@@ -1161,6 +1278,17 @@ synthE _ g (VarS v (MonomorphicExpr Nothing (x : xs))) = do
 synthE _ g (VarS v (MonomorphicExpr Nothing [])) = do
   let (g', t) = newvar (unEVar v <> "_u") g
   return (g', t, VarS v (MonomorphicExpr Nothing []))
+-- Checking a definition against its signature: a method use is instantiated
+-- here so the constraint it needs, over the same fresh variables, is recorded
+-- as an obligation; which instance it picks is not this check's business.
+synthE _ g0 (VarS v (PolymorphicExpr cls clsName t0 _))
+  | Just _ <- gammaRigid g0 = do
+      tcls <- MM.gets stateTypeclasses
+      let (g1, t1, rw) = renameWithMap g0 (etype t0)
+          cvars = maybe [] classVars (Map.lookup clsName tcls)
+          obligation = Constraint cls [rw (VarU cv) | cv <- cvars]
+          (g2, t2) = instantiateObligations g1 t1 [obligation]
+      return (g2, t2, VarS v (PolymorphicExpr cls clsName t0 []))
 synthE i g0 (VarS v (PolymorphicExpr cls clsName t0 rs0)) = do
   (g1, rsChecked) <- checkInstances g0 (etype t0) rs0
   let (g2, t1) = rename g1 (etype t0)
@@ -1253,6 +1381,10 @@ synthE _ g (LetBndS v) = do
   return (g', t', LetBndS v)
 synthE _ g (CallS v) = do
   (g', t') <- case lookupE v g of
+    -- Checking against a signature, the body's quantified variables are
+    -- rigid under their own names; a recursive call instantiates the
+    -- signature afresh, so it must not reuse them.
+    (Just t) | Just _ <- gammaRigid g -> return (rename g t)
     (Just t) -> return (g, t)
     Nothing -> return $ newvar (unEVar v <> "_rec") g
   return (g', t', CallS v)
@@ -1419,6 +1551,87 @@ synthE _ g (IntrinsicS IntrWrite [levelE, handleE, listE]) = do
          )
 synthE _ _ (IntrinsicS IntrWrite args) =
   error $ "IntrWrite expects 3 args (level, handle, list), got " <> show (length args)
+-- The fold accumulator. `Cell b` carries the accumulated type, which is
+-- what forces a folding handler's init, step and combine to agree with
+-- each other and with the handler that consumes the result. A bare
+-- integer handle would leave those types floating free, so a formatter
+-- pairing `@init=zeroHist` with `@fold=addCounts` would typecheck and
+-- then misread the accumulator -- an unsound path, not a missed warning.
+--
+-- The handle is checked before the value for the reason @write's rule
+-- gives: it pins the fresh existential, so a literal in the value still
+-- has a chance to inhabit the accumulator's own type rather than freezing
+-- to its default first.
+synthE _ g (IntrinsicS IntrCellNew [initE]) = do
+  let (g1, b) = newvar "cell_acc_" g
+  (g2, _, initE') <- checkG g1 initE b
+  return ( g2
+         , EffectU ioEffectSet (AppU (VarU BT.cellVar) [apply g2 b])
+         , IntrinsicS IntrCellNew [initE']
+         )
+synthE _ _ (IntrinsicS IntrCellNew args) =
+  error $ "IntrCellNew expects 1 arg (init), got " <> show (length args)
+synthE _ g (IntrinsicS IntrCellGet [handleE]) = do
+  (g1, b, handleE') <- checkCellHandle g handleE
+  return ( g1
+         , EffectU ioEffectSet b
+         , IntrinsicS IntrCellGet [handleE']
+         )
+synthE _ _ (IntrinsicS IntrCellGet args) =
+  error $ "IntrCellGet expects 1 arg (handle), got " <> show (length args)
+synthE _ g (IntrinsicS IntrCellPut [handleE, valE]) = do
+  (g2, b, handleE') <- checkCellHandle g handleE
+  (g3, _, valE')    <- checkG g2 valE b
+  return ( g3
+         , EffectU ioEffectSet BT.unitU
+         , IntrinsicS IntrCellPut [handleE', valE']
+         )
+synthE _ _ (IntrinsicS IntrCellPut args) =
+  error $ "IntrCellPut expects 2 args (handle, value), got " <> show (length args)
+synthE _ g (IntrinsicS IntrCellReduce [combineE, handleE]) = do
+  (g2, bT, handleE') <- checkCellHandle g handleE
+  (g3, _, combineE') <- checkG g2 combineE (FunU [bT, bT] bT)
+  return ( g3
+         , EffectU ioEffectSet (apply g3 bT)
+         , IntrinsicS IntrCellReduce [combineE', handleE']
+         )
+synthE _ _ (IntrinsicS IntrCellReduce args) =
+  error $ "IntrCellReduce expects 2 args (combine, handle), got " <> show (length args)
+-- @replay :: IStream a -> ([a] -> <IO> ()) -> <IO> (). The function receives
+-- each frame of the stream as a list; the element type comes from the stream.
+synthE _ g (IntrinsicS IntrReplay [handleE, fnE]) = do
+  let (g1, a) = newvar "replay_a_" g
+  (g2, _, handleE') <- checkG g1 handleE (AppU (VarU BT.istreamVar) [a])
+  (g3, _, fnE') <- checkG g2 fnE (FunU [BT.listU (apply g2 a)] (EffectU ioEffectSet BT.unitU))
+  return ( g3
+         , EffectU ioEffectSet BT.unitU
+         , IntrinsicS IntrReplay [handleE', fnE']
+         )
+synthE i _ (IntrinsicS IntrReplay args) =
+  MM.throwCompilerBugAt i $ "IntrReplay expects 2 args (stream, function), got " <> pretty (length args)
+-- @channel :: <IO> (IStream a); the element type comes from where the
+-- stream is used.
+synthE _ g (IntrinsicS IntrChannel []) =
+  let (g1, a) = newvar "channel_a_" g
+   in return (g1, EffectU ioEffectSet (AppU (VarU BT.istreamVar) [a]), IntrinsicS IntrChannel [])
+synthE i _ (IntrinsicS IntrChannel args) =
+  MM.throwCompilerBugAt i $ "IntrChannel expects no args, got " <> pretty (length args)
+-- @spawn :: IStream a -> (OStream a -> <IO> ()) -> <IO> (). The producer
+-- writes the channel the stream reads.
+synthE _ g (IntrinsicS IntrSpawn [handleE, fnE]) = do
+  let (g1, a) = newvar "spawn_a_" g
+  (g2, _, handleE') <- checkG g1 handleE (AppU (VarU BT.istreamVar) [a])
+  (g3, _, fnE') <- checkG g2 fnE (FunU [AppU (VarU BT.ostreamVar) [apply g2 a]] (EffectU ioEffectSet BT.unitU))
+  return (g3, EffectU ioEffectSet BT.unitU, IntrinsicS IntrSpawn [handleE', fnE'])
+synthE i _ (IntrinsicS IntrSpawn args) =
+  MM.throwCompilerBugAt i $ "IntrSpawn expects 2 args (stream, producer), got " <> pretty (length args)
+-- @settle :: IStream a -> <IO> ().
+synthE _ g (IntrinsicS IntrSettle [handleE]) = do
+  let (g1, a) = newvar "settle_a_" g
+  (g2, _, handleE') <- checkG g1 handleE (AppU (VarU BT.istreamVar) [a])
+  return (g2, EffectU ioEffectSet BT.unitU, IntrinsicS IntrSettle [handleE'])
+synthE i _ (IntrinsicS IntrSettle args) =
+  MM.throwCompilerBugAt i $ "IntrSettle expects 1 arg (stream), got " <> pretty (length args)
 -- Bespoke rule for @try. Its argument may fail in any number of ways --
 -- an intrinsic Err arm auto-required into a throw, a foreign function
 -- raising natively, an explicit @throw -- and those failures have no
@@ -1429,13 +1642,39 @@ synthE _ _ (IntrinsicS IntrWrite args) =
 -- discharge the IO the body performed on its way there. A pure body
 -- stays pure.
 synthE _ g (IntrinsicS IntrTry [bodyE]) = do
-  (g1, bodyT, bodyE') <- synthG g bodyE
-  let resultT = case peelForallU (apply g1 bodyT) of
+  (g0, bodyT, bodyE') <- synthG g bodyE
+  let (g1, openT) = stripForallU g0 (apply g0 bodyT)
+      resultT = case openT of
         EffectU e t -> mkEffectU e (BT.tryU BT.strU t)
         t           -> BT.tryU BT.strU t
   return (g1, resultT, IntrinsicS IntrTry [bodyE'])
 synthE i _ (IntrinsicS IntrTry args) =
   MM.throwCompilerBugAt i $ "IntrTry expects 1 arg (body), got " <> pretty (length args)
+-- @stream :: IFile [a] -> <IO> IStream a. An IFile carries the type of the
+-- whole value in its file and an IStream the type of one element, so the
+-- receiver is checked against a list-valued IFile and the element read from
+-- the solved variable. Checking (rather than reading the receiver's type
+-- syntactically) sees through aliases and solves an inferred receiver.
+synthE _ g (IntrinsicS IntrStream [handleE]) = do
+  let (g1, a) = newvar "stream_a_" g
+  (g2, _, handleE') <- checkG g1 handleE (AppU (VarU BT.ifileVar) [BT.listU a])
+  return ( g2
+         , EffectU ioEffectSet (AppU (VarU BT.istreamVar) [apply g2 a])
+         , IntrinsicS IntrStream [handleE']
+         )
+synthE i _ (IntrinsicS IntrStream args) =
+  throwTypeError i $ "@stream expects 1 arguments but got" <+> pretty (length args)
+-- @next :: IStream a -> <IO> (Try Str [a]). A mid-stream decode failure is
+-- an Err arm. Typed like @stream, by checking the receiver.
+synthE _ g (IntrinsicS IntrNext [handleE]) = do
+  let (g1, a) = newvar "next_a_" g
+  (g2, _, handleE') <- checkG g1 handleE (AppU (VarU BT.istreamVar) [a])
+  return ( g2
+         , EffectU ioEffectSet (BT.tryU BT.strU (BT.listU (apply g2 a)))
+         , IntrinsicS IntrNext [handleE']
+         )
+synthE i _ (IntrinsicS IntrNext args) =
+  throwTypeError i $ "@next expects 1 arguments but got" <+> pretty (length args)
 synthE i g (IntrinsicS intr args) = do
   (g', argTypes, args') <- synthArgs g args
   g'' <- checkIntrinsicArgs i g' intr argTypes
@@ -1491,21 +1730,14 @@ intrinsicTypeG g IntrRead _ =
 intrinsicTypeG g IntrOpen _ =
   let (g', openType) = newvar "open_" g
   in (g', EffectU ioEffectSet (BT.tryU BT.strU openType))
+-- @unpack: the decoded type is resolved by the synthesized ascription.
+intrinsicTypeG g IntrUnpack _ =
+  let (g', unpackType) = newvar "unpack_" g
+  in (g', EffectU ioEffectSet unpackType)
 -- @close: arg is any handle type (a fresh existential); user-side use
 -- always has the handle bound to a known type, so this resolves
 -- without needing ascription.
 intrinsicTypeG g IntrClose _ = (g, EffectU ioEffectSet BT.unitU)
--- @next :: IStream a -> <IO> (Try Str [a]). Mid-stream decode failures
--- come back as an Err arm.
-intrinsicTypeG g IntrNext [argT] =
-  let a = streamElemTypeU argT in
-  (g, EffectU ioEffectSet (BT.tryU BT.strU (BT.listU a)))
--- @stream :: IFile a -> <IO> IStream a. Same trick, with the IStream
--- head on the result side. The IFile was already validated at @open,
--- so this handle-setup step does not itself fail with Err.
-intrinsicTypeG g IntrStream [argT] =
-  let a = streamElemTypeU argT in
-  (g, EffectU ioEffectSet (AppU (VarU BT.istreamVar) [a]))
 -- @append: polymorphic return like @open; the user ascription resolves
 -- to the concrete OStream/IStream/IFile shape.
 intrinsicTypeG g IntrAppend _ =
@@ -1540,9 +1772,20 @@ intrinsicTypeG g intr _ = (g, intrinsicType intr)
 -- expected subtype constraint failed silently -- that branch is
 -- unreachable on a well-typed program but defends codegen against
 -- a missing-arg-type assertion.
-streamElemTypeU :: TypeU -> TypeU
-streamElemTypeU (AppU _ (a : _)) = a
-streamElemTypeU t = t
+-- | Check a @Cell b@ handle and return the accumulator type it carries.
+--
+-- Always the first check in a cell intrinsic's rule, for the reason
+-- @write's rule gives: it pins the fresh existential, so a literal in a
+-- later argument still has a chance to inhabit the accumulator's own type
+-- rather than freezing to its default first.
+checkCellHandle ::
+  Gamma ->
+  AnnoS Int ManyPoly Int ->
+  MorlocMonad (Gamma, TypeU, AnnoS (Indexed TypeU) ManyPoly Int)
+checkCellHandle g handleE = do
+  let (g1, b) = newvar "cell_acc_" g
+  (g2, _, handleE') <- checkG g1 handleE (AppU (VarU BT.cellVar) [b])
+  return (g2, apply g2 b, handleE')
 
 -- | Return type of a fully applied intrinsic (for intrinsics without fresh vars)
 intrinsicType :: Intrinsic -> TypeU
@@ -1559,6 +1802,8 @@ intrinsicType IntrTypeof = BT.strU
 intrinsicType IntrShow = BT.strU
 intrinsicType IntrRead = BT.tryU BT.strU (ExistU (TV "read_a") ([], Open) ([], Open))
 intrinsicType IntrDatafile = BT.strU
+intrinsicType IntrUnpack =
+  error "intrinsicType: IntrUnpack must be typed via intrinsicTypeG"
 -- IntrOpen and IntrClose flow through intrinsicTypeG (fresh existentials).
 intrinsicType IntrOpen =
   error "intrinsicType: IntrOpen must be typed via intrinsicTypeG"
@@ -1571,10 +1816,29 @@ intrinsicType IntrStreamLayout =
 intrinsicType IntrTell = EffectU ioEffectSet BT.u64U
 intrinsicType IntrTmpfile = EffectU ioEffectSet (BT.tryU BT.strU BT.strU)
 intrinsicType IntrNext =
-  error "intrinsicType: IntrNext must be typed via intrinsicTypeG (carries arg-derived element type)"
+  error "intrinsicType: IntrNext is typed in synthE (its element type comes from the receiver)"
 intrinsicType IntrStream =
-  error "intrinsicType: IntrStream must be typed via intrinsicTypeG (carries arg-derived element type)"
+  error "intrinsicType: IntrStream is typed in synthE (its element type comes from the receiver)"
 intrinsicType IntrWrite = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
+-- One clause each, not a guard over a list: this match is exhaustive on
+-- purpose, so that a new Intrinsic constructor fails the build here rather
+-- than falling through to a runtime error.
+intrinsicType IntrCellNew =
+  error "intrinsicType: IntrCellNew must be typed via synthE's dedicated clause"
+intrinsicType IntrCellGet =
+  error "intrinsicType: IntrCellGet must be typed via synthE's dedicated clause"
+intrinsicType IntrCellPut =
+  error "intrinsicType: IntrCellPut must be typed via synthE's dedicated clause"
+intrinsicType IntrCellReduce =
+  error "intrinsicType: IntrCellReduce must be typed via synthE's dedicated clause"
+intrinsicType IntrReplay =
+  error "intrinsicType: IntrReplay must be typed via synthE's dedicated clause"
+intrinsicType IntrChannel =
+  error "intrinsicType: IntrChannel must be typed via synthE's dedicated clause"
+intrinsicType IntrSpawn =
+  error "intrinsicType: IntrSpawn must be typed via synthE's dedicated clause"
+intrinsicType IntrSettle =
+  error "intrinsicType: IntrSettle must be typed via synthE's dedicated clause"
 intrinsicType IntrAppend =
   error "intrinsicType: IntrAppend must be typed via intrinsicTypeG (polymorphic return)"
 intrinsicType IntrConcat = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
@@ -1582,6 +1846,8 @@ intrinsicType IntrFlush = EffectU ioEffectSet (BT.tryU BT.strU BT.unitU)
 -- IntrMap is handled by its own synthE clause and never reaches this fallback.
 intrinsicType IntrMap =
   error "intrinsicType: IntrMap must be typed via synthE's dedicated clause"
+intrinsicType IntrMapOptional =
+  error "intrinsicType: IntrMapOptional is emitted after typechecking"
 intrinsicType IntrTagTest =
   error "intrinsicType: IntrTagTest must be typed via synthE's dedicated clause"
 intrinsicType IntrCtorField =
@@ -1654,6 +1920,8 @@ checkIntrinsicArgs i g intr argTypes = do
         (IntrRead, [strT]) -> subtype' i strT BT.strU g
         -- @datafile: Str -> Str (path must be string literal)
         (IntrDatafile, [pathT]) -> subtype' i pathT BT.strU g
+        -- @unpack: [U8] -> <IO> a
+        (IntrUnpack, [bytesT]) -> subtype' i bytesT (BT.listU BT.u8U) g
         -- @open: Str -> <IO> a (return type resolved by user ascription)
         (IntrOpen, [pathT]) -> subtype' i pathT BT.strU g
         -- @close: any handle type -> <IO> ()
@@ -1670,18 +1938,10 @@ checkIntrinsicArgs i g intr argTypes = do
           let (g'a, a) = newvar "streamlayout_a_" g
               expectedT = AppU (VarU BT.ifileVar) [BT.listU a]
            in subtype' i argT expectedT g'a
-        -- @next: IStream a -> <IO> [a]. Pin the receiver shape so the
-        -- result type's [a] is constrained to the same `a`. Runtime
-        -- enforces kind == ISTREAM.
-        (IntrNext, [argT]) ->
-          let (g'a, a) = newvar "next_a_" g
-              expectedT = AppU (VarU BT.istreamVar) [a]
-           in subtype' i argT expectedT g'a
-        -- @stream: IFile a -> <IO> IStream a. Same trick.
-        (IntrStream, [argT]) ->
-          let (g'a, a) = newvar "stream_a_" g
-              expectedT = AppU (VarU BT.ifileVar) [a]
-           in subtype' i argT expectedT g'a
+        -- @next and @stream have their own synthE clauses.
+        (IntrNext, _) -> MM.throwCompilerBugAt i "IntrNext is typed in synthE"
+        (IntrReplay, _) -> MM.throwCompilerBugAt i "IntrReplay is typed in synthE"
+        (IntrStream, _) -> MM.throwCompilerBugAt i "IntrStream is typed in synthE"
         -- @write is special-cased in synthE so the OStream's element
         -- type can pin the list literals' element type via check-mode
         -- propagation; see the synthE branch above.
@@ -1788,34 +2048,6 @@ etaExpandSynthE i g1 funType0 funExpr0 _f xs0 = do
             fullType = FunU newTypes retType
         return (g4, fullType, LamS newVars bodyAnno)
     _ -> error "impossible"
-
-expand :: Int -> Int -> Gamma -> ExprS Int f Int -> MorlocMonad (Gamma, ExprS Int f Int)
--- Guard the whole non-positive range, not just zero. Every caller should have
--- rejected an over-applied definition before reaching here, but a negative
--- count would otherwise recurse forever, appending a fresh parameter on each
--- step and never reaching the base case.
-expand _ n g x | n <= 0 = return (g, x)
-expand parentIdx n g e@(AppS _ _) = do
-  newIdx <- MM.getCounterWithPos parentIdx
-  let (g', v') = evarname g "v"
-  e' <- applyExistential parentIdx v' e
-  let x' = LamS [v'] (AnnoS newIdx newIdx e')
-  expand parentIdx (n - 1) g' x'
-expand parentIdx n g (LamS vs' (AnnoS t ci e)) = do
-  let (g', v') = evarname g "v"
-  e' <- applyExistential parentIdx v' e
-  expand parentIdx (n - 1) g' (LamS (vs' <> [v']) (AnnoS t ci e'))
-expand _ _ g x = return (g, x)
-
-applyExistential :: Int -> EVar -> ExprS Int f Int -> MorlocMonad (ExprS Int f Int)
-applyExistential parentIdx v' (AppS f xs') = do
-  newIdx <- MM.getCounterWithPos parentIdx
-  return $ AppS f (xs' <> [AnnoS newIdx newIdx (BndS v')])
--- possibly illegal application, will type check after expansion
-applyExistential parentIdx v' e = do
-  appIndex <- MM.getCounterWithPos parentIdx
-  varIndex <- MM.getCounterWithPos parentIdx
-  return $ AppS (AnnoS appIndex appIndex e) [AnnoS varIndex varIndex (BndS v')]
 
 application ::
   Int ->
@@ -1946,7 +2178,7 @@ checkE i g1 (LstS (e : es)) (AppU (VarU v) [t])
       -- LstS [] will go to the normal Sub case
       (g3, t3, LstS es') <- checkE' i g2 (LstS es) (AppU (VarU v) [t2])
       return (g3, t3, LstS (map (applyGen g3) (e' : es')))
-checkE i g0 e0@(LamS vs body) t@(FunU as b)
+checkE i g0 (LamS vs body) t@(FunU as b)
   | length vs == length as = do
       let g1 = g0 ++> zipWith AnnG vs as
       (g2, t2, e2) <- checkG g1 body b
@@ -1955,11 +2187,15 @@ checkE i g0 e0@(LamS vs body) t@(FunU as b)
           e3 = applyCon g2 (LamS vs e2)
 
       return (g2, t3, e3)
-  -- Fewer parameters than the type has arguments: eta-expand up to the
-  -- expected arity and re-check.
+  -- Fewer parameters than the type has arguments: the body computes the
+  -- function the rest of the type describes, and is checked against it. It is
+  -- not eta-expanded: that would move the body's work from each application
+  -- of this lambda to each call of the function it returns.
   | length vs < length as = do
-      (g', e') <- expand i (length as - length vs) g0 e0
-      checkE' i g' e' t
+      let (asHere, asRest) = splitAt (length vs) as
+          g1 = g0 ++> zipWith AnnG vs asHere
+      (g2, t2, e2) <- checkG g1 body (FunU asRest b)
+      return (g2, apply g2 (FunU asHere t2), applyCon g2 (LamS vs e2))
   -- More parameters than this arrow group has arguments. A signature written
   -- @A -> (B -> C)@ parses as @FunU [A] (FunU [B] C)@, so a two-parameter
   -- definition lands here with one argument to match against. Re-nest the
@@ -1985,8 +2221,12 @@ checkE i g0 e0@(LamS vs body) t@(FunU as b)
   | otherwise = throwTypeError i $
       "This definition takes" <+> pretty (length vs) <+> arguments (length vs)
       <> ", but its type accepts none. The declared type is:" <+> pretty t
-checkE i g1 e1 (ForallU v a) = do
-  checkE' i (g1 +> v) e1 (substitute v a)
+-- Checking against a quantified type: in inference the variable is an
+-- existential the body may solve; checking a definition against its
+-- signature makes it rigid, so the body must work for every instance of it.
+checkE i g1 e1 (ForallU v a) = case gammaRigid g1 of
+  Just rigid -> checkE' i (g1 {gammaRigid = Just (Set.insert v rigid)} +> VarG v) e1 a
+  Nothing -> checkE' i (g1 +> v) e1 (substitute v a)
 checkE i g (IfS cond thenE elseE) t = do
   (g1, condType, cond') <- synthG g cond
   g2 <- subtype' i condType (VarU (TV "Bool")) g1
@@ -2312,7 +2552,7 @@ checkE i g (IntS si x) t = do
       -- the resolved type annotation via CodeGenerator/NumericLiteral to
       -- pick the wire form and convert the value.
       acceptable u = BT.isIntegerBaseType u || BT.isRealBaseType u
-  if acceptable tApplied || acceptable tEval || acceptable tWire
+  if acceptable tApplied || acceptable tEval || acceptable tWire || literalAtRigid IntDefault g tApplied
     then return (g, tApplied, IntS si x)
     else case tApplied of
       -- Numeric literal checked against an unsolved existential: defer
@@ -2329,7 +2569,7 @@ checkE i g (RealS si x) t = do
   let tApplied = apply g t
       tEval = either (const tApplied) id (TE.evaluateType scope tApplied)
       tWire = TE.wireParentRoot scope tEval
-  if BT.isRealBaseType tApplied || BT.isRealBaseType tEval || BT.isRealBaseType tWire
+  if BT.isRealBaseType tApplied || BT.isRealBaseType tEval || BT.isRealBaseType tWire || literalAtRigid RealDefault g tApplied
     then return (g, tApplied, RealS si x)
     else case tApplied of
       ExistU v _ _ ->
@@ -2451,6 +2691,22 @@ checkE i g0 (AppS f xs) t = do
   (g1, funType0, funExpr0) <- synthG g0 f
   let g1' = resolveNatLabels f funType0 xs g1
       (g2, funType1) = stripForallU g1' (normalizeType funType0)
+      -- The head is synthesised above. Every path out of this rule other
+      -- than the one below still needs the application's own type, so
+      -- finish from the head already in hand instead of synthesising the
+      -- application from the start, which would synthesise the head a
+      -- second time. A head that is itself a definition carries that
+      -- definition's whole body, so the duplication compounds once per
+      -- level of nesting.
+      --
+      -- An application to no arguments has a synthesis rule of its own
+      -- that does not go through 'etaExpandSynthE', so it is left to the
+      -- fallback.
+      finish
+        | null xs = checkEFallback i g0 (AppS f xs) t
+        | otherwise = do
+            (g', a, e') <- etaExpandSynthE i g1' funType0 funExpr0 f xs
+            reconcileSynth i g' a e' t
   case funType1 of
     FunU paramTypes returnType
       | length xs == length paramTypes
@@ -2472,14 +2728,61 @@ checkE i g0 (AppS f xs) t = do
               -- pinnings back to the expected type.
               case subtype scope (apply g4 returnType) (apply g4 t) g4 of
                 Right g5 -> return (g5, apply g5 t, AppS funExpr0 xsAnn)
-                Left _ -> checkEFallback i g0 (AppS f xs) t
-            Left _ -> checkEFallback i g0 (AppS f xs) t
-      | otherwise -> checkEFallback i g0 (AppS f xs) t
-    _ -> checkEFallback i g0 (AppS f xs) t
+                Left _ -> finish
+            Left _ -> finish
+      | otherwise -> finish
+    _ -> finish
   where
     isBareExistU (ExistU _ _ _) = True
     isBareExistU _ = False
+-- A name in argument position whose own type takes more arguments than the
+-- expected type accepts. `zipWith add3 xs ys` hands a three-argument
+-- function to a slot that wants a two-argument one, so each element of the
+-- result is a one-argument closure. Eta-expanding to the expected arity
+-- builds that closure explicitly. Without it the pool calls the
+-- three-argument manifold with two arguments and dies at run time.
+--
+-- Only a bare reference needs this. An application is already handled by
+-- 'etaExpandSynthE', and a lambda by the LamS rule above.
+checkE i g0 e0 t
+  | isBareFunctionRef e0
+  , FunU as _ <- normalizeType t = do
+      (g1, a1, e1) <- synthE' i g0 e0
+      case snd (stripForallU g1 (normalizeType (apply g1 a1))) of
+        FunU ts _
+          | length ts > length as -> do
+              (g2, e2) <- etaExpandToArity i (length as) g0 e0
+              checkE' i g2 e2 t
+        _ -> reconcileSynth i g1 a1 e1 t
+  where
+    isBareFunctionRef VarS{} = True
+    isBareFunctionRef BndS{} = True
+    isBareFunctionRef CallS{} = True
+    isBareFunctionRef _ = False
 checkE i g1 e1 b = checkEFallback i g1 e1 b
+
+-- | Wrap a function-valued expression in a lambda of the given arity, so a
+-- term that takes more arguments than its context supplies becomes an
+-- explicit closure rather than an under-applied call.
+etaExpandToArity ::
+  Int ->
+  Int ->
+  Gamma ->
+  ExprS Int ManyPoly Int ->
+  MorlocMonad (Gamma, ExprS Int ManyPoly Int)
+etaExpandToArity parentIdx arity g0 e0 = do
+  let (g1, vs) = statefulMap (\g _ -> evarname g "v") g0 ([1 .. arity] :: [Int])
+  argAnnos <- mapM
+    (\v -> do
+       idx <- MM.getCounterWithPos parentIdx
+       return (AnnoS idx idx (BndS v)))
+    vs
+  appIdx <- MM.getCounterWithPos parentIdx
+  -- The moved reference keeps the index it was checked at. A fresh index
+  -- carries only a source location, so the per-index typedef scope that
+  -- resolves a module-local alias in its type would be lost.
+  let appE = AppS (AnnoS parentIdx parentIdx e0) argAnnos
+  return (g1, LamS vs (AnnoS appIdx appIdx appE))
 
 checkEFallback ::
   Int ->
@@ -2493,6 +2796,24 @@ checkEFallback ::
     )
 checkEFallback i g1 e1 b = do
   (g2, a, e2) <- synthE' i g1 e1
+  reconcileSynth i g2 a e2 b
+
+-- | Reconcile an already-synthesized expression against an expected type:
+-- subtype, else coerce, else report. Split out of 'checkEFallback' so a
+-- caller that has synthesized for its own reasons can finish the check
+-- without synthesizing twice.
+reconcileSynth ::
+  Int ->
+  Gamma ->
+  TypeU ->
+  ExprS (Indexed TypeU) ManyPoly Int ->
+  TypeU ->
+  MorlocMonad
+    ( Gamma
+    , TypeU
+    , ExprS (Indexed TypeU) ManyPoly Int
+    )
+reconcileSynth i g2 a e2 b = do
   let a' = apply g2 a
       b' = apply g2 b
   scope <- MM.getGeneralScope i
@@ -3254,3 +3575,245 @@ peakSExpr (CoerceS _ _) = "CoerceS"
 peakSExpr (IfS _ _ _) = "IfS"
 peakSExpr (IntrinsicS intr _) = "@" <> pretty (intrinsicName intr)
 
+
+-------------------------------------------------------------------------------
+-- Signatures as contracts
+
+-- | Check each definition against its signature as a contract: the
+-- signature's type variables are rigid, so the body must work at every
+-- instance of them, and every class method the body uses at a rigid type must
+-- follow from the signature's constraints (a superclass follows from its
+-- subclass). The trees are the definitions' own bodies, with references to
+-- other signed top-level terms typed by their signatures ('Treeify'). The
+-- results are discarded: this only rejects programs.
+validate :: [AnnoS Int ManyPoly Int] -> [(Int, ClassName, [TypeU])] -> MorlocMonad ()
+validate trees instances = do
+  mapM_ one trees
+  mapM_ checkSuperclassInstance instances
+  where
+    one e0@(AnnoS i _ _) = do
+      let g0 = emptyGamma {gammaRigid = Just Set.empty}
+      (g1, _, _) <- synthG g0 e0
+      let rigid = fromMaybe Set.empty (gammaRigid g1)
+          givens = fromMaybe [] (gammaAssumedConstraints g1)
+          obligations = [apply g1 c | c@(Constraint _ _) <- gammaConstraints g1]
+      -- a signature's effect variable may be passed through, never fixed
+      mapM_
+        (\(v, row) -> case applyEff g1 row of
+            EffectVar w | w == v || not (Set.member w rigid) -> return ()
+            row' ->
+              MM.throwSourcedError i $
+                "The definition fixes the effect variable" <+> squotes (pretty v)
+                  <+> "of its signature to" <+> prettyEffectSet row'
+                  <> "; declare those effects in the signature instead")
+        [(v, row) | (v, row) <- Map.toList (gammaEffSubs g1), Set.member v rigid]
+      closure <- superclassClosure givens
+      heads <- instanceHeads
+      mapM_
+        (requireEntailed i closure)
+        [ c
+        | c@(Constraint cls args) <- obligations
+        , any (mentionsRigid rigid) args
+        , not (any (covers args) (Map.findWithDefault [] cls heads))
+        ]
+
+-- | A name the renamer gave a local binding: its first renamed segment is a
+-- number (a recursion token alone is not local).
+isLocalName :: EVar -> Bool
+isLocalName (EV v) = case MT.breakOn "`" v of
+  (_, rest) -> case MT.uncons (MT.drop 1 rest) of
+    Just (c, _) -> c >= '0' && c <= '9'
+    Nothing -> False
+
+-- | A type whose head quantifiers over names in scope are dropped, those
+-- names meaning the variables they are in scope as: rigid variables when
+-- checking a definition against its signature, the existentials an enclosing
+-- quantifier was opened to otherwise.
+scopeType :: Bool -> Map.Map TVar TVar -> TypeU -> TypeU
+scopeType rigid m t
+  | Map.null m = t
+  | otherwise = foldr (\(from, to) acc -> open to (substituteTVar from (VarU to) acc)) (strip t) (Map.toList m)
+  where
+    open to x = if rigid then x else substitute to x
+    strip (ForallU v x)
+      | Map.member v m = strip x
+      | otherwise = ForallU v (strip x)
+    strip x = x
+
+scopeEType :: Bool -> Map.Map TVar TVar -> EType -> EType
+scopeEType rigid m et
+  | Map.null m = et
+  | otherwise = et {etype = scopeType rigid m (etype et), econs = Set.map sub (econs et)}
+  where
+    sub (Constraint cls ts) = Constraint cls (map (scopeType rigid m) ts)
+    sub c = c
+
+-- | The effect-row variables of a type.
+typeEffectVars :: TypeU -> [TVar]
+typeEffectVars t = case t of
+  EffectU es x -> effectSetVars es <> typeEffectVars x
+  ForallU _ x -> typeEffectVars x
+  FunU ts x -> concatMap typeEffectVars ts <> typeEffectVars x
+  AppU x ts -> typeEffectVars x <> concatMap typeEffectVars ts
+  NamU _ _ ps rs -> concatMap typeEffectVars ps <> concatMap (typeEffectVars . snd) rs
+  OptionalU x -> typeEffectVars x
+  _ -> []
+
+-- | A quantified type instantiated with fresh existentials; the constraints,
+-- rewritten over the same existentials, are recorded as obligations.
+instantiateObligations :: Gamma -> TypeU -> [Constraint] -> (Gamma, TypeU)
+instantiateObligations g (ForallU v t) cs =
+  instantiateObligations (g +> v) (substitute v t) (map (substC v) cs)
+  where
+    substC w (Constraint c ts) = Constraint c (map (substitute w) ts)
+    substC _ c = c
+instantiateObligations g t cs = (g {gammaConstraints = gammaConstraints g ++ cs}, t)
+
+-- | An instance exists only where an instance of each of its class's
+-- superclasses exists at the same types: @instance Mn Int@ needs
+-- @instance Sg Int@ when @class Sg a => Mn a@. A superclass with no methods
+-- leaves no trace of its instances and is not checked.
+checkSuperclassInstance :: (Int, ClassName, [TypeU]) -> MorlocMonad ()
+checkSuperclassInstance (i, cls, ts0) = do
+  -- the instance's own type variables are fixed names while matching
+  let ts = map (snd . unqualify) ts0
+  classDefs <- MM.gets stateClassDefs
+  tcls <- MM.gets stateTypeclasses
+  let vars = [classVars inst | inst <- Map.elems tcls, className inst == cls]
+      needed = case (Map.lookup cls classDefs, vars) of
+        (Just scs, vs : _) | length vs == length ts ->
+          [ (sc, map (substAll (zip vs ts)) sargs) | Constraint sc sargs <- scs ]
+        _ -> []
+      substAll ps t = foldr (\(v, r) acc -> substituteTVar v r acc) t ps
+      methodsOf sc = [inst | inst <- Map.elems tcls, className inst == sc]
+  mapM_
+    ( \(sc, args) -> case methodsOf sc of
+        [] -> return ()
+        insts ->
+          let heads = [h | inst <- insts, tt <- instanceTerms inst, Just h <- [instanceHeadOf inst tt]]
+           in if any (covers args) heads
+                then return ()
+                else
+                  MM.throwSourcedError i $
+                    "The instance" <+> pretty cls <+> hsep (map (parens . pretty) ts)
+                      <+> "needs an instance" <+> pretty sc <+> hsep (map (parens . pretty) args)
+                      <+> "of its superclass, and there is none."
+    )
+    needed
+
+-- | Every instance head of every class, as its quantified variables and head
+-- types. An obligation an instance head matches -- e.g. @Eq a@ under a
+-- catch-all @instance Eq a@ -- holds without a declared constraint.
+instanceHeads :: MorlocMonad (Map.Map ClassName [([TVar], [TypeU])])
+instanceHeads = do
+  tcls <- MM.gets stateTypeclasses
+  return $
+    Map.fromListWith (<>)
+      [ (className inst, [h])
+      | inst <- Map.elems tcls
+      , tt <- instanceTerms inst
+      , Just h <- [instanceHeadOf inst tt]
+      ]
+
+-- | The head of one implementation of a class method: the instance's
+-- quantified variables and the types it instantiates the class at.
+instanceHeadOf :: Instance -> TermTypes -> Maybe ([TVar], [TypeU])
+instanceHeadOf inst tt = do
+  et <- termGeneral tt
+  let (instVars, instBody) = unqualify (etype et)
+      (_, classBody) = unqualify (etype (classType inst))
+  sub <- matchTypeU (Set.fromList (classVars inst)) classBody instBody
+  h <- mapM (`Map.lookup` sub) (classVars inst)
+  return (instVars, h)
+
+-- | Whether an instance head matches the given class arguments.
+covers :: [TypeU] -> ([TVar], [TypeU]) -> Bool
+covers args (instVars, h) =
+  isJust (matchTypeU (Set.fromList instVars) (headTuple h) (headTuple args))
+  where
+    headTuple xs = AppU (VarU (TV "__instance_head__")) xs
+
+-- | A quantified type's variables and body.
+
+mentionsRigid :: Set.Set TVar -> TypeU -> Bool
+mentionsRigid rigid t = any isRigid (Set.toList (free t))
+  where
+    isRigid (VarU v) = Set.member v rigid
+    isRigid _ = False
+
+requireEntailed :: Int -> [Constraint] -> Constraint -> MorlocMonad ()
+requireEntailed defIdx closure c
+  | c `elem` closure = return ()
+  | otherwise =
+      MM.throwSourcedError defIdx $
+        "This definition needs" <+> prettyConstraint c
+          <+> "but its signature does not declare it (the signature's"
+          <+> "constraints and their superclasses give" <+> declared <> ")."
+  where
+    declared = case closure of
+      [] -> "no constraints"
+      cs -> hcat (punctuate ", " (map prettyConstraint cs))
+
+-- | Constraints together with every superclass constraint they imply.
+superclassClosure :: [Constraint] -> MorlocMonad [Constraint]
+superclassClosure cs0 = do
+  classDefs <- MM.gets stateClassDefs
+  tcls <- MM.gets stateTypeclasses
+  let varsOf cls = case [classVars inst | inst <- Map.elems tcls, className inst == cls] of
+        (vs : _) -> Just vs
+        [] -> Nothing
+      supers (Constraint cls args) = case (Map.lookup cls classDefs, varsOf cls) of
+        (Just scs, Just vs) | length vs == length args ->
+          [ Constraint sc (map (substAll (zip vs args)) sargs)
+          | Constraint sc sargs <- scs
+          ]
+        _ -> []
+      supers _ = []
+      substAll ps t = foldr (\(v, r) acc -> substituteTVar v r acc) t ps
+      grow seen [] = seen
+      grow seen (c : rest)
+        | c `elem` seen = grow seen rest
+        | otherwise = grow (c : seen) (supers c <> rest)
+  return (grow [] cs0)
+
+-- | A literal may inhabit a rigid type variable when the constraints in scope
+-- (closed under superclasses) give that variable a class whose values have
+-- literals: 'BT.integralClass' for an integer literal, 'BT.numericClass' for
+-- a real one.
+literalAtRigid :: NumLitKind -> Gamma -> TypeU -> Bool
+literalAtRigid kind g (VarU v) = case gammaRigid g of
+  Just rigid
+    | Set.member v rigid ->
+        let wanted = case kind of
+              IntDefault -> [BT.integralClass, BT.numericClass]
+              RealDefault -> [BT.numericClass]
+         in any
+              (\c -> case c of
+                  Constraint cls [VarU v'] -> v' == v && cls `elem` wanted
+                  _ -> False)
+              (fromMaybe [] (gammaAssumedConstraints g))
+  _ -> False
+literalAtRigid _ _ _ = False
+
+-- | One-way matching: bind the pattern's variables (those in @pats@) so the
+-- pattern equals the target. Other structure must agree exactly.
+matchTypeU :: Set.Set TVar -> TypeU -> TypeU -> Maybe (Map.Map TVar TypeU)
+matchTypeU pats = go Map.empty
+  where
+    go sub (VarU v) t
+      | Set.member v pats = case Map.lookup v sub of
+          Nothing -> Just (Map.insert v t sub)
+          Just t' -> if t' == t then Just sub else Nothing
+    go sub (FunU as a) (FunU bs b)
+      | length as == length bs = goList sub (a : as) (b : bs)
+    go sub (AppU f as) (AppU h bs)
+      | length as == length bs = goList sub (f : as) (h : bs)
+    go sub (OptionalU a) (OptionalU b) = go sub a b
+    go sub (EffectU _ a) (EffectU _ b) = go sub a b
+    go sub (NamU o1 n1 ps1 rs1) (NamU o2 n2 ps2 rs2)
+      | o1 == o2 && n1 == n2 && length ps1 == length ps2 && map fst rs1 == map fst rs2 =
+          goList sub (ps1 <> map snd rs1) (ps2 <> map snd rs2)
+    go sub a b = if a == b then Just sub else Nothing
+    goList sub [] [] = Just sub
+    goList sub (a : as) (b : bs) = go sub a b >>= \sub' -> goList sub' as bs
+    goList _ _ _ = Nothing

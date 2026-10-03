@@ -1,0 +1,19 @@
+-- A manifold whose result is one of its own arguments, passed through
+-- unchanged after a call, must return a copy of that argument's packet:
+-- the argument lives in the incoming call, which is released before the
+-- result is sent. Run with packets inline; with MORLOC_INLINE_SIZE=0, by
+-- reference into shared memory, where the copy takes its own reference;
+-- and built with --no-shm, as files owned by the evaluation.
+
+module main (passInt, passStr, passList)
+
+import root-rust
+
+passInt :: Int -> Int
+passInt n = seq (replicate 3 True) n
+
+passStr :: Str -> Int -> Str
+passStr s n = seq (replicate n True) s
+
+passList :: [Int] -> Int -> [Int]
+passList xs n = seq (replicate n True) xs

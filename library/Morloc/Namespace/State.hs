@@ -22,12 +22,14 @@ module Morloc.Namespace.State
   , MorlocMonad
   , MorlocReturn
   , MorlocState (..)
+  , ModuleCommands (..)
   , WrapperSpec (..)
   , WrapperMode (..)
   , WrapperFile (..)
   , SignatureSet (..)
   , Instance (..)
   , TermTypes (..)
+  , Specs (..)
 
     -- * Error handling
   , MorlocError (..)
@@ -162,6 +164,21 @@ data MorlocState = MorlocState
   , stateTermDocs :: Map.Map EVar [Text]
   -- ^ Declaration-level docstrings keyed by term name. Takes precedence over
   -- signature docstrings for the command-level description.
+  , stateErrorNotes :: Map Int MDoc
+  -- ^ A line prefixed to an error raised at the indexed expression: for a
+  -- synthesized expression, the directive it was synthesized from.
+  , stateModuleCommands :: Map.Map MVar ModuleCommands
+  -- ^ What terminal-action synthesis made in each module, under the names
+  -- of that module's definitions. Treeify moves it to the names the root
+  -- module exports ('stateReplayPlans', 'stateStreamElems').
+  , stateReplayPlans :: Map.Map EVar ReplayPlan
+  -- ^ For each terminal action of a program command, keyed by its replay
+  -- entry's name ('mangleReplayName'): the kind of entry synthesized to run
+  -- it on its command's saved output, or why there is none.
+  , stateParseSlots :: Map.Map EVar [Int]
+  -- ^ For each program command whose parse entry saves arguments in a run
+  -- that saves the command's output: their positions (1-based), in the
+  -- order of the entry's trailing (flag, path) slots.
   , stateStreamElems :: Map.Map EVar TypeU
   -- ^ For each command that streams its output through @collect, the batch
   -- type it writes to standard output. Such a command returns @()@, so the
@@ -239,6 +256,38 @@ data MorlocState = MorlocState
   -- takes and returns packets, which a caller in another pool needs and a
   -- caller in the same pool pays for on every level of the recursion. A
   -- caller in the same pool calls the native entry instead.
+  -- | The index of the term a recursion token names ('CallS' target).
+  -- Recursive exports keep their command name in 'stateName', so their
+  -- back-edges are resolved through this map.
+  , stateRecursionTargets :: Map EVar Int
+  -- | The term that owns each where-bound term (both by term identity, the
+  -- inner key of 'stateSignatures').
+  , stateWhereOwner :: Map Int Int
+  -- | The constant each expression is a copy of, by index
+  -- ('Restructure.markConstants'): copies of one constant are bound once per
+  -- command ('Share').
+  , stateConstantOrigin :: Map Int Int
+  -- | Answers of 'Infer.canHoldType', by (records must be declared, language,
+  -- index, type).
+  , stateHoldCache :: Map (Bool, Text, Int, Type) Bool
+  -- | Each staged closure value (by the index of its flat entry): its first
+  -- stage point and the index of its stage entry.
+  , stateStageEntries :: Map Int (Int, Int)
+  -- | The number of context arguments of each staged closure's flat entry,
+  -- once its manifold is built.
+  , stateStageContext :: Map Int Int
+  -- | Each staged recursive function (by the name its back-edges use): its
+  -- first stage point, the name of its stage entry, and the number of values
+  -- it captures (passed before its parameters, to both entries).
+  , stateRecStages :: Map EVar (Int, EVar, Int)
+  -- | The shared specializations: a definition elaborated at one type and
+  -- used at several places, as a root of its own that each use calls.
+  , stateSpecs :: Specs
+  -- | The names the uses of shared specializations call them by.
+  , stateSpecNames :: Set.Set EVar
+  -- | The copies of shared specializations the nexus calls by name, by the
+  -- index of their root.
+  , stateNamedGasts :: Map Int EVar
   , stateHostOriginClosures :: Set.Set Int
   -- ^ Manifolds that wrap a function value a HOST created (the adapter at
   -- a sourced call's result). Such a value has no identity of its own, so
@@ -326,6 +375,21 @@ data MorlocState = MorlocState
   }
   deriving (Show)
 
+-- | What terminal-action synthesis made in one module, keyed by the
+-- names of that module's own definitions.
+data ModuleCommands = ModuleCommands
+  { mcCompanions :: Map.Map EVar [CompanionRole]
+  -- ^ each command's synthesized companions
+  , mcReplayPlans :: Map.Map (EVar, Text) ReplayPlan
+  -- ^ keyed by command and action long flag
+  , mcStreamElems :: Map.Map EVar TypeU
+  -- ^ keyed by command or companion name: the batch type it streams
+  , mcParseSlots :: Map.Map EVar [Int]
+  -- ^ keyed by command: the arguments its parse entry saves (see
+  -- 'stateParseSlots')
+  }
+  deriving (Show)
+
 data SignatureSet
   = Monomorphic TermTypes
   | Polymorphic
@@ -342,6 +406,12 @@ data Instance = Instance
   , instanceTerms :: [TermTypes]
   }
   deriving (Show, Ord, Eq)
+
+-- | The roots of the shared specializations ('stateSpecs').
+newtype Specs = Specs [AnnoS (Indexed TypeU) Many Int]
+
+instance Show Specs where
+  show (Specs xs) = "<" <> show (length xs) <> " shared specializations>"
 
 data TermTypes = TermTypes
   { termGeneral :: Maybe EType
@@ -862,6 +932,14 @@ data Gamma = Gamma
   -- positional constraint, pays only an O(log n) lookup. Mirrors the
   -- cheap own-entry pre-check that 'accumulatedRecords' uses for records.
   , gammaPositionalReceivers :: Set.Set TVar
+  -- | 'Just' when checking definitions against their signatures as
+  -- contracts: a signature's type variables are then rigid (skolems), and
+  -- the set holds those introduced so far. 'Nothing' in ordinary inference.
+  , gammaRigid :: Maybe (Set.Set TVar)
+  -- | The type variables of the signatures being checked around this point,
+  -- by the name the signature wrote to the name the check gave it. A local
+  -- signature or annotation writing one of these names means that variable.
+  , gammaScoped :: Map TVar TVar
   }
 
 -- | Compile-time constant values tracked during typechecking for nat / str
@@ -940,6 +1018,10 @@ instance Defaultable MorlocState where
       , stateName = Map.empty
       , stateTermDocs = Map.empty
       , stateStreamElems = Map.empty
+      , stateModuleCommands = Map.empty
+      , stateParseSlots = Map.empty
+      , stateReplayPlans = Map.empty
+      , stateErrorNotes = Map.empty
       , stateManifoldConfig = Map.empty
       , stateLogTemplate = Nothing
       , stateBenchTemplate = Nothing
@@ -964,6 +1046,16 @@ instance Defaultable MorlocState where
       , stateExportGroups = Map.empty
       , stateManifoldLang = Map.empty
       , stateNativeRecEntries = Map.empty
+      , stateRecursionTargets = Map.empty
+      , stateWhereOwner = Map.empty
+      , stateConstantOrigin = Map.empty
+      , stateHoldCache = Map.empty
+      , stateStageEntries = Map.empty
+      , stateStageContext = Map.empty
+      , stateRecStages = Map.empty
+      , stateSpecs = Specs []
+      , stateSpecNames = Set.empty
+      , stateNamedGasts = Map.empty
       , stateHostOriginClosures = Set.empty
       , stateArgTypes = Map.empty
       , stateManifoldEffects = Map.empty

@@ -27,6 +27,11 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# macOS ships no timeout(1); the suites bound their runs with it.
+if ! command -v timeout > /dev/null 2>&1; then
+    export PATH="$SCRIPT_DIR/shims:$PATH"
+fi
+
 if [[ -t 1 ]]; then
     GREEN=$'\033[32m' RED=$'\033[31m' BOLD=$'\033[1m' RESET=$'\033[0m'
 else
@@ -34,12 +39,13 @@ else
 fi
 
 # name -> runner path. Order is cheapest/most-fundamental first.
-SUITE_NAMES=(typecheck-benchmark concurrency daemon packet-io stress expose)
+SUITE_NAMES=(portability typecheck-benchmark concurrency daemon packet-io stress expose)
 # A case rather than an associative array. macOS ships bash 3.2, which has
 # none, and this has to run there: macOS is the platform continuous
 # integration exists to cover, since development happens on Linux.
 suite_runner() {
     case "$1" in
+        portability)         echo "portability-lint/run.py" ;;
         typecheck-benchmark) echo "typecheck-benchmark/run-benchmarks.sh" ;;
         concurrency)         echo "concurrency-tests/run-tests.sh" ;;
         daemon)              echo "daemon-tests/run-tests.sh" ;;
@@ -69,12 +75,12 @@ fi
 # Selection: all suites, or the names passed on the command line.
 selected=("${args[@]+"${args[@]}"}")
 if [[ ${#selected[@]} -eq 0 ]]; then
-    selected=("${SUITE_NAMES[@]}")
+    selected=(${SUITE_NAMES[@]+"${SUITE_NAMES[@]}"})
 fi
 
 PASSED=() FAILED=() MISSING=()
 
-for name in "${selected[@]}"; do
+for name in ${selected[@]+"${selected[@]}"}; do
     runner=$(suite_runner "$name")
     if [[ -z "$runner" ]]; then
         echo "${RED}unknown suite: $name${RESET} (known: ${SUITE_NAMES[*]})"

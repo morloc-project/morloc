@@ -1,0 +1,24 @@
+module main (nested)
+
+import root
+import root-cpp
+import root-py
+
+-- Each level hands the next a function to run in the other language, so
+-- every level is a call back into a pool whose worker is waiting on the
+-- level above: four levels keep two workers of each pool waiting at once.
+-- The Makefile lets an idle worker retire at once, so workers retire and
+-- start throughout the run; a callback that arrived just as a worker
+-- retired, with no worker started to take it, would hang the run.
+
+source Cpp from "apply.hpp" ("cppApply")
+source Py from "apply.py" ("pyApply")
+
+cppApply :: (Int -> Int) -> Int -> Int
+pyApply :: (Int -> Int) -> Int -> Int
+
+nest :: Int -> Int
+nest x = cppApply (\a -> pyApply (\b -> cppApply (\c -> pyApply (\d -> d + 1) c) b) a) x
+
+nested :: Int -> Int
+nested n = sum (map nest (range 0 n))

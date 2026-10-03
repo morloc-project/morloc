@@ -27,9 +27,9 @@ use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Mutex;
 
-use morloc_runtime_types::packet::PacketHeader;
+use morloc_runtime_types::packet::{PacketHeader, StreamDiag, SubpacketEntry};
 use morloc_runtime_types::stdio_proto::{
-    OP_NEXT_STDIO, OP_WRITE_STDIO,
+    OP_NEXT_STDIO, OP_WRITE_STDIO, OP_SPAWN,
     STATUS_OK, STATUS_ERR, STATUS_EOF, STATUS_PIPE_CLOSED,
     STDIO_KIND_STDOUT, STDIO_KIND_STDERR,
 };
@@ -51,14 +51,80 @@ struct StdioSlot {
     // `single_data` marks that the stream ends after that one packet.
     pending_prefix: Option<Vec<u8>>,
     single_data: bool,
+    // stdout in one-shot CLI mode: every `@stdout` open in the run writes to
+    // one logical stream. The packet formats write the header once, drop
+    // each pool footer, and write one final footer at `finish_stdout`; these
+    // fields carry what that footer needs. `bytes_out` is the offset of the
+    // next byte written; `pending` holds the offsets of the sub-packets
+    // written since the last pool footer, whose element counts arrive in
+    // that footer's index.
+    bytes_out: u64,
+    pending: Vec<u64>,
+    entries: Vec<SubpacketEntry>,
+    diag: Option<StreamDiag>,
+    schema: Option<String>,
 }
 
-static STDIN_SLOT:  Mutex<StdioSlot> =
-    Mutex::new(StdioSlot { fd: 0, header_done: false, json_open: false, json_any: false, pending_prefix: None, single_data: false });
-static STDOUT_SLOT: Mutex<StdioSlot> =
-    Mutex::new(StdioSlot { fd: 1, header_done: false, json_open: false, json_any: false, pending_prefix: None, single_data: false });
-static STDERR_SLOT: Mutex<StdioSlot> =
-    Mutex::new(StdioSlot { fd: 2, header_done: false, json_open: false, json_any: false, pending_prefix: None, single_data: false });
+impl StdioSlot {
+    const fn new(fd: i32) -> Self {
+        StdioSlot {
+            fd, header_done: false, json_open: false, json_any: false,
+            pending_prefix: None, single_data: false,
+            bytes_out: 0, pending: Vec::new(), entries: Vec::new(),
+            diag: None, schema: None,
+        }
+    }
+}
+
+static STDIN_SLOT:  Mutex<StdioSlot> = Mutex::new(StdioSlot::new(0));
+static STDOUT_SLOT: Mutex<StdioSlot> = Mutex::new(StdioSlot::new(1));
+static STDERR_SLOT: Mutex<StdioSlot> = Mutex::new(StdioSlot::new(2));
+/// The stage of a multi-output run saves the stdout stream here, as a
+/// packet stream, whether or not stdout also gets it (see `stage`).
+static STAGE_SLOT: Mutex<StdioSlot> = Mutex::new(StdioSlot::new(-1));
+/// The batch schema of the staged stream, for the header of a stream the
+/// command never opened.
+static STAGE_SCHEMA: Mutex<Option<String>> = Mutex::new(None);
+/// Stdout closed downstream while the stage went on saving the stream; the
+/// run then ends with the broken-pipe status once staging completes.
+static STAGE_STDOUT_BROKEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Where the run's stdout stream goes. A stage saves the stream of a
+/// streaming command -- its output -- and writes it to stdout only when
+/// stdout wants the command's own output (`stage::stdout_on`). Every other
+/// stream, such as what a command that returns a value writes along the
+/// way, goes to stdout directly, as in any run.
+#[derive(Clone, Copy, PartialEq)]
+enum StdoutRoute {
+    Direct,
+    Save,
+}
+
+static STDOUT_ROUTE: Mutex<StdoutRoute> = Mutex::new(StdoutRoute::Direct);
+
+fn stdout_route() -> StdoutRoute {
+    STDOUT_ROUTE.lock().map(|g| *g).unwrap_or(StdoutRoute::Direct)
+}
+
+/// Save the stdout stream to `fd` (see `stage`). `schema` is the batch
+/// schema, used when the command streams nothing.
+pub fn save_stdout_stream(fd: i32, schema: Option<String>) {
+    if let Ok(mut g) = STAGE_SLOT.lock() {
+        g.fd = fd;
+    }
+    if let Ok(mut g) = STAGE_SCHEMA.lock() {
+        *g = schema;
+    }
+    if let Ok(mut g) = STDOUT_ROUTE.lock() {
+        *g = StdoutRoute::Save;
+    }
+}
+
+/// Whether stdout broke while the stage kept saving.
+pub fn stage_stdout_broken() -> bool {
+    STAGE_STDOUT_BROKEN.load(std::sync::atomic::Ordering::Acquire)
+}
 
 static NEXUS_PID: std::sync::atomic::AtomicI32 =
     std::sync::atomic::AtomicI32::new(0);
@@ -72,26 +138,28 @@ static DAEMON_MODE: std::sync::atomic::AtomicBool =
 
 /// Render configuration for streamed stdout, captured from the nexus
 /// `NexusConfig` at server start. Streamed `@stdout` output is
-/// re-encoded per `format` (and recompressed at `level` for the packet
-/// formats) so it honours `-f`/`-z` exactly like a returned value.
-/// stderr is unaffected (it stays raw stream-packet framing).
+/// re-encoded per `format` so it honours `-f` exactly like a returned
+/// value. Compression is not applied here: the pool compresses each
+/// sub-packet at the effective level (its `@write` level, or the nexus
+/// `-z` it reads from the environment), and the packet formats pass the
+/// bytes through so the footer's sub-packet index stays true. stderr is
+/// unaffected (it stays raw stream-packet framing).
 #[derive(Clone, Copy)]
 struct RenderCfg {
     format: OutputFormat,
-    level: u8,
 }
 
 // Mutable (not OnceLock) because a `render` terminal flag is resolved AFTER
 // `start` runs, and must retarget streamed stdout to the raw format before the
 // pool begins streaming (which happens later still, during dispatch).
 static RENDER_CFG: Mutex<RenderCfg> =
-    Mutex::new(RenderCfg { format: OutputFormat::Json, level: 0 });
+    Mutex::new(RenderCfg { format: OutputFormat::Json });
 
 fn render_cfg() -> RenderCfg {
     RENDER_CFG
         .lock()
         .map(|g| *g)
-        .unwrap_or(RenderCfg { format: OutputFormat::Json, level: 0 })
+        .unwrap_or(RenderCfg { format: OutputFormat::Json })
 }
 
 /// Retarget the streamed-stdout output format. Used by the dispatcher to
@@ -102,7 +170,7 @@ pub fn set_output_format(format: OutputFormat) {
     }
 }
 
-fn format_name(f: OutputFormat) -> &'static str {
+pub(crate) fn format_name(f: OutputFormat) -> &'static str {
     match f {
         OutputFormat::Json => "json",
         OutputFormat::Jsonl => "jsonl",
@@ -112,6 +180,7 @@ fn format_name(f: OutputFormat) -> &'static str {
         OutputFormat::Arrow => "arrow",
         OutputFormat::Parquet => "parquet",
         OutputFormat::Csv => "csv",
+        OutputFormat::Tsv => "tsv",
         OutputFormat::Raw => "raw",
     }
 }
@@ -121,12 +190,12 @@ fn format_name(f: OutputFormat) -> &'static str {
 /// thread. Idempotent: subsequent calls no-op. SIGPIPE is set to
 /// `SIG_IGN` here so a downstream consumer closing the pipe surfaces
 /// as `EPIPE` on `write(2)` instead of a nexus signal death.
-pub fn start(tmpdir: &str, output_format: OutputFormat, compression_level: u8, daemon: bool) {
+pub fn start(tmpdir: &str, output_format: OutputFormat, daemon: bool) {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         if let Ok(mut g) = RENDER_CFG.lock() {
-            *g = RenderCfg { format: output_format, level: compression_level };
+            *g = RenderCfg { format: output_format };
         }
         NEXUS_PID.store(std::process::id() as i32, std::sync::atomic::Ordering::Release);
         DAEMON_MODE.store(daemon, std::sync::atomic::Ordering::Release);
@@ -206,6 +275,10 @@ fn handle_connection(mut stream: UnixStream) -> std::io::Result<()> {
                 let resp = do_write(slot_id, relptr, size);
                 write_response(&mut stream, resp)?;
             }
+            OP_SPAWN => {
+                let resp = do_spawn(&mut stream)?;
+                write_response(&mut stream, resp)?;
+            }
             other => {
                 write_response(
                     &mut stream,
@@ -275,6 +348,50 @@ fn write_response(stream: &mut UnixStream, resp: Resp) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Handle a `SPAWN` request: start a channel's producer and watch it here,
+/// in the process that outlives every pool worker.
+fn do_spawn(stream: &mut UnixStream) -> std::io::Result<Resp> {
+    extern "C" {
+        fn mlc_spawn_watched(
+            socket_path: *const std::ffi::c_char, mid: u32, args: *const *const u8,
+            nargs: usize, handle: i64, errmsg: *mut *mut std::ffi::c_char,
+        ) -> bool;
+    }
+    let mut head = [0u8; 16];
+    stream.read_exact(&mut head)?;
+    let handle = i64::from_le_bytes(head[0..8].try_into().unwrap());
+    let mid = u32::from_le_bytes(head[8..12].try_into().unwrap());
+    let path_len = u32::from_le_bytes(head[12..16].try_into().unwrap()) as usize;
+    let mut path = vec![0u8; path_len];
+    stream.read_exact(&mut path)?;
+    let mut n = [0u8; 4];
+    stream.read_exact(&mut n)?;
+    let nargs = u32::from_le_bytes(n) as usize;
+    let mut packets: Vec<Vec<u8>> = Vec::with_capacity(nargs);
+    for _ in 0..nargs {
+        let mut len = [0u8; 8];
+        stream.read_exact(&mut len)?;
+        let mut p = vec![0u8; u64::from_le_bytes(len) as usize];
+        stream.read_exact(&mut p)?;
+        packets.push(p);
+    }
+    let path = match std::ffi::CString::new(path) {
+        Ok(p) => p,
+        Err(_) => return Ok(Resp::Err("SPAWN: socket path contains NUL".into())),
+    };
+    let ptrs: Vec<*const u8> = packets.iter().map(|p| p.as_ptr()).collect();
+    let mut err: *mut std::ffi::c_char = std::ptr::null_mut();
+    unsafe {
+        mlc_spawn_watched(path.as_ptr(), mid, ptrs.as_ptr(), ptrs.len(), handle, &mut err);
+        if !err.is_null() {
+            let msg = std::ffi::CStr::from_ptr(err).to_string_lossy().into_owned();
+            libc::free(err as *mut std::ffi::c_void);
+            return Ok(Resp::Err(msg));
+        }
+    }
+    Ok(Resp::Ack)
 }
 
 fn assert_nexus_pid() {
@@ -452,6 +569,18 @@ fn do_write(slot_id: i64, relptr: i64, size: u64) -> Resp {
             "WRITE_STDIO: unsupported stdio_kind {} for write path", stdio_kind,
         )),
     };
+    let route = if stdio_kind == STDIO_KIND_STDOUT { stdout_route() } else { StdoutRoute::Direct };
+    if route == StdoutRoute::Save {
+        if let Err(e) = stage_write(slot_id, relptr, size) {
+            return Resp::Err(format!("saving the stdout stream: {}", e));
+        }
+        if !crate::stage::stdout_on()
+            || STAGE_STDOUT_BROKEN.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Resp::Ack;
+        }
+    }
+
     let mut slot = match slot_mtx.lock() {
         Ok(s) => s,
         Err(e) => return Resp::Err(format!("stdio write mutex poisoned: {}", e)),
@@ -461,7 +590,7 @@ fn do_write(slot_id: i64, relptr: i64, size: u64) -> Resp {
     if stdio_kind == STDIO_KIND_STDERR {
         if !slot.header_done {
             match unsafe { br::write_stream_header_for_slot(slot.fd, slot_id) } {
-                Ok(()) => { slot.header_done = true; }
+                Ok(_) => { slot.header_done = true; }
                 Err(br::WriteError::BrokenPipe) => return pipe_closed_resp(),
                 Err(br::WriteError::Other(e)) => return Resp::Err(format!("WRITE_STDIO header: {}", e)),
             }
@@ -490,25 +619,30 @@ fn do_write(slot_id: i64, relptr: i64, size: u64) -> Resp {
     };
     let is_footer = header.is_footer();
     let is_data = header.is_data();
+    let daemon = DAEMON_MODE.load(std::sync::atomic::Ordering::Acquire);
 
     let result: Result<(), br::WriteError> = (|| -> Result<(), br::WriteError> {
         match cfg.format {
-            OutputFormat::Packet | OutputFormat::VoidStar => {
+            // A daemon call's stream is self-contained: every frame passes
+            // through byte-for-byte, including the pool's own footer, and
+            // the next call starts a fresh stream.
+            OutputFormat::Packet | OutputFormat::VoidStar if daemon => {
                 if !slot.header_done {
                     unsafe { br::write_stream_header_for_slot(slot.fd, slot_id) }?;
                     slot.header_done = true;
                 }
-                // At level 0 (the packet default) pass every frame through
-                // byte-for-byte: the stream -- and its footer's sub-packet
-                // index, which records the pool's exact offsets -- stays
-                // identical to what the pool emitted. Only recompress data
-                // frames when `-z > 0`; the footer always passes through.
-                if is_data && cfg.level > 0 {
-                    let bytes = unsafe { br::read_shm_bytes(relptr, size) }?;
-                    unsafe { br::emit_subpacket_as_packet(slot.fd, &bytes, cfg.level) }
-                } else {
-                    unsafe { br::write_shm_bytes_to_fd(slot.fd, relptr, size) }
+                unsafe { br::write_shm_bytes_to_fd(slot.fd, relptr, size) }?;
+                if is_footer {
+                    slot.header_done = false;
                 }
+                Ok(())
+            }
+            // One logical stream per run: the header is written once, data
+            // frames pass through unchanged (the pool already compressed
+            // them), and each pool footer is folded into the single final
+            // footer written by `finish_stdout`.
+            OutputFormat::Packet | OutputFormat::VoidStar => {
+                write_logical_packet(&mut slot, slot_id, relptr, size, is_footer, is_data)
             }
             OutputFormat::Jsonl => {
                 if is_data {
@@ -546,10 +680,14 @@ fn do_write(slot_id: i64, relptr: i64, size: u64) -> Resp {
                     }
                     Ok(())
                 } else if is_footer {
+                    // Each `@stdout` stream is one JSON array, closed when the
+                    // stream closes: anything the command prints afterwards
+                    // then follows the array instead of landing inside it.
                     if !slot.json_open {
                         unsafe { br::write_bytes_to_fd(slot.fd, b"[") }?;
-                        slot.json_open = true;
                     }
+                    slot.json_open = false;
+                    slot.json_any = false;
                     unsafe { br::write_bytes_to_fd(slot.fd, b"]\n") }
                 } else {
                     Ok(())
@@ -558,7 +696,8 @@ fn do_write(slot_id: i64, relptr: i64, size: u64) -> Resp {
             OutputFormat::MessagePack
             | OutputFormat::Arrow
             | OutputFormat::Parquet
-            | OutputFormat::Csv => Err(br::WriteError::Other(format!(
+            | OutputFormat::Csv
+            | OutputFormat::Tsv => Err(br::WriteError::Other(format!(
                 "streamed stdout output does not support -f {}; \
                  use -f json, -f jsonl, or -f packet",
                 format_name(cfg.format),
@@ -566,7 +705,216 @@ fn do_write(slot_id: i64, relptr: i64, size: u64) -> Resp {
         }
     })();
 
+    // Stdout that closes while a stage is saving must not end the stage:
+    // the actions still need the whole stream.
+    if route == StdoutRoute::Save {
+        if let Err(br::WriteError::BrokenPipe) = result {
+            STAGE_STDOUT_BROKEN.store(true, std::sync::atomic::Ordering::Release);
+            return Resp::Ack;
+        }
+    }
     write_resp(result)
+}
+
+/// Append one frame of the run's stdout stream to a packet-stream slot:
+/// the header once, data frames as they come (the pool already compressed
+/// them), and each pool footer folded into the single final footer written
+/// by `finish_stdout`.
+fn write_logical_packet(
+    slot: &mut StdioSlot,
+    slot_id: i64,
+    relptr: i64,
+    size: u64,
+    is_footer: bool,
+    is_data: bool,
+) -> Result<(), crate::stdio_bridge::WriteError> {
+    use crate::stdio_bridge as br;
+    let schema = unsafe { br::stdio_slot_schema(slot_id) }.map_err(br::WriteError::Other)?;
+    match &slot.schema {
+        None => slot.schema = Some(schema),
+        Some(first) => {
+            if !morloc_runtime_types::schema::schema_strings_compatible(first, &schema) {
+                return Err(br::WriteError::Other(format!(
+                    "stdout is one stream per run, but it was opened as `{}` \
+                     and again as `{}`; a packet stream carries one element type",
+                    first, schema,
+                )));
+            }
+        }
+    }
+    if !slot.header_done {
+        let n = unsafe { br::write_stream_header_for_slot(slot.fd, slot_id) }?;
+        slot.bytes_out += n;
+        slot.header_done = true;
+    }
+    if is_footer {
+        let bytes = unsafe { br::read_shm_bytes(relptr, size) }?;
+        fold_pool_footer(slot, &bytes).map_err(br::WriteError::Other)
+    } else {
+        let offset = slot.bytes_out;
+        unsafe { br::write_shm_bytes_to_fd(slot.fd, relptr, size) }?;
+        slot.bytes_out += size;
+        if is_data {
+            slot.pending.push(offset);
+        }
+        Ok(())
+    }
+}
+
+/// Save one frame of the stdout stream to the stage file.
+fn stage_write(slot_id: i64, relptr: i64, size: u64) -> Result<(), String> {
+    use crate::stdio_bridge as br;
+    let hdr_vec = unsafe { br::read_shm_bytes(relptr, 32) }?;
+    let hdr: [u8; 32] = hdr_vec
+        .get(..32)
+        .and_then(|h| h.try_into().ok())
+        .ok_or("frame smaller than a packet header")?;
+    let header = PacketHeader::from_bytes(&hdr).map_err(|e| e.to_string())?;
+    let mut slot = STAGE_SLOT.lock().map_err(|e| e.to_string())?;
+    write_logical_packet(&mut slot, slot_id, relptr, size, header.is_footer(), header.is_data())
+        .map_err(|e| match e {
+            br::WriteError::BrokenPipe => "the stage file closed".to_string(),
+            br::WriteError::Other(m) => m,
+        })
+}
+
+/// Fold a pool's stream footer into the run's single stdout stream. The
+/// footer's sub-packet index lists, in write order, the element count of
+/// every data frame that pool stream emitted; pair those counts with the
+/// offsets at which this server wrote the same frames, and merge the
+/// footer's diagnostics into the run's totals.
+fn fold_pool_footer(slot: &mut StdioSlot, footer: &[u8]) -> Result<(), String> {
+    use morloc_runtime_types::packet::{
+        decode_subpacket_index, iter_packet_metadata,
+        METADATA_TYPE_STREAM_DIAG, METADATA_TYPE_SUBPACKET_INDEX,
+    };
+    let mut counts: Vec<SubpacketEntry> = Vec::new();
+    let mut diag: Option<StreamDiag> = None;
+    for (kind, body) in iter_packet_metadata(footer).map_err(|e| e.to_string())? {
+        match kind {
+            METADATA_TYPE_SUBPACKET_INDEX => {
+                counts = decode_subpacket_index(body).map_err(|e| e.to_string())?;
+            }
+            METADATA_TYPE_STREAM_DIAG => {
+                diag = Some(StreamDiag::from_bytes(body).map_err(|e| e.to_string())?);
+            }
+            _ => {}
+        }
+    }
+    if counts.len() != slot.pending.len() {
+        return Err(format!(
+            "stdout stream footer indexes {} sub-packet(s) but {} were written",
+            counts.len(), slot.pending.len(),
+        ));
+    }
+    let pending = std::mem::take(&mut slot.pending);
+    for (offset, entry) in pending.into_iter().zip(counts) {
+        slot.entries.push(SubpacketEntry { offset, elem_count: entry.elem_count });
+    }
+    if let Some(d) = diag {
+        slot.diag = Some(match slot.diag {
+            None => d,
+            Some(acc) => merge_diag(acc, d),
+        });
+    }
+    Ok(())
+}
+
+/// Combine the diagnostics of two consecutive pool streams.
+fn merge_diag(a: StreamDiag, b: StreamDiag) -> StreamDiag {
+    let mut m = a;
+    m.n_oversize_subpackets = a.n_oversize_subpackets + b.n_oversize_subpackets;
+    m.subpacket_count = a.subpacket_count + b.subpacket_count;
+    m.element_count = a.element_count + b.element_count;
+    m.bytes_uncompressed_total = a.bytes_uncompressed_total + b.bytes_uncompressed_total;
+    m.bytes_compressed_total = a.bytes_compressed_total + b.bytes_compressed_total;
+    if b.largest_packet_uncompressed > a.largest_packet_uncompressed {
+        m.largest_packet_uncompressed = b.largest_packet_uncompressed;
+        m.largest_packet_idx = a.subpacket_count + b.largest_packet_idx;
+    }
+    if a.first_flush_time == 0 {
+        m.first_flush_time = b.first_flush_time;
+    }
+    m.last_flush_time = a.last_flush_time.max(b.last_flush_time);
+    m
+}
+
+/// Complete streamed stdout at the end of a one-shot run: write the single
+/// final footer of a packet stream. Must run before anything else the nexus
+/// prints to stdout. A packet stream with frames whose pool footer never
+/// arrived is left without a final footer, which readers treat as an
+/// unclosed stream and recover by scanning.
+pub fn finish_stdout() {
+    use crate::stdio_bridge as br;
+    if DAEMON_MODE.load(std::sync::atomic::Ordering::Acquire) {
+        return;
+    }
+    let mut slot = match STDOUT_SLOT.lock() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let result = match render_cfg().format {
+        OutputFormat::Packet | OutputFormat::VoidStar => finish_logical_packet(&mut slot),
+        _ => Ok(()),
+    };
+    if let Err(br::WriteError::Other(e)) = result {
+        eprintln!("Error: finishing streamed stdout: {}", e);
+    }
+}
+
+/// Complete the saved stdout stream of a stage. A command that streamed
+/// nothing still leaves a valid, empty stream.
+pub fn finish_stage() -> Result<(), String> {
+    use crate::stdio_bridge as br;
+    let mut slot = STAGE_SLOT.lock().map_err(|e| e.to_string())?;
+    if slot.fd < 0 {
+        return Ok(());
+    }
+    if !slot.header_done {
+        let schema = STAGE_SCHEMA.lock().map_err(|e| e.to_string())?.clone();
+        let Some(schema) = schema else { return Ok(()) };
+        let parsed = morloc_runtime_types::schema::parse_schema(&schema)
+            .map_err(|e| e.to_string())?;
+        let header = morloc_runtime_types::packet::make_stream_header_block(&parsed);
+        unsafe { br::write_bytes_to_fd(slot.fd, &header) }.map_err(|_| "writing the stage file")?;
+        slot.bytes_out = header.len() as u64;
+        slot.header_done = true;
+    }
+    if !slot.pending.is_empty() {
+        return Err("the stdout stream was never closed".into());
+    }
+    finish_logical_packet(&mut slot).map_err(|e| match e {
+        br::WriteError::BrokenPipe => "the stage file closed".to_string(),
+        br::WriteError::Other(m) => m,
+    })
+}
+
+/// Write the single final footer of a packet stream whose pool footers
+/// have all been folded in. A stream with frames whose footer never
+/// arrived is left without one, which readers treat as an unclosed stream.
+fn finish_logical_packet(slot: &mut StdioSlot) -> Result<(), crate::stdio_bridge::WriteError> {
+    use crate::stdio_bridge as br;
+    if !slot.header_done || !slot.pending.is_empty() {
+        return Ok(());
+    }
+    let mut diag = slot.diag.unwrap_or_else(StreamDiag::new);
+    let tail: Vec<u64> = slot.entries.iter().rev()
+        .take(morloc_runtime_types::packet::STREAM_DIAG_TAIL_MAX)
+        .map(|e| e.offset).collect();
+    diag.tail_len = tail.len() as u32;
+    for (i, off) in tail.iter().rev().enumerate() {
+        diag.tail[i] = *off;
+    }
+    let footer = morloc_runtime_types::packet::make_final_footer_packet(
+        &diag, &slot.entries,
+        morloc_runtime_types::packet::FOOTER_STATUS_CLOSED,
+    );
+    slot.header_done = false;
+    slot.entries.clear();
+    slot.diag = None;
+    slot.schema = None;
+    slot.bytes_out = 0;
+    unsafe { br::write_bytes_to_fd(slot.fd, &footer) }
 }
 
 /// Read one full `MORLOC_DATA_PACKET` sub-packet into a fresh SHM block.

@@ -19,19 +19,24 @@ module Morloc.CodeGenerator.Realize
   , removeVarS
   ) where
 
+import Morloc.CodeGenerator.Serial (containsFunT)
+import Morloc.CodeGenerator.Value (etaParts, isValueWith)
+import Morloc.Frontend.Namespace (newIndex)
+import Morloc.Frontend.Rename (displayName)
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Grammars.Common (propagateManifoldLabel)
 import qualified Morloc.CodeGenerator.SystemConfig as MCS
 import Morloc.Data.Doc
 import Morloc.Data.Map (Map)
 import qualified Morloc.Data.Map as Map
+import Data.IORef (modifyIORef, newIORef, readIORef)
 import qualified Data.Set as Set
-import qualified Data.Graph as Graph
 import qualified Data.List as List
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
 import qualified Morloc.LangRegistry as LR
+import qualified Morloc.CodeGenerator.Infer as Infer
 
 realityCheck ::
   -- | one AST forest for each command exported from main
@@ -41,19 +46,28 @@ realityCheck ::
     , [AnnoS (Indexed Type) One (Indexed Lang)]
     )
 realityCheck es = do
-  -- translate modules into bitrees
-  (gASTs0, rASTs0) <-
-    -- select a single instance at each node in the tree
-    mapM realize es
-      -- separate unrealized (general) ASTs (uASTs) from realized ASTs (rASTs)
+  names <- MM.gets stateSpecNames
+  let isSpec (AnnoS _ _ (VarS v _)) = Set.member v names
+      isSpec _ = False
+      (specs, roots) = List.partition isSpec es
+  -- shared specializations first, each scored once, in the order their uses
+  -- need them (a specialization's own shared references come before it)
+  (tables, finishers) <- foldM scoreSpec (Map.empty, Map.empty) specs
+  -- select a single instance at each node of each exported tree, and
+  -- separate unrealized (general) trees from realized ones
+  (gASTs0, rASTs00) <-
+    mapM (\e -> realize tables e >>= \(_, finish) -> finish Nothing) roots
       |>> partitionEithers
+  rASTs0 <- realizeDemanded finishers rASTs00
+  let takesFunction = Set.fromList [v | AnnoS (Idx _ (FunT ts _)) _ (VarS v _) <- specs, any containsFunT ts]
+  gASTs1 <- nexusDemanded finishers takesFunction gASTs0
 
   -- Extract non-exported recursive helpers into their own rASTs.
   -- This must happen before removeVarS so we can find the VarS wrappers.
   rASTs1 <- extractRecursiveHelpers rASTs0
 
   -- Now dissolve remaining (non-recursive) VarS wrappers
-  let gASTs = map removeVarS gASTs0
+  let gASTs = map removeVarS gASTs1
       rASTs = map removeVarS rASTs1
 
   -- check and configure the system
@@ -61,6 +75,109 @@ realityCheck es = do
   MCS.configure rASTs
 
   return (gASTs, rASTs)
+
+type Scored = AnnoS (Indexed Type) Many (Indexed [(Lang, Score)])
+
+-- | Finish realizing a scored tree, with the language of the context it is
+-- used in (or none, for a root).
+type Finisher =
+  Maybe Lang ->
+  MorlocMonad (Either (AnnoS (Indexed Type) One ()) (AnnoS (Indexed Type) One (Indexed Lang)))
+
+-- | Score a shared specialization once: its table serves every use.
+scoreSpec ::
+  (Map EVar [(Lang, Score)], Map EVar Finisher) ->
+  AnnoS (Indexed Type) Many Int ->
+  MorlocMonad (Map EVar [(Lang, Score)], Map EVar Finisher)
+scoreSpec (tables, finishers) spec@(AnnoS _ _ (VarS v _)) = do
+  (AnnoS _ (Idx _ scores) _, finish) <- realize tables spec
+  return (Map.insert v scores tables, Map.insert v finish finishers)
+scoreSpec acc _ = return acc
+
+-- | Realize each shared specialization once per language its uses demand,
+-- and point each use at its copy. A use's language is the one its call was
+-- given; the copy is named by the language its root lands in, so uses that
+-- land alike share one copy. Copies are realized as their own uses are
+-- found, until none is new (the specializations form no cycle).
+realizeDemanded ::
+  Map EVar Finisher ->
+  [AnnoS (Indexed Type) One (Indexed Lang)] ->
+  MorlocMonad [AnnoS (Indexed Type) One (Indexed Lang)]
+realizeDemanded finishers trees0
+  | Map.null finishers = return trees0
+  | otherwise = do
+      (named, copies) <- loop Map.empty Map.empty [] (concatMap demands trees0)
+      return (map (renameUses named) (trees0 <> copies))
+  where
+    demands t = [(v, l) | AnnoS _ (Idx _ l) (CallS v) <- annoNodes t, Map.member v finishers]
+    loop named _ copies [] = return (named, copies)
+    loop named landed copies (d@(v, l) : ds)
+      | Map.member d named = loop named landed copies ds
+      | otherwise = case Map.lookup v finishers of
+          Nothing -> loop named landed copies ds
+          Just finish -> finish (Just l) >>= \r -> case r of
+            Left _ -> MM.throwCompilerBug $ "a shared specialization has no language:" <+> pretty v
+            Right tree@(AnnoS _ (Idx _ l') _) -> case Map.lookup (v, l') landed of
+              Just name -> loop (Map.insert d name named) landed copies ds
+              Nothing -> do
+                let name = EV (unEVar v <> "@" <> langName l')
+                    firstCopy = not (any ((== v) . fst) (Map.keys landed))
+                copy@(AnnoS (Idx gi _) _ _) <- renameRoot name <$> if firstCopy then return tree else reindexOne tree
+                MM.modify (\st -> st {stateRecursionTargets = Map.insert name gi (stateRecursionTargets st)})
+                loop (Map.insert d name named) (Map.insert (v, l') name landed) (copies <> [copy]) (ds <> demands copy)
+    renameUses named = go
+      where
+        go (AnnoS g c@(Idx _ l) (CallS v))
+          | Just name <- Map.lookup (v, l) named = AnnoS g c (CallS name)
+        go (AnnoS g c e) = AnnoS g c (mapExprS go e)
+
+-- | The calls of shared specializations in trees the nexus evaluates. The
+-- nexus calls a first-order one by name: its copy with no language joins
+-- the trees as a named function ('stateNamedGasts'). The nexus holds no
+-- function values, so one that takes a function is copied into each call
+-- instead, as a term is expanded in place.
+nexusDemanded ::
+  Map EVar Finisher ->
+  Set.Set EVar ->
+  [AnnoS (Indexed Type) One ()] ->
+  MorlocMonad [AnnoS (Indexed Type) One ()]
+nexusDemanded finishers takesFunction trees0
+  | Map.null finishers = return trees0
+  | otherwise = do
+      namedRef <- MM.liftIO (newIORef Map.empty)
+      copiesRef <- MM.liftIO (newIORef [])
+      finishedRef <- MM.liftIO (newIORef Map.empty)
+      -- each specialization is finished once; every use takes a fresh copy
+      let pure' v = do
+            finished <- MM.liftIO (readIORef finishedRef)
+            tree <- case (Map.lookup v finished, Map.lookup v finishers) of
+              (Just g, _) -> return g
+              (_, Nothing) -> MM.throwCompilerBug $ "no shared specialization" <+> pretty v
+              (_, Just finish) -> finish Nothing >>= \r -> case r of
+                Left g -> MM.liftIO (modifyIORef finishedRef (Map.insert v g)) >> return g
+                Right _ -> MM.throwCompilerBug $ "a shared specialization called by the nexus has a language:" <+> pretty v
+            reindexWith return tree
+          rewrite (AnnoS g c e) = case e of
+            CallS v
+              | Map.member v finishers ->
+                  if Set.member v takesFunction
+                    then pure' v >>= rewrite . removeVarS
+                    else do
+                      done <- MM.liftIO (readIORef namedRef)
+                      case Map.lookup v done of
+                        Just name -> return (AnnoS g c (CallS name))
+                        Nothing -> do
+                          let name = EV (unEVar v <> "@nexus")
+                          MM.liftIO (modifyIORef namedRef (Map.insert v name))
+                          -- a copy of its own: a pool may hold another
+                          copy@(AnnoS (Idx ri _) _ _) <- renameRoot name <$> (pure' v >>= rewrite)
+                          MM.modify (\st -> st {stateNamedGasts = Map.insert ri name (stateNamedGasts st)})
+                          MM.liftIO (modifyIORef copiesRef (<> [copy]))
+                          return (AnnoS g c (CallS name))
+            _ -> AnnoS g c <$> mapExprSM rewrite e
+      trees <- mapM rewrite trees0
+      copies <- MM.liftIO (readIORef copiesRef)
+      return (trees <> copies)
 
 -- | The realize objective: @(accumulated cost, number of language switches)@,
 -- compared lexicographically. Cost dominates; switch-count is a PURE tiebreaker
@@ -106,38 +223,56 @@ emptyRState =
 -- the scorer re-scores function-typed bound variables, the source of the
 -- exponential blow-up on composition depth.
 normalizePop1 ::
+  (EVar -> Maybe Int) ->
   AnnoS (Indexed Type) Many Int ->
   MorlocMonad (AnnoS (Indexed Type) Many Int)
 -- empty lambda, no args left: unwrap, moving the discarded head's label up
-normalizePop1 (AnnoS g1@(Idx g1Idx _) _ (AppS (AnnoS (Idx lamIdx _) _ (LamS [] (AnnoS _ c2 e))) [])) = do
+normalizePop1 sp (AnnoS g1@(Idx g1Idx _) _ (AppS (AnnoS (Idx lamIdx _) _ (LamS [] (AnnoS _ c2 e))) [])) = do
   _ <- propagateManifoldLabel g1Idx lamIdx
-  normalizePop1 (AnnoS g1 c2 e)
+  normalizePop1 sp (AnnoS g1 c2 e)
 -- empty lambda with remaining args (over-application): unwrap the spent layer
-normalizePop1 (AnnoS g1@(Idx g1Idx _) c1 (AppS (AnnoS (Idx lamIdx _) _ (LamS [] body)) es@(_ : _))) = do
+normalizePop1 sp (AnnoS g1@(Idx g1Idx _) c1 (AppS (AnnoS (Idx lamIdx _) _ (LamS [] body)) es@(_ : _))) = do
   _ <- propagateManifoldLabel g1Idx lamIdx
-  normalizePop1 (AnnoS g1 c1 (AppS body es))
--- beta-reduce one singly-used parameter (pure move); recurse on the residual
-normalizePop1
+  normalizePop1 sp (AnnoS g1 c1 (AppS body es))
+-- beta-reduce one parameter. A value used at most once is substituted (a pure
+-- move). An argument that is not a value is evaluated once at the application,
+-- so a data argument is bound by a let; a function- or suspension-typed one is
+-- left for 'applyLambdas'.
+normalizePop1 sp
   ( AnnoS
-      i1
+      i1@(Idx i1n i1t)
       tb1
       ( AppS
-          (AnnoS (Idx i2 (FunT (_tv : tas) tb2)) c (LamS (v : vs) e2))
+          (AnnoS (Idx i2 (FunT (tv : tas) tb2)) c (LamS (v : vs) e2))
           (e1 : es)
         )
     )
-    | countRefsMany v e2 <= 1 =
-        normalizePop1 $
-          AnnoS i1 tb1 $
-            AppS
-              (AnnoS (Idx i2 (FunT tas tb2)) c (LamS vs (substFreeBnd v e1 e2)))
-              es
+    | valueArg && countRefsMany v e2 <= 1 =
+        normalizePop1 sp $ residual (substFreeBnd v e1 e2)
+    | not valueArg && not (isFunT tv) && not (isEffT tv) = do
+        e1' <- normalizePop1 sp e1
+        -- the let is the root of what the labeled application computes, so
+        -- a label, cache or log setting on the application moves to it
+        letIx <- newIndex i1n
+        MM.modify (\st -> st {stateManifoldConfig = Map.delete i1n (stateManifoldConfig st)})
+        body <- normalizePop1 sp (residual (rebindFreeBnd v e2))
+        return (AnnoS (Idx letIx i1t) tb1 (LetS v e1' body))
+  where
+    valueArg = isValueWith sp e1
+    residual body =
+      AnnoS i1 tb1 $ AppS (AnnoS (Idx i2 (FunT tas tb2)) c (LamS vs body)) es
+    isFunT (FunT _ _) = True
+    isFunT _ = False
+    -- a suspension's own arguments are bound by 'applyLambdas' before the
+    -- suspension is shared ('hoistThunkArgs')
+    isEffT (EffectT _ _) = True
+    isEffT _ = False
 -- application to no args: unwrap, moving the discarded head's label up
-normalizePop1 (AnnoS g1@(Idx g1Idx _) _ (AppS (AnnoS (Idx headIdx _) c2 e) [])) = do
+normalizePop1 sp (AnnoS g1@(Idx g1Idx _) _ (AppS (AnnoS (Idx headIdx _) c2 e) [])) = do
   _ <- propagateManifoldLabel g1Idx headIdx
-  normalizePop1 (AnnoS g1 c2 e)
+  normalizePop1 sp (AnnoS g1 c2 e)
 -- every other node (incl. multiply-used or Many-headed applications): recurse
-normalizePop1 (AnnoS g c e) = AnnoS g c <$> mapExprSM normalizePop1 e
+normalizePop1 sp (AnnoS g c e) = AnnoS g c <$> mapExprSM (normalizePop1 sp) e
 
 -- | Count free @BndS@/@LetBndS@ references to @v@, stopping at any binder that
 -- shadows @v@. Mirrors 'Morloc.CodeGenerator.LambdaEval.countRefs' for the @Many@
@@ -148,7 +283,7 @@ countRefsMany v = go
     go (AnnoS _ _ (BndS v')) | v == v' = 1
     go (AnnoS _ _ (LetBndS v')) | v == v' = 1
     go (AnnoS _ _ (LamS vs _)) | v `elem` vs = 0
-    go (AnnoS _ _ (LetS v' _ _)) | v == v' = 0
+    go (AnnoS _ _ (LetS v' e1 _)) | v == v' = go e1
     go (AnnoS _ _ e) = getSum (foldExprS (Sum . go) e)
 
 -- | Replace every free reference to @v@ with @r@, stopping at shadowing binders.
@@ -164,7 +299,18 @@ substFreeBnd v r = go
     go (AnnoS _ _ (BndS v')) | v == v' = r
     go (AnnoS _ _ (LetBndS v')) | v == v' = r
     go e0@(AnnoS _ _ (LamS vs _)) | v `elem` vs = e0
-    go e0@(AnnoS _ _ (LetS v' _ _)) | v == v' = e0
+    -- a non-recursive let shadows v in its body, not in its right-hand side
+    go (AnnoS g c (LetS v' e1 e2)) | v == v' = AnnoS g c (LetS v' (go e1) e2)
+    go (AnnoS g c e) = AnnoS g c (mapExprS go e)
+
+-- | Rebind every free lambda-bound reference to @v@ as a let-bound one, for a
+-- parameter turned into a @let@.
+rebindFreeBnd :: EVar -> AnnoS (Indexed Type) Many Int -> AnnoS (Indexed Type) Many Int
+rebindFreeBnd v = go
+  where
+    go (AnnoS g c (BndS v')) | v == v' = AnnoS g c (LetBndS v)
+    go e0@(AnnoS _ _ (LamS vs _)) | v `elem` vs = e0
+    go (AnnoS g c (LetS v' e1 e2)) | v == v' = AnnoS g c (LetS v' (go e1) e2)
     go (AnnoS g c e) = AnnoS g c (mapExprS go e)
 
 {- | Choose a single concrete implementation. In the future, this component
@@ -174,13 +320,10 @@ also need benchmarking data from all the implementations and possibly
 statistical info describing inputs.
 -}
 realize ::
+  Map EVar [(Lang, Score)] ->
   AnnoS (Indexed Type) Many Int ->
-  MorlocMonad
-    ( Either
-        (AnnoS (Indexed Type) One ())
-        (AnnoS (Indexed Type) One (Indexed Lang))
-    )
-realize s0 = do
+  MorlocMonad (Scored, Finisher)
+realize tables s0 = do
   registry <- MM.gets stateLangRegistry
   -- A term that calls nothing sourced has no language of its own and is
   -- evaluated by the nexus. That evaluator has no name to call a function
@@ -189,40 +332,58 @@ realize s0 = do
   -- offered are those the program declares concrete types for, which are
   -- the pools it can build; one of them is chosen by the ordinary scoring,
   -- so the choice follows whatever else the term touches.
+  --
+  -- A replay entry that drives a saved stream frame by frame (@replay) needs
+  -- a pool for the same reason: only a pool can call its sink per frame. Its
+  -- command streams from a sourced producer, so the program has a pool.
+  specNames <- MM.gets stateSpecNames
+  let AnnoS (Idx i0 _) _ _ = s0
+      selfCalling = anyCallS (not . (`Set.member` specNames)) s0
+      replays = anyIntrinsicS IntrReplay s0
   langs <-
-    if anyCallS (const True) s0
+    if selfCalling || replays
       then do
         scopes <- MM.gets stateUniversalConcreteTypedefs
         case unique (map (LR.poolOf registry) (Map.keys scopes)) of
-          [] ->
-            let AnnoS (Idx i _) _ _ = s0
-             in MM.throwSourcedError i $
+          []
+            | selfCalling ->
+                MM.throwSourcedError i0 $
                   "this function calls itself, and a function that calls itself needs a"
                     <+> "language to run in: the nexus evaluates an expression but cannot"
                     <+> "call a function by name. Import a language module (`import"
                     <+> "root-py`, `root-cpp`, ...) to give the program a pool."
+            | otherwise ->
+                MM.throwCompilerBugAt i0 "a replay entry in a program with no pool language"
           ls -> return ls
       else return []
-  realizeWithRegistry registry langs s0
+  realizeWithRegistry registry tables langs s0
 
+-- | Score a tree, returning the scored tree and how to finish it: a shared
+-- specialization is scored once and finished once per language it is used in.
+-- @tables@ holds the score of each shared specialization a call may name.
 realizeWithRegistry ::
   LangRegistry ->
+  Map EVar [(Lang, Score)] ->
   [Lang] ->
   AnnoS (Indexed Type) Many Int ->
-  MorlocMonad
-    ( Either
-        (AnnoS (Indexed Type) One ())
-        (AnnoS (Indexed Type) One (Indexed Lang))
-    )
-realizeWithRegistry registry seedLangs s0 = do
+  MorlocMonad (Scored, Finisher)
+realizeWithRegistry registry tables seedLangs s0 = do
   -- Normalize language-invariant (literal-lambda-head) redexes before scoring so
   -- the scorer is not fed composition chains it would re-score exponentially.
-  s0' <- normalizePop1 s0
-  e@(AnnoS _ li _) <- scoreAnnoS emptyRState {rLangs = seedLangs} s0' >>= collapseAnnoS [] Nothing
-  case li of
-    (Idx _ Nothing) -> makeGAST e |>> Left
-    (Idx _ _) -> propagateDown e |>> Right
+  let sp = stagePoints s0
+  s0' <- normalizePop1 (`Map.lookup` sp) s0
+  scored <- scoreAnnoS emptyRState {rLangs = seedLangs} s0'
+  return (scored, finish scored)
   where
+    finish scored ctx = do
+      e@(AnnoS g li x) <- collapseAnnoS [] ctx scored
+      case (li, ctx) of
+        -- language-free code used from a pool runs in that pool, as it
+        -- would inlined there
+        (Idx i Nothing, Just l) -> propagateDown (AnnoS g (Idx i (Just l)) x) |>> Right
+        (Idx _ Nothing, Nothing) -> makeGAST e |>> Left
+        _ -> propagateDown e |>> Right
+
     pairwiseCost :: Lang -> Lang -> Int
     pairwiseCost l1 l2
       | l1 == l2 = case Map.lookup (langName l2) (lrSameLangCosts registry) of
@@ -243,9 +404,65 @@ realizeWithRegistry registry seedLangs s0 = do
       RState ->
       AnnoS (Indexed Type) Many Int ->
       MorlocMonad (AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]))
-    scoreAnnoS rstat (AnnoS gi ci e) = do
-      (e', ci') <- scoreExpr rstat (e, ci)
-      return $ AnnoS gi ci' e'
+    scoreAnnoS rstat (AnnoS gi@(Idx gidx t) ci e) = do
+      (e', Idx ci' table) <- scoreExpr rstat (e, ci)
+      -- An operation that belongs to no language runs where its context
+      -- puts it, but only in a language that can hold what it computes.
+      table' <- maybe (return table) (\ts -> holding gidx ts table) (heldTypes e t)
+      return $ AnnoS gi (Idx ci' table') e'
+
+    -- The languages of @table@ that can hold values of types @ts@ (codegen
+    -- finds each a concrete type there). When none of them can, the
+    -- program's other pool languages that can are offered instead, each at
+    -- the table's cost plus the crossing to it. A table with no language
+    -- (a tree the nexus evaluates) is left alone, and so is one where no
+    -- pool language can hold the value: its error is reported where the
+    -- value is written out.
+    holding :: Int -> [Type] -> [(Lang, Score)] -> MorlocMonad [(Lang, Score)]
+    holding _ _ [] = return []
+    holding i ts table = do
+      able <- ableLangs i ts (map fst table)
+      return $ case (able, [x | x@(l, _) <- table, l `elem` able]) of
+        ([], _) -> table
+        (_, []) -> [(l, minimum [addScore sc (transScore l0 l) | (l0, sc) <- table]) | l <- able]
+        (_, kept) -> kept
+
+    -- The language a language-free computation placed in context @l@ runs
+    -- in: @l@ if it can hold the values the computation works on, else the
+    -- pool language that can, cheapest to reach from @l@; @l@ if none can.
+    holdingLang :: Int -> [Type] -> Lang -> MorlocMonad Lang
+    holdingLang i ts l = do
+      able <- ableLangs i ts [l]
+      return $ case able of
+        _ | l `elem` able -> l
+        [] -> l
+        _ -> snd (minimum [(transScore l l', l') | l' <- able])
+
+    -- Of these languages and the program's pool languages, those in which
+    -- codegen finds a concrete type for each of @ts@.
+    ableLangs :: Int -> [Type] -> [Lang] -> MorlocMonad [Lang]
+    ableLangs i ts langs = do
+      scopes <- MM.gets stateUniversalConcreteTypedefs
+      let candidates = unique (langs <> map (LR.poolOf registry) (Map.keys scopes))
+      filterM (\l -> and <$> mapM (Infer.canHoldType True l i) ts) candidates
+
+    -- The types a language-free computation works on, for one that is.
+    heldTypes :: ExprS (Indexed Type) f c -> Type -> Maybe [Type]
+    heldTypes e t = case e of
+      ExeS (PatCall _) -> Just (componentTypes t)
+      AppS (AnnoS (Idx _ ft) _ (ExeS (PatCall _))) _ -> Just (componentTypes ft)
+      -- a call of a function value runs wherever it is placed
+      AppS (AnnoS (Idx _ ft) _ (BndS _)) _ -> Just (componentTypes ft)
+      AppS (AnnoS (Idx _ ft) _ (LetBndS _)) _ -> Just (componentTypes ft)
+      LstS _ -> Just [t]
+      TupS _ -> Just [t]
+      NamS _ -> Just [t]
+      _ -> Nothing
+
+    -- what an operation of this type computes on: its inputs and result
+    componentTypes :: Type -> [Type]
+    componentTypes (FunT ins out) = ins <> [out]
+    componentTypes ty = [ty]
 
     -- \| Alternates with scoresAnnoS, finds the best score for each language at
     -- application nodes.
@@ -318,11 +535,22 @@ realizeWithRegistry registry seedLangs s0 = do
       return (ConS tv n j xs', zipLang i rstat)
     scoreExpr rstat (LetS v e1 e2, i) = do
       e1' <- scoreAnnoS rstat e1
-      -- Make the let-bound variable's RHS scores available to LetBndS
-      -- references in the body. Without this, LetBndS would fall back to
-      -- the calling context's lang preferences (zipLang on rstat.rLangs)
-      -- and miss the binding's actual language requirement.
-      let rstat' = rstat { rLetVars = Map.insert v (scoresOf e1') (rLetVars rstat) }
+      -- A reference to the bound value costs what it takes to have the value
+      -- in the reference's language: computing it in its cheapest home
+      -- relative to the cheapest place overall, plus moving it. The RHS's own
+      -- cost is counted once, at the LetS below, not again at every
+      -- reference. An empty table leaves LetBndS to the calling context.
+      let rhs = scoresOf e1'
+          refTable = case rhs of
+            [] -> []
+            _ ->
+              let base = minimum (map snd rhs)
+                  rel (c, n) (bc, bn) = (c - bc, n - bn)
+                  langs = unique (map fst rhs <> rLangs rstat)
+               in [ (l, minimum [addScore (rel sc base) (transScore h l) | (h, sc) <- rhs])
+                  | l <- langs
+                  ]
+          rstat' = rstat { rLetVars = Map.insert v refTable (rLetVars rstat) }
       e2' <- scoreAnnoS rstat' e2
       -- Score the chain like an application: the binding's RHS and the body
       -- both contribute, with cross-language penalties applied per-lang.
@@ -332,9 +560,12 @@ realizeWithRegistry registry seedLangs s0 = do
       return (LetS v e1' e2', Idx i best)
     scoreExpr rstat (LetBndS v, i) =
       case Map.lookup v (rLetVars rstat) of
-        Just scs -> return (LetBndS v, Idx i scs)
-        Nothing -> return (LetBndS v, zipLang i rstat)
-    scoreExpr rstat (CallS v, i) = return (CallS v, zipLang i rstat)
+        Just scs@(_ : _) -> return (LetBndS v, Idx i scs)
+        _ -> return (LetBndS v, zipLang i rstat)
+    scoreExpr rstat (CallS v, i) = case Map.lookup v tables of
+      -- a shared specialization costs what it costs in each language
+      Just table -> return (CallS v, Idx i table)
+      Nothing -> return (CallS v, zipLang i rstat)
     scoreExpr rstat (IfS c t e, i) = do
       c' <- scoreAnnoS rstat c
       t' <- scoreAnnoS rstat t
@@ -462,8 +693,16 @@ realizeWithRegistry registry seedLangs s0 = do
       Maybe Lang ->
       AnnoS (Indexed Type) Many (Indexed [(Lang, Score)]) ->
       MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)))
-    collapseAnnoS heads l1 (AnnoS gi@(Idx _ gt) ci e) = do
-      (e', ci') <- collapseExpr heads gt l1 (e, ci)
+    collapseAnnoS heads l1 (AnnoS gi@(Idx gidx gt) ci e) = do
+      l1' <- case (l1, heldTypes e gt) of
+        (Just l, Just ts) -> Just <$> holdingLang gidx ts l
+        _ -> return l1
+      (e', ci'') <- collapseExpr heads gt l1' (e, ci)
+      -- moved away from its context, a language-free computation keeps the
+      -- language it was moved to rather than inheriting its context's again
+      let ci' = case ci'' of
+            Idx i Nothing | l1' /= l1 -> Idx i l1'
+            _ -> ci''
       -- Explainability: at high verbosity, record each node's language decision
       -- (its index, the parent/incoming language, and the language chosen). The
       -- exact tree-DP makes this a faithful, per-node account of "why this pool".
@@ -554,12 +793,12 @@ realizeWithRegistry registry seedLangs s0 = do
       MorlocMonad (ExprS (Indexed Type) One (Indexed (Maybe Lang)), Indexed (Maybe Lang))
 
     collapseExpr _ _ _ (VarS v (Many []), Idx i _) =
-      MM.throwSourcedError i $ "No implementation found for" <+> squotes (pretty v)
+      MM.throwSourcedError i $ "No implementation found for" <+> squotes (pretty (displayName v))
     -- Select one implementation for the given term
     collapseExpr heads gt l1 (VarS v (Many xs), Idx i _) = do
       let minXs = minsBy (\(AnnoS _ (Idx _ ss) _) -> minimumMay [cost l1 l2 s | (l2, s) <- ss]) xs
       (x, lang) <- case minXs of
-        [] -> MM.throwSourcedError i $ "No implementation found for" <+> squotes (pretty v)
+        [] -> MM.throwSourcedError i $ "No implementation found for" <+> squotes (pretty (displayName v))
         [x] -> handleOne x
         choices -> mapM handleOne choices >>= handleMany gt
       return (VarS v (One x), Idx i lang)
@@ -610,7 +849,7 @@ realizeWithRegistry registry seedLangs s0 = do
           case nearest of
             [] ->
               MM.throwSourcedError i $
-                "No matching implementation found for" <+> squotes (pretty v)
+                "No matching implementation found for" <+> squotes (pretty (displayName v))
                   <+> "at type" <+> pretty gt'
             -- one head, possibly sourced several times (duplicate imports)
             ((h0, x) : rest) | all (equivalent h0 . fst) rest -> return x
@@ -620,7 +859,7 @@ realizeWithRegistry registry seedLangs s0 = do
             ((_, x) : _) | containsUnk gt' -> return x
             _ ->
               MM.throwSourcedError i $
-                "Ambiguous instances for" <+> squotes (pretty v)
+                "Ambiguous instances for" <+> squotes (pretty (displayName v))
                   <+> "at type" <+> pretty gt' <> ":"
                   <> "\n" <> indent 2 (vsep (map pretty maxima))
                   <> "\nEach matches, and none is more specific than the others."
@@ -692,15 +931,15 @@ realizeWithRegistry registry seedLangs s0 = do
       return (AppS f' xs', Idx i lang)
     -- Propagate data
     collapseExpr heads _ l1 (e@(LstS xs), Idx i ss) = do
-      lang <- if isFunctionalData e then functionalDataLang i l1 else pickLanguage heads l1 xs ss
+      lang <- if isFunctionalData e then return l1 else pickLanguage heads l1 xs ss
       xs' <- mapM (collapseElement heads e lang) xs
       return (LstS xs', Idx i lang)
     collapseExpr heads _ l1 (e@(TupS xs), Idx i ss) = do
-      lang <- if isFunctionalData e then functionalDataLang i l1 else pickLanguage heads l1 xs ss
+      lang <- if isFunctionalData e then return l1 else pickLanguage heads l1 xs ss
       xs' <- mapM (collapseElement heads e lang) xs
       return (TupS xs', Idx i lang)
     collapseExpr heads _ l1 (e@(NamS rs), Idx i ss) = do
-      lang <- if isFunctionalData e then functionalDataLang i l1 else pickLanguage heads l1 (map snd rs) ss
+      lang <- if isFunctionalData e then return l1 else pickLanguage heads l1 (map snd rs) ss
       xs' <- mapM (collapseElement heads e lang . snd) rs
       return (NamS (zip (map fst rs) xs'), Idx i lang)
     -- collapse leaf expressions
@@ -762,15 +1001,6 @@ realizeWithRegistry registry seedLangs s0 = do
     collapseElement heads container lang x
       | isFunctionalData container = collapseCarried heads lang x
       | otherwise = collapseAnnoS heads lang x
-
-    -- A structure holding function values lives in the pool that holds
-    -- it; with no pool around it (the root of a command) there is nowhere
-    -- for the function values to live.
-    functionalDataLang :: Int -> Maybe Lang -> MorlocMonad (Maybe Lang)
-    functionalDataLang _ l@(Just _) = return l
-    functionalDataLang i Nothing =
-      MM.throwSourcedError i
-        "A record, list or tuple holding function values cannot be the result of a command: a function value has no form outside a pool"
 
     collapseCarried ::
       [(EVar, Lang)] ->
@@ -868,7 +1098,10 @@ realizeWithRegistry registry seedLangs s0 = do
           Lang ->
           AnnoS (Indexed Type) One (Indexed (Maybe Lang)) ->
           MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
-        f lang (AnnoS g (Idx i Nothing) e') = f lang (AnnoS g (Idx i (Just lang)) e')
+        -- an inherited language, for a computation that can run there
+        f lang (AnnoS g@(Idx gidx gt) (Idx i Nothing) e') = do
+          lang' <- maybe (return lang) (\ts -> holdingLang gidx ts lang) (heldTypes e' gt)
+          f lang' (AnnoS g (Idx i (Just lang')) e')
         f _ (AnnoS g (Idx i (Just lang)) e') = do
           e'' <- case e' of
             (AppS x xs) -> AppS <$> f lang x <*> mapM (f lang) xs
@@ -959,12 +1192,107 @@ processTree ::
     , [AnnoS (Indexed Type) One (Indexed Lang)]
     )
 processTree exportSet tree = do
-  (modified0, helpers0) <- extractFromTree exportSet tree
+  (modifiedE, helpersE) <- extractFromRoot exportSet tree
+  (modified0, helpers0) <- addStageEntries modifiedE helpersE
   let captureMap = closeFreeVars helpers0
+  MM.modify (\st -> st {stateRecStages = Map.mapWithKey
+    (\v (k, sv, n) -> (k, sv, maybe n length (Map.lookup v captureMap))) (stateRecStages st)})
   modified1 <- rewriteCalls captureMap modified0
-  helpers1  <- mapM (\(v, t) -> (,) v <$> rewriteCalls captureMap t) helpers0
+  -- a let-bound value a helper captures becomes one of its parameters
+  let helpers0' = [ (v, letToParam (Set.fromList (map fst (Map.findWithDefault [] v captureMap))) t)
+                  | (v, t) <- helpers0 ]
+  helpers1  <- mapM (\(v, t) -> (,) v <$> rewriteCalls captureMap t) helpers0'
   let helpers2 = map (uncurry (widenHelperLam captureMap)) helpers1
   return (modified1, helpers2)
+
+-- | The first stage point of each recursive term defined in a tree, by the
+-- name its back-edges use: the number of parameters of a definition whose
+-- body does work before the lambda it returns.
+stagePoints :: AnnoS (Indexed Type) Many Int -> Map EVar Int
+stagePoints = go
+  where
+    go (AnnoS _ _ e) = case e of
+      VarS v (Many alts) ->
+        Map.unions (Map.fromList [ (v, length vs) | a <- alts, Just vs <- [staged v a] ] : map go alts)
+      _ -> Map.unions (foldExprS (\x -> [go x]) e)
+    staged v (AnnoS (Idx _ (FunT ts _)) _ (LamS vs body@(AnnoS _ _ be)))
+      | length vs < length ts
+      , notLam be
+      , anyCallS (== v) body =
+          Just vs
+    staged _ _ = Nothing
+    notLam (LamS _ _) = False
+    notLam _ = True
+
+-- | A recursive helper whose body does work before the lambda it returns
+-- (a stage point after its first @k@ parameters) gets a second entry, the
+-- /stage entry/, taking those @k@ parameters, running the work once, and
+-- returning the closure. A partial application of the helper to exactly @k@
+-- arguments calls the stage entry; a full application calls the helper.
+addStageEntries ::
+  AnnoS (Indexed Type) One (Indexed Lang) ->
+  [(EVar, AnnoS (Indexed Type) One (Indexed Lang))] ->
+  MorlocMonad
+    ( AnnoS (Indexed Type) One (Indexed Lang)
+    , [(EVar, AnnoS (Indexed Type) One (Indexed Lang))]
+    )
+addStageEntries modified helpers = do
+  staged <- sequence
+    [ do
+        let stageV = EV (unEVar v <> "@stage")
+            stageT = FunT (take k ts) (FunT (drop k ts) r)
+        AnnoS (Idx gi' _) c' e' <- reindexOne t
+        MM.modify (\st -> st {stateName = Map.insert gi' stageV (stateName st)})
+        return (v, stageV, k, stageT, AnnoS (Idx gi' stageT) c' e')
+    | (v, t@(AnnoS (Idx _ (FunT ts r)) _ (LamS vs body))) <- helpers
+    , let k = length vs
+    , k < length ts
+    , not (isLamBody body)
+    ]
+  MM.modify (\st -> st {stateRecStages = Map.union (Map.fromList [(v, (k, sv, 0)) | (v, sv, k, _, _) <- staged]) (stateRecStages st)})
+  let rewriteAll x = foldr (\(v, sv, k, st, _) acc -> rewritePartialCalls v sv k st acc) x staged
+      helpers' = [(v, rewriteAll t) | (v, t) <- helpers]
+      stages = [(sv, rewriteAll t) | (_, sv, _, _, t) <- staged]
+  return (rewriteAll modified, helpers' ++ stages)
+  where
+    isLamBody (AnnoS _ _ (LamS _ _)) = True
+    isLamBody _ = False
+
+-- | A partial application of recursive helper @v@ to its first @k@
+-- arguments (written by the typechecker as @\vs -> v pre vs@, or applied
+-- directly) becomes a call of its stage entry @stageV@.
+rewritePartialCalls ::
+  EVar -> EVar -> Int -> Type ->
+  AnnoS (Indexed Type) One (Indexed Lang) ->
+  AnnoS (Indexed Type) One (Indexed Lang)
+rewritePartialCalls v stageV k stageT = go
+  where
+    go n@(AnnoS g c e) = case partialCall n of
+      Just (hi, hc, args) -> AnnoS g c (AppS (AnnoS (Idx hi stageT) hc (CallS stageV)) (map go args))
+      Nothing -> AnnoS g c (mapExprS go e)
+    partialCall n@(AnnoS _ _ e)
+      | Just (AnnoS (Idx hi _) hc (CallS v'), pre) <- etaParts n, v' == v, length pre == k = Just (hi, hc, pre)
+      | AppS (AnnoS (Idx hi _) hc (CallS v')) xs <- e, v' == v, length xs == k = Just (hi, hc, xs)
+      | otherwise = Nothing
+
+-- | A copy of a tree with fresh indices carrying the state of those they copy.
+reindexOne ::
+  AnnoS (Indexed Type) One (Indexed Lang) ->
+  MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
+reindexOne = reindexWith (\(Idx ci l) -> (`Idx` l) <$> newIndex ci)
+
+-- | A copy with fresh general indices, and concrete annotations remade by
+-- the given function.
+reindexWith :: (c -> MorlocMonad c) -> AnnoS (Indexed Type) One c -> MorlocMonad (AnnoS (Indexed Type) One c)
+reindexWith f (AnnoS (Idx gi t) c e) = do
+  gi' <- newIndex gi
+  c' <- f c
+  AnnoS (Idx gi' t) c' <$> mapExprSM (reindexWith f) e
+
+-- | A tree whose root term is renamed.
+renameRoot :: EVar -> AnnoS g One c -> AnnoS g One c
+renameRoot name (AnnoS g c (VarS _ x)) = AnnoS g c (VarS name x)
+renameRoot _ t = t
 
 -- | Walk an rAST, replacing every self-recursive @VarS v (One child)@ with
 -- a bare @CallS v@ back-edge and returning the extracted body separately.
@@ -976,7 +1304,30 @@ extractFromTree ::
     ( AnnoS (Indexed Type) One (Indexed Lang)
     , [(EVar, AnnoS (Indexed Type) One (Indexed Lang))]
     )
-extractFromTree exports (AnnoS g c e) = do
+extractFromTree exports (AnnoS g@(Idx gi t) c e) = do
+  (e', helpers) <- extractExpr exports e
+  case (e, e') of
+    -- A reference that now names an extracted helper: Treeify gave the
+    -- reference the index of the definition it copied, which is the helper's
+    -- manifold, so the reference takes an index of its own. Its state is
+    -- copied, but not the helper's manifold configuration: the helper
+    -- itself carries it.
+    (VarS _ _, CallS _) -> do
+      gi' <- newIndex gi
+      MM.modify (\st -> st {stateManifoldConfig = Map.delete gi' (stateManifoldConfig st)})
+      return (AnnoS (Idx gi' t) c e', helpers)
+    _ -> return (AnnoS g c e', helpers)
+
+-- | 'extractFromTree' at the root of a tree, whose index names it (an
+-- export) and so is kept.
+extractFromRoot ::
+  Set.Set Int ->
+  AnnoS (Indexed Type) One (Indexed Lang) ->
+  MorlocMonad
+    ( AnnoS (Indexed Type) One (Indexed Lang)
+    , [(EVar, AnnoS (Indexed Type) One (Indexed Lang))]
+    )
+extractFromRoot exports (AnnoS g c e) = do
   (e', helpers) <- extractExpr exports e
   return (AnnoS g c e', helpers)
 
@@ -994,9 +1345,12 @@ extractExpr exports (VarS v (One child@(AnnoS (Idx midx _) _ _)))
       -- when two exports share the same source name for their helpers.
       let newV = EV (unEVar v <> MT.pack ("@" <> show midx))
       (child', innerHelpers) <- extractFromTree exports child
+      -- a helper hoisted from inside this one may call back to it (mutual
+      -- recursion), so its back-edges are renamed with this one's
       let renamedChild = renameCallS v newV child'
+          innerHelpers' = [(w, renameCallS v newV h) | (w, h) <- innerHelpers]
       MM.modify (\s -> s { stateName = Map.insert midx newV (stateName s) })
-      return (CallS newV, (newV, renamedChild) : innerHelpers)
+      return (CallS newV, (newV, renamedChild) : innerHelpers')
 extractExpr exports (VarS v (One child)) = do
   (child', helpers) <- extractFromTree exports child
   return (VarS v (One child'), helpers)
@@ -1057,23 +1411,50 @@ collectFreeBnds = go
     go bs (AnnoS (Idx _ t) _ (BndS v))
       | Set.member v bs = Map.empty
       | otherwise       = Map.singleton v t
+    go bs (AnnoS (Idx _ t) _ (LetBndS v))
+      | Set.member v bs = Map.empty
+      | otherwise       = Map.singleton v t
     go bs (AnnoS _ _ (LamS vs body)) = go (Set.union bs (Set.fromList vs)) body
     go bs (AnnoS _ _ (LetS v e1 e2)) = Map.union (go bs e1) (go (Set.insert v bs) e2)
     go bs (AnnoS _ _ e)              = foldExprS (go bs) e
 
--- | CallS names reachable from a tree.
-callSitesIn :: AnnoS (Indexed Type) One (Indexed Lang) -> Set.Set EVar
-callSitesIn = foldAnnoS extract
+-- | Read the free let-bound variables @vs@ as lambda parameters.
+letToParam ::
+  Set.Set EVar ->
+  AnnoS (Indexed Type) One (Indexed Lang) ->
+  AnnoS (Indexed Type) One (Indexed Lang)
+letToParam vs0 = go vs0
   where
-    extract (AnnoS _ _ (CallS v)) = Set.singleton v
-    extract _                     = Set.empty
+    go vs n@(AnnoS g c e)
+      | Set.null vs = n
+      | otherwise = case e of
+          LetBndS v | Set.member v vs -> AnnoS g c (BndS v)
+          LamS xs body -> AnnoS g c (LamS xs (go (Set.difference vs (Set.fromList xs)) body))
+          LetS v e1 e2 -> AnnoS g c (LetS v (go vs e1) (go (Set.delete v vs) e2))
+          _ -> AnnoS g c (mapExprS (go vs) e)
+
+-- | The helper calls in a tree, each with the variables bound around it
+-- inside the tree.
+callSitesIn ::
+  Set.Set EVar ->
+  AnnoS (Indexed Type) One (Indexed Lang) ->
+  [(EVar, Set.Set EVar)]
+callSitesIn helperNames = go Set.empty
+  where
+    go bs (AnnoS _ _ (CallS v))
+      | Set.member v helperNames = [(v, bs)]
+      | otherwise = []
+    go bs (AnnoS _ _ (LamS vs body)) = go (Set.union bs (Set.fromList vs)) body
+    go bs (AnnoS _ _ (LetS v e1 e2)) = go bs e1 ++ go (Set.insert v bs) e2
+    go bs (AnnoS _ _ e) = foldExprS (go bs) e
 
 -- | Info for each helper, precomputed once so 'closeFreeVars' doesn't
 -- re-walk each body per lookup.
 data HelperInfo = HelperInfo
   { hiParams  :: Set.Set EVar     -- ^ outer LamS binders
   , hiBodyFV  :: Map EVar Type    -- ^ FVs of the body (LamS/LetS-respecting)
-  , hiCallees :: Set.Set EVar     -- ^ helper names reachable via CallS
+  , hiCalls   :: [(EVar, Set.Set EVar)]
+    -- ^ helper calls, each with the variables bound around it in the body
   }
 
 helperInfo ::
@@ -1083,49 +1464,32 @@ helperInfo ::
 helperInfo helperNames tree = HelperInfo
   { hiParams  = case tree of AnnoS _ _ (LamS vs _) -> Set.fromList vs; _ -> Set.empty
   , hiBodyFV  = collectFreeBnds Set.empty tree
-  , hiCallees = callSitesIn tree `Set.intersection` helperNames
+  , hiCalls   = callSitesIn helperNames tree
   }
 
--- | Least fixed point of the FV closure equation over the helper call
--- graph. For each helper name, returns the stable-ordered list of
--- captured @(name, type)@ pairs it must be lifted with.
+-- | Least fixed point of the capture equation over the helper call graph.
+-- For each helper name, returns the stable-ordered list of captured
+-- @(name, type)@ pairs it must be lifted with.
 --
--- >   FV∞(h) = FV(body(h)) ∪ ⋃ { FV∞(h') : h' ∈ helperCallees(h) }
--- >          ∖ params(h)
+-- >   cap(h) = FV(body(h)) + sum { cap(h') - bound(site) : site calls h' in h }
 --
--- Solved by walking @Data.Graph.stronglyConnComp@'s output in reverse
--- topological order: every callee outside the current SCC has been
--- closed already, so its FV∞ is in the accumulator. Members of a
--- cyclic SCC share their combined FV.
+-- where @bound(site)@ is what the helper binds around that call (its own
+-- parameters included): a variable a callee captures from a scope inside the
+-- caller is passed at the call, not captured by the caller.
 closeFreeVars ::
   [(EVar, AnnoS (Indexed Type) One (Indexed Lang))] ->
   Map EVar [(EVar, Type)]
 closeFreeVars helpers =
   let helperNames = Set.fromList (map fst helpers)
-      infoMap     = Map.fromList
-        [ (v, helperInfo helperNames t) | (v, t) <- helpers ]
-      infoOf v    = Map.findWithDefault (HelperInfo Set.empty Map.empty Set.empty) v infoMap
-
-      sccs = Graph.stronglyConnComp
-        [ (v, v, Set.toList (hiCallees (infoOf v))) | (v, _) <- helpers ]
-
-      accumSCC :: Map EVar (Map EVar Type) -> Graph.SCC EVar -> Map EVar (Map EVar Type)
-      accumSCC acc scc =
-        let members = case scc of
-              Graph.AcyclicSCC v -> [v]
-              Graph.CyclicSCC vs -> vs
-            memberSet = Set.fromList members
-            fvBodies  = Map.unions [ hiBodyFV (infoOf v) | v <- members ]
-            outerCallees = Set.unions
-              [ Set.difference (hiCallees (infoOf v)) memberSet | v <- members ]
-            fvFromCallees = Map.unions
-              [ Map.findWithDefault Map.empty h acc | h <- Set.toList outerCallees ]
-            fvSCC = Map.union fvBodies fvFromCallees
-            entry v =
-              (v, Map.filterWithKey (\k _ -> Set.notMember k (hiParams (infoOf v))) fvSCC)
-        in Map.union (Map.fromList (map entry members)) acc
-
-      closed = List.foldl' accumSCC Map.empty sccs
+      infos = [ (v, helperInfo helperNames t) | (v, t) <- helpers ]
+      step acc = Map.fromList
+        [ (v, Map.unions (hiBodyFV info : [ Map.withoutKeys (Map.findWithDefault Map.empty h acc) bound
+                                          | (h, bound) <- hiCalls info ]))
+        | (v, info) <- infos ]
+      fixpoint acc =
+        let acc' = step acc
+         in if Map.map Map.keysSet acc' == Map.map Map.keysSet acc then acc' else fixpoint acc'
+      closed = fixpoint (Map.fromList [ (v, Map.empty) | (v, _) <- infos ])
    in Map.map Map.toAscList closed
 
 -- | Widen a helper's outer LamS/FunT by prepending its captured parameters.
@@ -1164,31 +1528,39 @@ rewriteCalls ::
   MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
 rewriteCalls captureMap tree
   | Map.null captureMap = return tree
-  | otherwise           = walk tree
+  | otherwise           = walk Set.empty tree
   where
     -- Injected BndS references an outer-scope variable that lives in the
     -- caller's language ('c'), not the callee's ('fc'); Express handles
     -- any cross-language transition at the callee.
-    walk (AnnoS g c (AppS (AnnoS (Idx fi fT) fc (CallS v)) xs))
+    -- @lets@: the let-bound names in scope, which a call site passes as
+    -- 'LetBndS'; any other captured name is a parameter here
+    walk lets (AnnoS g c (AppS (AnnoS (Idx fi fT) fc (CallS v)) xs))
       | Just captured <- Map.lookup v captureMap
       , not (null captured) = do
-          xs' <- mapM walk xs
-          injected <- mapM (mkCapturedBnd c) captured
+          xs' <- mapM (walk lets) xs
+          injected <- mapM (mkCapturedBnd lets c) captured
           let widenedT = widenFunType fT (map snd captured)
               headA = AnnoS (Idx fi widenedT) fc (CallS v)
           return $ AnnoS g c (AppS headA (injected ++ xs'))
 
-    walk (AnnoS (Idx _ t) c (CallS v))
+    walk lets (AnnoS (Idx gi t) c (CallS v))
       | Just captured <- Map.lookup v captureMap
       , not (null captured) =
-          etaExpandCallS t c v captured
+          etaExpandCallS (`Set.member` lets) gi t c v captured
 
-    walk (AnnoS g c e) = AnnoS g c <$> mapExprSM walk e
+    walk lets (AnnoS g c (LetS v e1 e2)) = do
+      e1' <- walk lets e1
+      e2' <- walk (Set.insert v lets) e2
+      return (AnnoS g c (LetS v e1' e2'))
+    walk lets (AnnoS g c (LamS vs body)) =
+      AnnoS g c . LamS vs <$> walk (Set.difference lets (Set.fromList vs)) body
+    walk lets (AnnoS g c e) = AnnoS g c <$> mapExprSM (walk lets) e
 
-    mkCapturedBnd :: Indexed Lang -> (EVar, Type) -> MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
-    mkCapturedBnd c (name, t) = do
+    mkCapturedBnd :: Set.Set EVar -> Indexed Lang -> (EVar, Type) -> MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
+    mkCapturedBnd lets c (name, t) = do
       gi <- MM.getCounter
-      return $ AnnoS (Idx gi t) c (BndS name)
+      return $ AnnoS (Idx gi t) c (if Set.member name lets then LetBndS name else BndS name)
 
 -- | Turn a bare @CallS v@ at value position into
 --
@@ -1200,12 +1572,14 @@ rewriteCalls captureMap tree
 -- at reference sites, so the CallS's own @gi@ is already claimed by the
 -- extracted helper's manifold.
 etaExpandCallS ::
+  (EVar -> Bool) ->
+  Int ->
   Type ->
   Indexed Lang ->
   EVar ->
   [(EVar, Type)] ->
   MorlocMonad (AnnoS (Indexed Type) One (Indexed Lang))
-etaExpandCallS t c v captured = do
+etaExpandCallS isLet gi t c v captured = do
   let (visibleIns, visibleOut, wrapEffect) = peelFunT t
       arity = length visibleIns
   freshNames  <- replicateM arity freshLamVar
@@ -1213,14 +1587,15 @@ etaExpandCallS t c v captured = do
   capturedGis <- replicateM (length captured) MM.getCounter
   callGi      <- MM.getCounter
   appGi       <- MM.getCounter
-  lamGi       <- MM.getCounter
+  -- the lambda stands where the call was, and carries that index's state
+  lamGi       <- newIndex gi
   let widenedT = widenFunType t (map snd captured)
       forwardBnds =
         [ AnnoS (Idx bgi ty) c (BndS n)
         | (bgi, n, ty) <- zip3 freshBndGis freshNames visibleIns
         ]
       capturedBnds =
-        [ AnnoS (Idx cgi ty) c (BndS n)
+        [ AnnoS (Idx cgi ty) c (if isLet n then LetBndS n else BndS n)
         | (cgi, (n, ty)) <- zip capturedGis captured
         ]
       callHead = AnnoS (Idx callGi widenedT) c (CallS v)
@@ -1249,6 +1624,12 @@ anyCallS p = getAny . foldAnnoS check
   where
     check (AnnoS _ _ (CallS v)) = Any (p v)
     check _                     = Any False
+
+anyIntrinsicS :: (Foldable f) => Intrinsic -> AnnoS g f c -> Bool
+anyIntrinsicS intr = getAny . foldAnnoS check
+  where
+    check (AnnoS _ _ (IntrinsicS i _)) = Any (i == intr)
+    check _                            = Any False
 
 containsCallS :: (Foldable f) => EVar -> AnnoS g f c -> Bool
 containsCallS target = anyCallS (== target)

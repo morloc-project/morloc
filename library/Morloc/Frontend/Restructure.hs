@@ -31,6 +31,9 @@ import qualified Morloc.Data.Map as Map
 import qualified Morloc.Frontend.AST as AST
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
+import Morloc.Frontend.Rename (renameLocals)
+import Morloc.Frontend.TerminalActions (synthesizeTerminalActions)
+import Morloc.Typecheck.Internal (expandStructuralAliases, structuralAliasesIn)
 
 -- | Resolve type aliases, term aliases and import/exports
 restructure ::
@@ -49,13 +52,170 @@ restructure s = do
     >>= checkMutualRecursion -- typedef cycles no `data` cuts are rejected
     >>= resolveImports -- rewrite DAG edges to map imported terms to their aliases
     >>= handleBinops -- resolve binary operators
-    >>= hoistEvals -- hoist user '!' markers into do-block binds
     >>= refineKinds -- promote VarU to NatVarU based on typedef param kinds (before self-defs are removed)
       |>> handleTypeDeclarations
-    >>= doM collectTags
     >>= doM collectTypes
     >>= (\x -> collectUniversalTypes x >> return x)
+    >>= expandStructuralTypes
+    -- unique local names, so no name placed in a synthesized body is captured
+    >>= DAG.mapNodeM renameLocals
+    -- synthesized code is hoisted and tagged with the rest
+    >>= synthesizeTerminalActions
+    >>= hoistEvals -- hoist user '!' markers into do-block binds
+    >>= DAG.mapNodeM markConstants
+    >>= doM collectTags
     >>= doM collectSources
+
+-- | Mark each constant a definition computes: a value that reads no
+-- parameter and no other local value -- the right-hand side of a @let@ or of
+-- a parameterless @where@ binding, the argument a lambda is applied to, or a
+-- computation in the body of a definition that is not a function, outside any
+-- lambda. A constant is evaluated once per command, however many times, or
+-- however recursively, the function around it is called. The mark is the
+-- node's own index ('stateConstantOrigin'); every copy made of the node keeps
+-- it, and 'Morloc.Frontend.Share' binds the copies of one mark once per
+-- command. Nothing moves here: each copy is typed where it is used.
+--
+-- Not marked: a value (evaluating it computes nothing), anything that
+-- performs an effect or sits in a do-block (evaluation order is fixed there),
+-- a lambda, a @let@ or argument nothing reads (it is evaluated where it is
+-- written), and a @where@ binding with its own @where@ block.
+markConstants :: ExprI -> MorlocMonad ExprI
+markConstants e0@(ExprI _ (ModE _ es)) = do
+  mapM_ topLevel es
+  return e0
+  where
+    topLevel (ExprI _ (AssE _ e ws)) = do
+      definition Set.empty e ws
+      -- a definition that is not a lambda is evaluated once per command, so
+      -- what its body computes outside any lambda is a constant already
+      let whereNames = Set.fromList [w | ExprI _ (AssE w _ _) <- ws]
+      if isLambda e then return () else outer whereNames True e
+    topLevel _ = return ()
+
+    mark :: ExprI -> MorlocMonad ()
+    mark (ExprI k _) = MM.modify (\st -> st {stateConstantOrigin = Map.insert k k (stateConstantOrigin st)})
+
+    constant locals x = computes x && not (isLambda x) && not (effectful x) && Set.null (freeLocals locals x)
+
+    -- the body and where-block of a definition, whose parameters and
+    -- where-bound names are in scope for each other
+    definition locals e ws = do
+      let params = case e of
+            ExprI _ (LamE vs _) -> vs
+            _ -> []
+          names = [v | ExprI _ (AssE v _ _) <- ws]
+          scope = Set.union locals (Set.fromList (params <> names))
+      expr scope e
+      mapM_ (\w -> case w of
+        ExprI _ (AssE _ rhs [])
+          | constant scope rhs -> mark rhs >> expr scope rhs
+        ExprI _ (AssE _ rhs ws2) -> definition scope rhs ws2
+        _ -> return ()) ws
+
+    expr locals (ExprI _ e) = case e of
+      AppE (ExprI _ (LamE vs body)) args -> do
+        mapM_ (\(v, a) -> do
+                 if constant locals a && Set.member v (referenced body) then mark a else return ()
+                 expr locals a)
+          (zip vs args)
+        expr (Set.union locals (Set.fromList vs)) body
+      LamE vs body -> expr (Set.union locals (Set.fromList vs)) body
+      LetE binds body -> letChain locals binds body
+      -- evaluation order in a do-block is fixed: nothing in it is marked
+      DoBlockE _ -> return ()
+      _ -> mapM_ (expr locals) (AST.exprIChildren e)
+
+    letChain locals [] body = expr locals body
+    letChain locals ((v, rhs) : rest) body = do
+      if constant locals rhs && Set.member v (referenced (ExprI 0 (LetE rest body)))
+        then mark rhs
+        else return ()
+      expr locals rhs
+      letChain (Set.insert v locals) rest body
+
+    -- the part of a constant's body outside every lambda
+    outer locals isBody x@(ExprI _ e)
+      | not isBody && constant locals x = mark x >> expr locals x
+      | otherwise = case e of
+          AppE f args -> mapM_ (outer locals False) (f : args)
+          IfE c t el -> mapM_ (outer locals False) [c, t, el]
+          AnnE y _ -> outer locals isBody y
+          _ -> expr locals x
+
+    -- a computation calls a term
+    computes (ExprI _ e) = case e of
+      AppE (ExprI _ (VarE _ _)) _ -> True
+      _ -> any computes (AST.exprIChildren e)
+
+    isLambda (ExprI _ (LamE _ _)) = True
+    isLambda (ExprI _ (AnnE x _)) = isLambda x
+    isLambda _ = False
+
+    effectful (ExprI _ e) = case e of
+      DoBlockE _ -> True
+      EvalE _ -> True
+      _ -> any effectful (AST.exprIChildren e)
+
+    -- local names a tree reads that it does not bind itself
+    freeLocals locals (ExprI _ e) = case e of
+      VarE _ v | Set.member v locals -> Set.singleton v
+      LamE vs body -> freeLocals (locals `Set.difference` Set.fromList vs) body
+      LetE binds body ->
+        let bound = Set.fromList (map fst binds)
+         in Set.unions (freeLocals (locals `Set.difference` bound) body : map (freeLocals locals . snd) binds)
+      _ -> Set.unions (map (freeLocals locals) (AST.exprIChildren e))
+
+    referenced (ExprI _ e) = case e of
+      VarE _ v -> Set.singleton v
+      _ -> Set.unions (map referenced (AST.exprIChildren e))
+markConstants e = return e
+
+-- | Expand every alias of an arrow, effect or optional type in the declared types
+-- (signatures, class method signatures, annotations, instance heads) and in
+-- the typedef bodies of each module, using the declaring module's scope. See
+-- 'expandStructuralAliases'.
+expandStructuralTypes :: DAG MVar e ExprI -> MorlocMonad (DAG MVar e ExprI)
+expandStructuralTypes d = do
+  GMap _ scopes <- MM.gets stateGeneralTypedefs
+  let expandEntry sc (ps, body, doc, terminal, kind) =
+        (map (fmap (expandStructuralAliases sc)) ps, expandStructuralAliases sc body, doc, terminal, kind)
+  MM.modify (\st -> st {stateGeneralTypedefs =
+    GMap.mapVals (\sc -> Map.map (map (expandEntry sc)) sc) (stateGeneralTypedefs st)})
+  _ <- storeUniversalScopes
+  DAG.mapNodeWithKeyM (\m e -> expandModule (Map.findWithDefault Map.empty m scopes) e) d
+  where
+    expandModule :: Scope -> ExprI -> MorlocMonad ExprI
+    expandModule sc e = do
+      e' <- AST.mapTypeInExprI (expandStructuralAliases sc) e
+      checkExpandable sc e'
+      return (expandClassSigs sc e')
+
+    expandClassSigs :: Scope -> ExprI -> ExprI
+    expandClassSigs sc (ExprI i (ModE m es)) = ExprI i (ModE m (map (expandClassSigs sc) es))
+    expandClassSigs sc (ExprI i (ClsE (Typeclass cs cls vs sigs))) =
+      ExprI i (ClsE (Typeclass cs cls vs [Signature v l (expandEType sc et) | Signature v l et <- sigs]))
+    expandClassSigs _ e = e
+
+    expandEType :: Scope -> EType -> EType
+    expandEType sc et =
+      et { etype = expandStructuralAliases sc (etype et)
+         , econs = Set.map (AST.mapConstraint (expandStructuralAliases sc)) (econs et)
+         }
+
+    -- An alias left in an expanded typedef names an arrow, effect or optional
+    -- type through itself, which has no finite expansion.
+    checkExpandable :: Scope -> ExprI -> MorlocMonad ()
+    checkExpandable sc = AST.checkExprI $ \e -> case e of
+      ExprI i (TypE (ExprTypeE _ v _ body _ _)) ->
+        case structuralAliasesIn sc body of
+          [] -> return ()
+          (w : _) -> MM.throwSourcedError i $
+            "The type" <+> squotes (pretty v) <+> "names a function, effect or optional type"
+            <+> "through the alias" <+> squotes (pretty w)
+            <+> "within its own expansion; a function, effect or optional type alias"
+            <+> "cannot be recursive"
+      _ -> return ()
 
 doM :: (Monad m) => (a -> m ()) -> a -> m a
 doM f x = f x >> return x
@@ -599,7 +759,7 @@ resolveImports d0 =
     -- The definition of an instance does not automatically imply export or make
     -- the values available. The instance is ALWAYS relative to the class
     -- definition (either local or imported).
-    findSymbols (ExprI _ (IstE cls _ _)) = Set.singleton $ ClassSymbol cls
+    findSymbols (ExprI _ (IstE cls _ _ _)) = Set.singleton $ ClassSymbol cls
     findSymbols _ = Set.empty
 
     unSymbol :: Symbol -> Text
@@ -694,7 +854,7 @@ handleBinops d0 = do
       where
         f e@(ExprI _ BopE {}) = resolveBinop m0 e >>= f
         f (ExprI i (ModE m es)) = ModE m <$> mapM f es |>> ExprI i
-        f (ExprI i (IstE cls ts es)) = IstE cls ts <$> mapM f es |>> ExprI i
+        f (ExprI i (IstE cls ctx ts es)) = IstE cls ctx ts <$> mapM f es |>> ExprI i
         f (ExprI i (AssE v e es)) = AssE v <$> f e <*> mapM f es |>> ExprI i
         f (ExprI i (LstE es)) = LstE <$> mapM f es |>> ExprI i
         f (ExprI i (TupE es)) = TupE <$> mapM f es |>> ExprI i
@@ -773,7 +933,7 @@ hoistEvals = DAG.mapNodeM hoistNode
   where
     hoistNode :: ExprI -> MorlocMonad ExprI
     hoistNode (ExprI i (ModE m es)) = ExprI i . ModE m <$> mapM hoistNode es
-    hoistNode (ExprI i (IstE cls ts es)) = ExprI i . IstE cls ts <$> mapM hoistNode es
+    hoistNode (ExprI i (IstE cls ctx ts es)) = ExprI i . IstE cls ctx ts <$> mapM hoistNode es
     hoistNode (ExprI i (AssE v rhs whereDecls)) = do
       rhs' <- hoistBoundary rhs
       whereDecls' <- mapM hoistNode whereDecls
@@ -948,7 +1108,7 @@ collectTags fullDag = do
             Nothing -> config
       MM.modify (\s -> s {stateManifoldConfig = Map.insert i config' (stateManifoldConfig s)})
     f (ExprI _ (ModE _ es)) = mapM_ f es
-    f (ExprI _ (IstE _ _ es)) = mapM_ f es
+    f (ExprI _ (IstE _ _ _ es)) = mapM_ f es
     f (ExprI _ (AssE _ e es)) = mapM_ f (e : es)
     f (ExprI _ (LstE es)) = mapM_ f es
     f (ExprI _ (TupE es)) = mapM_ f es
@@ -1022,8 +1182,7 @@ collectTypes fullDag = do
 -}
 collectUniversalTypes :: DAG MVar a ExprI -> MorlocMonad ()
 collectUniversalTypes dag = do
-  universalGeneralScope <- getUniversalGeneralScope
-  universalConcreteScope <- getUniversalConcreteScope universalGeneralScope
+  (universalGeneralScope, universalConcreteScope) <- storeUniversalScopes
 
   -- Invariant 1: a transparent `type` alias may not carry a per-language
   -- override. A `type` alias chain must resolve to a single concrete type
@@ -1039,13 +1198,16 @@ collectUniversalTypes dag = do
   -- root's instance.
   checkInstanceOnRoot dag universalGeneralScope
 
-  s <- MM.get
-  MM.put
-    ( s
-        { stateUniversalGeneralTypedefs = universalGeneralScope
-        , stateUniversalConcreteTypedefs = universalConcreteScope
-        }
-    )
+-- | Record the universal scopes, the union of every module's scopes.
+storeUniversalScopes :: MorlocMonad (Scope, Map Lang Scope)
+storeUniversalScopes = do
+  universalGeneralScope <- getUniversalGeneralScope
+  universalConcreteScope <- getUniversalConcreteScope universalGeneralScope
+  MM.modify $ \s -> s
+    { stateUniversalGeneralTypedefs = universalGeneralScope
+    , stateUniversalConcreteTypedefs = universalConcreteScope
+    }
+  return (universalGeneralScope, universalConcreteScope)
   where
     getUniversalGeneralScope :: MorlocMonad Scope
     getUniversalGeneralScope = do
@@ -1221,7 +1383,7 @@ checkInstanceOnRoot dag gscope =
     findInstanceTypes :: ExprI -> [(Int, [TypeU])]
     findInstanceTypes = go
       where
-        go (ExprI i (IstE _ ts _)) = [(i, ts)]
+        go (ExprI i (IstE _ _ ts _)) = [(i, ts)]
         go (ExprI _ (ModE _ es)) = concatMap go es
         go _ = []
 
@@ -1334,7 +1496,7 @@ refineKinds dag = do
     collectAllTypeDefParams (ExprI _ (ModE _ es)) = concatMap collectAllTypeDefParams es
     collectAllTypeDefParams (ExprI _ (TypE (ExprTypeE _ v ps _ _ _))) = [(v, ps)]
     collectAllTypeDefParams (ExprI _ (AssE _ e es)) = concatMap collectAllTypeDefParams (e:es)
-    collectAllTypeDefParams (ExprI _ (IstE _ _ es)) = concatMap collectAllTypeDefParams es
+    collectAllTypeDefParams (ExprI _ (IstE _ _ _ es)) = concatMap collectAllTypeDefParams es
     collectAllTypeDefParams _ = []
 
     refineExprKinds :: Map TVar [Kind] -> ExprI -> MorlocMonad ExprI
@@ -1361,8 +1523,8 @@ refineKinds dag = do
       in ExprI i (SigE (Signature v lng et { etype = newType, econs = newCons }))
     promoteLabelKindsExpr (ExprI i (AssE v e es)) =
       ExprI i (AssE v (promoteLabelKindsExpr e) (map promoteLabelKindsExpr es))
-    promoteLabelKindsExpr (ExprI i (IstE c ts es)) =
-      ExprI i (IstE c ts (map promoteLabelKindsExpr es))
+    promoteLabelKindsExpr (ExprI i (IstE c ctx ts es)) =
+      ExprI i (IstE c ctx ts (map promoteLabelKindsExpr es))
     promoteLabelKindsExpr e = e
 
     -- | Given the @enatLabels@ map (var -> arg index) and the function
@@ -1410,8 +1572,8 @@ refineKinds dag = do
       ExprI i (ModE m (map augmentImplicitConstraints es))
     augmentImplicitConstraints (ExprI i (AssE v e es)) =
       ExprI i (AssE v (augmentImplicitConstraints e) (map augmentImplicitConstraints es))
-    augmentImplicitConstraints (ExprI i (IstE c ts es)) =
-      ExprI i (IstE c ts (map augmentImplicitConstraints es))
+    augmentImplicitConstraints (ExprI i (IstE c ctx ts es)) =
+      ExprI i (IstE c ctx ts (map augmentImplicitConstraints es))
     augmentImplicitConstraints e = e
 
     -- Walk a TypeU and collect implicit constraints from the recognised
@@ -1606,13 +1768,22 @@ refineKinds dag = do
         -- constraint expressions like @Keys r@ commit @r@ to the Rec
         -- kind even when the surrounding context didn't already
         -- classify it.
-        asRec (VarU v) = RecVarU v
+        --
+        -- Only a type *variable* may be promoted. A capitalised name is a
+        -- concrete type or an alias, and turning it into a kind variable
+        -- would strip the name an alias needs to be expanded by later --
+        -- @Restrict Cols ['b]@ would become a row variable and generalize
+        -- away. Same lowercase convention that 'collectKindedVarsFromScope'
+        -- uses.
+        isKindVarName (TV n) = not (T.null n) && isLower (T.head n)
+
+        asRec (VarU v) | isKindVarName v = RecVarU v
         asRec t = t
 
-        asList (VarU v) = ListVarU v
+        asList (VarU v) | isKindVarName v = ListVarU v
         asList t = t
 
-        asStr (VarU v) = StrVarU v
+        asStr (VarU v) | isKindVarName v = StrVarU v
         asStr t = t
 
     -- Collect variables that appear in kinded positions according to typedef
@@ -1851,18 +2022,23 @@ refineKinds dag = do
         go (NatSubU a b) =
           let a' = go a; b' = go b
            in case b' of
-                StrLitU f | isRecLike a' -> RecDiffU a' [f]
+                -- Nothing but a record difference can have a Str or a
+                -- list on the right of `-`; you cannot subtract a name
+                -- from a number. So the left operand need not already
+                -- look Rec-kinded -- it may be a type alias, whose name
+                -- carries no kind until it is expanded.
+                StrLitU f -> RecDiffU a' [f]
                 -- `r - f` where f is a Str variable (introduced by an
                 -- f@Str signature label) drops the single key f from r.
                 -- Wrapped as a singleton list so RecDiffListU's reducer
                 -- handles the deferred-then-substituted lifecycle: when
                 -- f gets solved at the call site, the list goes ground
                 -- and reduceRecDiffList strips the key.
-                StrVarU _ | isRecLike a' -> RecDiffListU a' (ListLitU [b'])
+                StrVarU _ -> RecDiffListU a' (ListLitU [b'])
                 -- `r - l` where l is a List drops every key in l from r.
                 -- Routes to RecDiffListU; the new constructor's solver
                 -- reduces ground forms via reduceRecDiffList.
-                _ | isRecLike a' && isListLike b' -> RecDiffListU a' b'
+                _ | isListLike b' -> RecDiffListU a' b'
                 _ | isSetLike a' || isSetLike b' -> SetDiffU a' b'
                 _ -> NatSubU a' b'
         go (NatDivU a b) = NatDivU (go a) (go b)

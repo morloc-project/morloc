@@ -1,0 +1,15 @@
+--- letGuarded ---
+0
+--- letInBranch ---
+100
+--- whereInTry ---
+-1
+--- letInTry ---
+-1
+--- barrierA ---
+8
+--- barrierB ---
+8
+--- doLetAfterEffect ---
+OK
+before

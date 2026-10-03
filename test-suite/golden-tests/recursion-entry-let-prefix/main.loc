@@ -1,0 +1,17 @@
+module main (start)
+
+import root-cpp
+
+-- A recursive helper whose body binds a value before its conditional, and
+-- builds a closure of itself used twice, still returns its result from the
+-- entry other pools call.
+
+source Cpp from "helpers.hpp" ("bump")
+
+bump :: Int -> Int
+
+selfTwice :: Int -> Int -> Int
+selfTwice a = let p = bump a in \b -> (? b <= 0 = p : (\h -> h 0 + h 0) (selfTwice a))
+
+start :: Int -> Int
+start n = selfTwice n 1

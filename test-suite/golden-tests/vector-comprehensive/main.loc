@@ -44,6 +44,7 @@ module main
   , zcShmCpToPy, zcInlineCpToPy
   , zcShmRToPy
   , mlSum, mlLength, mlMap
+  , catLenCpp, catLenPy, catLenR, catHeadPy, catLastPy
   , emptyCross, singleCross
   , underThr, overThr
     -- (9) Literal inputs: morloc source literals + CLI literals
@@ -458,6 +459,27 @@ mlLength = length cppMakeBig
 
 mlMap :: Real
 mlMap = pySumReal10 (map (\x -> x * 2.0) cppMakeReal10)
+
+-- Concatenation must ADD the lengths. `size` is the probe that separates
+-- concatenation from elementwise addition: a sum cannot, because the sum
+-- of pairwise sums equals twice the sum of either side. Each export is
+-- realized in one language, so the three answers must agree.
+catLenCpp :: U64
+catLenCpp = size (cppMakeReal10 ++ cppMakeReal10)
+
+catLenPy :: U64
+catLenPy = size (pyMakeReal10 ++ pyMakeReal10)
+
+catLenR :: U64
+catLenR = size (rMakeReal10 ++ rMakeReal10)
+
+-- The join must not blend the two halves: the first element is the first
+-- element of the left side, the last is the last of the right.
+catHeadPy :: Real
+catHeadPy = .[0] (pyMakeReal10 ++ pyMakeReal10)
+
+catLastPy :: Real
+catLastPy = .[19] (pyMakeReal10 ++ pyMakeReal10)
 
 -- =========================================================================
 -- (7) Edge cases: empty (size 0) and single-element (size 1).

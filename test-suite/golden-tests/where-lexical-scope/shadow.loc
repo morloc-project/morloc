@@ -1,0 +1,21 @@
+module shadow (shadowTopLevelHelper)
+
+import root-py
+
+-- A recursive `where` helper shadows a top-level recursive term of the same
+-- name; the top-level one is still called, through `countDown`. Kept apart
+-- from main.loc because the collision fails the whole module's build.
+go :: Int -> Int
+go m
+  ? m <= 0 = 0
+  : 1 + go (m - 1)
+
+countDown :: Int -> Int
+countDown n = go n
+
+shadowTopLevelHelper :: Int -> Int
+shadowTopLevelHelper n = go n
+  where
+    go m
+      ? m <= 0 = 0
+      : countDown m + go (m - 1)

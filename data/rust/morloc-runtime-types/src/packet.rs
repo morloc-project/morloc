@@ -44,12 +44,16 @@ pub const STREAM_LENGTH_SENTINEL: u64 = u64::MAX;
 pub const MLC_KIND_IFILE: u8 = 0;
 pub const MLC_KIND_ISTREAM: u8 = 1;
 pub const MLC_KIND_OSTREAM: u8 = 2;
+/// A stream whose producer and readers run at once: batches pass through
+/// shared memory, never a file.
+pub const MLC_KIND_CHANNEL: u8 = 3;
 
 pub const fn handle_kind_name(k: u8) -> &'static str {
     match k {
         MLC_KIND_IFILE => "IFile",
         MLC_KIND_ISTREAM => "IStream",
         MLC_KIND_OSTREAM => "OStream",
+        MLC_KIND_CHANNEL => "channel",
         _ => "unknown",
     }
 }
@@ -305,6 +309,20 @@ pub const SUBPACKET_INDEX_HEADER_BYTES: usize = 8;
 pub struct FrameEntry {
     pub uncompressed_size: u64,
     pub compressed_size: u64,
+}
+
+/// The total uncompressed and compressed sizes of `frames`, or an error when
+/// a corrupt index sums past the address space.
+pub fn frame_totals(frames: &[FrameEntry]) -> Result<(usize, usize), MorlocError> {
+    frames.iter().try_fold((0usize, 0usize), |(u, c), f| {
+        match (
+            u.checked_add(crate::width::usize_from_u64(f.uncompressed_size)),
+            c.checked_add(crate::width::usize_from_u64(f.compressed_size)),
+        ) {
+            (Some(u), Some(c)) => Ok((u, c)),
+            _ => Err(MorlocError::Packet("frame index sizes overflow".into())),
+        }
+    })
 }
 
 /// Bytes per frame slot inside the frame-index entry payload
@@ -723,12 +741,16 @@ impl PacketHeader {
         if !header.is_valid() {
             let magic = { header.magic };
             return Err(MorlocError::Packet(format!(
-                "invalid magic: 0x{magic:08x}"
+                "invalid magic: 0x{magic:08x}\n{NOT_A_PACKET}"
             )));
         }
         Ok(header)
     }
 }
+
+/// The hint given with every error that finds bytes not shaped like a packet.
+pub const NOT_A_PACKET: &str =
+    "expected a morloc voidstar packet, but the data is in another format";
 
 // ── Full-packet validity check ──────────────────────────────────────────────
 
@@ -1608,6 +1630,15 @@ mod tests {
     #[test]
     fn test_header_size() {
         assert_eq!(std::mem::size_of::<PacketHeader>(), 32);
+    }
+
+    #[test]
+    fn test_bad_magic_names_expected_format() {
+        let mut bytes = [0u8; 32];
+        bytes[..4].copy_from_slice(b">sp|");
+        let msg = PacketHeader::from_bytes(&bytes).unwrap_err().to_string();
+        assert!(msg.contains("invalid magic: 0x7c70733e"), "{msg}");
+        assert!(msg.contains("expected a morloc voidstar packet"), "{msg}");
     }
 
     #[test]

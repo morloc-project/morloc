@@ -28,6 +28,7 @@ import Morloc.Build.Params
   , renderSalt
   )
 import Morloc.CodeGenerator.Guest.Futhark (backendLinkFlags, resolveFutharkBuild)
+import qualified Morloc.CodeGenerator.Platform as P
 import Morloc.Namespace.Expr (BuildConfig (..))
 
 -- helper to build a nested param map
@@ -118,7 +119,10 @@ linkFlagTests =
     "backendLinkFlags"
     [ testCase "c" $ backendLinkFlags "c" @?= ["-lm"]
     , testCase "multicore" $ backendLinkFlags "multicore" @?= ["-lpthread", "-lm"]
-    , testCase "opencl" $ backendLinkFlags "opencl" @?= ["-lOpenCL", "-lm"]
+    , testCase "opencl" $
+        backendLinkFlags "opencl" @?= case P.hostPlatform of
+          P.Darwin -> ["-framework OpenCL", "-lm"]
+          P.Linux -> ["-lOpenCL", "-lm"]
     , testCase "cuda" $ backendLinkFlags "cuda" @?= ["-lcuda", "-lnvrtc", "-lm"]
     , testCase "hip" $ backendLinkFlags "hip" @?= ["-lamdhip64", "-lhiprtc", "-lm"]
     ]

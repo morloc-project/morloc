@@ -375,26 +375,30 @@ pub unsafe extern "C" fn remote_call(
 ) -> *mut u8 {
     clear_errmsg(errmsg);
 
-    // Use extern C declarations for functions from other modules
-    extern "C" {
-        fn read_schema_from_packet_meta(packet: *const u8, errmsg: *mut *mut c_char) -> *mut c_char;
-        fn parse_schema(schema_str: *const c_char, errmsg: *mut *mut c_char) -> *mut crate::cschema::CSchema;
-        fn free_schema(schema: *mut crate::cschema::CSchema);
-        fn get_morloc_data_packet_value(data: *const u8, schema: *const crate::cschema::CSchema, errmsg: *mut *mut c_char) -> *mut u8;
-        fn hash_voidstar(data: *const c_void, schema: *const crate::cschema::CSchema, seed: u64, errmsg: *mut *mut c_char) -> u64;
-        fn mix(a: u64, b: u64) -> u64;
-        fn mkdir_p(path: *const c_char, errmsg: *mut *mut c_char) -> i32;
-        fn check_cache_packet(key: u64, cache_path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char;
-        fn get_cache_packet(key: u64, cache_path: *const c_char, errmsg: *mut *mut c_char) -> *mut u8;
-        fn put_cache_packet(data: *const u8, schema: *const crate::cschema::CSchema, key: u64, cache_path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char;
-        fn make_cache_filename(hash: u64, cache_path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char;
-        fn make_cache_filename_ext(hash: u64, cache_path: *const c_char, ext: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char;
-        fn make_morloc_remote_call_packet(midx: u32, arg_packets: *const *const u8, nargs: usize, errmsg: *mut *mut c_char) -> *mut u8;
-        fn morloc_packet_size(packet: *const u8, errmsg: *mut *mut c_char) -> usize;
-        fn read_binary_file(filename: *const c_char, file_size: *mut usize, errmsg: *mut *mut c_char) -> *mut u8;
-        fn write_atomic(filename: *const c_char, data: *const u8, size: usize, errmsg: *mut *mut c_char) -> i32;
-        fn get_morloc_data_packet_error_message(data: *const u8, errmsg: *mut *mut c_char) -> *mut c_char;
+    // The remote job may write a stream this pool has batches of in flight.
+    if let Err(e) = crate::stream::drain_before_handoff() {
+        crate::error::set_errmsg(errmsg, &e);
+        return std::ptr::null_mut();
     }
+
+    // Use extern C declarations for functions from other modules
+    use crate::packet_ffi::read_schema_from_packet_meta;
+    use crate::ffi::parse_schema;
+    use crate::ffi::free_schema;
+    use crate::packet_ffi::get_morloc_data_packet_value;
+    use crate::cache::hash_voidstar;
+    use crate::utility::mix;
+    use crate::utility::mkdir_p;
+    use crate::cache::check_cache_packet;
+    use crate::cache::get_cache_packet;
+    use crate::cache::put_cache_packet;
+    use crate::cache::make_cache_filename;
+    use crate::cache::make_cache_filename_ext;
+    use crate::packet_ffi::make_morloc_remote_call_packet;
+    use crate::packet_ffi::morloc_packet_size;
+    use crate::utility::read_binary_file;
+    use crate::utility::write_atomic;
+    use crate::packet_ffi::get_morloc_data_packet_error_message;
 
     let seed = midx as u64;
     let mut err: *mut c_char = ptr::null_mut();
@@ -631,11 +635,7 @@ pub unsafe extern "C" fn remote_call(
 
         let failure = get_morloc_data_packet_error_message(return_packet, &mut err);
         if !failure.is_null() {
-            libc::fprintf(
-                libc::fdopen(libc::STDERR_FILENO, b"w\0".as_ptr() as *const c_char),
-                b"Failed, deleting result %s\n\0".as_ptr() as *const c_char,
-                result_cache_filename,
-            );
+            eprintln!("Failed, deleting result {}", CStr::from_ptr(result_cache_filename).to_string_lossy());
             libc::unlink(result_cache_filename);
             libc::free(failure as *mut c_void);
         }
@@ -695,7 +695,7 @@ macro_rules! goto_cleanup {
         *$errmsg = $err;
         for i in 0..$schemas.len() {
             if !$schemas[i].is_null() {
-                extern "C" { fn free_schema(s: *mut crate::cschema::CSchema); }
+                use crate::ffi::free_schema;
                 free_schema($schemas[i]);
             }
             if !$filenames[i].is_null() { libc::free($filenames[i] as *mut c_void); }

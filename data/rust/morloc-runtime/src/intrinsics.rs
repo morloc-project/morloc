@@ -30,7 +30,7 @@ unsafe fn cstr_arg<'a>(
 /// error, and a caller-supplied error sentinel as the return value.
 /// The body uses `?` to short-circuit any `MorlocError`.
 #[inline]
-unsafe fn wrap_c_call<T, F>(errmsg: *mut *mut c_char, sentinel: T, f: F) -> T
+pub(crate) unsafe fn wrap_c_call<T, F>(errmsg: *mut *mut c_char, sentinel: T, f: F) -> T
 where
     F: FnOnce() -> Result<T, MorlocError>,
 {
@@ -44,33 +44,38 @@ where
     }
 }
 
+/// The compression level a C caller passed, or `None` with `errmsg` set.
+unsafe fn level_or_errmsg(
+    level: i64,
+    errmsg: *mut *mut c_char,
+) -> Option<crate::compression::CompressionLevel> {
+    crate::compression::CompressionLevel::from_int(level)
+        .map_err(|e| set_errmsg(errmsg, &e))
+        .ok()
+}
+
 // ── mlc_save: serialize to msgpack file ────────────────────────────────────
 
-// `level` is accepted for ABI uniformity with mlc_save_voidstar but is
-// ignored here: the msgpack file is not a morloc packet and has no header
-// in which to record a compression algorithm. Compressing the file as a
-// whole is the deferred "compressed JSON/MPK input" workstream.
+// `level` is accepted and range-checked for ABI uniformity with
+// mlc_save_voidstar, but otherwise unused here: the msgpack file is not a
+// morloc packet and has no header in which to record a compression
+// algorithm. Compressing the file as a whole is the deferred "compressed
+// JSON/MPK input" workstream.
 #[no_mangle]
 pub unsafe extern "C" fn mlc_save(
     data: *const c_void,
     schema: *const CSchema,
-    _level: u8,
+    level: i64,
     path: *const c_char,
     errmsg: *mut *mut c_char,
 ) -> i32 {
     clear_errmsg(errmsg);
-
-    extern "C" {
-        fn pack_with_schema(
-            mlc: *const c_void, schema: *const CSchema,
-            mpk: *mut *mut c_char, mpk_size: *mut usize,
-            errmsg: *mut *mut c_char,
-        ) -> i32;
-        fn write_atomic(
-            filename: *const c_char, data: *const u8, size: usize,
-            errmsg: *mut *mut c_char,
-        ) -> i32;
+    if level_or_errmsg(level, errmsg).is_none() {
+        return 1;
     }
+
+    use crate::ffi::pack_with_schema;
+    use crate::utility::write_atomic;
 
     let mut err: *mut c_char = ptr::null_mut();
     let mut mpk: *mut c_char = ptr::null_mut();
@@ -93,27 +98,22 @@ pub unsafe extern "C" fn mlc_save(
 
 // ── mlc_save_json: serialize to JSON file ──────────────────────────────────
 
-// `level` accepted but ignored; see mlc_save for the rationale.
+// `level` is range-checked but otherwise unused; see mlc_save.
 #[no_mangle]
 pub unsafe extern "C" fn mlc_save_json(
     data: *const c_void,
     schema: *const CSchema,
-    _level: u8,
+    level: i64,
     path: *const c_char,
     errmsg: *mut *mut c_char,
 ) -> i32 {
     clear_errmsg(errmsg);
-
-    extern "C" {
-        fn voidstar_to_json_string(
-            data: *const c_void, schema: *const CSchema,
-            errmsg: *mut *mut c_char,
-        ) -> *mut c_char;
-        fn write_atomic(
-            filename: *const c_char, data: *const u8, size: usize,
-            errmsg: *mut *mut c_char,
-        ) -> i32;
+    if level_or_errmsg(level, errmsg).is_none() {
+        return 1;
     }
+
+    use crate::json_ffi::voidstar_to_json_string;
+    use crate::utility::write_atomic;
 
     let mut err: *mut c_char = ptr::null_mut();
     let json = voidstar_to_json_string(data, schema, &mut err);
@@ -181,22 +181,11 @@ impl VoidstarDataPacketParts {
 unsafe fn build_voidstar_data_packet_parts(
     data: *const c_void,
     schema: *const CSchema,
-    level: u8,
+    clvl: crate::compression::CompressionLevel,
     errmsg: *mut *mut c_char,
 ) -> Option<VoidstarDataPacketParts> {
-    extern "C" {
-        fn flatten_voidstar_to_buffer(
-            data: *const c_void, schema: *const CSchema,
-            out_buf: *mut *mut u8, out_size: *mut usize,
-            errmsg: *mut *mut c_char,
-        ) -> i32;
-    }
+    use crate::packet_ffi::flatten_voidstar_to_buffer;
 
-    // Resolve level first so a bad value aborts before we allocate.
-    let clvl = match crate::compression::CompressionLevel::from_u8(level) {
-        Ok(lvl) => lvl,
-        Err(e) => { set_errmsg(errmsg, &e); return None; }
-    };
 
     let mut blob: *mut u8 = ptr::null_mut();
     let mut blob_size: usize = 0;
@@ -257,12 +246,7 @@ unsafe fn write_data_packet_parts_to_fd(
     fd: libc::c_int,
     parts: &VoidstarDataPacketParts,
 ) -> Result<(), *mut c_char> {
-    extern "C" {
-        fn write_binary_fd(
-            fd: i32, buf: *const c_char, count: usize,
-            errmsg: *mut *mut c_char,
-        ) -> i32;
-    }
+    use crate::utility::write_binary_fd;
     let mut err: *mut c_char = ptr::null_mut();
     if write_binary_fd(fd, parts.hdr_bytes.as_ptr() as *const c_char, parts.hdr_bytes.len(), &mut err) != 0 {
         return Err(err);
@@ -341,14 +325,16 @@ static TEMP_OWNER_COUNTER: std::sync::atomic::AtomicU64 =
 
 /// The dispatch this thread is running, or 0 on a thread the runtime did not
 /// start (a thread a manifold spawned).
-const TEMP_OWNER_NONE: u64 = 0;
+pub(crate) const TEMP_OWNER_NONE: u64 = 0;
 
 thread_local! {
     static CURRENT_TEMP_OWNER: std::cell::Cell<u64> =
         const { std::cell::Cell::new(TEMP_OWNER_NONE) };
 }
 
-fn current_temp_owner() -> u64 {
+/// The dispatch this thread is running. Shared with the cell registry,
+/// which scopes its entries to a call the same way.
+pub(crate) fn current_temp_owner() -> u64 {
     CURRENT_TEMP_OWNER.with(|c| c.get())
 }
 
@@ -468,10 +454,12 @@ pub unsafe extern "C" fn mlc_unlink_tmp(
 /// moment the file is taken out of the registry.
 pub fn end_dispatch(call_id: u64, prev: u64) {
     CURRENT_TEMP_OWNER.with(|c| c.set(prev));
+    let mut last_dispatch = false;
     let doomed: Vec<std::path::PathBuf> = match TEMP_REGISTRY.lock() {
         Ok(mut reg) => {
             reg.active = reg.active.saturating_sub(1);
-            let last = reg.active == 0;
+            last_dispatch = reg.active == 0;
+            let last = last_dispatch;
             let mut out = Vec::new();
             reg.entries.retain(|e| {
                 let collect =
@@ -488,6 +476,7 @@ pub fn end_dispatch(call_id: u64, prev: u64) {
     for p in doomed {
         let _ = std::fs::remove_file(&p);
     }
+    crate::cell::sweep_dispatch(call_id, last_dispatch);
 }
 
 // ── mlc_save_voidstar: serialize to binary voidstar packet file ────────────
@@ -495,13 +484,15 @@ pub fn end_dispatch(call_id: u64, prev: u64) {
 pub unsafe extern "C" fn mlc_save_voidstar(
     data: *const c_void,
     schema: *const CSchema,
-    level: u8,
+    level: i64,
     path: *const c_char,
     errmsg: *mut *mut c_char,
 ) -> i32 {
     clear_errmsg(errmsg);
 
-    let parts = match build_voidstar_data_packet_parts(data, schema, level, errmsg) {
+    // Resolve the level first so a bad value aborts before we allocate.
+    let Some(clvl) = level_or_errmsg(level, errmsg) else { return 1 };
+    let parts = match build_voidstar_data_packet_parts(data, schema, clvl, errmsg) {
         Some(p) => p,
         None => return 1,
     };
@@ -528,7 +519,13 @@ pub unsafe extern "C" fn mlc_save_voidstar(
         return 1;
     }
 
-    libc::fsync(fd);
+    if crate::utility::sync_file_data(fd) != 0 {
+        let e = std::io::Error::last_os_error();
+        libc::close(fd);
+        libc::unlink(tmp_buf.as_ptr() as *const c_char);
+        set_errmsg(errmsg, &MorlocError::Io(e));
+        return 1;
+    }
     libc::close(fd);
 
     if libc::rename(tmp_buf.as_ptr() as *const c_char, path) != 0 {
@@ -556,7 +553,11 @@ pub unsafe extern "C" fn mlc_write_voidstar_data_packet_to_fd(
 ) -> i64 {
     clear_errmsg(errmsg);
 
-    let parts = match build_voidstar_data_packet_parts(data, schema, level, errmsg) {
+    let clvl = match crate::compression::CompressionLevel::from_u8(level) {
+        Ok(l) => l,
+        Err(e) => { set_errmsg(errmsg, &e); return -1; }
+    };
+    let parts = match build_voidstar_data_packet_parts(data, schema, clvl, errmsg) {
         Some(p) => p,
         None => return -1,
     };
@@ -579,12 +580,9 @@ pub unsafe extern "C" fn mlc_load(
 ) -> *mut c_void {
     clear_errmsg(errmsg);
 
+    use crate::utility::file_exists;
+    use crate::utility::read_binary_file;
     extern "C" {
-        fn file_exists(filename: *const c_char) -> bool;
-        fn read_binary_file(
-            filename: *const c_char, file_size: *mut usize,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
         fn load_morloc_data_file(
             path: *const c_char, data: *mut u8, data_size: usize,
             schema: *const CSchema, errmsg: *mut *mut c_char,
@@ -703,12 +701,7 @@ pub unsafe extern "C" fn mlc_show(
 ) -> *mut c_char {
     clear_errmsg(errmsg);
 
-    extern "C" {
-        fn voidstar_to_json_string(
-            data: *const c_void, schema: *const CSchema,
-            errmsg: *mut *mut c_char,
-        ) -> *mut c_char;
-    }
+    use crate::json_ffi::voidstar_to_json_string;
 
     voidstar_to_json_string(data, schema, errmsg)
 }
@@ -723,12 +716,7 @@ pub unsafe extern "C" fn mlc_read(
 ) -> *mut c_void {
     clear_errmsg(errmsg);
 
-    extern "C" {
-        fn read_json_with_schema(
-            dest: *mut u8, json: *mut c_char, schema: *const CSchema,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
-    }
+    use crate::json_ffi::read_json_with_schema;
 
     let json_copy = libc::strdup(json_str);
     if json_copy.is_null() {
@@ -760,17 +748,8 @@ unsafe fn _write_voidstar_binary_rust(
 ) -> isize {
     clear_errmsg(errmsg);
 
-    extern "C" {
-        fn flatten_voidstar_to_buffer(
-            data: *const c_void, schema: *const CSchema,
-            out_buf: *mut *mut u8, out_size: *mut usize,
-            errmsg: *mut *mut c_char,
-        ) -> i32;
-        fn write_binary_fd(
-            fd: i32, buf: *const c_char, count: usize,
-            errmsg: *mut *mut c_char,
-        ) -> i32;
-    }
+    use crate::packet_ffi::flatten_voidstar_to_buffer;
+    use crate::utility::write_binary_fd;
 
     let mut err: *mut c_char = ptr::null_mut();
     let mut blob: *mut u8 = ptr::null_mut();
@@ -926,6 +905,64 @@ pub unsafe extern "C" fn mlc_open_ostream(
         }
     }
 }
+/// Open a channel for values of the list schema `schema_str`: one handle,
+/// written by its producer as an OStream and read by any pool as an
+/// IStream. Returns the handle, or -1 with `errmsg` set.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_open_channel(
+    schema_str: *const c_char,
+    errmsg: *mut *mut c_char,
+) -> i64 {
+    clear_errmsg(errmsg);
+    if schema_str.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other("mlc_open_channel: null schema".into()));
+        return -1;
+    }
+    let s = match CStr::from_ptr(schema_str).to_str() {
+        Ok(s) => s,
+        Err(_) => {
+            set_errmsg(errmsg, &MorlocError::Other("mlc_open_channel: schema is not valid UTF-8".into()));
+            return -1;
+        }
+    };
+    match crate::stream::shared_open_channel(s) {
+        Ok(h) => h,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            -1
+        }
+    }
+}
+
+/// Whether `handle` is an open channel. A pool that sizes its workers by
+/// how many are blocked counts a channel read or write as blocking.
+#[no_mangle]
+pub extern "C" fn mlc_is_channel(handle: i64) -> bool {
+    crate::stream::shared_is_channel(handle)
+}
+
+/// Settle a channel whose readers are done with it; see
+/// `shared_settle_channel`. On a failure a reader was handed, returns false
+/// with the producer's message, unchanged, in `errmsg`.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_settle(handle: i64, errmsg: *mut *mut c_char) -> bool {
+    clear_errmsg(errmsg);
+    match crate::stream::shared_settle_channel(handle) {
+        Ok(()) => true,
+        Err(MorlocError::Other(msg)) => {
+            match std::ffi::CString::new(msg.replace('\0', " ")) {
+                Ok(c) => *errmsg = libc::strdup(c.as_ptr()),
+                Err(_) => set_errmsg(errmsg, &MorlocError::Other("the stream's producer failed".into())),
+            }
+            false
+        }
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            false
+        }
+    }
+}
+
 
 /// `@open path :: <IO> (IStream T)` -- typed open. Like `mlc_open_ostream`
 /// the codegen threads the element schema string for `T`. For a real file
@@ -1139,6 +1176,13 @@ pub struct IFileWalkArg {
     pub value: i64,
 }
 
+impl IFileWalkArg {
+    /// A present or absent argument.
+    pub fn opt(v: Option<i64>) -> IFileWalkArg {
+        IFileWalkArg { has: v.is_some() as u8, _pad: [0u8; 7], value: v.unwrap_or(0) }
+    }
+}
+
 /// Unified IFile pattern walker. The `path` string encodes a single
 /// walk-step chain consumed by `crate::stream::ifile_walk`:
 ///
@@ -1212,6 +1256,34 @@ pub unsafe extern "C" fn mlc_next(
     }
 }
 
+/// Read the next frame (sub-packet) of a file-backed IStream as a fresh SHM
+/// Array<a>. At the end of the stream returns null and sets `*eof` to 1; an
+/// empty frame is an empty Array with `*eof` 0. Used by `@replay`.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_next_frame(
+    handle: i64,
+    eof: *mut i32,
+    errmsg: *mut *mut c_char,
+) -> *mut c_void {
+    clear_errmsg(errmsg);
+    if !eof.is_null() {
+        *eof = 0;
+    }
+    match crate::stream::shared_next_frame(handle) {
+        Ok(Some(p)) => p as *mut c_void,
+        Ok(None) => {
+            if !eof.is_null() {
+                *eof = 1;
+            }
+            ptr::null_mut()
+        }
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            ptr::null_mut()
+        }
+    }
+}
+
 /// `@streamLayout` on an IFile handle: return an AbsPtr to a freshly
 /// allocated SHM voidstar `Array<Tuple3<U64,U64,U64>>` holding one
 /// `(element_offset, element_count, uncompressed_size)` triple per
@@ -1273,13 +1345,16 @@ pub unsafe extern "C" fn mlc_stream_layout(
 /// flush, then resume buffering in the fresh buffer.
 #[no_mangle]
 pub unsafe extern "C" fn mlc_write(
-    level: u8,
+    level: i64,
     handle: i64,
     payload_voidstar: *const c_void,
     errmsg: *mut *mut c_char,
 ) -> i32 {
     clear_errmsg(errmsg);
-    match crate::stream::shared_write_subpacket(handle, level, payload_voidstar as crate::shm::AbsPtr) {
+    let written = crate::compression::CompressionLevel::from_int(level).and_then(|l| {
+        crate::stream::shared_write_subpacket(handle, l, payload_voidstar as crate::shm::AbsPtr)
+    });
+    match written {
         Ok(()) => 0,
         // Broken pipe is an <IO> condition, not a recoverable error: return
         // the reserved code with NO errmsg so the C++ shim throws a distinct
@@ -1424,7 +1499,7 @@ pub unsafe extern "C" fn mlc_concat(
     }
 }
 
-/// `@stream :: IFile a -> <IO> IStream a`: open a fresh IStream slot
+/// `@stream :: IFile [a] -> <IO> IStream a`: open a fresh IStream slot
 /// bound to the same path as the source IFile.
 #[no_mangle]
 pub unsafe extern "C" fn mlc_stream(
@@ -1628,13 +1703,13 @@ pub unsafe extern "C" fn mlc_write_stream_field(
                 }
             };
             sh::write_path_suballoc(cur, path_bytes);
-            sh::write_field(field_ptr, sh::TAG_PATH, rel as u64);
+            sh::write_field(field_ptr, sh::TAG_PATH, sh::path_payload(rel));
             *cursor = cur.add(sh::path_suballoc_size(path_bytes.len()))
                 as *mut c_void;
             0
         }
         sh::TAG_HANDLE => {
-            sh::write_field(field_ptr, sh::TAG_HANDLE, handle as u64);
+            sh::write_field(field_ptr, sh::TAG_HANDLE, sh::handle_payload(handle));
             0
         }
         _ => {
@@ -1765,11 +1840,10 @@ pub unsafe extern "C" fn mlc_write_handles_voidstar(
 #[no_mangle]
 pub unsafe extern "C" fn mlc_read_stream_field(
     field_ptr: *const c_void,
-    base_ptr: *const c_void,
+    space: crate::voidstar::MorlocSpace,
     kind: u8,
     errmsg: *mut *mut c_char,
 ) -> i64 {
-    use crate::shm;
     use morloc_runtime_types::stream_handle as sh;
     clear_errmsg(errmsg);
     if field_ptr.is_null() {
@@ -1783,45 +1857,35 @@ pub unsafe extern "C" fn mlc_read_stream_field(
     let payload = sh::read_payload(field_bytes);
     match tag {
         sh::TAG_PATH => {
-            if payload == sh::RELNULL_PAYLOAD {
-                set_errmsg(errmsg, &MorlocError::Other(
-                    "mlc_read_stream_field: path-form field has RELNULL payload".into(),
-                ));
-                return -1;
-            }
-            // Resolve the suballoc {size: u64, bytes...}. With a non-NULL
-            // base_ptr the payload is a payload-relative offset (used
-            // when reading from mmap'd file regions); otherwise it's an
-            // SHM-relative relptr.
-            let suballoc_abs: *const u8 = if base_ptr.is_null() {
-                match shm::rel2abs(payload as shm::RelPtr) {
-                    Ok(p) => p as *const u8,
-                    Err(e) => {
-                        set_errmsg(errmsg, &e);
-                        return -1;
-                    }
+            // The suballoc {size: u64, bytes...}, checked against `space`.
+            let block = match crate::voidstar::path_suballoc(&space, payload) {
+                Ok(Some(block)) => block,
+                Ok(None) => {
+                    set_errmsg(errmsg, &MorlocError::Other(
+                        "mlc_read_stream_field: path-form field has RELNULL payload".into(),
+                    ));
+                    return -1;
                 }
-            } else {
-                (base_ptr as *const u8).add(payload as usize)
+                Err(e) => {
+                    set_errmsg(errmsg, &e);
+                    return -1;
+                }
             };
-            let path_len = sh::read_path_size(suballoc_abs);
-            const PATH_MAX: u64 = 4096;
-            if path_len == 0 {
+            let path_bytes = &block[8..];
+            const PATH_MAX: usize = 4096;
+            if path_bytes.is_empty() {
                 set_errmsg(errmsg, &MorlocError::Other(
                     "mlc_read_stream_field: empty path".into(),
                 ));
                 return -1;
             }
-            if path_len >= PATH_MAX {
+            if path_bytes.len() >= PATH_MAX {
                 set_errmsg(errmsg, &MorlocError::Other(format!(
                     "mlc_read_stream_field: path too long ({} bytes, max {})",
-                    path_len, PATH_MAX - 1,
+                    path_bytes.len(), PATH_MAX - 1,
                 )));
                 return -1;
             }
-            let path_bytes = std::slice::from_raw_parts(
-                suballoc_abs.add(8), path_len as usize,
-            );
             let path_str = match std::str::from_utf8(path_bytes) {
                 Ok(s) => s,
                 Err(_) => {
@@ -1848,7 +1912,7 @@ pub unsafe extern "C" fn mlc_read_stream_field(
             // crossed a nexus boundary it shouldn't have (or the slot
             // was reused), and we surface a generation-mismatch error
             // instead of returning a wild value.
-            let handle = payload as i64;
+            let handle = sh::payload_handle(payload);
             let (gen_claim, slot_idx) = crate::stream::unpack_handle(handle);
             let slot = match crate::stream::slot_ref(slot_idx) {
                 Some(s) => s,
@@ -1891,11 +1955,11 @@ pub unsafe extern "C" fn mlc_read_stream_field(
 #[no_mangle]
 pub unsafe extern "C" fn mlc_read_handle_voidstar(
     arr: *const c_void,
-    base_ptr: *const c_void,
+    space: crate::voidstar::MorlocSpace,
     kind: u8,
     errmsg: *mut *mut c_char,
 ) -> i64 {
-    mlc_read_stream_field(arr, base_ptr, kind, errmsg)
+    mlc_read_stream_field(arr, space, kind, errmsg)
 }
 
 // ── stdio-server bridge FFI ────────────────────────────────────────────────

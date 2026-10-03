@@ -1,0 +1,6 @@
+6
+9
+error: argument #1 (format csv, path bad.csv): not a number: x
+exit 1
+[3,3,2,36]
+[2,2,2,21]

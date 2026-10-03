@@ -55,6 +55,8 @@ mpk bytes: 10
 b0;a0;
 b1;a1;
 b2;a2;
+=== cpp: fold (one accumulator, not a gathered list) ===
+total=108
 === cpp: default @collect (no formatter) ===
 3
 1
@@ -122,6 +124,8 @@ mpk bytes: 10
 b0;a0;
 b1;a1;
 b2;a2;
+=== py: fold (one accumulator, not a gathered list) ===
+total=108
 === py: default @collect (no formatter) ===
 3
 1
@@ -189,6 +193,8 @@ mpk bytes: 10
 b0;a0;
 b1;a1;
 b2;a2;
+=== r: fold (one accumulator, not a gathered list) ===
+total=108
 === r: default @collect (no formatter) ===
 3
 1
@@ -214,5 +220,6 @@ Return:
   -T/--tag-off:  [Int]
   -r/--text:     Str    (raw bytes)
   -R/--text-off: Str    (raw bytes)
+  -F/--folded:   Str    (raw bytes)
 === mlcp_ hidden from top-level --help (expect 0) ===
 0

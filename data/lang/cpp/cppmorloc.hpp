@@ -297,20 +297,29 @@ auto to_vector(const Container& c) {
 absptr_t rel2abs_cpp(relptr_t ptr);
 relptr_t abs2rel_cpp(absptr_t ptr);
 
-// Resolve a relative pointer.
-//
-// When `base_ptr` is non-null the relptr is a buffer-relative offset
-// into a malloc'd inline packet payload (the inline MESG+VOIDSTAR
-// path); resolution is a single add. Otherwise we route through the
-// inline `resolve_relptr` in morloc.h which consults the per-process
-// exposed volume table for a lock-free fast path, falling through to
-// the SHM FFI only when the slot has not yet been populated in this
-// process.
-static inline void* resolve_relptr_cpp(relptr_t relptr, const void* base_ptr) {
-    if (base_ptr) {
-        return (char*)base_ptr + relptr_offset_bits(relptr);
+// Resolve `relptr` to `extent` readable bytes in `space`, throwing when the
+// region is not there (see resolve_region in morloc.h).
+static inline void* resolve_region_cpp(relptr_t relptr, size_t extent, morloc_space_t space) {
+    char* err = NULL;
+    void* p = resolve_region(relptr, extent, space, &err);
+    if (p == NULL) {
+        std::string msg = err ? err : "relptr did not resolve";
+        free(err);
+        throw std::runtime_error(msg);
     }
-    return resolve_relptr(relptr, NULL, NULL);
+    return p;
+}
+
+// Resolve the data of an array of `n` elements of `width` bytes.
+static inline void* resolve_array_cpp(relptr_t relptr, size_t n, size_t width, morloc_space_t space) {
+    char* err = NULL;
+    void* p = resolve_array(relptr, n, width, space, &err);
+    if (p == NULL) {
+        std::string msg = err ? err : "relptr did not resolve";
+        free(err);
+        throw std::runtime_error(msg);
+    }
+    return p;
 }
 bool shfree_cpp(absptr_t ptr);
 Schema* parse_schema_cpp(const char* schema_ptr);
@@ -380,49 +389,6 @@ std::vector<char> mpk_pack(const T& data, const std::string& schema_str);
 template<typename T>
 T mpk_unpack(const std::vector<char>& packed_data, const std::string& schema_str);
 
-
-// ============================================================
-// schema_alignment (C++ mirror of the C function in schema.c)
-// ============================================================
-
-inline size_t schema_alignment_cpp(const Schema* schema) {
-    switch (schema->type) {
-        case MORLOC_NIL: case MORLOC_BOOL: case MORLOC_SINT8: case MORLOC_UINT8: return 1;
-        case MORLOC_SINT16: case MORLOC_UINT16: return 2;
-        case MORLOC_SINT32: case MORLOC_UINT32: case MORLOC_FLOAT32: return 4;
-        case MORLOC_SINT64: case MORLOC_UINT64: case MORLOC_FLOAT64:
-        case MORLOC_STRING: case MORLOC_ARRAY:
-        case MORLOC_INT: return alignof(size_t);
-        case MORLOC_TUPLE: case MORLOC_MAP: {
-            size_t max_align = 1;
-            for (size_t i = 0; i < schema->size; i++) {
-                size_t a = schema_alignment_cpp(schema->parameters[i]);
-                if (a > max_align) max_align = a;
-            }
-            return max_align;
-        }
-        case MORLOC_OPTIONAL: return schema_alignment_cpp(schema->parameters[0]);
-        default: return alignof(size_t);
-    }
-}
-
-// SIMD/BLAS-friendly alignment for Array data buffers when the element type
-// is a primitive numeric. Fixed 64-byte constant in the wire format spec --
-// covers SSE/AVX/AVX-512 + cache lines on every common architecture, and the
-// per-array slack overhead (<= 63 bytes) is negligible for large arrays.
-#define MORLOC_ARRAY_DATA_ALIGN 64
-
-inline bool is_primitive_numeric_cpp(const Schema* schema) {
-    switch (schema->type) {
-        case MORLOC_SINT8:  case MORLOC_SINT16: case MORLOC_SINT32: case MORLOC_SINT64:
-        case MORLOC_UINT8:  case MORLOC_UINT16: case MORLOC_UINT32: case MORLOC_UINT64:
-        case MORLOC_FLOAT32: case MORLOC_FLOAT64:
-            return true;
-        default:
-            return false;
-    }
-}
-
 // True iff a std::vector<T> with this element schema is byte-identical to the
 // voidstar element layout, so the whole data region can be bulk-copied. Both
 // T's numeric KIND (float / signed-int / unsigned-int) AND width must match the
@@ -445,17 +411,6 @@ inline bool vector_is_bulk_copyable(const Schema* elem) {
         return false;
     }
 }
-
-// Alignment for an Array's element data buffer in SHM. For primitive numerics
-// we bump to MORLOC_ARRAY_DATA_ALIGN (SIMD/BLAS); otherwise use the element's
-// natural alignment.
-inline size_t array_data_alignment_cpp(const Schema* elem) {
-    size_t natural = schema_alignment_cpp(elem);
-    return is_primitive_numeric_cpp(elem)
-        ? (MORLOC_ARRAY_DATA_ALIGN > natural ? MORLOC_ARRAY_DATA_ALIGN : natural)
-        : natural;
-}
-
 
 #define MORLOC_VARIANT_PAYLOAD 8
 
@@ -647,7 +602,11 @@ void mlc_leaf_write(void* dest, void** cursor, const Schema* schema, const T& da
         // A morloc enum is its one-byte wire tag; a host enum standing in
         // for an integer is written at the integer's width.
         if (schema->type == MORLOC_ENUM) {
-            *((uint8_t*)dest) = static_cast<uint8_t>(data);
+            auto tag = static_cast<std::underlying_type_t<T>>(data);
+            if (!(tag >= 0 && static_cast<size_t>(tag) < schema->size)) {
+                throw std::runtime_error("an enum tag names no constructor of its type");
+            }
+            *((uint8_t*)dest) = static_cast<uint8_t>(tag);
         } else {
             mlc_leaf_write(dest, cursor, schema, static_cast<std::underlying_type_t<T>>(data));
         }
@@ -674,7 +633,11 @@ void mlc_leaf_write(void* dest, void** cursor, const Schema* schema, const T& da
             case MORLOC_UINT16:  *(uint16_t*)dest = check_range_narrow<uint16_t>(data, "U16"); break;
             case MORLOC_UINT32:  *(uint32_t*)dest = check_range_narrow<uint32_t>(data, "U32"); break;
             case MORLOC_UINT64:  *(uint64_t*)dest = check_range_narrow<uint64_t>(data, "U64"); break;
-            case MORLOC_FLOAT32: *(float*)dest    = static_cast<float>(data);    break;
+            case MORLOC_FLOAT32:
+                if (morloc_f32_from_f64(static_cast<double>(data), (float*)dest) != 0) {
+                    throw std::overflow_error("value out of range for F32");
+                }
+                break;
             case MORLOC_FLOAT64: *(double*)dest   = static_cast<double>(data);   break;
             case MORLOC_INT: {
                 // Inline BigInt: [size=1, value] -- no allocation, no relptr
@@ -683,7 +646,24 @@ void mlc_leaf_write(void* dest, void** cursor, const Schema* schema, const T& da
                 fields[1] = check_range_narrow<int64_t>(data, "Int");
                 break;
             }
-            default: *(T*)dest = data; break;
+            // A bool or an enum tag is one byte, whatever the width of the
+            // number standing in for it, and only its valid values fit.
+            case MORLOC_BOOL:
+                if (!(data == 0 || data == 1)) {
+                    throw std::runtime_error("a Bool must be 0 or 1");
+                }
+                *(uint8_t*)dest = static_cast<uint8_t>(data);
+                break;
+            case MORLOC_ENUM:
+                if (!(data >= 0 && static_cast<size_t>(data) < schema->size)) {
+                    throw std::runtime_error("an enum tag names no constructor of its type");
+                }
+                *(uint8_t*)dest = static_cast<uint8_t>(data);
+                break;
+            case MORLOC_NIL: case MORLOC_STRING: case MORLOC_ARRAY: case MORLOC_TUPLE:
+            case MORLOC_MAP: case MORLOC_OPTIONAL: case MORLOC_TABLE: case MORLOC_RECUR:
+            case MORLOC_CLOSURE: case MORLOC_VARIANT:
+                throw std::runtime_error("cannot write a number where the schema holds a non-numeric type");
         }
     }
 }
@@ -691,7 +671,7 @@ void mlc_leaf_write(void* dest, void** cursor, const Schema* schema, const T& da
 // Read a leaf at schema width and convert to the C++ type, so a narrow
 // concrete type (e.g. `int` for Int) works with a wider schema.
 template<typename T>
-T mlc_leaf_read(const Schema* schema, const void* data, const void* base_ptr) {
+T mlc_leaf_read(const Schema* schema, const void* data, morloc_space_t space) {
     if (schema->type == MORLOC_NIL) {
         return T{};
     }
@@ -701,7 +681,7 @@ T mlc_leaf_read(const Schema* schema, const void* data, const void* base_ptr) {
     } else if constexpr (std::is_same_v<T, std::string>) {
         const Array* array = (const Array*)data;
         if(array->size > 0){
-            return std::string((char*)resolve_relptr_cpp(array->data, base_ptr), array->size);
+            return std::string((char*)resolve_array_cpp(array->data, array->size, 1, space), array->size);
         }
         return std::string("");
     } else if constexpr (std::is_same_v<T, std::nullptr_t>) {
@@ -710,7 +690,7 @@ T mlc_leaf_read(const Schema* schema, const void* data, const void* base_ptr) {
         if (schema->type == MORLOC_ENUM) {
             return static_cast<T>(*(const uint8_t*)data);
         }
-        return static_cast<T>(mlc_leaf_read<std::underlying_type_t<T>>(schema, data, base_ptr));
+        return static_cast<T>(mlc_leaf_read<std::underlying_type_t<T>>(schema, data, space));
     } else {
         switch(schema->type) {
             case MORLOC_IFILE:
@@ -721,7 +701,7 @@ T mlc_leaf_read(const Schema* schema, const void* data, const void* base_ptr) {
                              : (schema->type == MORLOC_OSTREAM) ? MLC_KIND_OSTREAM
                              :                                    MLC_KIND_ISTREAM;
                 int64_t handle = mlc_read_handle_voidstar(
-                    data, base_ptr, kind, &err);
+                    data, space, kind, &err);
                 if (err || handle < 0) {
                     std::string msg = err ? err : "mlc_read_handle_voidstar failed";
                     free(err);
@@ -779,8 +759,14 @@ T mlc_leaf_read(const Schema* schema, const void* data, const void* base_ptr) {
                     throw std::overflow_error(oss.str());
                 }
             }
-            default: return *(const T*)data;
+            case MORLOC_BOOL: return static_cast<T>(*(const uint8_t*)data == 1);
+            case MORLOC_ENUM: return static_cast<T>(*(const uint8_t*)data);
+            case MORLOC_NIL: case MORLOC_STRING: case MORLOC_ARRAY: case MORLOC_TUPLE:
+            case MORLOC_MAP: case MORLOC_OPTIONAL: case MORLOC_TABLE: case MORLOC_RECUR:
+            case MORLOC_CLOSURE: case MORLOC_VARIANT:
+                break;
         }
+        throw std::runtime_error("cannot read a number where the schema holds a non-numeric type");
     }
 }
 
@@ -928,8 +914,7 @@ struct MlcSizeWalk {
     template<typename T>
     void variant_payload(const Schema* schema, const Schema* arm, const T& payload) {
         const Schema* a = resolve_recur(arm);
-        size_t align = schema_alignment_cpp(a);
-        if (align == 0) align = 1;
+        size_t align = a->alignment;
         total += static_cast<int64_t>(schema->width + (align - 1));
         child(a, payload, false);
     }
@@ -993,8 +978,7 @@ struct MlcWriteWalk {
 
     // Take an aligned slot of `inner`'s width from the cursor.
     void* alloc(const Schema* inner) {
-        size_t align = schema_alignment_cpp(inner);
-        if (align == 0) align = 1;
+        size_t align = inner->alignment;
         *cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*cursor), align));
         void* slot = *cursor;
         *cursor = static_cast<char*>(slot) + inner->width;
@@ -1034,11 +1018,11 @@ struct MlcReadWalk {
     std::vector<Frame> stack;
     Frame cur;
     std::vector<std::shared_ptr<void>> keep;
-    const void* base_ptr;
+    morloc_space_t space;
     MlcFlatSet flats;
 
-    MlcReadWalk(const Schema* root, const void* base)
-        : base_ptr(base), flats(root) {}
+    MlcReadWalk(const Schema* root, morloc_space_t sp)
+        : space(sp), flats(root) {}
 
     bool flat(const Schema* schema) const {
         return flats.flat(schema);
@@ -1060,7 +1044,7 @@ struct MlcReadWalk {
     template<typename T>
     void child(const Schema* schema, const void* data, T* out) {
         if constexpr (mlc_is_leaf_v<T>) {
-            *out = mlc_leaf_read<T>(resolve_recur(schema), data, base_ptr);
+            *out = mlc_leaf_read<T>(resolve_recur(schema), data, space);
         } else if (flat(schema)) {
             MlcNode<T>::read_step(*this, schema, data, out, 0);
         } else {
@@ -1079,7 +1063,7 @@ struct MlcReadWalk {
     template<typename T>
     void variant_payload(const Schema* arm, const void* data, T* out) {
         relptr_t rel = *(const relptr_t*)((const char*)data + MORLOC_VARIANT_PAYLOAD);
-        child(arm, resolve_relptr_cpp(rel, base_ptr), out);
+        child(arm, resolve_region_cpp(rel, arm->width, space), out);
     }
 
     void run() {
@@ -1143,15 +1127,28 @@ void* to_voidstar(const Schema* schema, const T& data){
 }
 
 template<typename T>
-T from_voidstar(const Schema* schema, const void* data, T* = nullptr, const void* base_ptr = nullptr) {
+T from_voidstar(const Schema* schema, const void* data, T* = nullptr, morloc_space_t space = morloc_shm_space()) {
     if(data == NULL){
         throw std::runtime_error("Void error in from_voidstar");
     }
     T out{};
-    MlcReadWalk w(schema, base_ptr);
+    MlcReadWalk w(schema, space);
     w.child(schema, data, &out);
     w.run();
     return out;
+}
+
+// Read the value an uncompressed inline (MESG+VOIDSTAR) packet carries,
+// where it lies in the packet; every relptr is checked against the payload.
+template<typename T>
+T mlc_read_inline_packet(const uint8_t* packet, const Schema* schema) {
+    const morloc_packet_header_t* header = (const morloc_packet_header_t*)packet;
+    const uint8_t* payload = packet + sizeof(morloc_packet_header_t) + header->offset;
+    if ((size_t)header->length < schema->width) {
+        throw std::runtime_error("an inline payload is smaller than the value it carries");
+    }
+    return from_voidstar(schema, (const void*)payload, (T*)nullptr,
+                         morloc_payload_space(payload, (size_t)header->length));
 }
 
 // ------------------------------------------------------------
@@ -1159,18 +1156,6 @@ T from_voidstar(const Schema* schema, const void* data, T* = nullptr, const void
 // ------------------------------------------------------------
 
 // Fixed-width element schema: the array's data region is n * width bytes.
-inline bool mlc_elem_fixed_width(const Schema* elem) {
-    switch (elem->type) {
-        case MORLOC_NIL: case MORLOC_BOOL: case MORLOC_ENUM:
-        case MORLOC_SINT8: case MORLOC_SINT16: case MORLOC_SINT32: case MORLOC_SINT64:
-        case MORLOC_UINT8: case MORLOC_UINT16: case MORLOC_UINT32: case MORLOC_UINT64:
-        case MORLOC_FLOAT32: case MORLOC_FLOAT64:
-            return true;
-        default:
-            return false;
-    }
-}
-
 inline bool mlc_elem_is_handle(const Schema* elem) {
     return elem->type == MORLOC_IFILE
         || elem->type == MORLOC_OSTREAM
@@ -1235,8 +1220,8 @@ struct MlcNode {
             if (idx == 0) {
                 // The header, worst-case cursor alignment for the data
                 // region, and the fixed part of every element.
-                w.total += static_cast<int64_t>(schema->width + array_data_alignment_cpp(elem) - 1);
-                if (mlc_elem_fixed_width(elem)) {
+                w.total += static_cast<int64_t>(schema->width + elem->data_alignment - 1);
+                if (elem->fixed_width) {
                     w.total += static_cast<int64_t>(data.size() * elem->width);
                     return;
                 }
@@ -1289,8 +1274,7 @@ struct MlcNode {
                 w.total += static_cast<int64_t>(schema->width);
             } else {
                 const Schema* inner = resolve_recur(schema->parameters[0]);
-                size_t align = schema_alignment_cpp(inner);
-                if (align == 0) align = 1;
+                size_t align = inner->alignment;
                 w.total += static_cast<int64_t>(schema->width + (align - 1));
                 w.child(inner, *data, false);
             }
@@ -1313,7 +1297,7 @@ struct MlcNode {
                 }
                 // The data region: aligned (64 for primitive numerics), one
                 // fixed slot per element; tails follow at the cursor.
-                *w.cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*w.cursor), array_data_alignment_cpp(elem)));
+                *w.cursor = reinterpret_cast<void*>(ALIGN_UP(reinterpret_cast<uintptr_t>(*w.cursor), elem->data_alignment));
                 result->data = abs2rel_cpp(static_cast<absptr_t>(*w.cursor));
                 *w.cursor = static_cast<char*>(*w.cursor) + data.size() * width;
                 char* start = (char*)rel2abs_cpp(result->data);
@@ -1393,12 +1377,12 @@ struct MlcNode {
                     out->clear();
                     return;
                 }
-                const char* start = (const char*)resolve_relptr_cpp(array->data, w.base_ptr);
+                const char* start = (const char*)resolve_array_cpp(array->data, array->size, elem->width, w.space);
                 if constexpr (std::is_arithmetic_v<ElemT> && !std::is_same_v<ElemT, bool>) {
                     // Fixed-width primitives whose C++ width matches the
                     // wire width are one bulk copy; bool is excluded
                     // because a wire byte outside {0,1} must be normalised.
-                    if (mlc_elem_fixed_width(elem) && sizeof(ElemT) == elem->width) {
+                    if (elem->fixed_width && sizeof(ElemT) == elem->width) {
                         const ElemT* first = (const ElemT*)start;
                         out->assign(first, first + array->size);
                         return;
@@ -1407,13 +1391,13 @@ struct MlcNode {
                 out->resize(array->size);
                 if constexpr (mlc_is_leaf_v<ElemT>) {
                     for (size_t i = 0; i < array->size; i++) {
-                        (*out)[i] = mlc_leaf_read<ElemT>(elem, start + i * elem->width, w.base_ptr);
+                        (*out)[i] = mlc_leaf_read<ElemT>(elem, start + i * elem->width, w.space);
                     }
                     return;
                 }
             }
             if constexpr (!mlc_is_leaf_v<ElemT>) {
-                const char* start = (const char*)resolve_relptr_cpp(array->data, w.base_ptr);
+                const char* start = (const char*)resolve_array_cpp(array->data, array->size, elem->width, w.space);
                 if (w.flat(elem)) {
                     for (size_t i = 0; i < array->size; ++i) w.child(elem, start + i * elem->width, &(*out)[i]);
                 } else {
@@ -1439,7 +1423,7 @@ struct MlcNode {
                 out->reset();
             } else {
                 out->emplace();
-                w.child(schema->parameters[0], resolve_relptr_cpp(relptr, w.base_ptr), &**out);
+                w.child(schema->parameters[0], resolve_region_cpp(relptr, resolve_recur(schema->parameters[0])->width, w.space), &**out);
             }
         } else if constexpr (is_std_shared_ptr<T>::value) {
             // shared_ptr<T> is the C++ surface form for `?T` at a recursive
@@ -1450,7 +1434,7 @@ struct MlcNode {
                 out->reset();
             } else {
                 *out = std::make_shared<PointeeT>();
-                w.child(schema->parameters[0], resolve_relptr_cpp(relptr, w.base_ptr), out->get());
+                w.child(schema->parameters[0], resolve_region_cpp(relptr, resolve_recur(schema->parameters[0])->width, w.space), out->get());
             }
         } else {
             mlc_no_marshaller(schema);

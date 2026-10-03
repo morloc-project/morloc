@@ -1,0 +1,40 @@
+module main (consume, consumeAll)
+
+import root
+import root-py
+
+-- Draining a stream in a tail loop through a capturing sink must hold only
+-- the batch in hand: the program-wide peak of live shared memory may not grow
+-- with the number of batches. consumeAll returns every element, so its peak
+-- must grow; it shows the measurement sees retention at all.
+--
+-- Peak live SHM (program-wide, MORLOC_SHM_STATS) at N1 and N2 batches of 8 KB.
+-- MORLOC_INLINE_SIZE=0 puts every value in SHM, and a 64 KB write buffer keeps
+-- @write's buffering (which may hold up to 16 MB) out of the measurement. A
+-- steady drain may not grow by more than 4 batches; the control returns all N2
+-- elements, so it must grow by more than half of the extra data.
+
+drainWith :: IStream Int -> ([Int] -> <IO> ()) -> <IO> ()
+drainWith s sink = do
+  Ok xs <- @next s
+  ? length xs == 0 = do
+      ()
+  : do
+    sink xs
+    drainWith s sink
+
+--' Stream every batch to stdout
+consume :: IStream Int -> <IO> ()
+consume s = @collect (drainWith s)
+
+gather :: IStream Int -> [Int] -> <IO> [Int]
+gather s acc = do
+  Ok xs <- @next s
+  ? length xs == 0 = do
+      acc
+  : do
+    gather s (concat [acc, xs])
+
+--' Return every element
+consumeAll :: IStream Int -> <IO> [Int]
+consumeAll s = gather s []

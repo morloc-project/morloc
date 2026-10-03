@@ -1,0 +1,41 @@
+module main (both, reuse, chain, pull)
+
+import root-cpp
+import vector-cpp
+
+source Cpp from "impl.hpp" ("tag", "total")
+
+tag :: Str -> Str
+total :: [Int] -> Int
+
+data Box = Box Str [Int] | Empty
+
+-- A payload projection that is the LAST use of its subject may take the
+-- payload rather than copy it. These four shapes fix what "last use" has to
+-- mean, because each one reads the subject, or a value projected out of it,
+-- after a projection has already happened.
+
+--' both payload fields, then the whole box again
+both :: Box -> (Str, Int, Str)
+both b = match b
+  | (Box s xs) = (tag s, total xs, tag (@show b))
+  | Empty = (tag "", 0, "empty")
+
+--' the same field projected by two separate matches
+reuse :: Box -> (Int, Int)
+reuse b =
+  let a = match b | (Box _ xs) = total xs | Empty = 0
+      c = match b | (Box _ ys) = total ys | Empty = 0
+  in (a, c)
+
+--' one field, then the other, then both again
+chain :: Box -> (Str, Int, Str, Int)
+chain b = match b
+  | (Box s xs) = (tag s, total xs, tag s, total xs)
+  | Empty = ("", 0, "", 0)
+
+--' a payload bound once and read twice
+pull :: Box -> Int
+pull b =
+  let n = match b | (Box _ xs) = total xs | Empty = 0
+  in n + n

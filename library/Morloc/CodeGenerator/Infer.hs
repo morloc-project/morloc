@@ -18,16 +18,21 @@ module Morloc.CodeGenerator.Infer
   , inferConcreteTypeUniversal
   , inferConcreteTypeU
   , inferConcreteVar
+  , canHoldType
   , evalGeneralStep
   ) where
 
 import qualified Control.Monad.State as CMS
+import Control.Monad.Except (catchError)
+import Data.Functor.Const (Const (..))
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Data.Set as Set
 import qualified Data.Text as MT
 import qualified Morloc.Monad as MM
+import qualified Morloc.LangRegistry as LR
+import qualified Morloc.Language as ML
 import qualified Morloc.TypeEval as T
 import Numeric (showHex)
 
@@ -88,20 +93,16 @@ inferConcreteType lang (Idx i (type2typeu -> generalType)) = do
 -- downstream pattern matches (e.g. @open's IFile-head check in
 -- Imperative.hs).
 --
--- For everything else we delegate to the existing pure 'weave' via
--- 'inferConcreteTypeWeave', which still handles transparent aliases,
--- template-bearing per-language forms, records, optionals, and the
--- usual gscope-step fallbacks.
+-- Compound shapes recurse here ('structuralCompound'); a general name whose
+-- expansion corresponds to a compound concrete shape is expanded here
+-- ('stepTowardCompound'). What remains -- leaves, template-bearing
+-- per-language forms, and pairs no expansion matches -- goes to the pure
+-- 'weave' via 'inferConcreteTypeWeave'.
 inferConcreteTypeStructural
   :: Lang -> Int -> Scope -> TypeU -> TypeU -> MorlocMonad TypeF
-inferConcreteTypeStructural lang i gscope g c = case (g, c) of
-  -- A suspension is a closure of no arguments in every pool. Pierce it,
-  -- and an optional, so the AppU/VarU intercept fires through them:
-  -- @<IO> (IFile a)@, @?(IFile a)@, etc.
-  (EffectU _ g', EffectU _ c') ->
-    FunF [] <$> inferConcreteTypeStructural lang i gscope g' c'
-  (OptionalU g', OptionalU c') ->
-    OptionalF <$> inferConcreteTypeStructural lang i gscope g' c'
+inferConcreteTypeStructural lang i gscope g c
+  | Just r <- structuralCompound (inferConcreteTypeStructural lang i gscope) g c = hostConvention lang r
+  | otherwise = case (g, c) of
   -- A payload-bearing `data`. Its arms' field types have to be resolved to
   -- the target language here rather than in 'weave', which is pure and so
   -- cannot reach the per-language scope: weaving a field against itself
@@ -302,16 +303,15 @@ inferConcreteTypeStructuralRest lang i gscope g c = case (g, c) of
   -- time and crash macro expansion. Mismatches fall through to
   -- 'weave', which steps the alias and re-weaves on the body's head.
   (AppU (VarU vG) ts1, AppU (VarU (TV vC)) ts2)
-    | length ts1 == length ts2
-    , length (fst (partitionKindArgsU ts1))
-        == length (fst (partitionKindArgsU ts2)) -> do
+    | appArgsCorrespond ts1 ts2 -> do
         argTfs <- zipWithM
           (inferConcreteTypeStructural lang i gscope) ts1 ts2
         return $ AppF (VarF (FV vG (CV vC))) argTfs
-  -- Everything else (VarU/VarU, FunU, NamU, Nat*, leaves, mismatched
-  -- shapes) routes through the existing pure weave + scope-step fall
-  -- backs.
-  _ -> inferConcreteTypeWeave lang i gscope g c
+  -- Everything else (VarU/VarU, Nat*, leaves, mismatched shapes) routes
+  -- through the pure weave + scope-step fallbacks.
+  _ | Just g' <- stepTowardCompound gscope g c ->
+        inferConcreteTypeStructural lang i gscope g' c
+    | otherwise -> inferConcreteTypeWeave lang i gscope g c
 
 inferConcreteTypeWeave
   :: Lang -> Int -> Scope -> TypeU -> TypeU -> MorlocMonad TypeF
@@ -338,12 +338,23 @@ inferConcreteTypeWeave lang i gscope generalType concreteType =
           -- 'generalTransformType' returns the same NamU as input, so a
           -- naive recursion here loops forever. Compare structurally
           -- before recursing.
+          --
+          -- The step is tried in the index's own module scope first and
+          -- then in the universal one. The index is not always the site
+          -- the type was written at: an eta-reduced definition such as
+          -- @countRows = nrow@ carries the index of the sourced
+          -- function's @source@ statement, which lives in the module
+          -- that supplies the implementation. An alias declared by the
+          -- caller is invisible from there, and reducing it needs the
+          -- program-wide scope.
           mayReducedGType <- evalGeneralStep i generalType
-          case mayReducedGType of
-            (Just reducedGType)
-              | reducedGType /= generalType ->
-                  inferConcreteType lang (Idx i (typeOf reducedGType))
-            _ ->
+          let progressed t = if t /= generalType then Just t else Nothing
+              reduced =
+                (mayReducedGType >>= progressed)
+                  <|> (T.evaluateStep gscopeUni generalType >>= progressed)
+          case reduced of
+            Just reducedGType -> inferConcreteType lang (Idx i (typeOf reducedGType))
+            Nothing ->
               MM.throwSourcedError i $
                 "Cannot infer concrete type for" <+> pretty generalType <> "\nCould not reduce type"
 
@@ -366,11 +377,9 @@ inferConcreteTypeUniversal lang i t@(type2typeu -> generalType) = do
 -- newtype as opaque.
 inferConcreteTypeUniversalStructural
   :: Lang -> Int -> Scope -> Type -> TypeU -> TypeU -> MorlocMonad TypeF
-inferConcreteTypeUniversalStructural lang i gscopeUni t g c = case (g, c) of
-  (EffectU _ g', EffectU _ c') ->
-    FunF [] <$> inferConcreteTypeUniversalStructural lang i gscopeUni t g' c'
-  (OptionalU g', OptionalU c') ->
-    OptionalF <$> inferConcreteTypeUniversalStructural lang i gscopeUni t g' c'
+inferConcreteTypeUniversalStructural lang i gscopeUni t g c
+  | Just r <- structuralCompound (inferConcreteTypeUniversalStructural lang i gscopeUni t) g c = hostConvention lang r
+  | otherwise = case (g, c) of
   -- A `data` type resolves to its arms here exactly as it does in the
   -- module-scoped walk. Without this, the wire form of a parameterized
   -- `data` is asked for as though it were an ordinary applied type, and
@@ -400,12 +409,12 @@ inferConcreteTypeUniversalStructural lang i gscopeUni t g c = case (g, c) of
         argTfs <- mapM (inferConcreteTypeUniversal lang i . typeOf) ts
         return $ AppF (VarF (FV vG (CV vC))) argTfs
   (AppU (VarU vG) ts1, AppU (VarU (TV vC)) ts2)
-    | length ts1 == length ts2
-    , length (fst (partitionKindArgsU ts1))
-        == length (fst (partitionKindArgsU ts2)) -> do
+    | appArgsCorrespond ts1 ts2 -> do
         argTfs <- zipWithM
           (inferConcreteTypeUniversalStructural lang i gscopeUni t) ts1 ts2
         return $ AppF (VarF (FV vG (CV vC))) argTfs
+  _ | Just g' <- stepTowardCompound gscopeUni g c ->
+        inferConcreteTypeUniversalStructural lang i gscopeUni t g' c
   _ ->
     case weave gscopeUni g c of
       (Right tf) -> return tf
@@ -417,6 +426,87 @@ inferConcreteTypeUniversalStructural lang i gscopeUni t g c = case (g, c) of
           MM.throwSystemError $
             "Failed to infer concrete type for" <+> pretty t
               <> ": Could not reduce type in broadest scope"
+
+-- | In a compiled language a record mapped to a type the program declares
+-- (@record Rust => Ops = "Ops"@) holds its fields as that declaration spells
+-- them, in the host's convention: a function of type @A -> \<E\> C@ there
+-- runs its effect when called and returns @C@. The record's concrete type
+-- says so, so its native declaration, accessors and marshalling agree with
+-- the value it holds; 'Morloc.CodeGenerator.EffectBoundary' adapts the
+-- fields where such a record is built and where one is read. A record the
+-- compiler generates (@"struct"@), and every record of a dynamic language,
+-- holds morloc values. Nested records are left to their own node.
+hostConvention :: Lang -> MorlocMonad TypeF -> MorlocMonad TypeF
+hostConvention lang built = do
+  t <- built
+  reg <- CMS.gets stateLangRegistry
+  return $ case t of
+    NamF o v@(FV _ (CV cv)) ps rs
+      | cv /= "struct" && LR.registryIsCompiled reg (ML.langName lang) ->
+          NamF o v ps [(k, eager f) | (k, f) <- rs]
+    _ -> t
+  where
+    -- a suspension is a closure of no arguments; a function whose result is
+    -- one returns the result instead
+    eager (FunF [] c) = FunF [] (eager c)
+    eager (FunF as r) = FunF (map eager as) (eager (runs r))
+    eager (AppF h ts) = AppF h (map eager ts)
+    eager (OptionalF x) = OptionalF (eager x)
+    eager x = x
+    runs (FunF [] c) = c
+    runs r = r
+
+-- | The compound shapes every walk descends through, given the walk to
+-- recurse with; the one list of them, shared by both structural walks and
+-- 'weave'. Every type nested in a suspension, optional, function or record
+-- must pass through a structural walk rather than the pure 'weave', which
+-- cannot reach the per-language scope: a parameterized `data` woven there
+-- keeps its morloc name instead of its instance name.
+structuralCompound
+  :: Applicative f
+  => (TypeU -> TypeU -> f TypeF)
+  -> TypeU -> TypeU -> Maybe (f TypeF)
+structuralCompound walk g c = case (g, c) of
+  -- A suspension is a closure of no arguments in every pool.
+  (EffectU _ g', EffectU _ c') -> Just $ FunF [] <$> walk g' c'
+  (OptionalU g', OptionalU c') -> Just $ OptionalF <$> walk g' c'
+  (FunU gs gr, FunU cs cr)
+    | length gs == length cs ->
+        Just $ FunF <$> zipWithM walk gs cs <*> walk gr cr
+  (NamU o1 v1 ts1 rs1, NamU o2 v2 ts2 rs2)
+    | o1 == o2 && length ts1 == length ts2 && length rs1 == length rs2 ->
+        Just $ NamF o1 (FV v1 (CV (unTVar v2)))
+          <$> zipWithM walk ts1 ts2
+          <*> zipWithM (\(_, g') (k, c') -> (,) k <$> walk g' c') rs1 rs2
+  _ -> Nothing
+
+-- | Expand the general side one step when the expansion's shape
+-- corresponds to the concrete side's, as when a record, a tuple or an alias
+-- of a function type is named on the general side and spelled out on the
+-- concrete one. The walk then continues on the expansion; handing the pair
+-- to 'weave' would expand it there and weave everything beneath purely.
+-- Nothing when the expansion does not correspond, which leaves the pair to
+-- 'weave' as before. An applied type with kind arguments (@Table n r@,
+-- @Vector n a@) is not stepped: pairing its Nat and row arguments is
+-- 'weave's, and the universal walk cannot do it.
+stepTowardCompound :: Scope -> TypeU -> TypeU -> Maybe TypeU
+stepTowardCompound scope g c = case T.evaluateStep scope g of
+  Just g' | g' /= g && corresponds g' -> Just g'
+  _ -> Nothing
+  where
+    corresponds g' = isJust (dataHeadOf scope g')
+      || isJust (structuralCompound (\_ _ -> Const ()) g' c)
+      || case (g', c) of
+           (AppU (VarU _) ts1, AppU (VarU _) ts2) ->
+             snd (partitionKindArgsU ts1) == 0 && appArgsCorrespond ts1 ts2
+           _ -> False
+
+-- | Two argument lists the applied-type shortcut pairs one to one. The kind
+-- test rejects phantom-Nat aliases whose concrete form has fewer type slots.
+appArgsCorrespond :: [TypeU] -> [TypeU] -> Bool
+appArgsCorrespond ts1 ts2 =
+  length ts1 == length ts2
+    && length (fst (partitionKindArgsU ts1)) == length (fst (partitionKindArgsU ts2))
 
 -- | The concrete side of an applied type, which is either applied too or
 -- has already collapsed to a bare name. Mirrors @concreteHeadName@ in the
@@ -455,6 +545,7 @@ inferConcreteTypeUUniversal lang generalType = do
 weave :: Scope -> TypeU -> TypeU -> Either MDoc TypeF
 weave gscope = w Set.empty
   where
+    w anc t1 t2 | Just r <- structuralCompound (w anc) t1 t2 = r
     -- A `data` type weaves to 'EnumF' rather than a plain 'VarF' so the
     -- constructor names reach codegen. Making this the canonical TypeF for
     -- an enum is what lets every backend recognize one structurally --
@@ -481,7 +572,6 @@ weave gscope = w Set.empty
         -- form is, which is the same place the recursive case is tied off.
         | otherwise -> VarF (FV v1 (CV v2))
       Nothing -> VarF (FV v1 (CV v2))
-    w anc (FunU ts1 t1) (FunU ts2 t2) = FunF <$> zipWithM (w anc) ts1 ts2 <*> w anc t1 t2
     -- AppU vs AppU: weave heads, then args. If heads weave but arg lists
     -- have mismatched lengths (e.g. general @Pair Int@ has 1 arg while
     -- the concrete-side resolution expanded to @"tuple" [int, ?(...)]@
@@ -493,14 +583,6 @@ weave gscope = w Set.empty
       case (AppF <$> w anc h1 h2 <*> weaveArgs anc ts1 ts2) of
         r@(Right _) -> r
         Left _ -> wStep anc t1 t2
-    w anc t1@(NamU o1 v1 ts1 rs1) t2@(NamU o2 v2 ts2 rs2)
-      | o1 == o2 && length ts1 == length ts2 && length rs1 == length rs2 =
-          NamF o1 (FV v1 (CV (unTVar v2)))
-            <$> zipWithM (w anc) ts1 ts2
-            <*> zipWithM (\(_, t1') (k2', t2') -> (,) k2' <$> w anc t1' t2') rs1 rs2
-      | otherwise = Left $ "failed to weave:" <+> "\n  t1:" <+> pretty t1 <+> "\n  t2:" <+> pretty t2
-    w anc (EffectU _ t1) (EffectU _ t2) = FunF [] <$> w anc t1 t2
-    w anc (OptionalU t1) (OptionalU t2) = OptionalF <$> w anc t1 t2
     w _ (NatLitU n) (NatLitU _) = return $ NatLitF n
     w _ (NatLitU n) _ = return $ NatLitF n  -- Nat params may be erased in concrete type
     w _ NatVoidU _ = return NatVoidF  -- Erased phantom Nat slot
@@ -546,6 +628,57 @@ weave gscope = w Set.empty
     dropNatHead :: [TypeU] -> [TypeU]
     dropNatHead (c : cs) | isKindTypeU c = cs
     dropNatHead cs = cs
+
+-- | Whether values of a general type have a representation in a language:
+-- the type resolves there, and, when @declaredRecords@, every record in it is
+-- declared for the language (a record with no declaration there resolves only
+-- to its morloc name, which names nothing in the pool). Building a record
+-- always needs its declaration; holding one does not in a language with a
+-- generic record form. A @data@ type is generated in each pool that uses it.
+canHoldType :: Bool -> Lang -> Int -> Type -> MorlocMonad Bool
+canHoldType declaredRecords lang i t = do
+  let key = (declaredRecords, langName lang, i, t)
+  cached <- CMS.gets (Map.lookup key . stateHoldCache)
+  case cached of
+    Just answer -> return answer
+    Nothing -> do
+      answer <- canHoldType' declaredRecords lang i t
+      CMS.modify (\st -> st {stateHoldCache = Map.insert key answer (stateHoldCache st)})
+      return answer
+
+canHoldType' :: Bool -> Lang -> Int -> Type -> MorlocMonad Bool
+canHoldType' declaredRecords lang i t = do
+  -- a failed inference is an answer here, not an error: whatever it changed
+  -- on the way (the `data` types being expanded) is undone
+  st0 <- CMS.get
+  ( do
+      _ <- inferConcreteType lang (Idx i t)
+      gLocal <- MM.getGeneralScope i
+      gGlobal <- MM.getGeneralUniversalScope
+      if declaredRecords
+        then and <$> mapM (declared gLocal gGlobal) (recordNames gLocal gGlobal t)
+        else return True
+    )
+    `catchError` (\_ -> CMS.put st0 >> return False)
+  where
+    declared gLocal gGlobal v = do
+      local <- MM.getConcreteScope i lang
+      global <- MM.getConcreteUniversalScope lang
+      let isData = isJust (scopeDataCtors gLocal v) || isJust (scopeDataCtors gGlobal v)
+      return (isData || Map.member v local || Map.member v global)
+    -- the records a type holds, whether written out or named
+    recordNames gl gg ty = case ty of
+      NamT NamTable _ ps rs -> concatMap (recordNames gl gg) (ps <> map snd rs)
+      NamT _ v ps rs -> v : concatMap (recordNames gl gg) (ps <> map snd rs)
+      VarT v -> [v | namesRecord gl gg v]
+      FunT ins out -> concatMap (recordNames gl gg) (out : ins)
+      AppT f xs -> concatMap (recordNames gl gg) (f : xs)
+      OptionalT x -> recordNames gl gg x
+      EffectT _ x -> recordNames gl gg x
+      _ -> []
+    namesRecord gl gg v = case Map.lookup v gl <> Map.lookup v gg of
+      Just ((_, NamU o _ _ _, _, _, _) : _) -> o /= NamTable
+      _ -> False
 
 inferConcreteVar :: Lang -> Indexed TVar -> MorlocMonad FVar
 inferConcreteVar lang t0@(Idx i v) = do

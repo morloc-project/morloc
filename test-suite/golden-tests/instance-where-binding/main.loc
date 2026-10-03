@@ -1,0 +1,35 @@
+module main (scaleInt, countInt, scaleReal)
+
+import root-py
+
+-- An instance method may have a where block; its bindings are local to that
+-- method's definition and, like any where-binding, are evaluated once per
+-- call. `tick` records each evaluation in `tick.log`; `ticks` reads the count
+-- after its argument is computed.
+
+source Py from "helpers.py" ("tick", "ticks")
+
+tick :: Int -> Int
+ticks :: a -> Int
+
+class Scale a where
+  scale :: a -> a
+
+instance Scale Int where
+  scale x = y + y
+    where
+      y = tick x * 2
+
+instance Scale Real where
+  scale x = y * y
+    where
+      y = x + 0.5
+
+scaleInt :: Int -> Int
+scaleInt n = scale n
+
+countInt :: Int -> Int
+countInt n = ticks (scale n)
+
+scaleReal :: Real -> Real
+scaleReal x = scale x

@@ -82,6 +82,7 @@ module Morloc.Namespace.Expr
   , mapExprSGM
   , foldExprS
   , foldAnnoS
+  , annoNodes
 
     -- * JSON helpers
   , stripPrefixAndKebabCase
@@ -396,6 +397,11 @@ data Intrinsic
   | IntrShow      -- ^ @show   :: a -> Str           -- serialize to JSON string
   | IntrRead      -- ^ @read   :: Str -> Try Str a   -- deserialize from JSON string; pure, so it composes in `map`
   | IntrDatafile  -- ^ @datafile :: Str -> Str       -- resolve installed data file path
+  | IntrUnpack    -- ^ @unpack :: [U8] -> <IO> a     -- decode a morloc packet held as
+                  -- bytes, as the pool decodes an argument. NOT user-facing: the
+                  -- entries synthesized for `@parse` receive an argument that no
+                  -- parser read as the packet the nexus loaded, and decode it here.
+                  -- `a` is resolved by ascription.
   | IntrOpen      -- ^ @open  :: Str -> <IO> (Try Str a)  -- open a stream/file; `a` resolved via inline ascription to IFile/IStream/OStream
   | IntrClose     -- ^ @close :: a -> <IO> ()        -- close any stream/file handle
   | IntrFSchema   -- ^ @fschema :: Str -> <IO> (Try Str Str) -- read a file's element schema without typed open
@@ -406,6 +412,11 @@ data Intrinsic
                   -- The pure-runtime evaluator executes this as a direct
                   -- per-element loop over MORLOC_ARRAY; the pool path resolves
                   -- it to the language's @Functor.map@ instance.
+  | IntrMapOptional -- ^ internal @(a -> b) -> ?a -> ?b@: apply a function to
+                  -- an optional's value, if it has one. Emitted only by the
+                  -- host adapter ('Morloc.CodeGenerator.EffectBoundary'),
+                  -- which rebuilds an optional holding a function value in
+                  -- the convention of the side it crosses to. NOT user-facing.
   | IntrTagTest   -- ^ implicit @a -> a -> Bool@ tag test, emitted only by the
                   -- desugar's constructor-pattern lowering. NOT user-facing --
                   -- there is no entry in 'parseIntrinsic', as with 'IntrMap'.
@@ -447,7 +458,7 @@ data Intrinsic
                     -- current sub-packet and advance the cursor. Returns an
                     -- empty list at EOF (further calls keep returning empty).
                     -- A mid-stream decode failure is an Err arm.
-  | IntrStream      -- ^ @stream :: IFile a -> <IO> IStream a@ -- derive a
+  | IntrStream      -- ^ @stream :: IFile [a] -> <IO> IStream a@ -- derive a
                     -- forward-only IStream from an open IFile, bound to the
                     -- same path with an independent fd, mmap, and cursor.
   | IntrWrite       -- ^ @write :: Int -> OStream a -> [a] -> <IO> (Try Str ())@ --
@@ -511,6 +522,36 @@ data Intrinsic
                     -- call ends, and return its path. NOT user-facing;
                     -- synthesized by the whole-form `with:`/`render:` handler
                     -- to gather a stream to disk before applying the handler.
+  | IntrCellNew     -- ^ @cellnew :: b -> <IO> (Cell b)@ -- create a fold
+                    -- accumulator seeded with the given value. NOT
+                    -- user-facing; synthesized by the `@fold` handler form.
+  | IntrCellGet     -- ^ @cellget :: Cell b -> <IO> b@ -- read the calling
+                    -- thread's accumulator, or the seed if that thread has
+                    -- not folded yet.
+  | IntrCellPut     -- ^ @cellput :: Cell b -> b -> <IO> ()@ -- replace the
+                    -- calling thread's accumulator. Thread-local, so a
+                    -- producer driving its sink from several threads loses
+                    -- no updates and needs no lock.
+  | IntrCellReduce  -- ^ @cellreduce :: (b -> b -> b) -> Cell b -> <IO> b@ --
+                    -- merge every thread's accumulator with the handler's
+                    -- `combine` and release the cell. Never sees an empty
+                    -- cell: one that was never folded into answers with its
+                    -- seed, which is what an empty stream folds to.
+  | IntrReplay      -- ^ @replay :: IStream a -> ([a] -> <IO> ()) -> <IO> ()@ --
+                    -- call the function on every frame (sub-packet) of the
+                    -- stream, in order, empty frames included. Synthesized
+                    -- only (a replayed terminal action's producer), never
+                    -- written by users.
+  | IntrChannel     -- ^ internal @channel :: <IO> (IStream a), synthesized by
+                    -- `@parse`: a stream whose producer and readers run at
+                    -- once through shared memory. The one handle is the
+                    -- producer's OStream too (see IntrSpawn).
+  | IntrSpawn       -- ^ internal @spawn :: IStream a -> (OStream a -> <IO> ())
+                    -- -> <IO> (): start the producer on the channel as a call
+                    -- of its own, without waiting for it.
+  | IntrSettle      -- ^ internal @settle :: IStream a -> <IO> (): end a
+                    -- channel once its readers are done; a producer failure
+                    -- a reader was handed is raised again here.
   | IntrIFileWalk   -- ^ Unified IFile pattern walker. Synthesized by Express.hs
                     -- and Nexus.hs from any pattern application with an IFile
                     -- receiver (`.[i] f`, `.[s:e:p] f`, `.foo.bar f`, mixed
@@ -537,10 +578,12 @@ intrinsicName IntrTypeof = "typeof"
 intrinsicName IntrShow = "show"
 intrinsicName IntrRead = "read"
 intrinsicName IntrDatafile = "datafile"
+intrinsicName IntrUnpack = "unpack"
 intrinsicName IntrOpen = "open"
 intrinsicName IntrClose = "close"
 intrinsicName IntrFSchema = "fschema"
 intrinsicName IntrMap = "map"
+intrinsicName IntrMapOptional = "mapoptional"
 intrinsicName IntrTagTest = "tagtest"
 intrinsicName IntrCtorField = "ctorfield"
 intrinsicName IntrFLength = "flen"
@@ -559,6 +602,14 @@ intrinsicName IntrTry = "try"
 intrinsicName IntrTell = "tell"
 intrinsicName IntrCollect = "collect"
 intrinsicName IntrTmpfile = "tmpfile"
+intrinsicName IntrCellNew = "cellnew"
+intrinsicName IntrCellGet = "cellget"
+intrinsicName IntrCellPut = "cellput"
+intrinsicName IntrCellReduce = "cellreduce"
+intrinsicName IntrReplay = "replay"
+intrinsicName IntrChannel = "channel"
+intrinsicName IntrSpawn = "spawn"
+intrinsicName IntrSettle = "settle"
 intrinsicName IntrIFileWalk = "ifile_walk"
 
 -- | Does this intrinsic perform IO? True iff its type carries an `IO` effect
@@ -593,6 +644,15 @@ intrinsicIsIO IntrTmpfile = True
 intrinsicIsIO IntrCollect = True
 -- Synthesized post-typecheck (never user-written); IO by nature.
 intrinsicIsIO IntrIFileWalk = True
+-- Synthesized by the `@fold` handler form; all touch runtime-owned state.
+intrinsicIsIO IntrCellNew = True
+intrinsicIsIO IntrCellGet = True
+intrinsicIsIO IntrCellPut = True
+intrinsicIsIO IntrCellReduce = True
+intrinsicIsIO IntrReplay = True
+intrinsicIsIO IntrChannel = True
+intrinsicIsIO IntrSpawn = True
+intrinsicIsIO IntrSettle = True
 -- No IO: safe to write directly in a sandboxed eval.
 intrinsicIsIO IntrHash = False
 intrinsicIsIO IntrVersion = False
@@ -603,7 +663,9 @@ intrinsicIsIO IntrTypeof = False
 intrinsicIsIO IntrShow = False
 intrinsicIsIO IntrRead = False
 intrinsicIsIO IntrDatafile = False
+intrinsicIsIO IntrUnpack = True
 intrinsicIsIO IntrMap = False
+intrinsicIsIO IntrMapOptional = False
 intrinsicIsIO IntrTagTest = False
 intrinsicIsIO IntrCtorField = False
 intrinsicIsIO IntrThrow = False
@@ -664,10 +726,12 @@ intrinsicArity IntrTypeof = 1
 intrinsicArity IntrShow = 1
 intrinsicArity IntrRead = 1
 intrinsicArity IntrDatafile = 1
+intrinsicArity IntrUnpack = 1
 intrinsicArity IntrOpen = 1
 intrinsicArity IntrClose = 1
 intrinsicArity IntrFSchema = 1
 intrinsicArity IntrMap = 2
+intrinsicArity IntrMapOptional = 2
 intrinsicArity IntrFLength = 1
 intrinsicArity IntrStreamLayout = 1
 intrinsicArity IntrNext = 1
@@ -684,6 +748,14 @@ intrinsicArity IntrTry = 1
 intrinsicArity IntrTell = 0
 intrinsicArity IntrCollect = 1
 intrinsicArity IntrTmpfile = 0
+intrinsicArity IntrCellNew = 1
+intrinsicArity IntrCellGet = 1
+intrinsicArity IntrCellPut = 2
+intrinsicArity IntrCellReduce = 2
+intrinsicArity IntrReplay = 2
+intrinsicArity IntrChannel = 0
+intrinsicArity IntrSpawn = 2
+intrinsicArity IntrSettle = 1
 intrinsicArity IntrIFileWalk =
   error "intrinsicArity: IntrIFileWalk has dynamic arity (path + handle + 0..n bracket bounds) and is never eta-expanded"
 
@@ -693,7 +765,9 @@ data ExprI = ExprI Int Expr
 data Expr
   = ModE MVar [ExprI]
   | ClsE (Typeclass Signature)
-  | IstE ClassName [TypeU] [ExprI]
+  | IstE ClassName [Constraint] [TypeU] [ExprI]
+  -- ^ class, the instance's context (constraints its body may assume),
+  -- instance types, body
   | EffE EffectLabel Bool  -- ^ effect declaration: label, isEscapable
   | TypE ExprTypeE
   | ImpE Import
@@ -1114,6 +1188,10 @@ foldExprS _ _                 = mempty
 foldAnnoS :: (Foldable f, Monoid m) => (AnnoS g f c -> m) -> AnnoS g f c -> m
 foldAnnoS f a@(AnnoS _ _ e) = f a <> foldExprS (foldAnnoS f) e
 
+-- | Every node of a tree, root first.
+annoNodes :: Foldable f => AnnoS g f c -> [AnnoS g f c]
+annoNodes t = appEndo (foldAnnoS (\n -> Endo (n :)) t) []
+
 ----- Pretty instances -------------------------------------------------------
 
 instance Pretty Lit where
@@ -1207,7 +1285,7 @@ instance Pretty Expr where
         [] -> ""
         [c] -> pretty c <+> "=> "
         _ -> tupled (map pretty constraints) <+> "=> "
-  pretty (IstE cls ts es) = "instance" <+> pretty cls <+> hsep (map (parens . pretty) ts) <> (align . vsep . map pretty) es
+  pretty (IstE cls _ ts es) = "instance" <+> pretty cls <+> hsep (map (parens . pretty) ts) <> (align . vsep . map pretty) es
   pretty (EffE lbl esc) = (if esc then "escapable effect" else "effect") <+> pretty lbl
   pretty (TypE (ExprTypeE lang v vs t _ kind)) = case kind of
     TypedefPrimitive ->

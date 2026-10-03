@@ -1,0 +1,106 @@
+module main
+  ( flat
+  , grouped
+  , effectAlias
+  , fnAlias
+  , lambdaParam
+  , shadowedParam
+  , importedBatch
+  , importedHandler
+  , fileAlias
+  , letShadow
+  , nestedImported
+  )
+
+-- A terminal action (`--' with:` / `@with` / `@render`) composes a handler
+-- onto a command's result, or onto each batch a streaming (`@collect`)
+-- command emits. It needs the command's arguments, whether its result is a
+-- suspension, and the types of the producer and handler, however they are
+-- spelled: arrows grouped into the result, types named through aliases
+-- (including an alias declared in another module), and parameters bound by a
+-- lambda in the body. A `$N` argument is the command's Nth argument even
+-- where an inner binder reuses its name.
+
+import root-py
+import .batches (produceBatch, renderBatch, Batch, produceRows, Rows)
+
+type Act a = <IO> a
+type Pair2 = Int -> Int -> Str
+type Reader = IFile [Int]
+
+source Py from "helpers.py" ("shout", "tagWith", "readEf", "pairUp", "render2", "renderAll", "renderRows")
+
+shout :: Str -> Str
+tagWith :: Int -> Str -> Str
+readEf :: Int -> <IO> Str
+pairUp :: Int -> [Int]
+render2 :: Int -> [Int] -> Str
+renderAll :: [Int] -> Str
+renderRows :: [[Int]] -> Str
+
+-- "ab"; -y gives "AB"
+--' with: -y/--shout=shout
+flat :: Int -> Int -> Str
+flat i j = "ab"
+
+-- "ab"; -y gives "AB"; -t gives "2:ab"
+--' with: -y/--shout=shout
+--' with: -t/--tag=tagWith($2)
+grouped :: Int -> (Int -> Str)
+grouped i j = "ab"
+
+-- "ef"; -y gives "EF"
+--' with: -y/--shout=shout
+effectAlias :: Int -> Act Str
+effectAlias i = readEf i
+
+-- "ab"; -y gives "AB"
+--' with: -y/--shout=shout
+fnAlias :: Pair2
+fnAlias i j = "ab"
+
+produce :: Int -> ([Int] -> <IO> ()) -> <IO> ()
+produce n sink = sink (pairUp n)
+
+-- -r 1 2 renders 2:4
+--' @render -r/--text=render2($2)
+lambdaParam :: Int -> Int -> <IO> ()
+lambdaParam x = \y -> @collect (produce y)
+
+-- -r 1 2 renders 1:4
+--' @render -r/--text=render2($1)
+shadowedParam :: Int -> Int -> <IO> ()
+shadowedParam x y = (\x -> @collect (produce x)) y
+
+-- -a 3 gives "all:6"
+--' @with -a/--all=renderAll
+importedBatch :: Int -> <IO> ()
+importedBatch y = @collect (produceBatch y)
+
+-- -a 3 gives "batch:6"
+--' @with -a/--all=renderBatch
+importedHandler :: Int -> <IO> ()
+importedHandler y = @collect (produce y)
+
+countFile :: Reader -> <IO> Int
+countFile f = do
+  Ok _rv <- @flen f
+  _rv
+
+-- -m 3 gives 2
+--' @with -m/--count=countFile
+fileAlias :: Int -> <IO> ()
+fileAlias y = @collect (produce y)
+
+-- -r 7 renders 7:4; `y` is the let-bound `x`, not the parameter
+--' @render -r/--text=render2($1)
+letShadow :: Int -> <IO> ()
+letShadow x =
+  let x = 2
+      y = x
+  in @collect (produce y)
+
+-- -a 3 gives "rows:6"; the producer's batch type nests an alias in itself
+--' @with -a/--all=renderRows
+nestedImported :: Int -> <IO> ()
+nestedImported y = @collect (produceRows y)

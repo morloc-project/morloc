@@ -1,0 +1,13 @@
+module main (grouped, nested)
+
+-- An exported function's command takes every argument of its type, however
+-- the signature groups its arrows: `Int -> (Str -> Int)` is `Int -> Str ->
+-- Int`. Each command returns its first argument.
+
+import root-py
+
+grouped :: Int -> (Str -> Int)
+grouped i s = i
+
+nested :: Int -> (Str -> (Bool -> Int))
+nested i s b = i

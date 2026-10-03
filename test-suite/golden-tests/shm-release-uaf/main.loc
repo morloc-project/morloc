@@ -1,0 +1,66 @@
+module main (held, partial, alias, heldPy, partialPy, partialRust, aliasRust)
+
+import root
+import root-cpp
+import root-py
+import root-rust
+
+-- Shapes where a shared-memory block must outlive a release point: a result
+-- still held while the next call is made, a closure built by partially
+-- applying a foreign function to a large value, and a foreign result that is
+-- the caller's own argument. Every value is large enough to travel by
+-- reference, and a block freed too early reads as zeros, so each answer is
+-- checked exactly.
+--
+-- Every value travels by reference (MORLOC_INLINE_SIZE=0). Expected answers:
+-- t(i) = 3000 i + 4498500, the total of readings i
+-- held n     = sum_{i<n} 7 t(i) + t(i+1)
+-- partial i n = n t(i) + n(n-1)/2
+-- alias n    = sum_{i<n} t(i)
+
+source Cpp from "src.hpp" ("readingsCpp", "totalCpp", "pairTotalCpp", "applyNCpp", "idCpp")
+source Py from "src.py" ("readingsPy", "totalPy", "pairTotalPy", "addTotalPy", "applyNPy", "idPy")
+source Rust from "src.rs" ("readings_rust" as readingsRust, "add_total_rust" as addTotalRust, "id_rust" as idRust)
+
+readingsCpp :: Int -> [Int]
+totalCpp :: [Int] -> Int
+pairTotalCpp :: [Int] -> [Int] -> Int
+applyNCpp :: (Int -> Int) -> Int -> Int
+idCpp :: [Int] -> [Int]
+readingsPy :: Int -> [Int]
+totalPy :: [Int] -> Int
+pairTotalPy :: [Int] -> [Int] -> Int
+addTotalPy :: [Int] -> Int -> Int
+applyNPy :: (Int -> Int) -> Int -> Int
+idPy :: [Int] -> [Int]
+readingsRust :: Int -> [Int]
+addTotalRust :: [Int] -> Int -> Int
+idRust :: [Int] -> [Int]
+
+--' C++ holds a Python result across a second Python call, n times
+held :: Int -> Int
+held n = sum (map (\i -> pairTotalCpp (readingsPy i) (readingsPy (i + 1))) (range 0 n))
+
+--' Python holds a C++ result across a second C++ call, n times
+heldPy :: Int -> Int
+heldPy n = sum (map (\i -> pairTotalPy (readingsCpp i) (readingsCpp (i + 1))) (range 0 n))
+
+--' A Python function partially applied to a large C++ value, applied by C++
+partial :: Int -> Int -> Int
+partial i n = applyNCpp (addTotalPy (readingsCpp i)) n
+
+--' A C++-built large value captured in a closure applied by Python
+partialPy :: Int -> Int -> Int
+partialPy i n = applyNPy (addTotalPy (readingsCpp i)) n
+
+--' A Rust function partially applied to a large C++ value, applied by C++
+partialRust :: Int -> Int -> Int
+partialRust i n = applyNCpp (addTotalRust (readingsCpp i)) n
+
+--' A C++ list sent to Python and returned unchanged, n times
+alias :: Int -> Int
+alias n = sum (map (\i -> totalCpp (idPy (readingsCpp i))) (range 0 n))
+
+--' A C++ list sent to Rust and returned unchanged, n times
+aliasRust :: Int -> Int
+aliasRust n = sum (map (\i -> totalCpp (idRust (readingsCpp i))) (range 0 n))

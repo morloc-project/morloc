@@ -1,0 +1,60 @@
+module main (stream, pstream)
+
+-- A folding `@render` handler: the producer's batches are folded into one
+-- accumulator instead of gathered into a list. The same `@collect` also
+-- carries an ordinary whole-list handler, which is the property the form
+-- exists for -- one producer, one collect, renderers that fold or gather.
+--
+-- The accumulator records the size of every batch it saw, so a lowering that
+-- flattens the stream rather than preserving the producer's batch boundaries
+-- gives a visibly different answer.
+
+import root-cpp
+
+source Cpp from "impl.hpp"
+  ( "mk"
+  , "zeroAcc"
+  , "addBatch"
+  , "mergeAcc"
+  , "showAcc"
+  , "joinAll"
+  , "produceParallel"
+  , "zeroPAcc"
+  , "addPBatch"
+  , "mergePAcc"
+  , "showPAcc"
+  )
+
+type Acc = (Int, [Int])
+
+mk :: Int -> [Int]
+zeroAcc :: Acc
+addBatch :: Acc -> [Int] -> Acc
+mergeAcc :: Acc -> Acc -> Acc
+showAcc :: Acc -> Str
+joinAll :: [Int] -> Str
+
+produce :: ([Int] -> <IO> ()) -> <IO> ()
+produce sink = do
+  _ <- sink (mk 0)
+  _ <- sink (mk 1)
+  sink (mk 2)
+
+type PAcc = (Int, Int, Int)
+
+produceParallel :: ([Int] -> <IO> ()) -> <IO> ()
+zeroPAcc :: PAcc
+addPBatch :: PAcc -> [Int] -> PAcc
+mergePAcc :: PAcc -> PAcc -> PAcc
+showPAcc :: PAcc -> Str
+
+--' Stream integer batches
+--' @render -f/--folded=showAcc @fold=addBatch @init=zeroAcc @combine=mergeAcc
+--' @render -a/--all=joinAll
+stream :: <IO> ()
+stream = @collect produce
+
+--' Stream integer batches from four threads at once
+--' @render -p/--parallel=showPAcc @fold=addPBatch @init=zeroPAcc @combine=mergePAcc
+pstream :: <IO> ()
+pstream = @collect produceParallel

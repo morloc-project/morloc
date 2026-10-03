@@ -49,15 +49,15 @@ public:
     int64_t n_columns() const { return impl_->schema.n_children; }
     int64_t n_rows()    const { return impl_->array.length; }
 
-    // Zero-copy view over a table block in SHM. The block must outlive
-    // the returned table.
-    static ArrowTable from_shm(const arrow_shm_header_t* hdr) {
+    // Zero-copy view over a table block in SHM, holding the block for as
+    // long as the table lives. `acquire` takes a reference of the view's
+    // own; pass false to hand it the caller's only one.
+    static ArrowTable from_shm(const arrow_shm_header_t* hdr, bool acquire = true) {
         struct ArrowSchema as;
         struct ArrowArray aa;
         char* err = nullptr;
-        arrow_from_shm(hdr, &as, &aa, &err);
-        if (err) {
-            std::string msg(err);
+        if (arrow_from_shm_owned(hdr, acquire ? 1 : 0, &as, &aa, &err) != 0) {
+            std::string msg(err ? err : "cannot view the table's block");
             free(err);
             throw std::runtime_error(msg);
         }
@@ -93,8 +93,9 @@ public:
     // table this pool received and returns unchanged, pass that block
     // through), bringing it into agreement with the declared morloc
     // column schema when one is given, and repoint this table at the
-    // block. Returns the block's relptr for use in packets; the block is
-    // the caller's to track and release.
+    // block. Returns the block's relptr for the packet that will name it;
+    // that reference is the caller's to track and release, and is separate
+    // from the one the repointed table holds.
     relptr_t move_to_shm(const Schema* declared = nullptr) {
         // The structs are lent, never consumed: other copies of this
         // table may still be using them, and the consumer's release is
@@ -113,8 +114,8 @@ public:
         try {
             *this = from_shm(hdr);
         } catch (...) {
-            // The block is not yet tracked by anyone: release it here or
-            // it is held for the life of the program.
+            // The packet reference is not yet tracked by anyone: release
+            // it here or it is held for the life of the program.
             char* ferr = nullptr;
             shfree((absptr_t)hdr, &ferr);
             if (ferr) free(ferr);

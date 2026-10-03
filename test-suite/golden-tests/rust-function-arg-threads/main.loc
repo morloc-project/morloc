@@ -1,0 +1,53 @@
+-- A named function reaching a threaded sourced Rust function through a
+-- morloc function parameter.
+--
+-- `parMap` runs `f` on two threads, so Rust requires `f: Sync`. A named
+-- morloc function captures nothing and is Sync; it must still reach
+-- `parMap` as one when it travels through a parameter of an effectful
+-- wrapper or of a recursive loop, and when the threaded function is itself
+-- effectful and its call is suspended (the wrapper's result, or an argument
+-- to a sourced function that forces it), not as a boxed closure value.
+
+module main (direct, viaDo, viaLoop, effectfulBody, effectfulArgument)
+
+import root-rust
+
+source Rust from "lib.rs" ("par_map" as parMap, "force")
+parMap :: (Int -> Int) -> [Int] -> [Int]
+force :: <IO> a -> <IO> a
+
+source Rust from "lib.rs" ("par_map_io" as parMapIO)
+parMapIO :: (Int -> Int) -> [Int] -> <IO> [Int]
+
+double :: Int -> Int
+double x = x * 2
+
+wrapDo :: (Int -> Int) -> [Int] -> <IO> [Int]
+wrapDo f xs = do
+  parMap f xs
+
+loopF :: (Int -> Int) -> Int -> [Int] -> <IO> [Int]
+loopF f k xs = ? k == 0 = do
+    xs
+  : loopF f (k - 1) (parMap f xs)
+
+direct :: [Int] -> [Int]
+direct xs = parMap double xs
+
+viaDo :: [Int] -> <IO> [Int]
+viaDo xs = wrapDo double xs
+
+viaLoop :: [Int] -> <IO> [Int]
+viaLoop xs = loopF double 3 xs
+
+wrapIO :: (Int -> Int) -> [Int] -> <IO> [Int]
+wrapIO f xs = parMapIO f xs
+
+wrapForced :: (Int -> Int) -> [Int] -> <IO> [Int]
+wrapForced f xs = force (parMapIO f xs)
+
+effectfulBody :: [Int] -> <IO> [Int]
+effectfulBody xs = wrapIO double xs
+
+effectfulArgument :: [Int] -> <IO> [Int]
+effectfulArgument xs = wrapForced double xs

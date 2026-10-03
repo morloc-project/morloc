@@ -18,9 +18,13 @@ mod process;
 mod runlog;
 mod schemas;
 mod serve_help;
+mod parse_arg;
+mod sigrm;
 mod stdio_bridge;
 mod stdio_server;
 mod view;
+mod stage;
+mod orchestrate;
 
 use dispatch::NexusConfig;
 
@@ -67,6 +71,17 @@ fn main() {
         std::process::exit(0);
     }
 
+    // A nexus started by another nexus (a multi-output child, a served
+    // daemon) ends when that nexus ends. Its own children get its own
+    // lifeline, never this one.
+    {
+        extern "C" {
+            fn morloc_lifeline_guard();
+        }
+        unsafe { morloc_lifeline_guard() };
+        std::env::remove_var("MORLOC_LIFELINE");
+    }
+
     // Install a panic hook so a Rust panic still runs the run-scope
     // epilogue + summary.json + tee cleanup before the process dies.
     // Without this, panic-unwound exits skip clean_exit entirely and
@@ -99,10 +114,16 @@ fn main() {
 
     // `file` and `view` need no manifest, no pool spawning, no signal
     // handlers. Dispatch them before the manifest-mode plumbing below.
-    // `view` does need SHM because the loader may produce SHM-backed
-    // voidstar values.
+    // `view` and `file --validate` do need SHM because the loader may
+    // produce SHM-backed voidstar values.
     match invocation.nexus.cmd {
-        cli::Mode::File(ref fargs) => file::run(fargs),
+        cli::Mode::File(ref fargs) => {
+            // Validating loads each value, which takes shared memory.
+            if fargs.validate {
+                process::init_shm();
+            }
+            file::run(fargs)
+        }
         cli::Mode::View(ref vargs) => {
             process::init_shm();
             view::run(vargs);
@@ -285,7 +306,10 @@ fn main() {
     // wrap a sbatch invocation of `<nexus> --call-packet ...`. Both
     // paths are also useful handles for any future per-program tooling
     // that needs to re-enter the same nexus from a worker.
-    if let Ok(exe) = std::env::current_exe() {
+    // Resolved through symlinks: macOS reports the path the binary was
+    // started by, which for a PATH lookup is often a link such as
+    // ~/.local/bin/morloc-nexus, whose directory is not this install's.
+    if let Ok(exe) = std::env::current_exe().map(|e| std::fs::canonicalize(&e).unwrap_or(e)) {
         std::env::set_var("MORLOC_NEXUS_PATH", &exe);
         // Point pools at this nexus's sibling lib dir so they load the SAME
         // libmorloc.so the nexus resolved, wherever the build tree lives (pools
@@ -365,6 +389,9 @@ fn main() {
     if config.quiet {
         std::env::set_var("MORLOC_QUIET", "1");
     }
+    if let Some(z) = config.stdout_compression {
+        std::env::set_var("MORLOC_STDOUT_COMPRESSION_LEVEL", z.to_string());
+    }
     if let Some(n) = config.debug_cache_depth {
         std::env::set_var("MORLOC_DEBUG_CACHE_DEPTH", n.to_string());
     }
@@ -432,7 +459,7 @@ fn main() {
     // @stderr through this dedicated socket; the fork-side child fd
     // hygiene installed in start_language_server takes fd 0/1 away
     // from the pool so the nexus keeps its bytes clean.
-    stdio_server::start(&tmpdir, config.output_format, config.compression_level, config.daemon_flag);
+    stdio_server::start(&tmpdir, config.output_format, config.daemon_flag);
 
     // Become subreaper for orphaned grandchildren
     process::set_child_subreaper();
@@ -521,7 +548,46 @@ fn main() {
         // Scoped to normal CLI dispatch only: call-packet mode already
         // honors output_path internally (writes a sibling .mpk file
         // via write_atomic) and must not have its stdout hijacked.
-        process::redirect_stdout_to(config.output_path.as_deref());
+        // A child of a multi-output run already holds the `-o` file (if
+        // any) as fd 1, or was pointed elsewhere by its parent.
+        if matches!(config.child, dispatch::ChildMode::None) {
+            process::redirect_stdout_to(config.output_path.as_deref());
+        }
+
+        if let dispatch::ChildMode::Replay { cmd, inputs } = config.child.clone() {
+            // One action on a staged output: the inputs are packet files,
+            // in the entry's argument order.
+            let idx = manifest.command_index(&cmd).unwrap_or_else(|| {
+                eprintln!("Error: no internal command `{}`", cmd);
+                process::clean_exit(1);
+            });
+            let term = manifest.commands.iter()
+                .flat_map(|c| c.terminals.iter())
+                .find(|t| t.replay.as_deref() == Some(cmd.as_str()));
+            if let Some(t) = term.filter(|t| t.render) {
+                set_render_output(&mut config, t.kind);
+            }
+            // Each input is a file the stage wrote, read as the manifest
+            // says its argument is read (see `stageReplayArgs` in the
+            // compiler), exactly as a command-line argument would be.
+            let values = manifest.commands[idx].args.iter().zip(inputs).map(|(arg, input)| {
+                let value = match arg {
+                    manifest::Arg::Positional { checks, source, quoted, .. } => {
+                        dispatch::preprocess_cli_value(input, checks, *source, *quoted, &cmd)
+                    }
+                    _ => input,
+                };
+                dispatch::ArgValue::Value(value)
+            }).collect();
+            dispatch::dispatch_command_parsed(
+                values,
+                &config,
+                &manifest,
+                &manifest.commands[idx],
+                &mut sockets,
+            );
+            process::clean_exit(0);
+        }
 
         // Route through the manifest-driven parser. `user_zone`
         // is the command zone from the pre-scan split -- everything
@@ -531,20 +597,61 @@ fn main() {
         // manifest's command surface. Nexus flags placed in the
         // command zone are rejected here as unknown; users must
         // place them left of `@` or left of the subcommand.
-        let parsed =
-            phase2::parse_run(&manifest, &user_zone, &prog_name, format_explicit);
-        // A `render` terminal emits its handler's bytes verbatim. Force raw for
-        // BOTH output paths: the streamed-stdout path (`render.buffer`, whose
-        // () return is suppressed by the Raw arm's top-null guard) and the
-        // return path (whole-list `render`, which returns a Str/Vector U8 value
-        // formatted by `print_result_c`).
-        if parsed.render {
-            stdio_server::set_output_format(dispatch::OutputFormat::Raw);
-            config.output_format = dispatch::OutputFormat::Raw;
+        let parsed = phase2::parse_run(
+            &manifest,
+            &user_zone,
+            &prog_name,
+            format_explicit,
+            config.output_path.as_deref(),
+        );
+
+        if let dispatch::ChildMode::Stage { dir, args, tee } = config.child.clone() {
+            // The stage of a multi-output run: the parent command, once.
+            let parent = &manifest.commands[parsed.parent_index];
+            stage::init(&dir, &args, tee, &parent.name);
+            // A streaming command's stream is its output: saved for the
+            // actions when its type is known, and on stdout only with tee.
+            if parent.terminals.iter().any(|t| t.kind.of_streaming_command()) {
+                let (fd, schema) = match &parent.stream {
+                    Some(stream) => {
+                        let path = stage::stream_path(&dir);
+                        let file = std::fs::File::create(&path).unwrap_or_else(|e| {
+                            eprintln!("Error: {}: {}", path, e);
+                            process::clean_exit(1);
+                        });
+                        use std::os::unix::io::IntoRawFd;
+                        (file.into_raw_fd(), Some(stream.schema.clone()))
+                    }
+                    None => (-1, None),
+                };
+                stdio_server::save_stdout_stream(fd, schema);
+            }
+            let (idx, values) =
+                parse_arg::redirect(&manifest, parsed.parent_index, parsed.values);
+            dispatch::dispatch_command_parsed(
+                values,
+                &config,
+                &manifest,
+                &manifest.commands[idx],
+                &mut sockets,
+            );
+            process::clean_exit(0);
         }
-        let cmd = &manifest.commands[parsed.cmd_index];
+
+        if parsed.staged {
+            orchestrate::run(&manifest, &config, &parsed, format_explicit);
+        }
+
+        if parsed.render {
+            let kind = parsed.stdout_terminal
+                .map(|t| manifest.commands[parsed.parent_index].terminals[t].kind)
+                .unwrap_or_default();
+            set_render_output(&mut config, kind);
+        }
+        let (cmd_index, values) = parse_arg::redirect(&manifest, parsed.cmd_index, parsed.values);
+        let cmd = &manifest.commands[cmd_index];
         dispatch::dispatch_command_parsed(
-            parsed.values,
+            values,
             &config,
             &manifest,
             cmd,
@@ -560,8 +667,8 @@ fn main() {
         // process's own temporary directory, which is created fresh at
         // startup and inherited by nobody, so no pool of anyone else's is
         // ever reachable at these paths -- not even a parent that
-        // fork-exec'd this process. Pools started here die via
-        // PR_SET_PDEATHSIG when clean_exit drops this process.
+        // fork-exec'd this process. Pools started here end through their
+        // lifeline when this process ends.
         let to_start: Vec<usize> = (0..manifest.pools.len()).collect();
         if !to_start.is_empty() {
             if let Err(e) = process::start_daemons(&mut sockets, &to_start) {
@@ -573,6 +680,16 @@ fn main() {
     }
 
     process::clean_exit(0);
+}
+
+/// A `@render` action's output is its handler's bytes, written verbatim.
+/// That output is the returned value, or for a per-batch action the stream
+/// it writes; anything else the command streams keeps the run's format.
+fn set_render_output(config: &mut dispatch::NexusConfig, kind: manifest::ActionKind) {
+    config.output_format = dispatch::OutputFormat::Raw;
+    if kind == manifest::ActionKind::Stream {
+        stdio_server::set_output_format(dispatch::OutputFormat::Raw);
+    }
 }
 
 /// C `daemon_config_t` mirror (matches `daemon_ffi::DaemonConfig` layout).

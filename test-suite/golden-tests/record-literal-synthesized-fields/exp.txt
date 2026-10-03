@@ -1,0 +1,5 @@
+{"tag":1,"b":"Empty"}
+{"tag":2,"b":"Empty"}
+{"Ok":[{"tag":3,"b":"Empty"}]}
+[6,"Empty"]
+{"tag":7,"b":"Empty"}

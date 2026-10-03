@@ -120,7 +120,18 @@ the effects in `E` and yields a `T`. The rules:
    `f(x, y)`, `g :: B -> <E> C` as `g(y)`, and `h :: <E> C` as `h()`;
    `f x` on the morloc side is the thunk of that call; a morloc function
    handed to a host at an `A -> <E> C` slot is passed as `\a -> force(g a)`;
-   a suspension handed to a host is the callable itself. The program's
+   a suspension handed to a host is the callable itself. The adapter is
+   decided by type at the boundary, whatever built the value: a function
+   inside a record, tuple, list, optional or packable type is adapted
+   where the container crosses, and one the host returns is adapted the
+   other way. It follows the source's declared signature: below one of
+   its type variables the host holds the value without looking inside,
+   so `map :: (a -> b) -> f a -> f b` at `b = <E> C` builds suspensions
+   and runs none. In a compiled language a record mapped to a type the
+   program declares holds the host's convention, so it is adapted where
+   it is built and where a field is read, and crosses to a host as it
+   is. A value the adapter cannot rebuild is rejected when the program
+   is built. The program's
    caller is a host too: a suspension at the root of a command's argument
    is built from the value supplied, the suspension at the root of its
    result is run for the caller, and a suspension below the root of
@@ -141,6 +152,21 @@ the effects in `E` and yields a `T`. The rules:
 Vocabulary: `<E> T` is a *suspension*; `E` is its *row* of *effects*. A
 suspension is never "erased", "stripped" or "an annotation on `T`"; it is
 only ever run.
+
+## Named Values
+
+Laws 4 and 5 fix when suspensions and arguments run. A pure named value
+(`where`, `let`, a pure `let` in a do-block, a top-level constant) is
+computed at most once per evaluation of its scope, at the nearest point
+every use passes through (see [[../language/expressions.md]]). Two
+constructs bound that placement:
+
+- **`@try` is a region.** A value read only inside a `@try` argument is
+  computed inside it, so its failure becomes the `Err` of that `@try`.
+- **Effects are barriers.** A pure `let` in a do-block is never computed
+  before an effect statement that precedes it; it may only move later,
+  toward its uses. Effectful binds and bare statements keep their order and
+  are never dropped.
 
 ## Forcing Effects
 

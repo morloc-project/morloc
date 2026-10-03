@@ -9,9 +9,13 @@ source Py from "src.py" ("py_identity")
 -- each input/output format wired into the nexus:
 --
 --   CSV file input         (.csv -> arrow-csv parser)
+--   TSV file input         (.tsv -> tab delimiter)
 --   JSON CLI input         (read_json_to_arrow_shm)
 --   Parquet file input     (PAR1 magic -> arrow-parquet)
 --   Arrow IPC file input   (ARROW1 magic -> arrow-ipc)
+--   morloc packet input    (the output of an earlier run, fed back)
+--   the same five down a pipe, where there is no name to go on and the
+--     format has to be recognised from the bytes
 --   --output-form csv      (write_csv_to_buffer engages on Table return)
 --
 -- The python identity call forces an actual pool dispatch so each path

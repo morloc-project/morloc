@@ -25,6 +25,10 @@ pub struct CSchema {
     /// `&<klen><name>X` form) or back-reference target name (set on
     /// every Recur node). NULL on all other schemas.
     pub name: *mut c_char,
+    /// Layout facts, computed here once so no language recomputes them.
+    pub alignment: usize,
+    pub data_alignment: usize,
+    pub fixed_width: bool,
 }
 
 impl CSchema {
@@ -73,6 +77,9 @@ impl CSchema {
                 Some(s) => CString::new(s.as_str()).unwrap_or_default().into_raw(),
                 None => ptr::null_mut(),
             },
+            alignment: schema.alignment(),
+            data_alignment: schema.array_data_alignment(),
+            fixed_width: schema.is_fixed_width(),
         });
         Box::into_raw(cs)
     }
@@ -88,7 +95,8 @@ impl CSchema {
         }
         let cs = &*cs;
         // SAFETY: SerialType is #[repr(u32)] and cs.serial_type was set from a valid SerialType.
-        let serial_type = std::mem::transmute::<u32, SerialType>(cs.serial_type);
+        let serial_type = SerialType::from_u32(cs.serial_type)
+            .unwrap_or_else(|| panic!("C schema has unknown kind tag {}", cs.serial_type));
 
         let offsets = if cs.offsets.is_null() || cs.size == 0 {
             Vec::new()
@@ -99,7 +107,7 @@ impl CSchema {
                 // is a single relptr). Array keeps one dim-constraint
                 // entry in offsets[0].
                 SerialType::Array => 1,
-                _ => 0,
+                SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => 0,
             };
             if n > 0 {
                 std::slice::from_raw_parts(cs.offsets, n).to_vec()
@@ -160,7 +168,8 @@ impl CSchema {
         if schema.is_null() { return; }
         let cs = Box::from_raw(schema);
         // SAFETY: cs.serial_type was set from a valid SerialType in from_rust.
-        let st = std::mem::transmute::<u32, SerialType>(cs.serial_type);
+        let st = SerialType::from_u32(cs.serial_type)
+            .unwrap_or_else(|| panic!("C schema has unknown kind tag {}", cs.serial_type));
         if !cs.offsets.is_null() {
             let n = match st {
                 SerialType::Tuple | SerialType::Map => cs.size,
@@ -168,7 +177,7 @@ impl CSchema {
                 // is a single relptr). Array keeps one dim-constraint
                 // entry in offsets[0].
                 SerialType::Array => 1,
-                _ => 0,
+                SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => 0,
             };
             if n > 0 { let _ = Vec::from_raw_parts(cs.offsets, n, n); }
         }
@@ -198,12 +207,52 @@ pub unsafe fn is_top_null(schema: *const CSchema, ptr: *const u8) -> bool {
     if schema.is_null() {
         return false;
     }
-    match (*schema).serial_type {
-        x if x == SerialType::Nil as u32 => true,
-        x if x == SerialType::Optional as u32 => {
+    match SerialType::from_u32((*schema).serial_type) {
+        Some(SerialType::Nil) => true,
+        Some(SerialType::Optional) => {
             let relptr = *(ptr as *const crate::shm_types::RelPtr);
             relptr == crate::shm_types::RELNULL
         }
-        _ => false,
+        Some(
+            SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32
+            | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32
+            | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String
+            | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Int
+            | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream
+            | SerialType::IStream | SerialType::Enum | SerialType::Variant,
+        )
+        | None => false,
+    }
+}
+
+#[cfg(test)]
+mod layout_field_tests {
+    use super::*;
+    use crate::schema::parse_schema;
+
+    /// The layout facts a C schema carries are the runtime's own, at every
+    /// node, so no language needs rules of its own to lay values out.
+    #[test]
+    fn layout_fields_match_the_runtime_at_every_node() {
+        fn check(cs: *const CSchema, rs: &Schema, s: &str) {
+            unsafe {
+                assert_eq!((*cs).alignment, rs.alignment(), "{s}: alignment");
+                assert_eq!((*cs).data_alignment, rs.array_data_alignment(), "{s}: data alignment");
+                assert_eq!((*cs).fixed_width, rs.is_fixed_width(), "{s}: fixed width");
+                for (i, p) in rs.parameters.iter().enumerate() {
+                    check(*(*cs).parameters.add(i), p, s);
+                }
+            }
+        }
+        for s in [
+            "b", "u1", "i2", "i4", "f4", "i8", "f8", "j", "s", "z", "?b", "?i4", "e22E02E1",
+            "m11ab", "m21ab1bu1", "t2bb", "t2b?b", "t2si4", "v21A1b1B0", "v21A2b?b1B0",
+            "ab", "a?i4", "at2b?b", "F", "at2u1f8", "&4Treev24Leaf04Node3i8^4Tree^4Tree",
+        ] {
+            let rs = parse_schema(s).unwrap();
+            let cs = CSchema::from_rust(&rs);
+            check(cs, &rs, s);
+            unsafe { CSchema::free(cs) };
+        }
     }
 }

@@ -115,16 +115,47 @@ printExpr (IIntrinsicLoad sid Nothing path) =
   [idoc|_mlc_load(mlc_schema_table[#{pretty sid}], #{printExpr path})|]
 printExpr (IIntrinsicShow sid e) =
   [idoc|_mlc_show(#{printExpr e}, mlc_schema_table[#{pretty sid}])|]
+printExpr (IIntrinsicCellNew sid e) =
+  [idoc|_mlc_cell_new(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
+printExpr (IIntrinsicCellGet sid (Just t) h) =
+  [idoc|_mlc_cell_get<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
+printExpr (IIntrinsicCellGet sid Nothing h) =
+  [idoc|_mlc_cell_get(mlc_schema_table[#{pretty sid}], #{printExpr h})|]
+printExpr (IIntrinsicCellPut sid h e) =
+  [idoc|_mlc_cell_put(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr e})|]
+printExpr (IIntrinsicCellReduce sid (Just t) f h) =
+  [idoc|_mlc_cell_reduce<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr f}, #{printExpr h})|]
+printExpr (IIntrinsicCellReduce sid Nothing f h) =
+  [idoc|_mlc_cell_reduce(mlc_schema_table[#{pretty sid}], #{printExpr f}, #{printExpr h})|]
+printExpr (IIntrinsicChannel sid) =
+  [idoc|_mlc_open_channel(mlc_schema_table[#{pretty sid}])|]
+printExpr (IIntrinsicSpawn sid h f) =
+  [idoc|_mlc_spawn(#{printExpr f}, #{printExpr h}, mlc_schema_table[#{pretty sid}])|]
+printExpr (IIntrinsicSettle h) =
+  [idoc|_mlc_settle(#{printExpr h})|]
+printExpr (IIntrinsicReplay sid (Just t) h f) =
+  [idoc|_mlc_replay<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr f})|]
+printExpr (IIntrinsicReplay sid Nothing h f) =
+  [idoc|_mlc_replay(mlc_schema_table[#{pretty sid}], #{printExpr h}, #{printExpr f})|]
 printExpr (IIntrinsicRead sid (Just t) e) =
   [idoc|_mlc_read<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
 printExpr (IIntrinsicRead sid Nothing e) =
   [idoc|_mlc_read(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
+printExpr (IIntrinsicUnpack sid (Just t) e) =
+  [idoc|_mlc_unpack<#{renderIType t}>(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
+printExpr (IIntrinsicUnpack sid Nothing e) =
+  [idoc|_mlc_unpack(mlc_schema_table[#{pretty sid}], #{printExpr e})|]
 printExpr (IIntrinsicOpen kind path) =
   [idoc|_mlc_open(#{printExpr path}, #{pretty kind})|]
+-- @close and the temp-file unlink return void in the runtime, but their
+-- morloc type is `()`, and a call can land anywhere a value is consumed: a
+-- branch arm, a let, the tail of a manifold that returns `mlc::Unit`. Only
+-- the serialize boundary supplies the unit beside a void call, so the unit
+-- is supplied here instead and every consumer sees a value.
 printExpr (IIntrinsicClose h) =
-  [idoc|_mlc_close(#{printExpr h})|]
+  [idoc|([&](){ _mlc_close(#{printExpr h}); return mlc::Unit{}; }())|]
 printExpr (IIntrinsicUnlinkTemp path) =
-  [idoc|_mlc_unlink_tmp(#{printExpr path})|]
+  [idoc|([&](){ _mlc_unlink_tmp(#{printExpr path}); return mlc::Unit{}; }())|]
 printExpr (IIntrinsicFSchema path) =
   [idoc|_mlc_fschema(#{printExpr path})|]
 printExpr (IIntrinsicFLength h) =
@@ -167,7 +198,12 @@ printExpr (IIntrinsicStdout sid) =
   [idoc|_mlc_open_stdout(mlc_schema_table[#{pretty sid}])|]
 printExpr (IIntrinsicStderr sid) =
   [idoc|_mlc_open_stderr(mlc_schema_table[#{pretty sid}])|]
-printExpr (IIntrinsicThrow _ msg) =
+-- With its result type known, a raise converts to exactly that type: the
+-- catch-all conversion of an untyped raise is ambiguous wherever the type has
+-- several assignment operators (std::vector, std::string).
+printExpr (IIntrinsicThrow (Just t) msg) =
+  [idoc|_mlc_throw_as<#{renderIType t}>(#{printExpr msg})|]
+printExpr (IIntrinsicThrow Nothing msg) =
   [idoc|_mlc_throw(#{printExpr msg})|]
 
 -- C++ non-finite literals: rely on the C99 macros INFINITY and NAN. They are

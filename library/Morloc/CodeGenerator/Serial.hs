@@ -35,13 +35,13 @@ module Morloc.CodeGenerator.Serial
   , shallowType
   , serialAstToMsgpackSchema
   , rerootUnder
+  , serialOuterName
   , serialAstToGeneralSchema
   , encode64
   , decode64
   ) where
 
 import qualified Data.Char as C
-import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Set as Set
 import qualified Data.Text as DT
 import qualified Morloc.BaseTypes as BT
@@ -51,7 +51,7 @@ import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeEval as TE
-import Morloc.Typecheck.Internal (apply, qualify, substitute, subtype, unqualify)
+import Morloc.Typecheck.Internal (apply, emptyGamma, qualify, substitute, subtype, unqualify)
 
 -- | Classification of how an aliased outer type maps onto the wire form.
 -- Computed by 'makeSerialAST'' from the gscope alias body's outer head.
@@ -510,6 +510,7 @@ serialOuterName (SerialPack _ (_, s)) = serialOuterName s
 serialOuterName (SerialList (FV v _) _ _) = Just v
 serialOuterName (SerialTuple (FV v _) _) = Just v
 serialOuterName (SerialObject _ (FV v _) _ _) = Just v
+serialOuterName (SerialOptional (FV v _) _) = Just v
 serialOuterName (SerialVariant _ _ []) = Nothing
 serialOuterName (SerialVariant (FV v _) _ _) = Just v
 serialOuterName _ = Nothing
@@ -774,6 +775,25 @@ isArrowColumn (SerialBool _) = True
 isArrowColumn (SerialString _) = True
 isArrowColumn _ = False
 
+-- | Nested tables are not supported yet: a table inside a list, tuple,
+-- record, optional or constructor has no wire form, and the pools and the
+-- runtime's walkers would each fail on it later and in their own way (the
+-- walkers would treat it as holding no pointer). Until support lands, such a
+-- type is refused here with one clear message. Nested tables are meant to
+-- be legal; this check goes when they are implemented.
+checkNoNestedTable :: Int -> SerialAST -> MorlocMonad ()
+checkNoNestedTable m ast =
+  when (any holdsTable (serialKids (unpack ast))) $
+    MM.throwSourcedError m $
+      "Tables nested inside other values are not supported yet (support is coming soon):"
+        <+> "the value here holds a Table inside a list, tuple, record, optional or constructor."
+        <+> "For now a Table can cross between languages only as a whole argument or result."
+  where
+    unpack (SerialPack _ (_, s)) = unpack s
+    unpack s = s
+    holdsTable (SerialObject NamTable _ _ _) = True
+    holdsTable s = any holdsTable (serialKids s)
+
 makeSerialAST :: Int -> Lang -> TypeF -> MorlocMonad SerialAST
 makeSerialAST m lang t0 = do
   instances <- findPackerInstances
@@ -790,7 +810,9 @@ makeSerialAST m lang t0 = do
           , Map.member lang (piSources pin)
           ]
 
-  makeSerialAST' gscope typepackers Set.empty t0
+  ast <- makeSerialAST' gscope typepackers Set.empty t0
+  checkNoNestedTable m ast
+  return ast
   where
     -- The @Set TypeF@ is the types on the path above this one, and it is
     -- what a self-reference is recognised against. The whole type is the
@@ -1395,10 +1417,6 @@ typeFHead _ = Nothing
 --
 -- The table is filtered to the language before use, so a miss here means the
 -- filter and this lookup have gone out of step.
-emptyGamma :: Gamma
-emptyGamma =
-  Gamma 0 0 IntMap.empty Map.empty Map.empty [] Map.empty Map.empty [] Nothing Map.empty [] Set.empty
-
 packerSources :: Lang -> Int -> PackerInstance -> MorlocMonad (Source, Source)
 packerSources lang m0 pin = case Map.lookup lang (piSources pin) of
   (Just srcs) -> return srcs

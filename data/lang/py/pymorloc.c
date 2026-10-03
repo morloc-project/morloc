@@ -11,6 +11,82 @@
 #define PY_ARRAY_UNIQUE_SYMBOL MORLOC_ARRAY_API
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include <numpy/arrayobject.h>
+#include <unistd.h>
+
+// {{{ shm view owners
+//
+// A numpy array read out of shared memory can be a view onto the block
+// rather than a copy. The view must keep the block alive for as long as it
+// lives, which may be past the call that read it (a module global, a cell,
+// the next batch of a loop), so it holds a reference of its own: its numpy
+// base is an owner object that took one reference on the block and drops it
+// when the last view goes. Every other value read from the block is a copy,
+// so the reader releases its own reference as soon as the read returns.
+//
+// from_voidstar_owned names the block being read in a thread-local context
+// and the view branch of the walker attaches the owner, created on first
+// use and shared by every view of the block.
+
+typedef struct {
+    absptr_t block;
+    pid_t pid;
+} shm_view_owner_t;
+
+typedef struct {
+    absptr_t block;
+    PyObject* owner;
+} shm_view_ctx_t;
+
+static __thread shm_view_ctx_t shm_view_ctx = { NULL, NULL };
+
+static void shm_view_owner_release(PyObject* capsule) {
+    shm_view_owner_t* o = (shm_view_owner_t*)PyCapsule_GetPointer(capsule, "morloc.shm_view");
+    if (o == NULL) {
+        PyErr_Clear();
+        return;
+    }
+    // A forked child inherits the object but not the reference: the
+    // reference belongs to the process that took it.
+    if (o->pid == getpid()) {
+        char* err = NULL;
+        shfree(o->block, &err);
+        if (err) { free(err); }
+    }
+    free(o);
+}
+
+// The owner for the block being read, creating it (and its reference) on
+// first use. Returns a borrowed reference, or NULL with a Python error set.
+static PyObject* shm_view_owner(void) {
+    if (shm_view_ctx.owner != NULL) {
+        return shm_view_ctx.owner;
+    }
+    shm_view_owner_t* o = (shm_view_owner_t*)malloc(sizeof(shm_view_owner_t));
+    if (o == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    char* err = NULL;
+    bool acquired = shincref(shm_view_ctx.block, &err);
+    if (err) { free(err); }
+    if (!acquired) {
+        free(o);
+        PyErr_SetString(PyExc_RuntimeError, "shared-memory block of a view is no longer live");
+        return NULL;
+    }
+    o->block = shm_view_ctx.block;
+    o->pid = getpid();
+    PyObject* capsule = PyCapsule_New(o, "morloc.shm_view", shm_view_owner_release);
+    if (capsule == NULL) {
+        shfree(o->block, &err);
+        if (err) { free(err); }
+        free(o);
+        return NULL;
+    }
+    shm_view_ctx.owner = capsule;
+    return capsule;
+}
+// }}}
 
 // SHM tracker for _put_value allocations (deferred cleanup)
 #define SHM_TRACKER_INIT_CAP 16
@@ -30,7 +106,12 @@ static void shm_tracker_push(absptr_t ptr, Schema* schema) {
     if (shm_tracker_count >= shm_tracker_cap) {
         size_t new_cap = shm_tracker_cap ? shm_tracker_cap * 2 : SHM_TRACKER_INIT_CAP;
         shm_entry_t* new_buf = (shm_entry_t*)realloc(shm_tracker, new_cap * sizeof(shm_entry_t));
-        if (!new_buf) return;
+        if (!new_buf) {
+            // Dropping the entry would leak the reference it holds and let a
+            // later release miss it; there is no way to continue correctly.
+            fprintf(stderr, "morloc internal error (Py pool): out of memory growing the SHM tracker\n");
+            abort();
+        }
         shm_tracker = new_buf;
         shm_tracker_cap = new_cap;
     }
@@ -51,7 +132,6 @@ static void shm_tracker_flush(void) {
         }
     }
     shm_tracker_count = 0;
-    arrow_borrow_clear();
 }
 
 // Drop one tracker entry matching ptr (swap-with-last), shfree the
@@ -148,6 +228,24 @@ static PyObject* PyMorlocInternalError = NULL;
 // they raise PyMorlocInternalError -- which derives from BaseException and
 // so passes straight through `_mlc_catch`'s `except Exception:` -- rather
 // than the catchable RuntimeError that PyTRY raises.
+// PyTRY with the GIL released around the call, for a libmorloc call that
+// may wait on another worker (a channel read or write). `out` receives the
+// result.
+#define PyTRY_NOGIL(out, fun, ...) \
+    Py_BEGIN_ALLOW_THREADS \
+    out = fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
+    Py_END_ALLOW_THREADS \
+    if(child_errmsg_ != NULL){ \
+        char* prior_err = get_prior_err(); \
+        if(prior_err == NULL){ \
+            PyErr_Format(PyExc_RuntimeError, "Error (%s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_); \
+        } else { \
+            PyErr_Format(PyExc_RuntimeError, "%s\nError (%s:%d in %s):\n%s", prior_err, __FILE__, __LINE__, __func__, child_errmsg_); \
+            free(prior_err); \
+        } \
+        goto error; \
+    }
+
 #define PyTRY_INFRA(fun, ...) \
     fun(__VA_ARGS__ __VA_OPT__(,) &child_errmsg_); \
     if(child_errmsg_ != NULL){ \
@@ -282,6 +380,84 @@ static int schema_to_npy_type(morloc_serial_type type) {
     }
 }
 
+// How a numpy array becomes the data of a list of `elem`.
+//   NPY_ROUTE_BULK: its bytes already are the wire layout; copy them.
+//   NPY_ROUTE_CAST: numpy widens it to that layout without loss; cast, copy.
+//   NPY_ROUTE_EACH: convert and range-check element by element.
+// The size and write passes both route through here, so they agree.
+typedef enum { NPY_ROUTE_BULK, NPY_ROUTE_CAST, NPY_ROUTE_EACH } npy_route_t;
+
+// True when every value of numpy kind `from_kind` (itemsize `from_size`)
+// is exactly representable in kind `to_kind` of itemsize `to_size`.
+static bool npy_widens_exactly(char from_kind, int from_size, char to_kind, int to_size) {
+    if (from_size >= to_size) return false;
+    if (from_kind == 'f') return to_kind == 'f';
+    if (from_kind == 'i') return to_kind == 'i';
+    if (from_kind == 'u') return to_kind == 'u' || to_kind == 'i';
+    return false;
+}
+
+static int numpy_route(PyArrayObject* arr, const Schema* elem, npy_route_t* route) {
+    if (PyArray_NDIM(arr) != 1) {
+        PyErr_Format(PyExc_TypeError,
+            "a numpy array passed as a list must be one-dimensional; got %d dimensions",
+            PyArray_NDIM(arr));
+        return -1;
+    }
+    int t = schema_to_npy_type(elem->type);
+    if (PyArray_TYPE(arr) == NPY_OBJECT || t < 0) {
+        *route = NPY_ROUTE_EACH;
+        return 0;
+    }
+    if (PyArray_EquivTypenums(PyArray_TYPE(arr), t)
+        && PyArray_ITEMSIZE(arr) == (npy_intp)elem->width
+        && PyArray_ISNOTSWAPPED(arr)
+        && PyArray_IS_C_CONTIGUOUS(arr)
+        && PyArray_ISALIGNED(arr)) {
+        *route = NPY_ROUTE_BULK;
+        return 0;
+    }
+    // The target dtype is the element's own, so its width is the schema
+    // width. Bool and enum take only their own dtype: widening a number into
+    // them would skip their value checks.
+    PyArray_Descr* want = PyArray_DescrFromType(t);
+    char want_kind = want->kind;
+    Py_DECREF(want);
+    bool widen = elem->type != MORLOC_BOOL && elem->type != MORLOC_ENUM
+        && npy_widens_exactly(PyArray_DESCR(arr)->kind, (int)PyArray_ITEMSIZE(arr),
+                              want_kind, (int)elem->width);
+    *route = widen ? NPY_ROUTE_CAST : NPY_ROUTE_EACH;
+    return 0;
+}
+
+// Reject bytes that are not valid values of a one-byte element type: a
+// bool must be 0 or 1, an enum tag must name one of its constructors.
+static int check_byte_elements(const Schema* elem, const unsigned char* bytes, size_t n) {
+    // Every byte is a valid U8 or I8, so only Bool and enum need a pass.
+    if (elem->type != MORLOC_BOOL && elem->type != MORLOC_ENUM) {
+        return 0;
+    }
+    size_t limit = elem->type == MORLOC_BOOL ? 2 : elem->size;
+    for (size_t i = 0; i < n; i++) {
+        if (bytes[i] >= limit) {
+            PyErr_Format(PyExc_ValueError,
+                "element %zu has byte value %u, which is not a valid %s",
+                i, (unsigned)bytes[i],
+                elem->type == MORLOC_BOOL ? "bool (0 or 1)" : "constructor tag");
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// Whether bytes / bytearray can stand for a list of `elem`: only when each
+// element is one byte, so the byte count is the element count.
+static bool bytes_fit_elements(const Schema* elem) {
+    return elem->width == 1
+        && (elem->type == MORLOC_UINT8 || elem->type == MORLOC_SINT8
+            || elem->type == MORLOC_BOOL || elem->type == MORLOC_ENUM);
+}
+
 // Resolve a constructor name against a variant schema's key list, yielding
 // its tag. The tag is the constructor's position in the declaration, which
 // is what the wire carries; the keys arrive in that same order.
@@ -359,7 +535,7 @@ typedef struct {
     size_t env_base;        // recur env depth at entry, restored on exit
     ssize_t total;          // size pass
     void** cursor;          // write pass
-    const void* base_ptr;   // read pass
+    morloc_space_t space;   // read pass: where relptrs lead
     PyObject* result;       // read pass: the root, owned until returned
     PyObject* keep;         // references the walk holds until it ends
 } py_walk_t;
@@ -595,8 +771,8 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
                 // byte for chars); Array bumps to 64 for primitive numeric
                 // elements (SIMD/BLAS).
                 size_t buf_align = (schema->type == MORLOC_STRING)
-                    ? schema_alignment(schema->parameters[0])
-                    : array_data_alignment(element_schema);
+                    ? schema->parameters[0]->alignment
+                    : element_schema->data_alignment;
                 w->total += (ssize_t)(sizeof(Array) + buf_align - 1);
 
                 if (PyList_Check(obj)) {
@@ -657,20 +833,12 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
                 } else if (PyObject_HasAttrString(obj, "__array_interface__")) {
                     import_numpy();
                     PyArrayObject *arr = (PyArrayObject *)obj;
-                    npy_intp *dims = PyArray_DIMS(arr);
-                    int ndim = PyArray_NDIM(arr);
-                    size_t total_elements = 1;
-                    for (int i = 0; i < ndim; i++) {
-                        total_elements *= dims[i];
-                    }
-                    // Per-element sizing required when (a) dtype=object
-                    // (slots are PyObject*) or (b) the morloc element
-                    // schema is variable-width -- numpy's flat inline
-                    // storage does not match morloc's wire layout (e.g.
-                    // numpy int64 is 8 bytes per slot but morloc Int is
-                    // a 16-byte BigInt header plus optional limb tail).
-                    if (PyArray_TYPE(arr) == NPY_OBJECT
-                        || !schema_is_fixed_width((Schema*)element_schema)) {
+                    // A bulk or widening route copies `width` bytes per
+                    // element; any other array is sized element by element.
+                    npy_route_t route;
+                    if (numpy_route(arr, element_schema, &route) != 0) return -1;
+                    size_t total_elements = (size_t)PyArray_SIZE(arr);
+                    if (route == NPY_ROUTE_EACH) {
                         if (!per_element) {
                             for (size_t i = 0; i < total_elements; i++) {
                                 PyObject* item = PyArray_GETITEM(arr, PyArray_GETPTR1(arr, i));
@@ -688,11 +856,13 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
                         w->total += (ssize_t)(total_elements * element_schema->width);
                         return 0;
                     }
-                } else if (PyBytes_Check(obj)) {
-                    w->total += (ssize_t)PyBytes_GET_SIZE(obj);
-                    return 0;
-                } else if (PyByteArray_Check(obj)) {
-                    w->total += (ssize_t)PyByteArray_GET_SIZE(obj);
+                } else if (PyBytes_Check(obj) || PyByteArray_Check(obj)) {
+                    if (schema->type == MORLOC_ARRAY && !bytes_fit_elements(element_schema)) {
+                        PyRAISE("bytes can stand for a list only of one-byte elements "
+                                "(U8, I8, Bool or an enum)");
+                    }
+                    w->total += (ssize_t)(PyBytes_Check(obj) ? PyBytes_GET_SIZE(obj)
+                                                             : PyByteArray_GET_SIZE(obj));
                     return 0;
                 } else if (PyUnicode_Check(obj)) {
                     Py_ssize_t len = 0;
@@ -773,8 +943,7 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
                 w->total += (ssize_t)schema->width;
                 return 0;
             }
-            size_t varm_align = schema_alignment((Schema*)varm);
-            if (varm_align == 0) varm_align = 1;
+            size_t varm_align = varm->alignment;
             w->total += (ssize_t)schema->width + (ssize_t)(varm_align - 1);
             return py_size_child(w, varm, vfields, 0);
         }
@@ -790,8 +959,7 @@ static int py_size_step(py_walk_t* w, const Schema* schema, PyObject* obj, size_
             }
             const Schema* inner = py_resolve(schema->parameters[0]);
             if (inner == NULL) return -1;
-            size_t inner_align = schema_alignment((Schema*)inner);
-            if (inner_align == 0) inner_align = 1;
+            size_t inner_align = inner->alignment;
             w->total += (ssize_t)schema->width + (ssize_t)(inner_align - 1);
             return py_size_child(w, inner, obj, 0);
         }
@@ -940,7 +1108,15 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
             if (!PyFloat_Check(obj)) {
                 PyRAISE("Expected float for MORLOC_FLOAT32, but got %s", Py_TYPE(obj)->tp_name);
             }
-            *((float*)dest) = (float)PyFloat_AsDouble(obj);
+            {
+                double d = PyFloat_AsDouble(obj);
+                if (morloc_f32_from_f64(d, (float*)dest) != 0) {
+                    // Python's error formatter has no float conversion.
+                    char shown[32];
+                    snprintf(shown, sizeof shown, "%g", d);
+                    PyRAISE("value %s out of range for F32", shown);
+                }
+            }
             break;
 
         case MORLOC_FLOAT64:
@@ -1072,37 +1248,41 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                 // header / sub-data that numpy's flat dtype storage
                 // does not provide).
                 bool numpy_per_element = false;
+                npy_route_t np_route = NPY_ROUTE_BULK;
                 if (PyList_Check(obj)) {
                     size = PyList_Size(obj);
-                } else if (PyBytes_Check(obj)) {
-                    // This needs non-const data
-                    PyBytes_AsStringAndSize(obj, &mutable_data, &size);
-                } else if (PyByteArray_Check(obj)) {
-                    mutable_data = PyByteArray_AS_STRING(obj);
-                    size = PyByteArray_GET_SIZE(obj);
+                } else if (PyBytes_Check(obj) || PyByteArray_Check(obj)) {
+                    if (PyBytes_Check(obj)) {
+                        // This needs non-const data
+                        PyBytes_AsStringAndSize(obj, &mutable_data, &size);
+                    } else {
+                        mutable_data = PyByteArray_AS_STRING(obj);
+                        size = PyByteArray_GET_SIZE(obj);
+                    }
+                    if (schema->type == MORLOC_ARRAY) {
+                        if (!bytes_fit_elements(element_schema)) {
+                            PyRAISE("bytes can stand for a list only of one-byte elements "
+                                    "(U8, I8, Bool or an enum)");
+                        }
+                        if (check_byte_elements(element_schema, (const unsigned char*)mutable_data, (size_t)size) != 0) {
+                            goto error;
+                        }
+                    }
                 } else if (schema->type == MORLOC_ARRAY && PyObject_HasAttrString(obj, "__array_interface__")) { // check if it is a numpy array
                     import_numpy();
                     PyArrayObject* arr = (PyArrayObject*)obj;
                     size = PyArray_SIZE(arr);
-
-                    // Force per-element path when the morloc element
-                    // schema is variable-width. The memcpy fast-path
-                    // assumes numpy's flat element storage matches the
-                    // wire layout; for Int (16-byte BigInt vs 8-byte
-                    // int64) and other variable-width schemas it does
-                    // not, and memcpy would read past numpy's buffer
-                    // and write corrupt headers into SHM.
-                    if (PyArray_TYPE(arr) == NPY_OBJECT
-                        || !schema_is_fixed_width((Schema*)element_schema)) {
-                        // Boxed numpy array OR variable-width element
-                        // schema: leave immutable_data NULL and dispatch
-                        // to the per-element path below.
+                    if (numpy_route(arr, element_schema, &np_route) != 0) goto error;
+                    if (np_route == NPY_ROUTE_EACH) {
+                        // Leave immutable_data NULL and dispatch to the
+                        // per-element path below, which converts and
+                        // range-checks each value.
                         numpy_per_element = true;
-                    } else {
-                        // Fixed-width primitive numpy array.
+                    } else if (np_route == NPY_ROUTE_BULK) {
                         immutable_data = PyArray_DATA(arr);
-                        if (!PyArray_ISCONTIGUOUS(arr)) {
-                            PyRAISE("NumPy array must be contiguous");
+                        if (element_schema->width == 1
+                            && check_byte_elements(element_schema, (const unsigned char*)immutable_data, (size_t)size) != 0) {
+                            goto error;
                         }
                     }
                 } else {
@@ -1122,8 +1302,8 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                 // Array bumps to 64 for primitive numeric elements (SIMD/BLAS).
                 {
                     size_t buf_align = (schema->type == MORLOC_STRING)
-                        ? schema_alignment(schema->parameters[0])
-                        : array_data_alignment(element_schema);
+                        ? schema->parameters[0]->alignment
+                        : element_schema->data_alignment;
                     *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, buf_align);
                 }
 
@@ -1210,6 +1390,17 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
                     // move cursor to the location after the copied data
                     *cursor = (void*)(*(char**)cursor + size);
                 }
+                else if (np_route == NPY_ROUTE_CAST) {
+                    absptr_t tmp_ptr = PyTRY(rel2abs, result->data);
+                    PyArrayObject* cast = (PyArrayObject*)PyArray_FromArray(
+                        (PyArrayObject*)obj,
+                        PyArray_DescrFromType(schema_to_npy_type(element_schema->type)),
+                        NPY_ARRAY_CARRAY);
+                    if (!cast) goto error;
+                    memcpy(tmp_ptr, PyArray_DATA(cast), size * width);
+                    Py_DECREF(cast);
+                    *cursor = (void*)(*(char**)cursor + size * width);
+                }
                 else{
                     absptr_t tmp_ptr = PyTRY(rel2abs, result->data);
                     memcpy(tmp_ptr, immutable_data, size * width);
@@ -1278,8 +1469,7 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
             if (warm->size == 0) {
                 *(relptr_t*)((char*)dest + 8) = RELNULL;
             } else {
-                size_t warm_align = schema_alignment((Schema*)warm);
-                if (warm_align == 0) warm_align = 1;
+                size_t warm_align = warm->alignment;
                 *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, warm_align);
                 {
                     char* rel_err = NULL;
@@ -1306,8 +1496,7 @@ static int py_write_step(py_walk_t* w, const Schema* schema, void* dest, PyObjec
             } else {
                 const Schema* inner_schema = py_resolve(schema->parameters[0]);
                 if (inner_schema == NULL) goto error;
-                size_t inner_align = schema_alignment((Schema*)inner_schema);
-                if (inner_align == 0) inner_align = 1;
+                size_t inner_align = inner_schema->alignment;
                 *cursor = (void*)ALIGN_UP((uintptr_t)*cursor, inner_align);
                 {
                     char* rel_err = NULL;
@@ -1439,7 +1628,7 @@ static int py_read_child(py_walk_t* w, const Schema* schema, const void* data, u
 }
 
 static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, size_t idx, unsigned char slot_kind, PyObject* parent, Py_ssize_t slot, const char* key) { MAYFAIL
-    const void* base_ptr = w->base_ptr;
+    const morloc_space_t space = w->space;
     PyObject* obj = NULL;
 
     if (idx > 0) {
@@ -1508,7 +1697,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                 obj = PyLong_FromLongLong(val);
             } else {
                 // Overflow: second field is relptr to limb array
-                void* limb_ptr = resolve_relptr(*(relptr_t*)&fields[1], base_ptr, NULL);
+                void* limb_ptr = PyTRY(resolve_array, *(relptr_t*)&fields[1], (size_t)bigint_size, sizeof(uint64_t), space);
                 obj = _PyLong_FromByteArray(
                     (const unsigned char*)limb_ptr,
                     bigint_size * sizeof(uint64_t),
@@ -1524,7 +1713,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                          : (schema->type == MORLOC_OSTREAM) ? MLC_KIND_OSTREAM
                          :                                    MLC_KIND_ISTREAM;
             int64_t handle = PyTRY(mlc_read_handle_voidstar,
-                                   data, base_ptr, kind);
+                                   data, space, kind);
             obj = PyLong_FromLongLong((long long)handle);
             if (!obj) {
                 PyINTERNAL_ABORT("Failed to wrap stream handle as PyLong");
@@ -1536,7 +1725,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
             void* tmp_ptr = NULL;
 
             if (str_array->size != 0) {
-                tmp_ptr = PyTRY(resolve_relptr, str_array->data, base_ptr);
+                tmp_ptr = PyTRY(resolve_array, str_array->data, str_array->size, 1, space);
             }
 
             if (schema->hint != NULL && strcmp(schema->hint, "bytes") == 0) {
@@ -1576,13 +1765,13 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
             Array* array = (Array*)data;
             // Producer writes RELNULL into array->data for empty arrays
             // (see cppmorloc to_voidstar), so resolve only when non-empty.
-            void* absptr = NULL;
-            if (array->size != 0) {
-                absptr = PyTRY(resolve_relptr, array->data, base_ptr);
-            }
             const Schema* element_schema = py_resolve(schema->parameters[0]);
             if (element_schema == NULL) goto error;
             size_t width = element_schema->width;
+            void* absptr = NULL;
+            if (array->size != 0) {
+                absptr = PyTRY(resolve_array, array->data, array->size, width, space);
+            }
             // The "numpy.ndarray" hint is authoritative: the user wants a
             // NumPy array, regardless of element type. For fixed-width
             // primitive elements we use the natural dtype (zero-copy / fast
@@ -1633,9 +1822,9 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                 // Own the buffer when the source is inline (packet buffer is
                 // freed shortly after get_value returns; a view would see
                 // recycled memory) or empty (no data to view). Otherwise take
-                // a zero-copy view over SHM, which outlives this array via
-                // the deferred shm_tracker decref.
-                if (base_ptr != NULL || array->size == 0) {
+                // a zero-copy view over SHM, which holds the block through
+                // its owner (see shm view owners).
+                if (space.base != NULL || array->size == 0) {
                     obj = PyArray_SimpleNew(1, dims, numpy_type_num);
                     if (obj == NULL) {
                         PyINTERNAL_ABORT("Failed to allocate numpy array");
@@ -1650,9 +1839,29 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                     if(obj == NULL) {
                         PyRAISE("Failed to parse data");
                     }
+                    // A view outside from_voidstar_owned has no block to
+                    // own; every SHM read goes through it.
+                    if (shm_view_ctx.block == NULL) {
+                        PyRAISE("numpy view of shared memory read without an owner");
+                    }
+                    PyObject* owner = shm_view_owner();
+                    if (owner == NULL) {
+                        goto error;
+                    }
+                    Py_INCREF(owner);
+                    if (PyArray_SetBaseObject((PyArrayObject*)obj, owner) < 0) {
+                        Py_DECREF(owner);
+                        goto error;
+                    }
+                    // The view aliases shared memory that other pools may be
+                    // reading, and morloc values are immutable, so the array
+                    // is read-only. A kernel that needs to modify it calls
+                    // .copy() and pays for its own buffer. Without this a
+                    // write through the view corrupts another pool's data
+                    // with no error and no way to trace it.
+                    PyArray_CLEARFLAGS((PyArrayObject*)obj, NPY_ARRAY_WRITEABLE);
                 }
                 // Note that we do not want to give ownership to Python.
-                // This is shared memory, which means python should not mutate it.
                 break;
             } else if (schema->hint != NULL && strcmp(schema->hint, "list") == 0) {
                 // Explicit "list" hint takes precedence over the UInt8 fast-path
@@ -1666,6 +1875,12 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                     PyINTERNAL_ABORT("Failed to allocate list");
                 }
             } else if (schema->hint != NULL && strcmp(schema->hint, "bytearray") == 0) {
+                if (!bytes_fit_elements(element_schema)) {
+                    PyErr_SetString(PyExc_TypeError,
+                        "a list mapped to bytearray must have one-byte elements "
+                        "(U8, I8, Bool or an enum)");
+                    goto error;
+                }
                 obj = PyByteArray_FromStringAndSize((const char*)absptr, array->size);
                 if (!obj) {
                     PyErr_SetString(PyExc_TypeError, "Failed to create bytearray");
@@ -1775,7 +1990,7 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
                 PyTuple_SET_ITEM(pair, 1, fields);
                 return 0;
             }
-            const void* payload = PyTRY(resolve_relptr, vrelptr, base_ptr);
+            const void* payload = PyTRY(resolve_region, vrelptr, arm->width, space);
             // The arm's schema describes its fields as a tuple, so the walk
             // over that shape builds the field sequence.
             return py_read_child(w, arm, payload, PY_SLOT_TUPLE, pair, 1, NULL);
@@ -1783,15 +1998,15 @@ static int py_read_step(py_walk_t* w, const Schema* schema, const void* data, si
         case MORLOC_OPTIONAL: {
             // The Optional slot is a relptr (RELNULL = absent). Resolve and
             // read the inner T's body into this same slot when present.
-            // base_ptr is set when the data lives inline in a packet payload
-            // (relptrs are payload-relative); otherwise we go through SHM.
             relptr_t relptr = *(const relptr_t*)data;
             if (relptr == RELNULL) {
                 Py_INCREF(Py_None);
                 obj = Py_None;
                 break;
             }
-            const void* inner_abs = PyTRY(resolve_relptr, relptr, base_ptr);
+            const Schema* inner = py_resolve(schema->parameters[0]);
+            if (inner == NULL) goto error;
+            const void* inner_abs = PyTRY(resolve_region, relptr, inner->width, space);
             return py_read_child(w, schema->parameters[0], inner_abs, slot_kind, parent, slot, key);
         }
         default:
@@ -1807,10 +2022,10 @@ error:
 }
 
 // Build the Python value at `data`, or NULL with a Python error set.
-PyObject* from_voidstar(const Schema* schema, const void* data, const void* base_ptr){
+PyObject* from_voidstar(const Schema* schema, const void* data, morloc_space_t space){
     py_walk_t w;
     py_walk_init(&w, schema);
-    w.base_ptr = base_ptr;
+    w.space = space;
     if (py_read_child(&w, schema, data, PY_SLOT_ROOT, NULL, 0, NULL) != 0) goto error;
     for (;;) {
         int r = py_next(&w);
@@ -1829,6 +2044,19 @@ error:
     Py_CLEAR(w.result);
     py_walk_free(&w);
     return NULL;
+}
+
+// Read the value in shared-memory block `block`. Any view the value holds
+// onto the block owns a reference of its own, so the caller's reference can
+// be released as soon as this returns.
+static PyObject* from_voidstar_owned(const Schema* schema, void* block) {
+    shm_view_ctx_t saved = shm_view_ctx;
+    shm_view_ctx.block = (absptr_t)block;
+    shm_view_ctx.owner = NULL;
+    PyObject* obj = from_voidstar(schema, block, morloc_shm_space());
+    Py_XDECREF(shm_view_ctx.owner);
+    shm_view_ctx = saved;
+    return obj;
 }
 
 
@@ -2104,6 +2332,27 @@ error:
 }
 
 
+// Record the socket this pool serves; see mlc_set_self_socket.
+static PyObject* pybinding__set_self_socket(PyObject* self, PyObject* args) {
+    const char* socket_path;
+    if (!PyArg_ParseTuple(args, "s", &socket_path)) {
+        return NULL;
+    }
+    mlc_set_self_socket(socket_path);
+    Py_RETURN_NONE;
+}
+
+// The lifeline descriptor this pool watches for its nexus's end, or -1.
+static PyObject* pybinding__lifeline_adopt(PyObject* self, PyObject* args) {
+    return PyLong_FromLong(morloc_lifeline_adopt());
+}
+
+// End this pool's process group once the watched lifeline reaches end of file.
+static PyObject* pybinding__lifeline_teardown(PyObject* self, PyObject* args) {
+    morloc_lifeline_teardown();
+    Py_RETURN_NONE;
+}
+
 static PyObject* pybinding__close_daemon(PyObject* self, PyObject* args) {
     PyObject* daemon_capsule;
 
@@ -2361,6 +2610,9 @@ static PyObject* pybinding__put_value(PyObject* self, PyObject* args){ MAYFAIL
 
         if (self_contained) {
             packet = PyTRY_INFRA(make_inline_data_packet, shm_ptr, schema);
+            // The packet carries a copy of the table, so the block is not
+            // needed past this call.
+            shm_tracker_release_one((absptr_t)shm_ptr);
         } else {
             packet = make_arrow_data_packet(relptr, schema);
         }
@@ -2442,6 +2694,9 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
     const char* schema_str;
 
     PARSE_ARGS_OR_ABORT(args, "y#s", &packet, &packet_size, &schema_str);
+    if (!morloc_packet_fits((const uint8_t*)packet, packet_size)) {
+        PyRAISE("a %zu-byte packet is shorter than its header claims", packet_size);
+    }
 
     const morloc_packet_header_t* header = (const morloc_packet_header_t*)packet;
     uint8_t source = header->command.data.source;
@@ -2456,9 +2711,6 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
     // `schema` to the `error:` label; freeing it here as well would free
     // it twice.
     if (schema->type == MORLOC_TABLE) {
-        if (format == PACKET_FORMAT_ARROW && source != PACKET_SOURCE_RPTR) {
-            PyRAISE("Arrow packet does not name a shared-memory block");
-        }
         bool materialized = (source != PACKET_SOURCE_RPTR);
         voidstar = PyTRY_INFRA(get_morloc_data_packet_value, (uint8_t*)packet, schema);
 
@@ -2476,33 +2728,21 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
             goto error;
         }
 
-        // Hold the block for as long as pyarrow references its buffers,
-        // releasing it at the next dispatch. A table that arrived by
-        // reference needs one taken on this pool's behalf; the sender
-        // donated one before sending, so a refusal means the block is
-        // gone and the view would read scrubbed memory. A table
-        // materialized here is already this pool's own.
-        if (!materialized) {
-            char* incref_err = NULL;
-            bool acquired = shincref((absptr_t)voidstar, &incref_err);
-            if (incref_err) { free(incref_err); }
-            if (!acquired) {
-                PyINTERNAL_ABORT("received table's shared-memory block is no longer live");
-            }
-        }
-        shm_tracker_push((absptr_t)voidstar, NULL);
-        {
-            char* rerr = NULL;
-            relptr_t rel = abs2rel(voidstar, &rerr);
-            if (rerr) { free(rerr); } else { arrow_borrow_register((const uint8_t*)voidstar, rel); }
-        }
-
+        // The batch holds the block for exactly as long as pyarrow reads
+        // it: a table that arrived by reference takes one of its own,
+        // while a block this pool materialized passes its only reference
+        // to the view.
         struct ArrowSchema arrow_schema;
         struct ArrowArray arrow_array;
         char* arrow_err = NULL;
-        arrow_from_shm(arrow_hdr, &arrow_schema, &arrow_array, &arrow_err);
-        if (arrow_err) {
-            PyErr_SetString(PyExc_RuntimeError, arrow_err);
+        if (arrow_from_shm_owned(arrow_hdr, materialized ? 0 : 1,
+                                 &arrow_schema, &arrow_array, &arrow_err) != 0) {
+            if (materialized) {
+                char* ferr = NULL;
+                shfree((absptr_t)voidstar, &ferr);
+                if (ferr) { free(ferr); }
+            }
+            PyErr_SetString(PyExc_RuntimeError, arrow_err ? arrow_err : "cannot view the table's block");
             free(arrow_err);
             goto error;
         }
@@ -2550,7 +2790,11 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         && header->command.data.compression == PACKET_COMPRESSION_NONE
         && header->command.data.encryption == PACKET_ENCRYPTION_NONE) {
         const uint8_t* payload = (const uint8_t*)packet + sizeof(morloc_packet_header_t) + header->offset;
-        obj = from_voidstar(schema, (const void*)payload, (const void*)payload);
+        if (header->length < schema->width) {
+            free_schema(schema);
+            PyRAISE("a %zu-byte inline payload cannot hold its %zu-byte value", (size_t)header->length, schema->width);
+        }
+        obj = from_voidstar(schema, (const void*)payload, morloc_payload_space(payload, (size_t)header->length));
         PyTRACE(obj == NULL)
         free_schema(schema);
         return obj;
@@ -2581,16 +2825,18 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
             result = PyList_New(0);
             if (!result) goto stream_error;
             while (1) {
-                void* chunk = mlc_next(handle, &stream_err);
+                int32_t eof = 0;
+                void* chunk = mlc_next_frame(handle, &eof, &stream_err);
                 if (stream_err) goto stream_error;
-                if (chunk == NULL) break;
+                if (eof || chunk == NULL) break;
+                // An empty sub-packet is an empty batch, not the end.
                 Array* arr = (Array*)chunk;
                 if (arr->size == 0) {
                     char* ferr = NULL; shfree(chunk, &ferr);
                     if (ferr) free(ferr);
-                    break;
+                    continue;
                 }
-                PyObject* chunk_py = from_voidstar(schema, chunk, NULL);
+                PyObject* chunk_py = from_voidstar_owned(schema, chunk);
                 char* ferr = NULL; shfree(chunk, &ferr);
                 if (ferr) free(ferr);
                 if (chunk_py == NULL) goto stream_error;
@@ -2629,10 +2875,13 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
 
     voidstar = PyTRY_INFRA(get_morloc_data_packet_value, (uint8_t*)packet, schema);
 
-    // A value that arrived by reference needs a reference of this pool's
-    // own so the sender's flush cannot reclaim it while it is read or
-    // forwarded. The sender donated one before sending, so a refusal
-    // means the block is already gone.
+    // A value that arrived by reference is read under a reference of this
+    // pool's own. Whoever handed over the packet keeps it alive meanwhile --
+    // a caller blocked in its call, or the donated reference a foreign
+    // call's result carries -- so a refusal means the block is already gone.
+    // A payload that did not arrive by reference was materialized into a
+    // block of this pool's own. Either way the reference is released once
+    // the value is read: a view onto the block holds one of its own.
     if (is_rptr) {
         char* incref_err = NULL;
         bool acquired = shincref((absptr_t)voidstar, &incref_err);
@@ -2640,20 +2889,14 @@ static PyObject* pybinding__get_value(PyObject* self, PyObject* args){ MAYFAIL
         if (!acquired) {
             PyINTERNAL_ABORT("received value's shared-memory block is no longer live");
         }
-        // Track for deferred decref (tracker takes schema ownership)
-        shm_tracker_push((absptr_t)voidstar, schema);
-        tracked = true;
-    } else {
-        // A payload that did not arrive by reference was materialized into a
-        // block of this pool's own, and nothing else will free it. It is
-        // handed to the tracker rather than released here because a result
-        // can be a view onto these bytes rather than a copy of them, so the
-        // block has to outlive this call exactly as a referenced one does.
-        shm_tracker_push((absptr_t)voidstar, schema);
-        tracked = true;
     }
 
-    obj = from_voidstar(schema, voidstar, NULL);
+    obj = from_voidstar_owned(schema, voidstar);
+    {
+        char* free_err = NULL;
+        shfree((absptr_t)voidstar, &free_err);
+        if (free_err) { free(free_err); }
+    }
     PyTRACE(obj == NULL)
 
     if (!tracked) {
@@ -2672,6 +2915,11 @@ error:
 
 // Free tracked SHM allocations from put_value calls.
 // Called at dispatch start to free result SHM from previous dispatch.
+static PyObject* pybinding__shm_live_bytes(PyObject* self, PyObject* args) {
+    (void)self; (void)args;
+    return PyLong_FromLongLong((long long)morloc_shm_live_bytes());
+}
+
 static PyObject* pybinding__shm_tracker_flush(PyObject* self, PyObject* args) {
     (void)self; (void)args;
     shm_tracker_flush();
@@ -2762,6 +3010,20 @@ static PyObject* pybinding__debug_drain_frames(PyObject* self, PyObject* args) {
     PyObject* result = PyUnicode_FromString(trace);
     free(trace);
     return result;
+}
+
+// Atomically add `delta` to the C int at `address` and return the new value.
+// The pool's worker processes share their counters in memory inherited
+// across fork; a Python read-then-write on it loses updates.
+static PyObject* pybinding__atomic_add_int(PyObject* self, PyObject* args) {
+    (void)self;
+    unsigned long long address;
+    int delta;
+    if (!PyArg_ParseTuple(args, "Ki", &address, &delta)) {
+        return NULL;
+    }
+    int value = __atomic_add_fetch((int*)(uintptr_t)address, delta, __ATOMIC_SEQ_CST);
+    return PyLong_FromLong(value);
 }
 
 // Reset per-dispatch debug state (recursion counters, write counter,
@@ -3186,18 +3448,17 @@ static PyObject* pybinding__mlc_save(PyObject* self, PyObject* args) { MAYFAIL
     Schema* schema = NULL;
     void* voidstar = NULL;
 
-    // Args: (value, schema, level, path). The level is accepted here
-    // for ABI uniformity with mlc_save_voidstar; the runtime ignores it
-    // for the msgpack format (not a packet file).
+    // Args: (value, schema, level, path). The level is accepted for ABI
+    // uniformity with mlc_save_voidstar; the runtime range-checks it, but
+    // a msgpack file has no header to record it in.
     PARSE_ARGS_OR_ABORT(args, "OsLs", &obj, &schema_str, &level_ll, &path);
-    uint8_t level = (uint8_t)level_ll;
 
     schema = PyTRY(parse_schema, schema_str);
 
     voidstar = to_voidstar(schema, obj);
     PyTRACE(voidstar == NULL)
 
-    PyTRY(mlc_save, voidstar, schema, level, path);
+    PyTRY(mlc_save, voidstar, schema, level_ll, path);
 
     {
         char* shfree_errmsg = NULL;
@@ -3228,14 +3489,13 @@ static PyObject* pybinding__mlc_save_voidstar(PyObject* self, PyObject* args) { 
     // Args: (value, schema, level, path). level is the zstd preset
     // (0 = uncompressed, 1-9 = increasing ratio).
     PARSE_ARGS_OR_ABORT(args, "OsLs", &obj, &schema_str, &level_ll, &path);
-    uint8_t level = (uint8_t)level_ll;
 
     schema = PyTRY(parse_schema, schema_str);
 
     voidstar = to_voidstar(schema, obj);
     PyTRACE(voidstar == NULL)
 
-    PyTRY(mlc_save_voidstar, voidstar, schema, level, path);
+    PyTRY(mlc_save_voidstar, voidstar, schema, level_ll, path);
 
     {
         char* shfree_errmsg = NULL;
@@ -3265,14 +3525,13 @@ static PyObject* pybinding__mlc_save_json(PyObject* self, PyObject* args) { MAYF
 
     // Args: (value, schema, level, path). level accepted for ABI uniformity.
     PARSE_ARGS_OR_ABORT(args, "OsLs", &obj, &schema_str, &level_ll, &path);
-    uint8_t level = (uint8_t)level_ll;
 
     schema = PyTRY(parse_schema, schema_str);
 
     voidstar = to_voidstar(schema, obj);
     PyTRACE(voidstar == NULL)
 
-    PyTRY(mlc_save_json, voidstar, schema, level, path);
+    PyTRY(mlc_save_json, voidstar, schema, level_ll, path);
 
     {
         char* shfree_errmsg = NULL;
@@ -3332,6 +3591,33 @@ error:
     return NULL;
 }
 
+// @unpack: decode a morloc packet held as bytes (or as a list of ints), as
+// an argument packet is decoded.
+static PyObject* pybinding__mlc_unpack(PyObject* self, PyObject* args) {
+    const char* schema_str;
+    PyObject* data;
+    if (!PyArg_ParseTuple(args, "sO", &schema_str, &data)) {
+        return NULL;
+    }
+    PyObject* packet = PyBytes_FromObject(data);
+    if (packet == NULL) {
+        return NULL;
+    }
+    if ((size_t)PyBytes_GET_SIZE(packet) < sizeof(morloc_packet_header_t)) {
+        Py_DECREF(packet);
+        PyErr_SetString(PyExc_RuntimeError, "@unpack: packet is shorter than its header");
+        return NULL;
+    }
+    PyObject* inner = Py_BuildValue("(Os)", packet, schema_str);
+    Py_DECREF(packet);
+    if (inner == NULL) {
+        return NULL;
+    }
+    PyObject* result = pybinding__get_value(self, inner);
+    Py_DECREF(inner);
+    return result;
+}
+
 static PyObject* pybinding__mlc_read(PyObject* self, PyObject* args) { MAYFAIL
     const char* schema_str;
     const char* json_str;
@@ -3362,20 +3648,19 @@ static PyObject* pybinding__mlc_read(PyObject* self, PyObject* args) { MAYFAIL
     if (read_err != NULL) { free(read_err); read_err = NULL; }
 
     {
-        // The numpy fast-path in from_voidstar (base_ptr == NULL) returns a
-        // PyArray view of the SHM block via PyArray_SimpleNewFromData -- the
-        // backing memory must outlive the view. Defer the shfree via
-        // shm_tracker so the dispatch's flush releases the block (and the
-        // schema) once the view is no longer in scope.
-        PyObject* obj = from_voidstar(schema, voidstar, NULL);
-        if (obj == NULL) {
+        // The numpy fast-path in from_voidstar (shared-memory space) returns a
+        // Any view of the block holds it through its owner; the block's own
+        // reference is released as soon as the value is read.
+        PyObject* obj = from_voidstar_owned(schema, voidstar);
+        {
             char* shfree_errmsg = NULL;
             shfree(voidstar, &shfree_errmsg);
             free(shfree_errmsg);
-            free_schema(schema);
+        }
+        free_schema(schema);
+        if (obj == NULL) {
             return NULL;
         }
-        shm_tracker_push((absptr_t)voidstar, schema);
         return obj;
     }
 
@@ -3419,20 +3704,19 @@ static PyObject* pybinding__mlc_load(PyObject* self, PyObject* args) { MAYFAIL
     if (load_err != NULL) { free(load_err); load_err = NULL; }
 
     {
-        // The numpy fast-path in from_voidstar (base_ptr == NULL) returns a
-        // PyArray view of the SHM block via PyArray_SimpleNewFromData -- the
-        // backing memory must outlive the view. Defer the shfree via
-        // shm_tracker so the dispatch's flush releases the block (and the
-        // schema) once the view is no longer in scope.
-        PyObject* obj = from_voidstar(schema, voidstar, NULL);
-        if (obj == NULL) {
+        // The numpy fast-path in from_voidstar (shared-memory space) returns a
+        // Any view of the block holds it through its owner; the block's own
+        // reference is released as soon as the value is read.
+        PyObject* obj = from_voidstar_owned(schema, voidstar);
+        {
             char* shfree_errmsg = NULL;
             shfree(voidstar, &shfree_errmsg);
             free(shfree_errmsg);
-            free_schema(schema);
+        }
+        free_schema(schema);
+        if (obj == NULL) {
             return NULL;
         }
-        shm_tracker_push((absptr_t)voidstar, schema);
         return obj;
     }
 
@@ -3461,7 +3745,9 @@ error:
 static PyObject* pybinding__mlc_close(PyObject* self, PyObject* args) { MAYFAIL
     long long handle_ll;
     PARSE_ARGS_OR_ABORT(args, "L", &handle_ll);
-    PyTRY(mlc_close, (int64_t)handle_ll);
+    int32_t rc_ = 0;
+    PyTRY_NOGIL(rc_, mlc_close, (int64_t)handle_ll);
+    (void)rc_;
     Py_RETURN_NONE;
 error:
     return NULL;
@@ -3577,18 +3863,18 @@ static PyObject* pybinding__mlc_ifile_walk(PyObject* self, PyObject* args) { MAY
         Py_RETURN_NONE;
     }
     {
-        // Mirrors mlc_load's deferred-shfree pattern: from_voidstar may
-        // produce a numpy view backed by the SHM block, so defer freeing
-        // until the dispatch flushes.
-        PyObject* obj = from_voidstar(schema, voidstar, NULL);
-        if (obj == NULL) {
+        // Any view of the block holds it through its owner; the block's own
+        // reference is released as soon as the value is read.
+        PyObject* obj = from_voidstar_owned(schema, voidstar);
+        {
             char* shfree_errmsg = NULL;
             shfree(voidstar, &shfree_errmsg);
             free(shfree_errmsg);
-            free_schema(schema);
+        }
+        free_schema(schema);
+        if (obj == NULL) {
             return NULL;
         }
-        shm_tracker_push((absptr_t)voidstar, schema);
         return obj;
     }
 error:
@@ -3621,21 +3907,24 @@ static PyObject* pybinding__mlc_next(PyObject* self, PyObject* args) { MAYFAIL
     void* voidstar = NULL;
     PARSE_ARGS_OR_ABORT(args, "sL", &schema_str, &handle_ll);
     schema = PyTRY(parse_schema, schema_str);
-    voidstar = PyTRY(mlc_next, (int64_t)handle_ll);
+    PyTRY_NOGIL(voidstar, mlc_next, (int64_t)handle_ll);
     if (voidstar == NULL) {
         free_schema(schema);
         Py_RETURN_NONE;
     }
     {
-        PyObject* obj = from_voidstar(schema, voidstar, NULL);
-        if (obj == NULL) {
+        // Any view of the block holds it through its owner; the block's own
+        // reference is released as soon as the value is read.
+        PyObject* obj = from_voidstar_owned(schema, voidstar);
+        {
             char* shfree_errmsg = NULL;
             shfree(voidstar, &shfree_errmsg);
             free(shfree_errmsg);
-            free_schema(schema);
+        }
+        free_schema(schema);
+        if (obj == NULL) {
             return NULL;
         }
-        shm_tracker_push((absptr_t)voidstar, schema);
         return obj;
     }
 error:
@@ -3664,15 +3953,18 @@ static PyObject* pybinding__mlc_stream_layout(PyObject* self, PyObject* args) { 
         Py_RETURN_NONE;
     }
     {
-        PyObject* obj = from_voidstar(schema, voidstar, NULL);
-        if (obj == NULL) {
+        // Any view of the block holds it through its owner; the block's own
+        // reference is released as soon as the value is read.
+        PyObject* obj = from_voidstar_owned(schema, voidstar);
+        {
             char* shfree_errmsg = NULL;
             shfree(voidstar, &shfree_errmsg);
             free(shfree_errmsg);
-            free_schema(schema);
+        }
+        free_schema(schema);
+        if (obj == NULL) {
             return NULL;
         }
-        shm_tracker_push((absptr_t)voidstar, schema);
         return obj;
     }
 error:
@@ -3767,7 +4059,11 @@ static PyObject* pybinding__mlc_write(PyObject* self, PyObject* args) { MAYFAIL
     if (to_voidstar_inner(voidstar, &cursor, schema, value_obj) != 0) {
         goto error;
     }
-    PyTRY(mlc_write, (uint8_t)level_ll, (int64_t)handle_ll, voidstar);
+    {
+        int32_t rc_ = 0;
+        PyTRY_NOGIL(rc_, mlc_write, level_ll, (int64_t)handle_ll, voidstar);
+        (void)rc_;
+    }
     {
         char* shfree_errmsg = NULL;
         shfree(voidstar, &shfree_errmsg);
@@ -3838,12 +4134,89 @@ error:
     return NULL;
 }
 
+// mlc_open_channel(schema_str) -> handle. A channel is one handle for both
+// ends: a streamed @parse argument's producer writes it, its reader reads it.
+static PyObject* pybinding__mlc_open_channel(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    PARSE_ARGS_OR_ABORT(args, "s", &schema_str);
+    int64_t h = PyTRY(mlc_open_channel, schema_str);
+    return PyLong_FromLongLong((long long)h);
+error:
+    return NULL;
+}
+
+// mlc_is_channel(handle) -> bool. A channel read or write may wait.
+static PyObject* pybinding__mlc_is_channel(PyObject* self, PyObject* args) {
+    long long handle_ll;
+    if (!PyArg_ParseTuple(args, "L", &handle_ll)) return NULL;
+    return PyBool_FromLong(mlc_is_channel((int64_t)handle_ll));
+}
+
+// mlc_settle(handle) -> None. Release the channel; raises the producer's
+// failure, unchanged, if a reader was handed it.
+static PyObject* pybinding__mlc_settle(PyObject* self, PyObject* args) { MAYFAIL
+    long long handle_ll;
+    PARSE_ARGS_OR_ABORT(args, "L", &handle_ll);
+    mlc_settle((int64_t)handle_ll, &child_errmsg_);
+    if (child_errmsg_ != NULL) {
+        PyErr_SetString(PyMorlocException, child_errmsg_);
+        free(child_errmsg_);
+        return NULL;
+    }
+    Py_RETURN_NONE;
+error:
+    return NULL;
+}
+
+// mlc_spawn(socket_path, mid, packets, handle) -> None. Send the call
+// without waiting for it; its outcome is recorded on the channel.
+static PyObject* pybinding__mlc_spawn(PyObject* self, PyObject* args) { MAYFAIL
+    const char* socket_path;
+    int mid;
+    PyObject* py_args;
+    long long handle_ll;
+    const uint8_t** arg_packets = NULL;
+    PARSE_ARGS_OR_ABORT(args, "siOL", &socket_path, &mid, &py_args, &handle_ll);
+    if (!PyList_Check(py_args)) {
+        PyRAISE("mlc_spawn: packets must be a list");
+    }
+    Py_ssize_t nargs = PyList_GET_SIZE(py_args);
+    arg_packets = (const uint8_t**)calloc(nargs > 0 ? nargs : 1, sizeof(uint8_t*));
+    if (!arg_packets) PyINTERNAL_ABORT("mlc_spawn: out of memory");
+    for (Py_ssize_t i = 0; i < nargs; i++) {
+        PyObject* item = PyList_GET_ITEM(py_args, i);
+        if (!PyBytes_Check(item)) {
+            free(arg_packets);
+            PyRAISE("mlc_spawn: every packet must be bytes");
+        }
+        arg_packets[i] = (const uint8_t*)PyBytes_AS_STRING(item);
+    }
+    {
+        bool ok_ = false;
+        Py_BEGIN_ALLOW_THREADS
+        ok_ = mlc_spawn(socket_path, (uint32_t)mid, arg_packets, (size_t)nargs, (int64_t)handle_ll, &child_errmsg_);
+        Py_END_ALLOW_THREADS
+        (void)ok_;
+    }
+    free(arg_packets);
+    if (child_errmsg_ != NULL) {
+        PyErr_Format(PyMorlocInternalError, "morloc internal error (Py pool, %s:%d in %s):\n%s", __FILE__, __LINE__, __func__, child_errmsg_);
+        free(child_errmsg_);
+        return NULL;
+    }
+    Py_RETURN_NONE;
+error:
+    return NULL;
+}
+
 // _mlc_flush(handle) -> None. Force the OStream's SHM buffer to
 // flush as a sub-packet now (instead of waiting for full / @close).
 static PyObject* pybinding__mlc_flush(PyObject* self, PyObject* args) { MAYFAIL
     long long handle_ll;
     PARSE_ARGS_OR_ABORT(args, "L", &handle_ll);
-    PyTRY(mlc_flush, (int64_t)handle_ll);
+    int32_t rc_ = 0;
+    PyTRY_NOGIL(rc_, mlc_flush, (int64_t)handle_ll);
+    (void)rc_;
     Py_RETURN_NONE;
 error:
     return NULL;
@@ -3881,6 +4254,193 @@ error:
     return NULL;
 }
 
+// -- Fold accumulators (the `@fold` stream-handler form) ------------------
+// One accumulator per thread that folds into it; the pool-side
+// _mlc_cell_reduce merges them with the handler's `combine`.
+
+// mlc_cell_new(schema, init) -> handle
+static PyObject* pybinding__mlc_cell_new(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    PyObject* init_obj;
+    Schema* schema = NULL;
+    void* voidstar = NULL;
+    PARSE_ARGS_OR_ABORT(args, "sO", &schema_str, &init_obj);
+    schema = PyTRY(parse_schema, schema_str);
+    voidstar = to_voidstar(schema, init_obj);
+    PyTRACE(voidstar == NULL)
+    int64_t handle = PyTRY(mlc_cell_new, schema, voidstar);
+    {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return PyLong_FromLongLong((long long)handle);
+error:
+    if (voidstar) {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return NULL;
+}
+
+// Shared tail for the two accumulator readers.
+static PyObject* cell_value_to_py(Schema* schema, void* voidstar) {
+    // Any view of the block holds it through its owner; the block's own
+    // reference is released as soon as the value is read.
+    PyObject* obj = from_voidstar_owned(schema, voidstar);
+    {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    if (obj == NULL) {
+        return NULL;
+    }
+    return obj;
+}
+
+// mlc_cell_get(handle, schema) -> value
+static PyObject* pybinding__mlc_cell_get(PyObject* self, PyObject* args) { MAYFAIL
+    long long handle_ll;
+    const char* schema_str;
+    Schema* schema = NULL;
+    PARSE_ARGS_OR_ABORT(args, "Ls", &handle_ll, &schema_str);
+    schema = PyTRY(parse_schema, schema_str);
+    void* voidstar = PyTRY(mlc_cell_get, (int64_t)handle_ll, schema);
+    return cell_value_to_py(schema, voidstar);
+error:
+    free_schema(schema);
+    return NULL;
+}
+
+// mlc_cell_put(handle, schema, value) -> None
+static PyObject* pybinding__mlc_cell_put(PyObject* self, PyObject* args) { MAYFAIL
+    long long handle_ll;
+    const char* schema_str;
+    PyObject* value_obj;
+    Schema* schema = NULL;
+    void* voidstar = NULL;
+    PARSE_ARGS_OR_ABORT(args, "LsO", &handle_ll, &schema_str, &value_obj);
+    schema = PyTRY(parse_schema, schema_str);
+    voidstar = to_voidstar(schema, value_obj);
+    PyTRACE(voidstar == NULL)
+    PyTRY(mlc_cell_put, (int64_t)handle_ll, schema, voidstar);
+    {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    Py_RETURN_NONE;
+error:
+    if (voidstar) {
+        char* shfree_errmsg = NULL;
+        shfree(voidstar, &shfree_errmsg);
+        free(shfree_errmsg);
+    }
+    free_schema(schema);
+    return NULL;
+}
+
+
+
+
+// mlc_replay(schema, handle, fn) -> None. Call `fn` on every frame
+// (sub-packet) of the stream, in order, each as the list it holds. An empty
+// frame is an empty list; only the end of the stream stops the loop.
+static PyObject* pybinding__mlc_replay(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    long long handle_ll;
+    PyObject* fn;
+    Schema* schema = NULL;
+    PARSE_ARGS_OR_ABORT(args, "sLO", &schema_str, &handle_ll, &fn);
+    schema = PyTRY(parse_schema, schema_str);
+    while (1) {
+        int32_t eof = 0;
+        void* voidstar = PyTRY(mlc_next_frame, (int64_t)handle_ll, &eof);
+        if (eof) break;
+        // Any view of the block holds it through its owner; the block's own
+        // reference is released as soon as the value is read.
+        PyObject* frame = from_voidstar_owned(schema, voidstar);
+        {
+            char* shfree_errmsg = NULL;
+            shfree(voidstar, &shfree_errmsg);
+            free(shfree_errmsg);
+        }
+        if (frame == NULL) {
+            goto error;
+        }
+        PyObject* r = PyObject_CallFunctionObjArgs(fn, frame, NULL);
+        Py_DECREF(frame);
+        if (r == NULL) goto error;
+        Py_DECREF(r);
+    }
+    free_schema(schema);
+    Py_RETURN_NONE;
+error:
+    if (schema) free_schema(schema);
+    return NULL;
+}
+
+// mlc_cell_reduce(schema, combine, handle) -> value. Fold every accumulator
+// into one with `combine`, then release the cell. The count is never zero --
+// an untouched cell answers with its seed -- so there is always a value.
+static PyObject* pybinding__mlc_cell_reduce(PyObject* self, PyObject* args) { MAYFAIL
+    const char* schema_str;
+    PyObject* combine;
+    // Initialized because the argument parse below can jump to `error`,
+    // where the cell is released.
+    long long handle_ll = -1;
+    Schema* schema = NULL;
+    PyObject* acc = NULL;
+    PARSE_ARGS_OR_ABORT(args, "sOL", &schema_str, &combine, &handle_ll);
+    int64_t n = PyTRY(mlc_cell_count, (int64_t)handle_ll);
+    if (n < 1) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "mlc_cell_reduce: fold accumulator holds nothing to merge");
+        goto error;
+    }
+    for (int64_t i = 0; i < n; i++) {
+        // One schema per accumulator: from_voidstar may hand back a numpy
+        // view over the block, so its release is deferred to the tracker --
+        // and the tracker frees the schema of every entry it holds.
+        schema = PyTRY(parse_schema, schema_str);
+        void* voidstar = PyTRY(mlc_cell_slot, (int64_t)handle_ll, i, schema);
+        // Takes the schema either way: to the tracker on success, freed
+        // on failure.
+        PyObject* v = cell_value_to_py(schema, voidstar);
+        schema = NULL;
+        if (v == NULL) { goto error; }
+        if (acc == NULL) {
+            acc = v;
+        } else {
+            PyObject* merged = PyObject_CallFunctionObjArgs(combine, acc, v, NULL);
+            Py_DECREF(acc);
+            Py_DECREF(v);
+            acc = merged;
+            if (acc == NULL) { goto error; }
+        }
+    }
+    PyTRY(mlc_cell_free, (int64_t)handle_ll);
+    return acc;
+error:
+    {
+        // The sweep at end of dispatch would reclaim this, but a @try-wrapped
+        // fold that fails and retries inside one dispatch would strand a cell
+        // per attempt.
+        char* free_errmsg = NULL;
+        mlc_cell_free((int64_t)handle_ll, &free_errmsg);
+        free(free_errmsg);
+    }
+    Py_XDECREF(acc);
+    free_schema(schema);
+    return NULL;
+}
+
 static PyMethodDef Methods[] = {
     {"log_next_id", pybinding__log_next_id, METH_NOARGS, "Allocate a fresh log call id"},
     {"log_emit", pybinding__log_emit, METH_VARARGS, "Emit a formatted log line via libmorloc"},
@@ -3896,12 +4456,16 @@ static PyMethodDef Methods[] = {
     {"set_fallback_dir", pybinding__set_fallback_dir, METH_VARARGS, "Set fallback directory for file-backed shared memory"},
     {"shinit", pybinding__shinit, METH_VARARGS, "Open the shared memory pool"},
     {"start_daemon", pybinding__start_daemon, METH_VARARGS, "Initialize the shared memory and socket for the python daemon"},
+    {"set_self_socket", pybinding__set_self_socket, METH_VARARGS, "Record the socket this pool serves"},
+    {"lifeline_adopt", pybinding__lifeline_adopt, METH_NOARGS, "The lifeline descriptor to watch for the nexus's end, or -1"},
+    {"lifeline_teardown", pybinding__lifeline_teardown, METH_NOARGS, "End this pool's process group after the nexus ended"},
     {"close_daemon", pybinding__close_daemon, METH_VARARGS, "Banish the daemon back to the abyss from whence it came"},
     {"wait_for_client", pybinding__wait_for_client, METH_VARARGS, "Listen over a pipe until a client packet arrives"},
     {"read_morloc_call_packet", pybinding__read_morloc_call_packet, METH_VARARGS, "Parse a morloc call packet"},
     {"send_packet_to_foreign_server", pybinding__send_packet_to_foreign_server, METH_VARARGS, "Send data to a foreign server"},
     {"stream_from_client", pybinding__stream_from_client, METH_VARARGS, "Stream data from the client"},
     {"close_socket", pybinding__close_socket, METH_VARARGS, "Close the socket"},
+    {"shm_live_bytes", pybinding__shm_live_bytes, METH_NOARGS, "Bytes of shared memory the program holds now (-1 unless MORLOC_SHM_STATS is set)"},
     {"shm_tracker_flush", pybinding__shm_tracker_flush, METH_NOARGS, "Free tracked SHM allocations from put_value calls"},
     {"release_packet_shm", pybinding__release_packet_shm, METH_VARARGS, "Release the SHM ref owned by a put_value-produced packet"},
     {"debug_record_frame", pybinding__debug_record_frame, METH_VARARGS, "Append a manifold's args to the debug-trace stack"},
@@ -3909,6 +4473,7 @@ static PyMethodDef Methods[] = {
     {"debug_flush_dispatch", pybinding__debug_flush_dispatch, METH_NOARGS, "Reset per-dispatch debug state (recursion counters etc.)"},
     {"reclaim_stdio_after_dispatch", pybinding__reclaim_stdio_after_dispatch, METH_NOARGS, "Reclaim any stdio claim this dispatch left open"},
     {"foreign_call", pybinding__foreign_call, METH_VARARGS, "Send a call packet to a foreign pool"},
+    {"atomic_add_int", pybinding__atomic_add_int, METH_VARARGS, "Atomically add to a shared C int at an address"},
     {"get_value", pybinding__get_value, METH_VARARGS, "Convert a packet to a Python value"},
     {"put_value", pybinding__put_value, METH_VARARGS, "Convert a Python value to a packet"},
     {"is_ping", pybinding__is_ping, METH_VARARGS, "Packet is a ping"},
@@ -3924,6 +4489,7 @@ static PyMethodDef Methods[] = {
     {"mlc_load", pybinding__mlc_load, METH_VARARGS, "Load a value from file"},
     {"mlc_show", pybinding__mlc_show, METH_VARARGS, "Serialize a value to JSON string"},
     {"mlc_read", pybinding__mlc_read, METH_VARARGS, "Deserialize a JSON string to a value"},
+    {"mlc_unpack", pybinding__mlc_unpack, METH_VARARGS, "Decode a packet held as bytes"},
     {"mlc_open", pybinding__mlc_open, METH_VARARGS, "Open a stream/file as IFile/IStream/OStream handle"},
     {"mlc_close", pybinding__mlc_close, METH_VARARGS, "Close any stream/file handle"},
     {"mlc_fschema", pybinding__mlc_fschema, METH_VARARGS, "Read a file's element schema without typed open"},
@@ -3941,9 +4507,18 @@ static PyMethodDef Methods[] = {
     {"mlc_append", pybinding__mlc_append, METH_VARARGS, "Open an existing stream file for append"},
     {"mlc_concat", pybinding__mlc_concat, METH_VARARGS, "Concatenate stream files"},
     {"mlc_flush", pybinding__mlc_flush, METH_VARARGS, "Force OStream buffer to flush as a sub-packet"},
+    {"mlc_open_channel", pybinding__mlc_open_channel, METH_VARARGS, "Open a channel for a streamed @parse argument"},
+    {"mlc_is_channel", pybinding__mlc_is_channel, METH_VARARGS, "Whether a handle is an open channel"},
+    {"mlc_settle", pybinding__mlc_settle, METH_VARARGS, "Release a channel, raising the failure its reader saw"},
+    {"mlc_spawn", pybinding__mlc_spawn, METH_VARARGS, "Start a producer on a channel without waiting for it"},
     {"mlc_tell", pybinding__mlc_tell, METH_NOARGS, "Elements written to @stdout so far"},
     {"mlc_tmpfile", pybinding__mlc_tmpfile, METH_NOARGS, "Create a temp file for the whole-form gather"},
     {"mlc_unlink_tmp", pybinding__mlc_unlink_tmp, METH_VARARGS, "Unlink a registered temp file"},
+    {"mlc_cell_new", pybinding__mlc_cell_new, METH_VARARGS, "Create a fold accumulator"},
+    {"mlc_cell_get", pybinding__mlc_cell_get, METH_VARARGS, "Read this thread's fold accumulator"},
+    {"mlc_cell_put", pybinding__mlc_cell_put, METH_VARARGS, "Replace this thread's fold accumulator"},
+    {"mlc_cell_reduce", pybinding__mlc_cell_reduce, METH_VARARGS, "Merge the fold accumulators and release the cell"},
+    {"mlc_replay", pybinding__mlc_replay, METH_VARARGS, "Call a function on every element of an IStream"},
     {"mlc_throw", pybinding__mlc_throw, METH_VARARGS, "Raise a MorlocException with the given message"},
     {"mlc_try", pybinding__mlc_try, METH_VARARGS, "Evaluate body; wrap the value with ok, or a caught message with err"},
     {NULL, NULL, 0, NULL} // this is a sentinel value
@@ -3960,6 +4535,11 @@ static struct PyModuleDef pymorloc = {
 PyMODINIT_FUNC PyInit_pymorloc(void) {
     PyObject* m = PyModule_Create(&pymorloc);
     if (m == NULL) return NULL;
+    if (PyModule_AddIntConstant(m, "PRIMARY_VOLUME", MORLOC_PRIMARY_VOLUME) < 0) {
+        Py_DECREF(m);
+        return NULL;
+    }
+
     PyMorlocException = PyErr_NewException("pymorloc.MorlocException", PyExc_RuntimeError, NULL);
     if (PyMorlocException == NULL) {
         Py_DECREF(m);

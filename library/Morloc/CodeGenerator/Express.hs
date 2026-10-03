@@ -19,6 +19,7 @@ module Morloc.CodeGenerator.Express
   , addDebugWraps
   , addLoopWraps
   , addNativeRecEntries
+  , etaReduceForwarders
   , polyFreeVars
   ) where
 
@@ -37,11 +38,11 @@ import Morloc.CodeGenerator.IFile
   , bracketSliceSteps
   )
 import Morloc.CodeGenerator.Infer
+import Morloc.CodeGenerator.Instance (findFunctorMap, findInstanceByArgHead, resolveInstanceForType)
 import Morloc.CodeGenerator.LanguageDescriptor (ldAllowStringNull, loadLangDescriptorFromText)
 import qualified Morloc.DataFiles as DF
 import qualified Morloc.Language as ML
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (containsFunT)
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
@@ -63,6 +64,13 @@ mkPolyManifold ::
   Lang -> Int -> ManifoldForm None (Maybe Type) -> PolyExpr -> MorlocMonad PolyExpr
 mkPolyManifold lang midx form body = do
   observable <- hasManifoldLabel midx
+  -- the flat entry of a staged closure: its stage entry takes the same
+  -- context arguments, so the runtime can call it with the captured values
+  staged <- Map.member midx <$> MM.gets stateStageEntries
+  when staged $ case form of
+    ManifoldPart ctx _ -> MM.modify (\st -> st {stateStageContext = Map.insert midx (length ctx) (stateStageContext st)})
+    ManifoldPass _ -> MM.modify (\st -> st {stateStageContext = Map.insert midx 0 (stateStageContext st)})
+    _ -> return ()
   let kind = if observable then Preserved else Transparent
   return $ PolyManifold lang midx form kind body
 
@@ -198,17 +206,37 @@ addCacheWraps (PolyHead lang midx args body) = do
     hasCacheWrapAt m (PolyDebugWrap _ _ inner) = hasCacheWrapAt m inner
     hasCacheWrapAt _ _ = False
 
--- | Give every recursive manifold that a caller in its own pool reaches a
--- native entry point, and record it.
+-- | Replace each closure that only forwards to a function value it captures
+-- (@\\xs -> f xs@, the eta-abstraction a function value in a function slot
+-- is given) by that function value. The wrapper carries no adaptation of its
+-- own (one that did would have a different body), and keeping it hides the
+-- value's identity: a function passed along a loop would gain one wrapper
+-- per iteration, and a staged closure would lose its stage entry.
+etaReduceForwarders :: PolyHead -> PolyHead
+etaReduceForwarders (PolyHead lang m args body) = PolyHead lang m args (go body)
+  where
+    go e = case mapPolySubExprs go e of
+      PolyManifold _ _ (ManifoldPart [Arg j _] bound) k
+        (PolyReturn (PolyApp (PolyExe t (LocalCallP j')) xs))
+          | j == j'
+          , k /= Preserved
+          , map bndId xs == map (Just . ann) bound ->
+              PolyBndVar (C t) j
+      e' -> e'
+    bndId (PolyBndVar _ i) = Just i
+    bndId _ = Nothing
+
+-- | Give every recursive manifold or shared specialization that a caller in
+-- its own pool reaches a native entry point, and record it.
 --
--- A recursive function is lifted into a manifold of its own, which is the
--- pool's serial entry: it takes and returns packets. A caller in another
--- pool needs that, but a caller in the same pool pays for it on every
--- level of the recursion -- each level writes its whole remaining argument
--- to shared memory and reads it back, so a walk down a spine of n nodes
--- copies on the order of n^2 nodes. Tail recursion escapes this by
--- becoming a loop ('addLoopWraps'); a recursion that combines the results
--- of its calls cannot.
+-- A recursive function (or a shared specialization) is lifted into a
+-- manifold of its own, which is the pool's serial entry: it takes and
+-- returns packets. A caller in another pool needs that, but a caller in the
+-- same pool pays for it on every level of the recursion -- each level
+-- writes its whole remaining argument to shared memory and reads it back,
+-- so a walk down a spine of n nodes copies on the order of n^2 nodes. Tail
+-- recursion escapes this by becoming a loop ('addLoopWraps'); a recursion
+-- that combines the results of its calls cannot.
 --
 -- The manifold's body moves to a new ID and is marked as one that survives
 -- lowering as a real function, which makes it a native function of the
@@ -236,17 +264,11 @@ addNativeRecEntries phs = do
 
     splitEntry :: Set.Set Int -> PolyHead -> MorlocMonad PolyHead
     splitEntry targets ph@(PolyHead lang midx args body) = do
-      argTypes <- MM.gets stateArgTypes
-      -- A function value is passed by a convention of its own in each
-      -- language, and a recursion that carries one is not the case this
-      -- entry exists for.
-      let carriesFunction =
-            or [ maybe False (containsFunT . val) (Map.lookup i argTypes) | Arg i _ <- args ]
-      if Set.member midx targets && splittable body && not carriesFunction
-        then split
+      if Set.member midx targets && splittable body
+        then splitHead
         else return ph
       where
-       split = do
+       splitHead = do
           -- A manifold index, not an expression index: the two counters are
           -- separate, and this also carries the source position over so the
           -- frame that runs the body is the one diagnostics name.
@@ -260,19 +282,25 @@ addNativeRecEntries phs = do
               , stateName = maybe (stateName s)
                   (\n -> Map.insert midx' n (stateName s)) (Map.lookup midx name)
               }
-          return $ PolyHead lang midx args (PolyManifold lang midx' (ManifoldFull args) Preserved body)
+          -- a body that is this manifold's own (same id) is what the native
+          -- entry runs; left wrapped it would be emitted as a second
+          -- function of the same name
+          let native = case body of
+                PolyManifold _ m _ _ inner | m == midx -> inner
+                _ -> body
+          return $ PolyHead lang midx args (PolyManifold lang midx' (ManifoldFull args) Preserved native)
 
-    -- A body whose shape already commits the manifold to something else.
-    -- A loop carries its slots against the head's own form and has no
-    -- round trip left to remove; an observability hook (a label, a cache,
-    -- a debug wrap) is keyed to the manifold's own ID and would move with
-    -- the body.
+    -- A body whose shape already commits the manifold to something else: an
+    -- observability hook (a label, a cache, a debug wrap) is keyed to the
+    -- manifold's own ID and would move with the body. A loop is split like
+    -- any other body: its serial entry serializes every argument, and a
+    -- function argument would then be applied through this pool's own
+    -- socket on every iteration.
     splittable :: PolyExpr -> Bool
     splittable e
-      | crosses e = False
+      | crosses e && not (isLoop e) = False
       | otherwise = go e
       where
-        go (PolyLoop {}) = False
         go (PolyCacheBody {}) = False
         go (PolyDebugWrap {}) = False
         go (PolyManifold _ _ _ Preserved _) = False
@@ -282,17 +310,23 @@ addNativeRecEntries phs = do
 
     -- A body that reaches another pool serializes on that path, so at least
     -- one of its arguments is wanted in both forms; the entry takes one
-    -- value per argument and could not supply both.
+    -- value per argument and could not supply both. A loop is exempt: its
+    -- native entry copies every argument into a native local and serializes
+    -- a local for a crossing where it is used, on every iteration.
     crosses :: PolyExpr -> Bool
     crosses (PolyRemoteInterface {}) = True
     crosses e = any crosses (polySubExprs e)
 
+    -- A body that is a tail loop, under structural wrappers.
+    isLoop :: PolyExpr -> Bool
+    isLoop (PolyLoop {}) = True
+    isLoop (PolyManifold _ _ _ _ x) = isLoop x
+    isLoop (PolyReturn x) = isLoop x
+    isLoop _ = False
+
 -- | Whether a driver language can host a native tail-loop. Python/R lower via
--- 'genericMakeLoop'; C++ via the member's 'lcMakeLoop' (non-const native locals
--- reassigned in place). Rust is excluded: its borrow checker + single-assignment
--- last-use pass reject in-place reassignment of a loop-carried local (its
--- 'lcMakeLoop' is a matching fail-loud stub). Single source of truth for the
--- gate.
+-- 'genericMakeLoop'; C++ and Rust via the member's 'lcMakeLoop' (non-const
+-- native locals reassigned in place). Single source of truth for the gate.
 langSupportsNativeLoop :: Lang -> Bool
 langSupportsNativeLoop lang = langName lang `elem` ["py", "r", "cpp", "rust"]
 
@@ -741,7 +775,10 @@ expressDefault e0@(AnnoS (Idx midx t) (Idx cidx lang, args) _) =
     -- ensure the manifold body has PolyReturn at the return position
     ensurePolyReturn (PolyReturn x) = PolyReturn x
     ensurePolyReturn (PolyLet i e1 e2) = PolyLet i e1 (ensurePolyReturn e2)
-    ensurePolyReturn (PolyManifold l m f k e) = PolyManifold l m f k (ensurePolyReturn e)
+    -- this manifold's own body returns; another manifold at the return
+    -- position (a call, or a closure) is the value returned
+    ensurePolyReturn (PolyManifold l m f k e)
+      | m == midx && not (isClosureForm f) = PolyManifold l m f k (ensurePolyReturn e)
     ensurePolyReturn x = PolyReturn x
 
 expressPolyExprWrap ::
@@ -880,15 +917,6 @@ findSliceableDimGetSliceDim :: Lang -> TypeU -> MorlocMonad (Maybe Source)
 findSliceableDimGetSliceDim lang receiverType =
   findInstanceByArgHead 3 (EV "__get_slice_dim__") lang (extractKey receiverType)
 
--- | Look up the @Functor@ @map@ instance for a container type in
--- language @lang@. The instance method signature is @(a -> b) -> f a
--- -> f b@; the container head sits at argument index 1. Used by the
--- @IntrMap@ pool-path lowering to resolve the desugar's implicit map
--- over a bracket-accessor chain.
-findFunctorMap :: Lang -> TypeU -> MorlocMonad (Maybe Source)
-findFunctorMap lang receiverType =
-  findInstanceByArgHead 1 (EV "map") lang (extractKey receiverType)
-
 -- | Look up a user-declared @PatternAccessible.__extract_pattern__@
 -- instance for a receiver container type. The class method is
 -- @PatternChain (w a) b -> [?Int64] -> w a -> b@, so the receiver
@@ -899,28 +927,6 @@ findFunctorMap lang receiverType =
 findPatternAccessibleExtract :: Lang -> TypeU -> MorlocMonad (Maybe Source)
 findPatternAccessibleExtract lang receiverType =
   findInstanceByArgHead 2 (EV BT.extractPatternMethod) lang (extractKey receiverType)
-
--- | Shared helper: look up the per-language source binding of a
--- class method whose receiver type head occupies a known argument
--- position. Used by the @Sliceable@ / @Indexable@ / @SliceableDim@ /
--- @Functor@ helpers above.
-findInstanceByArgHead :: Int -> EVar -> Lang -> TVar -> MorlocMonad (Maybe Source)
-findInstanceByArgHead pos method lang containerTv = do
-  sigmap <- MM.gets stateTypeclasses
-  case Map.lookup method sigmap of
-    Nothing -> return Nothing
-    Just inst -> return $ listToMaybe
-      [ src
-      | TermTypes (Just et) cs _ <- instanceTerms inst
-      , receiverHead et == Just containerTv
-      , (_, Idx _ src) <- cs
-      , srcLang src == lang
-      ]
-  where
-    receiverHead :: EType -> Maybe TVar
-    receiverHead et = case snd (unqualify (etype et)) of
-      FunU args _ | length args > pos -> Just (extractKey (args !! pos))
-      _                               -> Nothing
 
 -- | The wire type for every slot the slicer / indexer expects: bounds
 -- always arrive as @?Int64@ (the return shape of @__to_index__@); a
@@ -1205,32 +1211,6 @@ dispatchPatCall callLang midx cidxCall pat inputs out xs fallback = case pat of
   PatternBracketIndex -> expressBracketIndex callLang midx inputs out xs
   PatternStruct sel   -> dispatchPatternStruct callLang midx cidxCall sel inputs out xs fallback
   _                   -> fallback
-
--- | Resolve a typeclass-method instance for a value's type by walking
--- the alias chain. Tests the type's outermost head TVar against the
--- per-TVar lookup; on miss, reduces the type one alias step
--- (via 'TE.reduceType') and retries. Returns the first hit, or
--- 'Nothing' if the chain is exhausted. This is the key mechanism by
--- which @type Array a = List a@ inherits @instance Indexable List@:
--- the call site type @Array Int@ misses on @Array@, reduces to
--- @List Int@, then hits.
-resolveInstanceForType
-  :: (Lang -> TypeU -> MorlocMonad (Maybe Source))
-  -> Lang
-  -> Int                  -- midx, used to recover the source scope
-  -> Type
-  -> MorlocMonad (Maybe Source)
-resolveInstanceForType perTypeLookup lang midx originalType = do
-  scope <- MM.getGeneralScope midx
-  go scope (type2typeu originalType)
-  where
-    go scope t = do
-      mSrc <- perTypeLookup lang t
-      case mSrc of
-        Just src -> return (Just src)
-        Nothing -> case TE.reduceType scope t of
-          Just t' | t' /= t -> go scope t'
-          _ -> return Nothing
 
 requireInstance
   :: Int
@@ -1523,8 +1503,11 @@ expressPolyExpr
     )
     | isLocal = do
         propagateScope gidxCall midx
-        let nContextArgs = length appArgs - length vs
-            contextArgs = map unvalue (take nContextArgs appArgs)
+        -- The lambda's arguments are its captures followed by its own
+        -- parameters; a body need not use every parameter, so the split is
+        -- taken from the lambda, not from the application inside it.
+        let nContextArgs = length lamArgs - length vs
+            contextArgs = map unvalue (take nContextArgs lamArgs)
 
             typedLambdaArgs =
               fromJust $
@@ -1548,7 +1531,7 @@ expressPolyExpr
             allParentArgs = args <> [i | (_, Just (i, _), _) <- xsInfo]
             lets = [PolyLet i e | (_, Just (i, e), _) <- xsInfo]
             passedParentArgs = unique (concat [[r | r <- allParentArgs, r == i] | i <- callArgs])
-            nContextArgs = length appArgs - length vs
+            nContextArgs = length lamArgs - length vs
 
             lambdaTypeMap = zip vs (map (Idx cidxLam) lamInputTypes)
             -- The values handed to the interface are exactly the indices the
@@ -1565,7 +1548,7 @@ expressPolyExpr
               Nothing -> case lookup i appArgVar of
                 Just v -> PolyBndVar (maybe (A parentLang) C (lookup v lambdaTypeMap)) i
                 Nothing -> error "unreachable: a called index is bound here or minted here"
-            untypedContextArgs = map unvalue $ take nContextArgs appArgs
+            untypedContextArgs = map unvalue $ take nContextArgs lamArgs
             typedPassedArgs = fromJust $ safeZipWith (\(Arg i _) t -> Arg i (Just t)) (drop nContextArgs lamArgs) lamInputTypes
 
             localForm = ManifoldPart untypedContextArgs typedPassedArgs
@@ -1797,7 +1780,7 @@ expressPolyExpr
   parentLang
   (val -> FunT pinputs poutput)
   e@(AnnoS (Idx midx (FunT callInputs _)) (Idx cidx callLang, _) inner)
-    | not (isComputedThunk inner), isLocal = do
+    | not (isComputedThunk inner), not (isLocalPartial inner), isLocal = do
         ids <- MM.takeFromCounter (length callInputs)
         let lambdaVals = bindVarIds ids (map (C . Idx cidx) callInputs)
             lambdaTypedArgs = fromJust $ safeZipWith annotate ids (map Just callInputs)
@@ -1814,7 +1797,7 @@ expressPolyExpr
               [] -> ManifoldPass lambdaTypedArgs
               _ -> ManifoldPart [Arg i None | i <- ctxIds] lambdaTypedArgs
         mkPolyManifold callLang midx form retapp
-    | not (isComputedThunk inner) = do
+    | not (isComputedThunk inner), not (isLocalPartial inner) = do
         ids <- MM.takeFromCounter (length callInputs)
         let lambdaArgs = [Arg i None | i <- ids]
             lambdaTypedArgs = map (`Arg` Nothing) ids
@@ -2249,7 +2232,7 @@ expressPolyApp lang f@(AnnoS g@(Idx i _) _ (AppS _ _)) es = do
     $ PolyApp (PolyLetVar g i) es
 expressPolyApp _ (AnnoS g (_, args) (BndS v)) xs = do
   case [j | (Arg j u) <- args, u == v] of
-    [j] -> return . PolyReturn $ PolyApp (PolyExe g (LocalCallP j)) xs
+    [j] -> return . PolyReturn $ PolyApp (PolyExe g (localApply g j xs)) xs
     _ -> error "Unreachable? BndS value should have been wired uniquely to args previously"
 -- A let-bound function value applied in head position. A multiply-referenced
 -- let lambda is kept shared (not inlined) by 'applyLambdas'; each use reaches
@@ -2257,7 +2240,7 @@ expressPolyApp _ (AnnoS g (_, args) (BndS v)) xs = do
 -- 'BndS' (lambda-argument) case above.
 expressPolyApp _ (AnnoS g (_, args) (LetBndS v)) xs = do
   case [j | (Arg j u) <- args, u == v] of
-    [j] -> return . PolyReturn $ PolyApp (PolyExe g (LocalCallP j)) xs
+    [j] -> return . PolyReturn $ PolyApp (PolyExe g (localApply g j xs)) xs
     _ -> error "Unreachable? LetBndS value should have been wired uniquely to args previously"
 -- A function value produced by a runtime effect and applied. A `<-` bind
 -- leaves a forced function value ('EvalS') -- or an inline effectful block
@@ -2455,6 +2438,7 @@ polyFreeVars = go
     -- the closure bound at index @j@ in the enclosing scope; other executable
     -- forms (source / pattern / recursive calls) name no enclosing variable.
     go (PolyExe _ (LocalCallP j)) = Set.singleton j
+    go (PolyExe _ (PapplyP j)) = Set.singleton j
     go (PolyApp e es) = Set.unions (map go (e : es))
     go (PolyReturn e) = go e
     go (PolyLet i e1 e2) = Set.union (go e1) (Set.delete i (go e2))
@@ -2497,8 +2481,12 @@ lookupRecursiveTarget parentLang v = do
   reg <- MM.gets stateLangRegistry
   -- Filter to concrete manifolds only (those in langMap) to avoid picking up
   -- general/polymorphic indices that don't have serial manifold definitions
+  recTargets <- MM.gets stateRecursionTargets
   let reverseMap = Map.fromList [(name, idx) | (idx, name) <- Map.toList nameMap, Map.member idx langMap]
-  case Map.lookup v reverseMap of
+      byToken = case Map.lookup v recTargets of
+        Just idx | Map.member idx langMap -> Just idx
+        _ -> Nothing
+  case maybe byToken Just (Map.lookup v reverseMap) of
     (Just mid) -> do
       -- A cross-language recursive call only when the target is NOT co-located
       -- with the caller; a co-located member (futhark in cpp) is an in-process call.
@@ -2513,6 +2501,24 @@ bindVarIds [] [] = []
 bindVarIds (i : args) (t : types) = PolyBndVar t i : bindVarIds args types
 bindVarIds [] ts = error $ "bindVarIds: too few arguments: " <> show ts
 bindVarIds _ [] = error "bindVarIds: too few types"
+
+-- | Applying the local function value @j@ (of the type in @g@) to @xs@: a
+-- call, or, with fewer arguments than it takes, a partial application.
+localApply :: Indexed Type -> Int -> [a] -> ExecutableExpressionPool
+localApply (Idx _ (FunT ins _)) j xs
+  | length xs < length ins = PapplyP j
+localApply _ j _ = LocalCallP j
+
+-- | A partial application of a local function value, which is built where
+-- it is written (never eta-abstracted: that would redo it at each call).
+isLocalPartial :: ExprS (Indexed Type) One c -> Bool
+isLocalPartial (AppS (AnnoS g _ h) xs)
+  | isLocalHead h, PapplyP _ <- localApply g 0 xs = True
+  where
+    isLocalHead (BndS _) = True
+    isLocalHead (LetBndS _) = True
+    isLocalHead _ = False
+isLocalPartial _ = False
 
 -- A computed function value that produces its result through evaluation rather
 -- than being a bare callable: a let, a forced thunk, or an inline effectful

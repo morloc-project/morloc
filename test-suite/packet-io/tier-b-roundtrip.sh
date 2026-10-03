@@ -78,7 +78,7 @@ FINAL_TMP=$(( $(count_tmp) - INIT_TMP ))
 
 echo ""
 echo "=== summary ==="
-echo "leaked /dev/shm segments:  $FINAL_SHM"
+echo "leaked shared-memory segments:  $FINAL_SHM"
 echo "leaked /tmp/morloc.* dirs: $FINAL_TMP"
 if (( FAIL == 0 && FINAL_SHM == 0 && FINAL_TMP == 0 )); then
     echo "PASS"

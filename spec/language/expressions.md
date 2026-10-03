@@ -70,7 +70,60 @@ foo x = result where
   result = helper (helper x)
 ```
 
-There is no `let ... in` syntax; use `where` instead.
+A `where` binding is lexically scoped: it shadows a top-level term of the
+same name, and a variable at a use site never captures it.
+
+## Let Expressions
+
+`let` binds names in an expression, one after another:
+
+```morloc
+twice x = let a = costly x in a + a
+
+pipeline x =
+  let a = step1 x
+      b = step2 a
+  in a + b
+```
+
+Each binding is in scope in the bindings after it and in the body.
+
+## When Named Values Are Evaluated
+
+Morloc is strict: every argument is evaluated once, where it is applied,
+however many times its parameter is used (zero included). A named value
+follows the same rule. It is computed at most once per evaluation of the
+scope that binds it, never once per mention:
+
+- **Placement:** a `where` or `let` binding is computed at the nearest
+  point every use passes through. A binding read in only one arm of a
+  conditional is computed in that arm; one read in a condition is computed
+  before it; one read only inside `@try` is computed inside it, so its
+  failure is caught there.
+- **Unused bindings:** a `where` binding that nothing reads is never
+  computed. A `let` binding that nothing reads is still computed where it
+  is written, since the function it calls may act in ways no type records.
+- **Lambdas and do-blocks:** a pure value used inside a lambda or a do-block
+  is computed when the lambda or do-block is built, and captured. Forcing a
+  suspension twice reruns its effects, not the pure values it captured.
+- **Top-level constants:** a top-level value that is not a function (or is
+  a function built by a computation, such as a partial application) is
+  computed at most once per command. A recursive function built by a
+  computation, `f = (\k n -> .. f (n - 1)) (e)`, computes `e` once per
+  command, not once per recursive call.
+- **Constants inside functions:** a computation that reads no parameter and
+  no other local value -- a `where` or `let` binding, the argument a lambda is
+  applied to, or a computation in the body of a top-level value outside any
+  lambda -- is a constant: it is computed at most once per command, however
+  many times, or however recursively, the function around it is called. The
+  unused-`let` rule above still holds: one nothing reads is computed where it
+  is written.
+- **Languages:** a named value is one value in every language that reads it.
+  It is computed once, in one language, and passed to its other readers.
+
+A function definition is code, not a value: it may be copied or shared
+between its uses freely, since calling it computes the same thing either way
+(see [[../interop/implementation-selection.md]]).
 
 ## Record Field Access
 
@@ -132,8 +185,20 @@ Operators can be used in prefix position by enclosing them in parentheses:
 (+ 1)         -- right section: \x -> x + 1
 ```
 
+## Conditionals
+
+A guard chooses among expressions, checked in order, with `:` for the
+remaining case:
+
+```morloc
+clamp lo hi x
+  ? x < lo = lo
+  ? x > hi = hi
+  : x
+```
+
+Only the chosen expression is evaluated.
+
 ## Limitations
 
-- **No recursion.** Use higher-order functions (`map`, `fold`, `filter`) for iteration.
-- **No conditionals.** Use pattern matching or foreign functions for branching.
 - **No native side effects.** All side effects originate in foreign implementations and are surfaced through effect annotations on source signatures. See [[../types/effects.md]].

@@ -109,16 +109,14 @@ pub unsafe extern "C" fn stream_sweep_pid(
     crate::stream::sweeper_enqueue_pid(pid, start_time);
 }
 
-/// Read this process's start time from `/proc/PID/stat` (field 22,
-/// clock ticks since boot). Used by the nexus to capture the
-/// start_time of each spawned pool, which it then pairs with the
-/// PID when enqueueing a PID sweep. Returns 0 on read failure (the
-/// sweep will then accept a PID-only match).
+/// The start stamp of `pid` (`process::start_time`), which the nexus pairs
+/// with a pool's pid when it enqueues a PID sweep. 0 when unreadable; the
+/// sweep then accepts a PID-only match.
 #[no_mangle]
 pub unsafe extern "C" fn stream_pid_start_time(
     pid: u32,
 ) -> u64 {
-    crate::stream::read_pid_start_time_for(pid)
+    morloc_runtime_types::process::start_time(pid)
 }
 
 #[no_mangle]
@@ -201,6 +199,23 @@ pub unsafe extern "C" fn rel2abs(ptr: RelPtr, errmsg: *mut *mut c_char) -> *mut 
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn rel2abs_extent(ptr: RelPtr, extent: usize, errmsg: *mut *mut c_char) -> *mut c_void {
+    ffi_try!(errmsg, ptr::null_mut(), shm::rel2abs_extent(ptr, extent).map(|p| p as *mut c_void))
+}
+
+/// The error C's inline payload resolve reports. Always returns null.
+#[no_mangle]
+pub unsafe extern "C" fn morloc_payload_region_error(
+    relptr: RelPtr,
+    extent: usize,
+    len: usize,
+    errmsg: *mut *mut c_char,
+) -> *mut c_void {
+    set_errmsg(errmsg, &crate::voidstar::payload_region_error(relptr, extent, len));
+    ptr::null_mut()
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn abs2rel(ptr: *mut c_void, errmsg: *mut *mut c_char) -> RelPtr {
     ffi_try!(errmsg, shm::RELNULL, shm::abs2rel(ptr as AbsPtr))
 }
@@ -275,22 +290,17 @@ pub unsafe extern "C" fn free_schema(schema: *mut CSchema) {
     CSchema::free(schema);
 }
 
+/// Narrow `v` to the nearest `f32` at `out`, for the pool marshallers: 0 on
+/// success, -1 when a finite `v` lies beyond the `f32` range.
 #[no_mangle]
-pub unsafe extern "C" fn schema_is_fixed_width(schema: *const CSchema) -> bool {
-    if schema.is_null() {
-        return true;
+pub unsafe extern "C" fn morloc_f32_from_f64(v: f64, out: *mut f32) -> i32 {
+    match morloc_runtime_types::width::f32_nearest(v) {
+        Ok(f) => {
+            *out = f;
+            0
+        }
+        Err(_) => -1,
     }
-    let rs = CSchema::to_rust(schema);
-    rs.is_fixed_width()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn schema_alignment(schema: *const CSchema) -> usize {
-    if schema.is_null() {
-        return 1;
-    }
-    let rs = CSchema::to_rust(schema);
-    rs.alignment()
 }
 
 // Hash: morloc_xxh64 is provided by utility.c (via xxhash.h inline)
@@ -402,6 +412,63 @@ pub unsafe extern "C" fn calculate_voidstar_size(
     }
 }
 
+/// The size of the value at `data`, and an upper bound on the number of
+/// sub-allocations a deep copy of it takes.
+///
+/// For a caller that copies into ONE block with a [`crate::voidstar::Bump`]:
+/// the bump rounds every part up to eight bytes, so the region has to carry
+/// up to seven bytes of padding per part, and the part count is not known
+/// before the value is walked. This walks it once and reports both, which is
+/// what lets such a caller size exactly and then copy once rather than
+/// building the value in per-part blocks and consolidating them.
+pub fn calc_voidstar_layout(
+    data: *const u8,
+    schema: &crate::schema::Schema,
+) -> Result<(usize, usize), MorlocError> {
+    let res = crate::recur::Resolver::new(schema);
+    let mut w = SizeWalk {
+        res: &res,
+        total: 0,
+        bound: usize::MAX,
+        steps: 0,
+        portable: false,
+    };
+    let mut st = crate::walk::Stack::new();
+    st.enter(schema, data, false);
+    crate::walk::run(&mut w, &mut st)?;
+    Ok((w.total, w.steps))
+}
+
+/// The size of the value's portable flat form, in which each handle-form
+/// stream field is written as its path; see
+/// [`crate::voidstar::flatten_into_portable`].
+pub fn calc_voidstar_size_portable(
+    data: *const u8,
+    schema: &crate::schema::Schema,
+) -> Result<usize, MorlocError> {
+    calc_voidstar_size_portable_with(data, schema, &crate::recur::Resolver::new(schema))
+}
+
+/// [`calc_voidstar_size_portable`] with a resolver of `schema` the caller
+/// built, for a caller sizing many values of one schema.
+pub fn calc_voidstar_size_portable_with(
+    data: *const u8,
+    schema: &crate::schema::Schema,
+    res: &crate::recur::Resolver<'_>,
+) -> Result<usize, MorlocError> {
+    let mut w = SizeWalk {
+        res,
+        total: 0,
+        bound: usize::MAX,
+        steps: 0,
+        portable: true,
+    };
+    let mut st = crate::walk::Stack::new();
+    st.enter(schema, data, false);
+    crate::walk::run(&mut w, &mut st)?;
+    Ok(w.total)
+}
+
 pub fn calc_voidstar_size_inner(
     data: *const u8,
     schema: &crate::schema::Schema,
@@ -426,7 +493,14 @@ pub fn calc_voidstar_size_bounded(
     schema: &crate::schema::Schema,
     upper_bound: usize,
 ) -> Result<usize, MorlocError> {
-    let mut w = SizeWalk { res: crate::recur::Resolver::new(schema), total: 0, bound: upper_bound };
+    let res = crate::recur::Resolver::new(schema);
+    let mut w = SizeWalk {
+        res: &res,
+        total: 0,
+        bound: upper_bound,
+        steps: 0,
+        portable: false,
+    };
     let mut st = crate::walk::Stack::new();
     st.enter(schema, data, false);
     crate::walk::run(&mut w, &mut st)?;
@@ -438,13 +512,22 @@ use crate::walk::Walker as _;
 /// The size walk. A frame's `x` says whether the parent already counted
 /// this node's slot (a tuple or record counts its whole fixed layout up
 /// front), in which case only the bytes beyond the slot are added.
-struct SizeWalk<'r> {
-    res: crate::recur::Resolver<'r>,
+struct SizeWalk<'a, 'r> {
+    res: &'a crate::recur::Resolver<'r>,
     total: usize,
     bound: usize,
+    /// Nodes stepped. An upper bound on the sub-allocations a deep copy of
+    /// this value takes: every allocation site in `deep_copy_alloc` sits in
+    /// a node's own arm and at most one of them fires per step. A caller
+    /// laying the value out in one block needs that bound to budget the
+    /// per-part alignment padding; see [`calc_voidstar_layout`].
+    steps: usize,
+    /// Count each handle-form stream field as the path it will be written
+    /// as, for the portable flat form.
+    portable: bool,
 }
 
-impl<'r> SizeWalk<'r> {
+impl<'a, 'r> SizeWalk<'a, 'r> {
     #[inline]
     fn add(&mut self, n: usize) {
         self.total = self.total.saturating_add(n);
@@ -471,7 +554,7 @@ impl<'r> SizeWalk<'r> {
     }
 }
 
-impl<'r> crate::walk::Walker<bool> for SizeWalk<'r> {
+impl<'a, 'r> crate::walk::Walker<bool> for SizeWalk<'a, 'r> {
     fn step(&mut self, st: &mut crate::walk::Stack<bool>, f: crate::walk::Frame<bool>) -> Result<(), MorlocError> {
         use crate::schema::SerialType;
         use crate::shm::{self, Array};
@@ -484,6 +567,7 @@ impl<'r> crate::walk::Walker<bool> for SizeWalk<'r> {
             st.clear();
             return Ok(());
         }
+        self.steps = self.steps.saturating_add(1);
         // SAFETY: frames hold nodes of the tree the resolver was built
         // from, which outlives the walk; `data` points at a value laid out
         // as that schema describes.
@@ -509,17 +593,21 @@ impl<'r> crate::walk::Walker<bool> for SizeWalk<'r> {
                 }
                 SerialType::IFile | SerialType::OStream | SerialType::IStream => {
                     // Tagged stream-handle field: 16-byte inline + path
-                    // suballoc (`8 + path_len`) for TAG_PATH; no suballoc for
-                    // TAG_HANDLE.
+                    // suballoc (`8 + path_len`) for TAG_PATH, plus the
+                    // worst-case padding the flatten inserts to 8-align it;
+                    // no suballoc for TAG_HANDLE.
                     use morloc_runtime_types::stream_handle as sh;
                     let field = data as *const u8;
                     let mut own = sh::STREAM_HANDLE_FIELD_SIZE;
-                    if sh::read_tag(field) == sh::TAG_PATH {
-                        let payload = sh::read_payload(field);
-                        if payload != shm::RELNULL as u64 {
-                            let suballoc = shm::rel2abs(payload as shm::RelPtr)?;
-                            let path_len = sh::read_path_size(suballoc) as usize;
-                            own += sh::path_suballoc_size(path_len);
+                    if self.portable && sh::read_tag(field) == sh::TAG_HANDLE {
+                        let path = crate::handle_scan::portable_path(sh::payload_handle(sh::read_payload(field)))?;
+                        if !path.is_empty() {
+                            own += sh::path_suballoc_size(path.len())
+                                + std::mem::align_of::<u64>() - 1;
+                        }
+                    } else if sh::read_tag(field) == sh::TAG_PATH {
+                        if let Some(block) = crate::voidstar::path_suballoc(&crate::voidstar::Arena, sh::read_payload(field))? {
+                            own += block.len() + std::mem::align_of::<u64>() - 1;
                         }
                     }
                     self.add(own - slot);
@@ -644,7 +732,7 @@ impl<'r> crate::walk::Walker<bool> for SizeWalk<'r> {
                     let own = crate::arrow_shm::block_size(data as *const crate::arrow_shm::ArrowShmHeader)?;
                     self.add(own - slot);
                 }
-                _ => self.add(s.width - slot),
+                SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Recur | SerialType::Enum => self.add(s.width - slot),
             }
         }
         Ok(())

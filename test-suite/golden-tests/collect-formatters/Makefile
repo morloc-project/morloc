@@ -44,6 +44,8 @@ define run_lang
 	./$(1) -f json streamStrs --sorted >> obs.txt 2>> obs.err
 	./$(1) -f json streamStrs --count  >> obs.txt 2>> obs.err
 	./$(1)         streamStrs --text   >> obs.txt 2>> obs.err
+	printf -- '=== $(2): fold (one accumulator, not a gathered list) ===\n' >> obs.txt
+	./$(1) streamInts --folded >> obs.txt 2>> obs.err
 	printf -- '=== $(2): default @collect (no formatter) ===\n' >> obs.txt
 	./$(1) -f jsonl streamInts >> obs.txt 2>> obs.err
 endef

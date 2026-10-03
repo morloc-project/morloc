@@ -1,0 +1,168 @@
+--- nexus-py ---
+20005: 1,2,3,4,5,0,1,2
+20005
+batch of 2
+batch of 0
+batch of 3
+batch of 20000
+sum=199990015 sizes=2,0,3,20000
+mark
+mark
+mark
+mark
+mark
+mark
+mark
+mark
+ran
+20005: 1,2,3,4,5,0,1,2
+20005
+batch of 2
+batch of 0
+batch of 3
+batch of 20000
+sum=199990015 sizes=2,0,3,20000
+20006: 1,2,3,4,5,0,1,2
+batch of 2
+batch of 0
+batch of 3
+batch of 20000
+batch of 1
+mark
+mark
+mark
+mark
+mark
+20006: 1,2,3,4,5,0,1,2
+20005: 1,2,3,4,5,0,1,2
+1: 7
+--- nexus-cpp ---
+20005: 1,2,3,4,5,0,1,2
+20005
+batch of 2
+batch of 0
+batch of 3
+batch of 20000
+sum=199990015 sizes=2,0,3,20000
+mark
+mark
+mark
+mark
+mark
+mark
+mark
+mark
+ran
+20005: 1,2,3,4,5,0,1,2
+20005
+batch of 2
+batch of 0
+batch of 3
+batch of 20000
+sum=199990015 sizes=2,0,3,20000
+20006: 1,2,3,4,5,0,1,2
+batch of 2
+batch of 0
+batch of 3
+batch of 20000
+batch of 1
+mark
+mark
+mark
+mark
+mark
+20006: 1,2,3,4,5,0,1,2
+20005: 1,2,3,4,5,0,1,2
+1: 7
+--- nexus-r ---
+20005: 1,2,3,4,5,0,1,2
+20005
+batch of 2
+batch of 0
+batch of 3
+batch of 20000
+sum=199990015 sizes=2,0,3,20000
+mark
+mark
+mark
+mark
+mark
+mark
+mark
+mark
+ran
+20005: 1,2,3,4,5,0,1,2
+20005
+batch of 2
+batch of 0
+batch of 3
+batch of 20000
+sum=199990015 sizes=2,0,3,20000
+20006: 1,2,3,4,5,0,1,2
+batch of 2
+batch of 0
+batch of 3
+batch of 20000
+batch of 1
+mark
+mark
+mark
+mark
+mark
+20006: 1,2,3,4,5,0,1,2
+20005: 1,2,3,4,5,0,1,2
+1: 7
+--- nexus-rust ---
+20005: 1,2,3,4,5,0,1,2
+20005
+batch of 2
+batch of 0
+batch of 3
+batch of 20000
+sum=199990015 sizes=2,0,3,20000
+mark
+mark
+mark
+mark
+mark
+mark
+mark
+mark
+ran
+20005: 1,2,3,4,5,0,1,2
+20005
+batch of 2
+batch of 0
+batch of 3
+batch of 20000
+sum=199990015 sizes=2,0,3,20000
+20006: 1,2,3,4,5,0,1,2
+batch of 2
+batch of 0
+batch of 3
+batch of 20000
+batch of 1
+mark
+mark
+mark
+mark
+mark
+20006: 1,2,3,4,5,0,1,2
+20005: 1,2,3,4,5,0,1,2
+1: 7
+--- serving ---
+Return:
+  default:      [Int]
+  -a/--all:     Str    (raw bytes)
+  -b/--batches: Str    (raw bytes)
+  -k/--marks:   Str    (raw bytes)
+stream ['raw', 'all', 'count', 'batches', 'folded', 'marks']
+twoSites ['raw']
+ok 20005: 1,2,3,4,5,0,1,2
+error render 'all' of command 'twoSites' runs only from the command line; request render=raw for the command's own output
+unknown render 'all'
+--- formats ---
+OK
+OK
+0
+20005

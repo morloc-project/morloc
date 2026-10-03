@@ -1,0 +1,20 @@
+module main (run)
+
+import root
+
+step :: Int -> [Int] -> Int
+step acc _ = acc
+
+zero :: Int
+zero = 0
+
+merge :: Int -> Int -> Int
+merge a _ = a
+
+showAcc :: Int -> Str
+showAcc _ = "acc"
+
+-- Nothing streams here, so there is nothing to fold over.
+--' @render -t/--total=showAcc @fold=step @init=zero @combine=merge
+run :: [Int]
+run = [1,2,3]

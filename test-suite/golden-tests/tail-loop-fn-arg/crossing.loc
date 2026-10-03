@@ -1,0 +1,23 @@
+module main (crossing)
+
+import root
+import root-cpp
+import root-py
+
+-- A C++ tail loop (its sums are a C++ source function) whose body also calls
+-- into Python with the function argument. Its entry is native as well: the
+-- argument stays a native value in the loop, so applying it never goes
+-- through the C++ pool's own socket.
+
+source Py from "crossing.py" ("pyApply")
+source Cpp from "crossing.hpp" ("addCpp")
+
+pyApply :: (Int -> Int) -> Int -> Int
+addCpp :: Int -> Int -> Int
+
+sumG :: (Int -> Int) -> Int -> Int -> Int
+sumG f acc n = ? n == 0 = acc : sumG f (addCpp acc (addCpp (f n) (pyApply f 0))) (n - 1)
+
+--' Sum of (i + k) + k for i in 1..n
+crossing :: Int -> Int -> Int
+crossing k n = sumG (\x -> addCpp x k) 0 n

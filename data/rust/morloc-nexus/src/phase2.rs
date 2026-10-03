@@ -22,7 +22,7 @@ use clap::{Arg as ClapArg, ArgAction, ArgGroup, ArgMatches, Command as ClapComma
 
 use crate::dispatch::{preprocess_cli_value, ArgValue};
 use morloc_runtime_types::schema::{parse_schema, SerialType};
-use morloc_manifest::{Arg as ManifestArg, Command as ManifestCommand, Manifest, Return, Terminal};
+use morloc_manifest::{Arg as ManifestArg, Command as ManifestCommand, Manifest, Return};
 
 /// Leak a string into a `&'static str` for clap's static-only
 /// builder API. The nexus is a short-lived dispatcher (one
@@ -36,20 +36,102 @@ pub(crate) fn leak(s: &str) -> &'static str {
 
 /// Result of parsing a phase-2 invocation.
 pub struct ParsedCommand {
-    /// Index into [`Manifest::commands`] of the dispatched command.
+    /// Index into [`Manifest::commands`] of the dispatched command, before
+    /// any `@parse` redirect (see `parse_arg::redirect`).
     pub cmd_index: usize,
-    /// Per-arg parsed values, index-aligned with `cmd.args`.
+    /// Per-arg parsed values of the parent, index-aligned with its `args`.
+    /// A terminal entry takes the same arguments as its parent.
     pub values: Vec<ArgValue>,
     /// True when a `render` terminal flag was chosen: the dispatcher forces
     /// the streamed-stdout output format to `raw` (verbatim). `render`
     /// handlers emit the final bytes, so `-f` does not apply.
     pub render: bool,
+    /// The command the user named, before any terminal redirect.
+    pub parent_index: usize,
+    /// Every terminal action named, in the order of `cmd.terminals`.
+    pub actions: Vec<Action>,
+    /// The terminal that writes standard output, if any: a bare action, or
+    /// else the `@default` one when no `-f` and no `--no-stdout` was given
+    /// and it was not given a path.
+    pub stdout_terminal: Option<usize>,
+    /// `--no-stdout` was given.
+    pub no_stdout: bool,
+    /// The run needs the parent's output staged and its actions replayed
+    /// (see `orchestrate`). `cmd_index`/`values`/`render` are then unused.
+    pub staged: bool,
+}
+
+/// Where one named terminal action writes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Dest {
+    Stdout,
+    File(FileTarget),
+}
+
+/// The file a path names, made only by [`resolve_target`]: two targets
+/// are equal exactly when they name one file, so the checks between
+/// actions and the place a file is finally written cannot disagree.
+#[derive(Clone, Debug)]
+pub struct FileTarget {
+    given: String,
+    file: std::path::PathBuf,
+}
+
+/// Targets are the files they name, however each path was spelled.
+impl PartialEq for FileTarget {
+    fn eq(&self, other: &Self) -> bool {
+        self.file == other.file
+    }
+}
+
+impl Eq for FileTarget {}
+
+impl FileTarget {
+    /// Whether writing both could write one file: the same resolved path,
+    /// the same existing file under two names (a hard link), or names in one
+    /// directory that differ only in case. The last is refused everywhere,
+    /// not only where the filesystem folds case, so a command line means the
+    /// same thing on every machine.
+    pub fn may_name_same_file(&self, other: &Self) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        if self == other {
+            return true;
+        }
+        if let (Ok(a), Ok(b)) = (std::fs::metadata(&self.file), std::fs::metadata(&other.file)) {
+            if (a.dev(), a.ino()) == (b.dev(), b.ino()) {
+                return true;
+            }
+        }
+        let fold = |p: &std::path::Path| p.file_name().map(|n| n.to_string_lossy().to_lowercase());
+        self.file.parent() == other.file.parent() && fold(&self.file) == fold(&other.file)
+    }
+
+    /// The path as the user wrote it.
+    pub fn given(&self) -> &str {
+        &self.given
+    }
+
+    /// The file it names.
+    pub fn file(&self) -> &std::path::Path {
+        &self.file
+    }
+}
+
+/// One terminal action named on the command line.
+#[derive(Clone, Debug)]
+pub struct Action {
+    /// Index into the parent command's `terminals`.
+    pub terminal: usize,
+    pub dest: Dest,
 }
 
 /// Prefix used on clap arg-ids for terminal-action flags. Distinct
 /// from the numeric `arg{N}` ids so the two families never collide.
 const TERMINAL_ID_PREFIX: &str = "term_";
-const TERMINAL_GROUP_ID: &str = "terminal_actions";
+/// Clap id of `--no-stdout`, present on commands with terminal actions.
+const NO_STDOUT_ID: &str = "no_stdout";
+/// The value of an action flag given without `=PATH`: standard output.
+const STDOUT_DEST: &str = "-";
 
 /// Parse the trailing `rest` from a `Run` mode invocation against the
 /// manifest. Builds a root `clap::Command` whose structure matches
@@ -65,6 +147,7 @@ pub fn parse_run(
     user_zone: &[String],
     prog_name: &str,
     format_explicit: bool,
+    output_path: Option<&str>,
 ) -> ParsedCommand {
     let root = build_root(manifest, prog_name, help_level(user_zone));
     // Internal (compiler-synthesized) commands never surface at the
@@ -113,9 +196,7 @@ pub fn parse_run(
     if single {
         let (cmd_index0, cmd) = visible[0];
         let values = extract_values(cmd, &matches);
-        let (cmd_index, render) =
-            redirect_via_terminal(manifest, cmd_index0, cmd, &matches, format_explicit);
-        return ParsedCommand { cmd_index, values, render };
+        return finish_parse(manifest, cmd_index0, cmd, &matches, values, format_explicit, output_path);
     }
 
     // Walk down through the optional group layer to reach the
@@ -140,9 +221,188 @@ pub fn parse_run(
         .expect("clap-chosen command must be in manifest");
     let cmd = &manifest.commands[cmd_index];
     let values = extract_values(cmd, chosen_matches);
-    let (cmd_index, render) =
-        redirect_via_terminal(manifest, cmd_index, cmd, chosen_matches, format_explicit);
-    ParsedCommand { cmd_index, values, render }
+    finish_parse(manifest, cmd_index, cmd, chosen_matches, values, format_explicit, output_path)
+}
+
+/// Resolve the parsed parent and its terminal actions into the command to
+/// dispatch. A run keeps today's path -- one fresh run of the parent, or of
+/// one terminal's entry -- unless it names an action with a path, gives
+/// `--no-stdout`, or sends to stdout an action that runs only on the staged
+/// output; then it is `staged`.
+fn finish_parse(
+    manifest: &Manifest,
+    parent_index: usize,
+    cmd: &ManifestCommand,
+    matches: &ArgMatches,
+    values: Vec<ArgValue>,
+    format_explicit: bool,
+    output_path: Option<&str>,
+) -> ParsedCommand {
+    let (actions, no_stdout) = collect_actions(cmd, matches, output_path);
+    let bare = actions.iter().find(|a| a.dest == Dest::Stdout).map(|a| a.terminal);
+    // Stdout gets a bare action, else the `@default` action unless `-f` asks
+    // for the typed value or that action writes to a file: no output goes
+    // to both a file and stdout.
+    let has_path_to = |t: usize| actions.iter().any(|a| a.terminal == t && a.dest != Dest::Stdout);
+    let stdout_terminal = if no_stdout {
+        None
+    } else if bare.is_some() {
+        bare
+    } else if !format_explicit {
+        cmd.terminals.iter().position(|t| t.default).filter(|&t| !has_path_to(t))
+    } else {
+        None
+    };
+    let has_path = actions.iter().any(|a| a.dest != Dest::Stdout);
+    let stdout_needs_stage = stdout_terminal
+        .map(|t| cmd.terminals[t].entry.is_none())
+        .unwrap_or(false);
+    let staged = has_path || no_stdout || stdout_needs_stage;
+    let (cmd_index, render) = match stdout_terminal {
+        Some(t) if !staged => {
+            let term = &cmd.terminals[t];
+            match term.entry.as_deref().and_then(|e| manifest.command_index(e)) {
+                Some(idx) => (idx, term.render),
+                None => (parent_index, false),
+            }
+        }
+        _ => (parent_index, false),
+    };
+    ParsedCommand {
+        cmd_index,
+        values,
+        render,
+        parent_index,
+        actions,
+        stdout_terminal,
+        no_stdout,
+        staged,
+    }
+}
+
+/// The terminal actions named on the command line, with their destinations,
+/// and whether `--no-stdout` was given. Rejects, before anything runs, the
+/// requests that contradict each other: two claims on standard output, one
+/// path given to two actions, a path that is also `-o`'s, an empty `=`, and
+/// a path naming a directory.
+fn collect_actions(
+    cmd: &ManifestCommand,
+    matches: &ArgMatches,
+    output_path: Option<&str>,
+) -> (Vec<Action>, bool) {
+    use clap::parser::ValueSource;
+    let fail = |msg: String| -> ! {
+        eprintln!("error: {}", msg);
+        std::process::exit(2);
+    };
+    if cmd.terminals.is_empty() {
+        return (Vec::new(), false);
+    }
+    let mut actions = Vec::new();
+    for (i, t) in cmd.terminals.iter().enumerate() {
+        let id: &'static str = leak(&format!("{}{}", TERMINAL_ID_PREFIX, i));
+        if matches.value_source(id) != Some(ValueSource::CommandLine) {
+            continue;
+        }
+        let v = matches.get_one::<String>(id).map(String::as_str).unwrap_or(STDOUT_DEST);
+        let dest = if v.is_empty() {
+            fail(format!(
+                "--{long}= needs a path; give --{long} alone to write to standard output",
+                long = t.long,
+            ))
+        } else if v == STDOUT_DEST {
+            Dest::Stdout
+        } else {
+            Dest::File(resolve_target(v))
+        };
+        actions.push(Action { terminal: i, dest });
+    }
+    let no_stdout = matches.try_get_one::<bool>(NO_STDOUT_ID).ok().flatten().copied().unwrap_or(false);
+
+    let mut claims: Vec<String> = actions
+        .iter()
+        .filter(|a| a.dest == Dest::Stdout)
+        .map(|a| format!("--{}", cmd.terminals[a.terminal].long))
+        .collect();
+    if no_stdout {
+        claims.push("--no-stdout".to_string());
+    }
+    if claims.len() > 1 {
+        let example = actions
+            .iter()
+            .filter(|a| a.dest == Dest::Stdout)
+            .last()
+            .map(|a| format!(", e.g. --{}=out.txt", cmd.terminals[a.terminal].long))
+            .unwrap_or_default();
+        let quantifier = if claims.len() == 2 { "both" } else { "all" };
+        fail(format!(
+            "{} {} claim standard output; give all but one a path{}",
+            claims.join(" and "),
+            quantifier,
+            example,
+        ));
+    }
+
+    let mut seen: Vec<(FileTarget, &str)> = Vec::new();
+    if let Some(o) = output_path {
+        seen.push((resolve_target(o), "-o"));
+    }
+    for a in &actions {
+        if let Dest::File(target) = &a.dest {
+            let long = cmd.terminals[a.terminal].long.as_str();
+            if target.file().is_dir() {
+                fail(format!("--{}={}: the path is a directory", long, target.given()));
+            }
+            if let Some((k, other)) = seen.iter().find(|(k, _)| k.may_name_same_file(target)) {
+                let other = if *other == "-o" { "-o".to_string() } else { format!("--{}", other) };
+                if k == target {
+                    fail(format!("--{} and {} both write to {}", long, other, target.given()));
+                }
+                fail(format!(
+                    "--{} and {} write to {} and {}, which may be one file: they are the \
+                     same existing file, or differ only in case, which a case-insensitive \
+                     filesystem (the macOS default) does not distinguish",
+                    long, other, target.given(), k.given()
+                ));
+            }
+            seen.push((target.clone(), long));
+        }
+    }
+    (actions, no_stdout)
+}
+
+/// The file a path names: symlinks followed, dangling ones included, and
+/// the directory resolved. Two paths name one file exactly when their
+/// resolutions are equal, and a file an action writes lands at the
+/// resolution of its path, as a shell `>` would write it.
+pub(crate) fn resolve_target(p: &str) -> FileTarget {
+    let mut path = std::path::PathBuf::from(p);
+    // A symlink loop is left unresolved after this many steps; opening the
+    // path then fails as it would for any tool.
+    for _ in 0..40 {
+        match std::fs::symlink_metadata(&path) {
+            Ok(m) if m.file_type().is_symlink() => match std::fs::read_link(&path) {
+                Ok(next) => {
+                    path = match path.parent() {
+                        Some(dir) if next.is_relative() => dir.join(next),
+                        _ => next,
+                    };
+                }
+                Err(_) => break,
+            },
+            _ => break,
+        }
+    }
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+    let file = match path.file_name() {
+        Some(name) => dir.join(name),
+        None => dir,
+    };
+    FileTarget { given: p.to_string(), file }
 }
 
 /// How much a help page discloses, from how many times the user asked.
@@ -199,44 +459,6 @@ fn nexus_flag_hint_for_error(err: &clap::Error) -> Option<String> {
          or `./prog {name} X cmd arg`.",
         name = name_only,
     ))
-}
-
-/// If any terminal-action flag matched, swap the dispatch target to
-/// the flag's synthesized `entry` command. Argv values (positional
-/// and optional) transfer verbatim: the internal command is
-/// guaranteed to have the same argument shape as its parent by the
-/// compiler's synthesis (see `Frontend/Desugar.hs`).
-fn redirect_via_terminal(
-    manifest: &Manifest,
-    default_index: usize,
-    cmd: &ManifestCommand,
-    matches: &ArgMatches,
-    format_explicit: bool,
-) -> (usize, bool) {
-    // Resolve a terminal to its synthesized entry command's (index, render).
-    let resolve = |t: &Terminal| {
-        manifest
-            .command_index(&t.entry)
-            .map(|idx| (idx, t.render))
-    };
-    // An explicit terminal flag always wins.
-    for (i, t) in cmd.terminals.iter().enumerate() {
-        let id: &'static str = leak(&format!("{}{}", TERMINAL_ID_PREFIX, i));
-        if matches.get_flag(id) {
-            if let Some(r) = resolve(t) {
-                return r;
-            }
-        }
-    }
-    // No formatter flag given: a `@default` terminal fires -- unless the user
-    // gave an explicit `-f`, which suppresses the default and yields the
-    // command's typed output (so `-f json` always recovers JSON).
-    if !format_explicit {
-        if let Some(r) = cmd.terminals.iter().find(|t| t.default).and_then(resolve) {
-            return r;
-        }
-    }
-    (default_index, false)
 }
 
 /// Build the root `clap::Command` for a Run-mode invocation. In
@@ -421,7 +643,7 @@ fn render_return_block(mcmd: &ManifestCommand, manifest: &Manifest) -> String {
         // A `render` action writes its bytes verbatim, so `-f` does not
         // apply to it; say so rather than leave the reader to find out.
         let ret = t
-            .resolve_entry(manifest)
+            .output_command(manifest)
             .map(|c| {
                 let base = stdout_display(c);
                 if t.render && !base.is_empty() {
@@ -580,13 +802,20 @@ fn build_command_args(
                     // passed after a single occurrence (`--xs 1 2 3`).
                     a = a.num_args(1..).action(ArgAction::Append);
                 }
-                a = a.help(leak(&render_arg_help(
+                let mut help = render_arg_help(
                     desc,
                     type_desc.as_deref(),
                     None,
                     format.as_deref(),
                     crate::json_help::schema_constructor_line(schema.as_deref()),
-                )));
+                );
+                if let Some(l) = formats_line(marg.parse()) {
+                    if !help.is_empty() {
+                        help.push('\n');
+                    }
+                    help.push_str(&l);
+                }
+                a = a.help(leak(&help));
                 cmd = cmd.arg(a);
             }
             ManifestArg::Flag {
@@ -758,26 +987,37 @@ fn add_terminal_flags(mut cmd: ClapCommand, mcmd: &ManifestCommand) -> ClapComma
     if mcmd.terminals.is_empty() {
         return cmd;
     }
-    let mut group_members: Vec<&'static str> = Vec::with_capacity(mcmd.terminals.len());
+    // `--long` writes to standard output and `--long=PATH` to a file. The
+    // value is taken only with `=`, so `--long word` stays a flag followed
+    // by a positional.
     for (i, t) in mcmd.terminals.iter().enumerate() {
         let id: &'static str = leak(&format!("{}{}", TERMINAL_ID_PREFIX, i));
         let long: &'static str = leak(&t.long);
         let mut a = ClapArg::new(id)
             .long(long)
-            .action(ArgAction::SetTrue)
+            .action(ArgAction::Set)
+            .num_args(0..=1)
+            .require_equals(true)
+            .default_missing_value(STDOUT_DEST)
+            .value_name("PATH")
             .help_heading("General Options")
             .help(leak(&t.description));
         if let Some(c) = t.short {
             a = a.short(c);
         }
         cmd = cmd.arg(a);
-        group_members.push(id);
     }
-    let mut grp = ArgGroup::new(TERMINAL_GROUP_ID).multiple(false);
-    for id in group_members {
-        grp = grp.arg(id);
-    }
-    cmd.group(grp)
+    cmd.arg(
+        ClapArg::new(NO_STDOUT_ID)
+            .long("no-stdout")
+            .action(ArgAction::SetTrue)
+            .help_heading("General Options")
+            .help(
+                "Write nothing to standard output. Actions given a path \
+                 (--action=PATH) still write their files, and several may be \
+                 combined in one run.",
+            ),
+    )
 }
 
 /// Add a clap arg representing one group entry (which is itself an
@@ -885,6 +1125,34 @@ fn add_group_entry_arg(
 /// Project an [`ArgMatches`] for the chosen command back onto the
 /// manifest arg list, producing one [`ArgValue`] per manifest slot in
 /// declaration order.
+/// Read one argv token of argument `i`. An argument with `@parse` formats is
+/// first checked for a format prefix or extension; a token that selects a
+/// format is a path its handler reads, so none of the value's shape applies.
+fn token_value(
+    raw: String,
+    marg: &ManifestArg,
+    checks: &[crate::manifest::Check],
+    source: crate::manifest::SourceAtom,
+    quoted: bool,
+    i: usize,
+) -> ArgValue {
+    use crate::parse_arg::{select, Selection};
+    let label = format!("argument #{}", i);
+    let raw = match marg.parse().map(|p| select(&raw, p)) {
+        Some(Selection::Format { index, path }) => {
+            if path.is_empty() {
+                crate::runlog::die_with_error(&format!("{}: no path after the format prefix in '{}'", label, raw));
+            }
+            let handed = if path == "-" { "/dev/stdin" } else { path };
+            return ArgValue::Parsed { format: index, path: handed.to_string(), shown: path.to_string() };
+        }
+        Some(Selection::Morloc(rest)) => rest.to_string(),
+        Some(Selection::Unselected) | None => raw,
+    };
+    crate::parse_arg::note_unparsed_token(&raw);
+    ArgValue::Value(preprocess_cli_value(raw, checks, source, quoted, &label))
+}
+
 fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> {
     let mut out = Vec::with_capacity(cmd.args.len());
     for (i, marg) in cmd.args.iter().enumerate() {
@@ -902,6 +1170,7 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                         .get_many::<String>(&id)
                         .map(|it| it.cloned().collect())
                         .unwrap_or_default();
+                    toks.iter().for_each(|t| crate::parse_arg::note_unparsed_token(t));
                     out.push(ArgValue::Many { tokens: toks, literal: *q });
                 } else if *stdin {
                     // Optional stdin positional. A supplied value (a path or
@@ -923,18 +1192,14 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                             "/dev/stdin".to_string()
                         }
                     };
-                    let v = preprocess_cli_value(raw, checks, *source, *q, &format!("argument #{}", i));
-                    out.push(ArgValue::Value(v));
+                    out.push(token_value(raw, marg, checks, *source, *q, i));
                 } else {
                     // A value is guaranteed for a required positional; an
                     // optional one may be absent, and absent means null. The
                     // null is pushed bare: with no argv token there is nothing
                     // for the checks or the source/form shape to act on.
                     match matches.get_one::<String>(&id).cloned() {
-                        Some(val) => {
-                            let v = preprocess_cli_value(val, checks, *source, *q, &format!("argument #{}", i));
-                            out.push(ArgValue::Value(v));
-                        }
+                        Some(val) => out.push(token_value(val, marg, checks, *source, *q, i)),
                         None => out.push(ArgValue::Null),
                     }
                 }
@@ -969,6 +1234,7 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                             .get_many::<String>(&id)
                             .map(|it| it.cloned().collect())
                             .unwrap_or_default();
+                        toks.iter().for_each(|t| crate::parse_arg::note_unparsed_token(t));
                         out.push(ArgValue::Many { tokens: toks, literal: *q });
                     } else if let Some(def) = default_val {
                         out.push(ArgValue::Value(def.clone()));
@@ -980,8 +1246,7 @@ fn extract_values(cmd: &ManifestCommand, matches: &ArgMatches) -> Vec<ArgValue> 
                         .get_one::<String>(&id)
                         .cloned()
                         .expect("CLI source guarantees a value");
-                    let v = preprocess_cli_value(v, checks, *source, *q, &format!("argument #{}", i));
-                    out.push(ArgValue::Value(v));
+                    out.push(token_value(v, marg, checks, *source, *q, i));
                 } else if let Some(def) = default_val {
                     out.push(ArgValue::Value(def.clone()));
                 } else {
@@ -1254,7 +1519,7 @@ fn arm_field_token(tok: &str, schema: &str) -> String {
             .parameters
             .first()
             .map_or(false, |p| p.serial_type == SerialType::String),
-        _ => false,
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => false,
     });
     if is_str {
         crate::dispatch::quoted(tok)
@@ -1326,6 +1591,26 @@ fn render_arg_help(
         }
     }
     lines.join("\n")
+}
+
+/// The help line listing an argument's `@parse` formats, each with the
+/// extensions that select it, e.g.
+/// `formats: fastq (.fq .fastq), fasta (.fa), morloc (the default)`.
+fn formats_line(parse: Option<&crate::manifest::ArgParse>) -> Option<String> {
+    let p = parse?;
+    let mut items: Vec<String> = p
+        .formats
+        .iter()
+        .map(|f| {
+            if f.exts.is_empty() {
+                f.name.clone()
+            } else {
+                format!("{} ({})", f.name, f.exts.join(" "))
+            }
+        })
+        .collect();
+    items.push("morloc (the default)".to_string());
+    Some(format!("formats: {}", items.join(", ")))
 }
 
 /// Render the "Positional arguments:" block for a command's
@@ -1408,6 +1693,9 @@ fn render_positional_block(mcmd: &ManifestCommand) -> String {
                 lines.push(format!("format: {}", f));
             }
         }
+        if let Some(l) = formats_line(marg.parse()) {
+            lines.push(l);
+        }
         // Say that a slot may be left out. The type line shows `?T`, which
         // states that the value may be null but not that the argument may be
         // dropped; this is the only place on a terminal that says so.
@@ -1430,7 +1718,46 @@ fn render_positional_block(mcmd: &ManifestCommand) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_symlink_and_its_target_resolve_to_one_file() {
+        let dir = std::env::temp_dir().join(format!("resolve-target-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real.txt");
+        let dangling_target = dir.join("later.txt");
+        std::fs::write(&real, b"x").unwrap();
+        std::os::unix::fs::symlink("real.txt", dir.join("link.txt")).unwrap();
+        std::os::unix::fs::symlink("later.txt", dir.join("dangling.txt")).unwrap();
+        let r = |name: &str| resolve_target(dir.join(name).to_str().unwrap()).file().to_path_buf();
+        let t = |name: &str| resolve_target(dir.join(name).to_str().unwrap());
+        assert!(t("link.txt") == t("real.txt"));
+        assert!(t("./real.txt".trim_start_matches("./")) == resolve_target(&format!("{}/./real.txt", dir.display())));
+        assert_eq!(r("link.txt"), r("real.txt"));
+        assert_eq!(r("dangling.txt"), r("later.txt"));
+        assert_eq!(r("dangling.txt"), std::fs::canonicalize(&dir).unwrap().join("later.txt"));
+        assert!(!dangling_target.exists());
+        assert_ne!(r("real.txt"), r("other.txt"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     use super::*;
+
+    #[test]
+    fn targets_that_may_be_one_file_are_caught() {
+        let dir = std::env::temp_dir().join(format!("phase2-alias-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let at = |n: &str| resolve_target(dir.join(n).to_str().unwrap());
+        // Case: one file on a case-insensitive filesystem.
+        assert!(at("Out.txt").may_name_same_file(&at("out.txt")));
+        // Different directories or names are different files.
+        assert!(!at("out.txt").may_name_same_file(&at("sub/out.txt")));
+        assert!(!at("a.txt").may_name_same_file(&at("b.txt")));
+        // A hard link is one file under two names.
+        std::fs::write(dir.join("a.txt"), "x").unwrap();
+        std::fs::hard_link(dir.join("a.txt"), dir.join("b.txt")).unwrap();
+        let linked = at("a.txt").may_name_same_file(&at("b.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(linked);
+    }
     use morloc_manifest::parse_manifest;
 
     /// Build a manifest JSON payload that wraps one or more
@@ -1647,7 +1974,7 @@ mod tests {
     #[test]
     fn single_command_positionals_extracted_in_order() {
         let m = fixture_single_add();
-        let parsed = parse_run(&m, &["3".into(), "5".into()], "add", false);
+        let parsed = parse_run(&m, &["3".into(), "5".into()], "add", false, None);
         assert_eq!(parsed.cmd_index, 0);
         assert_eq!(parsed.values.len(), 2);
         match &parsed.values[0] {
@@ -1668,7 +1995,7 @@ mod tests {
     #[test]
     fn single_command_accepts_negative_number_positional() {
         let m = fixture_single_add();
-        let parsed = parse_run(&m, &["-5".into(), "-7".into()], "add", false);
+        let parsed = parse_run(&m, &["-5".into(), "-7".into()], "add", false, None);
         assert_eq!(parsed.values.len(), 2);
         match &parsed.values[0] {
             ArgValue::Value(v) => assert_eq!(v, "-5"),
@@ -1691,6 +2018,7 @@ mod tests {
             &["add".into(), "3".into(), "5".into()],
             "add",
             false,
+            None,
         );
         assert_eq!(parsed.cmd_index, 0);
         assert_eq!(parsed.values.len(), 2);
@@ -1720,7 +2048,7 @@ mod tests {
     #[test]
     fn multi_command_routes_by_subcommand_name() {
         let m = fixture_multi_cmds();
-        let parsed = parse_run(&m, &["beta".into()], "main", false);
+        let parsed = parse_run(&m, &["beta".into()], "main", false, None);
         assert_eq!(parsed.cmd_index, 1);
     }
 
@@ -1752,7 +2080,7 @@ mod tests {
     #[test]
     fn optional_user_override_wins_over_default() {
         let m = fixture_optional_with_default();
-        let parsed = parse_run(&m, &["--name".into(), "Zeb".into()], "greet", false);
+        let parsed = parse_run(&m, &["--name".into(), "Zeb".into()], "greet", false, None);
         match &parsed.values[0] {
             ArgValue::Value(v) => assert_eq!(v, "Zeb"),
             _ => panic!("expected Value"),
@@ -1762,7 +2090,7 @@ mod tests {
     #[test]
     fn optional_default_used_when_absent() {
         let m = fixture_optional_with_default();
-        let parsed = parse_run(&m, &[], "greet", false);
+        let parsed = parse_run(&m, &[], "greet", false, None);
         match &parsed.values[0] {
             ArgValue::Value(v) => assert_eq!(v, "world"),
             _ => panic!("expected Value"),
@@ -1797,7 +2125,7 @@ mod tests {
     #[test]
     fn flag_set_becomes_true() {
         let m = fixture_flag();
-        let parsed = parse_run(&m, &["--verbose".into()], "go", false);
+        let parsed = parse_run(&m, &["--verbose".into()], "go", false, None);
         match &parsed.values[0] {
             ArgValue::Value(v) => assert_eq!(v, "true"),
             _ => panic!("expected Value"),
@@ -1807,7 +2135,7 @@ mod tests {
     #[test]
     fn flag_absent_uses_default() {
         let m = fixture_flag();
-        let parsed = parse_run(&m, &[], "go", false);
+        let parsed = parse_run(&m, &[], "go", false, None);
         match &parsed.values[0] {
             ArgValue::Value(v) => assert_eq!(v, "false"),
             _ => panic!("expected Value"),
@@ -1817,7 +2145,7 @@ mod tests {
     #[test]
     fn flag_with_short_form_set_becomes_true() {
         let m = fixture_flag();
-        let parsed = parse_run(&m, &["-v".into()], "go", false);
+        let parsed = parse_run(&m, &["-v".into()], "go", false, None);
         match &parsed.values[0] {
             ArgValue::Value(v) => assert_eq!(v, "true"),
             _ => panic!("expected Value"),
@@ -1855,7 +2183,7 @@ mod tests {
     #[test]
     fn quoted_positional_is_json_escaped() {
         let m = fixture_quoted_positional();
-        let parsed = parse_run(&m, &[r#"hello "world""#.into()], "echo", false);
+        let parsed = parse_run(&m, &[r#"hello "world""#.into()], "echo", false, None);
         match &parsed.values[0] {
             ArgValue::Value(v) => {
                 // Whatever clap and serde_json produce must round-trip through
@@ -1902,7 +2230,7 @@ mod tests {
     #[test]
     fn literal_optional_default_passes_through_verbatim() {
         let m = fixture_literal_optional_with_default();
-        let parsed = parse_run(&m, &[], "bar", false);
+        let parsed = parse_run(&m, &[], "bar", false, None);
         match &parsed.values[0] {
             ArgValue::Value(v) => assert_eq!(v, "\"yolo\""),
             _ => panic!("expected Value"),
@@ -1914,7 +2242,7 @@ mod tests {
         // When the user types `-y a`, the value is JSON-quoted on
         // the way to the pool so the string survives transport.
         let m = fixture_literal_optional_with_default();
-        let parsed = parse_run(&m, &["-y".into(), "a".into()], "bar", false);
+        let parsed = parse_run(&m, &["-y".into(), "a".into()], "bar", false, None);
         match &parsed.values[0] {
             ArgValue::Value(v) => assert_eq!(v, "\"a\""),
             _ => panic!("expected Value"),
@@ -1978,6 +2306,7 @@ mod tests {
             &["--alg-config=algconf.json".into()],
             "foo",
             false,
+            None,
         );
         match &parsed.values[0] {
             ArgValue::Group { grp_val, fields, defaults } => {
@@ -2000,6 +2329,7 @@ mod tests {
             &["-m".into(), "6".into()],
             "foo",
             false,
+            None,
         );
         match &parsed.values[0] {
             ArgValue::Group { fields, .. } => {

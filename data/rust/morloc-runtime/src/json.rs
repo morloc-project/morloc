@@ -8,6 +8,10 @@
 //! The only remaining `unsafe` blocks are `libc::snprintf` for float
 //! formatting and constructing readers/writers at known-valid offsets.
 
+// A value crossing this module is user data: a narrowing or sign change
+// goes through a checked conversion or a named helper, never `as`.
+#![deny(clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+
 use crate::error::MorlocError;
 use crate::schema::{Schema, SerialType};
 use crate::shm::{self, AbsPtr, Array, RelPtr, RELNULL};
@@ -15,6 +19,7 @@ use crate::walk::{self, Frame, Stack, Visit, Walker};
 use serde_json::value::RawValue;
 use std::io::{self, Write};
 use std::str::FromStr;
+use morloc_runtime_types::width::{self, out_of_range, IntSlot};
 
 // ── Safe SHM abstractions ────────────────────────────────────────────────────
 
@@ -116,7 +121,7 @@ pub fn bare_ctor_names(schema: &Schema) -> Option<Vec<&str>> {
                 .collect(),
         ),
         SerialType::Optional => schema.parameters.first().and_then(bare_ctor_names),
-        _ => None,
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream => None,
     }
 }
 
@@ -226,7 +231,7 @@ pub fn load_record_fields_from_json(
         let abs = shm::shmalloc(fs.width)?;
         // SAFETY: abs is freshly allocated with fs.width bytes.
         unsafe { std::ptr::write_bytes(abs, 0, fs.width) };
-        let mut w = LoadWalk { res: &res, lx, seen: Vec::new(), free: Vec::new() };
+        let mut w = LoadWalk { res: &res, lx, seen: Vec::new(), free: Vec::new(), parts: Vec::new() };
         let mut st = Stack::new();
         st.enter(fs, abs, 0);
         walk::run(&mut w, &mut st)?;
@@ -328,17 +333,56 @@ fn load_value(
         }
         (SerialType::Array, Some(d)) => d,
         _ => {
-            // A leaf takes the whole text.
+            // A leaf takes the whole text. Every leaf that suballocates
+            // writes a root value into one block, so `parts` is normally
+            // empty here; it is collected and consolidated anyway, because
+            // the caller of a root read frees one pointer and a leaf that
+            // forgot would otherwise strand what it took.
             let span = lx.value_span()?;
-            return write_leaf(span, schema, dest);
+            let mut parts: Vec<AbsPtr> = Vec::new();
+            let leaf = match write_leaf(span, schema, dest, &mut parts) {
+                Ok(p) => p,
+                Err(e) => {
+                    for p in parts {
+                        let _ = shm::shfree(p);
+                    }
+                    return Err(e);
+                }
+            };
+            if parts.is_empty() || dest.is_some() {
+                return Ok(leaf);
+            }
+            // SAFETY: `parts` is every block the leaf took below `leaf`,
+            // which is laid out as `schema` describes.
+            return unsafe { crate::voidstar::consolidate(leaf, schema, &parts) };
         }
     };
-    let mut w = LoadWalk { res, lx: &mut lx, seen: Vec::new(), free: Vec::new() };
+    let mut w = LoadWalk { res, lx: &mut lx, seen: Vec::new(), free: Vec::new(), parts: Vec::new() };
     let mut st = Stack::new();
     let single_block = dest.is_none() && schema.serial_type == SerialType::Array;
     st.enter(schema, root, if single_block { 1 } else { 0 });
-    walk::run(&mut w, &mut st)?;
-    Ok(root)
+    if let Err(e) = walk::run(&mut w, &mut st) {
+        // A load that gave up partway still took blocks; give them back
+        // rather than leave them for the process to end with.
+        for p in w.parts.drain(..) {
+            let _ = shm::shfree(p);
+        }
+        if dest.is_none() {
+            let _ = shm::shfree(root);
+        }
+        return Err(e);
+    }
+    if w.parts.is_empty() || dest.is_some() {
+        // Nothing below the root took a block of its own, or the caller
+        // owns the root slot and will release what it built.
+        return Ok(root);
+    }
+    // The value exists but as a graph. Its caller frees one pointer, so
+    // copy it into one block and give the graph back.
+    let parts = std::mem::take(&mut w.parts);
+    // SAFETY: `parts` is every block the walk took below `root`, `root`
+    // is laid out as `schema` describes, and nothing else points into them.
+    unsafe { crate::voidstar::consolidate(root, schema, &parts) }
 }
 
 /// The element or member count of every `[` and `{` in `text`, in text
@@ -521,7 +565,12 @@ impl<'t> Lexer<'t> {
 }
 
 /// Decode a leaf from its token text into `dest` (or a fresh block).
-fn write_leaf(text: &str, schema: &Schema, dest: Option<AbsPtr>) -> Result<AbsPtr, MorlocError> {
+fn write_leaf(
+    text: &str,
+    schema: &Schema,
+    dest: Option<AbsPtr>,
+    parts: &mut Vec<AbsPtr>,
+) -> Result<AbsPtr, MorlocError> {
     match schema.serial_type {
         SerialType::Nil => {
             if !is_null(text) { return Err(err(&format!("expected null, got {}", truncate_for_msg(text)))); }
@@ -535,11 +584,11 @@ fn write_leaf(text: &str, schema: &Schema, dest: Option<AbsPtr>) -> Result<AbsPt
             };
             let w = alloc(dest, 1)?; w.write_val::<u8>(0, b); Ok(w.as_ptr())
         }
-        SerialType::Sint8  => { let w = alloc(dest, 1)?; w.write_val::<i8>(0,  parse_sint(text, i8::MIN  as i64, i8::MAX  as i64, "I8")?  as i8);  Ok(w.as_ptr()) }
-        SerialType::Sint16 => { let w = alloc(dest, 2)?; w.write_val::<i16>(0, parse_sint(text, i16::MIN as i64, i16::MAX as i64, "I16")? as i16); Ok(w.as_ptr()) }
-        SerialType::Sint32 => { let w = alloc(dest, 4)?; w.write_val::<i32>(0, parse_sint(text, i32::MIN as i64, i32::MAX as i64, "I32")? as i32); Ok(w.as_ptr()) }
-        SerialType::Sint64 => { let w = alloc(dest, 8)?; w.write_val::<i64>(0, parse_sint(text, i64::MIN,        i64::MAX,        "I64")?);        Ok(w.as_ptr()) }
-        SerialType::Uint8  => { let w = alloc(dest, 1)?; w.write_val::<u8>(0,  parse_uint(text, u8::MAX  as u64, "U8")?  as u8);  Ok(w.as_ptr()) }
+        SerialType::Sint8  => { let w = alloc(dest, 1)?; w.write_val::<i8>(0,  parse_int::<i8>(text)?);  Ok(w.as_ptr()) }
+        SerialType::Sint16 => { let w = alloc(dest, 2)?; w.write_val::<i16>(0, parse_int::<i16>(text)?); Ok(w.as_ptr()) }
+        SerialType::Sint32 => { let w = alloc(dest, 4)?; w.write_val::<i32>(0, parse_int::<i32>(text)?); Ok(w.as_ptr()) }
+        SerialType::Sint64 => { let w = alloc(dest, 8)?; w.write_val::<i64>(0, parse_int::<i64>(text)?); Ok(w.as_ptr()) }
+        SerialType::Uint8  => { let w = alloc(dest, 1)?; w.write_val::<u8>(0,  parse_int::<u8>(text)?);  Ok(w.as_ptr()) }
         // JSON is the human- and LLM-facing format, so an enum reads and
         // writes as its constructor NAME. Only a declared name is accepted,
         // and a rejection names the whole legal set -- which is possible
@@ -561,13 +610,17 @@ fn write_leaf(text: &str, schema: &Schema, dest: Option<AbsPtr>) -> Result<AbsPt
                 ))
             })?;
             let w = alloc(dest, 1)?;
-            w.write_val::<u8>(0, tag as u8);
+            w.write_val::<u8>(0, width::arm_tag(tag, schema.size).ok_or_else(|| err("enum tag out of range"))?);
             Ok(w.as_ptr())
         }
-        SerialType::Uint16 => { let w = alloc(dest, 2)?; w.write_val::<u16>(0, parse_uint(text, u16::MAX as u64, "U16")? as u16); Ok(w.as_ptr()) }
-        SerialType::Uint32 => { let w = alloc(dest, 4)?; w.write_val::<u32>(0, parse_uint(text, u32::MAX as u64, "U32")? as u32); Ok(w.as_ptr()) }
-        SerialType::Uint64 => { let w = alloc(dest, 8)?; w.write_val::<u64>(0, parse_uint(text, u64::MAX,        "U64")?);        Ok(w.as_ptr()) }
-        SerialType::Float32 => { let w = alloc(dest, 4)?; w.write_val::<f32>(0, parse_float(text, "F32")? as f32); Ok(w.as_ptr()) }
+        SerialType::Uint16 => { let w = alloc(dest, 2)?; w.write_val::<u16>(0, parse_int::<u16>(text)?); Ok(w.as_ptr()) }
+        SerialType::Uint32 => { let w = alloc(dest, 4)?; w.write_val::<u32>(0, parse_int::<u32>(text)?); Ok(w.as_ptr()) }
+        SerialType::Uint64 => { let w = alloc(dest, 8)?; w.write_val::<u64>(0, parse_int::<u64>(text)?); Ok(w.as_ptr()) }
+        SerialType::Float32 => {
+            let v = parse_float(text, "F32")?;
+            let f = width::f32_nearest(v)?;
+            let w = alloc(dest, 4)?; w.write_val::<f32>(0, f); Ok(w.as_ptr())
+        }
         SerialType::Float64 => { let w = alloc(dest, 8)?; w.write_val::<f64>(0, parse_float(text, "F64")?);        Ok(w.as_ptr()) }
 
         SerialType::Int => {
@@ -579,17 +632,38 @@ fn write_leaf(text: &str, schema: &Schema, dest: Option<AbsPtr>) -> Result<AbsPt
             let limbs = crate::eval_ffi::decimal_to_limbs(digits)?;
             let nlimbs = limbs.len();
             // Inline layout: [size:i64, value_or_relptr:i64] = 16 bytes
-            let w = alloc(dest, 16)?;
-            if nlimbs <= 1 {
-                w.write_val::<i64>(0, nlimbs as i64);
-                w.write_val::<i64>(8, if nlimbs == 1 { limbs[0] as i64 } else { 0 });
-            } else {
-                let limb_bytes = nlimbs * 8;
-                let abs = shm::shmemcpy(limbs.as_ptr() as *const u8, limb_bytes)?;
+            if let Some([size, value]) = crate::eval_ffi::inline_bigint(&limbs) {
+                let w = alloc(dest, 16)?;
+                w.write_val::<i64>(0, size);
+                w.write_val::<i64>(8, value);
+                return Ok(w.as_ptr());
+            }
+            let limb_bytes = nlimbs * 8;
+            // SAFETY: `limbs` owns `nlimbs` u64s, so this is its byte view.
+            let limb_src = unsafe {
+                std::slice::from_raw_parts(limbs.as_ptr() as *const u8, limb_bytes)
+            };
+            if dest.is_some() {
+                let w = alloc(dest, 16)?;
+                // SAFETY: limb_src is a live slice of limb_bytes bytes.
+                let abs = unsafe { shm::shmemcpy(limb_src.as_ptr(), limb_bytes) }?;
+                parts.push(abs);
                 w.write_val::<usize>(0, nlimbs);
                 w.write_val::<shm::RelPtr>(8, shm::abs2rel(abs)?);
+                Ok(w.as_ptr())
+            } else {
+                // A root Int carries its limbs in the same block, the way a
+                // root String carries its bytes: the caller of a root read
+                // frees one pointer. The limbs land 16 bytes into an
+                // 8-aligned block, so they stay 8-aligned.
+                let w = alloc(None, 16 + limb_bytes)?;
+                w.write_bytes(16, limb_src);
+                // SAFETY: the limbs are 16 bytes into the same shmalloc block
+                let data_rel = shm::abs2rel(unsafe { w.as_ptr().add(16) })?;
+                w.write_val::<usize>(0, nlimbs);
+                w.write_val::<shm::RelPtr>(8, data_rel);
+                Ok(w.as_ptr())
             }
-            Ok(w.as_ptr())
         }
 
         SerialType::String => {
@@ -602,7 +676,10 @@ fn write_leaf(text: &str, schema: &Schema, dest: Option<AbsPtr>) -> Result<AbsPt
             let (w, data_rel) = if dest.is_some() {
                 let w = alloc(dest, hdr)?;
                 let data_rel = if bytes.is_empty() { RELNULL } else {
-                    shm::abs2rel(shm::shmemcpy(bytes.as_ptr(), bytes.len())?)?
+                    // SAFETY: bytes is a live slice.
+                    let abs = unsafe { shm::shmemcpy(bytes.as_ptr(), bytes.len()) }?;
+                    parts.push(abs);
+                    shm::abs2rel(abs)?
                 };
                 (w, data_rel)
             } else {
@@ -628,24 +705,25 @@ fn write_leaf(text: &str, schema: &Schema, dest: Option<AbsPtr>) -> Result<AbsPt
             let (w, payload) = if dest.is_some() {
                 let w = alloc(dest, sh::STREAM_HANDLE_FIELD_SIZE)?;
                 let payload = if bytes.is_empty() {
-                    RELNULL as u64
+                    sh::RELNULL_PAYLOAD
                 } else {
                     let block = shm::shmalloc(sh::path_suballoc_size(bytes.len()))?;
+                    parts.push(block);
                     unsafe { sh::write_path_suballoc(block, bytes); }
-                    shm::abs2rel(block)? as u64
+                    sh::path_payload(shm::abs2rel(block)?)
                 };
                 (w, payload)
             } else {
                 let suballoc = sh::path_suballoc_size(bytes.len());
                 let w = alloc(None, sh::STREAM_HANDLE_FIELD_SIZE + suballoc)?;
                 let payload = if bytes.is_empty() {
-                    RELNULL as u64
+                    sh::RELNULL_PAYLOAD
                 } else {
                     let body_ptr = unsafe {
                         w.as_ptr().add(sh::STREAM_HANDLE_FIELD_SIZE)
                     };
                     unsafe { sh::write_path_suballoc(body_ptr, bytes); }
-                    shm::abs2rel(body_ptr)? as u64
+                    sh::path_payload(shm::abs2rel(body_ptr)?)
                 };
                 (w, payload)
             };
@@ -653,7 +731,7 @@ fn write_leaf(text: &str, schema: &Schema, dest: Option<AbsPtr>) -> Result<AbsPt
             Ok(w.as_ptr())
         }
 
-        other => Err(err(&format!("{other:?} is not a leaf type"))),
+        other @ (SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Table | SerialType::Recur | SerialType::Variant) => Err(err(&format!("{other:?} is not a leaf type"))),
     }
 }
 
@@ -671,6 +749,12 @@ struct LoadWalk<'a, 'r, 't> {
     /// closes.
     seen: Vec<Vec<u64>>,
     free: Vec<usize>,
+    /// Every block taken for a part of the value below its root. The
+    /// loader cannot size its result before parsing it, so it builds the
+    /// value as a graph and `consolidate` copies it into the one block a
+    /// pool can release; this is the list that copy gives back. It also
+    /// makes the error path releasable, which it was not.
+    parts: Vec<AbsPtr>,
 }
 
 impl<'a, 'r, 't> LoadWalk<'a, 'r, 't> {
@@ -721,6 +805,7 @@ impl<'a, 'r, 't> LoadWalk<'a, 'r, 't> {
                 unsafe { (f.data as *mut u8).add(hdr) }
             } else if n > 0 {
                 let dp = shm::shmalloc(n * ew)?;
+                self.parts.push(dp);
                 // SAFETY: freshly allocated with n * ew bytes.
                 unsafe { std::ptr::write_bytes(dp, 0, n * ew) };
                 dp
@@ -862,7 +947,7 @@ impl<'a, 'r, 't> Walker<u64> for LoadWalk<'a, 'r, 't> {
                     }
                     return self.lx.expect(b']');
                 }
-                let id = x as usize;
+                let id = width::usize_from_u64(x);
                 let mut members = f.idx;
                 loop {
                     if self.lx.peek() == Some(b'}') {
@@ -920,6 +1005,7 @@ impl<'a, 'r, 't> Walker<u64> for LoadWalk<'a, 'r, 't> {
                     return Ok(());
                 }
                 let inner_abs = shm::shmalloc(inner.width)?;
+                self.parts.push(inner_abs);
                 // SAFETY: inner_abs is freshly allocated with inner.width bytes.
                 unsafe { std::ptr::write_bytes(inner_abs, 0, inner.width) };
                 w.write_val::<RelPtr>(0, shm::abs2rel(inner_abs)?);
@@ -967,7 +1053,7 @@ impl<'a, 'r, 't> Walker<u64> for LoadWalk<'a, 'r, 't> {
                     ))
                 })?;
                 let arm = &schema.parameters[tag];
-                w.write_val::<u8>(0, tag as u8);
+                w.write_val::<u8>(0, width::arm_tag(tag, schema.size).ok_or_else(|| err("variant tag out of range"))?);
                 // The seven bytes between the tag and the payload pointer
                 // are written explicitly so a variant's bytes are fully
                 // determined by its value, rather than by whatever the
@@ -992,6 +1078,7 @@ impl<'a, 'r, 't> Walker<u64> for LoadWalk<'a, 'r, 't> {
                     )));
                 }
                 let payload = shm::shmalloc(arm.width)?;
+                self.parts.push(payload);
                 // SAFETY: freshly allocated with arm.width bytes.
                 unsafe { std::ptr::write_bytes(payload, 0, arm.width) };
                 w.write_val::<RelPtr>(8, shm::abs2rel(payload)?);
@@ -1010,9 +1097,9 @@ impl<'a, 'r, 't> Walker<u64> for LoadWalk<'a, 'r, 't> {
                 Err(err("Cannot load a Table from generic JSON; use the Arrow CSV/JSON reader path"))
             }
             SerialType::Recur => unreachable!("a back-reference resolves before it is stepped"),
-            _ => {
+            SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Int | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Enum => {
                 let span = self.lx.value_span()?;
-                write_leaf(span, schema, Some(slot))?;
+                write_leaf(span, schema, Some(slot), &mut self.parts)?;
                 Ok(())
             }
         }
@@ -1056,18 +1143,26 @@ pub fn voidstar_to_json_string(ptr: AbsPtr, schema: &Schema) -> Result<String, M
 /// True when the top-level wire value is "null-ish": either Unit (Nil) or
 /// an Optional whose relptr is RELNULL. Nested null inside a container
 /// is not detected -- that would lose structural information.
-pub fn is_top_null(ptr: AbsPtr, schema: &Schema) -> bool {
+///
+/// # Safety
+///
+/// `ptr` must point to a live voidstar value of `schema`.
+pub unsafe fn is_top_null(ptr: AbsPtr, schema: &Schema) -> bool {
     match schema.serial_type {
         SerialType::Nil => true,
         SerialType::Optional => {
             let r = unsafe { ShmReader::new(ptr) };
             r.read_val::<RelPtr>(0) == RELNULL
         }
-        _ => false,
+        SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => false,
     }
 }
 
-pub fn print_voidstar(ptr: AbsPtr, schema: &Schema, keep_null: bool) -> Result<(), MorlocError> {
+///
+/// # Safety
+///
+/// `ptr` must point to a live voidstar value of `schema`.
+pub unsafe fn print_voidstar(ptr: AbsPtr, schema: &Schema, keep_null: bool) -> Result<(), MorlocError> {
     write_to_stdout(ptr, schema, keep_null, None)
 }
 
@@ -1078,7 +1173,11 @@ pub fn print_voidstar(ptr: AbsPtr, schema: &Schema, keep_null: bool) -> Result<(
 /// * Non-list schemas: emit the whole value on one line (equivalent
 ///   to `-f json` with a trailing newline). `-f jsonl` on a scalar
 ///   still parses as valid JSON-lines (one line, one value).
-pub fn print_voidstar_jsonl(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
+///
+/// # Safety
+///
+/// `ptr` must point to a live voidstar value of `schema`.
+pub unsafe fn print_voidstar_jsonl(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocError> {
     let mut w = io::BufWriter::with_capacity(BUFWRITER_CAPACITY, io::stdout().lock());
     match schema.serial_type {
         SerialType::Array => {
@@ -1098,7 +1197,7 @@ pub fn print_voidstar_jsonl(ptr: AbsPtr, schema: &Schema) -> Result<(), MorlocEr
             }
             map_io(w.flush())
         }
-        _ => {
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => {
             to_json(ptr, schema, &mut w, None)?;
             map_io(w.write_all(b"\n"))?;
             map_io(w.flush())
@@ -1179,7 +1278,7 @@ fn write_voidstar_raw<W: io::Write>(
             }
             Ok(())
         }
-        _ => Err(err(
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => Err(err(
             "-f raw requires Str, [Str], Vector U8, or [Vector U8] output \
              (a `render` handler's bytes)",
         )),
@@ -1202,7 +1301,10 @@ pub fn voidstar_raw_to_bytes(ptr: AbsPtr, schema: &Schema) -> Result<Vec<u8>, Mo
     Ok(buf)
 }
 
-pub fn pretty_print_voidstar(ptr: AbsPtr, schema: &Schema, keep_null: bool) -> Result<(), MorlocError> {
+/// # Safety
+///
+/// `ptr` must point to a live voidstar value of `schema`.
+pub unsafe fn pretty_print_voidstar(ptr: AbsPtr, schema: &Schema, keep_null: bool) -> Result<(), MorlocError> {
     // Top-level String renders as the unescaped body (terminal convenience
     // for `--print`). Other single-scalar returns fall through to the
     // streaming walker.
@@ -1224,7 +1326,8 @@ pub fn pretty_print_voidstar(ptr: AbsPtr, schema: &Schema, keep_null: bool) -> R
 fn write_to_stdout(ptr: AbsPtr, schema: &Schema, keep_null: bool, pretty: Pretty)
     -> Result<(), MorlocError>
 {
-    if !keep_null && is_top_null(ptr, schema) { return Ok(()); }
+    // SAFETY: forwarded from this function's own contract.
+    if !keep_null && unsafe { is_top_null(ptr, schema) } { return Ok(()); }
     let mut w = io::BufWriter::with_capacity(BUFWRITER_CAPACITY, io::stdout().lock());
     to_json(ptr, schema, &mut w, pretty)?;
     map_io(w.write_all(b"\n"))?;
@@ -1339,7 +1442,7 @@ impl<'a, 'r> Walker<Pretty> for JsonWalk<'a, 'r> {
                 let tag = r.read_u8(0) as usize;
                 s.parameters.get(tag).map_or(false, |arm| arm.size != 0)
             }
-            _ => false,
+            SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Enum => false,
         }
     }
 
@@ -1349,7 +1452,7 @@ impl<'a, 'r> Walker<Pretty> for JsonWalk<'a, 'r> {
             SerialType::Array | SerialType::Tuple => self.close(b']', f.x),
             SerialType::Map => self.close(b'}', f.x),
             SerialType::Variant => map_io(self.w.write_all(b"}")),
-            _ => Ok(()),
+            SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Enum => Ok(()),
         }
     }
 
@@ -1456,27 +1559,15 @@ impl<'a, 'r> Walker<Pretty> for JsonWalk<'a, 'r> {
                 let tag = unsafe { sh::read_tag(field_ptr) };
                 let payload = unsafe { sh::read_payload(field_ptr) };
                 if tag == sh::TAG_PATH {
-                    if payload == RELNULL as u64 {
-                        map_io(w.write_all(b"\"\""))?;
-                    } else {
-                        let suballoc = shm::rel2abs(payload as shm::RelPtr)?;
-                        let path_len = unsafe { sh::read_path_size(suballoc) } as usize;
-                        if path_len == 0 {
-                            map_io(w.write_all(b"\"\""))?;
-                        } else {
-                            let bytes = unsafe {
-                                std::slice::from_raw_parts(suballoc.add(8), path_len)
-                            };
-                            let s = std::str::from_utf8(bytes).map_err(|_| {
-                                MorlocError::Serialization(
-                                    "json stream-handle: path is not valid UTF-8".into(),
-                                )
-                            })?;
-                            json_escape(s, w)?;
-                        }
-                    }
+                    // SAFETY: the value being written is live SHM.
+                    let block = unsafe { crate::voidstar::path_suballoc(&crate::voidstar::Arena, payload) }?;
+                    let bytes = block.map_or(&[][..], |b| &b[8..]);
+                    let s = std::str::from_utf8(bytes).map_err(|_| {
+                        MorlocError::Serialization("json stream-handle: path is not valid UTF-8".into())
+                    })?;
+                    json_escape(s, w)?;
                 } else if tag == sh::TAG_HANDLE {
-                    let path = crate::stream::handle_path(payload as i64)?;
+                    let path = crate::stream::handle_path(sh::payload_handle(payload))?;
                     json_escape(&path, w)?;
                 } else {
                     return Err(MorlocError::Serialization(format!(
@@ -1660,74 +1751,29 @@ fn extract_bigint_digits(text: &str) -> Result<&str, MorlocError> {
     Ok(body)
 }
 
-/// Parse a fixed-width signed integer leaf. Operates directly on the raw
-/// JSON text (preserves precision for diagnostics), rejects float syntax,
-/// and reports out-of-range values with the original magnitude verbatim.
-fn parse_sint(text: &str, lo: i64, hi: i64, name: &str) -> Result<i64, MorlocError> {
+/// Parse a fixed-width integer leaf with the slot type's own parser.
+/// Operates directly on the raw JSON text, so a rejected value is reported
+/// with its original magnitude verbatim.
+fn parse_int<T: IntSlot>(text: &str) -> Result<T, MorlocError> {
+    use std::num::IntErrorKind;
     let t = text.trim();
-    if t.bytes().any(|b| b == b'.' || b == b'e' || b == b'E') {
-        return Err(MorlocError::Serialization(format!(
-            "expected integer for {}, got {}", name, truncate_for_msg(t)
-        )));
-    }
-    match i64::from_str(t) {
-        Ok(v) if v >= lo && v <= hi => Ok(v),
-        Ok(v) => Err(MorlocError::Serialization(format!(
-            "value {} out of range for {} (range {} to {})", v, name, lo, hi
-        ))),
-        Err(_) => {
-            // i64::from_str failed: the value is either malformed or exceeds
-            // i64. If the body is a valid decimal-digit run (with optional
-            // leading '-'), it must be out of range; otherwise it's invalid.
-            let body = t.strip_prefix('-').unwrap_or(t);
-            if !body.is_empty() && body.bytes().all(|b| b.is_ascii_digit()) {
-                Err(MorlocError::Serialization(format!(
-                    "value {} out of range for {} (range {} to {})", t, name, lo, hi
-                )))
-            } else {
-                Err(MorlocError::Serialization(format!(
-                    "invalid integer for {}: {}", name, truncate_for_msg(t)
-                )))
-            }
-        }
-    }
-}
-
-fn parse_uint(text: &str, hi: u64, name: &str) -> Result<u64, MorlocError> {
-    let t = text.trim();
-    if t.bytes().any(|b| b == b'.' || b == b'e' || b == b'E') {
-        return Err(MorlocError::Serialization(format!(
-            "expected unsigned integer for {}, got {}", name, truncate_for_msg(t)
-        )));
-    }
-    if let Some(rest) = t.strip_prefix('-') {
-        // Negative is necessarily out of range for unsigned; report so.
-        if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(MorlocError::Serialization(format!(
-                "value {} out of range for {} (range 0 to {})", t, name, hi
-            )));
-        }
-        return Err(MorlocError::Serialization(format!(
-            "invalid unsigned integer for {}: {}", name, truncate_for_msg(t)
-        )));
-    }
-    match u64::from_str(t) {
-        Ok(v) if v <= hi => Ok(v),
-        Ok(v) => Err(MorlocError::Serialization(format!(
-            "value {} out of range for {} (range 0 to {})", v, name, hi
-        ))),
-        Err(_) => {
-            if !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) {
-                Err(MorlocError::Serialization(format!(
-                    "value {} out of range for {} (range 0 to {})", t, name, hi
-                )))
-            } else {
-                Err(MorlocError::Serialization(format!(
-                    "invalid unsigned integer for {}: {}", name, truncate_for_msg(t)
-                )))
-            }
-        }
-    }
+    let e = match T::from_str(t) {
+        Ok(v) => return Ok(v),
+        Err(e) => e,
+    };
+    let kind = if T::LO == 0 { "unsigned integer" } else { "integer" };
+    let is_digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    Err(match e.kind() {
+        IntErrorKind::PosOverflow | IntErrorKind::NegOverflow => out_of_range::<T>(&t),
+        // A negative is out of range for an unsigned slot, including "-0".
+        _ if T::LO == 0 && t.strip_prefix('-').is_some_and(is_digits) => out_of_range::<T>(&t),
+        _ if t.bytes().any(|b| b == b'.' || b == b'e' || b == b'E') => MorlocError::Serialization(
+            format!("expected {} for {}, got {}", kind, T::NAME, truncate_for_msg(t)),
+        ),
+        _ => MorlocError::Serialization(
+            format!("invalid {} for {}: {}", kind, T::NAME, truncate_for_msg(t)),
+        ),
+    })
 }
 
 // Non-finite IEEE-754 values cannot appear as numeric literals in RFC 8259
@@ -1778,11 +1824,10 @@ fn write_float(w: &mut dyn Write, f: f64, fmt: &[u8]) -> Result<(), MorlocError>
     let mut cbuf = [0u8; 64];
     // SAFETY: snprintf writes to stack-local buffer with explicit size limit
     let n = unsafe { libc::snprintf(cbuf.as_mut_ptr() as *mut libc::c_char, cbuf.len(), fmt.as_ptr() as *const libc::c_char, f) };
-    if n > 0 && (n as usize) < cbuf.len() {
+    match usize::try_from(n) {
         // snprintf produces ASCII digits/sign/exponent -- no UTF-8 check needed.
-        map_io(w.write_all(&cbuf[..n as usize]))
-    } else {
-        map_io(w.write_all(b"0"))
+        Ok(k) if k > 0 && k < cbuf.len() => map_io(w.write_all(&cbuf[..k])),
+        _ => Err(MorlocError::Serialization(format!("could not format the float {}", f))),
     }
 }
 
@@ -1791,7 +1836,83 @@ mod tests {
     use super::*;
     use crate::schema::parse_schema;
     #[must_use]
-    fn setup() -> std::sync::RwLockReadGuard<'static, ()> { crate::init_test_shm() }
+    fn setup() -> crate::ArenaShared { crate::init_test_shm() }
+
+    /// An arbitrary-precision Int round-trips at every width.
+    ///
+    /// A root Int writes its limbs inside its own block while a nested one
+    /// suballocates, so the two layouts are separate code and the wide
+    /// cases only exercise the first through a bare `j` schema.
+    #[test]
+    fn a_bigint_round_trips_at_every_width() {
+        let _shm = crate::own_test_registry();
+        let root = parse_schema("j").unwrap();
+        let nested = parse_schema("aj").unwrap();
+        let cases = [
+            "0",
+            "7",
+            "18446744073709551615",
+            "18446744073709551616",
+            "123456789012345678901234567890123456789012345678901234567890",
+        ];
+        for text in cases {
+            let p = read_json_with_schema(text, &root).unwrap();
+            assert_eq!(voidstar_to_json_string(p, &root).unwrap(), text, "root {}", text);
+            crate::shm::shfree(p).unwrap();
+
+            let arr = format!("[{}]", text);
+            let q = read_json_with_schema(&arr, &nested).unwrap();
+            assert_eq!(voidstar_to_json_string(q, &nested).unwrap(), arr, "nested {}", text);
+            crate::shm::shfree(q).unwrap();
+        }
+    }
+
+    /// A value read from JSON is one self-contained block.
+    ///
+    /// Its caller frees one pointer -- that is the contract `load_value`
+    /// states and the reason it consolidates the walk path -- so anything
+    /// the read suballocates has to live inside the block it returns. A
+    /// root leaf is the easy case to get wrong, because it never reaches
+    /// the walk: it is written directly and returned.
+    #[test]
+    fn a_value_read_from_json_is_one_block() {
+        let _shm = crate::own_test_registry();
+        let mut hist = [0usize; 40];
+        let cases: &[(&str, &str)] = &[
+            ("i4", "42"),
+            ("s", "\"hello\""),
+            ("s", "\"\""),
+            ("b", "true"),
+            // Arbitrary-precision Int: inline when it fits in one limb,
+            // and suballocated when it does not.
+            ("j", "7"),
+            ("j", "123456789012345678901234567890123456789012345678901234567890"),
+            ("ai4", "[1,2,3]"),
+            ("as", "[\"a\",\"bb\"]"),
+            ("aj", "[1,123456789012345678901234567890123456789012345678901234567890]"),
+            ("?i4", "null"),
+            ("m21ai41cs", "{\"a\":1,\"c\":\"x\"}"),
+        ];
+        for (schema_str, json) in cases {
+            let schema = parse_schema(schema_str).unwrap();
+            // Settle whatever the first read allocates lazily.
+            let warm = read_json_with_schema(json, &schema).unwrap();
+            crate::shm::shfree(warm).unwrap();
+
+            let before = crate::shm::live_block_stats(&mut hist).0;
+            for _ in 0..4 {
+                let p = read_json_with_schema(json, &schema).unwrap();
+                crate::shm::shfree(p).unwrap();
+            }
+            assert_eq!(
+                crate::shm::live_block_stats(&mut hist).0,
+                before,
+                "{} {} did not come back as one block",
+                schema_str,
+                json
+            );
+        }
+    }
 
     #[test] fn test_int()     { let _shm = setup(); let s = parse_schema("i4").unwrap(); let p = read_json_with_schema("42", &s).unwrap(); assert_eq!(voidstar_to_json_string(p, &s).unwrap(), "42"); }
     #[test] fn test_string()  { let _shm = setup(); let s = parse_schema("s").unwrap(); let p = read_json_with_schema("\"hello\"", &s).unwrap(); assert_eq!(voidstar_to_json_string(p, &s).unwrap(), "\"hello\""); }

@@ -46,6 +46,9 @@ end
 
 # -- Daemon lifecycle --
 
+# End this pool's process group when the nexus ends, however it ends.
+lifeline_guard() = ccall((:jlmorloc_lifeline_guard, lib()), Nothing, ())
+
 function start_daemon(socket_path::String, tmpdir::String,
                       shm_basename::String, shm_size::Integer)
     ptr = ccall((:jlmorloc_start_daemon, lib()), Ptr{Nothing},
@@ -178,6 +181,16 @@ function get_value(packet::Ptr{UInt8}, schema_str::String)
     mpk_bytes = unsafe_wrap(Array, mpk_ptr, out_size[]; own=true)
     raw = MsgPack.unpack(mpk_bytes)
     return from_msgpack(raw, schema)
+end
+
+"""
+    mlc_unpack(schema_str, packet_bytes) -> Julia value
+
+Decode a morloc packet held as bytes, as an argument packet is decoded.
+"""
+function mlc_unpack(schema_str::String, packet_bytes)
+    bytes = Vector{UInt8}(packet_bytes)
+    GC.@preserve bytes get_value(pointer(bytes), schema_str)
 end
 
 # -- Error packet --

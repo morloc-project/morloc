@@ -1,0 +1,41 @@
+module pe11 (top)
+
+-- A deep chain whose dimension is never determined, beside one definition
+-- whose element type is never determined. Only the second cannot be
+-- elaborated on its own, and only it needs expanding where it is used.
+
+type Box (n :: Nat) a
+bcat :: Box a Real -> Box b Real -> Box m Real
+bsize :: Box a Real -> Int
+count :: [a] -> Int
+combine :: Int -> Int -> Int
+
+p0 :: Int -> Box m Real
+p1 :: Int -> Box m Real
+p1 n = bcat (p0 n) (p0 n)
+p2 :: Int -> Box m Real
+p2 n = bcat (p1 n) (p1 n)
+p3 :: Int -> Box m Real
+p3 n = bcat (p2 n) (p2 n)
+p4 :: Int -> Box m Real
+p4 n = bcat (p3 n) (p3 n)
+p5 :: Int -> Box m Real
+p5 n = bcat (p4 n) (p4 n)
+p6 :: Int -> Box m Real
+p6 n = bcat (p5 n) (p5 n)
+p7 :: Int -> Box m Real
+p7 n = bcat (p6 n) (p6 n)
+p8 :: Int -> Box m Real
+p8 n = bcat (p7 n) (p7 n)
+p9 :: Int -> Box m Real
+p9 n = bcat (p8 n) (p8 n)
+p10 :: Int -> Box m Real
+p10 n = bcat (p9 n) (p9 n)
+p11 :: Int -> Box m Real
+p11 n = bcat (p10 n) (p10 n)
+
+nothingHere :: [a]
+nothingHere = []
+
+top :: Int -> Int
+top n = combine (bsize (p11 n)) (count nothingHere)

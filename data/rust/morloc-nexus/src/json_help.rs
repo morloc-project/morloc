@@ -245,7 +245,7 @@ fn constructor_line_of(s: &Schema) -> Option<String> {
         SerialType::Optional | SerialType::Array => {
             s.parameters.first().and_then(constructor_line_of)
         }
-        _ => None,
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Tuple | SerialType::Map | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream => None,
     }
 }
 
@@ -360,7 +360,7 @@ fn command_to_json(cmd: &Command, manifest: &Manifest) -> Value {
         .terminals
         .iter()
         .map(|t| {
-            let entry = t.resolve_entry(manifest);
+            let entry = t.output_command(manifest);
             let ty = entry.map(|c| stream_or_return_type_object(c));
             json!({
                 "short": t.short.map(|c| c.to_string()),
@@ -405,6 +405,15 @@ fn command_to_json(cmd: &Command, manifest: &Manifest) -> Value {
 /// Render one manifest [`Arg`] to its lossless JSON object. `pos_index` is the
 /// zero-based position among positional args (ignored for non-positionals).
 fn arg_to_json(arg: &Arg, pos_index: usize) -> Value {
+    let mut v = arg_fields_json(arg, pos_index);
+    // Present only on an argument with `@parse` formats.
+    if let (Some(p), Value::Object(obj)) = (arg.parse(), &mut v) {
+        obj.insert("parse".into(), parse_json(p));
+    }
+    v
+}
+
+fn arg_fields_json(arg: &Arg, pos_index: usize) -> Value {
     match arg {
         Arg::Positional {
             schema,
@@ -619,6 +628,17 @@ fn type_object(
     Value::Object(obj)
 }
 
+/// An argument's `@parse` formats as JSON: each format's name and the
+/// extensions that select it. The CLI reads formats; daemon, MCP and
+/// call-packet callers pass values.
+fn parse_json(p: &morloc_manifest::ArgParse) -> Value {
+    json!({
+        "formats": p.formats.iter()
+            .map(|f| json!({ "name": f.name, "exts": f.exts }))
+            .collect::<Vec<_>>(),
+    })
+}
+
 /// The `source:`/`form:`/`check.*`/`list.*` CLI-shape grammar as JSON.
 fn input_object(
     source: &SourceAtom,
@@ -796,7 +816,12 @@ fn schema_returns_object(p: &Schema) -> bool {
 /// stdout capture). Checked on every argument and the return type.
 fn schema_tree_excluded(s: &Schema) -> bool {
     use SerialType::*;
-    matches!(s.serial_type, Table | IFile | IStream | OStream)
+    // A stream handle or an IFile cannot be served: the handle means nothing
+    // to a client, and a streaming command writes to a stdout fd the MCP loop
+    // has aliased away. A Table is neither -- its row schema is known
+    // statically and `schema_to_json_schema` already renders it as an array
+    // of typed row objects, which is a shape a client understands.
+    matches!(s.serial_type, IFile | IStream | OStream)
         || s.parameters.iter().any(schema_tree_excluded)
 }
 
@@ -843,17 +868,24 @@ fn cli_default_to_json(default_val: Option<&str>, st: Option<&Schema>) -> Value 
             "false" => json!(false),
             _ => Value::String(raw.to_string()),
         },
+        // Parsed as a JSON number so a value beyond i64 keeps every digit;
+        // a float fallback would round it.
         Some(Sint8 | Sint16 | Sint32 | Sint64 | Uint8 | Uint16 | Uint32 | Uint64 | Int) => raw
-            .parse::<i64>()
-            .map(|n| json!(n))
-            .or_else(|_| raw.parse::<f64>().map(|f| json!(f)))
-            .unwrap_or_else(|_| Value::String(raw.to_string())),
+            .parse::<serde_json::Number>()
+            .ok()
+            .filter(|n| !n.to_string().contains(['.', 'e', 'E']))
+            .map(Value::Number)
+            .unwrap_or_else(|| Value::String(raw.to_string())),
         Some(Float32 | Float64) => raw
             .parse::<f64>()
             .map(|f| json!(f))
             .unwrap_or_else(|_| Value::String(raw.to_string())),
         Some(String) => Value::String(strip_cli_quotes(raw)),
-        _ => serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string())),
+        Some(
+            Nil | Array | Tuple | Map | Optional | Table | Recur | IFile | OStream | IStream
+            | Variant | Enum,
+        )
+        | None => serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string())),
     }
 }
 
@@ -1122,11 +1154,14 @@ fn command_to_tool_shape(cmd: &Command) -> Result<McpToolShape, String> {
     let mut renders: Vec<RenderTarget> = Vec::new();
     if !cmd.terminals.is_empty() {
         let mut enum_vals: Vec<Value> = vec![Value::String("raw".into())];
+        // A tool call runs one action on a fresh run of its command; an
+        // action with no such entry runs only on saved output, from the CLI.
         for t in &cmd.terminals {
+            let Some(entry) = &t.entry else { continue };
             enum_vals.push(Value::String(t.long.clone()));
             renders.push(RenderTarget {
                 value: t.long.clone(),
-                command: t.entry.clone(),
+                command: entry.clone(),
                 mime: None,
                 returns_object: false,
             });
@@ -1288,6 +1323,16 @@ mod tests {
 
     fn js(schema: &str) -> Value {
         schema_to_json_schema(&parse_schema(schema).unwrap())
+    }
+
+    /// An integer default beyond i64 keeps every digit; it is not rounded
+    /// through a float.
+    #[test]
+    fn wide_integer_defaults_are_exact() {
+        for (raw, schema) in [("123456789012345678901234567890", "j"), ("18446744073709551615", "u8")] {
+            let v = cli_default_to_json(Some(raw), Some(&parse_schema(schema).unwrap()));
+            assert_eq!(v.to_string(), raw, "schema {schema}");
+        }
     }
 
     #[test]

@@ -1,7 +1,37 @@
-module pure (checkInt, checkReal, checkBool, checkStr, checkTuple)
+module pure (checkInt, checkReal, checkBool, checkStr, checkTuple, swapLadder)
 
 checkInt = 42 :: Int
 checkReal = 3.14 :: Real
 checkBool = True
 checkStr = "hello"
 checkTuple = (1 :: Int, True, "abc")
+
+-- a shared definition the evaluator calls by name (each level is compiled
+-- once, not once per use)
+s0 :: (Int, Int) -> (Int, Int)
+s0 p = (.1 p, .0 p)
+s1 :: (Int, Int) -> (Int, Int)
+s1 p = s0 (s0 p)
+s2 :: (Int, Int) -> (Int, Int)
+s2 p = s1 (s1 p)
+s3 :: (Int, Int) -> (Int, Int)
+s3 p = s2 (s2 p)
+s4 :: (Int, Int) -> (Int, Int)
+s4 p = s3 (s3 p)
+s5 :: (Int, Int) -> (Int, Int)
+s5 p = s4 (s4 p)
+s6 :: (Int, Int) -> (Int, Int)
+s6 p = s5 (s5 p)
+s7 :: (Int, Int) -> (Int, Int)
+s7 p = s6 (s6 p)
+s8 :: (Int, Int) -> (Int, Int)
+s8 p = s7 (s7 p)
+s9 :: (Int, Int) -> (Int, Int)
+s9 p = s8 (s8 p)
+s10 :: (Int, Int) -> (Int, Int)
+s10 p = s9 (s9 p)
+s11 :: (Int, Int) -> (Int, Int)
+s11 p = s0 (s10 p)
+
+swapLadder :: Int -> Int -> (Int, Int)
+swapLadder a b = s11 (a, b)

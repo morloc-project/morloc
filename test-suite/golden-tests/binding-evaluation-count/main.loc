@@ -1,0 +1,237 @@
+module main
+  ( oneArm
+  , bothArms
+  , inCondition
+  , conditionAndNestedArm
+  , nestedArms
+  , underLambda
+  , underForeignLambda
+  , inRecursiveHelper
+  , inRecursiveHelperForeignUse
+  , throughBinding
+  , onlyThroughUnused
+  , cafTwoFunctions
+  , cafUnderLambda
+  , cafOneArm
+  , letUnused
+  , letOneArm
+  , oneValue
+  , suspendedTwice
+  , cafBarrier
+  , nestedHelpers
+  , recShare
+  , wholeWhere
+  , closedLetTwice
+  , closedWhereTwice
+  , closedLetRecursive
+  , closedLetUnused
+  )
+
+import root-py
+
+effect IO
+
+-- A named value is evaluated at most once per evaluation of the scope that
+-- binds it, at the nearest point every use passes through: inside a
+-- conditional arm when only that arm reads it, before a lambda that captures
+-- it. A where-binding or top-level value nothing reads is never evaluated; a
+-- let nothing reads is evaluated where it is written, since the function it
+-- calls may act in ways no type records. A top-level value is evaluated at
+-- most once per command, and so is a named value inside a function that reads
+-- none of its parameters, however many times or however recursively the
+-- function is called; one nothing reads is still evaluated where it is written.
+--
+-- `tick` records each of its evaluations in `tick.log` and `ticks` reads the
+-- count after its argument is computed, so each export prints how many times
+-- `tick` ran. A file, not process state, because pool workers are separate
+-- processes.
+
+source Py from "helpers.py"
+  ( "tick", "ticks", "py_id" as pyId, "py_same" as pySame, "py_val" as val
+  , "note" )
+source Cpp from "helpers.hpp"
+  ("cpp_map" as cppMap, "cpp_id" as cppId, "cpp_val" as val)
+
+tick :: Int -> Int
+ticks :: a -> Int
+pyId :: Int -> Int
+cppId :: Int -> Int
+cppMap :: (a -> b) -> [a] -> [b]
+pySame :: Int -> Int -> Bool
+val :: Int -> Int
+note :: Int -> <IO> Int
+
+type Cpp => Int = "int"
+type Cpp => List a = "std::vector<$1>" a
+
+oneArm :: Int -> Int
+oneArm n = ticks (? n > 0 = x : 0)
+  where
+    x = tick n
+
+bothArms :: Int -> Int
+bothArms n = ticks (? n > 0 = x + 1 : x - 1)
+  where
+    x = tick n
+
+inCondition :: Int -> Int
+inCondition n = ticks (? x > 0 = x : 0)
+  where
+    x = tick n
+
+conditionAndNestedArm :: Int -> Int
+conditionAndNestedArm n = ticks (? x > 0 = (? n > 5 = x : 1) : 0)
+  where
+    x = tick n
+
+nestedArms :: Int -> Int
+nestedArms n = ticks (? n > 0 = (? n > 5 = x : 1) : (? n < 0 - 5 = x : 2))
+  where
+    x = tick n
+
+underLambda :: Int -> Int
+underLambda n = ticks (map (\i -> i + x) [1, 2, 3])
+  where
+    x = tick n
+
+underForeignLambda :: Int -> Int
+underForeignLambda n = ticks (cppMap (\i -> cppId i + x) [1, 2, 3])
+  where
+    x = tick n
+
+inRecursiveHelper :: Int -> Int
+inRecursiveHelper n = ticks (go 3)
+  where
+    x = tick n
+    go m
+      ? m <= 0 = 0
+      : x + go (m - 1)
+
+-- the captured value crosses into C++ at each step of the recursion
+inRecursiveHelperForeignUse :: Int -> Int
+inRecursiveHelperForeignUse n = ticks (go 3)
+  where
+    x = tick n
+    go m
+      ? m <= 0 = 0
+      : cppId x + go (m - 1)
+
+throughBinding :: Int -> Int
+throughBinding n = ticks (y + y)
+  where
+    y = x + 1
+    x = tick n
+
+onlyThroughUnused :: Int -> Int
+onlyThroughUnused n = ticks n
+  where
+    z = x + 1
+    x = tick n
+
+base :: Int
+base = tick 7
+
+plusBase :: Int -> Int
+plusBase n = base + n
+
+timesBase :: Int -> Int
+timesBase n = base * n
+
+cafTwoFunctions :: Int -> Int
+cafTwoFunctions n = ticks (plusBase n + timesBase n)
+
+cafUnderLambda :: Int -> Int
+cafUnderLambda n = ticks (map (\i -> i + base) [1, 2, 3])
+
+cafOneArm :: Int -> Int
+cafOneArm n = ticks (? n > 0 = plusBase n : 0)
+
+letUnused :: Int -> Int
+letUnused n = let x = tick n in ticks n
+
+letOneArm :: Int -> Int
+letOneArm n = ticks (let x = tick n in (? n > 0 = x : 0))
+
+-- One name is one value, whichever language reads it. The two
+-- implementations of `val` disagree on purpose, so reading `q` from Python and
+-- from C++ agrees only if `q` is computed once.
+oneValue :: Int -> Bool
+oneValue n = pySame (pyId q) (cppId q)
+  where
+    q = val n
+
+-- A suspension that reads a pure value captures the value once; forcing the
+-- suspension twice runs its effects twice but does not recompute the value.
+suspendedTwice :: Int -> <IO> Int
+suspendedTwice n = do
+  a <- s
+  b <- s
+  ticks (a + b)
+  where
+    x = tick n
+    s = do note (x + 1)
+
+-- A value placed for one binding does not pull a later binding out of the
+-- arm it is used in.
+cafBarrier :: Int -> Int
+cafBarrier n = ticks (a + (? n > 0 = a : base))
+  where
+    a = n + 1
+
+-- A value bound inside a recursive helper, captured by a helper nested in it.
+nestedHelpers :: Int -> Int
+nestedHelpers n = ticks (go n)
+  where
+    go m
+      ? m <= 0 = 0
+      : h 2 + go (m - 1)
+      where
+        x = tick m
+        h k
+          ? k <= 0 = 0
+          : x + h (k - 1)
+
+-- A value computed by a recursive call is shared: one leaf is evaluated, not
+-- 2^n.
+recShare :: Int -> Int
+recShare n = ticks (double n)
+
+double :: Int -> Int
+double n
+  ? n <= 0 = tick 1
+  : w + w
+  where
+    w = double (n - 1)
+
+-- An export with no parameters.
+wholeWhere :: Int
+wholeWhere = ticks (w + w)
+  where
+    w = tick 7
+
+-- A named value that reads no parameter is evaluated once per command.
+closedLet :: Int -> Int
+closedLet n = let k = tick 1 in k + n
+
+closedLetTwice :: Int -> Int
+closedLetTwice n = ticks (closedLet n + closedLet (n + 1))
+
+closedWhere :: Int -> Int
+closedWhere n = k + n
+  where
+    k = tick 1
+
+closedWhereTwice :: Int -> Int
+closedWhereTwice n = ticks (closedWhere n + closedWhere (n + 1))
+
+closedLetDown :: Int -> Int
+closedLetDown n = let k = tick 1 in ? n <= 0 = k : closedLetDown (n - 1)
+
+closedLetRecursive :: Int -> Int
+closedLetRecursive n = ticks (closedLetDown n)
+
+unusedClosedLet :: Int -> Int
+unusedClosedLet n = let k = tick 1 in n
+
+closedLetUnused :: Int -> Int
+closedLetUnused n = ticks (unusedClosedLet n + unusedClosedLet n)

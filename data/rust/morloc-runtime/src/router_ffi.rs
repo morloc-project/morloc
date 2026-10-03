@@ -10,8 +10,7 @@ use crate::http_ffi::{DaemonMethod, DaemonRequest};
 
 // -- Constants ----------------------------------------------------------------
 
-/// Max size of sun_path in sockaddr_un (108 on Linux)
-const SUN_PATH_LEN: usize = 108;
+use crate::utility::SUN_PATH_LEN;
 
 // Daemon startup polling (exponential backoff, ~5s total).
 // Sum of 100 * 1.25^i for i in 0..16 is ~4650ms.
@@ -78,7 +77,7 @@ fn startup_death_msg(prog_name: &str, status: i32, stderr_log: &str) -> String {
 pub struct RouterProgram {
     pub name: *mut c_char,
     pub manifest_path: *mut c_char,
-    pub manifest: *mut c_void, // manifest_t*
+    pub manifest: *mut crate::manifest_ffi::Manifest,
     pub daemon_pid: libc::pid_t,
     pub daemon_socket: [c_char; SUN_PATH_LEN],
 }
@@ -102,9 +101,7 @@ unsafe fn router_build(
     names: &[String],
     errmsg: *mut *mut c_char,
 ) -> *mut Router {
-    extern "C" {
-        fn read_manifest(path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_void;
-    }
+    use crate::manifest_ffi::read_manifest;
 
     let router = libc::calloc(1, std::mem::size_of::<Router>()) as *mut Router;
     (*router).fdb_path = libc::strdup(fdb_path);
@@ -155,15 +152,21 @@ unsafe fn router_build(
         }
 
         prog.daemon_pid = 0;
-        // Set socket path
+        // Set socket path, refusing a program whose name makes it too long
+        // to bind: a truncated path would collide or leave no terminator.
         let socket_path = format!("/tmp/morloc-router-{}.sock", name_str);
-        let c_socket = CString::new(socket_path).unwrap_or_default();
-        let socket_bytes = c_socket.as_bytes_with_nul();
-        let copy_len = socket_bytes.len().min(SUN_PATH_LEN);
+        if let Err(e) = crate::utility::unix_socket_addr(socket_path.as_bytes()) {
+            libc::free(prog.name as *mut c_void);
+            libc::free(prog.manifest_path as *mut c_void);
+            crate::manifest_ffi::free_manifest(prog.manifest);
+            set_errmsg(errmsg, &MorlocError::Other(format!("program '{}': {}", name_str, e)));
+            router_free(router);
+            return ptr::null_mut();
+        }
         ptr::copy_nonoverlapping(
-            socket_bytes.as_ptr() as *const c_char,
+            socket_path.as_ptr() as *const c_char,
             prog.daemon_socket.as_mut_ptr(),
-            copy_len,
+            socket_path.len(),
         );
 
         (*router).n_programs += 1;
@@ -219,9 +222,7 @@ pub unsafe extern "C" fn router_free(router: *mut Router) {
         return;
     }
 
-    extern "C" {
-        fn free_manifest(manifest: *mut c_void);
-    }
+    use crate::manifest_ffi::free_manifest;
 
     for i in 0..(*router).n_programs {
         let prog = &mut *(*router).programs.add(i);
@@ -347,6 +348,35 @@ pub unsafe extern "C" fn router_start_program(
     let stderr_log = format!("{log_dir}/{prog_name_str}.err");
     let c_stderr_log = CString::new(stderr_log.as_str()).unwrap_or_default();
 
+    let arg_nexus = CString::new("morloc-nexus").unwrap();
+    let arg_daemon = CString::new("daemon").unwrap();
+    let arg_socket = CString::new("--socket").unwrap();
+    let socket_path = CStr::from_ptr((*prog).daemon_socket.as_ptr());
+    let argv = [
+        arg_nexus.as_ptr(),
+        arg_daemon.as_ptr(),
+        (*prog).manifest_path as *const c_char,
+        arg_socket.as_ptr(),
+        socket_path.as_ptr(),
+        ptr::null(),
+    ];
+    // The daemon ends when this process ends: it adopts our lifeline.
+    let lifeline = crate::lifeline::Lifeline::get().ok();
+    let env: Vec<CString> = std::env::vars_os()
+        .filter(|(k, _)| k != crate::lifeline::ENV)
+        .filter_map(|(k, v)| {
+            let mut kv = k.into_encoded_bytes();
+            kv.push(b'=');
+            kv.extend(v.into_encoded_bytes());
+            CString::new(kv).ok()
+        })
+        .chain(lifeline.map(|l| l.env_entry()))
+        .collect();
+    let envp: Vec<*const c_char> =
+        env.iter().map(|e| e.as_ptr()).chain(std::iter::once(ptr::null())).collect();
+    let lifeline_fd = lifeline.map_or(-1, |l| l.read_fd());
+    let exec_failed = format!("morloc-router: failed to exec morloc-nexus for {prog_name_str}\n");
+
     let pid = libc::fork();
     if pid == 0 {
         // Child: exec `morloc-nexus daemon <manifest> --socket <path>`.
@@ -373,26 +403,14 @@ pub unsafe extern "C" fn router_start_program(
                 }
             }
         }
-        let arg_nexus = CString::new("morloc-nexus").unwrap();
-        let arg_daemon = CString::new("daemon").unwrap();
-        let arg_socket = CString::new("--socket").unwrap();
-        let socket_path = CStr::from_ptr((*prog).daemon_socket.as_ptr());
-        libc::execl(
-            c_nexus.as_ptr(),
-            arg_nexus.as_ptr(),
-            arg_daemon.as_ptr(),
-            (*prog).manifest_path,
-            arg_socket.as_ptr(),
-            socket_path.as_ptr(),
-            ptr::null::<c_char>(),
-        );
-        // If exec fails
-        let prog_name = CStr::from_ptr((*prog).name).to_string_lossy();
-        let errno_msg = CStr::from_ptr(libc::strerror(crate::utility::errno_val()))
-            .to_string_lossy();
-        eprintln!(
-            "morloc-router: failed to exec morloc-nexus for {}: {}",
-            prog_name, errno_msg
+        if lifeline_fd >= 0 {
+            crate::lifeline::keep_across_exec(lifeline_fd);
+        }
+        libc::execve(c_nexus.as_ptr(), argv.as_ptr(), envp.as_ptr());
+        libc::write(
+            libc::STDERR_FILENO,
+            exec_failed.as_ptr() as *const c_void,
+            exec_failed.len(),
         );
         libc::_exit(1);
     } else if pid > 0 {
@@ -422,16 +440,11 @@ pub unsafe extern "C" fn router_start_program(
             // Try connecting to the daemon socket
             let test_sock = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
             if test_sock >= 0 {
-                let mut addr: libc::sockaddr_un = std::mem::zeroed();
-                addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
-                let socket_path = (*prog).daemon_socket.as_ptr();
-                let path_bytes = CStr::from_ptr(socket_path).to_bytes();
-                let copy_len = path_bytes.len().min(addr.sun_path.len() - 1);
-                ptr::copy_nonoverlapping(
-                    path_bytes.as_ptr() as *const c_char,
-                    addr.sun_path.as_mut_ptr(),
-                    copy_len,
-                );
+                // The path was checked to fit when the program was registered.
+                let addr = crate::utility::unix_socket_addr(
+                    CStr::from_ptr((*prog).daemon_socket.as_ptr()).to_bytes(),
+                )
+                .expect("daemon socket path fits");
                 let rc = libc::connect(
                     test_sock,
                     &addr as *const libc::sockaddr_un as *const libc::sockaddr,
@@ -485,13 +498,7 @@ pub unsafe extern "C" fn router_forward(
 ) -> *mut DaemonResponse {
     clear_errmsg(errmsg);
 
-    extern "C" {
-        fn daemon_parse_response(
-            json: *const c_char,
-            len: usize,
-            errmsg: *mut *mut c_char,
-        ) -> *mut DaemonResponse;
-    }
+    use crate::daemon_ffi::daemon_parse_response;
 
     // Find program
     let program_name = CStr::from_ptr(program);
@@ -706,16 +713,9 @@ unsafe fn connect_to_daemon(
         std::mem::size_of::<libc::timeval>() as libc::socklen_t,
     );
 
-    let mut addr: libc::sockaddr_un = std::mem::zeroed();
-    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
-    let socket_path = (*prog).daemon_socket.as_ptr();
-    let path_bytes = CStr::from_ptr(socket_path).to_bytes();
-    let copy_len = path_bytes.len().min(addr.sun_path.len() - 1);
-    ptr::copy_nonoverlapping(
-        path_bytes.as_ptr() as *const c_char,
-        addr.sun_path.as_mut_ptr(),
-        copy_len,
-    );
+    // The path was checked to fit when the program was registered.
+    let addr = crate::utility::unix_socket_addr(CStr::from_ptr((*prog).daemon_socket.as_ptr()).to_bytes())
+        .expect("daemon socket path fits");
 
     if libc::connect(
         sock,

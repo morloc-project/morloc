@@ -3,3 +3,9 @@ use :: Holder {x=Int, y=Str} Int
 useUnion :: Holder {x=Int, y=Str} Int
 useDiff :: Holder {x=Int} Int
 useRowPoly :: Holder {y=Str, x=Int} Int
+useRestrict :: Holder {c=Real, a=Int} Int
+useDropB :: Holder {a=Int, c=Real} Int -> Int
+useProj :: Holder b a -> b."x"
+aliasUnion :: Holder {a=Int, b=Str, d=Bool} Int
+aliasDiff :: Holder {a=Int} Int
+aliasRestrict :: Holder {b=Str, a=Int} Int

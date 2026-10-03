@@ -116,7 +116,11 @@ typeOfE (IntrinsicP (Idx _ t) _ _) = t
 -- in exponential time in some cases. This can be avoided with a touch of
 -- memoization. But I will leave that as an exercise for my user (PR's accepted).
 valuecheck :: AnnoS (Indexed Type) Many Int -> MorlocMonad (AnnoS (Indexed Type) Many Int)
-valuecheck e0 = groundCheck e0 >> check (toE e0) >> return e0
+valuecheck e0 = do
+  specs <- MM.gets stateSpecNames
+  groundCheck specs e0
+  check (toE e0)
+  return e0
 
 -- A term whose every alternative is just a back-edge to itself (or to other
 -- such terms) has no concrete implementation. Treeify already detects these
@@ -127,10 +131,10 @@ valuecheck e0 = groundCheck e0 >> check (toE e0) >> return e0
 --
 -- Catches both `omega = omega` and mutual cycles like `a = b; b = a` when
 -- none of the participants has a concrete source.
-groundCheck :: AnnoS (Indexed Type) Many Int -> MorlocMonad ()
-groundCheck (AnnoS _ _ (VarS v (Many es))) = do
-  mapM_ groundCheck es
-  if any hasGround es
+groundCheck :: Set.Set EVar -> AnnoS (Indexed Type) Many Int -> MorlocMonad ()
+groundCheck specs (AnnoS _ _ (VarS v (Many es))) = do
+  mapM_ (groundCheck specs) es
+  if any (hasGround specs) es
     then return ()
     else case es of
       (AnnoS (Idx i _) _ _ : _) ->
@@ -138,16 +142,17 @@ groundCheck (AnnoS _ _ (VarS v (Many es))) = do
           "Self-referential or cyclic binding:" <+> squotes (pretty v)
             <> "; the term is defined only by reference to itself"
       [] -> return () -- typechecker would have rejected an alternative-less term
-groundCheck (AnnoS _ _ e) = mapM_ groundCheck (foldExprS (\a -> [a]) e)
+groundCheck specs (AnnoS _ _ e) = mapM_ (groundCheck specs) (foldExprS (\a -> [a]) e)
 
 -- True if the AnnoS contains any substantive content (not just BndS/CallS
--- references). VarS forwards to its alternatives.
-hasGround :: AnnoS (Indexed Type) Many Int -> Bool
-hasGround (AnnoS _ _ e) = case e of
+-- references; a call of a shared specialization is its implementation).
+-- VarS forwards to its alternatives.
+hasGround :: Set.Set EVar -> AnnoS (Indexed Type) Many Int -> Bool
+hasGround specs (AnnoS _ _ e) = case e of
   BndS _ -> False
-  CallS _ -> False
+  CallS v -> Set.member v specs
   LetBndS _ -> False
-  VarS _ (Many es) -> any hasGround es
+  VarS _ (Many es) -> any (hasGround specs) es
   _ -> True
 
 -- walk through a tree
@@ -179,6 +184,7 @@ check (IfP _ c t e) = mapM_ check [c, t, e]
 check (DoBlockP _ e) = check e
 check (EvalP _ e) = check e
 check (CoerceP _ _ e) = check e
+check (IntrinsicP _ _ es) = mapM_ check es
 check _ = return ()
 
 -- check for contradictions in one pair of expressions
@@ -384,6 +390,7 @@ substituteEVar oldVar newVar e0
     f used idx (DoBlockP g e) = DoBlockP g (f used idx e)
     f used idx (EvalP g e) = EvalP g (f used idx e)
     f used idx (CoerceP c g e) = CoerceP c g (f used idx e)
+    f used idx (IntrinsicP g intr es) = IntrinsicP g intr (map (f used idx) es)
     f _ _ e = e
 
     relabelLam :: Set.Set EVar -> Int -> [EVar] -> E -> (Set.Set EVar, Int, [EVar], E)
@@ -426,6 +433,7 @@ freeTerms = f Set.empty
     f boundterms (DoBlockP _ e) = f boundterms e
     f boundterms (EvalP _ e) = f boundterms e
     f boundterms (CoerceP _ _ e) = f boundterms e
+    f boundterms (IntrinsicP _ _ es) = Set.unions . map (f boundterms) $ es
     f _ _ = Set.empty
 
 substituteExpr :: EVar -> E -> E -> E

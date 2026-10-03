@@ -15,27 +15,12 @@ use crate::schema::Schema;
 use crate::shm;
 use crate::walk::{self, Frame, Stack, Visit, Walker};
 
-extern "C" {
-    fn parse_schema(schema_str: *const c_char, errmsg: *mut *mut c_char) -> *mut CSchema;
-    fn free_schema(schema: *mut CSchema);
-    fn write_atomic(
-        filename: *const c_char,
-        data: *const u8,
-        size: usize,
-        errmsg: *mut *mut c_char,
-    ) -> i32;
-    fn read_binary_file(
-        filename: *const c_char,
-        file_size: *mut usize,
-        errmsg: *mut *mut c_char,
-    ) -> *mut u8;
-    fn morloc_packet_size(packet: *const u8, errmsg: *mut *mut c_char) -> usize;
-    fn get_morloc_data_packet_value(
-        data: *const u8,
-        schema: *const CSchema,
-        errmsg: *mut *mut c_char,
-    ) -> *mut u8;
-}
+use crate::ffi::parse_schema;
+use crate::ffi::free_schema;
+use crate::utility::write_atomic;
+use crate::utility::read_binary_file;
+use crate::packet_ffi::morloc_packet_size;
+use crate::packet_ffi::get_morloc_data_packet_value;
 
 /// Resolve the on-disk path `<cache_dir>/<label>/<key:016x>.dat`,
 /// creating the label directory if needed. Returns a heap C-string the
@@ -237,8 +222,12 @@ pub extern "C" fn morloc_cache_record_store() {
 
 /// Read the (hits, misses, stores) counter triple. Consumed by the
 /// nexus at exit to print the run summary.
+///
+/// # Safety
+///
+/// Each out pointer must be null or writable for a `u64`.
 #[no_mangle]
-pub extern "C" fn morloc_cache_stats(
+pub unsafe extern "C" fn morloc_cache_stats(
     hits_out: *mut u64,
     misses_out: *mut u64,
     stores_out: *mut u64,
@@ -771,15 +760,12 @@ impl<'r> Walker<()> for HashWalk<'r> {
                     let owned: Vec<u8>;
                     let borrowed: &[u8];
                     if tag == sh::TAG_PATH {
-                        if payload == sh::RELNULL_PAYLOAD {
-                            borrowed = &[];
-                        } else {
-                            let suballoc = shm::rel2abs(payload as shm::RelPtr)?;
-                            let path_len = sh::read_path_size(suballoc) as usize;
-                            borrowed = std::slice::from_raw_parts(suballoc.add(8), path_len);
-                        }
+                        borrowed = match crate::voidstar::path_suballoc(&crate::voidstar::Arena, payload)? {
+                            Some(block) => &block[8..],
+                            None => &[],
+                        };
                     } else if tag == sh::TAG_HANDLE {
-                        owned = crate::stream::handle_path(payload as i64)?.into_bytes();
+                        owned = crate::stream::handle_path(sh::payload_handle(payload))?.into_bytes();
                         borrowed = &owned;
                     } else {
                         return Err(MorlocError::Other(format!(
@@ -933,12 +919,7 @@ pub unsafe extern "C" fn hash_morloc_packet(
     clear_errmsg(errmsg);
     *hash_out = 0;
 
-    extern "C" {
-        fn read_morloc_packet_header(
-            msg: *const u8,
-            errmsg: *mut *mut c_char,
-        ) -> *const crate::packet::PacketHeader;
-    }
+    use crate::packet_ffi::read_morloc_packet_header;
 
     let mut err: *mut c_char = ptr::null_mut();
     let header = read_morloc_packet_header(packet, &mut err);
@@ -1033,15 +1014,23 @@ pub unsafe extern "C" fn make_cache_filename(
 /// is 0 (uncompressed) so `morloc dump` renders cache entries without
 /// paying decompression cost. Users opt into higher levels via env for
 /// large-payload workloads where disk footprint matters. Cached once on
-/// first read like `pool_hash` and `cache_base`.
-fn read_cache_compression_level() -> u8 {
-    static CACHED: OnceLock<u8> = OnceLock::new();
-    *CACHED.get_or_init(|| {
-        std::env::var("MORLOC_CACHE_COMPRESSION_LEVEL")
-            .ok()
-            .and_then(|s| s.trim().parse::<u8>().ok())
-            .unwrap_or(0)
-    })
+/// first read like `pool_hash` and `cache_base`. A value that is not a
+/// level is an error, never a silent 0.
+fn read_cache_compression_level() -> Result<crate::compression::CompressionLevel, MorlocError> {
+    use crate::compression::CompressionLevel;
+    static CACHED: OnceLock<Result<CompressionLevel, String>> = OnceLock::new();
+    CACHED
+        .get_or_init(|| match std::env::var("MORLOC_CACHE_COMPRESSION_LEVEL") {
+            Err(_) => Ok(CompressionLevel::NONE),
+            Ok(s) => s
+                .trim()
+                .parse::<i64>()
+                .map_err(|_| format!("got {:?}", s))
+                .and_then(|n| CompressionLevel::from_int(n).map_err(|e| e.to_string()))
+                .map_err(|e| format!("MORLOC_CACHE_COMPRESSION_LEVEL: {}", e)),
+        })
+        .clone()
+        .map_err(MorlocError::Other)
 }
 
 /// Serialize an SHM voidstar as a self-contained MORLOC_DATA_PACKET
@@ -1083,9 +1072,7 @@ pub(crate) unsafe fn build_persistence_data_packet(
         return None;
     }
 
-    let clvl = match crate::compression::CompressionLevel::from_u8(
-        read_cache_compression_level(),
-    ) {
+    let clvl = match read_cache_compression_level() {
         Ok(l) => l,
         Err(e) => { set_errmsg(errmsg, &e); return None; }
     };

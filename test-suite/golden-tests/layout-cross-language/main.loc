@@ -1,0 +1,40 @@
+-- Values whose layout turns on alignment -- an optional's pointer slot in
+-- an array or a tuple, a record of one-byte fields, an enum tag, a variant
+-- arm holding an optional -- cross from the nexus to C++ to Python to C++
+-- and back unchanged. Every language lays these out by the alignment the
+-- runtime records in the schema, so none can place a slot differently.
+
+module main (optInts, boolPairs, smalls, dirs, shapes)
+
+import root-cpp
+import root-py
+
+record Small where
+  a :: U8
+  b :: U8
+record Cpp => Small = "struct"
+record Py => Small = "dict"
+
+data Dir = North | South | East
+
+data V = A Bool | B (?Bool)
+
+idCpp :: a -> a
+source Cpp from "id.hpp" ("ident" as idCpp)
+idPy :: a -> a
+source Py from "id.py" ("ident" as idPy)
+
+optInts :: [?I32] -> [?I32]
+optInts xs = idCpp (idPy (idCpp xs))
+
+boolPairs :: [(Bool, ?Bool)] -> [(Bool, ?Bool)]
+boolPairs xs = idCpp (idPy (idCpp xs))
+
+smalls :: [Small] -> [Small]
+smalls xs = idCpp (idPy (idCpp xs))
+
+dirs :: [Dir] -> [Dir]
+dirs xs = idCpp (idPy (idCpp xs))
+
+shapes :: [V] -> [V]
+shapes xs = idCpp (idPy (idCpp xs))

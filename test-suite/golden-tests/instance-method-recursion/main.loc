@@ -1,0 +1,24 @@
+module main (listSize, nestedSize, pairSize)
+
+import root-py
+
+-- An instance body that calls its own class method at a different type
+-- dispatches to the instance for that type, not back to itself.
+
+class Sz a where
+  sz :: a -> Int
+
+instance Sz Int where
+  sz x = 1
+
+instance Sz a => Sz (List a) where
+  sz xs = fold (\acc x -> acc + sz x) 0 xs
+
+listSize :: [Int] -> Int
+listSize xs = sz xs
+
+nestedSize :: [[Int]] -> Int
+nestedSize xss = sz xss
+
+pairSize :: [Int] -> [[Int]] -> Int
+pairSize xs xss = sz xs + sz xss

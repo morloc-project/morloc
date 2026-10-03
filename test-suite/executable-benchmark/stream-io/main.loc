@@ -1,0 +1,178 @@
+-- Stream write and read cost by element layout, end to end through the
+-- nexus and the C++ pool. `length` runs in C++, so every read result
+-- crosses into the pool. bench.sh times each command best-of-N.
+
+module main
+  ( boolWrite
+  , boolNext
+  , boolLoad
+  , boolSlice
+  , realWrite
+  , realNext
+  , realLoad
+  , realSlice
+  , strWrite
+  , strNext
+  , strLoad
+  , strSlice
+  , recWrite
+  , recNext
+  , recLoad
+  , recSlice
+  , shapeWrite
+  , shapeNext
+  , shapeLoad
+  , shapeSlice
+  , intShapeWrite
+  , intShapeNext
+  , intShapeLoad
+  , intShapeSlice
+  )
+
+import root-cpp
+
+data Shape = Circle Real | Rect Real Real
+
+boolWrite :: Str -> Int -> <IO> Int
+boolWrite p n = do
+  let xs = replicate n (True)
+  Ok o <- @open p :: <IO> (Try Str (OStream (Bool)))
+  @write 0 o xs
+  @close o
+  length xs
+
+boolNext :: Str -> <IO> Int
+boolNext p = do
+  Ok s <- @open p :: <IO> (Try Str (IStream (Bool)))
+  Ok xs <- @next s
+  length xs
+
+boolLoad :: Str -> <IO> Int
+boolLoad p = do
+  Ok xs <- @load p :: <IO> (Try Str [Bool])
+  length xs
+
+boolSlice :: Str -> Int -> Int -> <IO> Int
+boolSlice p i j = do
+  Ok f <- @open p :: <IO> (Try Str (IFile [Bool]))
+  length (.[i:j] f)
+
+realWrite :: Str -> Int -> <IO> Int
+realWrite p n = do
+  let xs = replicate n (1.5)
+  Ok o <- @open p :: <IO> (Try Str (OStream (Real)))
+  @write 0 o xs
+  @close o
+  length xs
+
+realNext :: Str -> <IO> Int
+realNext p = do
+  Ok s <- @open p :: <IO> (Try Str (IStream (Real)))
+  Ok xs <- @next s
+  length xs
+
+realLoad :: Str -> <IO> Int
+realLoad p = do
+  Ok xs <- @load p :: <IO> (Try Str [Real])
+  length xs
+
+realSlice :: Str -> Int -> Int -> <IO> Int
+realSlice p i j = do
+  Ok f <- @open p :: <IO> (Try Str (IFile [Real]))
+  length (.[i:j] f)
+
+strWrite :: Str -> Int -> <IO> Int
+strWrite p n = do
+  let xs = replicate n ("abcdefghijklmnopqrstuvw")
+  Ok o <- @open p :: <IO> (Try Str (OStream (Str)))
+  @write 0 o xs
+  @close o
+  length xs
+
+strNext :: Str -> <IO> Int
+strNext p = do
+  Ok s <- @open p :: <IO> (Try Str (IStream (Str)))
+  Ok xs <- @next s
+  length xs
+
+strLoad :: Str -> <IO> Int
+strLoad p = do
+  Ok xs <- @load p :: <IO> (Try Str [Str])
+  length xs
+
+strSlice :: Str -> Int -> Int -> <IO> Int
+strSlice p i j = do
+  Ok f <- @open p :: <IO> (Try Str (IFile [Str]))
+  length (.[i:j] f)
+
+recWrite :: Str -> Int -> <IO> Int
+recWrite p n = do
+  let xs = replicate n (("abcdefghijkl", [1, 2, 3], [4]))
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Str, [Int], [Int]))))
+  @write 0 o xs
+  @close o
+  length xs
+
+recNext :: Str -> <IO> Int
+recNext p = do
+  Ok s <- @open p :: <IO> (Try Str (IStream ((Str, [Int], [Int]))))
+  Ok xs <- @next s
+  length xs
+
+recLoad :: Str -> <IO> Int
+recLoad p = do
+  Ok xs <- @load p :: <IO> (Try Str [(Str, [Int], [Int])])
+  length xs
+
+recSlice :: Str -> Int -> Int -> <IO> Int
+recSlice p i j = do
+  Ok f <- @open p :: <IO> (Try Str (IFile [(Str, [Int], [Int])]))
+  length (.[i:j] f)
+
+shapeWrite :: Str -> Int -> <IO> Int
+shapeWrite p n = do
+  let xs = replicate n (Circle 1.5)
+  Ok o <- @open p :: <IO> (Try Str (OStream (Shape)))
+  @write 0 o xs
+  @close o
+  length xs
+
+shapeNext :: Str -> <IO> Int
+shapeNext p = do
+  Ok s <- @open p :: <IO> (Try Str (IStream (Shape)))
+  Ok xs <- @next s
+  length xs
+
+shapeLoad :: Str -> <IO> Int
+shapeLoad p = do
+  Ok xs <- @load p :: <IO> (Try Str [Shape])
+  length xs
+
+shapeSlice :: Str -> Int -> Int -> <IO> Int
+shapeSlice p i j = do
+  Ok f <- @open p :: <IO> (Try Str (IFile [Shape]))
+  length (.[i:j] f)
+
+intShapeWrite :: Str -> Int -> <IO> Int
+intShapeWrite p n = do
+  let xs = replicate n ((7, Circle 1.5))
+  Ok o <- @open p :: <IO> (Try Str (OStream ((Int, Shape))))
+  @write 0 o xs
+  @close o
+  length xs
+
+intShapeNext :: Str -> <IO> Int
+intShapeNext p = do
+  Ok s <- @open p :: <IO> (Try Str (IStream ((Int, Shape))))
+  Ok xs <- @next s
+  length xs
+
+intShapeLoad :: Str -> <IO> Int
+intShapeLoad p = do
+  Ok xs <- @load p :: <IO> (Try Str [(Int, Shape)])
+  length xs
+
+intShapeSlice :: Str -> Int -> Int -> <IO> Int
+intShapeSlice p i j = do
+  Ok f <- @open p :: <IO> (Try Str (IFile [(Int, Shape)]))
+  length (.[i:j] f)

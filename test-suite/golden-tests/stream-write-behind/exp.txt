@@ -1,0 +1,9 @@
+z0 [true,100000]
+z3 [true,100000]
+z3sync [true,100000]
+z3d1 [true,100000]
+f3 [true,100000]
+f3sync [true,100000]
+OK compressed
+OK same size as synchronous
+OK file same size as synchronous

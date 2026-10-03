@@ -1,0 +1,3 @@
+OK
+refers with `$1` to a streamed `@parse` argument
+x=6

@@ -226,6 +226,22 @@ configureAllSteps verbose force slurmSupport sanitize config = do
         when managerExists $
           symlinkBinary managerSrc (linkDir </> "mim")
 
+  -- Compiled programs start the nexus by name, so it has to be found on PATH,
+  -- and be this install's. Nothing above guarantees either: the link
+  -- directory may not exist (a fresh macOS has no ~/.local/bin) or may not be
+  -- on PATH, and another install may come first.
+  onPath <- findExecutable "morloc-nexus"
+  installed <- canonicalizePath nexusBinPath
+  case onPath of
+    Nothing ->
+      sayWarning $ "morloc-nexus is not on PATH, so compiled programs cannot start;"
+        <> " add " <> nexusBinDir <> " to PATH"
+    Just found -> do
+      resolved <- canonicalizePath found
+      when (resolved /= installed) $
+        sayWarning $ "morloc-nexus on PATH is " <> found <> ", not this install's "
+          <> nexusBinPath <> "; compiled programs will run the former"
+
   -- Create exe/ and fdb/ directories (STATE, under the state root)
   let exeDir = Config.exeDir config
       fdbDir = Config.fdbDir config
@@ -391,7 +407,13 @@ provisionRustRuntime verbose config homeDir soPath nexusBinPath = do
     , "--target-dir", rustBuildDir
     ]
   let rustNexus = rustBuildDir </> "release" </> "morloc-nexus"
-  stageInstall verbose hasStrip nexusBinPath $ \tmp -> copyFile rustNexus tmp
+      -- On Apple Silicon every executable must carry a valid signature, and a
+      -- strip that does not re-sign (GNU strip, some conda cctools builds)
+      -- leaves one the kernel kills at every launch. Unstripped is only larger.
+      nexusStrip = case P.hostPlatform of
+        P.Darwin -> Nothing
+        _ -> hasStrip
+  stageInstall verbose nexusStrip nexusBinPath $ \tmp -> copyFile rustNexus tmp
 
   -- Persist the Rust workspace SOURCE at $MORLOC_HOME/rust and warm the shared
   -- pool build cache. A Rust pool is now a real Cargo project (Members/Rust.hs)

@@ -9,21 +9,8 @@ use crate::recur::Resolver;
 use crate::schema::{Schema, SerialType};
 use crate::shm::{self, AbsPtr, Array, RelPtr};
 use crate::walk::{self, Frame, Stack, Visit, Walker};
+use morloc_runtime_types::width;
 
-// ── adjust_voidstar_relptrs ────────────────────────────────────────────────
-
-/// Adjust all relptrs in a voidstar blob by adding base_rel.
-///
-/// Used after copying a flattened blob into SHM: the blob's internal
-/// relptrs are offsets from position 0 of the blob; adding base_rel
-/// converts them to valid SHM-global relptrs. Walks every relptr-bearing
-/// node (Array.data, BigInt overflow limbs, Optional slot, all parents)
-/// and rebases.
-///
-/// Recursive records (MORLOC_RECUR back-references) require an env
-/// stack so each `^<name>` resolves to the matching `&<name>` ancestor.
-/// The `with_env` helper threads that state through; the public entry
-/// here just initializes an empty stack.
 /// Byte offset of a Variant's payload pointer within its 16-byte slot.
 /// The tag occupies byte 0; bytes 1..8 are padding kept for a future
 /// tag-version discriminator, mirroring the stream-handle union.
@@ -44,15 +31,211 @@ fn variant_arm_schema(tag: u8, schema: &Schema) -> Result<&Schema, MorlocError> 
     })
 }
 
-pub fn adjust_relptrs(
+/// Where a value's relative pointers point. `resolve` yields the address of
+/// `extent` readable bytes at `rel`, or fails; it never yields an address
+/// whose region leaves the space, so a walker that asks for every region it
+/// reads cannot read outside the value's storage.
+pub trait Space {
+    fn resolve(&self, rel: RelPtr, extent: usize) -> Result<AbsPtr, MorlocError>;
+}
+
+/// Shared memory, resolved through the volume table.
+pub struct Arena;
+
+impl Space for Arena {
+    #[inline]
+    fn resolve(&self, rel: RelPtr, extent: usize) -> Result<AbsPtr, MorlocError> {
+        shm::rel2abs_extent(rel, extent)
+    }
+}
+
+/// One contiguous payload holding offsets from its own start: a flattened
+/// buffer or a stream sub-packet mapped from a file. Its bytes come from
+/// outside, so every region is checked against its length.
+pub struct Local {
+    base: *const u8,
+    len: usize,
+}
+
+impl Local {
+    /// # Safety
+    ///
+    /// `base..base + len` must be readable for as long as the space is used.
+    pub unsafe fn new(base: *const u8, len: usize) -> Self {
+        Local { base, len }
+    }
+}
+
+impl Space for Local {
+    #[inline]
+    fn resolve(&self, rel: RelPtr, extent: usize) -> Result<AbsPtr, MorlocError> {
+        if shm::relptr_is_sentinel(rel) || rel < 0 {
+            return Err(payload_region_error(rel, extent, self.len));
+        }
+        let off = shm::relptr_offset(rel);
+        match off.checked_add(extent) {
+            Some(end) if end <= self.len => {
+                // SAFETY: [off, end) lies inside the payload `new` vouched for.
+                Ok(unsafe { self.base.add(off) } as AbsPtr)
+            }
+            _ => Err(payload_region_error(rel, extent, self.len)),
+        }
+    }
+}
+
+/// Why `extent` bytes at `rel` are not inside a `len`-byte payload.
+pub fn payload_region_error(rel: RelPtr, extent: usize, len: usize) -> MorlocError {
+    if shm::relptr_is_sentinel(rel) || rel < 0 {
+        MorlocError::Other(format!("relptr {} in a local payload is a sentinel (corrupt payload?)", rel))
+    } else {
+        MorlocError::Other(format!(
+            "a {}-byte region at offset {} runs past the {}-byte payload",
+            extent,
+            shm::relptr_offset(rel),
+            len
+        ))
+    }
+}
+
+/// The C `morloc_space_t`: shared memory when `base` is null, else an inline
+/// payload of `len` bytes at `base`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MorlocSpace {
+    pub base: *const u8,
+    pub len: usize,
+}
+
+impl MorlocSpace {
+    pub const SHM: MorlocSpace = MorlocSpace { base: std::ptr::null(), len: 0 };
+}
+
+impl Space for MorlocSpace {
+    #[inline]
+    fn resolve(&self, rel: RelPtr, extent: usize) -> Result<AbsPtr, MorlocError> {
+        if self.base.is_null() {
+            Arena.resolve(rel, extent)
+        } else {
+            // SAFETY: whoever built the space vouches that `base..base + len`
+            // is readable while it is used.
+            unsafe { Local::new(self.base, self.len) }.resolve(rel, extent)
+        }
+    }
+}
+
+/// The path block a `TAG_PATH` stream-handle payload points at -- its 8-byte
+/// length, then that many bytes -- with both regions checked against
+/// `space`, or `None` for the empty-path payload. The path's bytes are the
+/// block from offset 8.
+///
+/// # Safety
+///
+/// The space must stay mapped for the returned lifetime.
+pub unsafe fn path_suballoc<'a, S: Space>(space: &S, payload: u64) -> Result<Option<&'a [u8]>, MorlocError> {
+    use morloc_runtime_types::stream_handle as sh;
+    if payload == sh::RELNULL_PAYLOAD {
+        return Ok(None);
+    }
+    let rel = sh::payload_relptr(payload);
+    let len_at = space.resolve(rel, 8)?;
+    let total = sh::path_suballoc_size(width::usize_from_u64(sh::read_path_size(len_at)));
+    let block = space.resolve(rel, total)?;
+    Ok(Some(std::slice::from_raw_parts(block, total)))
+}
+
+/// `n` elements of `width` bytes, or an error when a size read from a value
+/// overflows the address space.
+pub(crate) fn region_len(n: usize, width: usize) -> Result<usize, MorlocError> {
+    n.checked_mul(width).ok_or_else(|| {
+        MorlocError::Other(format!("{} elements of {} bytes overflow the address space", n, width))
+    })
+}
+
+/// The relptr range `[lo, hi)` of one block. A block lies inside one
+/// volume, so its relptrs are contiguous, and bounds are checked on relptrs
+/// directly without resolving each one to an address. Computed once per
+/// block, not per value.
+#[derive(Clone, Copy)]
+pub struct RelWindow {
+    lo: RelPtr,
+    hi: RelPtr,
+}
+
+impl RelWindow {
+    pub fn of_block(block: *const u8, len: usize) -> Result<RelWindow, MorlocError> {
+        window_of(shm::abs2rel(block as AbsPtr)?, len)
+    }
+
+    /// The `len` bytes starting `offset` bytes into this window. Derived
+    /// arithmetically, so an empty region at the block's end needs no
+    /// address that lies past it.
+    pub fn narrow(self, offset: usize, len: usize) -> Result<RelWindow, MorlocError> {
+        let lo = isize::try_from(offset).ok().and_then(|o| self.lo.checked_add(o));
+        match lo {
+            Some(lo) => {
+                let w = window_of(lo, len)?;
+                if w.hi <= self.hi { Ok(w) } else {
+                    Err(MorlocError::Shm("narrowed rebase window leaves its block".into()))
+                }
+            }
+            None => Err(MorlocError::Shm("narrowed rebase window overflows".into())),
+        }
+    }
+}
+
+/// Rebase the relptrs of a value that lies wholly inside one block: every
+/// rebased pointer, together with the bytes it addresses, must land inside
+/// `window`, or the walk fails. A value copied into a fresh block can only
+/// be valid if it is self-contained, so a pointer that leaves the block
+/// means the copy or the rebase was wrong.
+///
+/// # Safety
+///
+/// `data` must point to a live value of `schema` whose relptrs are resolvable.
+pub unsafe fn adjust_relptrs_within(
     data: AbsPtr,
     schema: &Schema,
     base_rel: RelPtr,
+    window: RelWindow,
 ) -> Result<(), MorlocError> {
-    let mut w = RebaseWalk { res: Resolver::new(schema), mode: Rebase::Shm(base_rel) };
+    // SAFETY: forwarded from this function's own contract.
+    unsafe { adjust_records_within(data, 1, schema, base_rel, window) }
+}
+
+/// `adjust_relptrs_within` over `n` consecutive records of `schema`,
+/// sharing one resolver and one stack across them.
+///
+/// # Safety
+///
+/// `first` must point to `n` consecutive records of `schema`, and every relptr they hold must be resolvable.
+pub unsafe fn adjust_records_within(
+    first: AbsPtr,
+    n: usize,
+    schema: &Schema,
+    base_rel: RelPtr,
+    window: RelWindow,
+) -> Result<(), MorlocError> {
+    let res = Resolver::new(schema);
+    let mut w = RebaseWalk {
+        res: &res,
+        mode: Rebase::Shm(base_rel),
+        window: Some(window),
+    };
     let mut st = Stack::new();
-    st.enter(schema, data, ());
-    walk::run(&mut w, &mut st)
+    for k in 0..n {
+        // SAFETY: the caller's records are `n` consecutive slots of
+        // `schema.width` bytes.
+        st.enter(schema, unsafe { first.add(k * schema.width) }, ());
+        walk::run(&mut w, &mut st)?;
+    }
+    Ok(())
+}
+
+fn window_of(lo: RelPtr, len: usize) -> Result<RelWindow, MorlocError> {
+    let hi = isize::try_from(len).ok().and_then(|n| lo.checked_add(n)).ok_or_else(|| {
+        MorlocError::Shm(format!("rebase window at relptr {lo:#x} of {len} bytes overflows"))
+    })?;
+    Ok(RelWindow { lo, hi })
 }
 
 // ── shift_buffer_relptrs ───────────────────────────────────────────────────
@@ -64,17 +247,39 @@ pub fn adjust_relptrs(
 /// primary SHM volume rather than in the buffer, so any descent must
 /// use buffer-local pointer arithmetic (`buf_base + offset`).
 ///
-/// Use this instead of `adjust_relptrs` when the target of the shift
+/// Use this instead of `adjust_relptrs_within` when the target of the shift
 /// is not a fresh SHM allocation but an in-place move within a Vec /
 /// per-slot write buffer -- e.g. the write-buffer compaction step and
 /// the per-element blob relocation inside `append_one_element`.
+///
+/// Every shifted pointer must address bytes inside `[buf_base, buf_base +
+/// buf_len)`.
 pub unsafe fn shift_buffer_relptrs(
     buf_base: *mut u8,
+    buf_len: usize,
     field_offset: usize,
     schema: &Schema,
     delta: isize,
 ) -> Result<(), MorlocError> {
-    let mut w = RebaseWalk { res: Resolver::new(schema), mode: Rebase::Buffer { buf_base, delta } };
+    shift_buffer_relptrs_with(buf_base, buf_len, field_offset, schema, delta, &Resolver::new(schema))
+}
+
+/// [`shift_buffer_relptrs`] with a resolver of `schema` the caller built,
+/// for a caller shifting many values of one schema.
+///
+/// # Safety
+///
+/// As [`shift_buffer_relptrs`].
+pub unsafe fn shift_buffer_relptrs_with(
+    buf_base: *mut u8,
+    buf_len: usize,
+    field_offset: usize,
+    schema: &Schema,
+    delta: isize,
+    res: &Resolver<'_>,
+) -> Result<(), MorlocError> {
+    let window = Some(window_of(0, buf_len)?);
+    let mut w = RebaseWalk { res, mode: Rebase::Buffer { buf_base, delta }, window };
     let mut st = Stack::new();
     st.enter(schema, buf_base.add(field_offset), ());
     walk::run(&mut w, &mut st)
@@ -89,12 +294,15 @@ enum Rebase {
 
 /// Adds a constant to every relptr under a value, in place, descending
 /// through each rebased pointer so the blocks it names are rebased too.
-struct RebaseWalk<'r> {
-    res: Resolver<'r>,
+struct RebaseWalk<'a, 'r> {
+    res: &'a Resolver<'r>,
     mode: Rebase,
+    /// When set, the relptr range every rebased pointer and the bytes it
+    /// addresses must fall inside.
+    window: Option<RelWindow>,
 }
 
-impl<'r> RebaseWalk<'r> {
+impl<'a, 'r> RebaseWalk<'a, 'r> {
     #[inline]
     fn shift(&self) -> RelPtr {
         match self.mode {
@@ -110,6 +318,20 @@ impl<'r> RebaseWalk<'r> {
             Rebase::Shm(_) => shm::rel2abs(rel),
             // SAFETY: a buffer-local relptr is an offset into the buffer.
             Rebase::Buffer { buf_base, .. } => Ok(unsafe { buf_base.add(rel as usize) }),
+        }
+    }
+
+    /// Reject a rebased relptr that, with the `extent` bytes it addresses,
+    /// leaves the window.
+    #[inline]
+    fn check(&self, rel: RelPtr, extent: Option<usize>) -> Result<(), MorlocError> {
+        let Some(RelWindow { lo, hi }) = self.window else { return Ok(()) };
+        let end = extent.and_then(|e| isize::try_from(e).ok()).and_then(|e| rel.checked_add(e));
+        match end {
+            Some(end) if rel >= lo && end <= hi => Ok(()),
+            _ => Err(MorlocError::Shm(format!(
+                "rebased relptr {rel:#x} (+{extent:?} bytes) leaves its block [{lo:#x}, {hi:#x})"
+            ))),
         }
     }
 
@@ -131,7 +353,7 @@ impl<'r> RebaseWalk<'r> {
     }
 }
 
-impl<'r> Walker<()> for RebaseWalk<'r> {
+impl<'a, 'r> Walker<()> for RebaseWalk<'a, 'r> {
     fn step(&mut self, st: &mut Stack<()>, f: Frame<()>) -> Result<(), MorlocError> {
         // SAFETY: frames hold nodes of the tree the resolver was built from,
         // and `data` points at a value laid out as that schema describes;
@@ -148,6 +370,7 @@ impl<'r> Walker<()> for RebaseWalk<'r> {
                     if size > 1 {
                         let relptr = &mut *(data.add(std::mem::size_of::<usize>()) as *mut RelPtr);
                         *relptr += shift;
+                        self.check(*relptr, size.checked_mul(std::mem::size_of::<u64>()))?;
                     }
                 }
                 SerialType::String | SerialType::Array => {
@@ -158,7 +381,19 @@ impl<'r> Walker<()> for RebaseWalk<'r> {
                         if matches!(self.mode, Rebase::Buffer { .. }) && (arr.size == 0 || arr.data <= 0) {
                             return Ok(());
                         }
+                        // An empty array's pointer is never followed, but a
+                        // rebased one could name an address before the
+                        // block, even outside its volume; inside a window it
+                        // is pinned to the block's start instead.
+                        if let (0, Some(RelWindow { lo, .. })) = (arr.size, self.window) {
+                            arr.data = lo;
+                            return Ok(());
+                        }
                         arr.data += shift;
+                        if arr.size > 0 {
+                            let w = s.parameters.first().map_or(1, |e| e.width);
+                            self.check(arr.data, arr.size.checked_mul(w))?;
+                        }
                     }
                     // An empty array points nowhere (its rebased sentinel is
                     // never read); a flat element region holds no pointers.
@@ -187,7 +422,15 @@ impl<'r> Walker<()> for RebaseWalk<'r> {
                     if sh::read_tag(data) == sh::TAG_PATH {
                         let payload = sh::read_payload(data);
                         if payload != sh::RELNULL_PAYLOAD {
-                            sh::write_field(data, sh::TAG_PATH, payload.wrapping_add(shift as u64));
+                            let moved = payload.wrapping_add(width::i64_from_isize(shift).cast_unsigned());
+                            sh::write_field(data, sh::TAG_PATH, moved);
+                            if self.window.is_some() {
+                                // A path is an 8-byte length, then its bytes.
+                                let rel = sh::payload_relptr(moved);
+                                self.check(rel, Some(8))?;
+                                let len = usize::try_from(*(self.target(rel)? as *const u64)).ok();
+                                self.check(rel, len.and_then(|n| n.checked_add(8)))?;
+                            }
                         }
                     }
                 }
@@ -210,6 +453,7 @@ impl<'r> Walker<()> for RebaseWalk<'r> {
                     let relptr_slot = &mut *(data.add(VARIANT_PAYLOAD_OFFSET) as *mut RelPtr);
                     if *relptr_slot != shm::RELNULL {
                         *relptr_slot += shift;
+                        self.check(*relptr_slot, Some(arm.width))?;
                         let inner = self.target(*relptr_slot)?;
                         self.child(st, &f, 0, arm, inner)?;
                     }
@@ -224,11 +468,12 @@ impl<'r> Walker<()> for RebaseWalk<'r> {
                     let relptr_slot = &mut *(data as *mut RelPtr);
                     if *relptr_slot != shm::RELNULL {
                         *relptr_slot += shift;
+                        self.check(*relptr_slot, Some(s.parameters[0].width))?;
                         let inner = self.target(*relptr_slot)?;
                         self.child(st, &f, 0, &s.parameters[0], inner)?;
                     }
                 }
-                _ => {} // primitives have no relptrs
+                SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Table | SerialType::Recur | SerialType::Enum => {} // primitives have no relptrs
             }
         }
         Ok(())
@@ -252,14 +497,94 @@ pub fn read_binary_with_hint(
     schema: &Schema,
     vol_idx_hint: u16,
 ) -> Result<AbsPtr, MorlocError> {
-    let base = shm::shmalloc(blob.len())?;
-    // SAFETY: base is freshly allocated with blob.len() bytes.
-    unsafe { std::ptr::copy_nonoverlapping(blob.as_ptr(), base, blob.len()) };
-    let base_rel = shm::abs2rel(base)?;
-    let producer_base = shm::encode_relptr(vol_idx_hint as usize, 0);
-    let delta = (base_rel as i64).wrapping_sub(producer_base as i64) as shm::RelPtr;
-    adjust_relptrs(base, schema, delta)?;
-    Ok(base)
+    let landing = Landing::new(blob.len())?;
+    // SAFETY: the landing's block is fresh and blob.len() bytes long.
+    unsafe { std::ptr::copy_nonoverlapping(blob.as_ptr(), landing.as_mut_ptr(), blob.len()) };
+    landing.relocate(schema, vol_idx_hint)
+}
+
+/// Bytes brought into a fresh SHM block from outside -- a file, a buffer, a
+/// decompressor. Until relocated, the relptrs among them are offsets in the
+/// producer's frame and must not be followed, so the only way to a usable
+/// value is `relocate`, which rebases every pointer and checks it against
+/// the block. A landing dropped unrelocated frees its block.
+pub struct Landing {
+    block: AbsPtr,
+    len: usize,
+}
+
+impl Landing {
+    pub fn new(len: usize) -> Result<Self, MorlocError> {
+        Ok(Landing { block: shm::shmalloc(len)?, len })
+    }
+
+    /// Where to write the landed bytes: `len` writable bytes.
+    pub fn as_mut_ptr(&self) -> *mut u8 {
+        self.block
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Relocate the landed value of `schema` from the producer's frame: its
+    /// relptrs are offsets from the value's start, carrying `vol_idx_hint` in
+    /// their volume bits (0 for plain buffer-relative offsets, the only frame
+    /// written now). Every rebased pointer and the bytes it addresses must lie
+    /// inside the block.
+    pub fn relocate(self, schema: &Schema, vol_idx_hint: u16) -> Result<AbsPtr, MorlocError> {
+        // The root slot is read before any pointer is: a value shorter than
+        // it would be read past the block.
+        if self.len < schema.width {
+            return Err(MorlocError::Serialization(format!(
+                "a voidstar value of {} bytes is shorter than its {}-byte root", self.len, schema.width
+            )));
+        }
+        let block_rel = shm::abs2rel(self.block)?;
+        let producer_base = shm::encode_relptr(vol_idx_hint as usize, 0);
+        let delta = (block_rel as i64).wrapping_sub(producer_base as i64) as RelPtr;
+        let window = RelWindow::of_block(self.block, self.len)?;
+        // SAFETY: the block holds `len` landed bytes, at least one root
+        // wide; every pointer the rebase follows is checked against it.
+        unsafe { adjust_relptrs_within(self.block, schema, delta, window) }?;
+        let block = self.block;
+        std::mem::forget(self);
+        Ok(block)
+    }
+}
+
+/// Decompress the zstd `frames` of `compressed` into one fresh SHM block
+/// and relocate the value of `schema` there: the frames decode in parallel
+/// straight into the block, with no intermediate buffer.
+pub fn land_compressed_frames(
+    frames: &[morloc_runtime_types::packet::FrameEntry],
+    compressed: &[u8],
+    schema: &Schema,
+    vol_idx_hint: u16,
+) -> Result<AbsPtr, MorlocError> {
+    let (uncompressed, compressed_total) = morloc_runtime_types::packet::frame_totals(frames)?;
+    if compressed_total != compressed.len() {
+        return Err(MorlocError::Packet(format!(
+            "frame index sums to {} compressed bytes but header.length = {}",
+            compressed_total,
+            compressed.len()
+        )));
+    }
+    let landing = Landing::new(uncompressed)?;
+    // SAFETY: the landing's block is fresh and `uncompressed` bytes long.
+    let dest = unsafe { std::slice::from_raw_parts_mut(landing.as_mut_ptr(), uncompressed) };
+    crate::compression::parallel_decompress_frames(frames, compressed, dest)?;
+    landing.relocate(schema, vol_idx_hint)
+}
+
+impl Drop for Landing {
+    fn drop(&mut self) {
+        let _ = shm::shfree(self.block);
+    }
 }
 
 // ── deep_copy ──────────────────────────────────────────────────────────────
@@ -278,42 +603,227 @@ pub fn read_binary_with_hint(
 /// inside an already-allocated parent block). Sub-block allocations are
 /// charged to the SHM allocator and the resulting relptrs are written into
 /// `dst`.
+/// Where a deep copy puts the blocks it needs for a value's
+/// variable-length parts.
+///
+/// The default takes one SHM block per part, which is what the name
+/// "deep copy" has always meant here. A copy that must hand its result to
+/// a pool cannot do that: a pool releases a value with one `shfree` of the
+/// root, so every block below the root would be lost. Such a caller sizes
+/// the value first and passes [`Bump`], which cuts the parts out of one
+/// block it already owns.
+pub enum CopyAlloc<'a> {
+    /// A fresh SHM block per part.
+    Blocks,
+    /// A fresh SHM block per part, each recorded so the caller can give
+    /// them all back. Used to build a value whose size is not known until
+    /// it exists, before [`consolidate`] copies it into one block.
+    Recording(&'a mut Vec<crate::shm::AbsPtr>),
+    /// Successive slices of a caller-owned region.
+    Bump(&'a mut Bump),
+}
+
+/// A cursor over a region the caller has already allocated and sized.
+pub struct Bump {
+    next: *mut u8,
+    end: *mut u8,
+}
+
+impl Bump {
+    /// # Safety
+    /// `start` must own `len` writable bytes for as long as this is used.
+    pub unsafe fn new(start: *mut u8, len: usize) -> Self {
+        Bump { next: start, end: start.add(len) }
+    }
+
+    fn take(&mut self, len: usize) -> Result<*mut u8, MorlocError> {
+        // Every part is at least pointer-aligned where it needs to be,
+        // because the sizes handed here are whole multiples of the widths
+        // the schema describes; rounding up keeps that true across parts.
+        let len = (len + 7) & !7;
+        if (self.end as usize) - (self.next as usize) < len {
+            return Err(MorlocError::Shm(
+                "deep copy ran past the region it was sized for".into(),
+            ));
+        }
+        let p = self.next;
+        // SAFETY: the bound above proves `len` bytes remain.
+        self.next = unsafe { p.add(len) };
+        Ok(p)
+    }
+}
+
+impl CopyAlloc<'_> {
+    /// A zeroed region of `len` bytes.
+    fn zeroed(&mut self, len: usize) -> Result<crate::shm::AbsPtr, MorlocError> {
+        match self {
+            CopyAlloc::Blocks => shm::shmalloc(len).map(|p| {
+                // SAFETY: p owns len bytes.
+                unsafe { std::ptr::write_bytes(p, 0, len) };
+                p
+            }),
+            CopyAlloc::Recording(seen) => shm::shmalloc(len).map(|p| {
+                seen.push(p);
+                // SAFETY: p owns len bytes.
+                unsafe { std::ptr::write_bytes(p, 0, len) };
+                p
+            }),
+            CopyAlloc::Bump(b) => b.take(len).map(|p| {
+                // SAFETY: take() proved len bytes remain.
+                unsafe { std::ptr::write_bytes(p, 0, len) };
+                p
+            }),
+        }
+    }
+
+    /// A region of `len` bytes holding a copy of `src`.
+    fn copy_of(
+        &mut self,
+        src: *const u8,
+        len: usize,
+    ) -> Result<crate::shm::AbsPtr, MorlocError> {
+        match self {
+            // SAFETY (both arms): `src` is the region of `len` bytes the copy
+            // walk resolved; its resolver is what bounds it.
+            CopyAlloc::Blocks => unsafe { shm::shmemcpy(src, len) },
+            CopyAlloc::Recording(seen) => unsafe { shm::shmemcpy(src, len) }.inspect(|&p| seen.push(p)),
+            CopyAlloc::Bump(b) => {
+                let p = b.take(len)?;
+                // SAFETY: take() proved len bytes remain; src owns len bytes.
+                unsafe { std::ptr::copy_nonoverlapping(src, p, len) };
+                Ok(p)
+            }
+        }
+    }
+}
+
 pub unsafe fn deep_copy(
     src: *const u8,
     dst: *mut u8,
     schema: &Schema,
 ) -> Result<(), MorlocError> {
-    // Default source resolver: standard SHM rel2abs. Callers reading
-    // from file-backed regions instead use `deep_copy_with` with a
-    // custom resolver that adds an offset to the file's payload base.
-    deep_copy_with(src, dst, schema, &|p| shm::rel2abs(p))
+    // A source in SHM; a file-backed source uses `deep_copy_with` and a
+    // `Local` space.
+    deep_copy_with(src, dst, schema, &Arena)
 }
 
-/// Same as `deep_copy` but parameterised by the source-side relptr
-/// resolver. The destination side always uses the SHM allocator and
-/// `shm::rel2abs` for the destination's own sub-block relptrs; only
-/// the source relptr -> AbsPtr resolution is customisable.
+/// Deep-copy `src` into `dst`, cutting every variable-length part out of
+/// `bump` rather than taking a block for each. The caller must have sized
+/// `bump` with [`crate::ffi::calc_voidstar_size_inner`]; running short is an
+/// error, not a silent overrun.
 ///
-/// `resolve` is called whenever the walker needs to follow a relptr
-/// embedded in the *source* data: Array.data, Optional inners, BigInt
-/// limbs, etc. The returned `AbsPtr` must be a readable byte pointer
-/// to the resolved data; the walker reads `size_bytes` from it where
-/// `size_bytes` is determined by the schema.
-///
-/// For mmap'd file-backed source, the resolver decodes the file-
-/// relative offset and returns `payload_base + offset` (with bounds
-/// checking against the payload region). For SHM-resident source,
-/// the resolver is `shm::rel2abs`.
-pub unsafe fn deep_copy_with<R>(
+/// # Safety
+/// As [`deep_copy`], plus `bump` must own its region for the call.
+pub unsafe fn deep_copy_into(
     src: *const u8,
     dst: *mut u8,
     schema: &Schema,
-    resolve: &R,
-) -> Result<(), MorlocError>
-where
-    R: Fn(RelPtr) -> Result<crate::shm::AbsPtr, MorlocError>,
-{
-    let mut w = CopyWalk { res: Resolver::new(schema), resolve };
+    bump: &mut Bump,
+) -> Result<(), MorlocError> {
+    deep_copy_alloc(src, dst, schema, &Arena, CopyAlloc::Bump(bump))
+}
+
+/// Same as `deep_copy` but with the source in `space`. The destination is
+/// always SHM; the source's relptrs are resolved through `space`, which
+/// bounds every region the copy reads.
+pub unsafe fn deep_copy_with<S: Space>(
+    src: *const u8,
+    dst: *mut u8,
+    schema: &Schema,
+    space: &S,
+) -> Result<(), MorlocError> {
+    deep_copy_alloc(src, dst, schema, space, CopyAlloc::Blocks)
+}
+
+/// Copy a value built as a graph of blocks into ONE block, and give the
+/// graph back.
+///
+/// This is for a builder that cannot know its result's size until it has
+/// parsed or walked its input: it builds with
+/// [`CopyAlloc::Recording`] (or records its own allocations), then hands
+/// the root and that list here. The value that comes back is a single
+/// block, which is what a pool can release.
+///
+/// `root_block` is freed too; the returned pointer replaces it.
+///
+/// # Safety
+/// `root` must point at a value laid out as `schema` describes, `parts`
+/// must list every block below it and nothing else, and nothing may still
+/// be pointing into any of them.
+pub unsafe fn consolidate(
+    root: crate::shm::AbsPtr,
+    schema: &Schema,
+    parts: &[crate::shm::AbsPtr],
+) -> Result<crate::shm::AbsPtr, MorlocError> {
+    // The flat size packs each part against the last; the cursor below
+    // rounds each one up to eight bytes so a part that must be aligned is,
+    // which can cost up to seven bytes per part. Budget that rather than
+    // discover it as a short region.
+    let total = crate::ffi::calc_voidstar_size_inner(root, schema)?
+        + 8 * (parts.len() + 1);
+    let dest = shm::shmalloc(total)?;
+    std::ptr::write_bytes(dest, 0, total);
+    let mut bump = Bump::new(dest.add(schema.width), total - schema.width);
+    let r = deep_copy_alloc(root, dest, schema, &Arena, CopyAlloc::Bump(&mut bump));
+    if let Err(e) = r {
+        let _ = shm::shfree(dest);
+        return Err(e);
+    }
+    for &p in parts {
+        let _ = shm::shfree(p);
+    }
+    let _ = shm::shfree(root);
+    Ok(dest)
+}
+
+/// Copy the value at `src` into one self-contained SHM block.
+///
+/// The single block is what a pool can release: it frees a value with one
+/// `shfree` of the root, so a value spread over several blocks would lose
+/// everything below it.
+///
+/// Sizes the region first and then copies once. The size walk is structural
+/// -- a flat array costs one multiply rather than a visit per element -- and
+/// it reports the bound on the part count that the bump's per-part rounding
+/// has to be budgeted against. [`consolidate`] is the route for a builder
+/// that cannot know its result's size until it exists; a caller copying a
+/// value that already exists can know it, and pays one pass instead of two.
+///
+/// # Safety
+/// `src` must point at a value laid out as `schema` describes.
+pub unsafe fn deep_copy_to_block(
+    src: *const u8,
+    schema: &Schema,
+) -> Result<crate::shm::AbsPtr, MorlocError> {
+    let (payload, parts) = crate::ffi::calc_voidstar_layout(src, schema)?;
+    // Each part is rounded up to eight bytes as it is cut from the bump, so
+    // the region carries up to seven bytes of padding per part, plus the
+    // root's own rounding.
+    let total = payload
+        .checked_add(8usize.saturating_mul(parts.saturating_add(1)))
+        .ok_or_else(|| MorlocError::Shm("value too large to copy into one block".into()))?;
+    let dest = shm::shmalloc(total)?;
+    std::ptr::write_bytes(dest, 0, total);
+    let mut bump = Bump::new(dest.add(schema.width), total - schema.width);
+    if let Err(e) = deep_copy_into(src, dest, schema, &mut bump) {
+        let _ = shm::shfree(dest);
+        return Err(e);
+    }
+    Ok(dest)
+}
+
+/// [`deep_copy_with`] with the part allocator chosen by the caller.
+///
+/// # Safety
+/// As [`deep_copy_with`].
+pub unsafe fn deep_copy_alloc<S: Space>(
+    src: *const u8,
+    dst: *mut u8,
+    schema: &Schema,
+    space: &S,
+    alloc: CopyAlloc<'_>,
+) -> Result<(), MorlocError> {
+    let mut w = CopyWalk { res: Resolver::new(schema), space, alloc };
     let mut st = Stack::new();
     st.enter(schema, src, dst);
     walk::run(&mut w, &mut st)
@@ -323,15 +833,13 @@ where
 /// the copy can be released block by block. A frame's `data` is the
 /// source slot and its `x` the destination slot; a block for a pointer
 /// field is allocated and pointed at before the walk descends into it.
-struct CopyWalk<'r, 'f, R> {
+struct CopyWalk<'r, 'f, S> {
     res: Resolver<'r>,
-    resolve: &'f R,
+    space: &'f S,
+    alloc: CopyAlloc<'f>,
 }
 
-impl<'r, 'f, R> CopyWalk<'r, 'f, R>
-where
-    R: Fn(RelPtr) -> Result<crate::shm::AbsPtr, MorlocError>,
-{
+impl<'r, 'f, S: Space> CopyWalk<'r, 'f, S> {
     fn child(
         &mut self,
         st: &mut Stack<*mut u8>,
@@ -351,10 +859,7 @@ where
     }
 }
 
-impl<'r, 'f, R> Walker<*mut u8> for CopyWalk<'r, 'f, R>
-where
-    R: Fn(RelPtr) -> Result<crate::shm::AbsPtr, MorlocError>,
-{
+impl<'r, 'f, S: Space> Walker<*mut u8> for CopyWalk<'r, 'f, S> {
     fn step(&mut self, st: &mut Stack<*mut u8>, f: Frame<*mut u8>) -> Result<(), MorlocError> {
         // SAFETY: frames hold nodes of the tree the resolver was built from;
         // `data` points at a source value laid out as that schema describes
@@ -362,7 +867,7 @@ where
         let schema: &'r Schema = self.res.resolve(unsafe { &*f.schema })?;
         let src = f.data;
         let dst = f.x;
-        let resolve = self.resolve;
+        let space = self.space;
         unsafe {
             match schema.serial_type {
                 SerialType::String => {
@@ -370,8 +875,8 @@ where
                     let dst_arr = &mut *(dst as *mut Array);
                     dst_arr.size = src_arr.size;
                     if src_arr.size > 0 && src_arr.data >= 0 {
-                        let src_data = resolve(src_arr.data)?;
-                        let new_data = shm::shmemcpy(src_data, src_arr.size)?;
+                        let src_data = space.resolve(src_arr.data, src_arr.size)?;
+                        let new_data = self.alloc.copy_of(src_data, src_arr.size)?;
                         dst_arr.data = shm::abs2rel(new_data)?;
                     } else {
                         dst_arr.data = shm::RELNULL;
@@ -385,14 +890,11 @@ where
                     let src_payload = sh::read_payload(src);
                     match tag {
                         t if t == sh::TAG_PATH => {
-                            if src_payload == sh::RELNULL_PAYLOAD {
-                                sh::write_field(dst, sh::TAG_PATH, sh::RELNULL_PAYLOAD);
+                            if let Some(block) = path_suballoc(space, src_payload)? {
+                                let new_suballoc = self.alloc.copy_of(block.as_ptr(), block.len())?;
+                                sh::write_field(dst, sh::TAG_PATH, sh::path_payload(shm::abs2rel(new_suballoc)?));
                             } else {
-                                let src_suballoc = resolve(src_payload as RelPtr)?;
-                                let path_len = sh::read_path_size(src_suballoc) as usize;
-                                let total = sh::path_suballoc_size(path_len);
-                                let new_suballoc = shm::shmemcpy(src_suballoc, total)?;
-                                sh::write_field(dst, sh::TAG_PATH, shm::abs2rel(new_suballoc)? as u64);
+                                sh::write_field(dst, sh::TAG_PATH, sh::RELNULL_PAYLOAD);
                             }
                         }
                         t if t == sh::TAG_HANDLE => {
@@ -416,11 +918,12 @@ where
                         }
                         let elem_schema = &schema.parameters[0];
                         let elem_width = elem_schema.width;
-                        let src_data = resolve(src_arr.data)?;
-                        let new_data = shm::shcalloc(src_arr.size, elem_width)?;
+                        let bytes = region_len(src_arr.size, elem_width)?;
+                        let src_data = space.resolve(src_arr.data, bytes)?;
+                        let new_data = self.alloc.zeroed(bytes)?;
                         dst_arr.data = shm::abs2rel(new_data)?;
                         if elem_schema.is_fixed_width() {
-                            std::ptr::copy_nonoverlapping(src_data, new_data, src_arr.size * elem_width);
+                            std::ptr::copy_nonoverlapping(src_data, new_data, bytes);
                             return Ok(());
                         }
                     }
@@ -429,7 +932,7 @@ where
                         return Ok(());
                     }
                     let elem_width = elem_schema.width;
-                    let src_data = resolve(src_arr.data)?;
+                    let src_data = space.resolve(src_arr.data, region_len(src_arr.size, elem_width)?)?;
                     let new_data = shm::rel2abs(dst_arr.data)?;
                     let flat_elem = self.res.flat(elem_schema);
                     for i in f.idx..src_arr.size {
@@ -466,8 +969,8 @@ where
                     if src_relptr == shm::RELNULL {
                         *dst_relptr_slot = shm::RELNULL;
                     } else {
-                        let src_inner = resolve(src_relptr)?;
-                        let dst_inner = shm::shmalloc(arm.width)?;
+                        let src_inner = space.resolve(src_relptr, arm.width)?;
+                        let dst_inner = self.alloc.zeroed(arm.width)?;
                         std::ptr::write_bytes(dst_inner, 0, arm.width);
                         *dst_relptr_slot = shm::abs2rel(dst_inner)?;
                         self.child(st, &f, 0, arm, src_inner, dst_inner)?;
@@ -485,8 +988,8 @@ where
                         *dst_relptr_slot = shm::RELNULL;
                     } else {
                         let inner_schema = &schema.parameters[0];
-                        let src_inner = resolve(src_relptr)?;
-                        let dst_inner = shm::shmalloc(inner_schema.width)?;
+                        let src_inner = space.resolve(src_relptr, inner_schema.width)?;
+                        let dst_inner = self.alloc.zeroed(inner_schema.width)?;
                         std::ptr::write_bytes(dst_inner, 0, inner_schema.width);
                         *dst_relptr_slot = shm::abs2rel(dst_inner)?;
                         self.child(st, &f, 0, inner_schema, src_inner, dst_inner)?;
@@ -500,8 +1003,9 @@ where
                     if size > 1 {
                         let src_relptr = *(src.add(off) as *const RelPtr);
                         if src_relptr >= 0 {
-                            let src_limbs = resolve(src_relptr)?;
-                            let new_limbs = shm::shmemcpy(src_limbs, size * std::mem::size_of::<u64>())?;
+                            let limb_bytes = region_len(size, std::mem::size_of::<u64>())?;
+                            let src_limbs = space.resolve(src_relptr, limb_bytes)?;
+                            let new_limbs = self.alloc.copy_of(src_limbs, limb_bytes)?;
                             *(dst.add(off) as *mut RelPtr) = shm::abs2rel(new_limbs)?;
                         } else {
                             *(dst.add(off) as *mut RelPtr) = shm::RELNULL;
@@ -517,7 +1021,7 @@ where
                         "voidstar::deep_copy: a table cannot be copied into a slot".into(),
                     ));
                 }
-                _ => {
+                SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Recur | SerialType::Enum => {
                     // Fixed-size primitives (Bool/Sint*/Uint*/Float*/Nil): bit-copy
                     std::ptr::copy_nonoverlapping(src, dst, schema.width);
                 }
@@ -547,7 +1051,45 @@ pub fn flatten_into(
     data: AbsPtr,
     schema: &Schema,
 ) -> Result<(), MorlocError> {
-    let total = crate::ffi::calc_voidstar_size_inner(data, schema)?;
+    flatten_into_mode(buf, data, schema, false, &Resolver::new(schema))
+}
+
+/// [`flatten_into`] for a value leaving the local registry: each
+/// handle-form stream field is written in path form, its path laid out in
+/// place among the value's other variable bytes, as a path-form field's
+/// already is. A value flattened this way is self-contained: every byte
+/// it points at follows its own slot in depth-first order.
+pub fn flatten_into_portable(
+    buf: &mut Vec<u8>,
+    data: AbsPtr,
+    schema: &Schema,
+) -> Result<(), MorlocError> {
+    flatten_into_mode(buf, data, schema, true, &Resolver::new(schema))
+}
+
+/// [`flatten_into_portable`] with a resolver of `schema` the caller built,
+/// for a caller flattening many values of one schema.
+pub fn flatten_into_portable_with(
+    buf: &mut Vec<u8>,
+    data: AbsPtr,
+    schema: &Schema,
+    res: &Resolver<'_>,
+) -> Result<(), MorlocError> {
+    flatten_into_mode(buf, data, schema, true, res)
+}
+
+fn flatten_into_mode(
+    buf: &mut Vec<u8>,
+    data: AbsPtr,
+    schema: &Schema,
+    portable: bool,
+    res: &Resolver<'_>,
+) -> Result<(), MorlocError> {
+    let total = if portable {
+        crate::ffi::calc_voidstar_size_portable_with(data, schema, res)?
+    } else {
+        crate::ffi::calc_voidstar_size_inner(data, schema)?
+    };
     buf.clear();
     buf.resize(total, 0);
 
@@ -563,7 +1105,13 @@ pub fn flatten_into(
     unsafe { std::ptr::copy_nonoverlapping(data, buf.as_mut_ptr(), schema.width) };
 
     // Phase 2: fix up relptrs and copy variable-length data
-    let mut w = FlattenWalk { res: Resolver::new(schema), buf: buf.as_mut_ptr(), len: buf.len(), cursor: schema.width };
+    let mut w = FlattenWalk {
+        res,
+        buf: buf.as_mut_ptr(),
+        len: buf.len(),
+        cursor: schema.width,
+        portable,
+    };
     let mut st = Stack::new();
     st.enter(schema, data, 0);
     walk::run(&mut w, &mut st)?;
@@ -575,14 +1123,16 @@ pub fn flatten_into(
 /// slots the parent already copied, rewriting each pointer to the
 /// buffer-relative offset of the block. A frame's `x` is the offset of the
 /// node's slot in the buffer.
-struct FlattenWalk<'r> {
-    res: Resolver<'r>,
+struct FlattenWalk<'a, 'r> {
+    res: &'a Resolver<'r>,
     buf: *mut u8,
     len: usize,
     cursor: usize,
+    /// Write handle-form stream fields as their paths.
+    portable: bool,
 }
 
-impl<'r> FlattenWalk<'r> {
+impl<'a, 'r> FlattenWalk<'a, 'r> {
     /// The buffer region `[at, at + n)`, checked against the buffer's size,
     /// which the size walk chose to hold the whole value.
     fn region(&mut self, at: usize, n: usize) -> Result<&mut [u8], MorlocError> {
@@ -612,7 +1162,7 @@ impl<'r> FlattenWalk<'r> {
     }
 }
 
-impl<'r> Walker<usize> for FlattenWalk<'r> {
+impl<'a, 'r> Walker<usize> for FlattenWalk<'a, 'r> {
     fn step(&mut self, st: &mut Stack<usize>, f: Frame<usize>) -> Result<(), MorlocError> {
         // SAFETY: frames hold nodes of the tree the resolver was built from;
         // `data` points at the SHM value the schema describes, and every
@@ -703,18 +1253,31 @@ impl<'r> Walker<usize> for FlattenWalk<'r> {
                     let dst_field = self.region(at, sh::STREAM_HANDLE_FIELD_SIZE)?.as_mut_ptr();
                     match tag {
                         t if t == sh::TAG_PATH => {
-                            if src_payload == sh::RELNULL_PAYLOAD {
-                                sh::write_field(dst_field, sh::TAG_PATH, sh::RELNULL_PAYLOAD);
-                            } else {
-                                let src_suballoc = shm::rel2abs(src_payload as RelPtr)?;
-                                let path_len = sh::read_path_size(src_suballoc) as usize;
-                                let total = sh::path_suballoc_size(path_len);
+                            if let Some(block) = path_suballoc(&Arena, src_payload)? {
                                 self.cursor = shm::align_up(self.cursor, 8);
                                 let here = self.cursor;
-                                self.region(here, total)?
-                                    .copy_from_slice(std::slice::from_raw_parts(src_suballoc, total));
+                                self.region(here, block.len())?.copy_from_slice(block);
+                                self.cursor += block.len();
+                                sh::write_field(dst_field, sh::TAG_PATH, width::u64_from_usize(here));
+                            } else {
+                                sh::write_field(dst_field, sh::TAG_PATH, sh::RELNULL_PAYLOAD);
+                            }
+                        }
+                        t if t == sh::TAG_HANDLE && self.portable => {
+                            let path = crate::handle_scan::portable_path(sh::payload_handle(src_payload))?;
+                            if path.is_empty() {
+                                sh::write_field(dst_field, sh::TAG_PATH, sh::RELNULL_PAYLOAD);
+                            } else {
+                                let total = sh::path_suballoc_size(path.len());
+                                self.cursor = shm::align_up(self.cursor, 8);
+                                let here = self.cursor;
+                                sh::write_path_suballoc(self.region(here, total)?.as_mut_ptr(), path.as_bytes());
                                 self.cursor += total;
-                                sh::write_field(dst_field, sh::TAG_PATH, here as u64);
+                                sh::write_field(
+                                    self.region(at, sh::STREAM_HANDLE_FIELD_SIZE)?.as_mut_ptr(),
+                                    sh::TAG_PATH,
+                                    here as u64,
+                                );
                             }
                         }
                         t if t == sh::TAG_HANDLE => {
@@ -780,7 +1343,7 @@ impl<'r> Walker<usize> for FlattenWalk<'r> {
                         self.child(st, &f, 0, inner_schema, inner, here)?;
                     }
                 }
-                _ => {} // primitives already copied by parent
+                SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Table | SerialType::Recur | SerialType::Enum => {} // primitives already copied by parent
             }
         }
         Ok(())
@@ -952,7 +1515,7 @@ impl<'a, 'r> FlatEmit<'a, 'r> {
                 }
                 total
             }
-            _ => 0,
+            SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Table | SerialType::Recur | SerialType::Enum => 0,
         };
         self.pcount.insert(key, n);
         Ok(n)
@@ -1024,7 +1587,7 @@ impl<'a, 'r> FlatEmit<'a, 'r> {
                         self.patch(&s.parameters[i], data.add(fo), buf, off + fo, j)?;
                     }
                 }
-                _ => {}
+                SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Table | SerialType::Recur | SerialType::Enum => {}
             }
         }
         Ok(())
@@ -1146,9 +1709,8 @@ impl<'a, 'r> Walker<usize> for FlatEmit<'a, 'r> {
                         let pos = shm::align_up(self.cursor, 8);
                         self.set(base, pos as u64 | self.vol_mask);
                         self.pad_to(pos)?;
-                        let suballoc = shm::rel2abs(payload as RelPtr)?;
-                        let total = sh::path_suballoc_size(sh::read_path_size(suballoc) as usize);
-                        self.write_bytes(std::slice::from_raw_parts(suballoc, total))?;
+                        let block = path_suballoc(&Arena, payload)?.unwrap_or(&[]);
+                        self.write_bytes(block)?;
                     }
                 }
                 SerialType::Tuple | SerialType::Map => {
@@ -1166,7 +1728,7 @@ impl<'a, 'r> Walker<usize> for FlatEmit<'a, 'r> {
                     let arm = variant_arm_schema(*data, s)?;
                     let relptr = *(data.add(VARIANT_PAYLOAD_OFFSET) as *const RelPtr);
                     if relptr == shm::RELNULL {
-                        self.set(base, shm::RELNULL as u64);
+                        self.set(base, width::i64_from_isize(shm::RELNULL).cast_unsigned());
                     } else {
                         let pos = shm::align_up(self.cursor, arm.alignment().max(1));
                         self.set(base, pos as u64 | self.vol_mask);
@@ -1184,7 +1746,7 @@ impl<'a, 'r> Walker<usize> for FlatEmit<'a, 'r> {
                     }
                     let relptr = *(data as *const RelPtr);
                     if relptr == shm::RELNULL {
-                        self.set(base, shm::RELNULL as u64);
+                        self.set(base, width::i64_from_isize(shm::RELNULL).cast_unsigned());
                     } else {
                         let inner_schema = &s.parameters[0];
                         let pos = shm::align_up(self.cursor, inner_schema.alignment().max(1));
@@ -1197,7 +1759,7 @@ impl<'a, 'r> Walker<usize> for FlatEmit<'a, 'r> {
                         self.child(st, &f, 0, inner_schema, inner, ibase)?;
                     }
                 }
-                _ => {}
+                SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Table | SerialType::Recur | SerialType::Enum => {}
             }
         }
         Ok(())
@@ -1228,7 +1790,7 @@ mod flat_writer_tests {
     use crate::json::read_json_with_schema;
 
     #[must_use]
-    fn setup() -> std::sync::RwLockReadGuard<'static, ()> { crate::init_test_shm() }
+    fn setup() -> crate::ArenaShared { crate::init_test_shm() }
 
     // Build a voidstar from JSON, then verify both flatteners produce
     // equivalent output:
@@ -1489,5 +2051,372 @@ mod flat_writer_tests {
             voidstar_to_json_string(a, &schema).unwrap(),
             voidstar_to_json_string(b, &schema).unwrap(),
         );
+    }
+}
+
+#[cfg(test)]
+mod one_block_copy_tests {
+    use super::*;
+    use crate::json::{read_json_with_schema, voidstar_to_json_string};
+    use crate::schema::parse_schema;
+
+    /// Every value shape the deep copy can allocate for, so that the size
+    /// walk's bound on the part count is exercised against each of the
+    /// copier's allocation sites rather than only the string one.
+    const SHAPES: &[(&str, &str)] = &[
+        ("s", "\"plain\""),
+        ("s", "\"\""),
+        ("as", "[\"a\",\"bb\",\"ccc\"]"),
+        ("as", "[]"),
+        ("ai4", "[1,2,3,4,5]"),
+        ("ai4", "[]"),
+        // Array of variable-width elements: a part per element, plus one
+        // for the element region itself.
+        ("aas", "[[\"a\"],[\"bb\",\"ccc\"],[]]"),
+        ("at2si4", "[[\"a\",1],[\"bb\",2],[\"ccc\",3]]"),
+        ("t3sss", "[\"a\",\"bb\",\"ccc\"]"),
+        ("m21ai41cs", "{\"a\":7,\"c\":\"seven\"}"),
+        ("am21ai41cs", "[{\"a\":1,\"c\":\"x\"},{\"a\":2,\"c\":\"yy\"}]"),
+        // Optional: the inner value is its own sub-allocation.
+        ("?i4", "null"),
+        ("?i4", "5"),
+        ("a?s", "[\"a\",null,\"ccc\"]"),
+        // Arbitrary-precision Int: small enough to inline, and large
+        // enough to take a limb allocation.
+        ("j", "3"),
+        ("j", "123456789012345678901234567890123456789012345678901234567890"),
+        ("aj", "[1,123456789012345678901234567890123456789012345678901234567890]"),
+    ];
+
+    /// A copy into one block must reproduce the value exactly, whatever its
+    /// shape. The size walk bounds the parts the bump will cut, so a shape
+    /// whose bound came out short would fail here with "deep copy ran past
+    /// the region it was sized for" rather than silently truncating.
+    #[test]
+    fn a_one_block_copy_reproduces_every_shape() {
+        let _shm = crate::own_test_registry();
+        for (schema_str, json) in SHAPES {
+            let schema = parse_schema(schema_str).unwrap();
+            let src = read_json_with_schema(json, &schema).unwrap();
+            let before = voidstar_to_json_string(src, &schema).unwrap();
+
+            let copy = unsafe { deep_copy_to_block(src, &schema) }
+                .unwrap_or_else(|e| panic!("{} {}: {:?}", schema_str, json, e));
+            let after = voidstar_to_json_string(copy, &schema).unwrap();
+            assert_eq!(before, after, "shape {} {}", schema_str, json);
+
+            // One block: the pool releases a value with a single shfree, so
+            // everything below the root has to live inside it.
+            shm::shfree(copy).unwrap();
+            shm::shfree(src).unwrap();
+        }
+    }
+
+    /// The copy owns nothing outside the block it returns, so releasing
+    /// that block releases all of it.
+    #[test]
+    fn a_one_block_copy_leaves_no_blocks_behind() {
+        let _shm = crate::own_test_registry();
+        let mut hist = [0usize; 40];
+        let cycle = || {
+            for (schema_str, json) in SHAPES {
+                let schema = parse_schema(schema_str).unwrap();
+                let src = read_json_with_schema(json, &schema).unwrap();
+                let copy = unsafe { deep_copy_to_block(src, &schema) }.unwrap();
+                shm::shfree(copy).unwrap();
+                shm::shfree(src).unwrap();
+            }
+        };
+        cycle();
+        let before = shm::live_block_stats(&mut hist).0;
+        for _ in 0..4 {
+            cycle();
+        }
+        assert_eq!(shm::live_block_stats(&mut hist).0, before);
+    }
+}
+
+
+
+#[cfg(test)]
+mod bounded_rebase_tests {
+    use super::*;
+    use morloc_runtime_types::schema::parse_schema;
+
+    /// A 64-byte block holding one 16-byte slot at offset 0 whose pointer
+    /// field (at `ptr_at`) holds the block-relative offset `rel`.
+    fn block_with(ptr_at: usize, rel: i64, size: usize) -> AbsPtr {
+        let block = shm::shcalloc(1, 64).unwrap();
+        unsafe {
+            *(block as *mut usize) = size;
+            *(block.add(ptr_at) as *mut i64) = rel;
+        }
+        block
+    }
+
+    fn rebase(block: AbsPtr, schema: &str) -> Result<(), MorlocError> {
+        let schema = parse_schema(schema).unwrap();
+        let base = shm::abs2rel(block).unwrap();
+        unsafe { adjust_relptrs_within(block, &schema, base, RelWindow::of_block(block, 64)?) }
+    }
+
+    #[test]
+    fn string_inside_block_is_rebased() {
+        let _g = crate::init_test_shm();
+        let block = block_with(8, 16, 5);
+        rebase(block, "s").unwrap();
+        let arr = unsafe { &*(block as *const Array) };
+        assert_eq!(shm::rel2abs(arr.data).unwrap(), unsafe { block.add(16) });
+        shm::shfree(block).unwrap();
+    }
+
+    #[test]
+    fn string_leaving_block_is_rejected() {
+        let _g = crate::init_test_shm();
+        let block = block_with(8, 1000, 5);
+        assert!(rebase(block, "s").is_err());
+        shm::shfree(block).unwrap();
+    }
+
+    #[test]
+    fn string_running_past_block_end_is_rejected() {
+        let _g = crate::init_test_shm();
+        // Starts inside the block, but 60 bytes from offset 16 overrun it.
+        let block = block_with(8, 16, 60);
+        assert!(rebase(block, "s").is_err());
+        shm::shfree(block).unwrap();
+    }
+
+    #[test]
+    fn variant_payload_leaving_block_is_rejected() {
+        let _g = crate::init_test_shm();
+        // Tag 0 (arm with one f8 field), payload pointer far outside.
+        let block = block_with(VARIANT_PAYLOAD_OFFSET, 4096, 0);
+        assert!(rebase(block, "v11A1f8").is_err());
+        shm::shfree(block).unwrap();
+    }
+}
+
+// ── pointer_span ───────────────────────────────────────────────────────────
+
+/// The address range `[lo, hi)` covering every byte addressed by a live
+/// pointer reachable from `n` consecutive records of `schema` at `first`,
+/// or `None` when no record holds a live pointer. `space` resolves the
+/// relptrs found in the records, in whatever space the records live (a
+/// mapped file, an SHM block).
+///
+/// A flat array contributes its whole data range without its elements
+/// being visited, so the cost is one step per pointer slot, not per byte.
+///
+/// Every addressed range must lie inside `bound`, the `[lo, hi)` addresses
+/// of the memory the records belong to; a pointer or extent reaching past
+/// it is an error, checked before anything it addresses is read.
+///
+/// # Safety
+/// `first` must address `n` records laid out as `schema` describes, inside
+/// `bound`, which must be readable.
+pub unsafe fn pointer_span<S: Space>(
+    first: *const u8,
+    n: usize,
+    schema: &Schema,
+    space: &S,
+    bound: (usize, usize),
+) -> Result<Option<(usize, usize)>, MorlocError> {
+    let mut w = SpanWalk { res: Resolver::new(schema), space, bound, span: None };
+    let mut st = Stack::new();
+    for k in 0..n {
+        st.enter(schema, first.add(k * schema.width), ());
+        walk::run(&mut w, &mut st)?;
+    }
+    Ok(w.span)
+}
+
+/// True when `kind` occurs anywhere in `schema`.
+pub fn schema_holds(schema: &Schema, kind: SerialType) -> bool {
+    schema.serial_type == kind || schema.parameters.iter().any(|p| schema_holds(p, kind))
+}
+
+struct SpanWalk<'r, S> {
+    res: Resolver<'r>,
+    space: &'r S,
+    bound: (usize, usize),
+    span: Option<(usize, usize)>,
+}
+
+impl<'r, S: Space> SpanWalk<'r, S> {
+    /// Resolve `rel` and widen the span by the `extent` bytes it addresses.
+    fn cover(&mut self, rel: RelPtr, extent: Option<usize>) -> Result<*const u8, MorlocError> {
+        let extent = extent.ok_or_else(|| {
+            MorlocError::Serialization(format!("pointer extent at relptr {rel} overflows"))
+        })?;
+        let at = self.space.resolve(rel, extent)?;
+        let lo = at as usize;
+        let hi = lo.checked_add(extent).ok_or_else(|| {
+            MorlocError::Serialization(format!("pointer extent at {lo:#x} overflows"))
+        })?;
+        if lo < self.bound.0 || hi > self.bound.1 {
+            return Err(MorlocError::Serialization(format!(
+                "pointer to [{lo:#x}, {hi:#x}) leaves its sub-packet [{:#x}, {:#x})",
+                self.bound.0, self.bound.1
+            )));
+        }
+        self.span = Some(match self.span {
+            Some((a, b)) => (a.min(lo), b.max(hi)),
+            None => (lo, hi),
+        });
+        Ok(at)
+    }
+
+    fn child(
+        &mut self,
+        st: &mut Stack<()>,
+        f: &Frame<()>,
+        idx: usize,
+        s: &'r Schema,
+        data: *const u8,
+    ) -> Result<Visit, MorlocError> {
+        if self.res.flat(s) {
+            self.step(st, Frame::new(s, data, ()))?;
+            Ok(Visit::Done)
+        } else {
+            walk::defer(self, st, f, idx, s, data, ());
+            Ok(Visit::Deferred)
+        }
+    }
+}
+
+impl<'r, S: Space> Walker<()> for SpanWalk<'r, S> {
+    fn step(&mut self, st: &mut Stack<()>, f: Frame<()>) -> Result<(), MorlocError> {
+        // SAFETY: frames hold nodes of the tree the resolver was built from,
+        // and `data` points at a value laid out as that schema describes.
+        let s: &'r Schema = self.res.resolve(unsafe { &*f.schema })?;
+        let data = f.data;
+        unsafe {
+            match s.serial_type {
+                SerialType::Nil
+                | SerialType::Bool
+                | SerialType::Sint8
+                | SerialType::Sint16
+                | SerialType::Sint32
+                | SerialType::Sint64
+                | SerialType::Uint8
+                | SerialType::Uint16
+                | SerialType::Uint32
+                | SerialType::Uint64
+                | SerialType::Float32
+                | SerialType::Float64
+                | SerialType::Enum => {}
+                SerialType::Int => {
+                    // Inline BigInt: [size, value_or_relptr]; more than one
+                    // limb lives behind the pointer.
+                    let size = *(data as *const usize);
+                    if size > 1 {
+                        let rel = *(data.add(std::mem::size_of::<usize>()) as *const RelPtr);
+                        self.cover(rel, size.checked_mul(std::mem::size_of::<u64>()))?;
+                    }
+                }
+                SerialType::String | SerialType::Array => {
+                    let arr = &*(data as *const Array);
+                    if arr.size == 0 {
+                        return Ok(());
+                    }
+                    let elem = s.parameters.first();
+                    let w = elem.map_or(1, |e| e.width);
+                    let elems = if f.idx == 0 {
+                        self.cover(arr.data, arr.size.checked_mul(w))?
+                    } else {
+                        self.space.resolve(arr.data, region_len(arr.size, w)?)? as *const u8
+                    };
+                    let Some(elem) = elem else { return Ok(()) };
+                    if elem.is_fixed_width() {
+                        return Ok(());
+                    }
+                    for i in f.idx..arr.size {
+                        if self.child(st, &f, i, elem, elems.add(i * w))? == Visit::Deferred {
+                            return Ok(());
+                        }
+                    }
+                }
+                SerialType::IFile | SerialType::OStream | SerialType::IStream => {
+                    // Only a path-form handle points anywhere: at an 8-byte
+                    // length followed by the path's bytes.
+                    use morloc_runtime_types::stream_handle as sh;
+                    if sh::read_tag(data) == sh::TAG_PATH {
+                        let payload = sh::read_payload(data);
+                        if payload != sh::RELNULL_PAYLOAD {
+                            let at = self.cover(sh::payload_relptr(payload), Some(8))?;
+                            let len = usize::try_from(*(at as *const u64)).ok();
+                            self.cover(sh::payload_relptr(payload), len.and_then(|n| n.checked_add(8)))?;
+                        }
+                    }
+                }
+                SerialType::Tuple | SerialType::Map => {
+                    for i in f.idx..s.parameters.len() {
+                        let p = data.add(s.offsets[i]);
+                        if self.child(st, &f, i, &s.parameters[i], p)? == Visit::Deferred {
+                            return Ok(());
+                        }
+                    }
+                }
+                SerialType::Variant => {
+                    if f.idx > 0 {
+                        return Ok(());
+                    }
+                    let arm = variant_arm_schema(*data, s)?;
+                    let rel = *(data.add(VARIANT_PAYLOAD_OFFSET) as *const RelPtr);
+                    if rel != shm::RELNULL {
+                        let inner = self.cover(rel, Some(arm.width))?;
+                        self.child(st, &f, 0, arm, inner)?;
+                    }
+                }
+                SerialType::Optional => {
+                    if f.idx > 0 || s.parameters.is_empty() {
+                        return Ok(());
+                    }
+                    let rel = *(data as *const RelPtr);
+                    if rel != shm::RELNULL {
+                        let inner = self.cover(rel, Some(s.parameters[0].width))?;
+                        self.child(st, &f, 0, &s.parameters[0], inner)?;
+                    }
+                }
+                SerialType::Table => {
+                    return Err(MorlocError::Serialization(
+                        "pointer_span: an Arrow table has no voidstar pointer layout".into(),
+                    ));
+                }
+                SerialType::Recur => {
+                    return Err(MorlocError::Schema(
+                        "pointer_span: unresolved back-reference".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod flatten_size_tests {
+    use super::*;
+    use crate::json::read_json_with_schema;
+    use morloc_runtime_types::schema::parse_schema;
+
+    /// A path-form stream handle after a field that leaves the cursor
+    /// unaligned: flatten pads the path to 8 bytes, so the size it was
+    /// given must have budgeted that padding.
+    #[test]
+    fn handle_path_after_odd_string_flattens() {
+        let _g = crate::init_test_shm();
+        for s in ["x", "abc", "abcdefg", "abcdefgh"] {
+            let schema = parse_schema("t2sF").unwrap();
+            let v = read_json_with_schema(&format!(r#"["{s}", "/tmp/some/path.stream"]"#), &schema).unwrap();
+            let flat = flatten_to_buffer(v, &schema)
+                .unwrap_or_else(|e| panic!("string {s:?}: {e}"));
+            let back = read_binary(&flat, &schema).unwrap();
+            assert_eq!(
+                crate::json::voidstar_to_json_string(back, &schema).unwrap(),
+                crate::json::voidstar_to_json_string(v, &schema).unwrap(),
+            );
+        }
     }
 }

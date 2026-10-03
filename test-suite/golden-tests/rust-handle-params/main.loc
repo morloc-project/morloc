@@ -1,0 +1,112 @@
+-- Stream handles in borrowed positions in a Rust pool.
+--
+-- A handle (IFile, IStream, OStream) is a u64, and every handle intrinsic
+-- takes it by value. A handle reaches an intrinsic from a position the Rust
+-- backend may borrow: the parameter of a helper called more than once (kept a
+-- nested manifold), a suspension handed to a sourced Rust function, a tuple
+-- holding a handle, and the result of a sourced generic function (whose
+-- parameter stays borrowed). Each intrinsic that takes a handle is exercised
+-- from these.
+--
+-- Covers morloc-project/morloc: `@next` inside a suspension passed to a
+-- sourced Rust function passed the handle as `&u64` (E0308).
+
+module main (nextTwice, drainSuspended, lengthTwice, streamTwice, pairTwice, throughGeneric)
+
+import root-rust
+
+source Rust from "lib.rs" ("drain", "force", "same")
+drain :: <IO> (Bool, [Int]) -> <IO> Int
+force :: <IO> Int -> <IO> Int
+same :: a -> a
+
+put :: OStream Int -> [Int] -> <IO> ()
+put o xs = do
+  @write 0 o xs
+  @flush o
+  ()
+
+shut :: OStream Int -> <IO> ()
+shut o = do
+  @close o
+
+mk :: Str -> <IO> ()
+mk path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
+  put o [1, 2, 3]
+  put o [4, 5]
+  shut o
+
+firstBatch :: IStream Int -> <IO> [Int]
+firstBatch s = do
+  Ok xs <- @next s
+  xs
+
+nextTwice :: Str -> <IO> Int
+nextTwice path = do
+  mk path
+  Ok s <- @open path :: <IO> (Try Str (IStream Int))
+  a <- firstBatch s
+  b <- firstBatch s
+  length a + length b
+
+parts :: IStream Int -> <IO> (Bool, [Int])
+parts s = do
+  r <- @next s
+  match r
+    | (Err _) = (False, [])
+    | (Ok xs) = (True, xs)
+
+drainSuspended :: Str -> <IO> Int
+drainSuspended path = do
+  mk path
+  Ok s <- @open path :: <IO> (Try Str (IStream Int))
+  drain (parts s)
+
+lenOf :: IFile [Int] -> <IO> Int
+lenOf f = do
+  Ok n <- @flen f
+  n
+
+lengthTwice :: Str -> <IO> Int
+lengthTwice path = do
+  mk path
+  Ok f <- @open path :: <IO> (Try Str (IFile [Int]))
+  a <- lenOf f
+  b <- force (lenOf f)
+  a + b
+
+firstOfStream :: IFile [Int] -> <IO> Int
+firstOfStream f = do
+  s <- @stream f
+  Ok xs <- @next s
+  @close s
+  length xs
+
+streamTwice :: Str -> <IO> Int
+streamTwice path = do
+  mk path
+  Ok f <- @open path :: <IO> (Try Str (IFile [Int]))
+  a <- firstOfStream f
+  b <- force (firstOfStream f)
+  a + b
+
+lenOfPair :: (IFile [Int], Int) -> <IO> Int
+lenOfPair p = do
+  Ok n <- @flen (.0 p)
+  n + .1 p
+
+pairTwice :: Str -> <IO> Int
+pairTwice path = do
+  mk path
+  Ok f <- @open path :: <IO> (Try Str (IFile [Int]))
+  a <- lenOfPair (f, 10)
+  b <- lenOfPair (f, 20)
+  a + b
+
+throughGeneric :: Str -> <IO> Int
+throughGeneric path = do
+  mk path
+  Ok s <- @open path :: <IO> (Try Str (IStream Int))
+  Ok xs <- @next (same s)
+  length xs

@@ -1,6 +1,10 @@
 //! CLI argument handling and voidstar utility functions.
 //! Replaces cli.c.
 
+// A value crossing this module is user data: a narrowing or sign change
+// goes through a checked conversion or a named helper, never `as`.
+#![deny(clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+
 use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::cschema::CSchema;
 use crate::error::{clear_errmsg, set_errmsg, MorlocError};
 use crate::packet;
+use morloc_runtime_types::width;
 use crate::shm;
 
 /// Extensions that mark an argument as path-shaped for the
@@ -55,14 +60,13 @@ fn arg_looks_like_file_path(arg: &str) -> bool {
 /// errors clearly instead of silently reading zero bytes after the
 /// first reader drained it.
 ///
-/// The flag is reset by the dispatch entry point so a long-running
-/// nexus that handles multiple commands in sequence (currently not a
-/// thing, but cheap insurance) doesn't carry state across commands.
+/// A CLI run parses its arguments once per process, so nothing resets
+/// the flag there. A process that parses several commands' arguments
+/// must call [`reset_stdin_claim`] before each.
 static STDIN_CLAIMED: AtomicBool = AtomicBool::new(false);
 
-/// Reset the stdin-claim flag. Called at the start of each top-level
-/// dispatch so per-command isolation holds even if the runtime is
-/// reused across commands in one process.
+/// Reset the stdin-claim flag before parsing another command's
+/// arguments in the same process.
 pub fn reset_stdin_claim() {
     STDIN_CLAIMED.store(false, Ordering::Relaxed);
 }
@@ -161,7 +165,7 @@ fn is_json_literal_shape(s: &str) -> bool {
 ///   5. Anything else -> error pointing the user at `source: file` in
 ///      the argument's docstring.
 pub unsafe fn classify_arg_source(arg: *const c_char) -> Result<Classified, MorlocError> {
-    extern "C" { fn file_exists(filename: *const c_char) -> bool; }
+    use crate::utility::file_exists;
 
     let stdin_path = b"/dev/stdin\0";
     let dash_path = b"-\0";
@@ -288,26 +292,6 @@ pub unsafe extern "C" fn free_argument_t(arg: *mut ArgumentT) {
     libc::free(arg as *mut c_void);
 }
 
-// ── adjust_voidstar_relptrs ────────────────────────────────────────────────
-
-#[no_mangle]
-pub unsafe extern "C" fn adjust_voidstar_relptrs(
-    data: *mut c_void,
-    schema: *const CSchema,
-    base_rel: shm::RelPtr,
-    errmsg: *mut *mut c_char,
-) -> i32 {
-    clear_errmsg(errmsg);
-    let rs = CSchema::to_rust(schema);
-    match crate::voidstar::adjust_relptrs(data as *mut u8, &rs, base_rel) {
-        Ok(_) => 0,
-        Err(e) => {
-            set_errmsg(errmsg, &e);
-            1
-        }
-    }
-}
-
 // ── Stream-packet peek helpers ────────────────────────────────────────────
 
 /// Cheap file-shape sniff: returns the packet header if `path` names a
@@ -371,6 +355,101 @@ macro_rules! stream_fast_path_or_fallthrough {
     };
 }
 
+/// What to do with a table argument that names its data rather than
+/// spelling it out.
+pub(crate) enum TableArg {
+    /// Not a table, or inline JSON, which is small by construction and
+    /// stays where it is.
+    NotHandled,
+    /// Pass the file on by name; the pool reads it.
+    ByName(*mut u8),
+    /// The file is a morloc packet, which the ordinary loader knows how to
+    /// read. It is named here because the bytes may have come off a pipe
+    /// and been spooled, in which case reading stdin again would find
+    /// nothing.
+    Reclassified(Classified),
+}
+
+/// Nexus-side fast path for a table argument. A table's bytes belong in
+/// the pool that will hold the table, so a file -- or a pipe, spooled to
+/// one -- is passed on by name and the nexus never reads it.
+///
+/// # Safety
+/// `schema` must be a valid CSchema pointer.
+pub(crate) unsafe fn try_table_file_packet(
+    classified: &Classified,
+    schema: *const CSchema,
+) -> Result<TableArg, MorlocError> {
+    if schema.is_null() || !crate::arrow_ffi::is_arrow_table_schema(&CSchema::to_rust(schema)) {
+        return Ok(TableArg::NotHandled);
+    }
+    let effective: *const c_char = match classified.kind {
+        ArgSource::Inline => return Ok(TableArg::NotHandled),
+        ArgSource::File => classified.effective,
+        // A pipe cannot be handed on by name, and cannot be rewound once
+        // read, so it is spooled to a file the nexus removes at exit. The
+        // path outlives the call because the packet, or the loader that
+        // falls through to it, holds only a pointer.
+        ArgSource::Stdin => {
+            claim_stdin()?;
+            let path = std::ffi::CString::new(spool_stdin_to_temp()?)
+                .map_err(|_| MorlocError::Other("spooled table path has an embedded NUL".into()))?;
+            Box::leak(path.into_boxed_c_str()).as_ptr()
+        }
+    };
+    // A morloc packet carries its own schema and encoding; the ordinary
+    // loader reads it, and doing that here would lose the checks it makes.
+    if peek_packet_header_via_pread(effective).is_some() {
+        return Ok(TableArg::Reclassified(Classified { kind: ArgSource::File, effective }));
+    }
+    let packet = crate::packet_ffi::make_table_file_packet(effective, schema);
+    if packet.is_null() {
+        return Err(MorlocError::Packet("could not build the table argument packet".into()));
+    }
+    Ok(TableArg::ByName(packet))
+}
+
+/// Copy standard input to a temporary file and return its path. The file
+/// is unlinked when the process exits, so nothing survives the run.
+unsafe fn spool_stdin_to_temp() -> Result<String, MorlocError> {
+    use std::io::{Read, Write};
+    let dir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".into());
+    let mut template: Vec<u8> = format!("{}/morloc-table-XXXXXX", dir.trim_end_matches('/')).into_bytes();
+    template.push(0);
+    let fd = libc::mkstemp(template.as_mut_ptr() as *mut c_char);
+    if fd < 0 {
+        return Err(MorlocError::Other("could not open a temporary file for the table on stdin".into()));
+    }
+    let path = String::from_utf8_lossy(&template[..template.len() - 1]).into_owned();
+    // Unlinking now would take the name the pool needs, so the file is
+    // removed at exit instead.
+    SPOOLED.lock().unwrap_or_else(|e| e.into_inner()).push(path.clone());
+    let mut out = {
+        use std::os::fd::FromRawFd;
+        std::fs::File::from_raw_fd(fd)
+    };
+    let mut buf = vec![0u8; 1 << 20];
+    let mut stdin = std::io::stdin().lock();
+    loop {
+        let n = stdin.read(&mut buf).map_err(MorlocError::Io)?;
+        if n == 0 { break; }
+        out.write_all(&buf[..n]).map_err(MorlocError::Io)?;
+    }
+    out.flush().map_err(MorlocError::Io)?;
+    Ok(path)
+}
+
+/// Temporary files holding input spooled off a pipe, removed at exit.
+static SPOOLED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Remove every file spooled off a pipe during this run.
+pub fn remove_spooled_inputs() {
+    let mut files = SPOOLED.lock().unwrap_or_else(|e| e.into_inner());
+    for path in files.drain(..) {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
 // ── try_load_stream_packet_file ───────────────────────────────────────────
 
 /// Nexus-side fast path for stream-packet CLI file arguments. Dispatches
@@ -421,7 +500,7 @@ pub(crate) unsafe fn try_load_stream_packet_file(
                     return Err(e);
                 }
             };
-            sh::write_field(field_ptr, sh::TAG_HANDLE, handle as u64);
+            sh::write_field(field_ptr, sh::TAG_HANDLE, sh::handle_payload(handle));
             let mut inner_err: *mut c_char = ptr::null_mut();
             let pkt = wrap_voidstar_as_packet(
                 field_ptr as *mut c_void,
@@ -442,14 +521,17 @@ pub(crate) unsafe fn try_load_stream_packet_file(
             }
             Ok(Some(pkt))
         }
-        other => {
+        // An IFile names its file: the ordinary path loader hands the path
+        // on, and the pool opens it for random access.
+        SerialType::IFile => Ok(None),
+        other @ (SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::OStream | SerialType::Variant | SerialType::Enum) => {
             // Look up the file's schema string for a targeted error.
             let file_schema = crate::stream::read_schema_from_file(&path_str)
                 .unwrap_or_else(|_| "<unknown>".to_string());
             Err(MorlocError::Other(format!(
                 "'{}' is a stream-packet file (schema \"{}\"). The receiver's \
-                 type has serial_type {:?}; only `[a]` (Array) and \
-                 `IStream a` can accept a stream-packet file.",
+                 type has serial_type {:?}; only `[a]` (Array), \
+                 `IStream a` and `IFile [a]` can accept a stream-packet file.",
                 path_str, file_schema, other,
             )))
         }
@@ -512,7 +594,10 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
         libc::close(fd);
         return Ok(None);
     }
-    let file_size = sb.st_size as usize;
+    let Ok(file_size) = usize::try_from(sb.st_size) else {
+        libc::close(fd);
+        return Ok(None);
+    };
     if file_size < 32 || file_size < FAST_PATH_THRESHOLD {
         libc::close(fd);
         return Ok(None);
@@ -556,7 +641,7 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
     }
     let metadata_size = header.offset as usize;
     let payload_offset = 32 + metadata_size;
-    let payload_size = header.length as usize;
+    let payload_size = width::usize_from_u64(header.length);
     if payload_offset.saturating_add(payload_size) > file_size {
         libc::close(fd);
         return Ok(None);
@@ -576,7 +661,7 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
             metadata_size,
             32,
         );
-        if nm as usize != metadata_size {
+        if usize::try_from(nm).ok() != Some(metadata_size) {
             libc::close(fd);
             return Ok(None);
         }
@@ -593,100 +678,37 @@ pub(crate) unsafe fn try_load_voidstar_packet_via_mmap(
         0
     };
 
-    // Allocate the SHM destination for the payload and pread the file's
-    // payload region straight into it. The shmalloc-tracking arena
-    // hooks in automatically; the caller's normal "shfree on drop"
-    // semantics apply.
-    let dest = match shm::shmalloc(payload_size) {
-        Ok(p) => p,
+    // Land the file's payload region straight in SHM, then relocate it.
+    let landing = match crate::voidstar::Landing::new(payload_size) {
+        Ok(l) => l,
         Err(e) => {
             libc::close(fd);
             return Err(e);
         }
     };
-
-    // pread in a loop until payload_size bytes have been read, in case
-    // short reads occur on large files.
-    let mut total: usize = 0;
-    while total < payload_size {
-        let n = libc::pread(
-            fd,
-            dest.add(total) as *mut libc::c_void,
-            payload_size - total,
-            (payload_offset + total) as libc::off_t,
-        );
-        if n < 0 {
-            let e = std::io::Error::last_os_error();
-            if e.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            libc::close(fd);
-            let _ = shm::shfree(dest);
-            return Err(MorlocError::Io(e));
-        }
-        if n == 0 {
-            // Unexpected EOF mid-payload.
-            libc::close(fd);
-            let _ = shm::shfree(dest);
-            return Err(MorlocError::Other(format!(
-                "short read on packet payload: got {} of {} bytes",
-                total, payload_size
-            )));
-        }
-        total += n as usize;
-    }
+    let read = pread_exact(fd, landing.as_mut_ptr(), payload_size, payload_offset);
     libc::close(fd);
-
-    // Compute the delta that transforms each producer relptr P =
-    // (hint << 48) | p_o into the consumer-side relptr T = (dest_slot
-    // << 48) | (dest_offset + p_o). Single pass works for both Layer 3
-    // (hint > 0) and the legacy buffer-relative (hint = 0) cases.
-    let dest_rel = match shm::abs2rel(dest) {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = shm::shfree(dest);
-            return Err(e);
-        }
-    };
-    let producer_base = shm::encode_relptr(vol_idx_hint as usize, 0);
-    let delta = (dest_rel as i64).wrapping_sub(producer_base as i64) as shm::RelPtr;
-
-    let rs = CSchema::to_rust(schema);
-    if let Err(e) = crate::voidstar::adjust_relptrs(dest, &rs, delta) {
-        let _ = shm::shfree(dest);
-        return Err(e);
-    }
-
-    Ok(Some(dest))
+    read?;
+    Ok(Some(landing.relocate(&CSchema::to_rust(schema), vol_idx_hint)?))
 }
 
-// ── rebase_voidstar_in_shm (shared by the compressed ingest fast paths) ───
-
-/// Apply the producer->consumer relptr rebase to the voidstar in `dest`
-/// in-place. Computes `delta = abs2rel(dest) - encode_relptr(hint, 0)`
-/// and walks the structure adjusting each relptr by `delta`. On any
-/// failure, frees `dest` before returning the error so callers do not
-/// need a separate cleanup path.
-unsafe fn rebase_voidstar_in_shm(
-    dest: *mut u8,
-    schema: *const CSchema,
-    vol_idx_hint: u16,
-) -> Result<(), MorlocError> {
-    let dest_rel = match shm::abs2rel(dest) {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = shm::shfree(dest);
-            return Err(e);
+/// Read exactly `len` bytes of `fd` at `offset` into `dst`.
+///
+/// # Safety
+///
+/// `dst..dst + len` must be initialized and writable, and `fd` open.
+unsafe fn pread_exact(fd: libc::c_int, dst: *mut u8, len: usize, offset: usize) -> Result<(), MorlocError> {
+    use std::os::unix::fs::FileExt;
+    use std::os::unix::io::FromRawFd;
+    // Borrow the descriptor as a File without taking ownership of it.
+    let file = std::mem::ManuallyDrop::new(std::fs::File::from_raw_fd(fd));
+    let buf = std::slice::from_raw_parts_mut(dst, len);
+    file.read_exact_at(buf, width::u64_from_usize(offset)).map_err(|e| match e.kind() {
+        std::io::ErrorKind::UnexpectedEof => {
+            MorlocError::Other(format!("short read on packet payload: expected {} bytes", len))
         }
-    };
-    let producer_base = shm::encode_relptr(vol_idx_hint as usize, 0);
-    let delta = (dest_rel as i64).wrapping_sub(producer_base as i64) as shm::RelPtr;
-    let rs = CSchema::to_rust(schema);
-    if let Err(e) = crate::voidstar::adjust_relptrs(dest, &rs, delta) {
-        let _ = shm::shfree(dest);
-        return Err(e);
-    }
-    Ok(())
+        _ => MorlocError::Io(e),
+    })
 }
 
 // ── try_load_compressed_voidstar_via_shm ──────────────────────────────────
@@ -735,7 +757,10 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
         libc::close(fd);
         return Ok(None);
     }
-    let file_size = sb.st_size as usize;
+    let Ok(file_size) = usize::try_from(sb.st_size) else {
+        libc::close(fd);
+        return Ok(None);
+    };
     if file_size < 32 || file_size < FAST_PATH_THRESHOLD {
         libc::close(fd);
         return Ok(None);
@@ -776,7 +801,7 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
     }
     let metadata_size = header.offset as usize;
     let payload_offset = 32 + metadata_size;
-    let payload_size = header.length as usize; // compressed-frame length on disk
+    let payload_size = width::usize_from_u64(header.length); // compressed-frame length on disk
     if payload_offset.saturating_add(payload_size) > file_size {
         libc::close(fd);
         return Ok(None);
@@ -793,7 +818,7 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
             metadata_size,
             32,
         );
-        if nm as usize != metadata_size {
+        if usize::try_from(nm).ok() != Some(metadata_size) {
             libc::close(fd);
             return Ok(None);
         }
@@ -840,10 +865,13 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
     // eligible; a downstream failure is a real error, not "try the
     // legacy path".
 
-    let total_uncompressed: usize =
-        frames.iter().map(|f| f.uncompressed_size as usize).sum();
-    let total_compressed: usize =
-        frames.iter().map(|f| f.compressed_size as usize).sum();
+    let (total_uncompressed, total_compressed) = match packet::frame_totals(&frames) {
+        Ok(t) => t,
+        Err(e) => {
+            libc::close(fd);
+            return Err(e);
+        }
+    };
     if total_compressed != payload_size {
         libc::close(fd);
         return Err(MorlocError::Packet(format!(
@@ -869,26 +897,11 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
     // during the slow shmalloc fault-in phase).
     let t_decomp = std::time::Instant::now();
     let mut compressed_buf = vec![0u8; payload_size];
-    let mut total_read = 0usize;
-    while total_read < payload_size {
-        let n = libc::pread(
-            fd,
-            compressed_buf.as_mut_ptr().add(total_read) as *mut libc::c_void,
-            payload_size - total_read,
-            (payload_offset + total_read) as libc::off_t,
-        );
-        if n <= 0 {
-            libc::close(fd);
-            return Err(MorlocError::Io(std::io::Error::last_os_error()));
-        }
-        total_read += n as usize;
-    }
+    let read = pread_exact(fd, compressed_buf.as_mut_ptr(), payload_size, payload_offset);
     libc::close(fd);
+    read?;
 
-    let dest = match shm::shmalloc(total_uncompressed) {
-        Ok(p) => p,
-        Err(e) => return Err(e),
-    };
+    let landing = crate::voidstar::Landing::new(total_uncompressed)?;
     crate::morloc_trace!(
         "[fastpath] read compressed + shmalloc {} MiB took {:.2?}",
         total_uncompressed / (1 << 20),
@@ -898,15 +911,8 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
     // Decompress all frames in parallel into disjoint slices of the
     // SHM destination. Workers each own a non-overlapping subrange by
     // construction; no inter-worker synchronization on dest.
-    let dst_slice = std::slice::from_raw_parts_mut(dest, total_uncompressed);
-    if let Err(e) = crate::compression::parallel_decompress_frames(
-        &frames,
-        &compressed_buf,
-        dst_slice,
-    ) {
-        let _ = shm::shfree(dest);
-        return Err(e);
-    }
+    let dst_slice = std::slice::from_raw_parts_mut(landing.as_mut_ptr(), total_uncompressed);
+    crate::compression::parallel_decompress_frames(&frames, &compressed_buf, dst_slice)?;
     drop(compressed_buf);
     crate::morloc_trace!(
         "[fastpath] zstd decompress ({} frames, {} workers): wrote {} MiB in {:.2?} ({:.0} MB/s)",
@@ -918,8 +924,8 @@ pub(crate) unsafe fn try_load_compressed_voidstar_via_shm(
     );
 
     let t_relptr = std::time::Instant::now();
-    rebase_voidstar_in_shm(dest, schema, vol_idx_hint)?;
-    crate::morloc_trace!("[fastpath] adjust_relptrs took {:.2?}", t_relptr.elapsed());
+    let dest = landing.relocate(&CSchema::to_rust(schema), vol_idx_hint)?;
+    crate::morloc_trace!("[fastpath] relocation took {:.2?}", t_relptr.elapsed());
     crate::morloc_trace!("[fastpath] total ingest: {:.2?}", t0.elapsed());
 
     Ok(Some(dest))
@@ -978,7 +984,7 @@ unsafe fn try_decompress_voidstar_bytes_to_shm(
 
     let metadata_size = header.offset as usize;
     let payload_offset = 32 + metadata_size;
-    let payload_size = header.length as usize;
+    let payload_size = width::usize_from_u64(header.length);
     if payload_offset.saturating_add(payload_size) > data_size {
         return Ok(None);
     }
@@ -998,30 +1004,8 @@ unsafe fn try_decompress_voidstar_bytes_to_shm(
         Ok(Some(f)) if !f.is_empty() => f,
         _ => return Ok(None),
     };
-    let total_uncompressed: usize =
-        frames.iter().map(|f| f.uncompressed_size as usize).sum();
-    let total_compressed: usize =
-        frames.iter().map(|f| f.compressed_size as usize).sum();
-    if total_compressed != payload_size {
-        return Err(MorlocError::Packet(format!(
-            "frame index sums to {} compressed bytes but header.length = {}",
-            total_compressed, payload_size
-        )));
-    }
-
-    let dest = shm::shmalloc(total_uncompressed)?;
-    let dst_slice = std::slice::from_raw_parts_mut(dest, total_uncompressed);
-    if let Err(e) = crate::compression::parallel_decompress_frames(
-        &frames,
-        compressed,
-        dst_slice,
-    ) {
-        let _ = shm::shfree(dest);
-        return Err(e);
-    }
-
-    rebase_voidstar_in_shm(dest, schema, hint)?;
-    Ok(Some(dest as *mut c_void))
+    let landed = crate::voidstar::land_compressed_frames(&frames, compressed, &CSchema::to_rust(schema), hint)?;
+    Ok(Some(landed as *mut c_void))
 }
 
 // ── read_voidstar_binary ───────────────────────────────────────────────────
@@ -1064,35 +1048,14 @@ pub unsafe extern "C" fn read_voidstar_binary_with_hint(
     errmsg: *mut *mut c_char,
 ) -> *mut c_void {
     clear_errmsg(errmsg);
-    let rs = CSchema::to_rust(schema);
-
-    let base = match shm::shmalloc(blob_size) {
-        Ok(p) => p,
+    let blob = std::slice::from_raw_parts(blob, blob_size);
+    match crate::voidstar::read_binary_with_hint(blob, &CSchema::to_rust(schema), vol_idx_hint) {
+        Ok(base) => base as *mut c_void,
         Err(e) => {
             set_errmsg(errmsg, &e);
-            return ptr::null_mut();
+            ptr::null_mut()
         }
-    };
-    std::ptr::copy_nonoverlapping(blob, base, blob_size);
-
-    let base_rel = match shm::abs2rel(base) {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = shm::shfree(base);
-            set_errmsg(errmsg, &e);
-            return ptr::null_mut();
-        }
-    };
-    let producer_base = shm::encode_relptr(vol_idx_hint as usize, 0);
-    let delta = (base_rel as i64).wrapping_sub(producer_base as i64) as shm::RelPtr;
-
-    if let Err(e) = crate::voidstar::adjust_relptrs(base, &rs, delta) {
-        let _ = shm::shfree(base);
-        set_errmsg(errmsg, &e);
-        return ptr::null_mut();
     }
-
-    base as *mut c_void
 }
 
 // ── Form decoders ──────────────────────────────────────────────────────────
@@ -1155,7 +1118,7 @@ fn format_field_as_json(field: &str, st: crate::schema::SerialType) -> String {
             // IFile's CLI string view is a file path; escape like a String.
             serde_json::to_string(field).unwrap_or_else(|_| "\"\"".to_string())
         }
-        _ => field.to_string(),
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::Variant | SerialType::Enum => field.to_string(),
     }
 }
 
@@ -1283,7 +1246,7 @@ fn assemble_row_json(
                 .collect();
             Ok(format!("{{{}}}", parts.join(",")))
         }
-        other => Err(MorlocError::Other(format!(
+        other @ (SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum) => Err(MorlocError::Other(format!(
             "form: list table fallback: row schema must be tuple or record; got {:?}",
             other
         ))),
@@ -1460,14 +1423,7 @@ unsafe fn try_list_with_config(
 ) -> *mut c_void {
     use crate::schema::SerialType;
 
-    extern "C" {
-        fn read_json_with_schema(
-            dest: *mut u8,
-            json: *mut c_char,
-            schema: *const CSchema,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
-    }
+    use crate::json_ffi::read_json_with_schema;
 
     // RAII guard: `data` is owned by this function (per the contract);
     // every return path frees it via the drop. Subsequent `&[u8]` /
@@ -1597,7 +1553,7 @@ unsafe fn try_list_with_config(
                     SerialType::String | SerialType::IFile
         | SerialType::OStream | SerialType::IStream =>
                         format_field_as_json(line, elem_serial),
-                    _ => line.to_string(),
+                    SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::Variant | SerialType::Enum => line.to_string(),
                 }
             };
             p.push(v);
@@ -2163,16 +2119,8 @@ pub unsafe extern "C" fn load_morloc_data_file(
 ) -> *mut c_void {
     clear_errmsg(errmsg);
 
-    extern "C" {
-        fn read_json_with_schema(
-            dest: *mut u8, json: *mut c_char, schema: *const CSchema,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
-        fn unpack_with_schema(
-            mpk: *const c_char, mpk_size: usize, schema: *const CSchema,
-            mlcptr: *mut *mut c_void, errmsg: *mut *mut c_char,
-        ) -> i32;
-    }
+    use crate::json_ffi::read_json_with_schema;
+    use crate::ffi::unpack_with_schema;
 
     if data_size == 0 {
         set_errmsg(errmsg, &MorlocError::Other("Cannot parse 0-length data".into()));
@@ -2261,7 +2209,7 @@ pub unsafe extern "C" fn load_morloc_data_file(
                 .map(|p| matches!(p.serial_type, SerialType::String | SerialType::IFile
                     | SerialType::OStream | SerialType::IStream | SerialType::Enum))
                 .unwrap_or(false),
-            _ => false,
+            SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::Variant => false,
         };
         if bare_str {
             let bytes = std::slice::from_raw_parts(data, data_size);
@@ -2346,7 +2294,7 @@ pub unsafe extern "C" fn load_morloc_data_file(
                         || p.serial_type == SerialType::Float64
                 })
                 .unwrap_or(false),
-            _ => false,
+            SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::String | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => false,
         };
         if bare_float {
             let bytes = std::slice::from_raw_parts(data, data_size);
@@ -2530,7 +2478,7 @@ pub unsafe extern "C" fn load_morloc_data_file(
                     return ptr::null_mut();
                 }
                 let offset = { header.offset } as usize;
-                let length = { header.length } as usize;
+                let length = width::usize_from_u64(header.length);
                 // Compare the packet's stored schema descriptor to the
                 // caller's requested schema. Mismatch is user-attributable
                 // (loading the wrong type from a file) so surface as
@@ -2645,6 +2593,20 @@ unsafe fn parse_cli_data_argument_singular(
     parse_cli_data_argument_classified(dest, classified, schema, errmsg)
 }
 
+/// A stream over this process's stdin that may be closed when done: it reads
+/// a duplicate of fd 0, so closing it leaves fd 0 open. Null on failure.
+unsafe fn open_stdin_stream() -> *mut libc::FILE {
+    let fd = libc::dup(libc::STDIN_FILENO);
+    if fd < 0 {
+        return ptr::null_mut();
+    }
+    let stream = libc::fdopen(fd, b"rb\0".as_ptr() as *const c_char);
+    if stream.is_null() {
+        libc::close(fd);
+    }
+    stream
+}
+
 /// Body of [`parse_cli_data_argument_singular`] for callers that already
 /// know the source classification (e.g. the `form: list` per-line
 /// dispatcher, which forces `File` mode without going through the auto
@@ -2657,13 +2619,8 @@ unsafe fn parse_cli_data_argument_classified(
 ) -> *mut u8 {
     clear_errmsg(errmsg);
 
-    extern "C" {
-        fn read_json_with_schema(
-            dest: *mut u8, json: *mut c_char, schema: *const CSchema,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
-        fn read_binary_fd(file: *mut libc::FILE, file_size: *mut usize, errmsg: *mut *mut c_char) -> *mut u8;
-    }
+    use crate::json_ffi::read_json_with_schema;
+    use crate::utility::read_binary_fd;
 
     let rs = CSchema::to_rust(schema);
     let mut err: *mut c_char = ptr::null_mut();
@@ -2676,7 +2633,11 @@ unsafe fn parse_cli_data_argument_classified(
                 set_errmsg(errmsg, &e);
                 return ptr::null_mut();
             }
-            fd = libc::fdopen(libc::STDIN_FILENO, b"rb\0".as_ptr() as *const c_char);
+            fd = open_stdin_stream();
+            if fd.is_null() {
+                set_errmsg(errmsg, &MorlocError::Io(std::io::Error::last_os_error()));
+                return ptr::null_mut();
+            }
         }
         ArgSource::File => {
             // Layer 2 fast path: if the file is a regular file holding
@@ -2751,10 +2712,7 @@ unsafe fn parse_cli_data_argument_classified(
     };
     let mut data_size: usize = 0;
     let data = read_binary_fd(fd, &mut data_size, &mut err);
-    // Don't close stdin
-    if fd != libc::fdopen(libc::STDIN_FILENO, b"rb\0".as_ptr() as *const c_char) {
-        libc::fclose(fd);
-    }
+    libc::fclose(fd);
     if !err.is_null() {
         if !data.is_null() { libc::free(data as *mut c_void); }
         wrap_and_set_errmsg(err, &source_label, errmsg);
@@ -2997,7 +2955,7 @@ unsafe fn parse_cli_data_argument_unrolled(
     use crate::schema::SerialType;
     match rs.serial_type {
         SerialType::Tuple | SerialType::Map => {}
-        _ => {
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => {
             set_errmsg(errmsg, &MorlocError::Other(
                 "Only record and tuple types may be unrolled".into()));
             return ptr::null_mut();
@@ -3314,13 +3272,7 @@ pub unsafe extern "C" fn parse_cli_data_argument_list(
 /// formatted but without any caller-specific prefix). The buffer must
 /// be `libc::free`'d by the caller on success.
 unsafe fn read_path_into_libc(path: *const c_char) -> Result<(*mut u8, usize), String> {
-    extern "C" {
-        fn read_binary_fd(
-            file: *mut libc::FILE,
-            file_size: *mut usize,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
-    }
+    use crate::utility::read_binary_fd;
     if path.is_null() {
         return Err("null path".into());
     }
@@ -3352,13 +3304,7 @@ unsafe fn read_argv_bytes(
     arg: *mut c_char,
     errmsg: *mut *mut c_char,
 ) -> Option<(*mut u8, usize, ArgSource)> {
-    extern "C" {
-        fn read_binary_fd(
-            file: *mut libc::FILE,
-            file_size: *mut usize,
-            errmsg: *mut *mut c_char,
-        ) -> *mut u8;
-    }
+    use crate::utility::read_binary_fd;
 
     let classified = match classify_arg_source(arg) {
         Ok(c) => c,
@@ -3375,7 +3321,12 @@ unsafe fn read_argv_bytes(
                 set_errmsg(errmsg, &e);
                 return None;
             }
-            libc::fdopen(libc::STDIN_FILENO, b"rb\0".as_ptr() as *const c_char)
+            let fd = open_stdin_stream();
+            if fd.is_null() {
+                set_errmsg(errmsg, &MorlocError::Io(std::io::Error::last_os_error()));
+                return None;
+            }
+            fd
         }
         ArgSource::File => {
             let fd = libc::fopen(effective, b"rb\0".as_ptr() as *const c_char);
@@ -3409,10 +3360,7 @@ unsafe fn read_argv_bytes(
     let mut data_size: usize = 0;
     let mut err: *mut c_char = ptr::null_mut();
     let data = read_binary_fd(fd, &mut data_size, &mut err);
-    let stdin_fd = libc::fdopen(libc::STDIN_FILENO, b"rb\0".as_ptr() as *const c_char);
-    if fd != stdin_fd {
-        libc::fclose(fd);
-    }
+    libc::fclose(fd);
     if !err.is_null() {
         if !data.is_null() {
             libc::free(data as *mut c_void);
@@ -3613,14 +3561,7 @@ unsafe fn dispatch_shape_core(
             *data
         };
         if first_byte == b'[' {
-            extern "C" {
-                fn read_json_with_schema(
-                    dest: *mut u8,
-                    json: *mut c_char,
-                    schema: *const CSchema,
-                    errmsg: *mut *mut c_char,
-                ) -> *mut u8;
-            }
+            use crate::json_ffi::read_json_with_schema;
             // Ensure NUL-termination for the C parser. `read_argv_bytes`
             // returned an exact-length libc allocation without a
             // sentinel; grow by one and write `\0` at the end.
@@ -3791,6 +3732,14 @@ pub unsafe extern "C" fn parse_cli_data_argument_shaped(
             if c.kind == ArgSource::File {
                 stream_fast_path_or_fallthrough!(c.effective, schema, errmsg);
             }
+            match try_table_file_packet(&c, schema) {
+                Ok(TableArg::ByName(pkt)) => return pkt,
+                // A packet read through the shape pipeline keeps its
+                // ordinary route; only the name may have changed.
+                Ok(TableArg::Reclassified(_)) => {}
+                Ok(TableArg::NotHandled) => {}
+                Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+            }
         }
     } else if form_code == 1 && source_code == 2 {
         stream_fast_path_or_fallthrough!((*arg).value, schema, errmsg);
@@ -3820,15 +3769,24 @@ pub unsafe extern "C" fn parse_cli_data_argument(
     // Stream-packet fast path (singular args only): a MORLOC_STREAM_PACKET
     // file short-circuits the voidstar-then-wrap chain below and returns
     // a purpose-built packet directly.
+    let mut table_spool: Option<Classified> = None;
     if (*arg).fields.is_null() && !(*arg).value.is_null() {
         if let Ok(classified) = classify_arg_source((*arg).value) {
             if classified.kind == ArgSource::File {
                 stream_fast_path_or_fallthrough!(classified.effective, schema, errmsg);
             }
+            match try_table_file_packet(&classified, schema) {
+                Ok(TableArg::ByName(pkt)) => return pkt,
+                Ok(TableArg::Reclassified(c)) => table_spool = Some(c),
+                Ok(TableArg::NotHandled) => {}
+                Err(e) => { set_errmsg(errmsg, &e); return ptr::null_mut(); }
+            }
         }
     }
 
-    let result = if (*arg).fields.is_null() {
+    let result = if let Some(c) = table_spool {
+        parse_cli_data_argument_classified(dest, c, schema, &mut err)
+    } else if (*arg).fields.is_null() {
         parse_cli_data_argument_singular(dest, (*arg).value, schema, &mut err)
     } else {
         parse_cli_data_argument_unrolled(
@@ -4024,6 +3982,39 @@ mod tests {
             libc::free(err as *mut c_void);
             assert!(msg.contains("shared-memory reference"), "{msg}");
             crate::cschema::CSchema::free(cschema);
+        }
+    }
+
+    /// Reading an argument from stdin consumes it but leaves fd 0 open:
+    /// closing it would hand fd 0 to the next file opened.
+    #[test]
+    fn reading_stdin_leaves_fd_0_open() {
+        unsafe {
+            let child = libc::fork();
+            assert!(child >= 0);
+            if child == 0 {
+                let mut p = [0 as libc::c_int; 2];
+                libc::pipe(p.as_mut_ptr());
+                libc::write(p[1], b"[1]".as_ptr() as *const c_void, 3);
+                libc::close(p[1]);
+                libc::dup2(p[0], 0);
+                libc::close(p[0]);
+                reset_stdin_claim();
+                let mut err: *mut c_char = ptr::null_mut();
+                let arg = std::ffi::CString::new("-").unwrap();
+                let got = read_argv_bytes(arg.as_ptr() as *mut c_char, &mut err);
+                let read_ok = matches!(got, Some((_, 3, ArgSource::Stdin)));
+                let fd0_open = libc::fcntl(0, libc::F_GETFD) != -1;
+                libc::_exit(if !read_ok { 2 } else if !fd0_open { 1 } else { 0 });
+            }
+            let mut status = 0;
+            libc::waitpid(child, &mut status, 0);
+            assert!(libc::WIFEXITED(status), "child died: {status}");
+            match libc::WEXITSTATUS(status) {
+                0 => {}
+                1 => panic!("reading stdin closed fd 0"),
+                c => panic!("stdin was not read (exit {c})"),
+            }
         }
     }
 

@@ -18,7 +18,7 @@ all:
 	# magic. The classifier reports state=missing.
 	N=`wc -c < stream-temp.packet`; M=`expr $$N - 8`; \
 	  dd if=stream-temp.packet of=stream-missing.packet \
-	     bs=1 count=$$M status=none 2>> obs.err
+	     bs=1 count=$$M 2> /dev/null
 	# === plain classification: state extraction ===
 	printf 'final state: '   >> obs.txt
 	$(NEXUS) file stream-final.packet   | grep -o 'state=[a-z]*'   >> obs.txt 2>> obs.err

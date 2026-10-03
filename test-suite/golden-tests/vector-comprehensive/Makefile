@@ -107,6 +107,17 @@ all:
 	./nexus mlLength >> obs.txt 2>> obs.err
 	echo "--- mlMap ---" >> obs.txt
 	./nexus mlMap >> obs.txt 2>> obs.err
+	echo "=== (6b) Concatenation adds lengths in every language ===" >> obs.txt
+	echo "--- catLenCpp ---" >> obs.txt
+	./nexus catLenCpp >> obs.txt 2>> obs.err
+	echo "--- catLenPy ---" >> obs.txt
+	./nexus catLenPy >> obs.txt 2>> obs.err
+	echo "--- catLenR ---" >> obs.txt
+	./nexus catLenR >> obs.txt 2>> obs.err
+	echo "--- catHeadPy ---" >> obs.txt
+	./nexus catHeadPy >> obs.txt 2>> obs.err
+	echo "--- catLastPy ---" >> obs.txt
+	./nexus catLastPy >> obs.txt 2>> obs.err
 	echo "=== (7) Edge cases (empty / single) ===" >> obs.txt
 	echo "--- emptyCross ---" >> obs.txt
 	./nexus emptyCross >> obs.txt 2>> obs.err

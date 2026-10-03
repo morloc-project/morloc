@@ -1,0 +1,52 @@
+module main (inPy, inCpp, closureLadder)
+import root-py
+import root-cpp
+
+-- A shared definition used from two languages' contexts runs where the same
+-- code inlined would: sharing keeps each use's choice of implementation
+-- (Int `//` rounds differently in Python and C++, so a wrong copy would show).
+source Py from "helpers.py" ("py_id" as pyId, "py_f" as pyF, "py_map" as pyMap, "py_sum" as pySum)
+source Cpp from "helpers-mixed.hpp" ("cpp_id" as cppId, "cpp_f" as cppF)
+pyId :: Int -> Int
+cppId :: Int -> Int
+q0 :: Int -> Int
+q0 x = (x // (0 - 2)) * (0 - 3)
+q1 :: Int -> Int
+q1 x = q0 (q0 x)
+q2 :: Int -> Int
+q2 x = q1 (q1 x)
+q3 :: Int -> Int
+q3 x = q2 (q2 x)
+q4 :: Int -> Int
+q4 x = q3 (q3 x)
+q5 :: Int -> Int
+q5 x = q4 (q4 x)
+inPy :: Int -> Int
+inPy x = pyId (q5 (pyId x))
+inCpp :: Int -> Int
+inCpp x = cppId (q5 (cppId x))
+
+-- Each level hands the one below closures built in two languages: the
+-- levels are shared per language, not per closure, so the program stays
+-- linear in the depth while it runs the 2^d calls it asks for
+pyF :: Int -> Int
+cppF :: Int -> Int
+pyMap :: (Int -> Int) -> [Int] -> [Int]
+pySum :: [Int] -> Int
+k0 :: (Int -> Int) -> Int
+k0 g = pySum (pyMap g [1, 2, 3])
+k1 :: (Int -> Int) -> Int
+k1 g = k0 (\x -> pyF (g x)) + k0 (\x -> cppF (g x))
+k2 :: (Int -> Int) -> Int
+k2 g = k1 (\x -> pyF (g x)) + k1 (\x -> cppF (g x))
+k3 :: (Int -> Int) -> Int
+k3 g = k2 (\x -> pyF (g x)) + k2 (\x -> cppF (g x))
+k4 :: (Int -> Int) -> Int
+k4 g = k3 (\x -> pyF (g x)) + k3 (\x -> cppF (g x))
+k5 :: (Int -> Int) -> Int
+k5 g = k4 (\x -> pyF (g x)) + k4 (\x -> cppF (g x))
+k6 :: (Int -> Int) -> Int
+k6 g = k5 (\x -> pyF (g x)) + k5 (\x -> cppF (g x))
+
+closureLadder :: Int -> Int
+closureLadder n = k6 (\x -> x + n)

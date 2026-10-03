@@ -19,6 +19,7 @@ module Morloc.CodeGenerator.Nexus
   ) where
 
 import qualified Control.Monad as CM
+import Morloc.System (shellQuote)
 import qualified Control.Monad.State as CMS
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as AesonKey
@@ -29,6 +30,7 @@ import Data.Word (Word8)
 import qualified Data.Map as Map
 import qualified Data.Scientific as DS
 import Data.Set (Set)
+import qualified Data.List as List
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as MT
@@ -135,19 +137,37 @@ data ParentDocSlice = ParentDocSlice
 -- | Uniform accessor over 'FData' / 'GastData' so terminal-action
 -- inheritance doesn't repeat itself for the two shapes.
 class HasCmdDocSet a where
-  termNameOf :: a -> EVar
-  docSetOf   :: a -> CmdDocSet
-  setDocSet  :: CmdDocSet -> a -> a
+  termNameOf   :: a -> EVar
+  docSetOf     :: a -> CmdDocSet
+  setDocSet    :: CmdDocSet -> a -> a
+  argSchemasOf :: a -> [Text]
 
 instance HasCmdDocSet FData where
   termNameOf = EV . fdataTermName
   docSetOf = fdataCmdDocSet
   setDocSet ds fd = fd { fdataCmdDocSet = ds }
+  argSchemasOf = fdataArgSchemas
 
 instance HasCmdDocSet GastData where
   termNameOf = EV . commandTermName
   docSetOf = commandDocs
   setDocSet ds g = g { commandDocs = ds }
+  argSchemasOf = commandArgSchemas
+
+-- | A replay entry ('mangleReplayName') reads files the stage of a
+-- multi-output run wrote: every argument is a packet file to load, except
+-- an @IFile@, which is the file itself and is handed on by its path.
+stageReplayArgs :: HasCmdDocSet a => Set.Set EVar -> a -> a
+stageReplayArgs replayEntries x
+  | Set.member (termNameOf x) replayEntries =
+      let ds = docSetOf x
+          args' = zipWith stage (cmdDocArgs ds) (map Just (argSchemasOf x) ++ repeat Nothing)
+       in setDocSet ds { cmdDocArgs = args' } x
+  | otherwise = x
+  where
+    stage (CmdArgPos r) (Just schema)
+      | classifySchema schema /= CatIFile = CmdArgPos r { argPosDocSource = Just SourceFile }
+    stage a _ = a
 
 -- | Map from each compiler-synthesized `--' with:` internal command
 -- name (the mangled `mlcp_<parent>_<long>`) to the parent's inherit
@@ -190,6 +210,11 @@ applyParentSlice slice ds =
 
 data NexusExpr
   = AppX Text NexusExpr [NexusExpr]
+  | CallX Text Text [NexusExpr]
+  -- ^ a call of a named function: result schema, name, arguments
+  | NamedX [(Text, NexusExpr)] NexusExpr
+  -- ^ the named functions an expression calls (callees first), and the
+  -- expression
   | LamX [Text] NexusExpr
   | BndX Text Text
   | PatX Text Pattern
@@ -552,6 +577,9 @@ generalTypeToSerialAST' i anc t0@(NamT o v ps rs)
       anc' <- descendT i t0 anc
       SerialObject o (FV v (CV "")) (map keyTypeF ps)
         <$> mapM (secondM (generalTypeToSerialAST' i anc')) rs
+generalTypeToSerialAST' i _ t@(FunT _ _) = MM.throwSourcedError i $
+  "A command evaluated without a language pool cannot hold a function value (here of type"
+    <+> pretty t <> "); import a language so the command runs in a pool"
 generalTypeToSerialAST' i _ t = MM.throwSourcedError i $
   "cannot serialize type:" <+> pretty t
 
@@ -897,6 +925,10 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
           emitIFileWalkX t rE steps []
       | otherwise =
           AppX <$> type2schema t <*> toNexusExpr funcE <*> mapM toNexusExpr [rE]
+    -- a shared specialization the nexus calls by name
+    toNexusExpr (AnnoS (Idx _ t) _ (AppS (AnnoS _ _ (CallS v)) es)) = do
+      mapM_ (heldSuspension "passed as an argument") es
+      CallX <$> type2schema t <*> pure (render (pretty v)) <*> mapM toNexusExpr es
     toNexusExpr (AnnoS (Idx _ t) _ (AppS e es)) = do
       mapM_ (heldSuspension "passed as an argument") es
       AppX <$> type2schema t <*> toNexusExpr e <*> mapM toNexusExpr es
@@ -1155,6 +1187,14 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- pure (all-morloc) whole-form command is rejected with a clear message.
     -- Foreign-dispatched whole-form commands go through the pool path and are
     -- unaffected.
+    -- @unpack appears only in the entries synthesized for `@parse`, where
+    -- it decodes an argument handed over as packet bytes. The nexus
+    -- interpreter holds no packets, so such an entry must run in a pool.
+    toNexusExpr (AnnoS (Idx iUnpack _) _ (IntrinsicS IntrUnpack _)) =
+      MM.throwSourcedError iUnpack $
+        "a command with `@parse` arguments must dispatch to a foreign pool;"
+          <+> "here the command and its parsers are all morloc code. Call a"
+          <+> "foreign function in the command or in its parsers."
     toNexusExpr (AnnoS (Idx iTmp _) _ (IntrinsicS IntrTmpfile _)) =
       MM.throwSourcedError iTmp $
         "the whole-list `@with`/`@render` handler currently requires a command"
@@ -1162,11 +1202,44 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
           <+> "command is not yet supported. Add the `@stream` modifier for"
           <+> "per-batch streaming, or involve a foreign function in the"
           <+> "command body."
+    -- The fold accumulator lives in the runtime and its step and combine
+    -- run in a pool. The nexus interpreter cannot call a morloc function
+    -- by name, so a pure (all-morloc) folding command is rejected here
+    -- rather than falling off the evaluator.
+    toNexusExpr (AnnoS (Idx iCell _) _ (IntrinsicS intr _))
+      | intr `elem` [IntrCellNew, IntrCellGet, IntrCellPut, IntrCellReduce] =
+          MM.throwSourcedError iCell $
+            "a folding `@render`/`@with` handler currently requires a command"
+              <+> "that dispatches to a foreign pool; a pure (all-morloc) fold"
+              <+> "is not yet supported. Involve a foreign function in the"
+              <+> "command body, or drop `@fold` for the whole-list form."
+    -- @replay appears only in replay entries that drive a saved stream frame
+    -- by frame, and realization always gives those a pool.
+    toNexusExpr (AnnoS (Idx iReplay _) _ (IntrinsicS IntrReplay _)) =
+      MM.throwCompilerBugAt iReplay
+        "@replay reached the nexus evaluator; a frame-driven replay entry must run in a pool"
+    -- A streaming @parse argument's producer runs concurrently in a pool.
+    toNexusExpr (AnnoS (Idx iSpawn _) _ (IntrinsicS intr _))
+      | intr `elem` [IntrChannel, IntrSpawn, IntrSettle] =
+          MM.throwSourcedError iSpawn $
+            "a command with a streamed `@parse` argument currently requires"
+              <+> "a command or parser that dispatches to a foreign pool;"
+              <+> "involve a foreign function in either."
     toNexusExpr (AnnoS (Idx _ t) _ (IntrinsicS intr _)) = do
       v <- resolveCompileTimeIntrinsic intr
       StrX <$> type2schema t <*> pure v
+    -- one used as a value is the lambda that calls it
+    toNexusExpr (AnnoS (Idx _ (FunT ts r)) _ (CallS v)) = do
+      vars <- mapM (const (MM.getCounter >>= \k -> return ("call`" <> MT.pack (show k)))) ts
+      argSchemas <- mapM type2schema ts
+      rs <- type2schema r
+      return $ LamX vars (CallX rs (render (pretty v)) (zipWith BndX argSchemas vars))
     toNexusExpr (AnnoS (Idx _ t) _ (CallS v)) = BndX <$> type2schema t <*> pure (render (pretty v))
     toNexusExpr _ = error $ "Unreachable value of type reached"
+
+-- | The names a tree calls ('CallS').
+calledNames :: AnnoS g One c -> [EVar]
+calledNames t = [v | AnnoS _ _ (CallS v) <- annoNodes t]
 
 -- Resolve a numeric literal against the target type and map the shared
 -- resolver's decision to nexus LitType wire markers. F32X/F64X carry
@@ -1256,6 +1329,9 @@ resolvedSourceJson mLit Nothing mschema
   | otherwise = case fmap classifySchema mschema of
       Just CatScalarPrim    -> sourceAtomJson SourceInline
       Just CatStr           -> sourceAtomJson SourceInline
+      -- An IFile's command-line form is the path the pool opens, never
+      -- the file's contents.
+      Just CatIFile         -> sourceAtomJson SourceInline
       -- A constructor is always written literally on the command line;
       -- there is no reading under which `A` names a file.
       Just CatEnum          -> sourceAtomJson SourceInline
@@ -1326,6 +1402,7 @@ renderFormatHint mschema many mSrc mForm cks mLSrc mLForm lcks
         -- help text, so a format hint would only repeat them.
         CatEnum          -> Nothing
         CatStr           -> strFormatHint mSrc cks
+        CatIFile         -> Just "path to a morloc data or stream file"
         CatList elemS    -> listFormatHint elemS mSrc mForm cks mLSrc mLForm lcks
         CatOtherCompound -> Nothing
 
@@ -1425,6 +1502,7 @@ formListHint elemSchema mLSrc mLForm lcks =
 
     defaultPerLine es = case classifySchema es of
       CatStr           -> "path to text file with one string per line"
+      CatIFile         -> "path to text file with one file path per line"
       CatEnum          -> "path to text file with one constructor name per line"
       CatScalarPrim    -> "path to text file with one value per line"
       CatList _        -> "path to text file with one JSON array per line"
@@ -1452,6 +1530,25 @@ groupEntryWireSchemas ast0 = case peelPack ast0 of
   where
     peelPack (SerialPack _ (_, inner)) = peelPack inner
     peelPack x                          = x
+
+-- | The `parse` field of an argument with `@parse` formats: each format's
+-- name and extensions, and whether the nexus supplies a path at which the
+-- parsed value is staged (for an @IFile@ argument; an @IStream@ is read
+-- while its parser runs).
+parseFields :: [ParseSpec] -> Type -> [(Text, Text)]
+parseFields [] _ = []
+parseFields ps t =
+  [ ( "parse"
+    , jsonObj
+        [ ("formats", jsonArr [ jsonObj [("name", jsonStr (psName p)), ("exts", jsonStrArr (psExts p))] | p <- ps ])
+        , ("stage", jsonBool (isStream t))
+        ]
+    )
+  ]
+  where
+    isStream (OptionalT x) = isStream x
+    isStream (AppT (VarT v) _) = v == MBT.ifileVar
+    isStream _ = False
 
 -- | Serialize a 'CmdArg' to JSON.
 --
@@ -1485,6 +1582,7 @@ argToJson key mEmit mGeneral mShape _ (CmdArgPos r) =
          (argPosDocLiteral r)
          (argPosDocSource r) (argPosDocForm r) (argPosDocChecks r)
          (argPosDocListSource r) (argPosDocListForm r) (argPosDocListChecks r)
+    ++ parseFields (argPosDocParse r) (argPosDocType r)
 argToJson key mEmit mGeneral mShape _ (CmdArgOpt r) =
   jsonObj $
     [ ("kind", jsonStr "opt"), ("key", jsonStr key) ]
@@ -1504,6 +1602,7 @@ argToJson key mEmit mGeneral mShape _ (CmdArgOpt r) =
          (argOptDocLiteral r)
          (argOptDocSource r) (argOptDocForm r) (argOptDocChecks r)
          (argOptDocListSource r) (argOptDocListForm r) (argOptDocListChecks r)
+    ++ parseFields (argOptDocParse r) (argOptDocType r)
 argToJson key _ _ _ _ (CmdArgFlag r) =
   jsonObj
     [ ("kind", jsonStr "flag")
@@ -1595,15 +1694,16 @@ schemaField (Just s) mGen =
 -- the JSON parser. The flag fires only when the wire schema reduces
 -- to the Str primitive `s` AND the argv is going to be interpreted as
 -- an inline literal: with `source: file` the argv is a path and the
--- runtime's File branch must see it unquoted.
+-- runtime's File branch must see it unquoted. An IFile's argv is the
+-- path its handle names, so it is quoted the same way.
 isQuotedArg :: Maybe Bool -> Maybe SourceAtom -> Bool -> Maybe Text -> Bool
 isQuotedArg _literal mSource many mschema =
   case mschema of
     Nothing -> False
     Just s
       | mSource == Just SourceFile -> False
-      | many -> isListOfStrWireSchema s
-      | otherwise -> isStrOrOptStrWireSchema s
+      | many -> isListOfStrWireSchema s || fmap classifySchema (listElementSchema s) == Just CatIFile
+      | otherwise -> isStrOrOptStrWireSchema s || classifySchema s == CatIFile
 
 
 -- | Strip a leading addHint decoration `<...>` if present. Hints
@@ -1741,6 +1841,7 @@ validateArgSpecs i cmdargs asts schemas = do
 data SchemaCat
   = CatScalarPrim       -- Bool, Int, Real, UInt*, Float*, Null, etc.
   | CatStr              -- Str (`s`)
+  | CatIFile            -- IFile (`F`)
   | CatEnum             -- a `data` type with argument-free constructors (`e`)
   | CatList Text        -- `a<elem>` for any elem schema
   | CatOtherCompound    -- tuples, records, maps, tables
@@ -1757,6 +1858,8 @@ classifySchema s0 =
         _ -> peeled
   in if core == "s"
        then CatStr
+       else if core == "F"
+       then CatIFile
        else if isScalarPrimCore core
               then CatScalarPrim
               else case MT.uncons core of
@@ -1872,9 +1975,10 @@ validateGroup loc r ast = case peelGroupAst ast of
 -- Default-value validation
 -- ----------------------------------------------------------------------
 
--- | Recursive-type env: each entry binds a TVar (the record's name) to
--- the SerialAST that declared it, so SerialRec back-references can
--- resolve. Bound at SerialObject; consulted at SerialRec.
+-- | Recursive-type env: each entry binds a TVar (a declared type's name)
+-- to the SerialAST that declared it, so back-references can resolve.
+-- Bound at every named node on entry; consulted at SerialRec and at a
+-- variant back-reference.
 type RecEnv = Map.Map TVar SerialAST
 
 -- | The "JSON path" within the default value at which validation is
@@ -1887,7 +1991,7 @@ type JsonPath = MDoc
 -- the expected wire shape, and a (truncated) snippet of the offending
 -- value.
 validateValueAgainstAST :: MDoc -> RecEnv -> JsonPath -> SerialAST -> Aeson.Value -> MorlocMonad ()
-validateValueAgainstAST loc env path ast value = case (ast, value) of
+validateValueAgainstAST loc env0 path ast value = case (ast, value) of
   -- SerialPack: newtype/alias is transparent for default validation;
   -- the user writes the JSON shape of the underlying packed type.
   (SerialPack _ (_, inner), _) ->
@@ -1930,6 +2034,9 @@ validateValueAgainstAST loc env path ast value = case (ast, value) of
   -- whose value lists the arm's fields; an arm taking no arguments is
   -- still spelled bare. An unlisted name falls through to the mismatch
   -- reporter, which names the whole legal set.
+  -- A variant with no arms is a back-reference to the enclosing
+  -- declaration of its name.
+  (SerialVariant (FV v _) _ [], _) -> backRef v
   (SerialEnum _ _ ctors, Aeson.String name)
     | name `elem` ctors -> return ()
   (SerialVariant _ _ arms, Aeson.String name)
@@ -1981,14 +2088,13 @@ validateValueAgainstAST loc env path ast value = case (ast, value) of
   -- front so the diagnostic lists all of them at once (for a large
   -- record, a one-by-one report would force the user through many
   -- recompiles to discover the full set).
-  (SerialObject _ (FV v _) _ fields, Aeson.Object obj) -> do
-    let env' = Map.insert v ast env
-        missing = [k | (k, _) <- fields
+  (SerialObject _ _ _ fields, Aeson.Object obj) -> do
+    let missing = [k | (k, _) <- fields
                      , not (KM.member (AesonKey.fromText (unKey k)) obj)]
     case missing of
       []  -> CM.forM_ fields $ \(k, fieldAst) ->
         case KM.lookup (AesonKey.fromText (unKey k)) obj of
-          Just fv -> validateValueAgainstAST loc env'
+          Just fv -> validateValueAgainstAST loc env
                        (path <> "." <> pretty (unKey k)) fieldAst fv
           Nothing -> return ()
       ks  -> MM.throwSystemError $ formatBlock
@@ -2003,17 +2109,23 @@ validateValueAgainstAST loc env path ast value = case (ast, value) of
         ]
 
   -- Recursive back-reference: look up the binding, recurse.
-  (SerialRec (FV v _) _, _) -> case Map.lookup v env of
-    Just bound -> validateValueAgainstAST loc env path bound value
-    Nothing -> MM.throwSystemError $
-      loc <> ": compiler bug: unbound SerialRec `" <> pretty (unTVar v)
-        <> "` reached default-value validator" <> pathAt path
+  (SerialRec (FV v _) _, _) -> backRef v
 
   -- SerialUnknown: opaque type, cannot validate; allow anything.
   (SerialUnknown _, _) -> return ()
 
   -- Anything else is a type mismatch.
   _ -> typeMismatch loc path ast value
+  where
+    -- Every named node binds its name for the values beneath it, whatever
+    -- kind of declaration it is.
+    env = maybe env0 (\v -> Map.insert v ast env0) (Serial.serialOuterName ast)
+
+    backRef v = case Map.lookup v env of
+      Just bound -> validateValueAgainstAST loc env path bound value
+      Nothing -> MM.throwSystemError $
+        loc <> ": compiler bug: unbound back-reference `" <> pretty (unTVar v)
+          <> "` reached default-value validator" <> pathAt path
 
 -- | Mismatch reporter. Describes the offending JSON value's kind
 -- (Object / Array / String / Number / Bool / Null) AND the full
@@ -2248,7 +2360,7 @@ renderCliType = render . pretty . cliDisplayType
 -- to 'pretty' and never escapes this function.
 cliDisplayType :: Type -> Type
 cliDisplayType t0 = case t0 of
-  NamT NamRecord (TV "Rec") [] fields ->
+  NamT NamRecord v [] fields | v == anonRecordVar ->
     VarT (TV ("{" <> MT.intercalate ", "
                      [unKey k <> " = " <> renderCliType ft | (k, ft) <- fields]
                  <> "}"))
@@ -2711,6 +2823,19 @@ exprToJson (AppX schema func args) =
     , ("func", exprToJson func)
     , ("args", jsonArr (map exprToJson args))
     ]
+exprToJson (CallX schema name args) =
+  jsonObj
+    [ ("tag", jsonStr "call")
+    , ("schema", jsonStr schema)
+    , ("name", jsonStr name)
+    , ("args", jsonArr (map exprToJson args))
+    ]
+exprToJson (NamedX fs body) =
+  jsonObj
+    [ ("tag", jsonStr "named")
+    , ("functions", jsonArr [jsonObj [("name", jsonStr n), ("expr", exprToJson e)] | (n, e) <- fs])
+    , ("body", exprToJson body)
+    ]
 exprToJson (LamX vars body) =
   jsonObj
     [ ("tag", jsonStr "lambda")
@@ -3048,6 +3173,10 @@ data ManifestInputs = ManifestInputs
     -- description shown against a `--' with:` flag in `--help`
     -- (the referenced term's own docstring becomes the flag's help
     -- text).
+  , miReplayPlans         :: !(Map.Map EVar ReplayPlan)
+  , miParseSlots          :: !(Map.Map EVar [Int])
+    -- ^ Each terminal action's replay entry, by name: its kind, or why it
+    -- has none.
   , miStreamElems         :: !(Map.Map EVar (Text, Text))
   , miStreamTypes         :: !(Map.Map EVar Type)
     -- ^ The batch a streaming command writes. Its help shows this in place of
@@ -3174,6 +3303,22 @@ buildManifest ManifestInputs{..} =
             ])
         ]
 
+    -- The entry the nexus dispatches to when an argument is read by one of
+    -- its `@parse` formats (see 'Desugar.synthParseEntry'). A `@with`
+    -- command inherits its parent's arguments, formats included, and has
+    -- its own entry.
+    parseEntryField :: Text -> [CmdArg] -> [(Text, Text)]
+    parseEntryField termName cmdArgs
+      | any hasParse cmdArgs =
+          ("parse_entry", jsonStr (unEVar (parseEntryName (EV termName))))
+            : [ ("parse_save_slots", jsonArr (map jsonInt slots))
+              | Just slots <- [Map.lookup (EV termName) miParseSlots] ]
+      | otherwise = []
+      where
+        hasParse (CmdArgPos r) = not (null (argPosDocParse r))
+        hasParse (CmdArgOpt r) = not (null (argOptDocParse r))
+        hasParse _ = False
+
     remoteCmdJson :: FData -> Text
     remoteCmdJson fd =
       jsonObj $
@@ -3204,6 +3349,7 @@ buildManifest ManifestInputs{..} =
         , cmdGroupField (fdataMid fd)
         ]
         <> streamField (fdataTermName fd)
+        <> parseEntryField (fdataTermName fd) (cmdDocArgs (fdataCmdDocSet fd))
 
     pureCmdJson :: GastData -> Text
     pureCmdJson g =
@@ -3229,6 +3375,7 @@ buildManifest ManifestInputs{..} =
         , cmdGroupField (commandMid g)
         ]
         <> streamField (commandTermName g)
+        <> parseEntryField (commandTermName g) (cmdDocArgs (commandDocs g))
 
     -- Emit the `terminals` array for one command. The description
     -- comes from the referenced term's own top-level docstring; the
@@ -3239,25 +3386,56 @@ buildManifest ManifestInputs{..} =
       jsonArr (map (oneTerminal parentName) specs)
 
     oneTerminal :: Text -> WithSpec -> Text
-    oneTerminal parentName (WithSpec mShort long (EV tName) isRender _ isDefault _) =
+    oneTerminal parentName
+      WithSpec { wsShort = mShort
+               , wsLong = long
+               , wsTerm = EV tName
+               , wsRender = isRender
+               , wsDefault = isDefault
+               , wsArgs = argSrcs
+               } =
       let EV mangled = mangleTerminalName (EV parentName) long
+          EV replay = mangleReplayName (EV parentName) long
           desc = case Map.lookup (EV tName) miTermDocs of
             Just (firstLine : _) -> firstLine
             _ -> ""
+          plan = Map.lookup (EV replay) miReplayPlans
+          kind = case fmap replayPlanKind plan of
+            Just KindGather -> "gather"
+            Just KindStream -> "stream"
+            Just KindFold -> "fold"
+            _ -> "value" :: Text
+          -- Why the action cannot run on its command's saved output.
+          noReplay = case plan of
+            Just (NotReplayed _ why) -> Just why
+            _ -> Nothing
        in jsonObj
             [ ("short", case mShort of
                 Just c -> jsonStr (MT.singleton c)
                 Nothing -> jsonNull)
             , ("long", jsonStr long)
-            , ("entry", jsonStr mangled)
+            -- The command that runs the action on a fresh run of its parent;
+            -- null when the action runs only on the parent's saved output
+            -- (see `replay`).
+            , ("entry", if Set.member mangled emittedNames then jsonStr mangled else jsonNull)
             , ("description", jsonStr desc)
             -- `render` terminals emit their handler's bytes verbatim, so the
             -- nexus defaults their output format to `raw` (see phase2.rs).
             , ("render", jsonBool isRender)
             -- a `@default` terminal fires when no formatter flag and no `-f`
-            -- is given (see phase2.rs redirect_via_terminal).
+            -- is given (see phase2.rs finish_parse).
             , ("default", jsonBool isDefault)
+            -- The entry that applies the handler to the parent's staged
+            -- output, reading the referenced parent arguments (`args`,
+            -- 1-based) and then the staged value or stream.
+            , ("replay", if Set.member replay emittedNames then jsonStr replay else jsonNull)
+            , ("no_replay", maybe jsonNull jsonStr noReplay)
+            , ("args", jsonArr [jsonInt n | n <- Set.toList (Set.fromList [n | ArgPos n <- argSrcs])])
+            , ("kind", jsonStr kind)
             ]
+
+    emittedNames :: Set.Set Text
+    emittedNames = Set.fromList (map fdataTermName miFData ++ map commandTermName miGasts)
 
     -- Render the @args@ JSON array. 'makeSerialASTs' produces one
     -- SerialAST per arg position in the original function signature,
@@ -3359,16 +3537,54 @@ generate cs rASTs helperRASTs = do
   fdataRaw <- CM.mapM getFData xs
       |>> map (\fd -> fd { fdataSubSockets = mergeSockets (fdataSubSockets fd) helperSockets })
 
-  -- Extract data for pure commands
-  gastsRaw <- mapM annotateGasts cs
+  -- Extract data for pure commands. The copies of shared specializations a
+  -- pure command calls are not commands: each command carries the ones it
+  -- reaches, callees first.
+  namedMap <- MM.gets stateNamedGasts
+  let rootOf (AnnoS (Idx i _) _ _, _) = i
+      (namedCs0, exportCs) = List.partition ((`Map.member` namedMap) . rootOf) cs
+  replayPlans <- MM.gets stateReplayPlans
+  let named = [(n, c) | c <- namedCs0, Just n <- [Map.lookup (rootOf c) namedMap]]
+      callsOf t = [v | v <- calledNames t, Map.member v callees]
+      -- the named functions each named function calls, each found once
+      callees = Map.fromList [(n, callsOf (fst c)) | (n, c) <- named]
+      reach seen [] = seen
+      reach seen (v : vs)
+        | Set.member v seen = reach seen vs
+        | otherwise = reach (Set.insert v seen) (Map.findWithDefault [] v callees <> vs)
+  namedGasts <- mapM (annotateGasts . snd) named
+  let namedOrder = [(n, commandExpr g) | ((n, _), g) <- zip named namedGasts]
+      withNamed t g = case reach Set.empty (callsOf t) of
+        used
+          | Set.null used -> g
+          | otherwise -> g {commandExpr = NamedX [(unEVar n, e) | (n, e) <- namedOrder, Set.member n used] (commandExpr g)}
+  gastsRaw <- zipWith withNamed (map fst exportCs) <$> mapM annotateGasts exportCs
 
   -- Give each `mlcp_<parent>_<long>` internal command the parent's
   -- per-arg shape docs. Without this the dispatch loader sees the
   -- internal's default @cmdDocArgs@ and loads positional files in
   -- the wrong wire format.
   let parentArgMap = buildTerminalParentArgMap fdataRaw gastsRaw
-      fdata = map (inheritParentArgDocs parentArgMap) fdataRaw
-      gasts = map (inheritParentArgDocs parentArgMap) gastsRaw
+      replayEntries = Map.keysSet replayPlans
+      fdata = map (stageReplayArgs replayEntries . inheritParentArgDocs parentArgMap) fdataRaw
+      gasts = map (stageReplayArgs replayEntries . inheritParentArgDocs parentArgMap) gastsRaw
+
+  -- Every action has a replay plan, and every planned replay entry was
+  -- emitted.
+  let emittedEntries = Set.fromList (map (EV . fdataTermName) fdata ++ map (EV . commandTermName) gasts)
+      actionsOf = [ (EV (fdataTermName fd), cmdDocTerminals (fdataCmdDocSet fd)) | fd <- fdata ]
+               <> [ (EV (commandTermName g), cmdDocTerminals (commandDocs g)) | g <- gasts ]
+  CM.forM_ actionsOf $ \(parent, ws) -> CM.forM_ ws $ \w -> do
+    let replay = mangleReplayName parent (wsLong w)
+        missing :: MDoc -> MorlocMonad ()
+        missing why = MM.throwCompilerBug $
+          "the action --" <> pretty (wsLong w) <+> "of" <+> pretty parent <+> why
+    case Map.lookup replay replayPlans of
+      Nothing -> missing "has no replay plan"
+      Just (Replayed _)
+        | not (Set.member replay emittedEntries) ->
+            missing "has a replay plan, but its replay entry was not generated"
+      _ -> return ()
 
   -- Get build time and the build directory (shared with the program builder
   -- and any pre-build pass, see 'Morloc.ProgramBuilder.Build.resolveBuildDirs')
@@ -3478,6 +3694,8 @@ generate cs rASTs helperRASTs = do
             , miTermDocs            = termDocs
             , miStreamElems         = streamElems
             , miStreamTypes         = streamTypes
+            , miReplayPlans         = stateReplayPlans st
+            , miParseSlots          = stateParseSlots st
             }
 
   -- Launcher wrappers. Each is a pure-shell script that execs
@@ -3613,14 +3831,6 @@ dquoteEsc = concatMap esc
     esc '`' = "\\`"
     esc c = [c]
 
--- | POSIX single-quote a path so spaces and shell metacharacters in the
--- absolute manifest path survive. Embedded single quotes are escaped with
--- the standard @'\\''@ idiom.
-shellQuote :: FilePath -> String
-shellQuote p = "'" <> concatMap esc p <> "'"
-  where
-    esc '\'' = "'\\''"
-    esc c = [c]
 
 -- ======================================================================
 -- Utilities

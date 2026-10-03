@@ -13,11 +13,14 @@ import EffectBoundaryTests (effectBoundaryTests)
 import EnvSpecTests (envSpecTests)
 import FutharkTupleTests (futharkTupleTests)
 import GoldenMakefileTests (discoverGoldenTests)
+import GoldenShard (Shard (..), lookupShard)
+import GoldenShardTests (goldenShardTests)
 import IrrefutablePatternLexerTests (irrefutablePatternLexerTests)
 import LangSupportTests (langSupportTests)
 import MorlocDepsTests (morlocDepsTests)
 import PatternChainTests (patternChainTests)
 import PropertyTests (propertyTests)
+import RecSolverTests (recSolverTests)
 import RefutablePatternTests (refutablePatternTests)
 import RustPoolBuildTests (rustPoolBuildTests)
 import SchemaHintTests (schemaHintTests)
@@ -30,6 +33,7 @@ import VersionConstraintTests (versionConstraintTests)
 unitTests :: [TestTree]
 unitTests =
   [ unitTypeTests
+  , recSolverTests
   , abiTests
   , buildParamsTests
   , envSpecTests
@@ -42,9 +46,16 @@ unitTests =
   , propertyTests
   , whereTests
   , orderInvarianceTests
+  , signatureContractTests
+  , constraintContractTests
+  , definitionLadderTests
   , whitespaceTests
   , infixOperatorTests
   , recordLiteralOrderTests
+  , recordIdentityTests
+  , aliasExpansionTests
+  , accessorInWhereTests
+  , solvedKindCheckTests
   , substituteTVarTests
   , subtypeTests
   , complexityRegressionTests
@@ -76,6 +87,9 @@ unitTests =
   , postArgPropagationTests
   , tuplePatternLambdaTests
   , withDocstringTests
+  , parseDocstringTests
+  , epilogueDocstringTests
+  , streamIntrinsicTests
   , patternSelectorTests
   , sumTypeTests
   , variantTests
@@ -94,10 +108,16 @@ unitTests =
   , schemaHintTests
   , systemConfigTests
   , langSupportTests
+  , goldenShardTests
   ]
 
 main :: IO ()
 main = do
   wd <- SD.getCurrentDirectory >>= SD.makeAbsolute
-  goldens <- discoverGoldenTests (wd ++ "/test-suite/golden-tests")
-  defaultMain $ testGroup "Morloc tests" (unitTests ++ goldens)
+  shard <- lookupShard
+  goldens <- discoverGoldenTests shard (wd ++ "/test-suite/golden-tests")
+  -- Unit tests are cheap; one shard runs them.
+  let units = case shard of
+        Just (Shard i _) | i /= 1 -> []
+        _ -> unitTests
+  defaultMain $ testGroup "Morloc tests" (units ++ goldens)

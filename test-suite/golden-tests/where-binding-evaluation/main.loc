@@ -1,0 +1,45 @@
+module main (guardedDiv, guardedRec, branched, unreadSibling, readTwice)
+
+import root-py
+
+-- A `where` binding is evaluated where it is used, not where it is written.
+-- Each export below names a binding whose right-hand side would fail, or not
+-- terminate, if it were computed before the branch that reads it.
+
+-- The divisor is zero on the path that does not read `q`.
+guardedDiv :: Int -> Int -> Int
+guardedDiv a b
+  ? b == 0 = 0
+  : q
+  where
+    q = a // b
+
+-- `rest` recurses through the enclosing definition, so computing it before
+-- the base case is tested does not terminate.
+guardedRec :: Int -> Int
+guardedRec n
+  ? n <= 0 = 0
+  : rest
+  where
+    rest = n + guardedRec (n - 1)
+
+-- The same, through an inline guard in the middle of an expression rather
+-- than a clause-level one.
+branched :: Int -> Int -> Int
+branched a b = 100 + (? b == 0 = 0 : q)
+  where
+    q = a // b
+
+-- `helper` is read only by `unused`, which the body never names. The binding
+-- still has to resolve.
+unreadSibling :: Int -> Int
+unreadSibling n = helper n
+  where
+    helper x = x + 1
+    unused = helper 2
+
+-- A binding read from two places is one binding.
+readTwice :: Int -> Int
+readTwice n = w + w
+  where
+    w = n * 3

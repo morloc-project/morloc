@@ -103,6 +103,17 @@
 50000
 --- mlMap ---
 110
+=== (6b) Concatenation adds lengths in every language ===
+--- catLenCpp ---
+20
+--- catLenPy ---
+20
+--- catLenR ---
+20
+--- catHeadPy ---
+1
+--- catLastPy ---
+10
 === (7) Edge cases (empty / single) ===
 --- emptyCross ---
 0

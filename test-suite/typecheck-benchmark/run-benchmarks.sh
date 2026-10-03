@@ -17,7 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [ "$(date +%N 2>/dev/null)" = "N" ]; then
     now_ms() { python3 -c 'import time; print(int(time.time() * 1000))'; }
 else
-    now_ms() { echo $(( $(date +%s%N) / 1000000 )); }
+    now_ms() { echo $(( $(date +%s%N) / 1000000 )); }  # portable: used only where the %N probe above passed
 fi
 
 

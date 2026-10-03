@@ -1,0 +1,17 @@
+module main (run)
+
+import root
+
+zero :: Int
+zero = 0
+
+showAcc :: Int -> Str
+showAcc _ = "acc"
+
+produce :: ([Int] -> <IO> ()) -> <IO> ()
+produce sink = sink [1,2,3]
+
+-- `@init` describes how a fold is seeded; without `@fold` there is none.
+--' @render -t/--total=showAcc @init=zero
+run :: <IO> ()
+run = @collect produce

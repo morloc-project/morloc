@@ -1,9 +1,24 @@
 use crate::error::MorlocError;
 
-/// Morloc serial type identifiers, matching the C enum morloc_serial_type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum SerialType {
+/// Declares `SerialType` and `SerialType::ALL` from one list of variants,
+/// so no kind can be declared without being listed.
+macro_rules! serial_types {
+    ($($(#[$meta:meta])* $name:ident = $tag:expr,)*) => {
+        /// Morloc serial type identifiers, matching the C enum morloc_serial_type.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        #[repr(u32)]
+        pub enum SerialType {
+            $($(#[$meta])* $name = $tag,)*
+        }
+
+        impl SerialType {
+            /// Every kind.
+            pub const ALL: &'static [SerialType] = &[$(SerialType::$name,)*];
+        }
+    };
+}
+
+serial_types! {
     Nil = 0,
     Bool = 1,
     Sint8 = 2,
@@ -81,6 +96,15 @@ pub enum SerialType {
                     // byte-identical, reordering does not.
 }
 
+impl SerialType {
+    /// The kind a C schema's `u32` tag names, or `None` for a tag that names
+    /// no kind -- never a transmute, which would make an unknown tag
+    /// undefined behaviour.
+    pub fn from_u32(tag: u32) -> Option<SerialType> {
+        SerialType::ALL.iter().copied().find(|k| *k as u32 == tag)
+    }
+}
+
 /// Schema character codes for parsing schema strings.
 const SCHEMA_NIL: u8 = b'z';
 const SCHEMA_BOOL: u8 = b'b';
@@ -149,7 +173,7 @@ impl Schema {
             SerialType::String | SerialType::Int | SerialType::IFile
             | SerialType::OStream | SerialType::IStream
                 => std::mem::size_of::<shm::Array>(),
-            _ => 0,
+            SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Table | SerialType::Recur | SerialType::Variant => 0,
         };
         Schema {
             serial_type,
@@ -202,7 +226,7 @@ impl Schema {
             // A Recur back-references a record whose layout includes
             // variable-length payload; never fixed-width.
             SerialType::Recur => false,
-            _ => false,
+            SerialType::String | SerialType::Array | SerialType::Int | SerialType::Table | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant => false,
         }
     }
 
@@ -222,7 +246,7 @@ impl Schema {
         match self.serial_type {
             SerialType::String => true,
             SerialType::Array => self.parameters.first().map_or(false, |e| e.is_fixed_width()),
-            _ => false,
+            SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => false,
         }
     }
 
@@ -1032,9 +1056,9 @@ fn reaches_inline_recur(schema: &Schema, name: &str) -> bool {
         SerialType::Tuple | SerialType::Map => schema.parameters.iter().any(|p| match p.serial_type {
             SerialType::Recur => p.name.as_deref() == Some(name),
             _ if p.name.as_deref() == Some(name) => false,
-            _ => reaches_inline_recur(p, name),
+            SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => reaches_inline_recur(p, name),
         }),
-        _ => false,
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => false,
     }
 }
 
@@ -1054,7 +1078,7 @@ fn patch_recur_widths_in(schema: &mut Schema, name: &str, width: usize) {
                 }
             }
             _ if p.name.as_deref() == Some(name) => {}
-            _ => patch_recur_widths_in(p, name, width),
+            SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum => patch_recur_widths_in(p, name, width),
         }
     }
 }
@@ -1292,8 +1316,50 @@ fn schema_to_string_inner(schema: &Schema, buf: &mut String) {
     }
 }
 
+/// Make a sub-schema self-contained by replacing every back-reference to
+/// `parent`'s declaration with `parent` itself. A field schema handed to a
+/// reader on its own has no enclosing declaration to resolve against; with
+/// the parent spliced in, the parent's own back-references then sit under
+/// the declaration they need. The parent's widths are already patched, so
+/// the clone is complete as it stands.
+pub fn reroot_under(parent: &Schema, child: &Schema) -> Schema {
+    match (parent.serial_type, parent.name.as_deref()) {
+        (SerialType::Recur, _) | (_, None) => child.clone(),
+        (_, Some(name)) => splice(name, parent, child),
+    }
+}
+
+fn splice(name: &str, parent: &Schema, s: &Schema) -> Schema {
+    if s.serial_type == SerialType::Recur && s.name.as_deref() == Some(name) {
+        return parent.clone();
+    }
+    let mut out = s.clone();
+    out.parameters = s.parameters.iter().map(|c| splice(name, parent, c)).collect();
+    out
+}
+
+/// True when a back-reference to `name` occurs anywhere in `s`.
+pub fn refers_to(s: &Schema, name: &str) -> bool {
+    (s.serial_type == SerialType::Recur && s.name.as_deref() == Some(name))
+        || s.parameters.iter().any(|c| refers_to(c, name))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn from_u32_names_every_kind_and_nothing_else() {
+        for &k in SerialType::ALL {
+            assert_eq!(SerialType::from_u32(k as u32), Some(k));
+        }
+        let tags: std::collections::HashSet<u32> = SerialType::ALL.iter().map(|k| *k as u32).collect();
+        assert_eq!(tags.len(), SerialType::ALL.len(), "a kind is listed twice");
+        for t in 0..64u32 {
+            if !tags.contains(&t) {
+                assert_eq!(SerialType::from_u32(t), None, "tag {t}");
+            }
+        }
+    }
+
     use super::*;
 
     #[test]

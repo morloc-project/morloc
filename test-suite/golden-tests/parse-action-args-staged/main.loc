@@ -1,0 +1,96 @@
+-- Actions that refer with `$N` to arguments of a command that reads
+-- arguments with `@parse`, in runs that save the command's output: an
+-- action given a path, `--no-stdout`, and a `@default` action on a command
+-- whose actions run only on its saved output. Each action sees the value the
+-- command saw: a parsed value, a value given without a format, an argument
+-- that is not parsed, a parsed file, a file that is not parsed, and parsed
+-- input read from stdin.
+
+module main (total, trio, sizeOf, plainSize, mk, emit)
+
+import root-cpp
+
+source Cpp from "h.hpp"
+  ( "readLines", "streamLines", "emitList", "produce", "sumC"
+  , "showList", "tagged", "listed", "batchWith", "countWith" )
+
+readLines :: Str -> <IO> [Int]
+streamLines :: Str -> ([Int] -> <IO> ()) -> <IO> ()
+emitList :: [Int] -> ([Int] -> <IO> ()) -> <IO> ()
+produce :: ([Int] -> <IO> ()) -> <IO> ()
+sumC :: [Int] -> Int
+showList :: [Int] -> Str
+
+--' Tag the sum
+tagged :: Str -> Int -> Str
+
+--' The input and its sum
+listed :: [Int] -> Int -> Str
+
+--' The input and the batch
+batchWith :: [Int] -> [Int] -> Str
+
+--' Count and sum
+countWith :: Int -> Int -> Str
+
+--' Sum
+--' @render -t/--tagged=tagged($2)
+--' @render -l/--listed=listed($1)
+total ::
+  --' @parse lines=readLines
+  [Int] ->
+  Str ->
+  Int
+total xs tag = sumC xs
+
+--' Sum of the first list
+--' @render -a/--first=listed($1)
+--' @render -b/--mid=tagged($2)
+--' @render -c/--third=listed($3)
+trio ::
+  --' @parse lines=readLines
+  [Int] ->
+  Str ->
+  --' @parse lines=readLines
+  [Int] ->
+  Int
+trio xs tag ys = sumC xs
+
+--' Count, from a file
+countIn :: IFile [Int] -> Int -> <IO> Str
+countIn f x = do
+  Ok n <- @flen f
+  countWith n x
+
+--' Length of a parsed file
+--' @render -w/--where=countIn($1)
+sizeOf ::
+  --' @parse lines=streamLines
+  IFile [Int] ->
+  <IO> Int
+sizeOf f = do
+  Ok n <- @flen f
+  n
+
+--' Length of a data file
+--' @render -w/--where=countIn($1)
+plainSize :: IFile [Int] -> <IO> Int
+plainSize f = do
+  Ok n <- @flen f
+  n
+
+--' Write a data file
+mk :: Str -> <IO> Str
+mk path = do
+  @save 0 path [7, 8, 9, 10]
+  path
+
+--' Stream the input, then a tail
+--' @render -s/--show=batchWith($1) @stream @default
+emit ::
+  --' @parse lines=readLines
+  [Int] ->
+  <IO> ()
+emit xs = do
+  @collect (emitList xs)
+  @collect produce

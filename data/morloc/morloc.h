@@ -14,7 +14,7 @@
 // (Morloc.Abi). Provisioning refuses to run a prebuilt libmorloc/nexus whose
 // version differs from the compiler's expected value (fail-closed), preventing
 // silent cross-pool struct/offset corruption.
-#define MORLOC_ABI_VERSION 3
+#define MORLOC_ABI_VERSION 8
 
 // Atomic includes must sit outside any `extern "C"` block because the
 // C++ <atomic> header pulls in <type_traits> et al., which use C++
@@ -100,6 +100,11 @@ typedef void*   absptr_t;
 
 #define MAX_VOLUME_NUMBER 32768
 
+// The volume every process of a program shares. Volume 0 is never mapped, so
+// a buffer- or file-relative offset that reaches SHM unrebased fails to
+// resolve. Mirrors morloc-runtime-types::shm_types::PRIMARY_VOLUME.
+#define MORLOC_PRIMARY_VOLUME 1
+
 // Indexed relptr encoding: bit 63 = sentinel, bits 62..48 = 15-bit
 // volume index, bits 47..0 = 48-bit offset within the volume's data
 // region. Mirrors morloc-runtime-types::shm_types; kept here so the
@@ -118,18 +123,8 @@ static inline size_t relptr_offset_bits(relptr_t p) {
 }
 
 // Shared memory volume header (lives at the start of each mmap'd region).
-typedef struct shm_s {
-    unsigned int magic;
-    char volume_name[MAX_FILENAME_SIZE];
-    int volume_index;
-    size_t volume_size;
-    size_t relative_offset;
-    // Note: pthread_rwlock_t is opaque; consumers should not access it directly.
-    // It is included here so that sizeof(shm_t) is correct for mmap calculations.
-    // On Linux x86_64 this is typically 56 bytes.
-    char _rwlock_storage[56]; // placeholder for pthread_rwlock_t
-    volptr_t cursor;
-} shm_t;
+// Opaque: only the runtime reads or writes its fields.
+typedef struct shm_s shm_t;
 
 // Block header preceding every allocation inside a shared memory volume.
 // Atomic reference count for thread safety. Layout is stable (no padding).
@@ -266,6 +261,11 @@ typedef struct Schema {
     struct Schema** parameters;
     char** keys;       // field names (records only)
     char* name;        // recursive-schema declaration / back-ref name (or NULL)
+    // Layout facts, computed once by the runtime when it builds the schema
+    // so no language recomputes (and can disagree on) them:
+    size_t alignment;       // alignment of a slot of this type
+    size_t data_alignment;  // alignment of an array's data when this is its element
+    bool fixed_width;       // no pointer anywhere below: a value is its own bytes
 } Schema;
 
 // Variable-length array in voidstar representation.
@@ -392,6 +392,10 @@ void morloc_set_inline_threshold(int64_t bytes);
 // Read the live inline threshold (in bytes).
 uint64_t morloc_get_inline_threshold(void);
 
+// Bytes of shared memory the whole program holds now, or -1 when
+// MORLOC_SHM_STATS is unset.
+int64_t morloc_shm_live_bytes(void);
+
 // The ABI/wire-format contract version compiled into this libmorloc.so (the
 // value of MORLOC_ABI_VERSION at build time). Compared fail-closed against the
 // compiler's expected version at provisioning time so a mismatched prebuilt
@@ -505,6 +509,7 @@ typedef struct __attribute__((packed)) morloc_metadata_header_s {
 #define MLC_KIND_IFILE   0
 #define MLC_KIND_ISTREAM 1
 #define MLC_KIND_OSTREAM 2
+#define MLC_KIND_CHANNEL 3
 
 // Upper bound on the file-path payload carried by a single IFile
 // handle in voidstar wire form. POSIX PATH_MAX on Linux is 4096; we
@@ -1109,7 +1114,6 @@ typedef uint8_t* (*pool_dispatch_fn_t)(
 
 typedef enum {
     POOL_THREADS,
-    POOL_FORK,
     POOL_SINGLE
 } pool_concurrency_t;
 
@@ -1120,7 +1124,9 @@ typedef struct {
     pool_concurrency_t concurrency;
     int initial_workers;
     bool dynamic_scaling;
-    void (*post_fork_child)(void* ctx);
+    // Run on the worker thread once a dispatch's reply has been sent (or
+    // could not be); NULL for none.
+    void (*after_reply)(void);
 } pool_config_t;
 
 typedef struct pool_state_s pool_state_t;
@@ -1169,6 +1175,10 @@ struct ArrowArrayStream {
 
 #define ARROW_SHM_MAGIC    0xA770DA7A
 #define ARROW_SHM_VERSION  2
+// Buffers are laid out a cache line apart within a block, so no two share
+// one. What a consumer may rely on absolutely is the block's own
+// alignment, which is sixteen -- enough for the widest Arrow word, a
+// 128-bit decimal or string view.
 #define ARROW_BUFFER_ALIGN 64
 #define ARROW_ALIGN_UP(x)  (((x) + ARROW_BUFFER_ALIGN - 1) & ~((size_t)ARROW_BUFFER_ALIGN - 1))
 
@@ -1270,11 +1280,11 @@ absptr_t rel2abs(relptr_t ptr, ERRMSG);
 // -- Lock-free per-process volume base table ---------------------------------
 //
 // libmorloc.so publishes a base+size entry for every SHM volume it has
-// mapped into this process. `resolve_relptr` below reads from the
+// mapped into this process. `resolve_region` below reads from the
 // table inline, replacing what used to be a mutex-guarded FFI call
 // (~100 ns) with an Acquire-load + branch + add (~5 ns). On a miss --
 // volume not yet mapped in this process -- it falls through to the
-// FFI `rel2abs` which lazily opens the segment and publishes the
+// FFI `rel2abs_extent` which lazily opens the segment and publishes the
 // entry. Publication and withdrawal happen inside libmorloc.so's
 // `shinit` / `shopen_diag` / `shclose`.
 //
@@ -1294,37 +1304,64 @@ _Static_assert(sizeof(struct morloc_vol_entry)   == 2 * sizeof(void*),
                "morloc_vol_entry layout mismatch");
 #endif
 
-// Resolve a relptr. Three paths, in priority order:
-//
-//   1. `base_ptr` is non-null  -- inline MESG+VOIDSTAR data: the relptr
-//      is a buffer-relative offset; strip the vol_idx bits (they are
-//      zero in practice for inline producers, but masking is harmless
-//      either way) and add to base_ptr.
-//
-//   2. Lock-free table hit     -- the volume the relptr targets is
-//      mapped in this process. Acquire-load the entry, bounds-check
-//      the offset, return data_base + offset. No FFI, no mutex.
-//
-//   3. Lock-free table miss    -- volume not yet mapped here. Fall
-//      through to the FFI `rel2abs`, which lazily opens the segment
-//      and publishes the entry. Subsequent calls hit path (2).
-static inline void* resolve_relptr(relptr_t relptr, const void* base_ptr, ERRMSG) {
-    if (base_ptr) {
-        return (char*)base_ptr + relptr_offset_bits(relptr);
+// Where a value's relative pointers lead: shared memory when `base` is NULL,
+// else an inline packet payload of `len` bytes at `base`, whose relptrs are
+// offsets into it. Every resolve names the space and the number of bytes it
+// will read, so a malformed value is refused instead of read past its end.
+typedef struct morloc_space_s {
+    const void* base;
+    size_t len;
+} morloc_space_t;
+
+static inline morloc_space_t morloc_shm_space(void) {
+    morloc_space_t s = { NULL, 0 };
+    return s;
+}
+
+static inline morloc_space_t morloc_payload_space(const void* base, size_t len) {
+    morloc_space_t s = { base, len };
+    return s;
+}
+
+// Resolve `relptr` in shared memory to `extent` readable bytes.
+absptr_t rel2abs_extent(relptr_t ptr, size_t extent, ERRMSG);
+// The error a payload resolve reports; always returns NULL.
+void* morloc_payload_region_error(relptr_t relptr, size_t extent, size_t len, ERRMSG);
+
+// Resolve `relptr` to `extent` readable bytes in `space`. A shared-memory
+// resolve reads the lock-free volume table inline and falls through to the
+// FFI `rel2abs_extent` when the volume is not yet mapped in this process.
+static inline void* resolve_region(relptr_t relptr, size_t extent, morloc_space_t space, ERRMSG) {
+    size_t off = relptr_offset_bits(relptr);
+    if (space.base) {
+        if (relptr >= 0 && off <= space.len && extent <= space.len - off) {
+            return (char*)space.base + off;
+        }
+        return morloc_payload_region_error(relptr, extent, space.len, errmsg_);
     }
     size_t vol = relptr_vol_idx(relptr);
     void* data_base = MORLOC_ATOMIC_LOAD_ACQ(MORLOC_VOL_TABLE[vol].data_base);
-    if (data_base) {
-        size_t off = relptr_offset_bits(relptr);
+    if (relptr >= 0 && data_base) {
         size_t data_size = MORLOC_ATOMIC_LOAD_RLX(MORLOC_VOL_TABLE[vol].data_size);
-        if (off < data_size) {
+        if (off <= data_size && extent <= data_size - off) {
             return (char*)data_base + off;
         }
     }
-    return rel2abs(relptr, errmsg_);
+    return rel2abs_extent(relptr, extent, errmsg_);
 }
-relptr_t vol2rel(volptr_t ptr, shm_t* shm);
-absptr_t vol2abs(volptr_t ptr, shm_t* shm);
+
+// Resolve the data of an array of `n` elements of `width` bytes.
+static inline void* resolve_array(relptr_t relptr, size_t n, size_t width, morloc_space_t space, ERRMSG) {
+    size_t extent;
+    // An overflowing length fits nowhere, which the resolve reports.
+    if (__builtin_mul_overflow(n, width, &extent)) {
+        extent = SIZE_MAX;
+    }
+    return resolve_region(relptr, extent, space, errmsg_);
+}
+
+relptr_t vol2rel(volptr_t ptr, const shm_t* shm);
+absptr_t vol2abs(volptr_t ptr, const shm_t* shm);
 relptr_t abs2rel(absptr_t ptr, ERRMSG);
 shm_t* abs2shm(absptr_t ptr, ERRMSG);
 block_header_t* abs2blk(void* ptr, ERRMSG);
@@ -1337,41 +1374,13 @@ Schema* parse_schema(const char* schema, ERRMSG);
 char* schema_to_string(const Schema* schema);
 void* get_ptr(const Schema* schema, ERRMSG);
 void free_schema(Schema* schema);
-bool schema_is_fixed_width(const Schema* schema);
-size_t schema_alignment(const Schema* schema);
 size_t calculate_voidstar_size(const void* data, const Schema* schema, ERRMSG);
+// Narrow a double to the nearest float: 0 on success, -1 when a finite value
+// lies beyond the float range (a plain C conversion is then undefined).
+int morloc_f32_from_f64(double v, float* out);
 
 // Inline helpers used by language extensions (pymorloc.c, rmorloc.c)
 #define ALIGN_UP(x, align) (((x) + (align) - 1) & ~((size_t)(align) - 1))
-
-// SIMD/BLAS-friendly alignment for Array data buffers when the element type is
-// a primitive numeric. Fixed 64-byte constant in the wire format spec --
-// covers SSE/AVX/AVX-512 + cache lines on every common architecture, and the
-// per-array slack overhead (<= 63 bytes) is negligible for large arrays.
-#define MORLOC_ARRAY_DATA_ALIGN 64
-
-static inline bool is_primitive_numeric(const Schema* schema) {
-    if (schema == NULL) return false;
-    switch (schema->type) {
-        case MORLOC_SINT8: case MORLOC_SINT16: case MORLOC_SINT32: case MORLOC_SINT64:
-        case MORLOC_UINT8: case MORLOC_UINT16: case MORLOC_UINT32: case MORLOC_UINT64:
-        case MORLOC_FLOAT32: case MORLOC_FLOAT64:
-            return true;
-        default:
-            return false;
-    }
-}
-
-// Alignment for an Array's element data buffer in SHM. For primitive numerics
-// we bump to MORLOC_ARRAY_DATA_ALIGN (SIMD/BLAS); otherwise the element's
-// natural alignment.
-static inline size_t array_data_alignment(const Schema* elem) {
-    size_t natural = schema_alignment(elem);
-    if (is_primitive_numeric(elem)) {
-        return MORLOC_ARRAY_DATA_ALIGN > natural ? MORLOC_ARRAY_DATA_ALIGN : natural;
-    }
-    return natural;
-}
 
 // ========================================================================
 // Section 13: Function declarations -- Serialisation (pack/unpack)
@@ -1386,11 +1395,19 @@ int unpack_with_schema(const char* mpk, size_t mpk_size, const Schema* schema, v
 // ========================================================================
 
 morloc_packet_header_t* read_morloc_packet_header(const uint8_t* msg, ERRMSG);
+// True iff `n` bytes hold a packet header and the payload that header claims.
+static inline bool morloc_packet_fits(const uint8_t* packet, size_t n) {
+    if (n < sizeof(morloc_packet_header_t)) return false;
+    const morloc_packet_header_t* h = (const morloc_packet_header_t*)packet;
+    size_t room = n - sizeof(morloc_packet_header_t);
+    return (size_t)h->offset <= room && h->length <= room - (size_t)h->offset;
+}
 bool packet_is_ping(const uint8_t* packet, ERRMSG);
 bool packet_is_local_call(const uint8_t* packet, ERRMSG);
 bool packet_is_remote_call(const uint8_t* packet, ERRMSG);
 size_t morloc_packet_size_from_header(const morloc_packet_header_t* header);
 size_t morloc_packet_size(const uint8_t* packet, ERRMSG);
+uint8_t* morloc_dup_packet(const uint8_t* packet, absptr_t* block_out, ERRMSG);
 uint8_t* return_ping(const uint8_t* packet, ERRMSG);
 uint8_t* make_ping_packet(void);
 uint8_t* make_standard_data_packet(relptr_t ptr, const Schema* schema);
@@ -1415,8 +1432,7 @@ uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema,
 // heap description of the first String slot holding an interior NUL, or NULL
 // when there is none. The caller frees the result.
 //
-// `base_ptr` follows the same convention as resolve_relptr: non-NULL for a
-// payload inlined in a packet, NULL for a value in shared memory.
+// `space` is where the value's relative pointers lead (see morloc_space_t).
 //
 // Only called where the compiler emitted a check -- codegen knows the
 // receiving language and whether the type carries a Str, so a language that
@@ -1426,17 +1442,16 @@ uint8_t* get_morloc_data_packet_value(const uint8_t* data, const Schema* schema,
 char* morloc_first_null_in_value(
     const void* voidstar,
     const Schema* schema,
-    const void* base_ptr);
+    morloc_space_t space);
 
-uint8_t* make_morloc_local_call_packet(uint32_t midx, const uint8_t** arg_packets, size_t nargs, ERRMSG);
-uint8_t* make_morloc_remote_call_packet(uint32_t midx, const uint8_t** arg_packets, size_t nargs, ERRMSG);
+uint8_t* make_morloc_local_call_packet(uint32_t midx, const uint8_t* const* arg_packets, size_t nargs, ERRMSG);
+uint8_t* make_morloc_remote_call_packet(uint32_t midx, const uint8_t* const* arg_packets, size_t nargs, ERRMSG);
 morloc_call_t* read_morloc_call_packet(const uint8_t* packet, ERRMSG);
 void free_morloc_call(morloc_call_t* call);
 int print_morloc_data_packet(const uint8_t* packet, const Schema* schema, ERRMSG);
 int flatten_voidstar_to_buffer(const void* data, const Schema* schema, uint8_t** out_buf, size_t* out_size, ERRMSG);
 uint8_t* make_data_packet_auto(void* voidstar, relptr_t relptr, const Schema* schema, ERRMSG);
 uint8_t* make_inline_data_packet(void* voidstar, const Schema* schema, ERRMSG);
-int adjust_voidstar_relptrs(void* data, const Schema* schema, relptr_t base_rel, ERRMSG);
 void* read_voidstar_binary(const uint8_t* blob, size_t blob_size, const Schema* schema, ERRMSG);
 bool parse_morloc_call_arguments(uint8_t* packet, uint8_t** args, size_t* nargs, ERRMSG);
 bool hash_morloc_packet(const uint8_t* packet, const Schema* schema, uint64_t seed, uint64_t* hash, ERRMSG);
@@ -1460,6 +1475,15 @@ char* voidstar_to_json_string(const void* voidstar, const Schema* schema, ERRMSG
 // Section 16: Function declarations -- Daemon / socket communication
 // ========================================================================
 
+// Parent death: a process the nexus starts ends its process group when the
+// nexus ends. `guard` watches from a thread; a process with a loop of its own
+// takes the descriptor from `adopt` (-1 if none), polls it, and calls
+// `teardown` at end of file.
+int morloc_lifeline_adopt(void);
+void morloc_lifeline_guard(void);
+void morloc_lifeline_teardown(void);
+const char* morloc_lifeline_child_env(int* read_fd);
+
 void close_socket(int socket_id);
 void close_daemon(language_daemon_t** daemon_ptr);
 language_daemon_t* start_daemon(
@@ -1471,6 +1495,7 @@ uint8_t* send_and_receive_over_socket_wait(
     const char* socket_path, const uint8_t* packet,
     int poll_timeout_us, int recv_timeout_us, ERRMSG);
 uint8_t* send_and_receive_over_socket(const char* socket_path, const uint8_t* packet, ERRMSG);
+void mlc_set_self_socket(const char* socket_path);
 size_t send_packet_to_foreign_server(int client_fd, uint8_t* packet, ERRMSG);
 int wait_for_client_with_timeout(language_daemon_t* daemon, int timeout_us, ERRMSG);
 int wait_for_client(language_daemon_t* daemon, ERRMSG);
@@ -1569,8 +1594,10 @@ int arrow_validate(const arrow_shm_header_t* header, const Schema* schema, ERRMS
 // through with a fresh reference instead of a copy; forget them where the
 // pool releases its received blocks. MORLOC_ARROW_NO_BORROW=1 disables the
 // pass-through entirely.
-void arrow_borrow_register(const uint8_t* base, relptr_t rel);
-void arrow_borrow_clear(void);
+int arrow_from_shm_owned(const arrow_shm_header_t* header, int acquire,
+                         struct ArrowSchema* out_schema,
+                         struct ArrowArray* out_array, ERRMSG);
+size_t arrow_live_view_bytes(void);
 // Bytes memcpy'd into SHM by table writes in this process so far.
 uint64_t arrow_copied_bytes(void);
 int arrow_from_shm(const arrow_shm_header_t* header,
@@ -1698,15 +1725,15 @@ char* manifest_to_discovery_json(const manifest_t* manifest);
 // Section 25: Function declarations -- Intrinsics
 // ========================================================================
 
-int mlc_save(const absptr_t data, const Schema* schema, uint8_t level, const char* path, ERRMSG);
-int mlc_save_json(const absptr_t data, const Schema* schema, uint8_t level, const char* path, ERRMSG);
+int mlc_save(const void* data, const Schema* schema, int64_t level, const char* path, ERRMSG);
+int mlc_save_json(const void* data, const Schema* schema, int64_t level, const char* path, ERRMSG);
 // @save voidstar: produces a morloc data packet. When level > 0 the
 // packet's payload is zstd-compressed and the header carries
 // PACKET_COMPRESSION_ZSTD; level == 0 writes uncompressed (legacy shape).
-int mlc_save_voidstar(const absptr_t data, const Schema* schema, uint8_t level, const char* path, ERRMSG);
+int mlc_save_voidstar(const void* data, const Schema* schema, int64_t level, const char* path, ERRMSG);
 void* mlc_load(const char* path, const Schema* schema, ERRMSG);
-char* mlc_hash(const absptr_t data, const Schema* schema, ERRMSG);
-char* mlc_show(const absptr_t data, const Schema* schema, ERRMSG);
+char* mlc_hash(const void* data, const Schema* schema, ERRMSG);
+char* mlc_show(const void* data, const Schema* schema, ERRMSG);
 void* mlc_read(const char* json_str, const Schema* schema, ERRMSG);
 relptr_t write_voidstar_binary(int fd, const void* data, const Schema* schema, ERRMSG);
 
@@ -1780,13 +1807,10 @@ int64_t mlc_handle_path_len(int64_t handle, ERRMSG);
 // Voidstar wire-layout helpers. `dest` is the Array slot in the
 // voidstar buffer; `cursor` is the bridge's outer to_voidstar cursor
 // (advanced past the path bytes on success). Returns 0 on success.
-// On the read side, `base_ptr` is the relptr base: NULL means the
-// Array's `data` field is an SHM-relative relptr (the common
-// in-process case); non-NULL means it's a payload-relative offset
-// (used when reading from mmap'd file regions).
+// On the read side, `space` is where the field's path lives.
 int32_t mlc_write_handle_voidstar(int64_t handle, void* dest,
                                   void** cursor, ERRMSG);
-int64_t mlc_read_handle_voidstar(const void* arr, const void* base_ptr,
+int64_t mlc_read_handle_voidstar(const void* arr, morloc_space_t space,
                                  uint8_t kind, ERRMSG);
 
 // Batched IFile-array helpers. Each acquires the stream registry mutex
@@ -1822,6 +1846,11 @@ int32_t mlc_write_handles_voidstar(const int64_t* handles, size_t n,
 // new handle is auto-registered with the current `eval_arena`.
 void* mlc_next(int64_t handle, ERRMSG);
 int64_t mlc_stream(int64_t ifile_handle, ERRMSG);
+
+// `mlc_next_frame(handle, eof)` reads the next sub-packet of a file-backed
+// IStream like `mlc_next`, but tells the end of the stream apart from an
+// empty sub-packet: at the end it returns NULL and sets `*eof` to 1.
+void* mlc_next_frame(int64_t handle, int32_t* eof, ERRMSG);
 
 // `mlc_stream_layout(handle)` returns the per-sub-packet layout of an IFile
 // as a fresh SHM voidstar `Array<Tuple3<U64,U64,U64>>`: one
@@ -1863,6 +1892,10 @@ int64_t mlc_open_ostream(const char* schema_str, const char* path, ERRMSG);
 // declaring the schema so the nexus guards the incoming stream, and
 // rejecting an IFile open of stdin (a pipe is not seekable).
 int64_t mlc_open_istream(const char* schema_str, const char* path, ERRMSG);
+int64_t mlc_open_channel(const char* schema_str, ERRMSG);
+bool mlc_settle(int64_t handle, ERRMSG);
+bool mlc_is_channel(int64_t handle);
+bool mlc_spawn(const char* socket_path, uint32_t mid, const uint8_t* const* args, size_t nargs, int64_t handle, ERRMSG);
 // @stdin / @stdout / @stderr intrinsics -- open implied. The nexus is the
 // sole owner of fd 0/1/2; these register slots that route mlc_next /
 // mlc_write through the pool-nexus RPC socket. At most one open per
@@ -1875,7 +1908,7 @@ int64_t mlc_open_stderr(const char* schema_str, ERRMSG);
 // dispatch returns so a leaked claim does not wedge the next open. Cheap
 // on the no-stdio path (a single thread-local read).
 void mlc_reclaim_stdio_after_dispatch(void);
-int32_t mlc_write(uint8_t level, int64_t handle,
+int32_t mlc_write(int64_t level, int64_t handle,
                   const void* payload_voidstar, ERRMSG);
 int64_t mlc_append(const char* schema_str, const char* path, ERRMSG);
 int32_t mlc_concat(const char* const* paths, size_t n_paths,
@@ -1901,6 +1934,47 @@ char* mlc_tmpfile(ERRMSG);
 // file-removal tool.
 int32_t mlc_unlink_tmp(const char* path, ERRMSG);
 
+// ------------------------------------------------------------------------
+// Fold accumulators (the `@fold` stream-handler form)
+//
+// A folding handler turns a stream into one value. The sink cannot return
+// anything, so the running accumulator lives behind one of these handles
+// between batches.
+//
+// A cell holds one accumulator per thread that folds into it: a producer
+// may drive its sink from several threads, and the read-modify-write
+// around a morloc `step` cannot be made atomic from the runtime, since
+// applying `step` means running user code in a pool. Each thread therefore
+// folds without contention and the handler's `combine` merges the slots at
+// the end.
+//
+// Every value a cell is given is copied, and every value it hands back is
+// a fresh single block the caller releases with one shfree.
+
+// Create a cell seeded with `init`. Returns a handle, or -1 on error.
+int64_t mlc_cell_new(const Schema* schema, const void* init, ERRMSG);
+
+// This thread's accumulator; the seed if it has not folded yet.
+void* mlc_cell_get(int64_t handle, const Schema* schema, ERRMSG);
+
+// Replace this thread's accumulator. Returns 0 on success.
+int32_t mlc_cell_put(int64_t handle, const Schema* schema,
+                     const void* value, ERRMSG);
+
+// How many accumulators the final merge must fold. Never zero: an
+// untouched cell answers with its seed, which is what an empty stream
+// folds to.
+int64_t mlc_cell_count(int64_t handle, ERRMSG);
+
+// Accumulator `index`, for the merge. Returns -1-free NULL on error.
+void* mlc_cell_slot(int64_t handle, int64_t index, const Schema* schema,
+                    ERRMSG);
+
+// Release a cell and every accumulator in it. Returns 0 on success. A cell
+// still live when its dispatch ends is swept, so a handler that raises
+// before its merge cannot leak one.
+int32_t mlc_cell_free(int64_t handle, ERRMSG);
+
 // ========================================================================
 // Section 26: Function declarations -- Slurm
 // ========================================================================
@@ -1922,7 +1996,7 @@ uint8_t* remote_call(
     const char* socket_basename,
     const char* cache_path,
     const resources_t* resources,
-    const uint8_t** arg_packets,
+    const uint8_t* const* arg_packets,
     size_t nargs,
     ERRMSG);
 

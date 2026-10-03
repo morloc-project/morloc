@@ -1,0 +1,32 @@
+-- A void runtime call in value position of a C++ manifold.
+--
+-- `@close` returns void in the C++ runtime. When it is the tail of an
+-- exported manifold the serialize boundary supplies the unit value, but a
+-- branch arm is hoisted into its own Unit-returning manifold whose tail is
+-- the arm's last expression. Every `@collect` expands to a do-block ending
+-- in `@close o`, so `@collect` in a guard or match arm, and `@close` used
+-- as an arm's value, all put a void call where a `mlc::Unit` is returned.
+
+module main (viaGuard, viaMatch, closeArm)
+
+import root-cpp
+
+source Cpp from "emit.hpp" ("emit")
+
+emit :: [Int] -> ([Int] -> <IO> ()) -> <IO> ()
+
+viaGuard :: Bool -> <IO> ()
+viaGuard b = ? b = @collect (emit [1]) : @collect (emit [2])
+
+viaMatch :: Str -> <IO> ()
+viaMatch path = do
+  r <- @open path :: <IO> (Try Str (IFile [Int]))
+  match r
+    | (Ok _) = @collect (emit [3])
+    | (Err _) = @collect (emit [4])
+
+closeArm :: Bool -> Str -> <IO> ()
+closeArm b path = do
+  Ok o <- @open path :: <IO> (Try Str (OStream Int))
+  @write 0 o [5]
+  ? b = @close o : @close o

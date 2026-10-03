@@ -1,0 +1,27 @@
+-- A value only C++ can hold (Opts has no Python type) is computed by a
+-- language-free operation (a record update) and bound by name; its use lies
+-- inside a function evaluated in Python. The binding must be evaluated where
+-- the value can exist, never in Python.
+module topConstant (foo)
+
+import root-cpp
+
+record Opts where
+  n :: Int
+record Cpp => Opts = "Opts"
+source Cpp from "opts.hpp" ("nOf")
+nOf :: Opts -> Int
+
+base :: Opts
+base = { n = 2 }
+
+type Py => Int = "int"
+source Py from "pyhof.py" ("py_apply" as pyApply, "check")
+pyApply :: (Int -> Int) -> Int -> Int
+check :: Int -> Int -> Int -> Int
+
+opts :: Opts
+opts = .(.n = 7) base
+
+foo :: Int -> Int
+foo k = pyApply (\r -> r + nOf opts) k

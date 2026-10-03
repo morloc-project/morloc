@@ -1,0 +1,26 @@
+-- The mirror case: a record only Python can hold (PyOpts has no C++ type),
+-- produced in Python and bound by name, is used inside a function evaluated
+-- in C++. C++ carries it to the Python call without holding it.
+module mirror (sourced, updated)
+
+import root-cpp
+
+record PyOpts where
+  m :: Int
+record Py => PyOpts = "dict"
+type Py => Int = "int"
+source Py from "pyhof.py" ("py_m" as pyM, "py_mk" as pyMk)
+pyM :: PyOpts -> Int
+pyMk :: Int -> PyOpts
+
+source Cpp from "opts.hpp" ("cpp_apply" as cppApply)
+cppApply :: (Int -> Int) -> Int -> Int
+
+pbase :: PyOpts
+pbase = { m = 2 }
+
+sourced :: Int -> Int
+sourced k = let o = pyMk k in cppApply (\r -> r + pyM o) k
+
+updated :: Int -> Int
+updated k = let o = .(.m = k) pbase in cppApply (\r -> r + pyM o) k

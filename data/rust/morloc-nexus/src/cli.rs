@@ -125,11 +125,12 @@ pub struct DispatchOptions {
     /// materialized to inline MESG form on disk regardless of this
     /// flag, so the on-disk packet is self-contained. When N > 0 the
     /// MESG payload is additionally zstd-compressed; the schema
-    /// metadata block stays in the clear. 0 = no compression
-    /// (default), 1 = fastest, 9 = maximum.
-    #[arg(short = 'z', long = "compression-level",
-          default_value_t = 0, value_name = "N")]
-    pub compression_level: u8,
+    /// metadata block stays in the clear. 0 = no compression,
+    /// 1 = fastest, 9 = maximum. A returned value defaults to 0; a
+    /// stream written to stdout defaults to its `@write` level, which
+    /// this flag overrides when given.
+    #[arg(short = 'z', long = "compression-level", value_name = "N")]
+    pub compression_level: Option<u8>,
 }
 
 /// One-shot CLI invocation of a compiled morloc program.
@@ -158,6 +159,29 @@ pub struct RunArgs {
     /// the local pool listener.
     #[arg(short = 's', long = "socket-base", value_name = "NAME", hide = true)]
     pub socket_base: Option<String>,
+
+    // ---- Multi-output plumbing (internal; see orchestrate.rs) ----
+    /// Internal: run the parent command once as the stage of a multi-output
+    /// run, saving its output under DIR for the actions to replay.
+    #[arg(long = "mlc-stage", value_name = "DIR", hide = true)]
+    pub mlc_stage: Option<String>,
+
+    /// Internal: the 1-based parent arguments the actions refer to, saved
+    /// under the stage directory.
+    #[arg(long = "mlc-stage-args", value_name = "N", value_delimiter = ',', hide = true)]
+    pub mlc_stage_args: Vec<usize>,
+
+    /// Internal: the stage also writes the command's output to stdout.
+    #[arg(long = "mlc-stage-tee", hide = true)]
+    pub mlc_stage_tee: bool,
+
+    /// Internal: run this internal command on the given inputs.
+    #[arg(long = "mlc-internal", value_name = "CMD", hide = true)]
+    pub mlc_internal: Option<String>,
+
+    /// Internal: one positional input of `--mlc-internal`, in order.
+    #[arg(long = "mlc-input", value_name = "PATH", hide = true)]
+    pub mlc_input: Vec<String>,
 }
 
 /// Serve a compiled morloc program as a long-lived daemon.
@@ -186,11 +210,12 @@ pub struct DaemonArgs {
     #[arg(short = 'f', long = "output-form", value_name = "FORM", value_enum)]
     pub output_form: Option<DaemonOutputForm>,
 
-    /// zstd compression preset (0..=9) for `-f packet` output. 0 = none
-    /// (default). Ignored for `-f json`.
-    #[arg(short = 'z', long = "compression-level",
-          default_value_t = 0, value_name = "N")]
-    pub compression_level: u8,
+    /// zstd compression preset (0..=9) for `-f packet` output. A returned
+    /// value defaults to 0; a stream written to stdout defaults to its
+    /// `@write` level, which this flag overrides when given. Ignored for
+    /// `-f json`.
+    #[arg(short = 'z', long = "compression-level", value_name = "N")]
+    pub compression_level: Option<u8>,
 
     /// Suppress morloc-emitted log lines on stderr.
     #[arg(short, long)]
@@ -495,6 +520,10 @@ pub enum OutputForm {
     Arrow,
     Parquet,
     Csv,
+    /// Tab-separated values. Same writer as `csv` with a tab delimiter;
+    /// only valid where the return type is a Table. TSV is already
+    /// recognised on stdin, so this makes the two directions symmetric.
+    Tsv,
 }
 
 impl OutputForm {
@@ -508,6 +537,7 @@ impl OutputForm {
             OutputForm::Arrow => OutputFormat::Arrow,
             OutputForm::Parquet => OutputFormat::Parquet,
             OutputForm::Csv => OutputFormat::Csv,
+            OutputForm::Tsv => OutputFormat::Tsv,
         }
     }
 }
@@ -547,7 +577,8 @@ fn apply_dispatch_options(cfg: &mut NexusConfig, opts: &DispatchOptions) {
     cfg.quiet = opts.quiet;
     cfg.log_dir = opts.log_dir.clone();
     cfg.summary_path = opts.summary.clone();
-    cfg.compression_level = opts.compression_level;
+    cfg.compression_level = opts.compression_level.unwrap_or(0);
+    cfg.stdout_compression = opts.compression_level;
 }
 
 // ============================================================
@@ -793,6 +824,17 @@ pub fn run_args_to_config(args: &RunArgs) -> (NexusConfig, String) {
     apply_dispatch_options(&mut cfg, &args.common);
     cfg.packet_path = args.call_packet.clone();
     cfg.socket_base = args.socket_base.clone();
+    cfg.child = if let Some(dir) = &args.mlc_stage {
+        crate::dispatch::ChildMode::Stage {
+            dir: dir.clone(),
+            args: args.mlc_stage_args.clone(),
+            tee: args.mlc_stage_tee,
+        }
+    } else if let Some(cmd) = &args.mlc_internal {
+        crate::dispatch::ChildMode::Replay { cmd: cmd.clone(), inputs: args.mlc_input.clone() }
+    } else {
+        crate::dispatch::ChildMode::None
+    };
     (cfg, args.target.clone())
 }
 
@@ -805,7 +847,8 @@ pub fn daemon_args_to_config(args: &DaemonArgs) -> (NexusConfig, String) {
     cfg.quiet = args.quiet;
     cfg.log_dir = args.log_dir.clone();
     cfg.summary_path = args.summary.clone();
-    cfg.compression_level = args.compression_level;
+    cfg.compression_level = args.compression_level.unwrap_or(0);
+    cfg.stdout_compression = args.compression_level;
     if let Some(form) = args.output_form {
         cfg.output_format = form.to_internal();
     }
@@ -2334,6 +2377,7 @@ mod tests {
                 let (cfg, _) = daemon_args_to_config(&d);
                 assert_eq!(cfg.output_format, OutputFormat::Packet);
                 assert_eq!(cfg.compression_level, 3);
+                assert_eq!(cfg.stdout_compression, Some(3));
             }
             _ => panic!("expected Daemon mode"),
         }

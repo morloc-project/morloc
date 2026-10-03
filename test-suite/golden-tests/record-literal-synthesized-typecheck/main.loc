@@ -1,0 +1,39 @@
+-- Type checking only: a synthesized record literal meets the declared
+-- record with each field compared in the relation's own direction and no
+-- quantifier left in a field. A polymorphic definition in a field
+-- instantiates to the field's type, and a suspension performing fewer
+-- effects fills a field declaring more.
+
+module main (polyUser, effLet)
+
+import root-py
+
+effect IO, Err
+
+data Box a = Empty | Full a
+
+record Py => R = "dict"
+record R where
+  tag :: Int
+  b :: Box Int
+
+record Py => R3 = "dict"
+record R3 where
+  tag :: Int
+  run :: <IO, Err> Int
+
+note :: Int -> <IO> Int
+source Py from "f.py" ("note")
+
+none :: Box a
+none = Empty
+
+polyUser :: Int -> <IO> R
+polyUser n = do
+  y <- note n
+  {tag = y, b = none}
+
+effLet :: Int -> <IO, Err> Int
+effLet n =
+  let r = {tag = n, run = note n}
+  in .run r

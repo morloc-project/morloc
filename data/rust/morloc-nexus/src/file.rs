@@ -226,6 +226,11 @@ pub fn run(args: &FileArgs) -> ! {
         println!("{}", out);
     }
     let code = if any_error || validation_failed { 1 } else { 0 };
+    // With shared memory set up (--validate), exit through the teardown
+    // that removes it.
+    if args.validate {
+        crate::process::clean_exit(code);
+    }
     std::process::exit(code);
 }
 
@@ -1400,7 +1405,7 @@ fn format_validated_field(v: &ValidationOutcome) -> String {
 
 /// JSON-quote a string for use as a key=value field. Handles quotes,
 /// backslashes, and control chars so the output stays awk-parseable.
-fn json_quote(s: &str) -> String {
+pub(crate) fn json_quote(s: &str) -> String {
     serde_json::Value::String(s.to_string()).to_string()
 }
 

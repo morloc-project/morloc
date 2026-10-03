@@ -1,0 +1,44 @@
+module main (make, drainPeak)
+
+import root
+import root-cpp
+
+-- Reading a stream file forward maps the file into the reading pool; the
+-- pages it has read are never read again, so they are handed back as the
+-- read passes them. A pool that drains a large file and keeps nothing must
+-- not hold the file's size: its peak resident memory after an 80 MB file may
+-- exceed that after an 8 MB file by much less than the 72 MB between them.
+
+source Cpp from "src.hpp" ("peakKiB")
+
+peakKiB :: Int -> Int
+
+countFrom :: IStream Int -> Int -> <IO> Int
+countFrom s acc = do
+  Ok xs <- @next s
+  ? length xs == 0 = do
+      acc
+  : do
+    countFrom s (acc + length xs)
+
+--' Drain a stream file, keeping nothing; the pool's peak memory in KiB
+drainPeak :: IStream Int -> <IO> Int
+drainPeak s = do
+  n <- countFrom s 0
+  peakKiB n
+
+writeN :: OStream Int -> Int -> <IO> ()
+writeN o n = ? n == 0 = do
+    ()
+  : do
+    Ok _ <- @try (@write 0 o (replicate 10000 n))
+    @flush o
+    writeN o (n - 1)
+
+--' Write n batches of 10000 Ints (80 KB each) to a stream file
+make :: Int -> Str -> <IO> ()
+make n path = do
+  Ok o <- @open path
+  writeN o n
+  @close o
+  ()

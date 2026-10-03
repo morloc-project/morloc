@@ -1,0 +1,10 @@
+-- A program builds and runs from a directory whose path holds a space, as
+-- iCloud Drive and Google Drive folders do: every path the compiler puts on a
+-- build command line is quoted.
+module main (twice)
+
+import root-cpp
+
+source Cpp from "twice.hpp" ("twice")
+
+twice :: Int -> Int

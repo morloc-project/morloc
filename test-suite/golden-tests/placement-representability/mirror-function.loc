@@ -1,0 +1,28 @@
+-- The mirror case with a function value: C++ holds a Python function whose
+-- parameter is a record only Python can hold, and calls it with a value
+-- Python built, in C++ and in Rust. The function and the value need only
+-- pass through as packets.
+module mirrorFunction (function, rustFunction)
+
+import root-cpp
+import root-rust
+
+record PyOpts where
+  m :: Int
+record Py => PyOpts = "dict"
+type Py => Int = "int"
+source Py from "pyhof.py" ("py_m" as pyM, "py_mk" as pyMk)
+pyM :: PyOpts -> Int
+pyMk :: Int -> PyOpts
+
+source Cpp from "opts.hpp" ("cpp_apply" as cppApply)
+cppApply :: (Int -> Int) -> Int -> Int
+
+function :: Int -> Int
+function k = let g = pyM in cppApply (\r -> r + g (pyMk r)) k
+
+source Rust from "helpers.rs" ("rs_apply" as rsApply)
+rsApply :: (Int -> Int) -> Int -> Int
+
+rustFunction :: Int -> Int
+rustFunction k = let g = pyM in rsApply (\r -> r + g (pyMk r)) k

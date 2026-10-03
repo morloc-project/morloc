@@ -5,7 +5,7 @@
 -- list once, then returns an empty list at EOF. The cursor is part of
 -- the registry slot, so subsequent @next calls keep returning empty.
 --
--- @stream :: IFile a -> <IO> IStream a derives a forward-only IStream
+-- @stream :: IFile [a] -> <IO> IStream a derives a forward-only IStream
 -- from an open IFile, bound to the same path with an independent fd
 -- and cursor. The two handles read independently.
 --
@@ -17,6 +17,7 @@ module main
   , testNextEofTwice
   , testStreamFromIFile
   , testIntList
+  , testOpenText
   )
 
 import root
@@ -42,7 +43,7 @@ testNextEofTwice path = do
 testStreamFromIFile :: Str -> <IO> [Int]
 testStreamFromIFile path = do
   @save 0 path [11, 22, 33]
-  Ok f <- @open path :: <IO> (Try Str (IFile Int))
+  Ok f <- @open path :: <IO> (Try Str (IFile [Int]))
   s <- @stream f
   Ok _tailv35 <- @next s
   _tailv35
@@ -54,3 +55,12 @@ testIntList path = do
   Ok s <- @open path :: <IO> (Try Str (IStream Int))
   Ok _tailv36 <- @next s
   _tailv36
+
+-- 5. A file that is not a packet, shorter or longer than a header: the
+-- error names the expected format.
+testOpenText :: Str -> <IO> Str
+testOpenText path = do
+  r <- @open path :: <IO> (Try Str (IStream Str))
+  match r
+    | (Ok _) = "opened"
+    | (Err e) = e

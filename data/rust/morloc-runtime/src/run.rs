@@ -84,35 +84,9 @@ fn get_run() -> Option<&'static Run> {
     RUN.get_or_init(init_run).as_ref()
 }
 
-/// The parent of `pid`, or `None` when this platform offers no way to ask.
-///
-/// Linux publishes it in `/proc/<pid>/stat`. The `comm` field there is
-/// unquoted and may itself contain spaces and parentheses, so the fields after
-/// it are only unambiguous when read from the LAST `)`: state, then ppid.
 fn parent_of(pid: i32) -> Option<i32> {
-    #[cfg(target_os = "linux")]
-    {
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        parse_ppid_from_stat(&stat)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = pid;
-        None
-    }
-}
-
-/// Read the parent pid out of a `/proc/<pid>/stat` line.
-///
-/// Field two is the executable name, unquoted and parenthesized. It may itself
-/// contain spaces and parentheses -- a process is free to name itself
-/// `((weird) name)` -- so splitting the line on whitespace, or on the FIRST
-/// `)`, lands on the wrong field. Scanning from the last `)` is what makes the
-/// following fields (state, then ppid) unambiguous.
-#[cfg(any(target_os = "linux", test))]
-fn parse_ppid_from_stat(stat: &str) -> Option<i32> {
-    let after_comm = stat.rsplit_once(')')?.1;
-    after_comm.split_whitespace().nth(1)?.parse().ok()
+    let p = morloc_runtime_types::process::parent_of(u32::try_from(pid).ok()?)?;
+    i32::try_from(p).ok()
 }
 
 /// Whether `ancestor` is this process's parent or a further ancestor.
@@ -122,7 +96,7 @@ fn parse_ppid_from_stat(stat: &str) -> Option<i32> {
 /// a legitimate descendant. Where `parent_of` cannot answer, this degrades to
 /// exactly that immediate-parent test -- correct for pool models that dispatch
 /// on threads rather than forking below the pool process.
-fn descends_from(ancestor: i32) -> bool {
+pub(crate) fn descends_from(ancestor: i32) -> bool {
     let mut pid = unsafe { libc::getppid() };
     // Bounded so a `/proc` inconsistency cannot spin at startup. A morloc
     // process tree is a handful of levels deep.
@@ -460,12 +434,14 @@ pub unsafe extern "C" fn morloc_hostname(buf: *mut libc::c_char, len: usize) -> 
     n
 }
 
-/// Write `summary.json` and flush all tee handles. Called from the
-/// nexus's `clean_exit` after pools have been torn down so any
-/// in-flight log lines they wrote also land in the per-label files.
+/// Write `summary.json`, drop any input spooled off a pipe, and flush all
+/// tee handles. Called from the nexus's `clean_exit` after pools have been
+/// torn down so any in-flight log lines they wrote also land in the
+/// per-label files.
 #[no_mangle]
 pub extern "C" fn morloc_run_finalize(exit_code: i32) {
     write_summary_json(exit_code);
+    crate::cli::remove_spooled_inputs();
     if let Some(m) = TEE_HANDLES.get() {
         if let Ok(mut g) = m.lock() {
             g.clear();
@@ -492,24 +468,24 @@ mod tests {
     }
 
     #[test]
-    fn ppid_is_read_from_the_last_paren() {
-        // Ordinary case: comm is a plain name.
-        assert_eq!(parse_ppid_from_stat("42 (python3) S 17 42 42 0 -1").unwrap(), 17);
-        // A comm holding spaces and parentheses: splitting on whitespace or on
-        // the first ')' would read the wrong field.
-        assert_eq!(
-            parse_ppid_from_stat("42 ((weird) name) S 17 42 42 0 -1").unwrap(),
-            17
-        );
-        // Malformed input yields no answer rather than a wrong one.
-        assert!(parse_ppid_from_stat("not a stat line").is_none());
-        assert!(parse_ppid_from_stat("42 (comm) S").is_none());
+    fn descends_from_accepts_a_grandparent() {
+        // A pool's forked worker sits two levels below the nexus.
+        let grandparent = unsafe { libc::getppid() };
+        unsafe {
+            let child = libc::fork();
+            assert!(child >= 0);
+            if child == 0 {
+                libc::_exit(if descends_from(grandparent) { 0 } else { 1 });
+            }
+            let mut status = 0;
+            libc::waitpid(child, &mut status, 0);
+            assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "a grandchild denied its grandparent");
+        }
     }
 
     #[test]
     fn descends_from_accepts_the_immediate_parent() {
-        // The direct-parent case must keep working; it is the whole relation on
-        // platforms where `parent_of` cannot answer.
+        // The direct-parent case must keep working when `parent_of` cannot answer.
         let ppid = unsafe { libc::getppid() };
         assert!(descends_from(ppid));
     }

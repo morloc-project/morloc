@@ -61,3 +61,16 @@ inline std::string join_strs(std::vector<std::string> xs) {
     s += "\n";
     return s;
 }
+
+// Folding handlers: the stream is reduced to one running total instead of
+// gathered into a list.
+inline int zero_acc() { return 0; }
+
+inline int add_batch(int acc, const std::vector<int>& batch) {
+    for (int x : batch) acc += x;
+    return acc;
+}
+
+inline int merge_acc(int a, int b) { return a + b; }
+
+inline std::string show_acc(int acc) { return "total=" + std::to_string(acc) + "\n"; }

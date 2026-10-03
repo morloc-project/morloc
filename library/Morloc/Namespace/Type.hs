@@ -116,7 +116,20 @@ module Morloc.Namespace.Type
   , Check (..)
   , ArgSource (..)
   , WithSpec (..)
+  , ParseSpec (..)
+  , parseEntryName
+  , parseEntryPrefix
+  , parseEntryTargets
+  , FoldSpec (..)
   , mangleTerminalName
+  , mangleReplayName
+  , replayEntryPrefix
+  , CompanionRole (..)
+  , companionName
+  , ActionKind (..)
+  , ReplayPlan (..)
+  , replayPlanKind
+  , anonRecordVar
   , isInternalTerminalName
   , ArgDoc (..)
   , ArgDocVars (..)
@@ -134,6 +147,7 @@ module Morloc.Namespace.Type
 
     -- * Typeclasses
   , Typelike (..)
+  , uncurryU
 
     -- * kludge
   , newVariable
@@ -673,6 +687,28 @@ data ArgSource
   | ArgValue     -- ^ `@value`, the formatted payload
   deriving (Show, Ord, Eq)
 
+-- | The three terms a folding formatter declares. Grouping them makes
+-- "an init with no step" unrepresentable: a formatter either folds and
+-- names all three, or does not fold at all.
+--
+-- The accumulator is threaded by the synthesized body, so nothing here
+-- fixes its type; that is settled when the synthesized body is
+-- typechecked and the three terms must agree with each other and with
+-- the handler that consumes the result.
+--
+-- The three must form a monoid: one accumulator exists per thread that
+-- folds, each starting from 'fsInit', so unless 'fsInit' is an identity
+-- for 'fsCombine' the answer depends on how many threads the producer
+-- used. Neither that law nor 'fsCombine's associativity is checkable
+-- here; both are the caller's to keep, as in every parallel fold.
+data FoldSpec = FoldSpec
+  { fsStep    :: EVar  -- ^ @b -> [a] -> b@, folds one batch into the accumulator
+  , fsInit    :: EVar  -- ^ @b@, the identity: starts every accumulator, and
+                       --   is the answer for an empty stream
+  , fsCombine :: EVar  -- ^ @b -> b -> b@, merges accumulators into the answer
+  }
+  deriving (Show, Ord, Eq)
+
 -- | One `@with`/`@render` formatter declaration on a signature preamble.
 -- Declares a command-scoped CLI flag that dispatches to a compile-time-
 -- synthesized entry composing the referenced term with the head manifold
@@ -689,6 +725,21 @@ data WithSpec = WithSpec
   , wsDefault :: Bool         -- ^ `@default`: fires when no formatter flag and no `-f`
   , wsArgs    :: [ArgSource]  -- ^ handler argument sources, in order; the payload
                               --   goes at 'ArgValue' or is appended last if absent
+  , wsFold    :: Maybe FoldSpec
+                              -- ^ `@fold`/`@init`/`@combine`: the stream is folded
+                              --   into one accumulator rather than gathered into a
+                              --   list, and the handler receives the accumulator
+  }
+  deriving (Show, Ord, Eq)
+
+-- | One `@parse` declaration on a command argument. At the command line,
+-- a value prefixed with `<name>:`, or ending in one of 'psExts', is a path
+-- to a file in that format, and 'psHandler' reads it into the argument's
+-- value.
+data ParseSpec = ParseSpec
+  { psName    :: Text
+  , psHandler :: EVar
+  , psExts    :: [Text]  -- ^ lowercase, each starting with `.`
   }
   deriving (Show, Ord, Eq)
 
@@ -701,18 +752,92 @@ data WithSpec = WithSpec
 -- grammar and never contains `__`, which C++ reserves per lex.name.
 -- Hyphens in the long flag become underscores.
 mangleTerminalName :: EVar -> Text -> EVar
-mangleTerminalName (EV parent) long =
-  EV (DT.concat ["mlcp_", parent, "_", DT.map hyphenToUnder long])
+mangleTerminalName = mangleWithPrefix "mlcp_"
+
+-- | The name of the replay entry of a terminal action: the handler applied
+-- to the parent's staged output rather than to a fresh run of the parent.
+mangleReplayName :: EVar -> Text -> EVar
+mangleReplayName = mangleWithPrefix replayEntryPrefix
+
+-- | A command synthesized for a parent command, by what it does for it.
+data CompanionRole
+  = RoleAction Text
+  -- ^ the action with this long flag, on a fresh run of the parent
+  | RoleReplay Text
+  -- ^ the action with this long flag, on the parent's saved output
+  | RoleParse (Maybe Text)
+  -- ^ the `@parse` entry of the parent, or of its action with this long flag
+  deriving (Show, Ord, Eq)
+
+-- | The name of a parent's companion. Every companion name is made here.
+companionName :: EVar -> CompanionRole -> EVar
+companionName p (RoleAction long) = mangleTerminalName p long
+companionName p (RoleReplay long) = mangleReplayName p long
+companionName p (RoleParse Nothing) = parseEntryName p
+companionName p (RoleParse (Just long)) = parseEntryName (mangleTerminalName p long)
+
+-- | The compiler-owned prefix of every replay entry.
+replayEntryPrefix :: Text
+replayEntryPrefix = "mlcr_"
+
+-- | How a terminal action's handler consumes its command's output.
+data ActionKind
+  = KindValue   -- ^ the value a non-streaming command returns
+  | KindGather  -- ^ everything a streaming command streams, at once
+  | KindStream  -- ^ each batch, as the command streams it (@stream)
+  | KindFold    -- ^ each batch, into one accumulator (@fold)
+  deriving (Show, Ord, Eq)
+
+-- | The replay entry of one terminal action (see 'mangleReplayName'): the
+-- kind it was synthesized for, or why the action has none and runs only on
+-- a fresh run of its command.
+data ReplayPlan
+  = Replayed ActionKind
+  | NotReplayed ActionKind Text
+  deriving (Show, Ord, Eq)
+
+replayPlanKind :: ReplayPlan -> ActionKind
+replayPlanKind (Replayed k) = k
+replayPlanKind (NotReplayed k _) = k
+
+mangleWithPrefix :: Text -> EVar -> Text -> EVar
+mangleWithPrefix prefix (EV parent) long =
+  EV (DT.concat [prefix, parent, "_", DT.map hyphenToUnder long])
   where
     hyphenToUnder '-' = '_'
     hyphenToUnder c = c
+
+-- | The name of every anonymous closed record. It is not a legal type name,
+-- so no declared record can share it.
+anonRecordVar :: TVar
+anonRecordVar = TV "@REC"
 
 -- | Recognizes the compiler-internal name prefix produced by
 -- 'mangleTerminalName'. The nexus filters these out of the top-level
 -- command menu but keeps them dispatchable via each parent command's
 -- terminal flags.
 isInternalTerminalName :: Text -> Bool
-isInternalTerminalName = DT.isPrefixOf "mlcp_"
+isInternalTerminalName t =
+  DT.isPrefixOf "mlcp_" t || DT.isPrefixOf parseEntryPrefix t || DT.isPrefixOf replayEntryPrefix t
+
+-- | The compiler-owned prefix of every name synthesized for `@parse`.
+parseEntryPrefix :: Text
+parseEntryPrefix = "mlcq_"
+
+-- | The name of the entry synthesized for a target command whose arguments
+-- declare `@parse` formats. The target is the command itself or one of its
+-- 'mangleTerminalName' commands.
+parseEntryName :: EVar -> EVar
+parseEntryName (EV t) = EV (parseEntryPrefix <> t)
+
+-- | The targets of a command's `@parse` entries, given its preamble and
+-- argument docstrings: the command and each of its `@with`/`@render`
+-- commands, or none when no argument declares a format.
+parseEntryTargets :: EVar -> ArgDocVars -> [ArgDocVars] -> [EVar]
+parseEntryTargets name cmdDoc argDocs
+  | any (not . null . docParse) argDocs =
+      name : [ mangleTerminalName name (wsLong w) | w <- docWith cmdDoc ]
+  | otherwise = []
 
 data ArgDocVars = ArgDocVars
   { docLines :: [Text]
@@ -734,6 +859,7 @@ data ArgDocVars = ArgDocVars
   , docListForm :: Maybe FormAtom
   , docListChecks :: [Check]
   , docWith :: [WithSpec]
+  , docParse :: [ParseSpec]
   , docMime :: Maybe Text
   , docEpilogues :: [[Text]]
     -- ^ `@epilogue` blocks: verbatim lines printed at the foot of the
@@ -803,6 +929,7 @@ instance Defaultable ArgDocVars where
       , docListForm = Nothing
       , docListChecks = []
       , docWith = []
+      , docParse = []
       , docMime = Nothing
       , docEpilogues = []
       }
@@ -865,13 +992,31 @@ instance Typelike Type where
   normalizeType (StrConcatT a b) = StrConcatT (normalizeType a) (normalizeType b)
   normalizeType t = t
 
+-- | A function type's arguments and result, spelled flat by the rule
+-- 'typeOf' applies: @a -> (b -> c)@ is @a -> b -> c@, while an effect or an
+-- empty argument list is a suspension rather than a grouping.
+uncurryU :: TypeU -> ([TypeU], TypeU)
+uncurryU (ForallU _ t) = uncurryU t
+uncurryU t@(FunU [] _) = ([], t)
+uncurryU (FunU ts r) = case uncurryU r of
+  (us@(_ : _), r') -> (ts ++ us, r')
+  _ -> (ts, r)
+uncurryU t = ([], t)
+
 instance Typelike TypeU where
   typeOf (VarU v) = VarT v
   typeOf (NatVarU _) = NatVoidT
   typeOf (ExistU _ (ps, _) (rs@(_ : _), _)) = NamT NamRecord (TV "Record") (map typeOf ps) (map (second typeOf) rs)
   typeOf (ExistU v _ _) = typeOf (ForallU v (VarU v))
   typeOf (ForallU v t) = substituteTVar v (UnkT v) (typeOf t)
-  typeOf (FunU ts t) = FunT (map typeOf ts) (typeOf t)
+  -- One type, one spelling: `a -> (b -> c)` is `a -> b -> c`. How a function's
+  -- arguments are grouped is an implementation's choice (a source's @rsize@),
+  -- and a lambda that does work between its arguments is staged, so nothing a
+  -- morloc value is compiled to depends on how its type was parenthesized. An
+  -- effect or an empty argument list is a suspension, not a grouping.
+  typeOf (FunU ts t) = case typeOf t of
+    FunT us r | not (null ts), not (null us) -> FunT (map typeOf ts ++ us) r
+    t' -> FunT (map typeOf ts) t'
   typeOf (AppU t ts) = AppT (typeOf t) (map typeOf ts)
   typeOf (NamU n o ps rs) = NamT n o (map typeOf ps) (zip (map fst rs) (map (typeOf . snd) rs))
   typeOf (EffectU effs t) = mkEffectT (resolveEffectSet effs) (typeOf t)
@@ -886,7 +1031,7 @@ instance Typelike TypeU where
   -- nexus IO). See plans/tables/10-rec-solver-decidability.md.
   typeOf (RecVarU _) = NatVoidT
   typeOf r@(RecExtendU _ _ _) = case groundRecFields r of
-    Just fs -> NamT NamRecord (TV "Rec") [] [(Key k, typeOf t) | (k, t) <- fs]
+    Just fs -> NamT NamRecord anonRecordVar [] [(Key k, typeOf t) | (k, t) <- fs]
     Nothing -> NatVoidT
   typeOf RecVoidU = NatVoidT
   -- List- and Set-kinded constructs are entirely phantom at the ground
@@ -919,7 +1064,7 @@ instance Typelike TypeU where
   typeOf (OpU _ _) = NatVoidT  -- Rec/List/Set/cross-kind ops erase to phantom
   typeOf (LitU (LNat n)) = NatLitT n
   typeOf (LitU (LStr s)) = StrLitT s
-  typeOf (LitU (LRec fs)) = NamT NamRecord (TV "Rec") [] [(Key k, typeOf t) | (k, t) <- fs]
+  typeOf (LitU (LRec fs)) = NamT NamRecord anonRecordVar [] [(Key k, typeOf t) | (k, t) <- fs]
   typeOf (LitU (LList _)) = NatVoidT
   typeOf (LitU (LSet _)) = NatVoidT
   typeOf (LabeledU _ t) = typeOf t
@@ -1462,7 +1607,7 @@ extractKey (VoidU KindType) = TV "Type"
 extractKey (OpU op _) = opKeyTag op
 extractKey (LitU (LNat _)) = TV "Nat"
 extractKey (LitU (LStr _)) = TV "Str"
-extractKey (LitU (LRec _)) = TV "Rec"
+extractKey (LitU (LRec _)) = anonRecordVar
 extractKey (LitU (LList _)) = TV "List"
 extractKey (LitU (LSet _)) = TV "Set"
 extractKey (LabeledU _ t) = extractKey t
@@ -1477,12 +1622,12 @@ opKeyTag OpNatSub = TV "Nat"
 opKeyTag OpNatMul = TV "Nat"
 opKeyTag OpNatDiv = TV "Nat"
 opKeyTag OpStrConcat = TV "Str"
-opKeyTag OpRecExtend = TV "Rec"
-opKeyTag OpRecUnion = TV "Rec"
-opKeyTag OpRecIntersect = TV "Rec"
-opKeyTag OpRecRestrict = TV "Rec"
-opKeyTag OpRecDiffList = TV "Rec"
-opKeyTag OpRecSingleton = TV "Rec"
+opKeyTag OpRecExtend = anonRecordVar
+opKeyTag OpRecUnion = anonRecordVar
+opKeyTag OpRecIntersect = anonRecordVar
+opKeyTag OpRecRestrict = anonRecordVar
+opKeyTag OpRecDiffList = anonRecordVar
+opKeyTag OpRecSingleton = anonRecordVar
 opKeyTag OpListApp = TV "List"
 opKeyTag OpSetUnion = TV "Set"
 opKeyTag OpSetInter = TV "Set"

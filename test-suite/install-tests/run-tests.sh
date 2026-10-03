@@ -117,7 +117,7 @@ should_run() {
     if [[ $# -eq 0 ]] || [[ ${#FILTERS[@]} -eq 0 ]]; then
         return 0
     fi
-    for pat in "${FILTERS[@]}"; do
+    for pat in ${FILTERS[@]+"${FILTERS[@]}"}; do
         if [[ "$name" == *"$pat"* ]]; then
             return 0
         fi
@@ -152,7 +152,7 @@ run_install_test() {
 
     # Build and install
     local build_err
-    build_err=$(cd "$work_dir" && morloc make --install --force -o "$test_name" "${extra_args[@]}" main.loc 2>&1) || {
+    build_err=$(cd "$work_dir" && morloc make --install --force -o "$test_name" ${extra_args[@]+"${extra_args[@]}"} main.loc 2>&1) || {
         TOTAL=$((TOTAL + 1))
         printf "  %-55s " "$test_name: build"
         printf "%sFAIL%s\n" "$RED" "$RESET"
@@ -574,7 +574,7 @@ echo "${GREEN}Passed: $PASSED${RESET}, ${RED}Failed: $FAILED${RESET}, Total: $TO
 if (( FAILED > 0 )); then
     echo ""
     echo "${RED}Failures:${RESET}"
-    for f in "${FAILURES[@]}"; do
+    for f in ${FAILURES[@]+"${FAILURES[@]}"}; do
         echo "  ${RED}-${RESET} $f"
     done
     exit 1

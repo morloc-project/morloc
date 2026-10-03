@@ -1,0 +1,35 @@
+module main (applyAll, applyAllCurried)
+
+import root-rust
+
+-- A function taken from a list and applied to one of its arguments. The
+-- lambda's parameter has the type of the list's elements, whether they are
+-- functions of two arguments or functions returning functions, and the
+-- application is partial.
+
+callTwice :: (Int -> Int) -> Int
+callTwice h = h 2 + h 3
+
+plus :: Int -> Int -> Int
+plus x y = x + y
+
+times :: Int -> Int -> Int
+times x y = x * y
+
+applyEach :: [Int -> Int -> Int] -> Int -> [Int]
+applyEach fs x = map (\f -> callTwice (f x)) fs
+
+applyAll :: Int -> [Int]
+applyAll n = applyEach [plus, times] n
+
+plusC :: Int -> (Int -> Int)
+plusC x = \y -> x + y
+
+timesC :: Int -> (Int -> Int)
+timesC x = \y -> x * y
+
+applyEachC :: [Int -> (Int -> Int)] -> Int -> [Int]
+applyEachC fs x = map (\f -> callTwice (f x)) fs
+
+applyAllCurried :: Int -> [Int]
+applyAllCurried n = applyEachC [plusC, timesC] n

@@ -40,6 +40,7 @@ module Morloc.CodeGenerator.Pools.CAbi.Members.RustPrinter
 
 import qualified Data.Map as Map
 import qualified Data.Text as T
+import Text.Printf (printf)
 import Morloc.CodeGenerator.Grammars.Common (DispatchEntry (..), manNamer)
 import Morloc.CodeGenerator.Grammars.Translator.Imperative
 import Morloc.CodeGenerator.Namespace (MDoc, RealLit (..), Key (..))
@@ -114,6 +115,10 @@ printExpr (IIntrinsicRead sid (Just t) e) =
   "rustmorloc::read::<" <> rustType t <> ">(&(" <> printExpr e <> "), schema(" <> pretty sid <> "))"
 printExpr (IIntrinsicRead sid Nothing e) =
   "rustmorloc::read(&(" <> printExpr e <> "), schema(" <> pretty sid <> "))"
+printExpr (IIntrinsicUnpack sid (Just t) e) =
+  "rustmorloc::unpack::<" <> rustType t <> ">(&(" <> printExpr e <> "), schema(" <> pretty sid <> "))"
+printExpr (IIntrinsicUnpack sid Nothing e) =
+  "rustmorloc::unpack(&(" <> printExpr e <> "), schema(" <> pretty sid <> "))"
 -- A raise in a value position is typed as that value so the surrounding
 -- expression keeps its type: `!` would leave the statements after a
 -- throwing arm unreachable and give a serialized throw no `ToVoidstar`.
@@ -162,6 +167,29 @@ printExpr (IIntrinsicConcat paths dest) =
 printExpr (IIntrinsicFlush h) = "rustmorloc::flush(" <> printExpr h <> ")"
 printExpr IIntrinsicTell = "rustmorloc::tell()"
 printExpr IIntrinsicTmpfile = "rustmorloc::tmpfile()"
+printExpr (IIntrinsicCellNew sid e) =
+  "rustmorloc::cell_new(" <> schemaRef sid <> ", " <> refExpr e <> ")"
+printExpr (IIntrinsicCellGet sid mt h) =
+  "rustmorloc::cell_get" <> turbofish mt <> "(" <> schemaRef sid <> ", " <> printExpr h <> ")"
+printExpr (IIntrinsicCellPut sid h e) =
+  "rustmorloc::cell_put(" <> schemaRef sid <> ", " <> printExpr h <> ", " <> refExpr e <> ")"
+printExpr (IIntrinsicCellReduce sid mt f h) =
+  -- The accumulator type has to be given (it appears only in the return),
+  -- but the combine's type is an anonymous closure type, so it is left to
+  -- inference: a turbofish must name every parameter or none.
+  "rustmorloc::cell_reduce" <> reduceTurbofish mt <> "(" <> schemaRef sid <> ", "
+    <> printExpr f <> ", " <> printExpr h <> ")"
+printExpr (IIntrinsicChannel sid) =
+  "rustmorloc::open_channel(" <> schemaRef sid <> ")"
+printExpr (IIntrinsicSpawn sid h f) =
+  "rustmorloc::spawn(&" <> printExpr f <> ", " <> printExpr h <> ", " <> schemaRef sid <> ")"
+printExpr (IIntrinsicSettle h) =
+  "rustmorloc::settle(" <> printExpr h <> ")"
+printExpr (IIntrinsicReplay sid mt h f) =
+  -- As for cell_reduce: the element type is given, the function's closure
+  -- type is left to inference.
+  "rustmorloc::replay" <> reduceTurbofish mt <> "(" <> schemaRef sid <> ", "
+    <> printExpr h <> ", " <> printExpr f <> ")"
 printExpr (IIntrinsicStdin sid) = "rustmorloc::open_stdin(" <> schemaRef sid <> ")"
 printExpr (IIntrinsicStdout sid) = "rustmorloc::open_stdout(" <> schemaRef sid <> ")"
 printExpr (IIntrinsicStderr sid) = "rustmorloc::open_stderr(" <> schemaRef sid <> ")"
@@ -188,6 +216,11 @@ refExpr e = "&" <> parens (printExpr e)
 turbofish :: Maybe IType -> MDoc
 turbofish = maybe "" (\t -> "::<" <> rustType t <> ">")
 
+-- | Turbofish for @cell_reduce@, whose second parameter is the combine's
+-- closure type and can only be inferred.
+reduceTurbofish :: Maybe IType -> MDoc
+reduceTurbofish = maybe "" (\t -> "::<" <> rustType t <> ", _>")
+
 -- Rust non-finite float literals.
 renderRealLit :: RealLit -> MDoc
 renderRealLit (RealFinite r) = viaShow r
@@ -209,7 +242,9 @@ rustEscape = T.concatMap esc
     esc '\r' = "\\r"
     esc '\t' = "\\t"
     esc '\0' = "\\0"
-    esc c    = T.singleton c
+    esc c
+      | c < ' ' || c == '\DEL' = T.pack (printf "\\x%02x" (fromEnum c))
+      | otherwise = T.singleton c
 
 -- | Render a Rust named-field list `f0: v0, f1: v1` (no braces) from
 -- (field-name, rendered-value) pairs, escaping each name to a valid identifier.
@@ -558,7 +593,7 @@ printVariantImpls box name arms = vsep [toImpl, "", fromImpl]
                     ( [ pretty i <+> "=>" <+>
                           (if null ts
                              then "{}"
-                             else "{ let p = w.payload_ptr(data); w.child_step::<"
+                             else "{ let p = w.payload_ptr(data, &schema.parameters[" <> pretty i <> "]); w.child_step::<"
                                     <> armTy ts <> ">(&schema.parameters[" <> pretty i <> "], p); }")
                       | (i, (_, ts)) <- idxArms ]
                       <> [badTag]
@@ -573,7 +608,7 @@ printVariantImpls box name arms = vsep [toImpl, "", fromImpl]
                     ( [ pretty i <+> "=>" <+>
                           (if null ts
                              then "Self::" <> pretty c <> ","
-                             else "{ let p = w.payload_ptr(data); Self::" <> pretty c
+                             else "{ let p = w.payload_ptr(data, &schema.parameters[" <> pretty i <> "]); Self::" <> pretty c
                                     <> parens ("w.child_read::<" <> armTy ts <> ">(&schema.parameters["
                                                  <> pretty i <> "], p)") <> " }")
                       | (i, (c, ts)) <- idxArms ]
@@ -613,7 +648,7 @@ printEnumImpls name ctors = vsep [toImpl, "", fromImpl]
         [ "impl FromVoidstar for" <+> name <+> "{"
         , indent 4 $ vsep
             [ "const IS_LEAF: bool = true;"
-            , "unsafe fn read(_schema: &Schema, data: *const u8, _base: *const u8) -> Self {"
+            , "unsafe fn read(_schema: &Schema, data: *const u8, _space: rustmorloc::MorlocSpace) -> Self {"
             , indent 4 $ vsep
                 [ "match *data {"
                 , indent 4 $ vsep

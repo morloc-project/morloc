@@ -31,6 +31,24 @@ _daemon_slot = []
 workers = []
 global_state = dict()
 _shutdown_wakeup_fd = -1
+# Read end of the nexus's lifeline pipe (see morloc_lifeline_adopt), or -1.
+_lifeline_fd = -1
+
+
+class _LocalFlag:
+    """The shutdown flag of a process that shares it with no other."""
+    value = False
+
+
+def _lifeline_ended():
+    """After a poll reported the lifeline readable: whether the nexus is gone.
+    Nothing is ever written to it, so readable means end of file."""
+    try:
+        return os.read(_lifeline_fd, 1) == b""
+    except BlockingIOError:
+        return False
+    except OSError:
+        return True
 
 # The language preamble (runtime bootstrap: `import pymorloc as morloc`, path
 # setup) and the generated schema/closure tables run at module top, in the
@@ -43,6 +61,10 @@ _shutdown_wakeup_fd = -1
 # is built from it.
 def mlc_closure_codec(tuple_schema, arg_codecs, res_codec):
     return ("__mlc_closure__", tuple_schema, arg_codecs, res_codec)
+
+# The schema of every closure's wire tuple (home, manifold id, captured
+# packets); must equal the one Morloc.CodeGenerator.Serial emits.
+_MLC_CLOSURE_SCHEMA = "t3sjaau1"
 
 # AUTO include preamble start
 # <<<BREAK>>>
@@ -166,19 +188,35 @@ def _init_worker_tracking(busy, total, wakeup_fd):
     _total_ref = total
     _wakeup_fd = wakeup_fd
     morloc.foreign_call = _tracked_foreign_call
+    # A channel read or write waits on another worker, which may need a
+    # free worker of this pool to make progress.
+    morloc.mlc_next = _tracked_on_channel(morloc.mlc_next, 1)
+    morloc.mlc_write = _tracked_on_channel(morloc.mlc_write, 3)
+    morloc.mlc_flush = _tracked_on_channel(morloc.mlc_flush, 0)
+    morloc.mlc_close = _tracked_on_channel(morloc.mlc_close, 0)
+
+def _tracked_on_channel(f, handle_pos):
+    def g(*args):
+        if morloc.mlc_is_channel(args[handle_pos]):
+            return _tracked_call(f, *args)
+        return f(*args)
+    return g
 
 def _tracked_foreign_call(*args):
-    prev = _busy_ref.value
-    _busy_ref.value = prev + 1
-    if prev + 1 >= _total_ref.value and _wakeup_fd >= 0:
+    return _tracked_call(_original_foreign_call, *args)
+
+def _tracked_call(f, *args):
+    busy_addr = ctypes.addressof(_busy_ref)
+    busy = morloc.atomic_add_int(busy_addr, 1)
+    if busy >= _total_ref.value and _wakeup_fd >= 0:
         try:
             os.write(_wakeup_fd, b'!')
         except OSError:
             pass
     try:
-        return _original_foreign_call(*args)
+        return f(*args)
     finally:
-        _busy_ref.value -= 1
+        morloc.atomic_add_int(busy_addr, -1)
 
 def __mlc_wrap_log(group, start_tmpl, pass_tmpl, fail_tmpl, bench_key, fn):
     # bench_key is "group\tname\tlang" when the label carries
@@ -201,6 +239,8 @@ def __mlc_wrap_log(group, start_tmpl, pass_tmpl, fail_tmpl, bench_key, fn):
             if fail_tmpl is not None:
                 morloc.log_emit(fail_tmpl, group, time.monotonic() - t0, call_id)
             raise
+    # keep the manifold's name: a closure over it is identified by it
+    go.__name__ = getattr(fn, "__name__", "go")
     return go
 
 
@@ -282,15 +322,29 @@ def mlc_reify(f, home_lang):
         raise RuntimeError(
             f"morloc: no closure codecs for manifold {mid}; it was not "
             "registered as a crossing closure")
-    cap_codecs = mlc_closure_table[mid]
-    if len(captured) != len(cap_codecs):
+    cap_codecs, bnd_codecs = mlc_closure_table[mid]
+    # A partial application of the closure carries its applied arguments
+    # after its context ('mlc_papply'), so the captured values are the
+    # context and a prefix of the bound arguments.
+    if not (len(cap_codecs) <= len(captured) <= len(cap_codecs) + len(bnd_codecs)):
         raise RuntimeError(
             f"morloc: manifold {mid} captured {len(captured)} values but "
-            f"{len(cap_codecs)} codecs are registered")
+            f"{len(cap_codecs)} context codecs are registered")
+    cap_codecs = (cap_codecs + bnd_codecs)[:len(captured)]
     # A captured value is applied back after this dispatch has released
     # its blocks, so it must travel inside its packet.
     packets = [mlc_encode(c, s, True) for c, s in zip(captured, cap_codecs)]
     return (home_lang, mid, packets)
+
+
+def mlc_spawn(f, handle, schema):
+    # Start the producer `f` on the channel as a separate dispatch in its
+    # home pool, without waiting for it. The channel travels as the
+    # producer's OStream argument, after its captured values.
+    home, mid, packets = mlc_reify(f, MLC_HOME_LANG)
+    packets = list(packets) + [morloc.put_value(handle, schema, True)]
+    sock = os.path.join(global_state["tmpdir"], "pipe-" + home)
+    morloc.mlc_spawn(sock, mid, packets, handle)
 
 
 def _mlc_manifold_id(f):
@@ -308,6 +362,41 @@ def _mlc_manifold_id(f):
         "to send across a pool boundary")
 
 
+def _mlc_call_released(sock, mid, packets, own, res_codec):
+    # Call a manifold in another pool and read its result. The packets in
+    # `own` were made for this call alone, and the result is read into a value
+    # of this pool's own, so each is released here rather than held until the
+    # dispatch ends. A None codec reads a closure wire tuple.
+    try:
+        res = morloc.foreign_call(sock, mid, packets)
+    finally:
+        for p in own:
+            morloc.release_packet_shm(p)
+    try:
+        if res_codec is None:
+            return morloc.get_value(res, _MLC_CLOSURE_SCHEMA)
+        return mlc_decode(res, res_codec)
+    finally:
+        morloc.release_packet_shm(res)
+
+
+class _MlcOwnedPacket(bytes):
+    # A packet made for one call's argument list. CPython drops it as soon as
+    # the call has returned and the argument list is gone, and dropping it
+    # releases the shared memory it names.
+    __slots__ = ()
+
+    def __del__(self):
+        try:
+            morloc.release_packet_shm(self)
+        except Exception:
+            pass
+
+
+def _mlc_owned(packet):
+    return _MlcOwnedPacket(packet)
+
+
 def mlc_reflect_from_tuple(tup, arg_codecs, res_codec):
     # Rebuild a callable from an already-deserialized closure wire tuple
     # (home_lang, mid, captured_packets). On application it serializes its
@@ -318,9 +407,10 @@ def mlc_reflect_from_tuple(tup, arg_codecs, res_codec):
     home_lang, mid, captured = tup
     sock = os.path.join(global_state["tmpdir"], "pipe-" + home_lang)
     def _call(*args):
-        packets = list(captured) + [mlc_encode(a, s) for a, s in zip(args, arg_codecs)]
-        return mlc_decode(morloc.foreign_call(sock, mid, packets), res_codec)
+        own = [mlc_encode(a, s) for a, s in zip(args, arg_codecs)]
+        return _mlc_call_released(sock, mid, list(captured) + own, own, res_codec)
     _call.__mlc_origin__ = (home_lang, mid, list(captured))
+    _call.__mlc_codecs__ = (arg_codecs, res_codec)
     return _call
 
 
@@ -329,6 +419,65 @@ def mlc_reflect(pkt, tuple_schema, arg_codecs, res_codec):
     # tuple, then reflect it. Used when the closure is the top-level crossing
     # value (the whole packet is the closure tuple).
     return mlc_reflect_from_tuple(morloc.get_value(pkt, tuple_schema), arg_codecs, res_codec)
+
+
+def mlc_papply(f, xs):
+    # Apply a function value to its first arguments. A staged function (one
+    # that does work after these arguments and before the rest) runs that
+    # work now, once, through its stage entry, and the closure it returns is
+    # the result; otherwise the arguments are kept with the function, which
+    # runs when it gets the rest. mlc_stage_table maps a flat entry's
+    # manifold id to (context size, first stage point, stage entry id).
+    xs = list(xs)
+    if not xs:
+        return f
+    origin = getattr(f, "__mlc_origin__", None)
+    if origin is not None:
+        return _mlc_papply_remote(f, origin, xs)
+    if isinstance(f, functools.partial):
+        fn = f.func
+        caps = list(f.args)
+    else:
+        fn = f
+        caps = []
+    name = getattr(fn, "__name__", None)
+    if not (name is not None and name.startswith("m") and name[1:].isdigit()):
+        # a function host code made: it has no stages morloc knows of
+        return functools.partial(f, *xs)
+    mid = int(name[1:])
+    take, smid = _mlc_stage_take(mid, len(caps))
+    if take is None or len(xs) < take:
+        return functools.partial(fn, *caps, *xs)
+    g = globals()["m" + str(smid)](*caps, *xs[:take])
+    return mlc_papply(g, xs[take:])
+
+
+def _mlc_stage_take(mid, ncaptured):
+    # How many more arguments closure `mid`, holding `ncaptured` captured
+    # values, takes before its stage point, and its stage entry; (None, None)
+    # when it has none.
+    entry = mlc_stage_table.get(mid)
+    if entry is None:
+        return None, None
+    nctx, k, smid = entry
+    return k - (ncaptured - nctx), smid
+
+
+def _mlc_papply_remote(f, origin, xs):
+    # The same, for a closure that lives in another pool: its stage entry
+    # runs there, and the closure it returns comes back as a reflected proxy.
+    home_lang, mid, packets = origin
+    arg_codecs, res_codec = f.__mlc_codecs__
+    take, smid = _mlc_stage_take(mid, len(packets))
+    if take is None or len(xs) < take:
+        more = [mlc_encode(x, c, True) for x, c in zip(xs, arg_codecs)]
+        return mlc_reflect_from_tuple(
+            (home_lang, mid, list(packets) + more), arg_codecs[len(xs):], res_codec)
+    sock = os.path.join(global_state["tmpdir"], "pipe-" + home_lang)
+    own = [mlc_encode(x, c) for x, c in zip(xs[:take], arg_codecs)]
+    tup = _mlc_call_released(sock, smid, list(packets) + own, own, None)
+    g = mlc_reflect_from_tuple(tup, arg_codecs[take:], res_codec)
+    return mlc_papply(g, xs[take:])
 
 
 def mlc_make_closure_dispatch(mid, arg_codecs, res_codec):
@@ -366,7 +515,8 @@ def _with_debug_trace(msg: str) -> str:
 
 def run_job(client_fd: int) -> None:
     try:
-        # Free SHM from previous dispatch result (consumed by caller)
+        # Anything left on this thread outside a dispatch; a dispatch's own
+        # entries are released after its reply (see the finally below).
         morloc.shm_tracker_flush()
         morloc.debug_flush_dispatch()
         client_data = morloc.stream_from_client(client_fd)
@@ -436,6 +586,10 @@ def run_job(client_fd: int) -> None:
         # matches. Without this a leaked @stdout claim wedges every later
         # open with "@stdout already open in this nexus".
         morloc.reclaim_stdio_after_dispatch()
+        # The reply carried the caller's own reference to its value, so
+        # what this dispatch still holds is released now rather than when
+        # this worker next runs.
+        morloc.shm_tracker_flush()
         # Safety-net flush for any output from error handling paths
         sys.stdout.flush()
         # close child copy
@@ -476,7 +630,7 @@ def worker_process(job_fd, tmpdir, shm_basename, shutdown_flag, busy_count, tota
     # manifold (`mN`) that was executing; the parent reports the signal.
     faulthandler.enable()
     morloc.set_fallback_dir(tmpdir)
-    morloc.shinit(shm_basename, 0, 0xffff)
+    morloc.shinit(shm_basename, morloc.PRIMARY_VOLUME, 0xffff)
     # Load user sources HERE, post-fork, in the worker's own process (see the
     # _mlc_user_sources note). A failure is recorded, not raised: run_job turns
     # it into a fail packet so the caller gets the real import error.
@@ -652,7 +806,7 @@ def run_thread_pool(socket_path, tmpdir, shm_basename):
     # forfeit the required in-pool parallelism.
     faulthandler.enable()
     morloc.set_fallback_dir(tmpdir)
-    morloc.shinit(shm_basename, 0, 0xffff)  # attach SHM once for the process
+    morloc.shinit(shm_basename, morloc.PRIMARY_VOLUME, 0xffff)  # attach SHM once for the process
     _mlc_load_user_sources()  # no fork on this path -> safe to import in-thread
 
     daemon = _hold_daemon(morloc.start_daemon(socket_path, tmpdir, shm_basename, 0xffff))
@@ -748,9 +902,22 @@ def run_thread_pool(socket_path, tmpdir, shm_basename):
     listener = threading.Thread(target=_listener_loop, daemon=True)
     listener.start()
 
+    lifeline = select.poll()
+    if _lifeline_fd >= 0:
+        lifeline.register(_lifeline_fd, select.POLLIN)
     try:
         while not stop.is_set():
-            time.sleep(0.05)
+            # Signals reach Python handlers on this thread only, so a user's
+            # handler that raises (a SIGALRM timeout, say) raises here; that
+            # is the user's error, not a reason to stop serving.
+            try:
+                if _lifeline_fd < 0:
+                    time.sleep(0.05)
+                elif lifeline.poll(50) and _lifeline_ended():
+                    lifeline.unregister(_lifeline_fd)
+                    morloc.lifeline_teardown()
+            except Exception as e:
+                print(f"morloc pool: a signal handler raised: {e!r}", file=sys.stderr)
     finally:
         stop.set()
         # Join the listener so it is no longer inside wait_for_client(daemon)
@@ -792,23 +959,16 @@ if __name__ == "__main__":
     except (RuntimeError, ValueError):
         pass
 
-    # Request SIGTERM when the parent process (nexus) dies (Linux only).
-    # Without this, SIGKILL on the nexus leaves pool processes orphaned and
-    # their SHM segments leak. macOS has no prctl/PR_SET_PDEATHSIG equivalent,
-    # so this is a known parity gap there: a SIGKILL'd nexus can orphan pools
-    # (normal shutdown is still clean via the nexus's process-group teardown).
-    try:
-        import ctypes
-        _PR_SET_PDEATHSIG = 1
-        ctypes.CDLL("libc.so.6", use_errno=True).prctl(_PR_SET_PDEATHSIG, signal.SIGTERM)
-    except Exception:
-        pass  # non-Linux (e.g. macOS): no PDEATHSIG -- see the note above
+    # The nexus's lifeline: the main loops below poll it and end this pool's
+    # process group when the nexus ends, however it ends. Polled rather than
+    # watched from a thread, so a fork-model pool stays single-threaded.
+    _lifeline_fd = morloc.lifeline_adopt()
 
-    # RawValue (no lock), not Value: the SIGTERM/SIGINT handler writes this flag,
-    # and a Value's semaphore lock is not async-signal-safe -- acquiring it in the
-    # handler while the interrupted code already holds it can deadlock/corrupt at
-    # teardown. A single-byte flag needs no lock (byte writes are atomic).
-    shutdown_flag = RawValue('b', False)  # Shared flag (lock-free)
+    # The SIGTERM/SIGINT handler sets this. A plain flag until the fork model
+    # needs one its workers share: a
+    # multiprocessing value is backed, off Linux, by a file in a pymp-*
+    # temporary directory that only an orderly exit removes.
+    shutdown_flag = _LocalFlag()
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -835,6 +995,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     global_state["tmpdir"] = tmpdir
+    morloc.set_self_socket(socket_path)
 
     # Thread-based pool (macOS default; forced anywhere via MORLOC_PY_POOL=thread).
     # Avoids forking a live CPython interpreter. Everything below this branch is
@@ -842,6 +1003,12 @@ if __name__ == "__main__":
     if _select_pool_mode() == "thread":
         run_thread_pool(socket_path, tmpdir, shm_basename)
         sys.exit(0)
+
+    # Shared with the workers. RawValue (no lock), not Value: the signal
+    # handler writes it, and a Value's semaphore lock is not async-signal-safe
+    # -- acquiring it in the handler while the interrupted code holds it can
+    # deadlock at teardown. A single byte needs no lock.
+    shutdown_flag = RawValue('b', shutdown_flag.value)
 
     # Shared job queue: listener writes fds to write_sock, workers read from read_sock.
     # Only idle workers (blocked in recvmsg) pick up jobs, preventing the round-robin
@@ -884,9 +1051,16 @@ if __name__ == "__main__":
     # the FD_SETSIZE=1024 ceiling.
     wakeup_poller = select.poll()
     wakeup_poller.register(wakeup_r, select.POLLIN)
+    if _lifeline_fd >= 0:
+        wakeup_poller.register(_lifeline_fd, select.POLLIN)
     while not shutdown_flag.value:
         events = wakeup_poller.poll(10)  # milliseconds (was 0.01s)
-        if events:
+        for fd, _ in events:
+            if fd == _lifeline_fd:
+                if _lifeline_ended():
+                    wakeup_poller.unregister(_lifeline_fd)
+                    morloc.lifeline_teardown()
+                continue
             try:
                 os.read(wakeup_r, 4096)  # drain pipe
             except OSError:

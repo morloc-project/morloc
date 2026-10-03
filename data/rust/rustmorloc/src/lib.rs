@@ -17,7 +17,8 @@
 //!        `morloc-runtime-types::packet` Vec builders are never used for a
 //!        returned value.
 //!  * I3  SHM allocated for a result outlives the socket send; freeing is
-//!        deferred to the next dispatch via `dispatch_flush`. A per-alloc
+//!        deferred until the reply is sent, via `dispatch_flush` (the pool's
+//!        after-reply hook). A per-alloc
 //!        `ShmGuard` reclaims a half-built block if serialization panics.
 //!  * I4  The recur env is thread-local (THREAD concurrency runs manifolds in
 //!        one address space).
@@ -67,8 +68,11 @@ extern "C" {
     fn shmalloc(size: usize, errmsg: *mut *mut c_char) -> *mut c_void;
     fn shfree(ptr: *mut c_void, errmsg: *mut *mut c_char) -> bool;
     fn shincref(ptr: *mut c_void, errmsg: *mut *mut c_char) -> bool;
+    fn morloc_dup_packet(packet: *const u8, block_out: *mut *mut c_void,
+                         errmsg: *mut *mut c_char) -> *mut u8;
     fn abs2rel(ptr: *mut c_void, errmsg: *mut *mut c_char) -> isize;
     fn rel2abs(ptr: isize, errmsg: *mut *mut c_char) -> *mut c_void;
+    fn rel2abs_extent(ptr: isize, extent: usize, errmsg: *mut *mut c_char) -> *mut c_void;
     fn make_data_packet_auto(voidstar: *mut c_void, relptr: isize,
                              schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut u8;
     fn get_morloc_data_packet_value(data: *const u8, schema: *const CSchema,
@@ -76,13 +80,13 @@ extern "C" {
     // Tables: Arrow C Data Interface <-> SHM table block (see arrow_ffi.rs).
     fn arrow_to_shm_typed(array: *mut FFI_ArrowArray, schema: *const FFI_ArrowSchema,
                           declared: *const CSchema, errmsg: *mut *mut c_char) -> isize;
-    fn arrow_from_shm(header: *const c_void, out_schema: *mut FFI_ArrowSchema,
-                      out_array: *mut FFI_ArrowArray, errmsg: *mut *mut c_char) -> i32;
+    fn arrow_from_shm_owned(header: *const c_void, acquire: i32,
+                            out_schema: *mut FFI_ArrowSchema,
+                            out_array: *mut FFI_ArrowArray,
+                            errmsg: *mut *mut c_char) -> i32;
     fn arrow_validate(header: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> i32;
     fn make_arrow_data_packet(relptr: isize, schema: *const CSchema) -> *mut u8;
     fn make_inline_data_packet(voidstar: *mut c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut u8;
-    fn arrow_borrow_register(base: *const u8, rel: isize);
-    fn arrow_borrow_clear();
     fn make_fail_packet(msg: *const c_char) -> *mut u8;
     // Cross-pool foreign call primitives (see `foreign_call`).
     fn make_morloc_local_call_packet(midx: u32, arg_packets: *const *const u8,
@@ -101,9 +105,9 @@ extern "C" {
     // RPC to the nexus) lives behind these symbols in libmorloc, so each Rust
     // shim below is a thin wrapper, mirroring the C++ pool's `_mlc_*` helpers.
     fn mlc_hash(data: *const c_void, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_char;
-    fn mlc_save(data: *const c_void, schema: *const CSchema, level: u8, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
-    fn mlc_save_json(data: *const c_void, schema: *const CSchema, level: u8, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
-    fn mlc_save_voidstar(data: *const c_void, schema: *const CSchema, level: u8, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_save(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_save_json(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_save_voidstar(data: *const c_void, schema: *const CSchema, level: i64, path: *const c_char, errmsg: *mut *mut c_char) -> i32;
     fn mlc_load(path: *const c_char, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void;
     fn mlc_open(path: *const c_char, kind: u8, errmsg: *mut *mut c_char) -> i64;
     fn mlc_close(handle: i64, errmsg: *mut *mut c_char) -> i32;
@@ -111,15 +115,25 @@ extern "C" {
     fn mlc_fschema(path: *const c_char, errmsg: *mut *mut c_char) -> *mut c_char;
     fn mlc_ifile_length(handle: i64, errmsg: *mut *mut c_char) -> i64;
     fn mlc_next(handle: i64, errmsg: *mut *mut c_char) -> *mut c_void;
+    fn mlc_next_frame(handle: i64, eof: *mut i32, errmsg: *mut *mut c_char) -> *mut c_void;
     fn mlc_stream_layout(handle: i64, errmsg: *mut *mut c_char) -> *mut c_void;
     fn mlc_stream(ifile_handle: i64, errmsg: *mut *mut c_char) -> i64;
     fn mlc_ifile_walk(handle: i64, path: *const c_char, args_ptr: *const IFileWalkArg, n_args: u64, errmsg: *mut *mut c_char) -> *mut c_void;
-    fn mlc_write(level: u8, handle: i64, payload_voidstar: *const c_void, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_write(level: i64, handle: i64, payload_voidstar: *const c_void, errmsg: *mut *mut c_char) -> i32;
     fn mlc_append(schema_str: *const c_char, path: *const c_char, errmsg: *mut *mut c_char) -> i64;
     fn mlc_concat(paths: *const *const c_char, n_paths: usize, dest: *const c_char, errmsg: *mut *mut c_char) -> i32;
     fn mlc_flush(handle: i64, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_open_channel(schema_str: *const c_char, errmsg: *mut *mut c_char) -> i64;
+    fn mlc_settle(handle: i64, errmsg: *mut *mut c_char) -> bool;
+    fn mlc_spawn(socket_path: *const c_char, mid: u32, args: *const *const u8, nargs: usize, handle: i64, errmsg: *mut *mut c_char) -> bool;
     fn mlc_tell(errmsg: *mut *mut c_char) -> u64;
     fn mlc_tmpfile(errmsg: *mut *mut c_char) -> *mut c_char;
+    fn mlc_cell_new(schema: *const CSchema, init: *const c_void, errmsg: *mut *mut c_char) -> i64;
+    fn mlc_cell_get(handle: i64, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void;
+    fn mlc_cell_put(handle: i64, schema: *const CSchema, value: *const c_void, errmsg: *mut *mut c_char) -> i32;
+    fn mlc_cell_count(handle: i64, errmsg: *mut *mut c_char) -> i64;
+    fn mlc_cell_slot(handle: i64, index: i64, schema: *const CSchema, errmsg: *mut *mut c_char) -> *mut c_void;
+    fn mlc_cell_free(handle: i64, errmsg: *mut *mut c_char) -> i32;
     fn mlc_open_ostream(schema_str: *const c_char, path: *const c_char, errmsg: *mut *mut c_char) -> i64;
     fn mlc_open_istream(schema_str: *const c_char, path: *const c_char, errmsg: *mut *mut c_char) -> i64;
     fn mlc_open_stdin(schema_str: *const c_char, errmsg: *mut *mut c_char) -> i64;
@@ -132,9 +146,9 @@ extern "C" {
     // bare u64 slot id in-pool, but crosses a boundary as a 16-byte tagged field
     // (TAG_HANDLE inline, or TAG_PATH + a path suballoc) so the receiving pool
     // can re-resolve the slot. These marshal that field; `cursor` advances past
-    // any path suballoc, `base_ptr` resolves a relptr (null for in-SHM reads).
+    // any path suballoc; `space` is where a read's relptrs lead.
     fn mlc_write_handle_voidstar(handle: i64, dest: *mut c_void, cursor: *mut *mut c_void, errmsg: *mut *mut c_char) -> i32;
-    fn mlc_read_handle_voidstar(field: *const c_void, base_ptr: *const c_void, kind: u8, errmsg: *mut *mut c_char) -> i64;
+    fn mlc_read_handle_voidstar(field: *const c_void, space: MorlocSpace, kind: u8, errmsg: *mut *mut c_char) -> i64;
     // Remote (SLURM/nexus-dispatched) call. Builds the remote packet, resolves
     // the `_remote` cache dir, rewrites args to self-contained form, and
     // dispatches to the nexus. Renamed via link_name so the wrapper below can
@@ -186,21 +200,49 @@ struct IFileWalkArg {
 // schema is fixed for the process lifetime (parsed once into the pool's schema
 // table), so its CSchema conversion is cached per schema -- keyed by the stable
 // &'static Schema address -- instead of being rebuilt and freed on every
-// dispatch. Built once per thread per schema and intentionally never freed
-// (bounded: one entry per distinct schema). This removes a full CSchema-tree
-// allocate + free from the per-manifold-call hot path (put_value always; the
-// get_value SHM path).
-thread_local! {
-    static CSCHEMA_CACHE: RefCell<HashMap<usize, *mut CSchema>> = RefCell::new(HashMap::new());
+// dispatch. Built once per thread per schema and freed when the thread ends
+// (bounded per thread: one entry per distinct schema). A pool worker lives as
+// long as the pool, but a sourced function may spawn short-lived threads that
+// call manifolds, and a cache outliving those would grow with every call. This
+// removes a full CSchema-tree allocate + free from the per-manifold-call hot
+// path (put_value always; the get_value SHM path).
+struct CSchemaCache(RefCell<HashMap<usize, *mut CSchema>>);
+
+impl Drop for CSchemaCache {
+    fn drop(&mut self) {
+        for (_key, cs) in self.0.borrow_mut().drain() {
+            #[cfg(test)]
+            {
+                let mut live = LIVE_CSCHEMAS.lock().unwrap();
+                if let Some(i) = live.iter().position(|k| *k == _key) {
+                    live.swap_remove(i);
+                }
+            }
+            unsafe { CSchema::free(cs) };
+        }
+    }
 }
+
+thread_local! {
+    static CSCHEMA_CACHE: CSchemaCache = CSchemaCache(RefCell::new(HashMap::new()));
+}
+
+// Schemas whose conversion a thread has cached and not yet freed, one entry
+// per cached conversion. Test-only bookkeeping for the cache's lifetime.
+#[cfg(test)]
+static LIVE_CSCHEMAS: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
 
 #[inline]
 fn cschema_of(schema: &Schema) -> *mut CSchema {
     let key = schema as *const Schema as usize;
     CSCHEMA_CACHE.with(|c| {
-        *c.borrow_mut()
+        *c.0.borrow_mut()
             .entry(key)
-            .or_insert_with(|| CSchema::from_rust(schema))
+            .or_insert_with(|| {
+                #[cfg(test)]
+                LIVE_CSCHEMAS.lock().unwrap().push(key);
+                CSchema::from_rust(schema)
+            })
     })
 }
 
@@ -282,19 +324,59 @@ unsafe fn to_rel(ptr: *mut u8) -> RelPtr {
         encode_relptr(0, (ptr as usize) - base)
     } else {
         let mut err: *mut c_char = std::ptr::null_mut();
-        abs2rel(ptr as *mut c_void, &mut err)
+        let rel = abs2rel(ptr as *mut c_void, &mut err);
+        if !err.is_null() {
+            morloc_throw(cstr_take(err));
+        }
+        rel
     }
 }
 
-/// Resolve a relptr to an absolute pointer. `base` non-null => offset
-/// arithmetic (inline MESG packet / test buffer); null => SHM volume table.
+/// Where a value's relptrs lead: shared memory when `base` is null, else an
+/// inline payload of `len` bytes (a packet body or a test buffer). The C
+/// `morloc_space_t`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MorlocSpace {
+    pub base: *const u8,
+    pub len: usize,
+}
+
+impl MorlocSpace {
+    pub const SHM: MorlocSpace = MorlocSpace { base: std::ptr::null(), len: 0 };
+
+    pub fn payload(base: *const u8, len: usize) -> MorlocSpace {
+        MorlocSpace { base, len }
+    }
+}
+
+/// Resolve `rel` to `extent` readable bytes in `space`, or throw.
 #[inline]
-unsafe fn resolve(rel: RelPtr, base: *const u8) -> *const u8 {
-    if !base.is_null() {
-        base.add(relptr_offset(rel))
-    } else {
-        let mut err: *mut c_char = std::ptr::null_mut();
-        rel2abs(rel, &mut err) as *const u8
+unsafe fn resolve(rel: RelPtr, extent: usize, space: MorlocSpace) -> *const u8 {
+    if !space.base.is_null() {
+        let off = relptr_offset(rel);
+        if rel >= 0 && off <= space.len && extent <= space.len - off {
+            return space.base.add(off);
+        }
+        morloc_throw(format!(
+            "a {extent}-byte region at offset {off} runs past the {}-byte payload",
+            space.len
+        ));
+    }
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let p = rel2abs_extent(rel, extent, &mut err) as *const u8;
+    if !err.is_null() || p.is_null() {
+        morloc_throw(if err.is_null() { format!("relptr {rel} did not resolve") } else { cstr_take(err) });
+    }
+    p
+}
+
+/// Resolve the data of `n` elements of `width` bytes.
+#[inline]
+unsafe fn resolve_array(rel: RelPtr, n: usize, width: usize, space: MorlocSpace) -> *const u8 {
+    match n.checked_mul(width) {
+        Some(extent) => resolve(rel, extent, space),
+        None => morloc_throw(format!("an array of {n} {width}-byte elements overflows")),
     }
 }
 
@@ -379,15 +461,12 @@ pub fn resolve_recur(schema: &Schema) -> &Schema {
 }
 
 // ---------------------------------------------------------------------------
-// SHM lifetime (I3): a deferred-free tracker flushed at dispatch entry, plus a
+// SHM lifetime (I3): a deferred-free tracker flushed after each reply, plus a
 // per-alloc RAII guard that reclaims a half-built block on panic.
 // ---------------------------------------------------------------------------
 /// Holds the deferred-release list so that the blocks are released when the
-/// thread ends as well as at the next dispatch. A worker is retired only
-/// after going idle for longer than the dispatch that would otherwise have
-/// flushed it, so releasing here is never earlier than the release it stands
-/// in for; it simply happens on a thread that has no next dispatch to do it.
-/// Without this a retired worker takes its last dispatch's blocks with it.
+/// thread ends as well as after each reply, for what a thread holds outside
+/// any dispatch.
 struct ShmTracker(Cell<Vec<*mut c_void>>);
 
 impl Drop for ShmTracker {
@@ -415,10 +494,83 @@ fn track(ptr: *mut c_void) {
     });
 }
 
-/// Free all deferred SHM blocks from the previous dispatch. Generated
-/// `local_dispatch`/`remote_dispatch` call this at entry (cpp: pool.cpp:979).
+/// Finish with a packet: give back the shared memory it names, if it
+/// names any, and free the packet itself when nothing built from it can
+/// still be reading it. The codegen inserts this call where a packet's
+/// scope ends, which is the last moment anything can know the packet is
+/// done with -- a pool answering requests for as long as it is asked to
+/// has no later one.
+///
+/// `owned` is false where the value read out of the packet is a function
+/// value, which carries the packets of whatever it captured so that it
+/// can be applied later or handed on again; those bytes are the packet's.
+/// Every other value is read out into storage of its own.
+///
+/// # Safety
+/// `packet` must be a packet this manifold owns and has finished reading.
+pub unsafe fn release_packet(packet: *const u8, owned: bool) {
+    if packet.is_null() {
+        return;
+    }
+    if *packet.add(PKT_SOURCE_OFF) == PKT_SOURCE_RPTR {
+        let offset = core::ptr::read_unaligned(packet.add(PKT_OFFSET_OFF) as *const u32) as usize;
+        let relptr = core::ptr::read_unaligned(packet.add(PKT_HEADER_SIZE + offset) as *const isize);
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let block = rel2abs(relptr, &mut err);
+        discard_err(err);
+        if !block.is_null() {
+            release_tracked(block);
+        }
+    }
+    if owned {
+        libc::free(packet as *mut c_void);
+    }
+}
+
+/// A packet built for one call's argument list. Dropping it releases it; a
+/// temporary lives to the end of its statement, so one passed to a call is
+/// released once the call has returned, or when a panic unwinds past it.
+pub struct Packet(*mut u8);
+
+impl Packet {
+    pub fn new(packet: *mut u8) -> Packet {
+        Packet(packet)
+    }
+
+    pub fn as_ptr(&self) -> *const u8 {
+        self.0
+    }
+}
+
+impl Drop for Packet {
+    fn drop(&mut self) {
+        unsafe { release_packet(self.0, true) }
+    }
+}
+
+/// Drop one tracker entry for this block and give its reference back.
+/// Anything not tracked here belongs to someone else and is left alone.
+unsafe fn release_tracked(block: *mut c_void) {
+    let found = SHM_TRACKER.with(|t| {
+        let mut v = t.0.take();
+        let hit = v.iter().position(|p| *p == block);
+        if let Some(i) = hit {
+            v.swap_remove(i);
+        }
+        t.0.set(v);
+        hit.is_some()
+    });
+    if found {
+        let mut err: *mut c_char = std::ptr::null_mut();
+        shfree(block, &mut err);
+        discard_err(err);
+    }
+}
+
+/// Free all deferred SHM blocks. The pool runs this once a dispatch's reply
+/// is sent; generated `local_dispatch`/`remote_dispatch` also call it at
+/// entry, for anything the thread held outside a dispatch.
 pub fn dispatch_flush() {
-    unsafe { arrow_borrow_clear() };
     SHM_TRACKER.with(|t| {
         let v = t.0.take();
         for ptr in &v {
@@ -673,8 +825,8 @@ pub trait FromVoidstar: Sized {
     /// # Safety
     /// `data` must point at a valid `schema`-shaped inline slot; `base` is the
     /// relptr resolution base (see `resolve`).
-    unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self {
-        let mut w = ReadWalk::new(schema, base);
+    unsafe fn read(schema: &Schema, data: *const u8, space: MorlocSpace) -> Self {
+        let mut w = ReadWalk::new(schema, space);
         w.read_root::<Self>(schema, data)
     }
     /// Framed read, first half: push this node's finish frame, then its
@@ -1103,7 +1255,7 @@ pub struct ReadWalk {
     stack: Vec<ReadFrame>,
     cur: ReadFrame,
     pub values: ValueStack,
-    pub base: *const u8,
+    pub space: MorlocSpace,
     pub direct: bool,
 }
 
@@ -1117,12 +1269,12 @@ unsafe fn read_finish_thunk<T: FromVoidstar>(w: &mut ReadWalk, s: &Schema, data:
 }
 
 impl ReadWalk {
-    pub fn new(root: &Schema, base: *const u8) -> ReadWalk {
+    pub fn new(root: &Schema, space: MorlocSpace) -> ReadWalk {
         ReadWalk {
             stack: Vec::new(),
             cur: ReadFrame::PopEnv,
             values: ValueStack::new(),
-            base,
+            space,
             direct: !schema_has_recur(root),
         }
     }
@@ -1168,7 +1320,7 @@ impl ReadWalk {
     /// As for `FromVoidstar::read`.
     pub unsafe fn child_read<T: FromVoidstar>(&mut self, schema: &Schema, data: *const u8) -> T {
         if T::IS_LEAF {
-            T::read(resolve_recur(schema), data, self.base)
+            T::read(resolve_recur(schema), data, self.space)
         } else if self.flat(schema) {
             T::read_finish(self, resolve_recur(schema), data)
         } else {
@@ -1202,9 +1354,9 @@ impl ReadWalk {
     ///
     /// # Safety
     /// `data` must point at a variant slot whose payload pointer is live.
-    pub unsafe fn payload_ptr(&self, data: *const u8) -> *const u8 {
+    pub unsafe fn payload_ptr(&self, data: *const u8, arm: &Schema) -> *const u8 {
         let rel = core::ptr::read_unaligned(data.add(VARIANT_PAYLOAD) as *const RelPtr);
-        resolve(rel, self.base)
+        resolve(rel, resolve_recur(arm).width, self.space)
     }
 
     pub fn run(&mut self) {
@@ -1252,7 +1404,7 @@ impl ToVoidstar for RecordBatch {
 }
 impl FromVoidstar for RecordBatch {
     const IS_LEAF: bool = true;
-    unsafe fn read(_schema: &Schema, _data: *const u8, _base: *const u8) -> Self {
+    unsafe fn read(_schema: &Schema, _data: *const u8, _space: MorlocSpace) -> Self {
         morloc_infra_abort("a table cannot be read through the voidstar path")
     }
     unsafe fn arrow_import(array: FFI_ArrowArray, schema: &FFI_ArrowSchema) -> Option<Self> {
@@ -1272,7 +1424,7 @@ fn handle_kind(t: SerialType) -> u8 {
         SerialType::IFile => 0,
         SerialType::IStream => 1,
         SerialType::OStream => 2,
-        _ => 0,
+        SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::Variant | SerialType::Enum => 0,
     }
 }
 
@@ -1313,14 +1465,19 @@ macro_rules! int_impl {
                         core::ptr::write_unaligned(dest as *mut i64, 1);
                         core::ptr::write_unaligned((dest as *mut i64).add(1), *self as i64);
                     }
-                    _ => core::ptr::write_unaligned(dest as *mut $t, *self), // I8 unaligned
+                    SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16
+                    | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16
+                    | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64
+                    | SerialType::String | SerialType::Array | SerialType::Tuple | SerialType::Map
+                    | SerialType::Optional | SerialType::Table | SerialType::Recur | SerialType::Variant
+                    | SerialType::Enum => write_int(schema, dest, *self as i128),
                 }
             }
         }
         impl FromVoidstar for $t {
             const IS_LEAF: bool = true;
             #[inline]
-            unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self {
+            unsafe fn read(schema: &Schema, data: *const u8, space: MorlocSpace) -> Self {
                 match schema.serial_type {
                     // Read the 16-byte tagged field (payload at offset 8) and
                     // re-resolve it to a local handle -- NOT the plain-int path,
@@ -1329,7 +1486,7 @@ macro_rules! int_impl {
                         let mut err: *mut c_char = std::ptr::null_mut();
                         let handle = mlc_read_handle_voidstar(
                             data as *const c_void,
-                            base as *const c_void,
+                            space,
                             handle_kind(schema.serial_type),
                             &mut err,
                         );
@@ -1338,7 +1495,7 @@ macro_rules! int_impl {
                         }
                         handle as $t
                     }
-                    _ => read_int(schema, data) as $t,
+                    SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::Variant | SerialType::Enum => read_int(schema, data) as $t,
                 }
             }
         }
@@ -1346,6 +1503,33 @@ macro_rules! int_impl {
 }
 int_impl!(i8); int_impl!(i16); int_impl!(i32); int_impl!(i64);
 int_impl!(u8); int_impl!(u16); int_impl!(u32); int_impl!(u64);
+
+// Write `v` at the schema's own width, which may be narrower or wider than
+// the Rust integer it came from; a value the slot cannot hold is an error,
+// never a truncation or a write past the slot.
+#[inline]
+unsafe fn write_int(schema: &Schema, dest: *mut u8, v: i128) {
+    match schema.serial_type {
+        SerialType::Sint8 | SerialType::Sint16 | SerialType::Sint32 | SerialType::Sint64
+        | SerialType::Uint8 | SerialType::Uint16 | SerialType::Uint32 | SerialType::Uint64 => {
+            if let Some(Err(e)) = morloc_runtime_types::width::write_int_slot(schema.serial_type, dest, v) {
+                morloc_throw(format!("Integer overflow: {e}"))
+            }
+        }
+        SerialType::Bool if v == 0 || v == 1 => core::ptr::write_unaligned(dest, u8::from(v == 1)),
+        SerialType::Enum => match morloc_runtime_types::width::arm_tag(v, schema.size) {
+            Some(tag) => core::ptr::write_unaligned(dest, tag),
+            None => morloc_throw(format!("{v} is not a valid Enum value")),
+        },
+        SerialType::Bool => morloc_throw(format!("{v} is not a valid Bool value")),
+        other @ (SerialType::Nil | SerialType::Float32 | SerialType::Float64 | SerialType::String
+        | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional
+        | SerialType::Int | SerialType::Table | SerialType::Recur | SerialType::IFile
+        | SerialType::OStream | SerialType::IStream | SerialType::Variant) => {
+            morloc_throw(format!("cannot write an integer where the schema holds {other:?}"))
+        }
+    }
+}
 
 // Read an integer at schema width, widening to i128 (the common carrier);
 // rejects multi-limb Int (I6). Mirrors cppmorloc.hpp:1128-1168.
@@ -1368,7 +1552,10 @@ unsafe fn read_int(schema: &Schema, data: *const u8) -> i128 {
             }
             if size == 0 { 0 } else { core::ptr::read_unaligned((data as *const i64).add(1)) as i128 }
         }
-        _ => core::ptr::read_unaligned(data as *const i64) as i128,
+        SerialType::Enum => core::ptr::read_unaligned(data) as i128,
+        SerialType::Nil | SerialType::Float32 | SerialType::Float64 | SerialType::String | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant => {
+            morloc_throw(format!("cannot read an integer where the schema holds {:?}", schema.serial_type))
+        }
     }
 }
 
@@ -1379,18 +1566,41 @@ macro_rules! float_impl {
             #[inline]
             fn shm_size(&self, schema: &Schema) -> usize { schema.width }
             #[inline]
-            unsafe fn write(&self, dest: *mut u8, _cursor: &mut *mut u8, _schema: &Schema) {
-                core::ptr::write_unaligned(dest as *mut $t, *self); // I8
+            unsafe fn write(&self, dest: *mut u8, _cursor: &mut *mut u8, schema: &Schema) {
+                // At the schema's own width, which may differ from `$t`'s.
+                match schema.serial_type {
+                    SerialType::Float32 => core::ptr::write_unaligned(
+                        dest as *mut f32,
+                        morloc_runtime_types::width::f32_nearest(f64::from(*self))
+                            .unwrap_or_else(|e| morloc_throw(e.to_string())),
+                    ),
+                    SerialType::Float64 => core::ptr::write_unaligned(dest as *mut f64, *self as f64),
+                    SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16
+                    | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16
+                    | SerialType::Uint32 | SerialType::Uint64 | SerialType::String | SerialType::Array
+                    | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int
+                    | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream
+                    | SerialType::IStream | SerialType::Variant | SerialType::Enum => morloc_throw(format!(
+                        "cannot write a float where the schema holds {:?}", schema.serial_type
+                    )),
+                }
             }
         }
         impl FromVoidstar for $t {
             const IS_LEAF: bool = true;
             #[inline]
-            unsafe fn read(schema: &Schema, data: *const u8, _base: *const u8) -> Self {
+            unsafe fn read(schema: &Schema, data: *const u8, _space: MorlocSpace) -> Self {
                 match schema.serial_type {
                     SerialType::Float32 => core::ptr::read_unaligned(data as *const f32) as $t,
                     SerialType::Float64 => core::ptr::read_unaligned(data as *const f64) as $t,
-                    _ => core::ptr::read_unaligned(data as *const $t),
+                    SerialType::Nil | SerialType::Bool | SerialType::Sint8 | SerialType::Sint16
+                    | SerialType::Sint32 | SerialType::Sint64 | SerialType::Uint8 | SerialType::Uint16
+                    | SerialType::Uint32 | SerialType::Uint64 | SerialType::String | SerialType::Array
+                    | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Int
+                    | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream
+                    | SerialType::IStream | SerialType::Variant | SerialType::Enum => morloc_throw(format!(
+                        "cannot read a float where the schema holds {:?}", schema.serial_type
+                    )),
                 }
             }
         }
@@ -1410,7 +1620,7 @@ impl ToVoidstar for bool {
 impl FromVoidstar for bool {
     const IS_LEAF: bool = true;
     #[inline]
-    unsafe fn read(_schema: &Schema, data: *const u8, _base: *const u8) -> Self {
+    unsafe fn read(_schema: &Schema, data: *const u8, _space: MorlocSpace) -> Self {
         core::ptr::read_unaligned(data) == 1
     }
 }
@@ -1428,7 +1638,7 @@ impl ToVoidstar for () {
 impl FromVoidstar for () {
     const IS_LEAF: bool = true;
     #[inline]
-    unsafe fn read(_schema: &Schema, _data: *const u8, _base: *const u8) -> Self {}
+    unsafe fn read(_schema: &Schema, _data: *const u8, _space: MorlocSpace) -> Self {}
 }
 
 // ---- String (Str, I5: UTF-8 text by contract) -----------------------------
@@ -1452,12 +1662,12 @@ impl ToVoidstar for String {
 }
 impl FromVoidstar for String {
     const IS_LEAF: bool = true;
-    unsafe fn read(_schema: &Schema, data: *const u8, base: *const u8) -> Self {
+    unsafe fn read(_schema: &Schema, data: *const u8, space: MorlocSpace) -> Self {
         let a = core::ptr::read_unaligned(data as *const Array);
         if a.size == 0 {
             return String::new();
         }
-        let p = resolve(a.data, base);
+        let p = resolve(a.data, a.size, space);
         let bytes = core::slice::from_raw_parts(p, a.size).to_vec();
         match String::from_utf8(bytes) {
             Ok(s) => s,
@@ -1549,7 +1759,7 @@ impl<T: FromVoidstar> FromVoidstar for $container<T> {
             w.values.top_mut::<$container<T>>().$push(x);
         }
         if idx < a.size {
-            let start = resolve(a.data, w.base);
+            let start = resolve_array(a.data, a.size, elem.width, w.space);
             w.resume(idx + 1);
             w.child_step::<T>(elem, start.add(idx * elem.width));
         }
@@ -1560,7 +1770,7 @@ impl<T: FromVoidstar> FromVoidstar for $container<T> {
             return $container::new();
         }
         let elem = resolve_recur(&schema.parameters[0]);
-        let start = resolve(a.data, w.base);
+        let start = resolve_array(a.data, a.size, elem.width, w.space);
         let width = elem.width;
         let mut out = $container::with_capacity(a.size);
         for i in 0..a.size {
@@ -1605,7 +1815,7 @@ impl<T: FromVoidstar> FromVoidstar for Option<T> {
         w.push_finish::<Self>(schema, data);
         let rel = core::ptr::read_unaligned(data as *const RelPtr);
         if rel != RELNULL {
-            w.child_step::<T>(&schema.parameters[0], resolve(rel, w.base));
+            w.child_step::<T>(&schema.parameters[0], resolve(rel, resolve_recur(&schema.parameters[0]).width, w.space));
         }
     }
     unsafe fn read_finish(w: &mut ReadWalk, schema: &Schema, data: *const u8) -> Self {
@@ -1613,7 +1823,7 @@ impl<T: FromVoidstar> FromVoidstar for Option<T> {
         if rel == RELNULL {
             return None;
         }
-        Some(w.child_read::<T>(&schema.parameters[0], resolve(rel, w.base)))
+        Some(w.child_read::<T>(&schema.parameters[0], resolve(rel, resolve_recur(&schema.parameters[0]).width, w.space)))
     }
 }
 
@@ -1670,8 +1880,8 @@ impl<T: ToVoidstar> ToVoidstar for Box<T> {
 }
 impl<T: FromVoidstar> FromVoidstar for Box<T> {
     const IS_LEAF: bool = T::IS_LEAF;
-    unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self {
-        Box::new(T::read(schema, data, base))
+    unsafe fn read(schema: &Schema, data: *const u8, space: MorlocSpace) -> Self {
+        Box::new(T::read(schema, data, space))
     }
     unsafe fn read_step(w: &mut ReadWalk, schema: &Schema, data: *const u8, _idx: usize) {
         w.push_finish::<Self>(schema, data);
@@ -1878,8 +2088,8 @@ impl<T: ToVoidstar> ToVoidstar for RecBox<T> {
 }
 impl<T: FromVoidstar> FromVoidstar for RecBox<T> {
     const IS_LEAF: bool = T::IS_LEAF;
-    unsafe fn read(schema: &Schema, data: *const u8, base: *const u8) -> Self {
-        RecBox::new(T::read(schema, data, base))
+    unsafe fn read(schema: &Schema, data: *const u8, space: MorlocSpace) -> Self {
+        RecBox::new(T::read(schema, data, space))
     }
     unsafe fn read_step(w: &mut ReadWalk, schema: &Schema, data: *const u8, _idx: usize) {
         w.push_finish::<Self>(schema, data);
@@ -1968,61 +2178,67 @@ pub fn require_origin(origin: Option<&ClosureOrigin>) -> ClosureOrigin {
 }
 
 macro_rules! morloc_fn {
-    ($trait:ident, $closure:ident, $fnptr:ident, $call:ident, $reify:ident, $( ($A:ident, $a:ident) ),+ ) => {
-        pub trait $trait<$($A,)+ R> {
-            fn $call(&self, $($a: &$A,)+) -> R;
+    ($trait:ident, $closure:ident, $fnptr:ident, $call:ident, $reify:ident,
+     $apply:ident, $prev:ident, $pcall:ident, $preify:ident, $pap:ident, $staged:ident, $apply1:ident,
+     ($H:ident, $h:ident) $(, ($T:ident, $t:ident))* ) => {
+        pub trait $trait<$H, $($T,)* R> {
+            fn $call(&self, $h: &$H, $($t: &$T,)*) -> R;
             fn $reify(&self) -> Option<&ClosureOrigin>;
+            /// Apply to the first argument the way morloc does, when this
+            /// value knows how (see '$apply1'); `None` otherwise.
+            fn $apply(&self, _x: &$H) -> Option<std::rc::Rc<dyn $prev<$($T,)* R>>> { None }
         }
         // A plain native closure. Host code declares a higher-order parameter
         // as either `F: Fn(&A..) -> R` or `impl MorlocFnN<A.., R>`; this impl
         // is what lets one generated form satisfy both. It has no origin, so a
         // value reaching morloc this way cannot be sent onward.
-        impl<$($A,)+ R, F: Fn($(&$A,)+) -> R> $trait<$($A,)+ R> for F {
+        impl<$H, $($T,)* R, F: Fn(&$H, $(&$T,)*) -> R> $trait<$H, $($T,)* R> for F {
             #[inline]
-            fn $call(&self, $($a: &$A,)+) -> R { self($($a,)+) }
+            fn $call(&self, $h: &$H, $($t: &$T,)*) -> R { self($h, $($t,)*) }
             fn $reify(&self) -> Option<&ClosureOrigin> { None }
         }
         // A function value is held as `Rc<dyn $trait>`, and that is itself a
         // function value, so it can be passed wherever one is taken.
-        impl<$($A,)+ R, T: $trait<$($A,)+ R> + ?Sized> $trait<$($A,)+ R> for std::rc::Rc<T> {
+        impl<$H, $($T,)* R, T: $trait<$H, $($T,)* R> + ?Sized> $trait<$H, $($T,)* R> for std::rc::Rc<T> {
             #[inline]
-            fn $call(&self, $($a: &$A,)+) -> R { (**self).$call($($a,)+) }
+            fn $call(&self, $h: &$H, $($t: &$T,)*) -> R { (**self).$call($h, $($t,)*) }
             fn $reify(&self) -> Option<&ClosureOrigin> { (**self).$reify() }
+            fn $apply(&self, x: &$H) -> Option<std::rc::Rc<dyn $prev<$($T,)* R>>> { (**self).$apply(x) }
         }
         /// A morloc-built function value: the environment it captured, the
         /// manifold call, and how to reify that environment. `call` and `mk`
         /// are non-capturing, so they are plain function pointers reading the
         /// one copy of the captures -- the whole value is a single allocation
         /// and the captures are copied once.
-        pub struct $closure<C, $($A,)+ R> {
+        pub struct $closure<C, $H, $($T,)* R> {
             caps: C,
-            call: fn(&C, $(&$A,)+) -> R,
+            call: fn(&C, &$H, $(&$T,)*) -> R,
             mk: Option<fn(&C) -> ClosureOrigin>,
             origin: std::cell::OnceCell<ClosureOrigin>,
         }
-        impl<C, $($A,)+ R> $closure<C, $($A,)+ R> {
+        impl<C, $H, $($T,)* R> $closure<C, $H, $($T,)* R> {
             /// A closure that can be reified: the origin is built on first
             /// use and cached, so one that never crosses pays nothing.
-            pub fn new(caps: C, call: fn(&C, $(&$A,)+) -> R, mk: fn(&C) -> ClosureOrigin) -> Self {
+            pub fn new(caps: C, call: fn(&C, &$H, $(&$T,)*) -> R, mk: fn(&C) -> ClosureOrigin) -> Self {
                 Self { caps, call, mk: Some(mk), origin: std::cell::OnceCell::new() }
             }
             /// A closure with no dispatch entry, so nothing can call back
             /// into it and it has no origin to offer.
-            pub fn local(caps: C, call: fn(&C, $(&$A,)+) -> R) -> Self {
+            pub fn local(caps: C, call: fn(&C, &$H, $(&$T,)*) -> R) -> Self {
                 Self { caps, call, mk: None, origin: std::cell::OnceCell::new() }
             }
             /// A closure reflected from another pool. It answers with the
             /// origin it ARRIVED with, so a value crossing A -> B -> C calls
             /// back to A rather than to B.
-            pub fn proxy(caps: C, call: fn(&C, $(&$A,)+) -> R, origin: ClosureOrigin) -> Self {
+            pub fn proxy(caps: C, call: fn(&C, &$H, $(&$T,)*) -> R, origin: ClosureOrigin) -> Self {
                 let cell = std::cell::OnceCell::new();
                 let _ = cell.set(origin);
                 Self { caps, call, mk: None, origin: cell }
             }
         }
-        impl<C, $($A,)+ R> $trait<$($A,)+ R> for $closure<C, $($A,)+ R> {
+        impl<C, $H, $($T,)* R> $trait<$H, $($T,)* R> for $closure<C, $H, $($T,)* R> {
             #[inline]
-            fn $call(&self, $($a: &$A,)+) -> R { (self.call)(&self.caps, $($a,)+) }
+            fn $call(&self, $h: &$H, $($t: &$T,)*) -> R { (self.call)(&self.caps, $h, $($t,)*) }
             fn $reify(&self) -> Option<&ClosureOrigin> {
                 if self.origin.get().is_none() {
                     let mk = self.mk?;
@@ -2035,14 +2251,14 @@ macro_rules! morloc_fn {
         /// at this call, so a caller never has to name the result type -- which
         /// it could not do anyway, since the arity of a partially applied
         /// manifold's morloc type counts its captured context arguments.
-        pub fn $fnptr<$($A,)+ R>(f: fn($(&$A,)+) -> R) -> fn($(&$A,)+) -> R { f }
+        pub fn $fnptr<$H, $($T,)* R>(f: fn(&$H, $(&$T,)*) -> R) -> fn(&$H, $(&$T,)*) -> R { f }
 
         /// A function pointer is already the thinnest form there is, so the
         /// adapter is the identity. Anchoring this on a CONCRETE self type is
         /// what lets it coexist with the trait-object impl: the two self types
         /// are disjoint, so there is no overlap to reason about, and both
         /// parameters appear in the self type, so neither is unconstrained.
-        impl<$($A,)+ R> ThinFn for fn($(&$A,)+) -> R {
+        impl<$H, $($T,)* R> ThinFn for fn(&$H, $(&$T,)*) -> R {
             type Out = Self;
             fn thin(&self) -> Self { *self }
         }
@@ -2057,11 +2273,75 @@ macro_rules! morloc_fn {
         /// applied manifold's type counts its captured context arguments
         /// too. The adapter has no origin, so a value that reaches morloc
         /// back through a host parameter cannot be sent onward.
-        impl<$($A: 'static,)+ R: 'static> ThinFn for std::rc::Rc<dyn $trait<$($A,)+ R>> {
-            type Out = Box<dyn Fn($(&$A,)+) -> R>;
+        impl<$H: 'static, $($T: 'static,)* R: 'static> ThinFn for std::rc::Rc<dyn $trait<$H, $($T,)* R>> {
+            type Out = Box<dyn Fn(&$H, $(&$T,)*) -> R>;
             fn thin(&self) -> Self::Out {
                 let v = self.clone();
-                Box::new(move |$($a,)+| v.$call($($a,)+))
+                Box::new(move |$h, $($t,)*| v.$call($h, $($t,)*))
+            }
+        }
+        /// A function value applied to its first argument, keeping the
+        /// argument: it calls the function with the rest. If the function
+        /// has an origin, so does this, with the argument appended to its
+        /// captured values (`wire` serializes it).
+        pub struct $pap<$H, $($T,)* R> {
+            f: std::rc::Rc<dyn $trait<$H, $($T,)* R>>,
+            x: $H,
+            wire: Option<fn(&$H) -> Vec<u8>>,
+            origin: std::cell::OnceCell<Option<ClosureOrigin>>,
+        }
+        impl<$H, $($T,)* R> $pap<$H, $($T,)* R> {
+            pub fn new(f: std::rc::Rc<dyn $trait<$H, $($T,)* R>>, x: $H, wire: Option<fn(&$H) -> Vec<u8>>) -> Self {
+                Self { f, x, wire, origin: std::cell::OnceCell::new() }
+            }
+        }
+        impl<$H, $($T,)* R> $prev<$($T,)* R> for $pap<$H, $($T,)* R> {
+            #[inline]
+            fn $pcall(&self, $($t: &$T,)*) -> R { self.f.$call(&self.x, $($t,)*) }
+            fn $preify(&self) -> Option<&ClosureOrigin> {
+                self.origin
+                    .get_or_init(|| {
+                        let (home, mid, mut caps) = self.f.$reify()?.clone();
+                        let wire = self.wire?;
+                        caps.push(wire(&self.x));
+                        Some((home, mid, caps))
+                    })
+                    .as_ref()
+            }
+        }
+
+        /// A function value that knows how morloc applies it to its first
+        /// argument: `step` does it (a staged function runs its stage when
+        /// it has the arguments before the stage point). Called with every
+        /// argument, it is `flat`.
+        pub struct $staged<$H, $($T,)* R> {
+            flat: std::rc::Rc<dyn $trait<$H, $($T,)* R>>,
+            step: std::rc::Rc<dyn Fn(&$H) -> std::rc::Rc<dyn $prev<$($T,)* R>>>,
+        }
+        impl<$H, $($T,)* R> $staged<$H, $($T,)* R> {
+            pub fn new(
+                flat: std::rc::Rc<dyn $trait<$H, $($T,)* R>>,
+                step: std::rc::Rc<dyn Fn(&$H) -> std::rc::Rc<dyn $prev<$($T,)* R>>>,
+            ) -> Self {
+                Self { flat, step }
+            }
+        }
+        impl<$H, $($T,)* R> $trait<$H, $($T,)* R> for $staged<$H, $($T,)* R> {
+            #[inline]
+            fn $call(&self, $h: &$H, $($t: &$T,)*) -> R { self.flat.$call($h, $($t,)*) }
+            fn $reify(&self) -> Option<&ClosureOrigin> { self.flat.$reify() }
+            fn $apply(&self, x: &$H) -> Option<std::rc::Rc<dyn $prev<$($T,)* R>>> { Some((self.step)(x)) }
+        }
+
+        /// Apply a function value to its first argument: a value morloc made
+        /// knows how; any other keeps the argument.
+        pub fn $apply1<$H: Clone + 'static, $($T: 'static,)* R: 'static>(
+            f: &std::rc::Rc<dyn $trait<$H, $($T,)* R>>,
+            x: &$H,
+        ) -> std::rc::Rc<dyn $prev<$($T,)* R>> {
+            match f.$apply(x) {
+                Some(g) => g,
+                None => std::rc::Rc::new($pap::new(f.clone(), x.clone(), None)),
             }
         }
     };
@@ -2133,14 +2413,14 @@ impl<R: 'static> ThinFn for std::rc::Rc<dyn MorlocFn0<R>> {
     }
 }
 
-morloc_fn!(MorlocFn1, Closure1, fn_ptr1, call1, reify1, (A1, a1));
-morloc_fn!(MorlocFn2, Closure2, fn_ptr2, call2, reify2, (A1, a1), (A2, a2));
-morloc_fn!(MorlocFn3, Closure3, fn_ptr3, call3, reify3, (A1, a1), (A2, a2), (A3, a3));
-morloc_fn!(MorlocFn4, Closure4, fn_ptr4, call4, reify4, (A1, a1), (A2, a2), (A3, a3), (A4, a4));
-morloc_fn!(MorlocFn5, Closure5, fn_ptr5, call5, reify5, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5));
-morloc_fn!(MorlocFn6, Closure6, fn_ptr6, call6, reify6, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6));
-morloc_fn!(MorlocFn7, Closure7, fn_ptr7, call7, reify7, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7));
-morloc_fn!(MorlocFn8, Closure8, fn_ptr8, call8, reify8, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7), (A8, a8));
+morloc_fn!(MorlocFn1, Closure1, fn_ptr1, call1, reify1, apply1, MorlocFn0, call0, reify0, Pap1, Staged1, apply1_1, (A1, a1));
+morloc_fn!(MorlocFn2, Closure2, fn_ptr2, call2, reify2, apply2, MorlocFn1, call1, reify1, Pap2, Staged2, apply1_2, (A1, a1), (A2, a2));
+morloc_fn!(MorlocFn3, Closure3, fn_ptr3, call3, reify3, apply3, MorlocFn2, call2, reify2, Pap3, Staged3, apply1_3, (A1, a1), (A2, a2), (A3, a3));
+morloc_fn!(MorlocFn4, Closure4, fn_ptr4, call4, reify4, apply4, MorlocFn3, call3, reify3, Pap4, Staged4, apply1_4, (A1, a1), (A2, a2), (A3, a3), (A4, a4));
+morloc_fn!(MorlocFn5, Closure5, fn_ptr5, call5, reify5, apply5, MorlocFn4, call4, reify4, Pap5, Staged5, apply1_5, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5));
+morloc_fn!(MorlocFn6, Closure6, fn_ptr6, call6, reify6, apply6, MorlocFn5, call5, reify5, Pap6, Staged6, apply1_6, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6));
+morloc_fn!(MorlocFn7, Closure7, fn_ptr7, call7, reify7, apply7, MorlocFn6, call6, reify6, Pap7, Staged7, apply1_7, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7));
+morloc_fn!(MorlocFn8, Closure8, fn_ptr8, call8, reify8, apply8, MorlocFn7, call7, reify7, Pap8, Staged8, apply1_8, (A1, a1), (A2, a2), (A3, a3), (A4, a4), (A5, a5), (A6, a6), (A7, a7), (A8, a8));
 
 // ---------------------------------------------------------------------------
 // Packet bridge (production). `put_value` serializes a native value into a
@@ -2173,7 +2453,11 @@ pub unsafe fn put_value_as<T: ToVoidstar>(value: &T, schema: &Schema, self_conta
                     if block.is_null() {
                         return fail_packet_from_c(err, "rel2abs failed in put_value");
                     }
-                    make_inline_data_packet(block, cs, &mut err)
+                    // The packet carries a copy of the table, so the block
+                    // is not needed past this call.
+                    let packet = make_inline_data_packet(block, cs, &mut err);
+                    release_tracked(block);
+                    packet
                 } else {
                     make_arrow_data_packet(relptr, cs)
                 };
@@ -2204,11 +2488,13 @@ pub unsafe fn put_value_as<T: ToVoidstar>(value: &T, schema: &Schema, self_conta
     if packet.is_null() {
         return fail_packet_from_c(err, "packet construction failed in put_value"); // guard shfree
     }
-    // Defer the root's free to the next dispatch (I3). Safe for both RPTR
-    // packets (data still referenced) and inline packets (data already copied
-    // into the C-allocated packet; freeing later is harmless).
-    guard.commit();
-    track(root as *mut c_void);
+    // A packet that references the block keeps it until this dispatch ends;
+    // one that carries its data inline no longer needs it, and the guard
+    // frees it now.
+    if *packet.add(PKT_SOURCE_OFF) == PKT_SOURCE_RPTR {
+        guard.commit();
+        track(root as *mut c_void);
+    }
     packet
 }
 
@@ -2236,6 +2522,24 @@ unsafe fn arrow_put<T: ToVoidstar>(value: &T, schema: &Schema) -> Result<isize, 
     Ok(relptr)
 }
 
+/// A copy of an argument packet for a manifold to return as its result.
+/// The argument itself lives in the call the dispatcher frees before it
+/// sends and frees the result, so it cannot be returned; the copy holds its
+/// own reference to any shared memory the packet names, tracked here like
+/// every other packet this pool returns.
+pub unsafe fn dup_packet(packet: *const u8) -> *mut u8 {
+    let mut block: *mut c_void = std::ptr::null_mut();
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let copy = morloc_dup_packet(packet, &mut block, &mut err);
+    if !err.is_null() {
+        morloc_infra_abort(cstr_take(err));
+    }
+    if !block.is_null() {
+        track(block);
+    }
+    copy
+}
+
 /// # Safety
 /// `packet` must be a valid data packet whose schema matches `schema`.
 pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> T {
@@ -2244,13 +2548,10 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
     let format = *packet.add(PKT_FORMAT_OFF);
 
     if schema.serial_type == SerialType::Table {
-        // A table is a block. It arrives by reference (an Arrow packet) or
-        // in a form the runtime materializes into a block of this pool's
-        // own (a cached result read back from a file, a captured value
-        // carried inline).
-        if format == PKT_FORMAT_ARROW && source != PKT_SOURCE_RPTR {
-            morloc_infra_abort("Arrow packet does not name a shared-memory block");
-        }
+        // A table is a block. It arrives by reference, or in a form the
+        // runtime materializes into a block of this pool's own: the file
+        // an argument names, a cached result read back, or a captured
+        // value carried inline.
         let materialized = source != PKT_SOURCE_RPTR;
         let cs = cschema_of(schema);
         let mut err: *mut c_char = std::ptr::null_mut();
@@ -2264,32 +2565,17 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
         if arrow_validate(block as *const c_void, cs, &mut err) != 0 {
             morloc_throw(cstr_take(err));
         }
-        // Hold the block for as long as the batch references its buffers,
-        // releasing it at the next dispatch. A table that arrived by
-        // reference needs one taken on this pool's behalf; the sender
-        // donated one before sending, so a refusal means the block is gone
-        // and the view would read scrubbed memory.
-        if !materialized {
-            let acquired = shincref(block as *mut c_void, &mut err);
-            discard_err(err);
-            err = std::ptr::null_mut();
-            if !acquired {
-                morloc_infra_abort("received table's shared-memory block is no longer live");
-            }
-        }
-        guard.commit();
-        track(block as *mut c_void);
-        let rel = abs2rel(block as *mut c_void, &mut err);
-        if err.is_null() {
-            arrow_borrow_register(block, rel);
-        }
-        discard_err(err);
-        err = std::ptr::null_mut();
+        // The batch holds the block for exactly as long as it reads it: a
+        // table that arrived by reference takes one of its own, while a
+        // block this pool materialized passes its only reference to the
+        // view.
         let mut ffi_schema = FFI_ArrowSchema::empty();
         let mut array = FFI_ArrowArray::empty();
-        if arrow_from_shm(block as *const c_void, &mut ffi_schema, &mut array, &mut err) != 0 {
+        let acquire = if materialized { 0 } else { 1 };
+        if arrow_from_shm_owned(block as *const c_void, acquire, &mut ffi_schema, &mut array, &mut err) != 0 {
             morloc_throw(cstr_take(err));
         }
+        guard.commit();
         return match <T as FromVoidstar>::arrow_import(array, &ffi_schema) {
             Some(v) => v,
             None => morloc_infra_abort("Table-typed value requested as a non-Arrow type"),
@@ -2313,7 +2599,11 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
         // Inline: voidstar lives in the packet buffer; relptrs are buffer-relative.
         let meta = core::ptr::read_unaligned(packet.add(PKT_OFFSET_OFF) as *const u32) as usize;
         let payload = packet.add(PKT_HEADER_SIZE + meta);
-        return <T as FromVoidstar>::read(schema, payload, payload);
+        let length = core::ptr::read_unaligned(packet.add(PKT_LENGTH_OFF) as *const u64) as usize;
+        if length < schema.width {
+            morloc_throw(format!("a {length}-byte inline payload cannot hold its {}-byte value", schema.width));
+        }
+        return <T as FromVoidstar>::read(schema, payload, MorlocSpace::payload(payload, length));
     }
 
     // SHM path (RPTR, or MESG+MSGPACK): resolve via the C ABI, base = null.
@@ -2325,25 +2615,23 @@ pub unsafe fn get_value<T: FromVoidstar>(packet: *const u8, schema: &Schema) -> 
         morloc_throw(msg);
     }
     if source == PKT_SOURCE_RPTR {
-        // A value that arrived by reference needs a reference of this
-        // pool's own so the sender's flush cannot reclaim it while it is
-        // read or forwarded. The sender donated one before sending, so a
-        // refusal means the block is already gone.
+        // A value that arrived by reference is read under a reference of
+        // this pool's own. Whoever handed over the packet keeps it alive
+        // meanwhile -- a caller blocked in its call, or the donated
+        // reference a foreign call's result carries -- so a refusal means
+        // the block is already gone.
         let acquired = shincref(voidstar as *mut c_void, &mut err);
         discard_err(err);
         if !acquired {
             morloc_infra_abort("received value's shared-memory block is no longer live");
         }
-        track(voidstar as *mut c_void);
-    } else {
-        // A payload that did not arrive by reference was materialized into a
-        // block of this pool's own, and nothing else will free it. Hand it to
-        // the tracker, which is also panic-safe: the read below can throw and
-        // a throwing dispatch answers with a fail packet rather than ending
-        // the pool, so a block dropped there would be lost once per request.
-        track(voidstar as *mut c_void);
     }
-    <T as FromVoidstar>::read(schema, voidstar, std::ptr::null())
+    // The reference taken above, or the block this pool materialized for a
+    // payload that did not arrive by reference, is dropped once the value is
+    // read out: every read copies (a table, read in place, is handled above).
+    // The guard also drops it when the read throws.
+    let _held = ShmGuard::new(voidstar as *mut c_void);
+    <T as FromVoidstar>::read(schema, voidstar, MorlocSpace::SHM)
 }
 
 /// Serialize a captured value into a SELF-CONTAINED wire packet: the packet
@@ -2582,6 +2870,15 @@ pub unsafe fn show<T: ToVoidstar>(value: &T, schema: &Schema) -> String {
     s
 }
 
+/// Decode a morloc packet held as bytes, as an argument packet is decoded.
+/// `@unpack` is synthesized for `@parse` commands only.
+pub unsafe fn unpack<T: FromVoidstar>(packet: &[u8], schema: &Schema) -> T {
+    if packet.len() < PKT_HEADER_SIZE {
+        morloc_throw("@unpack: packet is shorter than its header");
+    }
+    get_value::<T>(packet.as_ptr(), schema)
+}
+
 /// @read: parse JSON text into a typed value; a parse failure is a catchable
 /// morloc error (so `@catch` can recover it).
 pub unsafe fn read<T: FromVoidstar>(s: &str, schema: &Schema) -> T {
@@ -2598,7 +2895,7 @@ pub unsafe fn read<T: FromVoidstar>(s: &str, schema: &Schema) -> T {
     if voidstar.is_null() {
         morloc_throw(format!("@read: could not parse \"{}\"", s));
     }
-    let result = <T as FromVoidstar>::read(schema, voidstar as *const u8, std::ptr::null());
+    let result = <T as FromVoidstar>::read(schema, voidstar as *const u8, MorlocSpace::SHM);
     let mut e2: *mut c_char = std::ptr::null_mut();
     shfree(voidstar, &mut e2);
     discard_err(e2);
@@ -2662,7 +2959,7 @@ unsafe fn read_voidstar<T: FromVoidstar>(
         morloc_throw(format!("{}: runtime returned a null value", what));
     }
     let _recur = RecurScope::enter(schema);
-    let result = <T as FromVoidstar>::read(schema, voidstar as *const u8, std::ptr::null());
+    let result = <T as FromVoidstar>::read(schema, voidstar as *const u8, MorlocSpace::SHM);
     let mut e2: *mut c_char = std::ptr::null_mut();
     shfree(voidstar, &mut e2);
     discard_err(e2);
@@ -2694,11 +2991,11 @@ pub unsafe fn hash<T: ToVoidstar>(value: &T, schema: &Schema) -> String {
 }
 
 /// @save: write a value to disk in the voidstar packet format. `level` is the
-/// compression level (the runtime narrows it to a byte). Returns unit.
+/// compression level, range-checked by the runtime. Returns unit.
 pub unsafe fn save<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, path: &str) {
     let path_c = cstr_arg(path, "@save");
     let rc = with_voidstar(value, schema, |vs, cs, err| {
-        mlc_save(vs, cs, level as u8, path_c.as_ptr(), err)
+        mlc_save(vs, cs, level, path_c.as_ptr(), err)
     });
     if rc != 0 {
         morloc_throw("@save: runtime write failed");
@@ -2709,7 +3006,7 @@ pub unsafe fn save<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, path: 
 pub unsafe fn save_json<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, path: &str) {
     let path_c = cstr_arg(path, "@savej");
     let rc = with_voidstar(value, schema, |vs, cs, err| {
-        mlc_save_json(vs, cs, level as u8, path_c.as_ptr(), err)
+        mlc_save_json(vs, cs, level, path_c.as_ptr(), err)
     });
     if rc != 0 {
         morloc_throw("@savej: runtime write failed");
@@ -2720,7 +3017,7 @@ pub unsafe fn save_json<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, p
 pub unsafe fn save_voidstar<T: ToVoidstar>(value: &T, schema: &Schema, level: i64, path: &str) {
     let path_c = cstr_arg(path, "@savem");
     let rc = with_voidstar(value, schema, |vs, cs, err| {
-        mlc_save_voidstar(vs, cs, level as u8, path_c.as_ptr(), err)
+        mlc_save_voidstar(vs, cs, level, path_c.as_ptr(), err)
     });
     if rc != 0 {
         morloc_throw("@savem: runtime write failed");
@@ -2784,6 +3081,25 @@ pub unsafe fn next<T: FromVoidstar>(schema: &Schema, handle: u64) -> T {
     read_voidstar(voidstar, err, schema, "@next")
 }
 
+/// @replay: call `f` on every frame (sub-packet) of the stream, in order,
+/// each as the list it holds. An empty frame is an empty list; only the end
+/// of the stream stops the loop.
+pub unsafe fn replay<E, F: MorlocFn1<Vec<E>, ()>>(schema: &Schema, handle: u64, f: F)
+where
+    Vec<E>: FromVoidstar,
+{
+    loop {
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let mut eof: i32 = 0;
+        let voidstar = mlc_next_frame(handle as i64, &mut eof, &mut err);
+        if eof != 0 && err.is_null() {
+            break;
+        }
+        let frame: Vec<E> = read_voidstar(voidstar, err, schema, "@replay");
+        f.call1(&frame);
+    }
+}
+
 /// @streamLayout: per-sub-packet layout of an IFile as `[(U64,U64,U64)]`.
 pub unsafe fn stream_layout<T: FromVoidstar>(schema: &Schema, handle: u64) -> T {
     let mut err: *mut c_char = std::ptr::null_mut();
@@ -2803,7 +3119,7 @@ pub unsafe fn stream(ifile_handle: u64) -> u64 {
 /// `with_voidstar` closure ignores its CSchema argument.
 pub unsafe fn write<T: ToVoidstar>(schema: &Schema, level: i64, value: &T, handle: u64) {
     let rc = with_voidstar(value, schema, |vs, _cs, err| {
-        mlc_write(level as u8, handle as i64, vs, err)
+        mlc_write(level, handle as i64, vs, err)
     });
     if rc != 0 {
         morloc_throw("@write: runtime write failed");
@@ -2859,6 +3175,69 @@ pub unsafe fn tmpfile() -> String {
     cstr_take(s)
 }
 
+/// @cellnew: create a fold accumulator seeded with `init`.
+pub unsafe fn cell_new<T: ToVoidstar>(schema: &Schema, init: &T) -> u64 {
+    let mut handle: i64 = -1;
+    let rc = with_voidstar(init, schema, |vs, cs, err| {
+        handle = mlc_cell_new(cs, vs, err);
+        if handle < 0 { 1 } else { 0 }
+    });
+    if rc != 0 {
+        morloc_throw("@fold: could not create the accumulator");
+    }
+    handle as u64
+}
+
+/// @cellget: this thread's accumulator.
+pub unsafe fn cell_get<T: FromVoidstar>(schema: &Schema, handle: u64) -> T {
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let voidstar = mlc_cell_get(handle as i64, cschema_of(schema), &mut err);
+    read_voidstar(voidstar, err, schema, "@fold")
+}
+
+/// @cellput: replace this thread's accumulator.
+pub unsafe fn cell_put<T: ToVoidstar>(schema: &Schema, handle: u64, value: &T) {
+    let rc = with_voidstar(value, schema, |vs, cs, err| {
+        mlc_cell_put(handle as i64, cs, vs, err)
+    });
+    if rc != 0 {
+        morloc_throw("@fold: could not store the accumulator");
+    }
+}
+
+/// @cellreduce: merge every accumulator with `combine` and release the cell.
+///
+/// The count is never zero -- an untouched cell answers with its seed -- so
+/// this always has a value to return.
+/// The combine is bounded on `MorlocFn2` rather than `Fn`: a morloc function
+/// value in a Rust pool is a defunctionalized closure, and the blanket impl
+/// beside the trait covers a plain `Fn` as well.
+pub unsafe fn cell_reduce<T: FromVoidstar, F: MorlocFn2<T, T, T>>(
+    schema: &Schema,
+    combine: F,
+    handle: u64,
+) -> T {
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let n = mlc_cell_count(handle as i64, &mut err);
+    check_err(err);
+    if n < 1 {
+        morloc_throw("@fold: the accumulator holds nothing to merge");
+    }
+    let slot = |i: i64| -> T {
+        let mut serr: *mut c_char = std::ptr::null_mut();
+        let vs = mlc_cell_slot(handle as i64, i, cschema_of(schema), &mut serr);
+        read_voidstar(vs, serr, schema, "@fold")
+    };
+    let mut acc = slot(0);
+    for i in 1..n {
+        acc = combine.call2(&acc, &slot(i));
+    }
+    let mut ferr: *mut c_char = std::ptr::null_mut();
+    mlc_cell_free(handle as i64, &mut ferr);
+    check_err(ferr);
+    acc
+}
+
 /// @open (OStream): open a file for writing with the element schema.
 pub unsafe fn open_ostream(schema: &Schema, path: &str) -> u64 {
     let path_c = cstr_arg(path, "@open");
@@ -2873,6 +3252,43 @@ pub unsafe fn open_istream(schema: &Schema, path: &str) -> u64 {
     let mut err: *mut c_char = std::ptr::null_mut();
     let h = with_schema_str(schema, |s| mlc_open_istream(s, path_c.as_ptr(), &mut err));
     handle_or_throw(h, err, "@open")
+}
+
+/// A channel for a streamed @parse argument: one handle, written by its
+/// producer and read by any pool.
+pub unsafe fn open_channel(schema: &Schema) -> u64 {
+    let mut err: *mut c_char = std::ptr::null_mut();
+    let h = with_schema_str(schema, |s| mlc_open_channel(s, &mut err));
+    handle_or_throw(h, err, "@channel")
+}
+
+/// Start the producer `f` on the channel as a separate dispatch in its home
+/// pool, without waiting for it. The channel travels as the producer's
+/// OStream argument, after its captured values.
+pub unsafe fn spawn<R, F: MorlocFn1<u64, R>>(f: &F, handle: u64, schema: &Schema) {
+    let (home, mid, mut captured) = require_origin(f.reify1());
+    captured.push(reify_capture(&handle, schema));
+    let ptrs: Vec<*const u8> = captured.iter().map(|c| c.as_ptr()).collect();
+    let tmpdir = TMPDIR
+        .get()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let sock = cstr_arg(&format!("{}/pipe-{}", tmpdir, home), "@spawn");
+    let mut err: *mut c_char = std::ptr::null_mut();
+    mlc_spawn(sock.as_ptr(), mid as u32, ptrs.as_ptr(), ptrs.len(), handle as i64, &mut err);
+    if !err.is_null() {
+        morloc_infra_abort(cstr_take(err));
+    }
+}
+
+/// Release a channel; raises the producer's failure, unchanged, if a reader
+/// was handed it.
+pub unsafe fn settle(handle: u64) {
+    let mut err: *mut c_char = std::ptr::null_mut();
+    mlc_settle(handle as i64, &mut err);
+    if !err.is_null() {
+        morloc_throw(cstr_take(err));
+    }
 }
 
 /// @stdin: open the process stdin as an IStream of the element schema.
@@ -3031,6 +3447,94 @@ mod tests {
     use super::*;
     use morloc_runtime_types::schema::parse_schema;
 
+    /// A thread that ends frees the schema conversions it cached. A sourced
+    /// function may spawn short-lived threads that call manifolds, so a cache
+    /// outliving its thread would grow with every such call.
+    #[test]
+    fn cschema_cache_is_freed_when_its_thread_ends() {
+        let schema: &'static Schema = Box::leak(Box::new(parse_schema("i4").expect("parse schema")));
+        let key = schema as *const Schema as usize;
+        // Joined explicitly: a scope may end before its threads' locals are
+        // destroyed, and the assertion is about what those locals free.
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    cschema_of(schema);
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("thread");
+        }
+        let live = LIVE_CSCHEMAS.lock().unwrap().iter().filter(|k| **k == key).count();
+        assert_eq!(live, 0, "cached schema conversions outlived their threads");
+    }
+
+    /// Write `value` as `schema_str` into a zeroed 16-byte slot guarded by
+    /// sentinel bytes; returns the slot or the thrown message.
+    unsafe fn write_slot<T: ToVoidstar>(schema_str: &str, value: T) -> Result<[u8; 32], String> {
+        let schema = parse_schema(schema_str).expect("parse schema");
+        let mut buf = [0xAAu8; 32];
+        let dest = buf.as_mut_ptr().add(8);
+        std::ptr::write_bytes(dest, 0, schema.width);
+        let mut cursor = dest.add(schema.width);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            value.write(dest, &mut cursor, &schema);
+        }));
+        match r {
+            Ok(()) => Ok(buf),
+            Err(e) => Err(e.downcast_ref::<MorlocThrow>().map(|t| t.0.clone()).unwrap_or_default()),
+        }
+    }
+
+    /// An integer written at a narrower schema writes exactly that width,
+    /// and a value that does not fit is an error, not a truncation or an
+    /// overwrite of the next slot.
+    #[test]
+    fn integer_writes_respect_schema_width() {
+        unsafe {
+            // -2 has every high byte set, so a write wider than the slot shows.
+            let buf = write_slot("i1", -2i64).unwrap();
+            assert_eq!(buf[8], 0xFE);
+            assert!(buf[9..].iter().all(|&b| b == 0xAA), "wrote past a 1-byte slot");
+            assert!(write_slot("u1", 300i64).is_err(), "300 fit in a u8");
+            assert!(write_slot("u2", -1i32).is_err(), "-1 fit in a u16");
+            assert!(write_slot("f8", 3i64).is_err(), "an int wrote a float's bits");
+            let buf = write_slot("u8", 7u8).unwrap();
+            assert_eq!(u64::from_le_bytes(buf[8..16].try_into().unwrap()), 7);
+        }
+    }
+
+    /// A float is written at the schema's own width, and not at all into a
+    /// slot that does not hold a float.
+    #[test]
+    fn float_writes_respect_schema_width() {
+        unsafe {
+            let buf = write_slot("f4", 1.5f64).unwrap();
+            assert_eq!(f32::from_le_bytes(buf[8..12].try_into().unwrap()), 1.5);
+            assert!(buf[12..].iter().all(|&b| b == 0xAA), "wrote past a 4-byte slot");
+            let buf = write_slot("f8", 2.25f32).unwrap();
+            assert_eq!(f64::from_le_bytes(buf[8..16].try_into().unwrap()), 2.25);
+            assert!(write_slot("i8", 1.0f64).is_err(), "a float wrote an int's bits");
+        }
+        let s = parse_schema("i8").unwrap();
+        let bytes = 7i64.to_le_bytes();
+        let r = std::panic::catch_unwind(|| unsafe { <f64 as FromVoidstar>::read(&s, bytes.as_ptr(), MorlocSpace::SHM) });
+        assert!(r.is_err(), "an f64 read an int's bits");
+    }
+
+    /// Reading an integer from a slot that does not hold one is an error.
+    #[test]
+    fn integer_reads_reject_non_integer_slots() {
+        let f = parse_schema("f8").unwrap();
+        let bytes = 1.5f64.to_le_bytes();
+        let r = std::panic::catch_unwind(|| unsafe { <i64 as FromVoidstar>::read(&f, bytes.as_ptr(), MorlocSpace::SHM) });
+        assert!(r.is_err(), "an i64 read a float's bits");
+        let s = parse_schema("i1").unwrap();
+        let v = unsafe { <i64 as FromVoidstar>::read(&s, [0xFFu8].as_ptr(), MorlocSpace::SHM) };
+        assert_eq!(v, -1);
+    }
+
     /// Serialize `value` into a fresh buffer and read it back, exercising the
     /// same shm_size/write/read the production pool uses.
     unsafe fn roundtrip<T: ToVoidstar + FromVoidstar>(schema_str: &str, value: &T) -> T {
@@ -3042,7 +3546,7 @@ mod tests {
         TEST_BASE.with(|b| b.set(Some(base as usize)));
         let mut cursor = base.add(schema.width);
         value.write(base, &mut cursor, &schema);
-        let out = <T as FromVoidstar>::read(&schema, base, base);
+        let out = <T as FromVoidstar>::read(&schema, base, MorlocSpace::payload(base, buf.len()));
         TEST_BASE.with(|b| b.set(None));
         out
     }
@@ -3310,7 +3814,7 @@ mod tests {
             match read_variant_tag(data) {
                 0 => {}
                 1 => {
-                    let p = w.payload_ptr(data);
+                    let p = w.payload_ptr(data, &schema.parameters[1]);
                     w.child_step::<RecBox<(i64, Tree, Tree)>>(&schema.parameters[1], p);
                 }
                 t => panic!("Tree: no constructor for tag {}", t),
@@ -3320,7 +3824,7 @@ mod tests {
             match read_variant_tag(data) {
                 0 => Self::Leaf,
                 1 => {
-                    let p = w.payload_ptr(data);
+                    let p = w.payload_ptr(data, &schema.parameters[1]);
                     Self::Node(w.child_read::<RecBox<(i64, Tree, Tree)>>(&schema.parameters[1], p))
                 }
                 t => panic!("Tree: no constructor for tag {}", t),

@@ -27,6 +27,10 @@ const char* jlmorloc_last_error(void) {
 
 /* -- Daemon lifecycle -- */
 
+void jlmorloc_lifeline_guard(void) {
+    morloc_lifeline_guard();
+}
+
 void* jlmorloc_start_daemon(const char* socket_path, const char* tmpdir,
                              const char* shm_basename, size_t shm_size) {
     clear_err();

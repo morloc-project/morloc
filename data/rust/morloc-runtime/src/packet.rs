@@ -161,22 +161,12 @@ pub fn get_data_value(
 }
 
 /// Read a flat voidstar binary blob into shared memory, adjusting
-/// relptrs. `vol_idx_hint` is the Layer-3 producer hint extracted from
-/// the packet's metadata block (0 if absent). The delta computation
-/// matches the fast-path loader in `cli.rs::try_load_voidstar_packet_via_mmap`.
+/// relptrs by the Layer-3 producer hint from the packet's metadata block
+/// (0 if absent).
 fn read_voidstar_binary(
     blob: &[u8],
     schema: &crate::Schema,
     vol_idx_hint: u16,
 ) -> Result<crate::shm::AbsPtr, MorlocError> {
-    use crate::shm;
-
-    let base = shm::shmalloc(blob.len())?;
-    unsafe { std::ptr::copy_nonoverlapping(blob.as_ptr(), base, blob.len()) };
-
-    let base_rel = shm::abs2rel(base)?;
-    let producer_base = shm::encode_relptr(vol_idx_hint as usize, 0);
-    let delta = (base_rel as i64).wrapping_sub(producer_base as i64) as shm::RelPtr;
-    crate::voidstar::adjust_relptrs(base, schema, delta)?;
-    Ok(base)
+    crate::voidstar::read_binary_with_hint(blob, schema, vol_idx_hint)
 }

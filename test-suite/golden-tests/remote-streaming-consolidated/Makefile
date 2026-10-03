@@ -5,7 +5,7 @@ export LD_LIBRARY_PATH := $(HOME)/.local/share/morloc/lib:$(LD_LIBRARY_PATH)
 # Scratch dir for handles-in-stream + file-based scenarios. The
 # handle test creates three IFile datasets here; the file-based test
 # writes a stream file here.
-SCRATCH := $(shell mktemp -d -t remote-streaming-XXXXXX)
+SCRATCH := $(CURDIR)/scratch
 
 # Small buffer for the oversize scenario. 512 bytes forces the
 # 50-element `[Int]` payload (400 raw + Array header + inline index)
@@ -31,6 +31,7 @@ all:
 	@echo "=== compression L7 ===" >> obs.txt
 	./nexus -f packet -z 7 @ prodComp7 2>> obs.err | ./nexus consComp7 >> obs.txt 2>> obs.err
 	@echo "=== handles ===" >> obs.txt
+	rm -rf "$(SCRATCH)" && mkdir -p "$(SCRATCH)"
 	./nexus prodHandles "$(SCRATCH)/handles.stream" \
 	  "$(SCRATCH)/a.dat" "$(SCRATCH)/b.dat" "$(SCRATCH)/c.dat" 2>> obs.err
 	./nexus consHandles "$(SCRATCH)/handles.stream" >> obs.txt 2>> obs.err
@@ -44,5 +45,5 @@ all:
 
 clean:
 	rm -rf nexus pools __pycache__ *.err
-	find /tmp -maxdepth 1 -name 'remote-streaming-*' -type d -exec rm -rf {} + 2>/dev/null || true
+	rm -rf scratch
 	rm -rf *-build *build.tmp*

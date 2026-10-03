@@ -1,0 +1,47 @@
+-- A record literal whose type is synthesized (the tail of a do block, a let
+-- body, an @try body) is checked against the declared record like one that
+-- is checked directly: a polymorphic field value (the nullary constructor
+-- Empty) instantiates to the field's type.
+
+module main
+  ( doTail
+  , letBody
+  , tryBody
+  , tupleCtl
+  , pureCtl
+  )
+
+import root-py
+
+effect IO
+
+data Box a = Empty | Full a
+
+record Py => R = "dict"
+record R where
+  tag :: Int
+  b :: Box Int
+
+note :: Int -> <IO> Int
+source Py from "f.py" ("note")
+
+doTail :: Int -> <IO> R
+doTail n = do
+  y <- note n
+  {tag = y, b = Empty}
+
+letBody :: Int -> R
+letBody n =
+  let r = {tag = n, b = Empty}
+  in r
+
+tryBody :: Int -> Try Str R
+tryBody n = @try {tag = n, b = Empty}
+
+tupleCtl :: Int -> <IO> (Int, Box Int)
+tupleCtl n = do
+  y <- note n
+  (y, Empty)
+
+pureCtl :: Int -> R
+pureCtl n = {tag = n, b = Empty}

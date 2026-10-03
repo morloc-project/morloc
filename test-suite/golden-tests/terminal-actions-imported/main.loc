@@ -1,0 +1,9 @@
+-- Terminal actions on commands defined in submodules: imported by name,
+-- imported under an alias, and two same-named commands from different
+-- modules (one aliased). Each runs bare (its `@default` action), with its
+-- action written to a file, and with `--no-stdout`.
+
+module main (twoSites, value, ts, other)
+
+import .sub (twoSites, value, one as ts)
+import .other (twoSites as other)

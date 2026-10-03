@@ -7,6 +7,9 @@ A golden test is a directory under @test-suite/golden-tests@ holding a
 @obs.txt@) and an @exp.txt@ holding the expected output. Every such directory
 is discovered and run; none has to be registered anywhere.
 
+With @MORLOC_TEST_SHARD@ set, only this run's share of the directories is
+considered (see "GoldenShard").
+
 A directory containing a @SKIP@ file is not run. The file's contents are the
 reason, listed once before the suite starts, so that a disabled test stays
 visible and its justification lives next to the test rather than in a source
@@ -20,14 +23,16 @@ module GoldenMakefileTests
 import Control.Monad (filterM, unless)
 import qualified Data.ByteString as BS
 import Data.List (isPrefixOf, sort)
+import GoldenShard (Shard, selectShard)
 import System.Directory
   ( doesDirectoryExist
   , doesFileExist
+  , findExecutable
   , listDirectory
   , makeAbsolute
   )
 import System.Environment (getEnvironment)
-import System.FilePath ((</>))
+import System.FilePath (takeDirectory, (</>))
 import qualified System.IO as SI
 import qualified System.Process as SP
 import Test.Tasty
@@ -41,12 +46,13 @@ import Test.Tasty.HUnit (assertFailure, testCase)
 -- Skip reasons are printed once, up front, rather than folded into the test
 -- names: tasty pads every line of its report to the longest name in the tree,
 -- so a sentence-long name indents the whole suite off the screen.
-discoverGoldenTests :: FilePath -> IO [TestTree]
-discoverGoldenTests root = do
+discoverGoldenTests :: Maybe Shard -> FilePath -> IO [TestTree]
+discoverGoldenTests shard root = do
   absRoot <- makeAbsolute root
   -- Hidden directories hold tooling (.claude), never tests.
   entries <- sort . filter (not . ("." `isPrefixOf`)) <$> listDirectory absRoot
-  dirs <- filterM (doesDirectoryExist . (absRoot </>)) entries
+  allDirs <- filterM (doesDirectoryExist . (absRoot </>)) entries
+  let dirs = maybe allDirs (`selectShard` allDirs) shard
   classified <- mapM (classify absRoot) dirs
   let skipped = [(name, reason) | Skipped name reason <- classified]
   unless (null skipped) $ do
@@ -116,10 +122,11 @@ goldenMakefileTest msg testdir =
 makeManifoldFile :: String -> IO ()
 makeManifoldFile path = do
   abspath <- makeAbsolute path
-  runQuietly ["-C", abspath, "--quiet"]
+  let shims = takeDirectory (takeDirectory abspath) </> "shims"
+  runQuietly shims ["-C", abspath, "--quiet"]
   matched <- outputMatched abspath
   if matched
-    then runQuietly ["-C", abspath, "--quiet", "clean"]
+    then runQuietly shims ["-C", abspath, "--quiet", "clean"]
     else return ()
 
 outputMatched :: FilePath -> IO Bool
@@ -140,13 +147,21 @@ readIfPresentBytes path = do
 -- test in flight. The suite turns it off unless the caller has already set
 -- @MORLOC_LANG_PARAMS@; a test that must exercise the shipped profile passes
 -- @-X rust:lto=thin@ in its Makefile, which outranks the environment.
-runQuietly :: [String] -> IO ()
-runQuietly args = do
+--
+-- Where the system has no @timeout@ (macOS ships none), @shims@ goes on PATH
+-- so the tests that bound a run with it still run it.
+runQuietly :: FilePath -> [String] -> IO ()
+runQuietly shims args = do
   env <- getEnvironment
+  hasTimeout <- maybe False (const True) <$> findExecutable "timeout"
   let env' = case lookup langParamsVar env of
         Just _ -> env
         Nothing -> (langParamsVar, "rust:lto=off") : env
-  _ <- SP.readCreateProcessWithExitCode (SP.proc "make" args) {SP.env = Just env'} ""
+      env'' =
+        if hasTimeout
+          then env'
+          else ("PATH", shims ++ ":" ++ maybe "" id (lookup "PATH" env')) : filter ((/= "PATH") . fst) env'
+  _ <- SP.readCreateProcessWithExitCode (SP.proc "make" args) {SP.env = Just env''} ""
   return ()
   where
     langParamsVar = "MORLOC_LANG_PARAMS"

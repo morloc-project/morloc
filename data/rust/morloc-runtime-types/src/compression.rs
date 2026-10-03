@@ -22,13 +22,13 @@
 //! Compression is parallel across frames (one libzstd encoder per
 //! frame; the encoder buffers a frame's worth of uncompressed bytes,
 //! sets `pledgedSrcSize` exactly, then emits a self-contained frame).
-//! Decompression is per-frame and trivially parallelizable; the
-//! current implementation is single-threaded but the on-disk format
-//! is ready for a worker pool.
+//! Decompression is per-frame, on `frame_workers()` threads
+//! (`parallel_decompress_frames`). `FrameCompressor` compresses one
+//! frame with a context its thread reuses.
 //!
 //! Public surface:
-//! * `CompressionLevel::from_u8` / `zstd_level` / `use_long` / `is_none`
-//! * `FRAME_CHUNK_SIZE`, `MultiFrameEncoder`, `max_frames_for`,
+//! * `CompressionLevel::from_int` / `from_u8` / `zstd_level` / `use_long` / `is_none`
+//! * `FRAME_CHUNK_SIZE`, `MultiFrameEncoder`, `FrameCompressor`, `max_frames_for`,
 //!   `frame_index_entry_max_bytes`
 //! * `compress_payload_zstd` / `decompress_payload_zstd_into` (raw bytes)
 //! * `compress_packet`       / `decompress_packet`           (full packets)
@@ -150,6 +150,36 @@ fn compress_one_frame(
     let mut out = Vec::new();
     compress_one_frame_into(&mut compressor, raw, &mut out)?;
     Ok(out)
+}
+
+/// A zstd context for one level, kept by a thread that compresses many
+/// payloads of at most `FRAME_CHUNK_SIZE` bytes, each into one frame. The
+/// output equals `compress_payload_zstd` on the same payload.
+pub struct FrameCompressor {
+    inner: zstd::bulk::Compressor<'static>,
+}
+
+impl FrameCompressor {
+    pub fn new(lvl: CompressionLevel) -> Result<Self, MorlocError> {
+        Ok(FrameCompressor { inner: make_bulk_compressor(lvl).map_err(MorlocError::Io)? })
+    }
+
+    /// Compress `raw` into one frame; returns the frame and its index.
+    pub fn compress(&mut self, raw: &[u8]) -> Result<(Vec<u8>, Vec<FrameEntry>), MorlocError> {
+        if raw.len() > FRAME_CHUNK_SIZE {
+            return Err(MorlocError::Other(format!(
+                "a single zstd frame holds at most {FRAME_CHUNK_SIZE} bytes, got {}",
+                raw.len()
+            )));
+        }
+        let mut out = Vec::new();
+        compress_one_frame_into(&mut self.inner, raw, &mut out)?;
+        let entry = FrameEntry {
+            uncompressed_size: raw.len() as u64,
+            compressed_size: out.len() as u64,
+        };
+        Ok((out, vec![entry]))
+    }
 }
 
 /// Streaming sink that splits writes into `chunk_size`-byte chunks
@@ -498,20 +528,28 @@ impl<W: Write> Write for MultiFrameEncoder<W> {
 // ── Compression level (0-9 user-facing, mapped to zstd 1-22) ──────────────
 
 /// User-facing compression preset. 0 disables compression; 1-9 select a
-/// zstd level + long-mode combination. Constructed via `from_u8`, which
-/// rejects out-of-range values before any compression work starts.
+/// zstd level + long-mode combination. Constructed via `from_int` or
+/// `from_u8`, which reject out-of-range values before any compression work
+/// starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompressionLevel(u8);
 
 impl CompressionLevel {
-    /// Build a CompressionLevel from the raw user input.
-    pub fn from_u8(n: u8) -> Result<Self, MorlocError> {
-        if n > 9 {
-            return Err(MorlocError::Other(format!(
+    /// No compression.
+    pub const NONE: CompressionLevel = CompressionLevel(0);
+
+    /// Build a CompressionLevel from a morloc `Int`, as the user wrote it.
+    pub fn from_int(n: i64) -> Result<Self, MorlocError> {
+        match u8::try_from(n) {
+            Ok(b) if b <= 9 => Ok(CompressionLevel(b)),
+            _ => Err(MorlocError::Other(format!(
                 "compression level must be in 0..=9, got {n}"
-            )));
+            ))),
         }
-        Ok(CompressionLevel(n))
+    }
+
+    pub fn from_u8(n: u8) -> Result<Self, MorlocError> {
+        Self::from_int(i64::from(n))
     }
 
     pub fn raw(self) -> u8 {
@@ -680,19 +718,8 @@ pub fn parallel_decompress_frames(
         return Ok(());
     }
 
-    // Per-frame (comp_offset, comp_len, unc_offset, unc_len). Built
-    // here so workers index into the original buffers by offset
-    // rather than holding slice references they would have to split.
-    let mut work: Vec<(usize, usize, usize, usize)> = Vec::with_capacity(frames.len());
-    let mut comp_cur = 0usize;
-    let mut unc_cur = 0usize;
-    for f in frames {
-        let cs = f.compressed_size as usize;
-        let us = f.uncompressed_size as usize;
-        work.push((comp_cur, cs, unc_cur, us));
-        comp_cur += cs;
-        unc_cur += us;
-    }
+    // The totals are checked first, so no prefix sum below can overflow.
+    let (unc_cur, comp_cur) = crate::packet::frame_totals(frames)?;
     if comp_cur != compressed.len() {
         return Err(MorlocError::Packet(format!(
             "compressed buffer is {} bytes; frame index sums to {}",
@@ -706,6 +733,19 @@ pub fn parallel_decompress_frames(
             dest.len(),
             unc_cur
         )));
+    }
+
+    // Per-frame (comp_offset, comp_len, unc_offset, unc_len). Built
+    // here so workers index into the original buffers by offset
+    // rather than holding slice references they would have to split.
+    let mut work: Vec<(usize, usize, usize, usize)> = Vec::with_capacity(frames.len());
+    let (mut comp_off, mut unc_off) = (0usize, 0usize);
+    for f in frames {
+        let cs = crate::width::usize_from_u64(f.compressed_size);
+        let us = crate::width::usize_from_u64(f.uncompressed_size);
+        work.push((comp_off, cs, unc_off, us));
+        comp_off += cs;
+        unc_off += us;
     }
 
     // Single frame: skip the thread pool dance entirely.
@@ -1012,14 +1052,7 @@ pub fn decompress_packet(packet: &[u8]) -> Result<Vec<u8>, MorlocError> {
             // sizes. Each frame's compressed bytes live consecutively
             // in the payload region; we compute prefix sums of
             // compressed_size to find frame boundaries.
-            let total_uncompressed: usize = frames
-                .iter()
-                .map(|f| f.uncompressed_size as usize)
-                .sum();
-            let total_compressed: usize = frames
-                .iter()
-                .map(|f| f.compressed_size as usize)
-                .sum();
+            let (total_uncompressed, total_compressed) = crate::packet::frame_totals(&frames)?;
             if total_compressed != length {
                 return Err(MorlocError::Packet(format!(
                     "frame index sums to {} compressed bytes but header.length = {}",
@@ -1118,6 +1151,17 @@ mod tests {
     use super::*;
     use crate::packet::{make_mesg_data_packet, PACKET_FORMAT_MSGPACK};
     use crate::schema::parse_schema;
+
+    #[test]
+    fn level_is_checked_at_full_int_width() {
+        for n in 0..=9 {
+            assert_eq!(CompressionLevel::from_int(n).unwrap().raw(), n as u8);
+        }
+        for n in [-1, 10, 255, 256, 265, i64::MIN, i64::MAX] {
+            let e = CompressionLevel::from_int(n).unwrap_err().to_string();
+            assert!(e.ends_with(&format!("got {n}")), "{e}");
+        }
+    }
 
     /// A msgpack-shaped payload that compresses cleanly: a repeating byte
     /// pattern guarantees high redundancy regardless of zstd level.

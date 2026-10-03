@@ -1,0 +1,34 @@
+-- An `IFile` command argument accepts a morloc data file and a finished
+-- morloc stream file, and opens either for random access; so does each
+-- token of an `@many` list of them.
+module main (writeData, writeStream, second, secondPy, count)
+
+import root-py
+
+source Py from "helpers.py" ("ident" as ident)
+
+ident :: Int -> Int
+
+writeData :: Str -> <IO> ()
+writeData p = do
+  Ok u <- @save 0 p ([10, 20, 30] :: [Int])
+  ()
+
+writeStream :: Str -> <IO> ()
+writeStream p = do
+  Ok o <- @open p :: <IO> (Try Str (OStream Int))
+  Ok a <- @write 0 o [10, 20]
+  Ok b <- @write 0 o [30]
+  @close o
+
+second :: IFile [Int] -> Int
+second f = .[1] f
+
+secondPy :: IFile [Int] -> Int
+secondPy f = ident (.[1] f)
+
+count ::
+  --' @many
+  [IFile [Int]] ->
+  Int
+count fs = length fs

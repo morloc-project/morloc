@@ -29,12 +29,12 @@ gamma
 --- describe --say ---
 int(42)
 --- fhead -h lines (grep terminal flags + descriptions) ---
-  -l, --lines  Print each string on its own line
-  -c, --csv    Print each string quoted, comma-separated on one line
-  -s, --sum    Join all strings into one semicolon-separated summary
-  -p, --plain  Pure semicolon join (no IO effect on the terminal)
+  -l, --lines[=<PATH>]  Print each string on its own line
+  -c, --csv[=<PATH>]    Print each string quoted, comma-separated on one line
+  -s, --sum[=<PATH>]    Join all strings into one semicolon-separated summary
+  -p, --plain[=<PATH>]  Pure semicolon join (no IO effect on the terminal)
 --- describe -h lines (grep --say) ---
-      --say   Human-readable form of an integer
+      --say[=<PATH>]  Human-readable form of an integer
   --say:   Unit
 --- fhead -h Return block (per-formatter return types) ---
 Return:

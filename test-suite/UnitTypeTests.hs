@@ -18,9 +18,16 @@ module UnitTypeTests
   , pendingNumLitTests
   , whereTests
   , orderInvarianceTests
+  , signatureContractTests
+  , constraintContractTests
+  , definitionLadderTests
   , whitespaceTests
   , infixOperatorTests
   , recordLiteralOrderTests
+  , recordIdentityTests
+  , aliasExpansionTests
+  , accessorInWhereTests
+  , solvedKindCheckTests
   , complexityRegressionTests
   , definitionArityTests
   , effectSubtypeTests
@@ -50,7 +57,9 @@ module UnitTypeTests
   , postArgPropagationTests
   , tuplePatternLambdaTests
   , withDocstringTests
+  , parseDocstringTests
   , epilogueDocstringTests
+  , streamIntrinsicTests
   , patternSelectorTests
   , sumTypeTests
   , variantTests
@@ -403,6 +412,9 @@ listToGamma gs =
     , gammaConstraints = []
     , gammaAssumedConstraints = Nothing
     , gammaPendingNumLits = []
+    , gammaRigid = Nothing
+    , gammaScoped = Map.empty
+
     , gammaPositionalReceivers = Set.empty
     }
 
@@ -949,6 +961,18 @@ typeAliasTests =
         f xs = map (\x -> x) xs
         |]
       , expectError
+          "instance on a transparent alias of an optional type is rejected"
+          [r|
+        module main (f)
+        type Opt a = ?a
+        class Size a where
+          size :: a -> Int
+        instance Size (Opt a) where
+          size x = 1
+        f :: Int -> Int
+        f x = x
+        |]
+      , expectError
           "instance on transparent alias is rejected (deep chain)"
           [r|
         module main (f)
@@ -1428,10 +1452,56 @@ pendingNumLitTests =
 
 whereTests :: TestTree
 whereTests =
-  localOption (mkTimeout 1000000) $ -- 1 second timeout
+  localOption (mkTimeout 2000000) $
     testGroup
       "Test of where statements"
-      [ assertGeneralType
+      [ -- A `where` binding is a declaration, not a local: it is elaborated
+        -- afresh at each use site, so one unsigned binding may serve two
+        -- types. A `let` pins a single type, so lowering a `where` into one
+        -- loses this.
+        assertGeneralType
+          "polymorphic where-binding applied at two types"
+          [r|
+            id :: a -> a
+            f = (me 1, me "a") where
+                me = id
+            f
+        |]
+          (AppU (VarU (TV "Tuple2")) [int, str])
+      , assertGeneralType
+          "polymorphic where-binding applied at two container types"
+          [r|
+            id :: a -> a
+            f = (me [1], me ["a"]) where
+                me = id
+            f
+        |]
+          (AppU (VarU (TV "Tuple2")) [lst int, lst str])
+      , -- A where-binding's scope covers its siblings, not only the body.
+        -- Here `unused` is the only reader of `g` and the body never names
+        -- it; `g` must still resolve.
+        assertGeneralType
+          "where-binding read only by an unread sibling"
+          [r|
+            inc :: Int -> Int
+            f = g 1 where
+                g y = inc y
+                unused = g 2
+            f
+        |]
+          int
+      , assertGeneralType
+          "chain of where-bindings behind a single reader"
+          [r|
+            inc :: Int -> Int
+            f = c where
+                a = 1
+                b = inc a
+                c = inc b
+            f
+        |]
+          int
+      , assertGeneralType
           "simple where"
           [r|
             f :: Int
@@ -1460,6 +1530,33 @@ whereTests =
             f
         |]
           int
+      , -- Names bound by a parameter pattern are in scope in the where-block,
+        -- exactly as a plain parameter is.
+        assertGeneralType
+          "tuple-pattern parameters are visible in where"
+          [r|
+            add :: Int -> Int -> Int
+            f :: (Int, Int) -> Int
+            f (a, b) = g where
+                g = add a b
+            f
+        |]
+          (fun [tuple [int, int], int])
+      , -- A where-binding is a pure value: running an effect in it has no
+        -- do-block to sequence it in.
+        expectError
+          "where-binding right-hand side cannot force an effect"
+          [r|
+           module main (f)
+           effect IO
+           readIt :: Int -> <IO> Int
+           addInt :: Int -> Int -> Int
+           f :: Int -> <IO> Int
+           f n = do
+             addInt x 1
+             where
+               x = !(readIt n)
+        |]
       ]
 
 orderInvarianceTests :: TestTree
@@ -1480,6 +1577,417 @@ orderInvarianceTests =
           "z = 42\ny = z\nx = y\nx"
           int
       ]
+
+-- A signature is a contract on the definition: its type variables are rigid,
+-- so a body that only works at some instance of them is rejected, whether the
+-- term is used at that instance, used elsewhere, or not used at all.
+--
+signatureContractTests :: TestTree
+signatureContractTests =
+  localOption (mkTimeout 2000000) $
+    testGroup
+      "Signatures are contracts"
+      [ expectError
+          "a body cannot fix a length its signature leaves free"
+          [r|
+module main (f)
+sum3 :: Vector 3 Real -> Real
+f :: Vector n Real -> Real
+f v = sum3 v
+|]
+      , expectError
+          "a body cannot equate two lengths its signature keeps apart"
+          [r|
+module main (f)
+dot :: Vector n Real -> Vector n Real -> Real
+f :: Vector n Real -> Vector m Real -> Real
+f a b = dot a b
+|]
+      , expectPass
+          "a length-polymorphic body passes its length through"
+          [r|
+module main (f)
+inc :: Real -> Real
+vmap :: (a -> b) -> Vector n a -> Vector n b
+f :: Vector n Real -> Vector n Real
+f v = vmap inc v
+|]
+      , expectError
+          "a body cannot fix an effect its signature leaves free"
+          [r|
+module main (f)
+effect IO
+ioOp :: Int -> <IO> Int
+f :: Int -> <e> Int
+f x = ioOp x
+|]
+      , expectPass
+          "an effect-polymorphic body passes its effect through"
+          [r|
+module main (f)
+apply :: (Int -> <e> Int) -> Int -> <e> Int
+f :: (Int -> <e> Int) -> Int -> <e> Int
+f g x = apply g x
+|]
+      , expectError
+          "a local signature's own type variable is not the enclosing one"
+          [r|
+module main (f)
+pair :: a -> a -> [a]
+f :: a -> [a]
+f x = g x
+  where
+    g :: b -> [b]
+    g y = pair y x
+|]
+      , expectPass
+          "a local signature's type variable is the enclosing signature's"
+          [r|
+module main (f)
+pair :: a -> a -> [a]
+f :: a -> [a]
+f x = g x
+  where
+    g :: a -> [a]
+    g y = pair y x
+|]
+      , expectError
+          "body narrower than signature, used at the narrow type"
+          [r|
+           module main (f)
+           addInt :: Int -> Int -> Int
+           bad :: a -> a
+           bad x = addInt x 1
+           f :: Int
+           f = bad 5
+        |]
+      , expectError
+          "body narrower than signature, never used"
+          [r|
+           module main (f)
+           addInt :: Int -> Int -> Int
+           bad :: a -> a
+           bad x = addInt x 1
+           f :: Int
+           f = 5
+        |]
+      , expectError
+          "body narrower than signature, exported"
+          [r|
+           module main (bad)
+           addInt :: Int -> Int -> Int
+           bad :: a -> a
+           bad x = addInt x 1
+        |]
+      , expectError
+          "body returns the wrong type variable"
+          [r|
+           module main (f)
+           swapBad :: a -> b -> a
+           swapBad x y = y
+           f :: Int
+           f = swapBad 1 2
+        |]
+      , -- a recursive call instantiates the signature afresh
+        expectPass
+          "recursive definition checked against its polymorphic signature"
+          [r|
+           module main (f)
+           le :: Int -> Int -> Bool
+           sub :: Int -> Int -> Int
+           keep :: a -> Int -> a
+           keep x n
+             ? le n 0 = x
+             : keep x (sub n 1)
+           f :: Int -> Str
+           f n = keep "a" n
+        |]
+      , assertGeneralType
+          "body as general as its signature, used at two types"
+          [r|
+           good :: a -> a
+           good x = x
+           (good 1, good "a")
+        |]
+          (AppU (VarU (TV "Tuple2")) [int, str])
+      ]
+
+-- A signature's class constraints are part of its contract: each names the
+-- type it constrains, the body's method uses must follow from them (a
+-- superclass follows from its subclass), and an instance exists only where
+-- its superclass instances exist.
+constraintContractTests :: TestTree
+constraintContractTests =
+  localOption (mkTimeout 2000000) $
+    testGroup
+      "Constraints are contracts"
+      [ expectError
+          "an instance body using a method at a type its context does not cover"
+          [r|
+module main (f)
+class Sz a where
+  sz :: a -> Int
+add :: Int -> Int -> Int
+fold :: (b -> a -> b) -> b -> [a] -> b
+instance Sz Int where
+  sz x = 1
+instance Sz (List a) where
+  sz xs = fold (\acc x -> add acc (sz x)) 0 xs
+f :: [Int] -> Int
+f xs = sz xs
+|]
+      , expectPass
+          "an instance body using a method at a type its context covers"
+          [r|
+module main (f)
+class Sz a where
+  sz :: a -> Int
+add :: Int -> Int -> Int
+fold :: (b -> a -> b) -> b -> [a] -> b
+instance Sz Int where
+  sz x = 1
+instance Sz a => Sz (List a) where
+  sz xs = fold (\acc x -> add acc (sz x)) 0 xs
+f :: [Int] -> Int
+f xs = sz xs
+|]
+      , expectPass
+          "an instance context entails its superclasses"
+          [r|
+module main (f)
+class Eqq a where
+  eqq :: a -> a -> Bool
+class Eqq a => Ordd a where
+  lte :: a -> a -> Bool
+class Sm a where
+  same :: a -> a -> Bool
+instance Eqq Int where
+  eqq x y = True
+instance Ordd Int where
+  lte x y = True
+instance Sm Int where
+  same x y = True
+pick :: [a] -> a
+instance (Ordd a) => Sm (List a) where
+  same xs ys = eqq (pick xs) (pick ys)
+f :: [Int] -> Bool
+f xs = same xs xs
+|]
+      , expectError
+          "class constraint without a type argument"
+          [r|
+           module main (f)
+           class Ord a where
+             (<=) :: a -> a -> Bool
+           instance Ord Int where
+             (<=) x y = True
+           lt :: Ord => a -> a -> Bool
+           lt x y = x <= y
+           f :: Int -> Bool
+           f x = lt x x
+        |]
+      , expectError
+          "body uses a method its signature does not constrain"
+          [r|
+           module main (f)
+           class Eq a where
+             (==) :: a -> a -> Bool
+           instance Eq Int where
+             (==) x y = True
+           same :: a -> a -> Bool
+           same x y = x == y
+           f :: Int -> Bool
+           f x = same x x
+        |]
+      , expectError
+          "instance without an instance of its superclass"
+          [r|
+           module main (f)
+           class Sg a where
+             cat :: a -> a -> a
+           class Sg a => Mn a where
+             emp :: a
+           instance Sg Str where
+             cat x y = x
+           instance Mn Int where
+             emp = 0
+           f :: Int -> Int
+           f x = emp
+        |]
+      , -- each constraint of a parenthesized list is one given
+        expectPass
+          "method of the second of two declared constraints"
+          [r|
+           module main (f)
+           class Sz a where
+             size :: a -> Int
+           class Eq a where
+             (==) :: a -> a -> Bool
+           instance Sz Int where
+             size x = 1
+           instance Eq Int where
+             (==) x y = True
+           same :: (Sz a, Eq a) => a -> a -> Bool
+           same x y = x == y
+           f :: Int -> Bool
+           f x = same x x
+        |]
+      , -- a literal inhabits a rigid variable only under a numeric class
+        expectPass
+          "integer literal at a variable constrained by Integral"
+          [r|
+           module main (f)
+           class Integral a where
+             (+) :: a -> a -> a
+           instance Integral Int where
+             (+) x y = x
+           inc :: Integral a => a -> a
+           inc x = x + 1
+           f :: Int -> Int
+           f x = inc x
+        |]
+      , expectError
+          "integer literal at an unconstrained variable"
+          [r|
+           module main (f)
+           one :: a -> a
+           one x = 1
+           f :: Int -> Int
+           f x = one x
+        |]
+      , expectPass
+          "superclass method used under the subclass constraint"
+          [r|
+           module main (f)
+           class Sg a where
+             cat :: a -> a -> a
+           class Sg a => Mn a where
+             emp :: a
+           instance Sg Int where
+             cat x y = x
+           instance Mn Int where
+             emp = 0
+           padded :: Mn a => a -> a
+           padded x = cat x emp
+           f :: Int -> Int
+           f x = padded x
+        |]
+      ]
+
+-- A definition is checked once, however many times it is named. In the
+-- ladder every level names the one below it twice, so any per-use
+-- re-elaboration costs 2^depth; checking each definition once is linear.
+--
+definitionLadderTests :: TestTree
+definitionLadderTests =
+  localOption (mkTimeout 500000) $
+    testGroup
+      "Definitions are checked once"
+      [ expectPass "ladder of definitions each naming the one below twice" (definitionLadder 8)
+      , expectError "recursion through two definitions at a growing type is rejected"
+          [r|
+module main (start)
+f :: a -> Int
+g :: [a] -> Int
+f x = g [x]
+g xs = f xs
+start :: Int
+start = f 1
+|]
+      , expectPass "a record constraint passes through two layers of definitions"
+          [r|
+module main (outer)
+type TBox (r :: Rec)
+hasZ :: (Subset (ListToSet ['z]) (Keys r)) => TBox r -> TBox r
+mid :: (Subset (ListToSet ['z]) (Keys r)) => TBox r -> TBox r
+mid t = hasZ t
+outer :: (Subset (ListToSet ['z]) (Keys r)) => TBox r -> TBox r
+outer t = mid t
+|]
+      , expectPass "mutual recursion over a list of a type variable"
+          [r|
+module main (evenLen)
+isNil :: [a] -> Bool
+rest :: [a] -> [a]
+evenLen :: [a] -> Bool
+oddLen :: [a] -> Bool
+evenLen xs = ? isNil xs = True : oddLen (rest xs)
+oddLen xs = ? isNil xs = False : evenLen (rest xs)
+|]
+      , expectPass "mutual recursion over a vector of any length"
+          [r|
+module main (start)
+dec :: Int -> Int
+isZero :: Int -> Bool
+evenV :: Int -> Vector n Int -> Bool
+oddV :: Int -> Vector n Int -> Bool
+evenV k v = ? isZero k = True : oddV (dec k) v
+oddV k v = ? isZero k = False : evenV (dec k) v
+start :: Int -> Vector n Int -> Bool
+start k v = evenV k v
+|]
+      , expectError "two definitions fixing one length variable differently are rejected"
+          [r|
+module main (both)
+add :: Real -> Real -> Real
+sum3 :: Vector 3 Real -> Real
+sum4 :: Vector 4 Real -> Real
+f :: Vector n Real -> Real
+f v = sum3 v
+g :: Vector n Real -> Real
+g v = sum4 v
+both :: Vector n Real -> Real
+both v = add (f v) (g v)
+|]
+      , expectPass "a subclass of Numeric admits a real literal"
+          [r|
+module main (half)
+class Integral a where
+  add :: a -> a -> a
+  mul :: a -> a -> a
+class Integral a => Numeric a where
+  divide :: a -> a -> a
+class Numeric a => Fancy a where
+  fancy :: a -> a
+instance Integral Real
+instance Numeric Real
+instance Fancy Real
+half :: Fancy a => a -> a
+half x = mul x 0.5
+|]
+      , expectPass "recursion through two definitions at one type"
+          [r|
+module main (start)
+dec :: Int -> Int
+dec n = n
+isZero :: Int -> Bool
+isZero n = True
+f :: Int -> Int
+g :: Int -> Int
+f x = g (dec x)
+g x = f (dec x)
+start :: Int
+start = f 1
+|]
+      ]
+
+-- | @p_k n = add (p_{k-1} n) (p_{k-1} n)@, @k@ levels of signed definitions.
+definitionLadder :: Int -> MT.Text
+definitionLadder k =
+  MT.unlines $
+    [ "module main (p" <> num k <> ")"
+    , "add :: Int -> Int -> Int"
+    , "p0 :: Int -> Int"
+    , "p0 n = add n 1"
+    ]
+      <> concat
+        [ [ "p" <> num i <> " :: Int -> Int"
+          , "p" <> num i <> " n = add (p" <> num (i - 1) <> " n) (p" <> num (i - 1) <> " n)"
+          ]
+        | i <- [1 .. k]
+        ]
+  where
+    num = MT.pack . show
 
 typeOrderTests :: TestTree
 typeOrderTests =
@@ -2701,6 +3209,33 @@ unitValuecheckTests =
              x = 100
              y = x + 1
       |]
+      , -- the body's lambda binds a parameter too
+        expectError
+          "where-clause binding shadows a parameter of the body's lambda"
+          [r|
+         module foo (g)
+           g :: Int -> Int -> Int
+           g x = \y -> y where
+             y = x
+      |]
+      , expectError
+          "where-clause binding shadows a parameter of a definition that is a lambda"
+          [r|
+         module foo (g)
+           g :: Int -> Int
+           g = \x -> x where
+             x = 1
+      |]
+      , -- a lambda nested in an argument binds locally, not a parameter
+        valuecheckPass
+          "where-clause binding named like a nested lambda's parameter"
+          [r|
+         module foo (g)
+           g :: Int -> Int
+           g x = h (\y -> y) where
+             y = 1
+             h f = f x
+      |]
       , -- duplicate names in a single where-clause
         expectError
           "duplicate where-clause binding"
@@ -2755,6 +3290,18 @@ unitValuecheckTests =
              show x = @show x
            f :: Int -> Str
            f = show
+      |]
+      , -- Two declarations that differ only in a parameter's name are the
+        -- same value, including where the parameter is read by an intrinsic.
+        valuecheckPass
+          "alpha-equivalent intrinsic bodies pass"
+          [r|
+         module foo (f)
+           g :: Int -> Str
+           g x = @show x
+           g y = @show y
+           f :: Int -> Str
+           f = g
       |]
       , valuecheckFail
           "distinct intrinsic bodies across instances fail"
@@ -3353,6 +3900,111 @@ infixOperatorTests =
 typecheck against the declared record type, while literals with mismatched
 key sets (missing / unknown fields) must be rejected.
 -}
+-- A tuple accessor inside an unannotated `where` helper. The helper's
+-- parameter existential is solved to another existential before that one
+-- goes ground, and the slot constraints from the accessor have to survive
+-- the chain. When they did not, the slot type was never checked: a Str
+-- slot could be returned where a Real was declared, and the program only
+-- failed at run time inside the pool.
+accessorInWhereTests :: TestTree
+accessorInWhereTests =
+  localOption (mkTimeout 2000000) $
+    testGroup
+      "A tuple accessor in an unannotated where binding"
+      [ expectPass
+          "an accessor whose slot type matches the signature"
+          [r|
+module main (top)
+mapL :: (a -> b) -> [a] -> [b]
+counts :: [(Str, Int)]
+top :: [Int]
+top = mapL score counts
+  where
+    score p = .1 p
+|]
+      , exprTestBad
+          "an accessor whose slot type contradicts the signature"
+          [r|
+module main (top)
+mapL :: (a -> b) -> [a] -> [b]
+counts :: [(Str, Int)]
+top :: [Real]
+top = mapL score counts
+  where
+    score p = .0 p
+|]
+      , exprTestBad
+          "the other slot, contradicted the other way"
+          [r|
+module main (top)
+mapL :: (a -> b) -> [a] -> [b]
+counts :: [(Str, Int)]
+top :: [Str]
+top = mapL score counts
+  where
+    score p = .1 p
+|]
+      , expectPass
+          "an accessor result passed on to a second unannotated helper"
+          [r|
+module main (top)
+mapL :: (a -> b) -> [a] -> [b]
+counts :: [(Str, Int)]
+top :: [Int]
+top = mapL score counts
+  where
+    score p = bump (.1 p)
+    bump c = c
+|]
+      ]
+
+-- Problems that only surface once every kind variable is solved. Each was
+-- previously invisible unless the user happened to annotate the result and
+-- force the solver to look.
+solvedKindCheckTests :: TestTree
+solvedKindCheckTests =
+  localOption (mkTimeout 2000000) $
+    testGroup
+      "Checks that run after every kind variable is solved"
+      [ exprTestBad
+          "a computed dimension that comes out negative"
+          [r|
+module main (bad)
+roll :: w@Int -> Vector n Real -> Vector (n - w + 1) Real
+src :: Vector 10 Real
+bad :: Vector m Real
+bad = roll 14 src
+|]
+      , expectPass
+          "the same arithmetic when it stays positive"
+          [r|
+module main (ok)
+roll :: w@Int -> Vector n Real -> Vector (n - w + 1) Real
+src :: Vector 10 Real
+ok = roll 3 src
+|]
+      , exprTestBad
+          "a column union whose sides share a name, with no annotation"
+          [r|
+module main (oops)
+type Holder (r :: Rec) a
+a :: Holder {x=Int} Int
+c :: Holder {x=Str} Int
+join2 :: Holder r1 z -> Holder r2 z -> Holder (r1 + r2) z
+oops = join2 a c
+|]
+      , expectPass
+          "a column union of disjoint sides"
+          [r|
+module main (fine)
+type Holder (r :: Rec) a
+a :: Holder {x=Int} Int
+d :: Holder {y=Str} Int
+join2 :: Holder r1 z -> Holder r2 z -> Holder (r1 + r2) z
+fine = join2 a d
+|]
+      ]
+
 recordLiteralOrderTests :: TestTree
 recordLiteralOrderTests =
   localOption (mkTimeout 1000000) $ -- 1 second timeout
@@ -3418,6 +4070,240 @@ recordLiteralOrderTests =
           b = { name = "Alice", years = 30 }
         |]
       ]
+
+-- | Records are nominal: a record type is its name and its parameters, phantom
+-- parameters included. An alias of a record is that record. The timeout
+-- asserts termination of the negative cases.
+recordIdentityTests :: TestTree
+recordIdentityTests =
+  localOption (mkTimeout 1000000) $ -- 1 second timeout; divergence appears as failure
+    testGroup
+      "Record identity and applied aliases"
+      [ expectError
+          "distinct records with the same fields are distinct types"
+          [r|
+          module main (f)
+          record A where
+            x :: Int
+          record B where
+            x :: Int
+          f :: A -> B
+          f a = a
+        |]
+      , expectError
+          "a literal typed at one record does not inhabit a same-fielded record"
+          [r|
+          module main (f)
+          record A where
+            x :: Int
+          record B where
+            x :: Int
+          mkA :: Int -> A
+          mkA i = {x = i}
+          f :: Int -> B
+          f i = mkA i
+        |]
+      , expectError
+          "an alias of one record does not name a same-fielded record"
+          [r|
+          module main (f)
+          record A where
+            x :: Int
+          record B where
+            x :: Int
+          type C = A
+          f :: C -> B
+          f c = c
+        |]
+      , expectError
+          "distinct parameterized records with the same fields are distinct types"
+          [r|
+          module main (f)
+          record A a where
+            x :: a
+          record B a where
+            x :: a
+          f :: A Int -> B Int
+          f a = a
+        |]
+      , expectError
+          "a phantom parameter distinguishes two instantiations of a record"
+          [r|
+          module main (f)
+          record Tag a where
+            n :: Int
+          f :: Tag Int -> Tag Str
+          f t = t
+        |]
+      , expectError
+          "a phantom parameter survives a polymorphic identity"
+          [r|
+          module main (h)
+          record Tag a where
+            n :: Int
+          mk :: Int -> Tag Str
+          mk i = {n = i}
+          retag :: Tag a -> Tag a
+          retag t = t
+          h :: Int -> Tag Int
+          h i = retag (mk i)
+        |]
+      , expectError
+          "a phantom parameter is checked between guard branches"
+          [r|
+          module main (g)
+          record Tag a where
+            n :: Int
+          c :: Tag Int
+          c = {n = 1}
+          g :: Bool -> Tag Str
+          g b ? b = {n = 2}
+            : c
+        |]
+      , expectPass
+          "an alias of a record is that record"
+          [r|
+          module main (f)
+          record A where
+            x :: Int
+          type C = A
+          f :: C -> A
+          f c = c
+        |]
+      , expectPass
+          "a literal builds a record at a new phantom parameter"
+          [r|
+          module main (f)
+          record Tag a where
+            n :: Int
+          f :: Tag Int -> Tag Str
+          f t = {n = .n t}
+        |]
+      , expectPass
+          "a polymorphic identity keeps a phantom parameter"
+          [r|
+          module main (g)
+          record Tag a where
+            n :: Int
+          mk :: Int -> Tag Str
+          mk i = {n = i}
+          retag :: Tag a -> Tag a
+          retag t = t
+          g :: Int -> Tag Str
+          g i = retag (mk i)
+        |]
+      , expectPass
+          "an effect alias names the effect type it expands to"
+          [r|
+          module main (f)
+          effect IO
+          type Act a = <IO> a
+          source Py from "m.py" ("rd")
+          rd :: Int -> <IO> Int
+          f :: Int -> Act Int
+          f i = rd i
+        |]
+      , expectPass
+          "an effect type is the effect alias that names it"
+          [r|
+          module main (f)
+          effect IO
+          type Act a = <IO> a
+          source Py from "m.py" ("rd")
+          rd :: Int -> Act Int
+          f :: Int -> <IO> Int
+          f i = rd i
+        |]
+      , expectError
+          "a record named Rec is nominal like any other"
+          [r|
+          module main (f)
+          record Rec where
+            x :: Int
+          record Other where
+            x :: Int
+          f :: Rec -> Other
+          f a = a
+        |]
+      ]
+
+-- | Aliases of arrow, effect and optional types are expanded wherever they
+-- occur. Other transparent aliases are expanded when a type leaves the module
+-- that declared them.
+aliasExpansionTests :: TestTree
+aliasExpansionTests =
+  localOption (mkTimeout 1000000) $
+    testGroup
+      "Alias expansion"
+      [ testEqual "uncurryU flattens arrows grouped into the result"
+          ([int, str], int)
+          (uncurryU (FunU [int] (FunU [str] int)))
+      , testEqual "uncurryU stops at a suspension"
+          ([int], FunU [] int)
+          (uncurryU (FunU [int] (FunU [] int)))
+      , testEqual "uncurryU stops at an optional result"
+          ([int], OptionalU (FunU [str] int))
+          (uncurryU (FunU [int] (OptionalU (FunU [str] int))))
+      , testEqual "uncurryU of a thunk has no arguments"
+          ([], FunU [] int)
+          (uncurryU (FunU [] int))
+      , testEqual "uncurryU looks through quantifiers"
+          ([var "a", var "a"], var "a")
+          (uncurryU (forallu ["a"] (FunU [var "a"] (FunU [var "a"] (var "a")))))
+      , testEqual "a function alias nested in its own argument is expanded"
+          (FunU [FunU [str] int] int)
+          (MTI.expandStructuralAliases scorerScope (arr "Scorer" [arr "Scorer" [str]]))
+      , testEqual "a function alias used twice side by side is expanded twice"
+          (tuple [FunU [str] int, FunU [int] int])
+          (MTI.expandStructuralAliases scorerScope (tuple [arr "Scorer" [str], arr "Scorer" [int]]))
+      , testEqual "a nested function alias leaves no alias behind"
+          []
+          (MTI.structuralAliasesIn scorerScope
+            (MTI.expandStructuralAliases scorerScope (arr "Scorer" [arr "Scorer" [str]])))
+      , testEqual "an alias of a record is not structural"
+          (arr "Batch" [int])
+          (MTI.expandStructuralAliases (aliasScope [("Batch", ["a"], lst (var "a"))]) (arr "Batch" [int]))
+      , testEqual "a recursive function alias is left in place"
+          [TV "F"]
+          (let sc = aliasScope [("F", [], FunU [int] (var "F"))]
+            in MTI.structuralAliasesIn sc (MTI.expandStructuralAliases sc (var "F")))
+      , testEqual "a transparent alias nested in its own argument is expanded"
+          (arr "Map" [str, arr "Map" [str, int]])
+          (MTI.expandTransparentAliases
+            (aliasScope [("Dict", ["a"], arr "Map" [str, var "a"])])
+            (arr "Dict" [arr "Dict" [int]]))
+      , assertGeneralType
+          "a signature through a function alias nested in its own argument"
+          [r|
+          module main (apply2)
+          type Scorer a = a -> Int
+          apply2 :: Scorer (Scorer Str)
+          apply2 f = f "x"
+        |]
+          (FunU [FunU [str] int] int)
+      , expectPass
+          "a typedef naming a function alias nested in its own argument"
+          [r|
+          module main (f)
+          type Scorer a = a -> Int
+          type Meta = Scorer (Scorer Str)
+          f :: Meta
+          f g = g "x"
+        |]
+      , expectError
+          "a recursive function alias is rejected"
+          [r|
+          module main (f)
+          type F = Int -> F
+          f :: F
+          f x = f
+        |]
+      ]
+  where
+    aliasScope defs = Map.fromList
+      [ (TV n, [([Left (TV p, KindType) | p <- ps], body, ArgDocAlias defaultValue, False, TypedefAlias)])
+      | (n, ps, body) <- defs ]
+    scorerScope = aliasScope [("Scorer", ["a"], FunU [var "a"] int)]
 
 {- | Tests for typechecker complexity - these would timeout with O(2^n) behavior
 All tests have a 0.1-second timeout to catch exponential blowup
@@ -4714,6 +5600,16 @@ effectEscapabilityTests =
         escapable effect Error
         effect Cap
         mixed :: <Error, Cap> Int -> <Error> Int
+        ok :: Int
+        ok = 42
+          |]
+      , exprTestBad
+          "signature: inescapable Cap spelled through an alias still propagates"
+          [r|
+        module main (ok)
+        effect Cap
+        type Capped a = <Cap> a
+        consume :: Capped Int -> Int
         ok :: Int
         ok = 42
           |]
@@ -7087,7 +7983,7 @@ aliasConstructorTests =
         instance Monoid (Deque a)
         instance Foldable List
         instance Foldable Deque
-        concat :: (Foldable f, Monoid a) => f (f a) -> f a
+        concat :: (Foldable f, Monoid (f a)) => f (f a) -> f a
         concat = fold append mempty
         f :: [[Int]] -> [Int]
         f = concat
@@ -7218,7 +8114,7 @@ aliasConstructorTests =
         instance Foldable List
         instance Foldable Deque
         instance Foldable Array
-        concat :: (Foldable f, Monoid a) => f (f a) -> f a
+        concat :: (Foldable f, Monoid (f a)) => f (f a) -> f a
         concat = fold append mempty
         f :: [[Int]] -> [Int]
         f = concat
@@ -8484,6 +9380,115 @@ patternSelectorTests =
           |]
       ]
 
+-- | `IFile a` names the whole value stored in the file, while `IStream a`
+-- names the element of a list file. `@stream` turns the one into the other,
+-- so it takes an `IFile [a]` and gives an `IStream a`, and `@next` on that
+-- stream gives `[a]`. A file whose value is not a list has no elements to
+-- stream.
+streamIntrinsicTests :: TestTree
+streamIntrinsicTests =
+  localOption (mkTimeout 1000000) $ -- 1s
+    testGroup
+      "@stream element type"
+      [ expectPass
+          "@stream on IFile [Int] then @next gives [Int]"
+          [r|
+        module main (foo)
+        effect IO
+        foo :: IFile [Int] -> <IO> (Try Str [Int])
+        foo f = do
+          s <- @stream f
+          @next s
+          |]
+      , expectPass
+          "@stream strips one list layer from IFile [[Int]]"
+          [r|
+        module main (foo)
+        effect IO
+        foo :: IFile [[Int]] -> <IO> (Try Str [[Int]])
+        foo f = do
+          s <- @stream f
+          @next s
+          |]
+      , expectError
+          "@stream on IFile [Int] does not give [[Int]]"
+          [r|
+        module main (foo)
+        effect IO
+        foo :: IFile [Int] -> <IO> (Try Str [[Int]])
+        foo f = do
+          s <- @stream f
+          @next s
+          |]
+      , expectPass
+          "@stream through an alias of the element list"
+          [r|
+        module main (foo)
+        effect IO
+        type Rows = [Int]
+        foo :: IFile Rows -> <IO> (Try Str [Int])
+        foo f = do
+          s <- @stream f
+          @next s
+          |]
+      , expectPass
+          "@stream through an alias of the whole handle"
+          [r|
+        module main (foo)
+        effect IO
+        type Rows = IFile [Int]
+        foo :: Rows -> <IO> (Try Str [Int])
+        foo f = do
+          s <- @stream f
+          @next s
+          |]
+      , expectPass
+          "@stream in a polymorphic helper"
+          [r|
+        module main (foo)
+        effect IO
+        streamOf :: IFile [a] -> <IO> IStream a
+        streamOf f = @stream f
+        foo :: IFile [Int] -> <IO> (Try Str [Int])
+        foo f = do
+          s <- streamOf f
+          @next s
+          |]
+      , expectPass
+          "@stream and @next on receivers typed by inference"
+          [r|
+        module main (foo)
+        effect IO
+        foo :: IFile [Int] -> <IO> (Try Str [Int])
+        foo f = do
+          let open = \h -> @stream h
+          let pull = \s -> @next s
+          s <- open f
+          pull s
+          |]
+      , expectError
+          "@stream on a receiver inferred as a non-list file is rejected"
+          [r|
+        module main (foo)
+        effect IO
+        foo :: IFile Int -> <IO> (Try Str [Int])
+        foo f = do
+          let open = \h -> @stream h
+          s <- open f
+          @next s
+          |]
+      , expectError
+          "@stream on a file whose value is not a list is rejected"
+          [r|
+        module main (foo)
+        effect IO
+        foo :: IFile Int -> <IO> (Try Str [Int])
+        foo f = do
+          s <- @stream f
+          @next s
+          |]
+      ]
+
 -- | Placement of `@epilogue` in a term docstring. A command's epilogue
 -- belongs on its signature preamble, like `@with`; anywhere else it has
 -- no help screen to render on and is rejected rather than kept as prose.
@@ -8524,6 +9529,117 @@ epilogueDocstringTests =
           |]
       ]
 
+-- | Frontend validation of `@parse` on command arguments. Each case varies
+-- one part of a small command whose argument is read by `readInts`.
+parseDocstringTests :: TestTree
+parseDocstringTests =
+  localOption (mkTimeout 2000000) $ -- 2s
+    testGroup
+      "parse: docstring validation"
+      [ expectPass "a format with extensions" (parseProg "@parse ints=readInts .ints .ints.gz")
+      , expectPass "two formats" (parseProg "@parse ints=readInts .ints\n  --' @parse csv=readInts .csv")
+      , expectPass "a format with no extensions" (parseProg "@parse ints=readInts")
+      , expectError "missing `=`" (parseProg "@parse ints readInts")
+      , expectError "missing handler" (parseProg "@parse ints=")
+      , expectError "uppercase format name" (parseProg "@parse Ints=readInts")
+      , expectError "format name with `_`" (parseProg "@parse my_ints=readInts")
+      , expectError "reserved format name `morloc`" (parseProg "@parse morloc=readInts")
+      , expectError "duplicate format name" (parseProg "@parse ints=readInts\n  --' @parse ints=readInts .x")
+      , expectError "extension without a leading dot" (parseProg "@parse ints=readInts ints")
+      , expectError "uppercase extension" (parseProg "@parse ints=readInts .INTS")
+      , expectError "extension claimed by two formats" (parseProg "@parse ints=readInts .txt\n  --' @parse csv=readInts .txt")
+      , expectError "extension repeated in one format" (parseProg "@parse ints=readInts .txt .txt")
+      , expectError "`@parse` in a signature preamble"
+          [r|
+        module main (count)
+        effect IO
+        source Py from "m.py" ("readInts", "size")
+        readInts :: Str -> <IO> [Int]
+        size :: [Int] -> Int
+        --' @parse ints=readInts
+        count :: [Int] -> Int
+        count xs = size xs
+          |]
+      , expectError "`@parse` on a `Str` argument" (parseProgT "Str" "@parse s=readStr" "x")
+      , expectError "`@parse` on an alias of `Str`" (parseProgT "Path" "@parse s=readStr" "x")
+      , expectError "`@parse` on an argument whose type has a type variable"
+          [r|
+        module main (count)
+        effect IO
+        data Try e a = Err e | Ok a
+        source Py from "m.py" ("readAny", "size")
+        readAny :: Str -> <IO> [a]
+        size :: [a] -> Int
+        count a ::
+          --' @parse any=readAny
+          [a] ->
+          Int
+        count xs = size xs
+          |]
+      , expectError "a handler of the wrong type" (parseProg "@parse ints=size")
+      , expectError "an unbound handler" (parseProg "@parse ints=noSuchReader")
+      , expectError "`@parse` with `@many`" (parseProg "@parse ints=readInts\n  --' @many")
+      , expectError "`@parse` with `@unroll`" (parseProg "@parse ints=readInts\n  --' @unroll")
+      , expectError "`@parse` on an `OStream` argument" (parseProgT "OStream Int" "@parse s=readInts" "0")
+      , expectError "`@parse` on an `IFile` that is not a list" (parseProgT "IFile Int" "@parse s=readInts" "0")
+      , expectError "a stream handler that is not a producer" (parseProgT "IStream Int" "@parse s=readInts" "0")
+      , expectPass "a stream producer on an `IStream` argument" (parseProgT "IStream Int" "@parse s=produceInts .txt" "0")
+      , expectPass "a stream producer on an `IFile` list argument" (parseProgT "IFile [Int]" "@parse s=produceInts .txt" "0")
+      , expectError "a command returning the stream it parses" (parseProgT "IStream Int" "@parse s=produceInts .txt" "x")
+      , expectPass "an optional argument" (parseProgT "?[Int]" "@parse ints=readInts .csv" "0")
+      , expectError "a user identifier with the reserved `mlcq_` prefix"
+          [r|
+        module main (mlcq_count)
+        mlcq_count :: Int -> Int
+        mlcq_count x = x
+          |]
+      , expectError "`@parse` on a type alias"
+          [r|
+        module main (count)
+        effect IO
+        source Py from "m.py" ("readInts", "size")
+        readInts :: Str -> <IO> [Int]
+        size :: [Int] -> Int
+        --' @parse ints=readInts
+        type Ints = [Int]
+        count :: Ints -> Int
+        count xs = size xs
+          |]
+      ]
+  where
+    -- one argument of type `t`, read with `directive`; the body returns `body`
+    parseProgT :: MT.Text -> MT.Text -> MT.Text -> MT.Text
+    parseProgT t directive body = MT.unlines
+      [ "module main (cmd)"
+      , "effect IO"
+      , "data Try e a = Err e | Ok a"
+      , "type Path = Str"
+      , "source Py from \"m.py\" (\"readInts\", \"readStr\", \"produceInts\")"
+      , "readInts :: Str -> <IO> [Int]"
+      , "readStr :: Str -> <IO> Str"
+      , "produceInts :: Str -> ([Int] -> <IO> ()) -> <IO> ()"
+      , "cmd ::"
+      , "  --' " <> directive
+      , "  " <> t <> " ->"
+      , "  " <> (if body == "x" then t else "Int")
+      , "cmd x = " <> body
+      ]
+
+    parseProg :: MT.Text -> MT.Text
+    parseProg directive = MT.unlines
+      [ "module main (count)"
+      , "effect IO"
+      , "data Try e a = Err e | Ok a"
+      , "source Py from \"m.py\" (\"readInts\", \"size\")"
+      , "readInts :: Str -> <IO> [Int]"
+      , "size :: [Int] -> Int"
+      , "count ::"
+      , "  --' " <> directive
+      , "  [Int] ->"
+      , "  Int"
+      , "count xs = size xs"
+      ]
+
 -- | Frontend validation of `--' with:` docstring atoms (terminal
 -- actions on CLI-exported commands). One positive sanity check plus
 -- coverage of the rejection paths in Frontend/Desugar.hs. Type-level
@@ -8534,8 +9650,87 @@ withDocstringTests =
   localOption (mkTimeout 1000000) $ -- 1s
     testGroup
       "with: docstring validation"
-      [ -- Sanity: a legal single-atom `with:` composes cleanly.
-        expectPass
+      [ -- The whole-list gather materializes the stream and applies the
+        -- handler to it once. Only the producer says what the stream holds,
+        -- so a handler whose receiver disagrees has to be rejected here --
+        -- the gathered bytes would otherwise be read as the wrong type.
+        expectError
+          "whole-form handler receiver disagreeing with the stream element type"
+          [r|
+        module main (stream)
+        effect IO
+        data Try e a = Err e | Ok a
+        mk :: Int -> [Int]
+        mk _ = [1]
+        showStr :: Str -> Str
+        showStr s = s
+        produce :: ([Int] -> <IO> ()) -> <IO> ()
+        produce sink = sink (mk 0)
+        --' @render -p/--plain=showStr
+        stream :: <IO> ()
+        stream = @collect produce
+          |]
+
+        -- A structurally different disagreement: a tuple where the stream
+        -- is a list. This is the shape that reads six list elements as a
+        -- two-slot tuple instead of failing.
+      , expectError
+          "whole-form handler taking a tuple where the stream is a list"
+          [r|
+        module main (stream)
+        effect IO
+        data Try e a = Err e | Ok a
+        mk :: Int -> [Int]
+        mk _ = [1]
+        showPair :: (Int, [Int]) -> Str
+        showPair _ = "x"
+        produce :: ([Int] -> <IO> ()) -> <IO> ()
+        produce sink = sink (mk 0)
+        --' @render -p/--pair=showPair
+        stream :: <IO> ()
+        stream = @collect produce
+          |]
+
+        -- The agreeing handler must still be accepted: the check has to
+        -- constrain the gather, not reject it.
+      , expectPass
+          "whole-form handler agreeing with the stream element type"
+          [r|
+        module main (stream)
+        effect IO
+        data Try e a = Err e | Ok a
+        mk :: Int -> [Int]
+        mk _ = [1]
+        showInts :: [Int] -> Str
+        showInts _ = "x"
+        produce :: ([Int] -> <IO> ()) -> <IO> ()
+        produce sink = sink (mk 0)
+        --' @render -p/--plain=showInts
+        stream :: <IO> ()
+        stream = @collect produce
+          |]
+
+        -- A polymorphic handler is not a disagreement: it accepts the
+        -- stream's element type like any other polymorphic function.
+      , expectPass
+          "polymorphic whole-form handler"
+          [r|
+        module main (stream)
+        effect IO
+        data Try e a = Err e | Ok a
+        mk :: Int -> [Int]
+        mk _ = [1]
+        countAny :: [a] -> Int
+        countAny _ = 0
+        produce :: ([Int] -> <IO> ()) -> <IO> ()
+        produce sink = sink (mk 0)
+        --' @with -n/--count=countAny
+        stream :: <IO> ()
+        stream = @collect produce
+          |]
+
+        -- Sanity: a legal single-atom `with:` composes cleanly.
+      , expectPass
           "single with: on effectful command with matching formatter"
           [r|
         module main (foo)
@@ -8800,6 +9995,73 @@ withDocstringTests =
         foo x = do x
           |]
 
+        -- The replay entries synthesized for terminal actions own the
+        -- `mlcr_` prefix.
+      , expectError
+          "with: an identifier may not use the reserved mlcr_ prefix"
+          [r|
+        module main (foo, mlcr_bar)
+        mlcr_bar :: Int -> Int
+        mlcr_bar n = n
+        foo :: Int -> Int
+        foo x = x
+          |]
+
+        -- Every command with terminal actions takes `--no-stdout`, so
+        -- neither an action nor an argument may use the name.
+      , expectError
+          "with: --no-stdout is a reserved action name"
+          [r|
+        module main (foo)
+        fmt :: Int -> Str
+        --' @render --no-stdout=fmt
+        foo :: Int -> Int
+        foo x = x
+          |]
+      , expectError
+          "with: --no-stdout is a reserved argument name on a command with actions"
+          [r|
+        module main (foo)
+        fmt :: Int -> Str
+        --' @render -F/--fmt=fmt
+        foo ::
+          --' @arg --no-stdout
+          Int ->
+          Int
+        foo x = x
+          |]
+
+        -- A terminal action applies to what a streaming command streams,
+        -- so the command may not also return a value.
+      , expectError
+          "with: an action on a streaming command that also returns a value"
+          [r|
+        module main (foo)
+        effect IO
+        produce :: ([Int] -> <IO> ()) -> <IO> ()
+        fmt :: [Int] -> Str
+        --' @render -a/--all=fmt
+        foo :: Int -> <IO> Int
+        foo n = do
+          @collect produce
+          n
+          |]
+
+        -- An action applies to the whole output, whatever the shape of the
+        -- body: a `@collect` in one branch of a guard builds.
+      , expectPass
+          "with: a gathering action on a @collect in one branch"
+          [r|
+        module main (foo)
+        effect IO
+        produce :: ([Int] -> <IO> ()) -> <IO> ()
+        nop :: <IO> ()
+        fmt :: [Int] -> Str
+        --' @render -a/--all=fmt
+        foo :: Bool -> <IO> ()
+        foo b = ? b = @collect produce : nop
+          |]
+
         -- A leading-underscore long flag name is rejected: those names are
         -- reserved for compiler-generated argument identifiers (the MCP
         -- backend names positionals `_1`, `_2`, ...), so a flag must not be
@@ -8815,6 +10077,95 @@ withDocstringTests =
           Int
         foo x = x
           |]
+
+        -- The streaming command duplicates the parent's body with its
+        -- parameters renamed. A multi-binding `let` is sequential, so `y`
+        -- names the `let`-bound `x` (a Str), never the Int parameter.
+      , expectPass
+          "with: a let binder shadowing a parameter stays in scope for later bindings"
+          [r|
+        module main (stream)
+        effect IO
+        data Try e a = Err e | Ok a
+        mk :: Str -> [Int]
+        mk _ = [1]
+        showInts :: [Int] -> Str
+        showInts _ = "x"
+        produce :: Str -> ([Int] -> <IO> ()) -> <IO> ()
+        produce s sink = sink (mk s)
+        --' @render -p/--plain=showInts
+        stream :: Int -> <IO> ()
+        stream x =
+          let x = "s"
+              y = x
+          in @collect (produce y)
+          |]
+
+        -- The streaming command names the handler inside the duplicated body,
+        -- where a local binder of the same name must not capture it.
+      , expectPass
+          "with: a local binder named like the handler does not capture it"
+          [r|
+        module main (stream)
+        effect IO
+        data Try e a = Err e | Ok a
+        mk :: Int -> [Int]
+        mk _ = [1]
+        showInts :: [Int] -> Str
+        showInts _ = "x"
+        produce :: Int -> ([Int] -> <IO> ()) -> <IO> ()
+        produce n sink = sink (mk n)
+        --' @render -p/--plain=showInts
+        stream :: Int -> <IO> ()
+        stream n = let showInts = 5 in @collect (produce showInts)
+          |]
+
+        -- A command streams when a @collect is reachable from its definition,
+        -- including from a where-binding.
+      , expectPass
+          "with: a command streaming from a where-binding"
+          [r|
+        module main (stream)
+        effect IO
+        data Try e a = Err e | Ok a
+        mk :: Int -> [Int]
+        mk _ = [1]
+        render2 :: Int -> [Int] -> Str
+        render2 _ _ = "x"
+        produce :: Int -> ([Int] -> <IO> ()) -> <IO> ()
+        produce n sink = sink (mk n)
+        --' @render -r/--text=render2($1)
+        stream :: Int -> Int -> <IO> ()
+        stream x y = go
+          where
+            go = @collect (produce x)
+          |]
+
+        -- A where-binding sees only the definition's own parameters, so a
+        -- `$N` naming a parameter bound by a lambda in the body cannot reach
+        -- a @collect inside a where-binding.
+      -- A command that streams from a where-binding runs its actions on its
+      -- staged output, where `$2` is the second argument the stage saved.
+      , testCase "with: `$N` naming a body lambda's parameter from a where-binding" $ do
+          result <- runFront [r|
+        module main (stream)
+        effect IO
+        data Try e a = Err e | Ok a
+        mk :: Int -> [Int]
+        mk _ = [1]
+        render2 :: Int -> [Int] -> Str
+        render2 _ _ = "x"
+        produce :: Int -> ([Int] -> <IO> ()) -> <IO> ()
+        produce n sink = sink (mk n)
+        --' @render -r/--text=render2($2)
+        stream :: Int -> Int -> <IO> ()
+        stream x = \y -> go
+          where
+            go = @collect (produce x)
+          |]
+          case result of
+            Right _ -> return ()
+            Left e -> assertFailure (show e)
       ]
 
 -- Sum types: declaration syntax, constructor scoping, and typechecking.

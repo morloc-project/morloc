@@ -1,0 +1,21 @@
+module main (localBody, foreignBody, ignoresAll)
+
+import root-py
+
+-- A lambda may ignore its own parameter and read only what it captures.
+-- Covered: a body in the lambda's own pool, a body that calls into another
+-- language, and a lambda of two parameters that reads neither.
+
+source Cpp from "helpers.hpp" ("cpp_add" as cppAdd)
+cppAdd :: Int -> Int -> Int
+
+type Cpp => Int = "int"
+
+localBody :: Int -> [Int]
+localBody n = map (\y -> n + 1) [10, 20]
+
+foreignBody :: Int -> [Int]
+foreignBody n = map (\y -> cppAdd n 1) [10, 20]
+
+ignoresAll :: Int -> [Int]
+ignoresAll n = zipWith (\a b -> n * 2) [1, 2] [3, 4]

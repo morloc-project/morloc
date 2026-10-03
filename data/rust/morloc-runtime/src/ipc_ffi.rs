@@ -271,8 +271,7 @@ pub unsafe extern "C" fn close_daemon(daemon_ptr: *mut *mut LanguageDaemon) {
         libc::free((*daemon).shm_basename as *mut c_void);
     }
 
-    // Unlink SHM segments owned by this process.
-    // Safe to call even if another process already unlinked (ENOENT is ignored).
+    // Unmap the volumes; they are removed only if this process owns them.
     let _ = crate::shm::shclose();
 
     libc::free(daemon as *mut c_void);
@@ -292,17 +291,8 @@ unsafe fn new_socket(errmsg: *mut *mut c_char) -> i32 {
     fd
 }
 
-unsafe fn new_server_addr(socket_path: *const c_char) -> libc::sockaddr_un {
-    let mut addr: libc::sockaddr_un = std::mem::zeroed();
-    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
-    let path_bytes = CStr::from_ptr(socket_path).to_bytes();
-    let copy_len = path_bytes.len().min(addr.sun_path.len() - 1);
-    ptr::copy_nonoverlapping(
-        path_bytes.as_ptr() as *const c_char,
-        addr.sun_path.as_mut_ptr(),
-        copy_len,
-    );
-    addr
+unsafe fn new_server_addr(socket_path: *const c_char) -> Result<libc::sockaddr_un, MorlocError> {
+    crate::utility::unix_socket_addr(CStr::from_ptr(socket_path).to_bytes())
 }
 
 unsafe fn new_server(socket_path: *const c_char, errmsg: *mut *mut c_char) -> i32 {
@@ -311,7 +301,14 @@ unsafe fn new_server(socket_path: *const c_char, errmsg: *mut *mut c_char) -> i3
         return -1;
     }
 
-    let addr = new_server_addr(socket_path);
+    let addr = match new_server_addr(socket_path) {
+        Ok(a) => a,
+        Err(e) => {
+            close_socket(server_fd);
+            set_errmsg(errmsg, &e);
+            return -1;
+        }
+    };
 
     // Remove any existing socket file
     libc::unlink(socket_path);
@@ -371,7 +368,7 @@ pub unsafe extern "C" fn start_daemon(
 
     // Init shared memory
     let mut err: *mut c_char = ptr::null_mut();
-    let shm = crate::ffi::shinit(shm_basename, 0, shm_default_size, &mut err);
+    let shm = crate::ffi::shinit(shm_basename, morloc_runtime_types::shm_types::PRIMARY_VOLUME, shm_default_size, &mut err);
     if !err.is_null() {
         close_daemon(&mut (daemon as *mut LanguageDaemon));
         *errmsg = err;
@@ -601,6 +598,86 @@ pub unsafe extern "C" fn stream_from_client(
     stream_from_client_wait(client_fd, 0, 0, errmsg)
 }
 
+// ── Self-call guard ──────────────────────────────────────────────────────────
+
+/// The socket this process serves, when it is a pool. Set before any worker
+/// is forked, so forked workers inherit it.
+static SELF_SOCKET: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+/// `MORLOC_FORBID_SELF_CALL`: a test guard. A pool sending a call to its own
+/// socket is a call between co-located code taking the serial path; with the
+/// guard set that call fails instead.
+fn forbid_self_call() -> bool {
+    static FORBID: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FORBID.get_or_init(|| std::env::var_os("MORLOC_FORBID_SELF_CALL").is_some())
+}
+
+/// Record the socket this pool serves. Called from pool startup.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_set_self_socket(socket_path: *const c_char) {
+    if socket_path.is_null() {
+        return;
+    }
+    let path = std::path::PathBuf::from(CStr::from_ptr(socket_path).to_string_lossy().into_owned());
+    if let Ok(mut s) = SELF_SOCKET.lock() {
+        *s = Some(path);
+    }
+}
+
+fn is_self_socket(socket_path: *const c_char) -> bool {
+    let target = std::path::PathBuf::from(unsafe { CStr::from_ptr(socket_path) }.to_string_lossy().into_owned());
+    match SELF_SOCKET.lock() {
+        Ok(s) => same_socket(s.as_deref(), &target),
+        Err(_) => false,
+    }
+}
+
+/// Compared component by component, so `dir/x` and `dir//x` or a trailing
+/// separator on the directory still match.
+fn same_socket(own: Option<&std::path::Path>, target: &std::path::Path) -> bool {
+    own.is_some_and(|own| own.components().eq(target.components()))
+}
+
+#[cfg(test)]
+mod self_call_tests {
+    use super::same_socket;
+    use std::path::Path;
+
+    #[test]
+    fn a_pool_recognizes_its_own_socket_however_it_is_spelled() {
+        let own = Path::new("/tmp/morloc.abc/pipe-cpp");
+        assert!(same_socket(Some(own), Path::new("/tmp/morloc.abc/pipe-cpp")));
+        assert!(same_socket(Some(own), Path::new("/tmp/morloc.abc//pipe-cpp")));
+        assert!(same_socket(Some(own), Path::new("/tmp/morloc.abc/./pipe-cpp")));
+    }
+
+    #[test]
+    fn another_pool_or_no_registration_is_not_a_self_call() {
+        let own = Path::new("/tmp/morloc.abc/pipe-cpp");
+        assert!(!same_socket(Some(own), Path::new("/tmp/morloc.abc/pipe-py")));
+        assert!(!same_socket(Some(own), Path::new("/tmp/morloc.xyz/pipe-cpp")));
+        assert!(!same_socket(None, Path::new("/tmp/morloc.abc/pipe-cpp")));
+    }
+}
+
+unsafe fn self_call_error(socket_path: *const c_char, packet: *const u8) -> MorlocError {
+    let mut err: *mut c_char = ptr::null_mut();
+    let header = crate::packet_ffi::read_morloc_packet_header(packet, &mut err);
+    let mid = if !header.is_null() && (*header).command_type() == crate::packet::PACKET_TYPE_CALL {
+        format!("{}", { (*header).command.call.midx })
+    } else {
+        "?".into()
+    };
+    if !err.is_null() {
+        libc::free(err as *mut c_void);
+    }
+    MorlocError::Ipc(format!(
+        "MORLOC_FORBID_SELF_CALL: pool called its own socket '{}' (mid {})",
+        CStr::from_ptr(socket_path).to_string_lossy(),
+        mid
+    ))
+}
+
 // ── send_and_receive_over_socket ─────────────────────────────────────────────
 
 #[no_mangle]
@@ -613,6 +690,17 @@ pub unsafe extern "C" fn send_and_receive_over_socket_wait(
 ) -> *mut u8 {
     clear_errmsg(errmsg);
 
+    // The callee may write a stream this pool has batches of in flight.
+    if let Err(e) = crate::stream::drain_before_handoff() {
+        set_errmsg(errmsg, &e);
+        return ptr::null_mut();
+    }
+
+    if forbid_self_call() && is_self_socket(socket_path) {
+        set_errmsg(errmsg, &self_call_error(socket_path, packet));
+        return ptr::null_mut();
+    }
+
     let mut err: *mut c_char = ptr::null_mut();
     let client_fd = new_socket(&mut err);
     if client_fd < 0 {
@@ -620,7 +708,14 @@ pub unsafe extern "C" fn send_and_receive_over_socket_wait(
         return ptr::null_mut();
     }
 
-    let addr = new_server_addr(socket_path);
+    let addr = match new_server_addr(socket_path) {
+        Ok(a) => a,
+        Err(e) => {
+            close_socket(client_fd);
+            set_errmsg(errmsg, &e);
+            return ptr::null_mut();
+        }
+    };
 
     // Connect with retry (matching C WAIT macro behavior)
     let mut retcode;
@@ -682,6 +777,135 @@ pub unsafe extern "C" fn send_and_receive_over_socket(
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
     send_and_receive_over_socket_wait(socket_path, packet, 0, 0, errmsg)
+}
+
+// -- mlc_spawn ----------------------------------------------------------------
+
+/// Start the producer of the channel `handle`: a local call to manifold `mid`
+/// in the pool at `socket_path`, made and watched by the nexus. The watcher
+/// must outlive the producer, and any pool process -- this one included --
+/// may be the one that runs the producer, or be reaped once idle.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_spawn(
+    socket_path: *const c_char,
+    mid: u32,
+    args: *const *const u8,
+    nargs: usize,
+    handle: i64,
+    errmsg: *mut *mut c_char,
+) -> bool {
+    clear_errmsg(errmsg);
+    let mut packets: Vec<&[u8]> = Vec::with_capacity(nargs);
+    for i in 0..nargs {
+        let p = *args.add(i);
+        let mut err: *mut c_char = ptr::null_mut();
+        let size = crate::packet_ffi::morloc_packet_size(p, &mut err);
+        if !err.is_null() {
+            *errmsg = err;
+            return false;
+        }
+        packets.push(std::slice::from_raw_parts(p, size));
+    }
+    let path = CStr::from_ptr(socket_path).to_bytes();
+    match crate::stream::nexus_spawn(handle, mid, path, &packets) {
+        Ok(()) => true,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            false
+        }
+    }
+}
+
+/// Start a local call to manifold `mid` in the pool at `socket_path` without
+/// waiting for its reply: the producer of the channel `handle`. A thread of
+/// this process waits for the reply instead. The call ends only when the
+/// producer does, so a failed producer -- or its pool dying -- is recorded
+/// on the channel, where every reader of it (in any pool) will see it after
+/// the batches already queued. The call is a dispatch of its own, so the
+/// producer runs alongside whatever its pool does next. Run by the nexus.
+#[no_mangle]
+pub unsafe extern "C" fn mlc_spawn_watched(
+    socket_path: *const c_char,
+    mid: u32,
+    args: *const *const u8,
+    nargs: usize,
+    handle: i64,
+    errmsg: *mut *mut c_char,
+) -> bool {
+    clear_errmsg(errmsg);
+    let mut err: *mut c_char = ptr::null_mut();
+    let packet = crate::packet_ffi::make_morloc_local_call_packet(mid, args, nargs, &mut err);
+    if !err.is_null() {
+        *errmsg = err;
+        return false;
+    }
+    let fd = new_socket(&mut err);
+    if fd < 0 {
+        libc::free(packet as *mut c_void);
+        *errmsg = err;
+        return false;
+    }
+    let addr = match new_server_addr(socket_path) {
+        Ok(a) => a,
+        Err(e) => {
+            close_socket(fd);
+            libc::free(packet as *mut c_void);
+            set_errmsg(errmsg, &e);
+            return false;
+        }
+    };
+    let mut attempts = 0;
+    while libc::connect(fd, &addr as *const libc::sockaddr_un as *const libc::sockaddr,
+                        std::mem::size_of::<libc::sockaddr_un>() as u32) != 0 {
+        attempts += 1;
+        if attempts > 300 {
+            close_socket(fd);
+            libc::free(packet as *mut c_void);
+            set_errmsg(errmsg, &MorlocError::Ipc(format!(
+                "Failed to connect to pipe '{}'", CStr::from_ptr(socket_path).to_string_lossy()
+            )));
+            return false;
+        }
+        libc::usleep(100_000);
+    }
+    let size = crate::packet_ffi::morloc_packet_size(packet, &mut err);
+    let sent = err.is_null() && send_all(fd, packet, size);
+    libc::free(packet as *mut c_void);
+    if !sent {
+        close_socket(fd);
+        if err.is_null() {
+            set_errmsg(errmsg, &MorlocError::Ipc("Failed to send the producer's call".into()));
+        } else {
+            *errmsg = err;
+        }
+        return false;
+    }
+    std::thread::spawn(move || {
+        let mut err: *mut c_char = ptr::null_mut();
+        let result = stream_from_client_wait(fd, 0, 0, &mut err);
+        close_socket(fd);
+        if !err.is_null() {
+            libc::free(err as *mut c_void);
+            let _ = crate::stream::shared_channel_fail(
+                handle, "the process parsing this stream stopped before it finished",
+            );
+            return;
+        }
+        let mut perr: *mut c_char = ptr::null_mut();
+        let msg = crate::packet_ffi::get_morloc_data_packet_error_message(result, &mut perr);
+        if !perr.is_null() {
+            libc::free(perr as *mut c_void);
+        }
+        if msg.is_null() {
+            let _ = crate::stream::shared_channel_ended(handle);
+        } else {
+            let text = CStr::from_ptr(msg).to_string_lossy().into_owned();
+            libc::free(msg as *mut c_void);
+            let _ = crate::stream::shared_channel_fail(handle, &text);
+        }
+        crate::packet_ffi::release_received_packet(result);
+    });
+    true
 }
 
 // ── send_packet_to_foreign_server ────────────────────────────────────────────

@@ -38,14 +38,14 @@ export MORLOC_INLINE_SIZE=0
 if ! time_call "gen -> raw.dat"     "$PKT_DIR/raw.dat"     ./nexus -f packet -z 0 genBig "$OUTER" "$STRLEN"; then
     echo "FAIL (gen)"; exit 1
 fi
-INPUT_SIZE=$(stat -c '%s' "$PKT_DIR/raw.dat")
+INPUT_SIZE=$(wc -c < "$PKT_DIR/raw.dat" | tr -d ' ')
 echo "  input packet size: $INPUT_SIZE bytes"
 
-# Volume count after gen: peek at /dev/shm (best-effort -- the runtime
+# Volume count after gen: peek at shared memory (best-effort -- the runtime
 # may have already torn down after the nexus exits; this is informational
 # only).
 SHM_PEAK=$(count_shm)
-echo "  /dev/shm segments after gen: $SHM_PEAK"
+echo "  shared-memory segments after gen: $SHM_PEAK"
 
 # Round-trip through the Py pool: each step must build a fresh SHM
 # population. Relptrs from the input have to resolve through the new
@@ -79,7 +79,7 @@ FINAL_TMP=$(( $(count_tmp) - INIT_TMP ))
 
 echo ""
 echo "=== summary ==="
-echo "leaked /dev/shm segments:  $FINAL_SHM"
+echo "leaked shared-memory segments:  $FINAL_SHM"
 echo "leaked /tmp/morloc.* dirs: $FINAL_TMP"
 if (( FAIL == 0 && FINAL_SHM == 0 && FINAL_TMP == 0 )); then
     echo "PASS"

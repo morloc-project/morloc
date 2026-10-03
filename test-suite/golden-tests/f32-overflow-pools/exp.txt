@@ -1,0 +1,7 @@
+pyF32 1.5 ok 1.5
+pyF32 1e39 rejected
+rF32 1.5 ok 1.5
+rF32 1e39 rejected
+cliF32 1.5 ok 1.5
+cliF32 1e39 rejected
+3

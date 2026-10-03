@@ -23,6 +23,12 @@ pub const BLK_MAGIC: u32 = 0x0CB1_0DF0;
 /// away" apart from uninitialised or scrubbed memory, which are both zero.
 pub const BLK_ABSORBED: u32 = 0x0CB1_DEAD;
 pub const MAX_VOLUME_NUMBER: usize = 32768;
+
+/// The volume every process of a program shares, created by the first to
+/// start. Volume 0 is never mapped: a buffer- or file-relative offset reads
+/// as volume 0, so an offset that reaches SHM unrebased fails to resolve
+/// instead of landing in live memory.
+pub const PRIMARY_VOLUME: usize = 1;
 pub const MAX_FILENAME_SIZE: usize = 128;
 pub const MAX_PATH_SIZE: usize = 512;
 
@@ -31,7 +37,7 @@ pub const MAX_PATH_SIZE: usize = 512;
 /// attaches) spin-wait on an Acquire-load of this until it appears,
 /// so all subsequent reads of slot fields happen-after the winner's
 /// initialization writes.
-pub const STREAM_REGISTRY_MAGIC: u64 = 0x4D4C_5354_5245_4757; // "MLSTREGW"
+pub const STREAM_REGISTRY_MAGIC: u64 = 0x4D4C_5354_5245_4758; // "MLSTREGX"
 
 /// Sentinel value used during bootstrap. A process that CAS-swaps the
 /// magic from 0 to this value has won the bootstrap and is responsible
@@ -148,18 +154,33 @@ impl MorlocVolEntry {
 
 // ── Shared memory header (lives in mmap'd region) ──────────────────────────
 
-#[repr(C)]
+/// Aligned to sixteen, and sized to a multiple of it, because the
+/// volume's first block starts immediately after: a block's alignment is
+/// only as good as the data region's.
+#[repr(C, align(16))]
 pub struct ShmHeader {
-    pub magic: u32,
+    /// `SHM_MAGIC`, stored last by the volume's creator: a volume whose
+    /// magic reads otherwise is not yet, or never was, initialised.
+    pub magic: AtomicU32,
     pub volume_name: [u8; MAX_FILENAME_SIZE],
     pub volume_index: i32,
     pub volume_size: usize,
     pub relative_offset: usize,
-    pub lock: AtomicU32,
+    pub lock: crate::shm_lock::ShmLock,
     pub cursor: VolPtr,
 }
 
-#[repr(C)]
+const _: () = assert!(std::mem::size_of::<ShmHeader>() % std::mem::align_of::<BlockHeader>() == 0);
+
+/// Aligned to sixteen so that a block's data is too. A block holds
+/// whatever a value needs, and the widest thing any of them contains is
+/// a 128-bit word: an Arrow decimal, or the view descriptors of a
+/// string-view column. Those are read where they lie, by another
+/// language's Arrow library, which is entitled to assume its own types'
+/// alignment and will refuse a buffer that does not have it. The header
+/// is itself sixteen bytes, so data starts one header past a
+/// sixteen-aligned block and is sixteen-aligned in turn.
+#[repr(C, align(16))]
 pub struct BlockHeader {
     pub magic: u32,
     pub reference_count: AtomicU32,
@@ -171,6 +192,11 @@ const _: () = assert!(
         == std::mem::size_of::<u32>()
             + std::mem::size_of::<AtomicU32>()
             + std::mem::size_of::<usize>()
+);
+// Data sits one header past the block, so the header's own size has to
+// preserve the alignment the block was given.
+const _: () = assert!(
+    std::mem::size_of::<BlockHeader>() % std::mem::align_of::<BlockHeader>() == 0
 );
 
 // ── Voidstar data structures (used by serialization) ───────────────────────
@@ -211,12 +237,22 @@ mod encoding_tests {
     }
 
     #[test]
+    fn primary_volume_matches_header() {
+        let header = include_str!("../../../morloc/morloc.h");
+        let from_header = header
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("#define MORLOC_PRIMARY_VOLUME"))
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .expect("morloc.h must define MORLOC_PRIMARY_VOLUME as an integer");
+        assert_eq!(from_header, PRIMARY_VOLUME);
+        assert_ne!(PRIMARY_VOLUME, 0, "volume 0 is never mapped");
+    }
+
+    #[test]
     fn small_values_decode_as_vol0() {
-        // Compatibility check for staged migration: a "small positive
-        // integer" relptr (the kind the old flat-offset encoding produced
-        // for offsets into volume 0) decodes as (volume 0, offset = ptr)
-        // under the new encoding. Call sites that haven't yet been
-        // updated and happen to operate inside volume 0 keep working.
+        // A buffer- or file-relative offset decodes as (volume 0, offset).
+        // Volume 0 is never mapped, so such an offset fails to resolve if
+        // it reaches SHM without a rebase.
         for &p in &[0i64, 1, 16, 1024, 0xFFFF] {
             let rp = p as RelPtr;
             assert!(!relptr_is_sentinel(rp));

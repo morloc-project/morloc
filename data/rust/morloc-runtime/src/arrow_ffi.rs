@@ -217,17 +217,39 @@ unsafe fn arrow_validate_impl(
     }
 }
 
-/// Record a block this pool received so a table returned unchanged can be
-/// passed through without a copy. Valid until `arrow_borrow_clear`.
+/// As `arrow_from_shm`, with the view holding the block for as long as the
+/// language object built from it lives, and no longer. `acquire` takes a
+/// reference of the view's own -- for a table that arrived by reference,
+/// whose sender still holds one; pass 0 for a block this pool materialised
+/// for itself, whose only reference the view adopts. Returns 0 on success;
+/// on failure nothing is taken and an adopted reference is still the
+/// caller's to release.
 #[no_mangle]
-pub unsafe extern "C" fn arrow_borrow_register(base: *const u8, rel: RelPtr) {
-    arrow_shm::borrow_register(base, rel)
+pub unsafe extern "C" fn arrow_from_shm_owned(
+    header: *const ArrowShmHeader,
+    acquire: i32,
+    out_schema: *mut FFI_ArrowSchema,
+    out_array: *mut FFI_ArrowArray,
+    errmsg: *mut *mut c_char,
+) -> i32 {
+    crate::error::guarded(errmsg, 1, || {
+        match arrow_shm::shm_to_ffi_owned(header, acquire != 0, out_schema, out_array) {
+            Ok(()) => 0,
+            Err(e) => {
+                set_errmsg(errmsg, &e);
+                1
+            }
+        }
+    })
 }
 
-/// Forget the blocks registered with `arrow_borrow_register`.
+/// Bytes of shared memory held by this process's open table views. A
+/// language whose garbage collector cannot see shared memory uses this to
+/// decide when a collection is worth running: its own heap accounting puts
+/// a batch at a few hundred bytes whatever the table behind it costs.
 #[no_mangle]
-pub extern "C" fn arrow_borrow_clear() {
-    arrow_shm::borrow_clear()
+pub extern "C" fn arrow_live_view_bytes() -> usize {
+    arrow_shm::LIVE_VIEW_BYTES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Bytes memcpy'd into SHM by table writes in this process so far.
@@ -396,6 +418,94 @@ unsafe fn print_arrow_as_json_impl(data: *const c_void, errmsg: *mut *mut c_char
     }
     out.push_str("]\n");
     write_stdout(&out, errmsg)
+}
+
+/// Render a block as a JSON array of row objects, returned as a
+/// libc-allocated C string. Same shape `print_arrow_as_json` writes, but
+/// handed back to the caller rather than printed: the served paths
+/// (daemon, MCP) build a response body instead of writing to stdout, and
+/// the generic voidstar serializer refuses a Table.
+///
+/// Returns null and sets `errmsg` on failure. The caller owns the string.
+#[no_mangle]
+pub unsafe extern "C" fn arrow_to_json_string(
+    data: *const c_void,
+    errmsg: *mut *mut c_char,
+) -> *mut c_char {
+    let batch = match arrow_shm::shm_to_batch(data as *const ArrowShmHeader) {
+        Ok(b) => b,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            return std::ptr::null_mut();
+        }
+    };
+    let mut out = String::new();
+    out.push('[');
+    for r in 0..batch.num_rows() {
+        if r > 0 {
+            out.push(',');
+        }
+        out.push('{');
+        for (c, field) in batch.schema().fields().iter().enumerate() {
+            if c > 0 {
+                out.push(',');
+            }
+            json_escape(field.name(), &mut out);
+            out.push(':');
+            json_cell(batch.column(c).as_ref(), r, &mut out);
+        }
+        out.push('}');
+    }
+    out.push(']');
+    // libc-allocated so the caller can free it the same way it frees the
+    // string voidstar_to_json_string returns.
+    let bytes = out.as_bytes();
+    let buf = libc::malloc(bytes.len() + 1) as *mut c_char;
+    if buf.is_null() {
+        set_errmsg(errmsg, &MorlocError::Other("out of memory rendering table to JSON".into()));
+        return std::ptr::null_mut();
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr() as *const c_char, buf, bytes.len());
+    *buf.add(bytes.len()) = 0;
+    buf
+}
+
+/// Print a block as JSON-lines: one row object per line. Each row is
+/// written as it is built, so peak memory is one row's JSON body rather
+/// than the whole table -- the same reason `print_voidstar_jsonl` streams.
+#[no_mangle]
+pub unsafe extern "C" fn print_arrow_as_jsonl(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
+    crate::error::guarded(errmsg, PRINT_RESULT_ERR, || print_arrow_as_jsonl_impl(data, errmsg))
+}
+
+unsafe fn print_arrow_as_jsonl_impl(data: *const c_void, errmsg: *mut *mut c_char) -> i32 {
+    let batch = match arrow_shm::shm_to_batch(data as *const ArrowShmHeader) {
+        Ok(b) => b,
+        Err(e) => {
+            set_errmsg(errmsg, &e);
+            return PRINT_RESULT_ERR;
+        }
+    };
+    let fields = batch.schema();
+    let mut out = String::new();
+    for r in 0..batch.num_rows() {
+        out.clear();
+        out.push('{');
+        for (c, field) in fields.fields().iter().enumerate() {
+            if c > 0 {
+                out.push(',');
+            }
+            json_escape(field.name(), &mut out);
+            out.push(':');
+            json_cell(batch.column(c).as_ref(), r, &mut out);
+        }
+        out.push_str("}\n");
+        let rc = write_stdout(&out, errmsg);
+        if rc != PRINT_RESULT_OK {
+            return rc;
+        }
+    }
+    PRINT_RESULT_OK
 }
 
 /// Print a block as a tab-separated table: a header line of column names,
@@ -608,14 +718,25 @@ unsafe fn read_json_to_arrow_shm_impl(
         set_errmsg(errmsg, &MorlocError::Other("JSON-to-table requires a Table schema".into()));
         return shm::RELNULL;
     }
-    let json_str = match CStr::from_ptr(json).to_str() {
-        Ok(s) => s,
-        Err(_) => {
-            set_errmsg(errmsg, &MorlocError::Other("Invalid UTF-8 in JSON".into()));
-            return shm::RELNULL;
-        }
-    };
-    let value: serde_json::Value = match serde_json::from_str(json_str) {
+    read_json_bytes_to_arrow_shm(CStr::from_ptr(json).to_bytes(), schema, errmsg)
+}
+
+/// As `read_json_to_arrow_shm` for JSON that is not already a C string --
+/// a file read into memory, say.
+///
+/// # Safety
+/// `schema` must be a valid CSchema pointer.
+pub unsafe fn read_json_bytes_to_arrow_shm(
+    json: &[u8],
+    schema: *const CSchema,
+    errmsg: *mut *mut c_char,
+) -> RelPtr {
+    let rs = CSchema::to_rust(schema);
+    if !is_arrow_table_schema(&rs) {
+        set_errmsg(errmsg, &MorlocError::Other("JSON-to-table requires a Table schema".into()));
+        return shm::RELNULL;
+    }
+    let value: serde_json::Value = match serde_json::from_slice(json) {
         Ok(v) => v,
         Err(e) => {
             set_errmsg(errmsg, &MorlocError::Other(format!("JSON parse error: {}", e)));
@@ -760,14 +881,9 @@ fn json_column(
             .enumerate()
             .map(|(i, o)| match o {
                 None => Ok(None),
-                Some(x) => {
-                    let y = x as f32;
-                    if x.is_finite() && !y.is_finite() {
-                        Err(overflow(name, i, values[i], SerialType::Float32))
-                    } else {
-                        Ok(Some(y))
-                    }
-                }
+                Some(x) => morloc_runtime_types::width::f32_nearest(x)
+                    .map(Some)
+                    .map_err(|_| overflow(name, i, values[i], SerialType::Float32)),
             })
             .collect()
     }
@@ -809,7 +925,7 @@ fn json_column(
                 .collect::<Result<_, _>>()?;
             Arc::new(StringArray::from(v))
         }
-        other => {
+        other @ (SerialType::Nil | SerialType::Array | SerialType::Tuple | SerialType::Map | SerialType::Optional | SerialType::Table | SerialType::Recur | SerialType::IFile | SerialType::OStream | SerialType::IStream | SerialType::Variant | SerialType::Enum) => {
             return Err(MorlocError::Other(format!(
                 "Unsupported column type {:?} for '{}' when building a table from JSON",
                 other, name

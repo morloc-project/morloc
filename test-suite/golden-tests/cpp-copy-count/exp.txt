@@ -1,0 +1,3 @@
+allocs-per-batch=4 rem=0
+write-allocs-per-batch=1 rem=0
+parts-allocs-per-batch=4 rem=0

@@ -1,0 +1,16 @@
+module main (bad)
+
+import root-py
+
+-- The source passes a curried Python function to the function it is given;
+-- morloc cannot call a foreign function in its own grouping, so this is
+-- rejected at build time.
+
+source Py from "helpers.py" ("pass_curried" as passCurried)
+passCurried :: ((Int -> (Int -> Int)) -> Int) -> Int
+
+useIt :: (Int -> Int -> Int) -> Int
+useIt f = f 1 2
+
+bad :: Int
+bad = passCurried useIt

@@ -1,0 +1,79 @@
+-- Terminal actions on a streaming command apply to everything it streams,
+-- batch by batch as the producer wrote it, whether one action runs or
+-- several run on the command's saved output in one pass.
+--
+-- The producer writes [1,2], an empty batch, [3,4,5] and a batch larger
+-- than the write buffer (the Makefile sets its size), so an action that saw
+-- merged, split or dropped batches reports different sizes. `twoSites`
+-- streams from two `@collect`s and `branch` from those in a guard: an
+-- action there sees the whole output (issues #115, #116). Each command
+-- appends to a log per run, so a combined run is seen to run it once.
+--
+-- `--marks` is a per-batch action whose handler is morloc code. Its replay
+-- entry is given a pool, so it runs on the saved output too, on `stream`
+-- (with a path) and on `twoSites` (which has no fresh-run entry).
+--
+-- An action with no fresh-run entry (the actions of `twoSites`) is served
+-- only from the command line: MCP does not list it, the daemon says why,
+-- and the help still shows what it writes. A `-f` one of the outputs
+-- cannot take is refused before the command runs.
+
+module mainp (stream, twoSites, branch)
+
+import root-py
+
+source Py from "impl.py"
+  ( "produce", "produce_tail" as produceTail
+  , "join_all" as joinAll, "show_batch" as showBatch
+  , "zero", "add_batch" as addBatch, "merge", "show_acc" as showAcc )
+
+type Acc = (Int, [Int])
+
+produce :: Str -> ([Int] -> <IO> ()) -> <IO> ()
+produceTail :: ([Int] -> <IO> ()) -> <IO> ()
+
+--' The number of elements and the first few
+joinAll :: [Int] -> Str
+
+--' One line per batch
+showBatch :: [Int] -> Str
+
+zero :: Acc
+addBatch :: Acc -> [Int] -> Acc
+merge :: Acc -> Acc -> Acc
+
+--' The sum and every batch size
+showAcc :: Acc -> Str
+
+--' A mark per batch
+markBatch :: [Int] -> Str
+markBatch _ = "mark\n"
+
+--' The number of elements, read from the file
+countStaged :: IFile [Int] -> <IO> Int
+countStaged f = do
+  Ok n <- @flen f
+  n
+
+--' Stream
+--' @render -a/--all=joinAll
+--' @with   -n/--count=countStaged
+--' @render -b/--batches=showBatch @stream
+--' @render -f/--folded=showAcc @fold=addBatch @init=zero @combine=merge
+--' @render -k/--marks=markBatch @stream
+stream :: Str -> <IO> ()
+stream log = @collect (produce log)
+
+--' Stream from two sites
+--' @render -a/--all=joinAll
+--' @render -b/--batches=showBatch @stream
+--' @render -k/--marks=markBatch @stream
+twoSites :: Str -> <IO> ()
+twoSites log = do
+  @collect (produce log)
+  @collect produceTail
+
+--' Stream from the arms of a guard
+--' @render -a/--all=joinAll
+branch :: Str -> Bool -> <IO> ()
+branch log b = ? b = @collect (produce log) : @collect produceTail
