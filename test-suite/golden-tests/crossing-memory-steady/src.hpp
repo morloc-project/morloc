@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -78,7 +79,7 @@ inline void reportLayout() {
 inline long long grownKiB(long long done) {
     (void)done;
     reportLayout();
-    if (markedBytes() < 0) return -1;
+    if (markedBytes() < 0) throw std::runtime_error("the run ended before the mark");
     return (heldBytes() - markedBytes()) / 1024;
 }
 
