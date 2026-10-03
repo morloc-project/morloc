@@ -2818,7 +2818,11 @@ use morloc_runtime_types::stdio_proto::{
 };
 
 thread_local! {
-    static STDIO_SOCK: std::cell::RefCell<Option<std::os::unix::net::UnixStream>> =
+    /// This thread's connection to the nexus, and the process that opened
+    /// it. A forked child inherits the forking thread's copy; sharing it
+    /// would interleave two processes' requests and replies, so the child
+    /// opens its own.
+    static STDIO_SOCK: std::cell::RefCell<Option<(u32, std::os::unix::net::UnixStream)>> =
         std::cell::RefCell::new(None);
 }
 
@@ -2836,12 +2840,13 @@ fn stdio_sock_connect() -> Result<std::os::unix::net::UnixStream, MorlocError> {
 fn with_stdio_sock<R>(
     f: impl FnOnce(&mut std::os::unix::net::UnixStream) -> Result<R, MorlocError>,
 ) -> Result<R, MorlocError> {
+    let pid = std::process::id();
     STDIO_SOCK.with(|cell| {
         let mut opt = cell.borrow_mut();
-        if opt.is_none() {
-            *opt = Some(stdio_sock_connect()?);
+        if opt.as_ref().map_or(true, |(owner, _)| *owner != pid) {
+            *opt = Some((pid, stdio_sock_connect()?));
         }
-        let s = opt.as_mut().expect("populated above");
+        let (_, s) = opt.as_mut().expect("populated above");
         f(s)
     })
 }
@@ -10846,6 +10851,54 @@ mod tests {
         assert_eq!(after, b"not a stream", "the replacing file was written");
         let e = wrote.expect_err("a write to a replaced file succeeded");
         assert!(format!("{e:?}").contains("replaced"), "unexpected error: {e:?}");
+    }
+
+    #[test]
+    fn a_forked_child_does_not_share_its_parents_nexus_connection() {
+        use std::os::unix::io::AsRawFd;
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("stdio_sock");
+        let sock = dir.join("nexus.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let saved = std::env::var("MORLOC_NEXUS_STDIO_SOCK").ok();
+        std::env::set_var("MORLOC_NEXUS_STDIO_SOCK", &sock);
+        with_stdio_sock(|_| Ok(())).unwrap();
+        let (_parent_conn, _) = listener.accept().unwrap();
+
+        // Requests and replies on one socket from two processes interleave:
+        // a child must open its own connection.
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            let ok = with_stdio_sock(|_| Ok(())).is_ok();
+            unsafe { libc::_exit(if ok { 0 } else { 2 }) };
+        }
+        listener.set_nonblocking(true).unwrap();
+        let began = std::time::Instant::now();
+        let peer = loop {
+            match listener.accept() {
+                Ok((conn, _)) => {
+                    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+                    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+                    unsafe {
+                        libc::getsockopt(conn.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED,
+                            &mut cred as *mut libc::ucred as *mut libc::c_void, &mut len);
+                    }
+                    break Some(cred.pid);
+                }
+                Err(_) if began.elapsed() < std::time::Duration::from_secs(5) => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(_) => break None,
+            }
+        };
+        let mut status = 0;
+        unsafe { libc::waitpid(pid, &mut status, 0) };
+        match saved {
+            Some(v) => std::env::set_var("MORLOC_NEXUS_STDIO_SOCK", v),
+            None => std::env::remove_var("MORLOC_NEXUS_STDIO_SOCK"),
+        }
+        STDIO_SOCK.with(|c| *c.borrow_mut() = None);
+        assert_eq!(peer, Some(pid), "the child reused its parent's connection");
     }
 
     /// Kill a child process while it holds the slot lock of `h`.
