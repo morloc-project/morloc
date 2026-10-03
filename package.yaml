@@ -89,6 +89,7 @@ dependencies:
   - template-haskell
   - text
   - time
+  - unix
   - unordered-containers
   - vector
   - xxhash-ffi

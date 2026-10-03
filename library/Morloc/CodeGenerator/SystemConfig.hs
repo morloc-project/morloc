@@ -15,6 +15,7 @@ per-language @init.sh@ scripts to compile language extensions.
 module Morloc.CodeGenerator.SystemConfig
   ( configure
   , configureAll
+  , withInitLock
   , pathIsWithin
   , Incoherence (..)
   , compilerIncoherence
@@ -25,17 +26,18 @@ import qualified Morloc.CodeGenerator.Platform as P
 import qualified Morloc.Completion as Completion
 import qualified Morloc.Config as Config
 import qualified Morloc.DataFiles as DF
+import qualified Morloc.System as MS
 import Morloc.Module (OverwriteProtocol (..))
 
 import qualified Data.List as DL
 import qualified Data.Text.IO as TIO
 
-import Control.Exception (SomeException, catch, displayException, fromException, onException, try)
+import Control.Exception (SomeException, bracket, catch, displayException, fromException, onException, try)
 import System.IO.Error (ioeGetErrorString)
 import System.Directory (canonicalizePath, copyFile, createDirectoryIfMissing, createFileLink, doesDirectoryExist, doesFileExist, findExecutable, getHomeDirectory, pathIsSymbolicLink, removeDirectoryRecursive, removeFile, renameFile)
 import System.Environment (lookupEnv, setEnv)
 import System.FilePath (takeDirectory, takeFileName)
-import System.IO (IOMode (ReadWriteMode), hClose, hIsTerminalDevice, hPutStrLn, openTempFile, stderr, withFile)
+import System.IO (hClose, hIsTerminalDevice, hPutStrLn, openTempFile, stderr)
 import GHC.IO.Handle.Lock (LockMode (ExclusiveLock), hLock, hTryLock)
 import System.Exit (ExitCode(..))
 import System.Process (CreateProcess(..), StdStream(..), createProcess, proc, readProcessWithExitCode, waitForProcess)
@@ -69,7 +71,7 @@ configureAll verbose force slurmSupport sanitize config = do
 withInitLock :: Bool -> FilePath -> IO a -> IO a
 withInitLock verbose homeDir act = do
   createDirectoryIfMissing True homeDir
-  withFile (homeDir </> ".init.lock") ReadWriteMode $ \h -> do
+  bracket (MS.openLockFile (homeDir </> ".init.lock")) hClose $ \h -> do
     held <- hTryLock h ExclusiveLock
     unless held $ do
       sayInfo verbose "Waiting for another morloc init to finish"

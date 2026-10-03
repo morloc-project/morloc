@@ -22,6 +22,7 @@ import PatternChainTests (patternChainTests)
 import PropertyTests (propertyTests)
 import RecSolverTests (recSolverTests)
 import RefutablePatternTests (refutablePatternTests)
+import LockFileTests (lockFileTests)
 import RustPoolBuildTests (rustPoolBuildTests)
 import SchemaHintTests (schemaHintTests)
 import SizeParseTests (sizeParseTests)
@@ -104,6 +105,7 @@ unitTests =
   , irrefutablePatternLexerTests
   , refutablePatternTests
   , rustPoolBuildTests
+  , lockFileTests
   , effectBoundaryTests
   , schemaHintTests
   , systemConfigTests
