@@ -10,7 +10,12 @@ inline int peakKiB(int done) {
     (void)done;
     struct rusage ru;
     getrusage(RUSAGE_SELF, &ru);
+    // ru_maxrss is kibibytes on Linux and bytes on macOS.
+#ifdef __APPLE__
+    return (int)(ru.ru_maxrss / 1024);
+#else
     return (int)ru.ru_maxrss;
+#endif
 }
 
 #endif

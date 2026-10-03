@@ -830,6 +830,10 @@ pub struct ProcessLocalSlot {
     /// kernel ('drop_read_pages'): an IStream reads its file forward, once.
     pub pages_dropped: u64,
 
+    /// IStream only: the file the mapping was made from, kept open so that
+    /// 'drop_read_pages' can map read pages afresh.
+    pub map_file: Option<std::fs::File>,
+
     /// Underlying file descriptor. For OStream this is the fd that
     /// holds the flock (only the OPENER pool acquires the flock;
     /// non-opener writers use their own non-flock'd fd). For
@@ -1380,10 +1384,14 @@ fn attach_process_local_slot(
     })?.to_string();
 
     // Open + mmap depending on kind.
-    let (fd, mmap_ptr, mmap_size) = match kind {
-        x if x == MLC_KIND_IFILE || x == MLC_KIND_ISTREAM => {
+    let (fd, map_file, mmap_ptr, mmap_size) = match kind {
+        x if x == MLC_KIND_IFILE => {
             let (mp, sz) = mmap_file_readonly(&path_str)?;
-            (-1i32, mp, sz)
+            (-1i32, None, mp, sz)
+        }
+        x if x == MLC_KIND_ISTREAM => {
+            let (f, mp, sz) = mmap_file_readonly_keep(&path_str)?;
+            (-1i32, Some(f), mp, sz)
         }
         x if x == MLC_KIND_OSTREAM => {
             // Non-opener pools open RDWR but DO NOT acquire flock
@@ -1401,7 +1409,7 @@ fn attach_process_local_slot(
             if fd < 0 {
                 return Err(MorlocError::Io(std::io::Error::last_os_error()));
             }
-            (fd, std::ptr::null_mut(), 0)
+            (fd, None, std::ptr::null_mut(), 0)
         }
         other => {
             return Err(MorlocError::Other(format!(
@@ -1480,6 +1488,7 @@ fn attach_process_local_slot(
         mmap_ptr,
         mmap_size,
         pages_dropped: 0,
+        map_file,
         fd,
         cache,
         value_schema,
@@ -2279,6 +2288,7 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
         mmap_ptr,
         mmap_size,
         pages_dropped: 0,
+        map_file: None,
         fd: -1,
         cache: Box::new(StreamCache::new(cap_bytes)),
         value_schema: parsed.value_schema.clone(),
@@ -2303,7 +2313,7 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
 
     reject_dev_stdio_path(path)?;
 
-    let (mmap_ptr, mmap_size) = mmap_file_readonly(path)?;
+    let (map_file, mmap_ptr, mmap_size) = mmap_file_readonly_keep(path)?;
     let parsed = match parse_stream_file(path, mmap_ptr, mmap_size) {
         Ok(p) => p,
         Err(e) => {
@@ -2385,6 +2395,7 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
         mmap_ptr,
         mmap_size,
         pages_dropped: 0,
+        map_file: Some(map_file),
         fd: -1,
         cache: Box::new(StreamCache::new(cap_bytes)),
         value_schema: parsed.value_schema.clone(),
@@ -2677,6 +2688,7 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
         mmap_ptr: std::ptr::null_mut(),
         mmap_size: 0,
         pages_dropped: 0,
+        map_file: None,
         fd: -1,                    // stdio writes go through RPC, not fd
         cache: Box::new(StreamCache::new(0)),
         value_schema: value_schema_cached,
@@ -3140,6 +3152,7 @@ fn init_ostream_on_locked_fd(
         mmap_ptr: std::ptr::null_mut(),
         mmap_size: 0,
         pages_dropped: 0,
+        map_file: None,
         fd,                       // opener holds flock for slot lifetime
         cache: Box::new(StreamCache::new(0)),
         value_schema: value_schema_cached,
@@ -4789,24 +4802,32 @@ fn next_file_subpacket(handle: i64) -> Result<Option<AbsPtr>, MorlocError> {
 /// Hand back to the kernel the pages of an IStream's mapping that lie wholly
 /// before `read_end`. A stream is read forward and each sub-packet is copied
 /// out once, so nothing reads those bytes again; left mapped they are counted
-/// against this process until the stream closes. The mapping is a clean,
-/// read-only file mapping, so a page dropped here would only fault back in
-/// from the file. Only this process's mapping is touched: the page cache,
-/// which other pools reading the stream share, is left alone.
+/// against this process until the stream closes. The pages are replaced by a
+/// fresh mapping of the same file range, so a page dropped here could only
+/// fault back in from the file. Only this process's mapping is touched: the
+/// page cache, which other pools reading the stream share, is left alone.
+/// `madvise(MADV_DONTNEED)` is not used: on macOS it leaves the pages resident.
 fn drop_read_pages(local: &mut ProcessLocalSlot, read_end: u64) {
     let page = crate::shm::page_size() as u64;
     let end = (read_end.min(local.mmap_size) / page) * page;
     if local.mmap_ptr.is_null() || end <= local.pages_dropped {
         return;
     }
-    unsafe {
-        libc::madvise(
-            (local.mmap_ptr as *mut u8).add(local.pages_dropped as usize) as *mut libc::c_void,
-            (end - local.pages_dropped) as usize,
-            libc::MADV_DONTNEED,
-        );
+    let Some(file) = local.map_file.as_ref() else { return };
+    let start = local.pages_dropped;
+    let ptr = unsafe {
+        libc::mmap(
+            (local.mmap_ptr as *mut u8).add(start as usize) as *mut libc::c_void,
+            (end - start) as usize,
+            libc::PROT_READ,
+            libc::MAP_PRIVATE | libc::MAP_FIXED,
+            file.as_raw_fd(),
+            start as libc::off_t,
+        )
+    };
+    if ptr != libc::MAP_FAILED {
+        local.pages_dropped = end;
     }
-    local.pages_dropped = end;
 }
 
 /// Read the sub-packet at the given byte offset in this pool's mmap
@@ -5954,6 +5975,7 @@ pub fn shared_append_to_path(
         mmap_ptr: std::ptr::null_mut(),
         mmap_size: 0,
         pages_dropped: 0,
+        map_file: None,
         fd,
         cache: Box::new(StreamCache::new(0)),
         value_schema: value_schema_clone,
@@ -6703,6 +6725,11 @@ fn mmap_fd_readonly(
 }
 
 fn mmap_file_readonly(path: &str) -> Result<(AbsPtr, u64), MorlocError> {
+    mmap_file_readonly_keep(path).map(|(_, ptr, size)| (ptr, size))
+}
+
+/// 'mmap_file_readonly', also returning the open file.
+fn mmap_file_readonly_keep(path: &str) -> Result<(std::fs::File, AbsPtr, u64), MorlocError> {
     let f = OpenOptions::new()
         .read(true)
         .open(Path::new(path))
@@ -6745,9 +6772,8 @@ fn mmap_file_readonly(path: &str) -> Result<(AbsPtr, u64), MorlocError> {
     // slice walker also issues MADV_WILLNEED over the projected
     // sub-packet range below to prefault the bulk-read section.
 
-    // `f` (and thus fd) is dropped when this function returns; mmap
-    // pins the underlying inode regardless of fd lifetime.
-    Ok((ptr as AbsPtr, size))
+    // The mapping pins the inode whether or not the caller keeps `f`.
+    Ok((f, ptr as AbsPtr, size))
 }
 
 // ── Stream header parsing ─────────────────────────────────────────────────
@@ -9955,6 +9981,7 @@ pub fn shared_open_ifile_recovered(
         mmap_ptr,
         mmap_size,
         pages_dropped: 0,
+        map_file: None,
         fd: -1,
         cache: Box::new(StreamCache::new(cap_bytes)),
         value_schema: parsed.value_schema.clone(),
@@ -11916,6 +11943,7 @@ fn channel_local(generation: u64, value_schema: &Schema) -> ProcessLocalSlot {
         mmap_ptr: std::ptr::null_mut(),
         mmap_size: 0,
         pages_dropped: 0,
+        map_file: None,
         fd: -1,
         cache: Box::new(StreamCache::new(0)),
         value_schema: value_schema.clone(),

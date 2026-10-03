@@ -17,9 +17,12 @@ inline long long peakKiB(long long done) {
     (void)done;
     struct rusage ru;
     getrusage(RUSAGE_SELF, &ru);
-    // ru_maxrss is kibibytes on Linux and bytes on macOS; the comparison
-    // this feeds is between two runs of the same binary, so either does.
+    // ru_maxrss is kibibytes on Linux and bytes on macOS.
+#ifdef __APPLE__
+    return (long long)ru.ru_maxrss / 1024;
+#else
     return (long long)ru.ru_maxrss;
+#endif
 }
 
 #endif
