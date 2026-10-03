@@ -3007,6 +3007,20 @@ static PyObject* pybinding__debug_drain_frames(PyObject* self, PyObject* args) {
     return result;
 }
 
+// Atomically add `delta` to the C int at `address` and return the new value.
+// The pool's worker processes share their counters in memory inherited
+// across fork; a Python read-then-write on it loses updates.
+static PyObject* pybinding__atomic_add_int(PyObject* self, PyObject* args) {
+    (void)self;
+    unsigned long long address;
+    int delta;
+    if (!PyArg_ParseTuple(args, "Ki", &address, &delta)) {
+        return NULL;
+    }
+    int value = __atomic_add_fetch((int*)(uintptr_t)address, delta, __ATOMIC_SEQ_CST);
+    return PyLong_FromLong(value);
+}
+
 // Reset per-dispatch debug state (recursion counters, write counter,
 // frame stack). Called by the pool's run_job at the start of each
 // new top-level call.
@@ -4453,6 +4467,7 @@ static PyMethodDef Methods[] = {
     {"debug_flush_dispatch", pybinding__debug_flush_dispatch, METH_NOARGS, "Reset per-dispatch debug state (recursion counters etc.)"},
     {"reclaim_stdio_after_dispatch", pybinding__reclaim_stdio_after_dispatch, METH_NOARGS, "Reclaim any stdio claim this dispatch left open"},
     {"foreign_call", pybinding__foreign_call, METH_VARARGS, "Send a call packet to a foreign pool"},
+    {"atomic_add_int", pybinding__atomic_add_int, METH_VARARGS, "Atomically add to a shared C int at an address"},
     {"get_value", pybinding__get_value, METH_VARARGS, "Convert a packet to a Python value"},
     {"put_value", pybinding__put_value, METH_VARARGS, "Convert a Python value to a packet"},
     {"is_ping", pybinding__is_ping, METH_VARARGS, "Packet is a ping"},

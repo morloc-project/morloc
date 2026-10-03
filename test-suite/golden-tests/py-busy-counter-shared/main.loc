@@ -1,0 +1,16 @@
+module main (drift)
+
+import root-py
+
+-- A Python pool's worker processes share one count of the workers blocked
+-- in a foreign call, which decides when the pool starts another worker.
+-- Processes that enter and leave foreign calls at the same time must leave
+-- it where it started: a lost update leaves it too high, so the pool keeps
+-- starting workers, or too low, so a blocked worker gets no spare to serve
+-- the callback it waits on. `drift` has `procs` processes of this worker
+-- each pass through the pool's own tracking `reps` times, then reports how
+-- far the count moved.
+
+source Py from "probe.py" ("drift")
+
+drift :: Int -> Int -> Int

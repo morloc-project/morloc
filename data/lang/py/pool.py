@@ -206,9 +206,9 @@ def _tracked_foreign_call(*args):
     return _tracked_call(_original_foreign_call, *args)
 
 def _tracked_call(f, *args):
-    prev = _busy_ref.value
-    _busy_ref.value = prev + 1
-    if prev + 1 >= _total_ref.value and _wakeup_fd >= 0:
+    busy_addr = ctypes.addressof(_busy_ref)
+    busy = morloc.atomic_add_int(busy_addr, 1)
+    if busy >= _total_ref.value and _wakeup_fd >= 0:
         try:
             os.write(_wakeup_fd, b'!')
         except OSError:
@@ -216,7 +216,7 @@ def _tracked_call(f, *args):
     try:
         return f(*args)
     finally:
-        _busy_ref.value -= 1
+        morloc.atomic_add_int(busy_addr, -1)
 
 def __mlc_wrap_log(group, start_tmpl, pass_tmpl, fail_tmpl, bench_key, fn):
     # bench_key is "group\tname\tlang" when the label carries
