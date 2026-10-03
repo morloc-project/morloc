@@ -400,9 +400,8 @@ pub unsafe extern "C" fn morloc_cache_lookup(
 ///   from before the msgpack->voidstar migration; unlink both the
 ///   indirection and its `.dat` sidecar.
 /// - Header claims `source=FILE, format=DATA` but the referenced
-///   content sidecar does not exist, or its size differs from what
-///   the indirection's length field claims (atomicity crash between
-///   writes); unlink the dangling indirection.
+///   content sidecar does not exist or is empty; unlink the dangling
+///   indirection.
 ///
 /// All other headers pass through (the caller trusts the packet
 /// framework to reject any leftover invalid combinations).

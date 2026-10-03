@@ -10,7 +10,7 @@
 //!   sub-packets per handle to avoid redundant zstd work.
 //! - **Handle layout**: `(generation << 16) | slot`. Generation occupies
 //!   47 bits (bit 63 stays clear so negative i64 is reserved for the FFI
-//!   error sentinel) and bumps by a salted random step on each close;
+//!   error sentinel) and changes on each close;
 //!   double-close, foreign-int collision, and ABA reuse all return a
 //!   clean error.
 //! - **IFile / IStream / OStream** all implemented against the shared
@@ -452,8 +452,7 @@ fn stdout_staged() -> bool {
 
 /// Return the registry's per-nexus generation-increment salt. The salt
 /// is set by the bootstrap winner and is the same value seen by every
-/// attached process. Used by the slot-close path to bump the generation
-/// by a salted-random step instead of monotonic +1.
+/// attached process.
 #[inline]
 pub(crate) fn registry_gen_salt() -> u64 {
     use std::sync::atomic::Ordering;
@@ -532,7 +531,7 @@ pub use morloc_runtime_types::stdio_proto::{
 #[repr(C, align(64))]
 pub struct RegistrySlot {
     // ── Identity / lifecycle (atomically accessed) ──────────────────
-    /// Bumped by salted random increment on every close. Publication-
+    /// Bumped on every close. Publication-
     /// order: all field writes happen-before the Release-store of this
     /// at @open's end. Cross-pool readers Acquire-load this BEFORE
     /// reading other fields and re-load AFTER; if changed, retry.
@@ -1118,10 +1117,6 @@ fn claim_process_local_slot(
 /// function validates the SHM slot's generation against the cached
 /// entry; if stale (or missing), it drops any stale entry and
 /// attaches afresh by reading the SHM slot's path + kind.
-///
-/// The cached entry is removed from the map for the duration of `f`,
-/// then re-inserted on completion. This avoids holding the map lock
-/// across `f`'s body (which may do file I/O or hold the slot lock).
 pub fn with_process_local_slot<R>(
     handle: i64,
     f: impl FnOnce(&mut ProcessLocalSlot, &'static RegistrySlot) -> Result<R, MorlocError>,
@@ -1644,15 +1639,6 @@ pub(crate) fn allocate_slot_cas(
     )))
 }
 
-/// Free a slot. Caller must hold the slot lock; the slot's state
-/// transitions to FREE and the generation bumps by the salted-random
-/// increment. After this call, any handle that referenced this slot
-/// fails the generation check.
-///
-/// Also frees the SHM-resident strings (path, schema) and
-/// subpacket_entries array that the slot referenced. The caller must
-/// already have done any kind-specific finalisation (e.g. write final
-/// footer for OStream).
 /// Transfer a freshly allocated block to the registry. The slot owns it
 /// from here: its lifetime is the slot's, which spans dispatches and can
 /// be shared across processes, so it must not be released when the
@@ -1849,8 +1835,6 @@ fn finish_ended(handle: i64, local: ProcessLocalSlot) {
     drop(guard);
 }
 
-/// Dispose of every slot of this process that holds the lock of an ended
-/// stream.
 /// Held across a release pass, which frees SHM blocks, so a fork never
 /// copies the allocator's lock mid-pass into a child without the thread.
 static RELEASE_PASS: Mutex<()> = Mutex::new(());
@@ -3193,10 +3177,6 @@ fn reject_dev_stdio_path(path: &str) -> Result<(), MorlocError> {
 }
 
 /// Open a file as `OStream` with the element schema known up front.
-/// Creates or silently overwrites the file (`@append` handles append
-/// semantics); a non-blocking exclusive flock guards against a live
-/// concurrent writer. `ftruncate` runs after the flock so a rejected
-/// open leaves the other writer's bytes intact.
 pub fn shared_open_ostream_with_schema(
     path: &str,
     schema_str: &str,
@@ -4789,7 +4769,7 @@ pub fn shared_write_subpacket(
             crate::shm::rel2abs(arr.data)?
         };
 
-        let _guard = lock_for_write(slot, gen_claim, "the reader of this stream has stopped")?;
+        let _guard = lock_for_write(slot, gen_claim, "the stream was closed, or its reader stopped")?;
         // Another process is waiting to write: hand it the stream.
         if slot.wb_sync_only != 0 {
             commit_sealed(slot, local, 0)?;
@@ -4897,7 +4877,7 @@ pub fn shared_flush_buffer(handle: i64) -> Result<(), MorlocError> {
                 handle_kind_name(slot.kind),
             )));
         }
-        let _guard = lock_for_write(slot, gen_claim, "the reader of this stream has stopped")?;
+        let _guard = lock_for_write(slot, gen_claim, "the stream was closed, or its reader stopped")?;
         flush_write_buffer(slot, local)
     })
 }
@@ -5522,10 +5502,6 @@ pub fn shared_handle_length(handle: i64) -> Result<u64, MorlocError> {
     let slot = slot_ref(slot_idx).ok_or_else(|| MorlocError::Other(format!(
         "shared_handle_length: slot index {} out of range", slot_idx,
     )))?;
-    // Versioned-pointer read; element_count is lock-protected for
-    // OStream writes but we accept a momentarily-stale snapshot
-    // for IFile/IStream readers. For OStream callers (which would
-    // be unusual for @flen) take the lock.
     let gen_before = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
     if gen_before != gen_claim {
         return Err(MorlocError::Other(format!(
@@ -5544,12 +5520,7 @@ pub fn shared_handle_length(handle: i64) -> Result<u64, MorlocError> {
             handle_kind_name(slot.kind),
         )));
     }
-    let count = if slot.kind == MLC_KIND_OSTREAM {
-        let _guard = SlotGuard::lock(slot)?;
-        slot.element_count
-    } else {
-        slot.element_count
-    };
+    let count = slot.element_count;
     let gen_after = slot.generation.load(Ordering::Acquire) & GENERATION_MASK;
     if gen_after != gen_before {
         return Err(MorlocError::Other(
@@ -6488,11 +6459,6 @@ pub(crate) fn pool_reclaim_stdio_after_dispatch() {
     set_current_call_id(CALL_ID_NO_SWEEP);
 }
 
-/// Read the configured write-buffer capacity in bytes from the
-/// `MORLOC_WRITE_BUFFER_BYTES` env var, defaulting to
-/// `WRITE_BUFFER_BYTES_DEFAULT` (16 MiB). Tests use this to lower
-/// the threshold and exercise flush logic without writing megabytes.
-/// Minimum is 4 KiB so the Array header + a few elements always fit.
 /// The nexus's explicit `-z N`, published to every pool as
 /// `MORLOC_STDOUT_COMPRESSION_LEVEL`. Unset means the `@write` level
 /// stands; an unparsable value is treated the same way rather than
@@ -8017,11 +7983,6 @@ pub fn concat_files(paths: &[&str], dest: &str) -> Result<(), MorlocError> {
     staged.commit().map_err(MorlocError::Io)
 }
 
-/// Finalise an OStream on close: replace the temp footer with a final
-/// footer carrying the full sub-packet index, the StreamDiag block,
-/// and the FOOTER_FINAL marker. fdatasync before returning so the
-/// on-disk file is consistent before the fd is closed.
-///
 /// `@stream :: IFile [a] -> <IO> IStream a`: open a fresh ISTREAM handle
 /// bound to the same path as the source IFile. Independent fd + mmap +
 /// cursor so the two handles can be walked concurrently.

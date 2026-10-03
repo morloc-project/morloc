@@ -20,7 +20,7 @@ mlc_closure_codec <- function(tuple_schema, arg_codecs, res_codec) {
 # each worker AFTER fork (see mlc_load_user_sources). Loading a package that
 # spins threads (an OpenMP / Accelerate-BLAS user library) in the parent and then
 # forking is unsafe on macOS (fork-after-threads deadlock/abort). Deferring keeps
-# the parent single-threaded; each worker loads its libraries in its own process,
+# user-library threads out of the parent; each worker loads its libraries in its own process,
 # preserving per-worker thread parallelism. Held as an unevaluated function body
 # and eval'd into globalenv post-fork, so sourced symbols land at global scope
 # exactly as if run at load time (R's source() targets globalenv by default).

@@ -1526,15 +1526,6 @@ unsafe fn emit_raw_media(
     (*resp).mime = libc::strdup(mime);
 }
 
-/// Take a reference on a result packet's shared-memory block, if it has one,
-/// and record it in the active eval arena so it is released when the request
-/// ends.
-///
-/// A packet whose payload is inline carries no block and needs nothing. One
-/// that points into shared memory is owned by the pool that produced it, and
-/// that pool frees it at the head of its next dispatch -- soon enough to
-/// matter when requests overlap.
-///
 /// # Safety
 /// `packet` must be a well-formed morloc packet.
 unsafe fn adopt_rptr_result(packet: *const u8) {
@@ -2190,10 +2181,7 @@ pub unsafe extern "C" fn daemon_dispatch(
         // SHM blocks for non-trivial args (these are referenced by relptr
         // in the call packet shipped to the pool); the pool's arg ingress
         // shincref's any RPTR args it consumes, so we can safely shfree
-        // our originals when the arena drops here. Pool-shipped RPTR
-        // results are NOT in the arena because they did not flow through
-        // shmalloc on this thread (rel2abs only); they remain owned by
-        // the pool, which releases them at its own next dispatch.
+        // our originals when the arena drops here.
         let _arena = match crate::eval_arena::enter() {
             Ok(g) => Some(g),
             Err(_) => None,  // already active is unexpected here; proceed without
@@ -2222,19 +2210,6 @@ pub unsafe extern "C" fn daemon_dispatch(
                 (*resp).error_kind = DAEMON_ERROR_INTERNAL;
                 (*resp).error = err;
             } else {
-                // Take a reference on a result that lives in shared memory,
-                // and hand it to the arena so it is released when this
-                // request ends.
-                //
-                // Without this the block is read while nothing holds it on
-                // this side: the pool that produced it keeps it only until
-                // its own next dispatch, and with several requests in flight
-                // that dispatch can arrive while this one is still reading.
-                // What comes back is then a prefix of the right answer
-                // followed by zeros, because releasing a block scrubs it.
-                // The pools already do exactly this to each other -- a pool
-                // receiving another pool's result increfs it and tracks it --
-                // and the daemon was the one consumer that did not.
                 adopt_rptr_result(result_packet);
 
                 let packet_error =

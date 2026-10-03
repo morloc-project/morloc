@@ -75,8 +75,9 @@ _MLC_CLOSURE_SCHEMA = "t3sjaau1"
 # in the parent and then forking is unsafe on macOS: e.g. numpy loads Apple's
 # Accelerate/libdispatch, which spins background threads, and forking a
 # multithreaded process then deadlocks/aborts in the child (fork-after-threads).
-# Deferring keeps the parent single-threaded, and each worker initializes its
-# libraries in its own process -- preserving full per-worker thread parallelism.
+# Deferring keeps user-library threads out of the parent (the runtime's own
+# threads are fork-aware), and each worker initializes its libraries in its own
+# process -- preserving full per-worker thread parallelism.
 # The block is held verbatim in a raw string and exec'd into module globals (so
 # the imports land at module scope exactly as if run at import time, past fork).
 _mlc_user_sources = r'''
@@ -957,8 +958,7 @@ if __name__ == "__main__":
         pass
 
     # The nexus's lifeline: the main loops below poll it and end this pool's
-    # process group when the nexus ends, however it ends. Polled rather than
-    # watched from a thread, so a fork-model pool stays single-threaded.
+    # process group when the nexus ends, however it ends.
     _lifeline_fd = morloc.lifeline_adopt()
 
     # The SIGTERM/SIGINT handler sets this. A plain flag until the fork model
