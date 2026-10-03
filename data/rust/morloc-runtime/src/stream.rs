@@ -11083,33 +11083,9 @@ mod tests {
         assert!(staging_files(&dir).is_empty(), "staging files left: {:?}", staging_files(&dir));
     }
 
-    /// The pid of the process at the other end of a Unix socket.
-    #[cfg(target_os = "linux")]
-    fn peer_pid(fd: i32) -> Option<libc::pid_t> {
-        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
-        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-        let rc = unsafe {
-            libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_PEERCRED,
-                &mut cred as *mut libc::ucred as *mut libc::c_void, &mut len)
-        };
-        (rc == 0).then_some(cred.pid)
-    }
-
-    /// The pid of the process at the other end of a Unix socket.
-    #[cfg(target_os = "macos")]
-    fn peer_pid(fd: i32) -> Option<libc::pid_t> {
-        let mut pid: libc::pid_t = 0;
-        let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
-        let rc = unsafe {
-            libc::getsockopt(fd, libc::SOL_LOCAL, libc::LOCAL_PEERPID,
-                &mut pid as *mut libc::pid_t as *mut libc::c_void, &mut len)
-        };
-        (rc == 0).then_some(pid)
-    }
-
     #[test]
     fn a_forked_child_does_not_share_its_parents_nexus_connection() {
-        use std::os::unix::io::AsRawFd;
+        use std::io::{Read, Write};
         let _shm = crate::own_test_registry();
         let dir = concat_test_dir("stdio_sock");
         let sock = dir.join("nexus.sock");
@@ -11120,17 +11096,27 @@ mod tests {
         let (_parent_conn, _) = listener.accept().unwrap();
 
         // Requests and replies on one socket from two processes interleave:
-        // a child must open its own connection.
+        // a child must open its own connection. The child names itself on
+        // whatever connection it uses, so its pid arrives on a new one only
+        // if it opened one.
         let pid = unsafe { libc::fork() };
         if pid == 0 {
-            let ok = with_stdio_sock(|_| Ok(())).is_ok();
+            let me = unsafe { libc::getpid() };
+            let ok = with_stdio_sock(|s| {
+                s.write_all(&me.to_le_bytes()).map_err(MorlocError::Io)
+            }).is_ok();
             unsafe { libc::_exit(if ok { 0 } else { 2 }) };
         }
         listener.set_nonblocking(true).unwrap();
         let began = std::time::Instant::now();
         let peer = loop {
             match listener.accept() {
-                Ok((conn, _)) => break peer_pid(conn.as_raw_fd()),
+                Ok((mut conn, _)) => {
+                    conn.set_nonblocking(false).unwrap();
+                    conn.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                    let mut buf = [0u8; std::mem::size_of::<libc::pid_t>()];
+                    break conn.read_exact(&mut buf).ok().map(|_| libc::pid_t::from_le_bytes(buf));
+                }
                 Err(_) if began.elapsed() < std::time::Duration::from_secs(5) => {
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
