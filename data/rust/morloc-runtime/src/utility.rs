@@ -223,11 +223,15 @@ impl AtomicFile {
     /// Flush the content to disk and move it onto the destination.
     pub fn commit(mut self) -> std::io::Result<()> {
         let file = self.file.take().expect("AtomicFile committed twice");
-        file.sync_all()?;
-        drop(file);
-        let guard = ReplaceGuard::take(&self.dest)?;
-        std::fs::rename(&self.tmp, &self.dest)?;
-        drop(guard);
+        let replaced = file.sync_all().and_then(|()| {
+            drop(file);
+            let guard = ReplaceGuard::take(&self.dest)?;
+            std::fs::rename(&self.tmp, &self.dest).map(|()| drop(guard))
+        });
+        if let Err(e) = replaced {
+            let _ = std::fs::remove_file(&self.tmp);
+            return Err(e);
+        }
         let dir = self.dest.parent().unwrap_or(std::path::Path::new("."));
         if let Ok(dir_f) = std::fs::File::open(dir) {
             let _ = dir_f.sync_all();
@@ -280,43 +284,57 @@ pub fn create_beside(
     }
 }
 
-/// The lock of a file about to be replaced, held across the rename. A
-/// stream writing the file holds that lock; replacing the file under it
-/// would leave the writer writing into a file nobody can reach.
+/// The lock of a file about to be replaced, held exclusively across the
+/// rename: a rename cannot check what it displaces, so whoever renames over a
+/// file must hold its lock. A stream writing the file holds that lock too,
+/// and replacing the file under it would leave the writer writing into a file
+/// nobody can reach. Replacements of one path (stores of one cache entry,
+/// say) therefore take turns: one finding the lock held waits, within
+/// `REPLACE_WAIT`, since a replacement holds it only across a rename. A
+/// stream holds it for as long as it writes, so the wait runs out and the
+/// replacement is refused.
 pub struct ReplaceGuard {
     fd: Option<libc::c_int>,
 }
+
+const REPLACE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl ReplaceGuard {
     pub fn take(dest: &std::path::Path) -> std::io::Result<Self> {
         use std::os::unix::ffi::OsStrExt;
         let c_path = std::ffi::CString::new(dest.as_os_str().as_bytes())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        let deadline = std::time::Instant::now() + REPLACE_WAIT;
         // Retry until the locked file is still the one `dest` names, so the
         // lock covers the file the rename replaces.
-        for _ in 0..8 {
+        loop {
             let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
             if fd < 0 {
-                // Nothing there yet, or nothing this process may open: no
-                // stream of this program can be writing it.
-                return Ok(ReplaceGuard { fd: None });
+                let e = std::io::Error::last_os_error();
+                // Nothing there yet: no stream can be writing it.
+                if matches!(e.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR)) {
+                    return Ok(ReplaceGuard { fd: None });
+                }
+                return Err(e);
             }
-            if let Err(why) = crate::stream::lock_stream_file(fd) {
-                unsafe { libc::close(fd); }
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::ResourceBusy,
-                    format!("'{}' is open for writing as a stream: {}", dest.display(), why),
-                ));
+            let refused = match crate::stream::lock_stream_file(fd) {
+                Err(why) => {
+                    unsafe { libc::close(fd); }
+                    format!("'{}' is open for writing as a stream: {}", dest.display(), why)
+                }
+                Ok(()) if crate::stream::path_names(&c_path, fd) => {
+                    return Ok(ReplaceGuard { fd: Some(fd) });
+                }
+                Ok(()) => {
+                    crate::stream::unlock_and_close(fd);
+                    format!("'{}' kept being replaced while it was locked", dest.display())
+                }
+            };
+            if std::time::Instant::now() >= deadline {
+                return Err(std::io::Error::new(std::io::ErrorKind::ResourceBusy, refused));
             }
-            if crate::stream::path_names(&c_path, fd) {
-                return Ok(ReplaceGuard { fd: Some(fd) });
-            }
-            crate::stream::unlock_and_close(fd);
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::ResourceBusy,
-            format!("'{}' kept being replaced while it was locked", dest.display()),
-        ))
     }
 }
 

@@ -11032,6 +11032,57 @@ mod tests {
         assert!(format!("{e:?}").contains("replaced"), "unexpected error: {e:?}");
     }
 
+    fn staging_files(dir: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(dir).unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .filter(|n| n.contains(".tmp."))
+            .collect()
+    }
+
+    #[test]
+    fn replacements_of_one_path_take_turns() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("replace_race");
+        let dest = dir.join("v.dat");
+        std::fs::write(&dest, b"first").unwrap();
+        // Another replacement is between taking the file's lock and renaming
+        // its copy over it, as concurrent stores of one cache entry are. This
+        // one must wait its turn: renaming now would displace a file it has
+        // not locked, which a stream may have just opened.
+        let other = crate::utility::ReplaceGuard::take(&dest).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let target = dest.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::utility::write_atomic_path(&target, b"second"));
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(rx.try_recv().is_err(), "a replacement renamed over a file another held");
+        drop(other);
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the waiting replacement never finished")
+            .expect("a replacement was refused because another was in flight");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"second");
+        assert!(staging_files(&dir).is_empty(), "staging files left: {:?}", staging_files(&dir));
+    }
+
+    #[test]
+    fn a_replacement_refused_by_a_stream_leaves_no_staging_file() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("replace_refused");
+        let dest = dir.join("v.dat");
+        std::fs::write(&dest, b"streaming").unwrap();
+        let c_dest = std::ffi::CString::new(dest.to_str().unwrap()).unwrap();
+        let fd = unsafe { libc::open(c_dest.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+        assert!(fd >= 0);
+        lock_stream_file(fd).expect("the stream writer's lock");
+        let refused = crate::utility::write_atomic_path(&dest, b"replacement");
+        unlock_and_close(fd);
+        let e = refused.expect_err("a file a stream is writing was replaced");
+        assert!(e.to_string().contains("stream"), "unexpected error: {e}");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"streaming");
+        assert!(staging_files(&dir).is_empty(), "staging files left: {:?}", staging_files(&dir));
+    }
+
     /// The pid of the process at the other end of a Unix socket.
     #[cfg(target_os = "linux")]
     fn peer_pid(fd: i32) -> Option<libc::pid_t> {
