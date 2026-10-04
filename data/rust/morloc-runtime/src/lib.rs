@@ -212,6 +212,111 @@ mod source_rule_tests {
         assert!(found.is_empty(), "descriptors not created close-on-exec:\n{}", found.join("\n"));
     }
 
+    fn item_id(text: &str) -> Option<&str> {
+        let prefix = text.bytes().take_while(|b| b.is_ascii_uppercase()).count();
+        if prefix == 0 || text.as_bytes().get(prefix) != Some(&b'-') {
+            return None;
+        }
+        let digits = text[prefix + 1..].bytes().take_while(|b| b.is_ascii_digit()).count();
+        if digits == 0 {
+            return None;
+        }
+        Some(&text[..prefix + 1 + digits])
+    }
+
+    #[test]
+    fn model_items_are_checked() {
+        let runtime = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo = runtime.parent().unwrap().parent().unwrap().parent().unwrap();
+        let sources = workspace_sources();
+        let mut test_fns = std::collections::HashSet::new();
+        for file in &sources {
+            let text = std::fs::read_to_string(file).unwrap();
+            for line in text.lines() {
+                let code = line.trim_start();
+                if let Some(rest) = code.strip_prefix("fn ") {
+                    let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                    test_fns.insert(name);
+                }
+            }
+        }
+
+        let mut problems = Vec::new();
+        let mut ids = std::collections::HashMap::new();
+        let mut items = Vec::new();
+        for entry in std::fs::read_dir(repo.join("model")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "md") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let mut current: Option<(String, Option<String>, Vec<String>)> = None;
+            for line in text.lines().chain(std::iter::once("### END")) {
+                if let Some(head) = line.strip_prefix("### ") {
+                    if let Some(item) = current.take() {
+                        items.push((path.clone(), item));
+                    }
+                    if let Some(id) = item_id(head) {
+                        if let Some(prev) = ids.insert(id.to_string(), path.clone()) {
+                            problems.push(format!("{id} defined in {} and {}", prev.display(), path.display()));
+                        }
+                        current = Some((id.to_string(), None, Vec::new()));
+                    }
+                } else if let Some((_, status, checks)) = current.as_mut() {
+                    if let Some(s) = line.strip_prefix("Status: ") {
+                        *status = Some(s.trim().to_string());
+                    } else if let Some(c) = line.strip_prefix("Checked by: ") {
+                        checks.extend(c.split(',').map(|t| t.trim().trim_matches('`').to_string()).filter(|t| !t.is_empty()));
+                    }
+                }
+            }
+        }
+        for (path, (id, status, checks)) in &items {
+            let at = path.display();
+            match status.as_deref() {
+                Some("implemented") => {
+                    if checks.is_empty() {
+                        problems.push(format!("{id} ({at}) is implemented but names no test"));
+                    }
+                    for check in checks {
+                        let exists = if let Some(dir) = check.strip_prefix("golden:") {
+                            repo.join("test-suite/golden-tests").join(dir).join("Makefile").exists()
+                        } else if let Some(cfg) = check.strip_prefix("tla:") {
+                            repo.join("model/tla").join(format!("{cfg}.cfg")).exists()
+                        } else {
+                            test_fns.contains(check)
+                        };
+                        if !exists {
+                            problems.push(format!("{id} ({at}) names {check}, which does not exist"));
+                        }
+                    }
+                }
+                Some("deviation") | Some("retired") => {
+                    if !checks.is_empty() {
+                        problems.push(format!("{id} ({at}) is not implemented but names tests"));
+                    }
+                }
+                other => problems.push(format!("{id} ({at}) has status {other:?}")),
+            }
+        }
+
+        for file in &sources {
+            let text = std::fs::read_to_string(file).unwrap();
+            for (i, line) in text.lines().enumerate() {
+                let Some(comment) = line.trim_start().strip_prefix("// ") else { continue };
+                let comment = comment.strip_prefix("SAFETY: ").unwrap_or(comment);
+                if let Some(id) = item_id(comment) {
+                    if comment[id.len()..].starts_with(':') && !ids.contains_key(id) {
+                        problems.push(format!("{}:{} cites {id}, which no model item defines", file.display(), i + 1));
+                    }
+                }
+            }
+        }
+
+        assert!(items.len() >= 20, "found only {} model items", items.len());
+        assert!(problems.is_empty(), "model problems:\n{}", problems.join("\n"));
+    }
+
     #[test]
     fn no_crate_declares_a_static_mut() {
         let files = workspace_sources();
