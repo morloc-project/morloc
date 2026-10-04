@@ -212,9 +212,10 @@ fn stage_dir() -> &'static str {
             }
             return dir;
         }
-        let base = std::env::var("MORLOC_TMPDIR")
-            .or_else(|_| std::env::var("TMPDIR"))
-            .unwrap_or_else(|_| "/tmp".to_string());
+        let base = ["MORLOC_TMPDIR", "TMPDIR"]
+            .iter()
+            .find_map(|k| std::env::var(k).ok().filter(|d| !d.is_empty()))
+            .unwrap_or_else(|| "/tmp".to_string());
         let template = std::ffi::CString::new(format!("{}/morloc-parse-XXXXXX", base))
             .unwrap_or_else(|_| crate::runlog::die_with_error("temporary directory path contains NUL"));
         let mut buf = template.into_bytes_with_nul();
