@@ -1,7 +1,7 @@
 # collect-formatters
 
 Polyglot coverage for the `@collect` output formatters (`with` / `with.buffer`
-/ `render.buffer`; whole-list `render` lives in `../collect-formatters-render-whole`).
+/ `render.buffer`; whole-list `render` lives in `../whole-render-cpp`).
 
 ## Layout (stdlib polyglot model)
 
@@ -43,6 +43,3 @@ cp obs.txt exp.txt
 - **R offset** (`streamInts --tag-off`, `--text-off`): the R `_mlc_tell`
   wrapper is deferred, so those invocations fail at runtime in the R pool until
   it lands. `exp.txt` encodes the intended (working) output.
-- **Whole-list `render`**: see the sibling `collect-formatters-render-whole`
-  directory — currently a compile-time `dfail`, RED until the raw return path
-  is wired.
