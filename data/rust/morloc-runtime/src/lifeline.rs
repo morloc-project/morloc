@@ -36,8 +36,7 @@ pub struct Lifeline {
 static OWN: OnceLock<Result<Lifeline, String>> = OnceLock::new();
 
 impl Lifeline {
-    /// This process's lifeline, created on first use. Both ends are
-    /// close-on-exec; `keep_across_exec` hands the read end to one child.
+    /// This process's lifeline, created on first use.
     pub fn get() -> Result<&'static Lifeline, MorlocError> {
         OWN.get_or_init(|| Self::create().map_err(|e| e.to_string()))
             .as_ref()
@@ -81,15 +80,6 @@ impl Lifeline {
     pub fn token(&self) -> &str {
         &self.token
     }
-}
-
-/// In a child between fork and exec: let the read end survive the exec.
-/// Async-signal-safe.
-///
-/// # Safety
-/// Only `fcntl` is called; `fd` should be a `Lifeline::read_fd`.
-pub unsafe fn keep_across_exec(fd: i32) {
-    libc::fcntl(fd, libc::F_SETFD, 0);
 }
 
 fn fifo_identity(fd: i32) -> Option<(u64, u64)> {
@@ -216,37 +206,39 @@ fn spawn_masked(f: impl FnOnce() + Send + 'static) {
 
 /// End what the nexus would have ended had it exited cleanly: this process
 /// group when this process has one apart from the nexus's (as the nexus
-/// arranges for pools), otherwise this process alone. A forked reaper sends
+/// arranges for pools), otherwise this process alone. A spawned reaper sends
 /// SIGTERM, waits `grace`, then sends SIGKILL; it ignores the SIGTERM it
 /// sends, so the escalation happens even after this process has exited.
 pub fn teardown(nexus_pgid: i32, grace: Duration) {
-    // SAFETY: only async-signal-safe calls after fork; the parent returns.
-    unsafe {
-        let group = libc::getpgrp();
-        let target = if group != nexus_pgid { -group } else { libc::getpid() };
-        let ts = libc::timespec {
-            tv_sec: grace.as_secs() as libc::time_t,
-            tv_nsec: grace.subsec_nanos() as libc::c_long,
-        };
-        let pid = libc::fork();
-        if pid == 0 {
-            // A live member keeps the group id from being reused during the
-            // grace period, so the SIGKILL cannot reach a stranger.
-            libc::signal(libc::SIGTERM, libc::SIG_IGN);
-            libc::kill(target, libc::SIGTERM);
-            libc::nanosleep(&ts, std::ptr::null_mut());
-            libc::kill(target, libc::SIGKILL);
-            libc::_exit(0);
-        }
-        if pid < 0 {
-            libc::kill(target, libc::SIGTERM);
-        }
+    // SAFETY: getpgrp and getpid cannot fail.
+    let group = unsafe { libc::getpgrp() };
+    let target = if group != nexus_pgid { -group } else { unsafe { libc::getpid() } };
+    let script = "trap '' TERM; kill -s TERM -- \"$1\"; sleep \"$2\"; kill -s KILL -- \"$1\"";
+    let args: Vec<CString> = [
+        "sh".to_string(),
+        "-c".to_string(),
+        script.to_string(),
+        "sh".to_string(),
+        target.to_string(),
+        format!("{}.{:03}", grace.as_secs(), grace.subsec_millis()),
+    ]
+    .into_iter()
+    .map(|a| CString::new(a).unwrap())
+    .collect();
+    let argv: Vec<*const libc::c_char> =
+        args.iter().map(|a| a.as_ptr()).chain(std::iter::once(std::ptr::null())).collect();
+    let (_env, envp) = morloc_runtime_types::spawn::current_environment();
+    let sh = CString::new("/bin/sh").unwrap();
+    let spawned = morloc_runtime_types::spawn::Spawn::new().and_then(|s| s.run(&sh, &argv, &envp, false));
+    if spawned.is_err() {
+        // SAFETY: kill takes plain integers.
+        unsafe { libc::kill(target, libc::SIGTERM) };
     }
 }
 
 /// The nexus side, for a child it starts: `MORLOC_LIFELINE=<token>` for the
-/// child's environment, with the read end to keep across its exec
-/// (`keep_across_exec`) stored in `read_fd`. Null, and -1, if this process
+/// child's environment, with the read end to keep across its exec stored in
+/// `read_fd`. Null, and -1, if this process
 /// could not make a lifeline.
 ///
 /// # Safety

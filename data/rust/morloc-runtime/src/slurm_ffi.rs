@@ -286,51 +286,41 @@ pub unsafe extern "C" fn submit_morloc_slurm_job(
     }
     let wrap_arg = format!("--wrap={}", wrap_cmd);
 
-    // Fork/exec sbatch
+    let args: Option<Vec<CString>> = [
+        "sbatch", "--parsable", "-o", output.as_ref(), "-e", error.as_ref(),
+        mem_arg.as_str(), time_arg.as_str(), cpus_arg.as_str(), gpus_arg.as_str(), wrap_arg.as_str(),
+    ]
+    .iter()
+    .map(|a| CString::new(*a).ok())
+    .collect();
+    let Some(args) = args else {
+        set_errmsg(errmsg, &MorlocError::Other("sbatch argument contains a NUL byte".into()));
+        return 0;
+    };
+    let argv: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).chain(std::iter::once(ptr::null())).collect();
+    let (_env, envp) = morloc_runtime_types::spawn::current_environment();
+
     let mut pipefd = [0i32; 2];
     if morloc_runtime_types::fd::pipe(pipefd.as_mut_ptr()) == -1 {
         set_errmsg(errmsg, &MorlocError::Other("Failed to create pipe for sbatch".into()));
         return 0;
     }
 
-    let pid = libc::fork();
-    if pid == -1 {
-        libc::close(pipefd[0]);
-        libc::close(pipefd[1]);
-        set_errmsg(errmsg, &MorlocError::Other("Failed to fork for sbatch".into()));
-        return 0;
-    }
-
-    if pid == 0 {
-        // Child
-        libc::close(pipefd[0]);
-        libc::dup2(pipefd[1], libc::STDOUT_FILENO);
-        libc::close(pipefd[1]);
-
-        let sbatch = CString::new("sbatch").unwrap();
-        let parsable = CString::new("--parsable").unwrap();
-        let o_flag = CString::new("-o").unwrap();
-        let e_flag = CString::new("-e").unwrap();
-        let c_output = CString::new(output.as_ref()).unwrap();
-        let c_error = CString::new(error.as_ref()).unwrap();
-        let c_mem = CString::new(mem_arg).unwrap();
-        let c_time = CString::new(time_arg).unwrap();
-        let c_cpus = CString::new(cpus_arg).unwrap();
-        let c_gpus = CString::new(gpus_arg).unwrap();
-        let c_wrap = CString::new(wrap_arg).unwrap();
-
-        libc::execlp(
-            sbatch.as_ptr(),
-            sbatch.as_ptr(),
-            parsable.as_ptr(),
-            o_flag.as_ptr(), c_output.as_ptr(),
-            e_flag.as_ptr(), c_error.as_ptr(),
-            c_mem.as_ptr(), c_time.as_ptr(), c_cpus.as_ptr(), c_gpus.as_ptr(),
-            c_wrap.as_ptr(),
-            ptr::null::<c_char>(),
-        );
-        libc::_exit(127);
-    }
+    let started = morloc_runtime_types::spawn::Spawn::new().and_then(|mut spawn| {
+        spawn.dup2(pipefd[1], libc::STDOUT_FILENO)?;
+        spawn.close(pipefd[0])?;
+        spawn.close(pipefd[1])?;
+        spawn.run(&args[0], &argv, &envp, true)
+    });
+    let pid = match started {
+        Ok(pid) => pid,
+        Err(e) => {
+            libc::close(pipefd[0]);
+            libc::close(pipefd[1]);
+            set_errmsg(errmsg, &MorlocError::Other(format!("cannot start sbatch: {e}")));
+            return 0;
+        }
+    };
 
     // Parent
     libc::close(pipefd[1]);

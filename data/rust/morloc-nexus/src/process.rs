@@ -1066,9 +1066,6 @@ fn start_language_server(socket: &PoolSocket) -> Result<i32, String> {
     extern "C" {
         fn morloc_lifeline_child_env(read_fd: *mut i32) -> *const libc::c_char;
     }
-    // Everything the child needs is built here, before the fork: the nexus is
-    // multithreaded in serve and daemon modes, so between fork and exec the
-    // child may only make async-signal-safe calls.
     let cmd = socket.syscmd.first().ok_or_else(|| format!("pool '{}' has no command", socket.lang))?;
     let program = resolve_program(cmd)
         .ok_or_else(|| format!("cannot start pool '{}': '{}' was not found on PATH", socket.lang, cmd.to_string_lossy()))?;
@@ -1100,31 +1097,18 @@ fn start_language_server(socket: &PoolSocket) -> Result<i32, String> {
     }
     let envp: Vec<*const libc::c_char> =
         env.iter().map(|s| s.as_ptr()).chain(std::iter::once(std::ptr::null())).collect();
-    let exec_failed = format!(
-        "exec failed for pool '{}' running '{}': errno ",
-        socket.lang,
-        program.to_string_lossy()
-    );
 
-    let pid = unsafe { libc::fork() };
-
-    if pid == 0 {
-        unsafe {
-            libc::setpgid(0, 0);
-            if lifeline_fd >= 0 {
-                libc::fcntl(lifeline_fd, libc::F_SETFD, 0);
-            }
-            libc::execve(program.as_ptr(), argv.as_ptr(), envp.as_ptr());
-            write_errno_line(exec_failed.as_bytes(), std::io::Error::last_os_error().raw_os_error().unwrap_or(0));
-            libc::_exit(127);
+    let started = (|| {
+        let mut spawn = morloc_runtime_types::spawn::Spawn::new()?;
+        spawn.new_process_group()?;
+        if lifeline_fd >= 0 {
+            spawn.keep_across_exec(lifeline_fd)?;
         }
-    } else if pid > 0 {
-        // Parent: ensure child is in its own process group
-        unsafe { libc::setpgid(pid, pid) };
-        Ok(pid)
-    } else {
-        Err(format!("fork failed: {}", std::io::Error::last_os_error()))
-    }
+        spawn.run(&program, &argv, &envp, false)
+    })();
+    started.map_err(|e| {
+        format!("cannot start pool '{}' running '{}': {e}", socket.lang, program.to_string_lossy())
+    })
 }
 
 /// The file `cmd` names: itself when it holds a `/`, otherwise the first
@@ -1142,27 +1126,6 @@ fn resolve_program(cmd: &CString) -> Option<CString> {
         let is_file = std::fs::metadata(std::ffi::OsStr::from_bytes(candidate.as_bytes())).is_ok_and(|m| m.is_file());
         (is_file && unsafe { libc::access(candidate.as_ptr(), libc::X_OK) } == 0).then_some(candidate)
     })
-}
-
-/// Write `prefix`, the decimal `errno` and a newline to stderr, without
-/// allocating: for a child between fork and exec.
-fn write_errno_line(prefix: &[u8], errno: i32) {
-    let mut digits = [0u8; 12];
-    let mut n = errno.unsigned_abs();
-    let mut i = digits.len();
-    loop {
-        i -= 1;
-        digits[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-        if n == 0 {
-            break;
-        }
-    }
-    unsafe {
-        libc::write(2, prefix.as_ptr() as *const libc::c_void, prefix.len());
-        libc::write(2, digits[i..].as_ptr() as *const libc::c_void, digits.len() - i);
-        libc::write(2, b"\n".as_ptr() as *const libc::c_void, 1);
-    }
 }
 
 #[cfg(test)]

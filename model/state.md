@@ -289,13 +289,9 @@ A row's `Cites` lists the deviation items it does not yet meet; an empty
 
 ## Fork sites
 
-Every call to `fork` outside tests, and what its child does.
+Every call to `fork` outside tests, and what its child does. Processes are
+started with `posix_spawn`, which runs no fork handler; a new `fork` call
+must be listed here.
 
 | Site | Child |
 |---|---|
-| morloc-nexus/process.rs::start_language_server | exec |
-| morloc-runtime/daemon_ffi.rs::compile_binding | exec |
-| morloc-runtime/daemon_ffi.rs::fork_morloc_command | exec |
-| morloc-runtime/router_ffi.rs::router_start_program | exec |
-| morloc-runtime/slurm_ffi.rs::submit_morloc_slurm_job | exec |
-| morloc-runtime/lifeline.rs::teardown | signal-safe |

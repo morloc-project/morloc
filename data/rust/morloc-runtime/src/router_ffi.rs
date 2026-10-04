@@ -335,8 +335,7 @@ pub unsafe extern "C" fn router_start_program(
     // manifest, ...) instead of only an exit status. The file lives under
     // MORLOC_STATE, which is the bind mount in the serve container (so it is also
     // readable from the host); the /tmp socket dir is a per-container tmpfs and
-    // would not be. All allocation happens here in the parent -- the child does
-    // only async-signal-safe calls before exec.
+    // would not be.
     let prog_name_str = CStr::from_ptr((*prog).name).to_string_lossy().into_owned();
     let log_dir = format!(
         "{}/logs",
@@ -375,116 +374,101 @@ pub unsafe extern "C" fn router_start_program(
     let envp: Vec<*const c_char> =
         env.iter().map(|e| e.as_ptr()).chain(std::iter::once(ptr::null())).collect();
     let lifeline_fd = lifeline.map_or(-1, |l| l.read_fd());
-    let exec_failed = format!("morloc-router: failed to exec morloc-nexus for {prog_name_str}\n");
-
-    let pid = libc::fork();
-    if pid == 0 {
-        // Child: exec `morloc-nexus daemon <manifest> --socket <path>`.
-        // The post-CLI-overhaul nexus uses explicit subcommands;
-        // `daemon` is the only argv shape that brings up a long-
-        // lived server. The router relies on this child to bind the
-        // Unix socket at `daemon_socket` so subsequent router
-        // requests can connect.
-        libc::setpgid(0, 0);
-        // Redirect stderr to the startup log so the parent can read the failure
-        // reason after a crash. O_APPEND preserves the first crash across a
-        // restart loop. Best-effort: on open failure fall back to the inherited
-        // stderr rather than aborting the exec.
-        if !c_stderr_log.as_bytes().is_empty() {
-            let log_fd = libc::open(
-                c_stderr_log.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND | libc::O_CLOEXEC,
-                0o644,
-            );
-            if log_fd >= 0 {
-                libc::dup2(log_fd, libc::STDERR_FILENO);
-                if log_fd > libc::STDERR_FILENO {
-                    libc::close(log_fd);
-                }
-            }
+    let log_fd = if c_stderr_log.as_bytes().is_empty() {
+        -1
+    } else {
+        libc::open(
+            c_stderr_log.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND | libc::O_CLOEXEC,
+            0o644,
+        )
+    };
+    let started = (|| {
+        let mut spawn = morloc_runtime_types::spawn::Spawn::new()?;
+        spawn.new_process_group()?;
+        if log_fd >= 0 {
+            spawn.dup2(log_fd, libc::STDERR_FILENO)?;
         }
         if lifeline_fd >= 0 {
-            crate::lifeline::keep_across_exec(lifeline_fd);
+            spawn.keep_across_exec(lifeline_fd)?;
         }
-        libc::execve(c_nexus.as_ptr(), argv.as_ptr(), envp.as_ptr());
-        libc::write(
-            libc::STDERR_FILENO,
-            exec_failed.as_ptr() as *const c_void,
-            exec_failed.len(),
-        );
-        libc::_exit(1);
-    } else if pid > 0 {
-        (*prog).daemon_pid = pid;
-
-        // Poll until the daemon socket is connectable (exponential backoff)
-        let mut delay_ms = DAEMON_POLL_INITIAL_MS;
-        let mut connected = false;
-        for _attempt in 0..DAEMON_POLL_MAX_RETRIES {
-            let ts = libc::timespec {
-                tv_sec: 0,
-                tv_nsec: (delay_ms * 1_000_000.0) as i64,
-            };
-            libc::nanosleep(&ts, ptr::null_mut());
-
-            // Check if child died during startup
-            let mut status: i32 = 0;
-            let result = libc::waitpid(pid, &mut status, libc::WNOHANG);
-            if result == pid {
-                (*prog).daemon_pid = 0;
-                let prog_name = CStr::from_ptr((*prog).name).to_string_lossy();
-                let msg = startup_death_msg(&prog_name, status, &stderr_log);
-                set_errmsg(errmsg, &MorlocError::Other(msg));
-                return false;
-            }
-
-            // Try connecting to the daemon socket
-            let test_sock = morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
-            if test_sock >= 0 {
-                // The path was checked to fit when the program was registered.
-                let addr = crate::utility::unix_socket_addr(
-                    CStr::from_ptr((*prog).daemon_socket.as_ptr()).to_bytes(),
-                )
-                .expect("daemon socket path fits");
-                let rc = libc::connect(
-                    test_sock,
-                    &addr as *const libc::sockaddr_un as *const libc::sockaddr,
-                    std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
-                );
-                libc::close(test_sock);
-                if rc == 0 {
-                    connected = true;
-                    break;
-                }
-            }
-
-            delay_ms *= DAEMON_POLL_MULTIPLIER;
-        }
-
-        if !connected {
-            // Final check: did the daemon die?
-            let mut status: i32 = 0;
-            let result = libc::waitpid(pid, &mut status, libc::WNOHANG);
-            if result == pid {
-                (*prog).daemon_pid = 0;
-                let prog_name = CStr::from_ptr((*prog).name).to_string_lossy();
-                let msg = startup_death_msg(&prog_name, status, &stderr_log);
-                set_errmsg(errmsg, &MorlocError::Other(msg));
-                return false;
-            }
-            // Daemon alive but socket not yet connectable -- proceed anyway,
-            // router_forward() will retry on connect failure.
-        }
-
-        true
-    } else {
-        let errno_msg = CStr::from_ptr(libc::strerror(crate::utility::errno_val()))
-            .to_string_lossy();
-        set_errmsg(
-            errmsg,
-            &MorlocError::Other(format!("fork failed: {}", errno_msg)),
-        );
-        false
+        spawn.run(&c_nexus, &argv, &envp, false)
+    })();
+    if log_fd >= 0 {
+        libc::close(log_fd);
     }
+    let pid = match started {
+        Ok(pid) => pid,
+        Err(e) => {
+            set_errmsg(
+                errmsg,
+                &MorlocError::Other(format!("cannot start morloc-nexus for {prog_name_str}: {e}")),
+            );
+            return false;
+        }
+    };
+    (*prog).daemon_pid = pid;
+
+    // Poll until the daemon socket is connectable (exponential backoff)
+    let mut delay_ms = DAEMON_POLL_INITIAL_MS;
+    let mut connected = false;
+    for _attempt in 0..DAEMON_POLL_MAX_RETRIES {
+        let ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: (delay_ms * 1_000_000.0) as i64,
+        };
+        libc::nanosleep(&ts, ptr::null_mut());
+
+        // Check if child died during startup
+        let mut status: i32 = 0;
+        let result = libc::waitpid(pid, &mut status, libc::WNOHANG);
+        if result == pid {
+            (*prog).daemon_pid = 0;
+            let prog_name = CStr::from_ptr((*prog).name).to_string_lossy();
+            let msg = startup_death_msg(&prog_name, status, &stderr_log);
+            set_errmsg(errmsg, &MorlocError::Other(msg));
+            return false;
+        }
+
+        // Try connecting to the daemon socket
+        let test_sock = morloc_runtime_types::fd::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+        if test_sock >= 0 {
+            // The path was checked to fit when the program was registered.
+            let addr = crate::utility::unix_socket_addr(
+                CStr::from_ptr((*prog).daemon_socket.as_ptr()).to_bytes(),
+            )
+            .expect("daemon socket path fits");
+            let rc = libc::connect(
+                test_sock,
+                &addr as *const libc::sockaddr_un as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+            );
+            libc::close(test_sock);
+            if rc == 0 {
+                connected = true;
+                break;
+            }
+        }
+
+        delay_ms *= DAEMON_POLL_MULTIPLIER;
+    }
+
+    if !connected {
+        // Final check: did the daemon die?
+        let mut status: i32 = 0;
+        let result = libc::waitpid(pid, &mut status, libc::WNOHANG);
+        if result == pid {
+            (*prog).daemon_pid = 0;
+            let prog_name = CStr::from_ptr((*prog).name).to_string_lossy();
+            let msg = startup_death_msg(&prog_name, status, &stderr_log);
+            set_errmsg(errmsg, &MorlocError::Other(msg));
+            return false;
+        }
+        // Daemon alive but socket not yet connectable -- proceed anyway,
+        // router_forward() will retry on connect failure.
+    }
+
+    true
 }
 
 // -- router_forward -----------------------------------------------------------

@@ -541,6 +541,34 @@ unsafe fn two_pipes(a: &mut [i32; 2], b: &mut [i32; 2]) -> bool {
     true
 }
 
+unsafe fn spawn_morloc(
+    argv: &[*const c_char],
+    stdout_pipe: &[i32; 2],
+    stderr_pipe: &[i32; 2],
+    cpu_seconds: i32,
+) -> std::io::Result<libc::pid_t> {
+    let (_env, envp) = morloc_runtime_types::spawn::current_environment();
+    let mut spawn = morloc_runtime_types::spawn::Spawn::new()?;
+    spawn.dup2(stdout_pipe[1], libc::STDOUT_FILENO)?;
+    spawn.dup2(stderr_pipe[1], libc::STDERR_FILENO)?;
+    if cpu_seconds <= 0 {
+        return spawn.run(&CString::new("morloc").unwrap(), argv, &envp, true);
+    }
+    let fixed: Vec<CString> = [
+        "sh",
+        "-c",
+        "ulimit -t \"$1\" && ulimit -S -t \"$2\" && shift 2 && exec \"$@\"",
+        "sh",
+        &(cpu_seconds + 5).to_string(),
+        &cpu_seconds.to_string(),
+    ]
+    .iter()
+    .map(|a| CString::new(*a).unwrap())
+    .collect();
+    let sh_argv: Vec<*const c_char> = fixed.iter().map(|a| a.as_ptr()).chain(argv.iter().copied()).collect();
+    spawn.run(&CString::new("/bin/sh").unwrap(), &sh_argv, &envp, false)
+}
+
 fn compile_binding(base_dir: &str, hv: u64, expr: &str, eval_timeout: i32) -> Option<String> {
     let hash_hex = format!("{:016x}", hv);
     let artifact_dir = format!("{}/{}", base_dir, hash_hex);
@@ -593,36 +621,16 @@ fn compile_binding(base_dir: &str, hv: u64, expr: &str, eval_timeout: i32) -> Op
         argv.push(ptr::null());
 
         let since = morloc_reaped_sequence();
-        let pid = libc::fork();
-        if pid < 0 {
-            libc::close(stdout_pipe[0]);
-            libc::close(stdout_pipe[1]);
-            libc::close(stderr_pipe[0]);
-            libc::close(stderr_pipe[1]);
-            return None;
-        }
-
-        if pid == 0 {
-            // Child
-            libc::close(stdout_pipe[0]);
-            libc::close(stderr_pipe[0]);
-            libc::dup2(stdout_pipe[1], libc::STDOUT_FILENO);
-            libc::dup2(stderr_pipe[1], libc::STDERR_FILENO);
-            libc::close(stdout_pipe[1]);
-            libc::close(stderr_pipe[1]);
-
-            // Memory is bounded by EVAL_HEAP_LIMIT in argv, not here.
-            if eval_timeout > 0 {
-                let cpu_limit = libc::rlimit {
-                    rlim_cur: eval_timeout as libc::rlim_t,
-                    rlim_max: (eval_timeout + 5) as libc::rlim_t,
-                };
-                libc::setrlimit(libc::RLIMIT_CPU, &cpu_limit);
+        let pid = match spawn_morloc(&argv, &stdout_pipe, &stderr_pipe, eval_timeout) {
+            Ok(pid) => pid,
+            Err(_) => {
+                libc::close(stdout_pipe[0]);
+                libc::close(stdout_pipe[1]);
+                libc::close(stderr_pipe[0]);
+                libc::close(stderr_pipe[1]);
+                return None;
             }
-
-            libc::execvp(cmd.as_ptr(), argv.as_ptr());
-            libc::_exit(127);
-        }
+        };
 
         // Parent
         libc::close(stdout_pipe[1]);
@@ -1244,41 +1252,20 @@ unsafe fn fork_morloc_command(subcmd: &str, expr: *const c_char) -> *mut DaemonR
     argv.push(ptr::null());
 
     let since = morloc_reaped_sequence();
-    let pid = libc::fork();
-    if pid < 0 {
-        (*resp).success = false;
-        (*resp).error_kind = DAEMON_ERROR_INTERNAL;
-        let c = CString::new(format!("Failed to fork for {}", subcmd)).unwrap_or_default();
-        (*resp).error = libc::strdup(c.as_ptr());
-        libc::close(stdout_pipe[0]);
-        libc::close(stdout_pipe[1]);
-        libc::close(stderr_pipe[0]);
-        libc::close(stderr_pipe[1]);
-        return resp;
-    }
-
-    if pid == 0 {
-        // Child
-        libc::close(stdout_pipe[0]);
-        libc::close(stderr_pipe[0]);
-        libc::dup2(stdout_pipe[1], libc::STDOUT_FILENO);
-        libc::dup2(stderr_pipe[1], libc::STDERR_FILENO);
-        libc::close(stdout_pipe[1]);
-        libc::close(stderr_pipe[1]);
-
-        // Memory is bounded by EVAL_HEAP_LIMIT in argv, not here.
-        let timeout = G_EVAL_TIMEOUT.load(Ordering::Relaxed);
-        if timeout > 0 {
-            let cpu_limit = libc::rlimit {
-                rlim_cur: timeout as libc::rlim_t,
-                rlim_max: (timeout + 5) as libc::rlim_t,
-            };
-            libc::setrlimit(libc::RLIMIT_CPU, &cpu_limit);
+    let pid = match spawn_morloc(&argv, &stdout_pipe, &stderr_pipe, G_EVAL_TIMEOUT.load(Ordering::Relaxed)) {
+        Ok(pid) => pid,
+        Err(e) => {
+            (*resp).success = false;
+            (*resp).error_kind = DAEMON_ERROR_INTERNAL;
+            let c = CString::new(format!("Failed to start morloc {}: {}", subcmd, e)).unwrap_or_default();
+            (*resp).error = libc::strdup(c.as_ptr());
+            libc::close(stdout_pipe[0]);
+            libc::close(stdout_pipe[1]);
+            libc::close(stderr_pipe[0]);
+            libc::close(stderr_pipe[1]);
+            return resp;
         }
-
-        libc::execvp(cmd.as_ptr(), argv.as_ptr());
-        libc::_exit(127);
-    }
+    };
 
     // Parent
     libc::close(stdout_pipe[1]);
