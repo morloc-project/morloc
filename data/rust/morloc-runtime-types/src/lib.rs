@@ -18,6 +18,7 @@ pub mod shm_types;
 pub mod shm_lock;
 pub mod recoverable_lock;
 pub mod process;
+pub mod fork_generation;
 pub mod fd;
 pub mod spawn;
 pub mod owner_word;

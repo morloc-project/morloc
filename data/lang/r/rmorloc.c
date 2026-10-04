@@ -2047,14 +2047,14 @@ static SEXP from_voidstar(const void* data, const Schema* schema, morloc_space_t
 
 // {{{ exported morloc API functions
 
-// PID of the process that created the daemon (set in morloc_start_daemon)
-static pid_t daemon_creator_pid = 0;
+// Fork generation of the process that created the daemon (FORK-14)
+static uint64_t daemon_creator_generation = UINT64_MAX;
 
 // Close the daemon when the R object dies
 static void daemon_finalizer(SEXP ptr) {
     if (!R_ExternalPtrAddr(ptr)) return;
     // Skip cleanup in forked children -- they must not unlink the socket file
-    if (daemon_creator_pid != 0 && getpid() != daemon_creator_pid) {
+    if (daemon_creator_generation != UINT64_MAX && morloc_fork_generation() != daemon_creator_generation) {
         R_ClearExternalPtr(ptr);
         return;
     }
@@ -2116,8 +2116,8 @@ SEXP morloc_start_daemon(
     // Wrap pointer in external pointer
     SEXP result = PROTECT(R_MakeExternalPtr(daemon, R_NilValue, R_NilValue));
 
-    // Record which process owns the daemon (for the PID guard in daemon_finalizer)
-    daemon_creator_pid = getpid();
+    // Record which process owns the daemon (for the guard in daemon_finalizer)
+    daemon_creator_generation = morloc_fork_generation();
 
     // Register finalizer with wrapper
     R_RegisterCFinalizerEx(result, daemon_finalizer, TRUE);
@@ -4298,6 +4298,8 @@ static void dispatch_manifold_c(int client_fd, const uint8_t* packet,
     // Single crossing into R: evaluate the manifold
     int eval_err = 0;
     SEXP result = R_tryEvalSilent(r_call, R_GlobalEnv, &eval_err);
+    // A process forked by user code during this call exits here (FORK-12).
+    morloc_exit_if_forked();
 
     if (eval_err || result == R_NilValue || TYPEOF(result) != RAWSXP) {
         UNPROTECT(nprotect);

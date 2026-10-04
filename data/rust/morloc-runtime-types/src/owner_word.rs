@@ -16,19 +16,17 @@ pub struct OwnerWord {
 }
 
 thread_local! {
-    /// The process and the words this thread holds, to refuse a second take
-    /// of one of them: the word names a process, not a thread. A forked child
-    /// starts with none.
-    static HELD: std::cell::RefCell<(u32, Vec<usize>)> =
-        const { std::cell::RefCell::new((0, Vec::new())) };
+    // FORK-14: keyed by fork generation; a forked child starts with none.
+    static HELD: std::cell::RefCell<(u64, Vec<usize>)> =
+        const { std::cell::RefCell::new((u64::MAX, Vec::new())) };
 }
 
 fn with_held<R>(f: impl FnOnce(&mut Vec<usize>) -> R) -> R {
-    let pid = std::process::id();
+    let generation = crate::fork_generation::generation();
     HELD.with(|h| {
         let mut h = h.borrow_mut();
-        if h.0 != pid {
-            *h = (pid, Vec::new());
+        if h.0 != generation {
+            *h = (generation, Vec::new());
         }
         f(&mut h.1)
     })

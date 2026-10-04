@@ -1,0 +1,22 @@
+-- A function that forks inside a call: the child shares the call's
+-- connection, and must exit once the call returns in it, whether it returns,
+-- raises or exits, rather than reply or run the worker's cleanup (FORK-12 in
+-- the compiler's model/fork.md). Each parent waits for its child and reports
+-- the child's exit status; a reply from a child shows up as "child".
+module main
+  ( pyForkReturns
+  , pyForkRaises
+  , pyForkExits
+  , cppForkReturns
+  )
+
+import root-cpp
+import root-py
+
+source Py from "forker.py" ("pyForkReturns", "pyForkRaises", "pyForkExits")
+source Cpp from "forker.hpp" ("cppForkReturns")
+
+pyForkReturns :: Int -> Str
+pyForkRaises :: Int -> Str
+pyForkExits :: Int -> Str
+cppForkReturns :: Int -> Str

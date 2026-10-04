@@ -238,6 +238,11 @@ pub unsafe extern "C" fn close_socket(socket_id: i32) {
                 std::backtrace::Backtrace::force_capture()
             );
         }
+        let _ = REQUEST.try_with(|r| {
+            if r.get().0 == socket_id {
+                r.set((-1, 0));
+            }
+        });
         libc::close(socket_id);
     }
 }
@@ -595,7 +600,42 @@ pub unsafe extern "C" fn stream_from_client(
     client_fd: i32,
     errmsg: *mut *mut c_char,
 ) -> *mut u8 {
-    stream_from_client_wait(client_fd, 0, 0, errmsg)
+    let request = stream_from_client_wait(client_fd, 0, 0, errmsg);
+    if !request.is_null() {
+        REQUEST.with(|r| r.set((client_fd, crate::fork_policy::generation())));
+    }
+    request
+}
+
+thread_local! {
+    static REQUEST: std::cell::Cell<(i32, u64)> = const { std::cell::Cell::new((-1, 0)) };
+}
+
+// FORK-12
+fn refuse_a_reply_from_a_fork(client_fd: i32) {
+    let (fd, generation) = REQUEST.with(|r| r.get());
+    if fd == client_fd {
+        exit_if_forked_since(generation);
+    }
+}
+
+// FORK-12: called as soon as user code returns, on the thread that read the request.
+#[no_mangle]
+pub extern "C" fn morloc_exit_if_forked() {
+    let (fd, generation) = REQUEST.with(|r| r.get());
+    if fd >= 0 {
+        exit_if_forked_since(generation);
+    }
+}
+
+pub(crate) fn exit_if_forked_since(generation: u64) {
+    if generation != crate::fork_policy::generation() {
+        let msg = b"morloc: a process forked during a call returned into the runtime; it exits instead of replying\n";
+        unsafe {
+            libc::write(2, msg.as_ptr() as *const c_void, msg.len());
+            libc::_exit(1);
+        }
+    }
 }
 
 // ── Self-call guard ──────────────────────────────────────────────────────────
@@ -935,6 +975,7 @@ pub unsafe extern "C" fn send_reply_to_foreign_server(
     release: Option<unsafe extern "C" fn()>,
     errmsg: *mut *mut c_char,
 ) -> usize {
+    refuse_a_reply_from_a_fork(client_fd);
     clear_errmsg(errmsg);
 
     let mut err: *mut c_char = ptr::null_mut();
@@ -1255,6 +1296,63 @@ mod tests {
             libc::close(peer);
             libc::close(server);
         }
+    }
+}
+
+#[cfg(test)]
+mod dispatch_fork_tests {
+    use super::*;
+
+    fn drain(fd: i32) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+            if unsafe { libc::poll(&mut pfd, 1, 200) } <= 0 {
+                return out;
+            }
+            let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut c_void, buf.len()) };
+            if n <= 0 {
+                return out;
+            }
+            out.extend_from_slice(&buf[..n as usize]);
+        }
+    }
+
+    unsafe fn send(fd: i32, msg: &std::ffi::CStr) {
+        let mut err: *mut c_char = ptr::null_mut();
+        let packet = crate::packet_ffi::make_fail_packet(msg.as_ptr());
+        send_reply_to_foreign_server(fd, packet, None, &mut err);
+        libc::free(packet as *mut c_void);
+    }
+
+    #[test]
+    fn a_child_forked_during_a_dispatch_exits_instead_of_replying() {
+        let mut sv = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { morloc_runtime_types::fd::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sv.as_mut_ptr()) }, 0);
+        let (server, peer) = (sv[0], sv[1]);
+        unsafe { send(peer, c"request") };
+        let mut err: *mut c_char = ptr::null_mut();
+        let request = unsafe { stream_from_client(server, &mut err) };
+        assert!(!request.is_null());
+        unsafe { libc::free(request as *mut c_void) };
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0);
+        if child == 0 {
+            unsafe { libc::alarm(5) };
+            unsafe { send(server, c"from-the-child") };
+            unsafe { libc::_exit(0) };
+        }
+        let mut status = 0;
+        unsafe { libc::waitpid(child, &mut status, 0) };
+        unsafe { send(server, c"from-the-parent") };
+        unsafe { libc::close(server) };
+        let got = drain(peer);
+        unsafe { libc::close(peer) };
+        let has = |needle: &[u8]| got.windows(needle.len()).any(|w| w == needle);
+        assert!(!has(b"from-the-child"), "a child forked during a dispatch replied to its parent's request");
+        assert!(has(b"from-the-parent"), "the parent's reply was lost");
+        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 1, "child status {status}");
     }
 }
 

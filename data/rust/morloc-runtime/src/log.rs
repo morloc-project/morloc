@@ -36,9 +36,7 @@ pub extern "C" fn morloc_log_next_id() -> u64 {
 }
 
 fn pool_pid() -> i32 {
-    // Stable post-fork, so caching across emits is safe (no syscall per call).
-    static CACHED: OnceLock<i32> = OnceLock::new();
-    *CACHED.get_or_init(|| unsafe { libc::getpid() })
+    unsafe { libc::getpid() }
 }
 
 /// Color is suppressed when stderr is redirected (pipe/file) OR when
@@ -280,5 +278,15 @@ mod tests {
         let a = morloc_log_next_id();
         let b = morloc_log_next_id();
         assert!(b > a);
+    }
+}
+
+#[cfg(test)]
+mod fork_tests {
+    #[test]
+    fn a_forked_child_logs_its_own_pid() {
+        let _ = super::pool_pid();
+        let ok = crate::fork_policy::exits_cleanly_in_a_forked_child(|| super::pool_pid() == unsafe { libc::getpid() });
+        assert!(ok, "a forked child logged its parent's pid");
     }
 }

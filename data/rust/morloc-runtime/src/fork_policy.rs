@@ -4,11 +4,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, LockResult, Mutex, MutexGuard, PoisonError};
 
-static GENERATION: AtomicU64 = AtomicU64::new(0);
-
-pub(crate) fn generation() -> u64 {
-    GENERATION.load(Ordering::Relaxed)
-}
+pub(crate) use morloc_runtime_types::fork_generation::generation;
 
 pub(crate) struct ForkLocal<T> {
     generation: u64,
@@ -227,8 +223,16 @@ struct ForkHeld {
     _error: HeldGuard<'static, Option<String>>,
 }
 
-thread_local! {
-    static FORK_HELD: std::cell::RefCell<Option<ForkHeld>> = const { std::cell::RefCell::new(None) };
+struct ForkHeldSlot(std::cell::UnsafeCell<Option<ForkHeld>>);
+
+// SAFETY: FORK-5: only the thread holding every held lock touches the slot.
+unsafe impl Sync for ForkHeldSlot {}
+
+static FORK_HELD: ForkHeldSlot = ForkHeldSlot(std::cell::UnsafeCell::new(None));
+
+fn take_fork_held() -> Option<ForkHeld> {
+    // SAFETY: FORK-5: called by the forking thread, which holds every held lock.
+    unsafe { (*FORK_HELD.0.get()).take() }
 }
 
 extern "C" fn prepare_fork() {
@@ -240,9 +244,7 @@ extern "C" fn prepare_fork() {
         }
     }
     let pass = crate::stream::RELEASE_PASS.lock();
-    if let Err(e) = crate::stream::drain_before_handoff() {
-        eprintln!("morloc: a stream write failed before fork: {e}");
-    }
+    crate::stream::drain_before_fork();
     let held = ForkHeld {
         _pass: pass,
         map: crate::stream::PROCESS_LOCAL_SLOTS.lock(),
@@ -262,22 +264,21 @@ extern "C" fn prepare_fork() {
         _command: crate::run::RUN_COMMAND.lock(),
         _error: crate::run::RUN_ERROR.lock(),
     };
-    FORK_HELD.with(|h| *h.borrow_mut() = Some(held));
+    // SAFETY: FORK-5: this thread now holds every held lock.
+    unsafe { *FORK_HELD.0.get() = Some(held) };
 }
 
 extern "C" fn after_fork_in_parent() {
-    FORK_HELD.with(|h| drop(h.borrow_mut().take()));
+    drop(take_fork_held());
 }
 
 extern "C" fn after_fork_in_child() {
-    GENERATION.fetch_add(1, Ordering::Relaxed);
+    morloc_runtime_types::fork_generation::bump_in_child();
     INHERITED_DISPATCHES.store(crate::intrinsics::dispatch_depth(), Ordering::Relaxed);
     crate::cell::after_fork_in_child();
-    FORK_HELD.with(|h| {
-        if let Some(mut held) = h.borrow_mut().take() {
-            crate::stream::after_fork_in_child(&mut held.map, &mut held.locked_fds);
-        }
-    });
+    if let Some(mut held) = take_fork_held() {
+        crate::stream::after_fork_in_child(&mut held.map, &mut held.locked_fds);
+    }
 }
 
 extern "C" fn register_fork_handlers() {
@@ -294,21 +295,130 @@ static REGISTER_AT_LOAD: extern "C" fn() = register_fork_handlers;
 #[cfg(test)]
 pub(crate) fn exits_cleanly_in_a_forked_child(work: impl FnOnce() -> bool) -> bool {
     let pid = unsafe { libc::fork() };
-    assert!(pid >= 0);
     if pid == 0 {
-        unsafe { libc::alarm(5) };
-        let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or(false);
-        unsafe { libc::_exit(if ok { 0 } else { 1 }) }
+        run_in_child(5, work);
     }
-    let mut status = 0;
-    unsafe { libc::waitpid(pid, &mut status, 0) };
-    libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
+    wait_status(pid) == 0
+}
+
+#[cfg(test)]
+fn wait_status(pid: libc::pid_t) -> i32 {
+    if pid < 0 {
+        return 2;
+    }
+    let mut st = 0;
+    loop {
+        let r = unsafe { libc::waitpid(pid, &mut st, 0) };
+        if r == pid {
+            break;
+        }
+        if r < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return 2;
+        }
+    }
+    if libc::WIFEXITED(st) { libc::WEXITSTATUS(st) } else { 100 + libc::WTERMSIG(st) }
+}
+
+#[cfg(test)]
+extern "C" fn exit_on_alarm(_: libc::c_int) {
+    unsafe { libc::_exit(114) };
+}
+
+#[cfg(test)]
+fn run_in_child(seconds: u32, work: impl FnOnce() -> bool) -> ! {
+    unsafe { libc::signal(libc::SIGALRM, exit_on_alarm as libc::sighandler_t) };
+    unsafe { libc::alarm(seconds) };
+    let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or(false);
+    unsafe { libc::_exit(if ok { 0 } else { 1 }) }
+}
+
+// FORK-14: runs `body` as pid 1 of new user and pid namespaces; None where unavailable.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn as_pid_one(body: impl FnOnce() -> bool) -> Option<bool> {
+    let uid = unsafe { libc::getuid() };
+    let gid = unsafe { libc::getgid() };
+    let child = unsafe { libc::fork() };
+    assert!(child >= 0);
+    if child == 0 {
+        if unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWPID) } != 0 {
+            unsafe { libc::_exit(77) };
+        }
+        let mapped = std::fs::write("/proc/self/setgroups", "deny").is_ok()
+            && std::fs::write("/proc/self/uid_map", format!("0 {uid} 1")).is_ok()
+            && std::fs::write("/proc/self/gid_map", format!("0 {gid} 1")).is_ok();
+        if !mapped {
+            unsafe { libc::_exit(77) };
+        }
+        let one = unsafe { libc::fork() };
+        if one == 0 {
+            run_in_child(10, || std::process::id() == 1 && body());
+        }
+        unsafe { libc::_exit(wait_status(one)) };
+    }
+    match wait_status(child) {
+        77 if std::env::var_os("MORLOC_REQUIRE_NAMESPACES").is_none_or(|v| v.is_empty()) => {
+            eprintln!("skipped: unprivileged user and pid namespaces are unavailable");
+            None
+        }
+        code => Some(code == 0),
+    }
+}
+
+// FORK-14: runs `work` in a descendant that is pid 1 of its own namespace.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn in_a_descendant_with_the_same_pid(work: impl FnOnce() -> bool) -> bool {
+    let me = std::process::id();
+    let child = unsafe { libc::fork() };
+    assert!(child >= 0);
+    if child == 0 {
+        if unsafe { libc::unshare(libc::CLONE_NEWPID) } != 0 {
+            unsafe { libc::_exit(78) };
+        }
+        let descendant = unsafe { libc::fork() };
+        if descendant == 0 {
+            run_in_child(5, || std::process::id() == me && work());
+        }
+        unsafe { libc::_exit(wait_status(descendant)) };
+    }
+    wait_status(child) == 0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_descendant_with_its_ancestors_pid_waits_on_a_word_its_ancestor_holds() {
+        use morloc_runtime_types::owner_word::OwnerWord;
+        let ran = as_pid_one(|| {
+            let p = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    std::mem::size_of::<OwnerWord>(),
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_SHARED | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            assert_ne!(p, libc::MAP_FAILED);
+            let word: &'static OwnerWord = unsafe { &*(p as *const OwnerWord) };
+            word.acquire().unwrap();
+            let waited = in_a_descendant_with_the_same_pid(move || {
+                std::thread::spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    unsafe { libc::_exit(0) };
+                });
+                let _ = word.acquire();
+                false
+            });
+            unsafe { word.release() };
+            waited
+        });
+        assert_ne!(ran, Some(false), "a descendant sharing its ancestor's pid did not wait on its ancestor's lock");
+    }
 
     #[test]
     fn a_value_dropped_in_a_forked_child_is_forgotten() {
@@ -390,6 +500,35 @@ mod tests {
             libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGABRT,
             "the fork did not abort: status {status}"
         );
+    }
+
+    #[test]
+    fn a_fork_from_a_thread_local_destructor_completes() {
+        fn fork_and_reap() {
+            let pid = unsafe { libc::fork() };
+            if pid == 0 {
+                unsafe { libc::_exit(0) };
+            }
+            wait_status(pid);
+        }
+        struct ForksOnDrop;
+        impl Drop for ForksOnDrop {
+            fn drop(&mut self) {
+                fork_and_reap();
+            }
+        }
+        thread_local! {
+            static LATE: ForksOnDrop = const { ForksOnDrop };
+        }
+        let ok = exits_cleanly_in_a_forked_child(|| {
+            std::thread::spawn(|| {
+                LATE.with(|_| {});
+                fork_and_reap();
+            })
+            .join()
+            .is_ok()
+        });
+        assert!(ok, "a fork from a thread-local destructor did not complete");
     }
 
     #[test]

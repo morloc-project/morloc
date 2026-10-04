@@ -117,7 +117,10 @@ pub unsafe extern "C" fn pool_dispatch_packet(
         let (temp_owner, prev_temp_owner) = crate::intrinsics::begin_dispatch();
 
         let dispatch_fn = if is_local { local_dispatch } else { remote_dispatch };
+        let started = crate::fork_policy::generation();
         let result = dispatch_fn(mid, args.cast_mut(), nargs, ctx);
+        // FORK-12: before anything of the worker's is touched.
+        crate::ipc_ffi::exit_if_forked_since(started);
 
         free_morloc_call(call);
 
@@ -694,6 +697,39 @@ pub unsafe extern "C" fn pool_main(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    unsafe extern "C" fn forks_and_returns(_: u32, _: *mut *const u8, _: usize, ctx: *mut c_void) -> *mut u8 {
+        let child = libc::fork();
+        if child > 0 {
+            *(ctx as *mut libc::pid_t) = child;
+        }
+        crate::packet_ffi::make_fail_packet(c"returned".as_ptr())
+    }
+
+    #[test]
+    fn a_child_forked_by_user_code_never_returns_from_the_dispatch() {
+        let mut err: *mut c_char = ptr::null_mut();
+        let arg = unsafe { crate::packet_ffi::make_fail_packet(c"arg".as_ptr()) };
+        let args = [arg as *const u8];
+        let call = unsafe { crate::packet_ffi::make_morloc_local_call_packet(0, args.as_ptr(), 1, &mut err) };
+        assert!(!call.is_null());
+        let mut child: libc::pid_t = 0;
+        let ctx = &mut child as *mut libc::pid_t as *mut c_void;
+        let watchdog = unsafe { libc::getpid() };
+        let reply = unsafe { pool_dispatch_packet(call, forks_and_returns, forks_and_returns, ctx) };
+        if unsafe { libc::getpid() } != watchdog {
+            unsafe { libc::_exit(0) };
+        }
+        assert!(!reply.is_null());
+        let mut status = 0;
+        unsafe { libc::waitpid(child, &mut status, 0) };
+        unsafe {
+            libc::free(reply as *mut c_void);
+            libc::free(call as *mut c_void);
+            libc::free(arg as *mut c_void);
+        }
+        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 1, "the child returned from the dispatch: status {status}");
+    }
 
     // Every queued job has a free worker counted to take it.
     fn covered(q: &JobQueue) -> bool {

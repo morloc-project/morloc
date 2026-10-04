@@ -519,7 +519,7 @@ fn run_shclose_hooks_atexit() {
 }
 
 /// atexit callback: unmap the volumes, and remove them if this process owns
-/// the program (see `OWNER_PID`). Catches normal exit() calls that bypass
+/// the program (see `OWNER_GENERATION`). Catches normal exit() calls that bypass
 /// an explicit shclose. Uses try_lock so a poisoned or held mutex skips the
 /// cleanup instead of panicking inside atexit.
 extern "C" fn shclose_atexit() {
@@ -628,7 +628,7 @@ pub fn shinit(
     let shm_name = volume_name(shm_basename, volume_index);
     if let Some(shm) = create_and_register(&shm_name, volume_index, shm_size)? {
         if volume_index == PRIMARY_VOLUME {
-            OWNER_PID.store(std::process::id(), Ordering::SeqCst);
+            claim_program();
         }
         crate::shm_stats::init()?;
         return Ok(shm);
@@ -651,15 +651,20 @@ fn volume_name(basename: &str, volume_index: usize) -> String {
     format!("{}-{:04x}", basename, volume_index)
 }
 
-/// The process that created the program's primary volume, or 0. Only it
-/// removes volumes: a volume lives as long as the program, since any
+/// The fork generation of the process that created the program's primary
+/// volume, or `u64::MAX` (FORK-14). Only it removes volumes: a volume lives as long as the program, since any
 /// process may hold a pointer into one another process created, and a
 /// removed name can be created again as a different volume under the
 /// same index.
-static OWNER_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static OWNER_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+// FORK-14
+fn claim_program() {
+    OWNER_GENERATION.store(crate::fork_policy::generation(), Ordering::SeqCst);
+}
 
 pub(crate) fn owns_program() -> bool {
-    OWNER_PID.load(Ordering::SeqCst) == std::process::id()
+    OWNER_GENERATION.load(Ordering::SeqCst) == crate::fork_policy::generation()
 }
 
 /// Create volume `name` with `data_size` data bytes, initialise it, and
@@ -927,7 +932,7 @@ fn split_volume_name(name: &str) -> (String, usize) {
 }
 
 /// Unmap every SHM volume, and remove the program's volumes if this process
-/// owns them (see `OWNER_PID`). Runs registered `shclose` hooks
+/// owns them (see `OWNER_GENERATION`). Runs registered `shclose` hooks
 /// first (companion segment teardowns) so callers of `shclose` don't
 /// have to know which subsystems are alive. The allocator is then back in
 /// its pre-`shinit` state: allocating fails until `shinit` runs again,
@@ -1070,7 +1075,7 @@ fn shclose_locked(vols: &mut VolumeTable) {
             let fallback = FALLBACK_DIR.try_lock().map(|fb| get_cstr_buf(&fb).to_string()).unwrap_or_default();
             remove_program_volumes(&basename, &fallback);
         }
-        OWNER_PID.store(0, Ordering::SeqCst);
+        OWNER_GENERATION.store(u64::MAX, Ordering::SeqCst);
     }
 }
 
@@ -2916,5 +2921,15 @@ mod tests {
         }
         shfree(p).unwrap();
         shclose().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_descendant_with_its_ancestors_pid_does_not_own_the_program() {
+        let ran = crate::fork_policy::as_pid_one(|| {
+            claim_program();
+            crate::fork_policy::in_a_descendant_with_the_same_pid(|| !owns_program()) && owns_program()
+        });
+        assert_ne!(ran, Some(false), "a descendant sharing its ancestor's pid owned the program");
     }
 }

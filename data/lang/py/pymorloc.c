@@ -29,7 +29,7 @@
 
 typedef struct {
     absptr_t block;
-    pid_t pid;
+    uint64_t generation;
 } shm_view_owner_t;
 
 typedef struct {
@@ -46,8 +46,8 @@ static void shm_view_owner_release(PyObject* capsule) {
         return;
     }
     // A forked child inherits the object but not the reference: the
-    // reference belongs to the process that took it.
-    if (o->pid == getpid()) {
+    // reference belongs to the process that took it (FORK-14).
+    if (o->generation == morloc_fork_generation()) {
         char* err = NULL;
         shfree(o->block, &err);
         if (err) { free(err); }
@@ -75,7 +75,7 @@ static PyObject* shm_view_owner(void) {
         return NULL;
     }
     o->block = shm_view_ctx.block;
-    o->pid = getpid();
+    o->generation = morloc_fork_generation();
     PyObject* capsule = PyCapsule_New(o, "morloc.shm_view", shm_view_owner_release);
     if (capsule == NULL) {
         shfree(o->block, &err);
@@ -3294,6 +3294,12 @@ error:
 }
 
 
+static PyObject* pybinding__exit_if_forked(PyObject* self, PyObject* args) {
+    (void)self; (void)args;
+    morloc_exit_if_forked();
+    Py_RETURN_NONE;
+}
+
 static PyObject* pybinding__is_ping(PyObject* self, PyObject* args) { MAYFAIL
     char* packet;
     size_t packet_size;
@@ -4499,6 +4505,7 @@ static PyMethodDef Methods[] = {
     {"get_value", pybinding__get_value, METH_VARARGS, "Convert a packet to a Python value"},
     {"put_value", pybinding__put_value, METH_VARARGS, "Convert a Python value to a packet"},
     {"is_ping", pybinding__is_ping, METH_VARARGS, "Packet is a ping"},
+    {"exit_if_forked", pybinding__exit_if_forked, METH_NOARGS, "Exit if this process was forked during the current call"},
     {"is_local_call", pybinding__is_local_call, METH_VARARGS, "Packet is a local call"},
     {"is_remote_call", pybinding__is_remote_call, METH_VARARGS, "Packet is a remote call"},
     {"pong", pybinding__pong, METH_VARARGS, "Return a ping"},

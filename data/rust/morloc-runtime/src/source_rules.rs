@@ -7,6 +7,42 @@ const CRATES: &[&str] = &["morloc-runtime", "morloc-runtime-types", "rustmorloc"
 const PREPARE_HANDLERS: &[&str] = &["prepare_fork"];
 const MAX_DEVIATING_ROWS: usize = 34;
 const MAX_ENV_READS: usize = 67;
+const PID_READ_SITES: &[&str] = &[
+    "morloc-runtime/cell.rs::proc_tag",
+    "morloc-runtime/crash.rs::fatal",
+    "morloc-runtime/lifeline.rs::create",
+    "morloc-runtime/lifeline.rs::teardown",
+    "morloc-runtime/log.rs::pool_pid",
+    "morloc-runtime/packet_ffi.rs::make_file_data_packet_voidstar",
+    "morloc-runtime/run.rs::init_run",
+    "morloc-runtime/run.rs::gen_id",
+    "morloc-runtime/stream.rs::with_process_local_slot",
+    "morloc-runtime/stream.rs::allocate_slot_cas",
+    "morloc-runtime/stream.rs::end_slot_locked",
+    "morloc-runtime/stream.rs::read_pid_start_time",
+    "morloc-runtime/stream.rs::try_reclaim_stale_stdio_claim",
+    "morloc-runtime/stream.rs::verify_stdio_opener_pid",
+    "morloc-runtime/stream.rs::shared_finalize_ostream_locked",
+    "morloc-runtime/stream.rs::lock_for_write",
+    "morloc-runtime/stream.rs::note_sealed",
+    "morloc-runtime-types/process.rs::token",
+    "morloc-runtime-types/recoverable_lock.rs::ensure_ready",
+    "morloc-nexus/process.rs::make_tmpdir",
+    "morloc-nexus/process.rs::make_job_hash",
+    "morloc-nexus/runlog.rs::render",
+    "morloc-nexus/stdio_server.rs::start",
+    "morloc-nexus/stdio_server.rs::assert_nexus_pid",
+    "morloc-nexus/main.rs::run_call_packet",
+    "morloc-nexus/process.rs::init_shm",
+    "morloc-nexus/mcp.rs::new_session_id",
+    "morloc-runtime/ipc_ffi.rs::stream_from_client_wait",
+    "morloc-runtime/ipc_ffi.rs::wait_for_client_with_timeout",
+    "morloc-runtime/ipc_ffi.rs::try_answer_ping",
+    "morloc-runtime/ipc_ffi.rs::close_socket",
+    "morloc-runtime/ipc_ffi.rs::send_and_receive_over_socket_wait",
+    "morloc-runtime/utility.rs::create_beside",
+];
+const BINDER_PID_READS: &[(&str, usize)] = &[("data/lang/r/rmorloc.c", 1)];
 const CLASSES: &[&str] = &[
     "held", "reset", "unreachable", "exec-only", "startup", "lazy", "fork-scoped", "counter", "thread",
     "instance", "paired", "test-only",
@@ -152,6 +188,9 @@ struct RustScan {
     calls: Vec<Call>,
     fn_names: HashSet<String>,
     prepare_bodies: String,
+    pid_reads: Vec<String>,
+    type_parts: HashMap<String, Vec<String>>,
+    plain_statics: Vec<Found>,
 }
 
 fn is_held(ty: &str) -> bool {
@@ -214,11 +253,12 @@ impl<'ast> Scan<'_, 'ast> {
         self.fns.last().map_or("-".to_string(), |(n, _)| n.clone())
     }
 
-    fn scoped(&mut self, attrs: &[syn::Attribute], f: impl FnOnce(&mut Self)) {
+    fn scoped<R>(&mut self, attrs: &[syn::Attribute], f: impl FnOnce(&mut Self) -> R) -> R {
         let t = has_test_attr(attrs) as usize;
         self.test_depth += t;
-        f(self);
+        let r = f(self);
         self.test_depth -= t;
+        r
     }
 
     fn in_fn(&mut self, name: &syn::Ident, block: &'ast syn::Block, attrs: &[syn::Attribute], f: impl FnOnce(&mut Self)) {
@@ -232,16 +272,34 @@ impl<'ast> Scan<'_, 'ast> {
         self.fns.pop();
     }
 
-    fn push(&mut self, name: &str, kind: Kind, ty: String, init: &str) {
+    fn found(&self, name: &str, kind: Kind, ty: String, init: &str) -> Found {
         let body = self.fns.last().map(|(_, b)| b.to_token_stream().to_string()).unwrap_or_default();
-        self.out.found.push(Found {
+        Found {
             id: format!("{}::{}::{}", self.file, self.scope(), name),
             kind,
             ty,
             init: init.replace(' ', ""),
             test_only: self.test_depth > 0,
             reads_pid: reads_pid(init) || reads_pid(&body),
-        });
+        }
+    }
+
+    fn push(&mut self, name: &str, kind: Kind, ty: String, init: &str) {
+        let f = self.found(name, kind, ty, init);
+        self.out.found.push(f);
+    }
+
+    fn note_pid_read(&mut self) {
+        if self.test_depth == 0 {
+            let site = format!("{}::{}", self.file, self.scope());
+            self.out.pid_reads.push(site);
+        }
+    }
+
+    fn note_pid_tokens(&mut self, tokens: &str) {
+        if tokens.contains("process :: id") || tokens.contains("getpid") {
+            self.note_pid_read();
+        }
     }
 
     fn push_thread_locals(&mut self, tokens: &str) {
@@ -272,13 +330,18 @@ impl<'ast> Visit<'ast> for Scan<'_, 'ast> {
         if mutable {
             self.out.static_muts.push(format!("{}::{}::{}", self.file, self.scope(), st.ident));
         }
+        let init = st.expr.to_token_stream().to_string();
         if mutable || interior_mutable(&ty) {
-            let init = st.expr.to_token_stream().to_string();
             self.scoped(&st.attrs, |s| s.push(&st.ident.to_string(), Kind::of(&ty), ty.clone(), &init));
+        } else {
+            let f = self.scoped(&st.attrs, |s| s.found(&st.ident.to_string(), Kind::Cell, ty.clone(), &init));
+            self.out.plain_statics.push(f);
         }
         syn::visit::visit_item_static(self, st);
     }
     fn visit_item_struct(&mut self, st: &'ast syn::ItemStruct) {
+        let parts = st.fields.iter().map(|f| f.ty.to_token_stream().to_string());
+        self.out.type_parts.entry(st.ident.to_string()).or_default().extend(parts);
         self.scoped(&st.attrs, |s| {
             for f in &st.fields {
                 let ty = f.ty.to_token_stream().to_string();
@@ -289,9 +352,25 @@ impl<'ast> Visit<'ast> for Scan<'_, 'ast> {
             }
         });
     }
+    fn visit_macro(&mut self, m: &'ast syn::Macro) {
+        self.note_pid_tokens(&m.tokens.to_string());
+    }
+    fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
+        let names: Vec<String> = p.path.segments.iter().rev().take(2).map(|s| s.ident.to_string()).collect();
+        if names.first().is_some_and(|n| n == "getpid") || names == ["id", "process"] {
+            self.note_pid_read();
+        }
+        syn::visit::visit_expr_path(self, p);
+    }
+    fn visit_item_type(&mut self, t: &'ast syn::ItemType) {
+        let ty = t.ty.to_token_stream().to_string();
+        self.out.type_parts.entry(t.ident.to_string()).or_default().push(ty);
+        syn::visit::visit_item_type(self, t);
+    }
     fn visit_item_macro(&mut self, m: &'ast syn::ItemMacro) {
         let path = m.mac.path.to_token_stream().to_string();
         let tokens = m.mac.tokens.to_string();
+        self.note_pid_tokens(&tokens);
         if path.ends_with("thread_local") {
             self.scoped(&m.attrs, |s| s.push_thread_locals(&tokens));
         } else if path.ends_with("macro_rules") && tokens.split_whitespace().any(|t| t == "static") {
@@ -300,8 +379,10 @@ impl<'ast> Visit<'ast> for Scan<'_, 'ast> {
         }
     }
     fn visit_stmt_macro(&mut self, m: &'ast syn::StmtMacro) {
+        let tokens = m.mac.tokens.to_string();
+        self.note_pid_tokens(&tokens);
         if m.mac.path.to_token_stream().to_string().ends_with("thread_local") {
-            self.push_thread_locals(&m.mac.tokens.to_string());
+            self.push_thread_locals(&tokens);
         }
     }
     fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
@@ -330,7 +411,50 @@ fn test_only_modules(src: &Path) -> HashSet<String> {
         .collect()
 }
 
-fn scan_rust() -> RustScan {
+fn idents(ty: &str) -> Vec<&str> {
+    ty.split(|c: char| !is_ident_char(c)).filter(|w| !w.is_empty()).collect()
+}
+
+fn interior_types(parts: &HashMap<String, Vec<String>>) -> HashSet<String> {
+    let named: Vec<(&String, bool, Vec<&str>)> = parts
+        .iter()
+        .map(|(n, fs)| (n, fs.iter().any(|f| interior_mutable(f)), fs.iter().flat_map(|f| idents(f)).collect()))
+        .collect();
+    let mut interior: HashSet<String> = HashSet::new();
+    loop {
+        let more: Vec<String> = named
+            .iter()
+            .filter(|(n, own, used)| !interior.contains(*n) && (*own || used.iter().any(|i| interior.contains(*i))))
+            .map(|(n, _, _)| n.to_string())
+            .collect();
+        if more.is_empty() {
+            return interior;
+        }
+        interior.extend(more);
+    }
+}
+
+#[test]
+fn a_static_of_a_type_that_nests_a_lock_is_found() {
+    let parts: HashMap<String, Vec<String>> = [
+        ("Inner".to_string(), vec!["std :: sync :: atomic :: AtomicUsize".to_string()]),
+        ("Outer".to_string(), vec!["Option < Inner >".to_string()]),
+        ("Table".to_string(), vec!["[Outer ; 4]".to_string()]),
+        ("Plain".to_string(), vec!["u32".to_string()]),
+    ]
+    .into_iter()
+    .collect();
+    let interior = interior_types(&parts);
+    assert!(["Inner", "Outer", "Table"].iter().all(|n| interior.contains(*n)));
+    assert!(!interior.contains("Plain"));
+}
+
+fn scan_rust() -> &'static RustScan {
+    static SCAN: std::sync::OnceLock<RustScan> = std::sync::OnceLock::new();
+    SCAN.get_or_init(scan_rust_sources)
+}
+
+fn scan_rust_sources() -> RustScan {
     let root = rust_root();
     let mut out = RustScan::default();
     for krate in CRATES {
@@ -347,6 +471,13 @@ fn scan_rust() -> RustScan {
                 out: &mut out,
             };
             scan.visit_file(&parsed);
+        }
+    }
+    let interior = interior_types(&out.type_parts);
+    let plain = std::mem::take(&mut out.plain_statics);
+    for f in plain {
+        if idents(&f.ty).iter().any(|i| interior.contains(*i)) {
+            out.found.push(f);
         }
     }
     out
@@ -719,4 +850,47 @@ fn deviating_rows_only_decrease() {
         .filter(|c| !c.test_only && (c.path.ends_with("env::var") || c.path.ends_with("env::var_os")))
         .count();
     assert!(env_reads <= MAX_ENV_READS, "{env_reads} environment reads outside tests; the limit is {MAX_ENV_READS}");
+}
+
+#[test]
+fn only_the_runtime_library_uses_generation_keyed_state() {
+    let banned = ["process::token", "owner_word", "OwnerWord", "fork_generation::", "shm_lock", "ShmLock", "recoverable_lock", "RecoverableLock"];
+    let mut uses = Vec::new();
+    for krate in ["rustmorloc", "morloc-nexus"] {
+        for f in walk(&rust_root().join(krate).join("src"), &["rs"], &[]) {
+            let text = std::fs::read_to_string(&f).unwrap();
+            for b in banned.iter().filter(|b| text.contains(*b)) {
+                uses.push(format!("{}: {b}", f.display()));
+            }
+        }
+    }
+    assert!(
+        uses.is_empty(),
+        "FORK-14: these crates link their own copy of the fork generation, which no fork handler changes:\n{}",
+        uses.join("\n")
+    );
+}
+
+#[test]
+fn every_process_id_read_is_reviewed() {
+    let scan = scan_rust();
+    let reads: HashSet<&str> = scan.pid_reads.iter().map(|s| s.as_str()).collect();
+    let mut binder_counts: HashMap<String, usize> = HashMap::new();
+    for f in walk(&repo_root().join("data/lang"), &["c", "cpp", "hpp", "h", "py", "R", "rs"], &["/julia", "nanoarrow"]) {
+        let text = std::fs::read_to_string(&f).unwrap();
+        let n = text.lines().filter(|l| l.contains("getpid(") || l.contains("os.getpid") || l.contains("Sys.getpid")).count();
+        if n > 0 {
+            binder_counts.insert(f.strip_prefix(repo_root()).unwrap().display().to_string(), n);
+        }
+    }
+    let expected: HashMap<String, usize> = BINDER_PID_READS.iter().map(|(f, n)| (f.to_string(), *n)).collect();
+    assert_eq!(binder_counts, expected, "FORK-14: binder process-id reads changed");
+    let allowed: HashSet<&str> = PID_READ_SITES.iter().copied().collect();
+    let new: Vec<&&str> = reads.difference(&allowed).collect();
+    let stale: Vec<&&str> = allowed.difference(&reads).collect();
+    assert!(
+        new.is_empty() && stale.is_empty(),
+        "FORK-14: state inherited across fork is owned by fork generation; a process id names a process \
+         to others (shared memory, files, logs). Unreviewed reads: {new:?}; listed but gone: {stale:?}"
+    );
 }

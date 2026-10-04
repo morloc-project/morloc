@@ -1009,7 +1009,7 @@ pub(crate) enum LocalEntry {
     /// A thread has the slot out for an operation; others wait for it.
     /// A forked child inherits the mark without the thread, so a mark
     /// from another pid is disregarded.
-    InUse { pid: u32, thread: std::thread::ThreadId },
+    InUse { generation: u64, thread: std::thread::ThreadId },
 }
 
 /// Per-process map from handle int to physical OS state. Lazily
@@ -1068,8 +1068,8 @@ impl Drop for LocalClaim {
         }
         let mut guard = PROCESS_LOCAL_SLOTS.lock();
         if let Some(map) = guard.as_mut() {
-            if let Some(LocalEntry::InUse { pid, thread }) = map.get(&self.handle) {
-                if *pid == std::process::id() && *thread == std::thread::current().id() {
+            if let Some(LocalEntry::InUse { generation, thread }) = map.get(&self.handle) {
+                if *generation == crate::fork_policy::generation() && *thread == std::thread::current().id() {
                     map.remove(&self.handle);
                 }
             }
@@ -1096,7 +1096,8 @@ fn claim_process_local_slot(
     handle: i64,
     mode: ClaimMode,
 ) -> Result<Option<(LocalClaim, Option<ProcessLocalSlot>)>, MorlocError> {
-    let pid = std::process::id();
+    // FORK-14
+    let generation = crate::fork_policy::generation();
     let thread = std::thread::current().id();
     let mut guard = PROCESS_LOCAL_SLOTS.lock();
     if mode == ClaimMode::Shared {
@@ -1113,8 +1114,8 @@ fn claim_process_local_slot(
     }
     loop {
         let map = guard.get_or_insert_with(std::collections::HashMap::new);
-        if let Some(LocalEntry::InUse { pid: p, thread: t }) = map.get(&handle) {
-            if *p == pid {
+        if let Some(LocalEntry::InUse { generation: g, thread: t }) = map.get(&handle) {
+            if *g == generation {
                 if *t == thread {
                     return Err(MorlocError::Other(format!(
                         "stream handle {:#x} used again by an operation already using it",
@@ -1128,7 +1129,7 @@ fn claim_process_local_slot(
                 continue;
             }
         }
-        let local = match map.insert(handle, LocalEntry::InUse { pid, thread }) {
+        let local = match map.insert(handle, LocalEntry::InUse { generation, thread }) {
             Some(LocalEntry::Idle(l)) => Some(l),
             _ => None,
         };
@@ -2938,11 +2939,8 @@ use morloc_runtime_types::stdio_proto::{
 };
 
 thread_local! {
-    /// This thread's connection to the nexus, and the process that opened
-    /// it. A forked child inherits the forking thread's copy; sharing it
-    /// would interleave two processes' requests and replies, so the child
-    /// opens its own.
-    static STDIO_SOCK: std::cell::RefCell<Option<(u32, std::os::unix::net::UnixStream)>> =
+    // FORK-14
+    static STDIO_SOCK: std::cell::RefCell<Option<(u64, std::os::unix::net::UnixStream)>> =
         std::cell::RefCell::new(None);
 }
 
@@ -2960,15 +2958,22 @@ fn stdio_sock_connect() -> Result<std::os::unix::net::UnixStream, MorlocError> {
 fn with_stdio_sock<R>(
     f: impl FnOnce(&mut std::os::unix::net::UnixStream) -> Result<R, MorlocError>,
 ) -> Result<R, MorlocError> {
-    let pid = std::process::id();
-    STDIO_SOCK.with(|cell| {
+    // FORK-14
+    let generation = crate::fork_policy::generation();
+    let mut f = Some(f);
+    let cached = STDIO_SOCK.try_with(|cell| {
         let mut opt = cell.borrow_mut();
-        if opt.as_ref().map_or(true, |(owner, _)| *owner != pid) {
-            *opt = Some((pid, stdio_sock_connect()?));
+        if opt.as_ref().map_or(true, |(owner, _)| *owner != generation) {
+            *opt = Some((generation, stdio_sock_connect()?));
         }
         let (_, s) = opt.as_mut().expect("populated above");
-        f(s)
-    })
+        (f.take().expect("called once"))(s)
+    });
+    match cached {
+        Ok(r) => r,
+        // FORK-5: prepare's drain can run from a thread-local destructor.
+        Err(_) => (f.take().expect("not called"))(&mut stdio_sock_connect()?),
+    }
 }
 
 fn read_error_message(stream: &mut std::os::unix::net::UnixStream) -> String {
@@ -4272,6 +4277,11 @@ pub(crate) fn drain_sealed_batches() -> Result<(), MorlocError> {
 pub(crate) fn drain_before_handoff() -> Result<(), MorlocError> {
     let mine = crate::write_behind::thread_sealed();
     drain_idle_streams(&mine)
+}
+
+// FORK-5: prepare reads no thread-local; it also runs from thread-local destructors.
+pub(crate) fn drain_before_fork() {
+    let _ = drain_idle_streams(&[]);
 }
 
 /// Compact the write buffer (remove wasted index space) and emit its
@@ -10678,6 +10688,36 @@ mod tests {
                 "child shutting down the sweeper did not exit cleanly: status {status}");
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_descendant_with_its_ancestors_pid_ignores_the_ancestors_in_use_marks() {
+        use std::sync::mpsc::channel;
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("pid_collision");
+        let p = dir.join("log.idx").to_str().unwrap().to_string();
+        let ran = crate::fork_policy::as_pid_one(move || {
+            let h = shared_open_ostream_with_schema(&p, "ai4").unwrap();
+            let (inside_tx, inside_rx) = channel::<()>();
+            let (done_tx, done_rx) = channel::<()>();
+            let first = std::thread::spawn(move || {
+                with_process_local_slot(h, |_, _| {
+                    inside_tx.send(()).unwrap();
+                    done_rx.recv().unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            });
+            inside_rx.recv().unwrap();
+            let claimed = crate::fork_policy::in_a_descendant_with_the_same_pid(move || {
+                with_process_local_slot(h, |_, _| Ok(())).is_ok()
+            });
+            done_tx.send(()).unwrap();
+            first.join().unwrap();
+            claimed
+        });
+        assert_ne!(ran, Some(false), "a descendant sharing its ancestor's pid waited on its ancestor's thread");
+    }
+
     #[test]
     fn a_stream_used_by_two_threads_stays_locked() {
         use std::sync::mpsc::channel;
@@ -11143,6 +11183,63 @@ mod tests {
         assert!(e.to_string().contains("stream"), "unexpected error: {e}");
         assert_eq!(std::fs::read(&dest).unwrap(), b"streaming");
         assert!(staging_files(&dir).is_empty(), "staging files left: {:?}", staging_files(&dir));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_descendant_with_its_ancestors_pid_opens_its_own_nexus_connection() {
+        use std::io::{Read, Write};
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("stdio_sock_pid");
+        let sock = dir.join("nexus.sock");
+        let ran = crate::fork_policy::as_pid_one(move || {
+            let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+            std::env::set_var("MORLOC_NEXUS_STDIO_SOCK", &sock);
+            with_stdio_sock(|_| Ok(())).unwrap();
+            let (_ancestor_conn, _) = listener.accept().unwrap();
+            let wrote = crate::fork_policy::in_a_descendant_with_the_same_pid(|| {
+                with_stdio_sock(|s| s.write_all(b"d").map_err(MorlocError::Io)).is_ok()
+            });
+            listener.set_nonblocking(true).unwrap();
+            let fresh = match listener.accept() {
+                Ok((mut conn, _)) => {
+                    conn.set_nonblocking(false).unwrap();
+                    let mut b = [0u8; 1];
+                    conn.read_exact(&mut b).is_ok() && &b == b"d"
+                }
+                Err(_) => false,
+            };
+            wrote && fresh
+        });
+        assert_ne!(ran, Some(false), "a descendant sharing its ancestor's pid used its ancestor's connection");
+    }
+
+    #[test]
+    fn the_nexus_connection_works_from_a_thread_local_destructor() {
+        let _shm = crate::own_test_registry();
+        let dir = concat_test_dir("stdio_sock_dtor");
+        let sock = dir.join("nexus.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let ok = crate::fork_policy::exits_cleanly_in_a_forked_child(move || {
+            struct UsesTheNexus;
+            impl Drop for UsesTheNexus {
+                fn drop(&mut self) {
+                    let _ = with_stdio_sock(|_| Ok(()));
+                }
+            }
+            thread_local! {
+                static LATE: UsesTheNexus = const { UsesTheNexus };
+            }
+            std::env::set_var("MORLOC_NEXUS_STDIO_SOCK", &sock);
+            std::thread::spawn(|| {
+                LATE.with(|_| {});
+                with_stdio_sock(|_| Ok(())).unwrap();
+            })
+            .join()
+            .is_ok()
+        });
+        drop(listener);
+        assert!(ok, "using the nexus connection from a thread-local destructor aborted");
     }
 
     #[test]

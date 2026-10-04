@@ -1018,9 +1018,7 @@ fn child_types(dt: &DataType) -> Vec<DataType> {
 ///
 /// `live_roots` is atomic because the two roots are released wherever the
 /// importing language frees its objects, which need not be the thread that
-/// built the view. `owner_pid` is the process that took the reference: a
-/// child that inherited a live view across a fork must not decrement a
-/// count its parent still owns.
+/// built the view; `owner_generation` names its owner (FORK-14).
 #[repr(C)]
 struct ImportArena {
     magic: u32,
@@ -1029,7 +1027,7 @@ struct ImportArena {
     len: usize,
     block: *mut u8,
     block_bytes: usize,
-    owner_pid: libc::pid_t,
+    owner_generation: u64,
 }
 
 const IMPORT_MAGIC: u32 = 0x4D4C4341; // "MLCA"
@@ -1068,7 +1066,7 @@ unsafe fn release_arena(private_data: *mut c_void) {
     if !block.is_null() {
         borrow_forget(arena);
         LIVE_VIEW_BYTES.fetch_sub((*arena).block_bytes, Ordering::Relaxed);
-        if libc::getpid() == (*arena).owner_pid {
+        if crate::fork_policy::generation() == (*arena).owner_generation {
             let _ = shm::shfree(block);
         }
     }
@@ -1227,7 +1225,7 @@ unsafe fn shm_to_ffi_inner(
             len,
             block,
             block_bytes: if block.is_null() { 0 } else { h.total_size as usize },
-            owner_pid: libc::getpid(),
+            owner_generation: crate::fork_policy::generation(),
         },
     );
     if !block.is_null() {
@@ -1979,11 +1977,32 @@ mod tests {
             // User code that forks inside a worker inherits live views; a
             // finalizer in the child must not decrement a count the parent
             // still owns.
-            unsafe { (*(arena as *mut ImportArena)).owner_pid += 1 };
+            unsafe { (*(arena as *mut ImportArena)).owner_generation += 1 };
             release_roots(&mut s, &mut a, false);
             assert_eq!(unsafe { shm::reference_count(base) }, Some(2));
             let _ = shm::shfree(base);
             let _ = shm::shfree(base);
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_descendant_with_its_ancestors_pid_cannot_release_the_ancestors_reference() {
+        with_shm(|| {
+            let ran = crate::fork_policy::as_pid_one(|| {
+                let rel = write_batch(&fixture(), None).unwrap();
+                let base = shm::rel2abs(rel).unwrap();
+                let mut s = FFI_ArrowSchema::empty();
+                let mut a = FFI_ArrowArray::empty();
+                unsafe { shm_to_ffi_owned(base as *const ArrowShmHeader, true, &mut s, &mut a) }.unwrap();
+                let before = unsafe { shm::reference_count(base) };
+                let released = crate::fork_policy::in_a_descendant_with_the_same_pid(|| {
+                    release_roots(&mut s, &mut a, false);
+                    true
+                });
+                released && unsafe { shm::reference_count(base) } == before
+            });
+            assert_ne!(ran, Some(false), "a descendant sharing its ancestor's pid released the ancestor's reference");
         });
     }
 

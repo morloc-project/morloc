@@ -544,21 +544,18 @@ def run_job(client_fd: int) -> None:
             morloc.send_reply(client_fd, morloc.make_fail_packet(_mlc_source_error))
             return
 
-        if(morloc.is_local_call(client_data)):
+        is_local = morloc.is_local_call(client_data)
+        if is_local or morloc.is_remote_call(client_data):
+            table = dispatch if is_local else remote_dispatch
             (mid, args) = morloc.read_morloc_call_packet(client_data)
 
             try:
-                result = dispatch[mid](*args)
+                result = table[mid](*args)
             except Exception as e:
                 result = morloc.make_fail_packet(_with_debug_trace(str(e)))
-
-        elif(morloc.is_remote_call(client_data)):
-            (mid, args) = morloc.read_morloc_call_packet(client_data)
-
-            try:
-                result = remote_dispatch[mid](*args)
-            except Exception as e:
-                result = morloc.make_fail_packet(_with_debug_trace(str(e)))
+            # A process forked by user code during this call exits as soon
+            # as the call returns in it (FORK-12).
+            morloc.exit_if_forked()
 
         elif(morloc.is_ping(client_data)):
             # The nexus abandons a readiness-ping connection when its probe
@@ -595,6 +592,7 @@ def run_job(client_fd: int) -> None:
             pass
         print(f"job failed: {e!s}", file=sys.stderr)
     finally:
+        morloc.exit_if_forked()
         # Reclaim any stdio singleton claim this dispatch left open (e.g. a
         # handler that raised past @close on a broken pipe). Runs on the
         # same worker thread that opened it, so the reclaim's call_id gate

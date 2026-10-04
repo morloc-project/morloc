@@ -253,8 +253,7 @@ impl Pending {
 pub(crate) struct WriteBehind {
     pending: VecDeque<Pending>,
     pub spare: Vec<AbsPtr>,
-    /// The process the contents belong to; 0 while empty.
-    pid: u32,
+    owner: Option<u64>,
 }
 
 // SAFETY: see `Pending`; spare buffers are unreferenced SHM blocks.
@@ -264,13 +263,14 @@ impl WriteBehind {
     /// Take ownership for this process, forgetting anything inherited
     /// from a parent across a fork.
     pub(crate) fn claim(&mut self) {
-        let me = std::process::id();
-        if self.pid != me {
-            if self.pid != 0 {
+        // FORK-14
+        let me = crate::fork_policy::generation();
+        if self.owner != Some(me) {
+            if self.owner.is_some() {
                 std::mem::forget(std::mem::take(&mut self.pending));
                 self.spare.clear();
             }
-            self.pid = me;
+            self.owner = Some(me);
         }
     }
 
@@ -399,10 +399,30 @@ mod tests {
         let mut wb = WriteBehind::default();
         wb.spare.push(buf);
         wb.claim();
-        wb.pid = wb.pid.wrapping_add(1);
+        wb.owner = wb.owner.map(|g| g.wrapping_add(1));
         drop(wb);
         let rc = unsafe { crate::shm::reference_count(buf) };
         assert_eq!(rc, Some(1), "a copy in another process freed the parent's buffer");
         crate::shm::shfree(buf).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_descendant_with_its_ancestors_pid_leaves_the_ancestors_buffers() {
+        let _shm = crate::own_test_registry();
+        let ran = crate::fork_policy::as_pid_one(|| {
+            let buf = crate::shm::shcalloc(1, 4096).unwrap();
+            let mut wb = WriteBehind::default();
+            wb.spare.push(buf);
+            wb.claim();
+            let wb = std::mem::ManuallyDrop::new(wb);
+            let dropped = crate::fork_policy::in_a_descendant_with_the_same_pid(move || {
+                drop(std::mem::ManuallyDrop::into_inner(wb));
+                true
+            });
+            let kept = unsafe { crate::shm::reference_count(buf) } == Some(1);
+            dropped && kept
+        });
+        assert_ne!(ran, Some(false), "a descendant sharing its ancestor's pid freed the ancestor's buffer");
     }
 }

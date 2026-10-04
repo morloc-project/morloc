@@ -45,7 +45,11 @@ gets a fresh lock and fresh state, and never touches the parent's). A lock
 with no class can be inherited held by a thread the child does not have,
 and the child then blocks on it forever. A held lock is declared as a
 `Held` with its rank, and one prepare handler, registered when the library
-loads, takes them all; a reset lock is declared `Reset` (FORK-8). Model: `tla/ForkLocks.tla` (`ForkLocks` passes;
+loads, takes them all; a reset lock is declared `Reset` (FORK-8). The
+guards live in one static slot: prepare fills it only once it holds every
+held lock, and the after-fork handlers empty it before releasing them, so a
+second forking thread, blocked on the first held lock, never sees it full.
+Model: `tla/ForkLocks.tla` (`ForkLocks` passes;
 `ForkLocks_uncovered.bug` shows the child blocking).
 
 ### FORK-6 Workers fork from a process that has no other threads
@@ -117,18 +121,49 @@ with no fork handling. A child that prints a diagnostic while another
 thread of the parent was printing at the moment of fork blocks forever.
 
 ### FORK-12 A forked child never returns into the dispatch loop
-Status: deviation
+Status: implemented
+Checked by: a_child_forked_during_a_dispatch_exits_instead_of_replying, a_child_forked_by_user_code_never_returns_from_the_dispatch, golden:fork-inside-call, tla:DispatchFork, tla:DispatchFork_unguarded.bug, tla:DispatchFork_by_pid.bug, tla:DispatchFork_reply_only.bug
 
 A child forked from user code during a dispatch shares the parent's
-connection; returning from the user function would send a second reply and
-continue as an uncounted worker taking the parent's scheduler locks.
+connection and worker state; returning from the user function would send a
+second reply, or run the worker's cleanup on the parent's state, and
+continue as an uncounted worker taking the parent's scheduler locks. The
+fork generation is recorded when a request is read, and a process whose
+generation differs exits as soon as user code returns in it, however it
+returns: the shared dispatch checks right after the call, the Python pool
+on every path out of the call, and every reply on the request's connection
+checks again. A child made without the fork handler (FORK-14) is outside
+this item. Model: `tla/DispatchFork.tla`.
 
 ### FORK-13 A cached process identity is refreshed in a forked child
-Status: deviation
+Status: implemented
+Checked by: a_forked_child_logs_its_own_pid, a_forked_child_never_resolves_its_parents_cell
 
-A value derived from the process id and cached on first use names the
-parent in a child that inherits it: logging reports the parent's pid. Fold
-cells draw a new tag in the child, never equal to the parent's.
+A value derived from the process id and cached on first use would name the
+parent in a child that inherits it. Logging reads the pid when it writes,
+and fold cells draw a new tag in the child, never equal to the parent's.
+
+### FORK-14 State inherited across fork is owned by fork generation, never by pid
+Status: implemented
+Checked by: a_descendant_with_its_ancestors_pid_leaves_the_ancestors_buffers, a_descendant_with_its_ancestors_pid_cannot_release_the_ancestors_reference, a_descendant_with_its_ancestors_pid_ignores_the_ancestors_in_use_marks, a_descendant_with_its_ancestors_pid_opens_its_own_nexus_connection, a_descendant_with_its_ancestors_pid_does_not_own_the_program, a_descendant_with_its_ancestors_pid_waits_on_a_word_its_ancestor_holds, every_process_id_read_is_reviewed
+
+Process-local state records the process that owns it, so a forked child
+can tell an inherited copy from its own. A pid does not identify a process
+along a fork chain: a descendant in another pid namespace, or one given a
+dead ancestor's pid, has its ancestor's pid and would treat the inherited
+copy as its own, waiting on threads it lacks or releasing what the ancestor
+holds. The fork generation increases at every fork and memory reaches
+another process only by fork, so it tells them apart. The counter changes
+in the fork handler, so a child made without one (raw `clone`, `vfork`,
+`_Fork`) that goes on running the runtime is outside this item; the
+runtime starts processes with `posix_spawn` and exec. Only the copy of
+the counter inside the runtime library changes; the nexus and the Rust
+pool link their own copies and use none of the state above. Shared-memory
+records that name a process to others, and cross-process locks, are out
+of scope here (SLOT-4, SHM-5); every place that reads a pid is listed and
+reviewed. The tests make the collision real with nested pid namespaces;
+they are skipped where unprivileged namespaces are unavailable, except on
+Linux CI, where a skip fails the run.
 
 ## Classes and ranks
 

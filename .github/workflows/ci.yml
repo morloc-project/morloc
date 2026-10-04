@@ -226,9 +226,18 @@ jobs:
             p morloc --version
           } 2>&1 | tee system-info.txt
 
+      # The fork-ownership tests make a real pid collision with nested user
+      # and pid namespaces; Ubuntu's AppArmor forbids those to unprivileged
+      # processes by default, and on Linux a skipped test fails the run.
+      - name: Allow unprivileged user namespaces (Linux)
+        if: matrix.shard == 1 && runner.os == 'Linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
       - name: Test rust runtime and nexus
         if: matrix.shard == 1
         run: cargo test --workspace --manifest-path data/rust/Cargo.toml
+        env:
+          MORLOC_REQUIRE_NAMESPACES: ${{ runner.os == 'Linux' && '1' || '' }}
         timeout-minutes: 20
 
       # The daemon, concurrency, packet and module-exposure suites. These
