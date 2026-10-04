@@ -238,8 +238,13 @@ jobs:
       # concurrently, pools crashing and being rebuilt under load. Roughly
       # 90s, and run before the long golden sweep so a broken runtime is
       # reported in the first two minutes rather than the tenth.
+      # Released shared memory is filled with a marker byte instead of zeros,
+      # so a read of freed memory shows up as garbage rather than as
+      # plausible zeros.
       - name: Test the runtime suites
         if: matrix.shard == 1
+        env:
+          MORLOC_SHM_POISON: "1"
         run: ./test-suite/test.sh portability typecheck-benchmark concurrency daemon packet-io expose
         timeout-minutes: 20
 
