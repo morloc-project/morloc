@@ -20,11 +20,13 @@ module Morloc.Frontend.TerminalActions
 
 import qualified Control.Monad.State.Strict as State
 import qualified Data.Set as Set
+import qualified Data.Text as T
 import qualified Morloc.Data.DAG as DAG
 import Morloc.Data.Doc
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Frontend.Desugar as Desugar
+import Morloc.Frontend.Token (Pos (..))
 import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
 import Morloc.Typecheck.Internal (expandTransparentAliases)
@@ -60,9 +62,14 @@ synthesizeTerminalActions dag = do
           })
         return ((m, (node', edges)), (m, made))
   case State.runStateT (mapM finalizeModule (Map.toList dag)) ds0 of
-    Left err ->
-      MM.throwSystemError . pretty $
-        Desugar.showParseError "<terminal-action synthesis>" err
+    Left err -> do
+      let file = posFile (Desugar.pePos err)
+      srcText <- MM.gets stateSourceText
+      let err' = case Map.lookup file srcText of
+            Just txt | null (Desugar.peSourceLines err) -> err {Desugar.peSourceLines = T.lines txt}
+            _ -> err
+          label = if null file then "<terminal-action synthesis>" else file
+      MM.throwSystemError . pretty $ Desugar.showParseError label err'
     Right (results, dsFinal) -> do
       MM.setCounter (Desugar.dsExpIndex dsFinal)
       MM.modify (\st -> st
