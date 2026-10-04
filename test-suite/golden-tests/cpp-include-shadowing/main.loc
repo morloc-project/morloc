@@ -1,7 +1,9 @@
 -- A file beside a program's sourced C++ header whose name is a standard
 -- header (here `tuple` and `vector`) must not replace that header in the
 -- pool, while a header the sourced one includes by angle brackets from the
--- same directory (`<sibling.hpp>`) still resolves.
+-- same directory (`<sibling.hpp>`) still resolves. The sibling also defines
+-- `OK` and `ERR` as macros, as ncurses.h does; the pool's own code below the
+-- user headers must not use those names.
 module main (foo)
 
 import root-cpp

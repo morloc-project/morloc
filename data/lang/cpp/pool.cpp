@@ -745,8 +745,8 @@ T _mlc_throw_as(const std::string& msg) {
 // The return type is deduced from `err` rather than `ok`: a Unit-returning
 // intrinsic's body is `void`, so `ok(body())` is ill-formed as a deduction
 // context even though the void branch never evaluates it.
-template<typename FL, typename OK, typename ERR>
-auto _mlc_try(FL&& body, OK&& ok, ERR&& err) -> decltype(err(std::string())) {
+template<typename MlcBody, typename MlcOk, typename MlcErr>
+auto _mlc_try(MlcBody&& body, MlcOk&& ok, MlcErr&& err) -> decltype(err(std::string())) {
     try {
         if constexpr (std::is_void_v<decltype(body())>) {
             body();
