@@ -57,7 +57,10 @@ $ morloc install --force <remote-model-name>
 ## Thread and memory model
 
 `model/` holds the spec of threads, processes, locks and shared-memory
-ownership. It describes the system as it is; where code breaks it, the
+ownership. Every process-wide mutable value (lock, atomic, once-cell,
+thread-local, lock field, binder or emitted static) needs a row in
+`model/state.md` with its fork class; a test fails until it has one, and
+prints the row to fill in. It describes the system as it is; where code breaks it, the
 break is listed in its deviations section. Read the relevant section before
 changing that code, and change the spec in the same commit as any protocol
 change.

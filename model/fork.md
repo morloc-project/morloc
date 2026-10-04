@@ -100,48 +100,19 @@ A child forked from user code during a dispatch shares the parent's
 connection; returning from the user function would send a second reply and
 continue as an uncounted worker taking the parent's scheduler locks.
 
-## Lock registry
+### FORK-13 A cached process identity is refreshed in a forked child
+Status: deviation
 
-Ranks come from the lock-order audit: every edge in the code goes from a
-lower to a higher rank, and the graph has no cycle. Pool schedulers
-(`unreachable`) coordinate threads that do not exist in a child; a child
-must never reach them (FORK-12).
+A value derived from the process id and cached on first use names the
+parent in a child that inherits it: logging reports the parent's pid and
+fold cells carry the parent's tag.
 
-```
-| Lock | File | Class | Rank |
-|------|------|-------|------|
-| RELEASE_PASS | stream.rs | held (current) | 1 |
-| PROCESS_LOCAL_SLOTS | stream.rs | held (current) | 2 |
-| LOCKED_FDS | stream.rs | held (current) | 3 |
-| ALLOC_MUTEX | shm.rs | held (current) | 4 |
-| VOLUMES | shm.rs | held (current) | 5 |
-| REGISTRY_SEGMENT | stream.rs | held | 6 |
-| SEGMENT | shm_stats.rs | held | 7 |
-| COMMON_BASENAME | shm.rs | held (current) | 8 |
-| FALLBACK_DIR | shm.rs | held (current) | 9 |
-| SHCLOSE_HOOKS | shm.rs | held | 10 |
-| TMPDIR | packet.rs | held | 11 |
-| SELF_SOCKET | ipc_ffi.rs | held | 12 |
-| BENCH_FILE | log.rs | held | 13 |
-| TEE_HANDLES | run.rs | held | 14 |
-| RUN_TEE_HANDLE | run.rs | held | 15 |
-| RunContext command, error | run.rs | held | 16, 17 |
-| SERVICE, Service queue, Job input/result | write_behind.rs | reset | - |
-| SEALED | write_behind.rs | reset | - |
-| RELEASE_SERVICE | stream.rs | reset | - |
-| SWEEPER_TX, SWEEPER_HANDLE | stream.rs | reset | - |
-| CELL_REGISTRY | cell.rs | reset | - |
-| BORROWABLE | arrow_shm.rs | reset | - |
-| TEMP_REGISTRY | intrinsics.rs | reset | - |
-| SPOOLED | cli.rs | reset | - |
-| REQUESTS_IN_FLIGHT | daemon_ffi.rs | reset | - |
-| POOL_STATUS | daemon_ffi.rs | reset | - |
-| BINDING_STORE | daemon_ffi.rs | reset | - |
-| G_EVAL_ALLOWED | daemon_ffi.rs | reset | - |
-| JobQueue (pool and daemon worker queues) | pool_ffi.rs, daemon_ffi.rs | unreachable | - |
-| Python `sched`, `job_q`, `stop` | py/pool.py | unreachable | - |
-| Futhark context mutex | Guest/Futhark.hs (emitted) | reset | - |
-```
+## Classes and ranks
+
+Every process-wide value's fork class, and the rank of each held lock, are
+in the registry in `state.md`. Ranks come from the lock-order audit: every
+edge in the code goes from a lower to a higher rank, and the graph has no
+cycle.
 
 Cross-process locks are not fork-handled: they live in shared segments and
 the dead-holder rules apply (SLOT-4, SHM-5). They still have a place in the
@@ -151,4 +122,3 @@ local-slot map, the descriptor list, the allocator, the sealed list and the
 compression service. A volume's lock ranks after VOLUMES: the allocator
 holds ALLOC_MUTEX and VOLUMES while it takes one. Test-only hooks
 (BEFORE_STREAM_LOCK, DRAIN_GAP_HOOK) are compiled only into tests.
-

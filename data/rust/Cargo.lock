@@ -825,9 +825,11 @@ dependencies = [
  "morloc-runtime-types",
  "nix",
  "parquet",
+ "quote",
  "rmp",
  "serde",
  "serde_json",
+ "syn",
  "thiserror",
  "twox-hash",
 ]
