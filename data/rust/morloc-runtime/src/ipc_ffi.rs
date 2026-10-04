@@ -1193,7 +1193,6 @@ mod tests {
             if !e.is_null() { libc::free(e as *mut c_void); }
             libc::free(ping as *mut c_void);
             libc::close(peer);
-            libc::close(server);
 
             // -- non-ping: not consumed, left for the worker --
             let mut fds2 = [0i32; 2];
