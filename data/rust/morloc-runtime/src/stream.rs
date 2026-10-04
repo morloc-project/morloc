@@ -245,11 +245,26 @@ pub fn registry_init() -> Result<usize, MorlocError> {
 /// Open (or attach to) the registry, run the CAS-arbitrated magic-gate
 /// bootstrap, and register `registry_teardown` as an `shclose` hook so
 /// normal-exit paths reach it automatically.
+#[cfg(test)]
+static BOOTSTRAP_GAP_HOOK: Mutex<Option<fn()>> = Mutex::new(None);
+
 pub fn registry_bootstrap() -> Result<usize, MorlocError> {
     use std::sync::atomic::Ordering;
 
     let cached = REGISTRY_BASE.load(Ordering::Acquire);
     if !cached.is_null() {
+        return Ok(REGISTRY_SLOT_COUNT.load(Ordering::Relaxed));
+    }
+    #[cfg(test)]
+    {
+        let hook = *BOOTSTRAP_GAP_HOOK.lock().unwrap();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    let mut segment = REGISTRY_SEGMENT.lock().unwrap_or_else(|p| p.into_inner());
+    if !REGISTRY_BASE.load(Ordering::Acquire).is_null() {
         return Ok(REGISTRY_SLOT_COUNT.load(Ordering::Relaxed));
     }
 
@@ -267,7 +282,7 @@ pub fn registry_bootstrap() -> Result<usize, MorlocError> {
     // from an in-flight local) so a peer that already committed to
     // attaching keeps a valid mapping.
     let base = seg.base as *mut RegistryHeader;
-    *REGISTRY_SEGMENT.lock().unwrap() = Some(seg);
+    *segment = Some(seg);
 
     let header = unsafe { &*base };
 
@@ -328,8 +343,9 @@ pub fn registry_bootstrap() -> Result<usize, MorlocError> {
         std::hint::spin_loop();
     }
 
-    REGISTRY_BASE.store(base, Ordering::Release);
     REGISTRY_SLOT_COUNT.store(slot_count, Ordering::Relaxed);
+    REGISTRY_BASE.store(base, Ordering::Release);
+    drop(segment);
 
     // Register normal-exit teardown once per process. `register_shclose_hook`
     // runs on both nexus (via `clean_exit -> shclose`) and pool (via
@@ -350,12 +366,13 @@ pub fn registry_teardown() {
     sweeper_shutdown();
     let service_stopped = release_service_shutdown();
 
+    let mut held = REGISTRY_SEGMENT.lock().unwrap_or_else(|p| p.into_inner());
     if REGISTRY_BASE.swap(std::ptr::null_mut(), Ordering::AcqRel).is_null() {
         return;
     }
     REGISTRY_SLOT_COUNT.store(0, Ordering::Relaxed);
-
-    let segment = REGISTRY_SEGMENT.lock().unwrap().take();
+    let segment = held.take();
+    drop(held);
     match segment {
         // A release service still blocked on a slot keeps the mapping.
         Some(seg) if !service_stopped => {
@@ -10600,6 +10617,41 @@ mod tests {
         let mut status = 0;
         unsafe { libc::waitpid(pid, &mut status, 0); }
         status
+    }
+
+    #[test]
+    fn first_uses_on_two_threads_build_one_registry() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static AT_GAP: AtomicBool = AtomicBool::new(false);
+        static RESUME: AtomicBool = AtomicBool::new(false);
+        let _shm = crate::own_test_registry();
+        registry_teardown();
+        AT_GAP.store(false, Ordering::SeqCst);
+        RESUME.store(false, Ordering::SeqCst);
+        *BOOTSTRAP_GAP_HOOK.lock().unwrap() = Some(|| {
+            if std::thread::current().name() == Some("first-user") {
+                AT_GAP.store(true, Ordering::SeqCst);
+                while !RESUME.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+            }
+        });
+        let first = std::thread::Builder::new()
+            .name("first-user".into())
+            .spawn(registry_bootstrap)
+            .unwrap();
+        while !AT_GAP.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+        registry_bootstrap().unwrap();
+        let base = REGISTRY_BASE.load(Ordering::SeqCst);
+        RESUME.store(true, Ordering::SeqCst);
+        first.join().unwrap().unwrap();
+        *BOOTSTRAP_GAP_HOOK.lock().unwrap() = None;
+        let still_mapped = unsafe { libc::msync(base as *mut libc::c_void, 4096, libc::MS_ASYNC) } == 0;
+        let published = REGISTRY_BASE.load(Ordering::SeqCst);
+        assert!(still_mapped, "a second first use unmapped the registry the first one published");
+        assert_eq!(published, base, "the published registry changed under a thread using it");
     }
 
     #[test]

@@ -14,12 +14,15 @@ Checked by: every_process_wide_value_is_registered, every_registry_row_names_a_v
 Status: deviation
 
 Lazy initialisation built by hand (a null check, then a set) lets two
-threads both initialise, and the second can destroy what the first built:
-the stream registry's bootstrap can unmap a live mapping, and the emitted
-Futhark context is created outside its mutex. The primitive is either a
-value set at startup, before the process has threads, or a lazy value whose
-initialiser runs under a held lock so the prepare handler waits for it
-(see FORK-9).
+threads both initialise, and the second can destroy what the first built.
+The primitive is either a value set at startup, before the process has
+threads, or a `lazy` value whose initialiser runs under a lock and checks
+again once it holds it; that lock must be held across fork so a child never
+inherits it mid-initialisation (see FORK-5, FORK-9). The stream registry and
+the emitted Futhark context follow it; the registry's lock is not yet held
+across fork. Model: `tla/LazyInit.tla` (`LazyInit` passes;
+`LazyInit_unlocked.bug` uses a destroyed value; `LazyInit_unheld.bug` leaves
+the child blocked).
 
 ## Classes
 
@@ -32,6 +35,8 @@ initialiser runs under a held lock so the prepare handler waits for it
   the daemon); the child runs async-signal-safe code until exec.
 - `startup` -- set once before the process starts threads; the child sees
   the same value.
+- `lazy` -- created on first use under a lock, checked again once the lock
+  is taken (INIT-1); fork-safe when that lock is held across fork.
 - `fork-scoped` -- describes one process; a child recomputes or forgets it.
 - `counter` -- an atomic whose inherited value is harmless in a child
   (statistics, sequence numbers, flags).
@@ -82,7 +87,7 @@ A row's `Cites` lists the deviation items it does not yet meet; an empty
 | data/lang/py/pool.py::-::job_q | unreachable |  | FORK-12 |
 | data/lang/py/pool.py::-::sched | unreachable |  | FORK-12 |
 | library/Morloc/CodeGenerator/Guest/Futhark.hs::-::m | reset |  | FORK-8 |
-| library/Morloc/CodeGenerator/Guest/Futhark.hs::-::c | startup |  | INIT-1 |
+| library/Morloc/CodeGenerator/Guest/Futhark.hs::-::c | lazy |  | FORK-8 |
 | library/Morloc/CodeGenerator/Pools/CAbi/Members/RustPrinter.hs::-::SCHEMA_STRS | startup |  |  |
 | library/Morloc/CodeGenerator/Pools/CAbi/Members/RustPrinter.hs::-::SCHEMA_TABLE | startup |  |  |
 | morloc-runtime/arrow_ffi.rs::stats_enabled::FLAG | startup |  | FORK-9 |
@@ -195,9 +200,12 @@ A row's `Cites` lists the deviation items it does not yet meet; an empty
 | morloc-runtime/shm_companion.rs::-::COMPANION_TOTAL_BYTES | counter |  |  |
 | morloc-runtime/shm_stats.rs::-::COUNTERS | startup |  |  |
 | morloc-runtime/shm_stats.rs::-::SEGMENT | held | 7 | FORK-5, FORK-10 |
-| morloc-runtime/stream.rs::-::REGISTRY_BASE | startup |  | INIT-1 |
-| morloc-runtime/stream.rs::-::REGISTRY_SLOT_COUNT | startup |  | INIT-1 |
+| morloc-runtime/stream.rs::-::REGISTRY_BASE | lazy |  | FORK-5 |
+| morloc-runtime/stream.rs::-::REGISTRY_SLOT_COUNT | lazy |  | FORK-5 |
 | morloc-runtime/stream.rs::-::REGISTRY_SEGMENT | held | 6 | FORK-5 |
+| morloc-runtime/stream.rs::-::BOOTSTRAP_GAP_HOOK | test-only |  |  |
+| morloc-runtime/stream.rs::first_uses_on_two_threads_build_one_registry::AT_GAP | test-only |  |  |
+| morloc-runtime/stream.rs::first_uses_on_two_threads_build_one_registry::RESUME | test-only |  |  |
 | morloc-runtime/stream.rs::stdout_staged::STAGED | startup |  | FORK-9 |
 | morloc-runtime/stream.rs::-::PROCESS_LOCAL_SLOTS | held | 2 |  |
 | morloc-runtime/stream.rs::-::PROCESS_LOCAL_RETURNED | paired |  |  |

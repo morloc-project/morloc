@@ -591,8 +591,8 @@ renderEntryText :: GlueEntry FutharkEntry -> Text
 renderEntryText ge =
   T.unlines $
     [header]
-      ++ ["    futhark_context* ctx = _mlc_fut_ctx();"]
       ++ ["    std::lock_guard<std::mutex> _lk(_mlc_fut_mtx());"]
+      ++ ["    futhark_context* ctx = _mlc_fut_ctx();"]
       ++ map (indent 4) inputSetup
       ++ [indent 4 retDecl]
       ++ [ indent 4 ("if (" <> callExpr <> " != 0 || futhark_context_sync(ctx) != 0) {")

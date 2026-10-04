@@ -8,7 +8,7 @@ const PREPARE_HANDLERS: &[&str] = &["prepare_fork", "alloc_prepare_fork"];
 const MAX_DEVIATING_ROWS: usize = 60;
 const MAX_ENV_READS: usize = 67;
 const CLASSES: &[&str] = &[
-    "held", "reset", "unreachable", "exec-only", "startup", "fork-scoped", "counter", "thread",
+    "held", "reset", "unreachable", "exec-only", "startup", "lazy", "fork-scoped", "counter", "thread",
     "instance", "paired", "test-only",
 ];
 

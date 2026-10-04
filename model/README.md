@@ -61,3 +61,4 @@ release.
 - `tla/ShmHandoff.tla` -- a block crossing between pools, with death and fork
 - `tla/DaemonRecovery.tla` -- pool-crash recovery against running requests
 - `tla/ForkLocks.tla` -- process-wide locks across fork
+- `tla/LazyInit.tla` -- initialising a process-wide value on first use

@@ -5,6 +5,7 @@ all:
 	./nexus mmSum >> obs.txt 2> obs.err
 	./nexus vScaledSum 2.0 '[1,2,3,4]' >> obs.txt 2>> obs.err
 	if [ -d nexus-build/pools/cpp/cpp-guests/futhark ] && [ ! -d pools ]; then echo OK >> obs.txt; else echo UNEXPECTED >> obs.txt; fi
+	awk '/lock_guard<std::mutex> _lk\(_mlc_fut_mtx\(\)\)/ {locked = 1} /= _mlc_fut_ctx\(\);/ {if (!locked) bad = 1} /^}/ {locked = 0} END {print (bad ? "UNEXPECTED" : "OK")}' nexus-build/pools/cpp/cpp-guests/futhark/*.hpp >> obs.txt
 	cp nexus-build/pools/cpp/pool.cpp first.cpp
 	morloc make -o nexus main.loc 2>> build.err
 	if cmp -s first.cpp nexus-build/pools/cpp/pool.cpp; then echo OK >> obs.txt; else echo UNEXPECTED >> obs.txt; fi
