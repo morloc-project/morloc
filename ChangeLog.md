@@ -1,3 +1,15 @@
+Unreleased
+----------
+
+Language and typing
+ * A type name means the declaration in scope where it is written: an imported
+   function's signature may name types the importer never imports, and two
+   modules may each declare a type of the same name (shown as `lib.P` where
+   they overlap)
+ * A type name that is neither declared nor imported is an error; a type given
+   only per-language forms needs a general declaration (`newtype Map a b`)
+ * Importing a type and also declaring one of that name is an error
+
 0.109.0 [2026-10-03]
 --------------------
 

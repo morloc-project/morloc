@@ -44,7 +44,6 @@ import qualified Morloc.DataFiles as DF
 import qualified Morloc.Language as ML
 import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
-import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
 import qualified Morloc.LangRegistry as LR
 import qualified Morloc.Monad as MM
@@ -120,13 +119,6 @@ setManifoldConfig midx (AnnoS (Idx outerIdx _) _ inner) = do
       CoerceS _ e -> setManifoldConfig midx e
       VarS _ (One inner_anno) -> setManifoldConfig midx inner_anno
       _ -> return False
-
-propagateScope :: Int -> Int -> MorlocMonad ()
-propagateScope calleeIdx appIdx = do
-  s <- MM.get
-  case GMap.yIsX calleeIdx appIdx (stateConcreteTypedefs s) of
-    (Just gmap') -> MM.put $ s {stateConcreteTypedefs = gmap'}
-    Nothing -> return ()
 
 express :: AnnoS (Indexed Type) One (Indexed Lang, [Arg EVar]) -> MorlocMonad PolyHead
 express e@(AnnoS (Idx midx t) (Idx cidx _, _) _) = do
@@ -717,7 +709,7 @@ expressCore (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (LstS xs)
 -- used as a manifold return type). Reduce one alias step and retry.
 -- Same shape as the NamS reduce-and-retry below.
 expressCore (AnnoS (Idx midx t) (Idx cidx lang, args) (LstS xs)) = do
-  mayT <- evalGeneralStep midx (type2typeu t)
+  mayT <- evalGeneralStep (type2typeu t)
   case mayT of
     (Just t') -> expressCore (AnnoS (Idx midx (typeOf t')) (Idx cidx lang, args) (LstS xs))
     Nothing -> MM.throwSourcedError midx $ "Invalid list form: " <> pretty t
@@ -739,7 +731,7 @@ expressCore (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx lang, args) (TupS xs)
 -- and bare @VarT WrappedLL@ for @type WrappedLL = (Int, LL)@). Reduce
 -- one alias step and retry; same shape as the NamS reduce-and-retry.
 expressCore (AnnoS (Idx midx t) (Idx cidx lang, args) (TupS xs)) = do
-  mayT <- evalGeneralStep midx (type2typeu t)
+  mayT <- evalGeneralStep (type2typeu t)
   case mayT of
     (Just t') -> expressCore (AnnoS (Idx midx (typeOf t')) (Idx cidx lang, args) (TupS xs))
     Nothing -> MM.throwSourcedError midx $ "Invalid tuple form: " <> pretty t
@@ -754,7 +746,7 @@ expressCore (AnnoS (Idx midx (NamT o v ps rs)) (Idx cidx lang, args) (NamS entri
   let x = PolyRecord o (Idx cidx v) (map (Idx cidx) ps) (zip (map fst rs) (zip idxTypes xs'))
   return $ PolyHead lang midx [Arg i None | Arg i _ <- args] (PolyReturn x)
 expressCore (AnnoS (Idx midx t) (Idx cidx lang, args) (NamS entries)) = do
-  mayT <- evalGeneralStep midx (type2typeu t)
+  mayT <- evalGeneralStep (type2typeu t)
   case mayT of
     (Just t') -> expressCore (AnnoS (Idx midx (typeOf t')) (Idx cidx lang, args) (NamS entries))
     Nothing -> MM.throwSourcedError midx $ "Missing concrete:" <+> "t=" <> pretty t
@@ -952,7 +944,7 @@ expressBracketSlice callLang midx inputs out xsExpr =
       -- (@mlc_ifile_walk). Each bound is still wrapped in __to_index__
       -- because the desugar produces them with their natural types
       -- and the wrapper marshals the optional encoding to the C ABI.
-      isIFile <- typeHeadIs midx BT.ifileVar rcvT
+      isIFile <- typeHeadIs BT.ifileVar rcvT
       if isIFile
         then do
           sW <- wrapBoundInToIndex callLang midx sT sE
@@ -967,8 +959,8 @@ expressBracketSlice callLang midx inputs out xsExpr =
             Nothing -> do
               getSliceSrc <- requireInstance midx
                 (firstJustM
-                  [ resolveInstanceForType findSliceableGetSlice    callLang midx rcvT
-                  , resolveInstanceForType findSliceableDimGetSliceDim callLang midx rcvT
+                  [ resolveInstanceForType findSliceableGetSlice    callLang rcvT
+                  , resolveInstanceForType findSliceableDimGetSliceDim callLang rcvT
                   ])
                 callLang "Sliceable.__get_slice__ or SliceableDim.__get_slice_dim__" rcvT
               sW <- wrapBoundInToIndex callLang midx sT sE
@@ -1011,7 +1003,7 @@ expressBracketIndex callLang midx inputs out xsExpr =
       -- walker handles materialisation + bounds checks. Aliases are
       -- resolved by walking the chain via @TE.reduceType@ until the
       -- head TVar exposes itself.
-      isIFile <- typeHeadIs midx BT.ifileVar rcvT
+      isIFile <- typeHeadIs BT.ifileVar rcvT
       if isIFile
         then emitIFileWalk callLang midx out bracketIndexSteps rcvE [iE]
         else do
@@ -1021,7 +1013,7 @@ expressBracketIndex callLang midx inputs out xsExpr =
             Just p -> return p
             Nothing -> do
               accessSrc <- requireInstance midx
-                (resolveInstanceForType findIndexableAccessIndex callLang midx rcvT)
+                (resolveInstanceForType findIndexableAccessIndex callLang rcvT)
                 callLang "Indexable.__access_index__" rcvT
               iW <- wrapBoundInToIndex callLang midx iT iE
               let fT = FunT [optI64T, rcvT] out
@@ -1032,9 +1024,9 @@ expressBracketIndex callLang midx inputs out xsExpr =
 -- TVar matches `target`. Mirrors the alias-walking strategy of
 -- 'resolveInstanceForType' so a user-defined `type FastaFile = IFile
 -- Sequence` is detected as IFile-headed.
-typeHeadIs :: Int -> TVar -> Type -> MorlocMonad Bool
-typeHeadIs midx target originalType = do
-  scope <- MM.getGeneralScope midx
+typeHeadIs :: TVar -> Type -> MorlocMonad Bool
+typeHeadIs target originalType = do
+  scope <- MM.getGeneralScope
   go scope (type2typeu originalType)
   where
     go scope t
@@ -1132,7 +1124,7 @@ tryPatternAccessible callLang midx out steps rcvT bounds rcvE = do
   if Map.notMember (EV BT.extractPatternMethod) sigmap
     then return Nothing
     else do
-      mSrc <- resolveInstanceForType findPatternAccessibleExtract callLang midx rcvT
+      mSrc <- resolveInstanceForType findPatternAccessibleExtract callLang rcvT
       case mSrc of
         Nothing -> return Nothing
         Just src -> Just <$>
@@ -1179,7 +1171,7 @@ dispatchPatternStruct callLang midx _cidxCall sel inputs out xsExpr fallback =
           bracketEs = take n xsExpr
           bracketTs = take n inputs
       steps <- selectorToWalkSteps midx sel
-      isIFile <- typeHeadIs midx BT.ifileVar rcvT
+      isIFile <- typeHeadIs BT.ifileVar rcvT
       if isIFile
         then emitIFileWalk callLang midx out steps rcvE bracketEs
         else do
@@ -1265,7 +1257,7 @@ wrapBoundInToIndex
   -> PolyExpr
   -> MorlocMonad PolyExpr
 wrapBoundInToIndex lang midx boundType expr = do
-  mSrc <- resolveInstanceForType findIndexLikeToIndex lang midx boundType
+  mSrc <- resolveInstanceForType findIndexLikeToIndex lang boundType
   case mSrc of
     Just src ->
       let wrapFT = FunT [boundType] optI64T
@@ -1382,7 +1374,7 @@ dispatchListLit ::
   [PolyExpr] ->  -- already-elaborated children
   MorlocMonad PolyExpr
 dispatchListLit midx cidx lang userT userTV userArgs xs' = do
-  scope <- MM.getGeneralScope midx
+  scope <- MM.getGeneralScope
   let wireT = typeOf (TE.wireParentRoot scope (type2typeu userT))
   case wireT of
     AppT (VarT wireTV) wireArgs -> do
@@ -1466,7 +1458,7 @@ dispatchPrimLit ::
   (TVar -> PolyExpr) ->   -- natural literal constructor parameterised by tag TVar
   MorlocMonad PolyExpr
 dispatchPrimLit midx lang userT userTV mkLit = do
-  scope <- MM.getGeneralScope midx
+  scope <- MM.getGeneralScope
   let wireTU = TE.wireParentRoot scope (type2typeu userT)
       wireTV = extractKey wireTU
   maySrc <- maybePackableWrap midx lang userT (typeOf wireTU)
@@ -1495,14 +1487,13 @@ expressPolyExpr
               _
               (Idx _ appLang, appArgs)
               ( AppS
-                  funExpr@(AnnoS (Idx gidxCall (FunT callInputTypes _)) (Idx _ callLang, _) _)
+                  funExpr@(AnnoS (Idx _ (FunT callInputTypes _)) (Idx _ callLang, _) _)
                   xs
                 )
             )
         )
     )
     | isLocal = do
-        propagateScope gidxCall midx
         -- The lambda's arguments are its captures followed by its own
         -- parameters; a body need not use every parameter, so the split is
         -- taken from the lambda, not from the application inside it.
@@ -1522,7 +1513,6 @@ expressPolyExpr
         -- Callback-return force lifted to Poly-stage 'EffectBoundary'.
         mkPolyManifold parentLang midx (ManifoldPart contextArgs typedLambdaArgs) call
     | not isLocal = do
-        propagateScope gidxCall midx
         xsInfo <- mapM partialExpress xs
 
         let xs' = map (\(_, _, e) -> e) xsInfo
@@ -1638,10 +1628,9 @@ expressPolyExpr
   ( AnnoS
       (Idx midx _)
       (_, outerArgs)
-      (AppS f@(AnnoS (Idx gidxCall (FunT inputs _)) (Idx cidxCall callLang, _) (ExeS (SrcCall src))) xs)
+      (AppS f@(AnnoS (Idx _ (FunT inputs _)) (Idx cidxCall callLang, _) (ExeS (SrcCall src))) xs)
     )
     | srcInline src && isLocal = do
-        propagateScope gidxCall midx
         checkRsizeArity midx src (length inputs)
         xsExpr <- zipWithM (expressPolyArg callLang) (map (Idx cidxCall) inputs) xs
         -- 'setManifoldConfig' (called from 'expressPolyExprWrap') already
@@ -1681,10 +1670,9 @@ expressPolyExpr
   ( AnnoS
       (Idx midx _)
       (_, outerArgs)
-      (AppS f@(AnnoS (Idx gidxCall (FunT inputs out)) (Idx cidxCall callLang, _) (ExeS (PatCall pat))) xs)
+      (AppS f@(AnnoS (Idx _ (FunT inputs out)) (Idx cidxCall callLang, _) (ExeS (PatCall pat))) xs)
     )
     | isLocal = do
-        propagateScope gidxCall midx
         xsExpr <- zipWithM (expressPolyArg callLang) (map (Idx cidxCall) inputs) xs
         dispatchPatCall callLang midx cidxCall pat inputs out xsExpr
           (expressPolyApp parentLang f xsExpr >>= stripPolyReturn)
@@ -1703,7 +1691,6 @@ expressPolyExpr
     -- PolyRemoteInterface structure used by the generic not-isLocal
     -- handler.
     | not isLocal = do
-        propagateScope gidxCall midx
         let idxInputTypes = zipWith mkIdx xs inputs
         mayXs <- safeZipWithM (expressPolyArg callLang) idxInputTypes xs
         let xsExpr = fromJust mayXs
@@ -1745,16 +1732,14 @@ expressPolyExpr
   ( AnnoS
       (Idx midx _)
       (_, args)
-      (AppS f@(AnnoS (Idx gidxCall (FunT inputs _)) (Idx cidxCall callLang, _) _) xs)
+      (AppS f@(AnnoS (Idx _ (FunT inputs _)) (Idx cidxCall callLang, _) _) xs)
     )
     | isLocal = do
-        propagateScope gidxCall midx
         xsExpr <- zipWithM (expressPolyArg callLang) (map (Idx cidxCall) inputs) xs
 
         func <- expressPolyApp parentLang f xsExpr
         mkPolyManifold callLang midx (ManifoldFull (map unvalue args)) func
     | not isLocal = do
-        propagateScope gidxCall midx
         let idxInputTypes = zipWith mkIdx xs inputs
         mayXs <- safeZipWithM (expressPolyArg callLang) idxInputTypes xs
         func <- expressPolyApp parentLang f (fromJust mayXs)
@@ -1897,9 +1882,9 @@ expressPolyExpr _ _ _ (AnnoS (Idx midx t@(VarT v)) (Idx cidx lang, _) (StrS x)) 
 -- arrives applied (@Box Int@), and the arguments decide both the wire form
 -- and the native declaration, so dropping them here would leave every arm's
 -- field types standing at the declaration's own parameters.
-expressPolyExpr findRemote parentLang _ (AnnoS (Idx midx t) (Idx cidx lang, _) (ConS _ n i xs))
+expressPolyExpr findRemote parentLang _ (AnnoS (Idx _ t) (Idx cidx lang, _) (ConS _ n i xs))
   | Just v <- dataHeadTVar t = do
-      scope <- MM.getGeneralScope midx
+      scope <- MM.getGeneralScope
       if scopeDataIsEnum scope v
         then return $ PolyEnum (Idx cidx t) n i
         else do
@@ -1963,7 +1948,7 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx userT@(AppT (VarT v) ts)) (Idx 
 -- emit naturally (e.g. @newtype Bytes = List UInt8@ with no per-language
 -- override emits a bare list) or wrap with the @ListLike v@ converter.
 expressPolyExpr _ parentLang pc (AnnoS (Idx midx userT@(VarT v)) (Idx cidx lang, args) (LstS xs)) = do
-  scope <- MM.getGeneralScope midx
+  scope <- MM.getGeneralScope
   let wireT = typeOf (TE.wireParentRoot scope (type2typeu userT))
   case wireT of
     AppT (VarT _) wireArgs
@@ -2001,7 +1986,7 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx userT@(AppT (VarT v) _)) (Idx c
     _ -> tryReduceLstS userT
   where
     tryReduceLstS t = do
-      scope <- MM.getGeneralScope midx
+      scope <- MM.getGeneralScope
       case reduceType scope t of
         Just t' -> expressPolyExprWrap parentLang pc (AnnoS (Idx midx t') (Idx cidx lang, args) (LstS xs))
         Nothing -> MM.throwSourcedError midx "Expected a list type"
@@ -2013,7 +1998,7 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx userT@(AppT (VarT v) _)) (Idx c
 -- wire-parent walk doesn't expose a list outer head (transparent aliases
 -- through non-list types), fall through to one-step reduce-and-retry.
 expressPolyExpr _ pl pc (AnnoS (Idx midx t) c e@(LstS _)) = do
-  scope <- MM.getGeneralScope midx
+  scope <- MM.getGeneralScope
   case reduceType scope t of
     Just t' -> expressPolyExprWrap pl pc (AnnoS (Idx midx t') c e)
     Nothing -> MM.throwSourcedError midx "Expected a list type"
@@ -2048,7 +2033,7 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx (AppT (VarT v) ts)) (Idx cidx l
 -- before the call). Without the pack wrap, the codegen would hand
 -- the tuple directly to a function expecting the wrapped native.
 expressPolyExpr _ pl pc (AnnoS (Idx midx t) c@(Idx cidx lang, _) e@(TupS _)) = do
-  scope <- MM.getGeneralScope midx
+  scope <- MM.getGeneralScope
   case TE.expandWireParent scope (type2typeu t) of
     Just t' -> do
       let bodyT = typeOf t'
@@ -2068,7 +2053,7 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx (NamT o v ps rs)) (Idx cidx lan
   let e = PolyRecord o (Idx cidx v) (map (Idx cidx) ps) (zip (map fst rs) (zip tsIdx xs'))
   expressContainer pc (Idx midx parentLang) (Idx cidx lang) args e
 expressPolyExpr _ pl pc (AnnoS (Idx i t) c e@(NamS _)) = do
-  scope <- MM.getGeneralScope i
+  scope <- MM.getGeneralScope
   case reduceType scope t of
     (Just t') -> expressPolyExprWrap pl pc (AnnoS (Idx i t') c e)
     Nothing -> error "Expected a record type"
@@ -2140,7 +2125,7 @@ expressPolyExpr _ parentLang pc (AnnoS (Idx midx t) (Idx cidx lang, args) (Intri
       let AnnoS (Idx _ listT) _ _ = listE
           AnnoS (Idx _ funcT) _ _ = funcE
       mapSrc <- requireInstance midx
-        (resolveInstanceForType findFunctorMap lang midx listT)
+        (resolveInstanceForType findFunctorMap lang listT)
         lang "Functor.map" listT
       funcExpr <- expressPolyExprWrap lang (mkIdx funcE funcT) funcE
       listExpr <- expressPolyExprWrap lang (mkIdx listE listT) listE
@@ -2333,7 +2318,7 @@ tryFuseSliceSelectorChain
 tryFuseSliceSelectorChain midx callLang funcE listE outT =
   case (matchSelectorLambda funcE, matchSliceOnIFile listE) of
     (Just sel, Just ((sE, eE, pE), rcvExpr, rcvT)) -> do
-      isIFile <- typeHeadIs midx BT.ifileVar rcvT
+      isIFile <- typeHeadIs BT.ifileVar rcvT
       if not isIFile
         then return Nothing
         else do

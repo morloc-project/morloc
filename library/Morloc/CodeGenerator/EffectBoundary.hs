@@ -309,7 +309,7 @@ rewrite lang m (PolyApp fn xs) = do
     -- in the host's convention. A read applied to further arguments is the
     -- read followed by a call of what it read.
     (PolyExe (Idx gi (FunT (recT : rest) r)) (PatCallP pat@(PatternStruct sel)), x : ys) -> do
-      scope <- MM.getGeneralScope gi
+      scope <- MM.getGeneralScope
       hostRecs <- hostRecords lang gi [recT]
       let hv = HostView scope Set.empty hostRecs Set.empty Nothing
           fieldT = if null rest then r else FunT rest r
@@ -356,7 +356,7 @@ rewrite lang m (PolyRecord o v@(Idx _ name) ps rs) = do
   hostRecs <- hostRecords lang m [recT]
   if Set.member name hostRecs
     then do
-      scope <- MM.getGeneralScope m
+      scope <- MM.getGeneralScope
       let hv = HostView scope Set.empty hostRecs Set.empty Nothing
       PolyRecord o v ps <$> sequence
         [ (,) k . (,) (Idx i (hostType hv Nothing ty)) <$> adapt Outbound lang m hv Nothing ty x
@@ -430,7 +430,7 @@ substBndVar i i' t = go
 -- running the suspension twice runs the host call twice and nothing else.
 sourceCall :: Lang -> PolyExpr -> [PolyExpr] -> MorlocMonad PolyExpr
 sourceCall lang fn@(PolyExe (Idx gidx exeT0) (SrcCallP src)) xs = do
-  scope <- MM.getGeneralScope gidx
+  scope <- MM.getGeneralScope
   (opaque, declared) <- declaredSignature gidx src
   -- The row may be spelled through an alias (@type IOInt = <IO> Int@).
   let exeT = expandT scope exeT0
@@ -504,7 +504,7 @@ sourceCall _ fn xs = return (PolyApp fn xs)
 -- the host's. Nothing else crosses differently.
 crossPool :: Lang -> Int -> PolyExpr -> [PolyExpr] -> MorlocMonad PolyExpr
 crossPool lang m (PolyRemoteInterface l (Idx ri t) ids rf inner0) xs0 = do
-  scope <- MM.getGeneralScope m
+  scope <- MM.getGeneralScope
   let view recs only = HostView scope Set.empty recs Set.empty (Just only)
       -- the callee's entry runs the root layer of a suspension it returns
       payload = case expandT scope t of
@@ -914,7 +914,7 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
       return $ PolyIntrinsic (Idx g (OptionalT aThere)) IntrMapOptional [each, var]
     AppT (VarT h) ts -> do
       mapSrc <- case ts of
-        [_] -> resolveInstanceForType findFunctorMap lang g t
+        [_] -> resolveInstanceForType findFunctorMap lang t
         _ -> return Nothing
       case (mapSrc, ts) of
         (Just src, [a]) -> do
@@ -1017,7 +1017,7 @@ rebuildIn dir lang g hv@(HostView scope _ _ _ _) d t0 e = do
 -- \<IO\> ()@, whose result type is the function's.
 intrinsicCallback :: Lang -> Int -> Intrinsic -> Type -> PolyExpr -> PolyExpr -> MorlocMonad PolyExpr
 intrinsicCallback lang m intr resT h f = do
-  scope <- MM.getGeneralScope m
+  scope <- MM.getGeneralScope
   let argT a = case intr of
         IntrReplay -> AppT (VarT BT.list) [a]
         _ -> AppT (VarT BT.ostreamVar) [a]
@@ -1041,7 +1041,7 @@ hostRecords lang g ts = do
   if not (LR.registryIsCompiled reg (ML.langName lang))
     then return Set.empty
     else do
-      scope <- MM.getGeneralScope g
+      scope <- MM.getGeneralScope
       let recs = Map.fromList [(v, t) | t@(NamT _ v _ _) <- concatMap (subTypes scope) ts]
       Set.fromList . catMaybes <$> mapM declared (Map.toList recs)
   where

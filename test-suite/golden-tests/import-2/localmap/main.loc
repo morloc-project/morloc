@@ -4,6 +4,7 @@ source py from "main.py" ( "morloc_person" as person )
 
 type py => Str = "str"
 type py => Int = "int"
+newtype Map key val
 type py => (Map key val) = "dict" key val
 type py => (Tuple2 a b) = "tuple" a b
 type py => (List a) = "list" a

@@ -22,7 +22,7 @@ module main
 -- where an inner binder reuses its name.
 
 import root-py
-import .batches (produceBatch, renderBatch, Batch, produceRows, Rows)
+import .batches (produceBatch, renderBatch, produceRows)
 
 type Act a = <IO> a
 type Pair2 = Int -> Int -> Str

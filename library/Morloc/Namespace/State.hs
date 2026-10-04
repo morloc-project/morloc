@@ -152,10 +152,8 @@ data MorlocState = MorlocState
   , stateDepth :: Int
   , stateSignatures :: GMap Int Int SignatureSet
   , stateTypeclasses :: Map.Map EVar Instance
-  , stateConcreteTypedefs :: GMap Int MVar (Map Lang Scope)
-  , stateGeneralTypedefs :: GMap Int MVar Scope
-  , stateUniversalGeneralTypedefs :: Scope
-  , stateUniversalConcreteTypedefs :: Map Lang Scope
+  , stateConcreteTypedefs :: Map Lang Scope
+  , stateGeneralTypedefs :: Scope
   , stateSources :: GMap Int MVar [Source]
   , stateAnnotations :: Map Int TypeU
   , stateOutfile :: Maybe Path
@@ -1007,10 +1005,8 @@ instance Defaultable MorlocState where
       , stateDepth = 0
       , stateSignatures = GMap Map.empty Map.empty
       , stateTypeclasses = Map.empty
-      , stateConcreteTypedefs = GMap Map.empty Map.empty
-      , stateGeneralTypedefs = GMap Map.empty Map.empty
-      , stateUniversalConcreteTypedefs = Map.empty
-      , stateUniversalGeneralTypedefs = Map.empty
+      , stateConcreteTypedefs = Map.empty
+      , stateGeneralTypedefs = Map.empty
       , stateSources = GMap Map.empty Map.empty
       , stateAnnotations = Map.empty
       , stateOutfile = Nothing

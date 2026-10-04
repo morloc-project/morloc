@@ -499,7 +499,7 @@ generalTypeToSerialAST' i anc (VarT v)
   | MBT.isTableVar v = return $ SerialObject NamTable (FV v (CV "")) [] []
   | any ((== Just v) . typeHeadT) (Set.toList anc) = return $ SerialRec (FV v (CV "")) []
   | otherwise = do
-      scope <- MM.gets stateUniversalGeneralTypedefs
+      scope <- MM.gets stateGeneralTypedefs
       -- A `data` type is a leaf here: its scope body is a constructor-name
       -- table, not a parent type, so the alias-expansion path below would
       -- try to serialize the table itself. This is the nexus's pure-morloc
@@ -690,7 +690,7 @@ checkExportedHigherOrder i name t = case findOffender t of
 -- bare variable.
 appliedTypeToSerialAST :: Int -> Set Type -> Type -> TVar -> [Type] -> MorlocMonad SerialAST
 appliedTypeToSerialAST i anc t0 v ts = do
-  scope <- MM.gets stateUniversalGeneralTypedefs
+  scope <- MM.gets stateGeneralTypedefs
   case (if scopeDataIsEnum scope v then scopeEnumCtors scope v else Nothing) of
     Just ctors -> return $ SerialEnum (FV v (CV "")) [] ctors
     Nothing | Just arms <- scopeDataCtors scope v -> do
@@ -713,7 +713,7 @@ appliedTypeToSerialAST i anc t0 v ts = do
 -- and the runtime resolves it against the enclosing @&name@.
 resolveAliasApp :: Int -> Set Type -> Type -> TVar -> [Type] -> MorlocMonad SerialAST
 resolveAliasApp i anc t0 v ts = do
-      scope <- MM.gets stateUniversalGeneralTypedefs
+      scope <- MM.gets stateGeneralTypedefs
       case Map.lookup v scope of
         (Just [(params, body, _, False, _)]) -> do
           let tvars = [tv | Left (tv, _) <- params]
@@ -751,7 +751,7 @@ nexusLiteralInt _ = Nothing
 -- the name against that type, so a miss here is a compiler bug.
 nexusCtorTag :: AnnoS (Indexed Type) One () -> Text -> MorlocMonad Int
 nexusCtorTag (AnnoS (Idx i t) _ _) n = do
-  scope <- MM.gets stateUniversalGeneralTypedefs
+  scope <- MM.gets stateGeneralTypedefs
   let tv = case t of
         VarT v -> Just v
         AppT (VarT v) _ -> Just v
@@ -967,7 +967,7 @@ annotateGasts (x0@(AnnoS (Idx i gtype) _ _), docs) = do
     -- relptr to be read from whatever follows. Express.hs makes the same
     -- distinction for the pool path.
     toNexusExpr (AnnoS (Idx _ t) _ (ConS tv _ ordinal xs)) = do
-      scope <- MM.gets stateUniversalGeneralTypedefs
+      scope <- MM.gets stateGeneralTypedefs
       if scopeDataIsEnum scope tv
         then return $ LitX U8X (MT.pack (show ordinal))
         else do
@@ -2517,11 +2517,11 @@ data RecordTypeDoc = RecordTypeDoc NamType [Text] [(Key, Type)]
 -- left out, as every other reader of the scope leaves it unresolved.
 collectRecordTypes :: MorlocMonad (Map.Map Text RecordTypeDoc)
 collectRecordTypes = do
-  scope <- MM.gets stateUniversalGeneralTypedefs
+  scope <- MM.gets stateGeneralTypedefs
   fmap (Map.fromList . catMaybes) . CM.forM (Map.elems scope) $ \entries ->
     case entries of
       [(vs, body@(NamU _ _ _ _), _, _, TypedefNewtype)] -> do
-        resolved <- Docstrings.resolveDeclaredType (typeOf body)
+        resolved <- Docstrings.resolveNestedTypes (typeOf body)
         return $ case resolved of
           NamT o con _ fields ->
             Just (render (pretty con), RecordTypeDoc o [unTVar p | Left (p, _) <- vs] fields)
@@ -2531,7 +2531,7 @@ collectRecordTypes = do
 -- | Every `data` type declared anywhere in the program, keyed by name.
 collectDataTypes :: MorlocMonad (Map.Map Text DataTypeDoc)
 collectDataTypes = do
-  scope <- MM.gets stateUniversalGeneralTypedefs
+  scope <- MM.gets stateGeneralTypedefs
   return $ Map.fromList
     [ (unTVar v, DataTypeDoc params (docLines typeDoc) ctors)
     | (v, entries) <- Map.toList scope
@@ -3658,8 +3658,7 @@ generate cs rASTs helperRASTs = do
   -- named types are still bare names. Resolve them here or the glossary has
   -- nothing to define.
   streamTypes <- fmap Map.fromList . CM.forM (Map.toList streamElemTypes) $ \(ev, tu) -> do
-    let i = Map.findWithDefault 0 ev streamMids
-    t <- Docstrings.resolveNestedTypes i (typeOf tu)
+    t <- Docstrings.resolveNestedTypes (typeOf tu)
     return (ev, t)
 
   packerInstances <- Serial.findPackerInstances

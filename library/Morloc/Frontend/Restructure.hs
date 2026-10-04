@@ -18,6 +18,7 @@ type declarations, and collects type definitions and source mappings into
 -}
 module Morloc.Frontend.Restructure (restructure) where
 
+import qualified Control.Monad.State.Strict as St
 import qualified Data.Graph as Graph
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -33,7 +34,8 @@ import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
 import Morloc.Frontend.Rename (renameLocals)
 import Morloc.Frontend.TerminalActions (synthesizeTerminalActions)
-import Morloc.Typecheck.Internal (expandStructuralAliases, structuralAliasesIn)
+import Morloc.Frontend.TypeNames (isReservedTypeName, resolveTypeNames)
+import Morloc.Typecheck.Internal (expandStructuralAliases, structuralAliasesIn, traverseTypeUChildren)
 
 -- | Resolve type aliases, term aliases and import/exports
 restructure ::
@@ -48,14 +50,15 @@ restructure s = do
   -- Since d is the entire tree, the initizalized counter will start at global maximum.
   MM.setCounter $ maximum (map AST.maxIndex (DAG.nodes s)) + 1
 
-  checkForSelfRecursion s -- bare self-recursion is rejected; guarded forms pass
-    >>= checkMutualRecursion -- typedef cycles no `data` cuts are rejected
-    >>= resolveImports -- rewrite DAG edges to map imported terms to their aliases
+  resolveImports s -- rewrite DAG edges to map imported terms to their aliases
     >>= handleBinops -- resolve binary operators
+    >>= resolveTypeNames -- every type name to the declaration it denotes
+    >>= checkForSelfRecursion -- bare self-recursion is rejected; guarded forms pass
+    >>= checkMutualRecursion -- typedef cycles no `data` cuts are rejected
     >>= refineKinds -- promote VarU to NatVarU based on typedef param kinds (before self-defs are removed)
       |>> handleTypeDeclarations
     >>= doM collectTypes
-    >>= (\x -> collectUniversalTypes x >> return x)
+    >>= doM checkTypeInvariants
     >>= expandStructuralTypes
     -- unique local names, so no name placed in a synthesized body is captured
     >>= DAG.mapNodeM renameLocals
@@ -173,17 +176,18 @@ markConstants e = return e
 
 -- | Expand every alias of an arrow, effect or optional type in the declared types
 -- (signatures, class method signatures, annotations, instance heads) and in
--- the typedef bodies of each module, using the declaring module's scope. See
+-- the typedef bodies of the program. See
 -- 'expandStructuralAliases'.
 expandStructuralTypes :: DAG MVar e ExprI -> MorlocMonad (DAG MVar e ExprI)
 expandStructuralTypes d = do
-  GMap _ scopes <- MM.gets stateGeneralTypedefs
-  let expandEntry sc (ps, body, doc, terminal, kind) =
-        (map (fmap (expandStructuralAliases sc)) ps, expandStructuralAliases sc body, doc, terminal, kind)
-  MM.modify (\st -> st {stateGeneralTypedefs =
-    GMap.mapVals (\sc -> Map.map (map (expandEntry sc)) sc) (stateGeneralTypedefs st)})
-  _ <- storeUniversalScopes
-  DAG.mapNodeWithKeyM (\m e -> expandModule (Map.findWithDefault Map.empty m scopes) e) d
+  scope <- MM.getGeneralScope
+  let expandEntry (ps, body, doc, terminal, kind) =
+        (map (fmap (expandStructuralAliases scope)) ps, expandStructuralAliases scope body, doc, terminal, kind)
+  MM.modify $ \st -> st
+    { stateGeneralTypedefs = Map.map (map expandEntry) (stateGeneralTypedefs st)
+    , stateConcreteTypedefs = Map.map (Map.map (map expandEntry)) (stateConcreteTypedefs st)
+    }
+  DAG.mapNodeM (expandModule scope) d
   where
     expandModule :: Scope -> ExprI -> MorlocMonad ExprI
     expandModule sc e = do
@@ -708,9 +712,9 @@ resolveImports d0 =
     methodSection :: [(Text, ClassName)] -> MVar -> MVar -> [MDoc]
     methodSection [] _ _ = []
     methodSection methods m1 m2 =
-      [ "The following terms imported from"
+      [ "Module"
           <+> squotes (pretty m1)
-          <+> "are typeclass methods reachable from"
+          <+> "imports names that are typeclass methods reachable from"
           <+> squotes (pretty m2)
           <> ", which cannot be imported by name:\n"
           <+> indent 2 (vsep [pretty name <+> "(method of class" <+> squotes (pretty cls) <> ")" | (name, cls) <- methods])
@@ -722,10 +726,11 @@ resolveImports d0 =
     notExportedSection :: [Text] -> MVar -> MVar -> [MDoc]
     notExportedSection [] _ _ = []
     notExportedSection names m1 m2 =
-      [ "The terms imported from"
+      [ "Module"
           <+> squotes (pretty m1)
-          <+> "are not exported from module"
+          <+> "imports names that module"
           <+> squotes (pretty m2)
+          <+> "does not export"
           <> ":\n"
           <+> indent 2 (vsep (map pretty names))
       ]
@@ -1123,111 +1128,91 @@ collectTags fullDag = do
     f (ExprI _ (IntrinsicE _ es)) = mapM_ f es
     f _ = return ()
 
-type GCMap = (Scope, Map Lang Scope)
-
-{- | Add the following fields to state:
-  * stateGeneralTypedefs           :: GMap Int MVar Scope
-  * stateConcreteTypedefs          :: GMap Int MVar (Map Lang Scope)
+{- | Collect the program's type declarations into 'stateGeneralTypedefs'
+and 'stateConcreteTypedefs'. Type names are resolved program-wide before this
+runs (see 'Morloc.Frontend.TypeNames'), so every name denotes one
+declaration and one table serves every module.
 -}
 collectTypes :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad ()
 collectTypes fullDag = do
-  let typeDag = DAG.mapEdge (\xs -> [(x, y) | AliasedType x y <- xs]) fullDag
-  result <- DAG.synthesizeNodes formTypes typeDag
-  case result of
-    Nothing -> MM.throwSystemError "Found cyclic module dependency"
-    Just _ -> return ()
+  let found = map (AST.findTypedefs . fst) (Map.elems fullDag)
+      general = Map.unionsWith mergeEntries (map fst found)
+      concrete =
+        Map.map (completeRecords general) $
+          Map.unionsWith (Map.unionWith mergeEntries) (map snd found)
+  checkConflictingForms Nothing general
+  checkReservedDeclarations general
+  mapM_ (\(lang, sc) -> checkConflictingForms (Just lang) sc) (Map.toList concrete)
+  MM.modify $ \s -> s {stateGeneralTypedefs = general, stateConcreteTypedefs = concrete}
+
+-- | Two declarations of one type, or two forms of it in one language, that
+-- apply to the same parameters but say different things.
+checkConflictingForms :: Maybe Lang -> Scope -> MorlocMonad ()
+checkConflictingForms lang scope =
+  case [v | (v, entries) <- Map.toList scope, hasConflict entries] of
+    [] -> return ()
+    vs ->
+      MM.throwSystemError $
+        "Conflicting" <+> what <+> "of"
+          <+> hsep (punctuate "," (map (squotes . pretty) vs))
+          <> "; a type is declared once, and has one form per language for each parameter pattern"
   where
-    formTypes ::
-      MVar ->
-      ExprI ->
-      [ ( MVar -- child module name
-        , [(TVar, TVar)] -- alias map
-        , GCMap
-        )
-      ] ->
-      MorlocMonad GCMap
-    formTypes m e0 childImports = do
-      let (generalTypemap, concreteTypemapsIncomplete) = foldl inherit (AST.findTypedefs e0) childImports
+    what = maybe "declarations" (\l -> pretty l <+> "forms") lang
+    hasConflict entries =
+      let patterns = [paramPattern ps | (ps, _, _, _, _) <- entries]
+       in length patterns /= Set.size (Set.fromList patterns)
 
-      -- Here we are creating links from every indexed term in the module to the module
-      -- sources and aliases. When the module abstractions are factored out later,
-      -- this will be the only way to access module-specific info.
-      let indices = AST.getIndices e0
+-- | The parameters a form applies to, with type variables numbered by first
+-- appearance so that @Foo (List a)@ and @Foo (List b)@ are one pattern.
+paramPattern :: [Either (TVar, Kind) TypeU] -> [Either Kind TypeU]
+paramPattern ps = St.evalState (mapM norm ps) Map.empty
+  where
+    norm :: Either (TVar, Kind) TypeU -> St.State (Map TVar TVar) (Either Kind TypeU)
+    norm (Left (_, k)) = return (Left k)
+    norm (Right t) = Right <$> go t
+    go :: TypeU -> St.State (Map TVar TVar) TypeU
+    go (VarU v@(TV n))
+      | isTypeVariableName n = do
+          seen <- St.get
+          case Map.lookup v seen of
+            Just v' -> return (VarU v')
+            Nothing -> do
+              let v' = TV ("v" <> T.pack (show (Map.size seen)))
+              St.put (Map.insert v v' seen)
+              return (VarU v')
+    go t = traverseTypeUChildren go t
 
-      -- link concrete records to their full general forms
-      let concreteTypemaps = Map.map (completeRecords generalTypemap) concreteTypemapsIncomplete
+-- | A name the compiler defines is one type: every declaration of it in the
+-- program must say the same thing.
+checkReservedDeclarations :: Scope -> MorlocMonad ()
+checkReservedDeclarations scope =
+  case [v | (v@(TV n), _ : _ : _) <- Map.toList scope, isReservedTypeName n] of
+    [] -> return ()
+    vs ->
+      MM.throwSystemError $
+        "The built-in type" <> (if length vs > 1 then "s" else "")
+          <+> hsep (punctuate "," (map (squotes . pretty) vs))
+          <+> "cannot be declared again with a different definition"
 
-      s <- MM.get
-      MM.put
-        ( s
-            { stateGeneralTypedefs = GMap.insertMany indices m generalTypemap (stateGeneralTypedefs s)
-            , stateConcreteTypedefs = GMap.insertMany indices m concreteTypemaps (stateConcreteTypedefs s)
-            }
-        )
-
-      return (generalTypemap, concreteTypemaps)
-
-    inherit :: GCMap -> (key, [(TVar, TVar)], GCMap) -> GCMap
-    inherit (thisGmap, thisCmap) (_, links, (gmap, cmap)) =
-      let gmap' = filterAndSubstitute links gmap
-          cmap' = Map.map (filterAndSubstitute links) cmap
-       in ( Map.unionWith mergeEntries gmap' thisGmap
-          , Map.unionWith (Map.unionWith mergeEntries) cmap' thisCmap
-          )
-
-{- | collect type definitions globally
-  define:
-    * stateUniversalGeneralTypedefs
-    * stateUniversalConcreteTypedefs
--}
-collectUniversalTypes :: DAG MVar a ExprI -> MorlocMonad ()
-collectUniversalTypes dag = do
-  (universalGeneralScope, universalConcreteScope) <- storeUniversalScopes
+-- | Program-wide invariants of the type declarations.
+checkTypeInvariants :: DAG MVar a ExprI -> MorlocMonad ()
+checkTypeInvariants dag = do
+  gscope <- MM.getGeneralScope
+  cscopes <- MM.gets stateConcreteTypedefs
 
   -- Invariant 1: a transparent `type` alias may not carry a per-language
   -- override. A `type` alias chain must resolve to a single concrete type
   -- per language. Per-language overrides belong to newtypes or primitives.
-  checkAliasLanguageFormConflict dag universalGeneralScope universalConcreteScope
+  checkAliasLanguageFormConflict dag gscope cscopes
 
   -- Invariant 2: a `newtype` wire-parent chain must not contain a cycle.
-  checkNewtypeCycles universalGeneralScope
+  checkNewtypeCycles gscope
 
   -- Invariant 3: a typeclass instance may only be declared on the root of
   -- an alias tree. Transparent `type` aliases share all instances with
   -- their root, so an instance on an alias would be ambiguous with the
   -- root's instance.
-  checkInstanceOnRoot dag universalGeneralScope
-
--- | Record the universal scopes, the union of every module's scopes.
-storeUniversalScopes :: MorlocMonad (Scope, Map Lang Scope)
-storeUniversalScopes = do
-  universalGeneralScope <- getUniversalGeneralScope
-  universalConcreteScope <- getUniversalConcreteScope universalGeneralScope
-  MM.modify $ \s -> s
-    { stateUniversalGeneralTypedefs = universalGeneralScope
-    , stateUniversalConcreteTypedefs = universalConcreteScope
-    }
-  return (universalGeneralScope, universalConcreteScope)
-  where
-    getUniversalGeneralScope :: MorlocMonad Scope
-    getUniversalGeneralScope = do
-      (GMap _ (Map.elems -> scopes)) <- MM.gets stateGeneralTypedefs
-      return $ Map.unionsWith mergeEntries scopes
-
-    getUniversalConcreteScope :: Scope -> MorlocMonad (Map Lang Scope)
-    getUniversalConcreteScope gscope = do
-      (GMap _ modMaps) <- MM.gets stateConcreteTypedefs
-      let langs = unique $ concatMap Map.keys . Map.elems $ modMaps
-      scopes <- mapM getLangScope langs
-      return . Map.fromList $ zip langs scopes
-      where
-        getLangScope :: Lang -> MorlocMonad Scope
-        getLangScope lang = do
-          (GMap _ (Map.elems -> langMaps)) <- MM.gets stateConcreteTypedefs
-          -- See note above, here we are completing any incomplete concrete
-          -- record/table/object types
-          let langMaps' = map (Map.map (completeRecords gscope)) langMaps
-          return . Map.unionsWith mergeEntries . mapMaybe (Map.lookup lang) $ langMaps'
+  checkInstanceOnRoot dag gscope
 
 -- | Enforce Invariant 1: a transparent @type Foo = Bar@ alias may not
 -- carry a per-language form. Primitives and newtypes are exempt -- both
@@ -1446,27 +1431,6 @@ mergeEntries xs0 ys0 = filter (isNovel ys0) xs0 <> ys0
           && kind1 == kind2 =
           False
       | otherwise = isNovel ys x
-
--- clean imports
---   * only keep the exports of a module that are explicitly imported
---   * resolve any aliases
-filterAndSubstitute :: [(TVar, TVar)] -> Scope -> Scope
-filterAndSubstitute links typemap =
-  let importedTypes = Map.filterWithKey (\k _ -> k `elem` map fst links) typemap
-   in foldl typeSubstitute importedTypes links
-  where
-    typeSubstitute ::
-      Scope -> -- imported map
-      (TVar, TVar) -> -- source name and local alias
-      Scope -- renamed map
-    typeSubstitute typedefs (sourceName, localAlias) =
-      case Map.lookup sourceName typedefs of
-        (Just xs) ->
-          Map.insert
-            localAlias
-            (map (\(a, b, c, d, e) -> (a, rename sourceName localAlias b, c, d, e)) xs)
-            (Map.delete sourceName typedefs)
-        Nothing -> typedefs
 
 -- | Promote VarU to NatVarU, StrVarU, or RecVarU based on typedef param
 -- kinds in all signatures. For each typedef like
@@ -1775,7 +1739,7 @@ refineKinds dag = do
         -- @Restrict Cols ['b]@ would become a row variable and generalize
         -- away. Same lowercase convention that 'collectKindedVarsFromScope'
         -- uses.
-        isKindVarName (TV n) = not (T.null n) && isLower (T.head n)
+        isKindVarName (TV n) = isTypeVariableName n
 
         asRec (VarU v) | isKindVarName v = RecVarU v
         asRec t = t
@@ -1850,7 +1814,7 @@ refineKinds dag = do
         -- Nat. Falls back to `go` for unrecognised subterms.
         goCollection :: Kind -> TypeU -> Map TVar Kind
         goCollection slotK (VarU v@(TV name))
-          | not (T.null name), isLower (T.head name) = Map.singleton v slotK
+          | isTypeVariableName name = Map.singleton v slotK
           | otherwise = Map.empty
         goCollection slotK (NatVarU v) = Map.singleton v slotK
         goCollection slotK (StrVarU v) = Map.singleton v slotK
@@ -1880,7 +1844,7 @@ refineKinds dag = do
         -- override is essential because Desugar's collectNatVars / etc are
         -- syntactic heuristics that don't see typedef-context info.
         goNat (VarU v@(TV name))
-          | not (T.null name), isLower (T.head name) = Map.singleton v KindNat
+          | isTypeVariableName name = Map.singleton v KindNat
           | otherwise = Map.empty
         goNat (NatVarU v) = Map.singleton v KindNat
         goNat (StrVarU v) = Map.singleton v KindNat
@@ -1892,7 +1856,7 @@ refineKinds dag = do
         goNat t = go t
 
         goStr (VarU v@(TV name))
-          | not (T.null name), isLower (T.head name) = Map.singleton v KindStr
+          | isTypeVariableName name = Map.singleton v KindStr
           | otherwise = Map.empty
         goStr (NatVarU v) = Map.singleton v KindStr
         goStr (StrVarU v) = Map.singleton v KindStr
@@ -1901,7 +1865,7 @@ refineKinds dag = do
         goStr t = go t
 
         goRec (VarU v@(TV name))
-          | not (T.null name), isLower (T.head name) = Map.singleton v KindRec
+          | isTypeVariableName name = Map.singleton v KindRec
           | otherwise = Map.empty
         goRec (NatVarU v) = Map.singleton v KindRec
         goRec (StrVarU v) = Map.singleton v KindRec

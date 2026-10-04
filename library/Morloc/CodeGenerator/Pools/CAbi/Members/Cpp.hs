@@ -195,9 +195,9 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
             let (typeTs, kindCount) = partitionKindArgsF ps
             ts' <- mapM f typeTs
             return . pretty $ expandMacro x (map render ts') kindCount
-        | otherwise = return (pretty x)
+        | otherwise = return (pretty (nativeTypeName x))
 
-      f (UnkF (FV _ x)) = return $ pretty x
+      f (UnkF (FV _ x)) = return $ pretty (nativeTypeName (unCVar x))
       -- An enum lowers to its concrete name; the `enum class X : uint8_t`
       -- behind it is generated for this pool or supplied by the user
       -- through a `data Cpp => X = "..."` mapping.
@@ -230,9 +230,9 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
         -- The generated-type set is what separates them.
         declared <- CMS.gets translatorVariantNames
         if legit || Set.member gv declared
-          then return (pretty cvText)
+          then return (pretty (nativeTypeName cvText))
           else leakError gvText
-      f (VarF (FV _ x)) = return $ pretty x
+      f (VarF (FV _ x)) = return $ pretty (nativeTypeName (unCVar x))
       f (FunF ts t) = do
         t' <- f t
         ts' <- mapM f ts
@@ -255,7 +255,7 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
             return . pretty $ expandMacro cvText (map render ts') kindCount
           else do
             declaredApp <- CMS.gets translatorVariantNames
-            if Set.member gv declaredApp then return (pretty cvText) else leakError gvText
+            if Set.member gv declaredApp then return (pretty (nativeTypeName cvText)) else leakError gvText
       f (AppF t ts) = do
         -- $N in the CV template indexes TYPE args only; kind-kinded
         -- args (NatLitF, NatVoidF, StrLitF, StrVoidF) are structural
@@ -308,7 +308,7 @@ instance {-# OVERLAPPABLE #-} (HasTypeF e) => HasCppType e where
           -- The leak diagnostic below is for recursive ALIASES, which have
           -- no generated form and would otherwise reach the pool as a bare
           -- morloc identifier.
-          _ | Set.member gv variantNames -> return (pretty gvName)
+          _ | Set.member gv variantNames -> return (pretty (nativeTypeName gvName))
           _ -> leakError (unTVar gv)
       -- Recursive optional (?T where T points back to a containing record)
       -- collapses to a single `std::shared_ptr<T>` with `nullptr == absent`.
@@ -464,11 +464,7 @@ getCppSchemaTable = do
 
 translate :: [Source] -> [SerialManifold] -> MorlocMonad Script
 translate srcs es = do
-  -- scopeMap :: GMap Int MVar (Map.Map Lang Scope)
-  scopeMap <- MM.gets stateConcreteTypedefs
-
-  -- universalScopeMap :: GMap Int MVar Scope
-  universalScopeMap0 <- MM.gets stateUniversalConcreteTypedefs
+  universalScopeMap0 <- MM.gets stateConcreteTypedefs
 
   -- General-scope aliases (e.g. `type Timestamp = Int64`) must chain into
   -- the concrete cpp scope so that a record field declared with a general
@@ -476,7 +472,7 @@ translate srcs es = do
   -- Without this merge, `evaluateType` against the cpp scope alone leaves
   -- `Timestamp` un-expanded and the printer emits the morloc alias name
   -- literally into pool.cpp. Concrete entries take precedence on collision.
-  generalScope <- MM.gets stateUniversalGeneralTypedefs
+  generalScope <- MM.gets stateGeneralTypedefs
   let cppScope = fromMaybe Map.empty (Map.lookup cppLang universalScopeMap0)
       mergedCppScope = Map.union cppScope generalScope
       universalScopeMap = Map.insert cppLang mergedCppScope universalScopeMap0
@@ -508,7 +504,7 @@ translate srcs es = do
         , translatorDebugMode = debugMode
         , translatorConsumableLets = consumableProjectionLets es
         }
-      code = CMS.evalState (makeCppCode labels srcs' es universalScopeMap scopeMap closureTable stageTable nativeEntries) translatorState
+      code = CMS.evalState (makeCppCode labels srcs' es universalScopeMap closureTable stageTable nativeEntries) translatorState
 
   maker <- makeTheMaker cxxFlags includeDirs
 
@@ -534,18 +530,17 @@ makeCppCode ::
   [Source] ->
   [SerialManifold] ->
   Map.Map Lang Scope ->
-  GMap Int MVar (Map.Map Lang Scope) ->
   Map.Map Int ([SerialAST], [SerialAST], SerialAST) ->
   Map.Map Int StageEntry ->
   Set.Set Int ->
   CppTranslator MDoc
-makeCppCode labels srcs es univeralScopeMap scopeMap closureTable0 stageTable nativeEntries = do
+makeCppCode labels srcs es univeralScopeMap closureTable0 stageTable nativeEntries = do
   -- Seeded before any type is rendered: 'cppTypeOf' consults it to tell a
   -- back-reference into a generated `data` type from an unmapped alias.
   CMS.modify $ \st -> st
     { translatorVariantNames = Set.fromList [gv | (FV gv _, _, _) <- collectCppVariants es] }
   templates <- CMS.gets translatorLogTemplates
-  (srcFwds, srcSerial, srcDeserial) <- generateSourcedSerializers univeralScopeMap scopeMap es
+  (srcFwds, srcSerial, srcDeserial) <- generateSourcedSerializers univeralScopeMap es
 
   -- write include statements for sources
   let includeDocs = map translateSource (unique . mapMaybe srcPath $ srcs)
@@ -679,17 +674,6 @@ cppDecode pkt typeStr ast = do
               <> ", mlc_schema_table[" <> pretty sid <> "])"
       cppClosureProxyLambda cloInit ins out
     _ -> return $ "_get_value<" <> typeStr <> ">(" <> pkt <> ", mlc_schema_table[" <> pretty sid <> "])"
-
-metaTypedefs ::
-  GMap Int MVar (Map.Map Lang Scope) ->
-  Int -> -- manifold index
-  Scope
-metaTypedefs tmap i =
-  case GMap.lookup i tmap of
-    (GMapJust langmap) -> case Map.lookup cppLang langmap of
-      (Just scope) -> Map.filter (not . null) scope
-      Nothing -> Map.empty
-    _ -> Map.empty
 
 -- | Collect TVar names of all named (non-anonymous) record types used
 -- in a SerialManifold tree.
@@ -1952,7 +1936,7 @@ generateCppEnums es = concat <$> mapM makeOne (collectCppEnums es)
   where
     makeOne (FV gv (CV cvText), ctors) = do
       userMapped <- variantIsUserMapped gv cvText
-      return [CP.printCppEnumDecl (pretty cvText) ctors | not userMapped]
+      return [CP.printCppEnumDecl (pretty (nativeTypeName cvText)) ctors | not userMapped]
 
 -- | Every occurrence of a payload-bearing @data@ type in this pool, with
 -- the arguments it was applied to. Occurrences are not merged here: which
@@ -2096,58 +2080,26 @@ generateAnonymousStructs = do
 
 generateSourcedSerializers ::
   Map.Map Lang Scope ->
-  GMap Int MVar (Map.Map Lang Scope) ->
   [SerialManifold] -> -- all segments that can be called in this pool
   CppTranslator
     ( [MDoc]
     , [MDoc]
     , [MDoc]
     )
-generateSourcedSerializers univeralScopeMap scopeMap es0 = do
-  perManifold <- Map.unions <$> mapM (foldSerialManifoldM fm) es0
-
+generateSourcedSerializers univeralScopeMap es0 = do
   scope <- case Map.lookup cppLang univeralScopeMap of
     (Just scope) -> return scope
     Nothing -> return Map.empty
 
-  -- Restrict marshaller emission to record types this pool actually needs.
-  -- perManifold accumulates every typedef visible in each manifold's scope
-  -- (populated in Frontend/Restructure.hs from the module import graph), so
-  -- without a filter every named C++ record from any imported module gets a
-  -- marshalling node -- and if no manifold references it, findSources never
-  -- pulls in the header that declares the struct, leaving the emitted body
-  -- unbacked (invalid C++).
-  --
-  -- We seed with the named record TVars actually referenced in this pool's
-  -- SerialManifold trees (schemas + expression types), close under record-
-  -- to-record field references so a used record's serializer body can find
-  -- serializers for its field types, and apply the closure to both the
-  -- per-manifold and universal-supplement sides.
-  --
-  -- The universal-supplement branch is preserved because secondary C++
-  -- pools reached via foreign_call may miss a locally-scoped typedef that
-  -- their argument schemas require; usedTypes catches those via
-  -- DeserializeN_ schemas.
-  let directUsed = Set.unions (map collectNamedRecordTVars es0)
-      combinedScope = Map.unionWith mergeScopes perManifold scope
-      keep = closeRecordDeps combinedScope directUsed
-      perManifold' = Map.filterWithKey (\k _ -> Set.member k keep) perManifold
-      missingTypes = Set.difference keep (Map.keysSet perManifold')
-      supplemental = Map.filterWithKey (\k _ -> Set.member k missingTypes) scope
-      typedef = Map.unionWith mergeScopes perManifold' supplemental
+  -- Marshallers are emitted only for the record types this pool uses: the
+  -- named records referenced in its manifolds, closed under the records
+  -- their fields name. A marshaller for a record no manifold references
+  -- would name a struct whose header no source pulls in.
+  let keep = closeRecordDeps scope (Set.unions (map collectNamedRecordTVars es0))
+      typedef = Map.filterWithKey (\k entries -> Set.member k keep && not (null entries)) scope
 
   foldl groupTriple ([], [], []) . concat . Map.elems <$> Map.mapWithKeyM (makeSerials scope) typedef
   where
-    -- given the universal map of scopes, pull out every one that is used in this subtree
-    fm =
-      defaultValue
-        { opSerialManifoldM = \(SerialManifold_ i _ _ _ e) -> return $ Map.unionWith mergeScopes (metaTypedefs scopeMap i) e
-        , opNativeManifoldM = \(NativeManifold_ i _ _ e) -> return $ Map.unionWith mergeScopes (metaTypedefs scopeMap i) e
-        }
-
-    -- there are likely to be repeats in the scopes, we only want the unique ones
-    mergeScopes xs ys = unique (xs <> ys)
-
     -- Fixed-point close a seed set of TVars over Scope-entry field
     -- references. Overapproximates: walks every TypeU subterm and collects
     -- any TVar reference. Non-record TVars naturally drop out of the emitted

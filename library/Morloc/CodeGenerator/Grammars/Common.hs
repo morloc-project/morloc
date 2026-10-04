@@ -701,7 +701,7 @@ unifyRecords xs =
     $ [((v, map fst es), (m, es)) | (v, m, es) <- xs]
 
 structName :: Int -> FVar -> MDoc
-structName i (FV v (CV "struct")) = "mlc_" <> pretty v <> "_" <> pretty i
+structName i (FV v (CV "struct")) = "mlc_" <> pretty (tvarIdentifier v) <> "_" <> pretty i
 structName _ (FV _ v) = pretty v
 
 -- | Merge every occurrence of one `data` type in a pool into the one

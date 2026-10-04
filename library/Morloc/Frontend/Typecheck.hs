@@ -20,7 +20,6 @@ import Data.Text (Text)
 import qualified Data.Text as MT
 import qualified Morloc.BaseTypes as BT
 import Morloc.Data.Doc
-import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
 import qualified Data.Set as Set
 import Morloc.Frontend.Namespace
@@ -96,9 +95,9 @@ resolvePendingNumLits g0 entries = do
     -- literal must be judged by the same standard, or the identical program
     -- is accepted or rejected purely on whether the literal happened to meet
     -- its type directly or through an existential.
-    baseOKThroughAliases :: (TypeU -> Bool) -> Int -> TypeU -> MorlocMonad Bool
-    baseOKThroughAliases baseOK i t = do
-      scope <- MM.getGeneralScope i
+    baseOKThroughAliases :: (TypeU -> Bool) -> TypeU -> MorlocMonad Bool
+    baseOKThroughAliases baseOK t = do
+      scope <- MM.getGeneralScope
       let tEval = either (const t) id (TE.evaluateType scope t)
           tWire = TE.wireParentRoot scope tEval
       return (baseOK t || baseOK tEval || baseOK tWire)
@@ -127,7 +126,7 @@ resolvePendingNumLits g0 entries = do
                Right Nothing   -> return g
                Right (Just g') -> return g'
            t -> do
-             ok <- baseOKThroughAliases baseOK i t
+             ok <- baseOKThroughAliases baseOK t
              if ok
                then return g
                else MM.throwSourcedError i $
@@ -157,7 +156,7 @@ assertStructuralTypesExpanded :: AnnoS (Indexed TypeU) Many Int -> MorlocMonad (
 assertStructuralTypesExpanded = mapAnnoSGM check
   where
     check g@(Idx i t) = do
-      scope <- MM.getGeneralScope i
+      scope <- MM.getGeneralScope
       case structuralAliasesIn scope t of
         [] -> return g
         (v : _) -> MM.throwCompilerBugAt i $
@@ -177,10 +176,10 @@ typecheckWith :: Maybe TypeU -> AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (In
 typecheckWith expected = run
   where
     run :: AnnoS Int ManyPoly Int -> MorlocMonad (AnnoS (Indexed TypeU) Many Int)
-    run e0@(AnnoS rootIdx _ _) = do
+    run e0 = do
       -- The general scope is needed to expand type aliases inside the
       -- primitive constraints discharged below.
-      scope <- MM.getGeneralScope rootIdx
+      scope <- MM.getGeneralScope
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
       let g0 = emptyGamma
       (g1raw, _, e1) <- case expected of
@@ -407,7 +406,7 @@ resolveTypes (AnnoS (Idx i t) ci e) =
 resolveInstances ::
   Gamma -> AnnoS (Indexed TypeU) ManyPoly Int -> MorlocMonad (Gamma, AnnoS (Indexed TypeU) Many Int)
 resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
-  gscope <- MM.getGeneralScope genIndex
+  gscope <- MM.getGeneralScope
   (g', e1) <- f gscope g e0
   return (g', AnnoS gi ci e1)
   where
@@ -541,8 +540,8 @@ resolveInstances g (AnnoS gi@(Idx genIndex gt) ci e0) = do
     -- propagate, since solving to one instance would break the others.
     connectInstance :: Bool -> Gamma -> [AnnoS (Indexed TypeU) f c] -> MorlocMonad Gamma
     connectInstance _ g0 [] = return g0
-    connectInstance singleGroup g0 (AnnoS (Idx i t) _ _ : es) = do
-      scope <- MM.getGeneralScope i
+    connectInstance singleGroup g0 (AnnoS (Idx _ t) _ _ : es) = do
+      scope <- MM.getGeneralScope
       case subtype scope (stripCoercionWrappers gt) t g0 of
         (Left _) -> connectInstance singleGroup g0 es
         (Right g1)
@@ -688,7 +687,7 @@ throwTypeError i msg = MM.throwSourcedError i ("General type error:" <+> msg)
 -- the application here with a clear message and a hint.
 rejectListSelectorTarget :: Int -> Selector -> TypeU -> MorlocMonad ()
 rejectListSelectorTarget i s t = do
-  scope <- MM.getGeneralScope i
+  scope <- MM.getGeneralScope
   let t' = either (const t) id (TE.evaluateType scope t)
   case t' of
     AppU (VarU (TV "List")) _ ->
@@ -711,7 +710,7 @@ rejectListSelectorTarget i s t = do
 -- first, so its fields have definite types.
 rejectSumSelectorTarget :: Int -> Selector -> TypeU -> MorlocMonad ()
 rejectSumSelectorTarget i s t = do
-  scope <- MM.getGeneralScope i
+  scope <- MM.getGeneralScope
   let name = case t of
         VarU v -> Just v
         AppU (VarU v) _ -> Just v
@@ -798,7 +797,7 @@ unAnnoSE (AnnoS _ _ e) = e
 -- which is the check that keeps a clause set from mixing two `data` types.
 checkCtorBelongs :: Int -> Gamma -> TypeU -> Text -> MorlocMonad [TypeU]
 checkCtorBelongs i g subjectT n = do
-  scope <- MM.getGeneralScope i
+  scope <- MM.getGeneralScope
   let resolved = apply g subjectT
       tv = extractKey resolved
       args = case resolved of
@@ -842,7 +841,7 @@ synthE _ g (StrS x) = return (g, BT.strU, StrS x)
 -- fresh existentials first and shared across every argument and the result,
 -- which is what ties `Some x :: Opt a` to the `a` of `x`.
 synthE i g0 (ConS tv n ord xs) = do
-  scope <- MM.getGeneralScope i
+  scope <- MM.getGeneralScope
   let params = [p | (p, _) <- typeParamsOf scope tv]
       (g1, freshArgs) = statefulMap (\g _ -> newvar (unTVar tv <> "_") g) g0 params
       sub = zip params freshArgs
@@ -1402,7 +1401,7 @@ synthE i g (IfS cond thenE elseE) = do
   g2 <- subtype' i condType (VarU (TV "Bool")) g1
   (g3, t2, thenE') <- synthG g2 thenE
   (g4, t3, elseE') <- synthG g3 elseE
-  scope <- MM.getGeneralScope i
+  scope <- MM.getGeneralScope
   let t2' = apply g4 t2
       t3' = apply g4 t3
   -- Try strict subtype both directions first (zero-coercion path), then
@@ -1433,7 +1432,7 @@ synthE i g (DoBlockS e) = do
   -- appears as ForallU (EffectU ...) and falls into the bareT branch,
   -- producing '<collected> (forall a. <Random> a)' -- a nested effect
   -- type. Mirrors the forcedView call in synthE (EvalS ...).
-  (g1', t1') <- forcedView i g1 t1
+  (g1', t1') <- forcedView g1 t1
   case t1' of
     EffectU _ iT -> do
       -- Final expr is effectful: wrap it in EvalS so codegen forces the
@@ -1453,7 +1452,7 @@ synthE _ g (CoerceS coercion e) = do
   return (g1, applyCoercion coercion t1, CoerceS coercion e1)
 synthE i g (EvalS e) = do
   (g1, t1, e1) <- synthG g e
-  (g1', t1') <- forcedView i g1 t1
+  (g1', t1') <- forcedView g1 t1
   case t1' of
     EffectU _ a -> return (g1', a, EvalS e1)
     ExistU _ _ _ -> do
@@ -1690,14 +1689,14 @@ stripForallU g t = (g, t)
 -- | The type of an expression at a position that runs it: foralls
 -- stripped, and an alias that names a suspension (@type IOInt = <IO> Int@)
 -- expanded so the row is visible.
-forcedView :: Int -> Gamma -> TypeU -> MorlocMonad (Gamma, TypeU)
-forcedView i g t0 = do
+forcedView :: Gamma -> TypeU -> MorlocMonad (Gamma, TypeU)
+forcedView g t0 = do
   let (g1, t1) = stripForallU g (apply g t0)
   case t1 of
     EffectU _ _ -> return (g1, t1)
     ExistU _ _ _ -> return (g1, t1)
     _ -> do
-      scope <- MM.getGeneralScope i
+      scope <- MM.getGeneralScope
       return $ case TE.evaluateType scope t1 of
         Right t2@(EffectU _ _) -> (g1, t2)
         _ -> (g1, t1)
@@ -2244,8 +2243,8 @@ checkE i g (IfS cond thenE elseE) t = do
 -- statement is run, as in 'synthE'.
 checkE i g (DoBlockS e) t@(EffectU _ (EffectU _ _)) = do
   (g1, t1, e1) <- synthG g e
-  (g1', t1') <- forcedView i g1 t1
-  scope <- MM.getGeneralScope i
+  (g1', t1') <- forcedView g1 t1
+  scope <- MM.getGeneralScope
   case t1' of
     EffectU _ iT
       | Right g2 <- subtype scope (EffectU (collectDoEffects e1) t1') t g1' ->
@@ -2264,7 +2263,7 @@ checkE i g (EvalS e) t = do
   -- then check the inner type against the expected type.
   -- This avoids creating an EffectVar that is never solved.
   (g1, t1, e1) <- synthG g e
-  (g1', t1') <- forcedView i g1 t1
+  (g1', t1') <- forcedView g1 t1
   case t1' of
     EffectU _ a -> do
       g2 <- subtype' i a t g1'
@@ -2300,7 +2299,7 @@ checkE i g e t@(ExistU v _ _)
 -- still length-checks at 4. Unsolved existentials in the element slot
 -- fall through to the synth path for more flexible inference.
 checkE i g1 e1@(LstS _) b = do
-  scope <- MM.getGeneralScope i
+  scope <- MM.getGeneralScope
   -- Apply the current gamma before consulting wire forms: when a
   -- containing context (e.g. a @(expr :: T)@ annotation) already
   -- solved the existentials in @b@, the solved type is the one we
@@ -2363,15 +2362,12 @@ checkE i g1 e1@(LstS _) b = do
                   anno3 = AnnoS (Idx i (apply g3 a')) i finalExpr
               g4 <- checkListNatDims g3 natArgs anno3
               return (g4, apply g4 b', finalExpr)
-            Nothing -> do
-              scope2 <- MM.getGeneralScope i
-              uniScope <- MM.getGeneralUniversalScope
+            Nothing ->
               MM.throwSourcedError i $
                 "Type mismatch:"
                 <> line <> "  expected: " <> prettyTypeU b'
                 <> line <> "  inferred: " <> prettyTypeU a'
                 <> line <> err
-                <> unimportedAliasHint scope2 uniScope b'
 --   Sub (with coercion fallback)
 -- Numeric literal defaulting: an `IntS` checked against any integer base
 -- type (Int / Int8..Int64 / UInt / UInt8..UInt64) takes on that expected
@@ -2429,7 +2425,7 @@ checkE _ g (LetS v e1 e2) t = do
 checkE i g e@(TupS _) (OptionalU innerT) = checkOptionalLit i g e innerT
 checkE i g e@(NamS _) (OptionalU innerT) = checkOptionalLit i g e innerT
 checkE i g (TupS xs) t = do
-  scope <- MM.getGeneralScope i
+  scope <- MM.getGeneralScope
   let tApplied = apply g t
       -- Pull out the slot types if the type is already a tuple of the
       -- right arity. Else try one alias-reduction step (e.g. expand
@@ -2484,7 +2480,7 @@ checkE i g (TupS xs) t = do
 -- check direction into each field value so nested record literals
 -- (e.g. {outer={inner={...}}}) also get reordered.
 checkE i g (NamS rs) t = do
-  scope <- MM.getGeneralScope i
+  scope <- MM.getGeneralScope
   let tApplied = apply g t
       tEval = either (const tApplied) id (TE.evaluateType scope tApplied)
       -- Walk through newtype boundaries as well (e.g. @record Bar where
@@ -2539,7 +2535,7 @@ checkE i g (NamS rs) t = do
 -- per-language form differs from the wire-parent's via the appropriate
 -- @*Like@ instance.
 checkE i g (IntS si x) t = do
-  scope <- MM.getGeneralScope i
+  scope <- MM.getGeneralScope
   let tApplied = apply g t
       tEval = either (const tApplied) id (TE.evaluateType scope tApplied)
       tWire = TE.wireParentRoot scope tEval
@@ -2565,7 +2561,7 @@ checkE i g (IntS si x) t = do
         in return (g', tApplied, IntS si x)
       _ -> checkEFallback i g (IntS si x) t
 checkE i g (RealS si x) t = do
-  scope <- MM.getGeneralScope i
+  scope <- MM.getGeneralScope
   let tApplied = apply g t
       tEval = either (const tApplied) id (TE.evaluateType scope tApplied)
       tWire = TE.wireParentRoot scope tEval
@@ -2580,21 +2576,21 @@ checkE i g (RealS si x) t = do
 -- pattern as IntS/RealS above: a literal inhabits a newtype if the
 -- newtype's wire-parent chain reaches the literal's natural primitive.
 checkE i g (StrS x) t = do
-  scope <- MM.getGeneralScope i
+  scope <- MM.getGeneralScope
   let tEval = either (const t) id (TE.evaluateType scope t)
       tWire = TE.wireParentRoot scope tEval
   if t == BT.strU || tEval == BT.strU || tWire == BT.strU
     then return (g, t, StrS x)
     else checkEFallback i g (StrS x) t
 checkE i g (LogS x) t = do
-  scope <- MM.getGeneralScope i
+  scope <- MM.getGeneralScope
   let tEval = either (const t) id (TE.evaluateType scope t)
       tWire = TE.wireParentRoot scope tEval
   if t == BT.boolU || tEval == BT.boolU || tWire == BT.boolU
     then return (g, t, LogS x)
     else checkEFallback i g (LogS x) t
 checkE i g UniS t = do
-  scope <- MM.getGeneralScope i
+  scope <- MM.getGeneralScope
   let tEval = either (const t) id (TE.evaluateType scope t)
       tWire = TE.wireParentRoot scope tEval
   if t == BT.unitU || tEval == BT.unitU || tWire == BT.unitU
@@ -2653,7 +2649,7 @@ checkE i g0 e@(AppS (AnnoS fgidx fcidx (ExeS (PatCall (PatternStruct s)))) (e0 :
   | not (selectorHasBracket s) = do
       let (g1, slotVars) = statefulMap (\g _ -> newvar "set_slot_" g) g0 es0
       (g2, structType) <- selectorType g1 s
-      scope <- MM.getGeneralScope i
+      scope <- MM.getGeneralScope
       let seated = do
             outputType <- selectorSetter slotVars s structType
             g3 <- either (const Nothing) Just (subtype scope outputType (apply g2 t) g2)
@@ -2711,7 +2707,7 @@ checkE i g0 (AppS f xs) t = do
     FunU paramTypes returnType
       | length xs == length paramTypes
       , isBareExistU (apply g2 returnType) -> do
-          scope <- MM.getGeneralScope i
+          scope <- MM.getGeneralScope
           let returnApplied = apply g2 returnType
               expectedApplied = apply g2 t
           case subtype scope returnApplied expectedApplied g2 of
@@ -2816,7 +2812,7 @@ reconcileSynth ::
 reconcileSynth i g2 a e2 b = do
   let a' = apply g2 a
       b' = apply g2 b
-  scope <- MM.getGeneralScope i
+  scope <- MM.getGeneralScope
   case subtype scope a' b' g2 of
     -- Pick the type with more record keys: when an open-keyed expected
     -- type (b) is checked against a synthesized record literal that has
@@ -2841,16 +2837,13 @@ reconcileSynth i g2 a e2 b = do
             (e2, apply g3 a')
             coercions
           return (g3, apply g3 b', finalExpr)
-        Nothing -> do
-          scope2 <- MM.getGeneralScope i
-          uniScope <- MM.getGeneralUniversalScope
+        Nothing ->
           MM.throwSourcedError i $
             "Type mismatch:"
             <> line <> "  expected: " <> prettyTypeU b'
             <> line <> "  inferred: " <> prettyTypeU a'
             <> line <> err
-            <> missingInstanceHint scope2 a' b'
-            <> unimportedAliasHint scope2 uniScope b'
+            <> missingInstanceHint scope a' b'
 
 -- | Check a compound literal (TupS or NamS) against the inner type of an
 -- Optional expected type, then wrap the result in @CoerceToOptional@.
@@ -2869,17 +2862,6 @@ checkOptionalLit ::
 checkOptionalLit i g e innerT = do
   (g', _, e') <- checkE' i g e innerT
   idx <- MM.getCounterWithPos i
-  -- Propagate the general-typedef scope from the original index to the
-  -- fresh one. Without this, downstream phases (e.g. Express's
-  -- reduce-and-retry) call @MM.getGeneralScope idx@ and get an empty
-  -- scope, so a type like @Pair Str@ that depends on the alias @Pair@
-  -- being in scope fails to reduce -- surfacing as
-  -- @Expected a tuple type, got: Pair Str@. Mirrors the pattern
-  -- @propagateScope@ uses for concrete typedefs in Express.hs.
-  MM.modify $ \s ->
-    case GMap.yIsX i idx (stateGeneralTypedefs s) of
-      Just g'' -> s { stateGeneralTypedefs = g'' }
-      Nothing -> s
   let appliedInner = apply g' innerT
       innerAnno = AnnoS (Idx idx appliedInner) i e'
   return (g', apply g' (OptionalU innerT), CoerceS CoerceToOptional innerAnno)
@@ -2957,7 +2939,7 @@ reorderRecordKeys ks t = case t of
 
 subtype' :: Int -> TypeU -> TypeU -> Gamma -> MorlocMonad Gamma
 subtype' i a b g = do
-  scope <- MM.getGeneralScope i
+  scope <- MM.getGeneralScope
   insetSay $ parens (pretty a) <+> "<:" <+> parens (pretty b)
   case subtype scope a b g of
     (Left err') -> MM.throwSourcedError i err'
@@ -2991,28 +2973,6 @@ subtype' i a b g = do
 -- can't dispatch without an instance. Append a hint pointing at
 -- the newtype so users don't have to decode the structural
 -- "Cannot compare" message.
--- | A mismatch against a name this module cannot resolve but the program
--- as a whole can. Importing a term does not import the type aliases its
--- signature is written in, and an alias is transparent inside its own
--- module and opaque across an import list that omits it -- so the call
--- compiles at the import and fails at every use, with nothing in the
--- message pointing at the cause.
-unimportedAliasHint :: Scope -> Scope -> TypeU -> MDoc
-unimportedAliasHint localScope universalScope expected
-  | Just v <- headVar expected
-  , not (Map.member v localScope)
-  , Map.member v universalScope =
-      line <> "  hint:" <+> squotes (pretty v)
-        <+> "is defined in another module and is not in scope here."
-        <+> "Importing a term does not bring in the type aliases its"
-        <+> "signature uses; name the type in the import list as well."
-  | otherwise = mempty
-  where
-    headVar t = case t of
-      VarU v -> Just v
-      AppU (VarU v) _ -> Just v
-      _ -> Nothing
-
 missingInstanceHint :: Scope -> TypeU -> TypeU -> MDoc
 missingInstanceHint scope inferred expected
   | Just nativeTv <- newtypeHead scope inferred
@@ -3350,19 +3310,11 @@ evaluateAnnoSTypes = mapAnnoSGM resolve
   where
     resolve :: Indexed TypeU -> MorlocMonad (Indexed TypeU)
     resolve (Idx m t) = do
-      scope <- getScope m
+      scope <- MM.getGeneralScope
       case TE.evaluateType scope t of
         (Left (SystemError e)) -> MM.throwSourcedError m e
         (Left e) -> MM.throwError e
         (Right tu) -> return (Idx m tu)
-
-    getScope :: Int -> MorlocMonad Scope
-    getScope i = do
-      globalMap <- MM.gets stateGeneralTypedefs
-      case GMap.lookup i globalMap of
-        GMapNoFst -> return Map.empty
-        GMapNoSnd -> return Map.empty
-        GMapJust scope -> return scope
 
 ---- debugging
 

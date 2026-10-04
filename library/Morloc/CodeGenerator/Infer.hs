@@ -36,29 +36,23 @@ import qualified Morloc.Language as ML
 import qualified Morloc.TypeEval as T
 import Numeric (showHex)
 
--- TODO: do not use global scope here
-getScope :: Int -> Lang -> MorlocMonad (Scope, Scope)
-getScope _ lang = do
-  cscope <- MM.getConcreteUniversalScope lang
-  gscope <- MM.getGeneralUniversalScope
+evalGeneralStep :: TypeU -> MorlocMonad (Maybe TypeU)
+evalGeneralStep t = T.evaluateStep <$> MM.getGeneralScope <*> pure t
+
+getScope :: Lang -> MorlocMonad (Scope, Scope)
+getScope lang = do
+  cscope <- MM.getConcreteScope lang
+  gscope <- MM.getGeneralScope
   MM.sayVVV $ "cscope:" <+> viaShow cscope
   return (cscope, gscope)
 
-evalGeneralStep :: Int -> TypeU -> MorlocMonad (Maybe TypeU)
-evalGeneralStep i t = T.evaluateStep <$> MM.getGeneralScope i <*> pure t
-
 inferConcreteTypeU :: Lang -> Indexed TypeU -> MorlocMonad TypeU
 inferConcreteTypeU lang (Idx i t0) = do
-  attemptT <- inferConcreteTypeU' t0 <$> getScope i lang
+  attemptT <- inferConcreteTypeU' t0 <$> getScope lang
   case attemptT of
     (Right t') -> return t'
-    (Left _) -> do
-      gscopeUni <- MM.getGeneralUniversalScope
-      cscopeUni <- MM.getConcreteUniversalScope lang
-      case inferConcreteTypeU' t0 (cscopeUni, gscopeUni) of
-        (Right t') -> return t'
-        (Left (SystemError e2)) -> MM.throwSourcedError i e2
-        (Left e2) -> MM.throwError e2
+    (Left (SystemError e2)) -> MM.throwSourcedError i e2
+    (Left e2) -> MM.throwError e2
 
 inferConcreteTypeU' :: TypeU -> (Scope, Scope) -> Either MorlocError TypeU
 inferConcreteTypeU' generalType (cscope, gscope) = T.pairEval cscope gscope generalType
@@ -67,7 +61,7 @@ inferConcreteType :: Lang -> Indexed Type -> MorlocMonad TypeF
 inferConcreteType _ (Idx i (UnkT _)) =
   MM.throwSourcedError i "Cannot infer concrete type for UnkT. This may be an unsolved generic term"
 inferConcreteType lang (Idx i (type2typeu -> generalType)) = do
-  (cscope0, gscope0) <- getScope i lang
+  (cscope0, gscope0) <- getScope lang
   anc <- CMS.gets stateVariantAncestors
   -- A `data` type already being expanded resolves to its NAME and stops.
   -- The check belongs here, at the single entry point, rather than deeper:
@@ -79,7 +73,7 @@ inferConcreteType lang (Idx i (type2typeu -> generalType)) = do
     Just key@(v, args) | Set.member key anc -> backEdge lang i cscope0 v args
     _ -> do
       concreteType <- inferConcreteTypeU lang (Idx i generalType)
-      (_, gscope) <- getScope i lang
+      (_, gscope) <- getScope lang
       inferConcreteTypeStructural lang i gscope generalType concreteType
 
 -- | Parallel structural walk over (general, concrete) that handles the
@@ -137,7 +131,7 @@ inferConcreteTypeStructural lang i gscope g c
   _ -> inferConcreteTypeStructuralRest lang i gscope g c
   where
     backEdgeHere vG tsG = do
-      (cscope, _) <- getScope i lang
+      (cscope, _) <- getScope lang
       backEdge lang i cscope vG tsG
     -- The concrete side of an applied type is either applied too or has
     -- already collapsed to a bare name.
@@ -175,7 +169,7 @@ inferVariantArms lang i gscope vG vC targs = do
   if all (null . snd) arms
     then return $ EnumF (FV vG (CV vC)) ps (map fst arms)
     else do
-        cscope <- fst <$> getScope i lang
+        cscope <- fst <$> getScope lang
         anc <- CMS.gets stateVariantAncestors
         let -- A field naming a `data` type that is already being resolved is
             -- left as a PLACEHOLDER rather than expanded. Expanding it would
@@ -279,7 +273,7 @@ inferConcreteTypeStructuralRest lang i gscope g c = case (g, c) of
   -- Str@ takes Str's mapping -- and an inherited form cannot carry the
   -- newtype's parameters, so those arguments are carried here instead.
   (AppU (VarU vG) ts, VarU (TV vC)) -> do
-    (cscope, _) <- getScope i lang
+    (cscope, _) <- getScope lang
     if Map.member vG cscope
       then
         MM.throwSourcedError i $
@@ -318,52 +312,27 @@ inferConcreteTypeWeave
 inferConcreteTypeWeave lang i gscope generalType concreteType =
   case weave gscope generalType concreteType of
     (Right tf) -> return tf
-    (Left _) -> do
-      gscopeUni <- CMS.gets stateUniversalGeneralTypedefs
-      case weave gscopeUni generalType concreteType of
-        (Right tf) -> return tf
-        (Left _) -> do
-          -- Evaluate the general type one level and try again
-          --
-          -- Weaving will fail for parameterize type definitions, such as
-          --   type (Foo a) = [(a, Str)]
-          -- Here the primitive type (e.g., "std::vector<std::tuple<$1,std::string>>" a)
-          -- cannot be woven with the `Foo a` type. So `Foo a` needs to be
-          -- substituted for [(a, Str)], which can be woven.
-          --
-          -- 'evalGeneralStep' wraps 'TE.evaluateStep' which returns
-          -- @Just t@ even when @t == generalType@ (no progress). For a
-          -- guarded recursive record like @record Tree where children
-          -- :: [Tree]@ the bnd-protected NamU branch in
-          -- 'generalTransformType' returns the same NamU as input, so a
-          -- naive recursion here loops forever. Compare structurally
-          -- before recursing.
-          --
-          -- The step is tried in the index's own module scope first and
-          -- then in the universal one. The index is not always the site
-          -- the type was written at: an eta-reduced definition such as
-          -- @countRows = nrow@ carries the index of the sourced
-          -- function's @source@ statement, which lives in the module
-          -- that supplies the implementation. An alias declared by the
-          -- caller is invisible from there, and reducing it needs the
-          -- program-wide scope.
-          mayReducedGType <- evalGeneralStep i generalType
-          let progressed t = if t /= generalType then Just t else Nothing
-              reduced =
-                (mayReducedGType >>= progressed)
-                  <|> (T.evaluateStep gscopeUni generalType >>= progressed)
-          case reduced of
-            Just reducedGType -> inferConcreteType lang (Idx i (typeOf reducedGType))
-            Nothing ->
-              MM.throwSourcedError i $
-                "Cannot infer concrete type for" <+> pretty generalType <> "\nCould not reduce type"
+    (Left _) ->
+      -- Weaving fails for a parameterized definition such as
+      --   type (Foo a) = [(a, Str)]
+      -- whose native form ("std::vector<std::tuple<$1,std::string>>" a)
+      -- cannot be woven with `Foo a`; one step of evaluation exposes the
+      -- body, which can. 'T.evaluateStep' may return the type unchanged (a
+      -- guarded recursive record), which must not recurse.
+      case T.evaluateStep gscope generalType of
+        Just reducedGType
+          | reducedGType /= generalType ->
+              inferConcreteType lang (Idx i (typeOf reducedGType))
+        _ ->
+          MM.throwSourcedError i $
+            "Cannot infer concrete type for" <+> pretty generalType <> "\nCould not reduce type"
 
 -- | The index is the source position errors are reported against and the
 -- site a `data` type's arms are resolved at; the scopes themselves are the
 -- universal ones, as the name says.
 inferConcreteTypeUniversal :: Lang -> Int -> Type -> MorlocMonad TypeF
 inferConcreteTypeUniversal lang i t@(type2typeu -> generalType) = do
-  gscopeUni <- CMS.gets stateUniversalGeneralTypedefs
+  gscopeUni <- CMS.gets stateGeneralTypedefs
   concreteType <- inferConcreteTypeUUniversal lang generalType
   inferConcreteTypeUniversalStructural lang i gscopeUni t generalType concreteType
 
@@ -394,7 +363,7 @@ inferConcreteTypeUniversalStructural lang i gscopeUni t g c
         inferVariantArms lang i gscopeUni vG vC tsG
   -- Same rule as in the module-scoped walk above.
   (AppU (VarU vG) ts, VarU (TV vC)) -> do
-    cscopeUni <- MM.getConcreteUniversalScope lang
+    cscopeUni <- MM.getConcreteScope lang
     if Map.member vG cscopeUni
       then
         MM.throwSystemError $
@@ -518,8 +487,8 @@ universalConcreteHead _ = Nothing
 
 inferConcreteTypeUUniversal :: Lang -> TypeU -> MorlocMonad TypeU
 inferConcreteTypeUUniversal lang generalType = do
-  gscopeUni <- CMS.gets stateUniversalGeneralTypedefs
-  cscopeUni <- MM.getConcreteUniversalScope lang
+  gscopeUni <- CMS.gets stateGeneralTypedefs
+  cscopeUni <- MM.getConcreteScope lang
   let attemptUni = inferConcreteTypeU' generalType (cscopeUni, gscopeUni)
   case attemptUni of
     (Right t) -> return t
@@ -653,39 +622,35 @@ canHoldType' declaredRecords lang i t = do
   st0 <- CMS.get
   ( do
       _ <- inferConcreteType lang (Idx i t)
-      gLocal <- MM.getGeneralScope i
-      gGlobal <- MM.getGeneralUniversalScope
+      gscope <- MM.getGeneralScope
       if declaredRecords
-        then and <$> mapM (declared gLocal gGlobal) (recordNames gLocal gGlobal t)
+        then and <$> mapM (declared gscope) (recordNames gscope t)
         else return True
     )
     `catchError` (\_ -> CMS.put st0 >> return False)
   where
-    declared gLocal gGlobal v = do
-      local <- MM.getConcreteScope i lang
-      global <- MM.getConcreteUniversalScope lang
-      let isData = isJust (scopeDataCtors gLocal v) || isJust (scopeDataCtors gGlobal v)
-      return (isData || Map.member v local || Map.member v global)
+    declared gscope v = do
+      cscope <- MM.getConcreteScope lang
+      return (isJust (scopeDataCtors gscope v) || Map.member v cscope)
     -- the records a type holds, whether written out or named
-    recordNames gl gg ty = case ty of
-      NamT NamTable _ ps rs -> concatMap (recordNames gl gg) (ps <> map snd rs)
-      NamT _ v ps rs -> v : concatMap (recordNames gl gg) (ps <> map snd rs)
-      VarT v -> [v | namesRecord gl gg v]
-      FunT ins out -> concatMap (recordNames gl gg) (out : ins)
-      AppT f xs -> concatMap (recordNames gl gg) (f : xs)
-      OptionalT x -> recordNames gl gg x
-      EffectT _ x -> recordNames gl gg x
+    recordNames g ty = case ty of
+      NamT NamTable _ ps rs -> concatMap (recordNames g) (ps <> map snd rs)
+      NamT _ v ps rs -> v : concatMap (recordNames g) (ps <> map snd rs)
+      VarT v -> [v | namesRecord g v]
+      FunT ins out -> concatMap (recordNames g) (out : ins)
+      AppT f xs -> concatMap (recordNames g) (f : xs)
+      OptionalT x -> recordNames g x
+      EffectT _ x -> recordNames g x
       _ -> []
-    namesRecord gl gg v = case Map.lookup v gl <> Map.lookup v gg of
+    namesRecord g v = case Map.lookup v g of
       Just ((_, NamU o _ _ _, _, _, _) : _) -> o /= NamTable
       _ -> False
 
 inferConcreteVar :: Lang -> Indexed TVar -> MorlocMonad FVar
 inferConcreteVar lang t0@(Idx i v) = do
   MM.sayVVV $ "inferConcreteVar" <+> pretty lang <+> pretty t0
-  localScope <- MM.getConcreteScope i lang
-  globalScope <- MM.getConcreteUniversalScope lang
-  case Map.lookup v localScope of
+  cscope <- MM.getConcreteScope lang
+  case Map.lookup v cscope of
     (Just ((_, t, _, True, _) : _)) -> return $ FV v (CV . unTVar $ extractKey t)
     -- Non-terminal concrete alias: e.g. `type Cpp => Array a = List a`.
     -- Follow through the body's head (recursively) until a terminal entry
@@ -695,16 +660,7 @@ inferConcreteVar lang t0@(Idx i v) = do
     (Just ((_, t, _, False, _) : _)) -> do
       FV _ cv <- inferConcreteVar lang (Idx i (extractKey t))
       return $ FV v cv
-    _ -> case Map.lookup v globalScope of
-      (Just ((_, t, _, True, _) : _)) -> do
-        -- TODO fix this, the types should be in scope
-        MM.sayVVV $ "WARNING: using global definition for v=" <> pretty v
-        return $ FV v (CV . unTVar $ extractKey t)
-      -- Same recursive resolution at the global scope level.
-      (Just ((_, t, _, False, _) : _)) -> do
-        FV _ cv <- inferConcreteVar lang (Idx i (extractKey t))
-        return $ FV v cv
-      _ -> do
+    _ -> do
         -- Not in any concrete scope. Try general scope: a general-only
         -- alias like `type MyVec (n :: Nat) a = Vector n a` has no
         -- concrete mapping of its own, but its body's head (Vector)
@@ -715,8 +671,7 @@ inferConcreteVar lang t0@(Idx i v) = do
         -- This is the bare-VarU analog of `expandHeadOnly`'s kind-based
         -- realignment: for general aliases that have params but no args
         -- in this lookup, we still want to chase the alias by its head.
-        gscopeUni <- MM.getGeneralUniversalScope
-        gscopeLocal <- MM.getGeneralScope i
+        gscope <- MM.getGeneralScope
         let
           -- A `data` type with no per-language mapping. Its general body is
           -- the constructor table, not an alias, so chasing the body's head
@@ -724,21 +679,19 @@ inferConcreteVar lang t0@(Idx i v) = do
           -- to anything the user wrote. The pool generates a native
           -- definition under the type's own name, so that is the concrete
           -- name here.
-          isData = case (scopeDataCtors gscopeLocal v, scopeDataCtors gscopeUni v) of
-                     (Nothing, Nothing) -> False
-                     _ -> True
+          isData = isJust (scopeDataCtors gscope v)
         let
           -- Guard against self-recursive lookup: if the body's
           -- extracted key resolves back to v (e.g. a record whose
           -- general definition is `record Container a where ...` --
           -- the body's NamU carries the same TVar `Container`), a
           -- naive recursion loops forever because each iteration
-          -- looks the same TVar up in gscopeUni and gets the same
+          -- looks the same TVar up in gscope and gets the same
           -- body back. When the body's key is v itself, fall through
           -- to pairEval, which produces a comprehensible
           -- "No concrete <lang> type for <v>" error naming the
           -- missing instance.
-          gscopeBody = case Map.lookup v gscopeUni of
+          gscopeBody = case Map.lookup v gscope of
             (Just ((_, body, _, _, _) : _)) | extractKey body /= v -> Just (extractKey body)
             _ -> Nothing
         case if isData then Nothing else gscopeBody of
@@ -748,7 +701,6 @@ inferConcreteVar lang t0@(Idx i v) = do
           Nothing | isData -> return $ FV v (CV (unTVar v))
           Nothing -> do
             -- Last resort: transitive resolution via pairEval.
-            (cscope, gscope) <- getScope i lang
             case T.pairEval cscope gscope (VarU v) of
               Right (VarU v') -> return $ FV v (CV (unTVar v'))
               Right t' -> MM.throwSourcedError i $

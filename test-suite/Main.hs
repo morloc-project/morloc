@@ -54,6 +54,7 @@ unitTests =
   , infixOperatorTests
   , recordLiteralOrderTests
   , recordIdentityTests
+  , typeIdentityTests
   , aliasExpansionTests
   , accessorInWhereTests
   , solvedKindCheckTests

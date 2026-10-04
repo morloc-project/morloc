@@ -71,6 +71,7 @@ module Morloc.Typecheck.Internal
   , expandStructuralAliases
   , expandTransparentAliases
   , structuralAliasesIn
+  , traverseTypeUChildren
   , isSubtypeOf2
   , isSubtypeOfOpen
   , recheckDeferred

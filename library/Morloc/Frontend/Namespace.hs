@@ -23,9 +23,7 @@ module Morloc.Frontend.Namespace
   , newIndex
   ) where
 
-import qualified Data.Char as DC
 import Data.Text (Text)
-import qualified Data.Text as DT
 import Morloc.Data.Doc (pretty)
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Data.Map as Map
@@ -35,9 +33,9 @@ import Morloc.Namespace.Prim
 import Morloc.Namespace.State
 import Morloc.Namespace.Type
 
--- | Determine if a type term is generic (i.e., is the first letter lowercase?)
+-- | Determine if a type term is generic
 isGeneric :: Text -> Bool
-isGeneric typeStr = maybe False (DC.isLower . fst) (DT.uncons typeStr)
+isGeneric = isTypeVariableName
 
 -- | Bottom-up map over the 'Expr' layer of an 'ExprI' tree.
 mapExpr :: (Expr -> Expr) -> ExprI -> ExprI
@@ -88,10 +86,8 @@ copyState oldIdx newIdx = do
       , stateDepth = stateDepth s
       , stateSignatures = updateGMap (stateSignatures s)
       , stateTypeclasses = stateTypeclasses s
-      , stateConcreteTypedefs = updateGMap (stateConcreteTypedefs s)
-      , stateGeneralTypedefs = updateGMap (stateGeneralTypedefs s)
-      , stateUniversalGeneralTypedefs = stateUniversalGeneralTypedefs s
-      , stateUniversalConcreteTypedefs = stateUniversalConcreteTypedefs s
+      , stateConcreteTypedefs = stateConcreteTypedefs s
+      , stateGeneralTypedefs = stateGeneralTypedefs s
       , stateSources = updateGMap (stateSources s)
       , stateAnnotations = updateMap (stateAnnotations s)
       , stateOutfile = stateOutfile s

@@ -196,11 +196,11 @@ rustTypeOf = f
           let (typeTs, kindCount) = partitionKindArgsF ps
           ts' <- mapM rustFieldType typeTs
           return . pretty $ expandMacro x (map render ts') kindCount
-      | otherwise = return (pretty x)
+      | otherwise = return (pretty (nativeTypeName x))
 
     f :: TypeF -> RustM MDoc
-    f (UnkF (FV _ x)) = return (pretty x)
-    f (VarF (FV _ x)) = return (pretty x)
+    f (UnkF (FV _ x)) = return (pretty (nativeTypeName (unCVar x)))
+    f (VarF (FV _ x)) = return (pretty (nativeTypeName (unCVar x)))
     -- An enum lowers to its concrete name; the `#[repr(u8)] enum` that
     -- name refers to is either generated for this pool or supplied by the
     -- user through a `data Rust => X = "..."` mapping.
@@ -261,7 +261,7 @@ rustTypeOf = f
         "is not yet supported. Add `record Rust => <Name> = \"<struct-name>\"` " ++
         "in the morloc source."
     f (RecF (FV gv@(TV gvText) (CV cv)))
-      | cv /= gvText = return (pretty cv)
+      | cv /= gvText = return (pretty (nativeTypeName cv))
       | otherwise = do
           cscope <- CMS.gets rsCScope
           case Map.lookup gv cscope of
@@ -1279,8 +1279,8 @@ translate srcs es = do
   -- Merge the general typedef scope into the Rust concrete scope so a record
   -- field declared via a general alias resolves through its Rust mapping (as
   -- the C++ member does). Concrete entries win on collision.
-  universalScopeMap <- MM.gets stateUniversalConcreteTypedefs
-  generalScope <- MM.gets stateUniversalGeneralTypedefs
+  universalScopeMap <- MM.gets stateConcreteTypedefs
+  generalScope <- MM.gets stateGeneralTypedefs
   let rustScope = fromMaybe Map.empty (Map.lookup rustLang universalScopeMap)
       mergedRustScope = Map.union rustScope generalScope
       recmap = unifyRecords . concatMap collectRecords $ es

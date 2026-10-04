@@ -70,7 +70,7 @@ autoRequire = go
     guardDiscarded v bound@(AnnoS (Idx i _) c _) body
       | not (BT.doDiscardPrefix `MT.isPrefixOf` unEVar v) = return Nothing
       | otherwise = do
-          t <- resolvedType i (typeSofAnnoS bound)
+          t <- resolvedType (typeSofAnnoS bound)
           case tryArms t of
             Nothing -> return Nothing
             Just (errT, okT) -> do
@@ -97,9 +97,9 @@ autoRequire = go
     -- rejected: it cannot be shown to be a Try, and failing the build on a
     -- type the evaluator cannot reduce would reject programs that compiled
     -- before this pass existed.
-    resolvedType :: Int -> Type -> MorlocMonad Type
-    resolvedType i t = do
-      scope <- MM.getGeneralScope i
+    resolvedType :: Type -> MorlocMonad Type
+    resolvedType t = do
+      scope <- MM.getGeneralScope
       return $ case TE.evaluateType scope (type2typeu t) of
         Right t' -> typeOf t'
         Left _ -> t

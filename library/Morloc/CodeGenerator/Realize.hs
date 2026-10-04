@@ -343,7 +343,7 @@ realize tables s0 = do
   langs <-
     if selfCalling || replays
       then do
-        scopes <- MM.gets stateUniversalConcreteTypedefs
+        scopes <- MM.gets stateConcreteTypedefs
         case unique (map (LR.poolOf registry) (Map.keys scopes)) of
           []
             | selfCalling ->
@@ -442,7 +442,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
     -- codegen finds a concrete type for each of @ts@.
     ableLangs :: Int -> [Type] -> [Lang] -> MorlocMonad [Lang]
     ableLangs i ts langs = do
-      scopes <- MM.gets stateUniversalConcreteTypedefs
+      scopes <- MM.gets stateConcreteTypedefs
       let candidates = unique (langs <> map (LR.poolOf registry) (Map.keys scopes))
       filterM (\l -> and <$> mapM (Infer.canHoldType True l i) ts) candidates
 
@@ -825,7 +825,7 @@ realizeWithRegistry registry tables seedLangs s0 = do
           [(AnnoS (Indexed Type) One (Indexed (Maybe Lang)), Maybe Lang)] ->
           MorlocMonad (AnnoS (Indexed Type) One (Indexed (Maybe Lang)), Maybe Lang)
         handleMany gt' xs' = do
-          gscope <- MM.getGeneralScope i
+          gscope <- MM.getGeneralScope
           -- gt' followed by each step of its alias chain toward the root
           -- type (C -> B -> A -> Str). A candidate matches at the first
           -- link its head is compatible with, so an instance on a nearer
