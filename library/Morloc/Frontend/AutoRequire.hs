@@ -52,7 +52,7 @@ autoRequire = go
     go :: AnnoS (Indexed Type) Many Int
        -> MorlocMonad (AnnoS (Indexed Type) Many Int)
     go (AnnoS g c (LetS v bound body)) = do
-      bound' <- go bound
+      bound' <- go bound >>= throwErrPayload v
       body' <- go body
       mGuarded <- guardDiscarded v bound' body'
       return $ AnnoS g c (LetS v bound' (fromMaybe body' mGuarded))
@@ -89,6 +89,35 @@ autoRequire = go
               guardVar <- freshGuardVar
               return . Just $ AnnoS (idx (typeSofAnnoS body)) c
                 (LetS guardVar guardE body)
+
+    -- A refutable do-bind's guard throws the rendered subject (see
+    -- 'BT.doGuardPrefix'). When the subject is a @Try Str a@ on its Err
+    -- arm, throw the Err message itself instead, as @unwrap@ does.
+    throwErrPayload ::
+      EVar ->
+      AnnoS (Indexed Type) Many Int ->
+      MorlocMonad (AnnoS (Indexed Type) Many Int)
+    throwErrPayload v guardE@(AnnoS g c (IfS cond yes (AnnoS tg tc (IntrinsicS IntrThrow [AnnoS _ _ (IntrinsicS IntrShow [subject])]))))
+      | BT.doGuardPrefix `MT.isPrefixOf` unEVar v = do
+          t <- resolvedType (typeSofAnnoS subject)
+          case tryArms t of
+            Just (errT@(VarT e), _) | e == BT.str -> do
+              let AnnoS (Idx i _) sc _ = subject
+                  idx = Idx i
+                  nameOf n = AnnoS (idx (VarT BT.str)) sc (StrS n)
+                  fieldIdx = AnnoS (idx (VarT BT.int)) sc (IntS i 0)
+                  errMsg = AnnoS (idx errT) sc
+                    (IntrinsicS IntrCtorField [subject, nameOf BT.tryErrCtor, fieldIdx])
+                  isErr = AnnoS (idx (VarT BT.bool)) sc
+                    (IntrinsicS IntrTagTest [subject, nameOf BT.tryErrCtor])
+                  throwMsg = AnnoS tg tc (IntrinsicS IntrThrow [errMsg])
+                  shown = AnnoS tg tc (IfS isErr throwMsg (elseBranch guardE))
+              return (AnnoS g c (IfS cond yes shown))
+            _ -> return guardE
+    throwErrPayload _ guardE = return guardE
+
+    elseBranch (AnnoS _ _ (IfS _ _ e)) = e
+    elseBranch e = e
 
     typeSofAnnoS (AnnoS (Idx _ t) _ _) = t
 

@@ -1,0 +1,28 @@
+-- A failed refutable bind `Ok y <- e` on a `Try Str a` reports the Err
+-- arm's message, as `unwrap` does, rather than the whole Try rendered as
+-- JSON. Checked in a Python and a C++ pool; the passing case guards the
+-- bind itself.
+
+module main (pyBind, cppBind)
+
+import root-py
+import root-cpp
+
+source Py from "f.py" ("py_inc")
+source Cpp from "f.hpp" ("cpp_inc")
+
+py_inc :: Int -> Int
+cpp_inc :: Int -> Int
+
+check :: Int -> <IO> (Try Str Int)
+check x = ? x < 0 = (do Err "negative input") : (do Ok x)
+
+pyBind :: Int -> <IO> Int
+pyBind x = do
+  Ok y <- check x
+  py_inc y
+
+cppBind :: Int -> <IO> Int
+cppBind x = do
+  Ok y <- check x
+  cpp_inc y
