@@ -545,15 +545,6 @@ fn main() {
 
     // Normal CLI mode
     if config.packet_path.is_none() {
-        // Scoped to normal CLI dispatch only: call-packet mode already
-        // honors output_path internally (writes a sibling .mpk file
-        // via write_atomic) and must not have its stdout hijacked.
-        // A child of a multi-output run already holds the `-o` file (if
-        // any) as fd 1, or was pointed elsewhere by its parent.
-        if matches!(config.child, dispatch::ChildMode::None) {
-            process::redirect_stdout_to(config.output_path.as_deref());
-        }
-
         if let dispatch::ChildMode::Replay { cmd, inputs } = config.child.clone() {
             // One action on a staged output: the inputs are packet files,
             // in the entry's argument order.
@@ -604,6 +595,14 @@ fn main() {
             format_explicit,
             config.output_path.as_deref(),
         );
+
+        // Opened only once the arguments parse, so a rejected command line
+        // leaves the file untouched. Call-packet mode writes its own output
+        // file; a child of a multi-output run already holds the `-o` file
+        // (if any) as fd 1, or was pointed elsewhere by its parent.
+        if matches!(config.child, dispatch::ChildMode::None) {
+            process::redirect_stdout_to(config.output_path.as_deref());
+        }
 
         if let dispatch::ChildMode::Stage { dir, args, tee } = config.child.clone() {
             // The stage of a multi-output run: the parent command, once.
