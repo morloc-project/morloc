@@ -2532,16 +2532,17 @@ collectRecordTypes = do
 collectDataTypes :: MorlocMonad (Map.Map Text DataTypeDoc)
 collectDataTypes = do
   scope <- MM.gets stateGeneralTypedefs
-  return $ Map.fromList
-    [ (unTVar v, DataTypeDoc params (docLines typeDoc) ctors)
+  fmap Map.fromList . sequence $
+    [ do
+        ctors <- CM.forM (zip table (map snd ctorDocs <> repeat defaultValue)) $
+          \((name, fieldTs), vars) -> do
+            fts <- mapM (Docstrings.resolveNestedTypes . typeOf) fieldTs
+            return (name, fts, docLines vars)
+        return (unTVar v, DataTypeDoc params (docLines typeDoc) ctors)
     | (v, entries) <- Map.toList scope
     , (vs, body, ArgDocData typeDoc ctorDocs, _, TypedefEnum) <- entries
     , Just table <- [dataBodyCtors body]
     , let params = [unTVar p | Left (p, _) <- vs]
-    , let ctors =
-            [ (name, map typeOf fieldTs, docLines vars)
-            | ((name, fieldTs), vars) <- zip table (map snd ctorDocs <> repeat defaultValue)
-            ]
     ]
 
 -- | The glossary for one command: every named type its signature mentions,
