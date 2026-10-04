@@ -7,6 +7,7 @@ Maintainer  : z@morloc.io
 -}
 module LockFileTests (lockFileTests) where
 
+import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, bracket, try)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Text as T
@@ -46,14 +47,20 @@ lockFileTests =
     ]
 
 -- | Start a child under the lock, leave the lock's scope while the child still
--- runs, and check that the lock can be taken again.
+-- runs, and check that the lock can be taken again well before the child
+-- exits. Any process forked concurrently holds every descriptor until it
+-- execs, so the lock may be briefly busy; only a holder that outlives that
+-- window is a failure.
 assertChildLeavesLockFree :: FilePath -> (IO ProcessHandle -> IO ProcessHandle) -> Assertion
 assertChildLeavesLockFree lockPath underLock =
   bracket (underLock (spawnProcess "sleep" ["60"])) stop $ \_ -> do
-    free <- bracket (openLockFile lockPath) hClose (`hTryLock` ExclusiveLock)
+    free <- poll (1000 :: Int)
     assertBool "the child still holds the lock" free
   where
     stop p = terminateProcess p >> waitForProcess p
+    poll k = do
+      free <- bracket (openLockFile lockPath) hClose (`hTryLock` ExclusiveLock)
+      if free || k <= 0 then return free else threadDelay 10000 >> poll (k - 1)
 
 withScratch :: String -> (FilePath -> IO a) -> IO a
 withScratch tag act = do
