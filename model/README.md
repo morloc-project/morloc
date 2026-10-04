@@ -58,3 +58,4 @@ release.
 - `streams.md` -- file-backed streams and their registry slots (SLOT)
 - `effects.md` -- the effect system
 - `tla/ShmHandoff.tla` -- a block crossing between pools, with death and fork
+- `tla/DaemonRecovery.tla` -- pool-crash recovery against running requests

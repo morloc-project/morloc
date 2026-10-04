@@ -56,7 +56,7 @@ for cfg in "$here"/*.cfg; do
         -workers 2 -metadir "$work/states-$name" -config "$name.cfg" "$module" 2>&1 || true)"
     case "$name" in
         *.bug)
-            if grep -q "is violated" <<<"$out"; then
+            if grep -qE "violated|Deadlock reached" <<<"$out"; then
                 echo "ok   $name (violation found, as expected)"
             else
                 echo "FAIL $name: expected a violation"

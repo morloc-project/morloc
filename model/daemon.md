@@ -2,7 +2,7 @@
 
 ### DAEMON-1 Shared memory is unmapped only when no request is running
 Status: implemented
-Checked by: `recovery_waits_for_requests_already_running_and_admits_none`
+Checked by: `recovery_waits_for_requests_already_running_and_admits_none`, `tla:DaemonRecovery`, `tla:DaemonRecovery_fixed_delay.bug`, `tla:DaemonRecovery_unlocked_admission.bug`, `tla:DaemonRecovery_wait_before_kill.bug`
 
 Admission and the recovery flag share one lock. Recovery closes admission,
 kills the pools, and waits for every admitted request to finish before it
