@@ -7,18 +7,20 @@ Maintainer  : z@morloc.io
 -}
 module LockFileTests (lockFileTests) where
 
-import Control.Exception (SomeException, try)
+import Control.Exception (SomeException, bracket, try)
 import Control.Monad.IO.Class (liftIO)
-import Data.List (isInfixOf)
 import qualified Data.Text as T
+import GHC.IO.Handle.Lock (LockMode (..), hTryLock)
 import qualified Morloc.Monad as MM
 import Morloc.CodeGenerator.SystemConfig (withInitLock)
 import Morloc.Module (withModuleLock)
 import Morloc.Namespace.Prim (Defaultable (..))
 import Morloc.Namespace.State (Config (..), MorlocError, MorlocMonad)
+import Morloc.System (openLockFile)
 import System.Directory (createDirectoryIfMissing, getTemporaryDirectory, removeDirectoryRecursive)
 import System.FilePath ((</>))
-import System.Process (readProcess)
+import System.IO (hClose)
+import System.Process (ProcessHandle, spawnProcess, terminateProcess, waitForProcess)
 import System.Timeout (timeout)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit
@@ -28,15 +30,13 @@ lockFileTests =
   testGroup
     "install locks"
     [ testCase "a process started under the init lock does not hold it" $
-        withScratch "init" $ \dir -> do
-          fds <- withInitLock False dir childDescriptors
-          assertBool "the child inherited the init lock" (not (".init.lock" `isInfixOf` fds))
+        withScratch "init" $ \dir ->
+          assertChildLeavesLockFree (dir </> ".init.lock") (withInitLock False dir)
     , testCase "a process started under a module lock does not hold it" $
-        withScratch "module" $ \dir -> do
-          r <- runMM dir (withModuleLock dir (T.pack "inherit") (liftIO childDescriptors))
-          case r of
-            Left e -> assertFailure ("the locked action failed: " <> show e)
-            Right fds -> assertBool "the child inherited the module lock" (not ("inherit.lock" `isInfixOf` fds))
+        withScratch "module" $ \dir ->
+          assertChildLeavesLockFree (dir </> "inherit.lock") $ \start -> do
+            r <- runMM dir (withModuleLock dir (T.pack "inherit") (liftIO start))
+            either (\e -> assertFailure ("the locked action failed: " <> show e)) return r
     , testCase "a module lock is released when an exception escapes it" $
         withScratch "escape" $ \dir -> do
           _ <- try (runMM dir (withModuleLock dir (T.pack "mod") (liftIO (ioError (userError "boom"))))) ::
@@ -45,9 +45,15 @@ lockFileTests =
           assertBool "the module lock was still held after the exception" (maybe False (const True) again)
     ]
 
--- | The descriptors a child process inherits, as `ls -l` prints them.
-childDescriptors :: IO String
-childDescriptors = readProcess "sh" ["-c", "ls -l /proc/$$/fd"] ""
+-- | Start a child under the lock, leave the lock's scope while the child still
+-- runs, and check that the lock can be taken again.
+assertChildLeavesLockFree :: FilePath -> (IO ProcessHandle -> IO ProcessHandle) -> Assertion
+assertChildLeavesLockFree lockPath underLock =
+  bracket (underLock (spawnProcess "sleep" ["60"])) stop $ \_ -> do
+    free <- bracket (openLockFile lockPath) hClose (`hTryLock` ExclusiveLock)
+    assertBool "the child still holds the lock" free
+  where
+    stop p = terminateProcess p >> waitForProcess p
 
 withScratch :: String -> (FilePath -> IO a) -> IO a
 withScratch tag act = do
