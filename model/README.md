@@ -59,3 +59,4 @@ release.
 - `effects.md` -- the effect system
 - `tla/ShmHandoff.tla` -- a block crossing between pools, with death and fork
 - `tla/DaemonRecovery.tla` -- pool-crash recovery against running requests
+- `tla/ForkLocks.tla` -- process-wide locks across fork
