@@ -1226,6 +1226,26 @@ fn link_ifile_arg(i: usize, arg_val: &ArgValue, arg_def: &crate::manifest::Arg) 
     }
 }
 
+/// An `IFile` argument given by path must name an existing file. It is
+/// opened only when the command runs, where an error no longer says which
+/// argument or path it came from.
+fn check_ifile_arg(arg_val: &ArgValue, arg_def: &crate::manifest::Arg) -> Result<(), String> {
+    let (ArgValue::Value(token), Some("F")) = (arg_val, arg_def.general_schema_str()) else {
+        return Ok(());
+    };
+    let path = serde_json::from_str::<String>(token).unwrap_or_else(|_| token.clone());
+    if path == "-" {
+        return Err(
+            "an IFile cannot be read from stdin ('-'): it needs a seekable file. \
+             Give a file path, or take the argument as an IStream."
+                .to_string(),
+        );
+    }
+    std::fs::metadata(&path)
+        .map(|_| ())
+        .map_err(|e| format!("cannot open IFile '{}': {}", path, e))
+}
+
 /// Save a parent-layout argument packet at the parent's position `arg`
 /// (0-based) in a stage. No-op outside one.
 fn save_parent_packet(arg: usize, pkt: *mut u8) {
@@ -1278,6 +1298,9 @@ fn build_arg_packet(
             save_parent_packet(*arg, pkt);
         }
         return pkt;
+    }
+    if let Err(msg) = check_ifile_arg(arg_val, arg_def) {
+        crate::runlog::die_with_error(&format!("failed to parse argument #{}: {}", i, msg));
     }
         let schema_str = arg_def.schema_str().unwrap_or("b");
         let schema = match parse_schema(schema_str) {
@@ -2093,6 +2116,9 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
     let mut c_arg_voidstars: Vec<*mut u8> = Vec::new();
 
     for (i, (arg_val, arg_def)) in args.iter().zip(cmd.args.iter()).enumerate() {
+        if let Err(msg) = check_ifile_arg(arg_val, arg_def) {
+            crate::runlog::die_with_error(&format!("failed to parse argument #{}: {}", i, msg));
+        }
         let schema_str = arg_def.schema_str().unwrap_or("b");
         let schema = match parse_schema(schema_str) {
             Ok(s) => s,
@@ -2255,6 +2281,45 @@ fn run_pure_command(cmd: &Command, args: &[ArgValue], config: &NexusConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn positional(schema: &str) -> crate::manifest::Arg {
+        serde_json::from_str(&format!(
+            r#"{{"kind":"pos","key":"_1","schema":"{0}","general_schema":"{0}","quoted":true}}"#,
+            schema
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn ifile_arg_from_stdin_is_refused() {
+        let err = check_ifile_arg(&ArgValue::Value("-".into()), &positional("F")).unwrap_err();
+        assert!(err.contains("stdin"), "{}", err);
+    }
+
+    #[test]
+    fn ifile_arg_missing_file_names_the_path() {
+        let path = "/no/such/dir/missing.mlc";
+        let err = check_ifile_arg(&ArgValue::Value(path.into()), &positional("F")).unwrap_err();
+        assert!(err.contains(path), "{}", err);
+        let quoted = serde_json::to_string(path).unwrap();
+        let err = check_ifile_arg(&ArgValue::Value(quoted), &positional("F")).unwrap_err();
+        assert!(err.contains(&format!("'{}'", path)), "{}", err);
+    }
+
+    #[test]
+    fn ifile_arg_existing_file_passes() {
+        let file = std::env::temp_dir().join(format!("ifile_arg_{}", std::process::id()));
+        std::fs::write(&file, b"").unwrap();
+        let ok = check_ifile_arg(&ArgValue::Value(file.to_string_lossy().into()), &positional("F"));
+        std::fs::remove_file(&file).unwrap();
+        assert!(ok.is_ok(), "{:?}", ok);
+    }
+
+    #[test]
+    fn non_ifile_arg_is_not_checked() {
+        assert!(check_ifile_arg(&ArgValue::Value("-".into()), &positional("s")).is_ok());
+        assert!(check_ifile_arg(&ArgValue::Json("\"-\"".into()), &positional("F")).is_ok());
+    }
 
     #[test]
     fn collapse_drops_adjacent_duplicates() {
