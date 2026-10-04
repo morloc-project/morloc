@@ -1820,11 +1820,41 @@ fn create_file_segment(name: &str, full_size: usize, why: &str) -> Result<Option
     }
 }
 
+pub const POISON_BYTE: u8 = 0xDB;
+
+static POISON: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Whether released blocks are filled with `POISON_BYTE` instead of zeros
+/// (`MORLOC_SHM_POISON=1`), so a reader of freed memory sees a recognisable
+/// pattern. Allocation then zeroes what it hands out.
+pub fn poison_on_free() -> bool {
+    match POISON.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let on = std::env::var("MORLOC_SHM_POISON").is_ok_and(|v| v == "1");
+            POISON.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+            on
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_poison_on_free(on: bool) {
+    POISON.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+}
+
 fn shmalloc_unlocked(size: usize) -> Result<AbsPtr, MorlocError> {
     let blk = find_free_block(size)?;
     // SAFETY: blk is a claimed BlockHeader in mapped SHM; its data starts
     // immediately after the header.
-    unsafe { Ok((blk as *mut u8).add(std::mem::size_of::<BlockHeader>())) }
+    unsafe {
+        let data = (blk as *mut u8).add(std::mem::size_of::<BlockHeader>());
+        if poison_on_free() {
+            std::ptr::write_bytes(data, 0, (*blk).size);
+        }
+        Ok(data)
+    }
 }
 
 fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
@@ -1882,8 +1912,9 @@ fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
             // held the last reference and has replaced it with a value that
             // reads as in-use, so the block cannot be handed to anyone until
             // the store below.
+            let scrub = if poison_on_free() { POISON_BYTE } else { 0 };
             unsafe {
-                std::ptr::write_bytes(ptr, 0, blk.size);
+                std::ptr::write_bytes(ptr, scrub, blk.size);
             }
             crate::shm_stats::on_release(blk.size);
             blk.reference_count.store(0, Ordering::Release);
@@ -2203,6 +2234,29 @@ pub unsafe fn vol2abs(ptr: VolPtr, shm: *const ShmHeader) -> AbsPtr {
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod poison_tests {
+    use super::*;
+
+    #[test]
+    fn a_released_block_reads_as_poison_and_a_new_one_as_zero() {
+        let _shm = crate::own_test_registry();
+        set_poison_on_free(true);
+        let p = shmalloc(256).unwrap();
+        unsafe { std::ptr::write_bytes(p, 7, 256) };
+        let freed = unsafe { std::slice::from_raw_parts(p, 256).to_vec() };
+        shfree(p).unwrap();
+        let after = unsafe { std::slice::from_raw_parts(p, 256).to_vec() };
+        let q = shmalloc(256).unwrap();
+        let fresh = unsafe { std::slice::from_raw_parts(q, 256).to_vec() };
+        shfree(q).unwrap();
+        set_poison_on_free(false);
+        assert!(freed.iter().all(|&b| b == 7));
+        assert!(after.iter().all(|&b| b == POISON_BYTE), "a released block was not poisoned");
+        assert!(fresh.iter().all(|&b| b == 0), "a newly allocated block was not zeroed");
+    }
+}
 
 #[cfg(test)]
 mod calloc_tests {
