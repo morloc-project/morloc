@@ -6222,7 +6222,7 @@ pub enum SweepRequest {
 /// Sender half of the sweeper queue. Cloned to every daemon worker
 /// that needs to enqueue a sweep. Initialised by `sweeper_init`;
 /// dropped by `sweeper_shutdown` to wake the sweeper thread.
-static SWEEPER_TX: Mutex<Option<std::sync::mpsc::Sender<SweepRequest>>> =
+static SWEEPER_TX: Mutex<Option<crate::fork_local::ForkLocal<std::sync::mpsc::Sender<SweepRequest>>>> =
     Mutex::new(None);
 
 /// Sweeper thread handle, retained so `sweeper_shutdown` can join it.
@@ -6234,17 +6234,32 @@ static SWEEPER_HANDLE: Mutex<Option<crate::fork_local::ForkLocal<std::thread::Jo
 /// sender and return immediately.
 pub fn sweeper_init() {
     let mut guard = SWEEPER_TX.lock().unwrap();
-    if guard.is_some() {
+    if guard.as_ref().is_some_and(|tx| !tx.is_inherited()) {
         return;
     }
+    start_sweeper(&mut guard);
+}
+
+fn start_sweeper(slot: &mut Option<crate::fork_local::ForkLocal<std::sync::mpsc::Sender<SweepRequest>>>) {
     let (tx, rx) = std::sync::mpsc::channel::<SweepRequest>();
-    *guard = Some(tx);
-    drop(guard);
+    *slot = Some(crate::fork_local::ForkLocal::new(tx));
     let h = std::thread::Builder::new()
         .name("morloc-stream-sweeper".into())
         .spawn(move || sweeper_main(rx))
         .expect("morloc-stream-sweeper: thread spawn failed");
     *SWEEPER_HANDLE.lock().unwrap() = Some(crate::fork_local::ForkLocal::new(h));
+}
+
+fn sweeper_send(req: SweepRequest) {
+    let mut guard = SWEEPER_TX.lock().unwrap();
+    if guard.as_ref().is_some_and(|tx| tx.is_inherited()) {
+        start_sweeper(&mut guard);
+    }
+    if let Some(tx) = guard.as_ref() {
+        // Errors mean the receiver has been dropped (process is
+        // shutting down). Discard silently.
+        let _ = tx.send(req);
+    }
 }
 
 /// Stop the sweeper thread. Called before `registry_teardown` unmaps
@@ -6273,21 +6288,13 @@ pub fn sweeper_enqueue_call(call_id: u64) {
     if call_id == CALL_ID_NO_SWEEP {
         return;
     }
-    let guard = SWEEPER_TX.lock().unwrap();
-    if let Some(tx) = guard.as_ref() {
-        // Errors mean the receiver has been dropped (process is
-        // shutting down). Discard silently.
-        let _ = tx.send(SweepRequest::PerCall(call_id));
-    }
+    sweeper_send(SweepRequest::PerCall(call_id));
 }
 
 /// Enqueue a per-PID sweep request. Called when a pool crash is detected
 /// (the pool's PID + start_time uniquely identify the dead pool's slots).
 pub fn sweeper_enqueue_pid(pid: u32, start_time: u64) {
-    let guard = SWEEPER_TX.lock().unwrap();
-    if let Some(tx) = guard.as_ref() {
-        let _ = tx.send(SweepRequest::PerPid(pid, start_time));
-    }
+    sweeper_send(SweepRequest::PerPid(pid, start_time));
 }
 
 /// Sweeper thread main loop. Drains the queue forever; exits when
@@ -10645,7 +10652,11 @@ mod tests {
     fn a_forked_child_can_shut_down_without_its_parents_sweeper() {
         let _shm = crate::own_test_registry();
         sweeper_init();
-        let status = run_in_forked_child(sweeper_shutdown);
+        let status = run_in_forked_child(|| {
+            sweeper_enqueue_call(u64::MAX);
+            sweeper_enqueue_pid(1, u64::MAX);
+            sweeper_shutdown();
+        });
         assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
                 "child shutting down the sweeper did not exit cleanly: status {status}");
     }
@@ -11146,10 +11157,19 @@ mod tests {
         let peer = loop {
             match listener.accept() {
                 Ok((mut conn, _)) => {
-                    conn.set_nonblocking(false).unwrap();
-                    conn.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
                     let mut buf = [0u8; std::mem::size_of::<libc::pid_t>()];
-                    break conn.read_exact(&mut buf).ok().map(|_| libc::pid_t::from_le_bytes(buf));
+                    let mut got = 0;
+                    while got < buf.len() && began.elapsed() < std::time::Duration::from_secs(5) {
+                        match conn.read(&mut buf[got..]) {
+                            Ok(0) => break,
+                            Ok(n) => got += n,
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                std::thread::sleep(std::time::Duration::from_millis(5));
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    break (got == buf.len()).then(|| libc::pid_t::from_le_bytes(buf));
                 }
                 Err(_) if began.elapsed() < std::time::Duration::from_secs(5) => {
                     std::thread::sleep(std::time::Duration::from_millis(5));
