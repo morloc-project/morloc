@@ -1780,7 +1780,7 @@ pub unsafe extern "C" fn daemon_dispatch(
 
     let mv = manifest as *const ManifestC;
     let command_name = CStr::from_ptr((*request).command);
-    let cmd = match (*mv).command_by_name(command_name) {
+    let cmd = match (*mv).command_by_name(command_name).filter(|c| !c.internal) {
         Some(c) => c,
         None => {
             (*resp).success = false;

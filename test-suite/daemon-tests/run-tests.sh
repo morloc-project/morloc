@@ -518,6 +518,11 @@ if should_run "render"; then
     assert_http_status "POST /call/echo?render=nope -> 400" "400" \
         "http://127.0.0.1:${HTTP_PORT}/call/echo?render=nope" \
         -X POST -H "Content-Type: application/json" -d '["hi"]'
+
+    # An internal entry is reachable only through ?render=, never by name.
+    assert_http_status "POST /call/mlcp_echo_shout (internal) -> 404" "404" \
+        "http://127.0.0.1:${HTTP_PORT}/call/mlcp_echo_shout" \
+        -X POST -H "Content-Type: application/json" -d '["hi"]'
 fi
 
 # ======================================================================
