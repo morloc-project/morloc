@@ -20,7 +20,8 @@ module GoldenMakefileTests
   , goldenMakefileTest
   ) where
 
-import Control.Monad (filterM, unless)
+import Control.Exception (bracket)
+import Control.Monad (filterM, unless, void)
 import qualified Data.ByteString as BS
 import Data.List (isPrefixOf, sort)
 import GoldenShard (Shard, selectShard)
@@ -28,8 +29,10 @@ import System.Directory
   ( doesDirectoryExist
   , doesFileExist
   , findExecutable
+  , getTemporaryDirectory
   , listDirectory
   , makeAbsolute
+  , removeFile
   )
 import System.Environment (getEnvironment)
 import System.FilePath (takeDirectory, (</>))
@@ -113,20 +116,23 @@ goldenMakefileTest msg testdir =
 -- | Build and run the test program, then clean up after it. @make@'s exit code
 -- is deliberately ignored: tests of compiler diagnostics expect the build to
 -- fail, and the comparison of obs.txt against exp.txt is the only verdict.
--- Each Makefile captures its own stderr into build.err / obs.err.
+-- Each Makefile captures its own stderr into build.err / obs.err; whatever
+-- else reaches make's stderr (shell syntax errors, failed recipe lines, make's
+-- own diagnostics) is stored in make.err.
 --
 -- Cleaning is skipped when the run did not match, because most clean targets
--- delete build.err and obs.err -- the two files you need to see why. A failing
+-- delete the .err files -- the files you need to see why. A failing
 -- test leaves its build tree and stderr in place; the next passing run removes
 -- them.
 makeManifoldFile :: String -> IO ()
 makeManifoldFile path = do
   abspath <- makeAbsolute path
   let shims = takeDirectory (takeDirectory abspath) </> "shims"
-  runQuietly shims ["-C", abspath, "--quiet"]
+  err <- runQuietly shims ["-C", abspath, "--quiet"]
+  BS.writeFile (abspath </> "make.err") err
   matched <- outputMatched abspath
   if matched
-    then runQuietly shims ["-C", abspath, "--quiet", "clean"]
+    then void (runQuietly shims ["-C", abspath, "--quiet", "clean"])
     else return ()
 
 outputMatched :: FilePath -> IO Bool
@@ -150,7 +156,10 @@ readIfPresentBytes path = do
 --
 -- Where the system has no @timeout@ (macOS ships none), @shims@ goes on PATH
 -- so the tests that bound a run with it still run it.
-runQuietly :: FilePath -> [String] -> IO ()
+--
+-- Returns make's stderr. It is collected outside the test directory because
+-- most recipes begin with @rm -f *.err@.
+runQuietly :: FilePath -> [String] -> IO BS.ByteString
 runQuietly shims args = do
   env <- getEnvironment
   hasTimeout <- maybe False (const True) <$> findExecutable "timeout"
@@ -161,7 +170,17 @@ runQuietly shims args = do
         if hasTimeout
           then env'
           else ("PATH", shims ++ ":" ++ maybe "" id (lookup "PATH" env')) : filter ((/= "PATH") . fst) env'
-  _ <- SP.readCreateProcessWithExitCode (SP.proc "make" args) {SP.env = Just env''} ""
-  return ()
+  tmp <- getTemporaryDirectory
+  bracket (SI.openBinaryTempFile tmp "make.err") (\(p, h) -> SI.hClose h >> removeFile p) $ \(p, h) ->
+    SI.withFile "/dev/null" SI.ReadWriteMode $ \devnull -> do
+      let cp =
+            (SP.proc "make" args)
+              { SP.env = Just env''
+              , SP.std_in = SP.UseHandle devnull
+              , SP.std_out = SP.UseHandle devnull
+              , SP.std_err = SP.UseHandle h
+              }
+      _ <- SP.withCreateProcess cp (\_ _ _ ph -> SP.waitForProcess ph)
+      BS.readFile p
   where
     langParamsVar = "MORLOC_LANG_PARAMS"

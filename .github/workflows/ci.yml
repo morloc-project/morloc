@@ -286,13 +286,13 @@ jobs:
       - name: Dump failing golden-test stderr to log
         if: failure()
         run: |
-          # Print every non-empty obs.err / build.err under the golden tests
+          # Print every non-empty build.err / obs.err / make.err under the golden tests
           # straight to the CI log, so failure stderr (e.g. pool-crash
           # diagnostics) is visible even when the uploaded artifact is not
           # convenient to fetch. Cap each file so the log stays readable.
           echo "=== non-empty golden-test stderr ==="
           found=0
-          for f in $(find test-suite/golden-tests -name obs.err -o -name build.err 2>/dev/null); do
+          for f in $(find test-suite/golden-tests -name obs.err -o -name build.err -o -name make.err 2>/dev/null); do
             if [ -s "$f" ]; then
               found=1
               echo "----- $f -----"
@@ -300,7 +300,7 @@ jobs:
               echo
             fi
           done
-          [ "$found" = 0 ] && echo "(no non-empty obs.err/build.err found)"
+          [ "$found" = 0 ] && echo "(no non-empty build.err/obs.err/make.err found)"
           true
 
       - name: Collect macOS crash reports
@@ -328,6 +328,7 @@ jobs:
           path: |
             test-suite/golden-tests/**/build.err
             test-suite/golden-tests/**/obs.err
+            test-suite/golden-tests/**/make.err
             test-suite/golden-tests/**/obs.txt
             crash-reports/**
             system-info.txt
