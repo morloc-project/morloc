@@ -42,9 +42,11 @@ prepare handler takes it and both sides release it, so the child sees a
 consistent copy of what it guards) or reset in the child (`reset`: the child
 gets a fresh lock and fresh state, and never touches the parent's). A lock
 with no class can be inherited held by a thread the child does not have,
-and the child then blocks on it forever. Today only the seven locks marked
-`held (current)` are covered. Model: `tla/ForkLocks.tla` (`ForkLocks`
-passes; `ForkLocks_uncovered.bug` shows the child blocking).
+and the child then blocks on it forever. A held lock is declared as a
+`Held` with its rank, and one prepare handler, registered when the library
+loads, takes them all. Today only the seven `held` rows without a FORK-5
+citation are covered. Model: `tla/ForkLocks.tla` (`ForkLocks` passes;
+`ForkLocks_uncovered.bug` shows the child blocking).
 
 ### FORK-6 Workers fork from a process that has no other threads
 Status: deviation
@@ -57,10 +59,13 @@ Status: deviation
 
 The prepare handler takes held locks in rank order, and no thread takes a
 lower-ranked held lock while holding a higher-ranked one. Otherwise prepare
-and a worker can each hold the lock the other waits for. Today's order
-(release pass, local-slot map, locked descriptors, then the allocator's
-four) is implied by handler registration order and not written down or
-checked against the code. Model: `ForkLocks_misordered.bug` deadlocks.
+and a worker can each hold the lock the other waits for. A thread that
+forks while holding a held lock deadlocks in its own prepare handler, so
+prepare aborts instead. Each thread records the ranks it holds; taking a
+`Held` lock at or below one already held panics, and prepare aborts if the
+forking thread holds any. Held rows still citing FORK-5 are not yet `Held`
+and are unchecked. Model: `ForkLocks_misordered.bug` and
+`ForkLocks_fork_while_holding.bug` deadlock.
 
 ### FORK-8 A reset lock is never the parent's in the child
 Status: deviation
@@ -110,7 +115,7 @@ fold cells carry the parent's tag.
 ## Classes and ranks
 
 Every process-wide value's fork class, and the rank of each held lock, are
-in the registry in `state.md`. Ranks come from the lock-order audit: every
+in the registry, `registry.tsv`. Ranks come from the lock-order audit: every
 edge in the code goes from a lower to a higher rank, and the graph has no
 cycle.
 

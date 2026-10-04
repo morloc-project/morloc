@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use syn::visit::Visit;
 
 const CRATES: &[&str] = &["morloc-runtime", "morloc-runtime-types", "rustmorloc", "morloc-nexus"];
-const PREPARE_HANDLERS: &[&str] = &["prepare_fork", "alloc_prepare_fork"];
+const PREPARE_HANDLERS: &[&str] = &["prepare_fork"];
 const MAX_DEVIATING_ROWS: usize = 60;
 const MAX_ENV_READS: usize = 67;
 const CLASSES: &[&str] = &[
@@ -132,6 +132,7 @@ struct Found {
     id: String,
     kind: Kind,
     ty: String,
+    init: String,
     test_only: bool,
     reads_pid: bool,
 }
@@ -153,15 +154,20 @@ struct RustScan {
     prepare_bodies: String,
 }
 
+fn is_held(ty: &str) -> bool {
+    ty.starts_with("Held <")
+}
+
 fn interior_mutable(ty: &str) -> bool {
-    !ty.contains("Guard")
+    is_held(ty)
+        || (!ty.contains("Guard")
         && ["Mutex", "RwLock", "Condvar", "Atomic", "Once", "LazyLock", "Cell", "RefCell", "UnsafeCell"]
             .iter()
-            .any(|w| ty.contains(w))
+            .any(|w| ty.contains(w)))
 }
 
 fn is_lock(ty: &str) -> bool {
-    !ty.contains("Guard") && ["Mutex", "RwLock", "Condvar"].iter().any(|w| ty.contains(w))
+    is_held(ty) || (!ty.contains("Guard") && ["Mutex", "RwLock", "Condvar"].iter().any(|w| ty.contains(w)))
 }
 
 fn has_test_attr(attrs: &[syn::Attribute]) -> bool {
@@ -213,6 +219,7 @@ impl<'ast> Scan<'_, 'ast> {
             id: format!("{}::{}::{}", self.file, self.scope(), name),
             kind,
             ty,
+            init: init.replace(' ', ""),
             test_only: self.test_depth > 0,
             reads_pid: reads_pid(init) || reads_pid(&body),
         });
@@ -333,6 +340,7 @@ fn other_found(file: &Path, scope: &str, name: String, kind: Kind) -> Found {
         id: format!("{}::{}::{}", file.strip_prefix(repo_root()).unwrap().display(), scope, name),
         kind,
         ty: String::new(),
+        init: String::new(),
         test_only: false,
         reads_pid: false,
     }
@@ -449,16 +457,58 @@ fn table_after(heading: &str) -> Vec<Vec<String>> {
         .collect()
 }
 
-fn rows() -> Vec<Row> {
-    table_after("## Registry")
-        .into_iter()
-        .map(|c| Row {
-            id: c[0].clone(),
-            class: c[1].clone(),
-            rank: c[2].parse().ok(),
-            cites: c[3].split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+const REGISTRY_HEADER: &str = "id\tclass\trank\tcites";
+
+fn parse_registry(text: &str) -> Result<Vec<Row>, String> {
+    let mut lines = text.lines().enumerate();
+    match lines.next() {
+        Some((_, REGISTRY_HEADER)) => {}
+        other => return Err(format!("line 1: expected header {REGISTRY_HEADER:?}, found {:?}", other.map(|(_, l)| l))),
+    }
+    lines
+        .map(|(i, line)| {
+            let at = i + 1;
+            let c: Vec<&str> = line.split('\t').collect();
+            let [id, class, rank, cites] = c[..] else {
+                return Err(format!("line {at}: expected 4 tab-separated fields, found {}", c.len()));
+            };
+            if id.is_empty() || class.is_empty() {
+                return Err(format!("line {at}: id and class are required"));
+            }
+            let rank = if rank.is_empty() {
+                None
+            } else {
+                Some(rank.parse().map_err(|_| format!("line {at}: rank {rank:?} is not a number"))?)
+            };
+            Ok(Row {
+                id: id.to_string(),
+                class: class.to_string(),
+                rank,
+                cites: cites.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+            })
         })
         .collect()
+}
+
+fn rows() -> Vec<Row> {
+    let text = std::fs::read_to_string(model_dir().join("registry.tsv")).unwrap();
+    parse_registry(&text).unwrap_or_else(|e| panic!("model/registry.tsv: {e}"))
+}
+
+#[test]
+fn the_registry_parser_rejects_malformed_rows() {
+    let ok = format!("{REGISTRY_HEADER}\na::-::X\theld\t3\tFORK-5, FORK-10\nb::-::Y\tcounter\t\t\n");
+    let rows = parse_registry(&ok).unwrap();
+    assert_eq!((rows[0].rank, rows[0].cites.len(), rows[1].rank), (Some(3), 2, None));
+    for bad in [
+        "id class rank cites\na\theld\t\t\n".to_string(),
+        format!("{REGISTRY_HEADER}\na\theld\t\n"),
+        format!("{REGISTRY_HEADER}\na\theld\tx\t\n"),
+        format!("{REGISTRY_HEADER}\n\theld\t\t\n"),
+        format!("{REGISTRY_HEADER}\n\n"),
+    ] {
+        assert!(parse_registry(&bad).is_err(), "accepted {bad:?}");
+    }
 }
 
 fn fork_sites() -> Vec<(String, String)> {
@@ -554,16 +604,16 @@ fn every_process_wide_value_is_registered() {
     let missing: Vec<String> = all_found(&scan_rust())
         .into_iter()
         .filter(|f| !ids.contains(f.id.as_str()))
-        .map(|f| format!("| {} | ? |  |  |   ({:?}{})", f.id, f.kind, if f.test_only { ", test-only" } else { "" }))
+        .map(|f| format!("{}\t?\t\t   ({:?}{})", f.id, f.kind, if f.test_only { ", test-only" } else { "" }))
         .collect();
-    assert!(missing.is_empty(), "process-wide values missing from model/state.md:\n{}", missing.join("\n"));
+    assert!(missing.is_empty(), "process-wide values missing from model/registry.tsv:\n{}", missing.join("\n"));
 }
 
 #[test]
 fn every_registry_row_names_a_value_in_code() {
     let found: HashSet<String> = all_found(&scan_rust()).into_iter().map(|f| f.id).collect();
     let stale: Vec<String> = rows().into_iter().filter(|r| !found.contains(&r.id)).map(|r| r.id).collect();
-    assert!(stale.is_empty(), "model/state.md rows with no value in code:\n{}", stale.join("\n"));
+    assert!(stale.is_empty(), "model/registry.tsv rows with no value in code:\n{}", stale.join("\n"));
 }
 
 #[test]
@@ -594,10 +644,15 @@ fn registry_rows_obey_their_class() {
         if f.kind == Kind::Cell && f.reads_pid && !["fork-scoped", "exec-only", "test-only"].contains(&r.class.as_str()) {
             problems.push(format!("{}: caches a value derived from the process id but is {}", r.id, r.class));
         }
+        if r.class != "held" && is_held(&f.ty) {
+            problems.push(format!("{}: declared Held but its class is {}", r.id, r.class));
+        }
         if r.class == "held" && !r.cites.iter().any(|c| c == "FORK-5") {
             let name = r.id.rsplit("::").next().unwrap();
-            if f.kind != Kind::Lock || !f.ty.contains("Mutex") || f.ty.contains("OnceLock") {
-                problems.push(format!("{}: held but not a plain static Mutex", r.id));
+            if !is_held(&f.ty) {
+                problems.push(format!("{}: held but not declared Held", r.id));
+            } else if !f.init.starts_with(&format!("Held::new({},", r.rank.unwrap())) {
+                problems.push(format!("{}: its Held rank differs from the registry's {}", r.id, r.rank.unwrap()));
             }
             if !scan.prepare_bodies.contains(&format!("{name}.lock()")) {
                 problems.push(format!("{}: held but no prepare handler takes it", r.id));
@@ -621,7 +676,7 @@ fn registry_rows_obey_their_class() {
             problems.push(format!("{site}: listed as a fork site but does not fork"));
         }
     }
-    assert!(problems.is_empty(), "model/state.md disagrees with the code:\n{}", problems.join("\n"));
+    assert!(problems.is_empty(), "model/registry.tsv disagrees with the code:\n{}", problems.join("\n"));
 }
 
 #[test]

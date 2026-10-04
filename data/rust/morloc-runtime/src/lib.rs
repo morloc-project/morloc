@@ -72,7 +72,7 @@ pub mod config_ffi;
 pub mod log;
 pub mod run;
 pub mod lifeline;
-mod fork_local;
+mod fork_policy;
 pub mod debug;
 
 /// Serializes tests against the process-global SHM arena. There is one arena

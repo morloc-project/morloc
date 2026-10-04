@@ -5,6 +5,7 @@
 use crate::error::MorlocError;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
+use crate::fork_policy::Held;
 use morloc_runtime_types::shm_lock::{ShmGuard, ShmLock};
 
 // Wire-format types and constants live in `morloc-runtime-types::shm_types`
@@ -371,7 +372,7 @@ static CURRENT_VOLUME: std::sync::atomic::AtomicUsize = std::sync::atomic::Atomi
 /// total_shm_size, etc) iterate `used` instead and visit only the
 /// active K, not 32 K nulls. Maintained as a no-order Vec; on free
 /// we swap_remove the slot's entry.
-struct VolumeTable {
+pub(crate) struct VolumeTable {
     slots: [SendPtr; MAX_VOLUME_NUMBER],
     used: Vec<u16>,
 }
@@ -386,53 +387,12 @@ impl VolumeTable {
     }
 }
 
-static VOLUMES: Mutex<VolumeTable> = Mutex::new(VolumeTable {
+pub(crate) static VOLUMES: Held<VolumeTable> = Held::new(5, VolumeTable {
     slots: [SendPtr::null(); MAX_VOLUME_NUMBER],
     used: Vec::new(),
 });
 
-static ALLOC_MUTEX: Mutex<()> = Mutex::new(());
-
-/// The allocator's process-local locks, held by the forking thread across a
-/// fork. A child has only that thread, so a lock another thread held at the
-/// fork would stay held in the child forever: its first allocation would
-/// hang. Taken in the order every other path takes them.
-struct AllocForkHeld {
-    _alloc: std::sync::MutexGuard<'static, ()>,
-    _volumes: std::sync::MutexGuard<'static, VolumeTable>,
-    _basename: std::sync::MutexGuard<'static, [u8; MAX_FILENAME_SIZE]>,
-    _fallback: std::sync::MutexGuard<'static, [u8; MAX_FILENAME_SIZE]>,
-}
-
-thread_local! {
-    static ALLOC_FORK_HELD: std::cell::RefCell<Option<AllocForkHeld>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Install the allocator's fork handlers, once. Prepare handlers run in the
-/// reverse of the order they were installed, so these must be installed no
-/// later than any handler whose prepare step allocates (the stream
-/// registry's): that one then runs while the allocator is still free.
-pub(crate) fn register_fork_handlers() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| unsafe {
-        libc::pthread_atfork(Some(alloc_prepare_fork), Some(alloc_after_fork), Some(alloc_after_fork));
-    });
-}
-
-extern "C" fn alloc_prepare_fork() {
-    let held = AllocForkHeld {
-        _alloc: ALLOC_MUTEX.lock().unwrap_or_else(|p| p.into_inner()),
-        _volumes: VOLUMES.lock().unwrap_or_else(|p| p.into_inner()),
-        _basename: COMMON_BASENAME.lock().unwrap_or_else(|p| p.into_inner()),
-        _fallback: FALLBACK_DIR.lock().unwrap_or_else(|p| p.into_inner()),
-    };
-    ALLOC_FORK_HELD.with(|h| *h.borrow_mut() = Some(held));
-}
-
-extern "C" fn alloc_after_fork() {
-    ALLOC_FORK_HELD.with(|h| drop(h.borrow_mut().take()));
-}
+pub(crate) static ALLOC_MUTEX: Held<()> = Held::new(4, ());
 
 /// Reference-count value marking a block whose last reference has been
 /// dropped and whose bytes are being scrubbed. It reads as in-use, so no
@@ -502,16 +462,16 @@ fn pick_free_slot(table: &VolumeTable) -> Option<usize> {
     None
 }
 
-static COMMON_BASENAME: Mutex<[u8; MAX_FILENAME_SIZE]> = Mutex::new([0u8; MAX_FILENAME_SIZE]);
+pub(crate) static COMMON_BASENAME: Held<[u8; MAX_FILENAME_SIZE]> = Held::new(8, [0u8; MAX_FILENAME_SIZE]);
 
-static FALLBACK_DIR: Mutex<[u8; MAX_FILENAME_SIZE]> = Mutex::new([0u8; MAX_FILENAME_SIZE]);
+pub(crate) static FALLBACK_DIR: Held<[u8; MAX_FILENAME_SIZE]> = Held::new(9, [0u8; MAX_FILENAME_SIZE]);
 
 /// Read the common SHM basename set by the first `shinit` call in
 /// this process. Returns an empty string if no `shinit` has been
 /// called yet. Used by callers that need to allocate additional
 /// volumes (e.g. the stream registry) under the same session.
 pub fn get_common_basename() -> String {
-    let cb = COMMON_BASENAME.lock().unwrap();
+    let cb = COMMON_BASENAME.lock();
     get_cstr_buf(&cb).to_string()
 }
 
@@ -572,7 +532,7 @@ extern "C" fn shclose_atexit() {
     // still-live allocator (safe ordering, and required by any hook
     // that itself performs allocator ops on the way out).
     run_shclose_hooks_atexit();
-    if let Ok(mut vols) = VOLUMES.try_lock() {
+    if let Some(mut vols) = VOLUMES.try_lock() {
         shclose_locked(&mut vols);
     }
 }
@@ -593,7 +553,7 @@ fn get_cstr(buf: &[u8]) -> &str {
 
 /// Set fallback directory for file-backed SHM when /dev/shm is too small.
 pub fn shm_set_fallback_dir(dir: &str) {
-    let mut fb = FALLBACK_DIR.lock().unwrap();
+    let mut fb = FALLBACK_DIR.lock();
     set_cstr(&mut *fb, dir);
 }
 
@@ -601,7 +561,7 @@ pub fn shm_set_fallback_dir(dir: &str) {
 /// Returns `None` if never set or empty. Used by companion-segment
 /// teardown to reach the file-backed path.
 pub fn get_fallback_dir() -> Option<String> {
-    let fb = FALLBACK_DIR.lock().unwrap();
+    let fb = FALLBACK_DIR.lock();
     let s = get_cstr_buf(&fb).to_string();
     if s.is_empty() { None } else { Some(s) }
 }
@@ -650,7 +610,6 @@ pub fn shinit(
     volume_index: usize,
     shm_size: usize,
 ) -> Result<*mut ShmHeader, MorlocError> {
-    register_fork_handlers();
     if volume_index == 0 || volume_index >= MAX_VOLUME_NUMBER {
         return Err(MorlocError::Shm(format!(
             "shinit: volume index {} is not usable (1..{})", volume_index, MAX_VOLUME_NUMBER
@@ -662,13 +621,13 @@ pub fn shinit(
         unsafe { libc::atexit(shclose_atexit) };
     }
     if get_common_basename() == shm_basename {
-        let mapped = VOLUMES.lock().unwrap().slots[volume_index].ptr();
+        let mapped = VOLUMES.lock().slots[volume_index].ptr();
         if !mapped.is_null() {
             return Ok(mapped);
         }
     }
     {
-        let mut cb = COMMON_BASENAME.lock().unwrap();
+        let mut cb = COMMON_BASENAME.lock();
         set_cstr(&mut *cb, shm_basename);
     }
     let shm_name = volume_name(shm_basename, volume_index);
@@ -765,7 +724,7 @@ unsafe fn init_volume(
 
 fn register_volume(volume_index: usize, shm: *mut ShmHeader, data_size: usize) {
     {
-        let mut vols = VOLUMES.lock().unwrap();
+        let mut vols = VOLUMES.lock();
         vols.slots[volume_index].set(shm, data_size);
         vols.mark_used(volume_index);
     }
@@ -839,13 +798,13 @@ pub fn shopen_diag(
     volume_index: usize,
 ) -> Result<Result<*mut ShmHeader, ShopenMiss>, MorlocError> {
     {
-        let vols = VOLUMES.lock().unwrap();
+        let vols = VOLUMES.lock();
         if !vols.slots[volume_index].is_null() {
             return Ok(Ok(vols.slots[volume_index].ptr()));
         }
     }
     let basename = {
-        let cb = COMMON_BASENAME.lock().unwrap();
+        let cb = COMMON_BASENAME.lock();
         get_cstr_buf(&cb).to_string()
     };
     if basename.is_empty() {
@@ -980,11 +939,11 @@ fn split_volume_name(name: &str) -> (String, usize) {
 /// rather than growing a volume that no owner would ever remove.
 pub fn shclose() -> Result<(), MorlocError> {
     run_shclose_hooks();
-    let _lock = ALLOC_MUTEX.lock().unwrap();
-    let mut vols = VOLUMES.lock().unwrap();
+    let _lock = ALLOC_MUTEX.lock();
+    let mut vols = VOLUMES.lock();
     shclose_locked(&mut vols);
     CURRENT_VOLUME.store(0, Ordering::Release);
-    COMMON_BASENAME.lock().unwrap().fill(0);
+    COMMON_BASENAME.lock().fill(0);
     Ok(())
 }
 
@@ -1003,11 +962,11 @@ pub fn shclose() -> Result<(), MorlocError> {
 /// "address not inside any mapped volume" guard added to `shfree` and
 /// no-op rather than segfault.
 pub fn reset_all() -> Result<(), MorlocError> {
-    let _lock = ALLOC_MUTEX.lock().unwrap();
-    let mut vols = VOLUMES.lock().unwrap();
+    let _lock = ALLOC_MUTEX.lock();
+    let mut vols = VOLUMES.lock();
     shclose_locked(&mut vols);
     CURRENT_VOLUME.store(0, std::sync::atomic::Ordering::Release);
-    let mut cb = COMMON_BASENAME.lock().unwrap();
+    let mut cb = COMMON_BASENAME.lock();
     for b in cb.iter_mut() {
         *b = 0;
     }
@@ -1028,7 +987,7 @@ pub fn live_block_stats(hist: &mut [usize]) -> (usize, usize) {
     let hdr_size = std::mem::size_of::<BlockHeader>();
     let mut blocks = 0usize;
     let mut bytes = 0usize;
-    let vols = VOLUMES.lock().unwrap();
+    let vols = VOLUMES.lock();
     for &slot_idx in &vols.used {
         let slot = vols.slots[slot_idx as usize];
         if slot.is_null() {
@@ -1069,7 +1028,7 @@ pub fn live_block_stats(hist: &mut [usize]) -> (usize, usize) {
 /// SHM ptr when its request was failed by the recovery quiesce).
 fn ptr_is_in_any_volume(ptr: AbsPtr) -> bool {
     let p = ptr as usize;
-    let vols = VOLUMES.lock().unwrap();
+    let vols = VOLUMES.lock();
     for &slot_idx in &vols.used {
         let slot = vols.slots[slot_idx as usize];
         if slot.is_null() {
@@ -1110,7 +1069,7 @@ fn shclose_locked(vols: &mut VolumeTable) {
         vols.slots[i] = SendPtr::null();
     }
     if owns_program() {
-        if let Ok(cb) = COMMON_BASENAME.try_lock() {
+        if let Some(cb) = COMMON_BASENAME.try_lock() {
             let basename = get_cstr_buf(&cb).to_string();
             drop(cb);
             let fallback = FALLBACK_DIR.try_lock().map(|fb| get_cstr_buf(&fb).to_string()).unwrap_or_default();
@@ -1182,7 +1141,7 @@ fn remove_program_volumes(basename: &str, fallback: &str) {
 pub fn shmalloc(size: usize) -> Result<AbsPtr, MorlocError> {
     let size = if size == 0 { BLOCK_ALIGN } else { align_up(size, BLOCK_ALIGN) };
     let ptr = {
-        let _lock = ALLOC_MUTEX.lock().unwrap();
+        let _lock = ALLOC_MUTEX.lock();
         shmalloc_unlocked(size)?
     };
     crate::eval_arena::record_if_active(ptr);
@@ -1219,7 +1178,7 @@ pub fn shfree(ptr: AbsPtr) -> Result<(), MorlocError> {
     // guard-drop won't attempt a second free. No-op if no arena is active
     // or if `ptr` was never tracked.
     crate::eval_arena::forget_if_active(ptr);
-    let _lock = ALLOC_MUTEX.lock().unwrap();
+    let _lock = ALLOC_MUTEX.lock();
     // Pool-crash recovery: if `reset_all` has unmapped every volume since
     // this caller obtained `ptr`, dereferencing the (now-unmapped) header
     // would segfault. The recovery sequence is responsible for getting all
@@ -1395,7 +1354,7 @@ pub fn rel2abs_extent(ptr: RelPtr, extent: usize) -> Result<AbsPtr, MorlocError>
     // Not published: look the slot up under the lock (it may be mapped but
     // not yet published), then drop the lock before computing the address.
     let slot = {
-        let vols = VOLUMES.lock().unwrap();
+        let vols = VOLUMES.lock();
         vols.slots[vol_idx]
     };
     if !slot.is_null() {
@@ -1423,7 +1382,7 @@ pub fn rel2abs_extent(ptr: RelPtr, extent: usize) -> Result<AbsPtr, MorlocError>
         Err(miss) => return Err(rel2abs_miss_error(ptr, vol_idx, 0, miss)),
     };
     let slot = {
-        let vols = VOLUMES.lock().unwrap();
+        let vols = VOLUMES.lock();
         vols.slots[vol_idx]
     };
     if slot.is_null() {
@@ -1466,7 +1425,7 @@ fn rel2abs_miss_error(
     miss: ShopenMiss,
 ) -> MorlocError {
     let basename_now = {
-        let cb = COMMON_BASENAME.lock().unwrap();
+        let cb = COMMON_BASENAME.lock();
         get_cstr_buf(&cb).to_string()
     };
     let offset = relptr_offset(ptr);
@@ -1523,7 +1482,7 @@ fn rel2abs_miss_error(
 /// (the packed list of K active slot indices) rather than scanning the
 /// 32 768-slot sparse `slots` array. Cost is O(K_active).
 pub fn abs2rel(ptr: AbsPtr) -> Result<RelPtr, MorlocError> {
-    let vols = VOLUMES.lock().unwrap();
+    let vols = VOLUMES.lock();
     for &slot_idx in &vols.used {
         let i = slot_idx as usize;
         let slot = vols.slots[i];
@@ -1553,7 +1512,7 @@ pub fn abs2rel(ptr: AbsPtr) -> Result<RelPtr, MorlocError> {
 
 /// Find the ShmHeader for a given absolute pointer.
 pub fn abs2shm(ptr: AbsPtr) -> Result<*mut ShmHeader, MorlocError> {
-    let vols = VOLUMES.lock().unwrap();
+    let vols = VOLUMES.lock();
     for &slot_idx in &vols.used {
         let slot = vols.slots[slot_idx as usize];
         if slot.is_null() {
@@ -1588,7 +1547,7 @@ pub fn abs2shm(ptr: AbsPtr) -> Result<*mut ShmHeader, MorlocError> {
 pub fn total_shm_size() -> usize {
     let mut total = 0;
     {
-        let vols = VOLUMES.lock().unwrap();
+        let vols = VOLUMES.lock();
         for &slot_idx in &vols.used {
             let slot = vols.slots[slot_idx as usize];
             if !slot.is_null() {
@@ -1925,7 +1884,7 @@ fn shfree_unlocked(ptr: AbsPtr) -> Result<(), MorlocError> {
 
 fn find_free_block(size: usize) -> Result<*mut BlockHeader, MorlocError> {
     let cv = CURRENT_VOLUME.load(Ordering::Relaxed);
-    let vols = VOLUMES.lock().unwrap();
+    let vols = VOLUMES.lock();
 
     // Try current volume first (allocation hint).
     let shm = vols.slots[cv].ptr();
@@ -1971,7 +1930,7 @@ fn find_free_block(size: usize) -> Result<*mut BlockHeader, MorlocError> {
 
     drop(vols);
     let basename = {
-        let cb = COMMON_BASENAME.lock().unwrap();
+        let cb = COMMON_BASENAME.lock();
         get_cstr_buf(&cb).to_string()
     };
     // No program to grow: shared memory is not initialised, or was closed.
@@ -1988,7 +1947,7 @@ fn find_free_block(size: usize) -> Result<*mut BlockHeader, MorlocError> {
     // search moves on.
     const ATTEMPTS: usize = 16;
     for _ in 0..ATTEMPTS {
-        let picked = pick_free_slot(&VOLUMES.lock().unwrap());
+        let picked = pick_free_slot(&VOLUMES.lock());
         let Some(idx) = picked else {
             return Err(MorlocError::Shm(format!(
                 "Could not find suitable block for {} bytes: all {} \
@@ -2861,7 +2820,7 @@ mod tests {
             allocs.push(p);
         }
         // Confirm we actually exercised the multi-volume path.
-        let used_count = VOLUMES.lock().unwrap().used.len();
+        let used_count = VOLUMES.lock().used.len();
         assert!(
             used_count >= 2,
             "expected at least 2 volumes after 128 allocs of 2 KiB, got {}",

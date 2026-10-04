@@ -59,7 +59,7 @@ $ morloc install --force <remote-model-name>
 `model/` holds the spec of threads, processes, locks and shared-memory
 ownership. Every process-wide mutable value (lock, atomic, once-cell,
 thread-local, lock field, binder or emitted static) needs a row in
-`model/state.md` with its fork class; a test fails until it has one, and
+`model/registry.tsv` with its fork class; a test fails until it has one, and
 prints the row to fill in. It describes the system as it is; where code breaks it, the
 break is listed in its deviations section. Read the relevant section before
 changing that code, and change the spec in the same commit as any protocol
@@ -70,7 +70,7 @@ In these files the only comments allowed are spec references:
 - morloc-runtime/src: stream.rs, write_behind.rs, handle_scan.rs, pins.rs,
   cache.rs, shm.rs, shm_companion.rs, eval_arena.rs, cell.rs, crash.rs,
   daemon_ffi.rs, pool_ffi.rs, ipc_ffi.rs, router_ffi.rs, arrow_shm.rs,
-  lifeline.rs, fork_local.rs
+  lifeline.rs, fork_policy.rs
 - morloc-runtime-types/src: recoverable_lock.rs, shm_lock.rs,
   owner_word.rs, stream_handle.rs, dispatch_guard.rs, fd.rs
 - morloc-nexus/src: process.rs

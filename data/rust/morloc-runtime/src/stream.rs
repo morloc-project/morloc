@@ -31,6 +31,7 @@ use std::fs::OpenOptions;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::sync::Mutex;
+use crate::fork_policy::Held;
 
 use morloc_runtime_types::packet::{
     decode_stream_tail,
@@ -863,7 +864,7 @@ pub struct ProcessLocalSlot {
     /// Per-handle decompressed-sub-packet LRU. Lives on the heap so
     /// dropping the entry from the HashMap shfree's the SHM blocks
     /// referenced by the cache.
-    pub(crate) cache: crate::fork_local::ForkLocal<Box<StreamCache>>,
+    pub(crate) cache: crate::fork_policy::ForkLocal<Box<StreamCache>>,
 
     /// Parsed value schema cached from the SHM slot's `schema_str`.
     /// Each pool parses on first attach; the cost is a microsecond-
@@ -906,7 +907,7 @@ pub struct ProcessLocalSlot {
 }
 
 fn fork_epoch() -> u64 {
-    crate::fork_local::generation()
+    crate::fork_policy::generation()
 }
 
 impl Drop for ProcessLocalSlot {
@@ -926,7 +927,7 @@ impl Drop for ProcessLocalSlot {
         }
         if self.fd >= 0 {
             if self.holds_lock {
-                LOCKED_FDS.lock().unwrap_or_else(|p| p.into_inner()).retain(|&f| f != self.fd);
+                LOCKED_FDS.lock().retain(|&f| f != self.fd);
             }
             unsafe { libc::close(self.fd); }
         }
@@ -980,7 +981,7 @@ fn file_identity(fd: libc::c_int) -> (u64, u64) {
 /// Close a descriptor this process locked for a stream that never
 /// opened, releasing the lock for any child forked in between.
 pub(crate) fn unlock_and_close(fd: libc::c_int) {
-    LOCKED_FDS.lock().unwrap_or_else(|p| p.into_inner()).retain(|&f| f != fd);
+    LOCKED_FDS.lock().retain(|&f| f != fd);
     unsafe {
         libc::flock(fd, libc::LOCK_UN);
         libc::close(fd);
@@ -997,7 +998,7 @@ pub(crate) fn unlock_and_close(fd: libc::c_int) {
 unsafe impl Send for ProcessLocalSlot {}
 
 /// A process's entry for one handle.
-enum LocalEntry {
+pub(crate) enum LocalEntry {
     Idle(ProcessLocalSlot),
     /// A thread has the slot out for an operation; others wait for it.
     /// A forked child inherits the mark without the thread, so a mark
@@ -1017,8 +1018,8 @@ enum LocalEntry {
 /// read handle's slot holds only a mapping and a cache, so threads reading
 /// at once each use their own. The map lock is never held across an
 /// operation's I/O.
-static PROCESS_LOCAL_SLOTS: Mutex<Option<std::collections::HashMap<i64, LocalEntry>>> =
-    Mutex::new(None);
+pub(crate) static PROCESS_LOCAL_SLOTS: Held<Option<std::collections::HashMap<i64, LocalEntry>>> =
+    Held::new(2, None);
 
 /// Signalled whenever an `InUse` mark is replaced or removed.
 static PROCESS_LOCAL_RETURNED: std::sync::Condvar = std::sync::Condvar::new();
@@ -1039,7 +1040,7 @@ impl LocalClaim {
             install_process_local_slot(self.handle, local);
             return;
         }
-        let mut guard = PROCESS_LOCAL_SLOTS.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = PROCESS_LOCAL_SLOTS.lock();
         let map = guard.get_or_insert_with(std::collections::HashMap::new);
         let spare = match map.entry(self.handle) {
             std::collections::hash_map::Entry::Vacant(v) => {
@@ -1059,7 +1060,7 @@ impl Drop for LocalClaim {
         if self.returned || !self.exclusive {
             return;
         }
-        let mut guard = PROCESS_LOCAL_SLOTS.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = PROCESS_LOCAL_SLOTS.lock();
         if let Some(map) = guard.as_mut() {
             if let Some(LocalEntry::InUse { pid, thread }) = map.get(&self.handle) {
                 if *pid == std::process::id() && *thread == std::thread::current().id() {
@@ -1089,10 +1090,9 @@ fn claim_process_local_slot(
     handle: i64,
     mode: ClaimMode,
 ) -> Result<Option<(LocalClaim, Option<ProcessLocalSlot>)>, MorlocError> {
-    register_fork_handlers();
     let pid = std::process::id();
     let thread = std::thread::current().id();
-    let mut guard = PROCESS_LOCAL_SLOTS.lock().unwrap_or_else(|p| p.into_inner());
+    let mut guard = PROCESS_LOCAL_SLOTS.lock();
     if mode == ClaimMode::Shared {
         let map = guard.get_or_insert_with(std::collections::HashMap::new);
         let local = match map.remove(&handle) {
@@ -1118,7 +1118,7 @@ fn claim_process_local_slot(
                 if mode == ClaimMode::NoWait {
                     return Ok(None);
                 }
-                guard = PROCESS_LOCAL_RETURNED.wait(guard).unwrap();
+                guard = guard.wait(&PROCESS_LOCAL_RETURNED);
                 continue;
             }
         }
@@ -1215,7 +1215,7 @@ pub fn with_process_local_slot<R>(
     }
 
     if local.cache.is_inherited() {
-        local.cache = crate::fork_local::ForkLocal::new(Box::new(StreamCache::new(read_cache_cap_env())));
+        local.cache = crate::fork_policy::ForkLocal::new(Box::new(StreamCache::new(read_cache_cap_env())));
     }
 
     // Run f with the validated local slot. A panic must not lose the slot:
@@ -1258,8 +1258,7 @@ pub fn with_process_local_slot<R>(
 /// Helper: insert an entry into the process-local map, replacing any
 /// existing entry (the caller already validated generation).
 fn install_process_local_slot(handle: i64, slot: ProcessLocalSlot) {
-    register_fork_handlers();
-    let mut guard = PROCESS_LOCAL_SLOTS.lock().unwrap_or_else(|p| p.into_inner());
+    let mut guard = PROCESS_LOCAL_SLOTS.lock();
     let map = guard.get_or_insert_with(std::collections::HashMap::new);
     let replaced = map.insert(handle, LocalEntry::Idle(slot));
     drop(guard);
@@ -1272,73 +1271,31 @@ fn install_process_local_slot(handle: i64, slot: ProcessLocalSlot) {
 /// Descriptors of this process that hold a stream file's lock. A forked
 /// child closes its copies: the lock is the opener's, and a copy in a child
 /// would keep the file locked after the opener ended the stream or died.
-static LOCKED_FDS: Mutex<Vec<libc::c_int>> = Mutex::new(Vec::new());
+pub(crate) static LOCKED_FDS: Held<Vec<libc::c_int>> = Held::new(3, Vec::new());
 
 fn note_locked_fd(fd: libc::c_int) {
-    LOCKED_FDS.lock().unwrap_or_else(|p| p.into_inner()).push(fd);
+    LOCKED_FDS.lock().push(fd);
 }
 
-/// Locks the forking thread holds across a fork, so the child never
-/// inherits one held by a thread it lacks.
-struct ForkHeld {
-    _pass: std::sync::MutexGuard<'static, ()>,
-    map: std::sync::MutexGuard<'static, Option<std::collections::HashMap<i64, LocalEntry>>>,
-    locked_fds: std::sync::MutexGuard<'static, Vec<libc::c_int>>,
-}
-
-thread_local! {
-    static FORK_HELD: std::cell::RefCell<Option<ForkHeld>> = const { std::cell::RefCell::new(None) };
-}
-
-/// Install the fork handlers for this process's stream state, once.
-pub(crate) fn register_fork_handlers() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| unsafe {
-        // The allocator's handlers first: this prepare step allocates.
-        crate::shm::register_fork_handlers();
-        crate::fork_local::register();
-        libc::pthread_atfork(Some(prepare_fork), Some(after_fork_in_parent), Some(after_fork_in_child));
-    });
-}
-
-/// A forked child may write the parent's streams, and the parent may wait
-/// for it: write what this process holds first. Then hold the stream state's
-/// locks across the fork.
-extern "C" fn prepare_fork() {
-    let pass = RELEASE_PASS.lock().unwrap_or_else(|p| p.into_inner());
-    if let Err(e) = drain_before_handoff() {
-        eprintln!("morloc: a stream write failed before fork: {e}");
+// FORK-4: the child closes its copies; its slots reattach on next use.
+pub(crate) fn after_fork_in_child(
+    map: &mut Option<std::collections::HashMap<i64, LocalEntry>>,
+    locked_fds: &mut Vec<libc::c_int>,
+) {
+    for fd in locked_fds.drain(..) {
+        unsafe { libc::close(fd); }
     }
-    let map = PROCESS_LOCAL_SLOTS.lock().unwrap_or_else(|p| p.into_inner());
-    let locked_fds = LOCKED_FDS.lock().unwrap_or_else(|p| p.into_inner());
-    FORK_HELD.with(|h| *h.borrow_mut() = Some(ForkHeld { _pass: pass, map, locked_fds }));
-}
-
-extern "C" fn after_fork_in_parent() {
-    FORK_HELD.with(|h| drop(h.borrow_mut().take()));
-}
-
-/// The child closes its copies of the locked descriptors. Its slots for
-/// those streams become stale, so a later use attaches its own descriptor,
-/// as any other writing process does.
-extern "C" fn after_fork_in_child() {
-    FORK_HELD.with(|h| {
-        let Some(mut held) = h.borrow_mut().take() else { return };
-        for fd in held.locked_fds.drain(..) {
-            unsafe { libc::close(fd); }
-        }
-        if let Some(map) = held.map.as_mut() {
-            for entry in map.values_mut() {
-                if let LocalEntry::Idle(local) = entry {
-                    if local.holds_lock {
-                        local.fd = -1;
-                        local.holds_lock = false;
-                        local.cached_generation = u64::MAX;
-                    }
+    if let Some(map) = map.as_mut() {
+        for entry in map.values_mut() {
+            if let LocalEntry::Idle(local) = entry {
+                if local.holds_lock {
+                    local.fd = -1;
+                    local.holds_lock = false;
+                    local.cached_generation = u64::MAX;
                 }
             }
         }
-    });
+    }
 }
 
 /// Explicitly invalidate (drop) the process-local entry for `handle`
@@ -1346,7 +1303,7 @@ extern "C" fn after_fork_in_child() {
 /// `shared_close_handle` after it releases the SHM slot, so the next
 /// access reattaches (which will then fail the generation check cleanly).
 pub fn invalidate_process_local_slot(handle: i64) {
-    let mut guard = PROCESS_LOCAL_SLOTS.lock().unwrap_or_else(|p| p.into_inner());
+    let mut guard = PROCESS_LOCAL_SLOTS.lock();
     let removed = guard.as_mut().and_then(|map| map.remove(&handle));
     drop(guard);
     match removed {
@@ -1529,7 +1486,7 @@ fn attach_process_local_slot(
     let (value_schema, elem_schema) = derive_stream_schemas(&parsed_schema);
 
     let cap_bytes = read_cache_cap_env();
-    let cache = crate::fork_local::ForkLocal::new(Box::new(StreamCache::new(cap_bytes)));
+    let cache = crate::fork_policy::ForkLocal::new(Box::new(StreamCache::new(cap_bytes)));
     Ok(ProcessLocalSlot {
         cached_generation,
         mmap_ptr,
@@ -1854,12 +1811,12 @@ fn finish_ended(handle: i64, local: ProcessLocalSlot) {
 
 /// Held across a release pass, which frees SHM blocks, so a fork never
 /// copies the allocator's lock mid-pass into a child without the thread.
-static RELEASE_PASS: Mutex<()> = Mutex::new(());
+pub(crate) static RELEASE_PASS: Held<()> = Held::new(1, ());
 
 fn release_ended_streams() {
-    let _pass = RELEASE_PASS.lock().unwrap_or_else(|p| p.into_inner());
+    let _pass = RELEASE_PASS.lock();
     let ended: Vec<(i64, ProcessLocalSlot)> = {
-        let mut guard = PROCESS_LOCAL_SLOTS.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = PROCESS_LOCAL_SLOTS.lock();
         let Some(map) = guard.as_mut() else { return };
         let handles: Vec<i64> = map
             .iter()
@@ -2490,7 +2447,7 @@ pub fn shared_open_ifile(path: &str) -> Result<i64, MorlocError> {
         pages_dropped: 0,
         map_file: None,
         fd: -1,
-        cache: crate::fork_local::ForkLocal::new(Box::new(StreamCache::new(cap_bytes))),
+        cache: crate::fork_policy::ForkLocal::new(Box::new(StreamCache::new(cap_bytes))),
         value_schema: parsed.value_schema.clone(),
         elem_schema: parsed.elem_schema.clone(),
         subpacket_entries_local: parsed.subpacket_entries.clone(),
@@ -2601,7 +2558,7 @@ pub fn shared_open_istream(path: &str) -> Result<i64, MorlocError> {
         pages_dropped: 0,
         map_file: Some(map_file),
         fd: -1,
-        cache: crate::fork_local::ForkLocal::new(Box::new(StreamCache::new(cap_bytes))),
+        cache: crate::fork_policy::ForkLocal::new(Box::new(StreamCache::new(cap_bytes))),
         value_schema: parsed.value_schema.clone(),
         elem_schema: parsed.elem_schema.clone(),
         subpacket_entries_local: parsed.subpacket_entries.clone(),
@@ -2894,7 +2851,7 @@ pub fn open_stdio(kind: u8, stdio_kind: u8, schema_str: &str)
         pages_dropped: 0,
         map_file: None,
         fd: -1,                    // stdio writes go through RPC, not fd
-        cache: crate::fork_local::ForkLocal::new(Box::new(StreamCache::new(0))),
+        cache: crate::fork_policy::ForkLocal::new(Box::new(StreamCache::new(0))),
         value_schema: value_schema_cached,
         elem_schema: elem_schema_cached,
         subpacket_entries_local: Vec::new(),
@@ -3350,7 +3307,7 @@ fn init_ostream_on_locked_fd(
         pages_dropped: 0,
         map_file: None,
         fd,                       // opener holds flock for slot lifetime
-        cache: crate::fork_local::ForkLocal::new(Box::new(StreamCache::new(0))),
+        cache: crate::fork_policy::ForkLocal::new(Box::new(StreamCache::new(0))),
         value_schema: value_schema_cached,
         elem_schema: elem_schema_cached,
         subpacket_entries_local: Vec::new(),
@@ -6193,7 +6150,7 @@ pub fn shared_append_to_path(
         pages_dropped: 0,
         map_file: None,
         fd,
-        cache: crate::fork_local::ForkLocal::new(Box::new(StreamCache::new(0))),
+        cache: crate::fork_policy::ForkLocal::new(Box::new(StreamCache::new(0))),
         value_schema: value_schema_clone,
         elem_schema: elem_schema_clone,
         subpacket_entries_local: subpacket_entries_clone,
@@ -6239,11 +6196,11 @@ pub enum SweepRequest {
 /// Sender half of the sweeper queue. Cloned to every daemon worker
 /// that needs to enqueue a sweep. Initialised by `sweeper_init`;
 /// dropped by `sweeper_shutdown` to wake the sweeper thread.
-static SWEEPER_TX: Mutex<Option<crate::fork_local::ForkLocal<std::sync::mpsc::Sender<SweepRequest>>>> =
+static SWEEPER_TX: Mutex<Option<crate::fork_policy::ForkLocal<std::sync::mpsc::Sender<SweepRequest>>>> =
     Mutex::new(None);
 
 /// Sweeper thread handle, retained so `sweeper_shutdown` can join it.
-static SWEEPER_HANDLE: Mutex<Option<crate::fork_local::ForkLocal<std::thread::JoinHandle<()>>>> =
+static SWEEPER_HANDLE: Mutex<Option<crate::fork_policy::ForkLocal<std::thread::JoinHandle<()>>>> =
     Mutex::new(None);
 
 /// Spawn the dedicated sweeper thread and install its `Sender` in
@@ -6257,14 +6214,14 @@ pub fn sweeper_init() {
     start_sweeper(&mut guard);
 }
 
-fn start_sweeper(slot: &mut Option<crate::fork_local::ForkLocal<std::sync::mpsc::Sender<SweepRequest>>>) {
+fn start_sweeper(slot: &mut Option<crate::fork_policy::ForkLocal<std::sync::mpsc::Sender<SweepRequest>>>) {
     let (tx, rx) = std::sync::mpsc::channel::<SweepRequest>();
-    *slot = Some(crate::fork_local::ForkLocal::new(tx));
+    *slot = Some(crate::fork_policy::ForkLocal::new(tx));
     let h = std::thread::Builder::new()
         .name("morloc-stream-sweeper".into())
         .spawn(move || sweeper_main(rx))
         .expect("morloc-stream-sweeper: thread spawn failed");
-    *SWEEPER_HANDLE.lock().unwrap() = Some(crate::fork_local::ForkLocal::new(h));
+    *SWEEPER_HANDLE.lock().unwrap() = Some(crate::fork_policy::ForkLocal::new(h));
 }
 
 fn sweeper_send(req: SweepRequest) {
@@ -10221,7 +10178,7 @@ pub fn shared_open_ifile_recovered(
         pages_dropped: 0,
         map_file: None,
         fd: -1,
-        cache: crate::fork_local::ForkLocal::new(Box::new(StreamCache::new(cap_bytes))),
+        cache: crate::fork_policy::ForkLocal::new(Box::new(StreamCache::new(cap_bytes))),
         value_schema: parsed.value_schema.clone(),
         elem_schema: parsed.elem_schema.clone(),
         subpacket_entries_local: subpacket_entries,
@@ -12780,7 +12737,7 @@ fn channel_local(generation: u64, value_schema: &Schema) -> ProcessLocalSlot {
         pages_dropped: 0,
         map_file: None,
         fd: -1,
-        cache: crate::fork_local::ForkLocal::new(Box::new(StreamCache::new(0))),
+        cache: crate::fork_policy::ForkLocal::new(Box::new(StreamCache::new(0))),
         value_schema: value_schema.clone(),
         elem_schema: value_schema.parameters[0].clone(),
         subpacket_entries_local: Vec::new(),

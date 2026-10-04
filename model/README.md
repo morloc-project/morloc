@@ -56,7 +56,8 @@ release.
 - `fork.md` -- what crosses fork and exec (FORK)
 - `daemon.md` -- the long-running daemon and its recovery (DAEMON)
 - `streams.md` -- file-backed streams and their registry slots (SLOT)
-- `state.md` -- every process-wide mutable value and its fork class (STATE, INIT)
+- `state.md` -- fork classes and rules for process-wide mutable values (STATE, INIT)
+- `registry.tsv` -- every process-wide mutable value with its fork class
 - `effects.md` -- the effect system
 - `tla/ShmHandoff.tla` -- a block crossing between pools, with death and fork
 - `tla/DaemonRecovery.tla` -- pool-crash recovery against running requests

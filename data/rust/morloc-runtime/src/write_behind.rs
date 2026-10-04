@@ -369,7 +369,6 @@ thread_local! {
 }
 
 pub(crate) fn note_sealed(handle: i64) {
-    crate::stream::register_fork_handlers();
     let mut all = SEALED.lock().unwrap();
     if !all.contains(&handle) {
         all.push(handle);

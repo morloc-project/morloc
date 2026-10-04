@@ -18,6 +18,8 @@ Rank == [l \in Locks |-> CASE l = "map" -> 1 [] l = "alloc" -> 2 [] l = "service
 \* "misordered": prepare takes the held locks against their rank.
 \* "held_across_wait": a worker holds a held lock while it waits on another
 \* process, which may never answer.
+\* "fork_while_holding": the forking thread already holds a held lock, as
+\* when user code forks from inside a callback the runtime made under it.
 Held == {"map", "alloc"}
 Reset == IF Variant = "uncovered" THEN {} ELSE {"service"}
 PrepareOrder == IF Variant = "misordered" THEN <<"alloc", "map">> ELSE <<"map", "alloc">>
@@ -68,6 +70,11 @@ end process;
 fair process Forker = "forker"
 variables next = 1;
 begin
+  Hold:
+    if Variant = "fork_while_holding" then
+      await holder["alloc"] = None;
+      holder["alloc"] := "forker";
+    end if;
   Prepare:
     while next <= Len(PrepareOrder) do
       await holder[PrepareOrder[next]] = None;
@@ -117,7 +124,7 @@ Init == (* Global variables *)
         (* Process Forker *)
         /\ next = 1
         /\ pc = [self \in ProcSet |-> CASE self \in Workers -> "Loop"
-                                        [] self = "forker" -> "Prepare"]
+                                        [] self = "forker" -> "Hold"]
 
 Loop(self) == /\ pc[self] = "Loop"
               /\ pc' = [pc EXCEPT ![self] = "Choose"]
@@ -165,6 +172,16 @@ Drop(self) == /\ pc[self] = "Drop"
 Worker(self) == Loop(self) \/ Choose(self) \/ Take(self) \/ Wait(self)
                    \/ Drop(self)
 
+Hold == /\ pc["forker"] = "Hold"
+        /\ IF Variant = "fork_while_holding"
+              THEN /\ holder["alloc"] = None
+                   /\ holder' = [holder EXCEPT !["alloc"] = "forker"]
+              ELSE /\ TRUE
+                   /\ UNCHANGED holder
+        /\ pc' = [pc EXCEPT !["forker"] = "Prepare"]
+        /\ UNCHANGED << childHolder, forked, childReady, childDone, want, held, 
+                        stuck, next >>
+
 Prepare == /\ pc["forker"] = "Prepare"
            /\ IF next <= Len(PrepareOrder)
                  THEN /\ holder[PrepareOrder[next]] = None
@@ -203,7 +220,7 @@ ChildUsesLocks == /\ pc["forker"] = "ChildUsesLocks"
                   /\ UNCHANGED << holder, childHolder, forked, childReady, 
                                   want, held, stuck, next >>
 
-Forker == Prepare \/ Fork \/ AfterForkInParent \/ AfterForkInChild
+Forker == Hold \/ Prepare \/ Fork \/ AfterForkInParent \/ AfterForkInChild
              \/ ChildUsesLocks
 
 Next == Forker
