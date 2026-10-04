@@ -18,11 +18,25 @@ threads both initialise, and the second can destroy what the first built.
 The primitive is either a value set at startup, before the process has
 threads, or a `lazy` value whose initialiser runs under a lock and checks
 again once it holds it; that lock must be held across fork so a child never
-inherits it mid-initialisation (see FORK-5, FORK-9). The stream registry and
-the emitted Futhark context follow it; the registry's lock is not yet held
-across fork. Model: `tla/LazyInit.tla` (`LazyInit` passes;
+inherits it mid-initialisation (see FORK-5, FORK-9). The emitted Futhark
+context follows it. Model: `tla/LazyInit.tla` (`LazyInit` passes;
 `LazyInit_unlocked.bug` uses a destroyed value; `LazyInit_unheld.bug` leaves
 the child blocked).
+
+### INIT-2 A value whose construction waits on another process is built outside its lock
+Status: implemented
+Checked by: first_uses_on_two_threads_build_one_registry, tla:LazyInit_outside, tla:LazyInit_outside_blind.bug, tla:LazyInit_locked_waits.bug
+
+A held lock taken across construction makes prepare wait for it (FORK-10):
+opening a shared segment can wait seconds for the process sizing it. Such
+a value is built without the lock; the lock is taken only to check again
+and install it. A thread that finds a value already installed discards its
+own, releasing only what it made: a segment is unmapped, never unlinked,
+since the installed mapping names the same segment, and only an installed
+segment joins the crash-sweep list. The stream registry, the statistics
+segment, the benchmark and tee files, and the runtime configuration (whose
+environment reads can wait on a thread forking through the standard
+library, which holds the environment lock across prepare) follow it.
 
 ## Classes
 

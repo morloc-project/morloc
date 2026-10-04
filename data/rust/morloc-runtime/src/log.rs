@@ -167,7 +167,22 @@ pub unsafe extern "C" fn morloc_log_emit(
 // being measured, and folding its duration into the mean would report a number
 // that describes nothing.
 
-static BENCH_FILE: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
+pub(crate) static BENCH_FILE: crate::fork_policy::Held<Option<std::sync::Arc<std::fs::File>>> = crate::fork_policy::Held::new(13, None);
+
+// INIT-2: opened without the lock; FORK-10: written without it.
+pub(crate) fn shared_append_file(
+    slot: &crate::fork_policy::Held<Option<std::sync::Arc<std::fs::File>>>,
+    path: impl FnOnce() -> Option<std::path::PathBuf>,
+) -> Option<std::sync::Arc<std::fs::File>> {
+    if let Some(f) = slot.lock().as_ref() {
+        return Some(f.clone());
+    }
+    let opened = std::sync::Arc::new(std::fs::OpenOptions::new().create(true).append(true).open(path()?).ok()?);
+    let installed = slot.lock().get_or_insert_with(|| opened.clone()).clone();
+    // FORK-10: a losing open is closed after the lock is released.
+    drop(opened);
+    Some(installed)
+}
 
 /// Path of this run's benchmark record file, as published by the nexus in
 /// `MORLOC_BENCH_RECORDS`. `None` when the variable is unset, which is how a
@@ -193,26 +208,10 @@ pub unsafe extern "C" fn morloc_bench_record(key: *const c_char, seconds: f64) {
     };
     let line = format!("{}\t{:.9}\n", key_str, seconds);
 
-    let mut guard = match BENCH_FILE.lock() {
-        Ok(g) => g,
-        Err(_) => return,
-    };
-    if guard.is_none() {
-        let path = match bench_record_path() {
-            Some(p) => p,
-            None => return,
-        };
-        *guard = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .ok();
-    }
-    if let Some(f) = guard.as_mut() {
-        // One write_all of a short buffer is one write(2), which O_APPEND
-        // makes atomic against other writers.
-        let _ = f.write_all(line.as_bytes());
-    }
+    let Some(file) = shared_append_file(&BENCH_FILE, bench_record_path) else { return };
+    // One write_all of a short buffer is one write(2), which O_APPEND
+    // makes atomic against other writers.
+    let _ = (&*file).write_all(line.as_bytes());
 }
 
 /// Emit a fully-rendered run-scope line (prologue or epilogue) to

@@ -4,7 +4,6 @@
 
 use crate::error::MorlocError;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Mutex;
 use crate::fork_policy::Held;
 use morloc_runtime_types::shm_lock::{ShmGuard, ShmLock};
 
@@ -484,28 +483,24 @@ static ATEXIT_REGISTERED: AtomicBool = AtomicBool::new(false);
 /// `shclose` doesn't need to know which subsystems are alive.
 pub type ShcloseHook = fn();
 
-static SHCLOSE_HOOKS: Mutex<Vec<ShcloseHook>> = Mutex::new(Vec::new());
+pub(crate) static SHCLOSE_HOOKS: Held<Vec<ShcloseHook>> = Held::new(10, Vec::new());
 
 /// Register a function to run when `shclose` is called. Hooks run in
 /// registration order, before the allocator volumes are unmapped.
 /// Deduped by function-pointer identity, so callers don't need their
 /// own "did I already register" guards.
 pub fn register_shclose_hook(hook: ShcloseHook) {
-    if let Ok(mut hs) = SHCLOSE_HOOKS.lock() {
-        let ptr = hook as usize;
-        if !hs.iter().any(|h| *h as usize == ptr) {
-            hs.push(hook);
-        }
+    let mut hs = SHCLOSE_HOOKS.lock();
+    let ptr = hook as usize;
+    if !hs.iter().any(|h| *h as usize == ptr) {
+        hs.push(hook);
     }
 }
 
 /// Run all registered `shclose` hooks. Blocking `lock`: normal-exit
 /// callers must not silently skip a poisoned mutex.
 fn run_shclose_hooks() {
-    let hooks: Vec<ShcloseHook> = match SHCLOSE_HOOKS.lock() {
-        Ok(hs) => hs.iter().copied().collect(),
-        Err(_) => return,
-    };
+    let hooks: Vec<ShcloseHook> = SHCLOSE_HOOKS.lock().clone();
     for h in hooks {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h()));
     }
@@ -515,8 +510,8 @@ fn run_shclose_hooks() {
 /// panic-poisoned or contended mutex doesn't wedge process shutdown.
 fn run_shclose_hooks_atexit() {
     let hooks: Vec<ShcloseHook> = match SHCLOSE_HOOKS.try_lock() {
-        Ok(hs) => hs.iter().copied().collect(),
-        Err(_) => return,
+        Some(hs) => hs.clone(),
+        None => return,
     };
     for h in hooks {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h()));

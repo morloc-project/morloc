@@ -9,6 +9,9 @@ CONSTANT Variant
 \* "locked": a held init lock, checked again once taken.
 \* "unlocked": check, then create and install, with no lock.
 \* "unheld": locked, but the lock is not held across fork.
+\* "outside": create without the lock, then take it only to check again and
+\* install; a thread that finds a value already installed destroys its own.
+\* "outside_blind": as "outside", but installs without checking again.
 
 Users == {"t1", "t2"}
 None == "none"
@@ -31,6 +34,8 @@ define
     ChildNeverWaitsOnAThreadItLacks ==
         childReady => childLock \in {None, "forker"}
     ChildFinishes == <>childDone
+    PrepareNeverWaitsOnACreation ==
+        ~(pc["forker"] = "Prepare" /\ lockHolder \in Users /\ pc[lockHolder] = "Create")
 end define;
 
 fair process User \in Users
@@ -41,15 +46,24 @@ begin
       mine := base;
       goto Use;
     end if;
+  Early:
+    if Variant \in {"outside", "outside_blind"} then
+      mine := self;
+    end if;
   Lock:
     if Variant /= "unlocked" then
       await lockHolder = None;
       lockHolder := self;
     end if;
   Recheck:
-    if Variant /= "unlocked" /\ base /= None then
+    if Variant \notin {"unlocked", "outside_blind"} /\ base /= None then
+      if Variant = "outside" then
+        destroyed := destroyed \union {mine};
+      end if;
       mine := base;
       goto Unlock;
+    elsif Variant \in {"outside", "outside_blind"} then
+      goto Install;
     end if;
   Create:
     mine := self;
@@ -71,14 +85,14 @@ end process;
 fair process Forker = "forker"
 begin
   Prepare:
-    if Variant = "locked" then
+    if Variant \in {"locked", "outside", "outside_blind"} then
       await lockHolder = None;
       lockHolder := "forker";
     end if;
   Fork:
     childLock := lockHolder;
   AfterFork:
-    if Variant = "locked" then
+    if Variant \in {"locked", "outside", "outside_blind"} then
       lockHolder := None;
       childLock := None;
     end if;
@@ -100,6 +114,8 @@ NoUseOfADestroyedValue ==
 ChildNeverWaitsOnAThreadItLacks ==
     childReady => childLock \in {None, "forker"}
 ChildFinishes == <>childDone
+PrepareNeverWaitsOnACreation ==
+    ~(pc["forker"] = "Prepare" /\ lockHolder \in Users /\ pc[lockHolder] = "Create")
 
 VARIABLE mine
 
@@ -126,8 +142,17 @@ Check(self) == /\ pc[self] = "Check"
                /\ IF base /= None
                      THEN /\ mine' = [mine EXCEPT ![self] = base]
                           /\ pc' = [pc EXCEPT ![self] = "Use"]
-                     ELSE /\ pc' = [pc EXCEPT ![self] = "Lock"]
+                     ELSE /\ pc' = [pc EXCEPT ![self] = "Early"]
                           /\ mine' = mine
+               /\ UNCHANGED << base, slot, destroyed, lockHolder, used, 
+                               childLock, childReady, childDone >>
+
+Early(self) == /\ pc[self] = "Early"
+               /\ IF Variant \in {"outside", "outside_blind"}
+                     THEN /\ mine' = [mine EXCEPT ![self] = self]
+                     ELSE /\ TRUE
+                          /\ mine' = mine
+               /\ pc' = [pc EXCEPT ![self] = "Lock"]
                /\ UNCHANGED << base, slot, destroyed, lockHolder, used, 
                                childLock, childReady, childDone >>
 
@@ -142,13 +167,19 @@ Lock(self) == /\ pc[self] = "Lock"
                               childReady, childDone, mine >>
 
 Recheck(self) == /\ pc[self] = "Recheck"
-                 /\ IF Variant /= "unlocked" /\ base /= None
-                       THEN /\ mine' = [mine EXCEPT ![self] = base]
+                 /\ IF Variant \notin {"unlocked", "outside_blind"} /\ base /= None
+                       THEN /\ IF Variant = "outside"
+                                  THEN /\ destroyed' = (destroyed \union {mine[self]})
+                                  ELSE /\ TRUE
+                                       /\ UNCHANGED destroyed
+                            /\ mine' = [mine EXCEPT ![self] = base]
                             /\ pc' = [pc EXCEPT ![self] = "Unlock"]
-                       ELSE /\ pc' = [pc EXCEPT ![self] = "Create"]
-                            /\ mine' = mine
-                 /\ UNCHANGED << base, slot, destroyed, lockHolder, used, 
-                                 childLock, childReady, childDone >>
+                       ELSE /\ IF Variant \in {"outside", "outside_blind"}
+                                  THEN /\ pc' = [pc EXCEPT ![self] = "Install"]
+                                  ELSE /\ pc' = [pc EXCEPT ![self] = "Create"]
+                            /\ UNCHANGED << destroyed, mine >>
+                 /\ UNCHANGED << base, slot, lockHolder, used, childLock, 
+                                 childReady, childDone >>
 
 Create(self) == /\ pc[self] = "Create"
                 /\ mine' = [mine EXCEPT ![self] = self]
@@ -187,12 +218,12 @@ Use(self) == /\ pc[self] = "Use"
              /\ UNCHANGED << base, slot, destroyed, lockHolder, childLock, 
                              childReady, childDone, mine >>
 
-User(self) == Check(self) \/ Lock(self) \/ Recheck(self) \/ Create(self)
-                 \/ Install(self) \/ Publish(self) \/ Unlock(self)
-                 \/ Use(self)
+User(self) == Check(self) \/ Early(self) \/ Lock(self) \/ Recheck(self)
+                 \/ Create(self) \/ Install(self) \/ Publish(self)
+                 \/ Unlock(self) \/ Use(self)
 
 Prepare == /\ pc["forker"] = "Prepare"
-           /\ IF Variant = "locked"
+           /\ IF Variant \in {"locked", "outside", "outside_blind"}
                  THEN /\ lockHolder = None
                       /\ lockHolder' = "forker"
                  ELSE /\ TRUE
@@ -208,7 +239,7 @@ Fork == /\ pc["forker"] = "Fork"
                         childDone, mine >>
 
 AfterFork == /\ pc["forker"] = "AfterFork"
-             /\ IF Variant = "locked"
+             /\ IF Variant \in {"locked", "outside", "outside_blind"}
                    THEN /\ lockHolder' = None
                         /\ childLock' = None
                    ELSE /\ TRUE

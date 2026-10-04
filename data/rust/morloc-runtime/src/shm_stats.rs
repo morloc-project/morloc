@@ -12,7 +12,6 @@
 
 use std::io::Write;
 use std::sync::atomic::{AtomicI64, AtomicPtr, Ordering};
-use std::sync::Mutex;
 
 use crate::error::MorlocError;
 use crate::shm;
@@ -27,7 +26,7 @@ struct Counters {
 }
 
 static COUNTERS: AtomicPtr<Counters> = AtomicPtr::new(std::ptr::null_mut());
-static SEGMENT: Mutex<Option<CompanionSegment>> = Mutex::new(None);
+pub(crate) static SEGMENT: crate::fork_policy::Held<Option<CompanionSegment>> = crate::fork_policy::Held::new(7, None);
 
 /// Map the counters if `MORLOC_SHM_STATS` is set. Called once the program's
 /// basename is known; later calls are no-ops.
@@ -35,18 +34,31 @@ pub(crate) fn init() -> Result<(), MorlocError> {
     if std::env::var_os(SHM_STATS_ENV).is_none() {
         return Ok(());
     }
-    let mut seg_slot = SEGMENT.lock().unwrap();
-    if seg_slot.is_some() {
+    if SEGMENT.lock().is_some() {
         return Ok(());
     }
-    // A fresh segment is zero-filled, which is the counters' initial state.
+    // INIT-2: opened without the lock; a fresh segment is zero-filled,
+    // which is the counters' initial state.
     let seg = CompanionSegment::open(
         "stats",
         std::mem::size_of::<Counters>(),
         SweepPolicy::SweepOnCrash,
     )?;
+    let mut seg = seg;
+    let mut seg_slot = SEGMENT.lock();
+    if seg_slot.is_some() {
+        drop(seg_slot);
+        seg.detach();
+        return Ok(());
+    }
+    if let Err(e) = seg.register_for_sweep() {
+        drop(seg_slot);
+        seg.detach();
+        return Err(e);
+    }
     COUNTERS.store(seg.base as *mut Counters, Ordering::Release);
     *seg_slot = Some(seg);
+    drop(seg_slot);
     shm::register_shclose_hook(teardown);
     Ok(())
 }
@@ -100,9 +112,9 @@ fn teardown() {
             let _ = writeln!(f, "{}", peak);
         }
     }
-    if let Ok(s) = SEGMENT.lock() {
-        if let Some(seg) = s.as_ref() {
-            seg.unlink();
-        }
+    // FORK-10: the names are removed outside the lock.
+    let name = SEGMENT.lock().as_mut().map(|seg| seg.forget_for_unlink());
+    if let Some(name) = name {
+        crate::shm_companion::remove_names(&name);
     }
 }

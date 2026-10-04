@@ -52,6 +52,7 @@ pub struct CompanionSegment {
     pub size:  usize,
     name:      CString,
     policy:    SweepPolicy,
+    swept:     bool,
 }
 
 // SAFETY: CompanionSegment holds a raw pointer to an mmap'd region and
@@ -94,9 +95,6 @@ impl CompanionSegment {
             MorlocError::Other(format!("companion name contains NUL: {}", e))
         })?;
 
-        if policy == SweepPolicy::SweepOnCrash {
-            register_companion(&name)?;
-        }
         COMPANION_TOTAL_BYTES.fetch_add(actual_size, Ordering::Relaxed);
 
         Ok(Self {
@@ -104,6 +102,7 @@ impl CompanionSegment {
             size: actual_size,
             name,
             policy,
+            swept: false,
         })
     }
 
@@ -125,7 +124,33 @@ impl CompanionSegment {
         if shm::owns_program() {
             self.remove_name();
         }
-        if self.policy == SweepPolicy::SweepOnCrash {
+        if self.swept {
+            deregister_companion(&self.name);
+        }
+        COMPANION_TOTAL_BYTES.fetch_sub(self.size, Ordering::Relaxed);
+    }
+
+    /// Add this segment to the names a crashing nexus removes, if its policy
+    /// asks for that. Called once the segment is installed for keeps.
+    pub fn register_for_sweep(&mut self) -> Result<(), MorlocError> {
+        if self.policy == SweepPolicy::SweepOnCrash && !self.swept {
+            register_companion(&self.name)?;
+            self.swept = true;
+        }
+        Ok(())
+    }
+
+    /// Unmap this mapping and deregister it, leaving the segment's name for
+    /// the mappings that stay.
+    pub fn detach(mut self) {
+        if self.base.is_null() {
+            return;
+        }
+        unsafe {
+            libc::munmap(self.base as *mut libc::c_void, self.size);
+        }
+        self.base = std::ptr::null_mut();
+        if self.swept {
             deregister_companion(&self.name);
         }
         COMPANION_TOTAL_BYTES.fetch_sub(self.size, Ordering::Relaxed);
@@ -134,20 +159,26 @@ impl CompanionSegment {
     /// Remove the segment's name, leaving this process's mapping in place,
     /// for a segment that threads of this process may still touch while it
     /// exits. Only the program's owner should call this.
-    pub fn unlink(&self) {
+    pub fn unlink(&mut self) {
         self.remove_name();
-        if self.policy == SweepPolicy::SweepOnCrash {
+        if self.swept {
             deregister_companion(&self.name);
+            self.swept = false;
         }
     }
 
-    fn remove_name(&self) {
-        shm::unlink_segment(&self.name);
-        if let Some(dir) = shm::get_fallback_dir() {
-            let mut path = PathBuf::from(dir);
-            path.push(self.name.to_string_lossy().trim_start_matches('/'));
-            let _ = std::fs::remove_file(path);
+    /// Leave the crash-sweep list and return the name, for a caller that
+    /// removes the names itself with [`remove_names`].
+    pub fn forget_for_unlink(&mut self) -> CString {
+        if self.swept {
+            deregister_companion(&self.name);
+            self.swept = false;
         }
+        self.name.clone()
+    }
+
+    fn remove_name(&self) {
+        remove_names(&self.name);
     }
 
     /// Full on-disk name (`<basename>.<suffix>`, including any `/` prefix
@@ -183,6 +214,16 @@ fn attach(name: &str, size: usize) -> Result<(*mut u8, usize), MorlocError> {
 impl Drop for CompanionSegment {
     fn drop(&mut self) {
         self.teardown();
+    }
+}
+
+/// Remove a segment's names, leaving every mapping of it in place.
+pub fn remove_names(name: &CStr) {
+    shm::unlink_segment(name);
+    if let Some(dir) = shm::get_fallback_dir() {
+        let mut path = PathBuf::from(dir);
+        path.push(name.to_string_lossy().trim_start_matches('/'));
+        let _ = std::fs::remove_file(path);
     }
 }
 

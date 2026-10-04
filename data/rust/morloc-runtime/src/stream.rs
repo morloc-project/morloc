@@ -30,6 +30,7 @@
 use std::fs::OpenOptions;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
+#[cfg(test)]
 use std::sync::Mutex;
 use crate::fork_policy::Held;
 
@@ -230,11 +231,8 @@ static REGISTRY_BASE: std::sync::atomic::AtomicPtr<RegistryHeader> =
 static REGISTRY_SLOT_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-/// The registry's backing companion segment. Owned for the process
-/// lifetime; teardown takes it and lets `Drop` run munmap + unlink +
-/// sweep-list deregister.
-static REGISTRY_SEGMENT:
-    Mutex<Option<crate::shm_companion::CompanionSegment>> = Mutex::new(None);
+pub(crate) static REGISTRY_SEGMENT: crate::fork_policy::Held<Option<crate::shm_companion::CompanionSegment>> =
+    crate::fork_policy::Held::new(6, None);
 
 /// Initialise the shared stream registry for this session. Wraps
 /// `registry_bootstrap`; kept as the public entry point for the FFI
@@ -264,27 +262,49 @@ pub fn registry_bootstrap() -> Result<usize, MorlocError> {
         }
     }
 
-    let mut segment = REGISTRY_SEGMENT.lock().unwrap_or_else(|p| p.into_inner());
-    if !REGISTRY_BASE.load(Ordering::Acquire).is_null() {
-        return Ok(REGISTRY_SLOT_COUNT.load(Ordering::Relaxed));
-    }
-
     let slot_count = read_registry_slot_count();
     let volume_bytes = registry_volume_size(slot_count);
 
+    // INIT-2: opened and published without the lock.
     let seg = crate::shm_companion::CompanionSegment::open(
         "reg",
         volume_bytes,
         crate::shm_companion::SweepPolicy::SweepOnCrash,
     )?;
-
-    // Own the segment via the static BEFORE running the CAS. If any
-    // step below bails, the segment stays live (its Drop won't run
-    // from an in-flight local) so a peer that already committed to
-    // attaching keeps a valid mapping.
     let base = seg.base as *mut RegistryHeader;
-    *segment = Some(seg);
+    if let Err(e) = publish_registry_header(base, slot_count) {
+        seg.detach();
+        return Err(e);
+    }
 
+    let mut seg = seg;
+    let mut segment = REGISTRY_SEGMENT.lock();
+    if !REGISTRY_BASE.load(Ordering::Acquire).is_null() {
+        drop(segment);
+        seg.detach();
+        return Ok(REGISTRY_SLOT_COUNT.load(Ordering::Relaxed));
+    }
+    if let Err(e) = seg.register_for_sweep() {
+        drop(segment);
+        seg.detach();
+        return Err(e);
+    }
+    *segment = Some(seg);
+    REGISTRY_SLOT_COUNT.store(slot_count, Ordering::Relaxed);
+    REGISTRY_BASE.store(base, Ordering::Release);
+    drop(segment);
+
+    // Register normal-exit teardown once per process. `register_shclose_hook`
+    // runs on both nexus (via `clean_exit -> shclose`) and pool (via
+    shm::register_shclose_hook(registry_teardown);
+
+    sweeper_init();
+
+    Ok(slot_count)
+}
+
+fn publish_registry_header(base: *mut RegistryHeader, slot_count: usize) -> Result<(), MorlocError> {
+    use std::sync::atomic::Ordering;
     let header = unsafe { &*base };
 
     let cas = header.magic.compare_exchange(
@@ -326,35 +346,21 @@ pub fn registry_bootstrap() -> Result<usize, MorlocError> {
         }
     }
 
-    // Spin until magic is the final value.
-    let mut spins: u32 = 0;
+    let began = std::time::Instant::now();
     loop {
-        let m = header.magic.load(Ordering::Acquire);
-        if m == shm_types_crate::STREAM_REGISTRY_MAGIC {
+        if header.magic.load(Ordering::Acquire) == shm_types_crate::STREAM_REGISTRY_MAGIC {
             break;
         }
-        spins += 1;
-        if spins > 1_000_000 {
+        if began.elapsed() > std::time::Duration::from_secs(5) {
             return Err(MorlocError::Other(
-                "stream registry: magic never published \
-                 (spin-wait exhausted; bootstrapper stalled?)"
+                "stream registry: magic never published within 5 s \
+                 (bootstrapper stalled?)"
                     .into(),
             ));
         }
-        std::hint::spin_loop();
+        std::thread::yield_now();
     }
-
-    REGISTRY_SLOT_COUNT.store(slot_count, Ordering::Relaxed);
-    REGISTRY_BASE.store(base, Ordering::Release);
-    drop(segment);
-
-    // Register normal-exit teardown once per process. `register_shclose_hook`
-    // runs on both nexus (via `clean_exit -> shclose`) and pool (via
-    shm::register_shclose_hook(registry_teardown);
-
-    sweeper_init();
-
-    Ok(slot_count)
+    Ok(())
 }
 
 /// Reverse of `registry_bootstrap`. Ordering: stop sweeper (its reads
@@ -367,7 +373,7 @@ pub fn registry_teardown() {
     sweeper_shutdown();
     let service_stopped = release_service_shutdown();
 
-    let mut held = REGISTRY_SEGMENT.lock().unwrap_or_else(|p| p.into_inner());
+    let mut held = REGISTRY_SEGMENT.lock();
     if REGISTRY_BASE.swap(std::ptr::null_mut(), Ordering::AcqRel).is_null() {
         return;
     }
@@ -376,7 +382,7 @@ pub fn registry_teardown() {
     drop(held);
     match segment {
         // A release service still blocked on a slot keeps the mapping.
-        Some(seg) if !service_stopped => {
+        Some(mut seg) if !service_stopped => {
             if shm::owns_program() {
                 seg.unlink();
             }

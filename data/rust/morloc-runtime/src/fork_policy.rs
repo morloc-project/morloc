@@ -214,7 +214,17 @@ struct ForkHeld {
     _alloc: HeldGuard<'static, ()>,
     _volumes: HeldGuard<'static, crate::shm::VolumeTable>,
     _basename: HeldGuard<'static, [u8; crate::shm::MAX_FILENAME_SIZE]>,
+    _registry: HeldGuard<'static, Option<crate::shm_companion::CompanionSegment>>,
+    _stats: HeldGuard<'static, Option<crate::shm_companion::CompanionSegment>>,
     _fallback: HeldGuard<'static, [u8; crate::shm::MAX_FILENAME_SIZE]>,
+    _hooks: HeldGuard<'static, Vec<crate::shm::ShcloseHook>>,
+    _tmpdir: HeldGuard<'static, crate::packet::Config>,
+    _self_socket: HeldGuard<'static, Option<std::path::PathBuf>>,
+    _bench: HeldGuard<'static, Option<std::sync::Arc<std::fs::File>>>,
+    _tees: HeldGuard<'static, Option<std::collections::HashMap<String, std::sync::Arc<std::fs::File>>>>,
+    _run_tee: HeldGuard<'static, Option<std::sync::Arc<std::fs::File>>>,
+    _command: HeldGuard<'static, Option<String>>,
+    _error: HeldGuard<'static, Option<String>>,
 }
 
 thread_local! {
@@ -239,8 +249,18 @@ extern "C" fn prepare_fork() {
         locked_fds: crate::stream::LOCKED_FDS.lock(),
         _alloc: crate::shm::ALLOC_MUTEX.lock(),
         _volumes: crate::shm::VOLUMES.lock(),
+        _registry: crate::stream::REGISTRY_SEGMENT.lock(),
+        _stats: crate::shm_stats::SEGMENT.lock(),
         _basename: crate::shm::COMMON_BASENAME.lock(),
         _fallback: crate::shm::FALLBACK_DIR.lock(),
+        _hooks: crate::shm::SHCLOSE_HOOKS.lock(),
+        _tmpdir: crate::packet::TMPDIR.lock(),
+        _self_socket: crate::ipc_ffi::SELF_SOCKET.lock(),
+        _bench: crate::log::BENCH_FILE.lock(),
+        _tees: crate::run::TEE_HANDLES.lock(),
+        _run_tee: crate::run::RUN_TEE_HANDLE.lock(),
+        _command: crate::run::RUN_COMMAND.lock(),
+        _error: crate::run::RUN_ERROR.lock(),
     };
     FORK_HELD.with(|h| *h.borrow_mut() = Some(held));
 }

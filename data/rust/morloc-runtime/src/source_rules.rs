@@ -5,7 +5,7 @@ use syn::visit::Visit;
 
 const CRATES: &[&str] = &["morloc-runtime", "morloc-runtime-types", "rustmorloc", "morloc-nexus"];
 const PREPARE_HANDLERS: &[&str] = &["prepare_fork"];
-const MAX_DEVIATING_ROWS: usize = 47;
+const MAX_DEVIATING_ROWS: usize = 34;
 const MAX_ENV_READS: usize = 67;
 const CLASSES: &[&str] = &[
     "held", "reset", "unreachable", "exec-only", "startup", "lazy", "fork-scoped", "counter", "thread",
@@ -155,7 +155,7 @@ struct RustScan {
 }
 
 fn is_held(ty: &str) -> bool {
-    ty.starts_with("Held <")
+    ty.starts_with("Held <") || ty.contains(":: Held <")
 }
 
 fn is_reset(ty: &str) -> bool {
@@ -173,6 +173,20 @@ fn interior_mutable(ty: &str) -> bool {
 
 fn is_lock(ty: &str) -> bool {
     is_held(ty) || is_reset(ty) || (!ty.contains("Guard") && !ty.contains("PhantomData") && ["Mutex", "RwLock", "Condvar"].iter().any(|w| ty.contains(w)))
+}
+
+fn takes_lock(body: &str, name: &str) -> bool {
+    let call = format!("{name}.lock()");
+    body.match_indices(&call).any(|(i, _)| {
+        !body[..i].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_')
+    })
+}
+
+#[test]
+fn a_lock_name_inside_a_longer_name_is_not_a_take() {
+    let body = "crate::stream::REGISTRY_SEGMENT.lock()";
+    assert!(takes_lock(body, "REGISTRY_SEGMENT"));
+    assert!(!takes_lock(body, "SEGMENT"));
 }
 
 fn has_test_attr(attrs: &[syn::Attribute]) -> bool {
@@ -662,10 +676,14 @@ fn registry_rows_obey_their_class() {
             let name = r.id.rsplit("::").next().unwrap();
             if !is_held(&f.ty) {
                 problems.push(format!("{}: held but not declared Held", r.id));
-            } else if !f.init.starts_with(&format!("Held::new({},", r.rank.unwrap())) {
+            } else if !f
+                .init
+                .trim_start_matches("crate::fork_policy::")
+                .starts_with(&format!("Held::new({},", r.rank.unwrap()))
+            {
                 problems.push(format!("{}: its Held rank differs from the registry's {}", r.id, r.rank.unwrap()));
             }
-            if !scan.prepare_bodies.contains(&format!("{name}.lock()")) {
+            if !takes_lock(&scan.prepare_bodies, name) {
                 problems.push(format!("{}: held but no prepare handler takes it", r.id));
             }
         }

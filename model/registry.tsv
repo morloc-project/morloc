@@ -98,7 +98,7 @@ morloc-runtime/intrinsics.rs::-::CURRENT_TEMP_OWNER	thread
 morloc-runtime/intrinsics.rs::-::DISPATCH_DEPTH	thread		
 morloc-runtime/ipc_ffi.rs::-::PING_PEEK_ACTIVE	counter		
 morloc-runtime/ipc_ffi.rs::trace_close_enabled::T	startup		FORK-9
-morloc-runtime/ipc_ffi.rs::-::SELF_SOCKET	held	12	FORK-5
+morloc-runtime/ipc_ffi.rs::-::SELF_SOCKET	held	12	
 morloc-runtime/ipc_ffi.rs::forbid_self_call::FORBID	startup		FORK-9
 morloc-runtime/ipc_ffi.rs::-::HELD	test-only		
 morloc-runtime/ipc_ffi.rs::-::PEER	test-only		
@@ -118,23 +118,23 @@ morloc-runtime/log.rs::pool_pid::CACHED	fork-scoped		FORK-13
 morloc-runtime/log.rs::color_enabled::CACHED	startup		FORK-9
 morloc-runtime/log.rs::quiet::CACHED	startup		FORK-9
 morloc-runtime/log.rs::trace_enabled::CACHED	startup		FORK-9
-morloc-runtime/log.rs::-::BENCH_FILE	held	13	FORK-5, FORK-10
+morloc-runtime/log.rs::-::BENCH_FILE	held	13	
 morloc-runtime/manifest_ffi.rs::-::NAMED_FUNCTIONS	thread		
 morloc-runtime/packet.rs::-::INLINE_THRESHOLD	startup		
 morloc-runtime/packet.rs::-::SHM_ENABLED	startup		
 morloc-runtime/packet.rs::-::TEST_CONFIG_LOCK	test-only		
-morloc-runtime/packet.rs::-::TMPDIR	held	11	FORK-5
-morloc-runtime/packet.rs::-::CONFIG_INIT	startup		FORK-9
+morloc-runtime/packet.rs::-::TMPDIR	held	11	
+morloc-runtime/packet.rs::-::CONFIG_LOADED	counter		
 morloc-runtime/packet_ffi.rs::make_file_data_packet_voidstar::SEQ	counter		
 morloc-runtime/pool_ffi.rs::-::SHUTTING_DOWN	counter		
 morloc-runtime/pool_ffi.rs::-::BUSY_COUNT	counter		
 morloc-runtime/pool_ffi.rs::-::JobQueue.state	unreachable		FORK-12
 morloc-runtime/pool_ffi.rs::-::JobQueue.cond	unreachable		FORK-12
 morloc-runtime/run.rs::-::RUN	startup		FORK-9
-morloc-runtime/run.rs::-::TEE_HANDLES	held	14	FORK-5, FORK-10
-morloc-runtime/run.rs::-::RUN_TEE_HANDLE	held	15	FORK-5, FORK-10
-morloc-runtime/run.rs::-::RunContext.command	held	16	FORK-5
-morloc-runtime/run.rs::-::RunContext.error	held	17	FORK-5
+morloc-runtime/run.rs::-::TEE_HANDLES	held	14	
+morloc-runtime/run.rs::-::RUN_TEE_HANDLE	held	15	
+morloc-runtime/run.rs::-::RUN_COMMAND	held	16	
+morloc-runtime/run.rs::-::RUN_ERROR	held	17	
 morloc-runtime/run.rs::-::CONTEXT	startup		FORK-9
 morloc-runtime/shm.rs::page_size::CACHED	startup		FORK-9
 morloc-runtime/shm.rs::-::CURRENT_VOLUME	counter		
@@ -144,16 +144,16 @@ morloc-runtime/shm.rs::-::RNG_STATE	thread
 morloc-runtime/shm.rs::-::COMMON_BASENAME	held	8	
 morloc-runtime/shm.rs::-::FALLBACK_DIR	held	9	
 morloc-runtime/shm.rs::-::ATEXIT_REGISTERED	counter		
-morloc-runtime/shm.rs::-::SHCLOSE_HOOKS	held	10	FORK-5
+morloc-runtime/shm.rs::-::SHCLOSE_HOOKS	held	10	
 morloc-runtime/shm.rs::-::OWNER_PID	startup		
 morloc-runtime/shm.rs::-::POISON	startup		
 morloc-runtime/shm_companion.rs::-::MORLOC_COMPANION_NAMES	startup		
 morloc-runtime/shm_companion.rs::-::COMPANION_TOTAL_BYTES	counter		
 morloc-runtime/shm_stats.rs::-::COUNTERS	startup		
-morloc-runtime/shm_stats.rs::-::SEGMENT	held	7	FORK-5, FORK-10
-morloc-runtime/stream.rs::-::REGISTRY_BASE	lazy		FORK-5
-morloc-runtime/stream.rs::-::REGISTRY_SLOT_COUNT	lazy		FORK-5
-morloc-runtime/stream.rs::-::REGISTRY_SEGMENT	held	6	FORK-5
+morloc-runtime/shm_stats.rs::-::SEGMENT	held	7	
+morloc-runtime/stream.rs::-::REGISTRY_BASE	lazy		
+morloc-runtime/stream.rs::-::REGISTRY_SLOT_COUNT	lazy		
+morloc-runtime/stream.rs::-::REGISTRY_SEGMENT	held	6	
 morloc-runtime/stream.rs::-::BOOTSTRAP_GAP_HOOK	test-only		
 morloc-runtime/stream.rs::first_uses_on_two_threads_build_one_registry::AT_GAP	test-only		
 morloc-runtime/stream.rs::first_uses_on_two_threads_build_one_registry::RESUME	test-only		

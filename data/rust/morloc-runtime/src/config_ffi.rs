@@ -58,8 +58,8 @@ pub unsafe extern "C" fn morloc_set_tmpdir(path: *const c_char) {
 
 #[cfg(test)]
 mod tests {
-    //! The env-var `Once` initializer in `packet::ensure_config_loaded`
-    //! fires at most once per process, so we exercise the explicit FFI
+    //! The env-var loader in `packet::ensure_config_loaded` runs at most
+    //! once per process, so we exercise the explicit FFI
     //! setters here rather than the env-var path. Run serialized to keep
     //! the global atomics from cross-test interference (cargo test is
     //! multi-threaded by default).

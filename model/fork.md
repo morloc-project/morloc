@@ -35,7 +35,8 @@ shares. The opener unlocks explicitly when the stream ends rather than
 relying on close.
 
 ### FORK-5 Every process-wide lock has a fork class
-Status: deviation
+Status: implemented
+Checked by: registry_rows_obey_their_class, a_child_forked_while_a_thread_holds_the_temp_dir_lock_can_read_it, a_child_forked_while_a_thread_holds_a_reset_lock_gets_a_fresh_one, tla:ForkLocks, tla:ForkLocks_uncovered.bug
 
 Each lock in the registry below is either held across fork (`held`: the
 prepare handler takes it and both sides release it, so the child sees a
@@ -44,8 +45,7 @@ gets a fresh lock and fresh state, and never touches the parent's). A lock
 with no class can be inherited held by a thread the child does not have,
 and the child then blocks on it forever. A held lock is declared as a
 `Held` with its rank, and one prepare handler, registered when the library
-loads, takes them all. Today only the seven `held` rows without a FORK-5
-citation are covered. Model: `tla/ForkLocks.tla` (`ForkLocks` passes;
+loads, takes them all; a reset lock is declared `Reset` (FORK-8). Model: `tla/ForkLocks.tla` (`ForkLocks` passes;
 `ForkLocks_uncovered.bug` shows the child blocking).
 
 ### FORK-6 Workers fork from a process that has no other threads
@@ -55,7 +55,8 @@ Python fork-mode and R pools fork workers after the runtime has started
 its sweeper (and, in R, lifeline) threads.
 
 ### FORK-7 Held locks are taken in one global rank order
-Status: deviation
+Status: implemented
+Checked by: a_lock_taken_below_a_held_rank_is_refused, a_fork_from_a_thread_holding_a_runtime_lock_aborts, a_fork_from_a_thread_holding_a_reset_lock_aborts, tla:ForkLocks_misordered.bug, tla:ForkLocks_fork_while_holding.bug
 
 The prepare handler takes held locks in rank order, and no thread takes a
 lower-ranked held lock while holding a higher-ranked one. Otherwise prepare
@@ -63,8 +64,7 @@ and a worker can each hold the lock the other waits for. A thread that
 forks while holding a held lock deadlocks in its own prepare handler, so
 prepare aborts instead. Each thread records the ranks it holds; taking a
 `Held` lock at or below one already held panics, and prepare aborts if the
-forking thread holds any. Held rows still citing FORK-5 are not yet `Held`
-and are unchecked. Model: `ForkLocks_misordered.bug` and
+forking thread holds any. Model: `ForkLocks_misordered.bug` and
 `ForkLocks_fork_while_holding.bug` deadlock.
 
 ### FORK-8 A reset lock is never the parent's in the child
@@ -104,9 +104,10 @@ Prepare waits for every held lock, so a thread that holds one while
 waiting on another process makes the fork wait as long as that process.
 Today the allocator's locks are held across other processes' volume locks
 and volume creation; the release pass across other processes' slot locks,
-compression jobs and nexus calls (also in prepare's own drain); the stats
-segment across a wait of up to five seconds; the benchmark and tee files
-across file I/O. Model: `ForkLocks_held_across_wait.bug` deadlocks.
+compression jobs and nexus calls (also in prepare's own drain). Shared
+segments are opened outside their locks (INIT-2), and the benchmark and
+tee files are opened and written outside theirs. Model:
+`ForkLocks_held_across_wait.bug` deadlocks.
 
 ### FORK-11 Code reachable in a forked child takes no standard-library lock
 Status: deviation

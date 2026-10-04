@@ -602,7 +602,7 @@ pub unsafe extern "C" fn stream_from_client(
 
 /// The socket this process serves, when it is a pool. Set before any worker
 /// is forked, so forked workers inherit it.
-static SELF_SOCKET: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+pub(crate) static SELF_SOCKET: crate::fork_policy::Held<Option<std::path::PathBuf>> = crate::fork_policy::Held::new(12, None);
 
 /// `MORLOC_FORBID_SELF_CALL`: a test guard. A pool sending a call to its own
 /// socket is a call between co-located code taking the serial path; with the
@@ -619,17 +619,12 @@ pub unsafe extern "C" fn mlc_set_self_socket(socket_path: *const c_char) {
         return;
     }
     let path = std::path::PathBuf::from(CStr::from_ptr(socket_path).to_string_lossy().into_owned());
-    if let Ok(mut s) = SELF_SOCKET.lock() {
-        *s = Some(path);
-    }
+    *SELF_SOCKET.lock() = Some(path);
 }
 
 fn is_self_socket(socket_path: *const c_char) -> bool {
     let target = std::path::PathBuf::from(unsafe { CStr::from_ptr(socket_path) }.to_string_lossy().into_owned());
-    match SELF_SOCKET.lock() {
-        Ok(s) => same_socket(s.as_deref(), &target),
-        Err(_) => false,
-    }
+    same_socket(SELF_SOCKET.lock().as_deref(), &target)
 }
 
 /// Compared component by component, so `dir/x` and `dir//x` or a trailing
