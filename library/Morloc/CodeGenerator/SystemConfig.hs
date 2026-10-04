@@ -99,21 +99,9 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   incremental <- maybe False (`notElem` ["", "0", "false", "no"]) <$> lookupEnv "MORLOC_INIT_INCREMENTAL"
 
   -- Admission control FIRST, before any destructive step: a failed coherence
-  -- check must abort before the force-clean below wipes opt/ + init-owned libs,
+  -- check must abort before the runtime build and the force-clean below,
   -- otherwise a rejected env leaves MORLOC_HOME gutted (no libmorloc, no nexus).
   checkCondaCoherence verbose mStrictPrefix
-
-  -- When force is set, clean stale init-owned artifacts. Package-installed
-  -- subtrees (see Module.exposeDirsFor) live in include/<modName>/,
-  -- lib/python/<modName>/ and lib/R/<modName>/; those must not be wiped
-  -- here or every `morloc init -f` would force a reinstall of every module
-  -- that uses the `expose:` field. opt/ has no expose target, so it can
-  -- still be fully wiped.
-  when (force == ForceOverwrite) $ do
-    sayInfo verbose "Force rebuild: cleaning init-owned artifacts"
-    forM_ initOwnedLibPaths $ \p -> removePathIfExists (libDir </> p)
-    forM_ initOwnedIncludePaths $ \p -> removePathIfExists (includeDir </> p)
-    cleanDirectory optDir
 
   ensureDirectory verbose "morloc home directory" homeDir
   ensureDirectory verbose "morloc lib directory" libDir
@@ -186,6 +174,20 @@ configureAllSteps verbose force slurmSupport sanitize config = do
   if force == ForceOverwrite || not runtimeBuilt || not incremental
     then provisionRustRuntime verbose config homeDir soPath nexusBinPath
     else sayInfo verbose "Runtime (libmorloc + morloc-nexus) already built; skipping"
+
+  -- When force is set, clean stale init-owned artifacts. This runs only once
+  -- the runtime has built, so a failed build leaves the installed one usable;
+  -- the runtime and morloc.h are already in place and are kept. Package-installed
+  -- subtrees (see Module.exposeDirsFor) live in include/<modName>/,
+  -- lib/python/<modName>/ and lib/R/<modName>/; those must not be wiped
+  -- here or every `morloc init -f` would force a reinstall of every module
+  -- that uses the `expose:` field. opt/ has no expose target, so it can
+  -- still be fully wiped.
+  when (force == ForceOverwrite) $ do
+    sayInfo verbose "Force rebuild: cleaning init-owned artifacts"
+    forM_ (filter (/= takeFileName soPath) initOwnedLibPaths) $ \p -> removePathIfExists (libDir </> p)
+    forM_ (filter (/= "morloc.h") initOwnedIncludePaths) $ \p -> removePathIfExists (includeDir </> p)
+    cleanDirectory optDir
 
   -- Symlink the newly installed binaries into a "user bin" directory so
   -- they end up on PATH. The directory is selected by the
