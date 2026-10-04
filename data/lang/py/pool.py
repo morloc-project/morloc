@@ -127,6 +127,16 @@ def _mlc_import_source(module_path):
     # installed package, the runtime -- and the module is registered under a
     # reserved key, so it neither reads nor replaces that module: a plain
     # `import copy` from inside a user file still reaches the standard library.
+    #
+    # A path that has no dotted name (one reaching outside the program's tree
+    # through `..`, or an absolute one) arrives as the file path itself and is
+    # always loaded by location.
+    if module_path.endswith(".py"):
+        for root in _mlc_source_roots:
+            candidate = os.path.normpath(os.path.join(root, module_path))
+            if os.path.isfile(candidate):
+                return _mlc_load_source_file(module_path, candidate)
+        raise ImportError("sourced file not found: " + module_path)
     rel = module_path.replace(".", os.sep) + ".py"
     for root in _mlc_source_roots:
         candidate = os.path.join(root, rel)
@@ -136,14 +146,18 @@ def _mlc_import_source(module_path):
                 found = getattr(module, "__file__", None)
                 if found and os.path.realpath(found) == os.path.realpath(candidate):
                     return module
-            key = "_mlc_src_" + module_path.replace(".", "_")
-            spec = importlib.util.spec_from_file_location(key, candidate)
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[key] = module
-            spec.loader.exec_module(module)
-            return module
+            return _mlc_load_source_file(module_path, candidate)
     # Nothing on the search path: an installed package, imported by name.
     return importlib.import_module(module_path)
+
+
+def _mlc_load_source_file(module_path, candidate):
+    key = "_mlc_src_" + "".join(c if c.isalnum() else "_" for c in module_path)
+    spec = importlib.util.spec_from_file_location(key, candidate)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[key] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def _mlc_load_user_sources():

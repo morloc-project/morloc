@@ -8,3 +8,5 @@
 "rel:util:util:app.rel"
 --- nsLeaf ---
 "ns:other:other:ns.leaf"
+--- dotdot ---
+"dotdot:hi"
